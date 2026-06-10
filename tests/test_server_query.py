@@ -157,6 +157,14 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
     assert calls == [("require_auth_for_post", "/api/fs/delete")]
     assert writes == [("fs-delete", "/api/fs/delete")]
 
+    handler, calls, writes = route_handler("/api/fs/batch")
+    handler.handle_fs_batch = lambda parsed: writes.append(("fs-batch", parsed.path))
+
+    Handler.do_POST(handler)
+
+    assert calls == [("require_auth_for_post", "/api/fs/batch")]
+    assert writes == [("fs-batch", "/api/fs/batch")]
+
     app = SimpleNamespace(tmux_copy_selection=lambda session: ({"session": session, "copied": True}, HTTPStatus.OK))
     handler, calls, writes = route_handler("/api/tmux-copy-selection?session=6", app)
 
@@ -164,6 +172,52 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
 
     assert calls == [("require_auth_for_post", "/api/tmux-copy-selection")]
     assert writes == [("json", HTTPStatus.OK, {"session": "6", "copied": True})]
+
+
+def batch_handler(payload):
+    body = json.dumps(payload).encode("utf-8")
+    writes = []
+    handler = object.__new__(Handler)
+    handler.headers = {"Content-Length": str(len(body))}
+    handler.rfile = io.BytesIO(body)
+    handler.write_json = lambda value, status=HTTPStatus.OK: writes.append((status, value))
+    return handler, writes
+
+
+def test_handle_fs_batch_returns_per_item_results(monkeypatch):
+    monkeypatch.setattr(server_module.filesystem, "list_directory", lambda path: {"path": path, "entries": [{"name": "a"}]})
+
+    def path_info(path):
+        if path == "/missing":
+            raise server_module.FilesystemError("path not found: /missing", status=404)
+        return {"path": path, "kind": "dir"}
+
+    monkeypatch.setattr(server_module.filesystem, "path_info", path_info)
+    handler, writes = batch_handler({
+        "requests": [
+            {"id": "root", "type": "list", "path": "/repo"},
+            {"id": "info", "type": "info", "path": "/repo"},
+            {"id": "missing", "type": "info", "path": "/missing"},
+            {"id": "bad", "type": "read", "path": "/repo/README.md"},
+        ],
+    })
+
+    Handler.handle_fs_batch(handler, SimpleNamespace(path="/api/fs/batch"))
+
+    assert writes == [(HTTPStatus.OK, {"responses": [
+        {"id": "root", "ok": True, "status": 200, "payload": {"path": "/repo", "entries": [{"name": "a"}]}},
+        {"id": "info", "ok": True, "status": 200, "payload": {"path": "/repo", "kind": "dir"}},
+        {"id": "missing", "ok": False, "status": 404, "error": "path not found: /missing", "path": "/missing"},
+        {"id": "bad", "ok": False, "status": 400, "error": "unsupported fs batch operation", "path": "/repo/README.md"},
+    ]})]
+
+
+def test_handle_fs_batch_rejects_invalid_shape():
+    handler, writes = batch_handler({"requests": "nope"})
+
+    Handler.handle_fs_batch(handler, SimpleNamespace(path="/api/fs/batch"))
+
+    assert writes == [(HTTPStatus.BAD_REQUEST, {"error": "requests must be a list"})]
 
 
 def test_handle_ws_payload_readonly_discards_input_and_scroll(monkeypatch):

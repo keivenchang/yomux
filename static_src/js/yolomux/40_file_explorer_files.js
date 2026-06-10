@@ -55,33 +55,143 @@ async function saveFileExplorerRootMode(mode) {
 // (one request per dir per render — the cause of the 7778 fs/list loop). Repeated fetches of the same dir
 // within the TTL reuse the listing; the change-detection sweep and explicit reloads pass {fresh:true}.
 const fileExplorerDirListingCache = new Map();
+const fileExplorerDirListingInflight = new Map();
+const fileExplorerPathInfoCache = new Map();
+const fileExplorerPathInfoInflight = new Map();
+const fileExplorerFsBatchQueue = [];
+const fileExplorerFsBatchPending = new Map();
+const fileExplorerFsBatchDelayMs = 8;
+let fileExplorerFsBatchSeq = 0;
+let fileExplorerFsBatchTimer = null;
+
+function fileExplorerFsCacheTtlMs() {
+  return Math.max(0, numberSetting('file_explorer.dir_cache_ms', 1500) || 0);
+}
+
+function fileExplorerFsBatchKey(type, path) {
+  return `${type}\x1f${normalizeDirectoryPath(path)}`;
+}
+
+function fileExplorerFsBatchSingleUrl(type, path) {
+  const normalized = normalizeDirectoryPath(path);
+  return type === 'list'
+    ? `/api/fs/list?path=${encodeURIComponent(normalized)}`
+    : `/api/fs/info?path=${encodeURIComponent(normalized)}`;
+}
+
+function scheduleFileExplorerFsBatchFlush() {
+  if (fileExplorerFsBatchTimer) return;
+  fileExplorerFsBatchTimer = setTimeout(flushFileExplorerFsBatch, fileExplorerFsBatchDelayMs);
+}
+
+function fetchFilesystemBatchItem(type, path, options = {}) {
+  const normalized = normalizeDirectoryPath(path);
+  const key = fileExplorerFsBatchKey(type, normalized);
+  if (options.dedupe !== false) {
+    const existing = fileExplorerFsBatchPending.get(key);
+    if (existing) return existing.promise;
+  }
+  let resolve;
+  let reject;
+  const promise = new Promise((ok, fail) => {
+    resolve = ok;
+    reject = fail;
+  });
+  const item = {id: ++fileExplorerFsBatchSeq, type, path: normalized, key, resolve, reject};
+  if (options.dedupe !== false) fileExplorerFsBatchPending.set(key, {promise, item});
+  fileExplorerFsBatchQueue.push(item);
+  scheduleFileExplorerFsBatchFlush();
+  return promise;
+}
+
+async function settleFileExplorerFsBatchItemFallback(item) {
+  try {
+    item.resolve(await apiFetchJson(fileExplorerFsBatchSingleUrl(item.type, item.path)));
+  } catch (error) {
+    item.reject(error);
+  } finally {
+    if (fileExplorerFsBatchPending.get(item.key)?.item === item) {
+      fileExplorerFsBatchPending.delete(item.key);
+    }
+  }
+}
+
+function settleFileExplorerFsBatchItem(item, response) {
+  if (fileExplorerFsBatchPending.get(item.key)?.item === item) {
+    fileExplorerFsBatchPending.delete(item.key);
+  }
+  if (response?.ok) {
+    item.resolve(response.payload || {});
+    return;
+  }
+  const error = new Error(response?.error || `fs ${item.type} failed`);
+  error.status = Number(response?.status) || 0;
+  error.payload = response || {};
+  item.reject(error);
+}
+
+async function flushFileExplorerFsBatch() {
+  fileExplorerFsBatchTimer = null;
+  const items = fileExplorerFsBatchQueue.splice(0);
+  if (!items.length) return;
+  const requests = items.map(item => ({id: item.id, type: item.type, path: item.path}));
+  try {
+    const payload = await apiFetchJson('/api/fs/batch', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({requests}),
+    });
+    const responses = new Map((payload.responses || []).map(response => [response.id, response]));
+    for (const item of items) {
+      settleFileExplorerFsBatchItem(item, responses.get(item.id) || {ok: false, status: 500, error: 'missing fs batch response'});
+    }
+  } catch (_) {
+    await Promise.all(items.map(settleFileExplorerFsBatchItemFallback));
+  }
+}
 
 async function fetchDirectory(path, options = {}) {
   const root = normalizeDirectoryPath(path);
-  const dirListingTtlMs = Math.max(0, numberSetting('file_explorer.dir_cache_ms', 1500) || 0);
-  if (options.fresh !== true && dirListingTtlMs > 0) {
+  const canReuse = options.fresh !== true;
+  const dirListingTtlMs = fileExplorerFsCacheTtlMs();
+  if (canReuse && dirListingTtlMs > 0) {
     const cached = fileExplorerDirListingCache.get(root);
     if (cached && Date.now() - cached.at < dirListingTtlMs) return cached.entries;
   }
+  if (canReuse) {
+    const inflight = fileExplorerDirListingInflight.get(root);
+    if (inflight) return inflight;
+  }
+  const request = (async () => {
+    try {
+      hydrateFileExplorerRepoInfoCache();
+      const payload = await fetchFilesystemBatchItem('list', root, {dedupe: canReuse});
+      const entries = payload.entries || [];
+      fileExplorerPathError = '';
+      fileExplorerLastListError = null;
+      cacheFileExplorerRepoInfoEntries(root, entries);
+      markNewDirectoryEntries(root, entries);
+      if (options.recordSignature !== false) recordDirectorySignature(root, entries);
+      setLimitedMapEntry(fileExplorerDirListingCache, root, {entries, at: Date.now()}, fileExplorerMemoryCacheLimit);
+      return entries;
+    } catch (err) {
+      const status = Number(err?.status) || 0;
+      fileExplorerPathError = status
+        ? err.message || `Cannot open ${root} (${status})`
+        : `Cannot open ${root}: ${err}`;
+      fileExplorerLastListError = {path: root, status, error: fileExplorerPathError, network: !status};
+      console.warn(status ? 'fs list failed' : 'fs list error', root, status || err, fileExplorerPathError);
+      return null;
+    }
+  })();
+  if (!canReuse) return request;
+  fileExplorerDirListingInflight.set(root, request);
   try {
-    hydrateFileExplorerRepoInfoCache();
-    const payload = await apiFetchJson(`/api/fs/list?path=${encodeURIComponent(root)}`);
-    const entries = payload.entries || [];
-    fileExplorerPathError = '';
-    fileExplorerLastListError = null;
-    cacheFileExplorerRepoInfoEntries(root, entries);
-    markNewDirectoryEntries(root, entries);
-    if (options.recordSignature !== false) recordDirectorySignature(root, entries);
-    setLimitedMapEntry(fileExplorerDirListingCache, root, {entries, at: Date.now()}, fileExplorerMemoryCacheLimit);
-    return entries;
-  } catch (err) {
-    const status = Number(err?.status) || 0;
-    fileExplorerPathError = status
-      ? err.message || `Cannot open ${root} (${status})`
-      : `Cannot open ${root}: ${err}`;
-    fileExplorerLastListError = {path: root, status, error: fileExplorerPathError, network: !status};
-    console.warn(status ? 'fs list failed' : 'fs list error', root, status || err, fileExplorerPathError);
-    return null;
+    return await request;
+  } finally {
+    if (fileExplorerDirListingInflight.get(root) === request) {
+      fileExplorerDirListingInflight.delete(root);
+    }
   }
 }
 
@@ -2390,8 +2500,32 @@ function startFileTreeDrag(event, row, fullPath, entry) {
   startFileDragPreview(event, paths, entry);
 }
 
-async function fetchFilePathInfo(path) {
-  return apiFetchJson(`/api/fs/info?path=${encodeURIComponent(path)}`);
+async function fetchFilePathInfo(path, options = {}) {
+  const normalized = normalizeDirectoryPath(path);
+  const canReuse = options.fresh !== true;
+  const pathInfoTtlMs = fileExplorerFsCacheTtlMs();
+  if (canReuse && pathInfoTtlMs > 0) {
+    const cached = fileExplorerPathInfoCache.get(normalized);
+    if (cached && Date.now() - cached.at < pathInfoTtlMs) return cached.payload;
+  }
+  if (canReuse) {
+    const inflight = fileExplorerPathInfoInflight.get(normalized);
+    if (inflight) return inflight;
+  }
+  const request = (async () => {
+    const payload = await fetchFilesystemBatchItem('info', normalized, {dedupe: canReuse});
+    setLimitedMapEntry(fileExplorerPathInfoCache, normalized, {payload, at: Date.now()}, fileExplorerMemoryCacheLimit);
+    return payload;
+  })();
+  if (!canReuse) return request;
+  fileExplorerPathInfoInflight.set(normalized, request);
+  try {
+    return await request;
+  } finally {
+    if (fileExplorerPathInfoInflight.get(normalized) === request) {
+      fileExplorerPathInfoInflight.delete(normalized);
+    }
+  }
 }
 
 async function showFileTreeContextMenu(row, fullPath, entry, x, y) {
@@ -3923,8 +4057,11 @@ async function refreshFileExplorerIfChanged() {
   let changed = false;
   const entriesByDir = new Map();
   const signaturesByDir = new Map();
-  for (const directory of directories) {
-    const entries = await fetchDirectory(directory, {recordSignature: false, fresh: true});
+  const listings = await Promise.all(directories.map(async directory => ({
+    directory,
+    entries: await fetchDirectory(directory, {recordSignature: false, fresh: true}),
+  })));
+  for (const {directory, entries} of listings) {
     if (!entries) continue;
     const normalizedDirectory = normalizeDirectoryPath(directory);
     entriesByDir.set(normalizedDirectory, entries);

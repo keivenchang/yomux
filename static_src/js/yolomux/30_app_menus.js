@@ -540,6 +540,9 @@ function appMenuTree() {
   const activeTmux = currentSessionActionTarget();
   const openItems = orderedPaneItems(activePaneItems());
   const yoloCount = yoloEnabledSessions().length;
+  const debugMenuItems = debugModeEnabled ? [
+    fileMenuVirtualCommand(debugPaneItemId, t('menu.file.debug.detail')),
+  ] : [];
   return [
     {
       id: 'file',
@@ -569,6 +572,7 @@ function appMenuTree() {
             iconHtml: tabTypeIconHtml(prefsItemId, {menu: true}),
             targetItem: prefsItemId,
           }),
+          ...debugMenuItems,
         ],
         [
           menuCommand(t('menu.file.logout'), logOut, {

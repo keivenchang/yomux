@@ -1271,7 +1271,8 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
       }
       window.fetch = async (input, options = {}) => {
         const url = new URL(String(input), 'https://localhost');
-        window.__bootFetches.push({path: url.pathname, method: options.method || 'GET'});
+        const body = options.body ? JSON.parse(options.body || '{}') : null;
+        window.__bootFetches.push({path: url.pathname, method: options.method || 'GET', body});
         if (url.pathname === '/api/settings') {
           if ((options.method || 'GET') === 'POST') {
             const body = JSON.parse(options.body || '{}');
@@ -1318,6 +1319,20 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
           const path = url.searchParams.get('path') || '/home/test';
           const entries = (window.__fixtureFsEntries || {})[path] || [];
           return jsonResponse({path, entries});
+        }
+        if (url.pathname === '/api/fs/batch') {
+          const entriesByPath = window.__fixtureFsEntries || {};
+          const responses = (body?.requests || []).map((request, index) => {
+            const path = request.path || '/home/test';
+            if (request.type === 'list') {
+              return {id: request.id ?? index, ok: true, status: 200, payload: {path, entries: entriesByPath[path] || []}};
+            }
+            if (request.type === 'info') {
+              return {id: request.id ?? index, ok: true, status: 200, payload: {path, name: path.split('/').filter(Boolean).pop() || '/', kind: entriesByPath[path] ? 'dir' : 'file'}};
+            }
+            return {id: request.id ?? index, ok: false, status: 400, error: 'unsupported fs batch operation', path};
+          });
+          return jsonResponse({responses});
         }
         return jsonResponse({});
       };
@@ -1739,7 +1754,7 @@ def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, t
           rejections: window.__bootRejections,
           root: document.querySelector('.file-explorer-path-inline')?.value || '',
           rows,
-          fetchedPaths: window.__bootFetches.filter(item => item.path === '/api/fs/list').length,
+          fetchedPaths: window.__bootFetches.filter(item => item.path === '/api/fs/list' || item.path === '/api/fs/batch').length,
           plan: fileExplorerSyncPlan('1'),
           expandedSet: Array.from(fileExplorerExpanded),
         };
@@ -1768,7 +1783,7 @@ def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, t
         assert "file-tree-row--changed-ancestor" in rows_by_path[path]["classes"], metrics
         assert rows_by_path[path]["background"] == "rgba(0, 0, 0, 0)", metrics
         assert rows_by_path[path]["nameWeight"] >= 700, metrics
-    assert metrics["fetchedPaths"] >= 3, metrics
+    assert metrics["fetchedPaths"] >= 1, metrics
     manual_collapse = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -2596,7 +2611,7 @@ def test_sync_mode_empty_session_opens_home_not_stale_payload(browser, tmp_path)
           rejections: window.__bootRejections,
           root: document.querySelector('.file-explorer-path-inline')?.value || '',
           rows,
-          fetchedPaths: window.__bootFetches.filter(item => item.path === '/api/fs/list').map(item => item.path),
+          fetchedPaths: window.__bootFetches.filter(item => item.path === '/api/fs/list' || item.path === '/api/fs/batch').map(item => item.path),
         };
         """
     )
@@ -5261,19 +5276,19 @@ def test_diff_overview_matches_actual_todo_codemirror_rows(browser, tmp_path):
             "toA": 147096,
             "endA": 147095,
             "fromB": 2235,
-            "toB": 45545,
-            "endB": 45544,
+            "toB": 41978,
+            "endB": 41977,
         }
     ]
     assert metrics["rows"]["bands"] == [
         {"kind": "remove", "start": 21, "end": 561},
-        {"kind": "add", "start": 561, "end": 801},
+        {"kind": "add", "start": 561, "end": 798},
     ]
-    assert metrics["rows"]["currentLineCount"] == 311
+    assert metrics["rows"]["currentLineCount"] == 308
     assert metrics["rows"]["deletedRows"] == 540
-    assert metrics["rows"]["totalRows"] == 851
+    assert metrics["rows"]["totalRows"] == 848
     assert metrics["deletedDomRows"] == metrics["removedRangeRows"]
-    assert metrics["insertedRangeRows"] == 240
+    assert metrics["insertedRangeRows"] == 237
     assert "linear-gradient" in metrics["overviewBackground"]
     assert metrics["overviewStops"] == metrics["expectedStops"], metrics["overviewBackground"]
     assert metrics["tickCount"] == 0

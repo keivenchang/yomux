@@ -63,6 +63,7 @@ from .websocket import set_pty_size
 PTY_DIMENSION_MIN = 1
 PTY_DIMENSION_MAX = 1000
 WEBSOCKET_FRAME_READ_TIMEOUT_SECONDS = 5.0
+MAX_FS_BATCH_REQUESTS = 64
 
 
 def query_one(qs: dict[str, list[str]], name: str, default: str | None = "") -> str | None:
@@ -657,6 +658,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             payload, status = self.handle_client_event()
             self.write_json(payload, status=status)
             return
+        if parsed.path == "/api/fs/batch":
+            self.handle_fs_batch(parsed)
+            return
         if parsed.path == "/api/fs/write":
             self.handle_fs_write(parsed)
             return
@@ -673,6 +677,36 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.handle_fs_mkdir(parsed)
             return
         self.write_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+
+    def handle_fs_batch(self, parsed: Any) -> None:
+        payload = self.read_json_body(64 * 1024)
+        if payload is None:
+            return
+        requests = payload.get("requests", [])
+        if not isinstance(requests, list):
+            self.write_json({"error": "requests must be a list"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if len(requests) > MAX_FS_BATCH_REQUESTS:
+            self.write_json({"error": f"requests must contain at most {MAX_FS_BATCH_REQUESTS} items"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        responses = []
+        for index, item in enumerate(requests):
+            request_id = item.get("id", index) if isinstance(item, dict) else index
+            if not isinstance(item, dict):
+                responses.append({"id": request_id, "ok": False, "status": 400, "error": "request must be an object"})
+                continue
+            op = str(item.get("type", item.get("op", "")) or "")
+            raw_path = str(item.get("path", "") or "")
+            if op not in {"list", "info"}:
+                responses.append({"id": request_id, "ok": False, "status": 400, "error": "unsupported fs batch operation", "path": raw_path})
+                continue
+            try:
+                result = filesystem.list_directory(raw_path) if op == "list" else filesystem.path_info(raw_path)
+            except FilesystemError as exc:
+                responses.append({"id": request_id, "ok": False, "status": exc.status, "error": str(exc), "path": raw_path})
+                continue
+            responses.append({"id": request_id, "ok": True, "status": 200, "payload": result})
+        self.write_json({"responses": responses})
 
     def read_urlencoded_form(self) -> dict[str, list[str]]:
         content_length_text = self.headers.get("Content-Length")

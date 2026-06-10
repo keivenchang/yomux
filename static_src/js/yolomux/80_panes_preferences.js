@@ -744,6 +744,10 @@ function preferencesPaneTabHtml(item = prefsItemId, options = {}) {
   return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir">${esc(t('tab.preferences'))}</span></span>`;
 }
 
+function debugPaneTabHtml(item = debugPaneItemId, options = {}) {
+  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir">${esc(t('tab.debug'))}</span></span>`;
+}
+
 function fileEditorPaneTabHtml(item, options = {}) {
   const path = fileItemPath(item);
   const state = openFiles.get(path) || {};
@@ -2311,6 +2315,187 @@ function preferencesPanelHtml() {
     <div class="preferences-path-rows">${preferencesPathRowsHtml()}${readonly}</div>
     <div class="preferences-sections">${sections}</div>
     ${resetBlock}`;
+}
+
+function debugEventCounts() {
+  const apiCalls = jsDebugEvents.filter(event => event.type === 'api').length;
+  const errors = jsDebugEvents.filter(event => event.type === 'error' || event.type === 'unhandledrejection' || event.error).length;
+  return {apiCalls, errors};
+}
+
+function debugMetaText() {
+  return t('debug.meta', {count: jsDebugEvents.length});
+}
+
+function debugStatHtml(label, value, key = '') {
+  const data = key ? ` data-js-debug-stat="${esc(key)}"` : '';
+  return `<div class="js-debug-stat"><span>${esc(label)}</span><strong${data}>${esc(value)}</strong></div>`;
+}
+
+function debugTimeText(value) {
+  const match = String(value || '').match(/T(\d\d:\d\d:\d\d)/);
+  return match ? match[1] : String(value || '');
+}
+
+function debugEventTypeLabel(type) {
+  if (type === 'api') return 'API';
+  if (type === 'unhandledrejection') return 'Promise';
+  if (type === 'error') return 'Error';
+  return String(type || 'Event');
+}
+
+function debugEventStatusText(event) {
+  if (event.error) return 'error';
+  if (Number.isFinite(event.status)) return `HTTP ${event.status}`;
+  if (typeof event.ok === 'boolean') return event.ok ? 'ok' : 'not ok';
+  return '';
+}
+
+function debugEventDetailText(event) {
+  if (event.type === 'api') return `${event.method || 'GET'} ${event.url || ''}`.trim();
+  return event.message || event.reason || event.source || '';
+}
+
+function debugEventMetaText(event) {
+  return [
+    debugTimeText(event.ts),
+    Number.isFinite(event.durationMs) ? `${event.durationMs} ms` : '',
+    debugEventStatusText(event),
+    event.source ? `source: ${event.source}` : '',
+    event.line ? `line ${event.line}${event.column ? `:${event.column}` : ''}` : '',
+  ].filter(Boolean).join(' | ');
+}
+
+function debugEventLineText(event) {
+  const status = debugEventStatusText(event);
+  const duration = Number.isFinite(event.durationMs) ? `${event.durationMs}ms` : '';
+  const location = event.source ? `${event.source}${event.line ? `:${event.line}${event.column ? `:${event.column}` : ''}` : ''}` : '';
+  return [
+    debugTimeText(event.ts),
+    debugEventTypeLabel(event.type).padEnd(7),
+    status.padEnd(8),
+    duration.padStart(8),
+    debugEventDetailText(event) || t('debug.event'),
+    location,
+  ].filter(Boolean).join(' ');
+}
+
+function jsDebugTextForClipboard() {
+  const page = `${location.pathname || ''}${location.search || ''}${location.hash || ''}`;
+  const counts = debugEventCounts();
+  const header = [
+    `JS Debug ${new Date().toISOString()}`,
+    `page=${page || '/'}`,
+    `events=${jsDebugEvents.length}`,
+    `api=${counts.apiCalls}`,
+    `errors=${counts.errors}`,
+  ].join(' ');
+  const rows = jsDebugEvents.map(debugEventLineText);
+  return [header, ...rows].join('\n');
+}
+
+function debugPanelHtml() {
+  const counts = debugEventCounts();
+  return `
+    <div class="js-debug-toolbar">
+      <div class="js-debug-summary" aria-label="${esc(t('debug.summary'))}">
+        ${debugStatHtml(t('debug.events'), jsDebugEvents.length, 'events')}
+        ${debugStatHtml(t('debug.apiCalls'), counts.apiCalls, 'api')}
+        ${debugStatHtml(t('debug.errors'), counts.errors, 'errors')}
+      </div>
+      <div class="js-debug-actions">
+        <button type="button" class="preferences-inline-action" data-js-debug-copy>${esc(t('debug.copy'))}</button>
+        <button type="button" class="preferences-inline-action" data-js-debug-clear>${esc(t('debug.clear'))}</button>
+      </div>
+    </div>
+    <textarea class="js-debug-log" data-js-debug-log readonly spellcheck="false" aria-label="${esc(t('debug.recent'))}">${esc(jsDebugTextForClipboard())}</textarea>`;
+}
+
+function createDebugPanel() {
+  const panel = document.createElement('article');
+  panel.className = 'panel js-debug-panel';
+  panel.id = `panel-${debugPaneItemId}`;
+  panel.innerHTML = `
+      <div class="panel-head preferences-panel-head">
+        ${virtualPanelControlsHtml(debugPaneItemId)}
+        <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
+      </div>
+      <div class="panel-detail-row">
+        <div class="panel-copy">
+          <div id="panel-tab-${debugPaneItemId}" class="panel-session-label"><span class="session-button-dir">${esc(t('tab.debug'))}</span></div>
+          <div id="meta-${debugPaneItemId}" class="meta">${esc(debugMetaText())}</div>
+        </div>
+        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(debugPaneItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
+      </div>
+      <div class="preferences-body js-debug-body panel-overlay-root">
+        <div id="panel-toasts-${debugPaneItemId}" class="panel-toast-stack"></div>
+        <div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>
+      </div>`;
+  bindPanelShell(panel, debugPaneItemId);
+  bindDebugPanel(panel);
+  return panel;
+}
+
+function renderDebugPanels(options = {}) {
+  if (dragSession != null) return;
+  for (const panel of document.querySelectorAll('.js-debug-panel')) {
+    const body = panel.querySelector('.js-debug-body');
+    refreshDebugPanelFromEvents(panel, options);
+    if (body && (options.force === true || !body.querySelector('[data-js-debug-log]'))) {
+      body.innerHTML = `<div id="panel-toasts-${debugPaneItemId}" class="panel-toast-stack"></div><div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>`;
+      refreshDebugPanelFromEvents(panel, {force: true});
+    }
+    bindDebugPanel(panel);
+  }
+}
+
+function refreshDebugPanelsFromEvents() {
+  for (const panel of document.querySelectorAll('.js-debug-panel')) {
+    refreshDebugPanelFromEvents(panel);
+  }
+}
+
+function refreshDebugPanelFromEvents(panel, options = {}) {
+  if (!panel) return;
+  const meta = panel.querySelector(`#meta-${cssEscape(debugPaneItemId)}`);
+  if (meta) meta.textContent = debugMetaText();
+  const counts = debugEventCounts();
+  const statEvents = panel.querySelector('[data-js-debug-stat="events"]');
+  const statApi = panel.querySelector('[data-js-debug-stat="api"]');
+  const statErrors = panel.querySelector('[data-js-debug-stat="errors"]');
+  if (statEvents) statEvents.textContent = String(jsDebugEvents.length);
+  if (statApi) statApi.textContent = String(counts.apiCalls);
+  if (statErrors) statErrors.textContent = String(counts.errors);
+  const log = panel.querySelector('[data-js-debug-log]');
+  if (!log || (document.activeElement === log && options.force !== true)) return;
+  const text = jsDebugTextForClipboard();
+  if (log.value === text) return;
+  const oldTop = log.scrollTop;
+  const maxScroll = Math.max(0, log.scrollHeight - log.clientHeight);
+  const nearBottom = maxScroll - oldTop <= 20;
+  log.value = text;
+  log.scrollTop = nearBottom || options.force === true ? log.scrollHeight : oldTop;
+}
+
+function bindDebugPanel(panel) {
+  if (!panel || panel.dataset.debugBound === 'true') return;
+  panel.dataset.debugBound = 'true';
+  panel.addEventListener('click', event => {
+    const copy = event.target.closest('[data-js-debug-copy]');
+    if (copy && panel.contains(copy)) {
+      event.preventDefault();
+      copyTextToClipboard(jsDebugTextForClipboard())
+        .then(() => { statusEl.textContent = t('debug.copied'); })
+        .catch(error => { statusErr(`copy failed: ${esc(error)}`); });
+      return;
+    }
+    const clear = event.target.closest('[data-js-debug-clear]');
+    if (clear && panel.contains(clear)) {
+      event.preventDefault();
+      clearJsDebugEvents();
+      statusEl.textContent = t('debug.cleared');
+    }
+  });
 }
 
 function createPreferencesPanel() {

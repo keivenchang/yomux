@@ -439,9 +439,24 @@ function yoagentTabLabel() { return t('brand.tab.agent'); }
 let infoPanelSubTab = readStoredInfoSubTab();
 const fileExplorerItemId = '__files__';
 const prefsItemId = '__prefs__';
+const debugPaneItemId = '__debug__';
 const emptyPaneParam = '__empty_pane__';
 const fileEditorItemPrefix = 'file:';
 const imageViewerItemPrefix = 'image:';
+function urlFlagEnabled(name) {
+  try {
+    return new URLSearchParams(location.search || '').get(name) === '1';
+  } catch (_) {
+    return false;
+  }
+}
+const debugModeEnabled = urlFlagEnabled('debug');
+const jsDebugEventLimit = 200;
+const jsDebugRenderDebounceMs = 500;
+let jsDebugEventSeq = 0;
+let jsDebugEvents = [];
+let jsDebugEventCaptureInstalled = false;
+let jsDebugRenderTimer = null;
 const CLS = Object.freeze({
   active: 'active',
   collapsed: 'collapsed',
@@ -563,6 +578,25 @@ const TAB_TYPES = [
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
     prunePriority: () => 0,
   },
+  ...(debugModeEnabled ? [{
+    key: 'debug',
+    id: debugPaneItemId,
+    aliases: ['debug', 'js-debug', 'jsdebug', debugPaneItemId],
+    match: item => item === debugPaneItemId,
+    label: () => t('tab.debug'),
+    shortLabel: () => t('tab.debug.short'),
+    terminalTitle: () => t('tab.unavailableFor', {name: t('tab.debug')}),
+    sortRank: 0.7,
+    param: () => 'debug',
+    detail: () => t('menu.file.debug.detail'),
+    rowHtml: (item, options) => debugPaneTabHtml(item, options),
+    createPanel: () => createDebugPanel(),
+    renderAttached: () => renderDebugPanels(),
+    className: () => 'debug-item',
+    icon: 'tab-meta',
+    minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
+    prunePriority: () => 0,
+  }] : []),
   filePanelTabType({
     key: 'image-viewer',
     prefix: imageViewerItemPrefix,
@@ -588,6 +622,7 @@ function tabTypeForParam(value) {
 function tabTypeParam(type, item) { return typeof type?.param === 'function' ? type.param(item) : type?.param; }
 function isFileExplorerItem(item) { return tabTypeForItem(item)?.key === 'files'; }
 function isPreferencesItem(item) { return tabTypeForItem(item)?.key === 'preferences'; }
+function isDebugItem(item) { return tabTypeForItem(item)?.key === 'debug'; }
 function isImageViewerItem(item) { return tabTypeForItem(item)?.key === 'image-viewer'; }
 function isFileEditorItem(item) {
   const key = tabTypeForItem(item)?.key;
@@ -688,8 +723,13 @@ function applyFileExplorerStaticLabels() {
   applyPlatformControlClass(fileExplorerClose, 'close');
 }
 const syntaxLanguageByExtension = new Map(Object.entries(HIGHLIGHTABLE_EXTENSIONS));
+function virtualTabItems() {
+  return debugModeEnabled
+    ? [infoItemId, fileExplorerItemId, prefsItemId, debugPaneItemId]
+    : [infoItemId, fileExplorerItemId, prefsItemId];
+}
 let visibleSessions = sessions.slice(0, maxSessionTabs);
-let layoutItems = [infoItemId, fileExplorerItemId, prefsItemId, ...visibleSessions];
+let layoutItems = [...virtualTabItems(), ...visibleSessions];
 let layoutSlots = initialLayoutSlots();
 let activeSessions = sessionsFromLayout();
 let transcriptMeta = {};
@@ -998,7 +1038,16 @@ function rerenderForLocale(options = {}) {
 async function apiFetch(url, options = {}) {
   const requestOptions = {...options};
   if (!requestOptions.credentials) requestOptions.credentials = 'same-origin';
-  const response = await fetch(url, requestOptions);
+  const startedAt = jsDebugPerformanceNow();
+  const method = jsDebugRequestMethod(requestOptions);
+  let response;
+  try {
+    response = await fetch(url, requestOptions);
+  } catch (error) {
+    recordApiDebugEvent(url, method, startedAt, {error});
+    throw error;
+  }
+  recordApiDebugEvent(url, method, startedAt, {status: response.status, ok: response.ok});
   if (response.status === 401) {
     await redirectToLogin(response);
     throw new Error('authentication required');
@@ -1031,6 +1080,104 @@ async function redirectToLogin(response) {
   } catch (_) {}
   window.location.assign(loginUrl);
 }
+
+function jsDebugPerformanceNow() {
+  if (!debugModeEnabled) return 0;
+  const value = globalThis.performance?.now?.();
+  return Number.isFinite(value) ? value : Date.now();
+}
+
+function jsDebugRequestMethod(options = {}) {
+  return String(options?.method || 'GET').toUpperCase();
+}
+
+function jsDebugDurationMs(startedAt) {
+  if (!debugModeEnabled || !Number.isFinite(startedAt)) return null;
+  const duration = jsDebugPerformanceNow() - startedAt;
+  return Number.isFinite(duration) ? Number(duration.toFixed(1)) : null;
+}
+
+function jsDebugUrlText(url) {
+  const value = String(url || '');
+  try {
+    const parsed = new URL(value, window.location.origin);
+    return `${parsed.pathname}${parsed.search}`;
+  } catch (_) {
+    return value.slice(0, 240);
+  }
+}
+
+function jsDebugErrorText(error) {
+  return String(error?.message || error || '').slice(0, 500);
+}
+
+function recordApiDebugEvent(url, method, startedAt, result = {}) {
+  if (!debugModeEnabled) return null;
+  const payload = {
+    method,
+    url: jsDebugUrlText(url),
+    durationMs: jsDebugDurationMs(startedAt),
+  };
+  if (Number.isFinite(result.status)) payload.status = result.status;
+  if (typeof result.ok === 'boolean') payload.ok = result.ok;
+  if (result.error) payload.error = jsDebugErrorText(result.error);
+  return recordJsDebugEvent('api', payload);
+}
+
+function recordJsDebugEvent(type, payload = {}) {
+  if (!debugModeEnabled) return null;
+  const event = {
+    id: ++jsDebugEventSeq,
+    ts: new Date().toISOString(),
+    type: String(type || 'event'),
+    ...payload,
+  };
+  jsDebugEvents.push(event);
+  if (jsDebugEvents.length > jsDebugEventLimit) {
+    jsDebugEvents.splice(0, jsDebugEvents.length - jsDebugEventLimit);
+  }
+  scheduleJsDebugPanelRefresh();
+  return event;
+}
+
+function clearJsDebugEvents() {
+  jsDebugEvents = [];
+  jsDebugEventSeq = 0;
+  if (jsDebugRenderTimer) {
+    clearTimeout(jsDebugRenderTimer);
+    jsDebugRenderTimer = null;
+  }
+  if (typeof renderDebugPanels === 'function') renderDebugPanels({force: true});
+}
+
+function scheduleJsDebugPanelRefresh() {
+  if (!debugModeEnabled || typeof refreshDebugPanelsFromEvents !== 'function') return;
+  if (jsDebugRenderTimer) return;
+  jsDebugRenderTimer = setTimeout(() => {
+    jsDebugRenderTimer = null;
+    refreshDebugPanelsFromEvents();
+  }, jsDebugRenderDebounceMs);
+}
+
+function installJsDebugEventCapture() {
+  if (!debugModeEnabled || jsDebugEventCaptureInstalled || !window?.addEventListener) return;
+  jsDebugEventCaptureInstalled = true;
+  window.addEventListener('error', event => {
+    recordJsDebugEvent('error', {
+      message: jsDebugErrorText(event.error || event.message),
+      source: jsDebugUrlText(event.filename || ''),
+      line: Number(event.lineno || 0),
+      column: Number(event.colno || 0),
+    });
+  });
+  window.addEventListener('unhandledrejection', event => {
+    recordJsDebugEvent('unhandledrejection', {
+      message: jsDebugErrorText(event.reason),
+    });
+  });
+}
+
+installJsDebugEventCapture();
 
 function agentLabel(kind) {
   const key = String(kind || '').toLowerCase();
@@ -3032,7 +3179,7 @@ function initialLayoutSlots() {
   const params = new URLSearchParams(location.search);
   maybeAdoptYoagentDeepLink(params);
   const layoutFromUrl = layoutFromParam(params.get('layout') || '', params.get('tabs') || '');
-  if (layoutFromUrl) return layoutFromUrl;
+  if (layoutFromUrl) return layoutWithDebugPaneActive(layoutFromUrl);
   const raw = params.get('sessions') || params.get('active') || '';
   const selected = [];
   for (const part of raw.split(',')) {
@@ -3041,8 +3188,30 @@ function initialLayoutSlots() {
     const item = resolveLayoutItem(value);
     if (isLayoutItem(item) && !selected.includes(item)) selected.push(item);
   }
-  if (selected.length) return layoutFromSessionList(selected);
-  return defaultLayoutSlots();
+  if (selected.length) return layoutWithDebugPaneActive(layoutFromSessionList(selected));
+  return layoutWithDebugPaneActive(defaultLayoutSlots());
+}
+
+function debugPanePreferredSlot(slots) {
+  const keys = layoutSlotKeys(slots);
+  return keys.find(slot => paneTabs(slot, slots).includes(infoItemId) || paneTabs(slot, slots).includes(prefsItemId))
+    || keys.find(slot => {
+      const active = activeItemForSide(slot, slots);
+      return active && !isFileExplorerItem(active);
+    })
+    || keys[0]
+    || 'left';
+}
+
+function layoutWithDebugPaneActive(slots) {
+  if (!debugModeEnabled || !isLayoutItem(debugPaneItemId)) return slots;
+  const next = cloneLayoutSlots(slots);
+  const existingSlot = layoutSlotKeys(next).find(slot => paneTabs(slot, next).includes(debugPaneItemId));
+  const slot = existingSlot || debugPanePreferredSlot(next);
+  const tabs = paneTabs(slot, next).filter(item => item !== debugPaneItemId);
+  next[slot] = paneStateWithTabs([...tabs, debugPaneItemId], debugPaneItemId);
+  if (!next[layoutTreeKey]) next[layoutTreeKey] = leafNode(slot);
+  return compactLayoutSlots(next);
 }
 
 function defaultLayoutSlots() {
@@ -3168,7 +3337,7 @@ function itemIsBackgroundPaneTab(item, slots = layoutSlots) {
 }
 
 function allTabItems() {
-  return [infoItemId, fileExplorerItemId, prefsItemId, ...openFileEditorItems(), ...visibleSessions];
+  return [...virtualTabItems(), ...openFileEditorItems(), ...visibleSessions];
 }
 
 function sortTabItems(items) {
@@ -3216,7 +3385,7 @@ function openFileEditorItems() {
 }
 
 function computeLayoutItems() {
-  return [infoItemId, fileExplorerItemId, prefsItemId, ...openFileEditorItems(), ...visibleSessions];
+  return [...virtualTabItems(), ...openFileEditorItems(), ...visibleSessions];
 }
 
 function isTmuxSession(item) {
@@ -5666,6 +5835,9 @@ function appMenuTree() {
   const activeTmux = currentSessionActionTarget();
   const openItems = orderedPaneItems(activePaneItems());
   const yoloCount = yoloEnabledSessions().length;
+  const debugMenuItems = debugModeEnabled ? [
+    fileMenuVirtualCommand(debugPaneItemId, t('menu.file.debug.detail')),
+  ] : [];
   return [
     {
       id: 'file',
@@ -5695,6 +5867,7 @@ function appMenuTree() {
             iconHtml: tabTypeIconHtml(prefsItemId, {menu: true}),
             targetItem: prefsItemId,
           }),
+          ...debugMenuItems,
         ],
         [
           menuCommand(t('menu.file.logout'), logOut, {
@@ -6380,33 +6553,143 @@ async function saveFileExplorerRootMode(mode) {
 // (one request per dir per render — the cause of the 7778 fs/list loop). Repeated fetches of the same dir
 // within the TTL reuse the listing; the change-detection sweep and explicit reloads pass {fresh:true}.
 const fileExplorerDirListingCache = new Map();
+const fileExplorerDirListingInflight = new Map();
+const fileExplorerPathInfoCache = new Map();
+const fileExplorerPathInfoInflight = new Map();
+const fileExplorerFsBatchQueue = [];
+const fileExplorerFsBatchPending = new Map();
+const fileExplorerFsBatchDelayMs = 8;
+let fileExplorerFsBatchSeq = 0;
+let fileExplorerFsBatchTimer = null;
+
+function fileExplorerFsCacheTtlMs() {
+  return Math.max(0, numberSetting('file_explorer.dir_cache_ms', 1500) || 0);
+}
+
+function fileExplorerFsBatchKey(type, path) {
+  return `${type}\x1f${normalizeDirectoryPath(path)}`;
+}
+
+function fileExplorerFsBatchSingleUrl(type, path) {
+  const normalized = normalizeDirectoryPath(path);
+  return type === 'list'
+    ? `/api/fs/list?path=${encodeURIComponent(normalized)}`
+    : `/api/fs/info?path=${encodeURIComponent(normalized)}`;
+}
+
+function scheduleFileExplorerFsBatchFlush() {
+  if (fileExplorerFsBatchTimer) return;
+  fileExplorerFsBatchTimer = setTimeout(flushFileExplorerFsBatch, fileExplorerFsBatchDelayMs);
+}
+
+function fetchFilesystemBatchItem(type, path, options = {}) {
+  const normalized = normalizeDirectoryPath(path);
+  const key = fileExplorerFsBatchKey(type, normalized);
+  if (options.dedupe !== false) {
+    const existing = fileExplorerFsBatchPending.get(key);
+    if (existing) return existing.promise;
+  }
+  let resolve;
+  let reject;
+  const promise = new Promise((ok, fail) => {
+    resolve = ok;
+    reject = fail;
+  });
+  const item = {id: ++fileExplorerFsBatchSeq, type, path: normalized, key, resolve, reject};
+  if (options.dedupe !== false) fileExplorerFsBatchPending.set(key, {promise, item});
+  fileExplorerFsBatchQueue.push(item);
+  scheduleFileExplorerFsBatchFlush();
+  return promise;
+}
+
+async function settleFileExplorerFsBatchItemFallback(item) {
+  try {
+    item.resolve(await apiFetchJson(fileExplorerFsBatchSingleUrl(item.type, item.path)));
+  } catch (error) {
+    item.reject(error);
+  } finally {
+    if (fileExplorerFsBatchPending.get(item.key)?.item === item) {
+      fileExplorerFsBatchPending.delete(item.key);
+    }
+  }
+}
+
+function settleFileExplorerFsBatchItem(item, response) {
+  if (fileExplorerFsBatchPending.get(item.key)?.item === item) {
+    fileExplorerFsBatchPending.delete(item.key);
+  }
+  if (response?.ok) {
+    item.resolve(response.payload || {});
+    return;
+  }
+  const error = new Error(response?.error || `fs ${item.type} failed`);
+  error.status = Number(response?.status) || 0;
+  error.payload = response || {};
+  item.reject(error);
+}
+
+async function flushFileExplorerFsBatch() {
+  fileExplorerFsBatchTimer = null;
+  const items = fileExplorerFsBatchQueue.splice(0);
+  if (!items.length) return;
+  const requests = items.map(item => ({id: item.id, type: item.type, path: item.path}));
+  try {
+    const payload = await apiFetchJson('/api/fs/batch', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({requests}),
+    });
+    const responses = new Map((payload.responses || []).map(response => [response.id, response]));
+    for (const item of items) {
+      settleFileExplorerFsBatchItem(item, responses.get(item.id) || {ok: false, status: 500, error: 'missing fs batch response'});
+    }
+  } catch (_) {
+    await Promise.all(items.map(settleFileExplorerFsBatchItemFallback));
+  }
+}
 
 async function fetchDirectory(path, options = {}) {
   const root = normalizeDirectoryPath(path);
-  const dirListingTtlMs = Math.max(0, numberSetting('file_explorer.dir_cache_ms', 1500) || 0);
-  if (options.fresh !== true && dirListingTtlMs > 0) {
+  const canReuse = options.fresh !== true;
+  const dirListingTtlMs = fileExplorerFsCacheTtlMs();
+  if (canReuse && dirListingTtlMs > 0) {
     const cached = fileExplorerDirListingCache.get(root);
     if (cached && Date.now() - cached.at < dirListingTtlMs) return cached.entries;
   }
+  if (canReuse) {
+    const inflight = fileExplorerDirListingInflight.get(root);
+    if (inflight) return inflight;
+  }
+  const request = (async () => {
+    try {
+      hydrateFileExplorerRepoInfoCache();
+      const payload = await fetchFilesystemBatchItem('list', root, {dedupe: canReuse});
+      const entries = payload.entries || [];
+      fileExplorerPathError = '';
+      fileExplorerLastListError = null;
+      cacheFileExplorerRepoInfoEntries(root, entries);
+      markNewDirectoryEntries(root, entries);
+      if (options.recordSignature !== false) recordDirectorySignature(root, entries);
+      setLimitedMapEntry(fileExplorerDirListingCache, root, {entries, at: Date.now()}, fileExplorerMemoryCacheLimit);
+      return entries;
+    } catch (err) {
+      const status = Number(err?.status) || 0;
+      fileExplorerPathError = status
+        ? err.message || `Cannot open ${root} (${status})`
+        : `Cannot open ${root}: ${err}`;
+      fileExplorerLastListError = {path: root, status, error: fileExplorerPathError, network: !status};
+      console.warn(status ? 'fs list failed' : 'fs list error', root, status || err, fileExplorerPathError);
+      return null;
+    }
+  })();
+  if (!canReuse) return request;
+  fileExplorerDirListingInflight.set(root, request);
   try {
-    hydrateFileExplorerRepoInfoCache();
-    const payload = await apiFetchJson(`/api/fs/list?path=${encodeURIComponent(root)}`);
-    const entries = payload.entries || [];
-    fileExplorerPathError = '';
-    fileExplorerLastListError = null;
-    cacheFileExplorerRepoInfoEntries(root, entries);
-    markNewDirectoryEntries(root, entries);
-    if (options.recordSignature !== false) recordDirectorySignature(root, entries);
-    setLimitedMapEntry(fileExplorerDirListingCache, root, {entries, at: Date.now()}, fileExplorerMemoryCacheLimit);
-    return entries;
-  } catch (err) {
-    const status = Number(err?.status) || 0;
-    fileExplorerPathError = status
-      ? err.message || `Cannot open ${root} (${status})`
-      : `Cannot open ${root}: ${err}`;
-    fileExplorerLastListError = {path: root, status, error: fileExplorerPathError, network: !status};
-    console.warn(status ? 'fs list failed' : 'fs list error', root, status || err, fileExplorerPathError);
-    return null;
+    return await request;
+  } finally {
+    if (fileExplorerDirListingInflight.get(root) === request) {
+      fileExplorerDirListingInflight.delete(root);
+    }
   }
 }
 
@@ -8715,8 +8998,32 @@ function startFileTreeDrag(event, row, fullPath, entry) {
   startFileDragPreview(event, paths, entry);
 }
 
-async function fetchFilePathInfo(path) {
-  return apiFetchJson(`/api/fs/info?path=${encodeURIComponent(path)}`);
+async function fetchFilePathInfo(path, options = {}) {
+  const normalized = normalizeDirectoryPath(path);
+  const canReuse = options.fresh !== true;
+  const pathInfoTtlMs = fileExplorerFsCacheTtlMs();
+  if (canReuse && pathInfoTtlMs > 0) {
+    const cached = fileExplorerPathInfoCache.get(normalized);
+    if (cached && Date.now() - cached.at < pathInfoTtlMs) return cached.payload;
+  }
+  if (canReuse) {
+    const inflight = fileExplorerPathInfoInflight.get(normalized);
+    if (inflight) return inflight;
+  }
+  const request = (async () => {
+    const payload = await fetchFilesystemBatchItem('info', normalized, {dedupe: canReuse});
+    setLimitedMapEntry(fileExplorerPathInfoCache, normalized, {payload, at: Date.now()}, fileExplorerMemoryCacheLimit);
+    return payload;
+  })();
+  if (!canReuse) return request;
+  fileExplorerPathInfoInflight.set(normalized, request);
+  try {
+    return await request;
+  } finally {
+    if (fileExplorerPathInfoInflight.get(normalized) === request) {
+      fileExplorerPathInfoInflight.delete(normalized);
+    }
+  }
 }
 
 async function showFileTreeContextMenu(row, fullPath, entry, x, y) {
@@ -10248,8 +10555,11 @@ async function refreshFileExplorerIfChanged() {
   let changed = false;
   const entriesByDir = new Map();
   const signaturesByDir = new Map();
-  for (const directory of directories) {
-    const entries = await fetchDirectory(directory, {recordSignature: false, fresh: true});
+  const listings = await Promise.all(directories.map(async directory => ({
+    directory,
+    entries: await fetchDirectory(directory, {recordSignature: false, fresh: true}),
+  })));
+  for (const {directory, entries} of listings) {
     if (!entries) continue;
     const normalizedDirectory = normalizeDirectoryPath(directory);
     entriesByDir.set(normalizedDirectory, entries);
@@ -15961,6 +16271,10 @@ function preferencesPaneTabHtml(item = prefsItemId, options = {}) {
   return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir">${esc(t('tab.preferences'))}</span></span>`;
 }
 
+function debugPaneTabHtml(item = debugPaneItemId, options = {}) {
+  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir">${esc(t('tab.debug'))}</span></span>`;
+}
+
 function fileEditorPaneTabHtml(item, options = {}) {
   const path = fileItemPath(item);
   const state = openFiles.get(path) || {};
@@ -17528,6 +17842,187 @@ function preferencesPanelHtml() {
     <div class="preferences-path-rows">${preferencesPathRowsHtml()}${readonly}</div>
     <div class="preferences-sections">${sections}</div>
     ${resetBlock}`;
+}
+
+function debugEventCounts() {
+  const apiCalls = jsDebugEvents.filter(event => event.type === 'api').length;
+  const errors = jsDebugEvents.filter(event => event.type === 'error' || event.type === 'unhandledrejection' || event.error).length;
+  return {apiCalls, errors};
+}
+
+function debugMetaText() {
+  return t('debug.meta', {count: jsDebugEvents.length});
+}
+
+function debugStatHtml(label, value, key = '') {
+  const data = key ? ` data-js-debug-stat="${esc(key)}"` : '';
+  return `<div class="js-debug-stat"><span>${esc(label)}</span><strong${data}>${esc(value)}</strong></div>`;
+}
+
+function debugTimeText(value) {
+  const match = String(value || '').match(/T(\d\d:\d\d:\d\d)/);
+  return match ? match[1] : String(value || '');
+}
+
+function debugEventTypeLabel(type) {
+  if (type === 'api') return 'API';
+  if (type === 'unhandledrejection') return 'Promise';
+  if (type === 'error') return 'Error';
+  return String(type || 'Event');
+}
+
+function debugEventStatusText(event) {
+  if (event.error) return 'error';
+  if (Number.isFinite(event.status)) return `HTTP ${event.status}`;
+  if (typeof event.ok === 'boolean') return event.ok ? 'ok' : 'not ok';
+  return '';
+}
+
+function debugEventDetailText(event) {
+  if (event.type === 'api') return `${event.method || 'GET'} ${event.url || ''}`.trim();
+  return event.message || event.reason || event.source || '';
+}
+
+function debugEventMetaText(event) {
+  return [
+    debugTimeText(event.ts),
+    Number.isFinite(event.durationMs) ? `${event.durationMs} ms` : '',
+    debugEventStatusText(event),
+    event.source ? `source: ${event.source}` : '',
+    event.line ? `line ${event.line}${event.column ? `:${event.column}` : ''}` : '',
+  ].filter(Boolean).join(' | ');
+}
+
+function debugEventLineText(event) {
+  const status = debugEventStatusText(event);
+  const duration = Number.isFinite(event.durationMs) ? `${event.durationMs}ms` : '';
+  const location = event.source ? `${event.source}${event.line ? `:${event.line}${event.column ? `:${event.column}` : ''}` : ''}` : '';
+  return [
+    debugTimeText(event.ts),
+    debugEventTypeLabel(event.type).padEnd(7),
+    status.padEnd(8),
+    duration.padStart(8),
+    debugEventDetailText(event) || t('debug.event'),
+    location,
+  ].filter(Boolean).join(' ');
+}
+
+function jsDebugTextForClipboard() {
+  const page = `${location.pathname || ''}${location.search || ''}${location.hash || ''}`;
+  const counts = debugEventCounts();
+  const header = [
+    `JS Debug ${new Date().toISOString()}`,
+    `page=${page || '/'}`,
+    `events=${jsDebugEvents.length}`,
+    `api=${counts.apiCalls}`,
+    `errors=${counts.errors}`,
+  ].join(' ');
+  const rows = jsDebugEvents.map(debugEventLineText);
+  return [header, ...rows].join('\n');
+}
+
+function debugPanelHtml() {
+  const counts = debugEventCounts();
+  return `
+    <div class="js-debug-toolbar">
+      <div class="js-debug-summary" aria-label="${esc(t('debug.summary'))}">
+        ${debugStatHtml(t('debug.events'), jsDebugEvents.length, 'events')}
+        ${debugStatHtml(t('debug.apiCalls'), counts.apiCalls, 'api')}
+        ${debugStatHtml(t('debug.errors'), counts.errors, 'errors')}
+      </div>
+      <div class="js-debug-actions">
+        <button type="button" class="preferences-inline-action" data-js-debug-copy>${esc(t('debug.copy'))}</button>
+        <button type="button" class="preferences-inline-action" data-js-debug-clear>${esc(t('debug.clear'))}</button>
+      </div>
+    </div>
+    <textarea class="js-debug-log" data-js-debug-log readonly spellcheck="false" aria-label="${esc(t('debug.recent'))}">${esc(jsDebugTextForClipboard())}</textarea>`;
+}
+
+function createDebugPanel() {
+  const panel = document.createElement('article');
+  panel.className = 'panel js-debug-panel';
+  panel.id = `panel-${debugPaneItemId}`;
+  panel.innerHTML = `
+      <div class="panel-head preferences-panel-head">
+        ${virtualPanelControlsHtml(debugPaneItemId)}
+        <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
+      </div>
+      <div class="panel-detail-row">
+        <div class="panel-copy">
+          <div id="panel-tab-${debugPaneItemId}" class="panel-session-label"><span class="session-button-dir">${esc(t('tab.debug'))}</span></div>
+          <div id="meta-${debugPaneItemId}" class="meta">${esc(debugMetaText())}</div>
+        </div>
+        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(debugPaneItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
+      </div>
+      <div class="preferences-body js-debug-body panel-overlay-root">
+        <div id="panel-toasts-${debugPaneItemId}" class="panel-toast-stack"></div>
+        <div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>
+      </div>`;
+  bindPanelShell(panel, debugPaneItemId);
+  bindDebugPanel(panel);
+  return panel;
+}
+
+function renderDebugPanels(options = {}) {
+  if (dragSession != null) return;
+  for (const panel of document.querySelectorAll('.js-debug-panel')) {
+    const body = panel.querySelector('.js-debug-body');
+    refreshDebugPanelFromEvents(panel, options);
+    if (body && (options.force === true || !body.querySelector('[data-js-debug-log]'))) {
+      body.innerHTML = `<div id="panel-toasts-${debugPaneItemId}" class="panel-toast-stack"></div><div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>`;
+      refreshDebugPanelFromEvents(panel, {force: true});
+    }
+    bindDebugPanel(panel);
+  }
+}
+
+function refreshDebugPanelsFromEvents() {
+  for (const panel of document.querySelectorAll('.js-debug-panel')) {
+    refreshDebugPanelFromEvents(panel);
+  }
+}
+
+function refreshDebugPanelFromEvents(panel, options = {}) {
+  if (!panel) return;
+  const meta = panel.querySelector(`#meta-${cssEscape(debugPaneItemId)}`);
+  if (meta) meta.textContent = debugMetaText();
+  const counts = debugEventCounts();
+  const statEvents = panel.querySelector('[data-js-debug-stat="events"]');
+  const statApi = panel.querySelector('[data-js-debug-stat="api"]');
+  const statErrors = panel.querySelector('[data-js-debug-stat="errors"]');
+  if (statEvents) statEvents.textContent = String(jsDebugEvents.length);
+  if (statApi) statApi.textContent = String(counts.apiCalls);
+  if (statErrors) statErrors.textContent = String(counts.errors);
+  const log = panel.querySelector('[data-js-debug-log]');
+  if (!log || (document.activeElement === log && options.force !== true)) return;
+  const text = jsDebugTextForClipboard();
+  if (log.value === text) return;
+  const oldTop = log.scrollTop;
+  const maxScroll = Math.max(0, log.scrollHeight - log.clientHeight);
+  const nearBottom = maxScroll - oldTop <= 20;
+  log.value = text;
+  log.scrollTop = nearBottom || options.force === true ? log.scrollHeight : oldTop;
+}
+
+function bindDebugPanel(panel) {
+  if (!panel || panel.dataset.debugBound === 'true') return;
+  panel.dataset.debugBound = 'true';
+  panel.addEventListener('click', event => {
+    const copy = event.target.closest('[data-js-debug-copy]');
+    if (copy && panel.contains(copy)) {
+      event.preventDefault();
+      copyTextToClipboard(jsDebugTextForClipboard())
+        .then(() => { statusEl.textContent = t('debug.copied'); })
+        .catch(error => { statusErr(`copy failed: ${esc(error)}`); });
+      return;
+    }
+    const clear = event.target.closest('[data-js-debug-clear]');
+    if (clear && panel.contains(clear)) {
+      event.preventDefault();
+      clearJsDebugEvents();
+      statusEl.textContent = t('debug.cleared');
+    }
+  });
 }
 
 function createPreferencesPanel() {

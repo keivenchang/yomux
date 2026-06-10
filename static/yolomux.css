@@ -2094,7 +2094,8 @@ body.theme-light .branch-link {
 .info-cell a.pr-status-closed {
   color: var(--pr-status-closed);
 }
-.preferences-panel {
+.preferences-panel,
+.js-debug-panel {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
 }
@@ -2116,6 +2117,62 @@ body.theme-light .branch-link {
   min-height: 0;
   overflow: auto;
   padding: 10px;
+}
+.js-debug-scroll {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 8px;
+}
+.js-debug-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+.js-debug-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+.js-debug-stat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+  padding: 4px 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+}
+.js-debug-stat span {
+  color: var(--muted);
+  font: 600 var(--ui-font-size-xs)/1 var(--ui-font);
+}
+.js-debug-stat strong {
+  color: var(--text);
+  font: 700 var(--ui-font-size-xs)/1 var(--mono-font);
+}
+.js-debug-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.js-debug-log {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  resize: none;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--panel);
+  font: 11px/1.35 var(--mono-font);
+  white-space: pre;
 }
 .info-refresh {
   margin-inline-start: auto;

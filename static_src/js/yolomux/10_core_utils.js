@@ -1,7 +1,16 @@
 async function apiFetch(url, options = {}) {
   const requestOptions = {...options};
   if (!requestOptions.credentials) requestOptions.credentials = 'same-origin';
-  const response = await fetch(url, requestOptions);
+  const startedAt = jsDebugPerformanceNow();
+  const method = jsDebugRequestMethod(requestOptions);
+  let response;
+  try {
+    response = await fetch(url, requestOptions);
+  } catch (error) {
+    recordApiDebugEvent(url, method, startedAt, {error});
+    throw error;
+  }
+  recordApiDebugEvent(url, method, startedAt, {status: response.status, ok: response.ok});
   if (response.status === 401) {
     await redirectToLogin(response);
     throw new Error('authentication required');
@@ -34,6 +43,104 @@ async function redirectToLogin(response) {
   } catch (_) {}
   window.location.assign(loginUrl);
 }
+
+function jsDebugPerformanceNow() {
+  if (!debugModeEnabled) return 0;
+  const value = globalThis.performance?.now?.();
+  return Number.isFinite(value) ? value : Date.now();
+}
+
+function jsDebugRequestMethod(options = {}) {
+  return String(options?.method || 'GET').toUpperCase();
+}
+
+function jsDebugDurationMs(startedAt) {
+  if (!debugModeEnabled || !Number.isFinite(startedAt)) return null;
+  const duration = jsDebugPerformanceNow() - startedAt;
+  return Number.isFinite(duration) ? Number(duration.toFixed(1)) : null;
+}
+
+function jsDebugUrlText(url) {
+  const value = String(url || '');
+  try {
+    const parsed = new URL(value, window.location.origin);
+    return `${parsed.pathname}${parsed.search}`;
+  } catch (_) {
+    return value.slice(0, 240);
+  }
+}
+
+function jsDebugErrorText(error) {
+  return String(error?.message || error || '').slice(0, 500);
+}
+
+function recordApiDebugEvent(url, method, startedAt, result = {}) {
+  if (!debugModeEnabled) return null;
+  const payload = {
+    method,
+    url: jsDebugUrlText(url),
+    durationMs: jsDebugDurationMs(startedAt),
+  };
+  if (Number.isFinite(result.status)) payload.status = result.status;
+  if (typeof result.ok === 'boolean') payload.ok = result.ok;
+  if (result.error) payload.error = jsDebugErrorText(result.error);
+  return recordJsDebugEvent('api', payload);
+}
+
+function recordJsDebugEvent(type, payload = {}) {
+  if (!debugModeEnabled) return null;
+  const event = {
+    id: ++jsDebugEventSeq,
+    ts: new Date().toISOString(),
+    type: String(type || 'event'),
+    ...payload,
+  };
+  jsDebugEvents.push(event);
+  if (jsDebugEvents.length > jsDebugEventLimit) {
+    jsDebugEvents.splice(0, jsDebugEvents.length - jsDebugEventLimit);
+  }
+  scheduleJsDebugPanelRefresh();
+  return event;
+}
+
+function clearJsDebugEvents() {
+  jsDebugEvents = [];
+  jsDebugEventSeq = 0;
+  if (jsDebugRenderTimer) {
+    clearTimeout(jsDebugRenderTimer);
+    jsDebugRenderTimer = null;
+  }
+  if (typeof renderDebugPanels === 'function') renderDebugPanels({force: true});
+}
+
+function scheduleJsDebugPanelRefresh() {
+  if (!debugModeEnabled || typeof refreshDebugPanelsFromEvents !== 'function') return;
+  if (jsDebugRenderTimer) return;
+  jsDebugRenderTimer = setTimeout(() => {
+    jsDebugRenderTimer = null;
+    refreshDebugPanelsFromEvents();
+  }, jsDebugRenderDebounceMs);
+}
+
+function installJsDebugEventCapture() {
+  if (!debugModeEnabled || jsDebugEventCaptureInstalled || !window?.addEventListener) return;
+  jsDebugEventCaptureInstalled = true;
+  window.addEventListener('error', event => {
+    recordJsDebugEvent('error', {
+      message: jsDebugErrorText(event.error || event.message),
+      source: jsDebugUrlText(event.filename || ''),
+      line: Number(event.lineno || 0),
+      column: Number(event.colno || 0),
+    });
+  });
+  window.addEventListener('unhandledrejection', event => {
+    recordJsDebugEvent('unhandledrejection', {
+      message: jsDebugErrorText(event.reason),
+    });
+  });
+}
+
+installJsDebugEventCapture();
 
 function agentLabel(kind) {
   const key = String(kind || '').toLowerCase();

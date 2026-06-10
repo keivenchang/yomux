@@ -512,7 +512,7 @@ function initialLayoutSlots() {
   const params = new URLSearchParams(location.search);
   maybeAdoptYoagentDeepLink(params);
   const layoutFromUrl = layoutFromParam(params.get('layout') || '', params.get('tabs') || '');
-  if (layoutFromUrl) return layoutFromUrl;
+  if (layoutFromUrl) return layoutWithDebugPaneActive(layoutFromUrl);
   const raw = params.get('sessions') || params.get('active') || '';
   const selected = [];
   for (const part of raw.split(',')) {
@@ -521,8 +521,30 @@ function initialLayoutSlots() {
     const item = resolveLayoutItem(value);
     if (isLayoutItem(item) && !selected.includes(item)) selected.push(item);
   }
-  if (selected.length) return layoutFromSessionList(selected);
-  return defaultLayoutSlots();
+  if (selected.length) return layoutWithDebugPaneActive(layoutFromSessionList(selected));
+  return layoutWithDebugPaneActive(defaultLayoutSlots());
+}
+
+function debugPanePreferredSlot(slots) {
+  const keys = layoutSlotKeys(slots);
+  return keys.find(slot => paneTabs(slot, slots).includes(infoItemId) || paneTabs(slot, slots).includes(prefsItemId))
+    || keys.find(slot => {
+      const active = activeItemForSide(slot, slots);
+      return active && !isFileExplorerItem(active);
+    })
+    || keys[0]
+    || 'left';
+}
+
+function layoutWithDebugPaneActive(slots) {
+  if (!debugModeEnabled || !isLayoutItem(debugPaneItemId)) return slots;
+  const next = cloneLayoutSlots(slots);
+  const existingSlot = layoutSlotKeys(next).find(slot => paneTabs(slot, next).includes(debugPaneItemId));
+  const slot = existingSlot || debugPanePreferredSlot(next);
+  const tabs = paneTabs(slot, next).filter(item => item !== debugPaneItemId);
+  next[slot] = paneStateWithTabs([...tabs, debugPaneItemId], debugPaneItemId);
+  if (!next[layoutTreeKey]) next[layoutTreeKey] = leafNode(slot);
+  return compactLayoutSlots(next);
 }
 
 function defaultLayoutSlots() {
@@ -648,7 +670,7 @@ function itemIsBackgroundPaneTab(item, slots = layoutSlots) {
 }
 
 function allTabItems() {
-  return [infoItemId, fileExplorerItemId, prefsItemId, ...openFileEditorItems(), ...visibleSessions];
+  return [...virtualTabItems(), ...openFileEditorItems(), ...visibleSessions];
 }
 
 function sortTabItems(items) {
@@ -696,7 +718,7 @@ function openFileEditorItems() {
 }
 
 function computeLayoutItems() {
-  return [infoItemId, fileExplorerItemId, prefsItemId, ...openFileEditorItems(), ...visibleSessions];
+  return [...virtualTabItems(), ...openFileEditorItems(), ...visibleSessions];
 }
 
 function isTmuxSession(item) {

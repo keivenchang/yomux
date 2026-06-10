@@ -438,9 +438,24 @@ function yoagentTabLabel() { return t('brand.tab.agent'); }
 let infoPanelSubTab = readStoredInfoSubTab();
 const fileExplorerItemId = '__files__';
 const prefsItemId = '__prefs__';
+const debugPaneItemId = '__debug__';
 const emptyPaneParam = '__empty_pane__';
 const fileEditorItemPrefix = 'file:';
 const imageViewerItemPrefix = 'image:';
+function urlFlagEnabled(name) {
+  try {
+    return new URLSearchParams(location.search || '').get(name) === '1';
+  } catch (_) {
+    return false;
+  }
+}
+const debugModeEnabled = urlFlagEnabled('debug');
+const jsDebugEventLimit = 200;
+const jsDebugRenderDebounceMs = 500;
+let jsDebugEventSeq = 0;
+let jsDebugEvents = [];
+let jsDebugEventCaptureInstalled = false;
+let jsDebugRenderTimer = null;
 const CLS = Object.freeze({
   active: 'active',
   collapsed: 'collapsed',
@@ -562,6 +577,25 @@ const TAB_TYPES = [
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
     prunePriority: () => 0,
   },
+  ...(debugModeEnabled ? [{
+    key: 'debug',
+    id: debugPaneItemId,
+    aliases: ['debug', 'js-debug', 'jsdebug', debugPaneItemId],
+    match: item => item === debugPaneItemId,
+    label: () => t('tab.debug'),
+    shortLabel: () => t('tab.debug.short'),
+    terminalTitle: () => t('tab.unavailableFor', {name: t('tab.debug')}),
+    sortRank: 0.7,
+    param: () => 'debug',
+    detail: () => t('menu.file.debug.detail'),
+    rowHtml: (item, options) => debugPaneTabHtml(item, options),
+    createPanel: () => createDebugPanel(),
+    renderAttached: () => renderDebugPanels(),
+    className: () => 'debug-item',
+    icon: 'tab-meta',
+    minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
+    prunePriority: () => 0,
+  }] : []),
   filePanelTabType({
     key: 'image-viewer',
     prefix: imageViewerItemPrefix,
@@ -587,6 +621,7 @@ function tabTypeForParam(value) {
 function tabTypeParam(type, item) { return typeof type?.param === 'function' ? type.param(item) : type?.param; }
 function isFileExplorerItem(item) { return tabTypeForItem(item)?.key === 'files'; }
 function isPreferencesItem(item) { return tabTypeForItem(item)?.key === 'preferences'; }
+function isDebugItem(item) { return tabTypeForItem(item)?.key === 'debug'; }
 function isImageViewerItem(item) { return tabTypeForItem(item)?.key === 'image-viewer'; }
 function isFileEditorItem(item) {
   const key = tabTypeForItem(item)?.key;
@@ -687,8 +722,13 @@ function applyFileExplorerStaticLabels() {
   applyPlatformControlClass(fileExplorerClose, 'close');
 }
 const syntaxLanguageByExtension = new Map(Object.entries(HIGHLIGHTABLE_EXTENSIONS));
+function virtualTabItems() {
+  return debugModeEnabled
+    ? [infoItemId, fileExplorerItemId, prefsItemId, debugPaneItemId]
+    : [infoItemId, fileExplorerItemId, prefsItemId];
+}
 let visibleSessions = sessions.slice(0, maxSessionTabs);
-let layoutItems = [infoItemId, fileExplorerItemId, prefsItemId, ...visibleSessions];
+let layoutItems = [...virtualTabItems(), ...visibleSessions];
 let layoutSlots = initialLayoutSlots();
 let activeSessions = sessionsFromLayout();
 let transcriptMeta = {};

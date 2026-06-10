@@ -431,6 +431,9 @@ globalThis.__layoutTestApi = {
   fileIconClassFor,
   fileExplorerNeedsLeftDock,
   fileExplorerPaneTabHtml,
+  fetchDirectoryForTest: fetchDirectory,
+  fetchFilePathInfoForTest: fetchFilePathInfo,
+  flushFileExplorerFsBatchForTest: flushFileExplorerFsBatch,
   firstEmptyPane,
   filePopoverRows,
   fuzzySearchScore,
@@ -440,6 +443,12 @@ globalThis.__layoutTestApi = {
   lineDiffRows,
   fileConflictCompareHtml,
   childPathParts,
+  debugModeEnabledForTest() { return debugModeEnabled; },
+  debugPaneItemId,
+  debugPanelHtmlForTest: debugPanelHtml,
+  jsDebugEventsForTest() { return jsDebugEvents.map(event => ({...event})); },
+  jsDebugTextForClipboardForTest: jsDebugTextForClipboard,
+  recordJsDebugEventForTest: recordJsDebugEvent,
   inactiveTabItems,
   infoItemId,
   infoPanelSubTabForTest() { return infoPanelSubTab; },
@@ -956,6 +965,15 @@ function fileDragEvent(target, payload = {path: '/home/test/pic.png', paths: ['/
     return '';
   };
   return event;
+}
+
+function jsonResponse(payload, status = 200) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    statusText: status === 200 ? 'OK' : String(status),
+    json: async () => payload,
+  };
 }
 
 function terminalLine(text, isWrapped = false) {
@@ -2312,6 +2330,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const api = loadYolomux('', ['1', '2']);
   api.setFileExplorerTreeDateModeForTest('date');
   assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,files,preferences,image-viewer,file-editor');
+  assert.equal(api.debugModeEnabledForTest(), false, 'JS Debug pane is off without the debug=1 URL flag');
+  assert.equal(api.resolveLayoutItem('debug'), 'debug', 'debug layout item is ignored while the URL flag is off');
   // #40: YO!info and YO!agent are merged into the single info item; the legacy yoagent/yosup aliases
   // resolve to it so saved layouts and bookmarked ?…=yoagent URLs open the merged pane.
   assert.equal(api.resolveLayoutItem('yoagent'), api.infoItemId, 'yoagent alias resolves to the merged YO!info item');
@@ -6083,6 +6103,46 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
 }
 
 {
+  const api = loadYolomux('?debug=1', ['1', '2']);
+  assert.equal(api.debugModeEnabledForTest(), true, 'debug=1 enables the JS Debug pane');
+  assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,files,preferences,debug,image-viewer,file-editor');
+  assert.equal(api.resolveLayoutItem('debug'), api.debugPaneItemId, 'debug URL item resolves to the virtual pane when enabled');
+  assert.equal(api.itemParam(api.debugPaneItemId), 'debug', 'Debug pane serializes to the readable debug item');
+  const fileMenu = api.appMenuTree().find(menu => menu.id === 'file');
+  assert.ok(fileMenu.items.some(item => item.targetItem === api.debugPaneItemId), 'File menu exposes JS Debug only when enabled');
+  const paletteRows = api.commandPaletteCommandItems().filter(item => item.targetItem === api.debugPaneItemId);
+  assert.equal(paletteRows.length, 1, 'command palette lists the Debug pane once through the Tabs group');
+  api.recordJsDebugEventForTest('api', {method: 'GET', url: '/api/ping', status: 200, ok: true, durationMs: 12.3});
+  api.recordJsDebugEventForTest('error', {message: 'boom', source: '/static/yolomux.js', line: 10});
+  assert.equal(api.jsDebugEventsForTest().length, 2, 'debug event recorder stores bounded diagnostics while enabled');
+  const html = api.debugPanelHtmlForTest();
+  assert.ok(html.includes('data-js-debug-log'), 'debug panel renders one copyable text log');
+  assert.ok(html.includes('GET /api/ping'), 'debug panel renders API timing rows');
+  assert.ok(html.includes('boom'), 'debug panel renders JS error rows');
+  const debugPaneSource = fs.readFileSync('static/yolomux.js', 'utf8');
+  const debugPaneCss = fs.readFileSync('static/yolomux.css', 'utf8');
+  assert.ok(!/panel\.className = 'panel preferences-panel js-debug-panel'/.test(debugPaneSource), 'Debug panel does not use the Preferences class; Preferences rerenders must not overwrite it');
+  assert.ok(/\.preferences-panel,\s*\.js-debug-panel\s*\{[^}]*grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(debugPaneCss), 'Debug panel gets the shared panel grid without being a Preferences panel');
+  const debugText = api.jsDebugTextForClipboardForTest();
+  assert.ok(debugText.includes('page=/?debug=1'), 'debug text includes the active URL path and query');
+  assert.ok(debugText.includes('API') && debugText.includes('GET /api/ping'), 'debug text exports API rows');
+  assert.ok(debugText.includes('Error') && debugText.includes('boom'), 'debug text exports JS error rows');
+  assert.equal(debugText.includes('"events"'), false, 'debug copy payload is compact text, not JSON');
+  const url = api.syncInitialLayoutUrlForTest();
+  assert.equal(parseUrl(url).get('debug'), '1', 'layout URL updates preserve debug=1');
+  const openedApi = loadYolomux('?debug=1&sessions=debug', ['1']);
+  assert.deepStrictEqual(canonical(openedApi.serialize(openedApi.currentSlots()).panes), {
+    left: {tabs: [openedApi.debugPaneItemId], active: openedApi.debugPaneItemId},
+  }, 'debug=1 allows sessions=debug to open the Debug pane directly');
+  const injectedApi = loadYolomux('?sessions=files,6,5&layout=row@22(slot2,row@50(left,slot1))&tabs=slot2:files;left:6;slot1:5,info&debug=1', ['5', '6']);
+  assert.deepStrictEqual(canonical(injectedApi.serialize(injectedApi.currentSlots()).panes), {
+    left: {tabs: ['6'], active: '6'},
+    slot1: {tabs: ['5', injectedApi.infoItemId, injectedApi.debugPaneItemId], active: injectedApi.debugPaneItemId},
+    slot2: {tabs: [injectedApi.fileExplorerItemId], active: injectedApi.fileExplorerItemId},
+  }, 'debug=1 injects and activates Debug in an existing URL layout');
+}
+
+{
   const api = loadYolomux();
   const info = {
     selected_pane: {current_path: '/home/test/project/project3'},
@@ -7781,3 +7841,106 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes('dragTimingReport()'), 'S14: the per-bucket report fires at drag end');
   assert.ok(source.includes('function showDragTimingOverlay(') && source.includes("el.className = 'drag-timing-overlay'"), 'S14: a copyable on-page timing overlay (no DevTools) is rendered at drag end');
 }
+
+(async () => {
+  {
+    const api = loadYolomux();
+    const calls = [];
+    api.setFetchForTest((url, options = {}) => {
+      const body = JSON.parse(options.body || '{}');
+      calls.push({url: String(url), method: options.method || 'GET', requests: body.requests || []});
+      return Promise.resolve(jsonResponse({
+        responses: (body.requests || []).map(request => ({
+          id: request.id,
+          ok: true,
+          status: 200,
+          payload: {path: request.path, entries: [{name: 'TODO.md', kind: 'file'}]},
+        })),
+      }));
+    });
+    const first = api.fetchDirectoryForTest('/home/test');
+    const second = api.fetchDirectoryForTest('/home/test/');
+    await api.flushFileExplorerFsBatchForTest();
+    assert.deepStrictEqual(canonical(calls), [{
+      method: 'POST',
+      requests: [{id: 1, path: '/home/test', type: 'list'}],
+      url: '/api/fs/batch',
+    }], 'concurrent identical directory listings share one batched backend request');
+    const [firstEntries, secondEntries] = await Promise.all([first, second]);
+    assert.strictEqual(firstEntries, secondEntries, 'shared directory listing callers receive the same entries object');
+    assert.equal(firstEntries[0].name, 'TODO.md');
+    const cachedEntries = await api.fetchDirectoryForTest('/home/test');
+    assert.strictEqual(cachedEntries, firstEntries, 'completed directory listing is reused by the short TTL cache');
+    assert.equal(calls.length, 1, 'short TTL cache avoids an immediate repeat directory listing');
+  }
+
+  {
+    const api = loadYolomux();
+    const calls = [];
+    api.setFetchForTest((url, options = {}) => {
+      const body = JSON.parse(options.body || '{}');
+      calls.push({url: String(url), method: options.method || 'GET', requests: body.requests || []});
+      return Promise.resolve(jsonResponse({
+        responses: (body.requests || []).map((request, index) => ({
+          id: request.id,
+          ok: true,
+          status: 200,
+          payload: {path: request.path, entries: [{name: index === 0 ? 'a.txt' : 'b.txt', kind: 'file'}]},
+        })),
+      }));
+    });
+    const first = api.fetchDirectoryForTest('/home/test', {fresh: true});
+    const second = api.fetchDirectoryForTest('/home/test', {fresh: true});
+    await api.flushFileExplorerFsBatchForTest();
+    assert.deepStrictEqual(canonical(calls), [{
+      method: 'POST',
+      requests: [
+        {id: 1, path: '/home/test', type: 'list'},
+        {id: 2, path: '/home/test', type: 'list'},
+      ],
+      url: '/api/fs/batch',
+    }], 'explicit fresh directory listings stay distinct inside one batch');
+    const [firstEntries, secondEntries] = await Promise.all([first, second]);
+    assert.equal(firstEntries[0].name, 'a.txt');
+    assert.equal(secondEntries[0].name, 'b.txt');
+  }
+
+  {
+    const api = loadYolomux();
+    const calls = [];
+    api.setFetchForTest((url, options = {}) => {
+      const body = JSON.parse(options.body || '{}');
+      calls.push({url: String(url), method: options.method || 'GET', requests: body.requests || []});
+      return Promise.resolve(jsonResponse({
+        responses: (body.requests || []).map(request => ({
+          id: request.id,
+          ok: true,
+          status: 200,
+          payload: {path: request.path, kind: 'dir', repo: {root: request.path}},
+        })),
+      }));
+    });
+    const first = api.fetchFilePathInfoForTest('/home/test');
+    const second = api.fetchFilePathInfoForTest('/home/test/');
+    await api.flushFileExplorerFsBatchForTest();
+    assert.deepStrictEqual(canonical(calls), [{
+      method: 'POST',
+      requests: [{id: 1, path: '/home/test', type: 'info'}],
+      url: '/api/fs/batch',
+    }], 'concurrent identical path-info lookups share one batched backend request');
+    const [firstInfo, secondInfo] = await Promise.all([first, second]);
+    assert.strictEqual(firstInfo, secondInfo, 'shared path-info callers receive the same payload object');
+    assert.equal(firstInfo.kind, 'dir');
+    const cachedInfo = await api.fetchFilePathInfoForTest('/home/test');
+    assert.strictEqual(cachedInfo, firstInfo, 'completed path-info lookup is reused by the short TTL cache');
+    assert.equal(calls.length, 1, 'short TTL cache avoids an immediate repeat path-info lookup');
+  }
+
+  {
+    const source = fs.readFileSync('static/yolomux.js', 'utf8');
+    assert.ok(/Promise\.all\(directories\.map\(async directory =>/.test(source), 'periodic Finder refresh starts watched directory checks together so fs/list can batch');
+  }
+})().catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});
