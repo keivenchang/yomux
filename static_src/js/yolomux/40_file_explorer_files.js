@@ -2606,10 +2606,11 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
 function handleFileExplorerArrowNav(event) {
   if (event.altKey) return false;
   const key = event.key;
-  const isMove = key === 'ArrowDown' || key === 'ArrowUp' || key === 'Home' || key === 'End';
+  const isVertical = key === 'ArrowDown' || key === 'ArrowUp' || key === 'Home' || key === 'End';
+  const isHorizontal = key === 'ArrowRight' || key === 'ArrowLeft';
   const isSelectAll = (event.metaKey || event.ctrlKey) && (key === 'a' || key === 'A');
-  if (!isMove && !isSelectAll) return false;
-  if (isMove && (event.metaKey || event.ctrlKey)) return false;   // leave Mod+Arrow for other shortcuts
+  if (!isVertical && !isHorizontal && !isSelectAll) return false;
+  if ((isVertical || isHorizontal) && (event.metaKey || event.ctrlKey)) return false;   // leave Mod+Arrow for other shortcuts
   if (!eventTargetIsFileExplorerSurface(event.target) && !isFileExplorerItem(focusedPanelItem)) return false;
   if (!globalShortcutTargetAllowsAppAction(event.target)) return false;
   // Scope to ONE tree: the event's tree, else the tree holding the current lead, else the active Finder tree.
@@ -2620,6 +2621,13 @@ function handleFileExplorerArrowNav(event) {
     || document;
   const rows = selectableFileTreeRows(container);
   if (!rows.length) return false;
+  const selectLead = (row, options = {}) => {
+    fileExplorerManualSelectionActive = true;
+    if (options.extend) selectFileTreeRange(row, row.dataset.path, {clear: true});
+    else selectFileTreePath(row.dataset.path);
+    fileExplorerSelectionLead = row.dataset.path;
+    row.scrollIntoView({block: 'nearest'});
+  };
   if (isSelectAll) {
     fileExplorerManualSelectionActive = true;
     fileExplorerSelectedPaths.clear();
@@ -2633,6 +2641,33 @@ function handleFileExplorerArrowNav(event) {
   }
   let leadIndex = rows.findIndex(item => item.dataset.path === fileExplorerSelectionLead);
   if (leadIndex < 0) leadIndex = rows.findIndex(item => fileExplorerSelectedPaths.has(item.dataset.path));
+  // macOS Finder list view: Right expands a collapsed folder, or steps into the first child if already
+  // expanded; Left collapses an expanded folder, or steps to the parent. (Files: Right is a no-op, Left -> parent.)
+  if (isHorizontal) {
+    if (leadIndex < 0) return false;
+    const leadRow = rows[leadIndex];
+    const leadPath = leadRow.dataset.path;
+    const isDir = leadRow.dataset.kind === 'dir';
+    const expanded = fileExplorerExpanded.has(leadPath);
+    event.preventDefault();
+    event.stopPropagation();
+    if (key === 'ArrowRight') {
+      if (isDir && !expanded) {
+        expandDirectoryRow(leadRow, leadPath, {manual: true});   // expand in place (children load async)
+      } else if (isDir && expanded) {
+        const child = rows[leadIndex + 1];
+        if (child && pathIsInsideDirectory(child.dataset.path, leadPath)) selectLead(child);
+      }
+      return true;   // on a file, no-op (but consumed so the tree doesn't scroll)
+    }
+    if (isDir && expanded) {
+      collapseDirectoryRow(leadRow, leadPath, {manual: true});   // collapse in place
+    } else {
+      const parentRow = rows.find(item => item.dataset.path === dirnameOf(leadPath));
+      if (parentRow) selectLead(parentRow);
+    }
+    return true;
+  }
   let nextIndex;
   if (key === 'Home') nextIndex = 0;
   else if (key === 'End') nextIndex = rows.length - 1;
@@ -2640,13 +2675,7 @@ function handleFileExplorerArrowNav(event) {
     const delta = key === 'ArrowDown' ? 1 : -1;
     nextIndex = leadIndex < 0 ? (delta > 0 ? 0 : rows.length - 1) : Math.max(0, Math.min(rows.length - 1, leadIndex + delta));
   }
-  const nextRow = rows[nextIndex];
-  const nextPath = nextRow.dataset.path;
-  fileExplorerManualSelectionActive = true;
-  if (event.shiftKey) selectFileTreeRange(nextRow, nextPath, {clear: true});
-  else selectFileTreePath(nextPath);
-  fileExplorerSelectionLead = nextPath;
-  nextRow.scrollIntoView({block: 'nearest'});
+  selectLead(rows[nextIndex], {extend: event.shiftKey});
   event.preventDefault();
   event.stopPropagation();
   return true;

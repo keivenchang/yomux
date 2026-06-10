@@ -7149,11 +7149,15 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(source.includes('function handleFileExplorerArrowNav('), 'arrow-nav handler exists');
   assert.ok(/if \(handleFileExplorerArrowNav\(event\)\) return;/.test(source), 'arrow-nav is wired into the global keydown after the delete shortcut');
-  assert.ok(/eventTargetIsFileExplorerSurface\(event\.target\) \|\| isFileExplorerItem\(focusedPanelItem\)/.test(source) || source.includes('!eventTargetIsFileExplorerSurface(event.target) && !isFileExplorerItem(focusedPanelItem)'), 'arrow-nav is gated on the Finder/Differ surface');
-  assert.ok(/event\.shiftKey\) selectFileTreeRange\(nextRow, nextPath, \{clear: true\}\)/.test(source), 'Shift+Arrow extends the range from the anchor');
-  assert.ok(/else selectFileTreePath\(nextPath\)/.test(source), 'plain Arrow single-selects the new lead');
-  assert.ok(source.includes('fileExplorerSelectionLead = nextPath'), 'the keyboard lead (cursor) advances with the arrows');
-  assert.ok(source.includes('fileExplorerSelectionLead = fullPath') , 'click/range selection seeds the same lead so keyboard continues from the clicked row');
+  assert.ok(source.includes('!eventTargetIsFileExplorerSurface(event.target) && !isFileExplorerItem(focusedPanelItem)'), 'arrow-nav is gated on the Finder/Differ surface');
+  assert.ok(/options\.extend\) selectFileTreeRange\(row, row\.dataset\.path, \{clear: true\}\)/.test(source), 'Shift+Arrow extends the range from the anchor');
+  assert.ok(/else selectFileTreePath\(row\.dataset\.path\)/.test(source), 'plain Arrow single-selects the new lead');
+  assert.ok(/selectLead\(rows\[nextIndex\], \{extend: event\.shiftKey\}\)/.test(source), 'Up/Down/Home/End move the lead; Shift extends');
+  assert.ok(source.includes('expandDirectoryRow(leadRow, leadPath, {manual: true})'), 'Right expands a collapsed folder in place (macOS Finder)');
+  assert.ok(source.includes('collapseDirectoryRow(leadRow, leadPath, {manual: true})'), 'Left collapses an expanded folder in place (macOS Finder)');
+  assert.ok(/pathIsInsideDirectory\(child\.dataset\.path, leadPath\)/.test(source), 'Right on an expanded folder steps into the first child');
+  assert.ok(/rows\.find\(item => item\.dataset\.path === dirnameOf\(leadPath\)\)/.test(source), 'Left on a collapsed folder/file steps to the parent');
+  assert.ok(source.includes('fileExplorerSelectionLead = fullPath'), 'click/range selection seeds the same lead so keyboard continues from the clicked row');
 }
 
 // S2 (DOIT.51) BEHAVIORAL PROOF: a file that is an open tab appears ONCE in the on-type palette — as its
