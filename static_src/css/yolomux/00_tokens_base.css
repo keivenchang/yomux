@@ -88,7 +88,7 @@
   --active-accent-rgb: 118 185 0;    /* triple → rgb(var(--active-accent-rgb) / α) for every alpha use */
   --active-accent-bright: #86d600;   /* active-tab fill + border */
   --active-accent-text: #071000;     /* text/icon ON the accent tab (contrast color) */
-  --active-accent-dim: color-mix(in srgb, var(--active-accent) 22%, var(--panel));  /* chrome strip bg */
+  --active-accent-dim: color-mix(in srgb, var(--active-accent) 26%, var(--panel));  /* chrome strip bg */
   --active-accent-soft: rgb(var(--active-accent-rgb) / 0.12);                        /* hover/selection wash */
   --active-control-bg: var(--active-accent-bright);
   --active-control-border: var(--active-accent-bright);
@@ -151,10 +151,11 @@
   --pane-split-gap: 0px;
   --pane-resizer-size: 1px;
   --pane-resizer-line-size: 1px;
-  --pane-resizer-hover-line-size: 1.5px;
+  --pane-resizer-hover-line-size: 5px;
   --pane-resizer-bg: rgba(255, 225, 77, 0.72);
   --pane-resizer-hover-bg: rgba(255, 225, 77, 0.96);
   --pane-resizer-shadow: rgba(255, 225, 77, 0.72);
+  --tab-insert-preview-width: 24px;
   --popover-show-delay: 1000ms;
   --popover-hide-delay: 300ms;
   --popover-edge-gap: 1vw;
@@ -320,6 +321,7 @@
   --icon-finder: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 7.5h7l2 2h9v8.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'/%3E%3Cpath d='M3 7.5V6a2 2 0 0 1 2-2h4.5l2 2H19a2 2 0 0 1 2 2v1.5'/%3E%3C/svg%3E");
   --icon-document: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 3h8l4 4v14H6z'/%3E%3Cpath d='M14 3v5h5'/%3E%3Cpath d='M9 12h6'/%3E%3Cpath d='M9 16h6'/%3E%3C/svg%3E");
   --icon-gear: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4z'/%3E%3Cpath d='M19.4 15a8 8 0 0 0 .1-1l2-1.5-2-3.5-2.4 1a7.3 7.3 0 0 0-1.7-1L15 6.4h-6L8.6 9a7.3 7.3 0 0 0-1.7 1l-2.4-1-2 3.5 2 1.5a8 8 0 0 0 .1 2l-2 1.5 2 3.5 2.4-1a7.3 7.3 0 0 0 1.7 1l.4 2.6h6l.4-2.6a7.3 7.3 0 0 0 1.7-1l2.4 1 2-3.5z'/%3E%3C/svg%3E");
+  --icon-pin: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 17v5'/%3E%3Cpath d='M5 17h14'/%3E%3Cpath d='M8 3h8l-1 7 3 4H6l3-4z'/%3E%3C/svg%3E");
   --icon-branch-info: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='6' cy='6' r='2.5'/%3E%3Ccircle cx='18' cy='18' r='2.5'/%3E%3Ccircle cx='6' cy='18' r='2.5'/%3E%3Cpath d='M8.5 6H12a4 4 0 0 1 4 4v5.5'/%3E%3Cpath d='M6 8.5v7'/%3E%3C/svg%3E");
   --icon-yoagent: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6.5A3.5 3.5 0 0 1 7.5 3h9A3.5 3.5 0 0 1 20 6.5v5A3.5 3.5 0 0 1 16.5 15H12l-5 4v-4A3 3 0 0 1 4 12z'/%3E%3Cpath d='M8 8h8'/%3E%3Cpath d='M8 11h5'/%3E%3C/svg%3E");
   --icon-changes: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 4h10'/%3E%3Cpath d='M7 20h10'/%3E%3Cpath d='M12 6v12'/%3E%3Cpath d='M5 10h5'/%3E%3Cpath d='M14 14h5'/%3E%3C/svg%3E");
@@ -346,7 +348,7 @@ body.theme-light {
   --active-accent-rgb: 95 152 0;
   --active-accent-bright: #4f9e3a;
   --active-accent-text: #ffffff;
-  --active-accent-dim: #dce8d2;
+  --active-accent-dim: #e1edda;
   --active-accent-soft: rgb(var(--active-accent-rgb) / 0.12);
   --active-control-bg: var(--active-accent-bright);
   --active-control-border: var(--active-accent-bright);

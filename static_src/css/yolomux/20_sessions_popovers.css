@@ -577,6 +577,62 @@ body.theme-light .branch-link {
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.40);
   opacity: 0.82 !important;
 }
+.pane-drag-image.drag-image {
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  border: 2px dotted var(--pane-resizer-hover-bg);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.42);
+  overflow: hidden;
+  opacity: 0.86 !important;
+}
+.pane-drag-image-frame {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 4px;
+  width: 100%;
+  height: 100%;
+  padding: 9px 10px;
+  background:
+    linear-gradient(to bottom, var(--pane-bar-bg, var(--panel2)) 0 30px, transparent 30px),
+    color-mix(in srgb, var(--panel) 94%, black 6%);
+}
+.pane-drag-image-title {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 700;
+  font-size: 12px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pane-drag-image-meta {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.2;
+}
+.pane-drag-image-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 4px;
+  min-height: 0;
+  overflow: hidden;
+  padding-top: 4px;
+}
+.pane-drag-image-tabs span {
+  max-width: min(18ch, 42%);
+  overflow: hidden;
+  padding: 2px 5px;
+  color: var(--text);
+  background: var(--pane-bar-bg, var(--panel2));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  font-size: 11px;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .file-drag-main {
   display: flex;
   align-items: flex-start;

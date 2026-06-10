@@ -32,6 +32,8 @@ STATIC_CONTENT_TYPES = {
     "xterm.js": "application/javascript; charset=utf-8",
     "yolomux.css": "text/css; charset=utf-8",
     "yolomux.js": "application/javascript; charset=utf-8",
+    "vendor/dockview.css": "text/css; charset=utf-8",
+    "vendor/dockview-core.noStyle.js": "application/javascript; charset=utf-8",
 }
 
 
@@ -185,6 +187,7 @@ def html_page(sessions: list[str], access_role: str = "admin", dev: bool = False
 <title>YOLOmux</title>
 <link rel="stylesheet" href="{static_asset_url("xterm.css")}" onerror="this.onerror=null;this.href='https://cdn.jsdelivr.net/npm/@xterm/xterm/css/xterm.css';">
 <link rel="stylesheet" href="{static_asset_url("brand.css")}">
+<link rel="stylesheet" href="{static_asset_url("vendor/dockview.css")}">
 <link rel="stylesheet" href="{static_asset_url("yolomux.css")}">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
 <script src="{static_asset_url("xterm.js")}" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/@xterm/xterm/lib/xterm.js';"></script>
@@ -239,6 +242,7 @@ def html_page(sessions: list[str], access_role: str = "admin", dev: bool = False
   <pre id="modalBody"></pre>
 </section>
 <script id="yolomux-bootstrap" type="application/json">{bootstrap_json}</script>
+<script src="{static_asset_url("vendor/dockview-core.noStyle.js")}"></script>
 <script src="{static_asset_url("yolomux.js")}"></script>
 </body>
 </html>

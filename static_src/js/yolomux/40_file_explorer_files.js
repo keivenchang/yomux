@@ -3454,7 +3454,7 @@ function openFileStatus(state) {
   if (state.externalError) return {message: `refresh failed; file state unknown: ${state.externalError}`, level: 'warn'};
   if (state.externalChanged) return {message: state.dirty ? 'changed on disk; unsaved edits kept' : 'changed on disk; reload available', level: 'warn'};
   if (state.dirty) return {message: t('filetab.modified'), level: ''};
-  if (state.kind === 'text') return {message: `${state.original.length} chars`, level: ''};
+  if (state.kind === 'text') return {message: `${String(state.original ?? '').length} chars`, level: ''};
   return {message: '', level: ''};
 }
 
@@ -4720,7 +4720,7 @@ function codeMirrorBlameExtension(api, path) {
     const blame = editorBlameForPath(path);
     if (!blame || !blame.lines) return api.Decoration.none;
     // DOIT.26: annotate EVERY visible line when fileEditorBlameAllLines is on, else just the cursor line
-    // (the Cursor default). Viewport-scoped so a huge file only decorates what's on screen.
+    // (the Popular IDE default). Viewport-scoped so a huge file only decorates what's on screen.
     if (fileEditorBlameAllLines) {
       const ranges = [];
       const visible = view.visibleRanges?.length ? view.visibleRanges : [{from: 0, to: view.state.doc.length}];

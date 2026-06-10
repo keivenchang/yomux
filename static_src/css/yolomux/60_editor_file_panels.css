@@ -1918,7 +1918,7 @@ body.editor-theme-light .file-editor-content {
 }
 /* DOIT.26: blame toggle goes green when ON (like the other pressed toggles), and the inline annotation
    is a dim ::after on the cursor's current line — colored by the editor scheme's --code-comment token
-   (theme-aware, the same gray Cursor uses), never selectable/copied as code. */
+   (theme-aware, the same gray common in Popular IDEs), never selectable/copied as code. */
 .file-editor-blame-panel[aria-pressed="true"] {
   color: var(--pane-ctl-pressed-fg, var(--pane-tab-active-text));
   background: var(--pane-ctl-pressed-bg, var(--pane-tab-active-bg));

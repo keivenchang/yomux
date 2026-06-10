@@ -201,6 +201,7 @@ function normalizePaneState(raw, seen, options = {}) {
       seen.add(item);
     }
   }
+  state.tabs = orderPaneTabs(state.tabs);
   const active = resolveLayoutItem(raw?.active);
   state.active = state.tabs.includes(active) ? active : state.tabs[0] || null;
   if (!state.tabs.length && !Array.isArray(raw) && raw?.placeholder === true) state.placeholder = true;
@@ -719,12 +720,73 @@ function activeItemForSide(side, slots = layoutSlots) {
   return stack.includes(active) ? active : stack[0] || null;
 }
 
-function paneStateWithTabs(tabs, active = null) {
+function normalizePinnedTabItems(items = pinnedTabItems) {
+  const result = [];
+  for (const raw of items || []) {
+    const item = String(raw || '').trim();
+    if (item && isPinnableTab(item) && !result.includes(item)) result.push(item);
+  }
+  return result;
+}
+
+function isPinnableTab(item) {
+  return isLayoutItem(item) && !isFileExplorerItem(item);
+}
+
+function tabIsPinned(item) {
+  return pinnedTabItems.includes(item) && isPinnableTab(item);
+}
+
+function orderPaneTabs(tabs) {
   const unique = [];
   for (const item of tabs) {
     if (isLayoutItem(item) && !unique.includes(item)) unique.push(item);
   }
-  return {tabs: unique, active: unique.includes(active) ? active : unique[0] || null};
+  return [
+    ...unique.filter(tabIsPinned),
+    ...unique.filter(item => !tabIsPinned(item)),
+  ];
+}
+
+function paneStateWithTabs(tabs, active = null) {
+  const ordered = orderPaneTabs(tabs);
+  return {tabs: ordered, active: ordered.includes(active) ? active : ordered[0] || null};
+}
+
+function pinnedTabIconHtml(item) {
+  if (!tabIsPinned(item)) return '';
+  const label = t('tab.pinned');
+  return `<span class="pane-tab-pin-icon" title="${esc(label)}" aria-label="${esc(label)}"></span>`;
+}
+
+function setTabPinned(item, pinned) {
+  const resolved = resolveLayoutItem(item);
+  if (!isPinnableTab(resolved)) {
+    statusEl.textContent = t('tab.pinUnavailable');
+    return false;
+  }
+  const nextPinned = pinnedTabItems.filter(tab => tab !== resolved);
+  if (pinned) nextPinned.push(resolved);
+  pinnedTabItems = normalizePinnedTabItems(nextPinned);
+  writeStoredPinnedTabs();
+  const next = cloneLayoutSlots(layoutSlots);
+  for (const slot of layoutSlotKeys(next)) {
+    next[slot] = paneStateWithTabs(paneTabs(slot, next), activeItemForSide(slot, next));
+  }
+  applyLayoutSlots(next, {focusSession: resolved, prune: false, forceFull: dockviewLayoutActive()});
+  statusEl.textContent = pinned ? t('tab.pinnedStatus', {name: itemLabel(resolved)}) : t('tab.unpinnedStatus', {name: itemLabel(resolved)});
+  return true;
+}
+
+function toggleTabPinned(item) {
+  const resolved = resolveLayoutItem(item);
+  return setTabPinned(resolved, !tabIsPinned(resolved));
+}
+
+function toggleActiveTabPinned() {
+  const item = currentActiveMenuItem();
+  if (!item) return false;
+  return toggleTabPinned(item);
 }
 
 function paneItems(slots = layoutSlots) {
@@ -1277,6 +1339,7 @@ function keyboardShortcutCatalog() {
       {label: t('shortcuts.redoChunk'), keys: appShortcutText('Z', {shift: true})},
     ]},
     {section: t('shortcuts.section.tabsPanes'), items: [
+      {label: t('shortcuts.pinTab'), keys: t('shortcuts.keys.pinTab', {k: appShortcutText('K')})},
       {label: t('shortcuts.closeTab'), keys: t('shortcuts.keys.closeTab', {w: appShortcutText('W'), bs: appShortcutText('Backspace')})},
       {label: t('shortcuts.moveTab'), keys: t('shortcuts.keys.dragTab')},
       {label: t('shortcuts.sessionActions'), keys: t('shortcuts.keys.rightClick')},
@@ -2650,6 +2713,7 @@ function applyLayoutSlots(nextSlots, options = {}) {
     nextShape: layoutShapeSignature(layoutSlots),
     options: {prune: options.prune},
     reason: 'applyLayoutSlots',
+    forceFull: options.forceFull === true,
   });
   for (const session of activeSessions.filter(isTmuxSession)) ensureTerminalRunning(session);
   // DOIT.9 S1: do NOT re-poll the server on a pure client-side layout change. refreshTranscripts()

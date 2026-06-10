@@ -777,7 +777,8 @@ function installFilePathDropTarget(session, target) {
     event.stopPropagation();
     event.dataTransfer.dropEffect = 'copy';
     const intent = dropIntentForEvent(event);
-    if (intent?.targetSlot) showDropPreview(intent);
+    if (intent?.targetSlot && pathDropIntentAllowsPayload(payload, intent)) showDropPreview(intent);
+    else clearDropPreview();
     target.classList.add(CLS.pathDragOver);
   });
   target.addEventListener('dragleave', event => {
@@ -793,7 +794,7 @@ function installFilePathDropTarget(session, target) {
     target.classList.remove(CLS.pathDragOver);
     const intent = dropIntentForEvent(event);
     clearDropPreview();
-    if (intent?.targetSlot && intent.zone !== 'middle') {
+    if (intent?.targetSlot && intent.zone !== 'middle' && pathDropIntentAllowsPayload(payload, intent)) {
       openDraggedFilesInEditor(payload, {targetSlot: intent.targetSlot, targetZone: intent.zone});
       return;
     }
@@ -1167,9 +1168,9 @@ function updatePanelSlot(panel, session, slot) {
   panel.dataset.layoutItem = session;
   const head = panel.querySelector('.panel-head');
   if (head) head.dataset.dragSlot = slot;
-  if (isFileEditorItem(session)) renderFileEditorPanel(panel, session);
+  if (isFileEditorItem(session)) renderFileEditorPanel(panel, session, {updateActiveFile: !dockviewLayoutActive()});
   updatePaneExpandButton(panel, session);
-  updatePaneTabStrip(panel, slot);
+  if (!hideDockviewInnerPaneTabs(panel)) updatePaneTabStrip(panel, slot);
   updatePanelInactiveOverlays();
 }
 
@@ -2254,6 +2255,38 @@ function globalShortcutTargetAllowsPlatformAction(target) {
   return isMacPlatform() || globalShortcutTargetAllowsAppAction(target);
 }
 
+function clearPendingGlobalShortcutChord() {
+  pendingGlobalShortcutChord = null;
+  if (pendingGlobalShortcutChordTimer) {
+    clearTimeout(pendingGlobalShortcutChordTimer);
+    pendingGlobalShortcutChordTimer = null;
+  }
+}
+
+function startPinTabShortcutChord() {
+  clearPendingGlobalShortcutChord();
+  pendingGlobalShortcutChord = 'pin-tab';
+  pendingGlobalShortcutChordTimer = setTimeout(clearPendingGlobalShortcutChord, globalShortcutChordTimeoutMs);
+  statusEl.textContent = t('shortcuts.pinTabPrompt', {keys: `${appShortcutText('K')} Enter`});
+}
+
+function handlePendingGlobalShortcutChord(event, key) {
+  if (!pendingGlobalShortcutChord) return false;
+  if (pendingGlobalShortcutChord === 'pin-tab' && key === 'enter') {
+    event.preventDefault();
+    event.stopPropagation();
+    clearPendingGlobalShortcutChord();
+    toggleActiveTabPinned();
+    return true;
+  }
+  if (event.key === 'Escape') {
+    clearPendingGlobalShortcutChord();
+    return false;
+  }
+  clearPendingGlobalShortcutChord();
+  return false;
+}
+
 function itemCanCloseWithAppShortcut(item) {
   return isFileEditorItem(item) || isImageViewerItem(item);
 }
@@ -2311,6 +2344,7 @@ function handleGlobalShortcutKeydown(event) {
   const mod = appModifier(event);
   const key = String(event.key || '').toLowerCase();
   const platformActionAllowed = globalShortcutTargetAllowsPlatformAction(event.target);
+  if (handlePendingGlobalShortcutChord(event, key)) return;
   // DOIT.21: editor back/forward history via the keyboard — Mod+Alt+[ / Mod+Alt+]. (appModifier() is
   // false when Alt is held, so test the platform modifier directly.) Matched by event.code so a layout
   // where Alt remaps the bracket char still works; plain Mod+[ / Mod+] stay with CodeMirror (indent).
@@ -2336,6 +2370,12 @@ function handleGlobalShortcutKeydown(event) {
     return;
   }
   if (mod && platformActionAllowed) {
+    if (key === 'k') {
+      event.preventDefault();
+      event.stopPropagation();
+      startPinTabShortcutChord();
+      return;
+    }
     if ((key === 'backspace' || key === 'delete') && globalShortcutTargetAllowsAppAction(event.target)) {
       event.preventDefault();
       const item = currentActiveMenuItem();

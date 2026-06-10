@@ -265,7 +265,7 @@ RESEARCH FINDINGS (2026-06-06) — free vs net-new, and the security model:
 - ClauBoard: explicit event schema, JSONL-style persistence, run lifecycle, task board, event timeline, and dependency/pipeline concepts.
 - dmux: tmux plus git worktrees, automated worktree lifecycle, read-only file browser per worktree, native notifications when panes need attention.
 - Nova Code: self-hosted workspaces, queues, scheduling/automations, files/git view, rules/templates, and normalized streaming across different agents.
-- Agent Watch/lazyagent-style monitors: broad agent discovery across Claude, Codex, Cursor, Gemini, Amp, and OpenCode; status API and menu-bar or notification surfaces.
+- Agent Watch/lazyagent-style monitors: broad agent discovery across Claude, Codex, Popular IDEs, Gemini, Amp, and OpenCode; status API and menu-bar or notification surfaces.
 
 ---
 

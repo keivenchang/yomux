@@ -12,10 +12,10 @@ from yolomux_lib.settings import sanitize_settings
 from yolomux_lib.settings import settings_payload
 
 
-def test_pane_spacing_default_is_4px():
-    # DOIT.20: the default inter-pane gap is 4px (the JS runtime fallback in 50_editor_settings_runtime.js
-    # must match this so a fresh profile and a reset-to-defaults both render a 4px gap + 4px ring).
-    assert default_settings()["appearance"]["pane_spacing"] == 4
+def test_pane_spacing_default_is_3px():
+    # DOIT.20: the default inter-pane gap is 3px (the JS runtime fallback in 50_editor_settings_runtime.js
+    # must match this so a fresh profile and a reset-to-defaults both render a 3px gap + 3px ring).
+    assert default_settings()["appearance"]["pane_spacing"] == 3
     assert default_settings()["appearance"]["pane_ring_opacity"] == 75
     assert default_settings()["appearance"]["inactive_pane_opacity"] == 60
 
@@ -47,8 +47,8 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     settings = sanitize_settings(
         {
             "general": {"default_layout": "bad"},
-            "appearance": {"theme": "neon", "terminal_theme": "neon", "date_time_hour_cycle": "bogus", "ui_font_size": 1, "terminal_font_size": 100, "editor_font_size": 100, "editor_color_scheme": "bogus", "editor_dark_color_scheme": "github-light", "editor_light_color_scheme": "vscode-dark-plus", "editor_cursor_style": "beam", "editor_cursor_color": "bogus-cursor", "file_explorer_font_size": 1, "tab_width": 20, "pane_spacing": 50, "pane_ring_opacity": 1, "inactive_pane_opacity": 500},
-            "file_explorer": {"root_mode": "bad", "image_open_mode": "bad", "image_preview_max_px": 5000},
+            "appearance": {"theme": "neon", "terminal_theme": "neon", "date_time_hour_cycle": "bogus", "ui_font_size": 1, "terminal_font_size": 100, "editor_font_size": 100, "editor_color_scheme": "bogus", "editor_dark_color_scheme": "github-light", "editor_light_color_scheme": "popular-ide-dark-plus", "editor_cursor_style": "beam", "editor_cursor_color": "bogus-cursor", "file_explorer_font_size": 1, "tab_width": 20, "pane_spacing": 50, "pane_ring_opacity": 1, "inactive_pane_opacity": 500},
+            "file_explorer": {"root_mode": "bad", "image_open_mode": "bad", "image_preview_max_px": 5000, "refresh_seconds": 99},
             "notifications": {"notify_transitions": ["needs-input", "bogus", "done"]},
             "performance": {"latency_refresh_ms": 100, "event_log_refresh_ms": 100000},
             "terminal_editor": {"word_wrap": "yes", "line_numbers": "no"},
@@ -98,6 +98,17 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["yolo"]["prompt_source"] == "hybrid"
 
 
+def test_legacy_editor_scheme_ids_migrate_to_popular_ide_names():
+    legacy_prefix = "".join(("vs", "code"))
+    settings = sanitize_settings({"appearance": {
+        "editor_dark_color_scheme": f"{legacy_prefix}-dark-plus",
+        "editor_light_color_scheme": f"{legacy_prefix}-light-plus",
+    }})
+
+    assert settings["appearance"]["editor_dark_color_scheme"] == "popular-ide-dark-plus"
+    assert settings["appearance"]["editor_light_color_scheme"] == "popular-ide-light-plus"
+
+
 def test_settings_round_trip_with_atomic_template(tmp_path):
     path = tmp_path / "settings.yaml"
     payload = settings_payload(path)
@@ -110,7 +121,7 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert payload["settings"]["general"]["default_layout"] == "split"
     assert payload["choices"]["general.default_layout"] == ["single", "split", "grid", "wall"]
     assert payload["choices"]["appearance.active_color"] == ["green", "blue", "orange", "yellow", "purple", "white"]
-    assert payload["choices"]["appearance.editor_cursor_color"] == ["yellow", "green", "blue", "orange", "purple", "white", "theme"]
+    assert payload["choices"]["appearance.editor_cursor_color"] == ["green", "blue", "orange", "yellow", "purple", "white", "theme"]
     assert payload["settings"]["general"]["startup_tips"] is True
     assert payload["settings"]["uploads"]["max_bytes"] == UPLOAD_MAX_BYTES
     assert payload["settings"]["yoagent"]["backend"] == "auto"

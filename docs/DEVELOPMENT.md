@@ -1,6 +1,6 @@
 # YOLOmux — Development
 
-Conventions, architecture, build/test workflow, restart workflow, and API notes for contributors live here. End-user/operator docs live in [`README.md`](README.md). AI-agent behavior rules live in [`AGENTS.md`](AGENTS.md).
+Conventions, architecture, build/test workflow, restart workflow, and API notes for contributors live here. End-user/operator docs live in [`README.md`](../README.md). AI-agent behavior rules live in [`AGENTS.md`](../AGENTS.md).
 
 ## Setup
 
@@ -176,7 +176,7 @@ Rules:
 
 ## xterm.js Assets
 
-YOLOmux serves xterm.js from a local install when available. It checks `YOLOMUX_XTERM_ROOTS` first, then `static/xterm`, then common Cursor, VS Code, and Windsurf server installs under the home directory. If `/static/xterm.js` or `/static/xterm.css` is missing, the browser falls back to jsDelivr.
+YOLOmux serves xterm.js from a local install when available. It checks `YOLOMUX_XTERM_ROOTS` first, then `static/xterm`, then common Popular IDE and agent server installs under the home directory. If `/static/xterm.js` or `/static/xterm.css` is missing, the browser falls back to jsDelivr.
 
 ## Localization
 

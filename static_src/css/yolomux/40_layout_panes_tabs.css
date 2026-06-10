@@ -9,7 +9,292 @@
 .grid.empty {
   display: block;
 }
+.grid.dockview-grid {
+  overflow: hidden;
+}
 .panel-pool {
+  display: none;
+}
+.yolomux-dockview {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+}
+.yolomux-dockview .yolomux-dockview-core,
+.yolomux-dockview .dv-dockview,
+.yolomux-dockview .dv-grid-view,
+.yolomux-dockview .dv-split-view,
+.yolomux-dockview .dv-view,
+.yolomux-dockview .dv-groupview,
+.yolomux-dockview .dv-content-container,
+.yolomux-dockview .dockview-panel-content {
+  min-width: 0;
+  min-height: 0;
+}
+.yolomux-dockview .yolomux-dockview-core {
+  --dv-tabs-and-actions-container-height: calc(var(--pane-tab-height) + 2px);
+  --dv-tabs-and-actions-container-font-size: var(--tab-label-size);
+  --dv-tabs-and-actions-container-background-color: var(--panel2);
+  --dv-group-view-background-color: var(--panel-inactive);
+  --dv-activegroup-visiblepanel-tab-background-color: var(--pane-tab-active-bg);
+  --dv-activegroup-hiddenpanel-tab-background-color: var(--pane-inactive-tab-bg);
+  --dv-inactivegroup-visiblepanel-tab-background-color: var(--pane-tab-unfocused-active-bg);
+  --dv-inactivegroup-hiddenpanel-tab-background-color: var(--panel2);
+  --dv-activegroup-visiblepanel-tab-color: var(--pane-tab-active-text);
+  --dv-activegroup-hiddenpanel-tab-color: var(--pane-tab-text);
+  --dv-inactivegroup-visiblepanel-tab-color: var(--pane-tab-unfocused-active-text);
+  --dv-inactivegroup-hiddenpanel-tab-color: var(--pane-tab-text);
+  --dv-tab-divider-color: var(--pane-inactive-tab-border);
+  --dv-sash-color: var(--pane-resizer-bg);
+  --dv-active-sash-color: var(--pane-resizer-hover-bg);
+  --dv-drag-over-background-color: color-mix(in srgb, var(--pane-resizer-bg) 18%, transparent);
+  --dv-drag-over-border-color: var(--pane-resizer-hover-bg);
+  --dv-drag-over-border: 2px dashed var(--pane-resizer-hover-bg);
+  color: var(--fg);
+  background: transparent;
+}
+.yolomux-dockview .dv-tabs-and-actions-container {
+  position: relative;
+  border-bottom: 0;
+  background: var(--pane-bar-bg, var(--panel2));
+  align-items: flex-start;
+  height: auto;
+  min-height: calc(var(--pane-tab-height) + 2px);
+  overflow: hidden;
+}
+.yolomux-dockview .dv-tabs-container {
+  box-sizing: border-box;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  height: auto;
+  min-height: calc(var(--pane-tab-height) + 2px);
+  max-height: calc((var(--pane-tab-height) + 2px) * 2);
+  padding-inline-end: var(--dockview-header-actions-reserved-inline-size, 0px);
+  overflow: hidden;
+  scrollbar-width: none;
+}
+.yolomux-dockview .dv-tabs-container::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+.yolomux-dockview .dv-right-actions-container {
+  position: absolute;
+  top: 0;
+  right: 1px;
+  z-index: var(--z-pane-tab-strip);
+  flex: 0 0 auto;
+  align-items: flex-start;
+  min-height: calc(var(--pane-tab-height) + 2px);
+  padding-top: 2px;
+  pointer-events: none;
+}
+.yolomux-dockview .dockview-pane-header-actions {
+  display: flex;
+  align-items: flex-start;
+  min-width: 0;
+  pointer-events: auto;
+}
+.yolomux-dockview .dockview-pane-header-actions[hidden] {
+  display: none !important;
+}
+.yolomux-dockview .dockview-pane-header-actions .tabs {
+  float: none;
+  flex: 0 0 auto;
+  max-width: none;
+  margin: 0 1px 0 4px;
+  overflow: visible;
+}
+.yolomux-dockview .dockview-pane-header-actions .tab {
+  box-sizing: border-box;
+  height: min(18px, var(--pane-tab-height));
+  min-height: 0;
+  max-height: min(18px, var(--pane-tab-height));
+  line-height: 1;
+}
+.yolomux-dockview .dockview-pane-header-actions .tmux-window-step,
+.yolomux-dockview .dockview-pane-header-actions .terminal-tab {
+  padding-block: 0;
+}
+.yolomux-dockview .dockview-pane-header-actions .pane-actions,
+.yolomux-dockview .dockview-pane-header-actions .panel-tab-overflow {
+  flex-basis: 20px;
+  min-width: 20px;
+  max-width: 20px;
+}
+.yolomux-dockview .dockview-pane-header-actions .pane-drag-handle {
+  flex: 0 0 min(18px, var(--pane-tab-height));
+  min-width: min(18px, var(--pane-tab-height));
+  max-width: min(18px, var(--pane-tab-height));
+  margin: 0 0 0 3px;
+  padding: 0;
+  cursor: grab;
+}
+.yolomux-dockview .dockview-pane-header-actions .pane-drag-handle:active {
+  cursor: grabbing;
+}
+.pane-drag-handle::before {
+  content: "";
+  width: 3px;
+  height: 3px;
+  border-radius: var(--radius-pill);
+  background: currentColor;
+  box-shadow: 0 5px 0 currentColor, 5px 0 0 currentColor, 5px 5px 0 currentColor;
+}
+.yolomux-dockview .dv-groupview {
+  --pane-bar-bg: var(--panel2);
+  --panel-ring-color: transparent;
+  --panel-ring-opacity: var(--pane-ring-opacity, 75%);
+  position: relative;
+  box-sizing: border-box;
+  border: 0;
+  border-radius: var(--pane-tile-radius);
+  padding: var(--pane-split-gap);
+  background: var(--panel-inactive);
+  overflow: hidden;
+}
+.yolomux-dockview .dv-groupview::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-pane-overlay);
+  box-sizing: border-box;
+  border: var(--pane-split-gap) solid color-mix(in srgb, var(--panel-ring-color) var(--panel-ring-opacity), transparent);
+  pointer-events: none;
+}
+.yolomux-dockview .dv-groupview:has(.panel.active-pane),
+.yolomux-dockview .dv-groupview:has(.panel.typing-ready-pane) {
+  --pane-bar-bg: var(--pane-tab-strip-bg);
+  --panel-ring-color: var(--pane-tab-panel-ring);
+  --panel-ring-opacity: var(--pane-active-ring-opacity);
+  background: var(--panel);
+}
+.yolomux-dockview .dv-groupview:has(.panel.needs-input-pane),
+.yolomux-dockview .dv-groupview:has(.panel.needs-exec-pane),
+.yolomux-dockview .dv-groupview:has(.panel.needs-blocked-pane) {
+  --panel-ring-color: #ff3347;
+}
+.yolomux-dockview .dv-content-container {
+  background: transparent;
+}
+.yolomux-dockview .dv-split-view-container > .dv-sash-container > .dv-sash,
+.yolomux-dockview .dv-split-view-container > .dv-sash-container > .dv-sash:not(.disabled):hover,
+.yolomux-dockview .dv-split-view-container > .dv-sash-container > .dv-sash:not(.disabled):active {
+  overflow: visible;
+  background: transparent;
+  background-color: transparent;
+}
+.yolomux-dockview .dv-sash::before {
+  content: "";
+  position: absolute;
+  background: var(--pane-resizer-bg);
+  transition: background 90ms ease, inset 90ms ease;
+}
+.yolomux-dockview .dv-split-view-container.dv-horizontal > .dv-sash-container > .dv-sash::before {
+  top: 0;
+  bottom: 0;
+  left: calc(50% - (var(--pane-resizer-line-size) / 2));
+  right: calc(50% - (var(--pane-resizer-line-size) / 2));
+}
+.yolomux-dockview .dv-split-view-container.dv-vertical > .dv-sash-container > .dv-sash::before {
+  top: calc(50% - (var(--pane-resizer-line-size) / 2));
+  bottom: calc(50% - (var(--pane-resizer-line-size) / 2));
+  left: 0;
+  right: 0;
+}
+.yolomux-dockview .dv-sash:hover::before,
+.yolomux-dockview .dv-sash:active::before {
+  background: var(--pane-resizer-hover-bg);
+}
+.yolomux-dockview .dv-split-view-container.dv-horizontal > .dv-sash-container > .dv-sash:hover::before,
+.yolomux-dockview .dv-split-view-container.dv-horizontal > .dv-sash-container > .dv-sash:active::before {
+  left: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
+  right: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
+}
+.yolomux-dockview .dv-split-view-container.dv-vertical > .dv-sash-container > .dv-sash:hover::before,
+.yolomux-dockview .dv-split-view-container.dv-vertical > .dv-sash-container > .dv-sash:active::before {
+  top: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
+  bottom: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
+}
+.yolomux-dockview .dv-tab {
+  flex: 0 0 min(var(--dockview-tab-inline-size, var(--pane-tab-width)), 100%);
+  width: var(--dockview-tab-inline-size, var(--pane-tab-width));
+  max-width: var(--dockview-tab-inline-size, var(--pane-tab-width));
+  min-width: 0;
+  height: var(--pane-tab-height);
+  padding: 0;
+  margin: 0 1px 0 0;
+  overflow: visible;
+  background: transparent;
+  border-radius: 6px 6px 0 0;
+}
+.yolomux-dockview .dv-tabs-and-actions-container.dv-single-tab.dv-full-width-single-tab .dv-tabs-container .dv-tab {
+  flex-grow: 0;
+}
+.yolomux-dockview .dv-tab > .dockview-pane-tab {
+  margin: 0;
+  width: 100%;
+  max-width: 100%;
+  height: var(--pane-tab-height);
+  border-radius: 6px 6px 0 0;
+}
+.yolomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab {
+  color: var(--pane-tab-active-text);
+  background: var(--pane-tab-active-bg);
+  border-color: var(--pane-tab-active-border);
+  border-bottom-color: var(--pane-tab-active-bg);
+}
+.yolomux-dockview .dv-tab.dv-inactive-tab > .dockview-pane-tab:not(.active) {
+  color: var(--pane-tab-text);
+  background: var(--pane-bar-bg, var(--panel2));
+  border-color: var(--pane-inactive-tab-border);
+}
+.yolomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab .session-button-name,
+.yolomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab .session-button-dir,
+.yolomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab .session-button-detail {
+  color: var(--pane-tab-active-text);
+}
+.yolomux-dockview .dv-tab.dv-drop-target .dv-drop-target-selection.dv-drop-target-left,
+.yolomux-dockview .dv-tab.dv-drop-target .dv-drop-target-selection.dv-drop-target-right {
+  top: -2px !important;
+  width: var(--tab-insert-preview-width) !important;
+  height: calc(100% + 4px) !important;
+  box-sizing: border-box;
+  border: 2px dashed var(--pane-resizer-hover-bg) !important;
+  border-radius: 2px !important;
+  background-color: color-mix(in srgb, var(--pane-resizer-bg) 18%, transparent) !important;
+  box-shadow: 0 0 12px var(--pane-resizer-shadow);
+  pointer-events: none;
+}
+.yolomux-dockview .dv-tab.dv-drop-target .dv-drop-target-selection.dv-drop-target-left {
+  left: 0 !important;
+  transform: translateX(-50%) !important;
+}
+.yolomux-dockview .dv-tab.dv-drop-target .dv-drop-target-selection.dv-drop-target-right {
+  left: 100% !important;
+  transform: translateX(-50%) !important;
+}
+.yolomux-dockview .dockview-panel-content {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.yolomux-dockview .dockview-panel-content > .panel {
+  height: 100%;
+  border-width: 0;
+  border-radius: 0;
+}
+.yolomux-dockview .dockview-panel-content > .panel.dockview-inner-head-collapsed {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+.yolomux-dockview .dockview-panel-content > .panel > .panel-head.dockview-inner-head-hidden,
+.yolomux-dockview .dockview-panel-content > .panel > .panel-head[hidden] {
+  display: none;
+}
+.yolomux-dockview .panel-head .pane-tabs[hidden] {
   display: none;
 }
 .layout-root,
@@ -140,7 +425,7 @@ body.layout-resizing {
   user-select: none;
 }
 .layout-column.drag-over {
-  outline: 1px dashed var(--drop-outline);
+  outline: 1px dashed var(--pane-resizer-hover-bg);
   outline-offset: -3px;
   border-radius: 8px;
 }
@@ -153,15 +438,16 @@ body.layout-resizing {
   border-radius: 8px;
 }
 .drop-slot.drag-over {
-  border-color: var(--drop-outline);
+  border-color: var(--pane-resizer-hover-bg);
   background: #1a2230;
 }
 /* Light mode: the dark drop-target fill is a black box on the white grid; the dashed
-   border already uses the theme-aware --drop-outline token (DOIT.12 B5). */
+   border already uses the theme-aware pane separator token. */
 body.theme-light .drop-slot.drag-over {
   background: rgb(var(--overlay-slate-rgb) / 0.06);
 }
 .drop-slot.drop-preview::before,
+.yolomux-dockview .dv-groupview.drop-preview::before,
 .grid.drop-preview::before {
   content: attr(data-drop-label);
   position: absolute;
@@ -170,8 +456,8 @@ body.theme-light .drop-slot.drag-over {
   align-items: center;
   justify-content: center;
   color: var(--drop-outline-text);
-  background: var(--drop-outline-bg);
-  border: 2px dashed var(--drop-outline-strong);
+  background: color-mix(in srgb, var(--pane-resizer-bg) 18%, transparent);
+  border: 2px dashed var(--pane-resizer-hover-bg);
   border-radius: 0;
   font: 900 var(--ui-font-size)/1 var(--ui-font);
   text-transform: uppercase;
@@ -183,7 +469,11 @@ body.theme-light .drop-slot.drag-over {
 .drop-slot.drop-preview-middle::before {
   inset: 18%;
 }
+.yolomux-dockview .dv-groupview.drop-preview-middle::before {
+  inset: 18%;
+}
 .drop-slot.drop-preview-top::before,
+.yolomux-dockview .dv-groupview.drop-preview-top::before,
 .grid.drop-preview-root.drop-preview-top::before {
   top: 6px;
   right: 6px;
@@ -191,6 +481,7 @@ body.theme-light .drop-slot.drag-over {
   height: calc(50% - 9px);
 }
 .drop-slot.drop-preview-bottom::before,
+.yolomux-dockview .dv-groupview.drop-preview-bottom::before,
 .grid.drop-preview-root.drop-preview-bottom::before {
   right: 6px;
   bottom: 6px;
@@ -207,6 +498,7 @@ body.theme-light .drop-slot.drag-over {
   width: var(--drop-preview-width, calc(100% - 12px));
 }
 .drop-slot.drop-preview-left::before,
+.yolomux-dockview .dv-groupview.drop-preview-left::before,
 .grid.drop-preview-root.drop-preview-left::before {
   top: 6px;
   bottom: 6px;
@@ -214,6 +506,7 @@ body.theme-light .drop-slot.drag-over {
   width: calc(50% - 9px);
 }
 .drop-slot.drop-preview-right::before,
+.yolomux-dockview .dv-groupview.drop-preview-right::before,
 .grid.drop-preview-root.drop-preview-right::before {
   top: 6px;
   right: 6px;
@@ -462,19 +755,19 @@ body.theme-light .drop-slot.drag-over {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--drop-outline);
-  background: var(--drop-outline-surface);
-  border: 2px dashed var(--drop-outline-strong);
+  color: var(--pane-resizer-hover-bg);
+  background: color-mix(in srgb, var(--pane-resizer-bg) 18%, transparent);
+  border: 2px dashed var(--pane-resizer-hover-bg);
   border-radius: 8px;
   font-weight: 700;
   pointer-events: none;
 }
 .terminal.path-drag-over {
-  outline: 2px dashed var(--drop-outline-strong);
+  outline: 2px dashed var(--pane-resizer-hover-bg);
   outline-offset: -5px;
 }
 .panel.path-drag-over {
-  outline: 2px dashed var(--drop-outline-strong);
+  outline: 2px dashed var(--pane-resizer-hover-bg);
   outline-offset: -5px;
 }
 .panel-head {
@@ -812,7 +1105,7 @@ body.theme-light .drop-slot.drag-over {
   display: none;
 }
 .pane-tabs.drag-over {
-  outline: 1px dashed var(--drop-outline);
+  outline: 1px dashed var(--pane-resizer-hover-bg);
   outline-offset: 2px;
   border-radius: 0;
 }
@@ -822,22 +1115,15 @@ body.theme-light .drop-slot.drag-over {
   left: var(--tab-drop-x, 2px);
   top: var(--tab-drop-y, 0px);
   z-index: var(--z-drag-ghost);
-  width: 12px;
+  width: var(--tab-insert-preview-width);
   height: var(--tab-drop-height, 27px);
-  border: 0;
-  border-radius: 0;
-  background: var(--drop-outline-bg);
+  box-sizing: border-box;
+  border: 2px dashed var(--pane-resizer-hover-bg);
+  border-radius: 2px;
   transform: translateX(-50%);
   pointer-events: none;
-  background-image:
-    linear-gradient(90deg, var(--drop-outline) 50%, transparent 0),
-    linear-gradient(90deg, var(--drop-outline) 50%, transparent 0),
-    linear-gradient(0deg, var(--drop-outline) 50%, transparent 0),
-    linear-gradient(0deg, var(--drop-outline) 50%, transparent 0);
-  background-position: left top, left bottom, left top, right top;
-  background-repeat: repeat-x, repeat-x, repeat-y, repeat-y;
-  background-size: 5px 2px, 5px 2px, 2px 5px, 2px 5px;
-  box-shadow: 0 0 0 1px var(--drop-outline-bg), 0 0 12px var(--drop-outline-shadow);
+  background-color: color-mix(in srgb, var(--pane-resizer-bg) 18%, transparent);
+  box-shadow: 0 0 12px var(--pane-resizer-shadow);
 }
 .pane-tab {
   width: min(var(--pane-tab-width), 100%);
@@ -893,10 +1179,31 @@ body.theme-light .drop-slot.drag-over {
 .panel:not(.active-pane):not(.file-explorer-panel) .pane-tab.active {
   opacity: 1;
 }
+.pane-tab-pin-icon {
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  display: inline-block;
+  color: currentColor;
+  opacity: 0.86;
+  background: currentColor;
+  -webkit-mask: var(--icon-pin) center / contain no-repeat;
+  mask: var(--icon-pin) center / contain no-repeat;
+}
+.pane-tab.pinned-tab {
+  padding-inline-start: 4px;
+}
+.pane-tab.pinned-tab .pane-tab-core {
+  min-width: 0;
+}
 /* image 003/004: an inactive pane's INACTIVE TABS match the gray bar (--pane-bar-bg, which is --panel2
    when the pane is unfocused). The bars themselves (strip, detail row, editor toolbar, find) already read
    --pane-bar-bg, so only the tabs need this; the active tab stays green. */
 .panel:not(.active-pane):not(.typing-ready-pane) .pane-tab:not(.active) {
+  background: var(--pane-bar-bg);
+}
+.panel.active-pane .pane-tab:not(.active),
+.panel.typing-ready-pane .pane-tab:not(.active) {
   background: var(--pane-bar-bg);
 }
 .pane-tab.active .session-button-name,
@@ -1120,7 +1427,8 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
   min-width: 0;
   max-width: none;
 }
-.pane-tab > .session-popover {
+.pane-tab > .session-popover,
+.pane-tab-detached-popover {
   position: fixed;
   top: var(--pane-tab-popover-top, 72px);
   left: var(--pane-tab-popover-left, 0);
@@ -1139,14 +1447,16 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
 .pane-tab.popover-open {
   z-index: var(--z-pane-modal);
 }
-.pane-tab.popover-open > .session-popover {
+.pane-tab.popover-open > .session-popover,
+.pane-tab-detached-popover.popover-open {
   visibility: visible;
   opacity: 1;
   pointer-events: auto;
   transform: translateY(0);
   transition-delay: 0s;
 }
-.pane-tab > .session-popover::before {
+.pane-tab > .session-popover::before,
+.pane-tab-detached-popover::before {
   content: "";
   position: absolute;
   left: 0;
@@ -1156,15 +1466,18 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
   display: block;
   background: transparent;
 }
-.pane-tab > .session-popover.file-popover {
+.pane-tab > .session-popover.file-popover,
+.pane-tab-detached-popover.file-popover {
   width: min(54ch, var(--popover-max-inline-size));
   max-height: min(42vh, var(--pane-tab-popover-max-block-size));
   pointer-events: none;
 }
-.pane-tab.popover-open > .session-popover.file-popover {
+.pane-tab.popover-open > .session-popover.file-popover,
+.pane-tab-detached-popover.popover-open.file-popover {
   pointer-events: auto;
 }
-.pane-tab > .session-popover.file-popover .popover-copy-button {
+.pane-tab > .session-popover.file-popover .popover-copy-button,
+.pane-tab-detached-popover.file-popover .popover-copy-button {
   pointer-events: auto;
 }
 .disabled-panel-controls .tab:disabled {

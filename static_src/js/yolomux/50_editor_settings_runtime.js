@@ -477,15 +477,15 @@ function normalizeEditorCursorStyle(value) {
 
 const UI_COLOR_CHOICES = ['green', 'blue', 'orange', 'yellow', 'purple', 'white'];
 const DEFAULT_CURSOR_COLOR = 'yellow';
-// One parent for the named UI colors. Active color and Cursor color must both derive from this map so
+// One parent for the named UI colors. Active color and cursor color must both derive from this map so
 // labels, swatches, and palette membership cannot drift.
 const UI_COLOR_PRESETS = {
-  green:  {labelKey: 'pref.appearance.active_color.green', cursor: '#76b900', active: null},
-  blue:   {labelKey: 'pref.appearance.active_color.blue', cursor: '#3b82f6', active: {dark: {accent: '#3b82f6', bright: '#3b82f6', text: '#ffffff'}, light: {accent: '#2563eb', bright: '#2563eb', text: '#ffffff'}}},
-  orange: {labelKey: 'pref.appearance.active_color.orange', cursor: '#f97316', active: {dark: {accent: '#f97316', bright: '#f97316', text: '#1a0c00'}, light: {accent: '#b91c1c', bright: '#b91c1c', text: '#ffffff'}}},
-  yellow: {labelKey: 'pref.appearance.active_color.yellow', cursor: '#ffd000', active: {dark: {accent: '#eab308', bright: '#eab308', text: '#1a1500'}, light: {accent: '#d6a400', bright: '#d6a400', text: '#1a1500'}}},
-  purple: {labelKey: 'pref.appearance.active_color.purple', cursor: '#a855f7', active: {dark: {accent: '#a855f7', bright: '#a855f7', text: '#ffffff'}, light: {accent: '#7c3aed', bright: '#7c3aed', text: '#ffffff'}}},
-  white:  {labelKey: 'pref.appearance.active_color.white', cursor: '#f8fafc', active: {dark: {accent: '#e8edf2', bright: '#e8edf2', text: '#0b0e14'}, light: {accent: '#9aa5b3', bright: '#dfe5ec', text: '#0b0e14'}}},
+  green:  {labelKey: 'pref.appearance.active_color.green', cursorLabelKey: 'pref.appearance.editor_cursor_color.green', cursor: '#39ff14', active: null},
+  blue:   {labelKey: 'pref.appearance.active_color.blue', cursorLabelKey: 'pref.appearance.editor_cursor_color.blue', cursor: '#00b7ff', active: {dark: {accent: '#3b82f6', bright: '#3b82f6', text: '#ffffff'}, light: {accent: '#2563eb', bright: '#2563eb', text: '#ffffff'}}},
+  orange: {labelKey: 'pref.appearance.active_color.orange', cursorLabelKey: 'pref.appearance.editor_cursor_color.orange', cursor: '#ff7a00', active: {dark: {accent: '#f97316', bright: '#f97316', text: '#1a0c00'}, light: {accent: '#b91c1c', bright: '#b91c1c', text: '#ffffff'}}},
+  yellow: {labelKey: 'pref.appearance.active_color.yellow', cursorLabelKey: 'pref.appearance.editor_cursor_color.yellow', cursor: '#ffea00', active: {dark: {accent: '#eab308', bright: '#eab308', text: '#1a1500'}, light: {accent: '#d6a400', bright: '#d6a400', text: '#1a1500'}}},
+  purple: {labelKey: 'pref.appearance.active_color.purple', cursorLabelKey: 'pref.appearance.editor_cursor_color.purple', cursor: '#d946ef', active: {dark: {accent: '#a855f7', bright: '#a855f7', text: '#ffffff'}, light: {accent: '#7c3aed', bright: '#7c3aed', text: '#ffffff'}}},
+  white:  {labelKey: 'pref.appearance.active_color.white', cursorLabelKey: 'pref.appearance.editor_cursor_color.white', cursor: '#ffffff', active: {dark: {accent: '#e8edf2', bright: '#e8edf2', text: '#0b0e14'}, light: {accent: '#9aa5b3', bright: '#dfe5ec', text: '#0b0e14'}}},
 };
 
 const ACTIVE_COLOR_PRESETS = Object.fromEntries(
@@ -562,7 +562,7 @@ function applyActiveColor(value) {
     style.setProperty('--active-accent-rgb', rgb);
     style.setProperty('--active-accent-bright', p.bright);
     style.setProperty('--active-accent-text', p.text);
-    style.setProperty('--active-accent-dim', `color-mix(in srgb, ${p.accent} 22%, var(--panel))`);
+    style.setProperty('--active-accent-dim', `color-mix(in srgb, ${p.accent} 26%, var(--panel))`);
     style.setProperty('--active-accent-soft', `rgb(${rgb} / 0.12)`);
   }
 }
@@ -581,7 +581,7 @@ function applyCssSettings() {
   // pane's green "border" (which fills its side of that gap up to the line). At 0: no gap, no green —
   // panes sit flush to the 1px separator. The red needs-* attention ring keeps its own constant width
   // (--pane-tab-panel-ring-width, unchanged) so it stays visible even at spacing 0.
-  const paneSpacing = Math.max(0, Math.min(20, numberSetting('appearance.pane_spacing', 4)));
+  const paneSpacing = Math.max(0, Math.min(20, numberSetting('appearance.pane_spacing', 3)));
   root.setProperty('--pane-split-gap', `${paneSpacing}px`);
   // Opacity (5-100%) of the translucent pane ring. The active ring follows the same setting; otherwise
   // low values appear to save correctly while the visible focused pane still stays prominent.

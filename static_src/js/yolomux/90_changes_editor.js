@@ -3785,13 +3785,19 @@ function diffModeShouldFallBackToEdit(path, state, item = null) {
         && !fileStateHasUsefulGitHistory(state)));
 }
 
-function renderFileEditorPanel(panel, item) {
+function renderFileEditorPanel(panel, item, options = {}) {
   const path = fileItemPath(item);
   captureFileEditorPanelViewState(item, panel);
-  const previousActiveFile = activeFile;
-  activeFile = path;
-  if (previousActiveFile !== path) scheduleFileExplorerActiveFileReveal(path);
-  else updateFileExplorerCurrentFileHighlight();
+  const shouldUpdateActiveFile = options.updateActiveFile !== false
+    && (!dockviewLayoutActive() || focusedPanelItem === item || options.forceActiveFile === true);
+  if (shouldUpdateActiveFile) {
+    const previousActiveFile = activeFile;
+    activeFile = path;
+    if (previousActiveFile !== path) scheduleFileExplorerActiveFileReveal(path);
+    else updateFileExplorerCurrentFileHighlight();
+  } else if (activeFile === path) {
+    updateFileExplorerCurrentFileHighlight();
+  }
   const state = openFiles.get(path);
   updateFileEditorPanelChrome(panel, path);
   const codeMirrorPane = panel.querySelector('.file-editor-codemirror-panel');

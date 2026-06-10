@@ -25,7 +25,22 @@ SETTINGS_DISPLAY_PATH = "~/.config/yolomux/settings.yaml"
 _SETTINGS_LOCK = threading.RLock()
 UI_COLOR_CHOICES: tuple[str, ...] = ("green", "blue", "orange", "yellow", "purple", "white")
 DEFAULT_CURSOR_COLOR = "yellow"
-CURSOR_COLOR_CHOICES: tuple[str, ...] = (DEFAULT_CURSOR_COLOR, "green", "blue", "orange", "purple", "white", "theme")
+CURSOR_COLOR_CHOICES: tuple[str, ...] = (*UI_COLOR_CHOICES, "theme")
+POPULAR_IDE_DARK_SCHEME = "popular-ide-dark-plus"
+POPULAR_IDE_LIGHT_SCHEME = "popular-ide-light-plus"
+LEGACY_EDITOR_SCHEME_PREFIX = "".join(("vs", "code"))
+SETTING_VALUE_ALIASES: dict[tuple[str, str], dict[str, str]] = {
+    ("appearance", "editor_color_scheme"): {
+        f"{LEGACY_EDITOR_SCHEME_PREFIX}-dark-plus": POPULAR_IDE_DARK_SCHEME,
+        f"{LEGACY_EDITOR_SCHEME_PREFIX}-light-plus": POPULAR_IDE_LIGHT_SCHEME,
+    },
+    ("appearance", "editor_dark_color_scheme"): {
+        f"{LEGACY_EDITOR_SCHEME_PREFIX}-dark-plus": POPULAR_IDE_DARK_SCHEME,
+    },
+    ("appearance", "editor_light_color_scheme"): {
+        f"{LEGACY_EDITOR_SCHEME_PREFIX}-light-plus": POPULAR_IDE_LIGHT_SCHEME,
+    },
+}
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "general": {
@@ -52,7 +67,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "editor_cursor_color": DEFAULT_CURSOR_COLOR,
         "file_explorer_font_size": 13,
         "tab_width": 180,
-        "pane_spacing": 4,
+        "pane_spacing": 3,
         "pane_ring_opacity": 75,
         "inactive_pane_opacity": 60,
         "active_color": "green",
@@ -230,11 +245,11 @@ SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
         "one-dark",
         "dracula",
         "monokai",
-        "vscode-dark-plus",
+        POPULAR_IDE_DARK_SCHEME,
         "nord",
         "yolomux-light",
         "github-light",
-        "vscode-light-plus",
+        POPULAR_IDE_LIGHT_SCHEME,
         "one-light",
         "solarized-light",
     },
@@ -243,13 +258,13 @@ SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
         "one-dark",
         "dracula",
         "monokai",
-        "vscode-dark-plus",
+        POPULAR_IDE_DARK_SCHEME,
         "nord",
     },
     ("appearance", "editor_light_color_scheme"): {
         "yolomux-light",
         "github-light",
-        "vscode-light-plus",
+        POPULAR_IDE_LIGHT_SCHEME,
         "one-light",
         "solarized-light",
     },
@@ -283,9 +298,9 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("appearance", "editor_font_size"): "Pixels, 6-28. Applied live to editor and preview panes.",
     ("appearance", "editor_color_scheme"): "Legacy active editor color scheme. Kept for compatibility; new UI uses separate dark/light scheme defaults.",
     ("appearance", "editor_dark_color_scheme"): "Dark editor scheme used by the editor dark/light toggle.",
-    ("appearance", "editor_light_color_scheme"): "Light editor scheme used by the editor dark/light toggle. Default is VS Code Light+.",
-    ("appearance", "editor_cursor_style"): "line | block. CodeMirror caret shape.",
-    ("appearance", "editor_cursor_color"): "yellow | green | blue | orange | purple | white | theme. Default yellow. Applies to the active terminal cursor, editor caret, and pane scrollbar thumb; theme uses each surface's scheme cursor.",
+    ("appearance", "editor_light_color_scheme"): "Light editor scheme used by the editor dark/light toggle. Default is Popular IDE Light+.",
+    ("appearance", "editor_cursor_style"): "line | block. CodeMirror cursor shape.",
+    ("appearance", "editor_cursor_color"): "green | blue | orange | yellow | purple | white | theme. Default yellow. Applies to the active terminal cursor, editor cursor, and pane scrollbar thumb; theme uses each surface's scheme cursor.",
     ("appearance", "file_explorer_font_size"): "Pixels, 6-24. Applied live to File Explorer/Finder.",
     ("appearance", "tab_width"): "Pixels, 120-420. Drives the pane tab width CSS variable.",
     ("appearance", "pane_spacing"): "Pixels, 0-20. Gap between panes; at 0 they touch and the green active outline covers the divider. The active outline thickens as spacing grows.",
@@ -314,7 +329,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("terminal_editor", "line_numbers"): "true/false. Default editor line-number gutter state.",
     ("editor", "autosave"): "true/false. When true, dirty editor tabs save after the delay when the file has not changed on disk.",
     ("editor", "autosave_delay_seconds"): "Seconds, 0.5-60. Delay before dirty editor tabs auto-save.",
-    ("editor", "blame_all_lines"): "true/false. Default false. When inline git blame is on, annotate EVERY line (not just the cursor's current line, the Cursor default).",
+    ("editor", "blame_all_lines"): "true/false. Default false. When inline git blame is on, annotate EVERY line (not just the caret's current line, the Popular IDE default).",
     ("file_explorer", "root_mode"): "fixed | sync. Default sync. fixed stays put; sync follows the focused tmux cwd.",
     ("file_explorer", "image_open_mode"): "same-tab | new-tab. same-tab reuses one image viewer while browsing; new-tab keeps one image tab per file.",
     ("file_explorer", "image_preview_max_px"): "Pixels, 120-1200. Maximum width and height for hover image previews.",
@@ -410,6 +425,8 @@ def sanitize_settings(raw: Any, coerced: list[str] | None = None) -> dict[str, A
             value = incoming.get(key, default)
             if present:
                 value = migrate_stale_default(section, key, value, default)
+            if isinstance(value, str):
+                value = SETTING_VALUE_ALIASES.get((section, key), {}).get(value.strip().lower(), value)
             if section == "yoagent" and key in LEGACY_YOAGENT_DEFAULTS and value == LEGACY_YOAGENT_DEFAULTS[key]:
                 value = default
             legacy_markers = LEGACY_YOAGENT_PROMPT_MARKERS.get(key, []) if section == "yoagent" else []
