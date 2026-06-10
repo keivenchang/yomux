@@ -2638,6 +2638,64 @@ def test_dockview_first_pinned_tab_drags_after_second_pinned_tab(browser, tmp_pa
     assert metrics["slots"]["left"]["tabs"] == ["2", "1", "3"], metrics
 
 
+def test_dockview_non_pinned_tab_cannot_drop_between_pinned_tabs(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2,3&layout=left&tabs=left:1,2,3", sessions=["1", "2", "3"])
+    wait_for_dockview(browser, min_tabs=3)
+    wait_for_dockview_tab_geometry(browser, min_tabs=3)
+    browser.execute_script("setTabPinned('1', true); setTabPinned('2', true);")
+    WebDriverWait(browser, 5).until(
+        lambda driver: dockview_layout_metrics(driver)["groups"][0]["tabs"] == ["1", "2", "3"]
+    )
+    points = browser.execute_script(
+        """
+        const point = (selector, xRatio) => {
+          const rect = document.querySelector(selector).getBoundingClientRect();
+          return {x: Math.round(rect.left + rect.width * xRatio), y: Math.round(rect.top + rect.height / 2)};
+        };
+        return {
+          start: point('.dockview-pane-tab[data-pane-tab="3"]', 0.5),
+          end: point('.dockview-pane-tab[data-pane-tab="2"]', 0.35),
+        };
+        """
+    )
+    try:
+        cdp_drag_hold(browser, points["start"], points["end"], steps=32)
+        browser.execute_async_script(
+            """
+            const done = arguments[arguments.length - 1];
+            requestAnimationFrame(() => requestAnimationFrame(done));
+            """
+        )
+        preview = browser.execute_script(
+            """
+            const visible = node => {
+              const rect = node.getBoundingClientRect();
+              const style = getComputedStyle(node);
+              return rect.width > 0
+                && rect.height > 0
+                && style.display !== 'none'
+                && style.visibility !== 'hidden'
+                && style.opacity !== '0';
+            };
+            return Array.from(document.querySelectorAll('.dv-drop-target, .dv-drop-target-selection, .dv-drop-target-anchor'))
+              .filter(visible)
+              .map(node => node.className);
+            """
+        )
+    finally:
+        cdp_release(browser, points["end"])
+    browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        requestAnimationFrame(() => requestAnimationFrame(done));
+        """
+    )
+    metrics = dockview_layout_metrics(browser)
+    assert preview == [], preview
+    assert metrics["groups"][0]["tabs"] == ["1", "2", "3"], metrics
+    assert metrics["slots"]["left"]["tabs"] == ["1", "2", "3"], metrics
+
+
 def test_dockview_pane_drag_handle_swaps_whole_panes(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,
