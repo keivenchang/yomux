@@ -3852,19 +3852,52 @@ function commandPaletteCommandItems() {
   return [...tabItems, ...menuItems, ...settingItems].map(item => ({...item, category: 'action'}));
 }
 
+function fileQuickOpenRootForFile(path) {
+  const normalized = normalizeDirectoryPath(path || '');
+  if (!normalized || normalized === '/') return '';
+  const rawGitRoot = openFiles.get(normalized)?.gitRoot || '';
+  const gitRoot = rawGitRoot ? normalizeDirectoryPath(rawGitRoot) : '';
+  if (gitRoot && pathIsInsideDirectory(normalized, gitRoot)) return gitRoot;
+  return dirnameOf(normalized);
+}
+
+function fileQuickOpenPathAliasSegment(query) {
+  const text = String(query || '').trim();
+  if (!text || text.startsWith('/') || text.startsWith('~')) return '';
+  const slash = text.indexOf('/');
+  return slash > 0 ? text.slice(0, slash) : '';
+}
+
+function fileQuickOpenRootMatchesPathAlias(root, query) {
+  const alias = fuzzyCanonicalPrefixText(fileQuickOpenPathAliasSegment(query));
+  if (alias.length < 2) return false;
+  return fuzzyCanonicalPrefixText(basenameOf(root)).startsWith(alias);
+}
+
+function fileQuickOpenExtraRootsForSearchQuery(query) {
+  return compactNestedPaths([repoRoot, fileQuickOpenRootForFile(activeFile)]
+    .map(normalizeDirectoryPath)
+    .filter(root => root && root !== '/' && fileQuickOpenRootMatchesPathAlias(root, query)));
+}
+
 function fileQuickOpenRootForSearch() {
+  const activeItem = currentActiveMenuItem();
+  const activePath = isFileEditorItem(activeItem) ? fileItemPath(activeItem) : '';
+  const activeFileRoot = fileQuickOpenRootForFile(activePath);
+  if (activeFileRoot) return activeFileRoot;
   const target = currentSessionActionTarget();
   const gitRoot = isTmuxSession(target) ? sessionTranscriptInfo(target).gitRoot : '';
   if (gitRoot) return normalizeDirectoryPath(gitRoot);
   const activeTmux = activeTmuxDirectoryPath(target);
   if (activeTmux) return activeTmux;
-  if (activeFile) return dirnameOf(activeFile);
+  const fallbackFileRoot = fileQuickOpenRootForFile(activeFile);
+  if (fallbackFileRoot) return fallbackFileRoot;
   if (fileExplorerRoot) return fileExplorerRoot;
   return repoRoot || homePath || '/';
 }
 
-function fileQuickOpenRootsForSearch(root = fileQuickOpenRoot || fileQuickOpenRootForSearch()) {
-  return fileExplorerIndexedSearchRoots(root);
+function fileQuickOpenRootsForSearch(root = fileQuickOpenRoot || fileQuickOpenRootForSearch(), query = commandPaletteSearchQuery()) {
+  return fileExplorerIndexedSearchRoots(root, fileQuickOpenExtraRootsForSearchQuery(query));
 }
 
 function fileQuickOpenScopeLabel(root = fileQuickOpenRoot || fileQuickOpenRootForSearch()) {
@@ -4353,7 +4386,7 @@ async function refreshFileQuickOpenCandidates(query = '') {
           mtime: entry.mtime,
         }));
     } else {
-      const searchRoots = fileQuickOpenRootsForSearch(root);
+      const searchRoots = fileQuickOpenRootsForSearch(root, commandPaletteSearchQuery(query));
       const results = await Promise.all(searchRoots.map(async searchRoot => {
         try {
           const normalizedRoot = normalizeStoredFileExplorerIndexedDir(searchRoot);
@@ -8637,7 +8670,7 @@ function updateFileExplorerIndexedDirectoryRows() {
   });
 }
 
-function fileExplorerIndexedSearchRoots(defaultRoot = fileQuickOpenRootForSearch()) {
+function fileExplorerIndexedSearchRoots(defaultRoot = fileQuickOpenRootForSearch(), extraRoots = []) {
   const defaultPath = normalizeStoredFileExplorerIndexedDir(defaultRoot);
   const indexedRoots = fileExplorerIndexedRootList();
   const defaultCoveredByIndexed = defaultPath && indexedRoots.some(root => root !== defaultPath && pathIsInsideDirectory(defaultPath, root));
@@ -8645,6 +8678,9 @@ function fileExplorerIndexedSearchRoots(defaultRoot = fileQuickOpenRootForSearch
   const roots = defaultPath && !defaultCoveredByIndexed && !defaultHasIndexedDescendant ? [defaultPath] : [];
   for (const indexedRoot of indexedRoots) {
     if (!roots.includes(indexedRoot)) roots.push(indexedRoot);
+  }
+  for (const extraRoot of compactNestedPaths((extraRoots || []).map(normalizeStoredFileExplorerIndexedDir).filter(Boolean))) {
+    if (!roots.some(root => pathIsInsideDirectory(extraRoot, root))) roots.push(extraRoot);
   }
   return roots;
 }
@@ -21896,7 +21932,6 @@ const MARKDOWN_PREVIEW_BLOCKED_TAGS = new Set([
   'embed',
   'form',
   'iframe',
-  'input',
   'link',
   'math',
   'meta',
@@ -21914,6 +21949,7 @@ const MARKDOWN_PREVIEW_BLOCKED_TAGS = new Set([
 const MARKDOWN_PREVIEW_URL_ATTRS = new Set(['href', 'src', 'poster', 'xlink:href']);
 const MARKDOWN_PREVIEW_SAFE_PROTOCOLS = new Set(['http:', 'https:', 'mailto:', 'tel:']);
 const MARKDOWN_PREVIEW_SAFE_IMAGE_DATA = /^data:image\/(?:png|gif|jpe?g|webp);/i;
+const MARKDOWN_PREVIEW_INPUT_ATTRS = new Set(['type', 'checked', 'disabled', 'aria-label', 'class']);
 
 function markdownPreviewUrlAllowed(value, tagName) {
   const raw = String(value || '').trim();
@@ -21933,6 +21969,10 @@ function sanitizeMarkdownPreviewAttribute(element, attr) {
   const name = String(attr?.name || '').toLowerCase();
   if (!name) return;
   const tagName = String(element.tagName || '').toLowerCase();
+  if (tagName === 'input' && !MARKDOWN_PREVIEW_INPUT_ATTRS.has(name)) {
+    element.removeAttribute(attr.name);
+    return;
+  }
   if (name.startsWith('on') || name === 'style' || name === 'srcdoc' || name === 'srcset' || name === 'formaction') {
     element.removeAttribute(attr.name);
     return;
@@ -21950,6 +21990,10 @@ function sanitizeMarkdownPreviewAttribute(element, attr) {
   }
 }
 
+function markdownPreviewInputAllowed(element) {
+  return String(element?.getAttribute?.('type') || '').toLowerCase() === 'checkbox';
+}
+
 function sanitizeMarkdownPreviewNode(root) {
   const elementNode = globalThis.Node?.ELEMENT_NODE || 1;
   const commentNode = globalThis.Node?.COMMENT_NODE || 8;
@@ -21960,6 +22004,14 @@ function sanitizeMarkdownPreviewNode(root) {
     }
     if (child.nodeType !== elementNode) continue;
     const tagName = String(child.tagName || '').toLowerCase();
+    if (tagName === 'input') {
+      if (!markdownPreviewInputAllowed(child)) {
+        child.remove();
+        continue;
+      }
+      child.setAttribute('type', 'checkbox');
+      child.setAttribute('disabled', '');
+    }
     if (MARKDOWN_PREVIEW_BLOCKED_TAGS.has(tagName)) {
       child.remove();
       continue;

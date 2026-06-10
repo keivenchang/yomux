@@ -2345,7 +2345,7 @@ function updateFileExplorerIndexedDirectoryRows() {
   });
 }
 
-function fileExplorerIndexedSearchRoots(defaultRoot = fileQuickOpenRootForSearch()) {
+function fileExplorerIndexedSearchRoots(defaultRoot = fileQuickOpenRootForSearch(), extraRoots = []) {
   const defaultPath = normalizeStoredFileExplorerIndexedDir(defaultRoot);
   const indexedRoots = fileExplorerIndexedRootList();
   const defaultCoveredByIndexed = defaultPath && indexedRoots.some(root => root !== defaultPath && pathIsInsideDirectory(defaultPath, root));
@@ -2353,6 +2353,9 @@ function fileExplorerIndexedSearchRoots(defaultRoot = fileQuickOpenRootForSearch
   const roots = defaultPath && !defaultCoveredByIndexed && !defaultHasIndexedDescendant ? [defaultPath] : [];
   for (const indexedRoot of indexedRoots) {
     if (!roots.includes(indexedRoot)) roots.push(indexedRoot);
+  }
+  for (const extraRoot of compactNestedPaths((extraRoots || []).map(normalizeStoredFileExplorerIndexedDir).filter(Boolean))) {
+    if (!roots.some(root => pathIsInsideDirectory(extraRoot, root))) roots.push(extraRoot);
   }
   return roots;
 }

@@ -1332,19 +1332,52 @@ function commandPaletteCommandItems() {
   return [...tabItems, ...menuItems, ...settingItems].map(item => ({...item, category: 'action'}));
 }
 
+function fileQuickOpenRootForFile(path) {
+  const normalized = normalizeDirectoryPath(path || '');
+  if (!normalized || normalized === '/') return '';
+  const rawGitRoot = openFiles.get(normalized)?.gitRoot || '';
+  const gitRoot = rawGitRoot ? normalizeDirectoryPath(rawGitRoot) : '';
+  if (gitRoot && pathIsInsideDirectory(normalized, gitRoot)) return gitRoot;
+  return dirnameOf(normalized);
+}
+
+function fileQuickOpenPathAliasSegment(query) {
+  const text = String(query || '').trim();
+  if (!text || text.startsWith('/') || text.startsWith('~')) return '';
+  const slash = text.indexOf('/');
+  return slash > 0 ? text.slice(0, slash) : '';
+}
+
+function fileQuickOpenRootMatchesPathAlias(root, query) {
+  const alias = fuzzyCanonicalPrefixText(fileQuickOpenPathAliasSegment(query));
+  if (alias.length < 2) return false;
+  return fuzzyCanonicalPrefixText(basenameOf(root)).startsWith(alias);
+}
+
+function fileQuickOpenExtraRootsForSearchQuery(query) {
+  return compactNestedPaths([repoRoot, fileQuickOpenRootForFile(activeFile)]
+    .map(normalizeDirectoryPath)
+    .filter(root => root && root !== '/' && fileQuickOpenRootMatchesPathAlias(root, query)));
+}
+
 function fileQuickOpenRootForSearch() {
+  const activeItem = currentActiveMenuItem();
+  const activePath = isFileEditorItem(activeItem) ? fileItemPath(activeItem) : '';
+  const activeFileRoot = fileQuickOpenRootForFile(activePath);
+  if (activeFileRoot) return activeFileRoot;
   const target = currentSessionActionTarget();
   const gitRoot = isTmuxSession(target) ? sessionTranscriptInfo(target).gitRoot : '';
   if (gitRoot) return normalizeDirectoryPath(gitRoot);
   const activeTmux = activeTmuxDirectoryPath(target);
   if (activeTmux) return activeTmux;
-  if (activeFile) return dirnameOf(activeFile);
+  const fallbackFileRoot = fileQuickOpenRootForFile(activeFile);
+  if (fallbackFileRoot) return fallbackFileRoot;
   if (fileExplorerRoot) return fileExplorerRoot;
   return repoRoot || homePath || '/';
 }
 
-function fileQuickOpenRootsForSearch(root = fileQuickOpenRoot || fileQuickOpenRootForSearch()) {
-  return fileExplorerIndexedSearchRoots(root);
+function fileQuickOpenRootsForSearch(root = fileQuickOpenRoot || fileQuickOpenRootForSearch(), query = commandPaletteSearchQuery()) {
+  return fileExplorerIndexedSearchRoots(root, fileQuickOpenExtraRootsForSearchQuery(query));
 }
 
 function fileQuickOpenScopeLabel(root = fileQuickOpenRoot || fileQuickOpenRootForSearch()) {
@@ -1833,7 +1866,7 @@ async function refreshFileQuickOpenCandidates(query = '') {
           mtime: entry.mtime,
         }));
     } else {
-      const searchRoots = fileQuickOpenRootsForSearch(root);
+      const searchRoots = fileQuickOpenRootsForSearch(root, commandPaletteSearchQuery(query));
       const results = await Promise.all(searchRoots.map(async searchRoot => {
         try {
           const normalizedRoot = normalizeStoredFileExplorerIndexedDir(searchRoot);

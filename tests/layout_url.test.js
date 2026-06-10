@@ -343,6 +343,9 @@ globalThis.__layoutTestApi = {
   fileEditorPaneTabHtml,
   fileQuickOpenItem,
   fileQuickOpenItems,
+  fileQuickOpenExtraRootsForSearchQuery,
+  fileQuickOpenRootMatchesPathAlias,
+  fileQuickOpenRootForFile,
   fileQuickOpenRootForSearch,
   fileQuickOpenRootsForSearch,
   fileQuickOpenScopeLabel,
@@ -603,6 +606,7 @@ globalThis.__layoutTestApi = {
   filePanelItemsForPath,
   imageOpenUsesSharedViewer,
   imageViewerItemFor,
+  markdownPreviewInputAllowed,
   keyboardShortcutsHtml,
   openFileEditorItems,
   pullRequestStatusLabel,
@@ -4513,6 +4517,18 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   api.setTranscriptInfoForTest('1', {project: {git: {root: '/repo/workspace'}}, selected_pane: {current_path: '/repo/workspace/src'}});
   api.setFocusedPanelItem('1');
   assert.equal(api.fileQuickOpenRootForSearch(), '/repo/workspace', 'file quick-open searches the workspace root when tmux is inside a repo');
+  const fileRootApi = loadYolomux('', ['1']);
+  fileRootApi.setTranscriptInfoForTest('1', {project: {git: {root: '/repo/workspace'}}, selected_pane: {current_path: '/repo/workspace/src'}});
+  fileRootApi.setFocusedPanelItem('1');
+  const activeMdPath = '/home/test/yolomux.dev/DOIT.54.md';
+  const activeMdItem = fileRootApi.fileEditorItemFor(activeMdPath);
+  const activeFileSlots = fileRootApi.emptyLayoutSlots();
+  activeFileSlots.left = fileRootApi.paneStateWithTabs([activeMdItem], activeMdItem);
+  fileRootApi.setOpenFileStateForTest(activeMdPath, {kind: 'text', gitRoot: '/home/test/yolomux.dev'});
+  fileRootApi.setLayoutSlotsForTest(activeFileSlots);
+  fileRootApi.setFocusedPanelItem(activeMdItem);
+  assert.equal(fileRootApi.fileQuickOpenRootForSearch(), '/home/test/yolomux.dev', 'file quick-open uses the focused file editor repo before the last tmux cwd');
+  assert.equal(fileRootApi.fileQuickOpenRootForFile('/home/test/yolomux.dev/src/file.js'), '/home/test/yolomux.dev/src', 'unloaded files fall back to their containing directory');
   api.setFileExplorerIndexedDirsForTest(['/repo/tools', '/repo/tools/src', '/repo/other']);
   assert.equal(api.fileExplorerDirectoryIsIndexed('/repo/tools'), true, 'Finder indexed directories are tracked by exact path');
   assert.equal(api.fileExplorerDirectoryIsIndexed('/repo/tools/src'), false, 'Finder compacts redundant child index marks under an indexed ancestor');
@@ -4529,6 +4545,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(api.commandPaletteItemScore(contextItem, 'target') > api.commandPaletteItemScore(indexedItem, 'target'), 'file quick-open prioritizes the active context over external indexed roots');
   api.setFileExplorerIndexedDirsForTest(['/home/test/dynamo']);
   assert.deepStrictEqual(canonical(api.fileQuickOpenRootsForSearch('/home/test')), ['/home/test/dynamo'], 'an indexed child under the default root replaces the broad live parent search');
+  assert.equal(api.fileQuickOpenRootMatchesPathAlias('/home/test/yolomux.dev', 'yolo/TODO.md'), true, 'bare yolo/... queries match the YOLOmux repo basename as a narrow root alias');
+  assert.deepStrictEqual(canonical(api.fileQuickOpenExtraRootsForSearchQuery('yolo/TODO.md')), ['/home/test/yolomux.dev'], 'bare yolo/... queries add the app repo root without adding all of home');
+  assert.deepStrictEqual(canonical(api.fileQuickOpenRootsForSearch('/home/test', 'yolo/TODO.md')), ['/home/test/dynamo', '/home/test/yolomux.dev'], 'yolo/TODO.md searches the YOLOmux checkout even when home is narrowed to indexed Dynamo');
+  assert.deepStrictEqual(canonical(api.fileQuickOpenRootsForSearch('/home/test', 'src/file.js')), ['/home/test/dynamo'], 'unrelated slash queries do not add the YOLOmux root');
   // #31: the Finder indexed badge reflects the cached build status without writing a long label into
   // the one-letter status column. Date/Ago mode hides the badge entirely because the date slot owns
   // the right side of the row.
@@ -4543,6 +4563,17 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.fileExplorerIndexBadgeText('/home/test/dynamo'), '', '#31: Ago mode hides the indexed badge instead of stacking it next to the age');
   api.setFileExplorerTreeDateModeForTest('none');
   assert.equal(api.fileExplorerIndexBadgeText('/home/test/not-indexed'), '', '#31: a non-indexed directory renders no badge');
+  const checkboxInput = {getAttribute: name => name === 'type' ? 'checkbox' : ''};
+  const textInput = {getAttribute: name => name === 'type' ? 'text' : ''};
+  assert.equal(api.markdownPreviewInputAllowed(checkboxInput), true, 'GFM task-list checkbox inputs survive markdown sanitization');
+  assert.equal(api.markdownPreviewInputAllowed(textInput), false, 'non-checkbox inputs stay blocked in markdown preview');
+  const markdownSource = fs.readFileSync('static/yolomux.js', 'utf8');
+  const blockedTagsSource = markdownSource.slice(markdownSource.indexOf('const MARKDOWN_PREVIEW_BLOCKED_TAGS'), markdownSource.indexOf('const MARKDOWN_PREVIEW_URL_ATTRS'));
+  assert.ok(!blockedTagsSource.includes("'input'"), 'markdown sanitizer no longer blocks safe task-list checkboxes at the tag level');
+  assert.ok(markdownSource.includes("const MARKDOWN_PREVIEW_INPUT_ATTRS = new Set(['type', 'checked', 'disabled', 'aria-label', 'class'])"), 'markdown task checkbox sanitizer has an input attribute allow-list');
+  const cssSource = fs.readFileSync('static/yolomux.css', 'utf8');
+  assert.ok(cssSource.includes('.markdown-body ul.contains-task-list'), 'markdown task lists remove the regular bullet gutter');
+  assert.ok(cssSource.includes('.markdown-body li.task-list-item > input[type="checkbox"]'), 'markdown task-list checkbox alignment is pinned');
   // Descendants of an indexed root stay visually quiet; the root's compact indexed badge is the only repeated signal.
   assert.equal(api.fileExplorerIndexBadgeText('/home/test/dynamo/lib'), '', 'indexed-root descendants do not show a noisy repeated badge');
   assert.equal(api.fileExplorerIndexBadgeText('/home/test/elsewhere'), '', 'C11: an unrelated directory shows no badge');

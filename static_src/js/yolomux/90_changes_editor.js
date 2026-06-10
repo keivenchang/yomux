@@ -4157,7 +4157,6 @@ const MARKDOWN_PREVIEW_BLOCKED_TAGS = new Set([
   'embed',
   'form',
   'iframe',
-  'input',
   'link',
   'math',
   'meta',
@@ -4175,6 +4174,7 @@ const MARKDOWN_PREVIEW_BLOCKED_TAGS = new Set([
 const MARKDOWN_PREVIEW_URL_ATTRS = new Set(['href', 'src', 'poster', 'xlink:href']);
 const MARKDOWN_PREVIEW_SAFE_PROTOCOLS = new Set(['http:', 'https:', 'mailto:', 'tel:']);
 const MARKDOWN_PREVIEW_SAFE_IMAGE_DATA = /^data:image\/(?:png|gif|jpe?g|webp);/i;
+const MARKDOWN_PREVIEW_INPUT_ATTRS = new Set(['type', 'checked', 'disabled', 'aria-label', 'class']);
 
 function markdownPreviewUrlAllowed(value, tagName) {
   const raw = String(value || '').trim();
@@ -4194,6 +4194,10 @@ function sanitizeMarkdownPreviewAttribute(element, attr) {
   const name = String(attr?.name || '').toLowerCase();
   if (!name) return;
   const tagName = String(element.tagName || '').toLowerCase();
+  if (tagName === 'input' && !MARKDOWN_PREVIEW_INPUT_ATTRS.has(name)) {
+    element.removeAttribute(attr.name);
+    return;
+  }
   if (name.startsWith('on') || name === 'style' || name === 'srcdoc' || name === 'srcset' || name === 'formaction') {
     element.removeAttribute(attr.name);
     return;
@@ -4211,6 +4215,10 @@ function sanitizeMarkdownPreviewAttribute(element, attr) {
   }
 }
 
+function markdownPreviewInputAllowed(element) {
+  return String(element?.getAttribute?.('type') || '').toLowerCase() === 'checkbox';
+}
+
 function sanitizeMarkdownPreviewNode(root) {
   const elementNode = globalThis.Node?.ELEMENT_NODE || 1;
   const commentNode = globalThis.Node?.COMMENT_NODE || 8;
@@ -4221,6 +4229,14 @@ function sanitizeMarkdownPreviewNode(root) {
     }
     if (child.nodeType !== elementNode) continue;
     const tagName = String(child.tagName || '').toLowerCase();
+    if (tagName === 'input') {
+      if (!markdownPreviewInputAllowed(child)) {
+        child.remove();
+        continue;
+      }
+      child.setAttribute('type', 'checkbox');
+      child.setAttribute('disabled', '');
+    }
     if (MARKDOWN_PREVIEW_BLOCKED_TAGS.has(tagName)) {
       child.remove();
       continue;
