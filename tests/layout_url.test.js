@@ -740,6 +740,7 @@ globalThis.__layoutTestApi = {
   selectFileTreePath,
   selectFileTreeRange,
   updateFileTreeSelectionFromClick,
+  fileExplorerKeyIntent,
   currentSlots() { return layoutSlots; },
   fileExplorerSelectionForTest() {
     return {
@@ -7143,24 +7144,63 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(!api.commandPaletteItems().some(item => item.group === 'Tabs'), '#7: @ stays reserved for symbols');
 }
 
-// File Explorer / Finder-style keyboard navigation of the Finder/Differ selection (Arrow + Shift+Arrow,
-// Home/End, Mod+A) over the shared selection model — works for both surfaces (both render .file-tree-row).
+// macOS Finder list-view keyboard PARITY. The key->intent map is a PURE function, unit-tested here so the
+// full set of bindings is verified as behavior (not just source shape). Works for Finder AND Differ.
+{
+  const api = loadYolomux();
+  const I = (key, mods = {}) => api.fileExplorerKeyIntent(key, {shift: !!mods.shift, mod: !!mods.mod, alt: !!mods.alt});
+  // move + extend
+  assert.equal(I('ArrowDown'), 'move-down', 'Down moves selection');
+  assert.equal(I('ArrowUp'), 'move-up', 'Up moves selection');
+  assert.equal(I('ArrowDown', {shift: true}), 'extend-down', 'Shift+Down extends');
+  assert.equal(I('ArrowUp', {shift: true}), 'extend-up', 'Shift+Up extends');
+  assert.equal(I('Home'), 'move-home');
+  assert.equal(I('End'), 'move-end');
+  assert.equal(I('Home', {shift: true}), 'extend-home');
+  assert.equal(I('End', {shift: true}), 'extend-end');
+  // expand / collapse / parent / child
+  assert.equal(I('ArrowRight'), 'expand', 'Right expands / steps in');
+  assert.equal(I('ArrowLeft'), 'collapse', 'Left collapses / steps out');
+  // open + enclosing folder
+  assert.equal(I('ArrowDown', {mod: true}), 'open', 'Cmd-Down = open');
+  assert.equal(I('o', {mod: true}), 'open', 'Cmd-O = open');
+  assert.equal(I('O', {mod: true}), 'open');
+  assert.equal(I('ArrowUp', {mod: true}), 'enclosing', 'Cmd-Up = enclosing folder');
+  // rename / select-all / preview / type-ahead
+  assert.equal(I('Enter'), 'rename', 'Return = rename (Finder)');
+  assert.equal(I('a', {mod: true}), 'select-all', 'Cmd-A = select all');
+  assert.equal(I(' '), 'preview', 'Space = Quick Look preview');
+  assert.equal(I('d'), 'typeahead', 'a letter is type-to-select');
+  assert.equal(I('R'), 'typeahead');
+  // NOT claimed (left for the OS / other shortcuts)
+  assert.equal(I('ArrowRight', {mod: true}), null, 'Cmd-Right is not claimed');
+  assert.equal(I('Enter', {mod: true}), null);
+  assert.equal(I('Enter', {shift: true}), null);
+  assert.equal(I('ArrowDown', {alt: true}), null, 'Alt combos not claimed');
+  assert.equal(I(' ', {mod: true}), null);
+  assert.equal(I('Tab'), null);
+  assert.equal(I('Escape'), null);
+  assert.equal(I('x', {mod: true}), null, 'Cmd-X is not a Finder nav key here');
+}
+
+// Source guards: the dispatcher wires each intent to the right live-tree action.
 {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(source.includes('function handleFileExplorerArrowNav('), 'arrow-nav handler exists');
-  assert.ok(/if \(handleFileExplorerArrowNav\(event\)\) return;/.test(source), 'arrow-nav is wired into the global keydown after the delete shortcut');
-  assert.ok(source.includes('!eventTargetIsFileExplorerSurface(event.target) && !isFileExplorerItem(focusedPanelItem)'), 'arrow-nav is gated on the Finder/Differ surface');
-  assert.ok(/options\.extend\) selectFileTreeRange\(row, row\.dataset\.path, \{clear: true\}\)/.test(source), 'Shift+Arrow extends the range from the anchor');
-  assert.ok(/else selectFileTreePath\(row\.dataset\.path\)/.test(source), 'plain Arrow single-selects the new lead');
-  assert.ok(/selectLead\(rows\[nextIndex\], \{extend: event\.shiftKey\}\)/.test(source), 'Up/Down/Home/End move the lead; Shift extends');
-  assert.ok(source.includes('expandDirectoryRow(leadRow, leadPath, {manual: true})'), 'Right expands a collapsed folder in place (macOS Finder)');
-  assert.ok(source.includes('collapseDirectoryRow(leadRow, leadPath, {manual: true})'), 'Left collapses an expanded folder in place (macOS Finder)');
-  assert.ok(/pathIsInsideDirectory\(child\.dataset\.path, leadPath\)/.test(source), 'Right on an expanded folder steps into the first child');
-  assert.ok(/rows\.find\(item => item\.dataset\.path === dirnameOf\(leadPath\)\)/.test(source), 'Left on a collapsed folder/file steps to the parent');
-  assert.ok(source.includes('fileExplorerSelectionLead = fullPath'), 'click/range selection seeds the same lead so keyboard continues from the clicked row');
-  assert.ok(/if \(isEnter\)[\s\S]*beginFileTreeRename\(leadRow, leadRow\.dataset\.path/.test(source), 'Enter renames the selected Finder row (macOS Finder Return)');
-  assert.ok(/if \(leadRow\.dataset\.openChangeFile !== undefined\) return false/.test(source), 'Enter is a no-op on Differ rows (not a Finder rename target)');
-  assert.ok(source.includes('fileTreeRepoPopoverCursor.x + 14'), 'the repo-row hover popover anchors to the RIGHT of the cursor');
+  assert.ok(source.includes('function fileExplorerKeyIntent('), 'pure key->intent map exists');
+  assert.ok(/if \(handleFileExplorerArrowNav\(event\)\) return;/.test(source), 'wired into the global keydown after the delete shortcut');
+  assert.ok(source.includes('!eventTargetIsFileExplorerSurface(event.target) && !isFileExplorerItem(focusedPanelItem)'), 'gated on the Finder/Differ surface');
+  assert.ok(/intent === 'open'[\s\S]{0,200}openFileExplorerManualRoot\(leadPath\)[\s\S]{0,120}openFileInEditor\(leadPath, entry\)/.test(source), 'open: folder descends, file opens in editor');
+  assert.ok(/intent === 'enclosing'[\s\S]{0,300}openFileExplorerManualRoot\(parent\)/.test(source), 'Cmd-Up opens the enclosing folder');
+  assert.ok(/intent === 'rename'[\s\S]{0,300}beginFileTreeRename\(leadRow, leadPath, entry\)/.test(source), 'Enter renames the lead row');
+  assert.ok(/leadRow\.dataset\.openChangeFile !== undefined\) return false/.test(source), 'rename is a no-op on Differ rows');
+  assert.ok(/intent === 'preview'[\s\S]{0,300}openFileImagePreview\(leadRow, leadPath, entry\)/.test(source), 'Space previews (Quick Look) the lead file');
+  assert.ok(source.includes('expandDirectoryRow(leadRow, leadPath, {manual: true})') && source.includes('collapseDirectoryRow(leadRow, leadPath, {manual: true})'), 'Right/Left expand/collapse in place');
+  assert.ok(/pathIsInsideDirectory\(child\.dataset\.path, leadPath\)/.test(source), 'Right steps into the first child when already expanded');
+  assert.ok(/rows\.find\(item => item\.dataset\.path === dirnameOf\(leadPath\)\)/.test(source), 'Left steps to the parent row');
+  assert.ok(source.includes('function fileExplorerTypeaheadSelect('), 'type-ahead selection exists');
+  assert.ok(source.includes('fileExplorerSelectionLead = fullPath'), 'click/range selection seeds the same lead');
+  assert.ok(source.includes('fileTreeRepoPopoverCursor.x + 14'), 'repo-row hover popover anchors to the RIGHT of the cursor');
 }
 
 // S2 (DOIT.51) BEHAVIORAL PROOF: a file that is an open tab appears ONCE in the on-type palette — as its

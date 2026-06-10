@@ -8852,18 +8852,69 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
 // Arrow (and Shift+Home/End) extend the range from the anchor; Home/End jump; Mod+A selects all. Same
 // surface gating as handleFileExplorerDeleteShortcut so it only fires when the Finder/Differ is active and
 // not while typing in a rename input. Returns true if it handled the key.
+// macOS Finder list-view keyboard PARITY. This is the PURE key->intent map (unit-tested in
+// layout_url.test.js) so the bindings are verifiable without a DOM. mods: {shift, mod (Cmd on Mac /
+// Ctrl on PC), alt}. Returns an intent string or null (key not claimed).
+function fileExplorerKeyIntent(key, mods) {
+  if (mods.alt) return null;
+  const shift = mods.shift === true;
+  const mod = mods.mod === true;
+  switch (key) {
+    case 'Enter': return (mod || shift) ? null : 'rename';                          // Finder Return = rename
+    case 'ArrowDown': return mod ? 'open' : (shift ? 'extend-down' : 'move-down');  // Cmd-Down = open
+    case 'ArrowUp': return mod ? 'enclosing' : (shift ? 'extend-up' : 'move-up');   // Cmd-Up = enclosing folder
+    case 'ArrowRight': return (mod || shift) ? null : 'expand';                     // expand / step into first child
+    case 'ArrowLeft': return (mod || shift) ? null : 'collapse';                    // collapse / step to parent
+    case 'Home': return mod ? null : (shift ? 'extend-home' : 'move-home');
+    case 'End': return mod ? null : (shift ? 'extend-end' : 'move-end');
+    case ' ': return (mod || shift) ? null : 'preview';                             // Space = Quick Look (preview)
+    default: break;
+  }
+  if (mod && (key === 'o' || key === 'O')) return 'open';                           // Cmd-O = open
+  if (mod && (key === 'a' || key === 'A')) return 'select-all';                     // Cmd-A = select all
+  if (!mod && typeof key === 'string' && key.length === 1 && key !== ' ') return 'typeahead';   // type-to-select
+  return null;
+}
+
+let fileExplorerTypeaheadBuffer = '';
+let fileExplorerTypeaheadTimer = null;
+
+// macOS Finder type-ahead: accumulate typed chars (buffer resets after a pause); pressing the SAME single
+// char again cycles to the next match. Selects the first row whose name starts with the buffer, searching
+// forward from the lead (wrapping).
+function fileExplorerTypeaheadSelect(rows, leadIndex, char, selectLead) {
+  if (fileExplorerTypeaheadTimer) clearTimeout(fileExplorerTypeaheadTimer);
+  fileExplorerTypeaheadTimer = setTimeout(() => { fileExplorerTypeaheadBuffer = ''; }, 700);
+  const lower = char.toLowerCase();
+  const cycling = fileExplorerTypeaheadBuffer === lower;
+  fileExplorerTypeaheadBuffer = cycling ? lower : (fileExplorerTypeaheadBuffer + lower);
+  const prefix = fileExplorerTypeaheadBuffer;
+  const nameOf = row => String(row.dataset.name || basenameOf(row.dataset.path)).toLowerCase();
+  const start = leadIndex < 0 ? 0 : (cycling ? leadIndex + 1 : leadIndex);
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[(start + i) % rows.length];
+    if (nameOf(row).startsWith(prefix)) { selectLead(row); return; }
+  }
+}
+
+// File Explorer / Finder-style keyboard nav over the SHARED selection (Finder AND Differ render
+// .file-tree-row). Dispatches the PURE fileExplorerKeyIntent map onto the live tree. Same surface gating
+// as the delete shortcut. Returns true if it handled the key.
 function handleFileExplorerArrowNav(event) {
-  if (event.altKey) return false;
-  const key = event.key;
-  const isVertical = key === 'ArrowDown' || key === 'ArrowUp' || key === 'Home' || key === 'End';
-  const isHorizontal = key === 'ArrowRight' || key === 'ArrowLeft';
-  const isEnter = key === 'Enter' && !event.metaKey && !event.ctrlKey && !event.shiftKey;
-  const isSelectAll = (event.metaKey || event.ctrlKey) && (key === 'a' || key === 'A');
-  if (!isVertical && !isHorizontal && !isEnter && !isSelectAll) return false;
-  if ((isVertical || isHorizontal) && (event.metaKey || event.ctrlKey)) return false;   // leave Mod+Arrow for other shortcuts
+  const intent = fileExplorerKeyIntent(event.key, {shift: event.shiftKey, mod: event.metaKey || event.ctrlKey, alt: event.altKey});
+  if (!intent) return false;
   if (!eventTargetIsFileExplorerSurface(event.target) && !isFileExplorerItem(focusedPanelItem)) return false;
   if (!globalShortcutTargetAllowsAppAction(event.target)) return false;
-  // Scope to ONE tree: the event's tree, else the tree holding the current lead, else the active Finder tree.
+  const consume = () => { event.preventDefault(); event.stopPropagation(); };
+  // Cmd-Up opens the enclosing folder (move the Finder root up a level) — independent of the row list.
+  if (intent === 'enclosing') {
+    consume();
+    const root = currentFileExplorerRoot();
+    const parent = dirnameOf(root);
+    if (parent && parent !== root) openFileExplorerManualRoot(parent);
+    return true;
+  }
+  // Scope to ONE tree: the event's tree, else the tree holding the lead, else the active Finder tree.
   const container = event.target?.closest?.('.file-explorer-tree-panel')
     || (fileExplorerSelectionLead && document.querySelector(`.file-tree-row[data-path="${cssEscape(fileExplorerSelectionLead)}"]`)?.closest?.('.file-explorer-tree-panel'))
     || document.querySelector('.panel.file-explorer-panel .file-explorer-tree-panel')
@@ -8871,74 +8922,75 @@ function handleFileExplorerArrowNav(event) {
     || document;
   const rows = selectableFileTreeRows(container);
   if (!rows.length) return false;
-  const selectLead = (row, options = {}) => {
+  const selectLead = (row, extend = false) => {
     fileExplorerManualSelectionActive = true;
-    if (options.extend) selectFileTreeRange(row, row.dataset.path, {clear: true});
+    if (extend) selectFileTreeRange(row, row.dataset.path, {clear: true});
     else selectFileTreePath(row.dataset.path);
     fileExplorerSelectionLead = row.dataset.path;
     row.scrollIntoView({block: 'nearest'});
   };
-  if (isSelectAll) {
+  if (intent === 'select-all') {
+    consume();
     fileExplorerManualSelectionActive = true;
     fileExplorerSelectedPaths.clear();
     for (const item of rows) fileExplorerSelectedPaths.add(item.dataset.path);
     fileExplorerSelectionAnchor = rows[0].dataset.path;
     fileExplorerSelectionLead = rows[rows.length - 1].dataset.path;
     updateFileExplorerCurrentFileHighlight();
-    event.preventDefault();
-    event.stopPropagation();
     return true;
   }
   let leadIndex = rows.findIndex(item => item.dataset.path === fileExplorerSelectionLead);
   if (leadIndex < 0) leadIndex = rows.findIndex(item => fileExplorerSelectedPaths.has(item.dataset.path));
-  // macOS Finder: Return/Enter renames the selected item (open is double-click / Cmd-O). Differ rows
-  // (data-open-change-file) are not Finder rename targets, so leave Enter alone there.
-  if (isEnter) {
-    if (leadIndex < 0) return false;
-    const leadRow = rows[leadIndex];
-    if (leadRow.dataset.openChangeFile !== undefined) return false;
-    event.preventDefault();
-    event.stopPropagation();
-    beginFileTreeRename(leadRow, leadRow.dataset.path, {kind: leadRow.dataset.kind, name: leadRow.dataset.name || basenameOf(leadRow.dataset.path), is_repo: leadRow.dataset.isRepo === 'true'});
-    return true;
-  }
-  // macOS Finder list view: Right expands a collapsed folder, or steps into the first child if already
-  // expanded; Left collapses an expanded folder, or steps to the parent. (Files: Right is a no-op, Left -> parent.)
-  if (isHorizontal) {
+  if (intent === 'typeahead') { consume(); fileExplorerTypeaheadSelect(rows, leadIndex, event.key, selectLead); return true; }
+  // Intents that act on the current lead row.
+  if (intent === 'rename' || intent === 'open' || intent === 'preview' || intent === 'expand' || intent === 'collapse') {
     if (leadIndex < 0) return false;
     const leadRow = rows[leadIndex];
     const leadPath = leadRow.dataset.path;
     const isDir = leadRow.dataset.kind === 'dir';
+    const entry = {kind: leadRow.dataset.kind, name: leadRow.dataset.name || basenameOf(leadPath), is_repo: leadRow.dataset.isRepo === 'true'};
+    if (intent === 'rename') {
+      if (leadRow.dataset.openChangeFile !== undefined) return false;   // Differ rows are not Finder rename targets
+      consume();
+      beginFileTreeRename(leadRow, leadPath, entry);
+      return true;
+    }
+    if (intent === 'open') {                       // Cmd-O / Cmd-Down: open a file in the editor, or open (descend into) a folder
+      consume();
+      if (isDir) openFileExplorerManualRoot(leadPath);
+      else openFileInEditor(leadPath, entry);
+      return true;
+    }
+    if (intent === 'preview') {                    // Space = Quick Look-style preview (image popover) of a file
+      consume();
+      if (document.querySelector('.file-image-preview-popover')) closeFileImagePreview();
+      else if (!isDir) openFileImagePreview(leadRow, leadPath, entry);
+      return true;
+    }
     const expanded = fileExplorerExpanded.has(leadPath);
-    event.preventDefault();
-    event.stopPropagation();
-    if (key === 'ArrowRight') {
-      if (isDir && !expanded) {
-        expandDirectoryRow(leadRow, leadPath, {manual: true});   // expand in place (children load async)
-      } else if (isDir && expanded) {
-        const child = rows[leadIndex + 1];
-        if (child && pathIsInsideDirectory(child.dataset.path, leadPath)) selectLead(child);
-      }
-      return true;   // on a file, no-op (but consumed so the tree doesn't scroll)
+    if (intent === 'expand') {
+      consume();
+      if (isDir && !expanded) expandDirectoryRow(leadRow, leadPath, {manual: true});
+      else if (isDir && expanded) { const child = rows[leadIndex + 1]; if (child && pathIsInsideDirectory(child.dataset.path, leadPath)) selectLead(child); }
+      return true;
     }
-    if (isDir && expanded) {
-      collapseDirectoryRow(leadRow, leadPath, {manual: true});   // collapse in place
-    } else {
-      const parentRow = rows.find(item => item.dataset.path === dirnameOf(leadPath));
-      if (parentRow) selectLead(parentRow);
-    }
+    // collapse: collapse an expanded folder, else step to the parent row
+    consume();
+    if (isDir && expanded) collapseDirectoryRow(leadRow, leadPath, {manual: true});
+    else { const parentRow = rows.find(item => item.dataset.path === dirnameOf(leadPath)); if (parentRow) selectLead(parentRow); }
     return true;
   }
+  // Movement intents (move/extend up/down/home/end).
+  const lastIndex = rows.length - 1;
   let nextIndex;
-  if (key === 'Home') nextIndex = 0;
-  else if (key === 'End') nextIndex = rows.length - 1;
+  if (intent === 'move-home' || intent === 'extend-home') nextIndex = 0;
+  else if (intent === 'move-end' || intent === 'extend-end') nextIndex = lastIndex;
   else {
-    const delta = key === 'ArrowDown' ? 1 : -1;
-    nextIndex = leadIndex < 0 ? (delta > 0 ? 0 : rows.length - 1) : Math.max(0, Math.min(rows.length - 1, leadIndex + delta));
+    const delta = (intent === 'move-down' || intent === 'extend-down') ? 1 : -1;
+    nextIndex = leadIndex < 0 ? (delta > 0 ? 0 : lastIndex) : Math.max(0, Math.min(lastIndex, leadIndex + delta));
   }
-  selectLead(rows[nextIndex], {extend: event.shiftKey});
-  event.preventDefault();
-  event.stopPropagation();
+  consume();
+  selectLead(rows[nextIndex], intent.startsWith('extend'));
   return true;
 }
 
