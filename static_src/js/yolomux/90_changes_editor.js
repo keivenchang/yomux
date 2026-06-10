@@ -92,6 +92,25 @@ function sessionFilesRequestQueryString() {
   return `${diffRefQueryString()}${sessionFilesRefsQuery()}`;
 }
 
+function clientSessionFilesWatchRequests() {
+  const params = new URLSearchParams(sessionFilesRequestQueryString());
+  let repoRefs = null;
+  const refs = params.get('refs');
+  if (refs) {
+    try {
+      const parsed = JSON.parse(refs);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) repoRefs = parsed;
+    } catch (_error) {}
+  }
+  return [{
+    session: fileExplorerSessionFilesTargetSession(),
+    hours: 24,
+    from_ref: params.get('from') || 'HEAD',
+    to_ref: params.get('to') || 'current',
+    repo_refs: repoRefs,
+  }];
+}
+
 function sessionFilesCacheKey(session) {
   return `${String(session || '')}\x1f${sessionFilesRequestQueryString()}`;
 }
@@ -750,6 +769,36 @@ async function fetchSessionFiles(options = {}) {
       renderSessionButtons();
     }
   }
+}
+
+function applySessionFilesPayloadFromPush(payload = {}, request = {}) {
+  const destination = 'finder';
+  const session = payload.session || request.session || fileExplorerSessionFilesTargetSession();
+  if (!session || session !== fileExplorerSessionFilesTargetSession()) return false;
+  const nextPayload = {
+    session,
+    files: Array.isArray(payload.files) ? payload.files : [],
+    repos: Array.isArray(payload.repos) ? payload.repos : [],
+    refs_by_repo: payload.refs_by_repo && typeof payload.refs_by_repo === 'object' ? payload.refs_by_repo : {},
+    errors: Array.isArray(payload.errors) ? payload.errors : [],
+    from_ref: payload.from_ref || request.from_ref || diffRefFrom,
+    to_ref: payload.to_ref || request.to_ref || diffRefTo,
+    loaded: true,
+  };
+  const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
+  const shouldRender = signature !== sessionFilesSignatureForDestination(destination);
+  setSessionFilesPayloadForDestination(destination, nextPayload);
+  setSessionFilesSignatureForDestination(destination, signature);
+  fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {payload: nextPayload, signature});
+  sessionFilesLastPollTs = Date.now();
+  if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+  if (shouldRender) {
+    renderSessionFilesDestination(destination, {force: true});
+    updateFileTreeGitStatusRows();
+    renderPaneTabStrips();
+    renderSessionButtons();
+  }
+  return true;
 }
 
 function sessionFileTimeText(mtime) {
@@ -2159,7 +2208,11 @@ function createFileExplorerPanel() {
   refreshFileExplorerPanelTree(panel);
   renderFileExplorerChangesPanel(panel);
   if (!fileExplorerSessionFilesPayload.loaded || fileExplorerSessionFilesPayload.session !== fileExplorerSessionFilesTargetSession()) {
-    fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true});
+    if (clientPushCanSupplyData()) {
+      if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+    } else {
+      fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true});
+    }
   }
   return panel;
 }
@@ -2178,6 +2231,10 @@ async function refreshFileExplorerPanelTree(panel, options = {}) {
   syncFileExplorerHiddenButton(hiddenBtn);
   syncFileExplorerTreeDateButton(dateBtn);
   if (sortSelect && sortSelect.value !== fileExplorerTreeSortMode) sortSelect.value = fileExplorerTreeSortMode;
+  if (clientPushCanSupplyData() && !options.entries && options.force !== true) {
+    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+    return;
+  }
   const entries = options.root === root && Array.isArray(options.entries)
     ? options.entries
     : await fetchDirectory(root);

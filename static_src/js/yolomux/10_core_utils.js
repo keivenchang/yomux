@@ -3,14 +3,16 @@ async function apiFetch(url, options = {}) {
   if (!requestOptions.credentials) requestOptions.credentials = 'same-origin';
   const startedAt = jsDebugPerformanceNow();
   const method = jsDebugRequestMethod(requestOptions);
+  const requestBytes = jsDebugRequestBytes(url, requestOptions);
   let response;
   try {
     response = await fetch(url, requestOptions);
   } catch (error) {
-    recordApiDebugEvent(url, method, startedAt, {error});
+    recordApiDebugEvent(url, method, startedAt, {error, requestBytes});
     throw error;
   }
-  recordApiDebugEvent(url, method, startedAt, {status: response.status, ok: response.ok});
+  const event = recordApiDebugEvent(url, method, startedAt, {status: response.status, ok: response.ok, requestBytes});
+  recordApiDebugResponseBytes(event, response);
   if (response.status === 401) {
     await redirectToLogin(response);
     throw new Error('authentication required');
@@ -30,6 +32,14 @@ async function apiFetchJson(url, options = {}) {
     throw error;
   }
   return payload;
+}
+
+function clientPushCanSupplyData() {
+  return Boolean(clientEventsSource && location.protocol !== 'file:');
+}
+
+function clientPushConnectedForData() {
+  return clientPushCanSupplyData() && clientEventsConnected === true;
 }
 
 async function redirectToLogin(response) {
@@ -52,6 +62,22 @@ function jsDebugPerformanceNow() {
 
 function jsDebugRequestMethod(options = {}) {
   return String(options?.method || 'GET').toUpperCase();
+}
+
+function jsDebugByteLength(text) {
+  const value = String(text || '');
+  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(value).length;
+  return value.length;
+}
+
+function jsDebugRequestBytes(url, options = {}) {
+  if (!debugModeEnabled) return 0;
+  let bytes = jsDebugByteLength(jsDebugUrlText(url));
+  const body = options?.body;
+  if (typeof body === 'string') bytes += jsDebugByteLength(body);
+  else if (body instanceof ArrayBuffer) bytes += body.byteLength;
+  else if (body?.byteLength) bytes += Number(body.byteLength) || 0;
+  return bytes;
 }
 
 function jsDebugDurationMs(startedAt) {
@@ -81,10 +107,25 @@ function recordApiDebugEvent(url, method, startedAt, result = {}) {
     url: jsDebugUrlText(url),
     durationMs: jsDebugDurationMs(startedAt),
   };
+  if (Number.isFinite(result.requestBytes)) payload.requestBytes = result.requestBytes;
   if (Number.isFinite(result.status)) payload.status = result.status;
   if (typeof result.ok === 'boolean') payload.ok = result.ok;
   if (result.error) payload.error = jsDebugErrorText(result.error);
   return recordJsDebugEvent('api', payload);
+}
+
+function recordApiDebugResponseBytes(event, response) {
+  if (!debugModeEnabled || !event || !response) return;
+  const headerBytes = Number(response.headers?.get?.('Content-Length') || NaN);
+  if (Number.isFinite(headerBytes) && headerBytes >= 0) {
+    event.responseBytes = headerBytes;
+    scheduleJsDebugPanelRefresh();
+    return;
+  }
+  response.clone().arrayBuffer().then(buffer => {
+    event.responseBytes = buffer.byteLength;
+    scheduleJsDebugPanelRefresh();
+  }).catch(() => {});
 }
 
 function recordJsDebugEvent(type, payload = {}) {

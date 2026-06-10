@@ -19,6 +19,7 @@ from typing import Any
 
 import auto_approve_tmux
 
+from . import filesystem
 from . import session_files
 from . import yolo_rules
 from .activity_summary import activity_signature
@@ -157,6 +158,84 @@ def filesystem_watch_signature(path: str | Path) -> tuple[Any, ...]:
     return (str(target), "dir", int(stat.st_mtime_ns), int(stat.st_size), tuple(entries))
 
 
+def filesystem_signature_entry_map(signature: tuple[Any, ...] | None) -> dict[str, tuple[str, int, int]]:
+    if not isinstance(signature, tuple) or len(signature) < 5 or signature[1] != "dir":
+        return {}
+    entries = signature[4]
+    if not isinstance(entries, tuple):
+        return {}
+    result: dict[str, tuple[str, int, int]] = {}
+    for item in entries:
+        if not isinstance(item, tuple) or len(item) < 4:
+            continue
+        result[str(item[0])] = (str(item[1]), int(item[2]), int(item[3]))
+    return result
+
+
+def filesystem_change_summary(previous: tuple[Any, ...] | None, current: tuple[Any, ...] | None) -> dict[str, Any]:
+    def root_map(signature: tuple[Any, ...] | None) -> dict[str, tuple[Any, ...]]:
+        result: dict[str, tuple[Any, ...]] = {}
+        for item in signature or ():
+            if not isinstance(item, tuple) or len(item) < 2 or not isinstance(item[1], tuple):
+                continue
+            result[str(item[0])] = item[1]
+        return result
+
+    previous_by_root = root_map(previous)
+    current_by_root = root_map(current)
+    summary: dict[str, Any] = {
+        "roots_changed": 0,
+        "roots_added": 0,
+        "roots_removed": 0,
+        "entries_added": 0,
+        "entries_removed": 0,
+        "entries_modified": 0,
+        "files_added": 0,
+        "files_removed": 0,
+        "files_modified": 0,
+        "dirs_added": 0,
+        "dirs_removed": 0,
+        "dirs_modified": 0,
+        "roots": [],
+    }
+    for root in sorted(set(previous_by_root) | set(current_by_root)):
+        prev_signature = previous_by_root.get(root)
+        next_signature = current_by_root.get(root)
+        if prev_signature == next_signature:
+            continue
+        summary["roots_changed"] += 1
+        if prev_signature is None:
+            summary["roots_added"] += 1
+        if next_signature is None:
+            summary["roots_removed"] += 1
+        prev_entries = filesystem_signature_entry_map(prev_signature)
+        next_entries = filesystem_signature_entry_map(next_signature)
+        added = sorted(set(next_entries) - set(prev_entries))
+        removed = sorted(set(prev_entries) - set(next_entries))
+        modified = sorted(name for name in set(prev_entries) & set(next_entries) if prev_entries[name] != next_entries[name])
+        root_summary = {
+            "root": root,
+            "added": len(added),
+            "removed": len(removed),
+            "modified": len(modified),
+        }
+        if len(summary["roots"]) < 12:
+            summary["roots"].append(root_summary)
+        summary["entries_added"] += len(added)
+        summary["entries_removed"] += len(removed)
+        summary["entries_modified"] += len(modified)
+        for name in added:
+            kind = next_entries[name][0]
+            summary["dirs_added" if kind == "dir" else "files_added"] += 1
+        for name in removed:
+            kind = prev_entries[name][0]
+            summary["dirs_removed" if kind == "dir" else "files_removed"] += 1
+        for name in modified:
+            kind = next_entries[name][0]
+            summary["dirs_modified" if kind == "dir" else "files_modified"] += 1
+    return summary
+
+
 def agent_cache_signature(agent: AgentInfo) -> tuple[Any, ...]:
     if agent.transcript:
         try:
@@ -293,12 +372,26 @@ class TmuxWebtermApp:
         self.client_events = ClientEventBroker()
         self.client_watch_lock = threading.RLock()
         self.client_watch_roots: dict[str, float] = {}
+        self.client_watch_context_items: list[dict[str, Any]] = []
+        self.client_watch_session_files: list[dict[str, Any]] = []
+        self.client_watch_activity_summary: dict[str, Any] = {}
         self.client_watch_initialized = False
         self.client_watch_settings_signature: tuple[Any, ...] | None = None
         self.client_watch_transcripts_signature: tuple[Any, ...] | None = None
         self.client_watch_filesystem_signature: tuple[Any, ...] | None = None
+        self.client_watch_auto_approve_signature: str = ""
+        self.client_watch_watched_prs_signature: str = ""
+        self.client_watch_context_item_payload_signatures: dict[str, str] = {}
+        self.client_watch_session_file_payload_signatures: dict[str, str] = {}
+        self.client_watch_transcripts_payload_signature: str = ""
+        self.client_watch_activity_summary_signature: str = ""
+        self.client_watch_filesystem_payload_signature: str = ""
+        self.client_watch_snapshot_running = False
         self.client_watch_thread: threading.Thread | None = None
         self.client_watch_running = False
+        self.client_event_next_signature_poll_at = 0.0
+        self.client_event_next_auto_poll_at = 0.0
+        self.client_event_next_watched_pr_poll_at = 0.0
         self.activity_summary_lock = threading.RLock()
         self.activity_summary_cache: dict[str, dict[str, Any]] = {}
         self.session_files_cache_lock = threading.RLock()
@@ -371,8 +464,28 @@ class TmuxWebtermApp:
     def settings_payload(self) -> dict[str, Any]:
         return settings_payload()
 
-    def publish_client_event(self, event_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self.client_events.publish(event_type, payload)
+    def publish_client_event(
+        self,
+        event_type: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        trigger: str = "watch",
+        cache: str | None = None,
+        compute_ms: float | None = None,
+    ) -> dict[str, Any]:
+        event_payload = dict(payload or {})
+        event_payload.setdefault("trigger", trigger)
+        if cache is not None:
+            event_payload.setdefault("cache", cache)
+        if compute_ms is not None:
+            event_payload.setdefault("compute_ms", round(max(0.0, compute_ms), 1))
+        return self.client_events.publish(event_type, event_payload)
+
+    def client_event_payload_signature(self, payload: Any) -> str:
+        try:
+            return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+        except (TypeError, ValueError):
+            return str(payload)
 
     def server_event_poll_seconds(self) -> float:
         settings = settings_payload().get("settings", {})
@@ -382,17 +495,100 @@ class TmuxWebtermApp:
 
     def update_client_watch_roots(self, roots: Any) -> dict[str, Any]:
         now = time.monotonic()
+        payload = roots if isinstance(roots, dict) else {"roots": roots}
         normalized: list[str] = []
-        if isinstance(roots, list):
-            for item in roots:
+        raw_roots = payload.get("roots", []) if isinstance(payload, dict) else []
+        if isinstance(raw_roots, list):
+            for item in raw_roots:
                 path = str(item or "").strip()
                 if not path.startswith("/"):
                     continue
                 normalized.append(str(Path(path).expanduser()))
         unique = sorted(set(normalized))[:CLIENT_WATCH_ROOT_LIMIT]
+        context_items = self.normalized_client_context_items(payload.get("context_items", []))
+        session_files_requests = self.normalized_client_session_files(payload.get("session_files", []))
+        activity_summary = self.normalized_client_activity_summary(payload.get("activity_summary", {}))
         with self.client_watch_lock:
             self.client_watch_roots = {path: now + CLIENT_WATCH_ROOT_TTL_SECONDS for path in unique}
-        return {"ok": True, "roots": unique, "mode": "poll", "ttl_seconds": CLIENT_WATCH_ROOT_TTL_SECONDS}
+            self.client_watch_context_items = context_items
+            self.client_watch_session_files = session_files_requests
+            self.client_watch_activity_summary = activity_summary
+        with self.client_events.lock:
+            has_client_event_subscribers = bool(self.client_events.subscribers)
+        if has_client_event_subscribers:
+            self.start_client_watch_snapshot_publish()
+        return {
+            "ok": True,
+            "roots": unique,
+            "context_items": context_items,
+            "session_files": session_files_requests,
+            "activity_summary": activity_summary,
+            "mode": "poll",
+            "ttl_seconds": CLIENT_WATCH_ROOT_TTL_SECONDS,
+        }
+
+    def normalized_client_context_items(self, value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        items: list[dict[str, Any]] = []
+        seen: set[tuple[str, int]] = set()
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            session = str(item.get("session") or "").strip()
+            if not session:
+                continue
+            messages = int(max(1, min(self.float_value(item.get("messages"), 200), MAX_COMPACT_TRANSCRIPT_ITEMS)))
+            key = (session, messages)
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append({"session": session, "messages": messages})
+        return items[:MAX_YOLOMUX_SESSION_TABS]
+
+    def normalized_client_session_files(self, value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        items: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            session = str(item.get("session") or "").strip() or None
+            hours = max(1.0, min(168.0, self.float_value(item.get("hours"), 24.0)))
+            from_ref = str(item.get("from_ref") or item.get("from") or "").strip() or None
+            to_ref = str(item.get("to_ref") or item.get("to") or "").strip() or None
+            repo_refs = item.get("repo_refs")
+            if not isinstance(repo_refs, dict):
+                repo_refs = None
+            request = {
+                "session": session,
+                "hours": hours,
+                "from_ref": from_ref,
+                "to_ref": to_ref,
+                "repo_refs": repo_refs,
+            }
+            signature = self.client_event_payload_signature(request)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            items.append(request)
+        return items[:MAX_YOLOMUX_SESSION_TABS]
+
+    def normalized_client_activity_summary(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        locale = str(value.get("locale") or "en").strip() or "en"
+        visible = value.get("visible") is True
+        return {"locale": locale, "visible": visible}
+
+    def client_watch_state_snapshot(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+        with self.client_watch_lock:
+            return (
+                [dict(item) for item in self.client_watch_context_items],
+                [dict(item) for item in self.client_watch_session_files],
+                dict(self.client_watch_activity_summary),
+            )
 
     def client_watch_roots_snapshot(self) -> list[str]:
         now = time.monotonic()
@@ -442,6 +638,68 @@ class TmuxWebtermApp:
     def filesystem_roots_watch_signature(self, sessions: dict[str, SessionInfo]) -> tuple[Any, ...]:
         return tuple((root, filesystem_watch_signature(root)) for root in self.filesystem_roots_for_watch(sessions))
 
+    def publish_filesystem_ready_event(
+        self,
+        roots: list[str],
+        trigger: str = "watch",
+        change_summary: dict[str, Any] | None = None,
+    ) -> list[str]:
+        if not roots:
+            return []
+        payload = self.filesystem_push_payload(roots)
+        signature = self.client_event_payload_signature(payload.get("directories", []))
+        with self.client_watch_lock:
+            previous_signature = self.client_watch_filesystem_payload_signature
+            self.client_watch_filesystem_payload_signature = signature
+        if previous_signature == signature:
+            return []
+        if change_summary is not None:
+            payload["change_summary"] = change_summary
+        self.publish_client_event(
+            "fs_changed",
+            payload,
+            trigger=trigger,
+            cache="ready",
+            compute_ms=float(payload.get("compute_ms") or 0.0),
+        )
+        return ["fs_changed"]
+
+    def filesystem_push_payload(self, roots: list[str]) -> dict[str, Any]:
+        directories: list[dict[str, Any]] = []
+        summary = {
+            "roots_requested": len(roots[:CLIENT_WATCH_ROOT_LIMIT]),
+            "roots_listed": 0,
+            "roots_error": 0,
+            "entries_listed": 0,
+            "files_listed": 0,
+            "dirs_listed": 0,
+        }
+        started = time.perf_counter()
+        for root in roots[:CLIENT_WATCH_ROOT_LIMIT]:
+            try:
+                payload = filesystem.list_directory(root)
+            except filesystem.FilesystemError as exc:
+                directories.append({"path": root, "status": int(exc.status), "ok": False, "error": str(exc)})
+                summary["roots_error"] += 1
+                continue
+            entries = payload.get("entries", []) if isinstance(payload, dict) else []
+            if isinstance(entries, list):
+                summary["entries_listed"] += len(entries)
+                for entry in entries:
+                    kind = str(entry.get("kind", "")) if isinstance(entry, dict) else ""
+                    if kind == "dir":
+                        summary["dirs_listed"] += 1
+                    else:
+                        summary["files_listed"] += 1
+            summary["roots_listed"] += 1
+            directories.append({"path": root, "status": 200, "ok": True, "data": payload})
+        return {
+            "roots": roots,
+            "directories": directories,
+            "listing_summary": summary,
+            "compute_ms": round((time.perf_counter() - started) * 1000, 1),
+        }
+
     def clear_transcript_caches(self) -> None:
         with self.transcript_tail_cache_lock:
             self.transcript_tail_cache.clear()
@@ -449,6 +707,40 @@ class TmuxWebtermApp:
             self.context_items_cache.clear()
         with self.transcripts_payload_cache_lock:
             self.transcripts_payload_cache = None
+
+    def start_client_watch_snapshot_publish(self) -> bool:
+        with self.client_watch_lock:
+            if self.client_watch_snapshot_running:
+                return False
+            self.client_watch_snapshot_running = True
+        worker = threading.Thread(target=self.publish_client_watch_snapshot, daemon=True)
+        worker.start()
+        return True
+
+    def publish_client_watch_snapshot(self) -> None:
+        try:
+            started = time.perf_counter()
+            payload = self.build_transcripts_payload()
+            self.set_transcripts_payload_cache(payload)
+            signature = self.client_event_payload_signature(payload)
+            with self.client_watch_lock:
+                previous_signature = self.client_watch_transcripts_payload_signature
+                self.client_watch_transcripts_payload_signature = signature
+            if previous_signature != signature:
+                self.publish_client_event(
+                    "transcripts_changed",
+                    {"signature": signature, "data": payload},
+                    trigger="watch_state",
+                    cache="ready",
+                    compute_ms=(time.perf_counter() - started) * 1000,
+                )
+            self.publish_context_items_ready_events(trigger="watch_state")
+            self.publish_activity_summary_ready_events(trigger="watch_state")
+            self.publish_filesystem_ready_event(self.client_watch_roots_snapshot(), trigger="watch_state")
+            self.publish_session_files_ready_events(trigger="watch_state")
+        finally:
+            with self.client_watch_lock:
+                self.client_watch_snapshot_running = False
 
     def poll_client_events_once(self) -> list[str]:
         sessions, _errors = discover_sessions(self.sessions)
@@ -458,26 +750,166 @@ class TmuxWebtermApp:
         events: list[str] = []
         with self.client_watch_lock:
             initialized = self.client_watch_initialized
+            previous_filesystem_signature = self.client_watch_filesystem_signature
             settings_changed = initialized and self.client_watch_settings_signature != settings_signature
             transcripts_changed = initialized and self.client_watch_transcripts_signature != transcripts_signature
-            filesystem_changed = initialized and self.client_watch_filesystem_signature != filesystem_signature
+            filesystem_changed = initialized and previous_filesystem_signature != filesystem_signature
             self.client_watch_initialized = True
             self.client_watch_settings_signature = settings_signature
             self.client_watch_transcripts_signature = transcripts_signature
             self.client_watch_filesystem_signature = filesystem_signature
         if settings_changed:
-            self.publish_client_event("settings_changed", {"signature": settings_signature})
+            started = time.perf_counter()
+            payload = self.settings_payload()
+            self.publish_client_event(
+                "settings_changed",
+                {"signature": settings_signature, "data": payload},
+                cache="ready",
+                compute_ms=(time.perf_counter() - started) * 1000,
+            )
             events.append("settings_changed")
         if transcripts_changed:
             self.clear_transcript_caches()
-            self.publish_client_event("transcripts_changed", {"signature": transcripts_signature})
+            started = time.perf_counter()
+            payload = self.build_transcripts_payload()
+            self.set_transcripts_payload_cache(payload)
+            payload_signature = self.client_event_payload_signature(payload)
+            with self.client_watch_lock:
+                self.client_watch_transcripts_payload_signature = payload_signature
+            self.publish_client_event(
+                "transcripts_changed",
+                {"signature": transcripts_signature, "data": payload},
+                cache="refresh",
+                compute_ms=(time.perf_counter() - started) * 1000,
+            )
             events.append("transcripts_changed")
+            events.extend(self.publish_context_items_ready_events(trigger="transcripts_changed"))
+            events.extend(self.publish_activity_summary_ready_events(trigger="transcripts_changed"))
         if filesystem_changed:
             roots = self.filesystem_roots_for_watch(sessions)
-            self.publish_client_event("fs_changed", {"roots": roots})
-            self.publish_client_event("session_files_changed", {"roots": roots})
-            events.extend(["fs_changed", "session_files_changed"])
+            change_summary = filesystem_change_summary(previous_filesystem_signature, filesystem_signature)
+            events.extend(self.publish_filesystem_ready_event(roots, change_summary=change_summary))
+            session_file_events = self.publish_session_files_ready_events(trigger="fs_changed")
+            if session_file_events:
+                events.extend(session_file_events)
         return events
+
+    def publish_context_items_ready_events(self, trigger: str = "watch") -> list[str]:
+        context_items, _session_files, _activity = self.client_watch_state_snapshot()
+        events: list[str] = []
+        for item in context_items:
+            started = time.perf_counter()
+            payload, status = self.context_items(item["session"], int(item["messages"]))
+            event_payload = {"session": item["session"], "messages": item["messages"], "status": int(status), "data": payload}
+            signature = self.client_event_payload_signature(event_payload)
+            key = self.client_event_payload_signature({"session": item["session"], "messages": item["messages"]})
+            with self.client_watch_lock:
+                previous_signature = self.client_watch_context_item_payload_signatures.get(key)
+                self.client_watch_context_item_payload_signatures[key] = signature
+            if previous_signature == signature:
+                continue
+            self.publish_client_event(
+                "context_items_ready",
+                event_payload,
+                trigger=trigger,
+                cache="ready",
+                compute_ms=(time.perf_counter() - started) * 1000,
+            )
+            events.append("context_items_ready")
+        return events
+
+    def publish_activity_summary_ready_events(self, trigger: str = "watch") -> list[str]:
+        _context_items, _session_files, activity_summary = self.client_watch_state_snapshot()
+        if activity_summary.get("visible") is not True:
+            return []
+        started = time.perf_counter()
+        payload = self.activity_summary_payload(locale=str(activity_summary.get("locale") or "en"))
+        stable_payload = {key: value for key, value in payload.items() if key not in {"generated_at", "generated_ts"}}
+        signature = self.client_event_payload_signature(stable_payload)
+        with self.client_watch_lock:
+            previous_signature = self.client_watch_activity_summary_signature
+            self.client_watch_activity_summary_signature = signature
+        if previous_signature == signature:
+            return []
+        self.publish_client_event(
+            "activity_summary_ready",
+            {"locale": payload.get("locale", activity_summary.get("locale") or "en"), "data": payload},
+            trigger=trigger,
+            cache="ready",
+            compute_ms=(time.perf_counter() - started) * 1000,
+        )
+        return ["activity_summary_ready"]
+
+    def publish_session_files_ready_events(self, trigger: str = "watch") -> list[str]:
+        _context_items, session_files_requests, _activity = self.client_watch_state_snapshot()
+        events: list[str] = []
+        for item in session_files_requests:
+            started = time.perf_counter()
+            payload, status = self.session_files_payload(
+                item.get("session"),
+                self.float_value(item.get("hours"), 24.0),
+                from_ref=item.get("from_ref"),
+                to_ref=item.get("to_ref"),
+                repo_refs=item.get("repo_refs"),
+                force=True,
+            )
+            event_payload = {"request": item, "status": int(status), "data": payload}
+            stable_event_payload = copy.deepcopy(event_payload)
+            if isinstance(stable_event_payload.get("data"), dict):
+                stable_event_payload["data"].pop("cache", None)
+            signature = self.client_event_payload_signature(stable_event_payload)
+            key = self.client_event_payload_signature(item)
+            with self.client_watch_lock:
+                previous_signature = self.client_watch_session_file_payload_signatures.get(key)
+                self.client_watch_session_file_payload_signatures[key] = signature
+            if previous_signature == signature:
+                continue
+            self.publish_client_event(
+                "session_files_ready",
+                event_payload,
+                trigger=trigger,
+                cache="ready",
+                compute_ms=(time.perf_counter() - started) * 1000,
+            )
+            events.append("session_files_ready")
+        return events
+
+    def poll_auto_approve_client_event_once(self) -> list[str]:
+        started = time.perf_counter()
+        payload, status = self.auto_approve_status()
+        event_payload = {"status": int(status), "data": payload}
+        signature = self.client_event_payload_signature(event_payload)
+        with self.client_watch_lock:
+            previous = self.client_watch_auto_approve_signature
+            self.client_watch_auto_approve_signature = signature
+        if previous == signature:
+            return []
+        self.publish_client_event(
+            "auto_approve_changed",
+            event_payload,
+            trigger="timer",
+            cache="ready",
+            compute_ms=(time.perf_counter() - started) * 1000,
+        )
+        return ["auto_approve_changed"]
+
+    def poll_watched_prs_client_event_once(self) -> list[str]:
+        started = time.perf_counter()
+        payload = self.watched_prs_payload()
+        signature = self.client_event_payload_signature(payload)
+        with self.client_watch_lock:
+            previous = self.client_watch_watched_prs_signature
+            self.client_watch_watched_prs_signature = signature
+        if previous == signature:
+            return []
+        self.publish_client_event(
+            "watched_prs_changed",
+            {"data": payload},
+            trigger="timer",
+            cache="ready",
+            compute_ms=(time.perf_counter() - started) * 1000,
+        )
+        return ["watched_prs_changed"]
 
     def start_client_event_watcher(self) -> None:
         with self.client_watch_lock:
@@ -491,10 +923,25 @@ class TmuxWebtermApp:
     def client_event_watch_loop(self) -> None:
         while True:
             try:
-                self.poll_client_events_once()
+                now = time.monotonic()
+                if now >= self.client_event_next_signature_poll_at:
+                    self.poll_client_events_once()
+                    self.client_event_next_signature_poll_at = now + self.server_event_poll_seconds()
+                if now >= self.client_event_next_auto_poll_at:
+                    self.poll_auto_approve_client_event_once()
+                    settings = settings_payload().get("settings", {})
+                    performance = settings.get("performance", {}) if isinstance(settings, dict) else {}
+                    value = performance.get("pane_state_refresh_ms", 1253) if isinstance(performance, dict) else 1253
+                    self.client_event_next_auto_poll_at = now + max(0.5, min(30.0, self.float_value(value, 1253.0) / 1000.0))
+                if now >= self.client_event_next_watched_pr_poll_at:
+                    self.poll_watched_prs_client_event_once()
+                    settings = settings_payload().get("settings", {})
+                    performance = settings.get("performance", {}) if isinstance(settings, dict) else {}
+                    value = performance.get("watched_pr_refresh_ms", 60001) if isinstance(performance, dict) else 60001
+                    self.client_event_next_watched_pr_poll_at = now + max(15.0, min(600.0, self.float_value(value, 60001.0) / 1000.0))
             except (OSError, RuntimeError, ValueError) as exc:
                 self.log_event(None, "client_event_watch_error", f"client event watch failed: {exc}", {})
-            time.sleep(self.server_event_poll_seconds())
+            time.sleep(0.5)
 
     def cache_set_limited(self, cache: dict[Any, Any], key: Any, value: Any, limit: int) -> None:
         cache[key] = value
@@ -1176,7 +1623,7 @@ class TmuxWebtermApp:
 
     def save_settings(self, patch: dict[str, Any]) -> dict[str, Any]:
         payload = save_settings(patch)
-        self.publish_client_event("settings_changed", {"mtime_ns": payload.get("mtime_ns", 0)})
+        self.publish_client_event("settings_changed", {"mtime_ns": payload.get("mtime_ns", 0), "data": payload}, trigger="manual", cache="ready")
         if payload.get("settings", {}).get("yoagent", {}).get("auto_refresh", False):
             self.maybe_start_yoagent_summary_worker()
         return payload

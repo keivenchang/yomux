@@ -24,6 +24,7 @@ async function expandDirectoryRow(row, fullPath, options = {}) {
   renderTreeChildren(children, fullPath, entries, nextDepth);
   if (!existingChildren) row.insertAdjacentElement('afterend', children);
   rememberFileExplorerSyncExpandedState();
+  if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }
 
 function collapseDirectoryRow(row, fullPath, options = {}) {
@@ -39,6 +40,7 @@ function collapseDirectoryRow(row, fullPath, options = {}) {
     .filter(node => node.classList?.contains('file-tree-children') && node.dataset?.parent === fullPath)
     .forEach(node => node.remove());
   rememberFileExplorerSyncExpandedState();
+  if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }
 
 if (fileExplorerClose) fileExplorerClose.addEventListener('click', () => toggleFileExplorer());

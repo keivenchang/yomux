@@ -1783,6 +1783,10 @@ function shouldSkipSilentActivitySummary(options = {}) {
 }
 
 async function refreshActivitySummary(options = {}) {
+  if (clientPushCanSupplyData() && options.silent === true) {
+    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+    return;
+  }
   if (activitySummaryRefreshing && options.force !== true) return;
   if (shouldSkipSilentActivitySummary(options)) return;
   const requestIsCurrent = activitySummaryGuard.begin();
@@ -1794,8 +1798,7 @@ async function refreshActivitySummary(options = {}) {
     params.set('locale', i18nActiveLocaleId());
     const payload = await apiFetchJson(`/api/activity-summary?${params.toString()}`, {cache: 'no-store'});
     if (!requestIsCurrent()) return;
-    activitySummaryPayload = payload;
-    activitySummaryLastRefreshTs = Date.now();
+    applyActivitySummaryPayloadFromPush(payload);
   } catch (error) {
     if (!requestIsCurrent()) return;
     activitySummaryPayload = {
@@ -1812,6 +1815,17 @@ async function refreshActivitySummary(options = {}) {
       if (infoPanelSubTab === 'yoagent') prewarmYoagent();
     }
   }
+}
+
+function applyActivitySummaryPayloadFromPush(payload = {}) {
+  if (!payload || typeof payload !== 'object') return false;
+  activitySummaryPayload = payload;
+  activitySummaryLastRefreshTs = Date.now();
+  activitySummaryRefreshing = false;
+  renderInfoPanel();
+  renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
+  if (infoPanelSubTab === 'yoagent') prewarmYoagent();
+  return true;
 }
 
 function editorSchemePreferenceChoices(options = {}) {
@@ -1951,8 +1965,6 @@ function preferenceSections() {
       {path: 'file_explorer.indexed_dirs', label: t('pref.file_explorer.indexed_dirs.label'), type: 'list', help: t('pref.file_explorer.indexed_dirs.help')},
       {path: 'file_explorer.index_refresh_seconds', label: t('pref.file_explorer.index_refresh_seconds.label'), type: 'number', min: 0, max: 3600, step: 10, suffix: 's', help: t('pref.file_explorer.index_refresh_seconds.help')},
       {path: 'file_explorer.companion_dirs', label: t('pref.file_explorer.companion_dirs.label'), type: 'list', help: t('pref.file_explorer.companion_dirs.help')},
-      {path: 'file_explorer.refresh_seconds', label: t('pref.file_explorer.refresh_seconds.label', {name: fileExplorerLabel()}), type: 'number', min: 1, max: 60, step: 1, suffix: 's', help: t('pref.file_explorer.refresh_seconds.help')},
-      {path: 'file_explorer.session_files_refresh_seconds', label: t('pref.file_explorer.session_files_refresh_seconds.label'), type: 'number', min: 1, max: 60, step: 1, suffix: 's', help: t('pref.file_explorer.session_files_refresh_seconds.help')},
       {path: 'file_explorer.dir_cache_ms', label: t('pref.file_explorer.dir_cache_ms.label'), type: 'number', min: 0, max: 10000, step: 100, suffix: 'ms', help: t('pref.file_explorer.dir_cache_ms.help')},
       {path: 'file_explorer.new_entry_highlight_ms', label: t('pref.file_explorer.new_entry_highlight_ms.label'), type: 'number', min: 0, max: 600000, step: 1000, suffix: 'ms', help: t('pref.file_explorer.new_entry_highlight_ms.help')},
     ]},
@@ -1962,14 +1974,16 @@ function preferenceSections() {
     ]},
     {title: t('pref.section.performance'), items: [
       {path: 'general.reload_on_update_auto', label: t('pref.general.reload_on_update_auto.label'), type: 'boolean', help: t('pref.general.reload_on_update_auto.help')},
+      {path: 'performance.server_event_poll_ms', label: t('pref.performance.server_event_poll_ms.label'), type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: t('pref.performance.server_event_poll_ms.help')},
+      {path: 'performance.activity_summary_refresh_ms', label: t('pref.performance.activity_summary_refresh_ms.label'), type: 'number', min: 10, max: 600, step: 1, suffix: 's', scale: 1000, displayDecimals: 0, help: t('pref.performance.activity_summary_refresh_ms.help')},
+      {path: 'file_explorer.refresh_seconds', label: t('pref.file_explorer.refresh_seconds.label', {name: fileExplorerLabel()}), type: 'number', min: 1, max: 60, step: 1, suffix: 's', help: t('pref.file_explorer.refresh_seconds.help')},
+      {path: 'file_explorer.session_files_refresh_seconds', label: t('pref.file_explorer.session_files_refresh_seconds.label'), type: 'number', min: 1, max: 60, step: 1, suffix: 's', help: t('pref.file_explorer.session_files_refresh_seconds.help')},
+      {path: 'performance.settings_refresh_ms', label: t('pref.performance.settings_refresh_ms.label'), type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: t('pref.performance.settings_refresh_ms.help')},
       {path: 'performance.metadata_refresh_ms', label: t('pref.performance.metadata_refresh_ms.label'), type: 'number', min: 3000, max: 120000, step: 100, suffix: 'ms', help: t('pref.performance.metadata_refresh_ms.help')},
       {path: 'performance.watched_pr_refresh_ms', label: t('pref.performance.watched_pr_refresh_ms.label'), type: 'number', min: 15000, max: 600000, step: 1000, suffix: 'ms', help: t('pref.performance.watched_pr_refresh_ms.help')},
       {path: 'performance.pane_state_refresh_ms', label: t('pref.performance.pane_state_refresh_ms.label'), type: 'number', min: 500, max: 30000, step: 100, suffix: 'ms', help: t('pref.performance.pane_state_refresh_ms.help')},
       {path: 'performance.latency_refresh_ms', label: t('pref.performance.latency_refresh_ms.label'), type: 'number', min: 1000, max: 30000, step: 100, suffix: 'ms', help: t('pref.performance.latency_refresh_ms.help')},
       {path: 'performance.event_log_refresh_ms', label: t('pref.performance.event_log_refresh_ms.label'), type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: t('pref.performance.event_log_refresh_ms.help')},
-      {path: 'performance.settings_refresh_ms', label: t('pref.performance.settings_refresh_ms.label'), type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: t('pref.performance.settings_refresh_ms.help')},
-      {path: 'performance.activity_summary_refresh_ms', label: t('pref.performance.activity_summary_refresh_ms.label'), type: 'number', min: 10000, max: 600000, step: 1000, suffix: 'ms', help: t('pref.performance.activity_summary_refresh_ms.help')},
-      {path: 'performance.server_event_poll_ms', label: t('pref.performance.server_event_poll_ms.label'), type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: t('pref.performance.server_event_poll_ms.help')},
       {path: 'performance.popover_show_delay_ms', label: t('pref.performance.popover_show_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.popover_show_delay_ms.help')},
       {path: 'performance.popover_hide_delay_ms', label: t('pref.performance.popover_hide_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.popover_hide_delay_ms.help')},
       {path: 'performance.menu_hover_open_delay_ms', label: t('pref.performance.menu_hover_open_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.menu_hover_open_delay_ms.help')},
@@ -2224,9 +2238,9 @@ function preferenceControlHtml(item, query = '') {
   if (item.type === 'boolean') {
     control = `<input type="checkbox" ${baseAttrs}${value ? ' checked' : ''}>`;
   } else if (item.type === 'number') {
-    control = `<input type="number" ${baseAttrs} inputmode="decimal" value="${esc(clampPreferenceNumber(item, item.scale ? Number(value) / item.scale : value))}" min="${esc(item.min)}" max="${esc(item.max)}" step="${esc(item.step || 1)}">`;
+    control = `<input type="number" ${baseAttrs} inputmode="decimal" value="${esc(preferenceNumberDisplayValue(item, value))}" min="${esc(item.min)}" max="${esc(item.max)}" step="${esc(item.step || 1)}">`;
   } else if (item.type === 'range') {
-    const rangeValue = clampPreferenceNumber(item, item.scale ? Number(value) / item.scale : value);
+    const rangeValue = preferenceNumberDisplayValue(item, value);
     control = `<input type="range" ${baseAttrs} value="${esc(rangeValue)}" min="${esc(item.min)}" max="${esc(item.max)}" step="${esc(item.step || 1)}"><output class="preferences-range-value" for="${esc(controlId)}">${esc(rangeValue)}</output>`;
   } else if (item.type === 'select') {
     control = `<select ${baseAttrs}>${preferenceSelectOptionsHtml(item, value)}</select>`;
@@ -2266,6 +2280,15 @@ function preferenceControlHtml(item, query = '') {
   const advisory = preferenceAdvisoryHtml(item, value);
   const rowClass = item.type === 'textarea' || item.wide ? ' preferences-setting-row--wide' : '';
   return `<div class="preferences-setting-row${rowClass}"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}</label><span class="preferences-setting-control setting-type-${esc(item.type)}">${control}${suffix}${extraControl}<button type="button" class="preferences-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>${esc(t('pref.reset.row'))}</button></span>${advisory}</div>`;
+}
+
+function preferenceNumberDisplayValue(item, value) {
+  const scale = Number(item.scale) || 1;
+  const raw = scale !== 1 ? Number(value) / scale : value;
+  const clamped = Number(clampPreferenceNumber(item, raw));
+  if (!Number.isFinite(clamped)) return clampPreferenceNumber(item, raw);
+  if (Number.isFinite(Number(item.displayDecimals))) return clamped.toFixed(Number(item.displayDecimals));
+  return clamped;
 }
 
 function uploadRsyncExampleCommand() {
@@ -2338,8 +2361,12 @@ function preferencesPanelHtml() {
 
 function debugEventCounts() {
   const apiCalls = jsDebugEvents.filter(event => event.type === 'api').length;
+  const sseEvents = jsDebugEvents.filter(event => event.type === 'sse').length;
   const errors = jsDebugEvents.filter(event => event.type === 'error' || event.type === 'unhandledrejection' || event.error).length;
-  return {apiCalls, errors};
+  const apiRequestBytes = jsDebugEvents.reduce((total, event) => total + (event.type === 'api' && Number.isFinite(event.requestBytes) ? event.requestBytes : 0), 0);
+  const apiResponseBytes = jsDebugEvents.reduce((total, event) => total + (event.type === 'api' && Number.isFinite(event.responseBytes) ? event.responseBytes : 0), 0);
+  const sseBytes = jsDebugEvents.reduce((total, event) => total + (event.type === 'sse' && Number.isFinite(event.frameBytes) ? event.frameBytes : 0), 0);
+  return {apiCalls, sseEvents, errors, apiRequestBytes, apiResponseBytes, sseBytes};
 }
 
 function debugMetaText() {
@@ -2358,6 +2385,7 @@ function debugTimeText(value) {
 
 function debugEventTypeLabel(type) {
   if (type === 'api') return 'API';
+  if (type === 'sse') return 'SSE';
   if (type === 'unhandledrejection') return 'Promise';
   if (type === 'error') return 'Error';
   return String(type || 'Event');
@@ -2372,13 +2400,61 @@ function debugEventStatusText(event) {
 
 function debugEventDetailText(event) {
   if (event.type === 'api') return `${event.method || 'GET'} ${event.url || ''}`.trim();
+  if (event.type === 'sse') return [
+    event.eventType || 'event',
+    event.trigger ? `trigger=${event.trigger}` : '',
+    event.cache ? `cache=${event.cache}` : '',
+    debugFilesystemEventSummaryText(event),
+    event.key ? `key=${event.key}` : '',
+  ].filter(Boolean).join(' ');
   return event.message || event.reason || event.source || '';
+}
+
+function debugCountToken(prefix, value, {includeZero = false} = {}) {
+  const count = Number(value);
+  if (!Number.isFinite(count)) return '';
+  if (!includeZero && count === 0) return '';
+  return `${prefix}${count}`;
+}
+
+function debugFilesystemEventSummaryText(event) {
+  if (event.type !== 'sse' || event.eventType !== 'fs_changed') return '';
+  const change = event.changeSummary && typeof event.changeSummary === 'object' ? event.changeSummary : {};
+  const listing = event.listingSummary && typeof event.listingSummary === 'object' ? event.listingSummary : {};
+  const parts = [];
+  const rootsChanged = debugCountToken('roots:', change.roots_changed);
+  const entriesAdded = debugCountToken('+', change.entries_added);
+  const entriesRemoved = debugCountToken('-', change.entries_removed);
+  const entriesModified = debugCountToken('~', change.entries_modified);
+  const entryParts = [entriesAdded, entriesRemoved, entriesModified].filter(Boolean).join(' ');
+  if (rootsChanged || entryParts) parts.push(`changed=${[rootsChanged, entryParts].filter(Boolean).join(' ')}`);
+  const filesAdded = debugCountToken('+', change.files_added);
+  const filesRemoved = debugCountToken('-', change.files_removed);
+  const filesModified = debugCountToken('~', change.files_modified);
+  const fileParts = [filesAdded, filesRemoved, filesModified].filter(Boolean).join(' ');
+  if (fileParts) parts.push(`files=${fileParts}`);
+  const dirsAdded = debugCountToken('+', change.dirs_added);
+  const dirsRemoved = debugCountToken('-', change.dirs_removed);
+  const dirsModified = debugCountToken('~', change.dirs_modified);
+  const dirParts = [dirsAdded, dirsRemoved, dirsModified].filter(Boolean).join(' ');
+  if (dirParts) parts.push(`dirs=${dirParts}`);
+  const listedEntries = debugCountToken('listed=', listing.entries_listed, {includeZero: true});
+  const listedRoots = debugCountToken('/', listing.roots_listed, {includeZero: true});
+  if (listedEntries) parts.push(`${listedEntries}${listedRoots}`);
+  const rootErrors = debugCountToken('errors=', listing.roots_error);
+  if (rootErrors) parts.push(rootErrors);
+  return parts.length ? `fs=${parts.join(' ')}` : '';
 }
 
 function debugEventMetaText(event) {
   return [
     debugTimeText(event.ts),
     Number.isFinite(event.durationMs) ? `${event.durationMs} ms` : '',
+    Number.isFinite(event.computeMs) ? `server ${event.computeMs} ms` : '',
+    Number.isFinite(event.receiveLatencyMs) ? `receive ${event.receiveLatencyMs} ms` : '',
+    Number.isFinite(event.frameBytes) ? `rx ${event.frameBytes} B` : '',
+    Number.isFinite(event.bytes) && event.bytes !== event.frameBytes ? `data ${event.bytes} B` : '',
+    Number.isFinite(event.responseBytes) ? `${event.responseBytes} B rx` : '',
     debugEventStatusText(event),
     event.source ? `source: ${event.source}` : '',
     event.line ? `line ${event.line}${event.column ? `:${event.column}` : ''}` : '',
@@ -2387,13 +2463,22 @@ function debugEventMetaText(event) {
 
 function debugEventLineText(event) {
   const status = debugEventStatusText(event);
-  const duration = Number.isFinite(event.durationMs) ? `${event.durationMs}ms` : '';
+  const durationMs = Number.isFinite(event.durationMs)
+    ? event.durationMs
+    : (event.type === 'sse' && Number.isFinite(event.receiveLatencyMs) ? event.receiveLatencyMs : NaN);
+  const duration = Number.isFinite(durationMs) ? `${durationMs}ms` : '';
+  const sseMeta = event.type === 'sse'
+    ? [
+      Number.isFinite(event.frameBytes) ? `rx=${event.frameBytes}B` : '',
+    ].filter(Boolean).join(' ')
+    : '';
   const location = event.source ? `${event.source}${event.line ? `:${event.line}${event.column ? `:${event.column}` : ''}` : ''}` : '';
   return [
     debugTimeText(event.ts),
     debugEventTypeLabel(event.type).padEnd(7),
     status.padEnd(8),
     duration.padStart(8),
+    sseMeta,
     debugEventDetailText(event) || t('debug.event'),
     location,
   ].filter(Boolean).join(' ');
@@ -2414,10 +2499,11 @@ function debugApiSummaryRows(limit = 6) {
   for (const event of jsDebugEvents) {
     if (event.type !== 'api' || !Number.isFinite(event.durationMs)) continue;
     const key = `${event.method || 'GET'} ${debugApiSummaryKey(event.url)}`;
-    const item = summaries.get(key) || {key, count: 0, total: 0, max: 0, lastStatus: ''};
+    const item = summaries.get(key) || {key, count: 0, total: 0, max: 0, bytes: 0, lastStatus: ''};
     item.count += 1;
     item.total += event.durationMs;
     item.max = Math.max(item.max, event.durationMs);
+    item.bytes += Number.isFinite(event.responseBytes) ? event.responseBytes : 0;
     item.lastStatus = debugEventStatusText(event);
     summaries.set(key, item);
   }
@@ -2426,7 +2512,36 @@ function debugApiSummaryRows(limit = 6) {
     .slice(0, limit)
     .map(item => {
       const avg = item.count ? item.total / item.count : 0;
-      return `${item.key.padEnd(28)} max=${item.max.toFixed(1).padStart(7)}ms avg=${avg.toFixed(1).padStart(7)}ms count=${String(item.count).padStart(3)} ${item.lastStatus}`.trimEnd();
+      return `${item.key.padEnd(28)} max=${item.max.toFixed(1).padStart(7)}ms avg=${avg.toFixed(1).padStart(7)}ms count=${String(item.count).padStart(3)} rx=${String(item.bytes).padStart(7)}B ${item.lastStatus}`.trimEnd();
+    });
+}
+
+function debugSseSummaryRows(limit = 6) {
+  return jsDebugEvents
+    .filter(event => event.type === 'sse' && Number.isFinite(event.computeMs))
+    .sort((a, b) => (b.computeMs - a.computeMs) || String(a.eventType || '').localeCompare(String(b.eventType || '')))
+    .slice(0, limit)
+    .map(event => `${String(event.eventType || 'event').padEnd(28)} server=${event.computeMs.toFixed(1).padStart(7)}ms rx=${String(event.frameBytes || event.bytes || 0).padStart(7)}B ${event.trigger || ''}`.trimEnd());
+}
+
+function debugSseLatencySummaryRows(limit = 6) {
+  const summaries = new Map();
+  for (const event of jsDebugEvents) {
+    if (event.type !== 'sse' || !Number.isFinite(event.receiveLatencyMs)) continue;
+    const key = String(event.eventType || 'event');
+    const item = summaries.get(key) || {key, count: 0, total: 0, max: 0, bytes: 0};
+    item.count += 1;
+    item.total += event.receiveLatencyMs;
+    item.max = Math.max(item.max, event.receiveLatencyMs);
+    item.bytes += Number.isFinite(event.frameBytes) ? event.frameBytes : Number(event.bytes || 0);
+    summaries.set(key, item);
+  }
+  return [...summaries.values()]
+    .sort((a, b) => (b.max - a.max) || (b.total - a.total) || a.key.localeCompare(b.key))
+    .slice(0, limit)
+    .map(item => {
+      const avg = item.count ? item.total / item.count : 0;
+      return `${item.key.padEnd(28)} max=${item.max.toFixed(1).padStart(7)}ms avg=${avg.toFixed(1).padStart(7)}ms count=${String(item.count).padStart(3)} rx=${String(item.bytes).padStart(7)}B`;
     });
 }
 
@@ -2438,13 +2553,21 @@ function jsDebugTextForClipboard() {
     `page=${page || '/'}`,
     `events=${jsDebugEvents.length}`,
     `api=${counts.apiCalls}`,
+    `sse=${counts.sseEvents}`,
     `errors=${counts.errors}`,
+    `api_tx=${counts.apiRequestBytes}B`,
+    `api_rx=${counts.apiResponseBytes}B`,
+    `sse_rx=${counts.sseBytes}B`,
   ].join(' ');
   const apiSummaryRows = debugApiSummaryRows();
+  const sseSummaryRows = debugSseSummaryRows();
+  const sseLatencySummaryRows = debugSseLatencySummaryRows();
   const rows = jsDebugEvents.map(debugEventLineText);
   return [
     header,
     ...(apiSummaryRows.length ? ['Slow API by max latency:', ...apiSummaryRows, ''] : []),
+    ...(sseSummaryRows.length ? ['Slow SSE server work:', ...sseSummaryRows, ''] : []),
+    ...(sseLatencySummaryRows.length ? ['Slow SSE receive latency:', ...sseLatencySummaryRows, ''] : []),
     ...rows,
   ].join('\n');
 }
@@ -2456,6 +2579,7 @@ function debugPanelHtml() {
       <div class="js-debug-summary" aria-label="${esc(t('debug.summary'))}">
         ${debugStatHtml(t('debug.events'), jsDebugEvents.length, 'events')}
         ${debugStatHtml(t('debug.apiCalls'), counts.apiCalls, 'api')}
+        ${debugStatHtml('SSE', counts.sseEvents, 'sse')}
         ${debugStatHtml(t('debug.errors'), counts.errors, 'errors')}
       </div>
       <div class="js-debug-actions">
@@ -2517,9 +2641,11 @@ function refreshDebugPanelFromEvents(panel, options = {}) {
   const counts = debugEventCounts();
   const statEvents = panel.querySelector('[data-js-debug-stat="events"]');
   const statApi = panel.querySelector('[data-js-debug-stat="api"]');
+  const statSse = panel.querySelector('[data-js-debug-stat="sse"]');
   const statErrors = panel.querySelector('[data-js-debug-stat="errors"]');
   if (statEvents) statEvents.textContent = String(jsDebugEvents.length);
   if (statApi) statApi.textContent = String(counts.apiCalls);
+  if (statSse) statSse.textContent = String(counts.sseEvents);
   if (statErrors) statErrors.textContent = String(counts.errors);
   const log = panel.querySelector('[data-js-debug-log]');
   if (!log || (document.activeElement === log && options.force !== true)) return;

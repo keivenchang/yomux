@@ -629,7 +629,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             payload = self.read_json_body(64 * 1024)
             if payload is None:
                 return
-            self.write_json(self.server.app.update_client_watch_roots(payload.get("roots", [])))
+            self.write_json(self.server.app.update_client_watch_roots(payload))
             return
         if parsed.path == "/api/yoagent/chat":
             payload = self.read_json_body(64 * 1024)

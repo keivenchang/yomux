@@ -63,6 +63,7 @@ const fileExplorerFsBatchPending = new Map();
 const fileExplorerFsBatchDelayMs = 8;
 let fileExplorerFsBatchSeq = 0;
 let fileExplorerFsBatchTimer = null;
+let fileExplorerPushRefreshDepth = 0;
 
 function fileExplorerFsCacheTtlMs() {
   return Math.max(0, numberSetting('file_explorer.dir_cache_ms', 1500) || 0);
@@ -77,6 +78,11 @@ function fileExplorerFsBatchSingleUrl(type, path) {
   return type === 'list'
     ? `/api/fs/list?path=${encodeURIComponent(normalized)}`
     : `/api/fs/info?path=${encodeURIComponent(normalized)}`;
+}
+
+function suppressBackgroundFilesystemFetch(options = {}) {
+  if (options.force === true || options.user === true) return false;
+  return clientPushConnectedForData() && !fileExplorerUserIsActive();
 }
 
 function scheduleFileExplorerFsBatchFlush() {
@@ -158,6 +164,8 @@ async function fetchDirectory(path, options = {}) {
     const cached = fileExplorerDirListingCache.get(root);
     if (cached && Date.now() - cached.at < dirListingTtlMs) return cached.entries;
   }
+  if (fileExplorerPushRefreshDepth > 0) return null;
+  if (suppressBackgroundFilesystemFetch(options)) return null;
   if (canReuse) {
     const inflight = fileExplorerDirListingInflight.get(root);
     if (inflight) return inflight;
@@ -201,12 +209,43 @@ function invalidateFileExplorerFsCaches() {
   fileExplorerDirectorySignatures.clear();
 }
 
-async function refreshFileExplorerFromPush(payload = {}) {
-  invalidateFileExplorerFsCaches();
-  if (fileExplorerPaneIsOpen()) {
-    await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+function entriesByDirFromFilesystemPush(payload = {}) {
+  const entriesByDir = new Map();
+  const directories = Array.isArray(payload.directories) ? payload.directories : [];
+  for (const item of directories) {
+    const path = normalizeDirectoryPath(item?.path || item?.data?.path || '');
+    const data = item?.data && typeof item.data === 'object' ? item.data : {};
+    const entries = Array.isArray(data.entries) ? data.entries : null;
+    if (!path || !entries || item.ok === false || Number(item.status || 200) >= 400) continue;
+    entriesByDir.set(path, entries);
+    cacheFileExplorerRepoInfoEntries(path, entries);
+    markNewDirectoryEntries(path, entries);
+    recordDirectorySignature(path, entries);
+    setLimitedMapEntry(fileExplorerDirListingCache, path, {entries, at: Date.now()}, fileExplorerMemoryCacheLimit);
   }
-  await refreshOpenFilesIfChanged();
+  return entriesByDir;
+}
+
+async function refreshFileExplorerFromPush(payload = {}) {
+  const entriesByDir = entriesByDirFromFilesystemPush(payload);
+  if (!entriesByDir.size) return;
+  fileExplorerPushRefreshDepth += 1;
+  try {
+    const root = normalizeDirectoryPath(currentFileExplorerRoot());
+    if (fileExplorerPaneIsOpen() && entriesByDir.has(root)) {
+      await refreshFileExplorerTreesInPlace({
+        root,
+        entries: entriesByDir.get(root),
+        preserveExpanded: true,
+        preserveScroll: true,
+        entriesByDir,
+      });
+    }
+    const openFileDirs = Array.from(openFiles.keys()).map(path => normalizeDirectoryPath(dirnameOf(path)));
+    if (openFileDirs.every(path => fileExplorerDirListingCache.has(path))) await refreshOpenFilesIfChanged();
+  } finally {
+    fileExplorerPushRefreshDepth = Math.max(0, fileExplorerPushRefreshDepth - 1);
+  }
 }
 
 function expandUserPath(path) {
@@ -2522,6 +2561,7 @@ async function fetchFilePathInfo(path, options = {}) {
     const cached = fileExplorerPathInfoCache.get(normalized);
     if (cached && Date.now() - cached.at < pathInfoTtlMs) return cached.payload;
   }
+  if (suppressBackgroundFilesystemFetch(options)) return null;
   if (canReuse) {
     const inflight = fileExplorerPathInfoInflight.get(normalized);
     if (inflight) return inflight;
@@ -4085,10 +4125,29 @@ function clientServerWatchRoots() {
     .sort();
 }
 
+function clientServerWatchState() {
+  const state = {
+    roots: clientServerWatchRoots(),
+    context_items: activeSessions
+      .filter(isTmuxSession)
+      .map(session => ({session, messages: transcriptPreviewMessages})),
+  };
+  if (typeof activitySummaryIsVisible === 'function') {
+    state.activity_summary = {
+      visible: activitySummaryIsVisible(),
+      locale: typeof i18nActiveLocaleId === 'function' ? i18nActiveLocaleId() : 'en',
+    };
+  }
+  if (document.querySelector('.file-explorer-changes-panel') && typeof clientSessionFilesWatchRequests === 'function') {
+    state.session_files = clientSessionFilesWatchRequests();
+  }
+  return state;
+}
+
 function syncServerWatchRoots(options = {}) {
-  if (readOnlyMode || !clientEventsSource || serverWatchRootsInFlight) return;
-  const roots = clientServerWatchRoots();
-  const signature = roots.join('\x1f');
+  if (readOnlyMode || !clientPushCanSupplyData() || serverWatchRootsInFlight) return;
+  const state = clientServerWatchState();
+  const signature = JSON.stringify(state);
   const renewDue = options.renew === true && Date.now() - serverWatchRootsSyncedAt >= 240000;
   if (signature === serverWatchRootsSignature && !renewDue) return;
   serverWatchRootsSignature = signature;
@@ -4096,7 +4155,7 @@ function syncServerWatchRoots(options = {}) {
   apiFetch('/api/watch/roots', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({roots}),
+    body: JSON.stringify(state),
   }).then(() => {
     serverWatchRootsSyncedAt = Date.now();
   }).catch(() => {

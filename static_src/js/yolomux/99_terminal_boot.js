@@ -316,18 +316,23 @@ function renderWatchedPrs() {
 async function refreshWatchedPrs() {
   try {
     const data = await apiFetchJson('/api/watched-prs');
-    if (!data || typeof data !== 'object') return;
-    watchedPrsData = {
-      watched_prs: Array.isArray(data.watched_prs) ? data.watched_prs : [],
-      truncated: Number(data.truncated) || 0,
-      invalid: Array.isArray(data.invalid) ? data.invalid : [],
-      refresh_ms: Number(data.refresh_ms) || watchedPrRefreshMs,
-    };
-    notifyWatchedPrTransitions(watchedPrsData.watched_prs);
-    renderWatchedPrs();
+    applyWatchedPrsPayload(data);
   } catch (error) {
     // Non-fatal: keep the last good render; the next poll retries.
   }
+}
+
+function applyWatchedPrsPayload(data) {
+  if (!data || typeof data !== 'object') return false;
+  watchedPrsData = {
+    watched_prs: Array.isArray(data.watched_prs) ? data.watched_prs : [],
+    truncated: Number(data.truncated) || 0,
+    invalid: Array.isArray(data.invalid) ? data.invalid : [],
+    refresh_ms: Number(data.refresh_ms) || watchedPrRefreshMs,
+  };
+  notifyWatchedPrTransitions(watchedPrsData.watched_prs);
+  renderWatchedPrs();
+  return true;
 }
 
 // Append a PR ref to github.watched_prs (dedup by canonical ref); accepts owner/repo#N or a PR URL.
@@ -1476,17 +1481,7 @@ async function refreshAutoStatuses() {
 async function loadAutoStatuses() {
   try {
     const payload = await apiFetchJson('/api/auto-approve');
-    const previousActive = activeSessions.slice();
-    const sessionsChanged = Array.isArray(payload.session_order) ? updateSessionList(payload.session_order) : false;
-    if (payload.rules) {
-      yoloRulesPayload = payload.rules;
-      renderPreferencesPanels();
-    }
-    for (const session of sessions) {
-      const state = payload.sessions?.[session] || {target: session, enabled: false, last_action: 'off'};
-      autoApproveStates.set(session, state);
-    }
-    if (sessionsChanged) renderPanels(previousActive);
+    applyAutoApprovePayload(payload);
   } catch (_) {
     for (const session of activeSessions.filter(isTmuxSession)) {
       try {
@@ -1500,6 +1495,27 @@ async function loadAutoStatuses() {
   // so a finished/idle pane's marker stops spinning instead of lingering (the transcript poll path
   // updated the title but never re-synced the markers).
   renderAutoApproveButtons();
+}
+
+function applyAutoApprovePayload(payload) {
+  if (!payload || typeof payload !== 'object') return false;
+  const previousActive = activeSessions.slice();
+  const sessionsChanged = Array.isArray(payload.session_order) ? updateSessionList(payload.session_order) : false;
+  if (payload.rules) {
+    yoloRulesPayload = payload.rules;
+    renderPreferencesPanels();
+  }
+  for (const session of sessions) {
+    const state = payload.sessions?.[session] || {target: session, enabled: false, last_action: 'off'};
+    autoApproveStates.set(session, state);
+  }
+  if (sessionsChanged) renderPanels(previousActive);
+  updateDocumentTitle();
+  renderAutoApproveButtons();
+  updateSessionButtonStates();
+  refreshActivePanelHeaders();
+  trackSessionStateChanges();
+  return true;
 }
 
 function autoApproveOwnerLabel(payload) {
@@ -1671,6 +1687,61 @@ function maybeHandleServerVersionChange(serverVersion) {
   showServerUpdateBanner(serverVersion);
 }
 
+async function applyTranscriptsPayload(payload, options = {}) {
+  if (!payload || typeof payload !== 'object') return false;
+  transcriptMeta = payload;
+  transcriptMetaLoaded = true;
+  transcriptMetaLoadError = '';
+  maybeHandleServerVersionChange(transcriptMeta.server_version);
+  if (transcriptMeta.agentAuth) agentAuth = transcriptMeta.agentAuth;
+  updateMetadataBadgePulses(transcriptMeta);
+  const previousActive = activeSessions.slice();
+  const sessionsChanged = updateSessionList(transcriptMeta.session_order || []);
+  if (options.refreshAuto !== false && !(typeof clientPushSuppressesPolling === 'function' && clientPushSuppressesPolling())) {
+    await loadAutoStatuses();
+  }
+  if (sessionsChanged) renderPanels(previousActive);
+  renderSessionButtons();
+  renderInfoPanel();
+  renderYoagentPanel();
+  if (options.refreshActivity !== false) refreshActivitySummary({silent: true});
+  for (const session of activeSessions.filter(isTmuxSession)) {
+    const meta = document.getElementById(`meta-${session}`);
+    const preview = document.getElementById(`transcript-${session}`);
+    const info = transcriptMeta.sessions?.[session];
+    const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
+    updatePanelHeader(session, info);
+    if (meta) {
+      meta.innerHTML = stripTitleAttrs(projectMetaHtml(session, info));
+      meta.removeAttribute('title');
+    }
+    renderSummaryContext(session, info, agent);
+    if (!preview) continue;
+    if (agent?.transcript) {
+      updateTranscriptPathRow(session, agent.transcript);
+      if (options.refreshContext === false) continue;
+      preview.textContent = `session_id: ${agent.session_id || ''}\nstatus: ${agent.status || ''}\n\nloading recent transcript context...`;
+      refreshTranscriptPreview(session, preview, {preserveScroll: false});
+    } else if (agent?.error) {
+      updateTranscriptPathRow(session, '', agent.error);
+      preview.textContent = agent.error;
+    } else {
+      updateTranscriptPathRow(session, '', 'no agent transcript found');
+      preview.textContent = 'no agent transcript found';
+    }
+  }
+  renderPaneTabStrips();
+  scheduleFileExplorerActiveTabSync();
+  if (typeof clientPushSuppressesPolling === 'function' && clientPushSuppressesPolling()) {
+    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({renew: true});
+  } else {
+    refreshWatchedFilesystem();
+  }
+  trackSessionStateChanges();
+  refreshOpenEventLogs();
+  return true;
+}
+
 async function refreshTranscripts(options = {}) {
   if (transcriptMetaRefreshPromise) return transcriptMetaRefreshPromise;
   transcriptMetaLoading = true;
@@ -1682,53 +1753,8 @@ async function refreshTranscripts(options = {}) {
       const params = new URLSearchParams();
       if (options.force === true) params.set('force', '1');
       const suffix = params.toString();
-      transcriptMeta = await apiFetchJson(`/api/transcripts${suffix ? `?${suffix}` : ''}`);
-      transcriptMetaLoaded = true;
-      transcriptMetaLoadError = '';
-      maybeHandleServerVersionChange(transcriptMeta.server_version);
-      // #39: keep agent login status fresh so the new-session picker re-enables an agent after login.
-      if (transcriptMeta.agentAuth) agentAuth = transcriptMeta.agentAuth;
-      updateMetadataBadgePulses(transcriptMeta);
-      const previousActive = activeSessions.slice();
-      const sessionsChanged = updateSessionList(transcriptMeta.session_order || []);
-      await loadAutoStatuses();
-      if (sessionsChanged) renderPanels(previousActive);
-      renderSessionButtons();
-      renderInfoPanel();
-      renderYoagentPanel();
-      refreshActivitySummary({silent: true});
-      for (const session of activeSessions.filter(isTmuxSession)) {
-        const meta = document.getElementById(`meta-${session}`);
-        const preview = document.getElementById(`transcript-${session}`);
-        const info = transcriptMeta.sessions?.[session];
-        const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
-        updatePanelHeader(session, info);
-        if (meta) {
-          meta.innerHTML = stripTitleAttrs(projectMetaHtml(session, info));
-          meta.removeAttribute('title');
-        }
-        renderSummaryContext(session, info, agent);
-        if (agent?.transcript) {
-          updateTranscriptPathRow(session, agent.transcript);
-          preview.textContent = `session_id: ${agent.session_id || ''}\nstatus: ${agent.status || ''}\n\nloading recent transcript context...`;
-          refreshTranscriptPreview(session, preview, {preserveScroll: false});
-        } else if (agent?.error) {
-          updateTranscriptPathRow(session, '', agent.error);
-          preview.textContent = agent.error;
-        } else {
-          updateTranscriptPathRow(session, '', 'no agent transcript found');
-          preview.textContent = 'no agent transcript found';
-        }
-      }
-      renderPaneTabStrips();
-      scheduleFileExplorerActiveTabSync();
-      if (typeof clientPushSuppressesPolling === 'function' && clientPushSuppressesPolling()) {
-        if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({renew: true});
-      } else {
-        refreshWatchedFilesystem();
-      }
-      trackSessionStateChanges();
-      refreshOpenEventLogs();
+      const payload = await apiFetchJson(`/api/transcripts${suffix ? `?${suffix}` : ''}`);
+      await applyTranscriptsPayload(payload, {refreshAuto: true, refreshContext: true, refreshActivity: true});
     } catch (error) {
       transcriptMetaLoadError = String(error);
       for (const session of activeSessions.filter(isTmuxSession)) {
@@ -1809,15 +1835,22 @@ function updateTranscriptPathRow(session, path, fallback = 'no transcript path')
 async function refreshTranscriptPreview(session, preview, options = {}) {
   try {
     const payload = await apiFetchJson(`/api/context-items?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
-    if (payload.items) {
-      updateTranscriptPathRow(session, payload.path);
-      renderTranscriptItems(preview, payload.path, payload.items, options);
-    } else {
+    if (!applyContextItemsPayloadFromPush(payload, options)) {
       preview.textContent = JSON.stringify(payload, null, 2);
     }
   } catch (error) {
     preview.textContent += `\n\ncontext load failed: ${error}`;
   }
+}
+
+function applyContextItemsPayloadFromPush(payload = {}, options = {}) {
+  if (!payload || !payload.items) return false;
+  const session = payload.session || options.session || '';
+  const preview = options.preview || (session ? document.getElementById(`transcript-${session}`) : null);
+  if (!preview) return false;
+  updateTranscriptPathRow(session, payload.path);
+  renderTranscriptItems(preview, payload.path, payload.items, options);
+  return true;
 }
 
 function startTranscriptStream(session, options = {}) {
@@ -2026,8 +2059,20 @@ function refreshAll() {
   refreshWatchedFilesystem();
 }
 
+function scheduleInitialTranscriptRefreshFallback() {
+  if (!clientPushCanSupplyData()) {
+    refreshTranscripts();
+    return;
+  }
+  setTimeout(() => {
+    const loaded = transcriptMeta?.sessions && Object.keys(transcriptMeta.sessions).length > 0;
+    if (!loaded) refreshTranscripts();
+  }, 15000);
+}
+
 async function boot() {
   applySettingsPayload(clientSettingsPayload, {initial: true, force: true});
+  installClientEventStream();
   // i18n (DOIT.8): AWAIT the active locale catalog (all-static-fetch) before the first render so menus,
   // tabs, and the wordmark paint in the right language from the start — no flash of raw t() keys (the
   // menu bar renders synchronously at boot, before any later re-render could fix it). A 'system' pref is
@@ -2046,26 +2091,58 @@ async function boot() {
   renderPanels([], {prune: false});
   seedVisualActivePaneItem(activeSessions);
   updatePanelInactiveOverlays();
+  if (clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   await Promise.all(activeSessions.filter(isTmuxSession).map(session => ensureTerminalRunning(session)));
-  refreshTranscripts();
+  scheduleInitialTranscriptRefreshFallback();
   refreshWatchedPrs();   // DOIT.29: first watched-PR fetch at boot; thereafter on its own interval
   renderAutoApproveButtons();
   updateLatency();
   installRuntimeIntervals();
   scheduleStartupHelperTip();
-  installClientEventStream();
   installDevAutoReload();
 }
 
-function clientEventPayload(event) {
+function clientEventEnvelope(event) {
   try {
     const parsed = JSON.parse(event?.data || '{}');
-    return parsed && typeof parsed === 'object' && parsed.payload && typeof parsed.payload === 'object'
-      ? parsed.payload
-      : parsed;
+    return parsed && typeof parsed === 'object' ? parsed : {};
   } catch (_error) {
     return {};
   }
+}
+
+function clientEventPayloadFromEnvelope(envelope) {
+  return envelope && typeof envelope === 'object' && envelope.payload && typeof envelope.payload === 'object'
+    ? envelope.payload
+    : envelope;
+}
+
+function recordSseDebugEvent(eventType, envelope = {}, rawEvent = null) {
+  if (!debugModeEnabled) return;
+  const payload = clientEventPayloadFromEnvelope(envelope);
+  const rawData = rawEvent?.data || '';
+  const dataBytes = jsDebugByteLength(rawData);
+  const dataLines = String(rawData || '').split(/\r?\n/);
+  const frameBytes = jsDebugByteLength(`event: ${eventType}\n`)
+    + dataLines.reduce((total, line) => total + jsDebugByteLength(`data: ${line}\n`), 0)
+    + 1;
+  const serverTimeMs = Number(envelope?.time) * 1000;
+  const receiveLatencyMs = Number.isFinite(serverTimeMs)
+    ? Number((Date.now() - serverTimeMs).toFixed(1))
+    : undefined;
+  recordJsDebugEvent('sse', {
+    eventType,
+    serverEventId: Number(envelope?.id || 0) || undefined,
+    trigger: payload?.trigger || '',
+    cache: payload?.cache || '',
+    computeMs: Number.isFinite(Number(payload?.compute_ms)) ? Number(payload.compute_ms) : undefined,
+    receiveLatencyMs,
+    bytes: dataBytes,
+    frameBytes,
+    changeSummary: payload?.change_summary && typeof payload.change_summary === 'object' ? payload.change_summary : null,
+    listingSummary: payload?.listing_summary && typeof payload.listing_summary === 'object' ? payload.listing_summary : null,
+    key: payload?.session || payload?.locale || payload?.request?.session || '',
+  });
 }
 
 function scheduleSessionFilesPushRefresh() {
@@ -2081,11 +2158,41 @@ function scheduleSessionFilesPushRefresh() {
 
 function handleClientPushEvent(type, payload = {}) {
   if (type === 'settings_changed') {
+    if (payload.data && typeof payload.data === 'object') {
+      applySettingsPayload(payload.data, {force: true});
+      return;
+    }
     refreshSettings({force: true, silent: true});
     return;
   }
+  if (type === 'auto_approve_changed') {
+    if (payload.data) applyAutoApprovePayload(payload.data);
+    return;
+  }
+  if (type === 'watched_prs_changed') {
+    if (payload.data) applyWatchedPrsPayload(payload.data);
+    return;
+  }
   if (type === 'transcripts_changed') {
-    refreshTranscripts({force: true});
+    if (payload.data) {
+      applyTranscriptsPayload(payload.data, {refreshAuto: false, refreshContext: false, refreshActivity: false});
+    } else {
+      refreshTranscripts({force: true});
+    }
+    return;
+  }
+  if (type === 'context_items_ready') {
+    if (payload.data) applyContextItemsPayloadFromPush(payload.data, {session: payload.session, preserveScroll: true});
+    return;
+  }
+  if (type === 'activity_summary_ready') {
+    if (payload.data) applyActivitySummaryPayloadFromPush(payload.data);
+    return;
+  }
+  if (type === 'session_files_ready') {
+    if (payload.data && typeof applySessionFilesPayloadFromPush === 'function') {
+      applySessionFilesPayloadFromPush(payload.data, payload.request || {});
+    }
     return;
   }
   if (type === 'session_files_changed') {
@@ -2108,16 +2215,22 @@ function installClientEventStream() {
     return;
   }
   clientEventsSource = source;
-  source.addEventListener('ready', () => {
+  source.addEventListener('ready', event => {
     clientEventsConnected = true;
+    recordSseDebugEvent('ready', clientEventEnvelope(event), event);
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   });
-  source.addEventListener('ping', () => { clientEventsConnected = true; });
+  source.addEventListener('ping', event => {
+    clientEventsConnected = true;
+    recordSseDebugEvent('ping', clientEventEnvelope(event), event);
+  });
   source.onerror = () => { clientEventsConnected = false; };
-  for (const type of ['settings_changed', 'fs_changed', 'session_files_changed', 'transcripts_changed']) {
+  for (const type of ['settings_changed', 'auto_approve_changed', 'watched_prs_changed', 'fs_changed', 'session_files_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready']) {
     source.addEventListener(type, event => {
       clientEventsConnected = true;
-      handleClientPushEvent(type, clientEventPayload(event));
+      const envelope = clientEventEnvelope(event);
+      recordSseDebugEvent(type, envelope, event);
+      handleClientPushEvent(type, clientEventPayloadFromEnvelope(envelope));
     });
   }
 }

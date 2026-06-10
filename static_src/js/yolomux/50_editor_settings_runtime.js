@@ -838,12 +838,22 @@ function clearRuntimeInterval(name) {
 }
 
 function clientPushSuppressesPolling() {
-  return clientEventsConnected === true;
+  return clientPushConnectedForData();
 }
 
 function refreshTranscriptsFromRuntime() {
   if (clientPushSuppressesPolling()) return;
   refreshTranscripts();
+}
+
+function refreshAutoStatusesFromRuntime() {
+  if (clientPushSuppressesPolling()) return;
+  refreshAutoStatuses();
+}
+
+function refreshWatchedPrsFromRuntime() {
+  if (clientPushSuppressesPolling()) return;
+  refreshWatchedPrs();
 }
 
 function refreshWatchedFilesystemFromRuntime() {
@@ -860,9 +870,9 @@ function refreshSettingsFromRuntime() {
 }
 
 function installRuntimeIntervals() {
-  resetRuntimeInterval('auto', refreshAutoStatuses, paneStateRefreshMs);
+  resetRuntimeInterval('auto', refreshAutoStatusesFromRuntime, paneStateRefreshMs);
   resetRuntimeInterval('metadata', refreshTranscriptsFromRuntime, metadataRefreshMs);
-  resetRuntimeInterval('watched-prs', refreshWatchedPrs, watchedPrRefreshMs);
+  resetRuntimeInterval('watched-prs', refreshWatchedPrsFromRuntime, watchedPrRefreshMs);
   resetRuntimeInterval('latency', updateLatency, latencyRefreshMs);
   resetRuntimeInterval('events', refreshOpenEventLogs, eventLogRefreshMs);
   resetRuntimeInterval('filesystem', refreshWatchedFilesystemFromRuntime, fileExplorerRefreshMs);

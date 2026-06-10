@@ -1055,14 +1055,16 @@ async function apiFetch(url, options = {}) {
   if (!requestOptions.credentials) requestOptions.credentials = 'same-origin';
   const startedAt = jsDebugPerformanceNow();
   const method = jsDebugRequestMethod(requestOptions);
+  const requestBytes = jsDebugRequestBytes(url, requestOptions);
   let response;
   try {
     response = await fetch(url, requestOptions);
   } catch (error) {
-    recordApiDebugEvent(url, method, startedAt, {error});
+    recordApiDebugEvent(url, method, startedAt, {error, requestBytes});
     throw error;
   }
-  recordApiDebugEvent(url, method, startedAt, {status: response.status, ok: response.ok});
+  const event = recordApiDebugEvent(url, method, startedAt, {status: response.status, ok: response.ok, requestBytes});
+  recordApiDebugResponseBytes(event, response);
   if (response.status === 401) {
     await redirectToLogin(response);
     throw new Error('authentication required');
@@ -1082,6 +1084,14 @@ async function apiFetchJson(url, options = {}) {
     throw error;
   }
   return payload;
+}
+
+function clientPushCanSupplyData() {
+  return Boolean(clientEventsSource && location.protocol !== 'file:');
+}
+
+function clientPushConnectedForData() {
+  return clientPushCanSupplyData() && clientEventsConnected === true;
 }
 
 async function redirectToLogin(response) {
@@ -1104,6 +1114,22 @@ function jsDebugPerformanceNow() {
 
 function jsDebugRequestMethod(options = {}) {
   return String(options?.method || 'GET').toUpperCase();
+}
+
+function jsDebugByteLength(text) {
+  const value = String(text || '');
+  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(value).length;
+  return value.length;
+}
+
+function jsDebugRequestBytes(url, options = {}) {
+  if (!debugModeEnabled) return 0;
+  let bytes = jsDebugByteLength(jsDebugUrlText(url));
+  const body = options?.body;
+  if (typeof body === 'string') bytes += jsDebugByteLength(body);
+  else if (body instanceof ArrayBuffer) bytes += body.byteLength;
+  else if (body?.byteLength) bytes += Number(body.byteLength) || 0;
+  return bytes;
 }
 
 function jsDebugDurationMs(startedAt) {
@@ -1133,10 +1159,25 @@ function recordApiDebugEvent(url, method, startedAt, result = {}) {
     url: jsDebugUrlText(url),
     durationMs: jsDebugDurationMs(startedAt),
   };
+  if (Number.isFinite(result.requestBytes)) payload.requestBytes = result.requestBytes;
   if (Number.isFinite(result.status)) payload.status = result.status;
   if (typeof result.ok === 'boolean') payload.ok = result.ok;
   if (result.error) payload.error = jsDebugErrorText(result.error);
   return recordJsDebugEvent('api', payload);
+}
+
+function recordApiDebugResponseBytes(event, response) {
+  if (!debugModeEnabled || !event || !response) return;
+  const headerBytes = Number(response.headers?.get?.('Content-Length') || NaN);
+  if (Number.isFinite(headerBytes) && headerBytes >= 0) {
+    event.responseBytes = headerBytes;
+    scheduleJsDebugPanelRefresh();
+    return;
+  }
+  response.clone().arrayBuffer().then(buffer => {
+    event.responseBytes = buffer.byteLength;
+    scheduleJsDebugPanelRefresh();
+  }).catch(() => {});
 }
 
 function recordJsDebugEvent(type, payload = {}) {
@@ -6576,6 +6617,7 @@ const fileExplorerFsBatchPending = new Map();
 const fileExplorerFsBatchDelayMs = 8;
 let fileExplorerFsBatchSeq = 0;
 let fileExplorerFsBatchTimer = null;
+let fileExplorerPushRefreshDepth = 0;
 
 function fileExplorerFsCacheTtlMs() {
   return Math.max(0, numberSetting('file_explorer.dir_cache_ms', 1500) || 0);
@@ -6590,6 +6632,11 @@ function fileExplorerFsBatchSingleUrl(type, path) {
   return type === 'list'
     ? `/api/fs/list?path=${encodeURIComponent(normalized)}`
     : `/api/fs/info?path=${encodeURIComponent(normalized)}`;
+}
+
+function suppressBackgroundFilesystemFetch(options = {}) {
+  if (options.force === true || options.user === true) return false;
+  return clientPushConnectedForData() && !fileExplorerUserIsActive();
 }
 
 function scheduleFileExplorerFsBatchFlush() {
@@ -6671,6 +6718,8 @@ async function fetchDirectory(path, options = {}) {
     const cached = fileExplorerDirListingCache.get(root);
     if (cached && Date.now() - cached.at < dirListingTtlMs) return cached.entries;
   }
+  if (fileExplorerPushRefreshDepth > 0) return null;
+  if (suppressBackgroundFilesystemFetch(options)) return null;
   if (canReuse) {
     const inflight = fileExplorerDirListingInflight.get(root);
     if (inflight) return inflight;
@@ -6714,12 +6763,43 @@ function invalidateFileExplorerFsCaches() {
   fileExplorerDirectorySignatures.clear();
 }
 
-async function refreshFileExplorerFromPush(payload = {}) {
-  invalidateFileExplorerFsCaches();
-  if (fileExplorerPaneIsOpen()) {
-    await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+function entriesByDirFromFilesystemPush(payload = {}) {
+  const entriesByDir = new Map();
+  const directories = Array.isArray(payload.directories) ? payload.directories : [];
+  for (const item of directories) {
+    const path = normalizeDirectoryPath(item?.path || item?.data?.path || '');
+    const data = item?.data && typeof item.data === 'object' ? item.data : {};
+    const entries = Array.isArray(data.entries) ? data.entries : null;
+    if (!path || !entries || item.ok === false || Number(item.status || 200) >= 400) continue;
+    entriesByDir.set(path, entries);
+    cacheFileExplorerRepoInfoEntries(path, entries);
+    markNewDirectoryEntries(path, entries);
+    recordDirectorySignature(path, entries);
+    setLimitedMapEntry(fileExplorerDirListingCache, path, {entries, at: Date.now()}, fileExplorerMemoryCacheLimit);
   }
-  await refreshOpenFilesIfChanged();
+  return entriesByDir;
+}
+
+async function refreshFileExplorerFromPush(payload = {}) {
+  const entriesByDir = entriesByDirFromFilesystemPush(payload);
+  if (!entriesByDir.size) return;
+  fileExplorerPushRefreshDepth += 1;
+  try {
+    const root = normalizeDirectoryPath(currentFileExplorerRoot());
+    if (fileExplorerPaneIsOpen() && entriesByDir.has(root)) {
+      await refreshFileExplorerTreesInPlace({
+        root,
+        entries: entriesByDir.get(root),
+        preserveExpanded: true,
+        preserveScroll: true,
+        entriesByDir,
+      });
+    }
+    const openFileDirs = Array.from(openFiles.keys()).map(path => normalizeDirectoryPath(dirnameOf(path)));
+    if (openFileDirs.every(path => fileExplorerDirListingCache.has(path))) await refreshOpenFilesIfChanged();
+  } finally {
+    fileExplorerPushRefreshDepth = Math.max(0, fileExplorerPushRefreshDepth - 1);
+  }
 }
 
 function expandUserPath(path) {
@@ -9035,6 +9115,7 @@ async function fetchFilePathInfo(path, options = {}) {
     const cached = fileExplorerPathInfoCache.get(normalized);
     if (cached && Date.now() - cached.at < pathInfoTtlMs) return cached.payload;
   }
+  if (suppressBackgroundFilesystemFetch(options)) return null;
   if (canReuse) {
     const inflight = fileExplorerPathInfoInflight.get(normalized);
     if (inflight) return inflight;
@@ -10598,10 +10679,29 @@ function clientServerWatchRoots() {
     .sort();
 }
 
+function clientServerWatchState() {
+  const state = {
+    roots: clientServerWatchRoots(),
+    context_items: activeSessions
+      .filter(isTmuxSession)
+      .map(session => ({session, messages: transcriptPreviewMessages})),
+  };
+  if (typeof activitySummaryIsVisible === 'function') {
+    state.activity_summary = {
+      visible: activitySummaryIsVisible(),
+      locale: typeof i18nActiveLocaleId === 'function' ? i18nActiveLocaleId() : 'en',
+    };
+  }
+  if (document.querySelector('.file-explorer-changes-panel') && typeof clientSessionFilesWatchRequests === 'function') {
+    state.session_files = clientSessionFilesWatchRequests();
+  }
+  return state;
+}
+
 function syncServerWatchRoots(options = {}) {
-  if (readOnlyMode || !clientEventsSource || serverWatchRootsInFlight) return;
-  const roots = clientServerWatchRoots();
-  const signature = roots.join('\x1f');
+  if (readOnlyMode || !clientPushCanSupplyData() || serverWatchRootsInFlight) return;
+  const state = clientServerWatchState();
+  const signature = JSON.stringify(state);
   const renewDue = options.renew === true && Date.now() - serverWatchRootsSyncedAt >= 240000;
   if (signature === serverWatchRootsSignature && !renewDue) return;
   serverWatchRootsSignature = signature;
@@ -10609,7 +10709,7 @@ function syncServerWatchRoots(options = {}) {
   apiFetch('/api/watch/roots', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({roots}),
+    body: JSON.stringify(state),
   }).then(() => {
     serverWatchRootsSyncedAt = Date.now();
   }).catch(() => {
@@ -12557,12 +12657,22 @@ function clearRuntimeInterval(name) {
 }
 
 function clientPushSuppressesPolling() {
-  return clientEventsConnected === true;
+  return clientPushConnectedForData();
 }
 
 function refreshTranscriptsFromRuntime() {
   if (clientPushSuppressesPolling()) return;
   refreshTranscripts();
+}
+
+function refreshAutoStatusesFromRuntime() {
+  if (clientPushSuppressesPolling()) return;
+  refreshAutoStatuses();
+}
+
+function refreshWatchedPrsFromRuntime() {
+  if (clientPushSuppressesPolling()) return;
+  refreshWatchedPrs();
 }
 
 function refreshWatchedFilesystemFromRuntime() {
@@ -12579,9 +12689,9 @@ function refreshSettingsFromRuntime() {
 }
 
 function installRuntimeIntervals() {
-  resetRuntimeInterval('auto', refreshAutoStatuses, paneStateRefreshMs);
+  resetRuntimeInterval('auto', refreshAutoStatusesFromRuntime, paneStateRefreshMs);
   resetRuntimeInterval('metadata', refreshTranscriptsFromRuntime, metadataRefreshMs);
-  resetRuntimeInterval('watched-prs', refreshWatchedPrs, watchedPrRefreshMs);
+  resetRuntimeInterval('watched-prs', refreshWatchedPrsFromRuntime, watchedPrRefreshMs);
   resetRuntimeInterval('latency', updateLatency, latencyRefreshMs);
   resetRuntimeInterval('events', refreshOpenEventLogs, eventLogRefreshMs);
   resetRuntimeInterval('filesystem', refreshWatchedFilesystemFromRuntime, fileExplorerRefreshMs);
@@ -12618,6 +12728,7 @@ async function expandDirectoryRow(row, fullPath, options = {}) {
   renderTreeChildren(children, fullPath, entries, nextDepth);
   if (!existingChildren) row.insertAdjacentElement('afterend', children);
   rememberFileExplorerSyncExpandedState();
+  if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }
 
 function collapseDirectoryRow(row, fullPath, options = {}) {
@@ -12633,6 +12744,7 @@ function collapseDirectoryRow(row, fullPath, options = {}) {
     .filter(node => node.classList?.contains('file-tree-children') && node.dataset?.parent === fullPath)
     .forEach(node => node.remove());
   rememberFileExplorerSyncExpandedState();
+  if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }
 
 if (fileExplorerClose) fileExplorerClose.addEventListener('click', () => toggleFileExplorer());
@@ -17410,6 +17522,10 @@ function shouldSkipSilentActivitySummary(options = {}) {
 }
 
 async function refreshActivitySummary(options = {}) {
+  if (clientPushCanSupplyData() && options.silent === true) {
+    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+    return;
+  }
   if (activitySummaryRefreshing && options.force !== true) return;
   if (shouldSkipSilentActivitySummary(options)) return;
   const requestIsCurrent = activitySummaryGuard.begin();
@@ -17421,8 +17537,7 @@ async function refreshActivitySummary(options = {}) {
     params.set('locale', i18nActiveLocaleId());
     const payload = await apiFetchJson(`/api/activity-summary?${params.toString()}`, {cache: 'no-store'});
     if (!requestIsCurrent()) return;
-    activitySummaryPayload = payload;
-    activitySummaryLastRefreshTs = Date.now();
+    applyActivitySummaryPayloadFromPush(payload);
   } catch (error) {
     if (!requestIsCurrent()) return;
     activitySummaryPayload = {
@@ -17439,6 +17554,17 @@ async function refreshActivitySummary(options = {}) {
       if (infoPanelSubTab === 'yoagent') prewarmYoagent();
     }
   }
+}
+
+function applyActivitySummaryPayloadFromPush(payload = {}) {
+  if (!payload || typeof payload !== 'object') return false;
+  activitySummaryPayload = payload;
+  activitySummaryLastRefreshTs = Date.now();
+  activitySummaryRefreshing = false;
+  renderInfoPanel();
+  renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
+  if (infoPanelSubTab === 'yoagent') prewarmYoagent();
+  return true;
 }
 
 function editorSchemePreferenceChoices(options = {}) {
@@ -17578,8 +17704,6 @@ function preferenceSections() {
       {path: 'file_explorer.indexed_dirs', label: t('pref.file_explorer.indexed_dirs.label'), type: 'list', help: t('pref.file_explorer.indexed_dirs.help')},
       {path: 'file_explorer.index_refresh_seconds', label: t('pref.file_explorer.index_refresh_seconds.label'), type: 'number', min: 0, max: 3600, step: 10, suffix: 's', help: t('pref.file_explorer.index_refresh_seconds.help')},
       {path: 'file_explorer.companion_dirs', label: t('pref.file_explorer.companion_dirs.label'), type: 'list', help: t('pref.file_explorer.companion_dirs.help')},
-      {path: 'file_explorer.refresh_seconds', label: t('pref.file_explorer.refresh_seconds.label', {name: fileExplorerLabel()}), type: 'number', min: 1, max: 60, step: 1, suffix: 's', help: t('pref.file_explorer.refresh_seconds.help')},
-      {path: 'file_explorer.session_files_refresh_seconds', label: t('pref.file_explorer.session_files_refresh_seconds.label'), type: 'number', min: 1, max: 60, step: 1, suffix: 's', help: t('pref.file_explorer.session_files_refresh_seconds.help')},
       {path: 'file_explorer.dir_cache_ms', label: t('pref.file_explorer.dir_cache_ms.label'), type: 'number', min: 0, max: 10000, step: 100, suffix: 'ms', help: t('pref.file_explorer.dir_cache_ms.help')},
       {path: 'file_explorer.new_entry_highlight_ms', label: t('pref.file_explorer.new_entry_highlight_ms.label'), type: 'number', min: 0, max: 600000, step: 1000, suffix: 'ms', help: t('pref.file_explorer.new_entry_highlight_ms.help')},
     ]},
@@ -17589,14 +17713,16 @@ function preferenceSections() {
     ]},
     {title: t('pref.section.performance'), items: [
       {path: 'general.reload_on_update_auto', label: t('pref.general.reload_on_update_auto.label'), type: 'boolean', help: t('pref.general.reload_on_update_auto.help')},
+      {path: 'performance.server_event_poll_ms', label: t('pref.performance.server_event_poll_ms.label'), type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: t('pref.performance.server_event_poll_ms.help')},
+      {path: 'performance.activity_summary_refresh_ms', label: t('pref.performance.activity_summary_refresh_ms.label'), type: 'number', min: 10, max: 600, step: 1, suffix: 's', scale: 1000, displayDecimals: 0, help: t('pref.performance.activity_summary_refresh_ms.help')},
+      {path: 'file_explorer.refresh_seconds', label: t('pref.file_explorer.refresh_seconds.label', {name: fileExplorerLabel()}), type: 'number', min: 1, max: 60, step: 1, suffix: 's', help: t('pref.file_explorer.refresh_seconds.help')},
+      {path: 'file_explorer.session_files_refresh_seconds', label: t('pref.file_explorer.session_files_refresh_seconds.label'), type: 'number', min: 1, max: 60, step: 1, suffix: 's', help: t('pref.file_explorer.session_files_refresh_seconds.help')},
+      {path: 'performance.settings_refresh_ms', label: t('pref.performance.settings_refresh_ms.label'), type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: t('pref.performance.settings_refresh_ms.help')},
       {path: 'performance.metadata_refresh_ms', label: t('pref.performance.metadata_refresh_ms.label'), type: 'number', min: 3000, max: 120000, step: 100, suffix: 'ms', help: t('pref.performance.metadata_refresh_ms.help')},
       {path: 'performance.watched_pr_refresh_ms', label: t('pref.performance.watched_pr_refresh_ms.label'), type: 'number', min: 15000, max: 600000, step: 1000, suffix: 'ms', help: t('pref.performance.watched_pr_refresh_ms.help')},
       {path: 'performance.pane_state_refresh_ms', label: t('pref.performance.pane_state_refresh_ms.label'), type: 'number', min: 500, max: 30000, step: 100, suffix: 'ms', help: t('pref.performance.pane_state_refresh_ms.help')},
       {path: 'performance.latency_refresh_ms', label: t('pref.performance.latency_refresh_ms.label'), type: 'number', min: 1000, max: 30000, step: 100, suffix: 'ms', help: t('pref.performance.latency_refresh_ms.help')},
       {path: 'performance.event_log_refresh_ms', label: t('pref.performance.event_log_refresh_ms.label'), type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: t('pref.performance.event_log_refresh_ms.help')},
-      {path: 'performance.settings_refresh_ms', label: t('pref.performance.settings_refresh_ms.label'), type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: t('pref.performance.settings_refresh_ms.help')},
-      {path: 'performance.activity_summary_refresh_ms', label: t('pref.performance.activity_summary_refresh_ms.label'), type: 'number', min: 10000, max: 600000, step: 1000, suffix: 'ms', help: t('pref.performance.activity_summary_refresh_ms.help')},
-      {path: 'performance.server_event_poll_ms', label: t('pref.performance.server_event_poll_ms.label'), type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: t('pref.performance.server_event_poll_ms.help')},
       {path: 'performance.popover_show_delay_ms', label: t('pref.performance.popover_show_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.popover_show_delay_ms.help')},
       {path: 'performance.popover_hide_delay_ms', label: t('pref.performance.popover_hide_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.popover_hide_delay_ms.help')},
       {path: 'performance.menu_hover_open_delay_ms', label: t('pref.performance.menu_hover_open_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.menu_hover_open_delay_ms.help')},
@@ -17851,9 +17977,9 @@ function preferenceControlHtml(item, query = '') {
   if (item.type === 'boolean') {
     control = `<input type="checkbox" ${baseAttrs}${value ? ' checked' : ''}>`;
   } else if (item.type === 'number') {
-    control = `<input type="number" ${baseAttrs} inputmode="decimal" value="${esc(clampPreferenceNumber(item, item.scale ? Number(value) / item.scale : value))}" min="${esc(item.min)}" max="${esc(item.max)}" step="${esc(item.step || 1)}">`;
+    control = `<input type="number" ${baseAttrs} inputmode="decimal" value="${esc(preferenceNumberDisplayValue(item, value))}" min="${esc(item.min)}" max="${esc(item.max)}" step="${esc(item.step || 1)}">`;
   } else if (item.type === 'range') {
-    const rangeValue = clampPreferenceNumber(item, item.scale ? Number(value) / item.scale : value);
+    const rangeValue = preferenceNumberDisplayValue(item, value);
     control = `<input type="range" ${baseAttrs} value="${esc(rangeValue)}" min="${esc(item.min)}" max="${esc(item.max)}" step="${esc(item.step || 1)}"><output class="preferences-range-value" for="${esc(controlId)}">${esc(rangeValue)}</output>`;
   } else if (item.type === 'select') {
     control = `<select ${baseAttrs}>${preferenceSelectOptionsHtml(item, value)}</select>`;
@@ -17893,6 +18019,15 @@ function preferenceControlHtml(item, query = '') {
   const advisory = preferenceAdvisoryHtml(item, value);
   const rowClass = item.type === 'textarea' || item.wide ? ' preferences-setting-row--wide' : '';
   return `<div class="preferences-setting-row${rowClass}"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}</label><span class="preferences-setting-control setting-type-${esc(item.type)}">${control}${suffix}${extraControl}<button type="button" class="preferences-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>${esc(t('pref.reset.row'))}</button></span>${advisory}</div>`;
+}
+
+function preferenceNumberDisplayValue(item, value) {
+  const scale = Number(item.scale) || 1;
+  const raw = scale !== 1 ? Number(value) / scale : value;
+  const clamped = Number(clampPreferenceNumber(item, raw));
+  if (!Number.isFinite(clamped)) return clampPreferenceNumber(item, raw);
+  if (Number.isFinite(Number(item.displayDecimals))) return clamped.toFixed(Number(item.displayDecimals));
+  return clamped;
 }
 
 function uploadRsyncExampleCommand() {
@@ -17965,8 +18100,12 @@ function preferencesPanelHtml() {
 
 function debugEventCounts() {
   const apiCalls = jsDebugEvents.filter(event => event.type === 'api').length;
+  const sseEvents = jsDebugEvents.filter(event => event.type === 'sse').length;
   const errors = jsDebugEvents.filter(event => event.type === 'error' || event.type === 'unhandledrejection' || event.error).length;
-  return {apiCalls, errors};
+  const apiRequestBytes = jsDebugEvents.reduce((total, event) => total + (event.type === 'api' && Number.isFinite(event.requestBytes) ? event.requestBytes : 0), 0);
+  const apiResponseBytes = jsDebugEvents.reduce((total, event) => total + (event.type === 'api' && Number.isFinite(event.responseBytes) ? event.responseBytes : 0), 0);
+  const sseBytes = jsDebugEvents.reduce((total, event) => total + (event.type === 'sse' && Number.isFinite(event.frameBytes) ? event.frameBytes : 0), 0);
+  return {apiCalls, sseEvents, errors, apiRequestBytes, apiResponseBytes, sseBytes};
 }
 
 function debugMetaText() {
@@ -17985,6 +18124,7 @@ function debugTimeText(value) {
 
 function debugEventTypeLabel(type) {
   if (type === 'api') return 'API';
+  if (type === 'sse') return 'SSE';
   if (type === 'unhandledrejection') return 'Promise';
   if (type === 'error') return 'Error';
   return String(type || 'Event');
@@ -17999,13 +18139,61 @@ function debugEventStatusText(event) {
 
 function debugEventDetailText(event) {
   if (event.type === 'api') return `${event.method || 'GET'} ${event.url || ''}`.trim();
+  if (event.type === 'sse') return [
+    event.eventType || 'event',
+    event.trigger ? `trigger=${event.trigger}` : '',
+    event.cache ? `cache=${event.cache}` : '',
+    debugFilesystemEventSummaryText(event),
+    event.key ? `key=${event.key}` : '',
+  ].filter(Boolean).join(' ');
   return event.message || event.reason || event.source || '';
+}
+
+function debugCountToken(prefix, value, {includeZero = false} = {}) {
+  const count = Number(value);
+  if (!Number.isFinite(count)) return '';
+  if (!includeZero && count === 0) return '';
+  return `${prefix}${count}`;
+}
+
+function debugFilesystemEventSummaryText(event) {
+  if (event.type !== 'sse' || event.eventType !== 'fs_changed') return '';
+  const change = event.changeSummary && typeof event.changeSummary === 'object' ? event.changeSummary : {};
+  const listing = event.listingSummary && typeof event.listingSummary === 'object' ? event.listingSummary : {};
+  const parts = [];
+  const rootsChanged = debugCountToken('roots:', change.roots_changed);
+  const entriesAdded = debugCountToken('+', change.entries_added);
+  const entriesRemoved = debugCountToken('-', change.entries_removed);
+  const entriesModified = debugCountToken('~', change.entries_modified);
+  const entryParts = [entriesAdded, entriesRemoved, entriesModified].filter(Boolean).join(' ');
+  if (rootsChanged || entryParts) parts.push(`changed=${[rootsChanged, entryParts].filter(Boolean).join(' ')}`);
+  const filesAdded = debugCountToken('+', change.files_added);
+  const filesRemoved = debugCountToken('-', change.files_removed);
+  const filesModified = debugCountToken('~', change.files_modified);
+  const fileParts = [filesAdded, filesRemoved, filesModified].filter(Boolean).join(' ');
+  if (fileParts) parts.push(`files=${fileParts}`);
+  const dirsAdded = debugCountToken('+', change.dirs_added);
+  const dirsRemoved = debugCountToken('-', change.dirs_removed);
+  const dirsModified = debugCountToken('~', change.dirs_modified);
+  const dirParts = [dirsAdded, dirsRemoved, dirsModified].filter(Boolean).join(' ');
+  if (dirParts) parts.push(`dirs=${dirParts}`);
+  const listedEntries = debugCountToken('listed=', listing.entries_listed, {includeZero: true});
+  const listedRoots = debugCountToken('/', listing.roots_listed, {includeZero: true});
+  if (listedEntries) parts.push(`${listedEntries}${listedRoots}`);
+  const rootErrors = debugCountToken('errors=', listing.roots_error);
+  if (rootErrors) parts.push(rootErrors);
+  return parts.length ? `fs=${parts.join(' ')}` : '';
 }
 
 function debugEventMetaText(event) {
   return [
     debugTimeText(event.ts),
     Number.isFinite(event.durationMs) ? `${event.durationMs} ms` : '',
+    Number.isFinite(event.computeMs) ? `server ${event.computeMs} ms` : '',
+    Number.isFinite(event.receiveLatencyMs) ? `receive ${event.receiveLatencyMs} ms` : '',
+    Number.isFinite(event.frameBytes) ? `rx ${event.frameBytes} B` : '',
+    Number.isFinite(event.bytes) && event.bytes !== event.frameBytes ? `data ${event.bytes} B` : '',
+    Number.isFinite(event.responseBytes) ? `${event.responseBytes} B rx` : '',
     debugEventStatusText(event),
     event.source ? `source: ${event.source}` : '',
     event.line ? `line ${event.line}${event.column ? `:${event.column}` : ''}` : '',
@@ -18014,13 +18202,22 @@ function debugEventMetaText(event) {
 
 function debugEventLineText(event) {
   const status = debugEventStatusText(event);
-  const duration = Number.isFinite(event.durationMs) ? `${event.durationMs}ms` : '';
+  const durationMs = Number.isFinite(event.durationMs)
+    ? event.durationMs
+    : (event.type === 'sse' && Number.isFinite(event.receiveLatencyMs) ? event.receiveLatencyMs : NaN);
+  const duration = Number.isFinite(durationMs) ? `${durationMs}ms` : '';
+  const sseMeta = event.type === 'sse'
+    ? [
+      Number.isFinite(event.frameBytes) ? `rx=${event.frameBytes}B` : '',
+    ].filter(Boolean).join(' ')
+    : '';
   const location = event.source ? `${event.source}${event.line ? `:${event.line}${event.column ? `:${event.column}` : ''}` : ''}` : '';
   return [
     debugTimeText(event.ts),
     debugEventTypeLabel(event.type).padEnd(7),
     status.padEnd(8),
     duration.padStart(8),
+    sseMeta,
     debugEventDetailText(event) || t('debug.event'),
     location,
   ].filter(Boolean).join(' ');
@@ -18041,10 +18238,11 @@ function debugApiSummaryRows(limit = 6) {
   for (const event of jsDebugEvents) {
     if (event.type !== 'api' || !Number.isFinite(event.durationMs)) continue;
     const key = `${event.method || 'GET'} ${debugApiSummaryKey(event.url)}`;
-    const item = summaries.get(key) || {key, count: 0, total: 0, max: 0, lastStatus: ''};
+    const item = summaries.get(key) || {key, count: 0, total: 0, max: 0, bytes: 0, lastStatus: ''};
     item.count += 1;
     item.total += event.durationMs;
     item.max = Math.max(item.max, event.durationMs);
+    item.bytes += Number.isFinite(event.responseBytes) ? event.responseBytes : 0;
     item.lastStatus = debugEventStatusText(event);
     summaries.set(key, item);
   }
@@ -18053,7 +18251,36 @@ function debugApiSummaryRows(limit = 6) {
     .slice(0, limit)
     .map(item => {
       const avg = item.count ? item.total / item.count : 0;
-      return `${item.key.padEnd(28)} max=${item.max.toFixed(1).padStart(7)}ms avg=${avg.toFixed(1).padStart(7)}ms count=${String(item.count).padStart(3)} ${item.lastStatus}`.trimEnd();
+      return `${item.key.padEnd(28)} max=${item.max.toFixed(1).padStart(7)}ms avg=${avg.toFixed(1).padStart(7)}ms count=${String(item.count).padStart(3)} rx=${String(item.bytes).padStart(7)}B ${item.lastStatus}`.trimEnd();
+    });
+}
+
+function debugSseSummaryRows(limit = 6) {
+  return jsDebugEvents
+    .filter(event => event.type === 'sse' && Number.isFinite(event.computeMs))
+    .sort((a, b) => (b.computeMs - a.computeMs) || String(a.eventType || '').localeCompare(String(b.eventType || '')))
+    .slice(0, limit)
+    .map(event => `${String(event.eventType || 'event').padEnd(28)} server=${event.computeMs.toFixed(1).padStart(7)}ms rx=${String(event.frameBytes || event.bytes || 0).padStart(7)}B ${event.trigger || ''}`.trimEnd());
+}
+
+function debugSseLatencySummaryRows(limit = 6) {
+  const summaries = new Map();
+  for (const event of jsDebugEvents) {
+    if (event.type !== 'sse' || !Number.isFinite(event.receiveLatencyMs)) continue;
+    const key = String(event.eventType || 'event');
+    const item = summaries.get(key) || {key, count: 0, total: 0, max: 0, bytes: 0};
+    item.count += 1;
+    item.total += event.receiveLatencyMs;
+    item.max = Math.max(item.max, event.receiveLatencyMs);
+    item.bytes += Number.isFinite(event.frameBytes) ? event.frameBytes : Number(event.bytes || 0);
+    summaries.set(key, item);
+  }
+  return [...summaries.values()]
+    .sort((a, b) => (b.max - a.max) || (b.total - a.total) || a.key.localeCompare(b.key))
+    .slice(0, limit)
+    .map(item => {
+      const avg = item.count ? item.total / item.count : 0;
+      return `${item.key.padEnd(28)} max=${item.max.toFixed(1).padStart(7)}ms avg=${avg.toFixed(1).padStart(7)}ms count=${String(item.count).padStart(3)} rx=${String(item.bytes).padStart(7)}B`;
     });
 }
 
@@ -18065,13 +18292,21 @@ function jsDebugTextForClipboard() {
     `page=${page || '/'}`,
     `events=${jsDebugEvents.length}`,
     `api=${counts.apiCalls}`,
+    `sse=${counts.sseEvents}`,
     `errors=${counts.errors}`,
+    `api_tx=${counts.apiRequestBytes}B`,
+    `api_rx=${counts.apiResponseBytes}B`,
+    `sse_rx=${counts.sseBytes}B`,
   ].join(' ');
   const apiSummaryRows = debugApiSummaryRows();
+  const sseSummaryRows = debugSseSummaryRows();
+  const sseLatencySummaryRows = debugSseLatencySummaryRows();
   const rows = jsDebugEvents.map(debugEventLineText);
   return [
     header,
     ...(apiSummaryRows.length ? ['Slow API by max latency:', ...apiSummaryRows, ''] : []),
+    ...(sseSummaryRows.length ? ['Slow SSE server work:', ...sseSummaryRows, ''] : []),
+    ...(sseLatencySummaryRows.length ? ['Slow SSE receive latency:', ...sseLatencySummaryRows, ''] : []),
     ...rows,
   ].join('\n');
 }
@@ -18083,6 +18318,7 @@ function debugPanelHtml() {
       <div class="js-debug-summary" aria-label="${esc(t('debug.summary'))}">
         ${debugStatHtml(t('debug.events'), jsDebugEvents.length, 'events')}
         ${debugStatHtml(t('debug.apiCalls'), counts.apiCalls, 'api')}
+        ${debugStatHtml('SSE', counts.sseEvents, 'sse')}
         ${debugStatHtml(t('debug.errors'), counts.errors, 'errors')}
       </div>
       <div class="js-debug-actions">
@@ -18144,9 +18380,11 @@ function refreshDebugPanelFromEvents(panel, options = {}) {
   const counts = debugEventCounts();
   const statEvents = panel.querySelector('[data-js-debug-stat="events"]');
   const statApi = panel.querySelector('[data-js-debug-stat="api"]');
+  const statSse = panel.querySelector('[data-js-debug-stat="sse"]');
   const statErrors = panel.querySelector('[data-js-debug-stat="errors"]');
   if (statEvents) statEvents.textContent = String(jsDebugEvents.length);
   if (statApi) statApi.textContent = String(counts.apiCalls);
+  if (statSse) statSse.textContent = String(counts.sseEvents);
   if (statErrors) statErrors.textContent = String(counts.errors);
   const log = panel.querySelector('[data-js-debug-log]');
   if (!log || (document.activeElement === log && options.force !== true)) return;
@@ -18515,6 +18753,25 @@ function sessionFilesRefsQuery() {
 function sessionFilesRequestQueryString() {
   if (fileExplorerMode !== 'diff') return 'from=HEAD&to=current';
   return `${diffRefQueryString()}${sessionFilesRefsQuery()}`;
+}
+
+function clientSessionFilesWatchRequests() {
+  const params = new URLSearchParams(sessionFilesRequestQueryString());
+  let repoRefs = null;
+  const refs = params.get('refs');
+  if (refs) {
+    try {
+      const parsed = JSON.parse(refs);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) repoRefs = parsed;
+    } catch (_error) {}
+  }
+  return [{
+    session: fileExplorerSessionFilesTargetSession(),
+    hours: 24,
+    from_ref: params.get('from') || 'HEAD',
+    to_ref: params.get('to') || 'current',
+    repo_refs: repoRefs,
+  }];
 }
 
 function sessionFilesCacheKey(session) {
@@ -19175,6 +19432,36 @@ async function fetchSessionFiles(options = {}) {
       renderSessionButtons();
     }
   }
+}
+
+function applySessionFilesPayloadFromPush(payload = {}, request = {}) {
+  const destination = 'finder';
+  const session = payload.session || request.session || fileExplorerSessionFilesTargetSession();
+  if (!session || session !== fileExplorerSessionFilesTargetSession()) return false;
+  const nextPayload = {
+    session,
+    files: Array.isArray(payload.files) ? payload.files : [],
+    repos: Array.isArray(payload.repos) ? payload.repos : [],
+    refs_by_repo: payload.refs_by_repo && typeof payload.refs_by_repo === 'object' ? payload.refs_by_repo : {},
+    errors: Array.isArray(payload.errors) ? payload.errors : [],
+    from_ref: payload.from_ref || request.from_ref || diffRefFrom,
+    to_ref: payload.to_ref || request.to_ref || diffRefTo,
+    loaded: true,
+  };
+  const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
+  const shouldRender = signature !== sessionFilesSignatureForDestination(destination);
+  setSessionFilesPayloadForDestination(destination, nextPayload);
+  setSessionFilesSignatureForDestination(destination, signature);
+  fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {payload: nextPayload, signature});
+  sessionFilesLastPollTs = Date.now();
+  if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+  if (shouldRender) {
+    renderSessionFilesDestination(destination, {force: true});
+    updateFileTreeGitStatusRows();
+    renderPaneTabStrips();
+    renderSessionButtons();
+  }
+  return true;
 }
 
 function sessionFileTimeText(mtime) {
@@ -20584,7 +20871,11 @@ function createFileExplorerPanel() {
   refreshFileExplorerPanelTree(panel);
   renderFileExplorerChangesPanel(panel);
   if (!fileExplorerSessionFilesPayload.loaded || fileExplorerSessionFilesPayload.session !== fileExplorerSessionFilesTargetSession()) {
-    fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true});
+    if (clientPushCanSupplyData()) {
+      if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+    } else {
+      fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true});
+    }
   }
   return panel;
 }
@@ -20603,6 +20894,10 @@ async function refreshFileExplorerPanelTree(panel, options = {}) {
   syncFileExplorerHiddenButton(hiddenBtn);
   syncFileExplorerTreeDateButton(dateBtn);
   if (sortSelect && sortSelect.value !== fileExplorerTreeSortMode) sortSelect.value = fileExplorerTreeSortMode;
+  if (clientPushCanSupplyData() && !options.entries && options.force !== true) {
+    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+    return;
+  }
   const entries = options.root === root && Array.isArray(options.entries)
     ? options.entries
     : await fetchDirectory(root);
@@ -24405,18 +24700,23 @@ function renderWatchedPrs() {
 async function refreshWatchedPrs() {
   try {
     const data = await apiFetchJson('/api/watched-prs');
-    if (!data || typeof data !== 'object') return;
-    watchedPrsData = {
-      watched_prs: Array.isArray(data.watched_prs) ? data.watched_prs : [],
-      truncated: Number(data.truncated) || 0,
-      invalid: Array.isArray(data.invalid) ? data.invalid : [],
-      refresh_ms: Number(data.refresh_ms) || watchedPrRefreshMs,
-    };
-    notifyWatchedPrTransitions(watchedPrsData.watched_prs);
-    renderWatchedPrs();
+    applyWatchedPrsPayload(data);
   } catch (error) {
     // Non-fatal: keep the last good render; the next poll retries.
   }
+}
+
+function applyWatchedPrsPayload(data) {
+  if (!data || typeof data !== 'object') return false;
+  watchedPrsData = {
+    watched_prs: Array.isArray(data.watched_prs) ? data.watched_prs : [],
+    truncated: Number(data.truncated) || 0,
+    invalid: Array.isArray(data.invalid) ? data.invalid : [],
+    refresh_ms: Number(data.refresh_ms) || watchedPrRefreshMs,
+  };
+  notifyWatchedPrTransitions(watchedPrsData.watched_prs);
+  renderWatchedPrs();
+  return true;
 }
 
 // Append a PR ref to github.watched_prs (dedup by canonical ref); accepts owner/repo#N or a PR URL.
@@ -25565,17 +25865,7 @@ async function refreshAutoStatuses() {
 async function loadAutoStatuses() {
   try {
     const payload = await apiFetchJson('/api/auto-approve');
-    const previousActive = activeSessions.slice();
-    const sessionsChanged = Array.isArray(payload.session_order) ? updateSessionList(payload.session_order) : false;
-    if (payload.rules) {
-      yoloRulesPayload = payload.rules;
-      renderPreferencesPanels();
-    }
-    for (const session of sessions) {
-      const state = payload.sessions?.[session] || {target: session, enabled: false, last_action: 'off'};
-      autoApproveStates.set(session, state);
-    }
-    if (sessionsChanged) renderPanels(previousActive);
+    applyAutoApprovePayload(payload);
   } catch (_) {
     for (const session of activeSessions.filter(isTmuxSession)) {
       try {
@@ -25589,6 +25879,27 @@ async function loadAutoStatuses() {
   // so a finished/idle pane's marker stops spinning instead of lingering (the transcript poll path
   // updated the title but never re-synced the markers).
   renderAutoApproveButtons();
+}
+
+function applyAutoApprovePayload(payload) {
+  if (!payload || typeof payload !== 'object') return false;
+  const previousActive = activeSessions.slice();
+  const sessionsChanged = Array.isArray(payload.session_order) ? updateSessionList(payload.session_order) : false;
+  if (payload.rules) {
+    yoloRulesPayload = payload.rules;
+    renderPreferencesPanels();
+  }
+  for (const session of sessions) {
+    const state = payload.sessions?.[session] || {target: session, enabled: false, last_action: 'off'};
+    autoApproveStates.set(session, state);
+  }
+  if (sessionsChanged) renderPanels(previousActive);
+  updateDocumentTitle();
+  renderAutoApproveButtons();
+  updateSessionButtonStates();
+  refreshActivePanelHeaders();
+  trackSessionStateChanges();
+  return true;
 }
 
 function autoApproveOwnerLabel(payload) {
@@ -25760,6 +26071,61 @@ function maybeHandleServerVersionChange(serverVersion) {
   showServerUpdateBanner(serverVersion);
 }
 
+async function applyTranscriptsPayload(payload, options = {}) {
+  if (!payload || typeof payload !== 'object') return false;
+  transcriptMeta = payload;
+  transcriptMetaLoaded = true;
+  transcriptMetaLoadError = '';
+  maybeHandleServerVersionChange(transcriptMeta.server_version);
+  if (transcriptMeta.agentAuth) agentAuth = transcriptMeta.agentAuth;
+  updateMetadataBadgePulses(transcriptMeta);
+  const previousActive = activeSessions.slice();
+  const sessionsChanged = updateSessionList(transcriptMeta.session_order || []);
+  if (options.refreshAuto !== false && !(typeof clientPushSuppressesPolling === 'function' && clientPushSuppressesPolling())) {
+    await loadAutoStatuses();
+  }
+  if (sessionsChanged) renderPanels(previousActive);
+  renderSessionButtons();
+  renderInfoPanel();
+  renderYoagentPanel();
+  if (options.refreshActivity !== false) refreshActivitySummary({silent: true});
+  for (const session of activeSessions.filter(isTmuxSession)) {
+    const meta = document.getElementById(`meta-${session}`);
+    const preview = document.getElementById(`transcript-${session}`);
+    const info = transcriptMeta.sessions?.[session];
+    const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
+    updatePanelHeader(session, info);
+    if (meta) {
+      meta.innerHTML = stripTitleAttrs(projectMetaHtml(session, info));
+      meta.removeAttribute('title');
+    }
+    renderSummaryContext(session, info, agent);
+    if (!preview) continue;
+    if (agent?.transcript) {
+      updateTranscriptPathRow(session, agent.transcript);
+      if (options.refreshContext === false) continue;
+      preview.textContent = `session_id: ${agent.session_id || ''}\nstatus: ${agent.status || ''}\n\nloading recent transcript context...`;
+      refreshTranscriptPreview(session, preview, {preserveScroll: false});
+    } else if (agent?.error) {
+      updateTranscriptPathRow(session, '', agent.error);
+      preview.textContent = agent.error;
+    } else {
+      updateTranscriptPathRow(session, '', 'no agent transcript found');
+      preview.textContent = 'no agent transcript found';
+    }
+  }
+  renderPaneTabStrips();
+  scheduleFileExplorerActiveTabSync();
+  if (typeof clientPushSuppressesPolling === 'function' && clientPushSuppressesPolling()) {
+    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({renew: true});
+  } else {
+    refreshWatchedFilesystem();
+  }
+  trackSessionStateChanges();
+  refreshOpenEventLogs();
+  return true;
+}
+
 async function refreshTranscripts(options = {}) {
   if (transcriptMetaRefreshPromise) return transcriptMetaRefreshPromise;
   transcriptMetaLoading = true;
@@ -25771,53 +26137,8 @@ async function refreshTranscripts(options = {}) {
       const params = new URLSearchParams();
       if (options.force === true) params.set('force', '1');
       const suffix = params.toString();
-      transcriptMeta = await apiFetchJson(`/api/transcripts${suffix ? `?${suffix}` : ''}`);
-      transcriptMetaLoaded = true;
-      transcriptMetaLoadError = '';
-      maybeHandleServerVersionChange(transcriptMeta.server_version);
-      // #39: keep agent login status fresh so the new-session picker re-enables an agent after login.
-      if (transcriptMeta.agentAuth) agentAuth = transcriptMeta.agentAuth;
-      updateMetadataBadgePulses(transcriptMeta);
-      const previousActive = activeSessions.slice();
-      const sessionsChanged = updateSessionList(transcriptMeta.session_order || []);
-      await loadAutoStatuses();
-      if (sessionsChanged) renderPanels(previousActive);
-      renderSessionButtons();
-      renderInfoPanel();
-      renderYoagentPanel();
-      refreshActivitySummary({silent: true});
-      for (const session of activeSessions.filter(isTmuxSession)) {
-        const meta = document.getElementById(`meta-${session}`);
-        const preview = document.getElementById(`transcript-${session}`);
-        const info = transcriptMeta.sessions?.[session];
-        const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
-        updatePanelHeader(session, info);
-        if (meta) {
-          meta.innerHTML = stripTitleAttrs(projectMetaHtml(session, info));
-          meta.removeAttribute('title');
-        }
-        renderSummaryContext(session, info, agent);
-        if (agent?.transcript) {
-          updateTranscriptPathRow(session, agent.transcript);
-          preview.textContent = `session_id: ${agent.session_id || ''}\nstatus: ${agent.status || ''}\n\nloading recent transcript context...`;
-          refreshTranscriptPreview(session, preview, {preserveScroll: false});
-        } else if (agent?.error) {
-          updateTranscriptPathRow(session, '', agent.error);
-          preview.textContent = agent.error;
-        } else {
-          updateTranscriptPathRow(session, '', 'no agent transcript found');
-          preview.textContent = 'no agent transcript found';
-        }
-      }
-      renderPaneTabStrips();
-      scheduleFileExplorerActiveTabSync();
-      if (typeof clientPushSuppressesPolling === 'function' && clientPushSuppressesPolling()) {
-        if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({renew: true});
-      } else {
-        refreshWatchedFilesystem();
-      }
-      trackSessionStateChanges();
-      refreshOpenEventLogs();
+      const payload = await apiFetchJson(`/api/transcripts${suffix ? `?${suffix}` : ''}`);
+      await applyTranscriptsPayload(payload, {refreshAuto: true, refreshContext: true, refreshActivity: true});
     } catch (error) {
       transcriptMetaLoadError = String(error);
       for (const session of activeSessions.filter(isTmuxSession)) {
@@ -25898,15 +26219,22 @@ function updateTranscriptPathRow(session, path, fallback = 'no transcript path')
 async function refreshTranscriptPreview(session, preview, options = {}) {
   try {
     const payload = await apiFetchJson(`/api/context-items?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
-    if (payload.items) {
-      updateTranscriptPathRow(session, payload.path);
-      renderTranscriptItems(preview, payload.path, payload.items, options);
-    } else {
+    if (!applyContextItemsPayloadFromPush(payload, options)) {
       preview.textContent = JSON.stringify(payload, null, 2);
     }
   } catch (error) {
     preview.textContent += `\n\ncontext load failed: ${error}`;
   }
+}
+
+function applyContextItemsPayloadFromPush(payload = {}, options = {}) {
+  if (!payload || !payload.items) return false;
+  const session = payload.session || options.session || '';
+  const preview = options.preview || (session ? document.getElementById(`transcript-${session}`) : null);
+  if (!preview) return false;
+  updateTranscriptPathRow(session, payload.path);
+  renderTranscriptItems(preview, payload.path, payload.items, options);
+  return true;
 }
 
 function startTranscriptStream(session, options = {}) {
@@ -26115,8 +26443,20 @@ function refreshAll() {
   refreshWatchedFilesystem();
 }
 
+function scheduleInitialTranscriptRefreshFallback() {
+  if (!clientPushCanSupplyData()) {
+    refreshTranscripts();
+    return;
+  }
+  setTimeout(() => {
+    const loaded = transcriptMeta?.sessions && Object.keys(transcriptMeta.sessions).length > 0;
+    if (!loaded) refreshTranscripts();
+  }, 15000);
+}
+
 async function boot() {
   applySettingsPayload(clientSettingsPayload, {initial: true, force: true});
+  installClientEventStream();
   // i18n (DOIT.8): AWAIT the active locale catalog (all-static-fetch) before the first render so menus,
   // tabs, and the wordmark paint in the right language from the start — no flash of raw t() keys (the
   // menu bar renders synchronously at boot, before any later re-render could fix it). A 'system' pref is
@@ -26135,26 +26475,58 @@ async function boot() {
   renderPanels([], {prune: false});
   seedVisualActivePaneItem(activeSessions);
   updatePanelInactiveOverlays();
+  if (clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   await Promise.all(activeSessions.filter(isTmuxSession).map(session => ensureTerminalRunning(session)));
-  refreshTranscripts();
+  scheduleInitialTranscriptRefreshFallback();
   refreshWatchedPrs();   // DOIT.29: first watched-PR fetch at boot; thereafter on its own interval
   renderAutoApproveButtons();
   updateLatency();
   installRuntimeIntervals();
   scheduleStartupHelperTip();
-  installClientEventStream();
   installDevAutoReload();
 }
 
-function clientEventPayload(event) {
+function clientEventEnvelope(event) {
   try {
     const parsed = JSON.parse(event?.data || '{}');
-    return parsed && typeof parsed === 'object' && parsed.payload && typeof parsed.payload === 'object'
-      ? parsed.payload
-      : parsed;
+    return parsed && typeof parsed === 'object' ? parsed : {};
   } catch (_error) {
     return {};
   }
+}
+
+function clientEventPayloadFromEnvelope(envelope) {
+  return envelope && typeof envelope === 'object' && envelope.payload && typeof envelope.payload === 'object'
+    ? envelope.payload
+    : envelope;
+}
+
+function recordSseDebugEvent(eventType, envelope = {}, rawEvent = null) {
+  if (!debugModeEnabled) return;
+  const payload = clientEventPayloadFromEnvelope(envelope);
+  const rawData = rawEvent?.data || '';
+  const dataBytes = jsDebugByteLength(rawData);
+  const dataLines = String(rawData || '').split(/\r?\n/);
+  const frameBytes = jsDebugByteLength(`event: ${eventType}\n`)
+    + dataLines.reduce((total, line) => total + jsDebugByteLength(`data: ${line}\n`), 0)
+    + 1;
+  const serverTimeMs = Number(envelope?.time) * 1000;
+  const receiveLatencyMs = Number.isFinite(serverTimeMs)
+    ? Number((Date.now() - serverTimeMs).toFixed(1))
+    : undefined;
+  recordJsDebugEvent('sse', {
+    eventType,
+    serverEventId: Number(envelope?.id || 0) || undefined,
+    trigger: payload?.trigger || '',
+    cache: payload?.cache || '',
+    computeMs: Number.isFinite(Number(payload?.compute_ms)) ? Number(payload.compute_ms) : undefined,
+    receiveLatencyMs,
+    bytes: dataBytes,
+    frameBytes,
+    changeSummary: payload?.change_summary && typeof payload.change_summary === 'object' ? payload.change_summary : null,
+    listingSummary: payload?.listing_summary && typeof payload.listing_summary === 'object' ? payload.listing_summary : null,
+    key: payload?.session || payload?.locale || payload?.request?.session || '',
+  });
 }
 
 function scheduleSessionFilesPushRefresh() {
@@ -26170,11 +26542,41 @@ function scheduleSessionFilesPushRefresh() {
 
 function handleClientPushEvent(type, payload = {}) {
   if (type === 'settings_changed') {
+    if (payload.data && typeof payload.data === 'object') {
+      applySettingsPayload(payload.data, {force: true});
+      return;
+    }
     refreshSettings({force: true, silent: true});
     return;
   }
+  if (type === 'auto_approve_changed') {
+    if (payload.data) applyAutoApprovePayload(payload.data);
+    return;
+  }
+  if (type === 'watched_prs_changed') {
+    if (payload.data) applyWatchedPrsPayload(payload.data);
+    return;
+  }
   if (type === 'transcripts_changed') {
-    refreshTranscripts({force: true});
+    if (payload.data) {
+      applyTranscriptsPayload(payload.data, {refreshAuto: false, refreshContext: false, refreshActivity: false});
+    } else {
+      refreshTranscripts({force: true});
+    }
+    return;
+  }
+  if (type === 'context_items_ready') {
+    if (payload.data) applyContextItemsPayloadFromPush(payload.data, {session: payload.session, preserveScroll: true});
+    return;
+  }
+  if (type === 'activity_summary_ready') {
+    if (payload.data) applyActivitySummaryPayloadFromPush(payload.data);
+    return;
+  }
+  if (type === 'session_files_ready') {
+    if (payload.data && typeof applySessionFilesPayloadFromPush === 'function') {
+      applySessionFilesPayloadFromPush(payload.data, payload.request || {});
+    }
     return;
   }
   if (type === 'session_files_changed') {
@@ -26197,16 +26599,22 @@ function installClientEventStream() {
     return;
   }
   clientEventsSource = source;
-  source.addEventListener('ready', () => {
+  source.addEventListener('ready', event => {
     clientEventsConnected = true;
+    recordSseDebugEvent('ready', clientEventEnvelope(event), event);
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   });
-  source.addEventListener('ping', () => { clientEventsConnected = true; });
+  source.addEventListener('ping', event => {
+    clientEventsConnected = true;
+    recordSseDebugEvent('ping', clientEventEnvelope(event), event);
+  });
   source.onerror = () => { clientEventsConnected = false; };
-  for (const type of ['settings_changed', 'fs_changed', 'session_files_changed', 'transcripts_changed']) {
+  for (const type of ['settings_changed', 'auto_approve_changed', 'watched_prs_changed', 'fs_changed', 'session_files_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready']) {
     source.addEventListener(type, event => {
       clientEventsConnected = true;
-      handleClientPushEvent(type, clientEventPayload(event));
+      const envelope = clientEventEnvelope(event);
+      recordSseDebugEvent(type, envelope, event);
+      handleClientPushEvent(type, clientEventPayloadFromEnvelope(envelope));
     });
   }
 }

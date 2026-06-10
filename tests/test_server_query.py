@@ -12,6 +12,7 @@ from yolomux_lib.server import parse_query_float
 from yolomux_lib.server import parse_query_int
 from yolomux_lib.server import parse_repo_refs_param
 from yolomux_lib.server import ws_resize_dimensions
+from yolomux_lib.web import html_page
 
 
 def test_parse_repo_refs_param_decodes_per_repo_overrides():
@@ -76,6 +77,14 @@ def test_websocket_resize_dimensions_are_clamped():
     assert ws_resize_dimensions({"rows": 24, "cols": 80}, 36, 120) == (24, 80)
     assert ws_resize_dimensions({"rows": True, "cols": 80}, 36, 120) is None
     assert ws_resize_dimensions({"rows": "24", "cols": 80}, 36, 120) is None
+
+
+def test_html_uses_browser_highlight_js_bundle():
+    html = html_page(["6"], "admin")
+
+    assert "highlight.js@11.9.0/lib/common.min.js" not in html
+    assert "highlightjs/cdn-release@11.9.0/build/highlight.min.js" in html
+    assert "highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" in html
 
 
 def test_handle_upload_enforces_live_app_size_limit():
@@ -183,7 +192,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
     Handler.do_POST(handler)
 
     assert calls == [("require_auth_for_post", "/api/watch/roots")]
-    assert writes == [("json", HTTPStatus.OK, {"ok": True, "roots": ["/repo"]})]
+    assert writes == [("json", HTTPStatus.OK, {"ok": True, "roots": {"roots": ["/repo"]}})]
 
     app = SimpleNamespace(tmux_copy_selection=lambda session: ({"session": session, "copied": True}, HTTPStatus.OK))
     handler, calls, writes = route_handler("/api/tmux-copy-selection?session=6", app)

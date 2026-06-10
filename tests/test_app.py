@@ -436,29 +436,100 @@ def test_update_client_watch_roots_filters_and_expires(monkeypatch):
         webapp.control_server.stop()
 
 
+def test_filesystem_change_summary_counts_entry_changes():
+    previous = (
+        (
+            "/repo",
+            (
+                "/repo",
+                "dir",
+                100,
+                0,
+                (
+                    ("old.txt", "file", 100, 10),
+                    ("same.txt", "file", 100, 10),
+                    ("old-dir", "dir", 100, 0),
+                    ("mod.txt", "file", 100, 10),
+                ),
+            ),
+        ),
+    )
+    current = (
+        (
+            "/repo",
+            (
+                "/repo",
+                "dir",
+                200,
+                0,
+                (
+                    ("new.txt", "file", 100, 10),
+                    ("same.txt", "file", 100, 10),
+                    ("new-dir", "dir", 100, 0),
+                    ("mod.txt", "file", 200, 10),
+                ),
+            ),
+        ),
+        ("/new-root", ("/new-root", "missing")),
+    )
+
+    summary = app_module.filesystem_change_summary(previous, current)
+
+    assert summary["roots_changed"] == 2
+    assert summary["roots_added"] == 1
+    assert summary["roots_removed"] == 0
+    assert summary["entries_added"] == 2
+    assert summary["entries_removed"] == 2
+    assert summary["entries_modified"] == 1
+    assert summary["files_added"] == 1
+    assert summary["files_removed"] == 1
+    assert summary["files_modified"] == 1
+    assert summary["dirs_added"] == 1
+    assert summary["dirs_removed"] == 1
+    assert summary["dirs_modified"] == 0
+
+
 def test_poll_client_events_once_publishes_changed_signatures(monkeypatch):
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
     webapp = app_module.TmuxWebtermApp([])
     events = []
     settings_signatures = [("settings", 1), ("settings", 2)]
     transcript_signatures = [("transcripts", 1), ("transcripts", 2)]
-    filesystem_signatures = [("filesystem", 1), ("filesystem", 2)]
+    filesystem_signatures = [
+        (("/repo", ("/repo", "dir", 100, 0, (("old.txt", "file", 100, 10),))),),
+        (("/repo", ("/repo", "dir", 200, 0, (("new.txt", "file", 100, 10),))),),
+    ]
     monkeypatch.setattr(webapp, "settings_watch_signature", lambda: settings_signatures.pop(0))
     monkeypatch.setattr(webapp, "transcripts_watch_signature", lambda sessions: transcript_signatures.pop(0))
     monkeypatch.setattr(webapp, "filesystem_roots_watch_signature", lambda sessions: filesystem_signatures.pop(0))
     monkeypatch.setattr(webapp, "filesystem_roots_for_watch", lambda sessions: ["/repo"])
-    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None: events.append((event_type, payload or {})))
+    monkeypatch.setattr(
+        webapp,
+        "filesystem_push_payload",
+        lambda roots: {
+            "roots": roots,
+            "directories": [{"path": "/repo", "status": 200, "ok": True, "data": {"entries": []}}],
+            "listing_summary": {"roots_requested": 1, "roots_listed": 1, "roots_error": 0, "entries_listed": 0, "files_listed": 0, "dirs_listed": 0},
+            "compute_ms": 1.0,
+        },
+    )
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
     try:
         webapp.set_session_files_cache(("k",), {"files": []}, HTTPStatus.OK)
         webapp.transcripts_payload_cache = (1.0, {"sessions": {}})
         assert webapp.poll_client_events_once() == []
-        assert webapp.poll_client_events_once() == ["settings_changed", "transcripts_changed", "fs_changed", "session_files_changed"]
+        assert webapp.poll_client_events_once() == ["settings_changed", "transcripts_changed", "fs_changed"]
     finally:
         webapp.control_server.stop()
 
-    assert [event_type for event_type, _payload in events] == ["settings_changed", "transcripts_changed", "fs_changed", "session_files_changed"]
+    assert [event_type for event_type, _payload in events] == ["settings_changed", "transcripts_changed", "fs_changed"]
+    fs_payload = events[-1][1]
+    assert fs_payload["change_summary"]["roots_changed"] == 1
+    assert fs_payload["change_summary"]["entries_added"] == 1
+    assert fs_payload["change_summary"]["entries_removed"] == 1
+    assert fs_payload["listing_summary"]["roots_listed"] == 1
     assert webapp.session_files_cache != {}
-    assert webapp.transcripts_payload_cache is None
+    assert webapp.transcripts_payload_cache is not None
 
 
 def test_filesystem_roots_for_watch_excludes_transcript_parent(monkeypatch, tmp_path):
