@@ -7143,6 +7143,19 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(!api.commandPaletteItems().some(item => item.group === 'Tabs'), '#7: @ stays reserved for symbols');
 }
 
+// File Explorer / Finder-style keyboard navigation of the Finder/Differ selection (Arrow + Shift+Arrow,
+// Home/End, Mod+A) over the shared selection model — works for both surfaces (both render .file-tree-row).
+{
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(source.includes('function handleFileExplorerArrowNav('), 'arrow-nav handler exists');
+  assert.ok(/if \(handleFileExplorerArrowNav\(event\)\) return;/.test(source), 'arrow-nav is wired into the global keydown after the delete shortcut');
+  assert.ok(/eventTargetIsFileExplorerSurface\(event\.target\) \|\| isFileExplorerItem\(focusedPanelItem\)/.test(source) || source.includes('!eventTargetIsFileExplorerSurface(event.target) && !isFileExplorerItem(focusedPanelItem)'), 'arrow-nav is gated on the Finder/Differ surface');
+  assert.ok(/event\.shiftKey\) selectFileTreeRange\(nextRow, nextPath, \{clear: true\}\)/.test(source), 'Shift+Arrow extends the range from the anchor');
+  assert.ok(/else selectFileTreePath\(nextPath\)/.test(source), 'plain Arrow single-selects the new lead');
+  assert.ok(source.includes('fileExplorerSelectionLead = nextPath'), 'the keyboard lead (cursor) advances with the arrows');
+  assert.ok(source.includes('fileExplorerSelectionLead = fullPath') , 'click/range selection seeds the same lead so keyboard continues from the clicked row');
+}
+
 // S2 (DOIT.51) BEHAVIORAL PROOF: a file that is an open tab appears ONCE in the on-type palette — as its
 // Tabs row — with its Recent/Files duplicate suppressed. Without the dedup it would appear twice.
 {

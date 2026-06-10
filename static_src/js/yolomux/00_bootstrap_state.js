@@ -761,6 +761,7 @@ const repoChipContextMenu = createContextMenuController();     // C9: per-pane "
 let sessionRenameDialog = null;
 const fileExplorerSelectedPaths = new Set();
 let fileExplorerSelectionAnchor = null;
+let fileExplorerSelectionLead = null;   // keyboard cursor (File-Explorer "lead" item); arrows move it, Shift+arrow extends anchor->lead
 let fileExplorerManualSelectionActive = false;
 let fileTreeRenamePath = null;
 let fileExplorerPathError = '';

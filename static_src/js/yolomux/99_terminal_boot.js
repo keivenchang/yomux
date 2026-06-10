@@ -2144,6 +2144,10 @@ function handleGlobalShortcutKeydown(event) {
   // C10: the Finder tree claims Command-Delete (Mac) / Delete (PC) to delete the selected file(s) before
   // the global Mod+Delete tab-close fallback can fire.
   if (handleFileExplorerDeleteShortcut(event)) return;
+  // File Explorer / Finder-style keyboard traversal of the Finder/Differ selection (Arrow + Shift+Arrow,
+  // Home/End, Mod+A) — claimed before the global shortcuts so arrows move the file selection when the
+  // Finder/Differ is the active surface.
+  if (handleFileExplorerArrowNav(event)) return;
   const mod = appModifier(event);
   const key = String(event.key || '').toLowerCase();
   const platformActionAllowed = globalShortcutTargetAllowsPlatformAction(event.target);

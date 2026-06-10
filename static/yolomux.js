@@ -762,6 +762,7 @@ const repoChipContextMenu = createContextMenuController();     // C9: per-pane "
 let sessionRenameDialog = null;
 const fileExplorerSelectedPaths = new Set();
 let fileExplorerSelectionAnchor = null;
+let fileExplorerSelectionLead = null;   // keyboard cursor (File-Explorer "lead" item); arrows move it, Shift+arrow extends anchor->lead
 let fileExplorerManualSelectionActive = false;
 let fileTreeRenamePath = null;
 let fileExplorerPathError = '';
@@ -6483,8 +6484,9 @@ function pruneFileExplorerSelectionForRoot(root) {
     && (!pathIsInsideDirectory(fileExplorerSelectionAnchor, normalizedRoot) || fileExplorerSelectionAnchor === normalizedRoot)
   ) {
     fileExplorerSelectionAnchor = null;
+    fileExplorerSelectionLead = null;
   }
-  if (!fileExplorerSelectedPaths.size) fileExplorerSelectionAnchor = null;
+  if (!fileExplorerSelectedPaths.size) { fileExplorerSelectionAnchor = null; fileExplorerSelectionLead = null; }
 }
 
 function fileExplorerIsOpen() {
@@ -8280,11 +8282,13 @@ function selectFileTreePath(fullPath, options = {}) {
     fileExplorerSelectedPaths.add(fullPath);
   }
   if (options.anchor !== false) fileExplorerSelectionAnchor = fullPath;
+  fileExplorerSelectionLead = fullPath;   // the keyboard cursor follows the single/clicked selection
   updateFileExplorerCurrentFileHighlight();
 }
 
 function selectFileTreeRange(row, fullPath, options = {}) {
   const rows = selectableFileTreeRows(row.closest('[role="tree"]') || document);
+  fileExplorerSelectionLead = fullPath;   // a range extend leaves the anchor put but moves the lead to the target
   const scrollContainer = row.closest('.file-explorer-tree-panel');
   const restoreScrollTop = options.preserveScroll !== false && scrollContainer ? scrollContainer.scrollTop : null;
   const finish = () => {
@@ -8838,6 +8842,60 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
 // Delete is a text-edit key on Mac), so on a Mac UI require metaKey+Backspace/Delete; on PC/File Explorer a
 // plain Delete works. Returns true once it has consumed the event so the global tab-close shortcut (which
 // also binds Mod+Delete) does NOT also fire. Guarded against text/rename inputs, readonly, and no selection.
+// File Explorer / Finder-style keyboard navigation over the SHARED selection. Works for the Finder AND the
+// Differ (both render `.file-tree-row`). Arrow Up/Down move the lead (cursor) and single-select it; Shift+
+// Arrow (and Shift+Home/End) extend the range from the anchor; Home/End jump; Mod+A selects all. Same
+// surface gating as handleFileExplorerDeleteShortcut so it only fires when the Finder/Differ is active and
+// not while typing in a rename input. Returns true if it handled the key.
+function handleFileExplorerArrowNav(event) {
+  if (event.altKey) return false;
+  const key = event.key;
+  const isMove = key === 'ArrowDown' || key === 'ArrowUp' || key === 'Home' || key === 'End';
+  const isSelectAll = (event.metaKey || event.ctrlKey) && (key === 'a' || key === 'A');
+  if (!isMove && !isSelectAll) return false;
+  if (isMove && (event.metaKey || event.ctrlKey)) return false;   // leave Mod+Arrow for other shortcuts
+  if (!eventTargetIsFileExplorerSurface(event.target) && !isFileExplorerItem(focusedPanelItem)) return false;
+  if (!globalShortcutTargetAllowsAppAction(event.target)) return false;
+  // Scope to ONE tree: the event's tree, else the tree holding the current lead, else the active Finder tree.
+  const container = event.target?.closest?.('.file-explorer-tree-panel')
+    || (fileExplorerSelectionLead && document.querySelector(`.file-tree-row[data-path="${cssEscape(fileExplorerSelectionLead)}"]`)?.closest?.('.file-explorer-tree-panel'))
+    || document.querySelector('.panel.file-explorer-panel .file-explorer-tree-panel')
+    || document.querySelector('.file-explorer-tree-panel')
+    || document;
+  const rows = selectableFileTreeRows(container);
+  if (!rows.length) return false;
+  if (isSelectAll) {
+    fileExplorerManualSelectionActive = true;
+    fileExplorerSelectedPaths.clear();
+    for (const item of rows) fileExplorerSelectedPaths.add(item.dataset.path);
+    fileExplorerSelectionAnchor = rows[0].dataset.path;
+    fileExplorerSelectionLead = rows[rows.length - 1].dataset.path;
+    updateFileExplorerCurrentFileHighlight();
+    event.preventDefault();
+    event.stopPropagation();
+    return true;
+  }
+  let leadIndex = rows.findIndex(item => item.dataset.path === fileExplorerSelectionLead);
+  if (leadIndex < 0) leadIndex = rows.findIndex(item => fileExplorerSelectedPaths.has(item.dataset.path));
+  let nextIndex;
+  if (key === 'Home') nextIndex = 0;
+  else if (key === 'End') nextIndex = rows.length - 1;
+  else {
+    const delta = key === 'ArrowDown' ? 1 : -1;
+    nextIndex = leadIndex < 0 ? (delta > 0 ? 0 : rows.length - 1) : Math.max(0, Math.min(rows.length - 1, leadIndex + delta));
+  }
+  const nextRow = rows[nextIndex];
+  const nextPath = nextRow.dataset.path;
+  fileExplorerManualSelectionActive = true;
+  if (event.shiftKey) selectFileTreeRange(nextRow, nextPath, {clear: true});
+  else selectFileTreePath(nextPath);
+  fileExplorerSelectionLead = nextPath;
+  nextRow.scrollIntoView({block: 'nearest'});
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
 function handleFileExplorerDeleteShortcut(event) {
   const key = String(event.key || '').toLowerCase();
   if (key !== 'backspace' && key !== 'delete') return false;
@@ -25290,6 +25348,10 @@ function handleGlobalShortcutKeydown(event) {
   // C10: the Finder tree claims Command-Delete (Mac) / Delete (PC) to delete the selected file(s) before
   // the global Mod+Delete tab-close fallback can fire.
   if (handleFileExplorerDeleteShortcut(event)) return;
+  // File Explorer / Finder-style keyboard traversal of the Finder/Differ selection (Arrow + Shift+Arrow,
+  // Home/End, Mod+A) — claimed before the global shortcuts so arrows move the file selection when the
+  // Finder/Differ is the active surface.
+  if (handleFileExplorerArrowNav(event)) return;
   const mod = appModifier(event);
   const key = String(event.key || '').toLowerCase();
   const platformActionAllowed = globalShortcutTargetAllowsPlatformAction(event.target);
