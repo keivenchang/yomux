@@ -370,6 +370,8 @@ const watchedPrLastStatus = new Map();
 let paneStateRefreshMs = initialSetting('performance.pane_state_refresh_ms', 1253);
 let latencyRefreshMs = initialSetting('performance.latency_refresh_ms', 3001);
 let eventLogRefreshMs = initialSetting('performance.event_log_refresh_ms', 5003);
+let settingsRefreshMs = initialSetting('performance.settings_refresh_ms', 5009);
+let activitySummaryBackgroundRefreshMs = initialSetting('performance.activity_summary_refresh_ms', 60001);
 let redReminderMs = initialSetting('appearance.red_reminder_ms', 1550);
 let yoloRotateMs = initialSetting('appearance.yolo_rotate_ms', 20000);
 const latencySamplesMax = 24;
@@ -395,6 +397,16 @@ let fileExplorerRefreshMs = fileExplorerRefreshMsFromValues(
   initialSetting('file_explorer.refresh_seconds', 5),
   initialSetting('file_explorer.refresh_ms', 15001),
 );
+function sessionFilesRefreshMsFromValues(secondsValue) {
+  const seconds = Number(secondsValue);
+  return Math.max(1, Math.min(60, Number.isFinite(seconds) ? seconds : 5)) * 1000 + 1;
+}
+let sessionFilesRefreshMs = sessionFilesRefreshMsFromValues(initialSetting('file_explorer.session_files_refresh_seconds', 5));
+let sessionFilesLastPollTs = 0;
+let sessionFilesPushRefreshTimer = null;
+let serverWatchRootsSignature = '';
+let serverWatchRootsInFlight = false;
+let serverWatchRootsSyncedAt = 0;
 let fileExplorerIndexRefreshSeconds = initialSetting('file_explorer.index_refresh_seconds', 120);
 let fileExplorerNewEntryHighlightMs = initialSetting('file_explorer.new_entry_highlight_ms', 60000);
 let fileExplorerImagePreviewMaxPx = initialSetting('file_explorer.image_preview_max_px', 320);
@@ -736,9 +748,12 @@ let transcriptMetaLoading = false;
 let transcriptMetaLoaded = false;
 let transcriptMetaLoadError = '';
 let transcriptMetaRefreshPromise = null;
+let clientEventsSource = null;
+let clientEventsConnected = false;
 let serverVersionReloadHandled = '';
 let activitySummaryPayload = {sessions: {}, global: {lines: []}, session_order: []};
 let activitySummaryRefreshing = false;
+let activitySummaryLastRefreshTs = 0;
 const activitySummaryGuard = makeGenerationGuard();
 let yoagentMessages = [];
 let yoagentBusy = false;

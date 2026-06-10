@@ -123,6 +123,40 @@ def test_transcripts_payload_exposes_server_version(monkeypatch):
     assert payload["server_version"] == app_module.YOLOMUX_VERSION
 
 
+def test_transcripts_payload_returns_stale_cache_and_refreshes(monkeypatch):
+    calls = []
+    info = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
+
+    def fake_discover(sessions):
+        calls.append(len(calls) + 1)
+        return {"5": info}, []
+
+    monkeypatch.setattr(app_module, "discover_sessions", fake_discover)
+    monkeypatch.setattr(app_module, "session_to_json", lambda info, cache, allow_network=False: {"session": info.session, "call": calls[-1]})
+    monkeypatch.setattr(app_module, "agent_auth_status", lambda: {})
+    webapp = app_module.TmuxWebtermApp(["5"])
+    monkeypatch.setattr(webapp, "refresh_sessions", lambda: [])
+    monkeypatch.setattr(webapp, "warm_metadata_cache_async", lambda sessions: None)
+    monkeypatch.setattr(webapp, "metadata_refresh_seconds", lambda: 1.0)
+    webapp.start_transcripts_payload_refresh = lambda: (webapp.refresh_transcripts_payload_cache() or True)
+    try:
+        first = webapp.transcripts_payload()
+        with webapp.transcripts_payload_cache_lock:
+            stored_at, value = webapp.transcripts_payload_cache
+            webapp.transcripts_payload_cache = (stored_at - 2.0, value)
+        second = webapp.transcripts_payload()
+        third = webapp.transcripts_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert first["sessions"]["5"]["call"] == 1
+    assert second["sessions"]["5"]["call"] == 1
+    assert second["cache"]["hit"] is True
+    assert second["cache"]["stale"] is True
+    assert third["sessions"]["5"]["call"] == 2
+    assert calls == [1, 2]
+
+
 def test_metadata_badge_pulse_expiry_does_not_persist(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["6"])
     signature = {"main": "", "pr": "123", "status": "open", "ci": "pending"}
@@ -302,7 +336,7 @@ def test_activity_summary_payload_reuses_cached_session_summary(monkeypatch, tmp
 
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
     monkeypatch.setattr(app_module, "session_project_metadata", lambda info, cache, allow_network=False: {"git": {"root": str(tmp_path), "branch": "main", "dirty_count": 1}, "pull_request": None, "linear": []})
-    monkeypatch.setattr(app_module.session_files, "session_files_payload_for_info", lambda info, hours=24.0: files_payload)
+    monkeypatch.setattr(app_module.session_files, "session_files_payload_for_info", lambda info, hours=24.0, **_kwargs: files_payload)
 
     def fake_build(info, project, files):
         calls.append(info.session)
@@ -324,6 +358,184 @@ def test_activity_summary_payload_reuses_cached_session_summary(monkeypatch, tmp
     assert second["sessions"]["5"]["local"] == "cached test"
     assert third["sessions"]["5"]["local"] == "cached test"
     assert localized["locale"] == "zh-Hant"
+
+
+def test_session_files_payload_reuses_short_cache(monkeypatch):
+    info = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
+    calls = []
+
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
+
+    def fake_session_files_payload(session, infos, hours, from_ref=None, to_ref=None, repo_refs=None):
+        calls.append((session, tuple(infos), hours, from_ref, to_ref, repo_refs))
+        return {"session": session, "files": [], "repos": [], "errors": []}, HTTPStatus.OK
+
+    monkeypatch.setattr(app_module.session_files, "session_files_payload", fake_session_files_payload)
+    webapp = app_module.TmuxWebtermApp(["5"])
+    webapp.refresh_sessions = lambda: []
+    try:
+        first, first_status = webapp.session_files_payload("5")
+        second, second_status = webapp.session_files_payload("5")
+    finally:
+        webapp.control_server.stop()
+
+    assert first_status == HTTPStatus.OK
+    assert second_status == HTTPStatus.OK
+    assert calls == [("5", ("5",), 24.0, None, None, None)]
+    assert first["cache"]["hit"] is False
+    assert second["cache"]["hit"] is True
+    assert first["files"] == second["files"] == []
+    assert first["repos"] == second["repos"] == []
+    assert first["errors"] == second["errors"] == []
+
+
+def test_session_files_payload_returns_stale_cache_and_refreshes(monkeypatch):
+    info = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
+    calls = []
+
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
+
+    def fake_session_files_payload(session, infos, hours, from_ref=None, to_ref=None, repo_refs=None):
+        calls.append(len(calls) + 1)
+        return {"session": session, "files": [{"path": f"file-{calls[-1]}.txt"}], "repos": [], "errors": []}, HTTPStatus.OK
+
+    monkeypatch.setattr(app_module.session_files, "session_files_payload", fake_session_files_payload)
+    webapp = app_module.TmuxWebtermApp(["5"])
+    webapp.refresh_sessions = lambda: []
+    webapp.session_files_refresh_seconds = lambda: 1.0
+    webapp.start_session_files_cache_refresh = lambda cache_key, target, *args: (target(cache_key, *args) or True)
+    try:
+        first, first_status = webapp.session_files_payload("5")
+        key = next(iter(webapp.session_files_cache))
+        with webapp.session_files_cache_lock:
+            stored_at, value = webapp.session_files_cache[key]
+            webapp.session_files_cache[key] = (stored_at - 2.0, value)
+        second, second_status = webapp.session_files_payload("5")
+    finally:
+        webapp.control_server.stop()
+
+    assert first_status == HTTPStatus.OK
+    assert second_status == HTTPStatus.OK
+    assert first["files"] == [{"path": "file-1.txt"}]
+    assert second["files"] == [{"path": "file-1.txt"}]
+    assert second["cache"]["hit"] is True
+    assert second["cache"]["stale"] is True
+    assert calls == [1, 2]
+
+
+def test_update_client_watch_roots_filters_and_expires(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: 100.0)
+    try:
+        payload = webapp.update_client_watch_roots(["/repo", "relative", "", "/repo"])
+        assert payload["roots"] == ["/repo"]
+        assert webapp.client_watch_roots_snapshot() == ["/repo"]
+        monkeypatch.setattr(app_module.time, "monotonic", lambda: 1000.0)
+        assert webapp.client_watch_roots_snapshot() == []
+    finally:
+        webapp.control_server.stop()
+
+
+def test_poll_client_events_once_publishes_changed_signatures(monkeypatch):
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+    webapp = app_module.TmuxWebtermApp([])
+    events = []
+    settings_signatures = [("settings", 1), ("settings", 2)]
+    transcript_signatures = [("transcripts", 1), ("transcripts", 2)]
+    filesystem_signatures = [("filesystem", 1), ("filesystem", 2)]
+    monkeypatch.setattr(webapp, "settings_watch_signature", lambda: settings_signatures.pop(0))
+    monkeypatch.setattr(webapp, "transcripts_watch_signature", lambda sessions: transcript_signatures.pop(0))
+    monkeypatch.setattr(webapp, "filesystem_roots_watch_signature", lambda sessions: filesystem_signatures.pop(0))
+    monkeypatch.setattr(webapp, "filesystem_roots_for_watch", lambda sessions: ["/repo"])
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None: events.append((event_type, payload or {})))
+    try:
+        webapp.set_session_files_cache(("k",), {"files": []}, HTTPStatus.OK)
+        webapp.transcripts_payload_cache = (1.0, {"sessions": {}})
+        assert webapp.poll_client_events_once() == []
+        assert webapp.poll_client_events_once() == ["settings_changed", "transcripts_changed", "fs_changed", "session_files_changed"]
+    finally:
+        webapp.control_server.stop()
+
+    assert [event_type for event_type, _payload in events] == ["settings_changed", "transcripts_changed", "fs_changed", "session_files_changed"]
+    assert webapp.session_files_cache != {}
+    assert webapp.transcripts_payload_cache is None
+
+
+def test_filesystem_roots_for_watch_excludes_transcript_parent(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    transcript = tmp_path / "transcripts" / "codex.jsonl"
+    info = SessionInfo(
+        session="5",
+        panes=[],
+        selected_pane=None,
+        agents=[
+            AgentInfo(
+                session="5",
+                kind="codex",
+                pid=123,
+                pane_target="5:1.0",
+                command="codex",
+                cwd=str(repo),
+                status=None,
+                session_id="session-5",
+                transcript=str(transcript),
+                error=None,
+            )
+        ],
+    )
+    monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"file_explorer": {"companion_dirs": []}}})
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        roots = webapp.filesystem_roots_for_watch({"5": info})
+    finally:
+        webapp.control_server.stop()
+
+    assert str(repo) in roots
+    assert str(transcript.parent) not in roots
+
+
+def test_context_items_reuses_transcript_tail_cache(monkeypatch, tmp_path):
+    transcript = tmp_path / "codex.jsonl"
+    transcript.write_text(json.dumps({"payload": {"type": "user_message", "message": "Check latency"}}) + "\n", encoding="utf-8")
+    info = SessionInfo(
+        session="5",
+        panes=[],
+        selected_pane=None,
+        agents=[
+            AgentInfo(
+                session="5",
+                kind="codex",
+                pid=123,
+                pane_target="5:0.0",
+                command="codex",
+                cwd=str(tmp_path),
+                status="running",
+                session_id="session-5",
+                transcript=str(transcript),
+                error=None,
+            )
+        ],
+    )
+    calls = []
+
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
+
+    def fake_tail_file_lines(path, lines):
+        calls.append((path, lines))
+        return transcript.read_text(encoding="utf-8")
+
+    monkeypatch.setattr(app_module, "tail_file_lines", fake_tail_file_lines)
+    webapp = app_module.TmuxWebtermApp(["5"])
+    try:
+        first, first_status = webapp.context_items("5", 20)
+        second, second_status = webapp.context_items("5", 20)
+    finally:
+        webapp.control_server.stop()
+
+    assert first_status == HTTPStatus.OK
+    assert second_status == HTTPStatus.OK
+    assert calls == [(transcript, app_module.MAX_TRANSCRIPT_TAIL_LINES)]
+    assert first["items"] == second["items"]
 
 
 def test_yoagent_session_summary_updates_from_transcript_delta(monkeypatch, tmp_path):

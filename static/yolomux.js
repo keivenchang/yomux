@@ -371,6 +371,8 @@ const watchedPrLastStatus = new Map();
 let paneStateRefreshMs = initialSetting('performance.pane_state_refresh_ms', 1253);
 let latencyRefreshMs = initialSetting('performance.latency_refresh_ms', 3001);
 let eventLogRefreshMs = initialSetting('performance.event_log_refresh_ms', 5003);
+let settingsRefreshMs = initialSetting('performance.settings_refresh_ms', 5009);
+let activitySummaryBackgroundRefreshMs = initialSetting('performance.activity_summary_refresh_ms', 60001);
 let redReminderMs = initialSetting('appearance.red_reminder_ms', 1550);
 let yoloRotateMs = initialSetting('appearance.yolo_rotate_ms', 20000);
 const latencySamplesMax = 24;
@@ -396,6 +398,16 @@ let fileExplorerRefreshMs = fileExplorerRefreshMsFromValues(
   initialSetting('file_explorer.refresh_seconds', 5),
   initialSetting('file_explorer.refresh_ms', 15001),
 );
+function sessionFilesRefreshMsFromValues(secondsValue) {
+  const seconds = Number(secondsValue);
+  return Math.max(1, Math.min(60, Number.isFinite(seconds) ? seconds : 5)) * 1000 + 1;
+}
+let sessionFilesRefreshMs = sessionFilesRefreshMsFromValues(initialSetting('file_explorer.session_files_refresh_seconds', 5));
+let sessionFilesLastPollTs = 0;
+let sessionFilesPushRefreshTimer = null;
+let serverWatchRootsSignature = '';
+let serverWatchRootsInFlight = false;
+let serverWatchRootsSyncedAt = 0;
 let fileExplorerIndexRefreshSeconds = initialSetting('file_explorer.index_refresh_seconds', 120);
 let fileExplorerNewEntryHighlightMs = initialSetting('file_explorer.new_entry_highlight_ms', 60000);
 let fileExplorerImagePreviewMaxPx = initialSetting('file_explorer.image_preview_max_px', 320);
@@ -737,9 +749,12 @@ let transcriptMetaLoading = false;
 let transcriptMetaLoaded = false;
 let transcriptMetaLoadError = '';
 let transcriptMetaRefreshPromise = null;
+let clientEventsSource = null;
+let clientEventsConnected = false;
 let serverVersionReloadHandled = '';
 let activitySummaryPayload = {sessions: {}, global: {lines: []}, session_order: []};
 let activitySummaryRefreshing = false;
+let activitySummaryLastRefreshTs = 0;
 const activitySummaryGuard = makeGenerationGuard();
 let yoagentMessages = [];
 let yoagentBusy = false;
@@ -6693,6 +6708,20 @@ async function fetchDirectory(path, options = {}) {
   }
 }
 
+function invalidateFileExplorerFsCaches() {
+  fileExplorerDirListingCache.clear();
+  fileExplorerPathInfoCache.clear();
+  fileExplorerDirectorySignatures.clear();
+}
+
+async function refreshFileExplorerFromPush(payload = {}) {
+  invalidateFileExplorerFsCaches();
+  if (fileExplorerPaneIsOpen()) {
+    await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+  }
+  await refreshOpenFilesIfChanged();
+}
+
 function expandUserPath(path) {
   const text = String(path || '').trim();
   if (text === '~') return homePath || text;
@@ -10550,6 +10579,46 @@ function watchedFileExplorerDirectories() {
   return Array.from(directories);
 }
 
+function clientServerWatchRoots() {
+  const roots = new Set(watchedFileExplorerDirectories());
+  for (const path of openFiles.keys()) {
+    roots.add(dirnameOf(path));
+  }
+  for (const repo of fileExplorerSessionFilesPayload?.repos || []) {
+    const path = normalizeDirectoryPath(repo?.repo || repo?.root || '');
+    if (path && path !== '/') roots.add(path);
+  }
+  for (const file of fileExplorerSessionFilesPayload?.files || []) {
+    const path = normalizeDirectoryPath(file?.abs_path || sessionFileAbsolutePath(file));
+    if (path && path !== '/') roots.add(dirnameOf(path));
+  }
+  return Array.from(roots)
+    .map(path => normalizeDirectoryPath(path))
+    .filter(path => path && path.startsWith('/'))
+    .sort();
+}
+
+function syncServerWatchRoots(options = {}) {
+  if (readOnlyMode || !clientEventsSource || serverWatchRootsInFlight) return;
+  const roots = clientServerWatchRoots();
+  const signature = roots.join('\x1f');
+  const renewDue = options.renew === true && Date.now() - serverWatchRootsSyncedAt >= 240000;
+  if (signature === serverWatchRootsSignature && !renewDue) return;
+  serverWatchRootsSignature = signature;
+  serverWatchRootsInFlight = true;
+  apiFetch('/api/watch/roots', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({roots}),
+  }).then(() => {
+    serverWatchRootsSyncedAt = Date.now();
+  }).catch(() => {
+    serverWatchRootsSignature = '';
+  }).finally(() => {
+    serverWatchRootsInFlight = false;
+  });
+}
+
 async function refreshFileExplorerIfChanged() {
   const directories = watchedFileExplorerDirectories();
   let changed = false;
@@ -10585,8 +10654,10 @@ async function refreshWatchedFilesystem() {
     await refreshFileExplorerIfChanged();
     await refreshOpenFilesIfChanged();
     if (document.querySelector('.file-explorer-changes-panel')) {
-      fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true});
+      const due = !sessionFilesLastPollTs || Date.now() - sessionFilesLastPollTs >= sessionFilesRefreshMs;
+      if (due) fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true});
     }
+    syncServerWatchRoots();
   } finally {
     filesystemRefreshInFlight = false;
   }
@@ -12121,6 +12192,10 @@ function fileExplorerRefreshMsFromSettings() {
   );
 }
 
+function sessionFilesRefreshMsFromSettings() {
+  return sessionFilesRefreshMsFromValues(numberSetting('file_explorer.session_files_refresh_seconds', 5));
+}
+
 function boolSetting(path, fallback) {
   const value = initialSetting(path, fallback);
   return value === true || value === 'true' || value === 1;
@@ -12327,7 +12402,7 @@ function refreshMetaButtonTitle() {
     'Refresh git, PR, Linear, and agent metadata.',
     'Refresh YOLO status and open event logs.',
     'Refresh active transcript previews.',
-    `Auto-refresh: YOLO ${seconds(paneStateRefreshMs)}, metadata ${seconds(metadataRefreshMs)}, ping ${seconds(latencyRefreshMs)}, open logs ${seconds(eventLogRefreshMs)}.`,
+    `Auto-refresh: YOLO ${seconds(paneStateRefreshMs)}, metadata ${seconds(metadataRefreshMs)}, settings ${seconds(settingsRefreshMs)}, ping ${seconds(latencyRefreshMs)}, open logs ${seconds(eventLogRefreshMs)}.`,
     'Does not reload the page or reconnect terminals.',
   ].join('\n');
 }
@@ -12348,6 +12423,8 @@ function applySettingsPayload(payload, options = {}) {
   paneStateRefreshMs = numberSetting('performance.pane_state_refresh_ms', 1253);
   latencyRefreshMs = numberSetting('performance.latency_refresh_ms', 3001);
   eventLogRefreshMs = numberSetting('performance.event_log_refresh_ms', 5003);
+  settingsRefreshMs = numberSetting('performance.settings_refresh_ms', 5009);
+  activitySummaryBackgroundRefreshMs = numberSetting('performance.activity_summary_refresh_ms', 60001);
   redReminderMs = numberSetting('appearance.red_reminder_ms', 1550);
   yoloRotateMs = numberSetting('appearance.yolo_rotate_ms', 20000);
   toastDurationMs = numberSetting('notifications.toast_duration_ms', 10000);
@@ -12359,6 +12436,7 @@ function applySettingsPayload(payload, options = {}) {
   tabPopoverShowDelayMs = numberSetting('performance.tab_popover_show_delay_ms', 1000);
   tabPopoverFollowDelayMs = numberSetting('performance.tab_popover_follow_delay_ms', 120);
   fileExplorerRefreshMs = fileExplorerRefreshMsFromSettings();
+  sessionFilesRefreshMs = sessionFilesRefreshMsFromSettings();
   fileExplorerIndexRefreshSeconds = numberSetting('file_explorer.index_refresh_seconds', 120);
   fileExplorerNewEntryHighlightMs = numberSetting('file_explorer.new_entry_highlight_ms', 60000);
   fileExplorerImagePreviewMaxPx = numberSetting('file_explorer.image_preview_max_px', 320);
@@ -12478,14 +12556,36 @@ function clearRuntimeInterval(name) {
   runtimeIntervals.delete(name);
 }
 
+function clientPushSuppressesPolling() {
+  return clientEventsConnected === true;
+}
+
+function refreshTranscriptsFromRuntime() {
+  if (clientPushSuppressesPolling()) return;
+  refreshTranscripts();
+}
+
+function refreshWatchedFilesystemFromRuntime() {
+  if (clientPushSuppressesPolling()) {
+    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({renew: true});
+    return;
+  }
+  refreshWatchedFilesystem();
+}
+
+function refreshSettingsFromRuntime() {
+  if (clientPushSuppressesPolling()) return;
+  refreshSettings({silent: true});
+}
+
 function installRuntimeIntervals() {
   resetRuntimeInterval('auto', refreshAutoStatuses, paneStateRefreshMs);
-  resetRuntimeInterval('metadata', refreshTranscripts, metadataRefreshMs);
+  resetRuntimeInterval('metadata', refreshTranscriptsFromRuntime, metadataRefreshMs);
   resetRuntimeInterval('watched-prs', refreshWatchedPrs, watchedPrRefreshMs);
   resetRuntimeInterval('latency', updateLatency, latencyRefreshMs);
   resetRuntimeInterval('events', refreshOpenEventLogs, eventLogRefreshMs);
-  resetRuntimeInterval('filesystem', refreshWatchedFilesystem, fileExplorerRefreshMs);
-  resetRuntimeInterval('settings', () => refreshSettings({silent: true}), Math.max(1000, Math.min(10000, eventLogRefreshMs)));
+  resetRuntimeInterval('filesystem', refreshWatchedFilesystemFromRuntime, fileExplorerRefreshMs);
+  resetRuntimeInterval('settings', refreshSettingsFromRuntime, settingsRefreshMs);
   if (fileExplorerIndexRefreshSeconds > 0) {
     resetRuntimeInterval('file-index-refresh', refreshAllIndexedDirsStatus, fileExplorerIndexRefreshSeconds * 1000);
   } else {
@@ -14722,7 +14822,7 @@ async function createNextSession(agent) {
     renderPanels(previousActive);
     await placeTmuxSession(payload.session);
     await ensureTerminalRunning(payload.session);
-    refreshTranscripts();
+    refreshTranscripts({force: true});
     renderAutoApproveButtons();
     statusOk(`created ${esc(sessionLabel(payload.session))} (${esc(payload.session)}) with ${esc(agentName(payload.agent) || agentLabel)}`);
   } catch (error) {
@@ -14905,7 +15005,7 @@ async function renameTmuxSession(session, proposedName) {
     replaceTmuxSessionInClient(session, renamed, payload.sessions);
     closeSessionRenameDialog();
     await ensureTerminalRunning(renamed);
-    refreshTranscripts();
+    refreshTranscripts({force: true});
     renderAutoApproveButtons();
     statusOk(`renamed ${esc(session)} to ${esc(renamed)}`);
     return true;
@@ -14937,7 +15037,7 @@ async function killTmuxSession(session) {
     renderSessionButtons();
     renderPanels(previousActive);
     if (sessionsChanged) renderPaneTabStrips();
-    refreshTranscripts();
+    refreshTranscripts({force: true});
     renderAutoApproveButtons();
     statusOk(`killed ${esc(sessionLabel(session))}`);
     return true;
@@ -16820,7 +16920,7 @@ function createInfoPanel() {
   bindPanelShell(panel, infoItemId);
   panel.querySelector('[data-info-refresh]')?.addEventListener('click', event => {
     event.preventDefault();
-    refreshTranscripts();
+    refreshTranscripts({force: true});
   });
   panel.querySelector('[data-yoagent-refresh]')?.addEventListener('click', event => {
     event.preventDefault();
@@ -16953,6 +17053,7 @@ function setInfoSubTab(tab, options = {}) {
   applyInfoSubTab();
   if (next === 'yoagent') {
     renderYoagentPanel({preserveDraft: true, focusInput: options.focusChat === true});
+    refreshActivitySummary({silent: true});
     prewarmYoagent();
   }
 }
@@ -16966,6 +17067,7 @@ async function openInfoSubTab(tab) {
   applyInfoSubTab();
   if (infoPanelSubTab === 'yoagent') {
     renderYoagentPanel({preserveDraft: true, focusInput: true});
+    refreshActivitySummary({silent: true});
     prewarmYoagent();
   }
 }
@@ -17296,8 +17398,20 @@ async function prewarmYoagent(options = {}) {
   }
 }
 
+function activitySummaryIsVisible() {
+  return infoPanelSubTab === 'yoagent' && itemIsActivePaneTab(infoItemId);
+}
+
+function shouldSkipSilentActivitySummary(options = {}) {
+  if (options.force === true || options.silent !== true) return false;
+  if (activitySummaryIsVisible()) return false;
+  if (!activitySummaryLastRefreshTs) return false;
+  return Date.now() - activitySummaryLastRefreshTs < activitySummaryBackgroundRefreshMs;
+}
+
 async function refreshActivitySummary(options = {}) {
   if (activitySummaryRefreshing && options.force !== true) return;
+  if (shouldSkipSilentActivitySummary(options)) return;
   const requestIsCurrent = activitySummaryGuard.begin();
   activitySummaryRefreshing = true;
   renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
@@ -17308,6 +17422,7 @@ async function refreshActivitySummary(options = {}) {
     const payload = await apiFetchJson(`/api/activity-summary?${params.toString()}`, {cache: 'no-store'});
     if (!requestIsCurrent()) return;
     activitySummaryPayload = payload;
+    activitySummaryLastRefreshTs = Date.now();
   } catch (error) {
     if (!requestIsCurrent()) return;
     activitySummaryPayload = {
@@ -17464,6 +17579,7 @@ function preferenceSections() {
       {path: 'file_explorer.index_refresh_seconds', label: t('pref.file_explorer.index_refresh_seconds.label'), type: 'number', min: 0, max: 3600, step: 10, suffix: 's', help: t('pref.file_explorer.index_refresh_seconds.help')},
       {path: 'file_explorer.companion_dirs', label: t('pref.file_explorer.companion_dirs.label'), type: 'list', help: t('pref.file_explorer.companion_dirs.help')},
       {path: 'file_explorer.refresh_seconds', label: t('pref.file_explorer.refresh_seconds.label', {name: fileExplorerLabel()}), type: 'number', min: 1, max: 60, step: 1, suffix: 's', help: t('pref.file_explorer.refresh_seconds.help')},
+      {path: 'file_explorer.session_files_refresh_seconds', label: t('pref.file_explorer.session_files_refresh_seconds.label'), type: 'number', min: 1, max: 60, step: 1, suffix: 's', help: t('pref.file_explorer.session_files_refresh_seconds.help')},
       {path: 'file_explorer.dir_cache_ms', label: t('pref.file_explorer.dir_cache_ms.label'), type: 'number', min: 0, max: 10000, step: 100, suffix: 'ms', help: t('pref.file_explorer.dir_cache_ms.help')},
       {path: 'file_explorer.new_entry_highlight_ms', label: t('pref.file_explorer.new_entry_highlight_ms.label'), type: 'number', min: 0, max: 600000, step: 1000, suffix: 'ms', help: t('pref.file_explorer.new_entry_highlight_ms.help')},
     ]},
@@ -17478,6 +17594,9 @@ function preferenceSections() {
       {path: 'performance.pane_state_refresh_ms', label: t('pref.performance.pane_state_refresh_ms.label'), type: 'number', min: 500, max: 30000, step: 100, suffix: 'ms', help: t('pref.performance.pane_state_refresh_ms.help')},
       {path: 'performance.latency_refresh_ms', label: t('pref.performance.latency_refresh_ms.label'), type: 'number', min: 1000, max: 30000, step: 100, suffix: 'ms', help: t('pref.performance.latency_refresh_ms.help')},
       {path: 'performance.event_log_refresh_ms', label: t('pref.performance.event_log_refresh_ms.label'), type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: t('pref.performance.event_log_refresh_ms.help')},
+      {path: 'performance.settings_refresh_ms', label: t('pref.performance.settings_refresh_ms.label'), type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: t('pref.performance.settings_refresh_ms.help')},
+      {path: 'performance.activity_summary_refresh_ms', label: t('pref.performance.activity_summary_refresh_ms.label'), type: 'number', min: 10000, max: 600000, step: 1000, suffix: 'ms', help: t('pref.performance.activity_summary_refresh_ms.help')},
+      {path: 'performance.server_event_poll_ms', label: t('pref.performance.server_event_poll_ms.label'), type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: t('pref.performance.server_event_poll_ms.help')},
       {path: 'performance.popover_show_delay_ms', label: t('pref.performance.popover_show_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.popover_show_delay_ms.help')},
       {path: 'performance.popover_hide_delay_ms', label: t('pref.performance.popover_hide_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.popover_hide_delay_ms.help')},
       {path: 'performance.menu_hover_open_delay_ms', label: t('pref.performance.menu_hover_open_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.menu_hover_open_delay_ms.help')},
@@ -17614,7 +17733,7 @@ function preferenceSearchKeywordsForItem(item) {
   const add = terms => keywords.push(...terms);
   if (path.includes('font_size') || path === 'appearance.tab_width') add(['large', 'larger', 'big', 'bigger', 'huge', 'small', 'smaller', 'tiny', 'text', 'scale', 'zoom', 'wide', 'narrow']);
   if (/(_ms|_seconds|_delay|_refresh|_interval|duration|period|pulse|rotate|throttle|resize)/.test(path)) add(['duration', 'timeout', 'time', 'timing', 'milliseconds', 'seconds', 'speed', 'fast', 'slow', 'quick', 'lag', 'wait', 'debounce', 'period', 'rate', 'frequency', 'often']);
-  if (path.includes('_refresh_ms') || path === 'file_explorer.refresh_seconds') add(['reload', 'update', 'poll', 'polling', 'sync', 'live', 'auto']);
+  if (path.includes('_refresh_ms') || path === 'file_explorer.refresh_seconds' || path === 'file_explorer.session_files_refresh_seconds') add(['reload', 'update', 'poll', 'polling', 'sync', 'live', 'auto']);
   if (path.includes('popover') || path.includes('hover')) add(['tooltip', 'popup', 'peek', 'flyout']);
   if (path.includes('red_reminder') || path.includes('yolo_rotate') || path.includes('badge_pulse')) add(['animation', 'animate', 'blink', 'flash', 'glow', 'attention', 'reminder']);
   if (path.startsWith('appearance.')) add(['color', 'colour', 'theme', 'dark', 'light', 'background', 'bg', 'contrast', 'style', 'look']);
@@ -17907,6 +18026,37 @@ function debugEventLineText(event) {
   ].filter(Boolean).join(' ');
 }
 
+function debugApiSummaryKey(url) {
+  const value = String(url || '');
+  try {
+    const parsed = new URL(value, window.location.origin);
+    return parsed.pathname || value;
+  } catch (_) {
+    return value.split('?')[0] || value;
+  }
+}
+
+function debugApiSummaryRows(limit = 6) {
+  const summaries = new Map();
+  for (const event of jsDebugEvents) {
+    if (event.type !== 'api' || !Number.isFinite(event.durationMs)) continue;
+    const key = `${event.method || 'GET'} ${debugApiSummaryKey(event.url)}`;
+    const item = summaries.get(key) || {key, count: 0, total: 0, max: 0, lastStatus: ''};
+    item.count += 1;
+    item.total += event.durationMs;
+    item.max = Math.max(item.max, event.durationMs);
+    item.lastStatus = debugEventStatusText(event);
+    summaries.set(key, item);
+  }
+  return [...summaries.values()]
+    .sort((a, b) => (b.max - a.max) || (b.total - a.total) || a.key.localeCompare(b.key))
+    .slice(0, limit)
+    .map(item => {
+      const avg = item.count ? item.total / item.count : 0;
+      return `${item.key.padEnd(28)} max=${item.max.toFixed(1).padStart(7)}ms avg=${avg.toFixed(1).padStart(7)}ms count=${String(item.count).padStart(3)} ${item.lastStatus}`.trimEnd();
+    });
+}
+
 function jsDebugTextForClipboard() {
   const page = `${location.pathname || ''}${location.search || ''}${location.hash || ''}`;
   const counts = debugEventCounts();
@@ -17917,8 +18067,13 @@ function jsDebugTextForClipboard() {
     `api=${counts.apiCalls}`,
     `errors=${counts.errors}`,
   ].join(' ');
+  const apiSummaryRows = debugApiSummaryRows();
   const rows = jsDebugEvents.map(debugEventLineText);
-  return [header, ...rows].join('\n');
+  return [
+    header,
+    ...(apiSummaryRows.length ? ['Slow API by max latency:', ...apiSummaryRows, ''] : []),
+    ...rows,
+  ].join('\n');
 }
 
 function debugPanelHtml() {
@@ -18763,6 +18918,11 @@ function diffRefResetButtonHtml(refs = repoDiffRefs('')) {
   return `<button type="button" class="diff-ref-reset" data-diff-ref-reset${resetHidden} title="${label}" aria-label="${label}">${esc(t('pref.reset.row'))}</button>`;
 }
 
+function invalidateSessionFilesCaches() {
+  fileExplorerSessionFilesCache.clear();
+  sessionFilesLastPollTs = 0;
+}
+
 // C6: set the FROM/TO for ONE repo (or the global default when repo is empty), then refresh. The diff-ref
 // state for other repos is untouched, so picking a SHA for repo A never disturbs repo B.
 function setRepoDiffRefs(repo, fromRef, toRef, options = {}) {
@@ -18780,7 +18940,7 @@ function setRepoDiffRefs(repo, fromRef, toRef, options = {}) {
     diffRefTo = nextTo;
   }
   writeStoredDiffRefs();
-  fileExplorerSessionFilesCache.clear();
+  invalidateSessionFilesCaches();
   for (const state of openFiles.values()) {
     if (!state || state.kind !== 'text') continue;
     state.diffLoaded = false;
@@ -18964,6 +19124,7 @@ async function fetchSessionFiles(options = {}) {
     return;
   }
   setSessionFilesLoadingForDestination(destination, true);
+  sessionFilesLastPollTs = Date.now();
   if (!options.silent) statusEl.textContent = 'loading changed files...';
   if (!options.silent) {
     renderSessionFilesDestination(destination, {force: true});
@@ -18972,7 +19133,11 @@ async function fetchSessionFiles(options = {}) {
   try {
     // C6: Differ follows selected refs; Finder file mode must stay tied to the current worktree so it
     // does not paint historical diff badges after the repo is clean.
-    const response = await apiFetch(`/api/session-files?session=${encodeURIComponent(session)}&hours=24&${sessionFilesRequestQueryString()}`);
+    const params = new URLSearchParams(sessionFilesRequestQueryString());
+    params.set('session', session);
+    params.set('hours', '24');
+    if (forceRefresh) params.set('force', '1');
+    const response = await apiFetch(`/api/session-files?${params.toString()}`);
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error || response.status);
     const nextPayload = {
@@ -18991,6 +19156,7 @@ async function fetchSessionFiles(options = {}) {
     setSessionFilesPayloadForDestination(destination, nextPayload);
     setSessionFilesSignatureForDestination(destination, signature);
     fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {payload: nextPayload, signature});
+    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     if (!options.silent) statusOk(`loaded ${nextPayload.files.length} changed file${nextPayload.files.length === 1 ? '' : 's'}`);
   } catch (err) {
     const nextPayload = {session, files: [], repos: [], refs_by_repo: {}, errors: [String(err)], from_ref: diffRefFrom, to_ref: diffRefTo, loaded: true};
@@ -24892,7 +25058,7 @@ async function uploadFiles(session, fileList, options = {}) {
       : insertUploadPaths(session, paths, {silent: true});
     showUploadResult(session, payload, inserted);
     refreshOpenEventLogs();
-    refreshTranscripts();
+    refreshTranscripts({force: true});
   } catch (error) {
     statusErr(`upload failed: ${esc(error?.payload?.error || error)}`);
   }
@@ -25161,7 +25327,7 @@ function tmuxWindow(session, key, label) {
   statusOk(`${esc(label)}: ${esc(sessionLabel(session))}`);
   scheduleFit(session);
   focusTerminalFromUserAction(session, 75);
-  setTimeout(refreshTranscripts, 250);
+  setTimeout(() => refreshTranscripts({force: true}), 250);
 }
 
 async function ensureTerminalRunning(session) {
@@ -25594,7 +25760,7 @@ function maybeHandleServerVersionChange(serverVersion) {
   showServerUpdateBanner(serverVersion);
 }
 
-async function refreshTranscripts() {
+async function refreshTranscripts(options = {}) {
   if (transcriptMetaRefreshPromise) return transcriptMetaRefreshPromise;
   transcriptMetaLoading = true;
   transcriptMetaLoadError = '';
@@ -25602,7 +25768,10 @@ async function refreshTranscripts() {
   renderInfoPanel();
   transcriptMetaRefreshPromise = (async () => {
     try {
-      transcriptMeta = await apiFetchJson('/api/transcripts');
+      const params = new URLSearchParams();
+      if (options.force === true) params.set('force', '1');
+      const suffix = params.toString();
+      transcriptMeta = await apiFetchJson(`/api/transcripts${suffix ? `?${suffix}` : ''}`);
       transcriptMetaLoaded = true;
       transcriptMetaLoadError = '';
       maybeHandleServerVersionChange(transcriptMeta.server_version);
@@ -25642,7 +25811,11 @@ async function refreshTranscripts() {
       }
       renderPaneTabStrips();
       scheduleFileExplorerActiveTabSync();
-      refreshWatchedFilesystem();
+      if (typeof clientPushSuppressesPolling === 'function' && clientPushSuppressesPolling()) {
+        if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({renew: true});
+      } else {
+        refreshWatchedFilesystem();
+      }
       trackSessionStateChanges();
       refreshOpenEventLogs();
     } catch (error) {
@@ -25937,7 +26110,7 @@ async function updateLatency() {
 }
 
 function refreshAll() {
-  refreshTranscripts();
+  refreshTranscripts({force: true});
   refreshAutoStatuses();
   refreshWatchedFilesystem();
 }
@@ -25969,7 +26142,73 @@ async function boot() {
   updateLatency();
   installRuntimeIntervals();
   scheduleStartupHelperTip();
+  installClientEventStream();
   installDevAutoReload();
+}
+
+function clientEventPayload(event) {
+  try {
+    const parsed = JSON.parse(event?.data || '{}');
+    return parsed && typeof parsed === 'object' && parsed.payload && typeof parsed.payload === 'object'
+      ? parsed.payload
+      : parsed;
+  } catch (_error) {
+    return {};
+  }
+}
+
+function scheduleSessionFilesPushRefresh() {
+  if (!document.querySelector('.file-explorer-changes-panel') || typeof fetchSessionFiles !== 'function') return;
+  if (sessionFilesPushRefreshTimer) clearTimeout(sessionFilesPushRefreshTimer);
+  const elapsed = sessionFilesLastPollTs ? Date.now() - sessionFilesLastPollTs : sessionFilesRefreshMs;
+  const delay = Math.max(0, sessionFilesRefreshMs - elapsed);
+  sessionFilesPushRefreshTimer = setTimeout(() => {
+    sessionFilesPushRefreshTimer = null;
+    fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true});
+  }, delay);
+}
+
+function handleClientPushEvent(type, payload = {}) {
+  if (type === 'settings_changed') {
+    refreshSettings({force: true, silent: true});
+    return;
+  }
+  if (type === 'transcripts_changed') {
+    refreshTranscripts({force: true});
+    return;
+  }
+  if (type === 'session_files_changed') {
+    scheduleSessionFilesPushRefresh();
+    return;
+  }
+  if (type === 'fs_changed') {
+    if (typeof refreshFileExplorerFromPush === 'function') {
+      refreshFileExplorerFromPush(payload).catch(error => console.warn('client fs push refresh failed', error));
+    }
+  }
+}
+
+function installClientEventStream() {
+  if (typeof EventSource === 'undefined' || clientEventsSource) return;
+  let source;
+  try {
+    source = new EventSource('/api/client-events');
+  } catch (_error) {
+    return;
+  }
+  clientEventsSource = source;
+  source.addEventListener('ready', () => {
+    clientEventsConnected = true;
+    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+  });
+  source.addEventListener('ping', () => { clientEventsConnected = true; });
+  source.onerror = () => { clientEventsConnected = false; };
+  for (const type of ['settings_changed', 'fs_changed', 'session_files_changed', 'transcripts_changed']) {
+    source.addEventListener(type, event => {
+      clientEventsConnected = true;
+      handleClientPushEvent(type, clientEventPayload(event));
+    });
+  }
 }
 
 // Dev-velocity #1b: in --dev mode, reload the page when the static bundle changes (ends the recurring

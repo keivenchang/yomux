@@ -1293,7 +1293,7 @@ function createInfoPanel() {
   bindPanelShell(panel, infoItemId);
   panel.querySelector('[data-info-refresh]')?.addEventListener('click', event => {
     event.preventDefault();
-    refreshTranscripts();
+    refreshTranscripts({force: true});
   });
   panel.querySelector('[data-yoagent-refresh]')?.addEventListener('click', event => {
     event.preventDefault();
@@ -1426,6 +1426,7 @@ function setInfoSubTab(tab, options = {}) {
   applyInfoSubTab();
   if (next === 'yoagent') {
     renderYoagentPanel({preserveDraft: true, focusInput: options.focusChat === true});
+    refreshActivitySummary({silent: true});
     prewarmYoagent();
   }
 }
@@ -1439,6 +1440,7 @@ async function openInfoSubTab(tab) {
   applyInfoSubTab();
   if (infoPanelSubTab === 'yoagent') {
     renderYoagentPanel({preserveDraft: true, focusInput: true});
+    refreshActivitySummary({silent: true});
     prewarmYoagent();
   }
 }
@@ -1769,8 +1771,20 @@ async function prewarmYoagent(options = {}) {
   }
 }
 
+function activitySummaryIsVisible() {
+  return infoPanelSubTab === 'yoagent' && itemIsActivePaneTab(infoItemId);
+}
+
+function shouldSkipSilentActivitySummary(options = {}) {
+  if (options.force === true || options.silent !== true) return false;
+  if (activitySummaryIsVisible()) return false;
+  if (!activitySummaryLastRefreshTs) return false;
+  return Date.now() - activitySummaryLastRefreshTs < activitySummaryBackgroundRefreshMs;
+}
+
 async function refreshActivitySummary(options = {}) {
   if (activitySummaryRefreshing && options.force !== true) return;
+  if (shouldSkipSilentActivitySummary(options)) return;
   const requestIsCurrent = activitySummaryGuard.begin();
   activitySummaryRefreshing = true;
   renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
@@ -1781,6 +1795,7 @@ async function refreshActivitySummary(options = {}) {
     const payload = await apiFetchJson(`/api/activity-summary?${params.toString()}`, {cache: 'no-store'});
     if (!requestIsCurrent()) return;
     activitySummaryPayload = payload;
+    activitySummaryLastRefreshTs = Date.now();
   } catch (error) {
     if (!requestIsCurrent()) return;
     activitySummaryPayload = {
@@ -1937,6 +1952,7 @@ function preferenceSections() {
       {path: 'file_explorer.index_refresh_seconds', label: t('pref.file_explorer.index_refresh_seconds.label'), type: 'number', min: 0, max: 3600, step: 10, suffix: 's', help: t('pref.file_explorer.index_refresh_seconds.help')},
       {path: 'file_explorer.companion_dirs', label: t('pref.file_explorer.companion_dirs.label'), type: 'list', help: t('pref.file_explorer.companion_dirs.help')},
       {path: 'file_explorer.refresh_seconds', label: t('pref.file_explorer.refresh_seconds.label', {name: fileExplorerLabel()}), type: 'number', min: 1, max: 60, step: 1, suffix: 's', help: t('pref.file_explorer.refresh_seconds.help')},
+      {path: 'file_explorer.session_files_refresh_seconds', label: t('pref.file_explorer.session_files_refresh_seconds.label'), type: 'number', min: 1, max: 60, step: 1, suffix: 's', help: t('pref.file_explorer.session_files_refresh_seconds.help')},
       {path: 'file_explorer.dir_cache_ms', label: t('pref.file_explorer.dir_cache_ms.label'), type: 'number', min: 0, max: 10000, step: 100, suffix: 'ms', help: t('pref.file_explorer.dir_cache_ms.help')},
       {path: 'file_explorer.new_entry_highlight_ms', label: t('pref.file_explorer.new_entry_highlight_ms.label'), type: 'number', min: 0, max: 600000, step: 1000, suffix: 'ms', help: t('pref.file_explorer.new_entry_highlight_ms.help')},
     ]},
@@ -1951,6 +1967,9 @@ function preferenceSections() {
       {path: 'performance.pane_state_refresh_ms', label: t('pref.performance.pane_state_refresh_ms.label'), type: 'number', min: 500, max: 30000, step: 100, suffix: 'ms', help: t('pref.performance.pane_state_refresh_ms.help')},
       {path: 'performance.latency_refresh_ms', label: t('pref.performance.latency_refresh_ms.label'), type: 'number', min: 1000, max: 30000, step: 100, suffix: 'ms', help: t('pref.performance.latency_refresh_ms.help')},
       {path: 'performance.event_log_refresh_ms', label: t('pref.performance.event_log_refresh_ms.label'), type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: t('pref.performance.event_log_refresh_ms.help')},
+      {path: 'performance.settings_refresh_ms', label: t('pref.performance.settings_refresh_ms.label'), type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: t('pref.performance.settings_refresh_ms.help')},
+      {path: 'performance.activity_summary_refresh_ms', label: t('pref.performance.activity_summary_refresh_ms.label'), type: 'number', min: 10000, max: 600000, step: 1000, suffix: 'ms', help: t('pref.performance.activity_summary_refresh_ms.help')},
+      {path: 'performance.server_event_poll_ms', label: t('pref.performance.server_event_poll_ms.label'), type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: t('pref.performance.server_event_poll_ms.help')},
       {path: 'performance.popover_show_delay_ms', label: t('pref.performance.popover_show_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.popover_show_delay_ms.help')},
       {path: 'performance.popover_hide_delay_ms', label: t('pref.performance.popover_hide_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.popover_hide_delay_ms.help')},
       {path: 'performance.menu_hover_open_delay_ms', label: t('pref.performance.menu_hover_open_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.menu_hover_open_delay_ms.help')},
@@ -2087,7 +2106,7 @@ function preferenceSearchKeywordsForItem(item) {
   const add = terms => keywords.push(...terms);
   if (path.includes('font_size') || path === 'appearance.tab_width') add(['large', 'larger', 'big', 'bigger', 'huge', 'small', 'smaller', 'tiny', 'text', 'scale', 'zoom', 'wide', 'narrow']);
   if (/(_ms|_seconds|_delay|_refresh|_interval|duration|period|pulse|rotate|throttle|resize)/.test(path)) add(['duration', 'timeout', 'time', 'timing', 'milliseconds', 'seconds', 'speed', 'fast', 'slow', 'quick', 'lag', 'wait', 'debounce', 'period', 'rate', 'frequency', 'often']);
-  if (path.includes('_refresh_ms') || path === 'file_explorer.refresh_seconds') add(['reload', 'update', 'poll', 'polling', 'sync', 'live', 'auto']);
+  if (path.includes('_refresh_ms') || path === 'file_explorer.refresh_seconds' || path === 'file_explorer.session_files_refresh_seconds') add(['reload', 'update', 'poll', 'polling', 'sync', 'live', 'auto']);
   if (path.includes('popover') || path.includes('hover')) add(['tooltip', 'popup', 'peek', 'flyout']);
   if (path.includes('red_reminder') || path.includes('yolo_rotate') || path.includes('badge_pulse')) add(['animation', 'animate', 'blink', 'flash', 'glow', 'attention', 'reminder']);
   if (path.startsWith('appearance.')) add(['color', 'colour', 'theme', 'dark', 'light', 'background', 'bg', 'contrast', 'style', 'look']);
@@ -2380,6 +2399,37 @@ function debugEventLineText(event) {
   ].filter(Boolean).join(' ');
 }
 
+function debugApiSummaryKey(url) {
+  const value = String(url || '');
+  try {
+    const parsed = new URL(value, window.location.origin);
+    return parsed.pathname || value;
+  } catch (_) {
+    return value.split('?')[0] || value;
+  }
+}
+
+function debugApiSummaryRows(limit = 6) {
+  const summaries = new Map();
+  for (const event of jsDebugEvents) {
+    if (event.type !== 'api' || !Number.isFinite(event.durationMs)) continue;
+    const key = `${event.method || 'GET'} ${debugApiSummaryKey(event.url)}`;
+    const item = summaries.get(key) || {key, count: 0, total: 0, max: 0, lastStatus: ''};
+    item.count += 1;
+    item.total += event.durationMs;
+    item.max = Math.max(item.max, event.durationMs);
+    item.lastStatus = debugEventStatusText(event);
+    summaries.set(key, item);
+  }
+  return [...summaries.values()]
+    .sort((a, b) => (b.max - a.max) || (b.total - a.total) || a.key.localeCompare(b.key))
+    .slice(0, limit)
+    .map(item => {
+      const avg = item.count ? item.total / item.count : 0;
+      return `${item.key.padEnd(28)} max=${item.max.toFixed(1).padStart(7)}ms avg=${avg.toFixed(1).padStart(7)}ms count=${String(item.count).padStart(3)} ${item.lastStatus}`.trimEnd();
+    });
+}
+
 function jsDebugTextForClipboard() {
   const page = `${location.pathname || ''}${location.search || ''}${location.hash || ''}`;
   const counts = debugEventCounts();
@@ -2390,8 +2440,13 @@ function jsDebugTextForClipboard() {
     `api=${counts.apiCalls}`,
     `errors=${counts.errors}`,
   ].join(' ');
+  const apiSummaryRows = debugApiSummaryRows();
   const rows = jsDebugEvents.map(debugEventLineText);
-  return [header, ...rows].join('\n');
+  return [
+    header,
+    ...(apiSummaryRows.length ? ['Slow API by max latency:', ...apiSummaryRows, ''] : []),
+    ...rows,
+  ].join('\n');
 }
 
 function debugPanelHtml() {

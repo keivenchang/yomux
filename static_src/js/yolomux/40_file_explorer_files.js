@@ -195,6 +195,20 @@ async function fetchDirectory(path, options = {}) {
   }
 }
 
+function invalidateFileExplorerFsCaches() {
+  fileExplorerDirListingCache.clear();
+  fileExplorerPathInfoCache.clear();
+  fileExplorerDirectorySignatures.clear();
+}
+
+async function refreshFileExplorerFromPush(payload = {}) {
+  invalidateFileExplorerFsCaches();
+  if (fileExplorerPaneIsOpen()) {
+    await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+  }
+  await refreshOpenFilesIfChanged();
+}
+
 function expandUserPath(path) {
   const text = String(path || '').trim();
   if (text === '~') return homePath || text;
@@ -4052,6 +4066,46 @@ function watchedFileExplorerDirectories() {
   return Array.from(directories);
 }
 
+function clientServerWatchRoots() {
+  const roots = new Set(watchedFileExplorerDirectories());
+  for (const path of openFiles.keys()) {
+    roots.add(dirnameOf(path));
+  }
+  for (const repo of fileExplorerSessionFilesPayload?.repos || []) {
+    const path = normalizeDirectoryPath(repo?.repo || repo?.root || '');
+    if (path && path !== '/') roots.add(path);
+  }
+  for (const file of fileExplorerSessionFilesPayload?.files || []) {
+    const path = normalizeDirectoryPath(file?.abs_path || sessionFileAbsolutePath(file));
+    if (path && path !== '/') roots.add(dirnameOf(path));
+  }
+  return Array.from(roots)
+    .map(path => normalizeDirectoryPath(path))
+    .filter(path => path && path.startsWith('/'))
+    .sort();
+}
+
+function syncServerWatchRoots(options = {}) {
+  if (readOnlyMode || !clientEventsSource || serverWatchRootsInFlight) return;
+  const roots = clientServerWatchRoots();
+  const signature = roots.join('\x1f');
+  const renewDue = options.renew === true && Date.now() - serverWatchRootsSyncedAt >= 240000;
+  if (signature === serverWatchRootsSignature && !renewDue) return;
+  serverWatchRootsSignature = signature;
+  serverWatchRootsInFlight = true;
+  apiFetch('/api/watch/roots', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({roots}),
+  }).then(() => {
+    serverWatchRootsSyncedAt = Date.now();
+  }).catch(() => {
+    serverWatchRootsSignature = '';
+  }).finally(() => {
+    serverWatchRootsInFlight = false;
+  });
+}
+
 async function refreshFileExplorerIfChanged() {
   const directories = watchedFileExplorerDirectories();
   let changed = false;
@@ -4087,8 +4141,10 @@ async function refreshWatchedFilesystem() {
     await refreshFileExplorerIfChanged();
     await refreshOpenFilesIfChanged();
     if (document.querySelector('.file-explorer-changes-panel')) {
-      fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true});
+      const due = !sessionFilesLastPollTs || Date.now() - sessionFilesLastPollTs >= sessionFilesRefreshMs;
+      if (due) fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true});
     }
+    syncServerWatchRoots();
   } finally {
     filesystemRefreshInFlight = false;
   }

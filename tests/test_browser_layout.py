@@ -2303,17 +2303,31 @@ def test_sync_mode_does_not_follow_hovered_tmux_session(browser, tmp_path):
             "return document.querySelector('.file-explorer-path-inline')?.value === '/home/test/yolomux.dev'"
         )
     )
-    expanded_before_switch = browser.execute_async_script(
+    browser.execute_script(
         """
-        const done = arguments[arguments.length - 1];
         const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
         const row = tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev/other"]');
         row.click();
-        requestAnimationFrame(() => requestAnimationFrame(() => done({
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+            return tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev/other"]')?.getAttribute('aria-expanded') === 'true'
+              && tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev/other/touched.js"]') !== null;
+            """
+        )
+    )
+    expanded_before_switch = browser.execute_script(
+        """
+        const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+        const row = tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev/other"]');
+        return {
           expanded: row.getAttribute('aria-expanded'),
           childVisible: tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev/other/touched.js"]') !== null,
           expandedSet: Array.from(fileExplorerExpanded),
-        })));
+        };
         """
     )
     assert expanded_before_switch["expanded"] == "true", expanded_before_switch

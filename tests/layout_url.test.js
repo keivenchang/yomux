@@ -3774,8 +3774,13 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(preferencesHtml.includes('preferences-setting-control setting-type-number'), 'number controls are identifiable for compact sizing');
   assert.ok(preferencesHtml.includes('data-setting-path="file_explorer.image_preview_max_px"'), 'preferences expose Finder image preview sizing');
   assert.ok(/data-setting-path="file_explorer\.refresh_seconds"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'Finder refresh interval is edited in seconds, not raw milliseconds');
+  assert.ok(/data-setting-path="file_explorer\.session_files_refresh_seconds"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'Changed-files refresh interval is edited in seconds');
+  assert.ok(preferencesHtml.includes('data-setting-path="performance.settings_refresh_ms"'), 'Preferences expose the settings refresh interval');
+  assert.ok(preferencesHtml.includes('data-setting-path="performance.activity_summary_refresh_ms"'), 'Preferences expose the hidden activity-summary refresh interval');
+  assert.ok(preferencesHtml.includes('data-setting-path="performance.server_event_poll_ms"'), 'Preferences expose the server push fallback poll interval');
   assert.equal(preferencesHtml.includes('data-setting-path="file_explorer.refresh_ms"'), false, 'Finder refresh interval no longer exposes the legacy millisecond setting');
   assert.ok(diffBundle.includes("fileExplorerRefreshMs = fileExplorerRefreshMsFromSettings()"), 'Finder refresh interval is derived from the seconds setting at runtime');
+  assert.ok(diffBundle.includes("sessionFilesRefreshMs = sessionFilesRefreshMsFromSettings()"), 'Changed-files refresh interval is derived from the seconds setting at runtime');
   assert.ok(diffBundle.includes("initialSetting('file_explorer.refresh_seconds', 5)"), '#DOIT.52 R5: JS Finder refresh fallback matches the server default');
   assert.ok(/function fileExplorerRefreshMsFromValues\([\s\S]*Math\.max\(1,\s*Math\.min\(60,\s*seconds\)\)\s*\* 1000 \+ 1/.test(diffBundle), 'Finder refresh seconds convert through one shared odd-millisecond polling helper');
   assert.ok(/function fileExplorerRefreshMsFromSettings\(\)[\s\S]*fileExplorerRefreshMsFromValues\([\s\S]*file_explorer\.refresh_seconds[\s\S]*file_explorer\.refresh_ms/.test(diffBundle), 'Finder refresh setting reads seconds with legacy millisecond fallback through the shared helper');
@@ -6113,19 +6118,25 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const paletteRows = api.commandPaletteCommandItems().filter(item => item.targetItem === api.debugPaneItemId);
   assert.equal(paletteRows.length, 1, 'command palette lists the Debug pane once through the Tabs group');
   api.recordJsDebugEventForTest('api', {method: 'GET', url: '/api/ping', status: 200, ok: true, durationMs: 12.3});
+  api.recordJsDebugEventForTest('api', {method: 'GET', url: '/api/activity-summary?locale=en', status: 200, ok: true, durationMs: 4200.4});
   api.recordJsDebugEventForTest('error', {message: 'boom', source: '/static/yolomux.js', line: 10});
-  assert.equal(api.jsDebugEventsForTest().length, 2, 'debug event recorder stores bounded diagnostics while enabled');
+  assert.equal(api.jsDebugEventsForTest().length, 3, 'debug event recorder stores bounded diagnostics while enabled');
   const html = api.debugPanelHtmlForTest();
   assert.ok(html.includes('data-js-debug-log'), 'debug panel renders one copyable text log');
   assert.ok(html.includes('GET /api/ping'), 'debug panel renders API timing rows');
+  assert.ok(html.includes('Slow API by max latency') && html.includes('GET /api/activity-summary'), 'debug panel summarizes slow API endpoints by path');
   assert.ok(html.includes('boom'), 'debug panel renders JS error rows');
   const debugPaneSource = fs.readFileSync('static/yolomux.js', 'utf8');
   const debugPaneCss = fs.readFileSync('static/yolomux.css', 'utf8');
   assert.ok(!/panel\.className = 'panel preferences-panel js-debug-panel'/.test(debugPaneSource), 'Debug panel does not use the Preferences class; Preferences rerenders must not overwrite it');
   assert.ok(/\.preferences-panel,\s*\.js-debug-panel\s*\{[^}]*grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(debugPaneCss), 'Debug panel gets the shared panel grid without being a Preferences panel');
+  assert.ok(debugPaneSource.includes("initialSetting('performance.activity_summary_refresh_ms', 60001)"), 'silent activity-summary refreshes use the Preferences-backed interval');
+  assert.ok(debugPaneSource.includes("activitySummaryBackgroundRefreshMs = numberSetting('performance.activity_summary_refresh_ms', 60001)"), 'activity-summary interval updates when settings reload');
+  assert.ok(debugPaneSource.includes('function activitySummaryIsVisible()'), 'activity-summary polling can refresh normally when YO!agent is active');
   const debugText = api.jsDebugTextForClipboardForTest();
   assert.ok(debugText.includes('page=/?debug=1'), 'debug text includes the active URL path and query');
   assert.ok(debugText.includes('API') && debugText.includes('GET /api/ping'), 'debug text exports API rows');
+  assert.ok(debugText.includes('Slow API by max latency') && debugText.includes('GET /api/activity-summary'), 'debug text exports grouped slow API rows');
   assert.ok(debugText.includes('Error') && debugText.includes('boom'), 'debug text exports JS error rows');
   assert.equal(debugText.includes('"events"'), false, 'debug copy payload is compact text, not JSON');
   const url = api.syncInitialLayoutUrlForTest();
@@ -6487,6 +6498,30 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes("new EventSource('/api/dev-reload')"), 'dev mode subscribes to the dev-reload SSE channel');
   assert.ok(/addEventListener\('reload',[\s\S]{0,120}location\.reload\(\)/.test(source), 'a reload event reloads the page');
   assert.ok(source.includes('installDevAutoReload()'), 'the dev auto-reload is installed at boot');
+}
+
+// DOIT.52: browser clients subscribe to server push events, while existing pollers remain installed as fallback.
+{
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(source.includes("new EventSource('/api/client-events')"), 'client subscribes to the general server event stream');
+  assert.ok(source.includes("installRuntimeIntervals();") && source.includes("installClientEventStream();"), 'push is installed without removing runtime polling fallback');
+  assert.ok(source.includes('function clientPushSuppressesPolling()'), 'connected push stream gates expensive runtime polling');
+  assert.ok(source.includes("resetRuntimeInterval('metadata', refreshTranscriptsFromRuntime"), 'metadata polling uses the push-aware fallback wrapper');
+  assert.ok(source.includes("resetRuntimeInterval('filesystem', refreshWatchedFilesystemFromRuntime"), 'filesystem polling uses the push-aware fallback wrapper');
+  assert.ok(source.includes("resetRuntimeInterval('settings', refreshSettingsFromRuntime"), 'settings polling uses the push-aware fallback wrapper');
+  assert.ok(source.includes('syncServerWatchRoots({renew: true})'), 'connected push mode renews watched roots without polling the filesystem');
+  assert.ok(source.includes("apiFetch('/api/watch/roots'"), 'client registers watched roots for server-side fallback polling');
+  assert.ok(source.includes('function clientServerWatchRoots()'), 'client derives watched roots from Finder/open-file/session-file state');
+  assert.ok(source.includes("['settings_changed', 'fs_changed', 'session_files_changed', 'transcripts_changed']"), 'client listens for the expected push event types');
+  assert.ok(/if \(type === 'settings_changed'\)[\s\S]{0,120}refreshSettings\(\{force: true, silent: true\}\)/.test(source), 'settings_changed refreshes settings immediately');
+  assert.ok(/if \(type === 'transcripts_changed'\)[\s\S]{0,120}refreshTranscripts\(\{force: true\}\)/.test(source), 'transcripts_changed forces metadata refresh');
+  assert.ok(/if \(type === 'session_files_changed'\)[\s\S]{0,120}scheduleSessionFilesPushRefresh\(\)/.test(source), 'session_files_changed coalesces changed-file refreshes through the cached path');
+  const sessionFilesPushHelper = source.slice(source.indexOf('function scheduleSessionFilesPushRefresh()'), source.indexOf('function handleClientPushEvent'));
+  assert.ok(sessionFilesPushHelper.includes("fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true})"), 'session-files push refreshes do not pass force=true');
+  assert.equal(sessionFilesPushHelper.includes('force: true'), false, 'session-files push refreshes must not bypass the server stale cache');
+  const fsPushHelper = source.slice(source.indexOf('async function refreshFileExplorerFromPush'), source.indexOf('function expandUserPath'));
+  assert.equal(fsPushHelper.includes('fetchSessionFiles'), false, 'fs_changed refreshes Finder/open-file state without also fetching session-files');
+  assert.ok(/if \(type === 'fs_changed'\)[\s\S]{0,180}refreshFileExplorerFromPush\(payload\)/.test(source), 'fs_changed refreshes Finder/open-file state through the shared push helper');
 }
 
 // DOIT.31: Finder symlink badge — the row toggles is-symlink/symlink-broken, shows a name→target
@@ -6936,7 +6971,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   for (const key of [
     'pref.appearance.theme.label', 'pref.appearance.terminal_theme.help',
     'pref.appearance.date_time_hour_cycle.label', 'pref.appearance.font_sizes.note',
-    'pref.performance.metadata_refresh_ms.label', 'pref.notifications.throttle_seconds.label',
+    'pref.performance.metadata_refresh_ms.label', 'pref.performance.settings_refresh_ms.label',
+    'pref.performance.activity_summary_refresh_ms.label', 'pref.performance.server_event_poll_ms.label',
+    'pref.notifications.throttle_seconds.label',
     'pref.terminal_editor.scrollback.label', 'pref.uploads.max_bytes.label',
     'pref.yoagent.backend.label', 'pref.yolo.dry_run.label',
   ]) {

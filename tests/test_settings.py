@@ -273,6 +273,9 @@ def test_watched_prs_and_watched_pr_refresh_defaults():
     d = default_settings()
     assert d["github"]["watched_prs"] == []
     assert d["performance"]["watched_pr_refresh_ms"] == 60001
+    assert d["performance"]["settings_refresh_ms"] == 5009
+    assert d["performance"]["activity_summary_refresh_ms"] == 60001
+    assert d["performance"]["server_event_poll_ms"] == 5009
 
 
 def test_file_explorer_refresh_uses_seconds_and_migrates_legacy_ms():
@@ -292,6 +295,9 @@ def test_stale_saved_poll_defaults_migrate_to_current_defaults():
             "pane_state_refresh_ms": 1250,
             "latency_refresh_ms": 3000,
             "event_log_refresh_ms": 5000,
+            "settings_refresh_ms": 5000,
+            "activity_summary_refresh_ms": 60000,
+            "server_event_poll_ms": 5000,
             "watched_pr_refresh_ms": 60000,
         },
     })
@@ -301,6 +307,9 @@ def test_stale_saved_poll_defaults_migrate_to_current_defaults():
     assert migrated["performance"]["pane_state_refresh_ms"] == defaults["performance"]["pane_state_refresh_ms"]
     assert migrated["performance"]["latency_refresh_ms"] == defaults["performance"]["latency_refresh_ms"]
     assert migrated["performance"]["event_log_refresh_ms"] == defaults["performance"]["event_log_refresh_ms"]
+    assert migrated["performance"]["settings_refresh_ms"] == defaults["performance"]["settings_refresh_ms"]
+    assert migrated["performance"]["activity_summary_refresh_ms"] == defaults["performance"]["activity_summary_refresh_ms"]
+    assert migrated["performance"]["server_event_poll_ms"] == defaults["performance"]["server_event_poll_ms"]
     assert migrated["performance"]["watched_pr_refresh_ms"] == defaults["performance"]["watched_pr_refresh_ms"]
 
     custom = sanitize_settings({
@@ -310,6 +319,9 @@ def test_stale_saved_poll_defaults_migrate_to_current_defaults():
             "pane_state_refresh_ms": 1254,
             "latency_refresh_ms": 3002,
             "event_log_refresh_ms": 5004,
+            "settings_refresh_ms": 5010,
+            "activity_summary_refresh_ms": 61000,
+            "server_event_poll_ms": 5011,
             "watched_pr_refresh_ms": 60002,
         },
     })
@@ -318,6 +330,9 @@ def test_stale_saved_poll_defaults_migrate_to_current_defaults():
     assert custom["performance"]["pane_state_refresh_ms"] == 1254
     assert custom["performance"]["latency_refresh_ms"] == 3002
     assert custom["performance"]["event_log_refresh_ms"] == 5004
+    assert custom["performance"]["settings_refresh_ms"] == 5010
+    assert custom["performance"]["activity_summary_refresh_ms"] == 61000
+    assert custom["performance"]["server_event_poll_ms"] == 5011
     assert custom["performance"]["watched_pr_refresh_ms"] == 60002
 
 
@@ -336,6 +351,17 @@ def test_watched_pr_refresh_ms_is_clamped_to_range():
     high = sanitize_settings({"performance": {"watched_pr_refresh_ms": 10_000_000}})
     assert low["performance"]["watched_pr_refresh_ms"] == 15000
     assert high["performance"]["watched_pr_refresh_ms"] == 600000
+
+
+def test_new_poll_intervals_are_clamped_to_range():
+    low = sanitize_settings({"performance": {"settings_refresh_ms": 100, "activity_summary_refresh_ms": 100, "server_event_poll_ms": 100}})
+    high = sanitize_settings({"performance": {"settings_refresh_ms": 10_000_000, "activity_summary_refresh_ms": 10_000_000, "server_event_poll_ms": 10_000_000}})
+    assert low["performance"]["settings_refresh_ms"] == 1000
+    assert high["performance"]["settings_refresh_ms"] == 60000
+    assert low["performance"]["activity_summary_refresh_ms"] == 10000
+    assert high["performance"]["activity_summary_refresh_ms"] == 600000
+    assert low["performance"]["server_event_poll_ms"] == 1000
+    assert high["performance"]["server_event_poll_ms"] == 60000
 
 
 def test_watched_prs_setting_round_trips_in_template(tmp_path):

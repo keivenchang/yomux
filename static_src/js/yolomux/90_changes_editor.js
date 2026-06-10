@@ -493,6 +493,11 @@ function diffRefResetButtonHtml(refs = repoDiffRefs('')) {
   return `<button type="button" class="diff-ref-reset" data-diff-ref-reset${resetHidden} title="${label}" aria-label="${label}">${esc(t('pref.reset.row'))}</button>`;
 }
 
+function invalidateSessionFilesCaches() {
+  fileExplorerSessionFilesCache.clear();
+  sessionFilesLastPollTs = 0;
+}
+
 // C6: set the FROM/TO for ONE repo (or the global default when repo is empty), then refresh. The diff-ref
 // state for other repos is untouched, so picking a SHA for repo A never disturbs repo B.
 function setRepoDiffRefs(repo, fromRef, toRef, options = {}) {
@@ -510,7 +515,7 @@ function setRepoDiffRefs(repo, fromRef, toRef, options = {}) {
     diffRefTo = nextTo;
   }
   writeStoredDiffRefs();
-  fileExplorerSessionFilesCache.clear();
+  invalidateSessionFilesCaches();
   for (const state of openFiles.values()) {
     if (!state || state.kind !== 'text') continue;
     state.diffLoaded = false;
@@ -694,6 +699,7 @@ async function fetchSessionFiles(options = {}) {
     return;
   }
   setSessionFilesLoadingForDestination(destination, true);
+  sessionFilesLastPollTs = Date.now();
   if (!options.silent) statusEl.textContent = 'loading changed files...';
   if (!options.silent) {
     renderSessionFilesDestination(destination, {force: true});
@@ -702,7 +708,11 @@ async function fetchSessionFiles(options = {}) {
   try {
     // C6: Differ follows selected refs; Finder file mode must stay tied to the current worktree so it
     // does not paint historical diff badges after the repo is clean.
-    const response = await apiFetch(`/api/session-files?session=${encodeURIComponent(session)}&hours=24&${sessionFilesRequestQueryString()}`);
+    const params = new URLSearchParams(sessionFilesRequestQueryString());
+    params.set('session', session);
+    params.set('hours', '24');
+    if (forceRefresh) params.set('force', '1');
+    const response = await apiFetch(`/api/session-files?${params.toString()}`);
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error || response.status);
     const nextPayload = {
@@ -721,6 +731,7 @@ async function fetchSessionFiles(options = {}) {
     setSessionFilesPayloadForDestination(destination, nextPayload);
     setSessionFilesSignatureForDestination(destination, signature);
     fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {payload: nextPayload, signature});
+    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     if (!options.silent) statusOk(`loaded ${nextPayload.files.length} changed file${nextPayload.files.length === 1 ? '' : 's'}`);
   } catch (err) {
     const nextPayload = {session, files: [], repos: [], refs_by_repo: {}, errors: [String(err)], from_ref: diffRefFrom, to_ref: diffRefTo, loaded: true};

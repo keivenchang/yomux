@@ -7,6 +7,7 @@ import json
 import math
 import os
 import pty
+import queue
 import select
 import signal
 import socket
@@ -206,6 +207,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 return
             self.stream_dev_reload()
             return
+        if parsed.path == "/api/client-events":
+            self.stream_client_events()
+            return
         if parsed.path == "/":
             self.write_html(html_page(self.server.app.sessions, self.auth_identity().role, dev=getattr(self.server, 'dev', False), dangerously_yolo=self.server.app.dangerously_yolo))
             return
@@ -213,7 +217,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.handle_preview_popout_placeholder(parsed)
             return
         if parsed.path == "/api/transcripts":
-            self.write_json(self.server.app.transcripts_payload())
+            qs = parse_qs(parsed.query)
+            self.write_json(self.server.app.transcripts_payload(force=query_bool(qs, "force")))
             return
         if parsed.path == "/api/activity-summary":
             qs = parse_qs(parsed.query)
@@ -322,10 +327,11 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 return
             from_ref = query_one(qs, "from", None)
             to_ref = query_one(qs, "to", None)
+            force = query_bool(qs, "force")
             # C6: optional per-repo override map ({repo_path: {"from","to"}}) as URL-encoded JSON, so each
             # repo can compare its own commit graph. Malformed JSON falls back to the scalar from/to.
             repo_refs = parse_repo_refs_param(query_one(qs, "refs", None))
-            payload, status = self.server.app.session_files_payload(session, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)
+            payload, status = self.server.app.session_files_payload(session, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, force=force)
             self.write_json(payload, status=status)
             return
         if parsed.path == "/api/summary":
@@ -619,6 +625,12 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 return
             self.write_json(self.server.app.save_settings(payload.get("settings", payload)))
             return
+        if parsed.path == "/api/watch/roots":
+            payload = self.read_json_body(64 * 1024)
+            if payload is None:
+                return
+            self.write_json(self.server.app.update_client_watch_roots(payload.get("roots", [])))
+            return
         if parsed.path == "/api/yoagent/chat":
             payload = self.read_json_body(64 * 1024)
             if payload is None:
@@ -827,6 +839,29 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                     self.write_sse_json("reload", {"signature": current})
         except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
             return
+
+    def stream_client_events(self) -> None:
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_auth_cookie_if_needed()
+        self.end_headers()
+        subscriber_id, subscriber_queue = self.server.app.client_events.subscribe()
+        try:
+            self.write_sse_json("ready", {"time": time.time()})
+            while True:
+                try:
+                    event = subscriber_queue.get(timeout=15.0)
+                except queue.Empty:
+                    self.write_sse_json("ping", {"time": time.time()})
+                    continue
+                self.write_sse_json(str(event.get("type") or "event"), event)
+        except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
+            return
+        finally:
+            self.server.app.client_events.unsubscribe(subscriber_id)
 
     def stream_context_items(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
@@ -1329,6 +1364,8 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
         self.app = app
         self.tls_context = tls_context
         self.dev = dev  # dev-velocity #1b: enables the /api/dev-reload SSE channel + the bootstrap dev flag
+        if hasattr(self.app, "start_client_event_watcher"):
+            self.app.start_client_event_watcher()
 
     def get_request(self) -> tuple[socket.socket, tuple[str, int]]:
         request, client_address = self.socket.accept()

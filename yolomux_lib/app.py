@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -31,6 +32,7 @@ from .activity_summary import yoagent_context_lines
 from .auto_approve_worker import AutoApproveWorker
 from .auto_approve_worker import auto_approve_lock_message
 from .auto_approve_worker import auto_approve_lock_owner
+from .client_events import ClientEventBroker
 from .common import AGENT_COMMANDS
 from .common import EVENT_LOG_PATH
 from .common import MAX_COMPACT_TRANSCRIPT_ITEMS
@@ -66,6 +68,7 @@ from .metadata import session_to_json
 from .metadata import watched_pr_metadata
 from .sessions import discover_sessions
 from .settings import save_settings
+from .settings import SETTINGS_PATH
 from .settings import settings_payload
 from .transcripts import codex_summary_prompt
 from .transcripts import codex_event_text
@@ -111,12 +114,91 @@ YOAGENT_AUTH_FAILURE_RE = re.compile(
     r"(not\s+logged\s+in|log\s*in|login|required\s+auth|authentication|unauthorized|permission\s+denied|401)",
     re.IGNORECASE,
 )
+SESSION_FILES_CACHE_MAX_ITEMS = 64
+TRANSCRIPT_TAIL_CACHE_MAX_ITEMS = 128
+CONTEXT_ITEMS_CACHE_MAX_ITEMS = 128
+CLIENT_WATCH_ROOT_TTL_SECONDS = 300
+CLIENT_WATCH_ROOT_LIMIT = 128
+DIRECTORY_WATCH_ENTRY_LIMIT = 512
 # Keep in sync with tmuxSessionNameError() in static/yolomux.js.
 TMUX_SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9_. -]{1,64}$")
 
 
 def yoagent_cli_auth_failure(text: str) -> bool:
     return bool(YOAGENT_AUTH_FAILURE_RE.search(text or ""))
+
+
+def file_stat_signature(path: Path) -> tuple[str, int, int]:
+    stat = path.stat()
+    return (str(path), int(stat.st_mtime_ns), int(stat.st_size))
+
+
+def filesystem_watch_signature(path: str | Path) -> tuple[Any, ...]:
+    target = Path(path).expanduser()
+    try:
+        stat = target.lstat()
+    except OSError:
+        return (str(target), "missing")
+    if not target.is_dir():
+        return (str(target), "file", int(stat.st_mtime_ns), int(stat.st_size))
+    entries: list[tuple[str, str, int, int]] = []
+    try:
+        children = sorted(target.iterdir(), key=lambda item: item.name)[:DIRECTORY_WATCH_ENTRY_LIMIT]
+    except OSError:
+        children = []
+    for child in children:
+        try:
+            child_stat = child.lstat()
+        except OSError:
+            entries.append((child.name, "missing", 0, 0))
+            continue
+        kind = "dir" if child.is_dir() else "file"
+        entries.append((child.name, kind, int(child_stat.st_mtime_ns), int(child_stat.st_size)))
+    return (str(target), "dir", int(stat.st_mtime_ns), int(stat.st_size), tuple(entries))
+
+
+def agent_cache_signature(agent: AgentInfo) -> tuple[Any, ...]:
+    if agent.transcript:
+        try:
+            transcript_signature = file_stat_signature(Path(agent.transcript))
+        except OSError:
+            transcript_signature = (str(agent.transcript), 0, 0)
+    else:
+        transcript_signature = ("", 0, 0)
+    return (
+        agent.kind or "",
+        agent.cwd or "",
+        agent.status or "",
+        agent.session_id or "",
+        agent.model or "",
+        transcript_signature,
+    )
+
+
+def session_info_cache_signature(info: SessionInfo) -> tuple[Any, ...]:
+    selected = info.selected_pane
+    selected_signature = (
+        selected.current_path,
+        selected.command,
+        selected.process_label or "",
+        selected.pid,
+    ) if selected else ("", "", "", 0)
+    return (
+        info.session,
+        selected_signature,
+        tuple(agent_cache_signature(agent) for agent in info.agents),
+    )
+
+
+def repo_refs_cache_signature(repo_refs: dict[str, dict[str, str]] | None) -> tuple[tuple[str, str, str], ...]:
+    if not repo_refs:
+        return ()
+    rows: list[tuple[str, str, str]] = []
+    for repo, refs in repo_refs.items():
+        if not isinstance(refs, dict):
+            continue
+        rows.append((str(repo), str(refs.get("from") or ""), str(refs.get("to") or "")))
+    return tuple(sorted(rows))
 
 
 def yoagent_cli_fallback_reason(backend: str, error: str) -> str:
@@ -208,8 +290,27 @@ class TmuxWebtermApp:
         self.metadata_badge_lock = threading.Lock()
         self.metadata_badge_signatures: dict[str, dict[str, str]] = {}
         self.metadata_badge_pulse_until: dict[str, dict[str, float]] = {}
+        self.client_events = ClientEventBroker()
+        self.client_watch_lock = threading.RLock()
+        self.client_watch_roots: dict[str, float] = {}
+        self.client_watch_initialized = False
+        self.client_watch_settings_signature: tuple[Any, ...] | None = None
+        self.client_watch_transcripts_signature: tuple[Any, ...] | None = None
+        self.client_watch_filesystem_signature: tuple[Any, ...] | None = None
+        self.client_watch_thread: threading.Thread | None = None
+        self.client_watch_running = False
         self.activity_summary_lock = threading.RLock()
         self.activity_summary_cache: dict[str, dict[str, Any]] = {}
+        self.session_files_cache_lock = threading.RLock()
+        self.session_files_cache: dict[tuple[Any, ...], tuple[float, tuple[dict[str, Any], HTTPStatus]]] = {}
+        self.session_files_refreshing_cache_keys: set[tuple[Any, ...]] = set()
+        self.transcripts_payload_cache_lock = threading.RLock()
+        self.transcripts_payload_cache: tuple[float, dict[str, Any]] | None = None
+        self.transcripts_payload_refreshing = False
+        self.transcript_tail_cache_lock = threading.RLock()
+        self.transcript_tail_cache: dict[tuple[Any, ...], tuple[float, str]] = {}
+        self.context_items_cache_lock = threading.RLock()
+        self.context_items_cache: dict[tuple[Any, ...], tuple[float, list[dict[str, Any]]]] = {}
         self.yoagent_cli_lock = threading.RLock()
         self.yoagent_cli_sessions: dict[str, dict[str, Any]] = {}
         self.yoagent_prewarm_lock = threading.Lock()
@@ -270,6 +371,297 @@ class TmuxWebtermApp:
     def settings_payload(self) -> dict[str, Any]:
         return settings_payload()
 
+    def publish_client_event(self, event_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.client_events.publish(event_type, payload)
+
+    def server_event_poll_seconds(self) -> float:
+        settings = settings_payload().get("settings", {})
+        performance = settings.get("performance", {}) if isinstance(settings, dict) else {}
+        value = performance.get("server_event_poll_ms", 5009) if isinstance(performance, dict) else 5009
+        return max(1.0, min(60.0, self.float_value(value, 5009.0) / 1000.0))
+
+    def update_client_watch_roots(self, roots: Any) -> dict[str, Any]:
+        now = time.monotonic()
+        normalized: list[str] = []
+        if isinstance(roots, list):
+            for item in roots:
+                path = str(item or "").strip()
+                if not path.startswith("/"):
+                    continue
+                normalized.append(str(Path(path).expanduser()))
+        unique = sorted(set(normalized))[:CLIENT_WATCH_ROOT_LIMIT]
+        with self.client_watch_lock:
+            self.client_watch_roots = {path: now + CLIENT_WATCH_ROOT_TTL_SECONDS for path in unique}
+        return {"ok": True, "roots": unique, "mode": "poll", "ttl_seconds": CLIENT_WATCH_ROOT_TTL_SECONDS}
+
+    def client_watch_roots_snapshot(self) -> list[str]:
+        now = time.monotonic()
+        with self.client_watch_lock:
+            current = {path: expires for path, expires in self.client_watch_roots.items() if expires > now}
+            if len(current) != len(self.client_watch_roots):
+                self.client_watch_roots = current
+            return sorted(current)
+
+    def settings_watch_signature(self) -> tuple[Any, ...]:
+        try:
+            return file_stat_signature(SETTINGS_PATH)
+        except OSError:
+            return (str(SETTINGS_PATH), 0, 0)
+
+    def transcripts_watch_signature(self, sessions: dict[str, SessionInfo]) -> tuple[Any, ...]:
+        rows: list[tuple[Any, ...]] = []
+        for name, info in sorted(sessions.items()):
+            for agent in info.agents:
+                transcript = str(agent.transcript or "")
+                if not transcript:
+                    continue
+                try:
+                    signature = file_stat_signature(Path(transcript))
+                except OSError:
+                    signature = (transcript, 0, 0)
+                rows.append((name, agent.kind or "", agent.session_id or "", signature))
+        return tuple(rows)
+
+    def filesystem_roots_for_watch(self, sessions: dict[str, SessionInfo]) -> list[str]:
+        roots = set(self.client_watch_roots_snapshot())
+        settings = settings_payload().get("settings", {})
+        file_explorer = settings.get("file_explorer", {}) if isinstance(settings, dict) else {}
+        if isinstance(file_explorer, dict):
+            for item in file_explorer.get("companion_dirs", []) or []:
+                path = str(item or "").strip()
+                if path.startswith("/"):
+                    roots.add(path)
+        for info in sessions.values():
+            if info.selected_pane and info.selected_pane.current_path:
+                roots.add(info.selected_pane.current_path)
+            for agent in info.agents:
+                if agent.cwd:
+                    roots.add(agent.cwd)
+        return sorted(str(Path(root).expanduser()) for root in roots if str(root or "").startswith("/"))[:CLIENT_WATCH_ROOT_LIMIT]
+
+    def filesystem_roots_watch_signature(self, sessions: dict[str, SessionInfo]) -> tuple[Any, ...]:
+        return tuple((root, filesystem_watch_signature(root)) for root in self.filesystem_roots_for_watch(sessions))
+
+    def clear_transcript_caches(self) -> None:
+        with self.transcript_tail_cache_lock:
+            self.transcript_tail_cache.clear()
+        with self.context_items_cache_lock:
+            self.context_items_cache.clear()
+        with self.transcripts_payload_cache_lock:
+            self.transcripts_payload_cache = None
+
+    def poll_client_events_once(self) -> list[str]:
+        sessions, _errors = discover_sessions(self.sessions)
+        settings_signature = self.settings_watch_signature()
+        transcripts_signature = self.transcripts_watch_signature(sessions)
+        filesystem_signature = self.filesystem_roots_watch_signature(sessions)
+        events: list[str] = []
+        with self.client_watch_lock:
+            initialized = self.client_watch_initialized
+            settings_changed = initialized and self.client_watch_settings_signature != settings_signature
+            transcripts_changed = initialized and self.client_watch_transcripts_signature != transcripts_signature
+            filesystem_changed = initialized and self.client_watch_filesystem_signature != filesystem_signature
+            self.client_watch_initialized = True
+            self.client_watch_settings_signature = settings_signature
+            self.client_watch_transcripts_signature = transcripts_signature
+            self.client_watch_filesystem_signature = filesystem_signature
+        if settings_changed:
+            self.publish_client_event("settings_changed", {"signature": settings_signature})
+            events.append("settings_changed")
+        if transcripts_changed:
+            self.clear_transcript_caches()
+            self.publish_client_event("transcripts_changed", {"signature": transcripts_signature})
+            events.append("transcripts_changed")
+        if filesystem_changed:
+            roots = self.filesystem_roots_for_watch(sessions)
+            self.publish_client_event("fs_changed", {"roots": roots})
+            self.publish_client_event("session_files_changed", {"roots": roots})
+            events.extend(["fs_changed", "session_files_changed"])
+        return events
+
+    def start_client_event_watcher(self) -> None:
+        with self.client_watch_lock:
+            if self.client_watch_running:
+                return
+            self.client_watch_running = True
+        worker = threading.Thread(target=self.client_event_watch_loop, daemon=True)
+        self.client_watch_thread = worker
+        worker.start()
+
+    def client_event_watch_loop(self) -> None:
+        while True:
+            try:
+                self.poll_client_events_once()
+            except (OSError, RuntimeError, ValueError) as exc:
+                self.log_event(None, "client_event_watch_error", f"client event watch failed: {exc}", {})
+            time.sleep(self.server_event_poll_seconds())
+
+    def cache_set_limited(self, cache: dict[Any, Any], key: Any, value: Any, limit: int) -> None:
+        cache[key] = value
+        while len(cache) > limit:
+            cache.pop(next(iter(cache)))
+
+    def session_files_refresh_seconds(self) -> float:
+        settings = settings_payload().get("settings", {})
+        file_explorer = settings.get("file_explorer", {}) if isinstance(settings, dict) else {}
+        fallback = file_explorer.get("refresh_seconds", 5) if isinstance(file_explorer, dict) else 5
+        value = file_explorer.get("session_files_refresh_seconds", fallback) if isinstance(file_explorer, dict) else fallback
+        return max(1.0, min(60.0, self.float_value(value, 5.0)))
+
+    def metadata_refresh_seconds(self) -> float:
+        settings = settings_payload().get("settings", {})
+        performance = settings.get("performance", {}) if isinstance(settings, dict) else {}
+        value = performance.get("metadata_refresh_ms", 15001) if isinstance(performance, dict) else 15001
+        return max(3.0, min(120.0, self.float_value(value, 15001.0) / 1000.0))
+
+    def session_files_cache_key(
+        self,
+        kind: str,
+        infos: dict[str, SessionInfo],
+        session: str | None,
+        hours: float,
+        from_ref: str | None,
+        to_ref: str | None,
+        repo_refs: dict[str, dict[str, str]] | None,
+    ) -> tuple[Any, ...]:
+        return (
+            kind,
+            session or "",
+            session_files.bounded_session_files_hours(hours),
+            str(from_ref or ""),
+            str(to_ref or ""),
+            repo_refs_cache_signature(repo_refs),
+            tuple((name, session_info_cache_signature(info)) for name, info in sorted(infos.items())),
+        )
+
+    def get_session_files_cache(
+        self,
+        key: tuple[Any, ...],
+        max_age_seconds: float | None = None,
+        allow_stale: bool = False,
+    ) -> tuple[dict[str, Any], HTTPStatus, bool, float] | None:
+        now = time.monotonic()
+        with self.session_files_cache_lock:
+            cached = self.session_files_cache.get(key)
+            if not cached:
+                return None
+            stored_at, value = cached
+            age_seconds = max(0.0, now - stored_at)
+            fresh = max_age_seconds is None or age_seconds <= max_age_seconds
+            if not fresh and not allow_stale:
+                return None
+            payload, status = value
+            return copy.deepcopy(payload), status, fresh, age_seconds
+
+    def set_session_files_cache(self, key: tuple[Any, ...], payload: dict[str, Any], status: HTTPStatus) -> None:
+        with self.session_files_cache_lock:
+            self.cache_set_limited(
+                self.session_files_cache,
+                key,
+                (time.monotonic(), (copy.deepcopy(payload), status)),
+                SESSION_FILES_CACHE_MAX_ITEMS,
+            )
+
+    def clear_session_files_cache(self) -> None:
+        with self.session_files_cache_lock:
+            self.session_files_cache.clear()
+            self.session_files_refreshing_cache_keys.clear()
+
+    def refresh_session_files_payload_cache(
+        self,
+        cache_key: tuple[Any, ...],
+        session: str | None,
+        infos: dict[str, SessionInfo],
+        hours: float,
+        from_ref: str | None,
+        to_ref: str | None,
+        repo_refs: dict[str, dict[str, str]] | None,
+    ) -> None:
+        try:
+            payload, status = session_files.session_files_payload(session, infos, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)
+            self.set_session_files_cache(cache_key, payload, status)
+        finally:
+            with self.session_files_cache_lock:
+                self.session_files_refreshing_cache_keys.discard(cache_key)
+
+    def refresh_session_files_info_cache(
+        self,
+        cache_key: tuple[Any, ...],
+        info: SessionInfo,
+        hours: float,
+        from_ref: str | None,
+        to_ref: str | None,
+        repo_refs: dict[str, dict[str, str]] | None,
+    ) -> None:
+        try:
+            payload = session_files.session_files_payload_for_info(info, hours=hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)
+            self.set_session_files_cache(cache_key, payload, HTTPStatus.OK)
+        finally:
+            with self.session_files_cache_lock:
+                self.session_files_refreshing_cache_keys.discard(cache_key)
+
+    def start_session_files_cache_refresh(self, cache_key: tuple[Any, ...], target: Any, *args: Any) -> bool:
+        with self.session_files_cache_lock:
+            if cache_key in self.session_files_refreshing_cache_keys:
+                return False
+            self.session_files_refreshing_cache_keys.add(cache_key)
+        worker = threading.Thread(target=target, args=(cache_key, *args), daemon=True)
+        worker.start()
+        return True
+
+    def cached_session_files_payload_for_info(
+        self,
+        info: SessionInfo,
+        hours: float = 24.0,
+        from_ref: str | None = None,
+        to_ref: str | None = None,
+        repo_refs: dict[str, dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        infos = {info.session: info}
+        key = self.session_files_cache_key("info", infos, info.session, hours, from_ref, to_ref, repo_refs)
+        cached = self.get_session_files_cache(key, max_age_seconds=self.session_files_refresh_seconds(), allow_stale=True)
+        if cached:
+            payload, _status, fresh, _age = cached
+            if not fresh:
+                self.start_session_files_cache_refresh(key, self.refresh_session_files_info_cache, info, hours, from_ref, to_ref, repo_refs)
+            return payload
+        payload = session_files.session_files_payload_for_info(info, hours=hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)
+        self.set_session_files_cache(key, payload, HTTPStatus.OK)
+        return copy.deepcopy(payload)
+
+    def get_transcripts_payload_cache(self, max_age_seconds: float, allow_stale: bool = False) -> tuple[dict[str, Any], bool, float] | None:
+        now = time.monotonic()
+        with self.transcripts_payload_cache_lock:
+            cached = self.transcripts_payload_cache
+            if cached is None:
+                return None
+            stored_at, payload = cached
+            age_seconds = max(0.0, now - stored_at)
+            fresh = age_seconds <= max_age_seconds
+            if not fresh and not allow_stale:
+                return None
+            return copy.deepcopy(payload), fresh, age_seconds
+
+    def set_transcripts_payload_cache(self, payload: dict[str, Any]) -> None:
+        with self.transcripts_payload_cache_lock:
+            self.transcripts_payload_cache = (time.monotonic(), copy.deepcopy(payload))
+
+    def start_transcripts_payload_refresh(self) -> bool:
+        with self.transcripts_payload_cache_lock:
+            if self.transcripts_payload_refreshing:
+                return False
+            self.transcripts_payload_refreshing = True
+        worker = threading.Thread(target=self.refresh_transcripts_payload_cache, daemon=True)
+        worker.start()
+        return True
+
+    def refresh_transcripts_payload_cache(self) -> None:
+        try:
+            self.set_transcripts_payload_cache(self.build_transcripts_payload())
+        finally:
+            with self.transcripts_payload_cache_lock:
+                self.transcripts_payload_refreshing = False
+
     def watched_prs_payload(self, allow_network: bool = True) -> dict[str, Any]:
         # DOIT.29: resolve the github.watched_prs watchlist to live PR metadata, independent of any open
         # session's branch. Shares the session-metadata cache (same per-PR TTL) but is polled on its own
@@ -308,12 +700,13 @@ class TmuxWebtermApp:
         with self.activity_summary_lock:
             if force:
                 self.activity_summary_cache.clear()
+                self.clear_session_files_cache()
             for session in self.sessions:
                 info = sessions.get(session)
                 if info is None:
                     continue
                 project = session_project_metadata(info, self.metadata_cache, allow_network=False)
-                files_payload = session_files.session_files_payload_for_info(info, hours=24.0)
+                files_payload = self.cached_session_files_payload_for_info(info, hours=24.0)
                 signature = activity_signature(info, project, files_payload)
                 cached = self.activity_summary_cache.get(session)
                 if cached and cached.get("signature") == signature:
@@ -783,6 +1176,7 @@ class TmuxWebtermApp:
 
     def save_settings(self, patch: dict[str, Any]) -> dict[str, Any]:
         payload = save_settings(patch)
+        self.publish_client_event("settings_changed", {"mtime_ns": payload.get("mtime_ns", 0)})
         if payload.get("settings", {}).get("yoagent", {}).get("auto_refresh", False):
             self.maybe_start_yoagent_summary_worker()
         return payload
@@ -904,6 +1298,7 @@ class TmuxWebtermApp:
         from_ref: str | None = None,
         to_ref: str | None = None,
         repo_refs: dict[str, dict[str, str]] | None = None,
+        force: bool = False,
     ) -> tuple[dict[str, Any], HTTPStatus]:
         refresh_errors = self.refresh_sessions()
         if session and session not in self.sessions:
@@ -911,8 +1306,33 @@ class TmuxWebtermApp:
         scope = [session] if session else self.sessions
         discover_scope = self.sessions if session else scope
         infos, errors = discover_sessions(discover_scope)
-        payload, status = session_files.session_files_payload(session, infos, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)
+        cache_key = self.session_files_cache_key("payload", infos, session, hours, from_ref, to_ref, repo_refs)
+        max_age = self.session_files_refresh_seconds()
+        cached = None if force else self.get_session_files_cache(cache_key, max_age_seconds=max_age, allow_stale=True)
+        cache_meta: dict[str, Any] | None = None
+        if cached:
+            payload, status, fresh, age_seconds = cached
+            cache_meta = {
+                "hit": True,
+                "stale": not fresh,
+                "age_seconds": round(age_seconds, 3),
+                "refresh_seconds": max_age,
+            }
+            if not fresh:
+                refreshing = self.start_session_files_cache_refresh(cache_key, self.refresh_session_files_payload_cache, session, infos, hours, from_ref, to_ref, repo_refs)
+                cache_meta["refreshing"] = refreshing
+        else:
+            payload, status = session_files.session_files_payload(session, infos, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)
+            self.set_session_files_cache(cache_key, payload, status)
+            cache_meta = {
+                "hit": False,
+                "stale": False,
+                "age_seconds": 0,
+                "refresh_seconds": max_age,
+                "refreshing": False,
+            }
         payload["errors"] = [*refresh_errors, *errors, *payload.get("errors", [])]
+        payload["cache"] = cache_meta
         return payload, status
 
     def client_event(self, event: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
@@ -965,7 +1385,7 @@ class TmuxWebtermApp:
         self.log_event(session, "yolo_released", "YOLO released for another server", {"requester": requester})
         return {"ok": True, "session": session, "enabled": False}
 
-    def transcripts_payload(self) -> dict[str, Any]:
+    def build_transcripts_payload(self) -> dict[str, Any]:
         refresh_errors = self.refresh_sessions()
         sessions, errors = discover_sessions(self.sessions)
         session_payloads = {
@@ -984,6 +1404,31 @@ class TmuxWebtermApp:
         }
         self.apply_metadata_badge_pulses(session_payloads)
         self.warm_metadata_cache_async(sessions)
+        return payload
+
+    def transcripts_payload(self, force: bool = False) -> dict[str, Any]:
+        max_age = self.metadata_refresh_seconds()
+        cached = None if force else self.get_transcripts_payload_cache(max_age, allow_stale=True)
+        if cached:
+            payload, fresh, age_seconds = cached
+            payload["cache"] = {
+                "hit": True,
+                "stale": not fresh,
+                "age_seconds": round(age_seconds, 3),
+                "refresh_seconds": max_age,
+            }
+            if not fresh:
+                payload["cache"]["refreshing"] = self.start_transcripts_payload_refresh()
+            return payload
+        payload = self.build_transcripts_payload()
+        self.set_transcripts_payload_cache(payload)
+        payload["cache"] = {
+            "hit": False,
+            "stale": False,
+            "age_seconds": 0,
+            "refresh_seconds": max_age,
+            "refreshing": False,
+        }
         return payload
 
     def apply_metadata_badge_pulses(self, session_payloads: dict[str, dict[str, Any]]) -> None:
@@ -1209,15 +1654,34 @@ class TmuxWebtermApp:
         if not agent.transcript:
             return {"session": session, "agent": asdict(agent), "errors": errors, "error": agent.error}, HTTPStatus.NOT_FOUND
         path = Path(agent.transcript)
+        safe_lines = min(max(1, lines), MAX_TRANSCRIPT_TAIL_LINES)
         try:
-            text = tail_file_lines(path, min(max(1, lines), MAX_TRANSCRIPT_TAIL_LINES))
+            stat_signature = file_stat_signature(path)
         except OSError as exc:
             return {"session": session, "agent": asdict(agent), "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR
+        cache_key = (
+            session,
+            safe_lines,
+            stat_signature,
+            agent.kind or "",
+            agent.session_id or "",
+            agent.status or "",
+        )
+        with self.transcript_tail_cache_lock:
+            cached_text = self.transcript_tail_cache.get(cache_key)
+            text = cached_text[1] if cached_text else None
+        if text is None:
+            try:
+                text = tail_file_lines(path, safe_lines)
+            except OSError as exc:
+                return {"session": session, "agent": asdict(agent), "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR
+            with self.transcript_tail_cache_lock:
+                self.cache_set_limited(self.transcript_tail_cache, cache_key, (time.monotonic(), text), TRANSCRIPT_TAIL_CACHE_MAX_ITEMS)
         return {
             "session": session,
             "agent": asdict(agent),
             "path": str(path),
-            "lines": lines,
+            "lines": safe_lines,
             "text": text,
             "errors": errors,
         }, HTTPStatus.OK
@@ -1248,11 +1712,28 @@ class TmuxWebtermApp:
         text = payload.get("text")
         if not isinstance(path, str) or not isinstance(text, str):
             return {"session": session, "error": "missing transcript text"}, HTTPStatus.NOT_FOUND
-        items = compact_transcript_items(text, max(1, min(messages, MAX_COMPACT_TRANSCRIPT_ITEMS)))
+        safe_messages = max(1, min(messages, MAX_COMPACT_TRANSCRIPT_ITEMS))
+        try:
+            stat_signature = file_stat_signature(Path(path))
+        except OSError:
+            stat_signature = (path, 0, 0)
+        cache_key = (session, safe_messages, stat_signature)
+        with self.context_items_cache_lock:
+            cached_items = self.context_items_cache.get(cache_key)
+            items = copy.deepcopy(cached_items[1]) if cached_items else None
+        if items is None:
+            items = compact_transcript_items(text, safe_messages)
+            with self.context_items_cache_lock:
+                self.cache_set_limited(
+                    self.context_items_cache,
+                    cache_key,
+                    (time.monotonic(), copy.deepcopy(items)),
+                    CONTEXT_ITEMS_CACHE_MAX_ITEMS,
+                )
         return {
             "session": session,
             "path": path,
-            "messages": messages,
+            "messages": safe_messages,
             "items": items,
             "agent": payload.get("agent"),
             "errors": payload.get("errors", []),

@@ -1119,7 +1119,7 @@ async function createNextSession(agent) {
     renderPanels(previousActive);
     await placeTmuxSession(payload.session);
     await ensureTerminalRunning(payload.session);
-    refreshTranscripts();
+    refreshTranscripts({force: true});
     renderAutoApproveButtons();
     statusOk(`created ${esc(sessionLabel(payload.session))} (${esc(payload.session)}) with ${esc(agentName(payload.agent) || agentLabel)}`);
   } catch (error) {
@@ -1302,7 +1302,7 @@ async function renameTmuxSession(session, proposedName) {
     replaceTmuxSessionInClient(session, renamed, payload.sessions);
     closeSessionRenameDialog();
     await ensureTerminalRunning(renamed);
-    refreshTranscripts();
+    refreshTranscripts({force: true});
     renderAutoApproveButtons();
     statusOk(`renamed ${esc(session)} to ${esc(renamed)}`);
     return true;
@@ -1334,7 +1334,7 @@ async function killTmuxSession(session) {
     renderSessionButtons();
     renderPanels(previousActive);
     if (sessionsChanged) renderPaneTabStrips();
-    refreshTranscripts();
+    refreshTranscripts({force: true});
     renderAutoApproveButtons();
     statusOk(`killed ${esc(sessionLabel(session))}`);
     return true;

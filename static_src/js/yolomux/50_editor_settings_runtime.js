@@ -473,6 +473,10 @@ function fileExplorerRefreshMsFromSettings() {
   );
 }
 
+function sessionFilesRefreshMsFromSettings() {
+  return sessionFilesRefreshMsFromValues(numberSetting('file_explorer.session_files_refresh_seconds', 5));
+}
+
 function boolSetting(path, fallback) {
   const value = initialSetting(path, fallback);
   return value === true || value === 'true' || value === 1;
@@ -679,7 +683,7 @@ function refreshMetaButtonTitle() {
     'Refresh git, PR, Linear, and agent metadata.',
     'Refresh YOLO status and open event logs.',
     'Refresh active transcript previews.',
-    `Auto-refresh: YOLO ${seconds(paneStateRefreshMs)}, metadata ${seconds(metadataRefreshMs)}, ping ${seconds(latencyRefreshMs)}, open logs ${seconds(eventLogRefreshMs)}.`,
+    `Auto-refresh: YOLO ${seconds(paneStateRefreshMs)}, metadata ${seconds(metadataRefreshMs)}, settings ${seconds(settingsRefreshMs)}, ping ${seconds(latencyRefreshMs)}, open logs ${seconds(eventLogRefreshMs)}.`,
     'Does not reload the page or reconnect terminals.',
   ].join('\n');
 }
@@ -700,6 +704,8 @@ function applySettingsPayload(payload, options = {}) {
   paneStateRefreshMs = numberSetting('performance.pane_state_refresh_ms', 1253);
   latencyRefreshMs = numberSetting('performance.latency_refresh_ms', 3001);
   eventLogRefreshMs = numberSetting('performance.event_log_refresh_ms', 5003);
+  settingsRefreshMs = numberSetting('performance.settings_refresh_ms', 5009);
+  activitySummaryBackgroundRefreshMs = numberSetting('performance.activity_summary_refresh_ms', 60001);
   redReminderMs = numberSetting('appearance.red_reminder_ms', 1550);
   yoloRotateMs = numberSetting('appearance.yolo_rotate_ms', 20000);
   toastDurationMs = numberSetting('notifications.toast_duration_ms', 10000);
@@ -711,6 +717,7 @@ function applySettingsPayload(payload, options = {}) {
   tabPopoverShowDelayMs = numberSetting('performance.tab_popover_show_delay_ms', 1000);
   tabPopoverFollowDelayMs = numberSetting('performance.tab_popover_follow_delay_ms', 120);
   fileExplorerRefreshMs = fileExplorerRefreshMsFromSettings();
+  sessionFilesRefreshMs = sessionFilesRefreshMsFromSettings();
   fileExplorerIndexRefreshSeconds = numberSetting('file_explorer.index_refresh_seconds', 120);
   fileExplorerNewEntryHighlightMs = numberSetting('file_explorer.new_entry_highlight_ms', 60000);
   fileExplorerImagePreviewMaxPx = numberSetting('file_explorer.image_preview_max_px', 320);
@@ -830,14 +837,36 @@ function clearRuntimeInterval(name) {
   runtimeIntervals.delete(name);
 }
 
+function clientPushSuppressesPolling() {
+  return clientEventsConnected === true;
+}
+
+function refreshTranscriptsFromRuntime() {
+  if (clientPushSuppressesPolling()) return;
+  refreshTranscripts();
+}
+
+function refreshWatchedFilesystemFromRuntime() {
+  if (clientPushSuppressesPolling()) {
+    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({renew: true});
+    return;
+  }
+  refreshWatchedFilesystem();
+}
+
+function refreshSettingsFromRuntime() {
+  if (clientPushSuppressesPolling()) return;
+  refreshSettings({silent: true});
+}
+
 function installRuntimeIntervals() {
   resetRuntimeInterval('auto', refreshAutoStatuses, paneStateRefreshMs);
-  resetRuntimeInterval('metadata', refreshTranscripts, metadataRefreshMs);
+  resetRuntimeInterval('metadata', refreshTranscriptsFromRuntime, metadataRefreshMs);
   resetRuntimeInterval('watched-prs', refreshWatchedPrs, watchedPrRefreshMs);
   resetRuntimeInterval('latency', updateLatency, latencyRefreshMs);
   resetRuntimeInterval('events', refreshOpenEventLogs, eventLogRefreshMs);
-  resetRuntimeInterval('filesystem', refreshWatchedFilesystem, fileExplorerRefreshMs);
-  resetRuntimeInterval('settings', () => refreshSettings({silent: true}), Math.max(1000, Math.min(10000, eventLogRefreshMs)));
+  resetRuntimeInterval('filesystem', refreshWatchedFilesystemFromRuntime, fileExplorerRefreshMs);
+  resetRuntimeInterval('settings', refreshSettingsFromRuntime, settingsRefreshMs);
   if (fileExplorerIndexRefreshSeconds > 0) {
     resetRuntimeInterval('file-index-refresh', refreshAllIndexedDirsStatus, fileExplorerIndexRefreshSeconds * 1000);
   } else {

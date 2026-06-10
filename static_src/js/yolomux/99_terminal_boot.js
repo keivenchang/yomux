@@ -969,7 +969,7 @@ async function uploadFiles(session, fileList, options = {}) {
       : insertUploadPaths(session, paths, {silent: true});
     showUploadResult(session, payload, inserted);
     refreshOpenEventLogs();
-    refreshTranscripts();
+    refreshTranscripts({force: true});
   } catch (error) {
     statusErr(`upload failed: ${esc(error?.payload?.error || error)}`);
   }
@@ -1238,7 +1238,7 @@ function tmuxWindow(session, key, label) {
   statusOk(`${esc(label)}: ${esc(sessionLabel(session))}`);
   scheduleFit(session);
   focusTerminalFromUserAction(session, 75);
-  setTimeout(refreshTranscripts, 250);
+  setTimeout(() => refreshTranscripts({force: true}), 250);
 }
 
 async function ensureTerminalRunning(session) {
@@ -1671,7 +1671,7 @@ function maybeHandleServerVersionChange(serverVersion) {
   showServerUpdateBanner(serverVersion);
 }
 
-async function refreshTranscripts() {
+async function refreshTranscripts(options = {}) {
   if (transcriptMetaRefreshPromise) return transcriptMetaRefreshPromise;
   transcriptMetaLoading = true;
   transcriptMetaLoadError = '';
@@ -1679,7 +1679,10 @@ async function refreshTranscripts() {
   renderInfoPanel();
   transcriptMetaRefreshPromise = (async () => {
     try {
-      transcriptMeta = await apiFetchJson('/api/transcripts');
+      const params = new URLSearchParams();
+      if (options.force === true) params.set('force', '1');
+      const suffix = params.toString();
+      transcriptMeta = await apiFetchJson(`/api/transcripts${suffix ? `?${suffix}` : ''}`);
       transcriptMetaLoaded = true;
       transcriptMetaLoadError = '';
       maybeHandleServerVersionChange(transcriptMeta.server_version);
@@ -1719,7 +1722,11 @@ async function refreshTranscripts() {
       }
       renderPaneTabStrips();
       scheduleFileExplorerActiveTabSync();
-      refreshWatchedFilesystem();
+      if (typeof clientPushSuppressesPolling === 'function' && clientPushSuppressesPolling()) {
+        if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({renew: true});
+      } else {
+        refreshWatchedFilesystem();
+      }
       trackSessionStateChanges();
       refreshOpenEventLogs();
     } catch (error) {
@@ -2014,7 +2021,7 @@ async function updateLatency() {
 }
 
 function refreshAll() {
-  refreshTranscripts();
+  refreshTranscripts({force: true});
   refreshAutoStatuses();
   refreshWatchedFilesystem();
 }
@@ -2046,7 +2053,73 @@ async function boot() {
   updateLatency();
   installRuntimeIntervals();
   scheduleStartupHelperTip();
+  installClientEventStream();
   installDevAutoReload();
+}
+
+function clientEventPayload(event) {
+  try {
+    const parsed = JSON.parse(event?.data || '{}');
+    return parsed && typeof parsed === 'object' && parsed.payload && typeof parsed.payload === 'object'
+      ? parsed.payload
+      : parsed;
+  } catch (_error) {
+    return {};
+  }
+}
+
+function scheduleSessionFilesPushRefresh() {
+  if (!document.querySelector('.file-explorer-changes-panel') || typeof fetchSessionFiles !== 'function') return;
+  if (sessionFilesPushRefreshTimer) clearTimeout(sessionFilesPushRefreshTimer);
+  const elapsed = sessionFilesLastPollTs ? Date.now() - sessionFilesLastPollTs : sessionFilesRefreshMs;
+  const delay = Math.max(0, sessionFilesRefreshMs - elapsed);
+  sessionFilesPushRefreshTimer = setTimeout(() => {
+    sessionFilesPushRefreshTimer = null;
+    fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true});
+  }, delay);
+}
+
+function handleClientPushEvent(type, payload = {}) {
+  if (type === 'settings_changed') {
+    refreshSettings({force: true, silent: true});
+    return;
+  }
+  if (type === 'transcripts_changed') {
+    refreshTranscripts({force: true});
+    return;
+  }
+  if (type === 'session_files_changed') {
+    scheduleSessionFilesPushRefresh();
+    return;
+  }
+  if (type === 'fs_changed') {
+    if (typeof refreshFileExplorerFromPush === 'function') {
+      refreshFileExplorerFromPush(payload).catch(error => console.warn('client fs push refresh failed', error));
+    }
+  }
+}
+
+function installClientEventStream() {
+  if (typeof EventSource === 'undefined' || clientEventsSource) return;
+  let source;
+  try {
+    source = new EventSource('/api/client-events');
+  } catch (_error) {
+    return;
+  }
+  clientEventsSource = source;
+  source.addEventListener('ready', () => {
+    clientEventsConnected = true;
+    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+  });
+  source.addEventListener('ping', () => { clientEventsConnected = true; });
+  source.onerror = () => { clientEventsConnected = false; };
+  for (const type of ['settings_changed', 'fs_changed', 'session_files_changed', 'transcripts_changed']) {
+    source.addEventListener(type, event => {
+      clientEventsConnected = true;
+      handleClientPushEvent(type, clientEventPayload(event));
+    });
+  }
 }
 
 // Dev-velocity #1b: in --dev mode, reload the page when the static bundle changes (ends the recurring

@@ -114,14 +114,25 @@ def route_handler(path, app=None, readonly=False):
 
 def test_do_get_routes_authenticated_json_and_stream_handlers():
     app = SimpleNamespace(
-        transcripts_payload=lambda: {"transcripts": []},
+        transcripts_payload=lambda force=False: {"transcripts": [], "force": force},
         activity_summary_payload=lambda force=False, locale="en": {"force": force, "locale": locale},
     )
+
+    handler, calls, writes = route_handler("/api/transcripts?force=1", app)
+    Handler.do_GET(handler)
+    assert calls == [("require_auth", "readonly")]
+    assert writes == [("json", HTTPStatus.OK, {"transcripts": [], "force": True})]
 
     handler, calls, writes = route_handler("/api/activity-summary?force=1&locale=ja", app)
     Handler.do_GET(handler)
     assert calls == [("require_auth", "readonly")]
     assert writes == [("json", HTTPStatus.OK, {"force": True, "locale": "ja"})]
+
+    handler, calls, writes = route_handler("/api/client-events", app)
+    handler.stream_client_events = lambda: writes.append(("client-events", handler.path))
+    Handler.do_GET(handler)
+    assert calls == [("require_auth", "readonly")]
+    assert writes == [("client-events", "/api/client-events")]
 
     handler, calls, writes = route_handler("/api/summary-stream", app)
     handler.stream_codex_summary = lambda parsed: writes.append(("summary-stream", parsed.path))
@@ -164,6 +175,15 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
 
     assert calls == [("require_auth_for_post", "/api/fs/batch")]
     assert writes == [("fs-batch", "/api/fs/batch")]
+
+    app = SimpleNamespace(update_client_watch_roots=lambda roots: {"ok": True, "roots": roots})
+    handler, calls, writes = route_handler("/api/watch/roots", app)
+    handler.read_json_body = lambda limit: {"roots": ["/repo"]}
+
+    Handler.do_POST(handler)
+
+    assert calls == [("require_auth_for_post", "/api/watch/roots")]
+    assert writes == [("json", HTTPStatus.OK, {"ok": True, "roots": ["/repo"]})]
 
     app = SimpleNamespace(tmux_copy_selection=lambda session: ({"session": session, "copied": True}, HTTPStatus.OK))
     handler, calls, writes = route_handler("/api/tmux-copy-selection?session=6", app)
