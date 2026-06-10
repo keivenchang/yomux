@@ -480,6 +480,8 @@ globalThis.__layoutTestApi = {
   toggleFileExplorerShortcut,
   focusedTerminalForTest() { return focusedTerminal; },
   globalShortcutTargetAllowsAppAction,
+  installTerminalCopyShortcutForTest: installTerminalCopyShortcut,
+  setFetchForTest(fn) { globalThis.fetch = fn; },
   commandPaletteItemScore,
   commandPaletteCommandItems,
   commandPaletteItems,
@@ -4387,6 +4389,55 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes('function copyTerminalSelectionToClipboardEvent(session, term, event)'), 'terminal copy has a DOM copy-event fallback');
   assert.ok(source.includes("container.addEventListener('copy', event => {"), 'terminal container handles browser copy events');
   assert.ok(source.includes("event.clipboardData.setData('text/plain', selected);"), 'terminal copy-event fallback writes the xterm selection to clipboardData');
+  assert.ok(source.includes('async function copyTmuxSelectionToClipboard(session)'), 'terminal Cmd-C can bridge tmux copy-mode selection to the browser clipboard');
+  assert.ok(source.includes("apiFetchJson(`/api/tmux-copy-selection?session=${encodeURIComponent(session)}`, {method: 'POST'})"), 'tmux copy bridge calls the authenticated tmux-copy endpoint');
+  assert.ok(source.includes("new ClipboardItem({'text/plain': textBlob})"), 'tmux copy bridge starts deferred clipboard writes during the shortcut activation');
+  assert.ok(source.includes('if (!selected && !isCmdC) return true;'), 'Ctrl-C without an xterm selection still falls through as SIGINT');
+  assert.ok(source.includes('else copyTmuxSelectionToClipboard(session);'), 'Cmd-C without an xterm selection asks tmux for the copy-mode selection instead of falling through');
+  const terminalCopyApi = loadYolomux('?platform=mac', ['1'], 'https:', 'MacIntel');
+  const fetchCalls = [];
+  terminalCopyApi.setFetchForTest((url, options = {}) => {
+    fetchCalls.push({url: String(url), method: options.method || 'GET'});
+    return new Promise(() => {});
+  });
+  let terminalSelection = '';
+  let copyShortcutHandler = null;
+  let clearSelectionCount = 0;
+  terminalCopyApi.installTerminalCopyShortcutForTest('1', {
+    getSelection: () => terminalSelection,
+    clearSelection: () => { clearSelectionCount += 1; },
+    attachCustomKeyEventHandler(handler) { copyShortcutHandler = handler; },
+  });
+  assert.equal(typeof copyShortcutHandler, 'function', 'terminal copy shortcut installs an xterm custom key handler');
+  let prevented = 0;
+  const cmdCResult = copyShortcutHandler({
+    type: 'keydown',
+    code: 'KeyC',
+    key: 'c',
+    metaKey: true,
+    ctrlKey: false,
+    altKey: false,
+    preventDefault() { prevented += 1; },
+  });
+  assert.equal(cmdCResult, false, 'Mac Cmd-C with no xterm selection is swallowed instead of reaching tmux');
+  assert.equal(prevented, 1, 'Mac Cmd-C prevents the browser/terminal default before the async tmux copy bridge');
+  assert.deepStrictEqual(fetchCalls, [{url: '/api/tmux-copy-selection?session=1', method: 'POST'}], 'Mac Cmd-C with no xterm selection asks tmux for copy-mode text');
+  fetchCalls.length = 0;
+  prevented = 0;
+  clearSelectionCount = 0;
+  const ctrlCResult = copyShortcutHandler({
+    type: 'keydown',
+    code: 'KeyC',
+    key: 'c',
+    metaKey: false,
+    ctrlKey: true,
+    altKey: false,
+    preventDefault() { prevented += 1; },
+  });
+  assert.equal(ctrlCResult, true, 'Ctrl-C with no xterm selection still reaches the PTY as SIGINT');
+  assert.equal(prevented, 0, 'Ctrl-C with no selection does not prevent the terminal default');
+  assert.deepStrictEqual(fetchCalls, [], 'Ctrl-C with no selection does not hit the tmux copy bridge');
+  assert.equal(clearSelectionCount, 0, 'Ctrl-C fallthrough does not mutate xterm selection state');
   assert.equal(source.includes("key === 'k' && platformActionAllowed"), false, 'Cmd+K no longer opens the command palette');
   assert.ok(source.includes("!mod && globalShortcutTargetAllowsAppAction(event.target) && (event.key === '?'"), 'question-mark shortcut does not fire while typing in editors or terminals');
   assert.equal(api.appModifier({ctrlKey: true, metaKey: false, altKey: false}), true, 'PC app modifier is Ctrl');

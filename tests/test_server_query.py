@@ -157,6 +157,14 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
     assert calls == [("require_auth_for_post", "/api/fs/delete")]
     assert writes == [("fs-delete", "/api/fs/delete")]
 
+    app = SimpleNamespace(tmux_copy_selection=lambda session: ({"session": session, "copied": True}, HTTPStatus.OK))
+    handler, calls, writes = route_handler("/api/tmux-copy-selection?session=6", app)
+
+    Handler.do_POST(handler)
+
+    assert calls == [("require_auth_for_post", "/api/tmux-copy-selection")]
+    assert writes == [("json", HTTPStatus.OK, {"session": "6", "copied": True})]
+
 
 def test_handle_ws_payload_readonly_discards_input_and_scroll(monkeypatch):
     writes = []

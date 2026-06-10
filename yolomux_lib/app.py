@@ -1432,6 +1432,65 @@ class TmuxWebtermApp:
             command = "scroll-down"
         tmux(["send-keys", "-t", target, "-X", "-N", bounded_lines, command], timeout=1.0)
 
+    def tmux_copy_selection(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
+        self.refresh_sessions()
+        if session not in self.sessions:
+            return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
+
+        sessions, errors = discover_sessions([session])
+        info = sessions.get(session)
+        target = info.selected_pane.target if info and info.selected_pane else tmux_session_target(session)
+
+        mode = tmux(["display-message", "-p", "-t", target, "#{pane_in_mode}"], timeout=1.0)
+        if mode.returncode != 0:
+            error = (mode.stderr or mode.stdout or "tmux pane mode check failed").strip()
+            return {"session": session, "target": target, "error": error, "errors": errors}, HTTPStatus.INTERNAL_SERVER_ERROR
+        if mode.stdout.strip() != "1":
+            return {
+                "session": session,
+                "target": target,
+                "copied": False,
+                "text": "",
+                "error": "tmux copy mode is not active",
+                "errors": errors,
+            }, HTTPStatus.OK
+
+        before = tmux(["display-message", "-p", "-t", target, "#{buffer_created}:#{buffer_size}:#{buffer_sample}"], timeout=1.0)
+        before_signature = before.stdout.strip() if before.returncode == 0 else ""
+        copied = tmux(["send-keys", "-t", target, "-X", "copy-selection-no-clear"], timeout=1.0)
+        if copied.returncode != 0:
+            error = (copied.stderr or copied.stdout or "tmux copy selection failed").strip()
+            return {"session": session, "target": target, "copied": False, "text": "", "error": error, "errors": errors}, HTTPStatus.OK
+
+        after = tmux(["display-message", "-p", "-t", target, "#{buffer_created}:#{buffer_size}:#{buffer_sample}"], timeout=1.0)
+        if after.returncode != 0:
+            error = (after.stderr or after.stdout or "tmux buffer check failed").strip()
+            return {"session": session, "target": target, "error": error, "errors": errors}, HTTPStatus.INTERNAL_SERVER_ERROR
+        if after.stdout.strip() == before_signature:
+            return {
+                "session": session,
+                "target": target,
+                "copied": False,
+                "text": "",
+                "error": "no tmux selection copied",
+                "errors": errors,
+            }, HTTPStatus.OK
+
+        buffer_result = tmux(["save-buffer", "-"], timeout=1.0)
+        if buffer_result.returncode != 0:
+            error = (buffer_result.stderr or buffer_result.stdout or "tmux save buffer failed").strip()
+            return {"session": session, "target": target, "error": error, "errors": errors}, HTTPStatus.INTERNAL_SERVER_ERROR
+
+        text = buffer_result.stdout
+        return {
+            "session": session,
+            "target": target,
+            "copied": bool(text),
+            "text": text,
+            "chars": len(text),
+            "errors": errors,
+        }, HTTPStatus.OK
+
     def ensure_session(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
         self.refresh_sessions()
         if session not in self.sessions:

@@ -647,6 +647,12 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             payload, status = self.server.app.tmux_next_window(session)
             self.write_json(payload, status=status)
             return
+        if parsed.path == "/api/tmux-copy-selection":
+            qs = parse_qs(parsed.query)
+            session = str(query_one(qs, "session", "") or "")
+            payload, status = self.server.app.tmux_copy_selection(session)
+            self.write_json(payload, status=status)
+            return
         if parsed.path == "/api/event":
             payload, status = self.handle_client_event()
             self.write_json(payload, status=status)

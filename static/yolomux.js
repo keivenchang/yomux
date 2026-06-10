@@ -2396,11 +2396,58 @@ function copyTerminalSelectionToClipboardEvent(session, term, event) {
   return true;
 }
 
+async function copyTmuxSelectionToClipboard(session) {
+  const payloadPromise = fetchTmuxSelectionText(session);
+  try {
+    const {payload, text} = await copyDeferredTextToClipboard(payloadPromise);
+    const chars = Number.isFinite(Number(payload.chars)) ? Number(payload.chars) : text.length;
+    statusEl.textContent = `copied ${chars} chars from tmux`;
+    return true;
+  } catch (error) {
+    if (error?.noClipboardText) {
+      statusEl.textContent = error.message || 'nothing selected';
+      return false;
+    }
+    statusErr(`copy failed: ${esc(error)}`);
+    return false;
+  }
+}
+
+async function fetchTmuxSelectionText(session) {
+  const payload = await apiFetchJson(`/api/tmux-copy-selection?session=${encodeURIComponent(session)}`, {method: 'POST'});
+  const text = payload?.copied ? String(payload.text || '') : '';
+  if (!text) {
+    const error = new Error(payload?.error === 'tmux copy mode is not active' ? 'nothing selected' : (payload?.error || 'nothing selected'));
+    error.noClipboardText = true;
+    throw error;
+  }
+  return {payload, text};
+}
+
+async function copyDeferredTextToClipboard(payloadPromise) {
+  const clipboard = globalThis.navigator?.clipboard;
+  if (clipboard?.write && typeof globalThis.ClipboardItem === 'function' && typeof globalThis.Blob === 'function') {
+    const textBlob = payloadPromise.then(({text}) => new Blob([text], {type: 'text/plain'}));
+    try {
+      await clipboard.write([new ClipboardItem({'text/plain': textBlob})]);
+      return await payloadPromise;
+    } catch (error) {
+      if (error?.noClipboardText) throw error;
+      const result = await payloadPromise;
+      await copyTextToClipboard(result.text);
+      return result;
+    }
+  }
+  const result = await payloadPromise;
+  await copyTextToClipboard(result.text);
+  return result;
+}
+
 function installTerminalCopyShortcut(session, term) {
-  // Ctrl-C / Cmd-C copy the terminal selection. Plain Ctrl-C with NO selection
-  // must still send SIGINT to the PTY, so only swallow the keystroke when there
-  // is something selected. xterm paints the selection on a canvas, so the
-  // browser's native copy can't grab it — we copy explicitly.
+  // Ctrl-C / Cmd-C copy the xterm selection. Plain Ctrl-C with NO selection
+  // must still send SIGINT to the PTY, but Cmd-C must stay a browser copy
+  // shortcut. If xterm has no selection, ask tmux for its copy-mode selection
+  // instead of forwarding Cmd-C into the PTY.
   term.attachCustomKeyEventHandler?.(event => {
     if (event.type !== 'keydown') return true;
     if (event.code !== 'KeyC' && event.key?.toLowerCase() !== 'c') return true;
@@ -2408,9 +2455,10 @@ function installTerminalCopyShortcut(session, term) {
     const isCtrlC = event.ctrlKey && !event.metaKey && !event.altKey;
     if (!isCmdC && !isCtrlC) return true;
     const selected = term.getSelection?.() || '';
-    if (!selected) return true; // no selection: let Ctrl-C through as SIGINT
+    if (!selected && !isCmdC) return true; // no selection: let Ctrl-C through as SIGINT
     event.preventDefault();
-    copyTerminalSelection(session, term);
+    if (selected) copyTerminalSelection(session, term);
+    else copyTmuxSelectionToClipboard(session);
     term.clearSelection?.(); // so a second Ctrl-C falls through to SIGINT
     return false; // swallow: do not forward ^C to the PTY
   });

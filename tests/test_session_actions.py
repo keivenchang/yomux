@@ -9,6 +9,8 @@ from http import HTTPStatus
 import yolomux_lib.app as app_module
 from yolomux_lib.app import TmuxWebtermApp
 from yolomux_lib.app import tmux_session_name_error
+from yolomux_lib.common import PaneInfo
+from yolomux_lib.common import SessionInfo
 
 
 class FakeTmuxResult:
@@ -98,3 +100,77 @@ def test_kill_session_calls_tmux_and_removes_session(monkeypatch):
     assert payload["killed"] is True
     assert payload["sessions"] == ["ant"]
     assert calls == [["kill-session", "-t", "1:"]]
+
+
+def test_tmux_copy_selection_reads_fresh_tmux_buffer(monkeypatch):
+    pane = PaneInfo(
+        session="1",
+        window="0",
+        pane="0",
+        pane_id="%42",
+        target="%42",
+        current_path="/repo",
+        command="bash",
+        active=True,
+        window_active=True,
+        title="bash",
+        pid=123,
+    )
+    app = make_app(["1"])
+    calls = []
+    buffer_signature = ["100:3:old", "101:11:fresh"]
+
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"1": SessionInfo("1", [pane], pane, [])}, []))
+
+    def fake_tmux(args, timeout=5.0):
+        calls.append(args)
+        if args[:4] == ["display-message", "-p", "-t", "%42"] and args[4] == "#{pane_in_mode}":
+            return FakeTmuxResult(stdout="1\n")
+        if args[:4] == ["display-message", "-p", "-t", "%42"] and args[4] == "#{buffer_created}:#{buffer_size}:#{buffer_sample}":
+            return FakeTmuxResult(stdout=f"{buffer_signature.pop(0)}\n")
+        if args == ["send-keys", "-t", "%42", "-X", "copy-selection-no-clear"]:
+            return FakeTmuxResult()
+        if args == ["save-buffer", "-"]:
+            return FakeTmuxResult(stdout="fresh text\n")
+        raise AssertionError(f"unexpected tmux call: {args}")
+
+    monkeypatch.setattr(app_module, "tmux", fake_tmux)
+
+    payload, status = app.tmux_copy_selection("1")
+
+    assert status == HTTPStatus.OK
+    assert payload["copied"] is True
+    assert payload["text"] == "fresh text\n"
+    assert payload["chars"] == len("fresh text\n")
+    assert calls == [
+        ["display-message", "-p", "-t", "%42", "#{pane_in_mode}"],
+        ["display-message", "-p", "-t", "%42", "#{buffer_created}:#{buffer_size}:#{buffer_sample}"],
+        ["send-keys", "-t", "%42", "-X", "copy-selection-no-clear"],
+        ["display-message", "-p", "-t", "%42", "#{buffer_created}:#{buffer_size}:#{buffer_sample}"],
+        ["save-buffer", "-"],
+    ]
+
+
+def test_tmux_copy_selection_does_not_return_stale_buffer(monkeypatch):
+    app = make_app(["1"])
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+
+    def fake_tmux(args, timeout=5.0):
+        if args[:3] == ["display-message", "-p", "-t"] and args[-1] == "#{pane_in_mode}":
+            return FakeTmuxResult(stdout="1\n")
+        if args[:3] == ["display-message", "-p", "-t"] and args[-1] == "#{buffer_created}:#{buffer_size}:#{buffer_sample}":
+            return FakeTmuxResult(stdout="100:3:old\n")
+        if args[:3] == ["send-keys", "-t", "1:"]:
+            return FakeTmuxResult()
+        if args == ["save-buffer", "-"]:
+            raise AssertionError("must not read a stale buffer when copy did not create one")
+        raise AssertionError(f"unexpected tmux call: {args}")
+
+    monkeypatch.setattr(app_module, "tmux", fake_tmux)
+
+    payload, status = app.tmux_copy_selection("1")
+
+    assert status == HTTPStatus.OK
+    assert payload["copied"] is False
+    assert payload["text"] == ""
+    assert payload["error"] == "no tmux selection copied"
