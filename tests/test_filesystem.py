@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -768,6 +769,36 @@ def test_blame_file_on_a_tracked_repo_file():
     first = result["lines"]["1"]
     assert len(first["sha"]) == 40
     assert first["author"]
+
+
+def test_rename_path_uses_git_mv_for_tracked_file(tmp_path):
+    # Renaming a git-TRACKED file uses `git mv`, so the new path lands TRACKED (staged), not untracked
+    # like a plain rename would leave it.
+    def run(*args):
+        subprocess.run(args, cwd=str(tmp_path), check=True, capture_output=True)
+
+    run("git", "init", "-q")
+    run("git", "config", "user.email", "t@example.com")
+    run("git", "config", "user.name", "T")
+    (tmp_path / "old.txt").write_text("hi\n", encoding="utf-8")
+    run("git", "add", "old.txt")
+    run("git", "commit", "-qm", "init")
+
+    result = filesystem.rename_path(str(tmp_path / "old.txt"), "new.txt")
+    assert result["name"] == "new.txt"
+    assert (tmp_path / "new.txt").exists()
+    assert not (tmp_path / "old.txt").exists()
+    tracked = subprocess.run(["git", "ls-files", "--error-unmatch", "new.txt"], cwd=str(tmp_path), capture_output=True)
+    assert tracked.returncode == 0, "git mv staged the new path (a plain mv would leave it untracked)"
+
+
+def test_rename_path_plain_rename_for_untracked_file(tmp_path):
+    # No repo / untracked: a plain rename still works (git mv path returns False, caller falls back).
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    result = filesystem.rename_path(str(tmp_path / "a.txt"), "b.txt")
+    assert result["name"] == "b.txt"
+    assert (tmp_path / "b.txt").exists() and not (tmp_path / "a.txt").exists()
+    assert filesystem._git_mv_if_tracked(tmp_path / "b.txt", tmp_path / "c.txt") is False
 
 
 def test_list_directory_flags_symlinks_with_target(tmp_path):

@@ -843,6 +843,25 @@ def delete_path(raw_path: str) -> dict[str, Any]:
     return {"path": str(path), "deleted": True, "kind": kind}
 
 
+def _git_mv_if_tracked(src: Path, dst: Path) -> bool:
+    """If `src` is a git-TRACKED file, move it with `git mv` (preserves history, updates the index) and
+    return True. Returns False for untracked files / paths outside any repo / cross-repo moves / git errors,
+    so the caller falls back to a plain rename. dst is assumed to be in the same repo (a sibling rename)."""
+    repo_root = git_root_for_path(src)
+    if not repo_root:
+        return False
+    repo = Path(repo_root)
+    try:
+        rel_src = src.relative_to(repo).as_posix()
+        rel_dst = dst.relative_to(repo).as_posix()
+    except ValueError:
+        return False
+    tracked = git(["ls-files", "--error-unmatch", "--", rel_src], cwd=str(repo), timeout=2.0)
+    if tracked.returncode != 0:
+        return False   # untracked inside a repo -> plain rename
+    return git(["mv", "--", rel_src, rel_dst], cwd=str(repo), timeout=5.0).returncode == 0
+
+
 def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
     path = _validated_path(raw_path)
     _ensure_not_configured_root(path, "rename")
@@ -852,8 +871,10 @@ def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
     target = path.with_name(name)
     if target.exists() or target.is_symlink():
         raise FilesystemError(f"target already exists: {target}", status=409)
-    with _fs_io_errors():
-        path.rename(target)
+    # A tracked file moves with `git mv` (history-preserving, index-aware); everything else uses a plain rename.
+    if not _git_mv_if_tracked(path, target):
+        with _fs_io_errors():
+            path.rename(target)
     return {"path": str(target), "old_path": str(path), "name": name}
 
 

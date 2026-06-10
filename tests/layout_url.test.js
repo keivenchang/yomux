@@ -7241,12 +7241,17 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes('function fileExplorerKeyIntent('), 'pure key->intent map exists');
   assert.ok(/if \(handleFileExplorerArrowNav\(event\)\) return;/.test(source), 'wired into the global keydown after the delete shortcut');
   assert.ok(source.includes('!eventTargetIsFileExplorerSurface(event.target) && !isFileExplorerItem(focusedPanelItem)'), 'gated on the Finder/Differ surface');
-  assert.ok(/intent === 'open'[\s\S]{0,200}openFileExplorerManualRoot\(leadPath\)[\s\S]{0,120}openFileInEditor\(leadPath, entry\)/.test(source), 'open: folder descends, file opens in editor');
+  // Differ + Finder share the EXACT same handler: the container selector and the expand/collapse parent both cover the changes panel.
+  assert.ok(source.includes('.file-explorer-tree-panel, .file-explorer-changes-panel'), 'the SAME handler scopes to both the Finder tree and the Differ changes panel');
+  assert.ok(source.includes('function fileTreeDirectoryExpanded(') && source.includes('function setFileTreeDirectoryExpanded('), 'one shared expand/collapse parent for both surfaces');
+  assert.ok(/setFileTreeDirectoryExpanded[\s\S]{0,260}closest\('\.file-explorer-changes-panel'\)[\s\S]{0,220}changesFolderCollapsed[\s\S]{0,220}expandDirectoryRow/.test(source), 'the parent dispatches Differ (changesFolderCollapsed) vs Finder (expandDirectoryRow) — no per-surface key code');
+  assert.ok(source.includes('setFileTreeDirectoryExpanded(leadRow, leadPath, true)') && source.includes('setFileTreeDirectoryExpanded(leadRow, leadPath, false)'), 'Right/Left route through the shared expand/collapse parent');
+  assert.ok(/intent === 'open'/.test(source) && source.includes('openChangedFileInDiff(') && source.includes('openFileInEditor(leadPath, entry)') && source.includes('openFileExplorerManualRoot(leadPath)'), 'open: Differ file -> diff, file -> editor, Finder folder -> descend');
   assert.ok(/intent === 'enclosing'[\s\S]{0,300}openFileExplorerManualRoot\(parent\)/.test(source), 'Cmd-Up opens the enclosing folder');
-  assert.ok(/intent === 'rename'[\s\S]{0,300}beginFileTreeRename\(leadRow, leadPath, entry\)/.test(source), 'Enter renames the lead row');
-  assert.ok(/leadRow\.dataset\.openChangeFile !== undefined\) return false/.test(source), 'rename is a no-op on Differ rows');
+  assert.ok(/intent === 'rename'[\s\S]{0,200}beginFileTreeRename\(leadRow, leadPath, entry\)/.test(source), 'Enter renames the lead row (Finder AND Differ)');
+  assert.ok(!/openChangeFile !== undefined\) return false/.test(source), 'no Differ-rename exclusion — Differ rows rename too (git mv handles tracked files)');
   assert.ok(/intent === 'preview'[\s\S]{0,300}openFileImagePreview\(leadRow, leadPath, entry\)/.test(source), 'Space previews (Quick Look) the lead file');
-  assert.ok(source.includes('expandDirectoryRow(leadRow, leadPath, {manual: true})') && source.includes('collapseDirectoryRow(leadRow, leadPath, {manual: true})'), 'Right/Left expand/collapse in place');
+  assert.ok(source.includes('expandDirectoryRow(row, fullPath, {manual: true})') && source.includes('collapseDirectoryRow(row, fullPath, {manual: true})'), 'Finder branch of the shared parent still uses expand/collapseDirectoryRow');
   assert.ok(/pathIsInsideDirectory\(child\.dataset\.path, leadPath\)/.test(source), 'Right steps into the first child when already expanded');
   assert.ok(/rows\.find\(item => item\.dataset\.path === dirnameOf\(leadPath\)\)/.test(source), 'Left steps to the parent row');
   assert.ok(source.includes('function fileExplorerTypeaheadSelect('), 'type-ahead selection exists');

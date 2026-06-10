@@ -2653,6 +2653,27 @@ function fileExplorerTypeaheadSelect(rows, leadIndex, char, selectLead) {
   }
 }
 
+// Shared expand/collapse for a tree directory row — the macOS-Finder ←/→ behavior must be IDENTICAL on
+// both surfaces, but the Finder uses fileExplorerExpanded (+ lazy fetch via expand/collapseDirectoryRow)
+// while the Differ uses changesFolderCollapsed (+ a changes-panel re-render). One parent dispatches by the
+// row's panel so neither surface needs bespoke key code.
+function fileTreeDirectoryExpanded(row, fullPath) {
+  return row.closest('.file-explorer-changes-panel')
+    ? !changesFolderCollapsed.has(fullPath)
+    : fileExplorerExpanded.has(fullPath);
+}
+function setFileTreeDirectoryExpanded(row, fullPath, expand) {
+  if (row.closest('.file-explorer-changes-panel')) {
+    if (expand) changesFolderCollapsed.delete(fullPath);
+    else changesFolderCollapsed.add(fullPath);
+    writeStoredChangesFolderCollapsed();
+    renderFileExplorerChangesPanels({force: true});
+    return;
+  }
+  if (expand) expandDirectoryRow(row, fullPath, {manual: true});
+  else collapseDirectoryRow(row, fullPath, {manual: true});
+}
+
 // File Explorer / Finder-style keyboard nav over the SHARED selection (Finder AND Differ render
 // .file-tree-row). Dispatches the PURE fileExplorerKeyIntent map onto the live tree. Same surface gating
 // as the delete shortcut. Returns true if it handled the key.
@@ -2670,11 +2691,14 @@ function handleFileExplorerArrowNav(event) {
     if (parent && parent !== root) openFileExplorerManualRoot(parent);
     return true;
   }
-  // Scope to ONE tree: the event's tree, else the tree holding the lead, else the active Finder tree.
-  const container = event.target?.closest?.('.file-explorer-tree-panel')
-    || (fileExplorerSelectionLead && document.querySelector(`.file-tree-row[data-path="${cssEscape(fileExplorerSelectionLead)}"]`)?.closest?.('.file-explorer-tree-panel'))
-    || document.querySelector('.panel.file-explorer-panel .file-explorer-tree-panel')
-    || document.querySelector('.file-explorer-tree-panel')
+  // Scope to ONE tree: the event's tree, else the tree holding the lead, else the active tree. Matches BOTH
+  // the Finder (.file-explorer-tree-panel) and the Differ (.file-explorer-changes-panel) so the exact same
+  // handler drives both surfaces.
+  const treeSel = '.file-explorer-tree-panel, .file-explorer-changes-panel';
+  const container = event.target?.closest?.(treeSel)
+    || (fileExplorerSelectionLead && document.querySelector(`.file-tree-row[data-path="${cssEscape(fileExplorerSelectionLead)}"]`)?.closest?.(treeSel))
+    || document.querySelector(`.panel.file-explorer-panel ${treeSel.split(', ').join(', .panel.file-explorer-panel ')}`)
+    || document.querySelector(treeSel)
     || document;
   const rows = selectableFileTreeRows(container);
   if (!rows.length) return false;
@@ -2704,17 +2728,19 @@ function handleFileExplorerArrowNav(event) {
     const leadRow = rows[leadIndex];
     const leadPath = leadRow.dataset.path;
     const isDir = leadRow.dataset.kind === 'dir';
+    const inDiffer = Boolean(leadRow.closest('.file-explorer-changes-panel'));
     const entry = {kind: leadRow.dataset.kind, name: leadRow.dataset.name || basenameOf(leadPath), is_repo: leadRow.dataset.isRepo === 'true'};
-    if (intent === 'rename') {
-      if (leadRow.dataset.openChangeFile !== undefined) return false;   // Differ rows are not Finder rename targets
+    if (intent === 'rename') {                     // Finder Return = rename; tracked files move via git mv (backend)
       consume();
       beginFileTreeRename(leadRow, leadPath, entry);
       return true;
     }
-    if (intent === 'open') {                       // Cmd-O / Cmd-Down: open a file in the editor, or open (descend into) a folder
+    if (intent === 'open') {                       // Cmd-O / Cmd-Down: open
       consume();
-      if (isDir) openFileExplorerManualRoot(leadPath);
-      else openFileInEditor(leadPath, entry);
+      if (!isDir && inDiffer && leadRow.dataset.openChangeFile) openChangedFileInDiff(leadRow.dataset.openChangeFile, leadRow.dataset.openChangeSession || '', leadRow.dataset.openChangeStatus || '', leadRow.dataset.openChangeRepo || '');
+      else if (!isDir) openFileInEditor(leadPath, entry);
+      else if (inDiffer) setFileTreeDirectoryExpanded(leadRow, leadPath, !fileTreeDirectoryExpanded(leadRow, leadPath));
+      else openFileExplorerManualRoot(leadPath);   // Finder: open a folder = descend into it
       return true;
     }
     if (intent === 'preview') {                    // Space = Quick Look-style preview (image popover) of a file
@@ -2723,16 +2749,16 @@ function handleFileExplorerArrowNav(event) {
       else if (!isDir) openFileImagePreview(leadRow, leadPath, entry);
       return true;
     }
-    const expanded = fileExplorerExpanded.has(leadPath);
+    const expanded = fileTreeDirectoryExpanded(leadRow, leadPath);
     if (intent === 'expand') {
       consume();
-      if (isDir && !expanded) expandDirectoryRow(leadRow, leadPath, {manual: true});
+      if (isDir && !expanded) setFileTreeDirectoryExpanded(leadRow, leadPath, true);
       else if (isDir && expanded) { const child = rows[leadIndex + 1]; if (child && pathIsInsideDirectory(child.dataset.path, leadPath)) selectLead(child); }
       return true;
     }
     // collapse: collapse an expanded folder, else step to the parent row
     consume();
-    if (isDir && expanded) collapseDirectoryRow(leadRow, leadPath, {manual: true});
+    if (isDir && expanded) setFileTreeDirectoryExpanded(leadRow, leadPath, false);
     else { const parentRow = rows.find(item => item.dataset.path === dirnameOf(leadPath)); if (parentRow) selectLead(parentRow); }
     return true;
   }
