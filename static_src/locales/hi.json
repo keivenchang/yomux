@@ -476,6 +476,8 @@
   "pref.performance.server_directory_event_poll_ms.label": "Server SSE: directory-change poll",
   "pref.performance.server_event_poll_ms.help": "Server-side SSE poll interval in seconds for open editor file signatures in visible panes before pushing file changes to browsers. Minimum 0.250 s.",
   "pref.performance.server_event_poll_ms.label": "Server SSE: editor file-change poll",
+  "pref.performance.server_background_file_event_poll_ms.help": "Server-side SSE poll interval in seconds for background editor file signatures before pushing file changes to browsers. Default 5 s. Minimum 0.250 s.",
+  "pref.performance.server_background_file_event_poll_ms.label": "Server SSE: background editor file-change poll",
   "pref.performance.tab_popover_follow_delay_ms.help": "एक टैब details popup पहले से खुला होने पर टैब के बीच जाने पर कम देरी।",
   "pref.performance.tab_popover_follow_delay_ms.label": "टैब detail follow देरी",
   "pref.performance.tab_popover_show_delay_ms.help": "टैब details popup खुलने से पहले की प्रारंभिक देरी।",

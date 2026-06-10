@@ -476,6 +476,8 @@
   "pref.performance.server_directory_event_poll_ms.label": "Server SSE: directory-change poll",
   "pref.performance.server_event_poll_ms.help": "Server-side SSE poll interval in seconds for open editor file signatures in visible panes before pushing file changes to browsers. Minimum 0.250 s.",
   "pref.performance.server_event_poll_ms.label": "Server SSE: editor file-change poll",
+  "pref.performance.server_background_file_event_poll_ms.help": "Server-side SSE poll interval in seconds for background editor file signatures before pushing file changes to browsers. Default 5 s. Minimum 0.250 s.",
+  "pref.performance.server_background_file_event_poll_ms.label": "Server SSE: background editor file-change poll",
   "pref.performance.tab_popover_follow_delay_ms.help": "Délai plus court lors du passage entre onglets quand une fenêtre de détails d'onglet est déjà ouverte.",
   "pref.performance.tab_popover_follow_delay_ms.label": "Délai de suivi des détails d'onglet",
   "pref.performance.tab_popover_show_delay_ms.help": "Délai initial avant l'ouverture d'une fenêtre de détails d'onglet.",

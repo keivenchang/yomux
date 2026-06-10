@@ -4151,10 +4151,19 @@ function watchedFileExplorerDirectories() {
 }
 
 function visibleFileEditorWatchFiles() {
-  return Array.from(new Set(paneItems()
+  return Array.from(new Set(activePaneItems()
     .filter(isFileEditorItem)
     .map(item => fileItemPath(item))
     .filter(path => path && path.startsWith('/'))))
+    .sort();
+}
+
+function backgroundFileEditorWatchFiles() {
+  const visible = new Set(visibleFileEditorWatchFiles());
+  return Array.from(new Set(paneItems()
+    .filter(isFileEditorItem)
+    .map(item => fileItemPath(item))
+    .filter(path => path && path.startsWith('/') && !visible.has(path))))
     .sort();
 }
 
@@ -4178,6 +4187,7 @@ function clientServerWatchState() {
   const state = {
     roots: clientServerWatchRoots(),
     files: visibleFileEditorWatchFiles(),
+    background_files: backgroundFileEditorWatchFiles(),
     context_items: activeSessions
       .filter(isTmuxSession)
       .map(session => ({session, messages: transcriptPreviewMessages})),

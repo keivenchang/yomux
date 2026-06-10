@@ -5331,6 +5331,7 @@ function applyLayoutSlots(nextSlots, options = {}) {
   } else {
     updateStatus();
   }
+  if (clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }
 
 function layoutRenderRequest(request = {}) {
@@ -10778,10 +10779,19 @@ function watchedFileExplorerDirectories() {
 }
 
 function visibleFileEditorWatchFiles() {
-  return Array.from(new Set(paneItems()
+  return Array.from(new Set(activePaneItems()
     .filter(isFileEditorItem)
     .map(item => fileItemPath(item))
     .filter(path => path && path.startsWith('/'))))
+    .sort();
+}
+
+function backgroundFileEditorWatchFiles() {
+  const visible = new Set(visibleFileEditorWatchFiles());
+  return Array.from(new Set(paneItems()
+    .filter(isFileEditorItem)
+    .map(item => fileItemPath(item))
+    .filter(path => path && path.startsWith('/') && !visible.has(path))))
     .sort();
 }
 
@@ -10805,6 +10815,7 @@ function clientServerWatchState() {
   const state = {
     roots: clientServerWatchRoots(),
     files: visibleFileEditorWatchFiles(),
+    background_files: backgroundFileEditorWatchFiles(),
     context_items: activeSessions
       .filter(isTmuxSession)
       .map(session => ({session, messages: transcriptPreviewMessages})),
@@ -17775,6 +17786,7 @@ function preferenceSections() {
     {title: t('pref.section.performance'), items: [
       {path: 'general.reload_on_update_auto', label: t('pref.general.reload_on_update_auto.label'), type: 'boolean', help: t('pref.general.reload_on_update_auto.help')},
       {path: 'performance.server_event_poll_ms', label: t('pref.performance.server_event_poll_ms.label'), type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.server_event_poll_ms.help')},
+      {path: 'performance.server_background_file_event_poll_ms', label: t('pref.performance.server_background_file_event_poll_ms.label'), type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.server_background_file_event_poll_ms.help')},
       {path: 'performance.server_directory_event_poll_ms', label: t('pref.performance.server_directory_event_poll_ms.label'), type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.server_directory_event_poll_ms.help')},
       {path: 'performance.latency_refresh_ms', label: t('pref.performance.latency_refresh_ms.label'), type: 'number', min: 1, max: 30, step: 0.1, suffix: 's', scale: 1000, help: t('pref.performance.latency_refresh_ms.help')},
       {path: 'performance.event_log_refresh_ms', label: t('pref.performance.event_log_refresh_ms.label'), type: 'number', min: 1, max: 60, step: 0.1, suffix: 's', scale: 1000, help: t('pref.performance.event_log_refresh_ms.help')},
@@ -17783,7 +17795,7 @@ function preferenceSections() {
       {path: 'performance.menu_hover_open_delay_ms', label: t('pref.performance.menu_hover_open_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.menu_hover_open_delay_ms.help')},
       {path: 'performance.tab_popover_show_delay_ms', label: t('pref.performance.tab_popover_show_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.tab_popover_show_delay_ms.help')},
       {path: 'performance.tab_popover_follow_delay_ms', label: t('pref.performance.tab_popover_follow_delay_ms.label'), type: 'number', min: 0, max: 1000, step: 20, suffix: 'ms', help: t('pref.performance.tab_popover_follow_delay_ms.help')},
-      {path: 'performance.remote_resize_delay_ms', label: t('pref.performance.remote_resize_delay_ms.label'), type: 'number', min: 0.05, max: 2, step: 0.01, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.remote_resize_delay_ms.help')},
+      {path: 'performance.remote_resize_delay_ms', label: t('pref.performance.remote_resize_delay_ms.label'), type: 'number', min: 50, max: 2000, step: 10, suffix: 'ms', help: t('pref.performance.remote_resize_delay_ms.help')},
     ]},
     {title: t('pref.section.github'), items: [
       {path: 'github.watched_prs', label: t('pref.github.watched_prs.label'), type: 'list', wide: true, help: t('pref.github.watched_prs.help')},

@@ -2629,6 +2629,7 @@ function applyLayoutSlots(nextSlots, options = {}) {
   } else {
     updateStatus();
   }
+  if (clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }
 
 function layoutRenderRequest(request = {}) {

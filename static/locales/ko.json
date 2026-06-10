@@ -472,6 +472,8 @@
   "pref.performance.popover_show_delay_ms.label": "도움말/미리보기 호버 지연",
   "pref.performance.remote_resize_delay_ms.help": "안정된 브라우저 크기 조정을 tmux에 전송하기까지의 지연 시간입니다.",
   "pref.performance.remote_resize_delay_ms.label": "원격 크기 조정 디바운스",
+  "pref.performance.server_background_file_event_poll_ms.help": "Server-side SSE poll interval in seconds for background editor file signatures before pushing file changes to browsers. Default 5 s. Minimum 0.250 s.",
+  "pref.performance.server_background_file_event_poll_ms.label": "Server SSE: background editor file-change poll",
   "pref.performance.server_directory_event_poll_ms.help": "Server-side SSE poll interval in seconds for Finder and Differ directory signatures before pushing directory changes to browsers. Minimum 0.250 s.",
   "pref.performance.server_directory_event_poll_ms.label": "Server SSE: directory-change poll",
   "pref.performance.server_event_poll_ms.help": "Server-side SSE poll interval in seconds for open editor file signatures in visible panes before pushing file changes to browsers. Minimum 0.250 s.",

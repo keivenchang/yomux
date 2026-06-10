@@ -472,6 +472,8 @@
   "pref.performance.popover_show_delay_ms.label": "帮助/预览悬停延迟",
   "pref.performance.remote_resize_delay_ms.help": "将稳定后的浏览器调整大小发送到 tmux 前的延迟。",
   "pref.performance.remote_resize_delay_ms.label": "远程调整大小防抖",
+  "pref.performance.server_background_file_event_poll_ms.help": "Server-side SSE poll interval in seconds for background editor file signatures before pushing file changes to browsers. Default 5 s. Minimum 0.250 s.",
+  "pref.performance.server_background_file_event_poll_ms.label": "Server SSE: background editor file-change poll",
   "pref.performance.server_directory_event_poll_ms.help": "Server-side SSE poll interval in seconds for Finder and Differ directory signatures before pushing directory changes to browsers. Minimum 0.250 s.",
   "pref.performance.server_directory_event_poll_ms.label": "Server SSE: directory-change poll",
   "pref.performance.server_event_poll_ms.help": "Server-side SSE poll interval in seconds for open editor file signatures in visible panes before pushing file changes to browsers. Minimum 0.250 s.",

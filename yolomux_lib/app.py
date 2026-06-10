@@ -388,6 +388,7 @@ class TmuxWebtermApp:
         self.client_watch_lock = threading.RLock()
         self.client_watch_roots: dict[str, float] = {}
         self.client_watch_files: dict[str, float] = {}
+        self.client_watch_background_files: dict[str, float] = {}
         self.client_watch_context_items: list[dict[str, Any]] = []
         self.client_watch_session_files: list[dict[str, Any]] = []
         self.client_watch_activity_summary: dict[str, Any] = {}
@@ -396,6 +397,7 @@ class TmuxWebtermApp:
         self.client_watch_transcripts_signature: tuple[Any, ...] | None = None
         self.client_watch_filesystem_signature: tuple[Any, ...] | None = None
         self.client_watch_file_signature: tuple[Any, ...] | None = None
+        self.client_watch_background_file_signature: tuple[Any, ...] | None = None
         self.client_watch_auto_approve_signature: str = ""
         self.client_watch_watched_prs_signature: str = ""
         self.client_watch_context_item_payload_signatures: dict[str, str] = {}
@@ -410,6 +412,7 @@ class TmuxWebtermApp:
         self.client_watch_wake_event = threading.Event()
         self.client_event_next_signature_poll_at = 0.0
         self.client_event_next_file_poll_at = 0.0
+        self.client_event_next_background_file_poll_at = 0.0
         self.client_event_next_auto_poll_at = 0.0
         self.client_event_next_watched_pr_poll_at = 0.0
         self.activity_summary_lock = threading.RLock()
@@ -519,6 +522,12 @@ class TmuxWebtermApp:
         value = performance.get("server_directory_event_poll_ms", 3000) if isinstance(performance, dict) else 3000
         return max(0.25, min(60.0, self.float_value(value, 3000.0) / 1000.0))
 
+    def server_background_file_event_poll_seconds(self) -> float:
+        settings = settings_payload().get("settings", {})
+        performance = settings.get("performance", {}) if isinstance(settings, dict) else {}
+        value = performance.get("server_background_file_event_poll_ms", 5000) if isinstance(performance, dict) else 5000
+        return max(0.25, min(60.0, self.float_value(value, 5000.0) / 1000.0))
+
     def server_auto_approve_event_poll_seconds(self) -> float:
         return SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS
 
@@ -529,6 +538,7 @@ class TmuxWebtermApp:
         next_due = min(
             self.client_event_next_signature_poll_at,
             self.client_event_next_file_poll_at,
+            self.client_event_next_background_file_poll_at,
             self.client_event_next_auto_poll_at,
             self.client_event_next_watched_pr_poll_at,
         )
@@ -557,12 +567,27 @@ class TmuxWebtermApp:
                     continue
                 normalized_files.append(str(Path(path).expanduser()))
         unique_files = sorted(set(normalized_files))[:CLIENT_WATCH_FILE_LIMIT]
+        active_file_set = set(unique_files)
+        normalized_background_files: list[str] = []
+        raw_background_files = payload.get("background_files", []) if isinstance(payload, dict) else []
+        if isinstance(raw_background_files, list):
+            for item in raw_background_files:
+                path = str(item or "").strip()
+                if not path.startswith("/"):
+                    continue
+                normalized_background_files.append(str(Path(path).expanduser()))
+        unique_background_files = [
+            path
+            for path in sorted(set(normalized_background_files))
+            if path not in active_file_set
+        ][:CLIENT_WATCH_FILE_LIMIT]
         context_items = self.normalized_client_context_items(payload.get("context_items", []))
         session_files_requests = self.normalized_client_session_files(payload.get("session_files", []))
         activity_summary = self.normalized_client_activity_summary(payload.get("activity_summary", {}))
         with self.client_watch_lock:
             self.client_watch_roots = {path: now + CLIENT_WATCH_ROOT_TTL_SECONDS for path in unique}
             self.client_watch_files = {path: now + CLIENT_WATCH_ROOT_TTL_SECONDS for path in unique_files}
+            self.client_watch_background_files = {path: now + CLIENT_WATCH_ROOT_TTL_SECONDS for path in unique_background_files}
             self.client_watch_context_items = context_items
             self.client_watch_session_files = session_files_requests
             self.client_watch_activity_summary = activity_summary
@@ -575,6 +600,7 @@ class TmuxWebtermApp:
             "ok": True,
             "roots": unique,
             "files": unique_files,
+            "background_files": unique_background_files,
             "context_items": context_items,
             "session_files": session_files_requests,
             "activity_summary": activity_summary,
@@ -661,6 +687,15 @@ class TmuxWebtermApp:
                 self.client_watch_files = current
             return sorted(current)
 
+    def client_watch_background_files_snapshot(self) -> list[str]:
+        now = time.monotonic()
+        with self.client_watch_lock:
+            current = {path: expires for path, expires in self.client_watch_background_files.items() if expires > now}
+            if len(current) != len(self.client_watch_background_files):
+                self.client_watch_background_files = current
+            active = {path for path, expires in self.client_watch_files.items() if expires > now}
+            return sorted(path for path in current if path not in active)
+
     def settings_watch_signature(self) -> tuple[Any, ...]:
         try:
             return file_stat_signature(SETTINGS_PATH)
@@ -700,6 +735,12 @@ class TmuxWebtermApp:
 
     def files_watch_signature(self) -> tuple[Any, ...]:
         return tuple((path, file_watch_signature(path)) for path in self.files_for_watch())
+
+    def background_files_for_watch(self) -> list[str]:
+        return self.client_watch_background_files_snapshot()[:CLIENT_WATCH_FILE_LIMIT]
+
+    def background_files_watch_signature(self) -> tuple[Any, ...]:
+        return tuple((path, file_watch_signature(path)) for path in self.background_files_for_watch())
 
     def publish_files_changed_event(self, previous: tuple[Any, ...] | None, current: tuple[Any, ...], compute_ms: float = 0.0) -> list[str]:
         if previous == current:
@@ -893,6 +934,18 @@ class TmuxWebtermApp:
             return []
         return self.publish_files_changed_event(previous, files_signature, compute_ms=compute_ms)
 
+    def poll_client_background_file_events_once(self) -> list[str]:
+        started = time.perf_counter()
+        files_signature = self.background_files_watch_signature()
+        compute_ms = (time.perf_counter() - started) * 1000
+        with self.client_watch_lock:
+            initialized = self.client_watch_background_file_signature is not None
+            previous = self.client_watch_background_file_signature
+            self.client_watch_background_file_signature = files_signature
+        if not initialized:
+            return []
+        return self.publish_files_changed_event(previous, files_signature, compute_ms=compute_ms)
+
     def publish_context_items_ready_events(self, trigger: str = "watch") -> list[str]:
         context_items, _session_files, _activity = self.client_watch_state_snapshot()
         events: list[str] = []
@@ -1044,6 +1097,9 @@ class TmuxWebtermApp:
                 if now >= self.client_event_next_file_poll_at:
                     self.poll_client_file_events_once()
                     self.client_event_next_file_poll_at = now + self.server_event_poll_seconds()
+                if now >= self.client_event_next_background_file_poll_at:
+                    self.poll_client_background_file_events_once()
+                    self.client_event_next_background_file_poll_at = now + self.server_background_file_event_poll_seconds()
                 if now >= self.client_event_next_signature_poll_at:
                     self.client_event_next_signature_poll_at = now + self.server_directory_event_poll_seconds()
                     self.start_client_directory_poll()

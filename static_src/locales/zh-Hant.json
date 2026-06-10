@@ -476,6 +476,8 @@
   "pref.performance.server_directory_event_poll_ms.label": "Server SSE: directory-change poll",
   "pref.performance.server_event_poll_ms.help": "Server-side SSE poll interval in seconds for open editor file signatures in visible panes before pushing file changes to browsers. Minimum 0.250 s.",
   "pref.performance.server_event_poll_ms.label": "Server SSE: editor file-change poll",
+  "pref.performance.server_background_file_event_poll_ms.help": "Server-side SSE poll interval in seconds for background editor file signatures before pushing file changes to browsers. Default 5 s. Minimum 0.250 s.",
+  "pref.performance.server_background_file_event_poll_ms.label": "Server SSE: background editor file-change poll",
   "pref.performance.tab_popover_follow_delay_ms.help": "已開啟一個分頁詳情彈出視窗後，在分頁間移動時的較短延遲。",
   "pref.performance.tab_popover_follow_delay_ms.label": "分頁詳情跟隨延遲",
   "pref.performance.tab_popover_show_delay_ms.help": "分頁詳情彈出視窗開啟前的初始延遲。",

@@ -59,9 +59,14 @@ def test_server_directory_event_poll_seconds_uses_own_interval(monkeypatch):
         monkeypatch.setattr(
             app_module,
             "settings_payload",
-            lambda: {"settings": {"performance": {"server_event_poll_ms": 250, "server_directory_event_poll_ms": 1250}}},
+            lambda: {"settings": {"performance": {
+                "server_event_poll_ms": 250,
+                "server_background_file_event_poll_ms": 5000,
+                "server_directory_event_poll_ms": 1250,
+            }}},
         )
         assert webapp.server_event_poll_seconds() == 0.25
+        assert webapp.server_background_file_event_poll_seconds() == 5.0
         assert webapp.server_directory_event_poll_seconds() == 1.25
     finally:
         webapp.control_server.stop()
@@ -76,6 +81,7 @@ def test_client_event_watch_sleep_uses_next_due_preference(monkeypatch):
             lambda: {"settings": {"performance": {"server_event_poll_ms": 250}}},
         )
         webapp.client_event_next_file_poll_at = 100.5
+        webapp.client_event_next_background_file_poll_at = 100.75
         webapp.client_event_next_signature_poll_at = 100.25
         webapp.client_event_next_auto_poll_at = 101.0
         webapp.client_event_next_watched_pr_poll_at = 200.0
@@ -477,14 +483,21 @@ def test_update_client_watch_roots_filters_and_expires(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     monkeypatch.setattr(app_module.time, "monotonic", lambda: 100.0)
     try:
-        payload = webapp.update_client_watch_roots({"roots": ["/repo", "relative", "", "/repo"], "files": ["/repo/DOIT.51.md", "relative"]})
+        payload = webapp.update_client_watch_roots({
+            "roots": ["/repo", "relative", "", "/repo"],
+            "files": ["/repo/DOIT.51.md", "relative"],
+            "background_files": ["/repo/README.md", "/repo/DOIT.51.md", "relative"],
+        })
         assert payload["roots"] == ["/repo"]
         assert payload["files"] == ["/repo/DOIT.51.md"]
+        assert payload["background_files"] == ["/repo/README.md"]
         assert webapp.client_watch_roots_snapshot() == ["/repo"]
         assert webapp.client_watch_files_snapshot() == ["/repo/DOIT.51.md"]
+        assert webapp.client_watch_background_files_snapshot() == ["/repo/README.md"]
         monkeypatch.setattr(app_module.time, "monotonic", lambda: 1000.0)
         assert webapp.client_watch_roots_snapshot() == []
         assert webapp.client_watch_files_snapshot() == []
+        assert webapp.client_watch_background_files_snapshot() == []
     finally:
         webapp.control_server.stop()
 
@@ -601,6 +614,24 @@ def test_poll_client_file_events_once_publishes_active_file_changes(monkeypatch)
         webapp.control_server.stop()
 
     assert events == [("files_changed", {"files": [{"path": "/repo/DOIT.51.md", "signature": ("/repo/DOIT.51.md", "file", 200, 12)}], "count": 1})]
+
+
+def test_poll_client_background_file_events_once_uses_own_signature(monkeypatch):
+    events = []
+    signatures = [
+        (("/repo/README.md", ("/repo/README.md", "file", 100, 10)),),
+        (("/repo/README.md", ("/repo/README.md", "file", 200, 12)),),
+    ]
+    webapp = app_module.TmuxWebtermApp([])
+    monkeypatch.setattr(webapp, "background_files_watch_signature", lambda: signatures.pop(0))
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
+    try:
+        assert webapp.poll_client_background_file_events_once() == []
+        assert webapp.poll_client_background_file_events_once() == ["files_changed"]
+    finally:
+        webapp.control_server.stop()
+
+    assert events == [("files_changed", {"files": [{"path": "/repo/README.md", "signature": ("/repo/README.md", "file", 200, 12)}], "count": 1})]
 
 
 def test_filesystem_roots_for_watch_uses_client_roots_not_agent_cwd(monkeypatch, tmp_path):

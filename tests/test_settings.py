@@ -276,6 +276,7 @@ def test_watched_prs_and_server_event_defaults():
     d = default_settings()
     assert d["github"]["watched_prs"] == []
     assert d["performance"]["server_event_poll_ms"] == 850
+    assert d["performance"]["server_background_file_event_poll_ms"] == 5000
     assert d["performance"]["server_directory_event_poll_ms"] == 3000
 
 
@@ -318,6 +319,7 @@ def test_stale_saved_poll_defaults_migrate_to_current_defaults():
             "latency_refresh_ms": 3_001,
             "event_log_refresh_ms": 5_003,
             "server_event_poll_ms": 5_009,
+            "server_background_file_event_poll_ms": 5_009,
             "server_directory_event_poll_ms": 5_009,
         },
     })
@@ -325,9 +327,12 @@ def test_stale_saved_poll_defaults_migrate_to_current_defaults():
     assert migrated["performance"]["latency_refresh_ms"] == defaults["performance"]["latency_refresh_ms"]
     assert migrated["performance"]["event_log_refresh_ms"] == defaults["performance"]["event_log_refresh_ms"]
     assert migrated["performance"]["server_event_poll_ms"] == defaults["performance"]["server_event_poll_ms"]
+    assert migrated["performance"]["server_background_file_event_poll_ms"] == defaults["performance"]["server_background_file_event_poll_ms"]
     assert migrated["performance"]["server_directory_event_poll_ms"] == defaults["performance"]["server_directory_event_poll_ms"]
     rounded_legacy = sanitize_settings({"performance": {"server_event_poll_ms": 5000}})
     assert rounded_legacy["performance"]["server_event_poll_ms"] == defaults["performance"]["server_event_poll_ms"]
+    rounded_background_legacy = sanitize_settings({"performance": {"server_background_file_event_poll_ms": 5000}})
+    assert rounded_background_legacy["performance"]["server_background_file_event_poll_ms"] == defaults["performance"]["server_background_file_event_poll_ms"]
     rounded_directory_legacy = sanitize_settings({"performance": {"server_directory_event_poll_ms": 5000}})
     assert rounded_directory_legacy["performance"]["server_directory_event_poll_ms"] == defaults["performance"]["server_directory_event_poll_ms"]
 
@@ -336,12 +341,14 @@ def test_stale_saved_poll_defaults_migrate_to_current_defaults():
             "latency_refresh_ms": 3002,
             "event_log_refresh_ms": 5004,
             "server_event_poll_ms": 251,
+            "server_background_file_event_poll_ms": 253,
             "server_directory_event_poll_ms": 252,
         },
     })
     assert custom["performance"]["latency_refresh_ms"] == 3002
     assert custom["performance"]["event_log_refresh_ms"] == 5004
     assert custom["performance"]["server_event_poll_ms"] == 251
+    assert custom["performance"]["server_background_file_event_poll_ms"] == 253
     assert custom["performance"]["server_directory_event_poll_ms"] == 252
 
 
@@ -355,10 +362,12 @@ def test_notify_transitions_accepts_pr_keys_and_drops_unknown():
 
 
 def test_new_poll_intervals_are_clamped_to_range():
-    low = sanitize_settings({"performance": {"server_event_poll_ms": 100, "server_directory_event_poll_ms": 100}})
-    high = sanitize_settings({"performance": {"server_event_poll_ms": 10_000_000, "server_directory_event_poll_ms": 10_000_000}})
+    low = sanitize_settings({"performance": {"server_event_poll_ms": 100, "server_background_file_event_poll_ms": 100, "server_directory_event_poll_ms": 100}})
+    high = sanitize_settings({"performance": {"server_event_poll_ms": 10_000_000, "server_background_file_event_poll_ms": 10_000_000, "server_directory_event_poll_ms": 10_000_000}})
     assert low["performance"]["server_event_poll_ms"] == 250
     assert high["performance"]["server_event_poll_ms"] == 60000
+    assert low["performance"]["server_background_file_event_poll_ms"] == 250
+    assert high["performance"]["server_background_file_event_poll_ms"] == 60000
     assert low["performance"]["server_directory_event_poll_ms"] == 250
     assert high["performance"]["server_directory_event_poll_ms"] == 60000
 
