@@ -94,12 +94,12 @@ Production and development instances run side-by-side:
 | dev3 | `~/yolomux.dev3/` | HTTPS `8003` | Active development worktree 3 |
 | dev4 | `~/yolomux.dev4/` | HTTPS `8004` | Active development worktree 4 |
 
-The dev worktree ports are HTTPS-only in normal use. Launch them with `--self-signed`; do not use plain HTTP for `8001`-`8004`.
+The dev worktree ports are HTTPS-only in normal use. Launch them with `--self-signed --dang`; do not use plain HTTP for `8001`-`8004`.
 
 For an ad hoc dev run:
 
 ```bash
-python3 yolomux.py --host 0.0.0.0 --port 8001 --self-signed
+python3 yolomux.py --host 0.0.0.0 --port 8001 --self-signed --dang
 ```
 
 ### Restart workflow

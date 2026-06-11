@@ -14,15 +14,17 @@ Developer / AI-agent docs (conventions, architecture, code layout, API reference
 
 ## Quickstart
 
+Recommended local run: HTTPS, login-gated, and YOLO-enabled for new Claude/Codex sessions created from the UI.
+
 ```bash
 git clone https://github.com/keivenchang/yolomux.git
 cd yolomux
 pip install -r requirements.txt
 tmux new-session -A -s project1     # start (or attach) a tmux session
-python3 yolomux.py                  # serves on http://0.0.0.0:9998
+python3 yolomux.py --self-signed --dang
 ```
 
-Open `http://localhost:9998/`. The first launch shows a setup page — see [First launch](#first-launch) below.
+Open `https://localhost:9998/`. The first launch shows a setup page — see [First launch](#first-launch) below. `--self-signed` creates a local HTTPS certificate under `~/.local/state/yolomux/tls/`; your browser will warn because it is not signed by a public CA. `--dang` is the short alias for `--dangerously-yolo`, which makes the UI's `+ Claude` and `+ Codex` buttons launch with their approval/sandbox bypass flags.
 
 ## First launch
 
@@ -90,19 +92,19 @@ The `YO` button toggles YOLO auto-approval for a tmux session. See [Agent permis
 Specific sessions only:
 
 ```bash
-python3 yolomux.py --sessions project1,project2
+python3 yolomux.py --sessions project1,project2 --self-signed --dang
 ```
 
 Custom port (default is `9998`, host defaults to `0.0.0.0`):
 
 ```bash
-python3 yolomux.py --port 8080
+python3 yolomux.py --port 8080 --self-signed --dang
 ```
 
 Background server:
 
 ```bash
-setsid nohup env TERM=xterm-256color PYTHONUNBUFFERED=1 python3 yolomux.py > /tmp/yolomux.log 2>&1 < /dev/null &
+setsid nohup env TERM=xterm-256color PYTHONUNBUFFERED=1 python3 yolomux.py --self-signed --dang > /tmp/yolomux.log 2>&1 < /dev/null &
 ```
 
 ## HTTPS / TLS
@@ -134,10 +136,10 @@ codex --ask-for-approval never       # no approval prompts, sandbox still active
 codex --dangerously-bypass-approvals-and-sandbox  # full bypass
 ```
 
-**`--dangerously-yolo` (server flag).** Makes `+ Claude` / `+ Codex` buttons launch with the full bypass flags:
+**`--dang` / `--dangerously-yolo` (server flag).** Makes `+ Claude` / `+ Codex` buttons launch with the full bypass flags:
 
 ```bash
-python3 yolomux.py --dangerously-yolo
+python3 yolomux.py --self-signed --dang
 ```
 
 Without it, those buttons create plain `claude` / `codex` sessions. This flag does not change existing sessions.
@@ -174,7 +176,7 @@ sudo ufw allow from <client-ip> to any port 9998 proto tcp
 To keep YOLOmux local-only instead, bind loopback and tunnel from your client:
 
 ```bash
-python3 yolomux.py --host 127.0.0.1 --port 9998
+python3 yolomux.py --host 127.0.0.1 --port 9998 --self-signed --dang
 autossh -M 0 -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -L 9998:127.0.0.1:9998 user@server
 ```
 
