@@ -880,6 +880,7 @@ globalThis.__layoutTestApi = {
   tmuxWindowRecords,
   tmuxWindowBarLabelMode,
   tmuxWindowBarHtml,
+  tmuxWindowAgentKeyForTest: tmuxWindowAgentKey,
   tabMenuItems,
   sortTabItemsForMenu,
   setTabsMenuSortMode,
@@ -6735,6 +6736,11 @@ test('t@6404', () => {
   assert.ok(windowBarHtml.includes('<span class="tmux-window-name-label">1:bash</span>'), 'DOIT.53 P2: normal labels include index:name');
   assert.ok(windowBarHtml.includes('<span class="tmux-window-name-label">2:codex(2)</span>'), 'P5: duplicate names keep the disambiguating suffix after the index prefix');
   assert.equal(windowBarHtml.includes('3:node'), false, 'DOIT.53 P2: process-aware agent labels beat raw tmux window names like node');
+  assert.ok(/data-window-agent="shell"[^>]*data-window-index="1"/.test(windowBarHtml), 'per-agent color: the bash window is tagged as the shell agent');
+  assert.ok(/tmux-window-button active"[^>]*data-window-agent="codex"/.test(windowBarHtml), 'per-agent color: the active codex window keeps its agent tag so the swatch shows on the green toggle');
+  assert.equal(api.tmuxWindowAgentKeyForTest('claude'), 'claude', 'per-agent color: claude windows map to the claude agent key');
+  assert.equal(api.tmuxWindowAgentKeyForTest('vim README.md'), 'editor', 'per-agent color: editor commands collapse to the editor agent key');
+  assert.equal(api.tmuxWindowAgentKeyForTest('htop'), 'other', 'per-agent color: unknown programs fall back to the other agent key');
   const manyWindows = Array.from({length: 9}, (_unused, index) => ({
     window: String(index + 1),
     window_name: `w${index + 1}`,

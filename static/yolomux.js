@@ -19585,6 +19585,18 @@ function tmuxWindowBarLabelMode(records, options = {}) {
   return items.length > fallbackCount || namedChars > charLimit ? 'numbers' : 'names';
 }
 
+// Classify a tmux window by the program it runs so the window-switcher buttons can be tinted per agent
+// (claude/codex/shell/editor/repl/git/other). Drives the per-agent color via [data-window-agent] in CSS.
+function tmuxWindowAgentKey(name) {
+  const base = String(name || '').trim().toLowerCase().replace(/\(\d+\)$/, '').split(/[\s:/]/)[0];
+  if (base === 'claude' || base === 'codex') return base;
+  if (['bash', 'sh', 'zsh', 'fish', 'shell', '-bash', '-zsh'].includes(base)) return 'shell';
+  if (['vim', 'nvim', 'vi', 'nano', 'emacs', 'hx', 'helix'].includes(base)) return 'editor';
+  if (['python', 'python3', 'ipython', 'node', 'ruby', 'irb', 'bun', 'deno'].includes(base)) return 'repl';
+  if (['git', 'lazygit', 'tig', 'gh'].includes(base)) return 'git';
+  return 'other';
+}
+
 function tmuxWindowBarHtml(session, info, options = {}) {
   const panes = Array.isArray(info) ? info : info?.panes;
   const records = tmuxWindowRecords(panes);
@@ -19600,7 +19612,7 @@ function tmuxWindowBarHtml(session, info, options = {}) {
     const attrs = disabled
       ? `disabled title="${esc(disabledTitle)}" aria-label="${esc(title)}"`
       : `data-window-index="${esc(record.indexText)}" data-window-session="${esc(session)}" data-window-label="${esc(visibleName)}" title="${esc(title)}" aria-label="${esc(title)}" aria-pressed="${pressed}"`;
-    return `<button type="button" class="tab tmux-window-button${activeClass}" ${attrs}><span class="tmux-window-name-label">${esc(visibleName)}</span><span class="tmux-window-number-label">${esc(record.numberLabel)}</span></button>`;
+    return `<button type="button" class="tab tmux-window-button${activeClass}" data-window-agent="${esc(tmuxWindowAgentKey(record.name))}" ${attrs}><span class="tmux-window-name-label">${esc(visibleName)}</span><span class="tmux-window-number-label">${esc(record.numberLabel)}</span></button>`;
   }).join('');
   return `<div class="tmux-window-bar" data-tmux-window-bar="${esc(session)}" data-tmux-window-label-mode="${esc(labelMode)}" role="group" aria-label="tmux windows">${buttons}</div>`;
 }

@@ -1586,6 +1586,25 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
   border-color: var(--active-control-border);
   font-weight: 600;
 }
+/* Per-agent tint for the window-switcher buttons. data-window-agent (set in tmuxWindowBarHtml from the
+   window's program: claude/codex/shell/editor/repl/git/other) picks a mid-tone hue. The hue shows as a
+   solid 3px left swatch on EVERY button (so the active green-toggle button still reveals its agent), and
+   inactive buttons also get a faint agent-tinted background mixed into the theme's --panel2 (so the tint
+   flips with the theme). Mid-tone hues + border/--var carriers keep the light-mode literal lint quiet.
+   These rules follow .active in source order so the left swatch wins over the active border on the left. */
+.tmux-window-button[data-window-agent="claude"] { --window-agent-color: #e0883c; }
+.tmux-window-button[data-window-agent="codex"]  { --window-agent-color: #9b87f5; }
+.tmux-window-button[data-window-agent="shell"]  { --window-agent-color: #6fd08c; }
+.tmux-window-button[data-window-agent="editor"] { --window-agent-color: #56d4c6; }
+.tmux-window-button[data-window-agent="repl"]   { --window-agent-color: #7cb3f0; }
+.tmux-window-button[data-window-agent="git"]    { --window-agent-color: #ff9a76; }
+.tmux-window-button[data-window-agent="other"]  { --window-agent-color: #9aa5b1; }
+.tmux-window-button[data-window-agent] {
+  border-inline-start: 3px solid var(--window-agent-color, transparent);
+}
+.tmux-window-button[data-window-agent]:not(.active) {
+  background: color-mix(in srgb, var(--window-agent-color, transparent) 18%, var(--panel2));
+}
 .terminal-tab {
   flex: 0 1 auto;
   max-width: 72px;
