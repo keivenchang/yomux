@@ -90,8 +90,8 @@ This document is the working GUI contract for pane, tab, Finder/Differ, editor, 
 - The active pane's tab container is slightly brighter than inactive panes. Inactive tabs inside the active pane use that same active-pane tab-container background.
 - Tab hover details must show the session/file information popover. Dockview tab popovers must not be clipped by the Dockview tab scroller.
 - Header actions such as back/forward, minimize, close, and add must stay on the first header row when there is room.
-- Terminal agent identity (`Codex`, `Claude`) belongs on the pane info line immediately before the detail-line close control, not in the first tab-title row.
-- Tmux session detail rows show a window bar with one button per tmux window, immediately before the detail-row close control. Buttons use `index:name`, keep duplicate-name suffixes when needed, highlight the active window, switch directly to that tmux window on click, hide with collapsed details, and fall back to number-only labels when the name bar would be too crowded.
+- The pane info (detail) row reads `path · dirty-count | tmux window buttons | ×` with NO separate agent badge — terminal agent identity is carried by the window buttons (an agent window's name falls back to its process label, so it reads `N:claude` / `N:codex`). The agent marker must never appear in the first tab-title row.
+- Tmux session detail rows show a window bar with one button per tmux window, immediately before the detail-row close control. Buttons use `index:name`, keep duplicate-name suffixes when needed, switch directly to that tmux window on click, hide with collapsed details, and fall back to number-only labels when the name bar would be too crowded. The ACTIVE window's button reads as a pressed toggle styled through the shared `--active-control-*` tokens (so it follows the user's Active color preference and flips with the theme); inactive buttons keep the plain button look.
 - Many tabs may wrap, but wrapping must not overlap content or force action buttons into a second line when first-line space is available.
 
 ## Pane Chrome And Resize

@@ -2541,8 +2541,7 @@ def test_dockview_terminal_info_bar_alignment_and_detail_toggle_refits_xterm(bro
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            return document.querySelector('#panel-1 .panel-agent-badge')
-              && document.querySelectorAll('#panel-1 .panel-detail-row [data-window-index]').length === 3
+            return document.querySelectorAll('#panel-1 .panel-detail-row [data-window-index]').length === 3
               && document.querySelector('#term-1 .xterm')
               && document.querySelector('.dockview-pane-header-actions [data-detail-toggle="1"]');
             """
@@ -2556,17 +2555,11 @@ def test_dockview_terminal_info_bar_alignment_and_detail_toggle_refits_xterm(bro
         };
         const panel = document.querySelector('#panel-1');
         const row = panel.querySelector('.panel-detail-row');
-        const badge = row.querySelector('.panel-agent-badge');
         const bar = row.querySelector('.tmux-window-bar');
         const close = row.querySelector('.panel-detail-close');
         const headerTerminal = document.querySelector('.dockview-pane-header-actions .terminal-tab');
         const pane = panel.querySelector('#terminal-pane-1');
         const xterm = panel.querySelector('#term-1 .xterm');
-        const probe = document.createElement('div');
-        probe.style.background = 'var(--pane-tab-yolo-bg)';
-        document.body.appendChild(probe);
-        const yoloBg = getComputedStyle(probe).backgroundColor;
-        probe.remove();
         const term = terminals.get('1')?.term;
         if (term) {
           const originalResize = term.resize.bind(term);
@@ -2579,9 +2572,6 @@ def test_dockview_terminal_info_bar_alignment_and_detail_toggle_refits_xterm(bro
         }
         return {
           row: rectFor(row),
-          badgeText: badge.textContent.trim(),
-          badgeBg: getComputedStyle(badge).backgroundColor,
-          yoloBg,
           bar: rectFor(bar),
           close: rectFor(close),
           headerTerminalText: headerTerminal?.textContent.trim() || '',
@@ -2640,8 +2630,6 @@ def test_dockview_terminal_info_bar_alignment_and_detail_toggle_refits_xterm(bro
         };
         """
     )
-    assert before["badgeText"] == "Claude"
-    assert before["badgeBg"] != before["yoloBg"]
     assert before["headerTerminalText"] == "Term"
     assert before["headerTerminalTitle"] == "terminal: claude"
     assert 0 <= before["close"]["left"] - before["bar"]["right"] <= 8

@@ -6,6 +6,11 @@ Unless an entry says otherwise, every item shipped with the standard check gate 
 
 ## 2026-06-11
 
+### DOIT.57 Info Bar dedup + window-button toggles
+- Removed the duplicate agent badge from the pane info (detail) row — it duplicated the `N:claude` window button now that the window bar carries agent identity (an agent window's name falls back to its process label). Deleted the `sessionAgentBadgeHtml` helper (no other callers), its per-poll refresh, and the `.panel-agent-slot` / `.panel-agent-badge` CSS. The info row now reads `path · dirty | window buttons | ×`.
+- The ACTIVE tmux window button reads as a pressed toggle via the shared `--active-control-*` tokens, so it follows the user's Active color preference and flips with the theme (no hardcoded hex); inactive buttons keep the plain look. GUI_SPEC info-row contract updated, and the prior "agent badge is muted" regression pins were flipped to assert the badge is gone and the toggle uses the tokens.
+- Verification beyond the standard gate: the live GUI check (badge absent, pressed toggle in dark + light, Active-color recolor) is pending a server restart / hard-reload; the Selenium info-bar alignment test was updated to drop the badge and still compiles.
+
 ### DOIT.55 unified Cmd-P / Shift-Cmd-P search ranking
 - Completed and removed `DOIT.55.md`. `Mod+P` and `Shift+Mod+P` now search one shared universe of files, panes/tabs, commands, and settings, with the entry point contributing only a domain-prior weight (`Mod+P` file-first, `Shift+Mod+P` pane/command-first). Open-file dedupe is preserved so a file already open as a tab appears once as the tab row with view chips, while typed queries in either entry point can blend file-index and pane/command results. Ranking weights now live in the exported `searchRankWeights` table, and the scorer adds bounded recency plus focused-repo affinity without letting those terms beat stronger text matches.
 - Backend session metadata now exposes the latest agent transcript mtime, which the palette uses as the primary pane recency timestamp with summary timestamps as fallback. `GUI_SPEC.md` now documents the unified search contract and the keyboard-shortcut line describes the two shortcuts as ranking-prior variants, not separate search features.

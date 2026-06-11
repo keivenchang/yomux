@@ -19500,13 +19500,6 @@ function terminalTabTitle(session, info) {
   return `terminal: ${terminalTabDetailLabel(session, info)}`;
 }
 
-function sessionAgentBadgeHtml(session) {
-  const kind = sessionAgentKind(session);
-  if (!kind) return '';
-  const name = agentName(kind);
-  return `<span class="panel-agent-badge ${esc(kind)}" title="${esc(name)}" aria-label="${esc(name)}">${esc(name)}</span>`;
-}
-
 function terminalProcessLabel(info) {
   const pane = terminalDisplayPane(info);
   if (pane?.process_label) return pane.process_label;
@@ -27340,7 +27333,6 @@ function createPanel(session) {
           <div id="meta-${session}" class="meta">${esc(t('pane.findingBranch'))}</div>
           ${sessionPopoverHtml(session, transcriptMeta.sessions?.[session], sessionAgentKind(session), autoApproveStates.get(session)?.enabled === true, sessionState(session, transcriptMeta.sessions?.[session]))}
         </div>
-        <span id="panel-agent-${session}" class="panel-agent-slot">${sessionAgentBadgeHtml(session)}</span>
         ${isTmuxSession(session) ? tmuxWindowBarHtml(session, transcriptMeta.sessions?.[session]) : ''}
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(session)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
       </div>
@@ -29315,8 +29307,6 @@ function updatePanelHeader(session, info) {
     tab.innerHTML = panelHeaderStateHtml(state);
     tab.removeAttribute('title');
   }
-  const agentSlot = document.getElementById(`panel-agent-${session}`);
-  if (agentSlot) agentSlot.innerHTML = sessionAgentBadgeHtml(session);
   const popover = panel?.querySelector(':scope .panel-popover-zone > .session-popover');
   if (popover) {
     const agentKind = sessionAgentKind(session);

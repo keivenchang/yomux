@@ -762,7 +762,6 @@ globalThis.__layoutTestApi = {
   terminalTabLabel,
   terminalTabTitle,
   terminalTabDisplayLabel,
-  sessionAgentBadgeHtml,
   tmuxWindowForTest: tmuxWindow,
   registerFileEditorLayoutItemForTest: registerFileEditorLayoutItem,
   setOpenFileStateForTest(path, state) { openFiles.set(path, state); },
@@ -1421,9 +1420,9 @@ test('t@1313', () => {
   const agentToolbar = api.panelControlsHtml('6');
   assert.ok(agentToolbar.includes('>Term</button>'), 'terminal top row shows the generic terminal label');
   assert.equal(agentToolbar.includes('>codex</button>') || agentToolbar.includes('>Codex</button>'), false, 'terminal top row does not render the agent marker as the terminal tab text');
-  assert.ok(api.sessionAgentBadgeHtml('6').includes('panel-agent-badge codex') && api.sessionAgentBadgeHtml('6').includes('>Codex</span>'), 'detail-row agent badge renders the detected agent');
   const sessionSource = fs.readFileSync('static/yolomux.js', 'utf8');
-  assert.ok(/id="panel-agent-\$\{session\}"[\s\S]{0,120}sessionAgentBadgeHtml\(session\)[\s\S]{0,160}class="panel-detail-close"/.test(sessionSource), 'agent badge is rendered on the info line immediately before the close control');
+  assert.equal(sessionSource.includes('panel-agent-slot'), false, 'DOIT.57 T1: the agent badge is removed from the Info Bar (the window buttons carry the agent fact)');
+  assert.equal(/function sessionAgentBadgeHtml/.test(sessionSource), false, 'DOIT.57 T1: the unused agent-badge helper is gone');
   assert.ok(/function terminalTabDisplayLabel\(session, info\)\s*\{\s*return 'Term';\s*\}/.test(sessionSource), 'DOIT.56 N3: terminal tab visible label is always static');
   assert.ok(/function terminalTabTitle\(session, info\)[\s\S]*terminalTabDetailLabel\(session, info\)/.test(sessionSource), 'DOIT.56 N3: terminal tab title still uses process/window detail');
 });
@@ -6754,12 +6753,13 @@ test('t@6404', () => {
   assert.equal(controls.includes('>codex</button>') || controls.includes('>node</button>'), false, 'DOIT.56 N3: terminal header no longer duplicates active window/process names');
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   const yoloCss = fs.readFileSync('static/yolomux.css', 'utf8');
-  const agentBadgeRule = yoloCss.match(/\.panel-agent-badge\s*\{[^}]*\}/)?.[0] || '';
-  assert.ok(/id="panel-agent-\$\{session\}"[\s\S]{0,160}tmuxWindowBarHtml\(session, transcriptMeta\.sessions\?\.\[session\]\)[\s\S]{0,180}class="panel-detail-close"/.test(source), 'DOIT.53 P1: tmux window bar is rendered on the detail row before the close button');
+  assert.ok(/tmuxWindowBarHtml\(session, transcriptMeta\.sessions\?\.\[session\]\)[\s\S]{0,180}class="panel-detail-close"/.test(source), 'DOIT.53 P1: tmux window bar is rendered on the detail row before the close button');
   assert.ok(/delegate\(panel, 'click', '\[data-window-dir\], \[data-window-index\]'/.test(source), 'DOIT.53 P3: in-panel window buttons use the shared delegated click path');
   assert.ok(/\.panel\.details-collapsed \.panel-detail-row\s*\{[\s\S]*display:\s*none/.test(yoloCss), 'DOIT.53 P1: detail-row window bar collapses with the detail row');
-  assert.ok(agentBadgeRule.includes('background: rgb(var(--overlay-slate-rgb) / 0.22)'), '2026-06-11 Info Bar regression: agent badge is muted instead of using the bright YO active background');
-  assert.equal(agentBadgeRule.includes('background: var(--pane-tab-yolo-bg)'), false, '2026-06-11 Info Bar regression: agent badge does not reuse the bright YO badge fill');
+  assert.equal(yoloCss.includes('.panel-agent-badge'), false, 'DOIT.57 T1: the duplicate Info Bar agent-badge CSS is removed');
+  assert.equal(source.includes('panel-agent-slot'), false, 'DOIT.57 T1: no agent-badge slot is rendered in the detail row');
+  assert.ok(/\.tmux-window-button\.active\s*\{[\s\S]*background:\s*var\(--active-control-bg\)/.test(yoloCss), 'DOIT.57 T2: the active window button is a pressed toggle via the shared active-control tokens');
+  assert.equal(/\.tmux-window-button\.active\s*\{[^}]*#[0-9a-fA-F]{3,6}/.test(yoloCss), false, 'DOIT.57 T2: the active window button uses theme-aware tokens, not hardcoded hex');
   assert.ok(/\.panel-detail-row \.tmux-window-bar\s*\{[\s\S]*margin-inline-start:\s*auto[\s\S]*justify-content:\s*flex-end/.test(yoloCss), '2026-06-11 Info Bar regression: tmux window bar right-aligns next to the detail close button');
   assert.ok(/\.yolomux-dockview \.dockview-panel-content > \.panel\.dockview-inner-head-collapsed\.details-collapsed\s*\{\s*grid-template-rows:\s*minmax\(0, 1fr\)/.test(yoloCss), '2026-06-11 Info Bar regression: Dockview terminals get one full-height grid row when both inner header and details are hidden');
   assert.ok(/function setPanelDetailsCollapsed\(panel, collapsed\)\s*\{[\s\S]*schedulePanelDetailsFit\(panel\)/.test(source), '2026-06-11 Info Bar regression: details toggle refits visible tmux terminals after row height changes');

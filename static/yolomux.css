@@ -4594,36 +4594,6 @@ body.theme-light .drop-slot.drag-over {
 .panel-session-label .agent-icon {
   margin-inline-start: 0;
 }
-.panel-agent-slot {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  min-width: 0;
-}
-.panel-agent-slot:empty {
-  display: none;
-}
-.panel-agent-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 0;
-  max-width: 74px;
-  height: 20px;
-  padding: 0 7px;
-  border: 1px solid color-mix(in srgb, var(--pane-tab-panel-head-text) 28%, transparent);
-  border-radius: 6px;
-  color: color-mix(in srgb, var(--pane-tab-panel-head-text) 82%, transparent);
-  background: rgb(var(--overlay-slate-rgb) / 0.22);
-  font: 700 var(--ui-font-size-xs)/1 var(--mono-font);
-  text-transform: lowercase;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.panel-detail-row > .panel-agent-slot + .panel-detail-close {
-  margin-inline-start: auto;
-}
 .panel-session-tab {
   cursor: default;
   pointer-events: none;
@@ -5207,6 +5177,14 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
   min-width: 20px;
   max-width: 28px;
   padding-inline: 3px;
+}
+/* The active window's button reads as a PRESSED toggle. Routed through the shared
+   --active-control-* tokens so it follows the user's Active color preference and
+   flips with the theme (no hardcoded hex); inactive buttons keep the plain .tab look. */
+.tmux-window-button.active {
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 .terminal-tab {
   flex: 0 1 auto;

@@ -1249,13 +1249,6 @@ function terminalTabTitle(session, info) {
   return `terminal: ${terminalTabDetailLabel(session, info)}`;
 }
 
-function sessionAgentBadgeHtml(session) {
-  const kind = sessionAgentKind(session);
-  if (!kind) return '';
-  const name = agentName(kind);
-  return `<span class="panel-agent-badge ${esc(kind)}" title="${esc(name)}" aria-label="${esc(name)}">${esc(name)}</span>`;
-}
-
 function terminalProcessLabel(info) {
   const pane = terminalDisplayPane(info);
   if (pane?.process_label) return pane.process_label;
