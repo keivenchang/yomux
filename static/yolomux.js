@@ -28242,7 +28242,7 @@ function showTerminalDropSuggestions(session, payload, x, y) {
     }
     // Press 1..9 to pick a row. Accept it WITH OR WITHOUT Alt/Shift so that a Mac user who hits
     // Option+digit (which would otherwise type ¡™£¢…) still selects and the stray char is suppressed.
-    // Exclude Ctrl/Cmd so the browser's Ctrl/Cmd+digit tab-switch is left alone.
+    // Exclude Ctrl and Cmd so the browser's Ctrl-or-Cmd+digit tab-switch is left alone.
     if (!event.ctrlKey && !event.metaKey && /^Digit[1-9]$/.test(event.code)) {
       const index = Number(event.code.slice(5)) - 1;
       event.preventDefault();
