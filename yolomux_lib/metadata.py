@@ -382,16 +382,28 @@ def enrich_branch_pull_requests(git_data: dict[str, Any], cache: MetadataCache, 
             continue
         local_pr = branch.get("pull_request")
         number = local_pr.get("number") if isinstance(local_pr, dict) else None
-        if not isinstance(number, int):
+        if isinstance(number, int):
+            branch["pull_request"] = pull_request_by_number_or_fallback(
+                repo,
+                number,
+                cache,
+                allow_network,
+                "local-ref",
+                local_pr.get("title") if isinstance(local_pr.get("title"), str) else branch.get("subject"),
+            )
             continue
-        branch["pull_request"] = pull_request_by_number_or_fallback(
-            repo,
-            number,
-            cache,
-            allow_network,
-            "local-ref",
-            local_pr.get("title") if isinstance(local_pr.get("title"), str) else branch.get("subject"),
-        )
+        # No local (#N) marker — that only appears after a squash-merge, so an OPEN PR on this branch
+        # has none and the by-number path above can't find it. Resolve it by HEAD BRANCH instead,
+        # mirroring project_pull_request's fallback, so YO!info surfaces open PRs on non-current
+        # branches (not just merged ones). Skip the current branch (project_pull_request already
+        # resolved its PR) and main/HEAD (no feature PR). github_pull_request_by_branch is cache-keyed,
+        # so this is bounded to at most OTHER_BRANCH_LIMIT branch lookups per repo per cache window.
+        name = branch.get("name")
+        if branch.get("current") or not isinstance(name, str) or name in MAIN_BRANCHES or name == "HEAD":
+            continue
+        found = github_pull_request_by_branch(repo, name, cache, allow_network=allow_network)
+        if found:
+            branch["pull_request"] = found
 
 def session_git_inventory(info: SessionInfo) -> dict[str, Any] | None:
     for cwd in candidate_session_cwds(info):

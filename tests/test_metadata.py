@@ -487,3 +487,58 @@ def test_git_worktree_identity_names_linked_worktree_vs_parent(tmp_path):
     assert Path(ident["parent_root"]).name == "main"
     assert ident["name"] == "wt"
     assert ident["path"] == str(wt)
+
+
+def test_open_pr_on_other_branch_resolves_by_head_branch(monkeypatch):
+    # An OPEN PR on a non-current branch has no local (#N) marker (that only appears after a
+    # squash-merge), so enrich_branch_pull_requests must fall back to a by-head-branch lookup —
+    # otherwise YO!info shows the branch + Linear ID but never the open PR number (the dynamo2
+    # DIS-2212 / PR #10423 bug). The current branch (resolved separately) and main are skipped.
+    queried = []
+
+    def fake_by_branch(repo, branch, cache, allow_network=True):
+        queried.append(branch)
+        if branch == "keivenchang/DIS-2212__cut-over-parsers-to-frontend-crates":
+            return {"number": 10423, "state": "open", "source": "github-api", "title": "chore(parsers): cut over"}
+        return None
+
+    monkeypatch.setattr(metadata, "github_pull_request_by_branch", fake_by_branch)
+    git_data = {
+        "github_repo": REPO,
+        "other_branches": {
+            "branches": [
+                {"name": "keivenchang/DIS-2223__current", "current": True, "pull_request": None},
+                {"name": "main", "current": False, "pull_request": None},
+                {"name": "keivenchang/DIS-2212__cut-over-parsers-to-frontend-crates", "current": False, "pull_request": None},
+            ],
+        },
+    }
+    metadata.enrich_branch_pull_requests(git_data, MetadataCache(), allow_network=True)
+    branches = {b["name"]: b for b in git_data["other_branches"]["branches"]}
+    # the open PR on the other branch is now resolved by head branch
+    assert branches["keivenchang/DIS-2212__cut-over-parsers-to-frontend-crates"]["pull_request"]["number"] == 10423
+    # the current branch and main are NOT queried by this fallback
+    assert "keivenchang/DIS-2223__current" not in queried
+    assert "main" not in queried
+    assert "keivenchang/DIS-2212__cut-over-parsers-to-frontend-crates" in queried
+
+
+def test_other_branch_with_local_pr_number_still_uses_by_number(monkeypatch):
+    # The existing merged-PR path (local (#N) -> by-number) must keep working and must NOT trigger
+    # the by-branch fallback.
+    branch_queries = []
+    monkeypatch.setattr(metadata, "github_pull_request_by_branch",
+                        lambda repo, branch, cache, allow_network=True: branch_queries.append(branch))
+    git_data = {
+        "github_repo": REPO,
+        "other_branches": {
+            "branches": [
+                {"name": "keivenc/merged", "current": False, "subject": "fix (#9981)",
+                 "pull_request": {"number": 9981, "title": "fix"}},
+            ],
+        },
+    }
+    metadata.enrich_branch_pull_requests(git_data, MetadataCache(), allow_network=False)
+    pr = git_data["other_branches"]["branches"][0]["pull_request"]
+    assert pr["number"] == 9981
+    assert branch_queries == []  # by-number path used; no by-branch fallback
