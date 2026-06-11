@@ -528,6 +528,8 @@
   "pref.uploads.max_bytes.label": "上傳大小上限",
   "pref.uploads.subdir.help": "工作目錄下用於儲存拖放或貼上上傳檔案的子目錄（按需建立）。留空則直接寫入工作目錄。",
   "pref.uploads.subdir.label": "上傳子資料夾",
+  "pref.uploads.show_suggestions.help": "將檔案拖放到終端機時，短暫顯示建議操作（分析、尋找錯誤、摘要等）的浮層，並附 Alt+1..9 快捷鍵。繼續輸入即可關閉。",
+  "pref.uploads.show_suggestions.label": "拖放檔案時建議操作",
   "pref.yoagent.backend.auto": "自動 (Codex → Claude)",
   "pref.yoagent.backend.claude": "Claude",
   "pref.yoagent.backend.codex": "Codex",

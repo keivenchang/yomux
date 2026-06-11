@@ -20439,6 +20439,7 @@ function preferenceSections() {
     {title: t('pref.section.uploads'), items: [
       {path: 'uploads.filename_template', label: t('pref.uploads.filename_template.label'), type: 'text', wide: true, help: t('pref.uploads.filename_template.help')},
       {path: 'uploads.subdir', label: t('pref.uploads.subdir.label'), type: 'text', help: t('pref.uploads.subdir.help')},
+      {path: 'uploads.show_suggestions', label: t('pref.uploads.show_suggestions.label'), type: 'boolean', help: t('pref.uploads.show_suggestions.help')},
       {path: 'uploads.max_bytes', label: t('pref.uploads.max_bytes.label'), type: 'number', min: 1, max: 512, step: 1, suffix: 'MB', scale: 1048576, help: t('pref.uploads.max_bytes.help')},
     ]},
     {title: t('pref.section.performance'), items: [
@@ -28112,22 +28113,170 @@ function insertFileDragPayloadIntoTerminal(session, payload) {
     : `<span class="err">${terminalNotConnectedHtml(session)}</span>`;
 }
 
-function terminalPathDropPayload(event) {
-  const payload = fileDragPayload(event);
-  if (!payload?.path) return null;
-  return payload.kind === 'dir' ? payload : null;
+// DOIT.57: dropping a file/dir onto a terminal shows a transient, keyboard-driven suggestion overlay
+// (Alt+1..9) of context-aware actions. It inserts nothing on its own — keep typing and it fades, or
+// press Alt+N to compose a prompt for the pane's agent (referencing the path) and insert it for review
+// (no auto-Enter). Gated by uploads.show_suggestions (default true). Alt+1 is always Insert path.
+const DROP_SUGGESTION_CATEGORY_EXTS = {
+  image: ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.heic', '.heif', '.avif'],
+  log: ['.log', '.out', '.err'],
+  diff: ['.diff', '.patch'],
+  data: ['.csv', '.tsv', '.json', '.ndjson', '.yaml', '.yml', '.parquet'],
+  doc: ['.md', '.markdown', '.rst', '.pdf', '.txt', '.docx', '.html'],
+  config: ['.toml', '.ini', '.env', '.cfg', '.conf'],
+  code: ['.py', '.js', '.ts', '.tsx', '.jsx', '.mjs', '.rs', '.go', '.java', '.c', '.h', '.cpp', '.cc', '.rb', '.php', '.lua', '.sql', '.css', '.sh', '.bash', '.zsh'],
+  archive: ['.zip', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.whl'],
+};
+
+function fileDropCategory(pathOrName, kind = 'file') {
+  if (kind === 'dir') return 'dir';
+  const name = String(pathOrName || '').toLowerCase();
+  const base = name.slice(Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\')) + 1);
+  const dot = base.lastIndexOf('.');
+  const ext = dot > 0 ? base.slice(dot) : '';
+  for (const category of Object.keys(DROP_SUGGESTION_CATEGORY_EXTS)) {
+    if (DROP_SUGGESTION_CATEGORY_EXTS[category].includes(ext)) return category;
+  }
+  return 'any';
+}
+
+// `prompt(ref)` composes the inserted text; `ref` is the shell-quoted path string. Display/combo order.
+const DROP_SUGGESTIONS = [
+  {id: 'img-error', cats: ['image'], agent: true, label: 'Diagnose the error in this screenshot', prompt: r => `This screenshot ${r} shows an error or problem. Read it, explain what is wrong, and suggest a fix.`},
+  {id: 'img-describe', cats: ['image'], agent: true, label: 'Describe the image', prompt: r => `Describe what is shown in the image ${r}.`},
+  {id: 'img-ocr', cats: ['image'], agent: true, label: 'Extract the text (OCR)', prompt: r => `Extract all of the text from the image ${r}.`},
+  {id: 'log-errors', cats: ['log'], agent: true, label: 'Find the errors', prompt: r => `Read the log ${r} and list the errors and warnings, most important first.`},
+  {id: 'log-cause', cats: ['log'], agent: true, label: 'Find the root cause', prompt: r => `Read the log ${r}, find the root cause of the failure, and suggest a fix.`},
+  {id: 'code-review', cats: ['code'], agent: true, label: 'Review for bugs', prompt: r => `Review ${r} for bugs and correctness issues.`},
+  {id: 'code-explain', cats: ['code', 'config'], agent: true, label: 'Explain what it does', prompt: r => `Explain what ${r} does.`},
+  {id: 'code-security', cats: ['code', 'config'], agent: true, label: 'Find security issues', prompt: r => `Review ${r} for security problems.`},
+  {id: 'code-tests', cats: ['code'], agent: true, label: 'Write tests', prompt: r => `Write tests for ${r}.`},
+  {id: 'diff-review', cats: ['diff'], agent: true, label: 'Review the diff', prompt: r => `Review the diff in ${r} for risks and regressions.`},
+  {id: 'diff-commit', cats: ['diff'], agent: true, label: 'Write a commit message', prompt: r => `Write a commit message for the change in ${r}.`},
+  {id: 'data-summary', cats: ['data'], agent: true, label: 'Summarize the data', prompt: r => `Summarize the structure and contents of ${r} (columns/schema, row count, anything notable).`},
+  {id: 'data-anomaly', cats: ['data'], agent: true, label: 'Find anomalies', prompt: r => `Look at ${r} and point out anomalies or outliers.`},
+  {id: 'doc-summary', cats: ['doc'], agent: true, label: 'Summarize', prompt: r => `Summarize ${r}.`},
+  {id: 'doc-todos', cats: ['doc'], agent: true, label: 'Extract the action items', prompt: r => `Extract the action items and TODOs from ${r}.`},
+  {id: 'dir-tree', cats: ['dir'], agent: true, label: 'Summarize this folder', prompt: r => `Summarize the contents of the directory ${r}.`},
+  {id: 'dir-large', cats: ['dir'], agent: true, label: 'Find the largest files', prompt: r => `Find the largest files under ${r}.`},
+  {id: 'analyze', cats: ['any'], agent: true, label: 'Take a look at it', prompt: r => `Take a look at ${r} and tell me what it is and anything notable.`},
+];
+
+function dropSuggestionsFor(category, agentKind, count = 1) {
+  const isAgent = agentKind === 'claude' || agentKind === 'codex';
+  // ⌥1 is reserved for Insert path, so context suggestions fill ⌥2..⌥9 (cap 8).
+  return DROP_SUGGESTIONS.filter(s => {
+    if (s.agent && !isAgent) return false;
+    return s.cats.includes('any') || s.cats.includes(category);
+  }).slice(0, 8);
+}
+
+function composeDropSuggestion(suggestion, references) {
+  return suggestion.prompt(references.join(' '));
+}
+
+let terminalDropSuggestionState = null;
+
+function dismissTerminalDropSuggestions() {
+  const state = terminalDropSuggestionState;
+  if (!state) return;
+  terminalDropSuggestionState = null;
+  clearTimeout(state.timer);
+  document.removeEventListener('keydown', state.onKeyDown, true);
+  document.removeEventListener('pointerdown', state.onPointerDown, true);
+  state.node.remove();
+}
+
+function showTerminalDropSuggestions(session, payload, x, y) {
+  dismissTerminalDropSuggestions();
+  const paths = Array.isArray(payload?.paths) ? payload.paths.filter(Boolean) : [payload?.path].filter(Boolean);
+  if (!paths.length) return false;
+  const references = terminalFileReferences(session, payload).map(shellQuote);
+  const category = fileDropCategory(paths[0], payload?.kind);
+  const suggestions = dropSuggestionsFor(category, sessionAgentKind(session), paths.length);
+  const rows = [
+    {label: paths.length > 1 ? `Insert ${paths.length} paths` : 'Insert path', run: () => insertFileDragPayloadIntoTerminal(session, payload)},
+    ...suggestions.map(s => ({label: s.label, run: () => insertIntoTerminal(session, composeDropSuggestion(s, references))})),
+  ].slice(0, 9);
+
+  const node = document.createElement('div');
+  node.className = 'terminal-drop-suggestions';
+  node.setAttribute('role', 'listbox');
+  const mac = isMacPlatform();
+  const head = document.createElement('div');
+  head.className = 'terminal-drop-suggestions-head';
+  head.textContent = paths.length > 1 ? `${paths.length} files — pick an action or keep typing` : `${basenameOf(paths[0])} — pick an action or keep typing`;
+  node.appendChild(head);
+  rows.forEach((row, index) => {
+    const item = document.createElement('div');
+    item.className = 'terminal-drop-suggestion';
+    item.setAttribute('role', 'option');
+    const combo = document.createElement('span');
+    combo.className = 'terminal-drop-suggestion-combo';
+    combo.textContent = mac ? `⌥${index + 1}` : `Alt+${index + 1}`;
+    const label = document.createElement('span');
+    label.className = 'terminal-drop-suggestion-label';
+    label.textContent = row.label;
+    item.append(combo, label);
+    item.addEventListener('click', () => { row.run(); dismissTerminalDropSuggestions(); });
+    node.appendChild(item);
+  });
+  document.body.appendChild(node);
+  const rect = node.getBoundingClientRect();
+  node.style.left = `${Math.round(Math.max(8, Math.min(x, window.innerWidth - rect.width - 8)))}px`;
+  node.style.top = `${Math.round(Math.max(8, Math.min(y, window.innerHeight - rect.height - 8)))}px`;
+
+  const onKeyDown = event => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      dismissTerminalDropSuggestions();
+      return;
+    }
+    // Alt+1..9 picks a row; gate strictly so AltGr (Ctrl+Alt) composing on EU layouts is not misread.
+    if (event.altKey && !event.ctrlKey && !event.metaKey && /^Digit[1-9]$/.test(event.code)) {
+      const index = Number(event.code.slice(5)) - 1;
+      if (index < rows.length) {
+        event.preventDefault();
+        event.stopPropagation();
+        rows[index].run();
+        dismissTerminalDropSuggestions();
+      }
+      return;
+    }
+    // Any other key: the overlay is advisory — dismiss it but let the keystroke reach the terminal.
+    dismissTerminalDropSuggestions();
+  };
+  const onPointerDown = event => { if (!node.contains(event.target)) dismissTerminalDropSuggestions(); };
+  const timer = setTimeout(dismissTerminalDropSuggestions, 6000);
+  terminalDropSuggestionState = {node, timer, onKeyDown, onPointerDown};
+  document.addEventListener('keydown', onKeyDown, true);
+  document.addEventListener('pointerdown', onPointerDown, true);
+  return true;
+}
+
+// Decide what a drop onto a terminal does. 'ignore' = let it bubble to the layout (files keep opening
+// in the editor when suggestions are off); 'editor' = open a split (edge drops); 'suggest' = the
+// transient overlay (center drops when uploads.show_suggestions is on); 'insert' = legacy dir path-insert.
+function terminalDropMode(payload, intent) {
+  if (!payload?.path) return 'ignore';
+  const center = !intent?.targetSlot || intent.zone === 'middle';
+  if (!center) return payload.kind === 'dir' ? 'editor' : 'ignore';
+  if (boolSetting('uploads.show_suggestions', true)) return 'suggest';
+  return payload.kind === 'dir' ? 'insert' : 'ignore';
 }
 
 function installFilePathDropTarget(session, target) {
   if (readOnlyMode) return;
   target.addEventListener('dragover', event => {
-    const payload = terminalPathDropPayload(event);
-    if (!payload) return;
+    const payload = fileDragPayload(event);
+    const intent = dropIntentForEvent(event);
+    const mode = terminalDropMode(payload, intent);
+    if (mode === 'ignore') return;
     event.preventDefault();
     event.stopPropagation();
     event.dataTransfer.dropEffect = 'copy';
-    const intent = dropIntentForEvent(event);
-    if (intent?.targetSlot && pathDropIntentAllowsPayload(payload, intent)) showDropPreview(intent);
+    if (mode === 'editor' && intent?.targetSlot && pathDropIntentAllowsPayload(payload, intent)) showDropPreview(intent);
     else clearDropPreview();
     target.classList.add(CLS.pathDragOver);
   });
@@ -28137,15 +28286,22 @@ function installFilePathDropTarget(session, target) {
     clearDropPreview();
   });
   target.addEventListener('drop', event => {
-    const payload = terminalPathDropPayload(event);
-    if (!payload?.path) return;
+    const payload = fileDragPayload(event);
+    const intent = dropIntentForEvent(event);
+    const mode = terminalDropMode(payload, intent);
+    if (mode === 'ignore') return;
     event.preventDefault();
     event.stopPropagation();
     target.classList.remove(CLS.pathDragOver);
-    const intent = dropIntentForEvent(event);
     clearDropPreview();
-    if (intent?.targetSlot && intent.zone !== 'middle' && pathDropIntentAllowsPayload(payload, intent)) {
-      openDraggedFilesInEditor(payload, {targetSlot: intent.targetSlot, targetZone: intent.zone});
+    if (mode === 'editor') {
+      if (intent?.targetSlot && pathDropIntentAllowsPayload(payload, intent)) {
+        openDraggedFilesInEditor(payload, {targetSlot: intent.targetSlot, targetZone: intent.zone});
+      }
+      return;
+    }
+    if (mode === 'suggest') {
+      showTerminalDropSuggestions(session, payload, event.clientX, event.clientY);
       return;
     }
     insertFileDragPayloadIntoTerminal(session, payload);

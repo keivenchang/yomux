@@ -528,6 +528,8 @@
   "pref.uploads.max_bytes.label": "מגבלת גודל העלאה",
   "pref.uploads.subdir.help": "תת-תיקייה בתוך תיקיית העבודה שאליה נכתבות העלאות שנגררו או הודבקו (נוצרת לפי הצורך). השאירו ריק כדי לכתוב ישירות לתיקיית העבודה.",
   "pref.uploads.subdir.label": "תיקיית משנה להעלאות",
+  "pref.uploads.show_suggestions.help": "כשמפילים קובץ על מסוף, מוצג שכבת-על קצרה עם פעולות מוצעות (ניתוח, איתור שגיאות, סיכום…) עם קיצורי Alt+1..9. המשך להקליד כדי לסגור.",
+  "pref.uploads.show_suggestions.label": "הצעת פעולות בעת גרירת קובץ",
   "pref.yoagent.backend.auto": "אוטומטי (Codex → Claude)",
   "pref.yoagent.backend.claude": "Claude",
   "pref.yoagent.backend.codex": "Codex",

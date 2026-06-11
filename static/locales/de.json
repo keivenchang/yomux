@@ -526,6 +526,8 @@
   "pref.uploads.filename_template.label": "Dateinamenvorlage für Uploads",
   "pref.uploads.max_bytes.help": "Maximale gepufferte Browser-Uploadgröße. Für große Dateien ist rsync schneller und vermeidet, den gesamten Upload im Speicher zu puffern.",
   "pref.uploads.max_bytes.label": "Obergrenze der Uploadgröße",
+  "pref.uploads.show_suggestions.help": "Wenn eine Datei auf ein Terminal gezogen wird, ein kurzes Overlay mit vorgeschlagenen Aktionen (analysieren, Fehler finden, zusammenfassen …) und Alt+1..9-Kürzeln anzeigen. Weitertippen blendet es aus.",
+  "pref.uploads.show_suggestions.label": "Aktionen beim Ablegen vorschlagen",
   "pref.uploads.subdir.help": "Unterverzeichnis im Arbeitsverzeichnis, in das abgelegte/eingefügte Uploads geschrieben werden (bei Bedarf erstellt). Leer lassen, um direkt ins Arbeitsverzeichnis zu schreiben.",
   "pref.uploads.subdir.label": "Upload-Unterordner",
   "pref.yoagent.auto_refresh.help": "When enabled, YO!agent updates per-session transcript summaries in the background after quiet intervals. Off by default to avoid background model cost.",

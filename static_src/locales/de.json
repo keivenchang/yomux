@@ -528,6 +528,8 @@
   "pref.uploads.max_bytes.label": "Obergrenze der Uploadgröße",
   "pref.uploads.subdir.help": "Unterverzeichnis im Arbeitsverzeichnis, in das abgelegte/eingefügte Uploads geschrieben werden (bei Bedarf erstellt). Leer lassen, um direkt ins Arbeitsverzeichnis zu schreiben.",
   "pref.uploads.subdir.label": "Upload-Unterordner",
+  "pref.uploads.show_suggestions.help": "Wenn eine Datei auf ein Terminal gezogen wird, ein kurzes Overlay mit vorgeschlagenen Aktionen (analysieren, Fehler finden, zusammenfassen …) und Alt+1..9-Kürzeln anzeigen. Weitertippen blendet es aus.",
+  "pref.uploads.show_suggestions.label": "Aktionen beim Ablegen vorschlagen",
   "pref.yoagent.backend.auto": "Auto (Codex → Claude)",
   "pref.yoagent.backend.claude": "Claude",
   "pref.yoagent.backend.codex": "Codex",

@@ -528,6 +528,8 @@
   "pref.uploads.max_bytes.label": "업로드 크기 제한",
   "pref.uploads.subdir.help": "끌어다 놓거나 붙여넣어 업로드한 파일을 저장할 작업 디렉터리의 하위 폴더(필요할 때 생성). 비워 두면 작업 디렉터리에 바로 저장합니다.",
   "pref.uploads.subdir.label": "업로드 하위 폴더",
+  "pref.uploads.show_suggestions.help": "파일을 터미널에 끌어다 놓으면 제안 작업(분석, 오류 찾기, 요약 등)을 Alt+1..9 단축키와 함께 잠깐 표시합니다. 계속 입력하면 사라집니다.",
+  "pref.uploads.show_suggestions.label": "파일 드롭 시 작업 제안",
   "pref.yoagent.backend.auto": "자동 (Codex → Claude)",
   "pref.yoagent.backend.claude": "Claude",
   "pref.yoagent.backend.codex": "Codex",

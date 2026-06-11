@@ -526,6 +526,8 @@
   "pref.uploads.filename_template.label": "Modèle de nom de fichier des téléversements",
   "pref.uploads.max_bytes.help": "Taille maximale de téléversement de navigateur en mémoire tampon. Pour les gros fichiers, rsync est plus rapide et évite de mettre tout le téléversement en mémoire.",
   "pref.uploads.max_bytes.label": "Limite de taille des téléversements",
+  "pref.uploads.show_suggestions.help": "Quand un fichier est déposé sur un terminal, afficher une courte surcouche d'actions suggérées (analyser, trouver les erreurs, résumer…) avec les raccourcis Alt+1..9. Continuez à taper pour la masquer.",
+  "pref.uploads.show_suggestions.label": "Suggérer des actions au dépôt d'un fichier",
   "pref.uploads.subdir.help": "Sous-répertoire du répertoire de travail où sont écrits les fichiers déposés ou collés (créé à la demande). Laisser vide pour écrire directement dans le répertoire de travail.",
   "pref.uploads.subdir.label": "Sous-dossier d'envoi",
   "pref.yoagent.auto_refresh.help": "When enabled, YO!agent updates per-session transcript summaries in the background after quiet intervals. Off by default to avoid background model cost.",

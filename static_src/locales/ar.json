@@ -528,6 +528,8 @@
   "pref.uploads.max_bytes.label": "حد حجم الرفع",
   "pref.uploads.subdir.help": "مجلد فرعي داخل دليل العمل تُكتب فيه الملفات المرفوعة بالسحب أو اللصق (يُنشأ عند الحاجة). اتركه فارغًا للكتابة مباشرة في دليل العمل.",
   "pref.uploads.subdir.label": "مجلد فرعي للرفع",
+  "pref.uploads.show_suggestions.help": "عند إسقاط ملف على طرفية، يظهر تراكب قصير باقتراحات الإجراءات (تحليل، البحث عن الأخطاء، تلخيص…) مع اختصارات Alt+1..9. تابع الكتابة لإخفائه.",
+  "pref.uploads.show_suggestions.label": "اقتراح إجراءات عند إسقاط ملف",
   "pref.yoagent.backend.auto": "تلقائي (Codex → Claude)",
   "pref.yoagent.backend.claude": "Claude",
   "pref.yoagent.backend.codex": "Codex",

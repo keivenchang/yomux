@@ -631,6 +631,9 @@ globalThis.__layoutTestApi = {
   tmuxSessionNameError,
   replaceTmuxSessionInClient,
   normalizedSessionOrder,
+  fileDropCategory,
+  dropSuggestionsFor,
+  composeDropSuggestion,
   normalizeLayoutSlots,
   compactLayoutSlots,
   layoutSlotsSignature,
@@ -9200,6 +9203,30 @@ test('t@8804', () => {
   assert.ok(/copyTerminalSelection\(session, term, \{dedent, selectionText: selected\}, container\)/.test(source), 'N7: menu Copy uses the captured selection text, not a stale live re-read');
   assert.ok(/const selected = options\.selectionText != null \? options\.selectionText : terminalSelectedText\(term, container\)/.test(source), 'N7: copyTerminalSelection honors an explicit captured selection');
 });
+
+{
+  // DOIT.57: drag-into-terminal suggestion registry (the transient Alt+1..9 overlay's data layer).
+  const api = loadYolomux();
+  assert.equal(api.fileDropCategory('/x/shot.png'), 'image');
+  assert.equal(api.fileDropCategory('build.log'), 'log');
+  assert.equal(api.fileDropCategory('app.py'), 'code');
+  assert.equal(api.fileDropCategory('data.csv'), 'data');
+  assert.equal(api.fileDropCategory('README.md'), 'doc');
+  assert.equal(api.fileDropCategory('fix.diff'), 'diff');
+  assert.equal(api.fileDropCategory('/some/dir', 'dir'), 'dir');
+  assert.equal(api.fileDropCategory('mystery.xyz'), 'any');
+
+  const imgClaude = api.dropSuggestionsFor('image', 'claude', 1);
+  assert.ok(imgClaude.some(s => s.id === 'img-error'), 'image + agent offers diagnose-screenshot');
+  assert.ok(!imgClaude.some(s => s.id === 'log-errors'), 'image category hides log-only suggestions');
+  assert.ok(imgClaude.length <= 8, 'suggestions cap at 8 (Alt+1 is reserved for Insert path)');
+  assert.equal(api.dropSuggestionsFor('image', '', 1).length, 0, 'a plain shell pane shows no agent suggestions');
+
+  const logErrors = api.dropSuggestionsFor('log', 'claude', 1).find(s => s.id === 'log-errors');
+  assert.ok(logErrors, 'log + agent offers find-errors');
+  assert.ok(api.composeDropSuggestion(logErrors, ["'/var/log/app.log'"]).includes("'/var/log/app.log'"), 'compose embeds the shell-quoted path reference');
+  assert.ok(api.dropSuggestionsFor('any', 'codex', 1).some(s => s.id === 'analyze'), 'any-category fallback offers a generic look');
+}
 
 (async () => {
   {

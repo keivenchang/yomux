@@ -526,6 +526,8 @@
   "pref.uploads.filename_template.label": "Upload filename template",
   "pref.uploads.max_bytes.help": "Maximum buffered browser upload size. For large files, rsync is faster and avoids buffering the whole upload in memory.",
   "pref.uploads.max_bytes.label": "Upload size cap",
+  "pref.uploads.show_suggestions.help": "When a file is dropped onto a terminal, show a brief overlay of suggested actions (analyze, find errors, summarize, …) with Alt+1..9 shortcuts. Keep typing to dismiss it.",
+  "pref.uploads.show_suggestions.label": "Suggest actions on file drop",
   "pref.uploads.subdir.help": "Subdirectory under the working directory where dropped/pasted uploads are written (created on demand). Leave empty to write straight into the working directory.",
   "pref.uploads.subdir.label": "Upload subfolder",
   "pref.yoagent.auto_refresh.help": "When enabled, YO!agent updates per-session transcript summaries in the background after quiet intervals. Off by default to avoid background model cost.",

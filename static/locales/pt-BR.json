@@ -526,6 +526,8 @@
   "pref.uploads.filename_template.label": "Modelo de nome de arquivo de upload",
   "pref.uploads.max_bytes.help": "Tamanho máximo de upload do navegador em buffer. Para arquivos grandes, rsync é mais rápido e evita armazenar o upload inteiro na memória.",
   "pref.uploads.max_bytes.label": "Limite de tamanho de upload",
+  "pref.uploads.show_suggestions.help": "Quando um arquivo é solto em um terminal, mostra uma breve sobreposição com ações sugeridas (analisar, encontrar erros, resumir…) e atalhos Alt+1..9. Continue digitando para dispensá-la.",
+  "pref.uploads.show_suggestions.label": "Sugerir ações ao soltar um arquivo",
   "pref.uploads.subdir.help": "Subdiretório dentro do diretório de trabalho onde os uploads arrastados ou colados são gravados (criado quando necessário). Deixe vazio para gravar direto no diretório de trabalho.",
   "pref.uploads.subdir.label": "Subpasta de upload",
   "pref.yoagent.auto_refresh.help": "When enabled, YO!agent updates per-session transcript summaries in the background after quiet intervals. Off by default to avoid background model cost.",

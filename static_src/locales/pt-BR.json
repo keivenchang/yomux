@@ -528,6 +528,8 @@
   "pref.uploads.max_bytes.label": "Limite de tamanho de upload",
   "pref.uploads.subdir.help": "Subdiretório dentro do diretório de trabalho onde os uploads arrastados ou colados são gravados (criado quando necessário). Deixe vazio para gravar direto no diretório de trabalho.",
   "pref.uploads.subdir.label": "Subpasta de upload",
+  "pref.uploads.show_suggestions.help": "Quando um arquivo é solto em um terminal, mostra uma breve sobreposição com ações sugeridas (analisar, encontrar erros, resumir…) e atalhos Alt+1..9. Continue digitando para dispensá-la.",
+  "pref.uploads.show_suggestions.label": "Sugerir ações ao soltar um arquivo",
   "pref.yoagent.backend.auto": "Auto (Codex → Claude)",
   "pref.yoagent.backend.claude": "Claude",
   "pref.yoagent.backend.codex": "Codex",

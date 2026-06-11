@@ -528,6 +528,8 @@
   "pref.uploads.max_bytes.label": "Ограничение размера загрузки",
   "pref.uploads.subdir.help": "Подкаталог в рабочем каталоге, куда записываются перетащенные или вставленные загрузки (создаётся при необходимости). Оставьте пустым, чтобы писать прямо в рабочий каталог.",
   "pref.uploads.subdir.label": "Подпапка загрузок",
+  "pref.uploads.show_suggestions.help": "При перетаскивании файла на терминал показывать короткое наложение с предлагаемыми действиями (анализ, поиск ошибок, краткое изложение…) и сочетаниями Alt+1..9. Продолжайте печатать, чтобы закрыть его.",
+  "pref.uploads.show_suggestions.label": "Предлагать действия при перетаскивании файла",
   "pref.yoagent.backend.auto": "Авто (Codex → Claude)",
   "pref.yoagent.backend.claude": "Claude",
   "pref.yoagent.backend.codex": "Codex",

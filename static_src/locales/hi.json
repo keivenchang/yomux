@@ -528,6 +528,8 @@
   "pref.uploads.max_bytes.label": "Upload साइज़ सीमा",
   "pref.uploads.subdir.help": "कार्यशील निर्देशिका के अंदर वह उपनिर्देशिका जहाँ खींचे या चिपकाए गए अपलोड लिखे जाते हैं (आवश्यकता पड़ने पर बनाई जाती है)। कार्यशील निर्देशिका में सीधे लिखने के लिए इसे खाली छोड़ें।",
   "pref.uploads.subdir.label": "अपलोड सबफ़ोल्डर",
+  "pref.uploads.show_suggestions.help": "जब किसी फ़ाइल को टर्मिनल पर छोड़ा जाता है, तो सुझाई गई क्रियाओं (विश्लेषण, त्रुटियाँ खोजें, सारांश…) का एक संक्षिप्त ओवरले Alt+1..9 शॉर्टकट के साथ दिखाएँ। हटाने के लिए टाइप करते रहें।",
+  "pref.uploads.show_suggestions.label": "फ़ाइल ड्रॉप पर क्रियाएँ सुझाएँ",
   "pref.yoagent.backend.auto": "Auto (Codex → Claude)",
   "pref.yoagent.backend.claude": "Claude",
   "pref.yoagent.backend.codex": "Codex",

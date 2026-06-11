@@ -528,6 +528,8 @@
   "pref.uploads.max_bytes.label": "Limite de taille des téléversements",
   "pref.uploads.subdir.help": "Sous-répertoire du répertoire de travail où sont écrits les fichiers déposés ou collés (créé à la demande). Laisser vide pour écrire directement dans le répertoire de travail.",
   "pref.uploads.subdir.label": "Sous-dossier d'envoi",
+  "pref.uploads.show_suggestions.help": "Quand un fichier est déposé sur un terminal, afficher une courte surcouche d'actions suggérées (analyser, trouver les erreurs, résumer…) avec les raccourcis Alt+1..9. Continuez à taper pour la masquer.",
+  "pref.uploads.show_suggestions.label": "Suggérer des actions au dépôt d'un fichier",
   "pref.yoagent.backend.auto": "Auto (Codex → Claude)",
   "pref.yoagent.backend.claude": "Claude",
   "pref.yoagent.backend.codex": "Codex",

@@ -124,6 +124,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "filename_template": DEFAULT_UPLOAD_FILENAME_TEMPLATE,
         "max_bytes": UPLOAD_MAX_BYTES,
         "subdir": DEFAULT_UPLOAD_SUBDIR,
+        "show_suggestions": True,
     },
     "yoagent": {
         "backend": "auto",
@@ -349,6 +350,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("uploads", "filename_template"): "Upload filename template. Supported fields: {date:%Y%m%d}, {seq:03d}, {name}, {ext}. When {name} is empty, a preceding dash is omitted.",
     ("uploads", "max_bytes"): "Bytes, 1048576-536870912. Maximum buffered browser upload size. Prefer rsync for large files.",
     ("uploads", "subdir"): "Subdirectory under the session working directory where uploads are written (default .upload, created on demand). Leave empty to write straight into the working directory.",
+    ("uploads", "show_suggestions"): "When a file is dropped onto a terminal, show a brief suggestion overlay of actions (analyze, find errors, summarize, …) with Alt+1..9 shortcuts. Keep typing to dismiss it.",
     ("yoagent", "backend"): "auto | deterministic | claude | codex. Default auto prefers codex, then claude (whichever is installed AND logged in), else the No agent summary. The deterministic internal value is shown as No agent; explicit Claude/Codex use the selected invocation when available.",
     ("yoagent", "invocation"): "cli | api-key. CLI runs the local agent binary; api-key is reserved and falls back safely today.",
     ("yoagent", "auto_refresh"): "true/false. Default false. When true, YO!agent refreshes per-session transcript summaries in the background after quiet intervals.",

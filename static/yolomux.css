@@ -7818,6 +7818,56 @@ body.theme-light .file-tree-children::before {
   border-bottom: 1px solid var(--line);
   min-height: 26px;
 }
+
+/* DOIT.57: the transient drop-suggestion overlay (Alt+1..9 actions when a file is dropped on a
+   terminal). Non-modal, auto-dismisses; the terminal keeps focus. */
+.terminal-drop-suggestions {
+  position: fixed;
+  z-index: 200;
+  min-width: 248px;
+  max-width: 380px;
+  padding: 6px;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-popover);
+  color: var(--text);
+  font: var(--ui-font-size) var(--ui-font);
+}
+.terminal-drop-suggestions-head {
+  padding: 4px 8px 6px;
+  color: var(--muted);
+  font-size: var(--ui-font-size-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.terminal-drop-suggestion {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.terminal-drop-suggestion:hover {
+  background: var(--active-control-soft-bg);
+}
+.terminal-drop-suggestion-combo {
+  flex: none;
+  min-width: 38px;
+  text-align: center;
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  background: var(--active-accent-bright);
+  color: var(--active-accent-text);
+  font: var(--ui-font-size-sm) var(--mono-font);
+}
+.terminal-drop-suggestion-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .file-editor-path {
   flex: 1;
   font-family: var(--mono-font);
