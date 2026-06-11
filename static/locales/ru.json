@@ -208,6 +208,7 @@
   "menu.help.about": "О программе",
   "menu.help.about.author": "Keiven Chang",
   "menu.help.about.datetime": "Дата/время",
+  "menu.help.about.github": "GitHub",
   "menu.help.about.linkedin": "LinkedIn",
   "menu.help.about.version": "Версия",
   "menu.help.commandPalette": "Палитра команд",

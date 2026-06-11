@@ -6034,6 +6034,7 @@ function layoutMenuCommand(mode) {
 }
 
 const aboutLinkedInUrl = 'https://www.linkedin.com/in/keiven/';
+const aboutProjectUrl = 'https://github.com/keivenchang/yolomux';
 
 function aboutDateTimeText() {
   if (bootstrap.versionCommitTime) return bootstrap.versionCommitTime;
@@ -6078,6 +6079,7 @@ function showAboutModal() {
       <div><dt>${esc(t('menu.help.about.version'))}</dt><dd>${esc(version || t('common.unknown'))}</dd></div>
     </dl>
     <a class="about-author" href="${esc(aboutLinkedInUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.author'))}</a>
+    <a class="about-author about-github" href="${esc(aboutProjectUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.github'))}</a>
   </div>`;
   modal.classList.add('open');
 }

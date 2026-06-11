@@ -208,6 +208,7 @@
   "menu.help.about": "About",
   "menu.help.about.author": "Keiven Chang",
   "menu.help.about.datetime": "Date/time",
+  "menu.help.about.github": "GitHub",
   "menu.help.about.linkedin": "LinkedIn",
   "menu.help.about.version": "Version",
   "menu.help.commandPalette": "Command palette",

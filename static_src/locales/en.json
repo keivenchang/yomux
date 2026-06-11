@@ -802,5 +802,6 @@
   "yolo.state.onHere": "on here",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} for {session}",
-  "yolo.titleReadonly": "YOLO {state} for {session}; readonly access"
+  "yolo.titleReadonly": "YOLO {state} for {session}; readonly access",
+  "menu.help.about.github": "GitHub"
 }

@@ -6,6 +6,9 @@ Unless an entry says otherwise, every item shipped with the standard check gate 
 
 ## 2026-06-11
 
+### DOIT.60 Help/About links to the project on GitHub
+- Added a `GitHub` link to the Help -> About modal pointing at `https://github.com/keivenchang/yolomux`, mirroring the existing LinkedIn author link: new `aboutProjectUrl` const beside `aboutLinkedInUrl`, a second `.about-author.about-github` anchor in `showAboutModal`, and a `menu.help.about.github` locale key ("GitHub", brand-literal) across all 13 locales + en-XA. node guard asserts the modal renders the repo URL + the `about-github` class + the localized label.
+
 ### DOIT.57 Info Bar dedup + window-button toggles
 - Removed the duplicate agent badge from the pane info (detail) row — it duplicated the `N:claude` window button now that the window bar carries agent identity (an agent window's name falls back to its process label). Deleted the `sessionAgentBadgeHtml` helper (no other callers), its per-poll refresh, and the `.panel-agent-slot` / `.panel-agent-badge` CSS. The info row now reads `path · dirty | window buttons | ×`.
 - The ACTIVE tmux window button reads as a pressed toggle via the shared `--active-control-*` tokens, so it follows the user's Active color preference and flips with the theme (no hardcoded hex); inactive buttons keep the plain look. GUI_SPEC info-row contract updated, and the prior "agent badge is muted" regression pins were flipped to assert the badge is gone and the toggle uses the tokens.

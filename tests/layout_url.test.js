@@ -4616,6 +4616,9 @@ test('t@2560', () => {
   assert.ok(api.modalBodyHtmlForTest().includes('Keiven Chang'), 'About modal contains Keiven Chang');
   assert.ok(api.modalBodyHtmlForTest().includes('https://www.linkedin.com/in/keiven/'), 'Keiven Chang entry links to LinkedIn');
   assert.ok(fs.readFileSync('static/yolomux.js', 'utf8').includes('https://www.linkedin.com/in/keiven/'), 'About LinkedIn URL is bundled');
+  assert.ok(api.modalBodyHtmlForTest().includes('https://github.com/keivenchang/yolomux'), 'DOIT.60: About modal links to the project GitHub repo');
+  assert.ok(api.modalBodyHtmlForTest().includes('about-github'), 'DOIT.60: the GitHub link carries the about-github class');
+  assert.ok(api.modalBodyHtmlForTest().includes(`>${api.t('menu.help.about.github')}</a>`), 'DOIT.60: the GitHub link uses the localized label');
   assert.ok(preferencesCss.includes('.modal.about-open'), 'About modal has compact modal chrome');
   assert.ok(preferencesCss.includes('.about-brand-row'), 'About modal has a large brand row style');
   assert.ok(/\.about-brand-yo\s*\{[\s\S]*animation:\s*yolo-marker-rotate/.test(preferencesCss), 'About YO glyph spins with the shared YOLO marker animation');
