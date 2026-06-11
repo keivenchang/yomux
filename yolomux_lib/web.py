@@ -12,6 +12,7 @@ from .common import STATIC_DIR
 from .common import YOLOMUX_VERSION
 from .common import login_username
 from .common import xterm_asset_path
+from .common import yolomux_commit_sha
 from .common import yolomux_commit_time_pt
 from .settings import save_settings
 from .settings import settings_payload
@@ -158,6 +159,7 @@ def html_page(sessions: list[str], access_role: str = "admin", dev: bool = False
         "maxSessionTabs": MAX_YOLOMUX_SESSION_TABS,
         "serverHostname": SERVER_HOSTNAME,
         "version": YOLOMUX_VERSION,
+        "versionCommit": yolomux_commit_sha(),
         "versionCommitTime": yolomux_commit_time_pt(),
         "settingsPayload": settings_data,
         # i18n: resolved active locale for first paint ("system" -> en server-side; the client

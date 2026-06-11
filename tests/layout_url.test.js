@@ -4624,6 +4624,8 @@ test('t@2560', () => {
   assert.ok(api.modalBodyHtmlForTest().includes('about-github'), 'DOIT.60: the GitHub link carries the about-github class');
   assert.ok(api.modalBodyHtmlForTest().includes(`>${api.t('menu.help.about.github')}</a>`), 'DOIT.60: the GitHub link uses the localized label');
   assert.ok(preferencesCss.includes('.modal.about-open'), 'About modal has compact modal chrome');
+  assert.ok(/\.modal\.about-open\s*\{[\s\S]*?z-index:\s*var\(--z-pane-modal\)/.test(preferencesCss), 'About modal sits above pane resizers and other pane-local overlays');
+  assert.ok(/\.modal\.about-open::before\s*\{[\s\S]*?position:\s*fixed/.test(preferencesCss), 'About modal dims the live app behind it so background lines do not bleed through');
   assert.ok(preferencesCss.includes('.about-brand-row'), 'About modal has a large brand row style');
   assert.ok(/\.about-brand-yo\s*\{[\s\S]*animation:\s*yolo-marker-rotate/.test(preferencesCss), 'About YO glyph spins with the shared YOLO marker animation');
   assert.ok(/\.about-brand-yo\s*\{[\s\S]*background:\s*var\(--pane-tab-yolo-bg\)/.test(preferencesCss), 'About YO glyph follows the active theme color');

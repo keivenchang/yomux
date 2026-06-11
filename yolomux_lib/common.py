@@ -34,7 +34,7 @@ DEFAULT_ROWS = 36
 MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
-YOLOMUX_VERSION = "0.3.0"
+YOLOMUX_VERSION = "0.3.1"
 SUMMARY_LOOKBACK_SECONDS = 3600
 SUMMARY_MAX_PROMPT_CHARS = 100_000
 SUMMARY_CODEX_TIMEOUT_SECONDS = 600
@@ -70,6 +70,7 @@ _CACHE_MISS = cache_MISS
 SERVER_HOSTNAME = socket.gethostname()
 PACIFIC_TIME = ZoneInfo("America/Los_Angeles")
 _YOLOMUX_COMMIT_TIME_PT: str | None = None
+_YOLOMUX_COMMIT_SHA: str | None = None
 
 
 def as_dict(value: Any) -> dict[str, Any]:
@@ -199,6 +200,24 @@ def yolomux_commit_time_pt() -> str:
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError):
         _YOLOMUX_COMMIT_TIME_PT = "commit time unavailable"
     return _YOLOMUX_COMMIT_TIME_PT
+
+
+def yolomux_commit_sha() -> str:
+    global _YOLOMUX_COMMIT_SHA
+    if _YOLOMUX_COMMIT_SHA is not None:
+        return _YOLOMUX_COMMIT_SHA
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(PROJECT_ROOT), "rev-parse", "--short=12", "HEAD"],
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=1.0,
+        )
+        _YOLOMUX_COMMIT_SHA = result.stdout.strip()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        _YOLOMUX_COMMIT_SHA = ""
+    return _YOLOMUX_COMMIT_SHA
 
 
 POPULAR_IDE_XTERM_APP_NAMES = [

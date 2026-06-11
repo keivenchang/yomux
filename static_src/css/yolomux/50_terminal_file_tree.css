@@ -1384,6 +1384,7 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   inset: 18vh auto auto 50%;
   width: min(520px, calc(100vw - 28px));
   min-height: 0;
+  z-index: var(--z-pane-modal);
   transform: translateX(-50%);
   background: var(--panel);
   box-shadow: var(--shadow-elevated);
@@ -1464,6 +1465,15 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   font-size: var(--ui-font-size-sm);
   font-weight: 800;
   text-decoration: underline;
+}
+/* Dim the live app behind the floating About panel. Without it the split-resizer line and terminal
+   text behind the panel stay visible and read as a stray line running through the dialog. */
+.modal.about-open::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background: color-mix(in srgb, var(--bg) 62%, transparent);
 }
 body.theme-light .modal.about-open {
   background: #ffffff;

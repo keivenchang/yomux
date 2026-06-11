@@ -129,6 +129,30 @@ def test_commit_time_display_uses_pt(monkeypatch):
     assert common.yolomux_commit_time_pt() == "2026-01-15 04:34:56 PT"
 
 
+def test_commit_sha_display_uses_git_head(monkeypatch):
+    class GitResult:
+        stdout = "abcdef123456\n"
+
+    monkeypatch.setattr(common, "_YOLOMUX_COMMIT_SHA", None)
+    monkeypatch.setattr(common.subprocess, "run", lambda *args, **kwargs: GitResult())
+
+    assert common.yolomux_commit_sha() == "abcdef123456"
+
+
+def test_main_page_bootstrap_includes_version_commit(monkeypatch):
+    monkeypatch.setattr(web, "available_agent_commands", lambda: [])
+    monkeypatch.setattr(web, "agent_auth_status", lambda: {})
+    monkeypatch.setattr(web, "rules_status", lambda: {})
+    monkeypatch.setattr(web, "settings_payload", lambda: {"settings": {"general": {"language": "en"}}})
+    monkeypatch.setattr(web, "yolomux_commit_sha", lambda: "abcdef123456")
+    monkeypatch.setattr(web, "yolomux_commit_time_pt", lambda: "2026-01-15 04:34:56 PT")
+
+    match = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', web.html_page([]), re.DOTALL)
+    assert match
+    payload = json.loads(match.group(1))
+    assert payload["versionCommit"] == "abcdef123456"
+
+
 def test_setup_auth_page_recommends_https(monkeypatch):
     monkeypatch.setattr(web, "login_username", lambda: "keivenc")
 
