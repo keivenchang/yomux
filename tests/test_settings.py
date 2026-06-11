@@ -402,8 +402,8 @@ def test_blame_all_lines_default_and_coercion():
     assert sanitize_settings({"editor": {"blame_all_lines": "no"}})["editor"]["blame_all_lines"] is False
 
 
-def test_uploads_subdir_defaults_to_dot_upload():
-    assert default_settings()["uploads"]["subdir"] == ".upload"
+def test_uploads_subdir_defaults_to_dot_uploads():
+    assert default_settings()["uploads"]["subdir"] == ".uploads"
 
 
 def test_uploads_subdir_allows_empty_for_cwd_opt_out():

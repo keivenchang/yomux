@@ -28099,7 +28099,8 @@ function bindFileUpload(panel, session) {
     event.preventDefault();
     event.stopPropagation();
     panel.classList.remove(CLS.fileDragOver);
-    uploadFiles(session, event.dataTransfer?.files || []);
+    // DOIT.57: remember the drop point so the post-upload suggestion overlay can anchor there.
+    uploadFiles(session, event.dataTransfer?.files || [], {suggestAt: {x: event.clientX, y: event.clientY}});
   });
 }
 
@@ -28473,10 +28474,18 @@ async function uploadFiles(session, fileList, options = {}) {
     const paths = (payload.files || []).map(file => file.path).filter(Boolean);
     if (options.source === 'paste') syncPasteCountersFromPayload(payload);
     activateTab(session, 'terminal');
-    const inserted = options.source === 'paste'
-      ? insertPasteUploadReferences(session, payload.files || [], {silent: true})
-      : insertUploadPaths(session, paths, {silent: true});
-    showUploadResult(session, payload, inserted);
+    // DOIT.57: a dropped/pasted upload shows the suggestion overlay (Alt+1..9) for the uploaded path
+    // instead of auto-inserting it — Alt+1 still inserts the path. Falls back to the legacy insert when
+    // uploads.show_suggestions is off or there is no anchor point.
+    if (options.suggestAt && paths.length && boolSetting('uploads.show_suggestions', true)) {
+      showUploadResult(session, payload, false);
+      showTerminalDropSuggestions(session, {path: paths[0], paths, kind: 'file'}, options.suggestAt.x, options.suggestAt.y);
+    } else {
+      const inserted = options.source === 'paste'
+        ? insertPasteUploadReferences(session, payload.files || [], {silent: true})
+        : insertUploadPaths(session, paths, {silent: true});
+      showUploadResult(session, payload, inserted);
+    }
     refreshOpenEventLogs();
     refreshTranscripts({force: true});
   } catch (error) {

@@ -236,7 +236,7 @@ SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
 }
 
 # String settings that accept an empty value (most strings revert to their default when blank).
-# `uploads.subdir` empty = write uploads straight into the cwd instead of a `.upload/` subdir.
+# `uploads.subdir` empty = write uploads straight into the cwd instead of a `.uploads/` subdir.
 STRING_ALLOW_EMPTY: set[tuple[str, str]] = {
     ("uploads", "subdir"),
 }
@@ -349,7 +349,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("file_explorer", "new_entry_highlight_ms"): "Milliseconds, 0-600000. How long new File Explorer entries stay highlighted.",
     ("uploads", "filename_template"): "Upload filename template. Supported fields: {date:%Y%m%d}, {seq:03d}, {name}, {ext}. When {name} is empty, a preceding dash is omitted.",
     ("uploads", "max_bytes"): "Bytes, 1048576-536870912. Maximum buffered browser upload size. Prefer rsync for large files.",
-    ("uploads", "subdir"): "Subdirectory under the session working directory where uploads are written (default .upload, created on demand). Leave empty to write straight into the working directory.",
+    ("uploads", "subdir"): "Subdirectory under the session working directory where uploads are written (default .uploads, created on demand). Leave empty to write straight into the working directory.",
     ("uploads", "show_suggestions"): "When a file is dropped onto a terminal, show a brief suggestion overlay of actions (analyze, find errors, summarize, …) with Alt+1..9 shortcuts. Keep typing to dismiss it.",
     ("yoagent", "backend"): "auto | deterministic | claude | codex. Default auto prefers codex, then claude (whichever is installed AND logged in), else the No agent summary. The deterministic internal value is shown as No agent; explicit Claude/Codex use the selected invocation when available.",
     ("yoagent", "invocation"): "cli | api-key. CLI runs the local agent binary; api-key is reserved and falls back safely today.",
