@@ -973,18 +973,18 @@ function showTerminalDropSuggestions(session, payload, x, y) {
   const node = document.createElement('div');
   node.className = 'terminal-drop-suggestions';
   node.setAttribute('role', 'listbox');
-  const mac = isMacPlatform();
   const head = document.createElement('div');
   head.className = 'terminal-drop-suggestions-head';
-  head.textContent = paths.length > 1 ? `${paths.length} files — pick an action or keep typing` : `${basenameOf(paths[0])} — pick an action or keep typing`;
+  head.textContent = paths.length > 1 ? `${paths.length} files — click or press 1-${Math.min(rows.length, 9)}, or keep typing` : `${basenameOf(paths[0])} — click or press 1-${Math.min(rows.length, 9)}, or keep typing`;
   node.appendChild(head);
   rows.forEach((row, index) => {
     const item = document.createElement('div');
     item.className = 'terminal-drop-suggestion';
     item.setAttribute('role', 'option');
+    item.tabIndex = -1;
     const combo = document.createElement('span');
     combo.className = 'terminal-drop-suggestion-combo';
-    combo.textContent = mac ? `⌥${index + 1}` : `Alt+${index + 1}`;
+    combo.textContent = String(index + 1);
     const label = document.createElement('span');
     label.className = 'terminal-drop-suggestion-label';
     label.textContent = row.label;
@@ -1014,12 +1014,14 @@ function showTerminalDropSuggestions(session, payload, x, y) {
       dismissTerminalDropSuggestions();
       return;
     }
-    // Alt+1..9 picks a row; gate strictly so AltGr (Ctrl+Alt) composing on EU layouts is not misread.
-    if (event.altKey && !event.ctrlKey && !event.metaKey && /^Digit[1-9]$/.test(event.code)) {
+    // Press 1..9 to pick a row. Accept it WITH OR WITHOUT Alt/Shift so that a Mac user who hits
+    // Option+digit (which would otherwise type ¡™£¢…) still selects and the stray char is suppressed.
+    // Exclude Ctrl/Cmd so the browser's Ctrl/Cmd+digit tab-switch is left alone.
+    if (!event.ctrlKey && !event.metaKey && /^Digit[1-9]$/.test(event.code)) {
       const index = Number(event.code.slice(5)) - 1;
+      event.preventDefault();
+      event.stopPropagation();
       if (index < rows.length) {
-        event.preventDefault();
-        event.stopPropagation();
         rows[index].run();
         dismissTerminalDropSuggestions();
       }
