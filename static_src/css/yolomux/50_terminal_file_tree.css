@@ -2414,15 +2414,18 @@ body.theme-light .file-tree-children::before {
 .terminal-drop-suggestion:hover {
   background: var(--active-control-soft-bg);
 }
+/* The number you press to pick this row, drawn as a keycap so the keyboard shortcut is obvious. */
 .terminal-drop-suggestion-combo {
   flex: none;
-  min-width: 38px;
+  min-width: 22px;
   text-align: center;
-  padding: 1px 5px;
+  padding: 1px 6px;
+  border: 1px solid var(--active-accent-text);
   border-radius: var(--radius-sm);
   background: var(--active-accent-bright);
   color: var(--active-accent-text);
   font: var(--ui-font-size-sm) var(--mono-font);
+  box-shadow: 0 1px 0 var(--active-accent-text);
 }
 .terminal-drop-suggestion-label {
   overflow: hidden;

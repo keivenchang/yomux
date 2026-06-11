@@ -888,10 +888,12 @@ function insertFileDragPayloadIntoTerminal(session, payload) {
     : `<span class="err">${terminalNotConnectedHtml(session)}</span>`;
 }
 
-// DOIT.57: dropping a file/dir onto a terminal shows a transient, keyboard-driven suggestion overlay
-// (Alt+1..9) of context-aware actions. It inserts nothing on its own — keep typing and it fades, or
-// press Alt+N to compose a prompt for the pane's agent (referencing the path) and insert it for review
-// (no auto-Enter). Gated by uploads.show_suggestions (default true). Alt+1 is always Insert path.
+// DOIT.57: dropping/pasting/uploading a file onto a terminal FIRST inserts the path (you always get the
+// name), then shows a transient, keyboard-driven overlay of context-aware actions for the pane's agent.
+// Press 1..9 (or click) to APPEND a deictic clause like "; do OCR on this image." after the path for
+// review (no auto-Enter) — the path is already there, so the clause refers to "this image/file" rather
+// than repeating it; keep typing and the overlay fades. Gated by uploads.show_suggestions (default true);
+// a non-agent shell pane just gets the path with no overlay.
 const DROP_SUGGESTION_CATEGORY_EXTS = {
   image: ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.heic', '.heif', '.avif'],
   log: ['.log', '.out', '.err'],
@@ -915,39 +917,42 @@ function fileDropCategory(pathOrName, kind = 'file') {
   return 'any';
 }
 
-// `prompt(ref)` composes the inserted text; `ref` is the shell-quoted path string. Display/combo order.
+// `label` is the row text; `prompt()` is the deictic clause APPENDED after the already-inserted path
+// (refers to "this image/file/log/…", never repeats the path). Display/shortcut order is array order.
 const DROP_SUGGESTIONS = [
-  {id: 'img-error', cats: ['image'], agent: true, label: 'Diagnose the error in this screenshot', prompt: r => `This screenshot ${r} shows an error or problem. Read it, explain what is wrong, and suggest a fix.`},
-  {id: 'img-describe', cats: ['image'], agent: true, label: 'Describe the image', prompt: r => `Describe what is shown in the image ${r}.`},
-  {id: 'img-ocr', cats: ['image'], agent: true, label: 'Extract the text (OCR)', prompt: r => `Extract all of the text from the image ${r}.`},
-  {id: 'log-errors', cats: ['log'], agent: true, label: 'Find the errors', prompt: r => `Read the log ${r} and list the errors and warnings, most important first.`},
-  {id: 'log-cause', cats: ['log'], agent: true, label: 'Find the root cause', prompt: r => `Read the log ${r}, find the root cause of the failure, and suggest a fix.`},
-  {id: 'code-review', cats: ['code'], agent: true, label: 'Review for bugs', prompt: r => `Review ${r} for bugs and correctness issues.`},
-  {id: 'code-explain', cats: ['code', 'config'], agent: true, label: 'Explain what it does', prompt: r => `Explain what ${r} does.`},
-  {id: 'code-security', cats: ['code', 'config'], agent: true, label: 'Find security issues', prompt: r => `Review ${r} for security problems.`},
-  {id: 'code-tests', cats: ['code'], agent: true, label: 'Write tests', prompt: r => `Write tests for ${r}.`},
-  {id: 'diff-review', cats: ['diff'], agent: true, label: 'Review the diff', prompt: r => `Review the diff in ${r} for risks and regressions.`},
-  {id: 'diff-commit', cats: ['diff'], agent: true, label: 'Write a commit message', prompt: r => `Write a commit message for the change in ${r}.`},
-  {id: 'data-summary', cats: ['data'], agent: true, label: 'Summarize the data', prompt: r => `Summarize the structure and contents of ${r} (columns/schema, row count, anything notable).`},
-  {id: 'data-anomaly', cats: ['data'], agent: true, label: 'Find anomalies', prompt: r => `Look at ${r} and point out anomalies or outliers.`},
-  {id: 'doc-summary', cats: ['doc'], agent: true, label: 'Summarize', prompt: r => `Summarize ${r}.`},
-  {id: 'doc-todos', cats: ['doc'], agent: true, label: 'Extract the action items', prompt: r => `Extract the action items and TODOs from ${r}.`},
-  {id: 'dir-tree', cats: ['dir'], agent: true, label: 'Summarize this folder', prompt: r => `Summarize the contents of the directory ${r}.`},
-  {id: 'dir-large', cats: ['dir'], agent: true, label: 'Find the largest files', prompt: r => `Find the largest files under ${r}.`},
-  {id: 'analyze', cats: ['any'], agent: true, label: 'Take a look at it', prompt: r => `Take a look at ${r} and tell me what it is and anything notable.`},
+  {id: 'img-error', cats: ['image'], agent: true, label: 'Diagnose the error in this screenshot', prompt: () => 'diagnose the error or problem shown in this screenshot and suggest a fix.'},
+  {id: 'img-describe', cats: ['image'], agent: true, label: 'Describe the image', prompt: () => 'describe what is shown in this image.'},
+  {id: 'img-ocr', cats: ['image'], agent: true, label: 'Extract the text (OCR)', prompt: () => 'do OCR on this image and extract all of the text.'},
+  {id: 'log-errors', cats: ['log'], agent: true, label: 'Find the errors', prompt: () => 'read this log and list the errors and warnings, most important first.'},
+  {id: 'log-cause', cats: ['log'], agent: true, label: 'Find the root cause', prompt: () => 'read this log, find the root cause of the failure, and suggest a fix.'},
+  {id: 'code-review', cats: ['code'], agent: true, label: 'Review for bugs', prompt: () => 'review this file for bugs and correctness issues.'},
+  {id: 'code-explain', cats: ['code', 'config'], agent: true, label: 'Explain what it does', prompt: () => 'explain what this file does.'},
+  {id: 'code-security', cats: ['code', 'config'], agent: true, label: 'Find security issues', prompt: () => 'review this file for security problems.'},
+  {id: 'code-tests', cats: ['code'], agent: true, label: 'Write tests', prompt: () => 'write tests for this file.'},
+  {id: 'diff-review', cats: ['diff'], agent: true, label: 'Review the diff', prompt: () => 'review this diff for risks and regressions.'},
+  {id: 'diff-commit', cats: ['diff'], agent: true, label: 'Write a commit message', prompt: () => 'write a commit message for the change in this diff.'},
+  {id: 'data-summary', cats: ['data'], agent: true, label: 'Summarize the data', prompt: () => 'summarize the structure and contents of this data file (columns/schema, row count, anything notable).'},
+  {id: 'data-anomaly', cats: ['data'], agent: true, label: 'Find anomalies', prompt: () => 'look at this data file and point out anomalies or outliers.'},
+  {id: 'doc-summary', cats: ['doc'], agent: true, label: 'Summarize', prompt: () => 'summarize this document.'},
+  {id: 'doc-todos', cats: ['doc'], agent: true, label: 'Extract the action items', prompt: () => 'extract the action items and TODOs from this document.'},
+  {id: 'dir-tree', cats: ['dir'], agent: true, label: 'Summarize this folder', prompt: () => 'summarize the contents of this folder.'},
+  {id: 'dir-large', cats: ['dir'], agent: true, label: 'Find the largest files', prompt: () => 'find the largest files in this folder.'},
+  {id: 'analyze', cats: ['any'], agent: true, label: 'Take a look at it', prompt: () => 'take a look at this file and tell me what it is and anything notable.'},
 ];
 
 function dropSuggestionsFor(category, agentKind, count = 1) {
   const isAgent = agentKind === 'claude' || agentKind === 'codex';
-  // ⌥1 is reserved for Insert path, so context suggestions fill ⌥2..⌥9 (cap 8).
+  // The path is inserted first (not a row), so 1..9 map straight to context actions (cap 9 = digit keys).
   return DROP_SUGGESTIONS.filter(s => {
     if (s.agent && !isAgent) return false;
     return s.cats.includes('any') || s.cats.includes(category);
-  }).slice(0, 8);
+  }).slice(0, 9);
 }
 
-function composeDropSuggestion(suggestion, references) {
-  return suggestion.prompt(references.join(' '));
+// The action clause to append after the already-inserted path. No path argument: it refers to the file
+// deictically ("this image/file/…") and is joined to the path with a leading "; " at the call site.
+function composeDropSuggestion(suggestion) {
+  return suggestion.prompt();
 }
 
 let terminalDropSuggestionState = null;
@@ -966,13 +971,12 @@ function showTerminalDropSuggestions(session, payload, x, y) {
   dismissTerminalDropSuggestions();
   const paths = Array.isArray(payload?.paths) ? payload.paths.filter(Boolean) : [payload?.path].filter(Boolean);
   if (!paths.length) return false;
-  const references = terminalFileReferences(session, payload).map(shellQuote);
   const category = fileDropCategory(paths[0], payload?.kind);
   const suggestions = dropSuggestionsFor(category, sessionAgentKind(session), paths.length);
-  const rows = [
-    {label: paths.length > 1 ? `Insert ${paths.length} paths` : 'Insert path', run: () => insertFileDragPayloadIntoTerminal(session, payload)},
-    ...suggestions.map(s => ({label: s.label, run: () => insertIntoTerminal(session, composeDropSuggestion(s, references))})),
-  ].slice(0, 9);
+  // The path was inserted before this overlay opened, so every row is an action that appends a clause
+  // ("; do OCR on this image.") after it. Nothing to suggest (non-agent pane / no match) → no overlay.
+  if (!suggestions.length) return false;
+  const rows = suggestions.map(s => ({label: s.label, run: () => insertIntoTerminal(session, `; ${composeDropSuggestion(s)}`)}));
 
   const node = document.createElement('div');
   node.className = 'terminal-drop-suggestions';
@@ -1088,6 +1092,8 @@ function installFilePathDropTarget(session, target) {
       return;
     }
     if (mode === 'suggest') {
+      // Insert the path first (the primary action), then offer the action overlay on top of it.
+      insertFileDragPayloadIntoTerminal(session, payload);
       showTerminalDropSuggestions(session, payload, event.clientX, event.clientY);
       return;
     }
@@ -1260,18 +1266,16 @@ async function uploadFiles(session, fileList, options = {}) {
     const paths = (payload.files || []).map(file => file.path).filter(Boolean);
     if (options.source === 'paste') syncPasteCountersFromPayload(payload);
     activateTab(session, 'terminal');
-    // DOIT.57: a dropped/pasted upload shows the suggestion overlay (Alt+1..9) for the uploaded path
-    // instead of auto-inserting it — Alt+1 still inserts the path. A drop anchors at the drop point; a
-    // paste has none, so the overlay anchors near the terminal. Falls back to the legacy insert when
-    // uploads.show_suggestions is off.
+    // DOIT.57: always insert the uploaded path first (you get the name no matter what), then — when
+    // uploads.show_suggestions is on (default) — float the action overlay on top so 1..9 can append a
+    // clause after it. A drop anchors at the drop point; a paste has none, so the overlay anchors near
+    // the terminal. The overlay no-ops for non-agent panes (just the path).
+    const inserted = options.source === 'paste'
+      ? insertPasteUploadReferences(session, payload.files || [], {silent: true})
+      : insertUploadPaths(session, paths, {silent: true});
+    showUploadResult(session, payload, inserted);
     if (paths.length && boolSetting('uploads.show_suggestions', true)) {
-      showUploadResult(session, payload, false);
       showTerminalDropSuggestions(session, {path: paths[0], paths, kind: 'file'}, options.suggestAt?.x, options.suggestAt?.y);
-    } else {
-      const inserted = options.source === 'paste'
-        ? insertPasteUploadReferences(session, payload.files || [], {silent: true})
-        : insertUploadPaths(session, paths, {silent: true});
-      showUploadResult(session, payload, inserted);
     }
     refreshOpenEventLogs();
     refreshTranscripts({force: true});

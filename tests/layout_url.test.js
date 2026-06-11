@@ -9225,12 +9225,15 @@ test('t@8804', () => {
   const imgClaude = api.dropSuggestionsFor('image', 'claude', 1);
   assert.ok(imgClaude.some(s => s.id === 'img-error'), 'image + agent offers diagnose-screenshot');
   assert.ok(!imgClaude.some(s => s.id === 'log-errors'), 'image category hides log-only suggestions');
-  assert.ok(imgClaude.length <= 8, 'suggestions cap at 8 (Alt+1 is reserved for Insert path)');
+  assert.ok(imgClaude.length <= 9, 'suggestions cap at 9 (the path is inserted first, so 1..9 are all actions)');
   assert.equal(api.dropSuggestionsFor('image', '', 1).length, 0, 'a plain shell pane shows no agent suggestions');
 
   const logErrors = api.dropSuggestionsFor('log', 'claude', 1).find(s => s.id === 'log-errors');
   assert.ok(logErrors, 'log + agent offers find-errors');
-  assert.ok(api.composeDropSuggestion(logErrors, ["'/var/log/app.log'"]).includes("'/var/log/app.log'"), 'compose embeds the shell-quoted path reference');
+  const logClause = api.composeDropSuggestion(logErrors);
+  assert.ok(/\blog\b/i.test(logClause), 'compose returns a deictic clause that refers to the file (this log)');
+  assert.equal(logClause.includes('/var/log'), false, 'compose does NOT repeat the path — it is appended after the already-inserted path');
+  assert.equal(api.composeDropSuggestion(imgClaude.find(s => s.id === 'img-ocr')), 'do OCR on this image and extract all of the text.', 'OCR clause reads as an appendable instruction about this image');
   assert.ok(api.dropSuggestionsFor('any', 'codex', 1).some(s => s.id === 'analyze'), 'any-category fallback offers a generic look');
 }
 
@@ -9335,9 +9338,10 @@ test('t@8804', () => {
       return Promise.resolve(jsonResponse({items: [], session: '1'}));
     });
 
-    // DOIT.57: pin the legacy paste->insert path here; with uploads.show_suggestions on (default) a
-    // paste shows the suggestion overlay instead of inserting (the registry/overlay is covered above).
-    api.setClientSettingsPatchForTest({uploads: {show_suggestions: false}});
+    // DOIT.57 regression: a pasted image must ALWAYS insert its path reference, even with the suggestion
+    // overlay on (default). The overlay is additive (it appends a clause); it never replaces the insert.
+    // This pane has no agent, so no overlay rows render — only the path insert is asserted here.
+    api.setClientSettingsPatchForTest({uploads: {show_suggestions: true}});
     api.bindClipboardPasteForTest();
     api.bindClipboardPasteForTest();
     const pasteListeners = api.documentListenersForTest('paste');
