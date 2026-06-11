@@ -1201,6 +1201,10 @@ function test(label, fn) {
     __testPass++;
   } catch (error) {
     __testFail++;
+    // Fail the process IMMEDIATELY on any failing test. The tail .finally also sets this, but it is
+    // skipped whenever the trailing async block does not settle (an await that never resolves) \u2014 which
+    // silently let red tests exit 0 and pass the cps gate. Setting it here does not depend on the tail.
+    process.exitCode = 1;
     console.error(`\u2717 ${label}: ${(error && error.message) || error}`);
   }
 }
