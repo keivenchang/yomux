@@ -414,6 +414,19 @@ VISIBLE_AGENT_WORKING_CASES = [
         id="codex-working-with-input-prompt-below",
     ),
     pytest.param(
+        "\n".join([
+            "○ Working (33m 05s · esc to interrupt)",
+            "╭────────────────────────────────────────────╮",
+            "│ Use /skills to list available skills       │",
+            "│ >                                          │",
+            "╰────────────────────────────────────────────╯",
+            "gpt-5.5 xhigh   ~/yolomux.dev2",
+        ]),
+        True,
+        "working",
+        id="codex-working-with-bottom-composer-and-model-status",
+    ),
+    pytest.param(
         "✱ Imagining… (4s · ↓ 98 tokens)\n  ⎿  Tip: Connect Claude to your IDE · /ide\n",
         True,
         "working",
@@ -521,6 +534,12 @@ VISIBLE_AGENT_WORKING_CASES = [
         "working",
         id="unicode-task-glyphs",
     ),
+    pytest.param(
+        "○ Working (4m 09s • esc to interrupt)\nuser@host$ echo done\n",
+        False,
+        None,
+        id="working-line-with-real-shell-prompt-below-is-stale",
+    ),
 ]
 
 
@@ -547,6 +566,23 @@ def test_claude_multi_agent_header_does_not_hide_live_approval_prompt():
     assert prompt_state["type"] == "bash"
     assert screen_state["key"] == "approval"
     assert screen_state["key"] != "working"
+
+
+def test_approval_prompt_ignores_codex_bottom_chrome_after_footer():
+    visible_text = "\n".join([
+        "Would you like to run the following command?",
+        "  echo hi",
+        "",
+        "❯ 1. Yes",
+        "  2. No",
+        "Enter to select",
+        "╭────────────────────────────────────────────╮",
+        "│ Use /skills to list available skills       │",
+        "│ >                                          │",
+        "╰────────────────────────────────────────────╯",
+        "gpt-5.5 xhigh   ~/yolomux.dev2",
+    ])
+    assert prompt_detector.approval_prompt_has_later_activity(visible_text) is False
 
 
 def test_detect_prompt_real_prompt_shapes_and_bottom_most_prompt_wins():

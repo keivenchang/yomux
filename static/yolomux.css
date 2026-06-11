@@ -3700,7 +3700,7 @@ button:disabled:hover { border-color: var(--line); }
   max-height: min(18px, var(--pane-tab-height));
   line-height: 1;
 }
-.yolomux-dockview .dockview-pane-header-actions .tmux-window-step,
+.yolomux-dockview .dockview-pane-header-actions .tmux-window-button,
 .yolomux-dockview .dockview-pane-header-actions .terminal-tab {
   padding-block: 0;
 }
@@ -4569,6 +4569,33 @@ body.theme-light .drop-slot.drag-over {
 .panel-session-label .agent-icon {
   margin-inline-start: 0;
 }
+.panel-agent-slot {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+.panel-agent-slot:empty {
+  display: none;
+}
+.panel-agent-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  max-width: 74px;
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid var(--pane-tab-yolo-border);
+  border-radius: 6px;
+  color: var(--pane-tab-yolo-text);
+  background: var(--pane-tab-yolo-bg);
+  font: 700 var(--ui-font-size-xs)/1 var(--mono-font);
+  text-transform: lowercase;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .panel-session-tab {
   cursor: default;
   pointer-events: none;
@@ -5116,10 +5143,40 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
 .tabs .tab[hidden] {
   display: none !important;
 }
-.tmux-window-step {
-  flex: 0 0 auto;
+.tmux-window-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 1 1 auto;
   min-width: 0;
-  padding: 1px 3px;
+  overflow: hidden;
+}
+.panel-detail-row .tmux-window-bar {
+  flex: 0 1 auto;
+  max-width: min(44ch, 46%);
+}
+.tmux-window-button {
+  flex: 0 1 auto;
+  min-width: 18px;
+  max-width: 96px;
+  padding-inline: 4px;
+}
+.tmux-window-button .tmux-window-name-label,
+.tmux-window-button .tmux-window-number-label {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tmux-window-bar[data-tmux-window-label-mode="names"] .tmux-window-number-label,
+.tmux-window-bar[data-tmux-window-label-mode="numbers"] .tmux-window-name-label {
+  display: none;
+}
+.tmux-window-bar[data-tmux-window-label-mode="numbers"] .tmux-window-button {
+  flex: 0 0 auto;
+  min-width: 20px;
+  max-width: 28px;
+  padding-inline: 3px;
 }
 .terminal-tab {
   flex: 0 1 auto;
@@ -5127,7 +5184,7 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
   min-width: 0;
   padding-inline: 3px;
 }
-.tabs .tab:not(.tmux-window-step):not(.terminal-tab):not(.pane-actions):not(.panel-tab-overflow):not(.pane-close):not(.pane-detail-toggle):not(.pane-minimize):not(.pane-expand) {
+.tabs .tab:not(.tmux-window-button):not(.terminal-tab):not(.pane-actions):not(.panel-tab-overflow):not(.pane-close):not(.pane-detail-toggle):not(.pane-minimize):not(.pane-expand) {
   flex: 0 1 auto;
   min-width: 0;
   padding-inline: 3px;
@@ -5247,7 +5304,7 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
   transform: translate(-50%, -50%) rotate(90deg);
 }
 /* ── SHARED pane-head control buttons (single source of truth) ──────────────────────────────────────
-   Every control button (terminal/agent pill, window-step < >, actions …, detail/info toggle, minimize,
+   Every control button (terminal/window pill, actions …, detail/info toggle, minimize,
    expand +, close ×) shares ONE color treatment — they only add their own glyph/layout, never their own
    colors. Rest = white (light) / near-black (dark) via --pane-ctl-*; the PRESSED/ACTIVE state (active
    terminal/agent tab, a toggled-on info toggle, etc.) = green. The .auto-toggle (YO/YOLO) keeps its own
@@ -9166,6 +9223,42 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
 }
 .file-explorer-changes-collapse-toggle {
   font-size: var(--ui-font-size);
+}
+.file-tree-expand-collapse-all {
+  box-sizing: border-box;
+  width: 16px;
+  min-width: 16px;
+  max-width: 16px;
+  inline-size: 16px;
+  min-inline-size: 16px;
+  max-inline-size: 16px;
+  flex: 0 0 16px;
+  padding: 0;
+  font-size: 0;
+}
+.changes-toolbar .file-tree-expand-collapse-all.changes-date-toggle,
+.file-explorer-changes-head .file-tree-expand-collapse-all.changes-date-toggle,
+.file-explorer-date-reload-cluster .file-tree-expand-collapse-all.changes-date-toggle {
+  width: 16px;
+  min-width: 16px;
+  max-width: 16px;
+  inline-size: 16px;
+  min-inline-size: 16px;
+  max-inline-size: 16px;
+  flex: 0 0 16px;
+  height: 20px;
+  padding: 0;
+}
+.file-tree-expand-collapse-icon {
+  display: block;
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.35;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
 }
 .file-explorer-mode-switcher {
   display: inline-flex;

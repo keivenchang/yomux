@@ -13,9 +13,10 @@ function toggleFileExplorer() {
 
 async function openFileExplorerAt(path, options = {}) {
   const root = normalizeDirectoryPath(expandUserPath(path));
-  const entries = await fetchDirectory(root);
+  const entries = await fetchDirectory(root, {user: options.user === true || options.manualSelection === true});
   if (!entries) {
-    setFileExplorerPathDisplay(root, {error: fileExplorerPathError || `Cannot open ${root}`});
+    const error = currentFileExplorerListError(root);
+    if (error) setFileExplorerPathDisplay(root, {error});
     return false;
   }
   const previousExpanded = options.preserveExpanded ? Array.from(fileExplorerExpanded) : [];
@@ -64,6 +65,27 @@ const fileExplorerFsBatchDelayMs = 8;
 let fileExplorerFsBatchSeq = 0;
 let fileExplorerFsBatchTimer = null;
 let fileExplorerPushRefreshDepth = 0;
+
+function clearFileExplorerListError(path = '') {
+  const root = normalizeDirectoryPath(path || '');
+  if (!root || !fileExplorerLastListError || normalizeDirectoryPath(fileExplorerLastListError.path) === root) {
+    fileExplorerPathError = '';
+    fileExplorerLastListError = null;
+  }
+}
+
+function setFileExplorerListError(path, error, status = 0) {
+  const root = normalizeDirectoryPath(path || '');
+  fileExplorerPathError = error || '';
+  fileExplorerLastListError = root && error ? {path: root, status, error, network: !status} : null;
+}
+
+function currentFileExplorerListError(path) {
+  const root = normalizeDirectoryPath(path || '');
+  return root && normalizeDirectoryPath(fileExplorerLastListError?.path || '') === root
+    ? fileExplorerLastListError.error || ''
+    : '';
+}
 
 function fileExplorerFsCacheTtlMs() {
   return Math.max(0, numberSetting('file_explorer.dir_cache_ms', 1500) || 0);
@@ -162,17 +184,25 @@ async function fetchDirectory(path, options = {}) {
   const dirListingTtlMs = fileExplorerFsCacheTtlMs();
   if (canReuse && dirListingTtlMs > 0) {
     const cached = fileExplorerDirListingCache.get(root);
-    if (cached && Date.now() - cached.at < dirListingTtlMs) return cached.entries;
+    if (cached && Date.now() - cached.at < dirListingTtlMs) {
+      clearFileExplorerListError(root);
+      return cached.entries;
+    }
   }
-  if (fileExplorerPushRefreshDepth > 0) return null;
-  if (suppressBackgroundFilesystemFetch(options)) return null;
+  if (fileExplorerPushRefreshDepth > 0) {
+    clearFileExplorerListError(root);
+    return null;
+  }
+  if (suppressBackgroundFilesystemFetch(options)) {
+    clearFileExplorerListError(root);
+    return null;
+  }
   return dedupeInflight(fileExplorerDirListingInflight, root, canReuse, () => (async () => {
     try {
       hydrateFileExplorerRepoInfoCache();
       const payload = await fetchFilesystemBatchItem('list', root, {dedupe: canReuse});
       const entries = payload.entries || [];
-      fileExplorerPathError = '';
-      fileExplorerLastListError = null;
+      clearFileExplorerListError(root);
       cacheFileExplorerRepoInfoEntries(root, entries);
       markNewDirectoryEntries(root, entries);
       if (options.recordSignature !== false) recordDirectorySignature(root, entries);
@@ -183,7 +213,7 @@ async function fetchDirectory(path, options = {}) {
       fileExplorerPathError = status
         ? err.message || `Cannot open ${root} (${status})`
         : `Cannot open ${root}: ${err}`;
-      fileExplorerLastListError = {path: root, status, error: fileExplorerPathError, network: !status};
+      setFileExplorerListError(root, fileExplorerPathError, status);
       console.warn(status ? 'fs list failed' : 'fs list error', root, status || err, fileExplorerPathError);
       return null;
     }
@@ -586,6 +616,14 @@ function fileExplorerExplicitSyncSessionTarget() {
     : '';
 }
 
+function fileExplorerSyncCommandSessionTarget() {
+  const explicitSession = fileExplorerExplicitSyncSessionTarget();
+  if (explicitSession) return explicitSession;
+  const payloadSession = String(fileExplorerSessionFilesPayload?.session || '');
+  if (isTmuxSession(payloadSession) && activeSessions.includes(payloadSession)) return payloadSession;
+  return activeTmuxSessionForFinder();
+}
+
 function rememberFileExplorerExplicitSyncSession(session) {
   if (!isTmuxSession(session) || !activeSessions.includes(session)) return false;
   fileExplorerExplicitSyncSession = session;
@@ -851,6 +889,21 @@ function fileExplorerSyncExpansionPaths(plan) {
   return (plan?.expandPaths || []).filter(path => !fileExplorerSyncPathSuppressed(path));
 }
 
+function fileExplorerSyncExplicitExpansionTargets(plan, root = plan?.root || currentFileExplorerRoot()) {
+  const normalizedRoot = normalizeDirectoryPath(root || '');
+  if (!normalizedRoot) return [];
+  return Array.from(new Set([
+    ...(plan?.expandPaths || []),
+    ...(plan?.affectedDirs || []),
+  ]
+    .map(path => normalizeDirectoryPath(path))
+    .filter(path => path && path !== normalizedRoot && pathIsInsideDirectory(path, normalizedRoot))))
+    .sort((left, right) => (
+      childPathParts(normalizedRoot, left).length - childPathParts(normalizedRoot, right).length
+      || left.localeCompare(right)
+    ));
+}
+
 function fileExplorerSyncHighlightedRepoRoots(plan, repoRoots) {
   const expansionPaths = new Set(fileExplorerSyncExpansionPaths(plan));
   const root = normalizeDirectoryPath(plan?.root || '');
@@ -1111,7 +1164,10 @@ async function commitFileExplorerPathInput(input) {
   const target = expandUserPath(raw);
   if (!target) return false;
   const opened = await openFileExplorerManualRoot(target);
-  if (!opened) setFileExplorerPathError(input, fileExplorerPathError || `Cannot open ${target}`);
+  if (!opened) {
+    const error = currentFileExplorerListError(target);
+    if (error) setFileExplorerPathError(input, error);
+  }
   return opened;
 }
 

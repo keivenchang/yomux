@@ -2,6 +2,8 @@ from http import HTTPStatus
 import json
 import threading
 from types import SimpleNamespace
+from urllib.parse import parse_qs
+from urllib.parse import urlparse
 
 import pytest
 
@@ -32,6 +34,47 @@ def test_auto_approve_status_refreshes_session_order(monkeypatch):
     assert status == HTTPStatus.OK
     assert payload["session_order"] == ["new"]
     assert payload["sessions"] == {"new": {"target": "new"}}
+
+
+def test_share_token_url_seeds_session_and_layout():
+    webapp = app_module.TmuxWebtermApp(["6"])
+    try:
+        payload, status = webapp.create_share_token(
+            "6",
+            900,
+            base_url="https://yolo.example.test:8002",
+            created_by="keivenc",
+            layout="row@50(left,slot1)",
+            tabs="slot1:6",
+        )
+        parsed = urlparse(payload["url"])
+        params = parse_qs(parsed.query)
+
+        assert status == HTTPStatus.OK
+        assert payload["ok"] is True
+        assert payload["session"] == "6"
+        assert parsed.scheme == "https"
+        assert parsed.netloc == "yolo.example.test:8002"
+        assert params["token"] == [payload["token"]]
+        assert params["sessions"] == ["6"]
+        assert params["layout"] == ["row@50(left,slot1)"]
+        assert params["tabs"] == ["slot1:6"]
+        assert webapp.verify_share_token(payload["token"])["session"] == "6"
+    finally:
+        webapp.control_server.stop()
+
+
+def test_share_token_revokes_when_session_disappears():
+    webapp = app_module.TmuxWebtermApp(["6"])
+    try:
+        payload, status = webapp.create_share_token("6", 900)
+        assert status == HTTPStatus.OK
+        assert webapp.verify_share_token(payload["token"])["session"] == "6"
+
+        assert webapp.revoke_share_tokens_for_missing_sessions(set()) == 1
+        assert webapp.verify_share_token(payload["token"]) is None
+    finally:
+        webapp.control_server.stop()
 
 
 def test_server_event_poll_seconds_accepts_fast_server_side_interval(monkeypatch):

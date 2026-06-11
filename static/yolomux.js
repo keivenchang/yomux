@@ -4592,6 +4592,12 @@ function revealOpenFileLineSoon(path, line) {
   });
 }
 
+function fileQuickOpenTargetSlot() {
+  const item = currentActiveMenuItem();
+  const slot = item ? slotForSession(item) : null;
+  return slot && !slotIsFileExplorerPane(slot) ? slot : null;
+}
+
 async function openFileQuickOpenPath(path, options = {}) {
   const label = basenameOf(path);
   let openedItem = null;
@@ -4602,7 +4608,10 @@ async function openFileQuickOpenPath(path, options = {}) {
       ? {targetSlot: splitBaseSlot, targetZone: targetSlot ? 'middle' : 'right', forceNewTab: true, userInitiated: true}
       : {forceNewTab: true, userInitiated: true});
   } else {
-    openedItem = await openFileInEditor(path, {name: label}, {userInitiated: true});
+    const targetSlot = fileQuickOpenTargetSlot();
+    openedItem = await openFileInEditor(path, {name: label}, targetSlot
+      ? {targetSlot, userInitiated: true}
+      : {userInitiated: true});
   }
   focusQuickOpenedFile(openedItem);
   revealOpenFileLineSoon(path, options.line || null);
@@ -4678,6 +4687,24 @@ function fileQuickOpenOpenFolderItem() {
   };
 }
 
+function fileQuickOpenStrictExternalIndexedQuery(query = commandPaletteSearchQuery()) {
+  const text = String(query || '').trim();
+  if (!text || text.includes('/') || text.startsWith('~')) return false;
+  return /[.]/.test(text);
+}
+
+function fileQuickOpenExternalIndexedMatchAllowed(file, query = commandPaletteSearchQuery()) {
+  if (!fileQuickOpenStrictExternalIndexedQuery(query)) return true;
+  const path = String(file?.path || '');
+  const basename = String(file?.name || basenameOf(path));
+  const stem = basename.includes('.') ? basename.slice(0, basename.lastIndexOf('.')) : basename;
+  const needle = fuzzyCanonicalPrefixText(query);
+  if (!needle) return true;
+  return [basename, stem]
+    .map(fuzzyCanonicalPrefixText)
+    .some(value => value && (value.startsWith(needle) || value.includes(needle)));
+}
+
 function fileQuickOpenItems() {
   const seen = new Set();
   const items = [];
@@ -4700,6 +4727,7 @@ function fileQuickOpenItems() {
     const indexedRoot = file.indexed_root ? normalizeStoredFileExplorerIndexedDir(file.indexed_root) : '';
     const baseRoot = normalizeStoredFileExplorerIndexedDir(fileQuickOpenRoot || '');
     const externalIndexed = Boolean(indexedRoot && indexedRoot !== baseRoot);
+    if (externalIndexed && !fileQuickOpenExternalIndexedMatchAllowed(file)) continue;
     const isImage = (file.kind || 'file') !== 'dir' && IMAGE_EXTENSIONS.has(fileExtensionOf(path));
     if (isImage) imageIndex += 1;
     add(fileQuickOpenItem(path, {
@@ -7021,9 +7049,10 @@ function toggleFileExplorer() {
 
 async function openFileExplorerAt(path, options = {}) {
   const root = normalizeDirectoryPath(expandUserPath(path));
-  const entries = await fetchDirectory(root);
+  const entries = await fetchDirectory(root, {user: options.user === true || options.manualSelection === true});
   if (!entries) {
-    setFileExplorerPathDisplay(root, {error: fileExplorerPathError || `Cannot open ${root}`});
+    const error = currentFileExplorerListError(root);
+    if (error) setFileExplorerPathDisplay(root, {error});
     return false;
   }
   const previousExpanded = options.preserveExpanded ? Array.from(fileExplorerExpanded) : [];
@@ -7072,6 +7101,27 @@ const fileExplorerFsBatchDelayMs = 8;
 let fileExplorerFsBatchSeq = 0;
 let fileExplorerFsBatchTimer = null;
 let fileExplorerPushRefreshDepth = 0;
+
+function clearFileExplorerListError(path = '') {
+  const root = normalizeDirectoryPath(path || '');
+  if (!root || !fileExplorerLastListError || normalizeDirectoryPath(fileExplorerLastListError.path) === root) {
+    fileExplorerPathError = '';
+    fileExplorerLastListError = null;
+  }
+}
+
+function setFileExplorerListError(path, error, status = 0) {
+  const root = normalizeDirectoryPath(path || '');
+  fileExplorerPathError = error || '';
+  fileExplorerLastListError = root && error ? {path: root, status, error, network: !status} : null;
+}
+
+function currentFileExplorerListError(path) {
+  const root = normalizeDirectoryPath(path || '');
+  return root && normalizeDirectoryPath(fileExplorerLastListError?.path || '') === root
+    ? fileExplorerLastListError.error || ''
+    : '';
+}
 
 function fileExplorerFsCacheTtlMs() {
   return Math.max(0, numberSetting('file_explorer.dir_cache_ms', 1500) || 0);
@@ -7170,17 +7220,25 @@ async function fetchDirectory(path, options = {}) {
   const dirListingTtlMs = fileExplorerFsCacheTtlMs();
   if (canReuse && dirListingTtlMs > 0) {
     const cached = fileExplorerDirListingCache.get(root);
-    if (cached && Date.now() - cached.at < dirListingTtlMs) return cached.entries;
+    if (cached && Date.now() - cached.at < dirListingTtlMs) {
+      clearFileExplorerListError(root);
+      return cached.entries;
+    }
   }
-  if (fileExplorerPushRefreshDepth > 0) return null;
-  if (suppressBackgroundFilesystemFetch(options)) return null;
+  if (fileExplorerPushRefreshDepth > 0) {
+    clearFileExplorerListError(root);
+    return null;
+  }
+  if (suppressBackgroundFilesystemFetch(options)) {
+    clearFileExplorerListError(root);
+    return null;
+  }
   return dedupeInflight(fileExplorerDirListingInflight, root, canReuse, () => (async () => {
     try {
       hydrateFileExplorerRepoInfoCache();
       const payload = await fetchFilesystemBatchItem('list', root, {dedupe: canReuse});
       const entries = payload.entries || [];
-      fileExplorerPathError = '';
-      fileExplorerLastListError = null;
+      clearFileExplorerListError(root);
       cacheFileExplorerRepoInfoEntries(root, entries);
       markNewDirectoryEntries(root, entries);
       if (options.recordSignature !== false) recordDirectorySignature(root, entries);
@@ -7191,7 +7249,7 @@ async function fetchDirectory(path, options = {}) {
       fileExplorerPathError = status
         ? err.message || `Cannot open ${root} (${status})`
         : `Cannot open ${root}: ${err}`;
-      fileExplorerLastListError = {path: root, status, error: fileExplorerPathError, network: !status};
+      setFileExplorerListError(root, fileExplorerPathError, status);
       console.warn(status ? 'fs list failed' : 'fs list error', root, status || err, fileExplorerPathError);
       return null;
     }
@@ -7594,6 +7652,14 @@ function fileExplorerExplicitSyncSessionTarget() {
     : '';
 }
 
+function fileExplorerSyncCommandSessionTarget() {
+  const explicitSession = fileExplorerExplicitSyncSessionTarget();
+  if (explicitSession) return explicitSession;
+  const payloadSession = String(fileExplorerSessionFilesPayload?.session || '');
+  if (isTmuxSession(payloadSession) && activeSessions.includes(payloadSession)) return payloadSession;
+  return activeTmuxSessionForFinder();
+}
+
 function rememberFileExplorerExplicitSyncSession(session) {
   if (!isTmuxSession(session) || !activeSessions.includes(session)) return false;
   fileExplorerExplicitSyncSession = session;
@@ -7859,6 +7925,21 @@ function fileExplorerSyncExpansionPaths(plan) {
   return (plan?.expandPaths || []).filter(path => !fileExplorerSyncPathSuppressed(path));
 }
 
+function fileExplorerSyncExplicitExpansionTargets(plan, root = plan?.root || currentFileExplorerRoot()) {
+  const normalizedRoot = normalizeDirectoryPath(root || '');
+  if (!normalizedRoot) return [];
+  return Array.from(new Set([
+    ...(plan?.expandPaths || []),
+    ...(plan?.affectedDirs || []),
+  ]
+    .map(path => normalizeDirectoryPath(path))
+    .filter(path => path && path !== normalizedRoot && pathIsInsideDirectory(path, normalizedRoot))))
+    .sort((left, right) => (
+      childPathParts(normalizedRoot, left).length - childPathParts(normalizedRoot, right).length
+      || left.localeCompare(right)
+    ));
+}
+
 function fileExplorerSyncHighlightedRepoRoots(plan, repoRoots) {
   const expansionPaths = new Set(fileExplorerSyncExpansionPaths(plan));
   const root = normalizeDirectoryPath(plan?.root || '');
@@ -8119,7 +8200,10 @@ async function commitFileExplorerPathInput(input) {
   const target = expandUserPath(raw);
   if (!target) return false;
   const opened = await openFileExplorerManualRoot(target);
-  if (!opened) setFileExplorerPathError(input, fileExplorerPathError || `Cannot open ${target}`);
+  if (!opened) {
+    const error = currentFileExplorerListError(target);
+    if (error) setFileExplorerPathError(input, error);
+  }
   return opened;
 }
 
@@ -9743,21 +9827,131 @@ async function createFileExplorerFolder() {
   }
 }
 
-function collapseAllFileExplorerDirectories() {
+function fileTreeExpandCollapseAllButtonHtml(action, extraClass = '') {
+  const expand = action === 'expand';
+  const title = t(expand ? 'changes.expandAll' : 'changes.collapseAll');
+  const classes = ['file-explorer-header-action', 'file-tree-expand-collapse-all', extraClass].filter(Boolean).join(' ');
+  return `<button type="button" class="${esc(classes)}" data-file-tree-expand-collapse-all="${expand ? 'expand' : 'collapse'}" title="${esc(title)}" aria-label="${esc(title)}">${fileTreeExpandCollapseAllIconHtml(action)}</button>`;
+}
+
+function fileTreeExpandCollapseAllIconHtml(action) {
+  const expand = action === 'expand';
+  const arrows = expand
+    ? '<path d="M6.2 6.2 3 3"/><path d="M3 3h3"/><path d="M3 3v3"/><path d="M9.8 6.2 13 3"/><path d="M13 3h-3"/><path d="M13 3v3"/><path d="M6.2 9.8 3 13"/><path d="M3 13h3"/><path d="M3 13v-3"/><path d="M9.8 9.8 13 13"/><path d="M13 13h-3"/><path d="M13 13v-3"/>'
+    : '<path d="M3 3 6.2 6.2"/><path d="M6.2 6.2h-3"/><path d="M6.2 6.2v-3"/><path d="M13 3 9.8 6.2"/><path d="M9.8 6.2h3"/><path d="M9.8 6.2v-3"/><path d="M3 13l3.2-3.2"/><path d="M6.2 9.8h-3"/><path d="M6.2 9.8v3"/><path d="M13 13 9.8 9.8"/><path d="M9.8 9.8h3"/><path d="M9.8 9.8v3"/>';
+  return `<svg class="file-tree-expand-collapse-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">${arrows}</svg>`;
+}
+
+function fileTreeExpandCollapseAllButtonsHtml(extraClass = '') {
+  return `${fileTreeExpandCollapseAllButtonHtml('expand', extraClass)}${fileTreeExpandCollapseAllButtonHtml('collapse', extraClass)}`;
+}
+
+async function fileExplorerDirectoryPathsForRoot(root = currentFileExplorerRoot()) {
+  const normalizedRoot = normalizeDirectoryPath(root);
+  const seen = new Set([normalizedRoot]);
+  const result = [];
+  const queue = [normalizedRoot];
+  while (queue.length) {
+    const directory = queue.shift();
+    const entries = await fetchDirectory(directory);
+    if (!Array.isArray(entries)) continue;
+    for (const entry of sortedFileTreeEntries(entries, fileExplorerTreeSortMode, {includeHidden: fileExplorerShowHidden})) {
+      if (entry?.kind !== 'dir') continue;
+      const child = childPath(directory, entry.name);
+      if (seen.has(child)) continue;
+      seen.add(child);
+      result.push(child);
+      queue.push(child);
+    }
+  }
+  return result;
+}
+
+function addFileExplorerExpandedPathAncestors(path, root = currentFileExplorerRoot()) {
+  const normalizedRoot = normalizeDirectoryPath(root || '');
+  const target = normalizeDirectoryPath(path || '');
+  if (!normalizedRoot || !target || target === normalizedRoot || !pathIsInsideDirectory(target, normalizedRoot)) return false;
+  let changed = false;
+  let parent = normalizedRoot;
+  for (const part of childPathParts(normalizedRoot, target)) {
+    const nextPath = childPath(parent, part);
+    if (!fileExplorerExpanded.has(nextPath)) {
+      fileExplorerExpanded.add(nextPath);
+      changed = true;
+    }
+    parent = nextPath;
+  }
+  return changed;
+}
+
+async function expandSyncFileExplorerAffectedDirectories() {
+  const plan = fileExplorerSyncPlan(fileExplorerSyncCommandSessionTarget());
+  const root = normalizeDirectoryPath(plan.root || currentFileExplorerRoot());
+  if (!root) return false;
+  resetFileExplorerSyncManualCollapsesIfNeeded(plan);
+  const paths = fileExplorerSyncExplicitExpansionTargets(plan, root);
+  for (const path of paths) forgetFileExplorerSyncManualCollapse(path);
+  resetFileExplorerAppliedSyncPlan();
+  if (root !== currentFileExplorerRoot()) {
+    const opened = await openFileExplorerAt(root, {preserveExpanded: false, preserveScroll: false});
+    if (!opened) return false;
+  }
+  const generation = ++fileExplorerSyncGeneration;
+  let changed = false;
+  for (const path of paths) {
+    changed = addFileExplorerExpandedPathAncestors(path, root) || changed;
+  }
+  if (changed) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+  for (const path of paths) {
+    if (generation !== fileExplorerSyncGeneration) return changed;
+    changed = await expandFileExplorerTreesToPath(path, root, generation, {scrollIntoView: false, auto: true}) || changed;
+  }
+  setFileExplorerVisibleSyncTarget(plan.session, root);
+  rememberFileExplorerSyncExpandedState(plan.session, root);
+  markFileExplorerSyncPlanApplied(plan);
+  updateFileExplorerSessionHighlightRows(plan.session);
+  if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+  return changed;
+}
+
+async function expandAllFileExplorerDirectories() {
   if (fileExplorerRootMode === 'sync') {
-    const plan = fileExplorerSyncPlan(fileExplorerExplicitSyncSessionTarget());
+    await expandSyncFileExplorerAffectedDirectories();
+    return;
+  }
+  const paths = await fileExplorerDirectoryPathsForRoot(currentFileExplorerRoot());
+  fileExplorerExpanded.clear();
+  for (const path of paths) fileExplorerExpanded.add(path);
+  rememberFileExplorerSyncExpandedState();
+  await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+  if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+}
+
+async function collapseAllFileExplorerDirectories() {
+  if (fileExplorerRootMode === 'sync') {
+    const plan = fileExplorerSyncPlan(fileExplorerSyncCommandSessionTarget());
     for (const path of fileExplorerSyncExpansionPaths(plan)) rememberFileExplorerSyncManualCollapse(path);
   }
   fileExplorerExpanded.clear();
   rememberFileExplorerSyncExpandedState();
-  refreshFileExplorerTrees({preserveExpanded: false, preserveScroll: true});
+  await refreshFileExplorerTrees({preserveExpanded: false, preserveScroll: true});
+  if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+}
+
+async function setAllFileTreeDirectoriesExpanded(source, expand) {
+  if (source?.closest?.('.file-explorer-changes-panel')) {
+    setAllFileExplorerChangesDirectoriesExpanded(expand);
+    return;
+  }
+  if (expand) await expandAllFileExplorerDirectories();
+  else await collapseAllFileExplorerDirectories();
 }
 
 function bindFileExplorerHeaderActions(container = document) {
   if (!container || container.dataset?.fileExplorerHeaderActionsBound === 'true') return;
   if (container.dataset) container.dataset.fileExplorerHeaderActionsBound = 'true';
   container.addEventListener('click', event => {
-    const action = event.target.closest('[data-file-explorer-new-file], [data-file-explorer-new-folder], [data-file-explorer-refresh], [data-file-explorer-collapse], [data-file-explorer-tree-dates]');
+    const action = event.target.closest('[data-file-explorer-new-file], [data-file-explorer-new-folder], [data-file-explorer-refresh], [data-file-explorer-collapse], [data-file-explorer-tree-dates], [data-file-tree-expand-collapse-all]');
     if (!action || !container.contains(action)) return;
     event.preventDefault();
     event.stopPropagation();
@@ -9770,9 +9964,11 @@ function bindFileExplorerHeaderActions(container = document) {
         fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
       }
     } else if (action.matches('[data-file-explorer-collapse]')) {
-      collapseAllFileExplorerDirectories();
-    }
-    else if (action.matches('[data-file-explorer-tree-dates]')) {
+      collapseAllFileExplorerDirectories().catch(error => statusErr(`collapse failed: ${esc(error)}`));
+    } else if (action.matches('[data-file-tree-expand-collapse-all]')) {
+      setAllFileTreeDirectoriesExpanded(action, action.dataset.fileTreeExpandCollapseAll === 'expand')
+        .catch(error => statusErr(`tree action failed: ${esc(error)}`));
+    } else if (action.matches('[data-file-explorer-tree-dates]')) {
       cycleFileExplorerTreeDateMode();
     }
   });
@@ -17589,7 +17785,7 @@ function handleDockviewHeaderActionClick(event, fallbackItem = '') {
     activateTab(button.dataset.tab, nextName, {userInitiated: true});
     return;
   }
-  if (button.dataset.windowDir !== undefined) {
+  if (button.dataset.windowDir !== undefined || button.dataset.windowIndex !== undefined) {
     event.preventDefault();
     event.stopPropagation();
     handleWindowStepButtonClick(event);
@@ -17641,7 +17837,10 @@ function createDockviewHeaderActionsRenderer() {
     element.innerHTML = html;
     updatePanelWindowStepButtons(activeItem, transcriptMeta.sessions?.[activeItem]);
     const panel = document.getElementById(panelDomId(activeItem));
-    if (panel) updatePaneExpandButton(panel, activeItem);
+    if (panel) {
+      updatePaneExpandButton(panel, activeItem);
+      syncPanelDetailsToggleState(panel);
+    }
   };
   const dispose = () => {
     for (const disposable of disposables) disposable?.dispose?.();
@@ -19023,29 +19222,71 @@ function bindPanelPopover(panel) {
   });
 }
 
+function panelDetailsToggleLabel(collapsed) {
+  return collapsed ? t('pane.details.show') : t('pane.details.hide');
+}
+
+function syncPanelDetailsToggleButton(button, collapsed) {
+  if (!button) return;
+  const detailsLabel = panelDetailsToggleLabel(collapsed);
+  button.classList.toggle('active', !collapsed);
+  button.title = detailsLabel;
+  button.setAttribute('aria-label', detailsLabel);
+  button.setAttribute('aria-pressed', collapsed ? 'false' : 'true');
+}
+
+function panelDetailToggleButtons(panel) {
+  if (!panel) return [];
+  const buttons = [];
+  const seen = new Set();
+  const add = button => {
+    if (!button || seen.has(button)) return;
+    seen.add(button);
+    buttons.push(button);
+  };
+  panel.querySelectorAll?.('[data-detail-toggle]')?.forEach(add);
+  const item = panel.dataset?.slot || String(panel.id || '').replace(/^panel-/, '');
+  if (item) {
+    document.body?.querySelectorAll?.(`[data-detail-toggle="${cssEscape(item)}"]`)?.forEach(add);
+  }
+  return buttons;
+}
+
+function syncPanelDetailsToggleState(panel) {
+  const collapsed = panel?.classList?.contains('details-collapsed') === true;
+  panelDetailToggleButtons(panel).forEach(button => syncPanelDetailsToggleButton(button, collapsed));
+}
+
 function setPanelDetailsCollapsed(panel, collapsed) {
   panel.classList.toggle('details-collapsed', collapsed);
-  const button = panel.querySelector('[data-detail-toggle]');
-  if (button) {
-    button.classList.toggle('active', !collapsed);
-    const detailsLabel = collapsed ? t('pane.details.show') : t('pane.details.hide');
-    button.title = detailsLabel;
-    button.setAttribute('aria-label', detailsLabel);
-    button.setAttribute('aria-pressed', collapsed ? 'false' : 'true');
-  }
+  syncPanelDetailsToggleState(panel);
+}
+
+function terminalTabDisplayLabel(session, info) {
+  const label = terminalProcessLabel(info);
+  const agentKind = sessionAgentKind(session);
+  const normalized = String(label || '').trim().toLowerCase();
+  if (agentKind && (normalized === agentKind || normalized === agentName(agentKind).toLowerCase())) return 'Term';
+  return label || 'Term';
 }
 
 function terminalTabLabel(session, info) {
   const type = tabTypeForItem(session);
   if (type?.shortLabel) return type.shortLabel(session);
-  const label = terminalProcessLabel(info);
-  return shortText(label || 'Term', 16);
+  return shortText(terminalTabDisplayLabel(session, info), 16);
 }
 
 function terminalTabTitle(session, info) {
   const type = tabTypeForItem(session);
   if (type?.terminalTitle) return type.terminalTitle(session);
-  return `terminal: ${terminalProcessLabel(info) || 'Term'}`;
+  return `terminal: ${terminalTabDisplayLabel(session, info)}`;
+}
+
+function sessionAgentBadgeHtml(session) {
+  const kind = sessionAgentKind(session);
+  if (!kind) return '';
+  const name = agentName(kind);
+  return `<span class="panel-agent-badge ${esc(kind)}" title="${esc(name)}" aria-label="${esc(name)}">${esc(name)}</span>`;
 }
 
 function terminalProcessLabel(info) {
@@ -19084,14 +19325,73 @@ function tmuxWindowIndices(panes) {
   return windows.sort((left, right) => left - right);
 }
 
-function windowStepVisibility(panes) {
-  const windows = tmuxWindowIndices(panes);
-  if (windows.length <= 1) return {prev: false, next: false};
-  const activeIndex = tmuxWindowNumber((Array.isArray(panes) ? panes : []).find(pane => pane.window_active)?.window) ?? windows[0];
-  return {
-    prev: windows.some(index => index < activeIndex),
-    next: windows.some(index => index > activeIndex),
-  };
+const tmuxWindowBarNumericFallbackCount = 8;
+const tmuxWindowBarNamedCharLimit = 44;
+
+function tmuxWindowDisplayName(pane) {
+  const process = String(pane?.process_label || '').trim();
+  if (process) return process;
+  const name = String(pane?.window_name || '').trim();
+  if (name) return name;
+  const inferred = processLabelFromCommand(pane?.command || '');
+  return String(inferred || '').trim() || `window ${pane?.window ?? ''}`.trim() || 'window';
+}
+
+function tmuxWindowRecords(panes) {
+  const byIndex = new Map();
+  for (const pane of Array.isArray(panes) ? panes : []) {
+    const index = tmuxWindowNumber(pane.window);
+    if (index === null) continue;
+    const indexText = String(pane.window);
+    const existing = byIndex.get(index);
+    const active = pane.window_active === true;
+    const record = existing || {index, indexText, name: tmuxWindowDisplayName(pane), active: false};
+    if (!existing || active || !record.name) record.name = tmuxWindowDisplayName(pane);
+    record.active = record.active || active;
+    byIndex.set(index, record);
+  }
+  const records = [...byIndex.values()].sort((left, right) => left.index - right.index);
+  const nameCounts = new Map();
+  records.forEach(record => {
+    nameCounts.set(record.name, (nameCounts.get(record.name) || 0) + 1);
+  });
+  return records.map(record => ({
+    ...record,
+    nameLabel: nameCounts.get(record.name) > 1 ? `${record.name}(${record.indexText})` : record.name,
+    numberLabel: record.indexText,
+  })).map(record => ({
+    ...record,
+    indexedNameLabel: `${record.indexText}:${record.nameLabel}`,
+  }));
+}
+
+function tmuxWindowBarLabelMode(records, options = {}) {
+  if (options.labelMode === 'numbers' || options.labelMode === 'names') return options.labelMode;
+  const items = Array.isArray(records) ? records : [];
+  const fallbackCount = Number.isFinite(options.fallbackCount) ? options.fallbackCount : tmuxWindowBarNumericFallbackCount;
+  const charLimit = Number.isFinite(options.namedCharLimit) ? options.namedCharLimit : tmuxWindowBarNamedCharLimit;
+  const namedChars = items.reduce((total, item) => total + String(item.indexedNameLabel || item.nameLabel || '').length, 0);
+  return items.length > fallbackCount || namedChars > charLimit ? 'numbers' : 'names';
+}
+
+function tmuxWindowBarHtml(session, info, options = {}) {
+  const panes = Array.isArray(info) ? info : info?.panes;
+  const records = tmuxWindowRecords(panes);
+  if (!records.length) return '';
+  const disabled = options.disabled === true || readOnlyMode;
+  const labelMode = tmuxWindowBarLabelMode(records, options);
+  const disabledTitle = readOnlyMode ? 'tmux window selection requires admin access' : `unavailable for ${itemLabel(session)}`;
+  const buttons = records.map(record => {
+    const pressed = record.active ? 'true' : 'false';
+    const activeClass = record.active ? ' active' : '';
+    const visibleName = record.indexedNameLabel || `${record.indexText}:${record.nameLabel}`;
+    const title = `tmux window ${visibleName}`;
+    const attrs = disabled
+      ? `disabled title="${esc(disabledTitle)}" aria-label="${esc(title)}"`
+      : `data-window-index="${esc(record.indexText)}" data-window-session="${esc(session)}" data-window-label="${esc(visibleName)}" title="${esc(title)}" aria-label="${esc(title)}" aria-pressed="${pressed}"`;
+    return `<button type="button" class="tab tmux-window-button${activeClass}" ${attrs}><span class="tmux-window-name-label">${esc(visibleName)}</span><span class="tmux-window-number-label">${esc(record.numberLabel)}</span></button>`;
+  }).join('');
+  return `<div class="tmux-window-bar" data-tmux-window-bar="${esc(session)}" data-tmux-window-label-mode="${esc(labelMode)}" role="group" aria-label="tmux windows">${buttons}</div>`;
 }
 
 function previewTmuxWindowInfo(info, key) {
@@ -19100,9 +19400,13 @@ function previewTmuxWindowInfo(info, key) {
   if (windows.length < 2) return null;
   const activePane = terminalDisplayPane(info);
   const activeIndex = tmuxWindowNumber(activePane?.window);
-  const current = Math.max(0, windows.findIndex(index => index === activeIndex));
-  const delta = key === 'p' ? -1 : 1;
-  const target = windows[(current + delta + windows.length) % windows.length];
+  let target = tmuxWindowNumber(key?.windowIndex);
+  if (target === null) {
+    const current = Math.max(0, windows.findIndex(index => index === activeIndex));
+    const delta = key === 'p' ? -1 : 1;
+    target = windows[(current + delta + windows.length) % windows.length];
+  }
+  if (!windows.includes(target)) return null;
   const nextPanes = panes.map(pane => ({...pane, window_active: tmuxWindowNumber(pane.window) === target}));
   return {
     ...info,
@@ -19131,6 +19435,11 @@ function previewTmuxWindowLabel(session, key) {
 function handleWindowStepButtonClick(event) {
   const button = windowStepButtonFromEvent(event);
   if (!button) return;
+  if (button.dataset.windowIndex !== undefined) {
+    const label = button.dataset.windowLabel || button.dataset.windowIndex;
+    tmuxWindow(button.dataset.windowSession, {windowIndex: button.dataset.windowIndex}, `tmux window ${label}`);
+    return;
+  }
   const key = button.dataset.windowDir === 'prev' ? 'p' : 'n';
   const label = button.dataset.windowDir === 'prev' ? 'previous tmux window' : 'next tmux window';
   tmuxWindow(button.dataset.windowSession, key, label);
@@ -19139,48 +19448,32 @@ function handleWindowStepButtonClick(event) {
 function windowStepButtonFromEvent(event) {
   const current = event?.currentTarget;
   if (current?.matches?.('[data-window-dir]')) return current;
-  return event?.target?.closest?.('[data-window-dir]') || null;
+  if (current?.matches?.('[data-window-index]')) return current;
+  return event?.target?.closest?.('[data-window-index]') || event?.target?.closest?.('[data-window-dir]') || null;
 }
 
-function createWindowStepButton(session, dir) {
-  const label = windowStepButtonLabel(dir);
-  const button = document.createElement('button');
-  button.className = 'tab tmux-window-step';
-  button.dataset.windowStepButton = dir;
-  button.textContent = dir === 'prev' ? '<' : '>';
-  if (readOnlyMode) {
-    button.type = 'button';
-    button.disabled = true;
-    button.title = `${label} tmux window requires admin access`;
-    return button;
-  }
-  button.dataset.windowDir = dir;
-  button.dataset.windowSession = session;
-  button.title = `${label} tmux window`;
-  button.addEventListener('click', handleWindowStepButtonClick);
-  return button;
-}
-
-function syncWindowStepButton(controls, terminalButton, session, dir, visible) {
-  const selector = `[data-window-step-button="${dir}"]`;
-  const existing = controls.querySelector(selector);
-  if (!visible) {
-    existing?.remove();
-    return;
-  }
-  if (existing) return;
-  const button = createWindowStepButton(session, dir);
-  if (dir === 'prev') controls.insertBefore(button, terminalButton);
-  else controls.insertBefore(button, terminalButton.nextSibling || null);
+function syncTmuxWindowBarOverflow(session) {
+  document.body?.querySelectorAll?.(`[data-tmux-window-bar="${cssEscape(session)}"]`)?.forEach(bar => {
+    if (!bar || bar.dataset.tmuxWindowLabelMode === 'numbers') return;
+    if (bar.scrollWidth > bar.clientWidth + 1) bar.dataset.tmuxWindowLabelMode = 'numbers';
+  });
 }
 
 function updatePanelWindowStepButtons(session, info) {
-  const controls = document.getElementById(panelDomId(session))?.querySelector('.tabs');
-  const terminalButton = controls?.querySelector('.terminal-tab');
-  if (!controls || !terminalButton) return;
-  const steps = windowStepVisibility(info?.panes);
-  syncWindowStepButton(controls, terminalButton, session, 'prev', steps.prev);
-  syncWindowStepButton(controls, terminalButton, session, 'next', steps.next);
+  const bars = [...(document.body?.querySelectorAll?.(`[data-tmux-window-bar="${cssEscape(session)}"]`) || [])];
+  if (!bars.length) return;
+  const html = tmuxWindowBarHtml(session, info);
+  if (!html) {
+    syncTmuxWindowBarOverflow(session);
+    return;
+  }
+  bars.forEach(existing => {
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = html;
+    const replacement = wrapper.firstElementChild;
+    if (replacement) existing.replaceWith(replacement);
+  });
+  syncTmuxWindowBarOverflow(session);
 }
 
 function agentForPane(info, pane) {
@@ -21776,6 +22069,21 @@ function fileExplorerChangesRepoKeys(payload = fileExplorerSessionFilesPayload) 
   return Array.from(repos).sort();
 }
 
+function fileExplorerChangesFolderKeys(payload = fileExplorerSessionFilesPayload) {
+  const folders = new Set();
+  for (const item of fileExplorerDifferFiles(payload)) {
+    const repoRoot = item?.repo && item.repo !== 'Outside repo' ? normalizeDirectoryPath(item.repo) : '/';
+    const absPath = item?.abs_path || (item?.repo && item?.path ? `${item.repo}/${item.path}` : item?.path || '');
+    if (!absPath) continue;
+    let directory = normalizeDirectoryPath(dirnameOf(absPath));
+    while (directory && directory !== repoRoot && pathIsInsideDirectory(directory, repoRoot)) {
+      folders.add(directory);
+      directory = dirnameOf(directory);
+    }
+  }
+  return Array.from(folders).sort((left, right) => left.localeCompare(right));
+}
+
 function fileExplorerChangesAllReposCollapsed(payload = fileExplorerSessionFilesPayload) {
   const repos = fileExplorerChangesRepoKeys(payload);
   return Boolean(repos.length) && repos.every(repo => changesRepoCollapsed.has(repo));
@@ -21815,6 +22123,20 @@ function setAllFileExplorerChangesCollapsed(collapsed) {
 
 function toggleAllFileExplorerChanges() {
   setAllFileExplorerChangesCollapsed(!fileExplorerChangesAllReposCollapsed());
+}
+
+function setAllFileExplorerChangesDirectoriesExpanded(expand) {
+  if (expand) {
+    changesRepoCollapsed.clear();
+    changesFolderCollapsed.clear();
+  } else {
+    changesRepoCollapsed = new Set(fileExplorerChangesRepoKeys());
+    changesFolderCollapsed = new Set(fileExplorerChangesFolderKeys());
+  }
+  writeStoredChangesRepoCollapsed();
+  writeStoredChangesFolderCollapsed();
+  renderFileExplorerChangesPanels({force: true});
+  syncFileExplorerChangesCollapseButtons();
 }
 
 function sessionFileIsDifferVisible(item) {
@@ -22283,6 +22605,7 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
       <div class="changes-toolbar file-explorer-diff-toolbar">
         <label class="changes-control">${esc(t('changes.sort'))} ${sessionFilesSortSelectHtml()}</label>
         ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
+        ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
         <button type="button" class="changes-refresh" data-session-files-refresh title="${esc(t('changes.refresh.title'))}" aria-label="${esc(t('changes.refresh.title'))}">${esc(t('changes.refresh'))}</button>
       </div>
       ${changesComparisonHeaderHtml(payload, files, {loading})}
@@ -22295,6 +22618,7 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
       <span class="changes-title">${esc(titleText)}</span>
       ${sessionFilesSortSelectHtml('changes-sort-select-compact')}
       ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
+      ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
       <button type="button" class="changes-refresh" data-session-files-refresh title="${esc(t('changes.refresh.title'))}" aria-label="${esc(t('changes.refresh.title'))}">${esc(t('changes.refresh'))}</button>
       <button type="button" class="changes-close" data-file-explorer-changes-close title="${esc(t('changes.hide'))}" aria-label="${esc(t('changes.hide'))}">×</button>
     </div>
@@ -22451,7 +22775,7 @@ function renderChangesRoot(root, staticHtml, files, groupOptions = {}, options =
 function activeChangesControl(panel) {
   const active = document.activeElement;
   if (!active || !panel?.contains(active)) return null;
-  return active.closest?.('[data-session-files-session], [data-session-files-sort], [data-diff-ref-from], [data-diff-ref-to], [data-session-files-refresh], [data-file-explorer-tree-dates], [data-uploaded-files-toggle], [data-changes-folder-toggle], [data-changes-repo-toggle]') || null;
+  return active.closest?.('[data-session-files-session], [data-session-files-sort], [data-diff-ref-from], [data-diff-ref-to], [data-session-files-refresh], [data-file-explorer-tree-dates], [data-file-tree-expand-collapse-all], [data-uploaded-files-toggle], [data-changes-folder-toggle], [data-changes-repo-toggle]') || null;
 }
 
 async function openChangedFileInDiff(path, ownerSession = '', status = '', repo = '') {
@@ -22570,6 +22894,13 @@ function bindChangesPanel(panel) {
     }
   });
   panel.addEventListener('click', async event => {
+    const treeExpandCollapseAll = event.target.closest('[data-file-tree-expand-collapse-all]');
+    if (treeExpandCollapseAll && panel.contains(treeExpandCollapseAll)) {
+      event.preventDefault();
+      event.stopPropagation();
+      await setAllFileTreeDirectoriesExpanded(treeExpandCollapseAll, treeExpandCollapseAll.dataset.fileTreeExpandCollapseAll === 'expand');
+      return;
+    }
     const collapseToggle = event.target.closest('[data-session-files-collapse-toggle]');
     if (collapseToggle && panel.contains(collapseToggle)) {
       event.preventDefault();
@@ -22997,7 +23328,6 @@ function createFileExplorerPanel() {
             <span class="file-explorer-toolbar-spacer"></span>
           </div>
           <div class="file-explorer-toolbar-row file-explorer-actions-row file-explorer-mode-files-only">
-            <button type="button" class="file-explorer-header-action file-explorer-mode-files-only" data-file-explorer-collapse title="${esc(t('finder.toolbar.collapseAll'))}" aria-label="${esc(t('finder.toolbar.collapseAll'))}">▤</button>
             <button type="button" class="file-explorer-header-action file-explorer-mode-files-only" data-file-explorer-new-file title="${esc(t('finder.toolbar.newFile'))}" aria-label="${esc(t('finder.toolbar.newFile'))}">+</button>
             <button type="button" class="file-explorer-header-action file-explorer-folder-action file-explorer-mode-files-only" data-file-explorer-new-folder title="${esc(t('finder.toolbar.newFolder'))}" aria-label="${esc(t('finder.toolbar.newFolder'))}"><span class="file-explorer-folder-icon" aria-hidden="true"></span></button>
             <span class="file-explorer-toolbar-spacer"></span>
@@ -23009,6 +23339,7 @@ function createFileExplorerPanel() {
             </select>
             <span class="file-explorer-date-reload-cluster file-explorer-mode-files-only">
               ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
+              ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
               <button type="button" class="changes-refresh file-explorer-refresh-cluster" data-file-explorer-refresh title="${esc(t('finder.toolbar.refresh'))}" aria-label="${esc(t('finder.toolbar.refresh'))}">${esc(t('changes.refresh'))}</button>
             </span>
           </div>
@@ -26667,23 +26998,6 @@ async function saveFileEditor(path, panel, options = {}) {
   }
 }
 
-function windowStepButtonLabel(dir) {
-  return dir === 'prev' ? 'previous' : 'next';
-}
-
-function windowStepButtonHtml(session, dir, visible, disabled) {
-  if (!visible) return '';
-  const label = windowStepButtonLabel(dir);
-  const glyph = dir === 'prev' ? '&lt;' : '&gt;';
-  if (disabled) {
-    return `<button type="button" class="tab tmux-window-step" data-window-step-button="${dir}" disabled title="unavailable for ${esc(itemLabel(session))}">${glyph}</button>`;
-  }
-  if (readOnlyMode) {
-    return `<button type="button" class="tab tmux-window-step" data-window-step-button="${dir}" disabled title="${label} tmux window requires admin access">${glyph}</button>`;
-  }
-  return `<button class="tab tmux-window-step" data-window-step-button="${dir}" data-window-dir="${dir}" data-window-session="${esc(session)}" title="${label} tmux window">${glyph}</button>`;
-}
-
 function paneFrameControlsHtml(session, options = {}) {
   const disabled = options.disabled === true;
   const unavailableLabel = options.unavailableLabel || itemLabel(session);
@@ -26699,9 +27013,10 @@ function paneFrameControlsHtml(session, options = {}) {
       : `<button type="button" class="tab pane-actions" data-pane-actions="${esc(session)}" title="${esc(t('pane.actions'))}" aria-label="${esc(t('pane.actions'))}"><span class="pane-actions-dots" aria-hidden="true">...</span></button>`);
   }
   if (includeDetails) {
+    const detailsLabel = t('pane.details.hide');
     controls.push(disabled
-      ? `<button class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')}" ${disabledAttrs(infoTabLabel())}></button>`
-      : `<button type="button" class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')} active" data-detail-toggle="${esc(session)}" title="${esc(infoTabLabel())}" aria-label="${esc(infoTabLabel())}" aria-pressed="true"></button>`);
+      ? `<button class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')}" ${disabledAttrs(detailsLabel)}></button>`
+      : `<button type="button" class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')} active" data-detail-toggle="${esc(session)}" title="${esc(detailsLabel)}" aria-label="${esc(detailsLabel)}" aria-pressed="true"></button>`);
   }
   if (includeMinimize) {
     controls.push(disabled
@@ -26746,8 +27061,8 @@ function panelControlsHtml(session, options = {}) {
   const terminalTitle = terminalTabTitle(session, info);
   const terminalAttrs = disabled ? disabledAttrs(terminalTitle) : `${tabAttrs('terminal')} title="${esc(terminalTitle)}" aria-label="${esc(terminalTitle)}"`;
   const terminalLabel = disabled ? 'Term' : terminalTabLabel(session, info);
-  const steps = disabled ? {prev: false, next: false} : windowStepVisibility(info?.panes);
   const isFiles = isFileExplorerItem(session);
+  const terminalButtonHtml = `<button class="tab active terminal-tab" ${terminalAttrs}>${esc(terminalLabel)}</button>`;
   const frameHtml = isFiles
     ? paneFrameControlsHtml(session, {
       disabled,
@@ -26760,9 +27075,7 @@ function panelControlsHtml(session, options = {}) {
     })
     : paneFrameControlsHtml(session, {disabled, actions: isTmuxSession(session), details: true, close: false});
   return `<div class="tabs ${disabled ? 'disabled-panel-controls' : ''}" role="tablist">
-          ${windowStepButtonHtml(session, 'prev', steps.prev, disabled)}
-          <button class="tab active terminal-tab" ${terminalAttrs}>${esc(terminalLabel)}</button>
-          ${windowStepButtonHtml(session, 'next', steps.next, disabled)}
+          ${terminalButtonHtml}
           ${frameHtml}
         </div>`;
 }
@@ -26797,6 +27110,8 @@ function createPanel(session) {
           <div id="meta-${session}" class="meta">${esc(t('pane.findingBranch'))}</div>
           ${sessionPopoverHtml(session, transcriptMeta.sessions?.[session], sessionAgentKind(session), autoApproveStates.get(session)?.enabled === true, sessionState(session, transcriptMeta.sessions?.[session]))}
         </div>
+        <span id="panel-agent-${session}" class="panel-agent-slot">${sessionAgentBadgeHtml(session)}</span>
+        ${isTmuxSession(session) ? tmuxWindowBarHtml(session, transcriptMeta.sessions?.[session]) : ''}
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(session)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
       </div>
       <div id="terminal-pane-${session}" class="tab-pane active panel-overlay-root">
@@ -27460,7 +27775,7 @@ function bindPanelControls(panel, session) {
     const nextName = currentName !== 'terminal' && button.classList.contains(CLS.active) ? 'terminal' : currentName;
     activateTab(button.dataset.tab, nextName, {userInitiated: true});
   });
-  delegate(panel, 'click', '[data-window-dir]', event => {
+  delegate(panel, 'click', '[data-window-dir], [data-window-index]', event => {
     handleWindowStepButtonClick(event);
   });
   delegate(panel, 'click', '[data-pane-close]', (event, button) => {
@@ -28036,6 +28351,17 @@ function tmuxWindow(session, key, label) {
     statusErr(localizedHtml('terminal.connection.readonlyTmuxWindow'));
     return;
   }
+  const directIndex = tmuxWindowNumber(key?.windowIndex);
+  if (directIndex !== null) {
+    previewTmuxWindowLabel(session, {windowIndex: directIndex});
+    statusOk(`${esc(label)}: ${esc(sessionLabel(session))}`);
+    scheduleFit(session);
+    focusTerminalFromUserAction(session, 75);
+    apiFetchJson(`/api/tmux-window?session=${encodeURIComponent(session)}&window=${encodeURIComponent(String(directIndex))}`, {method: 'POST'})
+      .then(() => setTimeout(() => refreshTranscripts({force: true}), 250))
+      .catch(error => statusErr(`tmux window failed: ${esc(error.message || error)}`));
+    return;
+  }
   const item = terminals.get(session);
   if (!item || item.socket?.readyState !== WebSocket.OPEN) {
     statusErr(terminalNotConnectedHtml(session));
@@ -28595,6 +28921,8 @@ function updatePanelHeader(session, info) {
     tab.innerHTML = panelHeaderStateHtml(state);
     tab.removeAttribute('title');
   }
+  const agentSlot = document.getElementById(`panel-agent-${session}`);
+  if (agentSlot) agentSlot.innerHTML = sessionAgentBadgeHtml(session);
   const popover = panel?.querySelector(':scope .panel-popover-zone > .session-popover');
   if (popover) {
     const agentKind = sessionAgentKind(session);

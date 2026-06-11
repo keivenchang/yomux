@@ -1434,6 +1434,42 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
 .file-explorer-changes-collapse-toggle {
   font-size: var(--ui-font-size);
 }
+.file-tree-expand-collapse-all {
+  box-sizing: border-box;
+  width: 16px;
+  min-width: 16px;
+  max-width: 16px;
+  inline-size: 16px;
+  min-inline-size: 16px;
+  max-inline-size: 16px;
+  flex: 0 0 16px;
+  padding: 0;
+  font-size: 0;
+}
+.changes-toolbar .file-tree-expand-collapse-all.changes-date-toggle,
+.file-explorer-changes-head .file-tree-expand-collapse-all.changes-date-toggle,
+.file-explorer-date-reload-cluster .file-tree-expand-collapse-all.changes-date-toggle {
+  width: 16px;
+  min-width: 16px;
+  max-width: 16px;
+  inline-size: 16px;
+  min-inline-size: 16px;
+  max-inline-size: 16px;
+  flex: 0 0 16px;
+  height: 20px;
+  padding: 0;
+}
+.file-tree-expand-collapse-icon {
+  display: block;
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.35;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
 .file-explorer-mode-switcher {
   display: inline-flex;
   align-items: center;

@@ -1,21 +1,4 @@
 
-function windowStepButtonLabel(dir) {
-  return dir === 'prev' ? 'previous' : 'next';
-}
-
-function windowStepButtonHtml(session, dir, visible, disabled) {
-  if (!visible) return '';
-  const label = windowStepButtonLabel(dir);
-  const glyph = dir === 'prev' ? '&lt;' : '&gt;';
-  if (disabled) {
-    return `<button type="button" class="tab tmux-window-step" data-window-step-button="${dir}" disabled title="unavailable for ${esc(itemLabel(session))}">${glyph}</button>`;
-  }
-  if (readOnlyMode) {
-    return `<button type="button" class="tab tmux-window-step" data-window-step-button="${dir}" disabled title="${label} tmux window requires admin access">${glyph}</button>`;
-  }
-  return `<button class="tab tmux-window-step" data-window-step-button="${dir}" data-window-dir="${dir}" data-window-session="${esc(session)}" title="${label} tmux window">${glyph}</button>`;
-}
-
 function paneFrameControlsHtml(session, options = {}) {
   const disabled = options.disabled === true;
   const unavailableLabel = options.unavailableLabel || itemLabel(session);
@@ -31,9 +14,10 @@ function paneFrameControlsHtml(session, options = {}) {
       : `<button type="button" class="tab pane-actions" data-pane-actions="${esc(session)}" title="${esc(t('pane.actions'))}" aria-label="${esc(t('pane.actions'))}"><span class="pane-actions-dots" aria-hidden="true">...</span></button>`);
   }
   if (includeDetails) {
+    const detailsLabel = t('pane.details.hide');
     controls.push(disabled
-      ? `<button class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')}" ${disabledAttrs(infoTabLabel())}></button>`
-      : `<button type="button" class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')} active" data-detail-toggle="${esc(session)}" title="${esc(infoTabLabel())}" aria-label="${esc(infoTabLabel())}" aria-pressed="true"></button>`);
+      ? `<button class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')}" ${disabledAttrs(detailsLabel)}></button>`
+      : `<button type="button" class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')} active" data-detail-toggle="${esc(session)}" title="${esc(detailsLabel)}" aria-label="${esc(detailsLabel)}" aria-pressed="true"></button>`);
   }
   if (includeMinimize) {
     controls.push(disabled
@@ -78,8 +62,8 @@ function panelControlsHtml(session, options = {}) {
   const terminalTitle = terminalTabTitle(session, info);
   const terminalAttrs = disabled ? disabledAttrs(terminalTitle) : `${tabAttrs('terminal')} title="${esc(terminalTitle)}" aria-label="${esc(terminalTitle)}"`;
   const terminalLabel = disabled ? 'Term' : terminalTabLabel(session, info);
-  const steps = disabled ? {prev: false, next: false} : windowStepVisibility(info?.panes);
   const isFiles = isFileExplorerItem(session);
+  const terminalButtonHtml = `<button class="tab active terminal-tab" ${terminalAttrs}>${esc(terminalLabel)}</button>`;
   const frameHtml = isFiles
     ? paneFrameControlsHtml(session, {
       disabled,
@@ -92,9 +76,7 @@ function panelControlsHtml(session, options = {}) {
     })
     : paneFrameControlsHtml(session, {disabled, actions: isTmuxSession(session), details: true, close: false});
   return `<div class="tabs ${disabled ? 'disabled-panel-controls' : ''}" role="tablist">
-          ${windowStepButtonHtml(session, 'prev', steps.prev, disabled)}
-          <button class="tab active terminal-tab" ${terminalAttrs}>${esc(terminalLabel)}</button>
-          ${windowStepButtonHtml(session, 'next', steps.next, disabled)}
+          ${terminalButtonHtml}
           ${frameHtml}
         </div>`;
 }
@@ -129,6 +111,8 @@ function createPanel(session) {
           <div id="meta-${session}" class="meta">${esc(t('pane.findingBranch'))}</div>
           ${sessionPopoverHtml(session, transcriptMeta.sessions?.[session], sessionAgentKind(session), autoApproveStates.get(session)?.enabled === true, sessionState(session, transcriptMeta.sessions?.[session]))}
         </div>
+        <span id="panel-agent-${session}" class="panel-agent-slot">${sessionAgentBadgeHtml(session)}</span>
+        ${isTmuxSession(session) ? tmuxWindowBarHtml(session, transcriptMeta.sessions?.[session]) : ''}
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(session)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
       </div>
       <div id="terminal-pane-${session}" class="tab-pane active panel-overlay-root">
@@ -792,7 +776,7 @@ function bindPanelControls(panel, session) {
     const nextName = currentName !== 'terminal' && button.classList.contains(CLS.active) ? 'terminal' : currentName;
     activateTab(button.dataset.tab, nextName, {userInitiated: true});
   });
-  delegate(panel, 'click', '[data-window-dir]', event => {
+  delegate(panel, 'click', '[data-window-dir], [data-window-index]', event => {
     handleWindowStepButtonClick(event);
   });
   delegate(panel, 'click', '[data-pane-close]', (event, button) => {
@@ -1368,6 +1352,17 @@ function tmuxWindow(session, key, label) {
     statusErr(localizedHtml('terminal.connection.readonlyTmuxWindow'));
     return;
   }
+  const directIndex = tmuxWindowNumber(key?.windowIndex);
+  if (directIndex !== null) {
+    previewTmuxWindowLabel(session, {windowIndex: directIndex});
+    statusOk(`${esc(label)}: ${esc(sessionLabel(session))}`);
+    scheduleFit(session);
+    focusTerminalFromUserAction(session, 75);
+    apiFetchJson(`/api/tmux-window?session=${encodeURIComponent(session)}&window=${encodeURIComponent(String(directIndex))}`, {method: 'POST'})
+      .then(() => setTimeout(() => refreshTranscripts({force: true}), 250))
+      .catch(error => statusErr(`tmux window failed: ${esc(error.message || error)}`));
+    return;
+  }
   const item = terminals.get(session);
   if (!item || item.socket?.readyState !== WebSocket.OPEN) {
     statusErr(terminalNotConnectedHtml(session));
@@ -1927,6 +1922,8 @@ function updatePanelHeader(session, info) {
     tab.innerHTML = panelHeaderStateHtml(state);
     tab.removeAttribute('title');
   }
+  const agentSlot = document.getElementById(`panel-agent-${session}`);
+  if (agentSlot) agentSlot.innerHTML = sessionAgentBadgeHtml(session);
   const popover = panel?.querySelector(':scope .panel-popover-zone > .session-popover');
   if (popover) {
     const agentKind = sessionAgentKind(session);

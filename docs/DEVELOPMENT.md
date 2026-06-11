@@ -104,28 +104,14 @@ python3 yolomux.py --host 0.0.0.0 --port 8001 --self-signed
 
 ### Restart workflow
 
-Restarts of YOLOmux dev servers must delegate the kill/relaunch chain to `systemd-run` as a transient user unit. Running the chain directly inside an AI harness shell can leave the child process reaped when that shell exits.
-
-Local-only restart scripts live under `~/.local/bin/`. They are not committed because they hardcode local paths and port choices. Reference dev1 launch:
-
-```bash
-systemctl --user stop yolomux-dev1-8001 2>/dev/null
-systemd-run --user --quiet --collect --unit=yolomux-dev1-8001 \
-  --working-directory=/home/keivenc/yolomux.dev1 \
-  /usr/bin/python3 /home/keivenc/yolomux.dev1/yolomux.py \
-  --host 0.0.0.0 --port 8001 --dangerously-yolo --self-signed
-```
-
-The prod script is the same shape with port `7777`, cwd `~/yolomux`, and `--self-signed`.
-
-Restart dev1:
+Preferred: delegate the kill/relaunch chain to `systemd-run` as a transient user unit, so the server is not a child of the launching shell. Local-only restart scripts live under `~/.local/bin/` (not committed; they hardcode local paths/ports). Reference dev1 launch — restart prod by swapping `dev1`/`8001`/`~/yolomux.dev1` for `prod`/`7777`/`~/yolomux`:
 
 ```bash
 systemctl --user stop yolomux-dev1-8001 2>/dev/null
 systemd-run --user --quiet --collect --unit=yolomux-dev1-8001 --working-directory=/home/keivenc/yolomux.dev1 /usr/bin/python3 /home/keivenc/yolomux.dev1/yolomux.py --host 0.0.0.0 --port 8001 --dangerously-yolo --self-signed
 ```
 
-Restart prod by swapping `dev1`/`8001`/`~/yolomux.dev1` for `prod`/`7777`/`~/yolomux`.
+Fallback when `systemd-run --user` is unavailable (some AI-harness sandboxes deny the D-Bus call): kill by PID, then relaunch detached with `( cd <checkout> && nohup python3 -u yolomux.py ... >> /tmp/<log> 2>&1 </dev/null & )`. Two footguns: (1) never `pkill -f` a pattern that also appears literally in the same command's launch string — it matches your own shell and TERMs it (use a `$port` variable in the pattern and keep kill and relaunch in separate commands); (2) a backend `.py` change only takes effect after the python process restarts — `static_build.py` does not touch it.
 
 Verify after restart:
 
@@ -144,37 +130,23 @@ systemctl --user status yolomux-dev1-8001 --no-pager
 
 ## Production Sync (`cps`)
 
-Two side-by-side checkouts of the YOLOmux repo share `origin`:
-
-- `~/yolomux.dev/` — where all edits happen.
-- `~/yolomux/` — read-only production checkout.
-
-When running commit/push/sync from `~/yolomux.dev/`, use the full check set, stage explicit files only, push `main`, fast-forward production, and restart both servers:
+Edits happen in a dev worktree (`~/yolomux.dev1` ... `~/yolomux.dev4`, see the table above); `~/yolomux/` is the read-only production checkout sharing the same `origin`. The sequence from the dev worktree:
 
 ```bash
-python3 -m py_compile yolomux.py tmux_wall.py auto_approve_tmux.py yolomux_lib/*.py
-python3 -m pytest tests -n auto -q
-python3 tools/static_build.py --check
-node --check static/yolomux.js
-node --check static/tmux-wall.js
-node tests/layout_url.test.js
+python3 tools/check.py                 # the full gate (see Tests above)
 git add -- <explicit-files>
-git commit -m "<message including Version: 0.1.N>"
-git push origin main
+git commit -m "<message including Version: 0.2.N>"
+git push origin <branch>:main
 cd ~/yolomux && git pull --ff-only origin main
-systemctl --user stop yolomux-prod-7777 2>/dev/null
-systemd-run --user --quiet --collect --unit=yolomux-prod-7777 ~/.local/bin/yolomux-restart-prod.sh
-systemctl --user stop yolomux-dev1-8001 2>/dev/null
-systemd-run --user --quiet --collect --unit=yolomux-dev1-8001 ~/.local/bin/yolomux-restart-dev.sh
+# restart prod + the dev server (see Restart workflow above)
 ```
 
 Rules:
 
 - Bump `YOLOMUX_VERSION` in `yolomux_lib/common.py` in the same commit.
 - Never use `git add -A`; screenshots and scratch files must not get swept in.
-- Production pull is `--ff-only`.
-- Never edit, stage, or commit inside `~/yolomux/`.
-- Restart both prod and dev after sync, then verify `https://localhost:7777/api/ping`, `https://localhost:8001/api/ping`, and the rendered version on both login pages.
+- Production pull is `--ff-only`. Never edit, stage, or commit inside `~/yolomux/`.
+- Restart both servers after sync, then verify `/api/ping` and the rendered version on each login page.
 
 ## xterm.js Assets
 
@@ -206,7 +178,7 @@ YOLO uses `auto_approve_tmux.py` workers behind `/api/auto-approve`. The browser
 
 ## Webterm API
 
-All API routes require auth. Read endpoints accept `readonly` or `admin`, except `/api/summary-stream` because it launches Codex and requires `admin`. Mutating POST routes require `admin` except `/api/event`, which accepts readonly client telemetry. `/ws` accepts readonly users but attaches tmux with `-r` and ignores keyboard input and tmux-scroll messages.
+All API routes require auth. Read endpoints accept `readonly` or `admin`, except `/api/summary-stream` because it launches Codex and requires `admin`. Mutating POST routes require `admin` except `/api/event`, which accepts readonly client telemetry. `/ws` accepts readonly users but attaches tmux with `-r` and ignores keyboard input, tmux-scroll, and resize messages. Share-token guests are narrower than `auth.yaml` readonly users: tokens are scoped to one session and whitelisted only to `/`, `/ws`, and static assets.
 
 - `GET /api/transcripts` returns pane, process, and transcript-path metadata.
 - `GET /api/tmux?session=project1&lines=90` returns a tmux capture-pane snapshot.

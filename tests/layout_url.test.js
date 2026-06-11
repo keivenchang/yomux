@@ -156,6 +156,10 @@ class TestElement {
       return this.classList.contains('pane-tab') && this.dataset.paneTab === dataPaneTabMatch[1];
     }
     if (selector === '[data-window-dir]') return this.dataset.windowDir !== undefined;
+    if (selector === '[data-window-index]') return this.dataset.windowIndex !== undefined;
+    if (selector === '[data-detail-toggle]') return this.dataset.detailToggle !== undefined;
+    const dataDetailToggleMatch = selector.match(/^\[data-detail-toggle="([^"]+)"\]$/);
+    if (dataDetailToggleMatch) return this.dataset.detailToggle === dataDetailToggleMatch[1];
     if (selector === '[role="tree"]') return this.attributes.role === 'tree';
     if (selector === '.file-explorer-tree-panel') return this.classList.contains('file-explorer-tree-panel');
     if (selector === '.file-tree-row[data-path]') return this.classList.contains('file-tree-row') && Boolean(this.dataset.path);
@@ -410,6 +414,7 @@ globalThis.__layoutTestApi = {
   fileQuickOpenRootForFile,
   fileQuickOpenRootForSearch,
   fileQuickOpenRootsForSearch,
+  fileQuickOpenTargetSlot,
   fileQuickOpenSearchText,
   fileQuickOpenScopeLabel,
   fileExplorerDirectoryIsIndexed,
@@ -437,6 +442,9 @@ globalThis.__layoutTestApi = {
   updateCodeMirrorDiffOverviewForTest: updateCodeMirrorDiffOverview,
   setDiffExpandUnchangedForTest(value) { diffExpandUnchanged = value === true; },
   fileExplorerChangesPanelHtml,
+  fileTreeExpandCollapseAllButtonsHtml,
+  fileExplorerDirectoryPathsForRootForTest: fileExplorerDirectoryPathsForRoot,
+  setAllFileTreeDirectoriesExpandedForTest: setAllFileTreeDirectoriesExpanded,
   fileExplorerSessionFilesTargetSessionForTest: fileExplorerSessionFilesTargetSession,
   sessionFilesCacheKeyForTest: sessionFilesCacheKey,
   noteFileExplorerChangesSessionInteractionForTest: noteFileExplorerChangesSessionInteraction,
@@ -498,6 +506,9 @@ globalThis.__layoutTestApi = {
   clientServerWatchStateForTest: clientServerWatchState,
   fileExplorerPaneTabHtml,
   fetchDirectoryForTest: fetchDirectory,
+  currentFileExplorerListErrorForTest: currentFileExplorerListError,
+  setFileExplorerPushRefreshDepthForTest(value) { fileExplorerPushRefreshDepth = Math.max(0, Number(value) || 0); },
+  setFileExplorerLastListErrorForTest(path, error = 'failed') { setFileExplorerListError(path, error, 500); },
   fetchFilePathInfoForTest: fetchFilePathInfo,
   flushFileExplorerFsBatchForTest: flushFileExplorerFsBatch,
   firstEmptyPane,
@@ -637,6 +648,7 @@ globalThis.__layoutTestApi = {
   },
   paneIsPlaceholder,
   panelControlsHtml,
+  setPanelDetailsCollapsedForTest: setPanelDetailsCollapsed,
   platformWindowControlClass,
   positionPaneTabPopover,
   pathIsInsideDirectory,
@@ -741,6 +753,12 @@ globalThis.__layoutTestApi = {
   renderFileEditorPanel,
   renderEditorPreviewPane,
   openFileIsMissing,
+  terminalTabLabel,
+  terminalTabTitle,
+  terminalTabDisplayLabel,
+  sessionAgentBadgeHtml,
+  tmuxWindowForTest: tmuxWindow,
+  registerFileEditorLayoutItemForTest: registerFileEditorLayoutItem,
   setOpenFileStateForTest(path, state) { openFiles.set(path, state); },
   renderTreeChildrenForTest(container, parentPath, entries, depth = 0, entriesByDirPairs = [], options = {}) {
     renderTreeChildren(container, parentPath, entries, depth, {...options, entriesByDir: new Map(entriesByDirPairs)});
@@ -753,6 +771,8 @@ globalThis.__layoutTestApi = {
   fileTreeDisplayParts,
   setUploadedFilesCollapsedForTest(value) { uploadedFilesCollapsed = Boolean(value); },
   setChangesFolderCollapsedForTest(keys) { changesFolderCollapsed = new Set((keys || []).map(String)); },
+  changesFolderCollapsedForTest() { return Array.from(changesFolderCollapsed).sort(); },
+  changesRepoCollapsedForTest() { return Array.from(changesRepoCollapsed).sort(); },
   rawFileUrl,
   rawFileDownloadUrl,
   displayQuickAccessPath,
@@ -852,13 +872,15 @@ globalThis.__layoutTestApi = {
   dockviewTabDropWouldNoop,
   dockviewTabEdgeReorderIntent,
   windowStepButtonFromEvent,
+  tmuxWindowRecords,
+  tmuxWindowBarLabelMode,
+  tmuxWindowBarHtml,
   tabMenuItems,
   sortTabItemsForMenu,
   setTabsMenuSortMode,
   tmuxPaneTabHtml,
   paneTabs,
   paneStateWithTabs,
-  windowStepVisibility,
   markdownSyntaxHtml,
   markdownTextWithSourceAnchors,
   markdownTaskLineEntries,
@@ -892,6 +914,11 @@ globalThis.__layoutTestApi = {
   setFileExplorerExpandedForTest(paths) {
     fileExplorerExpanded.clear();
     for (const path of paths || []) fileExplorerExpanded.add(path);
+  },
+  fileExplorerExpandedForTest() { return Array.from(fileExplorerExpanded).sort(); },
+  setFileExplorerRootForTest(path) { fileExplorerRoot = normalizeDirectoryPath(path); },
+  setFileExplorerDirListingForTest(path, entries) {
+    fileExplorerDirListingCache.set(normalizeDirectoryPath(path), {entries, at: Date.now()});
   },
   setAutoApproveStateForTest(session, payload) {
     autoApproveStates.set(session, payload);
@@ -1381,6 +1408,17 @@ test('t@1313', () => {
   assert.ok(terminalToolbarBeforeFinderFocus.includes('data-tab-name="terminal"'));
   assert.equal((terminalToolbarBeforeFinderFocus.match(/pane-actions-dots/g) || []).length, 1);
   assert.equal(terminalToolbarBeforeFinderFocus.includes('data-tab-name="summary"'), false);
+  const agentInfo = {agents: [{kind: 'codex', transcript: '/tmp/codex.jsonl'}], selected_pane: {process_label: 'codex'}};
+  api.setTranscriptInfoForTest('6', agentInfo);
+  assert.equal(api.terminalTabLabel('6', agentInfo), 'Term', 'agent process names move off the first terminal tab line');
+  assert.equal(api.terminalTabTitle('6', agentInfo), 'terminal: Term', 'agent process names are not duplicated in the terminal tab title');
+  const agentToolbar = api.panelControlsHtml('6');
+  assert.ok(agentToolbar.includes('>Term</button>'), 'terminal top row shows the generic terminal label when the process is the agent');
+  assert.equal(agentToolbar.includes('>codex</button>') || agentToolbar.includes('>Codex</button>'), false, 'terminal top row does not render the agent marker as the terminal tab text');
+  assert.ok(api.sessionAgentBadgeHtml('6').includes('panel-agent-badge codex') && api.sessionAgentBadgeHtml('6').includes('>Codex</span>'), 'detail-row agent badge renders the detected agent');
+  const sessionSource = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(/id="panel-agent-\$\{session\}"[\s\S]{0,120}sessionAgentBadgeHtml\(session\)[\s\S]{0,160}class="panel-detail-close"/.test(sessionSource), 'agent badge is rendered on the info line immediately before the close control');
+  assert.ok(/function terminalTabDisplayLabel\(session, info\)[\s\S]*normalized === agentKind[\s\S]*return 'Term'/.test(sessionSource), 'terminal tab labels suppress bare agent process names');
 });
 
 test('t@1367', () => {
@@ -2459,7 +2497,8 @@ test('t@2355', () => {
   assert.ok(source.includes('commandPaletteRecentKeyLimit = 100'), 'command palette recent-key cache is capped');
   assert.ok(source.includes('restoreElementScrollPosition(container, scrollTop, scrollLeft);'), 'editor preview renders preserve scroll position');
   assert.equal(source.includes("const signature = codeMirrorConfigSignature(path, {mode: 'diff', layout, original, from: state.diffFromRef, to: state.diffToRef});\n  installCodeMirrorDiffResizeObserver"), false, 'diff resize observer is not installed before the rebuild decision');
-  assert.ok(source.includes('openedItem = await openFileInEditor(path, {name: label}, {userInitiated: true});'), 'quick-open waits for file opens and passes user intent');
+  assert.ok(/function openFileQuickOpenPath\(path, options = \{\}\)[\s\S]*const targetSlot = fileQuickOpenTargetSlot\(\);[\s\S]*openedItem = await openFileInEditor\(path, \{name: label\}, targetSlot[\s\S]*\? \{targetSlot, userInitiated: true\}[\s\S]*: \{userInitiated: true\}\)/.test(source), 'quick-open normal file opens pass the active pane target slot');
+  assert.ok(/if \(options\.split === true\)[\s\S]*targetZone: targetSlot \? 'middle' : 'right'/.test(source), 'quick-open split-open keeps its explicit split behavior');
   assert.ok(source.includes('focusQuickOpenedFile(openedItem);'), 'quick-open focuses the opened file after the async open resolves');
   assert.ok(source.includes('await Promise.resolve(action?.());'), 'command palette selection awaits async run handlers before focus settles');
   assert.ok(source.includes('function focusCommandPaletteTarget'), 'command palette has one shared post-run focus helper');
@@ -2633,6 +2672,7 @@ test('t@2560', () => {
   const fullToolbarSlice = changesHtml.slice(changesHtml.indexOf('changes-toolbar'), changesHtml.indexOf('</div>', changesHtml.indexOf('changes-toolbar')));
   assert.equal(fullToolbarSlice.includes('data-session-files-session'), false, 'full Differ body toolbar no longer repeats the Session dropdown');
   assert.ok(/data-session-files-sort[\s\S]*data-file-explorer-tree-dates[\s\S]*data-session-files-refresh/.test(fullToolbarSlice), 'full Differ body toolbar keeps Sort, date mode, and Reload');
+  assert.ok(/data-file-explorer-tree-dates[\s\S]*data-file-tree-expand-collapse-all="expand"[\s\S]*data-file-tree-expand-collapse-all="collapse"[\s\S]*data-session-files-refresh/.test(fullToolbarSlice), 'full Differ body toolbar orders Date, Expand all, Collapse all, Reload');
   assert.ok(changesHtml.includes('Behind 0 commits'), 'Finder diff shows behind count');
   assert.ok(changesHtml.includes('Ahead 2 commits'), 'Finder diff shows ahead count');
   assert.ok(changesHtml.includes('file-tree-name">src'), 'Finder diff groups nested paths under folders');
@@ -2667,6 +2707,15 @@ test('t@2560', () => {
   const collapsedChangesHtml = api.fileExplorerChangesPanelHtml();
   assert.ok(collapsedChangesHtml.includes('file-tree-row kind-dir collapsed'), 'collapsed changed-file folders keep their state');
   assert.equal(collapsedChangesHtml.includes('data-open-change-file="/repo/app/src/new.py"'), false, 'collapsed changed-file folders hide file leaves');
+  const differExpandCollapseSource = {closest: selector => selector === '.file-explorer-changes-panel' ? {} : null};
+  api.setAllFileTreeDirectoriesExpandedForTest(differExpandCollapseSource, false);
+  assert.deepStrictEqual(canonical(api.changesRepoCollapsedForTest()), ['/repo/app'], 'Differ Collapse all collapses every repo root section');
+  assert.deepStrictEqual(canonical(api.changesFolderCollapsedForTest()), ['/repo/app/src'], 'Differ Collapse all records every changed directory row as collapsed');
+  assert.equal(api.fileExplorerChangesPanelHtml().includes('data-open-change-file="/repo/app/src/new.py"'), false, 'Differ Collapse all hides changed file leaves');
+  api.setAllFileTreeDirectoriesExpandedForTest(differExpandCollapseSource, true);
+  assert.deepStrictEqual(canonical(api.changesRepoCollapsedForTest()), [], 'Differ Expand all expands repo root sections');
+  assert.deepStrictEqual(canonical(api.changesFolderCollapsedForTest()), [], 'Differ Expand all expands changed directory rows');
+  assert.ok(api.fileExplorerChangesPanelHtml().includes('data-open-change-file="/repo/app/src/new.py"'), 'Differ Expand all shows changed file leaves');
   api.setChangesFolderCollapsedForTest([]);
   assert.ok(changesHtml.includes('data-diff-ref-from'), 'Finder diff exposes FROM ref picker');
   assert.ok(changesHtml.includes('data-diff-ref-to'), 'Finder diff exposes TO ref picker');
@@ -2916,6 +2965,7 @@ test('t@2560', () => {
   // own A-Z/Z-A/recent/oldest sort control, defaulting to recent.
   const finderSortPanel = api.fileExplorerChangesPanelHtml();
   assert.ok(/<select class="[^"]*file-explorer-sort-select[^"]*changes-sort-select[^"]*changes-sort-select-compact[^"]*"[^>]*data-session-files-sort/.test(finderSortPanel), 'Finder embedded Differ sort uses the shared compact select styling');
+  assert.ok(/data-file-explorer-tree-dates[\s\S]*data-file-tree-expand-collapse-all="expand"[\s\S]*data-file-tree-expand-collapse-all="collapse"[\s\S]*data-session-files-refresh/.test(finderSortPanel), 'Finder embedded Differ header orders Date, Expand all, Collapse all, Reload');
   const sortLabels = {az: 'finder.sort.az', za: 'finder.sort.za', newest: 'finder.sort.newest', oldest: 'finder.sort.oldest'};
   for (const [value, key] of Object.entries(sortLabels)) {
     const label = api.t(key).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -3724,7 +3774,7 @@ test('t@2560', () => {
   assert.ok(/\.file-explorer-toolbar\s*\{[\s\S]*flex-direction:\s*column[\s\S]*justify-content:\s*flex-start/.test(preferencesCss), 'Finder toolbar is a deliberate stacked-row column instead of one wrapping row');
   assert.ok(/\.file-explorer-toolbar-row\s*\{[\s\S]*inline-size:\s*100%/.test(preferencesCss), 'Finder toolbar rows span the pane width');
   assert.ok(/\.file-explorer-toolbar-spacer\s*\{[\s\S]*flex:\s*1 1 auto/.test(preferencesCss), 'Finder toolbar uses explicit spacers to pin right-side controls');
-  assert.ok(/\.file-explorer-actions-row \.file-explorer-date-reload-cluster\s*\{[\s\S]*display:\s*inline-flex/.test(preferencesCss), 'Finder row 3 keeps date and reload grouped');
+  assert.ok(/\.file-explorer-actions-row \.file-explorer-date-reload-cluster\s*\{[\s\S]*display:\s*inline-flex/.test(preferencesCss), 'Finder row 3 keeps date, tree expand/collapse, and reload grouped');
   assert.ok(/\.file-explorer-date-toggle\[data-date-mode="none"\]\s*\{[\s\S]*text-decoration-line:\s*line-through/.test(preferencesCss), 'Finder/Differ None date mode renders as crossed-out Date');
   assert.ok(/\.file-explorer-primary-row \.file-explorer-path-inline\s*\{[\s\S]*flex:\s*1 1 0[\s\S]*min-width:\s*0[\s\S]*min-inline-size:\s*0/.test(preferencesCss), 'Finder path fills the primary row and can shrink without wrapping controls');
   assert.ok(/body:not\(\.file-explorer-mode-diff\) \.file-explorer-primary-row \.file-explorer-toolbar-spacer\s*\{[\s\S]*flex:\s*0 0 0/.test(preferencesCss), 'Finder files mode lets the path input consume the space before Copy and close');
@@ -3756,11 +3806,18 @@ test('t@2560', () => {
   assert.equal(api.displayQuickAccessPath('/tmp'), '/tmp', 'Finder quick-access labels absolute paths such as /tmp with their leading slash');
   assert.ok(/const modes = \[[\s\S]*mode: 'files'[\s\S]*mode: 'diff'[\s\S]*data-file-explorer-mode-set="\$\{esc\(item\.mode\)\}"/.test(finderPanelBundle), 'Finder/Differ switcher renders both mode buttons from one segmented source');
   assert.ok(finderPanelSource.includes("fileExplorerTreeDateButtonHtml('changes-date-toggle')"), 'Finder panel toolbar uses the shared date-mode button helper with the Differ sizing class');
-  assert.ok(/file-explorer-sort-select[\s\S]*file-explorer-date-reload-cluster[\s\S]*fileExplorerTreeDateButtonHtml\('changes-date-toggle'\)[\s\S]*data-file-explorer-refresh[\s\S]*changes\.refresh/.test(finderPanelSource), 'Finder date-mode button and Reload form a trailing Ago/Reload cluster in the files-only action row');
+  assert.ok(/file-explorer-sort-select[\s\S]*file-explorer-date-reload-cluster[\s\S]*fileExplorerTreeDateButtonHtml\('changes-date-toggle'\)[\s\S]*fileTreeExpandCollapseAllButtonsHtml\('changes-date-toggle'\)[\s\S]*data-file-explorer-refresh[\s\S]*changes\.refresh/.test(finderPanelSource), 'Finder date-mode button, Expand all, Collapse all, and Reload form a trailing cluster in the files-only action row');
   assert.equal(finderPanelSource.includes('file-explorer-repo-summary'), false, 'Finder files-only action row no longer prints repo/path text between sort and date display');
   const finderActionsRowStart = finderPanelSource.indexOf('file-explorer-toolbar-row file-explorer-actions-row');
   const finderActionsRowSource = finderPanelSource.slice(finderActionsRowStart, finderPanelSource.indexOf('</div>', finderActionsRowStart));
-  assert.ok(/data-file-explorer-collapse[\s\S]*data-file-explorer-new-file[\s\S]*data-file-explorer-new-folder[\s\S]*file-explorer-folder-icon/.test(finderActionsRowSource), 'Finder files-only action row renders collapse, new file, then a folder-icon new-folder button');
+  assert.ok(/data-file-explorer-new-file[\s\S]*data-file-explorer-new-folder[\s\S]*file-explorer-folder-icon/.test(finderActionsRowSource), 'Finder files-only action row renders new file, then a folder-icon new-folder button');
+  assert.equal(finderActionsRowSource.includes('data-file-explorer-collapse'), false, 'Finder files-only action row no longer renders the old standalone left-side collapse button');
+  const treeExpandCollapseButtons = api.fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle');
+  assert.ok(/data-file-tree-expand-collapse-all="expand"[\s\S]*data-file-tree-expand-collapse-all="collapse"/.test(treeExpandCollapseButtons), 'shared tree expand/collapse helper renders Expand all before Collapse all');
+  assert.ok(/data-file-tree-expand-collapse-all="expand"[\s\S]*file-tree-expand-collapse-icon[\s\S]*data-file-tree-expand-collapse-all="collapse"[\s\S]*file-tree-expand-collapse-icon/.test(treeExpandCollapseButtons), 'shared tree expand/collapse helper renders toolbar SVG icons');
+  assert.equal(treeExpandCollapseButtons.includes('▦') || treeExpandCollapseButtons.includes('▤'), false, 'shared tree expand/collapse helper does not use square text glyphs');
+  assert.ok(/\.file-tree-expand-collapse-all\s*\{[\s\S]*box-sizing:\s*border-box[\s\S]*width:\s*16px[\s\S]*max-width:\s*16px[\s\S]*flex:\s*0 0 16px[\s\S]*padding:\s*0/.test(preferencesCss), 'shared tree expand/collapse toolbar icon buttons stay narrow');
+  assert.ok(/\.changes-toolbar \.file-tree-expand-collapse-all\.changes-date-toggle,[\s\S]*\.file-explorer-date-reload-cluster \.file-tree-expand-collapse-all\.changes-date-toggle\s*\{[\s\S]*max-inline-size:\s*16px[\s\S]*height:\s*20px/.test(preferencesCss), 'Differ/Finder toolbar context cannot widen tree expand/collapse icon buttons');
   assert.equal(finderActionsRowSource.includes('data-file-explorer-mode-set'), false, 'Finder files-only action row no longer repeats the mode switcher');
   assert.equal(/data-file-explorer-refresh[\s\S]*file-explorer-collapse/.test(finderPanelSource), false, 'Finder no longer has a standalone left-side refresh button before collapse');
   assert.equal(preferencesCss.includes('--file-explorer-changes-size: 40%'), false, 'Finder diff mode no longer keeps the old 40% stacked Modified-files section cap');
@@ -4992,6 +5049,18 @@ test('t@2560', () => {
     .sort((left, right) => right.score - left.score || left.label.localeCompare(right.label) || left.index - right.index)
     .map(item => item.label);
   assert.deepStrictEqual(canonical(doitRows.slice(0, 2)), ['DOIT.51.md', 'DOIT.53.md'], 'DOIT-numbered files stay contiguous for a DOIT: query');
+  doitApi.setFileQuickOpenCandidatesForTest('/repo/yolomux', [
+    {name: 'DOIT.53.md', path: '/repo/yolomux/DOIT.53.md', relative_path: 'DOIT.53.md', kind: 'file'},
+    {name: 'report.html', path: '/home/test/dynamo/commits/logs/BA01C8.51e42e397/report.html', relative_path: 'commits/logs/BA01C8.51e42e397/report.html', indexed_root: '/home/test/dynamo', kind: 'file'},
+  ]);
+  doitApi.setCommandPaletteStateForTest('files', 'DOIT.53');
+  const exactDoitRows = doitApi.commandPaletteItems()
+    .filter(item => item.category === 'file')
+    .map((item, index) => ({...item, index, score: doitApi.commandPaletteItemScore(item, 'DOIT.53')}))
+    .filter(item => Number.isFinite(item.score))
+    .sort((left, right) => right.score - left.score || left.index - right.index);
+  assert.equal(exactDoitRows[0]?.label, 'DOIT.53.md', 'S15: exact local DOIT.53.md stays first for a dotted filename query');
+  assert.equal(exactDoitRows.some(item => item.label === 'report.html'), false, 'S15: external indexed full-path-only fuzzy noise is hidden for dotted filename queries');
   assert.deepStrictEqual(
     canonical(api.cursorStyleFileReference('/home/keivenc/yolomux.dev1/20260609-001.png', {imageIndex: 1})),
     {label: '[Image #1]', detail: "'/home/keivenc/yolomux.dev1/20260609-001.png'"},
@@ -5062,6 +5131,31 @@ test('t@2560', () => {
   assert.deepStrictEqual(canonical(api.fileQuickOpenExtraRootsForSearchQuery('yolo/TODO.md')), ['/home/test/yolomux.dev'], 'bare yolo/... queries add the app repo root without adding all of home');
   assert.deepStrictEqual(canonical(api.fileQuickOpenRootsForSearch('/home/test', 'yolo/TODO.md')), ['/home/test/dynamo', '/home/test/yolomux.dev'], 'yolo/TODO.md searches the YOLOmux checkout even when home is narrowed to indexed Dynamo');
   assert.deepStrictEqual(canonical(api.fileQuickOpenRootsForSearch('/home/test', 'src/file.js')), ['/home/test/dynamo'], 'unrelated slash queries do not add the YOLOmux root');
+  const quickTargetApi = loadYolomux('', ['1', '2']);
+  const quickOpenTargetSlots = quickTargetApi.emptyLayoutSlots();
+  quickOpenTargetSlots.left = quickTargetApi.paneStateWithTabs(['1'], '1');
+  quickOpenTargetSlots.slot1 = quickTargetApi.paneStateWithTabs(['2'], '2');
+  quickOpenTargetSlots[quickTargetApi.layoutTreeKey] = quickTargetApi.splitNode('row', quickTargetApi.leafNode('left'), quickTargetApi.leafNode('slot1'), 50);
+  quickTargetApi.setLayoutSlotsForTest(quickOpenTargetSlots);
+  quickTargetApi.setFocusedPanelItem('2');
+  assert.equal(quickTargetApi.fileQuickOpenTargetSlot(), 'slot1', 'Cmd-P normal file opens target the currently active pane, not the first pane');
+  const editorTargetItem = fileRootApi.fileEditorItemFor('/home/test/yolomux.dev/DOIT.53.md');
+  fileRootApi.setOpenFileStateForTest('/home/test/yolomux.dev/DOIT.53.md', {kind: 'text', gitRoot: '/home/test/yolomux.dev'});
+  fileRootApi.registerFileEditorLayoutItemForTest('/home/test/yolomux.dev/DOIT.53.md');
+  const editorTargetSlots = fileRootApi.emptyLayoutSlots();
+  editorTargetSlots.left = fileRootApi.paneStateWithTabs(['1'], '1');
+  editorTargetSlots.slot1 = fileRootApi.paneStateWithTabs([editorTargetItem], editorTargetItem);
+  editorTargetSlots[fileRootApi.layoutTreeKey] = fileRootApi.splitNode('row', fileRootApi.leafNode('left'), fileRootApi.leafNode('slot1'), 50);
+  fileRootApi.setLayoutSlotsForTest(editorTargetSlots);
+  fileRootApi.setFocusedPanelItem(editorTargetItem);
+  assert.equal(fileRootApi.fileQuickOpenTargetSlot(), 'slot1', 'Cmd-P targets the active file-editor pane as well as terminal panes');
+  const finderOnlyTargetSlots = fileRootApi.emptyLayoutSlots();
+  finderOnlyTargetSlots.left = fileRootApi.paneStateWithTabs([fileRootApi.fileExplorerItemId], fileRootApi.fileExplorerItemId);
+  finderOnlyTargetSlots.slot1 = fileRootApi.paneStateWithTabs(['1'], '1');
+  finderOnlyTargetSlots[fileRootApi.layoutTreeKey] = fileRootApi.splitNode('row', fileRootApi.leafNode('left'), fileRootApi.leafNode('slot1'), 22);
+  fileRootApi.setLayoutSlotsForTest(finderOnlyTargetSlots);
+  fileRootApi.setFocusedPanelItem(fileRootApi.fileExplorerItemId);
+  assert.equal(fileRootApi.fileQuickOpenTargetSlot(), null, 'Cmd-P does not target the reserved Finder pane for normal file opens');
   // #31: the Finder indexed badge reflects the cached build status without writing a long label into
   // the one-letter status column. Date/Ago mode hides the badge entirely because the date slot owns
   // the right side of the row.
@@ -5158,9 +5252,31 @@ test('t@2560', () => {
   assert.equal(api.fileIconClassFor('main.rs'), 'file-icon-code');
   assert.equal(api.fileIconClassFor('screenshot.png'), 'file-icon-image');
   const controlsHtml = api.panelControlsHtml('1');
+  const hideDetailsLabel = api.t('pane.details.hide');
+  const showDetailsLabel = api.t('pane.details.show');
   assert.equal(controlsHtml.includes('data-panel-tab-overflow'), false);
   assert.equal((controlsHtml.match(/pane-actions-dots/g) || []).length, 1, 'pane header has one merged ellipsis menu');
-  assert.ok(controlsHtml.includes('title="YO!info" aria-label="YO!info"'));
+  assert.ok(controlsHtml.includes(`title="${hideDetailsLabel}" aria-label="${hideDetailsLabel}" aria-pressed="true"`), 'pane header detail toggle starts as the Hide details action');
+  assert.equal(controlsHtml.includes('title="YO!info" aria-label="YO!info"'), false, 'pane header detail toggle is not mislabeled as the YO!info pane');
+  const detailsPanel = new TestElement('panel-1');
+  detailsPanel.dataset.slot = '1';
+  const innerDetailToggle = new TestElement('', 'button');
+  innerDetailToggle.dataset.detailToggle = '1';
+  const headerDetailToggle = new TestElement('', 'button');
+  headerDetailToggle.dataset.detailToggle = '1';
+  detailsPanel.appendChild(innerDetailToggle);
+  api.testElementForId('body').appendChild(headerDetailToggle);
+  api.setPanelDetailsCollapsedForTest(detailsPanel, false);
+  assert.equal(innerDetailToggle.title, hideDetailsLabel, 'inner detail close uses the expanded-state hide label');
+  assert.equal(headerDetailToggle.title, hideDetailsLabel, 'header detail toggle uses the expanded-state hide label');
+  assert.equal(headerDetailToggle.getAttribute('aria-pressed'), 'true', 'expanded details mark the header toggle pressed');
+  assert.equal(headerDetailToggle.classList.contains('active'), true, 'expanded details keep the header toggle active');
+  api.setPanelDetailsCollapsedForTest(detailsPanel, true);
+  assert.equal(innerDetailToggle.title, showDetailsLabel, 'inner detail close uses the collapsed-state show label');
+  assert.equal(headerDetailToggle.title, showDetailsLabel, 'header detail toggle uses the collapsed-state show label');
+  assert.equal(headerDetailToggle.getAttribute('aria-label'), showDetailsLabel, 'header detail aria label follows collapsed state');
+  assert.equal(headerDetailToggle.getAttribute('aria-pressed'), 'false', 'collapsed details mark the header toggle unpressed');
+  assert.equal(headerDetailToggle.classList.contains('active'), false, 'collapsed details remove the header active state');
   assert.ok(api.tmuxPaneTabHtml('1', null, {key: 'blocked', short: 'BLK', label: 'Blocked', reason: 'test'}).includes('tab-symbol'));
   assert.equal(api.tmuxSessionNameError('good_name-1.2'), '');
   assert.equal(api.tmuxSessionNameError('dynamo 2'), '');
@@ -6422,22 +6538,55 @@ test('t@6393', () => {
 
 test('t@6404', () => {
   const api = loadYolomux('', ['1']);
-  assert.deepStrictEqual(canonical(api.windowStepVisibility([{window: "0", window_active: true}])), {prev: false, next: false});
-  assert.deepStrictEqual(canonical(api.windowStepVisibility([
-    {window: "0", window_active: true},
-    {window: "1", window_active: false},
-    {window: "2", window_active: false},
-  ])), {prev: false, next: true});
-  assert.deepStrictEqual(canonical(api.windowStepVisibility([
-    {window: "0", window_active: false},
-    {window: "1", window_active: true},
-    {window: "2", window_active: false},
-  ])), {prev: true, next: true});
-  assert.deepStrictEqual(canonical(api.windowStepVisibility([
-    {window: "0", window_active: false},
-    {window: "1", window_active: false},
-    {window: "2", window_active: true},
-  ])), {prev: true, next: false});
+  const windowPanes = [
+    {window: '2', window_name: 'codex', window_active: false, active: true, command: 'node'},
+    {window: '1', window_name: 'bash', window_active: false, active: true, command: 'bash'},
+    {window: '3', window_name: 'node', process_label: 'codex', window_active: true, active: true, command: 'node'},
+  ];
+  assert.deepStrictEqual(canonical(api.tmuxWindowRecords(windowPanes).map(item => ({
+    indexText: item.indexText,
+    nameLabel: item.nameLabel,
+    numberLabel: item.numberLabel,
+    indexedNameLabel: item.indexedNameLabel,
+    active: item.active,
+  }))), [
+    {indexText: '1', nameLabel: 'bash', numberLabel: '1', indexedNameLabel: '1:bash', active: false},
+    {indexText: '2', nameLabel: 'codex(2)', numberLabel: '2', indexedNameLabel: '2:codex(2)', active: false},
+    {indexText: '3', nameLabel: 'codex(3)', numberLabel: '3', indexedNameLabel: '3:codex(3)', active: true},
+  ], 'P5: tmux window records sort by index and disambiguate duplicate names with the window index');
+  const windowBarHtml = api.tmuxWindowBarHtml('1', {panes: windowPanes});
+  assert.ok(windowBarHtml.includes('data-tmux-window-label-mode="names"'), 'P5: normal window bars prefer names');
+  assert.ok(windowBarHtml.includes('data-window-index="1"'), 'P5: window bar button targets window 1');
+  assert.ok(windowBarHtml.includes('data-window-index="2"'), 'P5: window bar button targets window 2');
+  assert.ok(/class="tab tmux-window-button active"[^>]*data-window-index="3"[^>]*aria-pressed="true"/.test(windowBarHtml), 'P5: active tmux window button is highlighted and pressed');
+  assert.ok(windowBarHtml.includes('<span class="tmux-window-name-label">1:bash</span>'), 'DOIT.53 P2: normal labels include index:name');
+  assert.ok(windowBarHtml.includes('<span class="tmux-window-name-label">2:codex(2)</span>'), 'P5: duplicate names keep the disambiguating suffix after the index prefix');
+  assert.equal(windowBarHtml.includes('3:node'), false, 'DOIT.53 P2: process-aware agent labels beat raw tmux window names like node');
+  const manyWindows = Array.from({length: 9}, (_unused, index) => ({
+    window: String(index + 1),
+    window_name: `w${index + 1}`,
+    window_active: index === 0,
+    active: true,
+    command: 'bash',
+  }));
+  assert.equal(api.tmuxWindowBarLabelMode(api.tmuxWindowRecords(manyWindows)), 'numbers', 'P5: many windows fall back to numeric labels');
+  assert.ok(api.tmuxWindowBarHtml('1', {panes: manyWindows}).includes('data-tmux-window-label-mode="numbers"'), 'P5: numeric fallback is reflected in the rendered bar');
+  api.setTranscriptInfoForTest('1', {panes: windowPanes});
+  const controls = api.panelControlsHtml('1');
+  assert.equal(controls.includes('data-tmux-window-bar="1"'), false, 'DOIT.53 P1: tmux pane header controls do not render the window bar');
+  assert.equal(controls.includes('tmux-window-step'), false, 'P5: tmux pane controls no longer render the old prev/next stepper');
+  assert.ok(controls.includes('terminal-tab'), 'DOIT.53 P1: tmux pane header keeps only the terminal tab label in the top row');
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(/id="panel-agent-\$\{session\}"[\s\S]{0,160}tmuxWindowBarHtml\(session, transcriptMeta\.sessions\?\.\[session\]\)[\s\S]{0,180}class="panel-detail-close"/.test(source), 'DOIT.53 P1: tmux window bar is rendered on the detail row before the close button');
+  assert.ok(/delegate\(panel, 'click', '\[data-window-dir\], \[data-window-index\]'/.test(source), 'DOIT.53 P3: in-panel window buttons use the shared delegated click path');
+  assert.ok(/\.panel\.details-collapsed \.panel-detail-row\s*\{[\s\S]*display:\s*none/.test(fs.readFileSync('static/yolomux.css', 'utf8')), 'DOIT.53 P1: detail-row window bar collapses with the detail row');
+  const calls = [];
+  api.setFetchForTest((url, options = {}) => {
+    calls.push({url: String(url), method: options.method || 'GET'});
+    return Promise.resolve(jsonResponse({ok: true}));
+  });
+  api.tmuxWindowForTest('1', {windowIndex: '3'}, 'tmux window 3:codex(3)');
+  assert.deepStrictEqual(calls, [{url: '/api/tmux-window?session=1&window=3', method: 'POST'}], 'P5: clicking a window button posts direct select-window for that index');
 });
 
 test('t@6424', () => {
@@ -8359,8 +8508,15 @@ test('t@8334', () => {
   const glyph = new TestElement('glyph', 'span');
   button.appendChild(glyph);
   container.appendChild(button);
+  const directButton = new TestElement('window-2', 'button');
+  directButton.dataset.windowIndex = '2';
+  directButton.dataset.windowSession = 'codex';
+  const directLabel = new TestElement('label', 'span');
+  directButton.appendChild(directLabel);
+  container.appendChild(directButton);
   assert.equal(api.windowStepButtonFromEvent({currentTarget: button, target: glyph}), button, 'legacy direct window-step clicks resolve the button currentTarget');
   assert.equal(api.windowStepButtonFromEvent({currentTarget: container, target: glyph}), button, 'Dockview delegated window-step clicks resolve the closest data-window-dir button');
+  assert.equal(api.windowStepButtonFromEvent({currentTarget: container, target: directLabel}), directButton, 'Dockview delegated direct-window clicks resolve the closest data-window-index button');
 });
 
 test('t@8347', () => {
@@ -8830,6 +8986,74 @@ test('t@8804', () => {
 
 (async () => {
   {
+    const treeApi = loadYolomux('', ['1']);
+    treeApi.setFileExplorerRootMode('fixed', {sync: false});
+    treeApi.setFileExplorerRootForTest('/repo');
+    treeApi.setFileExplorerDirListingForTest('/repo', [
+      {name: 'README.md', kind: 'file'},
+      {name: 'src', kind: 'dir'},
+    ]);
+    treeApi.setFileExplorerDirListingForTest('/repo/src', [
+      {name: 'app.js', kind: 'file'},
+      {name: 'lib', kind: 'dir'},
+    ]);
+    treeApi.setFileExplorerDirListingForTest('/repo/src/lib', [
+      {name: 'util.js', kind: 'file'},
+    ]);
+    assert.deepStrictEqual(canonical(await treeApi.fileExplorerDirectoryPathsForRootForTest('/repo')), ['/repo/src', '/repo/src/lib'], 'Finder Expand all collects every directory under the current root through the directory listing cache');
+    await treeApi.setAllFileTreeDirectoriesExpandedForTest(null, true);
+    assert.deepStrictEqual(canonical(treeApi.fileExplorerExpandedForTest()), ['/repo/src', '/repo/src/lib'], 'Finder Expand all flips the full directory expansion state');
+    await treeApi.setAllFileTreeDirectoriesExpandedForTest(null, false);
+    assert.deepStrictEqual(canonical(treeApi.fileExplorerExpandedForTest()), [], 'Finder Collapse all clears the directory expansion state');
+  }
+
+  {
+    const syncTreeApi = loadYolomux('', ['1']);
+    syncTreeApi.setFileExplorerRootMode('sync', {sync: false});
+    syncTreeApi.setFileExplorerRootForTest('/home/test');
+    syncTreeApi.setTranscriptInfoForTest('1', {
+      project: {git: {cwd: '/home/test/yolomux.dev2', root: '/home/test/yolomux.dev2'}},
+      selected_pane: {current_path: '/home/test/yolomux.dev2'},
+    });
+    syncTreeApi.setSessionFilesPayloadForTest({
+      session: '1',
+      repos: [{repo: '/home/test/yolomux.dev2'}, {repo: '/home/test/ai-config'}],
+      files: [
+        {repo: '/home/test/yolomux.dev2', path: 'static_src/js/app.js', abs_path: '/home/test/yolomux.dev2/static_src/js/app.js'},
+        {repo: '/home/test/ai-config', path: 'hooks/install.js', abs_path: '/home/test/ai-config/hooks/install.js'},
+      ],
+    });
+    syncTreeApi.setFileExplorerDirListingForTest('/home/test', [
+      {name: 'ai-config', kind: 'dir'},
+      {name: 'unrelated', kind: 'dir'},
+      {name: 'yolomux.dev2', kind: 'dir'},
+    ]);
+    syncTreeApi.setFileExplorerDirListingForTest('/home/test/yolomux.dev2', [
+      {name: 'static_src', kind: 'dir'},
+    ]);
+    syncTreeApi.setFileExplorerDirListingForTest('/home/test/yolomux.dev2/static_src', [
+      {name: 'js', kind: 'dir'},
+    ]);
+    syncTreeApi.setFileExplorerDirListingForTest('/home/test/yolomux.dev2/static_src/js', [
+      {name: 'app.js', kind: 'file'},
+    ]);
+    syncTreeApi.setFileExplorerDirListingForTest('/home/test/ai-config', [
+      {name: 'hooks', kind: 'dir'},
+    ]);
+    syncTreeApi.setFileExplorerDirListingForTest('/home/test/ai-config/hooks', [
+      {name: 'install.js', kind: 'file'},
+    ]);
+    await syncTreeApi.setAllFileTreeDirectoriesExpandedForTest(null, true);
+    assert.deepStrictEqual(canonical(syncTreeApi.fileExplorerExpandedForTest()), [
+      '/home/test/ai-config',
+      '/home/test/ai-config/hooks',
+      '/home/test/yolomux.dev2',
+      '/home/test/yolomux.dev2/static_src',
+      '/home/test/yolomux.dev2/static_src/js',
+    ], 'Finder Sync Expand expands affected paths without crawling unrelated home directories');
+  }
+
+  {
     const api = loadYolomux('', ['1']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.leafNode('left');
@@ -8844,11 +9068,13 @@ test('t@8804', () => {
       },
     });
 
+    const today = new Date();
+    const generatedName = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}-001.png`;
     const calls = [];
     api.setFetchForTest((url, options = {}) => {
       calls.push({url: String(url), method: options.method || 'GET', body: options.body});
       if (String(url).startsWith('/api/upload')) {
-        return Promise.resolve(jsonResponse({files: [{path: '/home/test/20260610-001.png'}]}));
+        return Promise.resolve(jsonResponse({files: [{path: `/home/test/${generatedName}`}]}));
       }
       if (String(url).startsWith('/api/transcripts')) {
         return Promise.resolve(jsonResponse({session_order: ['1'], sessions: {'1': {agents: []}}}));
@@ -8888,10 +9114,10 @@ test('t@8804', () => {
     assert.equal(calls[0].url, '/api/upload?session=1', 'image paste uploads to the active terminal session');
     assert.equal(calls[0].method, 'POST');
     assert.equal(calls[0].body.fields[0].name, 'files');
-    assert.equal(calls[0].body.fields[0].filename, '20260610-001.png');
+    assert.equal(calls[0].body.fields[0].filename, generatedName);
     assert.deepStrictEqual(sent[0], {
       type: 'input',
-      data: "[Image #1] '/home/test/20260610-001.png' ",
+      data: `[Image #1] '/home/test/${generatedName}' `,
     }, 'pasted image upload inserts the image reference into xterm');
   }
 
@@ -8955,6 +9181,32 @@ test('t@8804', () => {
     const [firstEntries, secondEntries] = await Promise.all([first, second]);
     assert.equal(firstEntries[0].name, 'a.txt');
     assert.equal(secondEntries[0].name, 'b.txt');
+  }
+
+  {
+    const api = loadYolomux();
+    api.setFileExplorerLastListErrorForTest('/home/test/blocked', 'Cannot open blocked');
+    api.setFileExplorerPushRefreshDepthForTest(1);
+    assert.equal(await api.fetchDirectoryForTest('/home/test'), null, 'P4: push-refresh-depth returns a benign null');
+    assert.equal(api.currentFileExplorerListErrorForTest('/home/test'), '', 'P4: stale error from another path never applies to this path');
+    api.setFileExplorerLastListErrorForTest('/home/test', 'Cannot open /home/test');
+    assert.equal(await api.fetchDirectoryForTest('/home/test'), null, 'P4: push-refresh-depth still returns null when the same path had a stale error');
+    assert.equal(api.currentFileExplorerListErrorForTest('/home/test'), '', 'P4: benign null clears the stale error for the current path');
+    api.setFileExplorerPushRefreshDepthForTest(0);
+    api.setFetchForTest((url, options = {}) => {
+      const body = JSON.parse(options.body || '{}');
+      return Promise.resolve(jsonResponse({
+        responses: (body.requests || []).map(request => ({
+          id: request.id,
+          ok: false,
+          status: 403,
+          error: `denied ${request.path}`,
+        })),
+      }));
+    });
+    assert.equal(await api.fetchDirectoryForTest('/home/test/secret', {fresh: true}), null, 'P4: real list failures still return null');
+    assert.equal(api.currentFileExplorerListErrorForTest('/home/test/secret'), 'denied /home/test/secret', 'P4: real list failures record a path-keyed error');
+    assert.equal(api.currentFileExplorerListErrorForTest('/home/test'), '', 'P4: real errors remain scoped to the failed path');
   }
 
   {

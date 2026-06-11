@@ -54,7 +54,7 @@ def auth_header(username, password):
     return {"Authorization": f"Basic {encoded}"}
 
 
-def start_server(monkeypatch, tmp_path):
+def start_server(monkeypatch, tmp_path, app=None):
     auth_path = tmp_path / "auth.yaml"
     auth_path.write_text(active_auth_yaml(), encoding="utf-8")
     monkeypatch.setattr(common, "AUTH_CONFIG_PATH", auth_path)
@@ -63,7 +63,7 @@ def start_server(monkeypatch, tmp_path):
     # depend on the developer's saved locale or on test import order. request_locale_pref resolves the
     # name in server_auth's namespace, so patch it there; the yolomux_locale cookie branch stays live.
     monkeypatch.setattr(server_auth, "current_language_pref", lambda: "system")
-    app = SimpleNamespace(sessions=[])
+    app = app or SimpleNamespace(sessions=[], dangerously_yolo=False)
     server = TmuxWebtermHTTPServer(("127.0.0.1", 0), app)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -271,6 +271,64 @@ def test_readonly_identity_cannot_call_mutating_post(monkeypatch, tmp_path):
 
         assert status == HTTPStatus.FORBIDDEN
         assert json.loads(body) == {"error": "admin access required", "role": "readonly"}
+    finally:
+        stop_server(server, thread)
+
+
+def test_share_token_is_limited_to_root_and_websocket(monkeypatch, tmp_path):
+    app = SimpleNamespace(
+        sessions=["6", "7"],
+        dangerously_yolo=False,
+        verify_share_token=lambda token: {"session": "6"} if token == "valid-share-token" else None,
+    )
+    server, thread = start_server(monkeypatch, tmp_path, app=app)
+    port = server.server_address[1]
+    try:
+        status, _headers, body = request(port, "GET", "/?token=valid-share-token")
+        assert status == HTTPStatus.OK
+        assert b'"accessRole":"readonly"' in body
+        assert b'"sessions":["6"]' in body
+        assert b'"sessions":["6","7"]' not in body
+
+        status, _headers, body = request(port, "GET", "/api/ping?token=valid-share-token")
+        assert status == HTTPStatus.FORBIDDEN
+        assert json.loads(body)["error"] == "share token is limited to the shared page and websocket"
+
+        status, _headers, body = request(port, "GET", "/api/ping?token=wrong")
+        assert status == HTTPStatus.UNAUTHORIZED
+        assert json.loads(body)["error"] == "authentication required"
+    finally:
+        stop_server(server, thread)
+
+
+def test_share_create_endpoint_passes_layout_seed(monkeypatch, tmp_path):
+    calls = []
+
+    def create_share_token(session, ttl_seconds=None, **kwargs):
+        calls.append((session, ttl_seconds, kwargs))
+        return {"ok": True, "url": "http://127.0.0.1/share", "token": "token", "session": session}, HTTPStatus.OK
+
+    app = SimpleNamespace(sessions=["6"], dangerously_yolo=False, create_share_token=create_share_token)
+    server, thread = start_server(monkeypatch, tmp_path, app=app)
+    port = server.server_address[1]
+    try:
+        body = json.dumps({"session": "6", "ttl_seconds": 900, "layout": "row@50(left,slot1)", "tabs": "slot1:6"})
+        status, _headers, response = request(
+            port,
+            "POST",
+            "/api/share",
+            body=body,
+            headers={**auth_header("keivenc", "random-password"), "Content-Type": "application/json"},
+        )
+
+        assert status == HTTPStatus.OK
+        assert json.loads(response)["token"] == "token"
+        assert calls == [("6", 900, {
+            "base_url": f"http://127.0.0.1:{port}",
+            "created_by": "keivenc",
+            "layout": "row@50(left,slot1)",
+            "tabs": "slot1:6",
+        })]
     finally:
         stop_server(server, thread)
 

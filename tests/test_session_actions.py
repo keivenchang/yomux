@@ -7,6 +7,7 @@ from http import HTTPStatus
 
 
 import yolomux_lib.app as app_module
+import yolomux_lib.sessions as sessions_module
 from yolomux_lib.app import TmuxWebtermApp
 from yolomux_lib.app import tmux_session_name_error
 from yolomux_lib.common import PaneInfo
@@ -25,6 +26,8 @@ def make_app(sessions: list[str]) -> TmuxWebtermApp:
     app.sessions = sessions
     app.auto_workers = {}
     app.auto_workers_lock = threading.RLock()
+    app.share_tokens = {}
+    app.share_tokens_lock = threading.RLock()
     app.refresh_sessions = lambda: []
     app.set_persisted_auto_session = lambda _session, _enabled: None
     app.log_event = lambda session, event_type, message, details=None: {
@@ -100,6 +103,43 @@ def test_kill_session_calls_tmux_and_removes_session(monkeypatch):
     assert payload["killed"] is True
     assert payload["sessions"] == ["ant"]
     assert calls == [["kill-session", "-t", "1:"]]
+
+
+def test_tmux_select_window_calls_direct_target(monkeypatch):
+    app = make_app(["1"])
+    calls = []
+
+    def fake_tmux(args, timeout=5.0):
+        calls.append(args)
+        return FakeTmuxResult()
+
+    monkeypatch.setattr(app_module, "tmux", fake_tmux)
+
+    payload, status = app.tmux_select_window("1", "3")
+    invalid_payload, invalid_status = app.tmux_select_window("1", "bad")
+
+    assert status == HTTPStatus.OK
+    assert payload == {"session": "1", "window": "3", "ok": True}
+    assert invalid_status == HTTPStatus.BAD_REQUEST
+    assert "window" in invalid_payload["error"]
+    assert calls == [["select-window", "-t", "1:3"]]
+
+
+def test_list_tmux_panes_captures_window_name(monkeypatch):
+    calls = []
+
+    def fake_tmux(args, timeout=5.0):
+        calls.append(args)
+        return FakeTmuxResult(stdout="1\t2\tcodex\t0\t%42\t/repo\tbash\t1\t1\ttitle\t123\n")
+
+    monkeypatch.setattr(sessions_module, "tmux", fake_tmux)
+
+    panes, error = sessions_module.list_tmux_panes()
+
+    assert error is None
+    assert panes[0].window == "2"
+    assert panes[0].window_name == "codex"
+    assert "#{window_name}" in calls[0][-1]
 
 
 def test_tmux_copy_selection_reads_fresh_tmux_buffer(monkeypatch):

@@ -1116,7 +1116,7 @@ function handleDockviewHeaderActionClick(event, fallbackItem = '') {
     activateTab(button.dataset.tab, nextName, {userInitiated: true});
     return;
   }
-  if (button.dataset.windowDir !== undefined) {
+  if (button.dataset.windowDir !== undefined || button.dataset.windowIndex !== undefined) {
     event.preventDefault();
     event.stopPropagation();
     handleWindowStepButtonClick(event);
@@ -1168,7 +1168,10 @@ function createDockviewHeaderActionsRenderer() {
     element.innerHTML = html;
     updatePanelWindowStepButtons(activeItem, transcriptMeta.sessions?.[activeItem]);
     const panel = document.getElementById(panelDomId(activeItem));
-    if (panel) updatePaneExpandButton(panel, activeItem);
+    if (panel) {
+      updatePaneExpandButton(panel, activeItem);
+      syncPanelDetailsToggleState(panel);
+    }
   };
   const dispose = () => {
     for (const disposable of disposables) disposable?.dispose?.();

@@ -264,16 +264,34 @@ def test_handle_ws_payload_readonly_discards_input_and_scroll(monkeypatch):
     assert scrolls == []
 
 
-def test_handle_ws_payload_resize_sets_pty_and_signals(monkeypatch):
+def test_handle_ws_payload_resize_sets_pty_and_signals_for_admin_only(monkeypatch):
     calls = []
     process = SimpleNamespace(pid=123)
     handler = SimpleNamespace(server=SimpleNamespace(app=SimpleNamespace(tmux_scroll=lambda *_args: None)))
     monkeypatch.setattr(server_module, "set_pty_size", lambda fd, rows, cols: calls.append(("size", fd, rows, cols)))
     monkeypatch.setattr(server_module.os, "killpg", lambda pid, sig: calls.append(("signal", pid, sig)))
 
-    Handler.handle_ws_payload(handler, "6", 10, 11, process, json.dumps({"type": "resize", "rows": 24, "cols": 80}).encode(), readonly=True)
+    Handler.handle_ws_payload(handler, "6", 10, 11, process, json.dumps({"type": "resize", "rows": 24, "cols": 80}).encode(), readonly=False)
 
     assert calls == [("size", 11, 24, 80), ("signal", 123, server_module.signal.SIGWINCH)]
+    calls.clear()
+
+    Handler.handle_ws_payload(handler, "6", 10, 11, process, json.dumps({"type": "resize", "rows": 30, "cols": 100}).encode(), readonly=True)
+
+    assert calls == []
+
+
+def test_websocket_rejects_share_token_for_other_session():
+    writes = []
+    handler = SimpleNamespace(
+        share_session=lambda: "6",
+        server=SimpleNamespace(app=SimpleNamespace(sessions=["6", "7"])),
+        write_text=lambda value, status=HTTPStatus.OK: writes.append((status, value)),
+    )
+
+    Handler.websocket(handler, SimpleNamespace(query="session=7"))
+
+    assert writes == [(HTTPStatus.FORBIDDEN, "share token is scoped to a different session\n")]
 
 
 def test_write_sse_json_formats_event_stream():

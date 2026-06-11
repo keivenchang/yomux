@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import copy
+import hmac
 import json
+import math
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import threading
@@ -16,6 +19,7 @@ from datetime import timezone
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 from . import filesystem
 from . import session_files
@@ -124,6 +128,8 @@ SESSION_FILES_CACHE_SECONDS = 5.0
 TRANSCRIPT_TAIL_CACHE_MAX_ITEMS = 128
 TRANSCRIPTS_PAYLOAD_CACHE_SECONDS = 15.0
 CONTEXT_ITEMS_CACHE_MAX_ITEMS = 128
+SHARE_TOKEN_DEFAULT_TTL_SECONDS = 3600.0
+SHARE_TOKEN_MAX_TTL_SECONDS = 8.0 * 3600.0
 SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS = 1.25
 SERVER_WATCHED_PR_EVENT_POLL_SECONDS = 60.0
 CLIENT_WATCH_ROOT_TTL_SECONDS = 300
@@ -380,6 +386,8 @@ class TmuxWebtermApp:
         self.dangerously_yolo = dangerously_yolo
         self.auto_workers: dict[str, AutoApproveWorker] = {}
         self.auto_workers_lock = threading.RLock()
+        self.share_tokens: dict[str, dict[str, Any]] = {}
+        self.share_tokens_lock = threading.RLock()
         self.metadata_cache = MetadataCache()
         # last-logged watched-PR truncation state, so the cap is logged only when it changes.
         self._watched_pr_truncated_signature: tuple[int, tuple[str, ...]] | None = None
@@ -460,8 +468,109 @@ class TmuxWebtermApp:
         if error is None:
             self.sessions = sessions
             self.prune_yoagent_session_summaries(set(sessions))
+            self.revoke_share_tokens_for_missing_sessions(set(sessions))
             return []
         return [error]
+
+    def bounded_share_ttl_seconds(self, value: Any) -> float | None:
+        if value is None or value == "":
+            return SHARE_TOKEN_DEFAULT_TTL_SECONDS
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(seconds) or seconds <= 0:
+            return None
+        return min(seconds, SHARE_TOKEN_MAX_TTL_SECONDS)
+
+    def create_share_token(
+        self,
+        session: str,
+        ttl_seconds: Any = SHARE_TOKEN_DEFAULT_TTL_SECONDS,
+        *,
+        base_url: str = "",
+        created_by: str = "",
+        layout: str = "",
+        tabs: str = "",
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        unknown = self.require_known_session(session)
+        if unknown:
+            return unknown
+        bounded_ttl = self.bounded_share_ttl_seconds(ttl_seconds)
+        if bounded_ttl is None:
+            return {"session": session, "error": "ttl must be a positive number of seconds"}, HTTPStatus.BAD_REQUEST
+        now = time.time()
+        expires_at = now + bounded_ttl
+        token = secrets.token_urlsafe(32)
+        record = {
+            "session": session,
+            "created_at": now,
+            "expires_at": expires_at,
+            "created_by": str(created_by or ""),
+            "revoked": False,
+            "layout": str(layout or ""),
+            "tabs": str(tabs or ""),
+        }
+        with self.share_tokens_lock:
+            self.share_tokens[token] = record
+        params = {"token": token, "sessions": session}
+        if record["layout"]:
+            params["layout"] = record["layout"]
+        if record["tabs"]:
+            params["tabs"] = record["tabs"]
+        root = str(base_url or "").rstrip("/")
+        url = f"{root}/?{urlencode(params)}" if root else f"/?{urlencode(params)}"
+        return {
+            "ok": True,
+            "token": token,
+            "url": url,
+            "session": session,
+            "expires_at": expires_at,
+            "ttl_seconds": bounded_ttl,
+        }, HTTPStatus.OK
+
+    def verify_share_token(self, token: str) -> dict[str, Any] | None:
+        raw_token = str(token or "")
+        if not raw_token:
+            return None
+        now = time.time()
+        with self.share_tokens_lock:
+            for stored_token, record in list(self.share_tokens.items()):
+                expired = float(record.get("expires_at") or 0.0) <= now
+                session = str(record.get("session") or "")
+                if expired:
+                    self.share_tokens.pop(stored_token, None)
+                    continue
+                if session not in self.sessions:
+                    record["revoked"] = True
+                if not hmac.compare_digest(stored_token, raw_token):
+                    continue
+                if record.get("revoked") or session not in self.sessions:
+                    return None
+                return dict(record)
+        return None
+
+    def revoke_share_tokens_for_session(self, session: str) -> int:
+        revoked = 0
+        with self.share_tokens_lock:
+            for record in self.share_tokens.values():
+                if record.get("session") == session and not record.get("revoked"):
+                    record["revoked"] = True
+                    revoked += 1
+        return revoked
+
+    def revoke_share_tokens_for_missing_sessions(self, active_sessions: set[str]) -> int:
+        revoked = 0
+        now = time.time()
+        with self.share_tokens_lock:
+            for token, record in list(self.share_tokens.items()):
+                if float(record.get("expires_at") or 0.0) <= now:
+                    self.share_tokens.pop(token, None)
+                    continue
+                if str(record.get("session") or "") not in active_sessions and not record.get("revoked"):
+                    record["revoked"] = True
+                    revoked += 1
+        return revoked
 
     def persisted_auto_sessions(self) -> list[str]:
         enabled = read_yolomux_state().get("auto_approve_enabled", [])
@@ -2476,6 +2585,19 @@ class TmuxWebtermApp:
             return {"session": session, "error": error}, HTTPStatus.INTERNAL_SERVER_ERROR
         return {"session": session, "ok": True}, HTTPStatus.OK
 
+    def tmux_select_window(self, session: str, window: str) -> tuple[dict[str, Any], HTTPStatus]:
+        if session not in self.sessions:
+            return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
+        window_text = str(window or "").strip()
+        if not window_text.isdigit():
+            return {"session": session, "error": "window must be a non-negative integer"}, HTTPStatus.BAD_REQUEST
+        target = f"{tmux_session_target(session)}{window_text}"
+        result = tmux(["select-window", "-t", target], timeout=3.0)
+        if result.returncode != 0:
+            error = (result.stderr or result.stdout or "tmux select-window failed").strip()
+            return {"session": session, "window": window_text, "error": error}, HTTPStatus.INTERNAL_SERVER_ERROR
+        return {"session": session, "window": window_text, "ok": True}, HTTPStatus.OK
+
     def stop_auto_approve_worker(self, session: str) -> None:
         with self.auto_workers_lock:
             worker = self.auto_workers.pop(session, None)
@@ -2503,6 +2625,7 @@ class TmuxWebtermApp:
             return {"session": session, "new_name": new_name, "error": error}, HTTPStatus.INTERNAL_SERVER_ERROR
 
         self.stop_auto_approve_worker(session)
+        self.revoke_share_tokens_for_session(session)
         self.refresh_sessions()
         self.log_event(new_name, "session_renamed", f"renamed {session} to {new_name}", {"old_session": session, "new_session": new_name})
         return {"session": session, "new_session": new_name, "renamed": True, "sessions": self.sessions, "ok": True}, HTTPStatus.OK
@@ -2519,6 +2642,7 @@ class TmuxWebtermApp:
             return {"session": session, "error": error}, HTTPStatus.INTERNAL_SERVER_ERROR
 
         self.stop_auto_approve_worker(session)
+        self.revoke_share_tokens_for_session(session)
         self.refresh_sessions()
         self.log_event(None, "session_killed", f"killed {session}", {"session": session})
         return {"session": session, "killed": True, "sessions": self.sessions, "ok": True}, HTTPStatus.OK

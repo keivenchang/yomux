@@ -1177,29 +1177,71 @@ function bindPanelPopover(panel) {
   });
 }
 
+function panelDetailsToggleLabel(collapsed) {
+  return collapsed ? t('pane.details.show') : t('pane.details.hide');
+}
+
+function syncPanelDetailsToggleButton(button, collapsed) {
+  if (!button) return;
+  const detailsLabel = panelDetailsToggleLabel(collapsed);
+  button.classList.toggle('active', !collapsed);
+  button.title = detailsLabel;
+  button.setAttribute('aria-label', detailsLabel);
+  button.setAttribute('aria-pressed', collapsed ? 'false' : 'true');
+}
+
+function panelDetailToggleButtons(panel) {
+  if (!panel) return [];
+  const buttons = [];
+  const seen = new Set();
+  const add = button => {
+    if (!button || seen.has(button)) return;
+    seen.add(button);
+    buttons.push(button);
+  };
+  panel.querySelectorAll?.('[data-detail-toggle]')?.forEach(add);
+  const item = panel.dataset?.slot || String(panel.id || '').replace(/^panel-/, '');
+  if (item) {
+    document.body?.querySelectorAll?.(`[data-detail-toggle="${cssEscape(item)}"]`)?.forEach(add);
+  }
+  return buttons;
+}
+
+function syncPanelDetailsToggleState(panel) {
+  const collapsed = panel?.classList?.contains('details-collapsed') === true;
+  panelDetailToggleButtons(panel).forEach(button => syncPanelDetailsToggleButton(button, collapsed));
+}
+
 function setPanelDetailsCollapsed(panel, collapsed) {
   panel.classList.toggle('details-collapsed', collapsed);
-  const button = panel.querySelector('[data-detail-toggle]');
-  if (button) {
-    button.classList.toggle('active', !collapsed);
-    const detailsLabel = collapsed ? t('pane.details.show') : t('pane.details.hide');
-    button.title = detailsLabel;
-    button.setAttribute('aria-label', detailsLabel);
-    button.setAttribute('aria-pressed', collapsed ? 'false' : 'true');
-  }
+  syncPanelDetailsToggleState(panel);
+}
+
+function terminalTabDisplayLabel(session, info) {
+  const label = terminalProcessLabel(info);
+  const agentKind = sessionAgentKind(session);
+  const normalized = String(label || '').trim().toLowerCase();
+  if (agentKind && (normalized === agentKind || normalized === agentName(agentKind).toLowerCase())) return 'Term';
+  return label || 'Term';
 }
 
 function terminalTabLabel(session, info) {
   const type = tabTypeForItem(session);
   if (type?.shortLabel) return type.shortLabel(session);
-  const label = terminalProcessLabel(info);
-  return shortText(label || 'Term', 16);
+  return shortText(terminalTabDisplayLabel(session, info), 16);
 }
 
 function terminalTabTitle(session, info) {
   const type = tabTypeForItem(session);
   if (type?.terminalTitle) return type.terminalTitle(session);
-  return `terminal: ${terminalProcessLabel(info) || 'Term'}`;
+  return `terminal: ${terminalTabDisplayLabel(session, info)}`;
+}
+
+function sessionAgentBadgeHtml(session) {
+  const kind = sessionAgentKind(session);
+  if (!kind) return '';
+  const name = agentName(kind);
+  return `<span class="panel-agent-badge ${esc(kind)}" title="${esc(name)}" aria-label="${esc(name)}">${esc(name)}</span>`;
 }
 
 function terminalProcessLabel(info) {
@@ -1238,14 +1280,73 @@ function tmuxWindowIndices(panes) {
   return windows.sort((left, right) => left - right);
 }
 
-function windowStepVisibility(panes) {
-  const windows = tmuxWindowIndices(panes);
-  if (windows.length <= 1) return {prev: false, next: false};
-  const activeIndex = tmuxWindowNumber((Array.isArray(panes) ? panes : []).find(pane => pane.window_active)?.window) ?? windows[0];
-  return {
-    prev: windows.some(index => index < activeIndex),
-    next: windows.some(index => index > activeIndex),
-  };
+const tmuxWindowBarNumericFallbackCount = 8;
+const tmuxWindowBarNamedCharLimit = 44;
+
+function tmuxWindowDisplayName(pane) {
+  const process = String(pane?.process_label || '').trim();
+  if (process) return process;
+  const name = String(pane?.window_name || '').trim();
+  if (name) return name;
+  const inferred = processLabelFromCommand(pane?.command || '');
+  return String(inferred || '').trim() || `window ${pane?.window ?? ''}`.trim() || 'window';
+}
+
+function tmuxWindowRecords(panes) {
+  const byIndex = new Map();
+  for (const pane of Array.isArray(panes) ? panes : []) {
+    const index = tmuxWindowNumber(pane.window);
+    if (index === null) continue;
+    const indexText = String(pane.window);
+    const existing = byIndex.get(index);
+    const active = pane.window_active === true;
+    const record = existing || {index, indexText, name: tmuxWindowDisplayName(pane), active: false};
+    if (!existing || active || !record.name) record.name = tmuxWindowDisplayName(pane);
+    record.active = record.active || active;
+    byIndex.set(index, record);
+  }
+  const records = [...byIndex.values()].sort((left, right) => left.index - right.index);
+  const nameCounts = new Map();
+  records.forEach(record => {
+    nameCounts.set(record.name, (nameCounts.get(record.name) || 0) + 1);
+  });
+  return records.map(record => ({
+    ...record,
+    nameLabel: nameCounts.get(record.name) > 1 ? `${record.name}(${record.indexText})` : record.name,
+    numberLabel: record.indexText,
+  })).map(record => ({
+    ...record,
+    indexedNameLabel: `${record.indexText}:${record.nameLabel}`,
+  }));
+}
+
+function tmuxWindowBarLabelMode(records, options = {}) {
+  if (options.labelMode === 'numbers' || options.labelMode === 'names') return options.labelMode;
+  const items = Array.isArray(records) ? records : [];
+  const fallbackCount = Number.isFinite(options.fallbackCount) ? options.fallbackCount : tmuxWindowBarNumericFallbackCount;
+  const charLimit = Number.isFinite(options.namedCharLimit) ? options.namedCharLimit : tmuxWindowBarNamedCharLimit;
+  const namedChars = items.reduce((total, item) => total + String(item.indexedNameLabel || item.nameLabel || '').length, 0);
+  return items.length > fallbackCount || namedChars > charLimit ? 'numbers' : 'names';
+}
+
+function tmuxWindowBarHtml(session, info, options = {}) {
+  const panes = Array.isArray(info) ? info : info?.panes;
+  const records = tmuxWindowRecords(panes);
+  if (!records.length) return '';
+  const disabled = options.disabled === true || readOnlyMode;
+  const labelMode = tmuxWindowBarLabelMode(records, options);
+  const disabledTitle = readOnlyMode ? 'tmux window selection requires admin access' : `unavailable for ${itemLabel(session)}`;
+  const buttons = records.map(record => {
+    const pressed = record.active ? 'true' : 'false';
+    const activeClass = record.active ? ' active' : '';
+    const visibleName = record.indexedNameLabel || `${record.indexText}:${record.nameLabel}`;
+    const title = `tmux window ${visibleName}`;
+    const attrs = disabled
+      ? `disabled title="${esc(disabledTitle)}" aria-label="${esc(title)}"`
+      : `data-window-index="${esc(record.indexText)}" data-window-session="${esc(session)}" data-window-label="${esc(visibleName)}" title="${esc(title)}" aria-label="${esc(title)}" aria-pressed="${pressed}"`;
+    return `<button type="button" class="tab tmux-window-button${activeClass}" ${attrs}><span class="tmux-window-name-label">${esc(visibleName)}</span><span class="tmux-window-number-label">${esc(record.numberLabel)}</span></button>`;
+  }).join('');
+  return `<div class="tmux-window-bar" data-tmux-window-bar="${esc(session)}" data-tmux-window-label-mode="${esc(labelMode)}" role="group" aria-label="tmux windows">${buttons}</div>`;
 }
 
 function previewTmuxWindowInfo(info, key) {
@@ -1254,9 +1355,13 @@ function previewTmuxWindowInfo(info, key) {
   if (windows.length < 2) return null;
   const activePane = terminalDisplayPane(info);
   const activeIndex = tmuxWindowNumber(activePane?.window);
-  const current = Math.max(0, windows.findIndex(index => index === activeIndex));
-  const delta = key === 'p' ? -1 : 1;
-  const target = windows[(current + delta + windows.length) % windows.length];
+  let target = tmuxWindowNumber(key?.windowIndex);
+  if (target === null) {
+    const current = Math.max(0, windows.findIndex(index => index === activeIndex));
+    const delta = key === 'p' ? -1 : 1;
+    target = windows[(current + delta + windows.length) % windows.length];
+  }
+  if (!windows.includes(target)) return null;
   const nextPanes = panes.map(pane => ({...pane, window_active: tmuxWindowNumber(pane.window) === target}));
   return {
     ...info,
@@ -1285,6 +1390,11 @@ function previewTmuxWindowLabel(session, key) {
 function handleWindowStepButtonClick(event) {
   const button = windowStepButtonFromEvent(event);
   if (!button) return;
+  if (button.dataset.windowIndex !== undefined) {
+    const label = button.dataset.windowLabel || button.dataset.windowIndex;
+    tmuxWindow(button.dataset.windowSession, {windowIndex: button.dataset.windowIndex}, `tmux window ${label}`);
+    return;
+  }
   const key = button.dataset.windowDir === 'prev' ? 'p' : 'n';
   const label = button.dataset.windowDir === 'prev' ? 'previous tmux window' : 'next tmux window';
   tmuxWindow(button.dataset.windowSession, key, label);
@@ -1293,48 +1403,32 @@ function handleWindowStepButtonClick(event) {
 function windowStepButtonFromEvent(event) {
   const current = event?.currentTarget;
   if (current?.matches?.('[data-window-dir]')) return current;
-  return event?.target?.closest?.('[data-window-dir]') || null;
+  if (current?.matches?.('[data-window-index]')) return current;
+  return event?.target?.closest?.('[data-window-index]') || event?.target?.closest?.('[data-window-dir]') || null;
 }
 
-function createWindowStepButton(session, dir) {
-  const label = windowStepButtonLabel(dir);
-  const button = document.createElement('button');
-  button.className = 'tab tmux-window-step';
-  button.dataset.windowStepButton = dir;
-  button.textContent = dir === 'prev' ? '<' : '>';
-  if (readOnlyMode) {
-    button.type = 'button';
-    button.disabled = true;
-    button.title = `${label} tmux window requires admin access`;
-    return button;
-  }
-  button.dataset.windowDir = dir;
-  button.dataset.windowSession = session;
-  button.title = `${label} tmux window`;
-  button.addEventListener('click', handleWindowStepButtonClick);
-  return button;
-}
-
-function syncWindowStepButton(controls, terminalButton, session, dir, visible) {
-  const selector = `[data-window-step-button="${dir}"]`;
-  const existing = controls.querySelector(selector);
-  if (!visible) {
-    existing?.remove();
-    return;
-  }
-  if (existing) return;
-  const button = createWindowStepButton(session, dir);
-  if (dir === 'prev') controls.insertBefore(button, terminalButton);
-  else controls.insertBefore(button, terminalButton.nextSibling || null);
+function syncTmuxWindowBarOverflow(session) {
+  document.body?.querySelectorAll?.(`[data-tmux-window-bar="${cssEscape(session)}"]`)?.forEach(bar => {
+    if (!bar || bar.dataset.tmuxWindowLabelMode === 'numbers') return;
+    if (bar.scrollWidth > bar.clientWidth + 1) bar.dataset.tmuxWindowLabelMode = 'numbers';
+  });
 }
 
 function updatePanelWindowStepButtons(session, info) {
-  const controls = document.getElementById(panelDomId(session))?.querySelector('.tabs');
-  const terminalButton = controls?.querySelector('.terminal-tab');
-  if (!controls || !terminalButton) return;
-  const steps = windowStepVisibility(info?.panes);
-  syncWindowStepButton(controls, terminalButton, session, 'prev', steps.prev);
-  syncWindowStepButton(controls, terminalButton, session, 'next', steps.next);
+  const bars = [...(document.body?.querySelectorAll?.(`[data-tmux-window-bar="${cssEscape(session)}"]`) || [])];
+  if (!bars.length) return;
+  const html = tmuxWindowBarHtml(session, info);
+  if (!html) {
+    syncTmuxWindowBarOverflow(session);
+    return;
+  }
+  bars.forEach(existing => {
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = html;
+    const replacement = wrapper.firstElementChild;
+    if (replacement) existing.replaceWith(replacement);
+  });
+  syncTmuxWindowBarOverflow(session);
 }
 
 function agentForPane(info, pane) {

@@ -34,7 +34,7 @@ DEFAULT_ROWS = 36
 MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
-YOLOMUX_VERSION = "0.2.81"
+YOLOMUX_VERSION = "0.2.82"
 SUMMARY_LOOKBACK_SECONDS = 3600
 SUMMARY_MAX_PROMPT_CHARS = 100_000
 SUMMARY_CODEX_TIMEOUT_SECONDS = 600
@@ -257,6 +257,7 @@ class PaneInfo:
     title: str
     pid: int
     process_label: str | None = None
+    window_name: str = ""
 
 
 @dataclass(frozen=True)

@@ -20,6 +20,7 @@ This document is the working GUI contract for pane, tab, Finder/Differ, editor, 
 - [x] Editor back/forward buttons navigate the visited-file stack.
 - [x] Search results can render image/file references as `[Image #N] '/absolute/path'`.
 - [x] File quick-open ranks basename matches ahead of path-only matches.
+- [x] File quick-open opens new files in the active tab's pane, except Finder/Differ which stays reserved.
 - [x] Finder/Differ rows support selection, multi-select, rename/delete, context menu, date/sort controls, and image preview.
 - [x] Preferences exposes searchable, collapsible sections with reset controls and live-applied settings.
 - [x] Keyboard shortcut labels use the concrete platform modifier: Mac uses `Cmd`; PC/Linux uses `Ctrl`.
@@ -59,6 +60,7 @@ This document is the working GUI contract for pane, tab, Finder/Differ, editor, 
 - Cross-gutter drops preserve the sibling boundary and create a full-span pane at that boundary.
 - Closing or moving tabs must preserve user-chosen split percentages where possible. Empty placeholder panes are allowed when they preserve a meaningful user split.
 - Resizing the Finder/Differ sash changes the root Finder/Differ percentage and preserves the nested content split percentages. Example: in `Finder | Pane1 | Pane2`, dragging the Finder sash changes the available content width while Pane1 and Pane2 keep their relative ratio.
+- The pane-header detail-toggle button controls the pane detail strip only. It must be labeled as `show details` or `hide details` based on state and must not reuse the YO!info pane label.
 
 ## Finder/Differ Pane Rules
 
@@ -70,12 +72,15 @@ This document is the working GUI contract for pane, tab, Finder/Differ, editor, 
 - A file dragged from Finder or Differ onto Finder/Differ follows the reserved-target rule: no preview except the allowed bottom split when there is enough room.
 - Directory drags into terminal content keep the terminal path-insertion affordance. They may show a normal-pane split preview when the target is not Finder/Differ and the pane has enough room.
 - Finder and Differ rows share selection, multi-select, context menu, date columns, status columns, image preview, rename/delete, and keyboard behavior through shared helpers.
-- Finder mode and Differ mode must keep the same toolbar alignment rules, date-mode vocabulary (`None`, `Date`, `Ago`), sort vocabulary (`A-Z`, `Z-A`, `new`, `old`), and readable row metadata.
+- Finder mode and Differ mode must keep the same toolbar alignment rules, date-mode vocabulary (`None`, `Date`, `Ago`), sort vocabulary (`A-Z`, `Z-A`, `new`, `old`), and readable row metadata. The trailing tree controls are ordered `Date | Expand all | Collapse all | Reload` on both Finder and Differ, and Expand all/Collapse all use compact skinny in/out arrow toolbar icons rather than square text glyphs.
+- Finder Sync mode `Expand all` is bounded to the sync plan: expand affected repo/directories such as the active `yolomux.dev2` path and do not recursively crawl every directory under a broad home root. Fixed-root Finder mode may still recursively expand the current root.
 
 ## Tab Strip Behavior
 
 - Clicking a tab activates it in its current pane.
 - Dragging a tab within the same tab strip reorders it. The preview must appear between tabs, not on top of the target tab.
+- A same-strip reorder must commit on a slow, deliberate drag, not only on a quick flick. Drag-and-drop is pointer-based (`dndStrategy: 'pointer'`), so the dragged tab smooth-reorders under the cursor; the drop-target tab must be resolved from the pointer x-coordinate with the dragged tab excluded (nearest remaining tab when the pointer sits over the dragged tab's own gap), never by hit-testing whatever element is under the pointer. Hit-testing the element under the pointer resolves to the dragged tab itself, makes the drop look like a `source == target` no-op, and silently swallows the reorder — only a flick that outran the smooth-reorder transform would land, which reads to the user as "drag sometimes does nothing".
+- In a two-tab strip the dragged tab fully covers the drop point. The reorder must still commit, and a secondary pinned pointer-reorder fallback must stand down once the primary drop pipeline has handled the gesture, so it cannot re-run and mirror-swap the order back (which makes the completed drag look undone).
 - Dragging a tab to another tab strip moves it to that pane at the indicated insertion position.
 - Dragging a tab to another pane edge splits that target pane only.
 - Dragging a tab to a root edge creates a full-span pane beside the current layout.
@@ -84,6 +89,8 @@ This document is the working GUI contract for pane, tab, Finder/Differ, editor, 
 - The active pane's tab container is slightly brighter than inactive panes. Inactive tabs inside the active pane use that same active-pane tab-container background.
 - Tab hover details must show the session/file information popover. Dockview tab popovers must not be clipped by the Dockview tab scroller.
 - Header actions such as back/forward, minimize, close, and add must stay on the first header row when there is room.
+- Terminal agent identity (`Codex`, `Claude`) belongs on the pane info line immediately before the detail-line close control, not in the first tab-title row.
+- Tmux session detail rows show a window bar with one button per tmux window, immediately before the detail-row close control. Buttons use `index:name`, keep duplicate-name suffixes when needed, highlight the active window, switch directly to that tmux window on click, hide with collapsed details, and fall back to number-only labels when the name bar would be too crowded.
 - Many tabs may wrap, but wrapping must not overlap content or force action buttons into a second line when first-line space is available.
 
 ## Pane Chrome And Resize
@@ -108,6 +115,7 @@ This document is the working GUI contract for pane, tab, Finder/Differ, editor, 
 ## Search, Menus, And Popovers
 
 - Search results that reference images or files should use a Popular IDE-style display when possible: `[Image #N] '/absolute/path'`.
+- Cmd-P file quick-open should preserve active-pane context. A normal file open lands in the pane that owns the currently active tab; explicit split-open keeps its split behavior; Finder/Differ remains a reserved pane target.
 - Quick Search and Tabs search should collapse duplicate open-file rows by path and surface open view chips instead of showing duplicate file entries.
 - Tab search indexes session labels, branch/PR metadata, Linear IDs, file paths, and tab details.
 - Menus and popovers are global UI state. Hover must not auto-open menus when auto-focus is off unless the user explicitly opened a menu first.
@@ -157,7 +165,8 @@ This document is the working GUI contract for pane, tab, Finder/Differ, editor, 
 ## Current Test Coverage
 
 - `tests/layout_url.test.js` guards layout serialization, Finder/Differ reserved drop rules, min-size drop gating, source structure for Dockview root/pane/file drop hooks, tab insertion placement math, file-drag payload shape, Markdown task toggles, Finder/Differ shared row helpers, and many source-level invariants.
-- `tests/test_browser_layout.py::test_dockview_drag_reorders_tabs_in_same_pane` covers same-pane tab reorder.
+- `tests/test_browser_layout.py::test_dockview_drag_reorders_tabs_in_same_pane` covers same-pane tab reorder by asserting the result of a real pointer drag (not a scripted layout write), so a slow-drag reorder that gets silently swallowed by the no-op veto fails the test.
+- `tests/test_browser_layout.py::test_dockview_drag_reorders_two_tab_pane` and `test_dockview_drag_reorders_two_pinned_tabs` cover the two-tab strip where the dragged tab covers the drop point, guarding against both the no-op veto and the pinned-fallback mirror-swap revert.
 - `tests/test_browser_layout.py::test_dockview_tab_drag_preview_is_between_tabs` covers the visible between-tabs preview.
 - `tests/test_browser_layout.py::test_dockview_drag_moves_tab_to_other_pane` covers moving a tab into another pane's tab strip.
 - `tests/test_browser_layout.py::test_dockview_drag_splits_tab_to_right_pane_and_measures_geometry` covers basic pane-edge split geometry.
@@ -188,3 +197,4 @@ This document is the working GUI contract for pane, tab, Finder/Differ, editor, 
 - [ ] Add a Search rendering fixture for `[Image #N] '/path'` output, including file paths with spaces and shell-special characters.
 - [ ] Add a Markdown Preview task checkbox browser test with split editor/preview panes open at the same time, asserting both source and preview update after a click.
 - [ ] Collapse any future duplicate drop validation into `dropIntentAllowsSession`, `fileDropIntentAllowsPayload`, or a shared parent. Do not add a one-off Dockview-only or terminal-only target gate.
+- [ ] Implement and test "drop a tab on the empty tab-strip background past the last tab = move to end". This is currently a no-op: only drops that resolve onto an existing tab reorder, so a release in the empty strip area beyond the last tab leaves the order unchanged.

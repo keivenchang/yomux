@@ -108,9 +108,11 @@ def pane_fixture_html(width):
         <div class="panel active-pane">
           <div class="panel-head">
             <div class="tabs" role="tablist">
-              <button class="tab tmux-window-step">&lt;</button>
-              <button class="tab active terminal-tab">mock_codex.py</button>
-              <button class="tab tmux-window-step">&gt;</button>
+              <div class="tmux-window-bar" data-tmux-window-label-mode="names">
+                <button class="tab tmux-window-button"><span class="tmux-window-name-label">bash</span><span class="tmux-window-number-label">0</span></button>
+                <button class="tab tmux-window-button active" aria-pressed="true"><span class="tmux-window-name-label">codex</span><span class="tmux-window-number-label">1</span></button>
+                <button class="tab tmux-window-button"><span class="tmux-window-name-label">pytest</span><span class="tmux-window-number-label">2</span></button>
+              </div>
               <button class="tab">Tx</button>
               <button class="tab">AI</button>
               <button class="tab">Log</button>
@@ -1271,7 +1273,7 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
       window.fetch = async (input, options = {}) => {
         const url = new URL(String(input), 'https://localhost');
         const body = options.body ? JSON.parse(options.body || '{}') : null;
-        window.__bootFetches.push({path: url.pathname, method: options.method || 'GET', body});
+        window.__bootFetches.push({path: url.pathname, search: url.search, method: options.method || 'GET', body});
         if (url.pathname === '/api/settings') {
           if ((options.method || 'GET') === 'POST') {
             const body = JSON.parse(options.body || '{}');
@@ -1315,6 +1317,7 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
         if (url.pathname === '/api/ping') return jsonResponse({ok: true});
         if (url.pathname === '/api/event') return jsonResponse({ok: true});
         if (url.pathname === '/api/events') return jsonResponse({events: []});
+        if (url.pathname === '/api/tmux-window') return jsonResponse({ok: true, session: url.searchParams.get('session'), window: url.searchParams.get('window')});
         if (url.pathname === '/api/fs/list') {
           const path = url.searchParams.get('path') || '/home/test';
           const entries = (window.__fixtureFsEntries || {})[path] || [];
@@ -2457,13 +2460,13 @@ def test_dockview_header_actions_stay_on_first_row(browser, tmp_path):
     assert metrics["maxActionButtonHeight"] <= metrics["tabHeight"] + 1
 
 
-def test_dockview_window_step_buttons_send_tmux_window_keys(browser, tmp_path):
+def test_dockview_window_bar_buttons_select_tmux_windows(browser, tmp_path):
     transcript_sessions = {
         "1": {
             "panes": [
-                {"target": "%1", "window": 0, "window_active": False, "active": True, "process_label": "bash"},
-                {"target": "%2", "window": 1, "window_active": True, "active": True, "process_label": "codex"},
-                {"target": "%3", "window": 2, "window_active": False, "active": True, "process_label": "pytest"},
+                {"target": "%1", "window": 0, "window_name": "bash", "window_active": False, "active": True, "process_label": "bash"},
+                {"target": "%2", "window": 1, "window_name": "codex", "window_active": True, "active": True, "process_label": "codex"},
+                {"target": "%3", "window": 2, "window_name": "codex", "window_active": False, "active": True, "process_label": "pytest"},
             ],
         },
     }
@@ -2478,33 +2481,41 @@ def test_dockview_window_step_buttons_send_tmux_window_keys(browser, tmp_path):
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            return document.querySelector('.dockview-pane-header-actions [data-window-dir="prev"]')
-              && document.querySelector('.dockview-pane-header-actions [data-window-dir="next"]')
-              && terminals.get('1')?.socket?.readyState === WebSocket.OPEN;
+            return document.querySelectorAll('.panel-detail-row [data-window-index]').length === 3;
             """
         )
     )
-    order = browser.execute_script(
+    buttons = browser.execute_script(
         """
-        return Array.from(document.querySelectorAll('.dockview-pane-header-actions .tabs > .tab')).map(button => ({
-          text: button.textContent.trim(),
-          dir: button.dataset.windowDir || '',
-          tabName: button.dataset.tabName || '',
+        return Array.from(document.querySelectorAll('.panel-detail-row [data-window-index]')).map(button => ({
+          text: button.querySelector('.tmux-window-name-label')?.textContent.trim() || button.textContent.trim(),
+          index: button.dataset.windowIndex || '',
+          pressed: button.getAttribute('aria-pressed') || '',
+          active: button.classList.contains('active'),
         }));
         """
     )
-    browser.find_element("css selector", '.dockview-pane-header-actions [data-window-dir="next"]').click()
-    browser.find_element("css selector", '.dockview-pane-header-actions [data-window-dir="prev"]').click()
-    messages = browser.execute_script(
+    browser.find_element("css selector", '.panel-detail-row [data-window-index="2"]').click()
+    fetches = browser.execute_script(
         """
-        return terminals.get('1').socket.sent.map(message => JSON.parse(message));
+        return window.__bootFetches
+          .filter(item => item.path === '/api/tmux-window')
+          .map(item => `${item.method} ${item.path}`);
         """
     )
-    assert order[0]["dir"] == "prev", order
-    assert any(item["tabName"] == "terminal" and item["text"] == "codex" for item in order), order
-    assert order[2]["dir"] == "next", order
-    assert {"type": "input", "data": "\u0002n"} in messages
-    assert {"type": "input", "data": "\u0002p"} in messages
+    query = browser.execute_script(
+        """
+        const item = window.__bootFetches.find(entry => entry.path === '/api/tmux-window');
+        return item ? new URLSearchParams(item.search || '').toString() : '';
+        """
+    )
+    assert buttons == [
+        {"text": "0:bash", "index": "0", "pressed": "false", "active": False},
+        {"text": "1:codex", "index": "1", "pressed": "true", "active": True},
+        {"text": "2:pytest", "index": "2", "pressed": "false", "active": False},
+    ]
+    assert fetches == ["POST /api/tmux-window"]
+    assert query == "session=1&window=2"
 
 
 def test_dockview_many_tabs_wrap_like_yolomux_strip(browser, tmp_path):
@@ -7250,6 +7261,7 @@ def test_topbar_finder_and_modified_files_headers_hover_accent_in_light_mode(bro
         WebDriverWait(browser, 2).until(lambda _driver: background(selector) == expected)
 
     load_topbar_font_fixture(browser, tmp_path)
+    ActionChains(browser).move_to_element(browser.find_element("css selector", ".pane-tab")).perform()
     tokens = theme_tokens()
     wait_background("#topbar-fixture", tokens["neutral"])
     ActionChains(browser).move_to_element(browser.find_element("id", "topbar-fixture")).perform()
@@ -7614,23 +7626,23 @@ def test_diff_overview_matches_actual_todo_codemirror_rows(browser, tmp_path):
     metrics = browser.execute_script("return window.__todoDiffOverviewMetrics")
     assert metrics["chunks"] == [
         {
-            "fromA": 2235,
+            "fromA": 744,
             "toA": 148290,
             "endA": 148289,
-            "fromB": 2235,
-            "toB": 43178,
-            "endB": 43177,
+            "fromB": 744,
+            "toB": 43200,
+            "endB": 43199,
         }
     ]
     assert metrics["rows"]["bands"] == [
-        {"kind": "remove", "start": 21, "end": 571},
-        {"kind": "add", "start": 571, "end": 818},
+        {"kind": "remove", "start": 16, "end": 571},
+        {"kind": "add", "start": 571, "end": 823},
     ]
     assert metrics["rows"]["currentLineCount"] == 308
-    assert metrics["rows"]["deletedRows"] == 550
-    assert metrics["rows"]["totalRows"] == 858
+    assert metrics["rows"]["deletedRows"] == 555
+    assert metrics["rows"]["totalRows"] == 863
     assert metrics["deletedDomRows"] == metrics["removedRangeRows"]
-    assert metrics["insertedRangeRows"] == 247
+    assert metrics["insertedRangeRows"] == 252
     assert "linear-gradient" in metrics["overviewBackground"]
     assert metrics["overviewStops"] == metrics["expectedStops"], metrics["overviewBackground"]
     assert metrics["tickCount"] == 0

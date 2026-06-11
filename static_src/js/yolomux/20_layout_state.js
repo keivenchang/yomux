@@ -1614,6 +1614,12 @@ function revealOpenFileLineSoon(path, line) {
   });
 }
 
+function fileQuickOpenTargetSlot() {
+  const item = currentActiveMenuItem();
+  const slot = item ? slotForSession(item) : null;
+  return slot && !slotIsFileExplorerPane(slot) ? slot : null;
+}
+
 async function openFileQuickOpenPath(path, options = {}) {
   const label = basenameOf(path);
   let openedItem = null;
@@ -1624,7 +1630,10 @@ async function openFileQuickOpenPath(path, options = {}) {
       ? {targetSlot: splitBaseSlot, targetZone: targetSlot ? 'middle' : 'right', forceNewTab: true, userInitiated: true}
       : {forceNewTab: true, userInitiated: true});
   } else {
-    openedItem = await openFileInEditor(path, {name: label}, {userInitiated: true});
+    const targetSlot = fileQuickOpenTargetSlot();
+    openedItem = await openFileInEditor(path, {name: label}, targetSlot
+      ? {targetSlot, userInitiated: true}
+      : {userInitiated: true});
   }
   focusQuickOpenedFile(openedItem);
   revealOpenFileLineSoon(path, options.line || null);
@@ -1700,6 +1709,24 @@ function fileQuickOpenOpenFolderItem() {
   };
 }
 
+function fileQuickOpenStrictExternalIndexedQuery(query = commandPaletteSearchQuery()) {
+  const text = String(query || '').trim();
+  if (!text || text.includes('/') || text.startsWith('~')) return false;
+  return /[.]/.test(text);
+}
+
+function fileQuickOpenExternalIndexedMatchAllowed(file, query = commandPaletteSearchQuery()) {
+  if (!fileQuickOpenStrictExternalIndexedQuery(query)) return true;
+  const path = String(file?.path || '');
+  const basename = String(file?.name || basenameOf(path));
+  const stem = basename.includes('.') ? basename.slice(0, basename.lastIndexOf('.')) : basename;
+  const needle = fuzzyCanonicalPrefixText(query);
+  if (!needle) return true;
+  return [basename, stem]
+    .map(fuzzyCanonicalPrefixText)
+    .some(value => value && (value.startsWith(needle) || value.includes(needle)));
+}
+
 function fileQuickOpenItems() {
   const seen = new Set();
   const items = [];
@@ -1722,6 +1749,7 @@ function fileQuickOpenItems() {
     const indexedRoot = file.indexed_root ? normalizeStoredFileExplorerIndexedDir(file.indexed_root) : '';
     const baseRoot = normalizeStoredFileExplorerIndexedDir(fileQuickOpenRoot || '');
     const externalIndexed = Boolean(indexedRoot && indexedRoot !== baseRoot);
+    if (externalIndexed && !fileQuickOpenExternalIndexedMatchAllowed(file)) continue;
     const isImage = (file.kind || 'file') !== 'dir' && IMAGE_EXTENSIONS.has(fileExtensionOf(path));
     if (isImage) imageIndex += 1;
     add(fileQuickOpenItem(path, {

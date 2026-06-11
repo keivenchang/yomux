@@ -176,21 +176,131 @@ async function createFileExplorerFolder() {
   }
 }
 
-function collapseAllFileExplorerDirectories() {
+function fileTreeExpandCollapseAllButtonHtml(action, extraClass = '') {
+  const expand = action === 'expand';
+  const title = t(expand ? 'changes.expandAll' : 'changes.collapseAll');
+  const classes = ['file-explorer-header-action', 'file-tree-expand-collapse-all', extraClass].filter(Boolean).join(' ');
+  return `<button type="button" class="${esc(classes)}" data-file-tree-expand-collapse-all="${expand ? 'expand' : 'collapse'}" title="${esc(title)}" aria-label="${esc(title)}">${fileTreeExpandCollapseAllIconHtml(action)}</button>`;
+}
+
+function fileTreeExpandCollapseAllIconHtml(action) {
+  const expand = action === 'expand';
+  const arrows = expand
+    ? '<path d="M6.2 6.2 3 3"/><path d="M3 3h3"/><path d="M3 3v3"/><path d="M9.8 6.2 13 3"/><path d="M13 3h-3"/><path d="M13 3v3"/><path d="M6.2 9.8 3 13"/><path d="M3 13h3"/><path d="M3 13v-3"/><path d="M9.8 9.8 13 13"/><path d="M13 13h-3"/><path d="M13 13v-3"/>'
+    : '<path d="M3 3 6.2 6.2"/><path d="M6.2 6.2h-3"/><path d="M6.2 6.2v-3"/><path d="M13 3 9.8 6.2"/><path d="M9.8 6.2h3"/><path d="M9.8 6.2v-3"/><path d="M3 13l3.2-3.2"/><path d="M6.2 9.8h-3"/><path d="M6.2 9.8v3"/><path d="M13 13 9.8 9.8"/><path d="M9.8 9.8h3"/><path d="M9.8 9.8v3"/>';
+  return `<svg class="file-tree-expand-collapse-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">${arrows}</svg>`;
+}
+
+function fileTreeExpandCollapseAllButtonsHtml(extraClass = '') {
+  return `${fileTreeExpandCollapseAllButtonHtml('expand', extraClass)}${fileTreeExpandCollapseAllButtonHtml('collapse', extraClass)}`;
+}
+
+async function fileExplorerDirectoryPathsForRoot(root = currentFileExplorerRoot()) {
+  const normalizedRoot = normalizeDirectoryPath(root);
+  const seen = new Set([normalizedRoot]);
+  const result = [];
+  const queue = [normalizedRoot];
+  while (queue.length) {
+    const directory = queue.shift();
+    const entries = await fetchDirectory(directory);
+    if (!Array.isArray(entries)) continue;
+    for (const entry of sortedFileTreeEntries(entries, fileExplorerTreeSortMode, {includeHidden: fileExplorerShowHidden})) {
+      if (entry?.kind !== 'dir') continue;
+      const child = childPath(directory, entry.name);
+      if (seen.has(child)) continue;
+      seen.add(child);
+      result.push(child);
+      queue.push(child);
+    }
+  }
+  return result;
+}
+
+function addFileExplorerExpandedPathAncestors(path, root = currentFileExplorerRoot()) {
+  const normalizedRoot = normalizeDirectoryPath(root || '');
+  const target = normalizeDirectoryPath(path || '');
+  if (!normalizedRoot || !target || target === normalizedRoot || !pathIsInsideDirectory(target, normalizedRoot)) return false;
+  let changed = false;
+  let parent = normalizedRoot;
+  for (const part of childPathParts(normalizedRoot, target)) {
+    const nextPath = childPath(parent, part);
+    if (!fileExplorerExpanded.has(nextPath)) {
+      fileExplorerExpanded.add(nextPath);
+      changed = true;
+    }
+    parent = nextPath;
+  }
+  return changed;
+}
+
+async function expandSyncFileExplorerAffectedDirectories() {
+  const plan = fileExplorerSyncPlan(fileExplorerSyncCommandSessionTarget());
+  const root = normalizeDirectoryPath(plan.root || currentFileExplorerRoot());
+  if (!root) return false;
+  resetFileExplorerSyncManualCollapsesIfNeeded(plan);
+  const paths = fileExplorerSyncExplicitExpansionTargets(plan, root);
+  for (const path of paths) forgetFileExplorerSyncManualCollapse(path);
+  resetFileExplorerAppliedSyncPlan();
+  if (root !== currentFileExplorerRoot()) {
+    const opened = await openFileExplorerAt(root, {preserveExpanded: false, preserveScroll: false});
+    if (!opened) return false;
+  }
+  const generation = ++fileExplorerSyncGeneration;
+  let changed = false;
+  for (const path of paths) {
+    changed = addFileExplorerExpandedPathAncestors(path, root) || changed;
+  }
+  if (changed) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+  for (const path of paths) {
+    if (generation !== fileExplorerSyncGeneration) return changed;
+    changed = await expandFileExplorerTreesToPath(path, root, generation, {scrollIntoView: false, auto: true}) || changed;
+  }
+  setFileExplorerVisibleSyncTarget(plan.session, root);
+  rememberFileExplorerSyncExpandedState(plan.session, root);
+  markFileExplorerSyncPlanApplied(plan);
+  updateFileExplorerSessionHighlightRows(plan.session);
+  if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+  return changed;
+}
+
+async function expandAllFileExplorerDirectories() {
   if (fileExplorerRootMode === 'sync') {
-    const plan = fileExplorerSyncPlan(fileExplorerExplicitSyncSessionTarget());
+    await expandSyncFileExplorerAffectedDirectories();
+    return;
+  }
+  const paths = await fileExplorerDirectoryPathsForRoot(currentFileExplorerRoot());
+  fileExplorerExpanded.clear();
+  for (const path of paths) fileExplorerExpanded.add(path);
+  rememberFileExplorerSyncExpandedState();
+  await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+  if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+}
+
+async function collapseAllFileExplorerDirectories() {
+  if (fileExplorerRootMode === 'sync') {
+    const plan = fileExplorerSyncPlan(fileExplorerSyncCommandSessionTarget());
     for (const path of fileExplorerSyncExpansionPaths(plan)) rememberFileExplorerSyncManualCollapse(path);
   }
   fileExplorerExpanded.clear();
   rememberFileExplorerSyncExpandedState();
-  refreshFileExplorerTrees({preserveExpanded: false, preserveScroll: true});
+  await refreshFileExplorerTrees({preserveExpanded: false, preserveScroll: true});
+  if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+}
+
+async function setAllFileTreeDirectoriesExpanded(source, expand) {
+  if (source?.closest?.('.file-explorer-changes-panel')) {
+    setAllFileExplorerChangesDirectoriesExpanded(expand);
+    return;
+  }
+  if (expand) await expandAllFileExplorerDirectories();
+  else await collapseAllFileExplorerDirectories();
 }
 
 function bindFileExplorerHeaderActions(container = document) {
   if (!container || container.dataset?.fileExplorerHeaderActionsBound === 'true') return;
   if (container.dataset) container.dataset.fileExplorerHeaderActionsBound = 'true';
   container.addEventListener('click', event => {
-    const action = event.target.closest('[data-file-explorer-new-file], [data-file-explorer-new-folder], [data-file-explorer-refresh], [data-file-explorer-collapse], [data-file-explorer-tree-dates]');
+    const action = event.target.closest('[data-file-explorer-new-file], [data-file-explorer-new-folder], [data-file-explorer-refresh], [data-file-explorer-collapse], [data-file-explorer-tree-dates], [data-file-tree-expand-collapse-all]');
     if (!action || !container.contains(action)) return;
     event.preventDefault();
     event.stopPropagation();
@@ -203,9 +313,11 @@ function bindFileExplorerHeaderActions(container = document) {
         fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
       }
     } else if (action.matches('[data-file-explorer-collapse]')) {
-      collapseAllFileExplorerDirectories();
-    }
-    else if (action.matches('[data-file-explorer-tree-dates]')) {
+      collapseAllFileExplorerDirectories().catch(error => statusErr(`collapse failed: ${esc(error)}`));
+    } else if (action.matches('[data-file-tree-expand-collapse-all]')) {
+      setAllFileTreeDirectoriesExpanded(action, action.dataset.fileTreeExpandCollapseAll === 'expand')
+        .catch(error => statusErr(`tree action failed: ${esc(error)}`));
+    } else if (action.matches('[data-file-explorer-tree-dates]')) {
       cycleFileExplorerTreeDateMode();
     }
   });

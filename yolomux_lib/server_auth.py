@@ -136,6 +136,24 @@ class AuthMixin:
             return identity.role == "admin"
         return False
 
+    def share_token_text(self) -> str:
+        header_token = self.headers.get("X-Share-Token", "").strip()
+        if header_token:
+            return header_token
+        parsed = urlparse(self.path)
+        return parse_qs(parsed.query).get("token", [""])[0].strip()
+
+    def share_request_allowed(self) -> bool:
+        parsed = urlparse(self.path)
+        return parsed.path in {"/", "/ws"} or parsed.path.startswith("/static/")
+
+    def reject_share_forbidden(self) -> None:
+        self.close_after_unread_body()
+        self.write_json(
+            {"error": "share token is limited to the shared page and websocket", "role": "readonly"},
+            status=HTTPStatus.FORBIDDEN,
+        )
+
     def reject_forbidden(self, identity: AuthIdentity, required_role: str) -> None:
         self.close_after_unread_body()
         self.write_json({"error": f"{required_role} access required", "role": identity.role}, status=HTTPStatus.FORBIDDEN)
@@ -185,6 +203,27 @@ class AuthMixin:
             self.write_html(setup_auth_html(self.request_locale_pref()))
             return False
         self._auth_cookie_identity = None
+        self._share_session = None
+        self._share_token = None
+        share_token = self.share_token_text()
+        if share_token:
+            verifier = getattr(self.server.app, "verify_share_token", None)
+            record = verifier(share_token) if callable(verifier) else None
+            if record is None:
+                self._auth_identity = None
+                self.reject_unauthorized()
+                return False
+            identity = AuthIdentity(username="share", password="", role="readonly")
+            self._auth_identity = identity
+            self._share_session = str(record.get("session") or "")
+            self._share_token = share_token
+            if not self.share_request_allowed():
+                self.reject_share_forbidden()
+                return False
+            if self.role_allows(identity, required_role):
+                return True
+            self.reject_forbidden(identity, required_role)
+            return False
         identity = self.cookie_auth_identity()
         if identity is not None:
             # Do not re-mint an existing cookie. Polling requests in flight
@@ -218,6 +257,9 @@ class AuthMixin:
 
     def auth_readonly(self) -> bool:
         return self.auth_identity().role == "readonly"
+
+    def share_session(self) -> str:
+        return str(getattr(self, "_share_session", "") or "")
 
     def require_auth_for_post(self, path: str) -> bool:
         if path == "/api/event":

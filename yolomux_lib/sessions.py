@@ -49,6 +49,7 @@ def list_tmux_panes() -> tuple[list[PaneInfo], str | None]:
         [
             "#{session_name}",
             "#{window_index}",
+            "#{window_name}",
             "#{pane_index}",
             "#{pane_id}",
             "#{pane_current_path}",
@@ -67,9 +68,9 @@ def list_tmux_panes() -> tuple[list[PaneInfo], str | None]:
     panes: list[PaneInfo] = []
     for line in result.stdout.splitlines():
         parts = line.split("\t")
-        if len(parts) != 10:
+        if len(parts) != 11:
             continue
-        session, window, pane, pane_id, path, command, active, window_active, title, pid_text = parts
+        session, window, window_name, pane, pane_id, path, command, active, window_active, title, pid_text = parts
         try:
             pid = int(pid_text)
         except ValueError:
@@ -78,6 +79,7 @@ def list_tmux_panes() -> tuple[list[PaneInfo], str | None]:
             PaneInfo(
                 session=session,
                 window=window,
+                window_name=window_name,
                 pane=pane,
                 pane_id=pane_id,
                 target=pane_id,

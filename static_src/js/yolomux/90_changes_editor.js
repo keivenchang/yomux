@@ -910,6 +910,21 @@ function fileExplorerChangesRepoKeys(payload = fileExplorerSessionFilesPayload) 
   return Array.from(repos).sort();
 }
 
+function fileExplorerChangesFolderKeys(payload = fileExplorerSessionFilesPayload) {
+  const folders = new Set();
+  for (const item of fileExplorerDifferFiles(payload)) {
+    const repoRoot = item?.repo && item.repo !== 'Outside repo' ? normalizeDirectoryPath(item.repo) : '/';
+    const absPath = item?.abs_path || (item?.repo && item?.path ? `${item.repo}/${item.path}` : item?.path || '');
+    if (!absPath) continue;
+    let directory = normalizeDirectoryPath(dirnameOf(absPath));
+    while (directory && directory !== repoRoot && pathIsInsideDirectory(directory, repoRoot)) {
+      folders.add(directory);
+      directory = dirnameOf(directory);
+    }
+  }
+  return Array.from(folders).sort((left, right) => left.localeCompare(right));
+}
+
 function fileExplorerChangesAllReposCollapsed(payload = fileExplorerSessionFilesPayload) {
   const repos = fileExplorerChangesRepoKeys(payload);
   return Boolean(repos.length) && repos.every(repo => changesRepoCollapsed.has(repo));
@@ -949,6 +964,20 @@ function setAllFileExplorerChangesCollapsed(collapsed) {
 
 function toggleAllFileExplorerChanges() {
   setAllFileExplorerChangesCollapsed(!fileExplorerChangesAllReposCollapsed());
+}
+
+function setAllFileExplorerChangesDirectoriesExpanded(expand) {
+  if (expand) {
+    changesRepoCollapsed.clear();
+    changesFolderCollapsed.clear();
+  } else {
+    changesRepoCollapsed = new Set(fileExplorerChangesRepoKeys());
+    changesFolderCollapsed = new Set(fileExplorerChangesFolderKeys());
+  }
+  writeStoredChangesRepoCollapsed();
+  writeStoredChangesFolderCollapsed();
+  renderFileExplorerChangesPanels({force: true});
+  syncFileExplorerChangesCollapseButtons();
 }
 
 function sessionFileIsDifferVisible(item) {
@@ -1417,6 +1446,7 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
       <div class="changes-toolbar file-explorer-diff-toolbar">
         <label class="changes-control">${esc(t('changes.sort'))} ${sessionFilesSortSelectHtml()}</label>
         ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
+        ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
         <button type="button" class="changes-refresh" data-session-files-refresh title="${esc(t('changes.refresh.title'))}" aria-label="${esc(t('changes.refresh.title'))}">${esc(t('changes.refresh'))}</button>
       </div>
       ${changesComparisonHeaderHtml(payload, files, {loading})}
@@ -1429,6 +1459,7 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
       <span class="changes-title">${esc(titleText)}</span>
       ${sessionFilesSortSelectHtml('changes-sort-select-compact')}
       ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
+      ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
       <button type="button" class="changes-refresh" data-session-files-refresh title="${esc(t('changes.refresh.title'))}" aria-label="${esc(t('changes.refresh.title'))}">${esc(t('changes.refresh'))}</button>
       <button type="button" class="changes-close" data-file-explorer-changes-close title="${esc(t('changes.hide'))}" aria-label="${esc(t('changes.hide'))}">×</button>
     </div>
@@ -1585,7 +1616,7 @@ function renderChangesRoot(root, staticHtml, files, groupOptions = {}, options =
 function activeChangesControl(panel) {
   const active = document.activeElement;
   if (!active || !panel?.contains(active)) return null;
-  return active.closest?.('[data-session-files-session], [data-session-files-sort], [data-diff-ref-from], [data-diff-ref-to], [data-session-files-refresh], [data-file-explorer-tree-dates], [data-uploaded-files-toggle], [data-changes-folder-toggle], [data-changes-repo-toggle]') || null;
+  return active.closest?.('[data-session-files-session], [data-session-files-sort], [data-diff-ref-from], [data-diff-ref-to], [data-session-files-refresh], [data-file-explorer-tree-dates], [data-file-tree-expand-collapse-all], [data-uploaded-files-toggle], [data-changes-folder-toggle], [data-changes-repo-toggle]') || null;
 }
 
 async function openChangedFileInDiff(path, ownerSession = '', status = '', repo = '') {
@@ -1704,6 +1735,13 @@ function bindChangesPanel(panel) {
     }
   });
   panel.addEventListener('click', async event => {
+    const treeExpandCollapseAll = event.target.closest('[data-file-tree-expand-collapse-all]');
+    if (treeExpandCollapseAll && panel.contains(treeExpandCollapseAll)) {
+      event.preventDefault();
+      event.stopPropagation();
+      await setAllFileTreeDirectoriesExpanded(treeExpandCollapseAll, treeExpandCollapseAll.dataset.fileTreeExpandCollapseAll === 'expand');
+      return;
+    }
     const collapseToggle = event.target.closest('[data-session-files-collapse-toggle]');
     if (collapseToggle && panel.contains(collapseToggle)) {
       event.preventDefault();
@@ -2131,7 +2169,6 @@ function createFileExplorerPanel() {
             <span class="file-explorer-toolbar-spacer"></span>
           </div>
           <div class="file-explorer-toolbar-row file-explorer-actions-row file-explorer-mode-files-only">
-            <button type="button" class="file-explorer-header-action file-explorer-mode-files-only" data-file-explorer-collapse title="${esc(t('finder.toolbar.collapseAll'))}" aria-label="${esc(t('finder.toolbar.collapseAll'))}">▤</button>
             <button type="button" class="file-explorer-header-action file-explorer-mode-files-only" data-file-explorer-new-file title="${esc(t('finder.toolbar.newFile'))}" aria-label="${esc(t('finder.toolbar.newFile'))}">+</button>
             <button type="button" class="file-explorer-header-action file-explorer-folder-action file-explorer-mode-files-only" data-file-explorer-new-folder title="${esc(t('finder.toolbar.newFolder'))}" aria-label="${esc(t('finder.toolbar.newFolder'))}"><span class="file-explorer-folder-icon" aria-hidden="true"></span></button>
             <span class="file-explorer-toolbar-spacer"></span>
@@ -2143,6 +2180,7 @@ function createFileExplorerPanel() {
             </select>
             <span class="file-explorer-date-reload-cluster file-explorer-mode-files-only">
               ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
+              ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
               <button type="button" class="changes-refresh file-explorer-refresh-cluster" data-file-explorer-refresh title="${esc(t('finder.toolbar.refresh'))}" aria-label="${esc(t('finder.toolbar.refresh'))}">${esc(t('changes.refresh'))}</button>
             </span>
           </div>

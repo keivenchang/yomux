@@ -68,6 +68,29 @@ class DummyHybridProcessModule(DummyProcessModule):
         return self.prompt_state
 
 
+class StalePaneCommandModule(DummyProcessModule):
+    PROMPT_RETRY_SECONDS = 5.0
+
+    def __init__(self):
+        super().__init__({
+            "type": "bash",
+            "hash": "hash-cp",
+            "action": "option1",
+            "selected_option": 1,
+            "yes_selected": True,
+            "source": "pane",
+            "command": "cp -r src/ dist/",
+        })
+
+    def tmux_capture_pane(self, _target: str, visible_only: bool = False) -> str:
+        if visible_only:
+            return "live prompt for cp -r src/ dist/"
+        return "● Bash(chmod +x scripts/deploy.sh)\n⎿ ok\nPermission rule Bash requires confirmation"
+
+    def hybrid_approval_prompt_state(self, _target: str, _visible_text: str, pane_text: str | None = None, prompt_source: str = "hybrid") -> dict[str, Any]:
+        return self.prompt_state
+
+
 class MovingOptionModule(DummyProcessModule):
     def selected_prompt_option(self, _visible_text: str) -> int:
         return 2
@@ -181,6 +204,25 @@ def test_bash_prompt_passive_actions_do_not_send_keys(monkeypatch):
         assert module.sent == []
         assert worker.blocked == 1
         assert worker.last_blocked_hash == f"hash-{action}"
+
+
+def test_process_once_uses_live_prompt_command_not_stale_pane_command(monkeypatch):
+    module = StalePaneCommandModule()
+    worker = auto_approve_worker.AutoApproveWorker("6", interval=0.01)
+    evaluated: list[str] = []
+
+    def evaluate(command: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        evaluated.append(command)
+        return rule_decision("block", rule_name="block cp")
+
+    monkeypatch.setattr(auto_approve_worker.yolo_rules, "evaluate", evaluate)
+
+    acted = worker.process_once(module)
+
+    assert acted is True
+    assert evaluated == ["cp -r src/ dist/"]
+    assert worker.last_blocked_hash == "hash-cp"
+    assert worker.last_action == "blocked bash: cp -r src/ dist/"
 
 
 def test_bash_prompt_dry_run_does_not_send_key(monkeypatch):

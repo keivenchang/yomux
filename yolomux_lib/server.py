@@ -8,6 +8,7 @@ import math
 import os
 import pty
 import queue
+import re
 import select
 import signal
 import socket
@@ -65,6 +66,7 @@ PTY_DIMENSION_MIN = 1
 PTY_DIMENSION_MAX = 1000
 WEBSOCKET_FRAME_READ_TIMEOUT_SECONDS = 5.0
 MAX_FS_BATCH_REQUESTS = 64
+TOKEN_LOG_RE = re.compile(r"([?&]token=)[^&\s\"]+")
 
 
 def query_one(qs: dict[str, list[str]], name: str, default: str | None = "") -> str | None:
@@ -168,7 +170,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        sys.stderr.write("%s - - [%s] %s\n" % (self.client_address[0], self.log_date_time_string(), fmt % args))
+        message = TOKEN_LOG_RE.sub(r"\1[redacted]", fmt % args)
+        sys.stderr.write("%s - - [%s] %s\n" % (self.client_address[0], self.log_date_time_string(), message))
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -211,7 +214,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.stream_client_events()
             return
         if parsed.path == "/":
-            self.write_html(html_page(self.server.app.sessions, self.auth_identity().role, dev=getattr(self.server, 'dev', False), dangerously_yolo=self.server.app.dangerously_yolo))
+            sessions = [self.share_session()] if self.share_session() else self.server.app.sessions
+            self.write_html(html_page(sessions, self.auth_identity().role, dev=getattr(self.server, 'dev', False), dangerously_yolo=self.server.app.dangerously_yolo))
             return
         if parsed.path == "/preview-popout":
             self.handle_preview_popout_placeholder(parsed)
@@ -585,6 +589,12 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 return
             self.write_json(self.server.app.save_settings(payload.get("settings", payload)))
             return
+        if parsed.path == "/api/share":
+            payload = self.read_json_body(16 * 1024)
+            if payload is None:
+                return
+            self.write_app_result(self.handle_share_create(payload))
+            return
         if parsed.path == "/api/watch/roots":
             payload = self.read_json_body(64 * 1024)
             if payload is None:
@@ -619,6 +629,13 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             session = qs.get("session", [""])[0]
             self.write_app_result(self.server.app.tmux_next_window(session))
             return
+        if parsed.path == "/api/tmux-window":
+            qs = parse_qs(parsed.query)
+            session = qs.get("session", [""])[0]
+            window = qs.get("window", [""])[0]
+            payload, status = self.server.app.tmux_select_window(session, window)
+            self.write_json(payload, status=status)
+            return
         if parsed.path == "/api/tmux-copy-selection":
             qs = parse_qs(parsed.query)
             session = str(query_one(qs, "session", "") or "")
@@ -646,6 +663,27 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.handle_fs_mkdir(parsed)
             return
         self.write_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+
+    def request_base_url(self) -> str:
+        host = str(self.headers.get("Host") or self.server.server_name_with_port()).strip()
+        if not host or "\r" in host or "\n" in host:
+            host = self.server.server_name_with_port()
+        scheme = "https" if self.request_is_https() else "http"
+        return f"{scheme}://{host}"
+
+    def handle_share_create(self, payload: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
+        session = str(payload.get("session") or "").strip()
+        ttl_seconds = payload.get("ttl_seconds", payload.get("ttl", None))
+        layout = str(payload.get("layout") or "")
+        tabs = str(payload.get("tabs") or "")
+        return self.server.app.create_share_token(
+            session,
+            ttl_seconds,
+            base_url=self.request_base_url(),
+            created_by=self.auth_identity().username,
+            layout=layout,
+            tabs=tabs,
+        )
 
     def handle_fs_batch(self, parsed: Any) -> None:
         payload = self.read_json_body(64 * 1024)
@@ -1122,6 +1160,10 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
 
     def websocket(self, parsed: Any) -> None:
         session = parse_qs(parsed.query).get("session", [""])[0]
+        share_session = self.share_session()
+        if share_session and session != share_session:
+            self.write_text("share token is scoped to a different session\n", status=HTTPStatus.FORBIDDEN)
+            return
         if session not in self.server.app.sessions:
             self.write_text(f"unknown session: {session}\n", status=HTTPStatus.NOT_FOUND)
             return
@@ -1285,6 +1327,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 if filtered:
                     os.write(master_fd, filtered.encode("utf-8"))
         elif msg_type == "resize":
+            if readonly:
+                return
             dimensions = ws_resize_dimensions(message, DEFAULT_ROWS, DEFAULT_COLS)
             if dimensions:
                 rows, cols = dimensions
