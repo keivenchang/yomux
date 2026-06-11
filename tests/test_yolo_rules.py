@@ -106,7 +106,7 @@ def test_schema_validation_reports_errors():
 
 def test_builtin_default_reproduces_current_block_and_allow_sets(monkeypatch):
     rules = yolo_rules.validate_rules(yolo_rules.default_rule_data("approve"), source="built-in")
-    # DOIT.6 #68: is_dangerous now reads the ACTIVE cached ruleset; pin it to the built-in default here
+    # is_dangerous now reads the ACTIVE cached ruleset; pin it to the built-in default here
     # so this test still validates the built-in block/allow classification deterministically.
     monkeypatch.setattr(yolo_rules, "cached_rules", lambda: (rules, ""))
     dangerous_cmds = [
@@ -237,7 +237,7 @@ def test_dry_run_downgrades_active_rule_actions(monkeypatch):
 
 
 def test_is_dangerous_uses_active_ruleset_and_flags_non_approve(monkeypatch):
-    # DOIT.6 #68: the UI danger badge reflects the USER's active ruleset (what the worker acts on) and
+    # the UI danger badge reflects the USER's active ruleset (what the worker acts on) and
     # treats ANY non-approve outcome (block / decline / ask) as dangerous — only a clean approve is safe.
     rules = ruleset({
         "default": "ask",
@@ -254,7 +254,7 @@ def test_is_dangerous_uses_active_ruleset_and_flags_non_approve(monkeypatch):
 
 
 def test_dangerously_yolo_keeps_the_hard_floor(monkeypatch):
-    # DOIT.6 #62: --dangerously-yolo only opts out of the soft ruleset / ask-default — the catastrophic
+    # --dangerously-yolo only opts out of the soft ruleset / ask-default — the catastrophic
     # hard floor ALWAYS applies. rm -rf / is blocked under the flag; a non-catastrophic command the
     # ruleset approves is still approved (so the flag's broad relaxation is preserved).
     rules = ruleset({
@@ -290,7 +290,7 @@ def test_rule_file_text_validation_reports_yaml_errors():
 
 
 def test_normalize_risk_canonicalizes_for_display():
-    # S5 (DOIT.51): blank -> "unknown", storage-destruction synonyms -> "delete", case/space
+    # S5: blank -> "unknown", storage-destruction synonyms -> "delete", case/space
     # insensitive, and custom labels pass through (the engine never rejects a risk label).
     assert yolo_rules.normalize_risk("") == "unknown"
     assert yolo_rules.normalize_risk(None) == "unknown"

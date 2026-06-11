@@ -227,7 +227,7 @@ def latest_item_text(items: list[dict[str, str]], role: str) -> str:
 
 
 def _coerce_count(value: Any) -> int:
-    # DOIT.6 #78: count numeric strings ("5" -> 5) but never a bool (added=True must NOT count as +1).
+    # count numeric strings ("5" -> 5) but never a bool (added=True must NOT count as +1).
     if isinstance(value, bool) or value is None:
         return 0
     try:
@@ -945,7 +945,7 @@ def yoagent_default_pending_lines(summaries: list[dict[str, Any]]) -> list[str]:
 
 
 def deterministic_yoagent_reply(question: str, activity_payload: dict[str, Any], settings: dict[str, Any] | None = None, locale: str = "en") -> str:
-    # DOIT.8 Phase 3: localize the FIXED framing of the no-agent fallback (prefix, no-activity headline,
+    # Phase 3: localize the FIXED framing of the no-agent fallback (prefix, no-activity headline,
     # "Open / pending:"). The generated per-session activity prose stays English — its sentence assembly
     # is grammar-complex and built at poll time without a locale; the LLM backends localize it instead.
     help_reply = deterministic_yoagent_help_reply(question)

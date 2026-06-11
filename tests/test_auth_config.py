@@ -201,7 +201,7 @@ def test_bootstrap_locale_resolves_language_and_serves_locale_catalogs():
 
 
 def test_pre_auth_brand_wordmark_localizes_yo_lo_glyphs():
-    # DOIT.13 follow-up: the server-rendered login / auth-setup screens are NOT localized by the JS
+    # follow-up: the server-rendered login / auth-setup screens are NOT localized by the JS
     # renderBrandWordmark(), so brand_html must localize YO/LO itself — a Chinese locale showed
     # "YO/LOmux" instead of 優樂mux / 优乐mux.
     assert "優" in web.brand_html(locale="zh-Hant") and "樂" in web.brand_html(locale="zh-Hant")

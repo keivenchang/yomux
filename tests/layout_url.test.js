@@ -1,5 +1,6 @@
 const assert = require('assert');
 const fs = require('fs');
+const UI_PINS = JSON.parse(fs.readFileSync('tests/ui_pins.json', 'utf8'));  // shared color pins (see test_ui_pins.py)
 const vm = require('vm');
 
 class TestClassList {
@@ -351,7 +352,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     },
     localStorage,
     __clipboardText: '',
-    // DOIT.53: the OSC 52 clipboard bridge decodes base64 UTF-8; expose the host implementations.
+    // the OSC 52 clipboard bridge decodes base64 UTF-8; expose the host implementations.
     atob,
     btoa,
     TextDecoder,
@@ -617,6 +618,11 @@ globalThis.__layoutTestApi = {
   replaceTmuxSessionInClient,
   normalizedSessionOrder,
   normalizeLayoutSlots,
+  compactLayoutSlots,
+  layoutSlotsSignature,
+  dockviewJsonFromLayoutSlots,
+  layoutSlotsFromDockviewJson,
+  dockviewLayoutContentSignature,
   isPinnableTab,
   tabIsPinned,
   orderPaneTabs,
@@ -1152,7 +1158,21 @@ function makeFileTree(paths) {
   return {tree, rows};
 }
 
-{
+let __testPass = 0;
+let __testFail = 0;
+function test(label, fn) {
+  // Per-test isolation: a failing assertion is recorded and the rest of the suite still runs, so one
+  // failure no longer hides every later check. A pass/fail summary + non-zero exit print at the end.
+  try {
+    fn();
+    __testPass++;
+  } catch (error) {
+    __testFail++;
+    console.error(`\u2717 ${label}: ${(error && error.message) || error}`);
+  }
+}
+
+test('t@1160', () => {
   const api = loadYolomux();
   api.renderTransportWarning();
   const warning = api.httpsWarningForTest();
@@ -1164,9 +1184,9 @@ function makeFileTree(paths) {
   const secureApi = loadYolomux('', ['1'], 'https:');
   secureApi.renderTransportWarning();
   assert.equal(secureApi.httpsWarningForTest().hidden, true);
-}
+});
 
-{
+test('t@1174', () => {
   const api = loadYolomux('', ['1', '2', '3']);
   const layout = api.defaultLayoutForTest();
   assert.deepStrictEqual(canonical(layout), {
@@ -1181,9 +1201,9 @@ function makeFileTree(paths) {
   assert.equal(params.get('sessions'), '1,3');
   assert.equal(params.get('layout'), 'row@50(left,right)');
   assert.equal(params.get('tabs'), 'left:1,2;right:3');
-}
+});
 
-{
+test('t@1191', () => {
   const api = loadYolomux('', []);
   const layout = api.defaultLayoutForTest();
   assert.deepStrictEqual(canonical(layout.panes), {left: {tabs: [], active: null, placeholder: true}});
@@ -1191,9 +1211,9 @@ function makeFileTree(paths) {
   const params = new URLSearchParams(url.slice(url.indexOf('?') + 1));
   assert.equal(params.get('layout'), 'left');
   assert.equal(params.get('tabs'), 'left:__empty_pane__');
-}
+});
 
-{
+test('t@1201', () => {
   const api = loadYolomux('?sessions=3,2,1', ['1', '2', '3']);
   assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
     tree: {split: 'row', pct: 50, children: [{slot: 'left'}, {slot: 'right'}]},
@@ -1202,9 +1222,9 @@ function makeFileTree(paths) {
       right: {tabs: ['1'], active: '1'},
     },
   });
-}
+});
 
-{
+test('t@1212', () => {
   const api = loadYolomux('?keep=1');
   assert.equal(api.layoutFromParam('', ''), null, 'empty layout param falls back to default layout');
   assert.equal(api.layoutFromParam(null, ''), null, 'null layout param falls back to default layout');
@@ -1233,9 +1253,9 @@ function makeFileTree(paths) {
 
   const reloaded = loadYolomux(`?${url.split('?')[1] || ''}`);
   assert.deepStrictEqual(canonical(reloaded.serialize(reloaded.currentSlots())), canonical(api.serialize(slots)));
-}
+});
 
-{
+test('t@1243', () => {
   const api = loadYolomux();
   const oldPayload = {
     tree: {
@@ -1260,9 +1280,9 @@ function makeFileTree(paths) {
   const encodedOldSearch = `?sessions=6%2C1%2C3&layout=${encodeURIComponent(`tree:${JSON.stringify(oldPayload)}`)}`;
   const reloaded = loadYolomux(encodedOldSearch);
   assert.deepStrictEqual(canonical(reloaded.serialize(reloaded.currentSlots())), canonical(api.serialize(decoded)));
-}
+});
 
-{
+test('t@1270', () => {
   const api = loadYolomux('?sessions=3&layout=left&tabs=left:3,2');
   assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
     tree: {slot: 'left'},
@@ -1270,8 +1290,9 @@ function makeFileTree(paths) {
       left: {tabs: ['3', '2'], active: '3'},
     },
   });
-}
+});
 
+test('t@1280', () => {
 for (const legacyChangesToken of ['changes', '__changes__']) {
   const api = loadYolomux(`?layout=left&tabs=left:${legacyChangesToken}`, ['1']);
   assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
@@ -1280,7 +1301,9 @@ for (const legacyChangesToken of ['changes', '__changes__']) {
   });
   assert.equal(api.fileExplorerModeForTest(), 'diff', 'legacy changes-only URLs restore Finder diff mode');
 }
+});
 
+test('t@1289', () => {
 for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const api = loadYolomux(`?sessions=${yoagentToken}&layout=left&tabs=left:${yoagentToken}`, ['1']);
   assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
@@ -1289,8 +1312,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   });
   assert.equal(api.infoPanelSubTabForTest(), 'yoagent', `${yoagentToken} deep-link pre-selects the YO!agent sub-tab`);
 }
+});
 
-{
+test('t@1298', () => {
   const search = '?sessions=files,file%3A%2Fhome%2Fkeivenc%2FAGENTS.md,5&layout=row@20.7(slot2,row@42(slot3,slot1))&tabs=slot2:files;slot3:file%3A%2Fhome%2Fkeivenc%2FAGENTS.md;slot1:5';
   const api = loadYolomux(search, ['5']);
   const serialized = api.serialize(api.currentSlots());
@@ -1303,9 +1327,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const params = parseUrl(url);
   assert.equal(params.get('layout'), 'row@20.7(slot2,row@42(slot3,slot1))');
   assert.equal(params.get('tabs'), 'slot2:files;slot3:file:/home/keivenc/AGENTS.md;slot1:5');
-}
+});
 
-{
+test('t@1313', () => {
   const search = '?sessions=files,6&layout=row@22(slot2,slot3)&tabs=slot2:files;slot3:prefs,6*,file%3A%2Fhome%2Fkeivenc%2FAGENTS.md,ant,file%3A%2Fhome%2Fkeivenc%2Fyolomux.dev%2FTODO.md,file%3A%2Fhome%2Fkeivenc%2Fcomponents_metrics_README.md,file%3A%2Fhome%2Fkeivenc%2Fyolomux.dev%2F20260528-022.png';
   const api = loadYolomux(search, ['6', 'ant']);
   const agentsItem = 'file:/home/keivenc/AGENTS.md';
@@ -1357,9 +1381,52 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(terminalToolbarBeforeFinderFocus.includes('data-tab-name="terminal"'));
   assert.equal((terminalToolbarBeforeFinderFocus.match(/pane-actions-dots/g) || []).length, 1);
   assert.equal(terminalToolbarBeforeFinderFocus.includes('data-tab-name="summary"'), false);
-}
+});
 
-{
+test('t@1367', () => {
+  // Dockview round-trip parity: slots -> Dockview JSON -> slots is idempotent on the compacted
+  // form. The pane rewrite's bidirectional sync hinges on dockviewJsonFromLayoutSlots and
+  // layoutSlotsFromDockviewJson being exact inverses (up to compaction); any drift silently
+  // reshuffles panes/tabs on a Dockview-driven relayout, and is the single most fragile invariant
+  // in the rewrite. See docs/GUI_SPEC.md (pane layout model).
+  const api = loadYolomux('', ['1', '2', '3', '4']);
+  const base = api.emptyLayoutSlots();
+  base[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
+  base.left = api.paneStateWithTabs(['__files__'], '__files__');
+  base.slot1 = api.paneStateWithTabs(['1', '2', '3'], '2');
+  // Binary-tree shapes round-trip EXACTLY (tree + panes). Wall uses a flat N-ary split, which
+  // Dockview's strictly-binary grid cannot represent — it re-nests as right-leaning binary splits
+  // on the way back. That rebalances the split TREE but must never move a tab to the wrong pane,
+  // so for every shape the pane->tabs assignment is the invariant that must hold.
+  const binaryTreeModes = new Set(['single', 'split', 'grid']);
+  for (const mode of ['single', 'split', 'grid', 'wall']) {
+    api.setLayoutSlotsForTest(base);
+    api.setFocusedPanelItem('2');
+    api.applyLayoutMode(mode);
+    const slots = api.currentSlots();
+    const compacted = api.serialize(api.compactLayoutSlots(slots));
+    const roundTripped = api.serialize(api.layoutSlotsFromDockviewJson(api.dockviewJsonFromLayoutSlots(slots)));
+    assert.deepStrictEqual(
+      canonical(roundTripped.panes),
+      canonical(compacted.panes),
+      `slots -> dockview JSON -> slots preserves every pane's tabs + active tab (${mode} layout)`
+    );
+    if (binaryTreeModes.has(mode)) {
+      assert.deepStrictEqual(
+        canonical(roundTripped.tree),
+        canonical(compacted.tree),
+        `binary-tree layout round-trips the split tree exactly (${mode} layout)`
+      );
+      assert.equal(
+        api.layoutSlotsSignature(api.layoutSlotsFromDockviewJson(api.dockviewJsonFromLayoutSlots(slots))),
+        api.layoutSlotsSignature(api.compactLayoutSlots(slots)),
+        `binary-tree layout round-trips the full normalized signature (${mode} layout)`
+      );
+    }
+  }
+});
+
+test('t@1410', () => {
   const api = loadYolomux('', ['1', '2']);
   const item = 'file:/home/keivenc/review.json';
   const paneTab = api.fileEditorPaneTabHtml(item);
@@ -1419,7 +1486,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body pre code \*[\s\S]*color:\s*inherit !important/.test(editorCss), 'vanilla preview strips syntax token colors inside code blocks');
   assert.ok(/\.markdown-body pre code \.hljs-keyword,[\s\S]*color:\s*var\(--code-keyword\) !important/.test(editorCss), 'themed markdown preview owns Highlight.js keyword color instead of relying on the external stylesheet');
   assert.ok(/\.markdown-body pre code \.hljs-string,[\s\S]*color:\s*var\(--code-string\) !important/.test(editorCss), 'themed markdown preview owns Highlight.js string color');
-  const fileExplorerSource = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
+  const fileExplorerSource = (fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8') + fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8'));
   const highlightStart = fileExplorerSource.indexOf('function codeMirrorHighlightExtension');
   const highlightEnd = fileExplorerSource.indexOf('function codeMirrorThemeExtension');
   const highlightBlock = fileExplorerSource.slice(highlightStart, highlightEnd);
@@ -1592,9 +1659,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(compareHtml.includes('file-compare-line added'), 'editor-only lines are marked green');
   assert.ok(compareHtml.includes('file-compare-line removed'), 'disk-only lines are marked red');
   assert.ok(compareHtml.includes('data-file-compare-scroll'), 'compare columns expose synchronized scroll targets');
-}
+});
 
-{
+test('t@1645', () => {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(
     source.includes('if (panel._cmGeneration !== generation) return null;'),
@@ -1604,17 +1671,17 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     source.includes('if (loaded === false) renderFileEditorRawPane(rawPane, path, state.content);'),
     'raw editor fallback is only rendered for real CodeMirror failures',
   );
-}
+});
 
-{
+test('t@1657', () => {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   const withoutStorageHelpers = source
     .replace(/function storageGet\([\s\S]*?\n}\n\nfunction storageSet/, 'function storageSet')
     .replace(/function storageSet\([\s\S]*?\n}\n\nfunction safeJsonParse/, 'function safeJsonParse');
   assert.equal(withoutStorageHelpers.includes('localStorage.'), false, 'browser storage access goes through storageGet/storageSet helpers');
-}
+});
 
-{
+test('t@1665', () => {
   const api = loadYolomux('', ['1']);
   assert.equal(api.editorPreviewModeAvailable('/home/test/README.md'), true);
   assert.equal(api.editorPreviewModeAvailable('/home/test/index.html'), true);
@@ -1623,7 +1690,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes('function sanitizeMarkdownPreviewHtml'), 'Markdown previews pass through a sanitizer');
   assert.ok(source.includes('MARKDOWN_PREVIEW_BLOCKED_TAGS'), 'Markdown sanitizer blocks executable/embedded HTML tags');
   assert.equal(source.includes('container.innerHTML = window.marked.parse'), false, 'Markdown previews are not inserted with unsanitized marked HTML');
-  // DOIT.15: previews still insert ONLY sanitized nodes — sanitize into a fragment, linkify bare URLs
+  // previews still insert ONLY sanitized nodes — sanitize into a fragment, linkify bare URLs
   // on that already-sanitized fragment (so linkify can't reintroduce unsafe markup), then replaceChildren.
   assert.ok(source.includes('const frag = sanitizeMarkdownPreviewHtml(html);'), 'Markdown previews sanitize into a fragment');
   assert.ok(source.includes('linkifyBareUrls(frag);'), 'Markdown previews linkify bare URLs on the sanitized fragment');
@@ -1730,15 +1797,15 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(blameButton.disabled, true, 'Blame is not clickable in preview mode');
   api.setFileEditorViewMode(codePath, 'diff', codeItem);
   assert.equal(api.fileEditorGitActionControlsVisible(codePath, trackedHistoryState({diffLoaded: true, diff: ''}), codeItem), true, 'active diff mode keeps the paired git controls visible so Exit diff remains available');
-  // DOIT.45 (RECURRING): pressing DIFF on a git-tracked file with useful history but a CLEAN working tree
+  // (RECURRING): pressing DIFF on a git-tracked file with useful history but a CLEAN working tree
   // (empty HEAD-vs-working diff) must NOT force-exit diff mode — the FROM/TO sha ref picker has to stay
   // reachable so the user can compare ARBITRARY refs. A clean README.md (many commits, no working changes)
   // used to snap back to edit and hide the picker entirely. codePath is in diff mode here.
-  assert.equal(api.diffModeShouldFallBackToEdit(codePath, trackedHistoryState({diffLoaded: true, diff: ''}), codeItem), false, 'DOIT.45: a clean file WITH useful git history stays in diff mode so the FROM/TO ref picker stays reachable');
-  assert.equal(api.diffModeShouldFallBackToEdit(codePath, {kind: 'text', gitRoot: '/repo/app', gitTracked: true, gitHasHistory: false, gitHistory: [], diffLoaded: true, diff: ''}, codeItem), true, 'DOIT.45: a file WITHOUT useful history still falls back to edit when its diff is empty');
+  assert.equal(api.diffModeShouldFallBackToEdit(codePath, trackedHistoryState({diffLoaded: true, diff: ''}), codeItem), false, 'a clean file WITH useful git history stays in diff mode so the FROM/TO ref picker stays reachable');
+  assert.equal(api.diffModeShouldFallBackToEdit(codePath, {kind: 'text', gitRoot: '/repo/app', gitTracked: true, gitHasHistory: false, gitHistory: [], diffLoaded: true, diff: ''}, codeItem), true, 'a file WITHOUT useful history still falls back to edit when its diff is empty');
   assert.equal(api.diffModeShouldFallBackToEdit(codePath, {kind: 'text', gitTracked: true, gitHasHistory: true, gitHistory: fileHistory, diffLoaded: true, diff: 'diff --git a/a b/a'}, codeItem), true, 'files outside a repo cannot remain in Differ mode even with stale useful-history metadata');
-  assert.equal(api.diffModeShouldFallBackToEdit(codePath, trackedHistoryState({diffLoaded: true, diff: 'diff --git a/a b/a'}), codeItem), false, 'DOIT.45: a file with a real diff stays in diff mode (control)');
-  assert.ok(/async function enterFileEditorDiffMode[\s\S]*!fileStateHasRepo\(path, state\)[\s\S]*fileStateHasRepo\(path, current\) && \(openFileDiffAvailable\(current\) \|\| fileStateHasUsefulGitHistory\(current\)\)[\s\S]*setFileEditorViewMode\(path, 'diff', item\)/.test(source), 'DOIT.45: pressing Diff keeps clean files with useful history in diff mode after the default diff load finishes, but only for files under a repo');
+  assert.equal(api.diffModeShouldFallBackToEdit(codePath, trackedHistoryState({diffLoaded: true, diff: 'diff --git a/a b/a'}), codeItem), false, 'a file with a real diff stays in diff mode (control)');
+  assert.ok(/async function enterFileEditorDiffMode[\s\S]*!fileStateHasRepo\(path, state\)[\s\S]*fileStateHasRepo\(path, current\) && \(openFileDiffAvailable\(current\) \|\| fileStateHasUsefulGitHistory\(current\)\)[\s\S]*setFileEditorViewMode\(path, 'diff', item\)/.test(source), 'pressing Diff keeps clean files with useful history in diff mode after the default diff load finishes, but only for files under a repo');
   api.updateFileEditorDiffButton(diffButton, codePath, {kind: 'text', gitTracked: false, diffLoaded: true, diff: 'diff --git a/a b/a'}, codeItem);
   assert.equal(diffButton.hidden, true, 'untracked files stay diff-button-free even in diff mode');
   const diffExpandButton = new TestElement('diff-expand-button');
@@ -1782,16 +1849,16 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(Object.prototype.hasOwnProperty.call(editConfigSignature, 'lineNumbers'), false, 'line numbers are live-reconfigured, not part of the CodeMirror rebuild signature');
   assert.equal(Object.prototype.hasOwnProperty.call(diffConfigSignature, 'wrap'), false, 'word wrap cannot force a diff editor rebuild');
   api.setFileEditorViewMode(codePath, 'edit', codeItem);
-}
+});
 
-{
+test('t@1835', () => {
   const api = loadYolomux('', ['1']);
   assert.equal(api.runtimeIntervalDelay(3000), 3000);
   assert.equal(api.runtimeIntervalDelay(1250), 1250);
   assert.equal(api.runtimeIntervalDelay(0), 1);
-}
+});
 
-{
+test('t@1842', () => {
   const api = loadYolomux('', ['1']);
   assert.deepStrictEqual(canonical(api.codeMirrorSearchMatches('foo bar foo', 'foo')), [
     {from: 0, to: 3},
@@ -1804,9 +1871,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.deepStrictEqual(canonical(api.codeMirrorSearchMatches('vllm_rust: v0.22.0 0b3ba (/home/keivenc/dynamo/vllm-0.22.0)', '/home/keivenc/dynamo/vllm-0.22.0')), [
     {from: 26, to: 58},
   ], 'absolute paths with dots and hyphens are searched as literal text');
-}
+});
 
-{
+test('t@1857', () => {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   const start = source.indexOf('function renderFileEditorPanel(');
   const end = source.indexOf('function loadFileEditorState(', start);
@@ -1816,9 +1883,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes('const scrollTop = scrollDOM?.scrollTop || 0;'), 'external CodeMirror reload preserves scrollTop');
   assert.ok(source.includes('view.requestMeasure({write: restoreScroll});'), 'external CodeMirror reload restores scroll after the document update');
   assert.ok(source.includes('view.requestMeasure'), 'CodeMirror viewport restore waits for a measured layout frame');
-}
+});
 
-{
+test('t@1869', () => {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   const menuStart = source.indexOf('function bindAppMenuHover(');
   const menuEnd = source.indexOf('function openAppMenu(', menuStart);
@@ -1897,7 +1964,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/function relocalizeInfoPanelChrome[\s\S]*?querySelectorAll\('\[data-info-subtab\]'\)[\s\S]*?button\.dataset\.infoSubtab === 'yoagent'[\s\S]*?data-info-refresh[\s\S]*?data-yoagent-refresh/.test(source), '#40/#50: the persistent YO!info/YO!agent sub-tab chrome and actions are localized in place by data attribute');
   assert.equal(/function relocalizeInfoPanelChrome[\s\S]*?info\.subtitle/.test(source), false, '#40/#50: no removed YO!info subtitle bar remains to relocalize');
   assert.ok(/let i18nApplyLocaleRequestId = 0/.test(source) && /async function applyLocale[\s\S]*?\+\+i18nApplyLocaleRequestId[\s\S]*?if \(requestId !== i18nApplyLocaleRequestId\) return/.test(source), '#50: overlapping language transitions cannot let an older catalog load repaint after the newer language choice');
-  // DOIT.8 Phase 1: the YO marker glyph is i18n-keyed (renders 優/优 under Chinese), not a hardcoded "YO".
+  // Phase 1: the YO marker glyph is i18n-keyed (renders 優/优 under Chinese), not a hardcoded "YO".
   assert.ok(source.includes("esc(t('brand.marker'))"), 'the YO marker glyph renders via t(brand.marker)');
   // #81: a failed autosave-on-close falls through to the explicit save/discard/cancel dialog instead of
   // silently aborting the close.
@@ -2016,9 +2083,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const statusRefreshBody = source.slice(statusRefreshStart, statusRefreshEnd);
   assert.ok(statusRefreshBody.includes('if (fetched.missing)'), 'open-file refresh only marks missing after an explicit missing result');
   assert.ok(statusRefreshBody.includes('markOpenFileExternalError'), 'open-file refresh keeps network/list errors separate from deletion');
-}
+});
 
-{
+test('t@2069', () => {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   const start = source.indexOf('function updatePaneTabStrip(');
   const end = source.indexOf('function reconcilePaneTabChildren(', start);
@@ -2029,9 +2096,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes('function paneTabShouldPreserve('), 'open pane-tab popovers keep their existing node');
   // The per-pane left-dropdown caret was removed (it wasted a line above the tab strip) — keep it gone.
   assert.equal(source.includes('pane-tabs-menu-caret'), false, 'no per-pane dropdown caret (removed by request)');
-}
+});
 
-{
+test('t@2082', () => {
   const api = loadYolomux('', ['1']);
   const tab = new TestElement('tab');
   const popover = new TestElement('popover');
@@ -2061,9 +2128,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(tab.className.includes('popover-open'));
   assert.equal(tab.dataset.popoverHoverState, 'closing');
   assert.equal(tab.getAttribute('aria-label'), 'Session 1');
-}
+});
 
-{
+test('t@2114', () => {
   // GLOBAL activity status line: cross-session running / need-you / idle rollup in the top bar.
   const api = loadYolomux('', ['1', '2', '3', '4']);
   const css = fs.readFileSync('static/yolomux.css', 'utf8');
@@ -2081,9 +2148,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/2 idle/.test(html), 'status line shows the idle count');
   assert.ok(/\.topbar-activity\s*\{/.test(css), 'the top-bar activity line is styled');
   assert.ok(/\.topbar-activity\.has-attention/.test(css), 'the activity line highlights when a session needs the user');
-}
+});
 
-{
+test('t@2134', () => {
   // Event-driven session-kill: a terminal WS close roster-confirms gone vs transient disconnect.
   const api = loadYolomux('', ['1', '2', '3']);
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
@@ -2094,9 +2161,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes('confirmSessionGoneOrReconnect(session, item);'), 'terminal WS close roster-confirms before reconnecting');
   assert.ok(/sessionConfirmedGone\(session, order\)\)\s*\{\s*pruneDeadSession\(session\);/.test(source), 'a confirmed-gone session is pruned immediately');
   assert.ok(/scheduleTerminalReconnect\(session, item\);\s*\}\s*$/m.test(source) || source.includes('scheduleTerminalReconnect(session, item);'), 'a transient disconnect still reconnects');
-}
+});
 
-{
+test('t@2147', () => {
   // T5: stopping a session clears every session-keyed UI map and closes live streams.
   const api = loadYolomux('', ['1']);
   api.registerTerminalForTest('1', {dispose() {}}, {readyState: 1, close() {}});
@@ -2111,9 +2178,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     uploadTimer: false,
   }, 'stopSessionUi clears all session-keyed UI state');
   assert.deepEqual(closed, {transcript: 1, summary: 1}, 'stopSessionUi closes both EventSource streams');
-}
+});
 
-{
+test('t@2164', () => {
   // Git-aware Finder: repo-dir inline annotation (branch + ahead/behind/dirty) + hover popover.
   const api = loadYolomux('', ['1']);
   const css = fs.readFileSync('static/yolomux.css', 'utf8');
@@ -2134,9 +2201,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/\.popover-label\s*\{[\s\S]*color:\s*var\(--active-accent-bright\)/.test(css), 'session/tab popover labels follow the active theme color');
   assert.equal(/#081f08|#bddcaf|#a2c98d|rgba\(118,\s*185,\s*0,\s*0\.72\)/.test(css), false, 'old hardcoded green popup palette is gone');
   assert.ok(/\.file-tree-repo-ahead/.test(css) && /\.file-tree-repo-dirty/.test(css), 'inline ahead/dirty markers are styled');
-}
+});
 
-{
+test('t@2187', () => {
   // Max tabs per pane + LRU eviction (Preference).
   const api = loadYolomux('', ['1', '2', '3', '4', '5']);
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
@@ -2178,10 +2245,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.isPinnableTab('2'), true, 'normal tmux tabs are pinnable');
   api.setPinnedTabsForTest([]);
   assert.ok(source.includes('const evicted = tabsToEvictForCap(tabs, session);'), 'moveSessionToSlot enforces the tab cap when a tab joins a pane');
-}
+});
 
-{
-  // DOIT.6 #4: the session popover shows review status AND who reviewed.
+test('t@2231', () => {
+  // the session popover shows review status AND who reviewed.
   const api = loadYolomux('', ['5']);
   const approved = api.pullRequestReviewInlineHtml({number: 12, review_decision: 'APPROVED', review_reviewers: [{login: 'alice', state: 'APPROVED'}]});
   assert.ok(/Approved by alice/.test(approved) && /pr-status-passing/.test(approved), 'popover shows "Approved by <login>"');
@@ -2193,10 +2260,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   // Approved with no reviewer login still renders the status without a dangling "by".
   const approvedNoWho = api.pullRequestReviewInlineHtml({number: 12, review_decision: 'APPROVED', review_reviewers: []});
   assert.ok(/Approved</.test(approvedNoWho) && !/ by /.test(approvedNoWho), 'approved with no reviewer omits the "by" clause');
-}
+});
 
-{
-  // DOIT.6 #1/#2/#3: tab badge legibility (light), drop the redundant PR pill, no duplicate tooltip.
+test('t@2246', () => {
+  // #1/#2/#3: tab badge legibility (light), drop the redundant PR pill, no duplicate tooltip.
   const api = loadYolomux('', ['5']);
   const css = fs.readFileSync('static/yolomux.css', 'utf8');
   // #1: light-theme overrides exist for the badge chips, incl. a readable (non-transparent) review-required.
@@ -2215,9 +2282,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(mergedBadges.includes('MERGED'), false, 'merged PR tab omits the redundant MERGED text badge');
   assert.equal(api.pullRequestLinkLabel({number: 123, merged: true}), '#123', 'merged PR inline labels omit redundant MERGED text');
   assert.equal(api.pullRequestLinkLabel({number: 123, state: 'open'}), '#123', 'open PR inline labels omit redundant OPEN text');
-}
+});
 
-{
+test('t@2268', () => {
   // #38: tab APPROVAL badge driven by GitHub reviewDecision.
   const api = loadYolomux('', ['5']);
   const css = fs.readFileSync('static/yolomux.css', 'utf8');
@@ -2235,9 +2302,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/pr-review-approved/.test(api.pullRequestCompactBadgesHtml('5', {number: 12345, state: 'open', review_decision: 'APPROVED'})), '#38: the compact PR badge row includes the approval badge');
   assert.ok(/\.ci-indicator\.pr-review-approved/.test(css), '#38: approval badge has an approved (green) color class');
   assert.ok(/\.ci-indicator\.pr-review-required[\s\S]*?line-through/.test(css), '#38: the review-required badge is crossed out');
-}
+});
 
-{
+test('t@2288', () => {
   const api = loadYolomux('', ['1']);
   const strip = new TestElement('strip');
   const tab = new TestElement('tab');
@@ -2253,9 +2320,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.paneTabPopoverItemToRestore(strip), '1');
   assert.equal(api.bodyChildren().length, 0);
   assert.equal(api.paneTabShouldPreserve(tab), true);
-}
+});
 
-{
+test('t@2306', () => {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   const start = source.indexOf('function renderTreeChildren(');
   const end = source.indexOf('function rawFileUrl(', start);
@@ -2302,9 +2369,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes("'Disallow index'"), 'Finder directory context menu exposes Disallow index');
   assert.ok(source.includes("row.classList.toggle('indexed-directory', indexedDirectory)"), 'Finder row render marks indexed directories');
   assert.ok(source.includes("'file-icon-dir-indexed'"), 'Finder indexed directories use a distinct icon class');
-}
+});
 
-{
+test('t@2355', () => {
   const api = loadYolomux('', ['1']);
   assert.equal(api.fileImagePreviewMinShowDelayMs, 800);
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
@@ -2410,9 +2477,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(source.includes('file-editor-pure-preview'), false, 'old side-preview-only editor mode class is removed');
   assert.equal(source.includes('isFilePreviewItem'), false, 'old file-preview tab type is removed from runtime');
   assert.ok(/function updatePanelSlot[\s\S]*panel\.dataset\.layoutItem = session[\s\S]*isFileEditorItem\(session\)[\s\S]*renderFileEditorPanel\(panel, session, \{updateActiveFile: !dockviewLayoutActive\(\)\}\)/.test(source), 'switching a pane to a file editor tab re-renders editor chrome without making Dockview background renders active');
-}
+});
 
-{
+test('t@2463', () => {
   const api = loadYolomux('', ['1']);
   const section = new TestElement('section');
   section.rect = {left: 0, top: 0, right: 1000, bottom: 500, width: 1000, height: 500};
@@ -2421,9 +2488,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.splitPercentForPointer(section, row, {clientX: 990, clientY: 0}), 68);
   const nested = api.splitNode('row', api.leafNode('left'), api.splitNode('row', api.leafNode('slot1'), api.leafNode('slot2'), 50), 50);
   assert.equal(api.layoutNodeMinWidth(nested), 960);
-}
+});
 
-{
+test('t@2474', () => {
   const api = loadYolomux('', ['1']);
   const item = api.registerFileEditorLayoutItem('/home/test/AGENTS.md');
   let focusCount = 0;
@@ -2462,9 +2529,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   api.requestFileEditorPanelFocus(item);
   assert.equal(api.focusFileEditorPanelIfReady(panel, item), true);
   assert.equal(focusCount, 2);
-}
+});
 
-{
+test('t@2515', () => {
   const api = loadYolomux('', ['1']);
   assert.equal(api.autoFocusEnabledForTest(), false, 'auto-focus is off by default');
   api.testElementForId('terminal-pane-1').classList.add('active');
@@ -2479,9 +2546,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   enabledApi.testElementForId('terminal-pane-1').classList.add('active');
   enabledApi.selectPanelOnHover('1');
   assert.equal(enabledApi.focusedPanelItemForTest(), '1');
-}
+});
 
-{
+test('t@2532', () => {
   const api = loadYolomux('', ['1']);
   let focusCount = 0;
   api.registerTerminalForTest('1', {focus() { focusCount += 1; }});
@@ -2495,9 +2562,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   api.selectSession('1', {userInitiated: true});
   assert.equal(api.focusedPanelItemForTest(), '1');
   assert.equal(focusCount, 2, 'selecting an already visible tmux tab is an explicit user focus action');
-}
+});
 
-{
+test('t@2548', () => {
   const api = loadYolomux('', ['1']);
   api.setFocusedTerminal('1');
   assert.equal(api.focusedPanelItemForTest(), '1');
@@ -2507,9 +2574,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.focusedPanelItemForTest(), null, 'terminal blur clears keyboard pane focus');
   assert.equal(api.lastActivePaneItemForTest(), '1', 'terminal blur keeps the visual active pane');
   assert.equal(api.visualActivePaneItemForTest(), '1', 'visual active pane survives terminal blur');
-}
+});
 
-{
+test('t@2560', () => {
   const api = loadYolomux('', ['1', '2']);
   api.setFileExplorerTreeDateModeForTest('date');
   assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,files,preferences,image-viewer,file-editor');
@@ -2649,7 +2716,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/function syncDiffRefControlValues[\s\S]*dataset\?\.diffRefPath[\s\S]*diffRefFromSuggestions\(repo, path\)[\s\S]*diffRefToSuggestions\(refs\.from, repo, path\)/.test(changedFilesSource), 'editor diff ref sync keeps using file-scoped history after rerenders');
   assert.ok(/status\.textContent !== statusText[\s\S]*date\.textContent !== dateText/.test(changedFilesSource), 'Differ/Finder metadata slots avoid rewriting unchanged status/date text');
   assert.ok(/setClassNameIfChanged\(icon,[\s\S]*file-icon-dir-indexed/.test(changedFilesSource), 'indexed directory icon class is not rewritten when unchanged');
-  assert.ok(changedFilesSource.includes('showDiffRefPicker(diffRefInput, {showAll: true})'), 'clicking/focusing a filled ref input still shows available options');
+  // the picker-open is now the shared openDiffRefPickerForInput helper (used by both the
+  // changes panel and the file-editor diff-ref toolbar) instead of two inline copies.
+  assert.ok(/function openDiffRefPickerForInput\([^)]*\)\s*\{[\s\S]*?showDiffRefPicker\(input, \{showAll: true\}\)/.test(changedFilesSource), 'clicking/focusing a filled ref input still shows available options (via shared openDiffRefPickerForInput)');
+  assert.ok(changedFilesSource.includes('openDiffRefPickerForInput(diffRefInput, diffRefInput.closest('), 'changes panel routes ref-input focus/pointer through the shared picker-open helper');
   assert.ok(/const minWidth = Math\.min\(compact \? 880 : 960, viewportWidth - 16\)/.test(changedFilesSource), 'diff-ref popup is wide enough for normal 80-char commit subjects');
   assert.ok(/const maxWidth = compact \? 1040 : 1120/.test(changedFilesSource), 'diff-ref popup can expand beyond the old narrow 620px cap');
   assert.ok(/document\.addEventListener\('scroll', event =>[\s\S]*positionDiffRefPopover\(diffRefPopoverInput, context\.compact\)/.test(changedFilesSource), 'scrolling around an open diff-ref popup repositions it instead of closing it');
@@ -2721,14 +2791,14 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(imageRow.includes('data-change-size="4096"'), 'C5: image rows carry the file size for preview gating');
   assert.ok(imageRow.includes('data-change-rel="pic.png"'), 'C5: rows carry the relative path for Copy path');
   assert.equal(/title="[^"]*pic\.png"/.test(imageRow), false, 'C5: image rows drop the native title so it does not duplicate the hover preview');
-  // C5 / DOIT.53: per-render row binder + shared Finder selection/context menu for Modified-files rows.
+  // C5 / per-render row binder + shared Finder selection/context menu for Modified-files rows.
   assert.ok(changedFilesSource.includes('function bindChangedFileRowBehaviors('), 'C5: a per-render binder hooks Modified-files rows');
   assert.ok(/function bindChangedFileRowBehaviors\([\s\S]*?bindFileImagePreview\(row, path/.test(changedFilesSource), 'C5: image rows get the Finder hover preview');
-  assert.equal(changedFilesSource.includes('function selectChangedFileRow('), false, 'DOIT.53: Differ no longer has bespoke single-row selected state');
-  assert.equal(changedFilesSource.includes('function showChangedFileContextMenu('), false, 'DOIT.53: Differ file rows no longer fork a safe-only context menu');
-  assert.ok(/data-open-change-file[\s\S]{0,260}updateFileTreeSelectionFromClick\(fileRow,\s*fileRow\.dataset\.path/.test(changedFilesSource), 'DOIT.53: Differ click selection routes through the shared Finder selection parent');
-  assert.ok(/data-open-change-file[\s\S]{0,360}showFileTreeContextMenu\(fileRow,\s*path,\s*changedFileRowEntry\(fileRow\)/.test(changedFilesSource), 'DOIT.53: Differ file right-click routes through the shared Finder context menu, including Delete');
-  assert.ok(/async function deleteFileTreePath[\s\S]*fetchSessionFiles\(\{destination: 'finder', session: fileExplorerSessionFilesTargetSession\(\), silent: true, force: true\}\)/.test(changedFilesSource), 'DOIT.53: shared delete refreshes session-files so Differ rows disappear immediately');
+  assert.equal(changedFilesSource.includes('function selectChangedFileRow('), false, 'Differ no longer has bespoke single-row selected state');
+  assert.equal(changedFilesSource.includes('function showChangedFileContextMenu('), false, 'Differ file rows no longer fork a safe-only context menu');
+  assert.ok(/data-open-change-file[\s\S]{0,260}updateFileTreeSelectionFromClick\(fileRow,\s*fileRow\.dataset\.path/.test(changedFilesSource), 'Differ click selection routes through the shared Finder selection parent');
+  assert.ok(/data-open-change-file[\s\S]{0,360}showFileTreeContextMenu\(fileRow,\s*path,\s*changedFileRowEntry\(fileRow\)/.test(changedFilesSource), 'Differ file right-click routes through the shared Finder context menu, including Delete');
+  assert.ok(/async function deleteFileTreePath[\s\S]*fetchSessionFiles\(\{destination: 'finder', session: fileExplorerSessionFilesTargetSession\(\), silent: true, force: true\}\)/.test(changedFilesSource), 'shared delete refreshes session-files so Differ rows disappear immediately');
   assert.ok(changedFilesSource.includes('function showChangedDirectoryContextMenu('), 'C5: Modified-files folder rows have a right-click menu');
   const dirCtxStart = changedFilesSource.indexOf('function showChangedDirectoryContextMenu(');
   const dirCtxBody = changedFilesSource.slice(dirCtxStart, changedFilesSource.indexOf('\nfunction ', dirCtxStart + 1));
@@ -2738,9 +2808,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(dirCtxBody.includes('copyChangedPath(rel || path'), 'C5: directory Copy relative path uses the folder-relative path when present');
   assert.ok(/function openChangedDirectoryInFinder\([\s\S]*?openFileExplorerPane\(\)[\s\S]*?setFileExplorerMode\('files'\)[\s\S]*?expandFileExplorerTreesToPath\(path\)[\s\S]*?selectFileTreePath\(path\)/.test(changedFilesSource), 'C5: Modified-files folder menu switches to Finder mode and expands the directory in-place');
   assert.equal(/'Open in new tab'|'Download'|'Rename'|'Delete'|"Open in new tab"|"Download"|"Rename"|"Delete"/.test(dirCtxBody), false, 'C5: the Modified-files folder menu stays directory-only and non-destructive');
-  assert.ok(/contextmenu'[\s\S]*?data-open-change-file[\s\S]*?showFileTreeContextMenu[\s\S]*?data-open-change-directory[\s\S]*?showChangedDirectoryContextMenu/.test(changedFilesSource), 'DOIT.53: right-click dispatches file rows through the shared Finder menu and folder rows through the directory menu');
+  assert.ok(/contextmenu'[\s\S]*?data-open-change-file[\s\S]*?showFileTreeContextMenu[\s\S]*?data-open-change-directory[\s\S]*?showChangedDirectoryContextMenu/.test(changedFilesSource), 'right-click dispatches file rows through the shared Finder menu and folder rows through the directory menu');
   assert.ok(changedFilesSource.includes("multiple ? 'Copy full paths' : 'Copy full path'"), 'Finder context menu uses Copy full path label');
-  const fileExplorerSource = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
+  const fileExplorerSource = (fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8') + fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8'));
   assert.equal(/Copy raw paths?/.test(fileExplorerSource), false, 'Finder context menu no longer exposes a duplicate raw path action');
   api.setUploadedFilesCollapsedForTest(true);
   api.setSessionFilesPayloadForTest({
@@ -2996,7 +3066,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(fakeChangesScroll.innerHTML, '<div>updated</div>');
   assert.equal(fakeChangesScroll.scrollTop, 45, 'modified-files refresh preserves vertical scroll');
   assert.equal(fakeChangesScroll.scrollLeft, 3, 'modified-files refresh preserves horizontal scroll');
-  // DOIT.6 #149/#150: the edit view no longer auto-loads the diff or paints inline diff decorations.
+  // #149/#150: the edit view no longer auto-loads the diff or paints inline diff decorations.
   // Changes are shown ONLY in the explicit diff VIEW (the MergeView). The inline-decoration helpers and
   // the edit-mode auto-load are removed; parseUnifiedDiffLineClasses/codeMirrorDiffLineExtension are gone.
   const editSrc = fs.readFileSync('static/yolomux.js', 'utf8');
@@ -3044,7 +3114,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(appSource.includes("const diffTargetIsCurrent = !state.diffToRef || state.diffToRef === 'current';"), 'diff editor editability follows TO=current after the FROM/TO flip');
   assert.ok(appSource.includes('const diffEditsAllowed = diffTargetIsCurrent;'), 'diff editor allows edits on the new/current side');
   assert.ok(/function destroyCodeMirrorPanel[\s\S]*\.cm-diff-overview'\)\?\.remove\(\)/.test(appSource), '#26: tearing down the CodeMirror panel removes the diff scrollbar overview so its red/green rail does not linger in edit/normal mode');
-  // DOIT.38: the right overview is one linear-gradient derived from CodeMirror's rendered diff-row sequence.
+  // the right overview is one linear-gradient derived from CodeMirror's rendered diff-row sequence.
   assert.ok(/function buildDiffOverviewGradientFromBands[\s\S]*linear-gradient\(to bottom/.test(appSource), 'diff overview builds one linear-gradient from non-overlapping row bands');
   assert.ok(/function diffOverviewCodeMirrorChunks[\s\S]*view\?\.state\?\.values[\s\S]*fromA[\s\S]*fromB/.test(appSource), 'diff overview reads CodeMirror merge chunks from the live EditorView state');
   assert.ok(/function updateCodeMirrorDiffOverview[\s\S]*const chunks = diffOverviewCodeMirrorChunks\(view, panel\)[\s\S]*diffOverviewRowsFromCodeMirrorRenderedWeights\(view, chunks, currentText, original, container\)[\s\S]*\|\| diffOverviewRowsFromCodeMirrorChunks\(chunks, currentText, original\)/.test(appSource), 'diff overview derives the right rail from CodeMirror chunk rows, with text visual-row weights for wrap');
@@ -3094,12 +3164,12 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(positionedGradient.startsWith('linear-gradient(to bottom,'), 'diff overview gradient has the expected CSS function shape');
   const positionedStops = changedOverviewStops(positionedGradient);
   assert.deepEqual(positionedStops.map(stop => ({color: stop.color, start: stop.startText, end: stop.endText})), [
-    {color: '#ff5d6c', start: '10.000', end: '11.000'},
-    {color: '#38d878', start: '11.000', end: '12.000'},
+    {color: UI_PINS.diffOverviewDelete, start: '10.000', end: '11.000'},
+    {color: UI_PINS.diffOverviewAdd, start: '11.000', end: '12.000'},
   ], 'diff overview maps consecutive removed/added rows to adjacent one-line gradient slices');
   assert.equal(positionedStops[0].endText, positionedStops[1].startText, 'consecutive red/green rows share one exact boundary');
   assertNoOverviewStopOverlap(positionedStops);
-  assert.deepEqual([...new Set(positionedStops.map(stop => stop.color))].sort(), ['#38d878', '#ff5d6c'], 'diff overview uses only the red and green row colors for changed stops');
+  assert.deepEqual([...new Set(positionedStops.map(stop => stop.color))].sort(), [UI_PINS.diffOverviewAdd, UI_PINS.diffOverviewDelete], 'diff overview uses only the red and green row colors for changed stops');
   assert.equal(/rgba|var\(|\bred\b|\bgreen\b/.test(positionedGradient), false, 'diff overview gradient uses literal row colors only');
   assert.equal(api.buildDiffOverviewGradientForTest('', 100), null, 'empty diffs do not draw an overview gradient');
   const makeLines = (count, label) => Array.from({length: count}, (_, index) => `${label} ${index + 1}`).join('\n');
@@ -3157,8 +3227,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(currentOnlyContainer.querySelector('.cm-diff-overview'), null, '#55/#56/#57 current-side-only CodeMirror geometry draws no temporary rail before the deleted widgets settle');
   const largeStops = changedOverviewStops(api.buildDiffOverviewGradientFromBandsForTest(largeRows.bands, largeRows.totalRows));
   assert.deepEqual(largeStops.map(stop => ({color: stop.color, start: stop.startText, end: stop.endText})), [
-    {color: '#ff5d6c', start: '2.593', end: '69.259'},
-    {color: '#38d878', start: '69.259', end: '93.827'},
+    {color: UI_PINS.diffOverviewDelete, start: '2.593', end: '69.259'},
+    {color: UI_PINS.diffOverviewAdd, start: '69.259', end: '93.827'},
   ], 'large replacement gradient allocates the green band CodeMirror paints, not only literal raw additions');
   assert.equal(largeStops[0].endText, largeStops[1].startText, 'large replacement red and green bands share one boundary and never overlap');
   assertNoOverviewStopOverlap(largeStops);
@@ -3368,10 +3438,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   ].join('\n');
   const multiHunkStops = changedOverviewStops(api.buildDiffOverviewGradientForTest(multiHunkDiff, 100));
   assert.deepEqual(multiHunkStops.map(stop => ({color: stop.color, start: stop.startText, end: stop.endText})), [
-    {color: '#ff5d6c', start: '5.000', end: '6.000'},
-    {color: '#38d878', start: '6.000', end: '7.000'},
-    {color: '#ff5d6c', start: '50.000', end: '51.000'},
-    {color: '#38d878', start: '51.000', end: '52.000'},
+    {color: UI_PINS.diffOverviewDelete, start: '5.000', end: '6.000'},
+    {color: UI_PINS.diffOverviewAdd, start: '6.000', end: '7.000'},
+    {color: UI_PINS.diffOverviewDelete, start: '50.000', end: '51.000'},
+    {color: UI_PINS.diffOverviewAdd, start: '51.000', end: '52.000'},
   ], 'diff overview leaves real uncolored gaps between separate hunks');
   assert.equal(multiHunkStops.some(stop => stop.start > 7 && stop.start < 50), false, 'diff overview does not color the unchanged gap between hunks');
   assertNoOverviewStopOverlap(multiHunkStops);
@@ -3399,8 +3469,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(overview.querySelectorAll('.cm-diff-overview-tick').length, 0, 'diff overview creates no per-chunk tick children');
   const overviewStops = changedOverviewStops(overview.style.background);
   assert.deepEqual(overviewStops.map(stop => ({color: stop.color, start: stop.startText, end: stop.endText})), [
-    {color: '#ff5d6c', start: '0.000', end: '40.000'},
-    {color: '#38d878', start: '40.000', end: '80.000'},
+    {color: UI_PINS.diffOverviewDelete, start: '0.000', end: '40.000'},
+    {color: UI_PINS.diffOverviewAdd, start: '40.000', end: '80.000'},
   ], 'diff overview replacement gradient follows rendered red rows, then rendered green rows, linearly');
   assertNoOverviewStopOverlap(overviewStops);
   const viewportContainer = new TestElement('viewport-container');
@@ -3418,7 +3488,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(viewportIndicator.style.height, '20%', 'diff overview viewport indicator follows clientHeight / scrollHeight');
   assert.equal(appSource.includes('splitLaneIndexes'), false, 'diff overview does not use an overlapping-lane model');
   assert.equal(appSource.includes('Math.max(0.8'), false, 'diff overview does not inflate one-line ticks in percent space, which made adjacent red/green bands overlap');
-  // DOIT.12 B4: a diff-only toolbar toggle shows ALL context (omits collapseUnchanged) vs collapsing runs.
+  // a diff-only toolbar toggle shows ALL context (omits collapseUnchanged) vs collapsing runs.
   assert.ok(appSource.includes('file-editor-diff-expand-panel'), 'B4: the diff toolbar has an expand/collapse-all-unchanged toggle');
   assert.ok(/function toggleDiffExpandUnchanged[\s\S]*?setDiffExpandUnchanged/.test(appSource), 'B4: the toggle flips + persists diffExpandUnchanged and re-renders');
   assert.ok(/diffExpandUnchanged \? \{\} : \{collapseUnchanged: \{margin: 3, minSize: 8\}\}/.test(appSource), 'B4: expanded omits collapseUnchanged so every unchanged line shows (both diff layouts)');
@@ -3440,7 +3510,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/ensureCodeMirrorPanel\(panel, item, path, state\)\.then\(loaded => \{[\s\S]{0,160}renderFileEditorRawPane\(rawPane, path, state\.content\);[\s\S]{0,160}\}\)\.catch\(error => \{[\s\S]{0,360}renderFileEditorRawPane\(rawPane, path, state\.content\);/.test(appSource), 'CodeMirror render promise rejections are caught and fall back to raw text');
   assert.equal(appSource.includes("fileEditorEmptyState('No diff'"), false, 'clean selected refs render the normal editor instead of a No diff empty state');
   assert.ok(/if \(!openFileDiffAvailable\(state\)\)[\s\S]{0,360}return ensureCodeMirrorPanel\(panel, item, path, state, \{forceMode: 'edit'\}\)/.test(appSource), 'clean selected refs fall back to the normal editable CodeMirror view');
-  assert.ok(/function diffModeShouldFallBackToEdit[\s\S]*!state\.diffLoading[\s\S]*!openFileDiffAvailable\(state\)[\s\S]*!fileStateHasUsefulGitHistory\(state\)/.test(appSource), 'DOIT.45: once a diff load confirms no usable diff, diff mode exits to edit ONLY when the file has no useful history — a file WITH history stays in diff mode so the FROM/TO ref picker is reachable');
+  assert.ok(/function diffModeShouldFallBackToEdit[\s\S]*!state\.diffLoading[\s\S]*!openFileDiffAvailable\(state\)[\s\S]*!fileStateHasUsefulGitHistory\(state\)/.test(appSource), 'once a diff load confirms no usable diff, diff mode exits to edit ONLY when the file has no useful history — a file WITH history stays in diff mode so the FROM/TO ref picker is reachable');
   const refreshDiffStart = appSource.indexOf('async function refreshOpenFileDiff(');
   const openFileEditorStart = appSource.indexOf('async function openFileInEditor(', refreshDiffStart);
   assert.ok(refreshDiffStart > 0 && openFileEditorStart > refreshDiffStart, '#43: refreshOpenFileDiff body is locatable');
@@ -3710,7 +3780,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(resizerBlock.includes('var(--pane-resizer-hover-bg)'), 'C15: the Finder resizer brightens via the shared hover token');
   assert.ok(resizerBlock.includes('var(--drop-outline-shadow)'), 'C15: the Finder resizer hover uses the shared outline-shadow token');
   assert.equal(/118,\s*185,\s*0|255,\s*255,\s*255,\s*0\.04/.test(resizerBlock), false, 'C15: the hardcoded green gradient + white border are gone from the Finder resizer');
-  // Light theme drives the BASE pane-tab/ring styling via tokens, not rule overrides; but DOIT.6 #28
+  // Light theme drives the BASE pane-tab/ring styling via tokens, not rule overrides; but #28
   // adds targeted hover/link contrast overrides (expected), so guard only the base tab + ring.
   assert.equal(/body\.theme-light\s+\.pane-tab\s*\{/.test(preferencesCss), false, 'light theme does not restyle the base pane tab (tokens drive it)');
   assert.equal(/body\.theme-light\s+\.panel\.active-pane\s*\{/.test(preferencesCss), false, 'light theme does not restyle the active-pane ring directly');
@@ -3731,9 +3801,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const themeLightTokenBlock = preferencesCss.match(/body\.theme-light\s*\{[^}]*\}/)?.[0] || '';
   assert.equal(themeLightTokenBlock.includes('--pane-tab-strip-hover-bg'), false, 'light theme does not define the dark-only pane tab-container hover token');
   assert.ok(/body\.theme-light\s*\{[\s\S]*--active-accent-dim:\s*#e1edda/.test(preferencesCss), 'light theme uses a greenish-light pane tab-strip background (active-accent-dim)');
-  assert.ok(/--pane-tab-unfocused-active-bg:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'unfocused active tabs use the SAME full green as the focused active tab (DOIT.6 #6 + images 003/004: undimmed, un-lightened per-pane highlight)');
+  assert.ok(/--pane-tab-unfocused-active-bg:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'unfocused active tabs use the SAME full green as the focused active tab (+ images 003/004: undimmed, un-lightened per-pane highlight)');
   assert.equal(preferencesCss.includes('--pane-tab-unfocused-active-bg: #aeb7c4'), false, 'gray unfocused-active pane tabs must not return');
-  assert.ok(preferencesCss.includes('--pane-tab-panel-ring-width: 4px'), 'the pane ring uses the 4px width token (DOIT.20)');
+  assert.ok(preferencesCss.includes('--pane-tab-panel-ring-width: 4px'), 'the pane ring uses the 4px width token');
   assert.ok(preferencesCss.includes('--pane-ring-opacity: 75%'), 'the pane ring default opacity is prominent enough in both themes');
   assert.ok(preferencesCss.includes('--pane-active-ring-opacity: 75%'), 'the active pane ring shares the default ring opacity token');
   // Light mode uses a BLUE pane separator (dark mode keeps amber/yellow).
@@ -3768,7 +3838,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(preferencesCss.includes('--pane-resizer-bg: rgba(37, 99, 235, 0.72)'), 'light pane splitter is blue at rest');
   assert.ok(preferencesCss.includes('--pane-resizer-hover-line-size: 5px'), 'pane splitter hover thickens to a clearly visible 5px line over the 1px resting line');
   assert.ok(preferencesCss.includes('--pane-tile-radius: 0'), 'adjacent panes meet flush with square corners (no rounded-corner seam wedges)');
-  // #29 + DOIT.21: the nav (←/→) and search are centered as a PAIR — the nav absorbs the left free
+  // #29 + the nav (←/→) and search are centered as a PAIR — the nav absorbs the left free
   // space (margin-inline-start:auto) and the search absorbs the right (margin-inline: 6px auto), so the
   // cluster sits centered between the menubar and the right-side actions, not right-aligned.
   assert.ok(/\.topbar-nav\s*\{[^}]*margin-inline-start:\s*auto/.test(preferencesCss), '#29: the topbar nav group absorbs the left free space so the nav+search pair centers');
@@ -3778,24 +3848,25 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   // The active/focus outline is the pane's "natural border" (a --pane-split-gap-wide real border, never
   // clipped, flush to the resizer) colored green — the SAME mechanism for every pane type. Every pane
   // has the transparent border; the active one colors it. No box-shadow, no inset ::after for focus.
-  // DOIT.24 C1: the state ring IS the --pane-split-gap gutter border, colored per state via the unified
+  // the state ring IS the --pane-split-gap gutter border, colored per state via the unified
   // --panel-ring-color and faded by --pane-ring-opacity (transparent on a plain inactive pane). Sitting at
   // the seam edge, an active (green) pane and a needs (red) pane touch across the 1px resizer.
   assert.ok(/\.panel\s*\{[^}]*border:\s*var\(--pane-split-gap\) solid color-mix\(in srgb, var\(--panel-ring-color\) var\(--panel-ring-opacity,\s*var\(--pane-ring-opacity/.test(preferencesCss), 'the pane ring is the --pane-split-gap gutter border, colored by --panel-ring-color at per-state opacity (touches the neighbor at the seam)');
-  // DOIT.20: every focused pane (active or typing-ready) drives the SAME green ring via --panel-ring-color.
+  // every focused pane (active or typing-ready) drives the SAME green ring via --panel-ring-color.
   assert.ok(/\.panel\.active-pane\s*\{[^}]*--panel-ring-color:\s*var\(--pane-tab-panel-ring\)/.test(preferencesCss), 'the active pane sets the green ring color');
   assert.ok(/\.panel\.active-pane\s*\{[^}]*--panel-ring-opacity:\s*var\(--pane-active-ring-opacity\)/.test(preferencesCss), 'the active pane uses the user-controlled active ring opacity');
   assert.ok(/\.panel\.typing-ready-pane\s*\{[^}]*--panel-ring-color:\s*var\(--pane-tab-panel-ring\)/.test(preferencesCss), 'a typing-ready pane sets the SAME green ring color as active');
   assert.ok(/\.panel\.typing-ready-pane\s*\{[^}]*--panel-ring-opacity:\s*var\(--pane-active-ring-opacity\)/.test(preferencesCss), 'typing-ready panes use the same user-controlled active ring opacity as active panes');
   assert.equal(/\.panel\.typing-ready-pane\s*\{[^}]*border-color:\s*#465267/.test(preferencesCss), false, 'no gray focus border — focused panes are green, not the old typing-ready gray');
   assert.equal(/body\.theme-light \.panel\.typing-ready-pane\s*\{[^}]*border-color:\s*#9aa6b6/.test(preferencesCss), false, 'no LIGHT-mode gray focus border on terminals (the #465267 twin) — focused terminals stay green in light mode too');
-  // DOIT.24 C1: no content-edge overlay ring — the ring is the gutter border (asserted above). The
+  // no content-edge overlay ring — the ring is the gutter border (asserted above). The
   // needs-* PULSE animates the border-color directly on .panel (not a ::after).
-  assert.equal(/\.panel::after\s*\{/.test(preferencesCss), false, 'no .panel::after overlay ring — the ring is the gutter border, so adjacent rings touch at the seam (DOIT.24)');
-  assert.ok(/\.panel\.needs-input-pane,[\s\S]*?\{[^}]*--panel-ring-color:\s*#ff3347/.test(preferencesCss), 'needs-* panes set the red ring color');
+  assert.equal(/\.panel::after\s*\{/.test(preferencesCss), false, 'no .panel::after overlay ring — the ring is the gutter border, so adjacent rings touch at the seam');
+  assert.ok(/\.panel\.needs-input-pane,[\s\S]*?\{[^}]*--panel-ring-color:\s*var\(--pane-ring-attention\)/.test(preferencesCss), 'needs-* panes set the red ring color (via the --pane-ring-attention token)');
   assert.ok(/\.panel\.needs-input-pane,[\s\S]*?\.panel\.needs-blocked-pane\s*\{[^}]*animation:\s*attention-ring-fade/.test(preferencesCss), 'needs-* panes pulse the red ring (animation on .panel, not ::after)');
   // image 028: a focused needs-attention pane resolves RED (attention beats the yolo-ready green tint).
-  assert.ok(/\.panel\.active-pane\.needs-input-pane[\s\S]*?\.panel\.typing-ready-pane\.needs-blocked-pane\s*\{[^}]*--panel-ring-color:\s*#ff3347/.test(preferencesCss), 'a focused needs-attention pane resolves the red ring color, not the green/yolo tint');
+  assert.ok(/\.panel\.active-pane\.needs-input-pane[\s\S]*?\.panel\.typing-ready-pane\.needs-blocked-pane\s*\{[^}]*--panel-ring-color:\s*var\(--pane-ring-attention\)/.test(preferencesCss), 'a focused needs-attention pane resolves the red ring color, not the green/yolo tint');
+  assert.ok(/--pane-ring-attention:\s*#ff3347/.test(preferencesCss), 'the attention-ring token keeps the #ff3347 dark value');
   assert.equal(/\.panel\.active-pane\s*\{[^}]*border-color:/.test(preferencesCss), false, 'the active pane sets --panel-ring-color (which colors the shared gutter border), not its own border-color');
   // images 003/004 pane-color polish:
   assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-inactive-tab-bg:\s*var\(--active-tab-muted-bg\)/.test(preferencesCss), 'light-mode inactive tabs derive their tint from the active accent (not a fixed green)');
@@ -3820,7 +3891,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     // #261: a 0-20px pane spacing setting drives the inter-pane gap; the active pane's green box width
     // == that gap (--pane-split-gap), so it's 0 at spacing 0 and fills the active side up to the line.
     const paneSpacingSrc = fs.readFileSync('static/yolomux.js', 'utf8');
-    assert.ok(paneSpacingSrc.includes("numberSetting('appearance.pane_spacing', 3)"), 'DOIT.20: runtime reads appearance.pane_spacing with a 3px fallback (matches the backend default)');
+    assert.ok(paneSpacingSrc.includes("numberSetting('appearance.pane_spacing', 3)"), 'runtime reads appearance.pane_spacing with a 3px fallback (matches the backend default)');
     assert.ok(paneSpacingSrc.includes("setProperty('--pane-split-gap'"), '#261: pane spacing drives the --pane-split-gap inter-pane gap');
     assert.equal(paneSpacingSrc.includes('paneSpacing / 5'), false, '#261: the active green box width is NOT a separate scaled value — it uses --pane-split-gap directly');
     assert.ok(/path: 'appearance\.pane_spacing'[\s\S]{0,90}min: 0, max: 20/.test(paneSpacingSrc), '#261: Preferences exposes a 0-20px pane spacing field');
@@ -3933,7 +4004,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-a \.cm-changedText,[\s\S]*?\.cm-deletedChunk \.cm-deletedText\s*\{[\s\S]*color:\s*var\(--danger-light-text\)[\s\S]*background:\s*#f4b7b7/.test(preferencesCss), 'light diff removed inline text uses the danger text token on a distinct red fill (image 055)');
   assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-b \.cm-changedText\s*\{[\s\S]*color:\s*#064e3b[\s\S]*background:\s*#b9e7c2/.test(preferencesCss), 'light diff added inline text uses dark green on a distinct green fill');
   assert.ok(/--diff-remove-line-bg:\s*#540c06/.test(preferencesCss), '#250: diff removed lines use the sampled opaque red fill over the dark bg');
-  // DOIT.16 C3: a .panel-overlay-root must NOT be the scroll container (else the inactive-pane dim
+  // a .panel-overlay-root must NOT be the scroll container (else the inactive-pane dim
   // scrolls away). The overlay-root bodies are overflow:hidden; the scrolling lives on inner wrappers.
   assert.ok(/\.preferences-body\s*\{[^}]*overflow:\s*hidden/.test(preferencesCss), 'C3: .preferences-body (overlay-root) must not scroll (overflow:hidden)');
   assert.ok(!/\.preferences-body\s*\{[^}]*overflow:\s*auto/.test(preferencesCss), 'C3: .preferences-body must NOT be overflow:auto');
@@ -4159,16 +4230,16 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.terminalThemeForGlobalTheme('dark').blue, '#0451a5');
   assert.equal(api.terminalThemeForGlobalTheme('dark').selectionBackground, '#93c5fd', 'light terminal selection uses a visible blue fill');
   assert.equal(api.terminalThemeForGlobalTheme('dark').selectionForeground, '#071327', 'light terminal selection forces readable selected text');
-  // DOIT.6 #32: a white terminal auto-darkens faint 24-bit agent text via minimumContrastRatio.
+  // a white terminal auto-darkens faint 24-bit agent text via minimumContrastRatio.
   assert.equal(api.terminalMinimumContrastRatio('dark'), 4.5, '#32: light terminal raises the minimum contrast ratio');
   api.setTerminalThemeModeForTest('dark');
-  assert.equal(api.terminalMinimumContrastRatio('dark'), 3, 'DOIT.30: dark terminal uses a moderate 3:1 floor so a light-on-white agent composer (Codex input) is forced readable');
+  assert.equal(api.terminalMinimumContrastRatio('dark'), 3, 'dark terminal uses a moderate 3:1 floor so a light-on-white agent composer (Codex input) is forced readable');
   api.setTerminalThemeModeForTest('light');
   api.setTerminalThemeModeForTest('follow-app');
   assert.equal(api.terminalThemeForGlobalTheme('light').background, '#ffffff', 'follow-app maps to the resolved app theme');
   assert.equal(api.terminalThemeForGlobalTheme('dark').background, '#11151d');
   api.setTerminalThemeModeForTest('dark');
-  assert.equal(api.terminalThemeForGlobalTheme('dark').selectionBackground, '#2563eb', 'dark terminal selection uses a prominent blue fill');
+  assert.equal(api.terminalThemeForGlobalTheme('dark').selectionBackground, UI_PINS.textSelectionBg, 'dark terminal selection uses a prominent blue fill');
   assert.equal(api.terminalThemeForGlobalTheme('dark').selectionForeground, '#ffffff', 'dark terminal selection forces readable selected text');
   api.setGlobalThemeModeForTest('light');
   api.applyGlobalThemeMode({updateEditor: true, updateTerminals: false});
@@ -4486,7 +4557,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(/--brand-primary-green:\s*var\(--active-control-bg/.test(brandCss), false, 'topbar YOLOmux LO is not routed through the active color preference');
   assert.equal(api.testElementForId('closeModal').textContent || 'X', 'X', 'About modal close button is an X');
   assert.ok(fs.readFileSync('yolomux_lib/web.py', 'utf8').includes('<button id="closeModal" title="Close" aria-label="Close">X</button>'), 'HTML shell renders the modal close button as X');
-  // DOIT.8: File/View/Tabs/Help menu labels localize; tmux (a tool name) stays as-is.
+  // File/View/Tabs/Help menu labels localize; tmux (a tool name) stays as-is.
   const zhHantMenu = JSON.parse(fs.readFileSync('static/locales/zh-Hant.json', 'utf8'));
   api.i18nSetCatalogForTest('zh-Hant', zhHantMenu);
   api.setActiveLocaleForTest('zh-Hant');
@@ -4627,11 +4698,11 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/const syncItem = fileSyncPath \? preferredItem : \(isTmuxSession\(preferredItem\) \? preferredItem : explicitSession\);[\s\S]*if \(!syncItem \|\| \(!fileSyncPath && syncItem !== explicitSession\)\) return/.test(finderSyncBody), 'Finder Sync accepts clicked editor files without requiring a tmux target');
   assert.ok(finderSyncBody.includes('fileExplorerSyncPlanForFile(fileSyncPath)'), 'Finder Sync can plan from an explicit editor file');
   assert.ok(finderSyncBody.includes('syncFileExplorerRootToActiveFile(fileSyncPath, {force: explicit})'), 'Finder Sync can move the root to a clicked editor file and explicit sync forces a re-apply');
-  assert.ok(finderSyncBody.includes('(explicit || !fileExplorerSyncPlanAlreadyApplied(syncPlan))'), '#DOIT.52 B1: automatic Finder Sync skips a repeated already-applied plan');
+  assert.ok(finderSyncBody.includes('(explicit || !fileExplorerSyncPlanAlreadyApplied(syncPlan))'), '#automatic Finder Sync skips a repeated already-applied plan');
   assert.equal(finderSyncBody.includes('syncFileExplorerToActiveTab(preferredItem'), false, 'fixed Finder mode never follows explicit tmux/editor clicks');
-  assert.ok(source.includes('function fileExplorerSyncPlanKey(plan)'), '#DOIT.52 R3: Finder Sync has one shared sync-plan key helper');
-  assert.ok(source.includes('function fileExplorerSyncPlanAlreadyApplied(plan)'), '#DOIT.52 R3/B1: Finder Sync has one shared already-applied helper');
-  assert.ok(source.includes('function markFileExplorerSyncPlanApplied(plan)'), '#DOIT.52 R3/B1: Finder Sync marks successful plan application');
+  assert.ok(source.includes('function fileExplorerSyncPlanKey(plan)'), '#Finder Sync has one shared sync-plan key helper');
+  assert.ok(source.includes('function fileExplorerSyncPlanAlreadyApplied(plan)'), '#Finder Sync has one shared already-applied helper');
+  assert.ok(source.includes('function markFileExplorerSyncPlanApplied(plan)'), '#Finder Sync marks successful plan application');
   const finderCandidatesStart = source.indexOf('function finderCandidateItems(');
   const finderCandidatesEnd = source.indexOf('function firstFinderPath(', finderCandidatesStart);
   const finderCandidatesBody = source.slice(finderCandidatesStart, finderCandidatesEnd);
@@ -4671,7 +4742,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes("container.addEventListener('copy', event => {"), 'terminal container handles browser copy events');
   assert.ok(source.includes("event.clipboardData.setData('text/plain', selected);"), 'terminal copy-event fallback writes the xterm selection to clipboardData');
   assert.ok(source.includes('function copyTextToClipboardViaCopyEvent(text)'), 'terminal shortcut copy has a synchronous copy-event clipboard path');
-  // DOIT.53: the sync-then-async clipboard chain lives in ONE shared parent (writeTerminalTextToClipboard)
+  // the sync-then-async clipboard chain lives in ONE shared parent (writeTerminalTextToClipboard)
   // used by both the shortcut copy and the OSC 52 bridge.
   assert.ok(/function writeTerminalTextToClipboard\(text, label = 'copied'\)[\s\S]*?copyTextToClipboardViaCopyEvent\(text\)[\s\S]*?copyTextToClipboard\(text\)/.test(source), 'terminal clipboard writes use the synchronous copy-event path before async clipboard fallback (shared parent)');
   assert.ok(/function copyTerminalSelectionFromShortcut\(session, term, options = \{\}, container = null\)[\s\S]*?writeTerminalTextToClipboard\(text/.test(source), 'terminal shortcut copy routes through the shared clipboard-write chain');
@@ -4879,7 +4950,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
       api.commandPaletteItemScore({group: 'Tabs', label: '1', detail: 'y o agent buried in details', searchFields: ['1', 'y o agent buried in details']}, 'yoagent'),
     'command palette ranks YO!agent first for punctuation-insensitive prefix queries'
   );
-  // #40 / DOIT.39: YO!info, Finder, and Preferences are the standalone virtual tabs; YO!agent is now a
+  // #40 / YO!info, Finder, and Preferences are the standalone virtual tabs; YO!agent is now a
   // sub-tab of the merged YO!info pane, so it is NOT a Tabs entry.
   const paletteItems = api.commandPaletteCommandItems();
   const expectedVirtualLabels = [api.infoItemId, api.fileExplorerItemId, api.prefsItemId].map(api.itemLabel);
@@ -6158,9 +6229,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(event.propagationStopped, true);
   assert.equal(event.dataTransfer.dropEffect, 'none');
   assert.equal(finderStrip.classList.contains('tab-drop-preview'), false);
-}
+});
 
-{
+test('t@6215', () => {
   const api = loadYolomux('', ['1']);
   const path = '/repo/app/common.py';
   const normalRows = api.filePopoverRows(path, {kind: 'text', size: 42}).join('');
@@ -6171,9 +6242,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const dirtyRows = api.filePopoverRows(path, {kind: 'text', dirty: true}).join('');
   assert.ok(dirtyRows.includes('status'));
   assert.ok(dirtyRows.includes('modified'));
-}
+});
 
-{
+test('t@6228', () => {
   const api = loadYolomux('', ['1']);
   const signature = api.directoryEntriesSignature([
     {name: 'b.txt', kind: 'file', size: 2, mtime: 20},
@@ -6192,9 +6263,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.fileEntryChanged({mtime: 1780806618930051800, size: 1}, {mtime_ns: 1780806618930051885, size: 1}), false);
   assert.equal(api.fileEntryChanged({mtime: 1780806618930051800, size: 1}, {mtime_ns: 1780806618950051800, size: 1}), true);
   assert.equal(api.fileEntryChanged({mtime: 10, size: 1}, {mtime: 10, size: 2}), true);
-}
+});
 
-{
+test('t@6249', () => {
   const api = loadYolomux('', ['1']);
   const imagePath = '/home/test/a.png';
   const viewerItem = api.registerImageViewerLayoutItem(imagePath);
@@ -6217,9 +6288,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(missingHtml.includes('a.png'), 'missing file tabs still show the basename');
   assert.equal(api.openFileStatus({kind: 'text', externalError: 'network down'}).message.includes('file state unknown'), true);
   assert.equal(api.openFileStatus({kind: 'text', externalError: 'network down'}).message.includes('deleted'), false, 'network/list refresh errors are not reported as deletion');
-}
+});
 
-{
+test('t@6274', () => {
   const api = loadYolomux('', ['1']);
   const state = api.fileContextMenuState({kind: 'file'}, ['/repo/app/a.txt'], ['a.txt']);
   assert.equal(state.copyRelativeDisabled, false);
@@ -6232,32 +6303,32 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
 
   const readonlyApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'readonly');
   const readonlyState = readonlyApi.fileContextMenuState({kind: 'file'}, ['/repo/app/a.txt'], ['a.txt']);
-  // DOIT.34 #2: readonly is terminal-only — the server 403s every /api/fs/* read, so Download (and image
+  // readonly is terminal-only — the server 403s every /api/fs/* read, so Download (and image
   // open) are disabled in readonly to match, rather than offering a command that fails.
   assert.equal(readonlyState.downloadDisabled, true, 'readonly cannot download (server forbids /api/fs/raw)');
   const readonlyImage = readonlyApi.fileContextMenuState({kind: 'file', name: 'screen.png'}, ['/repo/app/screen.png'], ['screen.png']);
   assert.equal(readonlyImage.openInNewTabDisabled, true, 'readonly cannot open an image in a tab (server forbids the read)');
   assert.equal(readonlyState.renameDisabled, true);
   assert.equal(readonlyState.deleteDisabled, true);
-}
+});
 
-{
+test('t@6296', () => {
   const api = loadYolomux('', ['1']);
   const html = api.transcriptPathRowHtml('/tmp/yolomux/session.jsonl');
   assert.ok(html.includes('/tmp/yolomux/session.jsonl'));
   assert.ok(html.includes('data-copy-transcript-path'));
   assert.equal(api.transcriptPathRowHtml('').includes('no transcript path'), true);
-}
+});
 
-{
+test('t@6304', () => {
   const api = loadYolomux('', ['1']);
   assert.equal(api.editorWrapValue(false), 'off');
   assert.equal(api.editorWrapValue(true), 'soft');
   assert.equal(api.rawFileUrl('/repo/app/a b.txt', {v: 7}), '/api/fs/raw?path=%2Frepo%2Fapp%2Fa%20b.txt&v=7');
   assert.equal(api.rawFileDownloadUrl('/repo/app/a b.txt'), '/api/fs/raw?path=%2Frepo%2Fapp%2Fa%20b.txt&download=1');
-}
+});
 
-{
+test('t@6312', () => {
   const api = loadYolomux('', ['1']);
   const pixelWheel = api.terminalWheelSignedLines({deltaY: 105, deltaMode: 0}, 40);
   assert.ok(pixelWheel > 2.5 && pixelWheel < 3.5, 'mouse-like pixel wheel remains about three lines');
@@ -6268,9 +6339,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.terminalWheelSignedLines({deltaY: 999, deltaMode: 0}, 40), 12);
   assert.equal(api.terminalWheelSignedLines({deltaY: 4, deltaMode: 0, ctrlKey: true}, 40), 0);
   assert.equal(api.terminalWheelSignedLines({deltaY: 4, deltaMode: 0, shiftKey: true}, 40), 34);
-}
+});
 
-{
+test('t@6325', () => {
   const api = loadYolomux('', ['1']);
   assert.equal(api.agentErrorIsBlocking('codex transcript not found by process fd or cwd'), false);
   assert.equal(api.agentErrorIsBlocking('missing /home/test/.claude/sessions/123.json'), false);
@@ -6278,9 +6349,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.notEqual(api.sessionState('1', {agents: [{kind: 'codex', error: 'codex transcript not found by process fd or cwd'}]}).key, 'blocked');
   assert.notEqual(api.sessionState('1', {agents: [{kind: 'claude', error: 'missing /home/test/.claude/sessions/123.json'}]}).key, 'blocked');
   assert.equal(api.sessionState('1', {agents: [{kind: 'codex', error: 'worker crashed'}]}).key, 'blocked');
-}
+});
 
-{
+test('t@6335', () => {
   const api = loadYolomux('', ['1']);
   api.setAutoApproveStateForTest('1', {
     enabled: false,
@@ -6290,9 +6361,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const state = api.sessionState('1', {agents: [{kind: 'codex'}], panes: []});
   assert.equal(state.key, 'needs-approval', 'roster screen approval state lights EXEC? even when prompt.visible is absent');
   assert.equal(state.reason, 'Do you want to proceed?');
-}
+});
 
-{
+test('t@6347', () => {
   const api = loadYolomux('', ['1']);
   const zhHant = JSON.parse(fs.readFileSync('static/locales/zh-Hant.json', 'utf8'));
   api.i18nSetCatalogForTest('zh-Hant', zhHant);
@@ -6302,9 +6373,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   api.registerTerminalForTest('1', {}, {readyState: 1});
   api.setAutoApproveStateForTest('1', {screen: {key: 'disconnected', text: 'failed to capture pane'}});
   assert.equal(api.sessionState('1', {}).reason, zhHant['state.reason.terminalScreenUnavailable'], 'backend capture failure maps to the localized disconnected fallback');
-}
+});
 
-{
+test('t@6359', () => {
   const api = loadYolomux('', ['1', '2', '3']);
   const slots = api.emptyLayoutSlots();
   slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
@@ -6316,9 +6387,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.itemIsBackgroundPaneTab('1'), false);
   assert.deepStrictEqual(canonical(api.backgroundTabItems()), ['__info__']);
   assert.deepStrictEqual(canonical(api.inactiveTabItems()), ['__files__', '__prefs__', '3']);
-}
+});
 
-{
+test('t@6373', () => {
   const api = loadYolomux('', ['1']);
   const firstEditor = api.registerFileEditorLayoutItem('/repo/app/one.md');
   const slots = api.emptyLayoutSlots();
@@ -6327,18 +6398,18 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   slots.slot1 = api.paneStateWithTabs(['1'], '1');
   api.setLayoutSlotsForTest(slots);
   assert.equal(api.slotForNewFileEditorTab(), 'left');
-}
+});
 
-{
+test('t@6384', () => {
   const api = loadYolomux('', ['1']);
   assert.equal(api.pathRelativeToDirectory('/repo/app/file.txt', '/repo/app'), 'file.txt');
   assert.equal(api.pathRelativeToDirectory('/repo/app/src/file.txt', '/repo/app'), 'src/file.txt');
   assert.equal(api.pathRelativeToDirectory('/repo/app', '/repo/app'), '.');
   assert.equal(api.pathRelativeToDirectory('/repo/app/file.txt', '/'), 'repo/app/file.txt');
   assert.equal(api.pathRelativeToDirectory('/other/file.txt', '/repo/app'), '/other/file.txt');
-}
+});
 
-{
+test('t@6393', () => {
   const api = loadYolomux('', ['1']);
   assert.equal(api.splitPercentForNewItem('1', 'left'), 50);
   assert.equal(api.splitPercentForNewItem('1', 'right'), 50);
@@ -6347,9 +6418,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.splitPercentForNewItem('file:/repo/app/TODO.md', 'right', 42), 42);
   assert.equal(api.splitPercentForNewItem('__files__', 'left'), 22);
   assert.equal(api.splitPercentForNewItem('__files__', 'right'), 78);
-}
+});
 
-{
+test('t@6404', () => {
   const api = loadYolomux('', ['1']);
   assert.deepStrictEqual(canonical(api.windowStepVisibility([{window: "0", window_active: true}])), {prev: false, next: false});
   assert.deepStrictEqual(canonical(api.windowStepVisibility([
@@ -6367,9 +6438,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     {window: "1", window_active: false},
     {window: "2", window_active: true},
   ])), {prev: true, next: false});
-}
+});
 
-{
+test('t@6424', () => {
   loadYolomux();
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   const start = source.indexOf('function showAttentionAlert(');
@@ -6395,9 +6466,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['notify.testTitle'], 'YOLOmux[{host}] notifications enabled', 'test notification title uses compact host bracket format');
   const attentionCss = fs.readFileSync('static/yolomux.css', 'utf8');
   assert.ok(/\.panel-toast-stack\s*\{[\s\S]*top:\s*8px[\s\S]*z-index:\s*var\(--z-full-screen-overlay\)/.test(attentionCss), 'pane-local toast stacks render below each pane tab strip and above pane contents');
-}
+});
 
-{
+test('t@6452', () => {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(source.includes('async function apiFetchJson('), 'D1: shared JSON fetch helper is bundled');
   assert.ok(source.includes('error.status = response.status'), 'D1: JSON fetch errors preserve HTTP status for callers');
@@ -6414,11 +6485,11 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     assert.equal(/await response\.json\(\)/.test(src), false, `D1: ${file} should use apiFetchJson instead of manual response.json`);
     assert.equal(/if \(!response\.ok\)/.test(src), false, `D1: ${file} should use apiFetchJson instead of manual response.ok checks`);
   }
-  assert.ok(fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8').includes('apiFetch(`/api/fs/unindex'), 'D1: Finder unindex remains fire-and-forget');
+  assert.ok((fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8') + fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8')).includes('apiFetch(`/api/fs/unindex'), 'D1: Finder unindex remains fire-and-forget');
   assert.ok(fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8').includes("apiFetch('/api/event'"), 'D1: event telemetry remains fire-and-forget');
-}
+});
 
-{
+test('t@6473', () => {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(source.includes('const fileState = new Map();'), 'F1: one fileState map owns per-path file/editor state');
   assert.ok(source.includes('const openFiles = fileState;'), 'F1: openFiles is the compatibility alias for fileState');
@@ -6436,17 +6507,17 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/function setFileState[\s\S]*editorTabItems[\s\S]*ownerSessions[\s\S]*viewMode[\s\S]*imageMode[\s\S]*blame[\s\S]*conflictDialogOpen/.test(source), 'F1: replacing file content preserves per-path side state on the fileState record');
   assert.ok(/function removeOpenFile[\s\S]*deleteFileState\(path\)/.test(source), 'F1: closing the last owner deletes one fileState record');
   assert.ok(/function renameOpenFilePath[\s\S]*deleteFileState\(oldPath\)[\s\S]*setFileState\(newPath, state\)/.test(source), 'F1: rename moves one fileState record');
-}
+});
 
-{
+test('t@6493', () => {
   const css = fs.readFileSync('static/yolomux.css', 'utf8');
   assert.ok(/\.actions button,\s*\.info-refresh,\s*\.info-sort-button,\s*\.changes-repo-head,[\s\S]*\.file-editor-toolbar button,[\s\S]*display:\s*inline-flex;[\s\S]*align-items:\s*center;[\s\S]*border:\s*0;[\s\S]*background:\s*transparent;[\s\S]*cursor:\s*pointer;/.test(css), 'I1: common button reset/flex base is centralized');
   assert.equal(/\.actions button\s*\{[^}]*display:\s*inline-flex/.test(css), false, 'I1: topbar actions do not restate the shared inline-flex base');
   assert.equal(/\.info-refresh\s*\{[^}]*cursor:\s*pointer/.test(css), false, 'I1: info refresh does not restate shared cursor behavior');
   assert.equal(/\.file-editor-mode-control button\s*\{[^}]*background:\s*transparent/.test(css), false, 'I1: editor mode buttons do not restate shared transparent background');
-}
+});
 
-{
+test('t@6501', () => {
   const api = loadYolomux();
   api.setDocumentTitleNowForTest(0);
   api.updateDocumentTitle();
@@ -6470,9 +6541,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   api.setAutoApproveStateForTest('2', {screen: {key: 'idle'}});
   api.updateDocumentTitle();
   assert.equal(api.documentTitleForTest(), 'YOLOmux [idle]', 'idle timer resets after a running period');
-}
+});
 
-{
+test('t@6527', () => {
   const api = loadYolomux();
   const info = {
     project: {
@@ -6572,7 +6643,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/session-yolo-marker[^"]*\bworking\b/.test(autoOffWorkingHtml), 'a working agent spins its YO ball even when auto-approve is off');
   assert.equal(/session-yolo-marker[^"]*\bactive\b/.test(autoOffWorkingHtml), false, 'an auto-off working marker is not rendered as active');
   const yoloMarkerCss = fs.readFileSync('static/yolomux.css', 'utf8');
-  // DOIT.6 #23: the YO ball spins ONLY when .working, and at the slow rotation setting (not a fast
+  // the YO ball spins ONLY when .working, and at the slow rotation setting (not a fast
   // hardcoded value); there is NO ambient idle-rotation rule, so an idle marker is static.
   assert.ok(/\.session-yolo-marker\.working\s*\{[^}]*--yolo-rotation-duration/.test(yoloMarkerCss), '#23: working YO spin is driven by the slow yolo_rotate_ms setting');
   assert.equal(/\.session-yolo-marker\.working\s*\{[^}]*--yolo-working-duration/.test(yoloMarkerCss), false, '#23: the fast hardcoded working duration is gone');
@@ -6618,9 +6689,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     if (pulse) assert.ok(ciHtml.includes('metadata-pulse'), `${label} CI badge is marked after CI change`);
     if (state !== 'unknown') assertSingleCiBadge(ciHtml, label);
   });
-}
+});
 
-{
+test('t@6675', () => {
   const api = loadYolomux('?debug=1', ['1', '2']);
   assert.equal(api.debugModeEnabledForTest(), true, 'debug=1 enables the JS Debug pane');
   assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,files,preferences,debug,image-viewer,file-editor');
@@ -6697,9 +6768,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     slot1: {tabs: ['5', injectedApi.infoItemId, injectedApi.debugPaneItemId], active: injectedApi.debugPaneItemId},
     slot2: {tabs: [injectedApi.fileExplorerItemId], active: injectedApi.fileExplorerItemId},
   }, 'debug=1 injects and activates Debug in an existing URL layout');
-}
+});
 
-{
+test('t@6754', () => {
   const api = loadYolomux();
   const info = {
     selected_pane: {current_path: '/home/test/project/project3'},
@@ -6741,11 +6812,11 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
 
   const popover = api.sessionPopoverHtml('4', info, 'codex', true);
   assert.ok(popover.indexOf('popover-label">Linear') < popover.indexOf('popover-label">PR'), 'tab popover lists Linear before PR');
-}
+});
 
-// DOIT.33: a session is findable by an OTHER-branch PR / branch name / Linear ID — the same
+// a session is findable by an OTHER-branch PR / branch name / Linear ID — the same
 // project.git.other_branches data YO!info shows — not only its current-branch PR.
-{
+test('t@6800', () => {
   const api = loadYolomux();
   const info = {
     selected_pane: {current_path: '/home/test/dynamo4'},
@@ -6768,17 +6839,17 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   };
   api.setTranscriptInfoForTest('4', info);
   const fields = api.tabSearchFields('4');
-  assert.ok(fields.includes('#10289'), 'DOIT.33: an other-branch PR is indexed as #N');
-  assert.ok(fields.includes('PR#10289'), 'DOIT.33: ...and as PR#N');
-  assert.ok(fields.includes('10289'), 'DOIT.33: ...and as a bare number');
-  assert.ok(fields.includes('keivenc/DIS-2193__other-work'), 'DOIT.33: the other branch name is indexed');
-  assert.ok(fields.includes('DIS-2193'), 'DOIT.33: the other-branch Linear ID is indexed');
-  assert.ok(fields.includes('feat: other branch work'), 'DOIT.33: the other-branch PR title is indexed');
-  assert.ok(api.tabSearchScore('4', '#10289') >= 0, 'DOIT.33: searching #10289 matches the session');
-  assert.ok(api.tabSearchScore('4', 'DIS-2193') >= 0, 'DOIT.33: searching the Linear ID matches the session');
-}
+  assert.ok(fields.includes('#10289'), 'an other-branch PR is indexed as #N');
+  assert.ok(fields.includes('PR#10289'), '...and as PR#N');
+  assert.ok(fields.includes('10289'), '...and as a bare number');
+  assert.ok(fields.includes('keivenc/DIS-2193__other-work'), 'the other branch name is indexed');
+  assert.ok(fields.includes('DIS-2193'), 'the other-branch Linear ID is indexed');
+  assert.ok(fields.includes('feat: other branch work'), 'the other-branch PR title is indexed');
+  assert.ok(api.tabSearchScore('4', '#10289') >= 0, 'searching #10289 matches the session');
+  assert.ok(api.tabSearchScore('4', 'DIS-2193') >= 0, 'searching the Linear ID matches the session');
+});
 
-{
+test('t@6833', () => {
   const api = loadYolomux('', ['alpha', 'beta']);
   const baseActivitySummaryPayload = {
     generated_at: '2026-05-31T12:00:00+00:00',
@@ -6919,9 +6990,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   runResizeDrag('desc', 250);
   assert.equal(api.infoDescColumnWidthForTest(), 460, 'YO!info desc resize drag changes the column width');
   assert.equal(api.storageValueForTest('yolomux.infoDescColumnWidth.v1'), '460', 'YO!info desc resize drag persists the final width');
-}
+});
 
-{
+test('t@6976', () => {
   const api = loadYolomux();
   assert.equal(api.dedentSelectionText('  hello\n  world'), 'hello\nworld');
   assert.equal(api.dedentSelectionText('  hello\n    world'), 'hello\n  world');
@@ -6930,9 +7001,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.dedentSelectionText('● 1\n  2\n  3'), '1\n2\n3');
   assert.equal(api.dedentSelectionText('• answer'), 'answer');
   assert.equal(api.dedentSelectionText('• answer:\n\n  \"  hello\\n  world\"'), 'answer:\n\n\"  hello\\n  world\"');
-}
+});
 
-{
+test('t@6987', () => {
   const api = loadYolomux();
   const lines = [
     terminalLine('https://ex'),
@@ -6960,49 +7031,49 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const lastLinks = api.terminalWrappedLineLinks(term, 3);
   assert.equal(lastLinks.length, 1);
   assert.equal(lastLinks[0].text, 'https://example.com/abcdef');
-}
+});
 
-// DOIT.27: an agent HARD-wraps a long URL with a HANGING INDENT — the continuation is its own logical
+// an agent HARD-wraps a long URL with a HANGING INDENT — the continuation is its own logical
 // line (isWrapped === false), indented under the URL column. Stitch it onto the link so the whole URL
 // is one clickable link, underlined across both rows at their real columns.
-{
+test('t@7020', () => {
   const api = loadYolomux();
   const lines = [
     terminalLine('https://github.com/ai-dynamo/frontend-crates/actions/runs/26'),
     terminalLine('    919558600/job', false),  // hanging indent (4 spaces), NOT a soft-wrap
     terminalLine('$ ', false),                 // a plain prompt row — must NOT be merged
   ];
-  // DOIT.36 C1: the URL row fills the terminal to its right edge (cols == its length), proving it was
+  // the URL row fills the terminal to its right edge (cols == its length), proving it was
   // CLIPPED and hard-wrapped — that is what licenses stitching the indented continuation onto it.
   const term = {cols: lines[0].translateToString(true).length, buffer: {active: {getLine: index => lines[index] || null}}};
 
   const full = 'https://github.com/ai-dynamo/frontend-crates/actions/runs/26919558600/job';
   // Query from the FIRST row.
   const firstRow = api.terminalWrappedLineLinks(term, 1);
-  assert.equal(firstRow.length, 1, 'DOIT.27: the hard-wrapped URL is one link when hovering row 1');
-  assert.equal(firstRow[0].text, full, 'DOIT.27: the link text is the full stitched URL');
+  assert.equal(firstRow.length, 1, 'the hard-wrapped URL is one link when hovering row 1');
+  assert.equal(firstRow[0].text, full, 'the link text is the full stitched URL');
   assert.equal(firstRow[0].range.start.y, 1);
   assert.equal(firstRow[0].range.start.x, 1);
-  assert.equal(firstRow[0].range.end.y, 2, 'DOIT.27: the underline extends onto the continuation row');
+  assert.equal(firstRow[0].range.end.y, 2, 'the underline extends onto the continuation row');
   // continuation '919558600/job' is 13 chars after a 4-space indent → last char at column 4 + 13 = 17.
-  assert.equal(firstRow[0].range.end.x, 17, 'DOIT.27: the continuation underline lands at its REAL (indented) columns');
+  assert.equal(firstRow[0].range.end.x, 17, 'the continuation underline lands at its REAL (indented) columns');
 
   // Query from the CONTINUATION row — same link (backward sweep finds the URL start).
   const contRow = api.terminalWrappedLineLinks(term, 2);
-  assert.equal(contRow.length, 1, 'DOIT.27: the link is also active when hovering the continuation row');
+  assert.equal(contRow.length, 1, 'the link is also active when hovering the continuation row');
   assert.equal(contRow[0].text, full);
   assert.equal(contRow[0].range.start.y, 1);
   assert.equal(contRow[0].range.end.y, 2);
 
   // A plain prompt row below is NOT part of the link.
   const promptRow = api.terminalWrappedLineLinks(term, 3);
-  assert.equal(promptRow.length, 0, 'DOIT.27: the prompt row after the URL is not merged into the link');
-}
+  assert.equal(promptRow.length, 0, 'the prompt row after the URL is not merged into the link');
+});
 
-// DOIT.36 C1 (no false JOIN): a COMPLETE url at end-of-line that ends well short of the terminal's
+// (no false JOIN): a COMPLETE url at end-of-line that ends well short of the terminal's
 // right edge was NOT clipped, so the indented next row must stay independent — earlier this merged into
 // one bogus link `https://example.comnext step`.
-{
+test('t@7057', () => {
   const api = loadYolomux();
   const lines = [
     terminalLine('See https://example.com'),  // complete URL, ends at col 23 of an 80-col terminal
@@ -7015,11 +7086,11 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(row1[0].range.end.y, 1, 'C1: the underline stays on the URL row (no false continuation onto row 2)');
   const row2 = api.terminalWrappedLineLinks(term, 2);
   assert.equal(row2.length, 0, 'C1: the indented prose continuation is not a link');
-}
+});
 
-// DOIT.27 (no false merge): an indented line under a row that ends in PROSE (not an unterminated URL)
+// (no false merge): an indented line under a row that ends in PROSE (not an unterminated URL)
 // is left alone — only a url token that runs off the right edge gets a continuation stitched on.
-{
+test('t@7074', () => {
   const api = loadYolomux();
   const lines = [
     terminalLine('Here are the steps to run:'),  // ends in prose, no trailing URL
@@ -7027,74 +7098,74 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   ];
   const term = {buffer: {active: {getLine: index => lines[index] || null}}};
   const row1 = api.terminalWrappedLineLinks(term, 1);
-  assert.equal(row1.length, 0, 'DOIT.27: a prose line is not merged with the indented URL below it');
+  assert.equal(row1.length, 0, 'a prose line is not merged with the indented URL below it');
   const row2 = api.terminalWrappedLineLinks(term, 2);
-  assert.equal(row2.length, 1, 'DOIT.27: the indented URL on its own row still links');
+  assert.equal(row2.length, 1, 'the indented URL on its own row still links');
   assert.equal(row2[0].text, 'https://example.com/guide');
   // It links at its own indented columns (4-space indent → starts at column 5).
-  assert.equal(row2[0].range.start.x, 5, 'DOIT.27: a standalone indented URL underlines at its real column');
+  assert.equal(row2[0].range.start.x, 5, 'a standalone indented URL underlines at its real column');
   assert.equal(row2[0].range.start.y, 2);
-}
+});
 
-// DOIT.29: watched-PR ref normalization (client mirror of the backend parse_pull_request_ref).
-{
+// watched-PR ref normalization (client mirror of the backend parse_pull_request_ref).
+test('t@7092', () => {
   const api = loadYolomux();
   assert.equal(api.normalizeWatchedPrRef('ai-dynamo/frontend-crates#18'), 'ai-dynamo/frontend-crates#18');
   assert.equal(api.normalizeWatchedPrRef('ai-dynamo/frontend-crates/18'), 'ai-dynamo/frontend-crates#18');
   assert.equal(api.normalizeWatchedPrRef('https://github.com/ai-dynamo/frontend-crates/pull/18'), 'ai-dynamo/frontend-crates#18');
   assert.equal(api.normalizeWatchedPrRef('https://github.com/owner/repo/pull/7/files'), 'owner/repo#7');
   assert.equal(api.normalizeWatchedPrRef('  owner/repo#7  '), 'owner/repo#7');
-  assert.equal(api.normalizeWatchedPrRef('https://gitlab.com/owner/repo/pull/7'), '', 'DOIT.29: non-github URL is rejected');
-  assert.equal(api.normalizeWatchedPrRef('owner/repo'), '', 'DOIT.29: a repo without a PR number is rejected');
-  assert.equal(api.normalizeWatchedPrRef('owner/repo#0'), '', 'DOIT.29: PR #0 is rejected');
+  assert.equal(api.normalizeWatchedPrRef('https://gitlab.com/owner/repo/pull/7'), '', 'non-github URL is rejected');
+  assert.equal(api.normalizeWatchedPrRef('owner/repo'), '', 'a repo without a PR number is rejected');
+  assert.equal(api.normalizeWatchedPrRef('owner/repo#0'), '', 'PR #0 is rejected');
   assert.equal(api.normalizeWatchedPrRef('not a ref'), '');
-  assert.equal(api.normalizeWatchedPrRef('https://github.com/owner/repo/issues/3'), '', 'DOIT.29: an issue URL is not a PR');
-}
+  assert.equal(api.normalizeWatchedPrRef('https://github.com/owner/repo/issues/3'), '', 'an issue URL is not a PR');
+});
 
-// DOIT.29: watched-PR status snapshot + the pure transition detector (merge / CI→failing / review).
-{
+// watched-PR status snapshot + the pure transition detector (merge / CI→failing / review).
+test('t@7107', () => {
   const api = loadYolomux();
   const open = {state: 'open', checks: {state: 'passing'}, review_decision: 'REVIEW_REQUIRED'};
   assert.deepStrictEqual(canonical(api.watchedPrStatusSnapshot(open)), {merged: false, ci: 'passing', review: 'REVIEW_REQUIRED'});
-  assert.equal(api.watchedPrStatusSnapshot({merged: true}).merged, true, 'DOIT.29: merged flag → merged snapshot');
-  assert.equal(api.watchedPrStatusSnapshot({status_label: 'merged'}).merged, true, 'DOIT.29: merged status_label → merged snapshot');
+  assert.equal(api.watchedPrStatusSnapshot({merged: true}).merged, true, 'merged flag → merged snapshot');
+  assert.equal(api.watchedPrStatusSnapshot({status_label: 'merged'}).merged, true, 'merged status_label → merged snapshot');
   // First sighting (no prev) records a baseline → no transition (avoids a load-time storm).
   assert.deepStrictEqual(canonical(api.watchedPrTransitionKeys(null, api.watchedPrStatusSnapshot(open))), []);
-  assert.deepStrictEqual(canonical(api.watchedPrTransitionKeys({merged: false, ci: 'passing', review: ''}, {merged: true, ci: 'passing', review: ''})), ['pr-merged'], 'DOIT.29: → merged fires pr-merged');
-  assert.deepStrictEqual(canonical(api.watchedPrTransitionKeys({merged: false, ci: 'passing', review: ''}, {merged: false, ci: 'failing', review: ''})), ['pr-ci-failing'], 'DOIT.29: CI → failing fires pr-ci-failing');
-  assert.deepStrictEqual(canonical(api.watchedPrTransitionKeys({merged: false, ci: 'failing', review: ''}, {merged: false, ci: 'passing', review: ''})), [], 'DOIT.29: CI failing → passing is not a pr-ci-failing transition');
-  assert.deepStrictEqual(canonical(api.watchedPrTransitionKeys({merged: false, ci: 'passing', review: 'REVIEW_REQUIRED'}, {merged: false, ci: 'passing', review: 'APPROVED'})), ['pr-review'], 'DOIT.29: a review-decision change fires pr-review');
+  assert.deepStrictEqual(canonical(api.watchedPrTransitionKeys({merged: false, ci: 'passing', review: ''}, {merged: true, ci: 'passing', review: ''})), ['pr-merged'], '→ merged fires pr-merged');
+  assert.deepStrictEqual(canonical(api.watchedPrTransitionKeys({merged: false, ci: 'passing', review: ''}, {merged: false, ci: 'failing', review: ''})), ['pr-ci-failing'], 'CI → failing fires pr-ci-failing');
+  assert.deepStrictEqual(canonical(api.watchedPrTransitionKeys({merged: false, ci: 'failing', review: ''}, {merged: false, ci: 'passing', review: ''})), [], 'CI failing → passing is not a pr-ci-failing transition');
+  assert.deepStrictEqual(canonical(api.watchedPrTransitionKeys({merged: false, ci: 'passing', review: 'REVIEW_REQUIRED'}, {merged: false, ci: 'passing', review: 'APPROVED'})), ['pr-review'], 'a review-decision change fires pr-review');
   const same = api.watchedPrStatusSnapshot(open);
-  assert.deepStrictEqual(canonical(api.watchedPrTransitionKeys(same, same)), [], 'DOIT.29: an unchanged snapshot fires nothing');
-}
+  assert.deepStrictEqual(canonical(api.watchedPrTransitionKeys(same, same)), [], 'an unchanged snapshot fires nothing');
+});
 
-// DOIT.29: notify_transitions gates the new PR keys — they are opt-in (NOT in the default allowlist).
-{
+// notify_transitions gates the new PR keys — they are opt-in (NOT in the default allowlist).
+test('t@7124', () => {
   const api = loadYolomux();
-  assert.equal(api.shouldNotifyTransitionKey('needs-input'), true, 'DOIT.29: a default session-state key still notifies');
-  assert.equal(api.shouldNotifyTransitionKey('pr-merged'), false, 'DOIT.29: pr-merged is opt-in, off by default');
-}
+  assert.equal(api.shouldNotifyTransitionKey('needs-input'), true, 'a default session-state key still notifies');
+  assert.equal(api.shouldNotifyTransitionKey('pr-merged'), false, 'pr-merged is opt-in, off by default');
+});
 
-// DOIT.29: watched PRs have an initial fetch, SSE updates, container, and transition notifications.
-{
+// watched PRs have an initial fetch, SSE updates, container, and transition notifications.
+test('t@7131', () => {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
-  assert.equal(source.includes("resetRuntimeInterval('watched-prs', refreshWatchedPrs"), false, 'DOIT.29: watched PRs no longer run a recurring browser poll');
-  assert.ok(source.includes("apiFetchJson('/api/watched-prs')"), 'DOIT.29: refreshWatchedPrs keeps the boot/manual watched-PR endpoint fetch');
-  assert.ok(source.includes('id="info-watched"'), 'DOIT.29: YO!info renders a watched-PRs container');
-  assert.ok(source.includes('notifyWatchedPrTransitions(watchedPrsData.watched_prs)'), 'DOIT.29: incoming snapshots diff statuses to fire transition notifications');
-}
+  assert.equal(source.includes("resetRuntimeInterval('watched-prs', refreshWatchedPrs"), false, 'watched PRs no longer run a recurring browser poll');
+  assert.ok(source.includes("apiFetchJson('/api/watched-prs')"), 'refreshWatchedPrs keeps the boot/manual watched-PR endpoint fetch');
+  assert.ok(source.includes('id="info-watched"'), 'YO!info renders a watched-PRs container');
+  assert.ok(source.includes('notifyWatchedPrTransitions(watchedPrsData.watched_prs)'), 'incoming snapshots diff statuses to fire transition notifications');
+});
 
 // Dev-velocity #1b: in --dev mode the page subscribes to /api/dev-reload and reloads on bundle change.
-{
+test('t@7140', () => {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(source.includes('const devMode = bootstrap.dev === true'), 'the client reads the dev flag from the bootstrap');
   assert.ok(source.includes("new EventSource('/api/dev-reload')"), 'dev mode subscribes to the dev-reload SSE channel');
   assert.ok(/addEventListener\('reload',[\s\S]{0,120}location\.reload\(\)/.test(source), 'a reload event reloads the page');
   assert.ok(source.includes('installDevAutoReload()'), 'the dev auto-reload is installed at boot');
-}
+});
 
-// DOIT.52: browser clients subscribe to server push events for the expensive live datasets.
-{
+// browser clients subscribe to server push events for the expensive live datasets.
+test('t@7149', () => {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(source.includes("new EventSource('/api/client-events')"), 'client subscribes to the general server event stream');
   assert.ok(source.includes("installRuntimeIntervals();") && source.includes("installClientEventStream();"), 'SSE is installed alongside the remaining local ping/log timers');
@@ -7133,33 +7204,33 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes('context_items: activeSessions'), 'watch state includes active transcript context previews');
   assert.ok(source.includes('state.session_files = clientSessionFilesWatchRequests()'), 'watch state includes the current session-files request');
   assert.ok(source.includes("recordJsDebugEvent('sse'"), 'SSE events are captured in JS Debug');
-}
+});
 
-// DOIT.31: Finder symlink badge — the row toggles is-symlink/symlink-broken, shows a name→target
+// Finder symlink badge — the row toggles is-symlink/symlink-broken, shows a name→target
 // title, and the CSS overlays an arrow badge (red + struck-through for broken).
-{
+test('t@7192', () => {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.equal(source.includes('row.className = `file-tree-row kind-${entry.kind}`'), false, 'Finder row refresh does not drop and re-add symlink/indexed classes');
   assert.ok(source.includes('syncFileTreeRowKindClass(row, entry.kind)'), 'Finder row kind classes update through stable toggles');
-  assert.ok(source.includes("row.classList.toggle('is-symlink', entry.is_symlink === true)"), 'DOIT.31: rows flag symlinks');
-  assert.ok(source.includes("row.classList.toggle('symlink-broken', entry.kind === 'symlink-broken')"), 'DOIT.31: rows flag broken symlinks');
-  assert.ok(/entry\.is_symlink === true && entry\.symlink_target[\s\S]{0,160}→ \$\{entry\.symlink_target\}/.test(source), 'DOIT.31: a symlink row title shows name → target');
+  assert.ok(source.includes("row.classList.toggle('is-symlink', entry.is_symlink === true)"), 'rows flag symlinks');
+  assert.ok(source.includes("row.classList.toggle('symlink-broken', entry.kind === 'symlink-broken')"), 'rows flag broken symlinks');
+  assert.ok(/entry\.is_symlink === true && entry\.symlink_target[\s\S]{0,160}→ \$\{entry\.symlink_target\}/.test(source), 'a symlink row title shows name → target');
   // The target renders INLINE in the row name ("name → target"), rel or abs as stored.
   const api = loadYolomux();
   const linkFile = api.fileTreeDisplayParts('/repo/link', {kind: 'file', name: 'link', is_symlink: true, symlink_target: '../real/path.txt'});
-  assert.equal(linkFile.text, 'link → ../real/path.txt', 'DOIT.31: inline text shows name → target');
-  assert.ok(linkFile.html.includes('file-tree-symlink-target') && linkFile.html.includes('→ ../real/path.txt'), 'DOIT.31: inline target is its own dimmed span');
+  assert.equal(linkFile.text, 'link → ../real/path.txt', 'inline text shows name → target');
+  assert.ok(linkFile.html.includes('file-tree-symlink-target') && linkFile.html.includes('→ ../real/path.txt'), 'inline target is its own dimmed span');
   const linkDir = api.fileTreeDisplayParts('/repo/ld', {kind: 'dir', name: 'ld', is_symlink: true, symlink_target: '/abs/target'});
-  assert.ok(linkDir.text.includes('ld → /abs/target'), 'DOIT.31: a symlinked dir shows its absolute target inline');
+  assert.ok(linkDir.text.includes('ld → /abs/target'), 'a symlinked dir shows its absolute target inline');
   const plain = api.fileTreeDisplayParts('/repo/f.txt', {kind: 'file', name: 'f.txt'});
-  assert.ok(!plain.text.includes('→'), 'DOIT.31: a non-symlink has no target suffix');
+  assert.ok(!plain.text.includes('→'), 'a non-symlink has no target suffix');
   const css = fs.readFileSync('static/yolomux.css', 'utf8');
-  assert.ok(/\.file-tree-row\.is-symlink > \.file-tree-icon::after\s*\{[^}]*content:\s*"↪"/.test(css), 'DOIT.31: the symlink icon gets an arrow-badge overlay');
-  assert.ok(/\.file-tree-row\.symlink-broken[^{]*\.file-tree-icon::after\s*\{[^}]*color:\s*var\(--bad\)/.test(css), 'DOIT.31: a broken symlink badge is red (token)');
-  assert.ok(/\.file-tree-row\.symlink-broken[^{]*\.file-tree-name\s*\{[^}]*line-through/.test(css), 'DOIT.31: a broken symlink name is struck through');
-}
+  assert.ok(/\.file-tree-row\.is-symlink > \.file-tree-icon::after\s*\{[^}]*content:\s*"↪"/.test(css), 'the symlink icon gets an arrow-badge overlay');
+  assert.ok(/\.file-tree-row\.symlink-broken[^{]*\.file-tree-icon::after\s*\{[^}]*color:\s*var\(--bad\)/.test(css), 'a broken symlink badge is red (token)');
+  assert.ok(/\.file-tree-row\.symlink-broken[^{]*\.file-tree-name\s*\{[^}]*line-through/.test(css), 'a broken symlink name is struck through');
+});
 
-{
+test('t@7214', () => {
   const api = loadYolomux();
   const strip = tabStrip([
     tabElement('1', 100, 100),
@@ -7183,10 +7254,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   multiLineStrip.rect = {left: 100, right: 406, top: 0, bottom: 58, width: 306, height: 58};
   assert.deepStrictEqual(canonical(api.paneTabDropPlacement(multiLineStrip, {clientX: 110, clientY: 38}, '9')), {index: 2, x: 2, y: 30, height: 27, noop: false});
   assert.deepStrictEqual(canonical(api.paneTabDropPlacement(multiLineStrip, {clientX: 225, clientY: 38}, '9')), {index: 3, x: 103, y: 30, height: 27, noop: false});
-}
+});
 
-{
-  // DOIT.6 #24: View -> Theme is a submenu of discrete System/Dark/Light one-click items.
+test('t@7240', () => {
+  // View -> Theme is a submenu of discrete System/Dark/Light one-click items.
   const api = loadYolomux('', ['1']);
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   const themeSubmenu = api.appMenuTree()
@@ -7226,9 +7297,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/item\.term\.options\.theme = terminalThemeForSession\(session, theme\)/.test(source), 'active-terminal cursor: applyTerminalRuntimeSettings themes the active terminal with the configured cursor color');
   assert.ok(/theme: terminalThemeForSession\(session\)/.test(source), 'active-terminal cursor: a newly-created terminal uses terminalThemeForSession');
   assert.ok(/function updatePanelInactiveOverlays[\s\S]*?refreshActiveTerminalCursor\(\)/.test(source), 'active-terminal cursor: focus changes refresh the cursor color (refreshActiveTerminalCursor)');
-}
+});
 
-{
+test('t@7283', () => {
   // YO!agent composer redesign (mockup 044): a rounded input bar with the input on top and a control
   // row below — backend "Auto" pill (wired to yoagent.backend) + subtle Clear + a circular send arrow.
   const src = fs.readFileSync('static/yolomux.js', 'utf8');
@@ -7264,10 +7335,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/\.info-list\s*\{[^}]*overflow:\s*auto/.test(css), 'YO!info list owns the scroll (overflow:auto, both axes)');
   const en = JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'));
   assert.equal(en['yoagent.chatPlaceholder'], 'Ask anything…', 'composer placeholder matches the mockup ("Ask anything…")');
-}
+});
 
-{
-  // DOIT.6 #25: file-search dedupe folds mirror + symlink copies, keeps different-content same-name.
+test('t@7321', () => {
+  // file-search dedupe folds mirror + symlink copies, keeps different-content same-name.
   const api = loadYolomux('', ['1']);
   const deduped = api.dedupeFileSearchResults([
     {path: '/a/notes/DIS-1842.md', realpath: '/a/notes/DIS-1842.md', size: 100},
@@ -7282,10 +7353,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     {path: '/y/a.md', realpath: '/y/a.md'},
   ]).map(file => file.path);
   assert.deepStrictEqual([...unknown], ['/x/a.md', '/y/a.md'], '#25: unknown-size same-name files are not collapsed');
-}
+});
 
-{
-  // DOIT.6 #129: the yoagent markdown normalizer tightens loose lists / collapses blank-line runs.
+test('t@7339', () => {
+  // the yoagent markdown normalizer tightens loose lists / collapses blank-line runs.
   const api = loadYolomux('', ['1']);
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.equal(api.yoagentTightMarkdown('- a\n\n- b\n\n- c'), '- a\n- b\n- c', '#129: blank lines between adjacent list items are stripped (tight list)');
@@ -7296,12 +7367,12 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/renderMarkdownPreviewInto\(body, yoagentTightMarkdown\(/.test(source), '#129: the chat assistant body is tightened before rendering');
   // yoagentInlineMarkdown folds in the tightening (heading downgrade + tight lists).
   assert.equal(api.yoagentInlineMarkdown('## H\n\n- a\n\n- b'), '**H**\n\n- a\n- b', '#129: inline-markdown downgrades headings AND tightens the list');
-  // DOIT.6 #128: a <p> inside an <li> carries no margin so loose lists render tight.
+  // a <p> inside an <li> carries no margin so loose lists render tight.
   assert.ok(/\.markdown-body li > p\s*\{[^}]*margin:\s*0/.test(fs.readFileSync('static/yolomux.css', 'utf8')), '#128: .markdown-body li > p has zero margin');
-}
+});
 
-{
-  // DOIT.6 #133: the markdown-preview relative-link path normalizer + the in-pane link handler.
+test('t@7355', () => {
+  // the markdown-preview relative-link path normalizer + the in-pane link handler.
   const api = loadYolomux('', ['1']);
   assert.equal(api.joinAndNormalize('/a/b/c', './x.md'), '/a/b/c/x.md', '#133: ./ resolves against the base dir');
   assert.equal(api.joinAndNormalize('/a/b/c', '../y/z.md'), '/a/b/y/z.md', '#133: ../ pops a segment');
@@ -7321,9 +7392,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/t\('preview\.openFailed'/.test(src), "#133: a failed open surfaces a toast");
   // The handler is wired ONLY to the file-editor preview (path provided), not to yoagent bodies.
   assert.ok(/renderMarkdownPreviewInto\(container, text, path\)/.test(src), '#133: the file-editor preview threads the owning path (basePath); yoagent bodies pass no path');
-}
+});
 
-{
+test('t@7378', () => {
   // #260: the Global color theme field renders plain RADIO buttons (replaced the macOS-style cards).
   const api = loadYolomux('', ['1']);
   api.setActiveLocaleForTest('en');
@@ -7342,9 +7413,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const themeCss = fs.readFileSync('static/yolomux.css', 'utf8');
   assert.ok(/\.preferences-radio-group\s*\{/.test(themeCss), '#260: the radio group has styling');
   assert.equal(/\.theme-card-system/.test(themeCss), false, '#260: the old theme-card CSS is gone');
-}
+});
 
-{
+test('t@7399', () => {
   // Preview font size is independent from the editor font size and defaults one px larger.
   const api = loadYolomux('', ['1']);
   api.setActiveLocaleForTest('en');
@@ -7366,10 +7437,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const settingsSource = fs.readFileSync('yolomux_lib/settings.py', 'utf8');
   assert.ok(settingsSource.includes('"preview_font_size": 14'), 'preview font size default is 14');
   assert.ok(settingsSource.includes('("appearance", "preview_font_size"): (6, 32)'), 'preview font size has server-side limits');
-}
+});
 
-{
-  // DOIT.8 Phase 1: the topbar language switcher + system-locale resolution.
+test('t@7423', () => {
+  // Phase 1: the topbar language switcher + system-locale resolution.
   const api = loadYolomux('', ['1']);
   // Explicit prefs resolve to themselves; 'system' (no navigator.language in the harness) falls back to en.
   assert.equal(api.resolveLocalePref('zh-Hant'), 'zh-Hant', 'Phase 1: an explicit locale pref resolves to itself');
@@ -7492,16 +7563,16 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     assert.ok(cat['pref.appearance.file_explorer_font_size.label'].includes('{name}'), `Phase 2: ${loc} preserves the {name} placeholder`);
     assert.ok(cat['yoagent.files'].includes('{count}') && cat['yoagent.files'].includes('{added}'), `Phase 2: ${loc} preserves count/added placeholders`);
     assert.notEqual(cat['menu.file'], 'File', `Phase 2: ${loc} actually translates (menu.file not English)`);
-    // DOIT.8 Phase 3: the new Intl-wrap + deterministic-framing keys ship in every locale.
+    // Phase 3: the new Intl-wrap + deterministic-framing keys ship in every locale.
     for (const k of ['yoagent.updated.wrap', 'det.noBackend', 'det.noActivity', 'det.openPending']) {
       assert.ok(typeof cat[k] === 'string' && cat[k].length, `Phase 3: ${loc} has ${k}`);
     }
     assert.ok(cat['yoagent.updated.wrap'].includes('{rel}'), `Phase 3: ${loc} preserves the {rel} placeholder`);
   }
-}
+});
 
-{
-  // DOIT.8 Phase 3: relative time renders via Intl.RelativeTimeFormat(activeLocale) (native phrasing).
+test('t@7555', () => {
+  // Phase 3: relative time renders via Intl.RelativeTimeFormat(activeLocale) (native phrasing).
   const api = loadYolomux('', ['1']);
   api.setActiveLocaleForTest('en');
   assert.equal(api.relativeTimeFormat(120), '2 minutes ago', 'Phase 3: en relative time is "2 minutes ago" via Intl');
@@ -7510,10 +7581,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const src = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(/new Intl\.RelativeTimeFormat\(i18nActiveLocale/.test(src), 'Phase 3: relativeTimeFormat uses Intl.RelativeTimeFormat with the active locale');
   assert.ok(/t\('yoagent\.updated\.wrap', \{rel: relativeTimeFormat\(seconds\)\}\)/.test(src), 'Phase 3: the activity "last updated" line wraps the Intl relative time');
-}
+});
 
-{
-  // DOIT.9: tab-move latency. The shape signature ignores tabs order / active item, so a reorder or
+test('t@7567', () => {
+  // tab-move latency. The shape signature ignores tabs order / active item, so a reorder or
   // activate is a "same shape" change that takes the cheap in-place branch (no grid/topbar teardown,
   // no server re-poll).
   const api = loadYolomux('', ['1', '2']);
@@ -7527,28 +7598,28 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
       clone[key].active = clone[key].tabs[0];
     }
   }
-  assert.equal(api.layoutShapeSignature(clone), sigA, '#DOIT.9: reorder/activate keeps the same shape signature');
+  assert.equal(api.layoutShapeSignature(clone), sigA, '#reorder/activate keeps the same shape signature');
   // A different tree TOPOLOGY (a split) yields a different signature -> full rebuild path.
   const split = {'__tree': {split: 'row', pct: 50, children: [{slot: 'slot1'}, {slot: 'slot2'}]}, slot1: {tabs: ['1'], active: '1'}, slot2: {tabs: ['2'], active: '2'}};
-  assert.notEqual(api.layoutShapeSignature(split), sigA, '#DOIT.9: a split changes the shape signature');
+  assert.notEqual(api.layoutShapeSignature(split), sigA, '#a split changes the shape signature');
 
   // S1: applyLayoutSlots no longer re-polls the server (refreshTranscripts removed from its body).
   const layoutSrc = fs.readFileSync('static/yolomux.js', 'utf8');
   const applyBody = layoutSrc.slice(layoutSrc.indexOf('function applyLayoutSlots'), layoutSrc.indexOf('function updateActiveSessionParam'));
-  assert.equal(/refreshTranscripts\(\);/.test(applyBody), false, '#DOIT.9 S1: applyLayoutSlots does not call refreshTranscripts() (no server re-poll on a local layout change)');
-  // S2/DOIT.52: applyLayoutSlots delegates the shape decision to the shared scheduler.
+  assert.equal(/refreshTranscripts\(\);/.test(applyBody), false, '#applyLayoutSlots does not call refreshTranscripts() (no server re-poll on a local layout change)');
+  // applyLayoutSlots delegates the shape decision to the shared scheduler.
   const schedulerBody = layoutSrc.slice(layoutSrc.indexOf('function performLayoutRender'), layoutSrc.indexOf('function updateActiveSessionParam'));
-  assert.ok(/requestLayoutRender\(\{[\s\S]*?prevShape[\s\S]*?nextShape: layoutShapeSignature\(layoutSlots\)/.test(applyBody), '#DOIT.52 R1: applyLayoutSlots sends prev/next shape to the shared layout scheduler');
-  assert.ok(/function requestLayoutRender[\s\S]*?pendingLayoutRender = mergePendingLayoutRender/.test(schedulerBody), '#DOIT.52 R1/R2: scheduler stores structured deferred render state during drag');
-  assert.ok(/layoutRenderCanUseCheap\(renderRequest\)[\s\S]*?syncActivePanelsInPlace\(\)/.test(schedulerBody), '#DOIT.9 S2/DOIT.52: same-shape changes take the in-place branch');
-  assert.ok(/renderSessionButtons\(\);\s*renderPanels\(previousActive/.test(schedulerBody), '#DOIT.9 S2/DOIT.52: shape changes still fall through to the full rebuild');
-  assert.ok(layoutSrc.includes('function syncActivePanelsInPlace'), '#DOIT.9 S2: the in-place panel swap exists');
+  assert.ok(/requestLayoutRender\(\{[\s\S]*?prevShape[\s\S]*?nextShape: layoutShapeSignature\(layoutSlots\)/.test(applyBody), '#applyLayoutSlots sends prev/next shape to the shared layout scheduler');
+  assert.ok(/function requestLayoutRender[\s\S]*?pendingLayoutRender = mergePendingLayoutRender/.test(schedulerBody), '#scheduler stores structured deferred render state during drag');
+  assert.ok(/layoutRenderCanUseCheap\(renderRequest\)[\s\S]*?syncActivePanelsInPlace\(\)/.test(schedulerBody), '#same-shape changes take the in-place branch');
+  assert.ok(/renderSessionButtons\(\);\s*renderPanels\(previousActive/.test(schedulerBody), '#shape changes still fall through to the full rebuild');
+  assert.ok(layoutSrc.includes('function syncActivePanelsInPlace'), '#the in-place panel swap exists');
   // fix 6: the markdown preview render is guarded by a path+content signature.
-  assert.ok(/container\._previewPath !== path \|\| container\._previewText !== text/.test(layoutSrc), '#DOIT.9 fix 6: renderEditorPreviewPane skips re-rendering unchanged markdown');
-}
+  assert.ok(/container\._previewPath !== path \|\| container\._previewText !== text/.test(layoutSrc), '#fix 6: renderEditorPreviewPane skips re-rendering unchanged markdown');
+});
 
-{
-  // DOIT.8 Phase 0: i18n runtime — t()/tPlural() fallback + interpolation, active-over-en, pseudo.
+test('t@7602', () => {
+  // Phase 0: i18n runtime — t()/tPlural() fallback + interpolation, active-over-en, pseudo.
   const api = loadYolomux('', ['1']);
   api.i18nSetCatalogForTest('en', {greet: 'Hi {name}', plain: 'Plain'});
   api.setActiveLocaleForTest('en');
@@ -7563,10 +7634,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   api.setActiveLocaleForTest('zz');
   assert.equal(api.t('x'), 'Zzz', 'active locale wins over the en fallback');
   assert.equal(api.t('y'), 'y', 'missing-in-active falls through en to the key');
-}
+});
 
-{
-  // DOIT.8 Phase 0: the Preferences General section + section titles render through t(); under the
+test('t@7620', () => {
+  // Phase 0: the Preferences General section + section titles render through t(); under the
   // en-XA pseudo-locale every extracted label is accented/padded, with no plain-English leakage.
   const api = loadYolomux('', ['1']);
   const enXA = JSON.parse(fs.readFileSync('static/locales/en-XA.json', 'utf8'));
@@ -7577,7 +7648,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(html.includes(enXA['pref.general.auto_focus.label']), 'pseudo-locale General field label renders');
   assert.ok(html.includes(enXA['pref.general.language.help']), 'pseudo-locale field help renders');
   assert.equal(html.includes('Auto-focus active pane'), false, 'no plain-English General field label leaks under the pseudo-locale');
-  // DOIT.8 Phase 0 (extraction complete): every preference section's fields are i18n-keyed, so the
+  // Phase 0 (extraction complete): every preference section's fields are i18n-keyed, so the
   // pseudo-locale accents them and NO plain-English label/help from any section leaks through.
   for (const key of [
     'pref.appearance.theme.label', 'pref.appearance.terminal_theme.help',
@@ -7597,10 +7668,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   ]) {
     assert.equal(html.includes(englishLeak), false, `no plain-English "${englishLeak}" leaks under the pseudo-locale`);
   }
-}
+});
 
-{
-  // DOIT.8 "then Chinese": zh-Hant + zh-Hans catalogs localize the WHOLE Preferences panel, and the
+test('t@7654', () => {
+  // "then Chinese": zh-Hant + zh-Hans catalogs localize the WHOLE Preferences panel, and the
   // language select offers both endonym-labeled (Traditional before Simplified).
   const api = loadYolomux('', ['1']);
   // The select offers the two Chinese options in their own script, Traditional listed before Simplified.
@@ -7657,10 +7728,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
       assert.equal(zhHtml.includes(englishLeak), false, `${locale}: no plain-English "${englishLeak}" leaks`);
     }
   }
-}
+});
 
-{
-  // DOIT.6 #51: "Language" is the FIRST General preference and its label is "Language" (not "UI language").
+test('t@7714', () => {
+  // "Language" is the FIRST General preference and its label is "Language" (not "UI language").
   const api = loadYolomux('', ['1']);
   const enCatalog = JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'));
   assert.equal(enCatalog['pref.general.language.label'], 'Language', '#51: the language label reads "Language"');
@@ -7668,10 +7739,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const generalHtml = api.preferencesPanelHtmlForTest('');
   assert.ok(generalHtml.includes('data-setting-path="general.language"'), '#51: the language field is present');
   assert.ok(generalHtml.indexOf('data-setting-path="general.language"') < generalHtml.indexOf('data-setting-path="general.auto_focus"'), '#51: the language field is the first General row (before auto-focus)');
-}
+});
 
-{
-  // DOIT.48: startup helper tips are a persisted General preference, rotate serially through
+test('t@7725', () => {
+  // startup helper tips are a persisted General preference, rotate serially through
   // localStorage, use the shared toast path, and do not render for readonly users.
   const api = loadYolomux('', ['1']);
   api.setActiveLocaleForTest('en');
@@ -7712,9 +7783,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const settingsSrc = fs.readFileSync('yolomux_lib/settings.py', 'utf8');
   assert.ok(settingsSrc.includes('"startup_tips": True'), 'Startup Tips setting defaults on server-side');
   assert.ok(settingsSrc.includes('"startup_helpers" in incoming'), 'legacy startup_helpers configs migrate to startup_tips');
-}
+});
 
-{
+test('t@7769', () => {
   // User screenshot 20260608-004: pane tabs should sit tight to the pane border and to each other.
   const tokenCss = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8');
   const css = fs.readFileSync('static_src/css/yolomux/40_layout_panes_tabs.css', 'utf8');
@@ -7790,12 +7861,12 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/function fileDropIntentAllowsPayload\(payload, intent\)[\s\S]*dropIntentAllowsSession\(item, intent, \{allowCandidate: true\}\)/.test(layoutActionSrc), 'file drag previews use the same pane/Finder/min-size validator as tab drags');
   assert.ok(/function itemCanSplitSinglePurposePane\(item, intent\)[\s\S]*zone !== 'bottom'[\s\S]*return false[\s\S]*dropIntentHasRoomForItem\(item, intent\)/.test(layoutActionSrc), 'Finder/Differ target panes accept only bottom splits and only when the resulting pane can fit');
   assert.ok(/function dropIntentHasRoomForItem\(item, intent\)[\s\S]*minWidthForLayoutItem\(targetItem\)[\s\S]*targetMinWidth \+ itemMinWidth[\s\S]*targetMinHeight \+ itemMinHeight/.test(layoutActionSrc), 'pane drop previews are suppressed when the target is too small for both resulting panes');
-}
+});
 
-{
+test('t@7847', () => {
   // Pop-out previews must derive readable light-editor text inside their own document; copied inline
   // aliases like --text/--editor-scheme-fg override the pop-out's editor-theme-light remap.
-  const source = fs.readFileSync('static_src/js/yolomux/90_changes_editor.js', 'utf8');
+  const source = (fs.readFileSync('static_src/js/yolomux/90_changes_editor.js', 'utf8') + fs.readFileSync('static_src/js/yolomux/95_codemirror_editor.js', 'utf8'));
   const start = source.indexOf('function previewPopoutVariableStyle()');
   const end = source.indexOf('function previewPopoutToolbarHtml()');
   assert.ok(start >= 0 && end > start, 'previewPopoutVariableStyle exists');
@@ -7839,13 +7910,13 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/function closeFilePreviewPopout\(path\)[\s\S]*filePreviewPopouts\.delete\(path\)[\s\S]*previewWindow\.close\?\.\(\)/.test(source), 'preview pop-out close removes the registry entry and closes the window');
   assert.ok(/function setFileEditorViewMode\(path, mode, item = null\)[\s\S]*mode === 'preview' \|\| mode === 'split'[\s\S]*closeFilePreviewPopout\(path\)/.test(fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8')), 'switching to in-editor Preview or Split closes any open pop-out preview for that file');
   assert.ok(fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8').includes("if (typeof refreshFilePreviewPopouts === 'function') refreshFilePreviewPopouts();"), 'settings refresh syncs open preview pop-outs');
-  assert.ok(/function replaceOpenFileStateFromDisk[\s\S]*renderOpenFilePath\(path\);[\s\S]*updateFilePreviewPopout\(path, loaded\.state\.content \|\| ''\)/.test(fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8')), 'external disk reload syncs open preview pop-outs');
+  assert.ok(/function replaceOpenFileStateFromDisk[\s\S]*renderOpenFilePath\(path\);[\s\S]*updateFilePreviewPopout\(path, loaded\.state\.content \|\| ''\)/.test((fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8') + fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8'))), 'external disk reload syncs open preview pop-outs');
   assert.ok(source.includes('position: static !important;'), 'preview pop-out resets the in-pane absolute preview positioning');
   assert.ok(source.includes('display: block !important;') && source.includes('grid-template-rows: none !important;'), 'preview pop-out resets the app body grid layout');
   assert.ok(source.includes('width: 100% !important;') && source.includes('left: auto !important;'), 'preview pop-out resets split-preview geometry that would clip content to the right half');
-}
+});
 
-{
+test('t@7900', () => {
   // Preferences order is grouped by how the settings are used: general startup defaults, visual appearance,
   // terminal/editor behavior, notifications, file handling, polling/performance, then agent controls.
   const api = loadYolomux('', ['1']);
@@ -7911,8 +7982,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/data-setting-path="appearance\.terminal_font_size"[\s\S]*data-setting-path="appearance\.editor_font_size"[\s\S]*data-setting-path="appearance\.preview_font_size"[\s\S]*data-setting-path="terminal_editor\.scrollback"/.test(terminalEditorHtml), 'Terminal / Editor groups Terminal, Editor, and Preview font sizes together before scrollback');
   assert.equal(sectionHtml(api.t('pref.section.general')).includes('data-setting-path="general.default_layout"'), false, 'Default layout no longer lives in General');
   assert.equal(sectionHtml(api.t('pref.section.general')).includes('data-setting-path="general.reload_on_update"'), false, 'Notify on server update no longer lives in General');
-  // DOIT.29: the GitHub section carries the watched-PRs list field.
-  assert.ok(html.includes('data-setting-path="github.watched_prs"'), 'DOIT.29: the GitHub section has the watched_prs list field');
+  // the GitHub section carries the watched-PRs list field.
+  assert.ok(html.includes('data-setting-path="github.watched_prs"'), 'the GitHub section has the watched_prs list field');
   assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['pref.appearance.pane_ring_opacity.help'], 'Percent, 5–100. This is the ring drawn over the ACTIVE content edge; lower values make the green/red pane ring fainter.', 'Pane ring opacity help describes the ACTIVE content-edge ring');
   const settingsRuntimeSource = fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8');
   assert.ok(settingsRuntimeSource.includes("Math.max(5, Math.min(100, numberSetting('appearance.pane_ring_opacity', 75)))"), 'Pane ring opacity runtime clamp allows 5%');
@@ -7923,16 +7994,16 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(fs.readFileSync('yolomux_lib/settings.py', 'utf8').includes('("appearance", "pane_ring_opacity"): (5, 100)'), 'Pane ring opacity server settings clamp allows 5%');
   assert.equal(fs.readFileSync('yolomux_lib/settings.py', 'utf8').includes('inactive_pane_gradient'), false, 'Inactive pane gradient is removed from server settings');
   assert.ok(fs.readFileSync('yolomux_lib/settings.py', 'utf8').includes('("appearance", "inactive_pane_opacity"): (0, 100)'), 'Inactive pane opacity server settings clamp is 0-100');
-}
+});
 
-{
-  // DOIT.6 #122: the block cursor fills the full monospace cell (width: 1ch), not a fat line.
+test('t@7980', () => {
+  // the block cursor fills the full monospace cell (width: 1ch), not a fat line.
   const css = fs.readFileSync('static/yolomux.css', 'utf8');
   assert.ok(/body\.editor-cursor-block[^{]*\.cm-cursor[\s\S]*?\{[\s\S]*?width: 1ch !important;/.test(css), '#122: the block editor cursor is one full character cell wide (1ch)');
-}
+});
 
-{
-  // DOIT.6 #115: the Preferences global-reset UI (title, warning, both buttons, per-row Reset) is localized.
+test('t@7986', () => {
+  // the Preferences global-reset UI (title, warning, both buttons, per-row Reset) is localized.
   const api = loadYolomux('', ['1']);
   const zhHant = JSON.parse(fs.readFileSync('static/locales/zh-Hant.json', 'utf8'));
   api.i18nSetCatalogForTest('zh-Hant', zhHant);
@@ -7951,10 +8022,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   for (const key of ['title', 'confirmTitle', 'warning', 'confirmWarning', 'continue', 'cancel', 'all', 'row', 'aria']) {
     assert.ok(src.includes(`t('pref.reset.${key}'`), `#115: reset UI uses t('pref.reset.${key}')`);
   }
-}
+});
 
-{
-  // DOIT.6 #121: the menu bar, Modified-files panel, diff-ref, and comparison localize in a non-English
+test('t@8008', () => {
+  // the menu bar, Modified-files panel, diff-ref, and comparison localize in a non-English
   // locale and leak no bare English; source guards confirm the builders route through t().
   const api = loadYolomux('', ['1']);
   const zhHant = JSON.parse(fs.readFileSync('static/locales/zh-Hant.json', 'utf8'));
@@ -7993,10 +8064,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   // The pseudo-locale transforms a representative menu key (the completeness signal).
   const enXA = JSON.parse(fs.readFileSync('static/locales/en-XA.json', 'utf8'));
   assert.ok(/[⟦⟧]/.test(enXA['menu.file.openFile']) && !/^Open file$/.test(enXA['menu.file.openFile']), '#121: menu keys are pseudo-localized in en-XA');
-}
+});
 
-{
-  // DOIT.6 #7: the default (files-mode) search bar blends matching commands/tabs into the results.
+test('t@8050', () => {
+  // the default (files-mode) search bar blends matching commands/tabs into the results.
   const api = loadYolomux('', ['1']);
   const prefsLabel = api.itemLabel(api.prefsItemId);
   api.setFileQuickOpenCandidatesForTest('/repo/app', [
@@ -8013,11 +8084,11 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   // `@` stays reserved for symbols (no command blend).
   api.setCommandPaletteStateForTest('files', '@thing');
   assert.ok(!api.commandPaletteItems().some(item => item.group === 'Tabs'), '#7: @ stays reserved for symbols');
-}
+});
 
 // macOS Finder list-view keyboard PARITY. The key->intent map is a PURE function, unit-tested here so the
 // full set of bindings is verified as behavior (not just source shape). Works for Finder AND Differ.
-{
+test('t@8072', () => {
   const api = loadYolomux();
   const I = (key, mods = {}) => api.fileExplorerKeyIntent(key, {shift: !!mods.shift, mod: !!mods.mod, alt: !!mods.alt});
   // move + extend
@@ -8052,10 +8123,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(I('Tab'), null);
   assert.equal(I('Escape'), null);
   assert.equal(I('x', {mod: true}), null, 'Cmd-X is not a Finder nav key here');
-}
+});
 
 // Source guards: the dispatcher wires each intent to the right live-tree action.
-{
+test('t@8110', () => {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(source.includes('function handleFileExplorerArrowNav('), 'arrow-nav handler exists');
   assert.ok(source.includes('function fileExplorerKeyIntent('), 'pure key->intent map exists');
@@ -8077,11 +8148,11 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes('function fileExplorerTypeaheadSelect('), 'type-ahead selection exists');
   assert.ok(source.includes('fileExplorerSelectionLead = fullPath'), 'click/range selection seeds the same lead');
   assert.ok(source.includes('fileTreeRepoPopoverCursor.x + 14'), 'repo-row hover popover anchors to the RIGHT of the cursor');
-}
+});
 
-// S2 (DOIT.51) BEHAVIORAL PROOF: a file that is an open tab appears ONCE in the on-type palette — as its
+// S2 BEHAVIORAL PROOF: a file that is an open tab appears ONCE in the on-type palette — as its
 // Tabs row — with its Recent/Files duplicate suppressed. Without the dedup it would appear twice.
-{
+test('t@8136', () => {
   const path = '/repo/app/notes.py';
   const enc = encodeURIComponent('file:' + path);   // file%3A%2Frepo%2Fapp%2Fnotes.py
   // open the file as a real tab (slot3) via the layout URL — same shape as the passing test above
@@ -8098,10 +8169,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const tabRows = items.filter(it => it.category === 'action' && api.fileItemPath(it.targetItem || '') === path);
   assert.equal(fileGroupRows.length, 0, 'S2: the open file is NOT duplicated as a Recent/Files row');
   assert.ok(tabRows.length >= 1, 'S2: the open file still appears as its Tabs row');
-}
+});
 
-{
-  // DOIT.6 #8-#13: renames, toggles, theme propagation, README preview.
+test('t@8155', () => {
+  // #8-#13: renames, toggles, theme propagation, README preview.
   const api = loadYolomux('', ['1']);
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   const css = fs.readFileSync('static/yolomux.css', 'utf8');
@@ -8120,7 +8191,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(source.includes('patch.appearance.terminal_theme = terminalThemeSettingForGlobalMode(next)'), false, '#261: the View theme toggle no longer pins the terminal palette (terminal follows the app)');
   // #10: a global-theme change re-themes live editors via the compartment swap.
   assert.ok(/previousEditorSchemeId !== activeEditorScheme\(\)\.id \|\| previousCursorColor !== fileEditorCursorColor\)\s*\{[^}]*refreshOpenEditorThemePanels\(\)/.test(source), '#10: theme or cursor-color change re-themes open editors');
-  // #12: Preferences field renamed. (DOIT.8 Phase 0: the label is now i18n-keyed; en.json holds the text.)
+  // #12: Preferences field renamed. (Phase 0: the label is now i18n-keyed; en.json holds the text.)
   assert.ok(source.includes("label: t('pref.appearance.theme.label')"), '#12: the global theme field is i18n-keyed');
   assert.ok(source.includes("initialSetting('appearance.date_time_hour_cycle', '24')"), 'date/time clock defaults to 24-hour in the client');
   assert.ok(source.includes("label: t('pref.appearance.date_time_hour_cycle.label')"), 'date/time clock Preferences field is i18n-keyed');
@@ -8129,37 +8200,37 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(enThemeCatalog['pref.appearance.theme.label'] === 'Global app theme', false, '#12: no stale "Global app theme" label remains');
   // #13: Help -> README opens rendered markdown preview.
   assert.ok(source.includes("openFileInEditor(path, 'README.md', {viewMode: 'preview'})"), '#13: README opens in preview mode');
-}
+});
 
-{
-  // DOIT.6 #6: every pane keeps its active tab clearly green (no dimming); focused pane = brighter
+test('t@8186', () => {
+  // every pane keeps its active tab clearly green (no dimming); focused pane = brighter
   // lime + ring. Source-guards on the shared tokens + the un-dimmed unfocused-active rule.
   const css = fs.readFileSync('static/yolomux.css', 'utf8');
   assert.ok(/--pane-tab-unfocused-active-bg:\s*var\(--pane-tab-active-bg\)/.test(css), '#11: unfocused panes show a clearly-visible green active tab (aliased to the focused full-green token; images 003/004)');
   assert.ok(/\.panel:not\(\.active-pane\):not\(\.file-explorer-panel\) \.pane-tab\.active\s*\{\s*opacity:\s*1/.test(css), '#11: unfocused active tabs are no longer dimmed');
   assert.ok(/--active-accent-bright:\s*#86d600/.test(css), '#11: the focused pane keeps the brighter lime active tab as its extra cue (via active-accent)');
-}
+});
 
-{
-  // DOIT.6 #30: re-renders + search-focus are deferred/suppressed mid-drag so the dragged DOM node
+test('t@8195', () => {
+  // re-renders + search-focus are deferred/suppressed mid-drag so the dragged DOM node
   // is not replaced (which aborts the native HTML5 drag); + 3-tab placement in a consistent index space.
   const api = loadYolomux('', ['1', '2', '3']);
   api.setDragSessionForTest('2');
   api.renderPaneTabStrips();
   assert.equal(api.pendingTabStripRenderForTest(), true, '#30: tab-strip re-render is DEFERRED during a drag (node not replaced)');
   assert.equal(api.focusPreferencesSearch(), false, '#30: search focus is suppressed during a drag');
-  // DOIT.6 #114 / DOIT.52: a full renderPanels() pools every panel + clears the grid, which detaches the
+  // / a full renderPanels() pools every panel + clears the grid, which detaches the
   // dragged node and aborts the native drag. It must defer to a pendingLayoutRender request mid-drag, NOT
   // touch the grid. (If the guard were missing this call would throw on the absent grid element.)
   api.setPendingPanelsRenderForTest(false);
   api.renderPanels();
   assert.equal(api.pendingPanelsRenderForTest(), true, '#114: full panel re-render is DEFERRED during a drag (grid not wiped)');
-  assert.equal(api.pendingLayoutRenderForTest().forceFull, true, '#DOIT.52 R2: renderPanels stores an explicit forced-full render request');
+  assert.equal(api.pendingLayoutRenderForTest().forceFull, true, '#renderPanels stores an explicit forced-full render request');
   api.setDragSessionForTest(null);
   const strip3 = tabStrip([tabElement('A', 100, 100), tabElement('B', 203, 100), tabElement('C', 306, 100)]);
   assert.equal(api.paneTabDropPlacement(strip3, {clientX: 330, clientY: 8}, 'A').index, 2, '#30: 3-tab L->R drop on the far tab lands after it');
   assert.equal(api.paneTabDropPlacement(strip3, {clientX: 120, clientY: 8}, 'C').index, 0, '#30: 3-tab R->L drop on the first tab lands before it');
-  // DOIT.6 #32/#33 source guards.
+  // #32/#33 source guards.
   const dragSrc = fs.readFileSync('static/yolomux.js', 'utf8');
   const dragCss = fs.readFileSync('static/yolomux.css', 'utf8');
   assert.ok(dragSrc.includes('minimumContrastRatio: terminalMinimumContrastRatio()'), '#32: terminal creation sets minimumContrastRatio');
@@ -8171,21 +8242,21 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/\.topbar:hover,\s*\.topbar:focus-within\s*\{[^}]*background:\s*var\(--pane-tab-strip-bg\)/.test(dragCss), 'topbar bg matches the green tab strip on hover/focus');
   assert.ok(/body\.theme-light \.topbar\s*\{[^}]*background:\s*var\(--panel2\)/.test(dragCss), 'light-mode topbar is neutral at rest');
   assert.ok(/body\.theme-light \.topbar:hover,\s*body\.theme-light \.topbar:focus-within\s*\{[^}]*background:\s*var\(--pane-tab-strip-bg\)/.test(dragCss), 'light-mode topbar uses the green tab-strip bg on hover/focus');
-  // DOIT.6 #114 / DOIT.52: the dragSession guard MUST precede movePanelsToPool()/grid.innerHTML in
+  // / the dragSession guard MUST precede movePanelsToPool()/grid.innerHTML in
   // renderPanels, and endSessionDrag MUST flush via the scheduler instead of direct renderPanels().
   assert.ok(/function renderPanels\([^)]*\)\s*\{[\s\S]{0,700}?if \(dragSession != null\) \{[\s\S]*?requestLayoutRender\(\{[\s\S]*?forceFull: true[\s\S]*?return;[\s\S]{0,80}movePanelsToPool\(\)/.test(dragSrc), '#114/#52: renderPanels defers a structured forced-full request before pooling panels / clearing the grid');
   const endDragStart = dragSrc.indexOf('function endSessionDrag');
   const endDragBody = dragSrc.slice(endDragStart, endDragStart + 1200);
-  assert.ok(/dragSession = null;[\s\S]*?flushPendingLayoutRender\(\);/.test(endDragBody), '#DOIT.52 R1/R2: endSessionDrag flushes through the shared layout scheduler after clearing dragSession');
-  assert.equal(/pendingPanelsRender/.test(endDragBody), false, '#DOIT.52 R2: endSessionDrag no longer uses the old boolean pendingPanelsRender flag');
-}
+  assert.ok(/dragSession = null;[\s\S]*?flushPendingLayoutRender\(\);/.test(endDragBody), '#endSessionDrag flushes through the shared layout scheduler after clearing dragSession');
+  assert.equal(/pendingPanelsRender/.test(endDragBody), false, '#endSessionDrag no longer uses the old boolean pendingPanelsRender flag');
+});
 
-{
-  // DOIT.6 #5: same-strip drag-reorder works in BOTH directions. Dropping a tab anywhere onto a
+test('t@8235', () => {
+  // same-strip drag-reorder works in BOTH directions. Dropping a tab anywhere onto a
   // neighbor moves it past that neighbor (no center-overshoot required for the left->right case).
   const api = loadYolomux('', ['6']);
   const strip = tabStrip([tabElement('6', 100, 100), tabElement('P', 203, 100)]);
-  // DOIT.6 #26 (re-open of #12): a drop ANYWHERE on the neighbor reorders — BOTH halves, BOTH ways.
+  // (re-open of #12): a drop ANYWHERE on the neighbor reorders — BOTH halves, BOTH ways.
   // P spans 203-303 (center 253); L spans 100-200 (center 150).
   assert.equal(api.paneTabDropPlacement(strip, {clientX: 225, clientY: 8}, '6').index, 1, 'L dropped on R LEFT half reorders RIGHT (was the no-op pre-fix)');
   assert.equal(api.paneTabDropPlacement(strip, {clientX: 290, clientY: 8}, '6').index, 1, 'L dropped on R RIGHT half reorders RIGHT');
@@ -8193,9 +8264,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.paneTabDropPlacement(strip, {clientX: 190, clientY: 8}, 'P').index, 0, 'R dropped on L RIGHT half reorders LEFT');
   // Cross-pane drops keep the centered insert threshold (unchanged behavior).
   assert.equal(api.paneTabDropPlacement(strip, {clientX: 230, clientY: 8}, '9').index, 1, 'cross-pane drop keeps the centered threshold');
-}
+});
 
-{
+test('t@8250', () => {
   const api = loadYolomux();
   const strip = tabStrip([
     tabElement('1', 100, 100),
@@ -8206,9 +8277,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.paneTabDropPlacement(strip, {clientX: 290, clientY: 8}, '2').noop, true, 'dragging 2 into the 2|3 adjacent gap is a no-op');
   assert.equal(api.paneTabDropPlacement(strip, {clientX: 120, clientY: 8}, '2').noop, false, 'dragging 2 before tab 1 still reorders');
   assert.equal(api.paneTabDropPlacement(strip, {clientX: 330, clientY: 8}, '2').noop, false, 'dragging 2 after tab 3 still reorders');
-}
+});
 
-{
+test('t@8263', () => {
   const api = loadYolomux();
   const strip = new TestElement('dock-tabs');
   const dockTab = item => {
@@ -8245,9 +8316,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     targetSlot: 'left',
   }, 'Dockview manually reorders an edge tab dragged onto its adjacent neighbor');
   api.setPinnedTabsForTest([]);
-}
+});
 
-{
+test('t@8302', () => {
   const api = loadYolomux();
   const strip = tabStrip([
     tabElement('1', 100, 100),
@@ -8277,9 +8348,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(strip.style.getPropertyValue('--tab-drop-x'), '');
   assert.equal(strip.style.getPropertyValue('--tab-drop-y'), '');
   assert.equal(strip.style.getPropertyValue('--tab-drop-height'), '');
-}
+});
 
-{
+test('t@8334', () => {
   const api = loadYolomux();
   const container = new TestElement('dockview-actions');
   const button = new TestElement('window-next', 'button');
@@ -8290,9 +8361,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   container.appendChild(button);
   assert.equal(api.windowStepButtonFromEvent({currentTarget: button, target: glyph}), button, 'legacy direct window-step clicks resolve the button currentTarget');
   assert.equal(api.windowStepButtonFromEvent({currentTarget: container, target: glyph}), button, 'Dockview delegated window-step clicks resolve the closest data-window-dir button');
-}
+});
 
-{
+test('t@8347', () => {
   const api = loadYolomux();
   const slot = new TestElement('slot-left');
   slot.classList.add('drop-slot');
@@ -8310,9 +8381,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(slot.classList.contains('drop-preview'), 'file dragover shows split preview');
   assert.ok(slot.classList.contains('drop-preview-left'), 'file dragover uses the pointer-aware split zone');
   assert.equal(slot.dataset.dropLabel, 'left');
-}
+});
 
-{
+test('t@8367', () => {
   const api = loadYolomux();
   const slot = new TestElement('slot-left');
   slot.classList.add('drop-slot');
@@ -8335,9 +8406,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(event.dataTransfer.dropEffect, 'copy');
   assert.equal(terminal.classList.contains('path-drag-over'), false, 'terminal path insertion affordance is not shown for file-open drags');
   assert.ok(slot.classList.contains('drop-preview-left'), 'terminal path target also shows the pane split preview');
-}
+});
 
-{
+test('t@8392', () => {
   const api = loadYolomux();
   const slot = new TestElement('slot-left');
   slot.classList.add('drop-slot');
@@ -8356,9 +8427,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(event.dataTransfer.dropEffect, 'copy');
   assert.ok(terminal.classList.contains('path-drag-over'), 'terminal still shows path insertion affordance for directories');
   assert.ok(slot.classList.contains('drop-preview-left'), 'directory path target still shows the pane split preview');
-}
+});
 
-{
+test('t@8413', () => {
   const api = loadYolomux();
   const row = new TestElement('pic-row');
   row.rect = {left: 10, top: 20, right: 250, bottom: 40, width: 240, height: 20};
@@ -8394,15 +8465,15 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   api.stopCustomDragPreview();
 
   assert.equal(api.customDragPreviewForTest(), null, 'file drag preview is removed on cleanup');
-}
+});
 
-{
+test('t@8451', () => {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.equal(source.includes('installFilePathDropTarget(session, panel);'), false, 'panel-level path drop target must not swallow pane split previews');
   assert.ok(source.includes('installTerminalFileDrop(session, container);'), 'terminal surface still accepts path insertion drops');
-}
+});
 
-{
+test('t@8457', () => {
   const api = loadYolomux();
   const source = tabElement('4', 100, 140);
   source.rect = {left: 100, right: 240, top: 20, bottom: 47, width: 140, height: 27};
@@ -8428,9 +8499,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(event.dataTransfer.dragImage.x, 25, '#47/C12: drag-image grab offset X comes from event.offsetX');
   assert.equal(event.dataTransfer.dragImage.y, 11, '#47/C12: drag-image grab offset Y comes from event.offsetY');
   assert.equal(api.customDragPreviewForTest(), null, '#47: tab drags install no JS clone-follow preview');
-}
+});
 
-{
+test('t@8485', () => {
   const api = loadYolomux('', ['1', '2', '3']);
   const slots = api.emptyLayoutSlots();
   slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 50);
@@ -8498,9 +8569,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.paneSwapAllowed('left', 'right'), false);
   api.endSessionDrag(event);
   assert.equal(api.customDragPreviewForTest(), null, 'pane drag preview is removed on cleanup');
-}
+});
 
-{
+test('t@8555', () => {
   const api = loadYolomux();
   const strip = tabStrip([
     tabElement('1', 100, 100),
@@ -8533,28 +8604,28 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(strip.style.getPropertyValue('--tab-drop-x'), '103px');
   assert.equal(strip.style.getPropertyValue('--tab-drop-y'), '0px');
   assert.equal(strip.style.getPropertyValue('--tab-drop-height'), '27px');
-}
+});
 
-// DOIT.21: editor back/forward navigation history (Popular IDE-style file stack). Tests the record/dedupe/
+// editor back/forward navigation history (Popular IDE-style file stack). Tests the record/dedupe/
 // truncate logic of recordEditorNav (the async back/forward re-open goes through the live open path).
-{
+test('t@8592', () => {
   const api = loadYolomux();
   api.editorNav.stack = [];
   api.editorNav.index = -1;
   api.recordEditorNav('/repo/a.txt');
   api.recordEditorNav('/repo/b.txt');
-  assert.deepEqual(api.editorNav.stack, ['/repo/a.txt', '/repo/b.txt'], 'DOIT.21: opens push onto the nav stack');
-  assert.equal(api.editorNav.index, 1, 'DOIT.21: index points at the latest open');
+  assert.deepEqual(api.editorNav.stack, ['/repo/a.txt', '/repo/b.txt'], 'opens push onto the nav stack');
+  assert.equal(api.editorNav.index, 1, 'index points at the latest open');
   api.recordEditorNav('/repo/b.txt');
-  assert.deepEqual(api.editorNav.stack, ['/repo/a.txt', '/repo/b.txt'], 'DOIT.21: a consecutive same-file open does not duplicate');
+  assert.deepEqual(api.editorNav.stack, ['/repo/a.txt', '/repo/b.txt'], 'a consecutive same-file open does not duplicate');
   assert.equal(api.editorNav.index, 1);
   api.editorNav.index = 0; // simulate Back to A
   api.recordEditorNav('/repo/c.txt');
-  assert.deepEqual(api.editorNav.stack, ['/repo/a.txt', '/repo/c.txt'], 'DOIT.21: a new open after Back drops the forward tail');
+  assert.deepEqual(api.editorNav.stack, ['/repo/a.txt', '/repo/c.txt'], 'a new open after Back drops the forward tail');
   assert.equal(api.editorNav.index, 1);
   api.editorNav.navigating = true; // a back/forward re-open must NOT record a new entry
   api.recordEditorNav('/repo/d.txt');
-  assert.deepEqual(api.editorNav.stack, ['/repo/a.txt', '/repo/c.txt'], 'DOIT.21: recording is suppressed while navigating');
+  assert.deepEqual(api.editorNav.stack, ['/repo/a.txt', '/repo/c.txt'], 'recording is suppressed while navigating');
   api.editorNav.navigating = false;
   // The stack holds arbitrary tab ITEM ids now (not only file paths), so any tab kind is recorded.
   api.recordEditorNav('5');                 // a terminal session tab
@@ -8568,18 +8639,18 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   api.recordEditorNav('B');
   assert.deepEqual(api.editorNav.stack, ['A', 'B'], 'A->B->A->B collapses to the useful two-pane history');
   assert.equal(api.editorNav.index, 1, 'the collapsed ping-pong stack still points at the current pane');
-  // S3 (DOIT.51): the stack trims to NAV_STACK_LIMIT (50) oldest-first so long sessions stay bounded.
+  // S3: the stack trims to NAV_STACK_LIMIT (50) oldest-first so long sessions stay bounded.
   api.editorNav.stack = [];
   api.editorNav.index = -1;
   for (let i = 0; i < 55; i++) api.recordEditorNav(`/repo/f${i}.txt`);
   assert.equal(api.editorNav.stack.length, 50, 'S3: nav stack is capped at NAV_STACK_LIMIT (50)');
   assert.equal(api.editorNav.stack[0], '/repo/f5.txt', 'S3: the oldest entries are dropped when the cap is exceeded');
   assert.equal(api.editorNav.index, 49, 'S3: index points at the latest after trimming');
-}
+});
 
 // A user click/type focus transition records the pane being left and the pane being entered, so Back
 // becomes active even when the previous pane was only focused, not already present in the nav stack.
-{
+test('t@8634', () => {
   const api = loadYolomux();
   const back = api.testElementForId('topbarNavBack');
   api.editorNav.stack = [];
@@ -8590,10 +8661,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.deepEqual(api.editorNav.stack, ['1', '2'], 'user focus transition records previous pane then target pane');
   assert.equal(api.editorNav.index, 1, 'user focus transition points history at the target pane');
   assert.equal(back.disabled, false, 'Back is active after clicking/typing into another pane');
-}
+});
 
 // Tab history is bounded — the oldest entries drop past the cap so it can't grow without limit.
-{
+test('t@8648', () => {
   const api = loadYolomux();
   api.editorNav.stack = [];
   api.editorNav.index = -1;
@@ -8602,31 +8673,31 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.editorNav.stack[0], 'tab-30', 'the oldest entries past the cap are dropped');
   assert.equal(api.editorNav.stack[api.editorNav.stack.length - 1], 'tab-79', 'the newest entry is retained');
   assert.equal(api.editorNav.index, 49, 'the index tracks the capped stack tail');
-}
+});
 
-// DOIT.22: the quick-open palette collapses a file's editor-tab + preview-tab into ONE row with
+// the quick-open palette collapses a file's editor-tab + preview-tab into ONE row with
 // edit/preview view chips (it used to emit two identical rows — same name + path).
-{
+test('t@8661', () => {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
-  assert.ok(/const fileGroups = new Map\(\);[\s\S]{0,400}?fileItemPath\(item\)/.test(source), 'DOIT.22: the palette groups file tabs by path (fileItemPath)');
-  assert.ok(source.includes('tabRow(editorItem, {key: `file:${path}`, viewModes})'), 'DOIT.22: editor+preview of one file collapse to a single `file:` row carrying view chips');
-  assert.ok(source.includes('command-palette-view-chip'), 'DOIT.22: the deduped file row renders edit/preview view chips');
-  // DOIT.22 follow-up: the chips are clickable — each carries its view's layout item and jumps to it.
-  assert.ok(/data-view-item="\$\{esc\(v\.item\)\}" data-view-mode="\$\{esc\(v\.mode\)\}"/.test(source), 'DOIT.22: each view chip carries its layout item + mode');
-  assert.ok(/closest\('\[data-view-item\]'\)[\s\S]{0,180}selectSession\(viewItem, \{userInitiated: true\}\)/.test(source), 'DOIT.22: clicking a chip jumps to that view and closes the palette');
-}
+  assert.ok(/const fileGroups = new Map\(\);[\s\S]{0,400}?fileItemPath\(item\)/.test(source), 'the palette groups file tabs by path (fileItemPath)');
+  assert.ok(source.includes('tabRow(editorItem, {key: `file:${path}`, viewModes})'), 'editor+preview of one file collapse to a single `file:` row carrying view chips');
+  assert.ok(source.includes('command-palette-view-chip'), 'the deduped file row renders edit/preview view chips');
+  // follow-up: the chips are clickable — each carries its view's layout item and jumps to it.
+  assert.ok(/data-view-item="\$\{esc\(v\.item\)\}" data-view-mode="\$\{esc\(v\.mode\)\}"/.test(source), 'each view chip carries its layout item + mode');
+  assert.ok(/closest\('\[data-view-item\]'\)[\s\S]{0,180}selectSession\(viewItem, \{userInitiated: true\}\)/.test(source), 'clicking a chip jumps to that view and closes the palette');
+});
 
-// DOIT.23: the Modified-files repo header is a collapse toggle (button + caret), per-repo state.
-{
+// the Modified-files repo header is a collapse toggle (button + caret), per-repo state.
+test('t@8672', () => {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
-  assert.ok(source.includes('head.dataset.changesRepoToggle = repo'), 'DOIT.23: the repo header is a collapse toggle keyed by repo path');
-  assert.ok(source.includes('changesRepoCollapsed.has(repo)'), 'DOIT.23: the repo head reads per-repo collapse state');
-  assert.ok(source.includes('changes-repo-caret'), 'DOIT.23: the repo head shows a collapse caret');
-}
+  assert.ok(source.includes('head.dataset.changesRepoToggle = repo'), 'the repo header is a collapse toggle keyed by repo path');
+  assert.ok(source.includes('changesRepoCollapsed.has(repo)'), 'the repo head reads per-repo collapse state');
+  assert.ok(source.includes('changes-repo-caret'), 'the repo head shows a collapse caret');
+});
 
-// DOIT.21 (button completion): the back/forward buttons live in the GLOBAL topbar (left of the search
+// (button completion): the back/forward buttons live in the GLOBAL topbar (left of the search
 // box), are wired to editorNavBack/Forward, and tab-switches record as nav.
-{
+test('t@8681', () => {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(source.includes("createTopbarNav())"), 'the topbar assembles the nav group');
   assert.ok(source.indexOf('createTopbarNav())') < source.indexOf('createTopbarSearch())'), 'the nav (back/forward) group is appended before the topbar search box');
@@ -8635,37 +8706,37 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/topbarNavForward[\s\S]{0,400}?editorNavForward\(\)/.test(source), 'the forward button is wired to editorNavForward()');
   assert.ok(/getElementById\('topbarNavBack'\)[\s\S]{0,200}?editorNav\.index <= 0/.test(source), 'updateEditorNavButtons disables Back at the start of the stack');
   assert.ok(source.includes('setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});'), 'a user-initiated tab switch of ANY tab kind records through the shared focus path');
-  // DOIT.21: keyboard chords — Mod+Alt+[ / Mod+Alt+] drive editor back/forward (Mod+[ / ] stay with CM indent).
+  // keyboard chords — Mod+Alt+[ / Mod+Alt+] drive editor back/forward (Mod+[ / ] stay with CM indent).
   assert.ok(/event\.altKey && \(event\.code === 'BracketLeft' \|\| event\.code === 'BracketRight'\)/.test(source), 'editor nav has a Mod+Alt+bracket keyboard chord');
   assert.ok(/BracketLeft'\) editorNavBack\(\)/.test(source) && source.includes('else editorNavForward()'), 'the bracket chord maps [ to back and ] to forward');
-  // DOIT.35 C2: an auto-focus-driven focus change records nav history (debounced, gated on autoFocusEnabled).
-  assert.ok(source.includes('function recordAutoFocusNav(item, previousItem = null)'), 'DOIT.35: auto-focus nav recorder exists');
-  assert.ok(source.includes('recordAutoFocusNav(item, previousItem);'), 'DOIT.35: setFocusedPanelItem records auto-focus nav with the previous focus');
-  assert.ok(/recordAutoFocusNav[\s\S]{0,240}?if \(!autoFocusEnabled[\s\S]{0,240}?focusedPanelItem === item\) recordFocusNavTransition\(previousItem, item\)/.test(source), 'DOIT.35: it is gated on autoFocusEnabled and debounced to the landed focus');
+  // an auto-focus-driven focus change records nav history (debounced, gated on autoFocusEnabled).
+  assert.ok(source.includes('function recordAutoFocusNav(item, previousItem = null)'), 'auto-focus nav recorder exists');
+  assert.ok(source.includes('recordAutoFocusNav(item, previousItem);'), 'setFocusedPanelItem records auto-focus nav with the previous focus');
+  assert.ok(/recordAutoFocusNav[\s\S]{0,240}?if \(!autoFocusEnabled[\s\S]{0,240}?focusedPanelItem === item\) recordFocusNavTransition\(previousItem, item\)/.test(source), 'it is gated on autoFocusEnabled and debounced to the landed focus');
   assert.ok(!source.includes('file-editor-nav-control'), 'the per-pane editor nav group is fully removed (relocated to the topbar)');
-}
+});
 
-// DOIT.26: inline git blame — toolbar toggle + a CodeMirror line decoration (::after annotation).
-{
+// inline git blame — toolbar toggle + a CodeMirror line decoration (::after annotation).
+test('t@8701', () => {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
-  assert.ok(source.includes('file-editor-blame-panel'), 'DOIT.26: the editor toolbar has a blame toggle button');
-  assert.ok(source.includes('file-editor-icon-blame'), 'DOIT.26: the blame toggle uses the shared editor icon box, not an unaligned text glyph');
+  assert.ok(source.includes('file-editor-blame-panel'), 'the editor toolbar has a blame toggle button');
+  assert.ok(source.includes('file-editor-icon-blame'), 'the blame toggle uses the shared editor icon box, not an unaligned text glyph');
   const editorCss = fs.readFileSync('static/yolomux.css', 'utf8');
   assert.ok(/\.file-editor-icon-blame::before\s*\{[^}]*top:\s*50%[^}]*left:\s*50%[^}]*transform:\s*translate\(-50%, -50%\)/.test(editorCss), 'Blame outer circle is explicitly centered inside the editor icon box');
   assert.ok(/\.file-editor-icon-blame::after\s*\{[^}]*top:\s*50%[^}]*left:\s*50%[^}]*transform:\s*translate\(-50%, -50%\)/.test(editorCss), 'Blame center dot is explicitly centered inside the editor icon box');
-  assert.ok(source.includes('function codeMirrorBlameExtension(api, path)'), 'DOIT.26: a CodeMirror blame extension decorates the cursor line');
-  assert.ok(source.includes("'data-blame': blameAnnotationText(info)"), 'DOIT.26: the cursor line gets the dim blame annotation via data-blame (CSS ::after)');
-  assert.ok(source.includes('codeMirrorBlameExtension(api, path)'), 'DOIT.26: the blame extension is wired into the editable editor extensions');
+  assert.ok(source.includes('function codeMirrorBlameExtension(api, path)'), 'a CodeMirror blame extension decorates the cursor line');
+  assert.ok(source.includes("'data-blame': blameAnnotationText(info)"), 'the cursor line gets the dim blame annotation via data-blame (CSS ::after)');
+  assert.ok(source.includes('codeMirrorBlameExtension(api, path)'), 'the blame extension is wired into the editable editor extensions');
   const css = fs.readFileSync('static/yolomux.css', 'utf8');
-  assert.ok(/\.cm-line\[data-blame\]::after\s*\{[^}]*var\(--code-comment\)/.test(css), 'DOIT.26: the blame annotation uses the theme-aware --code-comment token');
+  assert.ok(/\.cm-line\[data-blame\]::after\s*\{[^}]*var\(--code-comment\)/.test(css), 'the blame annotation uses the theme-aware --code-comment token');
   // Fix: blame state is in the editor config signature, so toggling blame OFF rebuilds the editor and
   // the annotations are removed (the plugin is added/removed only at build time).
   assert.ok(source.includes('blame: fileEditorBlameEnabled'), 'blame is part of the editor config signature so a toggle rebuilds (annotations clear on OFF)');
-  // DOIT.26 follow-up: an all-lines blame Preference — the extension branches on it and the signature
+  // follow-up: an all-lines blame Preference — the extension branches on it and the signature
   // carries it (so toggling the pref rebuilds the decorations).
-  assert.ok(source.includes('blameAllLines: fileEditorBlameAllLines'), 'DOIT.26: blame-all-lines is in the editor config signature');
-  assert.ok(/if \(fileEditorBlameAllLines\)[\s\S]{0,260}view\.visibleRanges/.test(source), 'DOIT.26: all-lines blame decorates every visible line');
-  assert.ok(source.includes('data-setting-path="editor.blame_all_lines"') || source.includes("path: 'editor.blame_all_lines'"), 'DOIT.26: Preferences exposes the all-lines blame toggle');
+  assert.ok(source.includes('blameAllLines: fileEditorBlameAllLines'), 'blame-all-lines is in the editor config signature');
+  assert.ok(/if \(fileEditorBlameAllLines\)[\s\S]{0,260}view\.visibleRanges/.test(source), 'all-lines blame decorates every visible line');
+  assert.ok(source.includes('data-setting-path="editor.blame_all_lines"') || source.includes("path: 'editor.blame_all_lines'"), 'Preferences exposes the all-lines blame toggle');
   // Blame + Diff buttons are adjacent git-history controls, but Blame stays available after Diff learns
   // a file is clean so inline blame still works in normal edit mode.
   assert.ok(/file-editor-blame-panel[\s\S]{0,260}file-editor-diff-panel/.test(source), 'Blame and Diff buttons are adjacent toolbar controls');
@@ -8680,30 +8751,30 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/function updateFileEditorDiffButton[\s\S]*const visible = fileEditorGitActionControlsVisible\(path, state, item\)[\s\S]*button\.hidden = !visible[\s\S]*button\.disabled = !visible/.test(source), 'diff button uses the shared git-action visibility predicate and disabled state');
   assert.ok(/file-editor-diff-panel'\)\?\.addEventListener\('click'[\s\S]*event\.currentTarget\?\.disabled \|\| event\.currentTarget\?\.hidden\) return/.test(source), 'hidden or disabled Differ clicks cannot enter diff mode');
   assert.ok(source.includes('state.gitTracked = payload.git_tracked === true'), 'editor state carries the git_tracked flag from /api/fs/read through the shared normalizer');
-}
+});
 
 // Search scroll fix: navigating matches re-centers the match horizontally, so a short-line match in a
 // doc with a long line elsewhere is no longer left scrolled fully right (off-screen / blank).
-{
+test('t@8739', () => {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(source.includes('function codeMirrorSearchScrollFix(api)'), 'search-scroll fix extension exists');
   assert.ok(source.includes('codeMirrorSearchScrollFix(api)'), 'search-scroll fix is wired into the editable editor extensions');
   assert.ok(/isUserEvent\?\.\('select\.search'\)/.test(source), 'the fix triggers only on search-driven selection changes');
   assert.ok(/scrollIntoView\(head,\s*\{x:\s*'center'/.test(source), 'the fix re-centers the match horizontally');
-}
+});
 
-// S2 (DOIT.51): a file open as a tab shows ONCE in the merged palette — its deduped Tabs row (carrying
+// S2: a file open as a tab shows ONCE in the merged palette — its deduped Tabs row (carrying
 // both edit + preview chips) wins; the Recent/Files duplicate is dropped. Files-only / empty-box keep Recent.
-{
+test('t@8749', () => {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(source.includes('const openTabPaths = new Set(commandPaletteAllTabItems().map(fileItemPath).filter(Boolean))'), 'S2: merged palette collects open-tab file paths');
   assert.ok(/dedupedFileItems = fileQuickOpenItems\(\)\.filter\(item => !openTabPaths\.has\(filePathOf\(item\)\)\)/.test(source), 'S2: open-tab files are dropped from the file list so a file appears once total');
   assert.ok(/return \[\.\.\.dedupedFileItems, \.\.\.commandPaletteCommandItems\(\)\]/.test(source), 'S2: merged palette returns deduped files then commands');
-}
+});
 
-// S14 (DOIT.51): opt-in tab-drag timing instrumentation (OFF by default) to diagnose the ~500ms first-drag
+// S14: opt-in tab-drag timing instrumentation (OFF by default) to diagnose the ~500ms first-drag
 // delay by measuring the real bucket, instead of guessing setDragImage is the cause.
-{
+test('t@8758', () => {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(source.includes("storageGet('yolomux.debugDragTiming') === '1'"), 'S14: drag timing is gated behind an opt-in storage flag (no permanent user-visible perf log)');
   assert.ok(source.includes("dragTimingMark('pointerdown')"), 'S14: pointerdown is marked (pointerdown->dragstart bucket)');
@@ -8711,12 +8782,12 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes("dragTimingMarkOnce('dragMeasureStrip:first')") && source.includes("dragTimingMarkOnce('paneTabDropPlacement:first')"), 'S14: first strip-measure and drop-placement are marked');
   assert.ok(source.includes('dragTimingReport()'), 'S14: the per-bucket report fires at drag end');
   assert.ok(source.includes('function showDragTimingOverlay(') && source.includes("el.className = 'drag-timing-overlay'"), 'S14: a copyable on-page timing overlay (no DevTools) is rendered at drag end');
-}
+});
 
-// DOIT.53 root cause + fix: while Claude/tmux owns the mouse, copied text arrives as an OSC 52 clipboard
+// root cause + fix: while Claude/tmux owns the mouse, copied text arrives as an OSC 52 clipboard
 // escape; xterm.js drops it unless a handler is registered. The bridge decodes it and writes the browser
 // clipboard, and never answers '?' read queries (no clipboard exfiltration).
-{
+test('t@8771', () => {
   const api = loadYolomux('?platform=mac', ['1'], 'https:', 'MacIntel');
   const b64 = text => Buffer.from(text, 'utf8').toString('base64');
   // pure decoder
@@ -8743,19 +8814,19 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes('installTerminalOsc52Bridge(session, term);'), 'OSC 52 bridge is wired into terminal startup');
   assert.ok(/registerOscHandler\(52, data =>/.test(source), 'bridge registers the OSC 52 parser handler');
   assert.ok(source.includes('writeTerminalTextToClipboard(text, `copied ${text.length} chars`)'), 'bridge routes through the shared terminal clipboard-write chain');
-  assert.ok(source.includes("storageGet('yolomux.debugCopy') === '1'"), 'DOIT.53 N1: copy-path debug logging is gated behind an opt-in storage flag');
+  assert.ok(source.includes("storageGet('yolomux.debugCopy') === '1'"), 'copy-path debug logging is gated behind an opt-in storage flag');
   assert.ok(source.includes("copyDebug('shortcut'") && source.includes("copyDebug('osc52'") && source.includes("copyDebug('clipboard'"), 'N1: shortcut, OSC 52, and clipboard-write stages each log one compact debug event');
-}
+});
 
-// DOIT.53 N7: right-click must not clear the terminal highlight; the menu copies the selection captured at
+// right-click must not clear the terminal highlight; the menu copies the selection captured at
 // right-click time.
-{
+test('t@8804', () => {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(/container\.addEventListener\('mousedown', event => \{[\s\S]*?event\.button !== 2[\s\S]*?rightClickSelection = terminalSelectedText\(term, container\);[\s\S]*?event\.stopPropagation\(\);[\s\S]*?\}, \{capture: true\}\)/.test(source), 'N7: a capture-phase right-mousedown captures the selection and stops xterm clearing it');
   assert.ok(/showTerminalContextMenu\(session, term, event\.clientX, event\.clientY, container, rightClickSelection\)/.test(source), 'N7: the context menu receives the selection captured at right-click time');
   assert.ok(/copyTerminalSelection\(session, term, \{dedent, selectionText: selected\}, container\)/.test(source), 'N7: menu Copy uses the captured selection text, not a stale live re-read');
   assert.ok(/const selected = options\.selectionText != null \? options\.selectionText : terminalSelectedText\(term, container\)/.test(source), 'N7: copyTerminalSelection honors an explicit captured selection');
-}
+});
 
 (async () => {
   {
@@ -8924,4 +8995,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
 })().catch(error => {
   console.error(error);
   process.exitCode = 1;
+}).finally(() => {
+  console.log(`\nlayout suite: ${__testPass} passed, ${__testFail} failed`);
+  if (__testFail) process.exitCode = 1;
 });

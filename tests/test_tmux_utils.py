@@ -32,8 +32,28 @@ def test_tmux_run_check_raises_after_timeout(monkeypatch):
         raise AssertionError("tmux_run(check=True) should raise on timeout")
 
 
+def test_tmux_move_to_option_walks_highlight_without_crashing(monkeypatch):
+    # exercise the REAL tmux_move_to_option body (only tmux_run is stubbed). The auto-approve
+    # tests fake the whole tmux module, so they never run this loop — which masked a missing `import time`
+    # that made every highlight-moving approval (option 2, declines) raise NameError and kill the worker.
+    sent = []
+
+    def fake_run(*args, **kwargs):
+        sent.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(tmux_utils, "tmux_run", fake_run)
+    monkeypatch.setattr(tmux_utils.time, "sleep", lambda *_: None)
+
+    # "%3" is an unambiguous target (no session resolution). option 2 from selected 1 -> one Down press.
+    tmux_utils.tmux_move_to_option("%3", 2, 1)
+
+    down_presses = [call for call in sent if call[:2] == ("send-keys", "-t") and call[-1] == "Down"]
+    assert len(down_presses) == 1
+
+
 def test_cached_session_names_memoizes_within_ttl(monkeypatch):
-    # DOIT.6 #80: tmux_exact_target no longer runs `tmux list-sessions` on every capture — session-name
+    # tmux_exact_target no longer runs `tmux list-sessions` on every capture — session-name
     # resolution is cached for a short window so a poll's captures reuse one resolution.
     calls = {"n": 0}
 

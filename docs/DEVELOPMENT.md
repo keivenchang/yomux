@@ -27,9 +27,9 @@ To find the latest committed version: `git show HEAD:yolomux_lib/common.py | gre
 JavaScript and CSS timing constants in `static_src/`, `static/yolomux.js`, and `static/yolomux.css` are split by purpose:
 
 - UI / popup / display / animation timings use round whole numbers, for example `300`, `1000`, `1550`, `10000`, `20000`.
-- Backend polling / refresh intervals use odd numbers rounded up, for example `1257`, `3001`, `5003`, `15001`, `20003`.
+- Backend polling / refresh intervals SHOULD prefer slightly-staggered (often odd) values, for example `1257`, `3001`, `5003`, to spread client requests across ticks instead of piling up on the same one. This is a preference, not an invariant — several shipped defaults in `yolomux_lib/settings.py` are still round (`event_log_refresh_ms: 5000`, `server_event_poll_ms: 850`, `server_directory_event_poll_ms: 3000`); nudge them toward staggered values when you touch that area, but nothing enforces it today.
 
-UI durations are perceived by users and read as deliberate at round values. Backend poll intervals stagger client requests to avoid pile-ups on the same tick. When a request says "make it 1000ms", route it to the right bucket: UI keeps `1000`, backend uses `1003` or `1009`.
+UI durations are perceived by users and read as deliberate at round values. When a request says "make it 1000ms", a UI duration keeps `1000`; a backend poll may use a nearby staggered value like `1003`.
 
 ### Responsive UI sizing
 
@@ -162,8 +162,8 @@ git push origin main
 cd ~/yolomux && git pull --ff-only origin main
 systemctl --user stop yolomux-prod-7777 2>/dev/null
 systemd-run --user --quiet --collect --unit=yolomux-prod-7777 ~/.local/bin/yolomux-restart-prod.sh
-systemctl --user stop yolomux-dev-7778 2>/dev/null
-systemd-run --user --quiet --collect --unit=yolomux-dev-7778 ~/.local/bin/yolomux-restart-dev.sh
+systemctl --user stop yolomux-dev1-8001 2>/dev/null
+systemd-run --user --quiet --collect --unit=yolomux-dev1-8001 ~/.local/bin/yolomux-restart-dev.sh
 ```
 
 Rules:
@@ -172,7 +172,7 @@ Rules:
 - Never use `git add -A`; screenshots and scratch files must not get swept in.
 - Production pull is `--ff-only`.
 - Never edit, stage, or commit inside `~/yolomux/`.
-- Restart both prod and dev after sync, then verify `https://localhost:7777/api/ping`, `https://localhost:7778/api/ping`, and the rendered version on both login pages.
+- Restart both prod and dev after sync, then verify `https://localhost:7777/api/ping`, `https://localhost:8001/api/ping`, and the rendered version on both login pages.
 
 ## xterm.js Assets
 
@@ -218,7 +218,7 @@ All API routes require auth. Read endpoints accept `readonly` or `admin`, except
 - `GET /api/session-files?session=project1&hours=24` returns repo-aware AI file changes for one session.
 - `GET /api/auto-approve` returns YOLO status for all sessions.
 - `GET /api/auto-approve?session=project1` returns YOLO status for one session.
-- `POST /api/create-session?agent=claude`, `POST /api/create-session?agent=codex`, or `POST /api/create-session?agent=term` creates the next numbered tmux session with the selected agent, capped at nine visible sessions.
+- `POST /api/create-session?agent=claude`, `POST /api/create-session?agent=codex`, or `POST /api/create-session?agent=term` creates the next numbered tmux session with the selected agent, capped at `MAX_YOLOMUX_SESSION_TABS` (99) visible sessions.
 - `POST /api/ensure-session?session=project1` checks that a tmux session still exists.
 - `POST /api/auto-approve?session=project1&enabled=1` enables or disables YOLO for a session.
 - `POST /api/tmux-next?session=project1` moves the session to the next tmux window.

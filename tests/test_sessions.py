@@ -5,8 +5,8 @@ from yolomux_lib import sessions
 
 
 def clear_transcript_lookup_cache():
-    with sessions._TRANSCRIPT_LOOKUP_CACHE_LOCK:
-        sessions._TRANSCRIPT_LOOKUP_CACHE.clear()
+    # the lookup cache is now a shared TtlCache (was a hand-rolled dict + lock).
+    sessions._TRANSCRIPT_LOOKUP_CACHE.clear()
 
 
 def test_find_recent_codex_transcript_matches_session_meta_header(tmp_path):

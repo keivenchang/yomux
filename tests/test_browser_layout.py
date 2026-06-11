@@ -17,6 +17,36 @@ WebDriverWait = pytest.importorskip("selenium.webdriver.support.ui").WebDriverWa
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+_APP_CSS_CACHE: str | None = None
+
+
+def app_css() -> str:
+    # The shipped app stylesheet, read once and reused. Every Selenium fixture used to re-read
+    # static/yolomux.css from disk (~36 reads per run); the content is identical every time.
+    global _APP_CSS_CACHE
+    if _APP_CSS_CACHE is None:
+        _APP_CSS_CACHE = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    return _APP_CSS_CACHE
+
+
+def page_html(body: str, *, extra_css: str = "") -> str:
+    # One scaffold for the Selenium fixture pages: the app stylesheet, an optional fixture-specific
+    # <style> block, and the body. Replaces ~20 near-identical inline `<!doctype>…<style>{css}</style>`
+    # copies so a change to the harness shell happens in one place.
+    extra = f"\n        <style>\n{extra_css}\n        </style>" if extra_css else ""
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <style>{app_css()}</style>{extra}
+      </head>
+      <body>
+{body}
+      </body>
+    </html>
+    """
+
 
 @pytest.fixture(scope="module")
 def browser():
@@ -56,7 +86,7 @@ def _reset_browser_state(request):
 
 
 def pane_fixture_html(width):
-    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    css = app_css()
     tabs = "\n".join(
         f"""
         <button type="button" class="pane-tab {'active' if number == 5 else ''}">
@@ -73,18 +103,8 @@ def pane_fixture_html(width):
         """
         for number in (1, 2, 3, 5, 6, 9)
     )
-    return f"""
-    <!doctype html>
-    <html>
-      <head>
-        <meta charset="utf-8">
-        <style>{css}</style>
-        <style>
-          body {{ margin: 0; padding: 10px; display: block; height: auto; min-height: 0; }}
-          .panel {{ width: {width}px; height: 240px; }}
-        </style>
-      </head>
-      <body>
+    return page_html(
+        f"""
         <div class="panel active-pane">
           <div class="panel-head">
             <div class="tabs" role="tablist">
@@ -103,13 +123,16 @@ def pane_fixture_html(width):
           <div class="panel-detail-row"><div class="meta">branch · path · dirty 1</div><button class="panel-detail-close"></button></div>
           <div class="tab-pane active"><div class="terminal"></div></div>
         </div>
-      </body>
-    </html>
-    """
+      """,
+        extra_css=f"""
+          body {{ margin: 0; padding: 10px; display: block; height: auto; min-height: 0; }}
+          .panel {{ width: {width}px; height: 240px; }}
+        """,
+    )
 
 
 def menu_fixture_html():
-    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    css = app_css()
     rows = "\n".join(
         f"""
         <button type="button" class="app-menu-command app-menu-tab-command">
@@ -132,13 +155,13 @@ def menu_fixture_html():
         """
         for number in range(1, 31)
     )
-    return f"""
-    <!doctype html>
-    <html>
-      <head>
-        <meta charset="utf-8">
-        <style>{css}</style>
-        <style>
+    return page_html(
+        f"""
+        <div class="app-menu" data-app-menu="tabs">
+          <div class="app-menu-popover" role="menu">{rows}</div>
+        </div>
+      """,
+        extra_css=f"""
           body {{ margin: 0; padding: 10px; display: block; height: auto; min-height: 0; overflow: auto; }}
           .app-menu-popover {{
             visibility: visible;
@@ -147,30 +170,14 @@ def menu_fixture_html():
             position: static;
             transform: none;
           }}
-        </style>
-      </head>
-      <body>
-        <div class="app-menu" data-app-menu="tabs">
-          <div class="app-menu-popover" role="menu">{rows}</div>
-        </div>
-      </body>
-    </html>
-    """
+        """,
+    )
 
 
 def pc_controls_fixture_html():
-    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
-    return f"""
-    <!doctype html>
-    <html>
-      <head>
-        <meta charset="utf-8">
-        <style>{css}</style>
-        <style>
-          body {{ margin: 0; padding: 24px; display: block; height: auto; min-height: 0; }}
-        </style>
-      </head>
-      <body>
+    css = app_css()
+    return page_html(
+        f"""
         <div class="tabs" role="tablist">
           <button id="hash-tab" class="tab panel-detail-toggle">#</button>
           <button id="list-tab" class="tab terminal-tab">1.</button>
@@ -209,25 +216,17 @@ def pc_controls_fixture_html():
         <div class="pane-tab popover-open" style="position: fixed; top: 220px; left: 24px;">
           <div id="test-tab-popover" class="session-popover"></div>
         </div>
-      </body>
-    </html>
-    """
+      """,
+        extra_css=f"""
+          body {{ margin: 0; padding: 24px; display: block; height: auto; min-height: 0; }}
+        """,
+    )
 
 
 def topbar_font_fixture_html():
-    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
-    return f"""
-    <!doctype html>
-    <html>
-      <head>
-        <meta charset="utf-8">
-        <style>{css}</style>
-        <style>
-          body {{ margin: 0; padding: 12px; display: block; height: auto; min-height: 0; }}
-          :root {{ --ui-font-size: 18px; --tab-label-size: 18px; }}
-        </style>
-      </head>
-      <body>
+    css = app_css()
+    return page_html(
+        f"""
         <header id="topbar-fixture" class="topbar">
           <div class="brand"><span class="title">YOLOmux</span></div>
           <div class="app-menu-area">
@@ -244,13 +243,16 @@ def topbar_font_fixture_html():
         <button type="button" class="pane-tab active">
           <span class="pane-tab-core"><span class="session-button-name">1</span></span>
         </button>
-      </body>
-    </html>
-    """
+      """,
+        extra_css=f"""
+          body {{ margin: 0; padding: 12px; display: block; height: auto; min-height: 0; }}
+          :root {{ --ui-font-size: 18px; --tab-label-size: 18px; }}
+        """,
+    )
 
 
 def editor_pane_ignores_legacy_body_class_fixture_html():
-    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    css = app_css()
     return f"""
     <!doctype html>
     <html>
@@ -278,7 +280,7 @@ def editor_pane_ignores_legacy_body_class_fixture_html():
 
 
 def codemirror_editor_controls_fixture_html():
-    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    css = app_css()
     tabs = "\n".join(
         f"""
         <div role="button" tabindex="0" class="pane-tab {'active popover-open' if index == 2 else ''}">
@@ -380,19 +382,9 @@ def codemirror_editor_controls_fixture_html():
 
 
 def editor_diff_ref_toolbar_fixture_html():
-    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
-    return f"""
-    <!doctype html>
-    <html>
-      <head>
-        <meta charset="utf-8">
-        <style>{css}</style>
-        <style>
-          body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; }}
-          .file-editor-panel {{ width: 520px; height: 120px; }}
-        </style>
-      </head>
-      <body>
+    css = app_css()
+    return page_html(
+        f"""
         <article class="panel file-editor-panel active-pane">
           <div class="file-editor-toolbar" role="toolbar">
             <div class="file-editor-toolbar-zone file-editor-toolbar-left">
@@ -426,9 +418,12 @@ def editor_diff_ref_toolbar_fixture_html():
             </div>
           </div>
         </article>
-      </body>
-    </html>
-    """
+      """,
+        extra_css=f"""
+          body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; }}
+          .file-editor-panel {{ width: 520px; height: 120px; }}
+        """,
+    )
 
 
 def codemirror_bundle_fixture_html():
@@ -455,7 +450,7 @@ def git_show_text(rev_path, fallback_rev_paths=()):
 
 
 def codemirror_todo_diff_overview_fixture_html():
-    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
     strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
     bootstrap = json.dumps(
@@ -593,7 +588,7 @@ def codemirror_todo_diff_overview_fixture_html():
 
 
 def codemirror_file_explorer_diff_overview_fixture_html():
-    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
     strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
     bootstrap = json.dumps(
@@ -802,7 +797,7 @@ def app_bundle_before_boot_script():
 
 
 def codemirror_wrap_toggle_fixture_html():
-    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
     strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
     bootstrap = json.dumps(
@@ -934,19 +929,9 @@ def codemirror_wrap_toggle_fixture_html():
 
 
 def finder_click_toolbar_fixture_html():
-    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
-    return f"""
-    <!doctype html>
-    <html>
-      <head>
-        <meta charset="utf-8">
-        <style>{css}</style>
-        <style>
-          body {{ margin: 0; padding: 8px; display: grid; grid-template-columns: 420px 1fr; gap: 8px; height: auto; min-height: 0; }}
-          .panel {{ height: 230px; }}
-        </style>
-      </head>
-      <body>
+    css = app_css()
+    return page_html(
+        f"""
         <article id="finder-panel" class="panel file-explorer-panel active-pane">
           <div class="panel-head file-explorer-head">
             <div class="pane-tabs" hidden></div>
@@ -1034,13 +1019,16 @@ def finder_click_toolbar_fixture_html():
             }});
           }}));
         </script>
-      </body>
-    </html>
-    """
+      """,
+        extra_css=f"""
+          body {{ margin: 0; padding: 8px; display: grid; grid-template-columns: 420px 1fr; gap: 8px; height: auto; min-height: 0; }}
+          .panel {{ height: 230px; }}
+        """,
+    )
 
 
 def file_tree_status_alignment_fixture_html():
-    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    css = app_css()
     return f"""
     <!doctype html>
     <html>
@@ -1100,7 +1088,7 @@ def file_tree_status_alignment_fixture_html():
 
 
 def codemirror_scrollbar_overview_fixture_html():
-    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    css = app_css()
     return f"""
     <!doctype html>
     <html>
@@ -1135,31 +1123,24 @@ def codemirror_scrollbar_overview_fixture_html():
 
 
 def split_seam_fixture_html():
-    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
-    return f"""
-    <!doctype html>
-    <html>
-      <head>
-        <meta charset="utf-8">
-        <style>{css}</style>
-        <style>
-          body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; }}
-          .layout-root {{ width: 420px; height: 360px; }}
-        </style>
-      </head>
-      <body>
+    css = app_css()
+    return page_html(
+        f"""
         <div class="layout-root split-column">
           <section class="layout-column"><article id="top-panel" class="panel"></article></section>
           <div id="split-resizer" class="layout-resizer resizer-column"></div>
           <section class="layout-column"><article id="bottom-panel" class="panel"></article></section>
         </div>
-      </body>
-    </html>
-    """
+      """,
+        extra_css=f"""
+          body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; }}
+          .layout-root {{ width: 420px; height: 360px; }}
+        """,
+    )
 
 
 def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620):
-    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    css = app_css()
     script_uri = (REPO_ROOT / "static" / "yolomux.js").as_uri()
     dockview_css_uri = (REPO_ROOT / "static" / "vendor" / "dockview.css").as_uri()
     dockview_script_uri = (REPO_ROOT / "static" / "vendor" / "dockview-core.noStyle.js").as_uri()
@@ -1189,7 +1170,7 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
             "errors": [],
         },
         "codeMirrorAssetUrl": (REPO_ROOT / "static" / "codemirror.js").as_uri(),
-        # DOIT.8: the real page inlines the active locale catalog so t() resolves on the first render
+        # the real page inlines the active locale catalog so t() resolves on the first render
         # (the menu bar paints at boot). Mirror that here so the live-boot menu shows real labels.
         "locale": "en",
         "strings": {"en": json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text())},
@@ -5375,7 +5356,7 @@ def test_pane_tab_active_accent_theming(browser, tmp_path):
     # unpressed control bg in both themes, so the picker (Green/Blue/...) doesn't break the test.
     assert theme_metrics["dark"]["toolbarActiveBg"] != theme_metrics["dark"]["paneControlBg"]
     assert theme_metrics["light"]["toolbarActiveBg"] != theme_metrics["light"]["paneControlBg"]
-    # DOIT.6 #31: the active-tab greens are tuned PER THEME so a theme switch visibly repaints the active
+    # the active-tab greens are tuned PER THEME so a theme switch visibly repaints the active
     # pane tab; the frame controls are also theme-specific now (image 043). Every OTHER surface stays
     # token-equal across themes.
     # inactiveTabBg is theme-specific now (images 003/004): light gets a very-light-green #e6f1dd while
@@ -5553,12 +5534,12 @@ def test_active_pane_tab_container_lightens_in_dark_only(browser, tmp_path):
 def test_pane_tab_strip_hover_token_is_removed():
     # The dark-only --pane-tab-strip-hover-bg was removed when the tab container + info bar were unified
     # onto one token. Cheap string guard against its reintroduction — no browser needed (P3 demotion).
-    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    css = app_css()
     assert "--pane-tab-strip-hover-bg" not in css
 
 
 def test_diff_added_active_line_uses_same_fill_as_neighbor(browser, tmp_path):
-    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    css = app_css()
     page = tmp_path / "diff-active-line-fill.html"
     page.write_text(
         f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style>
@@ -5632,7 +5613,7 @@ def test_diff_added_active_line_uses_same_fill_as_neighbor(browser, tmp_path):
 
 
 def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_path):
-    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
     strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
     bootstrap = json.dumps(
@@ -5828,7 +5809,7 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
 
 
 def test_editor_diff_button_waits_for_clean_payload_before_showing_refs(browser, tmp_path):
-    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
     strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
     bootstrap = json.dumps(
@@ -6009,7 +5990,7 @@ def test_editor_diff_button_waits_for_clean_payload_before_showing_refs(browser,
 
 
 def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_path):
-    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    css = app_css()
     strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
     bootstrap = json.dumps(
         {
@@ -6912,7 +6893,7 @@ def test_light_editor_and_preview_share_python_fence_token_colors(browser, tmp_p
 
 
 def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser, tmp_path):
-    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    css = app_css()
     strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
     bootstrap = json.dumps(
         {
@@ -7014,7 +6995,7 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
 
 
 def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path):
-    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
     strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
     bootstrap = json.dumps(
@@ -7133,7 +7114,7 @@ def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path
 
 
 def test_editor_search_button_toggles_pressed_state_with_codemirror_panel(browser, tmp_path):
-    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
     strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
     bootstrap = json.dumps(
@@ -7684,8 +7665,8 @@ def test_diff_overview_matches_actual_file_explorer_visible_rows_after_scroll(br
     assert metrics["fullRows"]["deletedRows"] == 1986
     assert metrics["finalOverviewPresent"] is True
     assert metrics["finalChangedStops"] == metrics["expectedFullChangedStops"], metrics["finalBackground"]
-    assert any(stop["color"] == "#ff5d6c" for stop in metrics["finalChangedStops"])
-    assert any(stop["color"] == "#38d878" for stop in metrics["finalChangedStops"])
+    assert any(stop["color"] == '#ff5d6c' for stop in metrics["finalChangedStops"])
+    assert any(stop["color"] == '#38d878' for stop in metrics["finalChangedStops"])
     cases = {case["name"]: case for case in metrics["cases"]}
     assert cases["top-normal"]["deletedDomRows"] == 0
     assert cases["red-middle-previous-regression"]["deletedDomRows"] == 1986
@@ -8010,7 +7991,7 @@ def test_platform_controls_use_pc_glyphs(browser, tmp_path):
     assert browser.execute_script("return getComputedStyle(document.getElementById('collapsed-preferences')).display") == "none"
     assert browser.execute_script("return getComputedStyle(document.getElementById('working-yolo')).animationName") == "yolo-marker-rotate"
     assert browser.execute_script("return getComputedStyle(document.getElementById('working-yolo'), '::after').content") == "none"
-    # DOIT.6 #23: working YO spins SLOWLY at the yolo_rotate_ms setting (20s), not a fast hardcoded value.
+    # working YO spins SLOWLY at the yolo_rotate_ms setting (20s), not a fast hardcoded value.
     assert browser.execute_script("return getComputedStyle(document.getElementById('working-yolo')).animationDuration") == "20s"
     # An idle (auto-on, NON-working) marker must be STATIC — no ambient rotation.
     assert browser.execute_script("return getComputedStyle(document.getElementById('idle-yolo')).animationName") == "none"
@@ -8087,7 +8068,7 @@ def test_platform_controls_use_pc_glyphs(browser, tmp_path):
     assert light_control["actionsColor"] != light_control["actionsBg"]
     assert light_control["closeColor"] == "rgb(31, 41, 55)"
     assert light_control["closeColor"] != light_control["closeBg"]
-    # DOIT.6 #27: the YO!info tab label is legible in light mode (color contrasts with the tab bg,
+    # the YO!info tab label is legible in light mode (color contrasts with the tab bg,
     # not white-on-white) now that it uses the themed .session-button-dir treatment.
     assert light_control["infoLabelColor"] != light_control["infoTabBg"]
     z_indexes = browser.execute_script(
@@ -8273,7 +8254,7 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
           markerContent,
           markerHeight: marker.height,
           markerColor: markerStyle.color,
-          // DOIT.24 C1: the focus ring is the translucent gutter border (color-mix of --panel-ring-color).
+          // the focus ring is the translucent gutter border (color-mix of --panel-ring-color).
           panelRingBorderColor: getComputedStyle(document.querySelector('.file-editor-panel')).borderTopColor,
           searchLabel,
           editorBg: editorStyle.backgroundColor,
@@ -8346,7 +8327,7 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
     assert metrics["markerContent"] in ("none", '""')
     assert metrics["markerHeight"] > 0
     assert metrics["markerColor"] != "rgb(0, 0, 0)"
-    # DOIT.24 C1: the active pane's focus ring is the translucent gutter border; assert it shows a
+    # the active pane's focus ring is the translucent gutter border; assert it shows a
     # colored (non-transparent) ring color (color-mix of --panel-ring-color at --pane-ring-opacity).
     assert metrics["panelRingBorderColor"] not in ("rgba(0, 0, 0, 0)", "transparent")
     assert metrics["searchLabel"] in ("none", '""')
@@ -8642,7 +8623,7 @@ def test_clicking_finder_does_not_change_terminal_pane_toolbar(browser, tmp_path
     assert after == before
 
 
-# DOIT.12 B5 — light-mode surface regression guard. The recurring light-mode bug class is a
+# — light-mode surface regression guard. The recurring light-mode bug class is a
 # component rule that hardcodes a DARK color literal with no body.theme-light / body.editor-theme-light
 # counterpart, so it renders as a dark box (or invisible pale text) on the white surface. The earlier
 # white-on-white miss slipped through because the test measured BACKGROUNDS but never the nested TEXT
@@ -8692,7 +8673,7 @@ LIGHT_MODE_SURFACES = """
 
 
 def light_mode_surfaces_fixture_html(body_class):
-    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    css = app_css()
     return f"""
     <!doctype html><html><head><meta charset="utf-8"><style>{css}</style></head>
     <body class="{body_class}" style="background:#fff">{LIGHT_MODE_SURFACES}</body></html>
@@ -8745,7 +8726,7 @@ def test_light_mode_surfaces_are_readable_not_dark_boxes(browser, tmp_path):
         "badge-neutral": "badge-neutral", "badge-done": "badge-done", "ym-inactive": "ym-inactive",
         "fm-dir": "fm-tab", "fm-badge": "fm-tab", "sub": "sub", "sub-dismiss": "sub",
         "rnm-name": None, "idx-name": None, "idx-status": None, "rename-inp": "rename-inp", "md-pre": "md-pre",
-        # DOIT.18 C1: the YO!info table — rows/header/current/links must read on the light pane.
+        # the YO!info table — rows/header/current/links must read on the light pane.
         "info-hdr": None, "info-row-text": None, "info-link": None, "info-cur": None,
     }
     for eid, bg_id in text_checks.items():
@@ -8780,7 +8761,7 @@ def test_light_editor_image_backdrop_is_light(browser, tmp_path):
 
 
 def codemirror_search_panel_fixture_html():
-    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
     return f"""
     <!doctype html>
@@ -8848,7 +8829,7 @@ def test_needs_attention_pane_stays_red_when_focused_and_yolo_ready(browser, tmp
     # image 20260603-028: focusing/hovering a needs-attention (red) pane on a --dangerously-yolo server
     # made it `typing-ready-pane yolo-ready-pane needs-input-pane`; the yolo-ready green --panel-ring-color
     # (0,3,0) out-specified the needs red (0,2,0), so the alert went GREEN. The red must always win.
-    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    css = app_css()
     combos = [
         "needs-input-pane",                                       # unfocused alert -> red (ring)
         "active-pane needs-input-pane",                           # focused alert -> red
@@ -8871,4 +8852,4 @@ def test_needs_attention_pane_stays_red_when_focused_and_yolo_ready(browser, tmp
     )
     # Every needs-attention pane resolves the red ring color, regardless of focus/yolo-ready state.
     for pid, ring in rings.items():
-        assert ring.lower() == "#ff3347", f"{pid}: needs-attention pane must keep the red ring (#ff3347), got {ring}"
+        assert ring.lower() == '#ff3347', f"{pid}: needs-attention pane must keep the red ring (#ff3347), got {ring}"

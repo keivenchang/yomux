@@ -287,7 +287,7 @@ def test_search_files_returns_fuzzy_matches_and_skips_heavy_dirs_inside_repo(tmp
     paths = [item["relative_path"] for item in payload["files"]]
     assert "src/hello_x_and_y.py" in paths
     assert "node_modules/hello_x_and_y.js" not in paths
-    # DOIT.6 #25: search hits carry realpath + size so the client can fold symlink/mirror duplicates.
+    # search hits carry realpath + size so the client can fold symlink/mirror duplicates.
     hit = next(item for item in payload["files"] if item["relative_path"] == "src/hello_x_and_y.py")
     assert hit["realpath"] == os.path.realpath(str(tmp_path / "src" / "hello_x_and_y.py"))
     assert hit["size"] == len("print('ok')\n")
@@ -802,7 +802,7 @@ def test_rename_path_plain_rename_for_untracked_file(tmp_path):
 
 
 def test_list_directory_flags_symlinks_with_target(tmp_path):
-    # DOIT.31: symlink entries carry is_symlink + symlink_target; a symlink to a dir resolves kind=dir,
+    # symlink entries carry is_symlink + symlink_target; a symlink to a dir resolves kind=dir,
     # to a file kind=file, and a dangling link is kind=symlink-broken. Plain entries are not flagged.
     (tmp_path / "real_dir").mkdir()
     (tmp_path / "real_file.txt").write_text("hi", encoding="utf-8")

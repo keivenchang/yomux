@@ -8,6 +8,9 @@
   --input-bg: var(--panel2);
   --text: #e4e8ee;
   --muted: #9aa5b1;
+  /* The stronger/cooler muted shade (darker than --muted) — one owner for what was the bare #8b95a5
+     repeated across the editor scheme, code comments, and several muted-text component rules. */
+  --text-muted-strong: #8b95a5;
   --line: #303948;
   --tree-indent-line: rgba(148, 163, 184, 0.45);
   --sep-muted: #5e6878;
@@ -24,7 +27,7 @@
   --brand-green: #76b900;
   --brand-green-dark: #3f6f00;
   --accent-gold: #f5c542;
-  /* DOIT.12 A4: --accent was UNDEFINED, so topbar search/language/activity hover borders fell back to a
+  /* --accent was UNDEFINED, so topbar search/language/activity hover borders fell back to a
      literal light-blue (#6ea8fe) in BOTH themes. Define it per theme (light gets a darker, readable blue). */
   --accent: #6ea8fe;
   --drop-outline: #ffffff;
@@ -92,7 +95,7 @@
   --pane-inactive-tab-bg-hover: var(--active-tab-muted-hover-bg);
   --pane-inactive-tab-border: var(--active-tab-muted-border);
   --pane-tab-text: #dfe6ef;
-  /* DOIT.41: ONE source accent that every ACTIVE/FOCUSED surface derives from (active tab, focused-pane
+  /* ONE source accent that every ACTIVE/FOCUSED surface derives from (active tab, focused-pane
      ring + glow, chrome strip, file selection, hover tints, YO marker, and Markdown headings). Swapped
      by the appearance.active_color preference; Green is the default = the brand-green values below. */
   --active-accent: #76b900;          /* solid: ring, glow, strip, alpha tints */
@@ -141,6 +144,9 @@
   --pane-tab-panel-ring-shadow: rgb(var(--active-accent-rgb) / 0.95);
   --pane-tab-panel-ring-width: 4px;
   --pane-ring-opacity: 75%;
+  /* the needs-input/exec/blocked pane attention ring. A token (with a light-theme variant
+     below) so it themes like every other ring instead of being a raw #ff3347 that ignores the theme. */
+  --pane-ring-attention: #ff3347;
   --pane-active-ring-opacity: 75%;
   --pane-tab-panel-head-bg: #3f6f00;
   --pane-tab-panel-head-text: #f4ffe8;
@@ -173,6 +179,11 @@
   --popover-max-inline-size: calc(100vw - var(--popover-edge-gap) - var(--popover-edge-gap));
   --shadow-popover: 0 18px 50px rgba(0, 0, 0, 0.45);
   --shadow-elevated: 0 16px 42px rgba(0, 0, 0, 0.45);
+  /* Shared shadow-cast color, theme-aware. Per-element box-shadows keep their own geometry (offset/blur)
+     but read this through rgb(var(--shadow-rgb) / a) so they flip with the theme instead of staying black
+     on the light surface. Dark = pure black (identical to the old literals); light = the slate the popover
+     tokens already use. */
+  --shadow-rgb: 0 0 0;
   --app-menu-max-inline-size: var(--popover-max-inline-size);
   --app-menu-max-block-size: 74vh;
   --app-menu-tab-max-block-size: 82vh;
@@ -235,7 +246,7 @@
   --editor-gutter-bg: var(--panel);
   --editor-scheme-bg: #0f1115;
   --editor-scheme-fg: #e6efe2;
-  --editor-scheme-muted: #8b95a5;
+  --editor-scheme-muted: var(--text-muted-strong);
   --editor-scheme-line: #303948;
   --editor-scheme-panel: #151922;
   --editor-scheme-panel2: #1e2430;
@@ -259,7 +270,7 @@
   --code-type: #67e8f9;
   --code-property: #96d6ff;
   --code-tag: #f0abfc;
-  --code-comment: #8b95a5;
+  --code-comment: var(--text-muted-strong);
   --code-inline: #ffe08a;
   --code-inline-bg: rgba(245, 197, 66, 0.14);
   --code-inline-border: rgba(245, 197, 66, 0.24);
@@ -353,7 +364,7 @@ body.theme-light {
   --sep-muted: #8c96a3;
   --divider: var(--lt-line);
   --accent-lime: #2f7d20;
-  /* DOIT.41: light-theme defaults for the active accent (Green). The picker (applyActiveColor) overrides
+  /* light-theme defaults for the active accent (Green). The picker (applyActiveColor) overrides
      these per preset; supplied (not derived) so Green stays the exact current light values. */
   --active-accent: #5f9800;
   --active-accent-rgb: 95 152 0;
@@ -399,7 +410,7 @@ body.theme-light {
   --pane-tab-zoom-border: var(--active-control-border);
   --pane-tab-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 88%, #ffffff 12%);
   --pane-tab-zoom-hover-border: var(--active-control-border);
-  /* DOIT.6 #31: active-tab greens tuned for the light surface so a theme switch visibly repaints the
+  /* active-tab greens tuned for the light surface so a theme switch visibly repaints the
      active pane tab (the dark-mode neon lime looked "stuck" with no light override). */
   --pane-tab-active-bg: var(--active-accent-bright);
   --pane-tab-active-text: var(--active-accent-text);
@@ -463,6 +474,7 @@ body.theme-light {
   --auto-border-disabled: #b3c99b;
   --auto-glow: rgba(95, 152, 0, 0.22);
   --bad: #b91c1c;
+  --pane-ring-attention: #d11a2a;  /* darker attention red that reads on the light pane bg */
   --danger-text: #fff3f4;
   --danger-bg: #c61f38;
   --danger-border: #ff7a86;
@@ -482,6 +494,7 @@ body.theme-light {
   --inactive-tab-border: #9aa6b6;
   --shadow-popover: 0 18px 50px rgba(15, 23, 42, 0.24);
   --shadow-elevated: 0 16px 42px rgba(15, 23, 42, 0.24);
+  --shadow-rgb: 15 23 42;
   --text-selection-bg: #93c5fd;
   --file-hover-bg: #fff2a8;
   --file-hover-border: #d97706;

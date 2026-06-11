@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 function renderPanels(previousActive = [], options = {}) {
   if (renderPanelsDockview(previousActive, options)) return;
-  // DOIT.6 #114: a full panel re-render pools every panel and clears the grid, which detaches
+  // a full panel re-render pools every panel and clears the grid, which detaches
   // the node being dragged and aborts the native HTML5 drag. Defer the re-render until the drag
   // ends. The shared layout scheduler stores a forced-full request so metadata-driven renders do
   // not get mistaken for a cheap same-shape layout update on drop.
@@ -44,7 +44,7 @@ function movePanelsToPool() {
   }
 }
 
-// DOIT.9 S2: the registered item for a mounted panel node (reverse lookup of panelNodes).
+// the registered item for a mounted panel node (reverse lookup of panelNodes).
 function panelItemForNode(node) {
   if (!node) return null;
   for (const [item, panel] of panelNodes.entries()) {
@@ -53,7 +53,7 @@ function panelItemForNode(node) {
   return null;
 }
 
-// DOIT.9 S2: move ONE displaced panel back to the pool (preserving editor state), like movePanelsToPool
+// move ONE displaced panel back to the pool (preserving editor state), like movePanelsToPool
 // does for all. An empty-pane placeholder (not in panelNodes) is just dropped.
 function poolDisplacedPanel(node) {
   const item = panelItemForNode(node);
@@ -64,7 +64,7 @@ function poolDisplacedPanel(node) {
   panelPool.appendChild(node);
 }
 
-// DOIT.9 S2: for a SAME-SHAPE layout change, swap only the slots whose ACTIVE item changed — no
+// for a SAME-SHAPE layout change, swap only the slots whose ACTIVE item changed — no
 // grid.innerHTML='' / topbar teardown, no detach/reattach of unrelated panes. A pure reorder touches
 // zero panels (active unchanged) and only reconciles the tab strip via updatePanelSlot.
 function syncActivePanelsInPlace() {
@@ -358,7 +358,7 @@ function renderPaneTabStrips() {
     dockviewSyncMountedPanels();
     return;
   }
-  // DOIT.6 #30: do not rebuild tab DOM while a tab is being dragged — replacing the dragged node
+  // do not rebuild tab DOM while a tab is being dragged — replacing the dragged node
   // aborts the native drag. Defer to the endSessionDrag flush.
   if (dragSession != null) { pendingTabStripRender = true; return; }
   for (const side of layoutSlotKeys()) {
@@ -512,7 +512,11 @@ function restorePaneTabPopover(strip, item) {
   tab.classList.add('popover-open');
 }
 
-function createPaneTab(side, item, displayContext = {}) {
+// the inner markup of a pane tab — pin icon + row (virtual rowHtml or tmux) + close button +
+// the file/session popover — built once here and shared by BOTH the DOM factory (createPaneTab) and the
+// Dockview string builder (dockviewPaneTabHtml in 75_dockview_layout.js), so pin/close/popover parity is
+// enforced in one place instead of by hand across two renderers.
+function paneTabInnerHtml(item, rowOptions = {}) {
   const type = tabTypeForItem(item);
   const isFiles = type?.key === 'files';
   const isEditor = isFileEditorItem(item);
@@ -521,6 +525,25 @@ function createPaneTab(side, item, displayContext = {}) {
   const auto = autoApproveStates.get(item)?.enabled === true && !isVirtual;
   const state = isVirtual ? null : sessionState(item, info);
   const agentKind = isVirtual ? '' : sessionAgentKind(item);
+  let html = type?.rowHtml ? type.rowHtml(item, rowOptions) : tmuxPaneTabHtml(item, info, state, auto);
+  html = `${pinnedTabIconHtml(item)}${html}`;
+  if (!isFiles) {
+    const closeTitle = isEditor ? `Close ${itemLabel(item)}` : `hide ${itemLabel(item)} from layout`;
+    const closeLabel = isEditor ? `Close ${itemLabel(item)}` : `Hide ${itemLabel(item)} from layout`;
+    const controlKind = isEditor ? 'close' : 'minimize';
+    html += `<button type="button" class="pane-tab-close ${platformWindowControlClass(controlKind)}" data-pane-tab-close title="${esc(closeTitle)}" aria-label="${esc(closeLabel)}"></button>`;
+  }
+  if (isEditor) html += filePopoverHtml(item);
+  else if (!isVirtual) html += sessionPopoverHtml(item, info, agentKind, auto, state);
+  return html;
+}
+
+function createPaneTab(side, item, displayContext = {}) {
+  const type = tabTypeForItem(item);
+  const isEditor = isFileEditorItem(item);
+  const isVirtual = Boolean(type);
+  const info = transcriptMeta.sessions?.[item];
+  const state = isVirtual ? null : sessionState(item, info);
   const active = item === activeItemForSide(side);
   const tab = document.createElement('div');
   tab.role = 'button';
@@ -532,21 +555,11 @@ function createPaneTab(side, item, displayContext = {}) {
   tab.draggable = true;
   tab.dataset.paneTab = item;
   const rowOptions = isEditor ? {parentLabel: displayContext.fileParentLabels?.get(fileItemPath(item)) || ''} : {};
-  if (type?.rowHtml) tab.innerHTML = type.rowHtml(item, rowOptions);
-  else tab.innerHTML = tmuxPaneTabHtml(item, info, state, auto);
-  tab.insertAdjacentHTML('afterbegin', pinnedTabIconHtml(item));
-  if (!isFiles) {
-    const closeTitle = isEditor ? `Close ${itemLabel(item)}` : `hide ${itemLabel(item)} from layout`;
-    const closeLabel = isEditor ? `Close ${itemLabel(item)}` : `Hide ${itemLabel(item)} from layout`;
-    const controlKind = isEditor ? 'close' : 'minimize';
-    tab.insertAdjacentHTML('beforeend', `<button type="button" class="pane-tab-close ${platformWindowControlClass(controlKind)}" data-pane-tab-close title="${esc(closeTitle)}" aria-label="${esc(closeLabel)}"></button>`);
-  }
+  tab.innerHTML = paneTabInnerHtml(item, rowOptions);
   if (isEditor) {
-    tab.insertAdjacentHTML('beforeend', filePopoverHtml(item));
     bindFilePopoverActions(tab);
     bindPaneTabPopover(tab, item);
   } else if (!isVirtual) {
-    tab.insertAdjacentHTML('beforeend', sessionPopoverHtml(item, info, agentKind, auto, state));
     bindPaneTabPopover(tab, item);
   }
   tab.setAttribute('aria-label', isEditor
@@ -770,7 +783,7 @@ function positionPaneTabPopover(tab, popover = null) {
 }
 
 function paneInfoTabHtml(item = infoItemId, options = {}) {
-  // DOIT.6: use .session-button-dir (like the Finder/Prefs tabs) so the label gets the themed
+  // use .session-button-dir (like the Finder/Prefs tabs) so the label gets the themed
   // active/inactive colors; the old .pane-tab-info-label set no color and went white-on-white in light.
   return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir pane-tab-info-label">${esc(itemLabel(item))}</span></span>`;
 }
@@ -1316,7 +1329,7 @@ function syncWindowStepButton(controls, terminalButton, session, dir, visible) {
 }
 
 function updatePanelWindowStepButtons(session, info) {
-  const controls = document.getElementById(`panel-${session}`)?.querySelector('.tabs');
+  const controls = document.getElementById(panelDomId(session))?.querySelector('.tabs');
   const terminalButton = controls?.querySelector('.terminal-tab');
   if (!controls || !terminalButton) return;
   const steps = windowStepVisibility(info?.panes);
@@ -1348,14 +1361,14 @@ function updatePanelControlLabels(session, info) {
   }
 }
 
-// DOIT.6 #40: ONE merged panel hosting both YO!info (repo metadata) and YO!agent (chat + activity
+// ONE merged panel hosting both YO!info (repo metadata) and YO!agent (chat + activity
 // context), switched by a segmented sub-tab row under the pane tabs. Both sub-views render into their
 // own containers (#info-content / #yoagent-content) and the active one is shown via CSS; the chosen
 // sub-tab is remembered across reloads (infoPanelSubTab).
 function createInfoPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel info-panel';
-  panel.id = `panel-${infoItemId}`;
+  panel.id = panelDomId(infoItemId);
   panel.dataset.infoSubtab = infoPanelSubTab;
   panel.innerHTML = `
       <div class="panel-head">
@@ -1444,7 +1457,7 @@ function createInfoPanel() {
 
 // The merged YO!info pane keeps its outer chrome and sub-tab row mounted between language changes so the
 // YO!agent chat draft and active sub-tab survive. Re-label those persistent controls in place.
-function relocalizeInfoPanelChrome(panel = document.getElementById(`panel-${infoItemId}`)) {
+function relocalizeInfoPanelChrome(panel = document.getElementById(panelDomId(infoItemId))) {
   if (!panel) return;
   const infoLabel = infoTabLabel();
   const agentLabel = yoagentTabLabel();
@@ -1493,7 +1506,7 @@ function relocalizeInfoPanelChrome(panel = document.getElementById(`panel-${info
 }
 
 // Reflect the active sub-tab onto the merged panel (button highlight + which sub-view is visible).
-function applyInfoSubTab(panel = document.getElementById(`panel-${infoItemId}`)) {
+function applyInfoSubTab(panel = document.getElementById(panelDomId(infoItemId))) {
   if (!panel) return;
   panel.dataset.infoSubtab = infoPanelSubTab;
   panel.querySelectorAll('[data-info-subtab]').forEach(button => {
@@ -1577,7 +1590,7 @@ function relativeActivityGeneratedText(payload = activitySummaryPayload) {
   const ts = Number(payload?.generated_ts || 0) || Date.parse(payload?.generated_at || '') / 1000;
   if (!Number.isFinite(ts) || ts <= 0) return {text: t('yoagent.notLoaded'), title: ''};
   const seconds = Math.max(0, Math.round(Date.now() / 1000 - ts));
-  // DOIT.8 Phase 3: render the relative time with Intl.RelativeTimeFormat(activeLocale) for native
+  // Phase 3: render the relative time with Intl.RelativeTimeFormat(activeLocale) for native
   // locale phrasing, wrapped by the localized "last updated {rel}" string.
   const text = seconds < 60
     ? t('yoagent.updated.justNow')
@@ -1823,7 +1836,7 @@ async function sendYoagentChatMessage(rawText) {
     const payload = await apiFetchJson('/api/yoagent/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      // DOIT.8 Phase 1: pass the active UI locale so the LLM backend replies in that language.
+      // Phase 1: pass the active UI locale so the LLM backend replies in that language.
       body: JSON.stringify({message: text, history: yoagentMessages.slice(-10), locale: i18nActiveLocaleId()}),
     });
     if (payload.fallback && payload.fallback_reason) {
@@ -2676,7 +2689,7 @@ function debugPanelHtml() {
 function createDebugPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel js-debug-panel';
-  panel.id = `panel-${debugPaneItemId}`;
+  panel.id = panelDomId(debugPaneItemId);
   panel.innerHTML = `
       <div class="panel-head preferences-panel-head">
         ${virtualPanelControlsHtml(debugPaneItemId)}
@@ -2765,7 +2778,7 @@ function bindDebugPanel(panel) {
 function createPreferencesPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel preferences-panel';
-  panel.id = `panel-${prefsItemId}`;
+  panel.id = panelDomId(prefsItemId);
   panel.innerHTML = `
       <div class="panel-head preferences-panel-head">
         ${virtualPanelControlsHtml(prefsItemId)}
@@ -2788,7 +2801,7 @@ function createPreferencesPanel() {
 }
 
 function focusPreferencesSearch(panel = null) {
-  // DOIT.6 #30: never steal focus into the search box while a tab is being dragged — focus() during a
+  // never steal focus into the search box while a tab is being dragged — focus() during a
   // drag (and the re-render it triggers) aborts the native drag.
   if (dragSession != null) return false;
   const root = panel && panel.isConnected !== false
@@ -2826,7 +2839,7 @@ function notePreferencesScrollActivity(now = Date.now()) {
 }
 
 function renderPreferencesPanels(options = {}) {
-  // DOIT.6 #30: defer Preferences re-render while a tab drag is in flight; rebuilding the dragged tab
+  // defer Preferences re-render while a tab drag is in flight; rebuilding the dragged tab
   // node aborts the native HTML5 drag.
   if (dragSession != null) { pendingPreferencesRender = true; return; }
   if (options.force !== true && preferencesScrollIsActive()) {
@@ -2841,7 +2854,7 @@ function renderPreferencesPanels(options = {}) {
     if (body) {
       const activeControl = activePreferenceControl(panel);
       const shouldKeepDom = activeControl && options.force !== true;
-      // DOIT.16 C3: the scroller is the inner .preferences-scroll, not the overlay-root body.
+      // the scroller is the inner .preferences-scroll, not the overlay-root body.
       const scroller = () => body.querySelector('.preferences-scroll') || body;
       const prevScroll = scroller();
       const scrollTop = prevScroll.scrollTop;

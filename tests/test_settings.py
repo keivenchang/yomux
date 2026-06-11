@@ -13,7 +13,7 @@ from yolomux_lib.settings import settings_payload
 
 
 def test_pane_spacing_default_is_3px():
-    # DOIT.20: the default inter-pane gap is 3px (the JS runtime fallback in 50_editor_settings_runtime.js
+    # the default inter-pane gap is 3px (the JS runtime fallback in 50_editor_settings_runtime.js
     # must match this so a fresh profile and a reset-to-defaults both render a 3px gap + 3px ring).
     assert default_settings()["appearance"]["pane_spacing"] == 3
     assert default_settings()["appearance"]["pane_ring_opacity"] == 75
@@ -204,7 +204,7 @@ def test_save_settings_preserves_concurrent_section_updates(tmp_path):
 
 
 def test_save_settings_reports_coerced_keys(tmp_path):
-    # DOIT.6 #84: a clamped/reverted patch value is reported in payload["coerced"], not changed silently.
+    # a clamped/reverted patch value is reported in payload["coerced"], not changed silently.
     path = tmp_path / "settings.yaml"
     save_settings(default_settings(), path)
     result = save_settings({"appearance": {"ui_font_size": 999}}, path)
@@ -230,7 +230,7 @@ def test_save_settings_reports_coerced_keys(tmp_path):
 
 
 def test_login_locale_picker_writes_general_language():
-    # DOIT.8 Phase 1: the login-screen language picker (entry point #1) renders endonym options and a
+    # Phase 1: the login-screen language picker (entry point #1) renders endonym options and a
     # successful pick is persisted to general.language (the same setting topbar/Preferences write).
     from yolomux_lib.web import LOGIN_LOCALE_CHOICES
     from yolomux_lib.web import current_language_pref
@@ -242,7 +242,7 @@ def test_login_locale_picker_writes_general_language():
     assert 'name="locale"' in page
     assert "繁體中文" in page and "简体中文" in page  # endonym-labeled, Traditional before Simplified
     assert page.index("繁體中文") < page.index("简体中文")
-    # DOIT.8 Phase 2: the <html> shell carries lang + dir; Arabic is rendered right-to-left.
+    # Phase 2: the <html> shell carries lang + dir; Arabic is rendered right-to-left.
     from yolomux_lib.web import html_lang_dir_attrs
     assert html_lang_dir_attrs("en") == 'lang="en" dir="ltr"'
     assert html_lang_dir_attrs("ar") == 'lang="ar" dir="rtl"'
@@ -266,7 +266,7 @@ def test_login_locale_picker_writes_general_language():
 
 
 def test_deterministic_yoagent_reply_localizes_framing():
-    # DOIT.8 Phase 3: the no-agent fallback localizes its fixed framing (prefix + no-activity headline)
+    # Phase 3: the no-agent fallback localizes its fixed framing (prefix + no-activity headline)
     # via the saved/active locale. The generated per-session prose stays English (LLM backends localize).
     from yolomux_lib.activity_summary import deterministic_yoagent_reply
 
@@ -283,7 +283,7 @@ def test_deterministic_yoagent_reply_localizes_framing():
 
 
 def test_watched_prs_and_server_event_defaults():
-    # DOIT.29: watched PRs ship with a safe empty default; refresh cadence is server-internal.
+    # watched PRs ship with a safe empty default; refresh cadence is server-internal.
     d = default_settings()
     assert d["github"]["watched_prs"] == []
     assert d["performance"]["server_event_poll_ms"] == 850
@@ -364,7 +364,7 @@ def test_stale_saved_poll_defaults_migrate_to_current_defaults():
 
 
 def test_notify_transitions_accepts_pr_keys_and_drops_unknown():
-    # DOIT.29: the notify_transitions allowlist now accepts the watched-PR transition keys alongside
+    # the notify_transitions allowlist now accepts the watched-PR transition keys alongside
     # session-state keys; unknown keys are still dropped.
     settings = sanitize_settings(
         {"notifications": {"notify_transitions": ["needs-input", "pr-merged", "pr-ci-failing", "pr-review", "bogus"]}}
@@ -384,7 +384,7 @@ def test_new_poll_intervals_are_clamped_to_range():
 
 
 def test_watched_prs_setting_round_trips_in_template(tmp_path):
-    # DOIT.29: a watchlist persists through the YAML template round-trip.
+    # a watchlist persists through the YAML template round-trip.
     path = tmp_path / "settings.yaml"
     save_settings(default_settings(), path)
     updated = save_settings({"github": {"watched_prs": ["ai-dynamo/frontend-crates#18", "owner/repo#7"]}}, path)
@@ -395,7 +395,7 @@ def test_watched_prs_setting_round_trips_in_template(tmp_path):
 
 
 def test_blame_all_lines_default_and_coercion():
-    # DOIT.26 follow-up: the all-lines blame toggle defaults off and coerces to bool.
+    # follow-up: the all-lines blame toggle defaults off and coerces to bool.
     assert default_settings()["editor"]["blame_all_lines"] is False
     assert sanitize_settings({"editor": {"blame_all_lines": "yes"}})["editor"]["blame_all_lines"] is True
     assert sanitize_settings({"editor": {"blame_all_lines": "no"}})["editor"]["blame_all_lines"] is False

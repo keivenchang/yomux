@@ -2,6 +2,11 @@ const dockviewContentComponentName = 'yolomux-panel';
 const dockviewTabComponentName = 'yolomux-tab';
 const dockviewPanelRenderer = 'onlyWhenVisible';
 const dockviewRootId = 'dockviewRoot';
+// named geometry/timing constants for the Dockview layer (were repeated unnamed literals).
+const DRAG_HYSTERESIS_PX = 8;            // px a pointer must move before a header drag is treated as a drag
+const PANE_DRAG_SUPPRESS_MS = 500;       // window after a pane drag during which pointer events are ignored
+const SPLIT_PCT_EPSILON = 0.01;          // split-percent diffs below this are treated as equal (no re-layout)
+const SERIALIZED_WEIGHT_BASE = 1000;     // Dockview gridview node weight base for serialization
 const dockviewLayoutState = {
   api: null,
   host: null,
@@ -287,7 +292,7 @@ function dockviewTabForPoint(x, y) {
   return tab?.querySelector?.('.dockview-pane-tab') || node?.closest?.('.dockview-pane-tab') || null;
 }
 
-function dockviewSuppressPanePointerDrag(ms = 500) {
+function dockviewSuppressPanePointerDrag(ms = PANE_DRAG_SUPPRESS_MS) {
   dockviewLayoutState.panePointerDragSuppressedUntil = Math.max(
     Number(dockviewLayoutState.panePointerDragSuppressedUntil) || 0,
     Date.now() + ms,
@@ -321,7 +326,7 @@ function dockviewFinishTabPointerDrag(event) {
   if (!state?.item || !state.slot) return;
   const dx = Math.abs((Number(event.clientX) || 0) - state.x);
   const dy = Math.abs((Number(event.clientY) || 0) - state.y);
-  if (Math.max(dx, dy) < 8) return;
+  if (Math.max(dx, dy) < DRAG_HYSTERESIS_PX) return;
   const target = dockviewTabForPoint(Number(event.clientX) || 0, Number(event.clientY) || 0);
   const targetItem = target?.dataset?.paneTab || '';
   if (!targetItem || targetItem === state.item) return;
@@ -385,7 +390,7 @@ function dockviewTrackPanePointerDrag(event) {
   if (!state?.sourceSlot) return;
   const dx = Math.abs((Number(event.clientX) || 0) - state.x);
   const dy = Math.abs((Number(event.clientY) || 0) - state.y);
-  if (!state.active && Math.max(dx, dy) < 8) return;
+  if (!state.active && Math.max(dx, dy) < DRAG_HYSTERESIS_PX) return;
   state.active = true;
   if (!state.previewStarted) {
     startPaneDragPreview(event, state.sourceSlot);
@@ -832,7 +837,7 @@ function dockviewJsonFromLayoutSlots(slots = layoutSlots) {
   };
 }
 
-function dockviewSerializedNodeFromLayout(node, slots, orientation, weight = 1000) {
+function dockviewSerializedNodeFromLayout(node, slots, orientation, weight = SERIALIZED_WEIGHT_BASE) {
   if (!node || node.slot) {
     return {
       type: 'branch',
@@ -843,7 +848,7 @@ function dockviewSerializedNodeFromLayout(node, slots, orientation, weight = 100
   return dockviewSerializedNodeContentFromLayout(node, slots, orientation, weight);
 }
 
-function dockviewSerializedNodeContentFromLayout(node, slots, orientation, weight = 1000) {
+function dockviewSerializedNodeContentFromLayout(node, slots, orientation, weight = SERIALIZED_WEIGHT_BASE) {
   if (!node || node.slot) return dockviewSerializedLeaf(node?.slot || layoutSlotKeys(slots)[0] || 'left', slots, weight);
   const direction = dockviewSplitForOrientation(orientation);
   const parts = flattenLayoutNodeForDirection(node, slots, direction);
@@ -874,7 +879,7 @@ function flattenLayoutNodeForDirection(node, slots, direction, weight = 1) {
   ];
 }
 
-function dockviewSerializedLeaf(slot, slots, weight = 1000) {
+function dockviewSerializedLeaf(slot, slots, weight = SERIALIZED_WEIGHT_BASE) {
   const tabs = paneTabs(slot, slots);
   const groupId = slot || nextLayoutSlot(slots);
   dockviewLayoutState.groupSlots.set(groupId, groupId);
@@ -964,7 +969,7 @@ function preserveDockviewDockedFileExplorerSplit(next, previous = layoutSlots) {
   }
   const finderPct = previousDocked.finderIndex === 0 ? previousDocked.pct : 100 - previousDocked.pct;
   const preservedPct = nextDocked.finderIndex === 0 ? finderPct : 100 - finderPct;
-  if (Math.abs((Number(nextRoot.pct) || 0) - preservedPct) > 0.01) {
+  if (Math.abs((Number(nextRoot.pct) || 0) - preservedPct) > SPLIT_PCT_EPSILON) {
     nextRoot.pct = preservedPct;
     dockviewLayoutState.reloadAfterAdoption = true;
   }
@@ -973,7 +978,7 @@ function preserveDockviewDockedFileExplorerSplit(next, previous = layoutSlots) {
 function preserveDockviewContentSplitPercentagesAfterDockResize(nextRoot, previousRoot, nextDocked, previousDocked) {
   const previousFinderPct = previousDocked.finderIndex === 0 ? previousDocked.pct : 100 - previousDocked.pct;
   const nextFinderPct = nextDocked.finderIndex === 0 ? nextDocked.pct : 100 - nextDocked.pct;
-  if (Math.abs(nextFinderPct - previousFinderPct) <= 0.01) return;
+  if (Math.abs(nextFinderPct - previousFinderPct) <= SPLIT_PCT_EPSILON) return;
   const nextContent = nextRoot.children?.[nextDocked.contentIndex];
   const previousContent = previousRoot.children?.[previousDocked.contentIndex];
   if (copyLayoutSplitPercentagesByShape(nextContent, previousContent)) {
@@ -985,7 +990,7 @@ function copyLayoutSplitPercentagesByShape(target, source) {
   if (!target || !source || target.slot || source.slot || target.split !== source.split) return false;
   let changed = false;
   const sourcePct = splitPercent(source.pct);
-  if (Math.abs(splitPercent(target.pct) - sourcePct) > 0.01) {
+  if (Math.abs(splitPercent(target.pct) - sourcePct) > SPLIT_PCT_EPSILON) {
     target.pct = sourcePct;
     changed = true;
   }
@@ -1120,7 +1125,7 @@ function handleDockviewHeaderActionClick(event, fallbackItem = '') {
   if (button.dataset.detailToggle !== undefined) {
     event.preventDefault();
     event.stopPropagation();
-    const panel = document.getElementById(`panel-${item}`);
+    const panel = document.getElementById(panelDomId(item));
     if (panel) setPanelDetailsCollapsed(panel, !panel.classList.contains('details-collapsed'));
     return;
   }
@@ -1162,7 +1167,7 @@ function createDockviewHeaderActionsRenderer() {
     element.hidden = !html;
     element.innerHTML = html;
     updatePanelWindowStepButtons(activeItem, transcriptMeta.sessions?.[activeItem]);
-    const panel = document.getElementById(`panel-${activeItem}`);
+    const panel = document.getElementById(panelDomId(activeItem));
     if (panel) updatePaneExpandButton(panel, activeItem);
   };
   const dispose = () => {
@@ -1308,30 +1313,9 @@ function syncDockviewTabShell(tab, item, api = null) {
 }
 
 function dockviewPaneTabHtml(item) {
-  const type = tabTypeForItem(item);
-  const isFiles = type?.key === 'files';
-  const isEditor = isFileEditorItem(item);
-  const isVirtual = Boolean(type);
-  const info = transcriptMeta.sessions?.[item];
-  const auto = autoApproveStates.get(item)?.enabled === true && !isVirtual;
-  const state = isVirtual ? null : sessionState(item, info);
-  const agentKind = isVirtual ? '' : sessionAgentKind(item);
-  let html = type?.rowHtml
-    ? type.rowHtml(item, {})
-    : tmuxPaneTabHtml(item, info, state, auto);
-  html = `${pinnedTabIconHtml(item)}${html}`;
-  if (!isFiles) {
-    const closeTitle = isEditor ? `Close ${itemLabel(item)}` : `hide ${itemLabel(item)} from layout`;
-    const closeLabel = isEditor ? `Close ${itemLabel(item)}` : `Hide ${itemLabel(item)} from layout`;
-    const controlKind = isEditor ? 'close' : 'minimize';
-    html += `<button type="button" class="pane-tab-close ${platformWindowControlClass(controlKind)}" data-pane-tab-close title="${esc(closeTitle)}" aria-label="${esc(closeLabel)}"></button>`;
-  }
-  if (isEditor) {
-    html += filePopoverHtml(item);
-  } else if (!isVirtual) {
-    html += sessionPopoverHtml(item, info, agentKind, auto, state);
-  }
-  return html;
+  // Shares paneTabInnerHtml with the DOM-building createPaneTab so pin/close/popover markup parity is
+  // enforced in one place (the Dockview tab renderer just needs the string form).
+  return paneTabInnerHtml(item);
 }
 
 function dockviewTabAriaLabel(item) {

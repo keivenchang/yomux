@@ -69,7 +69,7 @@ def _index_disk_path(root: Path) -> Path:
 
 
 def _build_lock_path(root: Path) -> Path:
-    # C11: a per-root file lock so two server processes (e.g. :7777 and :7778 sharing STATE_DIR) don't
+    # C11: a per-root file lock so two server processes (e.g. :7777 and :8001 sharing STATE_DIR) don't
     # duplicate the same expensive walk or delete while another build is persisting.
     digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
     return INDEX_DIR / f"{digest}.lock"

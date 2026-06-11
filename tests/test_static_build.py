@@ -55,7 +55,7 @@ def test_build_pseudo_catalog_covers_every_source_key():
 
 
 def test_css_braces_are_balanced_in_every_partial():
-    # The shipped CSS partials must each be brace-balanced (DOIT.12 B1: a truncated rule once split across
+    # The shipped CSS partials must each be brace-balanced (a truncated rule once split across
     # two partials and only rebalanced by accident in the bundle). This passes today; it guards regressions.
     check_css_braces()
 
@@ -73,7 +73,25 @@ def test_duplicate_function_lint_flags_cross_file_duplicates(monkeypatch, tmp_pa
     second.write_text("  function indentedIsIgnored() {}\nfunction shared() {}\n", encoding="utf-8")
     monkeypatch.setitem(sb.ASSETS, "yolomux.js", ["first.js", "second.js"])
     monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
-    assert sb.lint_duplicate_functions() == ["duplicate function 'shared' in: first.js, second.js"]
+    assert sb.lint_duplicate_functions() == ["duplicate top-level declaration 'shared' in: first.js, second.js"]
+
+
+def test_duplicate_declaration_lint_also_catches_top_level_const(monkeypatch, tmp_path):
+    # a duplicate top-level const across concatenated partials silently shadows too.
+    import tools.static_build as sb
+    first = tmp_path / "first.js"
+    second = tmp_path / "second.js"
+    first.write_text("const DUP = 1;\nfunction onlyHere() {}\n", encoding="utf-8")
+    second.write_text("const DUP = 2;\n", encoding="utf-8")
+    monkeypatch.setitem(sb.ASSETS, "yolomux.js", ["first.js", "second.js"])
+    monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
+    assert sb.lint_duplicate_functions() == ["duplicate top-level declaration 'DUP' in: first.js, second.js"]
+
+
+def test_undefined_css_var_lint_is_clean():
+    # every var(--x) in the bundle resolves to a CSS def or a JS setProperty/inline-style.
+    from tools.static_build import lint_undefined_css_vars
+    assert lint_undefined_css_vars() == []
 
 
 def test_check_css_braces_flags_an_unbalanced_partial(monkeypatch, tmp_path):

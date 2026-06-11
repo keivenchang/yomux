@@ -9,6 +9,9 @@
   --input-bg: var(--panel2);
   --text: #e4e8ee;
   --muted: #9aa5b1;
+  /* The stronger/cooler muted shade (darker than --muted) — one owner for what was the bare #8b95a5
+     repeated across the editor scheme, code comments, and several muted-text component rules. */
+  --text-muted-strong: #8b95a5;
   --line: #303948;
   --tree-indent-line: rgba(148, 163, 184, 0.45);
   --sep-muted: #5e6878;
@@ -25,7 +28,7 @@
   --brand-green: #76b900;
   --brand-green-dark: #3f6f00;
   --accent-gold: #f5c542;
-  /* DOIT.12 A4: --accent was UNDEFINED, so topbar search/language/activity hover borders fell back to a
+  /* --accent was UNDEFINED, so topbar search/language/activity hover borders fell back to a
      literal light-blue (#6ea8fe) in BOTH themes. Define it per theme (light gets a darker, readable blue). */
   --accent: #6ea8fe;
   --drop-outline: #ffffff;
@@ -93,7 +96,7 @@
   --pane-inactive-tab-bg-hover: var(--active-tab-muted-hover-bg);
   --pane-inactive-tab-border: var(--active-tab-muted-border);
   --pane-tab-text: #dfe6ef;
-  /* DOIT.41: ONE source accent that every ACTIVE/FOCUSED surface derives from (active tab, focused-pane
+  /* ONE source accent that every ACTIVE/FOCUSED surface derives from (active tab, focused-pane
      ring + glow, chrome strip, file selection, hover tints, YO marker, and Markdown headings). Swapped
      by the appearance.active_color preference; Green is the default = the brand-green values below. */
   --active-accent: #76b900;          /* solid: ring, glow, strip, alpha tints */
@@ -142,6 +145,9 @@
   --pane-tab-panel-ring-shadow: rgb(var(--active-accent-rgb) / 0.95);
   --pane-tab-panel-ring-width: 4px;
   --pane-ring-opacity: 75%;
+  /* the needs-input/exec/blocked pane attention ring. A token (with a light-theme variant
+     below) so it themes like every other ring instead of being a raw #ff3347 that ignores the theme. */
+  --pane-ring-attention: #ff3347;
   --pane-active-ring-opacity: 75%;
   --pane-tab-panel-head-bg: #3f6f00;
   --pane-tab-panel-head-text: #f4ffe8;
@@ -174,6 +180,11 @@
   --popover-max-inline-size: calc(100vw - var(--popover-edge-gap) - var(--popover-edge-gap));
   --shadow-popover: 0 18px 50px rgba(0, 0, 0, 0.45);
   --shadow-elevated: 0 16px 42px rgba(0, 0, 0, 0.45);
+  /* Shared shadow-cast color, theme-aware. Per-element box-shadows keep their own geometry (offset/blur)
+     but read this through rgb(var(--shadow-rgb) / a) so they flip with the theme instead of staying black
+     on the light surface. Dark = pure black (identical to the old literals); light = the slate the popover
+     tokens already use. */
+  --shadow-rgb: 0 0 0;
   --app-menu-max-inline-size: var(--popover-max-inline-size);
   --app-menu-max-block-size: 74vh;
   --app-menu-tab-max-block-size: 82vh;
@@ -236,7 +247,7 @@
   --editor-gutter-bg: var(--panel);
   --editor-scheme-bg: #0f1115;
   --editor-scheme-fg: #e6efe2;
-  --editor-scheme-muted: #8b95a5;
+  --editor-scheme-muted: var(--text-muted-strong);
   --editor-scheme-line: #303948;
   --editor-scheme-panel: #151922;
   --editor-scheme-panel2: #1e2430;
@@ -260,7 +271,7 @@
   --code-type: #67e8f9;
   --code-property: #96d6ff;
   --code-tag: #f0abfc;
-  --code-comment: #8b95a5;
+  --code-comment: var(--text-muted-strong);
   --code-inline: #ffe08a;
   --code-inline-bg: rgba(245, 197, 66, 0.14);
   --code-inline-border: rgba(245, 197, 66, 0.24);
@@ -354,7 +365,7 @@ body.theme-light {
   --sep-muted: #8c96a3;
   --divider: var(--lt-line);
   --accent-lime: #2f7d20;
-  /* DOIT.41: light-theme defaults for the active accent (Green). The picker (applyActiveColor) overrides
+  /* light-theme defaults for the active accent (Green). The picker (applyActiveColor) overrides
      these per preset; supplied (not derived) so Green stays the exact current light values. */
   --active-accent: #5f9800;
   --active-accent-rgb: 95 152 0;
@@ -400,7 +411,7 @@ body.theme-light {
   --pane-tab-zoom-border: var(--active-control-border);
   --pane-tab-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 88%, #ffffff 12%);
   --pane-tab-zoom-hover-border: var(--active-control-border);
-  /* DOIT.6 #31: active-tab greens tuned for the light surface so a theme switch visibly repaints the
+  /* active-tab greens tuned for the light surface so a theme switch visibly repaints the
      active pane tab (the dark-mode neon lime looked "stuck" with no light override). */
   --pane-tab-active-bg: var(--active-accent-bright);
   --pane-tab-active-text: var(--active-accent-text);
@@ -464,6 +475,7 @@ body.theme-light {
   --auto-border-disabled: #b3c99b;
   --auto-glow: rgba(95, 152, 0, 0.22);
   --bad: #b91c1c;
+  --pane-ring-attention: #d11a2a;  /* darker attention red that reads on the light pane bg */
   --danger-text: #fff3f4;
   --danger-bg: #c61f38;
   --danger-border: #ff7a86;
@@ -483,6 +495,7 @@ body.theme-light {
   --inactive-tab-border: #9aa6b6;
   --shadow-popover: 0 18px 50px rgba(15, 23, 42, 0.24);
   --shadow-elevated: 0 16px 42px rgba(15, 23, 42, 0.24);
+  --shadow-rgb: 15 23 42;
   --text-selection-bg: #93c5fd;
   --file-hover-bg: #fff2a8;
   --file-hover-border: #d97706;
@@ -551,7 +564,7 @@ body {
   background: var(--text-selection-bg);
 }
 .topbar {
-  /* DOIT.12 A1/A2: the "big space" above the green tabs was the topbar's OWN cool-gray bg showing where
+  /* the "big space" above the green tabs was the topbar's OWN cool-gray bg showing where
      the shorter pills sit centered in a too-tall bar. Keep the tightened height (+4px, not +8px), but
      leave the bar neutral at rest and use the shared tab-strip green only for hover/focus feedback. */
   min-height: calc(var(--compact-control-height) + 4px);
@@ -628,7 +641,7 @@ body {
   background: rgba(42, 14, 18, 0.98);
   border: 1px solid var(--pr-status-failing);
   border-radius: 7px;
-  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.42);
+  box-shadow: 0 14px 38px rgb(var(--shadow-rgb) / 0.42);
   white-space: normal;
   font: var(--ui-font-size-sm)/1.35 var(--ui-font);
   opacity: 0;
@@ -735,7 +748,7 @@ body {
   min-height: var(--compact-control-height);
   overflow: visible;
 }
-/* DOIT.21: editor back/forward history, immediately before the search box. An auto inline-start margin
+/* editor back/forward history, immediately before the search box. An auto inline-start margin
    on the group + an auto inline-end margin on the search centers the nav+search PAIR as one unit. */
 .topbar-nav {
   flex: 0 0 auto;
@@ -764,7 +777,7 @@ body.theme-light .topbar-nav-button {
   background: rgb(var(--overlay-slate-rgb) / 0.05);
 }
 .topbar-nav-button:hover:not(:disabled) {
-  border-color: var(--accent, #6ea8fe);
+  border-color: var(--accent);
 }
 .topbar-nav-button:disabled {
   opacity: 0.34;
@@ -784,20 +797,20 @@ body.theme-light .topbar-nav-button {
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--input-bg);
-  color: var(--muted, #8b95a5);
+  color: var(--muted);
   cursor: text;
   font: inherit;
   overflow: hidden;
 }
 .topbar-search:hover {
-  border-color: var(--accent, #6ea8fe);
+  border-color: var(--accent);
 }
-/* DOIT.6 #33: --input-bg is undefined, so the fallback #11151c made this a DARK pill in both themes.
+/* --input-bg is undefined, so the fallback #11151c made this a DARK pill in both themes.
    In light mode blend it into the topbar as a subtle bordered box (keep the border + muted text). */
 body.theme-light .topbar-search {
   background: rgb(var(--overlay-slate-rgb) / 0.05);
 }
-/* DOIT.8 Phase 1: the top-right language switcher. A compact pill matching the topbar search. */
+/* Phase 1: the top-right language switcher. A compact pill matching the topbar search. */
 .topbar-language {
   flex: 0 0 auto;
   justify-self: end;
@@ -816,16 +829,13 @@ body.theme-light .topbar-language {
   background: rgb(var(--overlay-slate-rgb) / 0.05);
 }
 .topbar-language:hover {
-  border-color: var(--accent, #6ea8fe);
+  border-color: var(--accent);
 }
 .topbar-search-icon {
   flex: 0 0 auto;
 }
 .topbar-search-label {
   flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   text-align: start;
 }
 .topbar-search-hint {
@@ -835,7 +845,7 @@ body.theme-light .topbar-language {
   border: 1px solid var(--line);
   border-radius: 3px;
   padding: 0 4px;
-  color: var(--muted, #8b95a5);
+  color: var(--muted);
   background: transparent;
 }
 @media (max-width: 1100px) {
@@ -859,7 +869,7 @@ body.theme-light .topbar-language {
   border: 1px solid var(--line);
   border-radius: 6px;
   background: transparent;
-  color: var(--muted, #8b95a5);
+  color: var(--muted);
   font: inherit;
   font-size: var(--ui-font-size-2xs);
   cursor: pointer;
@@ -869,7 +879,7 @@ body.theme-light .topbar-language {
   display: none;
 }
 .topbar-activity:hover {
-  border-color: var(--accent, #6ea8fe);
+  border-color: var(--accent);
   color: var(--text);
 }
 .topbar-activity.has-attention {
@@ -1181,9 +1191,6 @@ body.theme-light .topbar-language {
      (a wrapping block's max-content is ~one word, so fitAppMenuPopover computed a tiny width). On one
      line the fit-width grows to the longest detail (capped at max-width), so the menu is wider + shorter.
      Full text stays available via the item's title/aria-label. */
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
   max-width: min(58ch, calc(var(--app-menu-max-inline-size) - 74px));
   color: var(--pr-status-closed);
   font: var(--ui-font-size-xs)/1.2 var(--mono-font);
@@ -1296,7 +1303,7 @@ body.theme-light .topbar:hover,
 body.theme-light .topbar:focus-within {
   background: var(--pane-tab-strip-bg);
 }
-/* DOIT.12 A4: light-mode topbar coloring fixes — each was tuned only for the dark topbar and read wrong
+/* light-mode topbar coloring fixes — each was tuned only for the dark topbar and read wrong
    on the light neutral/hover-green bar. */
 body.theme-light #tabMetaToggle.active {
   background: var(--active-control-bg);
@@ -1362,7 +1369,7 @@ body.theme-light .app-menu-submenu-wrap.open > .app-menu-command:not(:disabled) 
   border-color: #1d4ed8;
 }
 body.theme-light .app-menu-command:disabled {
-  color: #8b95a5;
+  color: var(--text-muted-strong);
 }
 body.theme-light .app-menu-ui-icon {
   color: #17202c;
@@ -1409,7 +1416,7 @@ body.theme-light .latency-meter {
   background: #ffffff;
   border-color: var(--line);
 }
-/* B1/DOIT.12: this rule was TRUNCATED (open brace, no body) and unbalanced the file's braces, so in the
+/* this rule was TRUNCATED (open brace, no body) and unbalanced the file's braces, so in the
    concatenated bundle it swallowed the start of the next partial's CSS. Completed: an enabled Notify
    toggle reads as active/pressed = brand green (theme-aware), like the other topbar toggles. */
 .notify-toggle.active {
@@ -1469,9 +1476,6 @@ body.theme-light .latency-meter {
 }
 .session-button-dir {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   color: #e7ecf3;
   font-size: var(--tab-label-size);
   font-weight: 500;
@@ -1638,7 +1642,7 @@ body.theme-light .latency-meter {
 }
 /* Light mode: the NEUTRAL badges/markers hardcode dark slate boxes (the saturated
    status colors — red/blue/green — already read on white and are left alone).
-   Repaint the neutral chips as light gray with dark text (DOIT.12 B5). */
+   Repaint the neutral chips as light gray with dark text. */
 body.theme-light .session-state-badge {
   color: #52617a;
   background: #eef1f5;
@@ -1654,7 +1658,7 @@ body.theme-light .session-yolo-marker.inactive {
   background: #e2e6ec;
   border-color: #c2cad6;
 }
-/* DOIT.6 #23: the YO ball spins ONLY when the agent is working, and SLOWLY — at the
+/* the YO ball spins ONLY when the agent is working, and SLOWLY — at the
    "Active YO rotation period" setting (appearance.yolo_rotate_ms, default 20s), not a fast hardcoded
    value. An idle marker (auto-on or not) is STATIC — there is no ambient idle rotation rule.
    yolo_rotate_ms = 0 -> --yolo-rotation-duration: 0s -> the rotation renders static (disabled). */
@@ -1685,9 +1689,6 @@ body.theme-light .session-yolo-marker.inactive {
   color: var(--pr-status-closed);
   background: #161d29;
   font: 800 var(--ui-font-size-3xs)/1 var(--mono-font);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 body.tab-meta-hidden .pane-tab .tab-symbol {
   display: none;
@@ -1757,7 +1758,7 @@ body.tab-meta-hidden .pane-tab .tab-symbol {
   background: #9fd8ff;
   border-color: #c9ebff;
 }
-/* DOIT.6: the .ci-indicator chips are tuned for dark mode; on a bright/green tab in light theme they
+/* the .ci-indicator chips are tuned for dark mode; on a bright/green tab in light theme they
    are illegible (worst: pr-review-required = light-gray text + strikethrough on transparent). Light
    theme uses dark text on light/saturated fills, and a readable (un-faded) review-required chip. */
 body.theme-light .ci-indicator {
@@ -1844,7 +1845,7 @@ body.theme-light .ci-indicator.branch-indicator {
   background: var(--panel2);
   border: 1px solid var(--active-control-soft-border);
   border-radius: 8px;
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.42);
+  box-shadow: 0 18px 50px rgb(var(--shadow-rgb) / 0.42);
   transform: translateY(-2px);
   transition:
     opacity 90ms ease var(--popover-hide-delay),
@@ -1863,7 +1864,7 @@ body.theme-light .ci-indicator.branch-indicator {
   border-inline-start: 1px solid var(--active-control-soft-border);
   border-top: 1px solid var(--active-control-soft-border);
 }
-/* S14 (DOIT.51): opt-in drag-timing readout — a copyable on-page box so the timing can be captured
+/* S14: opt-in drag-timing readout — a copyable on-page box so the timing can be captured
    without DevTools. Only shown after a tab drag while the yolomux.debugDragTiming flag is set; click
    it to select-all, then copy. Theme-aware (no hardcoded colors). */
 .drag-timing-overlay {
@@ -1878,7 +1879,7 @@ body.theme-light .ci-indicator.branch-indicator {
   background: var(--panel2);
   border: 1px solid var(--active-control-soft-border);
   border-radius: 6px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 8px 24px rgb(var(--shadow-rgb) / 0.5);
   font: 11px/1.4 var(--mono-font);
   white-space: pre;
   user-select: text;
@@ -1971,9 +1972,6 @@ body.theme-light .branch-link {
   overflow-wrap: anywhere;
 }
 .popover-row.compact .popover-value {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .session-popover .meta-muted {
   color: var(--muted);
@@ -1993,7 +1991,7 @@ body.theme-light .branch-link {
   background: color-mix(in srgb, var(--panel2) 96%, black 4%);
   border: 1px solid var(--active-control-soft-border);
   border-radius: var(--radius-control);
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.40);
+  box-shadow: 0 10px 28px rgb(var(--shadow-rgb) / 0.40);
   opacity: 0.82 !important;
 }
 .pane-drag-image.drag-image {
@@ -2001,7 +1999,7 @@ body.theme-light .branch-link {
   background: color-mix(in srgb, var(--panel) 88%, transparent);
   border: 2px dotted var(--pane-resizer-hover-bg);
   border-radius: var(--radius-lg);
-  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.42);
+  box-shadow: 0 14px 34px rgb(var(--shadow-rgb) / 0.42);
   overflow: hidden;
   opacity: 0.86 !important;
 }
@@ -2018,12 +2016,9 @@ body.theme-light .branch-link {
 }
 .pane-drag-image-title {
   min-width: 0;
-  overflow: hidden;
   font-weight: 700;
   font-size: 12px;
   line-height: 1.2;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .pane-drag-image-meta {
   color: var(--muted);
@@ -2041,16 +2036,13 @@ body.theme-light .branch-link {
 }
 .pane-drag-image-tabs span {
   max-width: min(18ch, 42%);
-  overflow: hidden;
   padding: 2px 5px;
   color: var(--text);
   background: var(--pane-bar-bg, var(--panel2));
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: var(--radius-control);
   font-size: 11px;
   line-height: 1.15;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .file-drag-main {
   display: flex;
@@ -2082,17 +2074,11 @@ body.theme-light .branch-link {
 }
 .file-drag-title {
   margin-bottom: 1px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   color: var(--text);
   font: 600 var(--ui-font-size-2xs)/1.15 var(--ui-font);
 }
 .file-drag-path,
 .file-drag-more {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   color: var(--muted);
   font: var(--ui-font-size-3xs)/1.15 var(--mono-font);
 }
@@ -2172,7 +2158,7 @@ body.theme-light .branch-link {
   grid-template-rows: auto auto minmax(0, 1fr);
 }
 .preferences-body {
-  /* DOIT.16 C3: the inactive-pane dim is a full-bleed .panel-overlay-root::after (inset 0). If the
+  /* the inactive-pane dim is a full-bleed .panel-overlay-root::after (inset 0). If the
      overlay-root is ALSO the scroll container, the dim scrolls away with the content and only covers
      the top viewport. So the overlay-root must be a stable, non-scrolling pane-filling layer; the
      scrolling lives on the inner .preferences-scroll. */
@@ -2373,7 +2359,7 @@ body.theme-light .branch-link {
   cursor: pointer;
 }
 .diff-ref-reset:hover {
-  background: var(--hover);
+  background: var(--active-control-soft-bg);
   color: var(--text);
 }
 .diff-ref-controls.compact .diff-ref-reset {
@@ -2388,7 +2374,7 @@ body.theme-light .branch-link {
   max-height: min(320px, 42vh);
   overflow: auto;
   padding: 4px;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--panel2);
   color: var(--text);
@@ -2433,25 +2419,16 @@ body.theme-light .branch-link {
 }
 .diff-ref-suggestion-ref {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   font: 800 var(--ui-font-size-xs)/1 var(--mono-font);
   color: var(--text);
 }
 .diff-ref-suggestion-subject {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   font: 600 var(--ui-font-size-xs)/1 var(--ui-font);
   color: var(--muted);
 }
 .diff-ref-suggestion-meta {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   font: 500 var(--ui-font-size-2xs)/1 var(--mono-font);
   color: var(--muted);
   opacity: 0.7;
@@ -2486,9 +2463,6 @@ body.theme-light .branch-link {
 }
 .changes-comparison-title {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   font-weight: 700;
 }
 .changes-comparison-summary {
@@ -2533,7 +2507,7 @@ body.theme-light .branch-link {
   background: var(--panel);
 }
 .changes-repo-head {
-  /* DOIT.23: now a collapse toggle (button), mirroring .changes-uploaded-toggle. */
+  /* now a collapse toggle (button), mirroring .changes-uploaded-toggle. */
   width: 100%;
   display: flex;
   align-items: center;
@@ -2559,9 +2533,6 @@ body.theme-light .branch-link {
 .changes-repo-title {
   flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   color: var(--accent-gold);
   font-weight: 800;
 }
@@ -2697,9 +2668,6 @@ body.theme-light .branch-link {
   font-size: var(--ui-font-size-xs);
 }
 .preferences-path-value {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   color: var(--text);
 }
 .preferences-readonly {
@@ -3103,14 +3071,11 @@ body.theme-light .branch-link {
 .command-palette-label,
 .command-palette-detail {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .command-palette-label {
   font-weight: 700;
 }
-/* DOIT.22: view-mode chips on a deduped file row (one row for a file open as editor + preview). */
+/* view-mode chips on a deduped file row (one row for a file open as editor + preview). */
 .command-palette-views {
   flex: 0 0 auto;
   display: inline-flex;
@@ -3125,7 +3090,7 @@ body.theme-light .branch-link {
   background: var(--active-control-soft-bg);
   font: 700 var(--ui-font-size-3xs)/1.5 var(--mono-font);
   text-transform: lowercase;
-  cursor: pointer;   /* DOIT.22 follow-up: chips are clickable — jump to that view */
+  cursor: pointer;   /* follow-up: chips are clickable — jump to that view */
 }
 .command-palette-view-chip:hover {
   border-color: var(--active-control-border);
@@ -3182,7 +3147,7 @@ body.theme-light .command-palette-view-chip {
   background: #111820;
   border: 1px solid #708093;
   border-radius: 8px;
-  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.62);
+  box-shadow: 0 24px 70px rgb(var(--shadow-rgb) / 0.62);
 }
 .keyboard-shortcuts-head {
   display: flex;
@@ -3479,12 +3444,9 @@ body.theme-light .preferences-inline-action {
   font: inherit;
 }
 .branch-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .branch-meta {
-  color: #8b95a5;
+  color: var(--text-muted-strong);
   white-space: nowrap;
 }
 .branch-subject {
@@ -3528,7 +3490,7 @@ body.theme-light .preferences-inline-action {
   color: #ffffff;
 }
 /* ============================================================================
-   Light mode (DOIT.12 B5): dialogs and warning chrome hardcode dark fills + light
+   Light mode: dialogs and warning chrome hardcode dark fills + light
    text. The dialogs combine a dark bg with theme-aware `var(--text)` (dark in light)
    → dark-on-dark. Repaint as light cards with dark/readable text. The white agent
    glyphs are invisible on the white Changes panel → darken.
@@ -3675,7 +3637,7 @@ button:disabled:hover { border-color: var(--line); }
   --dv-drag-over-background-color: color-mix(in srgb, var(--pane-resizer-bg) 18%, transparent);
   --dv-drag-over-border-color: var(--pane-resizer-hover-bg);
   --dv-drag-over-border: 2px dashed var(--pane-resizer-hover-bg);
-  color: var(--fg);
+  color: var(--text);
   background: transparent;
 }
 .yolomux-dockview .dv-tabs-and-actions-container {
@@ -3798,7 +3760,7 @@ button:disabled:hover { border-color: var(--line); }
 .yolomux-dockview .dv-groupview:has(.panel.needs-input-pane),
 .yolomux-dockview .dv-groupview:has(.panel.needs-exec-pane),
 .yolomux-dockview .dv-groupview:has(.panel.needs-blocked-pane) {
-  --panel-ring-color: #ff3347;
+  --panel-ring-color: var(--pane-ring-attention);
 }
 .yolomux-dockview .dv-content-container {
   background: transparent;
@@ -4155,7 +4117,7 @@ body.theme-light .drop-slot.drag-over {
        the .active / [aria-pressed=true] state = green. Buttons never hardcode their own colors.
      Raw values come from theme tokens, so everything flips light/dark automatically. */
   --pane-bar-bg: var(--panel2);
-  /* DOIT.20: default = no ring on a plain inactive pane; per-state rules below set green/red/white. */
+  /* default = no ring on a plain inactive pane; per-state rules below set green/red/white. */
   --panel-ring-color: transparent;
   --pane-ctl-bg: var(--pane-tab-control-bg);
   --pane-ctl-fg: var(--pc-control-fg);
@@ -4168,12 +4130,12 @@ body.theme-light .drop-slot.drag-over {
      border (box-sizing: border-box) it is part of the pane's box — it sits flush against the resizer
      (no gap to the red/yellow line) and is never clipped like an outset box-shadow was. At spacing 0
      the border is 0px (no gutter, panes flush to the 1px separator). */
-  /* DOIT.24 C1: the green/red/white state ring IS this gutter border, colored per state via the unified
+  /* the green/red/white state ring IS this gutter border, colored per state via the unified
      --panel-ring-color and faded by --pane-ring-opacity. Because it fills the pane's OUTER edge (the
      gutter, flush to the resizer), an active (green) pane and a needs (red) pane meet at the seam with
      only the 1px resizer between them — they TOUCH (image 038). Inactive = transparent (--panel-ring-color
      default). At spacing 0 the border is 0px (panes flush). This puts the ring back at the seam after
-     DOIT.20's content-edge overlay made adjacent rings sit a gutter apart. */
+     's content-edge overlay made adjacent rings sit a gutter apart. */
   border: var(--pane-split-gap) solid color-mix(in srgb, var(--panel-ring-color) var(--panel-ring-opacity, var(--pane-ring-opacity, 75%)), transparent);
   border-radius: var(--pane-tile-radius);
   background: var(--panel-inactive);
@@ -4494,12 +4456,12 @@ body.theme-light .drop-slot.drag-over {
   --panel-ring-opacity: var(--pane-active-ring-opacity);
   background: var(--panel);
 }
-/* DOIT.20 + DOIT.24 C1: the green/red/white pane ring is the translucent --pane-split-gap GUTTER BORDER
+/* the green/red/white pane ring is the translucent --pane-split-gap GUTTER BORDER
    (above), colored per state by the unified --panel-ring-color and faded by --pane-ring-opacity. Because
    it fills the pane's outer edge, an active (green) pane and a needs (red) pane meet at the seam (image
    038). ONE marker means no "red inside green" nesting: a focused+needs pane just resolves --panel-ring-
-   color to red. (DOIT.20 first tried a content-edge .panel::after overlay for opacity, but that sat a
-   gutter away from the neighbor; DOIT.24 moved it back to the seam border, keeping the opacity.) */
+   color to red. (first tried a content-edge .panel::after overlay for opacity, but that sat a
+   gutter away from the neighbor; moved it back to the seam border, keeping the opacity.) */
 .panel.active-pane,
 .panel.typing-ready-pane {
   /* focused pane: all chrome bars (tab container + info/detail row) switch from neutral gray to the
@@ -4523,7 +4485,7 @@ body.theme-light .drop-slot.drag-over {
 .panel.needs-input-pane,
 .panel.needs-exec-pane,
 .panel.needs-blocked-pane {
-  --panel-ring-color: #ff3347;
+  --panel-ring-color: var(--pane-ring-attention);
 }
 /* image 028: attention ALWAYS beats the yolo-ready green tint. A focused needs pane is also
    .yolo-ready-pane, whose green --panel-ring-color (0,3,0) would otherwise out-specify the needs red
@@ -4534,7 +4496,7 @@ body.theme-light .drop-slot.drag-over {
 .panel.typing-ready-pane.needs-input-pane,
 .panel.typing-ready-pane.needs-exec-pane,
 .panel.typing-ready-pane.needs-blocked-pane {
-  --panel-ring-color: #ff3347;
+  --panel-ring-color: var(--pane-ring-attention);
 }
 /* needs-* panes PULSE the red ring (the keyframes drive border-color directly on the gutter border). */
 .panel.needs-input-pane,
@@ -4594,9 +4556,6 @@ body.theme-light .drop-slot.drag-over {
   color: inherit;
   font-weight: 500;
   max-width: 120px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .panel-session-label .session-button-dir {
   max-width: 104px;
@@ -4621,9 +4580,6 @@ body.theme-light .drop-slot.drag-over {
   margin-top: 0;
   color: var(--muted);
   font: var(--ui-font-size-sm)/1.3 var(--mono-font);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .meta a,
 .summary-context a {
@@ -4661,7 +4617,7 @@ body.theme-light .drop-slot.drag-over {
   color: var(--pr-status-closed);
 }
 .meta-muted {
-  color: #8b95a5;
+  color: var(--text-muted-strong);
 }
 .meta-sep {
   color: var(--sep-muted);
@@ -4703,9 +4659,6 @@ body.theme-light .drop-slot.drag-over {
   font-weight: 700;
 }
 .repo-chip-menu .repo-chip-path {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .repo-chip-menu .repo-chip-meta {
   display: inline-flex;
@@ -4797,7 +4750,7 @@ body.theme-light .drop-slot.drag-over {
   border-bottom-color: var(--pane-tab-active-bg);
   box-shadow: none;
 }
-/* DOIT.6: every pane keeps its active tab clearly green (no dimming) so you can tell which session
+/* every pane keeps its active tab clearly green (no dimming) so you can tell which session
    each pane shows; the focused pane's extra cue is its brighter lime active tab + the pane ring. */
 .panel:not(.active-pane):not(.file-explorer-panel) .pane-tab.active {
   opacity: 1;
@@ -4883,7 +4836,7 @@ body.theme-light .pane-tab:not(.active) .session-button-detail {
 .pane-tab.file-missing.active .file-tab-missing-badge {
   color: #ffe0e5;
 }
-/* Light mode (DOIT.12 B5): the file-missing tab is a dark-maroon box and the inactive
+/* Light mode: the file-missing tab is a dark-maroon box and the inactive
    YO marker inside an active tab is a dark-slate box — both unreadable on the white head.
    Repaint as a light error tint (dark-red text) / light neutral chip. */
 body.theme-light .pane-tab.file-missing {
@@ -5153,15 +5106,12 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
   padding: 0 3px;
   color: var(--muted);
   background: transparent;
-  white-space: nowrap;
   font-family: var(--control-font);
   font-size: var(--ui-font-size-2xs);
   font-stretch: condensed;
   font-weight: 700;
   letter-spacing: 0;
   line-height: 1.1;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 .tabs .tab[hidden] {
   display: none !important;
@@ -5351,7 +5301,7 @@ body.theme-light .panel-detail-row {
   /* bg comes from the shared --pane-bar-bg (bright when focused, gray when not) — no light override. */
   color: var(--text);
 }
-/* DOIT.6 #35: the detail-row header LABEL (.session-button-name, e.g. "YO!info") is the one header
+/* the detail-row header LABEL (.session-button-name, e.g. "YO!info") is the one header
    element NOT covered by the active-pane color rule (which lists .meta*/.session-button-dir/detail),
    so in light mode force it dark on the light row. (meta/dir/detail already resolve dark via the
    --pane-tab-panel-head-text light override.) */
@@ -5364,7 +5314,7 @@ body.theme-light .panel-detail-close:focus-visible {
   color: var(--pc-control-hover-fg);
   background: rgb(var(--overlay-slate-rgb) / 0.08);
 }
-/* DOIT.6 #28: light-mode contrast fixes for genuine light-text-on-neutral / near-white-affordance
+/* light-mode contrast fixes for genuine light-text-on-neutral / near-white-affordance
    cases (links on the light detail row, the near-white tab-hover border, white hover-glyph text on
    the light control hover bg). Saturated-chip light text (red/dark-blue badges) is left as-is. */
 body.theme-light .meta a,
@@ -5375,7 +5325,7 @@ body.theme-light .meta a:hover,
 body.theme-light .summary-context a:hover {
   color: #1e3a8a;
 }
-/* DOIT.19: a merged PR link must read purple (GitHub convention + matches the purple #number tab chip),
+/* a merged PR link must read purple (GitHub convention + matches the purple #number tab chip),
    not the generic link blue above. The dark `.meta a.pr-status-merged{var(--pr-status-merged)}` (20_*.css) is out-won in
    light mode by `body.theme-light .meta a` (same 0,2,1, later in source), so re-assert at 0,3,1 here. */
 body.theme-light .popover-value a.pr-status-merged,
@@ -5429,7 +5379,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 }
 /* A .panel-overlay-root must NOT be the scroll container — put `overflow:auto` on an INNER child.
    The inactive-pane dim below is a full-bleed ::after (inset 0) on this element; if this element
-   scrolls, the dim scrolls away with the content and only covers the top viewport (DOIT.16 C3). */
+   scrolls, the dim scrolls away with the content and only covers the top viewport. */
 .panel-overlay-root {
   position: relative;
 }
@@ -5510,12 +5460,9 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   background: rgba(17, 24, 32, 0.98);
   border: 1px solid #6f7b8d;
   border-radius: 7px;
-  box-shadow: 0 18px 56px rgba(0, 0, 0, 0.58);
+  box-shadow: 0 18px 56px rgb(var(--shadow-rgb) / 0.58);
 }
 .session-rename-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   font: 700 var(--ui-font-size)/1.25 var(--ui-font);
 }
 .session-rename-input {
@@ -5587,12 +5534,9 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 }
 .context-menu-label {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .context-menu-shortcut {
-  color: var(--muted, #8b95a5);
+  color: var(--muted);
   font: 600 var(--ui-font-size-xs)/1.2 var(--mono-font);
   white-space: nowrap;
 }
@@ -5638,7 +5582,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   background: rgba(17, 24, 32, 0.98);
   border: 1px solid #6f7b8d;
   border-radius: 7px;
-  box-shadow: 10px 14px 32px rgba(0, 0, 0, 0.62);
+  box-shadow: 10px 14px 32px rgb(var(--shadow-rgb) / 0.62);
   pointer-events: none;
 }
 .file-image-preview-popover img {
@@ -5665,7 +5609,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   background: rgba(255, 244, 194, 0.58);
   border: 1px solid var(--accent-gold);
   border-radius: 8px;
-  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.38), inset 0 0 0 1px rgba(255, 255, 255, 0.26);
+  box-shadow: 0 16px 42px rgb(var(--shadow-rgb) / 0.38), inset 0 0 0 1px rgba(255, 255, 255, 0.26);
   backdrop-filter: blur(2px);
 }
 .toast-header {
@@ -5848,16 +5792,10 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 .transcript-path-value {
   min-width: 0;
   flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   color: var(--text);
 }
 .transcript-path-missing {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .transcript-path-copy {
   width: 20px;
@@ -5910,9 +5848,6 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   overflow: hidden;
 }
 .summary-context-line {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .summary-context-label {
   color: var(--text);
@@ -5956,7 +5891,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   text-transform: uppercase;
 }
 .event-message {
-  /* DOIT.25: wrap the command across lines instead of one-line ellipsis (no horizontal scroll). */
+  /* wrap the command across lines instead of one-line ellipsis (no horizontal scroll). */
   min-width: 0;
   white-space: normal;
   overflow-wrap: anywhere;
@@ -5978,7 +5913,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   flex-direction: column;
   background: #11151d;
 }
-/* DOIT.6 #40: the merged YO!info / YO!agent sub-views share the pane; only the active one is shown,
+/* the merged YO!info / YO!agent sub-views share the pane; only the active one is shown,
    and it fills the available height (head row + scrolling list). */
 .info-subview {
   display: none;
@@ -6007,7 +5942,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   align-items: center;
   gap: 8px;
   padding: 5px 10px;
-  /* DOIT.28 C1: route through a theme token so it flips light/dark — the hardcoded near-black slab
+  /* route through a theme token so it flips light/dark — the hardcoded near-black slab
      was a black band on the light pane. */
   background: var(--pane-bar-bg, var(--panel2));
   border-block-end: 1px solid var(--line);
@@ -6055,7 +5990,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 }
 .info-subtab:not(.active):hover {
   color: var(--pane-tab-text);
-  /* DOIT.28 C1: a token-based hover tint (the white tint was invisible on a light band). */
+  /* a token-based hover tint (the white tint was invisible on a light band). */
   background: var(--pane-inactive-tab-bg-hover);
 }
 .info-list {
@@ -6497,7 +6432,7 @@ body.theme-light .yoagent-global .markdown-body pre code {
   color: var(--accent-gold);
   font-size: var(--ui-font-size-2xs);
 }
-/* DOIT.28 C2: the current-branch row reuses the shared selection tokens (they flip light/dark) plus a
+/* the current-branch row reuses the shared selection tokens (they flip light/dark) plus a
    left accent bar, mirroring the Finder's selected-file treatment — the old dim navy barely stood out
    on the dark table. The separate body.theme-light override below is now redundant (tokens carry it). */
 .info-row.current {
@@ -6507,9 +6442,6 @@ body.theme-light .yoagent-global .markdown-body pre code {
 }
 .info-cell {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .info-resizable-header-cell {
   position: relative;
@@ -6589,7 +6521,7 @@ body.info-column-resizing {
 .info-cell a.pr-status-closed:hover {
   color: var(--pr-status-closed);
 }
-/* Light mode (DOIT.18 C1): the whole YO!info table hardcoded dark-mode colors with NO light
+/* Light mode: the whole YO!info table hardcoded dark-mode colors with NO light
    override — near-white row text vanished on the white pane, header/current rows were dark bars,
    and the PR/branch links were low-contrast pastels. Repaint for the white surface; dark unchanged. */
 body.theme-light .info-row {
@@ -6647,7 +6579,7 @@ body.theme-light .info-cell a.pr-status-closed:hover {
 .info-error {
   color: var(--bad);
 }
-/* DOIT.29: the Watched PRs section of YO!info (PRs tracked independent of any open session). Its own
+/* the Watched PRs section of YO!info (PRs tracked independent of any open session). Its own
    container below the branch table, separated by a rule; rows reuse .info-cell but a tighter 4-col grid. */
 .info-watched {
   border-block-start: 1px solid var(--line);
@@ -6684,7 +6616,7 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   border-radius: var(--radius-control);
   background: transparent;
   color: var(--muted);
-  font-size: var(--ui-font-size-md);
+  font-size: var(--ui-font-size);
   line-height: 1;
   cursor: pointer;
 }
@@ -6735,7 +6667,7 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   border-radius: 6px;
   background: #1b2230;
   color: #e8edf4;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 6px 20px rgb(var(--shadow-rgb) / 0.45);
   font: 600 var(--ui-font-size-xs, 12px)/1.2 var(--mono-font);
 }
 .server-update-banner-reload {
@@ -6994,7 +6926,7 @@ body.theme-light .modal.about-open {
   flex-direction: column;
   background: var(--panel);
   border-inline-end: 1px solid var(--line);
-  box-shadow: 4px 0 18px rgba(0, 0, 0, 0.35);
+  box-shadow: 4px 0 18px rgb(var(--shadow-rgb) / 0.35);
   overflow: hidden;
   font-family: var(--ui-font);
   font-size: var(--file-explorer-font-size);
@@ -7020,9 +6952,6 @@ body.theme-light .modal.about-open {
   background: color-mix(in srgb, var(--panel) 72%, transparent);
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   direction: ltr;
   text-align: start;
   outline: none;
@@ -7283,7 +7212,7 @@ body.theme-light .modal.about-open {
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--panel2);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 6px 20px rgb(var(--shadow-rgb) / 0.35);
   font-size: var(--ui-font-size-2xs);
   pointer-events: none;
 }
@@ -7319,7 +7248,7 @@ body.theme-light .modal.about-open {
   line-height: 1;
   border-radius: 3px;
 }
-/* DOIT.31: symlinks keep their target-type icon (dir icon for a linked dir, code icon for a linked .py)
+/* symlinks keep their target-type icon (dir icon for a linked dir, code icon for a linked .py)
    and get a small arrow badge overlaid — macOS-Finder / Popular IDE style. Broken links go red + struck. */
 .file-tree-row.is-symlink > .file-tree-icon {
   position: relative;
@@ -7340,7 +7269,7 @@ body.theme-light .modal.about-open {
   color: var(--bad);
   text-decoration: line-through;
 }
-/* DOIT.31: the inline "→ target" reads as secondary to the name; broken links tint it red too. */
+/* the inline "→ target" reads as secondary to the name; broken links tint it red too. */
 .file-tree-symlink-target {
   color: var(--muted);
 }
@@ -7369,7 +7298,7 @@ body.theme-light .modal.about-open {
   font-size: 1.18em;
   font-weight: 800;
   line-height: 1;
-  color: #8b95a5;
+  color: var(--text-muted-strong);
 }
 .file-tree-row.kind-dir.expanded > .file-tree-icon,
 .file-tree-row.kind-dir[aria-expanded="true"] > .file-tree-icon {
@@ -7408,7 +7337,7 @@ body.theme-light .modal.about-open {
   box-shadow: 0 0 0 1px rgba(12, 15, 20, 0.9), 0 0 7px rgba(245, 197, 66, 0.75);
 }
 /* ============================================================================
-   Light mode (DOIT.12 B5): the update banner is a dark navy slab, and the file-tree
+   Light mode: the update banner is a dark navy slab, and the file-tree
    "current"/"repo-non-main"/"indexed" rows hardcode near-white-green or washed-amber
    text that vanishes on the white tree. Darken the text; strengthen the selection
    ring (the --file-selection-* fill/border tokens are already theme-aware).
@@ -7807,9 +7736,6 @@ body.theme-light .file-tree-children::before {
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-xs);
   color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   direction: rtl;
   text-align: start;
 }
@@ -8102,8 +8028,8 @@ body.theme-light .file-tree-children::before {
   grid-template-rows: auto minmax(0, 1fr) auto;
   background: #151922;
   border: 1px solid #455164;
-  box-shadow: 0 20px 46px rgba(0, 0, 0, 0.48), 0 0 0 1px var(--active-control-focus-ring);
-  color: var(--fg);
+  box-shadow: 0 20px 46px rgb(var(--shadow-rgb) / 0.48), 0 0 0 1px var(--active-control-focus-ring);
+  color: var(--text);
 }
 .file-editor-dialog-title {
   padding: 10px 12px;
@@ -8270,7 +8196,7 @@ body.theme-light .file-tree-children::before {
   background: #0b0e14;
 }
 /* Light editor: the image backdrop + the transparency checkerboard are tuned dark
-   (white-on-dark checker). Repaint as a light backdrop with a dark checker (DOIT.12 B5). */
+   (white-on-dark checker). Repaint as a light backdrop with a dark checker. */
 body.editor-theme-light .file-editor-image {
   background: #eef1f5;
 }
@@ -8381,7 +8307,7 @@ body.editor-theme-light .file-editor-image {
 .markdown-body h2 { font-size: 1.4em; border-bottom: 1px solid var(--line); padding-bottom: 3px; }
 .markdown-body h3 { font-size: 1.2em; }
 .markdown-body p { margin: 4px 0 6px; }
-.markdown-body a { color: var(--markdown-link, #9fd8ff); text-decoration: underline; overflow-wrap: anywhere; word-break: break-word; }
+.markdown-body a { color: var(--markdown-link); text-decoration: underline; overflow-wrap: anywhere; word-break: break-word; }
 .markdown-body strong {
   color: var(--markdown-strong, var(--text));
 }
@@ -8398,7 +8324,7 @@ body.editor-theme-light .file-editor-image {
   font-size: 0.9em;
 }
 .markdown-body pre { background: #0b0e14; border: 1px solid var(--line); border-radius: var(--radius-control); padding: 6px 8px; overflow: auto; margin: 6px 0; }
-/* Light mode (DOIT.12 B5): the near-black code block is a dark box on the light app
+/* Light mode: the near-black code block is a dark box on the light app
    chrome. Scoped to the chrome-themed markdown surfaces (YO!agent chat/summary, the
    transcript summary) — the file-editor preview's `pre` is handled separately under
    `body.editor-theme-light .file-editor-content` so a dark editor keeps a dark block. */
@@ -8594,7 +8520,7 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 .markdown-body li.task-list-item > :not(input[type="checkbox"]) {
   grid-column: 2;
 }
-/* DOIT.6 #128: a <p> directly inside an <li> (loose lists) carries no vertical margin, so a loose
+/* a <p> directly inside an <li> (loose lists) carries no vertical margin, so a loose
    list renders as tightly as a tight one. Safe for the file-editor preview too. */
 .markdown-body li > p { margin: 0; }
 .markdown-body blockquote { border-inline-start: 3px solid var(--line); margin: 6px 0; padding: 3px 8px; color: var(--muted); }
@@ -8738,7 +8664,7 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   outline: none;
   box-shadow: 0 0 0 2px var(--active-control-focus-ring);
 }
-/* Light mode (DOIT.12 B5): the rename box hardcodes a near-black fill while its text
+/* Light mode: the rename box hardcodes a near-black fill while its text
    uses the theme-aware --text (dark in light) → dark-on-dark while renaming. */
 body.theme-light .file-tree-rename-input {
   color: var(--pc-control-fg);
@@ -8846,9 +8772,6 @@ body:not(.file-explorer-mode-diff) .file-explorer-mode-diff-only {
 .file-explorer-repo-summary {
   flex: 0 1 auto;
   max-width: 30%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   color: var(--accent-gold);
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-2xs);
@@ -8973,9 +8896,6 @@ body.theme-light .file-explorer-changes-head {
 }
 .file-explorer-changes-head .changes-title {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .file-explorer-changes-head .changes-sort-select {
   min-width: 8ch;
@@ -9111,9 +9031,6 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
   justify-self: end;
   min-width: 0;
   margin-inline-start: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 @container (max-width: 520px) {
   .file-explorer-changes-head {
@@ -9388,18 +9305,18 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
   z-index: 1;
   color: var(--diff-search-match-fg) !important;
   background: var(--diff-search-match-bg) !important;
-  box-shadow: inset 0 0 0 1px var(--diff-search-match-ring), 0 0 0 1px rgba(0, 0, 0, 0.54) !important;
+  box-shadow: inset 0 0 0 1px var(--diff-search-match-ring), 0 0 0 1px rgb(var(--shadow-rgb) / 0.54) !important;
   border-radius: 2px;
   font-weight: 800;
 }
 .file-editor-diff-codemirror .cm-searchMatch-selected {
   color: var(--diff-search-match-fg) !important;
   background: var(--diff-search-selected-bg) !important;
-  box-shadow: inset 0 0 0 2px var(--diff-search-selected-ring), 0 0 0 1px rgba(0, 0, 0, 0.66) !important;
+  box-shadow: inset 0 0 0 2px var(--diff-search-selected-ring), 0 0 0 1px rgb(var(--shadow-rgb) / 0.66) !important;
   border-radius: 2px;
   font-weight: 900;
 }
-/* DOIT.6 #44: diffs render as full red/green lines only (highlightChanges:false), so the per-token
+/* diffs render as full red/green lines only (highlightChanges:false), so the per-token
    intra-line change-highlight background rules and their --diff-*-text-bg tokens are gone. */
 .file-editor-diff-codemirror .cm-changedLineGutter,
 .file-editor-diff-codemirror .cm-deletedLineGutter {
@@ -9706,7 +9623,7 @@ body.editor-theme-light .file-editor-content {
 .file-editor-theme-panel.theme-with-label::after {
   content: attr(data-editor-theme-short);
   color: currentColor;
-  font: 800 var(--ui-font-size-xs)/1 var(--font);
+  font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
   white-space: nowrap;
 }
 .file-editor-diff-panel {
@@ -9720,7 +9637,7 @@ body.editor-theme-light .file-editor-content {
   justify-content: center;
   line-height: 1;
 }
-/* DOIT.26: blame toggle goes green when ON (like the other pressed toggles), and the inline annotation
+/* blame toggle goes green when ON (like the other pressed toggles), and the inline annotation
    is a dim ::after on the cursor's current line — colored by the editor scheme's --code-comment token
    (theme-aware, the same gray common in Popular IDEs), never selectable/copied as code. */
 .file-editor-blame-panel[aria-pressed="true"] {
@@ -10127,7 +10044,7 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-gutters {
 }
 body.editor-cursor-block .file-editor-codemirror .cm-cursor,
 body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
-  /* DOIT.6 #122: 1ch == the monospace cell advance (the "0"-glyph width), so the block cursor
+  /* 1ch == the monospace cell advance (the "0"-glyph width), so the block cursor
      fills the whole character cell. 0.62ch left it looking like a fat line, not a true block. */
   width: 1ch !important;
   margin-inline-start: 0 !important;
@@ -10342,7 +10259,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   font: 800 var(--ui-font-size-2xs)/1 var(--ui-font);
 }
 /* Chip glyph bound to the checkbox NAME, not :nth-of-type — so if CodeMirror reorders or
-   adds search controls, the glyph can't mis-map to the wrong toggle (DOIT.14). DOM order is
+   adds search controls, the glyph can't mis-map to the wrong toggle. DOM order is
    [case, re, word]; the grid placement above still uses :nth-of-type, which matches that order. */
 .file-editor-codemirror .cm-search label:has(input[name="case"])::after,
 .file-editor-codemirror-panel .cm-search label:has(input[name="case"])::after {
@@ -10726,9 +10643,6 @@ body.editor-theme-light .file-editor-image-panel {
 }
 .file-editor-status-message {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .file-editor-cursor-status {
   margin-inline-start: auto;
@@ -10782,4 +10696,44 @@ body.editor-theme-light .file-editor-image-panel {
   font-size: var(--ui-font-size-3xs);
   font-weight: 800;
   text-transform: uppercase;
+}
+
+/* One owner for the overflow:hidden + text-overflow:ellipsis + white-space:nowrap truncation idiom
+   (was inlined in ~30 rules). Same selectors, same three properties — computed styles unchanged. */
+.topbar-search-label,
+.app-menu-detail,
+.session-button-dir,
+.ci-indicator,
+.popover-row.compact .popover-value,
+.pane-drag-image-title,
+.pane-drag-image-tabs span,
+.file-drag-title,
+.file-drag-more,
+.diff-ref-suggestion-ref,
+.diff-ref-suggestion-subject,
+.diff-ref-suggestion-meta,
+.changes-comparison-title,
+.changes-repo-title,
+.preferences-path-value,
+.command-palette-detail,
+.branch-name,
+.panel-session-label .session-button-name,
+.meta,
+.repo-chip-menu .repo-chip-path,
+.tab,
+.session-rename-title,
+.context-menu-label,
+.transcript-path-value,
+.transcript-path-missing,
+.summary-context-line,
+.info-cell,
+.file-explorer-path-inline,
+.file-editor-path,
+.file-explorer-repo-summary,
+.file-explorer-changes-head .changes-title,
+.file-explorer-changes-panel .changes-summary,
+.file-editor-status-message {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

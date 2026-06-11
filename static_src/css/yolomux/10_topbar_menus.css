@@ -1,5 +1,5 @@
 .topbar {
-  /* DOIT.12 A1/A2: the "big space" above the green tabs was the topbar's OWN cool-gray bg showing where
+  /* the "big space" above the green tabs was the topbar's OWN cool-gray bg showing where
      the shorter pills sit centered in a too-tall bar. Keep the tightened height (+4px, not +8px), but
      leave the bar neutral at rest and use the shared tab-strip green only for hover/focus feedback. */
   min-height: calc(var(--compact-control-height) + 4px);
@@ -76,7 +76,7 @@
   background: rgba(42, 14, 18, 0.98);
   border: 1px solid var(--pr-status-failing);
   border-radius: 7px;
-  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.42);
+  box-shadow: 0 14px 38px rgb(var(--shadow-rgb) / 0.42);
   white-space: normal;
   font: var(--ui-font-size-sm)/1.35 var(--ui-font);
   opacity: 0;
@@ -183,7 +183,7 @@
   min-height: var(--compact-control-height);
   overflow: visible;
 }
-/* DOIT.21: editor back/forward history, immediately before the search box. An auto inline-start margin
+/* editor back/forward history, immediately before the search box. An auto inline-start margin
    on the group + an auto inline-end margin on the search centers the nav+search PAIR as one unit. */
 .topbar-nav {
   flex: 0 0 auto;
@@ -212,7 +212,7 @@ body.theme-light .topbar-nav-button {
   background: rgb(var(--overlay-slate-rgb) / 0.05);
 }
 .topbar-nav-button:hover:not(:disabled) {
-  border-color: var(--accent, #6ea8fe);
+  border-color: var(--accent);
 }
 .topbar-nav-button:disabled {
   opacity: 0.34;
@@ -232,20 +232,20 @@ body.theme-light .topbar-nav-button {
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--input-bg);
-  color: var(--muted, #8b95a5);
+  color: var(--muted);
   cursor: text;
   font: inherit;
   overflow: hidden;
 }
 .topbar-search:hover {
-  border-color: var(--accent, #6ea8fe);
+  border-color: var(--accent);
 }
-/* DOIT.6 #33: --input-bg is undefined, so the fallback #11151c made this a DARK pill in both themes.
+/* --input-bg is undefined, so the fallback #11151c made this a DARK pill in both themes.
    In light mode blend it into the topbar as a subtle bordered box (keep the border + muted text). */
 body.theme-light .topbar-search {
   background: rgb(var(--overlay-slate-rgb) / 0.05);
 }
-/* DOIT.8 Phase 1: the top-right language switcher. A compact pill matching the topbar search. */
+/* Phase 1: the top-right language switcher. A compact pill matching the topbar search. */
 .topbar-language {
   flex: 0 0 auto;
   justify-self: end;
@@ -264,16 +264,13 @@ body.theme-light .topbar-language {
   background: rgb(var(--overlay-slate-rgb) / 0.05);
 }
 .topbar-language:hover {
-  border-color: var(--accent, #6ea8fe);
+  border-color: var(--accent);
 }
 .topbar-search-icon {
   flex: 0 0 auto;
 }
 .topbar-search-label {
   flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   text-align: start;
 }
 .topbar-search-hint {
@@ -283,7 +280,7 @@ body.theme-light .topbar-language {
   border: 1px solid var(--line);
   border-radius: 3px;
   padding: 0 4px;
-  color: var(--muted, #8b95a5);
+  color: var(--muted);
   background: transparent;
 }
 @media (max-width: 1100px) {
@@ -307,7 +304,7 @@ body.theme-light .topbar-language {
   border: 1px solid var(--line);
   border-radius: 6px;
   background: transparent;
-  color: var(--muted, #8b95a5);
+  color: var(--muted);
   font: inherit;
   font-size: var(--ui-font-size-2xs);
   cursor: pointer;
@@ -317,7 +314,7 @@ body.theme-light .topbar-language {
   display: none;
 }
 .topbar-activity:hover {
-  border-color: var(--accent, #6ea8fe);
+  border-color: var(--accent);
   color: var(--text);
 }
 .topbar-activity.has-attention {
@@ -629,9 +626,6 @@ body.theme-light .topbar-language {
      (a wrapping block's max-content is ~one word, so fitAppMenuPopover computed a tiny width). On one
      line the fit-width grows to the longest detail (capped at max-width), so the menu is wider + shorter.
      Full text stays available via the item's title/aria-label. */
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
   max-width: min(58ch, calc(var(--app-menu-max-inline-size) - 74px));
   color: var(--pr-status-closed);
   font: var(--ui-font-size-xs)/1.2 var(--mono-font);
@@ -744,7 +738,7 @@ body.theme-light .topbar:hover,
 body.theme-light .topbar:focus-within {
   background: var(--pane-tab-strip-bg);
 }
-/* DOIT.12 A4: light-mode topbar coloring fixes — each was tuned only for the dark topbar and read wrong
+/* light-mode topbar coloring fixes — each was tuned only for the dark topbar and read wrong
    on the light neutral/hover-green bar. */
 body.theme-light #tabMetaToggle.active {
   background: var(--active-control-bg);
@@ -810,7 +804,7 @@ body.theme-light .app-menu-submenu-wrap.open > .app-menu-command:not(:disabled) 
   border-color: #1d4ed8;
 }
 body.theme-light .app-menu-command:disabled {
-  color: #8b95a5;
+  color: var(--text-muted-strong);
 }
 body.theme-light .app-menu-ui-icon {
   color: #17202c;
@@ -857,7 +851,7 @@ body.theme-light .latency-meter {
   background: #ffffff;
   border-color: var(--line);
 }
-/* B1/DOIT.12: this rule was TRUNCATED (open brace, no body) and unbalanced the file's braces, so in the
+/* this rule was TRUNCATED (open brace, no body) and unbalanced the file's braces, so in the
    concatenated bundle it swallowed the start of the next partial's CSS. Completed: an enabled Notify
    toggle reads as active/pressed = brand green (theme-aware), like the other topbar toggles. */
 .notify-toggle.active {

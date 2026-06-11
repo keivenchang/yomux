@@ -7,7 +7,7 @@ let i18nActiveLocale = (typeof bootstrap === 'object' && bootstrap && bootstrap.
 const i18nFallbackLocale = 'en';
 const i18nCatalogs = new Map();  // locale -> {dottedKey: string}
 let i18nApplyLocaleRequestId = 0;
-// DOIT.8: seed from the INLINED bootstrap catalogs (active locale + en fallback) so t() resolves
+// seed from the INLINED bootstrap catalogs (active locale + en fallback) so t() resolves
 // SYNCHRONOUSLY on the very first render — the menu bar/tabs/wordmark paint at boot before any fetch.
 if (typeof bootstrap === 'object' && bootstrap && bootstrap.strings && typeof bootstrap.strings === 'object') {
   for (const [loc, catalog] of Object.entries(bootstrap.strings)) {
@@ -53,7 +53,7 @@ function i18nActiveLocaleId() {
   return i18nActiveLocale;
 }
 
-// DOIT.8 Phase 3: render a relative time in the active locale's native phrasing via
+// Phase 3: render a relative time in the active locale's native phrasing via
 // Intl.RelativeTimeFormat. Falls back through local catalog strings if the browser API is unavailable.
 function relativeTimeFormat(secondsAgo) {
   const sec = Math.max(0, Math.round(Number(secondsAgo) || 0));
@@ -130,7 +130,7 @@ async function applyLocale(locale) {
   if (next !== i18nFallbackLocale) await i18nLoadCatalog(next);
   if (requestId !== i18nApplyLocaleRequestId) return;
   i18nActiveLocale = next;
-  // DOIT.8 Phase 2: flip the document direction so RTL locales (ar) mirror the whole layout.
+  // Phase 2: flip the document direction so RTL locales (ar) mirror the whole layout.
   if (typeof document !== 'undefined' && document.documentElement) {
     document.documentElement.setAttribute('dir', i18nIsRtl(next) ? 'rtl' : 'ltr');
     document.documentElement.setAttribute('lang', next);
@@ -144,7 +144,7 @@ function i18nSupportedLocales() {
   return ['zh-Hant', 'zh-Hans', 'es', 'ja', 'de', 'fr', 'pt-BR', 'ru', 'ko', 'hi', 'ar', 'he', 'en'];
 }
 
-// DOIT.8 Phase 2: right-to-left locales. Drives document.dir so the browser mirrors the layout.
+// Phase 2: right-to-left locales. Drives document.dir so the browser mirrors the layout.
 function i18nIsRtl(locale) {
   const base = String(locale || '').toLowerCase().split('-')[0];
   return base === 'ar' || base === 'he' || base === 'fa' || base === 'ur';
@@ -188,7 +188,7 @@ function resolveLocalePref(pref) {
 }
 
 function rerenderForLocale(options = {}) {
-  // DOIT.6 #50: force-re-render EVERY localized surface so a language switch repaints the open UI on
+  // force-re-render EVERY localized surface so a language switch repaints the open UI on
   // the same interaction. Guarded so this is safe at any load order. Preferences must be forced past
   // the active-control guard (the language <select> is the active control when the switch fires).
   if (typeof renderPreferencesPanels === 'function') renderPreferencesPanels({force: true});

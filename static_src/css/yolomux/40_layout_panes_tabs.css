@@ -52,7 +52,7 @@
   --dv-drag-over-background-color: color-mix(in srgb, var(--pane-resizer-bg) 18%, transparent);
   --dv-drag-over-border-color: var(--pane-resizer-hover-bg);
   --dv-drag-over-border: 2px dashed var(--pane-resizer-hover-bg);
-  color: var(--fg);
+  color: var(--text);
   background: transparent;
 }
 .yolomux-dockview .dv-tabs-and-actions-container {
@@ -175,7 +175,7 @@
 .yolomux-dockview .dv-groupview:has(.panel.needs-input-pane),
 .yolomux-dockview .dv-groupview:has(.panel.needs-exec-pane),
 .yolomux-dockview .dv-groupview:has(.panel.needs-blocked-pane) {
-  --panel-ring-color: #ff3347;
+  --panel-ring-color: var(--pane-ring-attention);
 }
 .yolomux-dockview .dv-content-container {
   background: transparent;
@@ -532,7 +532,7 @@ body.theme-light .drop-slot.drag-over {
        the .active / [aria-pressed=true] state = green. Buttons never hardcode their own colors.
      Raw values come from theme tokens, so everything flips light/dark automatically. */
   --pane-bar-bg: var(--panel2);
-  /* DOIT.20: default = no ring on a plain inactive pane; per-state rules below set green/red/white. */
+  /* default = no ring on a plain inactive pane; per-state rules below set green/red/white. */
   --panel-ring-color: transparent;
   --pane-ctl-bg: var(--pane-tab-control-bg);
   --pane-ctl-fg: var(--pc-control-fg);
@@ -545,12 +545,12 @@ body.theme-light .drop-slot.drag-over {
      border (box-sizing: border-box) it is part of the pane's box — it sits flush against the resizer
      (no gap to the red/yellow line) and is never clipped like an outset box-shadow was. At spacing 0
      the border is 0px (no gutter, panes flush to the 1px separator). */
-  /* DOIT.24 C1: the green/red/white state ring IS this gutter border, colored per state via the unified
+  /* the green/red/white state ring IS this gutter border, colored per state via the unified
      --panel-ring-color and faded by --pane-ring-opacity. Because it fills the pane's OUTER edge (the
      gutter, flush to the resizer), an active (green) pane and a needs (red) pane meet at the seam with
      only the 1px resizer between them — they TOUCH (image 038). Inactive = transparent (--panel-ring-color
      default). At spacing 0 the border is 0px (panes flush). This puts the ring back at the seam after
-     DOIT.20's content-edge overlay made adjacent rings sit a gutter apart. */
+     's content-edge overlay made adjacent rings sit a gutter apart. */
   border: var(--pane-split-gap) solid color-mix(in srgb, var(--panel-ring-color) var(--panel-ring-opacity, var(--pane-ring-opacity, 75%)), transparent);
   border-radius: var(--pane-tile-radius);
   background: var(--panel-inactive);
@@ -871,12 +871,12 @@ body.theme-light .drop-slot.drag-over {
   --panel-ring-opacity: var(--pane-active-ring-opacity);
   background: var(--panel);
 }
-/* DOIT.20 + DOIT.24 C1: the green/red/white pane ring is the translucent --pane-split-gap GUTTER BORDER
+/* the green/red/white pane ring is the translucent --pane-split-gap GUTTER BORDER
    (above), colored per state by the unified --panel-ring-color and faded by --pane-ring-opacity. Because
    it fills the pane's outer edge, an active (green) pane and a needs (red) pane meet at the seam (image
    038). ONE marker means no "red inside green" nesting: a focused+needs pane just resolves --panel-ring-
-   color to red. (DOIT.20 first tried a content-edge .panel::after overlay for opacity, but that sat a
-   gutter away from the neighbor; DOIT.24 moved it back to the seam border, keeping the opacity.) */
+   color to red. (first tried a content-edge .panel::after overlay for opacity, but that sat a
+   gutter away from the neighbor; moved it back to the seam border, keeping the opacity.) */
 .panel.active-pane,
 .panel.typing-ready-pane {
   /* focused pane: all chrome bars (tab container + info/detail row) switch from neutral gray to the
@@ -900,7 +900,7 @@ body.theme-light .drop-slot.drag-over {
 .panel.needs-input-pane,
 .panel.needs-exec-pane,
 .panel.needs-blocked-pane {
-  --panel-ring-color: #ff3347;
+  --panel-ring-color: var(--pane-ring-attention);
 }
 /* image 028: attention ALWAYS beats the yolo-ready green tint. A focused needs pane is also
    .yolo-ready-pane, whose green --panel-ring-color (0,3,0) would otherwise out-specify the needs red
@@ -911,7 +911,7 @@ body.theme-light .drop-slot.drag-over {
 .panel.typing-ready-pane.needs-input-pane,
 .panel.typing-ready-pane.needs-exec-pane,
 .panel.typing-ready-pane.needs-blocked-pane {
-  --panel-ring-color: #ff3347;
+  --panel-ring-color: var(--pane-ring-attention);
 }
 /* needs-* panes PULSE the red ring (the keyframes drive border-color directly on the gutter border). */
 .panel.needs-input-pane,
@@ -971,9 +971,6 @@ body.theme-light .drop-slot.drag-over {
   color: inherit;
   font-weight: 500;
   max-width: 120px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .panel-session-label .session-button-dir {
   max-width: 104px;
@@ -998,9 +995,6 @@ body.theme-light .drop-slot.drag-over {
   margin-top: 0;
   color: var(--muted);
   font: var(--ui-font-size-sm)/1.3 var(--mono-font);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .meta a,
 .summary-context a {
@@ -1038,7 +1032,7 @@ body.theme-light .drop-slot.drag-over {
   color: var(--pr-status-closed);
 }
 .meta-muted {
-  color: #8b95a5;
+  color: var(--text-muted-strong);
 }
 .meta-sep {
   color: var(--sep-muted);
@@ -1080,9 +1074,6 @@ body.theme-light .drop-slot.drag-over {
   font-weight: 700;
 }
 .repo-chip-menu .repo-chip-path {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .repo-chip-menu .repo-chip-meta {
   display: inline-flex;
@@ -1174,7 +1165,7 @@ body.theme-light .drop-slot.drag-over {
   border-bottom-color: var(--pane-tab-active-bg);
   box-shadow: none;
 }
-/* DOIT.6: every pane keeps its active tab clearly green (no dimming) so you can tell which session
+/* every pane keeps its active tab clearly green (no dimming) so you can tell which session
    each pane shows; the focused pane's extra cue is its brighter lime active tab + the pane ring. */
 .panel:not(.active-pane):not(.file-explorer-panel) .pane-tab.active {
   opacity: 1;
@@ -1260,7 +1251,7 @@ body.theme-light .pane-tab:not(.active) .session-button-detail {
 .pane-tab.file-missing.active .file-tab-missing-badge {
   color: #ffe0e5;
 }
-/* Light mode (DOIT.12 B5): the file-missing tab is a dark-maroon box and the inactive
+/* Light mode: the file-missing tab is a dark-maroon box and the inactive
    YO marker inside an active tab is a dark-slate box — both unreadable on the white head.
    Repaint as a light error tint (dark-red text) / light neutral chip. */
 body.theme-light .pane-tab.file-missing {
@@ -1530,15 +1521,12 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
   padding: 0 3px;
   color: var(--muted);
   background: transparent;
-  white-space: nowrap;
   font-family: var(--control-font);
   font-size: var(--ui-font-size-2xs);
   font-stretch: condensed;
   font-weight: 700;
   letter-spacing: 0;
   line-height: 1.1;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 .tabs .tab[hidden] {
   display: none !important;
@@ -1728,7 +1716,7 @@ body.theme-light .panel-detail-row {
   /* bg comes from the shared --pane-bar-bg (bright when focused, gray when not) — no light override. */
   color: var(--text);
 }
-/* DOIT.6 #35: the detail-row header LABEL (.session-button-name, e.g. "YO!info") is the one header
+/* the detail-row header LABEL (.session-button-name, e.g. "YO!info") is the one header
    element NOT covered by the active-pane color rule (which lists .meta*/.session-button-dir/detail),
    so in light mode force it dark on the light row. (meta/dir/detail already resolve dark via the
    --pane-tab-panel-head-text light override.) */
@@ -1741,7 +1729,7 @@ body.theme-light .panel-detail-close:focus-visible {
   color: var(--pc-control-hover-fg);
   background: rgb(var(--overlay-slate-rgb) / 0.08);
 }
-/* DOIT.6 #28: light-mode contrast fixes for genuine light-text-on-neutral / near-white-affordance
+/* light-mode contrast fixes for genuine light-text-on-neutral / near-white-affordance
    cases (links on the light detail row, the near-white tab-hover border, white hover-glyph text on
    the light control hover bg). Saturated-chip light text (red/dark-blue badges) is left as-is. */
 body.theme-light .meta a,
@@ -1752,7 +1740,7 @@ body.theme-light .meta a:hover,
 body.theme-light .summary-context a:hover {
   color: #1e3a8a;
 }
-/* DOIT.19: a merged PR link must read purple (GitHub convention + matches the purple #number tab chip),
+/* a merged PR link must read purple (GitHub convention + matches the purple #number tab chip),
    not the generic link blue above. The dark `.meta a.pr-status-merged{var(--pr-status-merged)}` (20_*.css) is out-won in
    light mode by `body.theme-light .meta a` (same 0,2,1, later in source), so re-assert at 0,3,1 here. */
 body.theme-light .popover-value a.pr-status-merged,

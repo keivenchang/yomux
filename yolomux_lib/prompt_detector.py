@@ -14,7 +14,7 @@ from . import yolo_rules
 def is_dangerous(cmd_line: str) -> bool:
     """Return True when the shared YOLO rule engine would not auto-approve this command.
 
-    DOIT.6 #68: evaluate the USER's active ruleset (the same one the worker acts on), not the built-in
+    evaluate the USER's active ruleset (the same one the worker acts on), not the built-in
     default, so the UI danger badge matches the real auto-approve decision. Any non-approve outcome
     (block / decline / ask / unknown) is "dangerous" for badge purposes — only a clean approve is safe.
     The catastrophic hard floor still flags regardless of the ruleset.
@@ -52,7 +52,7 @@ _SKIP_LINE = re.compile(
 
 # Lines that look like commands (contain special shell chars, flags, or are long).
 _CMD_CHARS = re.compile(r"[/|&;$=(>`~]|--|\s-[a-zA-Z]")
-# DOIT.6 #79: the canonical Claude bullet `● Bash(<cmd>)` / `• Bash(<cmd>)` — the parenthesized arg is
+# the canonical Claude bullet `● Bash(<cmd>)` / `• Bash(<cmd>)` — the parenthesized arg is
 # the exact command, so anchoring to it avoids folding the adjacent description prose.
 _BASH_CALL_RE = re.compile(r"[●•]\s*Bash\((.+)\)\s*$")
 
@@ -111,7 +111,7 @@ def extract_command(pane_text: str) -> str | None:
                     # Heredocs span their own delimited body; keep the existing single-line handling.
                     if "<<" in cmd:
                         return cmd or None
-                    # DOIT.6 #61: do NOT early-return on the first shlex-complete prefix — a wrapped
+                    # do NOT early-return on the first shlex-complete prefix — a wrapped
                     # command (e.g. `$ git push` continuing with `--force-with-lease`) would classify
                     # on the safe-looking prefix and auto-approve the dangerous tail. ALWAYS gather every
                     # continuation line up to the selector/stop boundary and classify the FULL command.
@@ -147,7 +147,7 @@ def extract_command(pane_text: str) -> str | None:
     if trigger_idx is None:
         return None
 
-    # DOIT.17: find the top of the CURRENT prompt block FIRST, so neither the `● Bash(<cmd>)` anchor
+    # find the top of the CURRENT prompt block FIRST, so neither the `● Bash(<cmd>)` anchor
     # search nor the command gather can cross a `─────` separator (or a prior `●` transcript bullet) into
     # the PREVIOUS step and return its (stale, often safe-looking) command. Before this fix the unbounded
     # backward search grabbed the prior `● Bash(chmod …)` when the live prompt — correctly matching real
@@ -162,7 +162,7 @@ def extract_command(pane_text: str) -> str | None:
             break
 
         if stripped.startswith("●"):
-            # DOIT.6 #79: a `● Bash(<cmd>)` bullet at the block top IS the command (the post-approval
+            # a `● Bash(<cmd>)` bullet at the block top IS the command (the post-approval
             # transcript form); otherwise the bullet just bounds the block (prior step's output).
             bash_call = _BASH_CALL_RE.search(lines[i])
             if bash_call:
@@ -177,7 +177,7 @@ def extract_command(pane_text: str) -> str | None:
         if stripped:
             found_content = True
 
-    # DOIT.6 #79: anchor to the canonical `● Bash(<cmd>)` arg WITHIN the block (bounded by top_idx — never
+    # anchor to the canonical `● Bash(<cmd>)` arg WITHIN the block (bounded by top_idx — never
     # crosses into a prior step) so we never fold the adjacent description prose into the danger string.
     for i in range(top_idx, trigger_idx):
         bash_call = _BASH_CALL_RE.search(lines[i])
@@ -301,7 +301,7 @@ def _approval_prompt_defaults_to_yes(pane_text: str) -> bool:
 def yes_is_selected(pane_text: str) -> bool:
     """Check that the first option is currently highlighted by an ACTUAL selector glyph (❯/›/>).
 
-    DOIT.6 #67: do NOT authorize from a positional "option 1 is Yes before No" guess — on a redraw
+    do NOT authorize from a positional "option 1 is Yes before No" guess — on a redraw
     frame with nothing highlighted that wrongly reports the first option as selected, which can confirm
     the wrong option. A send requires a visible selector glyph.
     """
@@ -430,11 +430,11 @@ _FOOTER_LINE_RE = re.compile(
 )
 _FOOTER_HINT_SEPARATOR_RE = re.compile(r"\s*(?:[·•]|\.(?=\s))\s*")
 _FOOTER_HINT_PART_RE = re.compile(
-    # DOIT.6 #43: also cover Claude's AskUserQuestion footer parts — the arrow cluster "↑/↓ to navigate"
+    # also cover Claude's AskUserQuestion footer parts — the arrow cluster "↑/↓ to navigate"
     # (and ←/→), and a bare single-letter key like "n to add notes".
     r"^(?:"
     r"\? for shortcuts"
-    # DOIT.6 #143: accept ONE-OR-MORE key tokens plus an optional parenthetical before "to", so a
+    # accept ONE-OR-MORE key tokens plus an optional parenthetical before "to", so a
     # footer like "ctrl+b ctrl+b (twice) to run in background" is recognized as a footer hint (not a
     # live command/prompt). Single-key footers like "n to add notes" still match.
     r"|(?:(?:esc|escape|enter|return|tab|shift\+tab|ctrl\+[a-z0-9]|cmd\+[a-z0-9]|alt\+[a-z0-9]|option\+[a-z0-9]|↑/↓|←/→|↑|↓|←|→|[a-z])\s+)+(?:\([^)]*\)\s+)?to\s+.+"
@@ -442,7 +442,7 @@ _FOOTER_HINT_PART_RE = re.compile(
     re.IGNORECASE,
 )
 _QUESTION_RE = re.compile(r"(?:^|\b)(?:Q\d+\s*/\s*\d+\s*:\s*)?.+\?\s*$")
-# DOIT.6 #43: Claude Code's AskUserQuestion footer. Its distinctive combo ("Enter to select" plus a
+# Claude Code's AskUserQuestion footer. Its distinctive combo ("Enter to select" plus a
 # navigate / add-notes / switch-questions hint) identifies the multi-option ask UI, whose selected
 # option is box-highlighted (no ❯ glyph) and which puts a preview / "Notes:" / "Chat about this" block
 # between the options and the footer.
@@ -617,7 +617,7 @@ def _is_prompt_trailing_ui_line(line: str) -> bool:
     # Ctrl-T task/todo list rows shown below an approval prompt (pending ☐, done ☑/☒/◼, active ◐),
     # optionally led by a tree/box connector. Defense-in-depth for a partial overlay (header scrolled
     # off): these are prompt-trailing UI, not new activity. The header break above is the durable fix.
-    # DOIT.35 C1: include this Claude version's task glyphs — □ (U+25A1) pending, ✓/✔ done, ✗/✘ failed,
+    # include this Claude version's task glyphs — □ (U+25A1) pending, ✓/✔ done, ✗/✘ failed,
     # ◯ (U+25EF) — alongside the U+2610 ballot-box family. Otherwise a working session with a Ctrl-T task
     # list reads as new output (visible_agent_working -> False) and the YO ball stops spinning.
     if re.match(r"^[│├└╰⎿]?\s*[☐☑☒▢▣◻◼◐◓□✓✔✗✘◯]\s+\S", stripped):
@@ -650,7 +650,7 @@ def _is_ask_user_question_footer(line: str) -> bool:
 def ask_user_question_prompt_text(visible_text: str) -> str:
     """Return the question text when the visible pane shows Claude Code's AskUserQuestion UI.
 
-    DOIT.6 #43: that UI is NOT a yes/no permission prompt (``detect_prompt`` returns None) and its
+    that UI is NOT a yes/no permission prompt (``detect_prompt`` returns None) and its
     selected option is box-highlighted (no ``❯``), so the generic choice detector misses it. Recognize
     it by its footer ("Enter to select" + a navigate / add-notes / switch-questions hint) below ≥2
     numbered options and a ``?``-question line — even with a preview box / "Notes:" / "Chat about this"
@@ -686,7 +686,7 @@ def visible_choice_prompt_text(visible_text: str) -> str:
     if re.search(r"accept edits on\s*\(", visible_text, re.IGNORECASE):
         return ""
 
-    # DOIT.6 #43: the box-highlighted AskUserQuestion multi-option UI is a question, not a yes/no prompt.
+    # the box-highlighted AskUserQuestion multi-option UI is a question, not a yes/no prompt.
     ask_question = ask_user_question_prompt_text(visible_text)
     if ask_question:
         return ask_question

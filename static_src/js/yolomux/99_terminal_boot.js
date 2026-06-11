@@ -106,7 +106,7 @@ function virtualPanelControlsHtml(session) {
 }
 
 function panelActiveTabName(session) {
-  const activePane = document.getElementById(`panel-${session}`)?.querySelector('.tab-pane.active');
+  const activePane = document.getElementById(panelDomId(session))?.querySelector('.tab-pane.active');
   const id = activePane?.id || '';
   if (id === `transcript-pane-${session}`) return 'transcript';
   if (id === `summary-pane-${session}`) return 'summary';
@@ -117,7 +117,7 @@ function panelActiveTabName(session) {
 function createPanel(session) {
   const panel = document.createElement('article');
   panel.className = 'panel';
-  panel.id = `panel-${session}`;
+  panel.id = panelDomId(session);
   panel.innerHTML = `
       <div class="panel-head">
         ${panelControlsHtml(session)}
@@ -189,7 +189,7 @@ function syncTranscriptMetaLoadingUi() {
       metaRefreshButton.setAttribute('aria-label', t('meta.refreshAria'));
     }
   }
-  document.getElementById(`panel-${infoItemId}`)?.classList.toggle('metadata-loading', transcriptMetaLoading);
+  document.getElementById(panelDomId(infoItemId))?.classList.toggle('metadata-loading', transcriptMetaLoading);
 }
 
 function infoMetadataLoadingHtml() {
@@ -204,8 +204,8 @@ function renderInfoPanel() {
   if (!node) return;
   syncTranscriptMetaLoadingUi();
   applyInfoBranchColumnWidth();
-  bindInfoPrContextMenu(node);   // DOIT.29: idempotent — "Watch this PR" on the PR column
-  renderWatchedPrs();   // DOIT.29: the Watched PRs section repaints alongside the branch table
+  bindInfoPrContextMenu(node);   // idempotent — "Watch this PR" on the PR column
+  renderWatchedPrs();   // the Watched PRs section repaints alongside the branch table
   const rows = infoBranchRows();
   if (!rows.length) {
     if (transcriptMetaLoading) {
@@ -393,7 +393,7 @@ function bindInfoColumnResizers(node) {
   });
 }
 
-// DOIT.29: client-side mirror of the backend parse_pull_request_ref — normalize a watched-PR entry
+// client-side mirror of the backend parse_pull_request_ref — normalize a watched-PR entry
 // ("owner/repo#N", "owner/repo/N", or a github.com PR URL) to the canonical "owner/repo#N", else ''.
 // Used to dedupe and to match a stored entry (which may be a URL) against a PR's canonical ref.
 function normalizeWatchedPrRef(entry) {
@@ -498,7 +498,7 @@ function removeWatchedPr(ref) {
     .catch(error => statusErr(`settings save failed: ${esc(error)}`));
 }
 
-// DOIT.29: right-clicking a PR link in YO!info offers "Watch this PR" (adds it to github.watched_prs).
+// right-clicking a PR link in YO!info offers "Watch this PR" (adds it to github.watched_prs).
 // Delegated on #info-content so it covers both the branch-table PR column and any future PR cells.
 function bindInfoPrContextMenu(node) {
   if (!node || node.dataset.watchedPrMenuBound === '1') return;
@@ -578,7 +578,7 @@ function yoagentBusyUiIsMounted(node = document.getElementById('yoagent-content'
 // Downgrade block-level headings (#/##/### …) to inline bold so an embedded agent heading renders as
 // emphasis inside a compact card instead of a giant h1/h2 that balloons its height. Inline emphasis,
 // code, lists, and links are left intact for marked.js to render.
-// DOIT.6 #129: the LLM backends emit "loose" markdown (blank lines between list items, double blank
+// the LLM backends emit "loose" markdown (blank lines between list items, double blank
 // lines between sections) which marked.js renders with big gaps. Tighten ONLY the yoagent inputs
 // (not the shared file-editor preview): collapse 2+ blank lines to one, and drop blank lines between
 // adjacent list items so a loose list renders as tightly as a tight one.
@@ -1392,7 +1392,7 @@ async function ensureTerminalRunning(session) {
   }
   const ensured = await ensureSession(session);
   if (!ensured) {
-    const container = document.getElementById(`term-${session}`);
+    const container = document.getElementById(terminalDomId(session));
     if (container) container.innerHTML = `<pre class="terminal-error">${localizedHtml('terminal.connection.sessionUnavailableRetry', {session: sessionLabel(session)})}</pre>`;
     return;
   }
@@ -1444,7 +1444,7 @@ function connectTerminalSocket(session, item) {
 function startTerminal(session) {
   const existing = terminals.get(session);
   const reconnectAttempt = existing?.reconnectAttempt || 0;
-  const container = document.getElementById(`term-${session}`);
+  const container = document.getElementById(terminalDomId(session));
   if (!container) return;
   if (existing?.term && existing.container === container) {
     connectTerminalSocket(session, existing);
@@ -1481,12 +1481,12 @@ function startTerminal(session) {
     macOptionClickForcesSelection: true,
   });
   term.open(container);
-  // DOIT.6 #32: match the container bg to the terminal theme so every pane shares one white.
+  // match the container bg to the terminal theme so every pane shares one white.
   if (container?.style) container.style.background = terminalThemeForGlobalTheme().background;
   installTerminalLinkProvider(term);
   installTerminalContextMenu(session, term, container);
   installTerminalCopyShortcut(session, term, container);
-  installTerminalOsc52Bridge(session, term);   // DOIT.53: Claude/tmux OSC 52 clipboard escapes -> browser clipboard
+  installTerminalOsc52Bridge(session, term);   // Claude/tmux OSC 52 clipboard escapes -> browser clipboard
   installTerminalFileDrop(session, container);
   const openedSize = estimateTerminalSize(container, term);
   if (term.cols !== openedSize.cols || term.rows !== openedSize.rows) {
@@ -1530,9 +1530,9 @@ function startTerminal(session) {
 
 function updateTypingIndicator(session) {
   const item = terminals.get(session);
-  const container = item?.container || document.getElementById(`term-${session}`);
+  const container = item?.container || document.getElementById(terminalDomId(session));
   const pane = document.getElementById(`terminal-pane-${session}`);
-  const panel = document.getElementById(`panel-${session}`);
+  const panel = document.getElementById(panelDomId(session));
   const ready = Boolean(
     item?.socket?.readyState === WebSocket.OPEN
     && focusedTerminal === session
@@ -1702,7 +1702,7 @@ function renderAutoApproveButton(session, payload) {
 
 function startSummaryStream(session) {
   stopSummaryStream(session);
-  const node = document.getElementById(`summary-${session}`);
+  const node = document.getElementById(summaryDomId(session));
   if (!node) return;
   if (readOnlyMode) {
     node.textContent = t('transcript.adminRequired');
@@ -1731,7 +1731,8 @@ function startSummaryStream(session) {
   const source = new EventSource(`/api/summary-stream?session=${encodeURIComponent(session)}&lookback=${60 * 60}`);
   summaryStreams.set(session, source);
   source.addEventListener('meta', event => {
-    const payload = JSON.parse(event.data);
+    const payload = safeJsonParse(event.data, null);
+    if (!payload) return;
     const fallback = payload.fallback ? 'recent transcript tail' : 'last hour';
     const projectCount = Array.isArray(payload.projects) ? payload.projects.length : 0;
     appendSummary(`[codex] summarizing ${fallback} for ${payload.focus_root || session}\n`);
@@ -1739,21 +1740,23 @@ function startSummaryStream(session) {
     appendSummary(`[codex] project inventory: ${projectCount} sessions\n\n`);
   });
   source.addEventListener('log', event => {
-    const payload = JSON.parse(event.data);
-    if (payload.text) appendSummary(`[codex] ${payload.text}\n`);
+    const payload = safeJsonParse(event.data, null);
+    if (payload?.text) appendSummary(`[codex] ${payload.text}\n`);
   });
   source.addEventListener('delta', event => {
-    const payload = JSON.parse(event.data);
-    if (payload.text) appendSummary(payload.text);
+    const payload = safeJsonParse(event.data, null);
+    if (payload?.text) appendSummary(payload.text);
   });
   source.addEventListener('summary_error', event => {
-    const payload = JSON.parse(event.data);
-    appendSummary(`\n[error] ${payload.error || 'summary failed'}\n`);
+    // A bad frame must still tear the stream down (this is the error path); guard the read but always stop
+    // — an unguarded JSON.parse throw here would leak the EventSource.
+    const payload = safeJsonParse(event.data, null);
+    appendSummary(`\n[error] ${payload?.error || 'summary failed'}\n`);
     stopSummaryStream(session);
   });
   source.addEventListener('done', event => {
-    const payload = JSON.parse(event.data);
-    if (payload.return_code && payload.return_code !== 0) {
+    const payload = safeJsonParse(event.data, null);
+    if (payload?.return_code && payload.return_code !== 0) {
       appendSummary(`\n[codex exited ${payload.return_code}]\n`);
     }
     stopSummaryStream(session);
@@ -1844,7 +1847,7 @@ async function applyTranscriptsPayload(payload, options = {}) {
   if (options.refreshActivity !== false) refreshActivitySummary({silent: true});
   for (const session of activeSessions.filter(isTmuxSession)) {
     const meta = document.getElementById(`meta-${session}`);
-    const preview = document.getElementById(`transcript-${session}`);
+    const preview = document.getElementById(transcriptDomId(session));
     const info = transcriptMeta.sessions?.[session];
     const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
     updatePanelHeader(session, info);
@@ -1896,7 +1899,7 @@ async function refreshTranscripts(options = {}) {
       transcriptMetaLoadError = String(error);
       for (const session of activeSessions.filter(isTmuxSession)) {
         const meta = document.getElementById(`meta-${session}`);
-        const preview = document.getElementById(`transcript-${session}`);
+        const preview = document.getElementById(transcriptDomId(session));
         if (meta) meta.innerHTML = `<span class="err">transcript lookup failed</span>`;
         updateTranscriptPathRow(session, '', 'transcript lookup failed');
         if (preview) preview.textContent = `transcript lookup failed: ${error}`;
@@ -1912,8 +1915,8 @@ async function refreshTranscripts(options = {}) {
 }
 
 function updatePanelHeader(session, info) {
-  const tab = document.getElementById(`panel-tab-${session}`);
-  const panel = document.getElementById(`panel-${session}`);
+  const tab = document.getElementById(paneTabDomId(session));
+  const panel = document.getElementById(panelDomId(session));
   const auto = autoApproveStates.get(session)?.enabled === true;
   const state = sessionState(session, info);
   updatePanelControlLabels(session, info);
@@ -1983,7 +1986,7 @@ async function refreshTranscriptPreview(session, preview, options = {}) {
 function applyContextItemsPayloadFromPush(payload = {}, options = {}) {
   if (!payload || !payload.items) return false;
   const session = payload.session || options.session || '';
-  const preview = options.preview || (session ? document.getElementById(`transcript-${session}`) : null);
+  const preview = options.preview || (session ? document.getElementById(transcriptDomId(session)) : null);
   if (!preview) return false;
   updateTranscriptPathRow(session, payload.path);
   renderTranscriptItems(preview, payload.path, payload.items, options);
@@ -1992,18 +1995,20 @@ function applyContextItemsPayloadFromPush(payload = {}, options = {}) {
 
 function startTranscriptStream(session, options = {}) {
   stopTranscriptStream(session);
-  const preview = document.getElementById(`transcript-${session}`);
+  const preview = document.getElementById(transcriptDomId(session));
   if (!preview) return;
   const url = `/api/context-stream?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`;
   const source = new EventSource(url);
   transcriptStreams.set(session, source);
   source.addEventListener('reset', event => {
-    const payload = JSON.parse(event.data);
+    const payload = safeJsonParse(event.data, null);
+    if (!payload) return;
     updateTranscriptPathRow(session, payload.path);
     renderTranscriptItems(preview, payload.path, payload.items || [], {scrollBottom: options.scrollBottom === true});
   });
   source.addEventListener('items', event => {
-    const payload = JSON.parse(event.data);
+    const payload = safeJsonParse(event.data, null);
+    if (!payload) return;
     appendTranscriptItems(preview, payload.items || []);
   });
   source.addEventListener('ping', () => {});
@@ -2199,7 +2204,7 @@ function refreshAll() {
 async function boot() {
   applySettingsPayload(clientSettingsPayload, {initial: true, force: true});
   installClientEventStream();
-  // i18n (DOIT.8): AWAIT the active locale catalog (all-static-fetch) before the first render so menus,
+  // i18n: AWAIT the active locale catalog (all-static-fetch) before the first render so menus,
   // tabs, and the wordmark paint in the right language from the start — no flash of raw t() keys (the
   // menu bar renders synchronously at boot, before any later re-render could fix it). A 'system' pref is
   // resolved client-side against navigator.language (the server can't see the browser locale).
@@ -2496,7 +2501,7 @@ function handleGlobalShortcutKeydown(event) {
   const key = String(event.key || '').toLowerCase();
   const platformActionAllowed = globalShortcutTargetAllowsPlatformAction(event.target);
   if (handlePendingGlobalShortcutChord(event, key)) return;
-  // DOIT.21: editor back/forward history via the keyboard — Mod+Alt+[ / Mod+Alt+]. (appModifier() is
+  // editor back/forward history via the keyboard — Mod+Alt+[ / Mod+Alt+]. (appModifier() is
   // false when Alt is held, so test the platform modifier directly.) Matched by event.code so a layout
   // where Alt remaps the bracket char still works; plain Mod+[ / Mod+] stay with CodeMirror (indent).
   const platformMod = isMacPlatform() ? (event.metaKey === true && event.ctrlKey !== true) : (event.ctrlKey === true && event.metaKey !== true);

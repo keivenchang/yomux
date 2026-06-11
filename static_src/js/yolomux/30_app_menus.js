@@ -369,7 +369,7 @@ function tmuxSessionViewCommands(session) {
     }),
     menuCommand(t('menu.tmux.paneDetails'), () => {
       if (!active) return;
-      const panel = document.getElementById(`panel-${session}`);
+      const panel = document.getElementById(panelDomId(session));
       if (panel) setPanelDetailsCollapsed(panel, !panel.classList.contains('details-collapsed'));
     }, {
       disabled: !active,
@@ -416,7 +416,7 @@ function tabCommandsForItems(items, options) {
   return items.map(item => menuTabCommand(item, options));
 }
 
-// DOIT.33: a PR number in any of the forms a user types (#N, PR#N, PR N, N).
+// a PR number in any of the forms a user types (#N, PR#N, PR N, N).
 function prNumberSearchForms(number) {
   if (!number) return [];
   return [`#${number}`, `PR#${number}`, `PR ${number}`, String(number)];
@@ -431,7 +431,7 @@ function tabSearchFields(item) {
   const info = transcriptMeta.sessions?.[item] || {};
   const filePath = fileItemPath(item) || '';
   const pr = displayPullRequest(info);
-  // DOIT.33: also index the repo's OTHER-branch PRs/branches/Linear IDs (the same data YO!info shows),
+  // also index the repo's OTHER-branch PRs/branches/Linear IDs (the same data YO!info shows),
   // so a session is findable by ANY PR (e.g. #10289 on a non-current branch), branch name, or Linear ID
   // — not just its current-branch PR. Already in the metadata payload, so no extra fetch.
   const otherBranches = info.project?.git?.other_branches?.branches || [];
@@ -745,7 +745,7 @@ function createAppMenuBar() {
   return bar;
 }
 
-// DOIT.21: the editor back/forward history control lives in the GLOBAL topbar (left of the search
+// the editor back/forward history control lives in the GLOBAL topbar (left of the search
 // box), not per editor pane — it's one file-history control for the whole window, like a browser's.
 // Buttons are always visible; updateEditorNavButtons() toggles their disabled state from editorNav.
 function createTopbarNav() {
@@ -802,7 +802,7 @@ function createTopbarSearch() {
   return button;
 }
 
-// DOIT.8 Phase 1: a top-right language switcher (entry point #2). It writes the SAME general.language
+// Phase 1: a top-right language switcher (entry point #2). It writes the SAME general.language
 // setting as the Preferences picker and applies the locale optimistically (no settings-poll round-trip).
 // 'system' resolves against navigator.language; the <select> shows the raw pref so 'system' reads as Auto.
 function createTopbarLanguageSwitcher() {

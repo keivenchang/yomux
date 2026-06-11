@@ -314,7 +314,7 @@ def test_review_decision_is_cached(monkeypatch):
 
 
 def test_cached_metadata_gives_failures_a_short_negative_ttl():
-    # DOIT.6 #71: a None result (transient 403/429/5xx/timeout, or genuinely no PR) is cached only
+    # a None result (transient 403/429/5xx/timeout, or genuinely no PR) is cached only
     # briefly so it retries soon, while a real value keeps the full positive TTL.
     cache = MetadataCache(ttl_seconds=300)
     github_client.cached_metadata(cache, "real", True, lambda: {"x": 1})
@@ -326,7 +326,7 @@ def test_cached_metadata_gives_failures_a_short_negative_ttl():
 
 
 def test_tail_file_lines_reads_a_bounded_window_from_eof(tmp_path):
-    # DOIT.6 #72: return the last N lines without scanning the whole file.
+    # return the last N lines without scanning the whole file.
     big = tmp_path / "transcript.jsonl"
     big.write_text("".join(f"row-{i}\n" for i in range(5000)))
     assert tail_file_lines(big, 3).splitlines() == ["row-4997", "row-4998", "row-4999"]
@@ -336,23 +336,25 @@ def test_tail_file_lines_reads_a_bounded_window_from_eof(tmp_path):
 
 
 def test_metadata_cache_is_bounded_and_sweeps_expired_on_write():
-    # DOIT.6 #83: the cache stays bounded (cap + sweep expired) so dead branch/sha keys don't leak for
+    # the cache stays bounded (cap + sweep expired) so dead branch/sha keys don't leak for
     # the process lifetime.
+    # MetadataCache is now a TtlCache subclass; max_entries is the (inherited) cap.
     cache = MetadataCache(ttl_seconds=300)
-    for i in range(MetadataCache.MAX_ENTRIES + 1):
+    cap = cache.max_entries
+    for i in range(cap + 1):
         cache.set(f"expired{i}", i, ttl=0)  # immediately expired
     cache.set("fresh", 1)
-    assert len(cache.values) <= MetadataCache.MAX_ENTRIES
+    assert len(cache.values) <= cap
     assert "fresh" in cache.values
     # a large burst of live entries is also capped.
     cache2 = MetadataCache(ttl_seconds=300)
-    for i in range(MetadataCache.MAX_ENTRIES + 100):
+    for i in range(cap + 100):
         cache2.set(f"k{i}", i)
-    assert len(cache2.values) <= MetadataCache.MAX_ENTRIES
+    assert len(cache2.values) <= cap
 
 
 def test_parse_pull_request_ref_accepts_short_and_url_forms():
-    # DOIT.29: owner/repo#N, owner/repo/N, and full PR URLs normalize to the canonical owner/repo#N.
+    # owner/repo#N, owner/repo/N, and full PR URLs normalize to the canonical owner/repo#N.
     from yolomux_lib.metadata import parse_pull_request_ref
 
     for text in ("ai-dynamo/frontend-crates#18", "ai-dynamo/frontend-crates/18",
@@ -369,7 +371,7 @@ def test_parse_pull_request_ref_accepts_short_and_url_forms():
 
 
 def test_parse_pull_request_ref_rejects_invalid():
-    # DOIT.29: non-github hosts, missing/zero PR numbers, repo-only refs, and issue URLs are rejected.
+    # non-github hosts, missing/zero PR numbers, repo-only refs, and issue URLs are rejected.
     from yolomux_lib.metadata import parse_pull_request_ref
 
     for text in ("https://gitlab.com/owner/repo/pull/7", "owner/repo", "owner/repo#0",
@@ -378,7 +380,7 @@ def test_parse_pull_request_ref_rejects_invalid():
 
 
 def test_watched_pr_metadata_dedupes_caps_and_flags_invalid():
-    # DOIT.29: dedupe by canonical ref, cap at WATCHED_PR_LIMIT, collect invalid entries, and (offline)
+    # dedupe by canonical ref, cap at WATCHED_PR_LIMIT, collect invalid entries, and (offline)
     # return the fallback PR shape carrying {ref, url}.
     from yolomux_lib.metadata import watched_pr_metadata, WATCHED_PR_LIMIT
 
@@ -398,7 +400,7 @@ def test_watched_pr_metadata_dedupes_caps_and_flags_invalid():
 
 
 def test_candidate_session_cwds_prefers_live_pane_cwd_over_default(monkeypatch, tmp_path):
-    # DOIT.32: the focused pane's live cwd (after `cd`) outranks the session-number default workdir, so
+    # the focused pane's live cwd (after `cd`) outranks the session-number default workdir, so
     # the project follows the pane instead of staying pinned to dynamoN.
     from yolomux_lib.common import PaneInfo, SessionInfo
 
@@ -437,7 +439,7 @@ def test_candidate_session_cwds_falls_back_to_default_without_live_cwd(monkeypat
 
 
 def test_git_worktree_identity_names_linked_worktree_vs_parent(tmp_path):
-    # S7 (DOIT.51): a linked worktree resolves to its parent repo; the main checkout returns None.
+    # S7: a linked worktree resolves to its parent repo; the main checkout returns None.
     import subprocess
 
     def run(*args, cwd):

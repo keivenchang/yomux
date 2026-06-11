@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import time
 
 from .cache import TtlCache
 
@@ -19,6 +20,14 @@ def run_cmd(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProces
 
 def tmux(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
     return run_cmd(["tmux", *args], timeout=timeout)
+
+
+def cmd_error(result: subprocess.CompletedProcess, fallback: str) -> str:
+    """The stderr-or-stdout-or-fallback error message shared by every checked tmux/git/ps call site.
+
+    `(result.stderr or result.stdout or "X").strip()` was written ~17 times.
+    """
+    return (result.stderr or result.stdout or fallback).strip()
 
 
 def tmux_run(*args: str, check: bool = True, timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
@@ -45,7 +54,7 @@ def session_sort_key(session: str) -> tuple[int, str, int]:
 def list_tmux_session_names() -> tuple[list[str], str | None]:
     result = tmux(["list-sessions", "-F", "#{session_name}"], timeout=3.0)
     if result.returncode != 0:
-        error = (result.stderr or result.stdout or "tmux list-sessions failed").strip()
+        error = cmd_error(result, "tmux list-sessions failed")
         return [], error
     sessions = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     return sorted(set(sessions), key=session_sort_key), None
@@ -81,7 +90,7 @@ def tmux_exact_target_from_sessions(target: str, sessions: list[str]) -> str:
     return target
 
 
-# DOIT.6 #80: tmux_exact_target ran `tmux list-sessions` on EVERY capture, so the inline N×2-3 captures
+# tmux_exact_target ran `tmux list-sessions` on EVERY capture, so the inline N×2-3 captures
 # in prompt_and_screen_status each paid a list-sessions subprocess (a +3s hang point if tmux wedged).
 # Cache the session-name resolution for a short window so a poll's captures reuse one resolution.
 _SESSION_NAMES_TTL = 1.0
@@ -119,11 +128,11 @@ def unique_session_names(values: list[str] | tuple[str, ...]) -> list[str]:
 def tmux_capture_pane(target: str, lines: int = 80, visible_only: bool = False, timeout: float = 3.0) -> str | None:
     """Capture a tmux pane, using visible_only=True for prompt presence checks.
 
-    DOIT.6 #80: an explicit short timeout so a wedged tmux fails the capture fast instead of blocking the
+    an explicit short timeout so a wedged tmux fails the capture fast instead of blocking the
     request thread (the synchronous /api/auto-approve path runs several captures inline).
     """
     exact_target = tmux_exact_target(target)
-    # DOIT.6 #144: -J rejoins lines that tmux wrapped across visual rows, so a command that wraps is
+    # -J rejoins lines that tmux wrapped across visual rows, so a command that wraps is
     # captured as one logical line. Without it, extract_command joins wrapped rows with a space and can
     # insert a spurious space mid-token (e.g. "rm -r"+"f /path" -> "rm -r f /path"), flipping a verdict.
     if visible_only:
@@ -140,7 +149,7 @@ def tmux_send_enter(target: str) -> None:
 
 
 def tmux_move_to_option(target: str, option: int, selected_option: int | None = None) -> None:
-    # DOIT.6 #66: walk the highlight to `option` WITHOUT pressing Enter, so the caller can re-verify the
+    # walk the highlight to `option` WITHOUT pressing Enter, so the caller can re-verify the
     # highlight actually landed on the target before confirming (the menu can redraw/move during a walk).
     exact_target = tmux_exact_target(target)
     selected = selected_option if selected_option and selected_option > 0 else 1

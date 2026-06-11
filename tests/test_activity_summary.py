@@ -332,7 +332,7 @@ def test_deterministic_yoagent_reply_prioritizes_active_work_without_listing_eve
 
 def test_changed_file_totals_coerces_numeric_strings_and_ignores_bools():
     from yolomux_lib.activity_summary import changed_file_totals
-    # DOIT.6 #78: numeric strings count ("5" -> 5); a bool does NOT (added=True must not be +1).
+    # numeric strings count ("5" -> 5); a bool does NOT (added=True must not be +1).
     payload = {"files": [
         {"added": "5", "removed": "2"},
         {"added": 3, "removed": 1},

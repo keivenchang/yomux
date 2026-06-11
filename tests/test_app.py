@@ -10,7 +10,7 @@ from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import SessionInfo
 
 
-PROMPT_STATE_KEYS = set(app_module.auto_approve_tmux.blank_prompt_state())
+PROMPT_STATE_KEYS = set(app_module.blank_prompt_state())
 
 
 @pytest.fixture(autouse=True)
@@ -143,14 +143,14 @@ def test_auto_approve_roster_uses_live_pane_working_signal(monkeypatch):
         capture_calls.append((session, kwargs.get("visible_only")))
         return pane_text.get(session, "")
 
-    monkeypatch.setattr(app_module.auto_approve_tmux, "tmux_capture_pane", fake_capture)
-    monkeypatch.setattr(app_module.auto_approve_tmux, "agent_screen_state", lambda text: {"key": "approval" if text == "approval pane" else "working" if text == "working pane" else "idle", "text": text})
+    monkeypatch.setattr(app_module, "tmux_capture_pane", fake_capture)
+    monkeypatch.setattr(app_module, "agent_screen_state", lambda text: {"key": "approval" if text == "approval pane" else "working" if text == "working pane" else "idle", "text": text})
     monkeypatch.setattr(
-        app_module.auto_approve_tmux,
+        app_module,
         "approval_prompt_state",
         lambda text: {"visible": text == "approval pane", "type": "bash" if text == "approval pane" else "", "text": "Do you want to proceed?" if text == "approval pane" else "", "yes_selected": text == "approval pane", "action": ""},
     )
-    monkeypatch.setattr(app_module.auto_approve_tmux, "hybrid_approval_prompt_state", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("roster must not run the prompt-detection fan-out")))
+    monkeypatch.setattr(app_module, "hybrid_approval_prompt_state", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("roster must not run the prompt-detection fan-out")))
     monkeypatch.setattr(app_module, "auto_approve_lock_owner", lambda _session: None)
     webapp = app_module.TmuxWebtermApp(["5", "6"])
     try:
@@ -282,7 +282,7 @@ def test_prompt_and_screen_status_uses_transcript_activity_when_visible_pane_is_
             )
         ],
     )
-    monkeypatch.setattr(app_module.auto_approve_tmux, "tmux_capture_pane", lambda session, visible_only=False: "❯ ")
+    monkeypatch.setattr(app_module, "tmux_capture_pane", lambda session, visible_only=False: "❯ ")
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"6": info}, []))
     webapp = app_module.TmuxWebtermApp(["6"])
     try:
@@ -326,9 +326,9 @@ def test_prompt_and_screen_status_captures_discovered_agent_pane(monkeypatch):
         hybrid_targets.append((target, pane_text is not None))
         return {"visible": True, "type": "bash", "text": "Do you want to proceed?", "yes_selected": True, "action": "approve"}
 
-    monkeypatch.setattr(app_module.auto_approve_tmux, "tmux_capture_pane", fake_capture)
-    monkeypatch.setattr(app_module.auto_approve_tmux, "hybrid_approval_prompt_state", fake_hybrid)
-    monkeypatch.setattr(app_module.auto_approve_tmux, "agent_screen_state", lambda _text: {"key": "approval", "text": "Do you want to proceed?"})
+    monkeypatch.setattr(app_module, "tmux_capture_pane", fake_capture)
+    monkeypatch.setattr(app_module, "hybrid_approval_prompt_state", fake_hybrid)
+    monkeypatch.setattr(app_module, "agent_screen_state", lambda _text: {"key": "approval", "text": "Do you want to proceed?"})
     webapp = app_module.TmuxWebtermApp(["6"])
     try:
         prompt, screen = webapp.prompt_and_screen_status("6", discovered_sessions={"6": info})
@@ -343,7 +343,7 @@ def test_prompt_and_screen_status_captures_discovered_agent_pane(monkeypatch):
 
 
 def test_prompt_and_screen_status_reports_os_errors(monkeypatch):
-    monkeypatch.setattr(app_module.auto_approve_tmux, "tmux_capture_pane", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("tmux failed")))
+    monkeypatch.setattr(app_module, "tmux_capture_pane", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("tmux failed")))
     webapp = app_module.TmuxWebtermApp(["6"])
     try:
         prompt, screen = webapp.prompt_and_screen_status("6")
@@ -356,8 +356,8 @@ def test_prompt_and_screen_status_reports_os_errors(monkeypatch):
 
 
 def test_prompt_and_screen_status_does_not_hide_programmer_errors(monkeypatch):
-    monkeypatch.setattr(app_module.auto_approve_tmux, "tmux_capture_pane", lambda *_args, **_kwargs: "visible")
-    monkeypatch.setattr(app_module.auto_approve_tmux, "hybrid_approval_prompt_state", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("bug")))
+    monkeypatch.setattr(app_module, "tmux_capture_pane", lambda *_args, **_kwargs: "visible")
+    monkeypatch.setattr(app_module, "hybrid_approval_prompt_state", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("bug")))
     webapp = app_module.TmuxWebtermApp(["6"])
     try:
         with pytest.raises(RuntimeError, match="bug"):
@@ -904,7 +904,7 @@ def test_resolve_yoagent_backend_auto_prefers_codex_then_claude(monkeypatch):
 
 
 def test_yoagent_language_directive_only_for_non_english_locales():
-    # DOIT.8 Phase 1: a non-English UI locale asks the LLM to answer in that language.
+    # Phase 1: a non-English UI locale asks the LLM to answer in that language.
     assert app_module.yoagent_language_directive("zh-Hant") == "\n\n請用繁體中文回答。"
     assert app_module.yoagent_language_directive("zh-Hans") == "\n\n请用简体中文回答。"
     assert app_module.yoagent_language_directive("es") == "\n\nResponde en español."
@@ -1108,8 +1108,8 @@ def test_yoagent_codex_cli_persists_then_resumes(monkeypatch):
 
 
 def test_watched_prs_payload_shapes_result_and_logs_truncation_once(monkeypatch):
-    # DOIT.29: watched_prs_payload returns {watched_prs, truncated, invalid}.
-    # DOIT.34 #4: the cap is logged only when the capped state CHANGES — not on every poll.
+    # watched_prs_payload returns {watched_prs, truncated, invalid}.
+    # the cap is logged only when the capped state CHANGES — not on every poll.
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
     webapp = app_module.TmuxWebtermApp([])
     truncated_box = {"n": 3}

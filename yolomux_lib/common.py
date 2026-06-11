@@ -22,6 +22,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from . import auth as _auth
+from .cache import MISS as cache_MISS
 from .tmux_utils import list_tmux_session_names
 from .tmux_utils import run_cmd
 from .tmux_utils import unique_session_names
@@ -33,7 +34,7 @@ DEFAULT_ROWS = 36
 MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
-YOLOMUX_VERSION = "0.2.80"
+YOLOMUX_VERSION = "0.2.81"
 SUMMARY_LOOKBACK_SECONDS = 3600
 SUMMARY_MAX_PROMPT_CHARS = 100_000
 SUMMARY_CODEX_TIMEOUT_SECONDS = 600
@@ -61,7 +62,9 @@ GITHUB_API_ROOT = "https://api.github.com"
 LINEAR_API_URL = "https://api.linear.app/graphql"
 DEFAULT_LINEAR_ISSUE_BASE_URL = "https://linear.app/nv/issue"
 OTHER_BRANCH_LIMIT = 8
-_CACHE_MISS = object()
+# the cache-miss sentinel is owned by cache.py (where the single TtlCache lives) and re-exported
+# here for the modules that import it from common. Same object identity, so `is _CACHE_MISS` holds.
+_CACHE_MISS = cache_MISS
 SERVER_HOSTNAME = socket.gethostname()
 PACIFIC_TIME = ZoneInfo("America/Los_Angeles")
 _YOLOMUX_COMMIT_TIME_PT: str | None = None
@@ -311,6 +314,26 @@ def git(args: list[str], cwd: str, timeout: float = 3.0) -> subprocess.Completed
     return run_cmd(["git", "-C", cwd, *args], timeout=timeout)
 
 
+def git_ahead_behind_counts(cwd: str, left: str, right: str = "HEAD") -> tuple[int, int] | None:
+    """(ahead, behind) of `right` relative to `left`, or None on git failure / unparseable output.
+
+    ahead = commits in `right` not in `left`; behind = the reverse. Uses
+    `git rev-list --left-right --count left...right`, where parts[0] is the left-only count (behind) and
+    parts[1] the right-only count (ahead). metadata.py and session_files.py each parsed this
+    with their own ref order + return shape; the left/right sign is the classic trap, so it lives once here.
+    """
+    result = git(["rev-list", "--left-right", "--count", f"{left}...{right}"], cwd)
+    if result.returncode != 0:
+        return None
+    parts = result.stdout.split()
+    if len(parts) < 2:
+        return None
+    try:
+        return int(parts[1]), int(parts[0])  # (ahead = right-only, behind = left-only)
+    except ValueError:
+        return None
+
+
 def git_bytes(args: list[str], cwd: str, timeout: float = 3.0) -> subprocess.CompletedProcess[bytes]:
     return subprocess.run(["git", "-C", cwd, *args], capture_output=True, timeout=timeout, check=False)
 
@@ -349,7 +372,7 @@ def split_csv(values: list[str]) -> list[str]:
 
 
 def tail_file_lines(path: Path, lines: int) -> str:
-    # DOIT.6 #72: read a bounded window backward from EOF instead of scanning the whole file front-to-
+    # read a bounded window backward from EOF instead of scanning the whole file front-to-
     # back. Transcripts are multi-hundred-MB JSONL and this is called on every metadata poll, /api/context,
     # /api/transcripts, and the summary — a full re-scan each time was the hot path.
     want = min(max(1, lines), MAX_TRANSCRIPT_TAIL_LINES)

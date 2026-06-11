@@ -39,12 +39,14 @@ ASSETS: dict[str, list[str]] = {
         "static_src/js/yolomux/20_layout_state.js",
         "static_src/js/yolomux/30_app_menus.js",
         "static_src/js/yolomux/40_file_explorer_files.js",
+        "static_src/js/yolomux/45_file_explorer_actions.js",
         "static_src/js/yolomux/50_editor_settings_runtime.js",
         "static_src/js/yolomux/60_popovers_tabs.js",
         "static_src/js/yolomux/70_layout_actions.js",
         "static_src/js/yolomux/75_dockview_layout.js",
         "static_src/js/yolomux/80_panes_preferences.js",
         "static_src/js/yolomux/90_changes_editor.js",
+        "static_src/js/yolomux/95_codemirror_editor.js",
         "static_src/js/yolomux/99_terminal_boot.js",
     ],
     "yolomux.css": [
@@ -99,7 +101,7 @@ def check_css_braces() -> None:
 
     A truncated/incomplete rule (open brace, no close) is invisible in isolation but, once the partials
     are concatenated, silently swallows the start of the NEXT partial's CSS until a stray } rebalances
-    it (this exact bug shipped once — DOIT.12 B1). Strips /* */ comments and quoted strings first so
+    it (this exact bug shipped once — B1). Strips /* */ comments and quoted strings first so
     braces inside content/url() values don't false-positive.
     """
     for asset, parts in ASSETS.items():
@@ -119,7 +121,7 @@ def check_css_braces() -> None:
 
 # Option-2 / "Durable Fix B": flag a DARK-default rule that hardcodes a theme-extreme literal color on a
 # theme-sensitive property with NO body.theme-light counterpart — the root cause of every recurring
-# light-mode dark-box / invisible-text bug (DOIT.18/19/25/28). Precision-first: only near-opaque,
+# light-mode dark-box / invisible-text bug (/19/25/28). Precision-first: only near-opaque,
 # near-extreme literals (very dark backgrounds / very light text) are flagged, so vibrant brand/status
 # colors that read in both themes don't false-positive. Selectors that are intentionally theme-
 # independent live in LIGHT_LINT_ALLOWLIST (vetted, with a reason).
@@ -413,9 +415,16 @@ def write_locales() -> bool:
 
 
 def lint_duplicate_functions() -> list[str]:
-    """Return error lines for top-level function names declared in more than one JS source file."""
+    """Return error lines for top-level declarations made in more than one JS source file.
+
+    The partials concatenate into one bundle sharing one scope, so a name declared in two partials lets the
+    last-concatenated one win silently (AGENTS.md). this covers top-level `const`/`let`/`class`
+    too, not just `function` — a duplicate const would otherwise only surface as a `node --check`
+    redeclaration error, which the manual lane can miss.
+    """
     js_sources = ASSETS.get("yolomux.js", [])
     name_to_files: dict[str, list[str]] = defaultdict(list)
+    decl = re.compile(r"^(?:function\s+(\w+)\s*\(|(?:const|let|class)\s+(\w+)\b)")
     for part in js_sources:
         path = repo_path(part)
         try:
@@ -423,14 +432,29 @@ def lint_duplicate_functions() -> list[str]:
         except FileNotFoundError:
             continue
         for line in text.splitlines():
-            m = re.match(r"^function\s+(\w+)\s*\(", line)
+            m = decl.match(line)
             if m:
-                name_to_files[m.group(1)].append(str(part))
+                name_to_files[m.group(1) or m.group(2)].append(str(part))
     errors = []
     for name, files in sorted(name_to_files.items()):
         if len(files) > 1:
-            errors.append(f"duplicate function '{name}' in: {', '.join(files)}")
+            errors.append(f"duplicate top-level declaration '{name}' in: {', '.join(files)}")
     return errors
+
+
+def lint_undefined_css_vars() -> list[str]:
+    """Every `var(--x)` in the CSS bundle must resolve to a `--x:` definition (CSS) or a JS
+    `setProperty('--x', …)` / inline `style="--x:…"`. a typo'd or removed token name otherwise
+    degrades silently (a hover that does nothing, an invalid `font` shorthand)."""
+    css = build_asset("yolomux.css")
+    js = build_asset("yolomux.js")
+    css_no_comments = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
+    defined = set(re.findall(r"(--[\w-]+)\s*:", css_no_comments))
+    defined |= set(re.findall(r"setProperty\(\s*[`'\"]\s*(--[\w-]+)", js))
+    defined |= set(re.findall(r"(--[\w-]+)\s*:", js))
+    referenced = set(re.findall(r"var\(\s*(--[\w-]+)", css_no_comments))
+    return [f"undefined CSS var {name} (referenced via var() but never defined in CSS or set from JS)"
+            for name in sorted(referenced - defined)]
 
 
 def check_locales() -> list[str]:
@@ -522,22 +546,25 @@ def main(argv: list[str] | None = None) -> int:
     if args.watch:
         return watch_loop(assets)
     try:
-        check_css_braces()
         if args.check:
+            check_css_braces()
             stale = [asset for asset in assets if not check_asset(asset)]
             stale += check_locales()
-            dup_errors = lint_duplicate_functions()
-            for err in dup_errors:
+            # the documented pre-commit gate runs the FULL lint set — duplicate top-level
+            # declarations, undefined CSS vars, AND theme-light pairing (the last previously ran only under
+            # --lint-light, so it was absent from --check / the CPS check list).
+            lint_errors = lint_duplicate_functions() + lint_undefined_css_vars() + lint_light_mode_pairs()
+            for err in lint_errors:
                 print(err, file=sys.stderr)
-            if stale or dup_errors:
+            if stale or lint_errors:
                 if stale:
                     print("stale static assets: " + ", ".join(stale), file=sys.stderr)
                 return 1
             return 0
 
-        changed = [asset for asset in assets if write_asset(asset)]
-        if write_locales():
-            changed.append("locales")
+        # a plain build goes through build_once (the same path --watch uses), so an invariant
+        # added there (e.g. check_css_braces) can never be skipped by the non-watch build.
+        changed = build_once(assets)
         if changed:
             print("rebuilt static assets: " + ", ".join(changed))
         return 0

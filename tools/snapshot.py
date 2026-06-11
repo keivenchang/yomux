@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """Headless screenshot of a RUNNING YOLOmux instance — agent self-verification of UI changes.
 
-Boots headless Chrome against a dev server (default https://localhost:7778), logs in via the login
+Boots headless Chrome against a dev server (default https://localhost:8001), logs in via the login
 form, optionally sets the locale cookie, loads a path/URL (e.g. a layout query string), waits for the
 UI to settle, and writes a PNG. This closes the diagnose -> fix -> re-screenshot loop: the agent can
 verify its OWN UI change instead of waiting on a human screenshot.
@@ -29,7 +29,7 @@ def find_chrome() -> str | None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--base", default="https://localhost:7778", help="server base URL (default the dev instance)")
+    parser.add_argument("--base", default="https://localhost:8001", help="server base URL (default the dev instance)")
     parser.add_argument("--path", default="/", help="path (+query) to screenshot, joined onto --base")
     parser.add_argument("--url", default="", help="full URL to screenshot (overrides --base/--path)")
     parser.add_argument("--out", default="/tmp/yolomux-snapshot.png", help="output PNG path")

@@ -21,6 +21,7 @@ from .common import AUTH_COOKIE_SECRET_PATH
 from .common import CONFIG_DIR
 from .common import git
 from .common import git_bytes
+from .tmux_utils import cmd_error
 from .common import is_generated_upload_name
 from . import file_index
 
@@ -319,7 +320,7 @@ def _entry_info(path: Path, name: str) -> dict[str, Any]:
         "is_symlink": stat.S_ISLNK(mode),
     }
     if stat.S_ISLNK(mode):
-        # DOIT.31: surface where the link points so the Finder row can show "name → target".
+        # surface where the link points so the Finder row can show "name → target".
         try:
             info["symlink_target"] = os.readlink(path)
         except OSError:
@@ -1006,7 +1007,7 @@ def diff_file(raw_path: str, from_ref: str | None = None, to_ref: str | None = N
             working, working_error = _git_blob_text(repo, diff_to, rel_path, "working")
         untracked = False
     if result.returncode not in {0, 1}:
-        message = (result.stderr or result.stdout or "git diff failed").strip()
+        message = cmd_error(result, "git diff failed")
         raise FilesystemError(message, status=500)
     diff = result.stdout or ""
     if len(diff.encode("utf-8", errors="replace")) > MAX_READ_BYTES:
@@ -1027,7 +1028,7 @@ def diff_file(raw_path: str, from_ref: str | None = None, to_ref: str | None = N
     }
 
 
-# DOIT.26: inline git blame for the editor. PR number is extracted from the commit summary the same
+# inline git blame for the editor. PR number is extracted from the commit summary the same
 # way the metadata code does (`(#1234)`). Cached per (path, HEAD sha, file mtime, ref) — blame is the
 # expensive call, and it only changes when the file or HEAD moves.
 _BLAME_PR_RE = re.compile(r"\(#(\d+)\)")

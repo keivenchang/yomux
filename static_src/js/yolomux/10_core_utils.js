@@ -413,7 +413,7 @@ function writeStoredTabMetaVisible(value) {
   storageSet(tabMetaStorageKey, value ? '1' : '0');
 }
 
-// DOIT.6 #40: persist the merged YO!info pane's active sub-tab ('info' | 'yoagent'), default 'info'.
+// persist the merged YO!info pane's active sub-tab ('info' | 'yoagent'), default 'info'.
 function normalizedInfoSubTab(value) {
   return value === 'yoagent' ? 'yoagent' : 'info';
 }
@@ -666,10 +666,10 @@ function terminalThemeForGlobalTheme(mode = globalThemeMode) {
   return {...theme};
 }
 
-// DOIT.6 #32: on a WHITE (light) terminal, agents emit 24-bit truecolor escapes tuned for a dark
+// on a WHITE (light) terminal, agents emit 24-bit truecolor escapes tuned for a dark
 // terminal that render faint on white. xterm's minimumContrastRatio auto-darkens ANY text color
 // (including app 24-bit colors) against the bg.
-// DOIT.30: the DARK terminal used to keep 1 (no adjustment), which left low-contrast cells alone — so
+// the DARK terminal used to keep 1 (no adjustment), which left low-contrast cells alone — so
 // an agent composer that draws light text on an ANSI-white box (Codex's input, ~contrast 1) was
 // white-on-white. Use a moderate 3 for dark: enough to force that composer to a readable foreground,
 // low enough that intentionally-dim dark-palette text (already at/above 3:1) is mostly untouched. Light
@@ -913,7 +913,7 @@ function setFocusedPanelItem(item, options = {}) {
 }
 
 let autoFocusNavTimer = null;
-// DOIT.35 C2: an AUTO-FOCUS-driven focus change records back/forward nav "as if clicked", so Back
+// an AUTO-FOCUS-driven focus change records back/forward nav "as if clicked", so Back
 // returns to where you were. Debounced by a short dwell so rapid auto-focus flapping (focus chasing
 // needs-attention) records only the focus that LANDS, not every transient flip. User clicks already
 // record immediately (activatePaneTab userInitiated); a back/forward re-activation lands on the item
@@ -1198,7 +1198,7 @@ function terminalBufferLineText(line) {
   return line?.translateToString?.(true) || '';
 }
 
-// DOIT.36 C1: did `line` fill the terminal to its right edge? translateToString(true) trims trailing
+// did `line` fill the terminal to its right edge? translateToString(true) trims trailing
 // blanks, so a row whose printed text reaches `cols` had a non-blank last cell — evidence the content
 // was CLIPPED at the edge and wrapped, not that it merely happened to end at the row. Used to gate the
 // hanging-URL stitch: a complete URL ending well short of the edge (e.g. `See https://x.com`) is NOT a
@@ -1208,7 +1208,7 @@ function terminalRowReachesRightEdge(line, cols) {
   return terminalBufferLineText(line).length >= cols;
 }
 
-// DOIT.27: does the joined group text end mid-URL? True when the LAST url token reaches the very end of
+// does the joined group text end mid-URL? True when the LAST url token reaches the very end of
 // the string (no trailing whitespace/terminator). Used to decide whether to stitch a hanging-indent
 // continuation row onto the group — only EXTEND a url token that runs off the row's right edge.
 function terminalTailIsUnterminatedUrl(text) {
@@ -1220,7 +1220,7 @@ function terminalTailIsUnterminatedUrl(text) {
   return last.index + last[0].length === text.length;
 }
 
-// DOIT.27: a row shaped like a hanging-indent continuation — leading whitespace, then a URL-valid char
+// a row shaped like a hanging-indent continuation — leading whitespace, then a URL-valid char
 // (not a quote/bracket). Returns {indent, text} with the indent stripped, or null. isWrapped rows are
 // not hanging continuations (they are real terminal soft-wraps and are handled by the isWrapped sweep).
 function terminalRowHangingShape(buffer, index) {
@@ -1232,10 +1232,10 @@ function terminalRowHangingShape(buffer, index) {
   return {indent: match[1].length, text: raw.slice(match[1].length)};
 }
 
-// DOIT.27: row `index` continues the URL printed on row `index - 1` — its own row shape is a hanging
+// row `index` continues the URL printed on row `index - 1` — its own row shape is a hanging
 // indent AND the previous row's tail is an unterminated url token. Gates tightly so ordinary indented
 // prose under a line that merely happens to end at a URL is not merged.
-// DOIT.36 C1: ALSO require the previous row to reach the terminal's right edge, proving the URL was
+// ALSO require the previous row to reach the terminal's right edge, proving the URL was
 // clipped/hard-wrapped. Without this, a complete URL at end-of-line falsely swallows the next row.
 function terminalRowIsHangingUrlContinuation(buffer, index, cols) {
   if (!terminalRowHangingShape(buffer, index)) return false;
@@ -1248,12 +1248,12 @@ function terminalRowIsHangingUrlContinuation(buffer, index, cols) {
 function terminalWrappedLineGroup(term, y) {
   const buffer = term.buffer?.active;
   if (!buffer?.getLine) return null;
-  // DOIT.36 C1: terminal width gates the hanging-URL stitch (a clipped URL fills to the right edge).
+  // terminal width gates the hanging-URL stitch (a clipped URL fills to the right edge).
   const cols = Number(term.cols) || 0;
   const requested = Math.max(0, y - 1);
   if (!buffer.getLine(requested)) return null;
   // Walk back to the logical line's first row: over terminal soft-wraps (isWrapped) AND over
-  // hanging-indent URL continuations (DOIT.27 — agent-hard-wrapped URLs whose continuation is its own
+  // hanging-indent URL continuations (agent-hard-wrapped URLs whose continuation is its own
   // non-wrapped, indented row). So querying ANY row of the wrapped URL yields the same full group.
   let start = requested;
   for (;;) {
@@ -1297,7 +1297,7 @@ function terminalWrappedOffsetPosition(group, offset, endPosition = false) {
   const row = group.rows.find(candidate => target >= candidate.start && target < candidate.end) || group.rows[group.rows.length - 1];
   if (!row) return null;
   // A stitched continuation row had `indent` leading spaces stripped before joining, so its real
-  // terminal column is shifted right by that indent (DOIT.27).
+  // terminal column is shifted right by that indent.
   return {x: Math.max(1, target - row.start + 1 + (row.indent || 0)), y: row.y};
 }
 
@@ -1387,7 +1387,7 @@ function copyTextToClipboardViaCopyEvent(text) {
   }
 }
 
-// DOIT.53: ONE clipboard-write chain for terminal-initiated copies (shortcut copy AND the OSC 52
+// ONE clipboard-write chain for terminal-initiated copies (shortcut copy AND the OSC 52
 // bridge): synchronous copy-event first — it stays inside any live user activation — then the async
 // navigator.clipboard path as fallback. Status text reports success/failure either way.
 function writeTerminalTextToClipboard(text, label = 'copied') {
@@ -1407,7 +1407,7 @@ function writeTerminalTextToClipboard(text, label = 'copied') {
     });
 }
 
-// DOIT.53 N1: opt-in live instrumentation for the copy path. Set storage key 'yolomux.debugCopy' to '1'
+// opt-in live instrumentation for the copy path. Set storage key 'yolomux.debugCopy' to '1'
 // and every copy decision logs ONE compact console line — enough to see which link breaks without
 // changing behavior.
 function copyDebugEnabled() {
@@ -1487,6 +1487,37 @@ function delegate(parent, type, selector, handler, options = {}) {
   };
   parent.addEventListener(type, listener, options);
   return listener;
+}
+
+// One owner for the per-session/-item DOM id scheme. Both the element that sets the id and every
+// getElementById/querySelector that looks it up route through these, so the prefix lives in one place
+// (the ids are produced + consumed across 7 partials). Changing a prefix is then a one-line edit.
+const panelDomId = item => `panel-${item}`;
+const paneTabDomId = session => `panel-tab-${session}`;
+const terminalDomId = session => `term-${session}`;
+const transcriptDomId = session => `transcript-${session}`;
+const summaryDomId = session => `summary-${session}`;
+
+// One inflight-dedup wrapper: run makeRequest() at most once per key while a call is outstanding, so
+// concurrent callers for the same key share the single in-flight promise and clean up after it settles.
+// When canReuse is false the caller wants an untracked fresh fetch, so it runs without registering. The
+// TTL cache-hit check and any resource-specific guards stay at the call site; this owns only the inflight
+// Map bookkeeping that was hand-rolled identically per filesystem resource (dir listing, path info, blame).
+function dedupeInflight(inflight, key, canReuse, makeRequest) {
+  if (canReuse) {
+    const existing = inflight.get(key);
+    if (existing) return existing;
+  }
+  const request = makeRequest();
+  if (!canReuse) return request;
+  inflight.set(key, request);
+  return (async () => {
+    try {
+      return await request;
+    } finally {
+      if (inflight.get(key) === request) inflight.delete(key);
+    }
+  })();
 }
 
 function appendContextMenuButton(menu, label, handler, closeMenu, options = {}) {
@@ -1576,7 +1607,7 @@ function closeContextMenus() {
   closeLinkContextMenu();
 }
 
-// DOIT.15: right-click menu for links in AI/markdown content — Copy URL / Open URL. Bound on the
+// right-click menu for links in AI/markdown content — Copy URL / Open URL. Bound on the
 // YO!agent body and markdown previews via installLinkContextMenu(container).
 function showLinkContextMenu(anchor, x, y) {
   closeTerminalContextMenu();
@@ -1718,7 +1749,7 @@ async function copyDeferredTextToClipboard(payloadPromise) {
   return result;
 }
 
-// DOIT.53 ROOT CAUSE: while Claude (or any TUI) owns the mouse inside tmux, the visible selection is the
+// ROOT CAUSE: while Claude (or any TUI) owns the mouse inside tmux, the visible selection is the
 // APP's — a plain drag never creates an xterm selection, and the copied text instead arrives as an
 // OSC 52 clipboard escape (app -> tmux `set-clipboard` passthrough -> our PTY -> xterm.js). xterm.js
 // DROPS OSC 52 unless a handler is registered, so those copies silently vanished. This bridge decodes
@@ -1781,7 +1812,7 @@ function handleTerminalCopyShortcutKeydown(session, term, container, event) {
   if (!selected) {
     if (isCmdC) {
       event.preventDefault();
-      // DOIT.53: in a Claude/tmux pane the APP owns the mouse, so a plain drag never creates an xterm
+      // in a Claude/tmux pane the APP owns the mouse, so a plain drag never creates an xterm
       // selection — tell the user the working gestures instead of dead-ending.
       statusEl.textContent = isMacPlatform()
         ? 'nothing selected — Option-drag selects while Claude/tmux owns the mouse; Cmd-Option-C copies the tmux selection'

@@ -21,7 +21,7 @@ launch() {
 
 cd "$SCRIPT_DIR"
 launch 7777 1
-launch 7778 2
+launch 8001 2
 
 sleep 2
-ss -tlnp | grep -E "7777|7778" | awk '{print $4, $6}'
+ss -tlnp | grep -E "7777|8001" | awk '{print $4, $6}'

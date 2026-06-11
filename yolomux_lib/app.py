@@ -17,11 +17,11 @@ from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 
-import auto_approve_tmux
-
 from . import filesystem
 from . import session_files
 from . import yolo_rules
+from .approvals import blank_prompt_state
+from .approvals import hybrid_approval_prompt_state
 from .activity_summary import activity_signature
 from .activity_summary import build_global_activity_summary
 from .activity_summary import build_session_activity_summary
@@ -82,8 +82,12 @@ from .transcripts import newest_transcript_timestamp
 from .transcripts import transcript_activity_is_recent
 from .transcripts import session_transcript_activity_state
 from .transcripts import trim_prompt_text
+from .prompt_detector import agent_screen_state
+from .prompt_detector import approval_prompt_state
+from .tmux_utils import cmd_error
 from .tmux_utils import list_tmux_session_names
 from .tmux_utils import tmux
+from .tmux_utils import tmux_capture_pane
 from .tmux_utils import tmux_has_exact_session
 from .tmux_utils import tmux_session_target
 from .types import AutoApproveState
@@ -302,7 +306,7 @@ def yoagent_cli_fallback_reason(backend: str, error: str) -> str:
     if not yoagent_cli_auth_failure(text):
         return text
     label = "Claude CLI" if backend == "claude" else "Codex CLI" if backend == "codex" else f"{backend} CLI"
-    # Use the canonical login command (DOIT.6 #39 verified `claude auth login`, not `claude login`).
+    # Use the canonical login command (verified `claude auth login`, not `claude login`).
     login_command = AGENT_LOGIN_COMMANDS.get(backend, f"{backend} login")
     return f"{label} is not logged in. Run `{login_command}`; showing the No agent YO!agent summary."
 
@@ -316,7 +320,7 @@ def yoagent_language_directive(locale: str) -> str:
 
 
 def resolve_yoagent_backend(backend: str) -> str:
-    # DOIT.6 #41: the default backend is "auto" — prefer codex, then claude, falling back to the
+    # the default backend is "auto" — prefer codex, then claude, falling back to the
     # deterministic ("No agent") summary if neither is installed AND logged in. Explicit choices
     # (claude / codex / deterministic) pass through unchanged.
     if backend != "auto":
@@ -364,7 +368,7 @@ def tmux_session_name_error(name: str) -> str | None:
 
 
 def normalized_prompt_state(prompt: dict[str, Any] | None = None) -> dict[str, Any]:
-    state = auto_approve_tmux.blank_prompt_state()
+    state = blank_prompt_state()
     if prompt:
         state.update(prompt)
     return state
@@ -377,7 +381,7 @@ class TmuxWebtermApp:
         self.auto_workers: dict[str, AutoApproveWorker] = {}
         self.auto_workers_lock = threading.RLock()
         self.metadata_cache = MetadataCache()
-        # DOIT.34 #4: last-logged watched-PR truncation state, so the cap is logged only when it changes.
+        # last-logged watched-PR truncation state, so the cap is logged only when it changes.
         self._watched_pr_truncated_signature: tuple[int, tuple[str, ...]] | None = None
         self.metadata_warm_lock = threading.Lock()
         self.metadata_warm_running = False
@@ -442,6 +446,14 @@ class TmuxWebtermApp:
         self.control_server = YolomuxControlServer(self.handle_control_request)
         self.control_server.start()
         self.maybe_start_yoagent_summary_worker()
+
+    def require_known_session(self, session: str) -> tuple[dict[str, Any], HTTPStatus] | None:
+        # the standard "unknown session -> 404" guard, written ~10 times verbatim. Returns the
+        # error pair to send, or None when the session exists. (The handlers that intentionally allow an
+        # empty session, or return a non-HTTP {"ok": False} shape, keep their own inline check.)
+        if session not in self.sessions:
+            return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
+        return None
 
     def refresh_sessions(self) -> list[str]:
         sessions, error = list_tmux_session_names()
@@ -1268,13 +1280,13 @@ class TmuxWebtermApp:
                 self.transcripts_payload_refreshing = False
 
     def watched_prs_payload(self, allow_network: bool = True) -> dict[str, Any]:
-        # DOIT.29: resolve the github.watched_prs watchlist to live PR metadata, independent of any open
+        # resolve the github.watched_prs watchlist to live PR metadata, independent of any open
         # session's branch. The server-side SSE loop refreshes it on a fixed slow cadence so a big watchlist
         # does not exhaust the GitHub rate limit.
         settings = settings_payload().get("settings", {})
         refs = settings.get("github", {}).get("watched_prs", [])
         result = watched_pr_metadata(refs, self.metadata_cache, allow_network=allow_network)
-        # DOIT.34 #4: log the truncation only when the capped state CHANGES (count or watchlist), not on
+        # log the truncation only when the capped state CHANGES (count or watchlist), not on
         # every poll — otherwise the event log fills with one identical entry per refresh.
         truncated = result["truncated"]
         signature = (truncated, tuple(str(ref) for ref in refs)) if truncated else None
@@ -1978,7 +1990,7 @@ class TmuxWebtermApp:
             worker = self.auto_workers.get(session)
             if worker is None:
                 return {"ok": True, "session": session, "enabled": False, "message": "YOLO was not enabled here"}
-            # DOIT.6 #70: confirm the worker thread actually exited (and released its flock) BEFORE
+            # confirm the worker thread actually exited (and released its flock) BEFORE
             # reporting released — otherwise the requester could re-acquire while this worker is still
             # alive and about to fire one more keystroke (two workers on one session).
             released = worker.stop()
@@ -2001,7 +2013,7 @@ class TmuxWebtermApp:
             "server_version": YOLOMUX_VERSION,
             "session_order": self.sessions,
             "sessions": session_payloads,
-            # DOIT.6 #39: refresh agent login status on the metadata poll (cached server-side) so the
+            # refresh agent login status on the metadata poll (cached server-side) so the
             # new-session picker re-enables an agent within the cache TTL after the user logs in.
             "agentAuth": agent_auth_status(),
             "errors": [*refresh_errors, *errors],
@@ -2230,15 +2242,16 @@ class TmuxWebtermApp:
                 self.metadata_warm_running = False
 
     def tmux_snapshot(self, session: str, lines: int) -> tuple[dict[str, Any], HTTPStatus]:
-        if session not in self.sessions:
-            return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
+        unknown = self.require_known_session(session)
+        if unknown:
+            return unknown
         sessions, errors = discover_sessions([session])
         info = sessions.get(session)
         target = info.selected_pane.target if info and info.selected_pane else session
-        # DOIT.6 #144: -J rejoins tmux-wrapped lines so a wrapped command is captured as one logical line.
+        # -J rejoins tmux-wrapped lines so a wrapped command is captured as one logical line.
         result = tmux(["capture-pane", "-t", target, "-p", "-J", "-S", f"-{max(1, min(lines, 1000))}"], timeout=3.0)
         if result.returncode != 0:
-            error = (result.stderr or result.stdout or "tmux capture-pane failed").strip()
+            error = cmd_error(result, "tmux capture-pane failed")
             return {"session": session, "target": target, "errors": [*errors, error]}, HTTPStatus.INTERNAL_SERVER_ERROR
         return {
             "session": session,
@@ -2248,8 +2261,9 @@ class TmuxWebtermApp:
         }, HTTPStatus.OK
 
     def transcript_tail(self, session: str, lines: int) -> tuple[dict[str, Any], HTTPStatus]:
-        if session not in self.sessions:
-            return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
+        unknown = self.require_known_session(session)
+        if unknown:
+            return unknown
         sessions, errors = discover_sessions([session])
         info = sessions.get(session)
         if not info or not info.agents:
@@ -2393,8 +2407,9 @@ class TmuxWebtermApp:
         }, HTTPStatus.OK
 
     def summary(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
-        if session not in self.sessions:
-            return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
+        unknown = self.require_known_session(session)
+        if unknown:
+            return unknown
         sessions, errors = discover_sessions([session])
         info = sessions.get(session)
         selected = info.selected_pane if info else None
@@ -2452,11 +2467,12 @@ class TmuxWebtermApp:
         }, HTTPStatus.OK
 
     def tmux_next_window(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
-        if session not in self.sessions:
-            return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
+        unknown = self.require_known_session(session)
+        if unknown:
+            return unknown
         result = tmux(["next-window", "-t", tmux_session_target(session)], timeout=3.0)
         if result.returncode != 0:
-            error = (result.stderr or result.stdout or "tmux next-window failed").strip()
+            error = cmd_error(result, "tmux next-window failed")
             return {"session": session, "error": error}, HTTPStatus.INTERNAL_SERVER_ERROR
         return {"session": session, "ok": True}, HTTPStatus.OK
 
@@ -2470,8 +2486,9 @@ class TmuxWebtermApp:
     def rename_session(self, session: str, new_name: str) -> tuple[dict[str, Any], HTTPStatus]:
         self.refresh_sessions()
         new_name = str(new_name or "").strip()
-        if session not in self.sessions:
-            return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
+        unknown = self.require_known_session(session)
+        if unknown:
+            return unknown
         name_error = tmux_session_name_error(new_name)
         if name_error:
             return {"session": session, "new_name": new_name, "error": name_error}, HTTPStatus.BAD_REQUEST
@@ -2482,7 +2499,7 @@ class TmuxWebtermApp:
 
         result = tmux(["rename-session", "-t", tmux_session_target(session), new_name], timeout=3.0)
         if result.returncode != 0:
-            error = (result.stderr or result.stdout or "tmux rename-session failed").strip()
+            error = cmd_error(result, "tmux rename-session failed")
             return {"session": session, "new_name": new_name, "error": error}, HTTPStatus.INTERNAL_SERVER_ERROR
 
         self.stop_auto_approve_worker(session)
@@ -2492,12 +2509,13 @@ class TmuxWebtermApp:
 
     def kill_session(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
         self.refresh_sessions()
-        if session not in self.sessions:
-            return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
+        unknown = self.require_known_session(session)
+        if unknown:
+            return unknown
 
         result = tmux(["kill-session", "-t", tmux_session_target(session)], timeout=3.0)
         if result.returncode != 0:
-            error = (result.stderr or result.stdout or "tmux kill-session failed").strip()
+            error = cmd_error(result, "tmux kill-session failed")
             return {"session": session, "error": error}, HTTPStatus.INTERNAL_SERVER_ERROR
 
         self.stop_auto_approve_worker(session)
@@ -2519,8 +2537,9 @@ class TmuxWebtermApp:
 
     def tmux_copy_selection(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
         self.refresh_sessions()
-        if session not in self.sessions:
-            return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
+        unknown = self.require_known_session(session)
+        if unknown:
+            return unknown
 
         sessions, errors = discover_sessions([session])
         info = sessions.get(session)
@@ -2528,7 +2547,7 @@ class TmuxWebtermApp:
 
         mode = tmux(["display-message", "-p", "-t", target, "#{pane_in_mode}"], timeout=1.0)
         if mode.returncode != 0:
-            error = (mode.stderr or mode.stdout or "tmux pane mode check failed").strip()
+            error = cmd_error(mode, "tmux pane mode check failed")
             return {"session": session, "target": target, "error": error, "errors": errors}, HTTPStatus.INTERNAL_SERVER_ERROR
         if mode.stdout.strip() != "1":
             return {
@@ -2544,12 +2563,12 @@ class TmuxWebtermApp:
         before_signature = before.stdout.strip() if before.returncode == 0 else ""
         copied = tmux(["send-keys", "-t", target, "-X", "copy-selection-no-clear"], timeout=1.0)
         if copied.returncode != 0:
-            error = (copied.stderr or copied.stdout or "tmux copy selection failed").strip()
+            error = cmd_error(copied, "tmux copy selection failed")
             return {"session": session, "target": target, "copied": False, "text": "", "error": error, "errors": errors}, HTTPStatus.OK
 
         after = tmux(["display-message", "-p", "-t", target, "#{buffer_created}:#{buffer_size}:#{buffer_sample}"], timeout=1.0)
         if after.returncode != 0:
-            error = (after.stderr or after.stdout or "tmux buffer check failed").strip()
+            error = cmd_error(after, "tmux buffer check failed")
             return {"session": session, "target": target, "error": error, "errors": errors}, HTTPStatus.INTERNAL_SERVER_ERROR
         if after.stdout.strip() == before_signature:
             return {
@@ -2563,7 +2582,7 @@ class TmuxWebtermApp:
 
         buffer_result = tmux(["save-buffer", "-"], timeout=1.0)
         if buffer_result.returncode != 0:
-            error = (buffer_result.stderr or buffer_result.stdout or "tmux save buffer failed").strip()
+            error = cmd_error(buffer_result, "tmux save buffer failed")
             return {"session": session, "target": target, "error": error, "errors": errors}, HTTPStatus.INTERNAL_SERVER_ERROR
 
         text = buffer_result.stdout
@@ -2578,8 +2597,9 @@ class TmuxWebtermApp:
 
     def ensure_session(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
         self.refresh_sessions()
-        if session not in self.sessions:
-            return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
+        unknown = self.require_known_session(session)
+        if unknown:
+            return unknown
 
         if tmux_has_exact_session(session):
             return {"session": session, "created": False, "ok": True}, HTTPStatus.OK
@@ -2624,7 +2644,7 @@ class TmuxWebtermApp:
             timeout=5.0,
         )
         if result.returncode != 0:
-            error = (result.stderr or result.stdout or "tmux new-session failed").strip()
+            error = cmd_error(result, "tmux new-session failed")
             return {"session": session, "created": False, "error": error}, HTTPStatus.INTERNAL_SERVER_ERROR
         self.refresh_sessions()
         self.log_event(
@@ -2645,8 +2665,9 @@ class TmuxWebtermApp:
         }, HTTPStatus.OK
 
     def upload_files(self, session: str, files: list[UploadedFile]) -> tuple[dict[str, Any], HTTPStatus]:
-        if session not in self.sessions:
-            return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
+        unknown = self.require_known_session(session)
+        if unknown:
+            return unknown
         if not files:
             return {"session": session, "error": "no files supplied"}, HTTPStatus.BAD_REQUEST
         if len(files) > UPLOAD_MAX_FILES:
@@ -2736,8 +2757,9 @@ class TmuxWebtermApp:
         return None, "session_workdir"
 
     def set_auto_approve(self, session: str, enabled: bool, persist: bool = True, takeover: bool = True) -> tuple[AutoApproveState, HTTPStatus]:
-        if session not in self.sessions:
-            return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
+        unknown = self.require_known_session(session)
+        if unknown:
+            return unknown
 
         with self.auto_workers_lock:
             existing = self.auto_workers.get(session)
@@ -2830,7 +2852,7 @@ class TmuxWebtermApp:
         if response.get("ok") is not True:
             self.log_event(session, "yolo_takeover_failed", "YOLO owner did not release", {"owner": owner or {}, "response": response})
             return False
-        # DOIT.6 #69: the owner stopped its worker and released the flock before replying ok (it joins the
+        # the owner stopped its worker and released the flock before replying ok (it joins the
         # thread first, #70). Do NOT probe-and-poll the lock to "infer" we may take it — that LOCK_EX
         # probe momentarily acquires the lock and races a third instance. Trust the owner's ok; the
         # caller re-acquires with a single atomic non-blocking flock, which is the only safe arbiter.
@@ -2860,27 +2882,25 @@ class TmuxWebtermApp:
             # Roster path: derive working/idle from the LIVE pane via a cheap visible-only capture
             # plus cheap prompt presence from the already-captured text. This avoids the expensive
             # hybrid transcript / bash double-capture fan-out while still lighting roster approval badges.
-            module = auto_approve_tmux
             try:
-                visible_text = module.tmux_capture_pane(target, visible_only=True)
+                visible_text = tmux_capture_pane(target, visible_only=True)
             except (OSError, subprocess.SubprocessError):
                 visible_text = None
             if visible_text is None:
                 return hidden_prompt, {"key": "idle", "text": ""}
-            return normalized_prompt_state(module.approval_prompt_state(visible_text)), dict(module.agent_screen_state(visible_text))
+            return normalized_prompt_state(approval_prompt_state(visible_text)), dict(agent_screen_state(visible_text))
         try:
-            module = auto_approve_tmux
-            visible_text = module.tmux_capture_pane(target, visible_only=True)
+            visible_text = tmux_capture_pane(target, visible_only=True)
             if visible_text is None:
                 prompt = normalized_prompt_state()
                 prompt["error"] = "failed to capture pane"
                 screen = {"key": "disconnected", "text": "failed to capture pane"}
                 return prompt, screen
-            prompt_state = module.hybrid_approval_prompt_state(session, visible_text, prompt_source=self.auto_approve_prompt_source())
+            prompt_state = hybrid_approval_prompt_state(session, visible_text, prompt_source=self.auto_approve_prompt_source())
             if prompt_state.get("visible") and prompt_state.get("type") == "bash":
-                pane_text = module.tmux_capture_pane(target)
-                prompt_state = module.hybrid_approval_prompt_state(session, visible_text, pane_text or visible_text, prompt_source=self.auto_approve_prompt_source())
-            screen_state = module.agent_screen_state(visible_text)
+                pane_text = tmux_capture_pane(target)
+                prompt_state = hybrid_approval_prompt_state(session, visible_text, pane_text or visible_text, prompt_source=self.auto_approve_prompt_source())
+            screen_state = agent_screen_state(visible_text)
             if screen_state.get("key") == "idle":
                 infos = discovered_sessions
                 if infos is None:

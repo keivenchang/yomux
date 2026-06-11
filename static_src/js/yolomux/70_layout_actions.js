@@ -343,7 +343,7 @@ async function placeTmuxSession(session) {
   await moveSessionToSlot(session, targetSlot, null, paneTabs(targetSlot).length);
 }
 
-// DOIT.6: File -> Finder toggles. Hide the Finder when it is already in the layout (same path as the
+// File -> Finder toggles. Hide the Finder when it is already in the layout (same path as the
 // Finder panel's close button), otherwise open/focus it. The menu's `checked` state tracks this.
 function toggleFinderPane() {
   if (itemInLayout(fileExplorerItemId)) {
@@ -627,7 +627,7 @@ function activatePaneTab(side, session, options = {}) {
     activeFile = fileItemPath(session);
     updateFileExplorerCurrentFileHighlight();
   }
-  // DOIT.21: a user-initiated tab switch IS navigation. setFocusedPanelItem records the previous
+  // a user-initiated tab switch IS navigation. setFocusedPanelItem records the previous
   // focused item plus the newly activated tab so Back returns to the pane the user just left.
   setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
   if (activeItemForSide(side) === session) {
@@ -857,7 +857,7 @@ function pullRequestCiIndicatorHtml(session, pr) {
 function pullRequestNumberIndicatorHtml(session, pr) {
   if (!pr?.number) return '';
   // No native title — the rich custom session popover already shows PR #, CI, and review state
-  // (DOIT.6: avoid a duplicate browser tooltip alongside the popover).
+  // (avoid a duplicate browser tooltip alongside the popover).
   const classes = pullRequestIsMerged(pr)
     ? metadataBadgeClasses(session, 'status', `ci-indicator tab-symbol pr-number-chip ${pullRequestStatusClass(pr)}`)
     : 'ci-indicator tab-symbol pr-number-chip';
@@ -891,11 +891,11 @@ function pullRequestApprovalIndicatorHtml(session, pr) {
   const cls = pullRequestApprovalClass(decision);
   if (!cls) return '';
   const label = pullRequestApprovalLabel(decision);
-  // No native title — the session popover carries the review state (DOIT.6: no duplicate tooltip).
+  // No native title — the session popover carries the review state (no duplicate tooltip).
   return `<span class="${metadataBadgeClasses(session, 'review', `ci-indicator tab-symbol pr-review-chip ${cls}`)}">${esc(label)}</span>`;
 }
 
-// DOIT.6: review status + reviewer(s) for the session popover PR row ("Approved by alice" /
+// review status + reviewer(s) for the session popover PR row ("Approved by alice" /
 // "Changes requested by bob" / "Review required"). Reuses the meta-pr-status color classes.
 function pullRequestReviewInlineHtml(pr) {
   const decision = pullRequestReviewDecision(pr);
@@ -1026,12 +1026,10 @@ function showRepoChipMenu(session, x, y) {
   menu.setAttribute('role', 'menu');
   const ordered = [...repos].sort((a, b) => (b.primary === true) - (a.primary === true));
   menu.innerHTML = ordered.map(repoChipMenuRowHtml).join('');
-  menu.querySelectorAll('[data-repo-chip-open]').forEach(row => {
-    row.addEventListener('click', () => {
-      const root = row.dataset.repoChipOpen || '';
-      repoChipContextMenu.close();
-      if (root) openFileExplorerAt(root);
-    });
+  delegate(menu, 'click', '[data-repo-chip-open]', (event, row) => {
+    const root = row.dataset.repoChipOpen || '';
+    repoChipContextMenu.close();
+    if (root) openFileExplorerAt(root);
   });
   repoChipContextMenu.open(menu, x, y);
 }
@@ -1053,7 +1051,7 @@ function summaryContextHtml(session, info, agent) {
   if (git) {
     lines.push(summaryContextLine('branch', `${git.branch || 'unknown'}${git.upstream ? ` -> ${git.upstream}` : ''}`));
     if (git.root) lines.push(summaryContextLine('repo', git.root));
-    // S7 (DOIT.51): name a linked worktree vs its parent repo so the focused path isn't mistaken for the main checkout.
+    // S7: name a linked worktree vs its parent repo so the focused path isn't mistaken for the main checkout.
     if (git.worktree) lines.push(summaryContextLine('worktree', `${git.worktree.name || git.worktree.path} — worktree of ${git.worktree.parent_root}`));
     if (git.head) lines.push(summaryContextLine('head', git.head));
   } else {
@@ -1169,7 +1167,7 @@ function replaceSessionMetadata(oldSession, newSession) {
     uploadResultsBySession,
     uploadCleanupTimers,
     pasteCounters,
-    // DOIT.6 #73: carry the per-pane LRU timestamp across a session rename too, or the renamed tab's
+    // carry the per-pane LRU timestamp across a session rename too, or the renamed tab's
     // eviction ordering glitches (it reads as never-activated).
     tabLastActivatedAt,
   ]) {
@@ -1341,7 +1339,7 @@ async function killTmuxSession(session) {
 }
 
 function focusPanel(session, options = {}) {
-  const panel = document.getElementById(`panel-${session}`);
+  const panel = document.getElementById(panelDomId(session));
   if (!panel) return;
   if (options.userInitiated === true || options.scrollIntoView === true) {
     panel.scrollIntoView({block: 'nearest', inline: 'nearest'});
@@ -1576,7 +1574,7 @@ function pruneDeadSession(session) {
 // prune it from the UI immediately instead of reconnecting and waiting for the next poll to notice.
 async function confirmSessionGoneOrReconnect(session, item) {
   if (item.manualClose || terminals.get(session) !== item) return;
-  // DOIT.6 #86: one in-flight confirmation per terminal. A flapping WS could otherwise run several
+  // one in-flight confirmation per terminal. A flapping WS could otherwise run several
   // concurrent confirmations, each scheduling a reconnect and double-incrementing reconnectAttempt
   // (distorting the backoff).
   if (item.confirmingGone) return;

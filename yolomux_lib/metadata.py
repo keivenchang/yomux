@@ -15,8 +15,10 @@ from .common import METADATA_CACHE_TTL_SECONDS
 from .common import OTHER_BRANCH_LIMIT
 from .common import PaneInfo
 from .common import SessionInfo
+from .cache import TtlCache
 from .common import _CACHE_MISS
 from .common import git
+from .common import git_ahead_behind_counts
 from .github_client import extract_linear_ids
 from .github_client import github_checks_unknown
 from .github_client import github_pull_request_by_branch
@@ -98,7 +100,7 @@ def path_within(path_text: str, root_text: str) -> bool:
     return path == root or path.is_relative_to(root)
 
 def git_worktree_identity(cwd: str, toplevel: str) -> dict[str, str] | None:
-    """S7 (DOIT.51): name a LINKED git worktree vs its parent repo, cheaply (one local git call).
+    """S7: name a LINKED git worktree vs its parent repo, cheaply (one local git call).
     A linked worktree's per-worktree git dir (`.../.git/worktrees/<name>`) differs from the shared
     common dir (`.../.git`); the main worktree's two are identical. Returns the worktree path, its
     name, and the parent (main) repo root — or None when `cwd` is the main worktree / not a worktree."""
@@ -146,20 +148,12 @@ def git_inventory(cwd: str | None) -> dict[str, Any] | None:
     }
 
 def git_ahead_behind(cwd: str, upstream: str | None) -> tuple[int | None, int | None]:
+    # ahead/behind counting lives in common.git_ahead_behind_counts (one ref order, one parse).
+    # HEAD relative to its upstream: ahead = local commits not pushed, behind = upstream commits not pulled.
     if not upstream:
         return None, None
-    result = git(["rev-list", "--left-right", "--count", f"{upstream}...HEAD"], cwd)
-    if result.returncode != 0:
-        return None, None
-    parts = result.stdout.split()
-    if len(parts) != 2:
-        return None, None
-    try:
-        behind = int(parts[0])
-        ahead = int(parts[1])
-    except ValueError:
-        return None, None
-    return ahead, behind
+    counts = git_ahead_behind_counts(cwd, upstream, "HEAD")
+    return counts if counts is not None else (None, None)
 
 def local_branch_inventory(cwd: str, current_branch: str | None) -> dict[str, Any]:
     result = git(
@@ -259,7 +253,7 @@ def parse_github_remote(remote_url: str) -> dict[str, str] | None:
         "url": f"https://github.com/{quote(owner)}/{quote(name)}",
     }
 
-# DOIT.29: a watched-PR entry is either "owner/repo#N" (or "owner/repo/N") or a full GitHub PR URL.
+# a watched-PR entry is either "owner/repo#N" (or "owner/repo/N") or a full GitHub PR URL.
 # An owner/repo segment is a conservative `[A-Za-z0-9._-]+` (GitHub's own allowed set).
 _PR_REF_SHORT = re.compile(r"^([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)(?:#|/(?:pull/)?)(\d+)$")
 
@@ -340,43 +334,16 @@ def watched_pr_metadata(
         results.append(pr)
     return {"watched_prs": results, "truncated": truncated, "invalid": invalid}
 
-class MetadataCache:
-    # DOIT.6 #83: bound the cache so dead branch/sha keys (e.g. github-checks:<old_sha> after a push)
-    # don't live for the whole process lifetime. Expired entries are swept on write, and a hard cap
-    # evicts the soonest-to-expire keys.
-    MAX_ENTRIES = 1024
-
+class MetadataCache(TtlCache):
+    # now a thin TtlCache subclass (which owns the bounded-eviction algorithm this duplicated —
+    # #83). Two behaviors preserved via the parent's knobs: get() returns the _CACHE_MISS sentinel
+    # (callers distinguish a cached empty value from a miss), and the TTL is measured on the WALL clock
+    # (time.time), as the original did, via clock=. Per-entry TTL on set() is inherited.
     def __init__(self, ttl_seconds: int = METADATA_CACHE_TTL_SECONDS):
-        self.ttl_seconds = ttl_seconds
-        self.lock = threading.Lock()
-        self.values: dict[str, tuple[float, Any]] = {}
+        super().__init__(ttl_seconds=ttl_seconds, max_entries=1024, clock=time.time)
 
     def get(self, key: str) -> Any:
-        with self.lock:
-            item = self.values.get(key)
-            if item is None:
-                return _CACHE_MISS
-            expires_at, value = item
-            if expires_at <= time.time():
-                self.values.pop(key, None)
-                return _CACHE_MISS
-            return value
-
-    def set(self, key: str, value: Any, ttl: float | None = None) -> None:
-        # DOIT.6 #71: allow a per-entry TTL so a failed/empty fetch can be cached briefly (retry soon)
-        # instead of for the full positive TTL.
-        with self.lock:
-            now = time.time()
-            self.values[key] = (now + (self.ttl_seconds if ttl is None else ttl), value)
-            # DOIT.6 #83: sweep expired entries on write, then evict the soonest-to-expire keys if still
-            # over the cap, so the cache stays bounded and dead keys don't leak.
-            if len(self.values) > self.MAX_ENTRIES:
-                for dead in [k for k, (expires_at, _) in self.values.items() if expires_at <= now]:
-                    self.values.pop(dead, None)
-                if len(self.values) > self.MAX_ENTRIES:
-                    overflow = len(self.values) - self.MAX_ENTRIES
-                    for stale in sorted(self.values, key=lambda k: self.values[k][0])[:overflow]:
-                        self.values.pop(stale, None)
+        return self.get_or_miss(key)
 
 def session_project_metadata(info: SessionInfo, cache: MetadataCache, allow_network: bool = True) -> dict[str, Any]:
     git_data = session_git_inventory(info)
@@ -475,7 +442,7 @@ def session_repo_summaries(info: SessionInfo, primary_root: str | None) -> list[
     return summaries
 
 def candidate_session_cwds(info: SessionInfo) -> list[str]:
-    # DOIT.32: the LIVE pane cwd wins. The session-number default workdir (session "1" -> dynamo1) is
+    # the LIVE pane cwd wins. The session-number default workdir (session "1" -> dynamo1) is
     # only a fallback for a fresh shell sitting in home / a non-repo — it must NOT out-rank a pane that
     # has `cd`'d into a different repo (which previously kept the project pinned to dynamo1 forever).
     paths: list[str] = []

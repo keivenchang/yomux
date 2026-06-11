@@ -5,6 +5,7 @@ import pytest
 
 
 import auto_approve_tmux
+from yolomux_lib import approvals
 from yolomux_lib import prompt_detector
 from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import SessionInfo
@@ -32,6 +33,22 @@ def test_auto_approve_tmux_reexports_detector_helpers():
     assert auto_approve_tmux.extract_command is prompt_detector.extract_command
     assert auto_approve_tmux.approval_prompt_state is prompt_detector.approval_prompt_state
     assert auto_approve_tmux.prompt_hash is prompt_detector.prompt_hash
+
+
+def test_approval_detection_pipeline_has_one_shared_owner():
+    # The read-path (app.py), the act-path worker (via the auto_approve_tmux module seam), and the CLI
+    # must all run the SAME detection functions — no parallel re-implementation. Detection lives in
+    # yolomux_lib.approvals; the root CLI re-exports it and app.py imports it directly. Identity here
+    # means a future divergent copy fails this test instead of silently drifting the two paths apart.
+    from yolomux_lib import app as app_module
+    from yolomux_lib import approvals
+
+    assert auto_approve_tmux.hybrid_approval_prompt_state is approvals.hybrid_approval_prompt_state
+    assert auto_approve_tmux.transcript_approval_prompt_state is approvals.transcript_approval_prompt_state
+    assert auto_approve_tmux.blank_prompt_state is approvals.blank_prompt_state
+    assert auto_approve_tmux.PROMPT_RETRY_SECONDS == approvals.PROMPT_RETRY_SECONDS
+    assert app_module.hybrid_approval_prompt_state is approvals.hybrid_approval_prompt_state
+    assert app_module.blank_prompt_state is approvals.blank_prompt_state
 
 
 def test_standalone_bash_decision_fails_closed_without_extracted_command(monkeypatch):
@@ -101,7 +118,7 @@ def test_hybrid_approval_prompt_state_uses_recent_transcript_when_pane_header_is
             )
         ],
     )
-    monkeypatch.setattr(auto_approve_tmux, "discover_sessions", lambda sessions: ({"6": info}, []))
+    monkeypatch.setattr(approvals, "discover_sessions", lambda sessions: ({"6": info}, []))
 
     state = auto_approve_tmux.hybrid_approval_prompt_state("6", "❯ 1. Yes\n  2. No")
 
@@ -143,7 +160,7 @@ def test_hybrid_approval_prompt_state_does_not_use_transcript_without_visible_se
             )
         ],
     )
-    monkeypatch.setattr(auto_approve_tmux, "discover_sessions", lambda sessions: ({"6": info}, []))
+    monkeypatch.setattr(approvals, "discover_sessions", lambda sessions: ({"6": info}, []))
 
     state = auto_approve_tmux.hybrid_approval_prompt_state("6", "agent is thinking")
 
@@ -201,7 +218,7 @@ def test_extract_command_returns_none_when_codex_block_has_no_selector():
 
 
 def test_extract_command_anchors_to_bash_call_arg_not_prose():
-    # DOIT.6 #79: anchor to the ● Bash(...) arg — never fold the description prose into the command.
+    # anchor to the ● Bash(...) arg — never fold the description prose into the command.
     visible_text = "\n".join([
         "● Bash(git status --short)",
         "  Show the working tree status so we can decide what to commit next and keep the repo tidy",
@@ -214,7 +231,7 @@ def test_extract_command_anchors_to_bash_call_arg_not_prose():
 
 
 def test_extract_command_does_not_cross_separator_into_prior_step():
-    # DOIT.17: the LIVE Claude prompt shows the command in the box with NO `● Bash()` (that renders only
+    # the LIVE Claude prompt shows the command in the box with NO `● Bash()` (that renders only
     # after approval). The `● Bash()` anchor search must be bounded to the current block so it does not
     # walk past the `─────` separator and return the PREVIOUS step's (stale, safe-looking) command.
     visible_text = "\n".join([
@@ -238,7 +255,7 @@ def test_extract_command_does_not_cross_separator_into_prior_step():
 
 
 def test_extract_command_does_not_fold_long_description_prose():
-    # DOIT.6 #79: a long description line (no shell metacharacters) is NOT folded into the command.
+    # a long description line (no shell metacharacters) is NOT folded into the command.
     visible_text = "\n".join([
         "Bash command",
         "",
@@ -265,7 +282,7 @@ def test_approval_prompt_ignores_exact_claude_ctrl_b_footer():
 
 
 def test_approval_prompt_ignores_multi_key_parenthetical_footer():
-    # DOIT.6 #143: a footer hint with one-or-more keys plus a parenthetical — e.g.
+    # a footer hint with one-or-more keys plus a parenthetical — e.g.
     # "(ctrl+b ctrl+b (twice) to run in background)" — must read as a footer (not later activity), so the
     # live approval prompt is still detected and auto-approvable.
     visible_text = claude_bash_prompt_with_footer(
@@ -334,7 +351,7 @@ def test_task_list_header_break_does_not_mask_real_dismissal_above_it():
 
 
 def test_claude_no_caret_prompt_is_not_treated_as_selected():
-    # DOIT.6 #67: a prompt with NO selector glyph (nothing highlighted — e.g. a redraw frame) must NOT
+    # a prompt with NO selector glyph (nothing highlighted — e.g. a redraw frame) must NOT
     # be auto-confirmed from a positional "option 1 is Yes" guess. A send requires a visible ❯/›/box.
     visible_text = claude_bash_prompt_with_footer(
         " Esc to cancel · Tab to amend · ctrl+e to explain",
@@ -654,7 +671,7 @@ def test_visible_choice_prompt_text_detects_current_user_question():
 
 
 def test_ask_user_question_ui_is_needs_input_not_auto_approved():
-    # DOIT.6 #43: Claude Code's AskUserQuestion multi-option UI (image 20260602-014). The selected option
+    # Claude Code's AskUserQuestion multi-option UI (image 20260602-014). The selected option
     # is box-highlighted (no ❯), and a preview box / "Notes:" / "Chat about this" sit between the options
     # and the footer. It must be flagged needs-input, but is NOT a yes/no permission prompt.
     visible_text = "\n".join([
@@ -684,7 +701,7 @@ def test_ask_user_question_footer_parts_are_recognized():
 
 
 def test_prompt_trailing_ui_line_accepts_unicode_task_glyphs():
-    # DOIT.35 C1: a Ctrl-T task list using □/✓ (U+25A1/U+2713, this Claude version) below a working
+    # a Ctrl-T task list using □/✓ (U+25A1/U+2713, this Claude version) below a working
     # footer must read as prompt-trailing chrome, not new output — else visible_agent_working flips to
     # False and the YO ball stops spinning while the agent works.
     # the new glyph rows are recognized as prompt-trailing UI; the ballot-box family still is too.

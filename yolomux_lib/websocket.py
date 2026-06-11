@@ -5,7 +5,7 @@ import struct
 import termios
 from typing import Any
 
-# DOIT.6 #65: hard ceiling on an inbound WebSocket frame's declared length. Browser terminal input is
+# hard ceiling on an inbound WebSocket frame's declared length. Browser terminal input is
 # tiny; this only bounds a hostile/buggy client so it cannot OOM the shared process.
 MAX_WS_FRAME_BYTES = 16 * 1024 * 1024
 

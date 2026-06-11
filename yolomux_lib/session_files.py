@@ -14,6 +14,7 @@ from typing import Any
 from .common import AgentInfo
 from .common import SessionInfo
 from .common import git
+from .common import git_ahead_behind_counts
 from .common import is_generated_upload_name
 from .filesystem import git_root_for_path
 
@@ -318,17 +319,11 @@ def git_ahead_behind(repo: Path, from_ref: str | None = None, to_ref: str | None
         right_ref = "HEAD"
     if not git_ref_exists(repo, left_ref) or not git_ref_exists(repo, right_ref):
         return {}
-    result = git(["rev-list", "--left-right", "--count", f"{left_ref}...{right_ref}"], cwd=str(repo), timeout=5.0)
-    if result.returncode != 0:
+    # shared ahead/behind parse. left...right -> ahead = right-only commits, behind = left-only.
+    counts = git_ahead_behind_counts(str(repo), left_ref, right_ref)
+    if counts is None:
         return {}
-    parts = result.stdout.strip().split()
-    if len(parts) < 2:
-        return {}
-    try:
-        behind = int(parts[0])
-        ahead = int(parts[1])
-    except ValueError:
-        return {}
+    ahead, behind = counts
     return {"behind": behind, "ahead": ahead}
 
 

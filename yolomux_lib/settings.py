@@ -5,16 +5,14 @@
 from __future__ import annotations
 
 import copy
-import fcntl
-import os
-import threading
-import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from .atomic_file import atomic_write_text
+from .atomic_file import file_lock
 from .common import CONFIG_DIR
 from .common import DEFAULT_UPLOAD_FILENAME_TEMPLATE
 from .common import UPLOAD_MAX_BYTES
@@ -22,7 +20,6 @@ from .common import UPLOAD_MAX_BYTES
 
 SETTINGS_PATH = CONFIG_DIR / "settings.yaml"
 SETTINGS_DISPLAY_PATH = "~/.config/yolomux/settings.yaml"
-_SETTINGS_LOCK = threading.RLock()
 UI_COLOR_CHOICES: tuple[str, ...] = ("green", "blue", "orange", "yellow", "purple", "white")
 DEFAULT_CURSOR_COLOR = "yellow"
 CURSOR_COLOR_CHOICES: tuple[str, ...] = (*UI_COLOR_CHOICES, "theme")
@@ -95,7 +92,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "notify_transitions": ["needs-input", "needs-approval", "blocked"],
         "throttle_seconds": 60,
     },
-    # DOIT.29: PRs to watch independently of any open session's branch. Each entry is "owner/repo#N" or
+    # PRs to watch independently of any open session's branch. Each entry is "owner/repo#N" or
     # a full https://github.com/owner/repo/pull/N URL (normalized when polled).
     "github": {
         "watched_prs": [],
@@ -178,7 +175,7 @@ SESSION_STATE_KEYS = {
     "done",
 }
 
-# DOIT.29: notifiable watched-PR transitions, opt-in alongside the session-state keys above.
+# notifiable watched-PR transitions, opt-in alongside the session-state keys above.
 PR_TRANSITION_KEYS = {
     "pr-merged",
     "pr-ci-failing",
@@ -236,7 +233,7 @@ SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
 
 SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
     ("general", "default_layout"): {"single", "split", "grid", "wall"},
-    # i18n (DOIT.8 Phase 0): only locales that ship a catalog are accepted; "system" matches the
+    # i18n (Phase 0): only locales that ship a catalog are accepted; "system" matches the
     # browser/OS. Phase 1 will widen this as real locale catalogs are added.
     ("general", "language"): {"system", "en", "zh-Hant", "zh-Hans", "es", "ja", "de", "fr", "pt-BR", "ru", "ko", "hi", "ar", "he", "en-XA"},
     ("appearance", "theme"): {"system", "dark", "light"},
@@ -412,7 +409,7 @@ def migrate_stale_default(section: str, key: str, value: Any, default: Any) -> A
 
 
 def sanitize_settings(raw: Any, coerced: list[str] | None = None) -> dict[str, Any]:
-    # DOIT.6 #84: pass a `coerced` list to collect "<section>.<key>" for every PRESENT incoming value
+    # pass a `coerced` list to collect "<section>.<key>" for every PRESENT incoming value
     # that had to be clamped/reverted, so the API can report it instead of silently changing the value.
     defaults = default_settings()
     source = raw if isinstance(raw, dict) else {}
@@ -508,34 +505,13 @@ def settings_template(settings: dict[str, Any]) -> str:
 
 @contextmanager
 def locked_settings_file(path: Path = SETTINGS_PATH) -> Any:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.parent.chmod(0o700)
-    lock_path = path.with_name(f".{path.name}.lock")
-    with _SETTINGS_LOCK:
-        with lock_path.open("a+", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    # lock + atomic-write machinery moved to atomic_file (shared with events.py / yolo_rules).
+    with file_lock(path, dir_mode=0o700):
+        yield
 
 
 def _write_settings_file_unlocked(settings: dict[str, Any], path: Path = SETTINGS_PATH) -> None:
-    sanitized = sanitize_settings(settings)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(settings_template(sanitized))
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-        path.chmod(0o600)
-    finally:
-        try:
-            tmp.unlink()
-        except FileNotFoundError:
-            pass
+    atomic_write_text(path, settings_template(sanitize_settings(settings)), mode=0o600)
 
 
 def write_settings_file(settings: dict[str, Any], path: Path = SETTINGS_PATH) -> None:
@@ -588,7 +564,7 @@ def save_settings(patch: Any, path: Path = SETTINGS_PATH) -> dict[str, Any]:
         next_settings = merge_settings(current, patch, coerced)
         _write_settings_file_unlocked(next_settings, path)
         payload = _settings_payload_unlocked(path)
-        # DOIT.6 #84: report which patched keys were clamped/reverted so the API/UI can surface it
+        # report which patched keys were clamped/reverted so the API/UI can surface it
         # instead of silently changing the value (e.g. ui_font_size:999 -> 20).
         payload["coerced"] = coerced
         return payload

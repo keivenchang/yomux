@@ -67,7 +67,7 @@ def bootstrap_locale(settings_data: dict) -> str:
 def bootstrap_locale_catalogs(locale: str) -> dict:
     """Inline the active locale's catalog (+ the en fallback) so t() resolves on the first render.
 
-    DOIT.8: boot-time surfaces (menu bar, tabs, wordmark) render synchronously before a client-side
+    boot-time surfaces (menu bar, tabs, wordmark) render synchronously before a client-side
     fetch could complete, so the active + fallback catalogs are embedded in the bootstrap. Other locales
     are still fetched from /static/locales on a language switch.
     """
@@ -84,7 +84,7 @@ def bootstrap_locale_catalogs(locale: str) -> dict:
 
 
 def html_lang_dir_attrs(locale: str) -> str:
-    """`lang="…" dir="…"` for the <html> shell. DOIT.8 Phase 2: RTL locales (ar) get dir="rtl" so the
+    """`lang="…" dir="…"` for the <html> shell. Phase 2: RTL locales (ar) get dir="rtl" so the
     server-rendered first paint already mirrors before the JS i18n runtime sets it."""
     code = str(locale or "en")
     base = code.lower().split("-")[0]
@@ -121,7 +121,7 @@ def static_asset_url(asset: str) -> str:
 
 def brand_html(class_name: str = "brand-title", tag: str = "span", locale: str | None = None) -> str:
     version_title = html.escape(f"Last commit: {yolomux_commit_time_pt()}", quote=True)
-    # DOIT.13 follow-up: the server-rendered pre-auth screens (login / auth-setup) are NOT localized by
+    # follow-up: the server-rendered pre-auth screens (login / auth-setup) are NOT localized by
     # the JS renderBrandWordmark(), so localize the YO/LO glyphs here too — otherwise a Chinese locale
     # showed "YO/LOmux" instead of 優樂mux / 优乐mux. Pass a locale on those pages; the main app leaves it
     # None (English) and re-localizes client-side after bootstrap.
@@ -149,7 +149,7 @@ def html_page(sessions: list[str], access_role: str = "admin", dev: bool = False
         # The exact launch command per agent (incl. the --dangerously-* flags when in YOLO mode), so the
         # new-session menu can show "Claude — <params>" instead of just "+ Claude".
         "agentLaunchCommands": {agent: agent_command(agent, dangerously_yolo) for agent in ("claude", "codex", "term")},
-        # DOIT.6 #39: per-agent {installed, logged_in} so the GUI can grey an installed-but-logged-out
+        # per-agent {installed, logged_in} so the GUI can grey an installed-but-logged-out
         # agent in the new-session picker (cached server-side; not probed per request).
         "agentAuth": agent_auth_status(),
         "accessRole": access_role,
@@ -160,7 +160,7 @@ def html_page(sessions: list[str], access_role: str = "admin", dev: bool = False
         "version": YOLOMUX_VERSION,
         "versionCommitTime": yolomux_commit_time_pt(),
         "settingsPayload": settings_data,
-        # i18n (DOIT.8): resolved active locale for first paint ("system" -> en server-side; the client
+        # i18n: resolved active locale for first paint ("system" -> en server-side; the client
         # may refine via navigator.language). The active locale's catalog (+ the en fallback) is INLINED
         # so t() resolves SYNCHRONOUSLY on the first render — the menu bar, tabs, and wordmark paint at
         # boot before any fetch could complete. Other locales are still fetched on a language switch.
@@ -250,7 +250,7 @@ def html_page(sessions: list[str], access_role: str = "admin", dev: bool = False
 
 
 def agent_login_notice_html(css_class: str = "login-warning") -> str:
-    # DOIT.6 #39: if an installed agent (claude/codex) is not logged in, tell the user the exact login
+    # if an installed agent (claude/codex) is not logged in, tell the user the exact login
     # command on the login + auth-setup screens. If NEITHER installed agent is logged in, lead with a
     # stronger "Please login to Claude or Codex". Returns '' when every installed agent is logged in
     # (or none are installed — a terminal-only host needs no agent login).
@@ -268,7 +268,7 @@ def agent_login_notice_html(css_class: str = "login-warning") -> str:
     return f'<div class="{html.escape(css_class)}">{lead} — run {commands}</div>'
 
 
-# DOIT.8 Phase 1: the login-screen language picker (entry point #1). Endonym-labeled (each language in
+# Phase 1: the login-screen language picker (entry point #1). Endonym-labeled (each language in
 # its own script) so the pre-auth screen needs no localization; Traditional Chinese before Simplified.
 # 'system' = follow the browser. A choice here is saved to general.language after a successful sign-in,
 # so all three entry points (login / topbar / Preferences) write the SAME setting.
@@ -298,7 +298,7 @@ def current_language_pref() -> str:
 
 
 def locale_field_html(current: str = "system", css_class: str = "login-locale") -> str:
-    """The endonym-labeled language <select>, shared by the login and setup screens (DOIT.13)."""
+    """The endonym-labeled language <select>, shared by the login and setup screens."""
     options = "".join(
         f'<option value="{html.escape(value, quote=True)}"{" selected" if value == current else ""}>{html.escape(label)}</option>'
         for value, label in LOGIN_LOCALE_CHOICES
@@ -325,7 +325,7 @@ def save_login_locale(value: str) -> None:
 
 def login_html(next_path: str = "/", error: str = "", secure: bool = True, current_locale: str = "system") -> str:
     safe_next = html.escape(next_path if next_path.startswith("/") else "/", quote=True)
-    # DOIT.8 Phase 1: localize the pre-auth login chrome via the SAVED locale (the JS i18n runtime is not
+    # Phase 1: localize the pre-auth login chrome via the SAVED locale (the JS i18n runtime is not
     # loaded here). The HTTPS warning + agent-login notice carry shell commands, so they stay English.
     sign_in = html.escape(server_string(current_locale, "login.signIn"))
     username_label = html.escape(server_string(current_locale, "login.username"))
@@ -402,7 +402,7 @@ def setup_auth_html(current_locale: str = "system") -> str:
     # here), the same way login_html() does. The HTTPS recommendation + agent-login notice carry shell
     # commands, so — matching login_html — they stay English. The auth.yaml example block is literal
     # config, not UI. The locale is carried pre-auth by request_locale_pref (query/cookie), so the
-    # setup-screen picker can switch language WITHOUT writing settings (DOIT.13).
+    # setup-screen picker can switch language WITHOUT writing settings.
     locale = current_locale if current_locale in _LOGIN_LOCALE_VALUES else "system"
     locale_picker = locale_field_html(locale, "setup-locale")
     auth_path = html.escape(AUTH_CONFIG_DISPLAY_PATH)

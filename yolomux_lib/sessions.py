@@ -15,8 +15,10 @@ from .common import AgentInfo
 from .common import PaneInfo
 from .common import ProcessInfo
 from .common import SessionInfo
+from .cache import TtlCache
 from .common import _CACHE_MISS
 from .common import tail_file_lines
+from .tmux_utils import cmd_error
 from .tmux_utils import run_cmd
 from .tmux_utils import tmux
 
@@ -24,32 +26,21 @@ from .tmux_utils import tmux
 TRANSCRIPT_LOOKUP_CACHE_TTL_SECONDS = 2.0
 # Newest-by-name rollout files to consider per cwd lookup (bounds work on a large tree).
 CODEX_TRANSCRIPT_SCAN_LIMIT = 80
-_TRANSCRIPT_LOOKUP_CACHE_LOCK = threading.Lock()
-_TRANSCRIPT_LOOKUP_CACHE: dict[tuple[str, str, str], tuple[float, Path | None]] = {}
+# the shared TtlCache instead of a hand-rolled dict+lock+TTL. get_or_miss() preserves the
+# _CACHE_MISS-vs-cached-None distinction the callers rely on.
+_TRANSCRIPT_LOOKUP_CACHE = TtlCache(ttl_seconds=TRANSCRIPT_LOOKUP_CACHE_TTL_SECONDS)
 
 
-def transcript_lookup_cache_key(kind: str, root: Path, needle: str) -> tuple[str, str, str]:
-    return kind, str(root.expanduser().resolve(strict=False)), needle
+def transcript_lookup_cache_key(kind: str, root: Path, needle: str) -> str:
+    return "\x1f".join([kind, str(root.expanduser().resolve(strict=False)), needle])
 
 
 def cached_transcript_lookup(kind: str, root: Path, needle: str) -> Path | None | object:
-    key = transcript_lookup_cache_key(kind, root, needle)
-    now = time.monotonic()
-    with _TRANSCRIPT_LOOKUP_CACHE_LOCK:
-        cached = _TRANSCRIPT_LOOKUP_CACHE.get(key)
-        if cached is None:
-            return _CACHE_MISS
-        expires_at, path = cached
-        if expires_at <= now:
-            _TRANSCRIPT_LOOKUP_CACHE.pop(key, None)
-            return _CACHE_MISS
-        return path
+    return _TRANSCRIPT_LOOKUP_CACHE.get_or_miss(transcript_lookup_cache_key(kind, root, needle))
 
 
 def set_cached_transcript_lookup(kind: str, root: Path, needle: str, path: Path | None) -> Path | None:
-    key = transcript_lookup_cache_key(kind, root, needle)
-    with _TRANSCRIPT_LOOKUP_CACHE_LOCK:
-        _TRANSCRIPT_LOOKUP_CACHE[key] = (time.monotonic() + TRANSCRIPT_LOOKUP_CACHE_TTL_SECONDS, path)
+    _TRANSCRIPT_LOOKUP_CACHE.set(transcript_lookup_cache_key(kind, root, needle), path)
     return path
 
 
@@ -70,7 +61,7 @@ def list_tmux_panes() -> tuple[list[PaneInfo], str | None]:
     )
     result = tmux(["list-panes", "-a", "-F", fmt])
     if result.returncode != 0:
-        error = (result.stderr or result.stdout or "tmux list-panes failed").strip()
+        error = cmd_error(result, "tmux list-panes failed")
         return [], error
 
     panes: list[PaneInfo] = []
@@ -104,7 +95,7 @@ def list_tmux_panes() -> tuple[list[PaneInfo], str | None]:
 def list_processes() -> tuple[dict[int, ProcessInfo], str | None]:
     result = run_cmd(["ps", "-eww", "-o", "pid=,ppid=,cmd="], timeout=8.0)
     if result.returncode != 0:
-        error = (result.stderr or result.stdout or "ps failed").strip()
+        error = cmd_error(result, "ps failed")
         return {}, error
 
     processes: dict[int, ProcessInfo] = {}

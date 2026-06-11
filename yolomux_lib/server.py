@@ -190,7 +190,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         required_role = "admin" if parsed.path == "/api/summary-stream" else "readonly"
         if not self.require_auth(required_role):
             return
-        # DOIT.34 #1: blame reads repository file history, so it is admin-only like the rest of the
+        # blame reads repository file history, so it is admin-only like the rest of the
         # file/repo API (the /api/fs/* reads) — a readonly identity must not read file content/history.
         if (parsed.path.startswith("/api/fs/") or parsed.path == "/api/blame") and self.auth_readonly():
             self.reject_forbidden(self.auth_identity(), "admin")
@@ -230,42 +230,22 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if parsed.path == "/api/tmux":
             qs = parse_qs(parsed.query)
             session = str(query_one(qs, "session", "") or "")
-            lines, error = parse_query_int(qs, "lines", 90, max_value=MAX_TRANSCRIPT_TAIL_LINES)
-            if error:
-                self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
-                return
-            payload, status = self.server.app.tmux_snapshot(session, lines)
-            self.write_json(payload, status=status)
+            self.write_validated_int_result(qs, "lines", 90, MAX_TRANSCRIPT_TAIL_LINES, lambda lines: self.server.app.tmux_snapshot(session, lines))
             return
         if parsed.path == "/api/transcript":
             qs = parse_qs(parsed.query)
             session = str(query_one(qs, "session", "") or "")
-            lines, error = parse_query_int(qs, "lines", 120, max_value=MAX_TRANSCRIPT_TAIL_LINES)
-            if error:
-                self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
-                return
-            payload, status = self.server.app.transcript_tail(session, lines)
-            self.write_json(payload, status=status)
+            self.write_validated_int_result(qs, "lines", 120, MAX_TRANSCRIPT_TAIL_LINES, lambda lines: self.server.app.transcript_tail(session, lines))
             return
         if parsed.path == "/api/context":
             qs = parse_qs(parsed.query)
             session = str(query_one(qs, "session", "") or "")
-            messages, error = parse_query_int(qs, "messages", 40, max_value=MAX_COMPACT_TRANSCRIPT_ITEMS)
-            if error:
-                self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
-                return
-            payload, status = self.server.app.context_tail(session, messages)
-            self.write_json(payload, status=status)
+            self.write_validated_int_result(qs, "messages", 40, MAX_COMPACT_TRANSCRIPT_ITEMS, lambda messages: self.server.app.context_tail(session, messages))
             return
         if parsed.path == "/api/context-items":
             qs = parse_qs(parsed.query)
             session = str(query_one(qs, "session", "") or "")
-            messages, error = parse_query_int(qs, "messages", 40, max_value=MAX_COMPACT_TRANSCRIPT_ITEMS)
-            if error:
-                self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
-                return
-            payload, status = self.server.app.context_items(session, messages)
-            self.write_json(payload, status=status)
+            self.write_validated_int_result(qs, "messages", 40, MAX_COMPACT_TRANSCRIPT_ITEMS, lambda messages: self.server.app.context_items(session, messages))
             return
         if parsed.path == "/api/context-stream":
             self.stream_context_items(parsed)
@@ -276,8 +256,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if parsed.path == "/api/auto-approve":
             qs = parse_qs(parsed.query)
             session = query_one(qs, "session", None)
-            payload, status = self.server.app.auto_approve_status(session)
-            self.write_json(payload, status=status)
+            self.write_app_result(self.server.app.auto_approve_status(session))
             return
         if parsed.path == "/api/notify":
             self.write_json(self.server.app.notify_status())
@@ -294,29 +273,18 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if parsed.path == "/api/events":
             qs = parse_qs(parsed.query)
             session = query_one(qs, "session", None)
-            limit, error = parse_query_int(qs, "limit", 100, max_value=MAX_EVENT_TAIL_LINES)
-            if error:
-                self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
-                return
-            payload, status = self.server.app.events_payload(session, limit)
-            self.write_json(payload, status=status)
+            self.write_validated_int_result(qs, "limit", 100, MAX_EVENT_TAIL_LINES, lambda limit: self.server.app.events_payload(session, limit))
             return
         if parsed.path == "/api/search":
             qs = parse_qs(parsed.query)
             session = query_one(qs, "session", None)
             query = str(query_one(qs, "q", "") or "")
-            limit, error = parse_query_int(qs, "limit", 100, max_value=MAX_EVENT_TAIL_LINES)
-            if error:
-                self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
-                return
-            payload, status = self.server.app.search_payload(query, session, limit)
-            self.write_json(payload, status=status)
+            self.write_validated_int_result(qs, "limit", 100, MAX_EVENT_TAIL_LINES, lambda limit: self.server.app.search_payload(query, session, limit))
             return
         if parsed.path == "/api/run-history":
             qs = parse_qs(parsed.query)
             session = query_one(qs, "session", None)
-            payload, status = self.server.app.run_history_payload(session)
-            self.write_json(payload, status=status)
+            self.write_app_result(self.server.app.run_history_payload(session))
             return
         if parsed.path == "/api/session-files":
             qs = parse_qs(parsed.query)
@@ -331,14 +299,12 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             # C6: optional per-repo override map ({repo_path: {"from","to"}}) as URL-encoded JSON, so each
             # repo can compare its own commit graph. Malformed JSON falls back to the scalar from/to.
             repo_refs = parse_repo_refs_param(query_one(qs, "refs", None))
-            payload, status = self.server.app.session_files_payload(session, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, force=force)
-            self.write_json(payload, status=status)
+            self.write_app_result(self.server.app.session_files_payload(session, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, force=force))
             return
         if parsed.path == "/api/summary":
             qs = parse_qs(parsed.query)
             session = str(query_one(qs, "session", "") or "")
-            payload, status = self.server.app.summary(session)
-            self.write_json(payload, status=status)
+            self.write_app_result(self.server.app.summary(session))
             return
         if parsed.path == "/api/fs/list":
             self.handle_fs_list(parsed)
@@ -579,40 +545,34 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if parsed.path == "/api/ensure-session":
             qs = parse_qs(parsed.query)
             session = str(query_one(qs, "session", "") or "")
-            payload, status = self.server.app.ensure_session(session)
-            self.write_json(payload, status=status)
+            self.write_app_result(self.server.app.ensure_session(session))
             return
         if parsed.path == "/api/create-session":
             qs = parse_qs(parsed.query)
             agent = str(query_one(qs, "agent", "claude") or "claude")
-            payload, status = self.server.app.create_next_session(agent)
-            self.write_json(payload, status=status)
+            self.write_app_result(self.server.app.create_next_session(agent))
             return
         if parsed.path == "/api/rename-session":
             qs = parse_qs(parsed.query)
             session = str(query_one(qs, "session", "") or "")
             new_name = str(query_one(qs, "new_name", "") or "")
-            payload, status = self.server.app.rename_session(session, new_name)
-            self.write_json(payload, status=status)
+            self.write_app_result(self.server.app.rename_session(session, new_name))
             return
         if parsed.path == "/api/kill-session":
             qs = parse_qs(parsed.query)
             session = str(query_one(qs, "session", "") or "")
-            payload, status = self.server.app.kill_session(session)
-            self.write_json(payload, status=status)
+            self.write_app_result(self.server.app.kill_session(session))
             return
         if parsed.path == "/api/upload":
             qs = parse_qs(parsed.query)
             session = str(query_one(qs, "session", "") or "")
-            payload, status = self.handle_upload(session)
-            self.write_json(payload, status=status)
+            self.write_app_result(self.handle_upload(session))
             return
         if parsed.path == "/api/auto-approve":
             qs = parse_qs(parsed.query)
             session = str(query_one(qs, "session", "") or "")
             enabled = query_bool(qs, "enabled")
-            payload, status = self.server.app.set_auto_approve(session, enabled)
-            self.write_json(payload, status=status)
+            self.write_app_result(self.server.app.set_auto_approve(session, enabled))
             return
         if parsed.path == "/api/notify":
             qs = parse_qs(parsed.query)
@@ -657,18 +617,15 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if parsed.path == "/api/tmux-next":
             qs = parse_qs(parsed.query)
             session = qs.get("session", [""])[0]
-            payload, status = self.server.app.tmux_next_window(session)
-            self.write_json(payload, status=status)
+            self.write_app_result(self.server.app.tmux_next_window(session))
             return
         if parsed.path == "/api/tmux-copy-selection":
             qs = parse_qs(parsed.query)
             session = str(query_one(qs, "session", "") or "")
-            payload, status = self.server.app.tmux_copy_selection(session)
-            self.write_json(payload, status=status)
+            self.write_app_result(self.server.app.tmux_copy_selection(session))
             return
         if parsed.path == "/api/event":
-            payload, status = self.handle_client_event()
-            self.write_json(payload, status=status)
+            self.write_app_result(self.handle_client_event())
             return
         if parsed.path == "/api/fs/batch":
             self.handle_fs_batch(parsed)
@@ -743,7 +700,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             content_length = int(content_length_text)
         except ValueError:
             return {"error": "invalid Content-Length"}, HTTPStatus.BAD_REQUEST
-        # DOIT.6 #77: reject a non-positive length — `read(-1)` blocks until disconnect and `read(-5)`
+        # reject a non-positive length — `read(-1)` blocks until disconnect and `read(-5)`
         # raises (-> 500); only the upper bound was checked.
         if content_length <= 0:
             return {"error": "invalid Content-Length"}, HTTPStatus.BAD_REQUEST
@@ -767,7 +724,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             content_length = int(content_length_text)
         except ValueError:
             return {"session": session, "error": "invalid Content-Length"}, HTTPStatus.BAD_REQUEST
-        # DOIT.6 #77: reject a non-positive length (read(-1) blocks until disconnect; read(-5) -> 500).
+        # reject a non-positive length (read(-1) blocks until disconnect; read(-5) -> 500).
         if content_length <= 0:
             return {"session": session, "error": "invalid Content-Length"}, HTTPStatus.BAD_REQUEST
         upload_max_bytes = self.server.app.upload_max_bytes()
@@ -1136,6 +1093,22 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def write_app_result(self, result: tuple[Any, HTTPStatus]) -> None:
+        # Every app method returns a (payload, HTTPStatus) pair; the unpack-then-write_json dance was
+        # written ~19 times verbatim. This is the one place that convention is spelled out.
+        payload, status = result
+        self.write_json(payload, status=status)
+
+    def write_validated_int_result(self, qs: dict, name: str, default: int, max_value: int, make_result) -> None:
+        # The "?<name>=<int>" routes (tmux/transcript/context/context-items/events/search) all parsed +
+        # range-checked one int the same way, emitting an identical 400 on a bad value before calling the
+        # app. Centralized so the bad-int response stays uniform; make_result(value) -> (payload, status).
+        value, error = parse_query_int(qs, name, default, max_value=max_value)
+        if error:
+            self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
+            return
+        self.write_app_result(make_result(value))
+
     def write_text(self, body: str, status: HTTPStatus = HTTPStatus.OK) -> None:
         data = body.encode("utf-8")
         self.send_response(status)
@@ -1171,7 +1144,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         set_pty_size(slave_fd, initial_rows, initial_cols)
         env = os.environ.copy()
         env["TERM"] = "xterm-256color"
-        # DOIT.53: the browser copy bridge needs tmux to FORWARD application OSC 52 clipboard escapes
+        # the browser copy bridge needs tmux to FORWARD application OSC 52 clipboard escapes
         # (Claude's copy) to this client. tmux's default `set-clipboard external` IGNORES application
         # OSC 52 entirely (verified empirically on tmux 3.4: external drops it, on forwards it), so
         # ensure `on` before attaching. Idempotent, best-effort, self-healing across tmux restarts.

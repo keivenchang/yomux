@@ -5,6 +5,26 @@ import threading
 import time
 from typing import Any
 
+# the canonical set of server-pushed client-event type names — previously ~11 bare string
+# literals scattered across app.py's publish_client_event() calls, with no single owner and no guard. The
+# names are a contract the browser (the EventSource consumer) depends on; centralizing them here gives a
+# single place to read/extend the set and lets a test catch a server-side typo'd event name (a typo would
+# silently mean "no client ever hears this event"). The `*_ready` events carry freshly-computed payloads;
+# the `*_changed` events are signal-only nudges to refetch.
+CLIENT_EVENT_TYPES: frozenset[str] = frozenset({
+    "activity_summary_ready",
+    "auto_approve_changed",
+    "context_changed",
+    "context_items_ready",
+    "files_changed",
+    "fs_changed",
+    "roots_changed",
+    "session_files_ready",
+    "settings_changed",
+    "transcripts_changed",
+    "watched_prs_changed",
+})
+
 
 class ClientEventBroker:
     def __init__(self, max_queue_size: int = 256):

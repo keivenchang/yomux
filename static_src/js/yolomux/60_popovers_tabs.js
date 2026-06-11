@@ -653,7 +653,7 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const subject = currentBranchSubject(git);
   if (subject && !pr?.number) rows.push(popoverRow(t('popover.desc'), `<div class="popover-desc">${esc(subject)}</div>`));
   if (git?.root && git.root !== displayPath) rows.push(popoverRow(t('popover.repo'), git.root));
-  // S7 (DOIT.51): name a linked worktree vs its parent repo so the focused path isn't mistaken for the main checkout.
+  // S7: name a linked worktree vs its parent repo so the focused path isn't mistaken for the main checkout.
   if (git?.worktree) rows.push(popoverRow(t('popover.worktree'), `${esc(git.worktree.name || git.worktree.path)} — worktree of ${esc(git.worktree.parent_root)}`));
   if (git?.head) rows.push(popoverRow('HEAD', gitHeadValueHtml(git)));
   if (gitStatusHasFacts(git)) rows.push(popoverRow(t('popover.git'), gitStatusText(git)));
@@ -1094,7 +1094,7 @@ function fileDragPreviewMedia(path, entry) {
   return `<span class="file-drag-thumb file-drag-icon" aria-hidden="true">${icon}</span>`;
 }
 
-// S14 (DOIT.51): OPT-IN tab-drag timing to diagnose the ~500ms first-drag delay without guessing. Off by
+// S14: OPT-IN tab-drag timing to diagnose the ~500ms first-drag delay without guessing. Off by
 // default (no permanent user-visible perf log). Enable by setting storage key 'yolomux.debugDragTiming' to
 // '1' (via storageSet in the console), drag a tab, then read the per-bucket console.table at drop. Marks
 // the buckets the DOIT calls out: pointerdown -> dragstart/startSessionDrag (begin/end) -> first dragover
@@ -1129,7 +1129,7 @@ function dragTimingReport() {
   dragTimingSeen.clear();
 }
 
-// S14 (DOIT.51): render the last drag's timing into a fixed, click-to-select-all box so it can be
+// S14: render the last drag's timing into a fixed, click-to-select-all box so it can be
 // copy-pasted (or screenshotted) back without opening DevTools. Created lazily; only the flag-gated
 // dragTimingReport calls it, so it never appears in normal use.
 function showDragTimingOverlay(rows) {
@@ -1208,10 +1208,10 @@ function endSessionDrag(event) {
   stopCustomDragPreview();
   sessionButtons.classList.remove(CLS.dragOver);
   clearDropPreview();
-  // DOIT.6 #30: flush any tab/preferences re-renders that were deferred during the drag.
+  // flush any tab/preferences re-renders that were deferred during the drag.
   if (pendingTabStripRender) { pendingTabStripRender = false; renderPaneTabStrips(); }
   if (pendingPreferencesRender) { pendingPreferencesRender = false; renderPreferencesPanels(); }
-  // DOIT.52: flush through the shared layout render scheduler so same-shape drops keep the cheap path.
+  // flush through the shared layout render scheduler so same-shape drops keep the cheap path.
   flushPendingLayoutRender();
   dragTimingReport();
 }

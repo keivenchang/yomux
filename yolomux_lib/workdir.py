@@ -57,7 +57,7 @@ def available_agent_commands() -> list[str]:
     # are installed (it used to be a no-agent fallback only, which left Term greyed "unavailable").
     return agents + ["term"]
 
-# DOIT.6 #39: surface claude/codex login status. The CLIs have purpose-built non-interactive status
+# surface claude/codex login status. The CLIs have purpose-built non-interactive status
 # commands; logout (or a missing binary) must NOT silently fall back to a deterministic agent without
 # telling the user to log in. These are subprocess calls, so the result is cached with a short TTL —
 # never probe per request.

@@ -23,7 +23,7 @@ from .common import SERVER_HOSTNAME
 from .common import truncate_text
 from .types import AutoApproveState
 
-# DOIT.6 #70: stop() joins for at least this long so an in-flight capture + keystroke walk (~0.6s) and
+# stop() joins for at least this long so an in-flight capture + keystroke walk (~0.6s) and
 # the post-approval / max-interval sleep (interruptible via stop_event, but the send is not) can finish
 # and the thread can release its flock before a takeover re-acquires.
 AUTO_APPROVE_STOP_JOIN_SECONDS = 5.0
@@ -171,7 +171,7 @@ class AutoApproveWorker:
         return True, None
 
     def stop(self) -> bool:
-        # DOIT.6 #70: join long enough for the thread to finish any in-flight capture/send (the relative
+        # join long enough for the thread to finish any in-flight capture/send (the relative
         # keystroke walk alone is ~0.6s) and exit + release its flock. A 1.0s join could return while the
         # thread is still alive and about to fire ONE more keystroke after a takeover (two workers, one
         # session). Returns True only when the thread has actually exited.
@@ -305,7 +305,7 @@ class AutoApproveWorker:
             if current_option > 0 and current_option != selected_option:
                 self.update(last_action=f"approval option moved from {selected_option} to {current_option}; waiting for next capture")
                 return False
-        # DOIT.6 #66: walk the highlight to the target, then RE-VERIFY it landed there before pressing
+        # walk the highlight to the target, then RE-VERIFY it landed there before pressing
         # Enter — the menu can redraw/move during the ~0.6s relative walk, so confirm the FINAL state
         # instead of confirming blind (which could pick the wrong option, even "No"). Abort+retry if it
         # is not on the target (or the highlight is unreadable).

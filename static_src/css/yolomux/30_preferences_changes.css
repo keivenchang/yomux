@@ -4,7 +4,7 @@
   grid-template-rows: auto auto minmax(0, 1fr);
 }
 .preferences-body {
-  /* DOIT.16 C3: the inactive-pane dim is a full-bleed .panel-overlay-root::after (inset 0). If the
+  /* the inactive-pane dim is a full-bleed .panel-overlay-root::after (inset 0). If the
      overlay-root is ALSO the scroll container, the dim scrolls away with the content and only covers
      the top viewport. So the overlay-root must be a stable, non-scrolling pane-filling layer; the
      scrolling lives on the inner .preferences-scroll. */
@@ -205,7 +205,7 @@
   cursor: pointer;
 }
 .diff-ref-reset:hover {
-  background: var(--hover);
+  background: var(--active-control-soft-bg);
   color: var(--text);
 }
 .diff-ref-controls.compact .diff-ref-reset {
@@ -220,7 +220,7 @@
   max-height: min(320px, 42vh);
   overflow: auto;
   padding: 4px;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--panel2);
   color: var(--text);
@@ -265,25 +265,16 @@
 }
 .diff-ref-suggestion-ref {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   font: 800 var(--ui-font-size-xs)/1 var(--mono-font);
   color: var(--text);
 }
 .diff-ref-suggestion-subject {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   font: 600 var(--ui-font-size-xs)/1 var(--ui-font);
   color: var(--muted);
 }
 .diff-ref-suggestion-meta {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   font: 500 var(--ui-font-size-2xs)/1 var(--mono-font);
   color: var(--muted);
   opacity: 0.7;
@@ -318,9 +309,6 @@
 }
 .changes-comparison-title {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   font-weight: 700;
 }
 .changes-comparison-summary {
@@ -365,7 +353,7 @@
   background: var(--panel);
 }
 .changes-repo-head {
-  /* DOIT.23: now a collapse toggle (button), mirroring .changes-uploaded-toggle. */
+  /* now a collapse toggle (button), mirroring .changes-uploaded-toggle. */
   width: 100%;
   display: flex;
   align-items: center;
@@ -391,9 +379,6 @@
 .changes-repo-title {
   flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   color: var(--accent-gold);
   font-weight: 800;
 }
@@ -529,9 +514,6 @@
   font-size: var(--ui-font-size-xs);
 }
 .preferences-path-value {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   color: var(--text);
 }
 .preferences-readonly {
@@ -935,14 +917,11 @@
 .command-palette-label,
 .command-palette-detail {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .command-palette-label {
   font-weight: 700;
 }
-/* DOIT.22: view-mode chips on a deduped file row (one row for a file open as editor + preview). */
+/* view-mode chips on a deduped file row (one row for a file open as editor + preview). */
 .command-palette-views {
   flex: 0 0 auto;
   display: inline-flex;
@@ -957,7 +936,7 @@
   background: var(--active-control-soft-bg);
   font: 700 var(--ui-font-size-3xs)/1.5 var(--mono-font);
   text-transform: lowercase;
-  cursor: pointer;   /* DOIT.22 follow-up: chips are clickable — jump to that view */
+  cursor: pointer;   /* follow-up: chips are clickable — jump to that view */
 }
 .command-palette-view-chip:hover {
   border-color: var(--active-control-border);
@@ -1014,7 +993,7 @@ body.theme-light .command-palette-view-chip {
   background: #111820;
   border: 1px solid #708093;
   border-radius: 8px;
-  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.62);
+  box-shadow: 0 24px 70px rgb(var(--shadow-rgb) / 0.62);
 }
 .keyboard-shortcuts-head {
   display: flex;
@@ -1311,12 +1290,9 @@ body.theme-light .preferences-inline-action {
   font: inherit;
 }
 .branch-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .branch-meta {
-  color: #8b95a5;
+  color: var(--text-muted-strong);
   white-space: nowrap;
 }
 .branch-subject {
@@ -1360,7 +1336,7 @@ body.theme-light .preferences-inline-action {
   color: #ffffff;
 }
 /* ============================================================================
-   Light mode (DOIT.12 B5): dialogs and warning chrome hardcode dark fills + light
+   Light mode: dialogs and warning chrome hardcode dark fills + light
    text. The dialogs combine a dark bg with theme-aware `var(--text)` (dark in light)
    → dark-on-dark. Repaint as light cards with dark/readable text. The white agent
    glyphs are invisible on the white Changes panel → darken.

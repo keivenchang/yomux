@@ -27,7 +27,7 @@
 }
 /* A .panel-overlay-root must NOT be the scroll container — put `overflow:auto` on an INNER child.
    The inactive-pane dim below is a full-bleed ::after (inset 0) on this element; if this element
-   scrolls, the dim scrolls away with the content and only covers the top viewport (DOIT.16 C3). */
+   scrolls, the dim scrolls away with the content and only covers the top viewport. */
 .panel-overlay-root {
   position: relative;
 }
@@ -108,12 +108,9 @@
   background: rgba(17, 24, 32, 0.98);
   border: 1px solid #6f7b8d;
   border-radius: 7px;
-  box-shadow: 0 18px 56px rgba(0, 0, 0, 0.58);
+  box-shadow: 0 18px 56px rgb(var(--shadow-rgb) / 0.58);
 }
 .session-rename-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   font: 700 var(--ui-font-size)/1.25 var(--ui-font);
 }
 .session-rename-input {
@@ -185,12 +182,9 @@
 }
 .context-menu-label {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .context-menu-shortcut {
-  color: var(--muted, #8b95a5);
+  color: var(--muted);
   font: 600 var(--ui-font-size-xs)/1.2 var(--mono-font);
   white-space: nowrap;
 }
@@ -236,7 +230,7 @@
   background: rgba(17, 24, 32, 0.98);
   border: 1px solid #6f7b8d;
   border-radius: 7px;
-  box-shadow: 10px 14px 32px rgba(0, 0, 0, 0.62);
+  box-shadow: 10px 14px 32px rgb(var(--shadow-rgb) / 0.62);
   pointer-events: none;
 }
 .file-image-preview-popover img {
@@ -263,7 +257,7 @@
   background: rgba(255, 244, 194, 0.58);
   border: 1px solid var(--accent-gold);
   border-radius: 8px;
-  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.38), inset 0 0 0 1px rgba(255, 255, 255, 0.26);
+  box-shadow: 0 16px 42px rgb(var(--shadow-rgb) / 0.38), inset 0 0 0 1px rgba(255, 255, 255, 0.26);
   backdrop-filter: blur(2px);
 }
 .toast-header {
@@ -446,16 +440,10 @@
 .transcript-path-value {
   min-width: 0;
   flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   color: var(--text);
 }
 .transcript-path-missing {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .transcript-path-copy {
   width: 20px;
@@ -508,9 +496,6 @@
   overflow: hidden;
 }
 .summary-context-line {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .summary-context-label {
   color: var(--text);
@@ -554,7 +539,7 @@
   text-transform: uppercase;
 }
 .event-message {
-  /* DOIT.25: wrap the command across lines instead of one-line ellipsis (no horizontal scroll). */
+  /* wrap the command across lines instead of one-line ellipsis (no horizontal scroll). */
   min-width: 0;
   white-space: normal;
   overflow-wrap: anywhere;
@@ -576,7 +561,7 @@
   flex-direction: column;
   background: #11151d;
 }
-/* DOIT.6 #40: the merged YO!info / YO!agent sub-views share the pane; only the active one is shown,
+/* the merged YO!info / YO!agent sub-views share the pane; only the active one is shown,
    and it fills the available height (head row + scrolling list). */
 .info-subview {
   display: none;
@@ -605,7 +590,7 @@
   align-items: center;
   gap: 8px;
   padding: 5px 10px;
-  /* DOIT.28 C1: route through a theme token so it flips light/dark — the hardcoded near-black slab
+  /* route through a theme token so it flips light/dark — the hardcoded near-black slab
      was a black band on the light pane. */
   background: var(--pane-bar-bg, var(--panel2));
   border-block-end: 1px solid var(--line);
@@ -653,7 +638,7 @@
 }
 .info-subtab:not(.active):hover {
   color: var(--pane-tab-text);
-  /* DOIT.28 C1: a token-based hover tint (the white tint was invisible on a light band). */
+  /* a token-based hover tint (the white tint was invisible on a light band). */
   background: var(--pane-inactive-tab-bg-hover);
 }
 .info-list {
@@ -1095,7 +1080,7 @@ body.theme-light .yoagent-global .markdown-body pre code {
   color: var(--accent-gold);
   font-size: var(--ui-font-size-2xs);
 }
-/* DOIT.28 C2: the current-branch row reuses the shared selection tokens (they flip light/dark) plus a
+/* the current-branch row reuses the shared selection tokens (they flip light/dark) plus a
    left accent bar, mirroring the Finder's selected-file treatment — the old dim navy barely stood out
    on the dark table. The separate body.theme-light override below is now redundant (tokens carry it). */
 .info-row.current {
@@ -1105,9 +1090,6 @@ body.theme-light .yoagent-global .markdown-body pre code {
 }
 .info-cell {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .info-resizable-header-cell {
   position: relative;
@@ -1187,7 +1169,7 @@ body.info-column-resizing {
 .info-cell a.pr-status-closed:hover {
   color: var(--pr-status-closed);
 }
-/* Light mode (DOIT.18 C1): the whole YO!info table hardcoded dark-mode colors with NO light
+/* Light mode: the whole YO!info table hardcoded dark-mode colors with NO light
    override — near-white row text vanished on the white pane, header/current rows were dark bars,
    and the PR/branch links were low-contrast pastels. Repaint for the white surface; dark unchanged. */
 body.theme-light .info-row {
@@ -1245,7 +1227,7 @@ body.theme-light .info-cell a.pr-status-closed:hover {
 .info-error {
   color: var(--bad);
 }
-/* DOIT.29: the Watched PRs section of YO!info (PRs tracked independent of any open session). Its own
+/* the Watched PRs section of YO!info (PRs tracked independent of any open session). Its own
    container below the branch table, separated by a rule; rows reuse .info-cell but a tighter 4-col grid. */
 .info-watched {
   border-block-start: 1px solid var(--line);
@@ -1282,7 +1264,7 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   border-radius: var(--radius-control);
   background: transparent;
   color: var(--muted);
-  font-size: var(--ui-font-size-md);
+  font-size: var(--ui-font-size);
   line-height: 1;
   cursor: pointer;
 }
@@ -1333,7 +1315,7 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   border-radius: 6px;
   background: #1b2230;
   color: #e8edf4;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 6px 20px rgb(var(--shadow-rgb) / 0.45);
   font: 600 var(--ui-font-size-xs, 12px)/1.2 var(--mono-font);
 }
 .server-update-banner-reload {
@@ -1592,7 +1574,7 @@ body.theme-light .modal.about-open {
   flex-direction: column;
   background: var(--panel);
   border-inline-end: 1px solid var(--line);
-  box-shadow: 4px 0 18px rgba(0, 0, 0, 0.35);
+  box-shadow: 4px 0 18px rgb(var(--shadow-rgb) / 0.35);
   overflow: hidden;
   font-family: var(--ui-font);
   font-size: var(--file-explorer-font-size);
@@ -1618,9 +1600,6 @@ body.theme-light .modal.about-open {
   background: color-mix(in srgb, var(--panel) 72%, transparent);
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   direction: ltr;
   text-align: start;
   outline: none;
@@ -1881,7 +1860,7 @@ body.theme-light .modal.about-open {
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--panel2);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 6px 20px rgb(var(--shadow-rgb) / 0.35);
   font-size: var(--ui-font-size-2xs);
   pointer-events: none;
 }
@@ -1917,7 +1896,7 @@ body.theme-light .modal.about-open {
   line-height: 1;
   border-radius: 3px;
 }
-/* DOIT.31: symlinks keep their target-type icon (dir icon for a linked dir, code icon for a linked .py)
+/* symlinks keep their target-type icon (dir icon for a linked dir, code icon for a linked .py)
    and get a small arrow badge overlaid — macOS-Finder / Popular IDE style. Broken links go red + struck. */
 .file-tree-row.is-symlink > .file-tree-icon {
   position: relative;
@@ -1938,7 +1917,7 @@ body.theme-light .modal.about-open {
   color: var(--bad);
   text-decoration: line-through;
 }
-/* DOIT.31: the inline "→ target" reads as secondary to the name; broken links tint it red too. */
+/* the inline "→ target" reads as secondary to the name; broken links tint it red too. */
 .file-tree-symlink-target {
   color: var(--muted);
 }
@@ -1967,7 +1946,7 @@ body.theme-light .modal.about-open {
   font-size: 1.18em;
   font-weight: 800;
   line-height: 1;
-  color: #8b95a5;
+  color: var(--text-muted-strong);
 }
 .file-tree-row.kind-dir.expanded > .file-tree-icon,
 .file-tree-row.kind-dir[aria-expanded="true"] > .file-tree-icon {
@@ -2006,7 +1985,7 @@ body.theme-light .modal.about-open {
   box-shadow: 0 0 0 1px rgba(12, 15, 20, 0.9), 0 0 7px rgba(245, 197, 66, 0.75);
 }
 /* ============================================================================
-   Light mode (DOIT.12 B5): the update banner is a dark navy slab, and the file-tree
+   Light mode: the update banner is a dark navy slab, and the file-tree
    "current"/"repo-non-main"/"indexed" rows hardcode near-white-green or washed-amber
    text that vanishes on the white tree. Darken the text; strengthen the selection
    ring (the --file-selection-* fill/border tokens are already theme-aware).

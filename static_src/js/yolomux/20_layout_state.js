@@ -43,7 +43,7 @@ function layoutLeafSlots(node) {
   return (node.children || []).flatMap(layoutLeafSlots);
 }
 
-// DOIT.9 S2: a signature of the layout TREE SHAPE — topology + slot ids + split dirs/pcts — that
+// a signature of the layout TREE SHAPE — topology + slot ids + split dirs/pcts — that
 // EXCLUDES each pane's tabs order and active item (those live in the per-slot pane state, not the
 // tree). Equal signatures mean a same-shape change (reorder / activate / move-within-or-between
 // existing panes / replace-in-place / close-a-non-last tab) that needs no grid/topbar teardown.
@@ -590,7 +590,7 @@ function readableParamComponentDecode(value) {
   }
 }
 
-// DOIT.6 #40: a bookmarked ?…=yoagent / __yoagent__ (or legacy __yosup__) URL opens the merged pane on
+// a bookmarked ?…=yoagent / __yoagent__ (or legacy __yosup__) URL opens the merged pane on
 // the YO!agent sub-tab. The aliases resolve to __info__ during normalization (losing the yoagent intent),
 // so detect them in the raw params here and pre-select the sub-tab before the layout is built.
 function maybeAdoptYoagentDeepLink(params) {
@@ -1213,7 +1213,7 @@ function stateBadgeHtml(key, short, title) {
 }
 
 function sessionStateHtml(state) {
-  // DOIT.6: 'ready-review' is dropped — the dedicated #NNNN / CI / Approved PR chips already convey
+  // 'ready-review' is dropped — the dedicated #NNNN / CI / Approved PR chips already convey
   // "PR ready", so the standalone "PR" state pill is redundant on the tab.
   if (!state || ['working', 'tests-running', 'done', 'disconnected', 'yolo-approval', 'ready-review'].includes(state.key)) return '';
   return stateBadgeHtml(state.key, state.short || stateDef(state.key).short, `${state.label}: ${state.reason}`);
@@ -1310,7 +1310,7 @@ async function openProjectReadme() {
     statusErr('README path is unavailable');
     return;
   }
-  // DOIT.6: open the README as rendered markdown by default (the user can switch to edit via the
+  // open the README as rendered markdown by default (the user can switch to edit via the
   // mode control); README.md is markdown so editorPreviewModeAvailable is true.
   await openFileInEditor(path, 'README.md', {viewMode: 'preview'});
 }
@@ -1439,7 +1439,7 @@ function commandPaletteKeybinding(label, detail = '') {
   return /\b(?:Ctrl|Cmd|Shift|Esc|Alt)[^,;]*/.exec(detail)?.[0] || '';
 }
 
-// DOIT.22: a short localized label for an editor/preview view mode, shown as a chip on a deduped row.
+// a short localized label for an editor/preview view mode, shown as a chip on a deduped row.
 function commandPaletteViewModeLabel(mode) {
   if (mode === 'preview') return t('editor.mode.preview');
   if (mode === 'split') return t('editor.mode.split');
@@ -1762,12 +1762,12 @@ function commandPaletteItems() {
   const parts = fileQuickOpenQueryParts();
   if (parts.commandMode) return commandPaletteCommandItems();                          // `>` = actions only
   if (parts.symbolMode || fileQuickOpenPathQuery().active) return fileQuickOpenItems(); // `@` / path = files only
-  // Lean on open: an empty box shows only the priority's home category (no command dump — DOIT.6 #7).
+  // Lean on open: an empty box shows only the priority's home category (no command dump — #7).
   if (!commandPaletteSearchQuery()) {
     return commandPaletteMode === 'files' ? fileQuickOpenItems() : commandPaletteCommandItems();
   }
   // On type: BOTH entry points search the full corpus; the priority sort floats the home category up.
-  // S2 (DOIT.51): a file that is already an open tab shows ONCE — as the deduped Tabs row (which carries
+  // S2: a file that is already an open tab shows ONCE — as the deduped Tabs row (which carries
   // both edit + preview chips). Drop its Recent/Files duplicate so it isn't listed twice. Only here, in
   // the merged view; the files-only and empty-box modes above have no Tabs rows, so Recent stays intact.
   const openTabPaths = new Set(commandPaletteAllTabItems().map(fileItemPath).filter(Boolean));
@@ -1909,7 +1909,7 @@ function ensureCommandPalette() {
     }
   });
   node.querySelector('.command-palette-results').addEventListener('click', event => {
-    // DOIT.22 follow-up: a click on a view chip jumps to THAT view (edit/preview/diff) and closes the
+    // follow-up: a click on a view chip jumps to THAT view (edit/preview/diff) and closes the
     // palette, instead of the row's default (focus the editor view).
     const chip = event.target.closest('[data-view-item]');
     if (chip && node.contains(chip)) {
@@ -2134,7 +2134,7 @@ function sendBrowserNotification(title, options = {}) {
   notification.onclick = () => {
     window.focus();
     if (options.session) selectSession(options.session, {userInitiated: true});
-    // DOIT.29: a watched-PR notification opens the PR (no session to focus); safe blank-target open.
+    // a watched-PR notification opens the PR (no session to focus); safe blank-target open.
     else if (options.url) {
       try { window.open(options.url, '_blank', 'noopener,noreferrer'); } catch (_) {}
     }
@@ -2276,7 +2276,7 @@ function showToast(title, lines, options = {}) {
     if (!first) break;
     removeAttentionAlert(Number(first.dataset.alertId || 0));
   }
-  // DOIT.6 #85: remove the toast when its countdown bar finishes — honor options.countdownMs (the
+  // remove the toast when its countdown bar finishes — honor options.countdownMs (the
   // reconnect toast animates over that, not the fixed toastDurationMs) so the bar and removal align.
   attentionAlertTimers.set(id, window.setTimeout(() => removeAttentionAlert(id), options.countdownMs || toastDurationMs));
   return node;
@@ -2458,7 +2458,7 @@ function dismissAttentionAlertsForSession(session) {
 function attentionAlreadyVisible(session) {
   if (document.visibilityState !== 'visible') return false;
   if (!activeSessions.includes(session)) return false;
-  const panel = document.getElementById(`panel-${session}`);
+  const panel = document.getElementById(panelDomId(session));
   if (!panel || !panel.isConnected) return false;
   return focusedPanelItem === session || focusedTerminal === session || activeSessions.length === 1;
 }
@@ -2563,7 +2563,7 @@ function maybeNotifyState(session, state, options = {}) {
   }
 }
 
-// DOIT.29: a stable snapshot of the watched-PR status dimensions we diff for notifications.
+// a stable snapshot of the watched-PR status dimensions we diff for notifications.
 function watchedPrStatusSnapshot(pr) {
   return {
     merged: pr?.merged === true || pullRequestStatusLabel(pr).toLowerCase() === 'merged',
@@ -2703,7 +2703,7 @@ function updateSessionList(nextSessions) {
 
 function applyLayoutSlots(nextSlots, options = {}) {
   const previousActive = activeSessions.slice();
-  // DOIT.9 S2: detect a same-shape change (reorder/activate/move/replace) so we can skip the full
+  // detect a same-shape change (reorder/activate/move/replace) so we can skip the full
   // topbar + grid teardown. Compute the shape signature before and after the slot reassignment.
   const prevShape = layoutShapeSignature(layoutSlots);
   layoutSlots = normalizeLayoutSlots(nextSlots);
@@ -2719,7 +2719,7 @@ function applyLayoutSlots(nextSlots, options = {}) {
     forceFull: options.forceFull === true,
   });
   for (const session of activeSessions.filter(isTmuxSession)) ensureTerminalRunning(session);
-  // DOIT.9 S1: do NOT re-poll the server on a pure client-side layout change. refreshTranscripts()
+  // do NOT re-poll the server on a pure client-side layout change. refreshTranscripts()
   // fires 3..(3+N) network round-trips and a second full render wave gated behind their latency —
   // the bulk of the "moving a tab takes several seconds" delay. Freshness is already covered by the
   // metadata interval (50_editor_settings_runtime.js), and the session-changing mutations

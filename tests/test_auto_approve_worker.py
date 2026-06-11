@@ -74,7 +74,7 @@ class MovingOptionModule(DummyProcessModule):
 
 
 class StableWalkModule(DummyProcessModule):
-    # DOIT.6 #66: highlight stays on the target through the walk; records the walk + Enter.
+    # highlight stays on the target through the walk; records the walk + Enter.
     def __init__(self, prompt_state: dict[str, Any]):
         super().__init__(prompt_state)
         self.moved: list[Any] = []
@@ -98,7 +98,7 @@ class PostWalkMoveModule(StableWalkModule):
 
 
 def test_send_action_confirms_after_reverifying_the_walked_highlight():
-    # DOIT.6 #66: walk to the target, re-verify it landed there, THEN press Enter.
+    # walk to the target, re-verify it landed there, THEN press Enter.
     worker = auto_approve_worker.AutoApproveWorker("6", interval=0.01)
     module = StableWalkModule({"type": "bash", "selected_option": 1})
     assert worker.send_action(module, "option1", selected_option=1) is True
@@ -107,7 +107,7 @@ def test_send_action_confirms_after_reverifying_the_walked_highlight():
 
 
 def test_send_action_aborts_when_highlight_moves_during_the_walk():
-    # DOIT.6 #66: if the highlight moved during the ~0.6s walk, do NOT press Enter (could confirm "No").
+    # if the highlight moved during the ~0.6s walk, do NOT press Enter (could confirm "No").
     worker = auto_approve_worker.AutoApproveWorker("6", interval=0.01)
     module = PostWalkMoveModule({"type": "bash", "selected_option": 1})
     assert worker.send_action(module, "option1", selected_option=1) is False

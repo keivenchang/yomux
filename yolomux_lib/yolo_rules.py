@@ -10,13 +10,13 @@ import re
 import shlex
 import sys
 import threading
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from .atomic_file import atomic_write_text
 from .common import CONFIG_DIR
 from .settings import settings_payload
 
@@ -29,7 +29,7 @@ ACTIVE_RULE_ACTIONS = {"approve", "decline"}
 PASSIVE_RULE_ACTIONS = {"block", "ask", "notify", "off"}
 RULE_MATCH_TYPES = {"command", "regex", "glob", "contains"}
 
-# S5 (DOIT.51): the canonical, boring risk vocabulary surfaced in the event log / audit display, rule
+# S5: the canonical, boring risk vocabulary surfaced in the event log / audit display, rule
 # templates, and docs. The engine still ACCEPTS any custom risk string (no validation/rejection) — this
 # is just the recommended set so what users see stays consistent instead of ad-hoc per rule.
 YOLO_RISK_LABELS = ("read", "edit", "network", "process", "delete", "credential", "unknown")
@@ -202,13 +202,10 @@ def ensure_rule_file(path: Path | None = None) -> Path:
     rule_path = path or active_rule_path()
     if rule_path.exists():
         return rule_path
+    # shared atomic write (adds the fsync this third copy lacked); 0o600 file in a 0o700 dir.
     rule_path.parent.mkdir(parents=True, exist_ok=True)
     rule_path.parent.chmod(0o700)
-    tmp = rule_path.with_name(f".{rule_path.name}.{os.getpid()}.{int(time.time() * 1000)}.tmp")
-    with tmp.open("w", encoding="utf-8") as handle:
-        handle.write(default_rule_file_text("ask"))
-    os.replace(tmp, rule_path)
-    rule_path.chmod(0o600)
+    atomic_write_text(rule_path, default_rule_file_text("ask"), mode=0o600)
     return rule_path
 
 
@@ -661,7 +658,7 @@ def evaluate(cmd: str, prompt_type: str = "bash", agent: str = "", session: str 
     settings = yolo_settings()
     path = active_rule_path()
     dry_run = settings["dry_run"]
-    # DOIT.6 #62: a FLOOR is a floor. The catastrophic block list (rm root, mkfs, dd to a block device,
+    # a FLOOR is a floor. The catastrophic block list (rm root, mkfs, dd to a block device,
     # fork bomb, block-device redirect) ALWAYS applies — even under --dangerously-yolo, which only opts
     # out of the soft ruleset / ask-default, never out of the hard floor.
     floor = hard_floor_decision(cmd)

@@ -12,26 +12,19 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 
+from .atomic_file import atomic_write_text
+from .atomic_file import file_lock
 from .common import CONFIG_DIR
 from .common import MAX_EVENT_TAIL_LINES
 from .common import STATE_PATH
 from .common import truncate_text
 
 
-_STATE_LOCK = threading.RLock()
-
-
 @contextmanager
 def locked_yolomux_state_file() -> Any:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    lock_path = STATE_PATH.with_name(f".{STATE_PATH.name}.lock")
-    with _STATE_LOCK:
-        with lock_path.open("a+", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    # lock + atomic-write machinery shared via atomic_file (with settings.py / yolo_rules).
+    with file_lock(STATE_PATH):
+        yield
 
 
 def _read_yolomux_state_unlocked() -> dict[str, Any]:
@@ -48,18 +41,7 @@ def read_yolomux_state() -> dict[str, Any]:
 
 
 def _write_yolomux_state_unlocked(state: dict[str, Any]) -> None:
-    tmp_path = STATE_PATH.with_name(f".{STATE_PATH.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
-    try:
-        with tmp_path.open("w", encoding="utf-8") as handle:
-            handle.write(json.dumps(state, indent=2, sort_keys=True) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        tmp_path.replace(STATE_PATH)
-    finally:
-        try:
-            tmp_path.unlink()
-        except FileNotFoundError:
-            pass
+    atomic_write_text(STATE_PATH, json.dumps(state, indent=2, sort_keys=True) + "\n")
 
 
 def write_yolomux_state(state: dict[str, Any]) -> None:

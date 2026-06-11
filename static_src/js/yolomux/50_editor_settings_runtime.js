@@ -386,7 +386,7 @@ function applyEditorWrapPreference() {
       if (typeof reconfigureCodeMirrorPanelEditorOptions === 'function' && reconfigureCodeMirrorPanelEditorOptions(panel)) {
         return;
       }
-      // Re-render each panel with its OWN layout item (DOIT.16 C1): passing the editor item flipped
+      // Re-render each panel with its OWN layout item: passing the editor item flipped
       // a preview/diff pane into an editor on any appearance change (e.g. font-size). This is a fallback
       // for raw/preview panels or browsers without CodeMirror compartments.
       renderFileEditorPanel(panel, panel.dataset.layoutItem || fileEditorItemFor(path));
@@ -400,7 +400,7 @@ function setEditorWrapEnabled(enabled) {
   applyEditorWrapPreference();
 }
 
-// DOIT.26: toggle inline git blame. Fetch the blame payload for each open text file first (so the
+// toggle inline git blame. Fetch the blame payload for each open text file first (so the
 // re-rendered editor's blame ViewPlugin has data), then re-render with each panel's OWN item.
 async function applyEditorBlamePreference() {
   for (const panel of document.querySelectorAll('.file-editor-panel')) {
@@ -430,7 +430,7 @@ function toggleEditorWrap() {
   setEditorWrapEnabled(enabled);
 }
 
-// B4 (DOIT.12): toggle showing ALL diff context vs collapsing unchanged regions. Persisted; re-renders
+// B4: toggle showing ALL diff context vs collapsing unchanged regions. Persisted; re-renders
 // every open editor in diff mode (the signature includes `expand`, so the diff view rebuilds).
 function setDiffExpandUnchanged(enabled) {
   diffExpandUnchanged = enabled === true;
@@ -605,7 +605,7 @@ function applyGlobalThemeMode(options = {}) {
   if (document.documentElement?.style) document.documentElement.style.colorScheme = resolved;
   if (options.updateEditor !== false) applyEditorThemeMode({refreshEditors: options.refreshEditors !== false});
   if (options.updateTerminals) applyTerminalRuntimeSettings({fit: false});
-  // DOIT.41: the active-color presets are theme-specific, so re-apply on every theme switch.
+  // the active-color presets are theme-specific, so re-apply on every theme switch.
   applyActiveColor(initialSetting('appearance.active_color', 'green'));
 }
 
@@ -635,7 +635,7 @@ function terminalThemeForSession(session, baseTheme) {
 }
 
 function applyTerminalRuntimeSettings(options = {}) {
-  // DOIT.6 #32: one theme source for every terminal AND its container, so all panes share the same
+  // one theme source for every terminal AND its container, so all panes share the same
   // white in light mode (no pane-level tint showing a different white); + minimumContrastRatio so
   // faint 24-bit agent output stays legible on white.
   const theme = terminalThemeForGlobalTheme();
@@ -749,16 +749,16 @@ function applySettingsPayload(payload, options = {}) {
     if (typeof relocalizeFileExplorerPanels === 'function') relocalizeFileExplorerPanels();
   }
   if (previousEditorSchemeId !== activeEditorScheme().id || previousCursorColor !== fileEditorCursorColor) {
-    // DOIT.6: re-theme LIVE editors via the compartment swap (preserves scroll/selection). A plain
+    // re-theme LIVE editors via the compartment swap (preserves scroll/selection). A plain
     // renderFileEditorPanel short-circuits because codeMirrorConfigSignature omits the scheme, so the
     // CM view would keep its old theme; refreshOpenEditorThemePanels reconfigures the theme directly.
     refreshOpenEditorThemePanels();
   }
-  // DOIT.26: the blame ViewPlugin decorates per fileEditorBlameAllLines at build time + the editor
+  // the blame ViewPlugin decorates per fileEditorBlameAllLines at build time + the editor
   // config signature carries it, so re-render open editors when the toggle changes (only matters while
   // blame is on).
   if (previousBlameAllLines !== fileEditorBlameAllLines && fileEditorBlameEnabled) applyEditorBlamePreference();
-  // i18n (DOIT.8): when general.language changes, load the new catalog and re-render localized surfaces.
+  // i18n: when general.language changes, load the new catalog and re-render localized surfaces.
   const nextLocale = resolveLocalePref(initialSetting('general.language', 'system'));
   if (nextLocale !== previousLocale) applyLocale(nextLocale);
   if (!options.initial) installRuntimeIntervals();

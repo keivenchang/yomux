@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 from __future__ import annotations
 
-"""Claude Code ``PreToolUse`` permission hook for YOLOmux (DOIT.11).
+"""Claude Code ``PreToolUse`` permission hook for YOLOmux.
 
 Screen-scraping a drifting TUI to decide WHEN to type ``1``/Enter is fragile by
 construction — every new CLI footer variant breaks the liveness guard, and a false

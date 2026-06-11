@@ -3,7 +3,7 @@ let sessions = bootstrap.sessions;
 const availableAgents = new Set(bootstrap.availableAgents);
 // The exact launch command per agent (with --dangerously-* flags in YOLO mode) for the new-session menu.
 const agentLaunchCommands = bootstrap.agentLaunchCommands || {};
-// DOIT.6 #39: per-agent {installed, logged_in} login status (probed + cached server-side). Used to
+// per-agent {installed, logged_in} login status (probed + cached server-side). Used to
 // grey an installed-but-logged-out agent in the new-session picker. Refreshed by metadata polls.
 let agentAuth = bootstrap.agentAuth || {};
 const agentLoginCommands = {claude: 'claude auth login', codex: 'codex login'};
@@ -249,12 +249,12 @@ let fileExplorerShowHidden = storageGet(fileExplorerHiddenStorageKey) === '1';
 const fileEditorThemeModeStorageKey = 'yolomux.fileEditorThemeMode.v1';
 const fileEditorPreviewDisplayModeStorageKey = 'yolomux.fileEditorPreviewDisplayMode.v1';
 let fileEditorWrapEnabled = readStoredEditorWrap();
-// DOIT.26: inline git blame (Popular IDE-style). Persisted toggle + a per-path cache of the /api/blame payload.
+// inline git blame (Popular IDE-style). Persisted toggle + a per-path cache of the /api/blame payload.
 let fileEditorBlameEnabled = storageGet('yolomux.editorBlame') === '1';
-const editorBlameFetches = new Map();  // DOIT.34 #3: in-flight /api/blame fetch per path (dedup concurrent panels)
-let fileEditorBlameAllLines = false;  // DOIT.26: annotate every line vs current-line only (set from settings in applySettingsPayload)
+const editorBlameFetches = new Map();  // in-flight /api/blame fetch per path (dedup concurrent panels)
+let fileEditorBlameAllLines = false;  // annotate every line vs current-line only (set from settings in applySettingsPayload)
 let fileEditorLineNumbersEnabled = readStoredEditorLineNumbers();
-// B4 (DOIT.12): when true the diff shows ALL context (no collapsed "N unchanged lines" folds). Persisted.
+// B4: when true the diff shows ALL context (no collapsed "N unchanged lines" folds). Persisted.
 let diffExpandUnchanged = storageGet('yolomux.diffExpandUnchanged') === '1';
 let fileEditorThemeMode = readStoredEditorThemeMode();
 let fileEditorPreviewDisplayMode = readStoredEditorPreviewDisplayMode();
@@ -280,7 +280,7 @@ let uploadedFilesCollapsed = (() => {
   }
 })();
 let changesFolderCollapsed = readStoredSet(changesFolderCollapsedStorageKey);
-// DOIT.23: per-repo collapse state for the Modified-files panel repo headers (keyed by repo path).
+// per-repo collapse state for the Modified-files panel repo headers (keyed by repo path).
 let changesRepoCollapsed = readStoredSet(changesRepoCollapsedStorageKey);
 let fileExplorerSessionFilesPayload = {session: '', files: [], repos: [], errors: []};
 let fileExplorerSessionFilesPayloadSignature = '';
@@ -360,7 +360,7 @@ const pasteLockStorageKey = 'yolomux.pasteUploadLock.v1';
 const tabMetaStorageKey = 'yolomux.showTabMeta.v1';
 const pinnedTabsStorageKey = 'yolomux.pinnedTabs.v1';
 const startupHelperIndexStorageKey = 'yolomux.startupHelper.index.v1';
-// DOIT.6 #40: YO!info and YO!agent are merged into one pane with an in-pane sub-tab toggle; the chosen
+// YO!info and YO!agent are merged into one pane with an in-pane sub-tab toggle; the chosen
 // sub-tab is remembered across reloads.
 const infoSubTabStorageKey = 'yolomux.infoPanel.activeSubTab.v1';
 const transcriptPreviewMessages = 200;
@@ -430,7 +430,7 @@ function infoTabLabel() { return t('brand.tab.info'); }
 const yoagentItemId = '__yoagent__';
 const legacyYosupItemId = '__yosup__';
 function yoagentTabLabel() { return t('brand.tab.agent'); }
-// DOIT.6 #40: the active sub-tab within the merged YO!info pane ('info' | 'yoagent'), remembered.
+// the active sub-tab within the merged YO!info pane ('info' | 'yoagent'), remembered.
 let infoPanelSubTab = readStoredInfoSubTab();
 const fileExplorerItemId = '__files__';
 const prefsItemId = '__prefs__';
@@ -512,7 +512,7 @@ function filePanelTabType({key, prefix, shortLabel, terminalTitle, className, so
 }
 const TAB_TYPES = [
   {
-    // DOIT.6 #40: YO!info and YO!agent are ONE item now — the panel hosts both via an in-pane sub-tab
+    // YO!info and YO!agent are ONE item now — the panel hosts both via an in-pane sub-tab
     // toggle. The legacy yoagent/yosup aliases resolve here so saved layouts and bookmarked
     // ?…=yoagent URLs open the merged pane (the boot deep-link scan pre-selects the YO!agent sub-tab).
     key: 'info',
@@ -788,7 +788,7 @@ let dragPaneSlot = null;
 // dragged DOM node mid-drag (which aborts the native HTML5 drag). endSessionDrag flushes these.
 let pendingTabStripRender = false;
 let pendingPreferencesRender = false;
-// DOIT.52: panel renders deferred during tab drag keep the cheap/full render decision that was made
+// panel renders deferred during tab drag keep the cheap/full render decision that was made
 // while the layout model changed. A boolean loses the pre-change shape and forces a full rebuild on drop.
 let pendingLayoutRender = null;
 let dragFilePayloadState = null;
@@ -798,7 +798,7 @@ let transparentDragImage = null;
 // #47: tab rects measured once per strip at drag time and reused for every dragover (tabs don't move
 // mid-drag — renders are deferred), so the drop-placement path doesn't force sync layout on each move.
 let dragTabRectCache = null;
-// DOIT.21: one global editor navigation history (Popular IDE-style back/forward through visited files).
+// one global editor navigation history (Popular IDE-style back/forward through visited files).
 // stack holds file paths; index points at the current entry; `navigating` suppresses recording while a
 // back/forward re-open is in flight (so it doesn't push a new entry).
 const editorNav = {stack: [], index: -1, navigating: false};
@@ -806,7 +806,7 @@ const terminalContextMenu = createContextMenuController();
 const fileContextMenu = createContextMenuController();
 const sessionContextMenu = createContextMenuController();
 const linkContextMenu = createContextMenuController();
-const watchedPrContextMenu = createContextMenuController();   // DOIT.29: "Watch this PR" on YO!info PR cells
+const watchedPrContextMenu = createContextMenuController();   // "Watch this PR" on YO!info PR cells
 const repoChipContextMenu = createContextMenuController();     // C9: per-pane "+N repos" detail-bar popover
 let sessionRenameDialog = null;
 const fileExplorerSelectedPaths = new Set();

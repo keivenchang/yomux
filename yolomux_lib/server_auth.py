@@ -65,7 +65,7 @@ class AuthMixin:
         return False
 
     def request_locale_pref(self) -> str:
-        """Resolve the pre-auth UI locale for the setup/login screens (DOIT.13): the short-lived
+        """Resolve the pre-auth UI locale for the setup/login screens: the short-lived
         `yolomux_locale` cookie (set by the setup/login language picker, which must NOT write settings
         pre-auth) wins, else the saved general.language. The permanent write happens post-auth via
         save_login_locale; the cookie is a carrier with a Max-Age backstop."""
@@ -142,7 +142,7 @@ class AuthMixin:
 
     def safe_next_path(self, value: str | None) -> str:
         text = str(value or "/").strip()
-        # DOIT.6 #76: also reject backslashes — a browser normalizes `/\evil.com` to `//evil.com`, an
+        # also reject backslashes — a browser normalizes `/\evil.com` to `//evil.com`, an
         # external open redirect after login. Protocol-relative `//` and CR/LF are rejected too.
         if not text.startswith("/") or text.startswith("//") or "\\" in text or "\r" in text or "\n" in text:
             return "/"
@@ -257,7 +257,7 @@ class AuthMixin:
                 status=HTTPStatus.UNAUTHORIZED,
             )
             return
-        # DOIT.8 Phase 1: persist the login-screen language choice to general.language now that auth
+        # Phase 1: persist the login-screen language choice to general.language now that auth
         # succeeded, so the picked language carries into the app (the same setting the topbar/Preferences
         # switchers write). Done post-auth so an unauthenticated POST can't mutate settings.
         save_login_locale(form.get("locale", [""])[0])

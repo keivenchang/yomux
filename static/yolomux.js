@@ -4,7 +4,7 @@ let sessions = bootstrap.sessions;
 const availableAgents = new Set(bootstrap.availableAgents);
 // The exact launch command per agent (with --dangerously-* flags in YOLO mode) for the new-session menu.
 const agentLaunchCommands = bootstrap.agentLaunchCommands || {};
-// DOIT.6 #39: per-agent {installed, logged_in} login status (probed + cached server-side). Used to
+// per-agent {installed, logged_in} login status (probed + cached server-side). Used to
 // grey an installed-but-logged-out agent in the new-session picker. Refreshed by metadata polls.
 let agentAuth = bootstrap.agentAuth || {};
 const agentLoginCommands = {claude: 'claude auth login', codex: 'codex login'};
@@ -250,12 +250,12 @@ let fileExplorerShowHidden = storageGet(fileExplorerHiddenStorageKey) === '1';
 const fileEditorThemeModeStorageKey = 'yolomux.fileEditorThemeMode.v1';
 const fileEditorPreviewDisplayModeStorageKey = 'yolomux.fileEditorPreviewDisplayMode.v1';
 let fileEditorWrapEnabled = readStoredEditorWrap();
-// DOIT.26: inline git blame (Popular IDE-style). Persisted toggle + a per-path cache of the /api/blame payload.
+// inline git blame (Popular IDE-style). Persisted toggle + a per-path cache of the /api/blame payload.
 let fileEditorBlameEnabled = storageGet('yolomux.editorBlame') === '1';
-const editorBlameFetches = new Map();  // DOIT.34 #3: in-flight /api/blame fetch per path (dedup concurrent panels)
-let fileEditorBlameAllLines = false;  // DOIT.26: annotate every line vs current-line only (set from settings in applySettingsPayload)
+const editorBlameFetches = new Map();  // in-flight /api/blame fetch per path (dedup concurrent panels)
+let fileEditorBlameAllLines = false;  // annotate every line vs current-line only (set from settings in applySettingsPayload)
 let fileEditorLineNumbersEnabled = readStoredEditorLineNumbers();
-// B4 (DOIT.12): when true the diff shows ALL context (no collapsed "N unchanged lines" folds). Persisted.
+// B4: when true the diff shows ALL context (no collapsed "N unchanged lines" folds). Persisted.
 let diffExpandUnchanged = storageGet('yolomux.diffExpandUnchanged') === '1';
 let fileEditorThemeMode = readStoredEditorThemeMode();
 let fileEditorPreviewDisplayMode = readStoredEditorPreviewDisplayMode();
@@ -281,7 +281,7 @@ let uploadedFilesCollapsed = (() => {
   }
 })();
 let changesFolderCollapsed = readStoredSet(changesFolderCollapsedStorageKey);
-// DOIT.23: per-repo collapse state for the Modified-files panel repo headers (keyed by repo path).
+// per-repo collapse state for the Modified-files panel repo headers (keyed by repo path).
 let changesRepoCollapsed = readStoredSet(changesRepoCollapsedStorageKey);
 let fileExplorerSessionFilesPayload = {session: '', files: [], repos: [], errors: []};
 let fileExplorerSessionFilesPayloadSignature = '';
@@ -361,7 +361,7 @@ const pasteLockStorageKey = 'yolomux.pasteUploadLock.v1';
 const tabMetaStorageKey = 'yolomux.showTabMeta.v1';
 const pinnedTabsStorageKey = 'yolomux.pinnedTabs.v1';
 const startupHelperIndexStorageKey = 'yolomux.startupHelper.index.v1';
-// DOIT.6 #40: YO!info and YO!agent are merged into one pane with an in-pane sub-tab toggle; the chosen
+// YO!info and YO!agent are merged into one pane with an in-pane sub-tab toggle; the chosen
 // sub-tab is remembered across reloads.
 const infoSubTabStorageKey = 'yolomux.infoPanel.activeSubTab.v1';
 const transcriptPreviewMessages = 200;
@@ -431,7 +431,7 @@ function infoTabLabel() { return t('brand.tab.info'); }
 const yoagentItemId = '__yoagent__';
 const legacyYosupItemId = '__yosup__';
 function yoagentTabLabel() { return t('brand.tab.agent'); }
-// DOIT.6 #40: the active sub-tab within the merged YO!info pane ('info' | 'yoagent'), remembered.
+// the active sub-tab within the merged YO!info pane ('info' | 'yoagent'), remembered.
 let infoPanelSubTab = readStoredInfoSubTab();
 const fileExplorerItemId = '__files__';
 const prefsItemId = '__prefs__';
@@ -513,7 +513,7 @@ function filePanelTabType({key, prefix, shortLabel, terminalTitle, className, so
 }
 const TAB_TYPES = [
   {
-    // DOIT.6 #40: YO!info and YO!agent are ONE item now — the panel hosts both via an in-pane sub-tab
+    // YO!info and YO!agent are ONE item now — the panel hosts both via an in-pane sub-tab
     // toggle. The legacy yoagent/yosup aliases resolve here so saved layouts and bookmarked
     // ?…=yoagent URLs open the merged pane (the boot deep-link scan pre-selects the YO!agent sub-tab).
     key: 'info',
@@ -789,7 +789,7 @@ let dragPaneSlot = null;
 // dragged DOM node mid-drag (which aborts the native HTML5 drag). endSessionDrag flushes these.
 let pendingTabStripRender = false;
 let pendingPreferencesRender = false;
-// DOIT.52: panel renders deferred during tab drag keep the cheap/full render decision that was made
+// panel renders deferred during tab drag keep the cheap/full render decision that was made
 // while the layout model changed. A boolean loses the pre-change shape and forces a full rebuild on drop.
 let pendingLayoutRender = null;
 let dragFilePayloadState = null;
@@ -799,7 +799,7 @@ let transparentDragImage = null;
 // #47: tab rects measured once per strip at drag time and reused for every dragover (tabs don't move
 // mid-drag — renders are deferred), so the drop-placement path doesn't force sync layout on each move.
 let dragTabRectCache = null;
-// DOIT.21: one global editor navigation history (Popular IDE-style back/forward through visited files).
+// one global editor navigation history (Popular IDE-style back/forward through visited files).
 // stack holds file paths; index points at the current entry; `navigating` suppresses recording while a
 // back/forward re-open is in flight (so it doesn't push a new entry).
 const editorNav = {stack: [], index: -1, navigating: false};
@@ -807,7 +807,7 @@ const terminalContextMenu = createContextMenuController();
 const fileContextMenu = createContextMenuController();
 const sessionContextMenu = createContextMenuController();
 const linkContextMenu = createContextMenuController();
-const watchedPrContextMenu = createContextMenuController();   // DOIT.29: "Watch this PR" on YO!info PR cells
+const watchedPrContextMenu = createContextMenuController();   // "Watch this PR" on YO!info PR cells
 const repoChipContextMenu = createContextMenuController();     // C9: per-pane "+N repos" detail-bar popover
 let sessionRenameDialog = null;
 const fileExplorerSelectedPaths = new Set();
@@ -843,7 +843,7 @@ let i18nActiveLocale = (typeof bootstrap === 'object' && bootstrap && bootstrap.
 const i18nFallbackLocale = 'en';
 const i18nCatalogs = new Map();  // locale -> {dottedKey: string}
 let i18nApplyLocaleRequestId = 0;
-// DOIT.8: seed from the INLINED bootstrap catalogs (active locale + en fallback) so t() resolves
+// seed from the INLINED bootstrap catalogs (active locale + en fallback) so t() resolves
 // SYNCHRONOUSLY on the very first render — the menu bar/tabs/wordmark paint at boot before any fetch.
 if (typeof bootstrap === 'object' && bootstrap && bootstrap.strings && typeof bootstrap.strings === 'object') {
   for (const [loc, catalog] of Object.entries(bootstrap.strings)) {
@@ -889,7 +889,7 @@ function i18nActiveLocaleId() {
   return i18nActiveLocale;
 }
 
-// DOIT.8 Phase 3: render a relative time in the active locale's native phrasing via
+// Phase 3: render a relative time in the active locale's native phrasing via
 // Intl.RelativeTimeFormat. Falls back through local catalog strings if the browser API is unavailable.
 function relativeTimeFormat(secondsAgo) {
   const sec = Math.max(0, Math.round(Number(secondsAgo) || 0));
@@ -966,7 +966,7 @@ async function applyLocale(locale) {
   if (next !== i18nFallbackLocale) await i18nLoadCatalog(next);
   if (requestId !== i18nApplyLocaleRequestId) return;
   i18nActiveLocale = next;
-  // DOIT.8 Phase 2: flip the document direction so RTL locales (ar) mirror the whole layout.
+  // Phase 2: flip the document direction so RTL locales (ar) mirror the whole layout.
   if (typeof document !== 'undefined' && document.documentElement) {
     document.documentElement.setAttribute('dir', i18nIsRtl(next) ? 'rtl' : 'ltr');
     document.documentElement.setAttribute('lang', next);
@@ -980,7 +980,7 @@ function i18nSupportedLocales() {
   return ['zh-Hant', 'zh-Hans', 'es', 'ja', 'de', 'fr', 'pt-BR', 'ru', 'ko', 'hi', 'ar', 'he', 'en'];
 }
 
-// DOIT.8 Phase 2: right-to-left locales. Drives document.dir so the browser mirrors the layout.
+// Phase 2: right-to-left locales. Drives document.dir so the browser mirrors the layout.
 function i18nIsRtl(locale) {
   const base = String(locale || '').toLowerCase().split('-')[0];
   return base === 'ar' || base === 'he' || base === 'fa' || base === 'ur';
@@ -1024,7 +1024,7 @@ function resolveLocalePref(pref) {
 }
 
 function rerenderForLocale(options = {}) {
-  // DOIT.6 #50: force-re-render EVERY localized surface so a language switch repaints the open UI on
+  // force-re-render EVERY localized surface so a language switch repaints the open UI on
   // the same interaction. Guarded so this is safe at any load order. Preferences must be forced past
   // the active-control guard (the language <select> is the active control when the switch fires).
   if (typeof renderPreferencesPanels === 'function') renderPreferencesPanels({force: true});
@@ -1460,7 +1460,7 @@ function writeStoredTabMetaVisible(value) {
   storageSet(tabMetaStorageKey, value ? '1' : '0');
 }
 
-// DOIT.6 #40: persist the merged YO!info pane's active sub-tab ('info' | 'yoagent'), default 'info'.
+// persist the merged YO!info pane's active sub-tab ('info' | 'yoagent'), default 'info'.
 function normalizedInfoSubTab(value) {
   return value === 'yoagent' ? 'yoagent' : 'info';
 }
@@ -1713,10 +1713,10 @@ function terminalThemeForGlobalTheme(mode = globalThemeMode) {
   return {...theme};
 }
 
-// DOIT.6 #32: on a WHITE (light) terminal, agents emit 24-bit truecolor escapes tuned for a dark
+// on a WHITE (light) terminal, agents emit 24-bit truecolor escapes tuned for a dark
 // terminal that render faint on white. xterm's minimumContrastRatio auto-darkens ANY text color
 // (including app 24-bit colors) against the bg.
-// DOIT.30: the DARK terminal used to keep 1 (no adjustment), which left low-contrast cells alone — so
+// the DARK terminal used to keep 1 (no adjustment), which left low-contrast cells alone — so
 // an agent composer that draws light text on an ANSI-white box (Codex's input, ~contrast 1) was
 // white-on-white. Use a moderate 3 for dark: enough to force that composer to a readable foreground,
 // low enough that intentionally-dim dark-palette text (already at/above 3:1) is mostly untouched. Light
@@ -1960,7 +1960,7 @@ function setFocusedPanelItem(item, options = {}) {
 }
 
 let autoFocusNavTimer = null;
-// DOIT.35 C2: an AUTO-FOCUS-driven focus change records back/forward nav "as if clicked", so Back
+// an AUTO-FOCUS-driven focus change records back/forward nav "as if clicked", so Back
 // returns to where you were. Debounced by a short dwell so rapid auto-focus flapping (focus chasing
 // needs-attention) records only the focus that LANDS, not every transient flip. User clicks already
 // record immediately (activatePaneTab userInitiated); a back/forward re-activation lands on the item
@@ -2245,7 +2245,7 @@ function terminalBufferLineText(line) {
   return line?.translateToString?.(true) || '';
 }
 
-// DOIT.36 C1: did `line` fill the terminal to its right edge? translateToString(true) trims trailing
+// did `line` fill the terminal to its right edge? translateToString(true) trims trailing
 // blanks, so a row whose printed text reaches `cols` had a non-blank last cell — evidence the content
 // was CLIPPED at the edge and wrapped, not that it merely happened to end at the row. Used to gate the
 // hanging-URL stitch: a complete URL ending well short of the edge (e.g. `See https://x.com`) is NOT a
@@ -2255,7 +2255,7 @@ function terminalRowReachesRightEdge(line, cols) {
   return terminalBufferLineText(line).length >= cols;
 }
 
-// DOIT.27: does the joined group text end mid-URL? True when the LAST url token reaches the very end of
+// does the joined group text end mid-URL? True when the LAST url token reaches the very end of
 // the string (no trailing whitespace/terminator). Used to decide whether to stitch a hanging-indent
 // continuation row onto the group — only EXTEND a url token that runs off the row's right edge.
 function terminalTailIsUnterminatedUrl(text) {
@@ -2267,7 +2267,7 @@ function terminalTailIsUnterminatedUrl(text) {
   return last.index + last[0].length === text.length;
 }
 
-// DOIT.27: a row shaped like a hanging-indent continuation — leading whitespace, then a URL-valid char
+// a row shaped like a hanging-indent continuation — leading whitespace, then a URL-valid char
 // (not a quote/bracket). Returns {indent, text} with the indent stripped, or null. isWrapped rows are
 // not hanging continuations (they are real terminal soft-wraps and are handled by the isWrapped sweep).
 function terminalRowHangingShape(buffer, index) {
@@ -2279,10 +2279,10 @@ function terminalRowHangingShape(buffer, index) {
   return {indent: match[1].length, text: raw.slice(match[1].length)};
 }
 
-// DOIT.27: row `index` continues the URL printed on row `index - 1` — its own row shape is a hanging
+// row `index` continues the URL printed on row `index - 1` — its own row shape is a hanging
 // indent AND the previous row's tail is an unterminated url token. Gates tightly so ordinary indented
 // prose under a line that merely happens to end at a URL is not merged.
-// DOIT.36 C1: ALSO require the previous row to reach the terminal's right edge, proving the URL was
+// ALSO require the previous row to reach the terminal's right edge, proving the URL was
 // clipped/hard-wrapped. Without this, a complete URL at end-of-line falsely swallows the next row.
 function terminalRowIsHangingUrlContinuation(buffer, index, cols) {
   if (!terminalRowHangingShape(buffer, index)) return false;
@@ -2295,12 +2295,12 @@ function terminalRowIsHangingUrlContinuation(buffer, index, cols) {
 function terminalWrappedLineGroup(term, y) {
   const buffer = term.buffer?.active;
   if (!buffer?.getLine) return null;
-  // DOIT.36 C1: terminal width gates the hanging-URL stitch (a clipped URL fills to the right edge).
+  // terminal width gates the hanging-URL stitch (a clipped URL fills to the right edge).
   const cols = Number(term.cols) || 0;
   const requested = Math.max(0, y - 1);
   if (!buffer.getLine(requested)) return null;
   // Walk back to the logical line's first row: over terminal soft-wraps (isWrapped) AND over
-  // hanging-indent URL continuations (DOIT.27 — agent-hard-wrapped URLs whose continuation is its own
+  // hanging-indent URL continuations (agent-hard-wrapped URLs whose continuation is its own
   // non-wrapped, indented row). So querying ANY row of the wrapped URL yields the same full group.
   let start = requested;
   for (;;) {
@@ -2344,7 +2344,7 @@ function terminalWrappedOffsetPosition(group, offset, endPosition = false) {
   const row = group.rows.find(candidate => target >= candidate.start && target < candidate.end) || group.rows[group.rows.length - 1];
   if (!row) return null;
   // A stitched continuation row had `indent` leading spaces stripped before joining, so its real
-  // terminal column is shifted right by that indent (DOIT.27).
+  // terminal column is shifted right by that indent.
   return {x: Math.max(1, target - row.start + 1 + (row.indent || 0)), y: row.y};
 }
 
@@ -2434,7 +2434,7 @@ function copyTextToClipboardViaCopyEvent(text) {
   }
 }
 
-// DOIT.53: ONE clipboard-write chain for terminal-initiated copies (shortcut copy AND the OSC 52
+// ONE clipboard-write chain for terminal-initiated copies (shortcut copy AND the OSC 52
 // bridge): synchronous copy-event first — it stays inside any live user activation — then the async
 // navigator.clipboard path as fallback. Status text reports success/failure either way.
 function writeTerminalTextToClipboard(text, label = 'copied') {
@@ -2454,7 +2454,7 @@ function writeTerminalTextToClipboard(text, label = 'copied') {
     });
 }
 
-// DOIT.53 N1: opt-in live instrumentation for the copy path. Set storage key 'yolomux.debugCopy' to '1'
+// opt-in live instrumentation for the copy path. Set storage key 'yolomux.debugCopy' to '1'
 // and every copy decision logs ONE compact console line — enough to see which link breaks without
 // changing behavior.
 function copyDebugEnabled() {
@@ -2534,6 +2534,37 @@ function delegate(parent, type, selector, handler, options = {}) {
   };
   parent.addEventListener(type, listener, options);
   return listener;
+}
+
+// One owner for the per-session/-item DOM id scheme. Both the element that sets the id and every
+// getElementById/querySelector that looks it up route through these, so the prefix lives in one place
+// (the ids are produced + consumed across 7 partials). Changing a prefix is then a one-line edit.
+const panelDomId = item => `panel-${item}`;
+const paneTabDomId = session => `panel-tab-${session}`;
+const terminalDomId = session => `term-${session}`;
+const transcriptDomId = session => `transcript-${session}`;
+const summaryDomId = session => `summary-${session}`;
+
+// One inflight-dedup wrapper: run makeRequest() at most once per key while a call is outstanding, so
+// concurrent callers for the same key share the single in-flight promise and clean up after it settles.
+// When canReuse is false the caller wants an untracked fresh fetch, so it runs without registering. The
+// TTL cache-hit check and any resource-specific guards stay at the call site; this owns only the inflight
+// Map bookkeeping that was hand-rolled identically per filesystem resource (dir listing, path info, blame).
+function dedupeInflight(inflight, key, canReuse, makeRequest) {
+  if (canReuse) {
+    const existing = inflight.get(key);
+    if (existing) return existing;
+  }
+  const request = makeRequest();
+  if (!canReuse) return request;
+  inflight.set(key, request);
+  return (async () => {
+    try {
+      return await request;
+    } finally {
+      if (inflight.get(key) === request) inflight.delete(key);
+    }
+  })();
 }
 
 function appendContextMenuButton(menu, label, handler, closeMenu, options = {}) {
@@ -2623,7 +2654,7 @@ function closeContextMenus() {
   closeLinkContextMenu();
 }
 
-// DOIT.15: right-click menu for links in AI/markdown content — Copy URL / Open URL. Bound on the
+// right-click menu for links in AI/markdown content — Copy URL / Open URL. Bound on the
 // YO!agent body and markdown previews via installLinkContextMenu(container).
 function showLinkContextMenu(anchor, x, y) {
   closeTerminalContextMenu();
@@ -2765,7 +2796,7 @@ async function copyDeferredTextToClipboard(payloadPromise) {
   return result;
 }
 
-// DOIT.53 ROOT CAUSE: while Claude (or any TUI) owns the mouse inside tmux, the visible selection is the
+// ROOT CAUSE: while Claude (or any TUI) owns the mouse inside tmux, the visible selection is the
 // APP's — a plain drag never creates an xterm selection, and the copied text instead arrives as an
 // OSC 52 clipboard escape (app -> tmux `set-clipboard` passthrough -> our PTY -> xterm.js). xterm.js
 // DROPS OSC 52 unless a handler is registered, so those copies silently vanished. This bridge decodes
@@ -2828,7 +2859,7 @@ function handleTerminalCopyShortcutKeydown(session, term, container, event) {
   if (!selected) {
     if (isCmdC) {
       event.preventDefault();
-      // DOIT.53: in a Claude/tmux pane the APP owns the mouse, so a plain drag never creates an xterm
+      // in a Claude/tmux pane the APP owns the mouse, so a plain drag never creates an xterm
       // selection — tell the user the working gestures instead of dead-ending.
       statusEl.textContent = isMacPlatform()
         ? 'nothing selected — Option-drag selects while Claude/tmux owns the mouse; Cmd-Option-C copies the tmux selection'
@@ -2990,7 +3021,7 @@ function layoutLeafSlots(node) {
   return (node.children || []).flatMap(layoutLeafSlots);
 }
 
-// DOIT.9 S2: a signature of the layout TREE SHAPE — topology + slot ids + split dirs/pcts — that
+// a signature of the layout TREE SHAPE — topology + slot ids + split dirs/pcts — that
 // EXCLUDES each pane's tabs order and active item (those live in the per-slot pane state, not the
 // tree). Equal signatures mean a same-shape change (reorder / activate / move-within-or-between
 // existing panes / replace-in-place / close-a-non-last tab) that needs no grid/topbar teardown.
@@ -3537,7 +3568,7 @@ function readableParamComponentDecode(value) {
   }
 }
 
-// DOIT.6 #40: a bookmarked ?…=yoagent / __yoagent__ (or legacy __yosup__) URL opens the merged pane on
+// a bookmarked ?…=yoagent / __yoagent__ (or legacy __yosup__) URL opens the merged pane on
 // the YO!agent sub-tab. The aliases resolve to __info__ during normalization (losing the yoagent intent),
 // so detect them in the raw params here and pre-select the sub-tab before the layout is built.
 function maybeAdoptYoagentDeepLink(params) {
@@ -4160,7 +4191,7 @@ function stateBadgeHtml(key, short, title) {
 }
 
 function sessionStateHtml(state) {
-  // DOIT.6: 'ready-review' is dropped — the dedicated #NNNN / CI / Approved PR chips already convey
+  // 'ready-review' is dropped — the dedicated #NNNN / CI / Approved PR chips already convey
   // "PR ready", so the standalone "PR" state pill is redundant on the tab.
   if (!state || ['working', 'tests-running', 'done', 'disconnected', 'yolo-approval', 'ready-review'].includes(state.key)) return '';
   return stateBadgeHtml(state.key, state.short || stateDef(state.key).short, `${state.label}: ${state.reason}`);
@@ -4257,7 +4288,7 @@ async function openProjectReadme() {
     statusErr('README path is unavailable');
     return;
   }
-  // DOIT.6: open the README as rendered markdown by default (the user can switch to edit via the
+  // open the README as rendered markdown by default (the user can switch to edit via the
   // mode control); README.md is markdown so editorPreviewModeAvailable is true.
   await openFileInEditor(path, 'README.md', {viewMode: 'preview'});
 }
@@ -4386,7 +4417,7 @@ function commandPaletteKeybinding(label, detail = '') {
   return /\b(?:Ctrl|Cmd|Shift|Esc|Alt)[^,;]*/.exec(detail)?.[0] || '';
 }
 
-// DOIT.22: a short localized label for an editor/preview view mode, shown as a chip on a deduped row.
+// a short localized label for an editor/preview view mode, shown as a chip on a deduped row.
 function commandPaletteViewModeLabel(mode) {
   if (mode === 'preview') return t('editor.mode.preview');
   if (mode === 'split') return t('editor.mode.split');
@@ -4709,12 +4740,12 @@ function commandPaletteItems() {
   const parts = fileQuickOpenQueryParts();
   if (parts.commandMode) return commandPaletteCommandItems();                          // `>` = actions only
   if (parts.symbolMode || fileQuickOpenPathQuery().active) return fileQuickOpenItems(); // `@` / path = files only
-  // Lean on open: an empty box shows only the priority's home category (no command dump — DOIT.6 #7).
+  // Lean on open: an empty box shows only the priority's home category (no command dump — #7).
   if (!commandPaletteSearchQuery()) {
     return commandPaletteMode === 'files' ? fileQuickOpenItems() : commandPaletteCommandItems();
   }
   // On type: BOTH entry points search the full corpus; the priority sort floats the home category up.
-  // S2 (DOIT.51): a file that is already an open tab shows ONCE — as the deduped Tabs row (which carries
+  // S2: a file that is already an open tab shows ONCE — as the deduped Tabs row (which carries
   // both edit + preview chips). Drop its Recent/Files duplicate so it isn't listed twice. Only here, in
   // the merged view; the files-only and empty-box modes above have no Tabs rows, so Recent stays intact.
   const openTabPaths = new Set(commandPaletteAllTabItems().map(fileItemPath).filter(Boolean));
@@ -4856,7 +4887,7 @@ function ensureCommandPalette() {
     }
   });
   node.querySelector('.command-palette-results').addEventListener('click', event => {
-    // DOIT.22 follow-up: a click on a view chip jumps to THAT view (edit/preview/diff) and closes the
+    // follow-up: a click on a view chip jumps to THAT view (edit/preview/diff) and closes the
     // palette, instead of the row's default (focus the editor view).
     const chip = event.target.closest('[data-view-item]');
     if (chip && node.contains(chip)) {
@@ -5081,7 +5112,7 @@ function sendBrowserNotification(title, options = {}) {
   notification.onclick = () => {
     window.focus();
     if (options.session) selectSession(options.session, {userInitiated: true});
-    // DOIT.29: a watched-PR notification opens the PR (no session to focus); safe blank-target open.
+    // a watched-PR notification opens the PR (no session to focus); safe blank-target open.
     else if (options.url) {
       try { window.open(options.url, '_blank', 'noopener,noreferrer'); } catch (_) {}
     }
@@ -5223,7 +5254,7 @@ function showToast(title, lines, options = {}) {
     if (!first) break;
     removeAttentionAlert(Number(first.dataset.alertId || 0));
   }
-  // DOIT.6 #85: remove the toast when its countdown bar finishes — honor options.countdownMs (the
+  // remove the toast when its countdown bar finishes — honor options.countdownMs (the
   // reconnect toast animates over that, not the fixed toastDurationMs) so the bar and removal align.
   attentionAlertTimers.set(id, window.setTimeout(() => removeAttentionAlert(id), options.countdownMs || toastDurationMs));
   return node;
@@ -5405,7 +5436,7 @@ function dismissAttentionAlertsForSession(session) {
 function attentionAlreadyVisible(session) {
   if (document.visibilityState !== 'visible') return false;
   if (!activeSessions.includes(session)) return false;
-  const panel = document.getElementById(`panel-${session}`);
+  const panel = document.getElementById(panelDomId(session));
   if (!panel || !panel.isConnected) return false;
   return focusedPanelItem === session || focusedTerminal === session || activeSessions.length === 1;
 }
@@ -5510,7 +5541,7 @@ function maybeNotifyState(session, state, options = {}) {
   }
 }
 
-// DOIT.29: a stable snapshot of the watched-PR status dimensions we diff for notifications.
+// a stable snapshot of the watched-PR status dimensions we diff for notifications.
 function watchedPrStatusSnapshot(pr) {
   return {
     merged: pr?.merged === true || pullRequestStatusLabel(pr).toLowerCase() === 'merged',
@@ -5650,7 +5681,7 @@ function updateSessionList(nextSessions) {
 
 function applyLayoutSlots(nextSlots, options = {}) {
   const previousActive = activeSessions.slice();
-  // DOIT.9 S2: detect a same-shape change (reorder/activate/move/replace) so we can skip the full
+  // detect a same-shape change (reorder/activate/move/replace) so we can skip the full
   // topbar + grid teardown. Compute the shape signature before and after the slot reassignment.
   const prevShape = layoutShapeSignature(layoutSlots);
   layoutSlots = normalizeLayoutSlots(nextSlots);
@@ -5666,7 +5697,7 @@ function applyLayoutSlots(nextSlots, options = {}) {
     forceFull: options.forceFull === true,
   });
   for (const session of activeSessions.filter(isTmuxSession)) ensureTerminalRunning(session);
-  // DOIT.9 S1: do NOT re-poll the server on a pure client-side layout change. refreshTranscripts()
+  // do NOT re-poll the server on a pure client-side layout change. refreshTranscripts()
   // fires 3..(3+N) network round-trips and a second full render wave gated behind their latency —
   // the bulk of the "moving a tab takes several seconds" delay. Freshness is already covered by the
   // metadata interval (50_editor_settings_runtime.js), and the session-changing mutations
@@ -6138,7 +6169,7 @@ function tmuxSessionViewCommands(session) {
     }),
     menuCommand(t('menu.tmux.paneDetails'), () => {
       if (!active) return;
-      const panel = document.getElementById(`panel-${session}`);
+      const panel = document.getElementById(panelDomId(session));
       if (panel) setPanelDetailsCollapsed(panel, !panel.classList.contains('details-collapsed'));
     }, {
       disabled: !active,
@@ -6185,7 +6216,7 @@ function tabCommandsForItems(items, options) {
   return items.map(item => menuTabCommand(item, options));
 }
 
-// DOIT.33: a PR number in any of the forms a user types (#N, PR#N, PR N, N).
+// a PR number in any of the forms a user types (#N, PR#N, PR N, N).
 function prNumberSearchForms(number) {
   if (!number) return [];
   return [`#${number}`, `PR#${number}`, `PR ${number}`, String(number)];
@@ -6200,7 +6231,7 @@ function tabSearchFields(item) {
   const info = transcriptMeta.sessions?.[item] || {};
   const filePath = fileItemPath(item) || '';
   const pr = displayPullRequest(info);
-  // DOIT.33: also index the repo's OTHER-branch PRs/branches/Linear IDs (the same data YO!info shows),
+  // also index the repo's OTHER-branch PRs/branches/Linear IDs (the same data YO!info shows),
   // so a session is findable by ANY PR (e.g. #10289 on a non-current branch), branch name, or Linear ID
   // — not just its current-branch PR. Already in the metadata payload, so no extra fetch.
   const otherBranches = info.project?.git?.other_branches?.branches || [];
@@ -6514,7 +6545,7 @@ function createAppMenuBar() {
   return bar;
 }
 
-// DOIT.21: the editor back/forward history control lives in the GLOBAL topbar (left of the search
+// the editor back/forward history control lives in the GLOBAL topbar (left of the search
 // box), not per editor pane — it's one file-history control for the whole window, like a browser's.
 // Buttons are always visible; updateEditorNavButtons() toggles their disabled state from editorNav.
 function createTopbarNav() {
@@ -6571,7 +6602,7 @@ function createTopbarSearch() {
   return button;
 }
 
-// DOIT.8 Phase 1: a top-right language switcher (entry point #2). It writes the SAME general.language
+// Phase 1: a top-right language switcher (entry point #2). It writes the SAME general.language
 // setting as the Preferences picker and applies the locale optimistically (no settings-poll round-trip).
 // 'system' resolves against navigator.language; the <select> shows the raw pref so 'system' reads as Auto.
 function createTopbarLanguageSwitcher() {
@@ -7029,7 +7060,7 @@ async function saveFileExplorerRootMode(mode) {
 
 // Short-TTL cache of directory listings. A live Differ/Finder of a busy session re-renders many times a
 // second and each render walks every expanded dir, which without this fans out into a /api/fs/list storm
-// (one request per dir per render — the cause of the 7778 fs/list loop). Repeated fetches of the same dir
+// (one request per dir per render — the cause of the 8001 fs/list loop). Repeated fetches of the same dir
 // within the TTL reuse the listing; the change-detection sweep and explicit reloads pass {fresh:true}.
 const fileExplorerDirListingCache = new Map();
 const fileExplorerDirListingInflight = new Map();
@@ -7143,11 +7174,7 @@ async function fetchDirectory(path, options = {}) {
   }
   if (fileExplorerPushRefreshDepth > 0) return null;
   if (suppressBackgroundFilesystemFetch(options)) return null;
-  if (canReuse) {
-    const inflight = fileExplorerDirListingInflight.get(root);
-    if (inflight) return inflight;
-  }
-  const request = (async () => {
+  return dedupeInflight(fileExplorerDirListingInflight, root, canReuse, () => (async () => {
     try {
       hydrateFileExplorerRepoInfoCache();
       const payload = await fetchFilesystemBatchItem('list', root, {dedupe: canReuse});
@@ -7168,16 +7195,7 @@ async function fetchDirectory(path, options = {}) {
       console.warn(status ? 'fs list failed' : 'fs list error', root, status || err, fileExplorerPathError);
       return null;
     }
-  })();
-  if (!canReuse) return request;
-  fileExplorerDirListingInflight.set(root, request);
-  try {
-    return await request;
-  } finally {
-    if (fileExplorerDirListingInflight.get(root) === request) {
-      fileExplorerDirListingInflight.delete(root);
-    }
-  }
+  })());
 }
 
 function invalidateFileExplorerFsCaches() {
@@ -7913,9 +7931,7 @@ function fileExplorerSessionHighlightClassForPath(path, kind = 'dir', options = 
 function applyFileExplorerSessionHighlightRow(row, sets = fileExplorerSessionHighlightSets()) {
   if (!row) return;
   const highlightClass = fileExplorerSessionHighlightClassForPath(row.dataset?.path || '', row.dataset?.kind || '', {sessionHighlightSets: sets});
-  row.classList.toggle('file-tree-row--sync-expanded', highlightClass === 'file-tree-row--sync-expanded');
-  row.classList.toggle('file-tree-row--session-repo', highlightClass === 'file-tree-row--session-repo');
-  row.classList.toggle('file-tree-row--session-touched', highlightClass === 'file-tree-row--session-touched');
+  applySessionHighlightRowClass(row, highlightClass);
 }
 
 function updateFileExplorerSessionHighlightRows(preferredItem = null) {
@@ -8581,7 +8597,7 @@ function fileTreeRepoBranchIsNonMain(path) {
 }
 
 function fileTreeDisplayParts(path, entry) {
-  // DOIT.31: a symlink shows where it points inline — "name → target" (the raw link text, rel or abs).
+  // a symlink shows where it points inline — "name → target" (the raw link text, rel or abs).
   const linkTarget = entry.is_symlink === true && entry.symlink_target ? String(entry.symlink_target) : '';
   const linkSuffixText = linkTarget ? ` → ${linkTarget}` : '';
   const linkSuffixHtml = linkTarget ? ` <span class="file-tree-symlink-target">→ ${esc(linkTarget)}</span>` : '';
@@ -8625,6 +8641,27 @@ function sortedFileTreeEntries(entries, sortMode = fileExplorerTreeSortMode, opt
     }
     return String(left.name || '').localeCompare(String(right.name || ''), undefined, {numeric: true, sensitivity: 'base'}) * direction;
   });
+}
+
+// one source for the git-status row classes (the toggle loop hardcoded this 5-element list in
+// two places — updateFileTreeRow + updateFileTreeGitStatusRows — so a status that maps elsewhere or a row
+// that changes status could leave a stale class behind on one path but not the other). applyGitStatusRowClass
+// toggles exactly this set so the stale class is always cleared.
+const GIT_STATUS_ROW_CLASSES = Object.freeze(['git-modified', 'git-untracked', 'git-deleted', 'git-staged', 'git-transcript']);
+// The session-highlight row classes (sync-expanded / session-repo / session-touched), likewise toggled in
+// two places (applyFileExplorerSessionHighlightRow + updateFileTreeRow).
+const SESSION_HIGHLIGHT_ROW_CLASSES = Object.freeze(['file-tree-row--sync-expanded', 'file-tree-row--session-repo', 'file-tree-row--session-touched']);
+
+function applyGitStatusRowClass(row, gitClass) {
+  for (const className of GIT_STATUS_ROW_CLASSES) {
+    row.classList.toggle(className, className === gitClass);
+  }
+}
+
+function applySessionHighlightRowClass(row, highlightClass) {
+  for (const className of SESSION_HIGHLIGHT_ROW_CLASSES) {
+    row.classList.toggle(className, className === highlightClass);
+  }
 }
 
 function gitStatusRowClass(status) {
@@ -8835,14 +8872,12 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
     differMode,
     sessionHighlightSets: options.sessionHighlightSets,
   });
-  row.classList.toggle('file-tree-row--sync-expanded', sessionHighlightClass === 'file-tree-row--sync-expanded');
-  row.classList.toggle('file-tree-row--session-repo', sessionHighlightClass === 'file-tree-row--session-repo');
-  row.classList.toggle('file-tree-row--session-touched', sessionHighlightClass === 'file-tree-row--session-touched');
+  applySessionHighlightRowClass(row, sessionHighlightClass);
   const changedAncestor = !differMode && entry.kind === 'dir' && options.changedAncestorStats instanceof Map
     ? (options.changedAncestorStats.get(fullPath) || null)
     : null;
   row.classList.toggle('file-tree-row--changed-ancestor', Boolean(changedAncestor?.count));
-  // DOIT.31: flag symlinks so the icon gets an arrow-badge overlay (target-type icon is kept); a broken
+  // flag symlinks so the icon gets an arrow-badge overlay (target-type icon is kept); a broken
   // link gets a red badge + struck-through name. The backend sets is_symlink + kind=symlink-broken.
   row.classList.toggle('is-symlink', entry.is_symlink === true);
   row.classList.toggle('symlink-broken', entry.kind === 'symlink-broken');
@@ -8854,9 +8889,7 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
     : (differMode ? '' : fileExplorerIndexBadgeText(fullPath));
   const gitStatusTitle = entry.kind === 'dir' && !differMode ? fileExplorerIndexBadgeTitle(fullPath) : gitStatusBadgeTitle(gitStatus);
   const gitClass = fileTreeGitStatusClass(gitStatus);
-  for (const className of ['git-modified', 'git-untracked', 'git-deleted', 'git-staged', 'git-transcript']) {
-    row.classList.toggle(className, className === gitClass);
-  }
+  applyGitStatusRowClass(row, gitClass);
   if (!differMode && entry.kind === 'dir' && entry.is_repo === true) {
     row.removeAttribute('title');
     row.onmouseenter = event => { fileTreeRepoPopoverCursor = {x: event.clientX, y: event.clientY}; scheduleRepoRowHoverPopover(row, fullPath); };
@@ -9158,9 +9191,7 @@ function updateFileTreeGitStatusRows() {
   document.querySelectorAll('.file-tree-row[data-path]').forEach(row => {
     const gitStatus = row.dataset.kind === 'file' ? fileTreeGitStatus(row.dataset.path) : '';
     const gitClass = fileTreeGitStatusClass(gitStatus);
-    for (const className of ['git-modified', 'git-untracked', 'git-deleted', 'git-staged', 'git-transcript']) {
-      row.classList.toggle(className, className === gitClass);
-    }
+    applyGitStatusRowClass(row, gitClass);
     const status = row.querySelector(':scope > .file-tree-git-status');
     if (status) {
       setClassNameIfChanged(status, ['file-tree-git-status', fileTreeGitStatusBadgeClass(gitStatus)].filter(Boolean).join(' '));
@@ -9434,7 +9465,7 @@ function setFileExplorerDirectoryIndexed(path, indexed) {
 
 function persistIndexedDirsSetting(op = {}) {
   // C11: MERGE the change into the current shared file_explorer.indexed_dirs rather than overwriting it
-  // with this page's whole set. Two browser origins (:7777 vs :7778) do NOT share localStorage, so a
+  // with this page's whole set. Two browser origins (:7777 vs :8001) do NOT share localStorage, so a
   // whole-list save from one would drop the other's dirs and make rows flip indexed/un-indexed on the
   // next settings poll. An explicit {add}/{remove} applies just that one op to the shared list; a bare
   // save (initial localStorage->setting migration) only UNIONS this page's dirs in, never removing.
@@ -9534,6 +9565,11 @@ function fileExplorerIndexedSearchRoots(defaultRoot = fileQuickOpenRootForSearch
   }
   return roots;
 }
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Continuation of the Finder/file-explorer module (split from 40_file_explorer_files.js to keep each
+// partial under a readable size): per-row click/drag, the file context menu, and file CRUD actions.
+// Concatenated immediately after 40 by tools/static_build.py, so it shares the same bundle scope.
 
 async function onFileTreeRowClick(row, fullPath, entry, event) {
   closeFileImagePreview();
@@ -9574,24 +9610,11 @@ async function fetchFilePathInfo(path, options = {}) {
     if (cached && Date.now() - cached.at < pathInfoTtlMs) return cached.payload;
   }
   if (suppressBackgroundFilesystemFetch(options)) return null;
-  if (canReuse) {
-    const inflight = fileExplorerPathInfoInflight.get(normalized);
-    if (inflight) return inflight;
-  }
-  const request = (async () => {
+  return dedupeInflight(fileExplorerPathInfoInflight, normalized, canReuse, () => (async () => {
     const payload = await fetchFilesystemBatchItem('info', normalized, {dedupe: canReuse});
     setLimitedMapEntry(fileExplorerPathInfoCache, normalized, {payload, at: Date.now()}, fileExplorerMemoryCacheLimit);
     return payload;
-  })();
-  if (!canReuse) return request;
-  fileExplorerPathInfoInflight.set(normalized, request);
-  try {
-    return await request;
-  } finally {
-    if (fileExplorerPathInfoInflight.get(normalized) === request) {
-      fileExplorerPathInfoInflight.delete(normalized);
-    }
-  }
+  })());
 }
 
 async function showFileTreeContextMenu(row, fullPath, entry, x, y) {
@@ -9626,7 +9649,7 @@ function fileContextMenuState(entry, selectedPaths, relativePaths) {
   const multiple = selectedPaths.length > 1;
   return {
     copyRelativeDisabled: relativePaths.length !== selectedPaths.length,
-    // DOIT.34 #2: readonly is terminal-only — the server forbids every /api/fs/* read (raw/list/...),
+    // readonly is terminal-only — the server forbids every /api/fs/* read (raw/list/...),
     // so the file-read affordances (open image in a tab via /api/fs/raw, Download via /api/fs/raw) are
     // disabled in readonly to match the server, instead of offering a command that 403s.
     openInNewTabDisabled: multiple || !entryIsImageFile(entry) || readOnlyMode,
@@ -10191,7 +10214,7 @@ function dirnameOf(path) {
   return path.slice(0, idx);
 }
 
-// DOIT.6 #133: resolve a relative href against a base dir, collapsing '.'/'..' segments. An absolute
+// resolve a relative href against a base dir, collapsing '.'/'..' segments. An absolute
 // `rel` (leading '/') ignores the base. Used to open relative markdown-preview links in the editor.
 function joinAndNormalize(base, rel) {
   const relStr = String(rel || '');
@@ -10257,7 +10280,7 @@ function fileEntryChanged(state, entry) {
   const stateMtime = Number(state.mtime || 0);
   const entryMtime = fileEntryMtime(entry);
   if (!fileMtimesMatch(stateMtime, entryMtime)) return true;
-  // DOIT.6 #88: equal mtimes but an UNKNOWN size on either side — do NOT assert "unchanged" (an
+  // equal mtimes but an UNKNOWN size on either side — do NOT assert "unchanged" (an
   // equal-mtime content change with no size would be missed); treat it as changed so the caller re-stats.
   if (state.size == null || entry.size == null) return true;
   return Number(state.size) !== Number(entry.size);
@@ -10278,7 +10301,7 @@ function removeFilePanelOwner(path, item) {
   if (isImageViewerItem(item) && sharedImageViewerPath === path) sharedImageViewerPath = null;
   else removeFileEditorTabItem(path, item);
   fileEditorViewModesForPath(path).delete(item);
-  // DOIT.6 #73: also drop the per-item CodeMirror scroll/selection state and the LRU timestamp on close
+  // also drop the per-item CodeMirror scroll/selection state and the LRU timestamp on close
   // so these item-keyed maps don't grow unbounded as editor tabs open and close.
   fileEditorViewState.delete(item);
   tabLastActivatedAt.delete(item);
@@ -10738,7 +10761,7 @@ async function confirmDirtyFileClose(path, panel = null) {
   if (!state.dirty) return true;
   if (fileEditorAutosaveEnabled) {
     if (await saveFileEditor(path, panel, {autosave: true, closing: true})) return true;
-    // DOIT.6 #81: autosave-on-close failed (transient error / on-disk conflict). Don't silently abort
+    // autosave-on-close failed (transient error / on-disk conflict). Don't silently abort
     // the close with only a status line — fall through to the explicit save/discard/cancel dialog so
     // the user can retry, discard, or cancel.
   }
@@ -10915,7 +10938,7 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
   const alreadyOpen = Boolean(openFiles.get(fullPath)?.kind);
   if (options.viewMode) setFileEditorViewMode(fullPath, options.viewMode, item);
   else setFileEditorViewMode(fullPath, 'edit', item);
-  recordEditorNav(item);   // DOIT.21: push this tab to the back/forward history (no-op while navigating)
+  recordEditorNav(item);   // push this tab to the back/forward history (no-op while navigating)
   if (alreadyOpen) {
     await refreshOpenFileGitMetadata(fullPath);
     await showFileEditorPaneForPath(fullPath, openOptions);
@@ -11647,26 +11670,21 @@ function codeMirrorWrapMarkerExtension(api) {
   }, {dark: scheme.dark});
 }
 
-// DOIT.26: inline git blame. Lazily fetch the /api/blame payload into the path's fileState record.
-// DOIT.34 #3: dedup concurrent fetches (multiple open panels for one path share a single request).
+// inline git blame. Lazily fetch the /api/blame payload into the path's fileState record.
+// dedup concurrent fetches (multiple open panels for one path share a single request).
 async function fetchEditorBlame(path) {
-  if (editorBlameFetches.has(path)) return editorBlameFetches.get(path);
-  const promise = (async () => {
+  return dedupeInflight(editorBlameFetches, path, true, () => (async () => {
     try {
       const data = await apiFetchJson(`/api/blame?path=${encodeURIComponent(path)}`);
       setEditorBlameForPath(path, data);
       return data;
     } catch (_error) {
       return null;
-    } finally {
-      editorBlameFetches.delete(path);
     }
-  })();
-  editorBlameFetches.set(path, promise);
-  return promise;
+  })());
 }
 
-// DOIT.34 #3: when a text editor opens/renders with blame already ON but its blame isn't cached yet
+// when a text editor opens/renders with blame already ON but its blame isn't cached yet
 // (the common case: enable blame, THEN open a new file), fetch it and nudge the open editors so the
 // blame ViewPlugin recomputes its decoration against the now-populated cache — no manual toggle needed.
 async function ensureEditorBlameForPath(path) {
@@ -11706,7 +11724,7 @@ function codeMirrorBlameExtension(api, path) {
   const build = view => {
     const blame = editorBlameForPath(path);
     if (!blame || !blame.lines) return api.Decoration.none;
-    // DOIT.26: annotate EVERY visible line when fileEditorBlameAllLines is on, else just the cursor line
+    // annotate EVERY visible line when fileEditorBlameAllLines is on, else just the cursor line
     // (the Popular IDE default). Viewport-scoped so a huge file only decorates what's on screen.
     if (fileEditorBlameAllLines) {
       const ranges = [];
@@ -11926,7 +11944,7 @@ function codeMirrorMarkdownFallbackSyntaxExtension(api, path) {
   });
 }
 
-// DOIT.6 #150: parseUnifiedDiffLineClasses + codeMirrorDiffLineExtension were removed. The edit view no
+// parseUnifiedDiffLineClasses + codeMirrorDiffLineExtension were removed. The edit view no
 // longer paints inline diff decorations (cm-yolomux-diff-add / deletion markers); changes are shown
 // ONLY in the explicit diff VIEW (the MergeView built by ensureCodeMirrorDiffPanel, with its own
 // .cm-changedLine/.cm-insertedChunk styling). The per-file cached diff-line class map is gone too.
@@ -12270,7 +12288,7 @@ function renameOpenFilePath(oldPath, newPath) {
       viewModes.set(newKey, viewModes.get(oldKey));
       viewModes.delete(oldKey);
     }
-    // DOIT.6 #73: migrate the item-keyed scroll/selection state and the LRU timestamp on rename too,
+    // migrate the item-keyed scroll/selection state and the LRU timestamp on rename too,
     // so they don't leak under the old item id (and the LRU ordering survives the rename).
     if (fileEditorViewState.has(oldKey)) {
       fileEditorViewState.set(newKey, fileEditorViewState.get(oldKey));
@@ -12687,7 +12705,7 @@ function applyEditorWrapPreference() {
       if (typeof reconfigureCodeMirrorPanelEditorOptions === 'function' && reconfigureCodeMirrorPanelEditorOptions(panel)) {
         return;
       }
-      // Re-render each panel with its OWN layout item (DOIT.16 C1): passing the editor item flipped
+      // Re-render each panel with its OWN layout item: passing the editor item flipped
       // a preview/diff pane into an editor on any appearance change (e.g. font-size). This is a fallback
       // for raw/preview panels or browsers without CodeMirror compartments.
       renderFileEditorPanel(panel, panel.dataset.layoutItem || fileEditorItemFor(path));
@@ -12701,7 +12719,7 @@ function setEditorWrapEnabled(enabled) {
   applyEditorWrapPreference();
 }
 
-// DOIT.26: toggle inline git blame. Fetch the blame payload for each open text file first (so the
+// toggle inline git blame. Fetch the blame payload for each open text file first (so the
 // re-rendered editor's blame ViewPlugin has data), then re-render with each panel's OWN item.
 async function applyEditorBlamePreference() {
   for (const panel of document.querySelectorAll('.file-editor-panel')) {
@@ -12731,7 +12749,7 @@ function toggleEditorWrap() {
   setEditorWrapEnabled(enabled);
 }
 
-// B4 (DOIT.12): toggle showing ALL diff context vs collapsing unchanged regions. Persisted; re-renders
+// B4: toggle showing ALL diff context vs collapsing unchanged regions. Persisted; re-renders
 // every open editor in diff mode (the signature includes `expand`, so the diff view rebuilds).
 function setDiffExpandUnchanged(enabled) {
   diffExpandUnchanged = enabled === true;
@@ -12906,7 +12924,7 @@ function applyGlobalThemeMode(options = {}) {
   if (document.documentElement?.style) document.documentElement.style.colorScheme = resolved;
   if (options.updateEditor !== false) applyEditorThemeMode({refreshEditors: options.refreshEditors !== false});
   if (options.updateTerminals) applyTerminalRuntimeSettings({fit: false});
-  // DOIT.41: the active-color presets are theme-specific, so re-apply on every theme switch.
+  // the active-color presets are theme-specific, so re-apply on every theme switch.
   applyActiveColor(initialSetting('appearance.active_color', 'green'));
 }
 
@@ -12936,7 +12954,7 @@ function terminalThemeForSession(session, baseTheme) {
 }
 
 function applyTerminalRuntimeSettings(options = {}) {
-  // DOIT.6 #32: one theme source for every terminal AND its container, so all panes share the same
+  // one theme source for every terminal AND its container, so all panes share the same
   // white in light mode (no pane-level tint showing a different white); + minimumContrastRatio so
   // faint 24-bit agent output stays legible on white.
   const theme = terminalThemeForGlobalTheme();
@@ -13050,16 +13068,16 @@ function applySettingsPayload(payload, options = {}) {
     if (typeof relocalizeFileExplorerPanels === 'function') relocalizeFileExplorerPanels();
   }
   if (previousEditorSchemeId !== activeEditorScheme().id || previousCursorColor !== fileEditorCursorColor) {
-    // DOIT.6: re-theme LIVE editors via the compartment swap (preserves scroll/selection). A plain
+    // re-theme LIVE editors via the compartment swap (preserves scroll/selection). A plain
     // renderFileEditorPanel short-circuits because codeMirrorConfigSignature omits the scheme, so the
     // CM view would keep its old theme; refreshOpenEditorThemePanels reconfigures the theme directly.
     refreshOpenEditorThemePanels();
   }
-  // DOIT.26: the blame ViewPlugin decorates per fileEditorBlameAllLines at build time + the editor
+  // the blame ViewPlugin decorates per fileEditorBlameAllLines at build time + the editor
   // config signature carries it, so re-render open editors when the toggle changes (only matters while
   // blame is on).
   if (previousBlameAllLines !== fileEditorBlameAllLines && fileEditorBlameEnabled) applyEditorBlamePreference();
-  // i18n (DOIT.8): when general.language changes, load the new catalog and re-render localized surfaces.
+  // i18n: when general.language changes, load the new catalog and re-render localized surfaces.
   const nextLocale = resolveLocalePref(initialSetting('general.language', 'system'));
   if (nextLocale !== previousLocale) applyLocale(nextLocale);
   if (!options.initial) installRuntimeIntervals();
@@ -13790,7 +13808,7 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const subject = currentBranchSubject(git);
   if (subject && !pr?.number) rows.push(popoverRow(t('popover.desc'), `<div class="popover-desc">${esc(subject)}</div>`));
   if (git?.root && git.root !== displayPath) rows.push(popoverRow(t('popover.repo'), git.root));
-  // S7 (DOIT.51): name a linked worktree vs its parent repo so the focused path isn't mistaken for the main checkout.
+  // S7: name a linked worktree vs its parent repo so the focused path isn't mistaken for the main checkout.
   if (git?.worktree) rows.push(popoverRow(t('popover.worktree'), `${esc(git.worktree.name || git.worktree.path)} — worktree of ${esc(git.worktree.parent_root)}`));
   if (git?.head) rows.push(popoverRow('HEAD', gitHeadValueHtml(git)));
   if (gitStatusHasFacts(git)) rows.push(popoverRow(t('popover.git'), gitStatusText(git)));
@@ -14231,7 +14249,7 @@ function fileDragPreviewMedia(path, entry) {
   return `<span class="file-drag-thumb file-drag-icon" aria-hidden="true">${icon}</span>`;
 }
 
-// S14 (DOIT.51): OPT-IN tab-drag timing to diagnose the ~500ms first-drag delay without guessing. Off by
+// S14: OPT-IN tab-drag timing to diagnose the ~500ms first-drag delay without guessing. Off by
 // default (no permanent user-visible perf log). Enable by setting storage key 'yolomux.debugDragTiming' to
 // '1' (via storageSet in the console), drag a tab, then read the per-bucket console.table at drop. Marks
 // the buckets the DOIT calls out: pointerdown -> dragstart/startSessionDrag (begin/end) -> first dragover
@@ -14266,7 +14284,7 @@ function dragTimingReport() {
   dragTimingSeen.clear();
 }
 
-// S14 (DOIT.51): render the last drag's timing into a fixed, click-to-select-all box so it can be
+// S14: render the last drag's timing into a fixed, click-to-select-all box so it can be
 // copy-pasted (or screenshotted) back without opening DevTools. Created lazily; only the flag-gated
 // dragTimingReport calls it, so it never appears in normal use.
 function showDragTimingOverlay(rows) {
@@ -14345,10 +14363,10 @@ function endSessionDrag(event) {
   stopCustomDragPreview();
   sessionButtons.classList.remove(CLS.dragOver);
   clearDropPreview();
-  // DOIT.6 #30: flush any tab/preferences re-renders that were deferred during the drag.
+  // flush any tab/preferences re-renders that were deferred during the drag.
   if (pendingTabStripRender) { pendingTabStripRender = false; renderPaneTabStrips(); }
   if (pendingPreferencesRender) { pendingPreferencesRender = false; renderPreferencesPanels(); }
-  // DOIT.52: flush through the shared layout render scheduler so same-shape drops keep the cheap path.
+  // flush through the shared layout render scheduler so same-shape drops keep the cheap path.
   flushPendingLayoutRender();
   dragTimingReport();
 }
@@ -14697,7 +14715,7 @@ async function placeTmuxSession(session) {
   await moveSessionToSlot(session, targetSlot, null, paneTabs(targetSlot).length);
 }
 
-// DOIT.6: File -> Finder toggles. Hide the Finder when it is already in the layout (same path as the
+// File -> Finder toggles. Hide the Finder when it is already in the layout (same path as the
 // Finder panel's close button), otherwise open/focus it. The menu's `checked` state tracks this.
 function toggleFinderPane() {
   if (itemInLayout(fileExplorerItemId)) {
@@ -14981,7 +14999,7 @@ function activatePaneTab(side, session, options = {}) {
     activeFile = fileItemPath(session);
     updateFileExplorerCurrentFileHighlight();
   }
-  // DOIT.21: a user-initiated tab switch IS navigation. setFocusedPanelItem records the previous
+  // a user-initiated tab switch IS navigation. setFocusedPanelItem records the previous
   // focused item plus the newly activated tab so Back returns to the pane the user just left.
   setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
   if (activeItemForSide(side) === session) {
@@ -15211,7 +15229,7 @@ function pullRequestCiIndicatorHtml(session, pr) {
 function pullRequestNumberIndicatorHtml(session, pr) {
   if (!pr?.number) return '';
   // No native title — the rich custom session popover already shows PR #, CI, and review state
-  // (DOIT.6: avoid a duplicate browser tooltip alongside the popover).
+  // (avoid a duplicate browser tooltip alongside the popover).
   const classes = pullRequestIsMerged(pr)
     ? metadataBadgeClasses(session, 'status', `ci-indicator tab-symbol pr-number-chip ${pullRequestStatusClass(pr)}`)
     : 'ci-indicator tab-symbol pr-number-chip';
@@ -15245,11 +15263,11 @@ function pullRequestApprovalIndicatorHtml(session, pr) {
   const cls = pullRequestApprovalClass(decision);
   if (!cls) return '';
   const label = pullRequestApprovalLabel(decision);
-  // No native title — the session popover carries the review state (DOIT.6: no duplicate tooltip).
+  // No native title — the session popover carries the review state (no duplicate tooltip).
   return `<span class="${metadataBadgeClasses(session, 'review', `ci-indicator tab-symbol pr-review-chip ${cls}`)}">${esc(label)}</span>`;
 }
 
-// DOIT.6: review status + reviewer(s) for the session popover PR row ("Approved by alice" /
+// review status + reviewer(s) for the session popover PR row ("Approved by alice" /
 // "Changes requested by bob" / "Review required"). Reuses the meta-pr-status color classes.
 function pullRequestReviewInlineHtml(pr) {
   const decision = pullRequestReviewDecision(pr);
@@ -15380,12 +15398,10 @@ function showRepoChipMenu(session, x, y) {
   menu.setAttribute('role', 'menu');
   const ordered = [...repos].sort((a, b) => (b.primary === true) - (a.primary === true));
   menu.innerHTML = ordered.map(repoChipMenuRowHtml).join('');
-  menu.querySelectorAll('[data-repo-chip-open]').forEach(row => {
-    row.addEventListener('click', () => {
-      const root = row.dataset.repoChipOpen || '';
-      repoChipContextMenu.close();
-      if (root) openFileExplorerAt(root);
-    });
+  delegate(menu, 'click', '[data-repo-chip-open]', (event, row) => {
+    const root = row.dataset.repoChipOpen || '';
+    repoChipContextMenu.close();
+    if (root) openFileExplorerAt(root);
   });
   repoChipContextMenu.open(menu, x, y);
 }
@@ -15407,7 +15423,7 @@ function summaryContextHtml(session, info, agent) {
   if (git) {
     lines.push(summaryContextLine('branch', `${git.branch || 'unknown'}${git.upstream ? ` -> ${git.upstream}` : ''}`));
     if (git.root) lines.push(summaryContextLine('repo', git.root));
-    // S7 (DOIT.51): name a linked worktree vs its parent repo so the focused path isn't mistaken for the main checkout.
+    // S7: name a linked worktree vs its parent repo so the focused path isn't mistaken for the main checkout.
     if (git.worktree) lines.push(summaryContextLine('worktree', `${git.worktree.name || git.worktree.path} — worktree of ${git.worktree.parent_root}`));
     if (git.head) lines.push(summaryContextLine('head', git.head));
   } else {
@@ -15523,7 +15539,7 @@ function replaceSessionMetadata(oldSession, newSession) {
     uploadResultsBySession,
     uploadCleanupTimers,
     pasteCounters,
-    // DOIT.6 #73: carry the per-pane LRU timestamp across a session rename too, or the renamed tab's
+    // carry the per-pane LRU timestamp across a session rename too, or the renamed tab's
     // eviction ordering glitches (it reads as never-activated).
     tabLastActivatedAt,
   ]) {
@@ -15695,7 +15711,7 @@ async function killTmuxSession(session) {
 }
 
 function focusPanel(session, options = {}) {
-  const panel = document.getElementById(`panel-${session}`);
+  const panel = document.getElementById(panelDomId(session));
   if (!panel) return;
   if (options.userInitiated === true || options.scrollIntoView === true) {
     panel.scrollIntoView({block: 'nearest', inline: 'nearest'});
@@ -15930,7 +15946,7 @@ function pruneDeadSession(session) {
 // prune it from the UI immediately instead of reconnecting and waiting for the next poll to notice.
 async function confirmSessionGoneOrReconnect(session, item) {
   if (item.manualClose || terminals.get(session) !== item) return;
-  // DOIT.6 #86: one in-flight confirmation per terminal. A flapping WS could otherwise run several
+  // one in-flight confirmation per terminal. A flapping WS could otherwise run several
   // concurrent confirmations, each scheduling a reconnect and double-incrementing reconnectAttempt
   // (distorting the backoff).
   if (item.confirmingGone) return;
@@ -16459,6 +16475,11 @@ const dockviewContentComponentName = 'yolomux-panel';
 const dockviewTabComponentName = 'yolomux-tab';
 const dockviewPanelRenderer = 'onlyWhenVisible';
 const dockviewRootId = 'dockviewRoot';
+// named geometry/timing constants for the Dockview layer (were repeated unnamed literals).
+const DRAG_HYSTERESIS_PX = 8;            // px a pointer must move before a header drag is treated as a drag
+const PANE_DRAG_SUPPRESS_MS = 500;       // window after a pane drag during which pointer events are ignored
+const SPLIT_PCT_EPSILON = 0.01;          // split-percent diffs below this are treated as equal (no re-layout)
+const SERIALIZED_WEIGHT_BASE = 1000;     // Dockview gridview node weight base for serialization
 const dockviewLayoutState = {
   api: null,
   host: null,
@@ -16744,7 +16765,7 @@ function dockviewTabForPoint(x, y) {
   return tab?.querySelector?.('.dockview-pane-tab') || node?.closest?.('.dockview-pane-tab') || null;
 }
 
-function dockviewSuppressPanePointerDrag(ms = 500) {
+function dockviewSuppressPanePointerDrag(ms = PANE_DRAG_SUPPRESS_MS) {
   dockviewLayoutState.panePointerDragSuppressedUntil = Math.max(
     Number(dockviewLayoutState.panePointerDragSuppressedUntil) || 0,
     Date.now() + ms,
@@ -16778,7 +16799,7 @@ function dockviewFinishTabPointerDrag(event) {
   if (!state?.item || !state.slot) return;
   const dx = Math.abs((Number(event.clientX) || 0) - state.x);
   const dy = Math.abs((Number(event.clientY) || 0) - state.y);
-  if (Math.max(dx, dy) < 8) return;
+  if (Math.max(dx, dy) < DRAG_HYSTERESIS_PX) return;
   const target = dockviewTabForPoint(Number(event.clientX) || 0, Number(event.clientY) || 0);
   const targetItem = target?.dataset?.paneTab || '';
   if (!targetItem || targetItem === state.item) return;
@@ -16842,7 +16863,7 @@ function dockviewTrackPanePointerDrag(event) {
   if (!state?.sourceSlot) return;
   const dx = Math.abs((Number(event.clientX) || 0) - state.x);
   const dy = Math.abs((Number(event.clientY) || 0) - state.y);
-  if (!state.active && Math.max(dx, dy) < 8) return;
+  if (!state.active && Math.max(dx, dy) < DRAG_HYSTERESIS_PX) return;
   state.active = true;
   if (!state.previewStarted) {
     startPaneDragPreview(event, state.sourceSlot);
@@ -17289,7 +17310,7 @@ function dockviewJsonFromLayoutSlots(slots = layoutSlots) {
   };
 }
 
-function dockviewSerializedNodeFromLayout(node, slots, orientation, weight = 1000) {
+function dockviewSerializedNodeFromLayout(node, slots, orientation, weight = SERIALIZED_WEIGHT_BASE) {
   if (!node || node.slot) {
     return {
       type: 'branch',
@@ -17300,7 +17321,7 @@ function dockviewSerializedNodeFromLayout(node, slots, orientation, weight = 100
   return dockviewSerializedNodeContentFromLayout(node, slots, orientation, weight);
 }
 
-function dockviewSerializedNodeContentFromLayout(node, slots, orientation, weight = 1000) {
+function dockviewSerializedNodeContentFromLayout(node, slots, orientation, weight = SERIALIZED_WEIGHT_BASE) {
   if (!node || node.slot) return dockviewSerializedLeaf(node?.slot || layoutSlotKeys(slots)[0] || 'left', slots, weight);
   const direction = dockviewSplitForOrientation(orientation);
   const parts = flattenLayoutNodeForDirection(node, slots, direction);
@@ -17331,7 +17352,7 @@ function flattenLayoutNodeForDirection(node, slots, direction, weight = 1) {
   ];
 }
 
-function dockviewSerializedLeaf(slot, slots, weight = 1000) {
+function dockviewSerializedLeaf(slot, slots, weight = SERIALIZED_WEIGHT_BASE) {
   const tabs = paneTabs(slot, slots);
   const groupId = slot || nextLayoutSlot(slots);
   dockviewLayoutState.groupSlots.set(groupId, groupId);
@@ -17421,7 +17442,7 @@ function preserveDockviewDockedFileExplorerSplit(next, previous = layoutSlots) {
   }
   const finderPct = previousDocked.finderIndex === 0 ? previousDocked.pct : 100 - previousDocked.pct;
   const preservedPct = nextDocked.finderIndex === 0 ? finderPct : 100 - finderPct;
-  if (Math.abs((Number(nextRoot.pct) || 0) - preservedPct) > 0.01) {
+  if (Math.abs((Number(nextRoot.pct) || 0) - preservedPct) > SPLIT_PCT_EPSILON) {
     nextRoot.pct = preservedPct;
     dockviewLayoutState.reloadAfterAdoption = true;
   }
@@ -17430,7 +17451,7 @@ function preserveDockviewDockedFileExplorerSplit(next, previous = layoutSlots) {
 function preserveDockviewContentSplitPercentagesAfterDockResize(nextRoot, previousRoot, nextDocked, previousDocked) {
   const previousFinderPct = previousDocked.finderIndex === 0 ? previousDocked.pct : 100 - previousDocked.pct;
   const nextFinderPct = nextDocked.finderIndex === 0 ? nextDocked.pct : 100 - nextDocked.pct;
-  if (Math.abs(nextFinderPct - previousFinderPct) <= 0.01) return;
+  if (Math.abs(nextFinderPct - previousFinderPct) <= SPLIT_PCT_EPSILON) return;
   const nextContent = nextRoot.children?.[nextDocked.contentIndex];
   const previousContent = previousRoot.children?.[previousDocked.contentIndex];
   if (copyLayoutSplitPercentagesByShape(nextContent, previousContent)) {
@@ -17442,7 +17463,7 @@ function copyLayoutSplitPercentagesByShape(target, source) {
   if (!target || !source || target.slot || source.slot || target.split !== source.split) return false;
   let changed = false;
   const sourcePct = splitPercent(source.pct);
-  if (Math.abs(splitPercent(target.pct) - sourcePct) > 0.01) {
+  if (Math.abs(splitPercent(target.pct) - sourcePct) > SPLIT_PCT_EPSILON) {
     target.pct = sourcePct;
     changed = true;
   }
@@ -17577,7 +17598,7 @@ function handleDockviewHeaderActionClick(event, fallbackItem = '') {
   if (button.dataset.detailToggle !== undefined) {
     event.preventDefault();
     event.stopPropagation();
-    const panel = document.getElementById(`panel-${item}`);
+    const panel = document.getElementById(panelDomId(item));
     if (panel) setPanelDetailsCollapsed(panel, !panel.classList.contains('details-collapsed'));
     return;
   }
@@ -17619,7 +17640,7 @@ function createDockviewHeaderActionsRenderer() {
     element.hidden = !html;
     element.innerHTML = html;
     updatePanelWindowStepButtons(activeItem, transcriptMeta.sessions?.[activeItem]);
-    const panel = document.getElementById(`panel-${activeItem}`);
+    const panel = document.getElementById(panelDomId(activeItem));
     if (panel) updatePaneExpandButton(panel, activeItem);
   };
   const dispose = () => {
@@ -17765,30 +17786,9 @@ function syncDockviewTabShell(tab, item, api = null) {
 }
 
 function dockviewPaneTabHtml(item) {
-  const type = tabTypeForItem(item);
-  const isFiles = type?.key === 'files';
-  const isEditor = isFileEditorItem(item);
-  const isVirtual = Boolean(type);
-  const info = transcriptMeta.sessions?.[item];
-  const auto = autoApproveStates.get(item)?.enabled === true && !isVirtual;
-  const state = isVirtual ? null : sessionState(item, info);
-  const agentKind = isVirtual ? '' : sessionAgentKind(item);
-  let html = type?.rowHtml
-    ? type.rowHtml(item, {})
-    : tmuxPaneTabHtml(item, info, state, auto);
-  html = `${pinnedTabIconHtml(item)}${html}`;
-  if (!isFiles) {
-    const closeTitle = isEditor ? `Close ${itemLabel(item)}` : `hide ${itemLabel(item)} from layout`;
-    const closeLabel = isEditor ? `Close ${itemLabel(item)}` : `Hide ${itemLabel(item)} from layout`;
-    const controlKind = isEditor ? 'close' : 'minimize';
-    html += `<button type="button" class="pane-tab-close ${platformWindowControlClass(controlKind)}" data-pane-tab-close title="${esc(closeTitle)}" aria-label="${esc(closeLabel)}"></button>`;
-  }
-  if (isEditor) {
-    html += filePopoverHtml(item);
-  } else if (!isVirtual) {
-    html += sessionPopoverHtml(item, info, agentKind, auto, state);
-  }
-  return html;
+  // Shares paneTabInnerHtml with the DOM-building createPaneTab so pin/close/popover markup parity is
+  // enforced in one place (the Dockview tab renderer just needs the string form).
+  return paneTabInnerHtml(item);
 }
 
 function dockviewTabAriaLabel(item) {
@@ -17848,7 +17848,7 @@ function hideDockviewInnerPaneTabs(panel) {
 }
 function renderPanels(previousActive = [], options = {}) {
   if (renderPanelsDockview(previousActive, options)) return;
-  // DOIT.6 #114: a full panel re-render pools every panel and clears the grid, which detaches
+  // a full panel re-render pools every panel and clears the grid, which detaches
   // the node being dragged and aborts the native HTML5 drag. Defer the re-render until the drag
   // ends. The shared layout scheduler stores a forced-full request so metadata-driven renders do
   // not get mistaken for a cheap same-shape layout update on drop.
@@ -17890,7 +17890,7 @@ function movePanelsToPool() {
   }
 }
 
-// DOIT.9 S2: the registered item for a mounted panel node (reverse lookup of panelNodes).
+// the registered item for a mounted panel node (reverse lookup of panelNodes).
 function panelItemForNode(node) {
   if (!node) return null;
   for (const [item, panel] of panelNodes.entries()) {
@@ -17899,7 +17899,7 @@ function panelItemForNode(node) {
   return null;
 }
 
-// DOIT.9 S2: move ONE displaced panel back to the pool (preserving editor state), like movePanelsToPool
+// move ONE displaced panel back to the pool (preserving editor state), like movePanelsToPool
 // does for all. An empty-pane placeholder (not in panelNodes) is just dropped.
 function poolDisplacedPanel(node) {
   const item = panelItemForNode(node);
@@ -17910,7 +17910,7 @@ function poolDisplacedPanel(node) {
   panelPool.appendChild(node);
 }
 
-// DOIT.9 S2: for a SAME-SHAPE layout change, swap only the slots whose ACTIVE item changed — no
+// for a SAME-SHAPE layout change, swap only the slots whose ACTIVE item changed — no
 // grid.innerHTML='' / topbar teardown, no detach/reattach of unrelated panes. A pure reorder touches
 // zero panels (active unchanged) and only reconciles the tab strip via updatePanelSlot.
 function syncActivePanelsInPlace() {
@@ -18204,7 +18204,7 @@ function renderPaneTabStrips() {
     dockviewSyncMountedPanels();
     return;
   }
-  // DOIT.6 #30: do not rebuild tab DOM while a tab is being dragged — replacing the dragged node
+  // do not rebuild tab DOM while a tab is being dragged — replacing the dragged node
   // aborts the native drag. Defer to the endSessionDrag flush.
   if (dragSession != null) { pendingTabStripRender = true; return; }
   for (const side of layoutSlotKeys()) {
@@ -18358,7 +18358,11 @@ function restorePaneTabPopover(strip, item) {
   tab.classList.add('popover-open');
 }
 
-function createPaneTab(side, item, displayContext = {}) {
+// the inner markup of a pane tab — pin icon + row (virtual rowHtml or tmux) + close button +
+// the file/session popover — built once here and shared by BOTH the DOM factory (createPaneTab) and the
+// Dockview string builder (dockviewPaneTabHtml in 75_dockview_layout.js), so pin/close/popover parity is
+// enforced in one place instead of by hand across two renderers.
+function paneTabInnerHtml(item, rowOptions = {}) {
   const type = tabTypeForItem(item);
   const isFiles = type?.key === 'files';
   const isEditor = isFileEditorItem(item);
@@ -18367,6 +18371,25 @@ function createPaneTab(side, item, displayContext = {}) {
   const auto = autoApproveStates.get(item)?.enabled === true && !isVirtual;
   const state = isVirtual ? null : sessionState(item, info);
   const agentKind = isVirtual ? '' : sessionAgentKind(item);
+  let html = type?.rowHtml ? type.rowHtml(item, rowOptions) : tmuxPaneTabHtml(item, info, state, auto);
+  html = `${pinnedTabIconHtml(item)}${html}`;
+  if (!isFiles) {
+    const closeTitle = isEditor ? `Close ${itemLabel(item)}` : `hide ${itemLabel(item)} from layout`;
+    const closeLabel = isEditor ? `Close ${itemLabel(item)}` : `Hide ${itemLabel(item)} from layout`;
+    const controlKind = isEditor ? 'close' : 'minimize';
+    html += `<button type="button" class="pane-tab-close ${platformWindowControlClass(controlKind)}" data-pane-tab-close title="${esc(closeTitle)}" aria-label="${esc(closeLabel)}"></button>`;
+  }
+  if (isEditor) html += filePopoverHtml(item);
+  else if (!isVirtual) html += sessionPopoverHtml(item, info, agentKind, auto, state);
+  return html;
+}
+
+function createPaneTab(side, item, displayContext = {}) {
+  const type = tabTypeForItem(item);
+  const isEditor = isFileEditorItem(item);
+  const isVirtual = Boolean(type);
+  const info = transcriptMeta.sessions?.[item];
+  const state = isVirtual ? null : sessionState(item, info);
   const active = item === activeItemForSide(side);
   const tab = document.createElement('div');
   tab.role = 'button';
@@ -18378,21 +18401,11 @@ function createPaneTab(side, item, displayContext = {}) {
   tab.draggable = true;
   tab.dataset.paneTab = item;
   const rowOptions = isEditor ? {parentLabel: displayContext.fileParentLabels?.get(fileItemPath(item)) || ''} : {};
-  if (type?.rowHtml) tab.innerHTML = type.rowHtml(item, rowOptions);
-  else tab.innerHTML = tmuxPaneTabHtml(item, info, state, auto);
-  tab.insertAdjacentHTML('afterbegin', pinnedTabIconHtml(item));
-  if (!isFiles) {
-    const closeTitle = isEditor ? `Close ${itemLabel(item)}` : `hide ${itemLabel(item)} from layout`;
-    const closeLabel = isEditor ? `Close ${itemLabel(item)}` : `Hide ${itemLabel(item)} from layout`;
-    const controlKind = isEditor ? 'close' : 'minimize';
-    tab.insertAdjacentHTML('beforeend', `<button type="button" class="pane-tab-close ${platformWindowControlClass(controlKind)}" data-pane-tab-close title="${esc(closeTitle)}" aria-label="${esc(closeLabel)}"></button>`);
-  }
+  tab.innerHTML = paneTabInnerHtml(item, rowOptions);
   if (isEditor) {
-    tab.insertAdjacentHTML('beforeend', filePopoverHtml(item));
     bindFilePopoverActions(tab);
     bindPaneTabPopover(tab, item);
   } else if (!isVirtual) {
-    tab.insertAdjacentHTML('beforeend', sessionPopoverHtml(item, info, agentKind, auto, state));
     bindPaneTabPopover(tab, item);
   }
   tab.setAttribute('aria-label', isEditor
@@ -18616,7 +18629,7 @@ function positionPaneTabPopover(tab, popover = null) {
 }
 
 function paneInfoTabHtml(item = infoItemId, options = {}) {
-  // DOIT.6: use .session-button-dir (like the Finder/Prefs tabs) so the label gets the themed
+  // use .session-button-dir (like the Finder/Prefs tabs) so the label gets the themed
   // active/inactive colors; the old .pane-tab-info-label set no color and went white-on-white in light.
   return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir pane-tab-info-label">${esc(itemLabel(item))}</span></span>`;
 }
@@ -19162,7 +19175,7 @@ function syncWindowStepButton(controls, terminalButton, session, dir, visible) {
 }
 
 function updatePanelWindowStepButtons(session, info) {
-  const controls = document.getElementById(`panel-${session}`)?.querySelector('.tabs');
+  const controls = document.getElementById(panelDomId(session))?.querySelector('.tabs');
   const terminalButton = controls?.querySelector('.terminal-tab');
   if (!controls || !terminalButton) return;
   const steps = windowStepVisibility(info?.panes);
@@ -19194,14 +19207,14 @@ function updatePanelControlLabels(session, info) {
   }
 }
 
-// DOIT.6 #40: ONE merged panel hosting both YO!info (repo metadata) and YO!agent (chat + activity
+// ONE merged panel hosting both YO!info (repo metadata) and YO!agent (chat + activity
 // context), switched by a segmented sub-tab row under the pane tabs. Both sub-views render into their
 // own containers (#info-content / #yoagent-content) and the active one is shown via CSS; the chosen
 // sub-tab is remembered across reloads (infoPanelSubTab).
 function createInfoPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel info-panel';
-  panel.id = `panel-${infoItemId}`;
+  panel.id = panelDomId(infoItemId);
   panel.dataset.infoSubtab = infoPanelSubTab;
   panel.innerHTML = `
       <div class="panel-head">
@@ -19290,7 +19303,7 @@ function createInfoPanel() {
 
 // The merged YO!info pane keeps its outer chrome and sub-tab row mounted between language changes so the
 // YO!agent chat draft and active sub-tab survive. Re-label those persistent controls in place.
-function relocalizeInfoPanelChrome(panel = document.getElementById(`panel-${infoItemId}`)) {
+function relocalizeInfoPanelChrome(panel = document.getElementById(panelDomId(infoItemId))) {
   if (!panel) return;
   const infoLabel = infoTabLabel();
   const agentLabel = yoagentTabLabel();
@@ -19339,7 +19352,7 @@ function relocalizeInfoPanelChrome(panel = document.getElementById(`panel-${info
 }
 
 // Reflect the active sub-tab onto the merged panel (button highlight + which sub-view is visible).
-function applyInfoSubTab(panel = document.getElementById(`panel-${infoItemId}`)) {
+function applyInfoSubTab(panel = document.getElementById(panelDomId(infoItemId))) {
   if (!panel) return;
   panel.dataset.infoSubtab = infoPanelSubTab;
   panel.querySelectorAll('[data-info-subtab]').forEach(button => {
@@ -19423,7 +19436,7 @@ function relativeActivityGeneratedText(payload = activitySummaryPayload) {
   const ts = Number(payload?.generated_ts || 0) || Date.parse(payload?.generated_at || '') / 1000;
   if (!Number.isFinite(ts) || ts <= 0) return {text: t('yoagent.notLoaded'), title: ''};
   const seconds = Math.max(0, Math.round(Date.now() / 1000 - ts));
-  // DOIT.8 Phase 3: render the relative time with Intl.RelativeTimeFormat(activeLocale) for native
+  // Phase 3: render the relative time with Intl.RelativeTimeFormat(activeLocale) for native
   // locale phrasing, wrapped by the localized "last updated {rel}" string.
   const text = seconds < 60
     ? t('yoagent.updated.justNow')
@@ -19669,7 +19682,7 @@ async function sendYoagentChatMessage(rawText) {
     const payload = await apiFetchJson('/api/yoagent/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      // DOIT.8 Phase 1: pass the active UI locale so the LLM backend replies in that language.
+      // Phase 1: pass the active UI locale so the LLM backend replies in that language.
       body: JSON.stringify({message: text, history: yoagentMessages.slice(-10), locale: i18nActiveLocaleId()}),
     });
     if (payload.fallback && payload.fallback_reason) {
@@ -20522,7 +20535,7 @@ function debugPanelHtml() {
 function createDebugPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel js-debug-panel';
-  panel.id = `panel-${debugPaneItemId}`;
+  panel.id = panelDomId(debugPaneItemId);
   panel.innerHTML = `
       <div class="panel-head preferences-panel-head">
         ${virtualPanelControlsHtml(debugPaneItemId)}
@@ -20611,7 +20624,7 @@ function bindDebugPanel(panel) {
 function createPreferencesPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel preferences-panel';
-  panel.id = `panel-${prefsItemId}`;
+  panel.id = panelDomId(prefsItemId);
   panel.innerHTML = `
       <div class="panel-head preferences-panel-head">
         ${virtualPanelControlsHtml(prefsItemId)}
@@ -20634,7 +20647,7 @@ function createPreferencesPanel() {
 }
 
 function focusPreferencesSearch(panel = null) {
-  // DOIT.6 #30: never steal focus into the search box while a tab is being dragged — focus() during a
+  // never steal focus into the search box while a tab is being dragged — focus() during a
   // drag (and the re-render it triggers) aborts the native drag.
   if (dragSession != null) return false;
   const root = panel && panel.isConnected !== false
@@ -20672,7 +20685,7 @@ function notePreferencesScrollActivity(now = Date.now()) {
 }
 
 function renderPreferencesPanels(options = {}) {
-  // DOIT.6 #30: defer Preferences re-render while a tab drag is in flight; rebuilding the dragged tab
+  // defer Preferences re-render while a tab drag is in flight; rebuilding the dragged tab
   // node aborts the native HTML5 drag.
   if (dragSession != null) { pendingPreferencesRender = true; return; }
   if (options.force !== true && preferencesScrollIsActive()) {
@@ -20687,7 +20700,7 @@ function renderPreferencesPanels(options = {}) {
     if (body) {
       const activeControl = activePreferenceControl(panel);
       const shouldKeepDom = activeControl && options.force !== true;
-      // DOIT.16 C3: the scroller is the inner .preferences-scroll, not the overlay-root body.
+      // the scroller is the inner .preferences-scroll, not the overlay-root body.
       const scroller = () => body.querySelector('.preferences-scroll') || body;
       const prevScroll = scroller();
       const scrollTop = prevScroll.scrollTop;
@@ -22478,6 +22491,26 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '', repo 
   renderOpenFilePath(path);
 }
 
+// the diff-ref Escape-revert and picker-open were written twice — once for the changes panel
+// (bindChangesPanel) and once for the file-editor toolbar (createFileEditorPanel). The revert carries the
+// C6 per-repo fix and had already diverged on which dataset key it reads; keeping the value computation in
+// one place stops the two copies restoring different refs. Each call site still owns its listener wiring
+// and its own repo/path SOURCE (changes reads the controls element's dataset; the editor reads the rendered
+// diff-ref panel's dataset) — only the shared body lives here.
+function revertDiffRefInputToRepo(input, repo, path) {
+  if (!input) return;
+  const escRefs = repoDiffRefs(repo);
+  input.value = input.matches('[data-diff-ref-from]')
+    ? diffRefInputDisplayValue(escRefs.from, diffRefFromSuggestions(repo, path))
+    : diffRefInputDisplayValue(escRefs.to, diffRefToSuggestions(escRefs.from, repo, path));
+  input.blur?.();
+}
+
+function openDiffRefPickerForInput(input, controls) {
+  refreshDiffRefToDatalist(controls);
+  showDiffRefPicker(input, {showAll: true});
+}
+
 function bindChangesPanel(panel) {
   if (!panel || panel.dataset.changesBound === 'true') return;
   panel.dataset.changesBound = 'true';
@@ -22512,14 +22545,12 @@ function bindChangesPanel(panel) {
   panel.addEventListener('focusin', event => {
     const diffRefInput = event.target.closest('[data-diff-ref-input]');
     if (!diffRefInput || !panel.contains(diffRefInput)) return;
-    refreshDiffRefToDatalist(diffRefInput.closest('[data-diff-ref-controls]'));
-    showDiffRefPicker(diffRefInput, {showAll: true});
+    openDiffRefPickerForInput(diffRefInput, diffRefInput.closest('[data-diff-ref-controls]'));
   });
   panel.addEventListener('pointerdown', event => {
     const diffRefInput = event.target.closest('[data-diff-ref-input]');
     if (!diffRefInput || !panel.contains(diffRefInput)) return;
-    refreshDiffRefToDatalist(diffRefInput.closest('[data-diff-ref-controls]'));
-    showDiffRefPicker(diffRefInput, {showAll: true});
+    openDiffRefPickerForInput(diffRefInput, diffRefInput.closest('[data-diff-ref-controls]'));
   });
   panel.addEventListener('keydown', event => {
     const diffRefInput = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
@@ -22535,13 +22566,7 @@ function bindChangesPanel(panel) {
       hideDiffRefPopover();
       // C6: revert to THIS repo's current ref, not the global default.
       const controls = diffRefInput.closest('[data-diff-ref-controls]');
-      const repo = controls?.dataset?.diffRefRepo || '';
-      const path = controls?.dataset?.diffRefPath || '';
-      const escRefs = repoDiffRefs(repo);
-      diffRefInput.value = diffRefInput.matches('[data-diff-ref-from]')
-        ? diffRefInputDisplayValue(escRefs.from, diffRefFromSuggestions(repo, path))
-        : diffRefInputDisplayValue(escRefs.to, diffRefToSuggestions(escRefs.from, repo, path));
-      diffRefInput.blur?.();
+      revertDiffRefInputToRepo(diffRefInput, controls?.dataset?.diffRefRepo || '', controls?.dataset?.diffRefPath || '');
     }
   });
   panel.addEventListener('click', async event => {
@@ -22940,7 +22965,7 @@ function setEditorPreviewFontSize(value) {
 function createFileExplorerPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel file-explorer-panel';
-  panel.id = `panel-${fileExplorerItemId}`;
+  panel.id = panelDomId(fileExplorerItemId);
   const initialPath = fileExplorerRoot || homePath || '/';
   const label = fileExplorerLabel();
   panel.innerHTML = `
@@ -23282,9 +23307,7 @@ function createFileEditorPanel(item) {
     if (event.target?.closest?.('button, a, input, textarea, select, [data-diff-ref-input]')) return;
     scheduleFileExplorerActiveFileReveal(path);
   });
-  panel.querySelectorAll('button').forEach(button => {
-    button.addEventListener('pointerdown', event => event.stopPropagation());
-  });
+  delegate(panel, 'pointerdown', 'button', event => event.stopPropagation());
   panel.querySelector('.file-editor-save-panel')?.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
@@ -23333,7 +23356,7 @@ function createFileEditorPanel(item) {
     event.preventDefault();
     event.stopPropagation();
     if (event.currentTarget?.disabled) return;
-    toggleFileEditorBlame();  // DOIT.26: inline git blame on/off (persisted, fetches + re-renders editors)
+    toggleFileEditorBlame();  // inline git blame on/off (persisted, fetches + re-renders editors)
   });
   panel.querySelector('.file-editor-diff-panel')?.addEventListener('click', event => {
     event.preventDefault();
@@ -23370,14 +23393,12 @@ function createFileEditorPanel(item) {
   diffRefPanel?.addEventListener('focusin', event => {
     const input = event.target.closest('[data-diff-ref-input]');
     if (!input) return;
-    refreshDiffRefToDatalist(diffRefPanel);
-    showDiffRefPicker(input, {showAll: true});
+    openDiffRefPickerForInput(input, diffRefPanel);
   });
   diffRefPanel?.addEventListener('pointerdown', event => {
     const input = event.target.closest('[data-diff-ref-input]');
     if (!input) return;
-    refreshDiffRefToDatalist(diffRefPanel);
-    showDiffRefPicker(input, {showAll: true});
+    openDiffRefPickerForInput(input, diffRefPanel);
   });
   diffRefPanel?.addEventListener('keydown', event => {
     const input = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
@@ -23393,13 +23414,7 @@ function createFileEditorPanel(item) {
       event.preventDefault();
       hideDiffRefPopover();
       // C6: revert to this file's repo refs, not the global default.
-      const repo = diffRefPanel?.dataset?.diffRefRepoRendered || '';
-      const path = diffRefPanel?.dataset?.diffRefPathRendered || '';
-      const escRefs = repoDiffRefs(repo);
-      input.value = input.matches('[data-diff-ref-from]')
-        ? diffRefInputDisplayValue(escRefs.from, diffRefFromSuggestions(repo, path))
-        : diffRefInputDisplayValue(escRefs.to, diffRefToSuggestions(escRefs.from, repo, path));
-      input.blur?.();
+      revertDiffRefInputToRepo(input, diffRefPanel?.dataset?.diffRefRepoRendered || '', diffRefPanel?.dataset?.diffRefPathRendered || '');
     }
   });
   diffRefPanel?.addEventListener('click', event => {
@@ -23620,6 +23635,11 @@ function restoreFileEditorPanelViewState(item, panel) {
   requestAnimationFrame(measuredRestore);
   requestAnimationFrame(() => requestAnimationFrame(measuredRestore));
 }
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Continuation of the editor module (split from 90_changes_editor.js to keep each partial under a
+// readable size): the CodeMirror panel lifecycle, extensions, theming, and diff/preview rendering.
+// Concatenated immediately after 90 by tools/static_build.py, so it shares the same bundle scope.
 
 function destroyCodeMirrorPanel(panel) {
   panel?._cmResizeObserver?.disconnect?.();
@@ -23674,7 +23694,7 @@ function codeMirrorConfigSignature(path, options = {}) {
     expand: options.expand === true,
     language: codeMirrorLanguageName(path),
     readOnly: readOnlyMode,
-    // DOIT.26 fix: the blame ViewPlugin is added/removed only at editor build time, so blame state must
+    // fix: the blame ViewPlugin is added/removed only at editor build time, so blame state must
     // be in the signature — otherwise toggling blame OFF reuses the existing view and the annotations
     // linger (and toggling ON wouldn't add them without an unrelated rebuild).
     blame: fileEditorBlameEnabled,
@@ -24469,7 +24489,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
         },
         parent: container,
         revertControls: 'a-to-b',
-        // DOIT.6 #44: show each change as TWO uniform full lines (old solid red + new solid green) with
+        // show each change as TWO uniform full lines (old solid red + new solid green) with
         // NO intra-line word/token highlight — even a 1-char edit shows whole-line red + whole-line green.
         highlightChanges: false,
         gutter: true,
@@ -24482,7 +24502,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
     } else {
       const unifiedMergeOptions = {
         original,
-        // DOIT.6 #44: full-line red/green only, no intra-line token highlight (see MergeView above).
+        // full-line red/green only, no intra-line token highlight (see MergeView above).
         highlightChanges: false,
         gutter: true,
         mergeControls: !readOnlyMode && diffEditsAllowed,
@@ -24594,7 +24614,7 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
     }
     restoreFileEditorPanelViewState(item, panel);
     focusFileEditorPanelIfReady(panel, item);
-    // DOIT.34 #3: if blame is on but this path isn't cached yet (file opened after the toggle), fetch it
+    // if blame is on but this path isn't cached yet (file opened after the toggle), fetch it
     // and nudge the editor so the annotation appears without a manual toggle. Deduped; no-op otherwise.
     ensureEditorBlameForPath(path);
     return true;
@@ -24622,7 +24642,7 @@ function renderFileEditorRawPane(rawPane, path, content) {
   });
 }
 
-// DOIT.45: should an in-diff-mode editor fall back to edit because the loaded diff has nothing to show?
+// should an in-diff-mode editor fall back to edit because the loaded diff has nothing to show?
 // YES only when the file has NO useful git history — those files genuinely can't be diffed. A file WITH
 // useful history (e.g. README.md with many commits but a clean working tree → an empty HEAD-vs-working
 // diff) must STAY in diff mode so the FROM/TO sha picker stays reachable and the user can compare
@@ -24715,9 +24735,9 @@ function renderFileEditorPanel(panel, item, options = {}) {
     setFileEditorPanelStatus(panel, status, 'error');
     return;
   }
-  // DOIT.6 #149: do NOT auto-load the diff when a file opens/renders. The diff loads only on explicit
+  // do NOT auto-load the diff when a file opens/renders. The diff loads only on explicit
   // diff-mode entry (the Diff button + the Modified-files menu both open in diff view and load there),
-  // so opening/editing a file does zero diff work (one fewer network round-trip + re-render; ties to DOIT.9).
+  // so opening/editing a file does zero diff work (one fewer network round-trip + re-render; ties to ).
   if (diffModeShouldFallBackToEdit(path, state, item)) {
     setFileEditorViewMode(path, 'edit', item);
   }
@@ -24910,7 +24930,7 @@ function setFileEditorToolbarSeparator(panel, key, visible) {
   if (separator) separator.hidden = !visible;
 }
 
-// DOIT.21 — back/forward navigation history. The stack holds the layout ITEM ids of visited tabs (any
+// — back/forward navigation history. The stack holds the layout ITEM ids of visited tabs (any
 // kind: file editors/previews, terminals, Finder, Prefs, …), so Back returns to the previous tab worked
 // on — not just files. recordEditorNav pushes a user-initiated activation; back/forward re-activate the
 // item (re-opening a since-closed file from its path-encoded id). Bounded so the history can't grow
@@ -25192,7 +25212,7 @@ function sanitizeMarkdownPreviewHtml(html) {
   return template.content;
 }
 
-// DOIT.15: turn bare http(s) URLs in rendered markdown into real <a> links — version-proof against
+// turn bare http(s) URLs in rendered markdown into real <a> links — version-proof against
 // marked's GFM autolink missing them (e.g. when per-line source anchors are interleaved). Skips text
 // already inside <a>/<code>/<pre> so existing links and code samples are untouched. Reuses
 // markdownPreviewUrlAllowed so only safe schemes link; mirrors the app's safe-link attributes.
@@ -25311,8 +25331,8 @@ function renderMarkdownPreviewInto(container, text, markdownPath) {
   container.replaceChildren(frag);
   applyMarkdownSourceLines(container, text);
   bindMarkdownTaskCheckboxes(container, text, markdownPath);
-  installLinkContextMenu(container);   // DOIT.15: right-click Copy URL / Open URL on rendered links
-  // DOIT.6 #133: when this preview belongs to an on-disk file (file-editor preview, NOT a yoagent body),
+  installLinkContextMenu(container);   // right-click Copy URL / Open URL on rendered links
+  // when this preview belongs to an on-disk file (file-editor preview, NOT a yoagent body),
   // remember the owning file's dir so relative links resolve, and bind the in-pane link handler once.
   if (markdownPath) {
     container.dataset.mdPath = markdownPath;
@@ -25380,7 +25400,7 @@ function openMarkdownPreviewPathLink(container, resolved) {
   })).catch(() => showToast(t('preview.openFailed', {path: resolved}), '', {level: 'error'}));
 }
 
-// DOIT.6 #133: in the file-editor markdown preview, route link clicks: in-page #anchors keep default;
+// in the file-editor markdown preview, route link clicks: in-page #anchors keep default;
 // file:// server paths and relative file links open through the YOLOmux editor, while external links
 // open in a new browser tab. The server's read endpoint still rejects paths outside allowed roots.
 function handleMarkdownPreviewLinkClick(event) {
@@ -25541,7 +25561,7 @@ function renderEditorPreviewPane(container, path, text) {
   container.classList.toggle('code-preview-body', !isMarkdownPath(path) && !isHtmlPath(path));
   container.classList.toggle('vanilla-preview-body', fileEditorPreviewDisplayMode === 'vanilla');
   if (isMarkdownPath(path)) {
-    // DOIT.9 fix 6: skip the expensive markdown render (marked.parse + recursive sanitize + per-block
+    // fix 6: skip the expensive markdown render (marked.parse + recursive sanitize + per-block
     // hljs) when the path + content are unchanged from the last render — mirrors CodeMirror's
     // _cmSignature short-circuit. Prevents a multi-second stall re-rendering a large .md when an
     // unrelated panel render fires (off the reorder hot path once S2 lands, but a latent cost).
@@ -26754,7 +26774,7 @@ function virtualPanelControlsHtml(session) {
 }
 
 function panelActiveTabName(session) {
-  const activePane = document.getElementById(`panel-${session}`)?.querySelector('.tab-pane.active');
+  const activePane = document.getElementById(panelDomId(session))?.querySelector('.tab-pane.active');
   const id = activePane?.id || '';
   if (id === `transcript-pane-${session}`) return 'transcript';
   if (id === `summary-pane-${session}`) return 'summary';
@@ -26765,7 +26785,7 @@ function panelActiveTabName(session) {
 function createPanel(session) {
   const panel = document.createElement('article');
   panel.className = 'panel';
-  panel.id = `panel-${session}`;
+  panel.id = panelDomId(session);
   panel.innerHTML = `
       <div class="panel-head">
         ${panelControlsHtml(session)}
@@ -26837,7 +26857,7 @@ function syncTranscriptMetaLoadingUi() {
       metaRefreshButton.setAttribute('aria-label', t('meta.refreshAria'));
     }
   }
-  document.getElementById(`panel-${infoItemId}`)?.classList.toggle('metadata-loading', transcriptMetaLoading);
+  document.getElementById(panelDomId(infoItemId))?.classList.toggle('metadata-loading', transcriptMetaLoading);
 }
 
 function infoMetadataLoadingHtml() {
@@ -26852,8 +26872,8 @@ function renderInfoPanel() {
   if (!node) return;
   syncTranscriptMetaLoadingUi();
   applyInfoBranchColumnWidth();
-  bindInfoPrContextMenu(node);   // DOIT.29: idempotent — "Watch this PR" on the PR column
-  renderWatchedPrs();   // DOIT.29: the Watched PRs section repaints alongside the branch table
+  bindInfoPrContextMenu(node);   // idempotent — "Watch this PR" on the PR column
+  renderWatchedPrs();   // the Watched PRs section repaints alongside the branch table
   const rows = infoBranchRows();
   if (!rows.length) {
     if (transcriptMetaLoading) {
@@ -27041,7 +27061,7 @@ function bindInfoColumnResizers(node) {
   });
 }
 
-// DOIT.29: client-side mirror of the backend parse_pull_request_ref — normalize a watched-PR entry
+// client-side mirror of the backend parse_pull_request_ref — normalize a watched-PR entry
 // ("owner/repo#N", "owner/repo/N", or a github.com PR URL) to the canonical "owner/repo#N", else ''.
 // Used to dedupe and to match a stored entry (which may be a URL) against a PR's canonical ref.
 function normalizeWatchedPrRef(entry) {
@@ -27146,7 +27166,7 @@ function removeWatchedPr(ref) {
     .catch(error => statusErr(`settings save failed: ${esc(error)}`));
 }
 
-// DOIT.29: right-clicking a PR link in YO!info offers "Watch this PR" (adds it to github.watched_prs).
+// right-clicking a PR link in YO!info offers "Watch this PR" (adds it to github.watched_prs).
 // Delegated on #info-content so it covers both the branch-table PR column and any future PR cells.
 function bindInfoPrContextMenu(node) {
   if (!node || node.dataset.watchedPrMenuBound === '1') return;
@@ -27226,7 +27246,7 @@ function yoagentBusyUiIsMounted(node = document.getElementById('yoagent-content'
 // Downgrade block-level headings (#/##/### …) to inline bold so an embedded agent heading renders as
 // emphasis inside a compact card instead of a giant h1/h2 that balloons its height. Inline emphasis,
 // code, lists, and links are left intact for marked.js to render.
-// DOIT.6 #129: the LLM backends emit "loose" markdown (blank lines between list items, double blank
+// the LLM backends emit "loose" markdown (blank lines between list items, double blank
 // lines between sections) which marked.js renders with big gaps. Tighten ONLY the yoagent inputs
 // (not the shared file-editor preview): collapse 2+ blank lines to one, and drop blank lines between
 // adjacent list items so a loose list renders as tightly as a tight one.
@@ -28040,7 +28060,7 @@ async function ensureTerminalRunning(session) {
   }
   const ensured = await ensureSession(session);
   if (!ensured) {
-    const container = document.getElementById(`term-${session}`);
+    const container = document.getElementById(terminalDomId(session));
     if (container) container.innerHTML = `<pre class="terminal-error">${localizedHtml('terminal.connection.sessionUnavailableRetry', {session: sessionLabel(session)})}</pre>`;
     return;
   }
@@ -28092,7 +28112,7 @@ function connectTerminalSocket(session, item) {
 function startTerminal(session) {
   const existing = terminals.get(session);
   const reconnectAttempt = existing?.reconnectAttempt || 0;
-  const container = document.getElementById(`term-${session}`);
+  const container = document.getElementById(terminalDomId(session));
   if (!container) return;
   if (existing?.term && existing.container === container) {
     connectTerminalSocket(session, existing);
@@ -28129,12 +28149,12 @@ function startTerminal(session) {
     macOptionClickForcesSelection: true,
   });
   term.open(container);
-  // DOIT.6 #32: match the container bg to the terminal theme so every pane shares one white.
+  // match the container bg to the terminal theme so every pane shares one white.
   if (container?.style) container.style.background = terminalThemeForGlobalTheme().background;
   installTerminalLinkProvider(term);
   installTerminalContextMenu(session, term, container);
   installTerminalCopyShortcut(session, term, container);
-  installTerminalOsc52Bridge(session, term);   // DOIT.53: Claude/tmux OSC 52 clipboard escapes -> browser clipboard
+  installTerminalOsc52Bridge(session, term);   // Claude/tmux OSC 52 clipboard escapes -> browser clipboard
   installTerminalFileDrop(session, container);
   const openedSize = estimateTerminalSize(container, term);
   if (term.cols !== openedSize.cols || term.rows !== openedSize.rows) {
@@ -28178,9 +28198,9 @@ function startTerminal(session) {
 
 function updateTypingIndicator(session) {
   const item = terminals.get(session);
-  const container = item?.container || document.getElementById(`term-${session}`);
+  const container = item?.container || document.getElementById(terminalDomId(session));
   const pane = document.getElementById(`terminal-pane-${session}`);
-  const panel = document.getElementById(`panel-${session}`);
+  const panel = document.getElementById(panelDomId(session));
   const ready = Boolean(
     item?.socket?.readyState === WebSocket.OPEN
     && focusedTerminal === session
@@ -28350,7 +28370,7 @@ function renderAutoApproveButton(session, payload) {
 
 function startSummaryStream(session) {
   stopSummaryStream(session);
-  const node = document.getElementById(`summary-${session}`);
+  const node = document.getElementById(summaryDomId(session));
   if (!node) return;
   if (readOnlyMode) {
     node.textContent = t('transcript.adminRequired');
@@ -28379,7 +28399,8 @@ function startSummaryStream(session) {
   const source = new EventSource(`/api/summary-stream?session=${encodeURIComponent(session)}&lookback=${60 * 60}`);
   summaryStreams.set(session, source);
   source.addEventListener('meta', event => {
-    const payload = JSON.parse(event.data);
+    const payload = safeJsonParse(event.data, null);
+    if (!payload) return;
     const fallback = payload.fallback ? 'recent transcript tail' : 'last hour';
     const projectCount = Array.isArray(payload.projects) ? payload.projects.length : 0;
     appendSummary(`[codex] summarizing ${fallback} for ${payload.focus_root || session}\n`);
@@ -28387,21 +28408,23 @@ function startSummaryStream(session) {
     appendSummary(`[codex] project inventory: ${projectCount} sessions\n\n`);
   });
   source.addEventListener('log', event => {
-    const payload = JSON.parse(event.data);
-    if (payload.text) appendSummary(`[codex] ${payload.text}\n`);
+    const payload = safeJsonParse(event.data, null);
+    if (payload?.text) appendSummary(`[codex] ${payload.text}\n`);
   });
   source.addEventListener('delta', event => {
-    const payload = JSON.parse(event.data);
-    if (payload.text) appendSummary(payload.text);
+    const payload = safeJsonParse(event.data, null);
+    if (payload?.text) appendSummary(payload.text);
   });
   source.addEventListener('summary_error', event => {
-    const payload = JSON.parse(event.data);
-    appendSummary(`\n[error] ${payload.error || 'summary failed'}\n`);
+    // A bad frame must still tear the stream down (this is the error path); guard the read but always stop
+    // — an unguarded JSON.parse throw here would leak the EventSource.
+    const payload = safeJsonParse(event.data, null);
+    appendSummary(`\n[error] ${payload?.error || 'summary failed'}\n`);
     stopSummaryStream(session);
   });
   source.addEventListener('done', event => {
-    const payload = JSON.parse(event.data);
-    if (payload.return_code && payload.return_code !== 0) {
+    const payload = safeJsonParse(event.data, null);
+    if (payload?.return_code && payload.return_code !== 0) {
       appendSummary(`\n[codex exited ${payload.return_code}]\n`);
     }
     stopSummaryStream(session);
@@ -28492,7 +28515,7 @@ async function applyTranscriptsPayload(payload, options = {}) {
   if (options.refreshActivity !== false) refreshActivitySummary({silent: true});
   for (const session of activeSessions.filter(isTmuxSession)) {
     const meta = document.getElementById(`meta-${session}`);
-    const preview = document.getElementById(`transcript-${session}`);
+    const preview = document.getElementById(transcriptDomId(session));
     const info = transcriptMeta.sessions?.[session];
     const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
     updatePanelHeader(session, info);
@@ -28544,7 +28567,7 @@ async function refreshTranscripts(options = {}) {
       transcriptMetaLoadError = String(error);
       for (const session of activeSessions.filter(isTmuxSession)) {
         const meta = document.getElementById(`meta-${session}`);
-        const preview = document.getElementById(`transcript-${session}`);
+        const preview = document.getElementById(transcriptDomId(session));
         if (meta) meta.innerHTML = `<span class="err">transcript lookup failed</span>`;
         updateTranscriptPathRow(session, '', 'transcript lookup failed');
         if (preview) preview.textContent = `transcript lookup failed: ${error}`;
@@ -28560,8 +28583,8 @@ async function refreshTranscripts(options = {}) {
 }
 
 function updatePanelHeader(session, info) {
-  const tab = document.getElementById(`panel-tab-${session}`);
-  const panel = document.getElementById(`panel-${session}`);
+  const tab = document.getElementById(paneTabDomId(session));
+  const panel = document.getElementById(panelDomId(session));
   const auto = autoApproveStates.get(session)?.enabled === true;
   const state = sessionState(session, info);
   updatePanelControlLabels(session, info);
@@ -28631,7 +28654,7 @@ async function refreshTranscriptPreview(session, preview, options = {}) {
 function applyContextItemsPayloadFromPush(payload = {}, options = {}) {
   if (!payload || !payload.items) return false;
   const session = payload.session || options.session || '';
-  const preview = options.preview || (session ? document.getElementById(`transcript-${session}`) : null);
+  const preview = options.preview || (session ? document.getElementById(transcriptDomId(session)) : null);
   if (!preview) return false;
   updateTranscriptPathRow(session, payload.path);
   renderTranscriptItems(preview, payload.path, payload.items, options);
@@ -28640,18 +28663,20 @@ function applyContextItemsPayloadFromPush(payload = {}, options = {}) {
 
 function startTranscriptStream(session, options = {}) {
   stopTranscriptStream(session);
-  const preview = document.getElementById(`transcript-${session}`);
+  const preview = document.getElementById(transcriptDomId(session));
   if (!preview) return;
   const url = `/api/context-stream?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`;
   const source = new EventSource(url);
   transcriptStreams.set(session, source);
   source.addEventListener('reset', event => {
-    const payload = JSON.parse(event.data);
+    const payload = safeJsonParse(event.data, null);
+    if (!payload) return;
     updateTranscriptPathRow(session, payload.path);
     renderTranscriptItems(preview, payload.path, payload.items || [], {scrollBottom: options.scrollBottom === true});
   });
   source.addEventListener('items', event => {
-    const payload = JSON.parse(event.data);
+    const payload = safeJsonParse(event.data, null);
+    if (!payload) return;
     appendTranscriptItems(preview, payload.items || []);
   });
   source.addEventListener('ping', () => {});
@@ -28847,7 +28872,7 @@ function refreshAll() {
 async function boot() {
   applySettingsPayload(clientSettingsPayload, {initial: true, force: true});
   installClientEventStream();
-  // i18n (DOIT.8): AWAIT the active locale catalog (all-static-fetch) before the first render so menus,
+  // i18n: AWAIT the active locale catalog (all-static-fetch) before the first render so menus,
   // tabs, and the wordmark paint in the right language from the start — no flash of raw t() keys (the
   // menu bar renders synchronously at boot, before any later re-render could fix it). A 'system' pref is
   // resolved client-side against navigator.language (the server can't see the browser locale).
@@ -29144,7 +29169,7 @@ function handleGlobalShortcutKeydown(event) {
   const key = String(event.key || '').toLowerCase();
   const platformActionAllowed = globalShortcutTargetAllowsPlatformAction(event.target);
   if (handlePendingGlobalShortcutChord(event, key)) return;
-  // DOIT.21: editor back/forward history via the keyboard — Mod+Alt+[ / Mod+Alt+]. (appModifier() is
+  // editor back/forward history via the keyboard — Mod+Alt+[ / Mod+Alt+]. (appModifier() is
   // false when Alt is held, so test the platform modifier directly.) Matched by event.code so a layout
   // where Alt remaps the bracket char still works; plain Mod+[ / Mod+] stay with CodeMirror (indent).
   const platformMod = isMacPlatform() ? (event.metaKey === true && event.ctrlKey !== true) : (event.ctrlKey === true && event.metaKey !== true);

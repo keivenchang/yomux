@@ -39,13 +39,13 @@ def test_parse_args_supports_sessions_dangerous_yolo_and_self_signed(monkeypatch
     monkeypatch.setattr(
         cli.sys,
         "argv",
-        ["yolomux.py", "--host", "0.0.0.0", "--port", "7778", "--sessions", "1,2", "ant", "--dang", "--self-signed"],
+        ["yolomux.py", "--host", "0.0.0.0", "--port", "8001", "--sessions", "1,2", "ant", "--dang", "--self-signed"],
     )
 
     args = cli.parse_args()
 
     assert args.host == "0.0.0.0"
-    assert args.port == 7778
+    assert args.port == 8001
     assert args.sessions == ["1,2", "ant"]
     assert args.dangerously_yolo is True
     assert args.self_signed is True
@@ -55,7 +55,7 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
     captured = {}
     args = argparse.Namespace(
         host="0.0.0.0",
-        port=7778,
+        port=8001,
         sessions=["1,2", "ant"],
         dangerously_yolo=True,
         self_signed=False,
@@ -100,7 +100,7 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert captured["sessions"] == ["1", "2", "ant"]
     assert captured["dangerously_yolo"] is True
-    assert captured["address"] == ("0.0.0.0", 7778)
+    assert captured["address"] == ("0.0.0.0", 8001)
     assert captured["tls_context"] is None
     assert captured["dev"] is False  # dev mode off by default
     assert captured["served"] is True
@@ -135,10 +135,10 @@ def test_self_signed_cert_generation_is_persistent(monkeypatch, tmp_path):
 
 def test_plain_http_on_tls_port_gets_redirect_response():
     response = https_redirect_response(
-        b"GET /foo?bar=1 HTTP/1.1\r\nHost: localhost:7778\r\n\r\n",
-        "fallback:7778",
+        b"GET /foo?bar=1 HTTP/1.1\r\nHost: localhost:8001\r\n\r\n",
+        "fallback:8001",
     )
 
     assert b"308 Permanent Redirect" in response
-    assert b"Location: https://localhost:7778/foo?bar=1" in response
+    assert b"Location: https://localhost:8001/foo?bar=1" in response
     assert b"Use HTTPS" in response
