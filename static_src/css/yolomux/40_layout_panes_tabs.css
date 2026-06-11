@@ -1553,6 +1553,10 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
   min-width: 18px;
   max-width: 96px;
   padding-inline: 4px;
+  /* DOIT.57: window buttons read in the normal UI font, not the condensed/bold .tab control font. */
+  font-family: var(--ui-font);
+  font-stretch: normal;
+  font-weight: 500;
 }
 .tmux-window-button .tmux-window-name-label,
 .tmux-window-button .tmux-window-number-label {
@@ -1571,13 +1575,16 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
   max-width: 28px;
   padding-inline: 3px;
 }
-/* The active window's button reads as a PRESSED toggle. Routed through the shared
-   --active-control-* tokens so it follows the user's Active color preference and
-   flips with the theme (no hardcoded hex); inactive buttons keep the plain .tab look. */
-.tmux-window-button.active {
+/* The active window's button reads as a PRESSED toggle (like the active Term tab). SCOPED through
+   the bar so it beats the generic `.tab.active` fallback (which otherwise wins on source order at
+   equal specificity and paints a flat slate box). Routed through the shared --active-control-* tokens
+   so it follows the user's Active color preference and flips with the theme (no hardcoded hex);
+   inactive buttons keep the plain .tab look. font-weight overrides .tab.active's heavy 700. */
+.tmux-window-bar .tmux-window-button.active {
   color: var(--active-control-text);
   background: var(--active-control-bg);
   border-color: var(--active-control-border);
+  font-weight: 600;
 }
 .terminal-tab {
   flex: 0 1 auto;
