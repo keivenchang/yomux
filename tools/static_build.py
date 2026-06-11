@@ -42,6 +42,7 @@ ASSETS: dict[str, list[str]] = {
         "static_src/js/yolomux/50_editor_settings_runtime.js",
         "static_src/js/yolomux/60_popovers_tabs.js",
         "static_src/js/yolomux/70_layout_actions.js",
+        "static_src/js/yolomux/75_dockview_layout.js",
         "static_src/js/yolomux/80_panes_preferences.js",
         "static_src/js/yolomux/90_changes_editor.js",
         "static_src/js/yolomux/99_terminal_boot.js",

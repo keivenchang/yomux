@@ -602,6 +602,9 @@ body.theme-light .topbar-language {
 .app-menu-ui-icon-gear {
   --app-menu-ui-icon: var(--icon-gear);
 }
+.app-menu-ui-icon-pin {
+  --app-menu-ui-icon: var(--icon-pin);
+}
 .app-menu-ui-icon-branch-info {
   --app-menu-ui-icon: var(--icon-branch-info);
 }

@@ -225,6 +225,21 @@ function readStoredJson(key, fallback = null) {
   return safeJsonParse(storageGet(key), fallback);
 }
 
+function readStoredPinnedTabs() {
+  const parsed = readStoredJson(pinnedTabsStorageKey, []);
+  if (!Array.isArray(parsed)) return [];
+  const result = [];
+  for (const raw of parsed) {
+    const item = String(raw || '').trim();
+    if (item && !result.includes(item)) result.push(item);
+  }
+  return result;
+}
+
+function writeStoredPinnedTabs() {
+  storageSet(pinnedTabsStorageKey, JSON.stringify(pinnedTabItems));
+}
+
 function normalizeFileStateRecord(state) {
   if (!state || typeof state !== 'object') state = {};
   if (!(state.editorTabItems instanceof Set)) state.editorTabItems = new Set();
@@ -586,7 +601,13 @@ function writeStoredFileExplorerMode(mode) {
 function normalizeEditorSchemeId(value) {
   const normalized = String(value || '').trim().toLowerCase();
   if (normalized === 'light' || normalized === 'white') return defaultLightEditorScheme;
-  return EDITOR_SCHEMES[normalized] ? normalized : defaultEditorScheme;
+  const legacySchemePrefix = ['vs', 'code'].join('');
+  const aliases = {
+    [`${legacySchemePrefix}-dark-plus`]: 'popular-ide-dark-plus',
+    [`${legacySchemePrefix}-light-plus`]: 'popular-ide-light-plus',
+  };
+  const id = aliases[normalized] || normalized;
+  return EDITOR_SCHEMES[id] ? id : defaultEditorScheme;
 }
 
 function normalizeGlobalThemeMode(value = globalThemeMode) {
@@ -880,6 +901,10 @@ function setFocusedPanelItem(item, options = {}) {
   updatePanelInactiveOverlays();
   if (options.userInitiated === true) {
     if (isTmuxSession(item)) rememberFileExplorerExplicitSyncSession(item);
+    if (isFileEditorItem(item)) {
+      activeFile = fileItemPath(item);
+      scheduleFileExplorerActiveFileReveal(activeFile);
+    }
     const explicitFinderSync = isTmuxSession(item) || isFileEditorItem(item);
     if (!isFileExplorerItem(item)) scheduleFileExplorerActiveTabSync(item, {explicit: explicitFinderSync});
     recordFocusNavTransition(previousItem, item);
@@ -1465,9 +1490,16 @@ function delegate(parent, type, selector, handler, options = {}) {
 }
 
 function appendContextMenuButton(menu, label, handler, closeMenu, options = {}) {
+  const iconHtml = options.iconHtml ? stripTitleAttrs(options.iconHtml) : '';
+  const shortcutHtml = options.shortcut ? `<span class="context-menu-shortcut">${esc(options.shortcut)}</span>` : '';
+  const buttonHtml = iconHtml || shortcutHtml
+    ? `<span class="context-menu-line">${iconHtml ? `<span class="context-menu-icon">${iconHtml}</span>` : ''}<span class="context-menu-label">${esc(label)}</span>${shortcutHtml}</span>`
+    : undefined;
   const button = makeButton({
     ...options,
-    label,
+    html: buttonHtml,
+    label: buttonHtml ? undefined : label,
+    ariaLabel: options.ariaLabel || label,
     role: options.checked !== undefined ? 'menuitemcheckbox' : 'menuitem',
   });
   button.addEventListener('click', event => {
@@ -1819,8 +1851,8 @@ function installTerminalContextMenu(session, term, container) {
   });
 }
 
-function showSessionContextMenu(session, x, y, options = {}) {
-  if (!isTmuxSession(session)) return;
+function showTabContextMenu(item, x, y, options = {}) {
+  if (!isPinnableTab(item) && !isTmuxSession(item)) return;
   closeAppMenus();
   closeTerminalContextMenu();
   closeFileContextMenu();
@@ -1828,20 +1860,41 @@ function showSessionContextMenu(session, x, y, options = {}) {
   const menu = document.createElement('div');
   menu.className = 'terminal-context-menu session-context-menu';
   menu.setAttribute('role', 'menu');
-  const renameAction = options.tab ? () => beginPaneTabRename(options.tab, session) : () => renameTmuxSession(session);
-  for (const item of tmuxSessionActionCommands(session, {renameAction, includeKill: false})) {
-    appendContextMenuButton(menu, item.label, item.action, closeSessionContextMenu, {disabled: item.disabled, checked: item.checked});
+  if (isPinnableTab(item)) {
+    const pinned = tabIsPinned(item);
+    appendContextMenuButton(
+      menu,
+      pinned ? t('tab.unpin') : t('tab.pin'),
+      () => setTabPinned(item, !pinned),
+      closeSessionContextMenu,
+      {
+        checked: pinned,
+        iconHtml: appMenuUiIcon('pin', pinned),
+        shortcut: `${appShortcutText('K')} Enter`,
+      },
+    );
   }
-  const viewItems = tmuxSessionViewCommands(session).filter(item => item.label !== 'Pane details');
-  for (const item of viewItems) {
-    appendContextMenuButton(menu, item.label, item.action, closeSessionContextMenu, {
-      disabled: item.disabled,
-      checked: item.checked,
-      title: item.detail || '',
-    });
+  if (isTmuxSession(item)) {
+    if (isPinnableTab(item)) appendContextMenuSeparator(menu);
+    const renameAction = options.tab ? () => beginPaneTabRename(options.tab, item) : () => renameTmuxSession(item);
+    for (const command of tmuxSessionActionCommands(item, {renameAction, includeKill: false})) {
+      appendContextMenuButton(menu, command.label, command.action, closeSessionContextMenu, {disabled: command.disabled, checked: command.checked});
+    }
+    const viewItems = tmuxSessionViewCommands(item).filter(command => command.label !== 'Pane details');
+    for (const command of viewItems) {
+      appendContextMenuButton(menu, command.label, command.action, closeSessionContextMenu, {
+        disabled: command.disabled,
+        checked: command.checked,
+        title: command.detail || '',
+      });
+    }
+    appendContextMenuSeparator(menu);
+    const killItem = tmuxSessionKillCommand(item);
+    appendContextMenuButton(menu, killItem.label, killItem.action, closeSessionContextMenu, {disabled: killItem.disabled, className: 'danger'});
   }
-  appendContextMenuSeparator(menu);
-  const killItem = tmuxSessionKillCommand(session);
-  appendContextMenuButton(menu, killItem.label, killItem.action, closeSessionContextMenu, {disabled: killItem.disabled, className: 'danger'});
   sessionContextMenu.open(menu, x, y);
+}
+
+function showSessionContextMenu(session, x, y, options = {}) {
+  showTabContextMenu(session, x, y, options);
 }

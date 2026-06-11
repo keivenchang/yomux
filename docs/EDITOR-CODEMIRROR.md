@@ -4,7 +4,7 @@
 
 Original goal: get a real Find (Cmd/Ctrl+F, `1/13`, ^/v, jump+reveal) and the rest of the editor-options list. Before the CodeMirror work, the file editor was a raw `<textarea id="fileEditorTextarea">` plus a custom highlight overlay painted by highlight.js. The decision was to adopt CodeMirror 6 and delete the textarea editor layer.
 
-CodeMirror 6 is a third-party editor library with upstream dependency notices recorded in [`../../THIRD_PARTY_NOTICES.md`](../../THIRD_PARTY_NOTICES.md). It gives, out of the box: Find/Replace (`@codemirror/search`) with match count + all-match highlight, multiple cursors, native soft-wrap + line-number gutter (this RETIRES #6), Lezer syntax highlighting, bracket matching, auto-close, code folding, go-to-line, comment-toggle, auto-indent, configurable tab width, line ops, undo/redo, read-only mode, viewport rendering for big files. Monaco (VS Code's editor) is the heavier alternative (much larger, needs web workers) — out of scope; CM6 is the right size.
+CodeMirror 6 is a third-party editor library with upstream dependency notices recorded in [`../../THIRD_PARTY_NOTICES.md`](../../THIRD_PARTY_NOTICES.md). It gives, out of the box: Find/Replace (`@codemirror/search`) with match count + all-match highlight, multiple carets, native soft-wrap + line-number gutter (this RETIRES #6), Lezer syntax highlighting, bracket matching, auto-close, code folding, go-to-line, comment-toggle, auto-indent, configurable tab width, line ops, undo/redo, read-only mode, viewport rendering for big files. Heavier Popular IDE editor engines need more runtime plumbing and web workers, so CM6 is the right size here.
 
 ## Two paths to prototype (behind one toggle, then compare)
 

@@ -1,15 +1,15 @@
 # AGENTS.md — YOLOmux AI agent guide
 
-This file documents AI-agent behavior and repo-specific lessons for working in YOLOmux. Development workflow, build/test commands, source layout, server restart, production sync, API notes, version bump rules, timing constants, and responsive UI conventions live in [`DEVELOPMENT.md`](DEVELOPMENT.md). End-user/operator docs live in [`README.md`](README.md).
+This file documents AI-agent behavior and repo-specific lessons for working in YOLOmux. Development workflow, build/test commands, source layout, server restart, production sync, API notes, version bump rules, timing constants, and responsive UI conventions live in [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md). End-user/operator docs live in [`README.md`](README.md).
 
 ## Development Workflow
 
-- Use [`DEVELOPMENT.md`](DEVELOPMENT.md) as the source of truth for local checks. Full local pytest runs use `python3 -m pytest tests -n auto -q`.
-- When `AGENTS.md` and `DEVELOPMENT.md` disagree on a build/test/development command, update `DEVELOPMENT.md` and keep only a reference here.
+- Use [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) as the source of truth for local checks. Full local pytest runs use `python3 -m pytest tests -n auto -q`.
+- When `AGENTS.md` and `docs/DEVELOPMENT.md` disagree on a build/test/development command, update `docs/DEVELOPMENT.md` and keep only a reference here.
 
 ## Recent Agent Learnings
 
-- Start with the local task files (`DOIT*.md`, `TODO.md`, `README.md`) and re-read them after each batch. The user updates these files while work is in progress, and stale assumptions caused repeated misses.
+- Start with the local task files (`DOIT*.md`, `docs/TODO.md`, `README.md`) and re-read them after each batch. The user updates these files while work is in progress, and stale assumptions caused repeated misses.
 - Separate feature completion from cleanup. Commit/push/sync the completed behavior first when asked, then do refactor work as a distinct pass so regressions and review diffs stay easier to reason about.
 - Treat visual bugs as layout-state bugs, not one-off CSS tweaks. Reproduce with the exact URL/layout/tabs query string or screenshot state, then add a layout/browser assertion that checks the failing geometry or DOM contract.
 - Do not hard-code menu widths, tab capacity, pane sizes, or dropdown behavior for the current browser. Earlier fixed-size guesses broke on different viewport/font/pane combinations. Measure the container/content and use shared CSS variables, flex/grid, percentages, and viewport clamps.
@@ -31,7 +31,7 @@ This file documents AI-agent behavior and repo-specific lessons for working in Y
 - Git editor actions are capability-gated as a pair. Blame and diff buttons should appear together only for files inside a git repo with meaningful committed history; untracked, no-history, or outside-repo files should hide both rather than showing disabled/mismatched controls.
 - Large Markdown cleanups still need surgical edits. Do not generate a replacement file under `/tmp` and overwrite the tracked Markdown with `\cp`; use `apply_patch` or a reviewed script-generated patch so concurrent user edits and unintended deletions are visible in the diff before the file changes.
 - In the YOLOmux repo, `cps` means the `yolo-cps` skill, not the Dynamo-utils `dyn-cps` flow. It requires the version bump, the full local check set, explicit staging, push, production fast-forward sync, and restarting BOTH prod `7777` and dev `7778`.
-- For YOLOmux CPS checks, `DEVELOPMENT.md` is authoritative: run `python3 -m pytest tests -n auto -q`, not a fixed worker count from stale skill text. There is no all-in-one CPS check script in this repo today; until one exists, run the command list from `DEVELOPMENT.md` directly.
+- For YOLOmux CPS checks, `docs/DEVELOPMENT.md` is authoritative: run `python3 -m pytest tests -n auto -q`, not a fixed worker count from stale skill text. There is no all-in-one CPS check script in this repo today; until one exists, run the command list from `docs/DEVELOPMENT.md` directly.
 - Good pattern to keep: after each substantial UI change, run `python3 tools/static_build.py --check`, `node --check static/yolomux.js`, `node tests/layout_url.test.js`, `python3 -m py_compile ...`, `python3 -m pytest tests -n auto ...`, and `git diff --check`. Report any sandbox-only failures separately and rerun them with the right permissions.
 - Implementer reflections (DOIT.7 retro, 2026-06-01): the rules below are what would have saved time on the build side of the DOIT.5/6 batches.
 - Pinned literals live in MULTIPLE test layers — grep before you change one. Every exact CSS token, label, glyph, or constant you edit is usually asserted in more than one place: `tests/layout_url.test.js` (node source-grep), `tests/test_browser_layout.py` (Selenium computed `rgb(...)`), and pytest. This session a single token change (`--pane-tab-unfocused-active-bg` `#285a2f`->`#4f9e3a`) broke both a node source-guard and a Selenium computed-color assertion, and one label (`Branch Info`->`YO!info`) broke three separate node pins. Before changing a pinned value, `grep -rn '<old-literal>' tests/` and update every pin in the same change.
@@ -39,6 +39,7 @@ This file documents AI-agent behavior and repo-specific lessons for working in Y
 - When a DOIT item carries "STUDIED FINDINGS" / "naive fixes that are wrong", implement the prescribed durable fix, not your first instinct — the diagnosing agent has usually already tried and rejected the naive path. The Ctrl-T auto-approve fix is the case in point: enumerating todo glyphs (my first move) was exactly the fragile approach the item warned against; the durable fix was a bounded-overlay `break` at the `^\d+\s+tasks?\s+\(` header. And before adopting a "defense-in-depth" suggestion, confirm it does not contradict an existing guarded invariant — the suggested `codeMirrorConfigSignature` scheme key is explicitly forbidden by a test (it forces full editor rebuilds); the compartment swap (`refreshOpenEditorThemePanels`) is the right mechanism, so I used that and skipped the signature change.
 - Cross-realm test equality: values returned from the vm-context bundle have a different prototype than the test realm, so `assert.deepStrictEqual` fails with "same structure but not reference-equal". Spread them first (`[...api.fn()]`) or compare primitives.
 - The DOIT/TODO checkbox is the shared source of truth, not your internal task tracker. Flip `[ ]`->`[x]` with a DONE note in the DOIT file as part of finishing each item (I once marked internal tasks done but left the DOIT boxes unchecked, so a re-read showed stale "open" items). Re-read the exact line immediately before editing — these files change under you mid-batch, and concurrent edits cause "file modified since read" churn.
+- When the user asks to perform a `DOIT*.md` file, finish the queued behavior, validate it, archive the completed work in `docs/DONE.md`, update `README.md` for user-visible behavior, and remove the DOIT file once every item is complete. Keep the raw DOIT file only if unfinished work remains.
 - Push the root cause back to the diagnosis. When the diagnosed cause is wrong, state the ACTUAL cause in the DONE note (drag-reorder was a threshold asymmetry, not an index off-by-one; the "PR pillbox" was a `ready-review` state badge, not a PR chip). The `file:symbol + FIX + Validate` contract only gets better if the implementer corrects it instead of silently coding around it.
 - Build + test after EACH item, not per batch. Every item this session ended with `tools/static_build.py` + `node tests/layout_url.test.js` (and pytest for backend) before moving on; that caught pinned-value regressions at the item that caused them instead of in a confusing end-of-batch pile.
 
@@ -60,4 +61,4 @@ Distilled from the DOIT.5/DOIT.6 batches (see `DOIT.7.md` for the concrete failu
 
 ## Development Details
 
-Development topics formerly duplicated here now live in [`DEVELOPMENT.md`](DEVELOPMENT.md): source layout, generated assets, local checks, server restart, production sync, webterm architecture, and API surface.
+Development topics formerly duplicated here now live in [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md): source layout, generated assets, local checks, server restart, production sync, webterm architecture, and API surface.

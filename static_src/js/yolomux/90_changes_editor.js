@@ -3785,13 +3785,19 @@ function diffModeShouldFallBackToEdit(path, state, item = null) {
         && !fileStateHasUsefulGitHistory(state)));
 }
 
-function renderFileEditorPanel(panel, item) {
+function renderFileEditorPanel(panel, item, options = {}) {
   const path = fileItemPath(item);
   captureFileEditorPanelViewState(item, panel);
-  const previousActiveFile = activeFile;
-  activeFile = path;
-  if (previousActiveFile !== path) scheduleFileExplorerActiveFileReveal(path);
-  else updateFileExplorerCurrentFileHighlight();
+  const shouldUpdateActiveFile = options.updateActiveFile !== false
+    && (!dockviewLayoutActive() || focusedPanelItem === item || options.forceActiveFile === true);
+  if (shouldUpdateActiveFile) {
+    const previousActiveFile = activeFile;
+    activeFile = path;
+    if (previousActiveFile !== path) scheduleFileExplorerActiveFileReveal(path);
+    else updateFileExplorerCurrentFileHighlight();
+  } else if (activeFile === path) {
+    updateFileExplorerCurrentFileHighlight();
+  }
   const state = openFiles.get(path);
   updateFileEditorPanelChrome(panel, path);
   const codeMirrorPane = panel.querySelector('.file-editor-codemirror-panel');
@@ -4306,7 +4312,15 @@ function sanitizeMarkdownPreviewNode(root) {
       child.remove();
       continue;
     }
+    if (tagName === 'input' && String(child.getAttribute('type') || '').toLowerCase() !== 'checkbox') {
+      child.remove();
+      continue;
+    }
     for (const attr of Array.from(child.attributes || [])) {
+      if (tagName === 'input' && !MARKDOWN_PREVIEW_INPUT_ATTRS.has(String(attr?.name || '').toLowerCase())) {
+        child.removeAttribute(attr.name);
+        continue;
+      }
       sanitizeMarkdownPreviewAttribute(child, attr);
     }
     sanitizeMarkdownPreviewNode(child);
@@ -4371,6 +4385,68 @@ function linkifyBareUrls(root) {
   }
 }
 
+const MARKDOWN_TASK_LINE_RE = /^(\s*(?:[-+*]|\d+[.)])\s+\[)([ xX])(\]\s*)/;
+
+function markdownTaskLineEntries(text) {
+  return String(text || '').split('\n')
+    .map((line, index) => {
+      const match = line.match(MARKDOWN_TASK_LINE_RE);
+      return match ? {line: index + 1, checked: match[2].toLowerCase() === 'x'} : null;
+    })
+    .filter(Boolean);
+}
+
+function markdownTextWithTaskLineToggled(text, sourceLine, checked) {
+  const lines = String(text || '').split('\n');
+  const index = Math.max(0, Math.floor(Number(sourceLine) || 1) - 1);
+  if (index >= lines.length || !MARKDOWN_TASK_LINE_RE.test(lines[index])) return null;
+  lines[index] = lines[index].replace(MARKDOWN_TASK_LINE_RE, (_, prefix, _marker, suffix) => `${prefix}${checked ? 'x' : ' '}${suffix}`);
+  return lines.join('\n');
+}
+
+function updateMarkdownTaskFromPreview(container, input) {
+  const path = container?.dataset?.mdPath || '';
+  const sourceLine = Number(input?.dataset?.sourceLine || 0);
+  const state = openFiles.get(path);
+  if (readOnlyMode || !path || !sourceLine || !state || state.kind !== 'text') return false;
+  const next = markdownTextWithTaskLineToggled(state.content, sourceLine, input.checked === true);
+  if (next === null || next === state.content) return false;
+  const sourcePanel = container.closest?.('.file-editor-panel') || fileEditorPanelsForPath(path)[0] || null;
+  handleFileEditorContentChanged(sourcePanel, path, next, {syntax: false});
+  for (const panel of fileEditorPanelsForPath(path)) {
+    if (panel?._cmView) syncCodeMirrorDocument(panel._cmView, next, {path});
+  }
+  return true;
+}
+
+function bindMarkdownTaskCheckboxes(container, text, markdownPath) {
+  const tasks = markdownTaskLineEntries(text);
+  const checkboxes = Array.from(container.querySelectorAll('input[type="checkbox"]'));
+  checkboxes.forEach((input, index) => {
+    const task = tasks[index];
+    if (!task) return;
+    input.dataset.sourceLine = String(task.line);
+    input.classList.add('markdown-task-checkbox');
+    input.checked = task.checked;
+    if (markdownPath && !readOnlyMode) {
+      input.disabled = false;
+      input.removeAttribute('disabled');
+      input.setAttribute('aria-label', `Toggle task on line ${task.line}`);
+    }
+  });
+  if (markdownPath && !container.dataset.mdTaskBound) {
+    container.dataset.mdTaskBound = '1';
+    container.addEventListener('change', event => {
+      const input = event.target?.closest?.('input[type="checkbox"].markdown-task-checkbox[data-source-line]');
+      if (!input || !container.contains(input)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const updated = updateMarkdownTaskFromPreview(container, input);
+      if (!updated) input.checked = !input.checked;
+    });
+  }
+}
+
 function renderMarkdownPreviewInto(container, text, markdownPath) {
   if (typeof window.marked === 'undefined') {
     container.textContent = 'marked.js not loaded (offline CDN?)';
@@ -4381,6 +4457,7 @@ function renderMarkdownPreviewInto(container, text, markdownPath) {
   linkifyBareUrls(frag);
   container.replaceChildren(frag);
   applyMarkdownSourceLines(container, text);
+  bindMarkdownTaskCheckboxes(container, text, markdownPath);
   installLinkContextMenu(container);   // DOIT.15: right-click Copy URL / Open URL on rendered links
   // DOIT.6 #133: when this preview belongs to an on-disk file (file-editor preview, NOT a yoagent body),
   // remember the owning file's dir so relative links resolve, and bind the in-pane link handler once.

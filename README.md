@@ -4,7 +4,7 @@ Browser tools for watching, driving, and summarizing tmux sessions.
 
 `yolomux.py` serves an interactive UI that attaches browser xterm.js terminals to local tmux sessions and adds agent-aware controls around them. Two companion tools ship alongside it: `auto_approve_tmux.py` (YOLO auto-approval without the UI) and `tmux_wall.py` (a read-only snapshot wall).
 
-Developer / AI-agent docs (conventions, architecture, code layout, API reference) live in [`AGENTS.md`](AGENTS.md). Contributing and build instructions are in [`DEVELOPMENT.md`](DEVELOPMENT.md).
+Developer / AI-agent docs (conventions, architecture, code layout, API reference) live in [`AGENTS.md`](AGENTS.md). Contributing and build instructions are in [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
 
 ## Requirements
 
@@ -67,17 +67,22 @@ Open YOLOmux after setup. Existing tmux sessions appear as tabs:
 
 - Click a tab to show it in that pane.
 - Use the `Tabs` menu to activate minimized or inactive tabs.
-- Drag a tab between pane tab bars to move it, or drop near a pane edge to split the layout.
+- Drag a tab between pane tab bars to move it, or drop near a pane edge to split that pane. Dropping on the outer root edge or cross-gutter can still create a full-span pane; top/bottom root previews stay out of a docked Finder/Differ column, and the dashed preview uses the same configurable color as the pane separator.
+- Pane splits are percentage-based: resizing a docked Finder/Differ column resizes the remaining content area while preserving the Pane1/Pane2 split ratio.
+- Drag a Finder or Differ file row into a pane to open that file there; dropping near a pane edge opens it in a new split with the same dashed placement preview.
+- Detailed pane/tab/Finder/Differ GUI behavior is tracked in [`docs/GUI_SPEC.md`](docs/GUI_SPEC.md).
 - The pane toolbar steps through the focused session's tmux windows (`<` / `>`), shows transcripts (`Tx`), asks for an AI summary (`AI`), and opens the event log (`Log`).
 - In dark mode, the focused pane's tab strip brightens so the active pane is easier to pick out at a glance; light mode keeps the same pane strip color.
 - Inactive panes use a flat dim from the visually active pane, and that visual-active pane survives terminal blur.
 - Finder can switch between the file tree and a full-pane `Differ` mode; diff mode uses the Differ chrome with session selection, per-repo FROM/TO controls, and no create-file actions.
 - The Finder root toggle is `No Sync` / `Sync`, and defaults to `Sync`. In Sync mode, Finder follows the focused session's affected repos: if a session touches multiple nearby repos, Finder opens their common parent, expands each touched repo path, and bolds affected repo roots plus changed descendant directories; with no changed-file payload yet, or with a stale same-session payload from a different repo, it falls back to the session's git root, and a fresh session with no cwd opens home.
 - Finder browsing defaults to the filesystem root (`/`) instead of only home and `/tmp`; credential-heavy paths such as `.ssh`, `.gnupg`, `.aws`, `.config/gh`, token files, and registry config files are blocked and hidden from search/index results.
+- Quick Search ranks filename matches ahead of path-only fuzzy matches, so numbered files such as `DOIT.53.md` and `DOIT.51.md` stay grouped. Image hits render as Popular IDE-style references such as `[Image #1] '/home/user/project/screenshot.png'`, while keeping the absolute path visible and searchable.
 - Finder file and diff rows share the same file date modes (`None`, `Date`, `Ago`); in Finder, the date toggle and Reload control sit together on the toolbar's right edge so row times line up under the date column.
 - Finder diff rows keep status, diff counts, and the time column visible by trimming long filenames first.
 - Editor diff rows use one consistent red or green fill for changed lines, including the cursor's active line.
 - The file editor's `Differ` toggle opens a diff view with a FROM/TO sha picker for any git-tracked file with commit history, including a file with no uncommitted changes. The default HEAD-vs-working diff for a clean file is empty, but diff mode stays open so you can pick two refs to compare; it only falls back to the editor for files git cannot diff.
+- Markdown Preview task checkboxes are editable for admin users: clicking a rendered `- [ ]` / `- [x]` item updates the underlying Markdown source and uses the normal dirty/autosave path.
 - Diff panes hold the loading state until the requested FROM/TO payload is ready, then render the diff without flashing a transient edit view.
 - The terminal border turns yellow for the focused pane.
 - Sessions waiting at a detected permission prompt show an attention badge in the roster even when YOLO auto-approval is off, so pending `Yes/No` prompts do not silently sit idle.

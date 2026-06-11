@@ -159,8 +159,8 @@ const EDITOR_SCHEMES = {
     syntax: {comment: '#75715e', keyword: '#f92672', string: '#e6db74', number: '#ae81ff', function: '#a6e22e', type: '#66d9ef', variable: '#f8f8f2', tag: '#f92672', heading: '#a6e22e', link: '#66d9ef', inlineCode: '#e6db74', inlineCodeBg: 'rgba(230, 219, 116, 0.14)', inlineCodeBorder: 'rgba(230, 219, 116, 0.32)', atom: '#ae81ff', property: '#66d9ef', strong: '#fd971f', emphasis: '#fd971f', invalid: '#f92672'},
     diff: {addFg: '#a6e22e', removeFg: '#f92672'},
   },
-  'vscode-dark-plus': {
-    id: 'vscode-dark-plus', label: 'VS Code Dark+', dark: true,
+  'popular-ide-dark-plus': {
+    id: 'popular-ide-dark-plus', label: 'Popular IDE Dark+', dark: true,
     bg: '#1e1e1e', fg: '#d4d4d4', cursor: '#aeafad', selection: 'rgba(96, 165, 250, 0.38)', activeLine: '#2a2d2e',
     gutterBg: '#1e1e1e', lineNo: '#858585', panel: '#1e1e1e', panel2: '#252526', line: '#3c3c3c', previewBg: '#252526',
     syntax: {comment: '#6a9955', keyword: '#569cd6', string: '#ce9178', number: '#b5cea8', function: '#dcdcaa', type: '#4ec9b0', variable: '#9cdcfe', tag: '#569cd6', heading: '#4fc1ff', headingBg: '#263342', link: '#3794ff', inlineCode: '#ffb86c', inlineCodeBg: 'rgba(255, 184, 108, 0.16)', inlineCodeBorder: 'rgba(255, 184, 108, 0.36)', atom: '#c586c0', property: '#9cdcfe', strong: '#ffd866', emphasis: '#c586c0', invalid: '#f14c4c'},
@@ -187,8 +187,8 @@ const EDITOR_SCHEMES = {
     syntax: {comment: '#008000', keyword: '#0000ff', control: '#af00db', string: '#0451a5', number: '#098658', function: '#267f2e', type: '#008080', variable: '#5f3b00', tag: '#800000', heading: '#000000', headingBg: '#ffffff', link: '#0451a5', inlineCode: '#a31515', inlineCodeBg: '#f3f3f3', inlineCodeBorder: '#d4d4d4', atom: '#0000ff', property: '#5f3b00', strong: '#000000', emphasis: '#795e26', invalid: '#a31515'},
     diff: {addFg: '#15803d', removeFg: '#b91c1c'},
   },
-  'vscode-light-plus': {
-    id: 'vscode-light-plus', label: 'VS Code Light+', dark: false,
+  'popular-ide-light-plus': {
+    id: 'popular-ide-light-plus', label: 'Popular IDE Light+', dark: false,
     bg: '#ffffff', fg: '#1f1f1f', cursor: '#000000', selection: 'rgba(37, 99, 235, 0.34)', activeLine: '#f5f5f5',
     gutterBg: '#ffffff', lineNo: '#6e7681', panel: '#f3f3f3', panel2: '#e9e9e9', line: '#d4d4d4', previewBg: '#ffffff',
     syntax: {comment: '#008000', keyword: '#0000ff', control: '#af00db', string: '#a31515', number: '#098658', function: '#795e26', type: '#267f99', variable: '#1f1f1f', tag: '#800000', heading: '#800000', link: '#0451a5', inlineCode: '#800000', inlineCodeBg: '#fff1d6', inlineCodeBorder: '#e0b45f', atom: '#0000ff', property: '#001080', strong: '#000000', emphasis: '#795e26', invalid: '#a31515'},
@@ -249,7 +249,7 @@ let fileExplorerShowHidden = storageGet(fileExplorerHiddenStorageKey) === '1';
 const fileEditorThemeModeStorageKey = 'yolomux.fileEditorThemeMode.v1';
 const fileEditorPreviewDisplayModeStorageKey = 'yolomux.fileEditorPreviewDisplayMode.v1';
 let fileEditorWrapEnabled = readStoredEditorWrap();
-// DOIT.26: inline git blame (Cursor-style). Persisted toggle + a per-path cache of the /api/blame payload.
+// DOIT.26: inline git blame (Popular IDE-style). Persisted toggle + a per-path cache of the /api/blame payload.
 let fileEditorBlameEnabled = storageGet('yolomux.editorBlame') === '1';
 const editorBlameFetches = new Map();  // DOIT.34 #3: in-flight /api/blame fetch per path (dedup concurrent panels)
 let fileEditorBlameAllLines = false;  // DOIT.26: annotate every line vs current-line only (set from settings in applySettingsPayload)
@@ -259,7 +259,7 @@ let diffExpandUnchanged = storageGet('yolomux.diffExpandUnchanged') === '1';
 let fileEditorThemeMode = readStoredEditorThemeMode();
 let fileEditorPreviewDisplayMode = readStoredEditorPreviewDisplayMode();
 let fileEditorCursorStyle = 'block';  // C3: default caret is block; saved 'line' choices round-trip via settings
-let fileEditorCursorColor = 'yellow';  // 'yellow' (match the active terminal cursor) | 'theme' (per-scheme caret)
+let fileEditorCursorColor = 'yellow';  // 'yellow' (match the active terminal cursor) | 'theme' (per-scheme cursor)
 let fileEditorAutosaveEnabled = false;
 let fileEditorAutosaveDelaySeconds = 2.5;
 const fileEditorAutosaveTimers = new Map();
@@ -310,6 +310,9 @@ let diffRefsByRepo = readStoredDiffRefsByRepo();  // C6: {repoPath: {from, to}} 
 let fileExplorerMode = readStoredFileExplorerMode();
 let commandPaletteNode = null;
 let keyboardShortcutsNode = null;
+let pendingGlobalShortcutChord = null;
+let pendingGlobalShortcutChordTimer = null;
+const globalShortcutChordTimeoutMs = 4000;
 let commandPaletteMode = 'command';
 let commandPaletteQuery = '';
 let commandPaletteIndex = 0;
@@ -355,6 +358,7 @@ const pasteCounters = new Map();
 const pasteCountersStorageKey = 'yolomux.pasteCounters.v1';
 const pasteLockStorageKey = 'yolomux.pasteUploadLock.v1';
 const tabMetaStorageKey = 'yolomux.showTabMeta.v1';
+const pinnedTabsStorageKey = 'yolomux.pinnedTabs.v1';
 const startupHelperIndexStorageKey = 'yolomux.startupHelper.index.v1';
 // DOIT.6 #40: YO!info and YO!agent are merged into one pane with an in-pane sub-tab toggle; the chosen
 // sub-tab is remembered across reloads.
@@ -372,6 +376,7 @@ const latencySamplesMax = 24;
 let toastDurationMs = initialSetting('notifications.toast_duration_ms', 10000);
 const toastMaxLines = 3;
 const toastMaxLineChars = 180;
+let pinnedTabItems = readStoredPinnedTabs();
 let popoverShowDelayMs = initialSetting('performance.popover_show_delay_ms', 1000);
 let hoverCloseDelayMs = initialSetting('performance.popover_hide_delay_ms', 300);
 let popoverHideDelayMs = hoverCloseDelayMs;
@@ -778,6 +783,7 @@ let lastActivePaneItem = null;
 let lastFocusedTmuxSession = null;
 let dragSession = null;
 let dragSourceSlot = null;
+let dragPaneSlot = null;
 // While a tab drag is in flight, tab/preferences re-renders are deferred so they don't replace the
 // dragged DOM node mid-drag (which aborts the native HTML5 drag). endSessionDrag flushes these.
 let pendingTabStripRender = false;
@@ -792,7 +798,7 @@ let transparentDragImage = null;
 // #47: tab rects measured once per strip at drag time and reused for every dragover (tabs don't move
 // mid-drag — renders are deferred), so the drop-placement path doesn't force sync layout on each move.
 let dragTabRectCache = null;
-// DOIT.21: one global editor navigation history (Cursor-style back/forward through visited files).
+// DOIT.21: one global editor navigation history (Popular IDE-style back/forward through visited files).
 // stack holds file paths; index points at the current entry; `navigating` suppresses recording while a
 // back/forward re-open is in flight (so it doesn't push a new entry).
 const editorNav = {stack: [], index: -1, navigating: false};

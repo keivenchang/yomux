@@ -114,9 +114,12 @@ function closeOtherSessionPopovers(current, options = {}) {
   const force = options.force === true;
   for (const other of document.querySelectorAll('.pane-tab.popover-open, .panel-popover-zone.popover-open')) {
     if (other !== current) {
-      const popover = other.querySelector?.(':scope > .session-popover, :scope > .panel-detail-popover');
+      const popover = other.querySelector?.(':scope > .session-popover, :scope > .panel-detail-popover')
+        || other.__yolomuxDetachedPopover;
       if (current === null && !force && popoverStillActive(other, popover)) continue;
       other.classList.remove('popover-open');
+      popover?.classList?.remove('popover-open');
+      other.__yolomuxDetachedPopover?.classList?.remove('popover-open');
       delete other.dataset.popoverHoverState;
     }
   }
@@ -200,6 +203,8 @@ function createHoverPopover(options) {
     if (anchor.isConnected === false || !canOpen(event)) return;
     if (event && !stillActive(event)) return;
     if (stateClass && anchor.classList.contains(stateClass) && stillActive(event)) {
+      options.position?.(event);
+      options.onOpen?.(event);
       markState('open');
       return;
     }
@@ -824,6 +829,7 @@ function otherBranchesHtml(session, info) {
 
 function dragPayload(event) {
   const raw = event.dataTransfer?.getData('application/x-yolomux-session') || '';
+  if (!raw && dragPaneSlot) return null;
   if (!raw && dragSession) return {session: dragSession, sourceSlot: dragSourceSlot};
   if (!raw) return null;
   try {
@@ -831,6 +837,18 @@ function dragPayload(event) {
     return isLayoutItem(parsed.session) ? parsed : null;
   } catch (_) {
     return isLayoutItem(raw) ? {session: raw, sourceSlot: null} : null;
+  }
+}
+
+function paneDragPayload(event) {
+  const raw = event.dataTransfer?.getData('application/x-yolomux-pane') || '';
+  if (!raw && dragPaneSlot) return {slot: dragPaneSlot};
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return layoutSlotKeys().includes(parsed.slot) ? parsed : null;
+  } catch (_) {
+    return layoutSlotKeys().includes(raw) ? {slot: raw} : null;
   }
 }
 
@@ -970,6 +988,70 @@ function stopCustomDragPreview() {
   closeFileImagePreview();
 }
 
+function paneDragPreviewMetrics(slot, event) {
+  const rect = layoutSlotScreenRect(slot);
+  const fallbackWidth = 360;
+  const fallbackHeight = 220;
+  const sourceWidth = Math.max(1, Number(rect?.width) || fallbackWidth);
+  const sourceHeight = Math.max(1, Number(rect?.height) || fallbackHeight);
+  const viewportWidth = Math.max(320, Number(window.innerWidth) || 1200);
+  const viewportHeight = Math.max(240, Number(window.innerHeight) || 800);
+  const maxWidth = Math.min(720, Math.max(220, viewportWidth * 0.64));
+  const maxHeight = Math.min(420, Math.max(160, viewportHeight * 0.58));
+  const scale = Math.min(1, maxWidth / sourceWidth, maxHeight / sourceHeight);
+  const width = Math.max(180, Math.round(sourceWidth * scale));
+  const height = Math.max(120, Math.round(sourceHeight * scale));
+  const sourceOffsetX = rect ? (Number(event?.clientX) || rect.left) - rect.left : width * 0.12;
+  const sourceOffsetY = rect ? (Number(event?.clientY) || rect.top) - rect.top : 18;
+  return {
+    width,
+    height,
+    offsetX: Math.max(16, Math.min(width - 16, Math.round(sourceOffsetX * scale))),
+    offsetY: Math.max(16, Math.min(height - 16, Math.round(sourceOffsetY * scale))),
+  };
+}
+
+function paneDragPreviewHtml(slot) {
+  const tabs = paneTabs(slot);
+  const active = activeItemForSide(slot) || tabs[0] || slot;
+  const title = itemLabel(active);
+  const count = tabs.length;
+  const extra = tabs
+    .filter(item => item !== active)
+    .slice(0, 3)
+    .map(item => `<span>${esc(itemLabel(item))}</span>`)
+    .join('');
+  return `
+    <div class="pane-drag-image-frame">
+      <div class="pane-drag-image-title">${esc(title)}</div>
+      <div class="pane-drag-image-meta">${esc(count === 1 ? '1 tab' : `${count} tabs`)}</div>
+      ${extra ? `<div class="pane-drag-image-tabs">${extra}</div>` : ''}
+    </div>`;
+}
+
+function startPaneDragPreview(event, slot, options = {}) {
+  stopCustomDragPreview();
+  const metrics = paneDragPreviewMetrics(slot, event);
+  const preview = document.createElement('div');
+  preview.className = 'pane-drag-image drag-image';
+  preview.dataset.dragSlot = slot;
+  preview.innerHTML = paneDragPreviewHtml(slot);
+  preview.style.position = 'fixed';
+  preview.style.pointerEvents = 'none';
+  preview.style.zIndex = '99999';
+  preview.style.width = `${metrics.width}px`;
+  preview.style.height = `${metrics.height}px`;
+  document.body.appendChild(preview);
+  customDragPreview = preview;
+  customDragPreviewOffset = {x: metrics.offsetX, y: metrics.offsetY};
+  moveCustomDragPreview(event);
+  if (options.nativeDrag === true) {
+    bindCustomDragPreviewListeners();
+    preview.getBoundingClientRect();
+    event.dataTransfer?.setDragImage?.(transparentNativeDragImage(), 0, 0);
+  }
+}
+
 // #47: tab drags use the native drag image (see startSessionDrag) — the clone-follow tab preview is
 // gone. The custom-preview machinery below is retained only for the rich FILE drag preview.
 function startFileDragPreview(event, paths, entry) {
@@ -1075,6 +1157,7 @@ function startSessionDrag(event, session, sourceSlot = null) {
   dragTimingMark('startSessionDrag:begin');
   dragSession = session;
   dragSourceSlot = sourceSlot;
+  dragPaneSlot = null;
   const payload = JSON.stringify({session, sourceSlot});
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('application/x-yolomux-session', payload);
@@ -1095,9 +1178,32 @@ function startSessionDrag(event, session, sourceSlot = null) {
   dragTimingMark('startSessionDrag:end');
 }
 
+function startPaneDrag(event, sourceSlot) {
+  const slot = layoutSlotKeys().includes(sourceSlot) ? sourceSlot : null;
+  if (!slot || slotIsFileExplorerPane(slot)) {
+    event.preventDefault?.();
+    return;
+  }
+  const active = activeItemForSide(slot);
+  if (!active) {
+    event.preventDefault?.();
+    return;
+  }
+  dragTimingMark('startPaneDrag');
+  dragSession = active;
+  dragSourceSlot = slot;
+  dragPaneSlot = slot;
+  const payload = JSON.stringify({slot});
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('application/x-yolomux-pane', payload);
+  event.dataTransfer.setData('text/plain', paneTabs(slot).map(itemLabel).join('\n'));
+  startPaneDragPreview(event, slot, {nativeDrag: true});
+}
+
 function endSessionDrag(event) {
   dragSession = null;
   dragSourceSlot = null;
+  dragPaneSlot = null;
   resetDragTabRectCache();
   stopCustomDragPreview();
   sessionButtons.classList.remove(CLS.dragOver);
