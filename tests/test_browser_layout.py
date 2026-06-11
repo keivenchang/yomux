@@ -2553,36 +2553,53 @@ def test_dockview_many_tabs_wrap_like_yolomux_strip(browser, tmp_path):
 
 
 def test_dockview_drag_reorders_tabs_in_same_pane(browser, tmp_path):
+    # REAL end-to-end reorder: the drag itself must produce the new order. (The previous version of this
+    # test force-wrote the expected layout via execute_script after the drag, which let the actual bug —
+    # the no-op veto hit-testing the smooth-reorder dragged tab under the cursor and silently swallowing
+    # every slow same-strip reorder — live in production undetected.)
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2,3&layout=left&tabs=left:1,2,3", sessions=["1", "2", "3"])
     wait_for_dockview(browser, min_tabs=3)
     wait_for_dockview_tab_geometry(browser, min_tabs=3)
     start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="1"]', 0.5, 0.5)
     end = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="2"]', 0.68, 0.5)
     cdp_drag(browser, start, end)
-    browser.execute_async_script(
-        """
-        const done = arguments[arguments.length - 1];
-        requestAnimationFrame(() => requestAnimationFrame(done));
-        """
-    )
-    browser.execute_script(
-        """
-        const next = cloneLayoutSlots(layoutSlots);
-        next.left = paneStateWithTabs(['2', '1', '3'], activeItemForSide('left'));
-        dockviewLayoutState.syncQueued = false;
-        layoutSlots = normalizeLayoutSlots(next);
-        activeSessions = sessionsFromLayout();
-        updateActiveSessionParam();
-        dockviewLoadLayout(layoutSlots);
-        """
-    )
     WebDriverWait(browser, 5).until(
-        lambda driver: dockview_layout_metrics(driver)["slots"]["left"]["tabs"][:2] == ["2", "1"]
+        lambda driver: driver.execute_script("return paneTabs('left', layoutSlots).slice(0, 2).join(',');") == "2,1"
     )
     metrics = dockview_layout_metrics(browser)
     assert metrics["groups"][0]["tabs"] == ["2", "1", "3"]
     assert metrics["slots"]["left"]["tabs"] == ["2", "1", "3"]
     assert "tabs=left:2,1" in metrics["url"]
+
+
+def test_dockview_drag_reorders_two_tab_pane(browser, tmp_path):
+    # Two-tab strip is the tightest case: the dragged tab covers the drop point (smooth reorder), and the
+    # pinned pointer fallback used to mirror-swap it back. Both must stay fixed.
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
+    wait_for_dockview(browser, min_tabs=2)
+    wait_for_dockview_tab_geometry(browser, min_tabs=2)
+    start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="1"]', 0.5, 0.5)
+    end = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="2"]', 0.68, 0.5)
+    cdp_drag(browser, start, end)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return paneTabs('left', layoutSlots).join(',');") == "2,1"
+    )
+    assert dockview_layout_metrics(browser)["groups"][0]["tabs"] == ["2", "1"]
+
+
+def test_dockview_drag_reorders_two_pinned_tabs(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
+    wait_for_dockview(browser, min_tabs=2)
+    wait_for_dockview_tab_geometry(browser, min_tabs=2)
+    browser.execute_script("setTabPinned('1', true); setTabPinned('2', true);")
+    wait_for_dockview_tab_geometry(browser, min_tabs=2)
+    start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="1"]', 0.5, 0.5)
+    end = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="2"]', 0.68, 0.5)
+    cdp_drag(browser, start, end)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return paneTabs('left', layoutSlots).join(',');") == "2,1"
+    )
+    assert dockview_layout_metrics(browser)["groups"][0]["tabs"] == ["2", "1"]
 
 
 def test_dockview_pinned_tabs_render_first_after_pin_toggle(browser, tmp_path):

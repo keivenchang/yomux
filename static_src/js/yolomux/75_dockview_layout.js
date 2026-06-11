@@ -14,6 +14,7 @@ const dockviewLayoutState = {
   pendingRootBoundaryDrop: null,
   reloadAfterAdoption: false,
   tabPointerDrag: null,
+  tabDropHandledAt: 0,
   panePointerDrag: null,
   panePointerDragSuppressedUntil: 0,
 };
@@ -190,6 +191,47 @@ function dockviewTabDropWouldNoop(event) {
   return Boolean(info && info.sourceSlot === info.targetSlot && info.adjustedIndex === info.sourceIndex);
 }
 
+// Resolve the DROP TARGET tab for a dockview tab-drop event by POINTER COORDINATES, never by
+// `nativeEvent.target` alone: with `dndStrategy: 'pointer'` the dragged tab smooth-reorders UNDER the
+// cursor, so the element under the pointer at drop time is usually the dragged tab itself. Hit-testing
+// that made every slow same-strip reorder look like a self-drop and the no-op veto silently swallowed
+// it (the "drag first tab to second does nothing" bug). Excludes the dragged tab, picks the tab whose
+// rect contains the pointer x (nearest rect when the pointer sits over the dragged tab's visual gap or
+// past the strip ends), and recomputes left/right from the resolved tab's own rect.
+function dockviewTabDropHit(event, item) {
+  const nativeEvent = event.nativeEvent;
+  const nativeTarget = nativeEvent?.target;
+  const hoveredTab = nativeTarget?.closest?.('.dv-tab') || null;
+  const tabStrip = nativeTarget?.closest?.('.dv-tabs-container') || hoveredTab?.parentElement || null;
+  if (!tabStrip) return null;
+  const tabs = Array.from(tabStrip.querySelectorAll?.('.dv-tab') || []);
+  if (!tabs.length) return null;
+  const tabItems = tabs.map(tab => tab.querySelector?.('.dockview-pane-tab')?.dataset?.paneTab || '');
+  const sourceIndex = tabItems.indexOf(item);
+  const pointerX = Number(nativeEvent?.clientX);
+  const hoveredIsDragged = hoveredTab ? tabs.indexOf(hoveredTab) === sourceIndex && sourceIndex >= 0 : false;
+  let targetTab = !hoveredIsDragged ? hoveredTab : null;
+  if ((!targetTab || !tabs.includes(targetTab)) && Number.isFinite(pointerX)) {
+    let best = null;
+    for (let index = 0; index < tabs.length; index++) {
+      if (index === sourceIndex) continue;   // never resolve to the dragged tab
+      const rect = tabs[index].getBoundingClientRect();
+      const distance = pointerX < rect.left ? rect.left - pointerX : (pointerX > rect.right ? pointerX - rect.right : 0);
+      if (!best || distance < best.distance) best = {tab: tabs[index], distance};
+    }
+    targetTab = best?.tab || null;
+  }
+  if (!targetTab) return null;
+  const targetIndex = tabs.indexOf(targetTab);
+  if (targetIndex < 0) return null;
+  let position = event.position === 'right' ? 'right' : 'left';
+  if (Number.isFinite(pointerX)) {
+    const rect = targetTab.getBoundingClientRect();
+    position = pointerX >= rect.left + rect.width / 2 ? 'right' : 'left';
+  }
+  return {tabs, tabItems, sourceIndex, targetTab, targetIndex, position};
+}
+
 function dockviewTabInsertionInfo(event) {
   if (event?.kind !== 'tab') return null;
   const data = event.getData?.();
@@ -197,16 +239,10 @@ function dockviewTabInsertionInfo(event) {
   const targetSlot = dockviewSlotForGroupId(event.group?.id || '');
   const sourceSlot = slotForItem(item) || dockviewSlotForGroupId(data?.groupId || '');
   if (!item || !targetSlot) return null;
-  const nativeTarget = event.nativeEvent?.target;
-  const targetTab = nativeTarget?.closest?.('.dv-tab');
-  const tabStrip = targetTab?.parentElement;
-  if (!targetTab || !tabStrip) return null;
-  const tabs = Array.from(tabStrip.querySelectorAll?.('.dv-tab') || []);
-  const tabItems = tabs.map(tab => tab.querySelector?.('.dockview-pane-tab')?.dataset?.paneTab || '');
-  const sourceIndex = tabItems.indexOf(item);
-  const targetIndex = tabs.indexOf(targetTab);
-  if (targetIndex < 0) return null;
-  const insertionIndex = event.position === 'right' ? targetIndex + 1 : targetIndex;
+  const hit = dockviewTabDropHit(event, item);
+  if (!hit) return null;
+  const {tabItems, sourceIndex, targetIndex, position} = hit;
+  const insertionIndex = position === 'right' ? targetIndex + 1 : targetIndex;
   const adjustedIndex = insertionIndex - (sourceSlot === targetSlot && sourceIndex >= 0 && sourceIndex < insertionIndex ? 1 : 0);
   const targetItems = tabItems.filter(tab => tab && tab !== item);
   const pinnedBoundary = targetItems.filter(tabIsPinned).length;
@@ -235,16 +271,11 @@ function dockviewTabEdgeReorderIntent(event) {
   const targetSlot = dockviewSlotForGroupId(event.group?.id || '');
   const sourceSlot = slotForItem(item) || dockviewSlotForGroupId(data?.groupId || '');
   if (!item || !targetSlot || sourceSlot !== targetSlot) return null;
-  const nativeTarget = event.nativeEvent?.target;
-  const targetTab = nativeTarget?.closest?.('.dv-tab');
-  const tabStrip = targetTab?.parentElement;
-  if (!targetTab || !tabStrip) return null;
-  const targetItem = targetTab.querySelector?.('.dockview-pane-tab')?.dataset?.paneTab || '';
+  const hit = dockviewTabDropHit(event, item);   // coordinate-resolved: never the dragged tab itself
+  if (!hit) return null;
+  const targetItem = hit.tabItems[hit.targetIndex] || '';
   if (!tabIsPinned(item) || !tabIsPinned(targetItem)) return null;
-  const tabs = Array.from(tabStrip.querySelectorAll?.('.dv-tab') || []);
-  const sourceIndex = tabs.findIndex(tab => tab.querySelector?.('.dockview-pane-tab')?.dataset?.paneTab === item);
-  const targetIndex = tabs.indexOf(targetTab);
-  const insertIndex = dockviewAdjacentEdgeTabInsertIndex(sourceIndex, targetIndex, tabs.length);
+  const insertIndex = dockviewAdjacentEdgeTabInsertIndex(hit.sourceIndex, hit.targetIndex, hit.tabs.length);
   if (insertIndex === null) return null;
   if (!targetSlot || slotIsFileExplorerPane(targetSlot)) return null;
   return {item, targetSlot, sourceSlot, insertIndex};
@@ -303,6 +334,10 @@ function dockviewFinishTabPointerDrag(event) {
   const insertIndex = dockviewAdjacentEdgeTabInsertIndex(sourceIndex, targetIndex, tabs.length);
   if (insertIndex === null) return;
   window.setTimeout(() => {
+    // The fallback only acts when dockview's own drop pipeline did NOT handle this gesture (onWillDrop
+    // stamps tabDropHandledAt). Without this guard the fallback re-runs the swap AFTER the primary move
+    // and, in a two-tab strip, computes the mirror swap — silently UNDOING the user's drag.
+    if (Date.now() - (Number(dockviewLayoutState.tabDropHandledAt) || 0) < 800) return;
     const currentTabs = paneTabs(targetSlot);
     const currentSourceIndex = currentTabs.indexOf(state.item);
     const currentTargetIndex = currentTabs.indexOf(targetItem);
@@ -646,6 +681,9 @@ function dockviewInit() {
     }),
     api.onWillShowOverlay(event => dockviewTrackRootBoundaryOverlay(event)),
     api.onWillDrop(event => {
+      // Tab drops are handled here (or committed by dockview itself); stamp the gesture so the pinned
+      // pointer-reorder FALLBACK stands down instead of double-applying (see dockviewFinishTabPointerDrag).
+      if (event?.kind === 'tab') dockviewLayoutState.tabDropHandledAt = Date.now();
       const edgeReorder = dockviewTabEdgeReorderIntent(event);
       if (edgeReorder) {
         dockviewLayoutState.pendingRootBoundaryDrop = null;
