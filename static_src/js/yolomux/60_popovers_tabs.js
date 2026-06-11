@@ -967,18 +967,30 @@ function moveCustomDragPreview(event) {
   customDragPreview.style.top = `${Math.round(event.clientY - customDragPreviewOffset.y)}px`;
 }
 
+const customDragPreviewCleanupEvents = ['drop', 'dragend', 'pointerup', 'mouseup', 'blur', 'visibilitychange'];
+
+function customDragPreviewEventTargets() {
+  return [document, window].filter(Boolean);
+}
+
 function bindCustomDragPreviewListeners() {
-  document.addEventListener?.('dragover', moveCustomDragPreview, true);
-  document.addEventListener?.('drag', moveCustomDragPreview, true);
-  document.addEventListener?.('drop', stopCustomDragPreview, true);
-  document.addEventListener?.('dragend', stopCustomDragPreview, true);
+  for (const target of customDragPreviewEventTargets()) {
+    target.addEventListener?.('dragover', moveCustomDragPreview, true);
+    target.addEventListener?.('drag', moveCustomDragPreview, true);
+    for (const eventName of customDragPreviewCleanupEvents) {
+      target.addEventListener?.(eventName, stopCustomDragPreview, true);
+    }
+  }
 }
 
 function unbindCustomDragPreviewListeners() {
-  document.removeEventListener?.('dragover', moveCustomDragPreview, true);
-  document.removeEventListener?.('drag', moveCustomDragPreview, true);
-  document.removeEventListener?.('drop', stopCustomDragPreview, true);
-  document.removeEventListener?.('dragend', stopCustomDragPreview, true);
+  for (const target of customDragPreviewEventTargets()) {
+    target.removeEventListener?.('dragover', moveCustomDragPreview, true);
+    target.removeEventListener?.('drag', moveCustomDragPreview, true);
+    for (const eventName of customDragPreviewCleanupEvents) {
+      target.removeEventListener?.(eventName, stopCustomDragPreview, true);
+    }
+  }
 }
 
 function stopCustomDragPreview() {

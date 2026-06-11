@@ -1,9 +1,11 @@
+import os
 from pathlib import Path
 
 from yolomux_lib import github_client
 from yolomux_lib import linear_client
 from yolomux_lib import metadata
 from yolomux_lib.common import _CACHE_MISS
+from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import PaneInfo
 from yolomux_lib.common import SessionInfo
 from yolomux_lib.common import tail_file_lines
@@ -109,6 +111,29 @@ def test_feature_branch_can_use_head_subject_pr_hint():
 def test_metadata_public_helpers_remain_available_after_client_split():
     assert github_checks_unknown()["state"] == "unknown"
     assert extract_linear_ids("OPS-123 is linked to INFRA-44 and OPS-123") == ["OPS-123", "INFRA-44"]
+
+
+def test_session_to_json_includes_latest_agent_transcript_mtime(tmp_path):
+    older = tmp_path / "older.jsonl"
+    newer = tmp_path / "newer.jsonl"
+    older.write_text("{}\n", encoding="utf-8")
+    newer.write_text("{}\n", encoding="utf-8")
+    older_mtime = 1_770_000_000
+    newer_mtime = 1_780_000_000
+    older.touch()
+    newer.touch()
+    os.utime(older, (older_mtime, older_mtime))
+    os.utime(newer, (newer_mtime, newer_mtime))
+    agents = [
+        AgentInfo("1", "codex", 1, "1:0.0", "codex", None, "running", "old", str(older), None),
+        AgentInfo("1", "claude", 2, "1:0.1", "claude", None, "running", "new", str(newer), None),
+        AgentInfo("1", "codex", 3, "1:0.2", "codex", None, "running", "missing", str(tmp_path / "missing.jsonl"), None),
+    ]
+    info = SessionInfo(session="1", panes=[], selected_pane=None, agents=agents)
+
+    payload = metadata.session_to_json(info, MetadataCache(), allow_network=False)
+
+    assert payload["transcript_mtime"] == newer_mtime
 
 
 def test_metadata_cache_expires_entries(monkeypatch):

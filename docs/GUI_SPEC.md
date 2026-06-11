@@ -20,7 +20,7 @@ This document is the working GUI contract for pane, tab, Finder/Differ, editor, 
 - [x] Editor back/forward buttons navigate the visited-file stack.
 - [x] Search results can render image/file references as `[Image #N] '/absolute/path'`.
 - [x] File quick-open ranks basename matches ahead of path-only matches.
-- [x] File quick-open opens new files in the active tab's pane, except Finder/Differ which stays reserved.
+- [x] Newly opened tabs (files, Preferences, YO!info/YO!agent, and other non-tmux tab types) open in the pane that owns the currently active tab; Finder/Differ stays reserved and tmux sessions keep their placement rules. DONE 2026-06-11: generalized from the former quick-open-only targeting rule.
 - [x] Finder/Differ rows support selection, multi-select, rename/delete, context menu, date/sort controls, and image preview.
 - [x] Preferences exposes searchable, collapsible sections with reset controls and live-applied settings.
 - [x] Keyboard shortcut labels use the concrete platform modifier: Mac uses `Cmd`; PC/Linux uses `Ctrl`.
@@ -116,9 +116,11 @@ This document is the working GUI contract for pane, tab, Finder/Differ, editor, 
 ## Search, Menus, And Popovers
 
 - Search results that reference images or files should use a Popular IDE-style display when possible: `[Image #N] '/absolute/path'`.
-- Cmd-P file quick-open should preserve active-pane context. A normal file open lands in the pane that owns the currently active tab; explicit split-open keeps its split behavior; Finder/Differ remains a reserved pane target.
+- Cmd-P file quick-open and other newly opened non-tmux tabs preserve active-pane context. A normal file, Preferences, or YO!info/YO!agent open lands in the pane that owns the currently active tab; explicit split-open keeps its split behavior; Finder/Differ remains a reserved pane target.
 - Quick Search and Tabs search should collapse duplicate open-file rows by path and surface open view chips instead of showing duplicate file entries.
 - Tab search indexes session labels, branch/PR metadata, Linear IDs, file paths, and tab details.
+- Unified search ranking contract: `Mod+P` and `Shift+Mod+P` search the SAME universe (files, panes/tabs, commands, settings) and differ ONLY in ranking prior — `Mod+P` ranks files first, `Shift+Mod+P` ranks panes first. Dominance order within results: (1) per-surface domain prior, (2) anchored prefix on the primary name (typing `6` puts file `6.md` first in `Mod+P`, pane `6 …` first in `Shift+Mod+P`), (3) contiguity (`123` ranks `hello 123` above `1 a 2 b 3 c`), (4) recency (file index mtime; pane recency uses latest agent transcript mtime from the session payload, then summary timestamps as fallback), (5) focused-session repo affinity. Match quality dominates recency; recency dominates repo affinity. For typed blended results, the first visible screen keeps a bounded mix of file and pane matches so async file-index results cannot crowd a strong pane hit offscreen. The scoring and first-screen mix weights are ONE exported data table guarded by table-driven ranking tests, so behavior is tuned by editing weights + expected-order rows, not by rewriting ranking code.
+- Unified search shows a compact loading status while backend file search is in flight, even when local pane/command/recent results are already displayed.
 - Menus and popovers are global UI state. Hover must not auto-open menus when auto-focus is off unless the user explicitly opened a menu first.
 - Popovers use shared timing and ownership so tab, image, menu, and file-preview popovers do not fight each other.
 - Custom popovers should replace duplicate native `title` text when the custom popover already provides the same information.
@@ -145,7 +147,7 @@ This document is the working GUI contract for pane, tab, Finder/Differ, editor, 
 - The app modifier is platform-specific: Mac uses `Cmd`; PC/Linux uses `Ctrl`. Shortcut labels must say the concrete platform modifier and must not display combined `Ctrl/Cmd` text.
 - Mac app shortcuts use `Cmd` so they can be captured even when a terminal is focused; Mac `Ctrl` stays available for terminal/tmux input. PC/Linux app shortcuts use `Ctrl`.
 - Global shortcuts are captured before focused controls swallow them, but text inputs, rename fields, editors, and terminal input must keep their normal typing shortcuts unless a shortcut is explicitly platform-owned by the app.
-- Implemented app shortcuts: `Shift+Mod+P` opens the command palette, `Mod+P` opens file quick-open, `Mod+B` toggles Finder/Differ, `Mod+,` opens Preferences, `?` opens Keyboard shortcuts, `Esc` closes shortcut/menu overlays, and `Mod+W` closes the active closable tab.
+- Implemented app shortcuts: `Mod+P` opens unified search with file-first ranking, `Shift+Mod+P` opens the same unified search with pane/command-first ranking, `Mod+B` toggles Finder/Differ, `Mod+,` opens Preferences, `?` opens Keyboard shortcuts, `Esc` closes shortcut/menu overlays, and `Mod+W` closes the active closable tab.
 - Close-tab fallback: outside text-editing contexts, `Mod+Backspace` / `Mod+Delete` may close the active closable tab. This fallback must not fire inside inputs, rename fields, editors, or terminal text entry.
 - Editor shortcuts: `Mod+S` saves, `Mod+F` finds, `Mod+H` replaces, `Mod+G` goes to line, `Mod+/` toggles comments, `Tab` / `Shift+Tab` indent and outdent, `Mod+Z` / `Shift+Mod+Z` undo and redo, and `Mod+Alt+[` / `Mod+Alt+]` move editor navigation back and forward.
 - Diff editor chunk shortcuts reuse editor undo/redo: `Mod+Z` undoes the selected chunk action and `Shift+Mod+Z` redoes it when the diff editor owns the focus.
@@ -185,6 +187,8 @@ This document is the working GUI contract for pane, tab, Finder/Differ, editor, 
 
 ## Audit Backlog For Future Specs And Tests
 
+- [x] High priority: terminal Info Bar agent labels stay muted, tmux window buttons align at the right next to the detail close control, and hiding/showing details refits xterm without overlap or clipped content. DONE 2026-06-11: fixed shared detail-row styling, Dockview collapsed grid rows, and terminal refit scheduling; guarded by `tests/layout_url.test.js` and `tests/test_browser_layout.py::test_dockview_terminal_info_bar_alignment_and_detail_toggle_refits_xterm`.
+- [ ] Preferences: expose the Active YO rotation period control from the YOLO dropdown, keeping it synced with the Preferences value. QUEUED 2026-06-11.
 - [ ] Add a source x target x zone drag/drop matrix fixture that enumerates tabs, file rows, directory rows, Finder/Differ, normal panes, root edges, and gutters. This should assert preview owner, drop effect, and final layout for each valid case.
 - [ ] Add visual screenshot checks for active/inactive Dockview tabs against the pre-Dockview tab style so spacing, rounded active tabs, inactive background, and header actions cannot drift.
 - [ ] Add a multi-file Finder/Differ drag test. It should verify one preview, one target slot, stable insertion order, and no duplicate file-editor items for repeated paths.

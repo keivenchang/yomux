@@ -260,7 +260,7 @@ let diffExpandUnchanged = storageGet('yolomux.diffExpandUnchanged') === '1';
 let fileEditorThemeMode = readStoredEditorThemeMode();
 let fileEditorPreviewDisplayMode = readStoredEditorPreviewDisplayMode();
 let fileEditorCursorStyle = 'block';  // C3: default caret is block; saved 'line' choices round-trip via settings
-let fileEditorCursorColor = 'yellow';  // 'yellow' (match the active terminal cursor) | 'theme' (per-scheme cursor)
+let fileEditorCursorColor = 'yellow';  // 'yellow' default; 'theme' uses the editor/terminal scheme cursor
 let fileEditorAutosaveEnabled = false;
 let fileEditorAutosaveDelaySeconds = 2.5;
 const fileEditorAutosaveTimers = new Map();
@@ -2031,6 +2031,34 @@ function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+const searchRankWeights = Object.freeze({
+  perChar: 8,
+  contiguous: 10,
+  wordStart: 6,
+  gapPenalty: 0.2,
+  haystackLengthPenalty: 0.01,
+  anchorPrimary: 20000,
+  anchorSecondary: 12000,
+  fieldIndexPenalty: 20,
+  domainPrior: {
+    files: {file: 6000, pane: 3000, command: 0, setting: 0},
+    command: {pane: 6000, command: 3000, setting: 3000, file: 0},
+  },
+  fileNamePrefix: 3500,
+  fileNameContains: 1800,
+  fileNameSubsequence: 600,
+  finderAlias: 25000,
+  finderAliasFilesMode: 2500,
+  recentSelectionBase: 1000,
+  recencyCap: 900,
+  recencyHalfLifeSeconds: 7 * 24 * 60 * 60,
+  repoAffinity: 400,
+  mixWindow: 8,
+  mixSecondarySlots: 2,
+  mixFirstSecondaryIndex: 2,
+  mixSecondaryStep: 3,
+});
+
 function fuzzySubsequenceMatch(query, text) {
   const needle = String(query || '').toLowerCase().replace(/\s+/g, '');
   const haystack = String(text || '').toLowerCase();
@@ -2045,15 +2073,15 @@ function fuzzySubsequenceMatch(query, text) {
     const previousChar = haystack[index - 1] || '';
     const contiguous = previousIndex >= 0 && index === previousIndex + 1;
     const wordStart = index === 0 || /[\s/_:.-]/.test(previousChar);
-    score += 8;
-    if (contiguous) score += 10;
-    if (wordStart) score += 6;
-    score -= Math.max(0, index - position) * 0.2;
+    score += searchRankWeights.perChar;
+    if (contiguous) score += searchRankWeights.contiguous;
+    if (wordStart) score += searchRankWeights.wordStart;
+    score -= Math.max(0, index - position) * searchRankWeights.gapPenalty;
     previousIndex = index;
     position = index + 1;
     indexes.push(index);
   }
-  return {score: score - Math.max(0, haystack.length - needle.length) * 0.01, indexes};
+  return {score: score - Math.max(0, haystack.length - needle.length) * searchRankWeights.haystackLengthPenalty, indexes};
 }
 
 function fuzzySubsequenceScore(query, text) {
@@ -2081,9 +2109,9 @@ function fuzzySearchScore(query, fields) {
     for (const [index, value] of values.entries()) {
       let fieldScore = fuzzySubsequenceScore(token, value);
       if (Number.isFinite(fieldScore) && fuzzyFieldStartsWithQuery(token, value)) {
-        fieldScore += index === 0 ? 20000 : 12000;
+        fieldScore += index === 0 ? searchRankWeights.anchorPrimary : searchRankWeights.anchorSecondary;
       }
-      if (Number.isFinite(fieldScore)) best = Math.max(best, fieldScore - index * 20);
+      if (Number.isFinite(fieldScore)) best = Math.max(best, fieldScore - index * searchRankWeights.fieldIndexPenalty);
     }
     if (!Number.isFinite(best)) return Number.NEGATIVE_INFINITY;
     total += best;
@@ -4425,15 +4453,33 @@ function commandPaletteViewModeLabel(mode) {
   return t('editor.mode.edit');
 }
 
+function commandPaletteNumericTime(value) {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number) || number <= 0) return 0;
+  if (number > 1e15) return number / 1e9;
+  if (number > 1e11) return number / 1000;
+  return number;
+}
+
+function commandPalettePaneMtime(item) {
+  if (!isTmuxSession(item)) return 0;
+  const info = sessionTranscriptInfo(item).info || {};
+  return commandPaletteNumericTime(
+    info.last_activity_ts || info.transcript_mtime || info.updated_ts || info.rolling_updated_ts || info.mtime || 0
+  );
+}
+
 function commandPaletteCommandItems() {
   // Group FILE items by path and emit ONE row per file; non-file tabs (sessions, Finder/Info/Prefs)
   // stay one row each.
   const tabRow = (item, extra = {}) => ({
     group: t('palette.group.tabs'),
+    category: 'pane',
     label: itemLabel(item),
     detail: menuTabDetail(item),
     key: `tab:${item}`,
     targetItem: item,
+    mtime: commandPalettePaneMtime(item),
     searchFields: tabSearchFields(item),
     keybinding: 'Enter',
     run: () => selectSession(item, {userInitiated: true}),
@@ -4464,9 +4510,11 @@ function commandPaletteCommandItems() {
   const tabItemIds = new Set(commandPaletteAllTabItems());
   const menuItems = appMenuTree()
     .flatMap(menu => flattenMenuCommands(menu.items, [menu.label]))
-    .filter(item => !(item.targetItem && isVirtualItem(item.targetItem) && tabItemIds.has(item.targetItem)));
+    .filter(item => !(item.targetItem && isVirtualItem(item.targetItem) && tabItemIds.has(item.targetItem)))
+    .map(item => ({...item, category: 'command'}));
   const settingItems = preferenceSections().flatMap(section => section.items.map(item => ({
     group: t('palette.group.settings'),
+    category: 'setting',
     label: `${section.title} / ${item.label}`,
     detail: item.help || item.path,
     key: `setting:${item.path}`,
@@ -4484,7 +4532,7 @@ function commandPaletteCommandItems() {
       });
     },
   })));
-  return [...tabItems, ...menuItems, ...settingItems].map(item => ({...item, category: 'action'}));
+  return [...tabItems, ...menuItems, ...settingItems];
 }
 
 function fileQuickOpenRootForFile(path) {
@@ -4593,9 +4641,7 @@ function revealOpenFileLineSoon(path, line) {
 }
 
 function fileQuickOpenTargetSlot() {
-  const item = currentActiveMenuItem();
-  const slot = item ? slotForSession(item) : null;
-  return slot && !slotIsFileExplorerPane(slot) ? slot : null;
+  return focusedActivationSlot();
 }
 
 async function openFileQuickOpenPath(path, options = {}) {
@@ -4641,9 +4687,12 @@ function fileQuickOpenItem(path, options = {}) {
   const detail = cursorReference?.detail || compactHomePath(path);
   return {
     group: options.group || 'Files',
+    category: 'file',
     label: cursorReference?.label || (isDir ? `${label}/` : label),
     detail,
     key: `file:${path}`,
+    path,
+    mtime: commandPaletteNumericTime(options.mtime || options.mtimeNs || 0),
     iconText: isDir ? '▸' : fileIconFor(label),
     keybinding: isDir ? 'Enter' : `${appShortcutText('Enter')} split`,
     searchFields: [label, path, detail, options.relativePath || '', cursorReference?.label || ''],
@@ -4656,6 +4705,7 @@ function fileQuickOpenItem(path, options = {}) {
 function recentFileQuickOpenItems() {
   return Array.from(openFiles.keys()).reverse().map((path, index) => fileQuickOpenItem(path, {
     group: t('palette.group.recent'),
+    mtime: openFiles.get(path)?.mtime || 0,
     sortBonus: 120 - index,
   }));
 }
@@ -4735,6 +4785,8 @@ function fileQuickOpenItems() {
       relativePath: file.relative_path || file.name || '',
       kind: file.kind || 'file',
       imageIndex,
+      mtime: file.mtime || 0,
+      mtimeNs: file.mtime_ns || 0,
       sortBonus: (externalIndexed ? -250 : 250) + (file.uploaded === true ? -500 : 0),
     }));
   }
@@ -4761,37 +4813,155 @@ function fileQuickOpenItems() {
   return items.map(item => ({...item, category: 'file'}));
 }
 
-function commandPaletteItems() {
-  // Unified palette. commandPaletteMode is now a PRIORITY flag ('files' = Cmd-P, 'command' = Cmd-Shift-P):
-  // it picks the home category shown on an EMPTY box, and which category ranks first once you type.
-  // Labels are identical for both entry points; only the ordering (commandPaletteItemPriorityRank) differs.
-  const parts = fileQuickOpenQueryParts();
+function commandPaletteFilePath(item) {
+  return item?.path || item?.searchFields?.[1] || fileItemPath(item?.targetItem || '') || item?.detail || item?.label || '';
+}
+
+function commandPaletteMergedItems() {
+  const openTabPaths = new Set(commandPaletteAllTabItems().map(fileItemPath).filter(Boolean));
+  const dedupedFileItems = fileQuickOpenItems().filter(item => !openTabPaths.has(commandPaletteFilePath(item)));
+  return [...dedupedFileItems, ...commandPaletteCommandItems()];
+}
+
+function commandPaletteCandidateItems(mode = commandPaletteMode, rawQuery = commandPaletteQuery) {
+  // Unified palette provider. `mode` is a priority flag: Cmd-P and Shift-Cmd-P draw from the same
+  // candidate universe and differ only in searchRankWeights.domainPrior.
+  const parts = fileQuickOpenQueryParts(rawQuery);
   if (parts.commandMode) return commandPaletteCommandItems();                          // `>` = actions only
-  if (parts.symbolMode || fileQuickOpenPathQuery().active) return fileQuickOpenItems(); // `@` / path = files only
+  if (parts.symbolMode || fileQuickOpenPathQuery(rawQuery).active) return fileQuickOpenItems(); // `@` / path = files only
   // Lean on open: an empty box shows only the priority's home category (no command dump — #7).
-  if (!commandPaletteSearchQuery()) {
-    return commandPaletteMode === 'files' ? fileQuickOpenItems() : commandPaletteCommandItems();
+  if (!commandPaletteSearchQuery(rawQuery, mode)) {
+    return mode === 'files' ? fileQuickOpenItems() : commandPaletteCommandItems();
   }
   // On type: BOTH entry points search the full corpus; the priority sort floats the home category up.
   // S2: a file that is already an open tab shows ONCE — as the deduped Tabs row (which carries
   // both edit + preview chips). Drop its Recent/Files duplicate so it isn't listed twice. Only here, in
   // the merged view; the files-only and empty-box modes above have no Tabs rows, so Recent stays intact.
-  const openTabPaths = new Set(commandPaletteAllTabItems().map(fileItemPath).filter(Boolean));
-  const filePathOf = item => item.searchFields?.[1] || item.detail || item.label;
-  const dedupedFileItems = fileQuickOpenItems().filter(item => !openTabPaths.has(filePathOf(item)));
-  return [...dedupedFileItems, ...commandPaletteCommandItems()];
+  return commandPaletteMergedItems();
+}
+
+function commandPaletteItems() {
+  return commandPaletteCandidateItems(commandPaletteMode, commandPaletteQuery);
+}
+
+function commandPaletteRankItems(items, query, options = {}) {
+  const ranked = (items || [])
+    .map((item, sortIndex) => ({...item, score: commandPaletteItemScore(item, query, options), sortIndex}))
+    .filter(item => Number.isFinite(item.score))
+    .sort((left, right) => query
+      ? right.score - left.score || left.group.localeCompare(right.group) || left.label.localeCompare(right.label)
+      : right.score - left.score || left.sortIndex - right.sortIndex);
+  return commandPaletteMixFirstScreenResults(ranked, query, options);
+}
+
+function commandPaletteMixDomains(options = {}) {
+  const surface = commandPaletteSurface(options);
+  if (surface === 'files') return {primary: 'file', secondary: 'pane'};
+  if (surface === 'command') return {primary: 'pane', secondary: 'file'};
+  return null;
+}
+
+function commandPaletteMixFirstScreenResults(ranked, query, options = {}) {
+  if (!String(query || '').trim()) return ranked;
+  const domains = commandPaletteMixDomains(options);
+  if (!domains) return ranked;
+  const windowSize = Math.max(0, Number(searchRankWeights.mixWindow || 0));
+  const maxSecondary = Math.max(0, Number(searchRankWeights.mixSecondarySlots || 0));
+  if (!windowSize || !maxSecondary) return ranked;
+  const hasPrimary = ranked.slice(0, windowSize).some(item => commandPaletteItemDomain(item) === domains.primary);
+  const secondaryCandidates = ranked
+    .map((item, index) => ({item, index}))
+    .filter(row => commandPaletteItemDomain(row.item) === domains.secondary)
+    .slice(0, maxSecondary);
+  if (!hasPrimary || !secondaryCandidates.length) return ranked;
+  const selected = [];
+  for (const [secondaryIndex, row] of secondaryCandidates.entries()) {
+    const target = Math.min(
+      windowSize - 1,
+      searchRankWeights.mixFirstSecondaryIndex + secondaryIndex * searchRankWeights.mixSecondaryStep
+    );
+    if (row.index > target) selected.push({item: row.item, target});
+  }
+  if (!selected.length) return ranked;
+  const selectedItems = new Set(selected.map(row => row.item));
+  const result = ranked.filter(item => !selectedItems.has(item));
+  for (const row of selected) {
+    result.splice(Math.min(row.target, result.length), 0, row.item);
+  }
+  return result;
 }
 
 function commandPaletteMatches(item, query) {
   return Number.isFinite(commandPaletteItemScore(item, query));
 }
 
-function commandPaletteItemScore(item, query) {
+function commandPaletteSurface(options = {}) {
+  return options.surface === 'files' || options.surface === 'command' ? options.surface : commandPaletteMode;
+}
+
+function commandPaletteItemDomain(item) {
+  if (item?.category === 'file') return 'file';
+  if (item?.category === 'pane') return 'pane';
+  if (item?.category === 'setting') return 'setting';
+  return 'command';
+}
+
+function commandPaletteDomainPrior(item, options = {}) {
+  const surface = commandPaletteSurface(options);
+  const domain = commandPaletteItemDomain(item);
+  return searchRankWeights.domainPrior[surface]?.[domain] || 0;
+}
+
+function commandPaletteNowSeconds(options = {}) {
+  const explicit = Number(options.nowSeconds);
+  return Number.isFinite(explicit) && explicit > 0 ? explicit : Date.now() / 1000;
+}
+
+function commandPaletteItemMtime(item) {
+  return commandPaletteNumericTime(item?.mtime || item?.mtime_ns || 0);
+}
+
+function commandPaletteRecencyBonus(item, options = {}) {
+  const timestamp = commandPaletteItemMtime(item);
+  if (!timestamp) return 0;
+  const age = Math.max(0, commandPaletteNowSeconds(options) - timestamp);
+  return searchRankWeights.recencyCap * Math.pow(0.5, age / searchRankWeights.recencyHalfLifeSeconds);
+}
+
+function commandPaletteFocusedRepoRoots(options = {}) {
+  if (Array.isArray(options.focusedRepoRoots)) {
+    return options.focusedRepoRoots.map(normalizeDirectoryPath).filter(Boolean);
+  }
+  const focused = currentSessionActionTarget() || focusedPanelItem || focusedTerminal;
+  const info = isTmuxSession(focused) ? sessionTranscriptInfo(focused) : null;
+  const roots = [
+    info?.gitRoot || '',
+    focusedRepoRootForSync(info?.selectedPath || info?.gitCwd || '', sessionFilesRepoRoots()),
+  ].map(normalizeDirectoryPath).filter(Boolean);
+  return Array.from(new Set(roots));
+}
+
+function commandPaletteRepoAffinityBonus(item, options = {}) {
+  if (item?.category !== 'file') return 0;
+  const path = normalizeDirectoryPath(commandPaletteFilePath(item));
+  if (!path) return 0;
+  return commandPaletteFocusedRepoRoots(options).some(root => pathIsInsideDirectory(path, root))
+    ? searchRankWeights.repoAffinity
+    : 0;
+}
+
+function commandPaletteItemScore(item, query, options = {}) {
   if (item.disabled) return 0;
   // C15 follow-up: the path-mode "Open this folder in Finder" row always sorts to the top (and survives
   // any filter text) so it is the default Enter action while a directory path is typed.
   if (item.pinTop) return 1e9;
-  const bonus = Number(item.sortBonus || 0) + commandPaletteRecentBonus(item) + commandPaletteFinderAliasBonus(item, query) + commandPaletteFileNameBonus(item, query);
+  const bonus = commandPaletteDomainPrior(item, options)
+    + Number(item.sortBonus || 0)
+    + commandPaletteRecentBonus(item)
+    + commandPaletteFinderAliasBonus(item, query, options)
+    + commandPaletteFileNameBonus(item, query)
+    + commandPaletteRecencyBonus(item, options)
+    + commandPaletteRepoAffinityBonus(item, options);
   if (!String(query || '').trim()) return bonus;
   const base = fuzzySearchScore(query, item.searchFields || [item.label, item.detail, item.group]);
   return Number.isFinite(base) ? base + bonus : base;
@@ -4808,33 +4978,28 @@ function commandPaletteFileNameBonus(item, query) {
   for (const token of tokens) {
     const canonicalToken = fuzzyCanonicalPrefixText(token);
     if (!canonicalToken) continue;
-    if (canonicalName.startsWith(canonicalToken)) bonus += 100000;
-    else if (canonicalName.includes(canonicalToken)) bonus += 60000;
-    else if (Number.isFinite(fuzzySubsequenceScore(token, filename))) bonus += 20000;
+    if (canonicalName.startsWith(canonicalToken)) bonus += searchRankWeights.fileNamePrefix;
+    else if (canonicalName.includes(canonicalToken)) bonus += searchRankWeights.fileNameContains;
+    else if (Number.isFinite(fuzzySubsequenceScore(token, filename))) bonus += searchRankWeights.fileNameSubsequence;
   }
   return bonus;
 }
 
-function commandPaletteFinderAliasBonus(item, query) {
+function commandPaletteFinderAliasBonus(item, query, options = {}) {
   if (item?.targetItem !== fileExplorerItemId) return 0;
   const text = String(query || '').trim().toLowerCase().replace(/\s+/g, ' ');
   if (text.length < 3) return 0;
   const aliases = ['file', 'files', 'finder', 'file explorer'];
-  return aliases.some(alias => alias === text || alias.startsWith(text)) ? 10000 : 0;
+  if (!aliases.some(alias => alias === text || alias.startsWith(text))) return 0;
+  return commandPaletteSurface(options) === 'files'
+    ? searchRankWeights.finderAliasFilesMode
+    : searchRankWeights.finderAlias;
 }
 
 function commandPaletteRecentBonus(item) {
   const key = item.key || `${item.group}:${item.label}`;
   const sequence = commandPaletteRecentKeys.get(key);
-  return sequence ? 1000 + sequence : 0;
-}
-
-// Priority sort tier: Cmd-P (commandPaletteMode 'files') floats file results above actions;
-// Cmd-Shift-P ('command') floats panes/tabs/commands/settings above files. pinTop rows stay first.
-function commandPaletteItemPriorityRank(item) {
-  if (item.pinTop) return -1;
-  const isFile = item.category === 'file';
-  return commandPaletteMode === 'files' ? (isFile ? 0 : 1) : (isFile ? 1 : 0);
+  return sequence ? searchRankWeights.recentSelectionBase + sequence : 0;
 }
 
 function rememberCommandPaletteItem(item) {
@@ -4847,8 +5012,8 @@ function commandPaletteEffectiveMode() {
   return commandPaletteMode === 'files' && !fileQuickOpenQueryParts().commandMode ? 'files' : 'command';
 }
 
-function commandPaletteSearchQuery(query = commandPaletteQuery) {
-  if (commandPaletteMode !== 'files') return String(query || '').trim();
+function commandPaletteSearchQuery(query = commandPaletteQuery, mode = commandPaletteMode) {
+  if (mode !== 'files') return String(query || '').trim();
   const parts = fileQuickOpenQueryParts(query);
   if (parts.commandMode) return String(query || '').replace(/^>\s*/, '').trim();
   if (parts.symbolMode) return String(query || '').replace(/^@\s*/, '').trim();
@@ -4876,6 +5041,10 @@ function commandPaletteEmptyText() {
   return 'No matches';
 }
 
+function commandPaletteStatusText() {
+  return fileQuickOpenLoading ? 'Searching files...' : '';
+}
+
 function ensureCommandPalette() {
   if (commandPaletteNode) return commandPaletteNode;
   const node = document.createElement('div');
@@ -4884,6 +5053,7 @@ function ensureCommandPalette() {
   node.innerHTML = `
     <div class="command-palette-dialog" role="dialog" aria-modal="true" aria-label="${esc(t('palette.aria'))}">
       <input type="search" class="command-palette-input" placeholder="${esc(t('palette.placeholder'))}" aria-label="${esc(t('palette.placeholder'))}">
+      <div class="command-palette-status" aria-live="polite" hidden></div>
       <div class="command-palette-results" role="listbox"></div>
     </div>`;
   node.addEventListener('mousedown', event => {
@@ -4938,22 +5108,21 @@ function renderCommandPaletteResults() {
   const node = ensureCommandPalette();
   const dialog = node.querySelector('.command-palette-dialog');
   const input = node.querySelector('.command-palette-input');
+  const status = node.querySelector('.command-palette-status');
   const results = node.querySelector('.command-palette-results');
   const query = commandPaletteSearchQuery();
   dialog?.setAttribute('aria-label', commandPaletteLabel());
   if (input) {
     input.placeholder = commandPalettePlaceholder();
     input.setAttribute('aria-label', commandPaletteLabel());
+    input.setAttribute('aria-busy', fileQuickOpenLoading ? 'true' : 'false');
   }
-  commandPaletteItemsCache = commandPaletteItems()
-    .map((item, sortIndex) => ({...item, score: commandPaletteItemScore(item, query), sortIndex}))
-    .filter(item => Number.isFinite(item.score))
-    .sort((left, right) =>
-      commandPaletteItemPriorityRank(left) - commandPaletteItemPriorityRank(right)
-      || (query
-        ? right.score - left.score || left.group.localeCompare(right.group) || left.label.localeCompare(right.label)
-        : right.score - left.score || left.sortIndex - right.sortIndex))
-    .slice(0, 60);
+  if (status) {
+    const text = commandPaletteStatusText();
+    status.hidden = !text;
+    status.textContent = text;
+  }
+  commandPaletteItemsCache = commandPaletteRankItems(commandPaletteItems(), query).slice(0, 60);
   commandPaletteIndex = Math.min(commandPaletteIndex, Math.max(0, commandPaletteItemsCache.length - 1));
   if (!commandPaletteItemsCache.length) {
     results.innerHTML = `<div class="command-palette-empty">${esc(commandPaletteEmptyText())}</div>`;
@@ -5023,7 +5192,8 @@ async function invokeCommandPaletteSelection(event = null) {
 function scheduleFileQuickOpenSearch(options = {}) {
   if (fileQuickOpenDebounce) clearTimeout(fileQuickOpenDebounce);
   const run = () => {
-    if (commandPaletteMode === 'files' && !commandPaletteQuery.trim().startsWith('>')) refreshFileQuickOpenCandidates(commandPaletteQuery);
+    const q = commandPaletteQuery.trim();
+    if (!q.startsWith('>') && !q.startsWith('@')) refreshFileQuickOpenCandidates(commandPaletteQuery);
   };
   if (options.immediate) run();
   else fileQuickOpenDebounce = setTimeout(run, 160);
@@ -11535,6 +11705,11 @@ async function openFileEditorPane(path, options = {}) {
     activatePaneTab(existingSlot, item);
     return;
   }
+  const activationSlot = slotForTabActivation(item);
+  if (activationSlot && !slotIsFileExplorerPane(activationSlot)) {
+    await moveSessionToSlot(item, activationSlot, null, paneTabs(activationSlot).length);
+    return;
+  }
   const editorSlot = slotForNewFileEditorTab();
   if (editorSlot) {
     await moveSessionToSlot(item, editorSlot, null, paneTabs(editorSlot).length);
@@ -12992,15 +13167,22 @@ function normalizeEditorCursorStyle(value) {
 
 const UI_COLOR_CHOICES = ['green', 'blue', 'orange', 'yellow', 'purple', 'white'];
 const DEFAULT_CURSOR_COLOR = 'yellow';
+const NEON_CURSOR_COLOR_CHOICES = ['laser-lime', 'neon-green', 'neon-cyan', 'neon-magenta', 'neon-orange'];
+const CURSOR_COLOR_CHOICES = [...UI_COLOR_CHOICES, ...NEON_CURSOR_COLOR_CHOICES, 'theme'];
 // One parent for the named UI colors. Active color and cursor color must both derive from this map so
 // labels, swatches, and palette membership cannot drift.
 const UI_COLOR_PRESETS = {
-  green:  {labelKey: 'pref.appearance.active_color.green', cursorLabelKey: 'pref.appearance.editor_cursor_color.green', cursor: '#39ff14', active: null},
-  blue:   {labelKey: 'pref.appearance.active_color.blue', cursorLabelKey: 'pref.appearance.editor_cursor_color.blue', cursor: '#00b7ff', active: {dark: {accent: '#3b82f6', bright: '#3b82f6', text: '#ffffff'}, light: {accent: '#2563eb', bright: '#2563eb', text: '#ffffff'}}},
-  orange: {labelKey: 'pref.appearance.active_color.orange', cursorLabelKey: 'pref.appearance.editor_cursor_color.orange', cursor: '#ff7a00', active: {dark: {accent: '#f97316', bright: '#f97316', text: '#1a0c00'}, light: {accent: '#b91c1c', bright: '#b91c1c', text: '#ffffff'}}},
-  yellow: {labelKey: 'pref.appearance.active_color.yellow', cursorLabelKey: 'pref.appearance.editor_cursor_color.yellow', cursor: '#ffea00', active: {dark: {accent: '#eab308', bright: '#eab308', text: '#1a1500'}, light: {accent: '#d6a400', bright: '#d6a400', text: '#1a1500'}}},
-  purple: {labelKey: 'pref.appearance.active_color.purple', cursorLabelKey: 'pref.appearance.editor_cursor_color.purple', cursor: '#d946ef', active: {dark: {accent: '#a855f7', bright: '#a855f7', text: '#ffffff'}, light: {accent: '#7c3aed', bright: '#7c3aed', text: '#ffffff'}}},
-  white:  {labelKey: 'pref.appearance.active_color.white', cursorLabelKey: 'pref.appearance.editor_cursor_color.white', cursor: '#ffffff', active: {dark: {accent: '#e8edf2', bright: '#e8edf2', text: '#0b0e14'}, light: {accent: '#9aa5b3', bright: '#dfe5ec', text: '#0b0e14'}}},
+  green:  {labelKey: 'pref.appearance.active_color.green', cursorLabelKey: 'pref.appearance.editor_cursor_color.green', cursor: {dark: '#76b900', light: '#4f7f00'}, active: null},
+  blue:   {labelKey: 'pref.appearance.active_color.blue', cursorLabelKey: 'pref.appearance.editor_cursor_color.blue', cursor: {dark: '#00b7ff', light: '#0069b8'}, active: {dark: {accent: '#3b82f6', bright: '#3b82f6', text: '#ffffff'}, light: {accent: '#2563eb', bright: '#2563eb', text: '#ffffff'}}},
+  orange: {labelKey: 'pref.appearance.active_color.orange', cursorLabelKey: 'pref.appearance.editor_cursor_color.orange', cursor: {dark: '#ff7a00', light: '#b91c1c'}, active: {dark: {accent: '#f97316', bright: '#f97316', text: '#1a0c00'}, light: {accent: '#b91c1c', bright: '#b91c1c', text: '#ffffff'}}},
+  yellow: {labelKey: 'pref.appearance.active_color.yellow', cursorLabelKey: 'pref.appearance.editor_cursor_color.yellow', cursor: {dark: '#ffea00', light: '#9a6700'}, active: {dark: {accent: '#eab308', bright: '#eab308', text: '#1a1500'}, light: {accent: '#d6a400', bright: '#d6a400', text: '#1a1500'}}},
+  purple: {labelKey: 'pref.appearance.active_color.purple', cursorLabelKey: 'pref.appearance.editor_cursor_color.purple', cursor: {dark: '#d946ef', light: '#7c3aed'}, active: {dark: {accent: '#a855f7', bright: '#a855f7', text: '#ffffff'}, light: {accent: '#7c3aed', bright: '#7c3aed', text: '#ffffff'}}},
+  white:  {labelKey: 'pref.appearance.active_color.white', cursorLabelKey: 'pref.appearance.editor_cursor_color.white', cursor: {dark: '#ffffff', light: '#6b7280'}, active: {dark: {accent: '#e8edf2', bright: '#e8edf2', text: '#0b0e14'}, light: {accent: '#9aa5b3', bright: '#dfe5ec', text: '#0b0e14'}}},
+  'laser-lime':   {cursorLabelKey: 'pref.appearance.editor_cursor_color.laser-lime', cursor: {dark: '#ccff00', light: '#6b8f00'}},
+  'neon-green':   {cursorLabelKey: 'pref.appearance.editor_cursor_color.neon-green', cursor: {dark: '#39ff14', light: '#16825d'}},
+  'neon-cyan':    {cursorLabelKey: 'pref.appearance.editor_cursor_color.neon-cyan', cursor: {dark: '#00ffff', light: '#0e7490'}},
+  'neon-magenta': {cursorLabelKey: 'pref.appearance.editor_cursor_color.neon-magenta', cursor: {dark: '#ff00ff', light: '#a21caf'}},
+  'neon-orange':  {cursorLabelKey: 'pref.appearance.editor_cursor_color.neon-orange', cursor: {dark: '#ff9f0a', light: '#b45309'}},
 };
 
 const ACTIVE_COLOR_PRESETS = Object.fromEntries(
@@ -13013,14 +13195,20 @@ function normalizeEditorCursorColor(value) {
   return value === 'theme' || UI_COLOR_PRESETS[value]?.cursor ? value : DEFAULT_CURSOR_COLOR;
 }
 
+function cursorColorForPreset(value, light = false) {
+  const cursor = UI_COLOR_PRESETS[value]?.cursor;
+  if (typeof cursor === 'string') return cursor;
+  return light ? cursor?.light : cursor?.dark;
+}
+
 function editorCursorColorForScheme(scheme = activeEditorScheme()) {
   const value = normalizeEditorCursorColor(fileEditorCursorColor);
-  return value === 'theme' ? scheme.cursor : UI_COLOR_PRESETS[value].cursor;
+  return value === 'theme' ? scheme.cursor : cursorColorForPreset(value, scheme?.dark === false);
 }
 
 function activeTerminalCursorColorForTheme(baseTheme = terminalThemeForGlobalTheme()) {
   const value = normalizeEditorCursorColor(fileEditorCursorColor);
-  return value === 'theme' ? baseTheme.cursor : UI_COLOR_PRESETS[value].cursor;
+  return value === 'theme' ? baseTheme.cursor : cursorColorForPreset(value, resolvedTerminalThemeMode() === 'light');
 }
 
 function applyCursorColorSetting() {
@@ -14318,18 +14506,30 @@ function moveCustomDragPreview(event) {
   customDragPreview.style.top = `${Math.round(event.clientY - customDragPreviewOffset.y)}px`;
 }
 
+const customDragPreviewCleanupEvents = ['drop', 'dragend', 'pointerup', 'mouseup', 'blur', 'visibilitychange'];
+
+function customDragPreviewEventTargets() {
+  return [document, window].filter(Boolean);
+}
+
 function bindCustomDragPreviewListeners() {
-  document.addEventListener?.('dragover', moveCustomDragPreview, true);
-  document.addEventListener?.('drag', moveCustomDragPreview, true);
-  document.addEventListener?.('drop', stopCustomDragPreview, true);
-  document.addEventListener?.('dragend', stopCustomDragPreview, true);
+  for (const target of customDragPreviewEventTargets()) {
+    target.addEventListener?.('dragover', moveCustomDragPreview, true);
+    target.addEventListener?.('drag', moveCustomDragPreview, true);
+    for (const eventName of customDragPreviewCleanupEvents) {
+      target.addEventListener?.(eventName, stopCustomDragPreview, true);
+    }
+  }
 }
 
 function unbindCustomDragPreviewListeners() {
-  document.removeEventListener?.('dragover', moveCustomDragPreview, true);
-  document.removeEventListener?.('drag', moveCustomDragPreview, true);
-  document.removeEventListener?.('drop', stopCustomDragPreview, true);
-  document.removeEventListener?.('dragend', stopCustomDragPreview, true);
+  for (const target of customDragPreviewEventTargets()) {
+    target.removeEventListener?.('dragover', moveCustomDragPreview, true);
+    target.removeEventListener?.('drag', moveCustomDragPreview, true);
+    for (const eventName of customDragPreviewCleanupEvents) {
+      target.removeEventListener?.(eventName, stopCustomDragPreview, true);
+    }
+  }
 }
 
 function stopCustomDragPreview() {
@@ -14853,10 +15053,16 @@ function slotForNewSession() {
   return 'left';
 }
 
+function focusedActivationSlot() {
+  const item = currentActiveMenuItem();
+  const slot = item ? slotForSession(item) : null;
+  return slot && !slotIsFileExplorerPane(slot) ? slot : null;
+}
+
 function slotForTabActivation(item) {
   const currentSlot = slotForSession(item);
   if (currentSlot) return currentSlot;
-  return largestNonFileExplorerPaneSlot() || firstEmptyPane() || largestPaneSlot() || slotForNewSession();
+  return focusedActivationSlot() || largestNonFileExplorerPaneSlot() || firstEmptyPane() || largestPaneSlot() || slotForNewSession();
 }
 
 async function activateTabInExistingPane(item) {
@@ -19245,7 +19451,7 @@ function panelDetailToggleButtons(panel) {
     buttons.push(button);
   };
   panel.querySelectorAll?.('[data-detail-toggle]')?.forEach(add);
-  const item = panel.dataset?.slot || String(panel.id || '').replace(/^panel-/, '');
+  const item = panel.dataset?.layoutItem || String(panel.id || '').replace(/^panel-/, '') || panel.dataset?.slot || '';
   if (item) {
     document.body?.querySelectorAll?.(`[data-detail-toggle="${cssEscape(item)}"]`)?.forEach(add);
   }
@@ -19260,13 +19466,25 @@ function syncPanelDetailsToggleState(panel) {
 function setPanelDetailsCollapsed(panel, collapsed) {
   panel.classList.toggle('details-collapsed', collapsed);
   syncPanelDetailsToggleState(panel);
+  schedulePanelDetailsFit(panel);
+}
+
+function panelItemFromPanel(panel) {
+  const id = String(panel?.id || '');
+  return id.startsWith('panel-') ? id.slice('panel-'.length) : '';
+}
+
+function schedulePanelDetailsFit(panel) {
+  const item = panelItemFromPanel(panel);
+  if (item && isTmuxSession(item)) scheduleFit(item);
 }
 
 function terminalTabDisplayLabel(session, info) {
+  return 'Term';
+}
+
+function terminalTabDetailLabel(session, info) {
   const label = terminalProcessLabel(info);
-  const agentKind = sessionAgentKind(session);
-  const normalized = String(label || '').trim().toLowerCase();
-  if (agentKind && (normalized === agentKind || normalized === agentName(agentKind).toLowerCase())) return 'Term';
   return label || 'Term';
 }
 
@@ -19279,7 +19497,7 @@ function terminalTabLabel(session, info) {
 function terminalTabTitle(session, info) {
   const type = tabTypeForItem(session);
   if (type?.terminalTitle) return type.terminalTitle(session);
-  return `terminal: ${terminalTabDisplayLabel(session, info)}`;
+  return `terminal: ${terminalTabDetailLabel(session, info)}`;
 }
 
 function sessionAgentBadgeHtml(session) {
@@ -19495,8 +19713,9 @@ function updatePanelControlLabels(session, info) {
   const button = document.querySelector(`[data-tab="${cssEscape(session)}"][data-tab-name="terminal"]`);
   updatePanelWindowStepButtons(session, info);
   if (button) {
-    button.textContent = terminalTabLabel(session, info);
-    button.title = terminalTabTitle(session, info);
+    const title = terminalTabTitle(session, info);
+    button.title = title;
+    button.setAttribute('aria-label', title);
   }
 }
 
@@ -20113,13 +20332,22 @@ function activeColorPreferenceChoices() {
 
 function cursorColorPreferenceChoice(value) {
   const preset = UI_COLOR_PRESETS[value];
-  const color = value === 'theme' ? activeEditorScheme().cursor : preset?.cursor;
-  const label = value === 'theme' ? t('pref.appearance.editor_cursor_color.theme') : t(preset.cursorLabelKey);
-  return color ? {value, label, swatches: [color]} : {value, label};
+  const label = value === 'theme'
+    ? t('pref.appearance.editor_cursor_color.theme')
+    : preset?.cursorLabelKey ? t(preset.cursorLabelKey) : preferenceChoiceLabel(value);
+  if (value === 'theme') return {value, label, swatches: [activeEditorScheme().cursor]};
+  const dark = cursorColorForPreset(value, false);
+  const light = cursorColorForPreset(value, true);
+  if (dark && light && dark !== light) return {value, label, swatches: [dark, light], joinedSwatches: true};
+  return dark ? {value, label, swatches: [dark]} : {value, label};
 }
 
 function cursorColorPreferenceChoices() {
-  return [...UI_COLOR_CHOICES, 'theme']
+  const choices = Array.isArray(clientSettingsPayload?.choices?.['appearance.editor_cursor_color'])
+    ? clientSettingsPayload.choices['appearance.editor_cursor_color']
+    : CURSOR_COLOR_CHOICES;
+  return choices
+    .filter(value => value === 'theme' || UI_COLOR_PRESETS[value]?.cursor)
     .map(cursorColorPreferenceChoice);
 }
 

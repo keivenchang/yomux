@@ -556,10 +556,19 @@ def fallback_pull_request(repo: dict[str, str], number: int, source: str, title:
     }
 
 def session_to_json(info: SessionInfo, metadata_cache: MetadataCache, allow_network: bool = True) -> dict[str, Any]:
+    transcript_mtime = 0.0
+    for agent in info.agents:
+        if not agent.transcript:
+            continue
+        try:
+            transcript_mtime = max(transcript_mtime, Path(agent.transcript).stat().st_mtime)
+        except OSError:
+            continue
     return {
         "session": info.session,
         "panes": [asdict(pane) for pane in info.panes],
         "selected_pane": asdict(info.selected_pane) if info.selected_pane else None,
         "agents": [asdict(agent) for agent in info.agents],
+        "transcript_mtime": transcript_mtime,
         "project": session_project_metadata(info, metadata_cache, allow_network=allow_network),
     }

@@ -22,7 +22,8 @@ SETTINGS_PATH = CONFIG_DIR / "settings.yaml"
 SETTINGS_DISPLAY_PATH = "~/.config/yolomux/settings.yaml"
 UI_COLOR_CHOICES: tuple[str, ...] = ("green", "blue", "orange", "yellow", "purple", "white")
 DEFAULT_CURSOR_COLOR = "yellow"
-CURSOR_COLOR_CHOICES: tuple[str, ...] = (*UI_COLOR_CHOICES, "theme")
+NEON_CURSOR_COLOR_CHOICES: tuple[str, ...] = ("laser-lime", "neon-green", "neon-cyan", "neon-magenta", "neon-orange")
+CURSOR_COLOR_CHOICES: tuple[str, ...] = (*UI_COLOR_CHOICES, *NEON_CURSOR_COLOR_CHOICES, "theme")
 POPULAR_IDE_DARK_SCHEME = "popular-ide-dark-plus"
 POPULAR_IDE_LIGHT_SCHEME = "popular-ide-light-plus"
 LEGACY_EDITOR_SCHEME_PREFIX = "".join(("vs", "code"))
@@ -300,7 +301,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("appearance", "editor_dark_color_scheme"): "Dark editor scheme used by the editor dark/light toggle.",
     ("appearance", "editor_light_color_scheme"): "Light editor scheme used by the editor dark/light toggle. Default is Popular IDE Light+.",
     ("appearance", "editor_cursor_style"): "line | block. CodeMirror cursor shape.",
-    ("appearance", "editor_cursor_color"): "green | blue | orange | yellow | purple | white | theme. Default yellow. Applies to the active terminal cursor, editor cursor, and pane scrollbar thumb; theme uses each surface's scheme cursor.",
+    ("appearance", "editor_cursor_color"): "green | blue | orange | yellow | purple | white | laser-lime | neon-green | neon-cyan | neon-magenta | neon-orange | theme. Default yellow. Applies to the active terminal cursor, editor cursor, and pane scrollbar thumb; theme uses each surface's scheme cursor.",
     ("appearance", "file_explorer_font_size"): "Pixels, 6-24. Applied live to File Explorer/Finder.",
     ("appearance", "tab_width"): "Pixels, 120-420. Drives the pane tab width CSS variable.",
     ("appearance", "pane_spacing"): "Pixels, 0-20. Gap between panes; at 0 they touch and the green active outline covers the divider. The active outline thickens as spacing grows.",

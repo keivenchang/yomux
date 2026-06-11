@@ -1200,7 +1200,7 @@ function panelDetailToggleButtons(panel) {
     buttons.push(button);
   };
   panel.querySelectorAll?.('[data-detail-toggle]')?.forEach(add);
-  const item = panel.dataset?.slot || String(panel.id || '').replace(/^panel-/, '');
+  const item = panel.dataset?.layoutItem || String(panel.id || '').replace(/^panel-/, '') || panel.dataset?.slot || '';
   if (item) {
     document.body?.querySelectorAll?.(`[data-detail-toggle="${cssEscape(item)}"]`)?.forEach(add);
   }
@@ -1215,13 +1215,25 @@ function syncPanelDetailsToggleState(panel) {
 function setPanelDetailsCollapsed(panel, collapsed) {
   panel.classList.toggle('details-collapsed', collapsed);
   syncPanelDetailsToggleState(panel);
+  schedulePanelDetailsFit(panel);
+}
+
+function panelItemFromPanel(panel) {
+  const id = String(panel?.id || '');
+  return id.startsWith('panel-') ? id.slice('panel-'.length) : '';
+}
+
+function schedulePanelDetailsFit(panel) {
+  const item = panelItemFromPanel(panel);
+  if (item && isTmuxSession(item)) scheduleFit(item);
 }
 
 function terminalTabDisplayLabel(session, info) {
+  return 'Term';
+}
+
+function terminalTabDetailLabel(session, info) {
   const label = terminalProcessLabel(info);
-  const agentKind = sessionAgentKind(session);
-  const normalized = String(label || '').trim().toLowerCase();
-  if (agentKind && (normalized === agentKind || normalized === agentName(agentKind).toLowerCase())) return 'Term';
   return label || 'Term';
 }
 
@@ -1234,7 +1246,7 @@ function terminalTabLabel(session, info) {
 function terminalTabTitle(session, info) {
   const type = tabTypeForItem(session);
   if (type?.terminalTitle) return type.terminalTitle(session);
-  return `terminal: ${terminalTabDisplayLabel(session, info)}`;
+  return `terminal: ${terminalTabDetailLabel(session, info)}`;
 }
 
 function sessionAgentBadgeHtml(session) {
@@ -1450,8 +1462,9 @@ function updatePanelControlLabels(session, info) {
   const button = document.querySelector(`[data-tab="${cssEscape(session)}"][data-tab-name="terminal"]`);
   updatePanelWindowStepButtons(session, info);
   if (button) {
-    button.textContent = terminalTabLabel(session, info);
-    button.title = terminalTabTitle(session, info);
+    const title = terminalTabTitle(session, info);
+    button.title = title;
+    button.setAttribute('aria-label', title);
   }
 }
 
@@ -2068,13 +2081,22 @@ function activeColorPreferenceChoices() {
 
 function cursorColorPreferenceChoice(value) {
   const preset = UI_COLOR_PRESETS[value];
-  const color = value === 'theme' ? activeEditorScheme().cursor : preset?.cursor;
-  const label = value === 'theme' ? t('pref.appearance.editor_cursor_color.theme') : t(preset.cursorLabelKey);
-  return color ? {value, label, swatches: [color]} : {value, label};
+  const label = value === 'theme'
+    ? t('pref.appearance.editor_cursor_color.theme')
+    : preset?.cursorLabelKey ? t(preset.cursorLabelKey) : preferenceChoiceLabel(value);
+  if (value === 'theme') return {value, label, swatches: [activeEditorScheme().cursor]};
+  const dark = cursorColorForPreset(value, false);
+  const light = cursorColorForPreset(value, true);
+  if (dark && light && dark !== light) return {value, label, swatches: [dark, light], joinedSwatches: true};
+  return dark ? {value, label, swatches: [dark]} : {value, label};
 }
 
 function cursorColorPreferenceChoices() {
-  return [...UI_COLOR_CHOICES, 'theme']
+  const choices = Array.isArray(clientSettingsPayload?.choices?.['appearance.editor_cursor_color'])
+    ? clientSettingsPayload.choices['appearance.editor_cursor_color']
+    : CURSOR_COLOR_CHOICES;
+  return choices
+    .filter(value => value === 'theme' || UI_COLOR_PRESETS[value]?.cursor)
     .map(cursorColorPreferenceChoice);
 }
 

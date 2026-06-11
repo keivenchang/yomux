@@ -71,6 +71,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["appearance"]["editor_light_color_scheme"] == "yolomux-light"
     assert settings["appearance"]["editor_cursor_style"] == "block"  # C3: invalid choice clamps to the new block default
     assert settings["appearance"]["editor_cursor_color"] == "yellow"  # invalid choice clamps to the default
+    assert sanitize_settings({"appearance": {"editor_cursor_color": "laser-lime"}})["appearance"]["editor_cursor_color"] == "laser-lime"
     assert settings["appearance"]["file_explorer_font_size"] == 6
     assert settings["appearance"]["tab_width"] == 120
     assert settings["appearance"]["pane_spacing"] == 20
@@ -121,7 +122,7 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert payload["settings"]["general"]["default_layout"] == "split"
     assert payload["choices"]["general.default_layout"] == ["single", "split", "grid", "wall"]
     assert payload["choices"]["appearance.active_color"] == ["green", "blue", "orange", "yellow", "purple", "white"]
-    assert payload["choices"]["appearance.editor_cursor_color"] == ["green", "blue", "orange", "yellow", "purple", "white", "theme"]
+    assert payload["choices"]["appearance.editor_cursor_color"] == ["green", "blue", "orange", "yellow", "purple", "white", "laser-lime", "neon-green", "neon-cyan", "neon-magenta", "neon-orange", "theme"]
     assert payload["settings"]["general"]["startup_tips"] is True
     assert payload["settings"]["uploads"]["max_bytes"] == UPLOAD_MAX_BYTES
     assert payload["settings"]["yoagent"]["backend"] == "auto"

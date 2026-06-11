@@ -1884,6 +1884,11 @@ async function openFileEditorPane(path, options = {}) {
     activatePaneTab(existingSlot, item);
     return;
   }
+  const activationSlot = slotForTabActivation(item);
+  if (activationSlot && !slotIsFileExplorerPane(activationSlot)) {
+    await moveSessionToSlot(item, activationSlot, null, paneTabs(activationSlot).length);
+    return;
+  }
   const editorSlot = slotForNewFileEditorTab();
   if (editorSlot) {
     await moveSessionToSlot(item, editorSlot, null, paneTabs(editorSlot).length);

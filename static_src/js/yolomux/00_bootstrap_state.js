@@ -259,7 +259,7 @@ let diffExpandUnchanged = storageGet('yolomux.diffExpandUnchanged') === '1';
 let fileEditorThemeMode = readStoredEditorThemeMode();
 let fileEditorPreviewDisplayMode = readStoredEditorPreviewDisplayMode();
 let fileEditorCursorStyle = 'block';  // C3: default caret is block; saved 'line' choices round-trip via settings
-let fileEditorCursorColor = 'yellow';  // 'yellow' (match the active terminal cursor) | 'theme' (per-scheme cursor)
+let fileEditorCursorColor = 'yellow';  // 'yellow' default; 'theme' uses the editor/terminal scheme cursor
 let fileEditorAutosaveEnabled = false;
 let fileEditorAutosaveDelaySeconds = 2.5;
 const fileEditorAutosaveTimers = new Map();

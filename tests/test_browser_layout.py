@@ -2518,6 +2518,217 @@ def test_dockview_window_bar_buttons_select_tmux_windows(browser, tmp_path):
     assert query == "session=1&window=2"
 
 
+def test_dockview_terminal_info_bar_alignment_and_detail_toggle_refits_xterm(browser, tmp_path):
+    transcript_sessions = {
+        "1": {
+            "agents": [{"kind": "claude", "transcript": True, "pane_target": "%2"}],
+            "panes": [
+                {"target": "%1", "window": 0, "window_name": "bash", "window_active": False, "active": True, "process_label": "bash"},
+                {"target": "%2", "window": 1, "window_name": "claude", "window_active": True, "active": True, "process_label": "claude"},
+                {"target": "%3", "window": 2, "window_name": "codex", "window_active": False, "active": True, "process_label": "codex"},
+            ],
+        },
+    }
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=left&tabs=left:1",
+        sessions=["1"],
+        transcript_sessions=transcript_sessions,
+        terminal_css=".terminal { width: 100%; height: 100%; } #term-1 .xterm { width: 100%; height: 100%; }",
+    )
+    wait_for_dockview(browser, min_tabs=1)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return document.querySelector('#panel-1 .panel-agent-badge')
+              && document.querySelectorAll('#panel-1 .panel-detail-row [data-window-index]').length === 3
+              && document.querySelector('#term-1 .xterm')
+              && document.querySelector('.dockview-pane-header-actions [data-detail-toggle="1"]');
+            """
+        )
+    )
+    before = browser.execute_script(
+        """
+        const rectFor = node => {
+          const rect = node.getBoundingClientRect();
+          return {top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right, width: rect.width, height: rect.height};
+        };
+        const panel = document.querySelector('#panel-1');
+        const row = panel.querySelector('.panel-detail-row');
+        const badge = row.querySelector('.panel-agent-badge');
+        const bar = row.querySelector('.tmux-window-bar');
+        const close = row.querySelector('.panel-detail-close');
+        const headerTerminal = document.querySelector('.dockview-pane-header-actions .terminal-tab');
+        const pane = panel.querySelector('#terminal-pane-1');
+        const xterm = panel.querySelector('#term-1 .xterm');
+        const probe = document.createElement('div');
+        probe.style.background = 'var(--pane-tab-yolo-bg)';
+        document.body.appendChild(probe);
+        const yoloBg = getComputedStyle(probe).backgroundColor;
+        probe.remove();
+        const term = terminals.get('1')?.term;
+        if (term) {
+          const originalResize = term.resize.bind(term);
+          term.__detailToggleResizeCount = 0;
+          term.__detailToggleRowsBefore = term.rows;
+          term.resize = (cols, rows) => {
+            term.__detailToggleResizeCount += 1;
+            originalResize(cols, rows);
+          };
+        }
+        return {
+          row: rectFor(row),
+          badgeText: badge.textContent.trim(),
+          badgeBg: getComputedStyle(badge).backgroundColor,
+          yoloBg,
+          bar: rectFor(bar),
+          close: rectFor(close),
+          headerTerminalText: headerTerminal?.textContent.trim() || '',
+          headerTerminalTitle: headerTerminal?.getAttribute('title') || '',
+          pane: rectFor(pane),
+          xterm: rectFor(xterm),
+          rowDisplay: getComputedStyle(row).display,
+          rows: term?.rows || 0,
+        };
+        """
+    )
+    browser.find_element("css selector", '.dockview-pane-header-actions [data-detail-toggle="1"]').click()
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const panel = document.querySelector('#panel-1');
+            return panel?.classList.contains('details-collapsed');
+            """
+        )
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const term = terminals.get('1')?.term;
+            return (term?.__detailToggleResizeCount || 0) > 0;
+            """
+        )
+    )
+    after = browser.execute_script(
+        """
+        const rectFor = node => {
+          const rect = node.getBoundingClientRect();
+          return {top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right, width: rect.width, height: rect.height};
+        };
+        const panel = document.querySelector('#panel-1');
+        const row = panel.querySelector('.panel-detail-row');
+        const pane = panel.querySelector('#terminal-pane-1');
+        const container = panel.querySelector('#term-1');
+        const xterm = panel.querySelector('#term-1 .xterm');
+        const headerToggle = document.querySelector('.dockview-pane-header-actions [data-detail-toggle="1"]');
+        const term = terminals.get('1')?.term;
+        return {
+          panel: rectFor(panel),
+          rowDisplay: getComputedStyle(row).display,
+          headerPressed: headerToggle?.getAttribute('aria-pressed') || '',
+          headerTitle: headerToggle?.getAttribute('title') || '',
+          pane: rectFor(pane),
+          paneActive: pane.classList.contains('active'),
+          container: rectFor(container),
+          containerClientWidth: container.clientWidth,
+          containerClientHeight: container.clientHeight,
+          xterm: rectFor(xterm),
+          resizeCount: term?.__detailToggleResizeCount || 0,
+          rowsBefore: term?.__detailToggleRowsBefore || 0,
+          rowsAfter: term?.rows || 0,
+        };
+        """
+    )
+    assert before["badgeText"] == "Claude"
+    assert before["badgeBg"] != before["yoloBg"]
+    assert before["headerTerminalText"] == "Term"
+    assert before["headerTerminalTitle"] == "terminal: claude"
+    assert 0 <= before["close"]["left"] - before["bar"]["right"] <= 8
+    assert before["row"]["right"] - before["close"]["right"] <= 8
+    assert before["rowDisplay"] == "flex"
+    assert before["xterm"]["top"] >= before["row"]["bottom"] - 1
+    assert after["rowDisplay"] == "none"
+    assert after["headerPressed"] == "false"
+    assert after["headerTitle"].lower() == "show details"
+    assert after["resizeCount"] >= 1, after
+    assert after["xterm"]["top"] >= after["panel"]["top"] - 1
+    assert after["xterm"]["bottom"] <= after["pane"]["bottom"] + 1
+    assert after["rowsAfter"] >= before["rows"]
+
+
+def test_dockview_new_virtual_and_file_tabs_open_in_focused_pane(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1,2&layout=row@50(left,slot1)&tabs=left:1;slot1:2",
+        sessions=["1", "2"],
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          activatePaneTab('slot1', '2', {userInitiated: true});
+          setFocusedPanelItem('2', {userInitiated: true});
+          await selectSession(prefsItemId, {userInitiated: true});
+          const prefsSlot = slotForItem(prefsItemId);
+          activatePaneTab('slot1', '2', {userInitiated: true});
+          setFocusedPanelItem('2', {userInitiated: true});
+          await openInfoSubTab('yoagent');
+          const infoSlot = slotForItem(infoItemId);
+          activatePaneTab('slot1', '2', {userInitiated: true});
+          setFocusedPanelItem('2', {userInitiated: true});
+          const filePath = '/home/test/yolomux.dev/NEWTAB.md';
+          const fileItem = await openFileInEditor(filePath, {name: 'NEWTAB.md'}, {userInitiated: true});
+          done({
+            prefsSlot,
+            infoSlot,
+            fileSlot: slotForItem(fileItem),
+            slot1Tabs: paneTabs('slot1'),
+            leftTabs: paneTabs('left'),
+          });
+        })().catch(error => done({error: String(error && error.stack || error)}));
+        """
+    )
+    assert metrics.get("error") is None, metrics
+    assert metrics["prefsSlot"] == "slot1", metrics
+    assert metrics["infoSlot"] == "slot1", metrics
+    assert metrics["fileSlot"] == "slot1", metrics
+    assert "1" in metrics["leftTabs"], metrics
+    assert "2" in metrics["slot1Tabs"], metrics
+
+
+def test_dockview_new_tabs_do_not_open_in_focused_finder(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=row@22(left,slot1)&tabs=left:files;slot1:1",
+        sessions=["1"],
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          activatePaneTab('left', fileExplorerItemId, {userInitiated: true});
+          setFocusedPanelItem(fileExplorerItemId, {userInitiated: true});
+          await selectSession(prefsItemId, {userInitiated: true});
+          done({
+            prefsSlot: slotForItem(prefsItemId),
+            finderSlot: slotForItem(fileExplorerItemId),
+            leftTabs: paneTabs('left'),
+            slot1Tabs: paneTabs('slot1'),
+          });
+        })().catch(error => done({error: String(error && error.stack || error)}));
+        """
+    )
+    assert metrics.get("error") is None, metrics
+    assert metrics["finderSlot"] == "left", metrics
+    assert metrics["prefsSlot"] == "slot1", metrics
+    assert "__prefs__" not in metrics["leftTabs"], metrics
+
+
 def test_dockview_many_tabs_wrap_like_yolomux_strip(browser, tmp_path):
     sessions = [str(index) for index in range(1, 10)]
     load_dockview_runtime_boot_fixture(
@@ -5202,6 +5413,40 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
             "return getComputedStyle(document.querySelector('.preferences-scroll'), '::-webkit-scrollbar-thumb').backgroundColor"
         ) == metrics["expectedNeutralScrollThumb"]
     )
+    browser.execute_script(
+        """
+        setFocusedPanelItem('1', {userInitiated: true});
+        const radio = document.querySelector('input[type="radio"][data-setting-path="appearance.editor_cursor_color"][value="laser-lime"]');
+        radio.checked = true;
+        radio.dispatchEvent(new Event('change', {bubbles: true}));
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return window.__settingsPayload?.settings?.appearance?.editor_cursor_color === 'laser-lime'
+              && getComputedStyle(document.documentElement).getPropertyValue('--active-terminal-cursor-rgb').trim() === '204 255 0'
+              && terminals.get('1')?.term?.options?.theme?.cursor === '#ccff00';
+            """
+        )
+    )
+    cursor_metrics = browser.execute_script(
+        """
+        const probe = document.createElement('div');
+        probe.style.background = 'var(--pane-scrollbar-thumb-active)';
+        document.body.appendChild(probe);
+        const activeThumb = getComputedStyle(probe).backgroundColor;
+        probe.remove();
+        return {
+          rootCursorRgb: getComputedStyle(document.documentElement).getPropertyValue('--active-terminal-cursor-rgb').trim(),
+          terminalCursor: terminals.get('1')?.term?.options?.theme?.cursor || '',
+          activeScrollbarThumb: activeThumb,
+        };
+        """
+    )
+    assert cursor_metrics["rootCursorRgb"] == "204 255 0", cursor_metrics
+    assert cursor_metrics["terminalCursor"] == "#ccff00", cursor_metrics
+    assert cursor_metrics["activeScrollbarThumb"] == "rgba(204, 255, 0, 0.88)", cursor_metrics
 
 
 def test_info_and_preferences_scrollbars_inherit_shared_hover_state(browser, tmp_path):
@@ -7630,8 +7875,8 @@ def test_diff_overview_matches_actual_todo_codemirror_rows(browser, tmp_path):
             "toA": 148290,
             "endA": 148289,
             "fromB": 744,
-            "toB": 40633,
-            "endB": 40632,
+            "toB": 40750,
+            "endB": 40749,
         }
     ]
     assert metrics["rows"]["bands"] == [

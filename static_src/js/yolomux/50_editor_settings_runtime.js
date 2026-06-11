@@ -477,15 +477,22 @@ function normalizeEditorCursorStyle(value) {
 
 const UI_COLOR_CHOICES = ['green', 'blue', 'orange', 'yellow', 'purple', 'white'];
 const DEFAULT_CURSOR_COLOR = 'yellow';
+const NEON_CURSOR_COLOR_CHOICES = ['laser-lime', 'neon-green', 'neon-cyan', 'neon-magenta', 'neon-orange'];
+const CURSOR_COLOR_CHOICES = [...UI_COLOR_CHOICES, ...NEON_CURSOR_COLOR_CHOICES, 'theme'];
 // One parent for the named UI colors. Active color and cursor color must both derive from this map so
 // labels, swatches, and palette membership cannot drift.
 const UI_COLOR_PRESETS = {
-  green:  {labelKey: 'pref.appearance.active_color.green', cursorLabelKey: 'pref.appearance.editor_cursor_color.green', cursor: '#39ff14', active: null},
-  blue:   {labelKey: 'pref.appearance.active_color.blue', cursorLabelKey: 'pref.appearance.editor_cursor_color.blue', cursor: '#00b7ff', active: {dark: {accent: '#3b82f6', bright: '#3b82f6', text: '#ffffff'}, light: {accent: '#2563eb', bright: '#2563eb', text: '#ffffff'}}},
-  orange: {labelKey: 'pref.appearance.active_color.orange', cursorLabelKey: 'pref.appearance.editor_cursor_color.orange', cursor: '#ff7a00', active: {dark: {accent: '#f97316', bright: '#f97316', text: '#1a0c00'}, light: {accent: '#b91c1c', bright: '#b91c1c', text: '#ffffff'}}},
-  yellow: {labelKey: 'pref.appearance.active_color.yellow', cursorLabelKey: 'pref.appearance.editor_cursor_color.yellow', cursor: '#ffea00', active: {dark: {accent: '#eab308', bright: '#eab308', text: '#1a1500'}, light: {accent: '#d6a400', bright: '#d6a400', text: '#1a1500'}}},
-  purple: {labelKey: 'pref.appearance.active_color.purple', cursorLabelKey: 'pref.appearance.editor_cursor_color.purple', cursor: '#d946ef', active: {dark: {accent: '#a855f7', bright: '#a855f7', text: '#ffffff'}, light: {accent: '#7c3aed', bright: '#7c3aed', text: '#ffffff'}}},
-  white:  {labelKey: 'pref.appearance.active_color.white', cursorLabelKey: 'pref.appearance.editor_cursor_color.white', cursor: '#ffffff', active: {dark: {accent: '#e8edf2', bright: '#e8edf2', text: '#0b0e14'}, light: {accent: '#9aa5b3', bright: '#dfe5ec', text: '#0b0e14'}}},
+  green:  {labelKey: 'pref.appearance.active_color.green', cursorLabelKey: 'pref.appearance.editor_cursor_color.green', cursor: {dark: '#76b900', light: '#4f7f00'}, active: null},
+  blue:   {labelKey: 'pref.appearance.active_color.blue', cursorLabelKey: 'pref.appearance.editor_cursor_color.blue', cursor: {dark: '#00b7ff', light: '#0069b8'}, active: {dark: {accent: '#3b82f6', bright: '#3b82f6', text: '#ffffff'}, light: {accent: '#2563eb', bright: '#2563eb', text: '#ffffff'}}},
+  orange: {labelKey: 'pref.appearance.active_color.orange', cursorLabelKey: 'pref.appearance.editor_cursor_color.orange', cursor: {dark: '#ff7a00', light: '#b91c1c'}, active: {dark: {accent: '#f97316', bright: '#f97316', text: '#1a0c00'}, light: {accent: '#b91c1c', bright: '#b91c1c', text: '#ffffff'}}},
+  yellow: {labelKey: 'pref.appearance.active_color.yellow', cursorLabelKey: 'pref.appearance.editor_cursor_color.yellow', cursor: {dark: '#ffea00', light: '#9a6700'}, active: {dark: {accent: '#eab308', bright: '#eab308', text: '#1a1500'}, light: {accent: '#d6a400', bright: '#d6a400', text: '#1a1500'}}},
+  purple: {labelKey: 'pref.appearance.active_color.purple', cursorLabelKey: 'pref.appearance.editor_cursor_color.purple', cursor: {dark: '#d946ef', light: '#7c3aed'}, active: {dark: {accent: '#a855f7', bright: '#a855f7', text: '#ffffff'}, light: {accent: '#7c3aed', bright: '#7c3aed', text: '#ffffff'}}},
+  white:  {labelKey: 'pref.appearance.active_color.white', cursorLabelKey: 'pref.appearance.editor_cursor_color.white', cursor: {dark: '#ffffff', light: '#6b7280'}, active: {dark: {accent: '#e8edf2', bright: '#e8edf2', text: '#0b0e14'}, light: {accent: '#9aa5b3', bright: '#dfe5ec', text: '#0b0e14'}}},
+  'laser-lime':   {cursorLabelKey: 'pref.appearance.editor_cursor_color.laser-lime', cursor: {dark: '#ccff00', light: '#6b8f00'}},
+  'neon-green':   {cursorLabelKey: 'pref.appearance.editor_cursor_color.neon-green', cursor: {dark: '#39ff14', light: '#16825d'}},
+  'neon-cyan':    {cursorLabelKey: 'pref.appearance.editor_cursor_color.neon-cyan', cursor: {dark: '#00ffff', light: '#0e7490'}},
+  'neon-magenta': {cursorLabelKey: 'pref.appearance.editor_cursor_color.neon-magenta', cursor: {dark: '#ff00ff', light: '#a21caf'}},
+  'neon-orange':  {cursorLabelKey: 'pref.appearance.editor_cursor_color.neon-orange', cursor: {dark: '#ff9f0a', light: '#b45309'}},
 };
 
 const ACTIVE_COLOR_PRESETS = Object.fromEntries(
@@ -498,14 +505,20 @@ function normalizeEditorCursorColor(value) {
   return value === 'theme' || UI_COLOR_PRESETS[value]?.cursor ? value : DEFAULT_CURSOR_COLOR;
 }
 
+function cursorColorForPreset(value, light = false) {
+  const cursor = UI_COLOR_PRESETS[value]?.cursor;
+  if (typeof cursor === 'string') return cursor;
+  return light ? cursor?.light : cursor?.dark;
+}
+
 function editorCursorColorForScheme(scheme = activeEditorScheme()) {
   const value = normalizeEditorCursorColor(fileEditorCursorColor);
-  return value === 'theme' ? scheme.cursor : UI_COLOR_PRESETS[value].cursor;
+  return value === 'theme' ? scheme.cursor : cursorColorForPreset(value, scheme?.dark === false);
 }
 
 function activeTerminalCursorColorForTheme(baseTheme = terminalThemeForGlobalTheme()) {
   const value = normalizeEditorCursorColor(fileEditorCursorColor);
-  return value === 'theme' ? baseTheme.cursor : UI_COLOR_PRESETS[value].cursor;
+  return value === 'theme' ? baseTheme.cursor : cursorColorForPreset(value, resolvedTerminalThemeMode() === 'light');
 }
 
 function applyCursorColorSetting() {

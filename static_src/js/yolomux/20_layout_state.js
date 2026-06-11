@@ -1447,15 +1447,33 @@ function commandPaletteViewModeLabel(mode) {
   return t('editor.mode.edit');
 }
 
+function commandPaletteNumericTime(value) {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number) || number <= 0) return 0;
+  if (number > 1e15) return number / 1e9;
+  if (number > 1e11) return number / 1000;
+  return number;
+}
+
+function commandPalettePaneMtime(item) {
+  if (!isTmuxSession(item)) return 0;
+  const info = sessionTranscriptInfo(item).info || {};
+  return commandPaletteNumericTime(
+    info.last_activity_ts || info.transcript_mtime || info.updated_ts || info.rolling_updated_ts || info.mtime || 0
+  );
+}
+
 function commandPaletteCommandItems() {
   // Group FILE items by path and emit ONE row per file; non-file tabs (sessions, Finder/Info/Prefs)
   // stay one row each.
   const tabRow = (item, extra = {}) => ({
     group: t('palette.group.tabs'),
+    category: 'pane',
     label: itemLabel(item),
     detail: menuTabDetail(item),
     key: `tab:${item}`,
     targetItem: item,
+    mtime: commandPalettePaneMtime(item),
     searchFields: tabSearchFields(item),
     keybinding: 'Enter',
     run: () => selectSession(item, {userInitiated: true}),
@@ -1486,9 +1504,11 @@ function commandPaletteCommandItems() {
   const tabItemIds = new Set(commandPaletteAllTabItems());
   const menuItems = appMenuTree()
     .flatMap(menu => flattenMenuCommands(menu.items, [menu.label]))
-    .filter(item => !(item.targetItem && isVirtualItem(item.targetItem) && tabItemIds.has(item.targetItem)));
+    .filter(item => !(item.targetItem && isVirtualItem(item.targetItem) && tabItemIds.has(item.targetItem)))
+    .map(item => ({...item, category: 'command'}));
   const settingItems = preferenceSections().flatMap(section => section.items.map(item => ({
     group: t('palette.group.settings'),
+    category: 'setting',
     label: `${section.title} / ${item.label}`,
     detail: item.help || item.path,
     key: `setting:${item.path}`,
@@ -1506,7 +1526,7 @@ function commandPaletteCommandItems() {
       });
     },
   })));
-  return [...tabItems, ...menuItems, ...settingItems].map(item => ({...item, category: 'action'}));
+  return [...tabItems, ...menuItems, ...settingItems];
 }
 
 function fileQuickOpenRootForFile(path) {
@@ -1615,9 +1635,7 @@ function revealOpenFileLineSoon(path, line) {
 }
 
 function fileQuickOpenTargetSlot() {
-  const item = currentActiveMenuItem();
-  const slot = item ? slotForSession(item) : null;
-  return slot && !slotIsFileExplorerPane(slot) ? slot : null;
+  return focusedActivationSlot();
 }
 
 async function openFileQuickOpenPath(path, options = {}) {
@@ -1663,9 +1681,12 @@ function fileQuickOpenItem(path, options = {}) {
   const detail = cursorReference?.detail || compactHomePath(path);
   return {
     group: options.group || 'Files',
+    category: 'file',
     label: cursorReference?.label || (isDir ? `${label}/` : label),
     detail,
     key: `file:${path}`,
+    path,
+    mtime: commandPaletteNumericTime(options.mtime || options.mtimeNs || 0),
     iconText: isDir ? '▸' : fileIconFor(label),
     keybinding: isDir ? 'Enter' : `${appShortcutText('Enter')} split`,
     searchFields: [label, path, detail, options.relativePath || '', cursorReference?.label || ''],
@@ -1678,6 +1699,7 @@ function fileQuickOpenItem(path, options = {}) {
 function recentFileQuickOpenItems() {
   return Array.from(openFiles.keys()).reverse().map((path, index) => fileQuickOpenItem(path, {
     group: t('palette.group.recent'),
+    mtime: openFiles.get(path)?.mtime || 0,
     sortBonus: 120 - index,
   }));
 }
@@ -1757,6 +1779,8 @@ function fileQuickOpenItems() {
       relativePath: file.relative_path || file.name || '',
       kind: file.kind || 'file',
       imageIndex,
+      mtime: file.mtime || 0,
+      mtimeNs: file.mtime_ns || 0,
       sortBonus: (externalIndexed ? -250 : 250) + (file.uploaded === true ? -500 : 0),
     }));
   }
@@ -1783,37 +1807,155 @@ function fileQuickOpenItems() {
   return items.map(item => ({...item, category: 'file'}));
 }
 
-function commandPaletteItems() {
-  // Unified palette. commandPaletteMode is now a PRIORITY flag ('files' = Cmd-P, 'command' = Cmd-Shift-P):
-  // it picks the home category shown on an EMPTY box, and which category ranks first once you type.
-  // Labels are identical for both entry points; only the ordering (commandPaletteItemPriorityRank) differs.
-  const parts = fileQuickOpenQueryParts();
+function commandPaletteFilePath(item) {
+  return item?.path || item?.searchFields?.[1] || fileItemPath(item?.targetItem || '') || item?.detail || item?.label || '';
+}
+
+function commandPaletteMergedItems() {
+  const openTabPaths = new Set(commandPaletteAllTabItems().map(fileItemPath).filter(Boolean));
+  const dedupedFileItems = fileQuickOpenItems().filter(item => !openTabPaths.has(commandPaletteFilePath(item)));
+  return [...dedupedFileItems, ...commandPaletteCommandItems()];
+}
+
+function commandPaletteCandidateItems(mode = commandPaletteMode, rawQuery = commandPaletteQuery) {
+  // Unified palette provider. `mode` is a priority flag: Cmd-P and Shift-Cmd-P draw from the same
+  // candidate universe and differ only in searchRankWeights.domainPrior.
+  const parts = fileQuickOpenQueryParts(rawQuery);
   if (parts.commandMode) return commandPaletteCommandItems();                          // `>` = actions only
-  if (parts.symbolMode || fileQuickOpenPathQuery().active) return fileQuickOpenItems(); // `@` / path = files only
+  if (parts.symbolMode || fileQuickOpenPathQuery(rawQuery).active) return fileQuickOpenItems(); // `@` / path = files only
   // Lean on open: an empty box shows only the priority's home category (no command dump — #7).
-  if (!commandPaletteSearchQuery()) {
-    return commandPaletteMode === 'files' ? fileQuickOpenItems() : commandPaletteCommandItems();
+  if (!commandPaletteSearchQuery(rawQuery, mode)) {
+    return mode === 'files' ? fileQuickOpenItems() : commandPaletteCommandItems();
   }
   // On type: BOTH entry points search the full corpus; the priority sort floats the home category up.
   // S2: a file that is already an open tab shows ONCE — as the deduped Tabs row (which carries
   // both edit + preview chips). Drop its Recent/Files duplicate so it isn't listed twice. Only here, in
   // the merged view; the files-only and empty-box modes above have no Tabs rows, so Recent stays intact.
-  const openTabPaths = new Set(commandPaletteAllTabItems().map(fileItemPath).filter(Boolean));
-  const filePathOf = item => item.searchFields?.[1] || item.detail || item.label;
-  const dedupedFileItems = fileQuickOpenItems().filter(item => !openTabPaths.has(filePathOf(item)));
-  return [...dedupedFileItems, ...commandPaletteCommandItems()];
+  return commandPaletteMergedItems();
+}
+
+function commandPaletteItems() {
+  return commandPaletteCandidateItems(commandPaletteMode, commandPaletteQuery);
+}
+
+function commandPaletteRankItems(items, query, options = {}) {
+  const ranked = (items || [])
+    .map((item, sortIndex) => ({...item, score: commandPaletteItemScore(item, query, options), sortIndex}))
+    .filter(item => Number.isFinite(item.score))
+    .sort((left, right) => query
+      ? right.score - left.score || left.group.localeCompare(right.group) || left.label.localeCompare(right.label)
+      : right.score - left.score || left.sortIndex - right.sortIndex);
+  return commandPaletteMixFirstScreenResults(ranked, query, options);
+}
+
+function commandPaletteMixDomains(options = {}) {
+  const surface = commandPaletteSurface(options);
+  if (surface === 'files') return {primary: 'file', secondary: 'pane'};
+  if (surface === 'command') return {primary: 'pane', secondary: 'file'};
+  return null;
+}
+
+function commandPaletteMixFirstScreenResults(ranked, query, options = {}) {
+  if (!String(query || '').trim()) return ranked;
+  const domains = commandPaletteMixDomains(options);
+  if (!domains) return ranked;
+  const windowSize = Math.max(0, Number(searchRankWeights.mixWindow || 0));
+  const maxSecondary = Math.max(0, Number(searchRankWeights.mixSecondarySlots || 0));
+  if (!windowSize || !maxSecondary) return ranked;
+  const hasPrimary = ranked.slice(0, windowSize).some(item => commandPaletteItemDomain(item) === domains.primary);
+  const secondaryCandidates = ranked
+    .map((item, index) => ({item, index}))
+    .filter(row => commandPaletteItemDomain(row.item) === domains.secondary)
+    .slice(0, maxSecondary);
+  if (!hasPrimary || !secondaryCandidates.length) return ranked;
+  const selected = [];
+  for (const [secondaryIndex, row] of secondaryCandidates.entries()) {
+    const target = Math.min(
+      windowSize - 1,
+      searchRankWeights.mixFirstSecondaryIndex + secondaryIndex * searchRankWeights.mixSecondaryStep
+    );
+    if (row.index > target) selected.push({item: row.item, target});
+  }
+  if (!selected.length) return ranked;
+  const selectedItems = new Set(selected.map(row => row.item));
+  const result = ranked.filter(item => !selectedItems.has(item));
+  for (const row of selected) {
+    result.splice(Math.min(row.target, result.length), 0, row.item);
+  }
+  return result;
 }
 
 function commandPaletteMatches(item, query) {
   return Number.isFinite(commandPaletteItemScore(item, query));
 }
 
-function commandPaletteItemScore(item, query) {
+function commandPaletteSurface(options = {}) {
+  return options.surface === 'files' || options.surface === 'command' ? options.surface : commandPaletteMode;
+}
+
+function commandPaletteItemDomain(item) {
+  if (item?.category === 'file') return 'file';
+  if (item?.category === 'pane') return 'pane';
+  if (item?.category === 'setting') return 'setting';
+  return 'command';
+}
+
+function commandPaletteDomainPrior(item, options = {}) {
+  const surface = commandPaletteSurface(options);
+  const domain = commandPaletteItemDomain(item);
+  return searchRankWeights.domainPrior[surface]?.[domain] || 0;
+}
+
+function commandPaletteNowSeconds(options = {}) {
+  const explicit = Number(options.nowSeconds);
+  return Number.isFinite(explicit) && explicit > 0 ? explicit : Date.now() / 1000;
+}
+
+function commandPaletteItemMtime(item) {
+  return commandPaletteNumericTime(item?.mtime || item?.mtime_ns || 0);
+}
+
+function commandPaletteRecencyBonus(item, options = {}) {
+  const timestamp = commandPaletteItemMtime(item);
+  if (!timestamp) return 0;
+  const age = Math.max(0, commandPaletteNowSeconds(options) - timestamp);
+  return searchRankWeights.recencyCap * Math.pow(0.5, age / searchRankWeights.recencyHalfLifeSeconds);
+}
+
+function commandPaletteFocusedRepoRoots(options = {}) {
+  if (Array.isArray(options.focusedRepoRoots)) {
+    return options.focusedRepoRoots.map(normalizeDirectoryPath).filter(Boolean);
+  }
+  const focused = currentSessionActionTarget() || focusedPanelItem || focusedTerminal;
+  const info = isTmuxSession(focused) ? sessionTranscriptInfo(focused) : null;
+  const roots = [
+    info?.gitRoot || '',
+    focusedRepoRootForSync(info?.selectedPath || info?.gitCwd || '', sessionFilesRepoRoots()),
+  ].map(normalizeDirectoryPath).filter(Boolean);
+  return Array.from(new Set(roots));
+}
+
+function commandPaletteRepoAffinityBonus(item, options = {}) {
+  if (item?.category !== 'file') return 0;
+  const path = normalizeDirectoryPath(commandPaletteFilePath(item));
+  if (!path) return 0;
+  return commandPaletteFocusedRepoRoots(options).some(root => pathIsInsideDirectory(path, root))
+    ? searchRankWeights.repoAffinity
+    : 0;
+}
+
+function commandPaletteItemScore(item, query, options = {}) {
   if (item.disabled) return 0;
   // C15 follow-up: the path-mode "Open this folder in Finder" row always sorts to the top (and survives
   // any filter text) so it is the default Enter action while a directory path is typed.
   if (item.pinTop) return 1e9;
-  const bonus = Number(item.sortBonus || 0) + commandPaletteRecentBonus(item) + commandPaletteFinderAliasBonus(item, query) + commandPaletteFileNameBonus(item, query);
+  const bonus = commandPaletteDomainPrior(item, options)
+    + Number(item.sortBonus || 0)
+    + commandPaletteRecentBonus(item)
+    + commandPaletteFinderAliasBonus(item, query, options)
+    + commandPaletteFileNameBonus(item, query)
+    + commandPaletteRecencyBonus(item, options)
+    + commandPaletteRepoAffinityBonus(item, options);
   if (!String(query || '').trim()) return bonus;
   const base = fuzzySearchScore(query, item.searchFields || [item.label, item.detail, item.group]);
   return Number.isFinite(base) ? base + bonus : base;
@@ -1830,33 +1972,28 @@ function commandPaletteFileNameBonus(item, query) {
   for (const token of tokens) {
     const canonicalToken = fuzzyCanonicalPrefixText(token);
     if (!canonicalToken) continue;
-    if (canonicalName.startsWith(canonicalToken)) bonus += 100000;
-    else if (canonicalName.includes(canonicalToken)) bonus += 60000;
-    else if (Number.isFinite(fuzzySubsequenceScore(token, filename))) bonus += 20000;
+    if (canonicalName.startsWith(canonicalToken)) bonus += searchRankWeights.fileNamePrefix;
+    else if (canonicalName.includes(canonicalToken)) bonus += searchRankWeights.fileNameContains;
+    else if (Number.isFinite(fuzzySubsequenceScore(token, filename))) bonus += searchRankWeights.fileNameSubsequence;
   }
   return bonus;
 }
 
-function commandPaletteFinderAliasBonus(item, query) {
+function commandPaletteFinderAliasBonus(item, query, options = {}) {
   if (item?.targetItem !== fileExplorerItemId) return 0;
   const text = String(query || '').trim().toLowerCase().replace(/\s+/g, ' ');
   if (text.length < 3) return 0;
   const aliases = ['file', 'files', 'finder', 'file explorer'];
-  return aliases.some(alias => alias === text || alias.startsWith(text)) ? 10000 : 0;
+  if (!aliases.some(alias => alias === text || alias.startsWith(text))) return 0;
+  return commandPaletteSurface(options) === 'files'
+    ? searchRankWeights.finderAliasFilesMode
+    : searchRankWeights.finderAlias;
 }
 
 function commandPaletteRecentBonus(item) {
   const key = item.key || `${item.group}:${item.label}`;
   const sequence = commandPaletteRecentKeys.get(key);
-  return sequence ? 1000 + sequence : 0;
-}
-
-// Priority sort tier: Cmd-P (commandPaletteMode 'files') floats file results above actions;
-// Cmd-Shift-P ('command') floats panes/tabs/commands/settings above files. pinTop rows stay first.
-function commandPaletteItemPriorityRank(item) {
-  if (item.pinTop) return -1;
-  const isFile = item.category === 'file';
-  return commandPaletteMode === 'files' ? (isFile ? 0 : 1) : (isFile ? 1 : 0);
+  return sequence ? searchRankWeights.recentSelectionBase + sequence : 0;
 }
 
 function rememberCommandPaletteItem(item) {
@@ -1869,8 +2006,8 @@ function commandPaletteEffectiveMode() {
   return commandPaletteMode === 'files' && !fileQuickOpenQueryParts().commandMode ? 'files' : 'command';
 }
 
-function commandPaletteSearchQuery(query = commandPaletteQuery) {
-  if (commandPaletteMode !== 'files') return String(query || '').trim();
+function commandPaletteSearchQuery(query = commandPaletteQuery, mode = commandPaletteMode) {
+  if (mode !== 'files') return String(query || '').trim();
   const parts = fileQuickOpenQueryParts(query);
   if (parts.commandMode) return String(query || '').replace(/^>\s*/, '').trim();
   if (parts.symbolMode) return String(query || '').replace(/^@\s*/, '').trim();
@@ -1898,6 +2035,10 @@ function commandPaletteEmptyText() {
   return 'No matches';
 }
 
+function commandPaletteStatusText() {
+  return fileQuickOpenLoading ? 'Searching files...' : '';
+}
+
 function ensureCommandPalette() {
   if (commandPaletteNode) return commandPaletteNode;
   const node = document.createElement('div');
@@ -1906,6 +2047,7 @@ function ensureCommandPalette() {
   node.innerHTML = `
     <div class="command-palette-dialog" role="dialog" aria-modal="true" aria-label="${esc(t('palette.aria'))}">
       <input type="search" class="command-palette-input" placeholder="${esc(t('palette.placeholder'))}" aria-label="${esc(t('palette.placeholder'))}">
+      <div class="command-palette-status" aria-live="polite" hidden></div>
       <div class="command-palette-results" role="listbox"></div>
     </div>`;
   node.addEventListener('mousedown', event => {
@@ -1960,22 +2102,21 @@ function renderCommandPaletteResults() {
   const node = ensureCommandPalette();
   const dialog = node.querySelector('.command-palette-dialog');
   const input = node.querySelector('.command-palette-input');
+  const status = node.querySelector('.command-palette-status');
   const results = node.querySelector('.command-palette-results');
   const query = commandPaletteSearchQuery();
   dialog?.setAttribute('aria-label', commandPaletteLabel());
   if (input) {
     input.placeholder = commandPalettePlaceholder();
     input.setAttribute('aria-label', commandPaletteLabel());
+    input.setAttribute('aria-busy', fileQuickOpenLoading ? 'true' : 'false');
   }
-  commandPaletteItemsCache = commandPaletteItems()
-    .map((item, sortIndex) => ({...item, score: commandPaletteItemScore(item, query), sortIndex}))
-    .filter(item => Number.isFinite(item.score))
-    .sort((left, right) =>
-      commandPaletteItemPriorityRank(left) - commandPaletteItemPriorityRank(right)
-      || (query
-        ? right.score - left.score || left.group.localeCompare(right.group) || left.label.localeCompare(right.label)
-        : right.score - left.score || left.sortIndex - right.sortIndex))
-    .slice(0, 60);
+  if (status) {
+    const text = commandPaletteStatusText();
+    status.hidden = !text;
+    status.textContent = text;
+  }
+  commandPaletteItemsCache = commandPaletteRankItems(commandPaletteItems(), query).slice(0, 60);
   commandPaletteIndex = Math.min(commandPaletteIndex, Math.max(0, commandPaletteItemsCache.length - 1));
   if (!commandPaletteItemsCache.length) {
     results.innerHTML = `<div class="command-palette-empty">${esc(commandPaletteEmptyText())}</div>`;
@@ -2045,7 +2186,8 @@ async function invokeCommandPaletteSelection(event = null) {
 function scheduleFileQuickOpenSearch(options = {}) {
   if (fileQuickOpenDebounce) clearTimeout(fileQuickOpenDebounce);
   const run = () => {
-    if (commandPaletteMode === 'files' && !commandPaletteQuery.trim().startsWith('>')) refreshFileQuickOpenCandidates(commandPaletteQuery);
+    const q = commandPaletteQuery.trim();
+    if (!q.startsWith('>') && !q.startsWith('@')) refreshFileQuickOpenCandidates(commandPaletteQuery);
   };
   if (options.immediate) run();
   else fileQuickOpenDebounce = setTimeout(run, 160);

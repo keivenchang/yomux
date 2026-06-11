@@ -592,6 +592,9 @@ globalThis.__layoutTestApi = {
   bindClipboardPasteForTest: bindClipboardPaste,
   documentListenersForTest(type) { return [...(document.__listeners.get(type) || [])]; },
   commandPaletteItemScore,
+  commandPaletteRankItems,
+  commandPaletteCandidateItems,
+  searchRankWeights,
   commandPaletteSearchQuery,
   commandPaletteCommandItems,
   commandPaletteItems,
@@ -1410,15 +1413,16 @@ test('t@1313', () => {
   assert.equal(terminalToolbarBeforeFinderFocus.includes('data-tab-name="summary"'), false);
   const agentInfo = {agents: [{kind: 'codex', transcript: '/tmp/codex.jsonl'}], selected_pane: {process_label: 'codex'}};
   api.setTranscriptInfoForTest('6', agentInfo);
-  assert.equal(api.terminalTabLabel('6', agentInfo), 'Term', 'agent process names move off the first terminal tab line');
-  assert.equal(api.terminalTabTitle('6', agentInfo), 'terminal: Term', 'agent process names are not duplicated in the terminal tab title');
+  assert.equal(api.terminalTabLabel('6', agentInfo), 'Term', 'terminal tab visible label is static');
+  assert.equal(api.terminalTabTitle('6', agentInfo), 'terminal: codex', 'terminal tab title keeps the active process detail');
   const agentToolbar = api.panelControlsHtml('6');
-  assert.ok(agentToolbar.includes('>Term</button>'), 'terminal top row shows the generic terminal label when the process is the agent');
+  assert.ok(agentToolbar.includes('>Term</button>'), 'terminal top row shows the generic terminal label');
   assert.equal(agentToolbar.includes('>codex</button>') || agentToolbar.includes('>Codex</button>'), false, 'terminal top row does not render the agent marker as the terminal tab text');
   assert.ok(api.sessionAgentBadgeHtml('6').includes('panel-agent-badge codex') && api.sessionAgentBadgeHtml('6').includes('>Codex</span>'), 'detail-row agent badge renders the detected agent');
   const sessionSource = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(/id="panel-agent-\$\{session\}"[\s\S]{0,120}sessionAgentBadgeHtml\(session\)[\s\S]{0,160}class="panel-detail-close"/.test(sessionSource), 'agent badge is rendered on the info line immediately before the close control');
-  assert.ok(/function terminalTabDisplayLabel\(session, info\)[\s\S]*normalized === agentKind[\s\S]*return 'Term'/.test(sessionSource), 'terminal tab labels suppress bare agent process names');
+  assert.ok(/function terminalTabDisplayLabel\(session, info\)\s*\{\s*return 'Term';\s*\}/.test(sessionSource), 'DOIT.56 N3: terminal tab visible label is always static');
+  assert.ok(/function terminalTabTitle\(session, info\)[\s\S]*terminalTabDetailLabel\(session, info\)/.test(sessionSource), 'DOIT.56 N3: terminal tab title still uses process/window detail');
 });
 
 test('t@1367', () => {
@@ -2498,6 +2502,9 @@ test('t@2355', () => {
   assert.ok(source.includes('restoreElementScrollPosition(container, scrollTop, scrollLeft);'), 'editor preview renders preserve scroll position');
   assert.equal(source.includes("const signature = codeMirrorConfigSignature(path, {mode: 'diff', layout, original, from: state.diffFromRef, to: state.diffToRef});\n  installCodeMirrorDiffResizeObserver"), false, 'diff resize observer is not installed before the rebuild decision');
   assert.ok(/function openFileQuickOpenPath\(path, options = \{\}\)[\s\S]*const targetSlot = fileQuickOpenTargetSlot\(\);[\s\S]*openedItem = await openFileInEditor\(path, \{name: label\}, targetSlot[\s\S]*\? \{targetSlot, userInitiated: true\}[\s\S]*: \{userInitiated: true\}\)/.test(source), 'quick-open normal file opens pass the active pane target slot');
+  assert.ok(/function fileQuickOpenTargetSlot\(\)\s*\{\s*return focusedActivationSlot\(\);/.test(source), 'DOIT.56 N2: quick-open uses the shared focused-pane activation target');
+  assert.ok(/function slotForTabActivation\(item\)\s*\{[\s\S]*return focusedActivationSlot\(\) \|\| largestNonFileExplorerPaneSlot\(\)/.test(source), 'DOIT.56 N2: new virtual/file tabs prefer the focused non-Finder pane before largest-pane fallback');
+  assert.ok(/async function openFileEditorPane\(path, options = \{\}\)[\s\S]*const activationSlot = slotForTabActivation\(item\);[\s\S]*await moveSessionToSlot\(item, activationSlot/.test(source), 'DOIT.56 N2: generic file opens share the same focused-pane activation target');
   assert.ok(/if \(options\.split === true\)[\s\S]*targetZone: targetSlot \? 'middle' : 'right'/.test(source), 'quick-open split-open keeps its explicit split behavior');
   assert.ok(source.includes('focusQuickOpenedFile(openedItem);'), 'quick-open focuses the opened file after the async open resolves');
   assert.ok(source.includes('await Promise.resolve(action?.());'), 'command palette selection awaits async run handlers before focus settles');
@@ -4173,9 +4180,10 @@ test('t@2560', () => {
   {
     const cursorSrc = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.ok(/const DEFAULT_CURSOR_COLOR\s*=\s*'yellow'/.test(cursorSrc), 'cursor color: yellow remains the named default');
-    assert.ok(/const UI_COLOR_PRESETS\s*=\s*\{[\s\S]*yellow:\s*\{labelKey:\s*'pref\.appearance\.active_color\.yellow',\s*cursorLabelKey:\s*'pref\.appearance\.editor_cursor_color\.yellow',\s*cursor:\s*'#ffea00'/.test(cursorSrc), 'cursor color: the shared UI color parent owns the bright yellow cursor value');
-    assert.ok(/function editorCursorColorForScheme[\s\S]*value === 'theme' \? scheme\.cursor : UI_COLOR_PRESETS\[value\]\.cursor/.test(cursorSrc), 'cursor color: theme uses the scheme cursor, color choices use the shared UI color parent');
-    assert.ok(/function activeTerminalCursorColorForTheme[\s\S]*value === 'theme' \? baseTheme\.cursor : UI_COLOR_PRESETS\[value\]\.cursor/.test(cursorSrc), 'cursor color: active terminal uses the same shared UI color parent');
+    assert.ok(/const NEON_CURSOR_COLOR_CHOICES\s*=\s*\['laser-lime', 'neon-green', 'neon-cyan', 'neon-magenta', 'neon-orange'\]/.test(cursorSrc), 'cursor color: neon choices are cursor-only, not active-color choices');
+    assert.ok(/'laser-lime':\s*\{cursorLabelKey:\s*'pref\.appearance\.editor_cursor_color\.laser-lime',\s*cursor:\s*\{dark:\s*'#ccff00',\s*light:\s*'#6b8f00'\}\}/.test(cursorSrc), 'cursor color: Laser lime is the first neon cursor preset with a readable light-mode variant');
+    assert.ok(/function editorCursorColorForScheme[\s\S]*value === 'theme' \? scheme\.cursor : cursorColorForPreset\(value, scheme\?\.dark === false\)/.test(cursorSrc), 'cursor color: theme uses the scheme cursor, color choices use the shared UI color parent');
+    assert.ok(/function activeTerminalCursorColorForTheme[\s\S]*value === 'theme' \? baseTheme\.cursor : cursorColorForPreset\(value, resolvedTerminalThemeMode\(\) === 'light'\)/.test(cursorSrc), 'cursor color: active terminal uses the same shared UI color parent');
     assert.ok(cursorSrc.includes("initialSetting('appearance.editor_cursor_color', DEFAULT_CURSOR_COLOR)"), 'editor cursor color defaults through the shared cursor default');
   }
   assert.ok(preferencesHtml.includes('data-setting-path="editor.autosave"'), 'preferences expose editor autosave');
@@ -4211,7 +4219,7 @@ test('t@2560', () => {
     ['appearance.terminal_theme', ['follow-app', 'dark', 'light']],
     ['appearance.date_time_hour_cycle', ['24', '12']],
     ['appearance.editor_cursor_style', ['line', 'block']],
-    ['appearance.editor_cursor_color', ['green', 'blue', 'orange', 'yellow', 'purple', 'white', 'theme']],
+    ['appearance.editor_cursor_color', ['green', 'blue', 'orange', 'yellow', 'purple', 'white', 'laser-lime', 'neon-green', 'neon-cyan', 'neon-magenta', 'neon-orange', 'theme']],
     ['yolo.prompt_source', ['hybrid', 'pane']],
     ['file_explorer.root_mode', ['fixed', 'sync']],
     ['file_explorer.image_open_mode', ['same-tab', 'new-tab']],
@@ -5002,11 +5010,145 @@ test('t@2560', () => {
   assert.ok(api.fuzzyHighlightHtml('10144', '#10144').includes('<mark class="fuzzy-match">10144</mark>'), 'contiguous fuzzy matches render as one box');
   assert.equal(api.commandPaletteMatches({group: 'Tabs', label: 'helloXandYyy', detail: ''}, 'xy'), true, 'command palette uses fuzzy matching');
   assert.equal(api.commandPaletteMatches({group: 'Tabs', label: 'helloXandYyy', detail: ''}, 'xz'), false, 'command palette rejects non-matches');
+  assert.ok(api.searchRankWeights.domainPrior.files.file > api.searchRankWeights.domainPrior.files.pane, 'Cmd-P domain weights rank files before panes for comparable matches');
+  assert.ok(api.searchRankWeights.domainPrior.command.pane > api.searchRankWeights.domainPrior.command.file, 'Shift-Cmd-P domain weights rank panes before files for comparable matches');
   assert.ok(
     api.commandPaletteItemScore({group: 'Tabs', label: 'YO!agent', detail: '', searchFields: ['YO!agent']}, 'yoagent') >
       api.commandPaletteItemScore({group: 'Tabs', label: '1', detail: 'y o agent buried in details', searchFields: ['1', 'y o agent buried in details']}, 'yoagent'),
     'command palette ranks YO!agent first for punctuation-insensitive prefix queries'
   );
+  const fileCandidate = (label, options = {}) => {
+    const path = options.path || `/repo/current/${label}`;
+    return {category: 'file', group: 'Files', label, detail: path, path, key: `file:${path}`, mtime: options.mtime || 0, searchFields: [label, path]};
+  };
+  const paneCandidate = (label, options = {}) => ({category: 'pane', group: 'Tabs', label, detail: options.detail || '', key: `pane:${label}`, mtime: options.mtime || 0, searchFields: [label, options.detail || '']});
+  const rankValues = (surface, query, candidates, options = {}) => api.commandPaletteRankItems(candidates, query, {
+    surface,
+    nowSeconds: options.nowSeconds || 300,
+    focusedRepoRoots: options.focusedRepoRoots || ['/repo/current'],
+  }).map(options.value || (item => item.label));
+  const sixCandidates = [
+    fileCandidate('6.md'),
+    fileCandidate('6-plan.md'),
+    fileCandidate('a6.txt'),
+    paneCandidate('6 Fix same-strip'),
+  ];
+  const fileHeavySixCandidates = [
+    fileCandidate('6-00.md'),
+    fileCandidate('6-01.md'),
+    fileCandidate('6-02.md'),
+    fileCandidate('6-03.md'),
+    fileCandidate('6-04.md'),
+    fileCandidate('6-05.md'),
+    paneCandidate('6 Fix same-strip'),
+    fileCandidate('a6.txt'),
+  ];
+  const claudeCandidates = [paneCandidate('claude'), fileCandidate('claude_notes.md')];
+  const rankingCases = [
+    {
+      name: 'Cmd-P ranks anchored files first, then anchored pane, then non-anchored file',
+      surface: 'files',
+      query: '6',
+      candidates: sixCandidates,
+      expected: ['6.md', '6-plan.md', '6 Fix same-strip', 'a6.txt'],
+    },
+    {
+      name: 'Cmd-P keeps a matching pane mixed into a file-heavy first screen',
+      surface: 'files',
+      query: '6',
+      candidates: fileHeavySixCandidates,
+      expected: ['6-00.md', '6-01.md', '6 Fix same-strip', '6-02.md', '6-03.md'],
+      limit: 5,
+    },
+    {
+      name: 'Shift-Cmd-P ranks the anchored pane before anchored files',
+      surface: 'command',
+      query: '6',
+      candidates: sixCandidates,
+      expected: ['6 Fix same-strip', '6.md', '6-plan.md', 'a6.txt'],
+    },
+    {
+      name: 'contiguous matches beat scattered subsequences',
+      surface: 'files',
+      query: '123',
+      candidates: [fileCandidate('hello 123'), fileCandidate('1 a 2 b 3 c')],
+      expected: ['hello 123', '1 a 2 b 3 c'],
+    },
+    {
+      name: 'newer mtime wins among comparable file matches',
+      surface: 'files',
+      query: '123',
+      candidates: [fileCandidate('x 123 y', {mtime: 200}), fileCandidate('z 123 y', {mtime: 100})],
+      expected: ['x 123 y', 'z 123 y'],
+    },
+    {
+      name: 'focused repo affinity wins only among comparable matches',
+      surface: 'files',
+      query: 'target',
+      candidates: [
+        fileCandidate('target.md', {path: '/other/repo/target.md', mtime: 100}),
+        fileCandidate('target.md', {path: '/repo/current/target.md', mtime: 100}),
+      ],
+      expected: ['/repo/current/target.md', '/other/repo/target.md'],
+      value: item => item.path,
+    },
+    {
+      name: 'anchored old match beats non-anchored new match',
+      surface: 'files',
+      query: 'ab',
+      candidates: [fileCandidate('ab.md', {mtime: 1}), fileCandidate('x-ab.md', {mtime: 299})],
+      expected: ['ab.md', 'x-ab.md'],
+    },
+    {
+      name: 'repo affinity never rescues a weaker scattered match',
+      surface: 'files',
+      query: '123',
+      candidates: [
+        fileCandidate('hello 123', {path: '/other/repo/hello-123.md'}),
+        fileCandidate('1 a 2 b 3 c', {path: '/repo/current/scattered.md'}),
+      ],
+      expected: ['hello 123', '1 a 2 b 3 c'],
+    },
+    {
+      name: 'word-start anchored match beats mid-word match',
+      surface: 'files',
+      query: 'do',
+      candidates: [fileCandidate('docs/'), fileCandidate('weirdo')],
+      expected: ['docs/', 'weirdo'],
+    },
+    {
+      name: 'Shift-Cmd-P ranks matching panes before files',
+      surface: 'command',
+      query: 'claude',
+      candidates: claudeCandidates,
+      expected: ['claude', 'claude_notes.md'],
+    },
+    {
+      name: 'Cmd-P ranks matching files before panes',
+      surface: 'files',
+      query: 'claude',
+      candidates: claudeCandidates,
+      expected: ['claude_notes.md', 'claude'],
+    },
+    {
+      name: 'empty Cmd-P file results sort by recency',
+      surface: 'files',
+      query: '',
+      candidates: [fileCandidate('old.md', {mtime: 100}), fileCandidate('new.md', {mtime: 200})],
+      expected: ['new.md', 'old.md'],
+    },
+    {
+      name: 'empty Shift-Cmd-P pane results sort by recency',
+      surface: 'command',
+      query: '',
+      candidates: [paneCandidate('old pane', {mtime: 100}), paneCandidate('new pane', {mtime: 200})],
+      expected: ['new pane', 'old pane'],
+    },
+  ];
+  for (const row of rankingCases) {
+    const actual = [...rankValues(row.surface, row.query, row.candidates, row)];
+    assert.deepStrictEqual(row.limit ? actual.slice(0, row.limit) : actual, row.expected, row.name);
+  }
   // #40 / YO!info, Finder, and Preferences are the standalone virtual tabs; YO!agent is now a
   // sub-tab of the merged YO!info pane, so it is NOT a Tabs entry.
   const paletteItems = api.commandPaletteCommandItems();
@@ -5139,6 +5281,8 @@ test('t@2560', () => {
   quickTargetApi.setLayoutSlotsForTest(quickOpenTargetSlots);
   quickTargetApi.setFocusedPanelItem('2');
   assert.equal(quickTargetApi.fileQuickOpenTargetSlot(), 'slot1', 'Cmd-P normal file opens target the currently active pane, not the first pane');
+  assert.equal(quickTargetApi.slotForTabActivation(quickTargetApi.prefsItemId), 'slot1', 'DOIT.56 N2: Preferences opens in the focused pane, not the first/largest pane');
+  assert.equal(quickTargetApi.slotForTabActivation(quickTargetApi.infoItemId), 'slot1', 'DOIT.56 N2: YO!info opens in the focused pane, not the first/largest pane');
   const editorTargetItem = fileRootApi.fileEditorItemFor('/home/test/yolomux.dev/DOIT.53.md');
   fileRootApi.setOpenFileStateForTest('/home/test/yolomux.dev/DOIT.53.md', {kind: 'text', gitRoot: '/home/test/yolomux.dev'});
   fileRootApi.registerFileEditorLayoutItemForTest('/home/test/yolomux.dev/DOIT.53.md');
@@ -5156,6 +5300,7 @@ test('t@2560', () => {
   fileRootApi.setLayoutSlotsForTest(finderOnlyTargetSlots);
   fileRootApi.setFocusedPanelItem(fileRootApi.fileExplorerItemId);
   assert.equal(fileRootApi.fileQuickOpenTargetSlot(), null, 'Cmd-P does not target the reserved Finder pane for normal file opens');
+  assert.equal(fileRootApi.slotForTabActivation(fileRootApi.prefsItemId), 'slot1', 'DOIT.56 N2: opening a virtual tab while Finder is focused falls back outside the reserved Finder pane');
   // #31: the Finder indexed badge reflects the cached build status without writing a long label into
   // the one-letter status column. Date/Ago mode hides the badge entirely because the date slot owns
   // the right side of the row.
@@ -5277,6 +5422,32 @@ test('t@2560', () => {
   assert.equal(headerDetailToggle.getAttribute('aria-label'), showDetailsLabel, 'header detail aria label follows collapsed state');
   assert.equal(headerDetailToggle.getAttribute('aria-pressed'), 'false', 'collapsed details mark the header toggle unpressed');
   assert.equal(headerDetailToggle.classList.contains('active'), false, 'collapsed details remove the header active state');
+  const dockviewPanel = new TestElement('panel-7');
+  dockviewPanel.dataset.slot = 'left';
+  dockviewPanel.dataset.layoutItem = '7';
+  const dockviewHeaderDetailToggle = new TestElement('', 'button');
+  dockviewHeaderDetailToggle.dataset.detailToggle = '7';
+  api.testElementForId('body').appendChild(dockviewHeaderDetailToggle);
+  api.setPanelDetailsCollapsedForTest(dockviewPanel, true);
+  assert.equal(dockviewHeaderDetailToggle.getAttribute('aria-pressed'), 'false', 'Dockview header detail toggle syncs by layout item, not the left/right slot id');
+  assert.equal(dockviewHeaderDetailToggle.title, showDetailsLabel, 'Dockview header detail toggle flips to Show details when collapsed');
+  const terminalPane = api.testElementForId('terminal-pane-1');
+  terminalPane.classList.add('active');
+  terminalPane.clientWidth = 720;
+  terminalPane.clientHeight = 260;
+  const fits = [];
+  api.registerTerminalForTest('1', {
+    cols: 80,
+    rows: 24,
+    resize(cols, rows) {
+      this.cols = cols;
+      this.rows = rows;
+      fits.push({cols, rows});
+    },
+    refresh() {},
+  });
+  api.setPanelDetailsCollapsedForTest(detailsPanel, false);
+  assert.ok(fits.length >= 1, 'hiding or showing the detail row schedules a visible tmux terminal fit');
   assert.ok(api.tmuxPaneTabHtml('1', null, {key: 'blocked', short: 'BLK', label: 'Blocked', reason: 'test'}).includes('tab-symbol'));
   assert.equal(api.tmuxSessionNameError('good_name-1.2'), '');
   assert.equal(api.tmuxSessionNameError('dynamo 2'), '');
@@ -6576,10 +6747,21 @@ test('t@6404', () => {
   assert.equal(controls.includes('data-tmux-window-bar="1"'), false, 'DOIT.53 P1: tmux pane header controls do not render the window bar');
   assert.equal(controls.includes('tmux-window-step'), false, 'P5: tmux pane controls no longer render the old prev/next stepper');
   assert.ok(controls.includes('terminal-tab'), 'DOIT.53 P1: tmux pane header keeps only the terminal tab label in the top row');
+  assert.ok(controls.includes('>Term</button>'), 'DOIT.56 N3: terminal header button keeps the static Term label');
+  assert.equal(controls.includes('>codex</button>') || controls.includes('>node</button>'), false, 'DOIT.56 N3: terminal header no longer duplicates active window/process names');
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  const yoloCss = fs.readFileSync('static/yolomux.css', 'utf8');
+  const agentBadgeRule = yoloCss.match(/\.panel-agent-badge\s*\{[^}]*\}/)?.[0] || '';
   assert.ok(/id="panel-agent-\$\{session\}"[\s\S]{0,160}tmuxWindowBarHtml\(session, transcriptMeta\.sessions\?\.\[session\]\)[\s\S]{0,180}class="panel-detail-close"/.test(source), 'DOIT.53 P1: tmux window bar is rendered on the detail row before the close button');
   assert.ok(/delegate\(panel, 'click', '\[data-window-dir\], \[data-window-index\]'/.test(source), 'DOIT.53 P3: in-panel window buttons use the shared delegated click path');
-  assert.ok(/\.panel\.details-collapsed \.panel-detail-row\s*\{[\s\S]*display:\s*none/.test(fs.readFileSync('static/yolomux.css', 'utf8')), 'DOIT.53 P1: detail-row window bar collapses with the detail row');
+  assert.ok(/\.panel\.details-collapsed \.panel-detail-row\s*\{[\s\S]*display:\s*none/.test(yoloCss), 'DOIT.53 P1: detail-row window bar collapses with the detail row');
+  assert.ok(agentBadgeRule.includes('background: rgb(var(--overlay-slate-rgb) / 0.22)'), '2026-06-11 Info Bar regression: agent badge is muted instead of using the bright YO active background');
+  assert.equal(agentBadgeRule.includes('background: var(--pane-tab-yolo-bg)'), false, '2026-06-11 Info Bar regression: agent badge does not reuse the bright YO badge fill');
+  assert.ok(/\.panel-detail-row \.tmux-window-bar\s*\{[\s\S]*margin-inline-start:\s*auto[\s\S]*justify-content:\s*flex-end/.test(yoloCss), '2026-06-11 Info Bar regression: tmux window bar right-aligns next to the detail close button');
+  assert.ok(/\.yolomux-dockview \.dockview-panel-content > \.panel\.dockview-inner-head-collapsed\.details-collapsed\s*\{\s*grid-template-rows:\s*minmax\(0, 1fr\)/.test(yoloCss), '2026-06-11 Info Bar regression: Dockview terminals get one full-height grid row when both inner header and details are hidden');
+  assert.ok(/function setPanelDetailsCollapsed\(panel, collapsed\)\s*\{[\s\S]*schedulePanelDetailsFit\(panel\)/.test(source), '2026-06-11 Info Bar regression: details toggle refits visible tmux terminals after row height changes');
+  assert.equal(source.includes('function windowStepButtonHtml'), false, 'DOIT.56 N3: dead header tmux stepper renderer stays removed');
+  assert.equal(/button\.textContent = terminalTabLabel/.test(source), false, 'DOIT.56 N3: metadata refresh no longer rewrites the static terminal tab label');
   const calls = [];
   api.setFetchForTest((url, options = {}) => {
     calls.push({url: String(url), method: options.method || 'GET'});
@@ -7441,7 +7623,7 @@ test('t@7240', () => {
   assert.equal(/function cycleGlobalThemeSetting[\s\S]*?patch\.appearance\.terminal_theme/.test(source), false, '#261: cycleGlobalThemeSetting no longer pins appearance.terminal_theme');
   // Active-terminal cursor: the focused pane's terminal shows the configured cursor color.
   assert.ok(/const DEFAULT_CURSOR_COLOR\s*=\s*'yellow'/.test(source), 'active-terminal cursor: yellow remains the default cursor color');
-  assert.ok(/const UI_COLOR_PRESETS\s*=\s*\{[\s\S]*yellow:\s*\{labelKey:\s*'pref\.appearance\.active_color\.yellow',\s*cursorLabelKey:\s*'pref\.appearance\.editor_cursor_color\.yellow',\s*cursor:\s*'#ffea00'/.test(source), 'active-terminal cursor: bright yellow cursor color lives in the shared UI color parent');
+  assert.ok(/const UI_COLOR_PRESETS\s*=\s*\{[\s\S]*yellow:\s*\{labelKey:\s*'pref\.appearance\.active_color\.yellow',\s*cursorLabelKey:\s*'pref\.appearance\.editor_cursor_color\.yellow',\s*cursor:\s*\{dark:\s*'#ffea00',\s*light:\s*'#9a6700'\}/.test(source), 'active-terminal cursor: bright yellow cursor color lives in the shared UI color parent with a light-mode variant');
   assert.ok(/function terminalThemeForSession[\s\S]*?session === focusedPanelItem \? \{\.\.\.theme, cursor: activeTerminalCursorColorForTheme\(theme\)\}/.test(source), 'active-terminal cursor: the focused session gets the configured cursor color, others keep theme default');
   assert.ok(/item\.term\.options\.theme = terminalThemeForSession\(session, theme\)/.test(source), 'active-terminal cursor: applyTerminalRuntimeSettings themes the active terminal with the configured cursor color');
   assert.ok(/theme: terminalThemeForSession\(session\)/.test(source), 'active-terminal cursor: a newly-created terminal uses terminalThemeForSession');
@@ -7993,6 +8175,9 @@ test('t@7769', () => {
   assert.ok(/function dockviewSyncHeaderActionReservations\(\)[\s\S]*--dockview-header-actions-reserved-inline-size[\s\S]*reservedWidth[\s\S]*--dockview-tab-inline-size/.test(dockviewSrc), 'Dockview measures the right-side action buttons and tab width so crowded tabs do not collide or spill past two rows');
   assert.ok(/function dockviewTrackPanePointerDrag\(event\)[\s\S]*startPaneDragPreview\(event, state\.sourceSlot\)[\s\S]*moveCustomDragPreview\(event\)/.test(dockviewSrc), 'Dockview pane-background pointer drags show and move the same pane drag preview as native pane drags');
   assert.ok(/function dockviewFinishPanePointerDrag\(event\)[\s\S]*stopCustomDragPreview\(\)[\s\S]*clearDropPreview\(\)/.test(dockviewSrc), 'Dockview pane-background pointer drags remove the pane preview on drop/cancel');
+  const dragPreviewSrc = fs.readFileSync('static_src/js/yolomux/60_popovers_tabs.js', 'utf8');
+  assert.ok(/const customDragPreviewCleanupEvents = \['drop', 'dragend', 'pointerup', 'mouseup', 'blur', 'visibilitychange'\]/.test(dragPreviewSrc), 'native custom drag previews clean up on drag release and page-cancel paths');
+  assert.ok(/function bindCustomDragPreviewListeners\(\)[\s\S]*for \(const target of customDragPreviewEventTargets\(\)\)[\s\S]*target\.addEventListener\?\.\('dragover', moveCustomDragPreview, true\)[\s\S]*target\.addEventListener\?\.\(eventName, stopCustomDragPreview, true\)/.test(dragPreviewSrc), 'native custom drag preview cleanup is bound on both document and window');
   assert.equal(/header\.draggable = draggable/.test(dockviewSrc), false, 'Dockview tab-container background must not become a native draggable ancestor that steals tab drags');
   assert.ok(/api\.onWillDrop\(event => \{[\s\S]*const edgeReorder = dockviewTabEdgeReorderIntent\(event\)[\s\S]*moveSessionToSlot\(edgeReorder\.item, edgeReorder\.targetSlot, edgeReorder\.sourceSlot, edgeReorder\.insertIndex\)/.test(dockviewSrc), 'Dockview manually reorders edge tabs dragged onto their adjacent neighbor');
   assert.ok(/function dockviewInstallTabPointerReorderFallback\(\)[\s\S]*document\.addEventListener\('pointerup', finish, true\)[\s\S]*document\.addEventListener\('mouseup', finish, true\)/.test(dockviewSrc), 'Dockview edge-tab reorder fallback listens to both pointer and mouse release paths');
@@ -8103,7 +8288,12 @@ test('t@7900', () => {
   assert.ok(appearanceHtml.includes('Solar gold'), 'Active color Yellow is labeled Solar gold');
   assert.ok(appearanceHtml.includes('Royal violet'), 'Active color Purple is labeled Royal violet');
   assert.ok(appearanceHtml.includes('Moon white'), 'Active color White is labeled Moon white');
-  assert.ok(appearanceHtml.includes('Laser lime'), 'Cursor color Green is labeled Laser lime');
+  assert.ok(appearanceHtml.includes('Signal green'), 'Cursor color Green is labeled Signal green');
+  assert.ok(appearanceHtml.includes('Laser lime'), 'Cursor color Laser lime is available');
+  assert.ok(appearanceHtml.includes('Neon green'), 'Cursor color Neon green is available');
+  assert.ok(appearanceHtml.includes('Neon cyan'), 'Cursor color Neon cyan is available');
+  assert.ok(appearanceHtml.includes('Neon magenta'), 'Cursor color Neon magenta is available');
+  assert.ok(appearanceHtml.includes('Neon orange'), 'Cursor color Neon orange is available');
   assert.ok(appearanceHtml.includes('Electric azure'), 'Cursor color Blue is labeled Electric azure');
   assert.ok(appearanceHtml.includes('Flare orange'), 'Cursor color Orange is labeled Flare orange');
   assert.ok(appearanceHtml.includes('Lightning yellow'), 'Cursor color Yellow is labeled Lightning yellow');
@@ -8115,8 +8305,8 @@ test('t@7900', () => {
   const preferencesSource = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(/function layoutModePreferenceChoices\(\)\s*\{[\s\S]*layoutModeValues\.map\(value => \(\{value, label: t\(`menu\.view\.layout\.\$\{value\}`\)\}\)\)/.test(preferencesSource), 'Default layout choices derive from the shared View layout modes');
   assert.ok(/function activeColorPreferenceChoices\(\)\s*\{[\s\S]*UI_COLOR_CHOICES\.map\(value => activeColorPreferenceChoice\(value, t\(UI_COLOR_PRESETS\[value\]\.labelKey\)\)\)/.test(preferencesSource), 'Active color choices derive labels from the shared UI color parent');
-  assert.ok(/function cursorColorPreferenceChoices\(\)\s*\{[\s\S]*\[\.\.\.UI_COLOR_CHOICES, 'theme'\][\s\S]*\.map\(cursorColorPreferenceChoice\)/.test(preferencesSource), 'Cursor color choices follow the Active color order while keeping yellow as the default value');
-  assert.ok(/function cursorColorPreferenceChoice\(value\)\s*\{[\s\S]*value === 'theme' \? t\('pref\.appearance\.editor_cursor_color\.theme'\) : t\(preset\.cursorLabelKey\)/.test(preferencesSource), 'Cursor color labels use cursor-specific bright color names from the shared parent');
+  assert.ok(/function cursorColorPreferenceChoices\(\)\s*\{[\s\S]*clientSettingsPayload\?\.choices\?\.\['appearance\.editor_cursor_color'\][\s\S]*CURSOR_COLOR_CHOICES[\s\S]*\.map\(cursorColorPreferenceChoice\)/.test(preferencesSource), 'Cursor color choices sync to the backend allowlist with a local fallback');
+  assert.ok(/function cursorColorPreferenceChoice\(value\)\s*\{[\s\S]*preset\?\.cursorLabelKey \? t\(preset\.cursorLabelKey\) : preferenceChoiceLabel\(value\)/.test(preferencesSource), 'Cursor color labels use cursor-specific bright color names from the shared parent');
   assert.ok(/preferences-radio-swatches joined[\s\S]*--preferences-radio-swatch:#3b82f6[\s\S]*--preferences-radio-swatch:#2563eb/.test(appearanceHtml), 'Active color Blue radio shows connected actual dark/light accent swatches');
   assert.ok(appearanceHtml.includes('preferences-setting-note') && appearanceHtml.includes('Editor/Terminal font sizes are in Terminal / Editor.'), 'Appearance shows a note after Finder font size pointing editor/terminal font sizes to Terminal / Editor');
   assert.ok(/data-setting-path="appearance\.file_explorer_font_size"[\s\S]*preferences-setting-note[\s\S]*data-setting-path="appearance\.tab_width"/.test(appearanceHtml), 'Appearance font-size note sits directly after Finder font size');
@@ -8224,6 +8414,8 @@ test('t@8050', () => {
   ]);
   api.setCommandPaletteStateForTest('files', prefsLabel);
   assert.ok(api.commandPaletteItems().some(item => item.group === 'Tabs' && item.label === prefsLabel), '#7: a command/tab matching a plain files-mode query is blended in (no > needed)');
+  api.setCommandPaletteStateForTest('command', 'notes');
+  assert.ok(api.commandPaletteItems().some(item => item.category === 'file' && item.path === '/repo/app/notes.py'), 'DOIT.55: command-mode queries also blend matching file-index results');
   // `>` stays commands-only — no file candidates blended.
   api.setCommandPaletteStateForTest('files', `>${prefsLabel}`);
   assert.ok(!api.commandPaletteItems().some(item => item.path === '/repo/app/notes.py'), '#7: the > prefix stays commands-only');
@@ -8315,7 +8507,7 @@ test('t@8136', () => {
   api.setCommandPaletteStateForTest('files', 'notes');
   const items = api.commandPaletteItems();
   const fileGroupRows = items.filter(it => it.category === 'file' && (it.searchFields?.[1] || it.detail) === path);
-  const tabRows = items.filter(it => it.category === 'action' && api.fileItemPath(it.targetItem || '') === path);
+  const tabRows = items.filter(it => it.category === 'pane' && api.fileItemPath(it.targetItem || '') === path);
   assert.equal(fileGroupRows.length, 0, 'S2: the open file is NOT duplicated as a Recent/Files row');
   assert.ok(tabRows.length >= 1, 'S2: the open file still appears as its Tabs row');
 });
@@ -8707,6 +8899,10 @@ test('t@8485', () => {
   assert.deepStrictEqual([...api.currentSlots().left.tabs], ['3'], 'target pane tabs moved as a whole into the source slot');
   assert.deepStrictEqual([...api.currentSlots().right.tabs], ['1', '2'], 'source pane tabs moved as a whole into the target slot');
   assert.equal(api.currentSlots()[api.layoutTreeKey].split, 'row', 'pane swaps keep the existing split tree');
+  assert.ok(api.windowListenersForTest('drop').length > 0, 'pane drag preview cleanup is bound at the window level');
+  api.windowListenersForTest('drop')[0](event);
+  assert.equal(api.customDragPreviewForTest(), null, 'pane drag preview is removed when native drag release reaches window instead of document');
+  assert.equal(api.windowListenersForTest('drop').length, 0, 'window preview cleanup listeners are removed after pane drag cleanup');
 
   const smallSlots = api.emptyLayoutSlots();
   smallSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 50);
@@ -8923,9 +9119,30 @@ test('t@8739', () => {
 // both edit + preview chips) wins; the Recent/Files duplicate is dropped. Files-only / empty-box keep Recent.
 test('t@8749', () => {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  const candidateStart = source.indexOf('function commandPaletteCandidateItems(');
+  const candidateEnd = source.indexOf('function commandPaletteItems(', candidateStart);
+  const candidateBody = source.slice(candidateStart, candidateEnd);
+  const rankStart = source.indexOf('function commandPaletteRankItems(');
+  const rankEnd = source.indexOf('function commandPaletteMatches(', rankStart);
+  const rankBody = source.slice(rankStart, rankEnd);
+  const fileNameBonusStart = source.indexOf('function commandPaletteFileNameBonus(');
+  const fileNameBonusEnd = source.indexOf('function commandPaletteFinderAliasBonus(', fileNameBonusStart);
+  const fileNameBonusBody = source.slice(fileNameBonusStart, fileNameBonusEnd);
   assert.ok(source.includes('const openTabPaths = new Set(commandPaletteAllTabItems().map(fileItemPath).filter(Boolean))'), 'S2: merged palette collects open-tab file paths');
-  assert.ok(/dedupedFileItems = fileQuickOpenItems\(\)\.filter\(item => !openTabPaths\.has\(filePathOf\(item\)\)\)/.test(source), 'S2: open-tab files are dropped from the file list so a file appears once total');
+  assert.ok(/dedupedFileItems = fileQuickOpenItems\(\)\.filter\(item => !openTabPaths\.has\(commandPaletteFilePath\(item\)\)\)/.test(source), 'S2: open-tab files are dropped from the file list so a file appears once total');
   assert.ok(/return \[\.\.\.dedupedFileItems, \.\.\.commandPaletteCommandItems\(\)\]/.test(source), 'S2: merged palette returns deduped files then commands');
+  assert.ok(candidateStart > 0 && candidateEnd > candidateStart, 'DOIT.55: unified command palette candidate provider exists');
+  assert.ok(candidateBody.includes('return commandPaletteMergedItems()'), 'DOIT.55: typed Cmd-P and Shift-Cmd-P queries use one merged candidate universe');
+  assert.ok(candidateBody.includes('mode === \'files\' ? fileQuickOpenItems() : commandPaletteCommandItems()'), 'DOIT.55: mode only chooses the empty-query home category');
+  assert.ok(rankStart > 0 && rankEnd > rankStart, 'DOIT.55: shared command palette ranker exists');
+  assert.ok(rankBody.includes('commandPaletteItemScore(item, query, options)'), 'DOIT.55: both surfaces rank through the shared scorer');
+  assert.ok(rankBody.includes('commandPaletteMixFirstScreenResults(ranked, query, options)'), 'DOIT.55 follow-up: shared ranker keeps first-screen file/pane results mixed after scoring');
+  assert.ok(source.includes('class="command-palette-status" aria-live="polite" hidden'), 'search loading indicator is part of the palette chrome, not just the empty state');
+  assert.ok(/renderCommandPaletteResults[\s\S]*input\.setAttribute\('aria-busy', fileQuickOpenLoading \? 'true' : 'false'\)[\s\S]*status\.textContent = text/.test(source), 'search loading indicator updates while local results remain visible');
+  assert.ok(/renderCommandPaletteResults[\s\S]*commandPaletteRankItems\(commandPaletteItems\(\), query\)/.test(source), 'DOIT.55: rendering uses the shared provider/ranker path');
+  assert.equal(source.includes('function commandPaletteItemPriorityRank'), false, 'DOIT.55: old per-surface priority rank fork stays removed');
+  assert.ok(/const searchRankWeights = Object\.freeze\(\{[\s\S]*domainPrior:[\s\S]*recencyHalfLifeSeconds:[\s\S]*repoAffinity:[\s\S]*mixWindow:/.test(source), 'DOIT.55: ranking weights live in one exported table');
+  assert.equal(/100000|60000|20000/.test(fileNameBonusBody), false, 'DOIT.55: file-name ranking bonuses use searchRankWeights, not inline legacy constants');
 });
 
 // S14: opt-in tab-drag timing instrumentation (OFF by default) to diagnose the ~500ms first-drag

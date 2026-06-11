@@ -2998,7 +2998,7 @@ body.theme-light .branch-link {
   width: min(760px, var(--popover-max-inline-size));
   max-height: min(70vh, 760px);
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   overflow: hidden;
   color: var(--text);
   background: #111820;
@@ -3018,6 +3018,28 @@ body.theme-light .branch-link {
   border-bottom: 1px solid var(--line);
   outline: none;
   font: var(--ui-font-size-lg)/1.2 var(--ui-font);
+}
+.command-palette-status {
+  padding: 4px 10px 5px;
+  color: var(--muted);
+  background: rgb(var(--overlay-slate-rgb) / 0.28);
+  border-bottom: 1px solid var(--line);
+  font: 700 var(--ui-font-size-2xs)/1 var(--mono-font);
+}
+.command-palette-status::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-inline-end: 7px;
+  border-radius: 999px;
+  background: var(--accent-gold);
+  animation: command-palette-thinking 900ms ease-in-out infinite alternate;
+  vertical-align: 1px;
+}
+@keyframes command-palette-thinking {
+  from { opacity: 0.35; }
+  to { opacity: 1; }
 }
 .command-palette-results {
   min-height: 0;
@@ -3875,6 +3897,9 @@ button:disabled:hover { border-color: var(--line); }
 .yolomux-dockview .dockview-panel-content > .panel.dockview-inner-head-collapsed {
   grid-template-rows: auto minmax(0, 1fr);
 }
+.yolomux-dockview .dockview-panel-content > .panel.dockview-inner-head-collapsed.details-collapsed {
+  grid-template-rows: minmax(0, 1fr);
+}
 .yolomux-dockview .dockview-panel-content > .panel > .panel-head.dockview-inner-head-hidden,
 .yolomux-dockview .dockview-panel-content > .panel > .panel-head[hidden] {
   display: none;
@@ -4392,7 +4417,7 @@ body.theme-light .drop-slot.drag-over {
   flex: 0 0 14px;
   width: 14px;
   height: 14px;
-  margin-inline-start: auto;
+  margin-inline-start: 4px;
   margin-inline-end: 0;
   align-self: center;
   position: relative;
@@ -4586,15 +4611,18 @@ body.theme-light .drop-slot.drag-over {
   max-width: 74px;
   height: 20px;
   padding: 0 7px;
-  border: 1px solid var(--pane-tab-yolo-border);
+  border: 1px solid color-mix(in srgb, var(--pane-tab-panel-head-text) 28%, transparent);
   border-radius: 6px;
-  color: var(--pane-tab-yolo-text);
-  background: var(--pane-tab-yolo-bg);
+  color: color-mix(in srgb, var(--pane-tab-panel-head-text) 82%, transparent);
+  background: rgb(var(--overlay-slate-rgb) / 0.22);
   font: 700 var(--ui-font-size-xs)/1 var(--mono-font);
   text-transform: lowercase;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.panel-detail-row > .panel-agent-slot + .panel-detail-close {
+  margin-inline-start: auto;
 }
 .panel-session-tab {
   cursor: default;
@@ -5154,6 +5182,8 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
 .panel-detail-row .tmux-window-bar {
   flex: 0 1 auto;
   max-width: min(44ch, 46%);
+  margin-inline-start: auto;
+  justify-content: flex-end;
 }
 .tmux-window-button {
   flex: 0 1 auto;

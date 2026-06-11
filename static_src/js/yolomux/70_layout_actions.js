@@ -285,10 +285,16 @@ function slotForNewSession() {
   return 'left';
 }
 
+function focusedActivationSlot() {
+  const item = currentActiveMenuItem();
+  const slot = item ? slotForSession(item) : null;
+  return slot && !slotIsFileExplorerPane(slot) ? slot : null;
+}
+
 function slotForTabActivation(item) {
   const currentSlot = slotForSession(item);
   if (currentSlot) return currentSlot;
-  return largestNonFileExplorerPaneSlot() || firstEmptyPane() || largestPaneSlot() || slotForNewSession();
+  return focusedActivationSlot() || largestNonFileExplorerPaneSlot() || firstEmptyPane() || largestPaneSlot() || slotForNewSession();
 }
 
 async function activateTabInExistingPane(item) {

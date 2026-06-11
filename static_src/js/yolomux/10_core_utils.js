@@ -984,6 +984,34 @@ function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+const searchRankWeights = Object.freeze({
+  perChar: 8,
+  contiguous: 10,
+  wordStart: 6,
+  gapPenalty: 0.2,
+  haystackLengthPenalty: 0.01,
+  anchorPrimary: 20000,
+  anchorSecondary: 12000,
+  fieldIndexPenalty: 20,
+  domainPrior: {
+    files: {file: 6000, pane: 3000, command: 0, setting: 0},
+    command: {pane: 6000, command: 3000, setting: 3000, file: 0},
+  },
+  fileNamePrefix: 3500,
+  fileNameContains: 1800,
+  fileNameSubsequence: 600,
+  finderAlias: 25000,
+  finderAliasFilesMode: 2500,
+  recentSelectionBase: 1000,
+  recencyCap: 900,
+  recencyHalfLifeSeconds: 7 * 24 * 60 * 60,
+  repoAffinity: 400,
+  mixWindow: 8,
+  mixSecondarySlots: 2,
+  mixFirstSecondaryIndex: 2,
+  mixSecondaryStep: 3,
+});
+
 function fuzzySubsequenceMatch(query, text) {
   const needle = String(query || '').toLowerCase().replace(/\s+/g, '');
   const haystack = String(text || '').toLowerCase();
@@ -998,15 +1026,15 @@ function fuzzySubsequenceMatch(query, text) {
     const previousChar = haystack[index - 1] || '';
     const contiguous = previousIndex >= 0 && index === previousIndex + 1;
     const wordStart = index === 0 || /[\s/_:.-]/.test(previousChar);
-    score += 8;
-    if (contiguous) score += 10;
-    if (wordStart) score += 6;
-    score -= Math.max(0, index - position) * 0.2;
+    score += searchRankWeights.perChar;
+    if (contiguous) score += searchRankWeights.contiguous;
+    if (wordStart) score += searchRankWeights.wordStart;
+    score -= Math.max(0, index - position) * searchRankWeights.gapPenalty;
     previousIndex = index;
     position = index + 1;
     indexes.push(index);
   }
-  return {score: score - Math.max(0, haystack.length - needle.length) * 0.01, indexes};
+  return {score: score - Math.max(0, haystack.length - needle.length) * searchRankWeights.haystackLengthPenalty, indexes};
 }
 
 function fuzzySubsequenceScore(query, text) {
@@ -1034,9 +1062,9 @@ function fuzzySearchScore(query, fields) {
     for (const [index, value] of values.entries()) {
       let fieldScore = fuzzySubsequenceScore(token, value);
       if (Number.isFinite(fieldScore) && fuzzyFieldStartsWithQuery(token, value)) {
-        fieldScore += index === 0 ? 20000 : 12000;
+        fieldScore += index === 0 ? searchRankWeights.anchorPrimary : searchRankWeights.anchorSecondary;
       }
-      if (Number.isFinite(fieldScore)) best = Math.max(best, fieldScore - index * 20);
+      if (Number.isFinite(fieldScore)) best = Math.max(best, fieldScore - index * searchRankWeights.fieldIndexPenalty);
     }
     if (!Number.isFinite(best)) return Number.NEGATIVE_INFINITY;
     total += best;
