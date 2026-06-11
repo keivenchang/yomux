@@ -42,6 +42,7 @@ from .activity import ActivityLedger
 from .common import ACTIVITY_HEARTBEATS_PATH
 from .common import ACTIVITY_PATH
 from .common import AGENT_COMMANDS
+from .common import DEFAULT_UPLOAD_SUBDIR
 from .common import EVENT_LOG_PATH
 from .common import MAX_COMPACT_TRANSCRIPT_ITEMS
 from .common import MAX_EVENT_TAIL_LINES
@@ -2889,6 +2890,31 @@ class TmuxWebtermApp:
         return int(value) if isinstance(value, (int, float)) and value > 0 else UPLOAD_MAX_BYTES
 
     def upload_target_dir(self, session: str) -> tuple[Path | None, str]:
+        base, source = self._resolve_upload_base_dir(session)
+        if base is None:
+            return None, source
+        return self._apply_upload_subdir(base), source
+
+    def _apply_upload_subdir(self, base: Path) -> Path:
+        # Uploads default into a `.upload/` subdir of the working dir (keeps the cwd/repo clean and
+        # easy to .gitignore); the `uploads.subdir` setting overrides it, and an empty value writes
+        # straight into the working dir. One owner: every upload routes through upload_target_dir, so
+        # the subdir logic lives only here.
+        subdir = str(settings_payload().get("settings", {}).get("uploads", {}).get("subdir", DEFAULT_UPLOAD_SUBDIR) or "").strip()
+        if not subdir:
+            return base
+        relative = Path(subdir)
+        if relative.is_absolute() or ".." in relative.parts:
+            return base  # never let the setting escape the working dir
+        target = base / relative
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            target.chmod(0o700)
+        except OSError:
+            return base  # fall back to the working dir if the subdir can't be created
+        return target
+
+    def _resolve_upload_base_dir(self, session: str) -> tuple[Path | None, str]:
         focus_root = focus_root_for_session(session)
         if focus_root:
             return Path(focus_root), "session_workdir"

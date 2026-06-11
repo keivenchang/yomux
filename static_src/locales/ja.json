@@ -526,6 +526,8 @@
   "pref.uploads.filename_template.label": "アップロードのファイル名テンプレート",
   "pref.uploads.max_bytes.help": "ブラウザーでバッファリングするアップロードの最大サイズ。大きいファイルには rsync の方が速く、アップロード全体をメモリに保持せずに済みます。",
   "pref.uploads.max_bytes.label": "アップロードサイズの上限",
+  "pref.uploads.subdir.help": "ドロップまたは貼り付けでアップロードしたファイルを書き込む作業ディレクトリ内のサブディレクトリ（必要に応じて作成）。空にすると作業ディレクトリ直下に書き込みます。",
+  "pref.uploads.subdir.label": "アップロードのサブフォルダ",
   "pref.yoagent.backend.auto": "自動 (Codex → Claude)",
   "pref.yoagent.backend.claude": "Claude",
   "pref.yoagent.backend.codex": "Codex",

@@ -526,6 +526,8 @@
   "pref.uploads.filename_template.label": "قالب اسم ملف الرفع",
   "pref.uploads.max_bytes.help": "الحد الأقصى لحجم رفع المتصفح المؤقت. للملفات الكبيرة، rsync أسرع ويتجنب تخزين الرفع بالكامل في الذاكرة.",
   "pref.uploads.max_bytes.label": "حد حجم الرفع",
+  "pref.uploads.subdir.help": "مجلد فرعي داخل دليل العمل تُكتب فيه الملفات المرفوعة بالسحب أو اللصق (يُنشأ عند الحاجة). اتركه فارغًا للكتابة مباشرة في دليل العمل.",
+  "pref.uploads.subdir.label": "مجلد فرعي للرفع",
   "pref.yoagent.backend.auto": "تلقائي (Codex → Claude)",
   "pref.yoagent.backend.claude": "Claude",
   "pref.yoagent.backend.codex": "Codex",

@@ -526,6 +526,8 @@
   "pref.uploads.filename_template.label": "Modelo de nome de arquivo de upload",
   "pref.uploads.max_bytes.help": "Tamanho máximo de upload do navegador em buffer. Para arquivos grandes, rsync é mais rápido e evita armazenar o upload inteiro na memória.",
   "pref.uploads.max_bytes.label": "Limite de tamanho de upload",
+  "pref.uploads.subdir.help": "Subdiretório dentro do diretório de trabalho onde os uploads arrastados ou colados são gravados (criado quando necessário). Deixe vazio para gravar direto no diretório de trabalho.",
+  "pref.uploads.subdir.label": "Subpasta de upload",
   "pref.yoagent.backend.auto": "Auto (Codex → Claude)",
   "pref.yoagent.backend.claude": "Claude",
   "pref.yoagent.backend.codex": "Codex",

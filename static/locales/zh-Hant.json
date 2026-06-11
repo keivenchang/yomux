@@ -526,6 +526,8 @@
   "pref.uploads.filename_template.label": "上傳檔名範本",
   "pref.uploads.max_bytes.help": "瀏覽器緩衝上傳的最大大小。對於大型檔案，rsync 較快且可避免將整個上傳緩衝在記憶體中。",
   "pref.uploads.max_bytes.label": "上傳大小上限",
+  "pref.uploads.subdir.help": "工作目錄下用於儲存拖放或貼上上傳檔案的子目錄（按需建立）。留空則直接寫入工作目錄。",
+  "pref.uploads.subdir.label": "上傳子資料夾",
   "pref.yoagent.auto_refresh.help": "When enabled, YO!agent updates per-session transcript summaries in the background after quiet intervals. Off by default to avoid background model cost.",
   "pref.yoagent.auto_refresh.label": "Background transcript summaries",
   "pref.yoagent.backend.auto": "自動 (Codex → Claude)",

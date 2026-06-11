@@ -526,6 +526,8 @@
   "pref.uploads.filename_template.label": "Dateinamenvorlage für Uploads",
   "pref.uploads.max_bytes.help": "Maximale gepufferte Browser-Uploadgröße. Für große Dateien ist rsync schneller und vermeidet, den gesamten Upload im Speicher zu puffern.",
   "pref.uploads.max_bytes.label": "Obergrenze der Uploadgröße",
+  "pref.uploads.subdir.help": "Unterverzeichnis im Arbeitsverzeichnis, in das abgelegte/eingefügte Uploads geschrieben werden (bei Bedarf erstellt). Leer lassen, um direkt ins Arbeitsverzeichnis zu schreiben.",
+  "pref.uploads.subdir.label": "Upload-Unterordner",
   "pref.yoagent.backend.auto": "Auto (Codex → Claude)",
   "pref.yoagent.backend.claude": "Claude",
   "pref.yoagent.backend.codex": "Codex",

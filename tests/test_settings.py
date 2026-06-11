@@ -400,3 +400,15 @@ def test_blame_all_lines_default_and_coercion():
     assert default_settings()["editor"]["blame_all_lines"] is False
     assert sanitize_settings({"editor": {"blame_all_lines": "yes"}})["editor"]["blame_all_lines"] is True
     assert sanitize_settings({"editor": {"blame_all_lines": "no"}})["editor"]["blame_all_lines"] is False
+
+
+def test_uploads_subdir_defaults_to_dot_upload():
+    assert default_settings()["uploads"]["subdir"] == ".upload"
+
+
+def test_uploads_subdir_allows_empty_for_cwd_opt_out():
+    assert sanitize_settings({"uploads": {"subdir": ""}})["uploads"]["subdir"] == ""
+
+
+def test_uploads_blank_filename_template_still_reverts_to_default():
+    assert sanitize_settings({"uploads": {"filename_template": ""}})["uploads"]["filename_template"] == DEFAULT_UPLOAD_FILENAME_TEMPLATE

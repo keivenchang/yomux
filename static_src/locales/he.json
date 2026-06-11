@@ -526,6 +526,8 @@
   "pref.uploads.filename_template.label": "תבנית שם קובץ להעלאה",
   "pref.uploads.max_bytes.help": "גודל ההעלאה המקסימלי שמאוחסן בדפדפן. לקבצים גדולים, rsync מהיר יותר ונמנע מאחסון כל ההעלאה בזיכרון.",
   "pref.uploads.max_bytes.label": "מגבלת גודל העלאה",
+  "pref.uploads.subdir.help": "תת-תיקייה בתוך תיקיית העבודה שאליה נכתבות העלאות שנגררו או הודבקו (נוצרת לפי הצורך). השאירו ריק כדי לכתוב ישירות לתיקיית העבודה.",
+  "pref.uploads.subdir.label": "תיקיית משנה להעלאות",
   "pref.yoagent.backend.auto": "אוטומטי (Codex → Claude)",
   "pref.yoagent.backend.claude": "Claude",
   "pref.yoagent.backend.codex": "Codex",

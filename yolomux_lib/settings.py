@@ -15,6 +15,7 @@ from .atomic_file import atomic_write_text
 from .atomic_file import file_lock
 from .common import CONFIG_DIR
 from .common import DEFAULT_UPLOAD_FILENAME_TEMPLATE
+from .common import DEFAULT_UPLOAD_SUBDIR
 from .common import UPLOAD_MAX_BYTES
 
 
@@ -122,6 +123,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "uploads": {
         "filename_template": DEFAULT_UPLOAD_FILENAME_TEMPLATE,
         "max_bytes": UPLOAD_MAX_BYTES,
+        "subdir": DEFAULT_UPLOAD_SUBDIR,
     },
     "yoagent": {
         "backend": "auto",
@@ -232,6 +234,12 @@ SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
     ("uploads", "max_bytes"): (1 * 1024 * 1024, 512 * 1024 * 1024),
 }
 
+# String settings that accept an empty value (most strings revert to their default when blank).
+# `uploads.subdir` empty = write uploads straight into the cwd instead of a `.upload/` subdir.
+STRING_ALLOW_EMPTY: set[tuple[str, str]] = {
+    ("uploads", "subdir"),
+}
+
 SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
     ("general", "default_layout"): {"single", "split", "grid", "wall"},
     # i18n (Phase 0): only locales that ship a catalog are accepted; "system" matches the
@@ -340,6 +348,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("file_explorer", "new_entry_highlight_ms"): "Milliseconds, 0-600000. How long new File Explorer entries stay highlighted.",
     ("uploads", "filename_template"): "Upload filename template. Supported fields: {date:%Y%m%d}, {seq:03d}, {name}, {ext}. When {name} is empty, a preceding dash is omitted.",
     ("uploads", "max_bytes"): "Bytes, 1048576-536870912. Maximum buffered browser upload size. Prefer rsync for large files.",
+    ("uploads", "subdir"): "Subdirectory under the session working directory where uploads are written (default .upload, created on demand). Leave empty to write straight into the working directory.",
     ("yoagent", "backend"): "auto | deterministic | claude | codex. Default auto prefers codex, then claude (whichever is installed AND logged in), else the No agent summary. The deterministic internal value is shown as No agent; explicit Claude/Codex use the selected invocation when available.",
     ("yoagent", "invocation"): "cli | api-key. CLI runs the local agent binary; api-key is reserved and falls back safely today.",
     ("yoagent", "auto_refresh"): "true/false. Default false. When true, YO!agent refreshes per-session transcript summaries in the background after quiet intervals.",
@@ -448,7 +457,9 @@ def sanitize_settings(raw: Any, coerced: list[str] | None = None) -> dict[str, A
             elif (section, key) in SETTING_CHOICES:
                 sanitized[section][key] = value if isinstance(value, str) and value in SETTING_CHOICES[(section, key)] else default
             elif isinstance(default, str):
-                sanitized[section][key] = value if isinstance(value, str) and value.strip() else default
+                allow_empty = (section, key) in STRING_ALLOW_EMPTY
+                valid = isinstance(value, str) and (allow_empty or value.strip())
+                sanitized[section][key] = value if valid else default
             if coerced is not None and present and sanitized[section][key] != value:
                 coerced.append(f"{section}.{key}")
     return sanitized

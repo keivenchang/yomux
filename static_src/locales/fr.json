@@ -526,6 +526,8 @@
   "pref.uploads.filename_template.label": "Modèle de nom de fichier des téléversements",
   "pref.uploads.max_bytes.help": "Taille maximale de téléversement de navigateur en mémoire tampon. Pour les gros fichiers, rsync est plus rapide et évite de mettre tout le téléversement en mémoire.",
   "pref.uploads.max_bytes.label": "Limite de taille des téléversements",
+  "pref.uploads.subdir.help": "Sous-répertoire du répertoire de travail où sont écrits les fichiers déposés ou collés (créé à la demande). Laisser vide pour écrire directement dans le répertoire de travail.",
+  "pref.uploads.subdir.label": "Sous-dossier d'envoi",
   "pref.yoagent.backend.auto": "Auto (Codex → Claude)",
   "pref.yoagent.backend.claude": "Claude",
   "pref.yoagent.backend.codex": "Codex",

@@ -34,7 +34,7 @@ DEFAULT_ROWS = 36
 MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
-YOLOMUX_VERSION = "0.2.86"
+YOLOMUX_VERSION = "0.2.87"
 SUMMARY_LOOKBACK_SECONDS = 3600
 SUMMARY_MAX_PROMPT_CHARS = 100_000
 SUMMARY_CODEX_TIMEOUT_SECONDS = 600
@@ -236,6 +236,9 @@ def positive_env_int(name: str, default: int) -> int:
 UPLOAD_MAX_BYTES = positive_env_int("YOLOMUX_UPLOAD_MAX_BYTES", 20 * 1024 * 1024)
 UPLOAD_MAX_FILES = positive_env_int("YOLOMUX_UPLOAD_MAX_FILES", 16)
 DEFAULT_UPLOAD_FILENAME_TEMPLATE = "{date:%Y%m%d}-{seq:03d}-{name}{ext}"
+# Uploads default into a `.upload/` subdir of the session working dir (keeps the cwd/repo clean and
+# is easy to .gitignore). An empty `uploads.subdir` setting writes straight into the cwd instead.
+DEFAULT_UPLOAD_SUBDIR = ".upload"
 UPLOAD_SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._ -]+")
 PASTE_UPLOAD_NAME_RE = re.compile(r"^(?P<date>\d{8})-(?P<index>\d{3})(?P<suffix>\.[A-Za-z0-9]{1,8})$")
 UPLOAD_GENERATED_NAME_RE = re.compile(r"^\d{8}-\d{3}(?:-[^/]+)?\.[A-Za-z0-9]{1,12}$")

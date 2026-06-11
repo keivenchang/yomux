@@ -526,6 +526,8 @@
   "pref.uploads.filename_template.label": "Шаблон имени загружаемого файла",
   "pref.uploads.max_bytes.help": "Максимальный буферизованный размер загрузки в браузере. Для больших файлов rsync быстрее и не буферизует всю загрузку в памяти.",
   "pref.uploads.max_bytes.label": "Ограничение размера загрузки",
+  "pref.uploads.subdir.help": "Подкаталог в рабочем каталоге, куда записываются перетащенные или вставленные загрузки (создаётся при необходимости). Оставьте пустым, чтобы писать прямо в рабочий каталог.",
+  "pref.uploads.subdir.label": "Подпапка загрузок",
   "pref.yoagent.backend.auto": "Авто (Codex → Claude)",
   "pref.yoagent.backend.claude": "Claude",
   "pref.yoagent.backend.codex": "Codex",

@@ -1184,3 +1184,44 @@ def test_watched_prs_payload_shapes_result_and_logs_truncation_once(monkeypatch)
     truncated_box["n"] = 5
     webapp.watched_prs_payload(allow_network=False)
     assert len(truncation_events()) == 2, "a changed capped state logs again"
+
+
+def test_apply_upload_subdir_defaults_to_dot_upload(monkeypatch, tmp_path):
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"uploads": {"subdir": ".upload"}}})
+        target = webapp._apply_upload_subdir(tmp_path)
+        assert target == tmp_path / ".upload"
+        assert target.is_dir()
+    finally:
+        webapp.control_server.stop()
+
+
+def test_apply_upload_subdir_empty_writes_into_cwd(monkeypatch, tmp_path):
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"uploads": {"subdir": ""}}})
+        assert webapp._apply_upload_subdir(tmp_path) == tmp_path
+    finally:
+        webapp.control_server.stop()
+
+
+def test_apply_upload_subdir_rejects_escaping_value(monkeypatch, tmp_path):
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"uploads": {"subdir": "../escape"}}})
+        assert webapp._apply_upload_subdir(tmp_path) == tmp_path
+        assert not (tmp_path.parent / "escape").exists()
+    finally:
+        webapp.control_server.stop()
+
+
+def test_apply_upload_subdir_falls_back_when_uncreatable(monkeypatch, tmp_path):
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"uploads": {"subdir": ".upload"}}})
+        base = tmp_path / "afile"
+        base.write_text("not a dir", encoding="utf-8")
+        assert webapp._apply_upload_subdir(base) == base
+    finally:
+        webapp.control_server.stop()

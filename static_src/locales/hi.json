@@ -526,6 +526,8 @@
   "pref.uploads.filename_template.label": "Upload फ़ाइलनाम टेम्पलेट",
   "pref.uploads.max_bytes.help": "अधिकतम buffered ब्राउज़र upload साइज़। बड़ी फ़ाइलों के लिए rsync तेज़ है और पूरी upload मेमोरी में buffer करने से बचाता है।",
   "pref.uploads.max_bytes.label": "Upload साइज़ सीमा",
+  "pref.uploads.subdir.help": "कार्यशील निर्देशिका के अंदर वह उपनिर्देशिका जहाँ खींचे या चिपकाए गए अपलोड लिखे जाते हैं (आवश्यकता पड़ने पर बनाई जाती है)। कार्यशील निर्देशिका में सीधे लिखने के लिए इसे खाली छोड़ें।",
+  "pref.uploads.subdir.label": "अपलोड सबफ़ोल्डर",
   "pref.yoagent.backend.auto": "Auto (Codex → Claude)",
   "pref.yoagent.backend.claude": "Claude",
   "pref.yoagent.backend.codex": "Codex",

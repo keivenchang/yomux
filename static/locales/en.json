@@ -526,6 +526,8 @@
   "pref.uploads.filename_template.label": "Upload filename template",
   "pref.uploads.max_bytes.help": "Maximum buffered browser upload size. For large files, rsync is faster and avoids buffering the whole upload in memory.",
   "pref.uploads.max_bytes.label": "Upload size cap",
+  "pref.uploads.subdir.help": "Subdirectory under the working directory where dropped/pasted uploads are written (created on demand). Leave empty to write straight into the working directory.",
+  "pref.uploads.subdir.label": "Upload subfolder",
   "pref.yoagent.auto_refresh.help": "When enabled, YO!agent updates per-session transcript summaries in the background after quiet intervals. Off by default to avoid background model cost.",
   "pref.yoagent.auto_refresh.label": "Background transcript summaries",
   "pref.yoagent.backend.auto": "Auto (Codex → Claude)",
