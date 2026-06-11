@@ -761,6 +761,16 @@ function setLimitedMapEntry(map, key, value, limit) {
 }
 
 let infoBranchSort = {key: 'updated', dir: 'desc'};
+const infoBranchColumnWidthStorageKey = 'yolomux.infoBranchColumnWidth.v1';
+const infoBranchColumnDefaultWidthPx = 320;
+const infoBranchColumnMinWidthPx = 230;
+const infoBranchColumnMaxWidthPx = 900;
+const infoDescColumnWidthStorageKey = 'yolomux.infoDescColumnWidth.v1';
+const infoDescColumnDefaultWidthPx = 310;
+const infoDescColumnMinWidthPx = 310;
+const infoDescColumnMaxWidthPx = 1600;
+let infoBranchColumnWidthPx = readStoredInfoColumnWidth('branch');
+let infoDescColumnWidthPx = readStoredInfoColumnWidth('desc');
 let attentionAlertSequence = 0;
 let stateTrackingReady = false;
 let focusedTerminal = null;
@@ -2374,6 +2384,58 @@ async function copyTextToClipboard(text) {
   if (!copied) throw new Error('clipboard copy is unavailable');
 }
 
+function copyTextToClipboardViaCopyEvent(text) {
+  const value = String(text ?? '');
+  let copied = false;
+  const onCopy = event => {
+    if (!event?.clipboardData) return;
+    event.clipboardData.setData('text/plain', value);
+    event.preventDefault();
+    event.stopImmediatePropagation?.();
+    event.stopPropagation?.();
+    copied = true;
+  };
+  document.addEventListener?.('copy', onCopy, true);
+  try {
+    return document.execCommand?.('copy') === true && copied;
+  } finally {
+    document.removeEventListener?.('copy', onCopy, true);
+  }
+}
+
+// DOIT.53: ONE clipboard-write chain for terminal-initiated copies (shortcut copy AND the OSC 52
+// bridge): synchronous copy-event first — it stays inside any live user activation — then the async
+// navigator.clipboard path as fallback. Status text reports success/failure either way.
+function writeTerminalTextToClipboard(text, label = 'copied') {
+  if (copyTextToClipboardViaCopyEvent(text)) {
+    copyDebug('clipboard', {via: 'copy-event', chars: String(text ?? '').length, ok: true});
+    statusEl.textContent = label;
+    return;
+  }
+  copyTextToClipboard(text)
+    .then(() => {
+      copyDebug('clipboard', {via: 'async', chars: String(text ?? '').length, ok: true});
+      statusEl.textContent = label;
+    })
+    .catch(error => {
+      copyDebug('clipboard', {via: 'async', chars: String(text ?? '').length, ok: false, error: String(error)});
+      statusErr(`copy failed: ${esc(error)}`);
+    });
+}
+
+// DOIT.53 N1: opt-in live instrumentation for the copy path. Set storage key 'yolomux.debugCopy' to '1'
+// and every copy decision logs ONE compact console line — enough to see which link breaks without
+// changing behavior.
+function copyDebugEnabled() {
+  return storageGet('yolomux.debugCopy') === '1';
+}
+
+function copyDebug(stage, fields = {}) {
+  if (!copyDebugEnabled()) return;
+  const parts = Object.entries(fields).map(([key, value]) => `${key}=${value}`).join(' ');
+  console.log(`[copy-debug] ${stage} ${parts}`);
+}
+
 function createContextMenuController() {
   let menu = null;
   const close = () => {
@@ -2552,8 +2614,37 @@ function installLinkContextMenu(container) {
   });
 }
 
-async function copyTerminalSelection(session, term, options = {}) {
-  const selected = term.getSelection?.() || '';
+function nodeInsideElement(element, node) {
+  if (!element || !node) return false;
+  if (element === node) return true;
+  if (element.contains?.(node)) return true;
+  let current = node.parentElement || node.parentNode || null;
+  while (current) {
+    if (current === element) return true;
+    current = current.parentElement || current.parentNode || null;
+  }
+  return false;
+}
+
+function browserSelectionTextInside(container) {
+  if (!container) return '';
+  const selection = globalThis.getSelection?.() || globalThis.window?.getSelection?.();
+  const text = String(selection?.toString?.() || '');
+  if (!text) return '';
+  const anchorNode = selection.anchorNode || null;
+  const focusNode = selection.focusNode || null;
+  if (!anchorNode && !focusNode) return '';
+  return nodeInsideElement(container, anchorNode) || nodeInsideElement(container, focusNode) ? text : '';
+}
+
+function terminalSelectedText(term, container = null) {
+  return term.getSelection?.() || browserSelectionTextInside(container);
+}
+
+async function copyTerminalSelection(session, term, options = {}, container = null) {
+  // N7: the context menu passes the selection captured at right-click time, because by the time the user
+  // clicks the menu the live selection may be gone (focus moved to the menu).
+  const selected = options.selectionText != null ? options.selectionText : terminalSelectedText(term, container);
   if (!selected) {
     statusEl.textContent = 'nothing selected';
     return;
@@ -2567,8 +2658,19 @@ async function copyTerminalSelection(session, term, options = {}) {
   }
 }
 
-function copyTerminalSelectionToClipboardEvent(session, term, event) {
-  const selected = term.getSelection?.() || '';
+function copyTerminalSelectionFromShortcut(session, term, options = {}, container = null) {
+  const selected = terminalSelectedText(term, container);
+  if (!selected) {
+    statusEl.textContent = 'nothing selected';
+    return false;
+  }
+  const text = options.dedent ? dedentSelectionText(selected) : selected;
+  writeTerminalTextToClipboard(text, options.dedent ? 'copied without indent' : 'copied');
+  return true;
+}
+
+function copyTerminalSelectionToClipboardEvent(session, term, event, container = null) {
+  const selected = terminalSelectedText(term, container);
   if (!selected || !event?.clipboardData) return false;
   event.clipboardData.setData('text/plain', selected);
   event.preventDefault();
@@ -2625,28 +2727,99 @@ async function copyDeferredTextToClipboard(payloadPromise) {
   return result;
 }
 
-function installTerminalCopyShortcut(session, term) {
-  // Ctrl-C / Cmd-C copy the xterm selection. Plain Ctrl-C with NO selection
-  // must still send SIGINT to the PTY, but Cmd-C must stay a browser copy
-  // shortcut. If xterm has no selection, ask tmux for its copy-mode selection
-  // instead of forwarding Cmd-C into the PTY.
-  term.attachCustomKeyEventHandler?.(event => {
-    if (event.type !== 'keydown') return true;
-    if (event.code !== 'KeyC' && event.key?.toLowerCase() !== 'c') return true;
-    const isCmdC = event.metaKey && !event.ctrlKey && !event.altKey;
-    const isCtrlC = event.ctrlKey && !event.metaKey && !event.altKey;
-    if (!isCmdC && !isCtrlC) return true;
-    const selected = term.getSelection?.() || '';
-    if (!selected && !isCmdC) return true; // no selection: let Ctrl-C through as SIGINT
+// DOIT.53 ROOT CAUSE: while Claude (or any TUI) owns the mouse inside tmux, the visible selection is the
+// APP's — a plain drag never creates an xterm selection, and the copied text instead arrives as an
+// OSC 52 clipboard escape (app -> tmux `set-clipboard` passthrough -> our PTY -> xterm.js). xterm.js
+// DROPS OSC 52 unless a handler is registered, so those copies silently vanished. This bridge decodes
+// the escape and writes the browser clipboard. It also catches tmux copy-mode `copy-pipe` buffers.
+// Payload format: "Pc;Pd" — Pc selects clipboard(s) (c/p/s/q...), Pd is base64 text or '?' (a READ
+// request, which we never answer so apps cannot exfiltrate the browser clipboard).
+function osc52ClipboardText(data) {
+  const raw = String(data ?? '');
+  const semi = raw.indexOf(';');
+  if (semi < 0) return null;
+  const payload = raw.slice(semi + 1);
+  if (!payload || payload === '?') return null;
+  try {
+    const binary = atob(payload);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const decoded = new TextDecoder('utf-8', {fatal: false}).decode(bytes);
+    return decoded || null;
+  } catch (_error) {
+    return null; // not valid base64: ignore rather than copy garbage
+  }
+}
+
+function installTerminalOsc52Bridge(session, term) {
+  if (!term?.parser?.registerOscHandler) return false;
+  term.parser.registerOscHandler(52, data => {
+    const text = osc52ClipboardText(data);
+    copyDebug('osc52', {session, payloadChars: String(data ?? '').length, textChars: text ? text.length : 0});
+    if (text) writeTerminalTextToClipboard(text, `copied ${text.length} chars`);
+    return true; // consumed either way; '?' queries get no reply
+  });
+  return true;
+}
+
+function handleTerminalCopyShortcutKeydown(session, term, container, event) {
+  if (event.type !== 'keydown') return false;
+  if (event.code !== 'KeyC' && event.key?.toLowerCase() !== 'c') return false;
+  const isTmuxCopyShortcut = event.altKey
+    && !event.shiftKey
+    && ((isMacPlatform() && event.metaKey && !event.ctrlKey)
+      || (!isMacPlatform() && event.ctrlKey && !event.metaKey));
+  if (isTmuxCopyShortcut) {
     event.preventDefault();
-    if (selected) copyTerminalSelection(session, term);
-    else copyTmuxSelectionToClipboard(session);
-    term.clearSelection?.(); // so a second Ctrl-C falls through to SIGINT
-    return false; // swallow: do not forward ^C to the PTY
+    copyTmuxSelectionToClipboard(session);
+    return true;
+  }
+  const isCmdC = event.metaKey && !event.ctrlKey && !event.altKey;
+  const isCtrlC = event.ctrlKey && !event.metaKey && !event.altKey;
+  if (!isCmdC && !isCtrlC) return false;
+  const xtermSelected = term.getSelection?.() || '';
+  const browserSelected = browserSelectionTextInside(container);
+  const selected = xtermSelected || browserSelected;
+  copyDebug('shortcut', {
+    session,
+    combo: isCmdC ? 'cmd-c' : 'ctrl-c',
+    xtermSel: xtermSelected.length,
+    browserSel: browserSelected.length,
+    branch: selected ? 'copy' : (isCmdC ? 'no-selection' : 'sigint'),
+  });
+  if (!selected) {
+    if (isCmdC) {
+      event.preventDefault();
+      // DOIT.53: in a Claude/tmux pane the APP owns the mouse, so a plain drag never creates an xterm
+      // selection — tell the user the working gestures instead of dead-ending.
+      statusEl.textContent = isMacPlatform()
+        ? 'nothing selected — Option-drag selects while Claude/tmux owns the mouse; Cmd-Option-C copies the tmux selection'
+        : 'nothing selected — Shift-drag selects while the app owns the mouse; Ctrl-Alt-C copies the tmux selection';
+      return true;
+    }
+    return false; // no selection: let Ctrl-C through as SIGINT
+  }
+  event.preventDefault();
+  copyTerminalSelectionFromShortcut(session, term, {}, container);
+  term.clearSelection?.(); // so a second Ctrl-C falls through to SIGINT
+  return true;
+}
+
+function installTerminalCopyShortcut(session, term, container = null) {
+  // Ctrl-C / Cmd-C copy the xterm selection. Plain Ctrl-C with NO selection
+  // must still send SIGINT to the PTY, and Cmd-C must stay browser/xterm copy
+  // only. Tmux copy-mode text has a separate explicit shortcut/menu action.
+  container?.addEventListener?.('keydown', event => {
+    if (!handleTerminalCopyShortcutKeydown(session, term, container, event)) return;
+    event.stopImmediatePropagation?.();
+    event.stopPropagation?.();
+  }, {capture: true});
+  term.attachCustomKeyEventHandler?.(event => {
+    return handleTerminalCopyShortcutKeydown(session, term, container, event) ? false : true;
   });
 }
 
-function showTerminalContextMenu(session, term, x, y) {
+function showTerminalContextMenu(session, term, x, y, container = null, presetSelection = '') {
   closeFileContextMenu();
   closeSessionContextMenu();
   closeFileImagePreview();
@@ -2654,23 +2827,36 @@ function showTerminalContextMenu(session, term, x, y) {
   const menu = document.createElement('div');
   menu.className = 'terminal-context-menu';
   menu.setAttribute('role', 'menu');
+  // N7: prefer the selection captured at right-click time over a live re-read (which can be empty by now).
+  const selected = presetSelection || terminalSelectedText(term, container);
   const items = [
     ['Copy', false],
     ['Copy without indent', true],
   ];
   for (const [label, dedent] of items) {
-    appendContextMenuButton(menu, label, () => copyTerminalSelection(session, term, {dedent}), closeTerminalContextMenu);
+    appendContextMenuButton(menu, label, () => copyTerminalSelection(session, term, {dedent, selectionText: selected}, container), closeTerminalContextMenu, {disabled: !selected});
   }
+  appendContextMenuSeparator(menu);
+  appendContextMenuButton(menu, t('terminal.copyTmuxSelection'), () => copyTmuxSelectionToClipboard(session), closeTerminalContextMenu);
   terminalContextMenu.open(menu, x, y);
 }
 
 function installTerminalContextMenu(session, term, container) {
+  // N7: right-click must NOT clear the highlight. xterm clears its selection on mousedown, so capture the
+  // selected text on the right-mousedown (capture phase, before xterm's handler) and stopPropagation so
+  // xterm never processes that mousedown — the highlight stays visible AND the menu has the text even if
+  // focus moves to the menu. No preventDefault, so the contextmenu event still fires normally.
+  let rightClickSelection = '';
+  container.addEventListener('mousedown', event => {
+    if (event.button !== 2) return;
+    rightClickSelection = terminalSelectedText(term, container);
+    event.stopPropagation();
+  }, {capture: true});
   container.addEventListener('contextmenu', event => {
-    const selected = term.getSelection?.() || '';
-    if (!selected) return;
     event.preventDefault();
     event.stopPropagation();
-    showTerminalContextMenu(session, term, event.clientX, event.clientY);
+    showTerminalContextMenu(session, term, event.clientX, event.clientY, container, rightClickSelection);
+    rightClickSelection = '';
   });
 }
 
@@ -3963,6 +4149,9 @@ function keyboardShortcutCatalog() {
       {label: t('shortcuts.toggleFinder', {name: fileExplorerLabel()}), keys: appShortcutText('B')},
       {label: t('shortcuts.openPreferences'), keys: appShortcutText(',')},
       {label: t('shortcuts.keyboardShortcuts'), keys: '?'},
+    ]},
+    {section: t('shortcuts.section.terminal'), items: [
+      {label: t('shortcuts.copyTmuxSelection'), keys: appShortcutText('C', {alt: true})},
     ]},
     {section: t('shortcuts.section.editor'), items: [
       {label: t('shortcuts.saveEditor'), keys: appShortcutText('S')},
@@ -24651,6 +24840,7 @@ function renderInfoPanel() {
   const node = document.getElementById('info-content');
   if (!node) return;
   syncTranscriptMetaLoadingUi();
+  applyInfoBranchColumnWidth();
   bindInfoPrContextMenu(node);   // DOIT.29: idempotent — "Watch this PR" on the PR column
   renderWatchedPrs();   // DOIT.29: the Watched PRs section repaints alongside the branch table
   const rows = infoBranchRows();
@@ -24676,13 +24866,14 @@ function renderInfoPanel() {
     const marker = active ? (infoBranchSort.dir === 'asc' ? 'A-Z' : 'Z-A') : '';
     return `<button type="button" class="info-sort-button${active ? ' active' : ''}" data-info-sort="${esc(key)}" aria-label="${esc(t('sort.aria', {label, dir: dirLabel}))}"><span>${esc(label)}</span>${marker ? `<span class="info-sort-marker">${marker}</span>` : ''}</button>`;
   };
+  const resizeHandle = (column, label) => `<button type="button" class="info-column-resizer" data-info-column-resize="${esc(column)}" title="${esc(label)}" aria-label="${esc(label)}"></button>`;
   const header = `<div class="info-row header">
     <div class="info-cell">${headerCell('session', t('info.header.session'))}</div>
     <div class="info-cell">${headerCell('path', t('info.header.path'))}</div>
-    <div class="info-cell">${headerCell('branch', t('info.header.branch'))}</div>
+    <div class="info-cell info-resizable-header-cell info-branch-header-cell">${headerCell('branch', t('info.header.branch'))}${resizeHandle('branch', t('info.resizeBranchColumn'))}</div>
     <div class="info-cell">${headerCell('pr', 'PR')}</div>
     <div class="info-cell">${headerCell('linear', 'Linear')}</div>
-    <div class="info-cell">${headerCell('desc', t('info.header.desc'))}</div>
+    <div class="info-cell info-resizable-header-cell info-desc-header-cell">${headerCell('desc', t('info.header.desc'))}${resizeHandle('desc', t('info.resizeDescColumn'))}</div>
     <div class="info-cell">${headerCell('updated', t('info.header.updated'))}</div>
   </div>`;
   const body = rows.map(row => `<div class="info-row${row.current ? ' current' : ''}">
@@ -24699,6 +24890,142 @@ function renderInfoPanel() {
     button.addEventListener('click', () => {
       setInfoBranchSort(button.dataset.infoSort);
       renderInfoPanel();
+    });
+  });
+  bindInfoColumnResizers(node);
+}
+
+function infoColumnResizeConfig(column) {
+  if (column === 'branch') {
+    return {
+      cssVar: '--info-branch-column-width',
+      defaultWidthPx: infoBranchColumnDefaultWidthPx,
+      maxWidthPx: infoBranchColumnMaxWidthPx,
+      minWidthPx: infoBranchColumnMinWidthPx,
+      storageKey: infoBranchColumnWidthStorageKey,
+    };
+  }
+  if (column === 'desc') {
+    return {
+      cssVar: '--info-desc-column-width',
+      defaultWidthPx: infoDescColumnDefaultWidthPx,
+      maxWidthPx: infoDescColumnMaxWidthPx,
+      minWidthPx: infoDescColumnMinWidthPx,
+      storageKey: infoDescColumnWidthStorageKey,
+    };
+  }
+  return null;
+}
+
+function infoColumnWidth(column) {
+  return column === 'desc' ? infoDescColumnWidthPx : infoBranchColumnWidthPx;
+}
+
+function setInfoColumnWidthState(column, value) {
+  if (column === 'desc') infoDescColumnWidthPx = value;
+  else infoBranchColumnWidthPx = value;
+}
+
+function clampInfoColumnWidth(column, value) {
+  const config = infoColumnResizeConfig(column);
+  if (!config) return infoBranchColumnDefaultWidthPx;
+  const number = Number(value);
+  if (!Number.isFinite(number)) return config.defaultWidthPx;
+  return Math.max(config.minWidthPx, Math.min(config.maxWidthPx, Math.round(number)));
+}
+
+function readStoredInfoColumnWidth(column) {
+  const config = infoColumnResizeConfig(column);
+  if (!config) return infoBranchColumnDefaultWidthPx;
+  return clampInfoColumnWidth(column, storageGet(config.storageKey, config.defaultWidthPx));
+}
+
+function setInfoColumnWidth(column, value, options = {}) {
+  const config = infoColumnResizeConfig(column);
+  if (!config) return infoColumnWidth('branch');
+  const width = clampInfoColumnWidth(column, value);
+  setInfoColumnWidthState(column, width);
+  applyInfoColumnWidth(column);
+  if (options.persist !== false) storageSet(config.storageKey, width);
+  return width;
+}
+
+function resetInfoColumnWidth(column) {
+  const config = infoColumnResizeConfig(column);
+  return setInfoColumnWidth(column, config?.defaultWidthPx);
+}
+
+function applyInfoColumnWidth(column, root = document.documentElement) {
+  const config = infoColumnResizeConfig(column);
+  if (!config) return;
+  root?.style?.setProperty(config.cssVar, `${clampInfoColumnWidth(column, infoColumnWidth(column))}px`);
+}
+
+function applyInfoColumnWidths(root = document.documentElement) {
+  applyInfoColumnWidth('branch', root);
+  applyInfoColumnWidth('desc', root);
+}
+
+function setInfoBranchColumnWidth(value, options = {}) {
+  return setInfoColumnWidth('branch', value, options);
+}
+
+function setInfoDescColumnWidth(value, options = {}) {
+  return setInfoColumnWidth('desc', value, options);
+}
+
+function resetInfoBranchColumnWidth() {
+  return resetInfoColumnWidth('branch');
+}
+
+function resetInfoDescColumnWidth() {
+  return resetInfoColumnWidth('desc');
+}
+
+function applyInfoBranchColumnWidth(root = document.documentElement) {
+  applyInfoColumnWidths(root);
+}
+
+function bindInfoColumnResizers(node) {
+  node.querySelectorAll('[data-info-column-resize]').forEach(handle => {
+    if (handle.dataset.bound === 'true') return;
+    const column = handle.dataset.infoColumnResize;
+    const config = infoColumnResizeConfig(column);
+    if (!config) return;
+    handle.dataset.bound = 'true';
+    handle.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    handle.addEventListener('dblclick', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      resetInfoColumnWidth(column);
+    });
+    handle.addEventListener('pointerdown', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      const pointerId = event.pointerId;
+      const startX = event.clientX;
+      const startWidth = infoColumnWidth(column);
+      const direction = getComputedStyle(node).direction === 'rtl' ? -1 : 1;
+      handle.setPointerCapture?.(pointerId);
+      document.body?.classList.add('info-column-resizing');
+      const move = moveEvent => {
+        const delta = (moveEvent.clientX - startX) * direction;
+        setInfoColumnWidth(column, startWidth + delta, {persist: false});
+      };
+      const done = () => {
+        storageSet(config.storageKey, infoColumnWidth(column));
+        document.body?.classList.remove('info-column-resizing');
+        try { handle.releasePointerCapture?.(pointerId); } catch (_) {}
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', done);
+        window.removeEventListener('pointercancel', done);
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', done);
+      window.addEventListener('pointercancel', done);
     });
   });
 }
@@ -25794,7 +26121,8 @@ function startTerminal(session) {
   if (container?.style) container.style.background = terminalThemeForGlobalTheme().background;
   installTerminalLinkProvider(term);
   installTerminalContextMenu(session, term, container);
-  installTerminalCopyShortcut(session, term);
+  installTerminalCopyShortcut(session, term, container);
+  installTerminalOsc52Bridge(session, term);   // DOIT.53: Claude/tmux OSC 52 clipboard escapes -> browser clipboard
   installTerminalFileDrop(session, container);
   const openedSize = estimateTerminalSize(container, term);
   if (term.cols !== openedSize.cols || term.rows !== openedSize.rows) {
@@ -25817,7 +26145,7 @@ function startTerminal(session) {
     clearFocusedTerminal(session);
   });
   container.addEventListener('copy', event => {
-    copyTerminalSelectionToClipboardEvent(session, term, event);
+    copyTerminalSelectionToClipboardEvent(session, term, event, container);
   }, {capture: true});
   container.addEventListener('keydown', () => noteTerminalExplicitInput(session), {capture: true});
   container.addEventListener('paste', () => noteTerminalExplicitInput(session), {capture: true});
@@ -26723,6 +27051,17 @@ function toggleFileExplorerShortcut() {
   selectSession(fileExplorerItemId);
 }
 
+function handleFocusedTerminalCopyShortcut(event) {
+  const session = focusedTerminal;
+  if (!session) return false;
+  const item = terminals.get(session);
+  if (!item?.term) return false;
+  if (!handleTerminalCopyShortcutKeydown(session, item.term, item.container, event)) return false;
+  event.stopImmediatePropagation?.();
+  event.stopPropagation?.();
+  return true;
+}
+
 if (refreshMeta) {
   refreshMeta.textContent = t('meta.refresh');
   refreshMeta.setAttribute('aria-label', t('meta.refreshAria'));
@@ -26749,6 +27088,7 @@ topbar?.addEventListener('pointerenter', () => {
   closeFileImagePreview();
 });
 function handleGlobalShortcutKeydown(event) {
+  if (handleFocusedTerminalCopyShortcut(event)) return;
   // C10: the Finder tree claims Command-Delete (Mac) / Delete (PC) to delete the selected file(s) before
   // the global Mod+Delete tab-close fallback can fire.
   if (handleFileExplorerDeleteShortcut(event)) return;

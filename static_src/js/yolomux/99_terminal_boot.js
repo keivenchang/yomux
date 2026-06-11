@@ -203,6 +203,7 @@ function renderInfoPanel() {
   const node = document.getElementById('info-content');
   if (!node) return;
   syncTranscriptMetaLoadingUi();
+  applyInfoBranchColumnWidth();
   bindInfoPrContextMenu(node);   // DOIT.29: idempotent — "Watch this PR" on the PR column
   renderWatchedPrs();   // DOIT.29: the Watched PRs section repaints alongside the branch table
   const rows = infoBranchRows();
@@ -228,13 +229,14 @@ function renderInfoPanel() {
     const marker = active ? (infoBranchSort.dir === 'asc' ? 'A-Z' : 'Z-A') : '';
     return `<button type="button" class="info-sort-button${active ? ' active' : ''}" data-info-sort="${esc(key)}" aria-label="${esc(t('sort.aria', {label, dir: dirLabel}))}"><span>${esc(label)}</span>${marker ? `<span class="info-sort-marker">${marker}</span>` : ''}</button>`;
   };
+  const resizeHandle = (column, label) => `<button type="button" class="info-column-resizer" data-info-column-resize="${esc(column)}" title="${esc(label)}" aria-label="${esc(label)}"></button>`;
   const header = `<div class="info-row header">
     <div class="info-cell">${headerCell('session', t('info.header.session'))}</div>
     <div class="info-cell">${headerCell('path', t('info.header.path'))}</div>
-    <div class="info-cell">${headerCell('branch', t('info.header.branch'))}</div>
+    <div class="info-cell info-resizable-header-cell info-branch-header-cell">${headerCell('branch', t('info.header.branch'))}${resizeHandle('branch', t('info.resizeBranchColumn'))}</div>
     <div class="info-cell">${headerCell('pr', 'PR')}</div>
     <div class="info-cell">${headerCell('linear', 'Linear')}</div>
-    <div class="info-cell">${headerCell('desc', t('info.header.desc'))}</div>
+    <div class="info-cell info-resizable-header-cell info-desc-header-cell">${headerCell('desc', t('info.header.desc'))}${resizeHandle('desc', t('info.resizeDescColumn'))}</div>
     <div class="info-cell">${headerCell('updated', t('info.header.updated'))}</div>
   </div>`;
   const body = rows.map(row => `<div class="info-row${row.current ? ' current' : ''}">
@@ -251,6 +253,142 @@ function renderInfoPanel() {
     button.addEventListener('click', () => {
       setInfoBranchSort(button.dataset.infoSort);
       renderInfoPanel();
+    });
+  });
+  bindInfoColumnResizers(node);
+}
+
+function infoColumnResizeConfig(column) {
+  if (column === 'branch') {
+    return {
+      cssVar: '--info-branch-column-width',
+      defaultWidthPx: infoBranchColumnDefaultWidthPx,
+      maxWidthPx: infoBranchColumnMaxWidthPx,
+      minWidthPx: infoBranchColumnMinWidthPx,
+      storageKey: infoBranchColumnWidthStorageKey,
+    };
+  }
+  if (column === 'desc') {
+    return {
+      cssVar: '--info-desc-column-width',
+      defaultWidthPx: infoDescColumnDefaultWidthPx,
+      maxWidthPx: infoDescColumnMaxWidthPx,
+      minWidthPx: infoDescColumnMinWidthPx,
+      storageKey: infoDescColumnWidthStorageKey,
+    };
+  }
+  return null;
+}
+
+function infoColumnWidth(column) {
+  return column === 'desc' ? infoDescColumnWidthPx : infoBranchColumnWidthPx;
+}
+
+function setInfoColumnWidthState(column, value) {
+  if (column === 'desc') infoDescColumnWidthPx = value;
+  else infoBranchColumnWidthPx = value;
+}
+
+function clampInfoColumnWidth(column, value) {
+  const config = infoColumnResizeConfig(column);
+  if (!config) return infoBranchColumnDefaultWidthPx;
+  const number = Number(value);
+  if (!Number.isFinite(number)) return config.defaultWidthPx;
+  return Math.max(config.minWidthPx, Math.min(config.maxWidthPx, Math.round(number)));
+}
+
+function readStoredInfoColumnWidth(column) {
+  const config = infoColumnResizeConfig(column);
+  if (!config) return infoBranchColumnDefaultWidthPx;
+  return clampInfoColumnWidth(column, storageGet(config.storageKey, config.defaultWidthPx));
+}
+
+function setInfoColumnWidth(column, value, options = {}) {
+  const config = infoColumnResizeConfig(column);
+  if (!config) return infoColumnWidth('branch');
+  const width = clampInfoColumnWidth(column, value);
+  setInfoColumnWidthState(column, width);
+  applyInfoColumnWidth(column);
+  if (options.persist !== false) storageSet(config.storageKey, width);
+  return width;
+}
+
+function resetInfoColumnWidth(column) {
+  const config = infoColumnResizeConfig(column);
+  return setInfoColumnWidth(column, config?.defaultWidthPx);
+}
+
+function applyInfoColumnWidth(column, root = document.documentElement) {
+  const config = infoColumnResizeConfig(column);
+  if (!config) return;
+  root?.style?.setProperty(config.cssVar, `${clampInfoColumnWidth(column, infoColumnWidth(column))}px`);
+}
+
+function applyInfoColumnWidths(root = document.documentElement) {
+  applyInfoColumnWidth('branch', root);
+  applyInfoColumnWidth('desc', root);
+}
+
+function setInfoBranchColumnWidth(value, options = {}) {
+  return setInfoColumnWidth('branch', value, options);
+}
+
+function setInfoDescColumnWidth(value, options = {}) {
+  return setInfoColumnWidth('desc', value, options);
+}
+
+function resetInfoBranchColumnWidth() {
+  return resetInfoColumnWidth('branch');
+}
+
+function resetInfoDescColumnWidth() {
+  return resetInfoColumnWidth('desc');
+}
+
+function applyInfoBranchColumnWidth(root = document.documentElement) {
+  applyInfoColumnWidths(root);
+}
+
+function bindInfoColumnResizers(node) {
+  node.querySelectorAll('[data-info-column-resize]').forEach(handle => {
+    if (handle.dataset.bound === 'true') return;
+    const column = handle.dataset.infoColumnResize;
+    const config = infoColumnResizeConfig(column);
+    if (!config) return;
+    handle.dataset.bound = 'true';
+    handle.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    handle.addEventListener('dblclick', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      resetInfoColumnWidth(column);
+    });
+    handle.addEventListener('pointerdown', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      const pointerId = event.pointerId;
+      const startX = event.clientX;
+      const startWidth = infoColumnWidth(column);
+      const direction = getComputedStyle(node).direction === 'rtl' ? -1 : 1;
+      handle.setPointerCapture?.(pointerId);
+      document.body?.classList.add('info-column-resizing');
+      const move = moveEvent => {
+        const delta = (moveEvent.clientX - startX) * direction;
+        setInfoColumnWidth(column, startWidth + delta, {persist: false});
+      };
+      const done = () => {
+        storageSet(config.storageKey, infoColumnWidth(column));
+        document.body?.classList.remove('info-column-resizing');
+        try { handle.releasePointerCapture?.(pointerId); } catch (_) {}
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', done);
+        window.removeEventListener('pointercancel', done);
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', done);
+      window.addEventListener('pointercancel', done);
     });
   });
 }
@@ -1346,7 +1484,8 @@ function startTerminal(session) {
   if (container?.style) container.style.background = terminalThemeForGlobalTheme().background;
   installTerminalLinkProvider(term);
   installTerminalContextMenu(session, term, container);
-  installTerminalCopyShortcut(session, term);
+  installTerminalCopyShortcut(session, term, container);
+  installTerminalOsc52Bridge(session, term);   // DOIT.53: Claude/tmux OSC 52 clipboard escapes -> browser clipboard
   installTerminalFileDrop(session, container);
   const openedSize = estimateTerminalSize(container, term);
   if (term.cols !== openedSize.cols || term.rows !== openedSize.rows) {
@@ -1369,7 +1508,7 @@ function startTerminal(session) {
     clearFocusedTerminal(session);
   });
   container.addEventListener('copy', event => {
-    copyTerminalSelectionToClipboardEvent(session, term, event);
+    copyTerminalSelectionToClipboardEvent(session, term, event, container);
   }, {capture: true});
   container.addEventListener('keydown', () => noteTerminalExplicitInput(session), {capture: true});
   container.addEventListener('paste', () => noteTerminalExplicitInput(session), {capture: true});
@@ -2275,6 +2414,17 @@ function toggleFileExplorerShortcut() {
   selectSession(fileExplorerItemId);
 }
 
+function handleFocusedTerminalCopyShortcut(event) {
+  const session = focusedTerminal;
+  if (!session) return false;
+  const item = terminals.get(session);
+  if (!item?.term) return false;
+  if (!handleTerminalCopyShortcutKeydown(session, item.term, item.container, event)) return false;
+  event.stopImmediatePropagation?.();
+  event.stopPropagation?.();
+  return true;
+}
+
 if (refreshMeta) {
   refreshMeta.textContent = t('meta.refresh');
   refreshMeta.setAttribute('aria-label', t('meta.refreshAria'));
@@ -2301,6 +2451,7 @@ topbar?.addEventListener('pointerenter', () => {
   closeFileImagePreview();
 });
 function handleGlobalShortcutKeydown(event) {
+  if (handleFocusedTerminalCopyShortcut(event)) return;
   // C10: the Finder tree claims Command-Delete (Mac) / Delete (PC) to delete the selected file(s) before
   // the global Mod+Delete tab-close fallback can fire.
   if (handleFileExplorerDeleteShortcut(event)) return;

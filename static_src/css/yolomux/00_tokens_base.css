@@ -68,6 +68,17 @@
   --git-staged-badge: var(--brand-green);
   --git-transcript: var(--muted);
   --git-transcript-badge: #94a3b8;
+  --info-session-column-width: 120px;
+  --info-path-column-width: 150px;
+  --info-branch-column-width: 320px;
+  --info-pr-column-width: 170px;
+  --info-linear-column-width: 170px;
+  --info-desc-column-width: 310px;
+  --info-updated-column-width: 112px;
+  --info-table-column-gap: 10px;
+  --info-table-inline-padding: 8px;
+  --info-column-resizer-hit-width: 24px;
+  --info-column-resizer-line-width: 2px;
   --inactive-gray: rgba(178, 190, 210, 0.38);
   --inactive-gray-hover: rgba(190, 202, 220, 0.44);
   --inactive-pane-opacity-scale: 1;

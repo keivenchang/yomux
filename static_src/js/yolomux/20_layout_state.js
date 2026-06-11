@@ -1262,6 +1262,9 @@ function keyboardShortcutCatalog() {
       {label: t('shortcuts.openPreferences'), keys: appShortcutText(',')},
       {label: t('shortcuts.keyboardShortcuts'), keys: '?'},
     ]},
+    {section: t('shortcuts.section.terminal'), items: [
+      {label: t('shortcuts.copyTmuxSelection'), keys: appShortcutText('C', {alt: true})},
+    ]},
     {section: t('shortcuts.section.editor'), items: [
       {label: t('shortcuts.saveEditor'), keys: appShortcutText('S')},
       {label: t('shortcuts.find'), keys: appShortcutText('F')},

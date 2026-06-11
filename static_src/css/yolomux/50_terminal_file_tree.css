@@ -1005,11 +1005,28 @@ body.theme-light .yoagent-global .markdown-body pre code {
 }
 .info-row {
   display: grid;
-  grid-template-columns: 120px 150px minmax(230px, 1fr) 170px 170px minmax(310px, 1fr) 112px;
-  gap: 10px;
+  grid-template-columns:
+    var(--info-session-column-width)
+    var(--info-path-column-width)
+    minmax(var(--info-branch-column-width), var(--info-branch-column-width))
+    var(--info-pr-column-width)
+    var(--info-linear-column-width)
+    minmax(var(--info-desc-column-width), 1fr)
+    var(--info-updated-column-width);
+  gap: var(--info-table-column-gap);
   align-items: baseline;
-  padding: 7px 8px;
-  min-width: 1380px;
+  padding: 7px var(--info-table-inline-padding);
+  min-width: calc(
+    var(--info-session-column-width)
+    + var(--info-path-column-width)
+    + var(--info-branch-column-width)
+    + var(--info-pr-column-width)
+    + var(--info-linear-column-width)
+    + var(--info-desc-column-width)
+    + var(--info-updated-column-width)
+    + (var(--info-table-column-gap) * 6)
+    + (var(--info-table-inline-padding) * 2)
+  );
   border-bottom: 1px solid #263044;
   color: #dfe6ef;
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
@@ -1060,6 +1077,43 @@ body.theme-light .yoagent-global .markdown-body pre code {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.info-resizable-header-cell {
+  position: relative;
+  overflow: visible;
+  padding-inline-end: calc(var(--info-column-resizer-hit-width) / 2 + 4px);
+}
+.info-column-resizer {
+  position: absolute;
+  inset-block: -7px;
+  inset-inline-end: calc(var(--info-column-resizer-hit-width) / -2);
+  z-index: 1;
+  width: var(--info-column-resizer-hit-width);
+  min-width: var(--info-column-resizer-hit-width);
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  cursor: col-resize;
+}
+.info-column-resizer::before {
+  content: "";
+  position: absolute;
+  inset-block: 5px;
+  inset-inline-start: 50%;
+  width: var(--info-column-resizer-line-width);
+  background: color-mix(in srgb, var(--muted) 48%, transparent);
+  transform: translateX(-50%);
+}
+.info-column-resizer:hover::before,
+.info-column-resizer:focus-visible::before,
+body.info-column-resizing .info-column-resizer::before {
+  background: var(--pane-resizer-hover-bg);
+  box-shadow: var(--drop-outline-shadow);
+}
+body.info-column-resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 .info-cell a {
   color: #93c5fd;

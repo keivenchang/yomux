@@ -1171,6 +1171,16 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         set_pty_size(slave_fd, initial_rows, initial_cols)
         env = os.environ.copy()
         env["TERM"] = "xterm-256color"
+        # DOIT.53: the browser copy bridge needs tmux to FORWARD application OSC 52 clipboard escapes
+        # (Claude's copy) to this client. tmux's default `set-clipboard external` IGNORES application
+        # OSC 52 entirely (verified empirically on tmux 3.4: external drops it, on forwards it), so
+        # ensure `on` before attaching. Idempotent, best-effort, self-healing across tmux restarts.
+        subprocess.run(
+            ["tmux", "set-option", "-s", "set-clipboard", "on"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
         attach_args = ["tmux", "attach-session"]
         if readonly:
             attach_args.append("-r")

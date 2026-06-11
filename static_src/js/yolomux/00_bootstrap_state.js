@@ -760,6 +760,16 @@ function setLimitedMapEntry(map, key, value, limit) {
 }
 
 let infoBranchSort = {key: 'updated', dir: 'desc'};
+const infoBranchColumnWidthStorageKey = 'yolomux.infoBranchColumnWidth.v1';
+const infoBranchColumnDefaultWidthPx = 320;
+const infoBranchColumnMinWidthPx = 230;
+const infoBranchColumnMaxWidthPx = 900;
+const infoDescColumnWidthStorageKey = 'yolomux.infoDescColumnWidth.v1';
+const infoDescColumnDefaultWidthPx = 310;
+const infoDescColumnMinWidthPx = 310;
+const infoDescColumnMaxWidthPx = 1600;
+let infoBranchColumnWidthPx = readStoredInfoColumnWidth('branch');
+let infoDescColumnWidthPx = readStoredInfoColumnWidth('desc');
 let attentionAlertSequence = 0;
 let stateTrackingReady = false;
 let focusedTerminal = null;

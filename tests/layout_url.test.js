@@ -267,6 +267,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
   });
   const elements = new Map();
   const documentListeners = new Map();
+  const windowListeners = new Map();
   const storage = new Map();
   const localStorage = {
     getItem(key) { return storage.has(String(key)) ? storage.get(String(key)) : null; },
@@ -295,6 +296,22 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
       body: element('body'),
       createElement: tag => new TestElement('', tag),
       documentElement: element('html'),
+      execCommand(command) {
+        if (String(command || '').toLowerCase() !== 'copy') return false;
+        let prevented = false;
+        const event = {
+          clipboardData: {
+            setData(type, value) {
+              if (type === 'text/plain') context.__clipboardText = String(value);
+            },
+          },
+          preventDefault() { prevented = true; },
+          stopPropagation() {},
+          stopImmediatePropagation() {},
+        };
+        for (const listener of [...(documentListeners.get('copy') || [])]) listener(event);
+        return prevented;
+      },
       getElementById: element,
       querySelector: () => null,
       querySelectorAll: () => [],
@@ -304,6 +321,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
       },
     },
     fetch() { return Promise.reject(new Error('fetch disabled in layout URL tests')); },
+    getComputedStyle: () => ({direction: 'ltr'}),
     history: {
       replaceState(_state, _title, url) {
         context.__lastUrl = url;
@@ -317,13 +335,26 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     setInterval() {},
     setTimeout() {},
     window: {
-      addEventListener() {},
+      __listeners: windowListeners,
+      addEventListener(type, listener) {
+        if (!windowListeners.has(type)) windowListeners.set(type, []);
+        windowListeners.get(type).push(listener);
+      },
       innerHeight: 800,
       innerWidth: 1200,
       localStorage,
-      removeEventListener() {},
+      removeEventListener(type, listener) {
+        const listeners = windowListeners.get(type) || [];
+        windowListeners.set(type, listeners.filter(item => item !== listener));
+      },
     },
     localStorage,
+    __clipboardText: '',
+    // DOIT.53: the OSC 52 clipboard bridge decodes base64 UTF-8; expose the host implementations.
+    atob,
+    btoa,
+    TextDecoder,
+    Uint8Array,
   };
   context.globalThis = context;
   vm.createContext(context);
@@ -514,6 +545,7 @@ globalThis.__layoutTestApi = {
   setFocusedPanelItem,
   setFocusedTerminal,
   clearFocusedTerminal,
+  handleFocusedTerminalCopyShortcutForTest: handleFocusedTerminalCopyShortcut,
   visualActivePaneItemForTest: visualActivePaneItem,
   lastActivePaneItemForTest() { return lastActivePaneItem; },
   focusedPanelItemForTest() { return focusedPanelItem; },
@@ -528,7 +560,20 @@ globalThis.__layoutTestApi = {
   focusedTerminalForTest() { return focusedTerminal; },
   globalShortcutTargetAllowsAppAction,
   installTerminalCopyShortcutForTest: installTerminalCopyShortcut,
+  osc52ClipboardText,
+  installTerminalOsc52BridgeForTest: installTerminalOsc52Bridge,
   setFetchForTest(fn) { globalThis.fetch = fn; },
+  clipboardTextForTest() { return globalThis.__clipboardText; },
+  clearClipboardTextForTest() { globalThis.__clipboardText = ''; },
+  setBrowserSelectionForTest(text, anchorNode = null, focusNode = anchorNode) {
+    const selection = {toString: () => String(text || ''), anchorNode, focusNode};
+    globalThis.getSelection = () => selection;
+    window.getSelection = globalThis.getSelection;
+  },
+  clearBrowserSelectionForTest() {
+    delete globalThis.getSelection;
+    delete window.getSelection;
+  },
   bindClipboardPasteForTest: bindClipboardPaste,
   documentListenersForTest(type) { return [...(document.__listeners.get(type) || [])]; },
   commandPaletteItemScore,
@@ -827,6 +872,15 @@ globalThis.__layoutTestApi = {
   setInfoBranchSortForTest(key, dir = 'asc') {
     infoBranchSort = {key, dir};
   },
+  infoBranchColumnWidthForTest() { return infoBranchColumnWidthPx; },
+  infoDescColumnWidthForTest() { return infoDescColumnWidthPx; },
+  setInfoBranchColumnWidthForTest: setInfoBranchColumnWidth,
+  setInfoDescColumnWidthForTest: setInfoDescColumnWidth,
+  resetInfoBranchColumnWidthForTest: resetInfoBranchColumnWidth,
+  resetInfoDescColumnWidthForTest: resetInfoDescColumnWidth,
+  bindInfoColumnResizersForTest: bindInfoColumnResizers,
+  storageValueForTest(key) { return localStorage.getItem(key); },
+  windowListenersForTest(type) { return [...(window.__listeners?.get?.(type) || [])]; },
   setSessionFilesPayloadForTest(payload) {
     fileExplorerSessionFilesPayload = payload;
   },
@@ -1830,6 +1884,17 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/\.info-subtab \.session-button-dir\s*\{[\s\S]*?color:\s*inherit/.test(mergedInfoCss), '#40: YO!info/YO!agent sub-tab labels inherit button contrast instead of forcing white text');
   assert.ok(/\.info-subtab\s*\{[\s\S]*?display:\s*inline-flex[\s\S]*?align-items:\s*center[\s\S]*?line-height:\s*1/.test(mergedInfoCss), '#40: YO!info/YO!agent sub-tab labels are vertically centered, including CJK labels');
   assert.ok(/body\.theme-light \.info-list,[\s\S]*?body\.theme-light \.info-watched\s*\{[\s\S]*?background:\s*#ffffff/.test(mergedInfoCss), '#40: the light-mode YO!info table uses a white surface');
+  assert.ok(mergedInfoCss.includes('--info-branch-column-width: 320px'), 'YO!info Branch column has a named default width token');
+  assert.ok(mergedInfoCss.includes('--info-desc-column-width: 310px'), 'YO!info desc column has a named default width token');
+  assert.ok(/grid-template-columns:[\s\S]*var\(--info-session-column-width\)[\s\S]*var\(--info-path-column-width\)[\s\S]*minmax\(var\(--info-branch-column-width\), var\(--info-branch-column-width\)\)[\s\S]*var\(--info-pr-column-width\)[\s\S]*var\(--info-linear-column-width\)[\s\S]*minmax\(var\(--info-desc-column-width\), 1fr\)[\s\S]*var\(--info-updated-column-width\)/.test(mergedInfoCss), 'YO!info table columns use named width tokens');
+  assert.ok(/min-width:\s*calc\([\s\S]*var\(--info-branch-column-width\)[\s\S]*var\(--info-desc-column-width\)[\s\S]*var\(--info-table-column-gap\) \* 6[\s\S]*var\(--info-table-inline-padding\) \* 2/.test(mergedInfoCss), 'YO!info table minimum width is derived from named column tokens');
+  assert.ok(mergedInfoCss.includes('--info-column-resizer-hit-width: 24px'), 'YO!info column resize target has a named hit-width token');
+  assert.ok(/\.info-resizable-header-cell\s*\{[\s\S]*?overflow:\s*visible/.test(mergedInfoCss), 'YO!info resize handles are not clipped by header cells');
+  assert.ok(/\.info-column-resizer\s*\{[\s\S]*?width:\s*var\(--info-column-resizer-hit-width\)[\s\S]*?cursor:\s*col-resize/.test(mergedInfoCss), 'YO!info headers expose full-width column-resize handles');
+  assert.ok(source.includes('data-info-column-resize="${esc(column)}"'), 'YO!info headers render resize handles through a shared helper');
+  assert.ok(source.includes("resizeHandle('branch', t('info.resizeBranchColumn'))"), 'YO!info Branch header renders the resize handle');
+  assert.ok(source.includes("resizeHandle('desc', t('info.resizeDescColumn'))"), 'YO!info desc header renders the resize handle');
+  assert.ok(/function bindInfoColumnResizers[\s\S]*dataset\.infoColumnResize[\s\S]*setPointerCapture[\s\S]*storageSet\(config\.storageKey/.test(source), 'YO!info column drag persists resized widths through shared config');
   // #48: the merged info panel gets its own 3-row grid so the YO!info|YO!agent sub-tab row is always
   // visible (a real track) without a redundant detail/header bar.
   assert.ok(/\.info-panel\s*\{[\s\S]*?grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(mergedInfoCss), '#48: the info panel reserves a row for the sub-tab toggle');
@@ -2811,7 +2876,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   // C10: Finder delete shortcut — Command-Delete on Mac, plain Delete on PC, gated to the Finder surface
   // and taking precedence over the global Mod+Delete tab-close.
   assert.ok(c9Src.includes('function handleFileExplorerDeleteShortcut('), 'C10: a Finder delete-shortcut handler exists');
-  assert.ok(/handleGlobalShortcutKeydown\(event\)\s*\{[\s\S]{0,200}?handleFileExplorerDeleteShortcut\(event\)\)\s*return/.test(c9Src), 'C10: Finder delete runs before the global tab-close shortcut');
+  const globalShortcutBody = c9Src.slice(c9Src.indexOf('function handleGlobalShortcutKeydown(event)'), c9Src.indexOf("window.addEventListener('keydown', handleGlobalShortcutKeydown, true)"));
+  assert.ok(globalShortcutBody.indexOf('handleFocusedTerminalCopyShortcut(event)') >= 0, 'terminal copy guard is part of the global shortcut path');
+  assert.ok(globalShortcutBody.indexOf('handleFocusedTerminalCopyShortcut(event)') < globalShortcutBody.indexOf('handleFileExplorerDeleteShortcut(event)'), 'terminal copy guard runs before other global shortcuts');
+  assert.ok(globalShortcutBody.indexOf('handleFileExplorerDeleteShortcut(event)') < globalShortcutBody.indexOf("if (mod && key === 'w')"), 'C10: Finder delete runs before the global tab-close shortcut');
   const c10Body = c9Src.slice(c9Src.indexOf('function handleFileExplorerDeleteShortcut('), c9Src.indexOf('function beginFileTreeRename('));
   assert.ok(c10Body.includes('isMacPlatform()') && c10Body.includes('event.metaKey === true'), 'C10: Mac requires Command (metaKey)');
   assert.ok(/key !== 'delete' \|\| event\.metaKey/.test(c10Body), 'C10: PC requires a plain Delete (no modifiers)');
@@ -4528,14 +4596,26 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes('function keyboardShortcutCatalog()'), 'shortcut help is driven from one catalog');
   assert.ok(api.keyboardShortcutsHtml().includes('outside text'), 'shortcut overlay scopes the Backspace close-tab fallback');
   assert.ok(/async function copyTextToClipboard\(text\)[\s\S]*?if \(clipboard\?\.writeText\) \{[\s\S]*?try \{[\s\S]*?await clipboard\.writeText\(value\);[\s\S]*?\} catch/.test(source), 'clipboard copy falls back when navigator.clipboard exists but rejects');
-  assert.ok(source.includes('function copyTerminalSelectionToClipboardEvent(session, term, event)'), 'terminal copy has a DOM copy-event fallback');
+  assert.ok(source.includes('function copyTerminalSelectionToClipboardEvent(session, term, event, container = null)'), 'terminal copy has a DOM copy-event fallback');
   assert.ok(source.includes("container.addEventListener('copy', event => {"), 'terminal container handles browser copy events');
   assert.ok(source.includes("event.clipboardData.setData('text/plain', selected);"), 'terminal copy-event fallback writes the xterm selection to clipboardData');
-  assert.ok(source.includes('async function copyTmuxSelectionToClipboard(session)'), 'terminal Cmd-C can bridge tmux copy-mode selection to the browser clipboard');
+  assert.ok(source.includes('function copyTextToClipboardViaCopyEvent(text)'), 'terminal shortcut copy has a synchronous copy-event clipboard path');
+  // DOIT.53: the sync-then-async clipboard chain lives in ONE shared parent (writeTerminalTextToClipboard)
+  // used by both the shortcut copy and the OSC 52 bridge.
+  assert.ok(/function writeTerminalTextToClipboard\(text, label = 'copied'\)[\s\S]*?copyTextToClipboardViaCopyEvent\(text\)[\s\S]*?copyTextToClipboard\(text\)/.test(source), 'terminal clipboard writes use the synchronous copy-event path before async clipboard fallback (shared parent)');
+  assert.ok(/function copyTerminalSelectionFromShortcut\(session, term, options = \{\}, container = null\)[\s\S]*?writeTerminalTextToClipboard\(text/.test(source), 'terminal shortcut copy routes through the shared clipboard-write chain');
+  assert.ok(source.includes('async function copyTmuxSelectionToClipboard(session)'), 'terminal tmux copy-mode selection can bridge to the browser clipboard');
   assert.ok(source.includes("apiFetchJson(`/api/tmux-copy-selection?session=${encodeURIComponent(session)}`, {method: 'POST'})"), 'tmux copy bridge calls the authenticated tmux-copy endpoint');
   assert.ok(source.includes("new ClipboardItem({'text/plain': textBlob})"), 'tmux copy bridge starts deferred clipboard writes during the shortcut activation');
-  assert.ok(source.includes('if (!selected && !isCmdC) return true;'), 'Ctrl-C without an xterm selection still falls through as SIGINT');
-  assert.ok(source.includes('else copyTmuxSelectionToClipboard(session);'), 'Cmd-C without an xterm selection asks tmux for the copy-mode selection instead of falling through');
+  assert.ok(/function terminalSelectedText\(term, container = null\)[\s\S]*browserSelectionTextInside\(container\)/.test(source), 'terminal copy shortcuts prefer visible browser selection before tmux copy-mode fallback');
+  assert.ok(source.includes("container?.addEventListener?.('keydown'"), 'terminal copy guard runs in DOM capture before xterm/TUI handlers');
+  assert.ok(/function handleFocusedTerminalCopyShortcut\(event\)[\s\S]*handleTerminalCopyShortcutKeydown\(session, item\.term, item\.container, event\)[\s\S]*stopImmediatePropagation/.test(source), 'focused-terminal copy guard runs at window capture before terminal internals');
+  assert.ok(/function handleGlobalShortcutKeydown\(event\) \{[\s\S]*?if \(handleFocusedTerminalCopyShortcut\(event\)\) return/.test(source), 'global shortcuts first give focused terminal copy handling a chance');
+  assert.ok(source.includes('const isTmuxCopyShortcut = event.altKey'), 'tmux copy-mode bridge is on a separate terminal shortcut');
+  assert.ok(source.includes("appendContextMenuButton(menu, t('terminal.copyTmuxSelection'), () => copyTmuxSelectionToClipboard(session), closeTerminalContextMenu)"), 'terminal context menu exposes explicit tmux copy');
+  assert.ok(/if \(!selected\) \{[\s\S]*?if \(isCmdC\) \{[\s\S]*?event\.preventDefault\(\);[\s\S]*?statusEl\.textContent = isMacPlatform\(\)[\s\S]*?nothing selected — Option-drag selects while Claude\/tmux owns the mouse[\s\S]*?return true;[\s\S]*?return false; \/\/ no selection: let Ctrl-C through as SIGINT/.test(source), 'Cmd-C without browser selection is swallowed (with a how-to-select hint) while Ctrl-C still falls through as SIGINT');
+  assert.equal(source.includes('else copyTmuxSelectionToClipboard(session);'), false, 'Cmd-C no longer falls back to tmux copy-mode');
+  assert.ok(api.keyboardShortcutsHtml().includes('Copy tmux selection'), 'keyboard shortcuts list includes the explicit tmux copy shortcut');
   const terminalCopyApi = loadYolomux('?platform=mac', ['1'], 'https:', 'MacIntel');
   const fetchCalls = [];
   terminalCopyApi.setFetchForTest((url, options = {}) => {
@@ -4561,12 +4641,135 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     altKey: false,
     preventDefault() { prevented += 1; },
   });
-  assert.equal(cmdCResult, false, 'Mac Cmd-C with no xterm selection is swallowed instead of reaching tmux');
-  assert.equal(prevented, 1, 'Mac Cmd-C prevents the browser/terminal default before the async tmux copy bridge');
-  assert.deepStrictEqual(fetchCalls, [{url: '/api/tmux-copy-selection?session=1', method: 'POST'}], 'Mac Cmd-C with no xterm selection asks tmux for copy-mode text');
+  assert.equal(cmdCResult, false, 'Mac Cmd-C with no browser/xterm selection is swallowed instead of reaching the PTY');
+  assert.equal(prevented, 1, 'Mac Cmd-C with no browser/xterm selection prevents the terminal default');
+  assert.deepStrictEqual(fetchCalls, [], 'Mac Cmd-C with no browser/xterm selection does not ask tmux for copy-mode text');
+  let domKeydownHandler = null;
+  let domKeydownOptions = null;
+  let domCopyShortcutHandler = null;
+  terminalCopyApi.installTerminalCopyShortcutForTest('1', {
+    getSelection: () => '',
+    clearSelection: () => { clearSelectionCount += 1; },
+    attachCustomKeyEventHandler(handler) { domCopyShortcutHandler = handler; },
+  }, {
+    addEventListener(type, handler, options) {
+      if (type === 'keydown') {
+        domKeydownHandler = handler;
+        domKeydownOptions = options;
+      }
+    },
+  });
+  assert.equal(typeof domCopyShortcutHandler, 'function', 'terminal DOM guard install keeps xterm handler available');
+  assert.equal(domKeydownOptions?.capture, true, 'terminal DOM copy guard is installed in capture phase');
+  fetchCalls.length = 0;
+  prevented = 0;
+  let stopped = 0;
+  let stoppedImmediate = 0;
+  domKeydownHandler({
+    type: 'keydown',
+    code: 'KeyC',
+    key: 'c',
+    metaKey: true,
+    ctrlKey: false,
+    altKey: false,
+    preventDefault() { prevented += 1; },
+    stopPropagation() { stopped += 1; },
+    stopImmediatePropagation() { stoppedImmediate += 1; },
+  });
+  assert.equal(prevented, 1, 'terminal DOM copy guard prevents Cmd-C with no browser/xterm selection');
+  assert.equal(stopped, 1, 'terminal DOM copy guard stops propagation before Claude/xterm');
+  assert.equal(stoppedImmediate, 1, 'terminal DOM copy guard stops sibling handlers before Claude/xterm');
+  assert.deepStrictEqual(fetchCalls, [], 'terminal DOM copy guard does not ask tmux for normal Cmd-C');
+  terminalCopyApi.registerTerminalForTest('1', {
+    getSelection: () => '',
+    clearSelection: () => { clearSelectionCount += 1; },
+  });
+  terminalCopyApi.setFocusedTerminal('1');
+  fetchCalls.length = 0;
+  prevented = 0;
+  stopped = 0;
+  stoppedImmediate = 0;
+  const focusedGuardResult = terminalCopyApi.handleFocusedTerminalCopyShortcutForTest({
+    type: 'keydown',
+    code: 'KeyC',
+    key: 'c',
+    metaKey: true,
+    ctrlKey: false,
+    altKey: false,
+    preventDefault() { prevented += 1; },
+    stopPropagation() { stopped += 1; },
+    stopImmediatePropagation() { stoppedImmediate += 1; },
+  });
+  assert.equal(focusedGuardResult, true, 'focused terminal copy guard claims Cmd-C before Claude/xterm');
+  assert.equal(prevented, 1, 'focused terminal window guard prevents Cmd-C before Claude/xterm');
+  assert.equal(stopped, 1, 'focused terminal window guard stops propagation before target handlers');
+  assert.equal(stoppedImmediate, 1, 'focused terminal window guard stops sibling window handlers');
+  assert.deepStrictEqual(fetchCalls, [], 'focused terminal window guard does not ask tmux for normal Cmd-C');
+  prevented = 0;
+  const tmuxCopyShortcutResult = copyShortcutHandler({
+    type: 'keydown',
+    code: 'KeyC',
+    key: 'c',
+    metaKey: true,
+    ctrlKey: false,
+    altKey: true,
+    shiftKey: false,
+    preventDefault() { prevented += 1; },
+  });
+  assert.equal(tmuxCopyShortcutResult, false, 'Mac Cmd-Option-C is handled as explicit tmux copy');
+  assert.equal(prevented, 1, 'Mac Cmd-Option-C prevents the terminal default');
+  assert.deepStrictEqual(fetchCalls, [{url: '/api/tmux-copy-selection?session=1', method: 'POST'}], 'Mac Cmd-Option-C asks tmux for copy-mode text');
   fetchCalls.length = 0;
   prevented = 0;
   clearSelectionCount = 0;
+  terminalCopyApi.clearClipboardTextForTest();
+  terminalSelection = 'selected xterm text';
+  const selectedCmdCResult = copyShortcutHandler({
+    type: 'keydown',
+    code: 'KeyC',
+    key: 'c',
+    metaKey: true,
+    ctrlKey: false,
+    altKey: false,
+    preventDefault() { prevented += 1; },
+  });
+  assert.equal(selectedCmdCResult, false, 'Mac Cmd-C with xterm selection is handled by browser copy');
+  assert.equal(prevented, 1, 'Mac Cmd-C with xterm selection prevents the terminal default');
+  assert.deepStrictEqual(fetchCalls, [], 'Mac Cmd-C with xterm selection does not ask tmux for copy-mode text');
+  assert.equal(terminalCopyApi.clipboardTextForTest(), 'selected xterm text', 'Mac Cmd-C with xterm selection writes selected xterm text to clipboardData');
+  assert.equal(clearSelectionCount, 1, 'Mac Cmd-C with xterm selection clears xterm selection after copying');
+  const insideSelectionNode = {};
+  const terminalContainer = {contains: node => node === insideSelectionNode};
+  terminalSelection = '';
+  terminalCopyApi.setBrowserSelectionForTest('selected browser text', insideSelectionNode);
+  terminalCopyApi.installTerminalCopyShortcutForTest('1', {
+    getSelection: () => terminalSelection,
+    clearSelection: () => { clearSelectionCount += 1; },
+    attachCustomKeyEventHandler(handler) { copyShortcutHandler = handler; },
+  }, terminalContainer);
+  fetchCalls.length = 0;
+  prevented = 0;
+  clearSelectionCount = 0;
+  terminalCopyApi.clearClipboardTextForTest();
+  const browserSelectedCmdCResult = copyShortcutHandler({
+    type: 'keydown',
+    code: 'KeyC',
+    key: 'c',
+    metaKey: true,
+    ctrlKey: false,
+    altKey: false,
+    preventDefault() { prevented += 1; },
+  });
+  terminalCopyApi.clearBrowserSelectionForTest();
+  assert.equal(browserSelectedCmdCResult, false, 'Mac Cmd-C with browser selection inside the terminal is handled by browser copy');
+  assert.equal(prevented, 1, 'Mac Cmd-C with browser selection prevents the terminal default');
+  assert.deepStrictEqual(fetchCalls, [], 'Mac Cmd-C with browser selection does not ask tmux for copy-mode text');
+  assert.equal(terminalCopyApi.clipboardTextForTest(), 'selected browser text', 'Mac Cmd-C with browser selection writes browser-selected terminal text to clipboardData');
+  assert.equal(clearSelectionCount, 1, 'Mac Cmd-C with browser selection clears xterm selection state after copying');
+  fetchCalls.length = 0;
+  prevented = 0;
+  clearSelectionCount = 0;
+  terminalSelection = '';
   const ctrlCResult = copyShortcutHandler({
     type: 'keydown',
     code: 'KeyC',
@@ -6539,6 +6742,53 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.deepStrictEqual(canonical(api.infoBranchRows().map(row => row.session)), ['beta', 'alpha']);
   api.setInfoBranchSortForTest('branch', 'asc');
   assert.deepStrictEqual(canonical(api.infoBranchRows().map(row => row.branch)), ['alpha', 'zeta']);
+  assert.equal(api.infoBranchColumnWidthForTest(), 320, 'YO!info Branch column defaults wider than the old 230px minimum');
+  assert.equal(api.setInfoBranchColumnWidthForTest(520), 520, 'YO!info Branch column accepts a wider user size');
+  assert.equal(api.storageValueForTest('yolomux.infoBranchColumnWidth.v1'), '520', 'YO!info Branch column width persists in browser storage');
+  assert.equal(api.setInfoBranchColumnWidthForTest(100), 230, 'YO!info Branch column width clamps to its minimum');
+  assert.equal(api.setInfoBranchColumnWidthForTest(5000), 900, 'YO!info Branch column width clamps to its maximum');
+  assert.equal(api.resetInfoBranchColumnWidthForTest(), 320, 'YO!info Branch column reset restores the default');
+  assert.equal(api.infoDescColumnWidthForTest(), 310, 'YO!info desc column defaults to the previous minimum width');
+  assert.equal(api.setInfoDescColumnWidthForTest(760), 760, 'YO!info desc column accepts a wider user size');
+  assert.equal(api.storageValueForTest('yolomux.infoDescColumnWidth.v1'), '760', 'YO!info desc column width persists in browser storage');
+  assert.equal(api.setInfoDescColumnWidthForTest(100), 310, 'YO!info desc column width clamps to its minimum');
+  assert.equal(api.setInfoDescColumnWidthForTest(5000), 1600, 'YO!info desc column width clamps to its maximum');
+  assert.equal(api.resetInfoDescColumnWidthForTest(), 310, 'YO!info desc column reset restores the default');
+  const runResizeDrag = (column, moveX) => {
+    const handleListeners = new Map();
+    let capturedPointer = null;
+    let releasedPointer = null;
+    const resizeHandle = {
+      dataset: {infoColumnResize: column},
+      addEventListener(type, listener) { handleListeners.set(type, listener); },
+      setPointerCapture(pointerId) { capturedPointer = pointerId; },
+      releasePointerCapture(pointerId) { releasedPointer = pointerId; },
+    };
+    const resizeNode = {
+      querySelectorAll(selector) {
+        return selector === '[data-info-column-resize]' ? [resizeHandle] : [];
+      },
+    };
+    api.bindInfoColumnResizersForTest(resizeNode);
+    assert.equal(resizeHandle.dataset.bound, 'true', `YO!info ${column} resize handle binds once`);
+    handleListeners.get('pointerdown')({
+      pointerId: 7,
+      clientX: 100,
+      preventDefault() {},
+      stopPropagation() {},
+    });
+    assert.equal(capturedPointer, 7, `YO!info ${column} resize drag captures the pointer`);
+    api.windowListenersForTest('pointermove')[0]({clientX: moveX});
+    api.windowListenersForTest('pointerup')[0]({});
+    assert.equal(releasedPointer, 7, `YO!info ${column} resize drag releases the pointer`);
+    assert.equal(api.windowListenersForTest('pointermove').length, 0, `YO!info ${column} resize drag removes pointermove listener on finish`);
+  };
+  runResizeDrag('branch', 180);
+  assert.equal(api.infoBranchColumnWidthForTest(), 400, 'YO!info Branch resize drag changes the column width');
+  assert.equal(api.storageValueForTest('yolomux.infoBranchColumnWidth.v1'), '400', 'YO!info Branch resize drag persists the final width');
+  runResizeDrag('desc', 250);
+  assert.equal(api.infoDescColumnWidthForTest(), 460, 'YO!info desc resize drag changes the column width');
+  assert.equal(api.storageValueForTest('yolomux.infoDescColumnWidth.v1'), '460', 'YO!info desc resize drag persists the final width');
 }
 
 {
@@ -8112,6 +8362,50 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes("dragTimingMarkOnce('dragMeasureStrip:first')") && source.includes("dragTimingMarkOnce('paneTabDropPlacement:first')"), 'S14: first strip-measure and drop-placement are marked');
   assert.ok(source.includes('dragTimingReport()'), 'S14: the per-bucket report fires at drag end');
   assert.ok(source.includes('function showDragTimingOverlay(') && source.includes("el.className = 'drag-timing-overlay'"), 'S14: a copyable on-page timing overlay (no DevTools) is rendered at drag end');
+}
+
+// DOIT.53 root cause + fix: while Claude/tmux owns the mouse, copied text arrives as an OSC 52 clipboard
+// escape; xterm.js drops it unless a handler is registered. The bridge decodes it and writes the browser
+// clipboard, and never answers '?' read queries (no clipboard exfiltration).
+{
+  const api = loadYolomux('?platform=mac', ['1'], 'https:', 'MacIntel');
+  const b64 = text => Buffer.from(text, 'utf8').toString('base64');
+  // pure decoder
+  assert.equal(api.osc52ClipboardText(`c;${b64('hello from claude')}`), 'hello from claude', 'OSC 52 base64 payload decodes');
+  assert.equal(api.osc52ClipboardText(`c;${b64('héllo ✓ 中文')}`), 'héllo ✓ 中文', 'OSC 52 decodes multibyte UTF-8 correctly');
+  assert.equal(api.osc52ClipboardText('c;?'), null, 'OSC 52 read query (?) is never treated as text');
+  assert.equal(api.osc52ClipboardText('c;'), null, 'empty OSC 52 payload is ignored');
+  assert.equal(api.osc52ClipboardText('no-semicolon'), null, 'malformed OSC 52 without selector is ignored');
+  assert.equal(api.osc52ClipboardText('c;!!!not-base64!!!'), null, 'invalid base64 is ignored instead of copying garbage');
+  // behavioral: registered on ident 52; payload lands on the clipboard; queries are consumed without reply
+  let registered = null;
+  const fakeTerm = {parser: {registerOscHandler(ident, handler) { registered = {ident, handler}; }}};
+  assert.equal(api.installTerminalOsc52BridgeForTest('1', fakeTerm), true, 'OSC 52 bridge installs when the parser API exists');
+  assert.equal(registered?.ident, 52, 'bridge registers on OSC ident 52');
+  api.clearClipboardTextForTest();
+  assert.equal(registered.handler(`c;${b64('osc52 payload text')}`), true, 'OSC 52 write is consumed');
+  assert.equal(api.clipboardTextForTest(), 'osc52 payload text', 'OSC 52 payload is written to the browser clipboard');
+  api.clearClipboardTextForTest();
+  assert.equal(registered.handler('c;?'), true, 'OSC 52 read query is consumed (no reply, no leak)');
+  assert.equal(api.clipboardTextForTest(), '', 'OSC 52 read query never touches the clipboard');
+  assert.equal(api.installTerminalOsc52BridgeForTest('1', {}), false, 'bridge degrades gracefully without parser API');
+  // wiring + instrumentation guards
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(source.includes('installTerminalOsc52Bridge(session, term);'), 'OSC 52 bridge is wired into terminal startup');
+  assert.ok(/registerOscHandler\(52, data =>/.test(source), 'bridge registers the OSC 52 parser handler');
+  assert.ok(source.includes('writeTerminalTextToClipboard(text, `copied ${text.length} chars`)'), 'bridge routes through the shared terminal clipboard-write chain');
+  assert.ok(source.includes("storageGet('yolomux.debugCopy') === '1'"), 'DOIT.53 N1: copy-path debug logging is gated behind an opt-in storage flag');
+  assert.ok(source.includes("copyDebug('shortcut'") && source.includes("copyDebug('osc52'") && source.includes("copyDebug('clipboard'"), 'N1: shortcut, OSC 52, and clipboard-write stages each log one compact debug event');
+}
+
+// DOIT.53 N7: right-click must not clear the terminal highlight; the menu copies the selection captured at
+// right-click time.
+{
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(/container\.addEventListener\('mousedown', event => \{[\s\S]*?event\.button !== 2[\s\S]*?rightClickSelection = terminalSelectedText\(term, container\);[\s\S]*?event\.stopPropagation\(\);[\s\S]*?\}, \{capture: true\}\)/.test(source), 'N7: a capture-phase right-mousedown captures the selection and stops xterm clearing it');
+  assert.ok(/showTerminalContextMenu\(session, term, event\.clientX, event\.clientY, container, rightClickSelection\)/.test(source), 'N7: the context menu receives the selection captured at right-click time');
+  assert.ok(/copyTerminalSelection\(session, term, \{dedent, selectionText: selected\}, container\)/.test(source), 'N7: menu Copy uses the captured selection text, not a stale live re-read');
+  assert.ok(/const selected = options\.selectionText != null \? options\.selectionText : terminalSelectedText\(term, container\)/.test(source), 'N7: copyTerminalSelection honors an explicit captured selection');
 }
 
 (async () => {
