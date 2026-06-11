@@ -993,9 +993,19 @@ function showTerminalDropSuggestions(session, payload, x, y) {
     node.appendChild(item);
   });
   document.body.appendChild(node);
+  // Anchor at the drop point when there is one; for paste (no drop point) anchor near the session's
+  // terminal, falling back to the viewport so the overlay is always on-screen.
+  let anchorX = x;
+  let anchorY = y;
+  if (!Number.isFinite(anchorX) || !Number.isFinite(anchorY)) {
+    const host = document.getElementById(terminalDomId(session)) || document.getElementById(panelDomId(session));
+    const hostRect = host?.getBoundingClientRect?.();
+    anchorX = hostRect ? hostRect.left + 16 : window.innerWidth / 2;
+    anchorY = hostRect ? hostRect.top + 16 : window.innerHeight / 3;
+  }
   const rect = node.getBoundingClientRect();
-  node.style.left = `${Math.round(Math.max(8, Math.min(x, window.innerWidth - rect.width - 8)))}px`;
-  node.style.top = `${Math.round(Math.max(8, Math.min(y, window.innerHeight - rect.height - 8)))}px`;
+  node.style.left = `${Math.round(Math.max(8, Math.min(anchorX, window.innerWidth - rect.width - 8)))}px`;
+  node.style.top = `${Math.round(Math.max(8, Math.min(anchorY, window.innerHeight - rect.height - 8)))}px`;
 
   const onKeyDown = event => {
     if (event.key === 'Escape') {
@@ -1245,11 +1255,12 @@ async function uploadFiles(session, fileList, options = {}) {
     if (options.source === 'paste') syncPasteCountersFromPayload(payload);
     activateTab(session, 'terminal');
     // DOIT.57: a dropped/pasted upload shows the suggestion overlay (Alt+1..9) for the uploaded path
-    // instead of auto-inserting it — Alt+1 still inserts the path. Falls back to the legacy insert when
-    // uploads.show_suggestions is off or there is no anchor point.
-    if (options.suggestAt && paths.length && boolSetting('uploads.show_suggestions', true)) {
+    // instead of auto-inserting it — Alt+1 still inserts the path. A drop anchors at the drop point; a
+    // paste has none, so the overlay anchors near the terminal. Falls back to the legacy insert when
+    // uploads.show_suggestions is off.
+    if (paths.length && boolSetting('uploads.show_suggestions', true)) {
       showUploadResult(session, payload, false);
-      showTerminalDropSuggestions(session, {path: paths[0], paths, kind: 'file'}, options.suggestAt.x, options.suggestAt.y);
+      showTerminalDropSuggestions(session, {path: paths[0], paths, kind: 'file'}, options.suggestAt?.x, options.suggestAt?.y);
     } else {
       const inserted = options.source === 'paste'
         ? insertPasteUploadReferences(session, payload.files || [], {silent: true})

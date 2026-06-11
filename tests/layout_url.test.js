@@ -9329,6 +9329,9 @@ test('t@8804', () => {
       return Promise.resolve(jsonResponse({items: [], session: '1'}));
     });
 
+    // DOIT.57: pin the legacy paste->insert path here; with uploads.show_suggestions on (default) a
+    // paste shows the suggestion overlay instead of inserting (the registry/overlay is covered above).
+    api.setClientSettingsPatchForTest({uploads: {show_suggestions: false}});
     api.bindClipboardPasteForTest();
     api.bindClipboardPasteForTest();
     const pasteListeners = api.documentListenersForTest('paste');
