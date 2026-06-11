@@ -27276,7 +27276,7 @@ function panelControlsHtml(session, options = {}) {
   const readonlyAttrs = label => ` type="button" disabled title="${esc(label)} requires admin access" aria-label="${esc(label)}"`;
   const tabAttrs = (name, label = '') => {
     if (disabled) return disabledAttrs(label || name);
-    if (readOnlyMode && name === 'summary') return readonlyAttrs('AI Transcript');
+    if (readOnlyMode && name === 'summary') return readonlyAttrs('YO!summary');
     const labelAttrs = label ? ` title="${esc(label)}" aria-label="${esc(label)}"` : '';
     return ` type="button" data-tab="${esc(session)}" data-tab-name="${name}"${labelAttrs}`;
   };
@@ -27285,7 +27285,11 @@ function panelControlsHtml(session, options = {}) {
   const terminalAttrs = disabled ? disabledAttrs(terminalTitle) : `${tabAttrs('terminal')} title="${esc(terminalTitle)}" aria-label="${esc(terminalTitle)}"`;
   const terminalLabel = disabled ? 'Term' : terminalTabLabel(session, info);
   const isFiles = isFileExplorerItem(session);
-  const terminalButtonHtml = `<button class="tab active terminal-tab" ${terminalAttrs}>${esc(terminalLabel)}</button>`;
+  // Term is pressed ONLY when the terminal view is the active one — computed from the live view, not
+  // hardcoded, so a panel re-render (Dockview header refresh) doesn't re-press it after the user
+  // switched to transcript / YO!summary / events. activateTab also toggles it on click.
+  const terminalActive = panelActiveTabName(session) === 'terminal';
+  const terminalButtonHtml = `<button class="tab${terminalActive ? ' active' : ''} terminal-tab" ${terminalAttrs}>${esc(terminalLabel)}</button>`;
   const frameHtml = isFiles
     ? paneFrameControlsHtml(session, {
       disabled,
@@ -27351,9 +27355,9 @@ function createPanel(session) {
       </div>
       <div id="summary-pane-${session}" class="tab-pane">
         <div class="summary">
-          <div class="transcript-head">AI Transcript for session '${esc(sessionLabel(session))}'</div>
+          <div class="transcript-head">${esc(t('menu.tmux.aiTranscript', {session: sessionLabel(session)}))}</div>
           <div id="summary-context-${session}" class="summary-context">loading session context...</div>
-          <div id="summary-${session}" class="summary-preview markdown-body">click "AI Transcript" to generate a Codex summary of the last hour</div>
+          <div id="summary-${session}" class="summary-preview markdown-body">click "YO!summary" to generate a Codex summary of the last hour</div>
         </div>
       </div>
       <div id="events-pane-${session}" class="tab-pane">

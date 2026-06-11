@@ -224,7 +224,7 @@
   "menu.tabs.yoloBadge.one": "{count} 個已啟用 YOLO 的 tmux 工作階段",
   "menu.tabs.yoloBadge.other": "{count} 個已啟用 YOLO 的 tmux 工作階段",
   "menu.tmux.agentUnavailable": "{name} 無法使用",
-  "menu.tmux.aiTranscript": "工作階段「{session}」的 AI 逐字稿",
+  "menu.tmux.aiTranscript": "YO!summary for session '{session}'",
   "menu.tmux.eventLog": "工作階段「{session}」的事件記錄",
   "menu.tmux.focusSessionFirst": "請先聚焦 tmux 工作階段",
   "menu.tmux.focusTabFirst": "請先聚焦 tmux 分頁",

@@ -224,7 +224,7 @@
   "menu.tabs.yoloBadge.one": "{count} sessão tmux com YOLO ativado",
   "menu.tabs.yoloBadge.other": "{count} sessões tmux com YOLO ativado",
   "menu.tmux.agentUnavailable": "{name} indisponível",
-  "menu.tmux.aiTranscript": "Transcrição de IA da sessão '{session}'",
+  "menu.tmux.aiTranscript": "YO!summary for session '{session}'",
   "menu.tmux.eventLog": "Registro de eventos da sessão '{session}'",
   "menu.tmux.focusSessionFirst": "Foque uma sessão tmux primeiro",
   "menu.tmux.focusTabFirst": "Foque uma aba tmux primeiro",

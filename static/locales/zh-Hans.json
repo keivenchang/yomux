@@ -224,7 +224,7 @@
   "menu.tabs.yoloBadge.one": "{count} 个已启用 YOLO 的 tmux 会话",
   "menu.tabs.yoloBadge.other": "{count} 个已启用 YOLO 的 tmux 会话",
   "menu.tmux.agentUnavailable": "{name} 不可用",
-  "menu.tmux.aiTranscript": "会话“{session}”的 AI 逐字记录",
+  "menu.tmux.aiTranscript": "YO!summary for session '{session}'",
   "menu.tmux.eventLog": "会话“{session}”的事件日志",
   "menu.tmux.focusSessionFirst": "请先聚焦 tmux 会话",
   "menu.tmux.focusTabFirst": "请先聚焦 tmux 标签",

@@ -224,7 +224,7 @@
   "menu.tabs.yoloBadge.one": "{count} tmux-сессия с включённым YOLO",
   "menu.tabs.yoloBadge.other": "{count} tmux-сессий с включённым YOLO",
   "menu.tmux.agentUnavailable": "{name} недоступен",
-  "menu.tmux.aiTranscript": "ИИ-транскрипт сессии '{session}'",
+  "menu.tmux.aiTranscript": "YO!summary for session '{session}'",
   "menu.tmux.eventLog": "Журнал событий сессии '{session}'",
   "menu.tmux.focusSessionFirst": "Сначала выберите tmux-сессию",
   "menu.tmux.focusTabFirst": "Сначала выберите вкладку tmux",

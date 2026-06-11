@@ -2069,9 +2069,9 @@ test('t@1869', () => {
   assert.equal(source.includes('function startCustomDragPreview'), false, '#47: the tab clone-follow preview is removed');
   assert.ok(/function paneTabDropPlacement[\s\S]*?dragMeasureStrip\(strip\)/.test(source), '#47: drop placement measures the strip via the per-drag cache');
   assert.ok(/function dragMeasureStrip\([\s\S]*?dragSession != null[\s\S]*?dragTabRectCache/.test(source), '#47: the rect cache is only active during a live drag');
-  assert.ok(source.includes('id="summary-${session}" class="summary-preview markdown-body"'), 'the AI Transcript panel is a markdown-body container, not a raw <pre>');
-  assert.ok(source.includes("AI Transcript for session '"), 'the AI Transcript panel head names the session');
-  assert.ok(/function startSummaryStream[\s\S]*renderMarkdownPreviewInto\(node, raw\)/.test(source), 'the AI Transcript stream renders accumulated text through the markdown pipeline');
+  assert.ok(source.includes('id="summary-${session}" class="summary-preview markdown-body"'), 'the YO!summary panel is a markdown-body container, not a raw <pre>');
+  assert.ok(/transcript-head">\$\{esc\(t\('menu\.tmux\.aiTranscript'/.test(source), 'the YO!summary panel head names the session via the localized aiTranscript key');
+  assert.ok(/function startSummaryStream[\s\S]*renderMarkdownPreviewInto\(node, raw\)/.test(source), 'the YO!summary stream renders accumulated text through the markdown pipeline');
   assert.ok(/function createTopbarSearch[\s\S]*openFileQuickOpen\(\)/.test(source), 'the topbar universal search opens the unified quick-open/command palette (no forked logic)');
   assert.ok(/renderSessionButtons[\s\S]*appendChild\(createTopbarSearch\(\)\)/.test(source), 'the topbar search is mounted in the menubar middle area');
   assert.ok(/refreshFileIndexStatus[\s\S]{0,400}\/api\/fs\/index-status\?root=/.test(source), '#30/#31: the client warms the backend index and tracks build status via /api/fs/index-status');
@@ -4672,7 +4672,7 @@ test('t@2560', () => {
     assert.ok(/capped \? t\('menu\.tmux\.limitReached'\) : agentLaunchParams\(agent\)/.test(newSessionSrc), 'a launchable new-session item shows the params passed as its detail');
   }
   assert.ok(tmuxMenuLabels.includes("Transcript for session '1'"));
-  assert.ok(tmuxMenuLabels.includes("AI Transcript for session '1'"));
+  assert.ok(tmuxMenuLabels.includes("YO!summary for session '1'"));
   assert.ok(tmuxMenuLabels.includes("Event log for session '1'"));
   assert.ok(tmuxMenuLabels.includes('Pane details'));
   assert.ok(tmuxMenuLabels.includes("Rename tmux session '1'"));
@@ -5370,7 +5370,7 @@ test('t@2560', () => {
   assert.ok(contextMenu.children[0].innerHTML.includes('Pin Tab'), 'tab context menu starts with Pin Tab');
   assert.ok(contextMenu.children[0].innerHTML.includes('app-menu-ui-icon-pin'), 'Pin Tab context menu row has the shared pin icon');
   assert.equal(contextMenu.children[0].getAttribute('aria-label'), 'Pin Tab', 'Pin Tab context menu row has an accessible label');
-  assert.deepStrictEqual(canonical(Array.from(contextMenu.children).map(child => child.textContent).filter(Boolean)), ["Enable YOLO for Tmux Session '1'", "Rename tmux session '1'", "Transcript for session '1'", "AI Transcript for session '1'", "Event log for session '1'", "Kill tmux session '1'"]);
+  assert.deepStrictEqual(canonical(Array.from(contextMenu.children).map(child => child.textContent).filter(Boolean)), ["Enable YOLO for Tmux Session '1'", "Rename tmux session '1'", "Transcript for session '1'", "YO!summary for session '1'", "Event log for session '1'", "Kill tmux session '1'"]);
   assert.equal(contextMenu.children.some(child => child.className === 'terminal-context-menu-separator'), true);
   const contextButtons = Array.from(contextMenu.children).filter(child => child.textContent);
   assert.equal(contextButtons[contextButtons.length - 1].classList.contains('danger'), true, 'Kill is styled as the final destructive action');
@@ -5386,7 +5386,7 @@ test('t@2560', () => {
   assert.equal(fileContextMenu.children.length, 1, 'non-tmux tab context menu only shows tab-level actions today');
   api.setPinnedTabsForTest([]);
   const sessionViews = api.tmuxSessionViewCommands('1');
-  assert.deepStrictEqual(canonical(sessionViews.map(item => item.label)), ["Transcript for session '1'", "AI Transcript for session '1'", "Event log for session '1'", 'Pane details']);
+  assert.deepStrictEqual(canonical(sessionViews.map(item => item.label)), ["Transcript for session '1'", "YO!summary for session '1'", "Event log for session '1'", 'Pane details']);
   assert.equal(api.fileIconFor('screenshot.png'), '🖼');
   assert.equal(api.fileIconFor('run.sh'), '🐚');
   assert.equal(api.fileIconFor('main.rs'), '🧩');
