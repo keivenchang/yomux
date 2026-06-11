@@ -37,11 +37,11 @@ Do not hard-code layout capacity around one browser window, OS, zoom level, or f
 
 ## Source Layout
 
-The main server entry point is `yolomux.py`, which delegates to `yolomux_lib/cli.py`. Request routing lives in `yolomux_lib/server.py`, application state and tmux actions live in `yolomux_lib/app.py`, and shared helpers live in smaller modules such as `metadata.py`, `sessions.py`, `session_files.py`, `transcripts.py`, `uploads.py`, `events.py`, and `websocket.py`.
+The main server entry point is `yolomux.py`, which delegates to `yolomux_lib/cli.py`. Request routing lives in `yolomux_lib/server.py`, application state and tmux actions live in `yolomux_lib/app.py`, and shared helpers live in smaller modules such as `metadata.py`, `sessions.py`, `session_files.py`, `transcripts.py`, `uploads.py`, `events.py`, `websocket.py`, `approvals.py` (the approval-prompt detection pipeline), `atomic_file.py` (cross-process file lock + atomic write), and `cache.py` (the shared `TtlCache`).
 
 Frontend source for the interactive UI lives in ordered partials under `static_src/js/yolomux/` and `static_src/css/yolomux/`. Generated served assets are `static/yolomux.js` and `static/yolomux.css`; do not edit those directly except as generated outputs. Python keeps only the small HTML shell in `yolomux_lib/web.py`, plus bootstrap JSON and versioned static asset URLs. The main app's non-tmux tab types are centralized in the `TAB_TYPES` registry in the JS source partials. The read-only wall has its own frontend files, `static/tmux-wall.js` and `static/tmux-wall.css`, so `tmux_wall.py` stays focused on tmux capture, JSON endpoints, and Server-Sent Events.
 
-The standalone auto-approval detector lives in `auto_approve_tmux.py` at the repo root. YOLOmux imports it as a Python module and wraps one `AutoApproveWorker` in `yolomux_lib/auto_approve_worker.py` around each enabled session.
+The approval-prompt detection pipeline lives in `yolomux_lib/approvals.py` (one shared owner: `app.py`'s read-path, the `AutoApproveWorker` act-path in `yolomux_lib/auto_approve_worker.py`, and the standalone `auto_approve_tmux.py` CLI all call it; the CLI re-exports it). One `AutoApproveWorker` wraps each enabled session.
 
 ## Static Build
 
@@ -58,6 +58,8 @@ python3 tools/static_build.py --check
 ```
 
 ## Tests
+
+`python3 tools/check.py` runs the whole gate below in order and exits non-zero if any step fails — use it as the one pre-commit/CPS command. `python3 tools/check.py --fast` swaps the full pytest run for the `not socket` lane (restricted sandboxes). The individual commands (run any directly when iterating):
 
 Use `-n auto` for full local pytest runs; pytest-xdist is already in `requirements-dev.txt`.
 
