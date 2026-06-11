@@ -290,6 +290,10 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             session = query_one(qs, "session", None)
             self.write_app_result(self.server.app.run_history_payload(session))
             return
+        if parsed.path == "/api/activity":
+            # DOIT.58 Phase 1: per-session/window activity ledger (metadata; readonly-allowed).
+            self.write_app_result(self.server.app.activity_payload())
+            return
         if parsed.path == "/api/session-files":
             qs = parse_qs(parsed.query)
             session = query_one(qs, "session", None)
@@ -1326,6 +1330,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 filtered = strip_terminal_query_responses(data)
                 if filtered:
                     os.write(master_fd, filtered.encode("utf-8"))
+                    # DOIT.58 Phase 1: one user-input heartbeat (readonly already returned above).
+                    self.server.app.record_user_input(session, len(filtered))
         elif msg_type == "resize":
             if readonly:
                 return

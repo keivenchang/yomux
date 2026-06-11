@@ -38,6 +38,9 @@ from .auto_approve_worker import AutoApproveWorker
 from .auto_approve_worker import auto_approve_lock_message
 from .auto_approve_worker import auto_approve_lock_owner
 from .client_events import ClientEventBroker
+from .activity import ActivityLedger
+from .common import ACTIVITY_HEARTBEATS_PATH
+from .common import ACTIVITY_PATH
 from .common import AGENT_COMMANDS
 from .common import EVENT_LOG_PATH
 from .common import MAX_COMPACT_TRANSCRIPT_ITEMS
@@ -389,6 +392,10 @@ class TmuxWebtermApp:
         self.share_tokens: dict[str, dict[str, Any]] = {}
         self.share_tokens_lock = threading.RLock()
         self.metadata_cache = MetadataCache()
+        # DOIT.58 Phase 1: per-session/window user+agent activity ledger (heartbeat-coalesced
+        # typed-time). Constructor defaults today; Preferences exposure is a deferred follow-up.
+        self.activity_ledger = ActivityLedger(ACTIVITY_PATH, heartbeat_path=ACTIVITY_HEARTBEATS_PATH)
+        self.activity_ledger.load()
         # last-logged watched-PR truncation state, so the cap is logged only when it changes.
         self._watched_pr_truncated_signature: tuple[int, tuple[str, ...]] | None = None
         self.metadata_warm_lock = threading.Lock()
@@ -468,6 +475,8 @@ class TmuxWebtermApp:
         if error is None:
             self.sessions = sessions
             self.prune_yoagent_session_summaries(set(sessions))
+            self.activity_ledger.prune(set(sessions))
+            self.activity_ledger.flush()
             self.revoke_share_tokens_for_missing_sessions(set(sessions))
             return []
         return [error]
@@ -1985,6 +1994,32 @@ class TmuxWebtermApp:
             "events": event_matches,
             "summaries": summary_matches,
         }, HTTPStatus.OK
+
+    def active_window_for(self, session: str) -> str | None:
+        """Cheap active-window lookup from the cached transcripts payload (no tmux spawn).
+        Returns the active window index for ``session`` or None when unknown."""
+        cached = self.get_transcripts_payload_cache(max_age_seconds=float("inf"), allow_stale=True)
+        if not cached:
+            return None
+        payload = cached[0]
+        info = (payload.get("sessions") or {}).get(session) if isinstance(payload, dict) else None
+        panes = info.get("panes") if isinstance(info, dict) else None
+        if not isinstance(panes, list):
+            return None
+        for pane in panes:
+            if isinstance(pane, dict) and pane.get("window_active") and pane.get("window") not in (None, ""):
+                return str(pane.get("window"))
+        return None
+
+    def record_user_input(self, session: str, byte_count: int) -> None:
+        """One user-input heartbeat from the WS bridge (admin keystrokes only — readonly is
+        dropped upstream). Attributes to the session and its active window."""
+        if not session:
+            return
+        self.activity_ledger.heartbeat(session, self.active_window_for(session), byte_count=byte_count)
+
+    def activity_payload(self) -> tuple[dict[str, Any], HTTPStatus]:
+        return {"activity": self.activity_ledger.snapshot()}, HTTPStatus.OK
 
     def run_history_payload(self, session: str | None = None) -> tuple[RunHistoryPayload, HTTPStatus]:
         refresh_errors = self.refresh_sessions()
