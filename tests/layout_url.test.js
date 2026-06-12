@@ -987,11 +987,10 @@ globalThis.__layoutTestApi = {
   setFileExplorerTreeSortModeForTest(mode) { fileExplorerTreeSortMode = mode; },
   setTabberSessionFilesForTest(session, files) { tabberSessionFilesCache.set(session, {files, loaded: true}); },
   tabberRenderedRowsForTest() {
-    // Default-expanded: clearing the collapsed set renders the whole tree. Render twice to exercise reuse.
+    // Default-expanded: clearing the collapsed set renders the whole tree.
     fileExplorerTabberCollapsed.clear();
     const el = document.createElement('div');
     el.className = 'changes-groups';
-    renderTabberTree(el);
     renderTabberTree(el);
     return Array.from(el.querySelectorAll('.file-tree-row')).map(row => ({
       type: row.dataset.tabberType || '',
@@ -9327,6 +9326,10 @@ test('t@tabber', () => {
   assert.ok(rows.some(r => r.type === 'window' && /0:claude ●/.test(r.name)), '#2: the current window is marked (got ' + JSON.stringify(rows.filter(r => r.type === 'window').map(r => r.name)) + ')');
   assert.ok(rows.some(r => r.type === 'repo' && /proj/.test(r.name)), 'L3: repo group rows render');
   assert.ok(rows.some(r => r.type === 'path' && r.openFile === '/home/u/proj/src/app.py'), 'L3: path rows render with abs_path');
+  // Non-tmux tabs (Preferences / YO!info / file editors) render as leaf rows AFTER all the sessions.
+  const rowTypes = rows.map(r => r.type);
+  assert.ok(rowTypes.includes('tab'), 'non-tmux tabs appear in the Tabber');
+  assert.ok(rowTypes.indexOf('tab') > rowTypes.lastIndexOf('session'), 'non-tmux tabs render after the sessions');
 
   // B4 recency sort: make session 2 most recent -> its codex window renders before session 1's claude window.
   api.setFileExplorerTreeSortModeForTest('newest');

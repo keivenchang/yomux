@@ -2767,9 +2767,13 @@ function buildTabberTree() {
     const branch = git?.branch ? shortBranch(git.branch) : '';
     const gitRoot = git?.root || '';
     const sessionRecency = tabberRecency(session);
+    // The session's descriptive work (PR/branch summary) is how the user identifies it, so it goes IN the
+    // priority name column (after the short session number) rather than a secondary detail that truncates first.
+    const sessionWork = sessionWorkDescription(session, info, 200);
+    const sessionDisplay = sessionWork ? `${sessionLabel(session) || session}  ${sessionWork}` : (sessionLabel(session) || session);
     const sessionEntry = {
-      name: sessionName, kind: 'dir', mtime: sessionRecency, sortName: sessionLabel(session) || session,
-      tabber: {type: 'session', session, label: sessionLabel(session) || session, detail: sessionWorkDescription(session, info, 60), icon: '■', statusText: branch},
+      name: sessionName, kind: 'dir', mtime: sessionRecency, sortName: sessionDisplay,
+      tabber: {type: 'session', session, label: sessionDisplay, icon: '■', statusText: branch},
     };
     topEntries.push(sessionEntry);
     const windowEntries = tmuxWindowRecords(info.panes).map(record => {
@@ -2791,6 +2795,15 @@ function buildTabberTree() {
     const maxChild = windowEntries.reduce((max, entry) => Math.max(max, Number(entry.mtime || 0)), 0);
     sessionEntry.mtime = Math.max(sessionRecency, maxChild);
   });
+  // The other open (non-tmux) tabs — Preferences, YO!info/YO!agent, file editors — as leaf rows after the
+  // sessions. They are kind:'file', so the shared dirs-before-files sort always keeps them below sessions.
+  for (const item of allTabItems()) {
+    if (isTmuxSession(item) || isFileExplorerItem(item)) continue; // tmux sessions are shown above; skip the Finder/Tabber pane itself
+    topEntries.push({
+      name: `t_${tabberPathToken(item)}`, kind: 'file', mtime: 0, sortName: itemLabel(item),
+      tabber: {type: 'tab', item, label: itemLabel(item), icon: '◷'},
+    });
+  }
   return {entries: topEntries, entriesByDir};
 }
 
@@ -2854,6 +2867,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   if (data.openStatus) row.dataset.tabberOpenStatus = data.openStatus; else delete row.dataset.tabberOpenStatus;
   if (data.openRepo) row.dataset.tabberOpenRepo = data.openRepo; else delete row.dataset.tabberOpenRepo;
   if (data.repoRoot) row.dataset.tabberRepoRoot = data.repoRoot; else delete row.dataset.tabberRepoRoot;
+  if (data.item) row.dataset.tabberItem = data.item; else delete row.dataset.tabberItem;
   const paddingLeft = `${8 + depth * 14}px`;
   if (row.style.paddingLeft !== paddingLeft) row.style.paddingLeft = paddingLeft;
   row.setAttribute('role', 'treeitem');
@@ -2925,7 +2939,9 @@ function handleTabberRowActivate(row, event) {
     return;
   }
   const switchWindow = () => { if (session && windowIndex !== null) tmuxWindow(session, {windowIndex}, row.querySelector('.file-tree-name')?.textContent || session); };
-  if (type === 'session' && session) {
+  if (type === 'tab' && row.dataset.tabberItem) {
+    selectSession(row.dataset.tabberItem, {userInitiated: true});
+  } else if (type === 'session' && session) {
     selectSession(session, {userInitiated: true});
   } else if (type === 'window' && session) {
     selectSession(session, {userInitiated: true});

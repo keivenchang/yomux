@@ -10943,3 +10943,18 @@ body.editor-theme-light .file-editor-image-panel {
   font-weight: 600;
   color: var(--text);
 }
+/* Tabber rows: the session/work name is the priority. Let its column take all available width and only
+   ellipsize as a last resort; keep the date from forcing the name to truncate by letting it shrink, and
+   drop the date entirely when the pane is genuinely narrow so the name is never starved. */
+.file-tree-row.tabber-row .file-tree-name {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.file-tree-row.tabber-row .file-tree-date {
+  flex: 0 1 auto;
+}
+@container (max-width: 380px) {
+  .file-explorer-changes-panel .file-tree-row.tabber-row .file-tree-date {
+    display: none;
+  }
+}
