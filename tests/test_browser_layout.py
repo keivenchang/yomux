@@ -2670,8 +2670,8 @@ def test_dockview_header_actions_stay_on_first_row(browser, tmp_path):
     assert metrics["actionsRight"] <= metrics["headerRight"] + 1
     assert metrics["actionsTopDelta"] <= 3
     assert metrics["actionsBottom"] <= metrics["tabBottom"] + 3
-    assert metrics["tabRows"] <= 2
-    assert metrics["headerHeight"] <= (metrics["tabHeight"] + 3) * 2
+    assert metrics["tabRows"] == 1
+    assert metrics["headerHeight"] <= metrics["tabHeight"] + 3
     assert metrics["maxActionButtonHeight"] <= 20
     assert metrics["maxActionButtonHeight"] <= metrics["tabHeight"] + 1
 
@@ -2933,7 +2933,7 @@ def test_dockview_new_tabs_do_not_open_in_focused_finder(browser, tmp_path):
     assert "__prefs__" not in metrics["leftTabs"], metrics
 
 
-def test_dockview_many_tabs_wrap_like_yolomux_strip(browser, tmp_path):
+def test_dockview_many_tabs_stay_one_row_above_content(browser, tmp_path):
     sessions = [str(index) for index in range(1, 10)]
     load_dockview_runtime_boot_fixture(
         browser,
@@ -2942,7 +2942,7 @@ def test_dockview_many_tabs_wrap_like_yolomux_strip(browser, tmp_path):
         sessions=sessions,
     )
     wait_for_dockview(browser, min_tabs=9)
-    wait_for_dockview_tab_geometry(browser, min_tabs=9, max_rows=2)
+    wait_for_dockview_tab_geometry(browser, min_tabs=9, min_width=64, max_rows=1)
     metrics = dockview_layout_metrics(browser)
     tab_tops = sorted({item["rect"]["top"] for item in metrics["tabStyles"]})
     tab_widths = {item["rect"]["width"] for item in metrics["tabStyles"]}
@@ -2950,13 +2950,70 @@ def test_dockview_many_tabs_wrap_like_yolomux_strip(browser, tmp_path):
     assert metrics["errors"] == []
     assert metrics["rejections"] == []
     assert metrics["groups"][0]["tabs"] == sessions
-    assert tab_tops == [tab_tops[0], tab_tops[0] + tab_height]
+    assert len(tab_tops) == 1
     assert max(tab_widths) <= 180
-    assert min(tab_widths) >= 160
-    assert metrics["header"]["height"] >= tab_height * 2
+    assert min(tab_widths) >= 64
+    assert metrics["header"]["height"] <= tab_height + 3
     assert metrics["header"]["tabsScrollbarWidth"] == "none"
     assert metrics["header"]["tabsWebkitScrollbarDisplay"] == "none"
     assert metrics["header"]["allTabsInsideHeader"] is True
+
+
+def test_dockview_file_editor_tabs_stay_above_toolbar(browser, tmp_path):
+    encoded_files = [
+        "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2Fmissing%20dynamo.rs",
+        "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2FCargo.toml",
+        "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2Fstatic%2Fyolomux.css",
+        "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2Fstatic_src%2Fjs%2Fyolomux%2F60_popovers_tabs.js",
+        "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2FREADME.md",
+        "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2Fdocs%2FGUI_SPECS.md",
+    ]
+    token = ",".join(encoded_files)
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        f"?sessions={token}&layout=left&tabs=left:{token}",
+        sessions=[],
+        grid_width=1200,
+        grid_height=620,
+    )
+    wait_for_dockview(browser, min_tabs=len(encoded_files))
+    wait_for_dockview_tab_geometry(browser, min_tabs=len(encoded_files), min_width=64, max_rows=1)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return Boolean(document.querySelector('.file-editor-toolbar:not([hidden])'))")
+    )
+    metrics = browser.execute_script(
+        """
+        const group = document.querySelector('.file-editor-panel').closest('.dv-groupview');
+        const rectFor = rect => ({
+          left: Math.round(rect.left),
+          right: Math.round(rect.right),
+          top: Math.round(rect.top),
+          bottom: Math.round(rect.bottom),
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+        });
+        const header = group.querySelector('.dv-tabs-and-actions-container').getBoundingClientRect();
+        const toolbar = group.querySelector('.file-editor-toolbar').getBoundingClientRect();
+        const tabs = Array.from(group.querySelectorAll('.dockview-pane-tab')).map(tab => rectFor(tab.getBoundingClientRect()));
+        const activeTab = group.querySelector('.dv-tab.dv-active-tab .dockview-pane-tab');
+        const activeRect = activeTab.getBoundingClientRect();
+        const hit = document.elementFromPoint(Math.round(activeRect.left + activeRect.width / 2), Math.round(activeRect.top + activeRect.height / 2));
+        return {
+          header: rectFor(header),
+          toolbar: rectFor(toolbar),
+          tabRows: new Set(tabs.map(rect => rect.top)).size,
+          tabsOverlapToolbar: tabs.filter(rect => rect.bottom > toolbar.top + 1),
+          activeTab: rectFor(activeRect),
+          activeTabClickable: Boolean(hit?.closest?.('.dockview-pane-tab') === activeTab),
+        };
+        """
+    )
+    assert metrics["tabRows"] == 1, metrics
+    assert metrics["tabsOverlapToolbar"] == [], metrics
+    assert metrics["activeTab"]["bottom"] <= metrics["toolbar"]["top"] + 1, metrics
+    assert metrics["header"]["bottom"] <= metrics["toolbar"]["top"] + 1, metrics
+    assert metrics["activeTabClickable"] is True, metrics
 
 
 def test_dockview_drag_reorders_tabs_in_same_pane(browser, tmp_path):
@@ -6801,6 +6858,7 @@ def test_editor_diff_button_waits_for_clean_payload_before_showing_refs(browser,
     assert metrics["whileUnresolved"]["refsHidden"] is True, metrics
     assert metrics["whileUnresolved"]["refsVisible"] is False, metrics
     assert metrics["afterCleanDiff"]["viewMode"] == "diff", metrics
+    assert metrics["afterCleanDiff"]["cmMode"] == "diff", metrics
     assert metrics["afterCleanDiff"]["buttonHidden"] is False, metrics
     assert metrics["afterCleanDiff"]["refsHidden"] is False, metrics
     assert metrics["afterCleanDiff"]["refsVisible"] is True, metrics

@@ -43,6 +43,8 @@
   "conflict.onDisk": "On disk",
   "conflict.unsaved": "Unsaved editor",
   "contextmenu.copyUrl": "คัดลอก URL",
+  "contextmenu.openNewDiffEditor": "Open in a new Diff Editor",
+  "contextmenu.openNewEditor": "Open in a new Editor",
   "contextmenu.openUrl": "เปิด URL",
   "debug.apiCalls": "API calls",
   "debug.clear": "Clear",

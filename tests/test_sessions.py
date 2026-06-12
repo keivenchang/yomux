@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 from yolomux_lib import sessions
@@ -24,7 +25,7 @@ def test_find_recent_codex_transcript_matches_session_meta_header(tmp_path):
     assert sessions.find_recent_codex_transcript(cwd, root=root) == transcript
 
 
-def test_find_recent_codex_transcript_keeps_tail_fallback(tmp_path):
+def test_find_recent_codex_transcript_keeps_structured_tail_fallback(tmp_path):
     clear_transcript_lookup_cache()
     root = tmp_path / "codex" / "sessions"
     transcript = root / "2026" / "05" / "rollout-tail.jsonl"
@@ -33,6 +34,20 @@ def test_find_recent_codex_transcript_keeps_tail_fallback(tmp_path):
     transcript.write_text("\n".join([json.dumps({"type": "session_meta", "payload": {"cwd": "/other"}}), json.dumps({"cwd": cwd})]), encoding="utf-8")
 
     assert sessions.find_recent_codex_transcript(cwd, root=root) == transcript
+
+
+def test_find_recent_codex_transcript_ignores_plain_tail_mentions(tmp_path):
+    clear_transcript_lookup_cache()
+    root = tmp_path / "codex" / "sessions"
+    transcript = root / "2026" / "05" / "rollout-tail.jsonl"
+    transcript.parent.mkdir(parents=True)
+    cwd = "/repo/project"
+    transcript.write_text("\n".join([
+        json.dumps({"type": "session_meta", "payload": {"cwd": "/other"}}),
+        json.dumps({"message": f"the user mentioned {cwd}, but no tool ran there"}),
+    ]), encoding="utf-8")
+
+    assert sessions.find_recent_codex_transcript(cwd, root=root) is None
 
 
 def test_find_recent_codex_transcript_refuses_global_newest_without_cwd(tmp_path):
@@ -82,6 +97,28 @@ def test_find_recent_codex_transcript_orders_by_name_without_stat_storm(tmp_path
     # Newest-by-name wins, and ordering issues no per-rollout-file stat() (no syscall storm).
     assert sessions.find_recent_codex_transcript(cwd, root=root) == newer
     assert [path for path in stat_calls if path.name.startswith("rollout-")] == []
+
+
+def test_find_recent_codex_transcript_falls_back_to_mtime_for_resumed_old_file(tmp_path):
+    clear_transcript_lookup_cache()
+    root = tmp_path / "codex" / "sessions"
+    cwd = "/repo/resumed"
+    old_day = root / "2026" / "06" / "08"
+    old_day.mkdir(parents=True)
+    resumed = old_day / "rollout-2026-06-08T08-00-00-old.jsonl"
+    resumed.write_text("\n".join([
+        json.dumps({"type": "session_meta", "payload": {"cwd": "/repo/other"}}),
+        json.dumps({"payload": {"arguments": json.dumps({"workdir": cwd})}}),
+    ]), encoding="utf-8")
+    new_day = root / "2026" / "06" / "12"
+    new_day.mkdir(parents=True)
+    for index in range(sessions.CODEX_TRANSCRIPT_SCAN_LIMIT + 5):
+        path = new_day / f"rollout-2026-06-12T10-{index:02d}-new.jsonl"
+        path.write_text(json.dumps({"type": "session_meta", "payload": {"cwd": "/repo/new"}}), encoding="utf-8")
+        os.utime(path, (1000 + index, 1000 + index))
+    os.utime(resumed, (5000, 5000))
+
+    assert sessions.find_recent_codex_transcript(cwd, root=root) == resumed
 
 
 def test_find_transcript_by_session_id_caches_glob(tmp_path, monkeypatch):

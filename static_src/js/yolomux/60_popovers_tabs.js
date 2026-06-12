@@ -891,7 +891,7 @@ async function openDraggedFilesInEditor(payload, options = {}) {
       });
       // Unify with double-click: a dragged CHANGED (tracked, has-diff) file opens in the SAME diff
       // view (ensureCodeMirrorDiffPanel) as openChangedFileInDiff, not a plain edit-mode editor.
-      // Unchanged/untracked files have no diff available and stay in edit.
+      // Files with no diff payload stay in edit.
       await refreshOpenFileDiff(path, {silent: true});
       const draggedState = openFiles.get(path);
       if (draggedState && openFileDiffAvailable(draggedState)) {

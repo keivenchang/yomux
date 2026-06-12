@@ -148,12 +148,141 @@ def test_session_files_payload_keeps_transcript_paths_when_branch_is_clean(tmp_p
     assert repo_summary["error"] == ""
 
 
+def test_scan_codex_transcript_uses_exec_command_workdir_for_git_add(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    transcript = tmp_path / "rollout.jsonl"
+    transcript.write_text(
+        json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": json.dumps({
+                    "cmd": "git add rust/Cargo.toml -- vllm/envs.py",
+                    "workdir": str(repo),
+                }),
+            },
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    changes = session_files.scan_codex_transcript(transcript, cwd="/elsewhere")
+
+    assert changes[str(repo / "rust" / "Cargo.toml")] == {"M"}
+    assert changes[str(repo / "vllm" / "envs.py")] == {"M"}
+
+
+def test_scan_shell_command_changes_stops_git_add_at_shell_separator(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    changes = session_files.scan_shell_command_changes("git add tracked.txt && git commit -m done", str(repo))
+
+    assert changes == {str(repo / "tracked.txt"): {"M"}}
+
+
+def test_scan_shell_command_changes_tracks_cd_before_git_add(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    changes = session_files.scan_shell_command_changes("bash -lc 'cd repo && git add src/app.py'", str(tmp_path))
+
+    assert changes == {str(repo / "src" / "app.py"): {"M"}}
+
+
+def test_session_files_payload_uses_historical_codex_transcript_for_clean_pane_repo(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test User")
+    tracked = repo / "tracked.txt"
+    tracked.write_text("one\n", encoding="utf-8")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-m", "base")
+    os.utime(tracked, (1400, 1400))
+    transcript = tmp_path / "rollout.jsonl"
+    transcript.write_text(
+        json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": json.dumps({
+                    "cmd": "git add tracked.txt",
+                    "workdir": str(repo),
+                }),
+            },
+        }) + "\n",
+        encoding="utf-8",
+    )
+    os.utime(transcript, (1500, 1500))
+    pane = PaneInfo(
+        session="s1",
+        window="0",
+        pane="0",
+        pane_id="%1",
+        target="s1:0.0",
+        current_path=str(repo),
+        command="zsh",
+        active=True,
+        window_active=True,
+        title="",
+        pid=11,
+    )
+    info = SessionInfo(session="s1", panes=[pane], selected_pane=pane, agents=[])
+    monkeypatch.setattr(session_files, "find_recent_codex_transcript", lambda cwd: transcript if cwd == str(repo) else None)
+
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=1600)
+
+    assert len(payload["files"]) == 1
+    item = payload["files"][0]
+    assert item["status"] == "T"
+    assert item["source"] == "transcript"
+    assert item["repo"] == str(repo)
+    assert item["path"] == "tracked.txt"
+    assert item["agents"] == ["codex"]
+    assert payload["repos"][0]["repo"] == str(repo)
+    assert payload["repos"][0]["count"] == 1
+    assert payload["repos"][0]["touched_count"] == 1
+
+
+def test_historical_codex_transcript_prefers_recent_transcript_with_repo_changes(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    mentioned = tmp_path / "mentioned.jsonl"
+    mentioned.write_text(json.dumps({"message": f"look at {repo}"}) + "\n", encoding="utf-8")
+    changed = tmp_path / "changed.jsonl"
+    changed.write_text(
+        json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": json.dumps({"cmd": "git add changed.txt", "workdir": str(repo)}),
+            },
+        }) + "\n",
+        encoding="utf-8",
+    )
+    os.utime(mentioned, (2000, 2000))
+    os.utime(changed, (1900, 1900))
+    monkeypatch.setattr(session_files, "find_recent_codex_transcript", lambda cwd: mentioned)
+    monkeypatch.setattr(session_files, "recent_codex_transcript_candidates", lambda: [mentioned, changed])
+
+    assert session_files.historical_codex_transcript_for_cwd(str(repo), cutoff=0) == changed
+
+
 def test_file_mtime_or_fallback_preserves_epoch_mtime(tmp_path):
     path = tmp_path / "epoch.txt"
     path.write_text("old\n", encoding="utf-8")
     os.utime(path, (0, 0))
 
     assert session_files.file_mtime_or_fallback(path, fallback=1234) == 0
+
+
+def test_file_mtime_or_fallback_uses_fallback_for_missing_path(tmp_path):
+    assert session_files.file_mtime_or_fallback(tmp_path / "missing.txt", fallback=1234) == 1234
 
 
 def test_session_files_payload_collects_multiple_agents_for_one_file(tmp_path):

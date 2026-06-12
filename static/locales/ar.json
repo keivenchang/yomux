@@ -43,6 +43,8 @@
   "conflict.onDisk": "على القرص",
   "conflict.unsaved": "محرر غير محفوظ",
   "contextmenu.copyUrl": "نسخ الرابط",
+  "contextmenu.openNewDiffEditor": "Open in a new Diff Editor",
+  "contextmenu.openNewEditor": "Open in a new Editor",
   "contextmenu.openUrl": "فتح الرابط",
   "debug.apiCalls": "API calls",
   "debug.clear": "Clear",

@@ -43,6 +43,8 @@
   "conflict.onDisk": "На диске",
   "conflict.unsaved": "Несохранённый редактор",
   "contextmenu.copyUrl": "Копировать URL",
+  "contextmenu.openNewDiffEditor": "Open in a new Diff Editor",
+  "contextmenu.openNewEditor": "Open in a new Editor",
   "contextmenu.openUrl": "Открыть URL",
   "debug.apiCalls": "API calls",
   "debug.clear": "Clear",

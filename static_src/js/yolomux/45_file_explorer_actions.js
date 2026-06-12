@@ -50,7 +50,7 @@ async function fetchFilePathInfo(path, options = {}) {
   })());
 }
 
-async function showFileTreeContextMenu(row, fullPath, entry, x, y) {
+async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {}) {
   closeFileContextMenu();
   closeTerminalContextMenu();
   closeSessionContextMenu();
@@ -68,10 +68,18 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y) {
   const relativePaths = infos.map(info => info?.relative_path || '').filter(Boolean);
   const menuState = fileContextMenuState(entry, selectedPaths, relativePaths);
   const multiple = selectedPaths.length > 1;
+  const openInNewTab = typeof options.openInNewTab === 'function'
+    ? options.openInNewTab
+    : () => openFileInAdditionalEditorTab(fullPath, entry, {userInitiated: true});
+  const openInNewTabActions = Array.isArray(options.openInNewTabActions) && options.openInNewTabActions.length
+    ? options.openInNewTabActions
+    : [{label: options.openInNewTabLabel || 'Open in new tab', action: openInNewTab}];
   appendContextMenuButton(menu, multiple ? 'Copy relative paths' : 'Copy relative path', () => copyFilePath(relativePaths.join('\n'), 'relative'), closeFileContextMenu, {disabled: menuState.copyRelativeDisabled});
   appendContextMenuButton(menu, multiple ? 'Copy full paths' : 'Copy full path', () => copyFilePath(selectedPaths.join('\n'), 'path'), closeFileContextMenu);
   appendContextMenuButton(menu, 'Copy image', () => copyImageFileToClipboard(selectedPaths[0]), closeFileContextMenu, {disabled: menuState.copyImageDisabled});
-  appendContextMenuButton(menu, 'Open in new tab', () => openFileInEditor(fullPath, entry, {forceNewTab: true}), closeFileContextMenu, {disabled: menuState.openInNewTabDisabled});
+  for (const action of openInNewTabActions) {
+    appendContextMenuButton(menu, action.label || 'Open in new tab', action.action, closeFileContextMenu, {disabled: action.disabled ?? menuState.openInNewTabDisabled});
+  }
   appendContextMenuButton(menu, 'Download', () => triggerFileDownload(fullPath), closeFileContextMenu, {disabled: menuState.downloadDisabled});
   appendContextMenuButton(menu, fileExplorerDirectoryIsIndexed(fullPath) ? 'Disallow index' : 'Allow index', () => toggleFileExplorerDirectoryIndexed(fullPath), closeFileContextMenu, {disabled: menuState.indexToggleDisabled, checked: entry?.kind === 'dir' ? fileExplorerDirectoryIsIndexed(fullPath) : undefined});
   appendContextMenuButton(menu, 'Rename', () => beginFileTreeRename(row, selectedPaths[0], entry), closeFileContextMenu, {disabled: menuState.renameDisabled});
@@ -84,9 +92,9 @@ function fileContextMenuState(entry, selectedPaths, relativePaths) {
   return {
     copyRelativeDisabled: relativePaths.length !== selectedPaths.length,
     // readonly is terminal-only — the server forbids every /api/fs/* read (raw/list/...),
-    // so the file-read affordances (open image in a tab via /api/fs/raw, Download via /api/fs/raw) are
+    // so the file-read affordances (open a file in a tab, Download via /api/fs/raw) are
     // disabled in readonly to match the server, instead of offering a command that 403s.
-    openInNewTabDisabled: multiple || !entryIsImageFile(entry) || readOnlyMode,
+    openInNewTabDisabled: multiple || entry?.kind !== 'file' || readOnlyMode,
     copyImageDisabled: multiple || !entryIsImageFile(entry) || readOnlyMode,
     downloadDisabled: multiple || entry?.kind !== 'file' || readOnlyMode,
     indexToggleDisabled: multiple || entry?.kind !== 'dir' || (!fileExplorerDirectoryIsIndexed(selectedPaths[0]) && Boolean(fileExplorerIndexedAncestor(selectedPaths[0]))),
@@ -867,6 +875,46 @@ function filePanelItemsForPath(path) {
   return items;
 }
 
+function fileEditorDiffPreviewItems() {
+  const items = new Set();
+  for (const state of openFiles.values()) {
+    normalizeFileStateRecord(state);
+    for (const item of state.editorTabItems) {
+      if (isFileEditorDiffPreviewItem(item)) items.add(item);
+    }
+  }
+  for (const item of paneItems()) {
+    if (isFileEditorDiffPreviewItem(item)) items.add(item);
+  }
+  return Array.from(items);
+}
+
+function reusableFileEditorDiffPreviewItem(path) {
+  const nextItem = fileEditorDiffPreviewItemFor(path);
+  addFileEditorTabItem(path, nextItem);
+  const replacements = new Map();
+  for (const oldItem of fileEditorDiffPreviewItems()) {
+    if (oldItem === nextItem) continue;
+    const oldPath = fileItemPath(oldItem);
+    if (!oldPath) continue;
+    const oldState = fileStateFor(oldPath);
+    if (oldState?.dirty && fileEditorTabItemsForPath(oldPath).length <= 1) continue;
+    replacements.set(oldItem, nextItem);
+    removeFileEditorTabItem(oldPath, oldItem);
+    fileEditorViewModesForPath(oldPath).delete(oldItem);
+    fileEditorViewState.delete(oldItem);
+    fileEditorDiffExpandOverrides.delete(oldItem);
+    tabLastActivatedAt.delete(oldItem);
+    removePanelForItem(oldItem);
+    if (!openFilePathHasOwner(oldPath) && !oldState?.dirty) deleteFileState(oldPath);
+  }
+  syncFileLayoutItems();
+  if (replacements.size) {
+    applyLayoutSlots(layoutWithReplacedItems(replacements), {focusSession: nextItem, prune: false});
+  }
+  return nextItem;
+}
+
 function openFilePathHasOwner(path) {
   return filePanelItemsForPath(path).length > 0;
 }
@@ -878,6 +926,7 @@ function removeFilePanelOwner(path, item) {
   // also drop the per-item CodeMirror scroll/selection state and the LRU timestamp on close
   // so these item-keyed maps don't grow unbounded as editor tabs open and close.
   fileEditorViewState.delete(item);
+  fileEditorDiffExpandOverrides.delete(item);
   tabLastActivatedAt.delete(item);
   if (!openFilePathHasOwner(path)) fileStateFor(path)?.ownerSessions.clear();
 }
@@ -1019,6 +1068,7 @@ function clearOpenFileExternalState(state) {
   delete state.externalMissing;
   delete state.externalError;
   delete state.externalChangeEditPrompted;
+  delete state.externalReloadDeferred;
   return state;
 }
 
@@ -1392,8 +1442,14 @@ function refreshOpenFileDiffDecorations(path) {
 function openFileDiffAvailable(state) {
   if (!state?.diffLoaded) return false;
   const diff = String(state.diff || '');
-  if (state.untracked || /^---\s+\/dev\/null/m.test(diff) || (!state.diffOriginal && !state.diffWorkingMissing && !diff)) return false;
+  if (!diff && !state.diffWorkingMissing) return false;
   return Boolean(state.diff || state.diffWorkingMissing);
+}
+
+function fileStateCanRenderDiffView(path, state) {
+  if (!state?.diffLoaded || state.diffUnavailable) return false;
+  if (openFileDiffAvailable(state)) return true;
+  return fileStateHasRepo(path, state) && fileStateHasUsefulGitHistory(state);
 }
 
 function applyOpenFileDiffPayload(state, payload) {
@@ -1558,6 +1614,11 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
   }
 }
 
+async function openFileInAdditionalEditorTab(fullPath, entryOrName, options = {}) {
+  const item = options.item || fileEditorCopyItemFor(fullPath);
+  return openFileInEditor(fullPath, entryOrName, {...options, item, forceNewTab: true});
+}
+
 async function openFileStateFromDisk(path, entry = null) {
   const fetched = entry ? {entry, missing: false, error: '', network: false} : await fetchFileEntryStatus(path);
   const fileEntry = fetched.entry;
@@ -1631,6 +1692,11 @@ function markOpenFileExternalError(path, error) {
 
 async function replaceOpenFileStateFromDisk(path, entry = null) {
   const previous = openFiles.get(path);
+  const viewStates = fileEditorTabItemsForPath(path).map(item => {
+    const panel = panelNodes.get(item);
+    if (panel) captureFileEditorPanelViewState(item, panel);
+    return {item, panel};
+  });
   const loaded = await openFileStateFromDisk(path, entry);
   if (loaded.missing) {
     markOpenFileMissing(path);
@@ -1639,11 +1705,49 @@ async function replaceOpenFileStateFromDisk(path, entry = null) {
   clearFileAutosaveTimer(path);
   setFileState(path, clearOpenFileExternalState(loaded.state));
   renderOpenFilePath(path);
+  for (const {item} of viewStates) {
+    const panel = panelNodes.get(item);
+    if (panel) restoreFileEditorPanelViewState(item, panel);
+  }
+  requestAnimationFrame(() => {
+    for (const {item} of viewStates) {
+      const panel = panelNodes.get(item);
+      if (panel) restoreFileEditorPanelViewState(item, panel);
+    }
+  });
   if (loaded.state?.kind === 'text' && typeof updateFilePreviewPopout === 'function') {
     updateFilePreviewPopout(path, loaded.state.content || '');
   }
   if (previous?.diff !== undefined) refreshOpenFileDiff(path);
   return true;
+}
+
+function fileEditorPathHasFocus(path) {
+  const active = document.activeElement;
+  if (!active) return false;
+  return fileEditorPanelsForPath(path).some(panel => panel?.contains?.(active));
+}
+
+function openFileBackgroundReloadShouldDefer(path, state) {
+  if (fileEditorPathHasFocus(path)) return true;
+  const lastCleanAt = Number(state?.lastCleanAt || 0);
+  return Number.isFinite(lastCleanAt)
+    && lastCleanAt > 0
+    && Date.now() - lastCleanAt < openFileBackgroundReloadDeferMs;
+}
+
+function markOpenFileReloadDeferred(path, state, entry) {
+  if (!state) return;
+  state.externalChanged = {mtime: fileEntryMtime(entry), size: entry?.size ?? null};
+  state.externalReloadDeferred = {mtime: state.externalChanged.mtime, size: state.externalChanged.size, at: Date.now()};
+  delete state.externalChangeEditPrompted;
+  delete state.externalMissing;
+  delete state.externalError;
+  for (const panel of fileEditorPanelsForPath(path)) {
+    updateFileEditorPanelChrome(panel, path);
+    const status = openFileStatus(state);
+    setFileEditorPanelStatus(panel, status.message, status.level);
+  }
 }
 
 async function reloadOpenFileFromDisk(path, options = {}) {
@@ -1673,6 +1777,7 @@ async function refreshOpenFileFromFetchedStatus(path, state, fetched) {
       delete state.externalMissing;
       delete state.externalError;
       if (!state.dirty) delete state.externalChanged;
+      if (!state.dirty) delete state.externalReloadDeferred;
       if (!state.dirty) delete state.externalChangeEditPrompted;
       renderOpenFilePath(path);
     }
@@ -1687,11 +1792,16 @@ async function refreshOpenFileFromFetchedStatus(path, state, fetched) {
       return;
     }
     state.externalChanged = externalChanged;
+    delete state.externalReloadDeferred;
     delete state.externalChangeEditPrompted;
     delete state.externalMissing;
     delete state.externalError;
     clearFileAutosaveTimer(path);
     renderOpenFilePath(path);
+    return;
+  }
+  if (openFileBackgroundReloadShouldDefer(path, state)) {
+    markOpenFileReloadDeferred(path, state, entry);
     return;
   }
   await replaceOpenFileStateFromDisk(path, entry);
@@ -2872,6 +2982,10 @@ function renameOpenFilePath(oldPath, newPath) {
     if (fileEditorViewState.has(oldKey)) {
       fileEditorViewState.set(newKey, fileEditorViewState.get(oldKey));
       fileEditorViewState.delete(oldKey);
+    }
+    if (fileEditorDiffExpandOverrides.has(oldKey)) {
+      fileEditorDiffExpandOverrides.set(newKey, fileEditorDiffExpandOverrides.get(oldKey));
+      fileEditorDiffExpandOverrides.delete(oldKey);
     }
     if (tabLastActivatedAt.has(oldKey)) {
       tabLastActivatedAt.set(newKey, tabLastActivatedAt.get(oldKey));

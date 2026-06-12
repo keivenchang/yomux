@@ -1337,7 +1337,15 @@ class TmuxWebtermApp:
         repo_refs: dict[str, dict[str, str]] | None,
     ) -> None:
         try:
-            payload, status = session_files.session_files_payload(session, infos, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)
+            payload, status = session_files.session_files_payload(
+                session,
+                infos,
+                hours,
+                from_ref=from_ref,
+                to_ref=to_ref,
+                repo_refs=repo_refs,
+                include_cross_session_attribution=not bool(session),
+            )
             self.set_session_files_cache(cache_key, payload, status)
         finally:
             with self.session_files_cache_lock:
@@ -2146,8 +2154,7 @@ class TmuxWebtermApp:
         if session and session not in self.sessions:
             return {"error": f"unknown session: {session}", "session": session}, HTTPStatus.NOT_FOUND
         scope = [session] if session else self.sessions
-        discover_scope = self.sessions if session else scope
-        infos, errors = discover_sessions(discover_scope)
+        infos, errors = discover_sessions(scope)
         cache_key = self.session_files_cache_key("payload", infos, session, hours, from_ref, to_ref, repo_refs)
         max_age = SESSION_FILES_CACHE_SECONDS
         cached = None if force else self.get_session_files_cache(cache_key, max_age_seconds=max_age, allow_stale=True)
@@ -2164,7 +2171,15 @@ class TmuxWebtermApp:
                 refreshing = self.start_session_files_cache_refresh(cache_key, self.refresh_session_files_payload_cache, session, infos, hours, from_ref, to_ref, repo_refs)
                 cache_meta["refreshing"] = refreshing
         else:
-            payload, status = session_files.session_files_payload(session, infos, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)
+            payload, status = session_files.session_files_payload(
+                session,
+                infos,
+                hours,
+                from_ref=from_ref,
+                to_ref=to_ref,
+                repo_refs=repo_refs,
+                include_cross_session_attribution=not bool(session),
+            )
             self.set_session_files_cache(cache_key, payload, status)
             cache_meta = {
                 "hit": False,

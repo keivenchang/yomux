@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import time
 from http import HTTPStatus
 from pathlib import Path
@@ -17,12 +18,19 @@ from .common import git
 from .common import git_ahead_behind_counts
 from .common import is_generated_upload_name
 from .filesystem import git_root_for_path
+from .sessions import find_recent_codex_transcript
+from .sessions import recent_codex_transcript_candidates
 
 
 CLAUDE_EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 CODEX_PATCH_RE = re.compile(r"\*\*\* (Add|Update|Delete) File: ([^\"\\\n]+)")
 CODEX_PATCH_STATUS = {"Add": "A", "Update": "M", "Delete": "D"}
+CODEX_SHELL_TOOL_NAMES = {"exec_command", "shell_command", "shell"}
+SHELL_COMMAND_BREAK_TOKENS = {"&&", "||", ";", "|"}
+SHELL_RUNNERS = {"bash", "sh", "zsh"}
 SESSION_FILES_MAX_HOURS = 24 * 14
+_CODEX_TRANSCRIPT_SCAN_CACHE_MAX = 64
+_CODEX_TRANSCRIPT_SCAN_CACHE: dict[tuple[str, str, bool, float, int], dict[str, set[str]]] = {}
 
 
 def classify_change(markers: set[str]) -> str:
@@ -62,9 +70,10 @@ def file_size(path: Path) -> int | None:
 
 
 def file_mtime_or_fallback(path: Path, fallback: Any = 0.0) -> float:
-    mtime = file_mtime(path)
-    if mtime is not None:
-        return mtime
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        pass
     try:
         return float(fallback) if fallback not in (None, "") else 0.0
     except (TypeError, ValueError):
@@ -102,19 +111,216 @@ def scan_claude_transcript(path: Path, cwd: str | None = None) -> dict[str, set[
     return changes
 
 
-def scan_codex_transcript(path: Path, cwd: str | None = None) -> dict[str, set[str]]:
+def scan_codex_transcript(path: Path, cwd: str | None = None, include_patch_text: bool = True) -> dict[str, set[str]]:
+    cache_key = codex_transcript_scan_cache_key(path, cwd, include_patch_text)
+    if cache_key is not None:
+        cached = _CODEX_TRANSCRIPT_SCAN_CACHE.get(cache_key)
+        if cached is not None:
+            return copy_change_set(cached)
     changes: dict[str, set[str]] = {}
     try:
         with path.open("r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
-                for verb, raw_path in CODEX_PATCH_RE.findall(line):
-                    resolved = resolved_change_path(raw_path, cwd)
-                    if resolved is None:
-                        continue
-                    changes.setdefault(str(resolved), set()).add(CODEX_PATCH_STATUS[verb])
+                if include_patch_text:
+                    for verb, raw_path in CODEX_PATCH_RE.findall(line):
+                        resolved = resolved_change_path(raw_path, cwd)
+                        if resolved is None:
+                            continue
+                        changes.setdefault(str(resolved), set()).add(CODEX_PATCH_STATUS[verb])
+                if not codex_line_may_contain_git_change(line):
+                    continue
+                for path_text, markers in scan_codex_tool_call_changes(line, cwd).items():
+                    changes.setdefault(path_text, set()).update(markers)
     except OSError:
         return changes
+    if cache_key is not None:
+        if len(_CODEX_TRANSCRIPT_SCAN_CACHE) >= _CODEX_TRANSCRIPT_SCAN_CACHE_MAX:
+            _CODEX_TRANSCRIPT_SCAN_CACHE.pop(next(iter(_CODEX_TRANSCRIPT_SCAN_CACHE)))
+        _CODEX_TRANSCRIPT_SCAN_CACHE[cache_key] = copy_change_set(changes)
     return changes
+
+
+def codex_transcript_scan_cache_key(path: Path, cwd: str | None, include_patch_text: bool) -> tuple[str, str, bool, float, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (str(path.expanduser().resolve(strict=False)), str(cwd or ""), bool(include_patch_text), stat.st_mtime, stat.st_size)
+
+
+def copy_change_set(changes: dict[str, set[str]]) -> dict[str, set[str]]:
+    return {path_text: set(markers) for path_text, markers in changes.items()}
+
+
+def codex_line_may_contain_git_change(line: str) -> bool:
+    if "git" not in line:
+        return False
+    return any(token in line for token in (" add ", " rm ", " mv ", " add\\", " rm\\", " mv\\"))
+
+
+def codex_tool_call_arguments(payload: dict[str, Any]) -> dict[str, Any]:
+    arguments = payload.get("arguments")
+    if isinstance(arguments, dict):
+        return arguments
+    if not isinstance(arguments, str) or not arguments.strip():
+        return {}
+    try:
+        parsed = json.loads(arguments)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def scan_codex_tool_call_changes(line: str, cwd: str | None = None) -> dict[str, set[str]]:
+    try:
+        record = json.loads(line)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(record, dict):
+        return {}
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return {}
+    if str(payload.get("type") or "") not in {"function_call", "custom_tool_call"}:
+        return {}
+    if str(payload.get("name") or "") not in CODEX_SHELL_TOOL_NAMES:
+        return {}
+    arguments = codex_tool_call_arguments(payload)
+    command = arguments.get("cmd") or arguments.get("command")
+    if not isinstance(command, str):
+        return {}
+    workdir = arguments.get("workdir")
+    effective_cwd = workdir if isinstance(workdir, str) and workdir else cwd
+    return scan_shell_command_changes(command, effective_cwd)
+
+
+def shell_tokens(command: str) -> list[str]:
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        return list(lexer)
+    except ValueError:
+        return []
+
+
+def scan_shell_command_changes(command: str, cwd: str | None = None) -> dict[str, set[str]]:
+    tokens = shell_tokens(command)
+    if not tokens:
+        return {}
+    changes: dict[str, set[str]] = {}
+    effective_cwd = cwd
+    segment: list[str] = []
+    for token in [*tokens, ";"]:
+        if token in SHELL_COMMAND_BREAK_TOKENS:
+            segment_changes, effective_cwd = scan_shell_command_segment_changes(segment, effective_cwd)
+            for path_text, markers in segment_changes.items():
+                changes.setdefault(path_text, set()).update(markers)
+            segment = []
+            continue
+        segment.append(token)
+    return changes
+
+
+def scan_shell_command_segment_changes(tokens: list[str], cwd: str | None = None) -> tuple[dict[str, set[str]], str | None]:
+    if not tokens:
+        return {}, cwd
+    if tokens[0] == "cd" and len(tokens) >= 2:
+        resolved = resolved_change_path(tokens[1], cwd)
+        return {}, str(resolved) if resolved is not None else cwd
+    inline_command = shell_runner_inline_command(tokens)
+    if inline_command is not None:
+        return scan_shell_command_changes(inline_command, cwd), cwd
+    return scan_git_command_changes(tokens, cwd), cwd
+
+
+def shell_runner_inline_command(tokens: list[str]) -> str | None:
+    if not tokens or Path(tokens[0]).name not in SHELL_RUNNERS:
+        return None
+    for index, token in enumerate(tokens[1:], start=1):
+        if token == "-c" and index + 1 < len(tokens):
+            return tokens[index + 1]
+        if token.startswith("-") and "c" in token and index + 1 < len(tokens):
+            return tokens[index + 1]
+    return None
+
+
+def scan_git_command_changes(tokens: list[str], cwd: str | None = None) -> dict[str, set[str]]:
+    if not tokens or tokens[0] != "git":
+        return {}
+    index = 1
+    effective_cwd = cwd
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "-C" and index + 1 < len(tokens):
+            resolved = resolved_change_path(tokens[index + 1], effective_cwd)
+            effective_cwd = str(resolved) if resolved is not None else tokens[index + 1]
+            index += 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        break
+    if index >= len(tokens):
+        return {}
+    subcommand = tokens[index]
+    if subcommand == "add":
+        return scan_git_path_args(tokens[index + 1 :], effective_cwd, "M")
+    if subcommand == "rm":
+        return scan_git_path_args(tokens[index + 1 :], effective_cwd, "D")
+    if subcommand == "mv":
+        path_args = git_path_args(tokens[index + 1 :])
+        changes: dict[str, set[str]] = {}
+        if len(path_args) >= 1:
+            resolved = resolved_change_path(path_args[0], effective_cwd)
+            if resolved is not None:
+                changes.setdefault(str(resolved), set()).add("D")
+        if len(path_args) >= 2:
+            resolved = resolved_change_path(path_args[-1], effective_cwd)
+            if resolved is not None:
+                changes.setdefault(str(resolved), set()).add("A")
+        return changes
+    return {}
+
+
+def scan_git_path_args(tokens: list[str], cwd: str | None, marker: str) -> dict[str, set[str]]:
+    changes: dict[str, set[str]] = {}
+    for raw_path in git_path_args(tokens):
+        resolved = resolved_change_path(raw_path, cwd)
+        if resolved is None:
+            continue
+        changes.setdefault(str(resolved), set()).add(marker)
+    return changes
+
+
+def git_path_args(tokens: list[str]) -> list[str]:
+    paths: list[str] = []
+    index = 0
+    positional = False
+    options_with_value = {"--pathspec-from-file", "--chmod"}
+    while index < len(tokens):
+        token = tokens[index]
+        if positional:
+            paths.append(token)
+            index += 1
+            continue
+        if token == "--":
+            positional = True
+            index += 1
+            continue
+        if token in SHELL_COMMAND_BREAK_TOKENS:
+            break
+        if token in options_with_value:
+            index += 2
+            continue
+        if token.startswith("--pathspec-from-file=") or token.startswith("--chmod="):
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        paths.append(token)
+        index += 1
+    return paths
 
 
 def scan_agent_changes(agent: AgentInfo) -> dict[str, set[str]]:
@@ -446,7 +652,75 @@ def touched_files_for_info(info: SessionInfo, cutoff: float, errors: list[str] |
                 entry["agents"].append(agent.kind)
             entry["status"] = classify_change(markers)
             entry["mtime"] = max(float(entry.get("mtime") or 0.0), transcript_mtime)
+    for path_text, metadata in historical_codex_changes_for_info(info, cutoff).items():
+        entry = touched.setdefault(path_text, {"agents": [], "status": "", "mtime": 0.0})
+        if "codex" not in entry["agents"]:
+            entry["agents"].append("codex")
+        entry["status"] = str(metadata.get("status") or "M")
+        entry["mtime"] = max(float(entry.get("mtime") or 0.0), float(metadata.get("mtime") or 0.0))
     return touched
+
+
+def historical_codex_changes_for_info(info: SessionInfo, cutoff: float) -> dict[str, dict[str, Any]]:
+    seen = {str(agent.transcript) for agent in info.agents if agent.transcript}
+    changes: dict[str, dict[str, Any]] = {}
+    for cwd in historical_codex_candidate_cwds(info):
+        transcript = historical_codex_transcript_for_cwd(cwd, cutoff)
+        if transcript is None:
+            continue
+        transcript_text = str(transcript)
+        if transcript_text in seen or file_mtime(transcript) < cutoff:
+            continue
+        seen.add(transcript_text)
+        transcript_mtime = file_mtime(transcript)
+        for path_text, markers in scan_codex_transcript(transcript, cwd, include_patch_text=False).items():
+            if not path_is_under_text(path_text, cwd):
+                continue
+            entry = changes.setdefault(path_text, {"status": "", "mtime": 0.0})
+            entry["status"] = classify_change(markers)
+            entry["mtime"] = max(float(entry.get("mtime") or 0.0), transcript_mtime)
+    return changes
+
+
+def historical_codex_transcript_for_cwd(cwd: str, cutoff: float) -> Path | None:
+    candidates: list[Path] = []
+    direct = find_recent_codex_transcript(cwd)
+    if direct is not None:
+        candidates.append(direct)
+    candidates.extend(recent_codex_transcript_candidates())
+    seen: set[str] = set()
+    for transcript in candidates:
+        transcript_text = str(transcript)
+        if transcript_text in seen or file_mtime(transcript) < cutoff:
+            continue
+        seen.add(transcript_text)
+        changes = scan_codex_transcript(transcript, cwd, include_patch_text=False)
+        if any(path_is_under_text(path_text, cwd) for path_text in changes):
+            return transcript
+    return None
+
+
+def path_is_under_text(path_text: str, root_text: str) -> bool:
+    path = Path(path_text).expanduser().resolve(strict=False)
+    root = Path(root_text).expanduser().resolve(strict=False)
+    return path == root or path.is_relative_to(root)
+
+
+def historical_codex_candidate_cwds(info: SessionInfo) -> list[str]:
+    candidates: list[str] = []
+    for agent in info.agents:
+        if agent.cwd:
+            candidates.append(agent.cwd)
+    if info.selected_pane is not None and info.selected_pane.current_path:
+        candidates.append(info.selected_pane.current_path)
+    candidates.extend(pane.current_path for pane in info.panes if pane.current_path)
+    candidates.extend(session_candidate_repo_roots(info))
+    unique: list[str] = []
+    for value in candidates:
+        text = str(value or "").strip()
+        if text and text not in unique:
+            unique.append(text)
+    return unique
 
 
 def agent_attribution_by_path(infos: dict[str, SessionInfo], cutoff: float) -> dict[str, list[str]]:
@@ -621,10 +895,11 @@ def session_files_payload(
     from_ref: str | None = None,
     to_ref: str | None = None,
     repo_refs: dict[str, dict[str, str]] | None = None,
+    include_cross_session_attribution: bool = True,
 ) -> tuple[dict[str, Any], HTTPStatus]:
     now = time.time()
     cutoff = now - bounded_session_files_hours(hours) * 3600
-    attribution = agent_attribution_by_path(infos, cutoff)
+    attribution = agent_attribution_by_path(infos, cutoff) if include_cross_session_attribution else {}
     if session:
         info = infos.get(session)
         if info is None:

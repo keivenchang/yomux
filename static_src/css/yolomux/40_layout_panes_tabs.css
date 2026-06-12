@@ -60,20 +60,21 @@
   border-bottom: 0;
   background: var(--pane-bar-bg, var(--panel2));
   align-items: flex-start;
-  height: auto;
+  height: calc(var(--pane-tab-height) + 2px);
   min-height: calc(var(--pane-tab-height) + 2px);
   overflow: hidden;
 }
 .yolomux-dockview .dv-tabs-container {
   box-sizing: border-box;
   flex: 1 1 auto;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-content: flex-start;
-  height: auto;
+  height: calc(var(--pane-tab-height) + 2px);
   min-height: calc(var(--pane-tab-height) + 2px);
-  max-height: calc((var(--pane-tab-height) + 2px) * 2);
+  max-height: calc(var(--pane-tab-height) + 2px);
   padding-inline-end: var(--dockview-header-actions-reserved-inline-size, 0px);
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
   scrollbar-width: none;
 }
 .yolomux-dockview .dv-tabs-container::-webkit-scrollbar {
@@ -220,7 +221,7 @@
   bottom: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
 }
 .yolomux-dockview .dv-tab {
-  flex: 0 0 min(var(--dockview-tab-inline-size, var(--pane-tab-width)), 100%);
+  flex: 0 0 var(--dockview-tab-inline-size, var(--pane-tab-width));
   width: var(--dockview-tab-inline-size, var(--pane-tab-width));
   max-width: var(--dockview-tab-inline-size, var(--pane-tab-width));
   min-width: 0;

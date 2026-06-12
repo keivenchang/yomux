@@ -111,6 +111,44 @@ function clientSessionFilesWatchRequests() {
   }];
 }
 
+function normalizedSessionFilesRepoRefs(repoRefs) {
+  if (!repoRefs || typeof repoRefs !== 'object' || Array.isArray(repoRefs)) return {};
+  const normalized = {};
+  for (const repo of Object.keys(repoRefs).sort()) {
+    const refs = repoRefs[repo];
+    if (!refs || typeof refs !== 'object' || Array.isArray(refs)) continue;
+    const from = cleanDiffRef(refs.from || refs.from_ref || '', '');
+    const to = cleanDiffRef(refs.to || refs.to_ref || '', '');
+    if (!from && !to) continue;
+    normalized[repo] = {from: from || 'HEAD', to: to || 'current'};
+  }
+  return normalized;
+}
+
+function normalizedSessionFilesRequest(request = {}, sessionFallback = '') {
+  const from = cleanDiffRef(request.from_ref || request.from || '', 'HEAD');
+  const to = cleanDiffRef(request.to_ref || request.to || '', 'current');
+  const hoursValue = Number(request.hours || 24);
+  return {
+    session: String(request.session || sessionFallback || ''),
+    hours: Number.isFinite(hoursValue) ? hoursValue : 24,
+    from_ref: from,
+    to_ref: to,
+    repo_refs: normalizedSessionFilesRepoRefs(request.repo_refs),
+  };
+}
+
+function sessionFilesRequestKey(request = {}, sessionFallback = '') {
+  const normalized = normalizedSessionFilesRequest(request, sessionFallback);
+  return JSON.stringify(normalized);
+}
+
+function sessionFilesPushRequestMatchesCurrent(request = {}, session = '') {
+  if (!request || typeof request !== 'object') return false;
+  const current = clientSessionFilesWatchRequests()[0] || {};
+  return sessionFilesRequestKey(request, session) === sessionFilesRequestKey(current, session);
+}
+
 function sessionFilesCacheKey(session) {
   return `${String(session || '')}\x1f${sessionFilesRequestQueryString()}`;
 }
@@ -783,6 +821,7 @@ function applySessionFilesPayloadFromPush(payload = {}, request = {}) {
   const destination = 'finder';
   const session = payload.session || request.session || fileExplorerSessionFilesTargetSession();
   if (!session || session !== fileExplorerSessionFilesTargetSession()) return false;
+  if (!sessionFilesPushRequestMatchesCurrent(request, session)) return false;
   const nextPayload = {
     session,
     files: Array.isArray(payload.files) ? payload.files : [],
@@ -886,20 +925,6 @@ function groupedSessionFiles(files) {
     groups.get(repo).push(item);
   }
   return Array.from(groups.entries());
-}
-
-function splitUploadedSessionFiles(files) {
-  const regular = [];
-  const uploaded = [];
-  for (const item of sortedSessionFiles(files)) {
-    if (item?.uploaded === true) uploaded.push(item);
-    else regular.push(item);
-  }
-  return {regular, uploaded};
-}
-
-function writeStoredUploadedFilesCollapsed() {
-  storageSet(uploadedFilesCollapsedStorageKey, uploadedFilesCollapsed ? '1' : '0');
 }
 
 function writeStoredChangesFolderCollapsed() {
@@ -1204,10 +1229,23 @@ function buildSessionFileTree(repoPath, sessionFiles) {
   return {entries: topLevel, entriesByDir, sessionFilesMap};
 }
 
+function initializeDefaultCollapsedChangesFolders(entriesByDir) {
+  for (const [directory, entries] of entriesByDir.entries()) {
+    for (const entry of entries || []) {
+      if (entry?.kind !== 'dir' || entry.name !== '.uploads') continue;
+      const fullPath = normalizeDirectoryPath(directory === '/' ? `/${entry.name}` : `${directory}/${entry.name}`);
+      if (!fullPath || changesFolderAutoCollapsed.has(fullPath)) continue;
+      changesFolderAutoCollapsed.add(fullPath);
+      changesFolderCollapsed.add(fullPath);
+    }
+  }
+}
+
 // Render changed files for one repo section using the shared file-tree renderer.
 function renderChangedFileList(container, repoPath, sessionFiles, options = {}) {
   const treeRoot = repoPath === 'Outside repo' ? '/' : repoPath;
   const {entries, entriesByDir, sessionFilesMap} = buildSessionFileTree(treeRoot, sessionFiles);
+  initializeDefaultCollapsedChangesFolders(entriesByDir);
   renderTreeChildren(container, treeRoot, entries, 0, {
     entriesByDir,
     sessionFilesMap,
@@ -1217,56 +1255,6 @@ function renderChangedFileList(container, repoPath, sessionFiles, options = {}) 
     treeSortMode: normalizeSessionFilesSortMode(sessionFilesSortMode),
     includeHidden: true,
   });
-}
-
-function uploadedFileRepoRoot(item) {
-  const repo = item?.repo || '';
-  if (repo && repo !== 'Outside repo') return repo;
-  const absPath = item?.abs_path || item?.path || '';
-  return dirnameOf(absPath);
-}
-
-function uploadedFileForRepoRoot(item, repoPath) {
-  const absPath = item?.abs_path || (repoPath && item?.path ? `${repoPath}/${item.path}` : item?.path || '');
-  const relPath = item?.path || (absPath && repoPath && absPath.startsWith(repoPath + '/') ? absPath.slice(repoPath.length + 1) : basenameOf(absPath));
-  return {
-    ...item,
-    repo: repoPath,
-    path: relPath,
-    abs_path: absPath,
-  };
-}
-
-function renderUploadedFileList(container, uploadedFiles, options = {}) {
-  const groups = new Map();
-  for (const item of uploadedFiles || []) {
-    const repoPath = uploadedFileRepoRoot(item);
-    if (!groups.has(repoPath)) groups.set(repoPath, []);
-    groups.get(repoPath).push(uploadedFileForRepoRoot(item, repoPath));
-  }
-  const groupedFiles = Array.from(groups.entries());
-  if (groupedFiles.length <= 1) {
-    const [repoPath, files] = groupedFiles[0] || ['', []];
-    renderChangedFileList(container, repoPath, files, options);
-    return;
-  }
-  const existing = new Map();
-  for (const child of container.children || []) {
-    const key = child.dataset?.uploadedRepo;
-    if (key) existing.set(key, child);
-  }
-  const nextNodes = [];
-  for (const [repoPath, files] of groupedFiles) {
-    let repoList = existing.get(repoPath);
-    if (!repoList) {
-      repoList = document.createElement('div');
-      repoList.className = 'changes-uploaded-repo-list';
-      repoList.dataset.uploadedRepo = repoPath;
-    }
-    renderChangedFileList(repoList, repoPath, files, options);
-    nextNodes.push(repoList);
-  }
-  reconcileChildNodes(container, nextNodes);
 }
 
 // C5: a changed file can be touched by 0, 1, or several agents. Render an icon per agent from item.agents
@@ -1294,7 +1282,7 @@ function changeFileAgentsHtml(item) {
 // Replaces changesRepoGroupsHtml — incrementally updates sections rather than replacing innerHTML.
 function renderChangesGroups(groupsEl, files, options = {}) {
   if (!groupsEl) return;
-  const {regular, uploaded} = splitUploadedSessionFiles(files);
+  const regular = sortedSessionFiles(files);
   const payload = options.payload || {};
   const repoMap = repoPayloadByPath(payload);
   const groups = new Map(groupedSessionFiles(regular));
@@ -1368,38 +1356,6 @@ function renderChangesGroups(groupsEl, files, options = {}) {
       fileList.hidden = true;
     }
     nextNodes.push(section);
-  }
-  if (uploaded.length) {
-    let uploadedSection = existing.get('__uploaded__');
-    if (!uploadedSection) {
-      uploadedSection = document.createElement('section');
-      uploadedSection.className = 'changes-repo-group changes-uploaded-group';
-      uploadedSection.dataset.changesRepo = '__uploaded__';
-    }
-    let head = uploadedSection.querySelector(':scope > .changes-uploaded-toggle');
-    if (!head) {
-      head = document.createElement('button');
-      head.type = 'button';
-      head.className = 'changes-repo-head changes-uploaded-toggle';
-      head.dataset.uploadedFilesToggle = '';
-      uploadedSection.prepend(head);
-    }
-    head.setAttribute('aria-expanded', uploadedFilesCollapsed ? 'false' : 'true');
-    head.innerHTML = `<span><span class="changes-uploaded-caret">${uploadedFilesCollapsed ? '▸' : '▾'}</span> ${esc(t('changes.uploaded', {count: uploaded.length}))}</span><span>${uploadedFilesCollapsed ? esc(t('changes.collapsed')) : uploaded.length}</span>`;
-    let fileList = uploadedSection.querySelector(':scope > .changes-file-list');
-    if (!uploadedFilesCollapsed) {
-      if (!fileList) {
-        fileList = document.createElement('div');
-        fileList.className = 'changes-file-list';
-        uploadedSection.append(fileList);
-      }
-      fileList.hidden = false;
-      renderUploadedFileList(fileList, uploaded, {compact});
-    } else if (fileList) {
-      fileList.hidden = true;
-    }
-    uploadedSection.classList.toggle('collapsed', uploadedFilesCollapsed);
-    nextNodes.push(uploadedSection);
   }
   reconcileChildNodes(groupsEl, nextNodes);
 }
@@ -1663,15 +1619,16 @@ function renderChangesRoot(root, staticHtml, files, groupOptions = {}, options =
 function activeChangesControl(panel) {
   const active = document.activeElement;
   if (!active || !panel?.contains(active)) return null;
-  return active.closest?.('[data-session-files-session], [data-session-files-sort], [data-diff-ref-from], [data-diff-ref-to], [data-session-files-refresh], [data-file-explorer-tree-dates], [data-file-tree-expand-collapse-all], [data-uploaded-files-toggle], [data-changes-folder-toggle], [data-changes-repo-toggle]') || null;
+  return active.closest?.('[data-session-files-session], [data-session-files-sort], [data-diff-ref-from], [data-diff-ref-to], [data-session-files-refresh], [data-file-explorer-tree-dates], [data-file-tree-expand-collapse-all], [data-changes-folder-toggle], [data-changes-repo-toggle]') || null;
 }
 
-async function openChangedFileInDiff(path, ownerSession = '', status = '', repo = '') {
-  const item = fileEditorItemFor(path);
+async function openChangedFileInDiff(path, ownerSession = '', status = '', repo = '', options = {}) {
+  const item = options.item
+    || (options.forceNewTab === true ? fileEditorCopyItemFor(path) : reusableFileEditorDiffPreviewItem(path));
   const normalizedStatus = String(status || '').toUpperCase();
-  const isAddedChange = normalizedStatus === 'A' || normalizedStatus === 'U' || normalizedStatus === '?';
-  const isTouchedOnly = normalizedStatus === 'T';
-  const initialMode = isAddedChange || isTouchedOnly ? 'edit' : 'diff';
+  const openDiffMode = options.openMode !== 'edit';
+  if (openDiffMode) setFileEditorDiffExpandUnchangedForItem(path, item, false);
+  const initialMode = openDiffMode ? 'diff' : 'edit';
   setFileEditorViewMode(path, initialMode, item);
   // Use the payload's own FROM/TO for this file's repo so the diff matches what the panel shows,
   // even when the repo is not in diffRefsByRepo (e.g. a repo outside the active session's checkout).
@@ -1683,6 +1640,16 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '', repo 
     return {};
   })();
   noteFileExplorerChangesSessionInteraction(ownerSession);
+  const openOptions = {
+    item,
+    ownerSession,
+    viewMode: initialMode,
+    forceNewTab: options.forceNewTab === true,
+    userInitiated: options.userInitiated !== false,
+  };
+  const targetSlot = options.targetSlot || (options.userInitiated === false ? '' : fileEditorActivationSlot());
+  if (targetSlot) openOptions.targetSlot = targetSlot;
+  if (options.targetZone) openOptions.targetZone = options.targetZone;
   if (normalizedStatus === 'D') {
     await openFilesSetAndShow(path, {
       mtime: 0,
@@ -1693,14 +1660,28 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '', repo 
       dirty: false,
       deleted: true,
       gitTracked: true,
-    }, {item, ownerSession});
+    }, openOptions);
   } else {
-    await openFileInEditor(path, {name: basenameOf(path), session: ownerSession}, {item, ownerSession, viewMode: initialMode});
+    await openFileInEditor(path, {name: basenameOf(path), session: ownerSession}, openOptions);
   }
-  const diffReady = await refreshOpenFileDiff(path, {silent: true, ...payloadRepoRefs});
-  if (diffReady && !isAddedChange && !isTouchedOnly) setFileEditorViewMode(path, 'diff', item);
-  if (!diffReady && (isAddedChange || isTouchedOnly)) setFileEditorViewMode(path, 'edit', item);
+  if (!openDiffMode) {
+    renderOpenFilePath(path);
+    void refreshOpenFileDiff(path, {silent: true, renderOnComplete: false, ...payloadRepoRefs});
+    return;
+  }
+  const diffReady = await refreshOpenFileDiff(path, {silent: true, renderOnComplete: false, ...payloadRepoRefs});
+  const current = openFiles.get(path);
+  if (diffReady && fileStateCanRenderDiffView(path, current)) {
+    setFileEditorViewMode(path, 'diff', item);
+  } else {
+    setFileEditorViewMode(path, 'edit', item);
+  }
   renderOpenFilePath(path);
+  if (!diffReady || !fileStateCanRenderDiffView(path, current)) {
+    const reason = current?.diffError || (current?.kind !== 'text' ? 'not a text file' : 'no git diff or useful history for this file');
+    const panel = panelNodes.get(item);
+    if (panel) setFileEditorPanelStatus(panel, `diff unavailable: ${reason}`, 'warn');
+  }
 }
 
 // the diff-ref Escape-revert and picker-open were written twice — once for the changes panel
@@ -1796,14 +1777,6 @@ function bindChangesPanel(panel) {
       toggleAllFileExplorerChanges();
       return;
     }
-    const uploadedToggle = event.target.closest('[data-uploaded-files-toggle]');
-    if (uploadedToggle && panel.contains(uploadedToggle)) {
-      event.preventDefault();
-      uploadedFilesCollapsed = !uploadedFilesCollapsed;
-      writeStoredUploadedFilesCollapsed();
-      renderFileExplorerChangesPanels({force: true});
-      return;
-    }
     const repoToggle = event.target.closest('[data-changes-repo-toggle]');
     if (repoToggle && panel.contains(repoToggle)) {
       event.preventDefault();
@@ -1863,29 +1836,45 @@ function bindChangesPanel(panel) {
     stopCustomDragPreview();
     clearDropPreview();
   });
-  panel.addEventListener('dblclick', async event => {
+  // Single-click opens the row in the active editor pane. Modifier clicks keep the shared Finder-style
+  // multi-select behavior without opening a diff.
+  panel.addEventListener('click', async event => {
     const fileRow = event.target.closest('[data-open-change-file]');
     if (!fileRow || !panel.contains(fileRow)) return;
-    event.preventDefault();
+    const selectionOnly = updateFileTreeSelectionFromClick(fileRow, fileRow.dataset.path || fileRow.dataset.openChangeFile || '', event);
+    if (selectionOnly) return;
     const path = fileRow.dataset.openChangeFile;
-    if (path) {
-      const ownerSession = fileRow.dataset.openChangeSession || '';
-      await openChangedFileInDiff(path, ownerSession, fileRow.dataset.openChangeStatus || '', fileRow.dataset.openChangeRepo || '');
-    }
-  });
-  // C5: single-click selects/highlights a Modified-files row (Finder-like), without opening it — the
-  // toggle/refresh handler above runs first and returns on its own targets, so this only fires for rows.
-  panel.addEventListener('click', event => {
-    const fileRow = event.target.closest('[data-open-change-file]');
-    if (!fileRow || !panel.contains(fileRow)) return;
-    updateFileTreeSelectionFromClick(fileRow, fileRow.dataset.path || fileRow.dataset.openChangeFile || '', event);
+    if (!path) return;
+    event.preventDefault();
+    await openChangedFileInDiff(path, fileRow.dataset.openChangeSession || '', fileRow.dataset.openChangeStatus || '', fileRow.dataset.openChangeRepo || '', {userInitiated: true});
   });
   panel.addEventListener('contextmenu', event => {
     const fileRow = event.target.closest('[data-open-change-file]');
     if (fileRow && panel.contains(fileRow)) {
       event.preventDefault();
       const path = fileRow.dataset.path || fileRow.dataset.openChangeFile || '';
-      showFileTreeContextMenu(fileRow, path, changedFileRowEntry(fileRow), event.clientX, event.clientY);
+      showFileTreeContextMenu(fileRow, path, changedFileRowEntry(fileRow), event.clientX, event.clientY, {
+        openInNewTabActions: [
+          {
+            label: t('contextmenu.openNewDiffEditor'),
+            action: () => openChangedFileInDiff(
+              path,
+              fileRow.dataset.openChangeSession || '',
+              fileRow.dataset.openChangeStatus || '',
+              fileRow.dataset.openChangeRepo || '',
+              {forceNewTab: true, userInitiated: true, openMode: 'diff'},
+            ),
+          },
+          {
+            label: t('contextmenu.openNewEditor'),
+            action: () => openFileInAdditionalEditorTab(path, changedFileRowEntry(fileRow), {
+              targetSlot: fileEditorActivationSlot(),
+              userInitiated: true,
+              viewMode: 'edit',
+            }),
+          },
+        ],
+      });
       return;
     }
     const directoryRow = event.target.closest('[data-open-change-directory]');
@@ -2420,6 +2409,10 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
   const dirty = state.content !== state.original;
   const dirtyChanged = dirty !== state.dirty;
   state.dirty = dirty;
+  if (dirtyChanged) {
+    if (dirty) delete state.lastCleanAt;
+    else state.lastCleanAt = Date.now();
+  }
   updateFileEditorPanelChrome(panel, path);
   const status = openFileStatus(state);
   setFileEditorPanelStatus(panel, status.message, status.level);
@@ -2494,7 +2487,7 @@ function createFileEditorPanel(item) {
         <div class="file-editor-toolbar-zone file-editor-toolbar-left">
           <button type="button" class="file-editor-gutter-panel" title="${esc(t('editor.toggleLineNumbers'))}" aria-label="${esc(t('editor.toggleLineNumbers'))}" hidden>#</button>
           <button type="button" class="file-editor-diff-panel" title="${esc(t('editor.diff'))}" aria-label="${esc(t('editor.diff'))}" hidden>Differ</button>
-          <button type="button" class="file-editor-diff-expand-panel" title="${esc(t('editor.diffExpand'))}" aria-label="${esc(t('editor.diffExpand'))}" aria-pressed="${diffExpandUnchanged ? 'true' : 'false'}" hidden>↕</button>
+          <button type="button" class="file-editor-diff-expand-panel" title="${esc(t('editor.diffExpand'))}" aria-label="${esc(t('editor.diffExpand'))}" aria-pressed="${fileEditorDiffExpandUnchangedForItem(item) ? 'true' : 'false'}" hidden>↕</button>
           <span class="file-editor-diff-ref-panel" hidden>${diffRefControlsHtml({compact: true})}</span>
         </div>
         <div class="file-editor-toolbar-zone file-editor-toolbar-center">
@@ -2604,7 +2597,7 @@ function createFileEditorPanel(item) {
   panel.querySelector('.file-editor-diff-expand-panel')?.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
-    toggleDiffExpandUnchanged();  // B4: show all context vs collapse unchanged runs (persisted, rebuilds the diff)
+    toggleFileEditorDiffExpandUnchangedForItem(path, item);  // show all context vs collapse unchanged runs for this editor
   });
   const diffRefPanel = panel.querySelector('.file-editor-diff-ref-panel');
   diffRefPanel?.addEventListener('change', event => {
@@ -2866,15 +2859,24 @@ function restoreFileEditorPanelViewState(item, panel) {
   } catch (_) {
     try { view.dispatch({selection: {anchor, head}}); } catch (_) {}
   }
+  const targetTop = Number(state.scrollTop || 0);
+  const targetLeft = Number(state.scrollLeft || 0);
+  const scrollStillAtTarget = () => (
+    Math.abs(Number(scrollDOM.scrollTop || 0) - targetTop) <= 1
+    && Math.abs(Number(scrollDOM.scrollLeft || 0) - targetLeft) <= 1
+  );
   const restore = () => {
-    scrollDOM.scrollTop = Number(state.scrollTop || 0);
-    scrollDOM.scrollLeft = Number(state.scrollLeft || 0);
+    scrollDOM.scrollTop = targetTop;
+    scrollDOM.scrollLeft = targetLeft;
   };
-  const measuredRestore = () => {
+  const measuredRestore = (guardUserScroll = false) => {
+    if (guardUserScroll && !scrollStillAtTarget()) return;
     if (typeof view.requestMeasure === 'function') {
       view.requestMeasure({
         read: () => null,
-        write: restore,
+        write: () => {
+          if (!guardUserScroll || scrollStillAtTarget()) restore();
+        },
       });
       return;
     }
@@ -2882,6 +2884,6 @@ function restoreFileEditorPanelViewState(item, panel) {
   };
   restore();
   measuredRestore();
-  requestAnimationFrame(measuredRestore);
-  requestAnimationFrame(() => requestAnimationFrame(measuredRestore));
+  requestAnimationFrame(() => measuredRestore(true));
+  requestAnimationFrame(() => requestAnimationFrame(() => measuredRestore(true)));
 }

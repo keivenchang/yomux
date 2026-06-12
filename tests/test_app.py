@@ -543,7 +543,7 @@ def test_session_files_payload_reuses_short_cache(monkeypatch):
 
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
 
-    def fake_session_files_payload(session, infos, hours, from_ref=None, to_ref=None, repo_refs=None):
+    def fake_session_files_payload(session, infos, hours, from_ref=None, to_ref=None, repo_refs=None, **_kwargs):
         calls.append((session, tuple(infos), hours, from_ref, to_ref, repo_refs))
         return {"session": session, "files": [], "repos": [], "errors": []}, HTTPStatus.OK
 
@@ -572,7 +572,7 @@ def test_session_files_payload_returns_stale_cache_and_refreshes(monkeypatch):
 
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
 
-    def fake_session_files_payload(session, infos, hours, from_ref=None, to_ref=None, repo_refs=None):
+    def fake_session_files_payload(session, infos, hours, from_ref=None, to_ref=None, repo_refs=None, **_kwargs):
         calls.append(len(calls) + 1)
         return {"session": session, "files": [{"path": f"file-{calls[-1]}.txt"}], "repos": [], "errors": []}, HTTPStatus.OK
 

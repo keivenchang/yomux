@@ -43,6 +43,8 @@
   "conflict.onDisk": "डिस्क पर",
   "conflict.unsaved": "Unsaved editor",
   "contextmenu.copyUrl": "URL कॉपी करें",
+  "contextmenu.openNewDiffEditor": "Open in a new Diff Editor",
+  "contextmenu.openNewEditor": "Open in a new Editor",
   "contextmenu.openUrl": "URL खोलें",
   "debug.apiCalls": "API calls",
   "debug.clear": "Clear",

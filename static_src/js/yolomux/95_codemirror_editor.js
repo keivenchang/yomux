@@ -653,7 +653,7 @@ function updateCodeMirrorDiffOverview(panel, container, state, currentText, orig
   if (panel) panel._diffOverviewCtx = {container, state, currentText, original};
   container?.querySelector?.('.cm-diff-overview')?.remove();
   panel?._diffOverviewViewportCleanup?.();
-  if (!diffExpandUnchanged) return;
+  if (!fileEditorDiffExpandUnchangedForItem(fileEditorPanelItem(panel))) return;
   const view = panel?._cmView;
   const scrollTarget = codeMirrorDiffOverviewScrollTarget(view, container);
   const currentLineCount = Math.max(String(currentText || '').split('\n').length, 1);
@@ -780,7 +780,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
     await refreshOpenFileDiff(path, {silent: true, renderOnComplete: false});
     if (panel._cmGeneration !== generation) return null;
   }
-  if (!openFileDiffAvailable(state)) {
+  if (!fileStateCanRenderDiffView(path, state)) {
     if (state.diffUnavailable) {
       const msg = `diff unavailable: ${state.diffError || 'unknown error'}`;
       setFileEditorPanelStatus(panel, msg, 'warn');
@@ -797,10 +797,11 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
       return false;
     }
     const layout = codeMirrorDiffLayout(container);
+    const expandUnchanged = fileEditorDiffExpandUnchangedForItem(item);
     const diffTargetIsCurrent = !state.diffToRef || state.diffToRef === 'current';
     const currentText = diffTargetIsCurrent ? String(state.content || '') : String(state.diffWorking || '');
     const diffEditsAllowed = diffTargetIsCurrent;
-    const signature = codeMirrorConfigSignature(path, {mode: 'diff', layout, original, from: state.diffFromRef, to: state.diffToRef, expand: diffExpandUnchanged});
+    const signature = codeMirrorConfigSignature(path, {mode: 'diff', layout, original, from: state.diffFromRef, to: state.diffToRef, expand: expandUnchanged});
     installCodeMirrorDiffCollapsedScrollGuard(panel, container);
     if (panel._cmView && panel._cmMode === 'diff' && panel._cmSignature === signature) {
       installCodeMirrorDiffResizeObserver(panel, item, path, container);
@@ -857,7 +858,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
         highlightChanges: false,
         gutter: true,
         // B4: expand-all omits collapseUnchanged so every unchanged line shows; else collapse the runs.
-        ...(diffExpandUnchanged ? {} : {collapseUnchanged: {margin: 3, minSize: 8}}),
+        ...(expandUnchanged ? {} : {collapseUnchanged: {margin: 3, minSize: 8}}),
       });
       panel._cmView = panel._cmMergeView.b;
       trackCodeMirrorThemeViews(panel, api, [panel._cmMergeView.a, panel._cmMergeView.b]);
@@ -873,7 +874,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
         gutter: true,
         mergeControls: !readOnlyMode && diffEditsAllowed,
         // B4: expand-all omits collapseUnchanged so every unchanged line shows; else collapse the runs.
-        ...(diffExpandUnchanged ? {} : {collapseUnchanged: {margin: 3, minSize: 8}}),
+        ...(expandUnchanged ? {} : {collapseUnchanged: {margin: 3, minSize: 8}}),
       };
       const unifiedDiffExtensions = (plain = false) => [
         api.unifiedMergeView(unifiedMergeOptions),
@@ -1026,8 +1027,7 @@ function diffModeShouldFallBackToEdit(path, state, item = null) {
     && (!fileStateHasRepo(path, state)
       || (state.diffLoaded === true
         && !state.diffLoading
-        && !openFileDiffAvailable(state)
-        && !fileStateHasUsefulGitHistory(state)));
+        && !fileStateCanRenderDiffView(path, state)));
 }
 
 function renderFileEditorPanelShouldCaptureViewState(options = {}) {
@@ -3024,6 +3024,7 @@ async function saveFileEditor(path, panel, options = {}) {
     state.size = payload.size;
     state.original = state.content;
     state.dirty = false;
+    state.lastCleanAt = Date.now();
     clearFileAutosaveTimer(path);
     clearOpenFileExternalState(state);
     if (payload.yolo_rules) {

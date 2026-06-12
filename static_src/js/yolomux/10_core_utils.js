@@ -836,7 +836,9 @@ function recordFocusNavTransition(previousItem, nextItem) {
 }
 
 function rememberActivePaneItem(item) {
-  if (item && itemIsActivePaneTab(item)) lastActivePaneItem = item;
+  if (!item || !itemIsActivePaneTab(item)) return;
+  lastActivePaneItem = item;
+  if (!isFileExplorerItem(item)) lastActiveNonFileExplorerPaneItem = item;
 }
 
 function visualActivePaneItem() {
@@ -952,6 +954,7 @@ function clearFocusForInactiveLayout() {
   if (focusedTerminal && !activeSessions.includes(focusedTerminal)) focusedTerminal = null;
   if (focusedPanelItem && !activeSessions.includes(focusedPanelItem)) focusedPanelItem = null;
   if (lastActivePaneItem && !itemIsActivePaneTab(lastActivePaneItem)) lastActivePaneItem = null;
+  if (lastActiveNonFileExplorerPaneItem && !itemIsActivePaneTab(lastActiveNonFileExplorerPaneItem)) lastActiveNonFileExplorerPaneItem = null;
   if (lastFocusedTmuxSession && !activeSessions.includes(lastFocusedTmuxSession)) lastFocusedTmuxSession = null;
 }
 
@@ -1157,6 +1160,7 @@ function stripTerminalQueryResponses(data) {
 }
 
 const terminalLinkPattern = /(?:https?:\/\/|file:\/\/|www\.)[^\s<>"'`]+/gi;
+const terminalWrappedUrlMaxRows = 8;
 const terminalLinkClosePairs = [
   [')', '('],
   [']', '['],
@@ -1248,7 +1252,7 @@ function terminalBufferLineText(line) {
 // clipped URL and must not absorb the indented next row. cols<=0 (unknown width) → treat as not clipped.
 function terminalRowReachesRightEdge(line, cols) {
   if (!Number.isFinite(cols) || cols <= 0) return false;
-  return terminalBufferLineText(line).length >= cols;
+  return terminalBufferLineText(line).length >= Math.max(1, cols - 1);
 }
 
 // does the joined group text end mid-URL? True when the LAST url token reaches the very end of
@@ -1263,16 +1267,22 @@ function terminalTailIsUnterminatedUrl(text) {
   return last.index + last[0].length === text.length;
 }
 
-// a row shaped like a hanging-indent continuation — leading whitespace, then a URL-valid char
+function terminalRowStartsNewUrlToken(text) {
+  return /^(?:https?:\/\/|file:\/\/|www\.)/i.test(String(text || ''));
+}
+
+// a row shaped like a hanging-indent continuation — optional leading whitespace, then a URL-valid char
 // (not a quote/bracket). Returns {indent, text} with the indent stripped, or null. isWrapped rows are
 // not hanging continuations (they are real terminal soft-wraps and are handled by the isWrapped sweep).
 function terminalRowHangingShape(buffer, index) {
   const line = buffer.getLine(index);
   if (!line || line.isWrapped === true) return null;
   const raw = terminalBufferLineText(line);
-  const match = /^(\s+)([^\s<>"'`])/.exec(raw);
+  const match = /^(\s*)([^\s<>"'`])/.exec(raw);
   if (!match) return null;
-  return {indent: match[1].length, text: raw.slice(match[1].length)};
+  const text = raw.slice(match[1].length);
+  if (!text || terminalRowStartsNewUrlToken(text)) return null;
+  return {indent: match[1].length, text};
 }
 
 // row `index` continues the URL printed on row `index - 1` — its own row shape is a hanging
@@ -1280,12 +1290,15 @@ function terminalRowHangingShape(buffer, index) {
 // prose under a line that merely happens to end at a URL is not merged.
 // ALSO require the previous row to reach the terminal's right edge, proving the URL was
 // clipped/hard-wrapped. Without this, a complete URL at end-of-line falsely swallows the next row.
-function terminalRowIsHangingUrlContinuation(buffer, index, cols) {
-  if (!terminalRowHangingShape(buffer, index)) return false;
+function terminalRowIsHangingUrlContinuation(buffer, index, cols, depth = 0) {
+  if (depth >= terminalWrappedUrlMaxRows) return false;
+  const shape = terminalRowHangingShape(buffer, index);
+  if (!shape) return false;
   const prev = buffer.getLine(index - 1);
   if (!prev) return false;
   if (!terminalRowReachesRightEdge(prev, cols)) return false;
-  return terminalTailIsUnterminatedUrl(terminalBufferLineText(prev));
+  return terminalTailIsUnterminatedUrl(terminalBufferLineText(prev))
+    || terminalRowIsHangingUrlContinuation(buffer, index - 1, cols, depth + 1);
 }
 
 function terminalWrappedLineGroup(term, y) {
@@ -1330,6 +1343,7 @@ function terminalWrappedLineGroup(term, y) {
     offset += text.length;
     joined += text;
     index += 1;
+    if (rows.length >= terminalWrappedUrlMaxRows) break;
     if (!buffer.getLine(index)) break;
   }
   return {text: joined, rows};

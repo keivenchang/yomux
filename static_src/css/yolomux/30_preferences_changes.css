@@ -364,7 +364,6 @@
   background: var(--panel);
 }
 .changes-repo-head {
-  /* now a collapse toggle (button), mirroring .changes-uploaded-toggle. */
   width: 100%;
   display: flex;
   align-items: center;
@@ -435,20 +434,6 @@
 }
 .changes-repo-refs .diff-ref-controls {
   margin-inline-start: 0;
-}
-.changes-uploaded-toggle {
-  width: 100%;
-  border: 0;
-  cursor: pointer;
-  text-align: start;
-}
-.changes-uploaded-toggle:hover,
-.changes-uploaded-toggle:focus-visible {
-  color: var(--active-control-bg);
-}
-.changes-uploaded-caret {
-  display: inline-block;
-  width: 12px;
 }
 .changes-file-list {
   display: grid;

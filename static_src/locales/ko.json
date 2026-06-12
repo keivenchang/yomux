@@ -43,6 +43,8 @@
   "conflict.onDisk": "디스크에 있는 내용",
   "conflict.unsaved": "미저장 에디터",
   "contextmenu.copyUrl": "URL 복사",
+  "contextmenu.openNewDiffEditor": "Open in a new Diff Editor",
+  "contextmenu.openNewEditor": "Open in a new Editor",
   "contextmenu.openUrl": "URL 열기",
   "debug.apiCalls": "API calls",
   "debug.clear": "Clear",

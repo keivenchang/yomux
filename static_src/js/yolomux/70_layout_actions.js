@@ -306,10 +306,17 @@ function focusedActivationSlot() {
   return slot && !slotIsFileExplorerPane(slot) ? slot : null;
 }
 
+function fileEditorActivationSlot() {
+  const focusedSlot = focusedActivationSlot();
+  if (focusedSlot) return focusedSlot;
+  const previousSlot = lastActiveNonFileExplorerPaneItem ? slotForSession(lastActiveNonFileExplorerPaneItem) : null;
+  return previousSlot && !slotIsFileExplorerPane(previousSlot) ? previousSlot : null;
+}
+
 function slotForTabActivation(item) {
   const currentSlot = slotForSession(item);
   if (currentSlot) return currentSlot;
-  return focusedActivationSlot() || largestNonFileExplorerPaneSlot() || firstEmptyPane() || largestPaneSlot() || slotForNewSession();
+  return fileEditorActivationSlot() || largestNonFileExplorerPaneSlot() || firstEmptyPane() || largestPaneSlot() || slotForNewSession();
 }
 
 async function activateTabInExistingPane(item) {

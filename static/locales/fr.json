@@ -43,6 +43,8 @@
   "conflict.onDisk": "Sur le disque",
   "conflict.unsaved": "Éditeur non enregistré",
   "contextmenu.copyUrl": "Copier l'URL",
+  "contextmenu.openNewDiffEditor": "Open in a new Diff Editor",
+  "contextmenu.openNewEditor": "Open in a new Editor",
   "contextmenu.openUrl": "Ouvrir l'URL",
   "debug.apiCalls": "API calls",
   "debug.clear": "Clear",

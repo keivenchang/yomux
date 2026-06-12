@@ -43,6 +43,8 @@
   "conflict.onDisk": "Trên đĩa",
   "conflict.unsaved": "Trình soạn thảo chưa lưu",
   "contextmenu.copyUrl": "Sao chép URL",
+  "contextmenu.openNewDiffEditor": "Open in a new Diff Editor",
+  "contextmenu.openNewEditor": "Open in a new Editor",
   "contextmenu.openUrl": "Mở URL",
   "debug.apiCalls": "API calls",
   "debug.clear": "Xóa",

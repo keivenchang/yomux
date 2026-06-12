@@ -43,6 +43,8 @@
   "conflict.onDisk": "磁盘上的版本",
   "conflict.unsaved": "未保存的编辑器",
   "contextmenu.copyUrl": "复制网址",
+  "contextmenu.openNewDiffEditor": "Open in a new Diff Editor",
+  "contextmenu.openNewEditor": "Open in a new Editor",
   "contextmenu.openUrl": "打开网址",
   "debug.apiCalls": "API 调用",
   "debug.clear": "清除",

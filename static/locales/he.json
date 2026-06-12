@@ -43,6 +43,8 @@
   "conflict.onDisk": "בדיסק",
   "conflict.unsaved": "עורך לא שמור",
   "contextmenu.copyUrl": "העתק כתובת",
+  "contextmenu.openNewDiffEditor": "Open in a new Diff Editor",
+  "contextmenu.openNewEditor": "Open in a new Editor",
   "contextmenu.openUrl": "פתח כתובת",
   "debug.apiCalls": "API calls",
   "debug.clear": "Clear",

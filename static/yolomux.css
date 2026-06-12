@@ -331,6 +331,7 @@
   --lt-code-control: var(--lt-code-keyword);
   --tab-line-height: 1;
   --pane-tab-width: 180px;
+  --dockview-tab-min-inline-size: 64px;
   --pc-control-bg: #1b2432;
   --pc-control-fg: #dfe6ef;
   --pc-control-border: #536074;
@@ -2607,7 +2608,6 @@ body.theme-light .branch-link {
   background: var(--panel);
 }
 .changes-repo-head {
-  /* now a collapse toggle (button), mirroring .changes-uploaded-toggle. */
   width: 100%;
   display: flex;
   align-items: center;
@@ -2678,20 +2678,6 @@ body.theme-light .branch-link {
 }
 .changes-repo-refs .diff-ref-controls {
   margin-inline-start: 0;
-}
-.changes-uploaded-toggle {
-  width: 100%;
-  border: 0;
-  cursor: pointer;
-  text-align: start;
-}
-.changes-uploaded-toggle:hover,
-.changes-uploaded-toggle:focus-visible {
-  color: var(--active-control-bg);
-}
-.changes-uploaded-caret {
-  display: inline-block;
-  width: 12px;
 }
 .changes-file-list {
   display: grid;
@@ -3767,20 +3753,21 @@ button:disabled:hover { border-color: var(--line); }
   border-bottom: 0;
   background: var(--pane-bar-bg, var(--panel2));
   align-items: flex-start;
-  height: auto;
+  height: calc(var(--pane-tab-height) + 2px);
   min-height: calc(var(--pane-tab-height) + 2px);
   overflow: hidden;
 }
 .yolomux-dockview .dv-tabs-container {
   box-sizing: border-box;
   flex: 1 1 auto;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-content: flex-start;
-  height: auto;
+  height: calc(var(--pane-tab-height) + 2px);
   min-height: calc(var(--pane-tab-height) + 2px);
-  max-height: calc((var(--pane-tab-height) + 2px) * 2);
+  max-height: calc(var(--pane-tab-height) + 2px);
   padding-inline-end: var(--dockview-header-actions-reserved-inline-size, 0px);
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
   scrollbar-width: none;
 }
 .yolomux-dockview .dv-tabs-container::-webkit-scrollbar {
@@ -3927,7 +3914,7 @@ button:disabled:hover { border-color: var(--line); }
   bottom: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
 }
 .yolomux-dockview .dv-tab {
-  flex: 0 0 min(var(--dockview-tab-inline-size, var(--pane-tab-width)), 100%);
+  flex: 0 0 var(--dockview-tab-inline-size, var(--pane-tab-width));
   width: var(--dockview-tab-inline-size, var(--pane-tab-width));
   max-width: var(--dockview-tab-inline-size, var(--pane-tab-width));
   min-width: 0;

@@ -330,6 +330,7 @@
   --lt-code-control: var(--lt-code-keyword);
   --tab-line-height: 1;
   --pane-tab-width: 180px;
+  --dockview-tab-min-inline-size: 64px;
   --pc-control-bg: #1b2432;
   --pc-control-fg: #dfe6ef;
   --pc-control-border: #536074;

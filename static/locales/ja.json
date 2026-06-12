@@ -43,6 +43,8 @@
   "conflict.onDisk": "ディスク上",
   "conflict.unsaved": "未保存のエディター",
   "contextmenu.copyUrl": "URLをコピー",
+  "contextmenu.openNewDiffEditor": "Open in a new Diff Editor",
+  "contextmenu.openNewEditor": "Open in a new Editor",
   "contextmenu.openUrl": "URLを開く",
   "debug.apiCalls": "API calls",
   "debug.clear": "Clear",

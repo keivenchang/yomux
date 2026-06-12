@@ -71,7 +71,6 @@ const fileExplorerIndexedDirsMigratedKey = 'yolomux.fileExplorer.indexedDirs.mig
 const fileExplorerModeStorageKey = 'yolomux.fileExplorerMode.v1';
 const fileExplorerTabberCollapsedStorageKey = 'yolomux.fileExplorer.tabberCollapsed.v1';
 const legacyFileExplorerChangesHiddenStorageKey = 'yolomux.fileExplorerChangesHidden';
-const uploadedFilesCollapsedStorageKey = 'yolomux.modifiedFiles.uploadedCollapsed.v1';
 const changesFolderCollapsedStorageKey = 'yolomux.modifiedFiles.folderCollapsed.v1';
 const changesRepoCollapsedStorageKey = 'yolomux.modifiedFiles.repoCollapsed.v1';
 const fileEditorWrapStorageKey = 'yolomux.editorWrap';
@@ -247,6 +246,7 @@ const pendingFileEditorFocus = new Set();
 const paneViewState = new Map();  // layout item -> generic pane scroll state
 const pendingPaneViewStateCaptures = new Set();
 const fileEditorViewState = new Map();  // layout item -> CodeMirror scroll/selection state
+const fileEditorDiffExpandOverrides = new Map();  // layout item -> per-editor diff context expansion
 let activeFile = null;
 let sharedImageViewerPath = null;
 let fileExplorerRoot = null;
@@ -271,6 +271,7 @@ let fileEditorCursorColor = 'yellow';  // 'yellow' default; 'theme' uses the edi
 let fileEditorAutosaveEnabled = false;
 let fileEditorAutosaveDelaySeconds = 2.5;
 const fileEditorAutosaveTimers = new Map();
+const openFileBackgroundReloadDeferMs = 2000;
 let codeMirrorApiPromise = null;
 let codeMirrorBundlePromise = null;
 let preferencesSearchText = '';
@@ -279,15 +280,8 @@ const preferencesScrollRenderDeferMs = 200;
 let preferencesScrollActiveUntil = 0;
 let preferencesScrollFlushTimer = null;
 let collapsedPreferenceSections = readStoredCollapsedPreferenceSections();
-let uploadedFilesCollapsed = (() => {
-  try {
-    const value = window.localStorage?.getItem(uploadedFilesCollapsedStorageKey);
-    return value == null ? true : value !== '0';
-  } catch (_) {
-    return true;
-  }
-})();
 let changesFolderCollapsed = readStoredSet(changesFolderCollapsedStorageKey);
+const changesFolderAutoCollapsed = new Set();
 // Tabber (Finder pane 3rd mode) COLLAPSED set, keyed by synthetic node path (s_<id>/w_<i>/r_<n>).
 // The Tabber defaults to fully expanded; collapsing a node adds it here (like the Differ's
 // changesFolderCollapsed). Persisted so the open/closed tree survives reloads. Threaded through the
@@ -456,7 +450,10 @@ const prefsItemId = '__prefs__';
 const debugPaneItemId = '__debug__';
 const emptyPaneParam = '__empty_pane__';
 const fileEditorItemPrefix = 'file:';
+const fileEditorCopyItemPrefix = 'filecopy:';
+const fileEditorDiffPreviewItemPrefix = 'filediff:';
 const imageViewerItemPrefix = 'image:';
+let fileEditorCopyItemSeq = 0;
 function urlFlagEnabled(name) {
   try {
     return new URLSearchParams(location.search || '').get(name) === '1';
@@ -509,12 +506,36 @@ function makeGenerationGuard() {
   });
 }
 function fileEditorItemFor(path) { return fileEditorItemPrefix + path; }
+function fileEditorDiffPreviewItemFor(path) { return fileEditorDiffPreviewItemPrefix + path; }
+function isFileEditorDiffPreviewItem(item) {
+  return typeof item === 'string' && item.startsWith(fileEditorDiffPreviewItemPrefix);
+}
+function fileEditorDiffPreviewItemPath(item) {
+  const text = String(item || '');
+  if (!text.startsWith(fileEditorDiffPreviewItemPrefix)) return null;
+  const path = text.slice(fileEditorDiffPreviewItemPrefix.length);
+  return path.startsWith('/') ? path : null;
+}
+function fileEditorCopyItemFor(path) {
+  fileEditorCopyItemSeq += 1;
+  return `${fileEditorCopyItemPrefix}${Date.now().toString(36)}-${fileEditorCopyItemSeq.toString(36)}:${path}`;
+}
+function fileEditorCopyItemPath(item) {
+  const text = String(item || '');
+  if (!text.startsWith(fileEditorCopyItemPrefix)) return null;
+  const rest = text.slice(fileEditorCopyItemPrefix.length);
+  const separator = rest.indexOf(':');
+  const path = separator >= 0 ? rest.slice(separator + 1) : '';
+  return path.startsWith('/') ? path : null;
+}
 function imageViewerItemFor(path) { return imageViewerItemPrefix + path; }
-function filePanelTabType({key, prefix, shortLabel, terminalTitle, className, sortRank}) {
+function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTitle, className, sortRank}) {
+  const matchPrefixes = Array.isArray(prefixes) && prefixes.length ? prefixes : [prefix];
   return {
     key,
     prefix,
-    match: item => typeof item === 'string' && item.startsWith(prefix),
+    prefixes: matchPrefixes,
+    match: item => typeof item === 'string' && matchPrefixes.some(itemPrefix => item.startsWith(itemPrefix)),
     label: item => basenameOf(fileItemPath(item)),
     shortLabel,
     terminalTitle,
@@ -622,6 +643,7 @@ const TAB_TYPES = [
   filePanelTabType({
     key: 'file-editor',
     prefix: fileEditorItemPrefix,
+    prefixes: [fileEditorItemPrefix, fileEditorCopyItemPrefix, fileEditorDiffPreviewItemPrefix],
     shortLabel: () => 'Edit',
     terminalTitle: () => 'unavailable for file editor',
     sortRank: 0.75,
@@ -631,7 +653,11 @@ const TAB_TYPES = [
 function tabTypeForItem(item) { return TAB_TYPES.find(type => type.match(item)) || null; }
 function tabTypeForParam(value) {
   const text = String(value || '');
-  return TAB_TYPES.find(type => (type.aliases || []).includes(text) || (type.prefix && text.startsWith(type.prefix))) || null;
+  return TAB_TYPES.find(type => {
+    if ((type.aliases || []).includes(text)) return true;
+    const prefixes = Array.isArray(type.prefixes) && type.prefixes.length ? type.prefixes : [type.prefix].filter(Boolean);
+    return prefixes.some(prefix => text.startsWith(prefix));
+  }) || null;
 }
 function tabTypeParam(type, item) { return typeof type?.param === 'function' ? type.param(item) : type?.param; }
 function isFileExplorerItem(item) { return tabTypeForItem(item)?.key === 'files'; }
@@ -644,6 +670,8 @@ function isFileEditorItem(item) {
 }
 function fileItemPath(item) {
   if (isImageViewerItem(item)) return item.slice(imageViewerItemPrefix.length);
+  if (typeof item === 'string' && item.startsWith(fileEditorCopyItemPrefix)) return fileEditorCopyItemPath(item);
+  if (typeof item === 'string' && item.startsWith(fileEditorDiffPreviewItemPrefix)) return fileEditorDiffPreviewItemPath(item);
   return tabTypeForItem(item)?.key === 'file-editor' ? item.slice(fileEditorItemPrefix.length) : null;
 }
 function normalizedImageOpenMode(mode = fileExplorerImageOpenMode) {
@@ -799,6 +827,7 @@ let stateTrackingReady = false;
 let focusedTerminal = null;
 let focusedPanelItem = null;
 let lastActivePaneItem = null;
+let lastActiveNonFileExplorerPaneItem = null;
 let lastFocusedTmuxSession = null;
 let dragSession = null;
 let dragSourceSlot = null;
@@ -1908,7 +1937,9 @@ function recordFocusNavTransition(previousItem, nextItem) {
 }
 
 function rememberActivePaneItem(item) {
-  if (item && itemIsActivePaneTab(item)) lastActivePaneItem = item;
+  if (!item || !itemIsActivePaneTab(item)) return;
+  lastActivePaneItem = item;
+  if (!isFileExplorerItem(item)) lastActiveNonFileExplorerPaneItem = item;
 }
 
 function visualActivePaneItem() {
@@ -2024,6 +2055,7 @@ function clearFocusForInactiveLayout() {
   if (focusedTerminal && !activeSessions.includes(focusedTerminal)) focusedTerminal = null;
   if (focusedPanelItem && !activeSessions.includes(focusedPanelItem)) focusedPanelItem = null;
   if (lastActivePaneItem && !itemIsActivePaneTab(lastActivePaneItem)) lastActivePaneItem = null;
+  if (lastActiveNonFileExplorerPaneItem && !itemIsActivePaneTab(lastActiveNonFileExplorerPaneItem)) lastActiveNonFileExplorerPaneItem = null;
   if (lastFocusedTmuxSession && !activeSessions.includes(lastFocusedTmuxSession)) lastFocusedTmuxSession = null;
 }
 
@@ -2229,6 +2261,7 @@ function stripTerminalQueryResponses(data) {
 }
 
 const terminalLinkPattern = /(?:https?:\/\/|file:\/\/|www\.)[^\s<>"'`]+/gi;
+const terminalWrappedUrlMaxRows = 8;
 const terminalLinkClosePairs = [
   [')', '('],
   [']', '['],
@@ -2320,7 +2353,7 @@ function terminalBufferLineText(line) {
 // clipped URL and must not absorb the indented next row. cols<=0 (unknown width) → treat as not clipped.
 function terminalRowReachesRightEdge(line, cols) {
   if (!Number.isFinite(cols) || cols <= 0) return false;
-  return terminalBufferLineText(line).length >= cols;
+  return terminalBufferLineText(line).length >= Math.max(1, cols - 1);
 }
 
 // does the joined group text end mid-URL? True when the LAST url token reaches the very end of
@@ -2335,16 +2368,22 @@ function terminalTailIsUnterminatedUrl(text) {
   return last.index + last[0].length === text.length;
 }
 
-// a row shaped like a hanging-indent continuation — leading whitespace, then a URL-valid char
+function terminalRowStartsNewUrlToken(text) {
+  return /^(?:https?:\/\/|file:\/\/|www\.)/i.test(String(text || ''));
+}
+
+// a row shaped like a hanging-indent continuation — optional leading whitespace, then a URL-valid char
 // (not a quote/bracket). Returns {indent, text} with the indent stripped, or null. isWrapped rows are
 // not hanging continuations (they are real terminal soft-wraps and are handled by the isWrapped sweep).
 function terminalRowHangingShape(buffer, index) {
   const line = buffer.getLine(index);
   if (!line || line.isWrapped === true) return null;
   const raw = terminalBufferLineText(line);
-  const match = /^(\s+)([^\s<>"'`])/.exec(raw);
+  const match = /^(\s*)([^\s<>"'`])/.exec(raw);
   if (!match) return null;
-  return {indent: match[1].length, text: raw.slice(match[1].length)};
+  const text = raw.slice(match[1].length);
+  if (!text || terminalRowStartsNewUrlToken(text)) return null;
+  return {indent: match[1].length, text};
 }
 
 // row `index` continues the URL printed on row `index - 1` — its own row shape is a hanging
@@ -2352,12 +2391,15 @@ function terminalRowHangingShape(buffer, index) {
 // prose under a line that merely happens to end at a URL is not merged.
 // ALSO require the previous row to reach the terminal's right edge, proving the URL was
 // clipped/hard-wrapped. Without this, a complete URL at end-of-line falsely swallows the next row.
-function terminalRowIsHangingUrlContinuation(buffer, index, cols) {
-  if (!terminalRowHangingShape(buffer, index)) return false;
+function terminalRowIsHangingUrlContinuation(buffer, index, cols, depth = 0) {
+  if (depth >= terminalWrappedUrlMaxRows) return false;
+  const shape = terminalRowHangingShape(buffer, index);
+  if (!shape) return false;
   const prev = buffer.getLine(index - 1);
   if (!prev) return false;
   if (!terminalRowReachesRightEdge(prev, cols)) return false;
-  return terminalTailIsUnterminatedUrl(terminalBufferLineText(prev));
+  return terminalTailIsUnterminatedUrl(terminalBufferLineText(prev))
+    || terminalRowIsHangingUrlContinuation(buffer, index - 1, cols, depth + 1);
 }
 
 function terminalWrappedLineGroup(term, y) {
@@ -2402,6 +2444,7 @@ function terminalWrappedLineGroup(term, y) {
     offset += text.length;
     joined += text;
     index += 1;
+    if (rows.length >= terminalWrappedUrlMaxRows) break;
     if (!buffer.getLine(index)) break;
   }
   return {text: joined, rows};
@@ -4042,9 +4085,10 @@ function restorePaneViewState(item, panel) {
   }
 }
 
-function registerFileEditorLayoutItem(path) {
+function registerFileEditorLayoutItem(path, options = {}) {
   if (!path || !path.startsWith('/')) return null;
-  const item = fileEditorItemFor(path);
+  const optionItem = options.item && fileItemPath(options.item) === path ? options.item : '';
+  const item = optionItem || fileEditorItemFor(path);
   addFileEditorTabItem(path, item);
   if (openFiles.get(path)?.loading !== true && openFiles.get(path)?.kind) {
     syncFileLayoutItems();
@@ -4088,7 +4132,10 @@ function resolveLayoutItem(value) {
   }
   const type = tabTypeForParam(text);
   if (type?.prefix === imageViewerItemPrefix) return registerImageViewerLayoutItem(text.slice(imageViewerItemPrefix.length)) || text;
-  if (type?.prefix === fileEditorItemPrefix) return registerFileEditorLayoutItem(text.slice(fileEditorItemPrefix.length)) || text;
+  if (type?.key === 'file-editor') {
+    const path = fileItemPath(text);
+    return (path && registerFileEditorLayoutItem(path, {item: text})) || text;
+  }
   if (type?.id) return type.id;
   if (sessions.includes(text)) return text;
   const ordinal = Number(text);
@@ -10863,7 +10910,7 @@ async function fetchFilePathInfo(path, options = {}) {
   })());
 }
 
-async function showFileTreeContextMenu(row, fullPath, entry, x, y) {
+async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {}) {
   closeFileContextMenu();
   closeTerminalContextMenu();
   closeSessionContextMenu();
@@ -10881,10 +10928,18 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y) {
   const relativePaths = infos.map(info => info?.relative_path || '').filter(Boolean);
   const menuState = fileContextMenuState(entry, selectedPaths, relativePaths);
   const multiple = selectedPaths.length > 1;
+  const openInNewTab = typeof options.openInNewTab === 'function'
+    ? options.openInNewTab
+    : () => openFileInAdditionalEditorTab(fullPath, entry, {userInitiated: true});
+  const openInNewTabActions = Array.isArray(options.openInNewTabActions) && options.openInNewTabActions.length
+    ? options.openInNewTabActions
+    : [{label: options.openInNewTabLabel || 'Open in new tab', action: openInNewTab}];
   appendContextMenuButton(menu, multiple ? 'Copy relative paths' : 'Copy relative path', () => copyFilePath(relativePaths.join('\n'), 'relative'), closeFileContextMenu, {disabled: menuState.copyRelativeDisabled});
   appendContextMenuButton(menu, multiple ? 'Copy full paths' : 'Copy full path', () => copyFilePath(selectedPaths.join('\n'), 'path'), closeFileContextMenu);
   appendContextMenuButton(menu, 'Copy image', () => copyImageFileToClipboard(selectedPaths[0]), closeFileContextMenu, {disabled: menuState.copyImageDisabled});
-  appendContextMenuButton(menu, 'Open in new tab', () => openFileInEditor(fullPath, entry, {forceNewTab: true}), closeFileContextMenu, {disabled: menuState.openInNewTabDisabled});
+  for (const action of openInNewTabActions) {
+    appendContextMenuButton(menu, action.label || 'Open in new tab', action.action, closeFileContextMenu, {disabled: action.disabled ?? menuState.openInNewTabDisabled});
+  }
   appendContextMenuButton(menu, 'Download', () => triggerFileDownload(fullPath), closeFileContextMenu, {disabled: menuState.downloadDisabled});
   appendContextMenuButton(menu, fileExplorerDirectoryIsIndexed(fullPath) ? 'Disallow index' : 'Allow index', () => toggleFileExplorerDirectoryIndexed(fullPath), closeFileContextMenu, {disabled: menuState.indexToggleDisabled, checked: entry?.kind === 'dir' ? fileExplorerDirectoryIsIndexed(fullPath) : undefined});
   appendContextMenuButton(menu, 'Rename', () => beginFileTreeRename(row, selectedPaths[0], entry), closeFileContextMenu, {disabled: menuState.renameDisabled});
@@ -10897,9 +10952,9 @@ function fileContextMenuState(entry, selectedPaths, relativePaths) {
   return {
     copyRelativeDisabled: relativePaths.length !== selectedPaths.length,
     // readonly is terminal-only — the server forbids every /api/fs/* read (raw/list/...),
-    // so the file-read affordances (open image in a tab via /api/fs/raw, Download via /api/fs/raw) are
+    // so the file-read affordances (open a file in a tab, Download via /api/fs/raw) are
     // disabled in readonly to match the server, instead of offering a command that 403s.
-    openInNewTabDisabled: multiple || !entryIsImageFile(entry) || readOnlyMode,
+    openInNewTabDisabled: multiple || entry?.kind !== 'file' || readOnlyMode,
     copyImageDisabled: multiple || !entryIsImageFile(entry) || readOnlyMode,
     downloadDisabled: multiple || entry?.kind !== 'file' || readOnlyMode,
     indexToggleDisabled: multiple || entry?.kind !== 'dir' || (!fileExplorerDirectoryIsIndexed(selectedPaths[0]) && Boolean(fileExplorerIndexedAncestor(selectedPaths[0]))),
@@ -11680,6 +11735,46 @@ function filePanelItemsForPath(path) {
   return items;
 }
 
+function fileEditorDiffPreviewItems() {
+  const items = new Set();
+  for (const state of openFiles.values()) {
+    normalizeFileStateRecord(state);
+    for (const item of state.editorTabItems) {
+      if (isFileEditorDiffPreviewItem(item)) items.add(item);
+    }
+  }
+  for (const item of paneItems()) {
+    if (isFileEditorDiffPreviewItem(item)) items.add(item);
+  }
+  return Array.from(items);
+}
+
+function reusableFileEditorDiffPreviewItem(path) {
+  const nextItem = fileEditorDiffPreviewItemFor(path);
+  addFileEditorTabItem(path, nextItem);
+  const replacements = new Map();
+  for (const oldItem of fileEditorDiffPreviewItems()) {
+    if (oldItem === nextItem) continue;
+    const oldPath = fileItemPath(oldItem);
+    if (!oldPath) continue;
+    const oldState = fileStateFor(oldPath);
+    if (oldState?.dirty && fileEditorTabItemsForPath(oldPath).length <= 1) continue;
+    replacements.set(oldItem, nextItem);
+    removeFileEditorTabItem(oldPath, oldItem);
+    fileEditorViewModesForPath(oldPath).delete(oldItem);
+    fileEditorViewState.delete(oldItem);
+    fileEditorDiffExpandOverrides.delete(oldItem);
+    tabLastActivatedAt.delete(oldItem);
+    removePanelForItem(oldItem);
+    if (!openFilePathHasOwner(oldPath) && !oldState?.dirty) deleteFileState(oldPath);
+  }
+  syncFileLayoutItems();
+  if (replacements.size) {
+    applyLayoutSlots(layoutWithReplacedItems(replacements), {focusSession: nextItem, prune: false});
+  }
+  return nextItem;
+}
+
 function openFilePathHasOwner(path) {
   return filePanelItemsForPath(path).length > 0;
 }
@@ -11691,6 +11786,7 @@ function removeFilePanelOwner(path, item) {
   // also drop the per-item CodeMirror scroll/selection state and the LRU timestamp on close
   // so these item-keyed maps don't grow unbounded as editor tabs open and close.
   fileEditorViewState.delete(item);
+  fileEditorDiffExpandOverrides.delete(item);
   tabLastActivatedAt.delete(item);
   if (!openFilePathHasOwner(path)) fileStateFor(path)?.ownerSessions.clear();
 }
@@ -11832,6 +11928,7 @@ function clearOpenFileExternalState(state) {
   delete state.externalMissing;
   delete state.externalError;
   delete state.externalChangeEditPrompted;
+  delete state.externalReloadDeferred;
   return state;
 }
 
@@ -12205,8 +12302,14 @@ function refreshOpenFileDiffDecorations(path) {
 function openFileDiffAvailable(state) {
   if (!state?.diffLoaded) return false;
   const diff = String(state.diff || '');
-  if (state.untracked || /^---\s+\/dev\/null/m.test(diff) || (!state.diffOriginal && !state.diffWorkingMissing && !diff)) return false;
+  if (!diff && !state.diffWorkingMissing) return false;
   return Boolean(state.diff || state.diffWorkingMissing);
+}
+
+function fileStateCanRenderDiffView(path, state) {
+  if (!state?.diffLoaded || state.diffUnavailable) return false;
+  if (openFileDiffAvailable(state)) return true;
+  return fileStateHasRepo(path, state) && fileStateHasUsefulGitHistory(state);
 }
 
 function applyOpenFileDiffPayload(state, payload) {
@@ -12371,6 +12474,11 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
   }
 }
 
+async function openFileInAdditionalEditorTab(fullPath, entryOrName, options = {}) {
+  const item = options.item || fileEditorCopyItemFor(fullPath);
+  return openFileInEditor(fullPath, entryOrName, {...options, item, forceNewTab: true});
+}
+
 async function openFileStateFromDisk(path, entry = null) {
   const fetched = entry ? {entry, missing: false, error: '', network: false} : await fetchFileEntryStatus(path);
   const fileEntry = fetched.entry;
@@ -12444,6 +12552,11 @@ function markOpenFileExternalError(path, error) {
 
 async function replaceOpenFileStateFromDisk(path, entry = null) {
   const previous = openFiles.get(path);
+  const viewStates = fileEditorTabItemsForPath(path).map(item => {
+    const panel = panelNodes.get(item);
+    if (panel) captureFileEditorPanelViewState(item, panel);
+    return {item, panel};
+  });
   const loaded = await openFileStateFromDisk(path, entry);
   if (loaded.missing) {
     markOpenFileMissing(path);
@@ -12452,11 +12565,49 @@ async function replaceOpenFileStateFromDisk(path, entry = null) {
   clearFileAutosaveTimer(path);
   setFileState(path, clearOpenFileExternalState(loaded.state));
   renderOpenFilePath(path);
+  for (const {item} of viewStates) {
+    const panel = panelNodes.get(item);
+    if (panel) restoreFileEditorPanelViewState(item, panel);
+  }
+  requestAnimationFrame(() => {
+    for (const {item} of viewStates) {
+      const panel = panelNodes.get(item);
+      if (panel) restoreFileEditorPanelViewState(item, panel);
+    }
+  });
   if (loaded.state?.kind === 'text' && typeof updateFilePreviewPopout === 'function') {
     updateFilePreviewPopout(path, loaded.state.content || '');
   }
   if (previous?.diff !== undefined) refreshOpenFileDiff(path);
   return true;
+}
+
+function fileEditorPathHasFocus(path) {
+  const active = document.activeElement;
+  if (!active) return false;
+  return fileEditorPanelsForPath(path).some(panel => panel?.contains?.(active));
+}
+
+function openFileBackgroundReloadShouldDefer(path, state) {
+  if (fileEditorPathHasFocus(path)) return true;
+  const lastCleanAt = Number(state?.lastCleanAt || 0);
+  return Number.isFinite(lastCleanAt)
+    && lastCleanAt > 0
+    && Date.now() - lastCleanAt < openFileBackgroundReloadDeferMs;
+}
+
+function markOpenFileReloadDeferred(path, state, entry) {
+  if (!state) return;
+  state.externalChanged = {mtime: fileEntryMtime(entry), size: entry?.size ?? null};
+  state.externalReloadDeferred = {mtime: state.externalChanged.mtime, size: state.externalChanged.size, at: Date.now()};
+  delete state.externalChangeEditPrompted;
+  delete state.externalMissing;
+  delete state.externalError;
+  for (const panel of fileEditorPanelsForPath(path)) {
+    updateFileEditorPanelChrome(panel, path);
+    const status = openFileStatus(state);
+    setFileEditorPanelStatus(panel, status.message, status.level);
+  }
 }
 
 async function reloadOpenFileFromDisk(path, options = {}) {
@@ -12486,6 +12637,7 @@ async function refreshOpenFileFromFetchedStatus(path, state, fetched) {
       delete state.externalMissing;
       delete state.externalError;
       if (!state.dirty) delete state.externalChanged;
+      if (!state.dirty) delete state.externalReloadDeferred;
       if (!state.dirty) delete state.externalChangeEditPrompted;
       renderOpenFilePath(path);
     }
@@ -12500,11 +12652,16 @@ async function refreshOpenFileFromFetchedStatus(path, state, fetched) {
       return;
     }
     state.externalChanged = externalChanged;
+    delete state.externalReloadDeferred;
     delete state.externalChangeEditPrompted;
     delete state.externalMissing;
     delete state.externalError;
     clearFileAutosaveTimer(path);
     renderOpenFilePath(path);
+    return;
+  }
+  if (openFileBackgroundReloadShouldDefer(path, state)) {
+    markOpenFileReloadDeferred(path, state, entry);
     return;
   }
   await replaceOpenFileStateFromDisk(path, entry);
@@ -13686,6 +13843,10 @@ function renameOpenFilePath(oldPath, newPath) {
       fileEditorViewState.set(newKey, fileEditorViewState.get(oldKey));
       fileEditorViewState.delete(oldKey);
     }
+    if (fileEditorDiffExpandOverrides.has(oldKey)) {
+      fileEditorDiffExpandOverrides.set(newKey, fileEditorDiffExpandOverrides.get(oldKey));
+      fileEditorDiffExpandOverrides.delete(oldKey);
+    }
     if (tabLastActivatedAt.has(oldKey)) {
       tabLastActivatedAt.set(newKey, tabLastActivatedAt.get(oldKey));
       tabLastActivatedAt.delete(oldKey);
@@ -14036,7 +14197,7 @@ function updateFileEditorDiffExpandButton(button, path, state, item = null) {
   const activeDiff = editorViewModeFor(path, item) === 'diff';
   button.hidden = state?.kind !== 'text' || !activeDiff || !openFileDiffAvailable(state);
   button.disabled = button.hidden || state?.diffLoading === true;
-  button.setAttribute('aria-pressed', diffExpandUnchanged ? 'true' : 'false');
+  button.setAttribute('aria-pressed', fileEditorDiffExpandUnchangedForItem(item) ? 'true' : 'false');
 }
 
 async function openEditorFind(host = null) {
@@ -14146,6 +14307,7 @@ function toggleEditorWrap() {
 function setDiffExpandUnchanged(enabled) {
   diffExpandUnchanged = enabled === true;
   storageSet('yolomux.diffExpandUnchanged', diffExpandUnchanged ? '1' : '0');
+  fileEditorDiffExpandOverrides.clear();
   document.querySelectorAll('.file-editor-panel').forEach(panel => {
     const item = panel.dataset.layoutItem || fileEditorItemFor(panel.dataset.filePath || '');
     const path = fileItemPath(item);
@@ -14159,6 +14321,26 @@ function setDiffExpandUnchanged(enabled) {
 
 function toggleDiffExpandUnchanged() {
   setDiffExpandUnchanged(!diffExpandUnchanged);
+}
+
+function fileEditorDiffExpandUnchangedForItem(item = null) {
+  if (item && fileEditorDiffExpandOverrides.has(item)) return fileEditorDiffExpandOverrides.get(item) === true;
+  return diffExpandUnchanged;
+}
+
+function setFileEditorDiffExpandUnchangedForItem(path, item, enabled) {
+  if (!isFileEditorItem(item)) return;
+  fileEditorDiffExpandOverrides.set(item, enabled === true);
+  const panel = panelNodes.get(item);
+  const state = openFiles.get(path);
+  if (panel) updateFileEditorDiffExpandButton(panel.querySelector('.file-editor-diff-expand-panel'), path, state, item);
+  if (panel && state?.kind === 'text' && editorViewModeFor(path, item) === 'diff' && openFileDiffAvailable(state)) {
+    renderFileEditorPanel(panel, item);
+  }
+}
+
+function toggleFileEditorDiffExpandUnchangedForItem(path, item) {
+  setFileEditorDiffExpandUnchangedForItem(path, item, !fileEditorDiffExpandUnchangedForItem(item));
 }
 
 function setEditorLineNumbersEnabled(enabled) {
@@ -15485,7 +15667,7 @@ async function openDraggedFilesInEditor(payload, options = {}) {
       });
       // Unify with double-click: a dragged CHANGED (tracked, has-diff) file opens in the SAME diff
       // view (ensureCodeMirrorDiffPanel) as openChangedFileInDiff, not a plain edit-mode editor.
-      // Unchanged/untracked files have no diff available and stay in edit.
+      // Files with no diff payload stay in edit.
       await refreshOpenFileDiff(path, {silent: true});
       const draggedState = openFiles.get(path);
       if (draggedState && openFileDiffAvailable(draggedState)) {
@@ -16128,10 +16310,17 @@ function focusedActivationSlot() {
   return slot && !slotIsFileExplorerPane(slot) ? slot : null;
 }
 
+function fileEditorActivationSlot() {
+  const focusedSlot = focusedActivationSlot();
+  if (focusedSlot) return focusedSlot;
+  const previousSlot = lastActiveNonFileExplorerPaneItem ? slotForSession(lastActiveNonFileExplorerPaneItem) : null;
+  return previousSlot && !slotIsFileExplorerPane(previousSlot) ? previousSlot : null;
+}
+
 function slotForTabActivation(item) {
   const currentSlot = slotForSession(item);
   if (currentSlot) return currentSlot;
-  return focusedActivationSlot() || largestNonFileExplorerPaneSlot() || firstEmptyPane() || largestPaneSlot() || slotForNewSession();
+  return fileEditorActivationSlot() || largestNonFileExplorerPaneSlot() || firstEmptyPane() || largestPaneSlot() || slotForNewSession();
 }
 
 async function activateTabInExistingPane(item) {
@@ -18708,13 +18897,14 @@ function dockviewSyncHeaderActionReservations() {
     const reservedWidth = width > 0 ? width + 8 : 0;
     const tabCount = group.querySelectorAll('.dv-tabs-container > .dv-tab').length;
     const headerWidth = Math.floor(header.getBoundingClientRect?.().width || header.clientWidth || 0);
-    const maxTabWidth = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--pane-tab-width')) || 180;
+    const rootStyle = getComputedStyle(document.documentElement);
+    const maxTabWidth = Number.parseFloat(rootStyle.getPropertyValue('--pane-tab-width')) || 180;
+    const minTabWidth = Number.parseFloat(rootStyle.getPropertyValue('--dockview-tab-min-inline-size')) || 64;
     let tabWidth = maxTabWidth;
     if (tabCount > 1 && headerWidth > 0) {
-      const targetTabsPerRow = Math.ceil(tabCount / 2);
-      const rowGaps = Math.max(0, targetTabsPerRow - 1);
-      const fitWidth = Math.floor((headerWidth - reservedWidth - rowGaps) / targetTabsPerRow);
-      tabWidth = Math.min(maxTabWidth, Math.max(120, fitWidth));
+      const rowGaps = Math.max(0, tabCount - 1);
+      const fitWidth = Math.floor((headerWidth - reservedWidth - rowGaps) / tabCount);
+      tabWidth = Math.min(maxTabWidth, Math.max(minTabWidth, fitWidth));
     }
     header.style.setProperty('--dockview-header-actions-reserved-inline-size', reservedWidth > 0 ? `${reservedWidth}px` : '0px');
     header.style.setProperty('--dockview-tab-inline-size', `${tabWidth}px`);
@@ -22821,6 +23011,44 @@ function clientSessionFilesWatchRequests() {
   }];
 }
 
+function normalizedSessionFilesRepoRefs(repoRefs) {
+  if (!repoRefs || typeof repoRefs !== 'object' || Array.isArray(repoRefs)) return {};
+  const normalized = {};
+  for (const repo of Object.keys(repoRefs).sort()) {
+    const refs = repoRefs[repo];
+    if (!refs || typeof refs !== 'object' || Array.isArray(refs)) continue;
+    const from = cleanDiffRef(refs.from || refs.from_ref || '', '');
+    const to = cleanDiffRef(refs.to || refs.to_ref || '', '');
+    if (!from && !to) continue;
+    normalized[repo] = {from: from || 'HEAD', to: to || 'current'};
+  }
+  return normalized;
+}
+
+function normalizedSessionFilesRequest(request = {}, sessionFallback = '') {
+  const from = cleanDiffRef(request.from_ref || request.from || '', 'HEAD');
+  const to = cleanDiffRef(request.to_ref || request.to || '', 'current');
+  const hoursValue = Number(request.hours || 24);
+  return {
+    session: String(request.session || sessionFallback || ''),
+    hours: Number.isFinite(hoursValue) ? hoursValue : 24,
+    from_ref: from,
+    to_ref: to,
+    repo_refs: normalizedSessionFilesRepoRefs(request.repo_refs),
+  };
+}
+
+function sessionFilesRequestKey(request = {}, sessionFallback = '') {
+  const normalized = normalizedSessionFilesRequest(request, sessionFallback);
+  return JSON.stringify(normalized);
+}
+
+function sessionFilesPushRequestMatchesCurrent(request = {}, session = '') {
+  if (!request || typeof request !== 'object') return false;
+  const current = clientSessionFilesWatchRequests()[0] || {};
+  return sessionFilesRequestKey(request, session) === sessionFilesRequestKey(current, session);
+}
+
 function sessionFilesCacheKey(session) {
   return `${String(session || '')}\x1f${sessionFilesRequestQueryString()}`;
 }
@@ -23493,6 +23721,7 @@ function applySessionFilesPayloadFromPush(payload = {}, request = {}) {
   const destination = 'finder';
   const session = payload.session || request.session || fileExplorerSessionFilesTargetSession();
   if (!session || session !== fileExplorerSessionFilesTargetSession()) return false;
+  if (!sessionFilesPushRequestMatchesCurrent(request, session)) return false;
   const nextPayload = {
     session,
     files: Array.isArray(payload.files) ? payload.files : [],
@@ -23596,20 +23825,6 @@ function groupedSessionFiles(files) {
     groups.get(repo).push(item);
   }
   return Array.from(groups.entries());
-}
-
-function splitUploadedSessionFiles(files) {
-  const regular = [];
-  const uploaded = [];
-  for (const item of sortedSessionFiles(files)) {
-    if (item?.uploaded === true) uploaded.push(item);
-    else regular.push(item);
-  }
-  return {regular, uploaded};
-}
-
-function writeStoredUploadedFilesCollapsed() {
-  storageSet(uploadedFilesCollapsedStorageKey, uploadedFilesCollapsed ? '1' : '0');
 }
 
 function writeStoredChangesFolderCollapsed() {
@@ -23914,10 +24129,23 @@ function buildSessionFileTree(repoPath, sessionFiles) {
   return {entries: topLevel, entriesByDir, sessionFilesMap};
 }
 
+function initializeDefaultCollapsedChangesFolders(entriesByDir) {
+  for (const [directory, entries] of entriesByDir.entries()) {
+    for (const entry of entries || []) {
+      if (entry?.kind !== 'dir' || entry.name !== '.uploads') continue;
+      const fullPath = normalizeDirectoryPath(directory === '/' ? `/${entry.name}` : `${directory}/${entry.name}`);
+      if (!fullPath || changesFolderAutoCollapsed.has(fullPath)) continue;
+      changesFolderAutoCollapsed.add(fullPath);
+      changesFolderCollapsed.add(fullPath);
+    }
+  }
+}
+
 // Render changed files for one repo section using the shared file-tree renderer.
 function renderChangedFileList(container, repoPath, sessionFiles, options = {}) {
   const treeRoot = repoPath === 'Outside repo' ? '/' : repoPath;
   const {entries, entriesByDir, sessionFilesMap} = buildSessionFileTree(treeRoot, sessionFiles);
+  initializeDefaultCollapsedChangesFolders(entriesByDir);
   renderTreeChildren(container, treeRoot, entries, 0, {
     entriesByDir,
     sessionFilesMap,
@@ -23927,56 +24155,6 @@ function renderChangedFileList(container, repoPath, sessionFiles, options = {}) 
     treeSortMode: normalizeSessionFilesSortMode(sessionFilesSortMode),
     includeHidden: true,
   });
-}
-
-function uploadedFileRepoRoot(item) {
-  const repo = item?.repo || '';
-  if (repo && repo !== 'Outside repo') return repo;
-  const absPath = item?.abs_path || item?.path || '';
-  return dirnameOf(absPath);
-}
-
-function uploadedFileForRepoRoot(item, repoPath) {
-  const absPath = item?.abs_path || (repoPath && item?.path ? `${repoPath}/${item.path}` : item?.path || '');
-  const relPath = item?.path || (absPath && repoPath && absPath.startsWith(repoPath + '/') ? absPath.slice(repoPath.length + 1) : basenameOf(absPath));
-  return {
-    ...item,
-    repo: repoPath,
-    path: relPath,
-    abs_path: absPath,
-  };
-}
-
-function renderUploadedFileList(container, uploadedFiles, options = {}) {
-  const groups = new Map();
-  for (const item of uploadedFiles || []) {
-    const repoPath = uploadedFileRepoRoot(item);
-    if (!groups.has(repoPath)) groups.set(repoPath, []);
-    groups.get(repoPath).push(uploadedFileForRepoRoot(item, repoPath));
-  }
-  const groupedFiles = Array.from(groups.entries());
-  if (groupedFiles.length <= 1) {
-    const [repoPath, files] = groupedFiles[0] || ['', []];
-    renderChangedFileList(container, repoPath, files, options);
-    return;
-  }
-  const existing = new Map();
-  for (const child of container.children || []) {
-    const key = child.dataset?.uploadedRepo;
-    if (key) existing.set(key, child);
-  }
-  const nextNodes = [];
-  for (const [repoPath, files] of groupedFiles) {
-    let repoList = existing.get(repoPath);
-    if (!repoList) {
-      repoList = document.createElement('div');
-      repoList.className = 'changes-uploaded-repo-list';
-      repoList.dataset.uploadedRepo = repoPath;
-    }
-    renderChangedFileList(repoList, repoPath, files, options);
-    nextNodes.push(repoList);
-  }
-  reconcileChildNodes(container, nextNodes);
 }
 
 // C5: a changed file can be touched by 0, 1, or several agents. Render an icon per agent from item.agents
@@ -24004,7 +24182,7 @@ function changeFileAgentsHtml(item) {
 // Replaces changesRepoGroupsHtml — incrementally updates sections rather than replacing innerHTML.
 function renderChangesGroups(groupsEl, files, options = {}) {
   if (!groupsEl) return;
-  const {regular, uploaded} = splitUploadedSessionFiles(files);
+  const regular = sortedSessionFiles(files);
   const payload = options.payload || {};
   const repoMap = repoPayloadByPath(payload);
   const groups = new Map(groupedSessionFiles(regular));
@@ -24078,38 +24256,6 @@ function renderChangesGroups(groupsEl, files, options = {}) {
       fileList.hidden = true;
     }
     nextNodes.push(section);
-  }
-  if (uploaded.length) {
-    let uploadedSection = existing.get('__uploaded__');
-    if (!uploadedSection) {
-      uploadedSection = document.createElement('section');
-      uploadedSection.className = 'changes-repo-group changes-uploaded-group';
-      uploadedSection.dataset.changesRepo = '__uploaded__';
-    }
-    let head = uploadedSection.querySelector(':scope > .changes-uploaded-toggle');
-    if (!head) {
-      head = document.createElement('button');
-      head.type = 'button';
-      head.className = 'changes-repo-head changes-uploaded-toggle';
-      head.dataset.uploadedFilesToggle = '';
-      uploadedSection.prepend(head);
-    }
-    head.setAttribute('aria-expanded', uploadedFilesCollapsed ? 'false' : 'true');
-    head.innerHTML = `<span><span class="changes-uploaded-caret">${uploadedFilesCollapsed ? '▸' : '▾'}</span> ${esc(t('changes.uploaded', {count: uploaded.length}))}</span><span>${uploadedFilesCollapsed ? esc(t('changes.collapsed')) : uploaded.length}</span>`;
-    let fileList = uploadedSection.querySelector(':scope > .changes-file-list');
-    if (!uploadedFilesCollapsed) {
-      if (!fileList) {
-        fileList = document.createElement('div');
-        fileList.className = 'changes-file-list';
-        uploadedSection.append(fileList);
-      }
-      fileList.hidden = false;
-      renderUploadedFileList(fileList, uploaded, {compact});
-    } else if (fileList) {
-      fileList.hidden = true;
-    }
-    uploadedSection.classList.toggle('collapsed', uploadedFilesCollapsed);
-    nextNodes.push(uploadedSection);
   }
   reconcileChildNodes(groupsEl, nextNodes);
 }
@@ -24373,15 +24519,16 @@ function renderChangesRoot(root, staticHtml, files, groupOptions = {}, options =
 function activeChangesControl(panel) {
   const active = document.activeElement;
   if (!active || !panel?.contains(active)) return null;
-  return active.closest?.('[data-session-files-session], [data-session-files-sort], [data-diff-ref-from], [data-diff-ref-to], [data-session-files-refresh], [data-file-explorer-tree-dates], [data-file-tree-expand-collapse-all], [data-uploaded-files-toggle], [data-changes-folder-toggle], [data-changes-repo-toggle]') || null;
+  return active.closest?.('[data-session-files-session], [data-session-files-sort], [data-diff-ref-from], [data-diff-ref-to], [data-session-files-refresh], [data-file-explorer-tree-dates], [data-file-tree-expand-collapse-all], [data-changes-folder-toggle], [data-changes-repo-toggle]') || null;
 }
 
-async function openChangedFileInDiff(path, ownerSession = '', status = '', repo = '') {
-  const item = fileEditorItemFor(path);
+async function openChangedFileInDiff(path, ownerSession = '', status = '', repo = '', options = {}) {
+  const item = options.item
+    || (options.forceNewTab === true ? fileEditorCopyItemFor(path) : reusableFileEditorDiffPreviewItem(path));
   const normalizedStatus = String(status || '').toUpperCase();
-  const isAddedChange = normalizedStatus === 'A' || normalizedStatus === 'U' || normalizedStatus === '?';
-  const isTouchedOnly = normalizedStatus === 'T';
-  const initialMode = isAddedChange || isTouchedOnly ? 'edit' : 'diff';
+  const openDiffMode = options.openMode !== 'edit';
+  if (openDiffMode) setFileEditorDiffExpandUnchangedForItem(path, item, false);
+  const initialMode = openDiffMode ? 'diff' : 'edit';
   setFileEditorViewMode(path, initialMode, item);
   // Use the payload's own FROM/TO for this file's repo so the diff matches what the panel shows,
   // even when the repo is not in diffRefsByRepo (e.g. a repo outside the active session's checkout).
@@ -24393,6 +24540,16 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '', repo 
     return {};
   })();
   noteFileExplorerChangesSessionInteraction(ownerSession);
+  const openOptions = {
+    item,
+    ownerSession,
+    viewMode: initialMode,
+    forceNewTab: options.forceNewTab === true,
+    userInitiated: options.userInitiated !== false,
+  };
+  const targetSlot = options.targetSlot || (options.userInitiated === false ? '' : fileEditorActivationSlot());
+  if (targetSlot) openOptions.targetSlot = targetSlot;
+  if (options.targetZone) openOptions.targetZone = options.targetZone;
   if (normalizedStatus === 'D') {
     await openFilesSetAndShow(path, {
       mtime: 0,
@@ -24403,14 +24560,28 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '', repo 
       dirty: false,
       deleted: true,
       gitTracked: true,
-    }, {item, ownerSession});
+    }, openOptions);
   } else {
-    await openFileInEditor(path, {name: basenameOf(path), session: ownerSession}, {item, ownerSession, viewMode: initialMode});
+    await openFileInEditor(path, {name: basenameOf(path), session: ownerSession}, openOptions);
   }
-  const diffReady = await refreshOpenFileDiff(path, {silent: true, ...payloadRepoRefs});
-  if (diffReady && !isAddedChange && !isTouchedOnly) setFileEditorViewMode(path, 'diff', item);
-  if (!diffReady && (isAddedChange || isTouchedOnly)) setFileEditorViewMode(path, 'edit', item);
+  if (!openDiffMode) {
+    renderOpenFilePath(path);
+    void refreshOpenFileDiff(path, {silent: true, renderOnComplete: false, ...payloadRepoRefs});
+    return;
+  }
+  const diffReady = await refreshOpenFileDiff(path, {silent: true, renderOnComplete: false, ...payloadRepoRefs});
+  const current = openFiles.get(path);
+  if (diffReady && fileStateCanRenderDiffView(path, current)) {
+    setFileEditorViewMode(path, 'diff', item);
+  } else {
+    setFileEditorViewMode(path, 'edit', item);
+  }
   renderOpenFilePath(path);
+  if (!diffReady || !fileStateCanRenderDiffView(path, current)) {
+    const reason = current?.diffError || (current?.kind !== 'text' ? 'not a text file' : 'no git diff or useful history for this file');
+    const panel = panelNodes.get(item);
+    if (panel) setFileEditorPanelStatus(panel, `diff unavailable: ${reason}`, 'warn');
+  }
 }
 
 // the diff-ref Escape-revert and picker-open were written twice — once for the changes panel
@@ -24506,14 +24677,6 @@ function bindChangesPanel(panel) {
       toggleAllFileExplorerChanges();
       return;
     }
-    const uploadedToggle = event.target.closest('[data-uploaded-files-toggle]');
-    if (uploadedToggle && panel.contains(uploadedToggle)) {
-      event.preventDefault();
-      uploadedFilesCollapsed = !uploadedFilesCollapsed;
-      writeStoredUploadedFilesCollapsed();
-      renderFileExplorerChangesPanels({force: true});
-      return;
-    }
     const repoToggle = event.target.closest('[data-changes-repo-toggle]');
     if (repoToggle && panel.contains(repoToggle)) {
       event.preventDefault();
@@ -24573,29 +24736,45 @@ function bindChangesPanel(panel) {
     stopCustomDragPreview();
     clearDropPreview();
   });
-  panel.addEventListener('dblclick', async event => {
+  // Single-click opens the row in the active editor pane. Modifier clicks keep the shared Finder-style
+  // multi-select behavior without opening a diff.
+  panel.addEventListener('click', async event => {
     const fileRow = event.target.closest('[data-open-change-file]');
     if (!fileRow || !panel.contains(fileRow)) return;
-    event.preventDefault();
+    const selectionOnly = updateFileTreeSelectionFromClick(fileRow, fileRow.dataset.path || fileRow.dataset.openChangeFile || '', event);
+    if (selectionOnly) return;
     const path = fileRow.dataset.openChangeFile;
-    if (path) {
-      const ownerSession = fileRow.dataset.openChangeSession || '';
-      await openChangedFileInDiff(path, ownerSession, fileRow.dataset.openChangeStatus || '', fileRow.dataset.openChangeRepo || '');
-    }
-  });
-  // C5: single-click selects/highlights a Modified-files row (Finder-like), without opening it — the
-  // toggle/refresh handler above runs first and returns on its own targets, so this only fires for rows.
-  panel.addEventListener('click', event => {
-    const fileRow = event.target.closest('[data-open-change-file]');
-    if (!fileRow || !panel.contains(fileRow)) return;
-    updateFileTreeSelectionFromClick(fileRow, fileRow.dataset.path || fileRow.dataset.openChangeFile || '', event);
+    if (!path) return;
+    event.preventDefault();
+    await openChangedFileInDiff(path, fileRow.dataset.openChangeSession || '', fileRow.dataset.openChangeStatus || '', fileRow.dataset.openChangeRepo || '', {userInitiated: true});
   });
   panel.addEventListener('contextmenu', event => {
     const fileRow = event.target.closest('[data-open-change-file]');
     if (fileRow && panel.contains(fileRow)) {
       event.preventDefault();
       const path = fileRow.dataset.path || fileRow.dataset.openChangeFile || '';
-      showFileTreeContextMenu(fileRow, path, changedFileRowEntry(fileRow), event.clientX, event.clientY);
+      showFileTreeContextMenu(fileRow, path, changedFileRowEntry(fileRow), event.clientX, event.clientY, {
+        openInNewTabActions: [
+          {
+            label: t('contextmenu.openNewDiffEditor'),
+            action: () => openChangedFileInDiff(
+              path,
+              fileRow.dataset.openChangeSession || '',
+              fileRow.dataset.openChangeStatus || '',
+              fileRow.dataset.openChangeRepo || '',
+              {forceNewTab: true, userInitiated: true, openMode: 'diff'},
+            ),
+          },
+          {
+            label: t('contextmenu.openNewEditor'),
+            action: () => openFileInAdditionalEditorTab(path, changedFileRowEntry(fileRow), {
+              targetSlot: fileEditorActivationSlot(),
+              userInitiated: true,
+              viewMode: 'edit',
+            }),
+          },
+        ],
+      });
       return;
     }
     const directoryRow = event.target.closest('[data-open-change-directory]');
@@ -25130,6 +25309,10 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
   const dirty = state.content !== state.original;
   const dirtyChanged = dirty !== state.dirty;
   state.dirty = dirty;
+  if (dirtyChanged) {
+    if (dirty) delete state.lastCleanAt;
+    else state.lastCleanAt = Date.now();
+  }
   updateFileEditorPanelChrome(panel, path);
   const status = openFileStatus(state);
   setFileEditorPanelStatus(panel, status.message, status.level);
@@ -25204,7 +25387,7 @@ function createFileEditorPanel(item) {
         <div class="file-editor-toolbar-zone file-editor-toolbar-left">
           <button type="button" class="file-editor-gutter-panel" title="${esc(t('editor.toggleLineNumbers'))}" aria-label="${esc(t('editor.toggleLineNumbers'))}" hidden>#</button>
           <button type="button" class="file-editor-diff-panel" title="${esc(t('editor.diff'))}" aria-label="${esc(t('editor.diff'))}" hidden>Differ</button>
-          <button type="button" class="file-editor-diff-expand-panel" title="${esc(t('editor.diffExpand'))}" aria-label="${esc(t('editor.diffExpand'))}" aria-pressed="${diffExpandUnchanged ? 'true' : 'false'}" hidden>↕</button>
+          <button type="button" class="file-editor-diff-expand-panel" title="${esc(t('editor.diffExpand'))}" aria-label="${esc(t('editor.diffExpand'))}" aria-pressed="${fileEditorDiffExpandUnchangedForItem(item) ? 'true' : 'false'}" hidden>↕</button>
           <span class="file-editor-diff-ref-panel" hidden>${diffRefControlsHtml({compact: true})}</span>
         </div>
         <div class="file-editor-toolbar-zone file-editor-toolbar-center">
@@ -25314,7 +25497,7 @@ function createFileEditorPanel(item) {
   panel.querySelector('.file-editor-diff-expand-panel')?.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
-    toggleDiffExpandUnchanged();  // B4: show all context vs collapse unchanged runs (persisted, rebuilds the diff)
+    toggleFileEditorDiffExpandUnchangedForItem(path, item);  // show all context vs collapse unchanged runs for this editor
   });
   const diffRefPanel = panel.querySelector('.file-editor-diff-ref-panel');
   diffRefPanel?.addEventListener('change', event => {
@@ -25576,15 +25759,24 @@ function restoreFileEditorPanelViewState(item, panel) {
   } catch (_) {
     try { view.dispatch({selection: {anchor, head}}); } catch (_) {}
   }
+  const targetTop = Number(state.scrollTop || 0);
+  const targetLeft = Number(state.scrollLeft || 0);
+  const scrollStillAtTarget = () => (
+    Math.abs(Number(scrollDOM.scrollTop || 0) - targetTop) <= 1
+    && Math.abs(Number(scrollDOM.scrollLeft || 0) - targetLeft) <= 1
+  );
   const restore = () => {
-    scrollDOM.scrollTop = Number(state.scrollTop || 0);
-    scrollDOM.scrollLeft = Number(state.scrollLeft || 0);
+    scrollDOM.scrollTop = targetTop;
+    scrollDOM.scrollLeft = targetLeft;
   };
-  const measuredRestore = () => {
+  const measuredRestore = (guardUserScroll = false) => {
+    if (guardUserScroll && !scrollStillAtTarget()) return;
     if (typeof view.requestMeasure === 'function') {
       view.requestMeasure({
         read: () => null,
-        write: restore,
+        write: () => {
+          if (!guardUserScroll || scrollStillAtTarget()) restore();
+        },
       });
       return;
     }
@@ -25592,8 +25784,8 @@ function restoreFileEditorPanelViewState(item, panel) {
   };
   restore();
   measuredRestore();
-  requestAnimationFrame(measuredRestore);
-  requestAnimationFrame(() => requestAnimationFrame(measuredRestore));
+  requestAnimationFrame(() => measuredRestore(true));
+  requestAnimationFrame(() => requestAnimationFrame(() => measuredRestore(true)));
 }
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
@@ -26250,7 +26442,7 @@ function updateCodeMirrorDiffOverview(panel, container, state, currentText, orig
   if (panel) panel._diffOverviewCtx = {container, state, currentText, original};
   container?.querySelector?.('.cm-diff-overview')?.remove();
   panel?._diffOverviewViewportCleanup?.();
-  if (!diffExpandUnchanged) return;
+  if (!fileEditorDiffExpandUnchangedForItem(fileEditorPanelItem(panel))) return;
   const view = panel?._cmView;
   const scrollTarget = codeMirrorDiffOverviewScrollTarget(view, container);
   const currentLineCount = Math.max(String(currentText || '').split('\n').length, 1);
@@ -26377,7 +26569,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
     await refreshOpenFileDiff(path, {silent: true, renderOnComplete: false});
     if (panel._cmGeneration !== generation) return null;
   }
-  if (!openFileDiffAvailable(state)) {
+  if (!fileStateCanRenderDiffView(path, state)) {
     if (state.diffUnavailable) {
       const msg = `diff unavailable: ${state.diffError || 'unknown error'}`;
       setFileEditorPanelStatus(panel, msg, 'warn');
@@ -26394,10 +26586,11 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
       return false;
     }
     const layout = codeMirrorDiffLayout(container);
+    const expandUnchanged = fileEditorDiffExpandUnchangedForItem(item);
     const diffTargetIsCurrent = !state.diffToRef || state.diffToRef === 'current';
     const currentText = diffTargetIsCurrent ? String(state.content || '') : String(state.diffWorking || '');
     const diffEditsAllowed = diffTargetIsCurrent;
-    const signature = codeMirrorConfigSignature(path, {mode: 'diff', layout, original, from: state.diffFromRef, to: state.diffToRef, expand: diffExpandUnchanged});
+    const signature = codeMirrorConfigSignature(path, {mode: 'diff', layout, original, from: state.diffFromRef, to: state.diffToRef, expand: expandUnchanged});
     installCodeMirrorDiffCollapsedScrollGuard(panel, container);
     if (panel._cmView && panel._cmMode === 'diff' && panel._cmSignature === signature) {
       installCodeMirrorDiffResizeObserver(panel, item, path, container);
@@ -26454,7 +26647,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
         highlightChanges: false,
         gutter: true,
         // B4: expand-all omits collapseUnchanged so every unchanged line shows; else collapse the runs.
-        ...(diffExpandUnchanged ? {} : {collapseUnchanged: {margin: 3, minSize: 8}}),
+        ...(expandUnchanged ? {} : {collapseUnchanged: {margin: 3, minSize: 8}}),
       });
       panel._cmView = panel._cmMergeView.b;
       trackCodeMirrorThemeViews(panel, api, [panel._cmMergeView.a, panel._cmMergeView.b]);
@@ -26470,7 +26663,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
         gutter: true,
         mergeControls: !readOnlyMode && diffEditsAllowed,
         // B4: expand-all omits collapseUnchanged so every unchanged line shows; else collapse the runs.
-        ...(diffExpandUnchanged ? {} : {collapseUnchanged: {margin: 3, minSize: 8}}),
+        ...(expandUnchanged ? {} : {collapseUnchanged: {margin: 3, minSize: 8}}),
       };
       const unifiedDiffExtensions = (plain = false) => [
         api.unifiedMergeView(unifiedMergeOptions),
@@ -26623,8 +26816,7 @@ function diffModeShouldFallBackToEdit(path, state, item = null) {
     && (!fileStateHasRepo(path, state)
       || (state.diffLoaded === true
         && !state.diffLoading
-        && !openFileDiffAvailable(state)
-        && !fileStateHasUsefulGitHistory(state)));
+        && !fileStateCanRenderDiffView(path, state)));
 }
 
 function renderFileEditorPanelShouldCaptureViewState(options = {}) {
@@ -28621,6 +28813,7 @@ async function saveFileEditor(path, panel, options = {}) {
     state.size = payload.size;
     state.original = state.content;
     state.dirty = false;
+    state.lastCleanAt = Date.now();
     clearFileAutosaveTimer(path);
     clearOpenFileExternalState(state);
     if (payload.yolo_rules) {

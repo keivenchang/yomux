@@ -325,7 +325,7 @@ function updateFileEditorDiffExpandButton(button, path, state, item = null) {
   const activeDiff = editorViewModeFor(path, item) === 'diff';
   button.hidden = state?.kind !== 'text' || !activeDiff || !openFileDiffAvailable(state);
   button.disabled = button.hidden || state?.diffLoading === true;
-  button.setAttribute('aria-pressed', diffExpandUnchanged ? 'true' : 'false');
+  button.setAttribute('aria-pressed', fileEditorDiffExpandUnchangedForItem(item) ? 'true' : 'false');
 }
 
 async function openEditorFind(host = null) {
@@ -435,6 +435,7 @@ function toggleEditorWrap() {
 function setDiffExpandUnchanged(enabled) {
   diffExpandUnchanged = enabled === true;
   storageSet('yolomux.diffExpandUnchanged', diffExpandUnchanged ? '1' : '0');
+  fileEditorDiffExpandOverrides.clear();
   document.querySelectorAll('.file-editor-panel').forEach(panel => {
     const item = panel.dataset.layoutItem || fileEditorItemFor(panel.dataset.filePath || '');
     const path = fileItemPath(item);
@@ -448,6 +449,26 @@ function setDiffExpandUnchanged(enabled) {
 
 function toggleDiffExpandUnchanged() {
   setDiffExpandUnchanged(!diffExpandUnchanged);
+}
+
+function fileEditorDiffExpandUnchangedForItem(item = null) {
+  if (item && fileEditorDiffExpandOverrides.has(item)) return fileEditorDiffExpandOverrides.get(item) === true;
+  return diffExpandUnchanged;
+}
+
+function setFileEditorDiffExpandUnchangedForItem(path, item, enabled) {
+  if (!isFileEditorItem(item)) return;
+  fileEditorDiffExpandOverrides.set(item, enabled === true);
+  const panel = panelNodes.get(item);
+  const state = openFiles.get(path);
+  if (panel) updateFileEditorDiffExpandButton(panel.querySelector('.file-editor-diff-expand-panel'), path, state, item);
+  if (panel && state?.kind === 'text' && editorViewModeFor(path, item) === 'diff' && openFileDiffAvailable(state)) {
+    renderFileEditorPanel(panel, item);
+  }
+}
+
+function toggleFileEditorDiffExpandUnchangedForItem(path, item) {
+  setFileEditorDiffExpandUnchangedForItem(path, item, !fileEditorDiffExpandUnchangedForItem(item));
 }
 
 function setEditorLineNumbersEnabled(enabled) {

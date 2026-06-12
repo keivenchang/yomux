@@ -763,13 +763,14 @@ function dockviewSyncHeaderActionReservations() {
     const reservedWidth = width > 0 ? width + 8 : 0;
     const tabCount = group.querySelectorAll('.dv-tabs-container > .dv-tab').length;
     const headerWidth = Math.floor(header.getBoundingClientRect?.().width || header.clientWidth || 0);
-    const maxTabWidth = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--pane-tab-width')) || 180;
+    const rootStyle = getComputedStyle(document.documentElement);
+    const maxTabWidth = Number.parseFloat(rootStyle.getPropertyValue('--pane-tab-width')) || 180;
+    const minTabWidth = Number.parseFloat(rootStyle.getPropertyValue('--dockview-tab-min-inline-size')) || 64;
     let tabWidth = maxTabWidth;
     if (tabCount > 1 && headerWidth > 0) {
-      const targetTabsPerRow = Math.ceil(tabCount / 2);
-      const rowGaps = Math.max(0, targetTabsPerRow - 1);
-      const fitWidth = Math.floor((headerWidth - reservedWidth - rowGaps) / targetTabsPerRow);
-      tabWidth = Math.min(maxTabWidth, Math.max(120, fitWidth));
+      const rowGaps = Math.max(0, tabCount - 1);
+      const fitWidth = Math.floor((headerWidth - reservedWidth - rowGaps) / tabCount);
+      tabWidth = Math.min(maxTabWidth, Math.max(minTabWidth, fitWidth));
     }
     header.style.setProperty('--dockview-header-actions-reserved-inline-size', reservedWidth > 0 ? `${reservedWidth}px` : '0px');
     header.style.setProperty('--dockview-tab-inline-size', `${tabWidth}px`);

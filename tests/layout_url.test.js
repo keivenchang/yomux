@@ -434,6 +434,7 @@ globalThis.__layoutTestApi = {
   fileExplorerIndexBadgeText,
   gitStatusRowClass,
   fileEditorGitActionControlsVisible,
+  fileStateCanRenderDiffView,
   diffModeShouldFallBackToEdit,
   setFileExplorerIndexedDirsForTest(paths) { setFileExplorerIndexedDirs(paths); },
   setFileExplorerIndexStatusForTest(root, status) { fileExplorerIndexStatus.set(normalizeStoredFileExplorerIndexedDir(root), status); },
@@ -771,6 +772,8 @@ globalThis.__layoutTestApi = {
   infoBranchRows,
   fileContextMenuState,
   fileEditorItemFor,
+  fileEditorCopyItemFor,
+  fileEditorDiffPreviewItemFor,
   fileEntryChanged,
   fileItemPath,
   filePanelItemsForPath,
@@ -815,7 +818,6 @@ globalThis.__layoutTestApi = {
   repoInfoPopoverHtml,
   fileTreeRepoSyncMeta,
   fileTreeDisplayParts,
-  setUploadedFilesCollapsedForTest(value) { uploadedFilesCollapsed = Boolean(value); },
   setChangesFolderCollapsedForTest(keys) { changesFolderCollapsed = new Set((keys || []).map(String)); },
   changesFolderCollapsedForTest() { return Array.from(changesFolderCollapsed).sort(); },
   changesRepoCollapsedForTest() { return Array.from(changesRepoCollapsed).sort(); },
@@ -1026,12 +1028,17 @@ globalThis.__layoutTestApi = {
   setFileExplorerSessionFilesPayloadForTest(payload) {
     fileExplorerSessionFilesPayload = payload;
   },
+  sessionFilesPayloadForTest() {
+    return fileExplorerSessionFilesPayload;
+  },
   setSessionFilesCachePayloadForTest(session, payload) {
     fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {
       payload: {...payload, session},
       signature: sessionFilesPayloadSignatureForPayload(payload),
     });
   },
+  applySessionFilesPayloadFromPushForTest: applySessionFilesPayloadFromPush,
+  sessionFilesPushRequestMatchesCurrentForTest: sessionFilesPushRequestMatchesCurrent,
   changedFileOwnerSessionForPathForTest: changedFileOwnerSessionForPath,
   fileTreeChangedAncestorStatsForTest(payload) {
     return Array.from(fileTreeChangedAncestorStats(payload).entries()).map(([path, stats]) => [path, {...stats}]);
@@ -1947,8 +1954,8 @@ test('t@1665', () => {
   assert.equal(api.editorViewModeFor(changedPath, changedItem), 'diff', 'opening from Modified files flips the shared editor item to diff mode');
   assert.equal(api.openFileDiffAvailable({kind: 'text', diffLoaded: true, diff: ''}), false, 'unchanged files are not diffable');
   assert.equal(api.openFileDiffAvailable({kind: 'text', diffLoaded: true, diff: 'diff --git a/a b/a'}), true, 'changed repo files are diffable');
-  assert.equal(api.openFileDiffAvailable({kind: 'text', diffLoaded: true, untracked: true, diff: 'diff --git a/a b/a'}), false, 'untracked/all-added files do not auto-open as all-green diffs');
-  assert.equal(api.openFileDiffAvailable({kind: 'text', diffLoaded: true, diffOriginal: '', diff: 'diff --git a/a b/a\n--- /dev/null\n+++ b/a\n@@\n+one'}), false, 'new-file diffs do not count as normal editable diffs');
+  assert.equal(api.openFileDiffAvailable({kind: 'text', diffLoaded: true, untracked: true, diff: 'diff --git a/a b/a'}), true, 'untracked/all-added files can render as Differ row diffs');
+  assert.equal(api.openFileDiffAvailable({kind: 'text', diffLoaded: true, diffOriginal: '', diff: 'diff --git a/a b/a\n--- /dev/null\n+++ b/a\n@@\n+one'}), true, 'new-file diffs can render as Differ row diffs');
   const unavailableDiffState = {kind: 'text', diffLoaded: false, diffLoading: true, diff: 'stale'};
   api.markOpenFileDiffUnavailable(unavailableDiffState, 'not tracked');
   assert.equal(unavailableDiffState.diffLoaded, true, 'diff-unavailable is a completed attempt');
@@ -2022,6 +2029,8 @@ test('t@1665', () => {
   // (empty HEAD-vs-working diff) must NOT force-exit diff mode — the FROM/TO sha ref picker has to stay
   // reachable so the user can compare ARBITRARY refs. A clean README.md (many commits, no working changes)
   // used to snap back to edit and hide the picker entirely. codePath is in diff mode here.
+  assert.equal(api.fileStateCanRenderDiffView(codePath, trackedHistoryState({diffLoaded: true, diff: ''})), true, 'a clean file WITH useful git history can still render the Diff editor shell and ref picker');
+  assert.equal(api.fileStateCanRenderDiffView(codePath, trackedHistoryState({diffLoaded: true, diffUnavailable: true, diff: ''})), false, 'a diff transport/error state does not render the Diff editor shell just because history exists');
   assert.equal(api.diffModeShouldFallBackToEdit(codePath, trackedHistoryState({diffLoaded: true, diff: ''}), codeItem), false, 'a clean file WITH useful git history stays in diff mode so the FROM/TO ref picker stays reachable');
   assert.equal(api.diffModeShouldFallBackToEdit(codePath, {kind: 'text', gitRoot: '/repo/app', gitTracked: true, gitHasHistory: false, gitHistory: [], diffLoaded: true, diff: ''}, codeItem), true, 'a file WITHOUT useful history still falls back to edit when its diff is empty');
   assert.equal(api.diffModeShouldFallBackToEdit(codePath, {kind: 'text', gitTracked: true, gitHasHistory: true, gitHistory: fileHistory, diffLoaded: true, diff: 'diff --git a/a b/a'}, codeItem), true, 'files outside a repo cannot remain in Differ mode even with stale useful-history metadata');
@@ -2321,6 +2330,9 @@ test('t@1869', () => {
   const statusRefreshBody = source.slice(statusRefreshStart, statusRefreshEnd);
   assert.ok(statusRefreshBody.includes('if (fetched.missing)'), 'open-file refresh only marks missing after an explicit missing result');
   assert.ok(statusRefreshBody.includes('markOpenFileExternalError'), 'open-file refresh keeps network/list errors separate from deletion');
+  assert.ok(statusRefreshBody.includes('openFileBackgroundReloadShouldDefer(path, state)'), 'background open-file refresh defers reload while the edited file has focus or was just saved');
+  assert.ok(source.includes('function fileEditorPathHasFocus(path)') && source.includes('fileEditorPanelsForPath(path).some(panel => panel?.contains?.(active))'), 'background reload deferral detects focus inside any same-file editor panel');
+  assert.ok(source.includes('function markOpenFileReloadDeferred(path, state, entry)') && source.includes('state.externalReloadDeferred'), 'deferred background reload marks external state instead of replacing the active document');
 });
 
 test('t@2069', () => {
@@ -2701,7 +2713,8 @@ test('t@2355', () => {
   assert.equal(source.includes("const signature = codeMirrorConfigSignature(path, {mode: 'diff', layout, original, from: state.diffFromRef, to: state.diffToRef});\n  installCodeMirrorDiffResizeObserver"), false, 'diff resize observer is not installed before the rebuild decision');
   assert.ok(/function openFileQuickOpenPath\(path, options = \{\}\)[\s\S]*const targetSlot = fileQuickOpenTargetSlot\(\);[\s\S]*openedItem = await openFileInEditor\(path, \{name: label\}, targetSlot[\s\S]*\? \{targetSlot, userInitiated: true\}[\s\S]*: \{userInitiated: true\}\)/.test(source), 'quick-open normal file opens pass the active pane target slot');
   assert.ok(/function fileQuickOpenTargetSlot\(\)\s*\{\s*return focusedActivationSlot\(\);/.test(source), 'DOIT.56 N2: quick-open uses the shared focused-pane activation target');
-  assert.ok(/function slotForTabActivation\(item\)\s*\{[\s\S]*return focusedActivationSlot\(\) \|\| largestNonFileExplorerPaneSlot\(\)/.test(source), 'DOIT.56 N2: new virtual/file tabs prefer the focused non-Finder pane before largest-pane fallback');
+  assert.ok(/function fileEditorActivationSlot\(\)[\s\S]*focusedActivationSlot\(\)[\s\S]*lastActiveNonFileExplorerPaneItem[\s\S]*slotForSession\(lastActiveNonFileExplorerPaneItem\)/.test(source), 'DOIT.56 N2: file opens remember the last active non-Finder pane when Differ itself has focus');
+  assert.ok(/function slotForTabActivation\(item\)\s*\{[\s\S]*return fileEditorActivationSlot\(\) \|\| largestNonFileExplorerPaneSlot\(\)/.test(source), 'DOIT.56 N2: new virtual/file tabs prefer the focused non-Finder pane before largest-pane fallback');
   assert.ok(/async function openFileEditorPane\(path, options = \{\}\)[\s\S]*const activationSlot = slotForTabActivation\(item\);[\s\S]*await moveSessionToSlot\(item, activationSlot/.test(source), 'DOIT.56 N2: generic file opens share the same focused-pane activation target');
   assert.ok(/if \(options\.split === true\)[\s\S]*targetZone: targetSlot \? 'middle' : 'right'/.test(source), 'quick-open split-open keeps its explicit split behavior');
   assert.ok(source.includes('focusQuickOpenedFile(openedItem);'), 'quick-open focuses the opened file after the async open resolves');
@@ -2814,6 +2827,8 @@ test('file editor restore dispatches CodeMirror scroll snapshot for long documen
   assert.strictEqual(dispatches[0].effects, scrollSnapshot, 'restore dispatches CodeMirror scrollSnapshot instead of relying only on raw scrollTop');
   assert.equal(scrollDOM.scrollTop, 960);
   assert.equal(scrollDOM.scrollLeft, 12);
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(/function restoreFileEditorPanelViewState[\s\S]*scrollStillAtTarget[\s\S]*requestAnimationFrame\(\(\) => measuredRestore\(true\)\)[\s\S]*requestAnimationFrame\(\(\) => requestAnimationFrame\(\(\) => measuredRestore\(true\)\)\)/.test(source), 'delayed CodeMirror scroll restores are guarded so user scrolling during diff load is not snapped back');
 });
 
 test('t@2463', () => {
@@ -2938,6 +2953,15 @@ test('t@2560', () => {
   assert.equal(api.tabTypeForItem('image:/home/test/screen.png').key, 'image-viewer');
   assert.equal(api.tabTypeForItem('file:/home/test/README.md').key, 'file-editor');
   assert.equal(api.fileItemPath('image:/home/test/screen.png'), '/home/test/screen.png');
+  const duplicateEditorItem = api.fileEditorCopyItemFor('/home/test/README.md');
+  assert.notEqual(duplicateEditorItem, api.fileEditorItemFor('/home/test/README.md'), 'secondary editor tabs get their own layout item id');
+  assert.equal(api.tabTypeForItem(duplicateEditorItem).key, 'file-editor');
+  assert.equal(api.fileItemPath(duplicateEditorItem), '/home/test/README.md', 'secondary editor tabs still map to the same backing file path');
+  assert.equal(api.resolveLayoutItem(duplicateEditorItem), duplicateEditorItem, 'secondary editor tab ids restore from the layout URL');
+  const differPreviewItem = api.fileEditorDiffPreviewItemFor('/home/test/README.md');
+  assert.equal(api.tabTypeForItem(differPreviewItem).key, 'file-editor');
+  assert.equal(api.fileItemPath(differPreviewItem), '/home/test/README.md', 'Differ preview tabs map to the same backing file path');
+  assert.equal(api.resolveLayoutItem(differPreviewItem), differPreviewItem, 'Differ preview tab ids restore from the layout URL');
   api.setSessionFilesPayloadForTest({
     session: '1',
     loaded: true,
@@ -3141,7 +3165,8 @@ test('t@2560', () => {
   assert.ok(/changes-repo-refs[\s\S]*data-diff-ref-from[\s\S]*data-diff-ref-to/.test(emptyExplicitRepoHtml), 'empty explicit repo section still exposes FROM/TO controls');
   assert.ok(emptyExplicitRepoHtml.includes('No Differ results for this session.'), 'empty explicit repo section explains that the selected refs have no visible file rows');
   assert.equal(emptyExplicitRepoHtml.includes('data-open-change-file='), false, 'empty explicit repo section does not invent transcript-only file rows');
-  assert.ok(changedFilesSource.includes("panel.addEventListener('dblclick', async event => {"), 'modified-file rows open from a double-click handler');
+  assert.equal(changedFilesSource.includes("panel.addEventListener('dblclick', async event => {"), false, 'modified-file rows no longer require double-click to open');
+  assert.ok(/panel\.addEventListener\('click', async event => \{[\s\S]*?data-open-change-file[\s\S]*?updateFileTreeSelectionFromClick[\s\S]*?if \(selectionOnly\) return[\s\S]*?openChangedFileInDiff/.test(changedFilesSource), 'single-clicking a Differ file row selects it and opens the reusable diff tab unless it is a modifier-selection click');
   const compactChangeHtml = api.changesGroupsSnapshotHtmlForTest([
     {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1},
   ], {compact: true});
@@ -3162,11 +3187,14 @@ test('t@2560', () => {
   assert.equal(changesHtml.includes('>codex<'), false, 'changed-file rows do not spell out the agent kind');
   assert.ok(changesHtml.includes('data-open-change-file="/repo/app/src/new.py"'));
   assert.ok(changesHtml.includes('data-open-change-status="A"'), 'changed-file clicks carry status for deleted-file diff opens');
-  assert.ok(changedFilesSource.includes("const isAddedChange = normalizedStatus === 'A' || normalizedStatus === 'U' || normalizedStatus === '?';"), 'added/untracked changed files open through editable mode first');
-  assert.ok(changedFilesSource.includes("const isTouchedOnly = normalizedStatus === 'T';"), 'touched-only transcript rows are recognized separately from diffable rows');
-  assert.ok(changedFilesSource.includes("const initialMode = isAddedChange || isTouchedOnly ? 'edit' : 'diff';"), 'added/untracked/touched rows open through editable mode first');
-  assert.ok(changedFilesSource.includes("viewMode: initialMode"), 'non-diff rows fall back to normal editor mode instead of forcing diff');
-  assert.ok(/async function openChangedFileInDiff\([^]*?const payloadRepoRefs = \(\(\) => \{[^]*?\}\)\(\);[\s\S]*?noteFileExplorerChangesSessionInteraction\(ownerSession\)[\s\S]*?openFileInEditor/.test(changedFilesSource), 'opening a changed-file row commits its owner session to the Differ panel after preserving row FROM/TO refs');
+  assert.equal(changedFilesSource.includes("const isTouchedOnly = normalizedStatus === 'T';"), false, 'touched-only transcript rows no longer hard-bypass the Diff editor');
+  assert.ok(changedFilesSource.includes("const openDiffMode = options.openMode !== 'edit';"), 'ordinary Differ row opens build the CodeMirror diff view by default');
+  assert.ok(changedFilesSource.includes("if (openDiffMode) setFileEditorDiffExpandUnchangedForItem(path, item, false);"), 'ordinary Differ row opens start collapsed without changing the global diff-expand preference');
+  assert.ok(changedFilesSource.includes("const initialMode = openDiffMode ? 'diff' : 'edit';"), 'Differ rows start in Diff mode and fall back only after the diff payload proves unavailable');
+  assert.ok(changedFilesSource.includes("viewMode: initialMode"), 'changed-file rows set the editor mode explicitly');
+  assert.ok(/async function openChangedFileInDiff\([^]*?reusableFileEditorDiffPreviewItem\(path\)[^]*?const payloadRepoRefs = \(\(\) => \{[^]*?\}\)\(\);[\s\S]*?noteFileExplorerChangesSessionInteraction\(ownerSession\)[\s\S]*?fileEditorActivationSlot\(\)[\s\S]*?openFileInEditor/.test(changedFilesSource), 'opening a changed-file row commits its owner session, preserves row FROM/TO refs, targets the active editor pane, and reuses the Differ preview tab');
+  assert.ok(/if \(!openDiffMode\) \{[\s\S]*?renderOpenFilePath\(path\);[\s\S]*?void refreshOpenFileDiff\(path, \{silent: true, renderOnComplete: false, \.\.\.payloadRepoRefs\}\);[\s\S]*?return;[\s\S]*?\}/.test(changedFilesSource), 'non-diffable rows prefetch diff data without the async repaint that can fight live scrolling');
+  assert.ok(/diffReady && fileStateCanRenderDiffView\(path, current\)[\s\S]*setFileEditorViewMode\(path, 'diff', item\)[\s\S]*setFileEditorViewMode\(path, 'edit', item\)[\s\S]*diff unavailable:/.test(changedFilesSource), 'failed or non-renderable diff opens visibly fall back to edit mode');
   const touchedOnlyHtml = api.changesGroupsSnapshotHtmlForTest([
     {session: '1', agent: 'codex', status: 'T', repo: '/repo/app', path: 'src/merged.py', abs_path: '/repo/app/src/merged.py', mtime: 100, source: 'transcript'},
   ], {compact: true});
@@ -3200,8 +3228,9 @@ test('t@2560', () => {
   assert.ok(/function bindChangedFileRowBehaviors\([\s\S]*?bindFileImagePreview\(row, path/.test(changedFilesSource), 'C5: image rows get the Finder hover preview');
   assert.equal(changedFilesSource.includes('function selectChangedFileRow('), false, 'Differ no longer has bespoke single-row selected state');
   assert.equal(changedFilesSource.includes('function showChangedFileContextMenu('), false, 'Differ file rows no longer fork a safe-only context menu');
-  assert.ok(/data-open-change-file[\s\S]{0,260}updateFileTreeSelectionFromClick\(fileRow,\s*fileRow\.dataset\.path/.test(changedFilesSource), 'Differ click selection routes through the shared Finder selection parent');
-  assert.ok(/data-open-change-file[\s\S]{0,360}showFileTreeContextMenu\(fileRow,\s*path,\s*changedFileRowEntry\(fileRow\)/.test(changedFilesSource), 'Differ file right-click routes through the shared Finder context menu, including Delete');
+  assert.ok(/data-open-change-file[\s\S]{0,420}updateFileTreeSelectionFromClick\(fileRow,\s*fileRow\.dataset\.path/.test(changedFilesSource), 'Differ click selection routes through the shared Finder selection parent');
+  assert.ok(/data-open-change-file[\s\S]{0,1400}showFileTreeContextMenu\(fileRow,\s*path,\s*changedFileRowEntry\(fileRow\)[\s\S]*t\('contextmenu\.openNewDiffEditor'\)[\s\S]*forceNewTab: true[\s\S]*openMode: 'diff'[\s\S]*t\('contextmenu\.openNewEditor'\)[\s\S]*openFileInAdditionalEditorTab/.test(changedFilesSource), 'Differ file right-click routes through the shared Finder context menu and orders new Diff Editor before new Editor');
+  assert.equal(/Open file in editor|Open file in diff/.test(changedFilesSource), false, 'Differ file context menu no longer hardcodes the old labels');
   assert.ok(/async function deleteFileTreePath[\s\S]*fetchSessionFiles\(\{destination: 'finder', session: fileExplorerSessionFilesTargetSession\(\), silent: true, force: true\}\)/.test(changedFilesSource), 'shared delete refreshes session-files so Differ rows disappear immediately');
   assert.ok(changedFilesSource.includes('function showChangedDirectoryContextMenu('), 'C5: Modified-files folder rows have a right-click menu');
   const dirCtxStart = changedFilesSource.indexOf('function showChangedDirectoryContextMenu(');
@@ -3216,7 +3245,6 @@ test('t@2560', () => {
   assert.ok(changedFilesSource.includes("multiple ? 'Copy full paths' : 'Copy full path'"), 'Finder context menu uses Copy full path label');
   const fileExplorerSource = (fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8') + fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8'));
   assert.equal(/Copy raw paths?/.test(fileExplorerSource), false, 'Finder context menu no longer exposes a duplicate raw path action');
-  api.setUploadedFilesCollapsedForTest(true);
   api.setSessionFilesPayloadForTest({
     session: '1',
     loaded: true,
@@ -3224,20 +3252,21 @@ test('t@2560', () => {
     repos: [{repo: '/repo/app', count: 1, touched_count: 1, added: 2, removed: 1}],
     files: [
       {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1},
-      {session: '1', agent: 'codex', status: 'A', repo: '/repo/app', path: '20260531-028.png', abs_path: '/repo/app/20260531-028.png', mtime: 200, added: 0, removed: 0, uploaded: true},
+      {session: '1', agent: 'codex', status: 'A', repo: '/repo/app', path: '.uploads/20260531-028.png', abs_path: '/repo/app/.uploads/20260531-028.png', mtime: 200, added: 0, removed: 0, uploaded: true},
     ],
   });
   api.setFileExplorerModeForTest('diff');
   const uploadedCollapsedHtml = api.fileExplorerChangesPanelHtml();
-  assert.ok(uploadedCollapsedHtml.includes('Uploaded files (1)'), 'uploaded files render under a named disclosure group');
-  assert.equal(uploadedCollapsedHtml.includes('20260531-028.png</span>'), false, 'uploaded files are collapsed by default');
-  api.setUploadedFilesCollapsedForTest(false);
+  assert.equal(uploadedCollapsedHtml.includes('Uploaded files'), false, 'uploaded files do not render in a synthetic top-level group');
+  assert.ok(uploadedCollapsedHtml.includes('/repo/app'), 'uploaded files stay under their repo section');
+  assert.ok(uploadedCollapsedHtml.includes('data-changes-folder-toggle="/repo/app/.uploads"'), 'uploaded files render under the repo-local .uploads directory row');
+  assert.ok(uploadedCollapsedHtml.includes('file-tree-row kind-dir collapsed'), 'repo-local .uploads directories are collapsed by default');
+  assert.equal(uploadedCollapsedHtml.includes('20260531-028.png</span>'), false, 'default-collapsed .uploads hides uploaded leaves');
+  api.setChangesFolderCollapsedForTest([]);
   const uploadedExpandedHtml = api.fileExplorerChangesPanelHtml();
-  assert.ok(uploadedExpandedHtml.includes('20260531-028.png</span>'), 'expanded uploaded group shows uploaded rows');
-  const uploadedSectionHtml = uploadedExpandedHtml.slice(uploadedExpandedHtml.indexOf('changes-uploaded-group'));
-  assert.ok(uploadedSectionHtml.includes('file-tree-row'), 'expanded uploaded group uses the shared Finder/Differ tree row renderer');
-  assert.ok(uploadedSectionHtml.includes('file-tree-icon file-icon-image'), 'uploaded image rows use the shared image icon class');
-  assert.equal(uploadedSectionHtml.includes('changes-file-row'), false, 'uploaded rows no longer use the legacy row renderer with separators');
+  assert.ok(uploadedExpandedHtml.includes('20260531-028.png</span>'), 'expanded .uploads folder shows uploaded rows');
+  assert.ok(uploadedExpandedHtml.includes('file-tree-icon file-icon-image'), 'uploaded image rows use the shared image icon class');
+  assert.equal(uploadedExpandedHtml.includes('changes-file-row'), false, 'uploaded rows no longer use the legacy row renderer with separators');
   assert.equal(/changes-file-path[^>]*>20260531-028\.png</.test(uploadedExpandedHtml), false, 'uploaded Differ rows do not repeat the basename as the secondary path line');
   api.setFileExplorerModeForTest('files');
   api.setFileExplorerSessionFilesPayloadForTest({
@@ -3909,9 +3938,9 @@ test('t@2560', () => {
   assert.equal(appSource.includes('Math.max(0.8'), false, 'diff overview does not inflate one-line ticks in percent space, which made adjacent red/green bands overlap');
   // a diff-only toolbar toggle shows ALL context (omits collapseUnchanged) vs collapsing runs.
   assert.ok(appSource.includes('file-editor-diff-expand-panel'), 'B4: the diff toolbar has an expand/collapse-all-unchanged toggle');
-  assert.ok(/function toggleDiffExpandUnchanged[\s\S]*?setDiffExpandUnchanged/.test(appSource), 'B4: the toggle flips + persists diffExpandUnchanged and re-renders');
-  assert.ok(/diffExpandUnchanged \? \{\} : \{collapseUnchanged: \{margin: 3, minSize: 8\}\}/.test(appSource), 'B4: expanded omits collapseUnchanged so every unchanged line shows (both diff layouts)');
-  assert.ok(/mode: 'diff'[^;]*expand: diffExpandUnchanged/.test(appSource), 'B4: the diff config signature includes expand so toggling rebuilds the diff view');
+  assert.ok(/function toggleFileEditorDiffExpandUnchangedForItem[\s\S]*?setFileEditorDiffExpandUnchangedForItem/.test(appSource), 'B4: the panel toggle flips diff context expansion for the current editor item');
+  assert.ok(/expandUnchanged \? \{\} : \{collapseUnchanged: \{margin: 3, minSize: 8\}\}/.test(appSource), 'B4: expanded omits collapseUnchanged so every unchanged line shows (both diff layouts)');
+  assert.ok(/mode: 'diff'[^;]*expand: expandUnchanged/.test(appSource), 'B4: the diff config signature includes the current item expansion state so toggling rebuilds the diff view');
   const diffLayoutFn = appSource.slice(appSource.indexOf('function codeMirrorDiffLayout('), appSource.indexOf('function codeMirrorDiffLayout(') + 800);
   assert.ok(diffLayoutFn.includes("return 'inline';"), '#33: the diff always uses the unified (inline) layout');
   assert.equal(diffLayoutFn.includes("'side'"), false, '#33: the wide-pane side-by-side layout (which numbered deleted rows) is no longer selected, so deleted rows are unnumbered widgets at every width');
@@ -3921,15 +3950,15 @@ test('t@2560', () => {
   assert.equal(appSource.includes('view.lineBlockAt(doc.line(line).from)'), false, '#48: diff overview must not infer deleted-row color from CodeMirror pixel gaps');
   assert.ok(/if \(state\.diffLoading && state\._diffLoadingPromise\) return state\._diffLoadingPromise/.test(appSource), '#43: concurrent diff loads are deduped (callers await one in-flight load), so the panel never renders against an un-loaded original');
   assert.ok(/if \(!state\.diffLoaded && !state\.diffUnavailable\) \{[\s\S]{0,320}await refreshOpenFileDiff\(path, \{silent: true, renderOnComplete: false\}\);[\s\S]{0,160}if \(panel\._cmGeneration !== generation\) return null/.test(appSource), '#43/Q4: unresolved diffs await the deduped payload and continue in the same generation instead of flashing an edit view');
-  const unresolvedDiffBranch = appSource.slice(appSource.indexOf('async function ensureCodeMirrorDiffPanel('), appSource.indexOf('if (!openFileDiffAvailable(state))', appSource.indexOf('async function ensureCodeMirrorDiffPanel(')));
+  const unresolvedDiffBranch = appSource.slice(appSource.indexOf('async function ensureCodeMirrorDiffPanel('), appSource.indexOf('if (!fileStateCanRenderDiffView(path, state))', appSource.indexOf('async function ensureCodeMirrorDiffPanel(')));
   assert.equal(unresolvedDiffBranch.includes("forceMode: 'edit'"), false, 'unresolved diff payloads must not bail to a temporary edit-mode CodeMirror view');
   assert.ok(/CodeMirror diff language parser failed; retrying plain diff editor/.test(appSource), 'diff CodeMirror build has the same parser-failure plain retry safety net as edit mode');
   const diffPanelBody = appSource.slice(appSource.indexOf('async function ensureCodeMirrorDiffPanel('), appSource.indexOf('async function ensureCodeMirrorPanel(', appSource.indexOf('async function ensureCodeMirrorDiffPanel(')));
   assert.ok(/catch \(error\) \{[\s\S]{0,360}CodeMirror diff editor unavailable; showing read-only raw text[\s\S]{0,260}container\.hidden = true;[\s\S]{0,260}return false;/.test(diffPanelBody), 'diff CodeMirror build failures fall back to raw text instead of leaving an emptied blank pane');
   assert.ok(/ensureCodeMirrorPanel\(panel, item, path, state\)\.then\(loaded => \{[\s\S]{0,160}renderFileEditorRawPane\(rawPane, path, state\.content\);[\s\S]{0,160}\}\)\.catch\(error => \{[\s\S]{0,360}renderFileEditorRawPane\(rawPane, path, state\.content\);/.test(appSource), 'CodeMirror render promise rejections are caught and fall back to raw text');
-  assert.equal(appSource.includes("fileEditorEmptyState('No diff'"), false, 'clean selected refs render the normal editor instead of a No diff empty state');
-  assert.ok(/if \(!openFileDiffAvailable\(state\)\)[\s\S]{0,360}return ensureCodeMirrorPanel\(panel, item, path, state, \{forceMode: 'edit'\}\)/.test(appSource), 'clean selected refs fall back to the normal editable CodeMirror view');
-  assert.ok(/function diffModeShouldFallBackToEdit[\s\S]*!state\.diffLoading[\s\S]*!openFileDiffAvailable\(state\)[\s\S]*!fileStateHasUsefulGitHistory\(state\)/.test(appSource), 'once a diff load confirms no usable diff, diff mode exits to edit ONLY when the file has no useful history — a file WITH history stays in diff mode so the FROM/TO ref picker is reachable');
+  assert.equal(appSource.includes("fileEditorEmptyState('No diff'"), false, 'clean selected refs do not render a No diff empty state');
+  assert.ok(/if \(!fileStateCanRenderDiffView\(path, state\)\)[\s\S]{0,360}return ensureCodeMirrorPanel\(panel, item, path, state, \{forceMode: 'edit'\}\)/.test(appSource), 'only truly unavailable diff views fall back to the normal editable CodeMirror view');
+  assert.ok(/function diffModeShouldFallBackToEdit[\s\S]*!state\.diffLoading[\s\S]*!fileStateCanRenderDiffView\(path, state\)/.test(appSource), 'once a diff load confirms no renderable diff view, diff mode exits to edit; a file WITH history stays in diff mode so the FROM/TO ref picker is reachable');
   const refreshDiffStart = appSource.indexOf('async function refreshOpenFileDiff(');
   const openFileEditorStart = appSource.indexOf('async function openFileInEditor(', refreshDiffStart);
   assert.ok(refreshDiffStart > 0 && openFileEditorStart > refreshDiffStart, '#43: refreshOpenFileDiff body is locatable');
@@ -3938,7 +3967,7 @@ test('t@2560', () => {
   const diffPanelRenderIndex = refreshDiffBody.indexOf('renderFileEditorPanel(panel, item);');
   assert.ok(diffLoadingClearIndex >= 0 && diffPanelRenderIndex > diffLoadingClearIndex, '#43: diff-load completion clears diffLoading before repainting the panel, so the expanded-context toolbar button is not left disabled');
   assert.ok(refreshDiffBody.includes("options.renderOnComplete !== false && editorViewModeFor(path, item) === 'diff'"), 'awaited diff builders can suppress the completion re-render that otherwise supersedes their generation');
-  assert.equal(api.openFileDiffAvailable({kind: 'text', diffLoaded: true, untracked: true, diff: 'diff --git a/a b/a\n--- /dev/null\n+++ b/a\n@@\n+x'}), false, '#43: an untracked/all-added file reports no diff, so it never enters diff view');
+  assert.equal(api.openFileDiffAvailable({kind: 'text', diffLoaded: true, untracked: true, diff: 'diff --git a/a b/a\n--- /dev/null\n+++ b/a\n@@\n+x'}), true, '#43: an untracked/all-added Differ row reports a displayable diff');
   assert.ok(/function openDraggedFilesInEditor[\s\S]*await refreshOpenFileDiff\(path[\s\S]*openFileDiffAvailable\(draggedState\)[\s\S]*setFileEditorViewMode\(path, 'diff'/.test(appSource), '#39: a dragged CHANGED file opens in the same unified diff view as double-click (routes through the shared refreshOpenFileDiff/diff path)');
   assert.ok(appSource.includes('data-file-explorer-new-folder'), 'Finder header exposes new-folder action');
   const focusPanelBody = appSource.slice(appSource.indexOf('function setFocusedPanelItem('), appSource.indexOf('let autoFocusNavTimer'));
@@ -3989,6 +4018,29 @@ test('t@2560', () => {
   assert.ok(/function sessionFilesCacheKey\(session\)[\s\S]*sessionFilesRequestQueryString\(\)/.test(appSource), 'Differ cached payloads are keyed by session plus effective FROM/TO/refs query');
   assert.ok(/const cached = fileExplorerSessionFilesCache\.get\(sessionFilesCacheKey\(session\)\)/.test(appSource), 'Differ session switches do not reuse payloads from a different ref pair');
   assert.ok(/fileExplorerSessionFilesCache\.set\(sessionFilesCacheKey\(session\), \{payload: nextPayload, signature\}\)/.test(appSource), 'Differ stores cached payloads under the same ref-aware key it reads');
+  assert.ok(/function applySessionFilesPayloadFromPush\([\s\S]*sessionFilesPushRequestMatchesCurrent\(request, session\)/.test(appSource), 'SSE session-files payloads cannot overwrite the active Differ refs with a stale request');
+  const stalePushApi = loadYolomux('', ['1']);
+  stalePushApi.setFileExplorerModeForTest('diff');
+  stalePushApi.setFileExplorerChangesSelectedSessionForTest('1');
+  stalePushApi.setDiffRefsByRepoForTest('/home/test/vllm-0.22.0', {from: '0b3ba88', to: 'current'});
+  stalePushApi.setFileExplorerSessionFilesPayloadForTest({
+    session: '1',
+    loaded: true,
+    files: [],
+    repos: [{repo: '/home/test/vllm-0.22.0', count: 8, added: 270, removed: 8}],
+    errors: [],
+  });
+  assert.equal(stalePushApi.sessionFilesPushRequestMatchesCurrentForTest({
+    session: '1',
+    hours: 24,
+    from_ref: 'HEAD',
+    to_ref: 'current',
+  }, '1'), false, 'a stale HEAD/current session-files push does not match active per-repo refs');
+  assert.equal(stalePushApi.applySessionFilesPayloadFromPushForTest(
+    {session: '1', loaded: true, files: [], repos: [{repo: '/home/test/vllm-0.22.0', count: 0, added: 0, removed: 0}]},
+    {session: '1', hours: 24, from_ref: 'HEAD', to_ref: 'current'},
+  ), false, 'stale session-files push is ignored before it can replace the active Differ payload');
+  assert.equal(stalePushApi.sessionFilesPayloadForTest().repos[0].added, 270, 'ignored stale push leaves the visible Differ payload intact');
   assert.ok(/function sessionFilesPayloadIsFinderWorktree\([\s\S]*from_ref \|\| 'HEAD'[\s\S]*to_ref \|\| 'current'/.test(appSource), 'Finder file mode can preserve an already-loaded HEAD/current payload for sync planning');
   assert.ok(/fileExplorerMode !== 'diff' && sessionFilesPayloadIsFinderWorktree\(fileExplorerSessionFilesPayload, session\)/.test(appSource), 'Finder file mode does not blank the current worktree payload when committing a session');
   assert.ok(/function sessionFilesRequestQueryString\(\)[\s\S]*fileExplorerMode !== 'diff'[\s\S]*from=HEAD&to=current[\s\S]*diffRefQueryString\(\)\}\$\{sessionFilesRefsQuery\(\)\}/.test(appSource), 'Finder file mode requests only current worktree status while Differ follows selected refs');
@@ -7133,7 +7185,7 @@ test('t@6274', () => {
   const api = loadYolomux('', ['1']);
   const state = api.fileContextMenuState({kind: 'file'}, ['/repo/app/a.txt'], ['a.txt']);
   assert.equal(state.copyRelativeDisabled, false);
-  assert.equal(state.openInNewTabDisabled, true);
+  assert.equal(state.openInNewTabDisabled, false, 'text files can open a second editor tab from the shared file context menu');
   assert.equal(state.downloadDisabled, false);
   assert.equal(state.renameDisabled, false);
   assert.equal(state.deleteDisabled, false);
@@ -7142,11 +7194,11 @@ test('t@6274', () => {
 
   const readonlyApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'readonly');
   const readonlyState = readonlyApi.fileContextMenuState({kind: 'file'}, ['/repo/app/a.txt'], ['a.txt']);
-  // readonly is terminal-only — the server 403s every /api/fs/* read, so Download (and image
-  // open) are disabled in readonly to match, rather than offering a command that fails.
+  // readonly is terminal-only — the server 403s every /api/fs/* read, so Download and file tab opens
+  // are disabled in readonly to match, rather than offering a command that fails.
   assert.equal(readonlyState.downloadDisabled, true, 'readonly cannot download (server forbids /api/fs/raw)');
   const readonlyImage = readonlyApi.fileContextMenuState({kind: 'file', name: 'screen.png'}, ['/repo/app/screen.png'], ['screen.png']);
-  assert.equal(readonlyImage.openInNewTabDisabled, true, 'readonly cannot open an image in a tab (server forbids the read)');
+  assert.equal(readonlyImage.openInNewTabDisabled, true, 'readonly cannot open a file in a tab (server forbids the read)');
   assert.equal(readonlyState.renameDisabled, true);
   assert.equal(readonlyState.deleteDisabled, true);
 });
@@ -7963,6 +8015,76 @@ test('t@7020', () => {
   // A plain prompt row below is NOT part of the link.
   const promptRow = api.terminalWrappedLineLinks(term, 3);
   assert.equal(promptRow.length, 0, 'the prompt row after the URL is not merged into the link');
+});
+
+// Some TUIs hard-wrap long URLs as separate, flush-left rows at width-1 to avoid xterm auto-wrap.
+// The link provider still needs to stitch those rows into one clickable URL.
+test('t@7036', () => {
+  const api = loadYolomux();
+  const linkProviderSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
+  assert.ok(/registerLinkProvider\(\{[\s\S]*provideLinks: \(y, callback\) => \{[\s\S]*callback\(terminalWrappedLineLinks\(term, y\)\)/.test(linkProviderSource), 'xterm hover/click links use the same wrapped-line stitcher');
+  const first = 'https://claude.com/cai/oauth/authorize?client_id=abc123&scope=org%3Acreate_a';
+  const continuations = [
+    'pi_key+user%3Aprofile+user%3Ainference&redirect_uri=http%3A%2F%2FlocalhostABCDEF',
+    '%3A54545%2Fcallback&code_challenge=GSappE0',
+  ];
+  const full = `${first}${continuations.join('')}`;
+  for (const cols of [first.length, first.length + 1]) {
+    const lines = [
+      terminalLine(first, false),
+      terminalLine(continuations[0], false),
+      terminalLine(continuations[1], false),
+      terminalLine('$ ', false),
+    ];
+    const term = {cols, buffer: {active: {getLine: index => lines[index] || null}}};
+    for (const y of [1, 2, 3]) {
+      const links = api.terminalWrappedLineLinks(term, y);
+      assert.equal(links.length, 1, `zero-indent width ${cols} row ${y} resolves one stitched URL`);
+      assert.equal(links[0].text, full, `zero-indent width ${cols} row ${y} returns the full URL; got ${links[0].text}`);
+      assert.deepStrictEqual(canonical(links[0].range), {
+        start: {x: 1, y: 1},
+        end: {x: continuations[1].length, y: 3},
+      }, `zero-indent width ${cols} row ${y} underlines the full 3-row URL`);
+    }
+    assert.equal(api.terminalWrappedLineLinks(term, 4).length, 0, `zero-indent width ${cols} stops before the prompt row`);
+  }
+});
+
+// (no false merge): a fresh URL on the next flush-left row is its own link, not a continuation.
+test('t@7047', () => {
+  const api = loadYolomux();
+  const first = 'https://example.com/first';
+  const second = 'https://example.com/second';
+  const lines = [
+    terminalLine(first, false),
+    terminalLine(second, false),
+  ];
+  const term = {cols: first.length + 1, buffer: {active: {getLine: index => lines[index] || null}}};
+  const row1 = api.terminalWrappedLineLinks(term, 1);
+  const row2 = api.terminalWrappedLineLinks(term, 2);
+  assert.equal(row1.length, 1, 'fresh-next-url row 1 has one link');
+  assert.equal(row1[0].text, first, 'fresh-next-url row 1 stays separate');
+  assert.equal(row1[0].range.end.y, 1, 'fresh-next-url row 1 underline does not continue');
+  assert.equal(row2.length, 1, 'fresh-next-url row 2 has one link');
+  assert.equal(row2[0].text, second, 'fresh-next-url row 2 stays separate');
+  assert.equal(row2[0].range.start.y, 2, 'fresh-next-url row 2 starts on row 2');
+});
+
+// (no false merge): even an unterminated URL-looking row cannot absorb a flush-left continuation when
+// it did not reach the terminal edge.
+test('t@7052', () => {
+  const api = loadYolomux();
+  const lines = [
+    terminalLine('https://example.com/abc', false),
+    terminalLine('def', false),
+  ];
+  const term = {cols: 80, buffer: {active: {getLine: index => lines[index] || null}}};
+  const row1 = api.terminalWrappedLineLinks(term, 1);
+  const row2 = api.terminalWrappedLineLinks(term, 2);
+  assert.equal(row1.length, 1, 'short-edge row 1 has its own link');
+  assert.equal(row1[0].text, 'https://example.com/abc', 'short-edge row 1 does not absorb row 2');
+  assert.equal(row1[0].range.end.y, 1, 'short-edge row 1 underline stays on row 1');
+  assert.equal(row2.length, 0, 'short-edge row 2 has no standalone URL');
 });
 
 // (no false JOIN): a COMPLETE url at end-of-line that ends well short of the terminal's
@@ -8816,9 +8938,9 @@ test('t@7769', () => {
   const popoverCss = fs.readFileSync('static_src/css/yolomux/20_sessions_popovers.css', 'utf8');
   assert.ok(/\.panel-head\s*\{[\s\S]*?padding:\s*2px 1px 0;/.test(css), 'pane tab strip has a 1px left/right edge gap');
   assert.ok(/\.pane-tab\s*\{[\s\S]*?margin:\s*0 1px 0 0;/.test(css), 'pane tabs have a 1px horizontal gap');
-  assert.ok(/\.yolomux-dockview \.dv-tabs-container\s*\{[\s\S]*?flex-wrap:\s*wrap/.test(css), 'Dockview pane tabs keep the old wrapping YOLOmux tab-strip behavior');
+  assert.ok(/\.yolomux-dockview \.dv-tabs-container\s*\{[\s\S]*?flex-wrap:\s*nowrap/.test(css), 'Dockview pane tabs stay on one row so editor toolbars cannot cover a wrapped active tab');
   assert.ok(/\.yolomux-dockview \.dv-tabs-container\s*\{[\s\S]*?padding-inline-end:\s*var\(--dockview-header-actions-reserved-inline-size,\s*0px\)/.test(css), 'Dockview tab strips reserve measured space for the overlaid right-side action buttons');
-  assert.ok(/\.yolomux-dockview \.dv-tab\s*\{[\s\S]*?flex:\s*0 0 min\(var\(--dockview-tab-inline-size,\s*var\(--pane-tab-width\)\),\s*100%\)/.test(css), 'Dockview pane tabs use the measured header width while keeping the normal pane-tab width as the default');
+  assert.ok(/\.yolomux-dockview \.dv-tab\s*\{[\s\S]*?flex:\s*0 0 var\(--dockview-tab-inline-size,\s*var\(--pane-tab-width\)\)/.test(css), 'Dockview pane tabs use the measured one-row header width while keeping the normal pane-tab width as the default');
   assert.ok(/\.yolomux-dockview \.dv-tab > \.dockview-pane-tab\s*\{[\s\S]*?border-radius:\s*6px 6px 0 0/.test(css), 'Dockview active tabs keep the old rounded top corners');
   assert.ok(/\.yolomux-dockview \.dv-groupview\s*\{[\s\S]*?border:\s*0;/.test(css), 'Dockview groups do not add a fat pane-spacing border around the skinny sash separator');
   assert.ok(/\.yolomux-dockview \.dv-groupview\s*\{[\s\S]*?padding:\s*var\(--pane-split-gap\);/.test(css), 'Dockview groups reserve pane-spacing width inside the active ring so terminals do not render under it');
@@ -8944,7 +9066,10 @@ test('t@7847', () => {
   assert.ok(/function closeFilePreviewPopout\(path\)[\s\S]*filePreviewPopouts\.delete\(path\)[\s\S]*previewWindow\.close\?\.\(\)/.test(source), 'preview pop-out close removes the registry entry and closes the window');
   assert.ok(/function setFileEditorViewMode\(path, mode, item = null\)[\s\S]*mode === 'preview' \|\| mode === 'split'[\s\S]*closeFilePreviewPopout\(path\)/.test(fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8')), 'switching to in-editor Preview or Split closes any open pop-out preview for that file');
   assert.ok(fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8').includes("if (typeof refreshFilePreviewPopouts === 'function') refreshFilePreviewPopouts();"), 'settings refresh syncs open preview pop-outs');
-  assert.ok(/function replaceOpenFileStateFromDisk[\s\S]*renderOpenFilePath\(path\);[\s\S]*updateFilePreviewPopout\(path, loaded\.state\.content \|\| ''\)/.test((fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8') + fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8'))), 'external disk reload syncs open preview pop-outs');
+  const fileReloadSource = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8') + fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
+  assert.ok(/function replaceOpenFileStateFromDisk[\s\S]*renderOpenFilePath\(path\);[\s\S]*updateFilePreviewPopout\(path, loaded\.state\.content \|\| ''\)/.test(fileReloadSource), 'external disk reload syncs open preview pop-outs');
+  assert.ok(/function replaceOpenFileStateFromDisk[\s\S]*fileEditorTabItemsForPath\(path\)\.map[\s\S]*captureFileEditorPanelViewState\(item, panel\)[\s\S]*renderOpenFilePath\(path\);[\s\S]*restoreFileEditorPanelViewState\(item, panel\)[\s\S]*requestAnimationFrame/.test(fileReloadSource), 'external disk reload preserves per-editor cursor and scroll for every open tab of the path');
+  assert.ok(fileReloadSource.includes('function openFileBackgroundReloadShouldDefer(path, state)') && fileReloadSource.includes('openFileBackgroundReloadDeferMs'), 'push/watch reloads are deferred during active editing and immediately after save');
   assert.ok(source.includes('position: static !important;'), 'preview pop-out resets the in-pane absolute preview positioning');
   assert.ok(source.includes('display: block !important;') && source.includes('grid-template-rows: none !important;'), 'preview pop-out resets the app body grid layout');
   assert.ok(source.includes('width: 100% !important;') && source.includes('left: auto !important;'), 'preview pop-out resets split-preview geometry that would clip content to the right half');
@@ -9179,7 +9304,7 @@ test('t@8110', () => {
   assert.ok(source.includes('function fileTreeDirectoryExpanded(') && source.includes('function setFileTreeDirectoryExpanded('), 'one shared expand/collapse parent for both surfaces');
   assert.ok(/setFileTreeDirectoryExpanded[\s\S]{0,260}closest\('\.file-explorer-changes-panel'\)[\s\S]{0,220}changesFolderCollapsed[\s\S]{0,220}expandDirectoryRow/.test(source), 'the parent dispatches Differ (changesFolderCollapsed) vs Finder (expandDirectoryRow) — no per-surface key code');
   assert.ok(source.includes('setFileTreeDirectoryExpanded(leadRow, leadPath, true)') && source.includes('setFileTreeDirectoryExpanded(leadRow, leadPath, false)'), 'Right/Left route through the shared expand/collapse parent');
-  assert.ok(/intent === 'open'/.test(source) && source.includes('openChangedFileInDiff(') && source.includes('openFileInEditor(leadPath, entry)') && source.includes('openFileExplorerManualRoot(leadPath)'), 'open: Differ file -> diff, file -> editor, Finder folder -> descend');
+  assert.ok(/intent === 'open'/.test(source) && source.includes('openChangedFileInDiff(') && source.includes('openFileInEditor(leadPath, entry)') && source.includes('openFileExplorerManualRoot(leadPath)'), 'open: Differ file -> reusable collapsed diff, file -> editor, Finder folder -> descend');
   assert.ok(/intent === 'enclosing'[\s\S]{0,300}openFileExplorerManualRoot\(parent\)/.test(source), 'Cmd-Up opens the enclosing folder');
   assert.ok(/intent === 'rename'[\s\S]{0,200}beginFileTreeRename\(leadRow, leadPath, entry\)/.test(source), 'Enter renames the lead row (Finder AND Differ)');
   assert.ok(!/openChangeFile !== undefined\) return false/.test(source), 'no Differ-rename exclusion — Differ rows rename too (git mv handles tracked files)');

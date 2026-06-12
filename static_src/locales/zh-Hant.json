@@ -43,6 +43,8 @@
   "conflict.onDisk": "磁碟上的版本",
   "conflict.unsaved": "未儲存的編輯器",
   "contextmenu.copyUrl": "複製網址",
+  "contextmenu.openNewDiffEditor": "Open in a new Diff Editor",
+  "contextmenu.openNewEditor": "Open in a new Editor",
   "contextmenu.openUrl": "開啟網址",
   "debug.apiCalls": "API 呼叫",
   "debug.clear": "清除",

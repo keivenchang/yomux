@@ -70,7 +70,6 @@ const fileExplorerIndexedDirsMigratedKey = 'yolomux.fileExplorer.indexedDirs.mig
 const fileExplorerModeStorageKey = 'yolomux.fileExplorerMode.v1';
 const fileExplorerTabberCollapsedStorageKey = 'yolomux.fileExplorer.tabberCollapsed.v1';
 const legacyFileExplorerChangesHiddenStorageKey = 'yolomux.fileExplorerChangesHidden';
-const uploadedFilesCollapsedStorageKey = 'yolomux.modifiedFiles.uploadedCollapsed.v1';
 const changesFolderCollapsedStorageKey = 'yolomux.modifiedFiles.folderCollapsed.v1';
 const changesRepoCollapsedStorageKey = 'yolomux.modifiedFiles.repoCollapsed.v1';
 const fileEditorWrapStorageKey = 'yolomux.editorWrap';
@@ -246,6 +245,7 @@ const pendingFileEditorFocus = new Set();
 const paneViewState = new Map();  // layout item -> generic pane scroll state
 const pendingPaneViewStateCaptures = new Set();
 const fileEditorViewState = new Map();  // layout item -> CodeMirror scroll/selection state
+const fileEditorDiffExpandOverrides = new Map();  // layout item -> per-editor diff context expansion
 let activeFile = null;
 let sharedImageViewerPath = null;
 let fileExplorerRoot = null;
@@ -270,6 +270,7 @@ let fileEditorCursorColor = 'yellow';  // 'yellow' default; 'theme' uses the edi
 let fileEditorAutosaveEnabled = false;
 let fileEditorAutosaveDelaySeconds = 2.5;
 const fileEditorAutosaveTimers = new Map();
+const openFileBackgroundReloadDeferMs = 2000;
 let codeMirrorApiPromise = null;
 let codeMirrorBundlePromise = null;
 let preferencesSearchText = '';
@@ -278,15 +279,8 @@ const preferencesScrollRenderDeferMs = 200;
 let preferencesScrollActiveUntil = 0;
 let preferencesScrollFlushTimer = null;
 let collapsedPreferenceSections = readStoredCollapsedPreferenceSections();
-let uploadedFilesCollapsed = (() => {
-  try {
-    const value = window.localStorage?.getItem(uploadedFilesCollapsedStorageKey);
-    return value == null ? true : value !== '0';
-  } catch (_) {
-    return true;
-  }
-})();
 let changesFolderCollapsed = readStoredSet(changesFolderCollapsedStorageKey);
+const changesFolderAutoCollapsed = new Set();
 // Tabber (Finder pane 3rd mode) COLLAPSED set, keyed by synthetic node path (s_<id>/w_<i>/r_<n>).
 // The Tabber defaults to fully expanded; collapsing a node adds it here (like the Differ's
 // changesFolderCollapsed). Persisted so the open/closed tree survives reloads. Threaded through the
@@ -455,7 +449,10 @@ const prefsItemId = '__prefs__';
 const debugPaneItemId = '__debug__';
 const emptyPaneParam = '__empty_pane__';
 const fileEditorItemPrefix = 'file:';
+const fileEditorCopyItemPrefix = 'filecopy:';
+const fileEditorDiffPreviewItemPrefix = 'filediff:';
 const imageViewerItemPrefix = 'image:';
+let fileEditorCopyItemSeq = 0;
 function urlFlagEnabled(name) {
   try {
     return new URLSearchParams(location.search || '').get(name) === '1';
@@ -508,12 +505,36 @@ function makeGenerationGuard() {
   });
 }
 function fileEditorItemFor(path) { return fileEditorItemPrefix + path; }
+function fileEditorDiffPreviewItemFor(path) { return fileEditorDiffPreviewItemPrefix + path; }
+function isFileEditorDiffPreviewItem(item) {
+  return typeof item === 'string' && item.startsWith(fileEditorDiffPreviewItemPrefix);
+}
+function fileEditorDiffPreviewItemPath(item) {
+  const text = String(item || '');
+  if (!text.startsWith(fileEditorDiffPreviewItemPrefix)) return null;
+  const path = text.slice(fileEditorDiffPreviewItemPrefix.length);
+  return path.startsWith('/') ? path : null;
+}
+function fileEditorCopyItemFor(path) {
+  fileEditorCopyItemSeq += 1;
+  return `${fileEditorCopyItemPrefix}${Date.now().toString(36)}-${fileEditorCopyItemSeq.toString(36)}:${path}`;
+}
+function fileEditorCopyItemPath(item) {
+  const text = String(item || '');
+  if (!text.startsWith(fileEditorCopyItemPrefix)) return null;
+  const rest = text.slice(fileEditorCopyItemPrefix.length);
+  const separator = rest.indexOf(':');
+  const path = separator >= 0 ? rest.slice(separator + 1) : '';
+  return path.startsWith('/') ? path : null;
+}
 function imageViewerItemFor(path) { return imageViewerItemPrefix + path; }
-function filePanelTabType({key, prefix, shortLabel, terminalTitle, className, sortRank}) {
+function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTitle, className, sortRank}) {
+  const matchPrefixes = Array.isArray(prefixes) && prefixes.length ? prefixes : [prefix];
   return {
     key,
     prefix,
-    match: item => typeof item === 'string' && item.startsWith(prefix),
+    prefixes: matchPrefixes,
+    match: item => typeof item === 'string' && matchPrefixes.some(itemPrefix => item.startsWith(itemPrefix)),
     label: item => basenameOf(fileItemPath(item)),
     shortLabel,
     terminalTitle,
@@ -621,6 +642,7 @@ const TAB_TYPES = [
   filePanelTabType({
     key: 'file-editor',
     prefix: fileEditorItemPrefix,
+    prefixes: [fileEditorItemPrefix, fileEditorCopyItemPrefix, fileEditorDiffPreviewItemPrefix],
     shortLabel: () => 'Edit',
     terminalTitle: () => 'unavailable for file editor',
     sortRank: 0.75,
@@ -630,7 +652,11 @@ const TAB_TYPES = [
 function tabTypeForItem(item) { return TAB_TYPES.find(type => type.match(item)) || null; }
 function tabTypeForParam(value) {
   const text = String(value || '');
-  return TAB_TYPES.find(type => (type.aliases || []).includes(text) || (type.prefix && text.startsWith(type.prefix))) || null;
+  return TAB_TYPES.find(type => {
+    if ((type.aliases || []).includes(text)) return true;
+    const prefixes = Array.isArray(type.prefixes) && type.prefixes.length ? type.prefixes : [type.prefix].filter(Boolean);
+    return prefixes.some(prefix => text.startsWith(prefix));
+  }) || null;
 }
 function tabTypeParam(type, item) { return typeof type?.param === 'function' ? type.param(item) : type?.param; }
 function isFileExplorerItem(item) { return tabTypeForItem(item)?.key === 'files'; }
@@ -643,6 +669,8 @@ function isFileEditorItem(item) {
 }
 function fileItemPath(item) {
   if (isImageViewerItem(item)) return item.slice(imageViewerItemPrefix.length);
+  if (typeof item === 'string' && item.startsWith(fileEditorCopyItemPrefix)) return fileEditorCopyItemPath(item);
+  if (typeof item === 'string' && item.startsWith(fileEditorDiffPreviewItemPrefix)) return fileEditorDiffPreviewItemPath(item);
   return tabTypeForItem(item)?.key === 'file-editor' ? item.slice(fileEditorItemPrefix.length) : null;
 }
 function normalizedImageOpenMode(mode = fileExplorerImageOpenMode) {
@@ -798,6 +826,7 @@ let stateTrackingReady = false;
 let focusedTerminal = null;
 let focusedPanelItem = null;
 let lastActivePaneItem = null;
+let lastActiveNonFileExplorerPaneItem = null;
 let lastFocusedTmuxSession = null;
 let dragSession = null;
 let dragSourceSlot = null;

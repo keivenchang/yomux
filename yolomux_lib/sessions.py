@@ -314,23 +314,90 @@ def find_recent_codex_transcript(cwd: str | None, root: Path | None = None) -> P
     cached = cached_transcript_lookup("codex-cwd", root, cwd)
     if cached is not _CACHE_MISS:
         return cached
-    # rollout files are named rollout-<ISO timestamp>-<uuid>.jsonl, so a reverse
-    # lexicographic sort by filename is recency-ordered without a per-file stat() —
-    # avoiding an O(files) syscall storm over the whole tree on every cache miss.
-    # Capping the candidate window also bounds work on a large ~/.codex/sessions tree.
-    files = sorted(root.glob("**/rollout-*.jsonl"), key=lambda path: path.name, reverse=True)[:CODEX_TRANSCRIPT_SCAN_LIMIT]
+    all_files = list(root.glob("**/rollout-*.jsonl"))
+    files = sorted(all_files, key=lambda path: path.name, reverse=True)[:CODEX_TRANSCRIPT_SCAN_LIMIT]
+    found = find_codex_transcript_in_candidates(files, cwd)
+    if found is not None:
+        return set_cached_transcript_lookup("codex-cwd", root, cwd, found)
+    # Resumed Codex sessions keep the original rollout filename, so filename order can miss an old-name
+    # transcript that was written seconds ago. Only pay the stat cost after the cheap filename pass misses.
+    files_by_mtime = sorted(all_files, key=path_mtime, reverse=True)[:CODEX_TRANSCRIPT_SCAN_LIMIT]
+    found = find_codex_transcript_in_candidates(files_by_mtime, cwd)
+    if found is not None:
+        return set_cached_transcript_lookup("codex-cwd", root, cwd, found)
+    return set_cached_transcript_lookup("codex-cwd", root, cwd, None)
+
+
+def recent_codex_transcript_candidates(root: Path | None = None, limit: int = CODEX_TRANSCRIPT_SCAN_LIMIT) -> list[Path]:
+    root = root or Path.home() / ".codex" / "sessions"
+    if not root.exists():
+        return []
+    all_files = list(root.glob("**/rollout-*.jsonl"))
+    # Filename order is cheap and catches ordinary new sessions. Mtime order catches resumed sessions whose
+    # old rollout filename is still being appended to today.
+    candidates = [
+        *sorted(all_files, key=lambda path: path.name, reverse=True)[:limit],
+        *sorted(all_files, key=path_mtime, reverse=True)[:limit],
+    ]
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for path in candidates:
+        if path in seen:
+            continue
+        seen.add(path)
+        unique.append(path)
+    return unique
+
+
+def path_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def find_codex_transcript_in_candidates(files: list[Path], cwd: str) -> Path | None:
     for path in files:
         if codex_transcript_header_cwd(path) == cwd:
-            return set_cached_transcript_lookup("codex-cwd", root, cwd, path)
-    needle = json.dumps(cwd)
+            return path
     for path in files:
         try:
             tail = tail_file_lines(path, 300)
         except OSError:
             continue
-        if needle in tail:
-            return set_cached_transcript_lookup("codex-cwd", root, cwd, path)
-    return set_cached_transcript_lookup("codex-cwd", root, cwd, None)
+        if codex_transcript_tail_matches_cwd(tail, cwd):
+            return path
+    return None
+
+
+def codex_transcript_tail_matches_cwd(tail: str, cwd: str) -> bool:
+    for line in tail.splitlines():
+        if codex_transcript_record_matches_cwd(line, cwd):
+            return True
+    return False
+
+
+def codex_transcript_record_matches_cwd(line: str, cwd: str) -> bool:
+    try:
+        record = json.loads(line)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(record, dict):
+        return False
+    payload = record.get("payload")
+    if record.get("cwd") == cwd:
+        return True
+    if isinstance(payload, dict) and payload.get("cwd") == cwd:
+        return True
+    arguments = payload.get("arguments") if isinstance(payload, dict) else None
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError:
+            arguments = None
+    if isinstance(arguments, dict):
+        return arguments.get("cwd") == cwd or arguments.get("workdir") == cwd
+    return False
 
 
 def path_is_under(path: Path, root: Path) -> bool:

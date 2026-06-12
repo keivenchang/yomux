@@ -996,9 +996,10 @@ function restorePaneViewState(item, panel) {
   }
 }
 
-function registerFileEditorLayoutItem(path) {
+function registerFileEditorLayoutItem(path, options = {}) {
   if (!path || !path.startsWith('/')) return null;
-  const item = fileEditorItemFor(path);
+  const optionItem = options.item && fileItemPath(options.item) === path ? options.item : '';
+  const item = optionItem || fileEditorItemFor(path);
   addFileEditorTabItem(path, item);
   if (openFiles.get(path)?.loading !== true && openFiles.get(path)?.kind) {
     syncFileLayoutItems();
@@ -1042,7 +1043,10 @@ function resolveLayoutItem(value) {
   }
   const type = tabTypeForParam(text);
   if (type?.prefix === imageViewerItemPrefix) return registerImageViewerLayoutItem(text.slice(imageViewerItemPrefix.length)) || text;
-  if (type?.prefix === fileEditorItemPrefix) return registerFileEditorLayoutItem(text.slice(fileEditorItemPrefix.length)) || text;
+  if (type?.key === 'file-editor') {
+    const path = fileItemPath(text);
+    return (path && registerFileEditorLayoutItem(path, {item: text})) || text;
+  }
   if (type?.id) return type.id;
   if (sessions.includes(text)) return text;
   const ordinal = Number(text);
