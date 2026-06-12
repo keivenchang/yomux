@@ -1107,17 +1107,17 @@ async function ensureSession(session) {
     return true;
   } catch (error) {
     if (error?.status) {
-      statusErr(`${esc(error.payload?.error || 'session create failed')}`);
+      statusErr(esc(error.payload?.error || t('status.sessionCreateFailedDefault')));
       return false;
     }
-    statusErr(`session check failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.sessionCheckFailed', {error}));
     return false;
   }
 }
 
 async function createNextSession(agent) {
   if (readOnlyMode) {
-    statusErr('readonly access cannot create sessions');
+    statusErr(localizedHtml('status.readOnlyCreateSessions'));
     return;
   }
   const agentLabel = agentName(agent) || 'agent';
@@ -1135,10 +1135,10 @@ async function createNextSession(agent) {
     statusOk(`created ${esc(sessionLabel(payload.session))} (${esc(payload.session)}) with ${esc(agentName(payload.agent) || agentLabel)}`);
   } catch (error) {
     if (error?.status) {
-      statusErr(`${esc(error.payload?.error || 'session create failed')}`);
+      statusErr(esc(error.payload?.error || t('status.sessionCreateFailedDefault')));
       return;
     }
-    statusErr(`session create failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.sessionCreateFailed', {error}));
   }
 }
 
@@ -1230,7 +1230,7 @@ function sessionRenameDialogKeydown(event) {
 
 function showSessionRenameDialog(session) {
   if (readOnlyMode) {
-    statusErr('readonly access cannot rename sessions');
+    statusErr(localizedHtml('status.readOnlyRenameSessions'));
     return false;
   }
   if (!isTmuxSession(session)) return false;
@@ -1274,7 +1274,7 @@ function showSessionRenameDialog(session) {
     errorNode.hidden = true;
     const renamed = await renameTmuxSession(session, nextName);
     if (!renamed) {
-      showError('rename failed; see status line');
+      showError(t('status.renameFailedSeeStatus'));
       input.focus();
     }
   });
@@ -1290,7 +1290,7 @@ function showSessionRenameDialog(session) {
 
 async function renameTmuxSession(session, proposedName) {
   if (readOnlyMode) {
-    statusErr('readonly access cannot rename sessions');
+    statusErr(localizedHtml('status.readOnlyRenameSessions'));
     return false;
   }
   if (!isTmuxSession(session)) return false;
@@ -1319,17 +1319,17 @@ async function renameTmuxSession(session, proposedName) {
     return true;
   } catch (error) {
     if (error?.status) {
-      statusErr(`${esc(error.payload?.error || 'session rename failed')}`);
+      statusErr(esc(error.payload?.error || t('status.sessionRenameFailedDefault')));
       return false;
     }
-    statusErr(`session rename failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.sessionRenameFailed', {error}));
     return false;
   }
 }
 
 async function killTmuxSession(session) {
   if (readOnlyMode) {
-    statusErr('readonly access cannot kill sessions');
+    statusErr(localizedHtml('status.readOnlyKillSessions'));
     return false;
   }
   if (!isTmuxSession(session)) return false;
@@ -1351,10 +1351,10 @@ async function killTmuxSession(session) {
     return true;
   } catch (error) {
     if (error?.status) {
-      statusErr(`${esc(error.payload?.error || 'session kill failed')}`);
+      statusErr(esc(error.payload?.error || t('status.sessionKillFailedDefault')));
       return false;
     }
-    statusErr(`session kill failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.sessionKillFailed', {error}));
     return false;
   }
 }

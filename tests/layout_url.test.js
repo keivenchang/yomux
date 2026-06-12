@@ -689,6 +689,7 @@ globalThis.__layoutTestApi = {
   paneSwapIntentAllowed,
   swapPaneSlots,
   directoryEntriesSignature,
+  editorModeLabel,
   editorWrapValue,
   editorViewModeFor,
   editorPreviewModeAvailable,
@@ -817,8 +818,12 @@ globalThis.__layoutTestApi = {
   setClientSettingsPatchForTest(patch) {
     clientSettings = mergeSettingObjects(clientSettings, patch || {});
   },
+  setClientSettingsPayloadPatchForTest(patch) {
+    clientSettingsPayload = {...clientSettingsPayload, ...(patch || {})};
+  },
   preferenceItemMatches,
   preferenceSectionMatches,
+  settingsLoadedAgeText,
   preferencesPanelHtmlForTest(query, collapsed = []) {
     preferencesSearchText = query || '';
     collapsedPreferenceSections = new Set(collapsed);
@@ -4770,13 +4775,18 @@ test('t@2560', () => {
   assert.ok(api.modalBodyHtmlForTest().includes('https://github.com/keivenchang/yolomux'), 'DOIT.60: About modal links to the project GitHub repo');
   assert.ok(api.modalBodyHtmlForTest().includes('about-github'), 'DOIT.60: the GitHub link carries the about-github class');
   assert.ok(api.modalBodyHtmlForTest().includes(`>${api.t('menu.help.about.github')}</a>`), 'DOIT.60: the GitHub link uses the localized label');
+  assert.ok(api.modalBodyHtmlForTest().includes('<span> - </span><a class="about-author about-github"'), 'About author and GitHub links render on one line');
+  assert.ok(api.modalBodyHtmlForTest().includes('<span> (to YOLOmux)</span>'), 'About GitHub link names the YOLOmux target inline');
   assert.ok(preferencesCss.includes('.modal.about-open'), 'About modal has compact modal chrome');
   assert.ok(/\.modal\.about-open\s*\{[\s\S]*?z-index:\s*var\(--z-pane-modal\)/.test(preferencesCss), 'About modal sits above pane resizers and other pane-local overlays');
   assert.ok(/\.modal\.about-open::before\s*\{[\s\S]*?position:\s*fixed/.test(preferencesCss), 'About modal dims the live app behind it so background lines do not bleed through');
   assert.ok(preferencesCss.includes('.about-brand-row'), 'About modal has a large brand row style');
   assert.ok(/\.about-brand-yo\s*\{[\s\S]*animation:\s*yolo-marker-rotate/.test(preferencesCss), 'About YO glyph spins with the shared YOLO marker animation');
   assert.ok(/\.about-brand-yo\s*\{[\s\S]*background:\s*var\(--pane-tab-yolo-bg\)/.test(preferencesCss), 'About YO glyph follows the active theme color');
+  assert.ok(/\.about-brand-lo\s*\{[\s\S]*color:\s*var\(--brand-green,\s*#76b900\)/.test(preferencesCss), 'About LO stays brand green regardless of active color');
   const brandCss = fs.readFileSync('static/brand.css', 'utf8');
+  assert.ok(/--brand-yolo-bg:\s*var\(--active-control-bg,\s*var\(--brand-primary-green\)\)/.test(brandCss), 'topbar YO follows the active color with green fallback');
+  assert.ok(/\.brand-title \.brand-yolo\s*\{[\s\S]*background:\s*var\(--brand-yolo-bg\)/.test(brandCss), 'topbar YO background uses the active-color brand token');
   assert.ok(/--brand-primary-green:\s*var\(--brand-green,\s*#76b900\)/.test(brandCss), 'topbar YOLOmux LO stays brand green regardless of active color');
   assert.equal(/--brand-primary-green:\s*var\(--active-control-bg/.test(brandCss), false, 'topbar YOLOmux LO is not routed through the active color preference');
   assert.equal(api.testElementForId('closeModal').textContent || 'X', 'X', 'About modal close button is an X');
@@ -7973,14 +7983,20 @@ test('t@7423', () => {
   assert.equal(api.resolveLocalePref('zh-Hans'), 'zh-Hans', 'Phase 1: Simplified Chinese resolves to itself');
   assert.equal(api.resolveLocalePref('en'), 'en', 'Phase 1: English resolves to itself');
   assert.equal(api.resolveLocalePref('system'), 'en', 'Phase 1: system falls back to en without a browser locale');
-  // The switcher choices: system + en + Traditional-before-Simplified + pseudo, endonym-labeled.
+  // The switcher choices: system + shipped locales in product-priority order + pseudo, endonym-labeled.
   const choices = api.i18nLocaleChoices();
-  assert.deepEqual(choices.map(c => c.value), ['system', 'en', 'zh-Hant', 'zh-Hans', 'es', 'ja', 'de', 'fr', 'pt-BR', 'ru', 'ko', 'hi', 'ar', 'he', 'en-XA'], 'Phase 1/2: the locale choices are ordered with all shipped locales then pseudo');
+  assert.deepEqual(choices.map(c => c.value), ['system', 'en', 'zh-Hans', 'zh-Hant', 'ja', 'es', 'fr', 'ar', 'de', 'ru', 'hi', 'ko', 'vi', 'th', 'tr', 'he', 'pt-BR', 'nl', 'pl', 'it', 'en-XA'], 'Phase 1/2/4: the locale choices are ordered with all shipped locales then pseudo');
   assert.equal(choices.find(c => c.value === 'de').label, 'Deutsch', 'Phase 2: German is labeled with its endonym');
   assert.equal(choices.find(c => c.value === 'ru').label, 'Русский', 'Phase 2: Russian is labeled with its endonym');
   assert.equal(choices.find(c => c.value === 'ar').label, 'العربية', 'Phase 2: Arabic is labeled with its endonym');
   assert.equal(choices.find(c => c.value === 'he').label, 'עברית', 'Hebrew is labeled with its endonym');
-  for (const loc of ['de', 'fr', 'pt-BR', 'ru', 'ko', 'hi', 'ar', 'he']) {
+  assert.equal(choices.find(c => c.value === 'vi').label, 'Tiếng Việt', 'Vietnamese is labeled with its endonym');
+  assert.equal(choices.find(c => c.value === 'th').label, 'ไทย', 'Thai is labeled with its endonym');
+  assert.equal(choices.find(c => c.value === 'tr').label, 'Türkçe', 'Turkish is labeled with its endonym');
+  assert.equal(choices.find(c => c.value === 'nl').label, 'Nederlands', 'Dutch is labeled with its endonym');
+  assert.equal(choices.find(c => c.value === 'pl').label, 'Polski', 'Polish is labeled with its endonym');
+  assert.equal(choices.find(c => c.value === 'it').label, 'Italiano', 'Italian is labeled with its endonym');
+  for (const loc of ['de', 'fr', 'pt-BR', 'ru', 'ko', 'hi', 'ar', 'he', 'vi', 'th', 'tr', 'nl', 'pl', 'it']) {
     assert.equal(api.resolveLocalePref(loc), loc, `Phase 2: ${loc} resolves to itself`);
   }
   // RTL: Arabic and Hebrew are detected as right-to-left; LTR locales are not.
@@ -8095,6 +8111,27 @@ test('t@7423', () => {
     }
     assert.ok(cat['yoagent.updated.wrap'].includes('{rel}'), `Phase 3: ${loc} preserves the {rel} placeholder`);
   }
+  // Phase 4 locales ship in the developer-priority batch and preserve the same catalog contract.
+  const phase4Expected = {
+    vi: {menuFile: 'Tệp', loginSignIn: 'Đăng nhập', language: 'Ngôn ngữ'},
+    th: {menuFile: 'ไฟล์', loginSignIn: 'เข้าสู่ระบบ', language: 'ภาษา'},
+    tr: {menuFile: 'Dosya', loginSignIn: 'Oturum aç', language: 'Dil'},
+    nl: {menuFile: 'Bestand', loginSignIn: 'Inloggen', language: 'Taal'},
+    pl: {menuFile: 'Plik', loginSignIn: 'Zaloguj', language: 'Język'},
+    it: {menuFile: 'File', loginSignIn: 'Accedi', language: 'Lingua'},
+  };
+  for (const [loc, expected] of Object.entries(phase4Expected)) {
+    const cat = JSON.parse(fs.readFileSync(`static/locales/${loc}.json`, 'utf8'));
+    assert.deepEqual(Object.keys(cat).sort(), Object.keys(en).sort(), `Phase 4: ${loc}.json has exactly the same keys as en.json (parity)`);
+    assert.equal(cat['brand.marker'], 'YO', `Phase 4: ${loc} keeps the YO brand marker`);
+    assert.equal(cat['menu.file'], expected.menuFile, `Phase 4: ${loc} translates the File menu label`);
+    assert.equal(cat['login.signIn'], expected.loginSignIn, `Phase 4: ${loc} translates the login sign-in label`);
+    assert.equal(cat['language.switcher'], expected.language, `Phase 4: ${loc} translates the language switcher label`);
+    assert.ok(cat['pref.appearance.file_explorer_font_size.label'].includes('{name}'), `Phase 4: ${loc} preserves the {name} placeholder`);
+    assert.ok(cat['yoagent.files'].includes('{count}') && cat['yoagent.files'].includes('{added}') && cat['yoagent.files'].includes('{removed}'), `Phase 4: ${loc} preserves count/added/removed placeholders`);
+    assert.ok(cat['yoagent.updated.wrap'].includes('{rel}'), `Phase 4: ${loc} preserves the {rel} placeholder`);
+    assert.notEqual(cat['yoagent.prompt.answerLanguage'], en['yoagent.prompt.answerLanguage'], `Phase 4: ${loc} sets a localized YO!agent answer-language directive`);
+  }
 });
 
 test('t@7555', () => {
@@ -8197,15 +8234,15 @@ test('t@7620', () => {
 });
 
 test('t@7654', () => {
-  // "then Chinese": zh-Hant + zh-Hans catalogs localize the WHOLE Preferences panel, and the
-  // language select offers both endonym-labeled (Traditional before Simplified).
+  // zh-Hans + zh-Hant catalogs localize the WHOLE Preferences panel, and the language select offers
+  // both endonym-labeled in product-priority order.
   const api = loadYolomux('', ['1']);
-  // The select offers the two Chinese options in their own script, Traditional listed before Simplified.
+  // The select offers the two Chinese options in their own script, Simplified listed before Traditional.
   const selectHtml = api.preferencesPanelHtmlForTest('language');
   assert.ok(selectHtml.includes('<option value="zh-Hant"'), 'language select offers Traditional Chinese');
   assert.ok(selectHtml.includes('<option value="zh-Hans"'), 'language select offers Simplified Chinese');
   assert.ok(selectHtml.includes('>繁體中文</option>') && selectHtml.includes('>简体中文</option>'), 'Chinese options use endonym labels');
-  assert.ok(selectHtml.indexOf('value="zh-Hant"') < selectHtml.indexOf('value="zh-Hans"'), 'Traditional Chinese is listed before Simplified');
+  assert.ok(selectHtml.indexOf('value="zh-Hans"') < selectHtml.indexOf('value="zh-Hant"'), 'Simplified Chinese is listed before Traditional');
   for (const locale of ['zh-Hant', 'zh-Hans']) {
     const catalog = JSON.parse(fs.readFileSync(`static/locales/${locale}.json`, 'utf8'));
     // Same key set as English (the build enforces this; assert it here too).
@@ -8215,6 +8252,17 @@ test('t@7654', () => {
     const zhHtml = api.preferencesPanelHtmlForTest('');
     assert.ok(zhHtml.includes(catalog['pref.appearance.theme.label']), `${locale} renders the localized global-theme label`);
     assert.ok(zhHtml.includes(catalog['pref.appearance.date_time_hour_cycle.label']), `${locale} renders the localized date/time clock label`);
+    assert.ok(zhHtml.includes(catalog['pref.appearance.active_color.label']), `${locale} renders the localized Active color label`);
+    assert.ok(zhHtml.includes(catalog['pref.appearance.active_color.help']), `${locale} renders the localized Active color help`);
+    for (const key of ['blue', 'green', 'orange', 'purple', 'white', 'yellow']) {
+      assert.ok(zhHtml.includes(catalog[`pref.appearance.active_color.${key}`]), `${locale} renders the localized Active color ${key} choice`);
+    }
+    assert.ok(zhHtml.includes(catalog['pref.general.startup_tips.label']), `${locale} renders the localized Startup Tips label`);
+    assert.ok(zhHtml.includes(catalog['pref.general.startup_tips.help']), `${locale} renders the localized Startup Tips help`);
+    assert.ok(zhHtml.includes(catalog['pref.section.yolo']), `${locale} renders the localized YOLO section title`);
+    assert.ok(zhHtml.includes(catalog['pref.path.rules']), `${locale} renders the localized YOLO rules path label`);
+    assert.ok(zhHtml.includes(catalog['pref.performance.auto_approve_interval_seconds.label']), `${locale} renders the localized YOLO worker poll label`);
+    assert.ok(zhHtml.includes(catalog['pref.yolo.rule_file_path.help']), `${locale} renders the localized YOLO rule-file help`);
     assert.ok(zhHtml.includes(catalog['pref.section.yoagent']), `${locale} renders the localized YO!agent section title`);
     // Brand glyph: YO!agent localizes to 優!助手 / 优!助手 (no plain "YO!agent" section title leak).
     assert.ok(catalog['pref.section.yoagent'].includes(locale === 'zh-Hant' ? '優!助手' : '优!助手'), `${locale} applies the YO!agent brand glyph`);
@@ -8239,6 +8287,12 @@ test('t@7654', () => {
     assert.equal(api.fileExplorerTreeDateModeTitle('relative').includes('Date display'), false, `${locale} Finder/Differ date-mode tooltip does not leak English title text`);
     assert.equal(api.sessionFileRelativeTimeText(1000, 19720), catalog['relative.compact.hour.other'].replace('{count}', '5.2'), `${locale} Finder/Differ compact Ago text is localized`);
     assert.equal(/\bago\b|hrs?|days?|min\b/i.test(api.sessionFileRelativeTimeText(1000, 217000)), false, `${locale} Finder/Differ compact Ago text does not leak English units`);
+    assert.equal(api.editorModeLabel('edit'), catalog['editor.mode.edit'], `${locale} editor Edit mode label is localized`);
+    assert.equal(api.editorModeLabel('preview'), catalog['editor.mode.preview'], `${locale} editor Preview mode label is localized`);
+    assert.equal(api.editorModeLabel('split'), catalog['editor.mode.split'], `${locale} editor Split View mode label is localized`);
+    assert.notEqual(api.editorModeLabel('edit'), 'Edit', `${locale} editor Edit mode label does not fall back to English`);
+    assert.notEqual(api.editorModeLabel('preview'), 'Preview', `${locale} editor Preview mode label does not fall back to English`);
+    assert.notEqual(api.editorModeLabel('split'), 'Split view', `${locale} editor Split View mode label does not fall back to English`);
     // The YOLO-toggle menu labels + the YOLO submenu header use the localized brand glyph (優/优 and
     // 優樂/优乐), not a Latin "YO"/"YOLO" (images #57 / #59).
     const glyph = locale === 'zh-Hant' ? '優' : '优';
@@ -8246,12 +8300,44 @@ test('t@7654', () => {
       assert.equal(/[A-Za-z]/.test(catalog[k]), false, `${locale} ${k} has no Latin "YO" leak`);
       assert.ok(catalog[k].startsWith(glyph), `${locale} ${k} leads with the localized brand glyph`);
     }
+    const yoloSectionStart = zhHtml.indexOf(`data-preference-section="${catalog['pref.section.yolo']}"`);
+    const yoagentSectionStart = zhHtml.indexOf(`data-preference-section="${catalog['pref.section.yoagent']}"`);
+    const yoloSectionHtml = zhHtml.slice(yoloSectionStart, yoagentSectionStart);
+    assert.ok(yoloSectionStart >= 0 && yoagentSectionStart > yoloSectionStart, `${locale} can isolate the localized YOLO Preferences section`);
+    assert.equal(yoloSectionHtml.includes('YOLO'), false, `${locale} YOLO Preferences section does not leak Latin YOLO`);
+    api.setClientSettingsPayloadPatchForTest({mtime_ns: 1000000000});
+    assert.equal(api.settingsLoadedAgeText(1123), catalog['pref.status.loadedSeconds'].replace('{count}', '0'), `${locale} Preferences loaded age is localized`);
+    api.setClientSettingsPayloadPatchForTest({mtime_ns: 0});
     // #54: the System theme option is bilingual (localized + "/System") so the OS-following option is
     // unambiguous in any locale; Dark/Light stay fully localized.
     assert.ok(catalog['pref.appearance.theme.system'].endsWith('/System'), `${locale} System theme option is bilingual`);
     assert.equal(catalog['pref.appearance.theme.dark'].includes('/'), false, `${locale} Dark theme option stays fully localized`);
-    for (const englishLeak of ['Global color theme', 'Upload size cap', 'Terminal scrollback']) {
+    for (const englishLeak of [
+      'Global color theme',
+      'Upload size cap',
+      'Terminal scrollback',
+      'Startup Tips',
+      'Show one small Tip',
+      'Active color',
+      'Deep ocean blue',
+      'Envy green',
+      'Blood orange',
+      'Royal violet',
+      'Moon white',
+      'Solar gold',
+      'YOLO rules',
+      'YOLO worker poll interval',
+      'Use the supplied',
+      'Reply in Markdown',
+      'Default shape:',
+      'Use the live AI agent activity',
+      'You are YO!agent',
+      'autonomous command-sending tools',
+    ]) {
       assert.equal(zhHtml.includes(englishLeak), false, `${locale}: no plain-English "${englishLeak}" leaks`);
+    }
+    for (const catalogKey of ['events.title', 'meta.refreshTitle', 'status.selectPaneForImagePaste', 'status.yoloLoading', 'yolo.buttonOnForSession', 'yolo.buttonOffForSession', 'yolo.buttonOwnedBy']) {
+      assert.equal(/YOLO/.test(catalog[catalogKey]), false, `${locale}: ${catalogKey} uses the localized YOLO brand`);
     }
   }
 });

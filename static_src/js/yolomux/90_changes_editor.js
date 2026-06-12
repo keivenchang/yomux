@@ -757,7 +757,7 @@ async function fetchSessionFiles(options = {}) {
     setSessionFilesSignatureForDestination(destination, signature);
     fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {payload: nextPayload, signature});
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
-    if (!options.silent) statusOk(`loaded ${nextPayload.files.length} changed file${nextPayload.files.length === 1 ? '' : 's'}`);
+    if (!options.silent) statusOk(esc(tPlural('status.changedFilesLoaded', nextPayload.files.length)));
   } catch (err) {
     const nextPayload = {session, files: [], repos: [], refs_by_repo: {}, errors: [String(err)], from_ref: diffRefFrom, to_ref: diffRefTo, loaded: true};
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
@@ -765,7 +765,7 @@ async function fetchSessionFiles(options = {}) {
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
     setSessionFilesPayloadForDestination(destination, nextPayload);
     setSessionFilesSignatureForDestination(destination, signature);
-    if (!options.silent) statusErr(`changed files failed: ${esc(err)}`);
+    if (!options.silent) statusErr(localizedHtml('status.changedFilesFailed', {error: err}));
   } finally {
     const current = requestIsCurrent();
     const wasLoading = current && sessionFilesLoadingForDestination(destination);
@@ -1925,7 +1925,7 @@ async function copyChangedPath(path, label) {
     await copyTextToClipboard(path);
     statusEl.textContent = `copied ${label}`;
   } catch (error) {
-    statusErr(`copy failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.copyFailed', {error}));
   }
 }
 
@@ -1947,7 +1947,7 @@ async function openChangedDirectoryInFinder(path) {
     selectFileTreePath(path);
     statusEl.textContent = `expanded ${path} in ${fileExplorerLabel()}`;
   } catch (error) {
-    statusErr(`expand directory failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.expandDirectoryFailed', {error}));
   }
 }
 
@@ -2117,7 +2117,7 @@ function savePreferenceControl(control) {
       }
       statusEl.textContent = `saved ${path}`;
     })
-    .catch(error => { statusErr(`settings save failed: ${esc(error)}`); refreshSettings({force: true}); });
+    .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
 }
 
 function resetPreference(path) {
@@ -2127,7 +2127,7 @@ function resetPreference(path) {
     applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',
   })
     .then(() => { statusEl.textContent = `reset ${path}`; })
-    .catch(error => { statusErr(`settings reset failed: ${esc(error)}`); });
+    .catch(error => { statusErr(localizedHtml('status.settingsResetFailed', {error})); });
 }
 
 function resetAllPreferences() {
@@ -2142,7 +2142,7 @@ function resetAllPreferences() {
       renderPreferencesPanels({force: true});
       statusEl.textContent = 'reset all preferences';
     })
-    .catch(error => { statusErr(`settings reset failed: ${esc(error)}`); });
+    .catch(error => { statusErr(localizedHtml('status.settingsResetFailed', {error})); });
 }
 
 function clampEditorPreviewFontSize(value) {
@@ -2176,7 +2176,7 @@ function setEditorPreviewFontSize(value) {
   refreshFilePreviewPopouts();
   saveSettingsPatch(settingPatch('appearance.preview_font_size', next))
     .then(() => { statusEl.textContent = 'saved appearance.preview_font_size'; })
-    .catch(error => { statusErr(`settings save failed: ${esc(error)}`); refreshSettings({force: true}); });
+    .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
 }
 
 // File Explorer pane content is self-contained so layout panes do not depend on

@@ -134,14 +134,14 @@ function createPanel(session) {
       <div id="summary-pane-${session}" class="tab-pane">
         <div class="summary">
           <div class="transcript-head">${esc(t('menu.tmux.aiTranscript', {session: sessionLabel(session)}))}</div>
-          <div id="summary-context-${session}" class="summary-context">loading session context...</div>
-          <div id="summary-${session}" class="summary-preview markdown-body">click "YO!summary" to generate a Codex summary of the last hour</div>
+          <div id="summary-context-${session}" class="summary-context">${esc(t('summary.loadingContext'))}</div>
+          <div id="summary-${session}" class="summary-preview markdown-body">${esc(t('summary.emptyPrompt'))}</div>
         </div>
       </div>
       <div id="events-pane-${session}" class="tab-pane">
         <div class="summary">
-          <div class="transcript-head">YOLO log</div>
-          <div id="events-${session}" class="event-list">loading events...</div>
+          <div class="transcript-head">${esc(t('events.title'))}</div>
+          <div id="events-${session}" class="event-list">${esc(t('events.loading'))}</div>
         </div>
       </div>`;
   bindPanelShell(panel, session);
@@ -473,7 +473,7 @@ function addWatchedPr(entry) {
   list.push(ref);
   saveSettingsPatch(settingPatch('github.watched_prs', list))
     .then(() => { statusOk(t('info.watched.added', {ref})); refreshWatchedPrs(); })
-    .catch(error => statusErr(`settings save failed: ${esc(error)}`));
+    .catch(error => statusErr(localizedHtml('status.settingsSaveFailed', {error})));
 }
 
 function removeWatchedPr(ref) {
@@ -482,7 +482,7 @@ function removeWatchedPr(ref) {
   const list = (Array.isArray(current) ? current : []).filter(item => normalizeWatchedPrRef(item) !== target && String(item).trim() !== target);
   saveSettingsPatch(settingPatch('github.watched_prs', list))
     .then(() => { statusOk(t('info.watched.removed', {ref: target})); refreshWatchedPrs(); })
-    .catch(error => statusErr(`settings save failed: ${esc(error)}`));
+    .catch(error => statusErr(localizedHtml('status.settingsSaveFailed', {error})));
 }
 
 // right-clicking a PR link in YO!info offers "Watch this PR" (adds it to github.watched_prs).
@@ -828,7 +828,7 @@ function bindPanelControls(panel, session) {
     if (!path) return;
     copyTextToClipboard(path)
       .then(() => { statusEl.textContent = 'copied transcript path'; })
-      .catch(error => { statusErr(`copy failed: ${esc(error)}`); });
+      .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
   });
   panel.querySelector('.meta')?.addEventListener('click', event => {
     event.stopPropagation();
@@ -1114,7 +1114,7 @@ function bindClipboardPaste() {
     if (!file) return;
     const session = pasteTargetSession(event);
     if (!session) {
-      statusErr('select a YOLOmux pane before pasting an image');
+      statusErr(localizedHtml('status.selectPaneForImagePaste'));
       return;
     }
     event.preventDefault();
@@ -1242,14 +1242,14 @@ function imageSuffix(mimeType) {
 
 async function uploadFiles(session, fileList, options = {}) {
   if (readOnlyMode) {
-    statusErr('readonly access cannot upload files');
+    statusErr(localizedHtml('status.readOnlyUploadFiles'));
     return;
   }
   const files = Array.from(fileList || []);
   if (!files.length) return;
   const totalBytes = files.reduce((total, file) => total + (Number(file?.size) || 0), 0);
   if (uploadMaxBytes > 0 && totalBytes > uploadMaxBytes) {
-    statusErr(`upload failed: ${esc(`selected files total ${formatFileSize(totalBytes)}; limit is ${formatFileSize(uploadMaxBytes)}`)}`);
+    statusErr(localizedHtml('status.uploadTooLarge', {selected: formatFileSize(totalBytes), limit: formatFileSize(uploadMaxBytes)}));
     showUploadRsyncRecommendation({session, sizeBytes: totalBytes});
     return;
   }
@@ -1280,7 +1280,7 @@ async function uploadFiles(session, fileList, options = {}) {
     refreshOpenEventLogs();
     refreshTranscripts({force: true});
   } catch (error) {
-    statusErr(`upload failed: ${esc(error?.payload?.error || error)}`);
+    statusErr(localizedHtml('status.uploadFailed', {error: error?.payload?.error || error}));
   }
 }
 
@@ -1339,7 +1339,7 @@ function syncPasteCounterFromPath(path) {
 
 function insertIntoTerminal(session, text) {
   if (readOnlyMode) {
-    statusErr('readonly access cannot type into terminal sessions');
+    statusErr(localizedHtml('status.readOnlyTypeTerminals'));
     return false;
   }
   const item = terminals.get(session);
@@ -1636,7 +1636,7 @@ function startTerminal(session) {
   const TerminalCtor = window.Terminal?.Terminal || window.Terminal;
   if (!TerminalCtor) {
     container.innerHTML = '<pre class="terminal-error">xterm.js failed to load from /static/xterm.js. Terminal cannot attach.</pre>';
-    statusErr('xterm unavailable');
+    statusErr(localizedHtml('status.xtermUnavailable'));
     return;
   }
   container.innerHTML = '';
@@ -1746,7 +1746,7 @@ function updateStatus() {
 
 async function toggleAutoApprove(session) {
   if (readOnlyMode) {
-    statusErr('readonly access cannot change YOLO');
+    statusErr(localizedHtml('status.yoloReadOnlyChange'));
     return;
   }
   const state = autoApproveStates.get(session) || {};
@@ -1756,7 +1756,7 @@ async function toggleAutoApprove(session) {
 
 async function setAutoApprove(session, enabled) {
   if (readOnlyMode) {
-    statusErr('readonly access cannot change YOLO');
+    statusErr(localizedHtml('status.yoloReadOnlyChange'));
     return;
   }
   try {
@@ -1766,8 +1766,8 @@ async function setAutoApprove(session, enabled) {
     updateSessionButtonStates();
     renderAutoApproveButton(session, payload);
     statusEl.innerHTML = payload.enabled
-      ? `<span class="ok">enabled YOLO for ${esc(sessionLabel(session))}</span>`
-      : `<span class="ok">disabled YOLO for ${esc(sessionLabel(session))}</span>`;
+      ? `<span class="ok">${localizedHtml('status.yoloEnabledFor', {session: sessionLabel(session)})}</span>`
+      : `<span class="ok">${localizedHtml('status.yoloDisabledFor', {session: sessionLabel(session)})}</span>`;
   } catch (error) {
     const payload = error?.payload || {};
     if (error?.status) {
@@ -1777,10 +1777,10 @@ async function setAutoApprove(session, enabled) {
         updateSessionButtonStates();
         renderAutoApproveButton(session, payload);
       }
-      statusErr(`${esc(payload.error || 'YOLO approval failed')}`);
+      statusErr(localizedHtml('status.yoloApprovalFailed', {error: payload.error || t('status.yoloApprovalFailedDefault')}));
       return;
     }
-    statusErr(`YOLO request failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.yoloRequestFailed', {error}));
   }
 }
 
@@ -1838,7 +1838,7 @@ function autoApproveOwnerLabel(payload) {
   const owner = payload?.lock_owner || {};
   const pid = owner.pid ? `pid ${owner.pid}` : '';
   const root = owner.project_root || '';
-  return [pid, root].filter(Boolean).join(' ') || payload?.last_action || 'another YOLOmux';
+  return [pid, root].filter(Boolean).join(' ') || payload?.last_action || t('yolo.ownerFallback');
 }
 
 function renderAutoApproveButtons() {
@@ -1868,12 +1868,13 @@ function renderAutoApproveButton(session, payload) {
     }
     button.closest('.pane-tab')?.classList.remove('is-working');
     button.textContent = t('brand.marker');
-    const action = payload?.last_action ? `; ${payload.last_action}` : '';
+    const action = payload?.last_action ? t('yolo.actionSuffix', {action: payload.last_action}) : '';
+    const readonly = readOnlyMode ? t('yolo.readonlySuffix') : '';
     button.title = enabled
-      ? `YOLO on for ${sessionLabel(session)}${action}${readOnlyMode ? '; readonly access' : ''}`
+      ? t('yolo.buttonOnForSession', {session: sessionLabel(session), action, readonly})
       : locked
-        ? `YOLO owned by ${autoApproveOwnerLabel(payload)}`
-      : `YOLO off for ${sessionLabel(session)}${readOnlyMode ? '; readonly access' : ''}`;
+        ? t('yolo.buttonOwnedBy', {owner: autoApproveOwnerLabel(payload)})
+      : t('yolo.buttonOffForSession', {session: sessionLabel(session), readonly});
   }
   updatePanelHeader(session, transcriptMeta.sessions?.[session]);
   updateTypingIndicator(session);
@@ -2394,7 +2395,7 @@ async function boot() {
   renderTabMetaToggle();
   bindTopbarMetrics();
   syncInitialLayoutUrl();
-  statusEl.textContent = 'loading YOLO status...';
+  statusEl.textContent = t('status.yoloLoading');
   await loadNotifyStatus();
   await loadAutoStatuses();
   bindClipboardPaste();

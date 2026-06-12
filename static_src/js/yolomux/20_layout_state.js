@@ -1236,13 +1236,13 @@ function renderNotifyToggle() {
   });
   const browserState = supported ? Notification.permission : 'unsupported';
   notifyToggle.title = readOnlyMode
-    ? 'Notify is admin-only'
-    : `notify when a session needs attention; browser notifications: ${browserState}`;
+    ? t('notify.adminOnlyTitle')
+    : t('notify.toggleTitle', {state: browserState});
 }
 
 async function toggleNotifications() {
   if (readOnlyMode) {
-    statusErr('readonly access cannot change Notify');
+    statusErr(localizedHtml('status.readOnlyChangeNotify'));
     return;
   }
   const nextEnabled = !notificationsEnabled;
@@ -1259,7 +1259,7 @@ async function toggleNotifications() {
     if (!response.ok) throw new Error(payload.error || response.statusText || `HTTP ${response.status}`);
     notificationsEnabled = payload.enabled === true;
   } catch (error) {
-    statusErr(`Notify request failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.notifyRequestFailed', {error}));
     return;
   }
   renderNotifyToggle();
@@ -1309,7 +1309,7 @@ function projectReadmePath() {
 async function openProjectReadme() {
   const path = projectReadmePath();
   if (!path) {
-    statusErr('README path is unavailable');
+    statusErr(localizedHtml('status.readmePathUnavailable'));
     return;
   }
   // open the README as rendered markdown by default (the user can switch to edit via the
@@ -2040,24 +2040,24 @@ function commandPaletteSearchQuery(query = commandPaletteQuery, mode = commandPa
 function commandPalettePlaceholder() {
   // Identical for Cmd-P and Cmd-Shift-P — they differ only in result ordering, not in labels.
   const q = commandPaletteQuery.trim();
-  if (q.startsWith('>')) return 'Run command';
-  if (q.startsWith('@')) return 'Symbol search is not available yet';
-  return 'Find files, tabs, commands, settings';
+  if (q.startsWith('>')) return t('palette.placeholderCommand');
+  if (q.startsWith('@')) return t('palette.symbolUnavailable');
+  return t('palette.placeholderWithFiles');
 }
 
 function commandPaletteLabel() {
   // Identical aria label for both entry points.
-  return 'Quick open';
+  return t('palette.quickOpen');
 }
 
 function commandPaletteEmptyText() {
-  if (fileQuickOpenLoading) return 'Searching...';
-  if (commandPaletteQuery.trim().startsWith('@')) return 'Symbol search is not available yet';
-  return 'No matches';
+  if (fileQuickOpenLoading) return t('search.searching');
+  if (commandPaletteQuery.trim().startsWith('@')) return t('palette.symbolUnavailable');
+  return t('palette.noMatches');
 }
 
 function commandPaletteStatusText() {
-  return fileQuickOpenLoading ? 'Searching files...' : '';
+  return fileQuickOpenLoading ? t('palette.searchingFiles') : '';
 }
 
 function ensureCommandPalette() {
@@ -2578,7 +2578,7 @@ function showStartupHelperTip(options = {}) {
     closeStartupHelperToast(node);
     saveSettingsPatch(settingPatch('general.startup_tips', false))
       .then(() => { statusEl.textContent = t('startupHelper.status.disabled'); })
-      .catch(error => { statusErr(`settings save failed: ${esc(error)}`); refreshSettings({force: true}); });
+      .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
   });
   node = showToast(startupHelperPromptTitle(index, tips.length, tip), tip.lines, {
     className: 'attention-alert toast startup-helper-toast',
@@ -2674,7 +2674,7 @@ function sendTestNotification() {
     });
     postEvent(null, 'notification_test_sent', 'notification test sent', {hostname: serverHostname});
   } catch (error) {
-    statusErr(`notification failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.notificationFailed', {error}));
     postEvent(null, 'notification_error', `notification test failed: ${error}`, {hostname: serverHostname});
   }
 }

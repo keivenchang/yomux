@@ -270,25 +270,30 @@ def agent_login_notice_html(css_class: str = "login-warning") -> str:
     return f'<div class="{html.escape(css_class)}">{lead} — run {commands}</div>'
 
 
-# Phase 1: the login-screen language picker (entry point #1). Endonym-labeled (each language in
-# its own script) so the pre-auth screen needs no localization; Traditional Chinese before Simplified.
-# 'system' = follow the browser. A choice here is saved to general.language after a successful sign-in,
-# so all three entry points (login / topbar / Preferences) write the SAME setting.
+# Phase 1: the login-screen language picker (entry point #1). Endonym-labeled in the same
+# product-priority order as the client switchers. 'system' = follow the browser. A choice here is saved
+# to general.language after a successful sign-in, so all three entry points write the SAME setting.
 LOGIN_LOCALE_CHOICES: list[tuple[str, str]] = [
     ("system", "System"),
     ("en", "English"),
-    ("zh-Hant", "繁體中文"),
     ("zh-Hans", "简体中文"),
-    ("es", "Español"),
+    ("zh-Hant", "繁體中文"),
     ("ja", "日本語"),
-    ("de", "Deutsch"),
+    ("es", "Español"),
     ("fr", "Français"),
-    ("pt-BR", "Português (BR)"),
-    ("ru", "Русский"),
-    ("ko", "한국어"),
-    ("hi", "हिन्दी"),
     ("ar", "العربية"),
+    ("de", "Deutsch"),
+    ("ru", "Русский"),
+    ("hi", "हिन्दी"),
+    ("ko", "한국어"),
+    ("vi", "Tiếng Việt"),
+    ("th", "ไทย"),
+    ("tr", "Türkçe"),
     ("he", "עברית"),
+    ("pt-BR", "Português (BR)"),
+    ("nl", "Nederlands"),
+    ("pl", "Polski"),
+    ("it", "Italiano"),
 ]
 _LOGIN_LOCALE_VALUES = {value for value, _ in LOGIN_LOCALE_CHOICES}
 

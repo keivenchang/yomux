@@ -34,10 +34,10 @@ function updateEditorModeControl(control, path, state, item = null) {
 }
 
 function editorModeLabel(mode) {
-  if (mode === 'diff') return 'Diff';
-  if (mode === 'preview') return 'Preview';
-  if (mode === 'split') return 'Split view';
-  return 'Edit';
+  if (mode === 'diff') return t('editor.diff');
+  if (mode === 'preview') return t('editor.mode.preview');
+  if (mode === 'split') return t('editor.mode.split');
+  return t('editor.mode.edit');
 }
 
 function editorModeIconClass(mode) {
@@ -679,15 +679,7 @@ function refreshActiveTerminalCursor() {
 function refreshMetaButtonTitle() {
   if (!refreshMeta) return;
   const seconds = ms => `${Math.round(ms / 1000)}s`;
-  refreshMeta.title = [
-    'Refresh session state',
-    'Re-list tmux sessions.',
-    'Refresh git, PR, Linear, and agent metadata.',
-    'Refresh YOLO status and open event logs.',
-    'Refresh active transcript previews.',
-    `Live updates arrive over SSE. Local timers: ping ${seconds(latencyRefreshMs)}, open logs ${seconds(eventLogRefreshMs)}.`,
-    'Does not reload the page or reconnect terminals.',
-  ].join('\n');
+  refreshMeta.title = t('meta.refreshTitle', {ping: seconds(latencyRefreshMs), openLogs: seconds(eventLogRefreshMs)});
 }
 
 function applySettingsPayload(payload, options = {}) {
@@ -785,9 +777,9 @@ async function refreshSettings(options = {}) {
     if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
     const changed = applySettingsPayload(payload, {force: options.force === true});
     if (changed) refreshYoloRulesStatus({silent: true});
-    if (changed && !options.silent) statusEl.textContent = 'settings reloaded';
+    if (changed && !options.silent) statusEl.textContent = t('status.settingsReloaded');
   } catch (error) {
-    if (!options.silent) statusErr(`settings reload failed: ${esc(error)}`);
+    if (!options.silent) statusErr(localizedHtml('status.settingsReloadFailed', {error}));
   }
 }
 

@@ -138,10 +138,10 @@ async function applyLocale(locale) {
   rerenderForLocale({localeChange: true});
 }
 
-// The real (non-pseudo) locales that ship a catalog, most-specific first. 'system' resolves against
-// navigator.language to one of these. Add new locales here as their catalogs ship.
+// The real (non-pseudo) locales that ship a catalog, in product-priority order. 'system' resolves
+// against navigator.language to one of these. Add new locales here as their catalogs ship.
 function i18nSupportedLocales() {
-  return ['zh-Hant', 'zh-Hans', 'es', 'ja', 'de', 'fr', 'pt-BR', 'ru', 'ko', 'hi', 'ar', 'he', 'en'];
+  return ['en', 'zh-Hans', 'zh-Hant', 'ja', 'es', 'fr', 'ar', 'de', 'ru', 'hi', 'ko', 'vi', 'th', 'tr', 'he', 'pt-BR', 'nl', 'pl', 'it'];
 }
 
 // Phase 2: right-to-left locales. Drives document.dir so the browser mirrors the layout.
@@ -151,23 +151,29 @@ function i18nIsRtl(locale) {
 }
 
 // The language-switcher choices (Preferences picker + topbar switcher). Endonyms stay in their own
-// script (never translated); 'system'/pseudo are localized. Traditional Chinese before Simplified.
+// script (never translated); 'system'/pseudo are localized. en-XA stays last as the QA pseudo-locale.
 function i18nLocaleChoices() {
   return [
     {value: 'system', label: t('pref.general.language.system')},
     {value: 'en', label: 'English'},
-    {value: 'zh-Hant', label: '繁體中文'},
     {value: 'zh-Hans', label: '简体中文'},
-    {value: 'es', label: 'Español'},
+    {value: 'zh-Hant', label: '繁體中文'},
     {value: 'ja', label: '日本語'},
-    {value: 'de', label: 'Deutsch'},
+    {value: 'es', label: 'Español'},
     {value: 'fr', label: 'Français'},
-    {value: 'pt-BR', label: 'Português (BR)'},
-    {value: 'ru', label: 'Русский'},
-    {value: 'ko', label: '한국어'},
-    {value: 'hi', label: 'हिन्दी'},
     {value: 'ar', label: 'العربية'},
+    {value: 'de', label: 'Deutsch'},
+    {value: 'ru', label: 'Русский'},
+    {value: 'hi', label: 'हिन्दी'},
+    {value: 'ko', label: '한국어'},
+    {value: 'vi', label: 'Tiếng Việt'},
+    {value: 'th', label: 'ไทย'},
+    {value: 'tr', label: 'Türkçe'},
     {value: 'he', label: 'עברית'},
+    {value: 'pt-BR', label: 'Português (BR)'},
+    {value: 'nl', label: 'Nederlands'},
+    {value: 'pl', label: 'Polski'},
+    {value: 'it', label: 'Italiano'},
     {value: 'en-XA', label: t('pref.general.language.pseudo')},
   ];
 }

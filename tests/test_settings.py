@@ -238,11 +238,13 @@ def test_login_locale_picker_writes_general_language():
     from yolomux_lib.web import login_html
     from yolomux_lib.web import save_login_locale
 
-    assert [value for value, _ in LOGIN_LOCALE_CHOICES] == ["system", "en", "zh-Hant", "zh-Hans", "es", "ja", "de", "fr", "pt-BR", "ru", "ko", "hi", "ar", "he"]
+    assert [value for value, _ in LOGIN_LOCALE_CHOICES] == ["system", "en", "zh-Hans", "zh-Hant", "ja", "es", "fr", "ar", "de", "ru", "hi", "ko", "vi", "th", "tr", "he", "pt-BR", "nl", "pl", "it"]
     page = login_html()
     assert 'name="locale"' in page
-    assert "繁體中文" in page and "简体中文" in page  # endonym-labeled, Traditional before Simplified
-    assert page.index("繁體中文") < page.index("简体中文")
+    assert "简体中文" in page and "繁體中文" in page  # endonym-labeled, product-priority order
+    assert page.index("简体中文") < page.index("繁體中文")
+    for label in ["Tiếng Việt", "ไทย", "Türkçe", "Nederlands", "Polski", "Italiano"]:
+        assert label in page
     # Phase 2: the <html> shell carries lang + dir; Arabic is rendered right-to-left.
     from yolomux_lib.web import html_lang_dir_attrs
     assert html_lang_dir_attrs("en") == 'lang="en" dir="ltr"'
@@ -254,7 +256,11 @@ def test_login_locale_picker_writes_general_language():
     assert "登入" in login_html(current_locale="zh-Hant")  # Sign in (Traditional)
     assert "Iniciar sesión" in login_html(current_locale="es")
     assert "ログイン" in login_html(current_locale="ja")
+    assert "Đăng nhập" in login_html(current_locale="vi")
     try:
+        save_login_locale("vi")
+        assert current_language_pref() == "vi"
+        assert ' value="vi" selected>' in login_html(current_locale=current_language_pref())
         save_login_locale("zh-Hant")
         assert current_language_pref() == "zh-Hant"
         page = login_html(current_locale=current_language_pref())

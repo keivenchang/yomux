@@ -6883,7 +6883,7 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   animation-delay: var(--yolo-rotate-delay, 0s);
 }
 .about-brand-lo {
-  color: var(--pane-tab-yolo-bg);
+  color: var(--brand-green, #76b900);
 }
 .about-brand-m {
   color: #3b82f6;
@@ -6919,11 +6919,16 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   color: var(--text);
   font-family: var(--mono-font);
 }
+.about-links {
+  justify-self: start;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: var(--ui-font-size-sm);
+  font-weight: 800;
+}
 .about-author {
   justify-self: start;
   color: var(--markdown-link);
-  font-size: var(--ui-font-size-sm);
-  font-weight: 800;
   text-decoration: underline;
 }
 /* Dim the live app behind the floating About panel. Without it the split-resizer line and terminal

@@ -653,7 +653,7 @@ function beginFileTabRename(tab, item) {
     return;
   }
   if (readOnlyMode) {
-    statusErr('readonly access cannot rename files');
+    statusErr(localizedHtml('status.readOnlyRenameFiles'));
     return;
   }
   const currentName = basenameOf(path);
@@ -1558,7 +1558,7 @@ function createInfoPanel() {
     if (!backend || !panel.contains(backend) || readOnlyMode) return;
     saveSettingsPatch(settingPatch('yoagent.backend', backend.value))
       .then(() => { statusEl.textContent = `YO!agent backend: ${yoagentBackendLabel(backend.value)}`; renderYoagentPanel(); })
-      .catch(error => { statusErr(`settings save failed: ${esc(error)}`); refreshSettings({force: true}); });
+      .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
   });
   applyInfoSubTab(panel);
   renderInfoPanel();
@@ -2015,7 +2015,7 @@ async function refreshActivitySummary(options = {}) {
       errors: [String(error)],
       global: {lines: [`activity summary unavailable: ${String(error)}`]},
     };
-    if (!options.silent) statusErr(`activity summary failed: ${esc(error)}`);
+    if (!options.silent) statusErr(localizedHtml('status.activitySummaryFailed', {error}));
   } finally {
     if (requestIsCurrent()) {
       activitySummaryRefreshing = false;
@@ -2109,23 +2109,7 @@ function preferenceSections() {
   return [
     {title: t('pref.section.general'), items: [
       // #51: Language is the FIRST General preference.
-      {path: 'general.language', label: t('pref.general.language.label'), type: 'select', choices: [
-        // Endonym labels (each language in its own script); Traditional Chinese before Simplified.
-        {value: 'system', label: t('pref.general.language.system')},
-        {value: 'en', label: 'English'},
-        {value: 'zh-Hant', label: '繁體中文'},
-        {value: 'zh-Hans', label: '简体中文'},
-        {value: 'es', label: 'Español'},
-        {value: 'ja', label: '日本語'},
-        {value: 'de', label: 'Deutsch'},
-        {value: 'fr', label: 'Français'},
-        {value: 'pt-BR', label: 'Português (BR)'},
-        {value: 'ru', label: 'Русский'},
-        {value: 'ko', label: '한국어'},
-        {value: 'hi', label: 'हिन्दी'},
-        {value: 'ar', label: 'العربية'},
-        {value: 'en-XA', label: t('pref.general.language.pseudo')},
-      ], help: t('pref.general.language.help')},
+      {path: 'general.language', label: t('pref.general.language.label'), type: 'select', choices: i18nLocaleChoices(), help: t('pref.general.language.help')},
       {path: 'general.auto_focus', label: t('pref.general.auto_focus.label'), type: 'boolean', help: t('pref.general.auto_focus.help')},
       {path: 'general.startup_tips', label: t('pref.general.startup_tips.label'), type: 'boolean', help: t('pref.general.startup_tips.help')},
       {path: 'general.default_sessions', label: t('pref.general.default_sessions.label'), type: 'list', help: t('pref.general.default_sessions.help')},
@@ -2258,22 +2242,22 @@ function preferenceDefault(path) {
 }
 
 function preferenceStatusText() {
-  if (clientSettingsPayload.error) return `settings error: ${clientSettingsPayload.error}`;
-  if (yoloRulesPayload.error) return `YOLO rules error: ${yoloRulesPayload.error}`;
+  if (clientSettingsPayload.error) return t('pref.status.settingsError', {error: clientSettingsPayload.error});
+  if (yoloRulesPayload.error) return t('pref.status.rulesError', {error: yoloRulesPayload.error});
   return settingsLoadedAgeText();
 }
 
 function settingsLoadedAgeText(nowMs = Date.now()) {
   const loadedMs = Number(clientSettingsPayload.mtime_ns || 0) / 1000000;
-  if (!Number.isFinite(loadedMs) || loadedMs <= 0) return 'loaded';
+  if (!Number.isFinite(loadedMs) || loadedMs <= 0) return t('pref.status.loaded');
   const ageSeconds = Math.max(0, Math.floor((Number(nowMs) - loadedMs) / 1000));
-  if (ageSeconds < 60) return `loaded ${ageSeconds} sec ago`;
+  if (ageSeconds < 60) return t('pref.status.loadedSeconds', {count: ageSeconds});
   const ageMinutes = Math.floor(ageSeconds / 60);
-  if (ageMinutes < 60) return `loaded ${ageMinutes} min ago`;
+  if (ageMinutes < 60) return t('pref.status.loadedMinutes', {count: ageMinutes});
   const ageHours = Math.floor(ageMinutes / 60);
-  if (ageHours < 24) return `loaded ${ageHours} hr ago`;
+  if (ageHours < 24) return t('pref.status.loadedHours', {count: ageHours});
   const ageDays = Math.floor(ageHours / 24);
-  return `loaded ${ageDays} day${ageDays === 1 ? '' : 's'} ago`;
+  return tPlural('pref.status.loadedDays', ageDays);
 }
 
 function preferencesPathRowsHtml() {
@@ -2886,7 +2870,7 @@ function bindDebugPanel(panel) {
       event.preventDefault();
       copyTextToClipboard(jsDebugTextForClipboard())
         .then(() => { statusEl.textContent = t('debug.copied'); })
-        .catch(error => { statusErr(`copy failed: ${esc(error)}`); });
+        .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
       return;
     }
     const clear = event.target.closest('[data-js-debug-clear]');
@@ -2984,7 +2968,7 @@ function renderPreferencesPanels(options = {}) {
       const scrollLeft = prevScroll.scrollLeft;
       if (shouldKeepDom) {
         const pathRows = body.querySelector('.preferences-path-rows');
-        if (pathRows) pathRows.innerHTML = `${preferencesPathRowsHtml()}${readOnlyMode ? '<span class="preferences-readonly">readonly access</span>' : ''}`;
+        if (pathRows) pathRows.innerHTML = `${preferencesPathRowsHtml()}${readOnlyMode ? `<span class="preferences-readonly">${esc(t('pref.readonly'))}</span>` : ''}`;
       } else {
         body.innerHTML = `<div id="panel-toasts-${prefsItemId}" class="panel-toast-stack"></div><div class="preferences-scroll">${preferencesPanelHtml()}</div>`;
       }
@@ -3097,7 +3081,7 @@ function bindPreferencesPanel(panel) {
       event.preventDefault();
       copyTextToClipboard(copy.dataset.copyPath || '')
         .then(() => { statusEl.textContent = 'copied path'; })
-        .catch(error => { statusErr(`copy failed: ${esc(error)}`); });
+        .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
       return;
     }
     const copyText = event.target.closest('[data-copy-text]');
@@ -3105,7 +3089,7 @@ function bindPreferencesPanel(panel) {
       event.preventDefault();
       copyTextToClipboard(copyText.dataset.copyText || '')
         .then(() => { statusEl.textContent = 'copied text'; })
-        .catch(error => { statusErr(`copy failed: ${esc(error)}`); });
+        .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
       return;
     }
     const yoloRuleOpen = event.target.closest('[data-yolo-rule-open]');

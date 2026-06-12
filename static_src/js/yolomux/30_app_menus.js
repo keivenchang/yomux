@@ -80,8 +80,7 @@ function showAboutModal() {
       <div><dt>SHA</dt><dd>${esc(sha || t('common.unknown'))}</dd></div>
       <div><dt>${esc(t('menu.help.about.version'))}</dt><dd>${esc(version || t('common.unknown'))}</dd></div>
     </dl>
-    <a class="about-author" href="${esc(aboutLinkedInUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.author'))}</a>
-    <a class="about-author about-github" href="${esc(aboutProjectUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.github'))}</a>
+    <div class="about-links"><a class="about-author" href="${esc(aboutLinkedInUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.author'))}</a><span> - </span><a class="about-author about-github" href="${esc(aboutProjectUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.github'))}</a><span> (to YOLOmux)</span></div>
   </div>`;
   modal.classList.add('open');
 }
@@ -236,7 +235,7 @@ function applyAndSaveGlobalTheme(next) {
       statusEl.textContent = `theme: ${globalThemeLabel(next)}`;
     })
     .catch(error => {
-      statusErr(`theme save failed: ${esc(error)}`);
+      statusErr(localizedHtml('status.themeSaveFailed', {error}));
       refreshSettings({force: true});
     });
 }
@@ -262,7 +261,7 @@ function yoloRuleStatusDetail() {
 
 async function openYoloRuleFile() {
   if (readOnlyMode) {
-    statusErr('readonly access cannot create YOLO rule files');
+    statusErr(localizedHtml('status.yoloReadOnlyCreateRules'));
     return;
   }
   try {
@@ -272,7 +271,7 @@ async function openYoloRuleFile() {
     await openFileInEditor(payload.path || yoloRulePath(), {name: basenameOf(payload.path || yoloRulePath())});
     statusEl.textContent = t('status.openedYoloRule');
   } catch (error) {
-    statusErr(`open YOLO rule file failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.yoloOpenRuleFailed', {error}));
   }
 }
 
@@ -283,11 +282,11 @@ async function reloadYoloRules() {
     renderPreferencesPanels();
     const level = payload.error ? 'error' : '';
     statusEl.innerHTML = payload.error
-      ? `<span class="err">YOLO rule reload failed: ${esc(payload.error)}</span>`
-      : `<span class="ok">reloaded YOLO rules</span>`;
-    showToast('YOLO rules', payload.error || yoloRuleStatusDetail(), {level});
+      ? `<span class="err">${localizedHtml('status.yoloReloadFailed', {error: payload.error})}</span>`
+      : `<span class="ok">${localizedHtml('status.yoloReloaded')}</span>`;
+    showToast(t('status.yoloToastTitle'), payload.error || yoloRuleStatusDetail(), {level});
   } catch (error) {
-    statusErr(`reload YOLO rules failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.yoloReloadRequestFailed', {error}));
   }
 }
 
@@ -298,7 +297,7 @@ async function refreshYoloRulesStatus(options = {}) {
     renderPreferencesPanels();
     return payload;
   } catch (error) {
-    if (!options.silent) statusErr(`YOLO rule status failed: ${esc(error)}`);
+    if (!options.silent) statusErr(localizedHtml('status.yoloStatusFailed', {error}));
     return null;
   }
 }
@@ -830,7 +829,7 @@ function createTopbarLanguageSwitcher() {
     applyLocale(resolveLocalePref(value));
     if (readOnlyMode) return;
     saveSettingsPatch(settingPatch('general.language', value))
-      .catch(error => { statusErr(`settings save failed: ${esc(error)}`); refreshSettings({force: true}); });
+      .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
   });
   return select;
 }
@@ -1064,11 +1063,11 @@ function runAppMenuCommand(item) {
         if (keepOpen) renderSessionButtons({force: true});
       })
       .catch(error => {
-        statusErr(`menu command failed: ${esc(error)}`);
+        statusErr(localizedHtml('status.menuCommandFailed', {error}));
         if (keepOpen) renderSessionButtons({force: true});
       });
   } catch (error) {
-    statusErr(`menu command failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.menuCommandFailed', {error}));
     if (keepOpen) renderSessionButtons({force: true});
   }
 }

@@ -1882,7 +1882,7 @@ async function openHtmlPreviewWithAuth(path) {
     window.setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
   } catch (error) {
     if (previewWindow) previewWindow.close();
-    statusErr(`HTML preview failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.htmlPreviewFailed', {error}));
   }
 }
 
@@ -2526,7 +2526,7 @@ function openFilePreviewPopout(path, panel = null) {
   }
   const previewWindow = window.open(`/preview-popout?path=${encodeURIComponent(path)}`, `yolomux-preview-${encodeURIComponent(path)}`, 'popup,width=980,height=900');
   if (!previewWindow) {
-    statusErr('preview pop-out was blocked by the browser');
+    statusErr(localizedHtml('status.previewPopoutBlocked'));
     return false;
   }
   try {
@@ -2536,7 +2536,7 @@ function openFilePreviewPopout(path, panel = null) {
   } catch (error) {
     filePreviewPopouts.delete(path);
     try { previewWindow.close(); } catch (_) {}
-    statusErr(`preview pop-out failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.previewPopoutFailed', {error}));
     return false;
   }
 }

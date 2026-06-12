@@ -1188,9 +1188,9 @@ function openTerminalLink(rawLink) {
   if (!link) return;
   try {
     const opened = window.open(link, '_blank', 'noopener,noreferrer');
-    if (!opened) statusErr(`browser blocked link: ${esc(link)}`);
+    if (!opened) statusErr(localizedHtml('status.browserBlockedLink', {link}));
   } catch (error) {
-    statusErr(`could not open link: ${esc(error)}`);
+    statusErr(localizedHtml('status.openLinkFailed', {error}));
   }
 }
 
@@ -1431,7 +1431,7 @@ function writeTerminalTextToClipboard(text, label = 'copied') {
     })
     .catch(error => {
       copyDebug('clipboard', {via: 'async', chars: String(text ?? '').length, ok: false, error: String(error)});
-      statusErr(`copy failed: ${esc(error)}`);
+      statusErr(localizedHtml('status.copyFailed', {error}));
     });
 }
 
@@ -1704,7 +1704,7 @@ async function copyTerminalSelection(session, term, options = {}, container = nu
     await copyTextToClipboard(text);
     statusEl.textContent = options.dedent ? 'copied without indent' : 'copied';
   } catch (error) {
-    statusErr(`copy failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.copyFailed', {error}));
   }
 }
 
@@ -1742,7 +1742,7 @@ async function copyTmuxSelectionToClipboard(session) {
       statusEl.textContent = error.message || 'nothing selected';
       return false;
     }
-    statusErr(`copy failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.copyFailed', {error}));
     return false;
   }
 }

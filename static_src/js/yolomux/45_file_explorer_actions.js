@@ -103,7 +103,7 @@ async function copyFilePath(path, label) {
     await copyTextToClipboard(text);
     statusEl.textContent = label === 'relative' ? 'copied relative path' : 'copied path';
   } catch (error) {
-    statusErr(`copy failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.copyFailed', {error}));
   }
 }
 
@@ -135,7 +135,7 @@ function childNameToPath(root, name) {
 
 async function createFileExplorerFile() {
   if (readOnlyMode) {
-    statusErr('readonly access cannot create files');
+    statusErr(localizedHtml('status.readOnlyCreateFiles'));
     return;
   }
   const name = window.prompt('New file name');
@@ -151,13 +151,13 @@ async function createFileExplorerFile() {
     await refreshFileExplorerTrees();
     await openFileInEditor(path, {name: basenameOf(path)});
   } catch (error) {
-    statusErr(`new file failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.newFileFailed', {error}));
   }
 }
 
 async function createFileExplorerFolder() {
   if (readOnlyMode) {
-    statusErr('readonly access cannot create folders');
+    statusErr(localizedHtml('status.readOnlyCreateFolders'));
     return;
   }
   const name = window.prompt('New folder name');
@@ -172,7 +172,7 @@ async function createFileExplorerFolder() {
     statusEl.textContent = `created ${basenameOf(path)}`;
     await refreshFileExplorerTrees();
   } catch (error) {
-    statusErr(`new folder failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.newFolderFailed', {error}));
   }
 }
 
@@ -321,10 +321,10 @@ function bindFileExplorerHeaderActions(container = document) {
         fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
       }
     } else if (action.matches('[data-file-explorer-collapse]')) {
-      collapseAllFileExplorerDirectories().catch(error => statusErr(`collapse failed: ${esc(error)}`));
+      collapseAllFileExplorerDirectories().catch(error => statusErr(localizedHtml('status.collapseFailed', {error})));
     } else if (action.matches('[data-file-tree-expand-collapse-all]')) {
       setAllFileTreeDirectoriesExpanded(action, action.dataset.fileTreeExpandCollapseAll === 'expand')
-        .catch(error => statusErr(`tree action failed: ${esc(error)}`));
+        .catch(error => statusErr(localizedHtml('status.treeActionFailed', {error})));
     } else if (action.matches('[data-file-explorer-tree-dates]')) {
       cycleFileExplorerTreeDateMode();
       if (fileExplorerMode === 'tabber') refreshTabberPanels();
@@ -344,7 +344,7 @@ function bindFileExplorerHeaderActions(container = document) {
 
 async function deleteFileTreePath(fullPath, entry, paths = null) {
   if (readOnlyMode) {
-    statusErr('readonly access cannot delete files');
+    statusErr(localizedHtml('status.readOnlyDeleteFiles'));
     return;
   }
   const deletePaths = compactNestedPaths(paths || fileTreeActionPaths(fullPath));
@@ -376,7 +376,7 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
     renderSessionButtons();
     renderPaneTabStrips();
   } catch (error) {
-    statusErr(`delete failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.deleteFailed', {error}));
   }
 }
 
@@ -573,7 +573,7 @@ function handleFileExplorerDeleteShortcut(event) {
   event.preventDefault();
   event.stopPropagation();
   if (readOnlyMode) {
-    statusErr('readonly access cannot delete files');
+    statusErr(localizedHtml('status.readOnlyDeleteFiles'));
     return true;
   }
   const primary = paths[0];
@@ -587,7 +587,7 @@ function handleFileExplorerDeleteShortcut(event) {
 
 function beginFileTreeRename(row, fullPath, entry) {
   if (readOnlyMode) {
-    statusErr('readonly access cannot rename files');
+    statusErr(localizedHtml('status.readOnlyRenameFiles'));
     return;
   }
   closeFileContextMenu();
@@ -651,7 +651,7 @@ function beginFileTreeRename(row, fullPath, entry) {
 
 async function renameFileTreePath(fullPath, entry, newName) {
   if (readOnlyMode) {
-    statusErr('readonly access cannot rename files');
+    statusErr(localizedHtml('status.readOnlyRenameFiles'));
     return false;
   }
   const currentName = entry?.name || basenameOf(fullPath);
@@ -675,7 +675,7 @@ async function renameFileTreePath(fullPath, entry, newName) {
     await refreshFileExplorerTrees();
     return true;
   } catch (error) {
-    statusErr(`rename failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.renameFailed', {error}));
     return false;
   }
 }

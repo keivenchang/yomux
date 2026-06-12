@@ -988,10 +988,10 @@ async function applyLocale(locale) {
   rerenderForLocale({localeChange: true});
 }
 
-// The real (non-pseudo) locales that ship a catalog, most-specific first. 'system' resolves against
-// navigator.language to one of these. Add new locales here as their catalogs ship.
+// The real (non-pseudo) locales that ship a catalog, in product-priority order. 'system' resolves
+// against navigator.language to one of these. Add new locales here as their catalogs ship.
 function i18nSupportedLocales() {
-  return ['zh-Hant', 'zh-Hans', 'es', 'ja', 'de', 'fr', 'pt-BR', 'ru', 'ko', 'hi', 'ar', 'he', 'en'];
+  return ['en', 'zh-Hans', 'zh-Hant', 'ja', 'es', 'fr', 'ar', 'de', 'ru', 'hi', 'ko', 'vi', 'th', 'tr', 'he', 'pt-BR', 'nl', 'pl', 'it'];
 }
 
 // Phase 2: right-to-left locales. Drives document.dir so the browser mirrors the layout.
@@ -1001,23 +1001,29 @@ function i18nIsRtl(locale) {
 }
 
 // The language-switcher choices (Preferences picker + topbar switcher). Endonyms stay in their own
-// script (never translated); 'system'/pseudo are localized. Traditional Chinese before Simplified.
+// script (never translated); 'system'/pseudo are localized. en-XA stays last as the QA pseudo-locale.
 function i18nLocaleChoices() {
   return [
     {value: 'system', label: t('pref.general.language.system')},
     {value: 'en', label: 'English'},
-    {value: 'zh-Hant', label: '繁體中文'},
     {value: 'zh-Hans', label: '简体中文'},
-    {value: 'es', label: 'Español'},
+    {value: 'zh-Hant', label: '繁體中文'},
     {value: 'ja', label: '日本語'},
-    {value: 'de', label: 'Deutsch'},
+    {value: 'es', label: 'Español'},
     {value: 'fr', label: 'Français'},
-    {value: 'pt-BR', label: 'Português (BR)'},
-    {value: 'ru', label: 'Русский'},
-    {value: 'ko', label: '한국어'},
-    {value: 'hi', label: 'हिन्दी'},
     {value: 'ar', label: 'العربية'},
+    {value: 'de', label: 'Deutsch'},
+    {value: 'ru', label: 'Русский'},
+    {value: 'hi', label: 'हिन्दी'},
+    {value: 'ko', label: '한국어'},
+    {value: 'vi', label: 'Tiếng Việt'},
+    {value: 'th', label: 'ไทย'},
+    {value: 'tr', label: 'Türkçe'},
     {value: 'he', label: 'עברית'},
+    {value: 'pt-BR', label: 'Português (BR)'},
+    {value: 'nl', label: 'Nederlands'},
+    {value: 'pl', label: 'Polski'},
+    {value: 'it', label: 'Italiano'},
     {value: 'en-XA', label: t('pref.general.language.pseudo')},
   ];
 }
@@ -2249,9 +2255,9 @@ function openTerminalLink(rawLink) {
   if (!link) return;
   try {
     const opened = window.open(link, '_blank', 'noopener,noreferrer');
-    if (!opened) statusErr(`browser blocked link: ${esc(link)}`);
+    if (!opened) statusErr(localizedHtml('status.browserBlockedLink', {link}));
   } catch (error) {
-    statusErr(`could not open link: ${esc(error)}`);
+    statusErr(localizedHtml('status.openLinkFailed', {error}));
   }
 }
 
@@ -2492,7 +2498,7 @@ function writeTerminalTextToClipboard(text, label = 'copied') {
     })
     .catch(error => {
       copyDebug('clipboard', {via: 'async', chars: String(text ?? '').length, ok: false, error: String(error)});
-      statusErr(`copy failed: ${esc(error)}`);
+      statusErr(localizedHtml('status.copyFailed', {error}));
     });
 }
 
@@ -2765,7 +2771,7 @@ async function copyTerminalSelection(session, term, options = {}, container = nu
     await copyTextToClipboard(text);
     statusEl.textContent = options.dedent ? 'copied without indent' : 'copied';
   } catch (error) {
-    statusErr(`copy failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.copyFailed', {error}));
   }
 }
 
@@ -2803,7 +2809,7 @@ async function copyTmuxSelectionToClipboard(session) {
       statusEl.textContent = error.message || 'nothing selected';
       return false;
     }
-    statusErr(`copy failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.copyFailed', {error}));
     return false;
   }
 }
@@ -4256,13 +4262,13 @@ function renderNotifyToggle() {
   });
   const browserState = supported ? Notification.permission : 'unsupported';
   notifyToggle.title = readOnlyMode
-    ? 'Notify is admin-only'
-    : `notify when a session needs attention; browser notifications: ${browserState}`;
+    ? t('notify.adminOnlyTitle')
+    : t('notify.toggleTitle', {state: browserState});
 }
 
 async function toggleNotifications() {
   if (readOnlyMode) {
-    statusErr('readonly access cannot change Notify');
+    statusErr(localizedHtml('status.readOnlyChangeNotify'));
     return;
   }
   const nextEnabled = !notificationsEnabled;
@@ -4279,7 +4285,7 @@ async function toggleNotifications() {
     if (!response.ok) throw new Error(payload.error || response.statusText || `HTTP ${response.status}`);
     notificationsEnabled = payload.enabled === true;
   } catch (error) {
-    statusErr(`Notify request failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.notifyRequestFailed', {error}));
     return;
   }
   renderNotifyToggle();
@@ -4329,7 +4335,7 @@ function projectReadmePath() {
 async function openProjectReadme() {
   const path = projectReadmePath();
   if (!path) {
-    statusErr('README path is unavailable');
+    statusErr(localizedHtml('status.readmePathUnavailable'));
     return;
   }
   // open the README as rendered markdown by default (the user can switch to edit via the
@@ -5060,24 +5066,24 @@ function commandPaletteSearchQuery(query = commandPaletteQuery, mode = commandPa
 function commandPalettePlaceholder() {
   // Identical for Cmd-P and Cmd-Shift-P — they differ only in result ordering, not in labels.
   const q = commandPaletteQuery.trim();
-  if (q.startsWith('>')) return 'Run command';
-  if (q.startsWith('@')) return 'Symbol search is not available yet';
-  return 'Find files, tabs, commands, settings';
+  if (q.startsWith('>')) return t('palette.placeholderCommand');
+  if (q.startsWith('@')) return t('palette.symbolUnavailable');
+  return t('palette.placeholderWithFiles');
 }
 
 function commandPaletteLabel() {
   // Identical aria label for both entry points.
-  return 'Quick open';
+  return t('palette.quickOpen');
 }
 
 function commandPaletteEmptyText() {
-  if (fileQuickOpenLoading) return 'Searching...';
-  if (commandPaletteQuery.trim().startsWith('@')) return 'Symbol search is not available yet';
-  return 'No matches';
+  if (fileQuickOpenLoading) return t('search.searching');
+  if (commandPaletteQuery.trim().startsWith('@')) return t('palette.symbolUnavailable');
+  return t('palette.noMatches');
 }
 
 function commandPaletteStatusText() {
-  return fileQuickOpenLoading ? 'Searching files...' : '';
+  return fileQuickOpenLoading ? t('palette.searchingFiles') : '';
 }
 
 function ensureCommandPalette() {
@@ -5598,7 +5604,7 @@ function showStartupHelperTip(options = {}) {
     closeStartupHelperToast(node);
     saveSettingsPatch(settingPatch('general.startup_tips', false))
       .then(() => { statusEl.textContent = t('startupHelper.status.disabled'); })
-      .catch(error => { statusErr(`settings save failed: ${esc(error)}`); refreshSettings({force: true}); });
+      .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
   });
   node = showToast(startupHelperPromptTitle(index, tips.length, tip), tip.lines, {
     className: 'attention-alert toast startup-helper-toast',
@@ -5694,7 +5700,7 @@ function sendTestNotification() {
     });
     postEvent(null, 'notification_test_sent', 'notification test sent', {hostname: serverHostname});
   } catch (error) {
-    statusErr(`notification failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.notificationFailed', {error}));
     postEvent(null, 'notification_error', `notification test failed: ${error}`, {hostname: serverHostname});
   }
 }
@@ -6113,8 +6119,7 @@ function showAboutModal() {
       <div><dt>SHA</dt><dd>${esc(sha || t('common.unknown'))}</dd></div>
       <div><dt>${esc(t('menu.help.about.version'))}</dt><dd>${esc(version || t('common.unknown'))}</dd></div>
     </dl>
-    <a class="about-author" href="${esc(aboutLinkedInUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.author'))}</a>
-    <a class="about-author about-github" href="${esc(aboutProjectUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.github'))}</a>
+    <div class="about-links"><a class="about-author" href="${esc(aboutLinkedInUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.author'))}</a><span> - </span><a class="about-author about-github" href="${esc(aboutProjectUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.github'))}</a><span> (to YOLOmux)</span></div>
   </div>`;
   modal.classList.add('open');
 }
@@ -6269,7 +6274,7 @@ function applyAndSaveGlobalTheme(next) {
       statusEl.textContent = `theme: ${globalThemeLabel(next)}`;
     })
     .catch(error => {
-      statusErr(`theme save failed: ${esc(error)}`);
+      statusErr(localizedHtml('status.themeSaveFailed', {error}));
       refreshSettings({force: true});
     });
 }
@@ -6295,7 +6300,7 @@ function yoloRuleStatusDetail() {
 
 async function openYoloRuleFile() {
   if (readOnlyMode) {
-    statusErr('readonly access cannot create YOLO rule files');
+    statusErr(localizedHtml('status.yoloReadOnlyCreateRules'));
     return;
   }
   try {
@@ -6305,7 +6310,7 @@ async function openYoloRuleFile() {
     await openFileInEditor(payload.path || yoloRulePath(), {name: basenameOf(payload.path || yoloRulePath())});
     statusEl.textContent = t('status.openedYoloRule');
   } catch (error) {
-    statusErr(`open YOLO rule file failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.yoloOpenRuleFailed', {error}));
   }
 }
 
@@ -6316,11 +6321,11 @@ async function reloadYoloRules() {
     renderPreferencesPanels();
     const level = payload.error ? 'error' : '';
     statusEl.innerHTML = payload.error
-      ? `<span class="err">YOLO rule reload failed: ${esc(payload.error)}</span>`
-      : `<span class="ok">reloaded YOLO rules</span>`;
-    showToast('YOLO rules', payload.error || yoloRuleStatusDetail(), {level});
+      ? `<span class="err">${localizedHtml('status.yoloReloadFailed', {error: payload.error})}</span>`
+      : `<span class="ok">${localizedHtml('status.yoloReloaded')}</span>`;
+    showToast(t('status.yoloToastTitle'), payload.error || yoloRuleStatusDetail(), {level});
   } catch (error) {
-    statusErr(`reload YOLO rules failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.yoloReloadRequestFailed', {error}));
   }
 }
 
@@ -6331,7 +6336,7 @@ async function refreshYoloRulesStatus(options = {}) {
     renderPreferencesPanels();
     return payload;
   } catch (error) {
-    if (!options.silent) statusErr(`YOLO rule status failed: ${esc(error)}`);
+    if (!options.silent) statusErr(localizedHtml('status.yoloStatusFailed', {error}));
     return null;
   }
 }
@@ -6863,7 +6868,7 @@ function createTopbarLanguageSwitcher() {
     applyLocale(resolveLocalePref(value));
     if (readOnlyMode) return;
     saveSettingsPatch(settingPatch('general.language', value))
-      .catch(error => { statusErr(`settings save failed: ${esc(error)}`); refreshSettings({force: true}); });
+      .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
   });
   return select;
 }
@@ -7097,11 +7102,11 @@ function runAppMenuCommand(item) {
         if (keepOpen) renderSessionButtons({force: true});
       })
       .catch(error => {
-        statusErr(`menu command failed: ${esc(error)}`);
+        statusErr(localizedHtml('status.menuCommandFailed', {error}));
         if (keepOpen) renderSessionButtons({force: true});
       });
   } catch (error) {
-    statusErr(`menu command failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.menuCommandFailed', {error}));
     if (keepOpen) renderSessionButtons({force: true});
   }
 }
@@ -10336,7 +10341,7 @@ async function copyFilePath(path, label) {
     await copyTextToClipboard(text);
     statusEl.textContent = label === 'relative' ? 'copied relative path' : 'copied path';
   } catch (error) {
-    statusErr(`copy failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.copyFailed', {error}));
   }
 }
 
@@ -10368,7 +10373,7 @@ function childNameToPath(root, name) {
 
 async function createFileExplorerFile() {
   if (readOnlyMode) {
-    statusErr('readonly access cannot create files');
+    statusErr(localizedHtml('status.readOnlyCreateFiles'));
     return;
   }
   const name = window.prompt('New file name');
@@ -10384,13 +10389,13 @@ async function createFileExplorerFile() {
     await refreshFileExplorerTrees();
     await openFileInEditor(path, {name: basenameOf(path)});
   } catch (error) {
-    statusErr(`new file failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.newFileFailed', {error}));
   }
 }
 
 async function createFileExplorerFolder() {
   if (readOnlyMode) {
-    statusErr('readonly access cannot create folders');
+    statusErr(localizedHtml('status.readOnlyCreateFolders'));
     return;
   }
   const name = window.prompt('New folder name');
@@ -10405,7 +10410,7 @@ async function createFileExplorerFolder() {
     statusEl.textContent = `created ${basenameOf(path)}`;
     await refreshFileExplorerTrees();
   } catch (error) {
-    statusErr(`new folder failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.newFolderFailed', {error}));
   }
 }
 
@@ -10554,10 +10559,10 @@ function bindFileExplorerHeaderActions(container = document) {
         fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
       }
     } else if (action.matches('[data-file-explorer-collapse]')) {
-      collapseAllFileExplorerDirectories().catch(error => statusErr(`collapse failed: ${esc(error)}`));
+      collapseAllFileExplorerDirectories().catch(error => statusErr(localizedHtml('status.collapseFailed', {error})));
     } else if (action.matches('[data-file-tree-expand-collapse-all]')) {
       setAllFileTreeDirectoriesExpanded(action, action.dataset.fileTreeExpandCollapseAll === 'expand')
-        .catch(error => statusErr(`tree action failed: ${esc(error)}`));
+        .catch(error => statusErr(localizedHtml('status.treeActionFailed', {error})));
     } else if (action.matches('[data-file-explorer-tree-dates]')) {
       cycleFileExplorerTreeDateMode();
       if (fileExplorerMode === 'tabber') refreshTabberPanels();
@@ -10577,7 +10582,7 @@ function bindFileExplorerHeaderActions(container = document) {
 
 async function deleteFileTreePath(fullPath, entry, paths = null) {
   if (readOnlyMode) {
-    statusErr('readonly access cannot delete files');
+    statusErr(localizedHtml('status.readOnlyDeleteFiles'));
     return;
   }
   const deletePaths = compactNestedPaths(paths || fileTreeActionPaths(fullPath));
@@ -10609,7 +10614,7 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
     renderSessionButtons();
     renderPaneTabStrips();
   } catch (error) {
-    statusErr(`delete failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.deleteFailed', {error}));
   }
 }
 
@@ -10806,7 +10811,7 @@ function handleFileExplorerDeleteShortcut(event) {
   event.preventDefault();
   event.stopPropagation();
   if (readOnlyMode) {
-    statusErr('readonly access cannot delete files');
+    statusErr(localizedHtml('status.readOnlyDeleteFiles'));
     return true;
   }
   const primary = paths[0];
@@ -10820,7 +10825,7 @@ function handleFileExplorerDeleteShortcut(event) {
 
 function beginFileTreeRename(row, fullPath, entry) {
   if (readOnlyMode) {
-    statusErr('readonly access cannot rename files');
+    statusErr(localizedHtml('status.readOnlyRenameFiles'));
     return;
   }
   closeFileContextMenu();
@@ -10884,7 +10889,7 @@ function beginFileTreeRename(row, fullPath, entry) {
 
 async function renameFileTreePath(fullPath, entry, newName) {
   if (readOnlyMode) {
-    statusErr('readonly access cannot rename files');
+    statusErr(localizedHtml('status.readOnlyRenameFiles'));
     return false;
   }
   const currentName = entry?.name || basenameOf(fullPath);
@@ -10908,7 +10913,7 @@ async function renameFileTreePath(fullPath, entry, newName) {
     await refreshFileExplorerTrees();
     return true;
   } catch (error) {
-    statusErr(`rename failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.renameFailed', {error}));
     return false;
   }
 }
@@ -13146,10 +13151,10 @@ function updateEditorModeControl(control, path, state, item = null) {
 }
 
 function editorModeLabel(mode) {
-  if (mode === 'diff') return 'Diff';
-  if (mode === 'preview') return 'Preview';
-  if (mode === 'split') return 'Split view';
-  return 'Edit';
+  if (mode === 'diff') return t('editor.diff');
+  if (mode === 'preview') return t('editor.mode.preview');
+  if (mode === 'split') return t('editor.mode.split');
+  return t('editor.mode.edit');
 }
 
 function editorModeIconClass(mode) {
@@ -13791,15 +13796,7 @@ function refreshActiveTerminalCursor() {
 function refreshMetaButtonTitle() {
   if (!refreshMeta) return;
   const seconds = ms => `${Math.round(ms / 1000)}s`;
-  refreshMeta.title = [
-    'Refresh session state',
-    'Re-list tmux sessions.',
-    'Refresh git, PR, Linear, and agent metadata.',
-    'Refresh YOLO status and open event logs.',
-    'Refresh active transcript previews.',
-    `Live updates arrive over SSE. Local timers: ping ${seconds(latencyRefreshMs)}, open logs ${seconds(eventLogRefreshMs)}.`,
-    'Does not reload the page or reconnect terminals.',
-  ].join('\n');
+  refreshMeta.title = t('meta.refreshTitle', {ping: seconds(latencyRefreshMs), openLogs: seconds(eventLogRefreshMs)});
 }
 
 function applySettingsPayload(payload, options = {}) {
@@ -13897,9 +13894,9 @@ async function refreshSettings(options = {}) {
     if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
     const changed = applySettingsPayload(payload, {force: options.force === true});
     if (changed) refreshYoloRulesStatus({silent: true});
-    if (changed && !options.silent) statusEl.textContent = 'settings reloaded';
+    if (changed && !options.silent) statusEl.textContent = t('status.settingsReloaded');
   } catch (error) {
-    if (!options.silent) statusErr(`settings reload failed: ${esc(error)}`);
+    if (!options.silent) statusErr(localizedHtml('status.settingsReloadFailed', {error}));
   }
 }
 
@@ -16297,17 +16294,17 @@ async function ensureSession(session) {
     return true;
   } catch (error) {
     if (error?.status) {
-      statusErr(`${esc(error.payload?.error || 'session create failed')}`);
+      statusErr(esc(error.payload?.error || t('status.sessionCreateFailedDefault')));
       return false;
     }
-    statusErr(`session check failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.sessionCheckFailed', {error}));
     return false;
   }
 }
 
 async function createNextSession(agent) {
   if (readOnlyMode) {
-    statusErr('readonly access cannot create sessions');
+    statusErr(localizedHtml('status.readOnlyCreateSessions'));
     return;
   }
   const agentLabel = agentName(agent) || 'agent';
@@ -16325,10 +16322,10 @@ async function createNextSession(agent) {
     statusOk(`created ${esc(sessionLabel(payload.session))} (${esc(payload.session)}) with ${esc(agentName(payload.agent) || agentLabel)}`);
   } catch (error) {
     if (error?.status) {
-      statusErr(`${esc(error.payload?.error || 'session create failed')}`);
+      statusErr(esc(error.payload?.error || t('status.sessionCreateFailedDefault')));
       return;
     }
-    statusErr(`session create failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.sessionCreateFailed', {error}));
   }
 }
 
@@ -16420,7 +16417,7 @@ function sessionRenameDialogKeydown(event) {
 
 function showSessionRenameDialog(session) {
   if (readOnlyMode) {
-    statusErr('readonly access cannot rename sessions');
+    statusErr(localizedHtml('status.readOnlyRenameSessions'));
     return false;
   }
   if (!isTmuxSession(session)) return false;
@@ -16464,7 +16461,7 @@ function showSessionRenameDialog(session) {
     errorNode.hidden = true;
     const renamed = await renameTmuxSession(session, nextName);
     if (!renamed) {
-      showError('rename failed; see status line');
+      showError(t('status.renameFailedSeeStatus'));
       input.focus();
     }
   });
@@ -16480,7 +16477,7 @@ function showSessionRenameDialog(session) {
 
 async function renameTmuxSession(session, proposedName) {
   if (readOnlyMode) {
-    statusErr('readonly access cannot rename sessions');
+    statusErr(localizedHtml('status.readOnlyRenameSessions'));
     return false;
   }
   if (!isTmuxSession(session)) return false;
@@ -16509,17 +16506,17 @@ async function renameTmuxSession(session, proposedName) {
     return true;
   } catch (error) {
     if (error?.status) {
-      statusErr(`${esc(error.payload?.error || 'session rename failed')}`);
+      statusErr(esc(error.payload?.error || t('status.sessionRenameFailedDefault')));
       return false;
     }
-    statusErr(`session rename failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.sessionRenameFailed', {error}));
     return false;
   }
 }
 
 async function killTmuxSession(session) {
   if (readOnlyMode) {
-    statusErr('readonly access cannot kill sessions');
+    statusErr(localizedHtml('status.readOnlyKillSessions'));
     return false;
   }
   if (!isTmuxSession(session)) return false;
@@ -16541,10 +16538,10 @@ async function killTmuxSession(session) {
     return true;
   } catch (error) {
     if (error?.status) {
-      statusErr(`${esc(error.payload?.error || 'session kill failed')}`);
+      statusErr(esc(error.payload?.error || t('status.sessionKillFailedDefault')));
       return false;
     }
-    statusErr(`session kill failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.sessionKillFailed', {error}));
     return false;
   }
 }
@@ -19392,7 +19389,7 @@ function beginFileTabRename(tab, item) {
     return;
   }
   if (readOnlyMode) {
-    statusErr('readonly access cannot rename files');
+    statusErr(localizedHtml('status.readOnlyRenameFiles'));
     return;
   }
   const currentName = basenameOf(path);
@@ -20297,7 +20294,7 @@ function createInfoPanel() {
     if (!backend || !panel.contains(backend) || readOnlyMode) return;
     saveSettingsPatch(settingPatch('yoagent.backend', backend.value))
       .then(() => { statusEl.textContent = `YO!agent backend: ${yoagentBackendLabel(backend.value)}`; renderYoagentPanel(); })
-      .catch(error => { statusErr(`settings save failed: ${esc(error)}`); refreshSettings({force: true}); });
+      .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
   });
   applyInfoSubTab(panel);
   renderInfoPanel();
@@ -20754,7 +20751,7 @@ async function refreshActivitySummary(options = {}) {
       errors: [String(error)],
       global: {lines: [`activity summary unavailable: ${String(error)}`]},
     };
-    if (!options.silent) statusErr(`activity summary failed: ${esc(error)}`);
+    if (!options.silent) statusErr(localizedHtml('status.activitySummaryFailed', {error}));
   } finally {
     if (requestIsCurrent()) {
       activitySummaryRefreshing = false;
@@ -20848,23 +20845,7 @@ function preferenceSections() {
   return [
     {title: t('pref.section.general'), items: [
       // #51: Language is the FIRST General preference.
-      {path: 'general.language', label: t('pref.general.language.label'), type: 'select', choices: [
-        // Endonym labels (each language in its own script); Traditional Chinese before Simplified.
-        {value: 'system', label: t('pref.general.language.system')},
-        {value: 'en', label: 'English'},
-        {value: 'zh-Hant', label: '繁體中文'},
-        {value: 'zh-Hans', label: '简体中文'},
-        {value: 'es', label: 'Español'},
-        {value: 'ja', label: '日本語'},
-        {value: 'de', label: 'Deutsch'},
-        {value: 'fr', label: 'Français'},
-        {value: 'pt-BR', label: 'Português (BR)'},
-        {value: 'ru', label: 'Русский'},
-        {value: 'ko', label: '한국어'},
-        {value: 'hi', label: 'हिन्दी'},
-        {value: 'ar', label: 'العربية'},
-        {value: 'en-XA', label: t('pref.general.language.pseudo')},
-      ], help: t('pref.general.language.help')},
+      {path: 'general.language', label: t('pref.general.language.label'), type: 'select', choices: i18nLocaleChoices(), help: t('pref.general.language.help')},
       {path: 'general.auto_focus', label: t('pref.general.auto_focus.label'), type: 'boolean', help: t('pref.general.auto_focus.help')},
       {path: 'general.startup_tips', label: t('pref.general.startup_tips.label'), type: 'boolean', help: t('pref.general.startup_tips.help')},
       {path: 'general.default_sessions', label: t('pref.general.default_sessions.label'), type: 'list', help: t('pref.general.default_sessions.help')},
@@ -20997,22 +20978,22 @@ function preferenceDefault(path) {
 }
 
 function preferenceStatusText() {
-  if (clientSettingsPayload.error) return `settings error: ${clientSettingsPayload.error}`;
-  if (yoloRulesPayload.error) return `YOLO rules error: ${yoloRulesPayload.error}`;
+  if (clientSettingsPayload.error) return t('pref.status.settingsError', {error: clientSettingsPayload.error});
+  if (yoloRulesPayload.error) return t('pref.status.rulesError', {error: yoloRulesPayload.error});
   return settingsLoadedAgeText();
 }
 
 function settingsLoadedAgeText(nowMs = Date.now()) {
   const loadedMs = Number(clientSettingsPayload.mtime_ns || 0) / 1000000;
-  if (!Number.isFinite(loadedMs) || loadedMs <= 0) return 'loaded';
+  if (!Number.isFinite(loadedMs) || loadedMs <= 0) return t('pref.status.loaded');
   const ageSeconds = Math.max(0, Math.floor((Number(nowMs) - loadedMs) / 1000));
-  if (ageSeconds < 60) return `loaded ${ageSeconds} sec ago`;
+  if (ageSeconds < 60) return t('pref.status.loadedSeconds', {count: ageSeconds});
   const ageMinutes = Math.floor(ageSeconds / 60);
-  if (ageMinutes < 60) return `loaded ${ageMinutes} min ago`;
+  if (ageMinutes < 60) return t('pref.status.loadedMinutes', {count: ageMinutes});
   const ageHours = Math.floor(ageMinutes / 60);
-  if (ageHours < 24) return `loaded ${ageHours} hr ago`;
+  if (ageHours < 24) return t('pref.status.loadedHours', {count: ageHours});
   const ageDays = Math.floor(ageHours / 24);
-  return `loaded ${ageDays} day${ageDays === 1 ? '' : 's'} ago`;
+  return tPlural('pref.status.loadedDays', ageDays);
 }
 
 function preferencesPathRowsHtml() {
@@ -21625,7 +21606,7 @@ function bindDebugPanel(panel) {
       event.preventDefault();
       copyTextToClipboard(jsDebugTextForClipboard())
         .then(() => { statusEl.textContent = t('debug.copied'); })
-        .catch(error => { statusErr(`copy failed: ${esc(error)}`); });
+        .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
       return;
     }
     const clear = event.target.closest('[data-js-debug-clear]');
@@ -21723,7 +21704,7 @@ function renderPreferencesPanels(options = {}) {
       const scrollLeft = prevScroll.scrollLeft;
       if (shouldKeepDom) {
         const pathRows = body.querySelector('.preferences-path-rows');
-        if (pathRows) pathRows.innerHTML = `${preferencesPathRowsHtml()}${readOnlyMode ? '<span class="preferences-readonly">readonly access</span>' : ''}`;
+        if (pathRows) pathRows.innerHTML = `${preferencesPathRowsHtml()}${readOnlyMode ? `<span class="preferences-readonly">${esc(t('pref.readonly'))}</span>` : ''}`;
       } else {
         body.innerHTML = `<div id="panel-toasts-${prefsItemId}" class="panel-toast-stack"></div><div class="preferences-scroll">${preferencesPanelHtml()}</div>`;
       }
@@ -21836,7 +21817,7 @@ function bindPreferencesPanel(panel) {
       event.preventDefault();
       copyTextToClipboard(copy.dataset.copyPath || '')
         .then(() => { statusEl.textContent = 'copied path'; })
-        .catch(error => { statusErr(`copy failed: ${esc(error)}`); });
+        .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
       return;
     }
     const copyText = event.target.closest('[data-copy-text]');
@@ -21844,7 +21825,7 @@ function bindPreferencesPanel(panel) {
       event.preventDefault();
       copyTextToClipboard(copyText.dataset.copyText || '')
         .then(() => { statusEl.textContent = 'copied text'; })
-        .catch(error => { statusErr(`copy failed: ${esc(error)}`); });
+        .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
       return;
     }
     const yoloRuleOpen = event.target.closest('[data-yolo-rule-open]');
@@ -22639,7 +22620,7 @@ async function fetchSessionFiles(options = {}) {
     setSessionFilesSignatureForDestination(destination, signature);
     fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {payload: nextPayload, signature});
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
-    if (!options.silent) statusOk(`loaded ${nextPayload.files.length} changed file${nextPayload.files.length === 1 ? '' : 's'}`);
+    if (!options.silent) statusOk(esc(tPlural('status.changedFilesLoaded', nextPayload.files.length)));
   } catch (err) {
     const nextPayload = {session, files: [], repos: [], refs_by_repo: {}, errors: [String(err)], from_ref: diffRefFrom, to_ref: diffRefTo, loaded: true};
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
@@ -22647,7 +22628,7 @@ async function fetchSessionFiles(options = {}) {
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
     setSessionFilesPayloadForDestination(destination, nextPayload);
     setSessionFilesSignatureForDestination(destination, signature);
-    if (!options.silent) statusErr(`changed files failed: ${esc(err)}`);
+    if (!options.silent) statusErr(localizedHtml('status.changedFilesFailed', {error: err}));
   } finally {
     const current = requestIsCurrent();
     const wasLoading = current && sessionFilesLoadingForDestination(destination);
@@ -23807,7 +23788,7 @@ async function copyChangedPath(path, label) {
     await copyTextToClipboard(path);
     statusEl.textContent = `copied ${label}`;
   } catch (error) {
-    statusErr(`copy failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.copyFailed', {error}));
   }
 }
 
@@ -23829,7 +23810,7 @@ async function openChangedDirectoryInFinder(path) {
     selectFileTreePath(path);
     statusEl.textContent = `expanded ${path} in ${fileExplorerLabel()}`;
   } catch (error) {
-    statusErr(`expand directory failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.expandDirectoryFailed', {error}));
   }
 }
 
@@ -23999,7 +23980,7 @@ function savePreferenceControl(control) {
       }
       statusEl.textContent = `saved ${path}`;
     })
-    .catch(error => { statusErr(`settings save failed: ${esc(error)}`); refreshSettings({force: true}); });
+    .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
 }
 
 function resetPreference(path) {
@@ -24009,7 +23990,7 @@ function resetPreference(path) {
     applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',
   })
     .then(() => { statusEl.textContent = `reset ${path}`; })
-    .catch(error => { statusErr(`settings reset failed: ${esc(error)}`); });
+    .catch(error => { statusErr(localizedHtml('status.settingsResetFailed', {error})); });
 }
 
 function resetAllPreferences() {
@@ -24024,7 +24005,7 @@ function resetAllPreferences() {
       renderPreferencesPanels({force: true});
       statusEl.textContent = 'reset all preferences';
     })
-    .catch(error => { statusErr(`settings reset failed: ${esc(error)}`); });
+    .catch(error => { statusErr(localizedHtml('status.settingsResetFailed', {error})); });
 }
 
 function clampEditorPreviewFontSize(value) {
@@ -24058,7 +24039,7 @@ function setEditorPreviewFontSize(value) {
   refreshFilePreviewPopouts();
   saveSettingsPatch(settingPatch('appearance.preview_font_size', next))
     .then(() => { statusEl.textContent = 'saved appearance.preview_font_size'; })
-    .catch(error => { statusErr(`settings save failed: ${esc(error)}`); refreshSettings({force: true}); });
+    .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
 }
 
 // File Explorer pane content is self-contained so layout panes do not depend on
@@ -26628,7 +26609,7 @@ async function openHtmlPreviewWithAuth(path) {
     window.setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
   } catch (error) {
     if (previewWindow) previewWindow.close();
-    statusErr(`HTML preview failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.htmlPreviewFailed', {error}));
   }
 }
 
@@ -27272,7 +27253,7 @@ function openFilePreviewPopout(path, panel = null) {
   }
   const previewWindow = window.open(`/preview-popout?path=${encodeURIComponent(path)}`, `yolomux-preview-${encodeURIComponent(path)}`, 'popup,width=980,height=900');
   if (!previewWindow) {
-    statusErr('preview pop-out was blocked by the browser');
+    statusErr(localizedHtml('status.previewPopoutBlocked'));
     return false;
   }
   try {
@@ -27282,7 +27263,7 @@ function openFilePreviewPopout(path, panel = null) {
   } catch (error) {
     filePreviewPopouts.delete(path);
     try { previewWindow.close(); } catch (_) {}
-    statusErr(`preview pop-out failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.previewPopoutFailed', {error}));
     return false;
   }
 }
@@ -27911,14 +27892,14 @@ function createPanel(session) {
       <div id="summary-pane-${session}" class="tab-pane">
         <div class="summary">
           <div class="transcript-head">${esc(t('menu.tmux.aiTranscript', {session: sessionLabel(session)}))}</div>
-          <div id="summary-context-${session}" class="summary-context">loading session context...</div>
-          <div id="summary-${session}" class="summary-preview markdown-body">click "YO!summary" to generate a Codex summary of the last hour</div>
+          <div id="summary-context-${session}" class="summary-context">${esc(t('summary.loadingContext'))}</div>
+          <div id="summary-${session}" class="summary-preview markdown-body">${esc(t('summary.emptyPrompt'))}</div>
         </div>
       </div>
       <div id="events-pane-${session}" class="tab-pane">
         <div class="summary">
-          <div class="transcript-head">YOLO log</div>
-          <div id="events-${session}" class="event-list">loading events...</div>
+          <div class="transcript-head">${esc(t('events.title'))}</div>
+          <div id="events-${session}" class="event-list">${esc(t('events.loading'))}</div>
         </div>
       </div>`;
   bindPanelShell(panel, session);
@@ -28250,7 +28231,7 @@ function addWatchedPr(entry) {
   list.push(ref);
   saveSettingsPatch(settingPatch('github.watched_prs', list))
     .then(() => { statusOk(t('info.watched.added', {ref})); refreshWatchedPrs(); })
-    .catch(error => statusErr(`settings save failed: ${esc(error)}`));
+    .catch(error => statusErr(localizedHtml('status.settingsSaveFailed', {error})));
 }
 
 function removeWatchedPr(ref) {
@@ -28259,7 +28240,7 @@ function removeWatchedPr(ref) {
   const list = (Array.isArray(current) ? current : []).filter(item => normalizeWatchedPrRef(item) !== target && String(item).trim() !== target);
   saveSettingsPatch(settingPatch('github.watched_prs', list))
     .then(() => { statusOk(t('info.watched.removed', {ref: target})); refreshWatchedPrs(); })
-    .catch(error => statusErr(`settings save failed: ${esc(error)}`));
+    .catch(error => statusErr(localizedHtml('status.settingsSaveFailed', {error})));
 }
 
 // right-clicking a PR link in YO!info offers "Watch this PR" (adds it to github.watched_prs).
@@ -28605,7 +28586,7 @@ function bindPanelControls(panel, session) {
     if (!path) return;
     copyTextToClipboard(path)
       .then(() => { statusEl.textContent = 'copied transcript path'; })
-      .catch(error => { statusErr(`copy failed: ${esc(error)}`); });
+      .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
   });
   panel.querySelector('.meta')?.addEventListener('click', event => {
     event.stopPropagation();
@@ -28891,7 +28872,7 @@ function bindClipboardPaste() {
     if (!file) return;
     const session = pasteTargetSession(event);
     if (!session) {
-      statusErr('select a YOLOmux pane before pasting an image');
+      statusErr(localizedHtml('status.selectPaneForImagePaste'));
       return;
     }
     event.preventDefault();
@@ -29019,14 +29000,14 @@ function imageSuffix(mimeType) {
 
 async function uploadFiles(session, fileList, options = {}) {
   if (readOnlyMode) {
-    statusErr('readonly access cannot upload files');
+    statusErr(localizedHtml('status.readOnlyUploadFiles'));
     return;
   }
   const files = Array.from(fileList || []);
   if (!files.length) return;
   const totalBytes = files.reduce((total, file) => total + (Number(file?.size) || 0), 0);
   if (uploadMaxBytes > 0 && totalBytes > uploadMaxBytes) {
-    statusErr(`upload failed: ${esc(`selected files total ${formatFileSize(totalBytes)}; limit is ${formatFileSize(uploadMaxBytes)}`)}`);
+    statusErr(localizedHtml('status.uploadTooLarge', {selected: formatFileSize(totalBytes), limit: formatFileSize(uploadMaxBytes)}));
     showUploadRsyncRecommendation({session, sizeBytes: totalBytes});
     return;
   }
@@ -29057,7 +29038,7 @@ async function uploadFiles(session, fileList, options = {}) {
     refreshOpenEventLogs();
     refreshTranscripts({force: true});
   } catch (error) {
-    statusErr(`upload failed: ${esc(error?.payload?.error || error)}`);
+    statusErr(localizedHtml('status.uploadFailed', {error: error?.payload?.error || error}));
   }
 }
 
@@ -29116,7 +29097,7 @@ function syncPasteCounterFromPath(path) {
 
 function insertIntoTerminal(session, text) {
   if (readOnlyMode) {
-    statusErr('readonly access cannot type into terminal sessions');
+    statusErr(localizedHtml('status.readOnlyTypeTerminals'));
     return false;
   }
   const item = terminals.get(session);
@@ -29413,7 +29394,7 @@ function startTerminal(session) {
   const TerminalCtor = window.Terminal?.Terminal || window.Terminal;
   if (!TerminalCtor) {
     container.innerHTML = '<pre class="terminal-error">xterm.js failed to load from /static/xterm.js. Terminal cannot attach.</pre>';
-    statusErr('xterm unavailable');
+    statusErr(localizedHtml('status.xtermUnavailable'));
     return;
   }
   container.innerHTML = '';
@@ -29523,7 +29504,7 @@ function updateStatus() {
 
 async function toggleAutoApprove(session) {
   if (readOnlyMode) {
-    statusErr('readonly access cannot change YOLO');
+    statusErr(localizedHtml('status.yoloReadOnlyChange'));
     return;
   }
   const state = autoApproveStates.get(session) || {};
@@ -29533,7 +29514,7 @@ async function toggleAutoApprove(session) {
 
 async function setAutoApprove(session, enabled) {
   if (readOnlyMode) {
-    statusErr('readonly access cannot change YOLO');
+    statusErr(localizedHtml('status.yoloReadOnlyChange'));
     return;
   }
   try {
@@ -29543,8 +29524,8 @@ async function setAutoApprove(session, enabled) {
     updateSessionButtonStates();
     renderAutoApproveButton(session, payload);
     statusEl.innerHTML = payload.enabled
-      ? `<span class="ok">enabled YOLO for ${esc(sessionLabel(session))}</span>`
-      : `<span class="ok">disabled YOLO for ${esc(sessionLabel(session))}</span>`;
+      ? `<span class="ok">${localizedHtml('status.yoloEnabledFor', {session: sessionLabel(session)})}</span>`
+      : `<span class="ok">${localizedHtml('status.yoloDisabledFor', {session: sessionLabel(session)})}</span>`;
   } catch (error) {
     const payload = error?.payload || {};
     if (error?.status) {
@@ -29554,10 +29535,10 @@ async function setAutoApprove(session, enabled) {
         updateSessionButtonStates();
         renderAutoApproveButton(session, payload);
       }
-      statusErr(`${esc(payload.error || 'YOLO approval failed')}`);
+      statusErr(localizedHtml('status.yoloApprovalFailed', {error: payload.error || t('status.yoloApprovalFailedDefault')}));
       return;
     }
-    statusErr(`YOLO request failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.yoloRequestFailed', {error}));
   }
 }
 
@@ -29615,7 +29596,7 @@ function autoApproveOwnerLabel(payload) {
   const owner = payload?.lock_owner || {};
   const pid = owner.pid ? `pid ${owner.pid}` : '';
   const root = owner.project_root || '';
-  return [pid, root].filter(Boolean).join(' ') || payload?.last_action || 'another YOLOmux';
+  return [pid, root].filter(Boolean).join(' ') || payload?.last_action || t('yolo.ownerFallback');
 }
 
 function renderAutoApproveButtons() {
@@ -29645,12 +29626,13 @@ function renderAutoApproveButton(session, payload) {
     }
     button.closest('.pane-tab')?.classList.remove('is-working');
     button.textContent = t('brand.marker');
-    const action = payload?.last_action ? `; ${payload.last_action}` : '';
+    const action = payload?.last_action ? t('yolo.actionSuffix', {action: payload.last_action}) : '';
+    const readonly = readOnlyMode ? t('yolo.readonlySuffix') : '';
     button.title = enabled
-      ? `YOLO on for ${sessionLabel(session)}${action}${readOnlyMode ? '; readonly access' : ''}`
+      ? t('yolo.buttonOnForSession', {session: sessionLabel(session), action, readonly})
       : locked
-        ? `YOLO owned by ${autoApproveOwnerLabel(payload)}`
-      : `YOLO off for ${sessionLabel(session)}${readOnlyMode ? '; readonly access' : ''}`;
+        ? t('yolo.buttonOwnedBy', {owner: autoApproveOwnerLabel(payload)})
+      : t('yolo.buttonOffForSession', {session: sessionLabel(session), readonly});
   }
   updatePanelHeader(session, transcriptMeta.sessions?.[session]);
   updateTypingIndicator(session);
@@ -30171,7 +30153,7 @@ async function boot() {
   renderTabMetaToggle();
   bindTopbarMetrics();
   syncInitialLayoutUrl();
-  statusEl.textContent = 'loading YOLO status...';
+  statusEl.textContent = t('status.yoloLoading');
   await loadNotifyStatus();
   await loadAutoStatuses();
   bindClipboardPaste();

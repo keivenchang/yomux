@@ -975,7 +975,9 @@ def test_yoagent_chat_appends_language_directive_to_the_llm_prompt(monkeypatch):
     finally:
         webapp.control_server.stop()
     assert status == HTTPStatus.OK
-    assert "You are YO!agent" in captured["prompt"]
+    assert "你是優!助手" in captured["prompt"]
+    assert "優樂mux" in captured["prompt"]
+    assert "You are YO!agent" not in captured["prompt"]
     assert "請用繁體中文回答。" in captured["prompt"]
 
 
