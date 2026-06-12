@@ -415,6 +415,8 @@
   "pref.appearance.preview_font_size.label": "Preview font size",
   "pref.appearance.red_reminder_ms.help": "입력이나 승인이 필요한 세션의 빨간 주의 펄스 지속 시간입니다. 0으로 설정하면 비활성화됩니다.",
   "pref.appearance.red_reminder_ms.label": "빨간 리마인더 지속 시간",
+  "pref.appearance.separator_color.help": "Color for pane separators and dashed tab/file/root drop previews.",
+  "pref.appearance.separator_color.label": "Separator color",
   "pref.appearance.tab_width.help": "창 탭이 추가 행으로 넘어가기 전의 목표 너비입니다.",
   "pref.appearance.tab_width.label": "탭 너비",
   "pref.appearance.terminal_font_size.help": "xterm.js 창에서 사용하는 글꼴 크기입니다. 범위를 벗어난 값은 제한됩니다.",

@@ -415,6 +415,8 @@
   "pref.appearance.preview_font_size.label": "Preview font size",
   "pref.appearance.red_reminder_ms.help": "משך פעימת תשומת הלב האדומה להפעלות הזקוקות לקלט או לאישור. הגדר 0 כדי לבטל.",
   "pref.appearance.red_reminder_ms.label": "משך תזכורת אדומה",
+  "pref.appearance.separator_color.help": "Color for pane separators and dashed tab/file/root drop previews.",
+  "pref.appearance.separator_color.label": "Separator color",
   "pref.appearance.tab_width.help": "רוחב היעד ללשוניות החלונית לפני שהן נגללות לשורות נוספות.",
   "pref.appearance.tab_width.label": "רוחב לשונית",
   "pref.appearance.terminal_font_size.help": "גודל הגופן בו משתמשות חלוניות xterm.js. ערכים מחוץ לטווח מוגבלים.",

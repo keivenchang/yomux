@@ -415,6 +415,8 @@
   "pref.appearance.preview_font_size.label": "預覽字型大小",
   "pref.appearance.red_reminder_ms.help": "需要輸入或核准的工作階段的紅色注意脈動持續時間。設為 0 可停用。",
   "pref.appearance.red_reminder_ms.label": "紅色提醒持續時間",
+  "pref.appearance.separator_color.help": "窗格分隔線，以及分頁、檔案、根層拖放虛線預覽的顏色。",
+  "pref.appearance.separator_color.label": "分隔線顏色",
   "pref.appearance.tab_width.help": "窗格分頁換到下一列前的目標寬度。",
   "pref.appearance.tab_width.label": "分頁寬度",
   "pref.appearance.terminal_font_size.help": "xterm.js 窗格使用的字型大小。超出範圍的值會被限制。",

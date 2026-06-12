@@ -47,7 +47,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     settings = sanitize_settings(
         {
             "general": {"default_layout": "bad"},
-            "appearance": {"theme": "neon", "terminal_theme": "neon", "date_time_hour_cycle": "bogus", "ui_font_size": 1, "terminal_font_size": 100, "editor_font_size": 100, "editor_color_scheme": "bogus", "editor_dark_color_scheme": "github-light", "editor_light_color_scheme": "popular-ide-dark-plus", "editor_cursor_style": "beam", "editor_cursor_color": "bogus-cursor", "file_explorer_font_size": 1, "tab_width": 20, "pane_spacing": 50, "pane_ring_opacity": 1, "inactive_pane_opacity": 500},
+            "appearance": {"theme": "neon", "terminal_theme": "neon", "date_time_hour_cycle": "bogus", "ui_font_size": 1, "terminal_font_size": 100, "editor_font_size": 100, "editor_color_scheme": "bogus", "editor_dark_color_scheme": "github-light", "editor_light_color_scheme": "popular-ide-dark-plus", "editor_cursor_style": "beam", "editor_cursor_color": "bogus-cursor", "separator_color": "bogus-separator", "file_explorer_font_size": 1, "tab_width": 20, "pane_spacing": 50, "pane_ring_opacity": 1, "inactive_pane_opacity": 500},
             "file_explorer": {"root_mode": "bad", "image_open_mode": "bad", "image_preview_max_px": 5000, "refresh_seconds": 99},
             "notifications": {"notify_transitions": ["needs-input", "bogus", "done"]},
             "performance": {"latency_refresh_ms": 100, "event_log_refresh_ms": 100000},
@@ -72,6 +72,8 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["appearance"]["editor_cursor_style"] == "block"  # C3: invalid choice clamps to the new block default
     assert settings["appearance"]["editor_cursor_color"] == "yellow"  # invalid choice clamps to the default
     assert sanitize_settings({"appearance": {"editor_cursor_color": "laser-lime"}})["appearance"]["editor_cursor_color"] == "laser-lime"
+    assert settings["appearance"]["separator_color"] == "theme"
+    assert sanitize_settings({"appearance": {"separator_color": "purple"}})["appearance"]["separator_color"] == "purple"
     assert settings["appearance"]["file_explorer_font_size"] == 6
     assert settings["appearance"]["tab_width"] == 120
     assert settings["appearance"]["pane_spacing"] == 20
@@ -122,6 +124,7 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert payload["settings"]["general"]["default_layout"] == "split"
     assert payload["choices"]["general.default_layout"] == ["single", "split", "grid", "wall"]
     assert payload["choices"]["appearance.active_color"] == ["green", "blue", "orange", "yellow", "purple", "white"]
+    assert payload["choices"]["appearance.separator_color"] == ["theme", "green", "blue", "orange", "yellow", "purple", "white"]
     assert payload["choices"]["appearance.editor_cursor_color"] == ["green", "blue", "orange", "yellow", "purple", "white", "laser-lime", "neon-green", "neon-cyan", "neon-magenta", "neon-orange", "theme"]
     assert payload["settings"]["general"]["startup_tips"] is True
     assert payload["settings"]["uploads"]["max_bytes"] == UPLOAD_MAX_BYTES

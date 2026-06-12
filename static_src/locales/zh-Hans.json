@@ -366,6 +366,8 @@
   "pref.appearance.active_color.green": "鲜绿",
   "pref.appearance.active_color.help": "活动/聚焦窗格的强调色（活动标签、焦点环、顶部色条、文件选中、Markdown 标题与优标记）。",
   "pref.appearance.active_color.label": "强调色",
+  "pref.appearance.separator_color.help": "窗格分隔线以及标签、文件、根级拖放虚线预览的颜色。",
+  "pref.appearance.separator_color.label": "分隔线颜色",
   "pref.appearance.active_color.orange": "血橙",
   "pref.appearance.active_color.purple": "皇家紫",
   "pref.appearance.active_color.white": "月光白",

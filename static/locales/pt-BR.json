@@ -415,6 +415,8 @@
   "pref.appearance.preview_font_size.label": "Preview font size",
   "pref.appearance.red_reminder_ms.help": "Duração do pulso de atenção vermelho para sessões que aguardam entrada ou aprovação. Defina 0 para desativar.",
   "pref.appearance.red_reminder_ms.label": "Duração do lembrete vermelho",
+  "pref.appearance.separator_color.help": "Color for pane separators and dashed tab/file/root drop previews.",
+  "pref.appearance.separator_color.label": "Separator color",
   "pref.appearance.tab_width.help": "Largura alvo das abas do painel antes de quebrarem para linhas adicionais.",
   "pref.appearance.tab_width.label": "Largura da aba",
   "pref.appearance.terminal_font_size.help": "Tamanho da fonte usado pelos painéis do xterm.js. Valores fora do intervalo são limitados.",

@@ -4699,7 +4699,7 @@ function cursorStyleFileReference(path, options = {}) {
   if (!fullPath || options.kind === 'dir') return null;
   if (IMAGE_EXTENSIONS.has(fileExtensionOf(fullPath))) {
     const index = Math.max(1, Math.floor(Number(options.imageIndex || 1)));
-    return {label: `[Image #${index}]`, detail: `'${fullPath}'`};
+    return {label: `[Image #${index}]`, detail: shellQuote(fullPath)};
   }
   return null;
 }
@@ -6055,6 +6055,10 @@ function menuSeparator() {
   return {type: 'separator'};
 }
 
+function menuNumberSetting(path, label, options = {}) {
+  return {type: 'number-setting', path, label, ...options};
+}
+
 function menuGroups(...groups) {
   const items = [];
   for (const group of groups) {
@@ -6346,6 +6350,14 @@ async function refreshYoloRulesStatus(options = {}) {
 
 function tmuxYoloMenuItems() {
   return [
+    menuNumberSetting('appearance.yolo_rotate_ms', t('pref.appearance.yolo_rotate_ms.label'), {
+      min: 0,
+      max: 60000,
+      step: 250,
+      suffix: 'ms',
+      fallback: 20000,
+      detail: t('pref.appearance.yolo_rotate_ms.help'),
+    }),
     menuCommand(t('menu.yolo.openRuleFile'), openYoloRuleFile, {
       disabled: readOnlyMode,
       detail: compactHomePath(yoloRulePath()),
@@ -7013,8 +7025,80 @@ function createAppMenuItem(item) {
     node.textContent = item.label;
     return node;
   }
+  if (item.type === 'number-setting') return createAppMenuNumberSetting(item);
   if (item.type === 'submenu') return createAppSubmenu(item);
   return createAppMenuCommand(item);
+}
+
+function clampAppMenuNumberSetting(item, rawValue) {
+  const fallback = Number.isFinite(Number(item.fallback)) ? Number(item.fallback) : 0;
+  let value = Number(rawValue);
+  if (!Number.isFinite(value)) value = fallback;
+  if (Number.isFinite(Number(item.min))) value = Math.max(Number(item.min), value);
+  if (Number.isFinite(Number(item.max))) value = Math.min(Number(item.max), value);
+  return Number.isInteger(value) ? Math.round(value) : value;
+}
+
+function applyAppMenuNumberSettingPreview(path, value) {
+  if (path === 'appearance.yolo_rotate_ms') {
+    yoloRotateMs = Math.max(0, Number(value) || 0);
+    applyCssSettings();
+  }
+}
+
+function createAppMenuNumberSetting(item) {
+  const row = document.createElement('label');
+  row.className = ['app-menu-setting-row', 'app-menu-number-setting', item.className || ''].filter(Boolean).join(' ');
+  row.setAttribute('role', 'none');
+  row.dataset.settingPath = item.path || '';
+  const label = document.createElement('span');
+  label.className = 'app-menu-setting-label';
+  label.textContent = item.label || item.path || '';
+  const control = document.createElement('span');
+  control.className = 'app-menu-setting-control';
+  const input = document.createElement('input');
+  input.type = 'number';
+  input.inputMode = 'decimal';
+  input.dataset.settingPath = item.path || '';
+  input.min = String(item.min ?? '');
+  input.max = String(item.max ?? '');
+  input.step = String(item.step || 1);
+  input.value = String(clampAppMenuNumberSetting(item, numberSetting(item.path, item.fallback ?? 0)));
+  input.disabled = readOnlyMode || item.disabled === true;
+  if (item.detail) input.title = item.detail;
+  input.setAttribute('aria-label', item.label || item.path || '');
+  input.addEventListener('click', event => event.stopPropagation());
+  input.addEventListener('keydown', event => event.stopPropagation());
+  input.addEventListener('input', event => {
+    event.stopPropagation();
+    const next = clampAppMenuNumberSetting(item, input.value);
+    applyAppMenuNumberSettingPreview(item.path, next);
+  });
+  input.addEventListener('change', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    const next = clampAppMenuNumberSetting(item, input.value);
+    input.value = String(next);
+    applyAppMenuNumberSettingPreview(item.path, next);
+    saveSettingsPatch(settingPatch(item.path, next))
+      .then(() => {
+        renderPreferencesPanels();
+        statusEl.textContent = `saved ${item.path}`;
+      })
+      .catch(error => {
+        statusErr(localizedHtml('status.settingsSaveFailed', {error}));
+        refreshSettings({force: true});
+      });
+  });
+  control.appendChild(input);
+  if (item.suffix) {
+    const suffix = document.createElement('span');
+    suffix.className = 'app-menu-setting-suffix';
+    suffix.textContent = item.suffix;
+    control.appendChild(suffix);
+  }
+  row.append(label, control);
+  return row;
 }
 
 function createAppSubmenu(item) {
@@ -13679,6 +13763,7 @@ function normalizeEditorCursorStyle(value) {
 
 const UI_COLOR_CHOICES = ['green', 'blue', 'orange', 'yellow', 'purple', 'white'];
 const DEFAULT_CURSOR_COLOR = 'yellow';
+const SEPARATOR_COLOR_CHOICES = ['theme', ...UI_COLOR_CHOICES];
 const NEON_CURSOR_COLOR_CHOICES = ['laser-lime', 'neon-green', 'neon-cyan', 'neon-magenta', 'neon-orange'];
 const CURSOR_COLOR_CHOICES = [...UI_COLOR_CHOICES, ...NEON_CURSOR_COLOR_CHOICES, 'theme'];
 // One parent for the named UI colors. Active color and cursor color must both derive from this map so
@@ -13756,6 +13841,16 @@ function hexToRgbTriple(hex) {
   return `${parseInt(h.slice(0, 2), 16)} ${parseInt(h.slice(2, 4), 16)} ${parseInt(h.slice(4, 6), 16)}`;
 }
 
+function uiColorVisualPreset(value, light = false) {
+  if (value === 'green') {
+    return light
+      ? {accent: '#5f9800', bright: '#4f9e3a', text: '#ffffff'}
+      : {accent: '#76b900', bright: '#86d600', text: '#071000'};
+  }
+  const preset = ACTIVE_COLOR_PRESETS[value];
+  return light ? preset?.light : preset?.dark;
+}
+
 // Set the active-accent source vars on both roots: documentElement covers surfaces that resolve tokens
 // there, while body inline beats body.theme-light's class-level defaults for normal descendants.
 // Green/unknown clears both so the CSS defaults stand. Re-run on theme switch since the per-preset values
@@ -13782,6 +13877,25 @@ function applyActiveColor(value) {
   }
 }
 
+function applySeparatorColor(value) {
+  const styles = [document.documentElement?.style, document.body?.style].filter(Boolean);
+  if (!styles.length) return;
+  const vars = ['--pane-resizer-bg', '--pane-resizer-hover-bg', '--pane-resizer-shadow'];
+  const preset = String(value || 'theme') === 'theme'
+    ? null
+    : uiColorVisualPreset(value, document.body?.classList?.contains('theme-resolved-light'));
+  if (!preset) {
+    styles.forEach(style => vars.forEach(v => style.removeProperty(v)));
+    return;
+  }
+  const rgb = hexToRgbTriple(preset.bright || preset.accent);
+  for (const style of styles) {
+    style.setProperty('--pane-resizer-bg', `rgb(${rgb} / 0.72)`);
+    style.setProperty('--pane-resizer-hover-bg', `rgb(${rgb} / 0.96)`);
+    style.setProperty('--pane-resizer-shadow', `rgb(${rgb} / 0.72)`);
+  }
+}
+
 function applyCssSettings() {
   const root = document.documentElement?.style;
   if (!root) return;
@@ -13804,6 +13918,7 @@ function applyCssSettings() {
   applyPaneRingOpacity(paneRingOpacity);
   applyInactivePaneOpacity(numberSetting('appearance.inactive_pane_opacity', 60));
   applyActiveColor(initialSetting('appearance.active_color', 'green'));
+  applySeparatorColor(initialSetting('appearance.separator_color', 'theme'));
   applyCursorColorSetting();
   root.setProperty('--red-reminder-duration', `${Math.max(0, redReminderMs) / 1000}s`);
   root.setProperty('--yolo-rotation-duration', `${Math.max(0, yoloRotateMs) / 1000}s`);
@@ -13822,6 +13937,7 @@ function applyGlobalThemeMode(options = {}) {
   if (options.updateTerminals) applyTerminalRuntimeSettings({fit: false});
   // the active-color presets are theme-specific, so re-apply on every theme switch.
   applyActiveColor(initialSetting('appearance.active_color', 'green'));
+  applySeparatorColor(initialSetting('appearance.separator_color', 'theme'));
 }
 
 let globalThemeMediaListenerInstalled = false;
@@ -17611,6 +17727,8 @@ function dockviewTrackRootBoundaryOverlay(event) {
 }
 
 function dockviewTabDropWouldNoop(event) {
+  const stripEnd = dockviewTabStripEndDropInfoForEvent(event);
+  if (stripEnd) return dockviewTabStripEndDropWouldNoop(stripEnd);
   if (dockviewTabEdgeReorderIntent(event)) return false;
   const info = dockviewTabInsertionInfo(event);
   return Boolean(info && info.sourceSlot === info.targetSlot && info.adjustedIndex === info.sourceIndex);
@@ -17674,7 +17792,101 @@ function dockviewTabInsertionInfo(event) {
   return {item, targetSlot, sourceSlot, sourceIndex, targetIndex, tabItems, targetItems, position, insertionIndex, adjustedIndex, pinnedBoundary};
 }
 
+function dockviewTabStripForPoint(x, y) {
+  const node = document.elementFromPoint?.(x, y);
+  return node?.closest?.('.dv-tabs-container') || null;
+}
+
+function dockviewTabStripEndDropInfo(options = {}) {
+  const tabStrip = options.tabStrip;
+  const item = options.item || '';
+  const pointerX = Number(options.pointerX);
+  if (!tabStrip || !item || !Number.isFinite(pointerX)) return null;
+  const tabs = Array.from(tabStrip.querySelectorAll?.('.dv-tab') || []);
+  if (!tabs.length) return null;
+  const tabItems = tabs.map(tab => tab.querySelector?.('.dockview-pane-tab')?.dataset?.paneTab || '');
+  const sourceIndex = tabItems.indexOf(item);
+  const targetItems = tabItems.filter(tab => tab && tab !== item);
+  const candidateTabs = tabs.filter((_, index) => index !== sourceIndex);
+  if (!candidateTabs.length) return null;
+  const stripRect = tabStrip.getBoundingClientRect?.();
+  if (!stripRect) return null;
+  const lastRect = candidateTabs
+    .map(tab => tab.getBoundingClientRect())
+    .filter(rect => rect && Number.isFinite(rect.right))
+    .reduce((best, rect) => (!best || rect.right > best.right ? rect : best), null);
+  if (!lastRect || pointerX < lastRect.right || pointerX > stripRect.right) return null;
+  const adjustedIndex = targetItems.length;
+  return {
+    item,
+    targetSlot: options.targetSlot || '',
+    sourceSlot: options.sourceSlot || '',
+    sourceIndex,
+    tabItems,
+    targetItems,
+    position: 'right',
+    insertionIndex: tabItems.length,
+    adjustedIndex,
+    insertIndex: adjustedIndex,
+    pinnedBoundary: targetItems.filter(tabIsPinned).length,
+  };
+}
+
+function dockviewTabStripEndDropInfoForEvent(event) {
+  if (event?.kind !== 'tab') return null;
+  const data = event.getData?.();
+  const item = resolveLayoutItem(data?.panelId || '');
+  const nativeEvent = event.nativeEvent;
+  const nativeTarget = nativeEvent?.target;
+  const tabStrip = nativeTarget?.closest?.('.dv-tabs-container') || null;
+  const targetSlot = dockviewSlotForGroupId(event.group?.id || '') || dockviewSlotForGroupElement(tabStrip?.closest?.('.dv-groupview'));
+  const sourceSlot = slotForItem(item) || dockviewSlotForGroupId(data?.groupId || '');
+  return dockviewTabStripEndDropInfo({
+    tabStrip,
+    item,
+    targetSlot,
+    sourceSlot,
+    pointerX: nativeEvent?.clientX,
+  });
+}
+
+function dockviewTabStripEndDropInfoForPointer(event, state) {
+  if (!state?.item || !state.slot) return null;
+  const x = Number(event.clientX) || 0;
+  const y = Number(event.clientY) || 0;
+  const tabStrip = dockviewTabStripForPoint(x, y);
+  const targetSlot = dockviewSlotForGroupElement(tabStrip?.closest?.('.dv-groupview'));
+  return dockviewTabStripEndDropInfo({
+    tabStrip,
+    item: state.item,
+    targetSlot,
+    sourceSlot: state.slot,
+    pointerX: x,
+  });
+}
+
+function dockviewTabStripEndDropWouldNoop(info) {
+  return Boolean(info?.sourceSlot && info.sourceSlot === info.targetSlot && info.sourceIndex === info.insertIndex);
+}
+
+function dockviewTabStripEndDropViolatesPinnedPartition(info) {
+  if (!info || !isPinnableTab(info.item)) return false;
+  if (dockviewPinnedTabCrossPaneViolation(info)) return true;
+  return tabIsPinned(info.item)
+    ? info.adjustedIndex > info.pinnedBoundary
+    : info.adjustedIndex < info.pinnedBoundary;
+}
+
+function dockviewTabStripEndDropIntent(event) {
+  const info = dockviewTabStripEndDropInfoForEvent(event);
+  if (!info || !info.targetSlot || dockviewTabStripEndDropWouldNoop(info)) return null;
+  if (dockviewTabStripEndDropViolatesPinnedPartition(info)) return null;
+  return info;
+}
+
 function dockviewTabDropViolatesPinnedPartition(event) {
+  const stripEnd = dockviewTabStripEndDropInfoForEvent(event);
+  if (stripEnd) return dockviewTabStripEndDropViolatesPinnedPartition(stripEnd);
   if (dockviewTabEdgeReorderIntent(event)) return false;
   const info = dockviewTabInsertionInfo(event);
   if (!info || !isPinnableTab(info.item)) return false;
@@ -17763,6 +17975,14 @@ function dockviewFinishTabPointerDrag(event) {
   const dx = Math.abs((Number(event.clientX) || 0) - state.x);
   const dy = Math.abs((Number(event.clientY) || 0) - state.y);
   if (Math.max(dx, dy) < DRAG_HYSTERESIS_PX) return;
+  const stripEnd = dockviewTabStripEndDropInfoForPointer(event, state);
+  if (stripEnd && !dockviewTabStripEndDropWouldNoop(stripEnd) && !dockviewTabStripEndDropViolatesPinnedPartition(stripEnd)) {
+    window.setTimeout(() => {
+      if (Date.now() - (Number(dockviewLayoutState.tabDropHandledAt) || 0) < 800) return;
+      void moveSessionToSlot(stripEnd.item, stripEnd.targetSlot, stripEnd.sourceSlot, stripEnd.insertIndex);
+    }, 0);
+    return;
+  }
   const target = dockviewTabForPoint(Number(event.clientX) || 0, Number(event.clientY) || 0);
   const targetItem = target?.dataset?.paneTab || '';
   if (!targetItem || targetItem === state.item) return;
@@ -18148,6 +18368,16 @@ function dockviewInit() {
         dockviewLayoutState.pendingRootBoundaryDrop = null;
         dockviewClearRootBoundaryPreview();
         event.preventDefault();
+        return;
+      }
+      const stripEndDrop = dockviewTabStripEndDropIntent(event);
+      if (stripEndDrop) {
+        dockviewLayoutState.pendingRootBoundaryDrop = null;
+        dockviewClearRootBoundaryPreview();
+        event.preventDefault();
+        queueMicrotask(() => {
+          void moveSessionToSlot(stripEndDrop.item, stripEndDrop.targetSlot, stripEndDrop.sourceSlot, stripEndDrop.insertIndex);
+        });
         return;
       }
       const rootIntent = dockviewRootBoundaryDropIntent(event);
@@ -20926,10 +21156,9 @@ function layoutModePreferenceChoices() {
 }
 
 function activeColorPreferenceChoice(value, label) {
-  const preset = ACTIVE_COLOR_PRESETS[value];
-  const swatches = preset
-    ? [preset.dark.bright, preset.light.bright]
-    : ['#86d600', '#4f9e3a'];
+  const dark = uiColorVisualPreset(value, false);
+  const light = uiColorVisualPreset(value, true);
+  const swatches = dark && light ? [dark.bright, light.bright] : ['#86d600', '#4f9e3a'];
   return {value, label, swatches, joinedSwatches: true};
 }
 
@@ -20958,6 +21187,20 @@ function cursorColorPreferenceChoices() {
     .map(cursorColorPreferenceChoice);
 }
 
+function separatorColorPreferenceChoice(value) {
+  if (value === 'theme') return {value, label: t('pref.appearance.editor_cursor_color.theme')};
+  return activeColorPreferenceChoice(value, t(UI_COLOR_PRESETS[value].labelKey));
+}
+
+function separatorColorPreferenceChoices() {
+  const choices = Array.isArray(clientSettingsPayload?.choices?.['appearance.separator_color'])
+    ? clientSettingsPayload.choices['appearance.separator_color']
+    : SEPARATOR_COLOR_CHOICES;
+  return choices
+    .filter(value => value === 'theme' || UI_COLOR_PRESETS[value])
+    .map(separatorColorPreferenceChoice);
+}
+
 function preferenceSections() {
   return [
     {title: t('pref.section.general'), items: [
@@ -20979,6 +21222,7 @@ function preferenceSections() {
       {path: 'appearance.pane_ring_opacity', label: t('pref.appearance.pane_ring_opacity.label'), type: 'range', min: 5, max: 100, step: 5, suffix: '%', help: t('pref.appearance.pane_ring_opacity.help')},
       {path: 'appearance.inactive_pane_opacity', label: t('pref.appearance.inactive_pane_opacity.label'), type: 'range', min: 0, max: 100, step: 5, suffix: '%', help: t('pref.appearance.inactive_pane_opacity.help')},
       {path: 'appearance.active_color', label: t('pref.appearance.active_color.label'), type: 'radio', choices: activeColorPreferenceChoices(), help: t('pref.appearance.active_color.help')},
+      {path: 'appearance.separator_color', label: t('pref.appearance.separator_color.label'), type: 'radio', choices: separatorColorPreferenceChoices(), help: t('pref.appearance.separator_color.help')},
       {path: 'appearance.editor_cursor_color', label: t('pref.appearance.editor_cursor_color.label'), type: 'radio', choices: cursorColorPreferenceChoices(), help: t('pref.appearance.editor_cursor_color.help')},
       {path: 'appearance.yolo_rotate_ms', label: t('pref.appearance.yolo_rotate_ms.label'), type: 'number', min: 0, max: 60000, step: 250, suffix: 'ms', help: t('pref.appearance.yolo_rotate_ms.help')},
       {path: 'appearance.date_time_hour_cycle', label: t('pref.appearance.date_time_hour_cycle.label'), type: 'radio', choices: [

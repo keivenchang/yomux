@@ -1,5 +1,6 @@
 from pathlib import Path
 import difflib
+from io import BytesIO
 import json
 import re
 import shutil
@@ -1867,7 +1868,14 @@ def dockview_layout_metrics(browser):
           borderTopRightRadius: getComputedStyle(tab).borderTopRightRadius,
           rect: (() => {
             const rect = tab.getBoundingClientRect();
-            return {width: Math.round(rect.width), height: Math.round(rect.height), top: Math.round(rect.top)};
+            return {
+              left: Math.round(rect.left),
+              right: Math.round(rect.right),
+              top: Math.round(rect.top),
+              bottom: Math.round(rect.bottom),
+              width: Math.round(rect.width),
+              height: Math.round(rect.height),
+            };
           })(),
         }));
         return {
@@ -1964,6 +1972,41 @@ def test_dockview_tabs_keep_yolomux_active_inactive_style(browser, tmp_path):
     assert metrics["header"]["tabsWebkitScrollbarDisplay"] == "none"
     assert metrics["header"]["tabsWebkitScrollbarHeight"] == "0px"
     assert metrics["header"]["activeTabInsideHeader"] is True
+
+    image_mod = pytest.importorskip("PIL.Image")
+    screenshot = image_mod.open(BytesIO(browser.get_screenshot_as_png())).convert("RGB")
+    dpr = browser.execute_script("return window.devicePixelRatio || 1") or 1
+
+    def rgb_tuple(css_color):
+        match = re.match(r"rgba?\((\d+),\s*(\d+),\s*(\d+)", css_color)
+        if match:
+            return tuple(int(part) for part in match.groups())
+        srgb_match = re.match(r"color\(srgb\s+([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)", css_color)
+        assert srgb_match, css_color
+        return tuple(round(float(part) * 255) for part in srgb_match.groups())
+
+    def color_distance(left, right):
+        return sum(abs(a - b) for a, b in zip(left, right))
+
+    def sampled_background_matches(rect, expected):
+        x_fractions = (0.18, 0.32, 0.5, 0.68, 0.82)
+        y_fractions = (0.45, 0.58, 0.72)
+        matches = 0
+        samples = []
+        for x_fraction in x_fractions:
+            for y_fraction in y_fractions:
+                x = max(0, min(screenshot.width - 1, int((rect["left"] + rect["width"] * x_fraction) * dpr)))
+                y = max(0, min(screenshot.height - 1, int((rect["top"] + rect["height"] * y_fraction) * dpr)))
+                sample = screenshot.getpixel((x, y))
+                samples.append(sample)
+                if color_distance(sample, expected) <= 18:
+                    matches += 1
+        return matches, samples
+
+    active_matches, active_samples = sampled_background_matches(active["rect"], rgb_tuple(active["bg"]))
+    inactive_matches, inactive_samples = sampled_background_matches(inactive["rect"], rgb_tuple(inactive["bg"]))
+    assert active_matches >= 4, {"bg": active["bg"], "samples": active_samples}
+    assert inactive_matches >= 4, {"bg": inactive["bg"], "samples": inactive_samples}
 
 
 def test_dockview_tab_hover_shows_session_detail_popover(browser, tmp_path):
@@ -2159,6 +2202,83 @@ def test_dockview_separator_inactive_tab_and_preview_colors_match_tokens(browser
     assert hover_metrics["sashBeforeWidth"] >= metrics["sashBeforeWidth"]
 
 
+def test_separator_color_preference_recolors_drop_previews(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=row@50(left,right)&tabs=left:1;right:2", sessions=["1", "2"])
+    wait_for_dockview(browser, min_tabs=2)
+    wait_for_dockview_tab_geometry(browser, min_tabs=2)
+    metrics = browser.execute_script(
+        """
+        applySettingsPayload({settings: {appearance: {separator_color: 'purple'}}, defaults: {}, mtime_ns: 9301}, {force: true});
+        const expectedProbe = document.createElement('div');
+        expectedProbe.style.borderLeft = '2px dashed var(--pane-resizer-hover-bg)';
+        expectedProbe.style.position = 'absolute';
+        expectedProbe.style.left = '-1000px';
+        document.body.append(expectedProbe);
+        const expected = getComputedStyle(expectedProbe).borderLeftColor;
+        expectedProbe.remove();
+
+        const tabStrip = document.createElement('div');
+        tabStrip.className = 'pane-tabs tab-drop-preview';
+        tabStrip.style.cssText = 'position:absolute;left:20px;top:20px;width:220px;height:28px;--tab-drop-x:40px;--tab-drop-y:0px;--tab-drop-height:24px;';
+        document.body.append(tabStrip);
+        const tabInsertion = getComputedStyle(tabStrip, '::after').borderLeftColor;
+        tabStrip.remove();
+
+        const group = document.querySelector('.dockview-pane-tab[data-pane-tab="2"]').closest('.dv-groupview');
+        const groupRect = group.getBoundingClientRect();
+        group.classList.add('drag-over', 'drop-preview', 'drop-preview-left');
+        const panePreview = getComputedStyle(group, '::before').borderLeftColor;
+        group.classList.remove('drag-over', 'drop-preview', 'drop-preview-left');
+
+        const gridNode = document.querySelector('#grid');
+        gridNode.classList.add('drop-preview', 'drop-preview-root', 'drop-preview-right');
+        const rootPreview = getComputedStyle(gridNode, '::before').borderLeftColor;
+        gridNode.classList.remove('drop-preview', 'drop-preview-root', 'drop-preview-right');
+
+        window.__filePreviewOpen = null;
+        window.openDraggedFilesInEditor = (payload, options) => {
+          window.__filePreviewOpen = {payload, options};
+        };
+        const target = group.querySelector('.dockview-panel-content') || group;
+        const store = {
+          'application/x-yolomux-file': JSON.stringify({path: '/home/test/yolomux.dev/README.md', paths: ['/home/test/yolomux.dev/README.md'], kind: 'file'}),
+          'text/plain': '/home/test/yolomux.dev/README.md',
+        };
+        const dataTransfer = {
+          types: Object.keys(store),
+          dropEffect: '',
+          effectAllowed: 'copy',
+          getData(type) { return store[type] || ''; },
+          setData(type, value) { store[type] = String(value); },
+        };
+        const event = new Event('dragover', {bubbles: true, cancelable: true});
+        Object.defineProperty(event, 'clientX', {value: Math.round(groupRect.left + 8)});
+        Object.defineProperty(event, 'clientY', {value: Math.round(groupRect.top + groupRect.height / 2)});
+        Object.defineProperty(event, 'dataTransfer', {value: dataTransfer});
+        target.dispatchEvent(event);
+        const fileDragPreview = getComputedStyle(group, '::before').borderLeftColor;
+        const fileDropEffect = dataTransfer.dropEffect;
+        clearDropPreview();
+
+        return {
+          expected,
+          token: getComputedStyle(document.documentElement).getPropertyValue('--pane-resizer-hover-bg').trim(),
+          tabInsertion,
+          panePreview,
+          rootPreview,
+          fileDragPreview,
+          fileDropEffect,
+        };
+        """
+    )
+    assert metrics["token"].startswith("rgb("), metrics
+    assert metrics["tabInsertion"] == metrics["expected"], metrics
+    assert metrics["panePreview"] == metrics["expected"], metrics
+    assert metrics["rootPreview"] == metrics["expected"], metrics
+    assert metrics["fileDragPreview"] == metrics["expected"], metrics
+    assert metrics["fileDropEffect"] == "copy", metrics
+
+
 def test_dockview_active_ring_follows_pane_spacing_without_thickening_sash(browser, tmp_path):
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=row@50(left,right)&tabs=left:1;right:2", sessions=["1", "2"])
     wait_for_dockview(browser, min_tabs=2)
@@ -2237,6 +2357,63 @@ def test_dockview_active_ring_follows_pane_spacing_without_thickening_sash(brows
     assert metrics["xtermInset"]["left"] >= metrics["paneGapPx"] - 0.5, metrics
     assert metrics["xtermInset"]["right"] >= metrics["paneGapPx"] - 0.5, metrics
     assert metrics["xtermInset"]["bottom"] >= metrics["paneGapPx"] - 0.5, metrics
+
+
+def test_dockview_pane_spacing_multiple_values_keep_terminal_inside_ring(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=row@50(left,right)&tabs=left:1;right:2", sessions=["1", "2"])
+    wait_for_dockview(browser, min_tabs=2)
+    wait_for_dockview_tab_geometry(browser, min_tabs=2)
+    metrics = browser.execute_script(
+        """
+        const activePanel = document.querySelector('#panel-1');
+        activePanel.classList.add('active-pane', 'focused-pane');
+        const activeGroup = activePanel.closest('.dv-groupview');
+        const docStyle = getComputedStyle(document.documentElement);
+        const snapshots = [];
+        for (const value of [0, 3, 12, 20]) {
+          applySettingsPayload({settings: {appearance: {pane_spacing: value, pane_ring_opacity: 75}}, defaults: {}, mtime_ns: 9100 + value}, {force: true});
+          const groupStyle = getComputedStyle(activeGroup);
+          const ring = getComputedStyle(activeGroup, '::after');
+          const groupRect = activeGroup.getBoundingClientRect();
+          const panelRect = activePanel.getBoundingClientRect();
+          const terminalRect = activePanel.querySelector('.terminal')?.getBoundingClientRect();
+          const xtermRect = activePanel.querySelector('.terminal .xterm')?.getBoundingClientRect();
+          const paneGapPx = parseFloat(docStyle.getPropertyValue('--pane-split-gap')) || 0;
+          snapshots.push({
+            value,
+            paneGap: docStyle.getPropertyValue('--pane-split-gap').trim(),
+            paneGapPx,
+            ringWidth: ring.borderTopWidth,
+            groupBorder: [groupStyle.borderTopWidth, groupStyle.borderRightWidth, groupStyle.borderBottomWidth, groupStyle.borderLeftWidth],
+            panelInset: {
+              left: panelRect.left - groupRect.left,
+              right: groupRect.right - panelRect.right,
+              bottom: groupRect.bottom - panelRect.bottom,
+            },
+            terminalInset: terminalRect ? {
+              left: terminalRect.left - groupRect.left,
+              right: groupRect.right - terminalRect.right,
+              bottom: groupRect.bottom - terminalRect.bottom,
+            } : null,
+            xtermInset: xtermRect ? {
+              left: xtermRect.left - groupRect.left,
+              right: groupRect.right - xtermRect.right,
+              bottom: groupRect.bottom - xtermRect.bottom,
+            } : null,
+          });
+        }
+        return snapshots;
+        """
+    )
+    assert [item["value"] for item in metrics] == [0, 3, 12, 20], metrics
+    for item in metrics:
+        assert item["paneGap"] == f"{item['value']}px", item
+        assert item["ringWidth"] == f"{item['value']}px", item
+        assert item["groupBorder"] == ["0px", "0px", "0px", "0px"], item
+        for rect_key in ["panelInset", "terminalInset", "xtermInset"]:
+            assert item[rect_key]["left"] >= item["paneGapPx"] - 0.5, item
+            assert item[rect_key]["right"] >= item["paneGapPx"] - 0.5, item
+            assert item[rect_key]["bottom"] >= item["paneGapPx"] - 0.5, item
 
 
 def test_dockview_complex_layout_sash_hit_targets_stay_transparent(browser, tmp_path):
@@ -4076,6 +4253,90 @@ def test_dockview_root_top_drag_preview_preserves_docked_finder_column(browser, 
     assert preview["coversFinder"] is False, preview
 
 
+def test_dockview_root_top_bottom_preview_normalizes_right_finder_and_avoids_reserved_column(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1,2&layout=row@76(col@50(slot1,slot2),right)&tabs=slot1:1;slot2:2;right:files",
+        sessions=["1", "2"],
+    )
+    wait_for_dockview(browser, min_tabs=3)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return document.querySelector('.dockview-pane-tab[data-pane-tab="__files__"]')?.closest('.dv-groupview')?.getBoundingClientRect().width > 0
+              && document.querySelector('.dockview-pane-tab[data-pane-tab="1"]')?.closest('.dv-groupview')?.getBoundingClientRect().width > 0;
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const host = document.querySelector('#dockviewRoot');
+        const gridNode = document.querySelector('#grid');
+        const finderGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="__files__"]').closest('.dv-groupview');
+        const contentGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]').closest('.dv-groupview');
+        const hostRect = host.getBoundingClientRect();
+        const gridRect = gridNode.getBoundingClientRect();
+        const finderRect = finderGroup.getBoundingClientRect();
+        const contentRect = contentGroup.getBoundingClientRect();
+        const eventAt = (rect, zone, x) => ({
+          kind: 'content',
+          position: zone,
+          getData() { return {panelId: '2', groupId: dockviewSlotForGroupElement(contentGroup)}; },
+          nativeEvent: {
+            clientX: Math.round(x),
+            clientY: zone === 'top' ? Math.round(hostRect.top + 2) : Math.round(hostRect.bottom - 2),
+          },
+        });
+        const finderOnLeft = finderRect.left < contentRect.left;
+        const previewFor = zone => {
+          const nearFinderX = finderOnLeft ? finderRect.right + 3 : finderRect.left - 3;
+          const contentIntent = dockviewRootBoundaryDropIntent(eventAt(contentRect, zone, nearFinderX));
+          dockviewShowRootBoundaryPreview(contentIntent);
+          const style = getComputedStyle(gridNode, '::before');
+          const preview = {
+            root: gridNode.classList.contains('drop-preview-root'),
+            zone: gridNode.classList.contains(`drop-preview-${zone}`),
+            label: gridNode.dataset.dropLabel || '',
+            left: parseFloat(style.left) || 0,
+            width: parseFloat(style.width) || 0,
+            borderColor: style.borderLeftColor,
+            separatorHover: getComputedStyle(document.documentElement).getPropertyValue('--pane-resizer-hover-bg').trim(),
+          };
+          clearDropPreview();
+          const finderIntent = dockviewRootBoundaryDropIntent(eventAt(finderRect, zone, finderRect.left + finderRect.width / 2));
+          return {
+            contentIntent: contentIntent ? {zone: contentIntent.zone} : null,
+            finderIntent: finderIntent ? {zone: finderIntent.zone} : null,
+            preview,
+          };
+        };
+        return {
+          top: previewFor('top'),
+          bottom: previewFor('bottom'),
+          finderOnLeft,
+          gridRect: {left: gridRect.left, width: gridRect.width},
+          finderRect: {left: finderRect.left, right: finderRect.right, width: finderRect.width},
+          contentRect: {left: contentRect.left, right: contentRect.right, width: contentRect.width},
+        };
+        """
+    )
+    for zone in ["top", "bottom"]:
+        item = metrics[zone]
+        assert metrics["finderOnLeft"] is True, metrics
+        assert item["contentIntent"] == {"zone": zone}, metrics
+        assert item["finderIntent"] is None, metrics
+        assert item["preview"]["root"] is True, metrics
+        assert item["preview"]["zone"] is True, metrics
+        assert item["preview"]["label"] == f"full {zone}", metrics
+        assert item["preview"]["borderColor"] == item["preview"]["separatorHover"], metrics
+        expected_left = metrics["contentRect"]["left"] - metrics["gridRect"]["left"] + 6
+        expected_width = metrics["contentRect"]["width"] - 12
+        assert abs(item["preview"]["left"] - expected_left) <= 2, metrics
+        assert abs(item["preview"]["width"] - expected_width) <= 2, metrics
+        assert item["preview"]["left"] >= metrics["finderRect"]["right"] - metrics["gridRect"]["left"] + 4, metrics
+
+
 def test_dockview_drag_between_content_panes_preserves_docked_finder_width(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,
@@ -4286,6 +4547,148 @@ def test_dockview_file_drag_to_finder_previews_only_roomy_bottom(browser, tmp_pa
     assert result["opened"]["payload"]["path"] == "/home/test/yolomux.dev/README.md", result
     assert result["opened"]["options"]["targetSlot"] == "left", result
     assert result["opened"]["options"]["targetZone"] == "bottom", result
+
+
+def test_dockview_multi_file_drag_preserves_order_dedupes_and_uses_one_target(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
+    wait_for_dockview(browser, min_tabs=2)
+    wait_for_dockview_tab_geometry(browser, min_tabs=2)
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          window.__multiFileOpened = [];
+          fetchFilePathInfo = async path => ({path, name: path.split('/').pop(), kind: 'file'});
+          openFileInEditor = async (path, info, options) => {
+            window.__multiFileOpened.push({path, info, options});
+          };
+          refreshOpenFileDiff = async () => {};
+          openFileDiffAvailable = () => false;
+          const group = document.querySelector('.dockview-pane-tab[data-pane-tab="2"]').closest('.dv-groupview');
+          const target = group.querySelector('.dockview-panel-content') || group;
+          const rect = group.getBoundingClientRect();
+          const paths = [
+            '/home/test/yolomux.dev/a.md',
+            '/home/test/yolomux.dev/b.md',
+            '/home/test/yolomux.dev/a.md',
+            '/home/test/yolomux.dev/c.md',
+          ];
+          const store = {
+            'application/x-yolomux-file': JSON.stringify({path: paths[0], paths, kind: 'file'}),
+            'text/plain': paths.join('\\n'),
+          };
+          const dataTransfer = {
+            types: Object.keys(store),
+            dropEffect: '',
+            effectAllowed: 'copy',
+            getData(type) { return store[type] || ''; },
+            setData(type, value) { store[type] = String(value); },
+          };
+          function fire(type, x, y) {
+            const event = new Event(type, {bubbles: true, cancelable: true});
+            Object.defineProperty(event, 'clientX', {value: x});
+            Object.defineProperty(event, 'clientY', {value: y});
+            Object.defineProperty(event, 'dataTransfer', {value: dataTransfer});
+            target.dispatchEvent(event);
+            return {defaultPrevented: event.defaultPrevented, dropEffect: dataTransfer.dropEffect};
+          }
+          const x = Math.round(rect.left + rect.width / 2);
+          const y = Math.round(rect.top + rect.height / 2);
+          const over = fire('dragover', x, y);
+          const preview = {
+            previewCount: document.querySelectorAll('.drop-preview').length,
+            groupPreview: group.classList.contains('drop-preview'),
+            label: group.dataset.dropLabel || '',
+            targetSlot: dockviewSlotForGroupElement(group),
+          };
+          const drop = fire('drop', x, y);
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          done({over, preview, drop, opened: window.__multiFileOpened});
+        })().catch(error => done({error: String(error), stack: error?.stack || ''}));
+        """
+    )
+    assert "error" not in result, result
+    assert result["over"]["defaultPrevented"] is True, result
+    assert result["over"]["dropEffect"] == "copy", result
+    assert result["preview"]["previewCount"] == 1, result
+    assert result["preview"]["groupPreview"] is True, result
+    assert result["preview"]["label"] == "take over", result
+    assert result["drop"]["defaultPrevented"] is True, result
+    assert [item["path"] for item in result["opened"]] == [
+        "/home/test/yolomux.dev/a.md",
+        "/home/test/yolomux.dev/b.md",
+        "/home/test/yolomux.dev/c.md",
+    ], result
+    assert {item["options"]["targetSlot"] for item in result["opened"]} == {result["preview"]["targetSlot"]}, result
+    assert [item["options"]["targetIndex"] for item in result["opened"]] == [None, None, None], result
+    assert {item["options"]["targetZone"] for item in result["opened"]} == {"middle"}, result
+
+
+def test_dockview_directory_drag_over_finder_is_reserved_but_terminal_path_target_stays_allowed(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=row@30(left,slot1)&tabs=left:files;slot1:1",
+        sessions=["1"],
+        grid_width=1200,
+        grid_height=620,
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    result = browser.execute_script(
+        """
+        const finderGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="__files__"]').closest('.dv-groupview');
+        const contentGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]').closest('.dv-groupview');
+        const target = finderGroup.querySelector('.dockview-panel-content') || finderGroup;
+        const finderRect = finderGroup.getBoundingClientRect();
+        const contentRect = contentGroup.getBoundingClientRect();
+        const finderSlot = dockviewSlotForGroupElement(finderGroup);
+        const contentSlot = dockviewSlotForGroupElement(contentGroup);
+        const payload = {path: '/home/test/yolomux.dev/src', paths: ['/home/test/yolomux.dev/src'], kind: 'dir'};
+        const store = {
+          'application/x-yolomux-file': JSON.stringify(payload),
+          'text/plain': payload.path,
+        };
+        const dataTransfer = {
+          types: Object.keys(store),
+          dropEffect: '',
+          effectAllowed: 'copy',
+          getData(type) { return store[type] || ''; },
+          setData(type, value) { store[type] = String(value); },
+        };
+        function fireFinder(type, x, y) {
+          const event = new Event(type, {bubbles: true, cancelable: true});
+          Object.defineProperty(event, 'clientX', {value: x});
+          Object.defineProperty(event, 'clientY', {value: y});
+          Object.defineProperty(event, 'dataTransfer', {value: dataTransfer});
+          target.dispatchEvent(event);
+          return {
+            defaultPrevented: event.defaultPrevented,
+            dropEffect: dataTransfer.dropEffect,
+            preview: finderGroup.classList.contains('drop-preview'),
+            label: finderGroup.dataset.dropLabel || '',
+          };
+        }
+        const center = fireFinder('dragover', Math.round(finderRect.left + finderRect.width / 2), Math.round(finderRect.top + finderRect.height / 2));
+        clearDropPreview();
+        const bottom = fireFinder('dragover', Math.round(finderRect.left + finderRect.width / 2), Math.round(finderRect.bottom - 8));
+        clearDropPreview();
+        return {
+          center,
+          bottom,
+          sharedFileGateFinder: fileDropIntentAllowsPayload(payload, {targetSlot: finderSlot, zone: 'bottom', targetRect: finderRect}),
+          sharedPathGateFinderMiddle: pathDropIntentAllowsPayload(payload, {targetSlot: finderSlot, zone: 'middle', targetRect: finderRect}),
+          sharedPathGateTerminalEdge: pathDropIntentAllowsPayload(payload, {targetSlot: contentSlot, zone: 'left', targetRect: contentRect}),
+        };
+        """
+    )
+    assert result["center"]["defaultPrevented"] is True, result
+    assert result["center"]["dropEffect"] == "none", result
+    assert result["center"]["preview"] is False, result
+    assert result["bottom"]["dropEffect"] == "none", result
+    assert result["bottom"]["preview"] is False, result
+    assert result["sharedFileGateFinder"] is False, result
+    assert result["sharedPathGateFinderMiddle"] is False, result
+    assert result["sharedPathGateTerminalEdge"] is True, result
 
 
 @pytest.mark.parametrize("legacy_token", ["changes", "__changes__"])
@@ -6518,6 +6921,109 @@ def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_
     assert metrics["edit"]["wrapHidden"] is False, metrics
     assert metrics["edit"]["findHidden"] is False, metrics
     assert metrics["edit"]["saveHidden"] is False, metrics
+
+
+def test_markdown_preview_task_checkbox_updates_split_source_and_preview(browser, tmp_path):
+    page = tmp_path / "markdown-task-checkbox-split.html"
+    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
+    browser.get(page.as_uri() + "?sessions=1")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return typeof createFileEditorPanel === 'function' && document.querySelector('#grid');")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+            const escapeHtml = value => String(value || '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
+            window.marked = {
+              parse(markdown) {
+                const items = [];
+                for (const line of String(markdown || '').split('\\n')) {
+                  const match = line.match(/^\\s*- \\[([ xX])\\]\\s*(.*)$/);
+                  if (!match) continue;
+                  items.push(`<li class="task-list-item"><input type="checkbox" ${match[1].toLowerCase() === 'x' ? 'checked' : ''} disabled> ${escapeHtml(match[2])}</li>`);
+                }
+                return `<ul>${items.join('')}</ul>`;
+              },
+            };
+            const path = '/home/test/yolomux.dev/TODO.md';
+            const original = '- [ ] first task\\n- [x] second task\\n';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {
+              kind: 'text',
+              content: original,
+              original,
+              dirty: false,
+              language: 'markdown',
+              gitRoot: '/home/test/yolomux.dev',
+              gitTracked: true,
+              gitHasHistory: true,
+              gitHistory: [{ref: 'HEAD'}],
+            });
+            setFileEditorViewMode(path, 'split', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panel.style.width = '980px';
+            panel.style.height = '560px';
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            const waitFor = async predicate => {
+              for (let attempt = 0; attempt < 160; attempt += 1) {
+                if (predicate()) return true;
+                await frame();
+              }
+              return false;
+            };
+            const ready = await waitFor(() => panel.querySelectorAll('.file-editor-preview-pane-panel input.markdown-task-checkbox').length === 2 && panel._cmView?.state?.doc?.toString?.().includes('first task'));
+            const before = {
+              ready,
+              content: openFiles.get(path)?.content || '',
+              checked: Array.from(panel.querySelectorAll('.file-editor-preview-pane-panel input.markdown-task-checkbox')).map(input => input.checked),
+              disabled: Array.from(panel.querySelectorAll('.file-editor-preview-pane-panel input.markdown-task-checkbox')).map(input => input.disabled),
+              cmText: panel._cmView?.state?.doc?.toString?.() || '',
+            };
+            const first = panel.querySelector('.file-editor-preview-pane-panel input.markdown-task-checkbox');
+            first.click();
+            await waitFor(() => (openFiles.get(path)?.content || '').startsWith('- [x] first task'));
+            await frame();
+            await frame();
+            const after = {
+              content: openFiles.get(path)?.content || '',
+              dirty: openFiles.get(path)?.dirty === true,
+              checked: Array.from(panel.querySelectorAll('.file-editor-preview-pane-panel input.markdown-task-checkbox')).map(input => input.checked),
+              sourceLines: Array.from(panel.querySelectorAll('.file-editor-preview-pane-panel input.markdown-task-checkbox')).map(input => input.dataset.sourceLine || ''),
+              cmText: panel._cmView?.state?.doc?.toString?.() || '',
+              previewText: panel.querySelector('.file-editor-preview-pane-panel')?.textContent || '',
+              mode: editorViewModeFor(path, item),
+              splitVisible: panel.querySelector('.file-editor-content')?.classList.contains('split-preview') === true,
+              errors: window.__bootErrors,
+              rejections: window.__bootRejections,
+            };
+            done({before, after});
+          } catch (error) {
+            done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["before"]["ready"] is True, metrics
+    assert metrics["before"]["checked"] == [False, True], metrics
+    assert metrics["before"]["disabled"] == [False, False], metrics
+    assert metrics["after"]["content"] == "- [x] first task\n- [x] second task\n", metrics
+    assert metrics["after"]["dirty"] is True, metrics
+    assert metrics["after"]["checked"] == [True, True], metrics
+    assert metrics["after"]["sourceLines"] == ["1", "2"], metrics
+    assert metrics["after"]["cmText"] == metrics["after"]["content"], metrics
+    assert "first task" in metrics["after"]["previewText"], metrics
+    assert metrics["after"]["mode"] == "split", metrics
+    assert metrics["after"]["splitVisible"] is True, metrics
+    assert metrics["after"]["errors"] == [], metrics
+    assert metrics["after"]["rejections"] == [], metrics
 
 
 def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):

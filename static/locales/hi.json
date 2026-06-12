@@ -415,6 +415,8 @@
   "pref.appearance.preview_font_size.label": "Preview font size",
   "pref.appearance.red_reminder_ms.help": "उन सेशन के लिए लाल ध्यान पल्स की अवधि जिन्हें इनपुट या अनुमोदन की आवश्यकता है। बंद करने के लिए 0 सेट करें।",
   "pref.appearance.red_reminder_ms.label": "लाल रिमाइंडर अवधि",
+  "pref.appearance.separator_color.help": "Color for pane separators and dashed tab/file/root drop previews.",
+  "pref.appearance.separator_color.label": "Separator color",
   "pref.appearance.tab_width.help": "अतिरिक्त पंक्तियों में जाने से पहले पेन टैब की लक्षित चौड़ाई।",
   "pref.appearance.tab_width.label": "टैब चौड़ाई",
   "pref.appearance.terminal_font_size.help": "xterm.js पेन में उपयोग किया जाने वाला फ़ॉन्ट साइज़। रेंज से बाहर के मान क्लैंप किए जाते हैं।",

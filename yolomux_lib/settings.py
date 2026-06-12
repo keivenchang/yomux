@@ -23,6 +23,7 @@ SETTINGS_PATH = CONFIG_DIR / "settings.yaml"
 SETTINGS_DISPLAY_PATH = "~/.config/yolomux/settings.yaml"
 UI_COLOR_CHOICES: tuple[str, ...] = ("green", "blue", "orange", "yellow", "purple", "white")
 DEFAULT_CURSOR_COLOR = "yellow"
+SEPARATOR_COLOR_CHOICES: tuple[str, ...] = ("theme", *UI_COLOR_CHOICES)
 NEON_CURSOR_COLOR_CHOICES: tuple[str, ...] = ("laser-lime", "neon-green", "neon-cyan", "neon-magenta", "neon-orange")
 CURSOR_COLOR_CHOICES: tuple[str, ...] = (*UI_COLOR_CHOICES, *NEON_CURSOR_COLOR_CHOICES, "theme")
 POPULAR_IDE_DARK_SCHEME = "popular-ide-dark-plus"
@@ -70,6 +71,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "pane_ring_opacity": 75,
         "inactive_pane_opacity": 60,
         "active_color": "green",
+        "separator_color": "theme",
         "max_tabs_per_pane": 10,
         "red_reminder_ms": 1550,
         "yolo_rotate_ms": 20000,
@@ -250,6 +252,7 @@ SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
     ("general", "language"): {"system", "en", "zh-Hans", "zh-Hant", "ja", "es", "fr", "ar", "de", "ru", "hi", "ko", "vi", "th", "tr", "he", "pt-BR", "nl", "pl", "it", "en-XA"},
     ("appearance", "theme"): {"system", "dark", "light"},
     ("appearance", "active_color"): set(UI_COLOR_CHOICES),
+    ("appearance", "separator_color"): set(SEPARATOR_COLOR_CHOICES),
     ("appearance", "terminal_theme"): {"dark", "light", "follow-app"},
     ("appearance", "date_time_hour_cycle"): {"24", "12"},
     ("appearance", "editor_color_scheme"): {
@@ -303,6 +306,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("github", "watched_prs"): "Pull requests to watch independently of any open session, one per line. Each is 'owner/repo#N' or a full https://github.com/owner/repo/pull/N URL. They show in YO!info and can notify on merge / CI / review changes (see notifications.notify_transitions).",
     ("appearance", "theme"): "system | dark | light. Global UI theme for menus, panes, Finder/File Explorer, Preferences, Differ, and editor defaults.",
     ("appearance", "active_color"): "green | blue | orange | yellow | purple | white. Accent color for ACTIVE/FOCUSED UI (active tab, focused-pane ring/glow, chrome strip, file selection, Markdown headings, and YO markers). Green is the default.",
+    ("appearance", "separator_color"): "theme | green | blue | orange | yellow | purple | white. Color for pane separators and dashed tab/file/root drop previews. Theme preserves the dark/light defaults.",
     ("appearance", "terminal_theme"): "dark | light | follow-app. Terminal color theme. Defaults to follow-app (matches the global color theme); a light terminal raises xterm minimumContrastRatio so dark-tuned agent output stays legible.",
     ("appearance", "date_time_hour_cycle"): "24 | 12. Controls date/time displays in Finder/File Explorer and Differ. Default 24.",
     ("appearance", "ui_font_size"): "Pixels, 6-20. Drives tab and compact UI text.",
@@ -560,6 +564,7 @@ def _settings_payload_unlocked(path: Path = SETTINGS_PATH) -> dict[str, Any]:
         "choices": {
             "general.default_layout": ["single", "split", "grid", "wall"],
             "appearance.active_color": list(UI_COLOR_CHOICES),
+            "appearance.separator_color": list(SEPARATOR_COLOR_CHOICES),
             "appearance.editor_cursor_color": list(CURSOR_COLOR_CHOICES),
         },
         "path": str(path),

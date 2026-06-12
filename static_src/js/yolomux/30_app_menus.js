@@ -14,6 +14,10 @@ function menuSeparator() {
   return {type: 'separator'};
 }
 
+function menuNumberSetting(path, label, options = {}) {
+  return {type: 'number-setting', path, label, ...options};
+}
+
 function menuGroups(...groups) {
   const items = [];
   for (const group of groups) {
@@ -305,6 +309,14 @@ async function refreshYoloRulesStatus(options = {}) {
 
 function tmuxYoloMenuItems() {
   return [
+    menuNumberSetting('appearance.yolo_rotate_ms', t('pref.appearance.yolo_rotate_ms.label'), {
+      min: 0,
+      max: 60000,
+      step: 250,
+      suffix: 'ms',
+      fallback: 20000,
+      detail: t('pref.appearance.yolo_rotate_ms.help'),
+    }),
     menuCommand(t('menu.yolo.openRuleFile'), openYoloRuleFile, {
       disabled: readOnlyMode,
       detail: compactHomePath(yoloRulePath()),
@@ -972,8 +984,80 @@ function createAppMenuItem(item) {
     node.textContent = item.label;
     return node;
   }
+  if (item.type === 'number-setting') return createAppMenuNumberSetting(item);
   if (item.type === 'submenu') return createAppSubmenu(item);
   return createAppMenuCommand(item);
+}
+
+function clampAppMenuNumberSetting(item, rawValue) {
+  const fallback = Number.isFinite(Number(item.fallback)) ? Number(item.fallback) : 0;
+  let value = Number(rawValue);
+  if (!Number.isFinite(value)) value = fallback;
+  if (Number.isFinite(Number(item.min))) value = Math.max(Number(item.min), value);
+  if (Number.isFinite(Number(item.max))) value = Math.min(Number(item.max), value);
+  return Number.isInteger(value) ? Math.round(value) : value;
+}
+
+function applyAppMenuNumberSettingPreview(path, value) {
+  if (path === 'appearance.yolo_rotate_ms') {
+    yoloRotateMs = Math.max(0, Number(value) || 0);
+    applyCssSettings();
+  }
+}
+
+function createAppMenuNumberSetting(item) {
+  const row = document.createElement('label');
+  row.className = ['app-menu-setting-row', 'app-menu-number-setting', item.className || ''].filter(Boolean).join(' ');
+  row.setAttribute('role', 'none');
+  row.dataset.settingPath = item.path || '';
+  const label = document.createElement('span');
+  label.className = 'app-menu-setting-label';
+  label.textContent = item.label || item.path || '';
+  const control = document.createElement('span');
+  control.className = 'app-menu-setting-control';
+  const input = document.createElement('input');
+  input.type = 'number';
+  input.inputMode = 'decimal';
+  input.dataset.settingPath = item.path || '';
+  input.min = String(item.min ?? '');
+  input.max = String(item.max ?? '');
+  input.step = String(item.step || 1);
+  input.value = String(clampAppMenuNumberSetting(item, numberSetting(item.path, item.fallback ?? 0)));
+  input.disabled = readOnlyMode || item.disabled === true;
+  if (item.detail) input.title = item.detail;
+  input.setAttribute('aria-label', item.label || item.path || '');
+  input.addEventListener('click', event => event.stopPropagation());
+  input.addEventListener('keydown', event => event.stopPropagation());
+  input.addEventListener('input', event => {
+    event.stopPropagation();
+    const next = clampAppMenuNumberSetting(item, input.value);
+    applyAppMenuNumberSettingPreview(item.path, next);
+  });
+  input.addEventListener('change', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    const next = clampAppMenuNumberSetting(item, input.value);
+    input.value = String(next);
+    applyAppMenuNumberSettingPreview(item.path, next);
+    saveSettingsPatch(settingPatch(item.path, next))
+      .then(() => {
+        renderPreferencesPanels();
+        statusEl.textContent = `saved ${item.path}`;
+      })
+      .catch(error => {
+        statusErr(localizedHtml('status.settingsSaveFailed', {error}));
+        refreshSettings({force: true});
+      });
+  });
+  control.appendChild(input);
+  if (item.suffix) {
+    const suffix = document.createElement('span');
+    suffix.className = 'app-menu-setting-suffix';
+    suffix.textContent = item.suffix;
+    control.appendChild(suffix);
+  }
+  row.append(label, control);
+  return row;
 }
 
 function createAppSubmenu(item) {

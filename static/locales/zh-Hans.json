@@ -415,6 +415,8 @@
   "pref.appearance.preview_font_size.label": "预览字体大小",
   "pref.appearance.red_reminder_ms.help": "需要输入或批准的会话的红色注意脉动持续时间。设为 0 可禁用。",
   "pref.appearance.red_reminder_ms.label": "红色提醒持续时间",
+  "pref.appearance.separator_color.help": "窗格分隔线以及标签、文件、根级拖放虚线预览的颜色。",
+  "pref.appearance.separator_color.label": "分隔线颜色",
   "pref.appearance.tab_width.help": "窗格标签页换到下一行前的目标宽度。",
   "pref.appearance.tab_width.label": "标签页宽度",
   "pref.appearance.terminal_font_size.help": "xterm.js 窗格使用的字体大小。超出范围的值会被限制。",

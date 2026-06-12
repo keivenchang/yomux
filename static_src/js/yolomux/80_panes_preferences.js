@@ -2088,10 +2088,9 @@ function layoutModePreferenceChoices() {
 }
 
 function activeColorPreferenceChoice(value, label) {
-  const preset = ACTIVE_COLOR_PRESETS[value];
-  const swatches = preset
-    ? [preset.dark.bright, preset.light.bright]
-    : ['#86d600', '#4f9e3a'];
+  const dark = uiColorVisualPreset(value, false);
+  const light = uiColorVisualPreset(value, true);
+  const swatches = dark && light ? [dark.bright, light.bright] : ['#86d600', '#4f9e3a'];
   return {value, label, swatches, joinedSwatches: true};
 }
 
@@ -2120,6 +2119,20 @@ function cursorColorPreferenceChoices() {
     .map(cursorColorPreferenceChoice);
 }
 
+function separatorColorPreferenceChoice(value) {
+  if (value === 'theme') return {value, label: t('pref.appearance.editor_cursor_color.theme')};
+  return activeColorPreferenceChoice(value, t(UI_COLOR_PRESETS[value].labelKey));
+}
+
+function separatorColorPreferenceChoices() {
+  const choices = Array.isArray(clientSettingsPayload?.choices?.['appearance.separator_color'])
+    ? clientSettingsPayload.choices['appearance.separator_color']
+    : SEPARATOR_COLOR_CHOICES;
+  return choices
+    .filter(value => value === 'theme' || UI_COLOR_PRESETS[value])
+    .map(separatorColorPreferenceChoice);
+}
+
 function preferenceSections() {
   return [
     {title: t('pref.section.general'), items: [
@@ -2141,6 +2154,7 @@ function preferenceSections() {
       {path: 'appearance.pane_ring_opacity', label: t('pref.appearance.pane_ring_opacity.label'), type: 'range', min: 5, max: 100, step: 5, suffix: '%', help: t('pref.appearance.pane_ring_opacity.help')},
       {path: 'appearance.inactive_pane_opacity', label: t('pref.appearance.inactive_pane_opacity.label'), type: 'range', min: 0, max: 100, step: 5, suffix: '%', help: t('pref.appearance.inactive_pane_opacity.help')},
       {path: 'appearance.active_color', label: t('pref.appearance.active_color.label'), type: 'radio', choices: activeColorPreferenceChoices(), help: t('pref.appearance.active_color.help')},
+      {path: 'appearance.separator_color', label: t('pref.appearance.separator_color.label'), type: 'radio', choices: separatorColorPreferenceChoices(), help: t('pref.appearance.separator_color.help')},
       {path: 'appearance.editor_cursor_color', label: t('pref.appearance.editor_cursor_color.label'), type: 'radio', choices: cursorColorPreferenceChoices(), help: t('pref.appearance.editor_cursor_color.help')},
       {path: 'appearance.yolo_rotate_ms', label: t('pref.appearance.yolo_rotate_ms.label'), type: 'number', min: 0, max: 60000, step: 250, suffix: 'ms', help: t('pref.appearance.yolo_rotate_ms.help')},
       {path: 'appearance.date_time_hour_cycle', label: t('pref.appearance.date_time_hour_cycle.label'), type: 'radio', choices: [

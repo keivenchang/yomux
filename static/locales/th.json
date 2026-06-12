@@ -415,6 +415,8 @@
   "pref.appearance.preview_font_size.label": "Preview font size",
   "pref.appearance.red_reminder_ms.help": "Duration of the red attention pulse for sessions that need input or approval. Set 0 to disable.",
   "pref.appearance.red_reminder_ms.label": "Red reminder duration",
+  "pref.appearance.separator_color.help": "Color for pane separators and dashed tab/file/root drop previews.",
+  "pref.appearance.separator_color.label": "Separator color",
   "pref.appearance.tab_width.help": "Target width for pane tabs before they wrap to additional rows.",
   "pref.appearance.tab_width.label": "Tab width",
   "pref.appearance.terminal_font_size.help": "Font size used by xterm.js panes. Values outside the range are clamped.",

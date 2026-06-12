@@ -366,6 +366,8 @@
   "pref.appearance.active_color.green": "鮮綠",
   "pref.appearance.active_color.help": "使用中/聚焦窗格的強調色（使用中分頁、焦點環、頂端色條、檔案選取、Markdown 標題與優標記）。",
   "pref.appearance.active_color.label": "強調色",
+  "pref.appearance.separator_color.help": "窗格分隔線，以及分頁、檔案、根層拖放虛線預覽的顏色。",
+  "pref.appearance.separator_color.label": "分隔線顏色",
   "pref.appearance.active_color.orange": "血橙",
   "pref.appearance.active_color.purple": "皇家紫",
   "pref.appearance.active_color.white": "月光白",

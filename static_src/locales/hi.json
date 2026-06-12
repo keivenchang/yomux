@@ -366,6 +366,8 @@
   "pref.appearance.active_color.green": "Envy green",
   "pref.appearance.active_color.help": "Accent color for the active/focused pane (active tab, focus ring, chrome strip, file selection, Markdown headings, and YO markers).",
   "pref.appearance.active_color.label": "Active color",
+  "pref.appearance.separator_color.help": "Color for pane separators and dashed tab/file/root drop previews.",
+  "pref.appearance.separator_color.label": "Separator color",
   "pref.appearance.active_color.orange": "Blood orange",
   "pref.appearance.active_color.purple": "Royal violet",
   "pref.appearance.active_color.white": "Moon white",

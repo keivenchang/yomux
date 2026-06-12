@@ -685,6 +685,8 @@ globalThis.__layoutTestApi = {
   dedentSelectionText,
   dropIntentForEvent,
   dropIntentAllowsSession,
+  fileDropIntentAllowsPayload,
+  pathDropIntentAllowsPayload,
   paneSwapAllowed,
   paneSwapIntentForEvent,
   paneSwapIntentAllowed,
@@ -896,6 +898,8 @@ globalThis.__layoutTestApi = {
   paneTabDropPlacement,
   dockviewTabDropWouldNoop,
   dockviewTabEdgeReorderIntent,
+  dockviewTabStripEndDropIntent,
+  dockviewTabDropViolatesPinnedPartitionForTest: dockviewTabDropViolatesPinnedPartition,
   windowStepButtonFromEvent,
   tmuxWindowRecords,
   tmuxWindowBarLabelMode,
@@ -1393,6 +1397,47 @@ test('t@1243', () => {
   const encodedOldSearch = `?sessions=6%2C1%2C3&layout=${encodeURIComponent(`tree:${JSON.stringify(oldPayload)}`)}`;
   const reloaded = loadYolomux(encodedOldSearch);
   assert.deepStrictEqual(canonical(reloaded.serialize(reloaded.currentSlots())), canonical(api.serialize(decoded)));
+
+  const oldFourPanePayload = {
+    tree: {
+      split: 'row',
+      children: [
+        {split: 'column', children: [{slot: 'leftTop'}, {slot: 'leftBottom'}]},
+        {split: 'column', children: [{slot: 'rightTop'}, {slot: 'rightBottom'}]},
+      ],
+    },
+    slots: {
+      leftTop: {tabs: ['4'], active: '4'},
+      leftBottom: {tabs: ['1'], active: '1'},
+      rightTop: {tabs: ['changes'], active: 'changes'},
+      rightBottom: {tabs: ['2', '3'], active: '3'},
+    },
+  };
+  const fourPane = api.layoutFromParam(`tree:${JSON.stringify(oldFourPanePayload)}`, '');
+  assert.deepStrictEqual(canonical(api.serialize(fourPane)), {
+    tree: {
+      split: 'row',
+      pct: 22,
+      children: [
+        {slot: 'rightTop'},
+        {
+          split: 'row',
+          pct: 50,
+          children: [
+            {split: 'column', pct: 50, children: [{slot: 'leftTop'}, {slot: 'leftBottom'}]},
+            {slot: 'rightBottom'},
+          ],
+        },
+      ],
+    },
+    panes: {
+      leftBottom: {tabs: ['1'], active: '1'},
+      leftTop: {tabs: ['4'], active: '4'},
+      rightBottom: {tabs: ['2', '3'], active: '3'},
+      rightTop: {tabs: ['__files__'], active: '__files__'},
+    },
+  });
+  assert.equal(api.fileExplorerModeForTest(), 'diff', 'legacy changes inside an old four-pane URL still selects Finder diff mode');
 });
 
 test('t@1270', () => {
@@ -4399,6 +4444,7 @@ test('t@2560', () => {
     ['general.default_layout', ['single', 'split', 'grid', 'wall']],
     ['appearance.theme', ['system', 'dark', 'light']],
     ['appearance.active_color', ['green', 'blue', 'orange', 'yellow', 'purple', 'white']],
+    ['appearance.separator_color', ['theme', 'green', 'blue', 'orange', 'yellow', 'purple', 'white']],
     ['appearance.terminal_theme', ['follow-app', 'dark', 'light']],
     ['appearance.date_time_hour_cycle', ['24', '12']],
     ['appearance.editor_cursor_style', ['line', 'block']],
@@ -4419,6 +4465,8 @@ test('t@2560', () => {
   assert.ok(preferencesHtml.includes('>Same Tab<'), 'string radio labels are humanized');
   assert.equal(/data-setting-path="appearance\.theme"[\s\S]{0,180}preferences-radio-swatches/.test(preferencesHtml), false, 'Global color theme radios do not show color swatches');
   assert.equal(/<select[^>]*data-setting-path="appearance\.active_color"/.test(preferencesHtml), false, 'Active color renders as radios, not a select');
+  assert.equal(/<select[^>]*data-setting-path="appearance\.separator_color"/.test(preferencesHtml), false, 'Separator color renders as radios, not a select');
+  assert.ok(preferencesHtml.includes('data-setting-path="appearance.separator_color"'), 'Preferences expose separator color for pane separators and drop previews');
   assert.ok(/preferences-radio-swatches joined[\s\S]*--preferences-radio-swatch:#86d600[\s\S]*--preferences-radio-swatch:#4f9e3a/.test(preferencesHtml), 'Active color Green radio shows joined actual dark/light accent swatches');
   assert.ok(/preferences-radio-swatches joined[\s\S]*--preferences-radio-swatch:#f97316[\s\S]*--preferences-radio-swatch:#b91c1c/.test(preferencesHtml), 'Active color Blood orange light swatch is redder than Solar gold');
   assert.ok(/preferences-radio-swatches joined[\s\S]*--preferences-radio-swatch:#eab308[\s\S]*--preferences-radio-swatch:#d6a400/.test(preferencesHtml), 'Active color Solar gold light swatch is a brighter gold');
@@ -4879,6 +4927,10 @@ test('t@2560', () => {
   assert.ok(tmuxMenuLabels.indexOf('YOLO') > tmuxMenuLabels.indexOf('Resume session'), 'YOLO submenu stays at the bottom after session actions');
   const yoloMenu = tmuxMenu.items.find(item => item.label === 'YOLO');
   assert.equal(yoloMenu.type, 'submenu');
+  const yoloRotationItem = yoloMenu.items.find(item => item.path === 'appearance.yolo_rotate_ms');
+  assert.equal(yoloRotationItem.type, 'number-setting');
+  assert.equal(yoloRotationItem.label, 'Active YO rotation period');
+  assert.equal(yoloRotationItem.suffix, 'ms');
   assert.ok(yoloMenu.items.some(item => item.label === 'Open rule file'));
   assert.ok(yoloMenu.items.some(item => item.label === 'Reload rules'));
   assert.equal(yoloMenu.items.some(item => item.label === 'Sessions'), false);
@@ -4913,6 +4965,11 @@ test('t@2560', () => {
   api.setFocusedPanelItem('__files__');
   assert.equal(api.currentSessionActionTarget(), '2');
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  const css = fs.readFileSync('static/yolomux.css', 'utf8');
+  assert.ok(source.includes("menuNumberSetting('appearance.yolo_rotate_ms'"), 'YOLO submenu exposes the same Active YO rotation setting as Preferences');
+  assert.ok(/function createAppMenuNumberSetting[\s\S]*saveSettingsPatch\(settingPatch\(item\.path, next\)\)/.test(source), 'menu number-setting rows save through the shared settings API');
+  assert.ok(/function applyAppMenuNumberSettingPreview[\s\S]*path === 'appearance\.yolo_rotate_ms'[\s\S]*applyCssSettings\(\)/.test(source), 'YOLO menu rotation control live-applies the marker timing');
+  assert.ok(css.includes('.app-menu-setting-control input[type="number"]'), 'menu number-setting rows have dedicated input styling');
   assert.ok(source.startsWith('/* GENERATED by tools/static_build.py from static_src/'), 'generated JS has a do-not-edit header');
   assert.ok(source.includes('const mod = appModifier(event);'), 'global app shortcuts use one platform modifier');
   assert.equal(source.includes('const mod = event.ctrlKey || event.metaKey;'), false, 'global app shortcuts do not claim both Ctrl and Cmd');
@@ -4998,6 +5055,8 @@ test('t@2560', () => {
   assert.ok(source.includes('function keyboardShortcutCatalog()'), 'shortcut help is driven from one catalog');
   assert.ok(api.keyboardShortcutsHtml().includes('Pin / unpin active tab'), 'shortcut overlay lists the Pin Tab chord');
   assert.ok(api.keyboardShortcutsHtml().includes('Ctrl+K Enter'), 'shortcut overlay renders the platform Pin Tab chord on PC/Linux');
+  assert.ok(api.keyboardShortcutsHtml().includes('Drag a tab'), 'shortcut overlay is honest that tab/pane layout changes are pointer-driven');
+  assert.equal(/Move or split tab[\s\S]{0,120}(Ctrl|Cmd|Alt|Shift)\+/.test(api.keyboardShortcutsHtml()), false, 'shortcut overlay does not advertise keyboard tab/pane movement');
   assert.ok(api.keyboardShortcutsHtml().includes('outside text'), 'shortcut overlay scopes the Backspace close-tab fallback');
   assert.ok(/async function copyTextToClipboard\(text\)[\s\S]*?if \(clipboard\?\.writeText\) \{[\s\S]*?try \{[\s\S]*?await clipboard\.writeText\(value\);[\s\S]*?\} catch/.test(source), 'clipboard copy falls back when navigator.clipboard exists but rejects');
   assert.ok(source.includes('function copyTerminalSelectionToClipboardEvent(session, term, event, container = null)'), 'terminal copy has a DOM copy-event fallback');
@@ -5405,13 +5464,21 @@ test('t@2560', () => {
     {label: '[Image #1]', detail: "'/home/keivenc/yolomux.dev1/20260609-001.png'"},
     'file quick-open can render image hits in Popular IDE-style reference form'
   );
+  assert.deepStrictEqual(
+    canonical(api.cursorStyleFileReference("/home/test/with spaces/[draft] it's $fine.png", {imageIndex: 7})),
+    {label: '[Image #7]', detail: "'/home/test/with spaces/[draft] it'\\''s $fine.png'"},
+    'Search image references shell-quote paths with spaces and shell-special characters'
+  );
   api.setFileQuickOpenCandidatesForTest('/home/keivenc/yolomux.dev1', [
     {name: '20260609-001.png', path: '/home/keivenc/yolomux.dev1/20260609-001.png', relative_path: '20260609-001.png', kind: 'file'},
     {name: '20260609-002.png', path: '/home/keivenc/yolomux.dev1/20260609-002.png', relative_path: '20260609-002.png', kind: 'file'},
+    {name: "[draft] it's $fine.png", path: "/home/keivenc/yolomux.dev1/screens with spaces/[draft] it's $fine.png", relative_path: "screens with spaces/[draft] it's $fine.png", kind: 'file'},
   ]);
   const imageItems = api.fileQuickOpenItems().filter(item => item.key.includes('20260609-00'));
   assert.deepStrictEqual(canonical(imageItems.map(item => item.label)), ['[Image #1]', '[Image #2]'], 'Search image results use Popular IDE-style image numbering');
   assert.equal(imageItems[0].detail, "'/home/keivenc/yolomux.dev1/20260609-001.png'", 'Search image result details show the quoted absolute path');
+  const specialImageItem = api.fileQuickOpenItems().find(item => item.path.includes('[draft]'));
+  assert.equal(specialImageItem.detail, "'/home/keivenc/yolomux.dev1/screens with spaces/[draft] it'\\''s $fine.png'", 'Search image result details safely quote special-character paths');
   // C15 follow-up: cmd-P path mode offers a pinned "Open folder in Finder" row (Enter opens the typed
   // directory), while a subfolder entry descends and a file entry opens.
   api.setFileQuickOpenCandidatesForTest('/repo/app', [
@@ -6579,6 +6646,43 @@ test('t@2560', () => {
   assert.equal(api.dropIntentAllowsSession('2', {targetSlot: 'slot1', zone: 'bottom', targetRect: {width: 720, height: 420}}), false, 'pane edge previews require enough height for both panes');
   assert.equal(api.dropIntentAllowsSession('2', {targetSlot: 'slot1', zone: 'middle', targetRect: {width: 300, height: 520}}), false, 'middle drops do not preview when the target cannot display the incoming tab');
   assert.equal(api.dropIntentAllowsSession('2', {targetSlot: 'slot1', zone: 'middle', targetRect: {width: 420, height: 520}}), true);
+
+  const dragMatrixSlots = api.emptyLayoutSlots();
+  dragMatrixSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 25);
+  dragMatrixSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+  dragMatrixSlots.slot1 = api.paneStateWithTabs(['1'], '1');
+  api.setLayoutSlotsForTest(dragMatrixSlots);
+  const matrixNormalRect = {left: 260, top: 0, right: 980, bottom: 520, width: 720, height: 520};
+  const matrixFinderRect = {left: 0, top: 0, right: 720, bottom: 520, width: 720, height: 520};
+  const filePayload = {path: '/repo/app/README.md', paths: ['/repo/app/README.md'], kind: 'file'};
+  const multiFilePayload = {path: '/repo/app/a.md', paths: ['/repo/app/a.md', '/repo/app/b.md'], kind: 'file'};
+  const directoryPayload = {path: '/repo/app/src', paths: ['/repo/app/src'], kind: 'dir'};
+  const matrixCases = [
+    {source: 'tab', target: 'normal-pane', zone: 'middle', previewOwner: 'tab-strip', dropEffect: 'move', finalAction: 'move-tab-to-pane', allowed: api.dropIntentAllowsSession('2', {targetSlot: 'slot1', zone: 'middle', targetRect: matrixNormalRect})},
+    {source: 'tab', target: 'normal-pane', zone: 'right', previewOwner: 'pane', dropEffect: 'move', finalAction: 'split-pane', allowed: api.dropIntentAllowsSession('2', {targetSlot: 'slot1', zone: 'right', targetRect: matrixNormalRect})},
+    {source: 'tab', target: 'Finder/Differ', zone: 'middle', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: api.dropIntentAllowsSession('2', {targetSlot: 'left', zone: 'middle', targetRect: matrixFinderRect})},
+    {source: 'tab', target: 'Finder/Differ', zone: 'bottom', previewOwner: 'pane', dropEffect: 'move', finalAction: 'split-reserved-pane-bottom', allowed: api.dropIntentAllowsSession('2', {targetSlot: 'left', zone: 'bottom', targetRect: matrixFinderRect})},
+    {source: 'Finder/Differ-tab', target: 'normal-pane', zone: 'right', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: api.dropIntentAllowsSession('__files__', {targetSlot: 'slot1', zone: 'right', targetRect: matrixNormalRect})},
+    {source: 'file-row', target: 'normal-pane', zone: 'left', previewOwner: 'pane', dropEffect: 'copy', finalAction: 'open-file-editor-split', allowed: api.fileDropIntentAllowsPayload(filePayload, {targetSlot: 'slot1', zone: 'left', targetRect: matrixNormalRect})},
+    {source: 'multi-file-row', target: 'normal-pane', zone: 'middle', previewOwner: 'pane', dropEffect: 'copy', finalAction: 'open-files-in-pane', allowed: api.fileDropIntentAllowsPayload(multiFilePayload, {targetSlot: 'slot1', zone: 'middle', targetRect: matrixNormalRect})},
+    {source: 'directory-row', target: 'terminal-path-target', zone: 'left', previewOwner: 'pane', dropEffect: 'copy', finalAction: 'insert-directory-path-or-split', allowed: api.pathDropIntentAllowsPayload(directoryPayload, {targetSlot: 'slot1', zone: 'left', targetRect: matrixNormalRect})},
+    {source: 'directory-row', target: 'file-editor-drop', zone: 'left', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: api.fileDropIntentAllowsPayload(directoryPayload, {targetSlot: 'slot1', zone: 'left', targetRect: matrixNormalRect})},
+    {source: 'tab', target: 'root-edge', zone: 'right', previewOwner: 'root', dropEffect: 'move', finalAction: 'split-root', allowed: api.dropIntentAllowsSession('2', {boundary: 'root', zone: 'right', targetSlot: 'slot1', targetRect: matrixNormalRect})},
+    {source: 'tab', target: 'cross-gutter', zone: 'right', previewOwner: 'gutter', dropEffect: 'move', finalAction: 'split-gutter', allowed: api.dropIntentAllowsSession('2', {boundary: 'gutter', zone: 'right', targetSlot: 'slot1', targetRect: matrixNormalRect})},
+  ];
+  assert.deepStrictEqual(canonical(matrixCases), [
+    {source: 'tab', target: 'normal-pane', zone: 'middle', previewOwner: 'tab-strip', dropEffect: 'move', finalAction: 'move-tab-to-pane', allowed: true},
+    {source: 'tab', target: 'normal-pane', zone: 'right', previewOwner: 'pane', dropEffect: 'move', finalAction: 'split-pane', allowed: true},
+    {source: 'tab', target: 'Finder/Differ', zone: 'middle', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: false},
+    {source: 'tab', target: 'Finder/Differ', zone: 'bottom', previewOwner: 'pane', dropEffect: 'move', finalAction: 'split-reserved-pane-bottom', allowed: true},
+    {source: 'Finder/Differ-tab', target: 'normal-pane', zone: 'right', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: false},
+    {source: 'file-row', target: 'normal-pane', zone: 'left', previewOwner: 'pane', dropEffect: 'copy', finalAction: 'open-file-editor-split', allowed: true},
+    {source: 'multi-file-row', target: 'normal-pane', zone: 'middle', previewOwner: 'pane', dropEffect: 'copy', finalAction: 'open-files-in-pane', allowed: true},
+    {source: 'directory-row', target: 'terminal-path-target', zone: 'left', previewOwner: 'pane', dropEffect: 'copy', finalAction: 'insert-directory-path-or-split', allowed: true},
+    {source: 'directory-row', target: 'file-editor-drop', zone: 'left', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: false},
+    {source: 'tab', target: 'root-edge', zone: 'right', previewOwner: 'root', dropEffect: 'move', finalAction: 'split-root', allowed: true},
+    {source: 'tab', target: 'cross-gutter', zone: 'right', previewOwner: 'gutter', dropEffect: 'move', finalAction: 'split-gutter', allowed: true},
+  ], 'drag/drop matrix covers source x target x zone through the shared validators');
   api.setLayoutSlotsForTest(finderOnly);
   api.splitSessionAtSlot(editorItem, 'left', 'bottom');
   const editorSplit = api.serialize(api.currentSlots());
@@ -8313,6 +8417,8 @@ test('t@7654', () => {
     assert.ok(zhHtml.includes(catalog['pref.appearance.date_time_hour_cycle.label']), `${locale} renders the localized date/time clock label`);
     assert.ok(zhHtml.includes(catalog['pref.appearance.active_color.label']), `${locale} renders the localized Active color label`);
     assert.ok(zhHtml.includes(catalog['pref.appearance.active_color.help']), `${locale} renders the localized Active color help`);
+    assert.ok(zhHtml.includes(catalog['pref.appearance.separator_color.label']), `${locale} renders the localized separator color label`);
+    assert.ok(zhHtml.includes(catalog['pref.appearance.separator_color.help']), `${locale} renders the localized separator color help`);
     for (const key of ['blue', 'green', 'orange', 'purple', 'white', 'yellow']) {
       assert.ok(zhHtml.includes(catalog[`pref.appearance.active_color.${key}`]), `${locale} renders the localized Active color ${key} choice`);
     }
@@ -8647,11 +8753,12 @@ test('t@7900', () => {
   assert.ok(appearanceHtml.includes('Plasma violet'), 'Cursor color Purple is labeled Plasma violet');
   assert.ok(appearanceHtml.includes('Starlight white'), 'Cursor color White is labeled Starlight white');
   assert.ok(/type="radio"[^>]*value="blue"[^>]*data-setting-path="appearance\.active_color"/.test(appearanceHtml), 'Active color Blue renders as a radio');
-  assert.ok(/data-setting-path="appearance\.active_color"[\s\S]*data-setting-path="appearance\.editor_cursor_color"[\s\S]*data-setting-path="appearance\.yolo_rotate_ms"/.test(appearanceHtml), 'Cursor color sits immediately after Active color in Appearance');
+  assert.ok(/data-setting-path="appearance\.active_color"[\s\S]*data-setting-path="appearance\.separator_color"[\s\S]*data-setting-path="appearance\.editor_cursor_color"[\s\S]*data-setting-path="appearance\.yolo_rotate_ms"/.test(appearanceHtml), 'Separator and Cursor color sit immediately after Active color in Appearance');
   assert.ok(/type="radio"[^>]*value="blue"[^>]*data-setting-path="appearance\.editor_cursor_color"/.test(appearanceHtml), 'Cursor color Blue renders as a radio');
   const preferencesSource = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(/function layoutModePreferenceChoices\(\)\s*\{[\s\S]*layoutModeValues\.map\(value => \(\{value, label: t\(`menu\.view\.layout\.\$\{value\}`\)\}\)\)/.test(preferencesSource), 'Default layout choices derive from the shared View layout modes');
   assert.ok(/function activeColorPreferenceChoices\(\)\s*\{[\s\S]*UI_COLOR_CHOICES\.map\(value => activeColorPreferenceChoice\(value, t\(UI_COLOR_PRESETS\[value\]\.labelKey\)\)\)/.test(preferencesSource), 'Active color choices derive labels from the shared UI color parent');
+  assert.ok(/function separatorColorPreferenceChoices\(\)[\s\S]*clientSettingsPayload\?\.choices\?\.\['appearance\.separator_color'\][\s\S]*SEPARATOR_COLOR_CHOICES[\s\S]*\.map\(separatorColorPreferenceChoice\)/.test(preferencesSource), 'Separator color choices sync to the backend allowlist with a local fallback');
   assert.ok(/function cursorColorPreferenceChoices\(\)\s*\{[\s\S]*clientSettingsPayload\?\.choices\?\.\['appearance\.editor_cursor_color'\][\s\S]*CURSOR_COLOR_CHOICES[\s\S]*\.map\(cursorColorPreferenceChoice\)/.test(preferencesSource), 'Cursor color choices sync to the backend allowlist with a local fallback');
   assert.ok(/function cursorColorPreferenceChoice\(value\)\s*\{[\s\S]*preset\?\.cursorLabelKey \? t\(preset\.cursorLabelKey\) : preferenceChoiceLabel\(value\)/.test(preferencesSource), 'Cursor color labels use cursor-specific bright color names from the shared parent');
   assert.ok(/preferences-radio-swatches joined[\s\S]*--preferences-radio-swatch:#3b82f6[\s\S]*--preferences-radio-swatch:#2563eb/.test(appearanceHtml), 'Active color Blue radio shows connected actual dark/light accent swatches');
@@ -8970,9 +9077,12 @@ test('t@8250', () => {
 test('t@8263', () => {
   const api = loadYolomux();
   const strip = new TestElement('dock-tabs');
+  strip.classList.add('dv-tabs-container');
+  strip.rect = {left: 100, right: 520, top: 0, bottom: 28, width: 420, height: 28};
   const dockTab = item => {
     const tab = new TestElement(`dv-${item}`);
     tab.classList.add('dv-tab');
+    tab.rect = {left: 100 + strip.children.length * 103, right: 200 + strip.children.length * 103, top: 0, bottom: 27, width: 100, height: 27};
     const inner = new TestElement(`tab-${item}`);
     inner.classList.add('dockview-pane-tab');
     inner.dataset.paneTab = item;
@@ -9003,6 +9113,31 @@ test('t@8263', () => {
     sourceSlot: 'left',
     targetSlot: 'left',
   }, 'Dockview manually reorders an edge tab dragged onto its adjacent neighbor');
+  api.setPinnedTabsForTest([]);
+
+  const stripEnd = eventFor(strip, 'right');
+  stripEnd.nativeEvent.clientX = 500;
+  assert.deepStrictEqual(canonical(api.dockviewTabStripEndDropIntent(stripEnd)), {
+    adjustedIndex: 2,
+    insertIndex: 2,
+    insertionIndex: 3,
+    item: '2',
+    pinnedBoundary: 0,
+    position: 'right',
+    sourceIndex: 1,
+    sourceSlot: 'left',
+    tabItems: ['1', '2', '3'],
+    targetItems: ['1', '3'],
+    targetSlot: 'left',
+  }, 'Dockview drops on the empty tab-strip background past the last tab as move-to-end');
+  const lastToEnd = eventFor(strip, 'right', '3');
+  lastToEnd.nativeEvent.clientX = 500;
+  assert.equal(api.dockviewTabDropWouldNoop(lastToEnd), true, 'Dockview suppresses dropping the already-last tab on the empty strip end');
+  api.setPinnedTabsForTest(['1']);
+  const pinnedToEnd = eventFor(strip, 'right', '1');
+  pinnedToEnd.nativeEvent.clientX = 500;
+  assert.equal(api.dockviewTabStripEndDropIntent(pinnedToEnd), null, 'Pinned tabs cannot move past the pinned partition through the empty strip end');
+  assert.equal(api.dockviewTabDropViolatesPinnedPartitionForTest(pinnedToEnd), true, 'Pinned strip-end violations still use the shared partition guard');
   api.setPinnedTabsForTest([]);
 });
 

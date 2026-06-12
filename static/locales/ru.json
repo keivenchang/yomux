@@ -415,6 +415,8 @@
   "pref.appearance.preview_font_size.label": "Preview font size",
   "pref.appearance.red_reminder_ms.help": "Длительность красного импульса внимания для сессий, требующих ввода или подтверждения. Установите 0 для отключения.",
   "pref.appearance.red_reminder_ms.label": "Длительность красного напоминания",
+  "pref.appearance.separator_color.help": "Color for pane separators and dashed tab/file/root drop previews.",
+  "pref.appearance.separator_color.label": "Separator color",
   "pref.appearance.tab_width.help": "Целевая ширина вкладок панели до их переноса на дополнительные строки.",
   "pref.appearance.tab_width.label": "Ширина вкладки",
   "pref.appearance.terminal_font_size.help": "Размер шрифта для панелей xterm.js. Значения вне диапазона обрезаются.",

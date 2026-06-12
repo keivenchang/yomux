@@ -477,6 +477,7 @@ function normalizeEditorCursorStyle(value) {
 
 const UI_COLOR_CHOICES = ['green', 'blue', 'orange', 'yellow', 'purple', 'white'];
 const DEFAULT_CURSOR_COLOR = 'yellow';
+const SEPARATOR_COLOR_CHOICES = ['theme', ...UI_COLOR_CHOICES];
 const NEON_CURSOR_COLOR_CHOICES = ['laser-lime', 'neon-green', 'neon-cyan', 'neon-magenta', 'neon-orange'];
 const CURSOR_COLOR_CHOICES = [...UI_COLOR_CHOICES, ...NEON_CURSOR_COLOR_CHOICES, 'theme'];
 // One parent for the named UI colors. Active color and cursor color must both derive from this map so
@@ -554,6 +555,16 @@ function hexToRgbTriple(hex) {
   return `${parseInt(h.slice(0, 2), 16)} ${parseInt(h.slice(2, 4), 16)} ${parseInt(h.slice(4, 6), 16)}`;
 }
 
+function uiColorVisualPreset(value, light = false) {
+  if (value === 'green') {
+    return light
+      ? {accent: '#5f9800', bright: '#4f9e3a', text: '#ffffff'}
+      : {accent: '#76b900', bright: '#86d600', text: '#071000'};
+  }
+  const preset = ACTIVE_COLOR_PRESETS[value];
+  return light ? preset?.light : preset?.dark;
+}
+
 // Set the active-accent source vars on both roots: documentElement covers surfaces that resolve tokens
 // there, while body inline beats body.theme-light's class-level defaults for normal descendants.
 // Green/unknown clears both so the CSS defaults stand. Re-run on theme switch since the per-preset values
@@ -580,6 +591,25 @@ function applyActiveColor(value) {
   }
 }
 
+function applySeparatorColor(value) {
+  const styles = [document.documentElement?.style, document.body?.style].filter(Boolean);
+  if (!styles.length) return;
+  const vars = ['--pane-resizer-bg', '--pane-resizer-hover-bg', '--pane-resizer-shadow'];
+  const preset = String(value || 'theme') === 'theme'
+    ? null
+    : uiColorVisualPreset(value, document.body?.classList?.contains('theme-resolved-light'));
+  if (!preset) {
+    styles.forEach(style => vars.forEach(v => style.removeProperty(v)));
+    return;
+  }
+  const rgb = hexToRgbTriple(preset.bright || preset.accent);
+  for (const style of styles) {
+    style.setProperty('--pane-resizer-bg', `rgb(${rgb} / 0.72)`);
+    style.setProperty('--pane-resizer-hover-bg', `rgb(${rgb} / 0.96)`);
+    style.setProperty('--pane-resizer-shadow', `rgb(${rgb} / 0.72)`);
+  }
+}
+
 function applyCssSettings() {
   const root = document.documentElement?.style;
   if (!root) return;
@@ -602,6 +632,7 @@ function applyCssSettings() {
   applyPaneRingOpacity(paneRingOpacity);
   applyInactivePaneOpacity(numberSetting('appearance.inactive_pane_opacity', 60));
   applyActiveColor(initialSetting('appearance.active_color', 'green'));
+  applySeparatorColor(initialSetting('appearance.separator_color', 'theme'));
   applyCursorColorSetting();
   root.setProperty('--red-reminder-duration', `${Math.max(0, redReminderMs) / 1000}s`);
   root.setProperty('--yolo-rotation-duration', `${Math.max(0, yoloRotateMs) / 1000}s`);
@@ -620,6 +651,7 @@ function applyGlobalThemeMode(options = {}) {
   if (options.updateTerminals) applyTerminalRuntimeSettings({fit: false});
   // the active-color presets are theme-specific, so re-apply on every theme switch.
   applyActiveColor(initialSetting('appearance.active_color', 'green'));
+  applySeparatorColor(initialSetting('appearance.separator_color', 'theme'));
 }
 
 let globalThemeMediaListenerInstalled = false;

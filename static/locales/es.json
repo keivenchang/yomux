@@ -415,6 +415,8 @@
   "pref.appearance.preview_font_size.label": "Preview font size",
   "pref.appearance.red_reminder_ms.help": "Duración del pulso de atención rojo para las sesiones que necesitan entrada o aprobación. Pon 0 para desactivarlo.",
   "pref.appearance.red_reminder_ms.label": "Duración del recordatorio rojo",
+  "pref.appearance.separator_color.help": "Color for pane separators and dashed tab/file/root drop previews.",
+  "pref.appearance.separator_color.label": "Separator color",
   "pref.appearance.tab_width.help": "Ancho objetivo de las pestañas del panel antes de que pasen a filas adicionales.",
   "pref.appearance.tab_width.label": "Ancho de pestaña",
   "pref.appearance.terminal_font_size.help": "Tamaño de fuente que usan los paneles de xterm.js. Los valores fuera del rango se ajustan.",

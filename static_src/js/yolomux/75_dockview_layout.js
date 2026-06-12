@@ -207,6 +207,8 @@ function dockviewTrackRootBoundaryOverlay(event) {
 }
 
 function dockviewTabDropWouldNoop(event) {
+  const stripEnd = dockviewTabStripEndDropInfoForEvent(event);
+  if (stripEnd) return dockviewTabStripEndDropWouldNoop(stripEnd);
   if (dockviewTabEdgeReorderIntent(event)) return false;
   const info = dockviewTabInsertionInfo(event);
   return Boolean(info && info.sourceSlot === info.targetSlot && info.adjustedIndex === info.sourceIndex);
@@ -270,7 +272,101 @@ function dockviewTabInsertionInfo(event) {
   return {item, targetSlot, sourceSlot, sourceIndex, targetIndex, tabItems, targetItems, position, insertionIndex, adjustedIndex, pinnedBoundary};
 }
 
+function dockviewTabStripForPoint(x, y) {
+  const node = document.elementFromPoint?.(x, y);
+  return node?.closest?.('.dv-tabs-container') || null;
+}
+
+function dockviewTabStripEndDropInfo(options = {}) {
+  const tabStrip = options.tabStrip;
+  const item = options.item || '';
+  const pointerX = Number(options.pointerX);
+  if (!tabStrip || !item || !Number.isFinite(pointerX)) return null;
+  const tabs = Array.from(tabStrip.querySelectorAll?.('.dv-tab') || []);
+  if (!tabs.length) return null;
+  const tabItems = tabs.map(tab => tab.querySelector?.('.dockview-pane-tab')?.dataset?.paneTab || '');
+  const sourceIndex = tabItems.indexOf(item);
+  const targetItems = tabItems.filter(tab => tab && tab !== item);
+  const candidateTabs = tabs.filter((_, index) => index !== sourceIndex);
+  if (!candidateTabs.length) return null;
+  const stripRect = tabStrip.getBoundingClientRect?.();
+  if (!stripRect) return null;
+  const lastRect = candidateTabs
+    .map(tab => tab.getBoundingClientRect())
+    .filter(rect => rect && Number.isFinite(rect.right))
+    .reduce((best, rect) => (!best || rect.right > best.right ? rect : best), null);
+  if (!lastRect || pointerX < lastRect.right || pointerX > stripRect.right) return null;
+  const adjustedIndex = targetItems.length;
+  return {
+    item,
+    targetSlot: options.targetSlot || '',
+    sourceSlot: options.sourceSlot || '',
+    sourceIndex,
+    tabItems,
+    targetItems,
+    position: 'right',
+    insertionIndex: tabItems.length,
+    adjustedIndex,
+    insertIndex: adjustedIndex,
+    pinnedBoundary: targetItems.filter(tabIsPinned).length,
+  };
+}
+
+function dockviewTabStripEndDropInfoForEvent(event) {
+  if (event?.kind !== 'tab') return null;
+  const data = event.getData?.();
+  const item = resolveLayoutItem(data?.panelId || '');
+  const nativeEvent = event.nativeEvent;
+  const nativeTarget = nativeEvent?.target;
+  const tabStrip = nativeTarget?.closest?.('.dv-tabs-container') || null;
+  const targetSlot = dockviewSlotForGroupId(event.group?.id || '') || dockviewSlotForGroupElement(tabStrip?.closest?.('.dv-groupview'));
+  const sourceSlot = slotForItem(item) || dockviewSlotForGroupId(data?.groupId || '');
+  return dockviewTabStripEndDropInfo({
+    tabStrip,
+    item,
+    targetSlot,
+    sourceSlot,
+    pointerX: nativeEvent?.clientX,
+  });
+}
+
+function dockviewTabStripEndDropInfoForPointer(event, state) {
+  if (!state?.item || !state.slot) return null;
+  const x = Number(event.clientX) || 0;
+  const y = Number(event.clientY) || 0;
+  const tabStrip = dockviewTabStripForPoint(x, y);
+  const targetSlot = dockviewSlotForGroupElement(tabStrip?.closest?.('.dv-groupview'));
+  return dockviewTabStripEndDropInfo({
+    tabStrip,
+    item: state.item,
+    targetSlot,
+    sourceSlot: state.slot,
+    pointerX: x,
+  });
+}
+
+function dockviewTabStripEndDropWouldNoop(info) {
+  return Boolean(info?.sourceSlot && info.sourceSlot === info.targetSlot && info.sourceIndex === info.insertIndex);
+}
+
+function dockviewTabStripEndDropViolatesPinnedPartition(info) {
+  if (!info || !isPinnableTab(info.item)) return false;
+  if (dockviewPinnedTabCrossPaneViolation(info)) return true;
+  return tabIsPinned(info.item)
+    ? info.adjustedIndex > info.pinnedBoundary
+    : info.adjustedIndex < info.pinnedBoundary;
+}
+
+function dockviewTabStripEndDropIntent(event) {
+  const info = dockviewTabStripEndDropInfoForEvent(event);
+  if (!info || !info.targetSlot || dockviewTabStripEndDropWouldNoop(info)) return null;
+  if (dockviewTabStripEndDropViolatesPinnedPartition(info)) return null;
+  return info;
+}
+
 function dockviewTabDropViolatesPinnedPartition(event) {
+  const stripEnd = dockviewTabStripEndDropInfoForEvent(event);
+  if (stripEnd) return dockviewTabStripEndDropViolatesPinnedPartition(stripEnd);
   if (dockviewTabEdgeReorderIntent(event)) return false;
   const info = dockviewTabInsertionInfo(event);
   if (!info || !isPinnableTab(info.item)) return false;
@@ -359,6 +455,14 @@ function dockviewFinishTabPointerDrag(event) {
   const dx = Math.abs((Number(event.clientX) || 0) - state.x);
   const dy = Math.abs((Number(event.clientY) || 0) - state.y);
   if (Math.max(dx, dy) < DRAG_HYSTERESIS_PX) return;
+  const stripEnd = dockviewTabStripEndDropInfoForPointer(event, state);
+  if (stripEnd && !dockviewTabStripEndDropWouldNoop(stripEnd) && !dockviewTabStripEndDropViolatesPinnedPartition(stripEnd)) {
+    window.setTimeout(() => {
+      if (Date.now() - (Number(dockviewLayoutState.tabDropHandledAt) || 0) < 800) return;
+      void moveSessionToSlot(stripEnd.item, stripEnd.targetSlot, stripEnd.sourceSlot, stripEnd.insertIndex);
+    }, 0);
+    return;
+  }
   const target = dockviewTabForPoint(Number(event.clientX) || 0, Number(event.clientY) || 0);
   const targetItem = target?.dataset?.paneTab || '';
   if (!targetItem || targetItem === state.item) return;
@@ -744,6 +848,16 @@ function dockviewInit() {
         dockviewLayoutState.pendingRootBoundaryDrop = null;
         dockviewClearRootBoundaryPreview();
         event.preventDefault();
+        return;
+      }
+      const stripEndDrop = dockviewTabStripEndDropIntent(event);
+      if (stripEndDrop) {
+        dockviewLayoutState.pendingRootBoundaryDrop = null;
+        dockviewClearRootBoundaryPreview();
+        event.preventDefault();
+        queueMicrotask(() => {
+          void moveSessionToSlot(stripEndDrop.item, stripEndDrop.targetSlot, stripEndDrop.sourceSlot, stripEndDrop.insertIndex);
+        });
         return;
       }
       const rootIntent = dockviewRootBoundaryDropIntent(event);

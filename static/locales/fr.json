@@ -415,6 +415,8 @@
   "pref.appearance.preview_font_size.label": "Preview font size",
   "pref.appearance.red_reminder_ms.help": "Durée de la pulsation d'attention rouge pour les sessions nécessitant une saisie ou une approbation. Mettez 0 pour désactiver.",
   "pref.appearance.red_reminder_ms.label": "Durée du rappel rouge",
+  "pref.appearance.separator_color.help": "Color for pane separators and dashed tab/file/root drop previews.",
+  "pref.appearance.separator_color.label": "Separator color",
   "pref.appearance.tab_width.help": "Largeur cible des onglets de panneau avant qu'ils ne passent à des lignes supplémentaires.",
   "pref.appearance.tab_width.label": "Largeur d'onglet",
   "pref.appearance.terminal_font_size.help": "Taille de police utilisée par les panneaux xterm.js. Les valeurs hors plage sont ajustées.",

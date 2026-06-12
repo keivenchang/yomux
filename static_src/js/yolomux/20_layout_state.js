@@ -1671,7 +1671,7 @@ function cursorStyleFileReference(path, options = {}) {
   if (!fullPath || options.kind === 'dir') return null;
   if (IMAGE_EXTENSIONS.has(fileExtensionOf(fullPath))) {
     const index = Math.max(1, Math.floor(Number(options.imageIndex || 1)));
-    return {label: `[Image #${index}]`, detail: `'${fullPath}'`};
+    return {label: `[Image #${index}]`, detail: shellQuote(fullPath)};
   }
   return null;
 }

@@ -415,6 +415,8 @@
   "pref.appearance.preview_font_size.label": "Preview font size",
   "pref.appearance.red_reminder_ms.help": "Dauer des roten Aufmerksamkeitspulses für Sitzungen, die Eingabe oder Bestätigung benötigen. 0 zum Deaktivieren.",
   "pref.appearance.red_reminder_ms.label": "Dauer der roten Erinnerung",
+  "pref.appearance.separator_color.help": "Color for pane separators and dashed tab/file/root drop previews.",
+  "pref.appearance.separator_color.label": "Separator color",
   "pref.appearance.tab_width.help": "Zielbreite für Fenster-Tabs, bevor sie in weitere Zeilen umbrechen.",
   "pref.appearance.tab_width.label": "Tabbreite",
   "pref.appearance.terminal_font_size.help": "Von xterm.js-Fenstern verwendete Schriftgröße. Werte außerhalb des Bereichs werden begrenzt.",

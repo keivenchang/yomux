@@ -415,6 +415,8 @@
   "pref.appearance.preview_font_size.label": "Preview font size",
   "pref.appearance.red_reminder_ms.help": "入力や承認が必要なセッションの赤い注意パルスの時間。0 で無効にします。",
   "pref.appearance.red_reminder_ms.label": "赤いリマインダーの時間",
+  "pref.appearance.separator_color.help": "Color for pane separators and dashed tab/file/root drop previews.",
+  "pref.appearance.separator_color.label": "Separator color",
   "pref.appearance.tab_width.help": "ペインタブが追加の行へ折り返す前の目標幅。",
   "pref.appearance.tab_width.label": "タブ幅",
   "pref.appearance.terminal_font_size.help": "xterm.js ペインが使うフォントサイズ。範囲外の値は丸められます。",
