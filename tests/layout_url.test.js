@@ -3010,6 +3010,20 @@ test('t@2560', () => {
     hoverApi.setFileExplorerChangesSelectedSessionForTest('5');
     hoverApi.noteFileExplorerChangesSessionInteractionForTest('6');
     assert.equal(hoverApi.fileExplorerSessionFilesTargetSessionForTest(), '6', 'explicit session interaction can still commit the Finder Modified-files target');
+    // DOIT.58 D1/D2: the same guard must hold in full Differ mode — hover + passive xterm focus keep the
+    // committed Differ target (which drives the title, session-select value, cache key, and fetch request),
+    // and only explicit input/selection commits it.
+    hoverApi.setFileExplorerChangesSelectedSessionForTest('5');
+    hoverApi.noteFileExplorerChangesSessionInteractionForTest('5');
+    hoverApi.setFileExplorerModeForTest('diff');
+    hoverApi.selectPanelOnHover('6');
+    hoverApi.setFocusedTerminal('6');
+    assert.equal(hoverApi.fileExplorerSessionFilesTargetSessionForTest(), '5', 'D1: Differ mode hover + passive focus keep the committed Differ target on A');
+    hoverApi.selectSession('6');
+    assert.equal(hoverApi.fileExplorerSessionFilesTargetSessionForTest(), '5', 'D1: passive selectSession does not retarget the Differ in diff mode');
+    hoverApi.selectSession('6', {userInitiated: true});
+    assert.equal(hoverApi.fileExplorerSessionFilesTargetSessionForTest(), '6', 'D1: explicit selectSession commits the Differ target in diff mode');
+    hoverApi.setFileExplorerModeForTest('files');
   }
   // C15/C6: the redundant global "N files changed in '1'" summary and global comparison line are gone;
   // each repo owns its own compact comparison line instead.
