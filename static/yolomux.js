@@ -804,6 +804,7 @@ let dragPaneSlot = null;
 // While a tab drag is in flight, tab/preferences re-renders are deferred so they don't replace the
 // dragged DOM node mid-drag (which aborts the native HTML5 drag). endSessionDrag flushes these.
 let pendingTabStripRender = false;
+let pendingSessionButtonsRender = false;
 let pendingPreferencesRender = false;
 // panel renders deferred during tab drag keep the cheap/full render decision that was made
 // while the layout model changed. A boolean loses the pre-change shape and forces a full rebuild on drop.
@@ -6741,12 +6742,29 @@ function appMenuIsOpen() {
   return Boolean(sessionButtons?.querySelector('.app-menu.open'));
 }
 
+function topbarControlIsActive() {
+  const active = document.activeElement;
+  return Boolean(active && sessionButtons?.contains(active) && active.matches?.('select, input'));
+}
+
+function flushPendingSessionButtonsRender() {
+  if (!pendingSessionButtonsRender || topbarControlIsActive()) return;
+  pendingSessionButtonsRender = false;
+  renderSessionButtons();
+}
+
 function renderSessionButtons(options = {}) {
   if (!sessionButtons) return;
   if (!options.force && appMenuIsOpen()) {
     scheduleTopbarMetricsUpdate();
     return;
   }
+  if (!options.force && topbarControlIsActive()) {
+    pendingSessionButtonsRender = true;
+    scheduleTopbarMetricsUpdate();
+    return;
+  }
+  pendingSessionButtonsRender = false;
   const openMenu = sessionButtons.querySelector('.app-menu.open');
   if (openMenu) {
     openAppMenuId = openMenu.dataset.appMenu || null;
@@ -6885,6 +6903,7 @@ function createTopbarLanguageSwitcher() {
     saveSettingsPatch(settingPatch('general.language', value))
       .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
   });
+  select.addEventListener('blur', flushPendingSessionButtonsRender);
   return select;
 }
 

@@ -700,12 +700,29 @@ function appMenuIsOpen() {
   return Boolean(sessionButtons?.querySelector('.app-menu.open'));
 }
 
+function topbarControlIsActive() {
+  const active = document.activeElement;
+  return Boolean(active && sessionButtons?.contains(active) && active.matches?.('select, input'));
+}
+
+function flushPendingSessionButtonsRender() {
+  if (!pendingSessionButtonsRender || topbarControlIsActive()) return;
+  pendingSessionButtonsRender = false;
+  renderSessionButtons();
+}
+
 function renderSessionButtons(options = {}) {
   if (!sessionButtons) return;
   if (!options.force && appMenuIsOpen()) {
     scheduleTopbarMetricsUpdate();
     return;
   }
+  if (!options.force && topbarControlIsActive()) {
+    pendingSessionButtonsRender = true;
+    scheduleTopbarMetricsUpdate();
+    return;
+  }
+  pendingSessionButtonsRender = false;
   const openMenu = sessionButtons.querySelector('.app-menu.open');
   if (openMenu) {
     openAppMenuId = openMenu.dataset.appMenu || null;
@@ -844,6 +861,7 @@ function createTopbarLanguageSwitcher() {
     saveSettingsPatch(settingPatch('general.language', value))
       .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
   });
+  select.addEventListener('blur', flushPendingSessionButtonsRender);
   return select;
 }
 

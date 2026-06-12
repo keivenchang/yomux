@@ -803,6 +803,7 @@ let dragPaneSlot = null;
 // While a tab drag is in flight, tab/preferences re-renders are deferred so they don't replace the
 // dragged DOM node mid-drag (which aborts the native HTML5 drag). endSessionDrag flushes these.
 let pendingTabStripRender = false;
+let pendingSessionButtonsRender = false;
 let pendingPreferencesRender = false;
 // panel renders deferred during tab drag keep the cheap/full render decision that was made
 // while the layout model changed. A boolean loses the pre-change shape and forces a full rebuild on drop.

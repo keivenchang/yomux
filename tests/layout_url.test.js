@@ -64,7 +64,7 @@ class TestElement {
     this.children = [];
     this.dataset = {};
     this.attributes = {};
-    this.innerHTML = '';
+    this._innerHTML = '';
     this.textContent = '';
     this.removed = false;
     this.parentElement = null;
@@ -81,6 +81,14 @@ class TestElement {
   set className(value) {
     this.classList = new TestClassList();
     String(value || '').split(/\s+/).filter(Boolean).forEach(name => this.classList.add(name));
+  }
+  get innerHTML() { return this._innerHTML; }
+  set innerHTML(value) {
+    this._innerHTML = String(value || '');
+    this.children.forEach(node => {
+      node.parentElement = null;
+    });
+    this.children = [];
   }
 
   addEventListener(type, listener) {
@@ -150,6 +158,8 @@ class TestElement {
   getBoundingClientRect() { return this.rect; }
   insertAdjacentHTML() {}
   matches(selector) {
+    if (selector.includes(',')) return selector.split(',').some(part => this.matches(part.trim()));
+    if (selector === String(this.localName || '').toLowerCase()) return true;
     if (selector === ':hover') return this.hovered === true;
     const dataPaneTabMatch = selector.match(/^\.pane-tab\[data-pane-tab="([^"]+)"\]$/);
     if (dataPaneTabMatch) {
@@ -325,6 +335,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
         const listeners = documentListeners.get(type) || [];
         documentListeners.set(type, listeners.filter(item => item !== listener));
       },
+      activeElement: null,
     },
     fetch() { return Promise.reject(new Error('fetch disabled in layout URL tests')); },
     getComputedStyle: () => ({direction: 'ltr'}),
@@ -807,6 +818,13 @@ globalThis.__layoutTestApi = {
   ensureFileTabStateForItem,
   setDragSessionForTest(session) { dragSession = session; },
   pendingTabStripRenderForTest() { return pendingTabStripRender; },
+  renderSessionButtonsForTest: renderSessionButtons,
+  sessionButtonsForTest() { return sessionButtons; },
+  pendingSessionButtonsRenderForTest() { return pendingSessionButtonsRender; },
+  setPendingSessionButtonsRenderForTest(value) { pendingSessionButtonsRender = Boolean(value); },
+  setDocumentActiveElementForTest(element) { document.activeElement = element; },
+  topbarControlIsActiveForTest: topbarControlIsActive,
+  flushPendingSessionButtonsRenderForTest: flushPendingSessionButtonsRender,
   pendingPreferencesRenderForTest() { return pendingPreferencesRender; },
   setPendingPreferencesRenderForTest(value) { pendingPreferencesRender = Boolean(value); },
   preferencesScrollActiveUntilForTest() { return preferencesScrollActiveUntil; },
@@ -8199,6 +8217,9 @@ test('t@7423', () => {
   // order ends Language, Theme, Activity (activity pinned far-right).
   // #257: the topbar theme switcher was REMOVED (redundant). Order is Language, then Activity (far right).
   assert.ok(/sessionButtons\.appendChild\(createTopbarLanguageSwitcher\(\)\);\s*sessionButtons\.appendChild\(createTopbarActivityStatus\(\)\)/.test(src), '#257: topbar order is Language then Activity (no theme switcher between them)');
+  assert.ok(/function topbarControlIsActive\(\)[\s\S]*document\.activeElement[\s\S]*sessionButtons\?\.contains\(active\)[\s\S]*active\.matches\?\.\('select, input'\)/.test(src), '#62: topbar detects focused native controls before passive rebuilds');
+  assert.ok(/if \(!options\.force && topbarControlIsActive\(\)\) \{[\s\S]*pendingSessionButtonsRender = true[\s\S]*return;\s*\}/.test(src), '#62: passive topbar renders defer while a native topbar control is focused');
+  assert.ok(/select\.addEventListener\('blur', flushPendingSessionButtonsRender\)/.test(src), '#62: language select blur flushes a deferred topbar render');
   assert.equal(/createTopbarThemeSwitcher/.test(src), false, '#257: createTopbarThemeSwitcher is gone (no redundant topbar theme select)');
   {
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
@@ -8302,6 +8323,46 @@ test('t@7423', () => {
     assert.ok(cat['yoagent.updated.wrap'].includes('{rel}'), `Phase 4: ${loc} preserves the {rel} placeholder`);
     assert.notEqual(cat['yoagent.prompt.answerLanguage'], en['yoagent.prompt.answerLanguage'], `Phase 4: ${loc} sets a localized YO!agent answer-language directive`);
   }
+});
+
+test('topbar language select survives passive background topbar renders while focused', () => {
+  const api = loadYolomux('', ['1']);
+  api.renderSessionButtonsForTest({force: true});
+  const root = api.sessionButtonsForTest();
+  const select = root.querySelector('.topbar-language');
+  assert.ok(select, 'language select is rendered');
+  api.setDocumentActiveElementForTest(select);
+  assert.equal(api.topbarControlIsActiveForTest(), true, 'focused language select is treated as active topbar control');
+
+  api.renderSessionButtonsForTest();
+
+  assert.equal(root.querySelector('.topbar-language'), select, 'passive render preserves the focused language select node');
+  assert.equal(api.pendingSessionButtonsRenderForTest(), true, 'passive render records a pending topbar refresh');
+
+  api.setDocumentActiveElementForTest(null);
+  api.renderSessionButtonsForTest();
+
+  assert.notEqual(root.querySelector('.topbar-language'), select, 'unfocused passive render can rebuild the topbar');
+  assert.equal(api.pendingSessionButtonsRenderForTest(), false, 'unfocused passive render clears pending state');
+});
+
+test('topbar language blur flushes a deferred topbar render once focus leaves', () => {
+  const api = loadYolomux('', ['1']);
+  api.renderSessionButtonsForTest({force: true});
+  const root = api.sessionButtonsForTest();
+  const select = root.querySelector('.topbar-language');
+  api.setDocumentActiveElementForTest(select);
+  api.renderSessionButtonsForTest();
+  assert.equal(root.querySelector('.topbar-language'), select, 'focused select is preserved before blur');
+  assert.equal(api.pendingSessionButtonsRenderForTest(), true, 'pending render is queued before blur');
+
+  api.setDocumentActiveElementForTest(null);
+  const blurListeners = select.listeners.get('blur') || [];
+  assert.ok(blurListeners.length > 0, 'language select has a blur listener');
+  blurListeners.forEach(listener => listener({target: select}));
+
+  assert.notEqual(root.querySelector('.topbar-language'), select, 'blur flush replaces the deferred topbar after focus leaves');
+  assert.equal(api.pendingSessionButtonsRenderForTest(), false, 'blur flush clears pending state');
 });
 
 test('t@7555', () => {

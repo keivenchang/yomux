@@ -8540,16 +8540,16 @@ def test_diff_overview_matches_actual_todo_codemirror_rows(browser, tmp_path):
         lambda driver: driver.execute_script("return window.__todoDiffOverviewMetrics != null")
     )
     metrics = browser.execute_script("return window.__todoDiffOverviewMetrics")
-    assert metrics["chunks"] == [
-        {
-            "fromA": 744,
-            "toA": 148290,
-            "endA": 148289,
-            "fromB": 744,
-            "toB": 40750,
-            "endB": 40749,
-        }
-    ]
+    # The B-side fixture is HEAD:docs/TODO.md, so its trailing chunk byte offset changes whenever the
+    # roadmap doc changes. Keep the stable A-side and row assertions pinned, and assert B-side shape.
+    assert len(metrics["chunks"]) == 1
+    chunk = metrics["chunks"][0]
+    assert chunk["fromA"] == 744
+    assert chunk["toA"] == 148290
+    assert chunk["endA"] == 148289
+    assert chunk["fromB"] == 744
+    assert chunk["toB"] > chunk["fromB"]
+    assert chunk["endB"] == chunk["toB"] - 1
     assert metrics["rows"]["bands"] == [
         {"kind": "remove", "start": 16, "end": 571},
         {"kind": "add", "start": 571, "end": 823},
