@@ -9355,6 +9355,9 @@ test('t@tabber', () => {
   assert.ok(fileRow, `L3: a touched file renders as a path row (got ${JSON.stringify(rows.filter(r => r.type === 'path').map(r => r.name))})`);
   assert.equal(fileRow.openFile, '/home/u/proj/src/app.py', 'B5: the path row carries abs_path for open-in-editor');
   assert.ok(/data-tabber-type="path"[\s\S]*?showFileTreeContextMenu\(row, abs,/.test(source), 'B5: right-click on a path row reuses the shared file context menu (targeting abs_path)');
+  // Render correctness: the finder's global git-status / session-highlight refreshes must EXCLUDE tabber
+  // rows (otherwise they relabel /s_<id> rows to the path basename and clobber the Tabber's own render).
+  assert.ok((source.match(/\.file-tree-row\[data-path\]:not\(\[data-tabber-type\]\)/g) || []).length >= 2, 'finder global row refreshes exclude tabber rows (no relabel/clobber)');
 });
 
 {

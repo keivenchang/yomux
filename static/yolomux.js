@@ -8198,7 +8198,7 @@ function applyFileExplorerSessionHighlightRow(row, sets = fileExplorerSessionHig
 
 function updateFileExplorerSessionHighlightRows(preferredItem = null) {
   const sets = fileExplorerSessionHighlightSets(preferredItem);
-  for (const row of document.querySelectorAll('.file-tree-row[data-path]')) {
+  for (const row of document.querySelectorAll('.file-tree-row[data-path]:not([data-tabber-type])')) {
     applyFileExplorerSessionHighlightRow(row, sets);
   }
 }
@@ -9460,7 +9460,10 @@ function scheduleFileExplorerActiveFileReveal(path = activeFile) {
 
 function updateFileTreeGitStatusRows() {
   const changedAncestorStats = fileTreeChangedAncestorStats();
-  document.querySelectorAll('.file-tree-row[data-path]').forEach(row => {
+  // Exclude Tabber rows: their data-path is a synthetic node path (/s_<id>...), so the finder's
+  // git-status/name refresh would rewrite the label to the path basename (s_1/w_0/r_00000) and clobber
+  // the Tabber's own render. The Tabber owns its rows via updateTabberRow / refreshTabberPanels.
+  document.querySelectorAll('.file-tree-row[data-path]:not([data-tabber-type])').forEach(row => {
     const gitStatus = row.dataset.kind === 'file' ? fileTreeGitStatus(row.dataset.path) : '';
     const gitClass = fileTreeGitStatusClass(gitStatus);
     applyGitStatusRowClass(row, gitClass);
@@ -10001,7 +10004,9 @@ function buildTabberTree() {
     const git = info?.project?.git;
     const branch = git?.branch ? shortBranch(git.branch) : '';
     const sessionRecency = tabberRecency(session);
-    topEntries.push({
+    // The session row's time is the later of its ledger recency and its most-recent child (so an expanded
+    // session inherits its touched files' latest mod time even before the ledger has recorded typing there).
+    const sessionEntry = {
       name: sessionName,
       kind: 'dir',
       mtime: sessionRecency,
@@ -10013,7 +10018,8 @@ function buildTabberTree() {
         icon: '■',
         statusText: branch,
       },
-    });
+    };
+    topEntries.push(sessionEntry);
     const windowRecords = tmuxWindowRecords(info.panes);
     const windowEntries = windowRecords.map(record => ({
       name: `w_${tabberPathToken(record.index)}`,
@@ -10030,6 +10036,8 @@ function buildTabberTree() {
     }));
     // Level 3/4: the session's touched paths (repo groups + files), lazily fetched when expanded.
     const repoEntries = tabberSessionPathEntries(session, sessionPath, entriesByDir, branch, git?.root || '');
+    const childMtimes = [...windowEntries, ...repoEntries].map(child => Number(child.mtime || 0));
+    sessionEntry.mtime = Math.max(sessionRecency, 0, ...childMtimes);
     entriesByDir.set(normalizeDirectoryPath(sessionPath), [...windowEntries, ...repoEntries]);
     windowRecords.forEach(record => {
       const windowPath = `${sessionPath}/w_${tabberPathToken(record.index)}`;
