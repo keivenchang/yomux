@@ -20167,11 +20167,13 @@ function tmuxWindowRecords(panes) {
   });
   return records.map(record => ({
     ...record,
+    buttonNameLabel: nameCounts.get(record.name) > 1 ? `${record.name}(${record.indexText})` : record.name,
     processLabel: tmuxWindowDisplayLabel(record.name, record.pid),
     nameLabel: tmuxWindowDisplayLabel(nameCounts.get(record.name) > 1 ? `${record.name}(${record.indexText})` : record.name, record.pid),
     numberLabel: record.indexText,
   })).map(record => ({
     ...record,
+    indexedButtonLabel: `${record.indexText}:${record.buttonNameLabel}`,
     indexedNameLabel: `${record.indexText}:${record.nameLabel}`,
   }));
 }
@@ -20181,7 +20183,7 @@ function tmuxWindowBarLabelMode(records, options = {}) {
   const items = Array.isArray(records) ? records : [];
   const fallbackCount = Number.isFinite(options.fallbackCount) ? options.fallbackCount : tmuxWindowBarNumericFallbackCount;
   const charLimit = Number.isFinite(options.namedCharLimit) ? options.namedCharLimit : tmuxWindowBarNamedCharLimit;
-  const namedChars = items.reduce((total, item) => total + String(item.indexedNameLabel || item.nameLabel || '').length, 0);
+  const namedChars = items.reduce((total, item) => total + String(item.indexedButtonLabel || item.buttonNameLabel || '').length, 0);
   return items.length > fallbackCount || namedChars > charLimit ? 'numbers' : 'names';
 }
 
@@ -20207,7 +20209,7 @@ function tmuxWindowBarHtml(session, info, options = {}) {
   const buttons = records.map(record => {
     const pressed = record.active ? 'true' : 'false';
     const activeClass = record.active ? ' active' : '';
-    const visibleName = record.indexedNameLabel || `${record.indexText}:${record.nameLabel}`;
+    const visibleName = record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.nameLabel}`;
     const title = `tmux window ${visibleName}`;
     const attrs = disabled
       ? `disabled title="${esc(disabledTitle)}" aria-label="${esc(title)}"`

@@ -65,7 +65,7 @@ When a Tab is a tmux session, that session has its own internal hierarchy — tm
 
 ## Daily use
 
-Open YOLOmux after setup. Existing tmux sessions appear as tabs. (The detailed pane/tab/Finder/Differ behavior contract lives in [`docs/GUI_SPEC.md`](docs/GUI_SPEC.md); this list is the daily-driver essentials.)
+Open YOLOmux after setup. Existing tmux sessions appear as tabs. (The detailed pane/tab/Finder/Differ behavior contract lives in [`docs/GUI_SPECS.md`](docs/GUI_SPECS.md); this list is the daily-driver essentials.)
 
 - Click a tab to show it in that pane. Use the `Tabs` menu to activate minimized or inactive tabs.
 - Drag a tab between pane tab bars to move it, drop near a pane edge to split that pane, or drop on the outer root edge for a full-span pane. Pane splits are percentage-based and encode into the shareable page URL.

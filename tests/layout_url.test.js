@@ -1513,7 +1513,7 @@ test('t@1367', () => {
   // form. The pane rewrite's bidirectional sync hinges on dockviewJsonFromLayoutSlots and
   // layoutSlotsFromDockviewJson being exact inverses (up to compaction); any drift silently
   // reshuffles panes/tabs on a Dockview-driven relayout, and is the single most fragile invariant
-  // in the rewrite. See docs/GUI_SPEC.md (pane layout model).
+  // in the rewrite. See docs/GUI_SPECS.md (pane layout model).
   const api = loadYolomux('', ['1', '2', '3', '4']);
   const base = api.emptyLayoutSlots();
   base[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
@@ -6967,24 +6967,27 @@ test('t@6404', () => {
   ];
   assert.deepStrictEqual(canonical(api.tmuxWindowRecords(windowPanes).map(item => ({
     indexText: item.indexText,
+    buttonNameLabel: item.buttonNameLabel,
     nameLabel: item.nameLabel,
     numberLabel: item.numberLabel,
+    indexedButtonLabel: item.indexedButtonLabel,
     indexedNameLabel: item.indexedNameLabel,
     processLabel: item.processLabel,
     pid: item.pid,
     active: item.active,
   }))), [
-    {indexText: '1', nameLabel: 'bash (pid=111)', numberLabel: '1', indexedNameLabel: '1:bash (pid=111)', processLabel: 'bash (pid=111)', pid: 111, active: false},
-    {indexText: '2', nameLabel: 'codex(2) (pid=222)', numberLabel: '2', indexedNameLabel: '2:codex(2) (pid=222)', processLabel: 'codex (pid=222)', pid: 222, active: false},
-    {indexText: '3', nameLabel: 'codex(3) (pid=3333)', numberLabel: '3', indexedNameLabel: '3:codex(3) (pid=3333)', processLabel: 'codex (pid=3333)', pid: 3333, active: true},
+    {indexText: '1', buttonNameLabel: 'bash', nameLabel: 'bash (pid=111)', numberLabel: '1', indexedButtonLabel: '1:bash', indexedNameLabel: '1:bash (pid=111)', processLabel: 'bash (pid=111)', pid: 111, active: false},
+    {indexText: '2', buttonNameLabel: 'codex(2)', nameLabel: 'codex(2) (pid=222)', numberLabel: '2', indexedButtonLabel: '2:codex(2)', indexedNameLabel: '2:codex(2) (pid=222)', processLabel: 'codex (pid=222)', pid: 222, active: false},
+    {indexText: '3', buttonNameLabel: 'codex(3)', nameLabel: 'codex(3) (pid=3333)', numberLabel: '3', indexedButtonLabel: '3:codex(3)', indexedNameLabel: '3:codex(3) (pid=3333)', processLabel: 'codex (pid=3333)', pid: 3333, active: true},
   ], 'P5: tmux window records sort by index and disambiguate duplicate names with the window index');
   const windowBarHtml = api.tmuxWindowBarHtml('1', {panes: windowPanes});
   assert.ok(windowBarHtml.includes('data-tmux-window-label-mode="names"'), 'P5: normal window bars prefer names');
   assert.ok(windowBarHtml.includes('data-window-index="1"'), 'P5: window bar button targets window 1');
   assert.ok(windowBarHtml.includes('data-window-index="2"'), 'P5: window bar button targets window 2');
   assert.ok(/class="tab tmux-window-button active"[^>]*data-window-index="3"[^>]*aria-pressed="true"/.test(windowBarHtml), 'P5: active tmux window button is highlighted and pressed');
-  assert.ok(windowBarHtml.includes('<span class="tmux-window-name-label">1:bash (pid=111)</span>'), 'DOIT.53 P2: normal labels include index:name plus pid');
-  assert.ok(windowBarHtml.includes('<span class="tmux-window-name-label">2:codex(2) (pid=222)</span>'), 'P5: duplicate names keep the disambiguating suffix after the index prefix and include pid');
+  assert.ok(windowBarHtml.includes('<span class="tmux-window-name-label">1:bash</span>'), 'tmux window buttons show index:name without pid');
+  assert.ok(windowBarHtml.includes('<span class="tmux-window-name-label">2:codex(2)</span>'), 'duplicate tmux window button names keep the disambiguating suffix after the index prefix');
+  assert.equal(windowBarHtml.includes('(pid='), false, 'tmux window button labels do not show process pids');
   assert.equal(windowBarHtml.includes('3:node'), false, 'DOIT.53 P2: process-aware agent labels beat raw tmux window names like node');
   assert.ok(/data-window-agent="shell"[^>]*data-window-index="1"/.test(windowBarHtml), 'per-agent color: the bash window is tagged as the shell agent');
   assert.ok(/tmux-window-button active"[^>]*data-window-agent="codex"/.test(windowBarHtml), 'per-agent color: the active codex window keeps its agent tag so the swatch shows on the green toggle');
