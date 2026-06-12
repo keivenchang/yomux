@@ -8,7 +8,7 @@ the whole run exits non-zero if any step fails, so it is usable as the one CPS /
 the lint set into `static_build.py --check`; E3 made pytest gate the node suite + locale staleness; this
 ties the remaining steps — py_compile, both `node --check`s, git whitespace — into one invocation).
 
-Usage: python3 tools/check.py            # run everything
+Usage: python3 tools/check.py            # run everything; full pytest uses -n auto
        python3 tools/check.py --fast      # skip the (slow) full pytest; run the "not socket" lane
 """
 
@@ -37,9 +37,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     py_files = ["yolomux.py", "tmux_wall.py", "auto_approve_tmux.py", *sorted(glob.glob("yolomux_lib/*.py", root_dir=REPO_ROOT))]
-    pytest_args = ["python3", "-m", "pytest", "tests", "-q"]
     if args.fast:
-        pytest_args += ["-m", "not socket"]
+        pytest_args = ["python3", "-m", "pytest", "tests", "-m", "not socket", "-q"]
+    else:
+        pytest_args = ["python3", "-m", "pytest", "tests", "-n", "auto", "-q"]
 
     steps: list[tuple[str, list[str]]] = [
         ("py_compile", ["python3", "-m", "py_compile", *py_files]),
