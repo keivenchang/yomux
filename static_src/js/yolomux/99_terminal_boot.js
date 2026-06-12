@@ -1474,7 +1474,7 @@ function updatePanelSlot(panel, session, slot) {
   panel.dataset.layoutItem = session;
   const head = panel.querySelector('.panel-head');
   if (head) head.dataset.dragSlot = slot;
-  if (isFileEditorItem(session)) renderFileEditorPanel(panel, session, {updateActiveFile: !dockviewLayoutActive()});
+  if (isFileEditorItem(session)) renderFileEditorPanel(panel, session, {updateActiveFile: !dockviewLayoutActive(), captureViewState: false});
   updatePaneExpandButton(panel, session);
   if (!hideDockviewInnerPaneTabs(panel)) updatePaneTabStrip(panel, slot);
   updatePanelInactiveOverlays();

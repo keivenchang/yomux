@@ -8146,6 +8146,215 @@ def test_editor_search_button_toggles_pressed_state_with_codemirror_panel(browse
     assert metrics["closed"]["bg"] == metrics["before"]["bg"], metrics
 
 
+def test_long_markdown_editor_restores_scroll_after_codemirror_recreate(browser, tmp_path):
+    css = app_css()
+    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    bootstrap = json.dumps(
+        {
+            "sessions": [],
+            "availableAgents": [],
+            "accessRole": "admin",
+            "homePath": "/home/test",
+            "repoRoot": str(REPO_ROOT),
+            "maxSessionTabs": 99,
+            "serverHostname": "test-host",
+            "strings": {"en": strings},
+            "codeMirrorAssetUrl": bundle_uri,
+        },
+        separators=(",", ":"),
+    )
+    page = tmp_path / "long-markdown-editor-scroll.html"
+    page.write_text(
+        f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style><script src="{bundle_uri}"></script>
+        <style>
+        body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #11151d; }}
+        #mount {{ width: 920px; height: 520px; }}
+        .file-editor-panel {{ width: 920px; height: 520px; }}
+        .file-editor-codemirror-panel {{ height: 100%; }}
+        </style></head>
+        <body class="theme-dark editor-theme-dark">
+          <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
+          <div id="mount"></div>
+          <script>{app_bundle_before_boot_script()}</script>
+          <script>
+            window.__longScrollReady = (async () => {{
+              const path = '/home/test/repo/2026.md';
+              const content = Array.from({{length: 1400}}, (_value, index) => `# Entry ${{index + 1}}\\n\\n- Work item ${{index + 1}} with enough text to produce normal Markdown editor rows.`).join('\\n');
+              const item = fileEditorItemFor(path);
+              setFileState(path, {{
+                kind: 'text',
+                content,
+                original: content,
+                dirty: false,
+                language: 'markdown',
+                gitRoot: '/home/test/repo',
+                gitTracked: true,
+                gitHasHistory: true,
+                gitHistory: [{{ref: 'HEAD'}}],
+              }});
+              setFileEditorViewMode(path, 'edit', item);
+              addFileEditorTabItem(path, item);
+              const panel = createFileEditorPanel(item);
+              panel.classList.add('active-pane');
+              document.getElementById('mount').append(panel);
+              renderFileEditorPanel(panel, item);
+              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+              const waitFor = async predicate => {{
+                for (let attempt = 0; attempt < 180; attempt += 1) {{
+                  if (predicate()) return true;
+                  await frame();
+                }}
+                return false;
+              }};
+              const ready = await waitFor(() => {{
+                const scroller = panel._cmView?.scrollDOM;
+                return scroller && scroller.scrollHeight > scroller.clientHeight * 3;
+              }});
+              if (!ready) return {{error: 'CodeMirror long editor did not become scrollable'}};
+              const firstScroller = panel._cmView.scrollDOM;
+              firstScroller.scrollTop = Math.min(9000, firstScroller.scrollHeight - firstScroller.clientHeight - 10);
+              await frame();
+              await frame();
+              const savedTop = firstScroller.scrollTop;
+              captureFileEditorPanelViewState(item, panel);
+              const savedSnapshot = Boolean(fileEditorViewState.get(item)?.scrollSnapshot);
+              destroyCodeMirrorPanel(panel);
+              renderFileEditorPanel(panel, item, {{updateActiveFile: false, captureViewState: false}});
+              const recreated = await waitFor(() => panel._cmView?.scrollDOM && panel._cmView.scrollDOM !== firstScroller);
+              if (!recreated) return {{error: 'CodeMirror editor was not recreated'}};
+              restoreFileEditorPanelViewState(item, panel);
+              const restored = await waitFor(() => Math.abs((panel._cmView?.scrollDOM?.scrollTop || 0) - savedTop) < 32);
+              const finalScroller = panel._cmView.scrollDOM;
+              return {{
+                savedTop,
+                restored,
+                restoredTop: finalScroller.scrollTop,
+                scrollHeight: finalScroller.scrollHeight,
+                clientHeight: finalScroller.clientHeight,
+                savedSnapshot,
+              }};
+            }})();
+          </script>
+        </body></html>""",
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri())
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        window.__longScrollReady.then(done, error => done({error: String(error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["savedSnapshot"] is True, metrics
+    assert metrics["savedTop"] > metrics["clientHeight"], metrics
+    assert metrics["restored"] is True, metrics
+    assert abs(metrics["restoredTop"] - metrics["savedTop"]) < 32, metrics
+
+
+def test_long_markdown_editor_scroll_survives_preferences_tab_roundtrip(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          autoFocusEnabled = false;
+          const path = '/home/test/repo/2026.md';
+          const item = fileEditorItemFor(path);
+          const content = Array.from({length: 1400}, (_value, index) => `# Entry ${index + 1}\\n\\n- Work item ${index + 1} with enough text to produce normal Markdown editor rows.`).join('\\n');
+          setFileState(path, {
+            kind: 'text',
+            content,
+            original: content,
+            dirty: false,
+            language: 'markdown',
+            gitRoot: '/home/test/repo',
+            gitTracked: true,
+            gitHasHistory: true,
+            gitHistory: [{ref: 'HEAD'}],
+          });
+          setFileEditorViewMode(path, 'edit', item);
+          registerFileEditorLayoutItem(path);
+          const next = emptyLayoutSlots();
+          next[layoutTreeKey] = leafNode('left');
+          next.left = paneStateWithTabs([item, prefsItemId], item);
+          applyLayoutSlots(next, {focusSession: item, forceFull: true});
+          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const waitFor = async predicate => {
+            for (let attempt = 0; attempt < 220; attempt += 1) {
+              if (predicate()) return true;
+              await frame();
+            }
+            return false;
+          };
+          const ready = await waitFor(() => {
+            const panel = panelNodes.get(item);
+            const scroller = panel?._cmView?.scrollDOM;
+            return activeItemForSide('left') === item
+              && panel?.isConnected
+              && scroller
+              && scroller.scrollHeight > scroller.clientHeight * 3;
+          });
+          if (!ready) {
+            const panel = panelNodes.get(item);
+            const scroller = panel?._cmView?.scrollDOM;
+            const rect = panel?.getBoundingClientRect?.();
+            return {
+              error: 'file editor did not become scrollable',
+              active: activeItemForSide('left'),
+              item,
+              panelExists: Boolean(panel),
+              connected: Boolean(panel?.isConnected),
+              panelHeight: rect?.height || 0,
+              hasView: Boolean(panel?._cmView),
+              scrollHeight: scroller?.scrollHeight || 0,
+              clientHeight: scroller?.clientHeight || 0,
+              cmText: panel?.querySelector?.('.file-editor-codemirror-panel')?.textContent?.slice(0, 80) || '',
+              bootErrors: window.__bootErrors || [],
+              bootRejections: window.__bootRejections || [],
+            };
+          }
+          const panel = panelNodes.get(item);
+          const scroller = panel._cmView.scrollDOM;
+          scroller.scrollTop = Math.min(9000, scroller.scrollHeight - scroller.clientHeight - 10);
+          await frame();
+          await frame();
+          const savedTop = scroller.scrollTop;
+          activatePaneTab('left', prefsItemId, {userInitiated: true});
+          const prefsReady = await waitFor(() => activeItemForSide('left') === prefsItemId && panelNodes.get(prefsItemId)?.isConnected);
+          const captured = fileEditorViewState.get(item);
+          const capturedTop = captured?.scrollTop || 0;
+          const capturedSnapshot = Boolean(captured?.scrollSnapshot);
+          if (!prefsReady) return {error: 'preferences tab did not activate', savedTop, capturedTop, capturedSnapshot};
+          activatePaneTab('left', item, {userInitiated: true});
+          const fileReady = await waitFor(() => activeItemForSide('left') === item && panelNodes.get(item)?.isConnected && panelNodes.get(item)?._cmView?.scrollDOM);
+          if (!fileReady) return {error: 'file tab did not reactivate', savedTop, capturedTop, capturedSnapshot};
+          await frame();
+          await frame();
+          await new Promise(resolve => setTimeout(resolve, 140));
+          await frame();
+          const restoredPanel = panelNodes.get(item);
+          const restoredScroller = restoredPanel._cmView.scrollDOM;
+          return {
+            savedTop,
+            capturedTop,
+            capturedSnapshot,
+            restoredTop: restoredScroller.scrollTop,
+            scrollHeight: restoredScroller.scrollHeight,
+            clientHeight: restoredScroller.clientHeight,
+            active: activeItemForSide('left'),
+            focusedPanelItem,
+          };
+        })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["capturedSnapshot"] is True, metrics
+    assert abs(metrics["capturedTop"] - metrics["savedTop"]) < 32, metrics
+    assert abs(metrics["restoredTop"] - metrics["savedTop"]) < 32, metrics
+
+
 def test_topbar_finder_and_modified_files_headers_hover_accent_in_light_mode(browser, tmp_path):
     def theme_tokens():
         return browser.execute_script(

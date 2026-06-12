@@ -785,6 +785,13 @@ globalThis.__layoutTestApi = {
   openFileStatus,
   setOpenFileOwner,
   renderTransportWarning,
+  captureFileEditorPanelViewStateForTest: captureFileEditorPanelViewState,
+  restoreFileEditorPanelViewStateForTest: restoreFileEditorPanelViewState,
+  fileEditorViewStateForTest(item) {
+    const state = fileEditorViewState.get(item);
+    return state ? {...state} : null;
+  },
+  renderFileEditorPanelShouldCaptureViewStateForTest: renderFileEditorPanelShouldCaptureViewState,
   renderFileEditorPanel,
   renderEditorPreviewPane,
   openFileIsMissing,
@@ -2095,6 +2102,9 @@ test('t@1857', () => {
   assert.ok(source.includes('const scrollTop = scrollDOM?.scrollTop || 0;'), 'external CodeMirror reload preserves scrollTop');
   assert.ok(source.includes('view.requestMeasure({write: restoreScroll});'), 'external CodeMirror reload restores scroll after the document update');
   assert.ok(source.includes('view.requestMeasure'), 'CodeMirror viewport restore waits for a measured layout frame');
+  assert.ok(source.includes("scrollSnapshot: typeof view.scrollSnapshot === 'function' ? view.scrollSnapshot() : null"), 'CodeMirror editor viewport capture stores a document-anchored scroll snapshot for long files');
+  assert.ok(/view\.dispatch\(\{\s*selection: \{anchor, head\},[\s\S]*state\.scrollSnapshot \? \{effects: state\.scrollSnapshot\}/.test(source), 'CodeMirror editor viewport restore dispatches the saved scroll snapshot through CodeMirror');
+  assert.ok(/function fileEditorPanelViewStateCaptureHasLayout\(panel, scrollDOM\)[\s\S]*!panel\.isConnected[\s\S]*scrollDOM\.clientHeight <= 0/.test(source), 'CodeMirror editor viewport capture ignores detached zero-height panels');
 });
 
 test('t@1869', () => {
@@ -2599,6 +2609,8 @@ test('t@2355', () => {
   assert.ok(source.includes('preserveScroll: sameImage'), 'image viewer refreshes preserve scroll on unchanged images');
   assert.ok(source.includes('captureFileEditorPanelViewState(item, panel)'), 'CodeMirror editor viewport is captured before pane/tab renders');
   assert.ok(source.includes('restoreFileEditorPanelViewState(item, panel)'), 'CodeMirror editor viewport is restored after pane/tab renders');
+  assert.ok(/function renderFileEditorPanelShouldCaptureViewState\(options = \{\}\)[\s\S]*return options\.captureViewState !== false/.test(source), 'file editor render has one shared view-state capture gate');
+  assert.ok(/function renderFileEditorPanel\(panel, item, options = \{\}\)[\s\S]*if \(renderFileEditorPanelShouldCaptureViewState\(options\)\) captureFileEditorPanelViewState\(item, panel\)/.test(source), 'file editor render capture is routed through the shared capture gate');
   assert.ok(source.includes('refreshOpenEditorThemePanels'), 'global/editor theme changes update already-open CodeMirror panels');
   assert.ok(source.includes('function reconfigureCodeMirrorPanelTheme'), 'open CodeMirror panels reconfigure their theme compartment');
   assert.ok(source.includes('&& api?.Compartment'), 'CodeMirror API validation requires Compartment for in-place theme updates');
@@ -2697,7 +2709,100 @@ test('t@2355', () => {
   assert.ok(/findButton && mode === 'preview'/.test(source), 'preview mode hides Search because the CodeMirror search panel is not available there');
   assert.equal(source.includes('file-editor-pure-preview'), false, 'old side-preview-only editor mode class is removed');
   assert.equal(source.includes('isFilePreviewItem'), false, 'old file-preview tab type is removed from runtime');
-  assert.ok(/function updatePanelSlot[\s\S]*panel\.dataset\.layoutItem = session[\s\S]*isFileEditorItem\(session\)[\s\S]*renderFileEditorPanel\(panel, session, \{updateActiveFile: !dockviewLayoutActive\(\)\}\)/.test(source), 'switching a pane to a file editor tab re-renders editor chrome without making Dockview background renders active');
+  assert.ok(/function updatePanelSlot[\s\S]*panel\.dataset\.layoutItem = session[\s\S]*isFileEditorItem\(session\)[\s\S]*renderFileEditorPanel\(panel, session, \{updateActiveFile: !dockviewLayoutActive\(\), captureViewState: false\}\)/.test(source), 'switching a pane to a file editor tab re-renders editor chrome without making Dockview background renders active or overwriting saved scroll');
+});
+
+test('file editor pane reattach does not overwrite saved CodeMirror scroll state', () => {
+  const api = loadYolomux('', ['1']);
+  const path = '/home/test/notes.md';
+  const item = api.registerFileEditorLayoutItemForTest(path);
+  const contentText = Array.from({length: 120}, (_, index) => `line ${index + 1}`).join('\n');
+  api.setOpenFileStateForTest(path, {mtime: 1, size: contentText.length, kind: 'text', original: contentText, content: contentText, dirty: false});
+  const panel = new TestElement('editor-panel');
+  panel.dataset.layoutItem = item;
+  panel.dataset.filePath = path;
+  panel.classList.add('panel', 'file-editor-panel');
+  const rawPane = new TestElement('', 'pre');
+  rawPane.classList.add('file-editor-raw-panel');
+  rawPane.appendChild(new TestElement('', 'code'));
+  const previewPane = new TestElement('', 'div');
+  previewPane.classList.add('file-editor-preview-pane-panel');
+  const imagePane = new TestElement('', 'div');
+  imagePane.classList.add('file-editor-image-panel');
+  const content = new TestElement('', 'div');
+  content.classList.add('file-editor-content');
+  content.append(rawPane, previewPane, imagePane);
+  const status = new TestElement('', 'div');
+  status.classList.add('file-editor-status-panel');
+  const message = new TestElement('', 'span');
+  message.classList.add('file-editor-status-message');
+  const cursor = new TestElement('', 'span');
+  cursor.classList.add('file-editor-cursor-status');
+  status.append(message, cursor);
+  panel.append(content, status);
+  const scrollDOM = {scrollTop: 420, scrollLeft: 7};
+  const doc = {
+    length: contentText.length,
+    toString() { return contentText; },
+    lineAt(pos) { return {number: 1, from: Math.max(0, Math.min(Number(pos) || 0, contentText.length))}; },
+  };
+  panel._cmView = {
+    scrollDOM,
+    state: {doc, selection: {main: {anchor: 11, head: 13}, ranges: [{from: 11, to: 13, anchor: 11, head: 13}]}},
+    dispatch(update) { this.lastDispatch = update; },
+  };
+  api.captureFileEditorPanelViewStateForTest(item, panel);
+  assert.equal(api.fileEditorViewStateForTest(item).scrollTop, 420, 'the focused editor saves its real scroll before tab switch');
+  assert.equal(api.fileEditorViewStateForTest(item).scrollLeft, 7);
+  panel.isConnected = false;
+  scrollDOM.clientHeight = 0;
+  scrollDOM.scrollTop = 0;
+  scrollDOM.scrollLeft = 0;
+  api.captureFileEditorPanelViewStateForTest(item, panel);
+  assert.equal(api.fileEditorViewStateForTest(item).scrollTop, 420, 'detached zero-height editor captures must not clobber a saved scroll position');
+  assert.equal(api.fileEditorViewStateForTest(item).scrollLeft, 7);
+  panel.isConnected = true;
+  scrollDOM.clientHeight = 200;
+  scrollDOM.scrollTop = 0;
+  scrollDOM.scrollLeft = 0;
+  panel._cmView.state.selection = {main: {anchor: 0, head: 0}, ranges: [{from: 0, to: 0, anchor: 0, head: 0}]};
+  assert.equal(api.renderFileEditorPanelShouldCaptureViewStateForTest({captureViewState: false}), false);
+  api.renderFileEditorPanel(panel, item, {updateActiveFile: false, captureViewState: false});
+  assert.equal(api.fileEditorViewStateForTest(item).scrollTop, 420, 'pane reattach render must not replace saved scroll with detached zero scroll');
+  assert.equal(api.fileEditorViewStateForTest(item).scrollLeft, 7);
+});
+
+test('file editor restore dispatches CodeMirror scroll snapshot for long documents', () => {
+  const api = loadYolomux('', ['1']);
+  const path = '/home/test/2026.md';
+  const item = api.registerFileEditorLayoutItemForTest(path);
+  const panel = new TestElement('editor-panel');
+  panel.dataset.layoutItem = item;
+  const scrollDOM = {scrollTop: 960, scrollLeft: 12};
+  const scrollSnapshot = {kind: 'cm-scroll-snapshot'};
+  const dispatches = [];
+  panel._cmView = {
+    scrollDOM,
+    scrollSnapshot() { return scrollSnapshot; },
+    state: {
+      doc: {length: 120000},
+      selection: {main: {anchor: 80000, head: 80000}, ranges: [{from: 80000, to: 80000, anchor: 80000, head: 80000}]},
+    },
+    dispatch(update) { dispatches.push(update); },
+    requestMeasure(request) { request.write(null, this); },
+  };
+  api.captureFileEditorPanelViewStateForTest(item, panel);
+  const saved = api.fileEditorViewStateForTest(item);
+  assert.equal(saved.scrollTop, 960);
+  assert.equal(saved.scrollLeft, 12);
+  assert.strictEqual(saved.scrollSnapshot, scrollSnapshot, 'capture stores CodeMirror scrollSnapshot so long-file restore has a line anchor');
+  scrollDOM.scrollTop = 0;
+  scrollDOM.scrollLeft = 0;
+  api.restoreFileEditorPanelViewStateForTest(item, panel);
+  assert.equal(dispatches[0].selection.anchor, 80000);
+  assert.strictEqual(dispatches[0].effects, scrollSnapshot, 'restore dispatches CodeMirror scrollSnapshot instead of relying only on raw scrollTop');
+  assert.equal(scrollDOM.scrollTop, 960);
+  assert.equal(scrollDOM.scrollLeft, 12);
 });
 
 test('t@2463', () => {

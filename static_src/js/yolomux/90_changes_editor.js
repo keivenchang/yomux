@@ -2803,22 +2803,34 @@ function focusFileEditorPanelIfReady(panel, item) {
   if (!pendingFileEditorFocus.has(item) || focusedPanelItem !== item) return false;
   if (panel?._cmView) {
     panel._cmView.focus?.();
+    // CodeMirror focus can scroll the cursor into view. Re-apply the saved viewport after focus so
+    // a long file that was only scrolled, not cursor-moved, does not jump back to the cursor line.
+    restoreFileEditorPanelViewState(item, panel);
     pendingFileEditorFocus.delete(item);
     return true;
   }
   return false;
 }
 
+function fileEditorPanelViewStateCaptureHasLayout(panel, scrollDOM) {
+  // Pooled or hidden CodeMirror panes report a zero viewport and would erase the last visible scroll.
+  if (panel && typeof panel.isConnected === 'boolean' && !panel.isConnected) return false;
+  if (scrollDOM && typeof scrollDOM.clientHeight === 'number' && scrollDOM.clientHeight <= 0) return false;
+  return true;
+}
+
 function captureFileEditorPanelViewState(item, panel) {
   const view = panel?._cmView;
   const scrollDOM = view?.scrollDOM;
   if (!isFileEditorItem(item) || !view || !scrollDOM) return;
+  if (fileEditorViewState.has(item) && !fileEditorPanelViewStateCaptureHasLayout(panel, scrollDOM)) return;
   const selection = view.state?.selection?.main;
   fileEditorViewState.set(item, {
     scrollTop: scrollDOM.scrollTop || 0,
     scrollLeft: scrollDOM.scrollLeft || 0,
     anchor: Number(selection?.anchor || 0),
     head: Number(selection?.head || selection?.anchor || 0),
+    scrollSnapshot: typeof view.scrollSnapshot === 'function' ? view.scrollSnapshot() : null,
   });
 }
 
@@ -2839,9 +2851,12 @@ function restoreFileEditorPanelViewState(item, panel) {
   const anchor = Math.max(0, Math.min(docLength, Number(state.anchor || 0)));
   const head = Math.max(0, Math.min(docLength, Number(state.head || anchor)));
   try {
-    view.dispatch({selection: {anchor, head}});
+    view.dispatch({
+      selection: {anchor, head},
+      ...(state.scrollSnapshot ? {effects: state.scrollSnapshot} : {}),
+    });
   } catch (_) {
-    // View state restoration is best-effort; scroll preservation is the critical part.
+    try { view.dispatch({selection: {anchor, head}}); } catch (_) {}
   }
   const restore = () => {
     scrollDOM.scrollTop = Number(state.scrollTop || 0);

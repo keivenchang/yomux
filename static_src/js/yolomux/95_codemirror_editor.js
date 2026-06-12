@@ -1021,9 +1021,13 @@ function diffModeShouldFallBackToEdit(path, state, item = null) {
         && !fileStateHasUsefulGitHistory(state)));
 }
 
+function renderFileEditorPanelShouldCaptureViewState(options = {}) {
+  return options.captureViewState !== false;
+}
+
 function renderFileEditorPanel(panel, item, options = {}) {
   const path = fileItemPath(item);
-  captureFileEditorPanelViewState(item, panel);
+  if (renderFileEditorPanelShouldCaptureViewState(options)) captureFileEditorPanelViewState(item, panel);
   const shouldUpdateActiveFile = options.updateActiveFile !== false
     && (!dockviewLayoutActive() || focusedPanelItem === item || options.forceActiveFile === true);
   if (shouldUpdateActiveFile) {
