@@ -1052,15 +1052,18 @@ body:not(.file-explorer-mode-diff) .file-explorer-mode-diff-only {
   --file-explorer-changes-min-block-size: 96px;
   --file-explorer-changes-resizer-size: 6px;
 }
-body:not(.file-explorer-mode-diff) .file-explorer-changes-panel,
-body:not(.file-explorer-mode-diff) .file-explorer-changes-resizer {
+body.file-explorer-mode-files .file-explorer-changes-panel,
+body.file-explorer-mode-files .file-explorer-changes-resizer {
   display: none;
 }
 body.file-explorer-mode-diff .file-explorer-tree-panel,
-body.file-explorer-mode-diff .file-explorer-changes-resizer {
+body.file-explorer-mode-diff .file-explorer-changes-resizer,
+body.file-explorer-mode-tabber .file-explorer-tree-panel,
+body.file-explorer-mode-tabber .file-explorer-changes-resizer {
   display: none;
 }
-body.file-explorer-mode-diff .file-explorer-changes-panel {
+body.file-explorer-mode-diff .file-explorer-changes-panel,
+body.file-explorer-mode-tabber .file-explorer-changes-panel {
   display: block;
   flex: 1 1 auto;
   min-height: 0;
@@ -3039,4 +3042,17 @@ body.editor-theme-light .file-editor-image-panel {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Tabber (Finder pane 3rd mode) rows reuse the .file-tree-row DOM; only the detail column (pane cwd /
+   session work description, carried in the agent slot) and the active-window emphasis are tabber-specific. */
+.file-tree-row.tabber-row .tabber-row-detail {
+  color: var(--muted);
+  margin-inline-start: 6px;
+  font-size: var(--ui-font-size-2xs);
+  font-family: var(--mono-font);
+}
+.file-tree-row.tabber-active-window .file-tree-name {
+  font-weight: 600;
+  color: var(--text);
 }

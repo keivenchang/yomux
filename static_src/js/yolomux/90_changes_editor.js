@@ -1432,6 +1432,14 @@ function syncFileExplorerDiffSessionControls() {
 
 // Returns the static toolbar/header HTML for the embedded Finder Differ panel.
 function fileExplorerChangesPanelStaticHtml(options = {}) {
+  if (fileExplorerMode === 'tabber') {
+    // Minimal Tabber chrome; the tree itself mounts into .changes-groups via renderTabberTree.
+    return `
+    <div class="file-explorer-changes-head">
+      <span class="changes-title">Tabber</span>
+    </div>
+    <div class="changes-groups"></div>`;
+  }
   const payload = fileExplorerSessionFilesPayload;
   const loading = fileExplorerSessionFilesLoading;
   const files = fileExplorerDifferFiles(payload);
@@ -1539,27 +1547,39 @@ function fileExplorerModeTitle() {
 }
 
 function fileExplorerModeButtonTitle(mode) {
+  // 'Tabber' tooltip is a brand-literal for now (no locale key) to avoid a 14-catalog change while the
+  // co-agent is editing locales; the localized title lands with the B6 docs pass.
+  if (mode === 'tabber') return 'Tabber: open tabs, tmux windows, and the paths each agent touched';
   return mode === 'diff' ? t('changes.show') : t('changes.hide');
 }
 
 function fileExplorerModeButtonLabel(mode) {
-  return mode === 'diff' ? 'Differ' : t('finder.label.finder');
+  // 'Differ' and 'Tabber' are brand-literal UI labels (like 'Differ' has always been); only 'Finder'
+  // is localized because it predates the brand naming.
+  if (mode === 'diff') return 'Differ';
+  if (mode === 'tabber') return 'Tabber';
+  return t('finder.label.finder');
 }
 
 function fileExplorerModeSwitcherHtml() {
   const modes = [
     {mode: 'files', label: fileExplorerModeButtonLabel('files')},
     {mode: 'diff', label: fileExplorerModeButtonLabel('diff')},
+    {mode: 'tabber', label: fileExplorerModeButtonLabel('tabber')},
   ];
-  const aria = `${fileExplorerModeButtonLabel('files')} / ${fileExplorerModeButtonLabel('diff')}`;
+  const aria = modes.map(item => item.label).join(' / ');
   return `<span class="file-explorer-mode-switcher" role="group" aria-label="${esc(aria)}">${modes.map(item => `
               <button type="button" class="file-explorer-mode-toggle" data-file-explorer-mode-set="${esc(item.mode)}" title="${esc(fileExplorerModeButtonTitle(item.mode))}" aria-label="${esc(item.label)}" aria-pressed="${fileExplorerMode === item.mode ? 'true' : 'false'}"><span class="file-explorer-mode-label">${esc(item.label)}</span></button>`).join('')}</span>`;
 }
 
 function applyFileExplorerMode(panel = null) {
   fileExplorerMode = normalizeFileExplorerMode(fileExplorerMode);
+  // Three exclusive body classes drive the pane layout: files = file-tree only (changes panel hidden);
+  // diff and tabber both take over the pane (tree hidden, changes panel full) — tabber renders the
+  // session/window tree into the same changes container instead of the diff groups.
   document.body.classList.toggle('file-explorer-mode-diff', fileExplorerMode === 'diff');
-  document.body.classList.toggle('file-explorer-mode-files', fileExplorerMode !== 'diff');
+  document.body.classList.toggle('file-explorer-mode-files', fileExplorerMode === 'files');
+  document.body.classList.toggle('file-explorer-mode-tabber', fileExplorerMode === 'tabber');
   const panels = new Set(document.querySelectorAll('.file-explorer-panel'));
   if (panel) panels.add(panel);
   panels.forEach(node => {
@@ -1588,7 +1608,10 @@ function setFileExplorerMode(mode, options = {}) {
   writeStoredFileExplorerMode(fileExplorerMode);
   applyFileExplorerMode();
   renderFileExplorerChangesPanels({force: true});
-  fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
+  // Tabber renders from the already-polled transcriptMeta, so it needs no Differ changed-files fetch.
+  if (fileExplorerMode !== 'tabber') {
+    fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
+  }
   return true;
 }
 
@@ -2293,6 +2316,14 @@ async function refreshFileExplorerPanelTree(panel, options = {}) {
 function renderFileExplorerChangesPanel(panel, options = {}) {
   const changes = panel?.querySelector?.('[data-file-explorer-changes]');
   if (!changes) return;
+  if (fileExplorerMode === 'tabber') {
+    if (options.force === true || !changes.querySelector('.changes-groups')) {
+      replaceChangesStaticHtml(changes, fileExplorerChangesPanelStaticHtml());
+    }
+    renderTabberTree(changes.querySelector('.changes-groups'));
+    bindTabberPanel(panel);
+    return;
+  }
   if (options.force === true || !activeChangesControl(panel)) {
     renderChangesRoot(
       changes,

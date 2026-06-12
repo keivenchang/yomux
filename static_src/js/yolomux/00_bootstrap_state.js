@@ -64,6 +64,7 @@ const fileExplorerRepoInfoStorageKey = 'yolomux.fileExplorer.repoInfo.v1';
 const fileExplorerIndexedDirsStorageKey = 'yolomux.fileExplorer.indexedDirs.v1';
 const fileExplorerIndexedDirsMigratedKey = 'yolomux.fileExplorer.indexedDirs.migrated.v1';  // C11 #3
 const fileExplorerModeStorageKey = 'yolomux.fileExplorerMode.v1';
+const fileExplorerTabberExpandedStorageKey = 'yolomux.fileExplorer.tabberExpanded.v1';
 const legacyFileExplorerChangesHiddenStorageKey = 'yolomux.fileExplorerChangesHidden';
 const uploadedFilesCollapsedStorageKey = 'yolomux.modifiedFiles.uploadedCollapsed.v1';
 const changesFolderCollapsedStorageKey = 'yolomux.modifiedFiles.folderCollapsed.v1';
@@ -280,6 +281,10 @@ let uploadedFilesCollapsed = (() => {
   }
 })();
 let changesFolderCollapsed = readStoredSet(changesFolderCollapsedStorageKey);
+// Tabber (Finder pane 3rd mode) expansion set, keyed by synthetic node path (session:/window:/pane:/repo:).
+// Persisted so the open tree survives reloads; the Tabber threads this through the shared row pipeline
+// as options.expandedSet instead of the in-memory fileExplorerExpanded used by fixed-root Finder mode.
+const fileExplorerTabberExpanded = readStoredSet(fileExplorerTabberExpandedStorageKey);
 // per-repo collapse state for the Modified-files panel repo headers (keyed by repo path).
 let changesRepoCollapsed = readStoredSet(changesRepoCollapsedStorageKey);
 let fileExplorerSessionFilesPayload = {session: '', files: [], repos: [], errors: []};

@@ -979,6 +979,33 @@ globalThis.__layoutTestApi = {
     fileExplorerMode = normalizeFileExplorerMode(mode);
   },
   fileExplorerModeForTest() { return fileExplorerMode; },
+  buildTabberTree,
+  renderTabberTree,
+  fileExplorerModeSwitcherHtml,
+  normalizeFileExplorerMode,
+  tabberRenderedNamesForTest() {
+    // Expand every dir node so windows + panes render too, then read back the visible row labels.
+    const {entries, entriesByDir} = buildTabberTree();
+    fileExplorerTabberExpanded.clear();
+    const addAll = (list, parent) => {
+      for (const e of list || []) {
+        if (e.kind !== 'dir') continue;
+        const path = parent === '/' ? '/' + e.name : parent + '/' + e.name;
+        fileExplorerTabberExpanded.add(path);
+        addAll(entriesByDir.get(normalizeDirectoryPath(path)), path);
+      }
+    };
+    addAll(entries, '/');
+    const el = document.createElement('div');
+    el.className = 'changes-groups';
+    renderTabberTree(el);
+    renderTabberTree(el);
+    const rows = el.querySelectorAll('.file-tree-row');
+    return Array.from(rows).map(row => {
+      const name = row.querySelector('.file-tree-name');
+      return name ? (name.textContent || '') : '';
+    });
+  },
   setSessionFilesSortModeForTest(mode) {
     sessionFilesSortMode = normalizeSessionFilesSortMode(mode);
   },
@@ -3835,9 +3862,11 @@ test('t@2560', () => {
   assert.equal(finderActionsRowSource.includes('data-file-explorer-mode-set'), false, 'Finder files-only action row no longer repeats the mode switcher');
   assert.equal(/data-file-explorer-refresh[\s\S]*file-explorer-collapse/.test(finderPanelSource), false, 'Finder no longer has a standalone left-side refresh button before collapse');
   assert.equal(preferencesCss.includes('--file-explorer-changes-size: 40%'), false, 'Finder diff mode no longer keeps the old 40% stacked Modified-files section cap');
-  assert.ok(/body:not\(\.file-explorer-mode-diff\) \.file-explorer-changes-panel/.test(preferencesCss), 'files mode hides the Finder changes panel and resizer');
+  assert.ok(/body\.file-explorer-mode-files \.file-explorer-changes-panel/.test(preferencesCss), 'files mode hides the Finder changes panel and resizer');
   assert.ok(/body\.file-explorer-mode-diff \.file-explorer-tree-panel/.test(preferencesCss), 'diff mode hides the Finder tree panel');
-  assert.ok(/body\.file-explorer-mode-diff \.file-explorer-changes-panel\s*\{[\s\S]*flex:\s*1 1 auto[\s\S]*max-block-size:\s*none/.test(preferencesCss), 'diff mode lets the Finder changes panel fill the pane');
+  assert.ok(/body\.file-explorer-mode-diff \.file-explorer-changes-panel[\s\S]*?\{[\s\S]*flex:\s*1 1 auto[\s\S]*max-block-size:\s*none/.test(preferencesCss), 'diff mode lets the Finder changes panel fill the pane');
+  assert.ok(/body\.file-explorer-mode-tabber \.file-explorer-changes-panel/.test(preferencesCss), 'DOIT.58 B1: tabber mode fills the pane like diff (tree hidden, changes panel full)');
+  assert.ok(/body\.file-explorer-mode-tabber \.file-explorer-tree-panel/.test(preferencesCss), 'DOIT.58 B1: tabber mode hides the Finder tree panel');
   assert.ok(/\.file-explorer-changes-panel \.changes-comparison-head\s*\{[^}]*flex-wrap: nowrap/.test(preferencesCss), '#44(d): the Finder comparison header is compacted to one tight line (header chrome takes less height)');
   assert.ok(/\.grid\.drop-preview::before/.test(preferencesCss), 'root layout drops have a full-layout preview overlay');
   assert.ok(/\.grid\.drop-preview-gutter::before\s*\{[\s\S]*--drop-preview-left/.test(preferencesCss), 'split-bar drops use explicit full-span preview geometry');
@@ -9217,6 +9246,54 @@ test('t@8804', () => {
   assert.ok(/showTerminalContextMenu\(session, term, event\.clientX, event\.clientY, container, rightClickSelection\)/.test(source), 'N7: the context menu receives the selection captured at right-click time');
   assert.ok(/copyTerminalSelection\(session, term, \{dedent, selectionText: selected\}, container\)/.test(source), 'N7: menu Copy uses the captured selection text, not a stale live re-read');
   assert.ok(/const selected = options\.selectionText != null \? options\.selectionText : terminalSelectedText\(term, container\)/.test(source), 'N7: copyTerminalSelection honors an explicit captured selection');
+});
+
+// DOIT.58 B1-B7: the Tabber (Finder pane's third mode) — source guards that rows route through the
+// shared row pipeline (no forked *RowHtml builder), plus a behavioral test of the tree assembly.
+test('t@tabber', () => {
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(/mode === 'diff' \|\| mode === 'tabber' \? mode : 'files'/.test(source), 'B1: normalizeFileExplorerMode accepts files|diff|tabber');
+  assert.ok(/if \(options\.mode === 'tabber'\) return updateTabberRow\(/.test(source), 'B3: updateFileTreeRow dispatches tabber rows to updateTabberRow (shared row entry point)');
+  assert.ok(/renderTreeChildren\(container, '\/', entries, 0, \{[\s\S]*?mode: 'tabber'/.test(source), 'B3: renderTabberTree drives the shared renderTreeChildren with mode:tabber');
+  assert.ok(/updateFileTreeRowContents\(row, icon, data\.label/.test(source), 'B3: updateTabberRow fills columns via the shared updateFileTreeRowContents');
+  assert.equal(/function tabberRowHtml|function renderTabberRowHtml|function tabberFileRowHtml/.test(source), false, 'B3: no bespoke tabber *RowHtml builder forked off the shared pipeline');
+
+  const api = loadYolomux();
+  assert.equal(api.normalizeFileExplorerMode('tabber'), 'tabber');
+  assert.equal(api.normalizeFileExplorerMode('bogus'), 'files');
+  const switcher = api.fileExplorerModeSwitcherHtml();
+  assert.ok(/data-file-explorer-mode-set="tabber"/.test(switcher), 'B1: the mode switcher renders a Tabber segment');
+  assert.ok(/data-file-explorer-mode-set="files"[\s\S]*data-file-explorer-mode-set="diff"[\s\S]*data-file-explorer-mode-set="tabber"/.test(switcher), 'B1: Finder / Differ / Tabber order');
+
+  api.setTranscriptInfoForTest('1', {
+    project: {git: {branch: 'devbranch'}},
+    panes: [
+      {window: '0', pane: '0', window_active: true, active: true, process_label: 'claude', command: 'claude', current_path: '/home/u/proj'},
+      {window: '1', pane: '0', window_active: false, active: true, process_label: 'bash', command: 'bash', current_path: '/home/u'},
+    ],
+  });
+  api.setTranscriptInfoForTest('2', {
+    panes: [{window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', command: 'codex', current_path: '/home/u/two'}],
+  });
+  const {entries, entriesByDir} = api.buildTabberTree();
+  const sessionEntries = entries.filter(e => e.tabber?.type === 'session');
+  const s1 = sessionEntries.find(e => e.tabber.session === '1');
+  assert.ok(s1, 'B2: tmux session 1 appears at level 0');
+  assert.ok(String(s1.tabber.statusText || '').length > 0, 'B2: the repo branch annotates the session row');
+  const windows = entriesByDir.get(`/${s1.name}`);
+  assert.ok(Array.isArray(windows) && windows.length === 2, 'B2: session 1 expands to its two tmux windows');
+  assert.equal(windows[0].tabber.type, 'window', 'B2: level 1 rows are windows');
+  assert.ok(/0:claude/.test(windows[0].tabber.label), 'B2: window label is index:process');
+  const panes = entriesByDir.get(`/${s1.name}/${windows[0].name}`);
+  assert.ok(Array.isArray(panes) && panes.length === 1, 'B2: window 0 holds one pane');
+  assert.equal(panes[0].tabber.type, 'pane', 'B2: level 2 rows are panes');
+  assert.ok(/claude/.test(panes[0].tabber.label), 'B2: pane row shows the foreground process');
+
+  // Render guard: the DOM rows must show the human labels, never the synthetic node names (s00000/w00000/p00000).
+  const renderedNames = api.tabberRenderedNamesForTest();
+  assert.ok(renderedNames.length >= 4, `B3: the tabber renders session + window + pane rows (got ${renderedNames.length})`);
+  assert.equal(renderedNames.some(n => /^[swp]\d{5}$/.test(n)), false, `B3: rows show human labels, not synthetic node names (got ${JSON.stringify(renderedNames)})`);
+  assert.ok(renderedNames.some(n => /0:claude/.test(n)), `B3: window rows show index:process (got ${JSON.stringify(renderedNames)})`);
 });
 
 {

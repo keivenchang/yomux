@@ -4185,7 +4185,7 @@ def test_legacy_changes_url_opens_finder_diff_mode(browser, tmp_path, legacy_tok
     assert metrics["panelMode"] == "diff"
     assert metrics["filesPressed"] == "false"
     assert metrics["diffPressed"] == "true"
-    assert metrics["modeTexts"] == ["Finder", "Differ"]
+    assert metrics["modeTexts"] == ["Finder", "Differ", "Tabber"]
     assert metrics["treeDisplay"] == "none"
     assert metrics["changesDisplay"] != "none"
     assert metrics["titleCount"] == 0

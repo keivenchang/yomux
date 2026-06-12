@@ -585,12 +585,12 @@ function writeStoredFileExplorerRootMode(mode) {
 }
 
 function normalizeFileExplorerMode(mode) {
-  return mode === 'diff' ? 'diff' : 'files';
+  return mode === 'diff' || mode === 'tabber' ? mode : 'files';
 }
 
 function readStoredFileExplorerMode() {
   const stored = storageGet(fileExplorerModeStorageKey);
-  if (stored === 'diff' || stored === 'files') return stored;
+  if (stored === 'diff' || stored === 'files' || stored === 'tabber') return stored;
   return storageGet(legacyFileExplorerChangesHiddenStorageKey) === '0' ? 'diff' : 'files';
 }
 
