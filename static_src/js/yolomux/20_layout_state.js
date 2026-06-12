@@ -1717,6 +1717,7 @@ function commandPaletteDropActionSession() {
 function commandPaletteDropActionItems() {
   const path = commandPaletteDropActionPath();
   if (!path) return [];
+  if (commandPaletteFilePathKnownMissing(path)) return [];
   const kind = commandPaletteDropActionKind(path);
   const paths = [path];
   const category = fileDropCategory(path, kind);
