@@ -165,7 +165,7 @@ YOLOmux serves xterm.js from a local install when available. It checks `YOLOMUX_
 
 ## Localization
 
-The UI ships in 19 user-facing languages. Locale files are in `static_src/` and generated `static/` locale outputs. When adding a new user-facing string, add the key to all locale files: English, Simplified and Traditional Chinese, Japanese, Spanish, French, Arabic, German, Russian, Hindi, Korean, Vietnamese, Thai, Turkish, Hebrew, Brazilian Portuguese, Dutch, Polish, and Italian, plus `en-XA` pseudo-locale for QA.
+The UI ships in 19 user-facing languages. Locale files are in `static_src/` and generated `static/` locale outputs. When adding a new user-facing string, add the key to all locale files: English, Traditional and Simplified Chinese, Japanese, Korean, Spanish, German, French, Italian, Brazilian Portuguese, Polish, Dutch, Hebrew, Arabic, Russian, Hindi, Vietnamese, Thai, and Turkish, plus `en-XA` pseudo-locale for QA.
 
 ## How The Webterm Works
 

@@ -8173,7 +8173,7 @@ test('t@7423', () => {
   assert.equal(api.resolveLocalePref('system'), 'en', 'Phase 1: system falls back to en without a browser locale');
   // The switcher choices: system + shipped locales in product-priority order + pseudo, endonym-labeled.
   const choices = api.i18nLocaleChoices();
-  assert.deepEqual(choices.map(c => c.value), ['system', 'en', 'zh-Hans', 'zh-Hant', 'ja', 'es', 'fr', 'ar', 'de', 'ru', 'hi', 'ko', 'vi', 'th', 'tr', 'he', 'pt-BR', 'nl', 'pl', 'it', 'en-XA'], 'Phase 1/2/4: the locale choices are ordered with all shipped locales then pseudo');
+  assert.deepEqual(choices.map(c => c.value), ['system', 'en', 'zh-Hant', 'zh-Hans', 'ja', 'ko', 'es', 'de', 'fr', 'it', 'pt-BR', 'pl', 'nl', 'he', 'ar', 'ru', 'hi', 'vi', 'th', 'tr', 'en-XA'], 'Phase 1/2/4: the locale choices are ordered with all shipped locales then pseudo');
   assert.equal(choices.find(c => c.value === 'de').label, 'Deutsch', 'Phase 2: German is labeled with its endonym');
   assert.equal(choices.find(c => c.value === 'ru').label, 'Русский', 'Phase 2: Russian is labeled with its endonym');
   assert.equal(choices.find(c => c.value === 'ar').label, 'العربية', 'Phase 2: Arabic is labeled with its endonym');
@@ -8203,6 +8203,9 @@ test('t@7423', () => {
   assert.ok(rtlCss.includes('margin-inline-start:') && rtlCss.includes('padding-inline-start:'), 'Phase 2: the CSS uses logical inline properties');
   assert.equal(choices.find(c => c.value === 'es').label, 'Español', 'Phase 1: Spanish is labeled with its endonym');
   assert.equal(choices.find(c => c.value === 'ja').label, '日本語', 'Phase 1: Japanese is labeled with its endonym');
+  assert.ok(choices.findIndex(c => c.value === 'ko') === choices.findIndex(c => c.value === 'ja') + 1, 'Korean appears immediately after Japanese');
+  assert.deepEqual(['de', 'fr', 'it', 'pt-BR', 'pl', 'nl'].map(loc => choices[choices.findIndex(c => c.value === 'de') + ['de', 'fr', 'it', 'pt-BR', 'pl', 'nl'].indexOf(loc)]?.value), ['de', 'fr', 'it', 'pt-BR', 'pl', 'nl'], 'German, French, Italian, Portuguese, Polish, and Dutch are grouped together');
+  assert.ok(choices.findIndex(c => c.value === 'he') === choices.findIndex(c => c.value === 'nl') + 1, 'Hebrew appears immediately after Dutch');
   assert.equal(api.resolveLocalePref('es'), 'es', 'Phase 1: Spanish resolves to itself');
   assert.equal(api.resolveLocalePref('ja'), 'ja', 'Phase 1: Japanese resolves to itself');
   assert.equal(choices.find(c => c.value === 'zh-Hant').label, '繁體中文', 'Phase 1: Traditional Chinese is labeled with its endonym');
@@ -8210,6 +8213,8 @@ test('t@7423', () => {
   const src = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(/sessionButtons\.appendChild\(createTopbarLanguageSwitcher\(\)\)/.test(src), 'Phase 1: the topbar renders the language switcher');
   assert.ok(/function createTopbarLanguageSwitcher[\s\S]*?applyLocale\(resolveLocalePref\(value\)\)[\s\S]*?saveSettingsPatch\(settingPatch\('general\.language', value\)\)/.test(src), 'Phase 1: the switcher applies the locale optimistically AND saves general.language (same setting as Preferences)');
+  assert.ok(/function rerenderForLocale[\s\S]*?renderSessionButtons\(\{force: true\}\)/.test(src), 'Phase 1: a real locale switch force-repaints the topbar labels after selection');
+  assert.ok(/function topbarLanguageSwitcherIsActive\(\)[\s\S]*?document\.activeElement[\s\S]*?\.topbar-language[\s\S]*?function renderSessionButtons[\s\S]*?appMenuIsOpen\(\) \|\| topbarLanguageSwitcherIsActive\(\)/.test(src), 'the topbar does not rebuild while the native language select is focused/open');
   // The zh fallback mapping (zh-TW/HK/Hant -> Hant, other zh -> Hans).
   assert.ok(/nav\.startsWith\('zh'\)\) return \/hant\|/.test(src), 'Phase 1: system maps Chinese browser locales to Hant/Hans');
   assert.ok(/\.topbar-language\s*\{/.test(fs.readFileSync('static/yolomux.css', 'utf8')), 'Phase 1: the language switcher has topbar styling');
@@ -8466,15 +8471,15 @@ test('t@7620', () => {
 });
 
 test('t@7654', () => {
-  // zh-Hans + zh-Hant catalogs localize the WHOLE Preferences panel, and the language select offers
+  // zh-Hant + zh-Hans catalogs localize the WHOLE Preferences panel, and the language select offers
   // both endonym-labeled in product-priority order.
   const api = loadYolomux('', ['1']);
-  // The select offers the two Chinese options in their own script, Simplified listed before Traditional.
+  // The select offers the two Chinese options in their own script, Traditional listed before Simplified.
   const selectHtml = api.preferencesPanelHtmlForTest('language');
   assert.ok(selectHtml.includes('<option value="zh-Hant"'), 'language select offers Traditional Chinese');
   assert.ok(selectHtml.includes('<option value="zh-Hans"'), 'language select offers Simplified Chinese');
   assert.ok(selectHtml.includes('>繁體中文</option>') && selectHtml.includes('>简体中文</option>'), 'Chinese options use endonym labels');
-  assert.ok(selectHtml.indexOf('value="zh-Hans"') < selectHtml.indexOf('value="zh-Hant"'), 'Simplified Chinese is listed before Traditional');
+  assert.ok(selectHtml.indexOf('value="zh-Hant"') < selectHtml.indexOf('value="zh-Hans"'), 'Traditional Chinese is listed before Simplified');
   for (const locale of ['zh-Hant', 'zh-Hans']) {
     const catalog = JSON.parse(fs.readFileSync(`static/locales/${locale}.json`, 'utf8'));
     // Same key set as English (the build enforces this; assert it here too).

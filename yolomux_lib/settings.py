@@ -249,7 +249,7 @@ STRING_ALLOW_EMPTY: set[tuple[str, str]] = {
 SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
     ("general", "default_layout"): {"single", "split", "grid", "wall"},
     # i18n: only locales that ship a catalog are accepted; "system" matches the browser/OS.
-    ("general", "language"): {"system", "en", "zh-Hans", "zh-Hant", "ja", "es", "fr", "ar", "de", "ru", "hi", "ko", "vi", "th", "tr", "he", "pt-BR", "nl", "pl", "it", "en-XA"},
+    ("general", "language"): {"system", "en", "zh-Hant", "zh-Hans", "ja", "ko", "es", "de", "fr", "it", "pt-BR", "pl", "nl", "he", "ar", "ru", "hi", "vi", "th", "tr", "en-XA"},
     ("appearance", "theme"): {"system", "dark", "light"},
     ("appearance", "active_color"): set(UI_COLOR_CHOICES),
     ("appearance", "separator_color"): set(SEPARATOR_COLOR_CHOICES),
@@ -295,7 +295,7 @@ SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
 SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("general", "auto_focus"): "true/false. Default false. When false, layout switches and hover gestures do not move focus or auto-open menus, panes, terminals, editors, Finder/File Explorer, Preferences, or other views.",
     ("general", "default_layout"): "single | split | grid | wall. Reserved default for new visits.",
-    ("general", "language"): "UI language. system matches the browser/OS; otherwise a locale code with a shipped catalog (en, zh-Hans, zh-Hant, ja, es, fr, ar, de, ru, hi, ko, vi, th, tr, he, pt-BR, nl, pl, it, en-XA pseudo).",
+    ("general", "language"): "UI language. system matches the browser/OS; otherwise a locale code with a shipped catalog (en, zh-Hant, zh-Hans, ja, ko, es, de, fr, it, pt-BR, pl, nl, he, ar, ru, hi, vi, th, tr, en-XA pseudo).",
     ("general", "default_sessions"): "List of tmux sessions to prefer on load. Empty means discovered sessions.",
     ("general", "reload_on_update"): "true/false. Default false. When true, an open client shows a 'New version available' banner once the server ships a newer YOLOMUX_VERSION.",
     ("general", "reload_on_update_auto"): "true/false. Default false. When reload_on_update is on, reload immediately instead of showing a banner — but only when it is safe (no unsaved editor changes and not mid-typing).",

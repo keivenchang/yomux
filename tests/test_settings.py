@@ -241,11 +241,11 @@ def test_login_locale_picker_writes_general_language():
     from yolomux_lib.web import login_html
     from yolomux_lib.web import save_login_locale
 
-    assert [value for value, _ in LOGIN_LOCALE_CHOICES] == ["system", "en", "zh-Hans", "zh-Hant", "ja", "es", "fr", "ar", "de", "ru", "hi", "ko", "vi", "th", "tr", "he", "pt-BR", "nl", "pl", "it"]
+    assert [value for value, _ in LOGIN_LOCALE_CHOICES] == ["system", "en", "zh-Hant", "zh-Hans", "ja", "ko", "es", "de", "fr", "it", "pt-BR", "pl", "nl", "he", "ar", "ru", "hi", "vi", "th", "tr"]
     page = login_html()
     assert 'name="locale"' in page
     assert "简体中文" in page and "繁體中文" in page  # endonym-labeled, product-priority order
-    assert page.index("简体中文") < page.index("繁體中文")
+    assert page.index("繁體中文") < page.index("简体中文")
     for label in ["Tiếng Việt", "ไทย", "Türkçe", "Nederlands", "Polski", "Italiano"]:
         assert label in page
     # Phase 2: the <html> shell carries lang + dir; Arabic is rendered right-to-left.

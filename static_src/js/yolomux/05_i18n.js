@@ -141,7 +141,7 @@ async function applyLocale(locale) {
 // The real (non-pseudo) locales that ship a catalog, in product-priority order. 'system' resolves
 // against navigator.language to one of these. Add new locales here as their catalogs ship.
 function i18nSupportedLocales() {
-  return ['en', 'zh-Hans', 'zh-Hant', 'ja', 'es', 'fr', 'ar', 'de', 'ru', 'hi', 'ko', 'vi', 'th', 'tr', 'he', 'pt-BR', 'nl', 'pl', 'it'];
+  return ['en', 'zh-Hant', 'zh-Hans', 'ja', 'ko', 'es', 'de', 'fr', 'it', 'pt-BR', 'pl', 'nl', 'he', 'ar', 'ru', 'hi', 'vi', 'th', 'tr'];
 }
 
 // Phase 2: right-to-left locales. Drives document.dir so the browser mirrors the layout.
@@ -156,24 +156,24 @@ function i18nLocaleChoices() {
   return [
     {value: 'system', label: t('pref.general.language.system')},
     {value: 'en', label: 'English'},
-    {value: 'zh-Hans', label: '简体中文'},
     {value: 'zh-Hant', label: '繁體中文'},
+    {value: 'zh-Hans', label: '简体中文'},
     {value: 'ja', label: '日本語'},
+    {value: 'ko', label: '한국어'},
     {value: 'es', label: 'Español'},
-    {value: 'fr', label: 'Français'},
-    {value: 'ar', label: 'العربية'},
     {value: 'de', label: 'Deutsch'},
+    {value: 'fr', label: 'Français'},
+    {value: 'it', label: 'Italiano'},
+    {value: 'pt-BR', label: 'Português (BR)'},
+    {value: 'pl', label: 'Polski'},
+    {value: 'nl', label: 'Nederlands'},
+    {value: 'he', label: 'עברית'},
+    {value: 'ar', label: 'العربية'},
     {value: 'ru', label: 'Русский'},
     {value: 'hi', label: 'हिन्दी'},
-    {value: 'ko', label: '한국어'},
     {value: 'vi', label: 'Tiếng Việt'},
     {value: 'th', label: 'ไทย'},
     {value: 'tr', label: 'Türkçe'},
-    {value: 'he', label: 'עברית'},
-    {value: 'pt-BR', label: 'Português (BR)'},
-    {value: 'nl', label: 'Nederlands'},
-    {value: 'pl', label: 'Polski'},
-    {value: 'it', label: 'Italiano'},
     {value: 'en-XA', label: t('pref.general.language.pseudo')},
   ];
 }
@@ -198,7 +198,7 @@ function rerenderForLocale(options = {}) {
   // the same interaction. Guarded so this is safe at any load order. Preferences must be forced past
   // the active-control guard (the language <select> is the active control when the switch fires).
   if (typeof renderPreferencesPanels === 'function') renderPreferencesPanels({force: true});
-  if (typeof renderSessionButtons === 'function') renderSessionButtons();  // rebuilds the app menu bar
+  if (typeof renderSessionButtons === 'function') renderSessionButtons({force: true});  // rebuilds the app menu bar
   if (typeof renderPaneTabStrips === 'function') renderPaneTabStrips();
   if (typeof relocalizeInfoPanelChrome === 'function') relocalizeInfoPanelChrome();
   if (typeof renderInfoPanel === 'function') renderInfoPanel();
