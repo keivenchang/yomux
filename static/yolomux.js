@@ -10187,6 +10187,17 @@ function bindTabberPanel(panel) {
     event.stopPropagation();
     handleTabberRowActivate(row);
   });
+  // B5: right-click a touched-path row reuses the shared file context menu (copy/open/download/rename/
+  // delete), targeting the file's real abs_path rather than the synthetic node path.
+  panel.addEventListener('contextmenu', event => {
+    if (fileExplorerMode !== 'tabber') return;
+    const row = event.target.closest?.('.file-tree-row[data-tabber-type="path"]');
+    const abs = row?.dataset.tabberOpenFile;
+    if (!row || !panel.contains(row) || !abs) return;
+    event.preventDefault();
+    event.stopPropagation();
+    showFileTreeContextMenu(row, abs, {name: basenameOf(abs), kind: 'file'}, event.clientX, event.clientY);
+  });
 }
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0

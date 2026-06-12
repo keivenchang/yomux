@@ -9340,6 +9340,7 @@ test('t@tabber', () => {
   const fileRow = rows.find(r => r.type === 'path' && /app\.py/.test(r.name));
   assert.ok(fileRow, `L3: a touched file renders as a path row (got ${JSON.stringify(rows.filter(r => r.type === 'path').map(r => r.name))})`);
   assert.equal(fileRow.openFile, '/home/u/proj/src/app.py', 'B5: the path row carries abs_path for open-in-editor');
+  assert.ok(/data-tabber-type="path"[\s\S]*?showFileTreeContextMenu\(row, abs,/.test(source), 'B5: right-click on a path row reuses the shared file context menu (targeting abs_path)');
 });
 
 {
