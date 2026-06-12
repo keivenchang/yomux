@@ -306,8 +306,15 @@ def current_language_pref() -> str:
 
 def locale_field_html(current: str = "system", css_class: str = "login-locale") -> str:
     """The endonym-labeled language <select>, shared by the login and setup screens."""
+    def option_label(value: str, label: str) -> str:
+        return server_string(current, "pref.general.language.system") if value == "system" else label
+
     options = "".join(
-        f'<option value="{html.escape(value, quote=True)}"{" selected" if value == current else ""}>{html.escape(label)}</option>'
+        (
+            f'<option value="{html.escape(value, quote=True)}"'
+            f'{" selected" if value == current else ""}>'
+            f"{html.escape(option_label(value, label))}</option>"
+        )
         for value, label in LOGIN_LOCALE_CHOICES
     )
     language_label = html.escape(server_string(current, "login.language"))

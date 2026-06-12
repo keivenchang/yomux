@@ -162,8 +162,11 @@ def test_login_page_localizes_via_locale_cookie(monkeypatch, tmp_path):
         localized = web.server_string("zh-Hant", "login.showPassword")
         assert localized == "顯示密碼"
         assert f'aria-label="{localized}"'.encode("utf-8") in body
+        localized_system = web.server_string("zh-Hant", "pref.general.language.system")
+        assert f">{localized_system}<".encode("utf-8") in body
         # The English default must NOT appear when the cookie selects another locale.
         assert b'aria-label="Show password"' not in body
+        assert b">System<" not in body
     finally:
         stop_server(server, thread)
 
