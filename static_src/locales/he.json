@@ -492,6 +492,8 @@
   "pref.performance.event_log_refresh_ms.label": "מרווח רענון יומן אירועים",
   "pref.performance.latency_refresh_ms.help": "How often the browser updates ping and latency displays.",
   "pref.performance.latency_refresh_ms.label": "מרווח רענון השהיה",
+  "pref.performance.tabber_activity_refresh_ms.help": "How often Tabber refreshes activity recency while Tabber is open.",
+  "pref.performance.tabber_activity_refresh_ms.label": "Client pull: Tabber activity",
   "pref.performance.menu_hover_open_delay_ms.help": "השהיה לפני שקובץ, תצוגה, tmux, לשוניות ועזרה נפתחים מריחוף.",
   "pref.performance.menu_hover_open_delay_ms.label": "השהיית פתיחת תפריט בריחוף",
   "pref.performance.popover_hide_delay_ms.help": "השהיה לפני סגירת חלונות ריחוף קופצים לאחר שהמצביע עוזב.",

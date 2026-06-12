@@ -492,6 +492,8 @@
   "pref.performance.event_log_refresh_ms.label": "事件記錄重新整理間隔",
   "pref.performance.latency_refresh_ms.help": "瀏覽器更新 ping 與延遲顯示的頻率。",
   "pref.performance.latency_refresh_ms.label": "延遲重新整理間隔",
+  "pref.performance.tabber_activity_refresh_ms.help": "How often Tabber refreshes activity recency while Tabber is open.",
+  "pref.performance.tabber_activity_refresh_ms.label": "Client pull: Tabber activity",
   "pref.performance.menu_hover_open_delay_ms.help": "檔案、檢視、tmux、分頁與說明從停留開啟前的延遲。",
   "pref.performance.menu_hover_open_delay_ms.label": "選單停留開啟延遲",
   "pref.performance.popover_hide_delay_ms.help": "指標離開後停留彈出視窗關閉前的延遲。",

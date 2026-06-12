@@ -679,7 +679,7 @@ function refreshActiveTerminalCursor() {
 function refreshMetaButtonTitle() {
   if (!refreshMeta) return;
   const seconds = ms => `${Math.round(ms / 1000)}s`;
-  refreshMeta.title = t('meta.refreshTitle', {ping: seconds(latencyRefreshMs), openLogs: seconds(eventLogRefreshMs)});
+  refreshMeta.title = t('meta.refreshTitle', {ping: seconds(latencyRefreshMs), openLogs: seconds(eventLogRefreshMs), tabber: seconds(tabberActivityRefreshMs)});
 }
 
 function applySettingsPayload(payload, options = {}) {
@@ -695,6 +695,7 @@ function applySettingsPayload(payload, options = {}) {
   remoteResizeDelayMs = numberSetting('performance.remote_resize_delay_ms', 220);
   latencyRefreshMs = numberSetting('performance.latency_refresh_ms', 3000);
   eventLogRefreshMs = numberSetting('performance.event_log_refresh_ms', 5000);
+  tabberActivityRefreshMs = numberSetting('performance.tabber_activity_refresh_ms', 15000);
   redReminderMs = numberSetting('appearance.red_reminder_ms', 1550);
   yoloRotateMs = numberSetting('appearance.yolo_rotate_ms', 20000);
   toastDurationMs = numberSetting('notifications.toast_duration_ms', 10000);
@@ -808,8 +809,14 @@ function resetRuntimeInterval(name, callback, delay) {
   };
   const run = () => {
     if (!state.active) return;
-    state.callback();
-    scheduleNext();
+    try {
+      Promise.resolve(state.callback())
+        .catch(error => console.warn('runtime interval failed', name, error))
+        .finally(scheduleNext);
+    } catch (error) {
+      console.warn('runtime interval failed', name, error);
+      scheduleNext();
+    }
   };
   scheduleNext();
   runtimeIntervals.set(name, state);
@@ -833,6 +840,9 @@ function installRuntimeIntervals() {
   resetRuntimeInterval('latency', updateLatency, latencyRefreshMs);
   resetRuntimeInterval('events', refreshOpenEventLogs, eventLogRefreshMs);
   resetRuntimeInterval('server-watch-renew', renewServerWatchRootsFromRuntime, 60000);
+  if (fileExplorerMode === 'tabber') {
+    resetRuntimeInterval('tabber-activity', () => { if (fileExplorerMode === 'tabber') fetchTabberActivity(); }, tabberActivityRefreshMs);
+  }
   if (fileExplorerIndexRefreshSeconds > 0) {
     resetRuntimeInterval('file-index-refresh', refreshAllIndexedDirsStatus, fileExplorerIndexRefreshSeconds * 1000);
   } else {

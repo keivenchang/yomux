@@ -460,6 +460,47 @@ def test_activity_summary_payload_reuses_cached_session_summary(monkeypatch, tmp
     assert localized["locale"] == "zh-Hant"
 
 
+def test_activity_payload_returns_indefinite_stale_cache_and_refreshes(monkeypatch):
+    snapshots = [
+        {"5": {"last_user_input_ts": 100}},
+        {"5": {"last_user_input_ts": 200}},
+    ]
+    webapp = app_module.TmuxWebtermApp(["5"])
+    try:
+        calls = []
+
+        def fake_snapshot():
+            calls.append("snapshot")
+            return snapshots[min(len(calls) - 1, len(snapshots) - 1)]
+
+        webapp.activity_ledger.snapshot = fake_snapshot
+        webapp.refresh_tabber_activity_cache()
+        first, status = webapp.activity_payload()
+        second, _status = webapp.activity_payload()
+
+        assert status == HTTPStatus.OK
+        assert first["activity"]["5"]["last_user_input_ts"] == 100
+        assert second["activity"]["5"]["last_user_input_ts"] == 100
+        assert second["cache"]["hit"] is True
+        assert second["cache"]["stale"] is False
+        assert calls == ["snapshot"]
+
+        stored_at, payload = webapp.tabber_activity_cache
+        webapp.tabber_activity_cache = (
+            stored_at - app_module.SERVER_TABBER_ACTIVITY_CACHE_REFRESH_SECONDS - 1,
+            payload,
+        )
+        monkeypatch.setattr(webapp, "start_tabber_activity_cache_refresh", lambda: "queued")
+        stale, _status = webapp.activity_payload()
+
+        assert stale["activity"]["5"]["last_user_input_ts"] == 100
+        assert stale["cache"]["stale"] is True
+        assert stale["cache"]["refreshing"] == "queued"
+        assert calls == ["snapshot"]
+    finally:
+        webapp.control_server.stop()
+
+
 def test_session_files_payload_reuses_short_cache(monkeypatch):
     info = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
     calls = []

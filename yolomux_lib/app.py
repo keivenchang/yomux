@@ -136,6 +136,7 @@ SHARE_TOKEN_DEFAULT_TTL_SECONDS = 3600.0
 SHARE_TOKEN_MAX_TTL_SECONDS = 8.0 * 3600.0
 SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS = 1.25
 SERVER_WATCHED_PR_EVENT_POLL_SECONDS = 60.0
+SERVER_TABBER_ACTIVITY_CACHE_REFRESH_SECONDS = 60.0
 CLIENT_WATCH_ROOT_TTL_SECONDS = 300
 CLIENT_WATCH_ROOT_LIMIT = 128
 CLIENT_WATCH_FILE_LIMIT = 128
@@ -397,6 +398,9 @@ class TmuxWebtermApp:
         # typed-time). Constructor defaults today; Preferences exposure is a deferred follow-up.
         self.activity_ledger = ActivityLedger(ACTIVITY_PATH, heartbeat_path=ACTIVITY_HEARTBEATS_PATH)
         self.activity_ledger.load()
+        self.tabber_activity_cache_lock = threading.RLock()
+        self.tabber_activity_cache: tuple[float, dict[str, Any]] | None = (time.monotonic(), self.build_activity_payload())
+        self.tabber_activity_cache_refreshing = False
         # last-logged watched-PR truncation state, so the cap is logged only when it changes.
         self._watched_pr_truncated_signature: tuple[int, tuple[str, ...]] | None = None
         self.metadata_warm_lock = threading.Lock()
@@ -435,6 +439,7 @@ class TmuxWebtermApp:
         self.client_event_next_background_file_poll_at = 0.0
         self.client_event_next_auto_poll_at = 0.0
         self.client_event_next_watched_pr_poll_at = 0.0
+        self.client_event_next_tabber_activity_refresh_at = 0.0
         self.activity_summary_lock = threading.RLock()
         self.activity_summary_cache: dict[str, dict[str, Any]] = {}
         self.session_files_cache_lock = threading.RLock()
@@ -672,6 +677,7 @@ class TmuxWebtermApp:
             self.client_event_next_background_file_poll_at,
             self.client_event_next_auto_poll_at,
             self.client_event_next_watched_pr_poll_at,
+            self.client_event_next_tabber_activity_refresh_at,
         )
         if next_due <= 0:
             return self.server_event_poll_seconds()
@@ -1240,6 +1246,9 @@ class TmuxWebtermApp:
                 if now >= self.client_event_next_watched_pr_poll_at:
                     self.poll_watched_prs_client_event_once()
                     self.client_event_next_watched_pr_poll_at = now + self.server_watched_pr_event_poll_seconds()
+                if now >= self.client_event_next_tabber_activity_refresh_at:
+                    self.refresh_tabber_activity_cache()
+                    self.client_event_next_tabber_activity_refresh_at = now + SERVER_TABBER_ACTIVITY_CACHE_REFRESH_SECONDS
             except (OSError, RuntimeError, ValueError) as exc:
                 self.log_event(None, "client_event_watch_error", f"client event watch failed: {exc}", {})
             if self.client_watch_wake_event.wait(self.client_event_watch_sleep_seconds(time.monotonic())):
@@ -2019,8 +2028,69 @@ class TmuxWebtermApp:
             return
         self.activity_ledger.heartbeat(session, self.active_window_for(session), byte_count=byte_count)
 
+    def build_activity_payload(self) -> dict[str, Any]:
+        return {"activity": self.activity_ledger.snapshot()}
+
+    def set_tabber_activity_cache(self, payload: dict[str, Any]) -> None:
+        with self.tabber_activity_cache_lock:
+            self.tabber_activity_cache = (time.monotonic(), copy.deepcopy(payload))
+
+    def get_tabber_activity_cache(self, max_age_seconds: float, allow_stale: bool = True) -> tuple[dict[str, Any], bool, float] | None:
+        now = time.monotonic()
+        with self.tabber_activity_cache_lock:
+            cached = self.tabber_activity_cache
+            if cached is None:
+                return None
+            stored_at, payload = cached
+            age_seconds = max(0.0, now - stored_at)
+            fresh = age_seconds <= max_age_seconds
+            if not fresh and not allow_stale:
+                return None
+            return copy.deepcopy(payload), fresh, age_seconds
+
+    def refresh_tabber_activity_cache(self) -> None:
+        self.set_tabber_activity_cache(self.build_activity_payload())
+
+    def run_tabber_activity_cache_refresh(self) -> None:
+        try:
+            self.refresh_tabber_activity_cache()
+        finally:
+            with self.tabber_activity_cache_lock:
+                self.tabber_activity_cache_refreshing = False
+
+    def start_tabber_activity_cache_refresh(self) -> bool:
+        with self.tabber_activity_cache_lock:
+            if self.tabber_activity_cache_refreshing:
+                return False
+            self.tabber_activity_cache_refreshing = True
+        worker = threading.Thread(target=self.run_tabber_activity_cache_refresh, daemon=True)
+        worker.start()
+        return True
+
     def activity_payload(self) -> tuple[dict[str, Any], HTTPStatus]:
-        return {"activity": self.activity_ledger.snapshot()}, HTTPStatus.OK
+        cached = self.get_tabber_activity_cache(SERVER_TABBER_ACTIVITY_CACHE_REFRESH_SECONDS, allow_stale=True)
+        if cached:
+            payload, fresh, age_seconds = cached
+            payload["cache"] = {
+                "hit": True,
+                "stale": not fresh,
+                "age_seconds": round(age_seconds, 3),
+                "refresh_seconds": SERVER_TABBER_ACTIVITY_CACHE_REFRESH_SECONDS,
+            }
+            if not fresh:
+                payload["cache"]["refreshing"] = self.start_tabber_activity_cache_refresh()
+            return payload, HTTPStatus.OK
+        payload = self.build_activity_payload()
+        self.set_tabber_activity_cache(payload)
+        payload = copy.deepcopy(payload)
+        payload["cache"] = {
+            "hit": False,
+            "stale": False,
+            "age_seconds": 0,
+            "refresh_seconds": SERVER_TABBER_ACTIVITY_CACHE_REFRESH_SECONDS,
+            "refreshing": False,
+        }
+        return payload, HTTPStatus.OK
 
     def run_history_payload(self, session: str | None = None) -> tuple[RunHistoryPayload, HTTPStatus]:
         refresh_errors = self.refresh_sessions()

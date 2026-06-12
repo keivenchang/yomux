@@ -492,6 +492,8 @@
   "pref.performance.event_log_refresh_ms.label": "事件日志刷新间隔",
   "pref.performance.latency_refresh_ms.help": "浏览器更新 ping 与延迟显示的频率。",
   "pref.performance.latency_refresh_ms.label": "延迟刷新间隔",
+  "pref.performance.tabber_activity_refresh_ms.help": "How often Tabber refreshes activity recency while Tabber is open.",
+  "pref.performance.tabber_activity_refresh_ms.label": "Client pull: Tabber activity",
   "pref.performance.menu_hover_open_delay_ms.help": "文件、视图、tmux、标签页和帮助从悬停打开前的延迟。",
   "pref.performance.menu_hover_open_delay_ms.label": "菜单悬停打开延迟",
   "pref.performance.popover_hide_delay_ms.help": "指针离开后悬停弹出窗口关闭前的延迟。",

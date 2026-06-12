@@ -993,6 +993,7 @@ body:not(.file-explorer-mode-diff) .file-explorer-primary-row .file-explorer-too
   min-width: 0;
 }
 body.file-explorer-mode-diff .file-explorer-mode-files-only,
+body.file-explorer-mode-tabber .file-explorer-mode-files-only,
 body:not(.file-explorer-mode-diff) .file-explorer-mode-diff-only {
   display: none;
 }
@@ -3046,15 +3047,104 @@ body.editor-theme-light .file-editor-image-panel {
 
 /* Tabber (Finder pane 3rd mode) rows reuse the .file-tree-row DOM; only the detail column (pane cwd /
    session work description, carried in the agent slot) and the active-window emphasis are tabber-specific. */
+.file-tree-row.tabber-row {
+  --tabber-level0-color: var(--markdown-heading);
+  --tabber-level1-color: var(--code-function);
+  --tabber-path-color: var(--text);
+  --tabber-detail-color: var(--muted);
+}
+body.theme-light .file-tree-row.tabber-row {
+  --tabber-level0-color: var(--lt-markdown-heading);
+  --tabber-level1-color: var(--lt-code-function);
+  --tabber-path-color: var(--text);
+  --tabber-detail-color: var(--muted);
+}
+.file-tree-row.tabber-row:not(.selected):hover {
+  background: var(--file-hover-bg);
+  box-shadow: inset 4px 0 0 var(--file-hover-border), inset 0 0 0 1px var(--file-hover-outline);
+}
 .file-tree-row.tabber-row .tabber-row-detail {
-  color: var(--muted);
+  color: var(--tabber-detail-color);
   margin-inline-start: 6px;
   font-size: var(--ui-font-size-2xs);
   font-family: var(--mono-font);
 }
-.file-tree-row.tabber-active-window .file-tree-name {
-  font-weight: 600;
-  color: var(--text);
+.file-tree-row.tabber-row .tabber-session-name,
+.file-tree-row.tabber-row .tabber-session-description {
+  cursor: pointer;
+}
+.file-tree-row.tabber-row .tabber-window-label {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  vertical-align: middle;
+}
+.file-tree-row.tabber-row .tabber-window-label .agent-icon {
+  flex: 0 0 auto;
+  width: calc(var(--file-explorer-font-size) + 2px);
+  min-width: calc(var(--file-explorer-font-size) + 2px);
+  height: calc(var(--file-explorer-font-size) + 2px);
+  margin: 0;
+  padding: 0;
+  vertical-align: middle;
+}
+.file-tree-row.tabber-row .tabber-window-label .agent-icon svg {
+  width: calc(var(--file-explorer-font-size) + 2px);
+  height: calc(var(--file-explorer-font-size) + 2px);
+}
+.file-tree-row.tabber-row .tabber-window-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.file-tree-row.tabber-row .tabber-session-description {
+  color: var(--tabber-level0-color);
+  margin-inline-start: 8px;
+  font-weight: 500;
+}
+.file-tree-row.tabber-row[data-tabber-type="session"]:not(.selected) .tabber-session-name {
+  color: var(--tabber-level0-color);
+  font-weight: 800;
+}
+.file-tree-row.tabber-row[data-tabber-type="session"]:not(.selected) > .file-tree-icon {
+  color: var(--tabber-level0-color);
+}
+.file-tree-row.tabber-row[data-tabber-type="window"]:not(.selected) > .file-tree-name {
+  color: var(--tabber-level1-color);
+  font-weight: 700;
+}
+.file-tree-row.tabber-row[data-tabber-type="window"]:not(.selected) > .file-tree-icon {
+  color: var(--tabber-level1-color);
+}
+.file-tree-row.tabber-row[data-tabber-type="window"]:not(.selected).tabber-active-window > .file-tree-name,
+.file-tree-row.tabber-row[data-tabber-type="window"]:not(.selected).tabber-active-window > .file-tree-icon {
+  color: var(--tabber-level1-color);
+}
+.file-tree-row.tabber-row[data-tabber-type="repo"]:not(.selected) > .file-tree-name,
+.file-tree-row.tabber-row[data-tabber-type="repo"]:not(.selected) > .file-tree-icon {
+  color: var(--tabber-path-color);
+}
+.file-tree-row.tabber-row[data-tabber-type="tab"]:not(.selected) > .file-tree-name,
+.file-tree-row.tabber-row[data-tabber-type="tab"]:not(.selected) > .file-tree-icon {
+  color: var(--tabber-level0-color);
+}
+.file-tree-row.tabber-row[data-tabber-type="loading"]:not(.selected) > .file-tree-name,
+.file-tree-row.tabber-row[data-tabber-type="loading"]:not(.selected) > .file-tree-icon {
+  color: var(--tabber-detail-color);
+  font-style: italic;
+}
+.tabber-loading-dots::after {
+  content: ".";
+  animation: tabber-loading-dots 1.05s steps(1, end) infinite;
+}
+@keyframes tabber-loading-dots {
+  0%, 24% { content: "."; }
+  25%, 49% { content: ".."; }
+  50%, 100% { content: "..."; }
+}
+.file-tree-row.tabber-active-window:not(.selected) .file-tree-name {
+  font-weight: 800;
 }
 /* Tabber rows: the session/work name is the priority. Let its column take all available width and only
    ellipsize as a last resort; keep the date from forcing the name to truncate by letting it shrink, and
@@ -3065,6 +3155,8 @@ body.editor-theme-light .file-editor-image-panel {
 }
 .file-tree-row.tabber-row .file-tree-date {
   flex: 0 1 auto;
+  color: var(--tabber-detail-color);
+  font-weight: 600;
 }
 @container (max-width: 380px) {
   .file-explorer-changes-panel .file-tree-row.tabber-row .file-tree-date {

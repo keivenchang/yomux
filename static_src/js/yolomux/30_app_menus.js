@@ -143,6 +143,7 @@ function menuTabCommand(item, options = {}) {
   const active = item === currentActiveMenuItem();
   const detail = options.detail || (visible ? menuTabDetail(item) : (itemIsBackgroundPaneTab(item) ? t('menu.tabs.minimizedDetail') : t('menu.tabs.inactiveDetail')));
   return menuCommand(itemLabel(item), () => {
+    if (item === infoItemId) return openInfoSubTab('info');
     if (slot && visible && !options.openAsPane) return activatePaneTab(slot, item, {userInitiated: true});
     return selectSession(item, {userInitiated: true});
   }, {
@@ -544,7 +545,7 @@ function tabMenuItems(openItems = orderedPaneItems(activePaneItems())) {
 }
 
 function fileMenuVirtualCommand(item, detail) {
-  return menuCommand(itemLabel(item), () => selectSession(item, {userInitiated: true}), {
+  return menuCommand(itemLabel(item), () => (item === infoItemId ? openInfoSubTab('info') : selectSession(item, {userInitiated: true})), {
     checked: itemInLayout(item),
     detail,
     iconHtml: tabTypeIconHtml(item, {menu: true}),

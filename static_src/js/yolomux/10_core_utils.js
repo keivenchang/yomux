@@ -590,7 +590,7 @@ function normalizeFileExplorerMode(mode) {
 
 function readStoredFileExplorerMode() {
   const stored = storageGet(fileExplorerModeStorageKey);
-  if (stored === 'diff' || stored === 'files' || stored === 'tabber') return stored;
+  if (stored === 'diff' || stored === 'files') return stored;
   return storageGet(legacyFileExplorerChangesHiddenStorageKey) === '0' ? 'diff' : 'files';
 }
 

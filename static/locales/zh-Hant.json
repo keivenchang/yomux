@@ -510,6 +510,8 @@
   "pref.performance.tab_popover_follow_delay_ms.label": "分頁詳情跟隨延遲",
   "pref.performance.tab_popover_show_delay_ms.help": "分頁詳情彈出視窗開啟前的初始延遲。",
   "pref.performance.tab_popover_show_delay_ms.label": "分頁詳情停留延遲",
+  "pref.performance.tabber_activity_refresh_ms.help": "How often Tabber refreshes activity recency while Tabber is open.",
+  "pref.performance.tabber_activity_refresh_ms.label": "Client pull: Tabber activity",
   "pref.readonly": "唯讀存取",
   "pref.reset.all": "重設所有預設值",
   "pref.reset.aria": "全域重設警告",

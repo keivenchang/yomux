@@ -1143,6 +1143,7 @@ def split_seam_fixture_html():
 
 def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620):
     css = app_css()
+    brand_css = (REPO_ROOT / "static" / "brand.css").read_text(encoding="utf-8")
     script_uri = (REPO_ROOT / "static" / "yolomux.js").as_uri()
     dockview_css_uri = (REPO_ROOT / "static" / "vendor" / "dockview.css").as_uri()
     dockview_script_uri = (REPO_ROOT / "static" / "vendor" / "dockview-core.noStyle.js").as_uri()
@@ -1347,6 +1348,7 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
         <meta charset="utf-8">
         <link rel="stylesheet" href="{dockview_css_uri}">
         <style>{css}</style>
+        <style>{brand_css}</style>
         <style>
           body {{ margin: 0; }}
           #grid {{ width: {grid_width}px; height: {grid_height}px; }}
@@ -1355,7 +1357,7 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
       </head>
       <body>
         <header class="topbar">
-          <div class="brand-cell"><div class="brand title">YOLOmux</div><span id="httpsWarning" class="transport-warning" hidden></span></div>
+          <div class="brand-cell"><div class="brand brand-title title" aria-label="YOLOmux test"><span class="brand-yolo brand-green">YO</span><span class="brand-lo brand-green">LO</span><span class="brand-blue">m</span><span class="brand-red">u</span><span class="brand-yellow">x</span><span class="brand-version">test</span></div><span id="httpsWarning" class="transport-warning" hidden></span></div>
           <div id="sessionButtons" class="app-menu-area" aria-label="Application menus"></div>
           <div class="actions">
             <div id="latencyMeter" class="latency-meter"><svg class="latency-graph" viewBox="0 0 44 18"><polyline id="latencyLine" class="latency-line" points=""></polyline></svg><span id="latencyNumber" class="latency-number">-- ms</span></div>
@@ -5426,6 +5428,7 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
         const finderMode = document.querySelector('#panel-__files__ .file-explorer-mode-toggle[aria-pressed="true"]');
         const tabMeta = document.getElementById('tabMetaToggle');
         const notify = document.getElementById('notifyToggle');
+        const brandYo = document.querySelector('.brand-title .brand-yolo');
         const mdProbe = document.createElement('div');
         mdProbe.className = 'markdown-body';
         mdProbe.innerHTML = '<h1>Probe</h1>';
@@ -5485,6 +5488,8 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
           tabMetaBg: getComputedStyle(tabMeta).backgroundColor,
           tabMetaBorder: getComputedStyle(tabMeta).borderTopColor,
           notifyBg: getComputedStyle(notify).backgroundColor,
+          brandYoBg: getComputedStyle(brandYo).backgroundColor,
+          brandYoBorder: getComputedStyle(brandYo).borderTopColor,
           markdownHeadingColor: metrics.markdownHeadingColor,
           cmHeadingColor: metrics.cmHeadingColor,
           yoloBg: metrics.yoloBg,
@@ -5515,6 +5520,8 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
     assert metrics["tabMetaBg"] == "rgb(59, 130, 246)", metrics
     assert metrics["tabMetaBorder"] == "rgb(59, 130, 246)", metrics
     assert metrics["notifyBg"] == "rgb(59, 130, 246)", metrics
+    assert metrics["brandYoBg"] == "rgb(59, 130, 246)", metrics
+    assert metrics["brandYoBorder"] == "rgb(59, 130, 246)", metrics
     assert metrics["markdownHeadingColor"] == "rgb(59, 130, 246)", metrics
     assert metrics["cmHeadingColor"] == "rgb(59, 130, 246)", metrics
     assert metrics["yoloBg"] == "rgb(59, 130, 246)", metrics
@@ -5587,6 +5594,23 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
     assert cursor_metrics["rootCursorRgb"] == "204 255 0", cursor_metrics
     assert cursor_metrics["terminalCursor"] == "#ccff00", cursor_metrics
     assert cursor_metrics["activeScrollbarThumb"] == "rgba(204, 255, 0, 0.88)", cursor_metrics
+    browser.execute_script(
+        """
+        const radio = document.querySelector('input[type="radio"][data-setting-path="appearance.active_color"][value="yellow"]');
+        radio.checked = true;
+        radio.dispatchEvent(new Event('change', {bubbles: true}));
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const brandYo = document.querySelector('.brand-title .brand-yolo');
+            return window.__settingsPayload?.settings?.appearance?.active_color === 'yellow'
+              && getComputedStyle(brandYo).backgroundColor === 'rgb(234, 179, 8)'
+              && getComputedStyle(brandYo).borderTopColor === 'rgb(234, 179, 8)';
+            """
+        )
+    )
 
 
 def test_info_and_preferences_scrollbars_inherit_shared_hover_state(browser, tmp_path):

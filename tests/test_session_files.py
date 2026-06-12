@@ -112,6 +112,7 @@ def test_session_files_payload_keeps_transcript_paths_when_branch_is_clean(tmp_p
     git(repo, "commit", "-m", "base")
     tracked.write_text("merged\n", encoding="utf-8")
     git(repo, "commit", "-am", "merged change")
+    os.utime(tracked, (1400, 1400))
 
     rollout = tmp_path / "rollout.jsonl"
     rollout.write_text('{"msg":"*** Begin Patch\\n*** Update File: tracked.txt\\n"}\n', encoding="utf-8")
@@ -129,7 +130,7 @@ def test_session_files_payload_keeps_transcript_paths_when_branch_is_clean(tmp_p
     assert item["repo"] == str(repo)
     assert item["path"] == "tracked.txt"
     assert item["abs_path"] == str(tracked)
-    assert item["mtime"] == 1500
+    assert item["mtime"] == 1400
     assert item["source"] == "transcript"
     assert item["added"] is None
     assert item["removed"] is None

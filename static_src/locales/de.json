@@ -492,6 +492,8 @@
   "pref.performance.event_log_refresh_ms.label": "Aktualisierungsintervall des Ereignisprotokolls",
   "pref.performance.latency_refresh_ms.help": "How often the browser updates ping and latency displays.",
   "pref.performance.latency_refresh_ms.label": "Aktualisierungsintervall der Latenz",
+  "pref.performance.tabber_activity_refresh_ms.help": "How often Tabber refreshes activity recency while Tabber is open.",
+  "pref.performance.tabber_activity_refresh_ms.label": "Client pull: Tabber activity",
   "pref.performance.menu_hover_open_delay_ms.help": "Verzögerung, bevor Datei, Ansicht, tmux, Tabs und Hilfe per Hover öffnen.",
   "pref.performance.menu_hover_open_delay_ms.label": "Hover-Öffnungsverzögerung des Menüs",
   "pref.performance.popover_hide_delay_ms.help": "Verzögerung, bevor Hover-Popovers schließen, nachdem der Zeiger weggeht.",

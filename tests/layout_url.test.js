@@ -529,6 +529,7 @@ globalThis.__layoutTestApi = {
   inactiveTabItems,
   infoItemId,
   infoPanelSubTabForTest() { return infoPanelSubTab; },
+  setInfoPanelSubTabForTest(value) { infoPanelSubTab = normalizedInfoSubTab(value); },
   itemInLayout,
   itemLabel,
   itemParam,
@@ -1001,6 +1002,11 @@ globalThis.__layoutTestApi = {
     fileExplorerMode = normalizeFileExplorerMode(mode);
   },
   fileExplorerModeForTest() { return fileExplorerMode; },
+  readStoredFileExplorerModeForTest(value) {
+    if (value == null) localStorage.removeItem(fileExplorerModeStorageKey);
+    else localStorage.setItem(fileExplorerModeStorageKey, value);
+    return readStoredFileExplorerMode();
+  },
   buildTabberTree,
   renderTabberTree,
   fileExplorerModeSwitcherHtml,
@@ -1008,17 +1014,32 @@ globalThis.__layoutTestApi = {
   setTabberActivityForTest(payload) { tabberActivityPayload = payload; },
   setFileExplorerTreeSortModeForTest(mode) { fileExplorerTreeSortMode = mode; },
   setTabberSessionFilesForTest(session, files) { tabberSessionFilesCache.set(session, {files, loaded: true}); },
-  tabberRenderedRowsForTest() {
-    // Default-expanded: clearing the collapsed set renders the whole tree.
+  setTabberSessionFilesLoadingForTest(session) {
+    tabberSessionFilesCache.delete(session);
+    tabberSessionFilesInFlight.add(session);
+  },
+  setTabberCollapsedForTest(paths) {
     fileExplorerTabberCollapsed.clear();
+    for (const path of paths || []) fileExplorerTabberCollapsed.add(path);
+  },
+  tabberRenderedRowsForTest(options = {}) {
+    // Default-expanded: clearing the collapsed set renders the whole tree.
+    if (options.preserveCollapsed !== true) fileExplorerTabberCollapsed.clear();
     const el = document.createElement('div');
     el.className = 'changes-groups';
     renderTabberTree(el);
     return Array.from(el.querySelectorAll('.file-tree-row')).map(row => ({
       type: row.dataset.tabberType || '',
       name: (row.querySelector('.file-tree-name') || {}).textContent || '',
+      icon: (row.querySelector('.file-tree-icon') || {}).textContent || '',
       openFile: row.dataset.tabberOpenFile || '',
       repoRoot: row.dataset.tabberRepoRoot || '',
+      branch: row.dataset.tabberBranch || '',
+      nameHtml: (row.querySelector('.file-tree-name') || {}).innerHTML || '',
+      status: (row.querySelector('.file-tree-git-status') || {}).textContent || '',
+      statusHidden: row.querySelector('.file-tree-git-status')?.hidden !== false,
+      date: (row.querySelector('.file-tree-date') || {}).textContent || '',
+      title: row.getAttribute('title') || '',
     }));
   },
   tabberRenderedNamesForTest() {
@@ -3988,6 +4009,7 @@ test('t@2560', () => {
   assert.ok(/body\.file-explorer-mode-files \.file-explorer-changes-panel/.test(preferencesCss), 'files mode hides the Finder changes panel and resizer');
   assert.ok(/body\.file-explorer-mode-diff \.file-explorer-tree-panel/.test(preferencesCss), 'diff mode hides the Finder tree panel');
   assert.ok(/body\.file-explorer-mode-diff \.file-explorer-changes-panel[\s\S]*?\{[\s\S]*flex:\s*1 1 auto[\s\S]*max-block-size:\s*none/.test(preferencesCss), 'diff mode lets the Finder changes panel fill the pane');
+  assert.ok(/body\.file-explorer-mode-diff \.file-explorer-mode-files-only,\s*\nbody\.file-explorer-mode-tabber \.file-explorer-mode-files-only,\s*\nbody:not\(\.file-explorer-mode-diff\) \.file-explorer-mode-diff-only\s*\{[\s\S]*?display:\s*none/.test(preferencesCss), 'Tabber hides Finder-only toolbar controls like .*, Sync, create file/folder, sort, and reload');
   assert.ok(/body\.file-explorer-mode-tabber \.file-explorer-changes-panel/.test(preferencesCss), 'DOIT.58 B1: tabber mode fills the pane like diff (tree hidden, changes panel full)');
   assert.ok(/body\.file-explorer-mode-tabber \.file-explorer-tree-panel/.test(preferencesCss), 'DOIT.58 B1: tabber mode hides the Finder tree panel');
   assert.ok(/\.file-explorer-changes-panel \.changes-comparison-head\s*\{[^}]*flex-wrap: nowrap/.test(preferencesCss), '#44(d): the Finder comparison header is compacted to one tight line (header chrome takes less height)');
@@ -4249,7 +4271,7 @@ test('t@2560', () => {
   assert.equal(preferencesCss.includes('cm-insertedText'), false, '#44: the dead intra-line token rules are removed');
   assert.equal(preferencesCss.includes('--diff-add-text-bg'), false, '#44: the unused intra-line text-bg token is removed');
   assert.ok(preferencesCss.includes('.file-tree-row.repo-non-main'), 'Finder repo rows have non-main branch styling');
-  api.setClientSettingsPatchForTest({performance: {server_event_poll_ms: 850, server_background_file_event_poll_ms: 5000, server_directory_event_poll_ms: 3000, remote_resize_delay_ms: 220}});
+  api.setClientSettingsPatchForTest({performance: {server_event_poll_ms: 850, server_background_file_event_poll_ms: 5000, server_directory_event_poll_ms: 3000, tabber_activity_refresh_ms: 15000, remote_resize_delay_ms: 220}});
   const preferencesHtml = api.preferencesPanelHtmlForTest('', []);
   assert.ok(preferencesHtml.indexOf('preferences-search-row') < preferencesHtml.indexOf('preferences-path-rows'), 'preferences search is first');
   assert.ok(preferencesHtml.includes('data-preferences-search-action>YOsearch</button>'), 'preferences search has an explicit YOsearch action');
@@ -4285,6 +4307,7 @@ test('t@2560', () => {
   assert.ok(/data-setting-path="performance\.server_directory_event_poll_ms"[\s\S]*?value="3\.000"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'server-side SSE directory-change poll displays seconds');
   assert.ok(/data-setting-path="performance\.latency_refresh_ms"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'latency refresh displays seconds instead of raw milliseconds');
   assert.ok(/data-setting-path="performance\.event_log_refresh_ms"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'event-log refresh displays seconds instead of raw milliseconds');
+  assert.ok(/data-setting-path="performance\.tabber_activity_refresh_ms"[\s\S]*?value="15"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'Tabber activity refresh displays seconds and defaults to 15 seconds');
   assert.ok(/data-setting-path="performance\.popover_show_delay_ms"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'hover popover timing remains in milliseconds');
   assert.ok(/data-setting-path="performance\.menu_hover_open_delay_ms"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'menu hover timing remains in milliseconds');
   assert.ok(/data-setting-path="performance\.tab_popover_show_delay_ms"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'tab hover timing remains in milliseconds');
@@ -4294,6 +4317,7 @@ test('t@2560', () => {
   assert.ok(performanceHtml.includes('Server SSE: editor file-change poll'), 'Performance labels the server-side SSE editor file-change interval');
   assert.ok(performanceHtml.includes('Server SSE: background editor file-change poll'), 'Performance labels the server-side SSE background editor interval');
   assert.ok(performanceHtml.includes('Server SSE: directory-change poll'), 'Performance labels the server-side SSE directory-change interval');
+  assert.ok(performanceHtml.includes('Client pull: Tabber activity'), 'Performance labels the Tabber activity refresh interval');
   assert.equal(performanceHtml.includes('Client pull: file-change/Differ fallback'), false, 'Performance no longer exposes the removed client file-change fallback interval');
   for (const removedPath of [
     'file_explorer.refresh_seconds',
@@ -4306,7 +4330,7 @@ test('t@2560', () => {
   ]) {
     assert.equal(preferencesHtml.includes(`data-setting-path="${removedPath}"`), false, `${removedPath} is no longer exposed in Preferences`);
   }
-  assert.ok(/data-setting-path="performance\.server_event_poll_ms"[\s\S]*data-setting-path="performance\.server_background_file_event_poll_ms"[\s\S]*data-setting-path="performance\.server_directory_event_poll_ms"[\s\S]*data-setting-path="performance\.latency_refresh_ms"[\s\S]*data-setting-path="performance\.event_log_refresh_ms"/.test(performanceHtml), 'Performance order groups server SSE settings before remaining client timers');
+  assert.ok(/data-setting-path="performance\.server_event_poll_ms"[\s\S]*data-setting-path="performance\.server_background_file_event_poll_ms"[\s\S]*data-setting-path="performance\.server_directory_event_poll_ms"[\s\S]*data-setting-path="performance\.latency_refresh_ms"[\s\S]*data-setting-path="performance\.event_log_refresh_ms"[\s\S]*data-setting-path="performance\.tabber_activity_refresh_ms"/.test(performanceHtml), 'Performance order groups server SSE settings before remaining client timers');
   assert.equal(preferencesHtml.includes('data-setting-path="file_explorer.refresh_ms"'), false, 'Finder refresh interval no longer exposes the legacy millisecond setting');
   assert.equal(diffBundle.includes('fileExplorerRefreshMsFromSettings'), false, 'Finder client-pull refresh setting helper is removed');
   assert.equal(diffBundle.includes('sessionFilesRefreshMsFromSettings'), false, 'Changed-files client-pull refresh setting helper is removed');
@@ -4315,6 +4339,7 @@ test('t@2560', () => {
   assert.ok(diffBundle.includes("path: 'performance.server_event_poll_ms'") && diffBundle.includes('displayDecimals: 3'), 'server file-change poll stores milliseconds but displays 0.850-style seconds');
   assert.ok(diffBundle.includes("path: 'performance.server_background_file_event_poll_ms'") && diffBundle.includes('displayDecimals: 3'), 'server background file-change poll stores milliseconds but displays 5.000-style seconds');
   assert.ok(diffBundle.includes("path: 'performance.server_directory_event_poll_ms'") && diffBundle.includes('displayDecimals: 3'), 'server directory-change poll stores milliseconds but displays 0.850-style seconds');
+  assert.ok(diffBundle.includes("path: 'performance.tabber_activity_refresh_ms'") && diffBundle.includes("initialSetting('performance.tabber_activity_refresh_ms', 15000)"), 'Tabber activity refresh is backed by the Performance preference');
   assert.ok(preferencesHtml.includes('data-setting-path="uploads.max_bytes"'), 'preferences expose the upload size cap');
   api.setClientSettingsPatchForTest({uploads: {max_bytes: 64 * 1024 * 1024}});
   const largeUploadPreferencesHtml = api.preferencesPanelHtmlForTest('upload', []);
@@ -6908,28 +6933,30 @@ test('t@6393', () => {
 test('t@6404', () => {
   const api = loadYolomux('', ['1']);
   const windowPanes = [
-    {window: '2', window_name: 'codex', window_active: false, active: true, command: 'node'},
-    {window: '1', window_name: 'bash', window_active: false, active: true, command: 'bash'},
-    {window: '3', window_name: 'node', process_label: 'codex', window_active: true, active: true, command: 'node'},
+    {window: '2', window_name: 'codex', window_active: false, active: true, command: 'node', pid: 222},
+    {window: '1', window_name: 'bash', window_active: false, active: true, command: 'bash', pid: 111},
+    {window: '3', window_name: 'node', process_label: 'codex', process_label_pid: 3333, pid: 333, window_active: true, active: true, command: 'node'},
   ];
   assert.deepStrictEqual(canonical(api.tmuxWindowRecords(windowPanes).map(item => ({
     indexText: item.indexText,
     nameLabel: item.nameLabel,
     numberLabel: item.numberLabel,
     indexedNameLabel: item.indexedNameLabel,
+    processLabel: item.processLabel,
+    pid: item.pid,
     active: item.active,
   }))), [
-    {indexText: '1', nameLabel: 'bash', numberLabel: '1', indexedNameLabel: '1:bash', active: false},
-    {indexText: '2', nameLabel: 'codex(2)', numberLabel: '2', indexedNameLabel: '2:codex(2)', active: false},
-    {indexText: '3', nameLabel: 'codex(3)', numberLabel: '3', indexedNameLabel: '3:codex(3)', active: true},
+    {indexText: '1', nameLabel: 'bash (pid=111)', numberLabel: '1', indexedNameLabel: '1:bash (pid=111)', processLabel: 'bash (pid=111)', pid: 111, active: false},
+    {indexText: '2', nameLabel: 'codex(2) (pid=222)', numberLabel: '2', indexedNameLabel: '2:codex(2) (pid=222)', processLabel: 'codex (pid=222)', pid: 222, active: false},
+    {indexText: '3', nameLabel: 'codex(3) (pid=3333)', numberLabel: '3', indexedNameLabel: '3:codex(3) (pid=3333)', processLabel: 'codex (pid=3333)', pid: 3333, active: true},
   ], 'P5: tmux window records sort by index and disambiguate duplicate names with the window index');
   const windowBarHtml = api.tmuxWindowBarHtml('1', {panes: windowPanes});
   assert.ok(windowBarHtml.includes('data-tmux-window-label-mode="names"'), 'P5: normal window bars prefer names');
   assert.ok(windowBarHtml.includes('data-window-index="1"'), 'P5: window bar button targets window 1');
   assert.ok(windowBarHtml.includes('data-window-index="2"'), 'P5: window bar button targets window 2');
   assert.ok(/class="tab tmux-window-button active"[^>]*data-window-index="3"[^>]*aria-pressed="true"/.test(windowBarHtml), 'P5: active tmux window button is highlighted and pressed');
-  assert.ok(windowBarHtml.includes('<span class="tmux-window-name-label">1:bash</span>'), 'DOIT.53 P2: normal labels include index:name');
-  assert.ok(windowBarHtml.includes('<span class="tmux-window-name-label">2:codex(2)</span>'), 'P5: duplicate names keep the disambiguating suffix after the index prefix');
+  assert.ok(windowBarHtml.includes('<span class="tmux-window-name-label">1:bash (pid=111)</span>'), 'DOIT.53 P2: normal labels include index:name plus pid');
+  assert.ok(windowBarHtml.includes('<span class="tmux-window-name-label">2:codex(2) (pid=222)</span>'), 'P5: duplicate names keep the disambiguating suffix after the index prefix and include pid');
   assert.equal(windowBarHtml.includes('3:node'), false, 'DOIT.53 P2: process-aware agent labels beat raw tmux window names like node');
   assert.ok(/data-window-agent="shell"[^>]*data-window-index="1"/.test(windowBarHtml), 'per-agent color: the bash window is tagged as the shell agent');
   assert.ok(/tmux-window-button active"[^>]*data-window-agent="codex"/.test(windowBarHtml), 'per-agent color: the active codex window keeps its agent tag so the swatch shows on the green toggle');
@@ -8219,6 +8246,7 @@ test('t@7620', () => {
     'pref.performance.latency_refresh_ms.label', 'pref.performance.event_log_refresh_ms.label',
     'pref.performance.server_event_poll_ms.label', 'pref.performance.server_background_file_event_poll_ms.label',
     'pref.performance.server_directory_event_poll_ms.label',
+    'pref.performance.tabber_activity_refresh_ms.label',
     'pref.notifications.throttle_seconds.label',
     'pref.terminal_editor.scrollback.label', 'pref.uploads.max_bytes.label',
     'pref.yoagent.backend.label', 'pref.yolo.dry_run.label',
@@ -9493,6 +9521,7 @@ test('t@8804', () => {
 // shared row pipeline (no forked *RowHtml builder), plus a behavioral test of the tree assembly.
 test('t@tabber', () => {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  const css = fs.readFileSync('static/yolomux.css', 'utf8');
   // B1/B3 source guards: routes through the shared pipeline, no forked builder, finder refreshes skip tabber rows.
   assert.ok(/mode === 'diff' \|\| mode === 'tabber' \? mode : 'files'/.test(source), 'B1: normalizeFileExplorerMode accepts files|diff|tabber');
   assert.ok(/if \(options\.mode === 'tabber'\) return updateTabberRow\(/.test(source), 'B3: updateFileTreeRow dispatches tabber rows to updateTabberRow');
@@ -9500,50 +9529,91 @@ test('t@tabber', () => {
   assert.ok(/updateFileTreeRowContents\(row, icon, label,/.test(source), 'B3: updateTabberRow fills columns via the shared updateFileTreeRowContents');
   assert.equal(/function tabberRowHtml|function renderTabberRowHtml|function tabberFileRowHtml/.test(source), false, 'B3: no bespoke tabber *RowHtml builder');
   assert.ok((source.match(/\.file-tree-row\[data-path\]:not\(\[data-tabber-type\]\)/g) || []).length >= 2, 'finder global row refreshes exclude tabber rows (no relabel/clobber)');
+  assert.ok(/\.file-tree-row\.tabber-row\s*\{[\s\S]*--tabber-level0-color:\s*var\(--markdown-heading\)[\s\S]*--tabber-level1-color:\s*var\(--code-function\)[\s\S]*--tabber-path-color:\s*var\(--text\)/.test(css), 'Tabber uses restrained level colors and keeps path rows normal text');
+  assert.ok(/body\.theme-light \.file-tree-row\.tabber-row\s*\{[\s\S]*--tabber-level1-color:\s*var\(--lt-code-function\)[\s\S]*--tabber-path-color:\s*var\(--text\)/.test(css), 'Tabber light mode keeps paths normal and windows one level color');
+  assert.ok(/\.file-tree-row\.tabber-row\[data-tabber-type="tab"\]:not\(\.selected\) > \.file-tree-name,[\s\S]*color:\s*var\(--tabber-level0-color\)/.test(css), 'non-tmux Tabber pane rows do not use purple');
+  assert.ok(css.includes('@keyframes tabber-loading-dots'), 'Tabber shows moving dots while touched paths are loading');
+  assert.ok(/\.file-tree-row\.tabber-row \.tabber-window-label \.agent-icon\s*\{[\s\S]*width:\s*calc\(var\(--file-explorer-font-size\) \+ 2px\)[\s\S]*height:\s*calc\(var\(--file-explorer-font-size\) \+ 2px\)/.test(css), 'Tabber process icons scale with the file explorer row font');
+  assert.ok(/function warmTabberDataOnLaunch\(\)[\s\S]*?tabberLaunchWarmupStarted = true;[\s\S]*?fetchTabberActivity\(\);/.test(source), 'Tabber launch warmup primes only the cheap activity ledger');
+  assert.ok(/transcriptMetaLoaded = true;[\s\S]*?warmTabberDataOnLaunch\(\)/.test(source), 'Tabber launch warmup runs as soon as transcript metadata is available');
+  assert.ok(/let tabberActivityRefreshMs = 15000;[\s\S]*tabberActivityRefreshMs = initialSetting\('performance\.tabber_activity_refresh_ms', 15000\);/.test(source), 'Tabber activity refresh defaults to 15 seconds and is Preference-backed after settings initialize');
+  assert.ok(/Promise\.resolve\(state\.callback\(\)\)[\s\S]*?\.finally\(scheduleNext\)/.test(source), 'runtime intervals wait for async callbacks to settle before starting the next wait');
 
   const api = loadYolomux();
   assert.equal(api.normalizeFileExplorerMode('tabber'), 'tabber');
   assert.equal(api.normalizeFileExplorerMode('bogus'), 'files');
+  assert.equal(api.readStoredFileExplorerModeForTest('tabber'), 'files', 'Tabber is an explicit mode choice, not the default restored left Finder pane');
   assert.ok(/data-file-explorer-mode-set="files"[\s\S]*data-file-explorer-mode-set="diff"[\s\S]*data-file-explorer-mode-set="tabber"/.test(api.fileExplorerModeSwitcherHtml()), 'B1: Finder / Differ / Tabber order');
+  assert.ok(source.includes('data-tabber-session-open') && source.includes('data-tabber-expand'), 'session rows split the click target: session name opens, description expands');
+  assert.ok(/row\.dataset\.tabberItem === infoItemId\) openInfoSubTab\('info'\)/.test(source), 'YO!info Tabber row opens the YO!info sub-tab, not the remembered YO!agent sub-tab');
+  api.setInfoPanelSubTabForTest('yoagent');
+  api.commandPaletteCommandItems().find(item => item.targetItem === api.infoItemId).run();
+  assert.equal(api.infoPanelSubTabForTest(), 'info', 'YO!info-labeled palette rows open YO!info, not the remembered YO!agent sub-tab');
 
   api.setTranscriptInfoForTest('1', {
     project: {git: {branch: 'devbranch', root: '/home/u/proj'}},
     panes: [
-      {window: '0', pane: '0', window_active: true, active: true, process_label: 'claude', command: 'claude', current_path: '/home/u/proj'},
-      {window: '1', pane: '0', window_active: false, active: true, process_label: 'bash', command: 'bash', current_path: '/home/u'},
+      {window: '0', pane: '0', window_active: true, active: true, process_label: 'claude', process_label_pid: 12345, command: 'claude', current_path: '/home/u/proj'},
+      {window: '1', pane: '0', window_active: false, active: true, process_label: 'bash', pid: 54321, command: 'bash', current_path: '/home/u'},
     ],
   });
   api.setTranscriptInfoForTest('2', {
-    panes: [{window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', command: 'codex', current_path: '/home/u/two'}],
+    panes: [{window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', process_label_pid: 24680, command: 'codex', current_path: '/home/u/two'}],
   });
   // L3 paths for the claude window (set BEFORE building so the agent window gets repo children).
   api.setTabberSessionFilesForTest('1', [
     {path: 'src/app.py', abs_path: '/home/u/proj/src/app.py', repo: '/home/u/proj', status: 'M', mtime: 5000},
     {path: 'README.md', abs_path: '/home/u/proj/README.md', repo: '/home/u/proj', status: 'A', mtime: 4000},
+    {path: '/home/u/proj/src/deep/tool.py', abs_path: '/home/u/proj/src/deep/tool.py', repo: '', status: 'T', mtime: 4500},
+    {path: '/tmp/scratch.txt', abs_path: '/tmp/scratch.txt', repo: '', status: 'T', mtime: 9000},
   ]);
 
   const {entries, entriesByDir} = api.buildTabberTree();
   const s1 = entries.find(e => e.tabber && e.tabber.session === '1');
   assert.ok(s1 && s1.tabber.type === 'session', 'B2: tmux session 1 appears at level 0');
-  assert.ok(String(s1.tabber.statusText || '').length > 0, 'B2: the repo branch annotates the session row');
+  assert.ok(String(s1.tabber.branchText || '').length > 0, 'B2: the repo branch is retained as Tabber metadata');
   const windows = entriesByDir.get('/' + s1.name);
   assert.ok(Array.isArray(windows) && windows.length === 2, 'B2: session 1 has its two tmux windows');
   const claudeWin = windows.find(w => /0:claude/.test(w.tabber.label));
   assert.ok(claudeWin, 'B2: window label is index:process (0:claude)');
+  assert.ok(/0:claude \(pid=12345\)/.test(claudeWin.tabber.label), 'B2: window label shows the displayed process pid');
   assert.equal(claudeWin.tabber.active, true, '#2: the active window is flagged');
-  assert.equal(claudeWin.kind, 'dir', 'L3: the agent window expands (has touched-path children)');
+  assert.equal(claudeWin.kind, 'dir', 'L3: the agent window expands to touched absolute paths');
   const repos = entriesByDir.get('/' + s1.name + '/' + claudeWin.name);
   assert.ok(Array.isArray(repos) && repos.length === 1 && repos[0].tabber.type === 'repo', 'L3: agent window holds a repo group');
-  assert.ok(/proj/.test(repos[0].tabber.label), 'L3: repo row labeled by repo basename');
-  const files = entriesByDir.get('/' + s1.name + '/' + claudeWin.name + '/' + repos[0].name);
-  assert.ok(Array.isArray(files) && files.some(f => f.tabber.type === 'path' && f.tabber.openFile === '/home/u/proj/src/app.py'), 'L3/B5: file rows carry abs_path');
+  assert.equal(repos[0].kind, 'file', 'L3: repo/path rows are leaves, not expandable file lists');
+  assert.equal(repos[0].tabber.label, '/home/u/proj', 'L3: repo/path row shows the full absolute path');
+  assert.equal(repos.some(row => /\/home\/u\/proj\/src/.test(row.tabber.label)), false, 'L3: descendant paths fold into the known repo root');
+  assert.equal(repos.some(row => /^\/tmp/.test(row.tabber.label)), false, 'L3: non-repo touched paths are omitted from Tabber');
+  assert.equal(entriesByDir.has('/' + s1.name + '/' + claudeWin.name + '/' + repos[0].name), false, 'L3: Tabber does not list individual files under the path row');
 
-  // Render guard: real labels (never synthetic node names); active window marked; repo + path rows present.
+  // Render guard: real labels (never synthetic node names); active window marked; absolute path rows present.
   const rows = api.tabberRenderedRowsForTest();
   assert.equal(rows.some(r => /^[swrf]_\d/.test(r.name)), false, 'rows show human labels, not synthetic node names (got ' + JSON.stringify(rows.map(r => r.name).slice(0, 8)) + ')');
-  assert.ok(rows.some(r => r.type === 'window' && /0:claude ●/.test(r.name)), '#2: the current window is marked (got ' + JSON.stringify(rows.filter(r => r.type === 'window').map(r => r.name)) + ')');
-  assert.ok(rows.some(r => r.type === 'repo' && /proj/.test(r.name)), 'L3: repo group rows render');
-  assert.ok(rows.some(r => r.type === 'path' && r.openFile === '/home/u/proj/src/app.py'), 'L3: path rows render with abs_path');
+  assert.ok(rows.some(r => r.type === 'session' && r.nameHtml.includes('tabber-session-name') && r.nameHtml.includes('tabber-session-description')), 'session rows render separate name and description click targets');
+  assert.ok(rows.some(r => r.type === 'window' && /0:claude \(pid=12345\) ●/.test(r.name)), '#2: the current window is marked and shows pid (got ' + JSON.stringify(rows.filter(r => r.type === 'window').map(r => r.name)) + ')');
+  assert.ok(rows.some(r => r.type === 'window' && r.nameHtml.includes('tabber-window-label') && r.nameHtml.includes('agent-icon claude')), 'Claude Tabber window rows show the shared Claude icon');
+  assert.ok(rows.some(r => r.type === 'window' && r.nameHtml.includes('tabber-window-label') && r.nameHtml.includes('agent-icon codex')), 'Codex Tabber window rows show the shared Codex icon');
+  const claudeWindowRow = rows.find(r => r.type === 'window' && /0:claude \(pid=12345\)/.test(r.name));
+  assert.ok(/tabber-window-text[^>]*>0:claude<[\s\S]*agent-icon claude[\s\S]*tabber-window-pid[^>]*> \(pid=12345\)</.test(claudeWindowRow?.nameHtml || ''), 'Claude icon renders after the window name and before the pid');
+  api.setFileExplorerTreeSortModeForTest('newest');
+  api.setTabberActivityForTest({activity: {'1:1': {last_user_input_ts: 99999}, '1:0': {last_user_input_ts: 1}}});
+  api.setTabberCollapsedForTest(['/s_1']);
+  const firstLevelExpandedRows = api.tabberRenderedRowsForTest({preserveCollapsed: true});
+  assert.ok(firstLevelExpandedRows.some(r => r.type === 'window' && /0:claude \(pid=12345\)/.test(r.name)), 'first-level Tabber session rows stay expanded so process rows remain visible');
+  assert.ok(firstLevelExpandedRows.findIndex(r => /0:claude/.test(r.name)) < firstLevelExpandedRows.findIndex(r => /1:bash/.test(r.name)), 'Tabber window rows stay in tmux window-index order even when tree sort is newest');
+  assert.ok(rows.some(r => r.type === 'repo' && r.repoRoot === '/home/u/proj' && r.name === '/home/u/proj'), 'L3: path rows render with absolute paths');
+  assert.ok(rows.some(r => r.type === 'repo' && r.repoRoot === '/home/u/proj' && r.icon === '📁'), 'L3: path rows use a folder icon');
+  assert.ok(rows.some(r => r.type === 'session' && r.branch === 'devbranch' && r.title.includes('branch: devbranch')), 'B2: the session branch remains available in row metadata/hover text');
+  assert.ok(rows.some(r => r.type === 'repo' && r.repoRoot === '/home/u/proj' && r.branch === 'devbranch' && r.title.includes('branch: devbranch')), 'L3: repo path rows retain branch context without visible badge text');
+  for (const row of rows.filter(r => r.type === 'session' || r.type === 'repo')) {
+    assert.equal(row.status, '', `Tabber ${row.type} row must not render branch/status fragments before the date column`);
+    assert.equal(row.statusHidden, true, `Tabber ${row.type} row hides the shared one-character git status badge`);
+  }
+  assert.equal(rows.some(r => r.type === 'path' || r.openFile), false, 'L3: individual file rows are not rendered');
+  api.setTabberSessionFilesLoadingForTest('1');
+  const loadingRows = api.tabberRenderedRowsForTest({preserveCollapsed: true});
+  assert.ok(loadingRows.some(r => r.type === 'loading' && /Fetching paths/.test(r.name)), 'L3: initial touched-path fetch shows a loading row');
   // Non-tmux tabs (Preferences / YO!info / file editors) render as leaf rows AFTER all the sessions.
   const rowTypes = rows.map(r => r.type);
   assert.ok(rowTypes.includes('tab'), 'non-tmux tabs appear in the Tabber');
@@ -9558,7 +9628,7 @@ test('t@tabber', () => {
   assert.ok(codexAt >= 0 && claudeAt >= 0 && codexAt < claudeAt, 'B4: the more-recently-active session sorts first (codex before claude)');
 
   // B5 context-menu source guard.
-  assert.ok(/data-tabber-type="path"[\s\S]*?showFileTreeContextMenu\(row, abs,/.test(source), 'B5: right-click on a path row reuses the shared file context menu');
+  assert.ok(/data-tabber-type="repo"[\s\S]*?showFileTreeContextMenu\(row, abs,/.test(source), 'B5: right-click on an absolute path row reuses the shared file context menu');
 });
 
 {

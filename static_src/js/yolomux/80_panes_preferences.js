@@ -1286,7 +1286,7 @@ function tmuxWindowIndices(panes) {
 }
 
 const tmuxWindowBarNumericFallbackCount = 8;
-const tmuxWindowBarNamedCharLimit = 44;
+const tmuxWindowBarNamedCharLimit = 80;
 
 function tmuxWindowDisplayName(pane) {
   const process = String(pane?.process_label || '').trim();
@@ -1297,6 +1297,15 @@ function tmuxWindowDisplayName(pane) {
   return String(inferred || '').trim() || `window ${pane?.window ?? ''}`.trim() || 'window';
 }
 
+function tmuxWindowProcessPid(pane) {
+  const value = Number(pane?.process_label_pid || pane?.pid || 0);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : null;
+}
+
+function tmuxWindowDisplayLabel(name, pid) {
+  return pid ? `${name} (pid=${pid})` : name;
+}
+
 function tmuxWindowRecords(panes) {
   const byIndex = new Map();
   for (const pane of Array.isArray(panes) ? panes : []) {
@@ -1305,8 +1314,11 @@ function tmuxWindowRecords(panes) {
     const indexText = String(pane.window);
     const existing = byIndex.get(index);
     const active = pane.window_active === true;
-    const record = existing || {index, indexText, name: tmuxWindowDisplayName(pane), active: false};
-    if (!existing || active || !record.name) record.name = tmuxWindowDisplayName(pane);
+    const record = existing || {index, indexText, name: tmuxWindowDisplayName(pane), pid: tmuxWindowProcessPid(pane), active: false};
+    if (!existing || active || !record.name) {
+      record.name = tmuxWindowDisplayName(pane);
+      record.pid = tmuxWindowProcessPid(pane);
+    }
     record.active = record.active || active;
     byIndex.set(index, record);
   }
@@ -1317,7 +1329,8 @@ function tmuxWindowRecords(panes) {
   });
   return records.map(record => ({
     ...record,
-    nameLabel: nameCounts.get(record.name) > 1 ? `${record.name}(${record.indexText})` : record.name,
+    processLabel: tmuxWindowDisplayLabel(record.name, record.pid),
+    nameLabel: tmuxWindowDisplayLabel(nameCounts.get(record.name) > 1 ? `${record.name}(${record.indexText})` : record.name, record.pid),
     numberLabel: record.indexText,
   })).map(record => ({
     ...record,
@@ -2187,6 +2200,7 @@ function preferenceSections() {
       {path: 'performance.server_directory_event_poll_ms', label: t('pref.performance.server_directory_event_poll_ms.label'), type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.server_directory_event_poll_ms.help')},
       {path: 'performance.latency_refresh_ms', label: t('pref.performance.latency_refresh_ms.label'), type: 'number', min: 1, max: 30, step: 0.1, suffix: 's', scale: 1000, help: t('pref.performance.latency_refresh_ms.help')},
       {path: 'performance.event_log_refresh_ms', label: t('pref.performance.event_log_refresh_ms.label'), type: 'number', min: 1, max: 60, step: 0.1, suffix: 's', scale: 1000, help: t('pref.performance.event_log_refresh_ms.help')},
+      {path: 'performance.tabber_activity_refresh_ms', label: t('pref.performance.tabber_activity_refresh_ms.label'), type: 'number', min: 1, max: 60, step: 0.5, suffix: 's', scale: 1000, help: t('pref.performance.tabber_activity_refresh_ms.help')},
       {path: 'performance.popover_show_delay_ms', label: t('pref.performance.popover_show_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.popover_show_delay_ms.help')},
       {path: 'performance.popover_hide_delay_ms', label: t('pref.performance.popover_hide_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.popover_hide_delay_ms.help')},
       {path: 'performance.menu_hover_open_delay_ms', label: t('pref.performance.menu_hover_open_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.menu_hover_open_delay_ms.help')},

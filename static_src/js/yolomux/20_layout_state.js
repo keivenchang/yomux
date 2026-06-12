@@ -1478,7 +1478,7 @@ function commandPaletteCommandItems() {
     mtime: commandPalettePaneMtime(item),
     searchFields: tabSearchFields(item),
     keybinding: 'Enter',
-    run: () => selectSession(item, {userInitiated: true}),
+    run: () => (item === infoItemId ? openInfoSubTab('info') : selectSession(item, {userInitiated: true})),
     ...extra,
   });
   const fileGroups = new Map();   // path -> [items], in discovery order

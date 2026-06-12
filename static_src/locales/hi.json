@@ -492,6 +492,8 @@
   "pref.performance.event_log_refresh_ms.label": "Event log रिफ्रेश अंतराल",
   "pref.performance.latency_refresh_ms.help": "How often the browser updates ping and latency displays.",
   "pref.performance.latency_refresh_ms.label": "Latency रिफ्रेश अंतराल",
+  "pref.performance.tabber_activity_refresh_ms.help": "How often Tabber refreshes activity recency while Tabber is open.",
+  "pref.performance.tabber_activity_refresh_ms.label": "Client pull: Tabber activity",
   "pref.performance.menu_hover_open_delay_ms.help": "File, View, tmux, Tabs, और Help के hover से खुलने से पहले की देरी।",
   "pref.performance.menu_hover_open_delay_ms.label": "मेनू hover open देरी",
   "pref.performance.popover_hide_delay_ms.help": "पॉइंटर हटने के बाद hover popovers बंद होने से पहले की देरी।",

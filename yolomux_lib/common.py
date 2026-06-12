@@ -321,6 +321,7 @@ class PaneInfo:
     title: str
     pid: int
     process_label: str | None = None
+    process_label_pid: int | None = None
     window_name: str = ""
 
 

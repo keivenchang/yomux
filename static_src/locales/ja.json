@@ -492,6 +492,8 @@
   "pref.performance.event_log_refresh_ms.label": "イベントログの更新間隔",
   "pref.performance.latency_refresh_ms.help": "How often the browser updates ping and latency displays.",
   "pref.performance.latency_refresh_ms.label": "レイテンシの更新間隔",
+  "pref.performance.tabber_activity_refresh_ms.help": "How often Tabber refreshes activity recency while Tabber is open.",
+  "pref.performance.tabber_activity_refresh_ms.label": "Client pull: Tabber activity",
   "pref.performance.menu_hover_open_delay_ms.help": "ファイル・表示・tmux・タブ・ヘルプがホバーで開くまでの遅延。",
   "pref.performance.menu_hover_open_delay_ms.label": "メニューのホバー開く遅延",
   "pref.performance.popover_hide_delay_ms.help": "ポインターが離れた後にホバーポップオーバーが閉じるまでの遅延。",

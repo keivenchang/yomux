@@ -78,6 +78,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "performance": {
         "latency_refresh_ms": 3000,
         "event_log_refresh_ms": 5000,
+        "tabber_activity_refresh_ms": 15000,
         "server_event_poll_ms": 850,
         "server_background_file_event_poll_ms": 5000,
         "server_directory_event_poll_ms": 3000,
@@ -192,6 +193,7 @@ NOTIFY_TRANSITION_KEYS = SESSION_STATE_KEYS | PR_TRANSITION_KEYS
 STALE_DEFAULT_MIGRATIONS: dict[tuple[str, str], Any] = {
     ("performance", "latency_refresh_ms"): 3_001,
     ("performance", "event_log_refresh_ms"): 5_003,
+    ("performance", "tabber_activity_refresh_ms"): (5_000, 5_009),
     ("performance", "server_event_poll_ms"): (5_000, 5_009),
     ("performance", "server_background_file_event_poll_ms"): (5_000, 5_009),
     ("performance", "server_directory_event_poll_ms"): (5_000, 5_009),
@@ -213,6 +215,7 @@ SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
     ("appearance", "metadata_badge_pulse_seconds"): (0, 120),
     ("performance", "latency_refresh_ms"): (1000, 30000),
     ("performance", "event_log_refresh_ms"): (1000, 60000),
+    ("performance", "tabber_activity_refresh_ms"): (1000, 60000),
     ("performance", "server_event_poll_ms"): (250, 60000),
     ("performance", "server_background_file_event_poll_ms"): (250, 60000),
     ("performance", "server_directory_event_poll_ms"): (250, 60000),
@@ -321,6 +324,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("appearance", "metadata_badge_pulse_seconds"): "Seconds, 0-120. Duration for PR/branch metadata badge pulses.",
     ("performance", "latency_refresh_ms"): "Client-side browser-to-server health ping interval. Stored as milliseconds, shown as seconds in Preferences, 1-30.",
     ("performance", "event_log_refresh_ms"): "Client-side refresh interval for open YOLO/event-log panes. Stored as milliseconds, shown as seconds in Preferences, 1-60.",
+    ("performance", "tabber_activity_refresh_ms"): "Client-side refresh interval for Tabber activity recency while Tabber is open. Stored as milliseconds, shown as seconds in Preferences, 1-60.",
     ("performance", "server_event_poll_ms"): "Stored as milliseconds, shown as seconds in Preferences, 0.250-60. Server-side SSE poll interval for open editor file signatures in visible panes before pushing files_changed events to browsers.",
     ("performance", "server_background_file_event_poll_ms"): "Stored as milliseconds, shown as seconds in Preferences, 0.250-60. Server-side SSE poll interval for background editor file signatures before pushing files_changed events to browsers.",
     ("performance", "server_directory_event_poll_ms"): "Stored as milliseconds, shown as seconds in Preferences, 0.250-60. Server-side SSE poll interval for Finder/Differ directory signatures before pushing fs_changed events to browsers.",

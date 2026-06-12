@@ -510,6 +510,8 @@
   "pref.performance.tab_popover_follow_delay_ms.label": "탭 상세 추적 지연",
   "pref.performance.tab_popover_show_delay_ms.help": "탭 상세 팝업이 열리기까지의 초기 지연 시간입니다.",
   "pref.performance.tab_popover_show_delay_ms.label": "탭 상세 호버 지연",
+  "pref.performance.tabber_activity_refresh_ms.help": "How often Tabber refreshes activity recency while Tabber is open.",
+  "pref.performance.tabber_activity_refresh_ms.label": "Client pull: Tabber activity",
   "pref.readonly": "읽기 전용 접근",
   "pref.reset.all": "모든 기본값으로 초기화",
   "pref.reset.aria": "전체 초기화 경고",

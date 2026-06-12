@@ -510,6 +510,8 @@
   "pref.performance.tab_popover_follow_delay_ms.label": "Atraso de acompanhamento de detalhes de aba",
   "pref.performance.tab_popover_show_delay_ms.help": "Atraso inicial antes de um popup de detalhes de aba abrir.",
   "pref.performance.tab_popover_show_delay_ms.label": "Atraso de hover para detalhes de aba",
+  "pref.performance.tabber_activity_refresh_ms.help": "How often Tabber refreshes activity recency while Tabber is open.",
+  "pref.performance.tabber_activity_refresh_ms.label": "Client pull: Tabber activity",
   "pref.readonly": "acesso somente leitura",
   "pref.reset.all": "Redefinir todos os padrões",
   "pref.reset.aria": "Aviso de redefinição GLOBAL",

@@ -492,6 +492,8 @@
   "pref.performance.event_log_refresh_ms.label": "이벤트 로그 갱신 간격",
   "pref.performance.latency_refresh_ms.help": "How often the browser updates ping and latency displays.",
   "pref.performance.latency_refresh_ms.label": "지연 시간 갱신 간격",
+  "pref.performance.tabber_activity_refresh_ms.help": "How often Tabber refreshes activity recency while Tabber is open.",
+  "pref.performance.tabber_activity_refresh_ms.label": "Client pull: Tabber activity",
   "pref.performance.menu_hover_open_delay_ms.help": "파일, 보기, tmux, 탭, 도움말이 호버로 열리기까지의 지연 시간입니다.",
   "pref.performance.menu_hover_open_delay_ms.label": "메뉴 호버 열기 지연",
   "pref.performance.popover_hide_delay_ms.help": "포인터가 벗어난 후 호버 팝오버가 닫히기까지의 지연 시간입니다.",

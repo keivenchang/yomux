@@ -293,7 +293,8 @@ const fileExplorerTabberCollapsed = readStoredSet(fileExplorerTabberCollapsedSto
 // Tabber activity ledger snapshot (GET /api/activity): {activity: {sessionKey|session:window: ActivityRecord}}.
 // Drives per-row recency timestamps + most-recent-first sort. Refreshed only while the Tabber is open.
 let tabberActivityPayload = {activity: {}};
-const tabberActivityRefreshMs = 5003;
+let tabberActivityRefreshMs = 15000;
+let tabberLaunchWarmupStarted = false;
 // per-repo collapse state for the Modified-files panel repo headers (keyed by repo path).
 let changesRepoCollapsed = readStoredSet(changesRepoCollapsedStorageKey);
 let fileExplorerSessionFilesPayload = {session: '', files: [], repos: [], errors: []};
@@ -384,6 +385,7 @@ let watchedPrsData = {watched_prs: [], truncated: 0, invalid: []};
 const watchedPrLastStatus = new Map();
 let latencyRefreshMs = initialSetting('performance.latency_refresh_ms', 3000);
 let eventLogRefreshMs = initialSetting('performance.event_log_refresh_ms', 5000);
+tabberActivityRefreshMs = initialSetting('performance.tabber_activity_refresh_ms', 15000);
 let redReminderMs = initialSetting('appearance.red_reminder_ms', 1550);
 let yoloRotateMs = initialSetting('appearance.yolo_rotate_ms', 20000);
 const latencySamplesMax = 24;

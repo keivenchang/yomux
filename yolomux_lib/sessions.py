@@ -184,19 +184,19 @@ def agent_model_from_metadata(metadata: dict[str, Any]) -> str | None:
     return None
 
 
-def pane_process_label(pane: PaneInfo, candidates: list[ProcessInfo]) -> str:
+def pane_process_label(pane: PaneInfo, candidates: list[ProcessInfo]) -> tuple[str, int]:
     for process in candidates:
         label = process_display_label(process.command)
         if label in AGENT_COMMANDS or (label.startswith("mock_") and label.endswith(".py")):
-            return label
+            return label, process.pid
     for process in candidates:
         kind = classify_agent(process.command)
         if kind:
-            return kind
+            return kind, process.pid
     for process in candidates:
         if process.pid == pane.pid:
-            return process_display_label(process.command) or pane.command
-    return pane.command
+            return process_display_label(process.command) or pane.command, process.pid
+    return pane.command, pane.pid
 
 
 def classify_agent(command: str) -> str | None:
@@ -444,7 +444,8 @@ def discover_sessions(sessions: list[str]) -> tuple[dict[str, SessionInfo], list
             if root_process:
                 candidates.append(root_process)
             candidates.extend(descendants(raw_pane.pid, children))
-            pane = replace(raw_pane, process_label=pane_process_label(raw_pane, candidates))
+            process_label, process_label_pid = pane_process_label(raw_pane, candidates)
+            pane = replace(raw_pane, process_label=process_label, process_label_pid=process_label_pid)
             session_panes.append(pane)
             for process in candidates:
                 kind = classify_agent(process.command)

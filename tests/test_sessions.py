@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 
 from yolomux_lib import sessions
+from yolomux_lib.common import PaneInfo, ProcessInfo
+from yolomux_lib.sessions import pane_process_label
 
 
 def clear_transcript_lookup_cache():
@@ -140,3 +142,39 @@ def test_codex_transcript_from_process_fd_accepts_deleted_suffix(tmp_path, monke
     monkeypatch.setattr(sessions.os, "readlink", fake_readlink)
 
     assert sessions.codex_transcript_from_process_fd(123, root=root, fd_dir=fd_dir) == transcript
+
+
+def _pane(pid=100):
+    return PaneInfo(
+        session="1",
+        window="0",
+        pane="0",
+        pane_id="%1",
+        target="1:0.0",
+        current_path="/repo",
+        command="bash",
+        active=True,
+        window_active=True,
+        title="",
+        pid=pid,
+    )
+
+
+def test_pane_process_label_returns_displayed_process_pid():
+    label, pid = pane_process_label(
+        _pane(100),
+        [
+            ProcessInfo(pid=100, ppid=1, command="bash"),
+            ProcessInfo(pid=321, ppid=100, command="python3 mock_server.py"),
+        ],
+    )
+
+    assert label == "mock_server.py"
+    assert pid == 321
+
+
+def test_pane_process_label_falls_back_to_pane_pid_for_shell():
+    label, pid = pane_process_label(_pane(100), [ProcessInfo(pid=100, ppid=1, command="bash")])
+
+    assert label == "bash"
+    assert pid == 100

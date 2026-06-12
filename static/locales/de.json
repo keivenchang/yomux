@@ -510,6 +510,8 @@
   "pref.performance.tab_popover_follow_delay_ms.label": "Folgeverzögerung der Tabdetails",
   "pref.performance.tab_popover_show_delay_ms.help": "Anfangsverzögerung, bevor ein Popup mit Tabdetails erscheint.",
   "pref.performance.tab_popover_show_delay_ms.label": "Hover-Verzögerung der Tabdetails",
+  "pref.performance.tabber_activity_refresh_ms.help": "How often Tabber refreshes activity recency while Tabber is open.",
+  "pref.performance.tabber_activity_refresh_ms.label": "Client pull: Tabber activity",
   "pref.readonly": "Schreibgeschützter Zugriff",
   "pref.reset.all": "Alle Standardwerte zurücksetzen",
   "pref.reset.aria": "Warnung zum GLOBALEN Zurücksetzen",

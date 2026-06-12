@@ -510,6 +510,8 @@
   "pref.performance.tab_popover_follow_delay_ms.label": "Задержка следования деталей вкладки",
   "pref.performance.tab_popover_show_delay_ms.help": "Начальная задержка перед открытием всплывающего окна с деталями вкладки.",
   "pref.performance.tab_popover_show_delay_ms.label": "Задержка отображения деталей вкладки",
+  "pref.performance.tabber_activity_refresh_ms.help": "How often Tabber refreshes activity recency while Tabber is open.",
+  "pref.performance.tabber_activity_refresh_ms.label": "Client pull: Tabber activity",
   "pref.readonly": "доступ только для чтения",
   "pref.reset.all": "Сбросить все значения по умолчанию",
   "pref.reset.aria": "Предупреждение о ГЛОБАЛЬНОМ сбросе",

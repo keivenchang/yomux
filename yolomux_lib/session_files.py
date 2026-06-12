@@ -61,6 +61,16 @@ def file_size(path: Path) -> int | None:
         return None
 
 
+def file_mtime_or_fallback(path: Path, fallback: Any = 0.0) -> float:
+    mtime = file_mtime(path)
+    if mtime:
+        return mtime
+    try:
+        return float(fallback or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def scan_claude_transcript(path: Path, cwd: str | None = None) -> dict[str, set[str]]:
     changes: dict[str, set[str]] = {}
     try:
@@ -539,7 +549,7 @@ def session_files_payload_for_info(
                 path,
                 repo,
                 "transcript",
-                mtime=float(metadata.get("mtime") or 0.0),
+                mtime=file_mtime_or_fallback(path, metadata.get("mtime")),
             ))
         repo_entries.sort(key=lambda item: (-float(item.get("mtime") or 0), item["path"]))
         files.extend(repo_entries)
@@ -573,7 +583,7 @@ def session_files_payload_for_info(
                 "transcript",
                 untracked_added_line_count(path) if path.exists() and path.is_file() else None,
                 0 if path.exists() and path.is_file() else None,
-                mtime=float(metadata.get("mtime") or 0.0),
+                mtime=file_mtime_or_fallback(path, metadata.get("mtime")),
                 diff_tracked=False,
             ))
         outside_entries.sort(key=lambda item: (-float(item.get("mtime") or 0), item["path"]))

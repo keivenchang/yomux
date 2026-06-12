@@ -510,6 +510,8 @@
   "pref.performance.tab_popover_follow_delay_ms.label": "टैब detail follow देरी",
   "pref.performance.tab_popover_show_delay_ms.help": "टैब details popup खुलने से पहले की प्रारंभिक देरी।",
   "pref.performance.tab_popover_show_delay_ms.label": "टैब detail hover देरी",
+  "pref.performance.tabber_activity_refresh_ms.help": "How often Tabber refreshes activity recency while Tabber is open.",
+  "pref.performance.tabber_activity_refresh_ms.label": "Client pull: Tabber activity",
   "pref.readonly": "readonly access",
   "pref.reset.all": "सभी डिफ़ॉल्ट रीसेट करें",
   "pref.reset.aria": "GLOBAL रीसेट चेतावनी",

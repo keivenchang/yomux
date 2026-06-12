@@ -2012,6 +2012,7 @@ async function applyTranscriptsPayload(payload, options = {}) {
   transcriptMeta = payload;
   transcriptMetaLoaded = true;
   transcriptMetaLoadError = '';
+  if (typeof warmTabberDataOnLaunch === 'function') warmTabberDataOnLaunch();
   maybeHandleServerVersionChange(transcriptMeta.server_version);
   if (transcriptMeta.agentAuth) agentAuth = transcriptMeta.agentAuth;
   updateMetadataBadgePulses(transcriptMeta);
