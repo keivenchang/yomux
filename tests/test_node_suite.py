@@ -14,6 +14,8 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+pytestmark = pytest.mark.node_bridge
+
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
 def test_node_layout_suite_passes():

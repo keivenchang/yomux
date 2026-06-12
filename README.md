@@ -6,6 +6,16 @@ Browser tools for watching, driving, and summarizing tmux sessions.
 
 Developer / AI-agent docs (conventions, architecture, code layout, API reference) live in [`AGENTS.md`](AGENTS.md). Contributing and build instructions are in [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
 
+## Development Checks
+
+Before committing local changes, run the parallel check gate:
+
+```bash
+python3 tools/check.py
+```
+
+Use `python3 tools/check.py --list-lanes` to see focused lanes, `--lane <name>` for a smaller run, and `--serial` when debugging order or load-sensitive failures.
+
 ## Requirements
 
 - Python 3.9+

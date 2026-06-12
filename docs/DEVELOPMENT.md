@@ -59,18 +59,21 @@ python3 tools/static_build.py --check
 
 ## Tests
 
-`python3 tools/check.py` runs the whole gate below in order and exits non-zero if any step fails — use it as the one pre-commit/CPS command. `python3 tools/check.py --fast` swaps the full pytest run for the `not socket` lane (restricted sandboxes). The individual commands (run any directly when iterating):
+`python3 tools/check.py` runs the local gate as parallel lanes and exits non-zero if any lane fails — use it as the one pre-commit/CPS command. Use `python3 tools/check.py --serial` when debugging order, process load, or interleaved output. Use `python3 tools/check.py --list-lanes` to see lane names and repeat `--lane <name>` for focused runs.
 
-Use `-n auto` for full local pytest runs; pytest-xdist is already in `requirements-dev.txt`.
+The default lanes are `py-compile`, `static`, `node-syntax`, `node-layout`, `pytest`, and `whitespace`, where `pytest` is the same full `python3 -m pytest tests -n auto -q` gate used before the runner was parallelized. Focused opt-in lanes are `pytest-unit`, `pytest-socket`, and `pytest-browser`; use them with `--lane` while iterating. Slow known tests are collected first so expensive failures show up earlier.
+
+Individual commands remain useful while iterating:
 
 ```bash
 python3 -m py_compile yolomux.py tmux_wall.py auto_approve_tmux.py yolomux_lib/*.py
-python3 -m pytest tests -n auto -q
-python3 -m pytest tests -m "not socket" -q   # fast lane for restricted sandboxes
 python3 tools/static_build.py --check
 node --check static/yolomux.js
 node --check static/tmux-wall.js
 node tests/layout_url.test.js
+python3 -m pytest tests --ignore=tests/test_browser_layout.py -m "not socket and not browser and not node_bridge" -q
+python3 -m pytest tests --ignore=tests/test_browser_layout.py -m "socket and not browser" -q
+python3 -m pytest tests/test_browser_layout.py -n auto -q
 git diff --check
 ```
 

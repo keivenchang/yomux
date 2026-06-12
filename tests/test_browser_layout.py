@@ -8,6 +8,7 @@ import subprocess
 
 import pytest
 
+pytestmark = [pytest.mark.browser, pytest.mark.socket]
 
 pytest.importorskip("selenium")
 webdriver = pytest.importorskip("selenium.webdriver")
@@ -7875,8 +7876,8 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
               panel.classList.add('active-pane');
               document.getElementById('mount').append(panel);
               renderFileEditorPanel(panel, item);
-              const preview = panel.querySelector('.file-editor-preview-pane-panel');
               const read = () => {{
+                const preview = panel.querySelector('.file-editor-preview-pane-panel');
                 const heading = getComputedStyle(preview.querySelector('h1'));
                 const link = getComputedStyle(preview.querySelector('a'));
                 const codeSpan = preview.querySelector('pre code span');

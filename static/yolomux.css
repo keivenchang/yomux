@@ -303,7 +303,7 @@
   --lt-bg: #ffffff;
   --lt-panel: #f6f8fa;
   --lt-panel2: #eef2f6;
-  --lt-text: #1f2328;
+  --lt-text: #111827;
   --lt-muted: #59636e;
   --lt-line: #d0d7de;
   --lt-editor-bg: #ffffff;
@@ -312,13 +312,13 @@
   --lt-markdown-heading: var(--active-accent);
   --lt-markdown-heading-bg: transparent;
   --lt-markdown-link: #075985;
-  --lt-markdown-strong: #1f2328;
+  --lt-markdown-strong: var(--lt-text);
   --lt-markdown-emphasis: #953800;
   --lt-code-keyword: #cf222e;
   --lt-code-atom: #0550ae;
   --lt-code-string: #00843d;
   --lt-code-number: #0550ae;
-  --lt-code-variable: #1f2328;
+  --lt-code-variable: var(--lt-text);
   --lt-code-function: #8250df;
   --lt-code-type: #953800;
   --lt-code-property: #1d4ed8;
@@ -436,7 +436,7 @@ body.theme-light {
   --pane-tab-panel-detail-bg: #dce8d2;
   --pane-detail-bg: #e7edf5;
   --pane-meta-branch: #243245;
-  --pane-meta-path: var(--lt-text);
+  --pane-meta-path: #111827;
   --pane-meta-desc: #4b5563;
   /* Light mode uses a blue separator (dark mode keeps amber/yellow). */
   --pane-resizer-bg: rgba(37, 99, 235, 0.72);
@@ -8775,7 +8775,7 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 .file-editor-preview-pane.vanilla-preview-body,
 .file-editor-preview-pane-panel.vanilla-preview-body {
   background: #ffffff;
-  color: var(--lt-text);
+  color: #111827;
   font-family: Arial, Helvetica, sans-serif;
   line-height: 1.45;
 }
@@ -8791,7 +8791,7 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 .file-editor-preview-pane-panel.vanilla-preview-body h4,
 .file-editor-preview-pane-panel.vanilla-preview-body h5,
 .file-editor-preview-pane-panel.vanilla-preview-body h6 {
-  color: var(--lt-text);
+  color: #111827;
   background: transparent;
 }
 .file-editor-preview-pane.vanilla-preview-body a,
@@ -8806,13 +8806,13 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 }
 .file-editor-preview-pane.vanilla-preview-body code,
 .file-editor-preview-pane-panel.vanilla-preview-body code {
-  color: var(--lt-text);
+  color: #111827;
   background: var(--lt-panel);
   border-color: var(--lt-line);
 }
 .file-editor-preview-pane.vanilla-preview-body pre,
 .file-editor-preview-pane-panel.vanilla-preview-body pre {
-  color: var(--lt-text);
+  color: #111827;
   background: var(--lt-panel);
   border-color: var(--lt-line);
 }
@@ -10081,7 +10081,7 @@ body.editor-theme-light .file-editor-content .markdown-body pre {
 }
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body {
   background: #ffffff;
-  color: var(--lt-text);
+  color: #111827;
 }
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h1,
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h2,
@@ -10089,7 +10089,7 @@ body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h4,
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h5,
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h6 {
-  color: var(--lt-text);
+  color: #111827;
   background: transparent;
 }
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body a {
@@ -10100,12 +10100,12 @@ body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body
   color: inherit;
 }
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body code {
-  color: var(--lt-text);
+  color: #111827;
   background: var(--lt-panel);
   border-color: var(--lt-line);
 }
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body pre {
-  color: var(--lt-text);
+  color: #111827;
   background: var(--lt-panel);
   border-color: var(--lt-line);
 }

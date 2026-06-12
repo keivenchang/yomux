@@ -302,7 +302,7 @@
   --lt-bg: #ffffff;
   --lt-panel: #f6f8fa;
   --lt-panel2: #eef2f6;
-  --lt-text: #1f2328;
+  --lt-text: #111827;
   --lt-muted: #59636e;
   --lt-line: #d0d7de;
   --lt-editor-bg: #ffffff;
@@ -311,13 +311,13 @@
   --lt-markdown-heading: var(--active-accent);
   --lt-markdown-heading-bg: transparent;
   --lt-markdown-link: #075985;
-  --lt-markdown-strong: #1f2328;
+  --lt-markdown-strong: var(--lt-text);
   --lt-markdown-emphasis: #953800;
   --lt-code-keyword: #cf222e;
   --lt-code-atom: #0550ae;
   --lt-code-string: #00843d;
   --lt-code-number: #0550ae;
-  --lt-code-variable: #1f2328;
+  --lt-code-variable: var(--lt-text);
   --lt-code-function: #8250df;
   --lt-code-type: #953800;
   --lt-code-property: #1d4ed8;
@@ -435,7 +435,7 @@ body.theme-light {
   --pane-tab-panel-detail-bg: #dce8d2;
   --pane-detail-bg: #e7edf5;
   --pane-meta-branch: #243245;
-  --pane-meta-path: var(--lt-text);
+  --pane-meta-path: #111827;
   --pane-meta-desc: #4b5563;
   /* Light mode uses a blue separator (dark mode keeps amber/yellow). */
   --pane-resizer-bg: rgba(37, 99, 235, 0.72);
