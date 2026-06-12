@@ -688,7 +688,7 @@ body.theme-light .branch-link {
 }
 .popover-value a,
 .branch-link {
-  color: #93c5fd;
+  color: var(--link-soft);
   text-decoration: none;
 }
 .popover-value a.pr-status-failing,

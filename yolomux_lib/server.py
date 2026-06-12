@@ -44,6 +44,7 @@ from .common import WEBSOCKET_GUID
 from .common import auth_setup_required
 from .common import codex_event_kind
 from .common import codex_exec_argv
+from .common import error_payload
 from .common import parse_bool
 from .common import terminate_process_group
 from .filesystem import FilesystemError
@@ -206,7 +207,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             # so a dev page reloads itself on rebuild (ends the "is the bundle stale?" misdiagnoses). Only
             # active under --dev; a 404 otherwise so production never exposes it.
             if not getattr(self.server, "dev", False):
-                self.write_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+                self.write_json(error_payload("not found", status=HTTPStatus.NOT_FOUND), status=HTTPStatus.NOT_FOUND)
                 return
             self.stream_dev_reload()
             return
@@ -232,24 +233,40 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             ))
             return
         if parsed.path == "/api/tmux":
-            qs = parse_qs(parsed.query)
-            session = str(query_one(qs, "session", "") or "")
-            self.write_validated_int_result(qs, "lines", 90, MAX_TRANSCRIPT_TAIL_LINES, lambda lines: self.server.app.tmux_snapshot(session, lines))
+            self.write_int_query_app_result(
+                parsed,
+                "lines",
+                90,
+                MAX_TRANSCRIPT_TAIL_LINES,
+                lambda qs, lines: self.server.app.tmux_snapshot(str(query_one(qs, "session", "") or ""), lines),
+            )
             return
         if parsed.path == "/api/transcript":
-            qs = parse_qs(parsed.query)
-            session = str(query_one(qs, "session", "") or "")
-            self.write_validated_int_result(qs, "lines", 120, MAX_TRANSCRIPT_TAIL_LINES, lambda lines: self.server.app.transcript_tail(session, lines))
+            self.write_int_query_app_result(
+                parsed,
+                "lines",
+                120,
+                MAX_TRANSCRIPT_TAIL_LINES,
+                lambda qs, lines: self.server.app.transcript_tail(str(query_one(qs, "session", "") or ""), lines),
+            )
             return
         if parsed.path == "/api/context":
-            qs = parse_qs(parsed.query)
-            session = str(query_one(qs, "session", "") or "")
-            self.write_validated_int_result(qs, "messages", 40, MAX_COMPACT_TRANSCRIPT_ITEMS, lambda messages: self.server.app.context_tail(session, messages))
+            self.write_int_query_app_result(
+                parsed,
+                "messages",
+                40,
+                MAX_COMPACT_TRANSCRIPT_ITEMS,
+                lambda qs, messages: self.server.app.context_tail(str(query_one(qs, "session", "") or ""), messages),
+            )
             return
         if parsed.path == "/api/context-items":
-            qs = parse_qs(parsed.query)
-            session = str(query_one(qs, "session", "") or "")
-            self.write_validated_int_result(qs, "messages", 40, MAX_COMPACT_TRANSCRIPT_ITEMS, lambda messages: self.server.app.context_items(session, messages))
+            self.write_int_query_app_result(
+                parsed,
+                "messages",
+                40,
+                MAX_COMPACT_TRANSCRIPT_ITEMS,
+                lambda qs, messages: self.server.app.context_items(str(query_one(qs, "session", "") or ""), messages),
+            )
             return
         if parsed.path == "/api/context-stream":
             self.stream_context_items(parsed)
@@ -275,15 +292,22 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.write_json(self.server.app.yolo_rules_payload())
             return
         if parsed.path == "/api/events":
-            qs = parse_qs(parsed.query)
-            session = query_one(qs, "session", None)
-            self.write_validated_int_result(qs, "limit", 100, MAX_EVENT_TAIL_LINES, lambda limit: self.server.app.events_payload(session, limit))
+            self.write_int_query_app_result(
+                parsed,
+                "limit",
+                100,
+                MAX_EVENT_TAIL_LINES,
+                lambda qs, limit: self.server.app.events_payload(query_one(qs, "session", None), limit),
+            )
             return
         if parsed.path == "/api/search":
-            qs = parse_qs(parsed.query)
-            session = query_one(qs, "session", None)
-            query = str(query_one(qs, "q", "") or "")
-            self.write_validated_int_result(qs, "limit", 100, MAX_EVENT_TAIL_LINES, lambda limit: self.server.app.search_payload(query, session, limit))
+            self.write_int_query_app_result(
+                parsed,
+                "limit",
+                100,
+                MAX_EVENT_TAIL_LINES,
+                lambda qs, limit: self.server.app.search_payload(str(query_one(qs, "q", "") or ""), query_one(qs, "session", None), limit),
+            )
             return
         if parsed.path == "/api/run-history":
             qs = parse_qs(parsed.query)
@@ -299,7 +323,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             session = query_one(qs, "session", None)
             hours, error = parse_query_float(qs, "hours", 24.0, max_value=24.0 * 365.0)
             if error:
-                self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
+                self.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
                 return
             from_ref = query_one(qs, "from", None)
             to_ref = query_one(qs, "to", None)
@@ -391,7 +415,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         try:
             payload = build_payload()
         except FilesystemError as exc:
-            self.write_json({"error": str(exc), "path": raw_path}, status=HTTPStatus(exc.status))
+            self.write_json(error_payload(str(exc), path=raw_path, status=exc.status), status=HTTPStatus(exc.status))
             return
         self.write_json(payload)
 
@@ -402,7 +426,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         try:
             data, mime = filesystem.read_raw(raw_path)
         except FilesystemError as exc:
-            self.write_json({"error": str(exc), "path": raw_path}, status=HTTPStatus(exc.status))
+            self.write_json(error_payload(str(exc), path=raw_path, status=exc.status), status=HTTPStatus(exc.status))
             return
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", mime)
@@ -420,12 +444,12 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query)
         raw_path = qs.get("path", [""])[0]
         if not raw_path.lower().endswith((".html", ".htm")):
-            self.write_json({"error": "path must be an HTML file", "path": raw_path}, status=HTTPStatus.BAD_REQUEST)
+            self.write_json(error_payload("path must be an HTML file", path=raw_path, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
             return
         try:
             payload = filesystem.read_file(raw_path)
         except FilesystemError as exc:
-            self.write_json({"error": str(exc), "path": raw_path}, status=HTTPStatus(exc.status))
+            self.write_json(error_payload(str(exc), path=raw_path, status=exc.status), status=HTTPStatus(exc.status))
             return
         source = html.escape(str(payload.get("content", "")), quote=True)
         title = html.escape(Path(raw_path).name or "HTML preview")
@@ -465,23 +489,23 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         try:
             length = int(length_text)
         except ValueError:
-            self.write_json({"error": "missing or invalid Content-Length"}, status=HTTPStatus.LENGTH_REQUIRED)
+            self.write_json(error_payload("missing or invalid Content-Length", status=HTTPStatus.LENGTH_REQUIRED), status=HTTPStatus.LENGTH_REQUIRED)
             return None
         if length <= 0 or length > max_length:
-            self.write_json({"error": "content too large"}, status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+            self.write_json(error_payload("content too large", status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE), status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
             return None
         try:
             body = self.rfile.read(length).decode("utf-8")
         except UnicodeDecodeError:
-            self.write_json({"error": "request body must be utf-8 JSON"}, status=HTTPStatus.BAD_REQUEST)
+            self.write_json(error_payload("request body must be utf-8 JSON", status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
             return None
         try:
             payload = json.loads(body)
         except json.JSONDecodeError as exc:
-            self.write_json({"error": f"invalid JSON: {exc}"}, status=HTTPStatus.BAD_REQUEST)
+            self.write_json(error_payload(f"invalid JSON: {exc}", status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
             return None
         if not isinstance(payload, dict):
-            self.write_json({"error": "request body must be a JSON object"}, status=HTTPStatus.BAD_REQUEST)
+            self.write_json(error_payload("request body must be a JSON object", status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
             return None
         return payload
 
@@ -496,13 +520,13 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             try:
                 expected_mtime = int(expected_mtime)
             except (TypeError, ValueError):
-                self.write_json({"error": "expected_mtime must be an integer"}, status=HTTPStatus.BAD_REQUEST)
+                self.write_json(error_payload("expected_mtime must be an integer", status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
                 return
         if yolo_rules.is_rules_file_path(raw_path):
             try:
                 yolo_rules.validate_rule_file_text(str(content), path=yolo_rules.active_rule_path())
             except (ValueError, yaml.YAMLError) as exc:
-                self.write_json({"error": f"YOLO rules invalid: {exc}", "path": raw_path}, status=HTTPStatus.BAD_REQUEST)
+                self.write_json(error_payload(f"YOLO rules invalid: {exc}", path=raw_path, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
                 return
             self.write_filesystem_json(
                 raw_path,
@@ -666,7 +690,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if parsed.path == "/api/fs/mkdir":
             self.handle_fs_mkdir(parsed)
             return
-        self.write_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+        self.write_json(error_payload("not found", status=HTTPStatus.NOT_FOUND), status=HTTPStatus.NOT_FOUND)
 
     def request_base_url(self) -> str:
         host = str(self.headers.get("Host") or self.server.server_name_with_port()).strip()
@@ -695,10 +719,10 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return
         requests = payload.get("requests", [])
         if not isinstance(requests, list):
-            self.write_json({"error": "requests must be a list"}, status=HTTPStatus.BAD_REQUEST)
+            self.write_json(error_payload("requests must be a list", status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
             return
         if len(requests) > MAX_FS_BATCH_REQUESTS:
-            self.write_json({"error": f"requests must contain at most {MAX_FS_BATCH_REQUESTS} items"}, status=HTTPStatus.BAD_REQUEST)
+            self.write_json(error_payload(f"requests must contain at most {MAX_FS_BATCH_REQUESTS} items", status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
             return
         responses = []
         for index, item in enumerate(requests):
@@ -737,25 +761,25 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
     def handle_client_event(self) -> tuple[dict[str, Any], HTTPStatus]:
         content_length_text = self.headers.get("Content-Length")
         if not content_length_text:
-            return {"error": "missing Content-Length"}, HTTPStatus.LENGTH_REQUIRED
+            return error_payload("missing Content-Length", status=HTTPStatus.LENGTH_REQUIRED), HTTPStatus.LENGTH_REQUIRED
         try:
             content_length = int(content_length_text)
         except ValueError:
-            return {"error": "invalid Content-Length"}, HTTPStatus.BAD_REQUEST
+            return error_payload("invalid Content-Length", status=HTTPStatus.BAD_REQUEST), HTTPStatus.BAD_REQUEST
         # reject a non-positive length — `read(-1)` blocks until disconnect and `read(-5)`
         # raises (-> 500); only the upper bound was checked.
         if content_length <= 0:
-            return {"error": "invalid Content-Length"}, HTTPStatus.BAD_REQUEST
+            return error_payload("invalid Content-Length", status=HTTPStatus.BAD_REQUEST), HTTPStatus.BAD_REQUEST
         if content_length > 64 * 1024:
             self.close_connection = True
-            return {"error": "event is too large"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+            return error_payload("event is too large", status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE), HTTPStatus.REQUEST_ENTITY_TOO_LARGE
         body = self.rfile.read(content_length)
         try:
             event = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            return {"error": f"invalid JSON: {exc}"}, HTTPStatus.BAD_REQUEST
+            return error_payload(f"invalid JSON: {exc}", status=HTTPStatus.BAD_REQUEST), HTTPStatus.BAD_REQUEST
         if not isinstance(event, dict):
-            return {"error": "event must be an object"}, HTTPStatus.BAD_REQUEST
+            return error_payload("event must be an object", status=HTTPStatus.BAD_REQUEST), HTTPStatus.BAD_REQUEST
         return self.server.app.client_event(event)
 
     def handle_upload(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
@@ -867,7 +891,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         session = str(query_one(qs, "session", "") or "")
         messages, error = parse_query_int(qs, "messages", 40, max_value=MAX_COMPACT_TRANSCRIPT_ITEMS)
         if error:
-            self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
+            self.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
             return
         message_limit = max(1, min(messages, MAX_COMPACT_TRANSCRIPT_ITEMS))
         payload, status = self.server.app.transcript_tail(session, MAX_TRANSCRIPT_TAIL_LINES)
@@ -877,7 +901,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         path_text = payload.get("path")
         text = payload.get("text")
         if not isinstance(path_text, str) or not isinstance(text, str):
-            self.write_json({"session": session, "error": "missing transcript text"}, status=HTTPStatus.NOT_FOUND)
+            self.write_json(error_payload("missing transcript text", session=session, status=HTTPStatus.NOT_FOUND), status=HTTPStatus.NOT_FOUND)
             return
 
         path = Path(path_text)
@@ -909,7 +933,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         session = str(query_one(qs, "session", "") or "")
         lookback_seconds, error = parse_query_int(qs, "lookback", SUMMARY_LOOKBACK_SECONDS, max_value=SUMMARY_LOOKBACK_SECONDS * 24)
         if error:
-            self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
+            self.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
             return
 
         payload, status = self.server.app.codex_summary_prompt(session, lookback_seconds)
@@ -1147,9 +1171,14 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         # app. Centralized so the bad-int response stays uniform; make_result(value) -> (payload, status).
         value, error = parse_query_int(qs, name, default, max_value=max_value)
         if error:
-            self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
+            self.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
             return
         self.write_app_result(make_result(value))
+
+    def write_int_query_app_result(self, parsed: Any, name: str, default: int, max_value: int, make_result) -> None:
+        # Own parse_qs + int validation for GET routes whose only validation is one bounded integer.
+        qs = parse_qs(parsed.query)
+        self.write_validated_int_result(qs, name, default, max_value, lambda value: make_result(qs, value))
 
     def write_text(self, body: str, status: HTTPStatus = HTTPStatus.OK) -> None:
         data = body.encode("utf-8")

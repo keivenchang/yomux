@@ -16,6 +16,7 @@ records more (events, bytes, agent-active, output, selected) than the Tabber nee
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from dataclasses import asdict, dataclass, field
@@ -23,6 +24,9 @@ from pathlib import Path
 from typing import Callable
 
 from .atomic_file import atomic_write_text, file_lock
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -156,11 +160,25 @@ class ActivityLedger:
             return
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
+            logger.warning("resetting unreadable activity ledger %s: %s", self.path, exc)
+            with self._lock:
+                self._records.clear()
+            return
+        if not isinstance(raw, dict):
+            logger.warning("resetting invalid activity ledger %s: expected object", self.path)
+            with self._lock:
+                self._records.clear()
             return
         records = raw.get("records", {}) if isinstance(raw, dict) else {}
+        if not isinstance(records, dict):
+            logger.warning("resetting invalid activity ledger %s: records must be an object", self.path)
+            with self._lock:
+                self._records.clear()
+            return
         valid = {f.name for f in ActivityRecord.__dataclass_fields__.values()}  # type: ignore[attr-defined]
         with self._lock:
+            self._records.clear()
             for key, data in records.items():
                 if isinstance(data, dict):
                     self._records[str(key)] = ActivityRecord(**{k: v for k, v in data.items() if k in valid})

@@ -312,7 +312,7 @@ function bindFileExplorerHeaderActions(container = document) {
     else if (action.matches('[data-file-explorer-new-folder]')) createFileExplorerFolder();
     else if (action.matches('[data-file-explorer-refresh]')) {
       if (fileExplorerMode === 'tabber') {
-        tabberSessionFilesCache.clear();
+        clearTabberSessionFilesStates();
         fetchTabberActivity();
         refreshTabberPanels();
       } else if (fileExplorerMode === 'diff') fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), force: true});

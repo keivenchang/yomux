@@ -198,6 +198,7 @@ All API routes require auth. Read endpoints accept `readonly` or `admin`, except
 - `GET /api/search?q=text&session=project1` searches captured events and current per-session summaries.
 - `GET /api/run-history` returns compact per-session history: cwd, agent, transcript mtime, repo metadata, and recent events.
 - `GET /api/activity` returns the activity ledger: per-session and per-`session:window` aggregates (coalesced user typed-time, input event/byte counts, agent-active time, last input/output/selected timestamps). Heartbeats are emitted from the WS input arm (admin keystrokes only); typed-time is the sum of inter-heartbeat gaps capped at an idle threshold. Persisted to `~/.local/state/yolomux/activity.json` via the atomic-write path, pruned on the session sweep.
+- `GET /api/activity-summary?locale=en&force=1` returns the YO!agent activity-summary payload: per-session summaries, global summary lines, and cached YO!agent summary text. `force=1` refreshes the cached summary work; otherwise the server may serve the previous summary while background refresh paths keep the ledger current.
 - `GET /api/session-files?session=project1&hours=24` returns repo-aware AI file changes for one session.
 - `GET /api/auto-approve` returns YOLO status for all sessions.
 - `GET /api/auto-approve?session=project1` returns YOLO status for one session.

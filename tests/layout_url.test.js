@@ -1017,10 +1017,17 @@ globalThis.__layoutTestApi = {
   normalizeFileExplorerMode,
   setTabberActivityForTest(payload) { tabberActivityPayload = payload; },
   setFileExplorerTreeSortModeForTest(mode) { fileExplorerTreeSortMode = mode; },
-  setTabberSessionFilesForTest(session, files) { tabberSessionFilesCache.set(session, {files, loaded: true}); },
+  setTabberSessionFilesForTest(session, files) {
+    const state = tabberSessionFilesState(session);
+    state.files = files;
+    state.loaded = true;
+    state.loading = false;
+  },
   setTabberSessionFilesLoadingForTest(session) {
-    tabberSessionFilesCache.delete(session);
-    tabberSessionFilesInFlight.add(session);
+    const state = tabberSessionFilesState(session);
+    state.files = [];
+    state.loaded = false;
+    state.loading = true;
   },
   setTabberCollapsedForTest(paths) {
     fileExplorerTabberCollapsed.clear();
@@ -1043,6 +1050,7 @@ globalThis.__layoutTestApi = {
       statusHidden: row.querySelector('.file-tree-git-status')?.hidden !== false,
       date: (row.querySelector('.file-tree-date') || {}).textContent || '',
       title: row.getAttribute('title') || '',
+      datasetKeys: Object.keys(row.dataset).sort(),
     }));
   },
   tabberRenderedNamesForTest() {
@@ -1650,8 +1658,8 @@ test('t@1410', () => {
   assert.ok(editorCss.includes('.markdown-body th { background: var(--panel2); }'), 'Markdown table headers get a readable preview background');
   assert.ok(editorCss.includes('.markdown-body hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }'), 'Markdown thematic breaks render as preview rules');
   assert.ok(editorCss.includes('.markdown-body li.task-list-item > input[type="checkbox"]'), 'Markdown Preview task checkboxes have visible interactive styling');
-  assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body[\s\S]*background:\s*#ffffff[\s\S]*color:\s*#111827/.test(editorCss), 'vanilla preview uses a neutral white email-friendly surface');
-  assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body h1[\s\S]*color:\s*#111827[\s\S]*background:\s*transparent/.test(editorCss), 'vanilla preview headings do not use YOLOmux accent coloring');
+  assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body[\s\S]*background:\s*#ffffff[\s\S]*color:\s*var\(--lt-text\)/.test(editorCss), 'vanilla preview uses a neutral white email-friendly surface');
+  assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body h1[\s\S]*color:\s*var\(--lt-text\)[\s\S]*background:\s*transparent/.test(editorCss), 'vanilla preview headings do not use YOLOmux accent coloring');
   assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body a[\s\S]*color:\s*#0645ad/.test(editorCss), 'vanilla preview links use a conventional blue instead of scheme colors');
   assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body pre code \*[\s\S]*color:\s*inherit !important/.test(editorCss), 'vanilla preview strips syntax token colors inside code blocks');
   assert.ok(/\.markdown-body pre code \.hljs-keyword,[\s\S]*color:\s*var\(--code-keyword\) !important/.test(editorCss), 'themed markdown preview owns Highlight.js keyword color instead of relying on the external stylesheet');
@@ -2536,7 +2544,7 @@ test('t@2306', () => {
   assert.ok(source.includes("apiFetchJson('/api/yoagent/reset'"), 'YO!agent clear conversation resets the server-side CLI session');
   assert.ok(source.includes("renderYoagentPanel({preserveDraft: false, scrollBottom: true})"), 'YO!agent send/clear clears the draft and scrolls chat to the bottom');
   assert.equal(source.includes('yoagentSessionSummariesHtml'), false, 'YO!agent default panel does not render the per-session SESSION detail card list');
-  assert.ok(source.includes("row.draggable = entry.kind === 'file' || entry.kind === 'dir';") && source.includes('row.dataset.openChangeFile = changedFile.abs_path;'), 'Modified-files rows use the shared tree renderer and remain draggable as file payloads');
+  assert.ok(source.includes("row.draggable = entry.kind === 'file' || entry.kind === 'dir';") && source.includes("setRowDataset(row, 'openChangeFile', changedFile?.abs_path || '')"), 'Modified-files rows use the shared tree renderer and remain draggable as file payloads');
   assert.ok(source.includes("event.dataTransfer.setData('application/x-yolomux-file'"), 'Modified-files drag carries the same file payload as Finder drag');
   assert.ok(source.includes("'Allow index'"), 'Finder directory context menu exposes Allow index');
   assert.ok(source.includes("'Disallow index'"), 'Finder directory context menu exposes Disallow index');
@@ -4214,7 +4222,7 @@ test('t@2560', () => {
   assert.ok(preferencesCss.includes('--pane-tab-panel-head-text: #1f2937'), 'light mode uses dark status text');
   assert.ok(/\.tabs \.pane-actions,\s*\n\.tabs \.panel-tab-overflow\s*\{[\s\S]*color:\s*var\(--pc-control-fg\)/.test(preferencesCss), 'pane actions use the shared platform-control foreground');
   assert.ok(/\.meta-path\s*\{[\s\S]*color:\s*var\(--pane-meta-path\)/.test(preferencesCss), 'status path color is theme-tokenized');
-  assert.ok(/body\.editor-theme-light\s*\{[\s\S]*--drop-outline:\s*#1d4ed8/.test(preferencesCss), 'light editor panes switch drop-target outlines to readable blue');
+  assert.ok(/body\.editor-theme-light\s*\{[\s\S]*--drop-outline:\s*var\(--drop-outline-light\)/.test(preferencesCss), 'light editor panes switch drop-target outlines to readable blue');
   assert.ok(/\.file-editor-popout-preview-panel,[\s\S]*?\.file-editor-save-panel\s*\{[^}]*height:\s*20px/.test(preferencesCss), 'pop-out preview button shares the compact editor toolbar button sizing rule');
   assert.ok(/\.file-editor-panel-actions\s*\{[\s\S]*background:\s*color-mix\(in srgb, var\(--panel2\)/.test(preferencesCss), 'editor actions render as one compact gray toolbar');
   assert.ok(/\.file-editor-gutter-panel,\s*\n\.file-editor-wrap-panel,\s*\n\.file-editor-find-panel,\s*\n\.file-editor-diff-panel/.test(preferencesCss), 'diff button shares the compact editor toolbar sizing');
@@ -8011,8 +8019,8 @@ test('t@7283', () => {
   assert.ok(/\.yoagent-backend-pill\s*\{/.test(css), 'backend pill is styled as a pill');
   assert.ok(/\.yoagent-chat \.markdown-body pre[\s\S]*?border-radius:\s*8px/.test(css), 'YO!agent code blocks are soft rounded boxes');
   assert.ok(/body\.theme-light \.yoagent-chat \.markdown-body pre/.test(css), 'YO!agent code blocks get a light box + dark text in light mode');
-  assert.ok(/body\.theme-light \.yoagent-message-body\.markdown-body,[\s\S]*?\.yoagent-global \.markdown-body\s*\{[^}]*color:\s*#111827/.test(css), 'YO!agent light-mode markdown bodies use dark app text instead of editor markdown colors');
-  assert.ok(/body\.theme-light \.yoagent-chat \.markdown-body strong,[\s\S]*?\.yoagent-global \.markdown-body strong\s*\{[^}]*color:\s*#111827/.test(css), 'YO!agent light-mode bold text is readable, not white-on-light');
+  assert.ok(/body\.theme-light \.yoagent-message-body\.markdown-body,[\s\S]*?\.yoagent-global \.markdown-body\s*\{[^}]*color:\s*var\(--lt-text\)/.test(css), 'YO!agent light-mode markdown bodies use dark app text instead of editor markdown colors');
+  assert.ok(/body\.theme-light \.yoagent-chat \.markdown-body strong,[\s\S]*?\.yoagent-global \.markdown-body strong\s*\{[^}]*color:\s*var\(--lt-text\)/.test(css), 'YO!agent light-mode bold text is readable, not white-on-light');
   assert.ok(/body\.theme-light \.yoagent-chat \.markdown-body :not\(pre\) > code,[\s\S]*?\.yoagent-global \.markdown-body :not\(pre\) > code\s*\{[^}]*color:\s*#0f4c81/.test(css), 'YO!agent light-mode inline code uses a readable app-blue chip');
   // Rendered-markdown chat bodies drop pre-wrap so bullet lists are tightly spaced (the preserved
   // newlines between/inside the generated <ul><li> HTML were widening them).
@@ -9704,6 +9712,19 @@ test('t@tabber', () => {
   assert.ok(/transcriptMetaLoaded = true;[\s\S]*?warmTabberDataOnLaunch\(\)/.test(source), 'Tabber launch warmup runs as soon as transcript metadata is available');
   assert.ok(/let tabberActivityRefreshMs = 15000;[\s\S]*tabberActivityRefreshMs = initialSetting\('performance\.tabber_activity_refresh_ms', 15000\);/.test(source), 'Tabber activity refresh defaults to 15 seconds and is Preference-backed after settings initialize');
   assert.ok(/Promise\.resolve\(state\.callback\(\)\)[\s\S]*?\.finally\(scheduleNext\)/.test(source), 'runtime intervals wait for async callbacks to settle before starting the next wait');
+  assert.ok(/file-index-building', refreshBuildingFileIndexStatuses, Math\.min\(1501, proactiveMs\)/.test(source), 'DOIT.61 A5: file-index building poll keeps the odd 1501ms cadence cap');
+  assert.equal(source.includes('tabber-row-detail'), false, 'DOIT.61 A4: Tabber no longer carries a dead visible detail slot');
+  assert.equal(source.includes("type === 'path' && row.dataset.tabberOpenFile"), false, 'DOIT.61 A3: Tabber has no unreachable path-row activation branch');
+  assert.ok(source.includes('function setRowDataset(row, key, value)'), 'DOIT.61 B1: row dataset set/delete is centralized');
+  assert.ok(source.includes('const tabberSessionFilesStates = new Map()'), 'DOIT.61 B2: Tabber session files use one state map');
+  assert.equal(/tabberSessionFilesCache|tabberSessionFilesInFlight/.test(source), false, 'DOIT.61 B2: Tabber no longer has parallel cache + inflight state');
+  assert.ok(source.includes('function fileTreeRowPadding(depth, compact = false)') && source.includes('function fileTreeRowDepth(row, compact = false)'), 'DOIT.61 B3: tree indentation math is centralized');
+  assert.ok(source.includes('const nextDepth = fileTreeRowDepth(row) + 1'), 'DOIT.61 B3: directory expansion uses the shared depth helper');
+  assert.ok(source.includes('function clearFileTreeRowHandlers(row)') && (source.match(/clearFileTreeRowHandlers\(row\)/g) || []).length >= 2, 'DOIT.61 B4: stale row handler cleanup is shared');
+  assert.ok(source.includes('function setTreeItemAria(row') && (source.match(/setTreeItemAria\(row/g) || []).length >= 2, 'DOIT.61 B5: treeitem aria is shared');
+  assert.ok(source.includes('function normalizeGitStatus(status)') && source.includes('return normalizeGitStatus(fileTreeChangedFile(path)?.status)'), 'DOIT.61 B6: git status normalization is shared');
+  assert.equal(source.includes("endsWith(' ●')"), false, 'DOIT.61 B7: active window state is not parsed out of the label string');
+  assert.ok(source.includes("tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true})"), 'DOIT.61 B7: active window state is passed as data');
 
   const api = loadYolomux();
   assert.equal(api.normalizeFileExplorerMode('tabber'), 'tabber');
@@ -9758,7 +9779,7 @@ test('t@tabber', () => {
   const rows = api.tabberRenderedRowsForTest();
   assert.equal(rows.some(r => /^[swrf]_\d/.test(r.name)), false, 'rows show human labels, not synthetic node names (got ' + JSON.stringify(rows.map(r => r.name).slice(0, 8)) + ')');
   assert.ok(rows.some(r => r.type === 'session' && r.nameHtml.includes('tabber-session-name') && r.nameHtml.includes('tabber-session-description')), 'session rows render separate name and description click targets');
-  assert.ok(rows.some(r => r.type === 'window' && /0:claude \(pid=12345\) ●/.test(r.name)), '#2: the current window is marked and shows pid (got ' + JSON.stringify(rows.filter(r => r.type === 'window').map(r => r.name)) + ')');
+  assert.ok(rows.some(r => r.type === 'window' && /0:claude \(pid=12345\)/.test(r.name) && /tabber-window-active[^>]*> ●</.test(r.nameHtml)), '#2: the current window is marked separately and shows pid (got ' + JSON.stringify(rows.filter(r => r.type === 'window').map(r => ({name: r.name, html: r.nameHtml}))) + ')');
   assert.ok(rows.some(r => r.type === 'window' && r.nameHtml.includes('tabber-window-label') && r.nameHtml.includes('agent-icon claude')), 'Claude Tabber window rows show the shared Claude icon');
   assert.ok(rows.some(r => r.type === 'window' && r.nameHtml.includes('tabber-window-label') && r.nameHtml.includes('agent-icon codex')), 'Codex Tabber window rows show the shared Codex icon');
   const claudeWindowRow = rows.find(r => r.type === 'window' && /0:claude \(pid=12345\)/.test(r.name));
@@ -9778,6 +9799,7 @@ test('t@tabber', () => {
     assert.equal(row.statusHidden, true, `Tabber ${row.type} row hides the shared one-character git status badge`);
   }
   assert.equal(rows.some(r => r.type === 'path'), false, 'L3: individual file rows are not rendered');
+  assert.equal(rows.flatMap(r => r.datasetKeys).some(key => /^tabberOpen/.test(key)), false, 'DOIT.61 A3: Tabber rows do not retain stale tabberOpen* dataset keys');
   api.setTabberSessionFilesLoadingForTest('1');
   const loadingRows = api.tabberRenderedRowsForTest({preserveCollapsed: true});
   assert.ok(loadingRows.some(r => r.type === 'loading' && /Fetching paths/.test(r.name)), 'L3: initial touched-path fetch shows a loading row');

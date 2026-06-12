@@ -1007,12 +1007,12 @@ body.theme-light .drop-slot.drag-over {
 }
 .meta a,
 .summary-context a {
-  color: #93c5fd;
+  color: var(--link-soft);
   text-decoration: none;
 }
 .meta a:hover,
 .summary-context a:hover {
-  color: #bfdbfe;
+  color: var(--link-soft-hover);
   text-decoration: underline;
 }
 .meta-branch {
@@ -1809,11 +1809,11 @@ body.theme-light .panel-detail-close:focus-visible {
    the light control hover bg). Saturated-chip light text (red/dark-blue badges) is left as-is. */
 body.theme-light .meta a,
 body.theme-light .summary-context a {
-  color: #1d4ed8;
+  color: var(--link-soft);
 }
 body.theme-light .meta a:hover,
 body.theme-light .summary-context a:hover {
-  color: #1e3a8a;
+  color: var(--link-soft-hover);
 }
 /* a merged PR link must read purple (GitHub convention + matches the purple #number tab chip),
    not the generic link blue above. The dark `.meta a.pr-status-merged{var(--pr-status-merged)}` (20_*.css) is out-won in

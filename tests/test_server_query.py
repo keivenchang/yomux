@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 
 from yolomux_lib import server as server_module
+from yolomux_lib.common import error_payload
 from yolomux_lib.server import Handler
 from yolomux_lib.server import parse_query_float
 from yolomux_lib.server import parse_query_int
@@ -20,6 +21,15 @@ def test_parse_repo_refs_param_decodes_per_repo_overrides():
     raw = json.dumps({"/repo/a": {"from": "abc123", "to": "current"}, "/repo/b": {"from": "  ", "to": "HEAD"}})
     parsed = parse_repo_refs_param(raw)
     assert parsed == {"/repo/a": {"from": "abc123", "to": "current"}, "/repo/b": {"to": "HEAD"}}
+
+
+def test_error_payload_normalizes_status_and_context():
+    assert error_payload("bad", path="/tmp/a", session="6", status=HTTPStatus.BAD_REQUEST) == {
+        "error": "bad",
+        "path": "/tmp/a",
+        "session": "6",
+        "status": 400,
+    }
 
 
 def test_parse_repo_refs_param_rejects_garbage():
@@ -53,6 +63,35 @@ def test_parse_query_float_rejects_non_finite_and_negative_values():
     assert parse_query_float({"hours": ["nan"]}, "hours", 24.0) == (None, "hours must be finite")
     assert parse_query_float({"hours": ["inf"]}, "hours", 24.0) == (None, "hours must be finite")
     assert parse_query_float({"hours": ["-1"]}, "hours", 24.0) == (None, "hours must be at least 0")
+
+
+def test_write_int_query_app_result_parses_and_validates_once():
+    handler = object.__new__(Handler)
+    writes = []
+    handler.write_app_result = lambda result: writes.append(("app", result))
+    handler.write_json = lambda value, status=HTTPStatus.OK: writes.append(("json", status, value))
+
+    Handler.write_int_query_app_result(
+        handler,
+        SimpleNamespace(query="session=6&limit=7"),
+        "limit",
+        100,
+        500,
+        lambda qs, limit: ({"session": qs["session"][0], "limit": limit}, HTTPStatus.OK),
+    )
+    Handler.write_int_query_app_result(
+        handler,
+        SimpleNamespace(query="limit=bad"),
+        "limit",
+        100,
+        500,
+        lambda qs, limit: ({"limit": limit}, HTTPStatus.OK),
+    )
+
+    assert writes == [
+        ("app", ({"session": "6", "limit": 7}, HTTPStatus.OK)),
+        ("json", HTTPStatus.BAD_REQUEST, {"error": "limit must be an integer", "status": 400}),
+    ]
 
 
 def test_websocket_bridge_terminates_tmux_process_group():
@@ -246,7 +285,7 @@ def test_handle_fs_batch_rejects_invalid_shape():
 
     Handler.handle_fs_batch(handler, SimpleNamespace(path="/api/fs/batch"))
 
-    assert writes == [(HTTPStatus.BAD_REQUEST, {"error": "requests must be a list"})]
+    assert writes == [(HTTPStatus.BAD_REQUEST, {"error": "requests must be a list", "status": 400})]
 
 
 def test_handle_ws_payload_readonly_discards_input_and_scroll(monkeypatch):

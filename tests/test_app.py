@@ -501,6 +501,40 @@ def test_activity_payload_returns_indefinite_stale_cache_and_refreshes(monkeypat
         webapp.control_server.stop()
 
 
+def test_refresh_sessions_rotates_activity_heartbeats_hourly(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["5"])
+    monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["5"], None))
+    try:
+        calls = []
+        monkeypatch.setattr(webapp.activity_ledger, "rotate_heartbeats", lambda: calls.append("rotate") or 1)
+
+        assert webapp.refresh_sessions() == []
+        assert webapp.refresh_sessions() == []
+        webapp.activity_heartbeat_next_rotate_at = 0
+        assert webapp.refresh_sessions() == []
+
+        assert calls == ["rotate", "rotate"]
+    finally:
+        webapp.control_server.stop()
+
+
+def test_corrupt_activity_ledger_does_not_break_app_start(monkeypatch, tmp_path):
+    activity_path = tmp_path / "activity.json"
+    heartbeat_path = tmp_path / "activity-heartbeats.jsonl"
+    activity_path.write_text("{broken", encoding="utf-8")
+    monkeypatch.setattr(app_module, "ACTIVITY_PATH", activity_path)
+    monkeypatch.setattr(app_module, "ACTIVITY_HEARTBEATS_PATH", heartbeat_path)
+
+    webapp = app_module.TmuxWebtermApp(["5"])
+    try:
+        payload, status = webapp.activity_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert payload["activity"] == {}
+
+
 def test_session_files_payload_reuses_short_cache(monkeypatch):
     info = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
     calls = []

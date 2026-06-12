@@ -27,10 +27,18 @@
   --brand-green: #76b900;
   --brand-green-dark: #3f6f00;
   --accent-gold: #f5c542;
+  --menu-accent: var(--accent);
+  --icon-code: #7dd3fc;
+  --icon-doc: #facc15;
+  --icon-image: #86efac;
+  --icon-archive: #fb923c;
+  --link-soft: #93c5fd;
+  --link-soft-hover: #bfdbfe;
   /* --accent was UNDEFINED, so topbar search/language/activity hover borders fell back to a
      literal light-blue (#6ea8fe) in BOTH themes. Define it per theme (light gets a darker, readable blue). */
   --accent: #6ea8fe;
   --drop-outline: #ffffff;
+  --drop-outline-light: #1d4ed8;
   --drop-outline-text: #2b2100;
   --drop-outline-bg: rgba(245, 197, 66, 0.18);
   --drop-outline-strong: rgba(255, 255, 255, 0.95);
@@ -163,7 +171,7 @@
   --pane-tab-zoom-border: var(--active-control-border);
   --pane-tab-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 84%, #ffffff 16%);
   --pane-tab-zoom-hover-border: color-mix(in srgb, var(--active-control-border) 78%, #ffffff 22%);
-  --pane-tab-badge-gold: #f5c542;
+  --pane-tab-badge-gold: var(--accent-gold);
   --pane-tile-radius: 0;
   --pane-split-gap: 0px;
   --pane-resizer-size: 1px;
@@ -203,6 +211,7 @@
   --z-resizer: 20;
   --z-pane-overlay: 12;
   --z-drop-preview: 38;
+  --z-drop-suggestions: 200;
   --z-drag-ghost: 45;
   --z-pane-modal: 170;
   --z-session-popover: 80;
@@ -279,7 +288,7 @@
   --code-diff-add: #56d364;
   --code-diff-remove: #ff7b72;
   --file-hover-bg: rgba(245, 197, 66, 0.26);
-  --file-hover-border: #f5c542;
+  --file-hover-border: var(--accent-gold);
   --file-hover-outline: rgba(245, 197, 66, 0.42);
   --file-selection-bg: rgb(var(--active-accent-rgb) / 0.46);
   --file-selection-border: var(--active-accent-bright);
@@ -426,7 +435,7 @@ body.theme-light {
   --pane-tab-panel-detail-bg: #dce8d2;
   --pane-detail-bg: #e7edf5;
   --pane-meta-branch: #243245;
-  --pane-meta-path: #111827;
+  --pane-meta-path: var(--lt-text);
   --pane-meta-desc: #4b5563;
   /* Light mode uses a blue separator (dark mode keeps amber/yellow). */
   --pane-resizer-bg: rgba(37, 99, 235, 0.72);
@@ -448,6 +457,13 @@ body.theme-light {
   --brand-green-dark: #3d6900;
   --accent-gold: #b7791f;
   --accent: #2563eb;
+  --menu-accent: #1d4ed8;
+  --icon-code: #0369a1;
+  --icon-doc: #a16207;
+  --icon-image: #15803d;
+  --icon-archive: #c2410c;
+  --link-soft: #075985;
+  --link-soft-hover: #0369a1;
   --git-modified: var(--accent-gold);
   --git-modified-badge: #f5c542;
   --git-untracked-name: #116329;
@@ -458,7 +474,7 @@ body.theme-light {
   --git-staged-badge: var(--brand-green);
   --git-transcript: var(--muted);
   --git-transcript-badge: #64748b;
-  --drop-outline: #1d4ed8;
+  --drop-outline: var(--drop-outline-light);
   --drop-outline-text: #071327;
   --drop-outline-bg: rgba(29, 78, 216, 0.14);
   --drop-outline-strong: rgba(29, 78, 216, 0.92);

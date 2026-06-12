@@ -71,6 +71,17 @@ def test_atomic_persistence_round_trip(tmp_path):
     assert reloaded.snapshot()["6:1"]["total_user_input_ms"] == 5000
 
 
+def test_load_corrupt_activity_json_resets_records_and_logs(tmp_path, caplog):
+    led = _ledger(tmp_path)
+    led.heartbeat("6", "1", ts=1000.0)
+    led.path.write_text("{not json", encoding="utf-8")
+
+    led.load()
+
+    assert led.snapshot() == {}
+    assert "resetting unreadable activity ledger" in caplog.text
+
+
 def test_agent_active_coalesces_separately(tmp_path):
     led = _ledger(tmp_path, idle_gap_seconds=120.0)
     led.note_agent_active("6", "1", ts=1000.0)

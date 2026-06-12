@@ -392,6 +392,16 @@ def pane_sort_key(pane: PaneInfo) -> tuple[str, int, int]:
     return (pane.session, int(pane.window), int(pane.pane))
 
 
+def active_window_for_panes(panes: list[PaneInfo] | list[dict[str, Any]]) -> str | None:
+    for pane in panes:
+        if isinstance(pane, PaneInfo):
+            if pane.window_active and pane.window not in (None, ""):
+                return str(pane.window)
+        elif isinstance(pane, dict) and pane.get("window_active") and pane.get("window") not in (None, ""):
+            return str(pane.get("window"))
+    return None
+
+
 def preferred_pane(panes: list[PaneInfo], agents: list[AgentInfo]) -> PaneInfo | None:
     if not panes:
         return None

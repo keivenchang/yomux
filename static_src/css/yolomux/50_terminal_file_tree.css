@@ -974,7 +974,7 @@ body.theme-light .yoagent-global {
 }
 body.theme-light .yoagent-chat,
 body.theme-light .yoagent-message {
-  color: #111827;
+  color: var(--lt-text);
   background: #ffffff;
   border-color: #cbd5e1;
 }
@@ -990,11 +990,11 @@ body.theme-light .yoagent-message-role {
 }
 body.theme-light .yoagent-message-body.markdown-body,
 body.theme-light .yoagent-global .markdown-body {
-  color: #111827;
+  color: var(--lt-text);
 }
 body.theme-light .yoagent-chat .markdown-body strong,
 body.theme-light .yoagent-global .markdown-body strong {
-  color: #111827;
+  color: var(--lt-text);
 }
 body.theme-light .yoagent-chat .markdown-body em,
 body.theme-light .yoagent-global .markdown-body em {
@@ -1129,7 +1129,7 @@ body.info-column-resizing {
   user-select: none;
 }
 .info-cell a {
-  color: #93c5fd;
+  color: var(--link-soft);
   text-decoration: none;
 }
 .info-cell a.pr-status-failing {
@@ -1149,7 +1149,7 @@ body.info-column-resizing {
   color: var(--pr-status-closed);
 }
 .info-cell a:hover {
-  color: #bfdbfe;
+  color: var(--link-soft-hover);
   text-decoration: underline;
 }
 .info-cell a.pr-status-failing:hover {
@@ -1181,10 +1181,10 @@ body.theme-light .info-row.header {
   background: #ffffff;
 }
 body.theme-light .info-cell a {
-  color: #1d4ed8;
+  color: var(--link-soft);
 }
 body.theme-light .info-cell a:hover {
-  color: #0a3bc0;
+  color: var(--link-soft-hover);
 }
 body.theme-light .info-cell a.pr-status-failing,
 body.theme-light .info-cell a.pr-status-failing:hover {
@@ -1940,19 +1940,19 @@ body.theme-light .modal.about-open {
   color: var(--bad);
 }
 .file-tree-icon.file-icon-code {
-  color: #7dd3fc;
+  color: var(--icon-code);
 }
 .file-tree-icon.file-icon-doc {
-  color: #facc15;
+  color: var(--icon-doc);
 }
 .file-tree-icon.file-icon-config {
   color: var(--pr-status-merged);
 }
 .file-tree-icon.file-icon-image {
-  color: #86efac;
+  color: var(--icon-image);
 }
 .file-tree-icon.file-icon-archive {
-  color: #fb923c;
+  color: var(--icon-archive);
 }
 .file-tree-icon.file-icon-generic {
   color: var(--git-transcript-badge);
@@ -2399,7 +2399,7 @@ body.theme-light .file-tree-children::before {
    terminal). Non-modal, auto-dismisses; the terminal keeps focus. */
 .terminal-drop-suggestions {
   position: fixed;
-  z-index: 200;
+  z-index: var(--z-drop-suggestions);
   min-width: 248px;
   max-width: 380px;
   padding: 6px;

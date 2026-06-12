@@ -75,6 +75,7 @@ from .metadata import session_git_inventory
 from .metadata import session_project_metadata
 from .metadata import session_to_json
 from .metadata import watched_pr_metadata
+from .sessions import active_window_for_panes
 from .sessions import discover_sessions
 from .settings import save_settings
 from .settings import SETTINGS_PATH
@@ -137,6 +138,7 @@ SHARE_TOKEN_MAX_TTL_SECONDS = 8.0 * 3600.0
 SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS = 1.25
 SERVER_WATCHED_PR_EVENT_POLL_SECONDS = 60.0
 SERVER_TABBER_ACTIVITY_CACHE_REFRESH_SECONDS = 60.0
+SERVER_ACTIVITY_HEARTBEAT_ROTATE_SECONDS = 3600.0
 CLIENT_WATCH_ROOT_TTL_SECONDS = 300
 CLIENT_WATCH_ROOT_LIMIT = 128
 CLIENT_WATCH_FILE_LIMIT = 128
@@ -398,6 +400,7 @@ class TmuxWebtermApp:
         # typed-time). Constructor defaults today; Preferences exposure is a deferred follow-up.
         self.activity_ledger = ActivityLedger(ACTIVITY_PATH, heartbeat_path=ACTIVITY_HEARTBEATS_PATH)
         self.activity_ledger.load()
+        self.activity_heartbeat_next_rotate_at = 0.0
         self.tabber_activity_cache_lock = threading.RLock()
         self.tabber_activity_cache: tuple[float, dict[str, Any]] | None = (time.monotonic(), self.build_activity_payload())
         self.tabber_activity_cache_refreshing = False
@@ -482,10 +485,19 @@ class TmuxWebtermApp:
             self.sessions = sessions
             self.prune_yoagent_session_summaries(set(sessions))
             self.activity_ledger.prune(set(sessions))
+            self.rotate_activity_heartbeats_if_due()
             self.activity_ledger.flush()
             self.revoke_share_tokens_for_missing_sessions(set(sessions))
             return []
         return [error]
+
+    def rotate_activity_heartbeats_if_due(self, now: float | None = None) -> int:
+        moment = time.monotonic() if now is None else float(now)
+        if moment < self.activity_heartbeat_next_rotate_at:
+            return 0
+        kept = self.activity_ledger.rotate_heartbeats()
+        self.activity_heartbeat_next_rotate_at = moment + SERVER_ACTIVITY_HEARTBEAT_ROTATE_SECONDS
+        return kept
 
     def bounded_share_ttl_seconds(self, value: Any) -> float | None:
         if value is None or value == "":
@@ -2016,10 +2028,7 @@ class TmuxWebtermApp:
         panes = info.get("panes") if isinstance(info, dict) else None
         if not isinstance(panes, list):
             return None
-        for pane in panes:
-            if isinstance(pane, dict) and pane.get("window_active") and pane.get("window") not in (None, ""):
-                return str(pane.get("window"))
-        return None
+        return active_window_for_panes(panes)
 
     def record_user_input(self, session: str, byte_count: int) -> None:
         """One user-input heartbeat from the WS bridge (admin keystrokes only — readonly is

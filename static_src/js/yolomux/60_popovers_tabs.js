@@ -19,8 +19,7 @@ async function expandDirectoryRow(row, fullPath, options = {}) {
   row.querySelector('.file-tree-icon').textContent = '▾';
   const existingChildren = childContainerForRow(row, fullPath);
   const children = existingChildren || createFileTreeChildContainer(fullPath);
-  const depth = parseInt(row.style.paddingLeft, 10);
-  const nextDepth = Math.round((depth - 8) / 14) + 1;
+  const nextDepth = fileTreeRowDepth(row) + 1;
   renderTreeChildren(children, fullPath, entries, nextDepth);
   if (!existingChildren) row.insertAdjacentElement('afterend', children);
   rememberFileExplorerSyncExpandedState();

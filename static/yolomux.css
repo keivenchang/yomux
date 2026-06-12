@@ -28,10 +28,18 @@
   --brand-green: #76b900;
   --brand-green-dark: #3f6f00;
   --accent-gold: #f5c542;
+  --menu-accent: var(--accent);
+  --icon-code: #7dd3fc;
+  --icon-doc: #facc15;
+  --icon-image: #86efac;
+  --icon-archive: #fb923c;
+  --link-soft: #93c5fd;
+  --link-soft-hover: #bfdbfe;
   /* --accent was UNDEFINED, so topbar search/language/activity hover borders fell back to a
      literal light-blue (#6ea8fe) in BOTH themes. Define it per theme (light gets a darker, readable blue). */
   --accent: #6ea8fe;
   --drop-outline: #ffffff;
+  --drop-outline-light: #1d4ed8;
   --drop-outline-text: #2b2100;
   --drop-outline-bg: rgba(245, 197, 66, 0.18);
   --drop-outline-strong: rgba(255, 255, 255, 0.95);
@@ -164,7 +172,7 @@
   --pane-tab-zoom-border: var(--active-control-border);
   --pane-tab-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 84%, #ffffff 16%);
   --pane-tab-zoom-hover-border: color-mix(in srgb, var(--active-control-border) 78%, #ffffff 22%);
-  --pane-tab-badge-gold: #f5c542;
+  --pane-tab-badge-gold: var(--accent-gold);
   --pane-tile-radius: 0;
   --pane-split-gap: 0px;
   --pane-resizer-size: 1px;
@@ -204,6 +212,7 @@
   --z-resizer: 20;
   --z-pane-overlay: 12;
   --z-drop-preview: 38;
+  --z-drop-suggestions: 200;
   --z-drag-ghost: 45;
   --z-pane-modal: 170;
   --z-session-popover: 80;
@@ -280,7 +289,7 @@
   --code-diff-add: #56d364;
   --code-diff-remove: #ff7b72;
   --file-hover-bg: rgba(245, 197, 66, 0.26);
-  --file-hover-border: #f5c542;
+  --file-hover-border: var(--accent-gold);
   --file-hover-outline: rgba(245, 197, 66, 0.42);
   --file-selection-bg: rgb(var(--active-accent-rgb) / 0.46);
   --file-selection-border: var(--active-accent-bright);
@@ -427,7 +436,7 @@ body.theme-light {
   --pane-tab-panel-detail-bg: #dce8d2;
   --pane-detail-bg: #e7edf5;
   --pane-meta-branch: #243245;
-  --pane-meta-path: #111827;
+  --pane-meta-path: var(--lt-text);
   --pane-meta-desc: #4b5563;
   /* Light mode uses a blue separator (dark mode keeps amber/yellow). */
   --pane-resizer-bg: rgba(37, 99, 235, 0.72);
@@ -449,6 +458,13 @@ body.theme-light {
   --brand-green-dark: #3d6900;
   --accent-gold: #b7791f;
   --accent: #2563eb;
+  --menu-accent: #1d4ed8;
+  --icon-code: #0369a1;
+  --icon-doc: #a16207;
+  --icon-image: #15803d;
+  --icon-archive: #c2410c;
+  --link-soft: #075985;
+  --link-soft-hover: #0369a1;
   --git-modified: var(--accent-gold);
   --git-modified-badge: #f5c542;
   --git-untracked-name: #116329;
@@ -459,7 +475,7 @@ body.theme-light {
   --git-staged-badge: var(--brand-green);
   --git-transcript: var(--muted);
   --git-transcript-badge: #64748b;
-  --drop-outline: #1d4ed8;
+  --drop-outline: var(--drop-outline-light);
   --drop-outline-text: #071327;
   --drop-outline-bg: rgba(29, 78, 216, 0.14);
   --drop-outline-strong: rgba(29, 78, 216, 0.92);
@@ -929,7 +945,7 @@ body.theme-light .topbar-language {
   align-items: center;
   gap: 4px;
   padding: 0 0.46em;
-  color: #dfe6ef;
+  color: var(--pane-tab-text);
   background: transparent;
   border: 1px solid transparent;
   border-radius: 6px;
@@ -1054,7 +1070,7 @@ body.theme-light .topbar-language {
   align-items: center;
   gap: 6px;
   padding: 5px 7px;
-  color: #dfe6ef;
+  color: var(--pane-tab-text);
   background: transparent;
   border: 1px solid transparent;
   border-radius: 6px;
@@ -1418,7 +1434,7 @@ body.theme-light .app-menu-submenu-wrap:hover > .app-menu-command:not(:disabled)
 body.theme-light .app-menu-submenu-wrap.open > .app-menu-command:not(:disabled) {
   color: var(--pc-control-hover-fg);
   background: #e8f0fb;
-  border-color: #1d4ed8;
+  border-color: var(--menu-accent);
 }
 body.theme-light .app-menu-command:disabled {
   color: var(--text-muted-strong);
@@ -1462,7 +1478,7 @@ body.theme-light .app-menu-tab-command:hover:not(:disabled),
 body.theme-light .app-menu-tab-command:focus-visible {
   color: var(--pc-control-hover-fg);
   background: #e8f0fb;
-  border-color: #1d4ed8;
+  border-color: var(--menu-accent);
 }
 body.theme-light .latency-meter {
   background: #ffffff;
@@ -2166,7 +2182,7 @@ body.theme-light .branch-link {
 }
 .popover-value a,
 .branch-link {
-  color: #93c5fd;
+  color: var(--link-soft);
   text-decoration: none;
 }
 .popover-value a.pr-status-failing,
@@ -2920,7 +2936,7 @@ body.theme-light .branch-link {
 }
 .preferences-setting-advisory code {
   padding: 2px 4px;
-  color: #111827;
+  color: var(--lt-text);
   background: rgba(255, 255, 255, 0.45);
   border: 1px solid rgba(42, 30, 0, 0.2);
   border-radius: 3px;
@@ -3351,7 +3367,7 @@ body.theme-light .changes-repo-group {
   --changes-repo-head-bg: var(--panel2);
   --changes-folder-text: var(--accent-gold);
   --changes-path-text: #59636e;
-  --changes-icon-text: #1d4ed8;
+  --changes-icon-text: var(--menu-accent);
 }
 body.theme-light .changes-toolbar,
 body.theme-light .changes-repo-group {
@@ -3500,7 +3516,7 @@ body.theme-light .preferences-inline-action {
 }
 .popover-value a:hover,
 .branch-link:hover {
-  color: #bfdbfe;
+  color: var(--link-soft-hover);
   text-decoration: underline;
 }
 .popover-value a.pr-status-merged:hover,
@@ -4677,12 +4693,12 @@ body.theme-light .drop-slot.drag-over {
 }
 .meta a,
 .summary-context a {
-  color: #93c5fd;
+  color: var(--link-soft);
   text-decoration: none;
 }
 .meta a:hover,
 .summary-context a:hover {
-  color: #bfdbfe;
+  color: var(--link-soft-hover);
   text-decoration: underline;
 }
 .meta-branch {
@@ -5479,11 +5495,11 @@ body.theme-light .panel-detail-close:focus-visible {
    the light control hover bg). Saturated-chip light text (red/dark-blue badges) is left as-is. */
 body.theme-light .meta a,
 body.theme-light .summary-context a {
-  color: #1d4ed8;
+  color: var(--link-soft);
 }
 body.theme-light .meta a:hover,
 body.theme-light .summary-context a:hover {
-  color: #1e3a8a;
+  color: var(--link-soft-hover);
 }
 /* a merged PR link must read purple (GitHub convention + matches the purple #number tab chip),
    not the generic link blue above. The dark `.meta a.pr-status-merged{var(--pr-status-merged)}` (20_*.css) is out-won in
@@ -6486,7 +6502,7 @@ body.theme-light .yoagent-global {
 }
 body.theme-light .yoagent-chat,
 body.theme-light .yoagent-message {
-  color: #111827;
+  color: var(--lt-text);
   background: #ffffff;
   border-color: #cbd5e1;
 }
@@ -6502,11 +6518,11 @@ body.theme-light .yoagent-message-role {
 }
 body.theme-light .yoagent-message-body.markdown-body,
 body.theme-light .yoagent-global .markdown-body {
-  color: #111827;
+  color: var(--lt-text);
 }
 body.theme-light .yoagent-chat .markdown-body strong,
 body.theme-light .yoagent-global .markdown-body strong {
-  color: #111827;
+  color: var(--lt-text);
 }
 body.theme-light .yoagent-chat .markdown-body em,
 body.theme-light .yoagent-global .markdown-body em {
@@ -6641,7 +6657,7 @@ body.info-column-resizing {
   user-select: none;
 }
 .info-cell a {
-  color: #93c5fd;
+  color: var(--link-soft);
   text-decoration: none;
 }
 .info-cell a.pr-status-failing {
@@ -6661,7 +6677,7 @@ body.info-column-resizing {
   color: var(--pr-status-closed);
 }
 .info-cell a:hover {
-  color: #bfdbfe;
+  color: var(--link-soft-hover);
   text-decoration: underline;
 }
 .info-cell a.pr-status-failing:hover {
@@ -6693,10 +6709,10 @@ body.theme-light .info-row.header {
   background: #ffffff;
 }
 body.theme-light .info-cell a {
-  color: #1d4ed8;
+  color: var(--link-soft);
 }
 body.theme-light .info-cell a:hover {
-  color: #0a3bc0;
+  color: var(--link-soft-hover);
 }
 body.theme-light .info-cell a.pr-status-failing,
 body.theme-light .info-cell a.pr-status-failing:hover {
@@ -7452,19 +7468,19 @@ body.theme-light .modal.about-open {
   color: var(--bad);
 }
 .file-tree-icon.file-icon-code {
-  color: #7dd3fc;
+  color: var(--icon-code);
 }
 .file-tree-icon.file-icon-doc {
-  color: #facc15;
+  color: var(--icon-doc);
 }
 .file-tree-icon.file-icon-config {
   color: var(--pr-status-merged);
 }
 .file-tree-icon.file-icon-image {
-  color: #86efac;
+  color: var(--icon-image);
 }
 .file-tree-icon.file-icon-archive {
-  color: #fb923c;
+  color: var(--icon-archive);
 }
 .file-tree-icon.file-icon-generic {
   color: var(--git-transcript-badge);
@@ -7911,7 +7927,7 @@ body.theme-light .file-tree-children::before {
    terminal). Non-modal, auto-dismisses; the terminal keeps focus. */
 .terminal-drop-suggestions {
   position: fixed;
-  z-index: 200;
+  z-index: var(--z-drop-suggestions);
   min-width: 248px;
   max-width: 380px;
   padding: 6px;
@@ -8396,7 +8412,7 @@ body.theme-light .file-tree-children::before {
   box-shadow: inset 0 0 0 1px rgba(245, 197, 66, 0.20);
 }
 .file-editor-theme-panel.theme-vanilla {
-  color: #111827;
+  color: var(--lt-text);
   background: #ffffff;
   border-color: #cbd5e1;
   box-shadow: inset 0 0 0 1px rgb(var(--overlay-slate-rgb) / 0.12);
@@ -8759,7 +8775,7 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 .file-editor-preview-pane.vanilla-preview-body,
 .file-editor-preview-pane-panel.vanilla-preview-body {
   background: #ffffff;
-  color: #111827;
+  color: var(--lt-text);
   font-family: Arial, Helvetica, sans-serif;
   line-height: 1.45;
 }
@@ -8775,7 +8791,7 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 .file-editor-preview-pane-panel.vanilla-preview-body h4,
 .file-editor-preview-pane-panel.vanilla-preview-body h5,
 .file-editor-preview-pane-panel.vanilla-preview-body h6 {
-  color: #111827;
+  color: var(--lt-text);
   background: transparent;
 }
 .file-editor-preview-pane.vanilla-preview-body a,
@@ -8790,13 +8806,13 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 }
 .file-editor-preview-pane.vanilla-preview-body code,
 .file-editor-preview-pane-panel.vanilla-preview-body code {
-  color: #111827;
+  color: var(--lt-text);
   background: var(--lt-panel);
   border-color: var(--lt-line);
 }
 .file-editor-preview-pane.vanilla-preview-body pre,
 .file-editor-preview-pane-panel.vanilla-preview-body pre {
-  color: #111827;
+  color: var(--lt-text);
   background: var(--lt-panel);
   border-color: var(--lt-line);
 }
@@ -8984,12 +9000,12 @@ body:not(.file-explorer-mode-diff) .file-explorer-mode-diff-only {
   border-radius: 1px;
 }
 .path-copy-button::before {
-  left: 5px;
+  inset-inline-start: 5px;
   top: 7px;
   opacity: 0.7;
 }
 .path-copy-button::after {
-  left: 8px;
+  inset-inline-start: 8px;
   top: 4px;
   background: inherit;
 }
@@ -9386,7 +9402,7 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
 .file-explorer-folder-icon::before {
   content: "";
   position: absolute;
-  left: 1px;
+  inset-inline-start: 1px;
   top: -5px;
   width: 7px;
   height: 5px;
@@ -9640,7 +9656,7 @@ body.editor-theme-light .file-editor-diff-codemirror {
   --diff-add-line-bg: #bfeac8;
   --diff-remove-line-bg: #f3b7b7;
   --diff-search-match-bg: #ffcc00;
-  --diff-search-match-fg: #111827;
+  --diff-search-match-fg: var(--lt-text);
   --diff-search-match-ring: #7c2d12;
   --diff-search-selected-bg: #ff9f1c;
   --diff-search-selected-ring: #7c2d12;
@@ -9768,6 +9784,7 @@ body.editor-theme-light .file-editor-content {
 }
 .file-editor-toolbar-center {
   position: absolute;
+  /* Physical centering pairs left:50% with translateX; logical inset would not match this transform. */
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
@@ -9974,7 +9991,7 @@ body.editor-theme-light .file-editor-content {
   box-shadow: inset 0 0 0 1px rgba(245, 197, 66, 0.20);
 }
 .file-editor-theme-panel.theme-vanilla {
-  color: #111827;
+  color: var(--lt-text);
   background: #ffffff;
   border-color: #cbd5e1;
   box-shadow: inset 0 0 0 1px rgb(var(--overlay-slate-rgb) / 0.12);
@@ -10046,7 +10063,7 @@ body.editor-theme-light .file-editor-code-preview {
   --markdown-emphasis: var(--lt-markdown-emphasis);
 }
 body.editor-theme-light {
-  --drop-outline: #1d4ed8;
+  --drop-outline: var(--drop-outline-light);
   --drop-outline-text: #0f2d69;
   --drop-outline-bg: rgba(29, 78, 216, 0.14);
   --drop-outline-strong: rgba(29, 78, 216, 0.98);
@@ -10064,7 +10081,7 @@ body.editor-theme-light .file-editor-content .markdown-body pre {
 }
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body {
   background: #ffffff;
-  color: #111827;
+  color: var(--lt-text);
 }
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h1,
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h2,
@@ -10072,7 +10089,7 @@ body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h4,
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h5,
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h6 {
-  color: #111827;
+  color: var(--lt-text);
   background: transparent;
 }
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body a {
@@ -10083,12 +10100,12 @@ body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body
   color: inherit;
 }
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body code {
-  color: #111827;
+  color: var(--lt-text);
   background: var(--lt-panel);
   border-color: var(--lt-line);
 }
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body pre {
-  color: #111827;
+  color: var(--lt-text);
   background: var(--lt-panel);
   border-color: var(--lt-line);
 }
@@ -10563,7 +10580,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
 .file-editor-codemirror-panel .cm-search .cm-dialog-close {
   position: absolute;
   top: 50%;
-  right: 8px;
+  inset-inline-end: 8px;
   width: 22px;
   height: 22px;
   padding: 0;
@@ -11023,12 +11040,6 @@ body.theme-light .file-tree-row.tabber-row {
 .file-tree-row.tabber-row:not(.selected):hover {
   background: var(--file-hover-bg);
   box-shadow: inset 4px 0 0 var(--file-hover-border), inset 0 0 0 1px var(--file-hover-outline);
-}
-.file-tree-row.tabber-row .tabber-row-detail {
-  color: var(--tabber-detail-color);
-  margin-inline-start: 6px;
-  font-size: var(--ui-font-size-2xs);
-  font-family: var(--mono-font);
 }
 .file-tree-row.tabber-row .tabber-session-name,
 .file-tree-row.tabber-row .tabber-session-description {

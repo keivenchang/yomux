@@ -65,6 +65,48 @@ const fileExplorerFsBatchDelayMs = 8;
 let fileExplorerFsBatchSeq = 0;
 let fileExplorerFsBatchTimer = null;
 let fileExplorerPushRefreshDepth = 0;
+const FILE_TREE_BASE_PAD_PX = 8;
+const FILE_TREE_COMPACT_PAD_PX = 4;
+const FILE_TREE_INDENT_PX = 14;
+const FILE_TREE_ROW_HANDLERS = Object.freeze([
+  'onpointerdown',
+  'onpointerup',
+  'onclick',
+  'ondblclick',
+  'oncontextmenu',
+  'ondragstart',
+  'ondragend',
+]);
+
+function fileTreeRowPadding(depth, compact = false) {
+  const safeDepth = Math.max(0, Number(depth) || 0);
+  const base = compact ? FILE_TREE_COMPACT_PAD_PX : FILE_TREE_BASE_PAD_PX;
+  return `${base + safeDepth * FILE_TREE_INDENT_PX}px`;
+}
+
+function fileTreeRowDepth(row, compact = false) {
+  const value = parseInt(row?.style?.paddingLeft || '', 10);
+  const base = compact ? FILE_TREE_COMPACT_PAD_PX : FILE_TREE_BASE_PAD_PX;
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.round((value - base) / FILE_TREE_INDENT_PX));
+}
+
+function setRowDataset(row, key, value) {
+  if (!row?.dataset || !key) return;
+  if (value === undefined || value === null || value === '') delete row.dataset[key];
+  else row.dataset[key] = String(value);
+}
+
+function clearFileTreeRowHandlers(row) {
+  for (const key of FILE_TREE_ROW_HANDLERS) row[key] = null;
+}
+
+function setTreeItemAria(row, {selected = false, expandable = false, expanded = false} = {}) {
+  row.setAttribute('role', 'treeitem');
+  row.setAttribute('aria-selected', selected ? 'true' : 'false');
+  if (expandable) row.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  else row.removeAttribute('aria-expanded');
+}
 
 function clearFileExplorerListError(path = '') {
   const root = normalizeDirectoryPath(path || '');
@@ -1584,8 +1626,12 @@ function fileTreeChangedAncestorStats(payload = fileExplorerSessionFilesPayload)
   return stats;
 }
 
+function normalizeGitStatus(status) {
+  return String(status || '').trim().toUpperCase();
+}
+
 function fileTreeGitStatus(path) {
-  return String(fileTreeChangedFile(path)?.status || '').toUpperCase();
+  return normalizeGitStatus(fileTreeChangedFile(path)?.status);
 }
 
 function fileTreeNumstatText(path) {
@@ -1725,13 +1771,13 @@ function applySessionHighlightRowClass(row, highlightClass) {
 }
 
 function gitStatusRowClass(status) {
-  const key = String(status || '').toUpperCase();
+  const key = normalizeGitStatus(status);
   if (key === 'A' || key === 'U' || key === '?') return 'git-untracked';
   if (key === 'D') return 'git-deleted';
   if (key === 'S') return 'git-staged';
   if (key === 'M') return 'git-modified';
   if (key === 'T') return 'git-transcript';
-  const fallback = String(status || '').toLowerCase();
+  const fallback = key.toLowerCase();
   return /^[a-z0-9_-]+$/.test(fallback) ? `git-${fallback}` : '';
 }
 
@@ -1740,11 +1786,11 @@ function fileTreeGitStatusClass(status) {
 }
 
 function fileTreeGitStatusBadgeClass(status) {
-  return String(status || '').toUpperCase() === '?' ? 'file-tree-git-status-unknown' : '';
+  return normalizeGitStatus(status) === '?' ? 'file-tree-git-status-unknown' : '';
 }
 
 function gitStatusBadgeTitle(status) {
-  const key = String(status || '').toUpperCase();
+  const key = normalizeGitStatus(status);
   const labels = {
     M: 'modified',
     A: 'added',
@@ -1910,20 +1956,22 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   const indexedDescendantDirectory = !differMode && entry.kind === 'dir' && !indexedDirectory && Boolean(fileExplorerIndexedAncestor(fullPath));
   syncFileTreeRowKindClass(row, entry.kind);
   row.classList.toggle('compact', compact);
-  row.dataset.path = fullPath;
-  row.dataset.kind = entry.kind;
-  row.dataset.name = entry.name;
-  row.dataset.isRepo = entry.is_repo === true ? 'true' : 'false';
-  row.dataset.isSymlink = entry.is_symlink === true ? 'true' : 'false';
-  if (entry.symlink_target) row.dataset.symlinkTarget = String(entry.symlink_target);
-  else delete row.dataset.symlinkTarget;
-  row.dataset.indexed = indexedDirectory ? 'true' : 'false';
-  const paddingLeft = `${(compact ? 4 : 8) + depth * 14}px`;
+  setRowDataset(row, 'path', fullPath);
+  setRowDataset(row, 'kind', entry.kind);
+  setRowDataset(row, 'name', entry.name);
+  setRowDataset(row, 'isRepo', entry.is_repo === true ? 'true' : 'false');
+  setRowDataset(row, 'isSymlink', entry.is_symlink === true ? 'true' : 'false');
+  setRowDataset(row, 'symlinkTarget', entry.symlink_target || '');
+  setRowDataset(row, 'indexed', indexedDirectory ? 'true' : 'false');
+  setRowDataset(row, 'tabberType', '');
+  setRowDataset(row, 'tabberSession', '');
+  setRowDataset(row, 'tabberWindow', '');
+  setRowDataset(row, 'tabberRepoRoot', '');
+  setRowDataset(row, 'tabberItem', '');
+  setRowDataset(row, 'tabberBranch', '');
+  const paddingLeft = fileTreeRowPadding(depth, compact);
   if (row.style.paddingLeft !== paddingLeft) row.style.paddingLeft = paddingLeft;
-  row.setAttribute('role', 'treeitem');
-  row.setAttribute('aria-selected', fileExplorerSelectedPaths.has(fullPath) ? 'true' : 'false');
-  if (entry.kind === 'dir') row.setAttribute('aria-expanded', expanded ? 'true' : 'false');
-  else row.removeAttribute('aria-expanded');
+  setTreeItemAria(row, {selected: fileExplorerSelectedPaths.has(fullPath), expandable: entry.kind === 'dir', expanded});
   row.draggable = entry.kind === 'file' || entry.kind === 'dir';
   row.classList.toggle('selected', fileExplorerSelectedPaths.has(fullPath));
   row.classList.toggle('expanded', expanded);
@@ -1949,7 +1997,7 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
     ? (options.sessionFilesMap ? (options.sessionFilesMap.get(fullPath) || null) : fileTreeChangedFile(fullPath))
     : null;
   const gitStatus = entry.kind === 'file'
-    ? (options.sessionFilesMap ? (changedFile ? String(changedFile.status || 'M').toUpperCase() : '') : fileTreeGitStatus(fullPath))
+    ? (options.sessionFilesMap ? (changedFile ? normalizeGitStatus(changedFile.status || 'M') : '') : fileTreeGitStatus(fullPath))
     : (differMode ? '' : fileExplorerIndexBadgeText(fullPath));
   const gitStatusTitle = entry.kind === 'dir' && !differMode ? fileExplorerIndexBadgeTitle(fullPath) : gitStatusBadgeTitle(gitStatus);
   const gitClass = fileTreeGitStatusClass(gitStatus);
@@ -1991,32 +2039,21 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
       : (changedAncestor?.count ? String(changedAncestor.count) : ''))
     : '';
   // Set data attributes so Differ event delegation (click/drag/contextmenu) can find these rows
-  if (changedFile?.abs_path) {
-    row.dataset.openChangeFile = changedFile.abs_path;
-    row.dataset.openChangeSession = changedFile.session || '';
-    row.dataset.openChangeStatus = (changedFile.status || 'M').toUpperCase();
-    row.dataset.changeRel = changedFile.path || '';
-    if (changedFile.repo) row.dataset.openChangeRepo = changedFile.repo;
-    else delete row.dataset.openChangeRepo;
-    if (changedFile.size !== null && changedFile.size !== undefined) row.dataset.changeSize = String(changedFile.size);
-    else delete row.dataset.changeSize;
-  } else {
-    delete row.dataset.openChangeFile;
-    delete row.dataset.openChangeSession;
-    delete row.dataset.openChangeStatus;
-    delete row.dataset.changeRel;
-    delete row.dataset.openChangeRepo;
-    delete row.dataset.changeSize;
-  }
+  setRowDataset(row, 'openChangeFile', changedFile?.abs_path || '');
+  setRowDataset(row, 'openChangeSession', changedFile?.abs_path ? (changedFile.session || '') : '');
+  setRowDataset(row, 'openChangeStatus', changedFile?.abs_path ? normalizeGitStatus(changedFile.status || 'M') : '');
+  setRowDataset(row, 'changeRel', changedFile?.abs_path ? (changedFile.path || '') : '');
+  setRowDataset(row, 'openChangeRepo', changedFile?.abs_path ? (changedFile.repo || '') : '');
+  setRowDataset(row, 'changeSize', changedFile?.abs_path && changedFile.size !== null && changedFile.size !== undefined ? changedFile.size : '');
   if (differMode && entry.kind === 'dir') {
     const repoRoot = options.repoForDiffer || '';
     const relDir = repoRoot && fullPath.startsWith(repoRoot + '/') ? fullPath.slice(repoRoot.length + 1) : '';
-    row.dataset.changesFolderToggle = fullPath;
-    row.dataset.openChangeDirectory = fullPath;
-    row.dataset.changeRel = relDir;
+    setRowDataset(row, 'changesFolderToggle', fullPath);
+    setRowDataset(row, 'openChangeDirectory', fullPath);
+    setRowDataset(row, 'changeRel', relDir);
   } else if (!differMode) {
-    delete row.dataset.changesFolderToggle;
-    delete row.dataset.openChangeDirectory;
+    setRowDataset(row, 'changesFolderToggle', '');
+    setRowDataset(row, 'openChangeDirectory', '');
   }
   updateFileTreeRowContents(row, icon, displayName.text, {
     gitStatus,
@@ -2033,13 +2070,7 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   }
   if (differMode) {
     // In differMode, event handling is via delegation in bindChangesPanel; clear Finder handlers
-    row.onpointerdown = null;
-    row.onpointerup = null;
-    row.onclick = null;
-    row.ondblclick = null;
-    row.oncontextmenu = null;
-    row.ondragstart = null;
-    row.ondragend = null;
+    clearFileTreeRowHandlers(row);
   } else {
     row.onpointerdown = event => {
       if (event.button != null && event.button !== 0) return;
@@ -2455,7 +2486,8 @@ function syncFileIndexStatusPollInterval() {
     return;
   }
   const proactiveMs = Math.max(1, fileExplorerIndexRefreshSeconds * 1000);
-  resetRuntimeInterval('file-index-building', refreshBuildingFileIndexStatuses, Math.min(1500, proactiveMs));
+  // Backend-facing poll intervals stay odd-numbered to avoid synchronized timer collisions.
+  resetRuntimeInterval('file-index-building', refreshBuildingFileIndexStatuses, Math.min(1501, proactiveMs));
 }
 
 // Lazily warm/poll an indexed root's status, without re-fetching once it is known ready or while a
@@ -2690,21 +2722,37 @@ function warmTabberDataOnLaunch() {
 }
 
 // Touched-path cache, keyed by session (lazily fetched; never disturbs the Differ target).
-const tabberSessionFilesCache = new Map();
-const tabberSessionFilesInFlight = new Set();
+const tabberSessionFilesStates = new Map();
+
+function tabberSessionFilesState(session) {
+  const key = String(session || '');
+  let state = tabberSessionFilesStates.get(key);
+  if (!state) {
+    state = {files: [], loaded: false, loading: false};
+    tabberSessionFilesStates.set(key, state);
+  }
+  return state;
+}
+
+function clearTabberSessionFilesStates() {
+  tabberSessionFilesStates.clear();
+}
 
 async function fetchTabberSessionFiles(session, options = {}) {
   if (!session) return;
-  if (!options.force && (tabberSessionFilesCache.has(session) || tabberSessionFilesInFlight.has(session))) return;
-  tabberSessionFilesInFlight.add(session);
+  const state = tabberSessionFilesState(session);
+  if (!options.force && (state.loaded || state.loading)) return;
+  state.loading = true;
   if (fileExplorerMode === 'tabber') refreshTabberPanels();
   try {
     const payload = await apiFetchJson(`/api/session-files?session=${encodeURIComponent(session)}&hours=24`, {cache: 'no-store'});
-    tabberSessionFilesCache.set(session, {files: Array.isArray(payload?.files) ? payload.files : [], loaded: true});
+    state.files = Array.isArray(payload?.files) ? payload.files : [];
+    state.loaded = true;
   } catch (_) {
-    tabberSessionFilesCache.set(session, {files: [], loaded: true});
+    state.files = [];
+    state.loaded = true;
   } finally {
-    tabberSessionFilesInFlight.delete(session);
+    state.loading = false;
   }
   if (fileExplorerMode === 'tabber') refreshTabberPanels();
 }
@@ -2733,7 +2781,8 @@ function tabberWindowIsAgent(name) {
 
 function ensureTabberSessionFilesFetches() {
   for (const session of tabberOrderedSessions()) {
-    if (tabberSessionFilesCache.has(session) || tabberSessionFilesInFlight.has(session)) continue;
+    const state = tabberSessionFilesStates.get(session);
+    if (state?.loaded || state?.loading) continue;
     const info = transcriptMeta.sessions?.[session];
     if (tmuxWindowRecords(info?.panes).some(record => tabberWindowIsAgent(record.name))) fetchTabberSessionFiles(session);
   }
@@ -2763,9 +2812,9 @@ function tabberKnownRootForPath(path, roots) {
 // Absolute touched-path entries for the paths a session's agent touched, attached under an agent window.
 // These are intentionally leaves: the Tabber shows where work happened, not every changed file.
 function tabberRepoEntriesForWindow(session, windowIndex, gitBranch, gitRoot) {
-  const cached = tabberSessionFilesCache.get(session);
-  if (!cached) {
-    if (!tabberSessionFilesInFlight.has(session)) return [];
+  const cached = tabberSessionFilesStates.get(session);
+  if (!cached?.loaded) {
+    if (!cached?.loading) return [];
     return [{
       name: 'loading', kind: 'file', mtime: 0, sortName: 'loading',
       tabber: {type: 'loading', session, windowIndex, label: 'Fetching paths', icon: '·'},
@@ -2893,13 +2942,12 @@ function refreshTabberPanels() {
   }
 }
 
-function tabberWindowLabelHtml(label, iconHtml) {
+function tabberWindowLabelHtml(label, iconHtml, options = {}) {
   const text = String(label || '');
-  const activeMarker = text.endsWith(' ●') ? ' ●' : '';
-  const body = activeMarker ? text.slice(0, -activeMarker.length) : text;
-  const pidMatch = body.match(/^(.*?)(\s+\(pid=\d+\))$/);
-  const nameText = pidMatch ? pidMatch[1] : body;
+  const pidMatch = text.match(/^(.*?)(\s+\(pid=\d+\))$/);
+  const nameText = pidMatch ? pidMatch[1] : text;
   const pidText = pidMatch ? pidMatch[2] : '';
+  const activeMarker = options.active === true ? ' ●' : '';
   return `<span class="tabber-window-label"><span class="tabber-window-text">${esc(nameText)}</span>${iconHtml}${pidText ? `<span class="tabber-window-pid">${esc(pidText)}</span>` : ''}${activeMarker ? `<span class="tabber-window-active">${esc(activeMarker)}</span>` : ''}</span>`;
 }
 
@@ -2910,22 +2958,26 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   const collapsedSet = options.collapsedSet instanceof Set ? options.collapsedSet : fileExplorerTabberCollapsed;
   const expanded = expandable && !collapsedSet.has(fullPath);
   syncFileTreeRowKindClass(row, entry.kind);
-  row.dataset.path = fullPath;
-  row.dataset.kind = entry.kind;
-  row.dataset.name = entry.name;
-  row.dataset.tabberType = data.type || '';
-  if (data.session) row.dataset.tabberSession = data.session; else delete row.dataset.tabberSession;
-  if (data.windowIndex !== null && data.windowIndex !== undefined) row.dataset.tabberWindow = String(data.windowIndex);
-  else delete row.dataset.tabberWindow;
-  if (data.repoRoot) row.dataset.tabberRepoRoot = data.repoRoot; else delete row.dataset.tabberRepoRoot;
-  if (data.item) row.dataset.tabberItem = data.item; else delete row.dataset.tabberItem;
-  if (data.branchText) row.dataset.tabberBranch = data.branchText; else delete row.dataset.tabberBranch;
-  const paddingLeft = `${8 + depth * 14}px`;
+  setRowDataset(row, 'path', fullPath);
+  setRowDataset(row, 'kind', entry.kind);
+  setRowDataset(row, 'name', entry.name);
+  setRowDataset(row, 'tabberType', data.type || '');
+  setRowDataset(row, 'tabberSession', data.session || '');
+  setRowDataset(row, 'tabberWindow', data.windowIndex !== null && data.windowIndex !== undefined ? data.windowIndex : '');
+  setRowDataset(row, 'tabberRepoRoot', data.repoRoot || '');
+  setRowDataset(row, 'tabberItem', data.item || '');
+  setRowDataset(row, 'tabberBranch', data.branchText || '');
+  setRowDataset(row, 'openChangeFile', '');
+  setRowDataset(row, 'openChangeSession', '');
+  setRowDataset(row, 'openChangeStatus', '');
+  setRowDataset(row, 'openChangeRepo', '');
+  setRowDataset(row, 'openChangeDirectory', '');
+  setRowDataset(row, 'changesFolderToggle', '');
+  setRowDataset(row, 'changeRel', '');
+  setRowDataset(row, 'changeSize', '');
+  const paddingLeft = fileTreeRowPadding(depth);
   if (row.style.paddingLeft !== paddingLeft) row.style.paddingLeft = paddingLeft;
-  row.setAttribute('role', 'treeitem');
-  row.setAttribute('aria-selected', fileExplorerSelectedPaths.has(fullPath) ? 'true' : 'false');
-  if (expandable) row.setAttribute('aria-expanded', expanded ? 'true' : 'false');
-  else row.removeAttribute('aria-expanded');
+  setTreeItemAria(row, {selected: fileExplorerSelectedPaths.has(fullPath), expandable, expanded});
   row.draggable = false;
   row.classList.toggle('selected', fileExplorerSelectedPaths.has(fullPath));
   row.classList.toggle('expanded', expanded);
@@ -2933,8 +2985,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   row.classList.add('tabber-row');
   row.classList.toggle('tabber-active-window', data.type === 'window' && data.active === true);
   const icon = expandable ? (expanded ? '▾' : '▸') : (data.icon || '·');
-  // Mark the session's current tmux window with a filled dot after the label.
-  const label = (data.type === 'window' && data.active === true) ? `${data.label || entry.name} ●` : (data.label || entry.name);
+  const label = data.label || entry.name;
   const titleParts = [
     label,
     data.description && data.description !== label ? data.description : '',
@@ -2943,26 +2994,23 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   ].filter(Boolean);
   if (titleParts.length) row.setAttribute('title', titleParts.join('\n'));
   else row.removeAttribute('title');
-  const detailHtml = data.detail ? `<span class="tabber-row-detail">${esc(shortText(data.detail, 48))}</span>` : '';
   const windowAgentIconHtml = data.type === 'window' && ['claude', 'codex'].includes(data.agentKey)
     ? agentIcon(data.agentKey, {label: agentLabel(data.agentKey)})
     : '';
   const nameHtml = data.type === 'session'
     ? `<span class="tabber-session-name" data-tabber-session-open>${esc(data.label || entry.name)}</span>${data.description ? `<span class="tabber-session-description" data-tabber-expand>${esc(data.description)}</span>` : ''}`
     : data.type === 'window' && windowAgentIconHtml
-      ? tabberWindowLabelHtml(label, windowAgentIconHtml)
+      ? tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true})
     : data.type === 'loading'
       ? `<span class="tabber-loading-label">${esc(data.label || 'Fetching')}</span><span class="tabber-loading-dots" aria-hidden="true"></span>`
     : '';
   updateFileTreeRowContents(row, icon, label, {
     iconClass: 'tabber-icon',
     nameHtml,
-    agentHtml: detailHtml,
     dateText: entry.mtime ? fileTreeMtimeText(entry) : '',
   });
   // Tabber rows use delegation (bindTabberPanel) like the Differ; clear any stale Finder per-row handlers.
-  row.onpointerdown = null; row.onpointerup = null; row.onclick = null; row.ondblclick = null;
-  row.oncontextmenu = null; row.ondragstart = null; row.ondragend = null;
+  clearFileTreeRowHandlers(row);
   return fullPath;
 }
 

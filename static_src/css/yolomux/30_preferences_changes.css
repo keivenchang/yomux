@@ -714,7 +714,7 @@
 }
 .preferences-setting-advisory code {
   padding: 2px 4px;
-  color: #111827;
+  color: var(--lt-text);
   background: rgba(255, 255, 255, 0.45);
   border: 1px solid rgba(42, 30, 0, 0.2);
   border-radius: 3px;
@@ -1145,7 +1145,7 @@ body.theme-light .changes-repo-group {
   --changes-repo-head-bg: var(--panel2);
   --changes-folder-text: var(--accent-gold);
   --changes-path-text: #59636e;
-  --changes-icon-text: #1d4ed8;
+  --changes-icon-text: var(--menu-accent);
 }
 body.theme-light .changes-toolbar,
 body.theme-light .changes-repo-group {
@@ -1294,7 +1294,7 @@ body.theme-light .preferences-inline-action {
 }
 .popover-value a:hover,
 .branch-link:hover {
-  color: #bfdbfe;
+  color: var(--link-soft-hover);
   text-decoration: underline;
 }
 .popover-value a.pr-status-merged:hover,

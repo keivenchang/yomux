@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from typing import TypedDict
 from zoneinfo import ZoneInfo
 
 from . import auth as _auth
@@ -58,6 +59,21 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = PROJECT_ROOT / "static"
 TERMINAL_QUERY_RESPONSE_RE = re.compile(r"(?:\x1b\[[?>]?[0-9;]*c|\x1bP[>|!][^\x1b]*(?:\x1b\\|\x9c))")
 LINEAR_ID_RE = re.compile(r"(?<![A-Za-z0-9])(?:DIS|DGH|DYN|OPS|INFRA)-\d{1,6}(?![A-Za-z0-9])")
+
+
+class ErrorPayload(TypedDict, total=False):
+    error: str
+    path: str
+    session: str
+    status: int
+
+
+def error_payload(error: str, **fields: Any) -> ErrorPayload:
+    payload: ErrorPayload = {"error": str(error)}
+    for key, value in fields.items():
+        if value is not None:
+            payload[key] = int(value) if key == "status" else value
+    return payload
 MAIN_BRANCHES = {"main", "master"}
 METADATA_CACHE_TTL_SECONDS = 300
 HTTP_METADATA_TIMEOUT_SECONDS = 2.0

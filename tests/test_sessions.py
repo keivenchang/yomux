@@ -160,6 +160,18 @@ def _pane(pid=100):
     )
 
 
+def test_active_window_for_panes_supports_typed_and_cached_payloads():
+    inactive = _pane(100)
+    inactive = PaneInfo(**{**inactive.__dict__, "window": "0", "window_active": False})
+    active = _pane(101)
+    active = PaneInfo(**{**active.__dict__, "window": "2", "window_active": True})
+    assert sessions.active_window_for_panes([inactive, active]) == "2"
+    assert sessions.active_window_for_panes([
+        {"window": "0", "window_active": False},
+        {"window": "3", "window_active": True},
+    ]) == "3"
+
+
 def test_pane_process_label_returns_displayed_process_pid():
     label, pid = pane_process_label(
         _pane(100),

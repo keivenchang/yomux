@@ -148,6 +148,14 @@ def test_session_files_payload_keeps_transcript_paths_when_branch_is_clean(tmp_p
     assert repo_summary["error"] == ""
 
 
+def test_file_mtime_or_fallback_preserves_epoch_mtime(tmp_path):
+    path = tmp_path / "epoch.txt"
+    path.write_text("old\n", encoding="utf-8")
+    os.utime(path, (0, 0))
+
+    assert session_files.file_mtime_or_fallback(path, fallback=1234) == 0
+
+
 def test_session_files_payload_collects_multiple_agents_for_one_file(tmp_path):
     # C5: when both Claude and Codex touch the same file, the entry lists BOTH (no overwrite), so the UI
     # can render two agent icons.

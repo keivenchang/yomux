@@ -63,10 +63,10 @@ def file_size(path: Path) -> int | None:
 
 def file_mtime_or_fallback(path: Path, fallback: Any = 0.0) -> float:
     mtime = file_mtime(path)
-    if mtime:
+    if mtime is not None:
         return mtime
     try:
-        return float(fallback or 0.0)
+        return float(fallback) if fallback not in (None, "") else 0.0
     except (TypeError, ValueError):
         return 0.0
 
