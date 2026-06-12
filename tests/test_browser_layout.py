@@ -8355,6 +8355,427 @@ def test_long_markdown_editor_scroll_survives_preferences_tab_roundtrip(browser,
     assert abs(metrics["restoredTop"] - metrics["savedTop"]) < 32, metrics
 
 
+def test_long_markdown_editor_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof applyLayoutSlots === 'function' && typeof registerFileEditorLayoutItem === 'function';"
+        )
+    )
+    setup = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          autoFocusEnabled = false;
+          const path = '/home/test/repo/2026.md';
+          const item = fileEditorItemFor(path);
+          const content = Array.from({length: 1400}, (_value, index) => `# Entry ${index + 1}\\n\\n- Work item ${index + 1} with enough text to produce normal Markdown editor rows.`).join('\\n');
+          setFileState(path, {
+            kind: 'text',
+            content,
+            original: content,
+            dirty: false,
+            language: 'markdown',
+            gitRoot: '/home/test/repo',
+            gitTracked: true,
+            gitHasHistory: true,
+            gitHistory: [{ref: 'HEAD'}],
+          });
+          setFileEditorViewMode(path, 'edit', item);
+          registerFileEditorLayoutItem(path);
+          const next = emptyLayoutSlots();
+          next[layoutTreeKey] = leafNode('left');
+          next.left = paneStateWithTabs([item, prefsItemId], item);
+          applyLayoutSlots(next, {focusSession: item, forceFull: true});
+          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const waitFor = async predicate => {
+            for (let attempt = 0; attempt < 260; attempt += 1) {
+              if (predicate()) return true;
+              await frame();
+            }
+            return false;
+          };
+          const ready = await waitFor(() => {
+            const panel = panelNodes.get(item);
+            const scroller = panel?._cmView?.scrollDOM;
+            return dockviewLayoutActive()
+              && activeItemForSide('left') === item
+              && panel?.isConnected
+              && scroller
+              && scroller.scrollHeight > scroller.clientHeight * 3
+              && Array.from(document.querySelectorAll('.dockview-pane-tab')).some(tab => tab.dataset.paneTab === item)
+              && Array.from(document.querySelectorAll('.dockview-pane-tab')).some(tab => tab.dataset.paneTab === prefsItemId);
+          });
+          if (!ready) {
+            const panel = panelNodes.get(item);
+            const scroller = panel?._cmView?.scrollDOM;
+            return {
+              error: 'dockview editor did not become ready',
+              dockview: typeof dockviewLayoutActive === 'function' ? dockviewLayoutActive() : null,
+              active: activeItemForSide('left'),
+              panelExists: Boolean(panel),
+              connected: Boolean(panel?.isConnected),
+              hasView: Boolean(panel?._cmView),
+              scrollHeight: scroller?.scrollHeight || 0,
+              clientHeight: scroller?.clientHeight || 0,
+              tabs: Array.from(document.querySelectorAll('.dockview-pane-tab')).map(tab => tab.dataset.paneTab || ''),
+            };
+          }
+          const panel = panelNodes.get(item);
+          const scroller = panel._cmView.scrollDOM;
+          scroller.scrollTop = Math.min(9000, scroller.scrollHeight - scroller.clientHeight - 10);
+          await frame();
+          await frame();
+          return {
+            item,
+            savedTop: scroller.scrollTop,
+            preSwitchCapturedTop: fileEditorViewState.get(item)?.scrollTop || 0,
+            clientHeight: scroller.clientHeight,
+            scrollHeight: scroller.scrollHeight,
+          };
+        })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
+        """
+    )
+    assert "error" not in setup, setup
+    assert setup["savedTop"] > setup["clientHeight"], setup
+
+    def dockview_tab(item):
+        return WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script(
+                """
+                return Array.from(document.querySelectorAll('.dockview-pane-tab'))
+                  .find(tab => tab.dataset.paneTab === arguments[0]) || null;
+                """,
+                item,
+            )
+        )
+
+    ActionChains(browser).move_to_element(dockview_tab("__prefs__")).click().perform()
+    after_prefs = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const item = arguments[0];
+            if (activeItemForSide('left') !== prefsItemId) return null;
+            const state = fileEditorViewState.get(item);
+            return {
+              active: activeItemForSide('left'),
+              capturedTop: state?.scrollTop || 0,
+              capturedSnapshot: Boolean(state?.scrollSnapshot),
+              panelConnected: Boolean(panelNodes.get(item)?.isConnected),
+            };
+            """,
+            setup["item"],
+        )
+    )
+    assert after_prefs["capturedSnapshot"] is True, after_prefs
+    assert abs(after_prefs["capturedTop"] - setup["savedTop"]) < 32, {**setup, **after_prefs}
+
+    ActionChains(browser).move_to_element(dockview_tab(setup["item"])).click().perform()
+    restored = browser.execute_async_script(
+        """
+        const item = arguments[0];
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const waitFor = async predicate => {
+            for (let attempt = 0; attempt < 220; attempt += 1) {
+              if (predicate()) return true;
+              await frame();
+            }
+            return false;
+          };
+          const ready = await waitFor(() => activeItemForSide('left') === item && panelNodes.get(item)?.isConnected && panelNodes.get(item)?._cmView?.scrollDOM);
+          await frame();
+          await frame();
+          await new Promise(resolve => setTimeout(resolve, 140));
+          await frame();
+          const panel = panelNodes.get(item);
+          const scroller = panel?._cmView?.scrollDOM;
+          return {
+            ready,
+            active: activeItemForSide('left'),
+            restoredTop: scroller?.scrollTop || 0,
+            scrollHeight: scroller?.scrollHeight || 0,
+            clientHeight: scroller?.clientHeight || 0,
+          };
+        })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
+        """,
+        setup["item"],
+    )
+    assert restored["ready"] is True, restored
+    assert abs(restored["restoredTop"] - setup["savedTop"]) < 32, {**setup, **after_prefs, **restored}
+
+
+def test_preferences_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof applyLayoutSlots === 'function' && typeof paneViewState !== 'undefined';"
+        )
+    )
+    setup = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          autoFocusEnabled = false;
+          const next = emptyLayoutSlots();
+          next[layoutTreeKey] = leafNode('left');
+          next.left = paneStateWithTabs([prefsItemId, infoItemId], prefsItemId);
+          applyLayoutSlots(next, {focusSession: prefsItemId, forceFull: true});
+          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const waitFor = async predicate => {
+            for (let attempt = 0; attempt < 240; attempt += 1) {
+              if (predicate()) return true;
+              await frame();
+            }
+            return false;
+          };
+          const ready = await waitFor(() => {
+            const scroller = panelNodes.get(prefsItemId)?.querySelector('.preferences-scroll');
+            return dockviewLayoutActive()
+              && activeItemForSide('left') === prefsItemId
+              && scroller
+              && scroller.scrollHeight > scroller.clientHeight * 2
+              && Array.from(document.querySelectorAll('.dockview-pane-tab')).some(tab => tab.dataset.paneTab === prefsItemId)
+              && Array.from(document.querySelectorAll('.dockview-pane-tab')).some(tab => tab.dataset.paneTab === infoItemId);
+          });
+          if (!ready) {
+            const scroller = panelNodes.get(prefsItemId)?.querySelector('.preferences-scroll');
+            return {
+              error: 'preferences pane did not become scrollable',
+              active: activeItemForSide('left'),
+              scrollHeight: scroller?.scrollHeight || 0,
+              clientHeight: scroller?.clientHeight || 0,
+              tabs: Array.from(document.querySelectorAll('.dockview-pane-tab')).map(tab => tab.dataset.paneTab || ''),
+            };
+          }
+          const scroller = panelNodes.get(prefsItemId).querySelector('.preferences-scroll');
+          scroller.scrollTop = Math.min(9000, scroller.scrollHeight - scroller.clientHeight - 10);
+          await frame();
+          await frame();
+          return {
+            item: prefsItemId,
+            other: infoItemId,
+            savedTop: scroller.scrollTop,
+            preSwitchCapturedTop: paneViewState.get(prefsItemId)?.scrollContainers?.find(entry => entry.scrollTop > 0)?.scrollTop || 0,
+            clientHeight: scroller.clientHeight,
+            scrollHeight: scroller.scrollHeight,
+          };
+        })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
+        """
+    )
+    assert "error" not in setup, setup
+    assert setup["savedTop"] > setup["clientHeight"], setup
+    assert abs(setup["preSwitchCapturedTop"] - setup["savedTop"]) < 32, setup
+
+    def dockview_tab(item):
+        return WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script(
+                """
+                return Array.from(document.querySelectorAll('.dockview-pane-tab'))
+                  .find(tab => tab.dataset.paneTab === arguments[0]) || null;
+                """,
+                item,
+            )
+        )
+
+    ActionChains(browser).move_to_element(dockview_tab(setup["other"])).click().perform()
+    after_other = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            if (activeItemForSide('left') !== arguments[0]) return null;
+            const state = paneViewState.get(arguments[1]);
+            return {
+              active: activeItemForSide('left'),
+              capturedTop: state?.scrollContainers?.find(entry => entry.scrollTop > 0)?.scrollTop || 0,
+            };
+            """,
+            setup["other"],
+            setup["item"],
+        )
+    )
+    assert abs(after_other["capturedTop"] - setup["savedTop"]) < 32, {**setup, **after_other}
+
+    ActionChains(browser).move_to_element(dockview_tab(setup["item"])).click().perform()
+    restored = browser.execute_async_script(
+        """
+        const item = arguments[0];
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          for (let attempt = 0; attempt < 80; attempt += 1) {
+            if (activeItemForSide('left') === item && panelNodes.get(item)?.querySelector('.preferences-scroll')) break;
+            await frame();
+          }
+          await frame();
+          await frame();
+          await new Promise(resolve => setTimeout(resolve, 120));
+          const scroller = panelNodes.get(item)?.querySelector('.preferences-scroll');
+          return {
+            active: activeItemForSide('left'),
+            restoredTop: scroller?.scrollTop || 0,
+            clientHeight: scroller?.clientHeight || 0,
+            scrollHeight: scroller?.scrollHeight || 0,
+          };
+        })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
+        """,
+        setup["item"],
+    )
+    assert restored["active"] == setup["item"], restored
+    assert abs(restored["restoredTop"] - setup["savedTop"]) < 32, {**setup, **after_other, **restored}
+
+
+def test_info_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof applyLayoutSlots === 'function' && typeof renderInfoPanel === 'function';"
+        )
+    )
+    setup = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          autoFocusEnabled = false;
+          infoPanelSubTab = 'info';
+          transcriptMetaLoaded = true;
+          transcriptMetaLoading = false;
+          transcriptMetaLoadError = '';
+          const branches = Array.from({length: 180}, (_value, index) => ({
+            name: `feature/long-info-row-${index + 1}`,
+            subject: `Long YO!info row ${index + 1} that makes the branch table scroll.`,
+            updated: `2026-06-${String((index % 28) + 1).padStart(2, '0')}`,
+            updated_ts: 1800000000 - index,
+            current: index === 0,
+            linear_ids: [`YOLO-${index + 1}`],
+          }));
+          transcriptMeta = {
+            session_order: ['1'],
+            sessions: {
+              '1': {
+                session: '1',
+                project: {
+                  git: {
+                    root: '/home/test/repo',
+                    cwd: '/home/test/repo',
+                    branch: 'feature/long-info-row-1',
+                    other_branches: {branches},
+                  },
+                  linear: [],
+                },
+              },
+            },
+          };
+          const next = emptyLayoutSlots();
+          next[layoutTreeKey] = leafNode('left');
+          next.left = paneStateWithTabs([infoItemId, prefsItemId], infoItemId);
+          applyLayoutSlots(next, {focusSession: infoItemId, forceFull: true});
+          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const waitFor = async predicate => {
+            for (let attempt = 0; attempt < 260; attempt += 1) {
+              if (predicate()) return true;
+              await frame();
+            }
+            return false;
+          };
+          const ready = await waitFor(() => {
+            const scroller = document.getElementById('info-content');
+            return dockviewLayoutActive()
+              && activeItemForSide('left') === infoItemId
+              && scroller
+              && scroller.scrollHeight > scroller.clientHeight * 2
+              && Array.from(document.querySelectorAll('.dockview-pane-tab')).some(tab => tab.dataset.paneTab === infoItemId)
+              && Array.from(document.querySelectorAll('.dockview-pane-tab')).some(tab => tab.dataset.paneTab === prefsItemId);
+          });
+          if (!ready) {
+            const scroller = document.getElementById('info-content');
+            return {
+              error: 'info pane did not become scrollable',
+              active: activeItemForSide('left'),
+              scrollHeight: scroller?.scrollHeight || 0,
+              clientHeight: scroller?.clientHeight || 0,
+              rows: document.querySelectorAll('#info-content .info-row').length,
+              tabs: Array.from(document.querySelectorAll('.dockview-pane-tab')).map(tab => tab.dataset.paneTab || ''),
+            };
+          }
+          const scroller = document.getElementById('info-content');
+          scroller.scrollTop = Math.min(9000, scroller.scrollHeight - scroller.clientHeight - 10);
+          await frame();
+          await frame();
+          return {
+            item: infoItemId,
+            other: prefsItemId,
+            savedTop: scroller.scrollTop,
+            preSwitchCapturedTop: paneViewState.get(infoItemId)?.scrollContainers?.find(entry => entry.scrollTop > 0)?.scrollTop || 0,
+            clientHeight: scroller.clientHeight,
+            scrollHeight: scroller.scrollHeight,
+            rowCount: document.querySelectorAll('#info-content .info-row').length,
+          };
+        })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
+        """
+    )
+    assert "error" not in setup, setup
+    assert setup["rowCount"] > 100, setup
+    assert setup["savedTop"] > setup["clientHeight"], setup
+    assert abs(setup["preSwitchCapturedTop"] - setup["savedTop"]) < 32, setup
+
+    def dockview_tab(item):
+        return WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script(
+                """
+                return Array.from(document.querySelectorAll('.dockview-pane-tab'))
+                  .find(tab => tab.dataset.paneTab === arguments[0]) || null;
+                """,
+                item,
+            )
+        )
+
+    ActionChains(browser).move_to_element(dockview_tab(setup["other"])).click().perform()
+    after_other = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            if (activeItemForSide('left') !== arguments[0]) return null;
+            const state = paneViewState.get(arguments[1]);
+            return {
+              active: activeItemForSide('left'),
+              capturedTop: state?.scrollContainers?.find(entry => entry.scrollTop > 0)?.scrollTop || 0,
+            };
+            """,
+            setup["other"],
+            setup["item"],
+        )
+    )
+    assert abs(after_other["capturedTop"] - setup["savedTop"]) < 32, {**setup, **after_other}
+
+    ActionChains(browser).move_to_element(dockview_tab(setup["item"])).click().perform()
+    restored = browser.execute_async_script(
+        """
+        const item = arguments[0];
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          for (let attempt = 0; attempt < 100; attempt += 1) {
+            if (activeItemForSide('left') === item && document.getElementById('info-content')) break;
+            await frame();
+          }
+          await frame();
+          await frame();
+          await new Promise(resolve => setTimeout(resolve, 120));
+          const scroller = document.getElementById('info-content');
+          return {
+            active: activeItemForSide('left'),
+            restoredTop: scroller?.scrollTop || 0,
+            clientHeight: scroller?.clientHeight || 0,
+            scrollHeight: scroller?.scrollHeight || 0,
+          };
+        })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
+        """,
+        setup["item"],
+    )
+    assert restored["active"] == setup["item"], restored
+    assert abs(restored["restoredTop"] - setup["savedTop"]) < 32, {**setup, **after_other, **restored}
+
+
 def test_topbar_finder_and_modified_files_headers_hover_accent_in_light_mode(browser, tmp_path):
     def theme_tokens():
         return browser.execute_script(

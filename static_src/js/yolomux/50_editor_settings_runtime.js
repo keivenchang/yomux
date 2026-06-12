@@ -207,7 +207,7 @@ function refreshOpenEditorThemePanels() {
     const reconfigured = typeof reconfigureCodeMirrorPanelTheme === 'function' && reconfigureCodeMirrorPanelTheme(panel);
     renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
     if (!reconfigured) {
-      captureFileEditorPanelViewState(item, panel);
+      capturePaneViewState(item, panel);
       renderFileEditorPanel(panel, item);
     }
   });

@@ -2095,16 +2095,22 @@ test('t@1857', () => {
   const end = source.indexOf('function loadFileEditorState(', start);
   assert.ok(start > 0 && end > start, 'could not locate renderFileEditorPanel body');
   assert.equal(source.slice(start, end).includes('.focus('), false, 'renderFileEditorPanel must not steal focus during refresh renders');
-  assert.ok(source.includes('function captureFileEditorViewStateForItemIfPresent(item)'), 'file-editor viewport capture has one shared focus-transition helper');
-  assert.ok(source.includes('captureFileEditorViewStateForItemIfPresent(previous)'), 'switching pane tabs captures the outgoing CodeMirror viewport through the shared helper');
-  assert.ok(/function setFocusedPanelItem[\s\S]*const previousItem = focusedPanelItem;[\s\S]*if \(previousItem !== item\) captureFileEditorViewStateForItemIfPresent\(previousItem\);/.test(source), 'clicking away from an editor snapshots its live CodeMirror viewport');
-  assert.ok(/function setFocusedTerminal[\s\S]*const previousItem = focusedPanelItem;[\s\S]*if \(previousItem !== session\) captureFileEditorViewStateForItemIfPresent\(previousItem\);/.test(source), 'clicking into a terminal snapshots the outgoing file editor viewport');
+  assert.ok(source.includes('function capturePaneViewStateForItemIfPresent(item)'), 'pane viewport capture has one shared focus-transition helper');
+  assert.ok(source.includes('capturePaneViewStateForItemIfPresent(previous)'), 'switching pane tabs captures the outgoing pane viewport through the shared helper');
+  assert.ok(/function setFocusedPanelItem[\s\S]*const previousItem = focusedPanelItem;[\s\S]*if \(previousItem !== item\) capturePaneViewStateForItemIfPresent\(previousItem\);/.test(source), 'clicking away from a pane snapshots its live viewport');
+  assert.ok(/function setFocusedTerminal[\s\S]*const previousItem = focusedPanelItem;[\s\S]*if \(previousItem !== session\) capturePaneViewStateForItemIfPresent\(previousItem\);/.test(source), 'clicking into a terminal snapshots the outgoing pane viewport');
   assert.ok(source.includes('const scrollTop = scrollDOM?.scrollTop || 0;'), 'external CodeMirror reload preserves scrollTop');
   assert.ok(source.includes('view.requestMeasure({write: restoreScroll});'), 'external CodeMirror reload restores scroll after the document update');
   assert.ok(source.includes('view.requestMeasure'), 'CodeMirror viewport restore waits for a measured layout frame');
   assert.ok(source.includes("scrollSnapshot: typeof view.scrollSnapshot === 'function' ? view.scrollSnapshot() : null"), 'CodeMirror editor viewport capture stores a document-anchored scroll snapshot for long files');
   assert.ok(/view\.dispatch\(\{\s*selection: \{anchor, head\},[\s\S]*state\.scrollSnapshot \? \{effects: state\.scrollSnapshot\}/.test(source), 'CodeMirror editor viewport restore dispatches the saved scroll snapshot through CodeMirror');
   assert.ok(/function fileEditorPanelViewStateCaptureHasLayout\(panel, scrollDOM\)[\s\S]*!panel\.isConnected[\s\S]*scrollDOM\.clientHeight <= 0/.test(source), 'CodeMirror editor viewport capture ignores detached zero-height panels');
+  assert.ok(/const paneScrollContainerSelector = \[[\s\S]*'\.preferences-scroll'[\s\S]*'\.info-list'[\s\S]*'\.file-explorer-tree-panel'[\s\S]*'\.file-editor-codemirror-panel \.cm-scroller'/.test(source), 'generic pane viewport capture includes non-editor and editor scroll containers');
+  assert.ok(/function movePanelsToPool\(\)[\s\S]*capturePaneViewState\(item, panel\)/.test(source), 'pooled pane capture uses the generic pane viewport path');
+  assert.ok(/function bindPanelShell\(panel, session\)[\s\S]*panel\.addEventListener\('scroll'[\s\S]*schedulePaneViewStateCapture\(session, panel\)/.test(source), 'pane shell delegates scroll captures to the generic pane viewport scheduler');
+  assert.ok(/function schedulePaneViewStateCapture\(item, panel\)[\s\S]*requestAnimationFrame\(\(\) => \{[\s\S]*capturePaneViewState\(item, currentPanel\)/.test(source), 'pane scroll capture is throttled through one shared scheduler');
+  assert.ok(/function scheduleFileEditorPanelViewStateCapture\(item, panel\)[\s\S]*schedulePaneViewStateCapture\(item, panel\)/.test(source), 'CodeMirror editor scroll capture routes through the shared pane scheduler');
+  assert.ok(/addEventListener\('scroll', \(\) => \{[\s\S]*scheduleFileEditorSplitScrollSync\(panel, 'editor'\);[\s\S]*scheduleFileEditorPanelViewStateCapture\(item, panel\);[\s\S]*\}\)/.test(source), 'CodeMirror editor scroll listener records viewport state as well as split-preview sync');
 });
 
 test('t@1869', () => {
@@ -2607,10 +2613,10 @@ test('t@2355', () => {
   assert.ok(css.includes('--file-image-preview-max-size: 320px'), 'Finder image preview default max size is tokenized');
   assert.ok(/\.file-image-preview-popover[\s\S]*pointer-events:\s*none/.test(css), 'Finder image previews cannot keep themselves hovered over terminals');
   assert.ok(source.includes('preserveScroll: sameImage'), 'image viewer refreshes preserve scroll on unchanged images');
-  assert.ok(source.includes('captureFileEditorPanelViewState(item, panel)'), 'CodeMirror editor viewport is captured before pane/tab renders');
+  assert.ok(source.includes('capturePaneViewState(item, panel)'), 'file-editor renders use the shared pane viewport capture before pane/tab renders');
   assert.ok(source.includes('restoreFileEditorPanelViewState(item, panel)'), 'CodeMirror editor viewport is restored after pane/tab renders');
   assert.ok(/function renderFileEditorPanelShouldCaptureViewState\(options = \{\}\)[\s\S]*return options\.captureViewState !== false/.test(source), 'file editor render has one shared view-state capture gate');
-  assert.ok(/function renderFileEditorPanel\(panel, item, options = \{\}\)[\s\S]*if \(renderFileEditorPanelShouldCaptureViewState\(options\)\) captureFileEditorPanelViewState\(item, panel\)/.test(source), 'file editor render capture is routed through the shared capture gate');
+  assert.ok(/function renderFileEditorPanel\(panel, item, options = \{\}\)[\s\S]*if \(renderFileEditorPanelShouldCaptureViewState\(options\)\) capturePaneViewState\(item, panel\)/.test(source), 'file editor render capture is routed through the shared pane capture gate');
   assert.ok(source.includes('refreshOpenEditorThemePanels'), 'global/editor theme changes update already-open CodeMirror panels');
   assert.ok(source.includes('function reconfigureCodeMirrorPanelTheme'), 'open CodeMirror panels reconfigure their theme compartment');
   assert.ok(source.includes('&& api?.Compartment'), 'CodeMirror API validation requires Compartment for in-place theme updates');
@@ -3944,6 +3950,8 @@ test('t@2560', () => {
   const dockviewTabRendererStart = appSource.indexOf('function createDockviewTabRenderer()');
   assert.ok(dockviewTabRendererStart > 0, 'Dockview tab renderer is locatable');
   const dockviewTabRendererBody = appSource.slice(dockviewTabRendererStart, appSource.indexOf('function createDockviewPanelRenderer()', dockviewTabRendererStart));
+  assert.ok(/function captureDockviewPreviousPaneBeforeTabActivation\(tabElement, targetItem\)[\s\S]*activeItemForSide\(slot\)[\s\S]*capturePaneViewStateForItemIfPresent\(previous\)/.test(appSource), 'Dockview tab activation captures the previously visible pane before Dockview hides it');
+  assert.ok(/element\.addEventListener\('pointerdown', event => \{[\s\S]*captureDockviewPreviousPaneBeforeTabActivation\(element, item\);[\s\S]*dockviewBeginTabPointerDrag\(event, item\)/.test(dockviewTabRendererBody), 'Dockview pointer tab activation captures pane viewport before native Dockview switching');
   assert.ok(/const commitExplicitTabInteraction = \(\) => \{[\s\S]*?if \(isTmuxSession\(item\)\) noteFileExplorerChangesSessionInteraction\(item\);[\s\S]*?setFocusedPanelItem\(item, \{userInitiated: true\}\);[\s\S]*?\};/.test(dockviewTabRendererBody), 'Dockview tab gestures commit tmux Differ context at the explicit call site');
   assert.ok(/element\.addEventListener\('click', async event => \{[\s\S]*?commitExplicitTabInteraction\(\);[\s\S]*?\}\);/.test(dockviewTabRendererBody), 'Dockview tab click commits an explicit interaction without relying on active-panel changes');
   assert.ok(/element\.addEventListener\('keydown', event => \{[\s\S]*?\['Enter', ' '\]\.includes\(event\.key\)[\s\S]*?commitExplicitTabInteraction\(\);[\s\S]*?api\?\.setActive\?\.\(\);[\s\S]*?\}\);/.test(dockviewTabRendererBody), 'Dockview tab Enter/Space activation commits an explicit interaction before setting the active panel');
@@ -8922,7 +8930,7 @@ test('t@7847', () => {
   assert.ok(/function fileEditorScrollSyncBlocked\(panel, source = ''\)[\s\S]*panel\?\._splitScrollSource !== source/.test(source), 'split Preview scroll guard suppresses only the opposite/programmatic side');
   assert.ok(/function setFileEditorScrollSyncGuardForSource\(source, \.\.\.panels\)[\s\S]*panel\._splitScrollSource = source \|\| ''/.test(source), 'split Preview scroll guard records the active driver pane');
   assert.ok(/function scheduleFileEditorSplitScrollSync\(host, source\)[\s\S]*host\._splitScrollPendingSource = source[\s\S]*requestAnimationFrame\(run\)/.test(source), 'split Preview scroll sync is coalesced through requestAnimationFrame for large-document trackpad deltas');
-  assert.ok(source.includes("addEventListener('scroll', () => scheduleFileEditorSplitScrollSync(panel, 'editor'))"), 'editor scroll listener uses the scheduled split-preview sync path');
+  assert.ok(/addEventListener\('scroll', \(\) => \{[\s\S]*scheduleFileEditorSplitScrollSync\(panel, 'editor'\);[\s\S]*scheduleFileEditorPanelViewStateCapture\(item, panel\);[\s\S]*\}\)/.test(source), 'editor scroll listener uses the scheduled split-preview sync path and records viewport state');
   assert.ok(source.includes("addEventListener('scroll', () => scheduleFileEditorSplitScrollSync(panel, 'preview'))"), 'preview scroll listener uses the scheduled split-preview sync path');
   assert.ok(/function syncFileEditorSplitScroll[\s\S]*syncFilePreviewPopoutsFromPanel\(host, source\)/.test(source), 'editor preview/editor scroll drives open preview pop-outs');
   assert.ok(/function closeFilePreviewPopout\(path\)[\s\S]*filePreviewPopouts\.delete\(path\)[\s\S]*previewWindow\.close\?\.\(\)/.test(source), 'preview pop-out close removes the registry entry and closes the window');

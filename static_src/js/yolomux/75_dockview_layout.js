@@ -1220,11 +1220,12 @@ function createDockviewPanelRenderer() {
     updatePanelSlot(panel, item, slot);
     element.replaceChildren(panel);
     renderAttachedPanelContent(item);
+    restorePaneViewState(item, panel);
     updatePanelInactiveOverlays();
   };
   const pool = () => {
     if (!panel || panel.parentElement !== element) return;
-    if (isFileEditorItem(item)) captureFileEditorPanelViewState(item, panel);
+    capturePaneViewState(item, panel);
     panel.classList.remove('active-pane');
     panel.dataset.slot = '';
     panelPool.appendChild(panel);
@@ -1369,6 +1370,13 @@ function createDockviewHeaderActionsRenderer() {
   };
 }
 
+function captureDockviewPreviousPaneBeforeTabActivation(tabElement, targetItem) {
+  const group = tabElement?.closest?.('.dv-groupview');
+  const slot = group && typeof dockviewSlotForGroupElement === 'function' ? dockviewSlotForGroupElement(group) : null;
+  const previous = slot ? activeItemForSide(slot) : focusedPanelItem;
+  if (previous && previous !== targetItem) capturePaneViewStateForItemIfPresent(previous);
+}
+
 function createDockviewTabRenderer() {
   const element = document.createElement('div');
   element.className = 'pane-tab dockview-pane-tab';
@@ -1409,10 +1417,14 @@ function createDockviewTabRenderer() {
     dragTimingReset();
     dragTimingMark('pointerdown');
     if (event.target.closest('[data-pane-tab-close], [data-auto-session]')) event.stopPropagation();
-    else dockviewBeginTabPointerDrag(event, item);
+    else {
+      captureDockviewPreviousPaneBeforeTabActivation(element, item);
+      dockviewBeginTabPointerDrag(event, item);
+    }
   });
   element.addEventListener('mousedown', event => {
     if (event.target.closest('[data-pane-tab-close], [data-auto-session]')) return;
+    captureDockviewPreviousPaneBeforeTabActivation(element, item);
     dockviewBeginTabPointerDrag(event, item);
   });
   element.addEventListener('click', async event => {
@@ -1434,11 +1446,13 @@ function createDockviewTabRenderer() {
       if (shouldRefocus) focusPanel(item);
       return;
     }
+    captureDockviewPreviousPaneBeforeTabActivation(element, item);
     commitExplicitTabInteraction();
   });
   element.addEventListener('keydown', event => {
     if (!['Enter', ' '].includes(event.key)) return;
     event.preventDefault();
+    captureDockviewPreviousPaneBeforeTabActivation(element, item);
     commitExplicitTabInteraction();
     api?.setActive?.();
   });

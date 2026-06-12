@@ -641,7 +641,7 @@ function activatePaneTab(side, session, options = {}) {
   }
   recordTabActivation(session);
   const previous = activeItemForSide(side);
-  if (previous && previous !== session) captureFileEditorViewStateForItemIfPresent(previous);
+  if (previous && previous !== session) capturePaneViewStateForItemIfPresent(previous);
   if (isFileEditorItem(session)) {
     activeFile = fileItemPath(session);
     updateFileExplorerCurrentFileHighlight();
@@ -1159,6 +1159,8 @@ function clearSessionUiState(session) {
   stopTranscriptStream(session);
   stopSummaryStream(session);
   autoApproveStates.delete(session);
+  paneViewState.delete(session);
+  pendingPaneViewStateCaptures.delete(session);
   uploadResultsBySession.delete(session);
   if (uploadCleanupTimers.has(session)) {
     clearTimeout(uploadCleanupTimers.get(session));
@@ -1186,6 +1188,7 @@ function replaceSessionMetadata(oldSession, newSession) {
     uploadResultsBySession,
     uploadCleanupTimers,
     pasteCounters,
+    paneViewState,
     // carry the per-pane LRU timestamp across a session rename too, or the renamed tab's
     // eviction ordering glitches (it reads as never-activated).
     tabLastActivatedAt,

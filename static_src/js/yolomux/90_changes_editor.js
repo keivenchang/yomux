@@ -2795,6 +2795,10 @@ function requestFileEditorPanelFocus(item) {
   if (isFileEditorItem(item)) pendingFileEditorFocus.add(item);
 }
 
+function scheduleFileEditorPanelViewStateCapture(item, panel) {
+  schedulePaneViewStateCapture(item, panel);
+}
+
 function focusFileEditorPanelIfReady(panel, item) {
   if (!autoFocusEnabled) {
     pendingFileEditorFocus.delete(item);
@@ -2805,7 +2809,7 @@ function focusFileEditorPanelIfReady(panel, item) {
     panel._cmView.focus?.();
     // CodeMirror focus can scroll the cursor into view. Re-apply the saved viewport after focus so
     // a long file that was only scrolled, not cursor-moved, does not jump back to the cursor line.
-    restoreFileEditorPanelViewState(item, panel);
+    restorePaneViewState(item, panel);
     pendingFileEditorFocus.delete(item);
     return true;
   }

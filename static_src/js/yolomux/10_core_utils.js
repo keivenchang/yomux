@@ -860,7 +860,7 @@ function seedVisualActivePaneItem(preferredItems = []) {
 
 function setFocusedTerminal(session, options = {}) {
   const previousItem = focusedPanelItem;
-  if (previousItem !== session) captureFileEditorViewStateForItemIfPresent(previousItem);
+  if (previousItem !== session) capturePaneViewStateForItemIfPresent(previousItem);
   focusedTerminal = session;
   focusedPanelItem = session;
   rememberActivePaneItem(session);
@@ -889,7 +889,7 @@ function clearFocusedTerminal(session) {
 
 function setFocusedPanelItem(item, options = {}) {
   const previousItem = focusedPanelItem;
-  if (previousItem !== item) captureFileEditorViewStateForItemIfPresent(previousItem);
+  if (previousItem !== item) capturePaneViewStateForItemIfPresent(previousItem);
   if (focusedTerminal !== item) focusedTerminal = null;
   focusedPanelItem = item;
   rememberActivePaneItem(item);
@@ -997,14 +997,6 @@ function movingEllipsisHtml(className = '') {
 
 function textWithMovingEllipsisHtml(value, className = '') {
   return `${esc(stripTrailingEllipsisText(value))}${movingEllipsisHtml(className)}`;
-}
-
-function captureFileEditorViewStateForItemIfPresent(item) {
-  if (isFileEditorItem(item) && typeof captureFileEditorPanelViewStateForItem === 'function') {
-    captureFileEditorPanelViewStateForItem(item);
-    return true;
-  }
-  return false;
 }
 
 const searchRankWeights = Object.freeze({

@@ -861,7 +861,10 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
       });
       panel._cmView = panel._cmMergeView.b;
       trackCodeMirrorThemeViews(panel, api, [panel._cmMergeView.a, panel._cmMergeView.b]);
-      panel._cmMergeView.b.scrollDOM?.addEventListener('scroll', () => scheduleFileEditorSplitScrollSync(panel, 'editor'));
+      panel._cmMergeView.b.scrollDOM?.addEventListener('scroll', () => {
+        scheduleFileEditorSplitScrollSync(panel, 'editor');
+        scheduleFileEditorPanelViewStateCapture(item, panel);
+      });
     } else {
       const unifiedMergeOptions = {
         original,
@@ -905,7 +908,10 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
           }
         },
       });
-      panel._cmView.scrollDOM?.addEventListener('scroll', () => scheduleFileEditorSplitScrollSync(panel, 'editor'));
+      panel._cmView.scrollDOM?.addEventListener('scroll', () => {
+        scheduleFileEditorSplitScrollSync(panel, 'editor');
+        scheduleFileEditorPanelViewStateCapture(item, panel);
+      });
       trackCodeMirrorThemeViews(panel, api, [panel._cmView]);
     }
     panel._cmPath = path;
@@ -963,7 +969,10 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
       panel._cmSignature = signature;
       panel._cmMode = 'edit';
       panel._cmPlainFallback = Boolean(createdState.plain);
-      panel._cmView.scrollDOM?.addEventListener('scroll', () => scheduleFileEditorSplitScrollSync(panel, 'editor'));
+      panel._cmView.scrollDOM?.addEventListener('scroll', () => {
+        scheduleFileEditorSplitScrollSync(panel, 'editor');
+        scheduleFileEditorPanelViewStateCapture(item, panel);
+      });
       trackCodeMirrorThemeViews(panel, api, [panel._cmView]);
       updateCodeMirrorCursorStatus(panel);
       if (createdState.plain) {
@@ -1027,7 +1036,7 @@ function renderFileEditorPanelShouldCaptureViewState(options = {}) {
 
 function renderFileEditorPanel(panel, item, options = {}) {
   const path = fileItemPath(item);
-  if (renderFileEditorPanelShouldCaptureViewState(options)) captureFileEditorPanelViewState(item, panel);
+  if (renderFileEditorPanelShouldCaptureViewState(options)) capturePaneViewState(item, panel);
   const shouldUpdateActiveFile = options.updateActiveFile !== false
     && (!dockviewLayoutActive() || focusedPanelItem === item || options.forceActiveFile === true);
   if (shouldUpdateActiveFile) {

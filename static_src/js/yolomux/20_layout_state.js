@@ -882,6 +882,120 @@ function isLayoutItem(item) {
   return layoutItems.includes(item);
 }
 
+const paneScrollContainerSelector = [
+  '.preferences-scroll',
+  '.terminal .xterm-viewport',
+  '.transcript-preview',
+  '.summary-preview',
+  '.event-list',
+  '.info-list',
+  '.yoagent-chat-history',
+  '.file-explorer-tree-panel',
+  '.file-explorer-changes-panel',
+  '.file-editor-raw-panel',
+  '.file-editor-preview-pane',
+  '.file-editor-preview-pane-panel',
+  '.file-editor-image-panel',
+  '.file-editor-diff-codemirror .cm-mergeView',
+  '.file-editor-codemirror .cm-scroller',
+  '.file-editor-codemirror-panel .cm-scroller',
+].join(', ');
+
+function paneScrollContainerHasLayout(element) {
+  if (!element || typeof element.isConnected === 'boolean' && !element.isConnected) return false;
+  if (typeof element.clientHeight === 'number' && element.clientHeight <= 0) return false;
+  if (typeof element.clientWidth === 'number' && element.clientWidth <= 0) return false;
+  return true;
+}
+
+function paneScrollContainers(panel) {
+  if (!panel?.querySelectorAll) return [];
+  return Array.from(panel.querySelectorAll(paneScrollContainerSelector));
+}
+
+function paneScrollContainerKey(element, index) {
+  const id = element?.id || '';
+  if (id) return `id:${id}`;
+  const explicit = element?.dataset?.paneScrollKey || '';
+  if (explicit) return `data:${explicit}`;
+  const classes = Array.from(element?.classList || []).slice(0, 4).join('.');
+  return `${String(element?.tagName || 'node').toLowerCase()}.${classes}:${index}`;
+}
+
+function capturePaneElementScrollState(panel) {
+  const entries = [];
+  paneScrollContainers(panel).forEach((element, index) => {
+    if (!paneScrollContainerHasLayout(element)) return;
+    entries.push({
+      key: paneScrollContainerKey(element, index),
+      scrollTop: Number(element.scrollTop || 0),
+      scrollLeft: Number(element.scrollLeft || 0),
+    });
+  });
+  return entries;
+}
+
+function restorePaneElementScrollState(panel, state) {
+  const entries = Array.isArray(state?.scrollContainers) ? state.scrollContainers : [];
+  if (!entries.length) return;
+  const current = new Map();
+  paneScrollContainers(panel).forEach((element, index) => {
+    current.set(paneScrollContainerKey(element, index), element);
+  });
+  const restore = () => {
+    for (const entry of entries) {
+      const element = current.get(entry.key);
+      if (!paneScrollContainerHasLayout(element)) continue;
+      element.scrollTop = Number(entry.scrollTop || 0);
+      element.scrollLeft = Number(entry.scrollLeft || 0);
+    }
+  };
+  restore();
+  requestAnimationFrame(restore);
+  requestAnimationFrame(() => requestAnimationFrame(restore));
+  setTimeout(restore, 0);
+}
+
+function capturePaneViewState(item, panel) {
+  if (!item || !panel) return false;
+  const scrollContainers = capturePaneElementScrollState(panel);
+  if (scrollContainers.length) {
+    paneViewState.set(item, {
+      scrollContainers,
+      capturedAt: Date.now(),
+    });
+  }
+  if (isFileEditorItem(item) && typeof captureFileEditorPanelViewState === 'function') {
+    captureFileEditorPanelViewState(item, panel);
+  }
+  return scrollContainers.length > 0 || fileEditorViewState.has(item);
+}
+
+function capturePaneViewStateForItemIfPresent(item) {
+  const panel = panelNodes.get(item);
+  if (!panel) return false;
+  return capturePaneViewState(item, panel);
+}
+
+function schedulePaneViewStateCapture(item, panel) {
+  if (!item || !panel) return;
+  if (pendingPaneViewStateCaptures.has(item)) return;
+  pendingPaneViewStateCaptures.add(item);
+  requestAnimationFrame(() => {
+    pendingPaneViewStateCaptures.delete(item);
+    const currentPanel = panelNodes.get(item) || panel;
+    capturePaneViewState(item, currentPanel);
+  });
+}
+
+function restorePaneViewState(item, panel) {
+  if (!item || !panel) return;
+  restorePaneElementScrollState(panel, paneViewState.get(item));
+  if (isFileEditorItem(item) && typeof restoreFileEditorPanelViewState === 'function') {
+    restoreFileEditorPanelViewState(item, panel);
+  }
+}
+
 function registerFileEditorLayoutItem(path) {
   if (!path || !path.startsWith('/')) return null;
   const item = fileEditorItemFor(path);

@@ -244,6 +244,8 @@ const fileExplorerRefreshIdleMs = 1500;
 const commandPaletteRecentKeyLimit = 100;
 const notificationLastSentLimit = 512;
 const pendingFileEditorFocus = new Set();
+const paneViewState = new Map();  // layout item -> generic pane scroll state
+const pendingPaneViewStateCaptures = new Set();
 const fileEditorViewState = new Map();  // layout item -> CodeMirror scroll/selection state
 let activeFile = null;
 let sharedImageViewerPath = null;
@@ -1930,7 +1932,7 @@ function seedVisualActivePaneItem(preferredItems = []) {
 
 function setFocusedTerminal(session, options = {}) {
   const previousItem = focusedPanelItem;
-  if (previousItem !== session) captureFileEditorViewStateForItemIfPresent(previousItem);
+  if (previousItem !== session) capturePaneViewStateForItemIfPresent(previousItem);
   focusedTerminal = session;
   focusedPanelItem = session;
   rememberActivePaneItem(session);
@@ -1959,7 +1961,7 @@ function clearFocusedTerminal(session) {
 
 function setFocusedPanelItem(item, options = {}) {
   const previousItem = focusedPanelItem;
-  if (previousItem !== item) captureFileEditorViewStateForItemIfPresent(previousItem);
+  if (previousItem !== item) capturePaneViewStateForItemIfPresent(previousItem);
   if (focusedTerminal !== item) focusedTerminal = null;
   focusedPanelItem = item;
   rememberActivePaneItem(item);
@@ -2067,14 +2069,6 @@ function movingEllipsisHtml(className = '') {
 
 function textWithMovingEllipsisHtml(value, className = '') {
   return `${esc(stripTrailingEllipsisText(value))}${movingEllipsisHtml(className)}`;
-}
-
-function captureFileEditorViewStateForItemIfPresent(item) {
-  if (isFileEditorItem(item) && typeof captureFileEditorPanelViewStateForItem === 'function') {
-    captureFileEditorPanelViewStateForItem(item);
-    return true;
-  }
-  return false;
 }
 
 const searchRankWeights = Object.freeze({
@@ -3932,6 +3926,120 @@ function isTmuxSession(item) {
 
 function isLayoutItem(item) {
   return layoutItems.includes(item);
+}
+
+const paneScrollContainerSelector = [
+  '.preferences-scroll',
+  '.terminal .xterm-viewport',
+  '.transcript-preview',
+  '.summary-preview',
+  '.event-list',
+  '.info-list',
+  '.yoagent-chat-history',
+  '.file-explorer-tree-panel',
+  '.file-explorer-changes-panel',
+  '.file-editor-raw-panel',
+  '.file-editor-preview-pane',
+  '.file-editor-preview-pane-panel',
+  '.file-editor-image-panel',
+  '.file-editor-diff-codemirror .cm-mergeView',
+  '.file-editor-codemirror .cm-scroller',
+  '.file-editor-codemirror-panel .cm-scroller',
+].join(', ');
+
+function paneScrollContainerHasLayout(element) {
+  if (!element || typeof element.isConnected === 'boolean' && !element.isConnected) return false;
+  if (typeof element.clientHeight === 'number' && element.clientHeight <= 0) return false;
+  if (typeof element.clientWidth === 'number' && element.clientWidth <= 0) return false;
+  return true;
+}
+
+function paneScrollContainers(panel) {
+  if (!panel?.querySelectorAll) return [];
+  return Array.from(panel.querySelectorAll(paneScrollContainerSelector));
+}
+
+function paneScrollContainerKey(element, index) {
+  const id = element?.id || '';
+  if (id) return `id:${id}`;
+  const explicit = element?.dataset?.paneScrollKey || '';
+  if (explicit) return `data:${explicit}`;
+  const classes = Array.from(element?.classList || []).slice(0, 4).join('.');
+  return `${String(element?.tagName || 'node').toLowerCase()}.${classes}:${index}`;
+}
+
+function capturePaneElementScrollState(panel) {
+  const entries = [];
+  paneScrollContainers(panel).forEach((element, index) => {
+    if (!paneScrollContainerHasLayout(element)) return;
+    entries.push({
+      key: paneScrollContainerKey(element, index),
+      scrollTop: Number(element.scrollTop || 0),
+      scrollLeft: Number(element.scrollLeft || 0),
+    });
+  });
+  return entries;
+}
+
+function restorePaneElementScrollState(panel, state) {
+  const entries = Array.isArray(state?.scrollContainers) ? state.scrollContainers : [];
+  if (!entries.length) return;
+  const current = new Map();
+  paneScrollContainers(panel).forEach((element, index) => {
+    current.set(paneScrollContainerKey(element, index), element);
+  });
+  const restore = () => {
+    for (const entry of entries) {
+      const element = current.get(entry.key);
+      if (!paneScrollContainerHasLayout(element)) continue;
+      element.scrollTop = Number(entry.scrollTop || 0);
+      element.scrollLeft = Number(entry.scrollLeft || 0);
+    }
+  };
+  restore();
+  requestAnimationFrame(restore);
+  requestAnimationFrame(() => requestAnimationFrame(restore));
+  setTimeout(restore, 0);
+}
+
+function capturePaneViewState(item, panel) {
+  if (!item || !panel) return false;
+  const scrollContainers = capturePaneElementScrollState(panel);
+  if (scrollContainers.length) {
+    paneViewState.set(item, {
+      scrollContainers,
+      capturedAt: Date.now(),
+    });
+  }
+  if (isFileEditorItem(item) && typeof captureFileEditorPanelViewState === 'function') {
+    captureFileEditorPanelViewState(item, panel);
+  }
+  return scrollContainers.length > 0 || fileEditorViewState.has(item);
+}
+
+function capturePaneViewStateForItemIfPresent(item) {
+  const panel = panelNodes.get(item);
+  if (!panel) return false;
+  return capturePaneViewState(item, panel);
+}
+
+function schedulePaneViewStateCapture(item, panel) {
+  if (!item || !panel) return;
+  if (pendingPaneViewStateCaptures.has(item)) return;
+  pendingPaneViewStateCaptures.add(item);
+  requestAnimationFrame(() => {
+    pendingPaneViewStateCaptures.delete(item);
+    const currentPanel = panelNodes.get(item) || panel;
+    capturePaneViewState(item, currentPanel);
+  });
+}
+
+function restorePaneViewState(item, panel) {
+  if (!item || !panel) return;
+  restorePaneElementScrollState(panel, paneViewState.get(item));
+  if (isFileEditorItem(item) && typeof restoreFileEditorPanelViewState === 'function') {
+    restoreFileEditorPanelViewState(item, panel);
+  }
 }
 
 function registerFileEditorLayoutItem(path) {
@@ -13744,7 +13852,7 @@ function refreshOpenEditorThemePanels() {
     const reconfigured = typeof reconfigureCodeMirrorPanelTheme === 'function' && reconfigureCodeMirrorPanelTheme(panel);
     renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
     if (!reconfigured) {
-      captureFileEditorPanelViewState(item, panel);
+      capturePaneViewState(item, panel);
       renderFileEditorPanel(panel, item);
     }
   });
@@ -16289,7 +16397,7 @@ function activatePaneTab(side, session, options = {}) {
   }
   recordTabActivation(session);
   const previous = activeItemForSide(side);
-  if (previous && previous !== session) captureFileEditorViewStateForItemIfPresent(previous);
+  if (previous && previous !== session) capturePaneViewStateForItemIfPresent(previous);
   if (isFileEditorItem(session)) {
     activeFile = fileItemPath(session);
     updateFileExplorerCurrentFileHighlight();
@@ -16807,6 +16915,8 @@ function clearSessionUiState(session) {
   stopTranscriptStream(session);
   stopSummaryStream(session);
   autoApproveStates.delete(session);
+  paneViewState.delete(session);
+  pendingPaneViewStateCaptures.delete(session);
   uploadResultsBySession.delete(session);
   if (uploadCleanupTimers.has(session)) {
     clearTimeout(uploadCleanupTimers.get(session));
@@ -16834,6 +16944,7 @@ function replaceSessionMetadata(oldSession, newSession) {
     uploadResultsBySession,
     uploadCleanupTimers,
     pasteCounters,
+    paneViewState,
     // carry the per-pane LRU timestamp across a session rename too, or the renamed tab's
     // eviction ordering glitches (it reads as never-activated).
     tabLastActivatedAt,
@@ -18988,11 +19099,12 @@ function createDockviewPanelRenderer() {
     updatePanelSlot(panel, item, slot);
     element.replaceChildren(panel);
     renderAttachedPanelContent(item);
+    restorePaneViewState(item, panel);
     updatePanelInactiveOverlays();
   };
   const pool = () => {
     if (!panel || panel.parentElement !== element) return;
-    if (isFileEditorItem(item)) captureFileEditorPanelViewState(item, panel);
+    capturePaneViewState(item, panel);
     panel.classList.remove('active-pane');
     panel.dataset.slot = '';
     panelPool.appendChild(panel);
@@ -19137,6 +19249,13 @@ function createDockviewHeaderActionsRenderer() {
   };
 }
 
+function captureDockviewPreviousPaneBeforeTabActivation(tabElement, targetItem) {
+  const group = tabElement?.closest?.('.dv-groupview');
+  const slot = group && typeof dockviewSlotForGroupElement === 'function' ? dockviewSlotForGroupElement(group) : null;
+  const previous = slot ? activeItemForSide(slot) : focusedPanelItem;
+  if (previous && previous !== targetItem) capturePaneViewStateForItemIfPresent(previous);
+}
+
 function createDockviewTabRenderer() {
   const element = document.createElement('div');
   element.className = 'pane-tab dockview-pane-tab';
@@ -19177,10 +19296,14 @@ function createDockviewTabRenderer() {
     dragTimingReset();
     dragTimingMark('pointerdown');
     if (event.target.closest('[data-pane-tab-close], [data-auto-session]')) event.stopPropagation();
-    else dockviewBeginTabPointerDrag(event, item);
+    else {
+      captureDockviewPreviousPaneBeforeTabActivation(element, item);
+      dockviewBeginTabPointerDrag(event, item);
+    }
   });
   element.addEventListener('mousedown', event => {
     if (event.target.closest('[data-pane-tab-close], [data-auto-session]')) return;
+    captureDockviewPreviousPaneBeforeTabActivation(element, item);
     dockviewBeginTabPointerDrag(event, item);
   });
   element.addEventListener('click', async event => {
@@ -19202,11 +19325,13 @@ function createDockviewTabRenderer() {
       if (shouldRefocus) focusPanel(item);
       return;
     }
+    captureDockviewPreviousPaneBeforeTabActivation(element, item);
     commitExplicitTabInteraction();
   });
   element.addEventListener('keydown', event => {
     if (!['Enter', ' '].includes(event.key)) return;
     event.preventDefault();
+    captureDockviewPreviousPaneBeforeTabActivation(element, item);
     commitExplicitTabInteraction();
     api?.setActive?.();
   });
@@ -19353,7 +19478,7 @@ function renderPanels(previousActive = [], options = {}) {
 
 function movePanelsToPool() {
   for (const [item, panel] of panelNodes.entries()) {
-    if (isFileEditorItem(item)) captureFileEditorPanelViewState(item, panel);
+    capturePaneViewState(item, panel);
     panel.classList.remove('active-pane');
     panel.dataset.slot = '';
     panelPool.appendChild(panel);
@@ -19374,7 +19499,7 @@ function panelItemForNode(node) {
 function poolDisplacedPanel(node) {
   const item = panelItemForNode(node);
   if (item == null) return;
-  if (isFileEditorItem(item)) captureFileEditorPanelViewState(item, node);
+  capturePaneViewState(item, node);
   node.classList.remove('active-pane');
   node.dataset.slot = '';
   panelPool.appendChild(node);
@@ -19408,6 +19533,7 @@ function syncActivePanelsInPlace() {
     dropSlot.replaceChildren(desired);
     updatePanelSlot(desired, item, slot);
     renderAttachedPanelContent(item);
+    restorePaneViewState(item, desired);
   }
 }
 
@@ -19655,6 +19781,7 @@ function renderDropSlot(slot, session) {
   updatePanelSlot(panel, session, slot);
   node.appendChild(panel);
   renderAttachedPanelContent(session);
+  restorePaneViewState(session, panel);
   return node;
 }
 
@@ -20355,6 +20482,12 @@ function bindPanelShell(panel, session) {
       setFocusedPanelItem(session);
     }
   });
+  panel.addEventListener('scroll', event => {
+    const target = event.target;
+    if (target?.matches?.(paneScrollContainerSelector) && panel.contains(target)) {
+      schedulePaneViewStateCapture(session, panel);
+    }
+  }, true);
   const head = panel.querySelector('.panel-head');
   if (head) {
     head.draggable = true;
@@ -25266,6 +25399,10 @@ function requestFileEditorPanelFocus(item) {
   if (isFileEditorItem(item)) pendingFileEditorFocus.add(item);
 }
 
+function scheduleFileEditorPanelViewStateCapture(item, panel) {
+  schedulePaneViewStateCapture(item, panel);
+}
+
 function focusFileEditorPanelIfReady(panel, item) {
   if (!autoFocusEnabled) {
     pendingFileEditorFocus.delete(item);
@@ -25276,7 +25413,7 @@ function focusFileEditorPanelIfReady(panel, item) {
     panel._cmView.focus?.();
     // CodeMirror focus can scroll the cursor into view. Re-apply the saved viewport after focus so
     // a long file that was only scrolled, not cursor-moved, does not jump back to the cursor line.
-    restoreFileEditorPanelViewState(item, panel);
+    restorePaneViewState(item, panel);
     pendingFileEditorFocus.delete(item);
     return true;
   }
@@ -26211,7 +26348,10 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
       });
       panel._cmView = panel._cmMergeView.b;
       trackCodeMirrorThemeViews(panel, api, [panel._cmMergeView.a, panel._cmMergeView.b]);
-      panel._cmMergeView.b.scrollDOM?.addEventListener('scroll', () => scheduleFileEditorSplitScrollSync(panel, 'editor'));
+      panel._cmMergeView.b.scrollDOM?.addEventListener('scroll', () => {
+        scheduleFileEditorSplitScrollSync(panel, 'editor');
+        scheduleFileEditorPanelViewStateCapture(item, panel);
+      });
     } else {
       const unifiedMergeOptions = {
         original,
@@ -26255,7 +26395,10 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
           }
         },
       });
-      panel._cmView.scrollDOM?.addEventListener('scroll', () => scheduleFileEditorSplitScrollSync(panel, 'editor'));
+      panel._cmView.scrollDOM?.addEventListener('scroll', () => {
+        scheduleFileEditorSplitScrollSync(panel, 'editor');
+        scheduleFileEditorPanelViewStateCapture(item, panel);
+      });
       trackCodeMirrorThemeViews(panel, api, [panel._cmView]);
     }
     panel._cmPath = path;
@@ -26313,7 +26456,10 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
       panel._cmSignature = signature;
       panel._cmMode = 'edit';
       panel._cmPlainFallback = Boolean(createdState.plain);
-      panel._cmView.scrollDOM?.addEventListener('scroll', () => scheduleFileEditorSplitScrollSync(panel, 'editor'));
+      panel._cmView.scrollDOM?.addEventListener('scroll', () => {
+        scheduleFileEditorSplitScrollSync(panel, 'editor');
+        scheduleFileEditorPanelViewStateCapture(item, panel);
+      });
       trackCodeMirrorThemeViews(panel, api, [panel._cmView]);
       updateCodeMirrorCursorStatus(panel);
       if (createdState.plain) {
@@ -26377,7 +26523,7 @@ function renderFileEditorPanelShouldCaptureViewState(options = {}) {
 
 function renderFileEditorPanel(panel, item, options = {}) {
   const path = fileItemPath(item);
-  if (renderFileEditorPanelShouldCaptureViewState(options)) captureFileEditorPanelViewState(item, panel);
+  if (renderFileEditorPanelShouldCaptureViewState(options)) capturePaneViewState(item, panel);
   const shouldUpdateActiveFile = options.updateActiveFile !== false
     && (!dockviewLayoutActive() || focusedPanelItem === item || options.forceActiveFile === true);
   if (shouldUpdateActiveFile) {
