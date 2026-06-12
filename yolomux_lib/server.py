@@ -629,6 +629,12 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 return
             self.write_json(self.server.app.update_client_watch_roots(payload))
             return
+        if parsed.path == "/api/drop-action/run":
+            payload = self.read_json_body(64 * 1024)
+            if payload is None:
+                return
+            self.write_app_result(self.server.app.run_file_drop_action(payload))
+            return
         if parsed.path == "/api/yoagent/chat":
             payload = self.read_json_body(64 * 1024)
             if payload is None:

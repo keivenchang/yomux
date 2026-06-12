@@ -7924,7 +7924,7 @@ body.theme-light .file-tree-children::before {
   min-height: 26px;
 }
 
-/* DOIT.57: the transient drop-suggestion overlay (Alt+1..9 actions when a file is dropped on a
+/* DOIT.57: the transient drop-suggestion overlay (1..9 actions when a file is dropped on a
    terminal). Non-modal, auto-dismisses; the terminal keeps focus. */
 .terminal-drop-suggestions {
   position: fixed;
@@ -8290,6 +8290,17 @@ body.theme-light .file-tree-children::before {
 }
 .file-editor-dialog-body.custom {
   white-space: normal;
+}
+
+.drop-action-result pre {
+  max-height: min(62vh, 720px);
+  overflow: auto;
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--mono-font);
+  font-size: 12px;
+  line-height: 1.45;
 }
 .file-editor-dialog-actions {
   display: flex;

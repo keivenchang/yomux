@@ -70,6 +70,7 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y) {
   const multiple = selectedPaths.length > 1;
   appendContextMenuButton(menu, multiple ? 'Copy relative paths' : 'Copy relative path', () => copyFilePath(relativePaths.join('\n'), 'relative'), closeFileContextMenu, {disabled: menuState.copyRelativeDisabled});
   appendContextMenuButton(menu, multiple ? 'Copy full paths' : 'Copy full path', () => copyFilePath(selectedPaths.join('\n'), 'path'), closeFileContextMenu);
+  appendContextMenuButton(menu, 'Copy image', () => copyImageFileToClipboard(selectedPaths[0]), closeFileContextMenu, {disabled: menuState.copyImageDisabled});
   appendContextMenuButton(menu, 'Open in new tab', () => openFileInEditor(fullPath, entry, {forceNewTab: true}), closeFileContextMenu, {disabled: menuState.openInNewTabDisabled});
   appendContextMenuButton(menu, 'Download', () => triggerFileDownload(fullPath), closeFileContextMenu, {disabled: menuState.downloadDisabled});
   appendContextMenuButton(menu, fileExplorerDirectoryIsIndexed(fullPath) ? 'Disallow index' : 'Allow index', () => toggleFileExplorerDirectoryIndexed(fullPath), closeFileContextMenu, {disabled: menuState.indexToggleDisabled, checked: entry?.kind === 'dir' ? fileExplorerDirectoryIsIndexed(fullPath) : undefined});
@@ -86,6 +87,7 @@ function fileContextMenuState(entry, selectedPaths, relativePaths) {
     // so the file-read affordances (open image in a tab via /api/fs/raw, Download via /api/fs/raw) are
     // disabled in readonly to match the server, instead of offering a command that 403s.
     openInNewTabDisabled: multiple || !entryIsImageFile(entry) || readOnlyMode,
+    copyImageDisabled: multiple || !entryIsImageFile(entry) || readOnlyMode,
     downloadDisabled: multiple || entry?.kind !== 'file' || readOnlyMode,
     indexToggleDisabled: multiple || entry?.kind !== 'dir' || (!fileExplorerDirectoryIsIndexed(selectedPaths[0]) && Boolean(fileExplorerIndexedAncestor(selectedPaths[0]))),
     renameDisabled: readOnlyMode || multiple,
@@ -102,6 +104,23 @@ async function copyFilePath(path, label) {
   try {
     await copyTextToClipboard(text);
     statusEl.textContent = label === 'relative' ? 'copied relative path' : 'copied path';
+  } catch (error) {
+    statusErr(localizedHtml('status.copyFailed', {error}));
+  }
+}
+
+async function copyImageFileToClipboard(path) {
+  if (!globalThis.ClipboardItem || !navigator?.clipboard?.write) {
+    await copyFilePath(path, 'path');
+    statusEl.textContent = 'image clipboard unavailable; copied path';
+    return;
+  }
+  try {
+    const response = await apiFetch(rawFileUrl(path), {cache: 'no-store'});
+    const blob = await response.blob();
+    const type = blob.type || 'image/png';
+    await navigator.clipboard.write([new ClipboardItem({[type]: blob})]);
+    statusEl.textContent = `copied image ${basenameOf(path)}`;
   } catch (error) {
     statusErr(localizedHtml('status.copyFailed', {error}));
   }

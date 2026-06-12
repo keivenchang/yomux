@@ -2030,7 +2030,11 @@ function valueFromPreferenceControl(control) {
     const scale = Number(item.scale) || 1;
     return Number(clamped) * scale;
   }
-  if (type === 'list') return String(control.value || '').split('\n').map(line => line.trim()).filter(Boolean);
+  if (type === 'list') {
+    const maxItems = Number(control.dataset.settingMaxItems || 0);
+    const items = String(control.value || '').split('\n').map(line => line.trim()).filter(Boolean);
+    return Number.isFinite(maxItems) && maxItems > 0 ? items.slice(0, maxItems) : items;
+  }
   return control.value;
 }
 

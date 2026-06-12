@@ -421,3 +421,32 @@ def test_uploads_subdir_allows_empty_for_cwd_opt_out():
 
 def test_uploads_blank_filename_template_still_reverts_to_default():
     assert sanitize_settings({"uploads": {"filename_template": ""}})["uploads"]["filename_template"] == DEFAULT_UPLOAD_FILENAME_TEMPLATE
+
+
+def test_upload_drop_action_settings_defaults_and_round_trip(tmp_path):
+    defaults = default_settings()["uploads"]
+    assert defaults["suggestion_autorun"] is False
+    assert defaults["image_action_order"] == [
+        "Extract the text (OCR): ; do OCR on this image and extract all of the text.",
+        "Diagnose the error: ; diagnose the error/problem shown in this screenshot & suggest a fix.",
+        "Describe the image: ; describe what is shown in this image.",
+        "info",
+    ]
+    assert defaults["custom_actions"] == []
+
+    settings = sanitize_settings({"uploads": {"suggestion_autorun": "yes", "image_action_order": ["img-describe", "", 7, "Info: info", "Insert path", "Show file type", "Extract the text: ; do OCR on this image and extract all of the text.", "Diagnose the error in this screenshot: ; diagnose the error or problem shown in this screenshot and suggest a fix.", "server ocr"], "custom_actions": ["Ask owner | explain {name} | code", "", 7]}})
+    assert settings["uploads"]["suggestion_autorun"] is True
+    assert settings["uploads"]["image_action_order"] == [
+        "Describe the image: ; describe what is shown in this image.",
+        "info",
+        "Extract the text (OCR): ; do OCR on this image and extract all of the text.",
+        "Diagnose the error: ; diagnose the error/problem shown in this screenshot & suggest a fix.",
+    ]
+    assert settings["uploads"]["custom_actions"] == ["Ask owner | explain {name} | code"]
+
+    path = tmp_path / "settings.yaml"
+    too_many_actions = [f"action {index}" for index in range(12)]
+    updated = save_settings({"uploads": {"suggestion_autorun": True, "image_action_order": too_many_actions, "custom_actions": ["Peek | shell:head -40 {qpath} | log"]}}, path)
+    assert updated["settings"]["uploads"]["suggestion_autorun"] is True
+    assert updated["settings"]["uploads"]["image_action_order"] == too_many_actions[:9]
+    assert updated["settings"]["uploads"]["custom_actions"] == ["Peek | shell:head -40 {qpath} | log"]

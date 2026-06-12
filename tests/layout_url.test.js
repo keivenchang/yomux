@@ -648,8 +648,13 @@ globalThis.__layoutTestApi = {
   replaceTmuxSessionInClient,
   normalizedSessionOrder,
   fileDropCategory,
+  dropSuggestionIndexFromKeyEvent,
+  rememberDropActionForTest: rememberDropAction,
   dropSuggestionsFor,
   composeDropSuggestion,
+  insertedDropActionText,
+  customDropActionFromLine,
+  commandPaletteDropActionItems,
   normalizeLayoutSlots,
   compactLayoutSlots,
   layoutSlotsSignature,
@@ -4588,6 +4593,9 @@ test('t@2560', () => {
   assert.ok(/data-setting-reset="yoagent\.intro"(?! disabled)/.test(preferencesHtml), 'YO!agent intro row Reset is visible and enabled at defaults');
   assert.ok(/data-setting-reset="yoagent\.format"(?! disabled)/.test(preferencesHtml), 'YO!agent answer format row Reset is visible and enabled at defaults');
   assert.ok(/data-setting-path="file_explorer\.quick_access_paths"[\s\S]*data-setting-type="list"[\s\S]*rows="3"/.test(preferencesHtml), 'list settings keep compact textarea rows');
+  assert.ok(/data-setting-path="uploads\.image_action_order"[\s\S]*data-setting-autosize="true"[\s\S]*data-setting-max-items="9"[\s\S]*rows="7"/.test(preferencesHtml), 'image paste action order autosizes from its readable list and caps shortcut-backed items at 9');
+  api.setClientSettingsPatchForTest({uploads: {image_action_order: ['Extract the text (OCR): ; do OCR on this image and extract all of the text.']}});
+  assert.ok(api.preferencesPanelHtmlForTest('image paste', []).includes('Extract the text (OCR): ; do OCR on this image and extract all of the text.'), 'image paste action order shows popup label plus the exact inserted prompt text');
   assert.ok(/\.preferences-setting-row--wide\s*\{[\s\S]*grid-template-columns:\s*minmax\(0, 1fr\)/.test(preferencesCss), 'wide preference rows stack to one column');
   assert.ok(/\.preferences-setting-row--wide \.preferences-setting-control textarea\s*\{[\s\S]*grid-column:\s*1 \/ -1[\s\S]*min-height:\s*5lh/.test(preferencesCss), 'wide textarea controls span the row with a compact autosize floor');
   assert.ok(/function autosizePreferenceTextarea\([\s\S]*scrollHeight/.test(diffBundle), 'Preferences autosize textareas resize from their content height');
@@ -10063,7 +10071,7 @@ test('t@tabber', () => {
 });
 
 {
-  // DOIT.57: drag-into-terminal suggestion registry (the transient Alt+1..9 overlay's data layer).
+  // DOIT.57: drag-into-terminal suggestion registry (the transient 1..9 overlay's data layer).
   const api = loadYolomux();
   assert.equal(api.fileDropCategory('/x/shot.png'), 'image');
   assert.equal(api.fileDropCategory('build.log'), 'log');
@@ -10074,19 +10082,60 @@ test('t@tabber', () => {
   assert.equal(api.fileDropCategory('/some/dir', 'dir'), 'dir');
   assert.equal(api.fileDropCategory('mystery.xyz'), 'any');
 
-  const imgClaude = api.dropSuggestionsFor('image', 'claude', 1);
+  const imgClaude = api.dropSuggestionsFor('image', 'claude', 1, {pathInserted: true});
   assert.ok(imgClaude.some(s => s.id === 'img-error'), 'image + agent offers diagnose-screenshot');
   assert.ok(!imgClaude.some(s => s.id === 'log-errors'), 'image category hides log-only suggestions');
   assert.ok(imgClaude.length <= 9, 'suggestions cap at 9 (the path is inserted first, so 1..9 are all actions)');
-  assert.equal(api.dropSuggestionsFor('image', '', 1).length, 0, 'a plain shell pane shows no agent suggestions');
+  assert.deepEqual(imgClaude.map(s => s.id), ['img-ocr', 'img-error', 'img-describe', 'server-info'], 'image paste shows the configured image action order entries');
+  assert.equal(imgClaude.some(s => s.id === 'analyze'), false, 'image paste does not append unconfigured fallback actions such as Take a look at it');
+  assert.equal(imgClaude.some(s => s.id === 'server-ocr' || s.id === 'shell-file'), false, 'image paste defaults do not include server OCR or file type');
+  assert.deepEqual(imgClaude.map(s => s.menuLabel || s.label), [
+    'Extract the text (OCR): ; do OCR on this image and extract all of the text.',
+    'Diagnose the error: ; diagnose the error/problem shown in this screenshot & suggest a fix.',
+    'Describe the image: ; describe what is shown in this image.',
+    'Server: file info',
+  ], 'image paste labels come from the Preference row verbatim, except the info alias resolves to the file-info action label');
+  api.rememberDropActionForTest('image', 'server-info');
+  assert.equal(api.dropSuggestionsFor('image', 'claude', 1, {pathInserted: true})[0]?.id, 'img-ocr', 'image action order Preference is authoritative over last-used state');
+  api.setClientSettingsPatchForTest({uploads: {image_action_order: ['Describe the image: ; describe what is shown in this image.', 'Info: info', 'Extract the text: ; do OCR on this image and extract all of the text.']}});
+  const reorderedImageActions = api.dropSuggestionsFor('image', 'claude', 1, {pathInserted: true});
+  assert.deepEqual(reorderedImageActions.map(s => s.id), ['img-describe', 'server-info', 'img-ocr'], 'Uploads Preferences strictly define the image paste action menu');
+  assert.deepEqual(reorderedImageActions.map(s => s.menuLabel || s.label), ['Describe the image: ; describe what is shown in this image.', 'Server: file info', 'Extract the text: ; do OCR on this image and extract all of the text.'], 'custom image paste menu labels match the configured rows verbatim except info');
+  api.setClientSettingsPatchForTest({uploads: {image_action_order: [
+    'Extract the text (OCR): ; do OCR on this image and extract all of the text.',
+    'Diagnose the error: ; diagnose the error/problem shown in this screenshot & suggest a fix.',
+    'Describe the image: ; describe what is shown in this image.',
+    'info',
+  ]}});
+  const imgShell = api.dropSuggestionsFor('image', '', 1);
+  assert.deepEqual(imgShell.map(s => s.id), ['server-info'], 'a plain shell image menu is still restricted to the configured image action order');
+  assert.equal(imgShell.some(s => s.id === 'server-ocr' || s.id === 'shell-file'), false, 'plain shell image defaults omit server OCR and file type');
 
   const logErrors = api.dropSuggestionsFor('log', 'claude', 1).find(s => s.id === 'log-errors');
   assert.ok(logErrors, 'log + agent offers find-errors');
+  api.rememberDropActionForTest('log', 'log-cause');
+  assert.equal(api.dropSuggestionsFor('log', 'claude', 1, {pathInserted: true})[0]?.id, 'log-cause', 'non-image categories still use the last chosen action when no Preference order exists');
   const logClause = api.composeDropSuggestion(logErrors);
   assert.ok(/\blog\b/i.test(logClause), 'compose returns a deictic clause that refers to the file (this log)');
   assert.equal(logClause.includes('/var/log'), false, 'compose does NOT repeat the path — it is appended after the already-inserted path');
   assert.equal(api.composeDropSuggestion(imgClaude.find(s => s.id === 'img-ocr')), 'do OCR on this image and extract all of the text.', 'OCR clause reads as an appendable instruction about this image');
   assert.ok(api.dropSuggestionsFor('any', 'codex', 1).some(s => s.id === 'analyze'), 'any-category fallback offers a generic look');
+  assert.ok(api.dropSuggestionsFor('code', 'claude', 2, {pathInserted: true}).some(s => s.id === 'multi-diff'), 'multi-file agent actions appear when count >= 2');
+  assert.equal(api.dropSuggestionIndexFromKeyEvent({key: '1', code: ''}), 0, 'drop action shortcuts accept browser events that only carry key');
+  assert.equal(api.dropSuggestionIndexFromKeyEvent({key: 'End', code: 'Numpad8'}), 7, 'drop action shortcuts accept numpad digits');
+  assert.equal(api.dropSuggestionIndexFromKeyEvent({key: '1', code: 'Digit1', metaKey: true}), -1, 'drop action shortcuts leave browser Cmd/Ctrl digit shortcuts alone');
+  const customShell = api.customDropActionFromLine('Peek | shell:head -40 {qpath} | log,code', 0);
+  assert.equal(customShell.kind, 'shell', 'custom shell actions parse from Settings lines');
+  assert.equal(api.composeDropSuggestion(customShell, {paths: ['/tmp/a b.log'], category: 'log'}), "head -40 '/tmp/a b.log'", 'custom shell templates expand quoted path placeholders');
+  api.setClientSettingsPatchForTest({uploads: {custom_actions: ['Ask owner | explain why {name} matters | code']}});
+  assert.ok(api.dropSuggestionsFor('code', 'claude', 1).some(s => s.custom && s.label === 'Ask owner'), 'custom prompt actions from Preferences join the shared registry');
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(source.includes("boolSetting('uploads.suggestion_autorun', false)"), 'read-only shell autorun is Preference-gated');
+  assert.ok(source.includes("storageSet(dropActionLastKey(category), actionId)"), 'chosen drop actions are remembered per category');
+  assert.ok(source.includes("apiFetchJson('/api/drop-action/run'"), 'server-side actions use the /api/drop-action/run endpoint');
+  assert.ok(source.includes("appendContextMenuButton(menu, 'Copy image'"), 'Finder/Differ image context menus expose Copy image');
+  assert.ok(source.includes('function commandPaletteDropActionItems()'), 'command palette reuses the drop-action registry for active file actions');
+  assert.ok(source.includes("path: 'uploads.custom_actions'") && source.includes("path: 'uploads.suggestion_autorun'") && source.includes("path: 'uploads.image_action_order'"), 'Uploads Preferences expose custom actions, image ordering, and autorun');
 }
 
 (async () => {

@@ -156,6 +156,7 @@ def route_handler(path, app=None, readonly=False):
     handler.write_json = lambda value, status=HTTPStatus.OK: writes.append(("json", status, value))
     handler.write_text = lambda value, status=HTTPStatus.OK, content_type="text/plain; charset=utf-8": writes.append(("text", status, value, content_type))
     handler.write_html = lambda value: writes.append(("html", HTTPStatus.OK, value))
+    handler.write_app_result = lambda result: handler.write_json(result[0], status=result[1])
     handler.reject_forbidden = lambda identity, required_role: writes.append(("forbidden", HTTPStatus.FORBIDDEN, identity.role, required_role))
     return handler, calls, writes
 
@@ -232,6 +233,15 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
 
     assert calls == [("require_auth_for_post", "/api/watch/roots")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "roots": {"roots": ["/repo"]}})]
+
+    app = SimpleNamespace(run_file_drop_action=lambda payload: ({"ok": True, "action": payload["action"]}, HTTPStatus.OK))
+    handler, calls, writes = route_handler("/api/drop-action/run", app)
+    handler.read_json_body = lambda limit: {"action": "server-info", "paths": ["/repo/README.md"]}
+
+    Handler.do_POST(handler)
+
+    assert calls == [("require_auth_for_post", "/api/drop-action/run")]
+    assert writes == [("json", HTTPStatus.OK, {"ok": True, "action": "server-info"})]
 
     app = SimpleNamespace(tmux_copy_selection=lambda session: ({"session": session, "copied": True}, HTTPStatus.OK))
     handler, calls, writes = route_handler("/api/tmux-copy-selection?session=6", app)

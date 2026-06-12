@@ -4736,7 +4736,53 @@ function commandPaletteCommandItems() {
       });
     },
   })));
-  return [...tabItems, ...menuItems, ...settingItems];
+  return [...tabItems, ...menuItems, ...settingItems, ...commandPaletteDropActionItems()];
+}
+
+function commandPaletteDropActionPath() {
+  const activeItem = currentActiveMenuItem();
+  const activeItemPath = isFileEditorItem(activeItem) ? fileItemPath(activeItem) : '';
+  if (activeItemPath) return activeItemPath;
+  if (activeFile) return activeFile;
+  if (fileExplorerSelectionLead) return fileExplorerSelectionLead;
+  return '';
+}
+
+function commandPaletteDropActionKind(path) {
+  const row = path ? document.querySelector?.(`.file-tree-row[data-path="${cssEscape(path)}"]`) : null;
+  return row?.dataset?.kind === 'dir' ? 'dir' : 'file';
+}
+
+function commandPaletteDropActionSession() {
+  const target = currentSessionActionTarget();
+  if (isTmuxSession(target)) return target;
+  if (isTmuxSession(focusedTerminal)) return focusedTerminal;
+  return activeSessions.find(item => isTmuxSession(item)) || '';
+}
+
+function commandPaletteDropActionItems() {
+  const path = commandPaletteDropActionPath();
+  if (!path) return [];
+  const kind = commandPaletteDropActionKind(path);
+  const paths = [path];
+  const category = fileDropCategory(path, kind);
+  const session = commandPaletteDropActionSession();
+  const agentKind = session ? sessionAgentKind(session) : '';
+  return dropActionsFor(category, agentKind, paths.length, {pathInserted: false, includeShellForAgents: true})
+    .map(action => {
+      const needsTerminal = action.kind !== 'server';
+      return {
+        group: 'File Actions',
+        category: 'command',
+        label: action.label,
+        detail: compactHomePath(path),
+        key: `drop-action:${action.id}:${path}`,
+        keybinding: 'Enter',
+        disabled: needsTerminal && !session,
+        searchFields: ['do something with file', 'file action', action.label, path, compactHomePath(path)],
+        run: () => runDropAction(action, dropActionContext(action, paths, category, agentKind, {session, kind, pathInserted: false})),
+      };
+    });
 }
 
 function fileQuickOpenRootForFile(path) {
@@ -10836,6 +10882,7 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y) {
   const multiple = selectedPaths.length > 1;
   appendContextMenuButton(menu, multiple ? 'Copy relative paths' : 'Copy relative path', () => copyFilePath(relativePaths.join('\n'), 'relative'), closeFileContextMenu, {disabled: menuState.copyRelativeDisabled});
   appendContextMenuButton(menu, multiple ? 'Copy full paths' : 'Copy full path', () => copyFilePath(selectedPaths.join('\n'), 'path'), closeFileContextMenu);
+  appendContextMenuButton(menu, 'Copy image', () => copyImageFileToClipboard(selectedPaths[0]), closeFileContextMenu, {disabled: menuState.copyImageDisabled});
   appendContextMenuButton(menu, 'Open in new tab', () => openFileInEditor(fullPath, entry, {forceNewTab: true}), closeFileContextMenu, {disabled: menuState.openInNewTabDisabled});
   appendContextMenuButton(menu, 'Download', () => triggerFileDownload(fullPath), closeFileContextMenu, {disabled: menuState.downloadDisabled});
   appendContextMenuButton(menu, fileExplorerDirectoryIsIndexed(fullPath) ? 'Disallow index' : 'Allow index', () => toggleFileExplorerDirectoryIndexed(fullPath), closeFileContextMenu, {disabled: menuState.indexToggleDisabled, checked: entry?.kind === 'dir' ? fileExplorerDirectoryIsIndexed(fullPath) : undefined});
@@ -10852,6 +10899,7 @@ function fileContextMenuState(entry, selectedPaths, relativePaths) {
     // so the file-read affordances (open image in a tab via /api/fs/raw, Download via /api/fs/raw) are
     // disabled in readonly to match the server, instead of offering a command that 403s.
     openInNewTabDisabled: multiple || !entryIsImageFile(entry) || readOnlyMode,
+    copyImageDisabled: multiple || !entryIsImageFile(entry) || readOnlyMode,
     downloadDisabled: multiple || entry?.kind !== 'file' || readOnlyMode,
     indexToggleDisabled: multiple || entry?.kind !== 'dir' || (!fileExplorerDirectoryIsIndexed(selectedPaths[0]) && Boolean(fileExplorerIndexedAncestor(selectedPaths[0]))),
     renameDisabled: readOnlyMode || multiple,
@@ -10868,6 +10916,23 @@ async function copyFilePath(path, label) {
   try {
     await copyTextToClipboard(text);
     statusEl.textContent = label === 'relative' ? 'copied relative path' : 'copied path';
+  } catch (error) {
+    statusErr(localizedHtml('status.copyFailed', {error}));
+  }
+}
+
+async function copyImageFileToClipboard(path) {
+  if (!globalThis.ClipboardItem || !navigator?.clipboard?.write) {
+    await copyFilePath(path, 'path');
+    statusEl.textContent = 'image clipboard unavailable; copied path';
+    return;
+  }
+  try {
+    const response = await apiFetch(rawFileUrl(path), {cache: 'no-store'});
+    const blob = await response.blob();
+    const type = blob.type || 'image/png';
+    await navigator.clipboard.write([new ClipboardItem({[type]: blob})]);
+    statusEl.textContent = `copied image ${basenameOf(path)}`;
   } catch (error) {
     statusErr(localizedHtml('status.copyFailed', {error}));
   }
@@ -21654,6 +21719,9 @@ function preferenceSections() {
       {path: 'uploads.filename_template', label: t('pref.uploads.filename_template.label'), type: 'text', wide: true, help: t('pref.uploads.filename_template.help')},
       {path: 'uploads.subdir', label: t('pref.uploads.subdir.label'), type: 'text', help: t('pref.uploads.subdir.help')},
       {path: 'uploads.show_suggestions', label: t('pref.uploads.show_suggestions.label'), type: 'boolean', help: t('pref.uploads.show_suggestions.help')},
+      {path: 'uploads.suggestion_autorun', label: t('pref.uploads.suggestion_autorun.label'), type: 'boolean', help: t('pref.uploads.suggestion_autorun.help')},
+      {path: 'uploads.image_action_order', label: t('pref.uploads.image_action_order.label'), type: 'list', wide: true, rows: 7, maxItems: 9, autosize: true, help: t('pref.uploads.image_action_order.help')},
+      {path: 'uploads.custom_actions', label: t('pref.uploads.custom_actions.label'), type: 'list', wide: true, help: t('pref.uploads.custom_actions.help')},
       {path: 'uploads.max_bytes', label: t('pref.uploads.max_bytes.label'), type: 'number', min: 1, max: 512, step: 1, suffix: 'MB', scale: 1048576, help: t('pref.uploads.max_bytes.help')},
     ]},
     {title: t('pref.section.performance'), items: [
@@ -21945,7 +22013,11 @@ function preferenceControlHtml(item, query = '') {
     control = `<div class="preferences-radio-group${groupHasSwatches ? ' has-swatches' : ''}" role="radiogroup" aria-label="${esc(item.label)}">${radios}</div>`;
   } else if (item.type === 'list') {
     const text = Array.isArray(value) ? value.join('\n') : String(value || '');
-    control = `<textarea ${baseAttrs} rows="3">${esc(text)}</textarea>`;
+    const rows = Number.isFinite(Number(item.rows)) ? Math.max(1, Math.min(9, Math.floor(Number(item.rows)))) : 3;
+    const maxItems = Number.isFinite(Number(item.maxItems)) ? Math.max(1, Math.floor(Number(item.maxItems))) : 0;
+    const autosize = item.autosize ? ' data-setting-autosize="true"' : '';
+    const maxItemsAttr = maxItems ? ` data-setting-max-items="${esc(maxItems)}"` : '';
+    control = `<textarea ${baseAttrs}${autosize}${maxItemsAttr} rows="${esc(rows)}">${esc(text)}</textarea>`;
   } else if (item.type === 'textarea') {
     control = `<textarea ${baseAttrs} rows="3" data-setting-autosize="true">${esc(String(value || ''))}</textarea>`;
   } else {
@@ -22463,8 +22535,40 @@ function renderPreferencesPanels(options = {}) {
 
 function autosizePreferenceTextarea(textarea) {
   if (!textarea || textarea.dataset.settingAutosize !== 'true') return;
+  const maxRows = Number(textarea.dataset.settingMaxItems || textarea.getAttribute('rows') || 0);
   textarea.style.height = 'auto';
-  textarea.style.height = `${textarea.scrollHeight}px`;
+  let height = textarea.scrollHeight;
+  if (Number.isFinite(maxRows) && maxRows > 0) {
+    const style = window.getComputedStyle?.(textarea);
+    const lineHeight = Number.parseFloat(style?.lineHeight || '');
+    const paddingTop = Number.parseFloat(style?.paddingTop || '0') || 0;
+    const paddingBottom = Number.parseFloat(style?.paddingBottom || '0') || 0;
+    const borderTop = Number.parseFloat(style?.borderTopWidth || '0') || 0;
+    const borderBottom = Number.parseFloat(style?.borderBottomWidth || '0') || 0;
+    if (Number.isFinite(lineHeight) && lineHeight > 0) {
+      const maxHeight = Math.ceil((lineHeight * maxRows) + paddingTop + paddingBottom + borderTop + borderBottom);
+      height = Math.min(height, maxHeight);
+      textarea.style.overflowY = textarea.scrollHeight > maxHeight ? 'auto' : '';
+    }
+  }
+  textarea.style.height = `${height}px`;
+}
+
+function clampPreferenceListControl(control) {
+  const maxItems = Number(control?.dataset?.settingMaxItems || 0);
+  if (!Number.isFinite(maxItems) || maxItems <= 0) return;
+  const lines = String(control.value || '').split('\n');
+  const kept = [];
+  let used = 0;
+  for (const line of lines) {
+    if (line.trim()) {
+      if (used >= maxItems) continue;
+      used += 1;
+    }
+    kept.push(line);
+  }
+  const next = kept.join('\n');
+  if (next !== control.value) control.value = next;
 }
 
 function autosizePreferenceTextareas(root) {
@@ -22485,6 +22589,7 @@ function bindPreferencesPanel(panel) {
     const control = event.target.closest('[data-setting-path]');
     if (!control || !panel.contains(control)) return;
     if (control.dataset.settingAutosize === 'true') {
+      if (control.dataset.settingType === 'list') clampPreferenceListControl(control);
       autosizePreferenceTextarea(control);
     }
     if (control.dataset.settingType === 'number') {
@@ -24634,7 +24739,11 @@ function valueFromPreferenceControl(control) {
     const scale = Number(item.scale) || 1;
     return Number(clamped) * scale;
   }
-  if (type === 'list') return String(control.value || '').split('\n').map(line => line.trim()).filter(Boolean);
+  if (type === 'list') {
+    const maxItems = Number(control.dataset.settingMaxItems || 0);
+    const items = String(control.value || '').split('\n').map(line => line.trim()).filter(Boolean);
+    return Number.isFinite(maxItems) && maxItems > 0 ? items.slice(0, maxItems) : items;
+  }
   return control.value;
 }
 
@@ -29419,12 +29528,9 @@ function insertFileDragPayloadIntoTerminal(session, payload) {
     : `<span class="err">${terminalNotConnectedHtml(session)}</span>`;
 }
 
-// DOIT.57: dropping/pasting/uploading a file onto a terminal FIRST inserts the path (you always get the
-// name), then shows a transient, keyboard-driven overlay of context-aware actions for the pane's agent.
-// Press 1..9 (or click) to APPEND a deictic clause like "; do OCR on this image." after the path for
-// review (no auto-Enter) — the path is already there, so the clause refers to "this image/file" rather
-// than repeating it; keep typing and the overlay fades. Gated by uploads.show_suggestions (default true);
-// a non-agent shell pane just gets the path with no overlay.
+// DOIT.57: one data-driven file-drop action registry. Agent panes keep the shipped "path first, then
+// append a deictic clause" behavior; shell and server actions compose full commands/results from the
+// selected action so they do not run a stray bare path before the useful command.
 const DROP_SUGGESTION_CATEGORY_EXTS = {
   image: ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.heic', '.heif', '.avif'],
   log: ['.log', '.out', '.err'],
@@ -29448,42 +29554,336 @@ function fileDropCategory(pathOrName, kind = 'file') {
   return 'any';
 }
 
-// `label` is the row text; `prompt()` is the deictic clause APPENDED after the already-inserted path
-// (refers to "this image/file/log/…", never repeats the path). Display/shortcut order is array order.
-const DROP_SUGGESTIONS = [
-  {id: 'img-error', cats: ['image'], agent: true, label: 'Diagnose the error in this screenshot', prompt: () => 'diagnose the error or problem shown in this screenshot and suggest a fix.'},
-  {id: 'img-describe', cats: ['image'], agent: true, label: 'Describe the image', prompt: () => 'describe what is shown in this image.'},
-  {id: 'img-ocr', cats: ['image'], agent: true, label: 'Extract the text (OCR)', prompt: () => 'do OCR on this image and extract all of the text.'},
-  {id: 'log-errors', cats: ['log'], agent: true, label: 'Find the errors', prompt: () => 'read this log and list the errors and warnings, most important first.'},
-  {id: 'log-cause', cats: ['log'], agent: true, label: 'Find the root cause', prompt: () => 'read this log, find the root cause of the failure, and suggest a fix.'},
-  {id: 'code-review', cats: ['code'], agent: true, label: 'Review for bugs', prompt: () => 'review this file for bugs and correctness issues.'},
-  {id: 'code-explain', cats: ['code', 'config'], agent: true, label: 'Explain what it does', prompt: () => 'explain what this file does.'},
-  {id: 'code-security', cats: ['code', 'config'], agent: true, label: 'Find security issues', prompt: () => 'review this file for security problems.'},
-  {id: 'code-tests', cats: ['code'], agent: true, label: 'Write tests', prompt: () => 'write tests for this file.'},
-  {id: 'diff-review', cats: ['diff'], agent: true, label: 'Review the diff', prompt: () => 'review this diff for risks and regressions.'},
-  {id: 'diff-commit', cats: ['diff'], agent: true, label: 'Write a commit message', prompt: () => 'write a commit message for the change in this diff.'},
-  {id: 'data-summary', cats: ['data'], agent: true, label: 'Summarize the data', prompt: () => 'summarize the structure and contents of this data file (columns/schema, row count, anything notable).'},
-  {id: 'data-anomaly', cats: ['data'], agent: true, label: 'Find anomalies', prompt: () => 'look at this data file and point out anomalies or outliers.'},
-  {id: 'doc-summary', cats: ['doc'], agent: true, label: 'Summarize', prompt: () => 'summarize this document.'},
-  {id: 'doc-todos', cats: ['doc'], agent: true, label: 'Extract the action items', prompt: () => 'extract the action items and TODOs from this document.'},
-  {id: 'dir-tree', cats: ['dir'], agent: true, label: 'Summarize this folder', prompt: () => 'summarize the contents of this folder.'},
-  {id: 'dir-large', cats: ['dir'], agent: true, label: 'Find the largest files', prompt: () => 'find the largest files in this folder.'},
-  {id: 'analyze', cats: ['any'], agent: true, label: 'Take a look at it', prompt: () => 'take a look at this file and tell me what it is and anything notable.'},
+const DROP_ACTION_CATEGORIES = Object.freeze(['any', 'image', 'log', 'code', 'diff', 'data', 'doc', 'config', 'archive', 'dir']);
+const DEFAULT_IMAGE_DROP_ACTION_ORDER = Object.freeze([
+  'Extract the text (OCR): ; do OCR on this image and extract all of the text.',
+  'Diagnose the error: ; diagnose the error/problem shown in this screenshot & suggest a fix.',
+  'Describe the image: ; describe what is shown in this image.',
+  'info',
+]);
+const DROP_ACTIONS = [
+  {id: 'insert-path', cats: DROP_ACTION_CATEGORIES, kind: 'insert', label: 'Insert path', readOnly: true},
+  {id: 'img-error', cats: ['image'], kind: 'prompt', agent: true, label: 'Diagnose the error', prompt: () => 'diagnose the error/problem shown in this screenshot & suggest a fix.', aliases: ['Diagnose the error in this screenshot', 'diagnose the error or problem shown in this screenshot and suggest a fix.', 'Diagnose the error in this screenshot: ; diagnose the error or problem shown in this screenshot and suggest a fix.']},
+  {id: 'img-describe', cats: ['image'], kind: 'prompt', agent: true, label: 'Describe the image', prompt: () => 'describe what is shown in this image.'},
+  {id: 'img-ocr', cats: ['image'], kind: 'prompt', agent: true, label: 'Extract the text (OCR)', prompt: () => 'do OCR on this image and extract all of the text.'},
+  {id: 'log-errors', cats: ['log'], kind: 'prompt', agent: true, label: 'Find the errors', prompt: () => 'read this log and list the errors and warnings, most important first.'},
+  {id: 'log-cause', cats: ['log'], kind: 'prompt', agent: true, label: 'Find the root cause', prompt: () => 'read this log, find the root cause of the failure, and suggest a fix.'},
+  {id: 'code-review', cats: ['code'], kind: 'prompt', agent: true, label: 'Review for bugs', prompt: () => 'review this file for bugs and correctness issues.'},
+  {id: 'code-explain', cats: ['code', 'config'], kind: 'prompt', agent: true, label: 'Explain what it does', prompt: () => 'explain what this file does.'},
+  {id: 'code-security', cats: ['code', 'config'], kind: 'prompt', agent: true, label: 'Find security issues', prompt: () => 'review this file for security problems.'},
+  {id: 'code-tests', cats: ['code'], kind: 'prompt', agent: true, label: 'Write tests', prompt: () => 'write tests for this file.'},
+  {id: 'diff-review', cats: ['diff'], kind: 'prompt', agent: true, label: 'Review the diff', prompt: () => 'review this diff for risks and regressions.'},
+  {id: 'diff-commit', cats: ['diff'], kind: 'prompt', agent: true, label: 'Write a commit message', prompt: () => 'write a commit message for the change in this diff.'},
+  {id: 'data-summary', cats: ['data'], kind: 'prompt', agent: true, label: 'Summarize the data', prompt: () => 'summarize the structure and contents of this data file (columns/schema, row count, anything notable).'},
+  {id: 'data-anomaly', cats: ['data'], kind: 'prompt', agent: true, label: 'Find anomalies', prompt: () => 'look at this data file and point out anomalies or outliers.'},
+  {id: 'doc-summary', cats: ['doc'], kind: 'prompt', agent: true, label: 'Summarize', prompt: () => 'summarize this document.'},
+  {id: 'doc-todos', cats: ['doc'], kind: 'prompt', agent: true, label: 'Extract the action items', prompt: () => 'extract the action items and TODOs from this document.'},
+  {id: 'dir-tree', cats: ['dir'], kind: 'prompt', agent: true, label: 'Summarize this folder', prompt: () => 'summarize the contents of this folder.'},
+  {id: 'dir-large', cats: ['dir'], kind: 'prompt', agent: true, label: 'Find the largest files', prompt: () => 'find the largest files in this folder.'},
+  {id: 'multi-diff', cats: DROP_ACTION_CATEGORIES, kind: 'prompt', agent: true, label: 'Compare these files', minFiles: 2, prompt: ctx => `compare these ${ctx.paths.length} files and summarize the important differences.`},
+  {id: 'multi-summary', cats: DROP_ACTION_CATEGORIES, kind: 'prompt', agent: true, label: 'Summarize all files', minFiles: 2, prompt: ctx => `summarize these ${ctx.paths.length} files together and call out common themes.`},
+  {id: 'analyze', cats: ['any'], kind: 'prompt', agent: true, label: 'Take a look at it', prompt: () => 'take a look at this file and tell me what it is and anything notable.'},
+  {id: 'shell-file', cats: DROP_ACTION_CATEGORIES.filter(cat => cat !== 'dir'), kind: 'shell', shell: true, readOnly: true, label: 'Show file type', command: ctx => `file ${dropActionQuotedPaths(ctx).join(' ')}`},
+  {id: 'shell-wc', cats: ['log', 'code', 'diff', 'data', 'doc', 'config', 'any'], kind: 'shell', shell: true, readOnly: true, label: 'Count lines and bytes', command: ctx => `wc -l -c ${dropActionQuotedPaths(ctx).join(' ')}`},
+  {id: 'shell-tail', cats: ['log', 'any'], kind: 'shell', shell: true, readOnly: true, label: 'Tail and watch', command: ctx => `tail -F ${dropActionQuotedPaths(ctx).join(' ')}`},
+  {id: 'shell-jq', cats: ['data'], kind: 'shell', shell: true, readOnly: true, label: 'Pretty-print JSON with jq', command: ctx => `jq . ${dropActionQuotedPaths(ctx).join(' ')}`},
+  {id: 'shell-column', cats: ['data'], kind: 'shell', shell: true, readOnly: true, label: 'Show as table', command: ctx => `column -t -s, ${dropActionQuotedPaths(ctx).join(' ')} | less -S`},
+  {id: 'shell-du', cats: ['dir'], kind: 'shell', shell: true, readOnly: true, label: 'Largest files here', command: ctx => `du -ah ${dropActionQuotedPaths(ctx).join(' ')} | sort -h | tail -40`},
+  {id: 'server-info', cats: DROP_ACTION_CATEGORIES, kind: 'server', readOnly: true, label: 'Server: file info'},
+  {id: 'server-head', cats: ['log', 'code', 'diff', 'data', 'doc', 'config', 'any'], kind: 'server', readOnly: true, label: 'Server: preview head'},
+  {id: 'server-log-errors', cats: ['log', 'any'], kind: 'server', readOnly: true, label: 'Server: scan errors'},
+  {id: 'server-data-stats', cats: ['data'], kind: 'server', readOnly: true, label: 'Server: data stats + chart'},
+  {id: 'server-ocr', cats: ['image'], kind: 'server', readOnly: true, label: 'Server: OCR image'},
 ];
 
-function dropSuggestionsFor(category, agentKind, count = 1) {
-  const isAgent = agentKind === 'claude' || agentKind === 'codex';
-  // The path is inserted first (not a row), so 1..9 map straight to context actions (cap 9 = digit keys).
-  return DROP_SUGGESTIONS.filter(s => {
-    if (s.agent && !isAgent) return false;
-    return s.cats.includes('any') || s.cats.includes(category);
-  }).slice(0, 9);
+function customDropActions() {
+  const lines = nestedSetting(clientSettings, 'uploads.custom_actions', []);
+  if (!Array.isArray(lines)) return [];
+  return lines.map((line, index) => customDropActionFromLine(line, index)).filter(Boolean);
 }
 
-// The action clause to append after the already-inserted path. No path argument: it refers to the file
-// deictically ("this image/file/…") and is joined to the path with a leading "; " at the call site.
-function composeDropSuggestion(suggestion) {
-  return suggestion.prompt();
+function customDropActionFromLine(line, index = 0) {
+  const parts = String(line || '').split('|').map(part => part.trim());
+  if (parts.length < 2 || !parts[0] || !parts[1]) return null;
+  const rawCats = (parts[2] || 'any').split(',').map(cat => cat.trim().toLowerCase()).filter(Boolean);
+  const cats = rawCats.filter(cat => DROP_ACTION_CATEGORIES.includes(cat));
+  const body = parts[1];
+  const shell = body.toLowerCase().startsWith('shell:');
+  return {
+    id: `custom-${index}-${fuzzyCanonicalPrefixText(parts[0]).slice(0, 24) || 'action'}`,
+    custom: true,
+    cats: cats.length ? cats : ['any'],
+    kind: shell ? 'shell' : 'prompt',
+    shell,
+    agent: !shell,
+    readOnly: shell,
+    label: parts[0],
+    template: shell ? body.slice(6).trim() : body,
+  };
+}
+
+function dropActionMatchesCategory(action, category) {
+  const cats = Array.isArray(action?.cats) ? action.cats : ['any'];
+  if (category === 'dir') return cats.includes('dir');
+  return cats.includes('any') || cats.includes(category);
+}
+
+function dropActionLastKey(category) {
+  return `yolomux.dropAction.last.${category || 'any'}`;
+}
+
+function rememberDropAction(category, actionId) {
+  if (!actionId) return;
+  storageSet(dropActionLastKey(category), actionId);
+}
+
+function normalizedDropActionOrderText(value) {
+  return String(value || '')
+    .trim()
+    .replace(/^;\s*/, '')
+    .replace(/[.:]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+}
+
+function dropActionPromptText(action) {
+  if (action?.kind !== 'prompt') return '';
+  return String(action.template ? action.template : action.prompt?.({paths: [''], category: 'image'}) || '').trim();
+}
+
+function dropActionLabelAliases(action) {
+  const label = String(action?.label || '').trim();
+  const aliases = [label, label.replace(/\s*\([^)]*\)\s*/g, ' ').replace(/\s+/g, ' ').trim()];
+  return aliases.map(normalizedDropActionOrderText).filter(Boolean);
+}
+
+function dropActionOrderAliases(action) {
+  const aliases = [action?.id, ...dropActionLabelAliases(action)];
+  if (Array.isArray(action?.aliases)) aliases.push(...action.aliases);
+  if (action?.kind === 'prompt') {
+    const clause = dropActionPromptText(action);
+    if (clause) {
+      aliases.push(clause, `; ${clause}`);
+      dropActionLabelAliases(action).forEach(label => {
+        aliases.push(`${label}: ${clause}`, `${label}: ; ${clause}`);
+      });
+    }
+  }
+  if (action?.id === 'server-info') aliases.push('info', 'file info', 'server info');
+  if (action?.id === 'server-ocr') aliases.push('server ocr', 'ocr result');
+  if (action?.id === 'shell-file') aliases.push('file', 'file type');
+  if (action?.id === 'insert-path') aliases.push('insert path', 'path');
+  return aliases.map(normalizedDropActionOrderText).filter(Boolean);
+}
+
+function imageDropActionPreferenceId(value) {
+  const raw = String(value || '').trim();
+  const normalized = normalizedDropActionOrderText(value);
+  if (!normalized) return '';
+  if (['insert-path', 'insert path', 'path', 'server-ocr', 'server ocr', 'server ocr image', 'ocr result', 'shell-file', 'show file type', 'file', 'file type'].includes(normalized)) return '';
+  const exact = DROP_ACTIONS.find(candidate => dropActionOrderAliases(candidate).includes(normalized));
+  if (exact) return exact.id;
+  const colonIndex = raw.indexOf(':');
+  if (colonIndex < 0) return '';
+  const labelText = normalizedDropActionOrderText(raw.slice(0, colonIndex));
+  const promptText = normalizedDropActionOrderText(raw.slice(colonIndex + 1));
+  if (!promptText) return '';
+  const promptMatches = DROP_ACTIONS.filter(candidate => dropActionOrderAliases(candidate).includes(promptText));
+  if (!promptMatches.length) return '';
+  const labelMatch = promptMatches.find(candidate => dropActionLabelAliases(candidate).includes(labelText));
+  return (labelMatch || promptMatches[0]).id || '';
+}
+
+function canonicalDropActionPreferenceLabel(action) {
+  if (!action) return '';
+  if (action.id === 'server-info') return action.label || 'Server: file info';
+  const prompt = dropActionPromptText(action);
+  if (action.kind === 'prompt' && prompt) return `${action.label}: ; ${prompt}`;
+  return action.label || action.id || '';
+}
+
+function imageDropActionPreferenceLabel(value, actionId) {
+  const action = DROP_ACTIONS.find(candidate => candidate.id === actionId);
+  const raw = String(value || '').trim();
+  if (!raw) return canonicalDropActionPreferenceLabel(action);
+  if (actionId === 'server-info') return action?.label || 'Server: file info';
+  if (normalizedDropActionOrderText(raw) === normalizedDropActionOrderText(actionId)) return canonicalDropActionPreferenceLabel(action);
+  return raw;
+}
+
+function preferredDropActionEntries(category) {
+  if (category !== 'image') return [];
+  const configured = nestedSetting(clientSettings, 'uploads.image_action_order', DEFAULT_IMAGE_DROP_ACTION_ORDER);
+  const rawOrder = Array.isArray(configured) && configured.length ? configured : DEFAULT_IMAGE_DROP_ACTION_ORDER;
+  const seen = new Set();
+  const ordered = [];
+  const addValue = value => {
+    const actionId = imageDropActionPreferenceId(value);
+    if (!actionId || seen.has(actionId)) return;
+    seen.add(actionId);
+    ordered.push({id: actionId, label: imageDropActionPreferenceLabel(value, actionId)});
+  };
+  rawOrder.forEach(addValue);
+  if (!ordered.length && rawOrder !== DEFAULT_IMAGE_DROP_ACTION_ORDER) DEFAULT_IMAGE_DROP_ACTION_ORDER.forEach(addValue);
+  return ordered;
+}
+
+function preferredDropActionOrder(category) {
+  return preferredDropActionEntries(category).map(entry => entry.id);
+}
+
+function sortDropActionsByPreference(actions, category, options = {}) {
+  const preferred = preferredDropActionEntries(category);
+  if (!preferred.length) return actions;
+  const byId = new Map(actions.map(action => [action.id, action]));
+  const ordered = [];
+  preferred.forEach(entry => {
+    const action = byId.get(entry.id);
+    if (!action) return;
+    ordered.push({...action, menuLabel: entry.label || action.label});
+  });
+  return ordered;
+}
+
+function sortDropActionsForCategory(actions, category, options = {}) {
+  const hasPreferredOrder = preferredDropActionOrder(category).length > 0;
+  actions = sortDropActionsByPreference(actions, category, options);
+  if (hasPreferredOrder) return actions;
+  const lastId = storageGet(dropActionLastKey(category), '');
+  if (!lastId) return actions;
+  const insert = actions.find(action => action.id === 'insert-path');
+  const rest = actions.filter(action => action.id !== 'insert-path');
+  const last = rest.find(action => action.id === lastId);
+  if (!last) return actions;
+  const ordered = [last, ...rest.filter(action => action !== last)];
+  return insert && options.pathInserted !== true ? [insert, ...ordered] : ordered;
+}
+
+function dropActionsFor(category, agentKind, count = 1, options = {}) {
+  const isAgent = agentKind === 'claude' || agentKind === 'codex';
+  const preferredImageIds = category === 'image' ? new Set(preferredDropActionOrder(category)) : new Set();
+  const all = [DROP_ACTIONS[0], ...customDropActions(), ...DROP_ACTIONS.slice(1)];
+  const filtered = all.filter(action => {
+    const configuredImageAction = preferredImageIds.has(action.id);
+    if (action.id === 'insert-path' && options.pathInserted === true) return false;
+    if (action.agent && !isAgent) return false;
+    if (action.shell && isAgent && options.includeShellForAgents !== true && !configuredImageAction) return false;
+    if (action.kind === 'server' && options.includeServer === false) return false;
+    const minFiles = Number(action.minFiles || 1);
+    const maxFiles = Number(action.maxFiles || 0);
+    if (count < minFiles) return false;
+    if (maxFiles > 0 && count > maxFiles) return false;
+    return dropActionMatchesCategory(action, category);
+  });
+  return sortDropActionsForCategory(filtered, category, options).slice(0, 9);
+}
+
+function dropSuggestionsFor(category, agentKind, count = 1, options = {}) {
+  return dropActionsFor(category, agentKind, count, options);
+}
+
+function dropActionContext(action, paths, category, agentKind, options = {}) {
+  return {action, paths, category, agentKind, session: options.session || '', kind: options.kind || 'file', pathInserted: options.pathInserted === true};
+}
+
+function dropActionQuotedPaths(context) {
+  return (context.paths || []).map(shellQuote);
+}
+
+function formatDropActionTemplate(template, context) {
+  const paths = context.paths || [];
+  const first = paths[0] || '';
+  const values = {
+    path: first,
+    qpath: shellQuote(first),
+    paths: paths.join(' '),
+    qpaths: paths.map(shellQuote).join(' '),
+    name: basenameOf(first),
+    count: String(paths.length),
+    category: context.category || 'any',
+  };
+  return String(template || '').replace(/\{(path|qpath|paths|qpaths|name|count|category)\}/g, (_m, key) => values[key] || '');
+}
+
+function composeDropSuggestion(action, context = {}) {
+  if (!action) return '';
+  const paths = Array.isArray(context.paths) && context.paths.length ? context.paths : ['/var/log/app.log'];
+  const category = context.category || fileDropCategory(paths[0], context.kind || 'file');
+  const fullContext = dropActionContext(action, paths, category, context.agentKind || '', context);
+  if (action.kind === 'insert') return `${paths.map(shellQuote).join(' ')} `;
+  if (action.kind === 'shell') {
+    const command = action.template ? formatDropActionTemplate(action.template, fullContext) : action.command?.(fullContext);
+    return String(command || '').trim();
+  }
+  if (action.kind === 'server') return '';
+  const clause = action.template ? formatDropActionTemplate(action.template, fullContext) : action.prompt?.(fullContext);
+  return String(clause || '').trim();
+}
+
+function insertedDropActionText(action, context = {}) {
+  const text = composeDropSuggestion(action, context);
+  if (!text) return '';
+  const pathInserted = context.pathInserted === true;
+  if (action.kind === 'prompt' && pathInserted) return `; ${text}`;
+  if (action.kind === 'shell' && pathInserted) {
+    const isAgent = context.agentKind === 'claude' || context.agentKind === 'codex';
+    if (isAgent) {
+      if (action.id === 'shell-file') return '; show the file type';
+      return `; ${String(action.label || text).toLowerCase()}`;
+    }
+    return `\u0015${text}`;
+  }
+  return text;
+}
+
+function terminalDropShouldInsertPathFirst(session, payload) {
+  const paths = Array.isArray(payload?.paths) ? payload.paths.filter(Boolean) : [payload?.path].filter(Boolean);
+  if (!paths.length) return false;
+  const agentKind = sessionAgentKind(session);
+  if (agentKind !== 'claude' && agentKind !== 'codex') return false;
+  const category = fileDropCategory(paths[0], payload?.kind);
+  return dropActionsFor(category, agentKind, paths.length, {pathInserted: true, includeServer: false}).some(action => action.kind === 'prompt');
+}
+
+async function runDropAction(action, context) {
+  const paths = context.paths || [];
+  const category = context.category || fileDropCategory(paths[0], context.kind || 'file');
+  rememberDropAction(category, action.id);
+  if (action.kind === 'server') {
+    await runServerDropAction(action, paths);
+    return;
+  }
+  const text = composeDropSuggestion(action, context);
+  if (!text) return;
+  const suffix = insertedDropActionText(action, context);
+  const shellActionActsAsAgentPrompt = action.kind === 'shell' && context.pathInserted && (context.agentKind === 'claude' || context.agentKind === 'codex');
+  const autoEnter = action.kind === 'shell' && action.readOnly === true && !shellActionActsAsAgentPrompt && boolSetting('uploads.suggestion_autorun', false);
+  const inserted = insertIntoTerminal(context.session, `${suffix}${autoEnter ? '\r' : ''}`);
+  statusEl.innerHTML = inserted
+    ? `<span class="ok">${esc(autoEnter ? 'ran' : 'inserted')} ${esc(action.label || action.id)}</span>`
+    : `<span class="err">${terminalNotConnectedHtml(context.session)}</span>`;
+}
+
+async function runServerDropAction(action, paths) {
+  try {
+    const payload = await apiFetchJson('/api/drop-action/run', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action: action.id, paths}),
+    });
+    showDropActionResult(payload);
+  } catch (error) {
+    statusErr(localizedHtml('status.copyFailed', {error: error?.payload?.error || error}));
+  }
+}
+
+function showDropActionResult(payload) {
+  showFileEditorDecisionDialog({
+    title: payload?.title || 'File action result',
+    bodyHtml: `<div class="drop-action-result"><pre>${esc(payload?.body || payload?.error || '')}</pre></div>`,
+    actions: [{id: 'close', label: 'Close'}],
+    className: 'drop-action-result-dialog',
+  });
 }
 
 let terminalDropSuggestionState = null;
@@ -29498,23 +29898,37 @@ function dismissTerminalDropSuggestions() {
   state.node.remove();
 }
 
-function showTerminalDropSuggestions(session, payload, x, y) {
+function dropSuggestionIndexFromKeyEvent(event) {
+  if (event?.ctrlKey || event?.metaKey) return -1;
+  const code = String(event?.code || '');
+  if (/^Digit[1-9]$/.test(code)) return Number(code.slice(5)) - 1;
+  if (/^Numpad[1-9]$/.test(code)) return Number(code.slice(6)) - 1;
+  const key = String(event?.key || '');
+  if (/^[1-9]$/.test(key)) return Number(key) - 1;
+  return -1;
+}
+
+function showTerminalDropSuggestions(session, payload, x, y, options = {}) {
   dismissTerminalDropSuggestions();
   const paths = Array.isArray(payload?.paths) ? payload.paths.filter(Boolean) : [payload?.path].filter(Boolean);
   if (!paths.length) return false;
   const category = fileDropCategory(paths[0], payload?.kind);
-  const suggestions = dropSuggestionsFor(category, sessionAgentKind(session), paths.length);
-  // The path was inserted before this overlay opened, so every row is an action that appends a clause
-  // ("; do OCR on this image.") after it. Nothing to suggest (non-agent pane / no match) → no overlay.
+  const agentKind = sessionAgentKind(session);
+  const pathInserted = options.pathInserted === true;
+  const suggestions = dropActionsFor(category, agentKind, paths.length, {pathInserted});
   if (!suggestions.length) return false;
-  const rows = suggestions.map(s => ({label: s.label, run: () => insertIntoTerminal(session, `; ${composeDropSuggestion(s)}`)}));
+  const rows = suggestions.map(action => ({
+    label: action.menuLabel || action.label,
+    run: () => runDropAction(action, dropActionContext(action, paths, category, agentKind, {pathInserted, session, kind: payload?.kind})),
+  }));
 
   const node = document.createElement('div');
   node.className = 'terminal-drop-suggestions';
   node.setAttribute('role', 'listbox');
   const head = document.createElement('div');
   head.className = 'terminal-drop-suggestions-head';
-  head.textContent = paths.length > 1 ? `${paths.length} files — click or press 1-${Math.min(rows.length, 9)}, or keep typing` : `${basenameOf(paths[0])} — click or press 1-${Math.min(rows.length, 9)}, or keep typing`;
+  const prefix = pathInserted ? 'path inserted' : (paths.length > 1 ? `${paths.length} files` : basenameOf(paths[0]));
+  head.textContent = `${prefix} — click or press 1-${Math.min(rows.length, 9)}, or keep typing`;
   node.appendChild(head);
   rows.forEach((row, index) => {
     const item = document.createElement('div');
@@ -29553,11 +29967,10 @@ function showTerminalDropSuggestions(session, payload, x, y) {
       dismissTerminalDropSuggestions();
       return;
     }
-    // Press 1..9 to pick a row. Accept it WITH OR WITHOUT Alt/Shift so that a Mac user who hits
-    // Option+digit (which would otherwise type ¡™£¢…) still selects and the stray char is suppressed.
-    // Exclude Ctrl and Cmd so the browser's Ctrl-or-Cmd+digit tab-switch is left alone.
-    if (!event.ctrlKey && !event.metaKey && /^Digit[1-9]$/.test(event.code)) {
-      const index = Number(event.code.slice(5)) - 1;
+    // Press 1..9 to pick a row. Accept top-row digits, numpad digits, and browsers that only provide
+    // event.key. Exclude platform browser tab-switch shortcuts.
+    const index = dropSuggestionIndexFromKeyEvent(event);
+    if (index >= 0) {
       event.preventDefault();
       event.stopPropagation();
       if (index < rows.length) {
@@ -29570,7 +29983,8 @@ function showTerminalDropSuggestions(session, payload, x, y) {
     dismissTerminalDropSuggestions();
   };
   const onPointerDown = event => { if (!node.contains(event.target)) dismissTerminalDropSuggestions(); };
-  const timer = setTimeout(dismissTerminalDropSuggestions, 6000);
+  const timeoutMs = Number.isFinite(Number(options.timeoutMs)) ? Math.max(1, Number(options.timeoutMs)) : 6000;
+  const timer = setTimeout(dismissTerminalDropSuggestions, timeoutMs);
   terminalDropSuggestionState = {node, timer, onKeyDown, onPointerDown};
   document.addEventListener('keydown', onKeyDown, true);
   document.addEventListener('pointerdown', onPointerDown, true);
@@ -29623,9 +30037,10 @@ function installFilePathDropTarget(session, target) {
       return;
     }
     if (mode === 'suggest') {
-      // Insert the path first (the primary action), then offer the action overlay on top of it.
-      insertFileDragPayloadIntoTerminal(session, payload);
-      showTerminalDropSuggestions(session, payload, event.clientX, event.clientY);
+      const pathInserted = terminalDropShouldInsertPathFirst(session, payload);
+      if (pathInserted) insertFileDragPayloadIntoTerminal(session, payload);
+      const shown = showTerminalDropSuggestions(session, payload, event.clientX, event.clientY, {pathInserted});
+      if (!shown && !pathInserted) insertFileDragPayloadIntoTerminal(session, payload);
       return;
     }
     insertFileDragPayloadIntoTerminal(session, payload);
@@ -29797,16 +30212,20 @@ async function uploadFiles(session, fileList, options = {}) {
     const paths = (payload.files || []).map(file => file.path).filter(Boolean);
     if (options.source === 'paste') syncPasteCountersFromPayload(payload);
     activateTab(session, 'terminal');
-    // DOIT.57: always insert the uploaded path first (you get the name no matter what), then — when
-    // uploads.show_suggestions is on (default) — float the action overlay on top so 1..9 can append a
-    // clause after it. A drop anchors at the drop point; a paste has none, so the overlay anchors near
-    // the terminal. The overlay no-ops for non-agent panes (just the path).
-    const inserted = options.source === 'paste'
-      ? insertPasteUploadReferences(session, payload.files || [], {silent: true})
-      : insertUploadPaths(session, paths, {silent: true});
-    showUploadResult(session, payload, inserted);
+    const dropPayload = {path: paths[0], paths, kind: 'file'};
+    const pathInserted = options.source === 'paste' || terminalDropShouldInsertPathFirst(session, dropPayload);
+    const inserted = pathInserted
+      ? (options.source === 'paste'
+          ? insertPasteUploadReferences(session, payload.files || [], {silent: true})
+          : insertUploadPaths(session, paths, {silent: true}))
+      : false;
+    const uploadResult = showUploadResult(session, payload, inserted);
     if (paths.length && boolSetting('uploads.show_suggestions', true)) {
-      showTerminalDropSuggestions(session, {path: paths[0], paths, kind: 'file'}, options.suggestAt?.x, options.suggestAt?.y);
+      const timeoutMs = uploadResult?.expiresAt ? uploadResult.expiresAt - Date.now() : toastDurationMs;
+      const shown = showTerminalDropSuggestions(session, dropPayload, options.suggestAt?.x, options.suggestAt?.y, {pathInserted, timeoutMs});
+      if (!shown && !pathInserted) insertUploadPaths(session, paths, {silent: true});
+    } else if (!pathInserted) {
+      insertUploadPaths(session, paths, {silent: true});
     }
     refreshOpenEventLogs();
     refreshTranscripts({force: true});
@@ -29895,7 +30314,7 @@ function shellQuote(value) {
 
 function showUploadResult(session, payload, inserted) {
   const node = document.getElementById(`upload-${session}`);
-  if (!node) return;
+  if (!node) return null;
   const files = payload.files || [];
   const paths = files.map(file => file.path).filter(Boolean);
   const label = files.length === 1 ? (files[0].saved_name || files[0].name || t('popover.kind.file')) : t('files.count', {count: files.length});
@@ -29923,6 +30342,7 @@ function showUploadResult(session, payload, inserted) {
   const active = [...existing.filter(entry => entry.expiresAt > Date.now()), ...newEntries].slice(-8);
   uploadResultsBySession.set(session, active);
   renderUploadResult(session);
+  return {expiresAt};
 }
 
 function ensureUploadResultShell(session, node) {

@@ -1690,7 +1690,53 @@ function commandPaletteCommandItems() {
       });
     },
   })));
-  return [...tabItems, ...menuItems, ...settingItems];
+  return [...tabItems, ...menuItems, ...settingItems, ...commandPaletteDropActionItems()];
+}
+
+function commandPaletteDropActionPath() {
+  const activeItem = currentActiveMenuItem();
+  const activeItemPath = isFileEditorItem(activeItem) ? fileItemPath(activeItem) : '';
+  if (activeItemPath) return activeItemPath;
+  if (activeFile) return activeFile;
+  if (fileExplorerSelectionLead) return fileExplorerSelectionLead;
+  return '';
+}
+
+function commandPaletteDropActionKind(path) {
+  const row = path ? document.querySelector?.(`.file-tree-row[data-path="${cssEscape(path)}"]`) : null;
+  return row?.dataset?.kind === 'dir' ? 'dir' : 'file';
+}
+
+function commandPaletteDropActionSession() {
+  const target = currentSessionActionTarget();
+  if (isTmuxSession(target)) return target;
+  if (isTmuxSession(focusedTerminal)) return focusedTerminal;
+  return activeSessions.find(item => isTmuxSession(item)) || '';
+}
+
+function commandPaletteDropActionItems() {
+  const path = commandPaletteDropActionPath();
+  if (!path) return [];
+  const kind = commandPaletteDropActionKind(path);
+  const paths = [path];
+  const category = fileDropCategory(path, kind);
+  const session = commandPaletteDropActionSession();
+  const agentKind = session ? sessionAgentKind(session) : '';
+  return dropActionsFor(category, agentKind, paths.length, {pathInserted: false, includeShellForAgents: true})
+    .map(action => {
+      const needsTerminal = action.kind !== 'server';
+      return {
+        group: 'File Actions',
+        category: 'command',
+        label: action.label,
+        detail: compactHomePath(path),
+        key: `drop-action:${action.id}:${path}`,
+        keybinding: 'Enter',
+        disabled: needsTerminal && !session,
+        searchFields: ['do something with file', 'file action', action.label, path, compactHomePath(path)],
+        run: () => runDropAction(action, dropActionContext(action, paths, category, agentKind, {session, kind, pathInserted: false})),
+      };
+    });
 }
 
 function fileQuickOpenRootForFile(path) {

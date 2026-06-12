@@ -29,6 +29,41 @@ CURSOR_COLOR_CHOICES: tuple[str, ...] = (*UI_COLOR_CHOICES, *NEON_CURSOR_COLOR_C
 POPULAR_IDE_DARK_SCHEME = "popular-ide-dark-plus"
 POPULAR_IDE_LIGHT_SCHEME = "popular-ide-light-plus"
 LEGACY_EDITOR_SCHEME_PREFIX = "".join(("vs", "code"))
+IMAGE_DROP_ACTION_ORDER_SPECS: tuple[dict[str, Any], ...] = (
+    {
+        "id": "img-ocr",
+        "canonical": "Extract the text (OCR): ; do OCR on this image and extract all of the text.",
+        "label": "Extract the text (OCR)",
+        "prompt": "do OCR on this image and extract all of the text.",
+        "aliases": ("Extract the text",),
+    },
+    {
+        "id": "img-error",
+        "canonical": "Diagnose the error: ; diagnose the error/problem shown in this screenshot & suggest a fix.",
+        "label": "Diagnose the error",
+        "prompt": "diagnose the error/problem shown in this screenshot & suggest a fix.",
+        "aliases": (
+            "Diagnose the error in this screenshot",
+            "diagnose the error or problem shown in this screenshot and suggest a fix.",
+            "Diagnose the error in this screenshot: ; diagnose the error or problem shown in this screenshot and suggest a fix.",
+        ),
+    },
+    {
+        "id": "img-describe",
+        "canonical": "Describe the image: ; describe what is shown in this image.",
+        "label": "Describe the image",
+        "prompt": "describe what is shown in this image.",
+        "aliases": (),
+    },
+    {
+        "id": "server-info",
+        "canonical": "info",
+        "label": "Server: file info",
+        "prompt": "",
+        "aliases": ("info", "file info", "server info", "Info: info"),
+    },
+)
+DEFAULT_IMAGE_DROP_ACTION_ORDER: tuple[str, ...] = tuple(str(spec["canonical"]) for spec in IMAGE_DROP_ACTION_ORDER_SPECS)
 SETTING_VALUE_ALIASES: dict[tuple[str, str], dict[str, str]] = {
     ("appearance", "editor_color_scheme"): {
         f"{LEGACY_EDITOR_SCHEME_PREFIX}-dark-plus": POPULAR_IDE_DARK_SCHEME,
@@ -128,6 +163,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "max_bytes": UPLOAD_MAX_BYTES,
         "subdir": DEFAULT_UPLOAD_SUBDIR,
         "show_suggestions": True,
+        "suggestion_autorun": False,
+        "image_action_order": list(DEFAULT_IMAGE_DROP_ACTION_ORDER),
+        "custom_actions": [],
     },
     "yoagent": {
         "backend": "auto",
@@ -246,6 +284,10 @@ STRING_ALLOW_EMPTY: set[tuple[str, str]] = {
     ("uploads", "subdir"),
 }
 
+SETTING_LIST_LIMITS: dict[tuple[str, str], int] = {
+    ("uploads", "image_action_order"): 9,
+}
+
 SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
     ("general", "default_layout"): {"single", "split", "grid", "wall"},
     # i18n: only locales that ship a catalog are accepted; "system" matches the browser/OS.
@@ -357,7 +399,10 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("uploads", "filename_template"): "Upload filename template. Supported fields: {date:%Y%m%d}, {seq:03d}, {name}, {ext}. When {name} is empty, a preceding dash is omitted.",
     ("uploads", "max_bytes"): "Bytes, 1048576-536870912. Maximum buffered browser upload size. Prefer rsync for large files.",
     ("uploads", "subdir"): "Subdirectory under the session working directory where uploads are written (default .uploads, created on demand). Leave empty to write straight into the working directory.",
-    ("uploads", "show_suggestions"): "When a file is dropped onto a terminal, show a brief suggestion overlay of actions (analyze, find errors, summarize, …) with Alt+1..9 shortcuts. Keep typing to dismiss it.",
+    ("uploads", "show_suggestions"): "When a file is dropped onto a terminal, show a brief suggestion overlay of actions (analyze, find errors, summarize, …) with 1..9 shortcuts. Keep typing to dismiss it.",
+    ("uploads", "suggestion_autorun"): "true/false. Default false. When true, read-only shell drop actions send Enter after inserting the generated command. Agent prompts and write-capable actions never autorun.",
+    ("uploads", "image_action_order"): "Image paste/drop action order, one item per line. Prompt rows use 'Popup label: ; prompt text inserted after the image path'. Non-AI rows may use the popup label or a special name such as info. The popup assigns shortcut keys 1-n, up to 9.",
+    ("uploads", "custom_actions"): "Custom file-drop actions, one per line: Label | prompt text or shell:command | optional comma-separated categories. Template fields: {path}, {qpath}, {paths}, {qpaths}, {name}, {count}, {category}.",
     ("yoagent", "backend"): "auto | deterministic | claude | codex. Default auto prefers codex, then claude (whichever is installed AND logged in), else the No agent summary. The deterministic internal value is shown as No agent; explicit Claude/Codex use the selected invocation when available.",
     ("yoagent", "invocation"): "cli | api-key. CLI runs the local agent binary; api-key is reserved and falls back safely today.",
     ("yoagent", "auto_refresh"): "true/false. Default false. When true, YO!agent refreshes per-session transcript summaries in the background after quiet intervals.",
@@ -406,6 +451,81 @@ def coerce_string_list(value: Any, default: list[str]) -> list[str]:
         if isinstance(item, str) and item.strip():
             result.append(item.strip())
     return result
+
+
+def normalize_image_action_order_text(value: str) -> str:
+    return " ".join(
+        str(value or "")
+        .strip()
+        .removeprefix(";")
+        .strip()
+        .rstrip(".:")
+        .lower()
+        .split()
+    )
+
+
+def image_action_order_aliases(spec: dict[str, Any]) -> set[str]:
+    label = str(spec.get("label") or "").strip()
+    prompt = str(spec.get("prompt") or "").strip()
+    aliases = {str(spec.get("id") or ""), str(spec.get("canonical") or ""), label}
+    aliases.update(str(alias or "") for alias in spec.get("aliases", ()))
+    if prompt:
+        aliases.update({prompt, f"; {prompt}"})
+        for label_alias in [label, *[str(alias or "") for alias in spec.get("aliases", ())]]:
+            if label_alias:
+                aliases.update({f"{label_alias}: {prompt}", f"{label_alias}: ; {prompt}"})
+    return {normalize_image_action_order_text(alias) for alias in aliases if str(alias or "").strip()}
+
+
+def canonical_image_action_order_item(value: str) -> str:
+    normalized = normalize_image_action_order_text(value)
+    if not normalized:
+        return ""
+    if normalized in {
+        "insert-path",
+        "insert path",
+        "path",
+        "server-ocr",
+        "server ocr",
+        "server ocr image",
+        "ocr result",
+        "shell-file",
+        "show file type",
+        "file",
+        "file type",
+    }:
+        return ""
+    for spec in IMAGE_DROP_ACTION_ORDER_SPECS:
+        if normalized in image_action_order_aliases(spec):
+            return str(spec["canonical"])
+    raw = str(value or "").strip()
+    colon_index = raw.find(":")
+    if colon_index < 0:
+        return raw
+    prompt_text = normalize_image_action_order_text(raw[colon_index + 1 :])
+    for spec in IMAGE_DROP_ACTION_ORDER_SPECS:
+        prompt = normalize_image_action_order_text(str(spec.get("prompt") or ""))
+        if prompt and prompt_text == prompt:
+            return str(spec["canonical"])
+    return raw
+
+
+def coerce_image_action_order(value: Any, default: list[str]) -> list[str]:
+    limit = SETTING_LIST_LIMITS[("uploads", "image_action_order")]
+    items = coerce_string_list(value, default)
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        canonical = canonical_image_action_order_item(item)
+        normalized = normalize_image_action_order_text(canonical)
+        if not canonical or not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(canonical)
+        if len(result) >= limit:
+            break
+    return result or list(default)
 
 
 def migrate_stale_default(section: str, key: str, value: Any, default: Any) -> Any:
@@ -459,9 +579,15 @@ def sanitize_settings(raw: Any, coerced: list[str] | None = None) -> dict[str, A
                 number = coerce_number(value, default, lower, upper)
                 sanitized[section][key] = number
             elif isinstance(default, list):
-                items = coerce_string_list(value, default)
+                if (section, key) == ("uploads", "image_action_order"):
+                    items = coerce_image_action_order(value, default)
+                else:
+                    items = coerce_string_list(value, default)
                 if (section, key) == ("notifications", "notify_transitions"):
                     items = [item for item in items if item in NOTIFY_TRANSITION_KEYS]
+                limit = SETTING_LIST_LIMITS.get((section, key), 0)
+                if limit > 0:
+                    items = items[:limit]
                 sanitized[section][key] = items
             elif (section, key) in SETTING_CHOICES:
                 sanitized[section][key] = value if isinstance(value, str) and value in SETTING_CHOICES[(section, key)] else default

@@ -2213,6 +2213,9 @@ function preferenceSections() {
       {path: 'uploads.filename_template', label: t('pref.uploads.filename_template.label'), type: 'text', wide: true, help: t('pref.uploads.filename_template.help')},
       {path: 'uploads.subdir', label: t('pref.uploads.subdir.label'), type: 'text', help: t('pref.uploads.subdir.help')},
       {path: 'uploads.show_suggestions', label: t('pref.uploads.show_suggestions.label'), type: 'boolean', help: t('pref.uploads.show_suggestions.help')},
+      {path: 'uploads.suggestion_autorun', label: t('pref.uploads.suggestion_autorun.label'), type: 'boolean', help: t('pref.uploads.suggestion_autorun.help')},
+      {path: 'uploads.image_action_order', label: t('pref.uploads.image_action_order.label'), type: 'list', wide: true, rows: 7, maxItems: 9, autosize: true, help: t('pref.uploads.image_action_order.help')},
+      {path: 'uploads.custom_actions', label: t('pref.uploads.custom_actions.label'), type: 'list', wide: true, help: t('pref.uploads.custom_actions.help')},
       {path: 'uploads.max_bytes', label: t('pref.uploads.max_bytes.label'), type: 'number', min: 1, max: 512, step: 1, suffix: 'MB', scale: 1048576, help: t('pref.uploads.max_bytes.help')},
     ]},
     {title: t('pref.section.performance'), items: [
@@ -2504,7 +2507,11 @@ function preferenceControlHtml(item, query = '') {
     control = `<div class="preferences-radio-group${groupHasSwatches ? ' has-swatches' : ''}" role="radiogroup" aria-label="${esc(item.label)}">${radios}</div>`;
   } else if (item.type === 'list') {
     const text = Array.isArray(value) ? value.join('\n') : String(value || '');
-    control = `<textarea ${baseAttrs} rows="3">${esc(text)}</textarea>`;
+    const rows = Number.isFinite(Number(item.rows)) ? Math.max(1, Math.min(9, Math.floor(Number(item.rows)))) : 3;
+    const maxItems = Number.isFinite(Number(item.maxItems)) ? Math.max(1, Math.floor(Number(item.maxItems))) : 0;
+    const autosize = item.autosize ? ' data-setting-autosize="true"' : '';
+    const maxItemsAttr = maxItems ? ` data-setting-max-items="${esc(maxItems)}"` : '';
+    control = `<textarea ${baseAttrs}${autosize}${maxItemsAttr} rows="${esc(rows)}">${esc(text)}</textarea>`;
   } else if (item.type === 'textarea') {
     control = `<textarea ${baseAttrs} rows="3" data-setting-autosize="true">${esc(String(value || ''))}</textarea>`;
   } else {
@@ -3022,8 +3029,40 @@ function renderPreferencesPanels(options = {}) {
 
 function autosizePreferenceTextarea(textarea) {
   if (!textarea || textarea.dataset.settingAutosize !== 'true') return;
+  const maxRows = Number(textarea.dataset.settingMaxItems || textarea.getAttribute('rows') || 0);
   textarea.style.height = 'auto';
-  textarea.style.height = `${textarea.scrollHeight}px`;
+  let height = textarea.scrollHeight;
+  if (Number.isFinite(maxRows) && maxRows > 0) {
+    const style = window.getComputedStyle?.(textarea);
+    const lineHeight = Number.parseFloat(style?.lineHeight || '');
+    const paddingTop = Number.parseFloat(style?.paddingTop || '0') || 0;
+    const paddingBottom = Number.parseFloat(style?.paddingBottom || '0') || 0;
+    const borderTop = Number.parseFloat(style?.borderTopWidth || '0') || 0;
+    const borderBottom = Number.parseFloat(style?.borderBottomWidth || '0') || 0;
+    if (Number.isFinite(lineHeight) && lineHeight > 0) {
+      const maxHeight = Math.ceil((lineHeight * maxRows) + paddingTop + paddingBottom + borderTop + borderBottom);
+      height = Math.min(height, maxHeight);
+      textarea.style.overflowY = textarea.scrollHeight > maxHeight ? 'auto' : '';
+    }
+  }
+  textarea.style.height = `${height}px`;
+}
+
+function clampPreferenceListControl(control) {
+  const maxItems = Number(control?.dataset?.settingMaxItems || 0);
+  if (!Number.isFinite(maxItems) || maxItems <= 0) return;
+  const lines = String(control.value || '').split('\n');
+  const kept = [];
+  let used = 0;
+  for (const line of lines) {
+    if (line.trim()) {
+      if (used >= maxItems) continue;
+      used += 1;
+    }
+    kept.push(line);
+  }
+  const next = kept.join('\n');
+  if (next !== control.value) control.value = next;
 }
 
 function autosizePreferenceTextareas(root) {
@@ -3044,6 +3083,7 @@ function bindPreferencesPanel(panel) {
     const control = event.target.closest('[data-setting-path]');
     if (!control || !panel.contains(control)) return;
     if (control.dataset.settingAutosize === 'true') {
+      if (control.dataset.settingType === 'list') clampPreferenceListControl(control);
       autosizePreferenceTextarea(control);
     }
     if (control.dataset.settingType === 'number') {

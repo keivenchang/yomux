@@ -63,6 +63,7 @@ from .common import tail_file_lines
 from .common import truncate_text
 from .control import YolomuxControlServer
 from .control import send_yolomux_control_request
+from .drop_actions import run_drop_action
 from .events import EventLog
 from .events import read_yolomux_state
 from .events import update_yolomux_state
@@ -2966,6 +2967,10 @@ class TmuxWebtermApp:
             "target_source": target_source,
             "files": saved,
         }, HTTPStatus.OK
+
+    def run_file_drop_action(self, payload: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
+        result, status = run_drop_action(payload)
+        return result, HTTPStatus(status)
 
     def upload_max_bytes(self) -> int:
         value = settings_payload().get("settings", {}).get("uploads", {}).get("max_bytes", UPLOAD_MAX_BYTES)

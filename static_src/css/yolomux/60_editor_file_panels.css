@@ -313,6 +313,17 @@
 .file-editor-dialog-body.custom {
   white-space: normal;
 }
+
+.drop-action-result pre {
+  max-height: min(62vh, 720px);
+  overflow: auto;
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--mono-font);
+  font-size: 12px;
+  line-height: 1.45;
+}
 .file-editor-dialog-actions {
   display: flex;
   justify-content: flex-end;
