@@ -284,7 +284,7 @@ function prunePriorityForLayoutSlot(slot) {
 }
 
 function slotCanAutoPrune(slot) {
-  return !isFileExplorerItem(activeItemForSide(slot));
+  return !paneTabs(slot).some(isFileExplorerItem);
 }
 
 function smallLayoutSlotCandidate() {

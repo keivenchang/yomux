@@ -391,6 +391,11 @@ function agentLaunchParams(agent) {
   return space >= 0 ? command.slice(space + 1).trim() : command;
 }
 
+function agentUnavailableDetail(agent) {
+  if (agentUnavailableReason(agent) === 'not-on-path') return t('menu.tmux.agentUnavailablePath');
+  return t('menu.tmux.agentUnavailable', {name: agentName(agent)});
+}
+
 function newTmuxSessionItems() {
   return ['claude', 'codex', 'term'].map(agent => {
     const available = availableAgents.has(agent);
@@ -406,7 +411,7 @@ function newTmuxSessionItems() {
       detail: readOnlyMode
         ? t('menu.common.adminOnly')
         : (!available
-          ? t('menu.tmux.agentUnavailable', {name: agentName(agent)})
+          ? agentUnavailableDetail(agent)
           : (loggedOut
             ? t('menu.tmux.runLogin', {command: agentLoginCommand(agent)})
             : (capped ? t('menu.tmux.limitReached') : agentLaunchParams(agent)))),

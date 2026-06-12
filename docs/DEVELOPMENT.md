@@ -104,11 +104,19 @@ python3 yolomux.py --host 0.0.0.0 --port 8001 --self-signed --dang
 
 ### Restart workflow
 
-Preferred: delegate the kill/relaunch chain to `systemd-run` as a transient user unit, so the server is not a child of the launching shell. Local-only restart scripts live under `~/.local/bin/` (not committed; they hardcode local paths/ports). Reference dev1 launch — restart prod by swapping `dev1`/`8001`/`~/yolomux.dev1` for `prod`/`7777`/`~/yolomux`:
+For dev1, use the repo restart owner. It sets `PATH` explicitly before launch so agent CLIs under `~/.local/bin` are visible even when the caller has a stripped systemd/cron-style environment:
+
+```bash
+tools/yolomux-restart-dev1.sh
+```
+
+The script defaults to HTTPS `8001`, `--self-signed`, and `--dang`; override with `YOLOMUX_DEV1_PORT`, `YOLOMUX_HOST`, or `YOLOMUX_DEV1_LOG` only when testing a non-standard dev1 instance. It prefers `systemd-run --user` and falls back to a detached `nohup` process with logs under `/tmp`.
+
+Manual reference: delegate the kill/relaunch chain to `systemd-run` as a transient user unit, so the server is not a child of the launching shell. Restart prod by swapping `dev1`/`8001`/`~/yolomux.dev1` for `prod`/`7777`/`~/yolomux`:
 
 ```bash
 systemctl --user stop yolomux-dev1-8001 2>/dev/null
-systemd-run --user --quiet --collect --unit=yolomux-dev1-8001 --working-directory=/home/keivenc/yolomux.dev1 /usr/bin/python3 /home/keivenc/yolomux.dev1/yolomux.py --host 0.0.0.0 --port 8001 --dangerously-yolo --self-signed
+systemd-run --user --quiet --collect --unit=yolomux-dev1-8001 --working-directory=/home/keivenc/yolomux.dev1 env PATH="$HOME/.local/bin:$PATH" TERM=xterm-256color PYTHONUNBUFFERED=1 /usr/bin/python3 /home/keivenc/yolomux.dev1/yolomux.py --host 0.0.0.0 --port 8001 --dangerously-yolo --self-signed
 ```
 
 Fallback when `systemd-run --user` is unavailable (some AI-harness sandboxes deny the D-Bus call): kill by PID, then relaunch detached with `( cd <checkout> && nohup python3 -u yolomux.py ... >> /tmp/<log> 2>&1 </dev/null & )`. Two footguns: (1) never `pkill -f` a pattern that also appears literally in the same command's launch string — it matches your own shell and TERMs it (use a `$port` variable in the pattern and keep kill and relaunch in separate commands); (2) a backend `.py` change only takes effect after the python process restarts — `static_build.py` does not touch it.

@@ -2478,6 +2478,17 @@ body.theme-light .branch-link {
 .changes-summary-label {
   min-width: 0;
 }
+.changes-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+.changes-loading-yolo {
+  min-width: 17px;
+  height: 17px;
+  font-size: var(--ui-font-size-2xs);
+}
 .changes-summary-totals {
   flex: 0 0 auto;
   display: inline-flex;
@@ -3875,6 +3886,12 @@ button:disabled:hover { border-color: var(--line); }
   background-color: color-mix(in srgb, var(--pane-resizer-bg) 18%, transparent) !important;
   box-shadow: 0 0 12px var(--pane-resizer-shadow);
   pointer-events: none;
+}
+.yolomux-dockview.dockview-invalid-tab-drop-preview .dv-tab.dv-drop-target .dv-drop-target-selection.dv-drop-target-left,
+.yolomux-dockview.dockview-invalid-tab-drop-preview .dv-tab.dv-drop-target .dv-drop-target-selection.dv-drop-target-right {
+  border-color: var(--danger-border) !important;
+  background-color: color-mix(in srgb, var(--danger-bg) 20%, transparent) !important;
+  box-shadow: 0 0 12px color-mix(in srgb, var(--danger-border) 70%, transparent);
 }
 .yolomux-dockview .dv-tab.dv-drop-target .dv-drop-target-selection.dv-drop-target-left {
   left: 0 !important;

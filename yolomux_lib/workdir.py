@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .cache import TtlCache
 from .common import PROJECT_ROOT
+from .common import heal_server_path
 
 
 def resolved_upload_dir(path: Path, allow_home: bool = False) -> tuple[Path | None, bool]:
@@ -52,6 +53,7 @@ def agent_command(agent: str, dangerously_yolo: bool = False) -> str:
     return "claude --dangerously-skip-permissions" if dangerously_yolo else "claude"
 
 def available_agent_commands() -> list[str]:
+    heal_server_path()
     agents = [agent for agent in ("claude", "codex") if shutil.which(agent)]
     # A plain terminal (a shell) is always launchable, so always offer Term — even when Claude/Codex
     # are installed (it used to be a no-agent fallback only, which left Term greyed "unavailable").
@@ -116,7 +118,8 @@ def _probe_agent_logged_in(agent: str) -> bool:
     return not any(marker in combined for marker in _AGENT_LOGGED_OUT_MARKERS)
 
 
-def agent_auth_status(force: bool = False) -> dict[str, dict[str, bool]]:
+def agent_auth_status(force: bool = False) -> dict[str, dict[str, object]]:
+    heal_server_path()
     cached = _agent_auth_cache.get("status")
     if not force and cached is not None:
         return cached
@@ -129,6 +132,11 @@ def agent_auth_status(force: bool = False) -> dict[str, dict[str, bool]]:
         with ThreadPoolExecutor(max_workers=len(to_probe)) as pool:
             for agent, result in zip(to_probe, pool.map(_probe_agent_logged_in, to_probe)):
                 logged_in[agent] = result
-    status = {agent: {"installed": installed[agent], "logged_in": logged_in[agent]} for agent in agents}
+    status = {}
+    for agent in agents:
+        entry = {"installed": installed[agent], "logged_in": logged_in[agent]}
+        if not installed[agent]:
+            entry["unavailable_reason"] = "not-on-path"
+        status[agent] = entry
     _agent_auth_cache.set("status", status)
     return status

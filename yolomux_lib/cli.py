@@ -17,6 +17,7 @@ from .common import auth_setup_required
 from .common import default_session_names
 from .common import split_csv
 from .common import unique_session_names
+from .common import warn_unavailable_agent_commands_once
 from .server import TmuxWebtermHTTPServer
 
 
@@ -220,6 +221,7 @@ def print_auth_setup_error() -> None:
 
 def main() -> int:
     args = parse_args()
+    warn_unavailable_agent_commands_once()
     try:
         tls_context, tls_message = tls_context_for_args(args)
     except (OSError, RuntimeError, ValueError, ssl.SSLError) as error:

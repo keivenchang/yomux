@@ -1,8 +1,12 @@
+import logging
+import os
 import subprocess
 
+from yolomux_lib import common
 from yolomux_lib import workdir
 from yolomux_lib.workdir import agent_auth_status
 from yolomux_lib.workdir import agent_command
+from yolomux_lib.workdir import available_agent_commands
 
 
 def test_agent_command_uses_plain_agent_cli_unless_dangerously_yolo():
@@ -47,6 +51,63 @@ def test_agent_auth_status_treats_logged_out_and_missing_as_not_logged_in(monkey
     status = agent_auth_status(force=True)
     assert status["claude"] == {"installed": True, "logged_in": False}
     assert status["codex"] == {"installed": True, "logged_in": False}
+
+
+def test_server_path_self_heal_finds_home_local_bin_agent(monkeypatch, tmp_path):
+    local_bin = tmp_path / ".local" / "bin"
+    local_bin.mkdir(parents=True)
+    claude = local_bin / "claude"
+    claude.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    claude.chmod(0o700)
+    bare_bin = tmp_path / "bin"
+    bare_bin.mkdir()
+    monkeypatch.setattr(common.Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("PATH", str(bare_bin))
+
+    assert workdir.shutil.which("claude") is None
+    agents = available_agent_commands()
+    assert agents[:1] == ["claude"]
+    assert os.environ["PATH"].split(os.pathsep)[0] == str(local_bin)
+
+
+def test_agent_auth_status_marks_missing_cli_as_not_on_path(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setattr(common.Path, "home", lambda: tmp_path)
+
+    status = agent_auth_status(force=True)
+
+    assert status["claude"] == {"installed": False, "logged_in": False, "unavailable_reason": "not-on-path"}
+    assert status["codex"] == {"installed": False, "logged_in": False, "unavailable_reason": "not-on-path"}
+
+
+def test_missing_agent_path_warning_is_one_shot(monkeypatch, tmp_path, caplog):
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setattr(common.Path, "home", lambda: tmp_path)
+    common._AGENT_PATH_WARNING_KEYS.clear()
+
+    with caplog.at_level(logging.WARNING):
+        common.warn_unavailable_agent_commands_once(("claude",))
+        common.warn_unavailable_agent_commands_once(("claude",))
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 1
+    assert "claude not found on server PATH=" in messages[0]
+
+
+def test_missing_agent_path_warning_skips_resolvable_agent(monkeypatch, tmp_path, caplog):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    claude = bin_dir / "claude"
+    claude.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    claude.chmod(0o700)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.setattr(common.Path, "home", lambda: tmp_path)
+    common._AGENT_PATH_WARNING_KEYS.clear()
+
+    with caplog.at_level(logging.WARNING):
+        common.warn_unavailable_agent_commands_once(("claude",))
+
+    assert [record.getMessage() for record in caplog.records] == []
 
 
 def test_agent_auth_status_nonzero_exit_and_timeout_are_not_logged_in(monkeypatch):

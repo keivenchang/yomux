@@ -596,12 +596,18 @@ function sessionFilesPayloadIsFinderWorktree(payload, session = '') {
   return (payload.from_ref || 'HEAD') === 'HEAD' && (payload.to_ref || 'current') === 'current';
 }
 
+function sessionFilesPayloadIsLoadedForSession(payload, session = '') {
+  if (!payload || payload.loaded !== true) return false;
+  return !session || String(payload.session || '') === String(session);
+}
+
 function switchFileExplorerChangesSession(session) {
   if (!session || !document.querySelector('.file-explorer-changes-panel')) return;
   rememberFileExplorerExplicitSyncSession(session);
   fileExplorerChangesSelectedSession = session;
   const cached = fileExplorerSessionFilesCache.get(sessionFilesCacheKey(session));
-  if (fileExplorerMode === 'diff' && cached?.payload) {
+  const cachedPayloadIsLoaded = sessionFilesPayloadIsLoadedForSession(cached?.payload, session);
+  if (fileExplorerMode === 'diff' && cachedPayloadIsLoaded) {
     setSessionFilesPayloadForDestination('finder', cached.payload);
     fileExplorerSessionFilesPayloadSignature = cached.signature || sessionFilesPayloadSignatureForPayload(cached.payload);
   } else if (fileExplorerMode !== 'diff' && sessionFilesPayloadIsFinderWorktree(fileExplorerSessionFilesPayload, session)) {
@@ -611,8 +617,9 @@ function switchFileExplorerChangesSession(session) {
     setSessionFilesPayloadForDestination('finder', pendingPayload);
     fileExplorerSessionFilesPayloadSignature = sessionFilesPayloadSignatureForPayload(pendingPayload);
   }
+  setSessionFilesLoadingForDestination('finder', !cachedPayloadIsLoaded);
   renderFileExplorerChangesPanels();
-  fetchSessionFiles({destination: 'finder', session, silent: true, force: true});
+  fetchSessionFiles({destination: 'finder', session, silent: true, force: true, background: cachedPayloadIsLoaded});
 }
 
 function noteFileExplorerChangesSessionInteraction(session) {
@@ -703,6 +710,7 @@ function renderSessionFilesDestination(destination, options = {}) {
 async function fetchSessionFiles(options = {}) {
   const destination = 'finder';
   const forceRefresh = options.force === true;
+  const backgroundRefresh = options.background === true;
   if (sessionFilesLoadingForDestination(destination) && !forceRefresh) return;
   const requestIsCurrent = fileExplorerSessionFilesGuard.begin();
   const session = options.session || fileExplorerSessionFilesTargetSession();
@@ -716,7 +724,7 @@ async function fetchSessionFiles(options = {}) {
     if (shouldRender) renderSessionFilesDestination(destination, sessionFilesRenderOptions(options));
     return;
   }
-  setSessionFilesLoadingForDestination(destination, true);
+  if (!backgroundRefresh) setSessionFilesLoadingForDestination(destination, true);
   if (!options.silent) statusEl.textContent = 'loading changed files...';
   if (!options.silent) {
     renderSessionFilesDestination(destination, {force: true});
@@ -759,8 +767,10 @@ async function fetchSessionFiles(options = {}) {
     setSessionFilesSignatureForDestination(destination, signature);
     if (!options.silent) statusErr(`changed files failed: ${esc(err)}`);
   } finally {
-    if (requestIsCurrent()) setSessionFilesLoadingForDestination(destination, false);
-    if (requestIsCurrent() && shouldRender) {
+    const current = requestIsCurrent();
+    const wasLoading = current && sessionFilesLoadingForDestination(destination);
+    if (current && !backgroundRefresh) setSessionFilesLoadingForDestination(destination, false);
+    if (current && (shouldRender || wasLoading)) {
       renderSessionFilesDestination(destination, sessionFilesRenderOptions(options));
       if (destination === 'finder') updateFileTreeGitStatusRows();
       renderPaneTabStrips();
@@ -1086,7 +1096,7 @@ function changesRepoCount(payload, files) {
 }
 
 function changesSummaryHtml(payload, files, session, loading, loaded) {
-  if (loading) return t('changes.loading');
+  if (loading) return changesLoadingHtml(session);
   if (!loaded) return t('changes.notLoaded');
   const fileCount = Array.isArray(files) ? files.length : 0;
   const repoCount = changesRepoCount(payload, files);
@@ -1094,6 +1104,16 @@ function changesSummaryHtml(payload, files, session, loading, loaded) {
   const count = tPlural('changes.fileCount', fileCount);
   const scope = session ? t('changes.inSession', {session: sessionLabel(session)}) : '';
   return `<span class="changes-summary-label">${esc(repos)}, ${esc(count)}${esc(scope)}</span>`;
+}
+
+function changesLoadingHtml(session = '') {
+  const base = t('changes.loading');
+  const label = session ? sessionLabel(session) : '';
+  const loadingText = label ? `${base.replace(/\s*(?:\.{3}|…)+\s*$/u, '')} ${label}...` : base;
+  return `<span class="changes-loading" aria-live="polite" aria-busy="true">
+    <span class="session-yolo-marker active working changes-loading-yolo" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span>
+    <span>${esc(loadingText)}</span>
+  </span>`;
 }
 
 function changesRepoMetaHtml(repoInfo, options = {}) {
@@ -1128,7 +1148,7 @@ function changesComparisonHeaderHtml(payload, files, options = {}) {
   const loaded = payload?.loaded === true;
   const loading = options.loading === true;
   if (options.compact) {
-    if (loading) return `<section class="changes-comparison-head compact">${esc(t('changes.loading'))}</section>`;
+    if (loading) return `<section class="changes-comparison-head compact">${changesLoadingHtml(payload?.session || '')}</section>`;
     if (!loaded) return `<section class="changes-comparison-head compact">${esc(t('changes.notLoaded'))}</section>`;
     return '';
   }

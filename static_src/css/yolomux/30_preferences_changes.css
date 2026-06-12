@@ -324,6 +324,17 @@
 .changes-summary-label {
   min-width: 0;
 }
+.changes-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+.changes-loading-yolo {
+  min-width: 17px;
+  height: 17px;
+  font-size: var(--ui-font-size-2xs);
+}
 .changes-summary-totals {
   flex: 0 0 auto;
   display: inline-flex;

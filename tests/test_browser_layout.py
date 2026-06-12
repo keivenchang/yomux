@@ -1801,6 +1801,42 @@ def cdp_release(browser, point):
     browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": point["x"], "y": point["y"], "button": "left", "buttons": 0, "clickCount": 1})
 
 
+def dockview_invalid_drop_preview(browser):
+    return browser.execute_script(
+        """
+        const visible = node => {
+          const rect = node.getBoundingClientRect();
+          const style = getComputedStyle(node);
+          return rect.width > 0
+            && rect.height > 0
+            && style.display !== 'none'
+            && style.visibility !== 'hidden'
+            && style.opacity !== '0';
+        };
+        const previews = Array.from(document.querySelectorAll('.dv-drop-target-selection, .dv-drop-target-anchor'))
+          .filter(visible)
+          .map(node => {
+            const style = getComputedStyle(node);
+            return {
+              className: node.className,
+              borderColor: style.borderTopColor,
+              borderStyle: style.borderTopStyle,
+            };
+          });
+        const swatch = document.createElement('span');
+        swatch.style.color = 'var(--danger-border)';
+        document.body.appendChild(swatch);
+        const dangerColor = getComputedStyle(swatch).color;
+        swatch.remove();
+        return {
+          previews,
+          dangerColor,
+          invalidPreview: document.querySelector('.yolomux-dockview')?.classList.contains('dockview-invalid-tab-drop-preview') || false,
+        };
+        """
+    )
+
+
 def dockview_layout_metrics(browser):
     return browser.execute_script(
         """
@@ -2874,22 +2910,7 @@ def test_dockview_non_pinned_tab_cannot_drop_between_pinned_tabs(browser, tmp_pa
             requestAnimationFrame(() => requestAnimationFrame(done));
             """
         )
-        preview = browser.execute_script(
-            """
-            const visible = node => {
-              const rect = node.getBoundingClientRect();
-              const style = getComputedStyle(node);
-              return rect.width > 0
-                && rect.height > 0
-                && style.display !== 'none'
-                && style.visibility !== 'hidden'
-                && style.opacity !== '0';
-            };
-            return Array.from(document.querySelectorAll('.dv-drop-target, .dv-drop-target-selection, .dv-drop-target-anchor'))
-              .filter(visible)
-              .map(node => node.className);
-            """
-        )
+        preview = dockview_invalid_drop_preview(browser)
     finally:
         cdp_release(browser, points["end"])
     browser.execute_async_script(
@@ -2899,9 +2920,138 @@ def test_dockview_non_pinned_tab_cannot_drop_between_pinned_tabs(browser, tmp_pa
         """
     )
     metrics = dockview_layout_metrics(browser)
-    assert preview == [], preview
+    assert preview["invalidPreview"] is True, preview
+    assert any(item["borderStyle"] == "dashed" and item["borderColor"] == preview["dangerColor"] for item in preview["previews"]), preview
     assert metrics["groups"][0]["tabs"] == ["1", "2", "3"], metrics
     assert metrics["slots"]["left"]["tabs"] == ["1", "2", "3"], metrics
+    assert browser.execute_script("return document.querySelector('.yolomux-dockview')?.classList.contains('dockview-invalid-tab-drop-preview') || false") is False
+
+
+def test_dockview_pinned_tab_cannot_move_to_other_pane(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2,3&layout=row@50(left,right)&tabs=left:1;right:2,3", sessions=["1", "2", "3"])
+    wait_for_dockview(browser, min_tabs=3)
+    wait_for_dockview_tab_geometry(browser, min_tabs=3)
+    browser.execute_script("setTabPinned('1', true);")
+    WebDriverWait(browser, 5).until(
+        lambda driver: dockview_layout_metrics(driver)["slots"]["left"]["tabs"] == ["1"]
+    )
+    start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="1"]', 0.5, 0.5)
+    end = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="3"]', 0.72, 0.5)
+    try:
+        cdp_drag_hold(browser, start, end, steps=32)
+        WebDriverWait(browser, 2).until(
+            lambda driver: dockview_invalid_drop_preview(driver)["invalidPreview"] is True
+        )
+        preview = dockview_invalid_drop_preview(browser)
+    finally:
+        cdp_release(browser, end)
+    assert preview["invalidPreview"] is True, preview
+    assert any(item["borderStyle"] == "dashed" and item["borderColor"] == preview["dangerColor"] for item in preview["previews"]), preview
+    WebDriverWait(browser, 5).until(
+        lambda driver: dockview_layout_metrics(driver)["slots"]["left"]["tabs"] == ["1"]
+    )
+    metrics = dockview_layout_metrics(browser)
+    assert metrics["slots"]["left"]["tabs"] == ["1"], metrics
+    assert metrics["slots"]["right"]["tabs"] == ["2", "3"], metrics
+    assert any(group["tabs"] == ["1"] for group in metrics["groups"]), metrics
+    assert browser.execute_script("return document.querySelector('.yolomux-dockview')?.classList.contains('dockview-invalid-tab-drop-preview') || false") is False
+
+
+def test_dockview_pinned_tab_cannot_split_to_new_pane(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
+    wait_for_dockview(browser, min_tabs=2)
+    wait_for_dockview_tab_geometry(browser, min_tabs=2)
+    browser.execute_script("setTabPinned('2', true);")
+    WebDriverWait(browser, 5).until(
+        lambda driver: dockview_layout_metrics(driver)["slots"]["left"]["tabs"] == ["2", "1"]
+    )
+    content_attempt = browser.execute_script(
+        """
+        const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="2"]');
+        const group = tab.closest('.dv-groupview');
+        const slot = dockviewSlotForGroupElement(group);
+        const rect = group.getBoundingClientRect();
+        const event = {
+          kind: 'content',
+          position: 'right',
+          group: {id: slot},
+          nativeEvent: {clientX: Math.round(rect.right - 8), clientY: Math.round(rect.top + rect.height / 2)},
+          getData() { return {panelId: '2', groupId: slot}; },
+          preventDefault() { this.prevented = true; },
+        };
+        const intent = dockviewPaneContentDropIntent(event);
+        dockviewTrackRootBoundaryOverlay(event);
+        return {
+          intent: intent ? {zone: intent.zone, targetSlot: intent.targetSlot} : null,
+          prevented: event.prevented === true,
+          rootPreview: document.querySelector('#grid').classList.contains('drop-preview-root'),
+        };
+        """
+    )
+    assert content_attempt["intent"] is None, content_attempt
+    assert content_attempt["prevented"] is True, content_attempt
+    assert content_attempt["rootPreview"] is False, content_attempt
+    start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="2"]', 0.5, 0.5)
+    end = dockview_point(browser, "#dockviewRoot", 0.97, 0.5)
+    try:
+        cdp_drag_hold(browser, start, end, steps=32)
+        browser.execute_async_script(
+            """
+            const done = arguments[arguments.length - 1];
+            requestAnimationFrame(() => requestAnimationFrame(done));
+            """
+        )
+        preview = browser.execute_script(
+            """
+            return {
+              rootPreview: document.querySelector('#grid')?.classList.contains('drop-preview-root') || false,
+              invalidPreview: document.querySelector('.yolomux-dockview')?.classList.contains('dockview-invalid-tab-drop-preview') || false,
+            };
+            """
+        )
+    finally:
+        cdp_release(browser, end)
+    assert preview["rootPreview"] is False, preview
+    assert preview["invalidPreview"] is False, preview
+    browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        requestAnimationFrame(() => requestAnimationFrame(done));
+        """
+    )
+    metrics = dockview_layout_metrics(browser)
+    assert metrics["slots"]["left"]["tabs"] == ["2", "1"], metrics
+    assert len([group for group in metrics["groups"] if group["tabs"]]) == 1, metrics
+    assert any(group["tabs"] == ["2", "1"] for group in metrics["groups"]), metrics
+
+
+def test_dockview_pinned_tab_invalid_non_pinned_target_shows_red_dashes(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2,3&layout=row@50(left,right)&tabs=left:1;right:2,3", sessions=["1", "2", "3"])
+    wait_for_dockview(browser, min_tabs=3)
+    wait_for_dockview_tab_geometry(browser, min_tabs=3)
+    browser.execute_script("setTabPinned('1', true); setTabPinned('2', true);")
+    WebDriverWait(browser, 5).until(
+        lambda driver: dockview_layout_metrics(driver)["slots"]["right"]["tabs"] == ["2", "3"]
+    )
+    start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="1"]', 0.5, 0.5)
+    end = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="3"]', 0.72, 0.5)
+    try:
+        cdp_drag_hold(browser, start, end, steps=32)
+        WebDriverWait(browser, 2).until(
+            lambda driver: dockview_invalid_drop_preview(driver)["invalidPreview"] is True
+        )
+        preview = dockview_invalid_drop_preview(browser)
+    finally:
+        cdp_release(browser, end)
+    assert preview["invalidPreview"] is True, preview
+    assert any(item["borderStyle"] == "dashed" and item["borderColor"] == preview["dangerColor"] for item in preview["previews"]), preview
+    WebDriverWait(browser, 2).until(
+        lambda driver: dockview_layout_metrics(driver)["slots"]["left"]["tabs"] == ["1"]
+    )
+    metrics = dockview_layout_metrics(browser)
+    assert metrics["slots"]["left"]["tabs"] == ["1"], metrics
+    assert metrics["slots"]["right"]["tabs"] == ["2", "3"], metrics
+    assert browser.execute_script("return document.querySelector('.yolomux-dockview')?.classList.contains('dockview-invalid-tab-drop-preview') || false") is False
 
 
 def test_dockview_pane_drag_handle_swaps_whole_panes(browser, tmp_path):
@@ -5207,16 +5357,18 @@ def test_active_pane_ring_opacity_follows_preference(browser, tmp_path):
     )
     metrics = browser.execute_script(
         """
-        const panel = document.querySelector('#panel-1');
-        panel.classList.add('active-pane');
         const applyOpacity = value => {
           applySettingsPayload({settings: {appearance: {pane_ring_opacity: value}}, defaults: {}, mtime_ns: value}, {force: true});
+          const panel = document.querySelector('#panel-1');
+          panel.classList.add('active-pane');
           const rootStyle = getComputedStyle(document.documentElement);
           const panelStyle = getComputedStyle(panel);
+          const ringOwner = panel.closest('.dv-groupview');
+          const ringStyle = ringOwner ? getComputedStyle(ringOwner, '::after') : panelStyle;
           return {
             activeOpacity: rootStyle.getPropertyValue('--pane-active-ring-opacity').trim(),
             normalOpacity: rootStyle.getPropertyValue('--pane-ring-opacity').trim(),
-            borderColor: panelStyle.borderLeftColor,
+            borderColor: ringStyle.borderLeftColor,
           };
         };
         return {low: applyOpacity(5), defaultish: applyOpacity(75)};

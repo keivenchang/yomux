@@ -269,6 +269,12 @@
   box-shadow: 0 0 12px var(--pane-resizer-shadow);
   pointer-events: none;
 }
+.yolomux-dockview.dockview-invalid-tab-drop-preview .dv-tab.dv-drop-target .dv-drop-target-selection.dv-drop-target-left,
+.yolomux-dockview.dockview-invalid-tab-drop-preview .dv-tab.dv-drop-target .dv-drop-target-selection.dv-drop-target-right {
+  border-color: var(--danger-border) !important;
+  background-color: color-mix(in srgb, var(--danger-bg) 20%, transparent) !important;
+  box-shadow: 0 0 12px color-mix(in srgb, var(--danger-border) 70%, transparent);
+}
 .yolomux-dockview .dv-tab.dv-drop-target .dv-drop-target-selection.dv-drop-target-left {
   left: 0 !important;
   transform: translateX(-50%) !important;

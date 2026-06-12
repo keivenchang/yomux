@@ -591,6 +591,8 @@ globalThis.__layoutTestApi = {
   },
   bindClipboardPasteForTest: bindClipboardPaste,
   documentListenersForTest(type) { return [...(document.__listeners.get(type) || [])]; },
+  setDocumentQuerySelectorForTest(fn) { document.querySelector = fn; },
+  setDocumentQuerySelectorAllForTest(fn) { document.querySelectorAll = fn; },
   commandPaletteItemScore,
   commandPaletteRankItems,
   commandPaletteCandidateItems,
@@ -639,6 +641,15 @@ globalThis.__layoutTestApi = {
   layoutSlotsSignature,
   dockviewJsonFromLayoutSlots,
   layoutSlotsFromDockviewJson,
+  adoptDockviewLayoutForTest(json) {
+    dockviewLayoutState.api = {
+      toJSON() { return json; },
+      fromJSON() {},
+      clear() {},
+    };
+    adoptDockviewLayout();
+    return layoutSlots;
+  },
   dockviewLayoutContentSignature,
   isPinnableTab,
   tabIsPinned,
@@ -730,6 +741,7 @@ globalThis.__layoutTestApi = {
   globalActivityCounts,
   globalActivityStatusLineHtml,
   setAutoApproveStateForTest(session, state) { autoApproveStates.set(session, state); },
+  setAgentAuthForTest(value) { agentAuth = value || {}; },
   maxTabsPerPane,
   tabsToEvictForCap,
   recordTabActivation,
@@ -837,9 +849,11 @@ globalThis.__layoutTestApi = {
   sessionState,
   slotForNewFileEditorTab,
   slotForNewTmuxSession,
+  slotForSession,
   slotForTabActivation,
   simpleCodeSyntaxHtml,
   smallLayoutSlotCandidate,
+  slotCanAutoPrune,
   splitPercentForPointer,
   layoutNodeMinWidth,
   layoutVisiblePaneCount,
@@ -953,6 +967,9 @@ globalThis.__layoutTestApi = {
   setSessionFilesPayloadForTest(payload) {
     fileExplorerSessionFilesPayload = payload;
   },
+  setSessionFilesLoadingForTest(loading) {
+    fileExplorerSessionFilesLoading = Boolean(loading);
+  },
   setFileExplorerSessionFilesPayloadForTest(payload) {
     fileExplorerSessionFilesPayload = payload;
   },
@@ -1021,6 +1038,7 @@ globalThis.__layoutTestApi = {
   modalClassForTest() { return document.getElementById('modal').className; },
   modalTitleForTest() { return document.getElementById('modalTitle').textContent; },
   modalBodyHtmlForTest() { return document.getElementById('modalBody').innerHTML; },
+  statusTextForTest() { return statusEl.textContent; },
   serialize(slots) {
     return {
       tree: slots[layoutTreeKey],
@@ -1258,34 +1276,36 @@ test('t@1174', () => {
   const api = loadYolomux('', ['1', '2', '3']);
   const layout = api.defaultLayoutForTest();
   assert.deepStrictEqual(canonical(layout), {
-    tree: {split: 'row', pct: 50, children: [{slot: 'left'}, {slot: 'right'}]},
+    tree: {split: 'row', pct: 22, children: [{slot: 'slot1'}, {split: 'row', pct: 50, children: [{slot: 'left'}, {slot: 'right'}]}]},
     panes: {
+      slot1: {tabs: ['__files__'], active: '__files__'},
       left: {tabs: ['1', '2'], active: '1'},
       right: {tabs: ['3'], active: '3'},
     },
   });
   const url = api.syncInitialLayoutUrlForTest();
   const params = new URLSearchParams(url.slice(url.indexOf('?') + 1));
-  assert.equal(params.get('sessions'), '1,3');
-  assert.equal(params.get('layout'), 'row@50(left,right)');
-  assert.equal(params.get('tabs'), 'left:1,2;right:3');
+  assert.equal(params.get('sessions'), 'files,1,3');
+  assert.equal(params.get('layout'), 'row@22(slot1,row@50(left,right))');
+  assert.equal(params.get('tabs'), 'slot1:files;left:1,2;right:3');
 });
 
 test('t@1191', () => {
   const api = loadYolomux('', []);
   const layout = api.defaultLayoutForTest();
-  assert.deepStrictEqual(canonical(layout.panes), {left: {tabs: [], active: null, placeholder: true}});
+  assert.deepStrictEqual(canonical(layout.panes), {left: {tabs: ['__files__'], active: '__files__'}});
   const url = api.syncInitialLayoutUrlForTest();
   const params = new URLSearchParams(url.slice(url.indexOf('?') + 1));
   assert.equal(params.get('layout'), 'left');
-  assert.equal(params.get('tabs'), 'left:__empty_pane__');
+  assert.equal(params.get('tabs'), 'left:files');
 });
 
 test('t@1201', () => {
   const api = loadYolomux('?sessions=3,2,1', ['1', '2', '3']);
   assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
-    tree: {split: 'row', pct: 50, children: [{slot: 'left'}, {slot: 'right'}]},
+    tree: {split: 'row', pct: 22, children: [{slot: 'slot1'}, {split: 'row', pct: 50, children: [{slot: 'left'}, {slot: 'right'}]}]},
     panes: {
+      slot1: {tabs: ['__files__'], active: '__files__'},
       left: {tabs: ['3', '2'], active: '3'},
       right: {tabs: ['1'], active: '1'},
     },
@@ -2012,6 +2032,9 @@ test('t@1869', () => {
   assert.ok(/disabled: readOnlyMode \|\| !available \|\| loggedOut \|\| capped/.test(source), '#39: a logged-out agent is disabled in the picker');
   assert.ok(/loggedOut[\s\S]*?t\('menu\.tmux\.runLogin', \{command: agentLoginCommand\(agent\)\}\)/.test(source), '#39: a logged-out agent shows its login command as the menu detail (via t())');
   assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['menu.tmux.runLogin'], 'Run {command}', '#39/#121: the login-command detail renders "Run <command>" in English');
+  assert.ok(/function agentUnavailableReason\(agent\)[\s\S]*unavailable_reason/.test(source), '#62: unavailable agents carry a server-provided reason');
+  assert.ok(/agentUnavailableReason\(agent\) === 'not-on-path'[\s\S]*t\('menu\.tmux\.agentUnavailablePath'\)/.test(source), '#62: missing agent CLIs show the server-PATH detail');
+  assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['menu.tmux.agentUnavailablePath'], 'Not on server PATH', '#62: missing-agent detail is localized in English');
   assert.ok(source.includes('if (transcriptMeta.agentAuth) agentAuth = transcriptMeta.agentAuth;'), '#39: the metadata poll refreshes agent login status');
   // #41: the frontend mirrors the server's auto backend resolution (codex -> claude -> deterministic)
   // so the chat input enables to match what the backend will run, and defaults to auto.
@@ -2709,6 +2732,63 @@ test('t@2560', () => {
   const comparisonSummaryStart = changesHtml.indexOf('class="changes-comparison-summary"');
   const comparisonSummary = changesHtml.slice(comparisonSummaryStart, changesHtml.indexOf('</div>', comparisonSummaryStart));
   assert.equal(/changes-summary-totals|changes-diff-add|changes-diff-remove|changes-repo-count/.test(comparisonSummary), false, 'Finder diff summary does not repeat global +line/-line/file totals');
+  api.setSessionFilesPayloadForTest({session: '2', loaded: false, errors: [], refs_by_repo: {}, repos: [], files: []});
+  api.setSessionFilesLoadingForTest(true);
+  const loadingDifferHtml = api.fileExplorerChangesPanelHtml();
+  assert.ok(/changes-loading[\s\S]*session-yolo-marker active working changes-loading-yolo[\s\S]*loading 2\.\.\./.test(loadingDifferHtml), 'Differ loading state uses the spinning YO marker and session label');
+  assert.equal(loadingDifferHtml.includes('not loaded'), false, 'Differ loading state does not flash "not loaded" while a session switch fetch is in flight');
+  const sessionSwitchSource = fs.readFileSync('static/yolomux.js', 'utf8');
+  const sessionSwitchBody = sessionSwitchSource.slice(sessionSwitchSource.indexOf('function switchFileExplorerChangesSession('), sessionSwitchSource.indexOf('function noteFileExplorerChangesSessionInteraction('));
+  assert.ok(/setSessionFilesLoadingForDestination\('finder', !cachedPayloadIsLoaded\);\s*renderFileExplorerChangesPanels\(\);\s*fetchSessionFiles\(\{destination: 'finder', session, silent: true, force: true, background: cachedPayloadIsLoaded\}\);/.test(sessionSwitchBody), 'auto-switching Differ sessions shows loading only when no loaded cached payload is available');
+  assert.ok(/const backgroundRefresh = options\.background === true;[\s\S]*if \(!backgroundRefresh\) setSessionFilesLoadingForDestination\(destination, true\);[\s\S]*if \(current && !backgroundRefresh\) setSessionFilesLoadingForDestination\(destination, false\);/.test(sessionSwitchSource), 'background Differ refreshes do not replace cached content with the foreground loading state');
+  api.setSessionFilesLoadingForTest(false);
+  api.setFileExplorerModeForTest('diff');
+  api.setFileExplorerChangesSelectedSessionForTest('1');
+  api.setSessionFilesCachePayloadForTest('2', {
+    session: '2',
+    loaded: true,
+    errors: [],
+    refs_by_repo: {},
+    repos: [{repo: '/repo/cached', count: 1, touched_count: 1, added: 1, removed: 0}],
+    files: [{session: '2', agent: 'codex', status: 'M', repo: '/repo/cached', path: 'cached-visible.py', abs_path: '/repo/cached/cached-visible.py', mtime: 500, added: 1, removed: 0}],
+  });
+  let cachedRefreshUrl = '';
+  api.setFetchForTest(url => {
+    cachedRefreshUrl = String(url);
+    return new Promise(() => {});
+  });
+  const mountedChangesPanel = api.testElementForId('mounted-changes-panel');
+  mountedChangesPanel.className = 'file-explorer-changes-panel';
+  api.setDocumentQuerySelectorForTest(selector => selector === '.file-explorer-changes-panel' ? mountedChangesPanel : null);
+  api.setDocumentQuerySelectorAllForTest(() => []);
+  assert.equal(api.noteFileExplorerChangesSessionInteractionForTest('2'), true, 'cached Differ switch still changes the selected session');
+  api.setDocumentQuerySelectorForTest(() => null);
+  api.setDocumentQuerySelectorAllForTest(() => []);
+  const cachedSwitchHtml = api.fileExplorerChangesPanelHtml();
+  assert.equal(cachedSwitchHtml.includes('changes-loading'), false, 'cached Differ switch keeps rendered rows instead of showing the loading state');
+  assert.ok(cachedSwitchHtml.includes('cached-visible.py'), 'cached Differ switch renders the cached changed-file rows immediately');
+  assert.ok(cachedRefreshUrl.includes('/api/session-files?') && cachedRefreshUrl.includes('session=2') && cachedRefreshUrl.includes('force=1'), 'cached Differ switch still starts a forced background refresh');
+  api.setSessionFilesPayloadForTest({session: '2', loaded: false, errors: [], refs_by_repo: {}, repos: [], files: []});
+  api.setSessionFilesLoadingForTest(true);
+  api.setFileExplorerModeForTest('files');
+  const loadingEmbeddedDifferHtml = api.fileExplorerChangesPanelHtml();
+  assert.ok(/changes-comparison-head compact[\s\S]*changes-loading[\s\S]*session-yolo-marker active working changes-loading-yolo/.test(loadingEmbeddedDifferHtml), 'embedded Finder Differ loading header uses the same moving YO indicator');
+  assert.equal(loadingEmbeddedDifferHtml.includes('not loaded'), false, 'embedded Finder Differ loading header does not flash "not loaded"');
+  api.setFileExplorerModeForTest('diff');
+  api.setSessionFilesLoadingForTest(false);
+  api.setSessionFilesPayloadForTest({
+    session: '1',
+    loaded: true,
+    errors: [],
+    refs_by_repo: {'/repo/app': [{ref: 'abc123def456', short: 'abc123d', subject: 'older base commit'}]},
+    repos: [{repo: '/repo/app', count: 3, touched_count: 4, added: 10, removed: 1, behind: 0, ahead: 2}],
+    files: [
+      {session: '1', agent: 'codex', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1},
+      {session: '1', agent: 'codex', status: 'A', repo: '/repo/app', path: 'src/new.py', abs_path: '/repo/app/src/new.py', mtime: 200, added: 8, removed: 0, diff_tracked: true},
+      {session: '1', agent: 'codex', status: '?', repo: '/repo/app', path: 'src/raw.txt', abs_path: '/repo/app/src/raw.txt', mtime: 220, added: 4, removed: 0, diff_tracked: false},
+      {session: '1', agent: 'codex', status: 'T', repo: '/repo/app', path: 'src/touched-only.py', abs_path: '/repo/app/src/touched-only.py', mtime: 300, added: 0, removed: 0, source: 'transcript'},
+    ],
+  });
   assert.ok(/changes-repo-refs[\s\S]*changes-repo-compare-title[\s\S]*Comparing[\s\S]*data-diff-ref-from[\s\S]*to[\s\S]*data-diff-ref-to/.test(changesHtml), 'Finder diff shows a per-repo comparison row with inline FROM/TO controls');
   assert.equal((changesHtml.match(/repo, 3 files changed in &#39;1&#39;/g) || []).length, 1, '#24: the repo/file-count summary appears exactly once (in the comparison card), not duplicated in the toolbar');
   assert.equal(changesHtml.includes('class="changes-summary"'), false, '#24: the standalone toolbar summary duplicate is removed');
@@ -3635,6 +3715,19 @@ test('t@2560', () => {
   assert.equal(/switchFileExplorerChangesSession/.test(focusPanelBody), false, 'passive focus/hover no longer switches the Finder Modified-files session');
   assert.equal(appSource.includes('sessionFilesTargetSession({followActive: true})'), false, 'Finder Modified-files session selection never follows passive hover/autofocus');
   assert.ok(/function noteFileExplorerChangesSessionInteraction\(session\)/.test(appSource), 'explicit session interactions can commit the Finder Modified-files target');
+  const dockviewActivePanelStart = appSource.indexOf('api.onDidActivePanelChange(panel => {');
+  assert.ok(dockviewActivePanelStart > 0, 'Dockview active-panel listener is locatable');
+  const dockviewActivePanelBody = appSource.slice(dockviewActivePanelStart, appSource.indexOf('api.onWillShowOverlay', dockviewActivePanelStart));
+  assert.ok(dockviewActivePanelBody.includes('if (dockviewLayoutState.applyingFromLayout) return;'), 'Dockview active-panel listener ignores programmatic layout application');
+  assert.equal(dockviewActivePanelBody.includes('noteFileExplorerChangesSessionInteraction'), false, 'Dockview active-panel listener stays passive so hover focus does not retarget Differ');
+  assert.equal(dockviewActivePanelBody.includes('userInitiated: true'), false, 'Dockview active-panel listener does not launder hover focus into a user interaction');
+  assert.ok(dockviewActivePanelBody.includes('setFocusedPanelItem(item);'), 'Dockview active-panel listener still updates passive focus state');
+  const dockviewTabRendererStart = appSource.indexOf('function createDockviewTabRenderer()');
+  assert.ok(dockviewTabRendererStart > 0, 'Dockview tab renderer is locatable');
+  const dockviewTabRendererBody = appSource.slice(dockviewTabRendererStart, appSource.indexOf('function createDockviewPanelRenderer()', dockviewTabRendererStart));
+  assert.ok(/const commitExplicitTabInteraction = \(\) => \{[\s\S]*?if \(isTmuxSession\(item\)\) noteFileExplorerChangesSessionInteraction\(item\);[\s\S]*?setFocusedPanelItem\(item, \{userInitiated: true\}\);[\s\S]*?\};/.test(dockviewTabRendererBody), 'Dockview tab gestures commit tmux Differ context at the explicit call site');
+  assert.ok(/element\.addEventListener\('click', async event => \{[\s\S]*?commitExplicitTabInteraction\(\);[\s\S]*?\}\);/.test(dockviewTabRendererBody), 'Dockview tab click commits an explicit interaction without relying on active-panel changes');
+  assert.ok(/element\.addEventListener\('keydown', event => \{[\s\S]*?\['Enter', ' '\]\.includes\(event\.key\)[\s\S]*?commitExplicitTabInteraction\(\);[\s\S]*?api\?\.setActive\?\.\(\);[\s\S]*?\}\);/.test(dockviewTabRendererBody), 'Dockview tab Enter/Space activation commits an explicit interaction before setting the active panel');
   assert.ok(/function activatePaneTab\([^]*?noteFileExplorerChangesSessionInteraction\(session\)/.test(appSource), 'clicking a tmux pane tab commits the Finder Modified-files target');
   assert.ok(/function activatePaneTab\([^]*?isFileEditorItem\(session\)[^]*?changedFileOwnerSessionForPath\(path, \{owners\}\)[^]*?owners\.length === 1[^]*?noteFileExplorerChangesSessionInteraction\(owner\)/.test(appSource), 'clicking a file tab commits an exact-path Differ owner, falling back to a single owner only');
   const exactOwnerApi = loadYolomux('', ['1', '2', '5']);
@@ -3660,7 +3753,7 @@ test('t@2560', () => {
   assert.ok(terminalInputBody.includes("container.addEventListener('keydown', () => noteTerminalExplicitInput(session), {capture: true});"), 'terminal keydown commits the Finder Modified-files target');
   assert.ok(terminalInputBody.includes("container.addEventListener('paste', () => noteTerminalExplicitInput(session), {capture: true});"), 'terminal paste commits the Finder Modified-files target');
   assert.equal(/term\.onData\(data => \{[^]*?noteFileExplorerChangesSessionInteraction\(session\)/.test(terminalInputBody), false, 'xterm data transport does not commit Finder because hover focus can emit focus/mouse reports');
-  assert.ok(/fetchSessionFiles\(\{destination: 'finder', session, silent: true, force: true\}\)/.test(appSource), 'explicit session changes force a fresh Finder modified-files fetch even if an older request is in flight');
+  assert.ok(/fetchSessionFiles\(\{destination: 'finder', session, silent: true, force: true, background: cachedPayloadIsLoaded\}\)/.test(appSource), 'explicit session changes force a fresh Finder modified-files fetch even if an older request is in flight');
   assert.ok(/function sessionFilesCacheKey\(session\)[\s\S]*sessionFilesRequestQueryString\(\)/.test(appSource), 'Differ cached payloads are keyed by session plus effective FROM/TO/refs query');
   assert.ok(/const cached = fileExplorerSessionFilesCache\.get\(sessionFilesCacheKey\(session\)\)/.test(appSource), 'Differ session switches do not reuse payloads from a different ref pair');
   assert.ok(/fileExplorerSessionFilesCache\.set\(sessionFilesCacheKey\(session\), \{payload: nextPayload, signature\}\)/.test(appSource), 'Differ stores cached payloads under the same ref-aware key it reads');
@@ -3783,6 +3876,12 @@ test('t@2560', () => {
   assert.equal(finderBesideSinglePaneUrlApi.canPaneExpand('3'), false);
   assert.ok(finderBesideSinglePaneUrlApi.panelControlsHtml('3').includes('hidden type="button" data-pane-expand="3"'));
 
+  const defaultFinderApi = loadYolomux('', ['1', '2']);
+  assert.equal(defaultFinderApi.itemInLayout('__files__'), true, 'param-less boot includes the Finder pane');
+  assert.equal(defaultFinderApi.itemInLayout('__files__', defaultFinderApi.defaultLayoutSlots()), true, 'defaultLayoutSlots includes the Finder pane');
+  const sessionsOnlyFinderApi = loadYolomux('?sessions=1', ['1', '2']);
+  assert.equal(sessionsOnlyFinderApi.itemInLayout('__files__'), true, 'sessions-only boot includes the Finder pane');
+
   const finderToggleSlots = api.emptyLayoutSlots();
   finderToggleSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 31);
   finderToggleSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
@@ -3792,6 +3891,7 @@ test('t@2560', () => {
   const finderLayoutBeforeToggle = api.layoutParamValue(api.currentSlots());
   api.toggleFileExplorerShortcut();
   assert.equal(api.itemInLayout('__files__'), false, 'app shortcut hides the Finder pane');
+  assert.equal(api.statusTextForTest(), `${api.fileExplorerLabel()} hidden - ${api.appShortcutText('B')} restores`, 'hiding Finder announces how to restore it');
   assert.equal(api.focusedPanelItemForTest(), '1', 'hiding Finder keeps focus on the active terminal');
   api.toggleFileExplorerShortcut();
   assert.equal(api.layoutParamValue(api.currentSlots()), finderLayoutBeforeToggle, 'app shortcut restores the prior Finder position and split size');
@@ -4722,6 +4822,10 @@ test('t@2560', () => {
   assert.ok(tmuxMenuLabels.includes('Codex'));
   assert.ok(tmuxMenuLabels.includes('Term'), 'Term is always offered (a plain shell), not greyed unavailable');
   assert.equal(tmuxMenuLabels.includes('+ Claude'), false, 'the "+" prefix is dropped from new-session items');
+  api.setAgentAuthForTest({claude: {installed: false, logged_in: false, unavailable_reason: 'not-on-path'}});
+  const missingPathClaude = api.appMenuTree().find(menu => menu.id === 'tmux').items.find(item => item.label === 'Claude');
+  assert.equal(missingPathClaude.disabled, true);
+  assert.equal(missingPathClaude.detail, 'Not on server PATH');
   {
     const newSessionSrc = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.ok(newSessionSrc.includes('function agentLaunchParams(agent)'), 'the launch-params helper exists');
@@ -6037,6 +6141,18 @@ test('t@2560', () => {
     },
   });
 
+  const dockviewPrevious = api.emptyLayoutSlots();
+  dockviewPrevious[api.layoutTreeKey] = api.splitNode('row', api.leafNode('slot2'), api.leafNode('left'), 22);
+  dockviewPrevious.slot2 = api.paneStateWithTabs(['__files__'], '__files__');
+  dockviewPrevious.left = api.paneStateWithTabs(['1'], '1');
+  api.setLayoutSlotsForTest(dockviewPrevious);
+  const dockviewNextWithoutFinder = api.emptyLayoutSlots();
+  dockviewNextWithoutFinder[api.layoutTreeKey] = api.leafNode('left');
+  dockviewNextWithoutFinder.left = api.paneStateWithTabs(['1'], '1');
+  api.adoptDockviewLayoutForTest(api.dockviewJsonFromLayoutSlots(dockviewNextWithoutFinder));
+  assert.equal(api.itemInLayout('__files__'), true, 'Dockview adoption re-docks Finder when a non-user commit drops it');
+  assert.equal(api.slotForSession('__files__'), 'slot2', 'Dockview adoption preserves the previous Finder slot when possible');
+
   const expandedNormal = api.emptyLayoutSlots();
   expandedNormal[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
   expandedNormal.left = api.paneStateWithTabs(['1'], '1');
@@ -6270,6 +6386,14 @@ test('t@2560', () => {
   api.setGridPreviewNodesForTest([topColumn, finderColumn]);
   assert.equal(api.smallLayoutSlotCandidate().slot, 'slot2');
 
+  autoPruneSlots.slot2 = api.paneStateWithTabs(['__files__', '1'], '1');
+  api.setLayoutSlotsForTest(autoPruneSlots);
+  api.setGridPreviewNodesForTest([topColumn, finderColumn]);
+  assert.equal(api.slotCanAutoPrune('slot2'), false, 'legacy auto-prune protects a slot when Finder is a background tab');
+  assert.equal(api.smallLayoutSlotCandidate(), null, 'legacy auto-prune does not remove a small slot containing a background Finder tab');
+
+  autoPruneSlots.slot2 = api.paneStateWithTabs(['1'], '1');
+  api.setLayoutSlotsForTest(autoPruneSlots);
   topColumn.rect = {left: 0, top: 0, right: 500, bottom: 260, width: 500, height: 260};
   api.setGridPreviewNodesForTest([topColumn, finderColumn]);
   assert.equal(api.smallLayoutSlotCandidate(), null);
@@ -7162,6 +7286,7 @@ test('t@6675', () => {
   const openedApi = loadYolomux('?debug=1&sessions=debug', ['1']);
   assert.deepStrictEqual(canonical(openedApi.serialize(openedApi.currentSlots()).panes), {
     left: {tabs: [openedApi.debugPaneItemId], active: openedApi.debugPaneItemId},
+    slot1: {tabs: [openedApi.fileExplorerItemId], active: openedApi.fileExplorerItemId},
   }, 'debug=1 allows sessions=debug to open the Debug pane directly');
   const injectedApi = loadYolomux('?sessions=files,6,5&layout=row@22(slot2,row@50(left,slot1))&tabs=slot2:files;left:6;slot1:5,info&debug=1', ['5', '6']);
   assert.deepStrictEqual(canonical(injectedApi.serialize(injectedApi.currentSlots()).panes), {
@@ -8229,6 +8354,13 @@ test('t@7769', () => {
   assert.ok(/function dockviewShouldSuppressPaneContentDrop\(event\)[\s\S]*!dropIntentAllowsSession\(info\.item, info\.intent\)[\s\S]*function dockviewTrackRootBoundaryOverlay\(event\)[\s\S]*dockviewShouldSuppressPaneContentDrop\(event\)[\s\S]*event\.preventDefault\?\.\(\)/.test(dockviewSrc), 'Dockview suppresses native previews for invalid pane drops before a dashed box is advertised');
   assert.ok(/api\.onWillDrop\(event => \{[\s\S]*const rootIntent = dockviewRootBoundaryDropIntent\(event\)[\s\S]*const paneIntent = dockviewPaneContentDropIntent\(event\)[\s\S]*splitSessionAtSlot\(paneIntent\.item, paneIntent\.targetSlot, paneIntent\.zone, paneIntent\.sourceSlot\)/.test(dockviewSrc), 'Dockview pane edge drops use splitSessionAtSlot so same-axis splits preserve 1/2 + 1/4 + 1/4 sizing');
   assert.ok(/function dockviewRootBoundaryDropIntent\(event\)[\s\S]*rootBoundaryDropOverDockedFileExplorer\(nativeEvent, zone\)[\s\S]*return null/.test(dockviewSrc), 'Dockview root top/bottom previews defer when the pointer is inside the docked Finder/Differ column');
+  assert.ok(/function dockviewPinnedTabCrossPaneViolation\(info\)[\s\S]*info\.createsPane === true[\s\S]*info\.targetSlot && info\.targetSlot !== info\.sourceSlot/.test(dockviewSrc), 'Dockview has one shared pinned-tab rule for cross-pane and new-pane violations');
+  assert.ok(/function dockviewTabDropViolatesPinnedPartition\(event\)[\s\S]*dockviewPinnedTabCrossPaneViolation\(info\)[\s\S]*return true/.test(dockviewSrc), 'Dockview tab-strip drops reject pinned tabs that leave their current pane');
+  assert.ok(/function dockviewPaneContentDropInfo\(event\)[\s\S]*createsPane: layoutSplitZone\(zone\)[\s\S]*function dockviewPaneContentDropIntent\(event\)[\s\S]*dockviewPinnedTabCrossPaneViolation\(info\.intent\)[\s\S]*return null/.test(dockviewSrc), 'Dockview pane-content drops reject pinned tabs that would split into a new pane');
+  assert.ok(/function dockviewTrackRootBoundaryOverlay\(event\)[\s\S]*dockviewPinnedTabRootBoundaryViolation\(intent\)[\s\S]*event\.preventDefault\?\.\(\)/.test(dockviewSrc), 'Dockview root-boundary previews are suppressed for pinned tabs');
+  assert.ok(/api\.onWillDrop\(event => \{[\s\S]*const rootIntent = dockviewRootBoundaryDropIntent\(event\)[\s\S]*dockviewPinnedTabRootBoundaryViolation\(rootIntent\)[\s\S]*event\.preventDefault\(\)/.test(dockviewSrc), 'Dockview root-boundary drops do not split pinned tabs into new panes');
+  assert.equal(dockviewSrc.includes('dockviewPinnedCrossPane'), false, 'old pinned cross-pane move exception helpers stay removed');
+  assert.equal(dockviewSrc.includes('pinnedCrossPanePointerDrop'), false, 'old pinned cross-pane pointer fallback state stays removed');
   assert.ok(/function dockviewTrackRootBoundaryOverlay\(event\)[\s\S]*dockviewShowRootBoundaryPreview\(intent\)[\s\S]*event\.preventDefault\?\.\(\)/.test(dockviewSrc), 'Dockview root-band drags show the bounded YOLOmux preview and suppress the native full-width Dockview overlay');
   assert.ok(dockviewSrc.includes('createRightHeaderActionComponent: () => createDockviewHeaderActionsRenderer()'), 'Dockview renders YOLOmux pane controls in the Dockview header row');
   assert.ok(/function dockviewLayoutToHost[\s\S]*api\.layout\?\.\(width, height\)/.test(dockviewSrc), 'Dockview is explicitly laid out to the host size instead of staying at the default 100px shell');

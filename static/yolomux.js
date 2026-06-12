@@ -16,6 +16,10 @@ function agentLoggedIn(agent) {
 function agentLoginCommand(agent) {
   return agentLoginCommands[agent] || '';
 }
+function agentUnavailableReason(agent) {
+  const entry = agentAuth[agent];
+  return entry?.unavailable_reason || '';
+}
 const accessRole = bootstrap.accessRole || 'admin';
 const readOnlyMode = accessRole !== 'admin';
 const devMode = bootstrap.dev === true;   // dev-velocity #1b: subscribe to /api/dev-reload + auto-reload
@@ -3372,7 +3376,7 @@ function layoutFromSessionList(values) {
     items.push(item);
     seen.add(item);
   }
-  return layoutSlotsForItems(items, configuredDefaultLayoutMode());
+  return layoutWithFileExplorerDockedLeft(layoutSlotsForItems(items, configuredDefaultLayoutMode()));
 }
 
 function layoutFromParam(raw, tabsRaw = '') {
@@ -3662,7 +3666,9 @@ function layoutWithDebugPaneActive(slots) {
 
 function defaultLayoutSlots() {
   const sorted = visibleSessions.slice().sort((left, right) => String(left).localeCompare(String(right)));
-  return layoutSlotsForItems(sorted, configuredDefaultLayoutMode());
+  return layoutWithFileExplorerDockedLeft(layoutSlotsForItems(sorted, configuredDefaultLayoutMode()), {
+    preservePlaceholders: false,
+  });
 }
 
 function layoutWithItems(value, items, preferredSlot = null) {
@@ -6418,6 +6424,11 @@ function agentLaunchParams(agent) {
   return space >= 0 ? command.slice(space + 1).trim() : command;
 }
 
+function agentUnavailableDetail(agent) {
+  if (agentUnavailableReason(agent) === 'not-on-path') return t('menu.tmux.agentUnavailablePath');
+  return t('menu.tmux.agentUnavailable', {name: agentName(agent)});
+}
+
 function newTmuxSessionItems() {
   return ['claude', 'codex', 'term'].map(agent => {
     const available = availableAgents.has(agent);
@@ -6433,7 +6444,7 @@ function newTmuxSessionItems() {
       detail: readOnlyMode
         ? t('menu.common.adminOnly')
         : (!available
-          ? t('menu.tmux.agentUnavailable', {name: agentName(agent)})
+          ? agentUnavailableDetail(agent)
           : (loggedOut
             ? t('menu.tmux.runLogin', {command: agentLoginCommand(agent)})
             : (capped ? t('menu.tmux.limitReached') : agentLaunchParams(agent)))),
@@ -15202,14 +15213,22 @@ function layoutWithoutItem(item, options = {}) {
   return layoutWithoutItemFromSlots(item, layoutSlots, options);
 }
 
-function removeSessionFromLayout(item) {
+function fileExplorerHiddenStatusMessage() {
+  return t('finder.hiddenStatus', {name: fileExplorerLabel(), keys: appShortcutText('B')});
+}
+
+function hiddenFromLayoutStatusMessage(item) {
+  return isFileExplorerItem(item) ? fileExplorerHiddenStatusMessage() : `${itemLabel(item)} hidden from layout`;
+}
+
+function removeSessionFromLayout(item, options = {}) {
   if (!itemInLayout(item)) return;
   const isFiles = isFileExplorerItem(item);
   applyLayoutSlots(layoutWithoutItem(item, {
     preserveRemovedSlot: !isFiles,
     preservePlaceholders: !isFiles,
   }), {
-    message: `${itemLabel(item)} hidden from layout`,
+    message: options.message || hiddenFromLayoutStatusMessage(item),
   });
 }
 
@@ -15427,14 +15446,21 @@ function setLayoutToWallPanes() {
   applyLayoutMode('wall');
 }
 
-function layoutWithFileExplorerDockedLeft(slots = layoutSlots) {
-  const right = compactLayoutSlots(layoutWithoutItemFromSlots(fileExplorerItemId, slots, {preservePlaceholders: true}));
+function layoutWithFileExplorerDockedLeft(slots = layoutSlots, options = {}) {
+  const rightRaw = layoutWithoutItemFromSlots(fileExplorerItemId, slots, {
+    preservePlaceholders: options.preservePlaceholders !== false,
+  });
+  const right = options.preservePlaceholders === false && !paneItems(rightRaw).length
+    ? rightRaw
+    : compactLayoutSlots(rightRaw);
   const rightSlots = layoutSlotKeys(right).filter(slot => paneHasLayoutContent(slot, right));
   const next = emptyLayoutSlots();
   for (const slot of rightSlots) next[slot] = paneStateForLayoutSlot(slot, right);
   const used = new Set(rightSlots);
   const currentSlot = slotForItem(fileExplorerItemId, slots);
+  const preferredSlot = options.preferredSlot && !used.has(options.preferredSlot) ? options.preferredSlot : null;
   let finderSlot = currentSlot && !used.has(currentSlot) ? currentSlot : null;
+  if (!finderSlot) finderSlot = preferredSlot;
   if (!finderSlot) finderSlot = !used.has('left') ? 'left' : nextLayoutSlot(next);
   next[finderSlot] = paneStateWithTabs([fileExplorerItemId], fileExplorerItemId);
   next[layoutTreeKey] = rightSlots.length
@@ -17401,6 +17427,7 @@ function dockviewPaneContentDropInfo(event) {
     targetSlot,
     targetRect: layoutSlotScreenRect(targetSlot),
     zone,
+    createsPane: layoutSplitZone(zone),
   };
   return {item, intent};
 }
@@ -17409,12 +17436,16 @@ function dockviewPaneContentDropIntent(event) {
   const info = dockviewPaneContentDropInfo(event);
   if (!info) return null;
   if (!layoutSplitZone(info.intent.zone)) return null;
+  if (dockviewPinnedTabCrossPaneViolation(info.intent)) return null;
   return dropIntentAllowsSession(info.item, info.intent) ? info.intent : null;
 }
 
 function dockviewShouldSuppressPaneContentDrop(event) {
   const info = dockviewPaneContentDropInfo(event);
-  return Boolean(info && !dropIntentAllowsSession(info.item, info.intent));
+  return Boolean(info && (
+    dockviewPinnedTabCrossPaneViolation(info.intent)
+      || !dropIntentAllowsSession(info.item, info.intent)
+  ));
 }
 
 function dockviewShouldSuppressReservedRootBoundary(event) {
@@ -17429,6 +17460,10 @@ function dockviewShouldSuppressReservedRootBoundary(event) {
 function dockviewClearRootBoundaryPreview() {
   if (!grid?.classList?.contains('drop-preview-root')) return;
   clearDropPreview();
+}
+
+function dockviewSetInvalidTabDropPreview(active) {
+  dockviewLayoutState.host?.classList?.toggle('dockview-invalid-tab-drop-preview', Boolean(active));
 }
 
 function dockviewShowRootBoundaryPreview(intent) {
@@ -17447,10 +17482,11 @@ function dockviewShowRootBoundaryPreview(intent) {
 }
 
 function dockviewTrackRootBoundaryOverlay(event) {
-  if (dockviewTabDropViolatesPinnedPartition(event)) {
+  const invalidTabDrop = dockviewTabDropViolatesPinnedPartition(event);
+  dockviewSetInvalidTabDropPreview(invalidTabDrop);
+  if (invalidTabDrop) {
     dockviewLayoutState.pendingRootBoundaryDrop = null;
     dockviewClearRootBoundaryPreview();
-    event.preventDefault?.();
     return;
   }
   if (dockviewTabDropWouldNoop(event)) {
@@ -17460,6 +17496,12 @@ function dockviewTrackRootBoundaryOverlay(event) {
     return;
   }
   const intent = dockviewRootBoundaryDropIntent(event);
+  if (dockviewPinnedTabRootBoundaryViolation(intent)) {
+    dockviewLayoutState.pendingRootBoundaryDrop = null;
+    dockviewClearRootBoundaryPreview();
+    event.preventDefault?.();
+    return;
+  }
   const paneIntent = intent ? null : dockviewPaneContentDropIntent(event);
   dockviewLayoutState.pendingRootBoundaryDrop = intent ? {
     ...intent,
@@ -17537,16 +17579,31 @@ function dockviewTabInsertionInfo(event) {
   const adjustedIndex = insertionIndex - (sourceSlot === targetSlot && sourceIndex >= 0 && sourceIndex < insertionIndex ? 1 : 0);
   const targetItems = tabItems.filter(tab => tab && tab !== item);
   const pinnedBoundary = targetItems.filter(tabIsPinned).length;
-  return {item, targetSlot, sourceSlot, sourceIndex, targetIndex, insertionIndex, adjustedIndex, pinnedBoundary};
+  return {item, targetSlot, sourceSlot, sourceIndex, targetIndex, tabItems, targetItems, position, insertionIndex, adjustedIndex, pinnedBoundary};
 }
 
 function dockviewTabDropViolatesPinnedPartition(event) {
   if (dockviewTabEdgeReorderIntent(event)) return false;
   const info = dockviewTabInsertionInfo(event);
   if (!info || !isPinnableTab(info.item)) return false;
+  if (dockviewPinnedTabCrossPaneViolation(info)) return true;
   return tabIsPinned(info.item)
     ? info.adjustedIndex > info.pinnedBoundary
     : info.adjustedIndex < info.pinnedBoundary;
+}
+
+function dockviewPinnedTabCrossPaneViolation(info) {
+  if (!info?.item || !tabIsPinned(info.item) || !info.sourceSlot) return false;
+  if (info.createsPane === true) return true;
+  return Boolean(info.targetSlot && info.targetSlot !== info.sourceSlot);
+}
+
+function dockviewPinnedTabRootBoundaryViolation(intent) {
+  return dockviewPinnedTabCrossPaneViolation({
+    item: intent?.item || '',
+    sourceSlot: intent?.sourceSlot || '',
+    createsPane: true,
+  });
 }
 
 function dockviewAdjacentEdgeTabInsertIndex(sourceIndex, targetIndex, tabCount) {
@@ -17608,6 +17665,7 @@ function dockviewBeginTabPointerDrag(event, item) {
 function dockviewFinishTabPointerDrag(event) {
   const state = dockviewLayoutState.tabPointerDrag;
   dockviewLayoutState.tabPointerDrag = null;
+  dockviewSetInvalidTabDropPreview(false);
   if (state) dockviewSuppressPanePointerDrag();
   if (!state?.item || !state.slot) return;
   const dx = Math.abs((Number(event.clientX) || 0) - state.x);
@@ -17848,7 +17906,9 @@ function dockviewInstallHostResizeObserver(host, api) {
 }
 
 function dockviewInstallTabPointerReorderFallback() {
-  const trackPane = event => dockviewTrackPanePointerDrag(event);
+  const track = event => {
+    dockviewTrackPanePointerDrag(event);
+  };
   const finish = event => {
     dockviewFinishTabPointerDrag(event);
     dockviewFinishPanePointerDrag(event);
@@ -17856,15 +17916,15 @@ function dockviewInstallTabPointerReorderFallback() {
   document.addEventListener('pointerup', finish, true);
   document.addEventListener('pointercancel', finish, true);
   document.addEventListener('mouseup', finish, true);
-  document.addEventListener('pointermove', trackPane, true);
-  document.addEventListener('mousemove', trackPane, true);
+  document.addEventListener('pointermove', track, true);
+  document.addEventListener('mousemove', track, true);
   return {
     dispose() {
       document.removeEventListener('pointerup', finish, true);
       document.removeEventListener('pointercancel', finish, true);
       document.removeEventListener('mouseup', finish, true);
-      document.removeEventListener('pointermove', trackPane, true);
-      document.removeEventListener('mousemove', trackPane, true);
+      document.removeEventListener('pointermove', track, true);
+      document.removeEventListener('mousemove', track, true);
     },
   };
 }
@@ -17965,16 +18025,17 @@ function dockviewInit() {
     dockviewInstallTabPointerReorderFallback(),
     api.onDidLayoutChange(() => queueDockviewLayoutAdoption()),
     api.onDidActivePanelChange(panel => {
+      if (dockviewLayoutState.applyingFromLayout) return;
       const item = panel?.id || '';
       if (!item) return;
-      if (isTmuxSession(item)) noteFileExplorerChangesSessionInteraction(item);
-      setFocusedPanelItem(item, {userInitiated: true});
+      setFocusedPanelItem(item);
     }),
     api.onWillShowOverlay(event => dockviewTrackRootBoundaryOverlay(event)),
     api.onWillDrop(event => {
       // Tab drops are handled here (or committed by dockview itself); stamp the gesture so the pinned
       // pointer-reorder FALLBACK stands down instead of double-applying (see dockviewFinishTabPointerDrag).
       if (event?.kind === 'tab') dockviewLayoutState.tabDropHandledAt = Date.now();
+      dockviewSetInvalidTabDropPreview(false);
       const edgeReorder = dockviewTabEdgeReorderIntent(event);
       if (edgeReorder) {
         dockviewLayoutState.pendingRootBoundaryDrop = null;
@@ -17998,6 +18059,12 @@ function dockviewInit() {
         return;
       }
       const rootIntent = dockviewRootBoundaryDropIntent(event);
+      if (dockviewPinnedTabRootBoundaryViolation(rootIntent)) {
+        dockviewLayoutState.pendingRootBoundaryDrop = null;
+        dockviewClearRootBoundaryPreview();
+        event.preventDefault();
+        return;
+      }
       if (rootIntent) {
         dockviewLayoutState.pendingRootBoundaryDrop = null;
         dockviewClearRootBoundaryPreview();
@@ -18193,7 +18260,12 @@ function adoptDockviewLayout() {
   dockviewLayoutState.syncQueued = false;
   const api = dockviewLayoutState.api;
   if (!api || dockviewLayoutState.applyingFromLayout) return;
-  const next = layoutSlotsFromDockviewJson(api.toJSON());
+  let next = layoutSlotsFromDockviewJson(api.toJSON());
+  const previousFinderSlot = slotForItem(fileExplorerItemId, layoutSlots);
+  if (previousFinderSlot && !itemInLayout(fileExplorerItemId, next)) {
+    next = layoutWithFileExplorerDockedLeft(next, {preferredSlot: previousFinderSlot});
+    dockviewLayoutState.reloadAfterAdoption = true;
+  }
   if (!layoutHasRestorableContent(next)) return;
   const nextSignature = layoutSlotsSignature(next);
   if (nextSignature === layoutSlotsSignature(layoutSlots)) {
@@ -18519,6 +18591,10 @@ function createDockviewTabRenderer() {
     for (const disposable of disposables) disposable?.dispose?.();
     disposables = [];
   };
+  const commitExplicitTabInteraction = () => {
+    if (isTmuxSession(item)) noteFileExplorerChangesSessionInteraction(item);
+    setFocusedPanelItem(item, {userInitiated: true});
+  };
   element.__yolomuxDockviewRefresh = render;
   element.addEventListener('pointerdown', event => {
     dragTimingReset();
@@ -18549,11 +18625,12 @@ function createDockviewTabRenderer() {
       if (shouldRefocus) focusPanel(item);
       return;
     }
-    setFocusedPanelItem(item, {userInitiated: true});
+    commitExplicitTabInteraction();
   });
   element.addEventListener('keydown', event => {
     if (!['Enter', ' '].includes(event.key)) return;
     event.preventDefault();
+    commitExplicitTabInteraction();
     api?.setActive?.();
   });
   element.addEventListener('dblclick', event => {
@@ -18946,7 +19023,7 @@ function prunePriorityForLayoutSlot(slot) {
 }
 
 function slotCanAutoPrune(slot) {
-  return !isFileExplorerItem(activeItemForSide(slot));
+  return !paneTabs(slot).some(isFileExplorerItem);
 }
 
 function smallLayoutSlotCandidate() {
@@ -22401,12 +22478,18 @@ function sessionFilesPayloadIsFinderWorktree(payload, session = '') {
   return (payload.from_ref || 'HEAD') === 'HEAD' && (payload.to_ref || 'current') === 'current';
 }
 
+function sessionFilesPayloadIsLoadedForSession(payload, session = '') {
+  if (!payload || payload.loaded !== true) return false;
+  return !session || String(payload.session || '') === String(session);
+}
+
 function switchFileExplorerChangesSession(session) {
   if (!session || !document.querySelector('.file-explorer-changes-panel')) return;
   rememberFileExplorerExplicitSyncSession(session);
   fileExplorerChangesSelectedSession = session;
   const cached = fileExplorerSessionFilesCache.get(sessionFilesCacheKey(session));
-  if (fileExplorerMode === 'diff' && cached?.payload) {
+  const cachedPayloadIsLoaded = sessionFilesPayloadIsLoadedForSession(cached?.payload, session);
+  if (fileExplorerMode === 'diff' && cachedPayloadIsLoaded) {
     setSessionFilesPayloadForDestination('finder', cached.payload);
     fileExplorerSessionFilesPayloadSignature = cached.signature || sessionFilesPayloadSignatureForPayload(cached.payload);
   } else if (fileExplorerMode !== 'diff' && sessionFilesPayloadIsFinderWorktree(fileExplorerSessionFilesPayload, session)) {
@@ -22416,8 +22499,9 @@ function switchFileExplorerChangesSession(session) {
     setSessionFilesPayloadForDestination('finder', pendingPayload);
     fileExplorerSessionFilesPayloadSignature = sessionFilesPayloadSignatureForPayload(pendingPayload);
   }
+  setSessionFilesLoadingForDestination('finder', !cachedPayloadIsLoaded);
   renderFileExplorerChangesPanels();
-  fetchSessionFiles({destination: 'finder', session, silent: true, force: true});
+  fetchSessionFiles({destination: 'finder', session, silent: true, force: true, background: cachedPayloadIsLoaded});
 }
 
 function noteFileExplorerChangesSessionInteraction(session) {
@@ -22508,6 +22592,7 @@ function renderSessionFilesDestination(destination, options = {}) {
 async function fetchSessionFiles(options = {}) {
   const destination = 'finder';
   const forceRefresh = options.force === true;
+  const backgroundRefresh = options.background === true;
   if (sessionFilesLoadingForDestination(destination) && !forceRefresh) return;
   const requestIsCurrent = fileExplorerSessionFilesGuard.begin();
   const session = options.session || fileExplorerSessionFilesTargetSession();
@@ -22521,7 +22606,7 @@ async function fetchSessionFiles(options = {}) {
     if (shouldRender) renderSessionFilesDestination(destination, sessionFilesRenderOptions(options));
     return;
   }
-  setSessionFilesLoadingForDestination(destination, true);
+  if (!backgroundRefresh) setSessionFilesLoadingForDestination(destination, true);
   if (!options.silent) statusEl.textContent = 'loading changed files...';
   if (!options.silent) {
     renderSessionFilesDestination(destination, {force: true});
@@ -22564,8 +22649,10 @@ async function fetchSessionFiles(options = {}) {
     setSessionFilesSignatureForDestination(destination, signature);
     if (!options.silent) statusErr(`changed files failed: ${esc(err)}`);
   } finally {
-    if (requestIsCurrent()) setSessionFilesLoadingForDestination(destination, false);
-    if (requestIsCurrent() && shouldRender) {
+    const current = requestIsCurrent();
+    const wasLoading = current && sessionFilesLoadingForDestination(destination);
+    if (current && !backgroundRefresh) setSessionFilesLoadingForDestination(destination, false);
+    if (current && (shouldRender || wasLoading)) {
       renderSessionFilesDestination(destination, sessionFilesRenderOptions(options));
       if (destination === 'finder') updateFileTreeGitStatusRows();
       renderPaneTabStrips();
@@ -22891,7 +22978,7 @@ function changesRepoCount(payload, files) {
 }
 
 function changesSummaryHtml(payload, files, session, loading, loaded) {
-  if (loading) return t('changes.loading');
+  if (loading) return changesLoadingHtml(session);
   if (!loaded) return t('changes.notLoaded');
   const fileCount = Array.isArray(files) ? files.length : 0;
   const repoCount = changesRepoCount(payload, files);
@@ -22899,6 +22986,16 @@ function changesSummaryHtml(payload, files, session, loading, loaded) {
   const count = tPlural('changes.fileCount', fileCount);
   const scope = session ? t('changes.inSession', {session: sessionLabel(session)}) : '';
   return `<span class="changes-summary-label">${esc(repos)}, ${esc(count)}${esc(scope)}</span>`;
+}
+
+function changesLoadingHtml(session = '') {
+  const base = t('changes.loading');
+  const label = session ? sessionLabel(session) : '';
+  const loadingText = label ? `${base.replace(/\s*(?:\.{3}|…)+\s*$/u, '')} ${label}...` : base;
+  return `<span class="changes-loading" aria-live="polite" aria-busy="true">
+    <span class="session-yolo-marker active working changes-loading-yolo" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span>
+    <span>${esc(loadingText)}</span>
+  </span>`;
 }
 
 function changesRepoMetaHtml(repoInfo, options = {}) {
@@ -22933,7 +23030,7 @@ function changesComparisonHeaderHtml(payload, files, options = {}) {
   const loaded = payload?.loaded === true;
   const loading = options.loading === true;
   if (options.compact) {
-    if (loading) return `<section class="changes-comparison-head compact">${esc(t('changes.loading'))}</section>`;
+    if (loading) return `<section class="changes-comparison-head compact">${changesLoadingHtml(payload?.session || '')}</section>`;
     if (!loaded) return `<section class="changes-comparison-head compact">${esc(t('changes.notLoaded'))}</section>`;
     return '';
   }

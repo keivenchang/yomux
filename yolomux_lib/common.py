@@ -10,9 +10,11 @@ Python side so it can run from a normal host checkout.
 from __future__ import annotations
 
 import collections
+import logging
 import os
 import re
 import signal
+import shutil
 import socket
 import subprocess
 from dataclasses import dataclass
@@ -34,7 +36,7 @@ DEFAULT_ROWS = 36
 MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
-YOLOMUX_VERSION = "0.3.8"
+YOLOMUX_VERSION = "0.3.9"
 SUMMARY_LOOKBACK_SECONDS = 3600
 SUMMARY_MAX_PROMPT_CHARS = 100_000
 SUMMARY_CODEX_TIMEOUT_SECONDS = 600
@@ -71,6 +73,44 @@ SERVER_HOSTNAME = socket.gethostname()
 PACIFIC_TIME = ZoneInfo("America/Los_Angeles")
 _YOLOMUX_COMMIT_TIME_PT: str | None = None
 _YOLOMUX_COMMIT_SHA: str | None = None
+_AGENT_PATH_WARNING_KEYS: set[str] = set()
+
+
+def _path_entries(value: str) -> list[str]:
+    return [entry for entry in str(value or "").split(os.pathsep) if entry]
+
+
+def heal_server_path() -> str:
+    """Make agent CLIs installed under ~/.local/bin visible under stripped service environments."""
+    current_entries = _path_entries(os.environ.get("PATH", ""))
+    candidates: list[str] = []
+    for entry in _path_entries(os.environ.get("YOLOMUX_EXTRA_PATH", "")):
+        candidates.append(str(Path(entry).expanduser()))
+    local_bin = Path.home() / ".local" / "bin"
+    if local_bin.is_dir():
+        candidates.append(str(local_bin))
+    additions: list[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in current_entries and candidate not in additions:
+            additions.append(candidate)
+    if additions:
+        os.environ["PATH"] = os.pathsep.join([*additions, *current_entries])
+    return os.environ.get("PATH", "")
+
+
+def warn_unavailable_agent_commands_once(agents: tuple[str, ...] = ("claude", "codex")) -> None:
+    path = heal_server_path()
+    logger = logging.getLogger(__name__)
+    for agent in agents:
+        if shutil.which(agent):
+            continue
+        if agent in _AGENT_PATH_WARNING_KEYS:
+            continue
+        _AGENT_PATH_WARNING_KEYS.add(agent)
+        logger.warning("%s not found on server PATH=%s; agent will be greyed in the UI", agent, path)
+
+
+heal_server_path()
 
 
 def as_dict(value: Any) -> dict[str, Any]:

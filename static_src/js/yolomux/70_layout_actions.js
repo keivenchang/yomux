@@ -23,14 +23,22 @@ function layoutWithoutItem(item, options = {}) {
   return layoutWithoutItemFromSlots(item, layoutSlots, options);
 }
 
-function removeSessionFromLayout(item) {
+function fileExplorerHiddenStatusMessage() {
+  return t('finder.hiddenStatus', {name: fileExplorerLabel(), keys: appShortcutText('B')});
+}
+
+function hiddenFromLayoutStatusMessage(item) {
+  return isFileExplorerItem(item) ? fileExplorerHiddenStatusMessage() : `${itemLabel(item)} hidden from layout`;
+}
+
+function removeSessionFromLayout(item, options = {}) {
   if (!itemInLayout(item)) return;
   const isFiles = isFileExplorerItem(item);
   applyLayoutSlots(layoutWithoutItem(item, {
     preserveRemovedSlot: !isFiles,
     preservePlaceholders: !isFiles,
   }), {
-    message: `${itemLabel(item)} hidden from layout`,
+    message: options.message || hiddenFromLayoutStatusMessage(item),
   });
 }
 
@@ -248,14 +256,21 @@ function setLayoutToWallPanes() {
   applyLayoutMode('wall');
 }
 
-function layoutWithFileExplorerDockedLeft(slots = layoutSlots) {
-  const right = compactLayoutSlots(layoutWithoutItemFromSlots(fileExplorerItemId, slots, {preservePlaceholders: true}));
+function layoutWithFileExplorerDockedLeft(slots = layoutSlots, options = {}) {
+  const rightRaw = layoutWithoutItemFromSlots(fileExplorerItemId, slots, {
+    preservePlaceholders: options.preservePlaceholders !== false,
+  });
+  const right = options.preservePlaceholders === false && !paneItems(rightRaw).length
+    ? rightRaw
+    : compactLayoutSlots(rightRaw);
   const rightSlots = layoutSlotKeys(right).filter(slot => paneHasLayoutContent(slot, right));
   const next = emptyLayoutSlots();
   for (const slot of rightSlots) next[slot] = paneStateForLayoutSlot(slot, right);
   const used = new Set(rightSlots);
   const currentSlot = slotForItem(fileExplorerItemId, slots);
+  const preferredSlot = options.preferredSlot && !used.has(options.preferredSlot) ? options.preferredSlot : null;
   let finderSlot = currentSlot && !used.has(currentSlot) ? currentSlot : null;
+  if (!finderSlot) finderSlot = preferredSlot;
   if (!finderSlot) finderSlot = !used.has('left') ? 'left' : nextLayoutSlot(next);
   next[finderSlot] = paneStateWithTabs([fileExplorerItemId], fileExplorerItemId);
   next[layoutTreeKey] = rightSlots.length

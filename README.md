@@ -69,7 +69,9 @@ Open YOLOmux after setup. Existing tmux sessions appear as tabs. (The detailed p
 
 - Click a tab to show it in that pane. Use the `Tabs` menu to activate minimized or inactive tabs.
 - Drag a tab between pane tab bars to move it, drop near a pane edge to split that pane, or drop on the outer root edge for a full-span pane. Pane splits are percentage-based and encode into the shareable page URL.
+- Pinned tabs stay at the front of their pane and cannot be dragged into another pane.
 - Drag a Finder or Differ file row into a pane to open that file there; dropping near a pane edge opens it in a new split.
+- Finder / File Explorer is docked by default on fresh and sessions-only URLs. Hiding it with `Mod+B`, the close button, or File -> Finder shows the restore shortcut in the status line.
 - The pane info line shows one button per tmux window (`0:bash`, `1:codex`, ...); clicking a button switches that session to the matching tmux window. The pane toolbar shows transcripts (`Tx`), asks for an AI summary (`AI`), and opens the event log (`Log`).
 - Finder switches between the file tree and a full-pane `Differ` mode (per-repo FROM/TO diff controls). The root toggle defaults to `Sync`, which follows the focused session's affected repos and highlights changed paths.
 - A third `Tabber` mode lists open tabs and each tmux session's windows (and the paths each agent touched), sorted by most recent activity — click a session to focus it, a window row to switch tmux windows.

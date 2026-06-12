@@ -356,7 +356,7 @@ function layoutFromSessionList(values) {
     items.push(item);
     seen.add(item);
   }
-  return layoutSlotsForItems(items, configuredDefaultLayoutMode());
+  return layoutWithFileExplorerDockedLeft(layoutSlotsForItems(items, configuredDefaultLayoutMode()));
 }
 
 function layoutFromParam(raw, tabsRaw = '') {
@@ -646,7 +646,9 @@ function layoutWithDebugPaneActive(slots) {
 
 function defaultLayoutSlots() {
   const sorted = visibleSessions.slice().sort((left, right) => String(left).localeCompare(String(right)));
-  return layoutSlotsForItems(sorted, configuredDefaultLayoutMode());
+  return layoutWithFileExplorerDockedLeft(layoutSlotsForItems(sorted, configuredDefaultLayoutMode()), {
+    preservePlaceholders: false,
+  });
 }
 
 function layoutWithItems(value, items, preferredSlot = null) {

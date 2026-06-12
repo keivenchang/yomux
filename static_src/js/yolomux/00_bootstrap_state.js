@@ -15,6 +15,10 @@ function agentLoggedIn(agent) {
 function agentLoginCommand(agent) {
   return agentLoginCommands[agent] || '';
 }
+function agentUnavailableReason(agent) {
+  const entry = agentAuth[agent];
+  return entry?.unavailable_reason || '';
+}
 const accessRole = bootstrap.accessRole || 'admin';
 const readOnlyMode = accessRole !== 'admin';
 const devMode = bootstrap.dev === true;   // dev-velocity #1b: subscribe to /api/dev-reload + auto-reload

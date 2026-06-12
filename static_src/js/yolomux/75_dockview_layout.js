@@ -115,6 +115,7 @@ function dockviewPaneContentDropInfo(event) {
     targetSlot,
     targetRect: layoutSlotScreenRect(targetSlot),
     zone,
+    createsPane: layoutSplitZone(zone),
   };
   return {item, intent};
 }
@@ -123,12 +124,16 @@ function dockviewPaneContentDropIntent(event) {
   const info = dockviewPaneContentDropInfo(event);
   if (!info) return null;
   if (!layoutSplitZone(info.intent.zone)) return null;
+  if (dockviewPinnedTabCrossPaneViolation(info.intent)) return null;
   return dropIntentAllowsSession(info.item, info.intent) ? info.intent : null;
 }
 
 function dockviewShouldSuppressPaneContentDrop(event) {
   const info = dockviewPaneContentDropInfo(event);
-  return Boolean(info && !dropIntentAllowsSession(info.item, info.intent));
+  return Boolean(info && (
+    dockviewPinnedTabCrossPaneViolation(info.intent)
+      || !dropIntentAllowsSession(info.item, info.intent)
+  ));
 }
 
 function dockviewShouldSuppressReservedRootBoundary(event) {
@@ -143,6 +148,10 @@ function dockviewShouldSuppressReservedRootBoundary(event) {
 function dockviewClearRootBoundaryPreview() {
   if (!grid?.classList?.contains('drop-preview-root')) return;
   clearDropPreview();
+}
+
+function dockviewSetInvalidTabDropPreview(active) {
+  dockviewLayoutState.host?.classList?.toggle('dockview-invalid-tab-drop-preview', Boolean(active));
 }
 
 function dockviewShowRootBoundaryPreview(intent) {
@@ -161,10 +170,11 @@ function dockviewShowRootBoundaryPreview(intent) {
 }
 
 function dockviewTrackRootBoundaryOverlay(event) {
-  if (dockviewTabDropViolatesPinnedPartition(event)) {
+  const invalidTabDrop = dockviewTabDropViolatesPinnedPartition(event);
+  dockviewSetInvalidTabDropPreview(invalidTabDrop);
+  if (invalidTabDrop) {
     dockviewLayoutState.pendingRootBoundaryDrop = null;
     dockviewClearRootBoundaryPreview();
-    event.preventDefault?.();
     return;
   }
   if (dockviewTabDropWouldNoop(event)) {
@@ -174,6 +184,12 @@ function dockviewTrackRootBoundaryOverlay(event) {
     return;
   }
   const intent = dockviewRootBoundaryDropIntent(event);
+  if (dockviewPinnedTabRootBoundaryViolation(intent)) {
+    dockviewLayoutState.pendingRootBoundaryDrop = null;
+    dockviewClearRootBoundaryPreview();
+    event.preventDefault?.();
+    return;
+  }
   const paneIntent = intent ? null : dockviewPaneContentDropIntent(event);
   dockviewLayoutState.pendingRootBoundaryDrop = intent ? {
     ...intent,
@@ -251,16 +267,31 @@ function dockviewTabInsertionInfo(event) {
   const adjustedIndex = insertionIndex - (sourceSlot === targetSlot && sourceIndex >= 0 && sourceIndex < insertionIndex ? 1 : 0);
   const targetItems = tabItems.filter(tab => tab && tab !== item);
   const pinnedBoundary = targetItems.filter(tabIsPinned).length;
-  return {item, targetSlot, sourceSlot, sourceIndex, targetIndex, insertionIndex, adjustedIndex, pinnedBoundary};
+  return {item, targetSlot, sourceSlot, sourceIndex, targetIndex, tabItems, targetItems, position, insertionIndex, adjustedIndex, pinnedBoundary};
 }
 
 function dockviewTabDropViolatesPinnedPartition(event) {
   if (dockviewTabEdgeReorderIntent(event)) return false;
   const info = dockviewTabInsertionInfo(event);
   if (!info || !isPinnableTab(info.item)) return false;
+  if (dockviewPinnedTabCrossPaneViolation(info)) return true;
   return tabIsPinned(info.item)
     ? info.adjustedIndex > info.pinnedBoundary
     : info.adjustedIndex < info.pinnedBoundary;
+}
+
+function dockviewPinnedTabCrossPaneViolation(info) {
+  if (!info?.item || !tabIsPinned(info.item) || !info.sourceSlot) return false;
+  if (info.createsPane === true) return true;
+  return Boolean(info.targetSlot && info.targetSlot !== info.sourceSlot);
+}
+
+function dockviewPinnedTabRootBoundaryViolation(intent) {
+  return dockviewPinnedTabCrossPaneViolation({
+    item: intent?.item || '',
+    sourceSlot: intent?.sourceSlot || '',
+    createsPane: true,
+  });
 }
 
 function dockviewAdjacentEdgeTabInsertIndex(sourceIndex, targetIndex, tabCount) {
@@ -322,6 +353,7 @@ function dockviewBeginTabPointerDrag(event, item) {
 function dockviewFinishTabPointerDrag(event) {
   const state = dockviewLayoutState.tabPointerDrag;
   dockviewLayoutState.tabPointerDrag = null;
+  dockviewSetInvalidTabDropPreview(false);
   if (state) dockviewSuppressPanePointerDrag();
   if (!state?.item || !state.slot) return;
   const dx = Math.abs((Number(event.clientX) || 0) - state.x);
@@ -562,7 +594,9 @@ function dockviewInstallHostResizeObserver(host, api) {
 }
 
 function dockviewInstallTabPointerReorderFallback() {
-  const trackPane = event => dockviewTrackPanePointerDrag(event);
+  const track = event => {
+    dockviewTrackPanePointerDrag(event);
+  };
   const finish = event => {
     dockviewFinishTabPointerDrag(event);
     dockviewFinishPanePointerDrag(event);
@@ -570,15 +604,15 @@ function dockviewInstallTabPointerReorderFallback() {
   document.addEventListener('pointerup', finish, true);
   document.addEventListener('pointercancel', finish, true);
   document.addEventListener('mouseup', finish, true);
-  document.addEventListener('pointermove', trackPane, true);
-  document.addEventListener('mousemove', trackPane, true);
+  document.addEventListener('pointermove', track, true);
+  document.addEventListener('mousemove', track, true);
   return {
     dispose() {
       document.removeEventListener('pointerup', finish, true);
       document.removeEventListener('pointercancel', finish, true);
       document.removeEventListener('mouseup', finish, true);
-      document.removeEventListener('pointermove', trackPane, true);
-      document.removeEventListener('mousemove', trackPane, true);
+      document.removeEventListener('pointermove', track, true);
+      document.removeEventListener('mousemove', track, true);
     },
   };
 }
@@ -679,16 +713,17 @@ function dockviewInit() {
     dockviewInstallTabPointerReorderFallback(),
     api.onDidLayoutChange(() => queueDockviewLayoutAdoption()),
     api.onDidActivePanelChange(panel => {
+      if (dockviewLayoutState.applyingFromLayout) return;
       const item = panel?.id || '';
       if (!item) return;
-      if (isTmuxSession(item)) noteFileExplorerChangesSessionInteraction(item);
-      setFocusedPanelItem(item, {userInitiated: true});
+      setFocusedPanelItem(item);
     }),
     api.onWillShowOverlay(event => dockviewTrackRootBoundaryOverlay(event)),
     api.onWillDrop(event => {
       // Tab drops are handled here (or committed by dockview itself); stamp the gesture so the pinned
       // pointer-reorder FALLBACK stands down instead of double-applying (see dockviewFinishTabPointerDrag).
       if (event?.kind === 'tab') dockviewLayoutState.tabDropHandledAt = Date.now();
+      dockviewSetInvalidTabDropPreview(false);
       const edgeReorder = dockviewTabEdgeReorderIntent(event);
       if (edgeReorder) {
         dockviewLayoutState.pendingRootBoundaryDrop = null;
@@ -712,6 +747,12 @@ function dockviewInit() {
         return;
       }
       const rootIntent = dockviewRootBoundaryDropIntent(event);
+      if (dockviewPinnedTabRootBoundaryViolation(rootIntent)) {
+        dockviewLayoutState.pendingRootBoundaryDrop = null;
+        dockviewClearRootBoundaryPreview();
+        event.preventDefault();
+        return;
+      }
       if (rootIntent) {
         dockviewLayoutState.pendingRootBoundaryDrop = null;
         dockviewClearRootBoundaryPreview();
@@ -907,7 +948,12 @@ function adoptDockviewLayout() {
   dockviewLayoutState.syncQueued = false;
   const api = dockviewLayoutState.api;
   if (!api || dockviewLayoutState.applyingFromLayout) return;
-  const next = layoutSlotsFromDockviewJson(api.toJSON());
+  let next = layoutSlotsFromDockviewJson(api.toJSON());
+  const previousFinderSlot = slotForItem(fileExplorerItemId, layoutSlots);
+  if (previousFinderSlot && !itemInLayout(fileExplorerItemId, next)) {
+    next = layoutWithFileExplorerDockedLeft(next, {preferredSlot: previousFinderSlot});
+    dockviewLayoutState.reloadAfterAdoption = true;
+  }
   if (!layoutHasRestorableContent(next)) return;
   const nextSignature = layoutSlotsSignature(next);
   if (nextSignature === layoutSlotsSignature(layoutSlots)) {
@@ -1233,6 +1279,10 @@ function createDockviewTabRenderer() {
     for (const disposable of disposables) disposable?.dispose?.();
     disposables = [];
   };
+  const commitExplicitTabInteraction = () => {
+    if (isTmuxSession(item)) noteFileExplorerChangesSessionInteraction(item);
+    setFocusedPanelItem(item, {userInitiated: true});
+  };
   element.__yolomuxDockviewRefresh = render;
   element.addEventListener('pointerdown', event => {
     dragTimingReset();
@@ -1263,11 +1313,12 @@ function createDockviewTabRenderer() {
       if (shouldRefocus) focusPanel(item);
       return;
     }
-    setFocusedPanelItem(item, {userInitiated: true});
+    commitExplicitTabInteraction();
   });
   element.addEventListener('keydown', event => {
     if (!['Enter', ' '].includes(event.key)) return;
     event.preventDefault();
+    commitExplicitTabInteraction();
     api?.setActive?.();
   });
   element.addEventListener('dblclick', event => {
