@@ -288,6 +288,10 @@ async function collapseAllFileExplorerDirectories() {
 }
 
 async function setAllFileTreeDirectoriesExpanded(source, expand) {
+  if (fileExplorerMode === 'tabber') {
+    setAllTabberCollapsed(!expand);
+    return;
+  }
   if (source?.closest?.('.file-explorer-changes-panel')) {
     setAllFileExplorerChangesDirectoriesExpanded(expand);
     return;
@@ -307,7 +311,11 @@ function bindFileExplorerHeaderActions(container = document) {
     if (action.matches('[data-file-explorer-new-file]')) createFileExplorerFile();
     else if (action.matches('[data-file-explorer-new-folder]')) createFileExplorerFolder();
     else if (action.matches('[data-file-explorer-refresh]')) {
-      if (fileExplorerMode === 'diff') fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), force: true});
+      if (fileExplorerMode === 'tabber') {
+        tabberSessionFilesCache.clear();
+        fetchTabberActivity();
+        refreshTabberPanels();
+      } else if (fileExplorerMode === 'diff') fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), force: true});
       else {
         refreshFileExplorerTrees();
         fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
@@ -319,6 +327,7 @@ function bindFileExplorerHeaderActions(container = document) {
         .catch(error => statusErr(`tree action failed: ${esc(error)}`));
     } else if (action.matches('[data-file-explorer-tree-dates]')) {
       cycleFileExplorerTreeDateMode();
+      if (fileExplorerMode === 'tabber') refreshTabberPanels();
     }
   });
   container.addEventListener('change', event => {
@@ -328,7 +337,8 @@ function bindFileExplorerHeaderActions(container = document) {
     event.stopPropagation();
     fileExplorerTreeSortMode = ['az', 'za', 'newest', 'oldest'].includes(select.value) ? select.value : 'az';
     writeStoredFileExplorerTreeSortMode(fileExplorerTreeSortMode);
-    refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+    if (fileExplorerMode === 'tabber') refreshTabberPanels();
+    else refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
   });
 }
 

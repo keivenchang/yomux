@@ -65,7 +65,7 @@ const fileExplorerRepoInfoStorageKey = 'yolomux.fileExplorer.repoInfo.v1';
 const fileExplorerIndexedDirsStorageKey = 'yolomux.fileExplorer.indexedDirs.v1';
 const fileExplorerIndexedDirsMigratedKey = 'yolomux.fileExplorer.indexedDirs.migrated.v1';  // C11 #3
 const fileExplorerModeStorageKey = 'yolomux.fileExplorerMode.v1';
-const fileExplorerTabberExpandedStorageKey = 'yolomux.fileExplorer.tabberExpanded.v1';
+const fileExplorerTabberCollapsedStorageKey = 'yolomux.fileExplorer.tabberCollapsed.v1';
 const legacyFileExplorerChangesHiddenStorageKey = 'yolomux.fileExplorerChangesHidden';
 const uploadedFilesCollapsedStorageKey = 'yolomux.modifiedFiles.uploadedCollapsed.v1';
 const changesFolderCollapsedStorageKey = 'yolomux.modifiedFiles.folderCollapsed.v1';
@@ -282,10 +282,11 @@ let uploadedFilesCollapsed = (() => {
   }
 })();
 let changesFolderCollapsed = readStoredSet(changesFolderCollapsedStorageKey);
-// Tabber (Finder pane 3rd mode) expansion set, keyed by synthetic node path (session:/window:/pane:/repo:).
-// Persisted so the open tree survives reloads; the Tabber threads this through the shared row pipeline
-// as options.expandedSet instead of the in-memory fileExplorerExpanded used by fixed-root Finder mode.
-const fileExplorerTabberExpanded = readStoredSet(fileExplorerTabberExpandedStorageKey);
+// Tabber (Finder pane 3rd mode) COLLAPSED set, keyed by synthetic node path (s_<id>/w_<i>/r_<n>).
+// The Tabber defaults to fully expanded; collapsing a node adds it here (like the Differ's
+// changesFolderCollapsed). Persisted so the open/closed tree survives reloads. Threaded through the
+// shared row pipeline as options.collapsedSet.
+const fileExplorerTabberCollapsed = readStoredSet(fileExplorerTabberCollapsedStorageKey);
 // Tabber activity ledger snapshot (GET /api/activity): {activity: {sessionKey|session:window: ActivityRecord}}.
 // Drives per-row recency timestamps + most-recent-first sort. Refreshed only while the Tabber is open.
 let tabberActivityPayload = {activity: {}};
@@ -8904,7 +8905,11 @@ function sortedFileTreeEntries(entries, sortMode = fileExplorerTreeSortMode, opt
       const mtimeResult = Number(right.mtime || 0) - Number(left.mtime || 0);
       if (mtimeResult !== 0) return mode === 'newest' ? mtimeResult : -mtimeResult;
     }
-    return String(left.name || '').localeCompare(String(right.name || ''), undefined, {numeric: true, sensitivity: 'base'}) * direction;
+    // sortName lets a caller (the Tabber) sort A-Z/Z-A by the human label while the row's name stays a
+    // stable synthetic path key; Finder/Differ entries have no sortName and fall back to name unchanged.
+    const leftKey = left.sortName != null ? String(left.sortName) : String(left.name || '');
+    const rightKey = right.sortName != null ? String(right.sortName) : String(right.name || '');
+    return leftKey.localeCompare(rightKey, undefined, {numeric: true, sensitivity: 'base'}) * direction;
   });
 }
 
@@ -9325,10 +9330,13 @@ function renderTreeChildren(container, parentPath, entries, depth, options = {})
     updateFileTreeRow(row, parentPath, entry, depth, renderOptions);
     nextNodes.push(row);
     const isDifferDir = renderOptions.differMode === true && entry.kind === 'dir';
-    // expandedSet lets a caller (the Tabber) drive recursion off its own persisted set instead of the
-    // in-memory fileExplorerExpanded used by fixed-root Finder mode — differences as data, no mode branch.
+    // collapsedSet (the Tabber) = default-expanded, collapse to opt out; expandedSet = default-collapsed,
+    // expand to opt in (fixed-root Finder uses fileExplorerExpanded). Differences as data, no mode branch.
+    const collapseSet = renderOptions.collapsedSet instanceof Set ? renderOptions.collapsedSet : null;
     const expandSet = renderOptions.expandedSet instanceof Set ? renderOptions.expandedSet : fileExplorerExpanded;
-    if (entry.kind === 'dir' && (isDifferDir ? !changesFolderCollapsed.has(fullPath) : (renderOptions.autoExpand === true || expandSet.has(fullPath)))) {
+    const dirExpanded = collapseSet ? !collapseSet.has(fullPath)
+      : (isDifferDir ? !changesFolderCollapsed.has(fullPath) : (renderOptions.autoExpand === true || expandSet.has(fullPath)));
+    if (entry.kind === 'dir' && dirExpanded) {
       const childEntries = entriesByDir?.get(normalizeDirectoryPath(fullPath));
       const existingChildContainer = childContainerForRow(row, fullPath);
       const childContainer = existingChildContainer || (Array.isArray(childEntries) ? createFileTreeChildContainer(fullPath) : null);
@@ -9842,39 +9850,35 @@ function fileExplorerIndexedSearchRoots(defaultRoot = fileQuickOpenRootForSearch
 }
 
 // ---------------------------------------------------------------------------
-// Tabber — the Finder pane's third mode (Finder / Differ / Tabber). A live tree of everything open:
-// tmux sessions (sorted first) -> their tmux windows -> each window's panes (foreground process + cwd).
+// Tabber — the Finder pane's third mode (Finder / Differ / Tabber). A live, default-expanded tree:
+// tmux sessions (level 0) -> their tmux windows (level 1, index:process, the current window marked) -> for
+// claude/codex windows, the paths that agent touched grouped by repo (level 2/3, from /api/session-files).
 // Rows render through the SHARED row pipeline (renderTreeChildren -> updateFileTreeRow ->
-// updateFileTreeRowContents) via mode:'tabber' entries whose display values are precomputed here as
-// data (B2/B3 of DOIT.58). This slice sources purely from transcriptMeta (no new fetch); the per-session
-// changed-paths level (repos + branches + files from /api/session-files) and the activity-recency sort
-// land in the follow-up (B4 / level 3).
+// updateFileTreeRowContents) via a mode:'tabber' option whose display values are precomputed as data; the
+// collapse state is a persisted COLLAPSED set (default expanded), times come from the activity ledger with
+// parent = max(child), and sort honors the active Finder sort (label for A-Z, mtime for recent).
 // ---------------------------------------------------------------------------
 
 function tabberPad(value) {
   return String(value).padStart(5, '0');
 }
 
-function persistTabberExpanded() {
-  storageSet(fileExplorerTabberExpandedStorageKey, JSON.stringify(Array.from(fileExplorerTabberExpanded).sort()));
-}
-
-// Sanitize a session id / index into a path-safe token so synthetic node paths are STABLE per identity
-// (session add/remove must not shift another session's path, or its persisted expansion would jump rows).
 function tabberPathToken(value) {
   return String(value).replace(/[^A-Za-z0-9._-]/g, '_');
 }
 
-// Recency for a ledger key (session "6" or session:window "6:1") = the later of the last admin keystroke
-// and the last agent-active tick. 0 when the key has no ledger entry yet (sorts last; mod-time fallback).
+function persistTabberCollapsed() {
+  storageSet(fileExplorerTabberCollapsedStorageKey, JSON.stringify(Array.from(fileExplorerTabberCollapsed).sort()));
+}
+
+// Recency for a ledger key (session "6" or session:window "6:1") = the latest of last typed / agent-active
+// / output. 0 when the key has no ledger entry yet.
 function tabberRecency(key) {
   const rec = tabberActivityPayload?.activity?.[key];
   if (!rec) return 0;
-  return Math.max(Number(rec.last_user_input_ts || 0), Number(rec.last_agent_active_ts || 0));
+  return Math.max(Number(rec.last_user_input_ts || 0), Number(rec.last_agent_active_ts || 0), Number(rec.last_output_ts || 0));
 }
 
-// Pull the activity-ledger snapshot (GET /api/activity, readonly-allowed) and re-render the open Tabber.
-// Polled only while the Tabber is the active mode (wired in setFileExplorerMode).
 async function fetchTabberActivity() {
   try {
     const payload = await apiFetchJson('/api/activity', {cache: 'no-store'});
@@ -9887,15 +9891,13 @@ async function fetchTabberActivity() {
   if (fileExplorerMode === 'tabber') refreshTabberPanels();
 }
 
-// Level-3 changed-paths cache, keyed by session. Populated lazily when a session row is expanded so the
-// Tabber never fans out N session-files fetches up front. Each entry: {files:[...], loaded:true}.
+// Level-3 changed-paths cache, keyed by session (lazily fetched; never disturbs the Differ target).
 const tabberSessionFilesCache = new Map();
 const tabberSessionFilesInFlight = new Set();
 
-// Lazy per-session fetch of the touched paths (GET /api/session-files), cached locally so it never
-// disturbs the Differ's committed target. Re-renders the Tabber when the data lands.
-async function fetchTabberSessionFiles(session) {
-  if (!session || tabberSessionFilesInFlight.has(session)) return;
+async function fetchTabberSessionFiles(session, options = {}) {
+  if (!session) return;
+  if (!options.force && (tabberSessionFilesCache.has(session) || tabberSessionFilesInFlight.has(session))) return;
   tabberSessionFilesInFlight.add(session);
   try {
     const payload = await apiFetchJson(`/api/session-files?session=${encodeURIComponent(session)}&hours=24`, {cache: 'no-store'});
@@ -9908,57 +9910,7 @@ async function fetchTabberSessionFiles(session) {
   if (fileExplorerMode === 'tabber') refreshTabberPanels();
 }
 
-// Repo + file entries (level 3/4) for a session's touched paths, grouped by repo root. Repo rows carry the
-// session's git branch (when it is that repo) + a dirty marker; file rows carry abs_path/status for opening.
-function tabberSessionPathEntries(session, sessionPath, entriesByDir, gitBranch, gitRoot) {
-  const cached = tabberSessionFilesCache.get(session);
-  if (!cached || !cached.loaded || !cached.files.length) return [];
-  const byRepo = new Map();
-  for (const file of cached.files) {
-    if (file.uploaded === true) continue;
-    const repo = String(file.repo || '').trim() || 'Outside repo';
-    if (!byRepo.has(repo)) byRepo.set(repo, []);
-    byRepo.get(repo).push(file);
-  }
-  const repoEntries = [];
-  let repoPos = 0;
-  for (const [repo, files] of byRepo) {
-    const repoName = `r_${tabberPad(repoPos++)}`;
-    const repoNodePath = `${sessionPath}/${repoName}`;
-    const isSessionRepo = repo && gitRoot && normalizeDirectoryPath(repo) === normalizeDirectoryPath(gitRoot);
-    const repoLabel = repo === 'Outside repo' ? repo : (basenameOf(repo) || repo);
-    const repoRecency = files.reduce((max, f) => Math.max(max, Number(f.mtime || 0)), 0);
-    repoEntries.push({
-      name: repoName,
-      kind: 'dir',
-      mtime: repoRecency,
-      tabber: {type: 'repo', session, repoRoot: repo === 'Outside repo' ? '' : repo, label: repoLabel, icon: '◆', statusText: isSessionRepo ? gitBranch : ''},
-    });
-    entriesByDir.set(normalizeDirectoryPath(repoNodePath), files
-      .slice()
-      .sort((a, b) => Number(b.mtime || 0) - Number(a.mtime || 0))
-      .map((file, filePos) => ({
-        name: `f_${tabberPad(filePos)}`,
-        kind: 'file',
-        mtime: Number(file.mtime || 0),
-        tabber: {
-          type: 'path',
-          session,
-          label: String(file.path || file.abs_path || '').split('/').pop() || file.path || '',
-          detail: file.path || '',
-          icon: '·',
-          openFile: file.abs_path || '',
-          openStatus: String(file.status || '').toUpperCase(),
-          openRepo: file.repo || '',
-          statusText: String(file.status || '').toUpperCase(),
-        },
-      })));
-  }
-  return repoEntries;
-}
-
-// Tabber level 0: session_order first (the user's tab order), then any remaining sessions, filtered to
-// live tmux sessions that actually have panes.
+// Tabber level 0: session_order first, then any remaining live tmux sessions with panes.
 function tabberOrderedSessions() {
   const order = Array.isArray(transcriptMeta.session_order) ? transcriptMeta.session_order : [];
   const all = transcriptMeta.sessions && typeof transcriptMeta.sessions === 'object' ? Object.keys(transcriptMeta.sessions) : [];
@@ -9975,25 +9927,53 @@ function tabberOrderedSessions() {
   return ordered;
 }
 
-// A tmux window's panes (level 2), sorted by pane index.
-function tabberWindowPanes(panes, windowIndex) {
-  return (Array.isArray(panes) ? panes : [])
-    .filter(pane => tmuxWindowNumber(pane.window) === windowIndex)
-    .sort((left, right) => (tmuxWindowNumber(left.pane) ?? 0) - (tmuxWindowNumber(right.pane) ?? 0));
+function tabberWindowIsAgent(name) {
+  const key = tmuxWindowAgentKey(name);
+  return key === 'claude' || key === 'codex';
 }
 
-function tabberPaneProcessLabel(pane) {
-  const process = String(pane?.process_label || '').trim();
-  if (process) return process;
-  const inferred = processLabelFromCommand(pane?.command || '');
-  return String(inferred || pane?.command || '').trim() || 'shell';
+// Repo group + file entries (level 2/3) for the paths a session's agent touched, attached under an agent
+// window. Repo rows carry the session's git branch; file rows carry abs_path/status/windowIndex for opening.
+function tabberRepoEntriesForWindow(session, windowPath, windowIndex, entriesByDir, gitBranch, gitRoot) {
+  const cached = tabberSessionFilesCache.get(session);
+  if (!cached || !cached.loaded || !cached.files.length) return [];
+  const byRepo = new Map();
+  for (const file of cached.files) {
+    if (file.uploaded === true) continue;
+    const repo = String(file.repo || '').trim() || 'Outside repo';
+    if (!byRepo.has(repo)) byRepo.set(repo, []);
+    byRepo.get(repo).push(file);
+  }
+  const repoEntries = [];
+  let repoPos = 0;
+  for (const [repo, files] of byRepo) {
+    const repoName = `r_${tabberPad(repoPos++)}`;
+    const repoNodePath = `${windowPath}/${repoName}`;
+    const isSessionRepo = repo !== 'Outside repo' && gitRoot && normalizeDirectoryPath(repo) === normalizeDirectoryPath(gitRoot);
+    const repoLabel = repo === 'Outside repo' ? repo : (basenameOf(repo) || repo);
+    const repoMtime = files.reduce((max, file) => Math.max(max, Number(file.mtime || 0)), 0);
+    repoEntries.push({
+      name: repoName, kind: 'dir', mtime: repoMtime, sortName: repoLabel,
+      tabber: {type: 'repo', session, windowIndex, repoRoot: repo === 'Outside repo' ? '' : repo, label: repoLabel, icon: '◆', statusText: isSessionRepo ? gitBranch : ''},
+    });
+    entriesByDir.set(normalizeDirectoryPath(repoNodePath), files
+      .slice()
+      .sort((left, right) => Number(right.mtime || 0) - Number(left.mtime || 0))
+      .map((file, filePos) => {
+        const rel = String(file.path || file.abs_path || '');
+        const base = rel.split('/').pop() || rel;
+        return {
+          name: `f_${tabberPad(filePos)}`, kind: 'file', mtime: Number(file.mtime || 0), sortName: base,
+          tabber: {type: 'path', session, windowIndex, label: base, detail: file.path || '', icon: '·', openFile: file.abs_path || '', openStatus: String(file.status || '').toUpperCase(), openRepo: file.repo || '', statusText: String(file.status || '').toUpperCase()},
+        };
+      }));
+  }
+  return repoEntries;
 }
 
-// Build the Tabber tree as shared-pipeline entries + an entriesByDir map keyed by synthetic node path.
-// Node names are id-based + path-safe (s_<session> / w_<index> / p_<index>) so a node's path is STABLE
-// across session add/remove (persisted expansion stays put). Display order comes from entry.mtime (ledger
-// recency, most-recent-first via treeSortMode 'newest'), NOT the name; the human label + action data ride
-// in entry.tabber. Each entry carries mtime = its recency so the shared date column + sort both work.
+// Build the Tabber tree + an entriesByDir map keyed by STABLE id-based synthetic node paths
+// (s_<session>/w_<index>/r_<n>/f_<n>). Each entry carries mtime (ledger recency; parents inherit the max
+// child) for the date column + recency sort, and sortName (the human label) for A-Z/Z-A sort.
 function buildTabberTree() {
   const entriesByDir = new Map();
   const topEntries = [];
@@ -10003,72 +9983,49 @@ function buildTabberTree() {
     const sessionPath = `/${sessionName}`;
     const git = info?.project?.git;
     const branch = git?.branch ? shortBranch(git.branch) : '';
+    const gitRoot = git?.root || '';
     const sessionRecency = tabberRecency(session);
-    // The session row's time is the later of its ledger recency and its most-recent child (so an expanded
-    // session inherits its touched files' latest mod time even before the ledger has recorded typing there).
     const sessionEntry = {
-      name: sessionName,
-      kind: 'dir',
-      mtime: sessionRecency,
-      tabber: {
-        type: 'session',
-        session,
-        label: sessionLabel(session) || session,
-        detail: sessionWorkDescription(session, info, 60),
-        icon: '■',
-        statusText: branch,
-      },
+      name: sessionName, kind: 'dir', mtime: sessionRecency, sortName: sessionLabel(session) || session,
+      tabber: {type: 'session', session, label: sessionLabel(session) || session, detail: sessionWorkDescription(session, info, 60), icon: '■', statusText: branch},
     };
     topEntries.push(sessionEntry);
-    const windowRecords = tmuxWindowRecords(info.panes);
-    const windowEntries = windowRecords.map(record => ({
-      name: `w_${tabberPathToken(record.index)}`,
-      kind: 'dir',
-      mtime: tabberRecency(`${session}:${record.index}`),
-      tabber: {
-        type: 'window',
-        session,
-        windowIndex: record.index,
-        label: record.indexedNameLabel || `${record.indexText}:${record.nameLabel}`,
-        icon: '▢',
-        active: record.active === true,
-      },
-    }));
-    // Level 3/4: the session's touched paths (repo groups + files), lazily fetched when expanded.
-    const repoEntries = tabberSessionPathEntries(session, sessionPath, entriesByDir, branch, git?.root || '');
-    const childMtimes = [...windowEntries, ...repoEntries].map(child => Number(child.mtime || 0));
-    sessionEntry.mtime = Math.max(sessionRecency, 0, ...childMtimes);
-    entriesByDir.set(normalizeDirectoryPath(sessionPath), [...windowEntries, ...repoEntries]);
-    windowRecords.forEach(record => {
-      const windowPath = `${sessionPath}/w_${tabberPathToken(record.index)}`;
-      const windowRecency = tabberRecency(`${session}:${record.index}`);
-      entriesByDir.set(normalizeDirectoryPath(windowPath), tabberWindowPanes(info.panes, record.index).map((pane, panePos) => {
-        const cwd = String(pane.current_path || '').trim();
-        const cwdBase = cwd ? basenameOf(cwd) : '';
-        const proc = tabberPaneProcessLabel(pane);
-        return {
-          name: `p_${tabberPathToken(panePos)}`,
-          kind: 'file',
-          mtime: windowRecency,
-          tabber: {
-            type: 'pane',
-            session,
-            windowIndex: record.index,
-            label: cwdBase ? `${proc} · ${cwdBase}` : proc,
-            detail: cwd,
-            icon: '·',
-            cwd,
-          },
-        };
-      }));
+    const windowEntries = tmuxWindowRecords(info.panes).map(record => {
+      const windowName = `w_${tabberPathToken(record.index)}`;
+      const windowPath = `${sessionPath}/${windowName}`;
+      const isAgent = tabberWindowIsAgent(record.name);
+      const repoEntries = isAgent ? tabberRepoEntriesForWindow(session, windowPath, record.index, entriesByDir, branch, gitRoot) : [];
+      const childMtime = repoEntries.reduce((max, entry) => Math.max(max, Number(entry.mtime || 0)), 0);
+      // Every window gets a time: its own ledger recency, else its touched-paths' latest, else the session's.
+      const windowMtime = Math.max(tabberRecency(`${session}:${record.index}`), childMtime, sessionRecency);
+      if (repoEntries.length) entriesByDir.set(normalizeDirectoryPath(windowPath), repoEntries);
+      return {
+        name: windowName, kind: repoEntries.length ? 'dir' : 'file', mtime: windowMtime,
+        sortName: record.indexedNameLabel || record.nameLabel,
+        tabber: {type: 'window', session, windowIndex: record.index, label: record.indexedNameLabel || `${record.indexText}:${record.nameLabel}`, icon: '▢', active: record.active === true, agentKey: tmuxWindowAgentKey(record.name)},
+      };
     });
+    entriesByDir.set(normalizeDirectoryPath(sessionPath), windowEntries);
+    const maxChild = windowEntries.reduce((max, entry) => Math.max(max, Number(entry.mtime || 0)), 0);
+    sessionEntry.mtime = Math.max(sessionRecency, maxChild);
   });
   return {entries: topEntries, entriesByDir};
+}
+
+function tabberSortMode() {
+  return ['az', 'za', 'newest', 'oldest'].includes(fileExplorerTreeSortMode) ? fileExplorerTreeSortMode : 'newest';
 }
 
 function renderTabberTree(groupsEl) {
   if (!groupsEl) return;
   const {entries, entriesByDir} = buildTabberTree();
+  // Default-expanded means every agent session's paths show up front; lazily fetch any uncached session
+  // that has a claude/codex window (the cheap /api/activity recency keeps polling; files fetch once).
+  for (const session of tabberOrderedSessions()) {
+    if (tabberSessionFilesCache.has(session)) continue;
+    const info = transcriptMeta.sessions?.[session];
+    if (tmuxWindowRecords(info?.panes).some(record => tabberWindowIsAgent(record.name))) fetchTabberSessionFiles(session);
+  }
   if (!entries.length) {
     groupsEl.innerHTML = '<div class="changes-empty">No open tmux sessions</div>';
     return;
@@ -10084,9 +10041,9 @@ function renderTabberTree(groupsEl) {
   }
   renderTreeChildren(container, '/', entries, 0, {
     mode: 'tabber',
-    expandedSet: fileExplorerTabberExpanded,
+    collapsedSet: fileExplorerTabberCollapsed,
     entriesByDir,
-    treeSortMode: 'newest', // most-recent activity first; ties fall back to the stable id-based name
+    treeSortMode: tabberSortMode(),
     includeHidden: true,
   });
 }
@@ -10098,12 +10055,11 @@ function refreshTabberPanels() {
   }
 }
 
-// Shared-pipeline row updater for Tabber nodes: same .file-tree-row DOM + updateFileTreeRowContents
-// column filler the Finder/Differ use, driven entirely by entry.tabber data.
+// Shared-pipeline row updater for Tabber nodes (same .file-tree-row DOM + updateFileTreeRowContents).
 function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   const data = entry.tabber || {};
   const expandable = entry.kind === 'dir';
-  const expanded = expandable && fileExplorerTabberExpanded.has(fullPath);
+  const expanded = expandable && !fileExplorerTabberCollapsed.has(fullPath);
   syncFileTreeRowKindClass(row, entry.kind);
   row.dataset.path = fullPath;
   row.dataset.kind = entry.kind;
@@ -10112,7 +10068,6 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   if (data.session) row.dataset.tabberSession = data.session; else delete row.dataset.tabberSession;
   if (data.windowIndex !== null && data.windowIndex !== undefined) row.dataset.tabberWindow = String(data.windowIndex);
   else delete row.dataset.tabberWindow;
-  if (data.cwd) row.dataset.tabberCwd = data.cwd; else delete row.dataset.tabberCwd;
   if (data.openFile) row.dataset.tabberOpenFile = data.openFile; else delete row.dataset.tabberOpenFile;
   if (data.openStatus) row.dataset.tabberOpenStatus = data.openStatus; else delete row.dataset.tabberOpenStatus;
   if (data.openRepo) row.dataset.tabberOpenRepo = data.openRepo; else delete row.dataset.tabberOpenRepo;
@@ -10130,57 +10085,82 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   row.classList.add('tabber-row');
   row.classList.toggle('tabber-active-window', data.type === 'window' && data.active === true);
   const icon = expandable ? (expanded ? '▾' : '▸') : (data.icon || '·');
+  // Mark the session's current tmux window with a filled dot after the label.
+  const label = (data.type === 'window' && data.active === true) ? `${data.label || entry.name} ●` : (data.label || entry.name);
   const detailHtml = data.detail ? `<span class="tabber-row-detail">${esc(shortText(data.detail, 48))}</span>` : '';
-  updateFileTreeRowContents(row, icon, data.label || entry.name, {
+  updateFileTreeRowContents(row, icon, label, {
     iconClass: 'tabber-icon',
     agentHtml: detailHtml,
     gitStatus: data.statusText || '',
     gitStatusTitle: data.statusText || '',
-    dateText: entry.mtime ? fileTreeMtimeText(entry) : '', // recency via the shared date column (None/Date/Ago)
+    dateText: entry.mtime ? fileTreeMtimeText(entry) : '',
   });
   // Tabber rows use delegation (bindTabberPanel) like the Differ; clear any stale Finder per-row handlers.
-  row.onpointerdown = null;
-  row.onpointerup = null;
-  row.onclick = null;
-  row.ondblclick = null;
-  row.oncontextmenu = null;
-  row.ondragstart = null;
-  row.ondragend = null;
+  row.onpointerdown = null; row.onpointerup = null; row.onclick = null; row.ondblclick = null;
+  row.oncontextmenu = null; row.ondragstart = null; row.ondragend = null;
   return fullPath;
 }
 
-function toggleTabberExpanded(fullPath) {
-  if (fileExplorerTabberExpanded.has(fullPath)) fileExplorerTabberExpanded.delete(fullPath);
-  else fileExplorerTabberExpanded.add(fullPath);
-  persistTabberExpanded();
+function toggleTabberCollapsed(fullPath) {
+  if (fileExplorerTabberCollapsed.has(fullPath)) fileExplorerTabberCollapsed.delete(fullPath);
+  else fileExplorerTabberCollapsed.add(fullPath);
+  persistTabberCollapsed();
 }
 
-// Delegated activation for Tabber rows (B5): expand/collapse a node, plus session-select (session row)
-// and window-switch (window row). Only explicit user intent reaches the focused-pane / tmux-window paths.
-function handleTabberRowActivate(row) {
+// Expand/collapse ALL Tabber nodes (the toolbar Expand all / Collapse all). Collapse-all records every
+// current dir node path; expand-all clears the collapsed set.
+function setAllTabberCollapsed(collapsed) {
+  if (!collapsed) {
+    fileExplorerTabberCollapsed.clear();
+  } else {
+    const {entries, entriesByDir} = buildTabberTree();
+    const walk = (list, parent) => {
+      for (const entry of list || []) {
+        if (entry.kind !== 'dir') continue;
+        const path = parent === '/' ? `/${entry.name}` : `${parent}/${entry.name}`;
+        fileExplorerTabberCollapsed.add(path);
+        walk(entriesByDir.get(normalizeDirectoryPath(path)), path);
+      }
+    };
+    walk(entries, '/');
+  }
+  persistTabberCollapsed();
+  refreshTabberPanels();
+}
+
+// Delegated activation for Tabber rows. Clicking the disclosure icon toggles a node; clicking the row body
+// acts: session -> open the session's tab; window -> open the tab + switch the tmux window; repo/path ->
+// point the Finder at it + open the tab + switch the window.
+function handleTabberRowActivate(row, event) {
   const fullPath = row.dataset.path;
   const type = row.dataset.tabberType;
   const session = row.dataset.tabberSession || '';
-  if (row.dataset.kind === 'dir' && fullPath) {
-    toggleTabberExpanded(fullPath);
-    // Expanding a session lazily loads its touched paths (level 3) on first open.
-    if (type === 'session' && session && fileExplorerTabberExpanded.has(fullPath) && !tabberSessionFilesCache.has(session)) {
-      fetchTabberSessionFiles(session);
-    }
+  const windowIndex = row.dataset.tabberWindow !== undefined ? tmuxWindowNumber(row.dataset.tabberWindow) : null;
+  const onDisclosure = Boolean(event?.target?.closest?.('.file-tree-icon'));
+  if (row.dataset.kind === 'dir' && fullPath && onDisclosure) {
+    toggleTabberCollapsed(fullPath);
     refreshTabberPanels();
+    return;
   }
+  const switchWindow = () => { if (session && windowIndex !== null) tmuxWindow(session, {windowIndex}, row.querySelector('.file-tree-name')?.textContent || session); };
   if (type === 'session' && session) {
-    focusTerminalFromUserAction(session);
-  } else if (type === 'window' && session && row.dataset.tabberWindow !== undefined) {
-    const windowIndex = tmuxWindowNumber(row.dataset.tabberWindow);
-    if (windowIndex !== null) tmuxWindow(session, {windowIndex}, row.querySelector('.file-tree-name')?.textContent || session);
+    selectSession(session, {userInitiated: true});
+  } else if (type === 'window' && session) {
+    selectSession(session, {userInitiated: true});
+    switchWindow();
   } else if (type === 'path' && row.dataset.tabberOpenFile) {
-    // B5: context-path click opens the file (diff view for changed files) in the focused pane.
-    openChangedFileInDiff(row.dataset.tabberOpenFile, session, row.dataset.tabberOpenStatus || '', row.dataset.tabberOpenRepo || '');
+    setFileExplorerMode('files');
+    openFileExplorerManualRoot(row.dataset.tabberOpenFile.replace(/\/[^/]*$/, '') || '/');
+    if (session) selectSession(session, {userInitiated: true});
+    switchWindow();
   } else if (type === 'repo' && row.dataset.tabberRepoRoot) {
-    // B5: repo row roots the Finder at the repo and switches back to file-tree mode.
     setFileExplorerMode('files');
     openFileExplorerManualRoot(row.dataset.tabberRepoRoot);
+    if (session) selectSession(session, {userInitiated: true});
+    switchWindow();
+  } else if (row.dataset.kind === 'dir' && fullPath) {
+    toggleTabberCollapsed(fullPath);
+    refreshTabberPanels();
   }
 }
 
@@ -10193,10 +10173,8 @@ function bindTabberPanel(panel) {
     if (!row || !panel.contains(row)) return;
     event.preventDefault();
     event.stopPropagation();
-    handleTabberRowActivate(row);
+    handleTabberRowActivate(row, event);
   });
-  // B5: right-click a touched-path row reuses the shared file context menu (copy/open/download/rename/
-  // delete), targeting the file's real abs_path rather than the synthetic node path.
   panel.addEventListener('contextmenu', event => {
     if (fileExplorerMode !== 'tabber') return;
     const row = event.target.closest?.('.file-tree-row[data-tabber-type="path"]');
@@ -10497,6 +10475,10 @@ async function collapseAllFileExplorerDirectories() {
 }
 
 async function setAllFileTreeDirectoriesExpanded(source, expand) {
+  if (fileExplorerMode === 'tabber') {
+    setAllTabberCollapsed(!expand);
+    return;
+  }
   if (source?.closest?.('.file-explorer-changes-panel')) {
     setAllFileExplorerChangesDirectoriesExpanded(expand);
     return;
@@ -10516,7 +10498,11 @@ function bindFileExplorerHeaderActions(container = document) {
     if (action.matches('[data-file-explorer-new-file]')) createFileExplorerFile();
     else if (action.matches('[data-file-explorer-new-folder]')) createFileExplorerFolder();
     else if (action.matches('[data-file-explorer-refresh]')) {
-      if (fileExplorerMode === 'diff') fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), force: true});
+      if (fileExplorerMode === 'tabber') {
+        tabberSessionFilesCache.clear();
+        fetchTabberActivity();
+        refreshTabberPanels();
+      } else if (fileExplorerMode === 'diff') fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), force: true});
       else {
         refreshFileExplorerTrees();
         fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
@@ -10528,6 +10514,7 @@ function bindFileExplorerHeaderActions(container = document) {
         .catch(error => statusErr(`tree action failed: ${esc(error)}`));
     } else if (action.matches('[data-file-explorer-tree-dates]')) {
       cycleFileExplorerTreeDateMode();
+      if (fileExplorerMode === 'tabber') refreshTabberPanels();
     }
   });
   container.addEventListener('change', event => {
@@ -10537,7 +10524,8 @@ function bindFileExplorerHeaderActions(container = document) {
     event.stopPropagation();
     fileExplorerTreeSortMode = ['az', 'za', 'newest', 'oldest'].includes(select.value) ? select.value : 'az';
     writeStoredFileExplorerTreeSortMode(fileExplorerTreeSortMode);
-    refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+    if (fileExplorerMode === 'tabber') refreshTabberPanels();
+    else refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
   });
 }
 

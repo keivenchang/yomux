@@ -984,19 +984,11 @@ globalThis.__layoutTestApi = {
   fileExplorerModeSwitcherHtml,
   normalizeFileExplorerMode,
   setTabberActivityForTest(payload) { tabberActivityPayload = payload; },
+  setFileExplorerTreeSortModeForTest(mode) { fileExplorerTreeSortMode = mode; },
   setTabberSessionFilesForTest(session, files) { tabberSessionFilesCache.set(session, {files, loaded: true}); },
   tabberRenderedRowsForTest() {
-    const {entries, entriesByDir} = buildTabberTree();
-    fileExplorerTabberExpanded.clear();
-    const addAll = (list, parent) => {
-      for (const e of list || []) {
-        if (e.kind !== 'dir') continue;
-        const path = parent === '/' ? '/' + e.name : parent + '/' + e.name;
-        fileExplorerTabberExpanded.add(path);
-        addAll(entriesByDir.get(normalizeDirectoryPath(path)), path);
-      }
-    };
-    addAll(entries, '/');
+    // Default-expanded: clearing the collapsed set renders the whole tree. Render twice to exercise reuse.
+    fileExplorerTabberCollapsed.clear();
     const el = document.createElement('div');
     el.className = 'changes-groups';
     renderTabberTree(el);
@@ -1009,24 +1001,12 @@ globalThis.__layoutTestApi = {
     }));
   },
   tabberRenderedNamesForTest() {
-    // Expand every dir node so windows + panes render too, then read back the visible row labels.
-    const {entries, entriesByDir} = buildTabberTree();
-    fileExplorerTabberExpanded.clear();
-    const addAll = (list, parent) => {
-      for (const e of list || []) {
-        if (e.kind !== 'dir') continue;
-        const path = parent === '/' ? '/' + e.name : parent + '/' + e.name;
-        fileExplorerTabberExpanded.add(path);
-        addAll(entriesByDir.get(normalizeDirectoryPath(path)), path);
-      }
-    };
-    addAll(entries, '/');
+    fileExplorerTabberCollapsed.clear();
     const el = document.createElement('div');
     el.className = 'changes-groups';
     renderTabberTree(el);
     renderTabberTree(el);
-    const rows = el.querySelectorAll('.file-tree-row');
-    return Array.from(rows).map(row => {
+    return Array.from(el.querySelectorAll('.file-tree-row')).map(row => {
       const name = row.querySelector('.file-tree-name');
       return name ? (name.textContent || '') : '';
     });
@@ -9291,21 +9271,21 @@ test('t@8804', () => {
 // shared row pipeline (no forked *RowHtml builder), plus a behavioral test of the tree assembly.
 test('t@tabber', () => {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  // B1/B3 source guards: routes through the shared pipeline, no forked builder, finder refreshes skip tabber rows.
   assert.ok(/mode === 'diff' \|\| mode === 'tabber' \? mode : 'files'/.test(source), 'B1: normalizeFileExplorerMode accepts files|diff|tabber');
-  assert.ok(/if \(options\.mode === 'tabber'\) return updateTabberRow\(/.test(source), 'B3: updateFileTreeRow dispatches tabber rows to updateTabberRow (shared row entry point)');
-  assert.ok(/renderTreeChildren\(container, '\/', entries, 0, \{[\s\S]*?mode: 'tabber'/.test(source), 'B3: renderTabberTree drives the shared renderTreeChildren with mode:tabber');
-  assert.ok(/updateFileTreeRowContents\(row, icon, data\.label/.test(source), 'B3: updateTabberRow fills columns via the shared updateFileTreeRowContents');
-  assert.equal(/function tabberRowHtml|function renderTabberRowHtml|function tabberFileRowHtml/.test(source), false, 'B3: no bespoke tabber *RowHtml builder forked off the shared pipeline');
+  assert.ok(/if \(options\.mode === 'tabber'\) return updateTabberRow\(/.test(source), 'B3: updateFileTreeRow dispatches tabber rows to updateTabberRow');
+  assert.ok(/renderTreeChildren\(container, '\/', entries, 0, \{[\s\S]*?mode: 'tabber'/.test(source), 'B3: renderTabberTree drives renderTreeChildren with mode:tabber');
+  assert.ok(/updateFileTreeRowContents\(row, icon, label,/.test(source), 'B3: updateTabberRow fills columns via the shared updateFileTreeRowContents');
+  assert.equal(/function tabberRowHtml|function renderTabberRowHtml|function tabberFileRowHtml/.test(source), false, 'B3: no bespoke tabber *RowHtml builder');
+  assert.ok((source.match(/\.file-tree-row\[data-path\]:not\(\[data-tabber-type\]\)/g) || []).length >= 2, 'finder global row refreshes exclude tabber rows (no relabel/clobber)');
 
   const api = loadYolomux();
   assert.equal(api.normalizeFileExplorerMode('tabber'), 'tabber');
   assert.equal(api.normalizeFileExplorerMode('bogus'), 'files');
-  const switcher = api.fileExplorerModeSwitcherHtml();
-  assert.ok(/data-file-explorer-mode-set="tabber"/.test(switcher), 'B1: the mode switcher renders a Tabber segment');
-  assert.ok(/data-file-explorer-mode-set="files"[\s\S]*data-file-explorer-mode-set="diff"[\s\S]*data-file-explorer-mode-set="tabber"/.test(switcher), 'B1: Finder / Differ / Tabber order');
+  assert.ok(/data-file-explorer-mode-set="files"[\s\S]*data-file-explorer-mode-set="diff"[\s\S]*data-file-explorer-mode-set="tabber"/.test(api.fileExplorerModeSwitcherHtml()), 'B1: Finder / Differ / Tabber order');
 
   api.setTranscriptInfoForTest('1', {
-    project: {git: {branch: 'devbranch'}},
+    project: {git: {branch: 'devbranch', root: '/home/u/proj'}},
     panes: [
       {window: '0', pane: '0', window_active: true, active: true, process_label: 'claude', command: 'claude', current_path: '/home/u/proj'},
       {window: '1', pane: '0', window_active: false, active: true, process_label: 'bash', command: 'bash', current_path: '/home/u'},
@@ -9314,50 +9294,45 @@ test('t@tabber', () => {
   api.setTranscriptInfoForTest('2', {
     panes: [{window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', command: 'codex', current_path: '/home/u/two'}],
   });
-  const {entries, entriesByDir} = api.buildTabberTree();
-  const sessionEntries = entries.filter(e => e.tabber?.type === 'session');
-  const s1 = sessionEntries.find(e => e.tabber.session === '1');
-  assert.ok(s1, 'B2: tmux session 1 appears at level 0');
-  assert.ok(String(s1.tabber.statusText || '').length > 0, 'B2: the repo branch annotates the session row');
-  const windows = entriesByDir.get(`/${s1.name}`);
-  assert.ok(Array.isArray(windows) && windows.length === 2, 'B2: session 1 expands to its two tmux windows');
-  assert.equal(windows[0].tabber.type, 'window', 'B2: level 1 rows are windows');
-  assert.ok(/0:claude/.test(windows[0].tabber.label), 'B2: window label is index:process');
-  const panes = entriesByDir.get(`/${s1.name}/${windows[0].name}`);
-  assert.ok(Array.isArray(panes) && panes.length === 1, 'B2: window 0 holds one pane');
-  assert.equal(panes[0].tabber.type, 'pane', 'B2: level 2 rows are panes');
-  assert.ok(/claude/.test(panes[0].tabber.label), 'B2: pane row shows the foreground process');
-
-  // Render guard: the DOM rows must show the human labels, never the synthetic node names (s_<id>/w_<i>/p_<i>).
-  const renderedNames = api.tabberRenderedNamesForTest();
-  assert.ok(renderedNames.length >= 4, `B3: the tabber renders session + window + pane rows (got ${renderedNames.length})`);
-  assert.equal(renderedNames.some(n => /^[swp]_/.test(n)), false, `B3: rows show human labels, not synthetic node names (got ${JSON.stringify(renderedNames)})`);
-  assert.ok(renderedNames.some(n => /0:claude/.test(n)), `B3: window rows show index:process (got ${JSON.stringify(renderedNames)})`);
-
-  // B4: most-recent-first sort from the activity ledger. Make session 2 more recently active than session 1,
-  // then the codex window (under session 2) must render before the claude window (under session 1).
-  api.setTabberActivityForTest({activity: {'2': {last_user_input_ts: 9999}, '1': {last_user_input_ts: 100}}});
-  const recencyNames = api.tabberRenderedNamesForTest();
-  const codexAt = recencyNames.findIndex(n => /0:codex/.test(n));
-  const claudeAt = recencyNames.findIndex(n => /0:claude/.test(n));
-  assert.ok(codexAt >= 0 && claudeAt >= 0, `B4: both windows render (got ${JSON.stringify(recencyNames)})`);
-  assert.ok(codexAt < claudeAt, `B4: the more-recently-active session sorts first (codex@${codexAt} before claude@${claudeAt})`);
-
-  // L3 / B5: a session's touched paths render as repo groups + openable file rows under the session.
+  // L3 paths for the claude window (set BEFORE building so the agent window gets repo children).
   api.setTabberSessionFilesForTest('1', [
     {path: 'src/app.py', abs_path: '/home/u/proj/src/app.py', repo: '/home/u/proj', status: 'M', mtime: 5000},
     {path: 'README.md', abs_path: '/home/u/proj/README.md', repo: '/home/u/proj', status: 'A', mtime: 4000},
   ]);
+
+  const {entries, entriesByDir} = api.buildTabberTree();
+  const s1 = entries.find(e => e.tabber && e.tabber.session === '1');
+  assert.ok(s1 && s1.tabber.type === 'session', 'B2: tmux session 1 appears at level 0');
+  assert.ok(String(s1.tabber.statusText || '').length > 0, 'B2: the repo branch annotates the session row');
+  const windows = entriesByDir.get('/' + s1.name);
+  assert.ok(Array.isArray(windows) && windows.length === 2, 'B2: session 1 has its two tmux windows');
+  const claudeWin = windows.find(w => /0:claude/.test(w.tabber.label));
+  assert.ok(claudeWin, 'B2: window label is index:process (0:claude)');
+  assert.equal(claudeWin.tabber.active, true, '#2: the active window is flagged');
+  assert.equal(claudeWin.kind, 'dir', 'L3: the agent window expands (has touched-path children)');
+  const repos = entriesByDir.get('/' + s1.name + '/' + claudeWin.name);
+  assert.ok(Array.isArray(repos) && repos.length === 1 && repos[0].tabber.type === 'repo', 'L3: agent window holds a repo group');
+  assert.ok(/proj/.test(repos[0].tabber.label), 'L3: repo row labeled by repo basename');
+  const files = entriesByDir.get('/' + s1.name + '/' + claudeWin.name + '/' + repos[0].name);
+  assert.ok(Array.isArray(files) && files.some(f => f.tabber.type === 'path' && f.tabber.openFile === '/home/u/proj/src/app.py'), 'L3/B5: file rows carry abs_path');
+
+  // Render guard: real labels (never synthetic node names); active window marked; repo + path rows present.
   const rows = api.tabberRenderedRowsForTest();
-  const repoRow = rows.find(r => r.type === 'repo');
-  assert.ok(repoRow && /proj/.test(repoRow.name), `L3: a repo group row renders for the touched paths (got ${JSON.stringify(rows.map(r => r.type + ':' + r.name))})`);
-  const fileRow = rows.find(r => r.type === 'path' && /app\.py/.test(r.name));
-  assert.ok(fileRow, `L3: a touched file renders as a path row (got ${JSON.stringify(rows.filter(r => r.type === 'path').map(r => r.name))})`);
-  assert.equal(fileRow.openFile, '/home/u/proj/src/app.py', 'B5: the path row carries abs_path for open-in-editor');
-  assert.ok(/data-tabber-type="path"[\s\S]*?showFileTreeContextMenu\(row, abs,/.test(source), 'B5: right-click on a path row reuses the shared file context menu (targeting abs_path)');
-  // Render correctness: the finder's global git-status / session-highlight refreshes must EXCLUDE tabber
-  // rows (otherwise they relabel /s_<id> rows to the path basename and clobber the Tabber's own render).
-  assert.ok((source.match(/\.file-tree-row\[data-path\]:not\(\[data-tabber-type\]\)/g) || []).length >= 2, 'finder global row refreshes exclude tabber rows (no relabel/clobber)');
+  assert.equal(rows.some(r => /^[swrf]_\d/.test(r.name)), false, 'rows show human labels, not synthetic node names (got ' + JSON.stringify(rows.map(r => r.name).slice(0, 8)) + ')');
+  assert.ok(rows.some(r => r.type === 'window' && /0:claude ●/.test(r.name)), '#2: the current window is marked (got ' + JSON.stringify(rows.filter(r => r.type === 'window').map(r => r.name)) + ')');
+  assert.ok(rows.some(r => r.type === 'repo' && /proj/.test(r.name)), 'L3: repo group rows render');
+  assert.ok(rows.some(r => r.type === 'path' && r.openFile === '/home/u/proj/src/app.py'), 'L3: path rows render with abs_path');
+
+  // B4 recency sort: make session 2 most recent -> its codex window renders before session 1's claude window.
+  api.setFileExplorerTreeSortModeForTest('newest');
+  api.setTabberActivityForTest({activity: {'2': {last_user_input_ts: 9999}, '1': {last_user_input_ts: 100}}});
+  const recency = api.tabberRenderedRowsForTest().map(r => r.name);
+  const codexAt = recency.findIndex(n => /0:codex/.test(n));
+  const claudeAt = recency.findIndex(n => /0:claude/.test(n));
+  assert.ok(codexAt >= 0 && claudeAt >= 0 && codexAt < claudeAt, 'B4: the more-recently-active session sorts first (codex before claude)');
+
+  // B5 context-menu source guard.
+  assert.ok(/data-tabber-type="path"[\s\S]*?showFileTreeContextMenu\(row, abs,/.test(source), 'B5: right-click on a path row reuses the shared file context menu');
 });
 
 {
