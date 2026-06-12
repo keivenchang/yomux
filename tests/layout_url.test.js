@@ -5287,6 +5287,11 @@ test('t@2560', () => {
   assert.ok(openFolder, 'C15: path mode offers a pinned Open-folder row');
   assert.equal(openFolder.detail, '/repo/app', 'C15: the Open-folder row targets the listed directory');
   assert.equal(typeof openFolder.run, 'function', 'C15: the Open-folder row opens the directory');
+  api.setCommandPaletteStateForTest('files', '/tmp/yolomux-paste-options-popup.png');
+  const exactPathItems = api.fileQuickOpenItems();
+  assert.equal(exactPathItems[0].path, '/tmp/yolomux-paste-options-popup.png', 'absolute file path input pins the exact file as the Enter target');
+  assert.equal(exactPathItems[0].label, 'Open image yolomux-paste-options-popup.png', 'absolute image path input labels the pinned row as an image open');
+  assert.ok(exactPathItems.some(item => item.key === 'open-folder:/tmp'), 'absolute file path input still offers the parent folder row');
   const dirEntry = pathItems.find(item => item.label === 'dynamo/');
   assert.ok(dirEntry && !dirEntry.pinTop, 'C15: a subfolder entry is a normal (descend) row, not pinned');
   // Bug fix: path-mode list entries (no indexed_root) must group under "Files", NOT "Indexed /" — the

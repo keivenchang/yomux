@@ -4720,6 +4720,23 @@ function recentFileQuickOpenItems() {
   }));
 }
 
+function fileQuickOpenExactPathItem() {
+  const pathQuery = fileQuickOpenPathQuery();
+  if (!pathQuery.active || !pathQuery.filter) return null;
+  const path = normalizeDirectoryPath(joinDirectoryPath(pathQuery.directory || '/', pathQuery.filter));
+  const name = basenameOf(path);
+  if (!name || !fileExtensionOf(name)) return null;
+  return {
+    ...fileQuickOpenItem(path, {group: t('palette.group.files')}),
+    label: IMAGE_EXTENSIONS.has(fileExtensionOf(path)) ? `Open image ${name}` : `Open ${name}`,
+    detail: compactHomePath(path),
+    key: `exact-file:${path}`,
+    keybinding: appShortcutText('Enter'),
+    pinTop: true,
+    searchFields: [name, path],
+  };
+}
+
 // C15 follow-up: while a directory PATH is typed in cmd-P, offer "Open <dir> in Finder" as the pinned
 // top row, so Enter (the default highlight) opens that directory in the Finder/File Explorer — while
 // arrowing down to a listed entry opens a file or descends into a subfolder. The target is the directory
@@ -4727,7 +4744,7 @@ function recentFileQuickOpenItems() {
 function fileQuickOpenOpenFolderItem() {
   const pathQuery = fileQuickOpenPathQuery();
   if (!pathQuery.active) return null;
-  let target = fileQuickOpenRoot || normalizeDirectoryPath(pathQuery.directory);
+  let target = normalizeDirectoryPath(pathQuery.directory);
   if (pathQuery.filter) {
     const filter = String(pathQuery.filter).toLowerCase();
     const match = fileQuickOpenCandidates.find(entry => entry.kind === 'dir' && String(entry.name || '').toLowerCase() === filter);
@@ -4775,6 +4792,8 @@ function fileQuickOpenItems() {
     seen.add(path);
     items.push(item);
   };
+  const exactPath = fileQuickOpenExactPathItem();
+  if (exactPath) add(exactPath);
   const openFolder = fileQuickOpenOpenFolderItem();
   if (openFolder) items.push(openFolder);
   recentFileQuickOpenItems().forEach(add);
