@@ -984,6 +984,30 @@ globalThis.__layoutTestApi = {
   fileExplorerModeSwitcherHtml,
   normalizeFileExplorerMode,
   setTabberActivityForTest(payload) { tabberActivityPayload = payload; },
+  setTabberSessionFilesForTest(session, files) { tabberSessionFilesCache.set(session, {files, loaded: true}); },
+  tabberRenderedRowsForTest() {
+    const {entries, entriesByDir} = buildTabberTree();
+    fileExplorerTabberExpanded.clear();
+    const addAll = (list, parent) => {
+      for (const e of list || []) {
+        if (e.kind !== 'dir') continue;
+        const path = parent === '/' ? '/' + e.name : parent + '/' + e.name;
+        fileExplorerTabberExpanded.add(path);
+        addAll(entriesByDir.get(normalizeDirectoryPath(path)), path);
+      }
+    };
+    addAll(entries, '/');
+    const el = document.createElement('div');
+    el.className = 'changes-groups';
+    renderTabberTree(el);
+    renderTabberTree(el);
+    return Array.from(el.querySelectorAll('.file-tree-row')).map(row => ({
+      type: row.dataset.tabberType || '',
+      name: (row.querySelector('.file-tree-name') || {}).textContent || '',
+      openFile: row.dataset.tabberOpenFile || '',
+      repoRoot: row.dataset.tabberRepoRoot || '',
+    }));
+  },
   tabberRenderedNamesForTest() {
     // Expand every dir node so windows + panes render too, then read back the visible row labels.
     const {entries, entriesByDir} = buildTabberTree();
@@ -9304,6 +9328,18 @@ test('t@tabber', () => {
   const claudeAt = recencyNames.findIndex(n => /0:claude/.test(n));
   assert.ok(codexAt >= 0 && claudeAt >= 0, `B4: both windows render (got ${JSON.stringify(recencyNames)})`);
   assert.ok(codexAt < claudeAt, `B4: the more-recently-active session sorts first (codex@${codexAt} before claude@${claudeAt})`);
+
+  // L3 / B5: a session's touched paths render as repo groups + openable file rows under the session.
+  api.setTabberSessionFilesForTest('1', [
+    {path: 'src/app.py', abs_path: '/home/u/proj/src/app.py', repo: '/home/u/proj', status: 'M', mtime: 5000},
+    {path: 'README.md', abs_path: '/home/u/proj/README.md', repo: '/home/u/proj', status: 'A', mtime: 4000},
+  ]);
+  const rows = api.tabberRenderedRowsForTest();
+  const repoRow = rows.find(r => r.type === 'repo');
+  assert.ok(repoRow && /proj/.test(repoRow.name), `L3: a repo group row renders for the touched paths (got ${JSON.stringify(rows.map(r => r.type + ':' + r.name))})`);
+  const fileRow = rows.find(r => r.type === 'path' && /app\.py/.test(r.name));
+  assert.ok(fileRow, `L3: a touched file renders as a path row (got ${JSON.stringify(rows.filter(r => r.type === 'path').map(r => r.name))})`);
+  assert.equal(fileRow.openFile, '/home/u/proj/src/app.py', 'B5: the path row carries abs_path for open-in-editor');
 });
 
 {

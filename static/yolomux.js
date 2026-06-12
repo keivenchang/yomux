@@ -9884,6 +9884,76 @@ async function fetchTabberActivity() {
   if (fileExplorerMode === 'tabber') refreshTabberPanels();
 }
 
+// Level-3 changed-paths cache, keyed by session. Populated lazily when a session row is expanded so the
+// Tabber never fans out N session-files fetches up front. Each entry: {files:[...], loaded:true}.
+const tabberSessionFilesCache = new Map();
+const tabberSessionFilesInFlight = new Set();
+
+// Lazy per-session fetch of the touched paths (GET /api/session-files), cached locally so it never
+// disturbs the Differ's committed target. Re-renders the Tabber when the data lands.
+async function fetchTabberSessionFiles(session) {
+  if (!session || tabberSessionFilesInFlight.has(session)) return;
+  tabberSessionFilesInFlight.add(session);
+  try {
+    const payload = await apiFetchJson(`/api/session-files?session=${encodeURIComponent(session)}&hours=24`, {cache: 'no-store'});
+    tabberSessionFilesCache.set(session, {files: Array.isArray(payload?.files) ? payload.files : [], loaded: true});
+  } catch (_) {
+    tabberSessionFilesCache.set(session, {files: [], loaded: true});
+  } finally {
+    tabberSessionFilesInFlight.delete(session);
+  }
+  if (fileExplorerMode === 'tabber') refreshTabberPanels();
+}
+
+// Repo + file entries (level 3/4) for a session's touched paths, grouped by repo root. Repo rows carry the
+// session's git branch (when it is that repo) + a dirty marker; file rows carry abs_path/status for opening.
+function tabberSessionPathEntries(session, sessionPath, entriesByDir, gitBranch, gitRoot) {
+  const cached = tabberSessionFilesCache.get(session);
+  if (!cached || !cached.loaded || !cached.files.length) return [];
+  const byRepo = new Map();
+  for (const file of cached.files) {
+    if (file.uploaded === true) continue;
+    const repo = String(file.repo || '').trim() || 'Outside repo';
+    if (!byRepo.has(repo)) byRepo.set(repo, []);
+    byRepo.get(repo).push(file);
+  }
+  const repoEntries = [];
+  let repoPos = 0;
+  for (const [repo, files] of byRepo) {
+    const repoName = `r_${tabberPad(repoPos++)}`;
+    const repoNodePath = `${sessionPath}/${repoName}`;
+    const isSessionRepo = repo && gitRoot && normalizeDirectoryPath(repo) === normalizeDirectoryPath(gitRoot);
+    const repoLabel = repo === 'Outside repo' ? repo : (basenameOf(repo) || repo);
+    const repoRecency = files.reduce((max, f) => Math.max(max, Number(f.mtime || 0)), 0);
+    repoEntries.push({
+      name: repoName,
+      kind: 'dir',
+      mtime: repoRecency,
+      tabber: {type: 'repo', session, repoRoot: repo === 'Outside repo' ? '' : repo, label: repoLabel, icon: '◆', statusText: isSessionRepo ? gitBranch : ''},
+    });
+    entriesByDir.set(normalizeDirectoryPath(repoNodePath), files
+      .slice()
+      .sort((a, b) => Number(b.mtime || 0) - Number(a.mtime || 0))
+      .map((file, filePos) => ({
+        name: `f_${tabberPad(filePos)}`,
+        kind: 'file',
+        mtime: Number(file.mtime || 0),
+        tabber: {
+          type: 'path',
+          session,
+          label: String(file.path || file.abs_path || '').split('/').pop() || file.path || '',
+          detail: file.path || '',
+          icon: '·',
+          openFile: file.abs_path || '',
+          openStatus: String(file.status || '').toUpperCase(),
+          openRepo: file.repo || '',
+          statusText: String(file.status || '').toUpperCase(),
+        },
+      })));
+  }
+  return repoEntries;
+}
+
 // Tabber level 0: session_order first (the user's tab order), then any remaining sessions, filtered to
 // live tmux sessions that actually have panes.
 function tabberOrderedSessions() {
@@ -9945,7 +10015,7 @@ function buildTabberTree() {
       },
     });
     const windowRecords = tmuxWindowRecords(info.panes);
-    entriesByDir.set(normalizeDirectoryPath(sessionPath), windowRecords.map(record => ({
+    const windowEntries = windowRecords.map(record => ({
       name: `w_${tabberPathToken(record.index)}`,
       kind: 'dir',
       mtime: tabberRecency(`${session}:${record.index}`),
@@ -9957,7 +10027,10 @@ function buildTabberTree() {
         icon: '▢',
         active: record.active === true,
       },
-    })));
+    }));
+    // Level 3/4: the session's touched paths (repo groups + files), lazily fetched when expanded.
+    const repoEntries = tabberSessionPathEntries(session, sessionPath, entriesByDir, branch, git?.root || '');
+    entriesByDir.set(normalizeDirectoryPath(sessionPath), [...windowEntries, ...repoEntries]);
     windowRecords.forEach(record => {
       const windowPath = `${sessionPath}/w_${tabberPathToken(record.index)}`;
       const windowRecency = tabberRecency(`${session}:${record.index}`);
@@ -10032,6 +10105,10 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   if (data.windowIndex !== null && data.windowIndex !== undefined) row.dataset.tabberWindow = String(data.windowIndex);
   else delete row.dataset.tabberWindow;
   if (data.cwd) row.dataset.tabberCwd = data.cwd; else delete row.dataset.tabberCwd;
+  if (data.openFile) row.dataset.tabberOpenFile = data.openFile; else delete row.dataset.tabberOpenFile;
+  if (data.openStatus) row.dataset.tabberOpenStatus = data.openStatus; else delete row.dataset.tabberOpenStatus;
+  if (data.openRepo) row.dataset.tabberOpenRepo = data.openRepo; else delete row.dataset.tabberOpenRepo;
+  if (data.repoRoot) row.dataset.tabberRepoRoot = data.repoRoot; else delete row.dataset.tabberRepoRoot;
   const paddingLeft = `${8 + depth * 14}px`;
   if (row.style.paddingLeft !== paddingLeft) row.style.paddingLeft = paddingLeft;
   row.setAttribute('role', 'treeitem');
@@ -10078,6 +10155,10 @@ function handleTabberRowActivate(row) {
   const session = row.dataset.tabberSession || '';
   if (row.dataset.kind === 'dir' && fullPath) {
     toggleTabberExpanded(fullPath);
+    // Expanding a session lazily loads its touched paths (level 3) on first open.
+    if (type === 'session' && session && fileExplorerTabberExpanded.has(fullPath) && !tabberSessionFilesCache.has(session)) {
+      fetchTabberSessionFiles(session);
+    }
     refreshTabberPanels();
   }
   if (type === 'session' && session) {
@@ -10085,6 +10166,13 @@ function handleTabberRowActivate(row) {
   } else if (type === 'window' && session && row.dataset.tabberWindow !== undefined) {
     const windowIndex = tmuxWindowNumber(row.dataset.tabberWindow);
     if (windowIndex !== null) tmuxWindow(session, {windowIndex}, row.querySelector('.file-tree-name')?.textContent || session);
+  } else if (type === 'path' && row.dataset.tabberOpenFile) {
+    // B5: context-path click opens the file (diff view for changed files) in the focused pane.
+    openChangedFileInDiff(row.dataset.tabberOpenFile, session, row.dataset.tabberOpenStatus || '', row.dataset.tabberOpenRepo || '');
+  } else if (type === 'repo' && row.dataset.tabberRepoRoot) {
+    // B5: repo row roots the Finder at the repo and switches back to file-tree mode.
+    setFileExplorerMode('files');
+    openFileExplorerManualRoot(row.dataset.tabberRepoRoot);
   }
 }
 
