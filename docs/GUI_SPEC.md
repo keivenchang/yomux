@@ -42,7 +42,7 @@ This document is the working GUI contract for pane, tab, Finder/Differ, editor, 
 
 - Pane: a visible browser layout region that contains one tab strip and one active tab body.
 - Tab: a layout item inside a pane. Current tab types include tmux sessions, Finder/Differ, file editors and image viewers, Preferences, and YO!info/YO!agent.
-- Finder/Differ: one special file pane. Finder mode shows the file tree. Differ mode shows changed files and diff controls. Tabber mode shows a live tree of open tabs, tmux windows, and the paths each agent touched, sorted by recent activity. Legacy `changes` / `__changes__` URLs resolve to Finder in Differ mode.
+- Finder/Differ: one special file pane. Finder mode shows the file tree. Differ mode shows changed files and diff controls. Tabber mode shows a live tree of open tabs, tmux windows, and touched repo roots, sorted by recent activity. Legacy `changes` / `__changes__` URLs resolve to Finder in Differ mode.
 - Root edge: the outside edge of the pane layout. Dropping there creates a full-span pane beside the existing layout.
 - Pane edge: the edge of one target pane. Dropping there splits only that target pane.
 - Cross-gutter: the separator between two sibling panes. Dropping there creates a full-span split at that sibling boundary.
@@ -65,6 +65,7 @@ This document is the working GUI contract for pane, tab, Finder/Differ, editor, 
 ## Finder/Differ Pane Rules
 
 - Finder/Differ is a real pane in the layout, not an overlay.
+- Finder/Differ/Tabber are three modes of the same reserved pane. Dockview adoption, Tabber refresh, Differ refresh, and Finder refresh must preserve that pane and its current tree position unless the user explicitly hides it with the close button, File -> Finder toggle, or the Finder shortcut.
 - Finder/Differ is reserved as a target. Nothing can be dropped into its center, left edge, right edge, or top edge.
 - The only allowed drop onto Finder/Differ is the bottom edge, and only when Finder/Differ is large enough for the existing Finder/Differ pane and the incoming tab after the split.
 - Finder/Differ itself is not draggable as a layout tab. Dragging Finder/Differ must not advertise a pane split, root split, or gutter split.

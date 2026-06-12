@@ -975,7 +975,7 @@ function adoptDockviewLayout() {
   }
 }
 
-function layoutSlotsFromDockviewJson(data) {
+function layoutSlotsFromDockviewJson(data, previous = layoutSlots) {
   const next = emptyLayoutSlots();
   const usedSlots = new Set();
   const parse = (node, orientation) => {
@@ -984,10 +984,17 @@ function layoutSlotsFromDockviewJson(data) {
       const group = node.data || {};
       const slot = dockviewSlotForGroupId(group.id, usedSlots);
       usedSlots.add(slot);
-      const tabs = (Array.isArray(group.views) ? group.views : [])
+      let tabs = (Array.isArray(group.views) ? group.views : [])
         .map(resolveLayoutItem)
         .filter(item => isLayoutItem(item));
-      next[slot] = paneStateWithTabs(tabs, resolveLayoutItem(group.activeView));
+      let activeView = resolveLayoutItem(group.activeView);
+      const previousTabs = paneTabs(slot, previous);
+      if (!tabs.length && previousTabs.includes(fileExplorerItemId)) {
+        tabs = previousTabs.slice();
+        activeView = activeItemForSide(slot, previous) || fileExplorerItemId;
+        dockviewLayoutState.reloadAfterAdoption = true;
+      }
+      next[slot] = paneStateWithTabs(tabs, activeView);
       return paneHasLayoutContent(slot, next) ? leafNode(slot) : null;
     }
     const children = (Array.isArray(node.data) ? node.data : [])
@@ -999,7 +1006,7 @@ function layoutSlotsFromDockviewJson(data) {
     return dockviewLayoutTreeFromChildren(children, dockviewSplitForOrientation(orientation));
   };
   next[layoutTreeKey] = parse(data?.grid?.root, data?.grid?.orientation || 'HORIZONTAL');
-  preserveDockviewDockedFileExplorerSplit(next, layoutSlots);
+  preserveDockviewDockedFileExplorerSplit(next, previous);
   return compactLayoutSlots(next);
 }
 

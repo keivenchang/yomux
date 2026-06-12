@@ -1032,7 +1032,6 @@ globalThis.__layoutTestApi = {
       type: row.dataset.tabberType || '',
       name: (row.querySelector('.file-tree-name') || {}).textContent || '',
       icon: (row.querySelector('.file-tree-icon') || {}).textContent || '',
-      openFile: row.dataset.tabberOpenFile || '',
       repoRoot: row.dataset.tabberRepoRoot || '',
       branch: row.dataset.tabberBranch || '',
       nameHtml: (row.querySelector('.file-tree-name') || {}).innerHTML || '',
@@ -6188,6 +6187,35 @@ test('t@2560', () => {
   assert.equal(api.itemInLayout('__files__'), true, 'Dockview adoption re-docks Finder when a non-user commit drops it');
   assert.equal(api.slotForSession('__files__'), 'slot2', 'Dockview adoption preserves the previous Finder slot when possible');
 
+  const transientDockviewFinder = api.emptyLayoutSlots();
+  transientDockviewFinder[api.layoutTreeKey] = api.splitNode(
+    'row',
+    api.splitNode('column', api.leafNode('slot2'), api.leafNode('left'), 50),
+    api.leafNode('slot1'),
+    35,
+  );
+  transientDockviewFinder.slot2 = api.paneStateWithTabs(['2'], '2');
+  transientDockviewFinder.left = api.paneStateWithTabs(['__files__'], '__files__');
+  transientDockviewFinder.slot1 = api.paneStateWithTabs(['1'], '1');
+  api.setLayoutSlotsForTest(transientDockviewFinder);
+  const transientDockviewJson = api.dockviewJsonFromLayoutSlots(api.currentSlots());
+  const clearDockviewLeafViews = (node, id) => {
+    if (!node) return false;
+    if (node.type === 'leaf' && node.data?.id === id) {
+      node.data.views = [];
+      node.data.activeView = null;
+      return true;
+    }
+    return (Array.isArray(node.data) ? node.data : []).some(child => clearDockviewLeafViews(child, id));
+  };
+  assert.equal(clearDockviewLeafViews(transientDockviewJson.grid.root, 'left'), true, 'test fixture clears the previous Finder Dockview group');
+  api.adoptDockviewLayoutForTest(transientDockviewJson);
+  assert.deepStrictEqual(
+    canonical(api.serialize(api.currentSlots())),
+    canonical(api.serialize(api.normalizeLayoutSlots(transientDockviewFinder))),
+    'Dockview adoption restores a transiently empty Finder/Differ group in its previous tree position',
+  );
+
   const expandedNormal = api.emptyLayoutSlots();
   expandedNormal[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
   expandedNormal.left = api.paneStateWithTabs(['1'], '1');
@@ -9546,6 +9574,7 @@ test('t@tabber', () => {
   assert.ok(/data-file-explorer-mode-set="files"[\s\S]*data-file-explorer-mode-set="diff"[\s\S]*data-file-explorer-mode-set="tabber"/.test(api.fileExplorerModeSwitcherHtml()), 'B1: Finder / Differ / Tabber order');
   assert.ok(source.includes('data-tabber-session-open') && source.includes('data-tabber-expand'), 'session rows split the click target: session name opens, description expands');
   assert.ok(/row\.dataset\.tabberItem === infoItemId\) openInfoSubTab\('info'\)/.test(source), 'YO!info Tabber row opens the YO!info sub-tab, not the remembered YO!agent sub-tab');
+  assert.equal(/tabberOpenFile|tabberOpenStatus|tabberOpenRepo|type === 'path'|data-tabber-type="path"/.test(source), false, 'Tabber has no individual-file row data or activation path');
   api.setInfoPanelSubTabForTest('yoagent');
   api.commandPaletteCommandItems().find(item => item.targetItem === api.infoItemId).run();
   assert.equal(api.infoPanelSubTabForTest(), 'info', 'YO!info-labeled palette rows open YO!info, not the remembered YO!agent sub-tab');
@@ -9610,7 +9639,7 @@ test('t@tabber', () => {
     assert.equal(row.status, '', `Tabber ${row.type} row must not render branch/status fragments before the date column`);
     assert.equal(row.statusHidden, true, `Tabber ${row.type} row hides the shared one-character git status badge`);
   }
-  assert.equal(rows.some(r => r.type === 'path' || r.openFile), false, 'L3: individual file rows are not rendered');
+  assert.equal(rows.some(r => r.type === 'path'), false, 'L3: individual file rows are not rendered');
   api.setTabberSessionFilesLoadingForTest('1');
   const loadingRows = api.tabberRenderedRowsForTest({preserveCollapsed: true});
   assert.ok(loadingRows.some(r => r.type === 'loading' && /Fetching paths/.test(r.name)), 'L3: initial touched-path fetch shows a loading row');

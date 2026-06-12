@@ -2917,9 +2917,6 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   if (data.session) row.dataset.tabberSession = data.session; else delete row.dataset.tabberSession;
   if (data.windowIndex !== null && data.windowIndex !== undefined) row.dataset.tabberWindow = String(data.windowIndex);
   else delete row.dataset.tabberWindow;
-  if (data.openFile) row.dataset.tabberOpenFile = data.openFile; else delete row.dataset.tabberOpenFile;
-  if (data.openStatus) row.dataset.tabberOpenStatus = data.openStatus; else delete row.dataset.tabberOpenStatus;
-  if (data.openRepo) row.dataset.tabberOpenRepo = data.openRepo; else delete row.dataset.tabberOpenRepo;
   if (data.repoRoot) row.dataset.tabberRepoRoot = data.repoRoot; else delete row.dataset.tabberRepoRoot;
   if (data.item) row.dataset.tabberItem = data.item; else delete row.dataset.tabberItem;
   if (data.branchText) row.dataset.tabberBranch = data.branchText; else delete row.dataset.tabberBranch;
@@ -3003,7 +3000,7 @@ function setAllTabberCollapsed(collapsed) {
 }
 
 // Delegated activation for Tabber rows. Clicking the disclosure icon toggles a node; clicking the row body
-// acts: session -> open the session's tab; window -> open the tab + switch the tmux window; repo/path ->
+// acts: session -> open the session's tab; window -> open the tab + switch the tmux window; repo root ->
 // point the Finder at it + open the tab + switch the window.
 function handleTabberRowActivate(row, event) {
   const fullPath = row.dataset.path;
@@ -3035,11 +3032,6 @@ function handleTabberRowActivate(row, event) {
     }
   } else if (type === 'window' && session) {
     selectSession(session, {userInitiated: true});
-    switchWindow();
-  } else if (type === 'path' && row.dataset.tabberOpenFile) {
-    setFileExplorerMode('files');
-    openFileExplorerManualRoot(row.dataset.tabberOpenFile.replace(/\/[^/]*$/, '') || '/');
-    if (session) selectSession(session, {userInitiated: true});
     switchWindow();
   } else if (type === 'repo' && row.dataset.tabberRepoRoot) {
     setFileExplorerMode('files');
