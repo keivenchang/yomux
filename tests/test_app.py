@@ -222,6 +222,8 @@ def test_transcripts_payload_exposes_server_version(monkeypatch):
         webapp.control_server.stop()
 
     assert payload["server_version"] == app_module.YOLOMUX_VERSION
+    assert payload["server_started_at"] == app_module.SERVER_STARTED_AT
+    assert payload["server_uptime_seconds"] >= 0
 
 
 def test_transcripts_payload_returns_stale_cache_and_refreshes(monkeypatch):

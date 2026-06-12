@@ -363,6 +363,27 @@
   --yolo-reminder-duration: 2.8s;
   --yolo-rotation-duration: 20s;
 }
+.moving-ellipsis {
+  display: inline-flex;
+  width: 1.6em;
+  justify-content: flex-start;
+  vertical-align: baseline;
+}
+.moving-ellipsis span {
+  display: inline-block;
+  opacity: 0;
+  animation: moving-ellipsis-dot 1.2s steps(1, end) infinite;
+}
+.moving-ellipsis span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+.moving-ellipsis span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+@keyframes moving-ellipsis-dot {
+  0%, 20%, 100% { opacity: 0; transform: translateY(0); }
+  25%, 75% { opacity: 1; transform: translateY(-1px); }
+}
 body.theme-dark {
   color-scheme: dark;
   /* --pane-tab-strip-bg inherits the greener :root mix (color-mix brand-green/panel). No re-statement and

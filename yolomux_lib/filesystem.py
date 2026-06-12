@@ -363,6 +363,15 @@ def _compact_search_text(value: str) -> str:
     return "".join(str(value or "").lower().split())
 
 
+def _alnum_search_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _doit_search_token(value: str) -> str:
+    needle = _alnum_search_text(value)
+    return needle if needle.startswith("doit") and len(needle) >= 4 else ""
+
+
 def _fuzzy_subsequence_span(query: str, text: str) -> int | None:
     needle = "".join(str(query or "").lower().split())
     if not needle:
@@ -390,6 +399,22 @@ def _search_token_rank(token: str, path: Path, rel: str) -> int | None:
     stem = _compact_search_text(path.stem)
     rel_text = _compact_search_text(rel)
     path_text = _compact_search_text(str(path))
+    doit_needle = _doit_search_token(token)
+    if doit_needle:
+        basename_alnum = _alnum_search_text(path.name)
+        stem_alnum = _alnum_search_text(path.stem)
+        rel_alnum = _alnum_search_text(rel)
+        if doit_needle in (stem_alnum, basename_alnum):
+            return 0
+        if stem_alnum.startswith(doit_needle) or basename_alnum.startswith(doit_needle):
+            return 10
+        if stem_alnum.find(doit_needle) >= 0:
+            return 20 + stem_alnum.find(doit_needle)
+        if basename_alnum.find(doit_needle) >= 0:
+            return 30 + basename_alnum.find(doit_needle)
+        if rel_alnum.find(doit_needle) >= 0:
+            return 90 + rel_alnum.find(doit_needle)
+        return None
 
     if needle in (stem, basename):
         return 0

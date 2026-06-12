@@ -293,6 +293,25 @@ def test_search_files_returns_fuzzy_matches_and_skips_heavy_dirs_inside_repo(tmp
     assert hit["size"] == len("print('ok')\n")
 
 
+def test_search_files_doit_queries_require_project_doc_prefix(tmp_path):
+    git(tmp_path, "init")
+    (tmp_path / "DOIT.57.md").write_text("# doit\n", encoding="utf-8")
+    (tmp_path / "frontend-crates").mkdir()
+    (tmp_path / "frontend-crates" / "DOIT.parser-performance-v2-audit.md").write_text("# audit\n", encoding="utf-8")
+    (tmp_path / "static_src" / "js" / "yolomux").mkdir(parents=True)
+    (tmp_path / "static_src" / "js" / "yolomux" / "75_dockview_layout.js").write_text("export {}\n", encoding="utf-8")
+
+    broad = filesystem.search_files(str(tmp_path), "DOIT", 20)
+    exactish = filesystem.search_files(str(tmp_path), "doit57", 20)
+
+    broad_paths = {item["relative_path"] for item in broad["files"]}
+    exactish_paths = {item["relative_path"] for item in exactish["files"]}
+    assert "DOIT.57.md" in broad_paths
+    assert "frontend-crates/DOIT.parser-performance-v2-audit.md" in broad_paths
+    assert "static_src/js/yolomux/75_dockview_layout.js" not in broad_paths
+    assert exactish_paths == {"DOIT.57.md"}
+
+
 def test_search_files_non_repo_root_stays_shallow_but_indexes_child_repos(tmp_path):
     root = tmp_path / "home"
     root.mkdir()

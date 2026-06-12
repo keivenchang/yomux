@@ -1862,11 +1862,9 @@ function yoagentChatHtml() {
   const placeholder = readOnlyMode ? t('yoagent.chatAdminPlaceholder', {name: yoagentTabLabel()}) : t('yoagent.chatPlaceholder');
   const isThinking = yoagentBusy || yoagentPrewarming;
   const hasConversation = Boolean(yoagentMessages.length || yoagentNotice || isThinking || yoagentError || yoagentIntroMessageText());
-  // Strip any trailing dots/ellipsis from the localized label so the three animated dots carry the motion.
-  const thinkingLabel = esc(t('yoagent.thinking').replace(/[.…\s]+$/, ''));
-  const thinkingDots = '<span class="yoagent-thinking-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span>';
+  const thinkingHtml = textWithMovingEllipsisHtml(t('yoagent.thinking'), 'yoagent-thinking-dots');
   const busy = isThinking
-    ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span><span class="yoagent-thinking">${thinkingLabel}${thinkingDots}</span></div>`
+    ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span><span class="yoagent-thinking">${thinkingHtml}</span></div>`
     : '';
   const retry = yoagentError && yoagentDraft && yoagentChatEnabled() && !yoagentBusy && !readOnlyMode
     ? `<button type="button" class="yoagent-chat-retry" data-yoagent-retry>${esc(t('yoagent.retry'))}</button>`

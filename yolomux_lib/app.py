@@ -50,6 +50,7 @@ from .common import MAX_TRANSCRIPT_TAIL_LINES
 from .common import MAX_YOLOMUX_SESSION_TABS
 from .common import PROJECT_ROOT
 from .common import SERVER_HOSTNAME
+from .common import SERVER_STARTED_AT
 from .common import SUMMARY_MAX_PROMPT_CHARS
 from .common import YOLOMUX_VERSION
 from .common import YOAGENT_CLAUDE_SUMMARY_MODEL
@@ -2235,6 +2236,8 @@ class TmuxWebtermApp:
         payload = {
             "server_time": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
             "server_version": YOLOMUX_VERSION,
+            "server_started_at": SERVER_STARTED_AT,
+            "server_uptime_seconds": max(0.0, time.time() - SERVER_STARTED_AT),
             "session_order": self.sessions,
             "sessions": session_payloads,
             # refresh agent login status on the metadata poll (cached server-side) so the

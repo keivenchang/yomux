@@ -860,6 +860,7 @@ function seedVisualActivePaneItem(preferredItems = []) {
 
 function setFocusedTerminal(session, options = {}) {
   const previousItem = focusedPanelItem;
+  if (previousItem !== session) captureFileEditorViewStateForItemIfPresent(previousItem);
   focusedTerminal = session;
   focusedPanelItem = session;
   rememberActivePaneItem(session);
@@ -888,6 +889,7 @@ function clearFocusedTerminal(session) {
 
 function setFocusedPanelItem(item, options = {}) {
   const previousItem = focusedPanelItem;
+  if (previousItem !== item) captureFileEditorViewStateForItemIfPresent(previousItem);
   if (focusedTerminal !== item) focusedTerminal = null;
   focusedPanelItem = item;
   rememberActivePaneItem(item);
@@ -982,6 +984,27 @@ function updatePanelInactiveOverlays() {
 
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function stripTrailingEllipsisText(value) {
+  return String(value ?? '').replace(/\s*(?:\.{3}|…)+\s*$/u, '').trimEnd();
+}
+
+function movingEllipsisHtml(className = '') {
+  const classes = ['moving-ellipsis', className].filter(Boolean).join(' ');
+  return `<span class="${esc(classes)}" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span>`;
+}
+
+function textWithMovingEllipsisHtml(value, className = '') {
+  return `${esc(stripTrailingEllipsisText(value))}${movingEllipsisHtml(className)}`;
+}
+
+function captureFileEditorViewStateForItemIfPresent(item) {
+  if (isFileEditorItem(item) && typeof captureFileEditorPanelViewStateForItem === 'function') {
+    captureFileEditorPanelViewStateForItem(item);
+    return true;
+  }
+  return false;
 }
 
 const searchRankWeights = Object.freeze({

@@ -1109,10 +1109,10 @@ function changesSummaryHtml(payload, files, session, loading, loaded) {
 function changesLoadingHtml(session = '') {
   const base = t('changes.loading');
   const label = session ? sessionLabel(session) : '';
-  const loadingText = label ? `${base.replace(/\s*(?:\.{3}|…)+\s*$/u, '')} ${label}...` : base;
+  const loadingText = label ? `${stripTrailingEllipsisText(base)} ${label}` : base;
   return `<span class="changes-loading" aria-live="polite" aria-busy="true">
     <span class="session-yolo-marker active working changes-loading-yolo" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span>
-    <span>${esc(loadingText)}</span>
+    <span>${textWithMovingEllipsisHtml(loadingText, 'changes-loading-dots')}</span>
   </span>`;
 }
 

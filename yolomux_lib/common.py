@@ -17,6 +17,7 @@ import signal
 import shutil
 import socket
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -86,6 +87,7 @@ OTHER_BRANCH_LIMIT = 8
 # here for the modules that import it from common. Same object identity, so `is _CACHE_MISS` holds.
 _CACHE_MISS = cache_MISS
 SERVER_HOSTNAME = socket.gethostname()
+SERVER_STARTED_AT = time.time()
 PACIFIC_TIME = ZoneInfo("America/Los_Angeles")
 _YOLOMUX_COMMIT_TIME_PT: str | None = None
 _YOLOMUX_COMMIT_SHA: str | None = None

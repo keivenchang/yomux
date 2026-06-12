@@ -1930,6 +1930,7 @@ function seedVisualActivePaneItem(preferredItems = []) {
 
 function setFocusedTerminal(session, options = {}) {
   const previousItem = focusedPanelItem;
+  if (previousItem !== session) captureFileEditorViewStateForItemIfPresent(previousItem);
   focusedTerminal = session;
   focusedPanelItem = session;
   rememberActivePaneItem(session);
@@ -1958,6 +1959,7 @@ function clearFocusedTerminal(session) {
 
 function setFocusedPanelItem(item, options = {}) {
   const previousItem = focusedPanelItem;
+  if (previousItem !== item) captureFileEditorViewStateForItemIfPresent(previousItem);
   if (focusedTerminal !== item) focusedTerminal = null;
   focusedPanelItem = item;
   rememberActivePaneItem(item);
@@ -2052,6 +2054,27 @@ function updatePanelInactiveOverlays() {
 
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function stripTrailingEllipsisText(value) {
+  return String(value ?? '').replace(/\s*(?:\.{3}|…)+\s*$/u, '').trimEnd();
+}
+
+function movingEllipsisHtml(className = '') {
+  const classes = ['moving-ellipsis', className].filter(Boolean).join(' ');
+  return `<span class="${esc(classes)}" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span>`;
+}
+
+function textWithMovingEllipsisHtml(value, className = '') {
+  return `${esc(stripTrailingEllipsisText(value))}${movingEllipsisHtml(className)}`;
+}
+
+function captureFileEditorViewStateForItemIfPresent(item) {
+  if (isFileEditorItem(item) && typeof captureFileEditorPanelViewStateForItem === 'function') {
+    captureFileEditorPanelViewStateForItem(item);
+    return true;
+  }
+  return false;
 }
 
 const searchRankWeights = Object.freeze({
@@ -4439,6 +4462,52 @@ function commandPaletteAllTabItems() {
   return Array.from(new Set([...activePaneItems(), ...backgroundTabItems(), ...inactiveTabItems()]));
 }
 
+const commandPaletteMissingFileTabPaths = new Set();
+const commandPaletteFileTabValidationInflight = new Set();
+
+function commandPaletteFilePathKnownMissing(path) {
+  const normalized = normalizeDirectoryPath(path || '');
+  return Boolean(normalized && (openFileIsMissing(normalized) || commandPaletteMissingFileTabPaths.has(normalized)));
+}
+
+function commandPaletteValidateFileTabPaths(items = commandPaletteAllTabItems()) {
+  if (typeof fetchFilePathInfo !== 'function') return;
+  for (const item of items) {
+    const path = fileItemPath(item);
+    const normalized = normalizeDirectoryPath(path || '');
+    if (!normalized || commandPaletteFileTabValidationInflight.has(normalized) || openFileIsMissing(normalized)) continue;
+    commandPaletteFileTabValidationInflight.add(normalized);
+    fetchFilePathInfo(normalized, {user: true})
+      .then(info => {
+        if (info?.kind) commandPaletteMissingFileTabPaths.delete(normalized);
+      })
+      .catch(error => {
+        if (Number(error?.status) === 404) {
+          commandPaletteMissingFileTabPaths.add(normalized);
+          markOpenFileMissing(normalized);
+          if (commandPaletteNode && !commandPaletteNode.hidden) renderCommandPaletteResults();
+        }
+      })
+      .finally(() => {
+        commandPaletteFileTabValidationInflight.delete(normalized);
+      });
+  }
+}
+
+function commandPaletteVisibleTabItems() {
+  const items = commandPaletteAllTabItems();
+  commandPaletteValidateFileTabPaths(items);
+  return items.filter(item => {
+    const path = fileItemPath(item);
+    return !path || !commandPaletteFilePathKnownMissing(path);
+  });
+}
+
+function commandPaletteCommandTargetsMissingFile(item) {
+  const targetPath = fileItemPath(item?.targetItem || '');
+  return Boolean(targetPath && commandPaletteFilePathKnownMissing(targetPath));
+}
+
 function flattenMenuCommands(items, prefix = []) {
   const result = [];
   for (const item of items || []) {
@@ -4512,7 +4581,8 @@ function commandPaletteCommandItems() {
   });
   const fileGroups = new Map();   // path -> [items], in discovery order
   const tabItems = [];
-  for (const item of commandPaletteAllTabItems()) {
+  const allTabItems = commandPaletteVisibleTabItems();
+  for (const item of allTabItems) {
     const path = fileItemPath(item);
     if (!path) { tabItems.push(tabRow(item)); continue; }
     if (!fileGroups.has(path)) fileGroups.set(path, []);
@@ -4532,9 +4602,10 @@ function commandPaletteCommandItems() {
     }
     tabItems.push(tabRow(editorItem, {key: `file:${path}`, viewModes}));
   }
-  const tabItemIds = new Set(commandPaletteAllTabItems());
+  const tabItemIds = new Set(allTabItems);
   const menuItems = appMenuTree()
     .flatMap(menu => flattenMenuCommands(menu.items, [menu.label]))
+    .filter(item => !commandPaletteCommandTargetsMissingFile(item))
     .filter(item => !(item.targetItem && isVirtualItem(item.targetItem) && tabItemIds.has(item.targetItem)))
     .map(item => ({...item, category: 'command'}));
   const settingItems = preferenceSections().flatMap(section => section.items.map(item => ({
@@ -4582,10 +4653,50 @@ function fileQuickOpenRootMatchesPathAlias(root, query) {
   return fuzzyCanonicalPrefixText(basenameOf(root)).startsWith(alias);
 }
 
+function fileQuickOpenDoitNeedle(query = commandPaletteSearchQuery()) {
+  const needle = String(fileQuickOpenSearchText(query) || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  return needle.startsWith('doit') && needle.length >= 4 ? needle : '';
+}
+
+function fileQuickOpenRepoFamilyBase() {
+  return normalizeDirectoryPath(fileQuickOpenRoot || repoRoot || '');
+}
+
+function fileQuickOpenRepoFamilyPrefix() {
+  const name = basenameOf(fileQuickOpenRepoFamilyBase());
+  return String(name || '').replace(/[._-]dev\d*$/i, '');
+}
+
+function fileQuickOpenPathInRepoFamily(path) {
+  const base = fileQuickOpenRepoFamilyBase();
+  const parent = dirnameOf(base);
+  const prefix = fileQuickOpenRepoFamilyPrefix();
+  const normalized = normalizeDirectoryPath(path || '');
+  if (!parent || !prefix || !normalized || !pathIsInsideDirectory(normalized, parent)) return false;
+  const top = childPathParts(parent, normalized)[0] || '';
+  return top === prefix || top.startsWith(`${prefix}.`) || top.startsWith(`${prefix}-`);
+}
+
+function fileQuickOpenDoitCandidateAllowed(file, query = commandPaletteSearchQuery()) {
+  const needle = fileQuickOpenDoitNeedle(query);
+  if (!needle) return true;
+  const path = String(file?.path || '');
+  const name = String(file?.name || basenameOf(path));
+  const stem = name.includes('.') ? name.slice(0, name.lastIndexOf('.')) : name;
+  const nameText = name.toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const stemText = stem.toLowerCase().replace(/[^a-z0-9]+/g, '');
+  if (!(stemText.startsWith(needle) || nameText.startsWith(needle) || stemText.includes(needle) || nameText.includes(needle))) return false;
+  return fileQuickOpenPathInRepoFamily(path);
+}
+
 function fileQuickOpenExtraRootsForSearchQuery(query) {
-  return compactNestedPaths([repoRoot, fileQuickOpenRootForFile(activeFile)]
+  const familyRoot = fileQuickOpenDoitNeedle(query) ? dirnameOf(fileQuickOpenRepoFamilyBase()) : '';
+  const aliasRoots = [repoRoot, fileQuickOpenRootForFile(activeFile)]
     .map(normalizeDirectoryPath)
-    .filter(root => root && root !== '/' && fileQuickOpenRootMatchesPathAlias(root, query)));
+    .filter(root => root && root !== '/' && fileQuickOpenRootMatchesPathAlias(root, query));
+  return compactNestedPaths([...aliasRoots, familyRoot]
+    .map(normalizeDirectoryPath)
+    .filter(root => root && root !== '/'));
 }
 
 function fileQuickOpenRootForSearch() {
@@ -4728,11 +4839,13 @@ function fileQuickOpenItem(path, options = {}) {
 }
 
 function recentFileQuickOpenItems() {
-  return Array.from(openFiles.keys()).reverse().map((path, index) => fileQuickOpenItem(path, {
-    group: t('palette.group.recent'),
-    mtime: openFiles.get(path)?.mtime || 0,
-    sortBonus: 120 - index,
-  }));
+  return Array.from(openFiles.keys()).reverse()
+    .filter(path => !commandPaletteFilePathKnownMissing(path))
+    .map((path, index) => fileQuickOpenItem(path, {
+      group: t('palette.group.recent'),
+      mtime: openFiles.get(path)?.mtime || 0,
+      sortBonus: 120 - index,
+    }));
 }
 
 function fileQuickOpenExactPathItem() {
@@ -4815,6 +4928,7 @@ function fileQuickOpenItems() {
   for (const file of fileQuickOpenCandidates) {
     const path = file.path || '';
     if (!path) continue;
+    if (!fileQuickOpenDoitCandidateAllowed(file)) continue;
     // Only an entry that ACTUALLY came from an indexed-root search carries an indexed_root; path-mode
     // listing entries have none. Guard the empty case — normalizeStoredFileExplorerIndexedDir('') returns
     // '/' (empty -> root), which used to mislabel every path-mode directory row as "Indexed /".
@@ -4847,8 +4961,9 @@ function fileQuickOpenItems() {
   if (fileQuickOpenLoading) {
     items.push({
       group: t('palette.group.files'),
-      label: t('search.searching'),
+      label: t('palette.searchingFiles'),
       detail: compactHomePath(fileQuickOpenRoot),
+      loading: true,
       searchFields: ['searching'],
       disabled: true,
       run: null,
@@ -4862,7 +4977,7 @@ function commandPaletteFilePath(item) {
 }
 
 function commandPaletteMergedItems() {
-  const openTabPaths = new Set(commandPaletteAllTabItems().map(fileItemPath).filter(Boolean));
+  const openTabPaths = new Set(commandPaletteVisibleTabItems().map(fileItemPath).filter(Boolean));
   const dedupedFileItems = fileQuickOpenItems().filter(item => !openTabPaths.has(commandPaletteFilePath(item)));
   return [...dedupedFileItems, ...commandPaletteCommandItems()];
 }
@@ -5089,6 +5204,19 @@ function commandPaletteStatusText() {
   return fileQuickOpenLoading ? t('palette.searchingFiles') : '';
 }
 
+function commandPaletteLoadingTextHtml(text) {
+  return textWithMovingEllipsisHtml(text, 'command-palette-loading-dots');
+}
+
+function commandPaletteStatusHtml() {
+  return fileQuickOpenLoading ? commandPaletteLoadingTextHtml(commandPaletteStatusText()) : '';
+}
+
+function commandPaletteItemLabelHtml(item, query) {
+  if (item?.loading === true) return commandPaletteLoadingTextHtml(item.label);
+  return fuzzyHighlightHtml(query, item.label);
+}
+
 function ensureCommandPalette() {
   if (commandPaletteNode) return commandPaletteNode;
   const node = document.createElement('div');
@@ -5163,8 +5291,10 @@ function renderCommandPaletteResults() {
   }
   if (status) {
     const text = commandPaletteStatusText();
-    status.hidden = !text;
-    status.textContent = text;
+    const html = commandPaletteStatusHtml();
+    status.hidden = !html;
+    status.setAttribute('aria-label', text);
+    status.innerHTML = html;
   }
   commandPaletteItemsCache = commandPaletteRankItems(commandPaletteItems(), query).slice(0, 60);
   commandPaletteIndex = Math.min(commandPaletteIndex, Math.max(0, commandPaletteItemsCache.length - 1));
@@ -5175,7 +5305,7 @@ function renderCommandPaletteResults() {
   results.innerHTML = commandPaletteItemsCache.map((item, index) => `
     <button type="button" class="command-palette-row${index === commandPaletteIndex ? ' active' : ''}" data-command-index="${index}" role="option" aria-selected="${index === commandPaletteIndex ? 'true' : 'false'}"${item.disabled ? ' disabled' : ''}>
       <span class="command-palette-group">${esc(item.group)}</span>
-      <span class="command-palette-main"><span class="command-palette-title">${item.iconText ? `<span class="command-palette-file-icon" aria-hidden="true">${esc(item.iconText)}</span>` : ''}<span class="command-palette-label">${fuzzyHighlightHtml(query, item.label)}</span>${(item.viewModes && item.viewModes.length) ? `<span class="command-palette-views">${item.viewModes.map(v => `<span class="command-palette-view-chip" role="button" tabindex="-1" data-view-item="${esc(v.item)}" data-view-mode="${esc(v.mode)}" title="${esc(t('palette.openView', {view: v.label}))}">${esc(v.label)}</span>`).join('')}</span>` : ''}</span><span class="command-palette-detail">${fuzzyHighlightHtml(query, item.detail || '')}</span></span>
+      <span class="command-palette-main"><span class="command-palette-title">${item.iconText ? `<span class="command-palette-file-icon" aria-hidden="true">${esc(item.iconText)}</span>` : ''}<span class="command-palette-label">${commandPaletteItemLabelHtml(item, query)}</span>${(item.viewModes && item.viewModes.length) ? `<span class="command-palette-views">${item.viewModes.map(v => `<span class="command-palette-view-chip" role="button" tabindex="-1" data-view-item="${esc(v.item)}" data-view-mode="${esc(v.mode)}" title="${esc(t('palette.openView', {view: v.label}))}">${esc(v.label)}</span>`).join('')}</span>` : ''}</span><span class="command-palette-detail">${fuzzyHighlightHtml(query, item.detail || '')}</span></span>
       <span class="command-palette-keybinding">${esc(item.keybinding || '')}</span>
     </button>`).join('');
   results.querySelector('.command-palette-row.active')?.scrollIntoView?.({block: 'nearest'});
@@ -6101,6 +6231,59 @@ function aboutCommitShaText() {
   return bootstrap.versionCommit || bootstrap.commitSha || bootstrap.commit_sha || bootstrap.gitSha || bootstrap.git_sha || '';
 }
 
+function topbarVersionTitle() {
+  const sha = aboutCommitShaText();
+  const lines = [];
+  if (sha) lines.push(`SHA: ${sha}`);
+  if (bootstrap.versionCommitTime) lines.push(`Last commit: ${bootstrap.versionCommitTime}`);
+  return lines.join('\n') || 'SHA unknown';
+}
+
+function topbarServerStartedAtMs() {
+  const explicitMs = Number(bootstrap.serverStartedAtMs);
+  if (Number.isFinite(explicitMs) && explicitMs > 0) return explicitMs;
+  const seconds = Number(bootstrap.serverStartedAt);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0;
+}
+
+function topbarDurationText(seconds) {
+  const remaining = Math.max(0, Math.floor(Number(seconds) || 0));
+  if (remaining < 1) return 'under 1 second';
+  const units = [
+    ['day', 86400],
+    ['hour', 3600],
+    ['minute', 60],
+    ['second', 1],
+  ];
+  const parts = [];
+  let rest = remaining;
+  for (const [name, size] of units) {
+    const value = Math.floor(rest / size);
+    if (!value) continue;
+    parts.push(`${value} ${name}${value === 1 ? '' : 's'}`);
+    rest -= value * size;
+    if (parts.length >= 2) break;
+  }
+  return parts.join(', ');
+}
+
+function topbarServerUptimeTitle() {
+  const startedAtMs = topbarServerStartedAtMs();
+  if (!startedAtMs) return 'Server uptime unknown';
+  return `Server running for ${topbarDurationText((Date.now() - startedAtMs) / 1000)}`;
+}
+
+function updateBrandTitles() {
+  for (const brand of document.querySelectorAll('.brand-title')) {
+    brand.title = topbarServerUptimeTitle();
+    brand.onpointerenter = updateBrandTitles;
+  }
+  for (const version of document.querySelectorAll('.brand-title .brand-version')) {
+    version.title = topbarVersionTitle();
+    version.onpointerenter = updateBrandTitles;
+  }
+}
+
 function aboutBrandHtml() {
   return `<span class="about-brand-yo" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}">${esc(t('brand.wordmark.yo'))}</span><span class="about-brand-lo">${esc(t('brand.wordmark.lo'))}</span><span class="about-brand-m">m</span><span class="about-brand-u">u</span><span class="about-brand-x">x</span>`;
 }
@@ -6812,6 +6995,7 @@ function renderSessionButtons(options = {}) {
 function renderBrandWordmark() {
   for (const yo of document.querySelectorAll('.brand-title .brand-yolo')) yo.textContent = t('brand.wordmark.yo');
   for (const lo of document.querySelectorAll('.brand-title .brand-lo')) lo.textContent = t('brand.wordmark.lo');
+  updateBrandTitles();
 }
 
 function createAppMenuBar() {
@@ -10361,7 +10545,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
     : data.type === 'window' && windowAgentIconHtml
       ? tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true})
     : data.type === 'loading'
-      ? `<span class="tabber-loading-label">${esc(data.label || 'Fetching')}</span><span class="tabber-loading-dots" aria-hidden="true"></span>`
+      ? `<span class="tabber-loading-label">${esc(data.label || 'Fetching')}</span>${movingEllipsisHtml('tabber-loading-dots')}`
     : '';
   updateFileTreeRowContents(row, icon, label, {
     iconClass: 'tabber-icon',
@@ -16105,9 +16289,7 @@ function activatePaneTab(side, session, options = {}) {
   }
   recordTabActivation(session);
   const previous = activeItemForSide(side);
-  if (previous && previous !== session && typeof captureFileEditorPanelViewStateForItem === 'function') {
-    captureFileEditorPanelViewStateForItem(previous);
-  }
+  if (previous && previous !== session) captureFileEditorViewStateForItemIfPresent(previous);
   if (isFileEditorItem(session)) {
     activeFile = fileItemPath(session);
     updateFileExplorerCurrentFileHighlight();
@@ -20996,11 +21178,9 @@ function yoagentChatHtml() {
   const placeholder = readOnlyMode ? t('yoagent.chatAdminPlaceholder', {name: yoagentTabLabel()}) : t('yoagent.chatPlaceholder');
   const isThinking = yoagentBusy || yoagentPrewarming;
   const hasConversation = Boolean(yoagentMessages.length || yoagentNotice || isThinking || yoagentError || yoagentIntroMessageText());
-  // Strip any trailing dots/ellipsis from the localized label so the three animated dots carry the motion.
-  const thinkingLabel = esc(t('yoagent.thinking').replace(/[.…\s]+$/, ''));
-  const thinkingDots = '<span class="yoagent-thinking-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span>';
+  const thinkingHtml = textWithMovingEllipsisHtml(t('yoagent.thinking'), 'yoagent-thinking-dots');
   const busy = isThinking
-    ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span><span class="yoagent-thinking">${thinkingLabel}${thinkingDots}</span></div>`
+    ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span><span class="yoagent-thinking">${thinkingHtml}</span></div>`
     : '';
   const retry = yoagentError && yoagentDraft && yoagentChatEnabled() && !yoagentBusy && !readOnlyMode
     ? `<button type="button" class="yoagent-chat-retry" data-yoagent-retry>${esc(t('yoagent.retry'))}</button>`
@@ -23400,10 +23580,10 @@ function changesSummaryHtml(payload, files, session, loading, loaded) {
 function changesLoadingHtml(session = '') {
   const base = t('changes.loading');
   const label = session ? sessionLabel(session) : '';
-  const loadingText = label ? `${base.replace(/\s*(?:\.{3}|…)+\s*$/u, '')} ${label}...` : base;
+  const loadingText = label ? `${stripTrailingEllipsisText(base)} ${label}` : base;
   return `<span class="changes-loading" aria-live="polite" aria-busy="true">
     <span class="session-yolo-marker active working changes-loading-yolo" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span>
-    <span>${esc(loadingText)}</span>
+    <span>${textWithMovingEllipsisHtml(loadingText, 'changes-loading-dots')}</span>
   </span>`;
 }
 

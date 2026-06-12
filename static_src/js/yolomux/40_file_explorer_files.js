@@ -3002,7 +3002,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
     : data.type === 'window' && windowAgentIconHtml
       ? tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true})
     : data.type === 'loading'
-      ? `<span class="tabber-loading-label">${esc(data.label || 'Fetching')}</span><span class="tabber-loading-dots" aria-hidden="true"></span>`
+      ? `<span class="tabber-loading-label">${esc(data.label || 'Fetching')}</span>${movingEllipsisHtml('tabber-loading-dots')}`
     : '';
   updateFileTreeRowContents(row, icon, label, {
     iconClass: 'tabber-icon',

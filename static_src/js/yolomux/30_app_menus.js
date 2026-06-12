@@ -59,6 +59,59 @@ function aboutCommitShaText() {
   return bootstrap.versionCommit || bootstrap.commitSha || bootstrap.commit_sha || bootstrap.gitSha || bootstrap.git_sha || '';
 }
 
+function topbarVersionTitle() {
+  const sha = aboutCommitShaText();
+  const lines = [];
+  if (sha) lines.push(`SHA: ${sha}`);
+  if (bootstrap.versionCommitTime) lines.push(`Last commit: ${bootstrap.versionCommitTime}`);
+  return lines.join('\n') || 'SHA unknown';
+}
+
+function topbarServerStartedAtMs() {
+  const explicitMs = Number(bootstrap.serverStartedAtMs);
+  if (Number.isFinite(explicitMs) && explicitMs > 0) return explicitMs;
+  const seconds = Number(bootstrap.serverStartedAt);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0;
+}
+
+function topbarDurationText(seconds) {
+  const remaining = Math.max(0, Math.floor(Number(seconds) || 0));
+  if (remaining < 1) return 'under 1 second';
+  const units = [
+    ['day', 86400],
+    ['hour', 3600],
+    ['minute', 60],
+    ['second', 1],
+  ];
+  const parts = [];
+  let rest = remaining;
+  for (const [name, size] of units) {
+    const value = Math.floor(rest / size);
+    if (!value) continue;
+    parts.push(`${value} ${name}${value === 1 ? '' : 's'}`);
+    rest -= value * size;
+    if (parts.length >= 2) break;
+  }
+  return parts.join(', ');
+}
+
+function topbarServerUptimeTitle() {
+  const startedAtMs = topbarServerStartedAtMs();
+  if (!startedAtMs) return 'Server uptime unknown';
+  return `Server running for ${topbarDurationText((Date.now() - startedAtMs) / 1000)}`;
+}
+
+function updateBrandTitles() {
+  for (const brand of document.querySelectorAll('.brand-title')) {
+    brand.title = topbarServerUptimeTitle();
+    brand.onpointerenter = updateBrandTitles;
+  }
+  for (const version of document.querySelectorAll('.brand-title .brand-version')) {
+    version.title = topbarVersionTitle();
+    version.onpointerenter = updateBrandTitles;
+  }
+}
+
 function aboutBrandHtml() {
   return `<span class="about-brand-yo" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}">${esc(t('brand.wordmark.yo'))}</span><span class="about-brand-lo">${esc(t('brand.wordmark.lo'))}</span><span class="about-brand-m">m</span><span class="about-brand-u">u</span><span class="about-brand-x">x</span>`;
 }
@@ -770,6 +823,7 @@ function renderSessionButtons(options = {}) {
 function renderBrandWordmark() {
   for (const yo of document.querySelectorAll('.brand-title .brand-yolo')) yo.textContent = t('brand.wordmark.yo');
   for (const lo of document.querySelectorAll('.brand-title .brand-lo')) lo.textContent = t('brand.wordmark.lo');
+  updateBrandTitles();
 }
 
 function createAppMenuBar() {

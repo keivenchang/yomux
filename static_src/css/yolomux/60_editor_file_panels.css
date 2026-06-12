@@ -3129,15 +3129,6 @@ body.theme-light .file-tree-row.tabber-row {
   color: var(--tabber-detail-color);
   font-style: italic;
 }
-.tabber-loading-dots::after {
-  content: ".";
-  animation: tabber-loading-dots 1.05s steps(1, end) infinite;
-}
-@keyframes tabber-loading-dots {
-  0%, 24% { content: "."; }
-  25%, 49% { content: ".."; }
-  50%, 100% { content: "..."; }
-}
 .file-tree-row.tabber-active-window:not(.selected) .file-tree-name {
   font-weight: 800;
 }

@@ -641,9 +641,7 @@ function activatePaneTab(side, session, options = {}) {
   }
   recordTabActivation(session);
   const previous = activeItemForSide(side);
-  if (previous && previous !== session && typeof captureFileEditorPanelViewStateForItem === 'function') {
-    captureFileEditorPanelViewStateForItem(previous);
-  }
+  if (previous && previous !== session) captureFileEditorViewStateForItemIfPresent(previous);
   if (isFileEditorItem(session)) {
     activeFile = fileItemPath(session);
     updateFileExplorerCurrentFileHighlight();

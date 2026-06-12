@@ -420,6 +420,8 @@ globalThis.__layoutTestApi = {
   fileEditorPaneTabHtml,
   fileQuickOpenItem,
   fileQuickOpenItems,
+  movingEllipsisHtml,
+  stripTrailingEllipsisText,
   fileQuickOpenExtraRootsForSearchQuery,
   fileQuickOpenRootMatchesPathAlias,
   fileQuickOpenRootForFile,
@@ -791,7 +793,7 @@ globalThis.__layoutTestApi = {
   terminalTabDisplayLabel,
   tmuxWindowForTest: tmuxWindow,
   registerFileEditorLayoutItemForTest: registerFileEditorLayoutItem,
-  setOpenFileStateForTest(path, state) { openFiles.set(path, state); },
+  setOpenFileStateForTest(path, state) { setFileState(path, state); },
   renderTreeChildrenForTest(container, parentPath, entries, depth = 0, entriesByDirPairs = [], options = {}) {
     renderTreeChildren(container, parentPath, entries, depth, {...options, entriesByDir: new Map(entriesByDirPairs)});
   },
@@ -871,6 +873,17 @@ globalThis.__layoutTestApi = {
     fileQuickOpenError = '';
     commandPaletteMode = 'files';
   },
+  setFileQuickOpenLoadingForTest(loading) {
+    fileQuickOpenLoading = Boolean(loading);
+    fileQuickOpenError = '';
+    commandPaletteMode = 'files';
+  },
+  setCommandPaletteQueryForTest(value) {
+    commandPaletteQuery = String(value || '');
+    commandPaletteIndex = 0;
+  },
+  commandPaletteItemLabelHtmlForTest: commandPaletteItemLabelHtml,
+  commandPaletteStatusHtmlForTest: commandPaletteStatusHtml,
   setTabsMenuSearchTextForTest(value) { tabsMenuSearchText = String(value || ''); },
   sessionState,
   slotForNewFileEditorTab,
@@ -2075,7 +2088,10 @@ test('t@1857', () => {
   const end = source.indexOf('function loadFileEditorState(', start);
   assert.ok(start > 0 && end > start, 'could not locate renderFileEditorPanel body');
   assert.equal(source.slice(start, end).includes('.focus('), false, 'renderFileEditorPanel must not steal focus during refresh renders');
-  assert.ok(source.includes('captureFileEditorPanelViewStateForItem(previous)'), 'switching pane tabs captures the outgoing CodeMirror viewport');
+  assert.ok(source.includes('function captureFileEditorViewStateForItemIfPresent(item)'), 'file-editor viewport capture has one shared focus-transition helper');
+  assert.ok(source.includes('captureFileEditorViewStateForItemIfPresent(previous)'), 'switching pane tabs captures the outgoing CodeMirror viewport through the shared helper');
+  assert.ok(/function setFocusedPanelItem[\s\S]*const previousItem = focusedPanelItem;[\s\S]*if \(previousItem !== item\) captureFileEditorViewStateForItemIfPresent\(previousItem\);/.test(source), 'clicking away from an editor snapshots its live CodeMirror viewport');
+  assert.ok(/function setFocusedTerminal[\s\S]*const previousItem = focusedPanelItem;[\s\S]*if \(previousItem !== session\) captureFileEditorViewStateForItemIfPresent\(previousItem\);/.test(source), 'clicking into a terminal snapshots the outgoing file editor viewport');
   assert.ok(source.includes('const scrollTop = scrollDOM?.scrollTop || 0;'), 'external CodeMirror reload preserves scrollTop');
   assert.ok(source.includes('view.requestMeasure({write: restoreScroll});'), 'external CodeMirror reload restores scroll after the document update');
   assert.ok(source.includes('view.requestMeasure'), 'CodeMirror viewport restore waits for a measured layout frame');
@@ -2211,6 +2227,8 @@ test('t@1869', () => {
   assert.ok(/if \(path === 'general\.language'\) applyLocale\(resolveLocalePref\(value\)\)/.test(source), '#50: the language select switches locale optimistically, not on the poll');
   // #52: the wordmark YO/LO glyphs localize client-side (優樂 / 优乐) via t(brand.wordmark.*).
   assert.ok(/function renderBrandWordmark\(\)[\s\S]*?t\('brand\.wordmark\.yo'\)[\s\S]*?t\('brand\.wordmark\.lo'\)/.test(source), '#52: renderBrandWordmark localizes the YO/LO wordmark glyphs');
+  assert.ok(/function updateBrandTitles\(\)[\s\S]*brand\.title = topbarServerUptimeTitle\(\)[\s\S]*version\.title = topbarVersionTitle\(\)/.test(source), 'top-left brand hover shows server uptime and version hover shows the commit SHA');
+  assert.ok(/function topbarVersionTitle\(\)[\s\S]*SHA: \$\{sha\}/.test(source), 'top-left version title includes the SHA');
   // #47: tab drags use the native drag image (no JS clone-follow), and the drop-placement path reuses
   // cached tab rects during a drag instead of forcing sync layout (getBoundingClientRect) per move.
   assert.ok(/function startSessionDrag[\s\S]*?setDragImage\(source/.test(source), '#47: tab drags install the native drag image (the tab itself)');
@@ -2831,7 +2849,7 @@ test('t@2560', () => {
   api.setSessionFilesPayloadForTest({session: '2', loaded: false, errors: [], refs_by_repo: {}, repos: [], files: []});
   api.setSessionFilesLoadingForTest(true);
   const loadingDifferHtml = api.fileExplorerChangesPanelHtml();
-  assert.ok(/changes-loading[\s\S]*session-yolo-marker active working changes-loading-yolo[\s\S]*loading 2\.\.\./.test(loadingDifferHtml), 'Differ loading state uses the spinning YO marker and session label');
+  assert.ok(/changes-loading[\s\S]*session-yolo-marker active working changes-loading-yolo[\s\S]*loading 2[\s\S]*moving-ellipsis changes-loading-dots/.test(loadingDifferHtml), 'Differ loading state uses the spinning YO marker, session label, and shared moving dots');
   assert.equal(loadingDifferHtml.includes('not loaded'), false, 'Differ loading state does not flash "not loaded" while a session switch fetch is in flight');
   const sessionSwitchSource = fs.readFileSync('static/yolomux.js', 'utf8');
   const sessionSwitchBody = sessionSwitchSource.slice(sessionSwitchSource.indexOf('function switchFileExplorerChangesSession('), sessionSwitchSource.indexOf('function noteFileExplorerChangesSessionInteraction('));
@@ -5485,6 +5503,19 @@ test('t@2560', () => {
     .sort((left, right) => right.score - left.score || left.index - right.index);
   assert.equal(exactDoitRows[0]?.label, 'DOIT.53.md', 'S15: exact local DOIT.53.md stays first for a dotted filename query');
   assert.equal(exactDoitRows.some(item => item.label === 'report.html'), false, 'S15: external indexed full-path-only fuzzy noise is hidden for dotted filename queries');
+  const doitFamilyApi = loadYolomux('', ['1']);
+  assert.deepStrictEqual(canonical(doitFamilyApi.fileQuickOpenExtraRootsForSearchQuery('DOIT')), ['/home/test'], 'DOIT queries search the current YOLOmux workdir family parent');
+  doitFamilyApi.setFileQuickOpenCandidatesForTest('/home/test/yolomux.dev3', [
+    {name: 'DOIT.64.md', path: '/home/test/yolomux.dev1/DOIT.64.md', relative_path: 'yolomux.dev1/DOIT.64.md', indexed_root: '/home/test', kind: 'file'},
+    {name: 'DOIT.57.md', path: '/home/test/yolomux.dev2/DOIT.57.md', relative_path: 'yolomux.dev2/DOIT.57.md', indexed_root: '/home/test', kind: 'file'},
+    {name: 'DOIT.parser-performance-v2-audit.md', path: '/home/test/dynamo/frontend-crates/DOIT.parser-performance-v2-audit.md', relative_path: 'frontend-crates/DOIT.parser-performance-v2-audit.md', indexed_root: '/home/test/dynamo', kind: 'file'},
+    {name: '75_dockview_layout.js', path: '/home/test/yolomux.dev3/static_src/js/yolomux/75_dockview_layout.js', relative_path: 'static_src/js/yolomux/75_dockview_layout.js', indexed_root: '/home/test/yolomux.dev3', kind: 'file'},
+  ]);
+  doitFamilyApi.setCommandPaletteStateForTest('files', 'DOIT');
+  const doitFamilyPaths = doitFamilyApi.fileQuickOpenItems()
+    .filter(item => item.category === 'file')
+    .map(item => item.path);
+  assert.deepStrictEqual(canonical(doitFamilyPaths), ['/home/test/yolomux.dev1/DOIT.64.md', '/home/test/yolomux.dev2/DOIT.57.md'], 'DOIT quick-open keeps YOLOmux sibling docs and drops indexed Dynamo/fuzzy path noise');
   assert.deepStrictEqual(
     canonical(api.cursorStyleFileReference('/home/keivenc/yolomux.dev1/20260609-001.png', {imageIndex: 1})),
     {label: '[Image #1]', detail: "'/home/keivenc/yolomux.dev1/20260609-001.png'"},
@@ -5568,6 +5599,25 @@ test('t@2560', () => {
   assert.deepStrictEqual(canonical(api.fileQuickOpenExtraRootsForSearchQuery('yolo/TODO.md')), ['/home/test/yolomux.dev'], 'bare yolo/... queries add the app repo root without adding all of home');
   assert.deepStrictEqual(canonical(api.fileQuickOpenRootsForSearch('/home/test', 'yolo/TODO.md')), ['/home/test/dynamo', '/home/test/yolomux.dev'], 'yolo/TODO.md searches the YOLOmux checkout even when home is narrowed to indexed Dynamo');
   assert.deepStrictEqual(canonical(api.fileQuickOpenRootsForSearch('/home/test', 'src/file.js')), ['/home/test/dynamo'], 'unrelated slash queries do not add the YOLOmux root');
+  const staleDoitApi = loadYolomux('', ['1']);
+  const staleDoitPath = '/home/test/yolomux.dev1/DOIT.57.md';
+  const realDoitPath = '/home/test/yolomux.dev2/DOIT.57.md';
+  const staleDoitItem = staleDoitApi.registerFileEditorLayoutItemForTest(staleDoitPath);
+  const staleDoitSlots = staleDoitApi.emptyLayoutSlots();
+  staleDoitSlots.left = staleDoitApi.paneStateWithTabs([staleDoitItem], staleDoitItem);
+  staleDoitApi.setLayoutSlotsForTest(staleDoitSlots);
+  staleDoitApi.setOpenFileStateForTest(staleDoitPath, {kind: 'error', externalMissing: true, error: 'file deleted or moved on disk'});
+  staleDoitApi.setFileQuickOpenCandidatesForTest('/home/test/yolomux.dev3', [
+    {name: 'DOIT.57.md', path: realDoitPath, relative_path: 'DOIT.57.md', indexed_root: '/home/test/yolomux.dev2', kind: 'file'},
+  ]);
+  staleDoitApi.setCommandPaletteStateForTest('files', 'doit57');
+  const staleDoitItems = staleDoitApi.commandPaletteItems();
+  const staleDoitRows = staleDoitItems.filter(item => item.targetItem === staleDoitItem
+    || item.path === staleDoitPath
+    || item.key?.includes(staleDoitPath)
+    || (item.searchFields || []).includes(staleDoitPath));
+  assert.deepStrictEqual(canonical(staleDoitRows), [], 'missing open file paths are hidden from quick search results');
+  assert.ok(staleDoitItems.some(item => item.category === 'file' && item.path === realDoitPath), 'real indexed DOIT.57 result remains available when a stale tab path is hidden');
   const quickTargetApi = loadYolomux('', ['1', '2']);
   const quickOpenTargetSlots = quickTargetApi.emptyLayoutSlots();
   quickOpenTargetSlots.left = quickTargetApi.paneStateWithTabs(['1'], '1');
@@ -8043,14 +8093,16 @@ test('t@7283', () => {
   // Rendered-markdown chat bodies drop pre-wrap so bullet lists are tightly spaced (the preserved
   // newlines between/inside the generated <ul><li> HTML were widening them).
   assert.ok(/\.yoagent-message-body\.markdown-body\s*\{[^}]*white-space:\s*normal/.test(css), 'rendered markdown chat bodies use white-space:normal so bullets are not widely spaced');
-  // The "thinking" busy indicator uses real staggered dot spans, not static localized "..." text or
-  // pseudo-element content animation that may not visibly update in all browsers.
-  assert.ok(/const thinkingDots = '<span class="yoagent-thinking-dots"[^']*<span>\.<\/span><span>\.<\/span><span>\.<\/span><\/span>';/.test(src), 'thinking dots render as three real animated spans');
-  assert.ok(/\.yoagent-thinking-dots span\s*\{[^}]*animation:\s*yoagent-thinking-dot/.test(css), 'thinking dot spans animate directly');
-  assert.ok(/\.yoagent-thinking-dots span\s*\{[^}]*opacity:\s*0/.test(css), 'thinking dots start hidden so the ellipsis visibly cycles');
-  assert.ok(/\.yoagent-thinking-dots span:nth-child\(2\)\s*\{[^}]*animation-delay:\s*0\.2s/.test(css), 'thinking dot 2 is staggered');
-  assert.ok(/\.yoagent-thinking-dots span:nth-child\(3\)\s*\{[^}]*animation-delay:\s*0\.4s/.test(css), 'thinking dot 3 is staggered');
-  assert.ok(/@keyframes yoagent-thinking-dot/.test(css), 'the thinking-dot keyframes exist');
+  // The "thinking" busy indicator uses the shared real-span moving ellipsis. Do not fork a second
+  // pseudo-element or per-feature keyframe animation.
+  assert.ok(/function movingEllipsisHtml\(className = ''\)[\s\S]*<span>\.<\/span><span>\.<\/span><span>\.<\/span>/.test(src), 'moving dots render as three real animated spans from one helper');
+  assert.ok(src.includes("textWithMovingEllipsisHtml(t('yoagent.thinking'), 'yoagent-thinking-dots')"), 'YO!agent thinking uses the shared moving ellipsis helper');
+  assert.ok(/\.moving-ellipsis span\s*\{[^}]*animation:\s*moving-ellipsis-dot/.test(css), 'moving dot spans animate directly');
+  assert.ok(/\.moving-ellipsis span\s*\{[^}]*opacity:\s*0/.test(css), 'moving dots start hidden so the ellipsis visibly cycles');
+  assert.ok(/\.moving-ellipsis span:nth-child\(2\)\s*\{[^}]*animation-delay:\s*0\.2s/.test(css), 'moving dot 2 is staggered');
+  assert.ok(/\.moving-ellipsis span:nth-child\(3\)\s*\{[^}]*animation-delay:\s*0\.4s/.test(css), 'moving dot 3 is staggered');
+  assert.equal((css.match(/@keyframes moving-ellipsis-dot/g) || []).length, 1, 'the moving-dot keyframes have one shared owner');
+  assert.equal(/@keyframes (yoagent-thinking-dot|tabber-loading-dots)/.test(css), false, 'old per-feature moving-dot keyframes stay removed');
   assert.equal(/prefers-reduced-motion[^{]*\{[^}]*yoagent-thinking-dots/.test(css), false, 'thinking dots keep blinking even when reduced-motion CSS is active');
   // #YO!info scroll: the body pane (a grid item of the .panel grid) must keep min-width:0 so wide
   // content scrolls inside .info-list (overflow:auto) instead of blowing the column out past the
@@ -8214,7 +8266,7 @@ test('t@7423', () => {
   assert.ok(/sessionButtons\.appendChild\(createTopbarLanguageSwitcher\(\)\)/.test(src), 'Phase 1: the topbar renders the language switcher');
   assert.ok(/function createTopbarLanguageSwitcher[\s\S]*?applyLocale\(resolveLocalePref\(value\)\)[\s\S]*?saveSettingsPatch\(settingPatch\('general\.language', value\)\)/.test(src), 'Phase 1: the switcher applies the locale optimistically AND saves general.language (same setting as Preferences)');
   assert.ok(/function rerenderForLocale[\s\S]*?renderSessionButtons\(\{force: true\}\)/.test(src), 'Phase 1: a real locale switch force-repaints the topbar labels after selection');
-  assert.ok(/function topbarLanguageSwitcherIsActive\(\)[\s\S]*?document\.activeElement[\s\S]*?\.topbar-language[\s\S]*?function renderSessionButtons[\s\S]*?appMenuIsOpen\(\) \|\| topbarLanguageSwitcherIsActive\(\)/.test(src), 'the topbar does not rebuild while the native language select is focused/open');
+  assert.ok(src.includes("active.matches?.('select, input')") && /function renderSessionButtons[\s\S]*?topbarControlIsActive\(\)/.test(src), 'the topbar does not rebuild while a native topbar control is focused/open');
   // The zh fallback mapping (zh-TW/HK/Hant -> Hant, other zh -> Hans).
   assert.ok(/nav\.startsWith\('zh'\)\) return \/hant\|/.test(src), 'Phase 1: system maps Chinese browser locales to Hant/Hans');
   assert.ok(/\.topbar-language\s*\{/.test(fs.readFileSync('static/yolomux.css', 'utf8')), 'Phase 1: the language switcher has topbar styling');
@@ -9675,6 +9727,7 @@ test('t@8739', () => {
 // both edit + preview chips) wins; the Recent/Files duplicate is dropped. Files-only / empty-box keep Recent.
 test('t@8749', () => {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  const api = loadYolomux('', ['1']);
   const candidateStart = source.indexOf('function commandPaletteCandidateItems(');
   const candidateEnd = source.indexOf('function commandPaletteItems(', candidateStart);
   const candidateBody = source.slice(candidateStart, candidateEnd);
@@ -9684,7 +9737,7 @@ test('t@8749', () => {
   const fileNameBonusStart = source.indexOf('function commandPaletteFileNameBonus(');
   const fileNameBonusEnd = source.indexOf('function commandPaletteFinderAliasBonus(', fileNameBonusStart);
   const fileNameBonusBody = source.slice(fileNameBonusStart, fileNameBonusEnd);
-  assert.ok(source.includes('const openTabPaths = new Set(commandPaletteAllTabItems().map(fileItemPath).filter(Boolean))'), 'S2: merged palette collects open-tab file paths');
+  assert.ok(source.includes('const openTabPaths = new Set(commandPaletteVisibleTabItems().map(fileItemPath).filter(Boolean))'), 'S2: merged palette collects visible open-tab file paths');
   assert.ok(/dedupedFileItems = fileQuickOpenItems\(\)\.filter\(item => !openTabPaths\.has\(commandPaletteFilePath\(item\)\)\)/.test(source), 'S2: open-tab files are dropped from the file list so a file appears once total');
   assert.ok(/return \[\.\.\.dedupedFileItems, \.\.\.commandPaletteCommandItems\(\)\]/.test(source), 'S2: merged palette returns deduped files then commands');
   assert.ok(candidateStart > 0 && candidateEnd > candidateStart, 'DOIT.55: unified command palette candidate provider exists');
@@ -9694,7 +9747,17 @@ test('t@8749', () => {
   assert.ok(rankBody.includes('commandPaletteItemScore(item, query, options)'), 'DOIT.55: both surfaces rank through the shared scorer');
   assert.ok(rankBody.includes('commandPaletteMixFirstScreenResults(ranked, query, options)'), 'DOIT.55 follow-up: shared ranker keeps first-screen file/pane results mixed after scoring');
   assert.ok(source.includes('class="command-palette-status" aria-live="polite" hidden'), 'search loading indicator is part of the palette chrome, not just the empty state');
-  assert.ok(/renderCommandPaletteResults[\s\S]*input\.setAttribute\('aria-busy', fileQuickOpenLoading \? 'true' : 'false'\)[\s\S]*status\.textContent = text/.test(source), 'search loading indicator updates while local results remain visible');
+  assert.ok(/renderCommandPaletteResults[\s\S]*input\.setAttribute\('aria-busy', fileQuickOpenLoading \? 'true' : 'false'\)[\s\S]*status\.innerHTML = html/.test(source), 'search loading indicator updates while local results remain visible');
+  assert.ok(/function commandPaletteItemLabelHtml\(item, query\)[\s\S]*item\?\.loading === true[\s\S]*commandPaletteLoadingTextHtml\(item\.label\)/.test(source), 'Cmd-P loading rows use the shared moving-dot label renderer');
+  assert.equal(api.stripTrailingEllipsisText('Searching files...'), 'Searching files', 'shared moving-dot helper strips static ASCII ellipses before rendering animated dots');
+  assert.ok(api.movingEllipsisHtml('test-dots').includes('moving-ellipsis test-dots'), 'shared moving-dot helper accepts per-site classes without duplicating markup');
+  api.setFileQuickOpenCandidatesForTest('/repo/app', []);
+  api.setFileQuickOpenLoadingForTest(true);
+  api.setCommandPaletteQueryForTest('');
+  const loadingItem = api.fileQuickOpenItems().find(item => item.loading === true);
+  assert.ok(loadingItem, 'Cmd-P exposes a loading row while file search is in flight');
+  assert.ok(/Searching files[\s\S]*moving-ellipsis command-palette-loading-dots/.test(api.commandPaletteStatusHtmlForTest()), 'Cmd-P loading status shows moving dots');
+  assert.ok(/Searching files[\s\S]*moving-ellipsis command-palette-loading-dots/.test(api.commandPaletteItemLabelHtmlForTest(loadingItem, '')), 'Cmd-P loading row shows moving dots');
   assert.ok(/renderCommandPaletteResults[\s\S]*commandPaletteRankItems\(commandPaletteItems\(\), query\)/.test(source), 'DOIT.55: rendering uses the shared provider/ranker path');
   assert.equal(source.includes('function commandPaletteItemPriorityRank'), false, 'DOIT.55: old per-surface priority rank fork stays removed');
   assert.ok(/const searchRankWeights = Object\.freeze\(\{[\s\S]*domainPrior:[\s\S]*recencyHalfLifeSeconds:[\s\S]*repoAffinity:[\s\S]*mixWindow:/.test(source), 'DOIT.55: ranking weights live in one exported table');
@@ -9772,7 +9835,7 @@ test('t@tabber', () => {
   assert.ok(/\.file-tree-row\.tabber-row\s*\{[\s\S]*--tabber-level0-color:\s*var\(--markdown-heading\)[\s\S]*--tabber-level1-color:\s*var\(--code-function\)[\s\S]*--tabber-path-color:\s*var\(--text\)/.test(css), 'Tabber uses restrained level colors and keeps path rows normal text');
   assert.ok(/body\.theme-light \.file-tree-row\.tabber-row\s*\{[\s\S]*--tabber-level1-color:\s*var\(--lt-code-function\)[\s\S]*--tabber-path-color:\s*var\(--text\)/.test(css), 'Tabber light mode keeps paths normal and windows one level color');
   assert.ok(/\.file-tree-row\.tabber-row\[data-tabber-type="tab"\]:not\(\.selected\) > \.file-tree-name,[\s\S]*color:\s*var\(--tabber-level0-color\)/.test(css), 'non-tmux Tabber pane rows do not use purple');
-  assert.ok(css.includes('@keyframes tabber-loading-dots'), 'Tabber shows moving dots while touched paths are loading');
+  assert.ok(source.includes("movingEllipsisHtml('tabber-loading-dots')"), 'Tabber shows shared moving dots while touched paths are loading');
   assert.ok(/\.file-tree-row\.tabber-row \.tabber-window-label \.agent-icon\s*\{[\s\S]*width:\s*calc\(var\(--file-explorer-font-size\) \+ 2px\)[\s\S]*height:\s*calc\(var\(--file-explorer-font-size\) \+ 2px\)/.test(css), 'Tabber process icons scale with the file explorer row font');
   assert.ok(/function warmTabberDataOnLaunch\(\)[\s\S]*?tabberLaunchWarmupStarted = true;[\s\S]*?fetchTabberActivity\(\);/.test(source), 'Tabber launch warmup primes only the cheap activity ledger');
   assert.ok(/transcriptMetaLoaded = true;[\s\S]*?warmTabberDataOnLaunch\(\)/.test(source), 'Tabber launch warmup runs as soon as transcript metadata is available');
@@ -9914,6 +9977,41 @@ test('t@tabber', () => {
 }
 
 (async () => {
+  {
+    const staleDoitPath = '/home/test/yolomux.dev1/DOIT.57.md';
+    const realDoitPath = '/home/test/yolomux.dev2/DOIT.57.md';
+    const validatingDoitApi = loadYolomux('', ['1']);
+    const validatingDoitItem = validatingDoitApi.registerFileEditorLayoutItemForTest(staleDoitPath);
+    const validatingDoitSlots = validatingDoitApi.emptyLayoutSlots();
+    validatingDoitSlots.left = validatingDoitApi.paneStateWithTabs([validatingDoitItem], validatingDoitItem);
+    validatingDoitApi.setLayoutSlotsForTest(validatingDoitSlots);
+    validatingDoitApi.setFileQuickOpenCandidatesForTest('/home/test/yolomux.dev3', [
+      {name: 'DOIT.57.md', path: realDoitPath, relative_path: 'DOIT.57.md', indexed_root: '/home/test/yolomux.dev2', kind: 'file'},
+    ]);
+    validatingDoitApi.setCommandPaletteStateForTest('files', 'doit57');
+    const validationCalls = [];
+    validatingDoitApi.setFetchForTest((url, options = {}) => {
+      const body = JSON.parse(options.body || '{}');
+      validationCalls.push({url: String(url), requests: body.requests || []});
+      return Promise.resolve(jsonResponse({
+        responses: (body.requests || []).map(request => request.path === staleDoitPath
+          ? {id: request.id, ok: false, status: 404, error: 'path not found'}
+          : {id: request.id, ok: true, status: 200, payload: {path: request.path, kind: 'file'}}),
+      }));
+    });
+    assert.ok(validatingDoitApi.commandPaletteItems().some(item => item.targetItem === validatingDoitItem), 'unknown file tabs remain visible before path-info validation resolves');
+    await validatingDoitApi.flushFileExplorerFsBatchForTest();
+    await flushAsyncWork();
+    const validatedDoitItems = validatingDoitApi.commandPaletteItems();
+    assert.ok(validationCalls.some(call => call.requests.some(request => request.type === 'info' && request.path === staleDoitPath)), 'quick search validates open file tab paths through fs info');
+    const validatedStaleDoitRows = validatedDoitItems.filter(item => item.targetItem === validatingDoitItem
+      || item.path === staleDoitPath
+      || item.key?.includes(staleDoitPath)
+      || (item.searchFields || []).includes(staleDoitPath));
+    assert.deepStrictEqual(canonical(validatedStaleDoitRows), [], '404-validated stale file paths are removed from quick search results');
+    assert.ok(validatedDoitItems.some(item => item.category === 'file' && item.path === realDoitPath), 'the real DOIT.57 file result remains after stale tab validation');
+  }
+
   {
     const treeApi = loadYolomux('', ['1']);
     treeApi.setFileExplorerRootMode('fixed', {sync: false});

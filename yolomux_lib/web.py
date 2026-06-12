@@ -8,6 +8,7 @@ from pathlib import Path
 from .common import AUTH_CONFIG_DISPLAY_PATH
 from .common import MAX_YOLOMUX_SESSION_TABS
 from .common import SERVER_HOSTNAME
+from .common import SERVER_STARTED_AT
 from .common import STATIC_DIR
 from .common import YOLOMUX_VERSION
 from .common import login_username
@@ -121,7 +122,7 @@ def static_asset_url(asset: str) -> str:
 
 
 def brand_html(class_name: str = "brand-title", tag: str = "span", locale: str | None = None) -> str:
-    version_title = html.escape(f"Last commit: {yolomux_commit_time_pt()}", quote=True)
+    version_title = html.escape(f"SHA: {yolomux_commit_sha()}\nLast commit: {yolomux_commit_time_pt()}", quote=True)
     # follow-up: the server-rendered pre-auth screens (login / auth-setup) are NOT localized by
     # the JS renderBrandWordmark(), so localize the YO/LO glyphs here too — otherwise a Chinese locale
     # showed "YO/LOmux" instead of 優樂mux / 优乐mux. Pass a locale on those pages; the main app leaves it
@@ -158,6 +159,8 @@ def html_page(sessions: list[str], access_role: str = "admin", dev: bool = False
         "repoRoot": str(Path(__file__).resolve().parents[1]),
         "maxSessionTabs": MAX_YOLOMUX_SESSION_TABS,
         "serverHostname": SERVER_HOSTNAME,
+        "serverStartedAt": SERVER_STARTED_AT,
+        "serverStartedAtMs": int(SERVER_STARTED_AT * 1000),
         "version": YOLOMUX_VERSION,
         "versionCommit": yolomux_commit_sha(),
         "versionCommitTime": yolomux_commit_time_pt(),
