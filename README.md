@@ -72,6 +72,7 @@ Open YOLOmux after setup. Existing tmux sessions appear as tabs. (The detailed p
 - Drag a Finder or Differ file row into a pane to open that file there; dropping near a pane edge opens it in a new split.
 - The pane info line shows one button per tmux window (`0:bash`, `1:codex`, ...); clicking a button switches that session to the matching tmux window. The pane toolbar shows transcripts (`Tx`), asks for an AI summary (`AI`), and opens the event log (`Log`).
 - Finder switches between the file tree and a full-pane `Differ` mode (per-repo FROM/TO diff controls). The root toggle defaults to `Sync`, which follows the focused session's affected repos and highlights changed paths.
+- A third `Tabber` mode lists open tabs and each tmux session's windows (and the paths each agent touched), sorted by most recent activity — click a session to focus it, a window row to switch tmux windows.
 - Finder browsing defaults to the filesystem root (`/`); credential-heavy paths such as `.ssh`, `.gnupg`, `.aws`, `.config/gh`, token files, and registry config files are blocked and hidden from search/index results.
 - Quick Search (`Mod+P`) ranks filename matches ahead of path-only fuzzy matches; image hits render as `[Image #1] '/abs/path.png'` references.
 - The file editor's `Differ` toggle opens a diff view with a FROM/TO sha picker for any git-tracked file with commit history, even when the working tree is clean.

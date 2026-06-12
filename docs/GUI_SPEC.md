@@ -42,7 +42,7 @@ This document is the working GUI contract for pane, tab, Finder/Differ, editor, 
 
 - Pane: a visible browser layout region that contains one tab strip and one active tab body.
 - Tab: a layout item inside a pane. Current tab types include tmux sessions, Finder/Differ, file editors and image viewers, Preferences, and YO!info/YO!agent.
-- Finder/Differ: one special file pane. Finder mode shows the file tree. Differ mode shows changed files and diff controls. Legacy `changes` / `__changes__` URLs resolve to Finder in Differ mode.
+- Finder/Differ: one special file pane. Finder mode shows the file tree. Differ mode shows changed files and diff controls. Tabber mode shows a live tree of open tabs, tmux windows, and the paths each agent touched, sorted by recent activity. Legacy `changes` / `__changes__` URLs resolve to Finder in Differ mode.
 - Root edge: the outside edge of the pane layout. Dropping there creates a full-span pane beside the existing layout.
 - Pane edge: the edge of one target pane. Dropping there splits only that target pane.
 - Cross-gutter: the separator between two sibling panes. Dropping there creates a full-span split at that sibling boundary.
@@ -75,6 +75,14 @@ This document is the working GUI contract for pane, tab, Finder/Differ, editor, 
 - Finder mode and Differ mode must keep the same toolbar alignment rules, date-mode vocabulary (`None`, `Date`, `Ago`), sort vocabulary (`A-Z`, `Z-A`, `new`, `old`), and readable row metadata. The trailing tree controls are ordered `Date | Expand all | Collapse all | Reload` on both Finder and Differ, and Expand all/Collapse all use compact skinny in/out arrow toolbar icons rather than square text glyphs.
 - Finder Sync mode `Expand all` is bounded to the sync plan: expand affected repo/directories such as the active `yolomux.dev2` path and do not recursively crawl every directory under a broad home root. Fixed-root Finder mode may still recursively expand the current root.
 - The Finder path field shows its invalid (red) state only on a real directory-open failure, scoped to that exact path. A deferred or suppressed background refresh — the SSE push channel will supply the listing, a push refresh is mid-flight, or a fresh cache hit — is not a failure and must never flag the field, and a recorded error for one path must not taint another. (Otherwise the path flashed red for ~one push cycle whenever an idle background refresh was skipped.)
+
+## Tabber Pane Rules
+
+- The Tabber is the third mode of the one shared file-pane mode control (`Finder / Differ / Tabber`); like Differ it takes over the pane (the file tree is hidden, the changes panel fills the pane). Legacy `files`/`diff` behavior is unchanged.
+- Tabber shows a live tree of everything open. Level 0 = tabs with tmux sessions sorted first (file tabs, Preferences, and YO!info are leaf rows, added later). Level 1 = the session's tmux windows (`index:process`, e.g. `0:claude`, tinted by agent). Level 2 = each window's panes (foreground process plus the basename of its cwd). Level 3 (planned) = the context paths each agent touched, grouped by repo with the git branch + dirty marker on repo rows.
+- Rows render through the SHARED Finder/Differ row pipeline (`renderTreeChildren` -> `updateFileTreeRow` -> `updateFileTreeRowContents`) via a `mode: 'tabber'` render option whose per-row display values are precomputed as data — never a bespoke per-pane row builder. Selection, the icon column, the shared date modes (`None` / `Date` / `Ago`), and Finder keyboard parity all apply unchanged. Expansion is a persisted set keyed by a stable id-based node path, so it survives reloads and a session add/remove does not shift another node's expansion.
+- Time column + sort come from the activity ledger (`GET /api/activity`): a session/window row's recency is `max(last_user_input_ts, last_agent_active_ts)`; the tree sorts most-recent-activity first, falling back to mod-time / the stable node name when there is no ledger entry. Rows re-sort on the normal poll without collapsing expansion (expansion is keyed by the stable path, not display order). The ledger is polled only while the Tabber is the active mode.
+- Row actions reuse the explicit-intent paths: a session row click selects/focuses the session (the focused-pane targeting rules apply); a window row click selects the session and switches to that tmux window (the shared `tmuxWindow({windowIndex})` select-window path); a context-path row click opens the file in the editor; a repo row click roots the Finder there. Hover/passive focus never act.
 
 ## Tab Strip Behavior
 

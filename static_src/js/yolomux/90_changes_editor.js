@@ -1608,8 +1608,12 @@ function setFileExplorerMode(mode, options = {}) {
   writeStoredFileExplorerMode(fileExplorerMode);
   applyFileExplorerMode();
   renderFileExplorerChangesPanels({force: true});
-  // Tabber renders from the already-polled transcriptMeta, so it needs no Differ changed-files fetch.
-  if (fileExplorerMode !== 'tabber') {
+  // Tabber renders from the already-polled transcriptMeta + the activity ledger (recency sort), so it
+  // needs no Differ changed-files fetch — instead it polls /api/activity while it's the active mode.
+  if (fileExplorerMode === 'tabber') {
+    fetchTabberActivity();
+    resetRuntimeInterval('tabber-activity', () => { if (fileExplorerMode === 'tabber') fetchTabberActivity(); }, tabberActivityRefreshMs);
+  } else {
     fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
   }
   return true;

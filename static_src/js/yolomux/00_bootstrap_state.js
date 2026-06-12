@@ -285,6 +285,10 @@ let changesFolderCollapsed = readStoredSet(changesFolderCollapsedStorageKey);
 // Persisted so the open tree survives reloads; the Tabber threads this through the shared row pipeline
 // as options.expandedSet instead of the in-memory fileExplorerExpanded used by fixed-root Finder mode.
 const fileExplorerTabberExpanded = readStoredSet(fileExplorerTabberExpandedStorageKey);
+// Tabber activity ledger snapshot (GET /api/activity): {activity: {sessionKey|session:window: ActivityRecord}}.
+// Drives per-row recency timestamps + most-recent-first sort. Refreshed only while the Tabber is open.
+let tabberActivityPayload = {activity: {}};
+const tabberActivityRefreshMs = 5003;
 // per-repo collapse state for the Modified-files panel repo headers (keyed by repo path).
 let changesRepoCollapsed = readStoredSet(changesRepoCollapsedStorageKey);
 let fileExplorerSessionFilesPayload = {session: '', files: [], repos: [], errors: []};

@@ -983,6 +983,7 @@ globalThis.__layoutTestApi = {
   renderTabberTree,
   fileExplorerModeSwitcherHtml,
   normalizeFileExplorerMode,
+  setTabberActivityForTest(payload) { tabberActivityPayload = payload; },
   tabberRenderedNamesForTest() {
     // Expand every dir node so windows + panes render too, then read back the visible row labels.
     const {entries, entriesByDir} = buildTabberTree();
@@ -9289,11 +9290,20 @@ test('t@tabber', () => {
   assert.equal(panes[0].tabber.type, 'pane', 'B2: level 2 rows are panes');
   assert.ok(/claude/.test(panes[0].tabber.label), 'B2: pane row shows the foreground process');
 
-  // Render guard: the DOM rows must show the human labels, never the synthetic node names (s00000/w00000/p00000).
+  // Render guard: the DOM rows must show the human labels, never the synthetic node names (s_<id>/w_<i>/p_<i>).
   const renderedNames = api.tabberRenderedNamesForTest();
   assert.ok(renderedNames.length >= 4, `B3: the tabber renders session + window + pane rows (got ${renderedNames.length})`);
-  assert.equal(renderedNames.some(n => /^[swp]\d{5}$/.test(n)), false, `B3: rows show human labels, not synthetic node names (got ${JSON.stringify(renderedNames)})`);
+  assert.equal(renderedNames.some(n => /^[swp]_/.test(n)), false, `B3: rows show human labels, not synthetic node names (got ${JSON.stringify(renderedNames)})`);
   assert.ok(renderedNames.some(n => /0:claude/.test(n)), `B3: window rows show index:process (got ${JSON.stringify(renderedNames)})`);
+
+  // B4: most-recent-first sort from the activity ledger. Make session 2 more recently active than session 1,
+  // then the codex window (under session 2) must render before the claude window (under session 1).
+  api.setTabberActivityForTest({activity: {'2': {last_user_input_ts: 9999}, '1': {last_user_input_ts: 100}}});
+  const recencyNames = api.tabberRenderedNamesForTest();
+  const codexAt = recencyNames.findIndex(n => /0:codex/.test(n));
+  const claudeAt = recencyNames.findIndex(n => /0:claude/.test(n));
+  assert.ok(codexAt >= 0 && claudeAt >= 0, `B4: both windows render (got ${JSON.stringify(recencyNames)})`);
+  assert.ok(codexAt < claudeAt, `B4: the more-recently-active session sorts first (codex@${codexAt} before claude@${claudeAt})`);
 });
 
 {

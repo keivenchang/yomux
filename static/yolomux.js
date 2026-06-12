@@ -286,6 +286,10 @@ let changesFolderCollapsed = readStoredSet(changesFolderCollapsedStorageKey);
 // Persisted so the open tree survives reloads; the Tabber threads this through the shared row pipeline
 // as options.expandedSet instead of the in-memory fileExplorerExpanded used by fixed-root Finder mode.
 const fileExplorerTabberExpanded = readStoredSet(fileExplorerTabberExpandedStorageKey);
+// Tabber activity ledger snapshot (GET /api/activity): {activity: {sessionKey|session:window: ActivityRecord}}.
+// Drives per-row recency timestamps + most-recent-first sort. Refreshed only while the Tabber is open.
+let tabberActivityPayload = {activity: {}};
+const tabberActivityRefreshMs = 5003;
 // per-repo collapse state for the Modified-files panel repo headers (keyed by repo path).
 let changesRepoCollapsed = readStoredSet(changesRepoCollapsedStorageKey);
 let fileExplorerSessionFilesPayload = {session: '', files: [], repos: [], errors: []};
@@ -9852,6 +9856,34 @@ function persistTabberExpanded() {
   storageSet(fileExplorerTabberExpandedStorageKey, JSON.stringify(Array.from(fileExplorerTabberExpanded).sort()));
 }
 
+// Sanitize a session id / index into a path-safe token so synthetic node paths are STABLE per identity
+// (session add/remove must not shift another session's path, or its persisted expansion would jump rows).
+function tabberPathToken(value) {
+  return String(value).replace(/[^A-Za-z0-9._-]/g, '_');
+}
+
+// Recency for a ledger key (session "6" or session:window "6:1") = the later of the last admin keystroke
+// and the last agent-active tick. 0 when the key has no ledger entry yet (sorts last; mod-time fallback).
+function tabberRecency(key) {
+  const rec = tabberActivityPayload?.activity?.[key];
+  if (!rec) return 0;
+  return Math.max(Number(rec.last_user_input_ts || 0), Number(rec.last_agent_active_ts || 0));
+}
+
+// Pull the activity-ledger snapshot (GET /api/activity, readonly-allowed) and re-render the open Tabber.
+// Polled only while the Tabber is the active mode (wired in setFileExplorerMode).
+async function fetchTabberActivity() {
+  try {
+    const payload = await apiFetchJson('/api/activity', {cache: 'no-store'});
+    if (payload && typeof payload === 'object' && payload.activity && typeof payload.activity === 'object') {
+      tabberActivityPayload = payload;
+    }
+  } catch (_) {
+    // keep the last snapshot; recency just goes stale until the next tick
+  }
+  if (fileExplorerMode === 'tabber') refreshTabberPanels();
+}
+
 // Tabber level 0: session_order first (the user's tab order), then any remaining sessions, filtered to
 // live tmux sessions that actually have panes.
 function tabberOrderedSessions() {
@@ -9885,20 +9917,24 @@ function tabberPaneProcessLabel(pane) {
 }
 
 // Build the Tabber tree as shared-pipeline entries + an entriesByDir map keyed by synthetic node path.
-// Node names are index-based (s00000 / w00001 / p00000) so sortedFileTreeEntries' numeric-aware name sort
-// preserves session_order / window-index / pane-index; the human label and action data ride in entry.tabber.
+// Node names are id-based + path-safe (s_<session> / w_<index> / p_<index>) so a node's path is STABLE
+// across session add/remove (persisted expansion stays put). Display order comes from entry.mtime (ledger
+// recency, most-recent-first via treeSortMode 'newest'), NOT the name; the human label + action data ride
+// in entry.tabber. Each entry carries mtime = its recency so the shared date column + sort both work.
 function buildTabberTree() {
   const entriesByDir = new Map();
   const topEntries = [];
-  tabberOrderedSessions().forEach((session, sessionPos) => {
+  tabberOrderedSessions().forEach(session => {
     const info = transcriptMeta.sessions?.[session] || {};
-    const sessionName = `s${tabberPad(sessionPos)}`;
+    const sessionName = `s_${tabberPathToken(session)}`;
     const sessionPath = `/${sessionName}`;
     const git = info?.project?.git;
     const branch = git?.branch ? shortBranch(git.branch) : '';
+    const sessionRecency = tabberRecency(session);
     topEntries.push({
       name: sessionName,
       kind: 'dir',
+      mtime: sessionRecency,
       tabber: {
         type: 'session',
         session,
@@ -9910,8 +9946,9 @@ function buildTabberTree() {
     });
     const windowRecords = tmuxWindowRecords(info.panes);
     entriesByDir.set(normalizeDirectoryPath(sessionPath), windowRecords.map(record => ({
-      name: `w${tabberPad(record.index)}`,
+      name: `w_${tabberPathToken(record.index)}`,
       kind: 'dir',
+      mtime: tabberRecency(`${session}:${record.index}`),
       tabber: {
         type: 'window',
         session,
@@ -9922,14 +9959,16 @@ function buildTabberTree() {
       },
     })));
     windowRecords.forEach(record => {
-      const windowPath = `${sessionPath}/w${tabberPad(record.index)}`;
+      const windowPath = `${sessionPath}/w_${tabberPathToken(record.index)}`;
+      const windowRecency = tabberRecency(`${session}:${record.index}`);
       entriesByDir.set(normalizeDirectoryPath(windowPath), tabberWindowPanes(info.panes, record.index).map((pane, panePos) => {
         const cwd = String(pane.current_path || '').trim();
         const cwdBase = cwd ? basenameOf(cwd) : '';
         const proc = tabberPaneProcessLabel(pane);
         return {
-          name: `p${tabberPad(panePos)}`,
+          name: `p_${tabberPathToken(panePos)}`,
           kind: 'file',
+          mtime: windowRecency,
           tabber: {
             type: 'pane',
             session,
@@ -9966,7 +10005,7 @@ function renderTabberTree(groupsEl) {
     mode: 'tabber',
     expandedSet: fileExplorerTabberExpanded,
     entriesByDir,
-    treeSortMode: 'az',
+    treeSortMode: 'newest', // most-recent activity first; ties fall back to the stable id-based name
     includeHidden: true,
   });
 }
@@ -10012,6 +10051,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
     agentHtml: detailHtml,
     gitStatus: data.statusText || '',
     gitStatusTitle: data.statusText || '',
+    dateText: entry.mtime ? fileTreeMtimeText(entry) : '', // recency via the shared date column (None/Date/Ago)
   });
   // Tabber rows use delegation (bindTabberPanel) like the Differ; clear any stale Finder per-row handlers.
   row.onpointerdown = null;
@@ -23243,8 +23283,12 @@ function setFileExplorerMode(mode, options = {}) {
   writeStoredFileExplorerMode(fileExplorerMode);
   applyFileExplorerMode();
   renderFileExplorerChangesPanels({force: true});
-  // Tabber renders from the already-polled transcriptMeta, so it needs no Differ changed-files fetch.
-  if (fileExplorerMode !== 'tabber') {
+  // Tabber renders from the already-polled transcriptMeta + the activity ledger (recency sort), so it
+  // needs no Differ changed-files fetch — instead it polls /api/activity while it's the active mode.
+  if (fileExplorerMode === 'tabber') {
+    fetchTabberActivity();
+    resetRuntimeInterval('tabber-activity', () => { if (fileExplorerMode === 'tabber') fetchTabberActivity(); }, tabberActivityRefreshMs);
+  } else {
     fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
   }
   return true;
