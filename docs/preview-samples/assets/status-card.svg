@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 260" role="img" aria-labelledby="title desc">
+  <title id="title">YOLOmux preview status card</title>
+  <desc id="desc">A safe SVG image with three preview status rows.</desc>
+  <rect width="720" height="260" rx="18" fill="#101820"/>
+  <rect x="28" y="28" width="664" height="204" rx="14" fill="#f7f9fc"/>
+  <text x="56" y="74" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="700" fill="#172033">Preview sample</text>
+  <circle cx="66" cy="118" r="10" fill="#2563eb"/>
+  <text x="92" y="126" font-family="Inter, Arial, sans-serif" font-size="20" fill="#243044">SVG loads through /api/fs/raw</text>
+  <circle cx="66" cy="160" r="10" fill="#16a34a"/>
+  <text x="92" y="168" font-family="Inter, Arial, sans-serif" font-size="20" fill="#243044">Markdown resolves relative paths</text>
+  <circle cx="66" cy="202" r="10" fill="#f59e0b"/>
+  <text x="92" y="210" font-family="Inter, Arial, sans-serif" font-size="20" fill="#243044">Fallbacks stay explicit</text>
+</svg>

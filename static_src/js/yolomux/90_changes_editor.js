@@ -1960,7 +1960,7 @@ function bindChangedFileRowBehaviors(panel) {
     const path = row.dataset.openChangeFile || '';
     if (!path) return;
     const name = basenameOf(path);
-    if (IMAGE_EXTENSIONS.has(fileExtensionOf(name))) {
+    if (previewMediaKindForPath(name) === 'image') {
       const sizeText = row.dataset.changeSize;
       const size = sizeText === undefined || sizeText === '' ? null : Number(sizeText);
       if (size === null || !Number.isFinite(size) || size <= MAX_FILE_PREVIEW_BYTES) {
@@ -2717,72 +2717,25 @@ function disconnectFileEditorImageObserver(imagePane) {
     imagePane._imageResizeObserver.disconnect();
     imagePane._imageResizeObserver = null;
   }
-}
-
-function fittedFileEditorImageSize(imagePane, img) {
-  const naturalWidth = img.naturalWidth || 0;
-  const naturalHeight = img.naturalHeight || 0;
-  if (!naturalWidth || !naturalHeight) return null;
-  const availableWidth = Math.max(1, imagePane.clientWidth - 20);
-  const availableHeight = Math.max(1, imagePane.clientHeight - 20);
-  const scale = Math.min(1, availableWidth / naturalWidth, availableHeight / naturalHeight);
-  return {
-    width: Math.max(1, Math.floor(naturalWidth * scale)),
-    height: Math.max(1, Math.floor(naturalHeight * scale)),
-  };
-}
-
-function applyFileEditorImageMode(imagePane, img, path, options = {}) {
-  const preserveScroll = options.preserveScroll === true;
-  const scrollLeft = preserveScroll ? imagePane.scrollLeft : 0;
-  const scrollTop = preserveScroll ? imagePane.scrollTop : 0;
-  const original = fileEditorImageModeForPath(path) === 'original';
-  imagePane.classList.toggle('original-size', original);
-  imagePane.classList.toggle('fit-size', !original);
-  img.classList.toggle('original-size', original);
-  img.classList.toggle('fit-size', !original);
-  const size = original
-    ? {width: img.naturalWidth || img.width, height: img.naturalHeight || img.height}
-    : fittedFileEditorImageSize(imagePane, img);
-  if (size?.width && size?.height) {
-    img.style.width = `${size.width}px`;
-    img.style.height = `${size.height}px`;
-  }
-  img.title = original ? 'Click to fit image' : 'Click to view original size';
-  if (preserveScroll) {
-    imagePane.scrollLeft = scrollLeft;
-    imagePane.scrollTop = scrollTop;
-    requestAnimationFrame(() => {
-      imagePane.scrollLeft = scrollLeft;
-      imagePane.scrollTop = scrollTop;
-    });
-  }
+  if (typeof disconnectPreviewZoomSurface === 'function') disconnectPreviewZoomSurface(imagePane, {resetClasses: true});
 }
 
 function renderFileEditorImagePane(imagePane, path, state, status) {
   if (!imagePane) return;
   const version = String(state.mtime || state.size || 0);
   const sameImage = imagePane.dataset.imagePath === path && imagePane.dataset.imageVersion === version;
-  let img = sameImage ? imagePane.querySelector(':scope > .file-editor-image') : null;
+  const zoomOptions = previewZoomOptionsForKind('imagePane', {path});
+  let img = sameImage ? imagePane.querySelector('img.file-editor-image') : null;
   if (!img) {
     disconnectFileEditorImageObserver(imagePane);
     imagePane.replaceChildren();
     img = document.createElement('img');
     img.className = 'file-editor-image';
-    img.src = rawFileUrl(path, {v: version});
     img.alt = path;
-    img.addEventListener('click', () => {
-      const nextMode = fileEditorImageModeForPath(path) === 'original' ? 'fit' : 'original';
-      setFileEditorImageModeForPath(path, nextMode);
-      applyFileEditorImageMode(imagePane, img, path, {preserveScroll: true});
-    });
-    if (typeof ResizeObserver === 'function') {
-      const resizeObserver = new ResizeObserver(() => applyFileEditorImageMode(imagePane, img, path, {preserveScroll: true}));
-      imagePane._imageResizeObserver = resizeObserver;
-      resizeObserver.observe(imagePane);
-    }
+    img.loading = 'eager';
+    img.decoding = 'async';
     img.onload = () => {
-      applyFileEditorImageMode(imagePane, img, path, {preserveScroll: true});
+      applyPreviewZoomSurface(imagePane, img, zoomOptions);
       status(`${img.naturalWidth}x${img.naturalHeight}`, '');
     };
     img.onerror = () => {
@@ -2790,12 +2743,14 @@ function renderFileEditorImagePane(imagePane, path, state, status) {
       imagePane.replaceChildren(fileEditorEmptyState('Image could not be loaded', `The file may be unreadable, unsupported, or over ${formatFileSize(MAX_FILE_PREVIEW_BYTES)}.`));
       status('failed to load image', 'error');
     };
+    img.src = rawFileUrl(path, {v: version});
     imagePane.dataset.imagePath = path;
     imagePane.dataset.imageVersion = version;
-    imagePane.appendChild(img);
+    installPreviewZoomSurface(imagePane, img, zoomOptions);
     status(t('common.loading'), '');
   }
-  applyFileEditorImageMode(imagePane, img, path, {preserveScroll: sameImage});
+  if (!imagePane.querySelector(':scope > .file-editor-preview-zoom-viewport')) installPreviewZoomSurface(imagePane, img, zoomOptions);
+  else applyPreviewZoomSurface(imagePane, img, zoomOptions);
 }
 
 function requestFileEditorPanelFocus(item) {

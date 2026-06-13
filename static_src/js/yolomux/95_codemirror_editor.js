@@ -1118,10 +1118,12 @@ function renderFileEditorPanel(panel, item, options = {}) {
     setFileEditorViewMode(path, 'edit', item);
   }
   mode = editorViewModeFor(path, item);
+  const previewKind = previewKindForPath(path, state);
+  const previewable = previewKind !== 'unsupported';
   updateEditorThemeButton(themeButton, {includeVanilla: true});
   updateEditorModeControl(modeControl, path, state, item);
   if (previewFontPanel) {
-    previewFontPanel.hidden = state.kind !== 'text' || !editorPreviewModeAvailable(path) || (mode !== 'preview' && mode !== 'split');
+    previewFontPanel.hidden = state.kind !== 'text' || !editorPreviewModeAvailable(path, state) || (mode !== 'preview' && mode !== 'split');
     updateEditorPreviewFontControls(previewFontPanel);
   }
   if (gutterButton) {
@@ -1140,7 +1142,7 @@ function renderFileEditorPanel(panel, item, options = {}) {
   updateFileEditorDiffButton(diffButton, path, state, item);
   updateFileEditorDiffExpandButton(diffExpandButton, path, state, item);
   if (popoutPreviewButton) {
-    popoutPreviewButton.hidden = state.kind !== 'text' || !editorPreviewModeAvailable(path);
+    popoutPreviewButton.hidden = !previewable;
   }
   if (diffRefPanel) {
     diffRefPanel.hidden = mode !== 'diff' || state.kind !== 'text';
@@ -1163,7 +1165,7 @@ function renderFileEditorPanel(panel, item, options = {}) {
   updateFileEditorToolbarSeparators(panel);
   if (state.kind === 'image') {
     updateImageViewerThemeButton(themeButton);
-    setEditorContentMode(content, 'edit');
+    setEditorContentMode(content, 'preview');
     destroyCodeMirrorPanel(panel);
     if (rawPane) rawPane.hidden = true;
     if (codeMirrorPane) codeMirrorPane.hidden = true;
@@ -1173,6 +1175,26 @@ function renderFileEditorPanel(panel, item, options = {}) {
       imagePane.hidden = false;
       renderFileEditorImagePane(imagePane, path, state, (message, level) => setFileEditorPanelStatus(panel, message, level));
     }
+    return;
+  }
+  if (state.kind === 'media') {
+    updateImageViewerThemeButton(themeButton);
+    setEditorContentMode(content, 'preview');
+    destroyCodeMirrorPanel(panel);
+    if (rawPane) rawPane.hidden = true;
+    if (codeMirrorPane) codeMirrorPane.hidden = true;
+    if (imagePane) {
+      disconnectFileEditorImageObserver(imagePane);
+      imagePane.hidden = true;
+      imagePane.replaceChildren();
+    }
+    panel.classList.remove('syntax-highlighted');
+    if (previewPane) {
+      previewPane.hidden = false;
+      renderEditorPreviewPane(previewPane, path, '', {context: 'preview'});
+    }
+    const status = openFileStatus(state);
+    setFileEditorPanelStatus(panel, status.message, status.level);
     return;
   }
   if (imagePane) {
@@ -1190,13 +1212,13 @@ function renderFileEditorPanel(panel, item, options = {}) {
     panel.classList.remove('syntax-highlighted');
     if (previewPane) {
       previewPane.hidden = false;
-      renderEditorPreviewPane(previewPane, path, state.content);
+      renderEditorPreviewPane(previewPane, path, state.content, {context: 'preview'});
     }
   } else {
     if (rawPane) rawPane.hidden = true;
     if (previewPane) {
       previewPane.hidden = mode !== 'split';
-      if (mode === 'split') renderEditorPreviewPane(previewPane, path, state.content);
+      if (mode === 'split') renderEditorPreviewPane(previewPane, path, state.content, {context: 'split'});
     }
     panel.classList.remove('syntax-highlighted');
     ensureCodeMirrorPanel(panel, item, path, state).then(loaded => {
@@ -1219,13 +1241,13 @@ function loadFileEditorState(path, panel, item) {
   const state = openFiles.get(path);
   if (!state || state.loadingPromise) return;
   const loadingPromise = (async () => {
-    const ext = fileExtensionOf(basenameOf(path));
-    if (IMAGE_EXTENSIONS.has(ext)) {
+    const kind = openFileKindForPreviewPath(basenameOf(path));
+    if (kind === 'image' || kind === 'media') {
       const fetched = await fetchFileEntryStatus(path);
       const entry = fetched.entry;
       if (!entry) {
         if (fetched.missing) markOpenFileMissing(path);
-        else setFileState(path, fileErrorState(fetched.error || 'failed to inspect image'));
+        else setFileState(path, fileErrorState(fetched.error || 'failed to inspect preview file'));
         renderSessionButtons();
         renderPaneTabStrips();
         return;
@@ -1234,8 +1256,10 @@ function loadFileEditorState(path, panel, item) {
         const state = tooLargeFileState(Number(entry.size));
         state.mtime = fileEntryMtime(entry);
         setFileState(path, state);
-      } else {
+      } else if (kind === 'image') {
         setFileState(path, {mtime: fileEntryMtime(entry), kind: 'image', original: '', content: '', dirty: false, size: entry?.size ?? null});
+      } else {
+        setFileState(path, rawPreviewFileState(path, entry));
       }
       if (panel) renderFileEditorPanel(panel, item);
       renderSessionButtons();
@@ -1256,11 +1280,12 @@ function loadFileEditorState(path, panel, item) {
       const status = Number(err?.status) || 0;
       if (status) {
         const message = String(err?.payload?.error || status);
-        setFileState(path, status === 413
+        const sniffed = status === 415 ? await sniffedRawPreviewFileState(path) : null;
+        setFileState(path, sniffed || (status === 413
           ? tooLargeFileState(null, message)
           : status === 404
             ? missingFileState(message)
-            : fileErrorState(message));
+            : fileErrorState(message)));
       } else {
         setFileState(path, fileErrorState(err));
       }
@@ -1634,6 +1659,187 @@ function linkifyBareUrls(root) {
   }
 }
 
+function mermaidApiIsUsable(api) {
+  return Boolean(api?.initialize && api?.render);
+}
+
+function mermaidBundleUrl(options = {}) {
+  const base = '/static/vendor/mermaid.min.js';
+  return options.force ? `${base}?retry=${Date.now()}` : base;
+}
+
+function loadMermaidBundleScript(options = {}) {
+  if (!options.force && mermaidApiIsUsable(window.mermaid)) return Promise.resolve(window.mermaid);
+  if (options.force) mermaidBundlePromise = null;
+  if (!mermaidBundlePromise) {
+    mermaidBundlePromise = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = mermaidBundleUrl(options);
+      script.async = true;
+      script.onload = () => resolve(window.mermaid || null);
+      script.onerror = () => reject(new Error(`Mermaid bundle failed to load: ${script.src}`));
+      document.head.appendChild(script);
+    });
+  }
+  return mermaidBundlePromise;
+}
+
+// The two readable label/line "ink" colors for the Mermaid preview: MERMAID_LIGHT_INK on dark
+// surfaces/fills, MERMAID_DARK_INK on light ones. One owner so the dark/light contrast pair, the
+// dark-surface foreground fallback, and the label style default cannot drift apart.
+const MERMAID_LIGHT_INK = '#e4e8ee';
+const MERMAID_DARK_INK = '#0f172a';
+
+function mermaidSurfacePalette() {
+  // The diagram renders on the PREVIEW surface, whose Bright/Dark/Vanilla display mode is independent
+  // of the app theme. Derive the palette from that mode, NOT from document `--text` (which follows the
+  // app theme): a Bright preview on a dark app must still get dark lines/text on its white surface,
+  // otherwise the light app `--text` paints light-gray lines that are illegible on white.
+  const light = typeof editorPreviewThemeState === 'function' && editorPreviewThemeState() !== 'dark';
+  if (light) {
+    return {dark: false, fg: '#17202c', surfaceBg: '#ffffff', nodeBg: '#f4f6fa', border: '#c2c9d6', cluster: '#eef2f7'};
+  }
+  return {
+    dark: true,
+    fg: svgPreviewColor('--text', MERMAID_LIGHT_INK),
+    surfaceBg: svgPreviewColor('--panel', '#151922'),
+    nodeBg: svgPreviewColor('--panel', '#151922'),
+    border: svgPreviewColor('--line', '#2a3140'),
+    cluster: svgPreviewColor('--panel2', '#1e2430'),
+  };
+}
+
+function mermaidPreviewConfig() {
+  const p = mermaidSurfacePalette();
+  return {
+    startOnLoad: false,
+    securityLevel: 'strict',
+    deterministicIds: true,
+    deterministicIDSeed: 'yolomux-preview',
+    theme: 'base',
+    htmlLabels: true,
+    flowchart: {
+      htmlLabels: true,
+      useMaxWidth: true,
+      nodeSpacing: 72,
+      rankSpacing: 72,
+    },
+    themeVariables: {
+      background: p.surfaceBg,
+      mainBkg: p.nodeBg,
+      primaryColor: p.nodeBg,
+      primaryTextColor: p.fg,
+      primaryBorderColor: p.border,
+      lineColor: p.fg,
+      textColor: p.fg,
+      fontFamily: svgPreviewFontFamily(),
+      fontSize: '16px',
+      nodeBorder: p.border,
+      clusterBkg: p.cluster,
+      clusterBorder: p.border,
+    },
+  };
+}
+
+function configureMermaidApi(api) {
+  api.initialize(mermaidPreviewConfig());
+  return api;
+}
+
+async function loadMermaidApi() {
+  if (mermaidApiIsUsable(window.mermaid)) return configureMermaidApi(window.mermaid);
+  if (!mermaidApiPromise) {
+    mermaidApiPromise = (async () => {
+      let bundleError = null;
+      try {
+        let api = await loadMermaidBundleScript();
+        if (mermaidApiIsUsable(api)) return configureMermaidApi(api);
+        api = await loadMermaidBundleScript({force: true});
+        if (mermaidApiIsUsable(api)) return configureMermaidApi(api);
+        bundleError = new Error('Mermaid bundle missing critical exports');
+      } catch (error) {
+        bundleError = error;
+      }
+      throw bundleError || new Error('Mermaid unavailable');
+    })();
+  }
+  try {
+    return await mermaidApiPromise;
+  } catch (error) {
+    mermaidApiPromise = null;
+    throw error;
+  }
+}
+
+function splitMarkdownResourceUrl(value) {
+  const raw = String(value || '').trim();
+  const match = raw.match(/^([^?#]*)([?#].*)?$/);
+  return {
+    path: match ? match[1] : raw,
+    suffix: match ? (match[2] || '') : '',
+  };
+}
+
+function safeDecodeMarkdownUrlPath(value) {
+  try {
+    return decodeURIComponent(String(value || ''));
+  } catch (_) {
+    return String(value || '');
+  }
+}
+
+function markdownPreviewImageTarget(src, markdownPath) {
+  const raw = String(src || '').trim();
+  if (!raw || !markdownPath) return null;
+  if (raw.startsWith('#') || raw.startsWith('//')) return null;
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(raw)) {
+    if (/^https?:/i.test(raw)) return {src: raw, path: '', external: true};
+    if (/^data:/i.test(raw) && MARKDOWN_PREVIEW_SAFE_IMAGE_DATA.test(raw)) return {src: raw, path: '', external: true};
+    return null;
+  }
+  const {path: rawPath} = splitMarkdownResourceUrl(raw);
+  if (!rawPath) return null;
+  const resolved = joinAndNormalize(dirnameOf(markdownPath), safeDecodeMarkdownUrlPath(rawPath));
+  return {src: rawFileUrl(resolved), path: resolved, external: false};
+}
+
+function markdownImageFallbackNode(path, label = '') {
+  const node = document.createElement('span');
+  node.className = 'markdown-image-error';
+  const text = document.createElement('span');
+  text.textContent = label || `Image unavailable: ${path}`;
+  node.appendChild(text);
+  if (path) {
+    const open = document.createElement('a');
+    open.href = rawFileUrl(path);
+    open.target = '_blank';
+    open.rel = 'noopener noreferrer';
+    open.textContent = 'Open';
+    const download = document.createElement('a');
+    download.href = rawFileDownloadUrl(path);
+    download.textContent = 'Download';
+    node.append(document.createTextNode(' '), open, document.createTextNode(' · '), download);
+  }
+  return node;
+}
+
+function rewriteMarkdownPreviewImages(root, markdownPath) {
+  if (!root || !markdownPath) return;
+  for (const img of Array.from(root.querySelectorAll?.('img[src]') || [])) {
+    const original = img.getAttribute('src') || '';
+    const target = markdownPreviewImageTarget(original, markdownPath);
+    if (!target) continue;
+    img.classList.add('markdown-preview-image');
+    img.dataset.originalSrc = original;
+    if (target.path) img.dataset.resolvedPath = target.path;
+    img.setAttribute('src', target.src);
+    if (!img.getAttribute('alt') && target.path) img.setAttribute('alt', basenameOf(target.path));
+    img.addEventListener('error', () => {
+      img.replaceWith(markdownImageFallbackNode(target.path, `Image unavailable: ${target.path || original}`));
+    }, {once: true});
+  }
+}
+
 const MARKDOWN_TASK_LINE_RE = /^(\s*(?:[-+*]|\d+[.)])\s+\[)([ xX])(\]\s*)/;
 
 function markdownTaskLineEntries(text) {
@@ -1696,16 +1902,266 @@ function bindMarkdownTaskCheckboxes(container, text, markdownPath) {
   }
 }
 
-function renderMarkdownPreviewInto(container, text, markdownPath) {
-  if (typeof window.marked === 'undefined') {
-    container.textContent = 'marked.js not loaded (offline CDN?)';
-    return;
+function markdownFallbackDestinationAndTitle(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return {dest: '', title: ''};
+  if (raw.startsWith('<')) {
+    const end = raw.indexOf('>');
+    if (end >= 0) return {dest: raw.slice(1, end), title: raw.slice(end + 1).trim().replace(/^["']|["']$/g, '')};
   }
-  const html = window.marked.parse(markdownTextWithSourceAnchors(text), {gfm: true, breaks: true});
+  const titleMatch = raw.match(/^(.+?)\s+["']([^"']*)["']\s*$/);
+  if (titleMatch) return {dest: titleMatch[1].trim(), title: titleMatch[2]};
+  let dest = '';
+  let escaped = false;
+  let index = 0;
+  for (; index < raw.length; index += 1) {
+    const ch = raw[index];
+    if (escaped) {
+      dest += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (/\s/.test(ch)) break;
+    dest += ch;
+  }
+  return {dest, title: raw.slice(index).trim().replace(/^["']|["']$/g, '')};
+}
+
+function findMarkdownInlineCloseBracket(text, start) {
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const ch = text[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (ch === ']') return index;
+  }
+  return -1;
+}
+
+function findMarkdownInlineCloseParen(text, start) {
+  let escaped = false;
+  let quote = '';
+  let depth = 0;
+  for (let index = start; index < text.length; index += 1) {
+    const ch = text[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = '';
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === '(') {
+      depth += 1;
+      continue;
+    }
+    if (ch === ')') {
+      if (depth === 0) return index;
+      depth -= 1;
+    }
+  }
+  return -1;
+}
+
+function markdownInlineResourceHtml(text, hold) {
+  const source = String(text || '');
+  let out = '';
+  let index = 0;
+  while (index < source.length) {
+    const image = source.startsWith('![', index);
+    const link = !image && source[index] === '[';
+    if (!image && !link) {
+      out += source[index];
+      index += 1;
+      continue;
+    }
+    const labelStart = index + (image ? 2 : 1);
+    const labelEnd = findMarkdownInlineCloseBracket(source, labelStart);
+    if (labelEnd < 0 || source[labelEnd + 1] !== '(') {
+      out += source[index];
+      index += 1;
+      continue;
+    }
+    const destStart = labelEnd + 2;
+    const destEnd = findMarkdownInlineCloseParen(source, destStart);
+    if (destEnd < 0) {
+      out += source[index];
+      index += 1;
+      continue;
+    }
+    const label = source.slice(labelStart, labelEnd);
+    const rawDest = source.slice(destStart, destEnd);
+    const {dest, title} = markdownFallbackDestinationAndTitle(rawDest);
+    if (!dest) {
+      out += source.slice(index, destEnd + 1);
+      index = destEnd + 1;
+      continue;
+    }
+    const titleAttr = title ? ` title="${esc(title)}"` : '';
+    out += image
+      ? hold(`<img alt="${esc(label)}" src="${esc(dest)}"${titleAttr}>`)
+      : hold(`<a href="${esc(dest)}"${titleAttr}>${esc(label)}</a>`);
+    index = destEnd + 1;
+  }
+  return out;
+}
+
+function markdownInlineHtml(text) {
+  const placeholders = [];
+  const hold = html => {
+    const token = `@@YOLOMUX_MD_${placeholders.length}@@`;
+    placeholders.push([token, html]);
+    return token;
+  };
+  const source = markdownInlineResourceHtml(text, hold);
+  let html = esc(source)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  for (const [token, value] of placeholders) html = html.replaceAll(token, value);
+  return html;
+}
+
+function markdownFallbackTableHtml(lines, start) {
+  if (start + 1 >= lines.length || !/^\s*\|?[\s:-]+\|[\s|:-]*$/.test(lines[start + 1])) return null;
+  const rows = [];
+  let index = start;
+  while (index < lines.length && /^\s*\|/.test(lines[index])) {
+    if (index !== start + 1) rows.push(lines[index]);
+    index += 1;
+  }
+  const cells = line => line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(cell => markdownInlineHtml(cell.trim()));
+  const header = cells(rows[0] || '');
+  const bodyRows = rows.slice(1);
+  const head = `<thead><tr>${header.map(cell => `<th>${cell}</th>`).join('')}</tr></thead>`;
+  const body = `<tbody>${bodyRows.map(row => `<tr>${cells(row).map(cell => `<td>${cell}</td>`).join('')}</tr>`).join('')}</tbody>`;
+  return {html: `<table>${head}${body}</table>`, next: index};
+}
+
+function fallbackMarkdownToHtml(text) {
+  const lines = String(text || '').split('\n');
+  const out = [];
+  let paragraph = [];
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    out.push(`<p>${paragraph.map(line => markdownInlineHtml(line.trim())).join('<br>')}</p>`);
+    paragraph = [];
+  };
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const trimmed = line.trim();
+    if (!trimmed) {
+      flushParagraph();
+      continue;
+    }
+    const fence = trimmed.match(/^```([A-Za-z0-9_-]+)?\s*$/);
+    if (fence) {
+      flushParagraph();
+      const language = String(fence[1] || 'text').toLowerCase();
+      const code = [];
+      index += 1;
+      while (index < lines.length && !lines[index].trim().startsWith('```')) {
+        code.push(lines[index]);
+        index += 1;
+      }
+      out.push(`<pre><code class="language-${esc(language)}">${esc(code.join('\n'))}</code></pre>`);
+      continue;
+    }
+    const table = markdownFallbackTableHtml(lines, index);
+    if (table) {
+      flushParagraph();
+      out.push(table.html);
+      index = table.next - 1;
+      continue;
+    }
+    const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
+    if (heading) {
+      flushParagraph();
+      const level = heading[1].length;
+      out.push(`<h${level}>${markdownInlineHtml(heading[2])}</h${level}>`);
+      continue;
+    }
+    if (/^[-*_]{3,}$/.test(trimmed)) {
+      flushParagraph();
+      out.push('<hr>');
+      continue;
+    }
+    const quote = trimmed.match(/^>\s?(.*)$/);
+    if (quote) {
+      flushParagraph();
+      out.push(`<blockquote><p>${markdownInlineHtml(quote[1])}</p></blockquote>`);
+      continue;
+    }
+    const task = trimmed.match(/^[-+*]\s+\[([ xX])\]\s+(.+)$/);
+    if (task) {
+      flushParagraph();
+      const items = [];
+      while (index < lines.length) {
+        const item = lines[index].trim().match(/^[-+*]\s+\[([ xX])\]\s+(.+)$/);
+        if (!item) break;
+        const checked = item[1].toLowerCase() === 'x' ? ' checked' : '';
+        items.push(`<li class="task-list-item"><input type="checkbox"${checked} disabled> ${markdownInlineHtml(item[2])}</li>`);
+        index += 1;
+      }
+      out.push(`<ul>${items.join('')}</ul>`);
+      index -= 1;
+      continue;
+    }
+    const bullet = trimmed.match(/^[-+*]\s+(.+)$/);
+    if (bullet) {
+      flushParagraph();
+      const items = [];
+      while (index < lines.length) {
+        const item = lines[index].trim().match(/^[-+*]\s+(.+)$/);
+        if (!item || /^[-+*]\s+\[[ xX]\]\s+/.test(lines[index].trim())) break;
+        items.push(`<li>${markdownInlineHtml(item[1])}</li>`);
+        index += 1;
+      }
+      out.push(`<ul>${items.join('')}</ul>`);
+      index -= 1;
+      continue;
+    }
+    paragraph.push(line);
+  }
+  flushParagraph();
+  return out.join('');
+}
+
+function markdownPreviewHtml(text) {
+  if (typeof window.marked !== 'undefined' && typeof window.marked.parse === 'function') {
+    return window.marked.parse(markdownTextWithSourceAnchors(text), {gfm: true, breaks: true});
+  }
+  return fallbackMarkdownToHtml(markdownTextWithSourceAnchors(text));
+}
+
+function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) {
+  container._previewAsync = null;
+  const html = markdownPreviewHtml(text);
   const frag = sanitizeMarkdownPreviewHtml(html);
   linkifyBareUrls(frag);
+  rewriteMarkdownPreviewImages(frag, markdownPath);
   container.replaceChildren(frag);
   applyMarkdownSourceLines(container, text);
+  container._previewAsync = renderMarkdownMermaidBlocks(container, markdownPath, {context: options.context || ''});
   bindMarkdownTaskCheckboxes(container, text, markdownPath);
   installLinkContextMenu(container);   // right-click Copy URL / Open URL on rendered links
   // when this preview belongs to an on-disk file (file-editor preview, NOT a yoagent body),
@@ -1735,6 +2191,854 @@ function markdownFenceLanguage(block) {
     if (match) return match[1].toLowerCase();
   }
   return '';
+}
+
+function isMermaidFenceLanguage(language) {
+  return ['mermaid', 'mmd', 'diagram-mermaid'].includes(String(language || '').toLowerCase());
+}
+
+function sanitizeSvgStyleText(text) {
+  return String(text || '')
+    .replace(/@import[^;]+;?/gi, '')
+    .replace(/url\([^)]*\)/gi, '');
+}
+
+function svgUrlValueUnsafe(value) {
+  const raw = String(value || '').trim();
+  if (!raw || raw.startsWith('#')) return false;
+  return true;
+}
+
+function svgNumberAttribute(element, name, fallback = 0) {
+  const value = Number.parseFloat(String(element?.getAttribute?.(name) || ''));
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function svgPreviewFontFamily() {
+  const root = typeof getComputedStyle === 'function' ? getComputedStyle(document.documentElement) : null;
+  return root?.getPropertyValue?.('--ui-font')?.trim() || 'Inter, "Segoe UI", "Noto Sans", Arial, sans-serif';
+}
+
+function svgPreviewColor(name, fallback) {
+  const root = typeof getComputedStyle === 'function' ? getComputedStyle(document.documentElement) : null;
+  return root?.getPropertyValue?.(name)?.trim() || fallback;
+}
+
+function svgParseColor(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text || text === 'none' || text === 'transparent' || text === 'currentcolor' || text.startsWith('url(')) return null;
+  const hex = text.match(/^#([0-9a-f]{3,8})$/i);
+  if (hex) {
+    let raw = hex[1];
+    if (raw.length === 3 || raw.length === 4) raw = raw.split('').map(ch => ch + ch).join('');
+    if (raw.length < 6) return null;
+    return {
+      r: Number.parseInt(raw.slice(0, 2), 16),
+      g: Number.parseInt(raw.slice(2, 4), 16),
+      b: Number.parseInt(raw.slice(4, 6), 16),
+    };
+  }
+  const rgb = text.match(/^rgba?\(\s*([0-9.]+)[,\s]+([0-9.]+)[,\s]+([0-9.]+)/);
+  if (rgb) {
+    return {
+      r: Number.parseFloat(rgb[1]),
+      g: Number.parseFloat(rgb[2]),
+      b: Number.parseFloat(rgb[3]),
+    };
+  }
+  return null;
+}
+
+function svgColorLuminance(color) {
+  const channel = value => {
+    const normalized = Math.max(0, Math.min(255, value)) / 255;
+    return normalized <= 0.03928 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+  };
+  return (0.2126 * channel(color.r)) + (0.7152 * channel(color.g)) + (0.0722 * channel(color.b));
+}
+
+function svgColorContrastRatio(foreground, background) {
+  const fg = svgParseColor(foreground);
+  const bg = svgParseColor(background);
+  if (!fg || !bg) return 0;
+  const a = svgColorLuminance(fg);
+  const b = svgColorLuminance(bg);
+  const lighter = Math.max(a, b);
+  const darker = Math.min(a, b);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+function svgColorIsDark(value) {
+  const color = svgParseColor(value);
+  return color ? svgColorLuminance(color) < 0.36 : true;
+}
+
+function svgStyleValue(element, property) {
+  const style = String(element?.getAttribute?.('style') || '');
+  const match = style.match(new RegExp(`${property}\\s*:\\s*([^;]+)`, 'i'));
+  // Strip a trailing `!important` (Mermaid stamps it on every classDef fill, e.g.
+  // `fill:#fef3c7 !important`); otherwise svgParseColor's anchored `^#...$` rejects the value and
+  // the node reads as having no background, which flips its label to the wrong contrast color.
+  return match ? match[1].replace(/\s*!important\s*$/i, '').trim() : '';
+}
+
+function svgStyleDeclarations(text) {
+  const declarations = {};
+  String(text || '').split(';').forEach(part => {
+    const index = part.indexOf(':');
+    if (index <= 0) return;
+    const property = part.slice(0, index).trim().toLowerCase();
+    const value = part.slice(index + 1).trim().replace(/\s*!important\s*$/i, '');
+    if (property && value) declarations[property] = value;
+  });
+  return declarations;
+}
+
+function svgStyleRules(svg) {
+  if (!svg) return [];
+  if (Array.isArray(svg._yolomuxSvgStyleRules)) return svg._yolomuxSvgStyleRules;
+  const rules = [];
+  svg.querySelectorAll?.('style').forEach(style => {
+    const text = String(style.textContent || '').replace(/\/\*[\s\S]*?\*\//g, '');
+    for (const match of text.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      const declarations = svgStyleDeclarations(match[2]);
+      match[1].split(',').map(selector => selector.trim()).filter(Boolean).forEach(selector => {
+        rules.push({selector, declarations});
+      });
+    }
+  });
+  svg._yolomuxSvgStyleRules = rules;
+  return rules;
+}
+
+function svgSimpleSelectorMatches(element, selector) {
+  const raw = String(selector || '').trim();
+  if (!raw || raw.includes(':') || raw.includes('>') || raw.includes('+') || raw.includes('~')) return false;
+  const tag = raw.match(/^[a-z][a-z0-9_-]*/i)?.[0] || '';
+  if (tag && tag !== '*' && String(element?.tagName || '').toLowerCase() !== tag.toLowerCase()) return false;
+  for (const id of raw.matchAll(/#([a-z0-9_-]+)/gi)) {
+    if (element?.id !== id[1]) return false;
+  }
+  for (const className of raw.matchAll(/\.([a-z0-9_-]+)/gi)) {
+    if (!element?.classList?.contains(className[1])) return false;
+  }
+  return true;
+}
+
+function svgSelectorMatches(element, selector) {
+  const parts = String(selector || '').trim().split(/\s+/).filter(Boolean);
+  if (!parts.length || !element) return false;
+  let node = element;
+  for (let index = parts.length - 1; index >= 0; index -= 1) {
+    let match = null;
+    for (let cursor = node; cursor; cursor = cursor.parentElement) {
+      if (svgSimpleSelectorMatches(cursor, parts[index])) {
+        match = cursor;
+        break;
+      }
+    }
+    if (!match) return false;
+    node = match.parentElement;
+  }
+  return true;
+}
+
+function svgCssStyleValue(element, property) {
+  const svg = element?.closest?.('svg');
+  if (!svg) return '';
+  const key = String(property || '').toLowerCase();
+  let value = '';
+  for (const rule of svgStyleRules(svg)) {
+    if (rule.declarations[key] && svgSelectorMatches(element, rule.selector)) value = rule.declarations[key];
+  }
+  return value;
+}
+
+function svgPaintColor(element, property = 'fill') {
+  return svgStyleValue(element, property) || svgCssStyleValue(element, property) || element?.getAttribute?.(property) || '';
+}
+
+function svgSetStyleProperty(element, property, value) {
+  if (!element?.setAttribute) return;
+  const existing = String(element.getAttribute('style') || '')
+    .split(';')
+    .map(part => part.trim())
+    .filter(part => part && !part.toLowerCase().startsWith(`${property.toLowerCase()}:`));
+  existing.push(`${property}:${value}`);
+  element.setAttribute('style', `${existing.join(';')};`);
+}
+
+function svgNodeBackgroundFill(node) {
+  // The background behind a node label is the node's own background SHAPE fill. Scan the node's
+  // shapes (skipping label-internal shapes) and return the first with a parseable fill; the first
+  // shape in document order can be a fill-less <path> or a label-internal shape, so picking it
+  // blindly is wrong. A node with no parseable shape fill is transparent over the preview surface.
+  const shapes = node?.querySelectorAll?.('rect, polygon, path, circle, ellipse') || [];
+  for (const shape of Array.from(shapes)) {
+    if (shape.closest?.('.label')) continue;
+    const fill = svgPaintColor(shape, 'fill');
+    if (svgParseColor(fill)) return fill;
+  }
+  return '';
+}
+
+function svgReadableLabelColor(element) {
+  // Labels that sit on the preview surface (subgraph/edge labels, or a node with no/transparent fill)
+  // use the surface foreground, which follows the preview's Bright/Dark/Vanilla mode (dark text on a
+  // white Bright surface, light text on a dark surface).
+  const surfaceFg = mermaidSurfacePalette().fg;
+  const node = element?.closest?.('.node');
+  if (!node) return surfaceFg;
+  // A node with a fill: pick the text color that contrasts with the node's actual background SHAPE
+  // fill (not the nearest ancestor fill, which for a label is the text color and gives dark-on-dark).
+  const bg = svgNodeBackgroundFill(node);
+  if (!bg || !svgParseColor(bg)) return surfaceFg;
+  return svgColorContrastRatio(MERMAID_DARK_INK, bg) >= svgColorContrastRatio(MERMAID_LIGHT_INK, bg) ? MERMAID_DARK_INK : MERMAID_LIGHT_INK;
+}
+
+function svgReadableEdgeColor() {
+  return mermaidSurfacePalette().fg;
+}
+
+function svgReadableLabelStyle(color = svgPreviewColor('--text', MERMAID_LIGHT_INK), size = 15, weight = 400) {
+  return `font-family:${svgPreviewFontFamily()};font-size:${size}px;font-weight:${weight};fill:${color};stroke:none;stroke-width:0;`;
+}
+
+function svgApplyReadableLabelStyle(node, color) {
+  if (!node?.setAttribute) return;
+  svgSetStyleProperty(node, 'font-family', svgPreviewFontFamily());
+  svgSetStyleProperty(node, 'font-weight', '400');
+  svgSetStyleProperty(node, 'fill', color);
+  svgSetStyleProperty(node, 'stroke', 'none');
+  svgSetStyleProperty(node, 'stroke-width', '0');
+}
+
+function svgForeignObjectTextNode(element) {
+  const clone = element.cloneNode(true);
+  clone.querySelectorAll?.('script,style,iframe,object,embed,link,meta').forEach(node => node.remove());
+  const text = String(clone.textContent || '').replace(/\s+/g, ' ').trim();
+  if (!text) return null;
+  const doc = element.ownerDocument || document;
+  const node = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
+  const x = svgNumberAttribute(element, 'x');
+  const y = svgNumberAttribute(element, 'y');
+  const width = svgNumberAttribute(element, 'width');
+  const height = svgNumberAttribute(element, 'height');
+  node.textContent = text;
+  node.setAttribute('x', String(x + (width / 2)));
+  node.setAttribute('y', String(y + (height / 2)));
+  node.setAttribute('text-anchor', 'middle');
+  node.setAttribute('dominant-baseline', 'middle');
+  node.setAttribute('class', 'mermaid-node-label');
+  node.setAttribute('style', svgReadableLabelStyle(svgReadableLabelColor(element)));
+  return node;
+}
+
+function styleStandaloneSvgText(svg) {
+  const fontFamily = svgPreviewFontFamily();
+  const edgeColor = svgReadableEdgeColor();
+  svg.querySelectorAll?.('.edgePaths path, .edgePath path, .flowchart-link, path.flowchart-link, path.messageLine0, path.messageLine1, line.messageLine0, line.messageLine1, marker path, marker polygon').forEach(edge => {
+    svgSetStyleProperty(edge, 'stroke', edgeColor);
+    svgSetStyleProperty(edge, 'stroke-opacity', '0.95');
+    const strokeWidth = Number.parseFloat(svgStyleValue(edge, 'stroke-width') || svgCssStyleValue(edge, 'stroke-width') || edge.getAttribute?.('stroke-width') || '');
+    if (!Number.isFinite(strokeWidth) || strokeWidth < 2) svgSetStyleProperty(edge, 'stroke-width', '2px');
+    if (String(edge.tagName || '').toLowerCase() !== 'path' || edge.closest?.('marker')) svgSetStyleProperty(edge, 'fill', edgeColor);
+  });
+  svg.querySelectorAll?.('.node rect, .node polygon, .node path').forEach(shape => {
+    const fill = svgPaintColor(shape, 'fill');
+    const stroke = svgPaintColor(shape, 'stroke');
+    if (svgColorIsDark(fill) && (!stroke || svgColorIsDark(stroke))) svgSetStyleProperty(shape, 'stroke', edgeColor);
+  });
+  svg.querySelectorAll?.('text').forEach(text => {
+    if (!text.getAttribute('font-family')) text.setAttribute('font-family', fontFamily);
+    const labelColor = svgReadableLabelColor(text);
+    svgApplyReadableLabelStyle(text, labelColor);
+    text.querySelectorAll?.('tspan').forEach(tspan => svgApplyReadableLabelStyle(tspan, labelColor));
+  });
+}
+
+function sanitizeStandaloneSvgNode(root) {
+  const elementNode = globalThis.Node?.ELEMENT_NODE || 1;
+  const blocked = new Set(['script', 'foreignobject', 'iframe', 'object', 'embed', 'audio', 'video', 'canvas', 'link', 'meta']);
+  for (const child of Array.from(root?.childNodes || [])) {
+    if (child.nodeType !== elementNode) {
+      if (child.nodeType === (globalThis.Node?.COMMENT_NODE || 8)) child.remove();
+      continue;
+    }
+    const tagName = String(child.tagName || '').toLowerCase();
+    if (tagName === 'foreignobject') {
+      const textNode = svgForeignObjectTextNode(child);
+      if (textNode) child.replaceWith(textNode);
+      else child.remove();
+      continue;
+    }
+    if (blocked.has(tagName)) {
+      child.remove();
+      continue;
+    }
+    if (tagName === 'style') {
+      child.textContent = sanitizeSvgStyleText(child.textContent);
+    }
+    for (const attr of Array.from(child.attributes || [])) {
+      const name = String(attr?.name || '').toLowerCase();
+      if (!name || name.startsWith('on')) {
+        child.removeAttribute(attr.name);
+        continue;
+      }
+      if (name === 'style') {
+        const sanitized = sanitizeSvgStyleText(attr.value);
+        if (sanitized) child.setAttribute(attr.name, sanitized);
+        else child.removeAttribute(attr.name);
+        continue;
+      }
+      if ((name === 'href' || name === 'xlink:href' || name === 'src') && svgUrlValueUnsafe(attr.value)) {
+        child.removeAttribute(attr.name);
+      }
+    }
+    sanitizeStandaloneSvgNode(child);
+  }
+}
+
+function sanitizeStandaloneSvgString(svgText) {
+  return String(svgText || '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<\s*(?:script|foreignObject|iframe|object|embed|audio|video|canvas|link|meta)\b[\s\S]*?<\s*\/\s*(?:script|foreignObject|iframe|object|embed|audio|video|canvas|link|meta)\s*>/gi, '')
+    .replace(/<\s*(?:script|foreignObject|iframe|object|embed|audio|video|canvas|link|meta)\b[^>]*\/?\s*>/gi, '')
+    .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/\s+(?:href|xlink:href|src)\s*=\s*(?:"(?!#)[^"]*"|'(?!#)[^']*'|(?![#'"])[^\s>]+)/gi, '')
+    .replace(/@import[^;]+;?/gi, '')
+    .replace(/url\([^)]*\)/gi, '')
+    .replace(/https?:\/\/[^"')\s<>]+/gi, '');
+}
+
+function sanitizeStandaloneSvg(svgText) {
+  const template = document.createElement('template');
+  if (!template.content) return sanitizeStandaloneSvgString(svgText);
+  template.innerHTML = String(svgText || '');
+  sanitizeStandaloneSvgNode(template.content);
+  const svg = template.content?.querySelector?.('svg');
+  if (svg) styleStandaloneSvgText(svg);
+  return svg ? svg.outerHTML : '';
+}
+
+function svgImageUrl(svgText) {
+  const svg = String(svgText || '');
+  if (typeof Blob === 'function' && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+    return URL.createObjectURL(new Blob([svg], {type: 'image/svg+xml'}));
+  }
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+const previewZoomPolicy = Object.freeze({
+  minScale: 0.2,
+  maxScale: 32,
+  step: 1.25,
+  disabledEpsilon: 0.001,
+  actualPressedEpsilon: 0.01,
+  fitPaddingPx: 24,
+  fitScaleCaps: Object.freeze({
+    image: 1,
+    mermaidInline: 3,
+    mermaidFull: Number.POSITIVE_INFINITY,
+  }),
+  panThresholdPx: 2,
+});
+
+const previewZoomShellClasses = Object.freeze([
+  'file-editor-preview-zoom-shell',
+  'file-editor-preview-zoom-full',
+  'file-editor-preview-zoom-inline',
+]);
+
+const previewZoomRendererDefaults = Object.freeze({
+  imagePane: Object.freeze({zoomKey: 'image-pane', fitMaxScale: previewZoomPolicy.fitScaleCaps.image, full: true, wheelZoom: true, panDrag: true}),
+  imagePreview: Object.freeze({zoomKey: 'image-preview', fitMaxScale: previewZoomPolicy.fitScaleCaps.image, full: true, wheelZoom: true, panDrag: true}),
+  mermaidFull: Object.freeze({zoomKey: 'mermaid', fitMaxScale: previewZoomPolicy.fitScaleCaps.mermaidFull, full: true, wheelZoom: true, panDrag: true}),
+  mermaidInline: Object.freeze({zoomKey: 'mermaid', fitMaxScale: previewZoomPolicy.fitScaleCaps.mermaidInline, full: false, wheelZoom: true, panDrag: true}),
+  default: Object.freeze({zoomKey: 'default', fitMaxScale: Number.POSITIVE_INFINITY, full: true}),
+});
+
+const previewZoomActions = Object.freeze([
+  Object.freeze({
+    id: 'out',
+    label: '-',
+    title: 'Zoom out',
+    zoomState: current => ({mode: 'manual', scale: current / previewZoomPolicy.step}),
+    disabled: scale => scale <= previewZoomPolicy.minScale + previewZoomPolicy.disabledEpsilon,
+  }),
+  Object.freeze({
+    id: 'fit',
+    label: 'Fit',
+    title: 'Fit to view',
+    zoomState: current => ({mode: 'fit', scale: current}),
+    pressed: state => state.mode === 'fit',
+  }),
+  Object.freeze({
+    id: 'actual',
+    label: '1:1',
+    title: 'Actual size',
+    zoomState: () => ({mode: 'actual', scale: 1}),
+    pressed: (state, scale) => state.mode !== 'fit' && Math.abs(scale - 1) < previewZoomPolicy.actualPressedEpsilon,
+  }),
+  Object.freeze({
+    id: 'in',
+    label: '+',
+    title: 'Zoom in',
+    zoomState: current => ({mode: 'manual', scale: current * previewZoomPolicy.step}),
+    disabled: scale => scale >= previewZoomPolicy.maxScale - previewZoomPolicy.disabledEpsilon,
+  }),
+]);
+
+const previewZoomActionById = new Map(previewZoomActions.map(action => [action.id, action]));
+
+function previewContextId(value) {
+  return String(value || '').trim();
+}
+
+function previewZoomScopedKey(key, context) {
+  const normalized = normalizedPreviewZoomKey(key);
+  const scope = previewContextId(context);
+  return scope ? `${scope}:${normalized}` : normalized;
+}
+
+function previewZoomOptionsForKind(kind, options = {}) {
+  const defaults = previewZoomRendererDefaults[kind] || previewZoomRendererDefaults.default;
+  const baseZoomKey = Object.prototype.hasOwnProperty.call(options, 'zoomKey') ? options.zoomKey : defaults.zoomKey;
+  const context = previewContextId(options.context || defaults.context || '');
+  const result = {...defaults, ...options};
+  result.context = context;
+  result.zoomKeyBase = normalizedPreviewZoomKey(baseZoomKey);
+  result.zoomKey = previewZoomScopedKey(baseZoomKey, context);
+  if (!Object.prototype.hasOwnProperty.call(options, 'fitMaxScale')) result.fitMaxScale = defaults.fitMaxScale;
+  if (!Object.prototype.hasOwnProperty.call(options, 'full')) result.full = defaults.full;
+  if (!Object.prototype.hasOwnProperty.call(options, 'wheelZoom')) result.wheelZoom = defaults.wheelZoom === true;
+  if (!Object.prototype.hasOwnProperty.call(options, 'panDrag')) result.panDrag = defaults.panDrag === true;
+  return result;
+}
+
+function previewZoomStateForAction(actionId, currentScale) {
+  return previewZoomActionById.get(actionId)?.zoomState?.(currentScale) || null;
+}
+
+function clampPreviewZoomScale(scale) {
+  const value = Number.parseFloat(String(scale || ''));
+  if (!Number.isFinite(value)) return 1;
+  return Math.max(previewZoomPolicy.minScale, Math.min(previewZoomPolicy.maxScale, value));
+}
+
+function clampPreviewFitScale(scale) {
+  const value = Number.parseFloat(String(scale || ''));
+  if (!Number.isFinite(value)) return 1;
+  return Math.max(previewZoomPolicy.minScale, value);
+}
+
+function resetPreviewZoomSurfaceClasses(shell) {
+  if (!shell?.classList) return;
+  shell.classList.remove(...previewZoomShellClasses);
+  if (shell.dataset) {
+    delete shell.dataset.previewZoomScale;
+    delete shell.dataset.previewZoomMode;
+  }
+}
+
+function disconnectPreviewZoomSurface(shell, options = {}) {
+  if (typeof shell?._previewZoomControlsCleanup === 'function') {
+    shell._previewZoomControlsCleanup();
+    shell._previewZoomControlsCleanup = null;
+  }
+  if (shell?._previewZoomResizeObserver) {
+    shell._previewZoomResizeObserver.disconnect();
+    shell._previewZoomResizeObserver = null;
+  }
+  if (shell?._previewZoomResizeFrame) {
+    previewZoomOwnerWindow(shell)?.cancelAnimationFrame?.(shell._previewZoomResizeFrame);
+    shell._previewZoomResizeFrame = 0;
+  }
+  if (shell?._previewZoomRevealTimer) {
+    previewZoomOwnerWindow(shell)?.clearTimeout?.(shell._previewZoomRevealTimer);
+    shell._previewZoomRevealTimer = 0;
+  }
+  shell?.classList?.remove?.('file-editor-preview-zoom-measuring');
+  if (options.resetClasses === true) resetPreviewZoomSurfaceClasses(shell);
+}
+
+function previewZoomOwnerWindow(shell) {
+  return shell?.ownerDocument?.defaultView || window;
+}
+
+function schedulePreviewZoomFrame(shell, callback) {
+  const ownerWindow = previewZoomOwnerWindow(shell);
+  if (typeof ownerWindow?.requestAnimationFrame === 'function') return ownerWindow.requestAnimationFrame(callback);
+  if (typeof requestAnimationFrame === 'function') return requestAnimationFrame(callback);
+  return setTimeout(callback, 0);
+}
+
+function writePreviewZoomSurfaceDataset(shell, options = {}) {
+  if (!shell?.dataset) return;
+  shell.dataset.previewZoomPath = options.path || '';
+  shell.dataset.previewZoomKey = options.zoomKey || 'default';
+  shell.dataset.previewZoomFull = options.full === false ? '0' : '1';
+  shell.dataset.previewZoomWheel = options.wheelZoom === true ? '1' : '0';
+  shell.dataset.previewZoomPan = options.panDrag === true ? '1' : '0';
+  if (Number.isFinite(options.fitMaxScale)) shell.dataset.previewZoomFitMaxScale = String(options.fitMaxScale);
+  else delete shell.dataset.previewZoomFitMaxScale;
+}
+
+function previewZoomOptionsFromSurface(shell) {
+  const fitMaxScale = Number.parseFloat(shell?.dataset?.previewZoomFitMaxScale || '');
+  return {
+    path: shell?.dataset?.previewZoomPath || '',
+    zoomKey: shell?.dataset?.previewZoomKey || 'default',
+    full: shell?.dataset?.previewZoomFull !== '0',
+    wheelZoom: shell?.dataset?.previewZoomWheel === '1',
+    panDrag: shell?.dataset?.previewZoomPan === '1',
+    fitMaxScale: Number.isFinite(fitMaxScale) ? fitMaxScale : Number.POSITIVE_INFINITY,
+  };
+}
+
+function previewZoomSurfaceContent(shell) {
+  return shell?.querySelector?.(':scope > .file-editor-preview-zoom-viewport > .file-editor-preview-zoom-stage > .file-editor-preview-zoom-content')
+    || shell?.querySelector?.(':scope > .file-editor-preview-zoom-viewport > .file-editor-preview-zoom-stage > *')
+    || null;
+}
+
+function previewZoomContentSize(content) {
+  const naturalWidth = Number(content?.naturalWidth || 0);
+  const naturalHeight = Number(content?.naturalHeight || 0);
+  if (naturalWidth > 0 && naturalHeight > 0) return {width: naturalWidth, height: naturalHeight};
+  const rect = content?.getBoundingClientRect?.();
+  return {
+    width: Math.max(1, Math.round(rect?.width || 1)),
+    height: Math.max(1, Math.round(rect?.height || 1)),
+  };
+}
+
+function previewZoomStagePadding(stage) {
+  const ownerWindow = previewZoomOwnerWindow(stage);
+  const style = ownerWindow?.getComputedStyle?.(stage) || (typeof getComputedStyle === 'function' ? getComputedStyle(stage) : null);
+  const px = name => Number.parseFloat(style?.getPropertyValue?.(name) || '') || 0;
+  return {
+    x: px('padding-left') + px('padding-right'),
+    y: px('padding-top') + px('padding-bottom'),
+  };
+}
+
+function previewZoomFitScale(viewport, content, options = {}) {
+  const size = previewZoomContentSize(content);
+  const availableWidth = Math.max(1, (viewport?.clientWidth || 1) - previewZoomPolicy.fitPaddingPx);
+  const availableHeight = Math.max(1, (viewport?.clientHeight || 1) - previewZoomPolicy.fitPaddingPx);
+  const fitScale = Math.min(availableWidth / size.width, availableHeight / size.height);
+  const maxFitScale = Number.isFinite(options.fitMaxScale) ? options.fitMaxScale : Number.POSITIVE_INFINITY;
+  return clampPreviewFitScale(Math.min(maxFitScale, fitScale));
+}
+
+function previewZoomButton(action) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.dataset.previewZoomAction = action.id;
+  button.textContent = action.label;
+  button.title = action.title;
+  button.setAttribute('aria-label', action.title);
+  return button;
+}
+
+function previewZoomReadState(options = {}) {
+  if (options.path) return fileEditorPreviewZoomStateForPath(options.path, options.zoomKey || 'default');
+  return normalizePreviewZoomState(options.shell?._previewZoomState);
+}
+
+function previewZoomWriteState(shell, options = {}, zoomState) {
+  const normalized = normalizePreviewZoomState(zoomState);
+  if (options.path) setFileEditorPreviewZoomStateForPath(options.path, options.zoomKey || 'default', normalized);
+  shell._previewZoomState = normalized;
+  return normalized;
+}
+
+function applyPreviewZoomSurface(shell, content, options = {}, applyOptions = {}) {
+  const viewport = shell.querySelector(':scope > .file-editor-preview-zoom-viewport');
+  const value = shell.querySelector(':scope > .file-editor-preview-zoom-toolbar .file-editor-preview-zoom-value');
+  if (!viewport || !content) return;
+  const previousScale = Number.parseFloat(shell.dataset.previewZoomScale || '1') || 1;
+  const viewportRect = viewport.getBoundingClientRect?.();
+  const focusOffsetX = Number.isFinite(applyOptions.focusClientX) && viewportRect
+    ? Math.max(0, Math.min(viewport.clientWidth, applyOptions.focusClientX - viewportRect.left))
+    : (viewport.clientWidth / 2);
+  const focusOffsetY = Number.isFinite(applyOptions.focusClientY) && viewportRect
+    ? Math.max(0, Math.min(viewport.clientHeight, applyOptions.focusClientY - viewportRect.top))
+    : (viewport.clientHeight / 2);
+  const hasFocusPoint = Number.isFinite(applyOptions.focusClientX) || Number.isFinite(applyOptions.focusClientY);
+  const focusX = (viewport.scrollLeft + focusOffsetX) / previousScale;
+  const focusY = (viewport.scrollTop + focusOffsetY) / previousScale;
+  const state = previewZoomReadState({...options, shell});
+  const scale = state.mode === 'fit' ? previewZoomFitScale(viewport, content, options) : clampPreviewZoomScale(state.scale);
+  const size = previewZoomContentSize(content);
+  const scaledWidth = Math.max(1, Math.round(size.width * scale));
+  const scaledHeight = Math.max(1, Math.round(size.height * scale));
+  content.style.width = `${scaledWidth}px`;
+  content.style.height = `${scaledHeight}px`;
+  content.classList.add('file-editor-preview-zoom-content');
+  const stage = content.closest?.('.file-editor-preview-zoom-stage') || null;
+  if (stage) {
+    const padding = previewZoomStagePadding(stage);
+    stage.style.width = `${Math.max(viewport.clientWidth, scaledWidth + padding.x)}px`;
+    stage.style.height = `${Math.max(viewport.clientHeight, scaledHeight + padding.y)}px`;
+  }
+  shell.dataset.previewZoomScale = String(scale);
+  shell.dataset.previewZoomMode = state.mode;
+  if (value) value.textContent = `${Math.round(scale * 100)}%`;
+  shell.querySelectorAll('[data-preview-zoom-action]').forEach(button => {
+    const action = previewZoomActionById.get(button.dataset.previewZoomAction);
+    button.disabled = Boolean(action?.disabled?.(scale));
+    if (action?.pressed) button.setAttribute('aria-pressed', action.pressed(state, scale) ? 'true' : 'false');
+    else button.removeAttribute('aria-pressed');
+  });
+  schedulePreviewZoomFrame(shell, () => {
+    if (state.mode === 'fit') {
+      viewport.scrollLeft = 0;
+      viewport.scrollTop = 0;
+      return;
+    }
+    if (applyOptions.centerIfUnfocused === true && !hasFocusPoint) {
+      viewport.scrollLeft = Math.max(0, (viewport.scrollWidth - viewport.clientWidth) / 2);
+      viewport.scrollTop = Math.max(0, (viewport.scrollHeight - viewport.clientHeight) / 2);
+      return;
+    }
+    viewport.scrollLeft = Math.max(0, (focusX * scale) - focusOffsetX);
+    viewport.scrollTop = Math.max(0, (focusY * scale) - focusOffsetY);
+  });
+}
+
+function setPreviewZoomSurfaceState(shell, content, options = {}, zoomState = {}, applyOptions = {}) {
+  previewZoomWriteState(shell, options, zoomState);
+  applyPreviewZoomSurface(shell, content, options, applyOptions);
+}
+
+function bindPreviewZoomDragPan(shell, viewport, bind) {
+  let drag = null;
+  const finish = event => {
+    if (!drag || (event.pointerId !== undefined && event.pointerId !== drag.pointerId)) return;
+    try { viewport.releasePointerCapture?.(drag.pointerId); } catch (_) {}
+    shell.classList.remove('file-editor-preview-zoom-panning');
+    drag = null;
+  };
+  bind(viewport, 'pointerdown', event => {
+    if (event.button !== 0 || event.defaultPrevented) return;
+    event.preventDefault();
+    drag = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      scrollLeft: viewport.scrollLeft,
+      scrollTop: viewport.scrollTop,
+    };
+    shell.classList.add('file-editor-preview-zoom-panning');
+    try { viewport.setPointerCapture?.(event.pointerId); } catch (_) {}
+  }, {passive: false});
+  bind(viewport, 'pointermove', event => {
+    if (!drag || (event.pointerId !== undefined && event.pointerId !== drag.pointerId)) return;
+    const dx = event.clientX - drag.x;
+    const dy = event.clientY - drag.y;
+    if (Math.abs(dx) > previewZoomPolicy.panThresholdPx || Math.abs(dy) > previewZoomPolicy.panThresholdPx) event.preventDefault();
+    viewport.scrollLeft = Math.max(0, drag.scrollLeft - dx);
+    viewport.scrollTop = Math.max(0, drag.scrollTop - dy);
+  }, {passive: false});
+  bind(viewport, 'pointerup', finish);
+  bind(viewport, 'pointercancel', finish);
+}
+
+function hydratePreviewZoomSurface(shell, content = null, options = null) {
+  if (!shell) return false;
+  const resolvedContent = content || previewZoomSurfaceContent(shell);
+  if (!resolvedContent) return false;
+  const resolvedOptions = options || previewZoomOptionsFromSurface(shell);
+  disconnectPreviewZoomSurface(shell);
+  writePreviewZoomSurfaceDataset(shell, resolvedOptions);
+  const toolbar = shell.querySelector(':scope > .file-editor-preview-zoom-toolbar');
+  const viewport = shell.querySelector(':scope > .file-editor-preview-zoom-viewport');
+  if (!toolbar || !viewport) return false;
+  const cleanup = [];
+  const bind = (target, type, handler, listenerOptions = false) => {
+    if (!target?.addEventListener) return;
+    target.addEventListener(type, handler, listenerOptions);
+    cleanup.push(() => target.removeEventListener?.(type, handler, listenerOptions));
+  };
+  shell._previewZoomControlsCleanup = () => {
+    while (cleanup.length) cleanup.pop()();
+  };
+  bind(toolbar, 'click', event => {
+    const button = event.target?.closest?.('[data-preview-zoom-action]');
+    if (!button || !toolbar.contains(button) || button.disabled) return;
+    const current = Number.parseFloat(shell.dataset.previewZoomScale || '1') || 1;
+    const zoomState = previewZoomStateForAction(button.dataset.previewZoomAction, current);
+    if (zoomState) setPreviewZoomSurfaceState(shell, resolvedContent, resolvedOptions, zoomState, {centerIfUnfocused: true});
+  });
+  bind(viewport, 'wheel', event => {
+    if (resolvedOptions.wheelZoom !== true && !event.ctrlKey && !event.metaKey) return;
+    event.preventDefault();
+    const current = Number.parseFloat(shell.dataset.previewZoomScale || '1') || 1;
+    const zoomState = previewZoomStateForAction(event.deltaY < 0 ? 'in' : 'out', current);
+    if (zoomState) setPreviewZoomSurfaceState(shell, resolvedContent, resolvedOptions, zoomState, {
+      focusClientX: event.clientX,
+      focusClientY: event.clientY,
+    });
+  }, {passive: false});
+  if (resolvedOptions.panDrag === true) bindPreviewZoomDragPan(shell, viewport, bind);
+  const ownerWindow = previewZoomOwnerWindow(shell);
+  // Hide the diagram until its viewport size has settled, then reveal. A file editor pane opens at a
+  // transient height and Dockview re-lays-it-out ~150ms later (and a hover that triggers a relayout
+  // does the same), so fitting against the transient size and then re-fitting makes the diagram
+  // visibly jump/resize. `visibility:hidden` keeps the viewport measurable while hidden, and a
+  // debounce after the last apply reveals it once at the settled size.
+  shell.classList.add('file-editor-preview-zoom-measuring');
+  const scheduleReveal = () => {
+    if (!shell.classList.contains('file-editor-preview-zoom-measuring')) return;
+    if (shell._previewZoomRevealTimer) ownerWindow?.clearTimeout?.(shell._previewZoomRevealTimer);
+    shell._previewZoomRevealTimer = ownerWindow?.setTimeout?.(() => {
+      shell._previewZoomRevealTimer = 0;
+      shell.classList.remove('file-editor-preview-zoom-measuring');
+    }, 150);
+  };
+  const applyAndScheduleReveal = applyOptions => {
+    applyPreviewZoomSurface(shell, resolvedContent, resolvedOptions, applyOptions);
+    scheduleReveal();
+  };
+  const ResizeObserverCtor = ownerWindow?.ResizeObserver || (typeof ResizeObserver === 'function' ? ResizeObserver : null);
+  if (ResizeObserverCtor) {
+    const resizeObserver = new ResizeObserverCtor(() => {
+      // Coalesce to one apply per frame. applyPreviewZoomSurface resizes the content inside the
+      // observed viewport (and can toggle a scrollbar, which changes the viewport content-box),
+      // so applying synchronously here would re-trigger this observer and emit the noisy
+      // "ResizeObserver loop completed with undelivered notifications" warning.
+      const ownerWin = previewZoomOwnerWindow(shell);
+      if (shell._previewZoomResizeFrame) ownerWin?.cancelAnimationFrame?.(shell._previewZoomResizeFrame);
+      shell._previewZoomResizeFrame = schedulePreviewZoomFrame(shell, () => {
+        shell._previewZoomResizeFrame = 0;
+        applyAndScheduleReveal();
+      });
+    });
+    shell._previewZoomResizeObserver = resizeObserver;
+    resizeObserver.observe(viewport);
+  }
+  bind(resolvedContent, 'load', () => applyAndScheduleReveal({centerIfUnfocused: true}), {once: true});
+  schedulePreviewZoomFrame(shell, () => applyAndScheduleReveal({centerIfUnfocused: true}));
+  return true;
+}
+
+function hydratePreviewZoomSurfaces(root) {
+  const surfaces = Array.from(root?.querySelectorAll?.('.file-editor-preview-zoom-shell') || []);
+  if (root?.classList?.contains('file-editor-preview-zoom-shell')) surfaces.unshift(root);
+  for (const shell of surfaces) hydratePreviewZoomSurface(shell);
+  return surfaces.length;
+}
+
+function installPreviewZoomSurface(shell, content, options = {}) {
+  disconnectPreviewZoomSurface(shell, {resetClasses: true});
+  shell.classList.add('file-editor-preview-zoom-shell');
+  shell.classList.toggle('file-editor-preview-zoom-full', options.full !== false);
+  shell.classList.toggle('file-editor-preview-zoom-inline', options.full === false);
+  writePreviewZoomSurfaceDataset(shell, options);
+  const toolbar = document.createElement('div');
+  toolbar.className = 'file-editor-preview-zoom-toolbar';
+  toolbar.append(...previewZoomActions.map(previewZoomButton));
+  const value = document.createElement('span');
+  value.className = 'file-editor-preview-zoom-value';
+  value.setAttribute('aria-live', 'polite');
+  value.textContent = '100%';
+  toolbar.appendChild(value);
+  const viewport = document.createElement('div');
+  viewport.className = 'file-editor-preview-zoom-viewport';
+  const stage = document.createElement('div');
+  stage.className = 'file-editor-preview-zoom-stage';
+  stage.appendChild(content);
+  viewport.appendChild(stage);
+  shell.replaceChildren(toolbar, viewport);
+  hydratePreviewZoomSurface(shell, content, options);
+  return shell;
+}
+
+function previewZoomSurfaceNode(content, options = {}) {
+  return installPreviewZoomSurface(document.createElement('div'), content, options);
+}
+
+let mermaidPreviewRenderSeq = 0;
+
+function mermaidErrorNode(source, error) {
+  const node = document.createElement('div');
+  node.className = 'mermaid-preview-error';
+  const title = document.createElement('div');
+  title.className = 'file-editor-empty-title';
+  title.textContent = 'Mermaid diagram could not be rendered';
+  const detail = document.createElement('div');
+  detail.className = 'file-editor-empty-detail';
+  detail.textContent = String(error || 'invalid Mermaid source');
+  const pre = document.createElement('pre');
+  const code = document.createElement('code');
+  code.className = 'language-mermaid';
+  code.textContent = source;
+  pre.appendChild(code);
+  node.append(title, detail, pre);
+  return node;
+}
+
+async function renderMermaidSourceInto(container, source, options = {}) {
+  const text = String(source || '').trim();
+  disconnectPreviewZoomSurface(container, {resetClasses: true});
+  if (!text) {
+    container.replaceChildren(fileEditorEmptyState('Mermaid diagram is empty'));
+    return false;
+  }
+  const seq = ++mermaidPreviewRenderSeq;
+  container.dataset.mermaidRenderSeq = String(seq);
+  container.classList.add('mermaid-preview');
+  container.textContent = 'Rendering Mermaid diagram...';
+  try {
+    const api = await loadMermaidApi();
+    if (container.dataset.mermaidRenderSeq !== String(seq)) return false;
+    const id = `yolomux-mermaid-${Date.now()}-${seq}`;
+    const result = await api.render(id, text);
+    if (container.dataset.mermaidRenderSeq !== String(seq)) return false;
+    const rawSvg = typeof result === 'string' ? result : result?.svg;
+    const svg = sanitizeStandaloneSvg(rawSvg);
+    if (!svg) throw new Error('Mermaid produced no SVG');
+    const img = document.createElement('img');
+    img.className = 'mermaid-preview-image';
+    img.alt = 'Mermaid diagram';
+    img.src = svgImageUrl(svg);
+    const fullPreview = Object.prototype.hasOwnProperty.call(options, 'full')
+      ? options.full !== false
+      : container.classList.contains('file-editor-preview-pane-panel');
+    installPreviewZoomSurface(container, img, previewZoomOptionsForKind(fullPreview ? 'mermaidFull' : 'mermaidInline', {
+      ...options,
+      path: options.path || '',
+      full: fullPreview,
+    }));
+    return true;
+  } catch (error) {
+    disconnectPreviewZoomSurface(container, {resetClasses: true});
+    if (container.dataset.mermaidRenderSeq === String(seq)) container.replaceChildren(mermaidErrorNode(text, error));
+    return false;
+  }
+}
+
+function renderMarkdownMermaidBlocks(container, markdownPath = '', options = {}) {
+  const blocks = Array.from(container.querySelectorAll?.('pre > code') || [])
+    .filter(block => isMermaidFenceLanguage(markdownFenceLanguage(block)));
+  const renders = [];
+  blocks.forEach((block, index) => {
+    const source = block.textContent || '';
+    const pre = block.closest?.('pre');
+    if (!pre) return;
+    const host = document.createElement('div');
+    host.className = 'mermaid-preview-host';
+    pre.replaceWith(host);
+    renders.push(renderMermaidSourceInto(host, source, {
+      full: false,
+      path: markdownPath,
+      zoomKey: `mermaid:${index}`,
+      context: options.context || '',
+    }));
+  });
+  return renders.length ? Promise.allSettled(renders) : null;
 }
 
 function applyMarkdownFenceFallbackHighlight(block) {
@@ -1814,8 +3118,8 @@ function isHtmlPath(path) {
   return lower.endsWith('.html') || lower.endsWith('.htm');
 }
 
-function editorPreviewModeAvailable(path) {
-  return isMarkdownPath(path) || isHtmlPath(path);
+function editorPreviewModeAvailable(path, state = null) {
+  return previewKindForPath(path, state || openFiles.get(path)) !== 'unsupported';
 }
 
 function editorVisualLineFragments(line, columnCount, wrapEnabled = fileEditorWrapEnabled) {
@@ -1870,6 +3174,176 @@ function renderEditorCodePreviewInto(container, path, text) {
   container.replaceChildren(pre);
 }
 
+function boundedPreviewText(text, maxChars = 20000) {
+  const source = String(text ?? '');
+  if (source.length <= maxChars) return {text: source, truncated: false};
+  return {text: source.slice(0, maxChars), truncated: true};
+}
+
+function previewRendererLanguageForPath(path) {
+  const renderer = previewRendererForPath(path);
+  const ext = fileExtensionOf(path);
+  return renderer?.languageByExtension?.[ext] || renderer?.language || syntaxLanguageForPath(path) || 'text';
+}
+
+function jsonStructuredPreview(label, source, errorLabel = `${label} parse error`) {
+  try {
+    return {label, text: JSON.stringify(JSON.parse(source), null, 2), language: 'json', error: ''};
+  } catch (error) {
+    return {label: errorLabel, text: source, language: 'json', error: String(error?.message || error)};
+  }
+}
+
+function jsonLinesStructuredPreview(path, source) {
+  const ext = fileExtensionOf(path);
+  const lines = String(source ?? '').split(/\r?\n/);
+  const records = [];
+  const errors = [];
+  lines.forEach((line, index) => {
+    if (!line.trim()) return;
+    try {
+      records.push(JSON.parse(line));
+    } catch (error) {
+      errors.push(`line ${index + 1}: ${String(error?.message || error)}`);
+    }
+  });
+  if (errors.length) {
+    return {
+      label: `${ext === '.ndjson' ? 'NDJSON' : 'JSONL'} parse error`,
+      text: source,
+      language: 'json',
+      error: errors.slice(0, 5).join('\n'),
+    };
+  }
+  return {
+    label: `${ext === '.ndjson' ? 'NDJSON' : 'JSONL'} preview · ${records.length} records`,
+    text: records.map(record => JSON.stringify(record)).join('\n'),
+    language: 'json',
+    error: '',
+  };
+}
+
+function notebookStructuredPreview(source) {
+  let notebook;
+  try {
+    notebook = JSON.parse(String(source ?? ''));
+  } catch (error) {
+    return {label: 'Notebook parse error', text: source, language: 'json', error: String(error?.message || error)};
+  }
+  const cells = Array.isArray(notebook?.cells) ? notebook.cells : [];
+  const out = [`Notebook preview · ${cells.length} cells · outputs not rendered`];
+  cells.slice(0, 80).forEach((cell, index) => {
+    const type = String(cell?.cell_type || 'cell');
+    const sourceText = Array.isArray(cell?.source) ? cell.source.join('') : String(cell?.source || '');
+    const outputCount = Array.isArray(cell?.outputs) ? cell.outputs.length : 0;
+    out.push('', `## ${index + 1}. ${type}${outputCount ? ` · ${outputCount} outputs hidden` : ''}`, sourceText.trimEnd());
+  });
+  if (cells.length > 80) out.push('', `... ${cells.length - 80} more cells truncated ...`);
+  return {label: 'Notebook preview', text: out.join('\n'), language: 'markdown', error: ''};
+}
+
+function structuredPreviewValue(path, text) {
+  const ext = fileExtensionOf(path);
+  const source = String(text ?? '');
+  if (ext === '.json') return jsonStructuredPreview('JSON preview', source, 'JSON parse error');
+  if (ext === '.geojson') return jsonStructuredPreview('GeoJSON preview', source, 'GeoJSON parse error');
+  if (ext === '.excalidraw') return jsonStructuredPreview('Excalidraw JSON preview', source, 'Excalidraw parse error');
+  if (ext === '.jsonl' || ext === '.ndjson') return jsonLinesStructuredPreview(path, source);
+  if (ext === '.ipynb') return notebookStructuredPreview(source);
+  if (ext === '.toml') return {label: 'TOML preview', text: source, language: 'ini', error: ''};
+  if (['.xml', '.drawio', '.dio'].includes(ext)) return {label: ext === '.xml' ? 'XML preview' : 'Draw.io XML preview', text: source, language: 'xml', error: ''};
+  if (['.ini', '.cfg', '.conf', '.env', '.properties', '.props'].includes(ext)) return {label: 'Config preview', text: source, language: 'ini', error: ''};
+  return {label: 'YAML preview', text: source, language: 'yaml', error: ''};
+}
+
+function renderStructuredPreviewInto(container, path, text) {
+  const value = structuredPreviewValue(path, text);
+  const bounded = boundedPreviewText(value.text);
+  const wrapper = document.createElement('div');
+  wrapper.className = 'file-editor-data-preview';
+  const header = document.createElement('div');
+  header.className = 'file-editor-data-preview-header';
+  header.textContent = `${value.label}${bounded.truncated ? ' · truncated' : ''}`;
+  wrapper.appendChild(header);
+  if (value.error) {
+    const error = document.createElement('div');
+    error.className = 'file-editor-preview-error';
+    error.textContent = value.error;
+    wrapper.appendChild(error);
+  }
+  const pre = document.createElement('pre');
+  pre.className = 'file-editor-code-preview editor-wrap';
+  const code = document.createElement('code');
+  code.className = `language-${value.language} editor-highlight-code`;
+  code.innerHTML = editorVisualHighlightHtml(value.language, bounded.text, {
+    wrap: true,
+    lineNumbers: fileEditorLineNumbersEnabled,
+    columnCount: 96,
+  });
+  pre.appendChild(code);
+  wrapper.appendChild(pre);
+  container.replaceChildren(wrapper);
+}
+
+function splitDelimitedPreviewLine(line, delimiter) {
+  const cells = [];
+  let value = '';
+  let quoted = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const ch = line[index];
+    if (ch === '"') {
+      if (quoted && line[index + 1] === '"') {
+        value += '"';
+        index += 1;
+      } else {
+        quoted = !quoted;
+      }
+      continue;
+    }
+    if (ch === delimiter && !quoted) {
+      cells.push(value);
+      value = '';
+      continue;
+    }
+    value += ch;
+  }
+  cells.push(value);
+  return cells;
+}
+
+function renderTablePreviewInto(container, path, text) {
+  const delimiter = fileExtensionOf(path) === '.tsv' ? '\t' : ',';
+  const maxRows = 200;
+  const maxCols = 50;
+  const lines = String(text ?? '').split(/\r?\n/).filter(line => line.length > 0);
+  let truncatedColumns = false;
+  const rows = lines.slice(0, maxRows).map(line => {
+    const cells = splitDelimitedPreviewLine(line, delimiter);
+    if (cells.length > maxCols) truncatedColumns = true;
+    return cells.slice(0, maxCols);
+  });
+  const wrapper = document.createElement('div');
+  wrapper.className = 'file-editor-table-preview';
+  const header = document.createElement('div');
+  header.className = 'file-editor-data-preview-header';
+  header.textContent = `${delimiter === '\t' ? 'TSV' : 'CSV'} preview · ${Math.min(lines.length, maxRows)} of ${lines.length} rows${lines.length > maxRows || truncatedColumns ? ' · truncated' : ''}`;
+  wrapper.appendChild(header);
+  const table = document.createElement('table');
+  const body = document.createElement('tbody');
+  rows.forEach((row, rowIndex) => {
+    const tr = document.createElement('tr');
+    row.forEach(cell => {
+      const node = document.createElement(rowIndex === 0 ? 'th' : 'td');
+      node.textContent = cell;
+      tr.appendChild(node);
+    });
+    body.appendChild(tr);
+  });
+  table.appendChild(body);
+  wrapper.appendChild(table);
+  container.replaceChildren(wrapper);
+}
+
 function htmlPreviewHasDisabledJavaScript(text) {
   const source = String(text ?? '');
   return /<script\b/i.test(source) || /\son[a-z]+\s*=/i.test(source);
@@ -1877,6 +3351,92 @@ function htmlPreviewHasDisabledJavaScript(text) {
 
 function htmlPreviewUrl(path) {
   return `/api/fs/html-preview?path=${encodeURIComponent(path)}`;
+}
+
+function renderRawImagePreviewInto(container, path, state = null, options = {}) {
+  const version = String(state?.mtime || state?.size || 0);
+  const img = document.createElement('img');
+  img.className = 'file-editor-preview-image';
+  img.src = rawFileUrl(path, version ? {v: version} : {});
+  img.alt = basenameOf(path);
+  img.loading = 'eager';
+  img.decoding = 'async';
+  img.addEventListener('error', () => {
+    container.replaceChildren(previewActionFallbackNode('Image could not be loaded', `${previewMimeForPath(path) || 'image'}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
+  }, {once: true});
+  container.replaceChildren(previewZoomSurfaceNode(img, previewZoomOptionsForKind('imagePreview', {
+    path,
+    context: options.context || '',
+  })));
+}
+
+function renderPdfPreviewInto(container, path) {
+  const frame = document.createElement('iframe');
+  frame.className = 'file-editor-pdf-preview';
+  frame.setAttribute('sandbox', '');
+  frame.setAttribute('title', `${basenameOf(path)} PDF preview`);
+  frame.src = rawFileUrl(path);
+  const fallback = document.createElement('div');
+  fallback.className = 'file-editor-preview-fallback';
+  const title = document.createElement('div');
+  title.className = 'file-editor-empty-title';
+  title.textContent = 'PDF preview';
+  const detail = document.createElement('div');
+  detail.className = 'file-editor-empty-detail';
+  const open = document.createElement('a');
+  open.href = rawFileUrl(path);
+  open.target = '_blank';
+  open.rel = 'noopener noreferrer';
+  open.textContent = 'Open';
+  const download = document.createElement('a');
+  download.href = rawFileDownloadUrl(path);
+  download.textContent = 'Download';
+  detail.append(open, document.createTextNode(' · '), download);
+  fallback.append(title, detail);
+  container.replaceChildren(frame, fallback);
+}
+
+function previewActionFallbackNode(titleText, detailText, path) {
+  const fallback = document.createElement('div');
+  fallback.className = 'file-editor-preview-fallback';
+  const title = document.createElement('div');
+  title.className = 'file-editor-empty-title';
+  title.textContent = titleText;
+  const detail = document.createElement('div');
+  detail.className = 'file-editor-empty-detail';
+  detail.append(document.createTextNode(detailText || ''));
+  if (path) {
+    const open = document.createElement('a');
+    open.href = rawFileUrl(path);
+    open.target = '_blank';
+    open.rel = 'noopener noreferrer';
+    open.textContent = 'Open';
+    const download = document.createElement('a');
+    download.href = rawFileDownloadUrl(path);
+    download.textContent = 'Download';
+    detail.append(document.createTextNode(detailText ? ' · ' : ''), open, document.createTextNode(' · '), download);
+  }
+  fallback.append(title, detail);
+  return fallback;
+}
+
+function renderNativeMediaPreviewInto(container, path, state = null, kind = 'audio') {
+  const media = document.createElement(kind === 'video' ? 'video' : 'audio');
+  media.className = `file-editor-native-media file-editor-native-${kind}`;
+  media.controls = true;
+  media.preload = 'metadata';
+  media.src = rawFileUrl(path, state?.mtime ? {v: state.mtime} : {});
+  media.addEventListener('error', () => {
+    container.replaceChildren(previewActionFallbackNode(`${kind === 'video' ? 'Video' : 'Audio'} could not be loaded`, `${previewMimeForPath(path) || kind}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
+  }, {once: true});
+  container.replaceChildren(media, previewActionFallbackNode(`${kind === 'video' ? 'Video' : 'Audio'} preview`, `${previewMimeForPath(path) || kind}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
+}
+
+function renderUnsupportedPreviewInto(container, path, state = null) {
+  const renderer = previewRendererForPath(path, state);
+  const title = renderer?.fallbackTitle || 'Preview is not available';
+  const label = state?.mime || previewMimeForPath(path) || state?.kind || 'unsupported file';
+  container.replaceChildren(previewActionFallbackNode(title, `${label}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
 }
 
 async function openHtmlPreviewWithAuth(path) {
@@ -1928,30 +3488,63 @@ function renderHtmlPreviewInto(container, path, text) {
   container.replaceChildren(...children);
 }
 
-function renderEditorPreviewPane(container, path, text) {
+function renderEditorPreviewPane(container, path, text, options = {}) {
   if (!container) return;
+  container._previewAsync = null;
   const scrollTop = container.scrollTop || 0;
   const scrollLeft = container.scrollLeft || 0;
-  container.classList.toggle('markdown-body', isMarkdownPath(path));
-  container.classList.toggle('html-preview-body', isHtmlPath(path));
-  container.classList.toggle('code-preview-body', !isMarkdownPath(path) && !isHtmlPath(path));
+  const state = openFiles.get(path) || null;
+  const previewKind = previewKindForPath(path, state);
+  const previewContext = previewContextId(options.context || 'preview');
+  container.classList.toggle('markdown-body', previewKind === 'markdown');
+  container.classList.toggle('html-preview-body', previewKind === 'html');
+  container.classList.toggle('image-preview-body', previewKind === 'image');
+  container.classList.toggle('pdf-preview-body', previewKind === 'pdf');
+  container.classList.toggle('data-preview-body', previewKind === 'structured' || previewKind === 'table');
+  container.classList.toggle('media-preview-body', previewKind === 'audio' || previewKind === 'video');
+  container.classList.toggle('code-preview-body', previewKind === 'text' || previewKind === 'mermaid');
   container.classList.toggle('vanilla-preview-body', fileEditorPreviewDisplayMode === 'vanilla');
-  if (isMarkdownPath(path)) {
+  if (previewKind === 'markdown') {
+    container._mermaidSig = null;
     // fix 6: skip the expensive markdown render (marked.parse + recursive sanitize + per-block
     // hljs) when the path + content are unchanged from the last render — mirrors CodeMirror's
     // _cmSignature short-circuit. Prevents a multi-second stall re-rendering a large .md when an
     // unrelated panel render fires (off the reorder hot path once S2 lands, but a latent cost).
-    if (container._previewPath !== path || container._previewText !== text || container._previewDisplayMode !== fileEditorPreviewDisplayMode) {
+    if (container._previewPath !== path || container._previewText !== text || container._previewDisplayMode !== fileEditorPreviewDisplayMode || container._previewContext !== previewContext) {
       container._previewPath = path;
       container._previewText = text;
       container._previewDisplayMode = fileEditorPreviewDisplayMode;
-      renderMarkdownPreviewInto(container, text, path);
+      container._previewContext = previewContext;
+      renderMarkdownPreviewInto(container, text, path, {context: previewContext});
+    }
+  } else if (previewKind === 'mermaid') {
+    // Idempotent: a periodic pane refresh re-runs this with identical source; re-rendering rebuilds
+    // the SVG and (with the reveal gate) FLASHES the diagram on every refresh tick. Skip when the
+    // source, preview theme, and context are unchanged AND a rendered diagram (or error) is already
+    // present. editorPreviewThemeState() is in the signature so a Bright/Dark/Vanilla toggle still
+    // re-renders with the new palette.
+    container._previewPath = null;
+    container._previewText = null;
+    container._previewDisplayMode = null;
+    container._previewContext = null;
+    const mermaidSig = `${path} ${text} ${typeof editorPreviewThemeState === 'function' ? editorPreviewThemeState() : ''} ${previewContext}`;
+    if (container._mermaidSig !== mermaidSig || !container.querySelector('img.mermaid-preview-image, .mermaid-preview-error')) {
+      container._mermaidSig = mermaidSig;
+      container._previewAsync = renderMermaidSourceInto(container, text, {path, zoomKey: 'mermaid', context: previewContext});
     }
   } else {
     container._previewPath = null;
     container._previewText = null;
     container._previewDisplayMode = null;
-    if (isHtmlPath(path)) renderHtmlPreviewInto(container, path, text);
+    container._previewContext = null;
+    container._mermaidSig = null;
+    if (previewKind === 'html') renderHtmlPreviewInto(container, path, text);
+    else if (previewKind === 'image') renderRawImagePreviewInto(container, path, state, {context: previewContext});
+    else if (previewKind === 'pdf') renderPdfPreviewInto(container, path);
+    else if (previewKind === 'structured') renderStructuredPreviewInto(container, path, text);
+    else if (previewKind === 'table') renderTablePreviewInto(container, path, text);
+    else if (previewKind === 'audio' || previewKind === 'video') renderNativeMediaPreviewInto(container, path, state, previewKind);
+    else if (previewKind === 'unsupported') renderUnsupportedPreviewInto(container, path, state);
     else renderEditorCodePreviewInto(container, path, text);
   }
   restoreElementScrollPosition(container, scrollTop, scrollLeft);
@@ -1971,6 +3564,18 @@ function closeFilePreviewPopout(path) {
   if (!previewWindow || previewWindow.closed) return false;
   try { previewWindow.close?.(); } catch (_) {}
   return true;
+}
+
+function bumpFilePreviewPopoutGeneration(path) {
+  const record = filePreviewPopouts.get(path);
+  if (!record) return 0;
+  record.previewGeneration = Number(record.previewGeneration || 0) + 1;
+  return record.previewGeneration;
+}
+
+function filePreviewPopoutGenerationMatches(path, previewWindow, generation) {
+  const record = filePreviewPopouts.get(path);
+  return Boolean(record && record.window === previewWindow && record.previewGeneration === generation);
 }
 
 function filePreviewPopoutDocument(previewWindow) {
@@ -2139,15 +3744,59 @@ function previewPopoutToolbarHtml() {
       <button type="button" class="file-editor-theme-panel" data-preview-popout-theme title="${esc(editorThemeLabel())}" aria-label="${esc(editorThemeLabel())}"><span class="file-editor-icon file-editor-icon-theme" aria-hidden="true"></span></button>`;
 }
 
-function renderedPreviewSnapshot(path, text) {
-  const scratch = document.createElement('div');
-  scratch.className = 'file-editor-preview-pane-panel';
-  renderEditorPreviewPane(scratch, path, text);
-  scratch.hidden = false;
+function snapshotRenderedPreviewContainer(scratch) {
   return {
     className: scratch.className,
     html: scratch.innerHTML,
+    dataAttributes: previewSnapshotDataAttributes(scratch),
   };
+}
+
+function previewSnapshotDataAttributes(scratch) {
+  const attributes = {};
+  for (const name of scratch?.getAttributeNames?.() || []) {
+    if (name.startsWith('data-')) attributes[name] = scratch.getAttribute(name) || '';
+  }
+  return attributes;
+}
+
+function previewSnapshotDataAttributesHtml(snapshot) {
+  return Object.entries(snapshot?.dataAttributes || {})
+    .map(([name, value]) => ` ${name}="${esc(value)}"`)
+    .join('');
+}
+
+function applyPreviewSnapshotRoot(root, snapshot) {
+  if (!root || !snapshot) return false;
+  root.className = snapshot.className;
+  for (const name of Array.from(root.getAttributeNames?.() || [])) {
+    if (name.startsWith('data-') && name !== 'data-preview-root') root.removeAttribute(name);
+  }
+  for (const [name, value] of Object.entries(snapshot.dataAttributes || {})) {
+    root.setAttribute(name, value);
+  }
+  root.innerHTML = snapshot.html;
+  return true;
+}
+
+function previewSnapshotScratch(path, text, options = {}) {
+  const scratch = document.createElement('div');
+  scratch.className = 'file-editor-preview-pane-panel';
+  renderEditorPreviewPane(scratch, path, text, {context: options.context || 'popout'});
+  scratch.hidden = false;
+  return scratch;
+}
+
+function renderedPreviewSnapshot(path, text) {
+  return snapshotRenderedPreviewContainer(previewSnapshotScratch(path, text, {context: 'popout'}));
+}
+
+async function renderedPreviewSnapshotAsync(path, text) {
+  const scratch = previewSnapshotScratch(path, text, {context: 'popout'});
+  if (scratch._previewAsync && typeof scratch._previewAsync.then === 'function') {
+    await scratch._previewAsync;
+  }
+  return snapshotRenderedPreviewContainer(scratch);
 }
 
 function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
@@ -2253,6 +3902,25 @@ function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
       border: 0;
       background: transparent;
     }
+	    .file-preview-popout-window .file-editor-preview-pane-panel.file-editor-preview-zoom-shell {
+	      display: grid !important;
+	      grid-template-rows: auto minmax(0, 1fr);
+	      height: clamp(360px, calc(100vh - 132px), 900px);
+	      min-height: 360px;
+	      overflow: hidden;
+	      padding: 8px;
+	    }
+	    .file-preview-popout-window .file-editor-preview-zoom-viewport {
+	      box-sizing: border-box;
+	      width: 100%;
+	      height: 100%;
+	      max-width: 100%;
+	      max-height: 100%;
+	      min-width: 0;
+	      min-height: 0;
+	      overflow: auto;
+	      overscroll-behavior: contain;
+	    }
     .file-preview-popout-window {
       --editor-scheme-bg: var(--popout-editor-scheme-bg);
       --editor-scheme-fg: var(--popout-editor-scheme-fg);
@@ -2407,7 +4075,7 @@ function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
       <span class="file-preview-popout-title-path">${esc(compactHomePath(path))}</span>
       ${previewPopoutToolbarHtml()}
     </header>
-    <article data-preview-root class="${esc(snapshot.className)}">${snapshot.html}</article>
+    <article data-preview-root${previewSnapshotDataAttributesHtml(snapshot)} class="${esc(snapshot.className)}">${snapshot.html}</article>
   </main>
 </body>
 </html>`);
@@ -2424,6 +4092,7 @@ function updateFilePreviewPopoutControls(path, previewWindow) {
   const themeButton = doc.querySelector('[data-preview-popout-theme]');
   if (themeButton) updateEditorThemeButton(themeButton, {includeVanilla: true});
   updateEditorPreviewFontControls(doc);
+  hydratePreviewZoomSurfaces(doc.querySelector('[data-preview-root]') || doc);
 }
 
 function bindFilePreviewPopoutControls(path, previewWindow) {
@@ -2473,6 +4142,7 @@ function updateFilePreviewPopout(path, text) {
   const record = filePreviewPopouts.get(path);
   if (!record) return false;
   const previewWindow = record.window;
+  const generation = bumpFilePreviewPopoutGeneration(path);
   if (!previewWindow || previewWindow.closed) {
     filePreviewPopouts.delete(path);
     return false;
@@ -2485,12 +4155,18 @@ function updateFilePreviewPopout(path, text) {
     const scrollLeft = scroller?.scrollLeft || 0;
     const root = doc?.querySelector?.('[data-preview-root]');
     if (!root) return writeFilePreviewPopoutDocument(path, previewWindow, snapshot);
-    root.className = snapshot.className;
-    root.innerHTML = snapshot.html;
+    applyPreviewSnapshotRoot(root, snapshot);
     doc.body.className = previewPopoutBodyClassName();
     updateFilePreviewPopoutControls(path, previewWindow);
     doc.title = `${basenameOf(path)} preview`;
     restoreElementScrollPosition(scroller, scrollTop, scrollLeft);
+    renderedPreviewSnapshotAsync(path, text).then(asyncSnapshot => {
+      if (!filePreviewPopoutGenerationMatches(path, previewWindow, generation) || previewWindow.closed) return;
+      const currentRoot = previewWindow.document?.querySelector?.('[data-preview-root]');
+      if (!currentRoot) return;
+      applyPreviewSnapshotRoot(currentRoot, asyncSnapshot);
+      updateFilePreviewPopoutControls(path, previewWindow);
+    }).catch(() => {});
     return true;
   } catch (_) {
     filePreviewPopouts.delete(path);
@@ -2501,7 +4177,7 @@ function updateFilePreviewPopout(path, text) {
 function refreshFilePreviewPopouts() {
   for (const path of Array.from(filePreviewPopouts.keys())) {
     const state = openFiles.get(path);
-    if (state?.kind === 'text') updateFilePreviewPopout(path, state.content);
+    if (state?.kind && editorPreviewModeAvailable(path, state)) updateFilePreviewPopout(path, state.content || '');
     else filePreviewPopouts.delete(path);
   }
 }
@@ -2526,14 +4202,24 @@ function writeFilePreviewPopoutAfterNavigation(path, previewWindow, snapshot) {
   }
 }
 
+function writeFilePreviewPopoutWhenReady(path, previewWindow, text) {
+  const generation = bumpFilePreviewPopoutGeneration(path);
+  writeFilePreviewPopoutAfterNavigation(path, previewWindow, renderedPreviewSnapshot(path, text));
+  renderedPreviewSnapshotAsync(path, text).then(snapshot => {
+    if (!filePreviewPopoutGenerationMatches(path, previewWindow, generation) || previewWindow.closed) return;
+    writeFilePreviewPopoutAfterNavigation(path, previewWindow, snapshot);
+  }).catch(() => {});
+}
+
 function openFilePreviewPopout(path, panel = null) {
   if (!path || !editorPreviewModeAvailable(path)) return false;
-  syncOpenFileContentFromPanels(path, panel);
+  const initialState = openFiles.get(path);
+  if (initialState?.kind === 'text') syncOpenFileContentFromPanels(path, panel);
   const state = openFiles.get(path);
-  if (!state || state.kind !== 'text') return false;
+  if (!state || !editorPreviewModeAvailable(path, state)) return false;
   const existing = filePreviewPopouts.get(path)?.window;
   if (existing && !existing.closed) {
-    updateFilePreviewPopout(path, state.content);
+    updateFilePreviewPopout(path, state.content || '');
     existing.focus?.();
     return true;
   }
@@ -2544,7 +4230,7 @@ function openFilePreviewPopout(path, panel = null) {
   }
   try {
     filePreviewPopouts.set(path, {window: previewWindow});
-    writeFilePreviewPopoutAfterNavigation(path, previewWindow, renderedPreviewSnapshot(path, state.content));
+    writeFilePreviewPopoutWhenReady(path, previewWindow, state.content || '');
     return true;
   } catch (error) {
     filePreviewPopouts.delete(path);
@@ -2932,7 +4618,7 @@ function renderLinkedFilePreviewPanels(sourcePanel, path, content) {
     if (panel === sourcePanel) continue;
     const mode = fileEditorPanelMode(panel);
     if (mode !== 'preview' && mode !== 'split') continue;
-    renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, content);
+    renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, content, {context: mode});
   }
 }
 
@@ -2978,9 +4664,9 @@ function refreshEditorPreviews() {
     if (!isFileEditorItem(item)) continue;
     const path = fileItemPath(item);
     const state = openFiles.get(path);
-    if (state?.kind === 'text') {
-      renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
-      updateFilePreviewPopout(path, state.content);
+    if (state?.kind && editorPreviewModeAvailable(path, state)) {
+      renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content || '', {context: fileEditorPanelMode(panel)});
+      updateFilePreviewPopout(path, state.content || '');
     }
   }
 }

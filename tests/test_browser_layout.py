@@ -50,6 +50,32 @@ def page_html(body: str, *, extra_css: str = "") -> str:
     """
 
 
+def browser_screenshot_rgb(browser):
+    image_mod = pytest.importorskip("PIL.Image")
+    return image_mod.open(BytesIO(browser.get_screenshot_as_png())).convert("RGB")
+
+
+def count_rect_region_pixels(image, dpr, rect, region, predicate, *, step=2):
+    left = int((rect["left"] + rect["width"] * region["left"]) * dpr)
+    top = int((rect["top"] + rect["height"] * region["top"]) * dpr)
+    right = int((rect["left"] + rect["width"] * region["right"]) * dpr)
+    bottom = int((rect["top"] + rect["height"] * region["bottom"]) * dpr)
+    left = max(0, min(image.width - 1, left))
+    right = max(left + 1, min(image.width, right))
+    top = max(0, min(image.height - 1, top))
+    bottom = max(top + 1, min(image.height, bottom))
+    stride = max(1, int(step))
+    matches = 0
+    samples = 0
+    for y in range(top, bottom, stride):
+        for x in range(left, right, stride):
+            pixel = image.getpixel((x, y))
+            samples += 1
+            if predicate(pixel):
+                matches += 1
+    return matches, samples
+
+
 @pytest.fixture(scope="module")
 def browser():
     # Module-scoped: launch headless Chrome ONCE for the whole file instead of per-test (~38 launches).
@@ -2046,8 +2072,7 @@ def test_dockview_tabs_keep_yolomux_active_inactive_style(browser, tmp_path):
     assert metrics["header"]["tabsWebkitScrollbarHeight"] == "0px"
     assert metrics["header"]["activeTabInsideHeader"] is True
 
-    image_mod = pytest.importorskip("PIL.Image")
-    screenshot = image_mod.open(BytesIO(browser.get_screenshot_as_png())).convert("RGB")
+    screenshot = browser_screenshot_rgb(browser)
     dpr = browser.execute_script("return window.devicePixelRatio || 1") or 1
 
     def rgb_tuple(css_color):
@@ -7382,6 +7407,1597 @@ def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_
     assert metrics["edit"]["wrapHidden"] is False, metrics
     assert metrics["edit"]["findHidden"] is False, metrics
     assert metrics["edit"]["saveHidden"] is False, metrics
+
+
+def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_path):
+    page = tmp_path / "preview-direct-media.html"
+    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
+    browser.get(page.as_uri() + "?sessions=1")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return typeof createFileEditorPanel === 'function' && document.querySelector('#grid');")
+    )
+    metrics = browser.execute_script(
+        """
+        const mount = document.getElementById('grid');
+        const makePanel = (path, state, mode = 'preview') => {
+          const item = fileEditorItemFor(path);
+          setFileState(path, state);
+          setFileEditorViewMode(path, mode, item);
+          addFileEditorTabItem(path, item);
+          const panel = createFileEditorPanel(item);
+          panel.classList.add('active-pane');
+          panel.style.width = '860px';
+          panel.style.height = '420px';
+          panelNodes.set(item, panel);
+          mount.append(panel);
+          renderFileEditorPanel(panel, item);
+          return {item, panel};
+        };
+        const png = makePanel('/home/test/repo/assets/photo.png', {kind: 'image', mtime: 11, size: 1234, content: '', original: '', dirty: false});
+        const apng = makePanel('/home/test/repo/assets/animation.apng', {kind: 'image', mtime: 111, size: 1534, content: '', original: '', dirty: false});
+        const jpg = makePanel('/home/test/repo/assets/photo.jpg', {kind: 'image', mtime: 12, size: 2234, content: '', original: '', dirty: false});
+        const gif = makePanel('/home/test/repo/assets/spinner.gif', {kind: 'image', mtime: 13, size: 3234, content: '', original: '', dirty: false});
+        const webp = makePanel('/home/test/repo/assets/photo.webp', {kind: 'image', mtime: 131, size: 3334, content: '', original: '', dirty: false});
+        const bmp = makePanel('/home/test/repo/assets/photo.bmp', {kind: 'image', mtime: 132, size: 3434, content: '', original: '', dirty: false});
+        const ico = makePanel('/home/test/repo/assets/favicon.ico', {kind: 'image', mtime: 133, size: 3534, content: '', original: '', dirty: false});
+        const avif = makePanel('/home/test/repo/assets/photo.avif', {kind: 'image', mtime: 134, size: 3634, content: '', original: '', dirty: false});
+        const svg = makePanel('/home/test/repo/assets/diagram.svg', {kind: 'image', mtime: 14, size: 4234, content: '', original: '', dirty: false});
+        const pdf = makePanel('/home/test/repo/spec.pdf', {kind: 'media', mediaKind: 'pdf', mtime: 15, size: 5234, content: '', original: '', dirty: false});
+        const audio = makePanel('/home/test/repo/sound.mp3', {kind: 'media', mediaKind: 'audio', mtime: 151, size: 6234, content: '', original: '', dirty: false});
+        const video = makePanel('/home/test/repo/movie.mp4', {kind: 'media', mediaKind: 'video', mtime: 152, size: 7234, content: '', original: '', dirty: false});
+        const tiff = makePanel('/home/test/repo/assets/photo.tiff', {kind: 'media', mediaKind: 'unsupported-image', mime: 'image/tiff', mtime: 153, size: 8234, content: '', original: '', dirty: false});
+        const archive = makePanel('/home/test/repo/archive.zip', {kind: 'media', mediaKind: 'unsupported-archive', mime: 'application/zip', mtime: 154, size: 9234, content: '', original: '', dirty: false});
+        const parquet = makePanel('/home/test/repo/data.parquet', {kind: 'media', mediaKind: 'unsupported-data', mime: 'application/vnd.apache.parquet', mtime: 155, size: 10234, content: '', original: '', dirty: false});
+        const code = makePanel('/home/test/repo/app.py', {kind: 'text', mtime: 16, size: 64, content: 'print("hello")\\n', original: 'print("hello")\\n', dirty: false, language: 'python'});
+        const unsupported = makePanel('/home/test/repo/archive.bin', {kind: 'too-large', size: 999999, maxBytes: 1024, error: 'binary preview blocked'});
+        const imageInfo = ({panel}) => {
+          const img = panel.querySelector('.file-editor-image-panel img.file-editor-image');
+          return {
+            imagePaneHidden: panel.querySelector('.file-editor-image-panel')?.hidden === true,
+            previewPaneHidden: panel.querySelector('.file-editor-preview-pane-panel')?.hidden === true,
+            src: img?.getAttribute('src') || '',
+            hasInlineSvg: Boolean(panel.querySelector('svg')),
+            mode: editorViewModeFor(panel.dataset.filePath, panel.dataset.layoutItem),
+            editButtonHidden: panel.querySelector('[data-editor-mode="edit"]')?.hidden === true,
+            splitButtonHidden: panel.querySelector('[data-editor-mode="split"]')?.hidden === true,
+            previewButtonHidden: panel.querySelector('[data-editor-mode="preview"]')?.hidden === true,
+            zoomToolbarExists: Boolean(panel.querySelector('.file-editor-image-panel .file-editor-preview-zoom-toolbar')),
+            zoomActions: Array.from(panel.querySelectorAll('.file-editor-image-panel [data-preview-zoom-action]')).map(button => button.dataset.previewZoomAction),
+            zoomWheel: panel.querySelector('.file-editor-image-panel')?.dataset.previewZoomWheel || '',
+            zoomPan: panel.querySelector('.file-editor-image-panel')?.dataset.previewZoomPan || '',
+          };
+        };
+        const fallbackInfo = ({panel}) => ({
+          previewPaneHidden: panel.querySelector('.file-editor-preview-pane-panel')?.hidden === true,
+          title: panel.querySelector('.file-editor-preview-fallback .file-editor-empty-title')?.textContent || '',
+          text: panel.querySelector('.file-editor-preview-fallback')?.textContent || '',
+          modeControlHidden: panel.querySelector('.file-editor-mode-control-panel')?.hidden === true,
+        });
+        const pdfFrame = pdf.panel.querySelector('.file-editor-pdf-preview');
+        const codeBlock = code.panel.querySelector('.file-editor-preview-pane-panel code.language-python');
+        return {
+          png: imageInfo(png),
+          apng: imageInfo(apng),
+          jpg: imageInfo(jpg),
+          gif: imageInfo(gif),
+          webp: imageInfo(webp),
+          bmp: imageInfo(bmp),
+          ico: imageInfo(ico),
+          avif: imageInfo(avif),
+          svg: imageInfo(svg),
+          pdf: {
+            previewPaneHidden: pdf.panel.querySelector('.file-editor-preview-pane-panel')?.hidden === true,
+            iframeSrc: pdfFrame?.getAttribute('src') || '',
+            sandbox: pdfFrame?.getAttribute('sandbox'),
+            fallbackText: pdf.panel.querySelector('.file-editor-preview-fallback')?.textContent || '',
+            editButtonHidden: pdf.panel.querySelector('[data-editor-mode="edit"]')?.hidden === true,
+            splitButtonHidden: pdf.panel.querySelector('[data-editor-mode="split"]')?.hidden === true,
+            previewButtonHidden: pdf.panel.querySelector('[data-editor-mode="preview"]')?.hidden === true,
+          },
+          audio: {
+            mediaSrc: audio.panel.querySelector('audio.file-editor-native-media')?.getAttribute('src') || '',
+            controls: audio.panel.querySelector('audio.file-editor-native-media')?.controls === true,
+            fallbackText: audio.panel.querySelector('.file-editor-preview-fallback')?.textContent || '',
+          },
+          video: {
+            mediaSrc: video.panel.querySelector('video.file-editor-native-media')?.getAttribute('src') || '',
+            controls: video.panel.querySelector('video.file-editor-native-media')?.controls === true,
+            autoplay: video.panel.querySelector('video.file-editor-native-media')?.autoplay === true,
+            fallbackText: video.panel.querySelector('.file-editor-preview-fallback')?.textContent || '',
+          },
+          tiff: fallbackInfo(tiff),
+          archive: fallbackInfo(archive),
+          parquet: fallbackInfo(parquet),
+          code: {
+            previewPaneHidden: code.panel.querySelector('.file-editor-preview-pane-panel')?.hidden === true,
+            codeText: codeBlock?.textContent || '',
+            codeClass: codeBlock?.className || '',
+          },
+          unsupported: {
+            imagePaneHidden: unsupported.panel.querySelector('.file-editor-image-panel')?.hidden === true,
+            previewPaneHidden: unsupported.panel.querySelector('.file-editor-preview-pane-panel')?.hidden === true,
+            text: unsupported.panel.textContent || '',
+            modeControlHidden: unsupported.panel.querySelector('.file-editor-mode-control-panel')?.hidden === true,
+          },
+          errors: window.__bootErrors,
+          rejections: window.__bootRejections,
+        };
+        """
+    )
+    for key in ("png", "apng", "jpg", "gif", "webp", "bmp", "ico", "avif", "svg"):
+        assert metrics[key]["imagePaneHidden"] is False, metrics
+        assert metrics[key]["previewPaneHidden"] is True, metrics
+        assert metrics[key]["src"].startswith("/api/fs/raw?path="), metrics
+        assert metrics[key]["mode"] == "preview", metrics
+        assert metrics[key]["previewButtonHidden"] is False, metrics
+        assert metrics[key]["editButtonHidden"] is True, metrics
+        assert metrics[key]["splitButtonHidden"] is True, metrics
+        assert metrics[key]["zoomToolbarExists"] is True, metrics
+        assert metrics[key]["zoomActions"] == ["out", "fit", "actual", "in"], metrics
+        assert metrics[key]["zoomWheel"] == "1", metrics
+        assert metrics[key]["zoomPan"] == "1", metrics
+    assert "photo.png" in metrics["png"]["src"], metrics
+    assert "animation.apng" in metrics["apng"]["src"], metrics
+    assert "photo.jpg" in metrics["jpg"]["src"], metrics
+    assert "spinner.gif" in metrics["gif"]["src"], metrics
+    assert "photo.webp" in metrics["webp"]["src"], metrics
+    assert "photo.bmp" in metrics["bmp"]["src"], metrics
+    assert "favicon.ico" in metrics["ico"]["src"], metrics
+    assert "photo.avif" in metrics["avif"]["src"], metrics
+    assert "diagram.svg" in metrics["svg"]["src"], metrics
+    assert metrics["svg"]["hasInlineSvg"] is False, metrics
+    assert metrics["pdf"]["previewPaneHidden"] is False, metrics
+    assert metrics["pdf"]["iframeSrc"].startswith("/api/fs/raw?path="), metrics
+    assert "spec.pdf" in metrics["pdf"]["iframeSrc"], metrics
+    assert metrics["pdf"]["sandbox"] == "", metrics
+    assert "Open" in metrics["pdf"]["fallbackText"] and "Download" in metrics["pdf"]["fallbackText"], metrics
+    assert metrics["pdf"]["editButtonHidden"] is True and metrics["pdf"]["splitButtonHidden"] is True, metrics
+    assert metrics["pdf"]["previewButtonHidden"] is False, metrics
+    assert metrics["audio"]["mediaSrc"].startswith("/api/fs/raw?path="), metrics
+    assert metrics["audio"]["controls"] is True, metrics
+    assert "Open" in metrics["audio"]["fallbackText"] and "Download" in metrics["audio"]["fallbackText"], metrics
+    assert metrics["video"]["mediaSrc"].startswith("/api/fs/raw?path="), metrics
+    assert metrics["video"]["controls"] is True and metrics["video"]["autoplay"] is False, metrics
+    assert "Open" in metrics["video"]["fallbackText"] and "Download" in metrics["video"]["fallbackText"], metrics
+    assert metrics["tiff"]["previewPaneHidden"] is False, metrics
+    assert "recognized but not previewable" in metrics["tiff"]["title"], metrics
+    assert "image/tiff" in metrics["tiff"]["text"] and "Open" in metrics["tiff"]["text"] and "Download" in metrics["tiff"]["text"], metrics
+    assert "Archive preview is not expanded" in metrics["archive"]["title"], metrics
+    assert "application/zip" in metrics["archive"]["text"], metrics
+    assert "external viewer" in metrics["parquet"]["title"], metrics
+    assert "application/vnd.apache.parquet" in metrics["parquet"]["text"], metrics
+    assert metrics["code"]["previewPaneHidden"] is False, metrics
+    assert "print" in metrics["code"]["codeText"], metrics
+    assert "language-python" in metrics["code"]["codeClass"], metrics
+    assert metrics["unsupported"]["modeControlHidden"] is True, metrics
+    assert "File is too large to preview" in metrics["unsupported"]["text"], metrics
+    assert "binary preview blocked" in metrics["unsupported"]["text"], metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["rejections"] == [], metrics
+
+
+def test_editor_opens_mermaid_source_preview_by_default(browser, tmp_path):
+    page = tmp_path / "preview-direct-mermaid-source.html"
+    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
+    browser.get(page.as_uri() + "?sessions=1")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return typeof openFileInEditor === 'function' && document.querySelector('#grid');")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+            const originalFetch = window.fetch.bind(window);
+            const path = '/home/test/repo/chart.mmd';
+            window.fetch = async (input, options = {}) => {
+              const url = new URL(String(input), 'https://localhost');
+              if (url.pathname === '/api/fs/read') {
+                return new Response(JSON.stringify({
+                  path,
+                  name: 'chart.mmd',
+                  size: 17,
+                  mtime: 20,
+                  content: 'graph TD; A-->B;',
+                }), {status: 200, headers: {'Content-Type': 'application/json'}});
+              }
+              return originalFetch(input, options);
+            };
+            const mermaidCalls = [];
+            window.mermaid = {
+              initialize(config) {
+                window.__directMermaidConfig = config;
+              },
+              async render(id, source) {
+                mermaidCalls.push({id, source});
+                return {svg: '<svg viewBox="0 0 100 40"><text>Direct Mermaid</text></svg>'};
+              },
+            };
+            const item = await openFileInEditor(path, {name: 'chart.mmd', size: 17, mtime: 20}, {userInitiated: true});
+            const panel = panelNodes.get(item);
+            const preview = panel?.querySelector('.file-editor-preview-pane-panel');
+            if (preview?._previewAsync) await preview._previewAsync;
+            await frame();
+            await frame();
+            done({
+              item,
+              mode: editorViewModeFor(path, item),
+              previewHidden: preview?.hidden === true,
+              imageExists: Boolean(preview?.querySelector('img.mermaid-preview-image')),
+              imageSrcPrefix: String(preview?.querySelector('img.mermaid-preview-image')?.getAttribute('src') || '').slice(0, 5),
+              calls: mermaidCalls,
+              config: window.__directMermaidConfig || {},
+              errors: window.__bootErrors,
+              rejections: window.__bootRejections,
+            });
+          } catch (error) {
+            done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["mode"] == "preview", metrics
+    assert metrics["previewHidden"] is False, metrics
+    assert metrics["imageExists"] is True, metrics
+    assert metrics["imageSrcPrefix"] in ("blob:", "data:"), metrics
+    assert metrics["calls"], metrics
+    assert {call["source"] for call in metrics["calls"]} == {"graph TD; A-->B;"}, metrics
+    assert metrics["config"]["startOnLoad"] is False, metrics
+    assert metrics["config"]["securityLevel"] == "strict", metrics
+    assert metrics["config"]["htmlLabels"] is True, metrics
+    assert metrics["config"]["flowchart"]["htmlLabels"] is True, metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["rejections"] == [], metrics
+
+
+def _wcag_contrast(c1, c2):
+    """WCAG contrast ratio between two CSS colors (#hex or rgb()/rgba()). None if unparseable."""
+    def rel_lum(color):
+        text = str(color or "").strip()
+        if text.startswith("#"):
+            h = text[1:]
+            if len(h) == 3:
+                h = "".join(ch * 2 for ch in h)
+            if len(h) < 6:
+                return None
+            r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        else:
+            m = re.match(r"rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)", text)
+            if not m:
+                return None
+            r, g, b = float(m.group(1)), float(m.group(2)), float(m.group(3))
+        def lin(v):
+            v /= 255.0
+            return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+        return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+    a, b = rel_lum(c1), rel_lum(c2)
+    if a is None or b is None:
+        return None
+    return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+
+
+def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_path):
+    browser.set_window_size(1200, 900)
+    page = tmp_path / "preview-direct-mermaid-real-bundle.html"
+    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
+    browser.get(page.as_uri() + "?sessions=1")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return typeof createFileEditorPanel === 'function' && document.querySelector('#grid');")
+    )
+    mermaid_uri = (REPO_ROOT / "static" / "vendor" / "mermaid.min.js").as_uri()
+    mermaid_source = (REPO_ROOT / "docs" / "preview-samples" / "14-mermaid.mmd").read_text(encoding="utf-8")
+    assert "flowchart TD" in mermaid_source
+    assert "direction LR" in mermaid_source
+    assert "subgraph MarkdownFlow" in mermaid_source
+    assert "subgraph MermaidFlow" in mermaid_source
+    assert "subgraph MediaFlow" in mermaid_source
+    metrics = browser.execute_async_script(
+        """
+        const mermaidUri = arguments[0];
+        const mermaidSource = arguments[1];
+        const done = arguments[arguments.length - 1];
+            (async () => {
+              try {
+                const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+                const waitImage = image => new Promise(resolve => {
+                  if (!image) {
+                    resolve(false);
+                    return;
+                  }
+                  if (image.complete && image.naturalWidth > 0) {
+                    resolve(true);
+                    return;
+                  }
+                  const finish = () => resolve(image.naturalWidth > 0);
+                  image.addEventListener('load', finish, {once: true});
+                  image.addEventListener('error', finish, {once: true});
+                });
+                const rect = node => {
+                  if (!node) return null;
+                  const box = node.getBoundingClientRect();
+                  return {left: box.left, top: box.top, width: box.width, height: box.height, right: box.right, bottom: box.bottom};
+                };
+                const readBlobText = url => new Promise((resolve, reject) => {
+                  const request = new XMLHttpRequest();
+                  request.open('GET', url);
+                  request.onload = () => resolve(String(request.responseText || ''));
+                  request.onerror = () => reject(new Error(`failed to read ${url}`));
+                  request.send();
+                });
+                await new Promise((resolve, reject) => {
+              const script = document.createElement('script');
+              script.src = mermaidUri;
+              script.onload = resolve;
+              script.onerror = () => reject(new Error(`failed to load ${mermaidUri}`));
+              document.head.append(script);
+            });
+            window.mermaid.initialize(mermaidPreviewConfig());
+            const probeResult = await window.mermaid.render('yolomux-mermaid-probe', mermaidSource);
+            const probeSvgText = typeof probeResult === 'string' ? probeResult : probeResult?.svg || '';
+            const path = '/home/test/repo/docs/preview-samples/14-mermaid.mmd';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: mermaidSource, original: mermaidSource, dirty: false, language: 'mermaid'});
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panel.style.width = '960px';
+            panel.style.height = '620px';
+            panelNodes.set(item, panel);
+            const grid = document.getElementById('grid');
+            grid.replaceChildren(panel);
+            renderFileEditorPanel(panel, item);
+            const preview = panel.querySelector('.file-editor-preview-pane-panel');
+            if (preview._previewAsync) await preview._previewAsync;
+            await frame();
+            await frame();
+            const image = preview.querySelector('img.mermaid-preview-image');
+            await waitImage(image);
+            await frame();
+            await frame();
+            // Idempotent re-render: a periodic pane refresh re-runs renderEditorPreviewPane with the
+            // SAME source. Tag the rendered diagram, re-run, and the SAME <img> must survive — a
+            // rebuild here is what flashed the diagram on every refresh tick.
+            image.dataset.idemTag = 'keep';
+            renderEditorPreviewPane(preview, path, mermaidSource, {context: 'preview'});
+            if (preview._previewAsync) await preview._previewAsync;
+            await frame();
+            const idempotentRerender = Boolean(preview.querySelector('img.mermaid-preview-image[data-idem-tag="keep"]'));
+            const svgText = image?.src ? await readBlobText(image.src) : '';
+            const viewport = preview.querySelector('.file-editor-preview-zoom-viewport');
+            const zoomIn = preview.querySelector('[data-preview-zoom-action="in"]');
+            const zoomActual = preview.querySelector('[data-preview-zoom-action="actual"]');
+            const zoomValueBefore = preview.querySelector('.file-editor-preview-zoom-value')?.textContent || '';
+            const imageRectFit = rect(image);
+            const wheelRect = rect(viewport);
+            const wheelEvent = new WheelEvent('wheel', {
+              deltaY: -160,
+              clientX: wheelRect.left + (wheelRect.width * 0.5),
+              clientY: wheelRect.top + (wheelRect.height * 0.5),
+              bubbles: true,
+              cancelable: true,
+            });
+            const wheelPrevented = !viewport.dispatchEvent(wheelEvent);
+            await frame();
+            await frame();
+            const imageRectAfterWheel = rect(image);
+            zoomActual?.click();
+            await frame();
+            await frame();
+            const imageRectActual = rect(image);
+            for (let index = 0; index < 8 && zoomIn && !zoomIn.disabled; index += 1) {
+              zoomIn.click();
+              await frame();
+            }
+            await frame();
+            await frame();
+            const imageRectAfterZoom = rect(image);
+            const zoomValueAfterManual = preview.querySelector('.file-editor-preview-zoom-value')?.textContent || '';
+            const zoomModeAfterManual = preview.dataset.previewZoomMode || '';
+            if (viewport) {
+              viewport.scrollLeft = Math.min(80, Math.max(0, viewport.scrollWidth - viewport.clientWidth));
+              viewport.scrollTop = Math.min(80, Math.max(0, viewport.scrollHeight - viewport.clientHeight));
+            }
+            const viewportAfterManual = viewport ? {
+              clientWidth: viewport.clientWidth,
+              clientHeight: viewport.clientHeight,
+              scrollWidth: viewport.scrollWidth,
+              scrollHeight: viewport.scrollHeight,
+              scrollLeft: viewport.scrollLeft,
+              scrollTop: viewport.scrollTop,
+            } : null;
+            setFileEditorPreviewZoomStateForPath(path, 'split:mermaid', {mode: 'manual', scale: 2.4});
+            setFileEditorViewMode(path, 'split', item);
+            renderFileEditorPanel(panel, item);
+            const splitPreview = panel.querySelector('.file-editor-preview-pane-panel');
+            if (splitPreview._previewAsync) await splitPreview._previewAsync;
+            await frame();
+            await frame();
+            const splitImage = splitPreview.querySelector('img.mermaid-preview-image');
+            await waitImage(splitImage);
+            await frame();
+            // Wait for the zoom surface to reveal (measuring class cleared) so geometry/pixels are
+            // sampled at the settled size, not a transient pre-settle size that is hidden anyway.
+            for (let i = 0; i < 50 && splitPreview.classList.contains('file-editor-preview-zoom-measuring'); i += 1) {
+              await new Promise(resolve => setTimeout(resolve, 16));
+            }
+            await frame();
+            const splitMeasuring = splitPreview.classList.contains('file-editor-preview-zoom-measuring');
+            const splitViewport = splitPreview.querySelector('.file-editor-preview-zoom-viewport');
+            const splitImageRect = rect(splitImage);
+            const splitZoomValueBeforeWheel = splitPreview.querySelector('.file-editor-preview-zoom-value')?.textContent || '';
+            const splitToolbarButtons = Array.from(splitPreview.querySelectorAll('[data-preview-zoom-action]'));
+            const splitWheelRect = rect(splitViewport);
+            const splitViewportBeforeWheel = splitViewport ? {
+              clientWidth: splitViewport.clientWidth,
+              clientHeight: splitViewport.clientHeight,
+              scrollWidth: splitViewport.scrollWidth,
+              scrollHeight: splitViewport.scrollHeight,
+              scrollLeft: splitViewport.scrollLeft,
+              scrollTop: splitViewport.scrollTop,
+            } : null;
+            const splitWheelEvent = new WheelEvent('wheel', {
+              deltaY: -160,
+              clientX: splitWheelRect.left + (splitWheelRect.width * 0.55),
+              clientY: splitWheelRect.top + (splitWheelRect.height * 0.45),
+              bubbles: true,
+              cancelable: true,
+            });
+            const splitWheelPrevented = !splitViewport.dispatchEvent(splitWheelEvent);
+            await frame();
+            await frame();
+            const splitImageRectAfterWheel = rect(splitImage);
+            // Start the pan from the top-left corner so the drag (which increases scroll) always
+            // has headroom; the wheel zoom above may have already scrolled the viewport to max.
+            splitViewport.scrollLeft = 0;
+            splitViewport.scrollTop = 0;
+            await frame();
+            const splitPanStart = {
+              scrollLeft: splitViewport.scrollLeft,
+              scrollTop: splitViewport.scrollTop,
+              clientX: splitWheelRect.left + (splitWheelRect.width * 0.5),
+              clientY: splitWheelRect.top + (splitWheelRect.height * 0.5),
+            };
+            splitViewport.dispatchEvent(new PointerEvent('pointerdown', {
+              pointerId: 9,
+              pointerType: 'mouse',
+              button: 0,
+              buttons: 1,
+              clientX: splitPanStart.clientX,
+              clientY: splitPanStart.clientY,
+              bubbles: true,
+              cancelable: true,
+            }));
+            splitViewport.dispatchEvent(new PointerEvent('pointermove', {
+              pointerId: 9,
+              pointerType: 'mouse',
+              buttons: 1,
+              clientX: splitPanStart.clientX - 90,
+              clientY: splitPanStart.clientY - 70,
+              bubbles: true,
+              cancelable: true,
+            }));
+            splitViewport.dispatchEvent(new PointerEvent('pointerup', {
+              pointerId: 9,
+              pointerType: 'mouse',
+              button: 0,
+              buttons: 0,
+              clientX: splitPanStart.clientX - 90,
+              clientY: splitPanStart.clientY - 70,
+              bubbles: true,
+              cancelable: true,
+            }));
+            await frame();
+            const nodeContrast = (() => {
+              // Parse the rendered SVG and verify every node label contrasts with its node's own
+              // background shape fill (the dark-on-dark Mermaid readability bug). Light text on a dark
+              // default node and dark text on a light classDef node must both clear WCAG-ish 3:1.
+              const lum = hx => { const m = /^#([0-9a-f]{6})$/i.exec(hx || ''); if (!m) return null;
+                const n = parseInt(m[1], 16), r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+                const f = c => { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
+                return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
+              const con = (a, b) => { const la = lum(a), lb = lum(b); if (la == null || lb == null) return null;
+                return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05); };
+              const norm = c => { if (!c) return c; const m = /^#([0-9a-f]{3})$/i.exec(c);
+                return m ? '#' + m[1].split('').map(x => x + x).join('') : c; };
+              const fillOf = el => { const s = (el && el.getAttribute && el.getAttribute('style')) || '';
+                const m = /fill:\\s*(#[0-9a-fA-F]{3,8})/.exec(s); return norm(m ? m[1] : ((el && el.getAttribute && el.getAttribute('fill')) || '')); };
+              const doc = new DOMParser().parseFromString(svgText, 'image/svg+xml');
+              const bgFor = node => { for (const sh of node.querySelectorAll('rect,polygon,path,circle,ellipse')) {
+                if (sh.closest('.label')) continue; const f = fillOf(sh); if (/^#[0-9a-f]{6}$/i.test(f)) return f; } return null; };
+              const fails = []; let minc = 99;
+              doc.querySelectorAll('.node text').forEach(t => {
+                const tf = fillOf(t); const bg = bgFor(t.closest('.node'));
+                if (!/^#[0-9a-f]{6}$/i.test(tf || '') || !bg) return;
+                const c = con(tf, bg); if (c == null) return; if (c < minc) minc = c;
+                if (c < 3) fails.push({text: (t.textContent || '').trim().slice(0, 24), tf, bg, c: Math.round(c * 100) / 100});
+              });
+              return {minContrast: minc === 99 ? null : Math.round(minc * 100) / 100, failCount: fails.length, failures: fails.slice(0, 8)};
+            })();
+            const result = {
+              nodeContrast,
+              idempotentRerender,
+              imageExists: Boolean(image),
+              imageSrcPrefix: String(image?.getAttribute('src') || '').slice(0, 5),
+              imageRect: rect(image),
+              imageRectFit,
+              wheelPrevented,
+              imageRectAfterWheel,
+              imageRectActual,
+              imageRectAfterZoom,
+              naturalWidth: image?.naturalWidth || 0,
+              naturalHeight: image?.naturalHeight || 0,
+              zoomToolbarExists: Boolean(preview.querySelector('.file-editor-preview-zoom-toolbar')),
+              zoomValueBefore,
+              zoomValueAfter: zoomValueAfterManual,
+              zoomModeAfter: zoomModeAfterManual,
+              viewport: viewportAfterManual,
+              split: {
+                mode: editorViewModeFor(path, item),
+                contentSplit: panel.querySelector('.file-editor-content')?.classList.contains('split-preview') === true,
+                zoomMode: splitPreview.dataset.previewZoomMode || '',
+                zoomValue: splitPreview.querySelector('.file-editor-preview-zoom-value')?.textContent || '',
+                toolbarActions: splitToolbarButtons.map(button => button.dataset.previewZoomAction),
+                toolbarLabels: splitToolbarButtons.map(button => button.textContent),
+                toolbarRects: splitToolbarButtons.map(button => rect(button)),
+                imageRect: splitImageRect,
+                paneRect: rect(splitPreview),
+                contentRect: rect(panel.querySelector('.file-editor-content')),
+                measuring: splitMeasuring,
+                viewportBeforeWheel: splitViewportBeforeWheel,
+                wheelPrevented: splitWheelPrevented,
+                zoomValueBeforeWheel: splitZoomValueBeforeWheel,
+                imageRectAfterWheel: splitImageRectAfterWheel,
+                panStart: splitPanStart,
+                panAfter: {
+                  scrollLeft: splitViewport.scrollLeft,
+                  scrollTop: splitViewport.scrollTop,
+                },
+                viewport: splitViewport ? {
+                  clientWidth: splitViewport.clientWidth,
+                  clientHeight: splitViewport.clientHeight,
+                  scrollWidth: splitViewport.scrollWidth,
+                  scrollHeight: splitViewport.scrollHeight,
+                } : null,
+              },
+              svgText,
+              probeSvgText,
+              config: window.mermaid?.mermaidAPI?.getConfig?.() || {},
+              errors: window.__bootErrors,
+              rejections: window.__bootRejections,
+            };
+            // Bright/Vanilla preview: the diagram's lines and labels must follow the white preview
+            // surface (dark on white), not the dark app theme; the app `--text` (light) would paint
+            // illegible light-gray lines on white. Run LAST (it re-renders the pane) so it does not
+            // detach the split elements measured above. (User-reported gray-on-white.)
+            let brightContrast = null;
+            try {
+              if (typeof setFileEditorPreviewDisplayMode === 'function') {
+                setFileEditorPreviewDisplayMode('vanilla');
+                const bp = panel.querySelector('.file-editor-preview-pane-panel');
+                renderEditorPreviewPane(bp, path, mermaidSource, {context: 'split'});
+                if (bp._previewAsync) await bp._previewAsync;
+                for (let i = 0; i < 60 && bp.querySelector('.file-editor-preview-zoom-shell') && bp.querySelector('.file-editor-preview-zoom-shell').classList.contains('file-editor-preview-zoom-measuring'); i += 1) {
+                  await new Promise(resolve => setTimeout(resolve, 16));
+                }
+                const bImg = bp.querySelector('img.mermaid-preview-image');
+                await waitImage(bImg);
+                const bTxt = bImg && bImg.src ? await readBlobText(bImg.src) : '';
+                const bDoc = new DOMParser().parseFromString(bTxt, 'image/svg+xml');
+                const ep = bDoc.querySelector('.edgePaths path, .edgePath path, path.flowchart-link');
+                const edgeStroke = ep ? (((/stroke:\\s*(#[0-9a-fA-F]{3,8})/.exec(ep.getAttribute('style') || '') || [])[1]) || ep.getAttribute('stroke') || '') : '';
+                const labelFills = Array.from(bDoc.querySelectorAll('.node text')).slice(0, 6)
+                  .map(t => (/fill:\\s*(#[0-9a-fA-F]{3,8})/.exec(t.getAttribute('style') || '') || [])[1] || '');
+                brightContrast = {
+                  mode: typeof editorPreviewThemeState === 'function' ? editorPreviewThemeState() : '?',
+                  paneBg: getComputedStyle(bp).backgroundColor,
+                  edgeStroke,
+                  labelFills,
+                };
+              }
+            } catch (error) { brightContrast = {error: String(error)}; }
+            result.brightContrast = brightContrast;
+            done(result);
+          } catch (error) {
+            done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
+          }
+        })();
+        """,
+        mermaid_uri,
+        mermaid_source,
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["imageExists"] is True, metrics
+    assert metrics["imageSrcPrefix"] in ("blob:", "data:"), metrics
+    assert metrics["naturalWidth"] > 0 and metrics["naturalHeight"] > 0, metrics
+    assert metrics["imageRectFit"]["height"] > 340, metrics
+    assert metrics["imageRectFit"]["height"] >= metrics["viewport"]["clientHeight"] - 40, metrics
+    assert metrics["wheelPrevented"] is True, metrics
+    assert metrics["imageRectAfterWheel"]["width"] > metrics["imageRectFit"]["width"], metrics
+    assert metrics["imageRectActual"]["height"] < metrics["imageRectFit"]["height"], metrics
+    assert metrics["imageRectAfterZoom"]["height"] > metrics["imageRectActual"]["height"], metrics
+    assert metrics["zoomToolbarExists"] is True, metrics
+    assert metrics["zoomValueBefore"].endswith("%"), metrics
+    assert metrics["zoomValueAfter"].endswith("%"), metrics
+    assert metrics["zoomModeAfter"] == "manual", metrics
+    assert metrics["viewport"]["scrollHeight"] > metrics["viewport"]["clientHeight"], metrics
+    assert metrics["viewport"]["scrollTop"] > 0, metrics
+    assert metrics["split"]["mode"] == "split", metrics
+    assert metrics["split"]["contentSplit"] is True, metrics
+    assert metrics["split"]["toolbarActions"] == ["out", "fit", "actual", "in"], metrics
+    assert metrics["split"]["toolbarLabels"] == ["-", "Fit", "1:1", "+"], metrics
+    for toolbar_rect in metrics["split"]["toolbarRects"]:
+        assert toolbar_rect["width"] > 0 and toolbar_rect["height"] > 0, metrics
+    assert metrics["split"]["zoomValueBeforeWheel"].endswith("%"), metrics
+    assert metrics["split"]["wheelPrevented"] is True, metrics
+    assert metrics["split"]["zoomMode"] == "manual", metrics
+    # Split preview pane must occupy ~half the editor content (right half), NOT full width.
+    # Regression: `.file-editor-preview-zoom-full { width:100% }` overrode `right:0` on the
+    # absolutely-positioned `inset:0 0 0 50%` split pane, so it rendered full-width offset to 50%
+    # and its right half (with the diagram) ran off-screen and was chopped. The image-vs-viewport
+    # asserts below passed anyway because the viewport itself was the wrong (full) width.
+    split_pane = metrics["split"]["paneRect"]
+    split_content = metrics["split"]["contentRect"]
+    # The diagram must reveal (not stay hidden) once its size settles; the reveal gate hides it only
+    # while the pane height is still settling so it does not visibly jump from a transient fit size.
+    assert metrics["split"]["measuring"] is False, metrics
+    assert split_content["width"] > 0, metrics
+    pane_ratio = split_pane["width"] / split_content["width"]
+    assert 0.4 <= pane_ratio <= 0.6, {"pane_ratio": pane_ratio, "pane": split_pane, "content": split_content}
+    assert split_pane["right"] <= split_content["right"] + 2, {"pane": split_pane, "content": split_content}
+    assert metrics["split"]["imageRect"]["width"] <= metrics["split"]["viewport"]["clientWidth"] + 2, metrics
+    assert metrics["split"]["imageRect"]["height"] <= metrics["split"]["viewport"]["clientHeight"] + 2, metrics
+    # The diagram must fit inside the visible content area, not extend past its right edge.
+    assert metrics["split"]["imageRect"]["right"] <= split_content["right"] + 2, {"image": metrics["split"]["imageRect"], "content": split_content}
+    assert metrics["split"]["viewportBeforeWheel"]["scrollLeft"] == 0, metrics
+    assert metrics["split"]["viewportBeforeWheel"]["scrollTop"] == 0, metrics
+    assert metrics["split"]["imageRectAfterWheel"]["width"] > metrics["split"]["imageRect"]["width"], metrics
+    assert (
+        metrics["split"]["panAfter"]["scrollLeft"] > metrics["split"]["panStart"]["scrollLeft"]
+        or metrics["split"]["panAfter"]["scrollTop"] > metrics["split"]["panStart"]["scrollTop"]
+    ), metrics
+    for label in ("Markdown pipeline", "Mermaid pipeline", "Media pipeline", "Preview pane", "Visible result"):
+        assert label in metrics["probeSvgText"], metrics
+    assert "<foreignObject" not in metrics["svgText"], metrics
+    for label in ("Markdown pipeline", "Mermaid pipeline", "Media pipeline", "Preview pane", "Visible result"):
+        assert label in metrics["svgText"], metrics
+    assert "font-family:" in metrics["svgText"], metrics
+    assert "font-weight:400" in metrics["svgText"], metrics
+    assert re.search(r'fill="(?:#[0-9a-fA-F]{3,8}|rgb)', metrics["svgText"]), metrics
+    assert metrics["config"]["htmlLabels"] is True, metrics
+    # Dark-on-dark readability: every node label must contrast with its node's own background fill.
+    # This catches the bug where default (dark-fill) nodes rendered dark text -> invisible, while the
+    # label-presence/font assertions above still passed. Both light-on-dark and dark-on-light qualify.
+    # Re-rendering identical Mermaid source must NOT rebuild the diagram (it flashed on every periodic
+    # pane refresh because the reveal gate re-hid the rebuilt SVG). The tagged <img> must survive.
+    assert metrics["idempotentRerender"] is True, metrics
+    assert metrics["nodeContrast"]["failCount"] == 0, metrics["nodeContrast"]
+    assert metrics["nodeContrast"]["minContrast"] is not None and metrics["nodeContrast"]["minContrast"] >= 3.0, metrics["nodeContrast"]
+    # Bright/Vanilla preview: diagram lines and labels must follow the white preview surface (dark on
+    # white), not the dark app theme that would paint illegible light-gray lines. (User-reported.)
+    bright = metrics.get("brightContrast")
+    assert bright and "error" not in bright, bright
+    assert bright["mode"] in ("vanilla", "light"), bright
+    edge_contrast = _wcag_contrast(bright["edgeStroke"], bright["paneBg"])
+    assert edge_contrast is not None and edge_contrast >= 3.0, {"edgeStroke": bright["edgeStroke"], "paneBg": bright["paneBg"], "contrast": edge_contrast}
+    for fill in bright["labelFills"]:
+        if not fill:
+            continue
+        label_contrast = _wcag_contrast(fill, bright["paneBg"])
+        assert label_contrast is not None and label_contrast >= 3.0, {"labelFill": fill, "paneBg": bright["paneBg"], "contrast": label_contrast}
+    assert metrics["errors"] == [], metrics
+    assert metrics["rejections"] == [], metrics
+
+    # Ensure the diagram has revealed (reveal gate cleared) before pixel-sampling the screenshot.
+    WebDriverWait(browser, 3).until(lambda drv: drv.execute_script(
+        "const s=document.querySelector('.file-editor-preview-pane-panel.file-editor-preview-zoom-shell');"
+        " return !!s && !s.classList.contains('file-editor-preview-zoom-measuring');"))
+    screenshot = browser_screenshot_rgb(browser)
+    dpr = browser.execute_script("return window.devicePixelRatio || 1") or 1
+    bright_pixels, bright_samples = count_rect_region_pixels(
+        screenshot,
+        dpr,
+        metrics["split"]["imageRect"],
+        {"left": 0.02, "top": 0.02, "right": 0.98, "bottom": 0.98},
+        lambda pixel: max(pixel) > 145 and sum(pixel) > 390,
+    )
+    saturated_pixels, saturated_samples = count_rect_region_pixels(
+        screenshot,
+        dpr,
+        metrics["split"]["imageRect"],
+        {"left": 0.02, "top": 0.02, "right": 0.98, "bottom": 0.98},
+        lambda pixel: max(pixel) - min(pixel) > 35 and max(pixel) > 110,
+    )
+    assert bright_pixels > 120, {"matches": bright_pixels, "samples": bright_samples, "rect": metrics["split"]["imageRect"]}
+    assert saturated_pixels > 120, {"matches": saturated_pixels, "samples": saturated_samples, "rect": metrics["split"]["imageRect"]}
+
+
+def test_editor_open_misleading_binary_uses_sniffed_preview_mime(browser, tmp_path):
+    page = tmp_path / "preview-sniffed-binary.html"
+    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
+    browser.get(page.as_uri() + "?sessions=1")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return typeof openFileInEditor === 'function' && document.querySelector('#grid');")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const originalFetch = window.fetch.bind(window);
+            const path = '/home/test/repo/renamed.bin';
+            window.fetch = async (input, options = {}) => {
+              const url = new URL(String(input), 'https://localhost');
+              if (url.pathname === '/api/fs/read') {
+                return new Response(JSON.stringify({error: 'file appears to be binary'}), {status: 415, headers: {'Content-Type': 'application/json'}});
+              }
+              if (url.pathname === '/api/fs/info') {
+                return new Response(JSON.stringify({
+                  path,
+                  name: 'renamed.bin',
+                  kind: 'file',
+                  size: 18,
+                  mtime: 33,
+                  mtime_ns: 33000000000,
+                  preview_mime: 'image/png',
+                  realpath: path,
+                  file_id: '1:2',
+                  file_identity: 'id:1:2',
+                }), {status: 200, headers: {'Content-Type': 'application/json'}});
+              }
+              return originalFetch(input, options);
+            };
+            const item = await openFileInEditor(path, {name: 'renamed.bin', size: 18, mtime: 33}, {userInitiated: true});
+            const panel = panelNodes.get(item);
+            const preview = panel?.querySelector('.file-editor-preview-pane-panel');
+            const image = preview?.querySelector('img.file-editor-preview-image');
+            const state = fileStateFor(path);
+            done({
+              stateKind: state?.kind || '',
+              mediaKind: state?.mediaKind || '',
+              mime: state?.mime || '',
+              previewHidden: preview?.hidden === true,
+              imageSrc: image?.getAttribute('src') || '',
+              mode: editorViewModeFor(path, item),
+              errors: window.__bootErrors,
+              rejections: window.__bootRejections,
+            });
+          } catch (error) {
+            done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["stateKind"] == "media", metrics
+    assert metrics["mediaKind"] == "image", metrics
+    assert metrics["mime"] == "image/png", metrics
+    assert metrics["previewHidden"] is False, metrics
+    assert metrics["imageSrc"].startswith("/api/fs/raw?path="), metrics
+    assert "renamed.bin" in metrics["imageSrc"], metrics
+    assert metrics["mode"] == "preview", metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["rejections"] == [], metrics
+
+
+def test_preview_registry_structured_table_and_offline_markdown(browser, tmp_path):
+    page = tmp_path / "preview-registry-structured-table.html"
+    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
+    browser.get(page.as_uri() + "?sessions=1")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return typeof renderEditorPreviewPane === 'function' && document.querySelector('#grid');")
+    )
+    metrics = browser.execute_script(
+        """
+        const mount = document.getElementById('grid');
+        const makePanel = (path, state, mode = 'preview') => {
+          const item = fileEditorItemFor(path);
+          setFileState(path, state);
+          setFileEditorViewMode(path, mode, item);
+          addFileEditorTabItem(path, item);
+          const panel = createFileEditorPanel(item);
+          panel.classList.add('active-pane');
+          panel.style.width = '920px';
+          panel.style.height = '520px';
+          panelNodes.set(item, panel);
+          mount.append(panel);
+          renderFileEditorPanel(panel, item);
+          return {item, panel};
+        };
+        delete window.marked;
+        delete window.hljs;
+        const mdText = [
+          '# Offline Preview',
+          '',
+          '| A | B |',
+          '|---|---|',
+          '| 1 | 2 |',
+          '',
+          '- [ ] task one',
+          '',
+          '![local](./asset dir/a.png "title")',
+          '',
+          '<script>bad()</script><svg><script>bad()</script></svg>',
+          '',
+          '```js',
+          'const value = 1;',
+          '```',
+          '',
+        ].join('\\n');
+        const markdown = makePanel('/home/test/repo/docs/README.md', {kind: 'text', content: mdText, original: mdText, dirty: false, language: 'markdown'});
+        const validJson = makePanel('/home/test/repo/config.json', {kind: 'text', content: '{"b":2,"a":1}', original: '{"b":2,"a":1}', dirty: false, language: 'json'});
+        const invalidJson = makePanel('/home/test/repo/bad.json', {kind: 'text', content: '{"b":', original: '{"b":', dirty: false, language: 'json'});
+        const jsonl = makePanel('/home/test/repo/events.jsonl', {kind: 'text', content: '{"id":1}\\n{"id":2}\\n', original: '', dirty: false, language: 'json'});
+        const badJsonl = makePanel('/home/test/repo/bad.jsonl', {kind: 'text', content: '{"id":1}\\n{"id":\\n', original: '', dirty: false, language: 'json'});
+        const geojson = makePanel('/home/test/repo/map.geojson', {kind: 'text', content: '{"type":"FeatureCollection","features":[]}', original: '', dirty: false, language: 'json'});
+        const notebookText = JSON.stringify({cells: [{cell_type: 'markdown', source: ['# Title\\n']}, {cell_type: 'code', source: ['print(1)\\n'], outputs: [{output_type: 'stream'}]}]});
+        const notebook = makePanel('/home/test/repo/notebook.ipynb', {kind: 'text', content: notebookText, original: '', dirty: false, language: 'json'});
+        const yaml = makePanel('/home/test/repo/config.yaml', {kind: 'text', content: 'name: test\\nitems:\\n  - one\\n', original: '', dirty: false, language: 'yaml'});
+        const toml = makePanel('/home/test/repo/config.toml', {kind: 'text', content: 'name = "test"\\ncount = 2\\n', original: '', dirty: false, language: 'toml'});
+        const xml = makePanel('/home/test/repo/layout.drawio', {kind: 'text', content: '<mxfile><diagram>safe</diagram></mxfile>', original: '', dirty: false, language: 'xml'});
+        const envFile = makePanel('/home/test/repo/.env', {kind: 'text', content: 'A=1\\nB=two\\n', original: '', dirty: false, language: 'ini'});
+        const csv = makePanel('/home/test/repo/table.csv', {kind: 'text', content: 'name,count\\nalpha,1\\n"beta,gamma",2\\n', original: '', dirty: false, language: 'text'});
+        const tsv = makePanel('/home/test/repo/table.tsv', {kind: 'text', content: 'name\\tcount\\nalpha\\t1\\n', original: '', dirty: false, language: 'text'});
+        const mdPreview = markdown.panel.querySelector('.file-editor-preview-pane-panel');
+        const image = mdPreview.querySelector('img[alt="local"]');
+        return {
+          markdown: {
+            heading: mdPreview.querySelector('h1')?.textContent || '',
+            tableCells: Array.from(mdPreview.querySelectorAll('table th, table td')).map(node => node.textContent),
+            checkboxCount: mdPreview.querySelectorAll('input.markdown-task-checkbox').length,
+            imageSrc: image?.getAttribute('src') || '',
+            imageTitle: image?.getAttribute('title') || '',
+            scriptCount: mdPreview.querySelectorAll('script').length,
+            svgCount: mdPreview.querySelectorAll('svg').length,
+            codeHtml: mdPreview.querySelector('pre code')?.innerHTML || '',
+          },
+          validJson: {
+            kind: previewKindForPath('/home/test/repo/config.json'),
+            header: validJson.panel.querySelector('.file-editor-data-preview-header')?.textContent || '',
+            text: validJson.panel.querySelector('.file-editor-data-preview code')?.textContent || '',
+          },
+          invalidJson: {
+            header: invalidJson.panel.querySelector('.file-editor-data-preview-header')?.textContent || '',
+            error: invalidJson.panel.querySelector('.file-editor-preview-error')?.textContent || '',
+          },
+          jsonl: {
+            header: jsonl.panel.querySelector('.file-editor-data-preview-header')?.textContent || '',
+            text: jsonl.panel.querySelector('.file-editor-data-preview code')?.textContent || '',
+          },
+          badJsonl: {
+            header: badJsonl.panel.querySelector('.file-editor-data-preview-header')?.textContent || '',
+            error: badJsonl.panel.querySelector('.file-editor-preview-error')?.textContent || '',
+          },
+          geojson: {
+            header: geojson.panel.querySelector('.file-editor-data-preview-header')?.textContent || '',
+            text: geojson.panel.querySelector('.file-editor-data-preview code')?.textContent || '',
+          },
+          notebook: {
+            header: notebook.panel.querySelector('.file-editor-data-preview-header')?.textContent || '',
+            text: notebook.panel.querySelector('.file-editor-data-preview code')?.textContent || '',
+          },
+          yaml: {
+            header: yaml.panel.querySelector('.file-editor-data-preview-header')?.textContent || '',
+            text: yaml.panel.querySelector('.file-editor-data-preview code')?.textContent || '',
+          },
+          toml: {
+            header: toml.panel.querySelector('.file-editor-data-preview-header')?.textContent || '',
+            text: toml.panel.querySelector('.file-editor-data-preview code')?.textContent || '',
+          },
+          xml: {
+            header: xml.panel.querySelector('.file-editor-data-preview-header')?.textContent || '',
+            text: xml.panel.querySelector('.file-editor-data-preview code')?.textContent || '',
+            scriptCount: xml.panel.querySelectorAll('script').length,
+          },
+          envFile: {
+            header: envFile.panel.querySelector('.file-editor-data-preview-header')?.textContent || '',
+            text: envFile.panel.querySelector('.file-editor-data-preview code')?.textContent || '',
+          },
+          csv: {
+            header: csv.panel.querySelector('.file-editor-data-preview-header')?.textContent || '',
+            cells: Array.from(csv.panel.querySelectorAll('.file-editor-table-preview th, .file-editor-table-preview td')).map(node => node.textContent),
+          },
+          tsv: {
+            header: tsv.panel.querySelector('.file-editor-data-preview-header')?.textContent || '',
+            cells: Array.from(tsv.panel.querySelectorAll('.file-editor-table-preview th, .file-editor-table-preview td')).map(node => node.textContent),
+          },
+          errors: window.__bootErrors,
+          rejections: window.__bootRejections,
+        };
+        """
+    )
+    assert metrics["markdown"]["heading"] == "Offline Preview", metrics
+    assert metrics["markdown"]["tableCells"] == ["A", "B", "1", "2"], metrics
+    assert metrics["markdown"]["checkboxCount"] == 1, metrics
+    assert metrics["markdown"]["imageSrc"] == "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fasset%20dir%2Fa.png", metrics
+    assert metrics["markdown"]["imageTitle"] == "title", metrics
+    assert metrics["markdown"]["scriptCount"] == 0 and metrics["markdown"]["svgCount"] == 0, metrics
+    assert "code-keyword" in metrics["markdown"]["codeHtml"], metrics
+    assert metrics["validJson"]["kind"] == "structured", metrics
+    assert "JSON preview" in metrics["validJson"]["header"], metrics
+    assert '"a": 1' in metrics["validJson"]["text"], metrics
+    assert "JSON parse error" in metrics["invalidJson"]["header"], metrics
+    assert metrics["invalidJson"]["error"], metrics
+    assert "JSONL preview" in metrics["jsonl"]["header"] and '"id":1' in metrics["jsonl"]["text"], metrics
+    assert "JSONL parse error" in metrics["badJsonl"]["header"] and "line 2" in metrics["badJsonl"]["error"], metrics
+    assert "GeoJSON preview" in metrics["geojson"]["header"] and '"FeatureCollection"' in metrics["geojson"]["text"], metrics
+    assert "Notebook preview" in metrics["notebook"]["header"], metrics
+    assert "2 cells" in metrics["notebook"]["text"] and "outputs hidden" in metrics["notebook"]["text"], metrics
+    assert "YAML preview" in metrics["yaml"]["header"] and "items" in metrics["yaml"]["text"], metrics
+    assert "TOML preview" in metrics["toml"]["header"] and "count" in metrics["toml"]["text"], metrics
+    assert "Draw.io XML preview" in metrics["xml"]["header"] and "mxfile" in metrics["xml"]["text"], metrics
+    assert metrics["xml"]["scriptCount"] == 0, metrics
+    assert "Config preview" in metrics["envFile"]["header"] and "A=1" in metrics["envFile"]["text"], metrics
+    assert "CSV preview" in metrics["csv"]["header"], metrics
+    assert metrics["csv"]["cells"][:6] == ["name", "count", "alpha", "1", "beta,gamma", "2"], metrics
+    assert "TSV preview" in metrics["tsv"]["header"], metrics
+    assert metrics["tsv"]["cells"][:4] == ["name", "count", "alpha", "1"], metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["rejections"] == [], metrics
+
+
+def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
+    page = tmp_path / "preview-markdown-media-mermaid.html"
+    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
+    browser.get(page.as_uri() + "?sessions=1")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return typeof createFileEditorPanel === 'function' && document.querySelector('#grid');")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+            const escapeHtml = value => String(value || '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
+            window.marked = {
+              parse(markdown) {
+                const parts = [];
+                for (const line of String(markdown || '').split('\\n')) {
+                  if (line.startsWith('![')) {
+                    const match = line.match(/^!\\[([^\\]]*)\\]\\(([^)]+)\\)/);
+                    if (match) parts.push(`<p><img alt="${escapeHtml(match[1])}" src="${escapeHtml(match[2])}"></p>`);
+                    continue;
+                  }
+                  if (line.startsWith('```mermaid')) {
+                    window.__mermaidFenceOpen = true;
+                    window.__mermaidSource = [];
+                    continue;
+                  }
+                  if (line.startsWith('```') && window.__mermaidFenceOpen) {
+                    parts.push(`<pre><code class="language-mermaid">${escapeHtml(window.__mermaidSource.join('\\n'))}</code></pre>`);
+                    window.__mermaidFenceOpen = false;
+                    window.__mermaidSource = [];
+                    continue;
+                  }
+                  if (window.__mermaidFenceOpen) {
+                    window.__mermaidSource.push(line);
+                    continue;
+                  }
+                  if (line.trim()) parts.push(`<p>${escapeHtml(line)}</p>`);
+                }
+                return parts.join('');
+              },
+            };
+            const mermaidCalls = [];
+            window.mermaid = {
+              initialize(config) {
+                window.__mermaidConfig = config;
+              },
+              async render(id, source) {
+                mermaidCalls.push({id, source});
+                if (source.includes('BROKEN')) throw new Error('parse failed for test');
+                return {
+                  svg: '<svg onclick="evil()" viewBox="0 0 100 40"><script>alert(1)</script><foreignObject>x</foreignObject><image href="https://evil.test/a.png"/><a href="#local"><text>Graph OK</text></a><style>@import url(https://evil.test/x.css); .a { fill: red; }</style></svg>',
+                };
+              },
+            };
+            const path = '/home/test/repo/docs/README.md';
+            const content = [
+              '# Preview Media',
+              '![local](./images/local pic.png?cache=1#frag)',
+              '![svg](../assets/logo.svg)',
+              '![external](https://example.test/image.png)',
+              '![unsafe](javascript:alert(1))',
+              '![missing](./missing.png)',
+              '```mermaid',
+              'graph TD; A-->B;',
+              '```',
+              '```mermaid',
+              'BROKEN',
+              '```',
+              '',
+            ].join('\\n');
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content, original: content, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panel.style.width = '900px';
+            panel.style.height = '520px';
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            const preview = panel.querySelector('.file-editor-preview-pane-panel');
+            const imageSnapshot = label => {
+              const img = preview.querySelector(`img[alt="${label}"]`);
+              return {
+                exists: Boolean(img),
+                src: img?.getAttribute('src') || '',
+                resolvedPath: img?.dataset?.resolvedPath || '',
+                originalSrc: img?.dataset?.originalSrc || '',
+                className: img?.className || '',
+                hasSrc: img?.hasAttribute('src') === true,
+              };
+            };
+            const initialImages = {
+              local: imageSnapshot('local'),
+              svg: imageSnapshot('svg'),
+              external: imageSnapshot('external'),
+              unsafe: imageSnapshot('unsafe'),
+              missing: imageSnapshot('missing'),
+            };
+            const missing = preview.querySelector('img[alt="missing"]');
+            if (missing) missing.dispatchEvent(new Event('error'));
+            const brokenText = preview.querySelector('.markdown-image-error')?.textContent || '';
+            if (preview._previewAsync) await preview._previewAsync;
+            await frame();
+            await frame();
+            const mermaidImage = preview.querySelector('.mermaid-preview-host img.mermaid-preview-image');
+            const mermaidError = preview.querySelector('.mermaid-preview-error');
+            done({
+              initialImages,
+              brokenText,
+              mermaid: {
+                imageExists: Boolean(mermaidImage),
+                imageSrcPrefix: String(mermaidImage?.getAttribute('src') || '').slice(0, 5),
+                errorText: mermaidError?.textContent || '',
+                hostCount: preview.querySelectorAll('.mermaid-preview-host').length,
+                inlineSvgCount: preview.querySelectorAll('svg').length,
+                scriptCount: preview.querySelectorAll('script').length,
+                calls: mermaidCalls,
+                config: window.__mermaidConfig || {},
+              },
+              previewText: preview.textContent || '',
+              errors: window.__bootErrors,
+              rejections: window.__bootRejections,
+            });
+          } catch (error) {
+            done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["initialImages"]["local"]["exists"] is True, metrics
+    assert metrics["initialImages"]["local"]["src"] == "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fimages%2Flocal%20pic.png", metrics
+    assert metrics["initialImages"]["local"]["resolvedPath"] == "/home/test/repo/docs/images/local pic.png", metrics
+    assert metrics["initialImages"]["local"]["originalSrc"] == "./images/local pic.png?cache=1#frag", metrics
+    assert "markdown-preview-image" in metrics["initialImages"]["local"]["className"], metrics
+    assert metrics["initialImages"]["svg"]["src"] == "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fassets%2Flogo.svg", metrics
+    assert metrics["initialImages"]["svg"]["resolvedPath"] == "/home/test/repo/assets/logo.svg", metrics
+    assert metrics["initialImages"]["external"]["src"] == "https://example.test/image.png", metrics
+    assert metrics["initialImages"]["external"]["resolvedPath"] == "", metrics
+    assert metrics["initialImages"]["unsafe"]["exists"] is True, metrics
+    assert metrics["initialImages"]["unsafe"]["hasSrc"] is False, metrics
+    assert "Image unavailable: /home/test/repo/docs/missing.png" in metrics["brokenText"], metrics
+    assert "Open" in metrics["brokenText"] and "Download" in metrics["brokenText"], metrics
+    assert metrics["mermaid"]["imageExists"] is True, metrics
+    assert metrics["mermaid"]["imageSrcPrefix"] in ("blob:", "data:"), metrics
+    assert "Mermaid diagram could not be rendered" in metrics["mermaid"]["errorText"], metrics
+    assert "BROKEN" in metrics["mermaid"]["errorText"], metrics
+    assert metrics["mermaid"]["hostCount"] == 2, metrics
+    assert metrics["mermaid"]["inlineSvgCount"] == 0, metrics
+    assert metrics["mermaid"]["scriptCount"] == 0, metrics
+    assert len(metrics["mermaid"]["calls"]) == 2, metrics
+    assert metrics["mermaid"]["config"]["startOnLoad"] is False, metrics
+    assert metrics["mermaid"]["config"]["securityLevel"] == "strict", metrics
+    assert metrics["mermaid"]["config"]["deterministicIds"] is True, metrics
+    assert metrics["mermaid"]["config"]["htmlLabels"] is True, metrics
+    assert metrics["mermaid"]["config"]["flowchart"]["htmlLabels"] is True, metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["rejections"] == [], metrics
+
+
+def test_markdown_preview_visual_rendering_has_mermaid_labels_and_media(browser, tmp_path):
+    browser.set_window_size(1200, 1200)
+    page = tmp_path / "preview-markdown-visual-mermaid-media.html"
+    page.write_text(live_runtime_boot_fixture_html(sessions=["1"], grid_width=1000, grid_height=980), encoding="utf-8")
+    browser.get(page.as_uri() + "?sessions=1")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return typeof createFileEditorPanel === 'function' && document.querySelector('#grid');")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+            const waitImage = image => new Promise(resolve => {
+              if (!image) {
+                resolve(false);
+                return;
+              }
+              if (image.complete && image.naturalWidth > 0) {
+                resolve(true);
+                return;
+              }
+              const finish = () => resolve(image.naturalWidth > 0);
+              image.addEventListener('load', finish, {once: true});
+              image.addEventListener('error', finish, {once: true});
+            });
+            const rect = node => {
+              if (!node) return null;
+              const box = node.getBoundingClientRect();
+              return {left: box.left, top: box.top, width: box.width, height: box.height, right: box.right, bottom: box.bottom};
+            };
+            const readBlobText = url => new Promise((resolve, reject) => {
+              const request = new XMLHttpRequest();
+              request.open('GET', url);
+              request.onload = () => resolve(String(request.responseText || ''));
+              request.onerror = () => reject(new Error(`failed to read ${url}`));
+              request.send();
+            });
+            const canvas = document.createElement('canvas');
+            canvas.width = 120;
+            canvas.height = 64;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#f97316';
+            ctx.fillRect(0, 0, 60, 64);
+            ctx.fillStyle = '#14b8a6';
+            ctx.fillRect(60, 0, 60, 64);
+            ctx.fillStyle = '#111827';
+            ctx.font = '700 18px Arial';
+            ctx.fillText('PNG', 36, 38);
+            const mediaDataUrl = canvas.toDataURL('image/png');
+            delete window.marked;
+            delete window.hljs;
+            const mermaidCalls = [];
+            window.mermaid = {
+              initialize(config) {
+                window.__visualMermaidConfig = config;
+              },
+              async render(id, source) {
+                mermaidCalls.push({id, source});
+                return {
+                  svg: `
+                    <svg xmlns="http://www.w3.org/2000/svg" width="720" height="260" viewBox="0 0 720 260">
+                      <style>
+                        .node rect { fill: #151922; stroke: #020617; stroke-width: 3px; }
+                        .nodeLabel { color: #020617; font-family: Arial, sans-serif; font-size: 22px; font-weight: 700; }
+                        .flowchart-link { stroke: #020617; stroke-width: 4px; fill: none; }
+                        marker path { fill: #020617; stroke: #020617; }
+                      </style>
+                      <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z"/></marker></defs>
+                      <rect x="1" y="1" width="718" height="258" rx="10" fill="#151922" stroke="#334155" stroke-width="2"/>
+                      <g class="node"><rect x="32" y="74" width="150" height="58" rx="8"/><g class="label"><foreignObject x="32" y="74" width="150" height="58"><div><span class="nodeLabel">Data file</span></div></foreignObject></g></g>
+                      <g class="node"><rect x="286" y="74" width="160" height="58" rx="8"/><g class="label"><foreignObject x="286" y="74" width="160" height="58"><div><span class="nodeLabel">Registry</span></div></foreignObject></g></g>
+                      <g class="node"><rect x="542" y="34" width="150" height="58" rx="8"/><g class="label"><foreignObject x="542" y="34" width="150" height="58"><div><span class="nodeLabel">Preview</span></div></foreignObject></g></g>
+                      <g class="node"><rect x="542" y="154" width="150" height="58" rx="8"/><g class="label"><foreignObject x="542" y="154" width="150" height="58"><div><span class="nodeLabel">Fallback</span></div></foreignObject></g></g>
+                      <path class="flowchart-link" d="M182 103L286 103" marker-end="url(#arrow)"/>
+                      <path class="flowchart-link" d="M446 86L542 63" marker-end="url(#arrow)"/>
+                      <path class="flowchart-link" d="M446 120L542 183" marker-end="url(#arrow)"/>
+                    </svg>
+                  `,
+                };
+              },
+            };
+            const path = '/home/test/repo/docs/visual.md';
+            const content = [
+              '# Visual Preview',
+              '',
+              '| Format | Status |',
+              '|---|---|',
+              '| PNG | rendered |',
+              '| Mermaid | labels visible |',
+              '',
+              `![generated media](${mediaDataUrl})`,
+              '',
+              '```mermaid',
+              'flowchart LR',
+              '  Data[Data file] --> Registry[Registry]',
+              '  Registry --> Preview[Preview]',
+              '  Registry --> Fallback[Fallback]',
+              '```',
+              '',
+            ].join('\\n');
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content, original: content, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panel.style.width = '960px';
+            panel.style.height = '620px';
+            panelNodes.set(item, panel);
+            const grid = document.getElementById('grid');
+            grid.replaceChildren();
+            grid.append(panel);
+            renderFileEditorPanel(panel, item);
+            const preview = panel.querySelector('.file-editor-preview-pane-panel');
+            if (preview._previewAsync) await preview._previewAsync;
+            await frame();
+            await frame();
+            const mediaImage = preview.querySelector('img[alt="generated media"]');
+            const mermaidImage = preview.querySelector('img.mermaid-preview-image');
+            await Promise.all([waitImage(mediaImage), waitImage(mermaidImage)]);
+            await frame();
+            await frame();
+            const mermaidSvgText = mermaidImage?.src ? await readBlobText(mermaidImage.src) : '';
+            done({
+              previewText: preview.textContent || '',
+              tableCells: Array.from(preview.querySelectorAll('table th, table td')).map(node => node.textContent),
+              mediaRect: rect(mediaImage),
+              mediaNaturalWidth: mediaImage?.naturalWidth || 0,
+              mediaNaturalHeight: mediaImage?.naturalHeight || 0,
+              mermaidRect: rect(mermaidImage),
+              mermaidNaturalWidth: mermaidImage?.naturalWidth || 0,
+              mermaidNaturalHeight: mermaidImage?.naturalHeight || 0,
+              mermaidCalls,
+              mermaidSvgText,
+              mermaidConfig: window.__visualMermaidConfig || {},
+              labelRegions: {
+                data: {left: 0.08, top: 0.35, right: 0.24, bottom: 0.46},
+                registry: {left: 0.42, top: 0.35, right: 0.60, bottom: 0.46},
+                preview: {left: 0.77, top: 0.19, right: 0.95, bottom: 0.31},
+                fallback: {left: 0.76, top: 0.65, right: 0.96, bottom: 0.77},
+              },
+              errors: window.__bootErrors,
+              rejections: window.__bootRejections,
+            });
+          } catch (error) {
+            done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["tableCells"] == ["Format", "Status", "PNG", "rendered", "Mermaid", "labels visible"], metrics
+    assert metrics["mediaNaturalWidth"] == 120 and metrics["mediaNaturalHeight"] == 64, metrics
+    assert metrics["mermaidNaturalWidth"] >= 700 and metrics["mermaidNaturalHeight"] >= 250, metrics
+    assert metrics["mermaidCalls"] and "Data[Data file]" in metrics["mermaidCalls"][0]["source"], metrics
+    assert "<foreignObject" not in metrics["mermaidSvgText"], metrics
+    assert "Data file" in metrics["mermaidSvgText"], metrics
+    assert "fill:#e4e8ee" in metrics["mermaidSvgText"], metrics
+    assert "stroke:#e4e8ee" in metrics["mermaidSvgText"], metrics
+    assert "font-weight:400" in metrics["mermaidSvgText"], metrics
+    assert "stroke:none" in metrics["mermaidSvgText"], metrics
+    assert metrics["mermaidConfig"]["flowchart"]["htmlLabels"] is True, metrics
+    assert metrics["mermaidConfig"]["htmlLabels"] is True, metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["rejections"] == [], metrics
+
+    # Wait for every zoom surface (the embedded Mermaid diagram) to reveal before pixel-sampling;
+    # the reveal gate keeps the diagram hidden until its size settles so it does not visibly jump.
+    WebDriverWait(browser, 3).until(lambda drv: drv.execute_script(
+        "return Array.from(document.querySelectorAll('.file-editor-preview-zoom-shell'))"
+        ".every(s => !s.classList.contains('file-editor-preview-zoom-measuring'));"))
+    screenshot = browser_screenshot_rgb(browser)
+    dpr = browser.execute_script("return window.devicePixelRatio || 1") or 1
+    saturated_media, media_samples = count_rect_region_pixels(
+        screenshot,
+        dpr,
+        metrics["mediaRect"],
+        {"left": 0.02, "top": 0.02, "right": 0.98, "bottom": 0.98},
+        lambda pixel: max(pixel) - min(pixel) > 70 and max(pixel) > 150,
+    )
+    assert saturated_media > 300, {"matches": saturated_media, "samples": media_samples, "rect": metrics["mediaRect"]}
+
+    bright_mermaid, mermaid_samples = count_rect_region_pixels(
+        screenshot,
+        dpr,
+        metrics["mermaidRect"],
+        {"left": 0.04, "top": 0.04, "right": 0.96, "bottom": 0.96},
+        lambda pixel: max(pixel) > 155 and sum(pixel) > 390,
+    )
+    assert bright_mermaid > 300, {"matches": bright_mermaid, "samples": mermaid_samples, "rect": metrics["mermaidRect"]}
+
+
+def test_preview_popout_snapshot_waits_for_media_and_mermaid(browser, tmp_path):
+    page = tmp_path / "preview-popout-media-mermaid.html"
+    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
+    browser.get(page.as_uri() + "?sessions=1")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return typeof renderedPreviewSnapshotAsync === 'function' && document.querySelector('#grid');")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+            const escapeHtml = value => String(value || '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
+            window.marked = {
+              parse(markdown) {
+                const lines = String(markdown || '').split('\\n');
+                const parts = [];
+                for (let index = 0; index < lines.length; index += 1) {
+                  const line = lines[index];
+                  const image = line.match(/^!\\[([^\\]]*)\\]\\(([^)]+)\\)/);
+                  if (image) {
+                    parts.push(`<p><img alt="${escapeHtml(image[1])}" src="${escapeHtml(image[2])}"></p>`);
+                    continue;
+                  }
+                  if (line.startsWith('```mermaid')) {
+                    const code = [];
+                    index += 1;
+                    while (index < lines.length && !lines[index].startsWith('```')) {
+                      code.push(lines[index]);
+                      index += 1;
+                    }
+                    parts.push(`<pre><code class="language-mermaid">${escapeHtml(code.join('\\n'))}</code></pre>`);
+                    continue;
+                  }
+                  if (line.trim()) parts.push(`<p>${escapeHtml(line)}</p>`);
+                }
+                return parts.join('');
+              },
+            };
+            window.mermaid = {
+              initialize(config) {
+                window.__popoutMermaidConfig = config;
+              },
+              async render() {
+                await frame();
+                return {svg: '<svg viewBox="0 0 100 40"><text>Popout Graph</text></svg>'};
+              },
+            };
+            const path = '/home/test/repo/docs/README.md';
+            const content = [
+              '# Popout Preview',
+              '![local](./assets/popout.png)',
+              '```mermaid',
+              'graph TD; A-->B;',
+              '```',
+              '',
+            ].join('\\n');
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content, original: content, dirty: false, language: 'markdown'});
+            const iframe = document.createElement('iframe');
+            iframe.style.width = '900px';
+            iframe.style.height = '520px';
+            document.body.append(iframe);
+            const immediate = renderedPreviewSnapshot(path, content);
+            const completed = await renderedPreviewSnapshotAsync(path, content);
+            writeFilePreviewPopoutDocument(path, iframe.contentWindow, completed);
+            const doc = iframe.contentDocument;
+            const root = doc.querySelector('[data-preview-root]');
+            done({
+              immediateText: immediate.html,
+              completedText: completed.html,
+              rootClass: root?.className || '',
+              rootHtml: root?.innerHTML || '',
+              rawImageSrc: root?.querySelector('img[alt="local"]')?.getAttribute('src') || '',
+              mermaidExists: Boolean(root?.querySelector('img.mermaid-preview-image')),
+              mermaidSrcPrefix: String(root?.querySelector('img.mermaid-preview-image')?.getAttribute('src') || '').slice(0, 5),
+              toolbarText: doc.querySelector('.file-preview-popout-title')?.textContent || '',
+              bodyClass: doc.body?.className || '',
+              errors: window.__bootErrors,
+              rejections: window.__bootRejections,
+            });
+          } catch (error) {
+            done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert "Rendering Mermaid diagram" in metrics["immediateText"], metrics
+    assert "Rendering Mermaid diagram" not in metrics["completedText"], metrics
+    assert "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fassets%2Fpopout.png" in metrics["completedText"], metrics
+    assert metrics["rawImageSrc"] in ("", "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fassets%2Fpopout.png"), metrics
+    assert metrics["mermaidExists"] is True, metrics
+    assert metrics["mermaidSrcPrefix"] in ("blob:", "data:"), metrics
+    assert "README.md" in metrics["toolbarText"], metrics
+    assert "file-preview-popout-window" in metrics["bodyClass"], metrics
+    assert "markdown-body" in metrics["rootClass"], metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["rejections"] == [], metrics
+
+
+def test_preview_popout_zoom_controls_are_hydrated(browser, tmp_path):
+    page = tmp_path / "preview-popout-zoom-controls.html"
+    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
+    browser.get(page.as_uri() + "?sessions=1")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return typeof renderedPreviewSnapshotAsync === 'function' && document.querySelector('#grid');")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const frame = win => new Promise(resolve => (win || window).requestAnimationFrame(resolve));
+            const waitImage = image => new Promise(resolve => {
+              if (!image) {
+                resolve(false);
+                return;
+              }
+              if (image.complete && image.naturalWidth > 0) {
+                resolve(true);
+                return;
+              }
+              const finish = () => resolve(image.naturalWidth > 0);
+              image.addEventListener('load', finish, {once: true});
+              image.addEventListener('error', finish, {once: true});
+            });
+            const rect = node => {
+              if (!node) return null;
+              const box = node.getBoundingClientRect();
+              return {left: box.left, top: box.top, width: box.width, height: box.height, right: box.right, bottom: box.bottom};
+            };
+            window.mermaid = {
+              initialize(config) {
+                window.__popoutZoomMermaidConfig = config;
+              },
+              async render() {
+                return {
+                  svg: `
+                    <svg xmlns="http://www.w3.org/2000/svg" width="900" height="520" viewBox="0 0 900 520">
+                      <rect x="1" y="1" width="898" height="518" fill="#f8fafc" stroke="#334155" stroke-width="2"/>
+                      <rect x="120" y="120" width="240" height="90" fill="#dbeafe" stroke="#1d4ed8" stroke-width="4"/>
+                      <text x="240" y="172" text-anchor="middle" font-family="Arial" font-size="34" font-weight="700">Popout</text>
+                      <rect x="540" y="310" width="240" height="90" fill="#dcfce7" stroke="#166534" stroke-width="4"/>
+                      <text x="660" y="362" text-anchor="middle" font-family="Arial" font-size="34" font-weight="700">Zoom</text>
+                      <line x1="360" y1="165" x2="540" y2="355" stroke="#111827" stroke-width="6"/>
+                    </svg>
+                  `,
+                };
+              },
+            };
+            const path = '/home/test/repo/docs/popout.mmd';
+            const content = 'flowchart LR\\n  Popout --> Zoom\\n';
+            setFileState(path, {kind: 'text', content, original: content, dirty: false, language: 'mermaid'});
+            const iframe = document.createElement('iframe');
+            iframe.style.width = '980px';
+            iframe.style.height = '720px';
+            document.body.append(iframe);
+            const snapshot = await renderedPreviewSnapshotAsync(path, content);
+            writeFilePreviewPopoutDocument(path, iframe.contentWindow, snapshot);
+            const doc = iframe.contentDocument;
+            const win = iframe.contentWindow;
+            await frame(win);
+            await frame(win);
+            const root = doc.querySelector('[data-preview-root]');
+            const image = root.querySelector('img.mermaid-preview-image');
+            await waitImage(image);
+            await frame(win);
+            await frame(win);
+            const viewport = root.querySelector('.file-editor-preview-zoom-viewport');
+            const value = () => root.querySelector('.file-editor-preview-zoom-value')?.textContent || '';
+            const click = async action => {
+              root.querySelector(`[data-preview-zoom-action="${action}"]`)?.click();
+              await frame(win);
+              await frame(win);
+            };
+            const initial = {value: value(), mode: root.dataset.previewZoomMode || '', rect: rect(image), viewport: rect(viewport)};
+            await click('actual');
+            const actual = {value: value(), mode: root.dataset.previewZoomMode || '', rect: rect(image)};
+            const wheelRect = rect(viewport);
+            const wheelEvent = new win.WheelEvent('wheel', {
+              deltaY: -160,
+              clientX: wheelRect.left + (wheelRect.width * 0.52),
+              clientY: wheelRect.top + (wheelRect.height * 0.48),
+              bubbles: true,
+              cancelable: true,
+            });
+            const wheelPrevented = !viewport.dispatchEvent(wheelEvent);
+            await frame(win);
+            await frame(win);
+            const wheelZoomed = {value: value(), mode: root.dataset.previewZoomMode || '', rect: rect(image)};
+            await click('in');
+            await click('in');
+            const zoomed = {
+              value: value(),
+              mode: root.dataset.previewZoomMode || '',
+              rect: rect(image),
+              stageRect: rect(root.querySelector('.file-editor-preview-zoom-stage')),
+              viewportScrollWidth: viewport.scrollWidth,
+              viewportClientWidth: viewport.clientWidth,
+              viewportScrollHeight: viewport.scrollHeight,
+              viewportClientHeight: viewport.clientHeight,
+            };
+            const panBefore = {
+              scrollLeft: Math.max(0, (viewport.scrollWidth - viewport.clientWidth) / 2),
+              scrollTop: Math.max(0, (viewport.scrollHeight - viewport.clientHeight) / 2),
+              maxScrollLeft: Math.max(0, viewport.scrollWidth - viewport.clientWidth),
+              maxScrollTop: Math.max(0, viewport.scrollHeight - viewport.clientHeight),
+              clientX: wheelRect.left + (wheelRect.width * 0.5),
+              clientY: wheelRect.top + (wheelRect.height * 0.5),
+            };
+            viewport.scrollLeft = panBefore.scrollLeft;
+            viewport.scrollTop = panBefore.scrollTop;
+            await frame(win);
+            const panStart = {scrollLeft: viewport.scrollLeft, scrollTop: viewport.scrollTop};
+            const pointerDownPrevented = !viewport.dispatchEvent(new win.PointerEvent('pointerdown', {
+              pointerId: 4,
+              pointerType: 'mouse',
+              button: 0,
+              buttons: 1,
+              clientX: panBefore.clientX,
+              clientY: panBefore.clientY,
+              bubbles: true,
+              cancelable: true,
+            }));
+            const pointerMovePrevented = !viewport.dispatchEvent(new win.PointerEvent('pointermove', {
+              pointerId: 4,
+              pointerType: 'mouse',
+              buttons: 1,
+              clientX: panBefore.clientX - 90,
+              clientY: panBefore.clientY - 70,
+              bubbles: true,
+              cancelable: true,
+            }));
+            viewport.dispatchEvent(new win.PointerEvent('pointerup', {
+              pointerId: 4,
+              pointerType: 'mouse',
+              button: 0,
+              buttons: 0,
+              clientX: panBefore.clientX - 90,
+              clientY: panBefore.clientY - 70,
+              bubbles: true,
+              cancelable: true,
+            }));
+            await frame(win);
+            const panAfter = {scrollLeft: viewport.scrollLeft, scrollTop: viewport.scrollTop};
+            await click('fit');
+            const fit = {value: value(), mode: root.dataset.previewZoomMode || '', rect: rect(image)};
+            done({
+              rootClass: root.className || '',
+              imageExists: Boolean(image),
+              naturalWidth: image?.naturalWidth || 0,
+              naturalHeight: image?.naturalHeight || 0,
+              toolbarActions: Array.from(root.querySelectorAll('[data-preview-zoom-action]')).map(button => button.dataset.previewZoomAction),
+              zoomWheel: root.dataset.previewZoomWheel || '',
+              zoomPan: root.dataset.previewZoomPan || '',
+              initial,
+              actual,
+              wheelPrevented,
+              wheelZoomed,
+              zoomed,
+            pointerDownPrevented,
+            pointerMovePrevented,
+            panBefore,
+            panStart,
+            panAfter,
+              fit,
+              errors: window.__bootErrors,
+              rejections: window.__bootRejections,
+            });
+          } catch (error) {
+            done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert "file-editor-preview-zoom-shell" in metrics["rootClass"], metrics
+    assert metrics["imageExists"] is True, metrics
+    assert metrics["naturalWidth"] == 900 and metrics["naturalHeight"] == 520, metrics
+    assert metrics["toolbarActions"] == ["out", "fit", "actual", "in"], metrics
+    assert metrics["zoomWheel"] == "1", metrics
+    assert metrics["zoomPan"] == "1", metrics
+    assert metrics["initial"]["mode"] == "fit", metrics
+    assert metrics["actual"]["mode"] == "actual", metrics
+    assert metrics["actual"]["value"] == "100%", metrics
+    assert metrics["wheelPrevented"] is True, metrics
+    assert metrics["wheelZoomed"]["mode"] == "manual", metrics
+    assert metrics["wheelZoomed"]["rect"]["width"] > metrics["actual"]["rect"]["width"], metrics
+    assert metrics["zoomed"]["mode"] == "manual", metrics
+    assert metrics["zoomed"]["rect"]["width"] > metrics["actual"]["rect"]["width"], metrics
+    assert metrics["zoomed"]["viewportScrollWidth"] > metrics["zoomed"]["viewportClientWidth"] or metrics["zoomed"]["viewportScrollHeight"] > metrics["zoomed"]["viewportClientHeight"], metrics
+    assert metrics["pointerDownPrevented"] is True, metrics
+    assert metrics["pointerMovePrevented"] is True, metrics
+    assert metrics["panAfter"]["scrollLeft"] > metrics["panStart"]["scrollLeft"] or metrics["panAfter"]["scrollTop"] > metrics["panStart"]["scrollTop"], (
+        f"zoomed={metrics['zoomed']} panBefore={metrics['panBefore']} panStart={metrics['panStart']} panAfter={metrics['panAfter']}"
+    )
+    assert metrics["fit"]["mode"] == "fit", metrics
+    assert metrics["fit"]["rect"]["width"] <= metrics["initial"]["viewport"]["width"] + 2, metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["rejections"] == [], metrics
 
 
 def test_markdown_preview_task_checkbox_updates_split_source_and_preview(browser, tmp_path):

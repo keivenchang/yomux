@@ -1809,7 +1809,7 @@ function fileIconClassFor(name, kind = 'file') {
   if (kind === 'dir') return 'file-icon-dir';
   const lowerName = String(name || '').toLowerCase();
   const ext = fileExtensionOf(lowerName);
-  if (IMAGE_EXTENSIONS.has(ext)) return 'file-icon-image';
+  if (previewMediaKindForPath(name) === 'image') return 'file-icon-image';
   if (['.md', '.markdown', '.txt', '.rst', 'readme', 'license'].includes(ext || lowerName)) return 'file-icon-doc';
   if (['.json', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf', '.env', 'dockerfile', 'makefile'].includes(ext || lowerName)) return 'file-icon-config';
   if (['.py', '.js', '.ts', '.tsx', '.jsx', '.rs', '.go', '.c', '.h', '.cpp', '.hpp', '.rb', '.lua', '.sql', '.sh', '.bash', '.zsh'].includes(ext)) return 'file-icon-code';
@@ -2065,7 +2065,7 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
     agentHtml: changedFile ? changeFileAgentsHtml(changedFile) : (changedAncestor ? changeFileAgentsHtml(changedAncestor) : ''),
     dirCountText,
   });
-  if (entry.kind === 'file' && IMAGE_EXTENSIONS.has(fileExtensionOf(entry.name)) && Number(entry.size || 0) <= MAX_FILE_PREVIEW_BYTES) {
+  if (entry.kind === 'file' && previewMediaKindForPath(entry.name) === 'image' && Number(entry.size || 0) <= MAX_FILE_PREVIEW_BYTES) {
     bindFileImagePreview(row, fullPath, entry);
   }
   if (differMode) {

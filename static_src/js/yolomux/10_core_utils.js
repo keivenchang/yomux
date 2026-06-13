@@ -268,7 +268,7 @@ function normalizeFileStateRecord(state) {
   if (!(state.editorTabItems instanceof Set)) state.editorTabItems = new Set();
   if (!(state.ownerSessions instanceof Set)) state.ownerSessions = new Set();
   if (!(state.viewMode instanceof Map)) state.viewMode = new Map();
-  if (!Object.prototype.hasOwnProperty.call(state, 'imageMode')) state.imageMode = '';
+  if (!(state.previewZoom instanceof Map)) state.previewZoom = new Map();
   if (!Object.prototype.hasOwnProperty.call(state, 'blame')) state.blame = null;
   if (!Object.prototype.hasOwnProperty.call(state, 'conflictDialogOpen')) state.conflictDialogOpen = false;
   return state;
@@ -390,7 +390,7 @@ function setFileState(path, state) {
     if (!(state.editorTabItems instanceof Set)) state.editorTabItems = previous.editorTabItems;
     if (!(state.ownerSessions instanceof Set)) state.ownerSessions = previous.ownerSessions;
     if (!(state.viewMode instanceof Map)) state.viewMode = previous.viewMode;
-    if (!Object.prototype.hasOwnProperty.call(state, 'imageMode')) state.imageMode = previous.imageMode;
+    if (!(state.previewZoom instanceof Map)) state.previewZoom = previous.previewZoom;
     if (!Object.prototype.hasOwnProperty.call(state, 'blame')) state.blame = previous.blame;
     if (!Object.prototype.hasOwnProperty.call(state, 'conflictDialogOpen')) state.conflictDialogOpen = previous.conflictDialogOpen;
     if (!Object.prototype.hasOwnProperty.call(state, 'realpath')) state.realpath = previous.realpath;
@@ -431,13 +431,43 @@ function fileEditorViewModesForPath(path, create = false) {
   return state?.viewMode || new Map();
 }
 
-function fileEditorImageModeForPath(path) {
-  return fileStateFor(path)?.imageMode || '';
+function normalizedPreviewZoomKey(key) {
+  return String(key || 'default');
 }
 
-function setFileEditorImageModeForPath(path, mode) {
+function normalizePreviewZoomState(value) {
+  const mode = value?.mode === 'manual' || value?.mode === 'actual' ? value.mode : 'fit';
+  const scale = Number.parseFloat(String(value?.scale || ''));
+  return {
+    mode,
+    scale: Number.isFinite(scale) && scale > 0 ? scale : 1,
+  };
+}
+
+function fileEditorPreviewZoomStateForPath(path, key = 'default') {
+  const state = fileStateFor(path);
+  return normalizePreviewZoomState(state?.previewZoom?.get(normalizedPreviewZoomKey(key)));
+}
+
+function setFileEditorPreviewZoomStateForPath(path, key, zoomState) {
   const state = ensureFileState(path);
-  if (state) state.imageMode = mode || '';
+  if (!state) return;
+  if (!(state.previewZoom instanceof Map)) state.previewZoom = new Map();
+  state.previewZoom.set(normalizedPreviewZoomKey(key), normalizePreviewZoomState(zoomState));
+}
+
+function resetFileEditorPreviewZoomStateForPath(path, keyPrefix = '') {
+  const state = fileStateFor(path);
+  if (!(state?.previewZoom instanceof Map)) return false;
+  const prefix = normalizedPreviewZoomKey(keyPrefix);
+  let changed = false;
+  for (const key of Array.from(state.previewZoom.keys())) {
+    if (!prefix || key === prefix || key.startsWith(`${prefix}:`)) {
+      state.previewZoom.delete(key);
+      changed = true;
+    }
+  }
+  return changed;
 }
 
 function editorBlameForPath(path) {

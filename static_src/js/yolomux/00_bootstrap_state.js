@@ -215,7 +215,131 @@ const EDITOR_SCHEMES = {
   },
 };
 const EDITOR_SCHEME_IDS = Object.keys(EDITOR_SCHEMES);
-const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp']);
+const PREVIEW_RENDERERS = Object.freeze([
+  {id: 'markdown', kind: 'markdown', extensions: ['.md', '.markdown'], textBacked: true, defaultMode: 'edit', language: 'markdown'},
+  {id: 'html', kind: 'html', extensions: ['.html', '.htm'], textBacked: true, defaultMode: 'edit', language: 'xml', sandbox: true},
+  {id: 'image', kind: 'image', mediaKind: 'image', extensions: ['.png', '.apng', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp', '.avif'], textBacked: false, defaultMode: 'preview', raw: true, mimeByExtension: {
+    '.png': 'image/png',
+    '.apng': 'image/apng',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.svg': 'image/svg+xml',
+    '.ico': 'image/x-icon',
+    '.bmp': 'image/bmp',
+    '.avif': 'image/avif',
+  }},
+  {id: 'pdf', kind: 'pdf', mediaKind: 'pdf', extensions: ['.pdf'], textBacked: false, defaultMode: 'preview', raw: true, sandbox: true, mimeByExtension: {'.pdf': 'application/pdf'}},
+  {id: 'mermaid', kind: 'mermaid', mediaKind: 'mermaid', extensions: ['.mmd', '.mermaid'], textBacked: true, defaultMode: 'preview', language: 'mermaid'},
+  {id: 'structured', kind: 'structured', extensions: ['.json', '.jsonl', '.ndjson', '.geojson', '.ipynb', '.yaml', '.yml', '.toml', '.xml', '.drawio', '.dio', '.excalidraw', '.ini', '.cfg', '.conf', '.env', '.properties', '.props'], textBacked: true, defaultMode: 'edit', languageByExtension: {
+    '.json': 'json',
+    '.jsonl': 'json',
+    '.ndjson': 'json',
+    '.geojson': 'json',
+    '.ipynb': 'json',
+    '.yaml': 'yaml',
+    '.yml': 'yaml',
+    '.toml': 'ini',
+    '.xml': 'xml',
+    '.drawio': 'xml',
+    '.dio': 'xml',
+    '.excalidraw': 'json',
+    '.ini': 'ini',
+    '.cfg': 'ini',
+    '.conf': 'ini',
+    '.env': 'ini',
+    '.properties': 'ini',
+    '.props': 'ini',
+  }},
+  {id: 'table', kind: 'table', extensions: ['.csv', '.tsv'], textBacked: true, defaultMode: 'edit', language: 'text'},
+  {id: 'audio', kind: 'audio', mediaKind: 'audio', extensions: ['.mp3', '.wav', '.ogg', '.oga', '.flac', '.m4a', '.aac', '.opus'], textBacked: false, defaultMode: 'preview', raw: true, mimeByExtension: {
+    '.mp3': 'audio/mpeg',
+    '.wav': 'audio/wav',
+    '.ogg': 'audio/ogg',
+    '.oga': 'audio/ogg',
+    '.flac': 'audio/flac',
+    '.m4a': 'audio/mp4',
+    '.aac': 'audio/aac',
+    '.opus': 'audio/opus',
+  }},
+  {id: 'video', kind: 'video', mediaKind: 'video', extensions: ['.mp4', '.m4v', '.webm', '.mov', '.mkv', '.ogv', '.3gp'], textBacked: false, defaultMode: 'preview', raw: true, mimeByExtension: {
+    '.mp4': 'video/mp4',
+    '.m4v': 'video/mp4',
+    '.webm': 'video/webm',
+    '.mov': 'video/quicktime',
+    '.mkv': 'video/x-matroska',
+    '.ogv': 'video/ogg',
+    '.3gp': 'video/3gpp',
+  }},
+  {id: 'text', kind: 'text', extensions: ['.txt', '.log', '.trace', '.out', '.rst', '.adoc', '.asciidoc', '.diff', '.patch', '.dot', '.gv', '.puml', '.plantuml', '.srt', '.vtt'], textBacked: true, defaultMode: 'edit', languageByExtension: {
+    '.txt': 'text',
+    '.log': 'text',
+    '.trace': 'text',
+    '.out': 'text',
+    '.rst': 'text',
+    '.adoc': 'text',
+    '.asciidoc': 'text',
+    '.diff': 'diff',
+    '.patch': 'diff',
+    '.dot': 'text',
+    '.gv': 'text',
+    '.puml': 'text',
+    '.plantuml': 'text',
+    '.srt': 'text',
+    '.vtt': 'text',
+  }},
+  {id: 'unsupported-image', kind: 'unsupported', extensions: ['.tif', '.tiff', '.heic', '.heif'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitle: 'Image format is recognized but not previewable in this browser', mimeByExtension: {
+    '.tif': 'image/tiff',
+    '.tiff': 'image/tiff',
+    '.heic': 'image/heic',
+    '.heif': 'image/heif',
+  }},
+  {id: 'unsupported-document', kind: 'unsupported', extensions: ['.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitle: 'Document format is recognized but not safely previewable', mimeByExtension: {
+    '.doc': 'application/msword',
+    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.ppt': 'application/vnd.ms-powerpoint',
+    '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    '.xls': 'application/vnd.ms-excel',
+    '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  }},
+  {id: 'unsupported-data', kind: 'unsupported', extensions: ['.sqlite', '.sqlite3', '.db', '.parquet', '.arrow', '.feather'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitle: 'Data format is recognized but needs an external viewer', mimeByExtension: {
+    '.sqlite': 'application/vnd.sqlite3',
+    '.sqlite3': 'application/vnd.sqlite3',
+    '.db': 'application/vnd.sqlite3',
+    '.parquet': 'application/vnd.apache.parquet',
+    '.arrow': 'application/vnd.apache.arrow.file',
+    '.feather': 'application/vnd.apache.arrow.file',
+  }},
+  {id: 'unsupported-archive', kind: 'unsupported', extensions: ['.zip', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.7z', '.rar'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitle: 'Archive preview is not expanded in YOLOmux', mimeByExtension: {
+    '.zip': 'application/zip',
+    '.tar': 'application/x-tar',
+    '.gz': 'application/gzip',
+    '.tgz': 'application/gzip',
+    '.bz2': 'application/x-bzip2',
+    '.xz': 'application/x-xz',
+    '.7z': 'application/x-7z-compressed',
+    '.rar': 'application/vnd.rar',
+  }},
+  {id: 'unsupported', kind: 'unsupported', extensions: [], textBacked: false, defaultMode: 'preview'},
+]);
+const PREVIEW_RENDERER_BY_ID = new Map(PREVIEW_RENDERERS.map(renderer => [renderer.id, renderer]));
+const PREVIEW_RENDERER_BY_EXTENSION = new Map();
+const PREVIEW_MIME_BY_EXTENSION = new Map();
+const PREVIEW_RENDERER_BY_MIME = new Map();
+for (const renderer of PREVIEW_RENDERERS) {
+  for (const ext of renderer.extensions || []) {
+    PREVIEW_RENDERER_BY_EXTENSION.set(ext, renderer);
+    const mime = renderer.mimeByExtension?.[ext] || renderer.mime || '';
+    if (mime) {
+      PREVIEW_MIME_BY_EXTENSION.set(ext, mime);
+      if (!PREVIEW_RENDERER_BY_MIME.has(mime)) PREVIEW_RENDERER_BY_MIME.set(mime, renderer);
+    }
+  }
+}
+const IMAGE_EXTENSIONS = new Set(PREVIEW_RENDERERS.find(renderer => renderer.id === 'image')?.extensions || []);
+const PDF_EXTENSIONS = new Set(PREVIEW_RENDERERS.find(renderer => renderer.id === 'pdf')?.extensions || []);
+const MERMAID_EXTENSIONS = new Set(PREVIEW_RENDERERS.find(renderer => renderer.id === 'mermaid')?.extensions || []);
 const MAX_FILE_PREVIEW_BYTES = 20 * 1024 * 1024;
 const HIGHLIGHTABLE_EXTENSIONS = {
   '.md': 'markdown', '.markdown': 'markdown',
@@ -223,12 +347,14 @@ const HIGHLIGHTABLE_EXTENSIONS = {
   '.py': 'python', '.pyw': 'python',
   '.js': 'javascript', '.mjs': 'javascript', '.cjs': 'javascript', '.jsx': 'javascript',
   '.ts': 'typescript', '.tsx': 'typescript',
-  '.json': 'json', '.css': 'css', '.scss': 'scss',
+  '.json': 'json', '.jsonl': 'json', '.ndjson': 'json', '.geojson': 'json', '.ipynb': 'json', '.excalidraw': 'json',
+  '.css': 'css', '.scss': 'scss',
   '.rs': 'rust', '.go': 'go', '.c': 'c', '.h': 'c',
   '.cpp': 'cpp', '.hpp': 'cpp', '.cc': 'cpp',
   '.sh': 'bash', '.bash': 'bash', '.zsh': 'bash',
   '.yaml': 'yaml', '.yml': 'yaml',
-  '.toml': 'ini', '.ini': 'ini', '.cfg': 'ini',
+  '.toml': 'ini', '.ini': 'ini', '.cfg': 'ini', '.conf': 'ini', '.env': 'ini', '.properties': 'ini', '.props': 'ini',
+  '.drawio': 'xml', '.dio': 'xml',
   '.sql': 'sql', '.rb': 'ruby', '.lua': 'lua', '.pl': 'perl',
 };
 const fileState = new Map();  // path -> open-file content plus editor tab/owner/mode/blame state
@@ -277,6 +403,8 @@ const fileEditorAutosaveTimers = new Map();
 const openFileBackgroundReloadDeferMs = 2000;
 let codeMirrorApiPromise = null;
 let codeMirrorBundlePromise = null;
+let mermaidApiPromise = null;
+let mermaidBundlePromise = null;
 let preferencesSearchText = '';
 let preferencesResetConfirmVisible = false;
 const preferencesScrollRenderDeferMs = 200;

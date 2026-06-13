@@ -24,11 +24,213 @@
   background: #ffffff;
   color-scheme: light;
 }
+.file-editor-pdf-preview {
+  display: block;
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 420px;
+  height: min(72vh, 100%);
+  border: 0;
+  background: #ffffff;
+  color-scheme: light;
+}
 .html-preview-body {
   display: flex;
   flex-direction: column;
   padding: 0;
   background: #ffffff;
+}
+.pdf-preview-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0;
+  background: #ffffff;
+}
+.image-preview-body,
+.file-editor-image-panel {
+  background-color: #151a22;
+  background-image:
+    linear-gradient(45deg, rgba(255, 255, 255, 0.10) 25%, transparent 25%),
+    linear-gradient(-45deg, rgba(255, 255, 255, 0.10) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, rgba(255, 255, 255, 0.10) 75%),
+    linear-gradient(-45deg, transparent 75%, rgba(255, 255, 255, 0.10) 75%);
+  background-position: 0 0, 0 12px, 12px -12px, -12px 0;
+  background-size: 24px 24px;
+}
+body.editor-theme-light .image-preview-body,
+body.editor-theme-light .file-editor-image-panel {
+  background-color: #e9edf2;
+  background-image:
+    linear-gradient(45deg, rgb(var(--overlay-slate-rgb) / 0.07) 25%, transparent 25%),
+    linear-gradient(-45deg, rgb(var(--overlay-slate-rgb) / 0.07) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, rgb(var(--overlay-slate-rgb) / 0.07) 75%),
+    linear-gradient(-45deg, transparent 75%, rgb(var(--overlay-slate-rgb) / 0.07) 75%);
+}
+.image-preview-body {
+  display: grid;
+  place-items: center;
+  padding: 10px;
+}
+.file-editor-preview-image,
+.markdown-body img.markdown-preview-image,
+.mermaid-preview-image {
+  display: block;
+  max-width: 100%;
+  max-height: min(340px, 48vh);
+  height: auto;
+  object-fit: contain;
+}
+.file-editor-preview-image {
+  max-height: 100%;
+  object-fit: contain;
+  filter: drop-shadow(0 0 0.5px rgba(255, 255, 255, 0.85)) drop-shadow(0 10px 24px rgba(0, 0, 0, 0.45));
+}
+.file-editor-preview-fallback,
+.markdown-image-error,
+.mermaid-preview-error {
+  display: block;
+  max-width: min(72ch, 100%);
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel2);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.markdown-image-error {
+  margin: 8px 0;
+  font: 600 var(--ui-font-size-sm)/1.35 var(--ui-font);
+}
+.markdown-image-error a,
+.file-editor-preview-fallback a {
+  color: var(--markdown-link);
+}
+.mermaid-preview,
+.mermaid-preview-host {
+  display: grid;
+  place-items: center;
+  min-height: 80px;
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  color: var(--text);
+}
+.file-editor-preview-zoom-shell {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 6px;
+  min-width: 0;
+  min-height: 0;
+  color: var(--text);
+}
+.file-editor-preview-zoom-full {
+  width: 100%;
+  height: 100%;
+}
+.file-editor-preview-zoom-inline {
+  width: 100%;
+  height: min(520px, 65vh);
+}
+.file-editor-preview-pane-panel.file-editor-preview-zoom-shell,
+.file-editor-image-panel.file-editor-preview-zoom-shell,
+.mermaid-preview.file-editor-preview-zoom-shell,
+.mermaid-preview-host.file-editor-preview-zoom-shell {
+  place-items: stretch;
+  overflow: hidden;
+  padding: 8px;
+}
+.file-editor-preview-zoom-toolbar {
+  display: inline-flex;
+  justify-self: end;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: color-mix(in srgb, var(--panel2) 92%, transparent);
+}
+.file-editor-preview-zoom-toolbar button {
+  height: 22px;
+  min-width: 28px;
+  padding: 0 6px;
+  border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
+  border-radius: 3px;
+  color: var(--editor-toolbar-control-fg);
+  background: var(--editor-toolbar-control-bg);
+  font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
+}
+.file-editor-preview-zoom-toolbar button[aria-pressed="true"] {
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
+}
+.file-editor-preview-zoom-toolbar button:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+.file-editor-preview-zoom-value {
+  min-width: 4ch;
+  padding: 0 3px;
+  text-align: right;
+  font: 800 var(--ui-font-size-xs)/1 var(--mono-font);
+  color: var(--muted);
+}
+.file-editor-preview-zoom-viewport {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+}
+.file-editor-preview-zoom-shell[data-preview-zoom-pan="1"] .file-editor-preview-zoom-viewport {
+  cursor: grab;
+  user-select: none;
+}
+.file-editor-preview-zoom-shell[data-preview-zoom-pan="1"] .file-editor-preview-zoom-content {
+  pointer-events: none;
+}
+.file-editor-preview-zoom-shell.file-editor-preview-zoom-panning .file-editor-preview-zoom-viewport {
+  cursor: grabbing;
+}
+.file-editor-preview-zoom-stage {
+  box-sizing: border-box;
+  width: max-content;
+  height: max-content;
+  min-width: 100%;
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+}
+/* While the zoom surface measures its settled size, keep the stage laid out (so the viewport size
+   stays measurable) but invisible, so the diagram is not painted at a transient pre-settle size and
+   then visibly re-fit. Revealed once the viewport size stops changing (see hydratePreviewZoomSurface). */
+.file-editor-preview-zoom-shell.file-editor-preview-zoom-measuring .file-editor-preview-zoom-stage {
+  visibility: hidden;
+}
+.file-editor-preview-zoom-content {
+  max-width: none !important;
+  max-height: none !important;
+  object-fit: contain;
+}
+.mermaid-preview-error {
+  place-self: stretch;
+}
+.mermaid-preview-error pre {
+  margin: 10px 0 0;
+  white-space: pre-wrap;
 }
 .file-editor-html-js-notice {
   display: flex;
@@ -2255,6 +2457,18 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
 .file-editor-content.preview-mode .file-editor-preview-pane-panel {
   inset: 0;
 }
+/* When the preview/image pane panel is ALSO the zoom shell (direct image or Mermaid preview),
+   its box must come from the absolute `inset` above (full pane in preview-mode, right half in
+   split-preview), NOT from the `.file-editor-preview-zoom-full { width:100%; height:100% }` rule.
+   An explicit `width:100%` overrides `right:0` on an absolutely-positioned box, so in split view
+   the pane renders full-width but offset to `left:50%`, pushing its right half (and the diagram)
+   off-screen and chopping it. `width:auto`/`height:auto` lets the inset define the box: full pane
+   when inset is 0, exactly the right half when inset is `0 0 0 50%`. */
+.file-editor-content .file-editor-preview-pane-panel.file-editor-preview-zoom-full,
+.file-editor-content .file-editor-image-panel.file-editor-preview-zoom-full {
+  width: auto;
+  height: auto;
+}
 .file-editor-codemirror-panel,
 .file-editor-raw-panel,
 .file-editor-preview-pane-panel,
@@ -2884,37 +3098,77 @@ body.editor-theme-light .cm-content .md-code {
   font-size: var(--editor-preview-font-size);
   line-height: var(--editor-line-height);
 }
+.file-editor-preview-pane.data-preview-body,
+.file-editor-preview-pane-panel.data-preview-body {
+  padding: 10px 12px;
+}
+.file-editor-preview-pane.media-preview-body,
+.file-editor-preview-pane-panel.media-preview-body {
+  display: grid;
+  place-items: center;
+  gap: 12px;
+  padding: 16px;
+}
+.file-editor-data-preview {
+  min-width: 0;
+}
+.file-editor-data-preview-header {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font: 700 var(--ui-font-size-xs)/1.2 var(--ui-font);
+}
+.file-editor-preview-error {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  color: var(--code-invalid);
+  background: color-mix(in srgb, var(--code-invalid) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--code-invalid) 35%, transparent);
+  border-radius: var(--radius-control);
+  font: 700 var(--ui-font-size-xs)/1.35 var(--mono-font);
+  overflow-wrap: anywhere;
+}
+.file-editor-table-preview {
+  overflow: auto;
+}
+.file-editor-table-preview table {
+  width: max-content;
+  min-width: min(100%, 420px);
+  border-collapse: collapse;
+  font: 500 var(--ui-font-size-sm)/1.35 var(--ui-font);
+}
+.file-editor-table-preview th,
+.file-editor-table-preview td {
+  max-width: 32ch;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  text-align: start;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+.file-editor-table-preview th {
+  color: var(--text);
+  background: var(--panel2);
+  font-weight: 800;
+}
+.file-editor-native-media {
+  display: block;
+  max-width: min(100%, 960px);
+  color: var(--text);
+}
+.file-editor-native-video {
+  max-height: min(72vh, 720px);
+  background: #000;
+}
+body.editor-theme-light .file-editor-native-video {
+  background: #000;
+}
 .file-editor-image-panel {
   z-index: 4;
   min-height: 0;
   display: grid;
   place-items: center;
   padding: 10px;
-  background-color: #151a22;
-  background-image:
-    linear-gradient(45deg, rgba(255, 255, 255, 0.10) 25%, transparent 25%),
-    linear-gradient(-45deg, rgba(255, 255, 255, 0.10) 25%, transparent 25%),
-    linear-gradient(45deg, transparent 75%, rgba(255, 255, 255, 0.10) 75%),
-    linear-gradient(-45deg, transparent 75%, rgba(255, 255, 255, 0.10) 75%);
-  background-position: 0 0, 0 12px, 12px -12px, -12px 0;
-  background-size: 24px 24px;
   overflow: auto;
-}
-body.editor-theme-light .file-editor-image-panel {
-  background-color: #e9edf2;
-  background-image:
-    linear-gradient(45deg, rgb(var(--overlay-slate-rgb) / 0.07) 25%, transparent 25%),
-    linear-gradient(-45deg, rgb(var(--overlay-slate-rgb) / 0.07) 25%, transparent 25%),
-    linear-gradient(45deg, transparent 75%, rgb(var(--overlay-slate-rgb) / 0.07) 75%),
-    linear-gradient(-45deg, transparent 75%, rgb(var(--overlay-slate-rgb) / 0.07) 75%);
-}
-.file-editor-image-panel.fit-size {
-  place-items: center;
-}
-.file-editor-image-panel.original-size {
-  place-items: start;
-  align-content: start;
-  justify-content: start;
 }
 .file-editor-image-panel .file-editor-image {
   position: relative;
@@ -2925,7 +3179,8 @@ body.editor-theme-light .file-editor-image-panel {
   cursor: zoom-in;
   filter: drop-shadow(0 0 0.5px rgba(255, 255, 255, 0.85)) drop-shadow(0 10px 24px rgba(0, 0, 0, 0.45));
 }
-.file-editor-image-panel .file-editor-image.original-size {
+.file-editor-image-panel[data-preview-zoom-mode="actual"] .file-editor-image,
+.file-editor-image-panel[data-preview-zoom-mode="manual"] .file-editor-image {
   cursor: zoom-out;
 }
 .file-editor-empty-state {

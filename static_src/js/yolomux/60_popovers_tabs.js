@@ -1104,7 +1104,7 @@ function startFileDragPreview(event, paths, entry) {
 
 function fileDragPreviewMedia(path, entry) {
   const kind = entry?.kind || 'file';
-  if (kind === 'file' && IMAGE_EXTENSIONS.has(fileExtensionOf(path))) {
+  if (kind === 'file' && previewMediaKindForPath(path) === 'image') {
     return `<img class="file-drag-thumb" src="${rawFileUrl(path)}" alt="">`;
   }
   const icon = kind === 'dir' ? '▸' : '📄';

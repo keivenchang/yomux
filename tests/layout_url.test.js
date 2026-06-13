@@ -807,6 +807,14 @@ globalThis.__layoutTestApi = {
   imageOpenUsesSharedViewer,
   imageViewerItemFor,
   markdownPreviewInputAllowed,
+  previewRendererForPath,
+  previewKindForPath,
+  previewMediaKindForPath,
+  previewMimeForPath,
+  markdownPreviewHtml,
+  markdownPreviewImageTarget,
+  sanitizeStandaloneSvg,
+  isMermaidFenceLanguage,
   keyboardShortcutsHtml,
   openFileEditorItems,
   pullRequestStatusLabel,
@@ -1752,6 +1760,101 @@ test('t@1410', () => {
   assert.equal(api.markdownTextWithTaskLineToggled('- [ ] Open\n- [x] Done', 1, true), '- [x] Open\n- [x] Done', 'Preview can toggle an unchecked task line to checked source');
   assert.equal(api.markdownTextWithTaskLineToggled('- [ ] Open\n- [x] Done', 2, false), '- [ ] Open\n- [ ] Done', 'Preview can toggle a checked task line to unchecked source');
   assert.equal(api.markdownTextWithTaskLineToggled('plain text', 1, true), null, 'Preview task toggles reject non-task source lines');
+  assert.equal(api.previewKindForPath('/repo/README.md'), 'markdown', 'Markdown paths route to Markdown Preview');
+  assert.equal(api.previewKindForPath('/repo/page.html'), 'html', 'HTML paths route to sandboxed HTML Preview');
+  assert.equal(api.previewKindForPath('/repo/diagram.svg'), 'image', 'SVG paths route to image Preview, not trusted inline DOM');
+  assert.equal(api.previewKindForPath('/repo/animation.apng'), 'image', 'APNG paths route to browser image Preview');
+  assert.equal(api.previewKindForPath('/repo/photo.avif'), 'image', 'AVIF paths are image Preview candidates');
+  assert.equal(api.previewKindForPath('/repo/spec.pdf'), 'pdf', 'PDF paths route to raw PDF Preview');
+  assert.equal(api.previewKindForPath('/repo/chart.mmd'), 'mermaid', 'Mermaid source files route to Mermaid Preview');
+  assert.equal(api.previewKindForPath('/repo/config.json'), 'structured', 'JSON paths route to structured Preview');
+  assert.equal(api.previewKindForPath('/repo/events.jsonl'), 'structured', 'JSONL paths route to structured Preview');
+  assert.equal(api.previewKindForPath('/repo/map.geojson'), 'structured', 'GeoJSON paths route to structured Preview');
+  assert.equal(api.previewKindForPath('/repo/notebook.ipynb'), 'structured', 'notebooks route to safe structured Preview');
+  assert.equal(api.previewKindForPath('/repo/diagram.drawio'), 'structured', 'Draw.io XML routes to structured Preview');
+  assert.equal(api.previewKindForPath('/repo/.env'), 'structured', 'env/config files route to bounded config Preview');
+  assert.equal(api.previewKindForPath('/repo/config.yaml'), 'structured', 'YAML paths route to structured Preview');
+  assert.equal(api.previewKindForPath('/repo/config.toml'), 'structured', 'TOML paths route to structured Preview');
+  assert.equal(api.previewKindForPath('/repo/table.csv'), 'table', 'CSV paths route to table Preview');
+  assert.equal(api.previewKindForPath('/repo/table.tsv'), 'table', 'TSV paths route to table Preview');
+  assert.equal(api.previewKindForPath('/repo/sound.mp3'), 'audio', 'audio paths route to native audio Preview');
+  assert.equal(api.previewKindForPath('/repo/movie.mp4'), 'video', 'video paths route to native video Preview');
+  assert.equal(api.previewKindForPath('/repo/photo.tiff'), 'unsupported', 'TIFF is recognized as unsupported-in-browser fallback');
+  assert.equal(api.previewKindForPath('/repo/photo.heic'), 'unsupported', 'HEIC is recognized as unsupported-in-browser fallback');
+  assert.equal(api.previewKindForPath('/repo/book.xlsx'), 'unsupported', 'Office files are recognized fallback, not fake text');
+  assert.equal(api.previewKindForPath('/repo/data.parquet'), 'unsupported', 'Parquet is recognized fallback, not fake text');
+  assert.equal(api.previewKindForPath('/repo/archive.zip'), 'unsupported', 'archives are recognized fallback, not unpacked');
+  assert.equal(api.previewKindForPath('/repo/app.py'), 'text', 'known code files get the code-preview fallback');
+  assert.equal(api.previewRendererForPath('/repo/config.json').id, 'structured', 'preview dispatch comes from the shared renderer registry');
+  assert.equal(api.previewRendererForPath('/repo/photo.tiff').id, 'unsupported-image', 'recognized image fallbacks are registry-owned');
+  assert.equal(api.previewRendererForPath('/repo/archive.zip').id, 'unsupported-archive', 'recognized archive fallbacks are registry-owned');
+  const previewRendererSamples = {
+    'docs/preview-samples/10-markdown.md': 'markdown',
+    'docs/preview-samples/11-html.html': 'html',
+    'docs/preview-samples/12-image.svg': 'image',
+    'docs/preview-samples/14-mermaid.mmd': 'mermaid',
+    'docs/preview-samples/15-structured.json': 'structured',
+    'docs/preview-samples/16-structured.jsonl': 'structured',
+    'docs/preview-samples/17-notebook.ipynb': 'structured',
+    'docs/preview-samples/18-structured.yaml': 'structured',
+    'docs/preview-samples/19-structured.toml': 'structured',
+    'docs/preview-samples/20-structured.drawio': 'structured',
+    'docs/preview-samples/21-config.properties': 'structured',
+    'docs/preview-samples/22-table.csv': 'table',
+    'docs/preview-samples/23-table.tsv': 'table',
+  };
+  for (const [samplePath, rendererId] of Object.entries(previewRendererSamples)) {
+    assert.equal(fs.existsSync(samplePath), true, `${rendererId} renderer has a docs/preview-samples fixture`);
+    assert.equal(api.previewRendererForPath(`/repo/${samplePath}`).id, rendererId, `${samplePath} routes to ${rendererId}`);
+  }
+  [
+    'docs/preview-samples/13-pdf.pdf',
+    'docs/preview-samples/24-audio.wav',
+    'docs/preview-samples/25-video.mp4',
+    'docs/preview-samples/26-text.log',
+    'docs/preview-samples/27-diff.patch',
+    'docs/preview-samples/28-diagram.dot',
+    'docs/preview-samples/29-plantuml.puml',
+    'docs/preview-samples/30-unsupported-image.tiff',
+    'docs/preview-samples/31-unsupported-document.xlsx',
+    'docs/preview-samples/32-unsupported-data.parquet',
+    'docs/preview-samples/33-unsupported-archive.zip',
+    'docs/preview-samples/34-unsupported.unknown',
+  ].forEach(samplePath => {
+    assert.equal(fs.existsSync(samplePath), false, `${samplePath} stays out of the curated preview sample set`);
+  });
+  assert.equal(api.previewMediaKindForPath('/repo/a.png'), 'image', 'image media kind is shared');
+  assert.equal(api.previewMediaKindForPath('/repo/a.pdf'), 'pdf', 'PDF media kind is shared');
+  assert.equal(api.previewMediaKindForPath('/repo/a.mp3'), 'audio', 'audio media kind is shared');
+  assert.equal(api.previewMimeForPath('/repo/a.apng'), 'image/apng', 'APNG MIME is known to the preview dispatcher');
+  assert.equal(api.previewMimeForPath('/repo/a.svg'), 'image/svg+xml', 'SVG MIME is known to the preview dispatcher');
+  assert.equal(api.previewMimeForPath('/repo/a.pdf'), 'application/pdf', 'PDF MIME is known to the preview dispatcher');
+  assert.equal(api.previewMimeForPath('/repo/a.mp4'), 'video/mp4', 'video MIME is known to the preview dispatcher');
+  assert.equal(api.previewMimeForPath('/repo/a.heic'), 'image/heic', 'HEIC MIME is known even though preview falls back');
+  assert.equal(api.previewMimeForPath('/repo/a.xlsx'), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'Office MIME is known for fallback display');
+  assert.ok(api.markdownPreviewHtml('# Offline\n\n![local](./a.png)\n\n```js\nconst x = 1;\n```').includes('<h1>Offline</h1>'), 'Markdown Preview has a local parser fallback when marked is unavailable');
+  assert.equal(/IMAGE_EXTENSIONS\.has|PDF_EXTENSIONS\.has|MERMAID_EXTENSIONS\.has/.test(fs.readFileSync('static/yolomux.js', 'utf8')), false, 'preview routing call sites use shared registry helpers instead of direct extension-set checks');
+  assert.ok(/function sniffedRawPreviewFileState[\s\S]*rawPreviewFileStateFromMime/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'binary text-read failures recover through sniffed MIME and the shared renderer registry');
+  assert.equal(api.markdownPreviewImageTarget('./asset dir/a%20b.png?cache=1#frag', '/repo/docs/README.md').src, '/api/fs/raw?path=%2Frepo%2Fdocs%2Fasset%20dir%2Fa%20b.png', 'relative Markdown image URLs resolve against the Markdown file and strip query/fragment from the filesystem path');
+  assert.ok(api.markdownPreviewHtml('![plot](./asset(dir)/a(1).png "Plot title")').includes('src="./asset(dir)/a(1).png"'), 'offline Markdown fallback preserves image URLs with parentheses');
+  assert.ok(api.markdownPreviewHtml('[doc](./notes(2026).md "Doc title")').includes('href="./notes(2026).md"'), 'offline Markdown fallback preserves link URLs with parentheses');
+  assert.equal(api.markdownPreviewImageTarget('../img.svg', '/repo/docs/README.md').path, '/repo/img.svg', 'parent-relative Markdown images normalize before raw-file routing');
+  assert.equal(api.markdownPreviewImageTarget('/repo/logo.gif', '/repo/docs/README.md').src, '/api/fs/raw?path=%2Frepo%2Flogo.gif', 'absolute local Markdown images route through raw-file serving');
+  assert.equal(api.markdownPreviewImageTarget('https://example.test/image.png', '/repo/docs/README.md').external, true, 'safe external Markdown image URLs are not rewritten');
+  assert.equal(api.markdownPreviewImageTarget('//example.test/image.png', '/repo/docs/README.md'), null, 'protocol-relative Markdown images stay blocked');
+  assert.equal(api.markdownPreviewImageTarget('data:image/svg+xml,<svg></svg>', '/repo/docs/README.md'), null, 'SVG data image URLs stay blocked');
+  assert.equal(api.markdownPreviewImageTarget('data:image/png;base64,abc', '/repo/docs/README.md').external, true, 'safe raster data images remain external data URLs');
+  assert.equal(api.markdownPreviewImageTarget('javascript:alert(1)', '/repo/docs/README.md'), null, 'unsafe Markdown image URLs stay blocked');
+  assert.equal(api.isMermaidFenceLanguage('mermaid'), true, 'Mermaid fences are detected');
+  assert.equal(api.isMermaidFenceLanguage('mmd'), true, 'mmd fences are detected');
+  assert.equal(api.isMermaidFenceLanguage('javascript'), false, 'non-Mermaid fences stay code preview');
+  const unsafeSvg = '<svg onclick="evil()"><script>alert(1)</script><foreignObject>x</foreignObject><image href="https://evil.test/a.png"/><a href="#local">ok</a><style>@import url(https://evil.test/x.css); .a { fill: red; }</style></svg>';
+  const sanitizedSvg = api.sanitizeStandaloneSvg(unsafeSvg);
+  assert.equal(/<script|foreignObject|onclick=|evil\.test|@import|url\(/i.test(sanitizedSvg), false, 'Mermaid SVG sanitizer removes scripts, event handlers, external references, and stylesheet imports');
+  assert.equal(sanitizedSvg.includes('href="#local"'), true, 'Mermaid SVG sanitizer keeps local fragment references');
+  assert.ok(/function mermaidPreviewConfig[\s\S]*htmlLabels:\s*true[\s\S]*flowchart:\s*\{[\s\S]*htmlLabels:\s*true/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'Mermaid HTML labels are allowed only as sanitizer input');
+  assert.ok(/function svgForeignObjectTextNode[\s\S]*createElementNS\('http:\/\/www\.w3\.org\/2000\/svg', 'text'\)[\s\S]*node\.textContent = text/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'Mermaid foreignObject labels convert to safe SVG text in browser runtime');
+  assert.ok(/tagName === 'foreignobject'[\s\S]*svgForeignObjectTextNode\(child\)[\s\S]*child\.replaceWith\(textNode\)/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'Mermaid foreignObject labels are converted before foreignObject stripping');
   assert.equal(api.markdownPreviewBlockedTagsForTest().includes('input'), false, 'Markdown sanitizer preserves checkbox inputs for task-list Preview controls');
   assert.ok(/bindMarkdownTaskCheckboxes\(container, text, markdownPath\)/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'Markdown Preview wires rendered task checkboxes after parsing');
   assert.ok(/tagName === 'input'[\s\S]*getAttribute\('type'\)[\s\S]*checkbox/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'Markdown sanitizer removes non-checkbox inputs while allowing task checkboxes');
@@ -1964,7 +2067,7 @@ test('t@1665', () => {
   const api = loadYolomux('', ['1']);
   assert.equal(api.editorPreviewModeAvailable('/home/test/README.md'), true);
   assert.equal(api.editorPreviewModeAvailable('/home/test/index.html'), true);
-  assert.equal(api.editorPreviewModeAvailable('/home/test/app.py'), false);
+  assert.equal(api.editorPreviewModeAvailable('/home/test/app.py'), true);
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(source.includes('function sanitizeMarkdownPreviewHtml'), 'Markdown previews pass through a sanitizer');
   assert.ok(source.includes('MARKDOWN_PREVIEW_BLOCKED_TAGS'), 'Markdown sanitizer blocks executable/embedded HTML tags');
@@ -1992,7 +2095,7 @@ test('t@1665', () => {
   assert.equal(htmlPreview.scrollTop, 37, 'HTML preview refresh preserves vertical scroll');
   assert.equal(htmlPreview.scrollLeft, 6, 'HTML preview refresh preserves horizontal scroll');
   api.setFileEditorViewMode('/home/test/app.py', 'split');
-  assert.equal(api.editorViewModeFor('/home/test/app.py'), 'edit');
+  assert.equal(api.editorViewModeFor('/home/test/app.py'), 'split');
   api.setFileEditorViewMode('/home/test/README.md', 'split');
   assert.equal(api.editorViewModeFor('/home/test/README.md'), 'split');
   const changedPath = '/repo/app/README.md';
@@ -2680,7 +2783,28 @@ test('t@2355', () => {
   assert.ok(source.includes('Math.max(fileImagePreviewMinShowDelayMs, tabPopoverShowDelayMs)'), 'image previews share the tab-style delayed hover threshold');
   assert.ok(css.includes('--file-image-preview-max-size: 320px'), 'Finder image preview default max size is tokenized');
   assert.ok(/\.file-image-preview-popover[\s\S]*pointer-events:\s*none/.test(css), 'Finder image previews cannot keep themselves hovered over terminals');
-  assert.ok(source.includes('preserveScroll: sameImage'), 'image viewer refreshes preserve scroll on unchanged images');
+  assert.ok(source.includes('function installPreviewZoomSurface'), 'visual previews share one zoom installer');
+  assert.ok(source.includes('const previewZoomPolicy = Object.freeze'), 'visual preview zoom limits are owned by one policy object');
+  assert.ok(source.includes('const previewZoomActions = Object.freeze'), 'visual preview zoom toolbar actions are owned by one action table');
+  assert.ok(/function previewZoomButton[\s\S]*button\.dataset\.previewZoomAction = action\.id/.test(source), 'visual preview zoom buttons come from one helper');
+  assert.ok(source.includes('function previewZoomOptionsForKind'), 'visual preview fit caps come from one renderer options helper');
+  assert.ok(/mermaidFull: Object\.freeze\(\{[\s\S]*wheelZoom: true[\s\S]*panDrag: true/.test(source), 'Mermaid preview zoom owns wheel zoom and drag pan through renderer defaults');
+  assert.ok(/function bindPreviewZoomDragPan[\s\S]*pointerdown[\s\S]*pointermove[\s\S]*viewport\.scrollLeft/.test(source), 'Mermaid preview drag pan is routed through the shared zoom surface');
+  assert.ok(source.includes('function previewZoomScopedKey'), 'visual preview zoom state is scoped by surface context');
+  assert.ok(source.includes('function svgReadableEdgeColor'), 'Mermaid SVG edges are restyled through one readable color helper');
+  assert.ok(source.includes('function svgCssStyleValue'), 'Mermaid SVG color repair reads Mermaid class-based style rules');
+  assert.ok(source.includes('function svgApplyReadableLabelStyle'), 'Mermaid SVG labels are restyled through one readable label helper');
+  assert.ok(/function installPreviewZoomSurface[\s\S]*viewport\.className = 'file-editor-preview-zoom-viewport'/.test(source), 'visual previews share one scroll viewport');
+  assert.ok(/function renderFileEditorImagePane[\s\S]*previewZoomOptionsForKind\('imagePane', \{path\}\)[\s\S]*installPreviewZoomSurface\(imagePane, img, zoomOptions\)/.test(source), 'image-file tabs use the shared zoom surface');
+  assert.ok(/async function renderMermaidSourceInto[\s\S]*previewZoomOptionsForKind\(fullPreview \? 'mermaidFull' : 'mermaidInline'/.test(source), 'Mermaid previews use shared renderer zoom policy');
+  assert.ok(/function disconnectPreviewZoomSurface\(shell, options = \{\}\)[\s\S]*resetPreviewZoomSurfaceClasses/.test(source), 'visual preview zoom cleanup uses one reset helper');
+  assert.ok(/function hydratePreviewZoomSurface[\s\S]*data-preview-zoom-action[\s\S]*setPreviewZoomSurfaceState/.test(source), 'visual preview zoom controls can hydrate existing markup');
+  assert.ok(source.includes("renderEditorPreviewPane(previewPane, path, state.content, {context: 'split'})"), 'Split Preview uses its own preview zoom context');
+  assert.ok(source.includes("hydratePreviewZoomSurfaces(doc.querySelector('[data-preview-root]') || doc)"), 'preview pop-out rehydrates zoom controls after snapshot writes');
+  assert.ok(source.includes('.file-preview-popout-window .file-editor-preview-pane-panel.file-editor-preview-zoom-shell'), 'preview pop-out preserves zoom-shell layout');
+  assert.equal(source.includes('fileEditorImageModeForPath'), false, 'visual previews do not keep the obsolete imageMode state path');
+  assert.ok(/function setFileState[\s\S]*previewZoom[\s\S]*previous\.previewZoom/.test(source), 'visual preview zoom state survives file-state replacement');
+  assert.ok(/\.file-editor-preview-zoom-viewport\s*\{[\s\S]*overflow:\s*auto/.test(css), 'visual preview zoom surface owns a scrollable viewport');
   assert.ok(source.includes('capturePaneViewState(item, panel)'), 'file-editor renders use the shared pane viewport capture before pane/tab renders');
   assert.ok(source.includes('restoreFileEditorPanelViewState(item, panel)'), 'CodeMirror editor viewport is restored after pane/tab renders');
   assert.ok(/function renderFileEditorPanelShouldCaptureViewState\(options = \{\}\)[\s\S]*return options\.captureViewState !== false/.test(source), 'file editor render has one shared view-state capture gate');
@@ -2774,7 +2898,9 @@ test('t@2355', () => {
   assert.ok(source.includes('focusCommandPaletteTarget(item);'), 'command palette applies deterministic focus after async tab/session actions');
   assert.ok(source.includes('targetItem: item,'), 'command palette tab entries carry their layout focus target');
   assert.ok(source.includes("const defaultLightEditorScheme = 'yolomux-light';"), 'light editor defaults to the brand YOLOmux Light scheme');
-  assert.ok(source.includes("else setFileEditorViewMode(fullPath, 'edit', item);"), 'plain file opens reset stale diff mode back to edit');
+  assert.ok(source.includes('function defaultFileEditorViewModeForPath(path, kind)')
+    && source.includes("return previewRendererForPath(path)?.defaultMode || 'edit';")
+    && source.includes('else setFileEditorViewMode(fullPath, defaultFileEditorViewModeForPath(fullPath, kind), item);'), 'plain file opens reset stale diff mode back to edit while media and Mermaid source open in Preview');
   assert.ok(source.includes('applyMarkdownSourceLines(container, text);'), 'Markdown preview source anchors are attached after parsing');
   assert.ok(source.includes('function codeMirrorMarkdownFallbackSyntaxExtension'), 'Markdown edit mode has a parser-independent CodeMirror coloring fallback');
   assert.ok(/function codeMirrorThemeExtensions[\s\S]*codeMirrorMarkdownFallbackSyntaxExtension\(api, path\)/.test(source), 'Markdown fallback coloring is wired into live CodeMirror edit views');
@@ -7546,7 +7672,7 @@ test('t@6473', () => {
   ]) {
     assert.equal(source.includes(obsolete), false, `F1: removed obsolete path-keyed container ${obsolete}`);
   }
-  assert.ok(/function setFileState[\s\S]*editorTabItems[\s\S]*ownerSessions[\s\S]*viewMode[\s\S]*imageMode[\s\S]*blame[\s\S]*conflictDialogOpen/.test(source), 'F1: replacing file content preserves per-path side state on the fileState record');
+  assert.ok(/function setFileState[\s\S]*editorTabItems[\s\S]*ownerSessions[\s\S]*viewMode[\s\S]*previewZoom[\s\S]*blame[\s\S]*conflictDialogOpen/.test(source), 'F1: replacing file content preserves per-path side state on the fileState record');
   assert.ok(/function removeOpenFile[\s\S]*deleteFileState\(path\)/.test(source), 'F1: closing the last owner deletes one fileState record');
   assert.ok(/function renameOpenFilePath[\s\S]*deleteFileState\(oldPath\)[\s\S]*setFileState\(newPath, state\)/.test(source), 'F1: rename moves one fileState record');
 });
@@ -8587,7 +8713,7 @@ test('t@7355', () => {
   assert.ok(/openFileInEditor\(resolved, basenameOf\(resolved\), \{[\s\S]*?viewMode: editorPreviewModeAvailable\(resolved\) \? 'preview' : 'edit'/.test(src), '#133: preview-capable file links open in preview (md/html), else edit');
   assert.ok(/t\('preview\.openFailed'/.test(src), "#133: a failed open surfaces a toast");
   // The handler is wired ONLY to the file-editor preview (path provided), not to yoagent bodies.
-  assert.ok(/renderMarkdownPreviewInto\(container, text, path\)/.test(src), '#133: the file-editor preview threads the owning path (basePath); yoagent bodies pass no path');
+  assert.ok(/renderMarkdownPreviewInto\(container, text, path, \{context: previewContext\}\)/.test(src), '#133: the file-editor preview threads the owning path and preview context; yoagent bodies pass no path');
 });
 
 test('t@7378', () => {
@@ -9240,6 +9366,8 @@ test('t@7847', () => {
   assert.ok(source.includes("window.open(`/preview-popout?path=${encodeURIComponent(path)}`"), 'preview pop-out opens a same-origin URL instead of about:blank');
   assert.ok(/file-editor-popout-preview-panel'\)\?\.addEventListener\('click'[\s\S]*if \(openFilePreviewPopout\(path, panel\)\) \{[\s\S]*setFileEditorViewMode\(path, 'edit', item\);[\s\S]*renderFileEditorPanel\(panel, item\);/.test(source), 'pressing Pop-out opens the preview window and returns the in-pane editor to Edit mode');
   assert.ok(/function openFilePreviewPopout\(path, panel = null\)[\s\S]*return true;[\s\S]*return false;/.test(source), 'preview pop-out open path reports whether a pop-out was actually opened or focused');
+  assert.ok(/function bumpFilePreviewPopoutGeneration\(path\)[\s\S]*record\.previewGeneration[\s\S]*function filePreviewPopoutGenerationMatches\(path, previewWindow, generation\)[\s\S]*record\.window === previewWindow && record\.previewGeneration === generation/.test(source), 'async preview pop-out snapshots are generation-guarded so stale Mermaid renders cannot overwrite newer content');
+  assert.ok(/function writeFilePreviewPopoutWhenReady\(path, previewWindow, text\)[\s\S]*renderedPreviewSnapshot\(path, text\)[\s\S]*renderedPreviewSnapshotAsync\(path, text\)[\s\S]*filePreviewPopoutGenerationMatches\(path, previewWindow, generation\)/.test(source), 'preview pop-out writes an immediate snapshot and then a completed async snapshot through the same dispatch');
   assert.ok(/previewWindow\._yolomuxPreviewControlsCleanup[\s\S]*bind\(previewWindow, 'scroll', syncScroll\)[\s\S]*bind\(previewWindow, 'wheel', scheduleScrollSync\)[\s\S]*bind\(scroller, 'scroll', syncScroll\)[\s\S]*bind\(scroller, 'wheel', scheduleScrollSync\)/.test(source), 'preview pop-out window and scrolling element sync immediately on scroll and schedule next-frame sync on wheel without stale document listeners');
   assert.ok(/function scrollSyncTargetPosition\(from, to, axis = 'top'\)[\s\S]*const edgeSnap = Math\.max\(2, Math\.ceil\(sourceClient \* 0\.01\)\);[\s\S]*if \(maxTo <= 0 \|\| current <= edgeSnap\) return 0;[\s\S]*if \(maxFrom <= edgeSnap \|\| current >= maxFrom - edgeSnap\) return maxTo;[\s\S]*const sourceCenter = Math\.min\(maxFrom, current\) \+ \(sourceClient \/ 2\);[\s\S]*return Math\.min\(maxTo, Math\.max\(0, target\)\);/.test(source), 'pop-out scroll sync aligns viewport centers with fractional precision and explicit edge snaps');
   assert.ok(/function syncFilePreviewPopoutFromPanel[\s\S]*syncScrollPositionByRatio\(from, scroller\)/.test(source), 'editor-to-popout scroll sync uses the shared proportional mapper');

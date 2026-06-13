@@ -37,11 +37,13 @@ BINARY_SNIFF_BYTES = 8 * 1024  # bytes inspected for NUL when classifying
 MTIME_NS_CONFLICT_TOLERANCE = 10_000_000
 
 TEXT_EXTENSIONS = {
-    ".rs", ".py", ".md", ".txt", ".json", ".js", ".ts", ".tsx", ".jsx",
+    ".rs", ".py", ".md", ".txt", ".json", ".jsonl", ".ndjson", ".geojson", ".ipynb", ".js", ".ts", ".tsx", ".jsx",
     ".css", ".scss", ".html", ".htm", ".xml", ".yaml", ".yml", ".toml",
     ".sh", ".bash", ".zsh", ".fish", ".c", ".h", ".cpp", ".hpp", ".cc",
-    ".go", ".rb", ".pl", ".lua", ".sql", ".env", ".cfg", ".ini", ".conf",
-    ".log", ".gitignore", ".dockerignore", ".dockerfile",
+    ".go", ".rb", ".pl", ".lua", ".sql", ".env", ".cfg", ".ini", ".conf", ".properties", ".props",
+    ".mmd", ".mermaid", ".drawio", ".dio", ".excalidraw", ".dot", ".gv", ".puml", ".plantuml",
+    ".log", ".trace", ".out", ".rst", ".adoc", ".asciidoc", ".diff", ".patch", ".srt", ".vtt",
+    ".gitignore", ".dockerignore", ".dockerfile",
 }
 
 EXTENSIONLESS_TEXT_NAMES = {
@@ -51,6 +53,7 @@ EXTENSIONLESS_TEXT_NAMES = {
 
 IMAGE_EXTENSIONS = {
     ".png": "image/png",
+    ".apng": "image/apng",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".gif": "image/gif",
@@ -58,7 +61,84 @@ IMAGE_EXTENSIONS = {
     ".svg": "image/svg+xml",
     ".ico": "image/x-icon",
     ".bmp": "image/bmp",
+    ".avif": "image/avif",
+    ".tif": "image/tiff",
+    ".tiff": "image/tiff",
+    ".heic": "image/heic",
+    ".heif": "image/heif",
+    ".pdf": "application/pdf",
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".ogg": "audio/ogg",
+    ".oga": "audio/ogg",
+    ".flac": "audio/flac",
+    ".m4a": "audio/mp4",
+    ".aac": "audio/aac",
+    ".opus": "audio/opus",
+    ".mp4": "video/mp4",
+    ".m4v": "video/mp4",
+    ".webm": "video/webm",
+    ".mov": "video/quicktime",
+    ".mkv": "video/x-matroska",
+    ".ogv": "video/ogg",
+    ".3gp": "video/3gpp",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".sqlite": "application/vnd.sqlite3",
+    ".sqlite3": "application/vnd.sqlite3",
+    ".db": "application/vnd.sqlite3",
+    ".parquet": "application/vnd.apache.parquet",
+    ".arrow": "application/vnd.apache.arrow.file",
+    ".feather": "application/vnd.apache.arrow.file",
+    ".zip": "application/zip",
+    ".tar": "application/x-tar",
+    ".gz": "application/gzip",
+    ".tgz": "application/gzip",
+    ".bz2": "application/x-bzip2",
+    ".xz": "application/x-xz",
+    ".7z": "application/x-7z-compressed",
+    ".rar": "application/vnd.rar",
 }
+
+
+def _sniff_raw_mime(data: bytes) -> str:
+    sample = data[:64]
+    if sample.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if sample.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if sample.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if sample.startswith((b"II*\x00", b"MM\x00*")):
+        return "image/tiff"
+    if sample.startswith(b"%PDF-"):
+        return "application/pdf"
+    if sample.startswith(b"ID3"):
+        return "audio/mpeg"
+    if sample.startswith(b"SQLite format 3\x00"):
+        return "application/vnd.sqlite3"
+    if sample.startswith(b"PAR1"):
+        return "application/vnd.apache.parquet"
+    if sample.startswith(b"PK\x03\x04"):
+        return "application/zip"
+    if sample.startswith(b"RIFF") and sample[8:12] == b"WEBP":
+        return "image/webp"
+    if sample.startswith(b"RIFF") and sample[8:12] == b"WAVE":
+        return "audio/wav"
+    if len(sample) >= 12 and sample[4:8] == b"ftyp":
+        brand = sample[8:12]
+        if brand in {b"avif", b"avis"}:
+            return "image/avif"
+        if brand in {b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1"}:
+            return "image/heic"
+        if brand in {b"mp41", b"mp42", b"isom", b"M4A ", b"M4V "}:
+            return "video/mp4" if brand not in {b"M4A "} else "audio/mp4"
+    return ""
+
 
 MAX_RAW_BYTES = 20 * 1024 * 1024  # 20 MB cap on raw (image) reads
 REPO_MARKERS = (".git", ".hg", ".svn", ".jj")
@@ -936,6 +1016,20 @@ def path_info(raw_path: str) -> dict[str, Any]:
     if not path.exists() and not path.is_symlink():
         raise FilesystemError(f"path not found: {path}", status=404)
     kind = "dir" if path.is_dir() else "file"
+    size: int | None = None
+    mtime: int | None = None
+    mtime_ns: int | None = None
+    preview_mime = ""
+    if kind == "file":
+        try:
+            file_stat = path.stat()
+            size = int(file_stat.st_size)
+            mtime = int(file_stat.st_mtime)
+            mtime_ns = int(file_stat.st_mtime_ns)
+            with path.open("rb") as fh:
+                preview_mime = _sniff_raw_mime(fh.read(512)) or IMAGE_EXTENSIONS.get(path.suffix.lower(), "")
+        except OSError:
+            preview_mime = IMAGE_EXTENSIONS.get(path.suffix.lower(), "")
     repo_root = git_root_for_path(path)
     relative_path = ""
     repo_info: dict[str, Any] | None = None
@@ -950,6 +1044,10 @@ def path_info(raw_path: str) -> dict[str, Any]:
         "path": str(path),
         "name": path.name,
         "kind": kind,
+        "size": size,
+        "mtime": mtime,
+        "mtime_ns": mtime_ns,
+        "preview_mime": preview_mime,
         "repo_root": repo_root,
         "relative_path": relative_path,
         "repo": repo_info,
@@ -1197,5 +1295,5 @@ def read_raw(raw_path: str) -> tuple[bytes, str]:
     with _fs_io_errors():
         with path.open("rb") as fh:
             data = fh.read(MAX_RAW_BYTES + 1)
-    mime = IMAGE_EXTENSIONS.get(path.suffix.lower(), "application/octet-stream")
+    mime = _sniff_raw_mime(data) or IMAGE_EXTENSIONS.get(path.suffix.lower(), "application/octet-stream")
     return data, mime

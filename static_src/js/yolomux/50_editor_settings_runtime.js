@@ -7,6 +7,8 @@ function editorViewModeFor(path, item = null) {
   const mode = modes.get(editorViewModeKey(path, item)) || modes.get(path);
   if (mode === 'diff') return 'diff';
   if (!editorPreviewModeAvailable(path)) return 'edit';
+  const state = openFiles.get(path);
+  if (state?.kind && state.kind !== 'text') return 'preview';
   if (editorViewModes.has(mode)) return mode;
   return 'edit';
 }
@@ -14,20 +16,25 @@ function editorViewModeFor(path, item = null) {
 function setFileEditorViewMode(path, mode, item = null) {
   if (!path || !editorViewModes.has(mode)) return;
   if (mode !== 'edit' && mode !== 'diff' && !editorPreviewModeAvailable(path)) mode = 'edit';
+  const previousMode = editorViewModeFor(path, item);
   if ((mode === 'preview' || mode === 'split') && typeof closeFilePreviewPopout === 'function') closeFilePreviewPopout(path);
+  if (mode === 'split' && previousMode !== 'split' && ['markdown', 'mermaid'].includes(previewKindForPath(path, openFiles.get(path)))) {
+    resetFileEditorPreviewZoomStateForPath(path, 'split:mermaid');
+  }
   fileEditorViewModesForPath(path, true).set(editorViewModeKey(path, item), mode);
 }
 
 function updateEditorModeControl(control, path, state, item = null) {
   if (!control) return;
-  const visible = state?.kind === 'text' && editorPreviewModeAvailable(path);
+  const visible = Boolean(state?.kind) && editorPreviewModeAvailable(path, state);
   control.hidden = !visible;
   if (!visible) return;
   const mode = editorViewModeFor(path, item);
   control.querySelectorAll('[data-editor-mode]').forEach(button => {
     const nextMode = button.dataset.editorMode;
+    button.hidden = state?.kind !== 'text' && nextMode !== 'preview';
     const label = editorModeLabel(nextMode);
-    const active = button.dataset.editorMode === mode;
+    const active = nextMode === mode || (state?.kind !== 'text' && nextMode === 'preview');
     syncPressedButton(button, active, {labelOn: label, labelOff: label});
     setFileEditorIcon(button, editorModeIconClass(nextMode));
   });

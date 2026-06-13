@@ -36,6 +36,7 @@ STATIC_CONTENT_TYPES = {
     "yolomux.js": "application/javascript; charset=utf-8",
     "vendor/dockview.css": "text/css; charset=utf-8",
     "vendor/dockview-core.noStyle.js": "application/javascript; charset=utf-8",
+    "vendor/mermaid.min.js": "application/javascript; charset=utf-8",
 }
 
 

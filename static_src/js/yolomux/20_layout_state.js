@@ -1925,7 +1925,7 @@ function focusQuickOpenedFile(item) {
 function cursorStyleFileReference(path, options = {}) {
   const fullPath = String(path || '');
   if (!fullPath || options.kind === 'dir') return null;
-  if (IMAGE_EXTENSIONS.has(fileExtensionOf(fullPath))) {
+  if (previewMediaKindForPath(fullPath) === 'image') {
     const index = Math.max(1, Math.floor(Number(options.imageIndex || 1)));
     return {label: `[Image #${index}]`, detail: shellQuote(fullPath)};
   }
@@ -1972,7 +1972,7 @@ function fileQuickOpenExactPathItem() {
   if (!name || !fileExtensionOf(name)) return null;
   return {
     ...fileQuickOpenItem(path, {group: t('palette.group.files')}),
-    label: IMAGE_EXTENSIONS.has(fileExtensionOf(path)) ? `Open image ${name}` : `Open ${name}`,
+    label: previewMediaKindForPath(path) === 'image' ? `Open image ${name}` : `Open ${name}`,
     detail: compactHomePath(path),
     key: `exact-file:${path}`,
     keybinding: appShortcutText('Enter'),
@@ -2052,7 +2052,7 @@ function fileQuickOpenItems() {
     const baseRoot = normalizeStoredFileExplorerIndexedDir(fileQuickOpenRoot || '');
     const externalIndexed = Boolean(indexedRoot && indexedRoot !== baseRoot);
     if (externalIndexed && !fileQuickOpenExternalIndexedMatchAllowed(file)) continue;
-    const isImage = (file.kind || 'file') !== 'dir' && IMAGE_EXTENSIONS.has(fileExtensionOf(path));
+    const isImage = (file.kind || 'file') !== 'dir' && previewMediaKindForPath(path) === 'image';
     if (isImage) imageIndex += 1;
     add(fileQuickOpenItem(path, {
       group: externalIndexed ? `Indexed ${compactHomePath(indexedRoot)}` : 'Files',

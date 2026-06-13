@@ -220,15 +220,41 @@ def test_search_files_skips_secret_paths(tmp_path):
     assert all(str(path) not in paths for path in secrets)
 
 
-def test_read_raw_streams_image_with_mime_type(tmp_path):
-    image = tmp_path / "tiny.png"
-    data = b"\x89PNG\r\n\x1a\n"
-    image.write_bytes(data)
+def test_read_raw_streams_preview_media_with_mime_type(tmp_path):
+    cases = [
+        ("tiny.png", b"\x89PNG\r\n\x1a\n", "image/png"),
+        ("photo.avif", b"\x00\x00\x00 ftypavif", "image/avif"),
+        ("spec.pdf", b"%PDF-1.7\n", "application/pdf"),
+        ("spec", b"%PDF-1.7\n", "application/pdf"),
+        ("renamed.bin", b"\x89PNG\r\n\x1a\n", "image/png"),
+        ("photo.tiff", b"II*\x00rest", "image/tiff"),
+        ("photo.heic", b"\x00\x00\x00 ftypheic", "image/heic"),
+        ("sound.mp3", b"ID3\x03\x00\x00", "audio/mpeg"),
+        ("sound.aac", b"not-sniffed", "audio/aac"),
+        ("movie.mp4", b"\x00\x00\x00 ftypmp42", "video/mp4"),
+        ("book.xlsx", b"PK\x03\x04", "application/zip"),
+        ("data.parquet", b"PAR1data", "application/vnd.apache.parquet"),
+        ("data.sqlite", b"SQLite format 3\x00", "application/vnd.sqlite3"),
+        ("archive.zip", b"PK\x03\x04", "application/zip"),
+    ]
+    for name, data, expected_mime in cases:
+        target = tmp_path / name
+        target.write_bytes(data)
 
-    payload, mime = filesystem.read_raw(str(image))
+        payload, mime = filesystem.read_raw(str(target))
 
-    assert payload == data
-    assert mime == "image/png"
+        assert payload == data
+        assert mime == expected_mime
+
+
+def test_path_info_returns_sniffed_preview_mime_for_misleading_extension(tmp_path):
+    target = tmp_path / "renamed.bin"
+    target.write_bytes(b"\x89PNG\r\n\x1a\npayload")
+
+    result = filesystem.path_info(str(target))
+
+    assert result["size"] == target.stat().st_size
+    assert result["preview_mime"] == "image/png"
 
 
 def test_delete_path_refuses_configured_root(monkeypatch, tmp_path):

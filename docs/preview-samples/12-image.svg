@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="520" height="260" viewBox="0 0 520 260">
+  <rect width="520" height="260" rx="20" fill="#0f172a"/>
+  <rect x="36" y="42" width="448" height="176" rx="16" fill="#f8fafc"/>
+  <circle cx="122" cy="130" r="48" fill="#2563eb"/>
+  <rect x="210" y="82" width="220" height="24" rx="12" fill="#22c55e"/>
+  <rect x="210" y="122" width="180" height="24" rx="12" fill="#f97316"/>
+  <rect x="210" y="162" width="132" height="24" rx="12" fill="#eab308"/>
+  <text x="122" y="138" text-anchor="middle" font-family="Arial, sans-serif" font-size="28" font-weight="700" fill="#ffffff">SVG</text>
+  <text x="260" y="238" font-family="Arial, sans-serif" font-size="16" text-anchor="middle" fill="#cbd5e1">Direct image renderer sample</text>
+</svg>

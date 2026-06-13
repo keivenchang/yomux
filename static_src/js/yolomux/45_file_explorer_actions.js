@@ -106,7 +106,7 @@ function fileContextMenuState(entry, selectedPaths, relativePaths) {
 }
 
 function entryIsImageFile(entry) {
-  return entry?.kind === 'file' && IMAGE_EXTENSIONS.has(fileExtensionOf(entry.name || entry.path || ''));
+  return entry?.kind === 'file' && previewMediaKindForPath(entry.name || entry.path || '') === 'image';
 }
 
 async function copyFilePath(path, label) {
@@ -770,10 +770,55 @@ function fileExtensionOf(name) {
   return dot === -1 ? '' : name.slice(dot).toLowerCase();
 }
 
+function previewMimeForPath(path) {
+  return PREVIEW_MIME_BY_EXTENSION.get(fileExtensionOf(path)) || '';
+}
+
+function previewRendererForMime(mime) {
+  return PREVIEW_RENDERER_BY_MIME.get(String(mime || '').toLowerCase()) || null;
+}
+
+function previewRendererForPath(path, state = null) {
+  if (state?.kind === 'image') return PREVIEW_RENDERER_BY_ID.get('image') || PREVIEW_RENDERER_BY_ID.get('unsupported');
+  if (state?.kind === 'media' && state.mediaKind) return PREVIEW_RENDERER_BY_ID.get(String(state.mediaKind)) || PREVIEW_RENDERER_BY_ID.get('unsupported');
+  if (state?.kind === 'too-large' || state?.kind === 'error') return PREVIEW_RENDERER_BY_ID.get('unsupported');
+  const ext = fileExtensionOf(path);
+  const renderer = PREVIEW_RENDERER_BY_EXTENSION.get(ext);
+  if (renderer) return renderer;
+  if (HIGHLIGHTABLE_EXTENSIONS[ext]) return PREVIEW_RENDERER_BY_ID.get('text');
+  if (state?.kind === 'text') return PREVIEW_RENDERER_BY_ID.get('text');
+  return PREVIEW_RENDERER_BY_ID.get('unsupported');
+}
+
+function previewMediaKindForPath(path, state = null) {
+  return previewRendererForPath(path, state)?.mediaKind || '';
+}
+
+function previewKindForPath(path, state = null) {
+  return previewRendererForPath(path, state)?.kind || 'unsupported';
+}
+
+function previewKindIsTextBacked(kind) {
+  return PREVIEW_RENDERERS.some(renderer => renderer.kind === kind && renderer.textBacked);
+}
+
+function defaultFileEditorViewModeForPath(path, kind) {
+  if (kind !== 'text') return 'preview';
+  return previewRendererForPath(path)?.defaultMode || 'edit';
+}
+
+function openFileKindForPreviewPath(path) {
+  const renderer = previewRendererForPath(path);
+  const mediaKind = renderer?.mediaKind || '';
+  if (mediaKind === 'image') return 'image';
+  if (renderer?.raw && !renderer?.textBacked) return 'media';
+  return 'text';
+}
+
 function fileIconFor(name) {
   const lowerName = String(name || '').toLowerCase();
   const ext = fileExtensionOf(lowerName);
-  if (IMAGE_EXTENSIONS.has(ext)) return '🖼';
+  if (previewMediaKindForPath(lowerName) === 'image') return '🖼';
   if (ext === '.log') return '🪵';
   if (['.md', '.txt', '.rst'].includes(ext)) return '📝';
   if (['.json', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf', '.env'].includes(ext)) return '⚙';
@@ -832,6 +877,14 @@ async function fetchFileEntryStatus(path) {
   const name = basenameOf(path);
   const entry = entries.find(entry => entry.name === name) || null;
   return {entry, missing: !entry, error: entry ? '' : `path not found: ${path}`, network: false};
+}
+
+async function fetchFileInfoStatus(path) {
+  try {
+    return {info: await apiFetchJson(`/api/fs/info?path=${encodeURIComponent(path)}`), error: ''};
+  } catch (error) {
+    return {info: null, error: String(error?.payload?.error || error || 'failed to inspect file')};
+  }
 }
 
 function fileEntryMtime(entry) {
@@ -1043,6 +1096,40 @@ function tooLargeFileState(size = null, message = '') {
   };
 }
 
+function rawPreviewFileState(path, entry = null, options = {}) {
+  const renderer = options.renderer || previewRendererForPath(path);
+  const mime = options.mime || previewMimeForPath(path);
+  const mediaKind = renderer?.mediaKind || renderer?.id || 'unsupported';
+  return {
+    mtime: fileEntryMtime(entry),
+    size: entry?.size ?? null,
+    kind: 'media',
+    mediaKind,
+    mime,
+    original: '',
+    content: '',
+    dirty: false,
+  };
+}
+
+function rawPreviewFileStateFromMime(path, entry = null, mime = '') {
+  const renderer = previewRendererForMime(mime);
+  if (!renderer?.raw || renderer.textBacked) return null;
+  return rawPreviewFileState(path, entry, {renderer, mime});
+}
+
+async function sniffedRawPreviewFileState(path, entry = null) {
+  const fetched = await fetchFileInfoStatus(path);
+  const info = fetched.info || {};
+  const mime = info.preview_mime || info.mime || '';
+  const state = rawPreviewFileStateFromMime(path, entry || info, mime);
+  if (!state) return null;
+  state.mtime = fileEntryMtime(entry || info);
+  state.size = entry?.size ?? info.size ?? null;
+  applyFileIdentityMetadata(state, info);
+  return state;
+}
+
 function fileErrorState(message) {
   return {
     mtime: 0,
@@ -1081,6 +1168,8 @@ function openFileStatus(state) {
   if (state.externalChanged) return {message: state.dirty ? 'changed on disk; unsaved edits kept' : 'changed on disk; reload available', level: 'warn'};
   if (state.dirty) return {message: t('filetab.modified'), level: ''};
   if (state.kind === 'text') return {message: `${String(state.original ?? '').length} chars`, level: ''};
+  if (state.kind === 'image') return {message: state.size ? formatFileSize(state.size) : '', level: ''};
+  if (state.kind === 'media') return {message: [state.mime || state.mediaKind, state.size ? formatFileSize(state.size) : ''].filter(Boolean).join(' · '), level: ''};
   return {message: '', level: ''};
 }
 
@@ -1604,8 +1693,7 @@ async function refreshOpenFileGitMetadata(path) {
 async function openFileInEditor(fullPath, entryOrName, options = {}) {
   const entry = typeof entryOrName === 'object' && entryOrName ? entryOrName : null;
   const name = entry?.name || String(entryOrName || basenameOf(fullPath));
-  const ext = fileExtensionOf(name);
-  const kind = IMAGE_EXTENSIONS.has(ext) ? 'image' : 'text';
+  const kind = openFileKindForPreviewPath(name);
   const identityDedupe = kind === 'text';
   if (identityDedupe) {
     const pendingOpen = fileOpenPromisesByPath.get(fullPath);
@@ -1632,7 +1720,7 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     ownerSession: options.ownerSession || normalizedOpenFileOwnerSession(entry?.session),
   };
   if (options.viewMode) setFileEditorViewMode(fullPath, options.viewMode, item);
-  else setFileEditorViewMode(fullPath, 'edit', item);
+  else setFileEditorViewMode(fullPath, defaultFileEditorViewModeForPath(fullPath, kind), item);
   recordEditorNav(item);   // push this tab to the back/forward history (no-op while navigating)
   if (alreadyOpen) {
     foldDuplicateEditorItemsForPath(fullPath, item);
@@ -1650,6 +1738,10 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
   }
   if (kind === 'image') {
     await openFilesSetAndShow(fullPath, applyFileIdentityMetadata({mtime: fileEntryMtime(entry), kind: 'image', original: '', content: '', dirty: false, size: entry?.size ?? null}, entry), openOptions);
+    return item;
+  }
+  if (kind === 'media') {
+    await openFilesSetAndShow(fullPath, applyFileIdentityMetadata(rawPreviewFileState(fullPath, entry), entry), openOptions);
     return item;
   }
   const openPromise = (async () => {
@@ -1678,11 +1770,14 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     const status = Number(err?.status) || 0;
     if (status) {
       const message = err?.payload?.error || status;
-      const state = status === 413
-        ? tooLargeFileState(entry?.size ?? null, String(message))
-        : status === 404
-          ? missingFileState(String(message))
-          : fileErrorState(message);
+      let state = status === 415 ? await sniffedRawPreviewFileState(fullPath, entry) : null;
+      if (!state) {
+        state = status === 413
+          ? tooLargeFileState(entry?.size ?? null, String(message))
+          : status === 404
+            ? missingFileState(String(message))
+            : fileErrorState(message);
+      }
       await openFilesSetAndShow(fullPath, state, openOptions);
       return item;
     }
@@ -1710,8 +1805,8 @@ async function openFileStateFromDisk(path, entry = null) {
     state.mtime = fileEntryMtime(fileEntry);
     return {state};
   }
-  const ext = fileExtensionOf(fileEntry.name || basenameOf(path));
-  if (IMAGE_EXTENSIONS.has(ext)) {
+  const kind = openFileKindForPreviewPath(fileEntry.name || basenameOf(path));
+  if (kind === 'image') {
     return {state: {
       mtime: fileEntryMtime(fileEntry),
       size: fileEntry.size ?? null,
@@ -1720,6 +1815,9 @@ async function openFileStateFromDisk(path, entry = null) {
       content: '',
       dirty: false,
     }};
+  }
+  if (kind === 'media') {
+    return {state: rawPreviewFileState(path, fileEntry)};
   }
   try {
     const payload = await apiFetchJson(`/api/fs/read?path=${encodeURIComponent(path)}`);
@@ -1735,11 +1833,14 @@ async function openFileStateFromDisk(path, entry = null) {
     const status = Number(error?.status) || 0;
     if (status) {
       const message = String(error?.payload?.error || status);
-      const state = status === 413
-        ? tooLargeFileState(fileEntry.size ?? null, message)
-        : status === 404
-          ? missingFileState(message)
-          : fileErrorState(message);
+      let state = status === 415 ? await sniffedRawPreviewFileState(path, fileEntry) : null;
+      if (!state) {
+        state = status === 413
+          ? tooLargeFileState(fileEntry.size ?? null, message)
+          : status === 404
+            ? missingFileState(message)
+            : fileErrorState(message);
+      }
       state.mtime = fileEntryMtime(fileEntry);
       state.size = fileEntry.size ?? null;
       return {state};
@@ -1794,7 +1895,7 @@ async function replaceOpenFileStateFromDisk(path, entry = null) {
       if (panel) restoreFileEditorPanelViewState(item, panel);
     }
   });
-  if (loaded.state?.kind === 'text' && typeof updateFilePreviewPopout === 'function') {
+  if (loaded.state?.kind && typeof updateFilePreviewPopout === 'function' && editorPreviewModeAvailable(path, loaded.state)) {
     updateFilePreviewPopout(path, loaded.state.content || '');
   }
   if (previous?.diff !== undefined) refreshOpenFileDiff(path);
