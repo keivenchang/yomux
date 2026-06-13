@@ -1143,7 +1143,7 @@ def split_seam_fixture_html():
     )
 
 
-def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620):
+def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620, file_explorer_open_intent=None, auto_approve_payload=None):
     css = app_css()
     brand_css = (REPO_ROOT / "static" / "brand.css").read_text(encoding="utf-8")
     script_uri = (REPO_ROOT / "static" / "yolomux.js").as_uri()
@@ -1180,11 +1180,17 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
         "locale": "en",
         "strings": {"en": json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text())},
     }
+    file_explorer_intent_script = ""
+    if file_explorer_open_intent is not None:
+        file_explorer_intent_script = f"""
+          try {{ sessionStorage.setItem('yolomux.fileExplorerOpen.v1', {json.dumps(str(file_explorer_open_intent))}); }} catch (error) {{}}
+        """
     stub_script = """
       window.__bootErrors = [];
       window.__bootRejections = [];
       window.__bootFetches = [];
       window.__bootSockets = [];
+      window.__eventSources = [];
       window.__terminalOpened = 0;
       window.__settingsMtime = 0;
       window.__settingsPayload = JSON.parse(document.getElementById('yolomux-bootstrap').textContent).settingsPayload;
@@ -1251,8 +1257,9 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
       }
       window.WebSocket = FakeWebSocket;
       window.EventSource = class {
-        constructor(url) { this.url = String(url); this.listeners = {}; }
+        constructor(url) { this.url = String(url); this.listeners = {}; window.__eventSources.push(this); }
         addEventListener(name, callback) { this.listeners[name] = callback; }
+        emit(name, payload = {}) { this.listeners[name]?.({data: JSON.stringify(payload)}); }
         close() { this.closed = true; }
       };
       function jsonResponse(payload, status = 200) {
@@ -1288,7 +1295,7 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
         if (url.pathname === '/api/notify') return jsonResponse({enabled: false});
         if (url.pathname === '/api/ensure-session') return jsonResponse({ok: true, created: false});
         if (url.pathname === '/api/auto-approve') {
-          return jsonResponse({
+          return jsonResponse(window.__fixtureAutoApprovePayload || {
             session_order: window.__fixtureSessions,
             sessions: Object.fromEntries(window.__fixtureSessions.map(session => [session, {target: session, enabled: false, last_action: 'off'}])),
             rules: {path: '/home/test/.config/yolomux/yolo-rules.yaml', source: 'default', rules: [], errors: []},
@@ -1396,7 +1403,9 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
           window.__fixtureSessionFilesPayload = {json.dumps(session_files_payload, separators=(",", ":"))};
           window.__fixtureSessionFilesPayloads = {json.dumps(session_files_payloads or {}, separators=(",", ":"))};
           window.__fixtureFsEntries = {json.dumps(fs_entries, separators=(",", ":"))};
+          window.__fixtureAutoApprovePayload = {json.dumps(auto_approve_payload, separators=(",", ":")) if auto_approve_payload is not None else "null"};
         </script>
+        <script>{file_explorer_intent_script}</script>
         <script>{stub_script}</script>
         <script src="{dockview_script_uri}"></script>
         <script src="{script_uri}"></script>
@@ -1582,6 +1591,7 @@ def load_live_runtime_boot_fixture(browser, tmp_path, search="", **fixture_kwarg
 
 def load_dockview_runtime_boot_fixture(browser, tmp_path, search="", **fixture_kwargs):
     browser.set_window_size(1200, 700)
+    fixture_kwargs.setdefault("file_explorer_open_intent", "0")
     load_live_runtime_boot_fixture(browser, tmp_path, search, **fixture_kwargs)
 
 
@@ -1947,6 +1957,68 @@ def test_generated_app_boots_live_runtime_without_browser_errors(browser, tmp_pa
     assert metrics["paneTabCount"] >= 1
     assert metrics["panelVisible"]
     assert metrics["terminalText"] == "fake terminal"
+
+
+def test_client_events_ready_refetches_yolo_marker_after_reconnect(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        sessions=["1"],
+        auto_approve_payload={
+            "session_order": ["1"],
+            "sessions": {"1": {"target": "1", "enabled": False, "last_action": "off", "screen": {"key": "idle"}}},
+            "rules": {"path": "/home/test/.config/yolomux/yolo-rules.yaml", "source": "default", "rules": [], "errors": []},
+        },
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return window.__terminalOpened >= 1 && document.querySelector('[data-yolo-session=\"1\"]') !== null"
+        )
+    )
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const markerBefore = document.querySelector('[data-yolo-session="1"]');
+          const source = (window.__eventSources || []).find(item => item.url === '/api/client-events');
+          if (!markerBefore || !source) return {error: 'missing marker or client-events source'};
+          const beforeWorking = markerBefore.classList.contains('working');
+          window.__fixtureAutoApprovePayload = {
+            session_order: ['1'],
+            sessions: {'1': {target: '1', enabled: false, last_action: 'off', screen: {key: 'working'}}},
+            rules: {path: '/home/test/.config/yolomux/yolo-rules.yaml', source: 'default', rules: [], errors: []},
+          };
+          clientEventsConnected = false;
+          source.emit('ready');
+          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const waitFor = async predicate => {
+            for (let attempt = 0; attempt < 90; attempt += 1) {
+              if (predicate()) return true;
+              await frame();
+            }
+            return false;
+          };
+          const ready = await waitFor(() => document.querySelector('[data-yolo-session="1"]')?.classList.contains('working'));
+          const markerAfter = document.querySelector('[data-yolo-session="1"]');
+          return {
+            beforeWorking,
+            ready,
+            connected: clientEventsConnected,
+            className: markerAfter?.className || '',
+            autoApproveFetches: window.__bootFetches.filter(item => item.path === '/api/auto-approve').length,
+            errors: window.__bootErrors,
+            rejections: window.__bootRejections,
+          };
+        })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
+        """
+    )
+    assert "error" not in result, result
+    assert result["beforeWorking"] is False, result
+    assert result["ready"] is True, result
+    assert result["connected"] is True, result
+    assert result["autoApproveFetches"] >= 2, result
+    assert result["errors"] == []
+    assert result["rejections"] == []
 
 
 def test_dockview_tabs_keep_yolomux_active_inactive_style(browser, tmp_path):
@@ -4378,6 +4450,89 @@ def test_dockview_finder_drop_previews_are_bottom_only_and_size_gated(browser, t
     assert too_small["intent"] is None, too_small
     assert too_small["prevented"] is True, too_small
     assert too_small["rootPreview"] is False, too_small
+
+
+def test_dockview_finder_survives_hidden_host_adoption_and_reshow(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=row@28(left,slot1)&tabs=left:files;slot1:1",
+        sessions=["1"],
+        grid_width=1000,
+        grid_height=620,
+        file_explorer_open_intent="1",
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return document.querySelector('.dockview-pane-tab[data-pane-tab="__files__"]')?.closest('.dv-groupview')?.getBoundingClientRect().width > 0;
+            """
+        )
+    )
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const waitFor = async predicate => {
+            for (let attempt = 0; attempt < 120; attempt += 1) {
+              if (predicate()) return true;
+              await frame();
+            }
+            return false;
+          };
+          const finderGroup = () => document.querySelector('.dockview-pane-tab[data-pane-tab="__files__"]')?.closest('.dv-groupview') || null;
+          const widthOf = group => Math.round(group?.getBoundingClientRect?.().width || 0);
+          const host = dockviewLayoutState.host;
+          const api = dockviewLayoutState.api;
+          if (!host || !api) return {error: 'dockview host or api missing'};
+          const beforeWidth = widthOf(finderGroup());
+          const beforeSlot = slotForSession(fileExplorerItemId);
+          const originalToJSON = api.toJSON.bind(api);
+          const finderless = emptyLayoutSlots();
+          finderless[layoutTreeKey] = leafNode('left');
+          finderless.left = paneStateWithTabs(['1'], '1');
+          const finderlessJson = dockviewJsonFromLayoutSlots(finderless);
+          api.toJSON = () => finderlessJson;
+          host.style.display = 'none';
+          adoptDockviewLayout();
+          const hiddenHasFinder = itemInLayout(fileExplorerItemId);
+          const hiddenSlot = slotForSession(fileExplorerItemId);
+          host.style.display = '';
+          dockviewLayoutToHost();
+          adoptDockviewLayout();
+          const restored = await waitFor(() => itemInLayout(fileExplorerItemId) && widthOf(finderGroup()) > 0);
+          const afterWidth = widthOf(finderGroup());
+          const afterSlot = slotForSession(fileExplorerItemId);
+          api.toJSON = originalToJSON;
+          return {
+            beforeWidth,
+            beforeSlot,
+            hiddenHasFinder,
+            hiddenSlot,
+            restored,
+            afterWidth,
+            afterSlot,
+            tabs: Array.from(document.querySelectorAll('.dockview-pane-tab')).map(tab => tab.dataset.paneTab || ''),
+            url: location.search,
+            errors: window.__bootErrors,
+            rejections: window.__bootRejections,
+          };
+        })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
+        """
+    )
+    assert "error" not in result, result
+    assert result["beforeWidth"] > 0, result
+    assert result["beforeSlot"], result
+    assert result["hiddenHasFinder"] is True, result
+    assert result["hiddenSlot"] == result["beforeSlot"], result
+    assert result["restored"] is True, result
+    assert result["afterWidth"] > 0, result
+    assert result["afterSlot"], result
+    assert "__files__" in result["tabs"], result
+    assert result["errors"] == []
+    assert result["rejections"] == []
 
 
 def test_dockview_root_bottom_preview_preserves_docked_finder_column(browser, tmp_path):

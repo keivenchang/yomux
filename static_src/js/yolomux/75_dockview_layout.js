@@ -7,6 +7,8 @@ const DRAG_HYSTERESIS_PX = 8;            // px a pointer must move before a head
 const PANE_DRAG_SUPPRESS_MS = 500;       // window after a pane drag during which pointer events are ignored
 const SPLIT_PCT_EPSILON = 0.01;          // split-percent diffs below this are treated as equal (no re-layout)
 const SERIALIZED_WEIGHT_BASE = 1000;     // Dockview gridview node weight base for serialization
+const DOCKVIEW_MIN_LAYOUT_WIDTH = 640;   // enough room for a serialized Finder + content pane snapshot
+const DOCKVIEW_MIN_LAYOUT_HEIGHT = 240;  // prevents sleep/hidden-tab 1px layouts from serializing
 const dockviewLayoutState = {
   api: null,
   host: null,
@@ -681,9 +683,27 @@ function dockviewInstallFileDropBridge(host) {
 
 function dockviewLayoutToHost(api = dockviewLayoutState.api, host = dockviewLayoutState.host) {
   if (!api || !host) return;
-  const width = Math.max(1, Math.round(host.clientWidth || host.getBoundingClientRect?.().width || 1));
-  const height = Math.max(1, Math.round(host.clientHeight || host.getBoundingClientRect?.().height || 1));
+  const size = dockviewHostLayoutSize(host);
+  const width = Math.max(1, Math.round(size.width || 0));
+  const height = Math.max(1, Math.round(size.height || 0));
   api.layout?.(width, height);
+}
+
+function dockviewHostLayoutSize(host = dockviewLayoutState.host) {
+  if (!host) return {width: DOCKVIEW_MIN_LAYOUT_WIDTH, height: DOCKVIEW_MIN_LAYOUT_HEIGHT};
+  const rect = host.getBoundingClientRect?.();
+  const width = Number(host.clientWidth || rect?.width || 0);
+  const height = Number(host.clientHeight || rect?.height || 0);
+  return {
+    width: Number.isFinite(width) ? width : 0,
+    height: Number.isFinite(height) ? height : 0,
+  };
+}
+
+function dockviewHostCanAdoptLayout(host = dockviewLayoutState.host) {
+  if (!host) return true;
+  const {width, height} = dockviewHostLayoutSize(host);
+  return width > 1 && height > 1;
 }
 
 function dockviewInstallHostResizeObserver(host, api) {
@@ -817,6 +837,7 @@ function dockviewInit() {
     dockviewInstallHostResizeObserver(host, api),
     dockviewInstallTabPointerReorderFallback(),
     api.onDidLayoutChange(() => queueDockviewLayoutAdoption()),
+    api.onDidRemoveGroup?.(group => dockviewHandleRemovedGroup(group)),
     api.onDidActivePanelChange(panel => {
       if (dockviewLayoutState.applyingFromLayout) return;
       const item = panel?.id || '';
@@ -968,6 +989,7 @@ function dockviewJsonFromLayoutSlots(slots = layoutSlots) {
   const tree = slots?.[layoutTreeKey] || legacyLayoutTree(slots);
   const rootOrientation = dockviewOrientationForSplit(tree?.split === 'column' ? 'column' : 'row');
   const panelItems = paneItems(slots);
+  const size = dockviewHostLayoutSize(dockviewLayoutState.host || grid);
   const panels = {};
   for (const item of panelItems) {
     panels[item] = {
@@ -984,8 +1006,8 @@ function dockviewJsonFromLayoutSlots(slots = layoutSlots) {
   return {
     grid: {
       root: dockviewSerializedNodeFromLayout(tree, slots, rootOrientation),
-      height: Math.max(1, Math.round(grid?.clientHeight || window.innerHeight || 1)),
-      width: Math.max(1, Math.round(grid?.clientWidth || window.innerWidth || 1)),
+      height: Math.max(DOCKVIEW_MIN_LAYOUT_HEIGHT, Math.round(size.height || window.innerHeight || 0)),
+      width: Math.max(DOCKVIEW_MIN_LAYOUT_WIDTH, Math.round(size.width || window.innerWidth || 0)),
       orientation: rootOrientation,
     },
     panels,
@@ -1063,6 +1085,7 @@ function adoptDockviewLayout() {
   dockviewLayoutState.syncQueued = false;
   const api = dockviewLayoutState.api;
   if (!api || dockviewLayoutState.applyingFromLayout) return;
+  if (!dockviewHostCanAdoptLayout()) return;
   let next = layoutSlotsFromDockviewJson(api.toJSON());
   const previousFinderSlot = slotForItem(fileExplorerItemId, layoutSlots);
   if (previousFinderSlot && !itemInLayout(fileExplorerItemId, next)) {
@@ -1123,6 +1146,30 @@ function layoutSlotsFromDockviewJson(data, previous = layoutSlots) {
   next[layoutTreeKey] = parse(data?.grid?.root, data?.grid?.orientation || 'HORIZONTAL');
   preserveDockviewDockedFileExplorerSplit(next, previous);
   return compactLayoutSlots(next);
+}
+
+function dockviewGroupId(group) {
+  return String(group?.id || group?.api?.id || group?.model?.id || group?.data?.id || '');
+}
+
+function dockviewRemovedGroupItems(group) {
+  const raw = [
+    ...(Array.isArray(group?.panels) ? group.panels : []),
+    ...(Array.isArray(group?.api?.panels) ? group.api.panels : []),
+    ...(Array.isArray(group?.model?.panels) ? group.model.panels : []),
+  ];
+  return raw
+    .map(panel => resolveLayoutItem(panel?.id || panel?.api?.id || panel?.data?.id || panel))
+    .filter(item => isLayoutItem(item));
+}
+
+function dockviewHandleRemovedGroup(group) {
+  const items = dockviewRemovedGroupItems(group);
+  const groupId = dockviewGroupId(group);
+  const slot = dockviewLayoutState.groupSlots.get(groupId) || layoutSlotName(groupId);
+  if (!items.includes(fileExplorerItemId) && !(slot && paneTabs(slot).includes(fileExplorerItemId))) return;
+  dockviewLayoutState.reloadAfterAdoption = true;
+  queueDockviewLayoutAdoption();
 }
 
 function preserveDockviewDockedFileExplorerSplit(next, previous = layoutSlots) {

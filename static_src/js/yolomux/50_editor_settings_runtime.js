@@ -892,6 +892,10 @@ function renewServerWatchRootsFromRuntime() {
 function installRuntimeIntervals() {
   resetRuntimeInterval('latency', updateLatency, latencyRefreshMs);
   resetRuntimeInterval('events', refreshOpenEventLogs, eventLogRefreshMs);
+  resetRuntimeInterval('auto-approve', () => {
+    if (clientEventsConnected === true) return null;
+    return refreshAutoStatuses();
+  }, autoApproveDisconnectedPollMs);
   resetRuntimeInterval('server-watch-renew', renewServerWatchRootsFromRuntime, 60000);
   if (fileExplorerMode === 'tabber') {
     resetRuntimeInterval('tabber-activity', () => { if (fileExplorerMode === 'tabber') fetchTabberActivity(); }, tabberActivityRefreshMs);

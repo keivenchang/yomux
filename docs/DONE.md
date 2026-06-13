@@ -4,6 +4,15 @@ Archive of completed YOLOmux work, newest first. Concise by design — the full 
 
 Unless an entry says otherwise, every item shipped with the standard check gate green (`tools/check.py`: py_compile, `static_build.py --check`, both `node --check`, `node tests/layout_url.test.js`, full pytest, `git diff --check`). Entries call out only verification that goes BEYOND that gate (live user confirmation, focused browser repros, notable test counts).
 
+## 2026-06-13
+
+### DOIT.65 Finder/Differ self-heal and reconnect resync
+- Completed and removed the new `DOIT.65.md`. Finder/Differ/Tabber now self-heals if URL parsing, Dockview adoption, reconnect, wake, hidden-tab measurement, or resize work produces a layout that lost the reserved pane without an explicit user close. Intentional close is stored per browser tab, so `Mod+B`, File -> Finder, and the close button keep the pane hidden until the user restores it.
+- Dockview hardening now skips adoption while the host has zero measurable area, gives Finder/Differ groups a Dockview min-width floor, re-queues recovery if Dockview removes the Finder group, and clamps serialized snapshot dimensions to functional minimums without forcing visible small hosts to overflow.
+- Client-events reconnect now backfills auto-approve state so stale YO markers resync immediately on `ready`. Page wake and browser `online` schedule the shared refresh path, and a narrow auto-status fallback poll runs only while the client-events stream is disconnected.
+- Preserved the larger edge-pinned-tab architecture proposal in `docs/TODO.md` as future work instead of keeping an active DOIT file open for a multi-day refactor.
+- Verification: `node tests/layout_url.test.js`, `python3 -m pytest tests/test_browser_layout.py::test_client_events_ready_refetches_yolo_marker_after_reconnect tests/test_browser_layout.py::test_dockview_finder_survives_hidden_host_adoption_and_reshow -q` (2 passed), and the final full standard gate `python3 tools/check.py` (`CHECK PASSED in 15.11s`).
+
 ## 2026-06-12
 
 ### DOIT.65 Differ tab home and physical-file editor identity

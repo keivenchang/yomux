@@ -66,6 +66,8 @@ This document is the working GUI contract for pane, tab, Finder/Differ, editor, 
 
 - Finder/Differ is a real pane in the layout, not an overlay.
 - Finder/Differ/Tabber are three modes of the same reserved pane. Dockview adoption, Tabber refresh, Differ refresh, and Finder refresh must preserve that pane and its current tree position unless the user explicitly hides it with the close button, File -> Finder toggle, or the Finder shortcut.
+- Finder/Differ must self-heal when a URL parse, Dockview adoption, reconnect, wake, hidden-tab measurement, or resize path produces a layout that lost the reserved pane without an explicit user close. Explicit close intent is per browser tab and suppresses self-heal until the user restores Finder/Differ.
+- Dockview must not adopt a layout snapshot while its host is hidden or measured at zero area. A visible small host still lays out at its real size; only serialized snapshots use functional fallback dimensions so a sleep/hidden-tab measurement cannot become the persisted layout.
 - Finder/Differ is reserved as a target. Nothing can be dropped into its center, left edge, right edge, or top edge.
 - The only allowed drop onto Finder/Differ is the bottom edge, and only when Finder/Differ is large enough for the existing Finder/Differ pane and the incoming tab after the split.
 - Finder/Differ itself is not draggable as a layout tab. Dragging Finder/Differ must not advertise a pane split, root split, or gutter split.
@@ -85,6 +87,10 @@ This document is the working GUI contract for pane, tab, Finder/Differ, editor, 
 - Finder Sync mode `Expand all` is bounded to the sync plan: expand affected repo/directories such as the active `yolomux.dev2` path and do not recursively crawl every directory under a broad home root. Fixed-root Finder mode may still recursively expand the current root.
 - Differ's target session is committed only by explicit user intent: clicking/selecting a pane or typing/pasting/inserting input into a terminal. Hover auto-focus, passive xterm focus, pointerenter pane selection, background refresh, SSE updates, and tab-hover popovers must not switch the Differ session or fetch another session's changed-files payload.
 - The Finder path field shows its invalid (red) state only on a real directory-open failure, scoped to that exact path. A deferred or suppressed background refresh — the SSE push channel will supply the listing, a push refresh is mid-flight, or a fresh cache hit — is not a failure and must never flag the field, and a recorded error for one path must not taint another. (Otherwise the path flashed red for ~one push cycle whenever an idle background refresh was skipped.)
+
+## Reconnect And Wake Rules
+
+- Client-events reconnect must backfill live auto-approve status so YO markers reflect the current working/idle state immediately after the stream is ready again. Page visibility returning to visible and browser `online` events must schedule the shared refresh path, and a narrow auto-status fallback poll may run only while the client-events stream is disconnected.
 
 ## Tabber Pane Rules
 
@@ -195,6 +201,7 @@ This document is the working GUI contract for pane, tab, Finder/Differ, editor, 
 ## Current Test Coverage
 
 - `tests/layout_url.test.js` guards layout serialization, legacy `changes` URL migration, old four-pane URL migration, Finder/Differ reserved drop rules, min-size drop gating, source structure for Dockview root/pane/file drop hooks, tab insertion placement math, empty tab-strip end drops, file-drag payload shape, Markdown task toggles, Finder/Differ shared row helpers, search image/file reference quoting, shortcut overlay honesty, and many source-level invariants.
+- `tests/layout_url.test.js` guards Finder/Differ self-heal for Finder-less normalized layouts, explicit per-tab close intent, zero-area Dockview adoption skips, removed-group recovery, Dockview Finder min-width and serialized-dimension floors, client-events ready auto-status backfill, wake/online resync, and disconnected-only auto-status fallback polling.
 - `tests/layout_url.test.js` guards file-editor physical identity dedupe for symlink aliases, same-path concurrent open convergence, dirty-buffer preservation, and Differ re-open preserving the moved tab's current pane.
 - `tests/layout_url.test.js` guards the terminal file-drop action registry: category detection, agent-vs-shell filtering, insert-path ordering, shell command quoting, multi-file prompt actions, custom action parsing, per-category action memory, server-action endpoint usage, command-palette reuse, and `Copy image` context-menu exposure.
 - `tests/layout_url.test.js` includes a source x target x zone drag/drop matrix fixture that covers tabs, file rows, directory rows, Finder/Differ, normal panes, root edges, and gutters through the shared tab/file/path intent gates.
@@ -212,6 +219,7 @@ This document is the working GUI contract for pane, tab, Finder/Differ, editor, 
 - `tests/test_browser_layout.py::test_dockview_root_left_drag_shows_full_span_preview_before_drop` and `test_dockview_root_right_drag_shows_full_span_preview_before_drop` cover full-span root previews.
 - `tests/test_browser_layout.py::test_dockview_too_small_pane_edge_rejects_tab_preview` covers no preview for too-small target panes.
 - `tests/test_browser_layout.py::test_dockview_finder_drop_previews_are_bottom_only_and_size_gated` covers Finder/Differ reserved tab-drop previews and the bottom-only exception.
+- `tests/test_browser_layout.py::test_dockview_finder_survives_hidden_host_adoption_and_reshow` covers the sleep/hidden-host path: a zero-area Dockview adoption cannot drop Finder/Differ, and a later visible adoption re-docks it with non-zero width.
 - `tests/test_browser_layout.py::test_dockview_file_drag_from_finder_opens_in_target_pane_with_preview` covers Finder/Differ file drags into normal panes.
 - `tests/test_browser_layout.py::test_dockview_file_drag_to_finder_previews_only_roomy_bottom` covers Finder/Differ reserved file-drop previews and the bottom-only exception.
 - `tests/test_browser_layout.py::test_dockview_multi_file_drag_preserves_order_dedupes_and_uses_one_target` covers multi-file Finder/Differ drags: one preview, one target slot, stable insertion order, and deduped file-editor tabs.
@@ -220,6 +228,7 @@ This document is the working GUI contract for pane, tab, Finder/Differ, editor, 
 - `tests/test_browser_layout.py::test_dockview_docked_finder_sash_resize_updates_root_pct` covers Finder/Differ sash resize and nested content ratio preservation.
 - `tests/test_browser_layout.py::test_dockview_active_ring_follows_pane_spacing_without_thickening_sash`, `test_dockview_pane_spacing_multiple_values_keep_terminal_inside_ring`, `test_dockview_complex_layout_sash_hit_targets_stay_transparent`, and `test_dockview_hidden_inner_header_keeps_terminal_content_full_height` cover pane chrome, separators, and terminal/editor content geometry.
 - `tests/test_browser_layout.py::test_separator_color_preference_recolors_drop_previews` covers the separator color preference across tab insertion, pane preview, root preview, and file-drag preview.
+- `tests/test_browser_layout.py::test_client_events_ready_refetches_yolo_marker_after_reconnect` covers client-events reconnect backfilling auto-status so a stale YO marker starts spinning again without manual refresh.
 - `tests/test_browser_layout.py::test_markdown_preview_task_checkbox_updates_split_source_and_preview` covers clicking Markdown Preview task checkboxes while split source and preview panes are open, asserting both source and preview update.
 - `tests/layout_url.test.js` guards the platform app modifier, shortcut catalog, shortcut labels, Finder/Differ key intent map, Finder/Differ delete scoping, Preferences section order, Preference path rendering, settings defaults, and settings clamps.
 - `tests/test_drop_actions.py`, `tests/test_settings.py`, and `tests/test_server_query.py` guard the server-side file-action runners, Upload Preference defaults/round-trip behavior, and `/api/drop-action/run` routing.

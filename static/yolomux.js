@@ -69,6 +69,7 @@ const fileExplorerRepoInfoStorageKey = 'yolomux.fileExplorer.repoInfo.v1';
 const fileExplorerIndexedDirsStorageKey = 'yolomux.fileExplorer.indexedDirs.v1';
 const fileExplorerIndexedDirsMigratedKey = 'yolomux.fileExplorer.indexedDirs.migrated.v1';  // C11 #3
 const fileExplorerModeStorageKey = 'yolomux.fileExplorerMode.v1';
+const fileExplorerOpenIntentStorageKey = 'yolomux.fileExplorerOpen.v1';
 const fileExplorerTabberCollapsedStorageKey = 'yolomux.fileExplorer.tabberCollapsed.v1';
 const legacyFileExplorerChangesHiddenStorageKey = 'yolomux.fileExplorerChangesHidden';
 const changesFolderCollapsedStorageKey = 'yolomux.modifiedFiles.folderCollapsed.v1';
@@ -784,6 +785,9 @@ let transcriptMetaLoadError = '';
 let transcriptMetaRefreshPromise = null;
 let clientEventsSource = null;
 let clientEventsConnected = false;
+let reconnectResyncTimer = null;
+const reconnectResyncDebounceMs = 751;
+const autoApproveDisconnectedPollMs = 5003;
 let serverVersionReloadHandled = '';
 let activitySummaryPayload = {sessions: {}, global: {lines: []}, session_order: []};
 let activitySummaryRefreshing = false;
@@ -1310,6 +1314,29 @@ function storageSet(key, value) {
   try {
     window.localStorage?.setItem(key, String(value));
   } catch (_) {}
+}
+
+function sessionStorageGet(key, fallback = null) {
+  try {
+    const value = window.sessionStorage?.getItem(key);
+    return value == null ? fallback : value;
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function sessionStorageSet(key, value) {
+  try {
+    window.sessionStorage?.setItem(key, String(value));
+  } catch (_) {}
+}
+
+function fileExplorerClosedByUser() {
+  return sessionStorageGet(fileExplorerOpenIntentStorageKey) === '0';
+}
+
+function rememberFileExplorerOpenIntent(open) {
+  sessionStorageSet(fileExplorerOpenIntentStorageKey, open ? '1' : '0');
 }
 
 function safeJsonParse(raw, fallback = null) {
@@ -3509,6 +3536,9 @@ function fileExplorerNeedsLeftDock(slots = layoutSlots) {
 }
 
 function normalizeFileExplorerDock(slots) {
+  if (!itemInLayout(fileExplorerItemId, slots) && !fileExplorerClosedByUser() && paneItems(slots).length) {
+    return layoutWithFileExplorerDockedLeft(slots);
+  }
   return fileExplorerNeedsLeftDock(slots) ? layoutWithFileExplorerDockedLeft(slots) : slots;
 }
 
@@ -14983,6 +15013,10 @@ function renewServerWatchRootsFromRuntime() {
 function installRuntimeIntervals() {
   resetRuntimeInterval('latency', updateLatency, latencyRefreshMs);
   resetRuntimeInterval('events', refreshOpenEventLogs, eventLogRefreshMs);
+  resetRuntimeInterval('auto-approve', () => {
+    if (clientEventsConnected === true) return null;
+    return refreshAutoStatuses();
+  }, autoApproveDisconnectedPollMs);
   resetRuntimeInterval('server-watch-renew', renewServerWatchRootsFromRuntime, 60000);
   if (fileExplorerMode === 'tabber') {
     resetRuntimeInterval('tabber-activity', () => { if (fileExplorerMode === 'tabber') fetchTabberActivity(); }, tabberActivityRefreshMs);
@@ -16263,6 +16297,7 @@ function hiddenFromLayoutStatusMessage(item) {
 function removeSessionFromLayout(item, options = {}) {
   if (!itemInLayout(item)) return;
   const isFiles = isFileExplorerItem(item);
+  if (isFiles) rememberFileExplorerOpenIntent(false);
   applyLayoutSlots(layoutWithoutItem(item, {
     preserveRemovedSlot: !isFiles,
     preservePlaceholders: !isFiles,
@@ -16275,6 +16310,7 @@ function removePaneFromLayout(item) {
   const slot = slotForSession(item);
   if (!slot) return;
   const moved = paneTabs(slot);
+  if (moved.includes(fileExplorerItemId)) rememberFileExplorerOpenIntent(false);
   applyLayoutSlots(layoutWithoutSlot(slot, {preserveRemovedSlot: shouldPreserveClosedPaneSlot(slot)}), {
     message: moved.length ? `${moved.map(itemLabel).join(', ')} hidden from layout` : '',
   });
@@ -16509,6 +16545,7 @@ function layoutWithFileExplorerDockedLeft(slots = layoutSlots, options = {}) {
 }
 
 function dockFileExplorerPane() {
+  rememberFileExplorerOpenIntent(true);
   applyLayoutSlots(layoutWithFileExplorerDockedLeft(), {
     focusSession: fileExplorerItemId,
     prune: false,
@@ -16612,6 +16649,7 @@ function toggleFinderPane() {
 }
 
 async function openFileExplorerPane() {
+  rememberFileExplorerOpenIntent(true);
   const currentSlot = slotForSession(fileExplorerItemId);
   if (currentSlot) {
     if (paneTabs(currentSlot).length === 1 && !fileExplorerNeedsLeftDock()) {
@@ -18366,6 +18404,8 @@ const DRAG_HYSTERESIS_PX = 8;            // px a pointer must move before a head
 const PANE_DRAG_SUPPRESS_MS = 500;       // window after a pane drag during which pointer events are ignored
 const SPLIT_PCT_EPSILON = 0.01;          // split-percent diffs below this are treated as equal (no re-layout)
 const SERIALIZED_WEIGHT_BASE = 1000;     // Dockview gridview node weight base for serialization
+const DOCKVIEW_MIN_LAYOUT_WIDTH = 640;   // enough room for a serialized Finder + content pane snapshot
+const DOCKVIEW_MIN_LAYOUT_HEIGHT = 240;  // prevents sleep/hidden-tab 1px layouts from serializing
 const dockviewLayoutState = {
   api: null,
   host: null,
@@ -19040,9 +19080,27 @@ function dockviewInstallFileDropBridge(host) {
 
 function dockviewLayoutToHost(api = dockviewLayoutState.api, host = dockviewLayoutState.host) {
   if (!api || !host) return;
-  const width = Math.max(1, Math.round(host.clientWidth || host.getBoundingClientRect?.().width || 1));
-  const height = Math.max(1, Math.round(host.clientHeight || host.getBoundingClientRect?.().height || 1));
+  const size = dockviewHostLayoutSize(host);
+  const width = Math.max(1, Math.round(size.width || 0));
+  const height = Math.max(1, Math.round(size.height || 0));
   api.layout?.(width, height);
+}
+
+function dockviewHostLayoutSize(host = dockviewLayoutState.host) {
+  if (!host) return {width: DOCKVIEW_MIN_LAYOUT_WIDTH, height: DOCKVIEW_MIN_LAYOUT_HEIGHT};
+  const rect = host.getBoundingClientRect?.();
+  const width = Number(host.clientWidth || rect?.width || 0);
+  const height = Number(host.clientHeight || rect?.height || 0);
+  return {
+    width: Number.isFinite(width) ? width : 0,
+    height: Number.isFinite(height) ? height : 0,
+  };
+}
+
+function dockviewHostCanAdoptLayout(host = dockviewLayoutState.host) {
+  if (!host) return true;
+  const {width, height} = dockviewHostLayoutSize(host);
+  return width > 1 && height > 1;
 }
 
 function dockviewInstallHostResizeObserver(host, api) {
@@ -19176,6 +19234,7 @@ function dockviewInit() {
     dockviewInstallHostResizeObserver(host, api),
     dockviewInstallTabPointerReorderFallback(),
     api.onDidLayoutChange(() => queueDockviewLayoutAdoption()),
+    api.onDidRemoveGroup?.(group => dockviewHandleRemovedGroup(group)),
     api.onDidActivePanelChange(panel => {
       if (dockviewLayoutState.applyingFromLayout) return;
       const item = panel?.id || '';
@@ -19327,6 +19386,7 @@ function dockviewJsonFromLayoutSlots(slots = layoutSlots) {
   const tree = slots?.[layoutTreeKey] || legacyLayoutTree(slots);
   const rootOrientation = dockviewOrientationForSplit(tree?.split === 'column' ? 'column' : 'row');
   const panelItems = paneItems(slots);
+  const size = dockviewHostLayoutSize(dockviewLayoutState.host || grid);
   const panels = {};
   for (const item of panelItems) {
     panels[item] = {
@@ -19343,8 +19403,8 @@ function dockviewJsonFromLayoutSlots(slots = layoutSlots) {
   return {
     grid: {
       root: dockviewSerializedNodeFromLayout(tree, slots, rootOrientation),
-      height: Math.max(1, Math.round(grid?.clientHeight || window.innerHeight || 1)),
-      width: Math.max(1, Math.round(grid?.clientWidth || window.innerWidth || 1)),
+      height: Math.max(DOCKVIEW_MIN_LAYOUT_HEIGHT, Math.round(size.height || window.innerHeight || 0)),
+      width: Math.max(DOCKVIEW_MIN_LAYOUT_WIDTH, Math.round(size.width || window.innerWidth || 0)),
       orientation: rootOrientation,
     },
     panels,
@@ -19422,6 +19482,7 @@ function adoptDockviewLayout() {
   dockviewLayoutState.syncQueued = false;
   const api = dockviewLayoutState.api;
   if (!api || dockviewLayoutState.applyingFromLayout) return;
+  if (!dockviewHostCanAdoptLayout()) return;
   let next = layoutSlotsFromDockviewJson(api.toJSON());
   const previousFinderSlot = slotForItem(fileExplorerItemId, layoutSlots);
   if (previousFinderSlot && !itemInLayout(fileExplorerItemId, next)) {
@@ -19482,6 +19543,30 @@ function layoutSlotsFromDockviewJson(data, previous = layoutSlots) {
   next[layoutTreeKey] = parse(data?.grid?.root, data?.grid?.orientation || 'HORIZONTAL');
   preserveDockviewDockedFileExplorerSplit(next, previous);
   return compactLayoutSlots(next);
+}
+
+function dockviewGroupId(group) {
+  return String(group?.id || group?.api?.id || group?.model?.id || group?.data?.id || '');
+}
+
+function dockviewRemovedGroupItems(group) {
+  const raw = [
+    ...(Array.isArray(group?.panels) ? group.panels : []),
+    ...(Array.isArray(group?.api?.panels) ? group.api.panels : []),
+    ...(Array.isArray(group?.model?.panels) ? group.model.panels : []),
+  ];
+  return raw
+    .map(panel => resolveLayoutItem(panel?.id || panel?.api?.id || panel?.data?.id || panel))
+    .filter(item => isLayoutItem(item));
+}
+
+function dockviewHandleRemovedGroup(group) {
+  const items = dockviewRemovedGroupItems(group);
+  const groupId = dockviewGroupId(group);
+  const slot = dockviewLayoutState.groupSlots.get(groupId) || layoutSlotName(groupId);
+  if (!items.includes(fileExplorerItemId) && !(slot && paneTabs(slot).includes(fileExplorerItemId))) return;
+  dockviewLayoutState.reloadAfterAdoption = true;
+  queueDockviewLayoutAdoption();
 }
 
 function preserveDockviewDockedFileExplorerSplit(next, previous = layoutSlots) {
@@ -31782,8 +31867,24 @@ function refreshAll() {
   refreshWatchedFilesystem();
 }
 
+function scheduleReconnectResync(reason = '') {
+  if (reconnectResyncTimer) clearTimeout(reconnectResyncTimer);
+  reconnectResyncTimer = setTimeout(() => {
+    reconnectResyncTimer = null;
+    refreshAll();
+  }, reconnectResyncDebounceMs);
+}
+
+function installReconnectResyncHandlers() {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') scheduleReconnectResync('visible');
+  });
+  window.addEventListener('online', () => scheduleReconnectResync('online'));
+}
+
 async function boot() {
   applySettingsPayload(clientSettingsPayload, {initial: true, force: true});
+  installReconnectResyncHandlers();
   installClientEventStream();
   // i18n: AWAIT the active locale catalog (all-static-fetch) before the first render so menus,
   // tabs, and the wordmark paint in the right language from the start — no flash of raw t() keys (the
@@ -31919,6 +32020,7 @@ function installClientEventStream() {
     clientEventsConnected = true;
     recordSseDebugEvent('ready', clientEventEnvelope(event), event);
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+    refreshAutoStatuses().catch(error => console.warn('client-events ready auto-status refresh failed', error));
   });
   source.addEventListener('ping', event => {
     clientEventsConnected = true;
@@ -32023,6 +32125,7 @@ function toggleFileExplorerShortcut() {
     return;
   }
   if (fileExplorerShortcutRestoreSlots && itemInLayout(fileExplorerItemId, fileExplorerShortcutRestoreSlots)) {
+    rememberFileExplorerOpenIntent(true);
     applyLayoutSlots(fileExplorerShortcutRestoreSlots, {
       prune: false,
       message: `${fileExplorerLabel()} restored`,
@@ -32030,6 +32133,7 @@ function toggleFileExplorerShortcut() {
     fileExplorerShortcutRestoreSlots = null;
     return;
   }
+  rememberFileExplorerOpenIntent(true);
   selectSession(fileExplorerItemId);
 }
 

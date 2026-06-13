@@ -2710,8 +2710,24 @@ function refreshAll() {
   refreshWatchedFilesystem();
 }
 
+function scheduleReconnectResync(reason = '') {
+  if (reconnectResyncTimer) clearTimeout(reconnectResyncTimer);
+  reconnectResyncTimer = setTimeout(() => {
+    reconnectResyncTimer = null;
+    refreshAll();
+  }, reconnectResyncDebounceMs);
+}
+
+function installReconnectResyncHandlers() {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') scheduleReconnectResync('visible');
+  });
+  window.addEventListener('online', () => scheduleReconnectResync('online'));
+}
+
 async function boot() {
   applySettingsPayload(clientSettingsPayload, {initial: true, force: true});
+  installReconnectResyncHandlers();
   installClientEventStream();
   // i18n: AWAIT the active locale catalog (all-static-fetch) before the first render so menus,
   // tabs, and the wordmark paint in the right language from the start — no flash of raw t() keys (the
@@ -2847,6 +2863,7 @@ function installClientEventStream() {
     clientEventsConnected = true;
     recordSseDebugEvent('ready', clientEventEnvelope(event), event);
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+    refreshAutoStatuses().catch(error => console.warn('client-events ready auto-status refresh failed', error));
   });
   source.addEventListener('ping', event => {
     clientEventsConnected = true;
@@ -2951,6 +2968,7 @@ function toggleFileExplorerShortcut() {
     return;
   }
   if (fileExplorerShortcutRestoreSlots && itemInLayout(fileExplorerItemId, fileExplorerShortcutRestoreSlots)) {
+    rememberFileExplorerOpenIntent(true);
     applyLayoutSlots(fileExplorerShortcutRestoreSlots, {
       prune: false,
       message: `${fileExplorerLabel()} restored`,
@@ -2958,6 +2976,7 @@ function toggleFileExplorerShortcut() {
     fileExplorerShortcutRestoreSlots = null;
     return;
   }
+  rememberFileExplorerOpenIntent(true);
   selectSession(fileExplorerItemId);
 }
 

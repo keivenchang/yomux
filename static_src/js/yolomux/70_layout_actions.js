@@ -34,6 +34,7 @@ function hiddenFromLayoutStatusMessage(item) {
 function removeSessionFromLayout(item, options = {}) {
   if (!itemInLayout(item)) return;
   const isFiles = isFileExplorerItem(item);
+  if (isFiles) rememberFileExplorerOpenIntent(false);
   applyLayoutSlots(layoutWithoutItem(item, {
     preserveRemovedSlot: !isFiles,
     preservePlaceholders: !isFiles,
@@ -46,6 +47,7 @@ function removePaneFromLayout(item) {
   const slot = slotForSession(item);
   if (!slot) return;
   const moved = paneTabs(slot);
+  if (moved.includes(fileExplorerItemId)) rememberFileExplorerOpenIntent(false);
   applyLayoutSlots(layoutWithoutSlot(slot, {preserveRemovedSlot: shouldPreserveClosedPaneSlot(slot)}), {
     message: moved.length ? `${moved.map(itemLabel).join(', ')} hidden from layout` : '',
   });
@@ -280,6 +282,7 @@ function layoutWithFileExplorerDockedLeft(slots = layoutSlots, options = {}) {
 }
 
 function dockFileExplorerPane() {
+  rememberFileExplorerOpenIntent(true);
   applyLayoutSlots(layoutWithFileExplorerDockedLeft(), {
     focusSession: fileExplorerItemId,
     prune: false,
@@ -383,6 +386,7 @@ function toggleFinderPane() {
 }
 
 async function openFileExplorerPane() {
+  rememberFileExplorerOpenIntent(true);
   const currentSlot = slotForSession(fileExplorerItemId);
   if (currentSlot) {
     if (paneTabs(currentSlot).length === 1 && !fileExplorerNeedsLeftDock()) {

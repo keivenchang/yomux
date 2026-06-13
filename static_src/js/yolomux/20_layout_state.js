@@ -344,6 +344,9 @@ function fileExplorerNeedsLeftDock(slots = layoutSlots) {
 }
 
 function normalizeFileExplorerDock(slots) {
+  if (!itemInLayout(fileExplorerItemId, slots) && !fileExplorerClosedByUser() && paneItems(slots).length) {
+    return layoutWithFileExplorerDockedLeft(slots);
+  }
   return fileExplorerNeedsLeftDock(slots) ? layoutWithFileExplorerDockedLeft(slots) : slots;
 }
 

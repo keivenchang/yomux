@@ -2,6 +2,7 @@ const assert = require('assert');
 const fs = require('fs');
 const UI_PINS = JSON.parse(fs.readFileSync('tests/ui_pins.json', 'utf8'));  // shared color pins (see test_ui_pins.py)
 const vm = require('vm');
+const FILE_EXPLORER_OPEN_INTENT_STORAGE_KEY_FOR_TEST = 'yolomux.fileExplorerOpen.v1';
 
 class TestClassList {
   constructor() {
@@ -264,7 +265,7 @@ function assertSingleCiBadge(html, label) {
   assert.equal((html.match(/>CI<\/span>/g) || []).length, 1, `${label} renders exactly one CI badge`);
 }
 
-function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], protocol = 'http:', navigatorPlatform = 'Linux x86_64', accessRole = 'admin') {
+function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], protocol = 'http:', navigatorPlatform = 'Linux x86_64', accessRole = 'admin', options = {}) {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   const bootStart = source.indexOf("if (refreshMeta) {");
   assert.ok(bootStart > 0, 'could not find browser boot section');
@@ -285,10 +286,16 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
   const documentListeners = new Map();
   const windowListeners = new Map();
   const storage = new Map();
+  const sessionStorageMap = new Map(Object.entries(options.sessionStorage || {}).map(([key, value]) => [String(key), String(value)]));
   const localStorage = {
     getItem(key) { return storage.has(String(key)) ? storage.get(String(key)) : null; },
     setItem(key, value) { storage.set(String(key), String(value)); },
     removeItem(key) { storage.delete(String(key)); },
+  };
+  const sessionStorage = {
+    getItem(key) { return sessionStorageMap.has(String(key)) ? sessionStorageMap.get(String(key)) : null; },
+    setItem(key, value) { sessionStorageMap.set(String(key), String(value)); },
+    removeItem(key) { sessionStorageMap.delete(String(key)); },
   };
   const element = id => {
     if (!elements.has(id)) elements.set(id, new TestElement(id));
@@ -360,12 +367,14 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
       innerHeight: 800,
       innerWidth: 1200,
       localStorage,
+      sessionStorage,
       removeEventListener(type, listener) {
         const listeners = windowListeners.get(type) || [];
         windowListeners.set(type, listeners.filter(item => item !== listener));
       },
     },
     localStorage,
+    sessionStorage,
     __clipboardText: '',
     // the OSC 52 clipboard bridge decodes base64 UTF-8; expose the host implementations.
     atob,
@@ -661,7 +670,24 @@ globalThis.__layoutTestApi = {
   layoutSlotsSignature,
   dockviewJsonFromLayoutSlots,
   layoutSlotsFromDockviewJson,
-  adoptDockviewLayoutForTest(json) {
+  adoptDockviewLayoutForTest(json, hostRect = null) {
+    if (hostRect) {
+      const host = document.createElement('div');
+      host.id = 'dockviewHost';
+      host.clientWidth = Number(hostRect.width) || 0;
+      host.clientHeight = Number(hostRect.height) || 0;
+      host.rect = {
+        width: Number(hostRect.width) || 0,
+        height: Number(hostRect.height) || 0,
+        left: 0,
+        top: 0,
+        right: Number(hostRect.width) || 0,
+        bottom: Number(hostRect.height) || 0,
+      };
+      dockviewLayoutState.host = host;
+    } else {
+      dockviewLayoutState.host = null;
+    }
     dockviewLayoutState.api = {
       toJSON() { return json; },
       fromJSON() {},
@@ -671,6 +697,7 @@ globalThis.__layoutTestApi = {
     return layoutSlots;
   },
   dockviewLayoutContentSignature,
+  dockviewHostCanAdoptLayout,
   isPinnableTab,
   tabIsPinned,
   orderPaneTabs,
@@ -1030,6 +1057,9 @@ globalThis.__layoutTestApi = {
   resetInfoDescColumnWidthForTest: resetInfoDescColumnWidth,
   bindInfoColumnResizersForTest: bindInfoColumnResizers,
   storageValueForTest(key) { return localStorage.getItem(key); },
+  sessionStorageValueForTest(key) { return sessionStorage.getItem(key); },
+  rememberFileExplorerOpenIntentForTest: rememberFileExplorerOpenIntent,
+  fileExplorerClosedByUserForTest: fileExplorerClosedByUser,
   windowListenersForTest(type) { return [...(window.__listeners?.get?.(type) || [])]; },
   setSessionFilesPayloadForTest(payload) {
     fileExplorerSessionFilesPayload = payload;
@@ -1207,6 +1237,14 @@ globalThis.__layoutTestApi = {
     api.i18nSetCatalogForTest('en', JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8')));
   } catch (_) {}
   return api;
+}
+
+function fileExplorerClosedOptions() {
+  return {sessionStorage: {[FILE_EXPLORER_OPEN_INTENT_STORAGE_KEY_FOR_TEST]: '0'}};
+}
+
+function loadYolomuxWithFileExplorerClosed(search = '', sessions = ['1', '2', '3', '4', '5', '6'], protocol = 'http:', navigatorPlatform = 'Linux x86_64', accessRole = 'admin') {
+  return loadYolomux(search, sessions, protocol, navigatorPlatform, accessRole, fileExplorerClosedOptions());
 }
 
 function tabElement(session, left, width, top = 0) {
@@ -1416,6 +1454,7 @@ test('t@1212', () => {
   assert.equal(api.layoutFromParam('', ''), null, 'empty layout param falls back to default layout');
   assert.equal(api.layoutFromParam(null, ''), null, 'null layout param falls back to default layout');
   assert.equal(api.layoutFromParam('not-a-layout', ''), null, 'garbage layout param falls back to default layout');
+  api.rememberFileExplorerOpenIntentForTest(false);
   const slots = nestedSlots(api);
   const url = api.setLayoutSlotsForTest(slots);
   const params = parseUrl(url);
@@ -1438,12 +1477,12 @@ test('t@1212', () => {
   const highPctLayout = api.layoutFromParam('row@120(left,slot1)', 'left:1;slot1:2');
   assert.equal(api.serialize(highPctLayout).tree.pct, 95, 'layout parser clamps high split percentages');
 
-  const reloaded = loadYolomux(`?${url.split('?')[1] || ''}`);
+  const reloaded = loadYolomuxWithFileExplorerClosed(`?${url.split('?')[1] || ''}`);
   assert.deepStrictEqual(canonical(reloaded.serialize(reloaded.currentSlots())), canonical(api.serialize(slots)));
 });
 
 test('t@1243', () => {
-  const api = loadYolomux();
+  const api = loadYolomuxWithFileExplorerClosed();
   const oldPayload = {
     tree: {
       split: 'row',
@@ -1465,7 +1504,7 @@ test('t@1243', () => {
   assert.equal(params.get('tabs'), 'left:5,6*;slot1:1;slot2:3');
 
   const encodedOldSearch = `?sessions=6%2C1%2C3&layout=${encodeURIComponent(`tree:${JSON.stringify(oldPayload)}`)}`;
-  const reloaded = loadYolomux(encodedOldSearch);
+  const reloaded = loadYolomuxWithFileExplorerClosed(encodedOldSearch);
   assert.deepStrictEqual(canonical(reloaded.serialize(reloaded.currentSlots())), canonical(api.serialize(decoded)));
 
   const oldFourPanePayload = {
@@ -1511,7 +1550,7 @@ test('t@1243', () => {
 });
 
 test('t@1270', () => {
-  const api = loadYolomux('?sessions=3&layout=left&tabs=left:3,2');
+  const api = loadYolomuxWithFileExplorerClosed('?sessions=3&layout=left&tabs=left:3,2');
   assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
     tree: {slot: 'left'},
     panes: {
@@ -1533,7 +1572,7 @@ for (const legacyChangesToken of ['changes', '__changes__']) {
 
 test('t@1289', () => {
 for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
-  const api = loadYolomux(`?sessions=${yoagentToken}&layout=left&tabs=left:${yoagentToken}`, ['1']);
+  const api = loadYolomuxWithFileExplorerClosed(`?sessions=${yoagentToken}&layout=left&tabs=left:${yoagentToken}`, ['1']);
   assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
     tree: {slot: 'left'},
     panes: {left: {tabs: ['__info__'], active: '__info__'}},
@@ -4157,7 +4196,17 @@ test('t@2560', () => {
   assert.deepStrictEqual([...watchApi.visibleFileEditorWatchFilesForTest()], [backgroundPath], 'activating a background editor promotes it to the fast watch list');
   assert.deepStrictEqual([...watchApi.backgroundFileEditorWatchFilesForTest()], [visiblePath], 'the previously visible editor moves to the slower watch list');
 
-  const singlePaneUrlApi = loadYolomux('?sessions=1&layout=left&tabs=left:1,2,3,4,5,6,ant', ['1', '2', '3', '4', '5', '6', 'ant']);
+  const selfHealingFinderUrlApi = loadYolomux('?sessions=1&layout=left&tabs=left:1,2,3,4,5,6,ant', ['1', '2', '3', '4', '5', '6', 'ant']);
+  assert.equal(selfHealingFinderUrlApi.itemInLayout('__files__'), true, 'Finder-less URLs self-heal unless this tab explicitly closed Finder');
+  assert.deepStrictEqual(Array.from(selfHealingFinderUrlApi.layoutSlotKeys(selfHealingFinderUrlApi.currentSlots())), ['slot1', 'left']);
+  const singlePaneUrlApi = loadYolomux(
+    '?sessions=1&layout=left&tabs=left:1,2,3,4,5,6,ant',
+    ['1', '2', '3', '4', '5', '6', 'ant'],
+    'http:',
+    'Linux x86_64',
+    'admin',
+    fileExplorerClosedOptions(),
+  );
   assert.deepStrictEqual(Array.from(singlePaneUrlApi.layoutSlotKeys(singlePaneUrlApi.currentSlots())), ['left']);
   assert.deepStrictEqual(Array.from(singlePaneUrlApi.paneTabs('left')), ['1', '2', '3', '4', '5', '6', 'ant']);
   assert.equal(singlePaneUrlApi.canPaneExpand('1'), false);
@@ -4189,9 +4238,12 @@ test('t@2560', () => {
   const finderLayoutBeforeToggle = api.layoutParamValue(api.currentSlots());
   api.toggleFileExplorerShortcut();
   assert.equal(api.itemInLayout('__files__'), false, 'app shortcut hides the Finder pane');
+  assert.equal(api.sessionStorageValueForTest(FILE_EXPLORER_OPEN_INTENT_STORAGE_KEY_FOR_TEST), '0', 'hiding Finder records explicit per-tab close intent');
+  assert.equal(api.fileExplorerClosedByUserForTest(), true, 'Finder self-heal sees the explicit close intent');
   assert.equal(api.statusTextForTest(), `${api.fileExplorerLabel()} hidden - ${api.appShortcutText('B')} restores`, 'hiding Finder announces how to restore it');
   assert.equal(api.focusedPanelItemForTest(), '1', 'hiding Finder keeps focus on the active terminal');
   api.toggleFileExplorerShortcut();
+  assert.equal(api.sessionStorageValueForTest(FILE_EXPLORER_OPEN_INTENT_STORAGE_KEY_FOR_TEST), '1', 'restoring Finder records explicit per-tab open intent');
   assert.equal(api.layoutParamValue(api.currentSlots()), finderLayoutBeforeToggle, 'app shortcut restores the prior Finder position and split size');
   assert.equal(api.focusedPanelItemForTest(), '1', 'restoring Finder keeps focus on the active terminal');
 
@@ -6400,11 +6452,13 @@ test('t@2560', () => {
   normalSplit.left = api.paneStateWithTabs(['1'], '1');
   const extraPaneItem = api.registerFileEditorLayoutItem('/home/test/a.md');
   normalSplit.slot1 = api.paneStateWithTabs(['2', extraPaneItem], '2');
+  api.rememberFileExplorerOpenIntentForTest(false);
   api.setLayoutSlotsForTest(normalSplit);
   api.removePaneFromLayout('2');
   assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
     left: {tabs: ['1'], active: '1'},
   });
+  api.rememberFileExplorerOpenIntentForTest(true);
 
   const tmuxAndFinder = api.emptyLayoutSlots();
   tmuxAndFinder[api.layoutTreeKey] = api.splitNode('row', api.leafNode('slot1'), api.leafNode('left'), 78);
@@ -6500,6 +6554,11 @@ test('t@2560', () => {
   noFinderSplit[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
   noFinderSplit.left = api.paneStateWithTabs(['1'], '1');
   noFinderSplit.slot1 = api.paneStateWithTabs(['2'], '2');
+  api.rememberFileExplorerOpenIntentForTest(true);
+  assert.equal(api.itemInLayout('__files__', api.normalizeLayoutSlots(noFinderSplit)), true, 'normalization re-docks a missing Finder when it was not explicitly closed');
+  api.rememberFileExplorerOpenIntentForTest(false);
+  assert.equal(api.itemInLayout('__files__', api.normalizeLayoutSlots(noFinderSplit)), false, 'normalization keeps Finder hidden after an explicit per-tab close');
+  api.rememberFileExplorerOpenIntentForTest(true);
   api.setLayoutSlotsForTest(noFinderSplit);
   assert.deepStrictEqual(canonical(api.serialize(api.layoutWithFileExplorerDockedLeft())), {
     tree: {
@@ -6525,6 +6584,12 @@ test('t@2560', () => {
   const dockviewNextWithoutFinder = api.emptyLayoutSlots();
   dockviewNextWithoutFinder[api.layoutTreeKey] = api.leafNode('left');
   dockviewNextWithoutFinder.left = api.paneStateWithTabs(['1'], '1');
+  api.adoptDockviewLayoutForTest(api.dockviewJsonFromLayoutSlots(dockviewNextWithoutFinder), {width: 0, height: 0});
+  assert.deepStrictEqual(
+    canonical(api.serialize(api.currentSlots())),
+    canonical(api.serialize(dockviewPrevious)),
+    'Dockview adoption ignores 0-area host measurements so sleep/hidden-tab layouts cannot drop Finder',
+  );
   api.adoptDockviewLayoutForTest(api.dockviewJsonFromLayoutSlots(dockviewNextWithoutFinder));
   assert.equal(api.itemInLayout('__files__'), true, 'Dockview adoption re-docks Finder when a non-user commit drops it');
   assert.equal(api.slotForSession('__files__'), 'slot2', 'Dockview adoption preserves the previous Finder slot when possible');
@@ -6562,12 +6627,14 @@ test('t@2560', () => {
   expandedNormal[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
   expandedNormal.left = api.paneStateWithTabs(['1'], '1');
   expandedNormal.slot1 = api.paneStateWithTabs(['2'], '2');
+  api.rememberFileExplorerOpenIntentForTest(false);
   api.setLayoutSlotsForTest(expandedNormal);
   api.expandPaneFromLayout('2');
   assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
     tree: {slot: 'slot1'},
     panes: {slot1: {tabs: ['2', '1'], active: '2'}},
   });
+  api.rememberFileExplorerOpenIntentForTest(true);
 
   const expandedBesideFinder = api.emptyLayoutSlots();
   expandedBesideFinder[api.layoutTreeKey] = api.splitNode(
@@ -6707,6 +6774,7 @@ test('t@2560', () => {
   placeholderBesideSinglePane[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 40);
   placeholderBesideSinglePane.left = api.paneStateWithTabs(['1'], '1');
   placeholderBesideSinglePane.slot1 = api.emptyPlaceholderPaneState();
+  api.rememberFileExplorerOpenIntentForTest(false);
   api.setLayoutSlotsForTest(placeholderBesideSinglePane);
   assert.equal(api.canPaneExpand('1'), false);
   assert.ok(api.panelControlsHtml('1').includes('hidden type="button" data-pane-expand="1"'));
@@ -6728,6 +6796,7 @@ test('t@2560', () => {
     tree: {slot: 'left'},
     panes: {left: {tabs: ['1', '2', extraPaneItem], active: '1'}},
   });
+  api.rememberFileExplorerOpenIntentForTest(true);
 
   const finderOnly = api.emptyLayoutSlots();
   finderOnly[api.layoutTreeKey] = api.leafNode('left');
@@ -7298,6 +7367,7 @@ test('t@6359', () => {
   slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
   slots.left = api.paneStateWithTabs(['1', '__info__'], '1');
   slots.slot1 = api.paneStateWithTabs(['2'], '2');
+  api.rememberFileExplorerOpenIntentForTest(false);
   api.setLayoutSlotsForTest(slots);
 
   assert.equal(api.itemIsBackgroundPaneTab('__info__'), true);
@@ -8300,6 +8370,11 @@ test('t@7149', () => {
   assert.ok(source.includes('files: visibleFileEditorWatchFiles()'), 'watch state includes visible editor file paths for the fast files_changed stream');
   assert.ok(source.includes('background_files: backgroundFileEditorWatchFiles()'), 'watch state includes background editor file paths for the slower files_changed stream');
   assert.ok(source.includes("['settings_changed', 'auto_approve_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready']"), 'client listens for the expected push event types');
+  assert.ok(/addEventListener\('ready',[\s\S]{0,260}refreshAutoStatuses\(\)\.catch/.test(source), 'client-events ready re-fetches auto status so stale YO markers are backfilled after reconnect');
+  assert.ok(/function installReconnectResyncHandlers\(\)[\s\S]*document\.addEventListener\('visibilitychange'[\s\S]*document\.visibilityState === 'visible'[\s\S]*scheduleReconnectResync\('visible'\)[\s\S]*window\.addEventListener\('online'[\s\S]*scheduleReconnectResync\('online'\)/.test(source), 'page wake and network restore schedule a shared refreshAll resync');
+  assert.ok(/function scheduleReconnectResync\(reason = ''\)[\s\S]*setTimeout\(\(\) => \{[\s\S]*refreshAll\(\)/.test(source), 'wake/network reconnect resync is debounced before refreshAll');
+  const runtimeSrc = fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8');
+  assert.ok(runtimeSrc.includes("resetRuntimeInterval('auto-approve', () => {\n    if (clientEventsConnected === true) return null;\n    return refreshAutoStatuses();\n  }, autoApproveDisconnectedPollMs);"), 'auto-approve fallback poll only runs while client-events is disconnected');
   assert.ok(/if \(type === 'settings_changed'\)[\s\S]{0,220}applySettingsPayload\(payload\.data, \{force: true\}\)/.test(source), 'settings_changed applies direct payloads without polling settings again');
   assert.ok(/if \(type === 'auto_approve_changed'\)[\s\S]{0,120}applyAutoApprovePayload\(payload\.data\)/.test(source), 'auto_approve_changed applies direct payloads');
   assert.ok(/if \(type === 'watched_prs_changed'\)[\s\S]{0,120}applyWatchedPrsPayload\(payload\.data\)/.test(source), 'watched_prs_changed applies direct payloads');
@@ -9058,6 +9133,7 @@ test('t@7769', () => {
   assert.ok(/\.yolomux-dockview \.dv-groupview\s*\{[\s\S]*?border:\s*0;/.test(css), 'Dockview groups do not add a fat pane-spacing border around the skinny sash separator');
   assert.ok(/\.yolomux-dockview \.dv-groupview\s*\{[\s\S]*?padding:\s*var\(--pane-split-gap\);/.test(css), 'Dockview groups reserve pane-spacing width inside the active ring so terminals do not render under it');
   assert.ok(/\.yolomux-dockview \.dv-groupview::after\s*\{[\s\S]*?border:\s*var\(--pane-split-gap\) solid color-mix\(in srgb, var\(--panel-ring-color\) var\(--panel-ring-opacity\), transparent\)/.test(css), 'Dockview groups draw the active surround as a pane-spacing-width pseudo-ring without thickening the sash');
+  assert.ok(/\.yolomux-dockview \.dv-groupview:has\(\.file-explorer-panel\)\s*\{[\s\S]*?min-width:\s*var\(--file-pane-min-inline-size\)/.test(css), 'Dockview gives the docked Finder/Differ group a real min-width floor');
   assert.ok(/\.yolomux-dockview \.dv-groupview:has\(\.panel\.active-pane\),[\s\S]*?\.dv-groupview:has\(\.panel\.typing-ready-pane\)\s*\{[\s\S]*?--panel-ring-color:\s*var\(--pane-tab-panel-ring\)/.test(css), 'Dockview active/typing panes feed the same active ring color into the group pseudo-ring');
   assert.ok(/\.yolomux-dockview \.dockview-panel-content > \.panel\s*\{[\s\S]*?border-width:\s*0;/.test(css), 'Dockview-mounted panes do not keep the legacy pane-spacing border');
   assert.ok(/\.yolomux-dockview \.dockview-panel-content > \.panel\.dockview-inner-head-collapsed\s*\{[\s\S]*?grid-template-rows:\s*auto minmax\(0,\s*1fr\)/.test(css), 'Dockview-mounted panes switch from header/detail/content rows to detail/content rows when the inner header is hidden');
@@ -9097,6 +9173,11 @@ test('t@7769', () => {
   assert.ok(/function dockviewTrackRootBoundaryOverlay\(event\)[\s\S]*dockviewShowRootBoundaryPreview\(intent\)[\s\S]*event\.preventDefault\?\.\(\)/.test(dockviewSrc), 'Dockview root-band drags show the bounded YOLOmux preview and suppress the native full-width Dockview overlay');
   assert.ok(dockviewSrc.includes('createRightHeaderActionComponent: () => createDockviewHeaderActionsRenderer()'), 'Dockview renders YOLOmux pane controls in the Dockview header row');
   assert.ok(/function dockviewLayoutToHost[\s\S]*api\.layout\?\.\(width, height\)/.test(dockviewSrc), 'Dockview is explicitly laid out to the host size instead of staying at the default 100px shell');
+  assert.ok(dockviewSrc.includes('const DOCKVIEW_MIN_LAYOUT_WIDTH = 640') && dockviewSrc.includes('const DOCKVIEW_MIN_LAYOUT_HEIGHT = 240'), 'Dockview serialized fallback dimensions use functional minimums');
+  assert.ok(/function dockviewHostCanAdoptLayout\(host = dockviewLayoutState\.host\)[\s\S]*return width > 1 && height > 1/.test(dockviewSrc), 'Dockview adoption rejects hidden or zero-area hosts');
+  assert.ok(/function adoptDockviewLayout\(\)[\s\S]*if \(!dockviewHostCanAdoptLayout\(\)\) return/.test(dockviewSrc), 'Dockview skips adopting snapshots while the host has no measurable area');
+  assert.ok(/api\.onDidRemoveGroup\?\.\(group => dockviewHandleRemovedGroup\(group\)\)/.test(dockviewSrc), 'Dockview removed-group events queue Finder/Differ recovery');
+  assert.ok(/function dockviewJsonFromLayoutSlots\(slots = layoutSlots\)[\s\S]*Math\.max\(DOCKVIEW_MIN_LAYOUT_HEIGHT[\s\S]*Math\.max\(DOCKVIEW_MIN_LAYOUT_WIDTH/.test(dockviewSrc), 'Dockview JSON snapshots clamp serialized dimensions to functional minimums');
   assert.ok(/function hideDockviewInnerPaneTabs\(panel\)[\s\S]*panel\.classList\.add\('dockview-inner-head-collapsed'\)/.test(dockviewSrc), 'Dockview marks panels whose inner header was hidden so their content row still fills the pane');
   assert.ok(/function preserveDockviewDockedFileExplorerSplit[\s\S]*dockviewLayoutState\.reloadAfterAdoption = true/.test(dockviewSrc), 'Dockview adoption preserves and reapplies the docked Finder root split width');
   assert.ok(/function dockviewInstallFileDropBridge[\s\S]*dockviewHandleFileDragOver[\s\S]*dockviewHandleFileDrop/.test(dockviewSrc), 'Dockview panes bridge Finder/Differ file drags into the shared pane drop behavior');
@@ -10395,6 +10476,7 @@ test('t@tabber', () => {
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
     slots.left = api.paneStateWithTabs(['1'], '1');
     slots.slot1 = api.paneStateWithTabs([item], item);
+    api.rememberFileExplorerOpenIntentForTest(false);
     api.setLayoutSlotsForTest(slots);
     api.setFocusedPanelItem('1');
     api.setFetchForTest(url => {

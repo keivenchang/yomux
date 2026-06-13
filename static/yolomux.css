@@ -3726,6 +3726,9 @@ button:disabled:hover { border-color: var(--line); }
   min-width: 0;
   min-height: 0;
 }
+.yolomux-dockview .dv-groupview:has(.file-explorer-panel) {
+  min-width: var(--file-pane-min-inline-size);
+}
 .yolomux-dockview .yolomux-dockview-core {
   --dv-tabs-and-actions-container-height: calc(var(--pane-tab-height) + 2px);
   --dv-tabs-and-actions-container-font-size: var(--tab-label-size);

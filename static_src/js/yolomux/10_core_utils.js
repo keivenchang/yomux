@@ -208,6 +208,29 @@ function storageSet(key, value) {
   } catch (_) {}
 }
 
+function sessionStorageGet(key, fallback = null) {
+  try {
+    const value = window.sessionStorage?.getItem(key);
+    return value == null ? fallback : value;
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function sessionStorageSet(key, value) {
+  try {
+    window.sessionStorage?.setItem(key, String(value));
+  } catch (_) {}
+}
+
+function fileExplorerClosedByUser() {
+  return sessionStorageGet(fileExplorerOpenIntentStorageKey) === '0';
+}
+
+function rememberFileExplorerOpenIntent(open) {
+  sessionStorageSet(fileExplorerOpenIntentStorageKey, open ? '1' : '0');
+}
+
 function safeJsonParse(raw, fallback = null) {
   try {
     return raw ? JSON.parse(raw) : fallback;
