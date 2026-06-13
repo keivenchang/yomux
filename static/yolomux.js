@@ -2106,6 +2106,7 @@ function textWithMovingEllipsisHtml(value, className = '') {
 const searchRankWeights = Object.freeze({
   perChar: 8,
   contiguous: 10,
+  contiguousSubstring: 30000,
   wordStart: 6,
   gapPenalty: 0.2,
   haystackLengthPenalty: 0.01,
@@ -2121,6 +2122,7 @@ const searchRankWeights = Object.freeze({
   fileNameSubsequence: 600,
   finderAlias: 25000,
   finderAliasFilesMode: 2500,
+  paneExactIdentifier: 30000,
   recentSelectionBase: 1000,
   recencyCap: 900,
   recencyHalfLifeSeconds: 7 * 24 * 60 * 60,
@@ -2153,6 +2155,7 @@ function fuzzySubsequenceMatch(query, text) {
     position = index + 1;
     indexes.push(index);
   }
+  if (needle.length >= 3 && haystack.includes(needle)) score += searchRankWeights.contiguousSubstring;
   return {score: score - Math.max(0, haystack.length - needle.length) * searchRankWeights.haystackLengthPenalty, indexes};
 }
 
@@ -4725,7 +4728,7 @@ function commandPaletteCommandItems() {
     group: t('palette.group.tabs'),
     category: 'pane',
     label: itemLabel(item),
-    detail: menuTabDetail(item),
+    detail: commandPaletteTabDetail(item),
     key: `tab:${item}`,
     targetItem: item,
     mtime: commandPalettePaneMtime(item),
@@ -5319,6 +5322,7 @@ function commandPaletteItemScore(item, query, options = {}) {
   const bonus = commandPaletteDomainPrior(item, options)
     + Number(item.sortBonus || 0)
     + commandPaletteRecentBonus(item)
+    + commandPalettePaneExactIdentifierBonus(item, query)
     + commandPaletteFinderAliasBonus(item, query, options)
     + commandPaletteFileNameBonus(item, query)
     + commandPaletteRecencyBonus(item, options)
@@ -5326,6 +5330,23 @@ function commandPaletteItemScore(item, query, options = {}) {
   if (!String(query || '').trim()) return bonus;
   const base = fuzzySearchScore(query, item.searchFields || [item.label, item.detail, item.group]);
   return Number.isFinite(base) ? base + bonus : base;
+}
+
+function commandPaletteIdentifierKey(value) {
+  return String(value || '').trim().toUpperCase().replace(/^PR[\s#-]*/, '').replace(/^#/, '').replace(/[^A-Z0-9]+/g, '');
+}
+
+function commandPaletteIdentifierField(value) {
+  return /^(?:#?\d{3,}|PR[\s#-]*\d{3,}|[A-Z][A-Z0-9]+-\d+)$/i.test(String(value || '').trim());
+}
+
+function commandPalettePaneExactIdentifierBonus(item, query) {
+  if (commandPaletteItemDomain(item) !== 'pane') return 0;
+  const needle = commandPaletteIdentifierKey(query);
+  if (!needle) return 0;
+  return (item.searchFields || []).some(field => commandPaletteIdentifierField(field) && commandPaletteIdentifierKey(field) === needle)
+    ? searchRankWeights.paneExactIdentifier
+    : 0;
 }
 
 function commandPaletteFileNameBonus(item, query) {
@@ -5412,6 +5433,15 @@ function commandPaletteLoadingTextHtml(text) {
 
 function commandPaletteStatusHtml() {
   return fileQuickOpenLoading ? commandPaletteLoadingTextHtml(commandPaletteStatusText()) : '';
+}
+
+function commandPaletteResultsHtml(items, query) {
+  return items.map((item, index) => `
+    <button type="button" class="command-palette-row${index === commandPaletteIndex ? ' active' : ''}" data-command-index="${index}" role="option" aria-selected="${index === commandPaletteIndex ? 'true' : 'false'}"${item.disabled ? ' disabled' : ''}>
+      <span class="command-palette-group">${esc(item.group)}</span>
+      <span class="command-palette-main"><span class="command-palette-title">${item.iconText ? `<span class="command-palette-file-icon" aria-hidden="true">${esc(item.iconText)}</span>` : ''}<span class="command-palette-label">${commandPaletteItemLabelHtml(item, query)}</span>${(item.viewModes && item.viewModes.length) ? `<span class="command-palette-views">${item.viewModes.map(v => `<span class="command-palette-view-chip" role="button" tabindex="-1" data-view-item="${esc(v.item)}" data-view-mode="${esc(v.mode)}" title="${esc(t('palette.openView', {view: v.label}))}">${esc(v.label)}</span>`).join('')}</span>` : ''}</span><span class="command-palette-detail">${fuzzyHighlightHtml(query, item.detail || '')}</span></span>
+      <span class="command-palette-keybinding">${esc(item.keybinding || '')}</span>
+    </button>`).join('');
 }
 
 function commandPaletteItemLabelHtml(item, query) {
@@ -5504,12 +5534,7 @@ function renderCommandPaletteResults() {
     results.innerHTML = `<div class="command-palette-empty">${esc(commandPaletteEmptyText())}</div>`;
     return;
   }
-  results.innerHTML = commandPaletteItemsCache.map((item, index) => `
-    <button type="button" class="command-palette-row${index === commandPaletteIndex ? ' active' : ''}" data-command-index="${index}" role="option" aria-selected="${index === commandPaletteIndex ? 'true' : 'false'}"${item.disabled ? ' disabled' : ''}>
-      <span class="command-palette-group">${esc(item.group)}</span>
-      <span class="command-palette-main"><span class="command-palette-title">${item.iconText ? `<span class="command-palette-file-icon" aria-hidden="true">${esc(item.iconText)}</span>` : ''}<span class="command-palette-label">${commandPaletteItemLabelHtml(item, query)}</span>${(item.viewModes && item.viewModes.length) ? `<span class="command-palette-views">${item.viewModes.map(v => `<span class="command-palette-view-chip" role="button" tabindex="-1" data-view-item="${esc(v.item)}" data-view-mode="${esc(v.mode)}" title="${esc(t('palette.openView', {view: v.label}))}">${esc(v.label)}</span>`).join('')}</span>` : ''}</span><span class="command-palette-detail">${fuzzyHighlightHtml(query, item.detail || '')}</span></span>
-      <span class="command-palette-keybinding">${esc(item.keybinding || '')}</span>
-    </button>`).join('');
+  results.innerHTML = commandPaletteResultsHtml(commandPaletteItemsCache, query);
   results.querySelector('.command-palette-row.active')?.scrollIntoView?.({block: 'nearest'});
 }
 
@@ -6555,6 +6580,21 @@ function menuTabDetail(item) {
   return detail;
 }
 
+function commandPaletteTabDetail(item) {
+  const detail = menuTabDetail(item);
+  const pr = displayPullRequest(transcriptMeta.sessions?.[item]);
+  if (!pr?.number) return detail;
+  const bareNumber = `#${pr.number}`;
+  const visibleNumber = `PR ${bareNumber}`;
+  const rest = detail
+    .replace(visibleNumber, '')
+    .replace(bareNumber, '')
+    .replace(/\s*·\s*·\s*/g, ' · ')
+    .replace(/^\s*·\s*|\s*·\s*$/g, '')
+    .trim();
+  return rest ? `${visibleNumber} · ${rest}` : visibleNumber;
+}
+
 function menuTabRowHtml(item, options = {}) {
   const type = tabTypeForItem(item);
   if (type?.rowHtml) return type.rowHtml(item, options);
@@ -6868,6 +6908,31 @@ function prNumberSearchForms(number) {
   return [`#${number}`, `PR#${number}`, `PR ${number}`, String(number)];
 }
 
+function linearSearchFields(linear) {
+  if (!Array.isArray(linear)) return [];
+  return linear.flatMap(item => {
+    if (!item) return [];
+    if (typeof item === 'string') return [item];
+    return [item.identifier, item.title, item.state, item.url];
+  }).filter(Boolean);
+}
+
+function pullRequestSearchFields(pr) {
+  if (!pr) return [];
+  return [
+    pr.title,
+    pr.description,
+    pr.url,
+    pr.state,
+    pr.status_label,
+    pr.review_decision,
+    pr.author_login,
+    pr.number ? 'PR' : '',
+    ...prNumberSearchForms(pr.number),
+    ...linearSearchFields(pr.linear_ids),
+  ].filter(Boolean);
+}
+
 function finderSearchAliases(item) {
   if (!isFileExplorerItem(item)) return [];
   return ['Finder', 'File Explorer', t('finder.label.finder'), t('finder.label.explorer')];
@@ -6876,11 +6941,11 @@ function finderSearchAliases(item) {
 function tabSearchFields(item) {
   const info = transcriptMeta.sessions?.[item] || {};
   const filePath = fileItemPath(item) || '';
-  const pr = displayPullRequest(info);
   // also index the repo's OTHER-branch PRs/branches/Linear IDs (the same data YO!info shows),
   // so a session is findable by ANY PR (e.g. #10289 on a non-current branch), branch name, or Linear ID
   // — not just its current-branch PR. Already in the metadata payload, so no extra fetch.
   const otherBranches = info.project?.git?.other_branches?.branches || [];
+  const pr = displayPullRequest(info);
   return [
     item,
     itemLabel(item),
@@ -6894,16 +6959,14 @@ function tabSearchFields(item) {
     info.description,
     info.goal,
     ...finderSearchAliases(item),
-    pr?.title,
-    pr?.url,
-    pr?.number ? 'PR' : '',
-    ...prNumberSearchForms(pr?.number),
-    ...(Array.isArray(info.linear) ? info.linear : []),
+    ...pullRequestSearchFields(pr),
+    ...linearSearchFields(info.linear),
+    ...linearSearchFields(info.project?.linear),
     ...otherBranches.flatMap(branch => [
       branch.name,
-      branch.pull_request?.title,
-      ...prNumberSearchForms(branch.pull_request?.number),
-      ...(Array.isArray(branch.linear_ids) ? branch.linear_ids : []),
+      branch.subject,
+      ...pullRequestSearchFields(branch.pull_request),
+      ...linearSearchFields(branch.linear_ids),
     ]),
   ].filter(Boolean);
 }
@@ -15204,8 +15267,13 @@ function defaultBranchHeadPullRequest(info) {
   };
 }
 
+function currentBranchInventoryPullRequest(info) {
+  const branches = info?.project?.git?.other_branches?.branches || [];
+  return branches.find(branch => branch.current === true)?.pull_request || null;
+}
+
 function displayPullRequest(info) {
-  return defaultBranchHeadPullRequest(info) || info?.project?.pull_request || null;
+  return defaultBranchHeadPullRequest(info) || info?.project?.pull_request || currentBranchInventoryPullRequest(info);
 }
 
 function metadataBadgeKey(session, badge) {
@@ -29062,7 +29130,7 @@ function renderInfoPanel() {
   </div>`;
   const body = rows.map(row => `<div class="info-row${row.current ? ' current' : ''}">
     <div class="info-cell" title="${esc(row.session)}">${esc(row.session)}</div>
-    <div class="info-cell" title="${esc(row.path)}">${esc(pathBasename(row.path) || row.session || '')}</div>
+    <div class="info-cell" title="${esc(row.pathTitle || row.path)}">${esc(row.pathLabel || compactHomePath(row.path) || row.session || '')}</div>
     <div class="info-cell" title="${esc(row.branch)}">${row.current ? '<span class="info-branch-current">*</span> ' : ''}${row.branchHtml}</div>
     <div class="info-cell" title="${esc(row.prTitle)}">${row.prHtml}</div>
     <div class="info-cell" title="${esc(row.linearTitle)}">${row.linearHtml}</div>
@@ -29510,6 +29578,21 @@ function infoBranchRows() {
   return sortedInfoBranchRows(rawInfoBranchRows(), infoBranchSort);
 }
 
+function infoPathLabel(git) {
+  const path = git?.root || git?.cwd || '';
+  const label = compactHomePath(path);
+  const parent = git?.worktree?.parent_root || '';
+  if (!parent) return label;
+  return `${label} (worktree of ${compactHomePath(parent)})`;
+}
+
+function infoPathTitle(git) {
+  const path = git?.root || git?.cwd || '';
+  const parent = git?.worktree?.parent_root || '';
+  if (!parent) return path;
+  return `${path} (worktree of ${parent})`;
+}
+
 function rawInfoBranchRows() {
   const rows = [];
   const seen = new Set();
@@ -29548,6 +29631,8 @@ function rawInfoBranchRows() {
       rows.push({
         session,
         path: git?.root || git?.cwd || '',
+        pathLabel: infoPathLabel(git),
+        pathTitle: infoPathTitle(git),
         branch: branch.name || '',
         branchHtml: branchLinkHtml(git, branch.name),
         desc,

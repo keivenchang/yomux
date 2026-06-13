@@ -896,6 +896,11 @@ globalThis.__layoutTestApi = {
     commandPaletteQuery = String(value || '');
     commandPaletteIndex = 0;
   },
+  commandPaletteResultsHtmlForTest() {
+    const query = commandPaletteSearchQuery();
+    const rows = commandPaletteRankItems(commandPaletteItems(), query).slice(0, 60);
+    return rows.length ? commandPaletteResultsHtml(rows, query) : '';
+  },
   commandPaletteItemLabelHtmlForTest: commandPaletteItemLabelHtml,
   commandPaletteStatusHtmlForTest: commandPaletteStatusHtml,
   setTabsMenuSearchTextForTest(value) { tabsMenuSearchText = String(value || ''); },
@@ -5476,6 +5481,8 @@ test('t@2560', () => {
   assert.ok(Number.isFinite(api.fuzzySubsequenceScore('xy', 'hello X and blah Y')), 'fuzzy matcher allows ordered gaps');
   assert.equal(Number.isFinite(api.fuzzySubsequenceScore('xz', 'hello X and blah Y')), false, 'fuzzy matcher rejects missing characters');
   assert.ok(api.fuzzySearchScore('hel', ['helloXandYyy']) > api.fuzzySearchScore('hel', ['h e l']), 'fuzzy matcher ranks contiguous matches higher');
+  assert.ok(api.fuzzySearchScore('2223', ['DIS-2223']) > api.fuzzySearchScore('2223', ['hello22 23']), 'fuzzy matcher ranks raw contiguous numeric matches above separated numeric runs');
+  assert.ok(api.fuzzySearchScore('2223', ['DIS-2223']) > api.fuzzySearchScore('2223', ['2-2-2-3']), 'fuzzy matcher ranks raw contiguous numeric matches above punctuation-separated numeric runs');
   assert.ok(api.fuzzySearchScore('READ', ['README.md']) > api.fuzzySearchScore('READ', ['src/README.md']), 'fuzzy matcher prefers primary field prefixes');
   assert.ok(api.fuzzySearchScore('yoagent', ['YO!agent']) > api.fuzzySearchScore('yoagent', ['1', 'y o agent in details']), 'punctuation-insensitive label prefixes beat scattered detail matches');
   assert.deepStrictEqual(Array.from(api.fuzzySubsequenceMatch('xy', 'helloXandYyy').indexes), [5, 9], 'fuzzy matcher exposes matched indexes for result highlighting');
@@ -5495,6 +5502,16 @@ test('t@2560', () => {
     return {category: 'file', group: 'Files', label, detail: path, path, key: `file:${path}`, mtime: options.mtime || 0, searchFields: [label, path]};
   };
   const paneCandidate = (label, options = {}) => ({category: 'pane', group: 'Tabs', label, detail: options.detail || '', key: `pane:${label}`, mtime: options.mtime || 0, searchFields: [label, options.detail || '']});
+  assert.ok(
+    api.commandPaletteItemScore(paneCandidate('2', {detail: 'keivenchang/DIS-2223__nemotron-reasoning-end-token-stream-split'}), '2223', {surface: 'files'}) >
+      api.commandPaletteItemScore(fileCandidate('hello22 23.md'), '2223', {surface: 'files', focusedRepoRoots: ['/repo/current']}),
+    'Cmd-P ranks contiguous branch-number matches above scattered numeric file-name matches'
+  );
+  assert.ok(
+    api.commandPaletteItemScore(paneCandidate('2', {detail: 'keivenchang/DIS-2223__nemotron-reasoning-end-token-stream-split'}), '2223', {surface: 'files'}) >
+      api.commandPaletteItemScore(fileCandidate('2-2-2-3.md'), '2223', {surface: 'files', focusedRepoRoots: ['/repo/current']}),
+    'Cmd-P ranks contiguous branch-number matches above punctuation-separated numeric file-name matches'
+  );
   const rankValues = (surface, query, candidates, options = {}) => api.commandPaletteRankItems(candidates, query, {
     surface,
     nowSeconds: options.nowSeconds || 300,
@@ -7726,6 +7743,7 @@ test('t@6754', () => {
       pull_request: {
         number: 9981,
         title: 'fix(parser): parse dangling reasoning end markers',
+        description: 'Parser PR description mentions fallback recovery',
         status_label: 'CI failing',
         checks: {state: 'failure'},
       },
@@ -7740,6 +7758,9 @@ test('t@6754', () => {
   assert.ok(searchFields.includes('PR#9981'), 'tab search fields include PR#number');
   assert.ok(searchFields.includes('#9981'), 'tab search fields include #number');
   assert.ok(searchFields.includes('9981'), 'tab search fields include bare PR number');
+  assert.ok(searchFields.includes('Parser PR description mentions fallback recovery'), 'tab search fields include the PR description');
+  assert.ok(searchFields.includes('GH-2132'), 'tab search fields include Linear identifiers from issue objects');
+  assert.ok(searchFields.includes('DeepSeek V4 validation'), 'tab search fields include Linear titles from issue objects');
   assert.ok(detail.includes('GH-2132__reasoning-dangling-end-marker'), 'tab menu detail includes fuller branch name');
   assert.ok(detail.includes('~/project/project3'), 'tab menu detail includes compact path');
   const prFailingLabel = api.t('pr.status.failing');
@@ -7776,7 +7797,8 @@ test('t@6800', () => {
             {
               name: 'keivenc/DIS-2193__other-work',
               current: false,
-              pull_request: {number: 10289, title: 'feat: other branch work'},
+              subject: 'feat: branch subject text',
+              pull_request: {number: 10289, title: 'feat: other branch work', description: 'PR body explains cut over parser wiring', linear_ids: ['DIS-2200']},
               linear_ids: ['DIS-2193'],
             },
           ],
@@ -7790,10 +7812,81 @@ test('t@6800', () => {
   assert.ok(fields.includes('PR#10289'), '...and as PR#N');
   assert.ok(fields.includes('10289'), '...and as a bare number');
   assert.ok(fields.includes('keivenc/DIS-2193__other-work'), 'the other branch name is indexed');
+  assert.ok(fields.includes('feat: branch subject text'), 'the other branch subject is indexed');
   assert.ok(fields.includes('DIS-2193'), 'the other-branch Linear ID is indexed');
+  assert.ok(fields.includes('DIS-2200'), 'the other-branch PR Linear IDs are indexed');
   assert.ok(fields.includes('feat: other branch work'), 'the other-branch PR title is indexed');
+  assert.ok(fields.includes('PR body explains cut over parser wiring'), 'the other-branch PR description is indexed');
+  assert.ok(Number.isFinite(api.tabSearchScore('4', 'cut over')), 'searching other-branch PR description matches the session');
   assert.ok(api.tabSearchScore('4', '#10289') >= 0, 'searching #10289 matches the session');
   assert.ok(api.tabSearchScore('4', 'DIS-2193') >= 0, 'searching the Linear ID matches the session');
+  api.setCommandPaletteStateForTest('files', 'cut over');
+  const visibleRows = api.commandPaletteRankItems(api.commandPaletteItems(), 'cut over').slice(0, 60);
+  assert.ok(visibleRows.some(item => item.targetItem === '4'), 'Cmd-P searching cut over shows the matching pane');
+});
+
+test('t@6801', () => {
+  const api = loadYolomux('', ['2']);
+  api.setTranscriptInfoForTest('2', {
+    selected_pane: {current_path: '/home/test/dynamo/dynamo2'},
+    project: {
+      git: {
+        branch: 'keivenchang/DIS-2223__nemotron-reasoning-end-token-stream-split',
+        root: '/home/test/dynamo/dynamo2',
+        other_branches: {
+          branches: [
+            {
+              name: 'keivenchang/DIS-2223__nemotron-reasoning-end-token-stream-split',
+              current: true,
+              subject: 'Rework parser debug taps to always-on anomaly detection',
+              pull_request: {number: 10569, title: 'Rework parser debug taps to always-on anomaly detection'},
+              linear_ids: ['DIS-2223'],
+            },
+          ],
+        },
+      },
+    },
+  });
+  api.setFileQuickOpenCandidatesForTest('/home/test/dynamo', Array.from({length: 80}, (_, index) => ({
+    name: `10569-noise-${index}.txt`,
+    path: `/home/test/dynamo/noise/10569-noise-${index}.txt`,
+    relative_path: `noise/10569-noise-${index}.txt`,
+  })));
+  api.setCommandPaletteStateForTest('files', '10569');
+  const fields = api.tabSearchFields('2');
+  assert.ok(fields.includes('10569'), 'current branch PR from other_branches is indexed as a bare number');
+  assert.ok(api.tabMenuDetailText('2').includes('#10569'), 'current branch PR from other_branches is visible in the tab detail');
+  const rows = api.commandPaletteRankItems(api.commandPaletteItems(), '10569').slice(0, 8);
+  const row = rows.find(item => item.targetItem === '2');
+  assert.ok(row, 'Cmd-P searching the current PR number keeps the matching pane on the first screen');
+  assert.ok(row.detail.startsWith('PR #10569 · '), 'Cmd-P row detail puts the matching PR number before long branch/path text');
+  const popupText = api.commandPaletteResultsHtmlForTest().replace(/<[^>]+>/g, '');
+  assert.ok(popupText.includes('PR #10569'), 'rendered Cmd-P popup visibly shows the matching PR number');
+});
+
+test('t@6802', () => {
+  const api = loadYolomux('', ['wt']);
+  api.setTranscriptInfoForTest('wt', {
+    project: {
+      git: {
+        root: '/home/test/yolomux.dev3',
+        cwd: '/home/test/yolomux.dev3',
+        worktree: {
+          path: '/home/test/yolomux.dev3',
+          parent_root: '/home/test/yolomux',
+          name: 'yolomux.dev3',
+        },
+        other_branches: {
+          branches: [
+            {name: 'yolomux.dev3', current: true, updated: 'today', updated_ts: 1, subject: 'worktree path row'},
+          ],
+        },
+      },
+    },
+  });
+  const [row] = api.infoBranchRows();
+  assert.equal(row.pathLabel, '~/yolomux.dev3 (worktree of ~/yolomux)', 'YO!info path shows the compact full path and its worktree parent');
+  assert.equal(row.pathTitle, '/home/test/yolomux.dev3 (worktree of /home/test/yolomux)', 'YO!info path tooltip keeps the absolute path and parent');
 });
 
 test('t@6833', () => {

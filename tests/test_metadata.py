@@ -489,6 +489,61 @@ def test_git_worktree_identity_names_linked_worktree_vs_parent(tmp_path):
     assert ident["path"] == str(wt)
 
 
+def test_linked_worktree_inventory_only_reports_checked_out_branch(tmp_path):
+    main = tmp_path / "main"
+    wt = tmp_path / "wt"
+    main.mkdir()
+    _git(main, "init", "-b", "main")
+    _git(main, "config", "user.email", "t@example.com")
+    _git(main, "config", "user.name", "T")
+    (main / "f.txt").write_text("hi\n", encoding="utf-8")
+    _git(main, "add", "f.txt")
+    _git(main, "commit", "-m", "init")
+    _git(main, "branch", "spare")
+    _git(main, "worktree", "add", "-q", str(wt), "-b", "feature")
+
+    main_names = [branch["name"] for branch in metadata.git_inventory(str(main))["other_branches"]["branches"]]
+    wt_names = [branch["name"] for branch in metadata.git_inventory(str(wt))["other_branches"]["branches"]]
+
+    assert "main" in main_names
+    assert "spare" in main_names
+    assert "feature" not in main_names
+    assert wt_names == ["feature"]
+
+
+def test_local_branch_inventory_includes_remote_only_pr_branch(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "T")
+    (repo / "base.txt").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", "base.txt")
+    _git(repo, "commit", "-m", "init")
+    current_branch = "keivenchang/DIS-2223__current"
+    _git(repo, "checkout", "-b", current_branch)
+    (repo / "current.txt").write_text("current\n", encoding="utf-8")
+    _git(repo, "add", "current.txt")
+    _git(repo, "commit", "-m", "current")
+    pr_branch = "keivenchang/DIS-2212__cut-over-parsers-to-frontend-crates"
+    _git(repo, "checkout", "-b", pr_branch)
+    (repo / "parser.txt").write_text("parser\n", encoding="utf-8")
+    _git(repo, "add", "parser.txt")
+    _git(repo, "commit", "-m", "chore(parsers): cut over lib/parsers to dynamo-parsers crate")
+    pr_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    _git(repo, "checkout", current_branch)
+    _git(repo, "branch", "-D", pr_branch)
+    _git(repo, "update-ref", f"refs/remotes/origin/{pr_branch}", pr_sha)
+    _git(repo, "update-ref", "refs/remotes/origin/pull-request/10423", pr_sha)
+
+    inventory = metadata.local_branch_inventory(str(repo), current_branch)
+    branches = {branch["name"]: branch for branch in inventory["branches"]}
+
+    assert pr_branch in branches
+    assert branches[pr_branch]["remote"] is True
+    assert branches[pr_branch]["pull_request"]["number"] == 10423
+
+
 def test_open_pr_on_other_branch_resolves_by_head_branch(monkeypatch):
     # An OPEN PR on a non-current branch has no local (#N) marker (that only appears after a
     # squash-merge), so enrich_branch_pull_requests must fall back to a by-head-branch lookup —

@@ -428,8 +428,13 @@ function defaultBranchHeadPullRequest(info) {
   };
 }
 
+function currentBranchInventoryPullRequest(info) {
+  const branches = info?.project?.git?.other_branches?.branches || [];
+  return branches.find(branch => branch.current === true)?.pull_request || null;
+}
+
 function displayPullRequest(info) {
-  return defaultBranchHeadPullRequest(info) || info?.project?.pull_request || null;
+  return defaultBranchHeadPullRequest(info) || info?.project?.pull_request || currentBranchInventoryPullRequest(info);
 }
 
 function metadataBadgeKey(session, badge) {

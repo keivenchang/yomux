@@ -1005,6 +1005,7 @@ function textWithMovingEllipsisHtml(value, className = '') {
 const searchRankWeights = Object.freeze({
   perChar: 8,
   contiguous: 10,
+  contiguousSubstring: 30000,
   wordStart: 6,
   gapPenalty: 0.2,
   haystackLengthPenalty: 0.01,
@@ -1020,6 +1021,7 @@ const searchRankWeights = Object.freeze({
   fileNameSubsequence: 600,
   finderAlias: 25000,
   finderAliasFilesMode: 2500,
+  paneExactIdentifier: 30000,
   recentSelectionBase: 1000,
   recencyCap: 900,
   recencyHalfLifeSeconds: 7 * 24 * 60 * 60,
@@ -1052,6 +1054,7 @@ function fuzzySubsequenceMatch(query, text) {
     position = index + 1;
     indexes.push(index);
   }
+  if (needle.length >= 3 && haystack.includes(needle)) score += searchRankWeights.contiguousSubstring;
   return {score: score - Math.max(0, haystack.length - needle.length) * searchRankWeights.haystackLengthPenalty, indexes};
 }
 

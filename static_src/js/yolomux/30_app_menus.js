@@ -181,6 +181,21 @@ function menuTabDetail(item) {
   return detail;
 }
 
+function commandPaletteTabDetail(item) {
+  const detail = menuTabDetail(item);
+  const pr = displayPullRequest(transcriptMeta.sessions?.[item]);
+  if (!pr?.number) return detail;
+  const bareNumber = `#${pr.number}`;
+  const visibleNumber = `PR ${bareNumber}`;
+  const rest = detail
+    .replace(visibleNumber, '')
+    .replace(bareNumber, '')
+    .replace(/\s*·\s*·\s*/g, ' · ')
+    .replace(/^\s*·\s*|\s*·\s*$/g, '')
+    .trim();
+  return rest ? `${visibleNumber} · ${rest}` : visibleNumber;
+}
+
 function menuTabRowHtml(item, options = {}) {
   const type = tabTypeForItem(item);
   if (type?.rowHtml) return type.rowHtml(item, options);
@@ -494,6 +509,31 @@ function prNumberSearchForms(number) {
   return [`#${number}`, `PR#${number}`, `PR ${number}`, String(number)];
 }
 
+function linearSearchFields(linear) {
+  if (!Array.isArray(linear)) return [];
+  return linear.flatMap(item => {
+    if (!item) return [];
+    if (typeof item === 'string') return [item];
+    return [item.identifier, item.title, item.state, item.url];
+  }).filter(Boolean);
+}
+
+function pullRequestSearchFields(pr) {
+  if (!pr) return [];
+  return [
+    pr.title,
+    pr.description,
+    pr.url,
+    pr.state,
+    pr.status_label,
+    pr.review_decision,
+    pr.author_login,
+    pr.number ? 'PR' : '',
+    ...prNumberSearchForms(pr.number),
+    ...linearSearchFields(pr.linear_ids),
+  ].filter(Boolean);
+}
+
 function finderSearchAliases(item) {
   if (!isFileExplorerItem(item)) return [];
   return ['Finder', 'File Explorer', t('finder.label.finder'), t('finder.label.explorer')];
@@ -502,11 +542,11 @@ function finderSearchAliases(item) {
 function tabSearchFields(item) {
   const info = transcriptMeta.sessions?.[item] || {};
   const filePath = fileItemPath(item) || '';
-  const pr = displayPullRequest(info);
   // also index the repo's OTHER-branch PRs/branches/Linear IDs (the same data YO!info shows),
   // so a session is findable by ANY PR (e.g. #10289 on a non-current branch), branch name, or Linear ID
   // — not just its current-branch PR. Already in the metadata payload, so no extra fetch.
   const otherBranches = info.project?.git?.other_branches?.branches || [];
+  const pr = displayPullRequest(info);
   return [
     item,
     itemLabel(item),
@@ -520,16 +560,14 @@ function tabSearchFields(item) {
     info.description,
     info.goal,
     ...finderSearchAliases(item),
-    pr?.title,
-    pr?.url,
-    pr?.number ? 'PR' : '',
-    ...prNumberSearchForms(pr?.number),
-    ...(Array.isArray(info.linear) ? info.linear : []),
+    ...pullRequestSearchFields(pr),
+    ...linearSearchFields(info.linear),
+    ...linearSearchFields(info.project?.linear),
     ...otherBranches.flatMap(branch => [
       branch.name,
-      branch.pull_request?.title,
-      ...prNumberSearchForms(branch.pull_request?.number),
-      ...(Array.isArray(branch.linear_ids) ? branch.linear_ids : []),
+      branch.subject,
+      ...pullRequestSearchFields(branch.pull_request),
+      ...linearSearchFields(branch.linear_ids),
     ]),
   ].filter(Boolean);
 }

@@ -1636,7 +1636,7 @@ function commandPaletteCommandItems() {
     group: t('palette.group.tabs'),
     category: 'pane',
     label: itemLabel(item),
-    detail: menuTabDetail(item),
+    detail: commandPaletteTabDetail(item),
     key: `tab:${item}`,
     targetItem: item,
     mtime: commandPalettePaneMtime(item),
@@ -2230,6 +2230,7 @@ function commandPaletteItemScore(item, query, options = {}) {
   const bonus = commandPaletteDomainPrior(item, options)
     + Number(item.sortBonus || 0)
     + commandPaletteRecentBonus(item)
+    + commandPalettePaneExactIdentifierBonus(item, query)
     + commandPaletteFinderAliasBonus(item, query, options)
     + commandPaletteFileNameBonus(item, query)
     + commandPaletteRecencyBonus(item, options)
@@ -2237,6 +2238,23 @@ function commandPaletteItemScore(item, query, options = {}) {
   if (!String(query || '').trim()) return bonus;
   const base = fuzzySearchScore(query, item.searchFields || [item.label, item.detail, item.group]);
   return Number.isFinite(base) ? base + bonus : base;
+}
+
+function commandPaletteIdentifierKey(value) {
+  return String(value || '').trim().toUpperCase().replace(/^PR[\s#-]*/, '').replace(/^#/, '').replace(/[^A-Z0-9]+/g, '');
+}
+
+function commandPaletteIdentifierField(value) {
+  return /^(?:#?\d{3,}|PR[\s#-]*\d{3,}|[A-Z][A-Z0-9]+-\d+)$/i.test(String(value || '').trim());
+}
+
+function commandPalettePaneExactIdentifierBonus(item, query) {
+  if (commandPaletteItemDomain(item) !== 'pane') return 0;
+  const needle = commandPaletteIdentifierKey(query);
+  if (!needle) return 0;
+  return (item.searchFields || []).some(field => commandPaletteIdentifierField(field) && commandPaletteIdentifierKey(field) === needle)
+    ? searchRankWeights.paneExactIdentifier
+    : 0;
 }
 
 function commandPaletteFileNameBonus(item, query) {
@@ -2323,6 +2341,15 @@ function commandPaletteLoadingTextHtml(text) {
 
 function commandPaletteStatusHtml() {
   return fileQuickOpenLoading ? commandPaletteLoadingTextHtml(commandPaletteStatusText()) : '';
+}
+
+function commandPaletteResultsHtml(items, query) {
+  return items.map((item, index) => `
+    <button type="button" class="command-palette-row${index === commandPaletteIndex ? ' active' : ''}" data-command-index="${index}" role="option" aria-selected="${index === commandPaletteIndex ? 'true' : 'false'}"${item.disabled ? ' disabled' : ''}>
+      <span class="command-palette-group">${esc(item.group)}</span>
+      <span class="command-palette-main"><span class="command-palette-title">${item.iconText ? `<span class="command-palette-file-icon" aria-hidden="true">${esc(item.iconText)}</span>` : ''}<span class="command-palette-label">${commandPaletteItemLabelHtml(item, query)}</span>${(item.viewModes && item.viewModes.length) ? `<span class="command-palette-views">${item.viewModes.map(v => `<span class="command-palette-view-chip" role="button" tabindex="-1" data-view-item="${esc(v.item)}" data-view-mode="${esc(v.mode)}" title="${esc(t('palette.openView', {view: v.label}))}">${esc(v.label)}</span>`).join('')}</span>` : ''}</span><span class="command-palette-detail">${fuzzyHighlightHtml(query, item.detail || '')}</span></span>
+      <span class="command-palette-keybinding">${esc(item.keybinding || '')}</span>
+    </button>`).join('');
 }
 
 function commandPaletteItemLabelHtml(item, query) {
@@ -2415,12 +2442,7 @@ function renderCommandPaletteResults() {
     results.innerHTML = `<div class="command-palette-empty">${esc(commandPaletteEmptyText())}</div>`;
     return;
   }
-  results.innerHTML = commandPaletteItemsCache.map((item, index) => `
-    <button type="button" class="command-palette-row${index === commandPaletteIndex ? ' active' : ''}" data-command-index="${index}" role="option" aria-selected="${index === commandPaletteIndex ? 'true' : 'false'}"${item.disabled ? ' disabled' : ''}>
-      <span class="command-palette-group">${esc(item.group)}</span>
-      <span class="command-palette-main"><span class="command-palette-title">${item.iconText ? `<span class="command-palette-file-icon" aria-hidden="true">${esc(item.iconText)}</span>` : ''}<span class="command-palette-label">${commandPaletteItemLabelHtml(item, query)}</span>${(item.viewModes && item.viewModes.length) ? `<span class="command-palette-views">${item.viewModes.map(v => `<span class="command-palette-view-chip" role="button" tabindex="-1" data-view-item="${esc(v.item)}" data-view-mode="${esc(v.mode)}" title="${esc(t('palette.openView', {view: v.label}))}">${esc(v.label)}</span>`).join('')}</span>` : ''}</span><span class="command-palette-detail">${fuzzyHighlightHtml(query, item.detail || '')}</span></span>
-      <span class="command-palette-keybinding">${esc(item.keybinding || '')}</span>
-    </button>`).join('');
+  results.innerHTML = commandPaletteResultsHtml(commandPaletteItemsCache, query);
   results.querySelector('.command-palette-row.active')?.scrollIntoView?.({block: 'nearest'});
 }
 

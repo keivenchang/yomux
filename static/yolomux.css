@@ -81,7 +81,7 @@
   --git-transcript: var(--muted);
   --git-transcript-badge: #94a3b8;
   --info-session-column-width: 120px;
-  --info-path-column-width: 150px;
+  --info-path-column-width: 320px;
   --info-branch-column-width: 320px;
   --info-pr-column-width: 170px;
   --info-linear-column-width: 170px;

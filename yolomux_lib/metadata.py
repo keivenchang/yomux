@@ -116,6 +116,31 @@ def git_worktree_identity(cwd: str, toplevel: str) -> dict[str, str] | None:
     return {"path": toplevel, "parent_root": str(Path(common_dir).parent), "name": Path(git_dir).name}
 
 
+def linked_worktree_branch_names(cwd: str, toplevel: str) -> set[str]:
+    result = git(["worktree", "list", "--porcelain"], cwd)
+    if result.returncode != 0:
+        return set()
+    try:
+        root = Path(toplevel).resolve()
+    except OSError:
+        root = Path(toplevel)
+    branches: set[str] = set()
+    worktree_path: str | None = None
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            worktree_path = line.removeprefix("worktree ").strip()
+            continue
+        if not worktree_path or not line.startswith("branch refs/heads/"):
+            continue
+        try:
+            is_current_root = Path(worktree_path).resolve() == root
+        except OSError:
+            is_current_root = Path(worktree_path) == root
+        if not is_current_root:
+            branches.add(line.removeprefix("branch refs/heads/").strip())
+    return branches
+
+
 def git_inventory(cwd: str | None) -> dict[str, Any] | None:
     if not cwd:
         return None
@@ -132,8 +157,11 @@ def git_inventory(cwd: str | None) -> dict[str, Any] | None:
     branch_name = branch.stdout.strip() if branch.returncode == 0 else None
     ahead, behind = git_ahead_behind(cwd, upstream_name)
     status_lines = [line for line in status.stdout.splitlines() if line.strip()] if status.returncode == 0 else []
+    root_text = root.stdout.strip()
+    worktree = git_worktree_identity(cwd, root_text)
+    linked_branches = set() if worktree is not None else linked_worktree_branch_names(cwd, root_text)
     return {
-        "root": root.stdout.strip(),
+        "root": root_text,
         "branch": branch_name,
         "upstream": upstream_name,
         "head": head.stdout.strip() if head.returncode == 0 else None,
@@ -143,8 +171,13 @@ def git_inventory(cwd: str | None) -> dict[str, Any] | None:
         "dirty_count": len(status_lines),
         "status": status_lines[:30],
         "github_repo": parse_github_remote(origin_url.stdout.strip()) if origin_url.returncode == 0 else None,
-        "other_branches": local_branch_inventory(cwd, branch_name),
-        "worktree": git_worktree_identity(cwd, root.stdout.strip()),
+        "other_branches": local_branch_inventory(
+            cwd,
+            branch_name,
+            worktree=worktree,
+            linked_worktree_branches=linked_branches,
+        ),
+        "worktree": worktree,
     }
 
 def git_ahead_behind(cwd: str, upstream: str | None) -> tuple[int | None, int | None]:
@@ -155,49 +188,124 @@ def git_ahead_behind(cwd: str, upstream: str | None) -> tuple[int | None, int | 
     counts = git_ahead_behind_counts(cwd, upstream, "HEAD")
     return counts if counts is not None else (None, None)
 
-def local_branch_inventory(cwd: str, current_branch: str | None) -> dict[str, Any]:
+def local_branch_inventory(
+    cwd: str,
+    current_branch: str | None,
+    worktree: dict[str, str] | None = None,
+    linked_worktree_branches: set[str] | None = None,
+) -> dict[str, Any]:
     result = git(
         [
             "for-each-ref",
             "--sort=-committerdate",
-            "--format=%(refname:short)\t%(objectname)\t%(committerdate:unix)\t%(committerdate:relative)\t%(subject)",
+            "--format=%(refname)\t%(refname:short)\t%(objectname)\t%(committerdate:unix)"
+            "\t%(committerdate:relative)\t%(subject)",
             "refs/heads",
+            "refs/remotes/origin",
         ],
         cwd,
     )
     if result.returncode != 0:
         return {"branches": [], "hidden_count": 0}
     pr_by_sha = local_pull_request_by_sha(cwd)
-    branches: list[dict[str, Any]] = []
-    hidden_count = 0
+    entries: list[dict[str, Any]] = []
+    all_local_names: set[str] = set()
     for line in result.stdout.splitlines():
-        name, _, rest = line.partition("\t")
+        full_ref, _, rest = line.partition("\t")
+        short_ref, _, rest = rest.partition("\t")
         sha, _, rest = rest.partition("\t")
         updated_ts_text, _, rest = rest.partition("\t")
         updated, _, subject = rest.partition("\t")
-        if not name:
+        source, name = branch_inventory_ref(full_ref, short_ref)
+        if not source or not name:
             continue
+        if source == "local":
+            all_local_names.add(name)
+        entries.append(
+            {
+                "source": source,
+                "name": name,
+                "sha": sha,
+                "updated_ts_text": updated_ts_text,
+                "updated": updated,
+                "subject": subject,
+            }
+        )
+    branches: list[dict[str, Any]] = []
+    hidden_count = 0
+    seen_names: set[str] = set()
+    local_entries = [entry for entry in entries if entry["source"] == "local"]
+    remote_entries = [entry for entry in entries if entry["source"] == "remote"]
+    if worktree is not None:
+        # Linked worktrees share refs/heads in the common git dir. Let the main checkout own the shared
+        # branch inventory; each linked checkout only reports the branch it has checked out.
+        local_entries = [entry for entry in local_entries if entry["name"] == current_branch]
+        remote_entries = []
+    else:
+        linked_worktree_branches = linked_worktree_branches or set()
+        local_entries = [
+            entry
+            for entry in local_entries
+            if entry["name"] == current_branch or entry["name"] not in linked_worktree_branches
+        ]
+    local_names = {entry["name"] for entry in local_entries}
+    local_namespaces = {
+        namespace
+        for namespace in (branch_namespace(name) for name in local_names)
+        if namespace
+    }
+    for entry in [*local_entries, *remote_entries]:
+        name = entry["name"]
+        sha = entry["sha"]
+        if name in seen_names:
+            continue
+        remote_only_pr = entry["source"] == "remote" and name not in all_local_names and sha in pr_by_sha
+        if entry["source"] == "remote":
+            # Remote refs are huge in shared repos; only promote PR branches from namespaces already present
+            # locally so stale or unrelated remote PR refs do not crowd out the checked-out work.
+            if not remote_only_pr or branch_namespace(name) not in local_namespaces:
+                continue
         if len(branches) >= OTHER_BRANCH_LIMIT and name != current_branch:
-            hidden_count += 1
+            if entry["source"] == "local":
+                hidden_count += 1
             continue
         try:
-            updated_ts = int(updated_ts_text)
+            updated_ts = int(entry["updated_ts_text"])
         except ValueError:
             updated_ts = None
         local_pr = pr_by_sha.get(sha)
+        seen_names.add(name)
         branches.append(
             {
                 "name": name,
                 "current": name == current_branch,
-                "updated": updated or None,
+                "remote": entry["source"] == "remote",
+                "updated": entry["updated"] or None,
                 "updated_ts": updated_ts,
                 "head": sha[:12] if sha else None,
-                "subject": subject or None,
+                "subject": entry["subject"] or None,
                 "pull_request": local_pr,
-                "linear_ids": extract_linear_ids(name, subject),
+                "linear_ids": extract_linear_ids(name, entry["subject"]),
             }
         )
     return {"branches": branches, "hidden_count": hidden_count}
+
+
+def branch_inventory_ref(full_ref: str, short_ref: str) -> tuple[str | None, str | None]:
+    if full_ref.startswith("refs/heads/"):
+        return "local", full_ref.removeprefix("refs/heads/")
+    if full_ref.startswith("refs/remotes/origin/"):
+        name = full_ref.removeprefix("refs/remotes/origin/")
+        if name == "HEAD" or name.startswith("pull-request/"):
+            return None, None
+        return "remote", name
+    return None, short_ref or None
+
+
+def branch_namespace(name: str) -> str | None:
+    namespace, separator, _ = name.partition("/")
+    return namespace if separator and namespace else None
+
 
 def local_pull_request_by_sha(cwd: str) -> dict[str, dict[str, Any]]:
     result = git(

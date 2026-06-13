@@ -228,7 +228,7 @@ function renderInfoPanel() {
   </div>`;
   const body = rows.map(row => `<div class="info-row${row.current ? ' current' : ''}">
     <div class="info-cell" title="${esc(row.session)}">${esc(row.session)}</div>
-    <div class="info-cell" title="${esc(row.path)}">${esc(pathBasename(row.path) || row.session || '')}</div>
+    <div class="info-cell" title="${esc(row.pathTitle || row.path)}">${esc(row.pathLabel || compactHomePath(row.path) || row.session || '')}</div>
     <div class="info-cell" title="${esc(row.branch)}">${row.current ? '<span class="info-branch-current">*</span> ' : ''}${row.branchHtml}</div>
     <div class="info-cell" title="${esc(row.prTitle)}">${row.prHtml}</div>
     <div class="info-cell" title="${esc(row.linearTitle)}">${row.linearHtml}</div>
@@ -676,6 +676,21 @@ function infoBranchRows() {
   return sortedInfoBranchRows(rawInfoBranchRows(), infoBranchSort);
 }
 
+function infoPathLabel(git) {
+  const path = git?.root || git?.cwd || '';
+  const label = compactHomePath(path);
+  const parent = git?.worktree?.parent_root || '';
+  if (!parent) return label;
+  return `${label} (worktree of ${compactHomePath(parent)})`;
+}
+
+function infoPathTitle(git) {
+  const path = git?.root || git?.cwd || '';
+  const parent = git?.worktree?.parent_root || '';
+  if (!parent) return path;
+  return `${path} (worktree of ${parent})`;
+}
+
 function rawInfoBranchRows() {
   const rows = [];
   const seen = new Set();
@@ -714,6 +729,8 @@ function rawInfoBranchRows() {
       rows.push({
         session,
         path: git?.root || git?.cwd || '',
+        pathLabel: infoPathLabel(git),
+        pathTitle: infoPathTitle(git),
         branch: branch.name || '',
         branchHtml: branchLinkHtml(git, branch.name),
         desc,
