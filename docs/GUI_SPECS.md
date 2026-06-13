@@ -61,6 +61,7 @@ Section order follows the reading path: a capabilities overview and glossary, th
 - Root drops over the Finder/Differ column are reserved and must not show a preview.
 - Cross-gutter drops preserve the sibling boundary and create a full-span pane at that boundary.
 - Closing or moving tabs must preserve user-chosen split percentages where possible. Empty placeholder panes are allowed when they preserve a meaningful user split.
+- The app layout menu exposes Single pane, Split, and Grid. The separate `tmux_wall.py` companion is not an app layout mode.
 - Resizing the Finder/Differ sash changes the root Finder/Differ percentage and preserves the nested content split percentages. Example: in `Finder | Pane1 | Pane2`, dragging the Finder sash changes the available content width while Pane1 and Pane2 keep their relative ratio.
 - The pane-header detail-toggle button controls the pane detail strip only. It must be labeled as `show details` or `hide details` based on state and must not reuse the YO!info pane label.
 

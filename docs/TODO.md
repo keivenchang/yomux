@@ -38,9 +38,6 @@ RECOMMENDED SEQUENCE (2026-06-04, after DOIT.36 archive): (1) Dev-velocity trio 
 - [ ] [L] WORKTREE-AWARE PARALLEL AGENTS + TASK HUB (P0 + P5) — git worktree management so multiple agents work isolated branches in parallel, plus a real Task Hub (the For-Review → In-Progress → Complete flow from the product vision) that aggregates tasks/changes across sessions and worktrees into one board. WHY: this is the core "identify → manage → automate tasks" product story; the session-state model exists but the hub + worktree isolation do not.
 
 
-### Active bugs (2026-06-04, from live use)
-Small `[S]` follow-ups from this batch are archived in `docs/DONE.md`.
-
 ## Dev velocity — bottlenecks & speedups (analysis 2026-06-03)
 
 Measured: the BUILD is not the bottleneck — `tools/static_build.py` is **36ms** (12 JS + 7 CSS partials), `node tests/layout_url.test.js` **0.65s**, a unit pytest file **0.78s**. The real cost is the edit→reload→verify LOOP, the SLOW test tail, and the human screenshot round-trip. Ranked by leverage:
@@ -65,14 +62,14 @@ IMPLEMENTATION STATUS (verified 2026-05-29 — NOTE: line numbers in this file d
   - NAMING DECISION (2026-05-30): the menu that lists the visible/minimized/inactive app tabs is named `Tabs`, while `tmux` is only for tmux-specific controls. The dropdown rows are separated by bars only; no `Active` / `Minimized` / `Inactive` section text.
   - File today: File Explorer, Open file, Preferences, Log out.
   - tmux today: current session YO toggle, direct `+ Claude` / `+ Codex` / `+ Term`, Transcript / AI summary / Event log / Branch Info, Rename / Kill tmux session, Resume session (disabled), YOLO rule-file actions at the bottom.
-  - View today: tab-metadata toggle, Alert, Refresh, Branch Info, Layout submenu (Single pane / Grid / Wall — ALL disabled). MISSING: Filter/Sort, panel-tabs visibility.
+  - View today: tab-metadata toggle, Alert, Refresh, Branch Info, Layout submenu, and Sort tab list. MISSING: Filter/Sort refinements and panel-tabs visibility.
   - Help today: Command palette, version (disabled), Keyboard shortcuts submenu, Open README.
   - NOT BUILT yet: per-pane left dropdown.
 
 DESIGN GATE (mostly satisfied — the skeleton is built; remaining gate work is reconciling the items below against the live `appMenuTree()`):
 
-- [~] (PARTIAL) View ▾  (display options) — LIVE: Theme, Layout (Single/Split; Grid/Wall disabled), Tab metadata, Alert, Refresh, and Sort tab list (Default/Needs-me/Name, added 2026-06-03). STILL MISSING: a "Panel tabs ▸" per-pane-tab visibility toggle (Terminal/Tx/AI/Log/Info) and an Inactive-tabs show-all/tray control. (Branch Info lives in File ▾ as YO!info.)
-  - Layout ▸ : Single / Grid / Wall
+- [~] (PARTIAL) View ▾  (display options) — LIVE: Theme, Layout, Tab metadata, Alert, Refresh, and Sort tab list (Default/Needs-me/Name, added 2026-06-03). STILL MISSING: a "Panel tabs ▸" per-pane-tab visibility toggle (Terminal/Tx/AI/Log/Info) and an Inactive-tabs show-all/tray control. (Branch Info lives in File ▾ as YO!info.)
+  - Layout ▸ : Single / Split / Grid
   - Filter / Sort ▸ : Needs me, by state, by repo, by PR status
   - Tab metadata: show / hide (the current `#` toggle)
   - Inactive tabs: show all / tray

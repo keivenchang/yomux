@@ -104,25 +104,26 @@ python3 yolomux.py --host 0.0.0.0 --port <port> --self-signed --dang
 
 ### Restart workflow
 
-If your checkout matches the repo-owned dev1 convention, use the repo restart owner. It sets `PATH` explicitly before launch so agent CLIs under `~/.local/bin` are visible even when the caller has a stripped systemd/cron-style environment:
+For dev1, use the repo restart owner. It sets `PATH` explicitly before launch so agent CLIs under `~/.local/bin` are visible even when the caller has a stripped environment:
 
 ```bash
 tools/yolomux-restart-dev1.sh
 ```
 
-The script defaults to its local dev1 checkout and port; override with `YOLOMUX_DEV1_PORT`, `YOLOMUX_HOST`, or `YOLOMUX_DEV1_LOG` only when testing that convention. For any other checkout or port, use the manual pattern below instead of running a stale local script that might point at the wrong worktree.
+The script defaults to HTTPS `8001`, `--self-signed`, and `--dang`; override with `YOLOMUX_DEV1_PORT`, `YOLOMUX_HOST`, or `YOLOMUX_DEV1_LOG` only when testing a non-standard dev1 instance. Logs go under `/tmp`.
 
-Manual reference: delegate the kill/relaunch chain to `systemd-run` as a transient user unit, so the server is not a child of the launching shell. Set the unit name, checkout, and port first; then reuse the same values for verification.
+Manual reference: kill the old process narrowly by port, then relaunch detached with `nohup`. Restart prod by swapping `dev1`/`8001`/`~/yolomux.dev1` for `prod`/`7777`/`~/yolomux`:
 
 ```bash
-unit=yolomux-dev-<port>
-checkout=<absolute-checkout-path>
-port=<port>
-systemctl --user stop "$unit" 2>/dev/null
-systemd-run --user --quiet --collect --unit="$unit" --working-directory="$checkout" env PATH="$HOME/.local/bin:$PATH" TERM=xterm-256color PYTHONUNBUFFERED=1 /usr/bin/python3 "$checkout/yolomux.py" --host 0.0.0.0 --port "$port" --dangerously-yolo --self-signed
+port=8001
+checkout="$HOME/yolomux.dev1"
+log="/tmp/yolomux-dev1-${port}.log"
+pid="$(ps -eo pid=,args= | awk -v port="$port" '$0 ~ /yolomux.py/ && $0 ~ ("--port " port) {print $1; exit}')"
+if [ -n "$pid" ]; then kill "$pid"; fi
+( cd "$checkout" && nohup env PATH="$HOME/.local/bin:$PATH" TERM=xterm-256color PYTHONUNBUFFERED=1 python3 -u yolomux.py --host 0.0.0.0 --port "$port" --self-signed --dang > "$log" 2>&1 < /dev/null & )
 ```
 
-Fallback when `systemd-run --user` is unavailable (some AI-harness sandboxes deny the D-Bus call): kill by PID, then relaunch detached with `( cd <checkout> && nohup python3 -u yolomux.py ... >> /tmp/<log> 2>&1 </dev/null & )`. Two footguns: (1) never `pkill -f` a pattern that also appears literally in the same command's launch string — it matches your own shell and TERMs it (use a `$port` variable in the pattern and keep kill and relaunch in separate commands); (2) a backend `.py` change only takes effect after the python process restarts — `static_build.py` does not touch it.
+Two footguns: (1) never `pkill -f` a pattern that also appears literally in the same command's launch string because it can match the launching shell; use a port variable and keep kill and relaunch steps separate; (2) a backend `.py` change only takes effect after the Python process restarts, because `static_build.py` does not touch backend code.
 
 Verify after restart:
 
@@ -133,11 +134,7 @@ curl -sk -o /dev/null -w "ping: %{http_code} %{time_total}s\n" https://localhost
 curl -skL -u <user>:<pass> https://localhost:<port>/ | grep -oE 'YOLOmux [0-9.]+' | head -1
 ```
 
-Expected: one `yolomux.py` process, `LISTEN` on the intended port, and `ping: 401` in under roughly 100ms. If the login/setup shell does not expose the version string to `curl`, verify the running process cwd (`readlink /proc/<pid>/cwd`) and the `YOLOMUX_VERSION` file in that checkout instead of treating the missing grep as a restart failure. If verification fails, inspect the unit:
-
-```bash
-systemctl --user status <unit> --no-pager
-```
+Expected: one `yolomux.py` process, `LISTEN` on the intended port, `ping: 401` in under roughly 100ms, and the rendered version matches `YOLOMUX_VERSION`. If verification fails, inspect the `/tmp/yolomux-<role>-<port>.log` log for the launch error.
 
 ## Production Sync (`cps`)
 

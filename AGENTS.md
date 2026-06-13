@@ -1,6 +1,14 @@
 # AGENTS.md — YOLOmux AI agent guide
 
-This file documents AI-agent behavior and repo-specific lessons for working in YOLOmux. Development workflow, build/test commands, source layout, server restart, production sync, API notes, version bump rules, timing constants, and responsive UI conventions live in [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md). End-user/operator docs live in [`README.md`](README.md).
+This file documents AI-agent behavior and repo-specific lessons for working in YOLOmux. Keep it focused on how agents should work in this repo; put user-facing instructions and command references in the docs below.
+
+## Documentation Map
+
+- [`README.md`](README.md): end-user and operator guide.
+- [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md): development workflow, build/test commands, source layout, restart workflow, production sync, API notes, version bump rules, timing constants, and responsive UI conventions.
+- [`docs/GUI_SPECS.md`](docs/GUI_SPECS.md): GUI behavior contract and test coverage map.
+- [`docs/TODO.md`](docs/TODO.md): open roadmap and future work.
+- [`docs/DONE.md`](docs/DONE.md): completed work archive.
 
 ## Development Workflow
 

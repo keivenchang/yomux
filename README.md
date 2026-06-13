@@ -24,17 +24,17 @@ Use `python3 tools/check.py --list-lanes` to see focused lanes, `--lane <name>` 
 
 ## Quickstart
 
-Recommended local run: HTTPS, login-gated, and YOLO-enabled for new Claude/Codex sessions created from the UI.
+Recommended local run: HTTPS, login-gated, all tmux sessions visible, and YOLO-enabled for new Claude/Codex sessions created from the UI.
 
 ```bash
 git clone https://github.com/keivenchang/yolomux.git
 cd yolomux
 pip install -r requirements.txt
-tmux new-session -A -s project1     # start (or attach) a tmux session
+tmux new-session -A -s project1     # optional: create one if you do not already have tmux sessions
 python3 yolomux.py --self-signed --dang
 ```
 
-Open `https://localhost:9998/`. The first launch shows a setup page — see [First launch](#first-launch) below. `--self-signed` creates a local HTTPS certificate under `~/.local/state/yolomux/tls/`; your browser will warn because it is not signed by a public CA. `--dang` is the short alias for `--dangerously-yolo`, which makes the UI's `+ Claude` and `+ Codex` buttons launch with their dangerous bypass flags.
+Open `https://localhost:9998/`. The first launch shows a setup page — see [First launch](#first-launch) below. With no `--sessions` filter, YOLOmux discovers every tmux session from `tmux list-sessions`. `--self-signed` creates a local HTTPS certificate under `~/.local/state/yolomux/tls/`; your browser will warn because it is not signed by a public CA. `--dang` is the short alias for `--dangerously-yolo`, which makes the UI's `+ Claude` and `+ Codex` buttons launch with their dangerous bypass flags.
 
 ## First launch
 
@@ -112,10 +112,10 @@ The `YO` button toggles YOLO auto-approval for a tmux session. See [Agent permis
 
 ## Running options
 
-Specific sessions only:
+All tmux sessions, default behavior:
 
 ```bash
-python3 yolomux.py --sessions project1,project2 --self-signed --dang
+python3 yolomux.py --self-signed --dang
 ```
 
 Custom port (default is `9998`, host defaults to `0.0.0.0`):
@@ -128,6 +128,12 @@ Background server:
 
 ```bash
 setsid nohup env TERM=xterm-256color PYTHONUNBUFFERED=1 python3 yolomux.py --self-signed --dang > /tmp/yolomux.log 2>&1 < /dev/null &
+```
+
+Specific tmux sessions only, optional filter:
+
+```bash
+python3 yolomux.py --sessions project1,project2 --self-signed --dang
 ```
 
 ## HTTPS / TLS
