@@ -8786,6 +8786,8 @@ def test_preview_popout_snapshot_waits_for_media_and_mermaid(browser, tmp_path):
     )
     assert "error" not in metrics, metrics
     assert "Rendering Mermaid diagram" in metrics["immediateText"], metrics
+    # The "Rendering..." placeholder reuses the shared blinking-ellipsis loader, not a static string.
+    assert "moving-ellipsis" in metrics["immediateText"], metrics
     assert "Rendering Mermaid diagram" not in metrics["completedText"], metrics
     assert "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fassets%2Fpopout.png" in metrics["completedText"], metrics
     assert metrics["rawImageSrc"] in ("", "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fassets%2Fpopout.png"), metrics

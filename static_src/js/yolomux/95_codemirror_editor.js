@@ -2980,6 +2980,21 @@ function mermaidErrorNode(source, error) {
   return node;
 }
 
+function mermaidLoadingNode() {
+  // While a NEW diagram loads/renders, show the shared blinking "..." (moving-ellipsis) used by the
+  // other loading states, not a static "Rendering...". Reuses the empty-state shell so it matches
+  // the Mermaid empty/error states.
+  const node = document.createElement('div');
+  node.className = 'file-editor-empty-state mermaid-preview-loading';
+  node.setAttribute('aria-live', 'polite');
+  node.setAttribute('aria-busy', 'true');
+  const title = document.createElement('div');
+  title.className = 'file-editor-empty-title';
+  title.innerHTML = textWithMovingEllipsisHtml('Rendering Mermaid diagram', 'mermaid-preview-loading-dots');
+  node.appendChild(title);
+  return node;
+}
+
 async function renderMermaidSourceInto(container, source, options = {}) {
   const text = String(source || '').trim();
   disconnectPreviewZoomSurface(container, {resetClasses: true});
@@ -2990,7 +3005,7 @@ async function renderMermaidSourceInto(container, source, options = {}) {
   const seq = ++mermaidPreviewRenderSeq;
   container.dataset.mermaidRenderSeq = String(seq);
   container.classList.add('mermaid-preview');
-  container.textContent = 'Rendering Mermaid diagram...';
+  container.replaceChildren(mermaidLoadingNode());
   try {
     const api = await loadMermaidApi();
     if (container.dataset.mermaidRenderSeq !== String(seq)) return false;
