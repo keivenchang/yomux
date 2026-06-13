@@ -551,6 +551,8 @@
   "pref.terminal_editor.scrollback.label": "터미널 스크롤백",
   "pref.terminal_editor.word_wrap.help": "새로 열린 에디터 탭의 초기 줄 바꿈 상태입니다.",
   "pref.terminal_editor.word_wrap.label": "에디터 기본 줄 바꿈",
+  "pref.updates.check_enabled.help": "Check https://github.com/keivenchang/yolomux for a newer version every hour and prompt admins (non-intrusively) to update and restart. Updating is admin-only, fast-forward only, and never runs on a read-only session.",
+  "pref.updates.check_enabled.label": "Auto-update check (github.com/keivenchang/yolomux)",
   "pref.uploads.custom_actions.help": "Custom actions, one per line: Label | prompt text or shell:command | optional categories. Template fields: {path}, {qpath}, {paths}, {qpaths}, {name}, {count}, {category}.",
   "pref.uploads.custom_actions.label": "Custom file-drop actions",
   "pref.uploads.filename_template.help": "붙여넣기 및 드롭된 파일명 템플릿입니다. {date:%Y%m%d}, {seq:03d}, {name}, {ext}를 사용할 수 있습니다.",

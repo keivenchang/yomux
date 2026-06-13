@@ -646,6 +646,23 @@ body {
 .brand {
   min-width: 92px;
 }
+.brand-update-badge {
+  margin-inline-start: 8px;
+  padding: 1px 7px;
+  border: 1px solid var(--active-control-border, var(--line));
+  border-radius: 999px;
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
+  cursor: pointer;
+  vertical-align: middle;
+}
+.brand-update-badge:hover {
+  filter: brightness(1.08);
+}
+.brand-update-badge[hidden] {
+  display: none;
+}
 .transport-warning {
   position: relative;
   width: 18px;
@@ -5799,6 +5816,12 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   box-shadow: 0 16px 42px rgb(var(--shadow-rgb) / 0.38), inset 0 0 0 1px rgba(255, 255, 255, 0.26);
   backdrop-filter: blur(2px);
 }
+/* The update-available cue uses a solid (opaque) background instead of the translucent default, so it
+   reads clearly over busy terminal content while it sits for its 4-hour window. */
+.toast.toast-update {
+  background: #fff4c2;
+  backdrop-filter: none;
+}
 .toast-header {
   min-width: 0;
   display: flex;
@@ -5887,6 +5910,19 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   gap: 6px;
   margin-top: 6px;
   justify-content: flex-end;
+}
+.toast-action {
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--active-control-border, var(--line));
+  border-radius: 6px;
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
+  cursor: pointer;
+}
+.toast-action:hover {
+  filter: brightness(1.08);
 }
 .startup-helper-nav {
   display: inline-flex;

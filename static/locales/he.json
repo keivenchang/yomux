@@ -551,6 +551,8 @@
   "pref.terminal_editor.scrollback.label": "גלילה אחורה בטרמינל",
   "pref.terminal_editor.word_wrap.help": "מצב גלישת המילים ההתחלתי ללשוניות עורך שנפתחו לאחרונה.",
   "pref.terminal_editor.word_wrap.label": "גלישת מילים בעורך כברירת מחדל",
+  "pref.updates.check_enabled.help": "Check https://github.com/keivenchang/yolomux for a newer version every hour and prompt admins (non-intrusively) to update and restart. Updating is admin-only, fast-forward only, and never runs on a read-only session.",
+  "pref.updates.check_enabled.label": "Auto-update check (github.com/keivenchang/yolomux)",
   "pref.uploads.custom_actions.help": "Custom actions, one per line: Label | prompt text or shell:command | optional categories. Template fields: {path}, {qpath}, {paths}, {qpaths}, {name}, {count}, {category}.",
   "pref.uploads.custom_actions.label": "Custom file-drop actions",
   "pref.uploads.filename_template.help": "תבנית לשמות קבצים שהודבקו ונגררו. השתמש ב-{date:%Y%m%d}, {seq:03d}, {name} ו-{ext}.",

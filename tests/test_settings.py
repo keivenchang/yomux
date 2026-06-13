@@ -450,3 +450,10 @@ def test_upload_drop_action_settings_defaults_and_round_trip(tmp_path):
     assert updated["settings"]["uploads"]["suggestion_autorun"] is True
     assert updated["settings"]["uploads"]["image_action_order"] == too_many_actions[:9]
     assert updated["settings"]["uploads"]["custom_actions"] == ["Peek | shell:head -40 {qpath} | log"]
+
+
+def test_updates_check_defaults_on():
+    # Auto-update check defaults ON, surfaced as the Performance "Auto-update check" toggle.
+    updates = default_settings()["updates"]
+    assert updates["check_enabled"] is True
+    assert updates["check_interval_minutes"] == 60

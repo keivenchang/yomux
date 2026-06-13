@@ -8495,7 +8495,7 @@ test('t@7149', () => {
   assert.ok(/function backgroundFileEditorWatchFiles\(\)[\s\S]*?paneItems\(\)[\s\S]*?!visible\.has\(path\)/.test(source), 'client reports background editor files separately from active visible editor files');
   assert.ok(source.includes('files: visibleFileEditorWatchFiles()'), 'watch state includes visible editor file paths for the fast files_changed stream');
   assert.ok(source.includes('background_files: backgroundFileEditorWatchFiles()'), 'watch state includes background editor file paths for the slower files_changed stream');
-  assert.ok(source.includes("['settings_changed', 'auto_approve_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready']"), 'client listens for the expected push event types');
+  assert.ok(source.includes("['settings_changed', 'auto_approve_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available']"), 'client listens for the expected push event types');
   assert.ok(/addEventListener\('ready',[\s\S]{0,260}refreshAutoStatuses\(\)\.catch/.test(source), 'client-events ready re-fetches auto status so stale YO markers are backfilled after reconnect');
   assert.ok(/function installReconnectResyncHandlers\(\)[\s\S]*document\.addEventListener\('visibilitychange'[\s\S]*document\.visibilityState === 'visible'[\s\S]*scheduleReconnectResync\('visible'\)[\s\S]*window\.addEventListener\('online'[\s\S]*scheduleReconnectResync\('online'\)/.test(source), 'page wake and network restore schedule a shared refreshAll resync');
   assert.ok(/function scheduleReconnectResync\(reason = ''\)[\s\S]*setTimeout\(\(\) => \{[\s\S]*refreshAll\(\)/.test(source), 'wake/network reconnect resync is debounced before refreshAll');
@@ -11093,6 +11093,17 @@ test('t@tabber', () => {
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.ok(/Promise\.all\(directories\.map\(async directory =>/.test(source), 'periodic Finder refresh starts watched directory checks together so fs/list can batch');
   }
+  test('self-update: topbar update badge + dryrun wiring present', () => {
+    const src = fs.readFileSync('static/yolomux.js', 'utf8');
+    assert.ok(/function applyUpdateAvailable\(/.test(src), 'applyUpdateAvailable present');
+    assert.ok(/function checkForUpdateOnce\(/.test(src), 'checkForUpdateOnce present');
+    assert.ok(/function triggerSelfUpdate\(/.test(src), 'triggerSelfUpdate present');
+    assert.ok(src.includes('/api/self-update'), 'posts to /api/self-update');
+    assert.ok(src.includes('/api/update-status'), 'checks /api/update-status');
+    assert.ok(src.includes('updateDryRun'), 'dryrun url flag wired');
+    assert.ok(src.includes('data-update-badge'), 'topbar update badge selector wired');
+    assert.ok(src.includes("'update_available'"), 'subscribes to the update_available client event');
+  });
 })().catch(error => {
   console.error(error);
   process.exitCode = 1;

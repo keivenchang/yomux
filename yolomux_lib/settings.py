@@ -137,6 +137,13 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "github": {
         "watched_prs": [],
     },
+    # Hourly check for a newer version on origin/main. Opt-in (default off). When on, the server polls
+    # git on its own checkout and, if origin/main is ahead, nudges admins with a non-intrusive
+    # "update available" cue offering an admin-only update+restart. Never acts on a readonly session.
+    "updates": {
+        "check_enabled": True,
+        "check_interval_minutes": 60,
+    },
     "terminal_editor": {
         "scrollback": 5000,
         "word_wrap": False,

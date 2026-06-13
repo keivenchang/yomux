@@ -46,3 +46,8 @@ def test_app_publishes_only_known_client_event_types():
     assert emitted, "expected to find publish_client_event(\"...\") string-literal calls"
     unknown = emitted - CLIENT_EVENT_TYPES
     assert not unknown, f"app.py emits client-event types not in CLIENT_EVENT_TYPES: {sorted(unknown)}"
+
+
+def test_update_available_is_a_known_client_event():
+    # The server pushes "update_available" over /api/client-events; the browser subscribes by name.
+    assert "update_available" in CLIENT_EVENT_TYPES

@@ -43,6 +43,23 @@
 .brand {
   min-width: 92px;
 }
+.brand-update-badge {
+  margin-inline-start: 8px;
+  padding: 1px 7px;
+  border: 1px solid var(--active-control-border, var(--line));
+  border-radius: 999px;
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
+  cursor: pointer;
+  vertical-align: middle;
+}
+.brand-update-badge:hover {
+  filter: brightness(1.08);
+}
+.brand-update-badge[hidden] {
+  display: none;
+}
 .transport-warning {
   position: relative;
   width: 18px;

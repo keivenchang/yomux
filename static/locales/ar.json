@@ -551,6 +551,8 @@
   "pref.terminal_editor.scrollback.label": "سجل تمرير الطرفية",
   "pref.terminal_editor.word_wrap.help": "حالة التفاف الكلمات الأولية لتبويبات المحرر المفتوحة حديثاً.",
   "pref.terminal_editor.word_wrap.label": "التفاف الكلمات الافتراضي في المحرر",
+  "pref.updates.check_enabled.help": "Check https://github.com/keivenchang/yolomux for a newer version every hour and prompt admins (non-intrusively) to update and restart. Updating is admin-only, fast-forward only, and never runs on a read-only session.",
+  "pref.updates.check_enabled.label": "Auto-update check (github.com/keivenchang/yolomux)",
   "pref.uploads.custom_actions.help": "Custom actions, one per line: Label | prompt text or shell:command | optional categories. Template fields: {path}, {qpath}, {paths}, {qpaths}, {name}, {count}, {category}.",
   "pref.uploads.custom_actions.label": "Custom file-drop actions",
   "pref.uploads.filename_template.help": "قالب لأسماء الملفات الملصوقة والمسقطة. استخدم {date:%Y%m%d} و{seq:03d} و{name} و{ext}.",

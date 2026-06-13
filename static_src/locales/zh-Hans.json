@@ -907,5 +907,7 @@
   "yolo.state.onHere": "在此开启",
   "yolo.title": "优乐 {state}",
   "yolo.titleForSession": "优乐 {session} {state}",
-  "yolo.titleReadonly": "优乐 {session} {state}；只读访问"
+  "yolo.titleReadonly": "优乐 {session} {state}；只读访问",
+  "pref.updates.check_enabled.label": "Auto-update check (github.com/keivenchang/yolomux)",
+  "pref.updates.check_enabled.help": "Check https://github.com/keivenchang/yolomux for a newer version every hour and prompt admins (non-intrusively) to update and restart. Updating is admin-only, fast-forward only, and never runs on a read-only session."
 }

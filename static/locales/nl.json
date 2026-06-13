@@ -551,6 +551,8 @@
   "pref.terminal_editor.scrollback.label": "Terminal scrollback",
   "pref.terminal_editor.word_wrap.help": "Initial word-wrap state for newly opened editor tabs.",
   "pref.terminal_editor.word_wrap.label": "Default editor word wrap",
+  "pref.updates.check_enabled.help": "Check https://github.com/keivenchang/yolomux for a newer version every hour and prompt admins (non-intrusively) to update and restart. Updating is admin-only, fast-forward only, and never runs on a read-only session.",
+  "pref.updates.check_enabled.label": "Auto-update check (github.com/keivenchang/yolomux)",
   "pref.uploads.custom_actions.help": "Custom actions, one per line: Label | prompt text or shell:command | optional categories. Template fields: {path}, {qpath}, {paths}, {qpaths}, {name}, {count}, {category}.",
   "pref.uploads.custom_actions.label": "Custom file-drop actions",
   "pref.uploads.filename_template.help": "Template for pasted and dropped filenames. Use {date:%Y%m%d}, {seq:03d}, {name}, and {ext}.",

@@ -1304,3 +1304,21 @@ def test_apply_upload_subdir_falls_back_when_uncreatable(monkeypatch, tmp_path):
         assert webapp._apply_upload_subdir(base) == base
     finally:
         webapp.control_server.stop()
+
+
+def test_self_update_dryrun_is_noop_with_plan():
+    webapp = app_module.TmuxWebtermApp(["1"])
+    result = webapp.perform_self_update(dryrun=True)
+    assert result["ok"] is True
+    assert result["dryrun"] is True
+    assert result["restarting"] is False
+    assert any("git pull" in step for step in result["plan"])
+
+
+def test_update_status_dryrun_reports_available():
+    webapp = app_module.TmuxWebtermApp(["1"])
+    status = webapp.update_status_payload(dryrun=True)
+    assert status["available"] is True
+    assert status["target"] == "dryrun"
+    assert status["dryrun"] is True
+    assert status["enabled"] is True

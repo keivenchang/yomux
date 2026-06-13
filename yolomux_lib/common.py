@@ -38,7 +38,7 @@ DEFAULT_ROWS = 36
 MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
-YOLOMUX_VERSION = "0.3.21"
+YOLOMUX_VERSION = "0.3.22"
 SUMMARY_LOOKBACK_SECONDS = 3600
 SUMMARY_MAX_PROMPT_CHARS = 100_000
 SUMMARY_CODEX_TIMEOUT_SECONDS = 600
@@ -416,6 +416,32 @@ def git_ahead_behind_counts(cwd: str, left: str, right: str = "HEAD") -> tuple[i
         return int(parts[1]), int(parts[0])  # (ahead = right-only, behind = left-only)
     except ValueError:
         return None
+
+
+def update_check_status(cwd: str, branch: str = "main", dryrun: bool = False, fetch: bool = True) -> dict[str, Any]:
+    """Whether `origin/<branch>` has commits the running checkout at `cwd` does not have.
+
+    Compares the running HEAD to origin/<branch> via git on the local checkout (reusing its existing
+    credentials, so this works for private repos with no GitHub token). `dryrun=True` forces
+    available=True without touching the network, so the update UX can be exercised without a real push.
+    Returns a plain dict (never raises) so the poll thread / endpoint can serialize it directly.
+    """
+    current = yolomux_commit_sha()
+    base = {"available": False, "ahead": 0, "behind": 0, "current": current,
+            "target": None, "branch": branch, "dryrun": dryrun, "error": None}
+    if dryrun:
+        return {**base, "available": True, "behind": 1, "target": "dryrun"}
+    if fetch:
+        fetched = git(["fetch", "--quiet", "origin", branch], cwd)
+        if fetched.returncode != 0:
+            return {**base, "error": (fetched.stderr or "git fetch failed").strip()[:300]}
+    counts = git_ahead_behind_counts(cwd, f"origin/{branch}")
+    if counts is None:
+        return {**base, "error": "git rev-list failed"}
+    ahead, behind = counts
+    target = git(["rev-parse", "--short=12", f"origin/{branch}"], cwd)
+    return {**base, "available": behind > 0, "ahead": ahead, "behind": behind,
+            "target": target.stdout.strip() if target.returncode == 0 else None}
 
 
 def git_bytes(args: list[str], cwd: str, timeout: float = 3.0) -> subprocess.CompletedProcess[bytes]:

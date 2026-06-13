@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import shutil
+import shlex
 import subprocess
 import threading
 import time
@@ -21,6 +22,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
+from . import common
 from . import filesystem
 from . import session_files
 from . import yolo_rules
@@ -683,6 +685,91 @@ class TmuxWebtermApp:
 
     def server_watched_pr_event_poll_seconds(self) -> float:
         return SERVER_WATCHED_PR_EVENT_POLL_SECONDS
+
+    # --- self-update: hourly check for a newer origin/main + admin-only update+restart -------------
+    def updates_settings(self) -> dict[str, Any]:
+        settings = settings_payload().get("settings", {})
+        section = settings.get("updates", {}) if isinstance(settings, dict) else {}
+        return section if isinstance(section, dict) else {}
+
+    def update_status_payload(self, dryrun: bool = False) -> dict[str, Any]:
+        enabled = bool(self.updates_settings().get("check_enabled", False))
+        # Only hit the network (git fetch) when actually checking — dryrun, or the opt-in is on. A
+        # disabled boot-time status call stays cheap (local refs only) instead of fetching every load.
+        status = common.update_check_status(str(common.PROJECT_ROOT), dryrun=dryrun, fetch=(dryrun or enabled))
+        status["enabled"] = enabled
+        status["version"] = YOLOMUX_VERSION
+        return status
+
+    def perform_self_update(self, dryrun: bool = False) -> dict[str, Any]:
+        root = str(common.PROJECT_ROOT)
+        plan = ["git pull --ff-only origin main", "python3 tools/static_build.py", "restart server"]
+        if dryrun:
+            return {"ok": True, "dryrun": True, "restarting": False, "plan": plan,
+                    "message": "dryrun: nothing pulled, server not restarted"}
+        pull = common.git(["pull", "--ff-only", "origin", "main"], root)
+        if pull.returncode != 0:
+            # Never force: a dirty/diverged ("read-only") checkout must not be clobbered.
+            return {"ok": False, "dryrun": False, "restarting": False, "plan": plan,
+                    "error": (pull.stderr or "git pull --ff-only failed").strip()[:400],
+                    "message": "update blocked: checkout is not a clean fast-forward; sync it manually"}
+        try:
+            subprocess.run(["python3", "tools/static_build.py"], cwd=root,
+                           capture_output=True, text=True, timeout=120, check=False)
+        except Exception:
+            pass
+        restarting = self._spawn_self_restart()
+        return {"ok": True, "dryrun": False, "restarting": restarting, "plan": plan,
+                "message": "updated; restarting now" if restarting
+                           else "updated; restart the server manually (no restart hook for this checkout)"}
+
+    def _spawn_self_restart(self) -> bool:
+        # Only auto-restart the prod deployment (~/yolomux via its restart script). A dev worktree must
+        # never restart prod, so non-prod checkouts report "restart manually". The 1s delay lets the
+        # HTTP response flush before the script kills this process; the browser SSE auto-reconnects.
+        script = Path.home() / ".local" / "bin" / "yolomux-restart-prod.sh"
+        prod_root = (Path.home() / "yolomux").resolve()
+        if common.PROJECT_ROOT.resolve() != prod_root or not script.exists():
+            return False
+        try:
+            subprocess.Popen(["setsid", "bash", "-c", f"sleep 1; exec {shlex.quote(str(script))}"],
+                             cwd=str(common.PROJECT_ROOT), stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            return True
+        except Exception:
+            return False
+
+    def update_check_loop(self) -> None:
+        # Re-reads settings every iteration so the opt-in toggle takes effect without a restart. When
+        # disabled, idles cheaply. Publishes update_available only when the available target changes,
+        # so admins are nudged once per new version, not every interval.
+        while True:
+            section = self.updates_settings()
+            if not section.get("check_enabled", False):
+                time.sleep(60)
+                continue
+            try:
+                status = self.update_status_payload(dryrun=False)
+                target = status.get("target")
+                if status.get("available") and target and target != getattr(self, "_update_last_target", None):
+                    self._update_last_target = target
+                    self.publish_client_event("update_available", status, trigger="update-check")
+            except Exception:
+                pass
+            interval_minutes = section.get("check_interval_minutes", 60)
+            try:
+                interval = max(1.0, float(interval_minutes)) * 60.0
+            except (TypeError, ValueError):
+                interval = 3600.0
+            time.sleep(interval)
+
+    def start_update_check_thread(self) -> bool:
+        if getattr(self, "update_check_thread", None) is not None:
+            return False
+        worker = threading.Thread(target=self.update_check_loop, name="update-check", daemon=True)
+        self.update_check_thread = worker
+        worker.start()
+        return True
 
     def client_event_watch_sleep_seconds(self, now: float) -> float:
         next_due = min(

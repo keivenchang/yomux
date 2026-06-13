@@ -551,6 +551,8 @@
   "pref.terminal_editor.scrollback.label": "終端機回捲",
   "pref.terminal_editor.word_wrap.help": "新開啟編輯器分頁的初始自動換行狀態。",
   "pref.terminal_editor.word_wrap.label": "預設編輯器自動換行",
+  "pref.updates.check_enabled.help": "Check https://github.com/keivenchang/yolomux for a newer version every hour and prompt admins (non-intrusively) to update and restart. Updating is admin-only, fast-forward only, and never runs on a read-only session.",
+  "pref.updates.check_enabled.label": "Auto-update check (github.com/keivenchang/yolomux)",
   "pref.uploads.custom_actions.help": "Custom actions, one per line: Label | prompt text or shell:command | optional categories. Template fields: {path}, {qpath}, {paths}, {qpaths}, {name}, {count}, {category}.",
   "pref.uploads.custom_actions.label": "Custom file-drop actions",
   "pref.uploads.filename_template.help": "貼上與拖放檔名的範本。可使用 {date:%Y%m%d}、{seq:03d}、{name} 與 {ext}。",

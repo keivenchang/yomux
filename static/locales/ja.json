@@ -551,6 +551,8 @@
   "pref.terminal_editor.scrollback.label": "ターミナルのスクロールバック",
   "pref.terminal_editor.word_wrap.help": "新しく開いたエディタータブの折り返しの初期状態。",
   "pref.terminal_editor.word_wrap.label": "エディターの既定の折り返し",
+  "pref.updates.check_enabled.help": "Check https://github.com/keivenchang/yolomux for a newer version every hour and prompt admins (non-intrusively) to update and restart. Updating is admin-only, fast-forward only, and never runs on a read-only session.",
+  "pref.updates.check_enabled.label": "Auto-update check (github.com/keivenchang/yolomux)",
   "pref.uploads.custom_actions.help": "Custom actions, one per line: Label | prompt text or shell:command | optional categories. Template fields: {path}, {qpath}, {paths}, {qpaths}, {name}, {count}, {category}.",
   "pref.uploads.custom_actions.label": "Custom file-drop actions",
   "pref.uploads.filename_template.help": "貼り付け・ドロップしたファイル名のテンプレート。{date:%Y%m%d}、{seq:03d}、{name}、{ext} を使えます。",

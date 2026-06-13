@@ -202,6 +202,12 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if parsed.path == "/api/ping":
             self.write_json({"ok": True, "time": time.time()})
             return
+        if parsed.path == "/api/update-status":
+            if self.auth_readonly():
+                self.reject_forbidden(self.auth_identity(), "admin")
+                return
+            self.write_json(self.server.app.update_status_payload(dryrun=query_bool(parse_qs(parsed.query), "dryrun")))
+            return
         if parsed.path == "/api/dev-reload":
             # Dev-velocity #1b: an SSE stream that emits the static-bundle signature whenever it changes,
             # so a dev page reloads itself on rebuild (ends the "is the bundle stale?" misdiagnoses). Only
@@ -573,6 +579,12 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.handle_login_submit(parsed)
             return
         if not self.require_auth_for_post(parsed.path):
+            return
+        if parsed.path == "/api/self-update":
+            if self.auth_readonly():
+                self.reject_forbidden(self.auth_identity(), "admin")
+                return
+            self.write_json(self.server.app.perform_self_update(dryrun=query_bool(parse_qs(parsed.query), "dryrun")))
             return
         if parsed.path == "/api/ensure-session":
             qs = parse_qs(parsed.query)
@@ -1434,6 +1446,8 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
         self.dev = dev  # dev-velocity #1b: enables the /api/dev-reload SSE channel + the bootstrap dev flag
         if hasattr(self.app, "start_client_event_watcher"):
             self.app.start_client_event_watcher()
+        if hasattr(self.app, "start_update_check_thread"):
+            self.app.start_update_check_thread()
 
     def get_request(self) -> tuple[socket.socket, tuple[str, int]]:
         request, client_address = self.socket.accept()

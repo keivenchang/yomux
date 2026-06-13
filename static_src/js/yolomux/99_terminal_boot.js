@@ -2757,6 +2757,8 @@ async function boot() {
   installRuntimeIntervals();
   scheduleStartupHelperTip();
   installDevAutoReload();
+  document.querySelector('[data-update-badge]')?.addEventListener('click', triggerSelfUpdate);
+  checkForUpdateOnce();
 }
 
 function clientEventEnvelope(event) {
@@ -2802,7 +2804,67 @@ function recordSseDebugEvent(eventType, envelope = {}, rawEvent = null) {
   });
 }
 
+function updateDryRunEnabled() {
+  return typeof urlFlagEnabled === 'function' && urlFlagEnabled('updateDryRun');
+}
+
+function updateActionButton(label, onClick) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'toast-action';
+  button.textContent = label;
+  button.addEventListener('click', onClick);
+  return button;
+}
+
+async function triggerSelfUpdate() {
+  const dry = updateDryRunEnabled();
+  const confirmed = window.confirm(dry
+    ? 'Dry run: simulate "update & restart"? Nothing is pulled and the server is not restarted.'
+    : 'Update to the latest version on origin/main and restart the server now?');
+  if (!confirmed) return;
+  try {
+    const res = await fetch(`/api/self-update${dry ? '?dryrun=1' : ''}`, {method: 'POST'});
+    const data = await res.json().catch(() => ({}));
+    const title = data.ok ? (data.restarting ? 'Updating, restarting...' : 'Update') : 'Update failed';
+    showToast(title, [data.message || (data.ok ? 'done' : 'see server logs')]);
+  } catch (error) {
+    showToast('Update failed', [String(error)]);
+  }
+}
+
+// Non-intrusive "a newer version exists" cue: unhide the topbar badge and show one dismissible toast
+// with an "Update & restart" action (admin-only; the endpoint rejects readonly).
+function applyUpdateAvailable(status) {
+  if (!status || !status.available) return;
+  const badge = document.querySelector('[data-update-badge]');
+  if (badge) {
+    badge.hidden = false;
+    badge.title = `Update available${status.target ? ` (${status.target})` : ''} - click to update and restart`;
+  }
+  showToast('Update available', [
+    `A newer version is on origin/main${status.target ? ` (${status.target})` : ''}.`,
+  ], {
+    actions: [updateActionButton('Update & restart', triggerSelfUpdate)],
+    countdownMs: 4 * 60 * 60 * 1000,  // keep the update cue up for 4 hours, not the default ~10s
+    className: 'attention-alert toast toast-update',  // solid (opaque) background, not the translucent default
+  });
+}
+
+async function checkForUpdateOnce() {
+  try {
+    const res = await fetch(`/api/update-status${updateDryRunEnabled() ? '?dryrun=1' : ''}`);
+    if (!res.ok) return;  // readonly (403) or unavailable
+    const status = await res.json();
+    if (status && status.available) applyUpdateAvailable(status);
+  } catch (_error) { /* offline / transient — the hourly push will retry */ }
+}
+
 function handleClientPushEvent(type, payload = {}) {
+  if (type === 'update_available') {
+    applyUpdateAvailable(payload && payload.available !== undefined ? payload : (payload.data || {}));
+    return;
+  }
   if (type === 'settings_changed') {
     if (payload.data && typeof payload.data === 'object') {
       applySettingsPayload(payload.data, {force: true});
@@ -2870,7 +2932,7 @@ function installClientEventStream() {
     recordSseDebugEvent('ping', clientEventEnvelope(event), event);
   });
   source.onerror = () => { clientEventsConnected = false; };
-  for (const type of ['settings_changed', 'auto_approve_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready']) {
+  for (const type of ['settings_changed', 'auto_approve_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available']) {
     source.addEventListener(type, event => {
       clientEventsConnected = true;
       const envelope = clientEventEnvelope(event);

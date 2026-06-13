@@ -138,6 +138,8 @@ def brand_html(class_name: str = "brand-title", tag: str = "span", locale: str |
         '<span class="brand-red">u</span>'
         '<span class="brand-yellow">x</span>'
         f'<span class="brand-version" title="{version_title}">{html.escape(YOLOMUX_VERSION)}</span>'
+        '<button type="button" class="brand-update-badge" data-update-badge hidden '
+        'title="Update available — click to update and restart" aria-label="Update available">update</button>'
         f"</{tag}>"
     )
 
