@@ -3020,6 +3020,8 @@ async function saveFileEditor(path, panel, options = {}) {
       return false;
     }
     const payload = await response.json();
+    applyFileIdentityMetadata(state, payload);
+    registerFileIdentityForPath(path, state);
     state.mtime = filePayloadMtime(payload);
     state.size = payload.size;
     state.original = state.content;

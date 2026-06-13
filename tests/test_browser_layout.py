@@ -2903,6 +2903,253 @@ def test_dockview_new_virtual_and_file_tabs_open_in_focused_pane(browser, tmp_pa
     assert "2" in metrics["slot1Tabs"], metrics
 
 
+def test_differ_reopen_keeps_dragged_file_tab_home(browser, tmp_path):
+    path = "/repo/app/src/main.py"
+    item = f"filediff:{path}"
+    session_files_payload = {
+        "session": "1",
+        "loaded": True,
+        "errors": [],
+        "refs_by_repo": {},
+        "repos": [{"repo": "/repo/app"}],
+        "files": [{"session": "1", "agent": "codex", "status": "M", "repo": "/repo/app", "path": "src/main.py", "abs_path": path, "mtime": 100, "added": 1, "removed": 1}],
+    }
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1,2&layout=row@24(left,row@50(slot1,slot2))&tabs=left:files;slot1:1;slot2:2",
+        sessions=["1", "2"],
+        session_files_payload=session_files_payload,
+        grid_width=1300,
+        grid_height=620,
+    )
+    wait_for_dockview(browser, min_tabs=3)
+    wait_for_visible_selector(browser, '.dockview-pane-tab[data-pane-tab="1"]')
+    wait_for_visible_selector(browser, '.dockview-pane-tab[data-pane-tab="2"]')
+    opened = browser.execute_async_script(
+        """
+        const path = arguments[0];
+        const done = arguments[arguments.length - 1];
+        const originalFetch = window.fetch.bind(window);
+        window.__doit65Fetches = [];
+        window.fetch = async (input, options = {}) => {
+          const url = new URL(String(input), 'https://localhost');
+          window.__doit65Fetches.push(url.pathname + url.search);
+          if (url.pathname === '/api/fs/read') {
+            return new Response(JSON.stringify({
+              path: url.searchParams.get('path') || path,
+              content: 'print("hello")\\n',
+              size: 15,
+              mtime: 1,
+              mtime_ns: 1,
+              realpath: path,
+              file_id: 'dev:10:ino:20',
+              git_root: '/repo/app',
+              git_tracked: true,
+              git_history: [{ref: 'a'}, {ref: 'b'}],
+              git_has_history: true,
+            }), {status: 200, headers: {'Content-Type': 'application/json'}});
+          }
+          if (url.pathname === '/api/fs/diff') {
+            return new Response(JSON.stringify({
+              repo: '/repo/app',
+              relative_path: 'src/main.py',
+              diff: '@@ -1 +1 @@\\n-print("old")\\n+print("hello")\\n',
+              original: 'print("old")\\n',
+              working: 'print("hello")\\n',
+            }), {status: 200, headers: {'Content-Type': 'application/json'}});
+          }
+          return originalFetch(input, options);
+        };
+        const waitFor = predicate => new Promise((resolve, reject) => {
+          let attempts = 0;
+          const tick = () => {
+            try {
+              const value = predicate();
+              if (value) { resolve(value); return; }
+            } catch (error) {
+              reject(error);
+              return;
+            }
+            attempts += 1;
+            if (attempts > 120) {
+              reject(new Error('timed out waiting for Differ row/opened tab'));
+              return;
+            }
+            requestAnimationFrame(tick);
+          };
+          tick();
+        });
+        (async () => {
+          setFileExplorerMode('diff', {force: true});
+          renderFileExplorerChangesPanels({force: true});
+          const row = await waitFor(() => document.querySelector(`[data-open-change-file="${path}"]`));
+          row.click();
+          await waitFor(() => slotForItem(`filediff:${path}`) === 'slot1');
+          done({
+            slot: slotForItem(`filediff:${path}`),
+            mode: editorViewModeFor(path, `filediff:${path}`),
+            rows: document.querySelectorAll(`[data-open-change-file="${path}"]`).length,
+          });
+        })().catch(error => done({error: String(error && error.stack || error)}));
+        """,
+        path,
+    )
+    assert opened.get("error") is None, opened
+    assert opened["slot"] == "slot1", opened
+    assert opened["mode"] == "diff", opened
+    assert opened["rows"] == 1, opened
+
+    points = browser.execute_script(
+        """
+        const rectPoint = (rect, x = 0.5, y = 0.5) => ({x: Math.round(rect.left + rect.width * x), y: Math.round(rect.top + rect.height * y)});
+        const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(arguments[0])}"]`);
+        const targetGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="2"]').closest('.dv-groupview');
+        return {
+          start: rectPoint(tab.closest('.dv-tab').getBoundingClientRect()),
+          end: rectPoint(targetGroup.getBoundingClientRect(), 0.55, 0.5),
+        };
+        """,
+        item,
+    )
+    cdp_drag(browser, points["start"], points["end"], steps=28)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return slotForItem(arguments[0])", item) == "slot2"
+    )
+
+    reopened = browser.execute_async_script(
+        """
+        const path = arguments[0];
+        const item = `filediff:${path}`;
+        const done = arguments[arguments.length - 1];
+        const waitFor = predicate => new Promise((resolve, reject) => {
+          let attempts = 0;
+          const tick = () => {
+            try {
+              const value = predicate();
+              if (value) { resolve(value); return; }
+            } catch (error) {
+              reject(error);
+              return;
+            }
+            attempts += 1;
+            if (attempts > 120) {
+              reject(new Error('timed out waiting for Differ reopen'));
+              return;
+            }
+            requestAnimationFrame(tick);
+          };
+          tick();
+        });
+        (async () => {
+          setFileEditorViewMode(path, 'edit', item);
+          renderOpenFilePath(path);
+          document.querySelector(`[data-open-change-file="${path}"]`).click();
+          await waitFor(() => slotForItem(item) === 'slot2' && activeItemForSide('slot2') === item && editorViewModeFor(path, item) === 'diff');
+          done({
+            slot: slotForItem(item),
+            mode: editorViewModeFor(path, item),
+            slot2Tabs: paneTabs('slot2'),
+            leftTabs: paneTabs('left'),
+            slot1Tabs: paneTabs('slot1'),
+          });
+        })().catch(error => done({error: String(error && error.stack || error)}));
+        """,
+        path,
+    )
+    assert reopened.get("error") is None, reopened
+    assert reopened["slot"] == "slot2", reopened
+    assert reopened["mode"] == "diff", reopened
+    assert item in reopened["slot2Tabs"], reopened
+    assert item not in reopened["slot1Tabs"], reopened
+    assert item not in reopened["leftTabs"], reopened
+
+
+def test_dockview_symlink_alias_focuses_existing_file_editor(browser, tmp_path):
+    real_path = "/repo/app/src/main.py"
+    link_path = "/repo/app/link-main.py"
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=left&tabs=left:1",
+        sessions=["1"],
+    )
+    wait_for_dockview(browser, min_tabs=1)
+    metrics = browser.execute_async_script(
+        """
+        const realPath = arguments[0];
+        const linkPath = arguments[1];
+        const done = arguments[arguments.length - 1];
+        const originalFetch = window.fetch.bind(window);
+        window.__doit65Fetches = [];
+        window.fetch = async (input, options = {}) => {
+          const url = new URL(String(input), 'https://localhost');
+          window.__doit65Fetches.push(url.pathname + url.search);
+          if (url.pathname === '/api/fs/read') {
+            return new Response(JSON.stringify({
+              path: url.searchParams.get('path') || realPath,
+              content: 'print("hello")\\n',
+              size: 15,
+              mtime: 1,
+              mtime_ns: 1,
+              realpath: realPath,
+              file_id: 'dev:10:ino:20',
+              git_root: '/repo/app',
+              git_tracked: true,
+              git_history: [{ref: 'a'}, {ref: 'b'}],
+              git_has_history: true,
+            }), {status: 200, headers: {'Content-Type': 'application/json'}});
+          }
+          if (url.pathname === '/api/fs/diff') {
+            return new Response(JSON.stringify({
+              repo: '/repo/app',
+              relative_path: 'src/main.py',
+              diff: '@@ -1 +1 @@\\n-print("old")\\n+print("hello")\\n',
+              original: 'print("old")\\n',
+              working: 'print("hello")\\n',
+            }), {status: 200, headers: {'Content-Type': 'application/json'}});
+          }
+          return originalFetch(input, options);
+        };
+        (async () => {
+          const first = await openFileInEditor(realPath, {name: 'main.py', realpath: realPath, file_id: 'dev:10:ino:20'}, {viewMode: 'edit'});
+          const state = fileStateFor(realPath);
+          state.content = 'dirty edit\\n';
+          state.dirty = true;
+          await openChangedFileInDiff(linkPath, '1', 'M', '/repo/app', {forceNewTab: true, userInitiated: true, openMode: 'diff'});
+          const afterDiffActionItems = openFileEditorItems();
+          const second = await openFileInAdditionalEditorTab(linkPath, {name: 'link-main.py', realpath: realPath, file_id: 'dev:10:ino:20'}, {viewMode: 'diff'});
+          done({
+            first,
+            second,
+            afterDiffActionItems,
+            openItems: openFileEditorItems(),
+            realItems: filePanelItemsForPath(realPath),
+            linkItems: filePanelItemsForPath(linkPath),
+            content: fileStateFor(realPath)?.content || '',
+            dirty: fileStateFor(realPath)?.dirty === true,
+            mode: editorViewModeFor(realPath, first),
+            tabCount: Array.from(document.querySelectorAll('.dockview-pane-tab')).filter(tab => String(tab.dataset.paneTab || '').includes('main.py')).length,
+            readCalls: window.__doit65Fetches.filter(url => url.startsWith('/api/fs/read')).length,
+          });
+        })().catch(error => done({error: String(error && error.stack || error)}));
+        """,
+        real_path,
+        link_path,
+    )
+    assert metrics.get("error") is None, metrics
+    assert metrics["second"] == metrics["first"], metrics
+    assert metrics["afterDiffActionItems"] == [metrics["first"]], metrics
+    assert metrics["openItems"] == [metrics["first"]], metrics
+    assert metrics["realItems"] == [metrics["first"]], metrics
+    assert metrics["linkItems"] == [], metrics
+    assert metrics["content"] == "dirty edit\n", metrics
+    assert metrics["dirty"] is True, metrics
+    assert metrics["mode"] == "diff", metrics
+    assert metrics["tabCount"] == 1, metrics
+    assert metrics["readCalls"] == 2, metrics
+
+
 def test_dockview_new_tabs_do_not_open_in_focused_finder(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,

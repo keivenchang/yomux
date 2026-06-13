@@ -329,7 +329,22 @@ def _entry_info(path: Path, name: str) -> dict[str, Any]:
         info["is_repo"] = _directory_is_repo(path)
         if info["is_repo"]:
             info["repo"] = git_repo_info(path, include_status=False)
+    info.update(_physical_file_identity(path))
     return info
+
+
+def _physical_file_identity(path: Path) -> dict[str, Any]:
+    try:
+        _ensure_path_allowed(path)
+        st = path.stat()
+    except (FilesystemError, OSError):
+        return {}
+    file_id = f"{st.st_dev}:{st.st_ino}"
+    return {
+        "realpath": os.path.realpath(path),
+        "file_id": file_id,
+        "file_identity": f"id:{file_id}",
+    }
 
 
 def _visible_directory_names(path: Path) -> list[str]:
@@ -479,13 +494,13 @@ def _search_file_entry(root: Path, path: Path, tokens: list[str]) -> dict[str, A
     return {
         "name": path.name,
         "path": str(path),
-        "realpath": os.path.realpath(path),
         "relative_path": rel,
         "kind": "file",
         "size": int(st.st_size),
         "mtime": int(st.st_mtime),
         "uploaded": is_generated_upload_name(path),
         "_sort_key": sort_key,
+        **_physical_file_identity(path),
     }
 
 
@@ -500,6 +515,7 @@ def _annotate_search_dedupe_fields(entry: dict[str, Any]) -> None:
             entry["size"] = int(os.stat(path_str).st_size)
         except OSError:
             entry["size"] = None
+    entry.update({key: value for key, value in _physical_file_identity(Path(path_str)).items() if key not in entry})
 
 
 def _search_full_tree(root: Path, search_root: Path, tokens: list[str], results: list[dict[str, Any]]) -> tuple[int, int, bool]:
@@ -802,6 +818,7 @@ def read_file(raw_path: str) -> dict[str, Any]:
         "git_tracked": git_tracked,
         "git_history": git_history,
         "git_has_history": len(git_history) > 1,
+        **_physical_file_identity(path),
     }
 
 
@@ -834,6 +851,7 @@ def write_file(raw_path: str, content: str, expected_mtime: int | None = None) -
         "size": len(data),
         "mtime": int(file_stat.st_mtime),
         "mtime_ns": int(file_stat.st_mtime_ns),
+        **_physical_file_identity(path),
     }
 
 
@@ -935,6 +953,7 @@ def path_info(raw_path: str) -> dict[str, Any]:
         "repo_root": repo_root,
         "relative_path": relative_path,
         "repo": repo_info,
+        **_physical_file_identity(path),
     }
 
 

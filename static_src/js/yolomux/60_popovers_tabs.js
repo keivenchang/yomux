@@ -893,6 +893,7 @@ async function openDraggedFilesInEditor(payload, options = {}) {
         targetSlot: options.targetSlot || null,
         targetZone: options.targetZone || 'middle',
         targetIndex: options.targetIndex == null ? null : Number(options.targetIndex) + index,
+        rehomeExisting: true,
       });
       // Unify with double-click: a dragged CHANGED (tracked, has-diff) file opens in the SAME diff
       // view (ensureCodeMirrorDiffPanel) as openChangedFileInDiff, not a plain edit-mode editor.

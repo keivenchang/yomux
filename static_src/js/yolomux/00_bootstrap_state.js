@@ -232,6 +232,9 @@ const HIGHLIGHTABLE_EXTENSIONS = {
 };
 const fileState = new Map();  // path -> open-file content plus editor tab/owner/mode/blame state
 const openFiles = fileState;  // compatibility alias during the file-state migration
+const fileIdentityByPath = new Map();  // display path -> backend physical-file identity
+const openFilePathByIdentity = new Map();  // backend physical-file identity -> primary open display path
+const fileOpenPromisesByPath = new Map();  // display path -> in-flight text-editor open promise
 const fileExplorerDirectorySignatures = new Map();
 const fileExplorerKnownEntryNames = new Map();
 const fileExplorerNewEntryUntil = new Map();

@@ -251,12 +251,77 @@ function normalizeFileStateRecord(state) {
   return state;
 }
 
+function physicalFileIdentityFromPayload(payload) {
+  if (!payload || typeof payload !== 'object') return '';
+  const explicit = String(payload.file_identity || payload.fileIdentity || '').trim();
+  if (explicit) return explicit;
+  const fileId = String(payload.file_id || payload.fileId || '').trim();
+  if (fileId) return `id:${fileId}`;
+  const realpath = String(payload.realpath || payload.realPath || '').trim();
+  return realpath ? `realpath:${realpath}` : '';
+}
+
+function applyFileIdentityMetadata(state, payload) {
+  if (!state || typeof state !== 'object' || !payload || typeof payload !== 'object') return state;
+  const realpath = String(payload.realpath || payload.realPath || '').trim();
+  const fileId = String(payload.file_id || payload.fileId || '').trim();
+  const identity = physicalFileIdentityFromPayload(payload);
+  if (realpath) state.realpath = realpath;
+  if (fileId) state.fileId = fileId;
+  if (identity) state.fileIdentity = identity;
+  return state;
+}
+
+function registerFileIdentityForPath(path, payload) {
+  const normalized = String(path || '').trim();
+  const identity = physicalFileIdentityFromPayload(payload);
+  if (!normalized || !identity) return '';
+  fileIdentityByPath.set(normalized, identity);
+  if (!openFilePathByIdentity.has(identity)) openFilePathByIdentity.set(identity, normalized);
+  return identity;
+}
+
+function primaryOpenPathForFileIdentity(identity) {
+  const text = String(identity || '').trim();
+  if (!text) return '';
+  const mapped = openFilePathByIdentity.get(text);
+  if (mapped && openFiles.has(mapped)) return mapped;
+  for (const [path, state] of openFiles.entries()) {
+    if (physicalFileIdentityFromPayload(state) === text) {
+      openFilePathByIdentity.set(text, path);
+      return path;
+    }
+  }
+  openFilePathByIdentity.delete(text);
+  return '';
+}
+
+function openPathForPhysicalFile(path, payload = null) {
+  const identity = registerFileIdentityForPath(path, payload) || fileIdentityByPath.get(path) || physicalFileIdentityFromPayload(payload);
+  return primaryOpenPathForFileIdentity(identity);
+}
+
+function reassignOpenFileIdentityPath(oldPath, newPath) {
+  const identity = fileIdentityByPath.get(oldPath) || physicalFileIdentityFromPayload(fileStateFor(oldPath));
+  if (!identity) return;
+  fileIdentityByPath.delete(oldPath);
+  fileIdentityByPath.set(newPath, identity);
+  if (openFilePathByIdentity.get(identity) === oldPath) openFilePathByIdentity.set(identity, newPath);
+}
+
+function clearOpenFileIdentityPath(path) {
+  const identity = fileIdentityByPath.get(path) || physicalFileIdentityFromPayload(fileStateFor(path));
+  fileIdentityByPath.delete(path);
+  if (identity && openFilePathByIdentity.get(identity) === path) openFilePathByIdentity.delete(identity);
+}
+
 function normalizedFileGitHistory(value) {
   return Array.isArray(value) ? value.filter(item => item && typeof item === 'object' && item.ref) : [];
 }
 
 function applyFileGitMetadata(state, payload) {
   if (!state || typeof state !== 'object' || !payload || typeof payload !== 'object') return state;
+  applyFileIdentityMetadata(state, payload);
   const gitHistory = normalizedFileGitHistory(payload.git_history);
   state.gitRoot = payload.git_root ? normalizeDirectoryPath(payload.git_root) : '';
   state.gitTracked = payload.git_tracked === true;
@@ -305,14 +370,19 @@ function setFileState(path, state) {
     if (!Object.prototype.hasOwnProperty.call(state, 'imageMode')) state.imageMode = previous.imageMode;
     if (!Object.prototype.hasOwnProperty.call(state, 'blame')) state.blame = previous.blame;
     if (!Object.prototype.hasOwnProperty.call(state, 'conflictDialogOpen')) state.conflictDialogOpen = previous.conflictDialogOpen;
+    if (!Object.prototype.hasOwnProperty.call(state, 'realpath')) state.realpath = previous.realpath;
+    if (!Object.prototype.hasOwnProperty.call(state, 'fileId')) state.fileId = previous.fileId;
+    if (!Object.prototype.hasOwnProperty.call(state, 'fileIdentity')) state.fileIdentity = previous.fileIdentity;
   }
   const normalized = normalizeFileStateRecord(state);
   fileState.set(path, normalized);
+  registerFileIdentityForPath(path, normalized);
   return normalized;
 }
 
 function deleteFileState(path) {
   if (!path) return false;
+  clearOpenFileIdentityPath(path);
   return fileState.delete(path);
 }
 

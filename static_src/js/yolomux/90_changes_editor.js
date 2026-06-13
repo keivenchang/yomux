@@ -1623,7 +1623,7 @@ function activeChangesControl(panel) {
 }
 
 async function openChangedFileInDiff(path, ownerSession = '', status = '', repo = '', options = {}) {
-  const item = options.item
+  let item = options.item
     || (options.forceNewTab === true ? fileEditorCopyItemFor(path) : reusableFileEditorDiffPreviewItem(path));
   const normalizedStatus = String(status || '').toUpperCase();
   const openDiffMode = options.openMode !== 'edit';
@@ -1662,7 +1662,8 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '', repo 
       gitTracked: true,
     }, openOptions);
   } else {
-    await openFileInEditor(path, {name: basenameOf(path), session: ownerSession}, openOptions);
+    const openedItem = await openFileInEditor(path, {name: basenameOf(path), session: ownerSession}, openOptions);
+    if (openedItem) item = openedItem;
   }
   if (!openDiffMode) {
     renderOpenFilePath(path);
@@ -1855,6 +1856,16 @@ function bindChangesPanel(panel) {
       const path = fileRow.dataset.path || fileRow.dataset.openChangeFile || '';
       showFileTreeContextMenu(fileRow, path, changedFileRowEntry(fileRow), event.clientX, event.clientY, {
         openInNewTabActions: [
+          {
+            label: t('contextmenu.openInDiffer'),
+            action: () => openChangedFileInDiff(
+              path,
+              fileRow.dataset.openChangeSession || '',
+              fileRow.dataset.openChangeStatus || '',
+              fileRow.dataset.openChangeRepo || '',
+              {userInitiated: true, openMode: 'diff'},
+            ),
+          },
           {
             label: t('contextmenu.openNewDiffEditor'),
             action: () => openChangedFileInDiff(

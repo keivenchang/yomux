@@ -74,12 +74,14 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {})
   const openInNewTabActions = Array.isArray(options.openInNewTabActions) && options.openInNewTabActions.length
     ? options.openInNewTabActions
     : [{label: options.openInNewTabLabel || 'Open in new tab', action: openInNewTab}];
+  const actionContext = {fullPath, entry, selectedPaths, infos, primaryInfo: infos[0] || null, menuState};
+  for (const action of openInNewTabActions) {
+    const label = typeof action.label === 'function' ? action.label(actionContext) : action.label;
+    appendContextMenuButton(menu, label || 'Open in new tab', action.action, closeFileContextMenu, {disabled: action.disabled ?? menuState.openInNewTabDisabled});
+  }
   appendContextMenuButton(menu, multiple ? 'Copy relative paths' : 'Copy relative path', () => copyFilePath(relativePaths.join('\n'), 'relative'), closeFileContextMenu, {disabled: menuState.copyRelativeDisabled});
   appendContextMenuButton(menu, multiple ? 'Copy full paths' : 'Copy full path', () => copyFilePath(selectedPaths.join('\n'), 'path'), closeFileContextMenu);
   appendContextMenuButton(menu, 'Copy image', () => copyImageFileToClipboard(selectedPaths[0]), closeFileContextMenu, {disabled: menuState.copyImageDisabled});
-  for (const action of openInNewTabActions) {
-    appendContextMenuButton(menu, action.label || 'Open in new tab', action.action, closeFileContextMenu, {disabled: action.disabled ?? menuState.openInNewTabDisabled});
-  }
   appendContextMenuButton(menu, 'Download', () => triggerFileDownload(fullPath), closeFileContextMenu, {disabled: menuState.downloadDisabled});
   appendContextMenuButton(menu, fileExplorerDirectoryIsIndexed(fullPath) ? 'Disallow index' : 'Allow index', () => toggleFileExplorerDirectoryIndexed(fullPath), closeFileContextMenu, {disabled: menuState.indexToggleDisabled, checked: entry?.kind === 'dir' ? fileExplorerDirectoryIsIndexed(fullPath) : undefined});
   appendContextMenuButton(menu, 'Rename', () => beginFileTreeRename(row, selectedPaths[0], entry), closeFileContextMenu, {disabled: menuState.renameDisabled});
@@ -1439,6 +1441,54 @@ function refreshOpenFileDiffDecorations(path) {
   }
 }
 
+function primaryEditorItemForPath(path, fallbackItem = null) {
+  const items = fileEditorTabItemsForPath(path).filter(item => !isImageViewerItem(item));
+  const activeItem = items.find(item => itemIsActivePaneTab(item)) || items.find(item => item === focusedPanelItem);
+  return activeItem || items[0] || fallbackItem || fileEditorItemFor(path);
+}
+
+function foldDuplicateEditorItemsForPath(path, keepItem = null) {
+  const items = fileEditorTabItemsForPath(path).filter(item => !isImageViewerItem(item));
+  if (items.length <= 1) return null;
+  const keeper = items.includes(keepItem) ? keepItem : primaryEditorItemForPath(path);
+  let nextSlots = layoutSlots;
+  let layoutChanged = false;
+  for (const item of items) {
+    if (item === keeper) continue;
+    if (itemInLayout(item, nextSlots)) {
+      nextSlots = layoutWithoutItemFromSlots(item, nextSlots, {preserveRemovedSlot: true});
+      layoutChanged = true;
+    }
+    removeFilePanelOwner(path, item);
+    removePanelForItem(item);
+  }
+  syncFileLayoutItems();
+  if (layoutChanged) applyLayoutSlots(nextSlots, {focusSession: keeper, prune: false});
+  return keeper;
+}
+
+async function focusExistingPhysicalFileEditor(requestedPath, existingPath, options = {}) {
+  if (!requestedPath || !existingPath) return null;
+  const item = primaryEditorItemForPath(existingPath, options.item || null);
+  foldDuplicateEditorItemsForPath(existingPath, item);
+  if (options.viewMode) setFileEditorViewMode(existingPath, options.viewMode, item);
+  else setFileEditorViewMode(existingPath, 'edit', item);
+  recordEditorNav(item);
+  const openOptions = {
+    ...options,
+    item,
+    targetSlot: options.rehomeExisting === true ? options.targetSlot : null,
+    targetZone: options.rehomeExisting === true ? options.targetZone : 'middle',
+  };
+  await showFileEditorPaneForPath(existingPath, openOptions);
+  renderOpenFilePath(existingPath);
+  const panel = panelNodes.get(item);
+  if (panel && requestedPath !== existingPath) {
+    setFileEditorPanelStatus(panel, `already open as ${basenameOf(existingPath)}`, 'ok');
+  }
+  return item;
+}
+
 function openFileDiffAvailable(state) {
   if (!state?.diffLoaded) return false;
   const diff = String(state.diff || '');
@@ -1556,20 +1606,36 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
   const name = entry?.name || String(entryOrName || basenameOf(fullPath));
   const ext = fileExtensionOf(name);
   const kind = IMAGE_EXTENSIONS.has(ext) ? 'image' : 'text';
+  const identityDedupe = kind === 'text';
+  if (identityDedupe) {
+    const pendingOpen = fileOpenPromisesByPath.get(fullPath);
+    if (pendingOpen) {
+      await pendingOpen.catch(() => null);
+      const existingAfterPending = openPathForPhysicalFile(fullPath, entry) || (openFiles.has(fullPath) ? fullPath : '');
+      if (existingAfterPending) return focusExistingPhysicalFileEditor(fullPath, existingAfterPending, options);
+    }
+    const existingIdentityPath = openPathForPhysicalFile(fullPath, entry);
+    if (existingIdentityPath && existingIdentityPath !== fullPath) {
+      return focusExistingPhysicalFileEditor(fullPath, existingIdentityPath, options);
+    }
+  }
   const defaultItem = kind === 'image' && imageOpenUsesSharedViewer(options)
     ? imageViewerItemFor(fullPath)
     : fileEditorItemFor(fullPath);
-  const item = options.item || defaultItem;
+  const alreadyOpen = Boolean(openFiles.get(fullPath)?.kind);
+  const item = identityDedupe && alreadyOpen
+    ? primaryEditorItemForPath(fullPath, options.item || defaultItem)
+    : (options.item || defaultItem);
   const openOptions = {
     ...options,
     item,
     ownerSession: options.ownerSession || normalizedOpenFileOwnerSession(entry?.session),
   };
-  const alreadyOpen = Boolean(openFiles.get(fullPath)?.kind);
   if (options.viewMode) setFileEditorViewMode(fullPath, options.viewMode, item);
   else setFileEditorViewMode(fullPath, 'edit', item);
   recordEditorNav(item);   // push this tab to the back/forward history (no-op while navigating)
   if (alreadyOpen) {
+    foldDuplicateEditorItemsForPath(fullPath, item);
     await refreshOpenFileGitMetadata(fullPath);
     await showFileEditorPaneForPath(fullPath, openOptions);
     renderOpenFilePath(fullPath);
@@ -1578,15 +1644,22 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
   if (Number(entry?.size) > MAX_FILE_PREVIEW_BYTES) {
     const state = tooLargeFileState(Number(entry.size));
     state.mtime = fileEntryMtime(entry);
+    applyFileIdentityMetadata(state, entry);
     await openFilesSetAndShow(fullPath, state, openOptions);
     return item;
   }
   if (kind === 'image') {
-    await openFilesSetAndShow(fullPath, {mtime: fileEntryMtime(entry), kind: 'image', original: '', content: '', dirty: false, size: entry?.size ?? null}, openOptions);
+    await openFilesSetAndShow(fullPath, applyFileIdentityMetadata({mtime: fileEntryMtime(entry), kind: 'image', original: '', content: '', dirty: false, size: entry?.size ?? null}, entry), openOptions);
     return item;
   }
-  try {
+  const openPromise = (async () => {
     const payload = await apiFetchJson(`/api/fs/read?path=${encodeURIComponent(fullPath)}`);
+    if (identityDedupe) {
+      const existingIdentityPath = openPathForPhysicalFile(fullPath, payload);
+      if (existingIdentityPath && existingIdentityPath !== fullPath) {
+        return focusExistingPhysicalFileEditor(fullPath, existingIdentityPath, options);
+      }
+    }
     const state = applyFileGitMetadata({
       mtime: filePayloadMtime(payload),
       size: payload.size,
@@ -1597,6 +1670,10 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     }, payload);
     await openFilesSetAndShow(fullPath, state, openOptions);
     return item;
+  })();
+  if (identityDedupe) fileOpenPromisesByPath.set(fullPath, openPromise);
+  try {
+    return await openPromise;
   } catch (err) {
     const status = Number(err?.status) || 0;
     if (status) {
@@ -1611,6 +1688,8 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     }
     showFileOpenError(fullPath, err);
     return null;
+  } finally {
+    if (fileOpenPromisesByPath.get(fullPath) === openPromise) fileOpenPromisesByPath.delete(fullPath);
   }
 }
 
@@ -2011,6 +2090,10 @@ async function openFileEditorPane(path, options = {}) {
   const targetSlot = options.targetSlot && layoutSlotKeys().includes(options.targetSlot) ? options.targetSlot : null;
   const targetZone = options.targetZone || 'middle';
   const targetIndex = Number.isFinite(Number(options.targetIndex)) ? Number(options.targetIndex) : null;
+  if (existingSlot && options.rehomeExisting !== true) {
+    activatePaneTab(existingSlot, item);
+    return;
+  }
   if (targetSlot && targetZone !== 'middle') {
     await splitSessionAtSlot(item, targetSlot, targetZone, existingSlot, options.pct || null);
     return;

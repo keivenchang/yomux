@@ -809,6 +809,10 @@ globalThis.__layoutTestApi = {
   tmuxWindowForTest: tmuxWindow,
   registerFileEditorLayoutItemForTest: registerFileEditorLayoutItem,
   setOpenFileStateForTest(path, state) { setFileState(path, state); },
+  currentFileStateForTest(path) {
+    const state = fileStateFor(path);
+    return state ? {...state} : null;
+  },
   renderTreeChildrenForTest(container, parentPath, entries, depth = 0, entriesByDirPairs = [], options = {}) {
     renderTreeChildren(container, parentPath, entries, depth, {...options, entriesByDir: new Map(entriesByDirPairs)});
   },
@@ -826,6 +830,9 @@ globalThis.__layoutTestApi = {
   displayQuickAccessPath,
   expandQuickAccessPath,
   markOpenFileDiffUnavailable,
+  openChangedFileInDiffForTest: openChangedFileInDiff,
+  openFileInEditorForTest: openFileInEditor,
+  openFileInAdditionalEditorTabForTest: openFileInAdditionalEditorTab,
   focusPreferencesSearch,
   renderPreferencesPanelsForTest: renderPreferencesPanels,
   renderPaneTabStrips,
@@ -3137,6 +3144,7 @@ test('t@2560', () => {
   assert.equal(duplicateShaOptions.includes('selected ref'), false, 'diff ref picker does not add a synthetic duplicate for a selected SHA already in suggestions');
   const manyDiffRefs = Array.from({length: 120}, (_, index) => ({ref: `${String(index).padStart(7, 'a')}abcdef`, short: `r${index}`, subject: `commit ${index}`}));
   const changedFilesSource = fs.readFileSync('static/yolomux.js', 'utf8');
+  const fileExplorerSource = (fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8') + fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8'));
   assert.equal(api.diffRefPopoverItems('', {compact: true, suggestions: manyDiffRefs, showAll: true}).length, 12, 'compact diff-ref popups are capped to avoid huge menus');
   assert.equal(api.diffRefPopoverItems('', {compact: false, suggestions: manyDiffRefs, showAll: true}).length, 18, 'full diff-ref popups are capped to a compact menu size');
   assert.deepEqual(api.diffRefPopoverItems('commit 117', {compact: true, suggestions: manyDiffRefs}).map(item => item.subject), ['commit 117'], 'typing filters the diff-ref popup to matching refs/subjects');
@@ -3234,8 +3242,10 @@ test('t@2560', () => {
   assert.equal(changedFilesSource.includes('function selectChangedFileRow('), false, 'Differ no longer has bespoke single-row selected state');
   assert.equal(changedFilesSource.includes('function showChangedFileContextMenu('), false, 'Differ file rows no longer fork a safe-only context menu');
   assert.ok(/data-open-change-file[\s\S]{0,420}updateFileTreeSelectionFromClick\(fileRow,\s*fileRow\.dataset\.path/.test(changedFilesSource), 'Differ click selection routes through the shared Finder selection parent');
-  assert.ok(/data-open-change-file[\s\S]{0,1400}showFileTreeContextMenu\(fileRow,\s*path,\s*changedFileRowEntry\(fileRow\)[\s\S]*t\('contextmenu\.openNewDiffEditor'\)[\s\S]*forceNewTab: true[\s\S]*openMode: 'diff'[\s\S]*t\('contextmenu\.openNewEditor'\)[\s\S]*openFileInAdditionalEditorTab/.test(changedFilesSource), 'Differ file right-click routes through the shared Finder context menu and orders new Diff Editor before new Editor');
+  assert.ok(/data-open-change-file[\s\S]{0,2200}showFileTreeContextMenu\(fileRow,\s*path,\s*changedFileRowEntry\(fileRow\)[\s\S]*t\('contextmenu\.openInDiffer'\)[\s\S]*openChangedFileInDiff[\s\S]*\{userInitiated: true, openMode: 'diff'\}[\s\S]*t\('contextmenu\.openNewDiffEditor'\)[\s\S]*forceNewTab: true[\s\S]*openMode: 'diff'[\s\S]*t\('contextmenu\.openNewEditor'\)[\s\S]*openFileInAdditionalEditorTab/.test(changedFilesSource), 'Differ file right-click routes through the shared Finder context menu and orders Open in a Differ, Open in a new Differ, then Open in a new Editor');
   assert.equal(/Open file in editor|Open file in diff/.test(changedFilesSource), false, 'Differ file context menu no longer hardcodes the old labels');
+  assert.ok(/async function showFileTreeContextMenu\([\s\S]*?const actionContext = \{fullPath, entry, selectedPaths, infos, primaryInfo: infos\[0\] \|\| null, menuState\};[\s\S]*?for \(const action of openInNewTabActions\)[\s\S]*?typeof action\.label === 'function'[\s\S]*?appendContextMenuButton\(menu, label \|\| 'Open in new tab'[\s\S]*?appendContextMenuButton\(menu, multiple \? 'Copy relative paths' : 'Copy relative path'/.test(fileExplorerSource), 'Finder/Differ file context menu lists Open actions first and resolves dynamic Open labels before Copy actions');
+  assert.equal(changedFilesSource.includes('contextmenu.openDifferent'), false, 'Differ file context menu no longer uses dynamic different-editor labels');
   assert.ok(/async function deleteFileTreePath[\s\S]*fetchSessionFiles\(\{destination: 'finder', session: fileExplorerSessionFilesTargetSession\(\), silent: true, force: true\}\)/.test(changedFilesSource), 'shared delete refreshes session-files so Differ rows disappear immediately');
   assert.ok(changedFilesSource.includes('function showChangedDirectoryContextMenu('), 'C5: Modified-files folder rows have a right-click menu');
   const dirCtxStart = changedFilesSource.indexOf('function showChangedDirectoryContextMenu(');
@@ -3248,7 +3258,6 @@ test('t@2560', () => {
   assert.equal(/'Open in new tab'|'Download'|'Rename'|'Delete'|"Open in new tab"|"Download"|"Rename"|"Delete"/.test(dirCtxBody), false, 'C5: the Modified-files folder menu stays directory-only and non-destructive');
   assert.ok(/contextmenu'[\s\S]*?data-open-change-file[\s\S]*?showFileTreeContextMenu[\s\S]*?data-open-change-directory[\s\S]*?showChangedDirectoryContextMenu/.test(changedFilesSource), 'right-click dispatches file rows through the shared Finder menu and folder rows through the directory menu');
   assert.ok(changedFilesSource.includes("multiple ? 'Copy full paths' : 'Copy full path'"), 'Finder context menu uses Copy full path label');
-  const fileExplorerSource = (fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8') + fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8'));
   assert.equal(/Copy raw paths?/.test(fileExplorerSource), false, 'Finder context menu no longer exposes a duplicate raw path action');
   api.setSessionFilesPayloadForTest({
     session: '1',
@@ -8659,6 +8668,17 @@ test('t@7423', () => {
   const en = JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'));
   const es = JSON.parse(fs.readFileSync('static/locales/es.json', 'utf8'));
   assert.deepEqual(Object.keys(es).sort(), Object.keys(en).sort(), 'Phase 1: es.json has exactly the same keys as en.json (parity)');
+  const contextMenuOpenKeys = ['contextmenu.openInDiffer', 'contextmenu.openNewDiffEditor', 'contextmenu.openNewEditor'];
+  assert.equal(en['contextmenu.openInDiffer'], 'Open in a Differ', 'en reusable Differ context label');
+  assert.equal(en['contextmenu.openNewDiffEditor'], 'Open in a new Differ', 'en new Differ context label');
+  assert.equal(en['contextmenu.openNewEditor'], 'Open in a new Editor', 'en new Editor context label');
+  for (const loc of ['es', 'ja', 'de', 'fr', 'pt-BR', 'ru', 'ko', 'hi', 'ar', 'he', 'vi', 'th', 'tr', 'nl', 'pl', 'it', 'zh-Hans', 'zh-Hant']) {
+    const cat = JSON.parse(fs.readFileSync(`static/locales/${loc}.json`, 'utf8'));
+    for (const key of contextMenuOpenKeys) {
+      assert.ok(typeof cat[key] === 'string' && cat[key].length, `${loc} has ${key}`);
+      assert.notEqual(cat[key], en[key], `${loc} translates ${key} instead of falling back to English`);
+    }
+  }
   // The YO!info / YO!agent tab labels are localized via brand.tab.*; en (and non-Chinese locales) keep
   // the English brand text, while the two Chinese catalogs render the requested glyphs (asserted below).
   assert.equal(en['brand.tab.info'], 'YO!info', 'en YO!info tab label');
@@ -10357,6 +10377,214 @@ test('t@tabber', () => {
 }
 
 (async () => {
+  {
+    const api = loadYolomux('', ['1']);
+    const path = '/repo/app/src/main.py';
+    const item = api.fileEditorDiffPreviewItemFor(path);
+    api.setOpenFileOwner(path, item);
+    api.setOpenFileStateForTest(path, {
+      kind: 'text',
+      original: 'print("hello")\n',
+      content: 'print("hello")\n',
+      dirty: false,
+      realpath: path,
+      file_id: 'dev:10:ino:20',
+      fileIdentity: 'id:dev:10:ino:20',
+    });
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
+    slots.left = api.paneStateWithTabs(['1'], '1');
+    slots.slot1 = api.paneStateWithTabs([item], item);
+    api.setLayoutSlotsForTest(slots);
+    api.setFocusedPanelItem('1');
+    api.setFetchForTest(url => {
+      const text = String(url);
+      if (text.startsWith('/api/fs/read')) {
+        return Promise.resolve(jsonResponse({
+          path,
+          content: 'print("hello")\n',
+          size: 15,
+          mtime: 1,
+          mtime_ns: 1,
+          realpath: path,
+          file_id: 'dev:10:ino:20',
+          git_root: '/repo/app',
+          git_tracked: true,
+          git_history: [{ref: 'a'}, {ref: 'b'}],
+          git_has_history: true,
+        }));
+      }
+      if (text.startsWith('/api/fs/diff')) {
+        return Promise.resolve(jsonResponse({
+          repo: '/repo/app',
+          relative_path: 'src/main.py',
+          diff: '@@ -1 +1 @@\n-print("old")\n+print("hello")\n',
+          original: 'print("old")\n',
+          working: 'print("hello")\n',
+        }));
+      }
+      return Promise.resolve(jsonResponse({ok: true}));
+    });
+
+    await api.openChangedFileInDiffForTest(path, '1', 'M', '/repo/app', {userInitiated: true});
+
+    assert.equal(api.slotForSession(item), 'slot1', 'Differ reopen keeps the moved filediff tab in its current pane');
+    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
+      left: {tabs: ['1'], active: '1'},
+      slot1: {tabs: [item], active: item},
+    });
+    assert.equal(api.editorViewModeFor(path, item), 'diff', 'Differ reopen leaves the moved filediff tab in Diff mode');
+  }
+
+  {
+    const api = loadYolomux('', ['1']);
+    const path = '/repo/app/src/main.py';
+    const existingItem = api.fileEditorItemFor(path);
+    api.setOpenFileOwner(path, existingItem);
+    api.setOpenFileStateForTest(path, {
+      kind: 'text',
+      original: 'print("hello")\n',
+      content: 'print("hello")\n',
+      dirty: false,
+      realpath: path,
+      file_id: 'dev:10:ino:20',
+      fileIdentity: 'id:dev:10:ino:20',
+      gitRoot: '/repo/app',
+      gitTracked: true,
+      gitHistory: [{ref: 'a'}, {ref: 'b'}],
+      gitHasHistory: true,
+      diffLoaded: true,
+      diffUnavailable: true,
+      diffError: 'old unavailable diff',
+    });
+    api.setFileEditorViewMode(path, 'edit', existingItem);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
+    slots.left = api.paneStateWithTabs(['1'], '1');
+    slots.slot1 = api.paneStateWithTabs([existingItem], existingItem);
+    api.setLayoutSlotsForTest(slots);
+    api.setFocusedPanelItem('1');
+    api.setFetchForTest(url => {
+      const text = String(url);
+      if (text.startsWith('/api/fs/read')) {
+        return Promise.resolve(jsonResponse({
+          path,
+          content: 'print("hello")\n',
+          size: 15,
+          mtime: 1,
+          mtime_ns: 1,
+          realpath: path,
+          file_id: 'dev:10:ino:20',
+          git_root: '/repo/app',
+          git_tracked: true,
+          git_history: [{ref: 'a'}, {ref: 'b'}],
+          git_has_history: true,
+        }));
+      }
+      if (text.startsWith('/api/fs/diff')) {
+        api.setFileEditorViewMode(path, 'edit', existingItem);
+        return Promise.resolve(jsonResponse({
+          repo: '/repo/app',
+          relative_path: 'src/main.py',
+          diff: '@@ -1 +1 @@\n-print("old")\n+print("hello")\n',
+          original: 'print("old")\n',
+          working: 'print("hello")\n',
+        }));
+      }
+      return Promise.resolve(jsonResponse({ok: true}));
+    });
+
+    await api.openChangedFileInDiffForTest(path, '1', 'M', '/repo/app', {userInitiated: true});
+
+    assert.equal(api.slotForSession(existingItem), 'slot1', 'Differ row reopen keeps the existing editor tab in its pane');
+    assert.equal(api.editorViewModeFor(path, existingItem), 'diff', 'a repeated Differ row click forces the actual existing tab back to Diff mode');
+  }
+
+  {
+    const api = loadYolomux('', ['1']);
+    const realPath = '/repo/app/src/main.py';
+    const linkPath = '/repo/app/link-main.py';
+    const calls = [];
+    api.setFetchForTest(url => {
+      const text = String(url);
+      calls.push(text);
+      const path = decodeURIComponent((text.match(/path=([^&]+)/) || [])[1] || '');
+      if (text.startsWith('/api/fs/read')) {
+        return Promise.resolve(jsonResponse({
+          path,
+          content: 'print("hello")\n',
+          size: 15,
+          mtime: 1,
+          mtime_ns: 1,
+          realpath: realPath,
+          file_id: 'dev:10:ino:20',
+          git_root: '/repo/app',
+          git_tracked: true,
+          git_history: [{ref: 'a'}, {ref: 'b'}],
+          git_has_history: true,
+        }));
+      }
+      return Promise.resolve(jsonResponse({ok: true}));
+    });
+
+    const firstItem = await api.openFileInEditorForTest(realPath, {name: 'main.py', realpath: realPath, file_id: 'dev:10:ino:20'}, {viewMode: 'edit'});
+    const dirtyState = api.currentFileStateForTest(realPath);
+    api.setOpenFileStateForTest(realPath, {
+      ...dirtyState,
+      content: 'dirty edit\n',
+      dirty: true,
+    });
+    const secondItem = await api.openFileInAdditionalEditorTabForTest(linkPath, {name: 'link-main.py', realpath: realPath, file_id: 'dev:10:ino:20'}, {viewMode: 'diff'});
+
+    assert.equal(secondItem, firstItem, 'opening a symlink alias focuses the existing physical-file editor item');
+    assert.deepStrictEqual(canonical(api.openFileEditorItems()), [firstItem], 'same physical file has one editable editor item');
+    assert.deepStrictEqual(canonical(api.filePanelItemsForPath(realPath)), [firstItem], 'primary path owns the single editor tab');
+    assert.deepStrictEqual(canonical(api.filePanelItemsForPath(linkPath)), [], 'symlink alias does not create a second editable editor tab');
+    assert.equal(api.editorViewModeFor(realPath, firstItem), 'diff', 'alias open applies the requested mode to the existing editor');
+    assert.equal(api.currentFileStateForTest(realPath).content, 'dirty edit\n', 'alias open preserves the dirty buffer');
+    assert.equal(calls.filter(url => url.startsWith('/api/fs/read')).length, 1, 'entry identity avoids a second read before focusing the existing editor');
+  }
+
+  {
+    const api = loadYolomux('', ['1']);
+    const path = '/repo/app/src/main.py';
+    const readResolvers = [];
+    const calls = [];
+    api.setFetchForTest(url => {
+      const text = String(url);
+      calls.push(text);
+      if (text.startsWith('/api/fs/read')) {
+        return new Promise(resolve => {
+          readResolvers.push(() => resolve(jsonResponse({
+            path,
+            content: 'print("hello")\n',
+            size: 15,
+            mtime: 1,
+            mtime_ns: 1,
+            realpath: path,
+            file_id: 'dev:10:ino:20',
+            git_root: '/repo/app',
+            git_tracked: true,
+            git_history: [{ref: 'a'}, {ref: 'b'}],
+            git_has_history: true,
+          })));
+        });
+      }
+      return Promise.resolve(jsonResponse({ok: true}));
+    });
+
+    const firstOpen = api.openFileInAdditionalEditorTabForTest(path, {name: 'main.py'}, {viewMode: 'edit'});
+    const secondOpen = api.openFileInAdditionalEditorTabForTest(path, {name: 'main.py'}, {viewMode: 'diff'});
+    assert.equal(readResolvers.length, 1, 'concurrent same-path editor opens share one in-flight read');
+    readResolvers[0]();
+    const [firstItem, secondItem] = await Promise.all([firstOpen, secondOpen]);
+
+    assert.equal(secondItem, firstItem, 'concurrent same-path new-editor opens converge on the first editor item');
+    assert.deepStrictEqual(canonical(api.openFileEditorItems()), [firstItem], 'concurrent same-path opens leave one editable editor item');
+    assert.equal(api.editorViewModeFor(path, firstItem), 'diff', 'the later requested mode applies to the focused existing editor');
+    assert.equal(calls.filter(url => url.startsWith('/api/fs/read')).length, 1, 'same-path open dedupe does not race a second read');
+  }
+
   {
     const staleDoitPath = '/home/test/yolomux.dev1/DOIT.57.md';
     const realDoitPath = '/home/test/yolomux.dev2/DOIT.57.md';

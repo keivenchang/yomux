@@ -129,6 +129,10 @@ def test_filesystem_blocks_symlink_escape_from_allowed_root(monkeypatch, tmp_pat
         filesystem.read_file(str(link))
 
     assert info.value.status == 403
+    listed_link = {entry["name"]: entry for entry in filesystem.list_directory(str(allowed))["entries"]}["link.txt"]
+    assert "file_id" not in listed_link
+    assert "file_identity" not in listed_link
+    assert "realpath" not in listed_link
 
 
 def test_filesystem_blocks_exact_secret_files(monkeypatch, tmp_path):
@@ -617,6 +621,34 @@ def test_path_info_returns_git_relative_path(tmp_path):
     assert result["repo_root"] == str(tmp_path)
     assert result["relative_path"] == "src/main.py"
     assert result["kind"] == "file"
+
+
+def test_file_identity_payloads_follow_symlinks_and_hardlinks(tmp_path):
+    target = tmp_path / "target.txt"
+    target.write_text("hello\n", encoding="utf-8")
+    symlink = tmp_path / "alias.txt"
+    symlink.symlink_to(target)
+    hardlink = tmp_path / "hard.txt"
+    os.link(target, hardlink)
+    broken = tmp_path / "broken.txt"
+    broken.symlink_to(tmp_path / "missing.txt")
+
+    target_read = filesystem.read_file(str(target))
+    symlink_read = filesystem.read_file(str(symlink))
+    hardlink_info = filesystem.path_info(str(hardlink))
+    entries = {entry["name"]: entry for entry in filesystem.list_directory(str(tmp_path))["entries"]}
+    broken_info = filesystem.path_info(str(broken))
+
+    assert target_read["file_id"]
+    assert target_read["file_identity"] == f"id:{target_read['file_id']}"
+    assert symlink_read["file_id"] == target_read["file_id"]
+    assert symlink_read["realpath"] == os.path.realpath(target)
+    assert entries["alias.txt"]["file_id"] == target_read["file_id"]
+    assert entries["alias.txt"]["realpath"] == os.path.realpath(target)
+    assert hardlink_info["file_id"] == target_read["file_id"]
+    assert hardlink_info["realpath"] == os.path.realpath(hardlink)
+    assert "file_id" not in broken_info
+    assert "file_identity" not in broken_info
 
 
 def test_diff_file_returns_git_diff_for_tracked_file(tmp_path):
