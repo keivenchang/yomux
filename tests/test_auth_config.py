@@ -263,8 +263,8 @@ def test_bootstrap_exposes_agent_launch_commands_and_term_always_available():
         match = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
         return json.loads(match.group(1))
     yolo = boot(web.html_page([], "admin", dangerously_yolo=True))
-    assert yolo["agentLaunchCommands"]["claude"] == "claude --dangerously-skip-permissions"
-    assert yolo["agentLaunchCommands"]["codex"] == "codex --dangerously-bypass-approvals-and-sandbox"
+    assert yolo["agentLaunchCommands"]["claude"] == "claude --dangerously-skip-permissions --bare"
+    assert yolo["agentLaunchCommands"]["codex"] == "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
     assert "term" in yolo["agentLaunchCommands"]
     # Without --dangerously-yolo the commands carry no bypass flags.
     plain = boot(web.html_page([], "admin"))

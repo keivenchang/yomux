@@ -47,10 +47,10 @@ def numbered_session_workdir(session: str) -> Path | None:
 
 def agent_command(agent: str, dangerously_yolo: bool = False) -> str:
     if agent == "codex":
-        return "codex --dangerously-bypass-approvals-and-sandbox" if dangerously_yolo else "codex"
+        return "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust" if dangerously_yolo else "codex"
     if agent == "term":
         return os.environ.get("SHELL") or "bash"
-    return "claude --dangerously-skip-permissions" if dangerously_yolo else "claude"
+    return "claude --dangerously-skip-permissions --bare" if dangerously_yolo else "claude"
 
 def available_agent_commands() -> list[str]:
     heal_server_path()

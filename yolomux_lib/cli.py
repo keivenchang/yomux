@@ -42,7 +42,7 @@ def parse_args() -> argparse.Namespace:
         "--dangerously-yolo",
         dest="dangerously_yolo",
         action="store_true",
-        help="launch Claude/Codex sessions with their dangerous approval/sandbox bypass flags",
+        help="launch Claude/Codex sessions with their dangerous permission, sandbox, and hook bypass flags",
     )
     parser.add_argument(
         "--self-signed",

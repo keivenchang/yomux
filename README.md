@@ -34,7 +34,7 @@ tmux new-session -A -s project1     # start (or attach) a tmux session
 python3 yolomux.py --self-signed --dang
 ```
 
-Open `https://localhost:9998/`. The first launch shows a setup page — see [First launch](#first-launch) below. `--self-signed` creates a local HTTPS certificate under `~/.local/state/yolomux/tls/`; your browser will warn because it is not signed by a public CA. `--dang` is the short alias for `--dangerously-yolo`, which makes the UI's `+ Claude` and `+ Codex` buttons launch with their approval/sandbox bypass flags.
+Open `https://localhost:9998/`. The first launch shows a setup page — see [First launch](#first-launch) below. `--self-signed` creates a local HTTPS certificate under `~/.local/state/yolomux/tls/`; your browser will warn because it is not signed by a public CA. `--dang` is the short alias for `--dangerously-yolo`, which makes the UI's `+ Claude` and `+ Codex` buttons launch with their dangerous bypass flags.
 
 ## First launch
 
@@ -151,15 +151,23 @@ Cookies have a 90-day sliding lifetime and survive server restarts. Cookies are 
 ```bash
 claude --permission-mode auto        # auto-handles most decisions
 claude --dangerously-skip-permissions  # full bypass
+claude --bare                        # skip hooks and other customizations
 codex --ask-for-approval never       # no approval prompts, sandbox still active
-codex --dangerously-bypass-approvals-and-sandbox  # full bypass
+codex --dangerously-bypass-approvals-and-sandbox  # command approval and sandbox bypass
+codex --dangerously-bypass-hook-trust             # hook trust bypass
 ```
 
-**`--dang` / `--dangerously-yolo` (server flag).** Makes `+ Claude` / `+ Codex` buttons launch with the full bypass flags:
+`claude --dangerously-skip-permissions` bypasses Claude Code permission prompts. `claude --bare` is Claude Code's hook-side equivalent in version 2.1.177: it skips hooks, LSP, plugin sync, auto-memory, background prefetches, keychain reads, and `CLAUDE.md` auto-discovery. Claude Code does not expose a narrow hook-trust bypass flag equivalent to Codex's `--dangerously-bypass-hook-trust`.
+
+`codex --dangerously-bypass-approvals-and-sandbox` lets Codex run model-generated commands without approval prompts and without the Codex command sandbox. `codex --dangerously-bypass-hook-trust` is separate: it allows enabled Codex hooks to run without persisted hook trust. It does not remove the normal command sandbox by itself.
+
+**`--dang` / `--dangerously-yolo` (server flag).** Makes `+ Claude` / `+ Codex` buttons launch with the dangerous bypass flags:
 
 ```bash
 python3 yolomux.py --self-signed --dang
 ```
+
+With `--dang`, `+ Claude` launches `claude --dangerously-skip-permissions --bare`, so permission prompts are bypassed and hooks are skipped for new Claude sessions. `+ Codex` launches `codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust`, so both command approval/sandbox checks and hook trust checks are bypassed for new Codex sessions.
 
 Without it, those buttons create plain `claude` / `codex` sessions. This flag does not change existing sessions.
 
