@@ -706,6 +706,21 @@ def test_visible_choice_prompt_text_detects_current_user_question():
     assert prompt_detector.agent_screen_state(visible_text)["key"] == "needs-input"
 
 
+def test_visible_choice_prompt_text_ignores_stale_user_question_above_idle_prompt():
+    visible_text = "\n".join([
+        "❯ Where are the DOIT files?",
+        "",
+        "● They're gone from ~/yolomux.dev2 — and that's by the project's design, not a loss.",
+        "",
+        "✻ Baked for 1m 33s · 1 shell still running",
+        "",
+        "❯ ",
+    ])
+
+    assert prompt_detector.visible_choice_prompt_text(visible_text) == ""
+    assert prompt_detector.agent_screen_state(visible_text)["key"] == "idle"
+
+
 def test_ask_user_question_ui_is_needs_input_not_auto_approved():
     # Claude Code's AskUserQuestion multi-option UI (image 20260602-014). The selected option
     # is box-highlighted (no ❯), and a preview box / "Notes:" / "Chat about this" sit between the options

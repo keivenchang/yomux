@@ -727,10 +727,10 @@ def visible_choice_prompt_text(visible_text: str) -> str:
         stripped = _clean_prompt_block_line(line)
         if not stripped or _is_footer_hint_line(stripped) or stripped.startswith(("keivenc@", "$ ")):
             continue
-        if _QUESTION_RE.match(stripped):
-            return stripped
         if re.match(r"^\s*[❯›>]\s+\S", line):
             break
+        if _QUESTION_RE.match(stripped):
+            return stripped
     return ""
 
 
