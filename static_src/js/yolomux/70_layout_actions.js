@@ -278,7 +278,7 @@ function layoutWithFileExplorerDockedLeft(slots = layoutSlots, options = {}) {
   next[layoutTreeKey] = rightSlots.length
     ? splitNode('row', leafNode(finderSlot), right[layoutTreeKey], fileExplorerSplitPercent)
     : leafNode(finderSlot);
-  return compactLayoutSlots(next);
+  return layoutWithFileExplorerPeerPane(compactLayoutSlots(next));
 }
 
 function dockFileExplorerPane() {

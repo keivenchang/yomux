@@ -109,6 +109,7 @@ Section order follows the reading path: a capabilities overview and glossary, th
 
 - Finder/Differ is a real pane in the layout, not an overlay.
 - Finder/Differ/Tabber are three modes of the same reserved pane. Dockview adoption, Tabber refresh, Differ refresh, and Finder refresh must preserve that pane and its current tree position unless the user explicitly hides it with the close button, File -> Finder toggle, or the Finder shortcut.
+- Finder/Differ/Tabber must never be the only full-width/full-height pane. If closing, minimizing, URL restore, Dockview adoption, reconnect, wake, hidden-tab measurement, or resize leaves only the reserved file pane, the layout must preserve that pane at the configured Finder/Differ width and create an empty placeholder pane to its right.
 - Finder/Differ must self-heal when a URL parse, Dockview adoption, reconnect, wake, hidden-tab measurement, or resize path produces a layout that lost the reserved pane without an explicit user close. Explicit close intent is per browser tab and suppresses self-heal until the user restores Finder/Differ.
 - Dockview must not adopt a layout snapshot while its host is hidden or measured at zero area. A visible small host still lays out at its real size; only serialized snapshots use functional fallback dimensions so a sleep/hidden-tab measurement cannot become the persisted layout.
 - Finder/Differ is reserved as a target. Nothing can be dropped into its center, left edge, right edge, or top edge.

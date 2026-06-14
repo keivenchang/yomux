@@ -1,8 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-from __future__ import annotations
+"""Pure prompt detection, approval state, and command safety helpers.
 
-"""Pure prompt detection, approval state, and command safety helpers."""
+Keep the detector contract and raw prompt examples synced with
+docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md.
+"""
+
+from __future__ import annotations
 
 import hashlib
 import re
@@ -467,7 +471,10 @@ def _is_working_line(line: str) -> bool:
 
 
 def visible_agent_working(visible_text: str) -> bool:
-    """Return True when the visible pane is showing an active thinking/working row."""
+    """Return True when the visible pane is showing an active thinking/working row.
+
+    Spec: docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md#detector-principles
+    """
     lines = visible_text.splitlines()[-25:]
     working_index = _last_working_index(lines)
     return working_index >= 0 and not _working_line_has_later_prompt(lines, working_index)
@@ -739,6 +746,7 @@ def agent_screen_state(visible_text: str) -> dict[str, object]:
 
     Approval detection and auto-approval use the same visible pane text as this
     UI state, so the browser does not need its own stale scrollback parser.
+    Spec: docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md#state-model
     """
     prompt_state = approval_prompt_state(visible_text)
     prompt_type = prompt_state.get("type") or None
@@ -806,6 +814,8 @@ def approval_prompt_state(visible_text: str, pane_text: str | None = None) -> di
     ``visible_text`` must be captured with ``visible_only=True``. ``pane_text``
     may include scrollback and is used only to extract command context after a
     visible bash prompt has already been confirmed.
+    Spec: docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md#claude-approval-patterns
+    and docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md#codex-approval-patterns.
     """
     prompt_type = detect_prompt(visible_text)
     selected = yes_is_selected(visible_text)

@@ -4013,10 +4013,38 @@ function fileExplorerNeedsLeftDock(slots = layoutSlots) {
 }
 
 function normalizeFileExplorerDock(slots) {
+  let next = slots;
   if (!itemInLayout(fileExplorerItemId, slots) && !fileExplorerClosedByUser() && paneItems(slots).length) {
-    return layoutWithFileExplorerDockedLeft(slots);
+    next = layoutWithFileExplorerDockedLeft(slots);
+  } else if (fileExplorerNeedsLeftDock(slots)) {
+    next = layoutWithFileExplorerDockedLeft(slots);
   }
-  return fileExplorerNeedsLeftDock(slots) ? layoutWithFileExplorerDockedLeft(slots) : slots;
+  return layoutWithFileExplorerPeerPane(next);
+}
+
+function soleFileExplorerSlot(slots) {
+  const keys = layoutSlotKeys(slots).filter(slot => paneHasLayoutContent(slot, slots));
+  if (keys.length !== 1) return null;
+  const slot = keys[0];
+  const tabs = paneTabs(slot, slots);
+  return tabs.length === 1 && tabs[0] === fileExplorerItemId ? slot : null;
+}
+
+function layoutWithFileExplorerPeerPane(slots) {
+  const finderSlot = soleFileExplorerSlot(slots);
+  if (!finderSlot) return slots;
+  const next = cloneLayoutSlots(slots);
+  const peerSlot = fileExplorerPeerSlot(slots, finderSlot);
+  next[peerSlot] = emptyPlaceholderPaneState();
+  next[layoutTreeKey] = splitNode('row', leafNode(finderSlot), leafNode(peerSlot), fileExplorerSplitPercent);
+  return compactLayoutSlots(next);
+}
+
+function fileExplorerPeerSlot(slots, finderSlot) {
+  const formerLeaf = layoutLeafSlots(slots?.[layoutTreeKey]).find(slot => slot !== finderSlot && !paneHasLayoutContent(slot, slots));
+  if (formerLeaf) return formerLeaf;
+  const dormantSlot = Object.keys(slots || {}).find(slot => slot !== layoutTreeKey && slot !== finderSlot && !paneHasLayoutContent(slot, slots));
+  return dormantSlot || nextLayoutSlot(slots);
 }
 
 function layoutFromSessionList(values) {
@@ -17489,7 +17517,7 @@ function layoutWithFileExplorerDockedLeft(slots = layoutSlots, options = {}) {
   next[layoutTreeKey] = rightSlots.length
     ? splitNode('row', leafNode(finderSlot), right[layoutTreeKey], fileExplorerSplitPercent)
     : leafNode(finderSlot);
-  return compactLayoutSlots(next);
+  return layoutWithFileExplorerPeerPane(compactLayoutSlots(next));
 }
 
 function dockFileExplorerPane() {

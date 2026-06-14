@@ -1576,11 +1576,17 @@ test('t@1174', () => {
 test('t@1191', () => {
   const api = loadYolomux('', []);
   const layout = api.defaultLayoutForTest();
-  assert.deepStrictEqual(canonical(layout.panes), {left: {tabs: ['__files__'], active: '__files__'}});
+  assert.deepStrictEqual(canonical(layout), {
+    tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot1'}]},
+    panes: {
+      left: {tabs: ['__files__'], active: '__files__'},
+      slot1: {tabs: [], active: null, placeholder: true},
+    },
+  });
   const url = api.syncInitialLayoutUrlForTest();
   const params = new URLSearchParams(url.slice(url.indexOf('?') + 1));
-  assert.equal(params.get('layout'), 'left');
-  assert.equal(params.get('tabs'), 'left:files');
+  assert.equal(params.get('layout'), 'row@22(left,slot1)');
+  assert.equal(params.get('tabs'), 'left:files;slot1:__empty_pane__');
 });
 
 test('t@1201', () => {
@@ -1735,8 +1741,11 @@ test('t@1280', () => {
 for (const legacyChangesToken of ['changes', '__changes__']) {
   const api = loadYolomux(`?layout=left&tabs=left:${legacyChangesToken}`, ['1']);
   assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
-    tree: {slot: 'left'},
-    panes: {left: {tabs: ['__files__'], active: '__files__'}},
+    tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot1'}]},
+    panes: {
+      left: {tabs: ['__files__'], active: '__files__'},
+      slot1: {tabs: [], active: null, placeholder: true},
+    },
   });
   assert.equal(api.fileExplorerModeForTest(), 'diff', 'legacy changes-only URLs restore Finder diff mode');
 }
@@ -7281,8 +7290,11 @@ test('t@2560', () => {
   api.setLayoutSlotsForTest(tmuxAboveFinder);
   api.removeSessionFromLayout('1');
   assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
-    tree: {slot: 'left'},
-    panes: {left: {tabs: ['__files__'], active: '__files__'}},
+    tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot2'}]},
+    panes: {
+      left: {tabs: ['__files__'], active: '__files__'},
+      slot2: {tabs: [], active: null, placeholder: true},
+    },
   });
 
   const finderAboveTmux = api.emptyLayoutSlots();
@@ -7292,8 +7304,11 @@ test('t@2560', () => {
   api.setLayoutSlotsForTest(finderAboveTmux);
   api.removePaneFromLayout('1');
   assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
-    tree: {slot: 'left'},
-    panes: {left: {tabs: ['__files__'], active: '__files__'}},
+    tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot2'}]},
+    panes: {
+      left: {tabs: ['__files__'], active: '__files__'},
+      slot2: {tabs: [], active: null, placeholder: true},
+    },
   });
 
   const activationSlots = api.emptyLayoutSlots();
@@ -7605,7 +7620,14 @@ test('t@2560', () => {
   finderOnly[api.layoutTreeKey] = api.leafNode('left');
   finderOnly.left = api.paneStateWithTabs(['__files__'], '__files__');
   api.setLayoutSlotsForTest(finderOnly);
-  assert.equal(api.slotForNewTmuxSession('2'), 'left');
+  assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
+    tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot1'}]},
+    panes: {
+      left: {tabs: ['__files__'], active: '__files__'},
+      slot1: {tabs: [], active: null, placeholder: true},
+    },
+  });
+  assert.equal(api.slotForNewTmuxSession('2'), 'slot1');
 
   const dragSlots = api.emptyLayoutSlots();
   dragSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
@@ -7622,6 +7644,7 @@ test('t@2560', () => {
   const moved = api.normalizeLayoutSlots(api.layoutWithoutItem('__info__'));
   assert.deepStrictEqual(canonical(api.serialize(moved).panes), {
     left: {tabs: ['__files__'], active: '__files__'},
+    slot1: {tabs: [], active: null, placeholder: true},
   });
   api.splitSessionAtSlot('__info__', 'left', 'top', 'slot1');
   const split = api.serialize(api.currentSlots());
@@ -7749,8 +7772,11 @@ test('t@2560', () => {
     preserveRemovedSlots: true,
   });
   assert.deepStrictEqual(canonical(killedApi.serialize(killedVerticalNormalized)), {
-    tree: {slot: 'left'},
-    panes: {left: {tabs: ['__files__'], active: '__files__'}},
+    tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot2'}]},
+    panes: {
+      left: {tabs: ['__files__'], active: '__files__'},
+      slot2: {tabs: [], active: null, placeholder: true},
+    },
   });
 
   api.setLayoutSlotsForTest(finderOnly);

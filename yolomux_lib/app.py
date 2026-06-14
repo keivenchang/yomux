@@ -5489,6 +5489,8 @@ class TmuxWebtermApp:
                 prompt_state = hybrid_approval_prompt_state(session, visible_text, pane_text or visible_text, prompt_source=self.auto_approve_prompt_source())
             screen_state = agent_screen_state(visible_text)
             if screen_state.get("key") == "idle":
+                # Visible pane state is primary. Transcript activity only upgrades idle -> working
+                # when recent, matching docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md#transcript-signals.
                 infos = discovered_sessions
                 if infos is None:
                     infos, _errors = discover_sessions([session])

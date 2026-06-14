@@ -8,6 +8,9 @@ forced `yolomux_lib` modules (app.py read-path, the auto-approve worker act-path
 script and reach detection through that indirection — an inverted dependency, and two callers reaching
 the same logic by different routes. Detection now lives here in the library; the root script re-exports
 these names for its own CLI use, and the lib callers import them directly.
+
+Keep the pane-first / transcript-fallback order synced with
+docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md#recommended-channel-order.
 """
 
 from __future__ import annotations

@@ -1,3 +1,9 @@
+"""Transcript parsing helpers for agent activity and approval fallback state.
+
+Keep transcript recency and pending-tool rules synced with
+docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md#transcript-signals.
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -61,6 +67,11 @@ TRANSCRIPT_FILE_TOOL_NAMES = {"write", "edit", "multiedit", "notebookedit", "app
 
 
 def transcript_activity_state_from_text(text: str, kind: str = "") -> dict[str, Any]:
+    """Classify recent transcript JSON as working or idle.
+
+    Visible TUI state remains primary; this supports the spec's passive transcript
+    fallback for pending tool calls and streaming deltas.
+    """
     pending_tools: dict[str, str] = {}
     streaming = False
     completed = False
