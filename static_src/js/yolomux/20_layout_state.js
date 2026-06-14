@@ -2145,8 +2145,8 @@ function commandPaletteRankItems(items, query, options = {}) {
 
 function commandPaletteMixDomains(options = {}) {
   const surface = commandPaletteSurface(options);
-  if (surface === 'files') return {primary: 'file', secondary: 'pane'};
-  if (surface === 'command') return {primary: 'pane', secondary: 'file'};
+  if (surface === 'files') return {primary: 'file', secondary: ['pane', 'command', 'setting']};
+  if (surface === 'command') return {primary: 'pane', secondary: ['command', 'setting', 'file']};
   return null;
 }
 
@@ -2158,10 +2158,24 @@ function commandPaletteMixFirstScreenResults(ranked, query, options = {}) {
   const maxSecondary = Math.max(0, Number(searchRankWeights.mixSecondarySlots || 0));
   if (!windowSize || !maxSecondary) return ranked;
   const hasPrimary = ranked.slice(0, windowSize).some(item => commandPaletteItemDomain(item) === domains.primary);
-  const secondaryCandidates = ranked
+  const secondaryDomains = Array.isArray(domains.secondary) ? domains.secondary : [domains.secondary].filter(Boolean);
+  const rowsByDomain = new Map(secondaryDomains.map(domain => [domain, ranked
     .map((item, index) => ({item, index}))
-    .filter(row => commandPaletteItemDomain(row.item) === domains.secondary)
-    .slice(0, maxSecondary);
+    .filter(row => commandPaletteItemDomain(row.item) === domain)]));
+  const secondaryCandidates = [];
+  const selectedItems = new Set();
+  while (secondaryCandidates.length < maxSecondary) {
+    let added = false;
+    for (const domain of secondaryDomains) {
+      const row = (rowsByDomain.get(domain) || []).find(candidate => !selectedItems.has(candidate.item));
+      if (!row) continue;
+      secondaryCandidates.push(row);
+      selectedItems.add(row.item);
+      added = true;
+      if (secondaryCandidates.length >= maxSecondary) break;
+    }
+    if (!added) break;
+  }
   if (!hasPrimary || !secondaryCandidates.length) return ranked;
   const selected = [];
   for (const [secondaryIndex, row] of secondaryCandidates.entries()) {
@@ -2172,8 +2186,8 @@ function commandPaletteMixFirstScreenResults(ranked, query, options = {}) {
     if (row.index > target) selected.push({item: row.item, target});
   }
   if (!selected.length) return ranked;
-  const selectedItems = new Set(selected.map(row => row.item));
-  const result = ranked.filter(item => !selectedItems.has(item));
+  const selectedForMove = new Set(selected.map(row => row.item));
+  const result = ranked.filter(item => !selectedForMove.has(item));
   for (const row of selected) {
     result.splice(Math.min(row.target, result.length), 0, row.item);
   }

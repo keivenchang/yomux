@@ -507,7 +507,7 @@ function boolSetting(path, fallback) {
   return value === true || value === 'true' || value === 1;
 }
 
-const UPDATE_NOTIFICATION_LEVELS = ['patch', 'minor', 'none'];
+const UPDATE_NOTIFICATION_LEVELS = ['major', 'minor', 'patch', 'none'];
 
 function normalizeUpdateNotificationLevel(value) {
   if (value === true || value === 'true' || value === 1) return 'patch';
@@ -517,7 +517,7 @@ function normalizeUpdateNotificationLevel(value) {
 }
 
 function updateNotificationLevelSetting() {
-  return normalizeUpdateNotificationLevel(initialSetting('general.reload_on_update', 'patch'));
+  return normalizeUpdateNotificationLevel(initialSetting('general.reload_on_update', false));
 }
 
 function semanticVersionParts(value) {
@@ -538,8 +538,12 @@ function updateNotificationAllowsVersion(currentVersion, targetVersion, level = 
   if (!currentParts || !targetParts) {
     return cleanLevel === 'patch' && String(targetVersion || '') !== String(currentVersion || '');
   }
-  if (targetParts[0] !== currentParts[0]) return targetParts[0] > currentParts[0];
-  if (targetParts[1] !== currentParts[1]) return targetParts[1] > currentParts[1];
+  if (targetParts[0] !== currentParts[0]) {
+    return cleanLevel !== 'none' && targetParts[0] > currentParts[0];
+  }
+  if (targetParts[1] !== currentParts[1]) {
+    return (cleanLevel === 'minor' || cleanLevel === 'patch') && targetParts[1] > currentParts[1];
+  }
   if (targetParts[2] !== currentParts[2]) return cleanLevel === 'patch' && targetParts[2] > currentParts[2];
   return false;
 }
@@ -689,6 +693,7 @@ function applyCssSettings() {
   const uiFontSize = numberSetting('appearance.ui_font_size', 13);
   root.setProperty('--ui-font-size', `${uiFontSize}px`);
   root.setProperty('--tab-label-size', `${uiFontSize}px`);
+  root.setProperty('--terminal-font-size', `${terminalFontSize}px`);
   root.setProperty('--editor-font-size', `${editorFontSize}px`);
   root.setProperty('--editor-preview-font-size', `${editorPreviewFontSize}px`);
   root.setProperty('--file-explorer-font-size', `${fileExplorerFontSize}px`);

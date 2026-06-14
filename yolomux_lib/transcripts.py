@@ -134,6 +134,86 @@ def transcript_activity_state_from_text(text: str, kind: str = "") -> dict[str, 
         return {"key": "working", "text": f"{kind or 'agent'} turn is active in transcript"}
     return {"key": "idle", "text": ""}
 
+def transcript_delta_result_state(text: str) -> dict[str, Any]:
+    state: dict[str, Any] = {"has_lifecycle": False, "working": False, "complete": False}
+    pending_tools: dict[str, str] = {}
+    synthetic_index = 0
+    for raw_line in text.splitlines():
+        try:
+            raw_item = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(raw_item, dict):
+            continue
+        entry_type = str(raw_item.get("type") or "")
+        message = raw_item.get("message")
+        if isinstance(message, dict):
+            role = str(message.get("role") or "")
+            stop_reason = str(message.get("stop_reason") or raw_item.get("stop_reason") or "")
+            content = message.get("content")
+            if role == "assistant" and stop_reason:
+                state["has_lifecycle"] = True
+                if stop_reason in CLAUDE_TERMINAL_STOP_REASONS:
+                    state["working"] = False
+                    state["complete"] = True
+                else:
+                    state["working"] = True
+                    state["complete"] = False
+            if isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    block_type = str(block.get("type") or "")
+                    if block_type == "tool_use":
+                        synthetic_index += 1
+                        tool_id = str(block.get("id") or f"tool-{synthetic_index}")
+                        pending_tools[tool_id] = str(block.get("name") or "tool")
+                        state["has_lifecycle"] = True
+                        state["working"] = True
+                        state["complete"] = False
+                    elif block_type == "tool_result":
+                        tool_id = str(block.get("tool_use_id") or block.get("id") or "")
+                        if tool_id:
+                            pending_tools.pop(tool_id, None)
+                        state["has_lifecycle"] = True
+                        state["working"] = True
+                        state["complete"] = False
+        payload = raw_item.get("payload")
+        if not isinstance(payload, dict) and entry_type in {"function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output"}:
+            payload = raw_item
+        if isinstance(payload, dict):
+            payload_type = str(payload.get("type") or entry_type or "")
+            if payload_type in {"task_started", "agent_message_delta", "message.delta", "item.delta"}:
+                state["has_lifecycle"] = True
+                state["working"] = True
+                state["complete"] = False
+            elif payload_type == "task_complete":
+                state["has_lifecycle"] = True
+                state["working"] = False
+                state["complete"] = True
+            elif payload_type in {"function_call", "custom_tool_call"}:
+                synthetic_index += 1
+                call_id = str(payload.get("call_id") or payload.get("id") or f"call-{synthetic_index}")
+                pending_tools[call_id] = str(payload.get("name") or "tool")
+                state["has_lifecycle"] = True
+                state["working"] = True
+                state["complete"] = False
+            elif payload_type in {"function_call_output", "custom_tool_call_output"}:
+                call_id = str(payload.get("call_id") or payload.get("id") or "")
+                if call_id:
+                    pending_tools.pop(call_id, None)
+                state["has_lifecycle"] = True
+                state["working"] = True
+                state["complete"] = False
+        elif entry_type in {"agent_message_delta", "message.delta", "item.delta"}:
+            state["has_lifecycle"] = True
+            state["working"] = True
+            state["complete"] = False
+    if pending_tools:
+        state["working"] = True
+        state["complete"] = False
+    return state
+
 def newest_transcript_timestamp(text: str) -> datetime | None:
     newest = None
     for raw_line in text.splitlines():

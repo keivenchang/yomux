@@ -24,6 +24,9 @@ CLIENT_EVENT_TYPES: frozenset[str] = frozenset({
     "transcripts_changed",
     "update_available",
     "watched_prs_changed",
+    "yoagent_conversation_changed",
+    "yoagent_jobs_changed",
+    "yoagent_skills_changed",
 })
 
 

@@ -538,7 +538,7 @@ const changesFolderAutoCollapsed = new Set();
 const fileExplorerTabberCollapsed = readStoredSet(fileExplorerTabberCollapsedStorageKey);
 // Tabber activity ledger snapshot (GET /api/activity): {activity: {sessionKey|session:window: ActivityRecord}}.
 // Drives per-row recency timestamps + most-recent-first sort. Refreshed only while the Tabber is open.
-let tabberActivityPayload = {activity: {}};
+let tabberActivityPayload = {activity: {}, agents: []};
 let tabberActivityRefreshMs = 15000;
 let tabberLaunchWarmupStarted = false;
 // per-repo collapse state for the Modified-files panel repo headers (keyed by repo path).
@@ -1041,12 +1041,22 @@ let activitySummaryRefreshing = false;
 let activitySummaryLastRefreshTs = 0;
 const activitySummaryGuard = makeGenerationGuard();
 let yoagentMessages = [];
+let yoagentPendingWaits = [];
+let yoagentConversationLoaded = false;
+let yoagentConversationLoading = false;
+let yoagentConversationPath = '';
+let yoagentConversationDisplayPath = '';
 let yoagentBusy = false;
 let yoagentPrewarming = false;
 let yoagentPrewarmStarted = false;
 let yoagentError = '';
 let yoagentDraft = '';
+let yoagentHistoryCursor = null;
+let yoagentHistoryDraft = '';
 let yoagentNotice = null;
+let yoagentScrollbackLocked = false;
+let yoagentStartupInfoShown = false;
+let yoagentStartupInfoVisible = false;
 let notificationsEnabled = false;
 let fileExplorerChangesSelectedSession = shareBootstrapFinderSession();
 const sessionStateKeys = new Map();
@@ -1209,6 +1219,25 @@ function relativeTimeFormat(secondsAgo) {
     return new Intl.RelativeTimeFormat(i18nActiveLocale, {numeric: 'always'}).format(-value, unit);
   } catch (_) {
     return t(`relative.${unit}`, {count: value});
+  }
+}
+
+function compactRelativeTimeFormat(secondsAgo) {
+  const sec = Math.max(0, Math.round(Number(secondsAgo) || 0));
+  let value;
+  let unit;
+  if (sec < 3600) { value = Math.max(1, Math.round(sec / 60)); unit = 'minute'; }
+  else if (sec < 86400) { value = Math.max(1, Math.round(sec / 3600)); unit = 'hour'; }
+  else if (sec < 604800) { value = Math.max(1, Math.round(sec / 86400)); unit = 'day'; }
+  else if (sec < 2629800) { value = Math.max(1, Math.round(sec / 604800)); unit = 'week'; }
+  else if (sec < 31557600) { value = Math.max(1, Math.round(sec / 2629800)); unit = 'month'; }
+  else { value = Math.max(1, Math.round(sec / 31557600)); unit = 'year'; }
+  try {
+    return new Intl.RelativeTimeFormat(i18nActiveLocale, {numeric: 'always', style: 'short'})
+      .format(-value, unit)
+      .replace(/\./g, '');
+  } catch (_) {
+    return relativeTimeFormat(secondsAgo);
   }
 }
 
@@ -2635,9 +2664,9 @@ const searchRankWeights = Object.freeze({
   recencyHalfLifeSeconds: 7 * 24 * 60 * 60,
   repoAffinity: 400,
   mixWindow: 8,
-  mixSecondarySlots: 2,
+  mixSecondarySlots: 4,
   mixFirstSecondaryIndex: 2,
-  mixSecondaryStep: 3,
+  mixSecondaryStep: 2,
 });
 
 function fuzzySubsequenceMatch(query, text) {
@@ -5785,8 +5814,8 @@ function commandPaletteRankItems(items, query, options = {}) {
 
 function commandPaletteMixDomains(options = {}) {
   const surface = commandPaletteSurface(options);
-  if (surface === 'files') return {primary: 'file', secondary: 'pane'};
-  if (surface === 'command') return {primary: 'pane', secondary: 'file'};
+  if (surface === 'files') return {primary: 'file', secondary: ['pane', 'command', 'setting']};
+  if (surface === 'command') return {primary: 'pane', secondary: ['command', 'setting', 'file']};
   return null;
 }
 
@@ -5798,10 +5827,24 @@ function commandPaletteMixFirstScreenResults(ranked, query, options = {}) {
   const maxSecondary = Math.max(0, Number(searchRankWeights.mixSecondarySlots || 0));
   if (!windowSize || !maxSecondary) return ranked;
   const hasPrimary = ranked.slice(0, windowSize).some(item => commandPaletteItemDomain(item) === domains.primary);
-  const secondaryCandidates = ranked
+  const secondaryDomains = Array.isArray(domains.secondary) ? domains.secondary : [domains.secondary].filter(Boolean);
+  const rowsByDomain = new Map(secondaryDomains.map(domain => [domain, ranked
     .map((item, index) => ({item, index}))
-    .filter(row => commandPaletteItemDomain(row.item) === domains.secondary)
-    .slice(0, maxSecondary);
+    .filter(row => commandPaletteItemDomain(row.item) === domain)]));
+  const secondaryCandidates = [];
+  const selectedItems = new Set();
+  while (secondaryCandidates.length < maxSecondary) {
+    let added = false;
+    for (const domain of secondaryDomains) {
+      const row = (rowsByDomain.get(domain) || []).find(candidate => !selectedItems.has(candidate.item));
+      if (!row) continue;
+      secondaryCandidates.push(row);
+      selectedItems.add(row.item);
+      added = true;
+      if (secondaryCandidates.length >= maxSecondary) break;
+    }
+    if (!added) break;
+  }
   if (!hasPrimary || !secondaryCandidates.length) return ranked;
   const selected = [];
   for (const [secondaryIndex, row] of secondaryCandidates.entries()) {
@@ -5812,8 +5855,8 @@ function commandPaletteMixFirstScreenResults(ranked, query, options = {}) {
     if (row.index > target) selected.push({item: row.item, target});
   }
   if (!selected.length) return ranked;
-  const selectedItems = new Set(selected.map(row => row.item));
-  const result = ranked.filter(item => !selectedItems.has(item));
+  const selectedForMove = new Set(selected.map(row => row.item));
+  const result = ranked.filter(item => !selectedForMove.has(item));
   for (const row of selected) {
     result.splice(Math.min(row.target, result.length), 0, row.item);
   }
@@ -9136,6 +9179,7 @@ function rememberFileExplorerExplicitSyncSession(session) {
   const normalizedSession = String(session || '');
   if (!isTmuxSession(normalizedSession) || !activeSessions.includes(normalizedSession)) return false;
   if (fileExplorerExplicitSyncSession !== normalizedSession) {
+    if (fileExplorerExplicitSyncSession) restoreCommittedFileExplorerRootDisplay();
     fileExplorerExplicitSyncSession = normalizedSession;
     cancelPendingFileExplorerActiveSync();
     return true;
@@ -9533,6 +9577,27 @@ function setFileExplorerPathDisplay(path = currentFileExplorerRoot(), options = 
   refreshFileExplorerRepoDisplay(normalized, {error});
 }
 
+function displayedFileExplorerRoot() {
+  const input = fileExplorerPathInputs()[0];
+  const value = input ? ('value' in input ? input.value : input.textContent) : '';
+  return normalizeDirectoryPath(value || currentFileExplorerRoot());
+}
+
+function restoreCommittedFileExplorerRootDisplay() {
+  const root = normalizeDirectoryPath(currentFileExplorerRoot());
+  if (!root) return;
+  const displayedRoot = displayedFileExplorerRoot();
+  const pendingRoot = normalizeDirectoryPath(document.querySelector('.file-explorer-tree-panel .file-tree-status-row')?.dataset?.root || '');
+  if (displayedRoot === root && (!pendingRoot || pendingRoot === root)) return;
+  setFileExplorerPathDisplay(root);
+  renderFileExplorerRootModeControls();
+  if (typeof refreshFileExplorerTreesInPlace === 'function') {
+    refreshFileExplorerTreesInPlace({root, preserveExpanded: true, preserveScroll: true}).catch(error => {
+      console.warn('Finder root display restore failed', error);
+    });
+  }
+}
+
 function repoInfoSummary(repo) {
   if (!repo?.root) return '';
   const dirty = Number.isFinite(Number(repo.dirty_count)) && Number(repo.dirty_count) > 0 ? `, ${Number(repo.dirty_count)} dirty` : '';
@@ -9817,6 +9882,7 @@ function cancelPendingFileExplorerActiveSync(options = {}) {
   fileExplorerInteractionGeneration += 1;
   if (options.invalidateOpen !== false) fileExplorerOpenGeneration += 1;
   fileExplorerSyncGeneration += 1;
+  fileExplorerSyncPathInFlight = '';
   resetFileExplorerAppliedSyncPlan();
 }
 
@@ -11244,6 +11310,37 @@ function tabberRecency(key) {
   return Math.max(Number(rec.last_user_input_ts || 0), Number(rec.last_agent_active_ts || 0), Number(rec.last_output_ts || 0));
 }
 
+function tabberRecentAgents(payload = tabberActivityPayload) {
+  return Array.isArray(payload?.agents) ? payload.agents.filter(item => item && typeof item === 'object') : [];
+}
+
+function tabberAgentForWindow(session, windowIndex, agentKey = '') {
+  const sessionText = String(session || '');
+  const windowText = String(windowIndex ?? '');
+  const kindText = String(agentKey || '').toLowerCase();
+  let best = null;
+  for (const agent of tabberRecentAgents()) {
+    if (String(agent.session || '') !== sessionText) continue;
+    if (String(agent.window ?? '') !== windowText) continue;
+    if (kindText && String(agent.agent_kind || '').toLowerCase() !== kindText) continue;
+    if (!best || Number(agent.sort_ts || agent.last_used_ts || 0) > Number(best.sort_ts || best.last_used_ts || 0)) best = agent;
+  }
+  return best;
+}
+
+function tabberAgentRecency(agent) {
+  if (!agent) return 0;
+  return Math.max(Number(agent.sort_ts || 0), Number(agent.last_used_ts || 0));
+}
+
+function tabberAgentDateText(agent) {
+  if (!agent) return '';
+  if (agent.running === true) return t('yoagent.agent.running');
+  const ts = Number(agent.last_used_ts || 0);
+  if (!Number.isFinite(ts) || ts <= 0) return '';
+  return sessionFileDisplayTimeText(ts);
+}
+
 async function fetchTabberActivity() {
   try {
     const payload = await apiFetchJson('/api/activity', {cache: 'no-store'});
@@ -11403,12 +11500,12 @@ function buildTabberTree() {
     const git = info?.project?.git;
     const branch = git?.branch ? shortBranch(git.branch) : '';
     const gitRoot = git?.root || '';
-    const sessionRecency = tabberRecency(session);
+    const fallbackSessionRecency = tabberRecency(session);
     const sessionWork = sessionWorkDescription(session, info, 200);
     const sessionNameLabel = sessionLabel(session) || session;
     const sessionDisplay = sessionWork ? `${sessionNameLabel}  ${sessionWork}` : sessionNameLabel;
     const sessionEntry = {
-      name: sessionName, kind: 'dir', mtime: sessionRecency, sortName: sessionDisplay,
+      name: sessionName, kind: 'dir', mtime: 0, sortName: sessionDisplay,
       tabber: {type: 'session', session, label: sessionNameLabel, description: sessionWork, icon: '■', branchText: branch},
     };
     topEntries.push(sessionEntry);
@@ -11416,20 +11513,26 @@ function buildTabberTree() {
       const windowName = `w_${tabberPathToken(record.index)}`;
       const windowPath = `${sessionPath}/${windowName}`;
       const isAgent = tabberWindowIsAgent(record.name);
+      const agentKey = tmuxWindowAgentKey(record.name);
+      const agentActivity = isAgent ? tabberAgentForWindow(session, record.index, agentKey) : null;
       const repoEntries = isAgent ? tabberRepoEntriesForWindow(session, record.index, branch, gitRoot) : [];
       const childMtime = repoEntries.reduce((max, entry) => Math.max(max, Number(entry.mtime || 0)), 0);
-      // Every window gets a time: its own ledger recency, else its touched-paths' latest, else the session's.
-      const windowMtime = Math.max(tabberRecency(`${session}:${record.index}`), childMtime, sessionRecency);
+      const ledgerMtime = isAgent ? 0 : tabberRecency(`${session}:${record.index}`);
+      // Agent windows use transcript activity only. Their touched repo rows may have newer file mtimes, but
+      // parent window/session recency must still answer "when was this agent last used?"
+      const windowMtime = isAgent
+        ? tabberAgentRecency(agentActivity)
+        : Math.max(ledgerMtime, childMtime, fallbackSessionRecency);
       if (repoEntries.length) entriesByDir.set(normalizeDirectoryPath(windowPath), repoEntries);
       return {
         name: windowName, kind: repoEntries.length ? 'dir' : 'file', mtime: windowMtime,
         sortName: record.indexedNameLabel || record.nameLabel,
-        tabber: {type: 'window', session, windowIndex: record.index, label: record.indexedNameLabel || `${record.indexText}:${record.nameLabel}`, icon: '▢', active: record.active === true, agentKey: tmuxWindowAgentKey(record.name)},
+        tabber: {type: 'window', session, windowIndex: record.index, label: record.indexedNameLabel || `${record.indexText}:${record.nameLabel}`, icon: '▢', active: record.active === true, agentKey, dateText: tabberAgentDateText(agentActivity)},
       };
     });
     entriesByDir.set(normalizeDirectoryPath(sessionPath), windowEntries);
     const maxChild = windowEntries.reduce((max, entry) => Math.max(max, Number(entry.mtime || 0)), 0);
-    sessionEntry.mtime = Math.max(sessionRecency, maxChild);
+    sessionEntry.mtime = Math.max(maxChild, windowEntries.length ? 0 : fallbackSessionRecency);
   });
   // The other open (non-tmux) tabs — Preferences, YO!info/YO!agent, file editors — as leaf rows after the
   // sessions. They are kind:'file', so the shared dirs-before-files sort always keeps them below sessions.
@@ -11549,7 +11652,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   updateFileTreeRowContents(row, icon, label, {
     iconClass: 'tabber-icon',
     nameHtml,
-    dateText: entry.mtime ? fileTreeMtimeText(entry) : '',
+    dateText: data.dateText || (entry.mtime ? fileTreeMtimeText(entry) : ''),
   });
   // Tabber rows use delegation (bindTabberPanel) like the Differ; clear any stale Finder per-row handlers.
   clearFileTreeRowHandlers(row);
@@ -15385,7 +15488,7 @@ function boolSetting(path, fallback) {
   return value === true || value === 'true' || value === 1;
 }
 
-const UPDATE_NOTIFICATION_LEVELS = ['patch', 'minor', 'none'];
+const UPDATE_NOTIFICATION_LEVELS = ['major', 'minor', 'patch', 'none'];
 
 function normalizeUpdateNotificationLevel(value) {
   if (value === true || value === 'true' || value === 1) return 'patch';
@@ -15395,7 +15498,7 @@ function normalizeUpdateNotificationLevel(value) {
 }
 
 function updateNotificationLevelSetting() {
-  return normalizeUpdateNotificationLevel(initialSetting('general.reload_on_update', 'patch'));
+  return normalizeUpdateNotificationLevel(initialSetting('general.reload_on_update', false));
 }
 
 function semanticVersionParts(value) {
@@ -15416,8 +15519,12 @@ function updateNotificationAllowsVersion(currentVersion, targetVersion, level = 
   if (!currentParts || !targetParts) {
     return cleanLevel === 'patch' && String(targetVersion || '') !== String(currentVersion || '');
   }
-  if (targetParts[0] !== currentParts[0]) return targetParts[0] > currentParts[0];
-  if (targetParts[1] !== currentParts[1]) return targetParts[1] > currentParts[1];
+  if (targetParts[0] !== currentParts[0]) {
+    return cleanLevel !== 'none' && targetParts[0] > currentParts[0];
+  }
+  if (targetParts[1] !== currentParts[1]) {
+    return (cleanLevel === 'minor' || cleanLevel === 'patch') && targetParts[1] > currentParts[1];
+  }
   if (targetParts[2] !== currentParts[2]) return cleanLevel === 'patch' && targetParts[2] > currentParts[2];
   return false;
 }
@@ -15567,6 +15674,7 @@ function applyCssSettings() {
   const uiFontSize = numberSetting('appearance.ui_font_size', 13);
   root.setProperty('--ui-font-size', `${uiFontSize}px`);
   root.setProperty('--tab-label-size', `${uiFontSize}px`);
+  root.setProperty('--terminal-font-size', `${terminalFontSize}px`);
   root.setProperty('--editor-font-size', `${editorFontSize}px`);
   root.setProperty('--editor-preview-font-size', `${editorPreviewFontSize}px`);
   root.setProperty('--file-explorer-font-size', `${fileExplorerFontSize}px`);
@@ -22456,6 +22564,7 @@ function createInfoPanel() {
     const value = input?.value || '';
     if (input) input.value = '';
     yoagentDraft = '';
+    resetYoagentComposerHistory();
     sendYoagentChatMessage(value);
   });
   panel.addEventListener('click', event => {
@@ -22470,11 +22579,24 @@ function createInfoPanel() {
       event.preventDefault();
       const input = panel.querySelector('[data-yoagent-chat-input]');
       sendYoagentChatMessage(input?.value || yoagentDraft);
+      return;
+    }
+    const actionSend = event.target.closest('[data-yoagent-action-send]');
+    if (actionSend && panel.contains(actionSend)) {
+      event.preventDefault();
+      executeYoagentActionSend(actionSend.dataset.yoagentActionSend || '');
     }
   });
   panel.addEventListener('input', event => {
     const input = event.target.closest('[data-yoagent-chat-input]');
-    if (input && panel.contains(input)) yoagentDraft = input.value || '';
+    if (input && panel.contains(input)) {
+      yoagentDraft = input.value || '';
+      if (yoagentHistoryCursor === null) yoagentHistoryDraft = '';
+    }
+  });
+  panel.addEventListener('keydown', event => {
+    const input = event.target.closest('[data-yoagent-chat-input]');
+    if (input && panel.contains(input)) handleYoagentChatHistoryKeydown(event, input);
   });
   panel.addEventListener('change', event => {
     // The composer's backend pill writes the real yoagent.backend setting and re-renders (which also
@@ -22482,13 +22604,17 @@ function createInfoPanel() {
     const backend = event.target.closest('[data-yoagent-backend]');
     if (!backend || !panel.contains(backend) || readOnlyMode) return;
     saveSettingsPatch(settingPatch('yoagent.backend', backend.value))
-      .then(() => { statusEl.textContent = `YO!agent backend: ${yoagentBackendLabel(backend.value)}`; renderYoagentPanel(); })
+      .then(() => { statusEl.textContent = t('yoagent.statusBackend', {backend: yoagentBackendLabel(backend.value)}); renderYoagentPanel(); })
       .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
   });
   applyInfoSubTab(panel);
   renderInfoPanel();
+  if (infoPanelSubTab === 'yoagent') showYoagentStartupInfoOnce();
   renderYoagentPanel();
-  if (infoPanelSubTab === 'yoagent') prewarmYoagent();
+  if (infoPanelSubTab === 'yoagent') {
+    loadYoagentConversation({silent: true});
+    prewarmYoagent();
+  }
   return panel;
 }
 
@@ -22567,7 +22693,9 @@ function setInfoSubTab(tab, options = {}) {
   }
   applyInfoSubTab();
   if (next === 'yoagent') {
+    showYoagentStartupInfoOnce();
     renderYoagentPanel({preserveDraft: true, focusInput: options.focusChat === true});
+    loadYoagentConversation({silent: true});
     refreshActivitySummary({silent: true});
     prewarmYoagent();
   }
@@ -22582,11 +22710,82 @@ async function openInfoSubTab(tab) {
   await selectSession(infoItemId);
   applyInfoSubTab();
   if (infoPanelSubTab === 'yoagent') {
+    showYoagentStartupInfoOnce();
     renderYoagentPanel({preserveDraft: true, focusInput: true});
+    loadYoagentConversation({silent: true});
     refreshActivitySummary({silent: true});
     prewarmYoagent();
   }
   scheduleShareUiStatePublish();
+}
+
+function rightmostLeafSlotWithRowSplit(node, insideRow = false, slots = layoutSlots, options = {}) {
+  if (!node) return null;
+  if (node.slot) {
+    if (!insideRow) return null;
+    if (options.excludeFileExplorer && isFileExplorerItem(activeItemForSide(node.slot, slots))) return null;
+    return node.slot;
+  }
+  const children = Array.isArray(node.children) ? node.children : [];
+  if (node.split === 'row') {
+    return rightmostLeafSlotWithRowSplit(children[1], true, slots, options)
+      || rightmostLeafSlotWithRowSplit(children[0], true, slots, options);
+  }
+  return rightmostLeafSlotWithRowSplit(children[0], insideRow, slots, options)
+    || rightmostLeafSlotWithRowSplit(children[1], insideRow, slots, options);
+}
+
+function layoutTreeHasRowSplit(node) {
+  if (!node || node.slot) return false;
+  if (node.split === 'row') return true;
+  return (node.children || []).some(layoutTreeHasRowSplit);
+}
+
+function nonFileExplorerLeafSlots(root, slots = layoutSlots) {
+  return layoutLeafSlots(root).filter(slot => !isFileExplorerItem(activeItemForSide(slot, slots)));
+}
+
+function rightmostExistingPaneSlot(slots = layoutSlots) {
+  const root = slots?.[layoutTreeKey] || null;
+  if (!root || nonFileExplorerLeafSlots(root, slots).length < 2 || !layoutTreeHasRowSplit(root)) return null;
+  return rightmostLeafSlotWithRowSplit(root, false, slots, {excludeFileExplorer: true})
+    || rightmostLeafSlotWithRowSplit(root, false, slots);
+}
+
+function focusYoagentChatSoon() {
+  setTimeout(() => setInfoSubTab('yoagent', {focusChat: true}), 80);
+}
+
+function splitInfoItemToRightPane(sourceSlot = null) {
+  const next = layoutWithoutItem(infoItemId);
+  const root = next[layoutTreeKey] || legacyLayoutTree(next);
+  if (!root) {
+    const targetSlot = sourceSlot || slotForNewSession();
+    next[layoutTreeKey] = leafNode(targetSlot);
+    next[targetSlot] = paneStateWithTabs([infoItemId], infoItemId);
+    applyLayoutSlots(next, {focusSession: infoItemId, prune: false});
+    return;
+  }
+  const newSlot = nextLayoutSlot(next);
+  next[newSlot] = paneStateWithTabs([infoItemId], infoItemId);
+  next[layoutTreeKey] = splitNode('row', root, leafNode(newSlot), splitPercentForNewItem(infoItemId, 'right'));
+  applyLayoutSlots(next, {focusSession: infoItemId, prune: false});
+}
+
+function openYoagentRightPane() {
+  const sourceSlot = slotForSession(infoItemId);
+  const targetSlot = rightmostExistingPaneSlot();
+  if (targetSlot) {
+    if (sourceSlot === targetSlot) {
+      activatePaneTab(targetSlot, infoItemId);
+    } else {
+      moveSessionToSlot(infoItemId, targetSlot, sourceSlot, paneTabs(targetSlot).length);
+    }
+  } else {
+    splitInfoItemToRightPane(sourceSlot);
+  }
+  setInfoSubTab('yoagent', {focusChat: true});
+  focusYoagentChatSoon();
 }
 
 function sessionActivitySummary(session) {
@@ -22666,9 +22865,9 @@ function globalActivitySummaryHtml() {
 
 function yoagentChatMessagesHtml() {
   const messages = Array.isArray(yoagentMessages) ? yoagentMessages : [];
-  const intro = yoagentIntroMessageHtml();
+  const startupInfo = yoagentStartupInfoVisible ? yoagentStartupInfoHtml() : '';
   if (!messages.length) {
-    if (intro) return intro;
+    if (startupInfo) return startupInfo;
     if (!yoagentChatEnabled()) {
       return `<div class="yoagent-chat-empty">${esc(t('yoagent.chatDisabled'))}</div>`;
     }
@@ -22677,16 +22876,63 @@ function yoagentChatMessagesHtml() {
   const messageHtml = messages.map(message => {
     const role = message.role === 'user' ? t('yoagent.you') : yoagentTabLabel();
     const roleClass = message.role === 'user' ? 'user' : 'assistant';
+    const agentResult = roleClass === 'assistant' && message?.kind === 'agent_result';
+    const messageClass = `yoagent-message ${roleClass}${agentResult ? ' yoagent-agent-result' : ''}`;
     // Assistant replies are Markdown (numbered sections, bold titles, sub-bullets); flag the body so
     // renderYoagentMessageMarkdown() can render it. The escaped text stays as the no-marked fallback.
     const bodyClass = roleClass === 'assistant' ? 'yoagent-message-body markdown-body' : 'yoagent-message-body';
     const markdownAttr = roleClass === 'assistant' ? ' data-yoagent-markdown' : '';
-    return `<div class="yoagent-message ${roleClass}">
+    return `<div class="${messageClass}">
       <div class="yoagent-message-role"><span>${esc(role)}</span>${yoagentMessageTimestampHtml(message.createdAt)}</div>
       <div class="${bodyClass}"${markdownAttr}>${esc(message.content || '')}</div>
+      ${roleClass === 'assistant' ? yoagentActionCardsHtml(message.actions) : ''}
     </div>`;
   }).join('');
-  return `${intro}${messageHtml}`;
+  return `${messageHtml}${startupInfo}`;
+}
+
+function yoagentActionCardsHtml(actions) {
+  const items = Array.isArray(actions) ? actions : [];
+  return items.map(yoagentActionCardHtml).join('');
+}
+
+function yoagentActionCardHtml(action) {
+  if (!action || typeof action !== 'object') return '';
+  const target = action.target && typeof action.target === 'object' ? action.target : {};
+  const status = String(action.status || 'ready');
+  const transport = String(target.transport || 'tmux-legacy');
+  const transportLabel = yoagentActionTransportText(transport, target.transport_label);
+  const canSend = status === 'ready' && action.id && !readOnlyMode && !yoagentBusy;
+  const button = canSend
+    ? `<button type="button" class="yoagent-action-send" data-yoagent-action-send="${esc(action.id)}">${esc(t('yoagent.action.send'))}</button>`
+    : `<span class="yoagent-action-state">${esc(yoagentActionStatusText(action))}</span>`;
+  const rows = [
+    [t('yoagent.action.row.session'), target.session || action.session || ''],
+    [t('yoagent.action.row.agent'), [target.agent_kind, target.agent_model].filter(Boolean).join(' ')],
+    [t('yoagent.action.row.transport'), transportLabel],
+    [t('yoagent.action.row.pane'), target.pane_target || ''],
+    [t('yoagent.action.row.path'), target.cwd || ''],
+  ].filter(row => row[1]);
+  const rowHtml = rows.map(([label, value]) => `<div class="yoagent-action-row"><span>${esc(label)}</span><code>${esc(value)}</code></div>`).join('');
+  return `<div class="yoagent-action-card ${esc(status)}" data-yoagent-action-card="${esc(action.id || '')}">
+    <div class="yoagent-action-head"><span>${esc(t('yoagent.action.preview'))}</span>${button}</div>
+    <div class="yoagent-action-rows">${rowHtml}</div>
+    <pre class="yoagent-action-text">${esc(action.text || '')}</pre>
+  </div>`;
+}
+
+function yoagentActionTransportText(transport, fallback = '') {
+  if (transport === 'tmux-legacy' || transport === 'pane-paste') return `${t('yoagent.action.transport.panePasteFallback')} (tmux-legacy)`;
+  return transport === 'agent-native-resume'
+    ? t('yoagent.action.transport.agentNativeResume')
+    : (String(fallback || '') || transport);
+}
+
+function yoagentActionStatusText(action) {
+  const status = String(action?.status || '');
+  if (status === 'sent') return t('yoagent.action.state.sent');
+  if (String(action?.status_text || '') === 'sending') return t('yoagent.action.state.sending');
+  return action?.status_text || status;
 }
 
 function yoagentIntroMessageText() {
@@ -22710,6 +22956,26 @@ function yoagentIntroMessageHtml() {
   </div>`;
 }
 
+function yoagentStartupInfoHtml() {
+  return `${yoagentIntroMessageHtml()}${yoagentRecentAgentsMessageHtml()}`;
+}
+
+function showYoagentStartupInfoOnce() {
+  if (yoagentStartupInfoShown) return false;
+  yoagentStartupInfoShown = true;
+  yoagentStartupInfoVisible = true;
+  return true;
+}
+
+function showYoagentStartupInfoForLatestActivity() {
+  yoagentStartupInfoShown = false;
+  return showYoagentStartupInfoOnce();
+}
+
+function hideYoagentStartupInfo() {
+  yoagentStartupInfoVisible = false;
+}
+
 function yoagentNoticeHtml() {
   if (!yoagentNotice?.reason) return '';
   const backend = yoagentNotice.backend ? `<span class="yoagent-chat-notice-backend">${esc(yoagentNotice.backend)}</span> ` : '';
@@ -22723,6 +22989,203 @@ function yoagentAutoRefreshStatusHtml() {
     ? relativeActivityGeneratedText({generated_ts: summary.updated_ts, generated_at: summary.updated_at})
     : {text: t('yoagent.notLoaded'), title: ''};
   return `<div class="yoagent-chat-notice yoagent-auto-refresh-status" title="${esc(generated.title)}">${esc(t('yoagent.autoRefreshStatus', {updated: generated.text}))}</div>`;
+}
+
+function yoagentPendingWaitsHtml() {
+  const waits = Array.isArray(yoagentPendingWaits) ? yoagentPendingWaits : [];
+  if (!waits.length) return '';
+  const title = tPlural('yoagent.waiting.count', waits.length);
+  const rows = waits.map(wait => {
+    const session = String(wait?.session || '');
+    const handoff = wait?.handoff && typeof wait.handoff === 'object' ? wait.handoff : null;
+    const handoffTarget = String(handoff?.session || '');
+    const handoffSource = String(handoff?.source_session || session);
+    const sourceRegarding = String(handoff?.source_regarding || t('yoagent.waiting.currentRequest'));
+    const targetRegarding = String(handoff?.target_regarding || t('yoagent.waiting.nextRequest'));
+    const label = handoffTarget
+      ? t('yoagent.waiting.handoff', {source: handoffSource, target: handoffTarget, sourceRegarding, targetRegarding})
+      : (session ? t('yoagent.waiting.session', {session}) : String(wait?.label || t('yoagent.waiting.generic')));
+    const startedTs = Number(wait?.started_ts || 0);
+    const age = Number.isFinite(startedTs) && startedTs > 0
+      ? compactRelativeTimeFormat(Math.max(0, Math.round(Date.now() / 1000 - startedTs)))
+      : '';
+    const transcript = String(wait?.transcript || '');
+    return `<li class="yoagent-waiting-item" title="${esc(transcript)}">
+      <span class="session-yolo-marker active working yoagent-waiting-spinner" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span>
+      <span class="yoagent-waiting-label">${esc(label)}</span>
+      ${age ? `<span class="yoagent-waiting-age">${esc(age)}</span>` : ''}
+    </li>`;
+  }).join('');
+  return `<div class="yoagent-waiting-queue" aria-live="polite" aria-label="${esc(title)}">
+    <div class="yoagent-waiting-title">${esc(title)}</div>
+    <ul class="yoagent-waiting-list">${rows}</ul>
+  </div>`;
+}
+
+function applyYoagentConversationPayload(payload = {}) {
+  if (!payload || typeof payload !== 'object') return false;
+  const messages = Array.isArray(payload.messages) ? payload.messages : [];
+  yoagentPendingWaits = Array.isArray(payload.pending_waits) ? payload.pending_waits : [];
+  if (messages.length) hideYoagentStartupInfo();
+  yoagentMessages = messages;
+  yoagentConversationPath = String(payload.transcript_path || '');
+  yoagentConversationDisplayPath = String(payload.transcript_display_path || yoagentConversationPath);
+  yoagentConversationLoaded = true;
+  return true;
+}
+
+function resetYoagentComposerHistory() {
+  yoagentHistoryCursor = null;
+  yoagentHistoryDraft = '';
+}
+
+function yoagentUserMessageHistory() {
+  return (Array.isArray(yoagentMessages) ? yoagentMessages : [])
+    .filter(message => message?.role === 'user')
+    .map(message => String(message.content || '').trim())
+    .filter(Boolean);
+}
+
+function setYoagentChatInputValue(input, value) {
+  if (!input) return;
+  const nextValue = String(value || '');
+  input.value = nextValue;
+  yoagentDraft = nextValue;
+  const end = nextValue.length;
+  try { input.setSelectionRange(end, end); } catch (_) {}
+}
+
+function yoagentNavigateChatHistory(input, direction) {
+  if (!input || input.disabled) return false;
+  const history = yoagentUserMessageHistory();
+  const latest = yoagentHistoryCursor === null;
+  if (direction === 'up') {
+    if (!history.length) return false;
+    if (latest) {
+      yoagentHistoryDraft = input.value || yoagentDraft || '';
+      yoagentHistoryCursor = history.length - 1;
+    } else {
+      yoagentHistoryCursor = Math.max(0, Math.min(history.length - 1, Number(yoagentHistoryCursor) - 1));
+    }
+    setYoagentChatInputValue(input, history[yoagentHistoryCursor] || '');
+    return true;
+  }
+  if (direction === 'down') {
+    if (latest) return false;
+    const next = Math.min(history.length, Number(yoagentHistoryCursor) + 1);
+    if (next >= history.length) {
+      yoagentHistoryCursor = null;
+      setYoagentChatInputValue(input, yoagentHistoryDraft);
+      yoagentHistoryDraft = '';
+    } else {
+      yoagentHistoryCursor = next;
+      setYoagentChatInputValue(input, history[yoagentHistoryCursor] || '');
+    }
+    return true;
+  }
+  return false;
+}
+
+function handleYoagentChatHistoryKeydown(event, input) {
+  if (!input || event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return false;
+  const direction = event.key === 'ArrowUp' ? 'up' : (event.key === 'ArrowDown' ? 'down' : '');
+  if (!direction || !yoagentNavigateChatHistory(input, direction)) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function yoagentTranscriptPathHtml() {
+  if (readOnlyMode) return '';
+  const path = yoagentConversationPath || '';
+  const display = yoagentConversationDisplayPath || path;
+  if (!path && !yoagentConversationLoading && !yoagentConversationLoaded) return '';
+  const value = path
+    ? `<code class="yoagent-transcript-value" title="${esc(path)}">${esc(display)}</code>${pathCopyButtonHtml(path, {className: 'yoagent-transcript-copy', title: t('yoagent.transcript.copy')})}`
+    : `<span class="yoagent-transcript-loading">${esc(t('yoagent.transcript.loading'))}</span>`;
+  return `<div class="yoagent-transcript-path">
+    <span class="yoagent-transcript-label">${esc(t('yoagent.transcript.label'))}</span>
+    ${value}
+  </div>`;
+}
+
+function yoagentRecentAgentActivityText(agent) {
+  if (agent?.running === true) return t('yoagent.agent.running');
+  const ts = Number(agent?.last_used_ts || agent?.sort_ts || 0);
+  if (!Number.isFinite(ts) || ts <= 0) return '';
+  return compactRelativeTimeFormat(Math.max(0, Math.round(Date.now() / 1000 - ts)));
+}
+
+function yoagentRecentAgentPathText(agent) {
+  const paths = Array.isArray(agent?.recent_paths)
+    ? agent.recent_paths
+      .map(item => compactHomePath(item?.path || ''))
+      .filter(Boolean)
+    : [];
+  if (paths.length) {
+    const visible = paths.slice(0, 2);
+    const extra = paths.length - visible.length;
+    return `${visible.join(', ')}${extra > 0 ? ` +${extra}` : ''}`;
+  }
+  return agent?.cwd ? compactHomePath(agent.cwd) : '';
+}
+
+function yoagentRecentAgentsHtml() {
+  const agents = Array.isArray(activitySummaryPayload?.agents) ? activitySummaryPayload.agents : [];
+  const items = agents
+    .filter(agent => agent && typeof agent === 'object' && agent.label)
+    .slice(0, 6);
+  if (!items.length) return '';
+  const rows = items.map(agent => {
+    const kind = String(agent.agent_kind || '').toLowerCase();
+    const activity = yoagentRecentAgentActivityText(agent);
+    const windowText = String(agent.window_label || [agent.window, agent.window_name || kind].filter(Boolean).join(':') || kind || '').trim();
+    const pathText = yoagentRecentAgentPathText(agent);
+    const title = [
+      agent.cwd ? `cwd: ${agent.cwd}` : '',
+      pathText ? `paths: ${pathText}` : '',
+      agent.transcript ? `transcript: ${agent.transcript}` : '',
+      agent.state_text || '',
+    ].filter(Boolean).join('\n');
+    return `<li class="yoagent-recent-agent" data-agent-kind="${esc(kind)}" title="${esc(title)}">
+      <span class="yoagent-recent-agent-line">
+        ${kind ? agentIcon(kind, {label: agentLabel(kind)}) : ''}
+        <span class="yoagent-recent-agent-session">${esc(t('yoagent.sessionLabel', {session: agent.session || ''}))}</span>
+        <span class="yoagent-recent-agent-window">${esc(windowText)}</span>
+        ${pathText ? `<span class="yoagent-recent-agent-paths">${esc(pathText)}</span>` : ''}
+        ${activity ? `<span class="yoagent-recent-agent-activity">${esc(activity)}</span>` : ''}
+      </span>
+    </li>`;
+  }).join('');
+  return `<div class="yoagent-recent-agents" aria-label="${esc(t('yoagent.recentAgents.label'))}">
+    <span class="yoagent-recent-agents-label">${esc(t('yoagent.recentAgents.label'))}</span>
+    <ul class="yoagent-recent-agents-list">${rows}</ul>
+  </div>`;
+}
+
+function yoagentRecentAgentsMessageHtml() {
+  const html = yoagentRecentAgentsHtml();
+  if (!html || !yoagentChatEnabled()) return '';
+  return `<div class="yoagent-message assistant yoagent-recent-agents-message">
+    <div class="yoagent-message-role"><span>${esc(yoagentTabLabel())}</span>${yoagentMessageTimestampHtml(activitySummaryPayload?.generated_at)}</div>
+    ${html}
+  </div>`;
+}
+
+async function loadYoagentConversation(options = {}) {
+  if (readOnlyMode || yoagentConversationLoading) return;
+  if (yoagentConversationLoaded && options.force !== true) return;
+  yoagentConversationLoading = true;
+  if (options.render !== false) renderYoagentPanel({preserveDraft: true, scrollBottom: false});
+  try {
+    const payload = await apiFetchJson('/api/yoagent/conversation', {cache: 'no-store'});
+    applyYoagentConversationPayload(payload);
+  } catch (error) {
+    if (!options.silent) statusErr(localizedHtml('yoagent.conversationLoadFailed', {error}));
+  } finally {
+    yoagentConversationLoading = false;
+    if (options.render !== false) renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom ?? false});
+  }
 }
 
 function yoagentBackendLabel(value) {
@@ -22773,7 +23236,8 @@ function yoagentChatHtml() {
   const disabled = yoagentBusy || readOnlyMode ? ' disabled' : '';
   const placeholder = readOnlyMode ? t('yoagent.chatAdminPlaceholder', {name: yoagentTabLabel()}) : t('yoagent.chatPlaceholder');
   const isThinking = yoagentBusy || yoagentPrewarming;
-  const hasConversation = Boolean(yoagentMessages.length || yoagentNotice || isThinking || yoagentError || yoagentIntroMessageText());
+  const startupInfo = yoagentStartupInfoVisible ? yoagentStartupInfoHtml() : '';
+  const hasConversation = Boolean(yoagentMessages.length || yoagentPendingWaits.length || yoagentNotice || isThinking || yoagentError || startupInfo);
   const thinkingHtml = textWithMovingEllipsisHtml(t('yoagent.thinking'), 'yoagent-thinking-dots');
   const busy = isThinking
     ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span><span class="yoagent-thinking">${thinkingHtml}</span></div>`
@@ -22797,7 +23261,8 @@ function yoagentChatHtml() {
     </form>`
     : '';
   return `<section class="yoagent-chat ${hasConversation ? 'has-history' : 'empty'}" aria-label="${esc(t('yoagent.chatAria', {name: yoagentTabLabel()}))}">
-    <div class="yoagent-chat-history">${yoagentAutoRefreshStatusHtml()}${yoagentNoticeHtml()}${yoagentChatMessagesHtml()}${busy}${error}</div>
+    ${yoagentTranscriptPathHtml()}
+    <div class="yoagent-chat-history">${yoagentAutoRefreshStatusHtml()}${yoagentNoticeHtml()}${yoagentChatMessagesHtml()}${yoagentPendingWaitsHtml()}${busy}${error}</div>
     ${form}
   </section>`;
 }
@@ -22843,14 +23308,25 @@ function installYoagentFocusTracker() {
 
 async function clearYoagentConversation() {
   yoagentMessages = [];
+  yoagentPendingWaits = [];
   yoagentBusy = false;
+  yoagentPrewarming = false;
+  yoagentPrewarmStarted = false;
   yoagentError = '';
   yoagentDraft = '';
+  resetYoagentComposerHistory();
   yoagentNotice = null;
+  showYoagentStartupInfoForLatestActivity();
   renderYoagentPanel({preserveDraft: false, scrollBottom: true});
   try {
-    await apiFetchJson('/api/yoagent/reset', {method: 'POST'});
+    const payload = await apiFetchJson('/api/yoagent/reset', {method: 'POST'});
+    applyYoagentConversationPayload(payload.conversation || {});
+    showYoagentStartupInfoForLatestActivity();
+    renderYoagentPanel({preserveDraft: false, scrollBottom: true});
     statusEl.textContent = t('yoagent.statusCleared');
+    await refreshActivitySummary({force: true, silent: true});
+    showYoagentStartupInfoForLatestActivity();
+    renderYoagentPanel({preserveDraft: false, scrollBottom: true});
   } catch (error) {
     statusErr(`${esc(t('yoagent.statusClearFailed', {error}))}`);
   }
@@ -22859,6 +23335,8 @@ async function clearYoagentConversation() {
 async function sendYoagentChatMessage(rawText) {
   const text = String(rawText || '').trim();
   if (!text || yoagentBusy || readOnlyMode || !yoagentChatEnabled()) return;
+  resetYoagentComposerHistory();
+  hideYoagentStartupInfo();
   installYoagentFocusTracker();
   const focusSerial = yoagentFocusSerial;
   const shouldRestoreFocus = yoagentChatInputIsFocused() && yoagentDocumentHasFocus();
@@ -22873,13 +23351,19 @@ async function sendYoagentChatMessage(rawText) {
     const payload = await apiFetchJson('/api/yoagent/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      // Phase 1: pass the active UI locale so the LLM backend replies in that language.
-      body: JSON.stringify({message: text, history: yoagentMessages.slice(-10), locale: i18nActiveLocaleId()}),
+      body: JSON.stringify({message: text, history: yoagentMessages.slice(-11, -1), locale: i18nActiveLocaleId()}),
     });
     if (payload.fallback && payload.fallback_reason) {
       yoagentNotice = {backend: yoagentBackendLabel(payload.backend_used || payload.backend), reason: payload.fallback_reason};
     }
-    yoagentMessages.push({role: 'assistant', content: payload.answer || t('yoagent.noAnswer'), createdAt: payload.answered_at || new Date().toISOString()});
+    if (!applyYoagentConversationPayload(payload.conversation || {})) {
+      yoagentMessages.push({
+        role: 'assistant',
+        content: payload.answer || t('yoagent.noAnswer'),
+        actions: Array.isArray(payload.actions) ? payload.actions : [],
+        createdAt: payload.answered_at || new Date().toISOString(),
+      });
+    }
     statusEl.textContent = t('yoagent.statusAnswered', {backend: yoagentBackendLabel(payload.backend_used || payload.backend)});
   } catch (error) {
     if (yoagentChatNetworkError(error)) yoagentDraft = text;
@@ -22891,6 +23375,47 @@ async function sendYoagentChatMessage(rawText) {
       scrollBottom: true,
       focusInput: shouldRestoreFocus && focusSerial === yoagentFocusSerial && yoagentDocumentHasFocus(),
     });
+  }
+}
+
+function updateYoagentActionPreview(previewId, patch) {
+  let changed = false;
+  for (const message of yoagentMessages) {
+    if (!Array.isArray(message.actions)) continue;
+    message.actions = message.actions.map(action => {
+      if (action?.id !== previewId) return action;
+      changed = true;
+      return {...action, ...patch};
+    });
+  }
+  return changed;
+}
+
+async function executeYoagentActionSend(previewId) {
+  if (!previewId || readOnlyMode || yoagentBusy) return;
+  hideYoagentStartupInfo();
+  yoagentBusy = true;
+  updateYoagentActionPreview(previewId, {status_text: 'sending'});
+  renderYoagentPanel({preserveDraft: true, scrollBottom: false});
+  try {
+    const payload = await apiFetchJson('/api/yoagent/actions/execute-send', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({preview_id: previewId}),
+    });
+    applyYoagentConversationPayload(payload.conversation || {});
+    updateYoagentActionPreview(previewId, {status: 'sent', status_text: 'sent'});
+    const answer = payload.answer
+      ? t('yoagent.action.sentWithAnswer', {session: payload.session, transport: payload.transport, answer: payload.answer})
+      : t('yoagent.action.sent', {session: payload.session, transport: payload.transport});
+    if (!payload.conversation) yoagentMessages.push({role: 'assistant', content: answer, createdAt: new Date().toISOString()});
+    statusEl.textContent = t('yoagent.statusActionSent', {session: payload.session});
+  } catch (error) {
+    updateYoagentActionPreview(previewId, {status: 'error', status_text: error?.message || String(error)});
+    yoagentError = yoagentChatErrorMessage(error);
+  } finally {
+    yoagentBusy = false;
+    renderYoagentPanel({preserveDraft: true, scrollBottom: true});
   }
 }
 
@@ -23043,13 +23568,11 @@ function separatorColorPreferenceChoices() {
     .map(separatorColorPreferenceChoice);
 }
 
-function updateNotificationPreferenceChoices() {
-  const choices = Array.isArray(clientSettingsPayload?.choices?.['general.reload_on_update'])
-    ? clientSettingsPayload.choices['general.reload_on_update']
-    : UPDATE_NOTIFICATION_LEVELS;
-  return choices
-    .filter(value => UPDATE_NOTIFICATION_LEVELS.includes(value))
-    .map(value => ({value, label: t(`pref.general.reload_on_update.${value}`)}));
+function updateNotifyLevelPreferenceChoices() {
+  const choices = Array.isArray(clientSettingsPayload?.choices?.['updates.notify_level'])
+    ? clientSettingsPayload.choices['updates.notify_level']
+    : ['major', 'minor', 'patch', 'none'];
+  return choices.map(value => ({value, label: t(`pref.updates.notify_level.${value}`)}));
 }
 
 function preferenceSections() {
@@ -23104,7 +23627,10 @@ function preferenceSections() {
       {path: 'editor.blame_all_lines', label: t('pref.editor.blame_all_lines.label'), type: 'boolean', help: t('pref.editor.blame_all_lines.help')},
     ]},
     {title: t('pref.section.notifications'), items: [
-      {path: 'general.reload_on_update', label: t('pref.general.reload_on_update.label'), type: 'radio', choices: updateNotificationPreferenceChoices(), help: t('pref.general.reload_on_update.help')},
+      {path: 'general.reload_on_update', label: t('pref.general.reload_on_update.label'), type: 'boolean', help: t('pref.general.reload_on_update.help')},
+      {path: 'general.reload_on_update_auto', label: t('pref.general.reload_on_update_auto.label'), type: 'boolean', help: t('pref.general.reload_on_update_auto.help')},
+      {path: 'updates.check_enabled', label: t('pref.updates.check_enabled.label'), type: 'boolean', help: t('pref.updates.check_enabled.help')},
+      {path: 'updates.notify_level', label: t('pref.updates.notify_level.label'), type: 'radio', choices: updateNotifyLevelPreferenceChoices(), help: t('pref.updates.notify_level.help')},
       {path: 'notifications.notify_transitions', label: t('pref.notifications.notify_transitions.label'), type: 'list', help: t('pref.notifications.notify_transitions.help')},
       {path: 'notifications.toast_duration_ms', label: t('pref.notifications.toast_duration_ms.label'), type: 'number', min: 1000, max: 60000, step: 500, suffix: 'ms', help: t('pref.notifications.toast_duration_ms.help')},
       {path: 'notifications.throttle_seconds', label: t('pref.notifications.throttle_seconds.label'), type: 'number', min: 0, max: 600, step: 5, suffix: 's', help: t('pref.notifications.throttle_seconds.help')},
@@ -23138,8 +23664,6 @@ function preferenceSections() {
       {path: 'share.scheme', label: t('pref.share.scheme.label'), type: 'radio', choices: ['http', 'https'], help: t('pref.share.scheme.help')},
     ]},
     {title: t('pref.section.performance'), items: [
-      {path: 'general.reload_on_update_auto', label: t('pref.general.reload_on_update_auto.label'), type: 'boolean', help: t('pref.general.reload_on_update_auto.help')},
-      {path: 'updates.check_enabled', label: t('pref.updates.check_enabled.label'), type: 'boolean', help: t('pref.updates.check_enabled.help')},
       {path: 'performance.server_event_poll_ms', label: t('pref.performance.server_event_poll_ms.label'), type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.server_event_poll_ms.help')},
       {path: 'performance.server_background_file_event_poll_ms', label: t('pref.performance.server_background_file_event_poll_ms.label'), type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.server_background_file_event_poll_ms.help')},
       {path: 'performance.server_directory_event_poll_ms', label: t('pref.performance.server_directory_event_poll_ms.label'), type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.server_directory_event_poll_ms.help')},
@@ -23292,6 +23816,7 @@ function preferenceSearchKeywordsForItem(item) {
   if (path === 'terminal_editor.word_wrap') add(['softwrap', 'wrapping']);
   if (path === 'terminal_editor.line_numbers') add(['numbers', 'gutter']);
   if (path.startsWith('notifications.')) add(['notify', 'alert', 'toast', 'message', 'banner', 'sound', 'ding', 'ping', 'bell', 'beep', 'desktop', 'dismiss']);
+  if (path.startsWith('updates.')) add(['notify', 'notification', 'alert', 'update', 'version', 'major', 'minor', 'patch', 'release', 'origin', 'main']);
   if (path.includes('throttle')) add(['mute', 'quiet', 'spam', 'cooldown', 'rate limit']);
   if (path.startsWith('file_explorer.')) add(['finder', 'files', 'tree', 'sidebar', 'browser', 'directory', 'folder', 'navigator']);
   if (path.startsWith('uploads.')) add(['upload', 'paste', 'drop', 'filename', 'template', 'file']);
@@ -32308,6 +32833,49 @@ function scrollYoagentChatToBottom(node = document.getElementById('yoagent-conte
   if (node) node.scrollTop = node.scrollHeight;
   const panelBody = node?.closest?.('.info-pane, .panel-overlay-root, .panel');
   if (panelBody && panelBody !== node) panelBody.scrollTop = panelBody.scrollHeight;
+  yoagentScrollbackLocked = false;
+}
+
+function yoagentChatHistoryIsNearBottom(history, threshold = 48) {
+  if (!history) return true;
+  return history.scrollHeight - history.clientHeight - history.scrollTop <= threshold;
+}
+
+function yoagentChatScrollState(node = document.getElementById('yoagent-content')) {
+  const history = node?.querySelector?.('.yoagent-chat-history');
+  const panelBody = node?.closest?.('.info-pane, .panel-overlay-root, .panel');
+  return {
+    nearBottom: yoagentChatHistoryIsNearBottom(history),
+    historyTop: history ? history.scrollTop : 0,
+    nodeTop: node ? node.scrollTop : 0,
+    panelTop: panelBody && panelBody !== node ? panelBody.scrollTop : 0,
+  };
+}
+
+function restoreYoagentChatScrollState(node, state) {
+  if (!node || !state) return;
+  const history = node.querySelector?.('.yoagent-chat-history');
+  if (history) history.scrollTop = state.historyTop || 0;
+  node.scrollTop = state.nodeTop || 0;
+  const panelBody = node.closest?.('.info-pane, .panel-overlay-root, .panel');
+  if (panelBody && panelBody !== node) panelBody.scrollTop = state.panelTop || 0;
+  yoagentScrollbackLocked = state.nearBottom === false;
+}
+
+function installYoagentChatScrollTracker(node = document.getElementById('yoagent-content')) {
+  const history = node?.querySelector?.('.yoagent-chat-history');
+  if (!history || history.dataset.yoagentScrollTracker === 'true') return;
+  history.dataset.yoagentScrollTracker = 'true';
+  history.addEventListener('scroll', () => {
+    yoagentScrollbackLocked = !yoagentChatHistoryIsNearBottom(history);
+  }, {passive: true});
+}
+
+function yoagentShouldScrollBottom(options, scrollState) {
+  if (options.scrollBottom === true) return true;
+  if (options.scrollBottom === false) return false;
+  if (yoagentScrollbackLocked) return false;
+  return scrollState?.nearBottom !== false;
 }
 
 function focusYoagentChatInput(node = document.getElementById('yoagent-content')) {
@@ -32340,6 +32908,7 @@ function refreshYoagentSummaryRegions(node = document.getElementById('yoagent-co
   if (!chat) return false;
   chat.outerHTML = yoagentChatHtml();
   renderYoagentMessageMarkdown(node);
+  installYoagentChatScrollTracker(node);
   return true;
 }
 
@@ -32428,6 +32997,8 @@ function renderYoagentMessageMarkdown(node = document.getElementById('yoagent-co
 function renderYoagentPanel(options = {}) {
   const node = document.getElementById('yoagent-content');
   if (!node) return;
+  const scrollState = yoagentChatScrollState(node);
+  const shouldScrollBottom = yoagentShouldScrollBottom(options, scrollState);
   const input = node.querySelector('[data-yoagent-chat-input]');
   const inputFocused = input && document.activeElement === input;
   const selectionStart = inputFocused ? input.selectionStart : null;
@@ -32435,19 +33006,26 @@ function renderYoagentPanel(options = {}) {
   if (input && options.preserveDraft !== false) yoagentDraft = input.value || '';
   if (yoagentBusyUiIsMounted(node) && options.allowBusyRebuild !== true) {
     if (refreshYoagentSummaryRegions(node)) {
+      if (shouldScrollBottom) scrollYoagentChatToBottom(node);
+      else restoreYoagentChatScrollState(node, scrollState);
       restoreYoagentChatInputFocus(node, inputFocused, selectionStart, selectionEnd);
     }
     return;
   }
   if (options.summaryOnly && refreshYoagentSummaryRegions(node)) {
+    if (shouldScrollBottom) scrollYoagentChatToBottom(node);
+    else restoreYoagentChatScrollState(node, scrollState);
     restoreYoagentChatInputFocus(node, inputFocused, selectionStart, selectionEnd);
     return;
   }
   node.innerHTML = yoagentChatHtml();
   renderYoagentMessageMarkdown(node);
-  if (options.scrollBottom !== false) {
+  installYoagentChatScrollTracker(node);
+  if (shouldScrollBottom) {
     requestAnimationFrame(() => scrollYoagentChatToBottom(node));
     setTimeout(() => scrollYoagentChatToBottom(node), 0);
+  } else {
+    restoreYoagentChatScrollState(node, scrollState);
   }
   if (options.focusInput) {
     requestAnimationFrame(() => focusYoagentChatInput(node));
@@ -33587,6 +34165,10 @@ function noteTerminalExplicitInput(session) {
   setFocusedTerminal(session, {userInitiated: true});
 }
 
+function terminalDataIsPassiveFocusReport(data) {
+  return /^\x1b\[[IO]$/.test(String(data || ''));
+}
+
 function shellQuote(value) {
   return "'" + String(value).replace(/'/g, "'\\''") + "'";
 }
@@ -33968,6 +34550,7 @@ function startTerminal(session) {
     if (socket?.readyState === WebSocket.OPEN) {
       const filtered = stripTerminalQueryResponses(data);
       if (filtered) {
+        if (!terminalDataIsPassiveFocusReport(filtered)) noteTerminalExplicitInput(session);
         socket.send(JSON.stringify({type: 'input', data: filtered}));
       }
     }
@@ -34812,7 +35395,7 @@ async function triggerSelfUpdate() {
 // with an "Update Now" action (admin-only; the endpoint rejects readonly).
 function applyUpdateAvailable(status) {
   if (!status || !status.available) return;
-  if (!updateNotificationAllowsVersion(status.current_version || status.current || bootstrap.version, status.target_version || status.target)) return;
+  if (status.notify === false) return;
   const badge = document.querySelector('[data-update-badge]');
   if (badge) {
     badge.hidden = false;
@@ -34834,6 +35417,26 @@ async function checkForUpdateOnce() {
     const status = await res.json();
     if (status && status.available) applyUpdateAvailable(status);
   } catch (_error) { /* offline / transient — the hourly push will retry */ }
+}
+
+function maybeNotifyYoagentJob(notification = {}) {
+  const title = String(notification.title || 'YO!agent');
+  const body = String(notification.body || '').trim();
+  if (!body || !notificationsEnabled) return;
+  const session = String(notification.session || '').trim();
+  const tag = `yoagent-job:${session || 'global'}:${body}`;
+  showToast(title, [body], {session});
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  try {
+    sendBrowserNotification(hostNotificationTitle(title), {
+      body,
+      tag,
+      renotify: true,
+      session,
+    });
+  } catch (error) {
+    postEvent(session || null, 'yoagent_job_notification_error', `notification failed: ${error}`, {});
+  }
 }
 
 function handleClientPushEvent(type, payload = {}) {
@@ -34867,6 +35470,18 @@ function handleClientPushEvent(type, payload = {}) {
   }
   if (type === 'activity_summary_ready') {
     if (payload.data) applyActivitySummaryPayloadFromPush(payload.data);
+    return;
+  }
+  if (type === 'yoagent_conversation_changed') {
+    loadYoagentConversation({force: true, render: infoPanelSubTab === 'yoagent', scrollBottom: 'auto'}).catch(error => console.warn('YO!agent conversation refresh failed', error));
+    return;
+  }
+  if (type === 'yoagent_jobs_changed') {
+    maybeNotifyYoagentJob(payload.notification || {});
+    return;
+  }
+  if (type === 'yoagent_skills_changed') {
+    refreshActivitySummary({force: true, render: infoPanelSubTab === 'yoagent'}).catch(error => console.warn('YO!agent skills refresh failed', error));
     return;
   }
   if (type === 'session_files_ready') {
@@ -34908,7 +35523,7 @@ function installClientEventStream() {
     recordSseDebugEvent('ping', clientEventEnvelope(event), event);
   });
   source.onerror = () => { clientEventsConnected = false; };
-  for (const type of ['settings_changed', 'auto_approve_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available']) {
+  for (const type of ['settings_changed', 'auto_approve_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed']) {
     source.addEventListener(type, event => {
       clientEventsConnected = true;
       const envelope = clientEventEnvelope(event);
@@ -37629,6 +38244,12 @@ function handleGlobalShortcutKeydown(event) {
     event.stopPropagation();
     if (event.code === 'BracketLeft') editorNavBack();
     else editorNavForward();
+    return;
+  }
+  if (platformMod && event.altKey && event.code === 'KeyB') {
+    event.preventDefault();
+    event.stopPropagation();
+    openYoagentRightPane();
     return;
   }
   if (mod && key === 'w') {

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import re
+import secrets
 import subprocess
 import time
 
@@ -146,6 +147,35 @@ def tmux_capture_pane(target: str, lines: int = 80, visible_only: bool = False, 
 
 def tmux_send_enter(target: str) -> None:
     tmux_run("send-keys", "-t", tmux_exact_target(target), "Enter", check=False)
+
+
+def tmux_paste_text(target: str, text: str, submit: bool = False, timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
+    """Paste exact text into a pane via a tmux buffer.
+
+    This is the visible-send path for YO!agent actions. It avoids shell quoting and avoids sending user text as
+    tmux key names; submission is a real Enter key after the paste, not a pasted newline.
+    """
+    exact_target = tmux_exact_target(target)
+    buffer_name = f"yolomux-{secrets.token_hex(8)}"
+    payload = str(text or "")
+    load = subprocess.run(
+        ["tmux", "load-buffer", "-b", buffer_name, "-"],
+        input=payload,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    if load.returncode != 0:
+        return load
+    try:
+        paste = tmux_run("paste-buffer", "-p", "-t", exact_target, "-b", buffer_name, check=False, timeout=timeout)
+        if paste.returncode != 0 or not submit:
+            return paste
+        enter = tmux_run("send-keys", "-t", exact_target, "Enter", check=False, timeout=timeout)
+        return enter if enter.returncode != 0 else paste
+    finally:
+        tmux_run("delete-buffer", "-b", buffer_name, check=False, timeout=1.0)
 
 
 def tmux_move_to_option(target: str, option: int, selected_option: int | None = None) -> None:

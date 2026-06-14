@@ -537,7 +537,7 @@ const changesFolderAutoCollapsed = new Set();
 const fileExplorerTabberCollapsed = readStoredSet(fileExplorerTabberCollapsedStorageKey);
 // Tabber activity ledger snapshot (GET /api/activity): {activity: {sessionKey|session:window: ActivityRecord}}.
 // Drives per-row recency timestamps + most-recent-first sort. Refreshed only while the Tabber is open.
-let tabberActivityPayload = {activity: {}};
+let tabberActivityPayload = {activity: {}, agents: []};
 let tabberActivityRefreshMs = 15000;
 let tabberLaunchWarmupStarted = false;
 // per-repo collapse state for the Modified-files panel repo headers (keyed by repo path).
@@ -1040,12 +1040,22 @@ let activitySummaryRefreshing = false;
 let activitySummaryLastRefreshTs = 0;
 const activitySummaryGuard = makeGenerationGuard();
 let yoagentMessages = [];
+let yoagentPendingWaits = [];
+let yoagentConversationLoaded = false;
+let yoagentConversationLoading = false;
+let yoagentConversationPath = '';
+let yoagentConversationDisplayPath = '';
 let yoagentBusy = false;
 let yoagentPrewarming = false;
 let yoagentPrewarmStarted = false;
 let yoagentError = '';
 let yoagentDraft = '';
+let yoagentHistoryCursor = null;
+let yoagentHistoryDraft = '';
 let yoagentNotice = null;
+let yoagentScrollbackLocked = false;
+let yoagentStartupInfoShown = false;
+let yoagentStartupInfoVisible = false;
 let notificationsEnabled = false;
 let fileExplorerChangesSelectedSession = shareBootstrapFinderSession();
 const sessionStateKeys = new Map();

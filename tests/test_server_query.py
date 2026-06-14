@@ -194,6 +194,30 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
     assert calls == [("require_auth", "readonly")]
     assert writes == [("json", HTTPStatus.OK, {"force": True, "locale": "ja"})]
 
+    app = SimpleNamespace(yoagent_skills_payload=lambda: {"skills": []})
+    handler, calls, writes = route_handler("/api/yoagent/skills", app)
+    Handler.do_GET(handler)
+    assert calls == [("require_auth", "admin")]
+    assert writes == [("json", HTTPStatus.OK, {"skills": []})]
+
+    app = SimpleNamespace(yoagent_skill_files_payload=lambda kind="", name="": ({"kind": kind, "name": name}, HTTPStatus.OK))
+    handler, calls, writes = route_handler("/api/yoagent/skill-files?kind=skill&name=local-checks", app)
+    Handler.do_GET(handler)
+    assert calls == [("require_auth", "admin")]
+    assert writes == [("json", HTTPStatus.OK, {"kind": "skill", "name": "local-checks"})]
+
+    app = SimpleNamespace(yoagent_conversation_payload=lambda: {"messages": []})
+    handler, calls, writes = route_handler("/api/yoagent/conversation", app)
+    Handler.do_GET(handler)
+    assert calls == [("require_auth", "admin")]
+    assert writes == [("json", HTTPStatus.OK, {"messages": []})]
+
+    app = SimpleNamespace(yoagent_jobs_payload=lambda: ({"jobs": []}, HTTPStatus.OK))
+    handler, calls, writes = route_handler("/api/yoagent/jobs", app)
+    Handler.do_GET(handler)
+    assert calls == [("require_auth", "admin")]
+    assert writes == [("json", HTTPStatus.OK, {"jobs": []})]
+
     handler, calls, writes = route_handler("/api/client-events", app)
     handler.stream_client_events = lambda: writes.append(("client-events", handler.path))
     Handler.do_GET(handler)
@@ -282,6 +306,8 @@ def test_share_token_post_auth_allows_only_readonly_fs_batch(monkeypatch):
         "/api/watch/roots",
         "/api/drop-action/run",
         "/api/yoagent/chat",
+        "/api/yoagent/intent",
+        "/api/yoagent/jobs",
         "/api/fs/write",
         "/api/fs/delete",
         "/api/fs/rename",
@@ -320,6 +346,8 @@ def test_share_request_allowed_route_matrix(monkeypatch):
         "/api/watch/roots",
         "/api/drop-action/run",
         "/api/yoagent/chat",
+        "/api/yoagent/intent",
+        "/api/yoagent/jobs",
         "/api/fs/write",
         "/api/fs/delete",
         "/api/fs/rename",
@@ -377,6 +405,78 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
 
     assert calls == [("require_auth_for_post", "/api/drop-action/run")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "action": "server-info"})]
+
+    app = SimpleNamespace(preview_yoagent_send_action=lambda payload: ({"ok": True, "preview": payload["session"]}, HTTPStatus.OK))
+    handler, calls, writes = route_handler("/api/yoagent/actions/preview-send", app)
+    handler.read_json_body = lambda limit: {"session": "6", "text": "date"}
+
+    Handler.do_POST(handler)
+
+    assert calls == [("require_auth_for_post", "/api/yoagent/actions/preview-send")]
+    assert writes == [("json", HTTPStatus.OK, {"ok": True, "preview": "6"})]
+
+    app = SimpleNamespace(execute_yoagent_send_action=lambda payload: ({"ok": True, "preview_id": payload["preview_id"]}, HTTPStatus.OK))
+    handler, calls, writes = route_handler("/api/yoagent/actions/execute-send", app)
+    handler.read_json_body = lambda limit: {"preview_id": "ya_1"}
+
+    Handler.do_POST(handler)
+
+    assert calls == [("require_auth_for_post", "/api/yoagent/actions/execute-send")]
+    assert writes == [("json", HTTPStatus.OK, {"ok": True, "preview_id": "ya_1"})]
+
+    app = SimpleNamespace(yoagent_intent=lambda payload: ({"ok": True, "intent": payload["type"]}, HTTPStatus.OK))
+    handler, calls, writes = route_handler("/api/yoagent/intent", app)
+    handler.read_json_body = lambda limit: {"type": "notify_session_idle"}
+
+    Handler.do_POST(handler)
+
+    assert calls == [("require_auth_for_post", "/api/yoagent/intent")]
+    assert writes == [("json", HTTPStatus.OK, {"ok": True, "intent": "notify_session_idle"})]
+
+    app = SimpleNamespace(create_yoagent_job=lambda payload: ({"ok": True, "job": payload["type"]}, HTTPStatus.OK))
+    handler, calls, writes = route_handler("/api/yoagent/jobs", app)
+    handler.read_json_body = lambda limit: {"type": "notify_session_idle"}
+
+    Handler.do_POST(handler)
+
+    assert calls == [("require_auth_for_post", "/api/yoagent/jobs")]
+    assert writes == [("json", HTTPStatus.OK, {"ok": True, "job": "notify_session_idle"})]
+
+    app = SimpleNamespace(confirm_yoagent_job=lambda job_id: ({"ok": True, "id": job_id}, HTTPStatus.OK))
+    handler, calls, writes = route_handler("/api/yoagent/jobs/yj_1/confirm", app)
+    handler.read_json_body = lambda limit: {}
+
+    Handler.do_POST(handler)
+
+    assert calls == [("require_auth_for_post", "/api/yoagent/jobs/yj_1/confirm")]
+    assert writes == [("json", HTTPStatus.OK, {"ok": True, "id": "yj_1"})]
+
+    app = SimpleNamespace(cancel_yoagent_job=lambda job_id: ({"ok": True, "id": job_id}, HTTPStatus.OK))
+    handler, calls, writes = route_handler("/api/yoagent/jobs/yj_1/cancel", app)
+    handler.read_json_body = lambda limit: {}
+
+    Handler.do_POST(handler)
+
+    assert calls == [("require_auth_for_post", "/api/yoagent/jobs/yj_1/cancel")]
+    assert writes == [("json", HTTPStatus.OK, {"ok": True, "id": "yj_1"})]
+
+    app = SimpleNamespace(upsert_yoagent_skill_file=lambda payload: ({"ok": True, "name": payload["name"]}, HTTPStatus.OK))
+    handler, calls, writes = route_handler("/api/yoagent/skill-files/upsert", app)
+    handler.read_json_body = lambda limit: {"kind": "skill", "name": "local-checks", "text": "name: local-checks\n"}
+
+    Handler.do_POST(handler)
+
+    assert calls == [("require_auth_for_post", "/api/yoagent/skill-files/upsert")]
+    assert writes == [("json", HTTPStatus.OK, {"ok": True, "name": "local-checks"})]
+
+    app = SimpleNamespace(delete_yoagent_skill_file=lambda payload: ({"ok": True, "name": payload["name"]}, HTTPStatus.OK))
+    handler, calls, writes = route_handler("/api/yoagent/skill-files/delete", app)
+    handler.read_json_body = lambda limit: {"kind": "skill", "name": "local-checks"}
+
+    Handler.do_POST(handler)
+
+    assert calls == [("require_auth_for_post", "/api/yoagent/skill-files/delete")]
+    assert writes == [("json", HTTPStatus.OK, {"ok": True, "name": "local-checks"})]
 
     app = SimpleNamespace(tmux_copy_selection=lambda session: ({"session": session, "copied": True}, HTTPStatus.OK))
     handler, calls, writes = route_handler("/api/tmux-copy-selection?session=6", app)

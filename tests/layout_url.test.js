@@ -417,6 +417,7 @@ globalThis.__layoutTestApi = {
   i18nLocaleChoices,
   i18nIsRtl,
   relativeTimeFormat,
+  compactRelativeTimeFormat,
   i18nActiveLocaleId,
   i18nSetCatalogForTest,
   setActiveLocaleForTest(locale) { i18nActiveLocale = locale; },
@@ -510,6 +511,13 @@ globalThis.__layoutTestApi = {
   setYoagentBusyForTest(value) { yoagentBusy = Boolean(value); },
   setYoagentErrorForTest(value) { yoagentError = String(value || ''); },
   setYoagentNoticeForTest(value) { yoagentNotice = value; },
+  setYoagentMessagesForTest(value) { yoagentMessages = Array.isArray(value) ? value : []; if (yoagentMessages.length) hideYoagentStartupInfo(); resetYoagentComposerHistory(); },
+  showYoagentStartupInfoOnceForTest: showYoagentStartupInfoOnce,
+  hideYoagentStartupInfoForTest: hideYoagentStartupInfo,
+  yoagentUserMessageHistoryForTest: yoagentUserMessageHistory,
+  yoagentNavigateChatHistoryForTest: yoagentNavigateChatHistory,
+  resetYoagentComposerHistoryForTest: resetYoagentComposerHistory,
+  applyYoagentConversationPayloadForTest: applyYoagentConversationPayload,
   sessionActivitySummary,
   fitAppMenuPopover,
   finderDirectoryForItem,
@@ -1018,6 +1026,8 @@ globalThis.__layoutTestApi = {
   splitSessionAtLayoutBoundary,
   splitSessionAtGutter,
   updateActiveSessionParam,
+  openYoagentRightPane,
+  rightmostExistingPaneSlot,
   paneTabDropIndex,
   paneTabDropPlacement,
   dockviewTabDropWouldNoop,
@@ -2499,9 +2509,12 @@ test('t@1869', () => {
   assert.equal(updateApi.normalizeUpdateNotificationLevelForTest(false), 'none', 'legacy false maps to no update notifications');
   assert.equal(updateApi.updateNotificationAllowsVersionForTest('0.3.25', '0.3.26', 'patch'), true, 'patch threshold notifies for patch updates');
   assert.equal(updateApi.updateNotificationAllowsVersionForTest('0.3.25', '0.3.26', 'minor'), false, 'minor threshold suppresses patch-only updates');
+  assert.equal(updateApi.updateNotificationAllowsVersionForTest('0.3.25', '0.4.0', 'major'), false, 'major threshold suppresses minor-only updates');
   assert.equal(updateApi.updateNotificationAllowsVersionForTest('0.3.25', '0.4.0', 'minor'), true, 'minor threshold notifies for minor updates');
   assert.equal(updateApi.updateNotificationAllowsVersionForTest('0.3.25', '1.0.0', 'minor'), true, 'minor threshold includes major updates');
+  assert.equal(updateApi.updateNotificationAllowsVersionForTest('0.3.25', '1.0.0', 'major'), true, 'major threshold notifies for major updates');
   assert.equal(updateApi.updateNotificationAllowsVersionForTest('0.3.25', '1.0.0', 'none'), false, 'none threshold suppresses update notifications');
+  assert.ok(/function applyUpdateAvailable\(status\)[\s\S]*status\.notify === false[\s\S]*return/.test(source), 'origin/main update cue respects the server-side notify threshold');
   assert.ok(/function reloadIsSafe\(\)[\s\S]*file\?\.dirty[\s\S]*isContentEditable/.test(source), 'reloadIsSafe refuses when an editor buffer is dirty or the user is typing');
   // #40: YO!info and YO!agent are merged into ONE panel with a segmented sub-tab toggle; both sub-views
   // (the metadata table + the AI chat/summary) live in the single info panel and the active one is shown.
@@ -2512,7 +2525,7 @@ test('t@1869', () => {
   assert.equal(createInfoPanelSource.includes('class="panel-detail-row"'), false, '#40: the merged YO!info panel no longer renders a redundant title/info bar');
   assert.equal(createInfoPanelSource.includes('id="meta-'), false, '#40: the merged YO!info panel no longer renders a subtitle meta bar');
   assert.equal(/class="transcript-head info-head"/.test(source), false, '#40: the duplicate sub-view title bar is gone');
-  assert.ok(/function createInfoPanel\(\)[\s\S]*?renderInfoPanel\(\);\s*renderYoagentPanel\(\);/.test(source), '#40: the merged panel renders both sub-views on creation');
+  assert.ok(/function createInfoPanel\(\)[\s\S]*?renderInfoPanel\(\);[\s\S]*?renderYoagentPanel\(\);/.test(source), '#40: the merged panel renders both sub-views on creation');
   assert.ok(/renderAttached:\s*\(\) => \{[\s\S]*?applyInfoSubTab\(\);[\s\S]*?renderInfoPanel\(\);[\s\S]*?renderYoagentPanel\(\{preserveDraft: true, scrollBottom: false\}\);[\s\S]*?\}/.test(source), '#40/#YO!info: info tab registry hook renders both sub-views on attach');
   assert.ok(/function renderAttachedPanelContent\(item\)[\s\S]*?tabTypeForItem\(item\)\?\.renderAttached[\s\S]*?renderAttached\(item\)/.test(source), '#40/#YO!info: pooled panel attach dispatches through TAB_TYPES');
   assert.ok(/function renderDropSlot\(slot, session\)[\s\S]*?node\.appendChild\(panel\);\s*renderAttachedPanelContent\(session\);/.test(source), '#40/#YO!info: initial drop-slot attach renders YO!info before metadata polling');
@@ -2521,6 +2534,7 @@ test('t@1869', () => {
   assert.ok(source.includes('function setInfoSubTab(') && source.includes('function applyInfoSubTab(') && source.includes('function relocalizeInfoPanelChrome(') && source.includes('async function openInfoSubTab('), '#40: sub-tab switch + locale + open helpers exist');
   assert.ok(/function setInfoSubTab[\s\S]*?writeStoredInfoSubTab\(next\)/.test(source), '#40: switching the sub-tab persists it (remembered across reloads)');
   assert.ok(/function openInfoSubTab[\s\S]*?selectSession\(infoItemId\)/.test(source), '#40: opening YO!agent activates the merged info pane');
+  assert.ok(/function openYoagentRightPane\(\)[\s\S]*rightmostExistingPaneSlot\(\)[\s\S]*moveSessionToSlot\(infoItemId, targetSlot[\s\S]*splitInfoItemToRightPane\(sourceSlot\)/.test(source), '#40: the YO!agent shortcut places the merged info tab in the right pane');
   assert.ok(/function rerenderForLocale\(options = \{\}\)[\s\S]*?relocalizeInfoPanelChrome\(\)[\s\S]*?renderInfoPanel\(\)[\s\S]*?renderYoagentPanel\(\{preserveDraft: true, allowBusyRebuild: options\.localeChange === true\}\)[\s\S]*?relocalizeInfoPanelChrome\(\)/.test(source), '#40/#50: a language switch relabels persistent YO!info chrome and forces busy YO!agent UI to rebuild in the new locale');
   assert.equal(/function virtualPanelControlsHtml\(session\)[\s\S]*terminal-tab/.test(source), false, '#40: Preferences and YO!info virtual pane controls do not render a redundant active-tab pill');
   assert.ok(/function relocalizeInfoPanelChrome[\s\S]*?querySelectorAll\('\[data-info-subtab\]'\)[\s\S]*?button\.dataset\.infoSubtab === 'yoagent'[\s\S]*?data-info-refresh[\s\S]*?data-yoagent-refresh/.test(source), '#40/#50: the persistent YO!info/YO!agent sub-tab chrome and actions are localized in place by data attribute');
@@ -2928,7 +2942,11 @@ test('t@2306', () => {
   assert.ok(source.includes("params.set('locale', i18nActiveLocaleId())"), 'YO!agent summary API carries the active locale query');
   assert.ok(source.includes("data-yolo-rule-open"), 'Preferences exposes an Open button for the YOLO rule file');
   assert.ok(source.includes("apiFetchJson('/api/yoagent/reset'"), 'YO!agent clear conversation resets the server-side CLI session');
+  assert.ok(source.includes("apiFetchJson('/api/yoagent/conversation'"), 'YO!agent hydrates chat history from the server-side conversation transcript');
+  assert.ok(source.includes("transcript_display_path"), 'YO!agent conversation payload carries the transcript display path');
+  assert.ok(source.includes("pathCopyButtonHtml(path, {className: 'yoagent-transcript-copy'"), 'YO!agent transcript path renders with the shared copy button');
   assert.ok(source.includes("renderYoagentPanel({preserveDraft: false, scrollBottom: true})"), 'YO!agent send/clear clears the draft and scrolls chat to the bottom');
+  assert.ok(source.includes("'yoagent_conversation_changed'") && source.includes('loadYoagentConversation({force: true'), 'YO!agent background result pushes refresh the persisted conversation');
   assert.equal(source.includes('yoagentSessionSummariesHtml'), false, 'YO!agent default panel does not render the per-session SESSION detail card list');
   assert.ok(source.includes("row.draggable = entry.kind === 'file' || entry.kind === 'dir';") && source.includes("setRowDataset(row, 'openChangeFile', changedFile?.abs_path || '')"), 'Modified-files rows use the shared tree renderer and remain draggable as file payloads');
   assert.ok(source.includes("event.dataTransfer.setData('application/x-yolomux-file'"), 'Modified-files drag carries the same file payload as Finder drag');
@@ -4852,9 +4870,12 @@ test('t@2560', () => {
   assert.ok(/\.yoagent-list\s*\{[\s\S]*display:\s*flex[\s\S]*flex-direction:\s*column/.test(preferencesCss), 'YO!agent content column can push the chat section to the bottom');
   assert.ok(/\.yoagent-chat\s*\{[\s\S]*min-width:\s*0/.test(preferencesCss), 'YO!agent chat fits narrow panes');
   assert.ok(/\.yoagent-chat\s*\{[\s\S]*margin-top:\s*auto/.test(preferencesCss), 'YO!agent chat stays at the bottom of the summary view when there is spare height');
+  assert.ok(preferencesCss.includes('--terminal-font-size: 13px'), 'terminal font size is exposed as a shared CSS variable');
+  assert.ok(/\.yoagent-list\s*\{[\s\S]*font-size:\s*var\(--terminal-font-size\)/.test(preferencesCss), 'YO!agent uses the terminal font-size setting');
+  assert.ok(/\.yoagent-chat\s*\{[\s\S]*grid-template-rows:\s*auto minmax\(0, 1fr\) auto/.test(preferencesCss), 'YO!agent transcript row stays compact while history owns spare height, including the Recent agents response');
   assert.ok(/\.yoagent-global\s*\{[\s\S]*border-inline-start:\s*3px solid var\(--active-accent-bright\)/.test(preferencesCss), 'YO!agent global summary accent follows the active theme color');
   assert.equal(/\.yoagent-(?:global|refresh|session|chat|message|backend)[\s\S]{0,260}var\(--brand-green\)/.test(preferencesCss), false, 'YO!agent summary/chat accents do not hardcode the green theme token');
-  assert.ok(/\.yoagent-chat\.empty\s*\{[\s\S]*grid-template-rows:\s*auto auto/.test(preferencesCss), 'empty YO!agent chat does not stretch an empty history row');
+  assert.ok(/\.yoagent-chat\.empty\s*\{[\s\S]*grid-template-rows:\s*auto auto auto/.test(preferencesCss), 'empty YO!agent chat does not stretch an empty history row');
   assert.ok(preferencesCss.includes('body.editor-cursor-block .file-editor-codemirror .cm-cursor'), 'block cursor styling is available for CodeMirror');
   assert.ok(/\.preferences-setting-control\s*\{[^}]*--preferences-control-left-indent:\s*14px/.test(preferencesCss), 'Preferences controls share the 14px left inset');
   assert.ok(/\.preferences-setting-control\s*\{[^}]*--preferences-number-control-width:\s*11ch/.test(preferencesCss), 'Preferences number controls reserve room for the native spinner');
@@ -4937,7 +4958,7 @@ test('t@2560', () => {
   assert.equal(preferencesCss.includes('cm-insertedText'), false, '#44: the dead intra-line token rules are removed');
   assert.equal(preferencesCss.includes('--diff-add-text-bg'), false, '#44: the unused intra-line text-bg token is removed');
   assert.ok(preferencesCss.includes('.file-tree-row.repo-non-main'), 'Finder repo rows have non-main branch styling');
-  api.setClientSettingsPatchForTest({performance: {server_event_poll_ms: 850, server_background_file_event_poll_ms: 5000, server_directory_event_poll_ms: 3000, tabber_activity_refresh_ms: 15000, remote_resize_delay_ms: 220}});
+  api.setClientSettingsPatchForTest({performance: {server_event_poll_ms: 850, server_background_file_event_poll_ms: 5000, server_directory_event_poll_ms: 3000, tabber_activity_refresh_ms: 15000, remote_resize_delay_ms: 220}, updates: {notify_level: 'patch'}});
   const preferencesHtml = api.preferencesPanelHtmlForTest('', []);
   assert.ok(preferencesHtml.indexOf('preferences-search-row') < preferencesHtml.indexOf('preferences-path-rows'), 'preferences search is first');
   assert.ok(preferencesHtml.includes('data-preferences-search-action>YOsearch</button>'), 'preferences search has an explicit YOsearch action');
@@ -4968,6 +4989,8 @@ test('t@2560', () => {
   assert.ok(preferencesHtml.includes('preferences-setting-control setting-type-number'), 'number controls are identifiable for compact sizing');
   assert.ok(preferencesHtml.includes('data-setting-path="file_explorer.image_preview_max_px"'), 'preferences expose Finder image preview sizing');
   assert.ok(preferencesHtml.includes('data-setting-path="performance.server_event_poll_ms"'), 'Preferences expose the server SSE editor file-change poll interval');
+  assert.ok(preferencesHtml.includes('data-setting-path="updates.notify_level"'), 'Preferences expose the origin/main update notification threshold');
+  assert.ok(/value="major"[^>]*data-setting-path="updates\.notify_level"[\s\S]*value="minor"[^>]*data-setting-path="updates\.notify_level"[\s\S]*value="patch"[^>]*data-setting-path="updates\.notify_level"[^>]*checked[\s\S]*value="none"[^>]*data-setting-path="updates\.notify_level"/.test(preferencesHtml), 'Update notification threshold is a major/minor/patch/none radio group defaulting to patch');
   assert.ok(/data-setting-path="performance\.server_event_poll_ms"[\s\S]*?value="0\.850"[\s\S]*?min="0\.25"[\s\S]*?step="0\.05"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'server-side SSE editor file-change poll displays seconds with a 0.250s minimum');
   assert.ok(/data-setting-path="performance\.server_background_file_event_poll_ms"[\s\S]*?value="5\.000"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'server-side SSE background editor file-change poll defaults to 5 seconds');
   assert.ok(/data-setting-path="performance\.server_directory_event_poll_ms"[\s\S]*?value="3\.000"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'server-side SSE directory-change poll displays seconds');
@@ -4983,7 +5006,7 @@ test('t@2560', () => {
   assert.ok(performanceHtml.includes('Server SSE: editor file-change poll'), 'Performance labels the server-side SSE editor file-change interval');
   assert.ok(performanceHtml.includes('Server SSE: background editor file-change poll'), 'Performance labels the server-side SSE background editor interval');
   assert.ok(performanceHtml.includes('Server SSE: directory-change poll'), 'Performance labels the server-side SSE directory-change interval');
-  assert.ok(performanceHtml.includes('Client pull: Tabber activity'), 'Performance labels the Tabber activity refresh interval');
+  assert.ok(performanceHtml.includes('Server cache: Tabber activity'), 'Performance labels the Tabber activity refresh interval as server-cached');
   assert.equal(performanceHtml.includes('Client pull: file-change/Differ fallback'), false, 'Performance no longer exposes the removed client file-change fallback interval');
   for (const removedPath of [
     'file_explorer.refresh_seconds',
@@ -6028,6 +6051,7 @@ test('t@2560', () => {
   assert.ok(source.includes("if (mod && key === 'p' && platformActionAllowed)"), 'file quick-open is bound through the platform shortcut guard');
   assert.ok(source.includes('if (event.shiftKey) openCommandPalette();'), 'Shift plus app modifier opens the command palette');
   assert.ok(source.includes('else openFileQuickOpen();'), 'Plain app modifier plus P opens file quick-open');
+  assert.ok(/platformMod && event\.altKey && event\.code === 'KeyB'[\s\S]*openYoagentRightPane\(\)/.test(source), 'Cmd/Ctrl+Alt+B opens YO!agent in the right pane');
   assert.ok(source.includes("if (event.key === ',')"), 'Preferences keeps best-effort comma shortcut in browser tabs');
   assert.ok(source.includes('selectSession(prefsItemId);'), 'Preferences shortcut opens the pane, while menu and palette remain fallbacks');
   assert.ok(source.includes('function startPinTabShortcutChord()'), 'Pin Tab shortcut uses an explicit chord starter');
@@ -8767,6 +8791,10 @@ test('t@6833', () => {
     sessions: {
       alpha: {local: "Codex session alpha is active in yolomux.dev. It has been working on editor fixes. It currently has 2 files changed (+8/-1)."},
     },
+    agents: [
+      {session: '5', window: '2', window_name: 'codex', window_label: '2:codex', agent_kind: 'codex', label: "session '5' 2:codex", running: true, sort_ts: Date.now() / 1000, cwd: '/home/test/yolomux.dev', recent_paths: [{path: '/home/test/yolomux.dev', mtime: Date.now() / 1000, count: 2}]},
+      {session: '6', window: '1', window_name: 'claude', window_label: '1:claude', agent_kind: 'claude', label: "session '6' 1:claude", last_used_ts: Date.now() / 1000 - 180, sort_ts: Date.now() / 1000 - 180, cwd: '/home/test/other', recent_paths: [{path: '/home/test/other', mtime: Date.now() / 1000 - 180, count: 1}]},
+    ],
   };
   api.setActivitySummaryPayloadForTest(baseActivitySummaryPayload);
   assert.ok(api.globalActivitySummaryHtml().includes('YO!agent'), 'global activity summary uses the YO agent label');
@@ -8774,10 +8802,21 @@ test('t@6833', () => {
   assert.equal(api.yoagentChatHtml().includes('data-yoagent-chat-form'), false, 'No-agent YO!agent hides the chat form');
   assert.ok(api.yoagentChatHtml().includes('Set a Claude or Codex backend in Preferences to chat.'), 'No-agent YO!agent points users to backend settings');
   api.setClientSettingsPatchForTest({yoagent: {backend: 'claude'}});
+  assert.equal(api.yoagentChatHtml().includes('Your most recent work is about editor fixes'), false, 'Claude-backed YO!agent does not auto-inject Recent agents until the startup one-shot is enabled');
+  assert.equal(api.showYoagentStartupInfoOnceForTest(), true, 'YO!agent startup info can be shown once when the tab first opens');
+  assert.equal(api.showYoagentStartupInfoOnceForTest(), false, 'YO!agent startup info does not re-show on later renders');
   const enabledChatHtml = api.yoagentChatHtml();
   assert.ok(enabledChatHtml.includes('data-yoagent-chat-form'), 'Claude-backed YO!agent panel includes a chat form');
-  assert.ok(enabledChatHtml.includes('Your most recent work is about editor fixes'), 'Claude-backed YO!agent chat starts with the regular intro message');
+  assert.ok(enabledChatHtml.includes('Your most recent work is about editor fixes'), 'Claude-backed YO!agent chat shows the regular intro message only during startup');
   assert.ok(enabledChatHtml.includes('Ask anything'), 'Claude-backed YO!agent composer uses the localized ask-anything placeholder');
+  assert.ok(enabledChatHtml.includes('yoagent-message assistant yoagent-recent-agents-message'), 'YO!agent chat shows recent agents as an assistant-style response during startup');
+  assert.ok(enabledChatHtml.includes('<ul class="yoagent-recent-agents-list">'), 'YO!agent chat shows recent agents as a bullet list');
+  assert.ok(enabledChatHtml.includes('yoagent-recent-agent-session">session 5'), 'YO!agent recent agents show the session in a fixed field');
+  assert.ok(enabledChatHtml.includes('yoagent-recent-agent-window">2:codex'), 'YO!agent recent agents show the tmux window name in a fixed field');
+  assert.ok(enabledChatHtml.includes('yoagent-recent-agent-paths">~/yolomux.dev'), 'YO!agent recent agents show touched paths from the backend agent payload');
+  assert.ok(enabledChatHtml.includes('yoagent-recent-agent-activity">running'), 'YO!agent recent agents show running agents as running');
+  assert.ok(enabledChatHtml.includes('yoagent-recent-agent-activity">3 min ago'), 'YO!agent recent agents show compact last-used time for idle agents');
+  assert.ok(enabledChatHtml.indexOf('yoagent-recent-agent-session">session 5') < enabledChatHtml.indexOf('yoagent-recent-agent-session">session 6'), 'YO!agent recent agents preserve backend recency order');
   api.setActivitySummaryPayloadForTest({yoagent_summaries: {auto_refresh: true, updated_ts: 1760000000, updated_at: '2025-10-09T08:53:20+00:00'}, global: {headline: 'Cached rolling context'}, sessions: {}, session_order: []});
   assert.ok(api.yoagentChatHtml().includes('Background transcript summaries on'), 'YO!agent chat shows when background transcript summaries are enabled');
   api.setActivitySummaryPayloadForTest(baseActivitySummaryPayload);
@@ -8793,6 +8832,66 @@ test('t@6833', () => {
   assert.equal(/data-yoagent-backend[\s\S]*?<option value="deterministic"/.test(enabledChatHtml), false, 'YO!agent composer pill does not offer No agent (deterministic)');
   assert.ok(enabledChatHtml.includes('yoagent-chat-send-icon'), 'YO!agent send button is a circular arrow icon');
   assert.ok(enabledChatHtml.indexOf('yoagent-chat-clear') < enabledChatHtml.indexOf('yoagent-chat-send'), 'YO!agent send arrow is the last (far-right) control, after Clear');
+  api.setYoagentMessagesForTest([
+    {role: 'user', content: 'first question', createdAt: '2026-06-13T17:38:00Z'},
+    {role: 'assistant', content: 'first answer', createdAt: '2026-06-13T17:38:01Z'},
+    {role: 'user', content: 'second question', createdAt: '2026-06-13T17:39:00Z'},
+  ]);
+  api.setYoagentDraftForTest('new draft');
+  const historyInput = {value: 'new draft', disabled: false, setSelectionRange(start, end) { this.selection = [start, end]; }};
+  assert.deepStrictEqual(api.yoagentUserMessageHistoryForTest(), ['first question', 'second question'], 'YO!agent composer history contains only prior user messages');
+  assert.equal(api.yoagentNavigateChatHistoryForTest(historyInput, 'up'), true, 'Up enters YO!agent composer history');
+  assert.equal(historyInput.value, 'second question', 'first Up shows the most recent user message');
+  assert.deepStrictEqual(historyInput.selection, ['second question'.length, 'second question'.length], 'history navigation places the cursor at the end for editing');
+  assert.equal(api.yoagentNavigateChatHistoryForTest(historyInput, 'up'), true, 'repeated Up walks older');
+  assert.equal(historyInput.value, 'first question', 'second Up shows the older user message');
+  assert.equal(api.yoagentNavigateChatHistoryForTest(historyInput, 'up'), true, 'Up at the oldest message is handled');
+  assert.equal(historyInput.value, 'first question', 'Up clamps at the oldest message');
+  assert.equal(api.yoagentNavigateChatHistoryForTest(historyInput, 'down'), true, 'Down walks newer');
+  assert.equal(historyInput.value, 'second question', 'first Down returns to the newer history message');
+  assert.equal(api.yoagentNavigateChatHistoryForTest(historyInput, 'down'), true, 'Down from newest history returns to the latest draft slot');
+  assert.equal(historyInput.value, 'new draft', 'latest slot restores the unsent draft so the placeholder is visible when blank');
+  assert.equal(api.yoagentNavigateChatHistoryForTest(historyInput, 'down'), false, 'Down at the latest draft slot leaves the composer alone');
+  api.applyYoagentConversationPayloadForTest({
+    transcript_path: '/home/test/.local/state/yolomux/yoagent/conversation.jsonl',
+    transcript_display_path: '~/.local/state/yolomux/yoagent/conversation.jsonl',
+    messages: [{role: 'user', content: 'persisted question', createdAt: '2026-06-13T17:39:00Z'}],
+  });
+  const transcriptHtml = api.yoagentChatHtml();
+  assert.ok(transcriptHtml.includes('yoagent-transcript-path'), 'YO!agent chat shows the persisted transcript location at the top');
+  assert.ok(transcriptHtml.includes('~/.local/state/yolomux/yoagent/conversation.jsonl'), 'YO!agent transcript row uses the compact display path');
+  assert.ok(transcriptHtml.includes('data-copy-path="/home/test/.local/state/yolomux/yoagent/conversation.jsonl"'), 'YO!agent transcript path can be copied');
+  assert.equal(transcriptHtml.includes('yoagent-message assistant yoagent-recent-agents-message'), false, 'persisted YO!agent messages hide the one-shot Recent agents block so responses stay visible');
+  api.setYoagentMessagesForTest([
+    {role: 'user', content: 'wait for session 6, then ask for date', createdAt: '2026-06-13T17:40:00Z'},
+    {
+      role: 'assistant',
+      content: 'I resolved tmux session `6` and prepared a confirmed send action.',
+      createdAt: '2026-06-13T17:40:01Z',
+      actions: [{
+        id: 'ya_test',
+        status: 'ready',
+        session: '6',
+        text: 'date',
+        target: {session: '6', agent_kind: 'claude', transport: 'pane-paste', pane_target: '%6', cwd: '/repo/app'},
+      }],
+    },
+    {
+      role: 'assistant',
+      kind: 'agent_result',
+      session: '6',
+      content: 'Result from tmux session `6`:\n\nThe date is June 13, 2026.',
+      createdAt: '2026-06-13T17:41:00Z',
+    },
+  ]);
+  const actionHtml = api.yoagentChatHtml();
+  assert.ok(actionHtml.includes('yoagent-message user'), 'YO!agent user turns keep a role-specific bubble');
+  assert.ok(actionHtml.includes('yoagent-message assistant'), 'YO!agent assistant turns keep a role-specific bubble');
+  assert.ok(actionHtml.includes('yoagent-message assistant yoagent-agent-result'), 'YO!agent target-agent result turns get a distinct result bubble class');
+  assert.ok(actionHtml.includes('data-yoagent-action-card="ya_test"'), 'YO!agent assistant turns render server-resolved action cards');
+  assert.ok(actionHtml.includes('data-yoagent-action-send="ya_test"'), 'ready YO!agent action cards expose a confirmed send control');
+  assert.ok(actionHtml.includes('Action preview') && actionHtml.includes('Send'), 'ready YO!agent action cards use localized action labels');
+  assert.ok(actionHtml.includes('visible tmux pane'), 'ready YO!agent action cards label sends as visible-pane delivery');
   api.setYoagentBusyForTest(true);
   assert.ok(api.yoagentChatHtml().includes('yoagent-chat-spinner'), 'YO!agent busy state includes an animated spinner');
   // The "thinking" label keeps its word but the trailing dots are CSS-animated, so the text updates
@@ -9199,7 +9298,7 @@ test('t@7149', () => {
   assert.ok(/function backgroundFileEditorWatchFiles\(\)[\s\S]*?paneItems\(\)[\s\S]*?!visible\.has\(path\)/.test(source), 'client reports background editor files separately from active visible editor files');
   assert.ok(source.includes('files: visibleFileEditorWatchFiles()'), 'watch state includes visible editor file paths for the fast files_changed stream');
   assert.ok(source.includes('background_files: backgroundFileEditorWatchFiles()'), 'watch state includes background editor file paths for the slower files_changed stream');
-  assert.ok(source.includes("['settings_changed', 'auto_approve_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available']"), 'client listens for the expected push event types');
+  assert.ok(source.includes("['settings_changed', 'auto_approve_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed']"), 'client listens for the expected push event types');
   assert.ok(/addEventListener\('ready',[\s\S]{0,260}refreshAutoStatuses\(\)\.catch/.test(source), 'client-events ready re-fetches auto status so stale YO markers are backfilled after reconnect');
   assert.ok(/function installReconnectResyncHandlers\(\)[\s\S]*document\.addEventListener\('visibilitychange'[\s\S]*document\.visibilityState === 'visible'[\s\S]*scheduleReconnectResync\('visible'\)[\s\S]*window\.addEventListener\('online'[\s\S]*scheduleReconnectResync\('online'\)/.test(source), 'page wake and network restore schedule a shared refreshAll resync');
   assert.ok(/function scheduleReconnectResync\(reason = ''\)[\s\S]*setTimeout\(\(\) => \{[\s\S]*refreshAll\(\)/.test(source), 'wake/network reconnect resync is debounced before refreshAll');
@@ -9211,6 +9310,8 @@ test('t@7149', () => {
   assert.ok(/if \(type === 'transcripts_changed'\)[\s\S]{0,220}applyTranscriptsPayload\(payload\.data, \{refreshAuto: false, refreshContext: false, refreshActivity: false\}\)/.test(source), 'transcripts_changed applies direct metadata payloads');
   assert.ok(/if \(type === 'context_items_ready'\)[\s\S]{0,160}applyContextItemsPayloadFromPush\(payload\.data/.test(source), 'context_items_ready applies direct context payloads');
   assert.ok(/if \(type === 'activity_summary_ready'\)[\s\S]{0,120}applyActivitySummaryPayloadFromPush\(payload\.data\)/.test(source), 'activity_summary_ready applies direct summary payloads');
+  assert.ok(/if \(type === 'yoagent_skills_changed'\)[\s\S]{0,160}refreshActivitySummary\(\{force: true/.test(source), 'yoagent_skills_changed refreshes YO!agent context');
+  assert.ok(/if \(type === 'yoagent_jobs_changed'\)[\s\S]{0,120}maybeNotifyYoagentJob\(payload\.notification/.test(source), 'yoagent_jobs_changed can notify from server-fired jobs');
   assert.ok(/if \(type === 'session_files_ready'\)[\s\S]{0,180}applySessionFilesPayloadFromPush\(payload\.data, payload\.request/.test(source), 'session_files_ready applies direct session-files payloads');
   assert.equal(source.includes('session_files_changed'), false, 'stale session_files_changed refetch event path is removed');
   assert.ok(/if \(type === 'files_changed'\)[\s\S]{0,180}refreshOpenFilesFromPush\(payload\)/.test(source), 'files_changed refreshes visible editor files without waiting for directory payloads');
@@ -9335,6 +9436,34 @@ test('t@7283', () => {
   assert.ok(/\.yoagent-chat-form\s*\{[^}]*border-radius:\s*14px/.test(css), 'composer is one rounded container');
   assert.ok(/\.yoagent-chat-send\s*\{[^}]*border-radius:\s*50%/.test(css), 'send button is circular');
   assert.ok(/\.yoagent-backend-pill\s*\{/.test(css), 'backend pill is styled as a pill');
+  assert.ok(/\.yoagent-recent-agents-list\s*\{[^}]*display:\s*grid/.test(css), 'YO!agent recent agents render as a compact bullet list inside the chat history');
+  assert.ok(/function yoagentRecentAgentPathText\(agent\)[\s\S]*agent\?\.recent_paths[\s\S]*compactHomePath/.test(src), 'YO!agent recent agents display backend recent_paths with compact home paths');
+  assert.ok(/function yoagentRecentAgentsHtml\(\)[\s\S]*activitySummaryPayload\?\.agents[\s\S]*<ul class="yoagent-recent-agents-list">/.test(src), 'YO!agent recent agents render from backend activity-summary agents as a list');
+  assert.ok(/function yoagentRecentAgentsMessageHtml\(\)[\s\S]*yoagentRecentAgentsHtml\(\)[\s\S]*yoagent-message assistant yoagent-recent-agents-message/.test(src), 'YO!agent recent agents are wrapped as an assistant response for the startup one-shot');
+  assert.ok(/function yoagentChatMessagesHtml\(\)[\s\S]*const startupInfo = yoagentStartupInfoVisible \? yoagentStartupInfoHtml\(\) : '';[\s\S]*return `\$\{messageHtml\}\$\{startupInfo\}`;/.test(src), 'YO!agent startup info is state-gated instead of always appended after messages');
+  assert.ok(/function showYoagentStartupInfoOnce\(\)[\s\S]*yoagentStartupInfoShown[\s\S]*yoagentStartupInfoVisible = true/.test(src), 'YO!agent startup info can be shown only once per page session');
+  assert.ok(/function showYoagentStartupInfoForLatestActivity\(\)[\s\S]*yoagentStartupInfoShown = false[\s\S]*showYoagentStartupInfoOnce\(\)/.test(src), 'YO!agent can intentionally re-show the latest activity snapshot after clearing conversation');
+  assert.ok(/async function clearYoagentConversation\(\)[\s\S]*yoagentPrewarmStarted = false[\s\S]*showYoagentStartupInfoForLatestActivity\(\)[\s\S]*refreshActivitySummary\(\{force: true, silent: true\}\)[\s\S]*showYoagentStartupInfoForLatestActivity\(\)/.test(src), 'Clear conversation resets prewarm and re-renders the refreshed latest activity snapshot');
+  assert.ok(/function applyYoagentConversationPayload\(payload = \{\}\)[\s\S]*if \(messages\.length\) hideYoagentStartupInfo\(\)/.test(src), 'YO!agent real conversation payloads hide the startup Recent agents block');
+  assert.ok(/let yoagentPendingWaits = \[\]/.test(src), 'YO!agent keeps server-reported pending waits in chat state');
+  assert.ok(/function applyYoagentConversationPayload\(payload = \{\}\)[\s\S]*yoagentPendingWaits = Array\.isArray\(payload\.pending_waits\)/.test(src), 'YO!agent conversation payload carries pending background waits');
+  assert.ok(/function yoagentPendingWaitsHtml\(\)[\s\S]*tPlural\('yoagent\.waiting\.count'[\s\S]*yoagent-waiting-queue/.test(src), 'YO!agent renders a waiting queue for one or more background result waits');
+  assert.ok(/function yoagentPendingWaitsHtml\(\)[\s\S]*sourceRegarding[\s\S]*targetRegarding[\s\S]*yoagent\.waiting\.handoff[\s\S]*yoagent\.waiting\.session/.test(src), 'YO!agent waiting rows distinguish handoff waits from direct session waits and include both regarding summaries');
+  assert.ok(/function yoagentShouldScrollBottom\(options, scrollState\)[\s\S]*options\.scrollBottom === true[\s\S]*options\.scrollBottom === false[\s\S]*yoagentScrollbackLocked[\s\S]*scrollState\?\.nearBottom/.test(src), 'YO!agent chat auto-scrolls only when forced or already near the bottom and not manually scrollback-locked');
+  assert.ok(/function installYoagentChatScrollTracker\(node = document\.getElementById\('yoagent-content'\)\)[\s\S]*addEventListener\('scroll'[\s\S]*yoagentScrollbackLocked = !yoagentChatHistoryIsNearBottom\(history\)/.test(src), 'YO!agent chat records manual scrollback on the scrollable history');
+  assert.ok(src.includes("loadYoagentConversation({force: true, render: infoPanelSubTab === 'yoagent', scrollBottom: 'auto'})"), 'YO!agent background result pushes preserve manual scrollback unless the chat is already near bottom');
+  assert.ok(/\.yoagent-transcript-path\s*\{[^}]*display:\s*flex[\s\S]*min-width:\s*0/.test(css), 'YO!agent transcript path row is compact and ellipsizes inside the chat panel');
+  assert.ok(/\.yoagent-transcript-value\s*\{[^}]*text-overflow:\s*ellipsis/.test(css), 'YO!agent transcript path cannot overflow the chat panel');
+  assert.ok(/\.yoagent-message\.assistant\s*\{[\s\S]*align-self:\s*flex-start[\s\S]*margin-inline-end:\s*28px[\s\S]*border-color:\s*var\(--active-control-border\)[\s\S]*background:\s*color-mix\(in srgb, var\(--active-control-soft-bg\)/.test(css), 'YO!agent assistant bubbles are left-indented and use the active theme accent');
+  assert.ok(/\.yoagent-message\.assistant\.yoagent-agent-result\s*\{[\s\S]*border-inline-start-color:\s*var\(--accent-gold\)[\s\S]*border-inline-start-width:\s*6px/.test(css), 'YO!agent target-agent result bubbles have a stronger colored left rule');
+  assert.ok(/\.yoagent-message\.user\s*\{[\s\S]*align-self:\s*flex-end[\s\S]*margin-inline-start:\s*28px[\s\S]*border-color:\s*var\(--link-soft\)/.test(css), 'YO!agent user bubbles are right-indented with the secondary/link border color');
+  assert.ok(/\.yoagent-waiting-queue\s*\{[\s\S]*border:\s*1px solid var\(--active-control-soft-border\)/.test(css), 'YO!agent pending waits render as a visible compact queue');
+  const actionCardStart = src.indexOf('function yoagentActionCardHtml(action)');
+  const actionCardEnd = src.indexOf('function yoagentIntroMessageText', actionCardStart);
+  const actionCardBody = src.slice(actionCardStart, actionCardEnd);
+  assert.ok(actionCardStart >= 0 && actionCardBody.includes('data-yoagent-action-card') && actionCardBody.includes('data-yoagent-action-send'), 'YO!agent action previews render as confirmed-send cards');
+  assert.ok(actionCardBody.includes("t('yoagent.action.preview')") && actionCardBody.includes("t('yoagent.action.send')"), 'YO!agent action card labels are localized');
+  assert.ok(src.includes("t('yoagent.statusActionSent'") && src.includes("t('yoagent.statusBackend'"), 'YO!agent action/backend status strings are localized');
   assert.ok(/\.yoagent-chat \.markdown-body pre[\s\S]*?border-radius:\s*8px/.test(css), 'YO!agent code blocks are soft rounded boxes');
   assert.ok(/body\.theme-light \.yoagent-chat \.markdown-body pre/.test(css), 'YO!agent code blocks get a light box + dark text in light mode');
   assert.ok(/body\.theme-light \.yoagent-message-body\.markdown-body,[\s\S]*?\.yoagent-global \.markdown-body\s*\{[^}]*color:\s*var\(--lt-text\)/.test(css), 'YO!agent light-mode markdown bodies use dark app text instead of editor markdown colors');
@@ -9361,6 +9490,53 @@ test('t@7283', () => {
   assert.ok(/\.info-list\s*\{[^}]*overflow:\s*auto/.test(css), 'YO!info list owns the scroll (overflow:auto, both axes)');
   const en = JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'));
   assert.equal(en['yoagent.chatPlaceholder'], 'Ask anything…', 'composer placeholder matches the mockup ("Ask anything…")');
+  assert.equal(en['yoagent.waiting.count.other'], 'Waiting for {count} replies', 'YO!agent pending-wait count is localized');
+  assert.equal(en['yoagent.waiting.handoff'], 'Waiting for tmux session `{source}` to respond (regarding {sourceRegarding}), before handing off the next request to tmux session `{target}` (regarding {targetRegarding})', 'YO!agent handoff wait text names both sessions and both regarding summaries');
+});
+
+test('t@7290', () => {
+  const api = loadYolomux('', ['1', '2']);
+  api.rememberFileExplorerOpenIntentForTest(false);
+  const single = api.emptyLayoutSlots();
+  single[api.layoutTreeKey] = api.leafNode('left');
+  single.left = api.paneStateWithTabs(['1'], '1');
+  api.setLayoutSlotsForTest(single);
+  assert.equal(api.rightmostExistingPaneSlot(), null, 'single-pane layout has no existing right pane');
+  api.openYoagentRightPane();
+  assert.equal(api.infoPanelSubTabForTest(), 'yoagent', 'Cmd+Alt+B selects the YO!agent sub-tab');
+  let serialized = api.serialize(api.currentSlots());
+  const paneList = value => Object.values(value.panes).filter(Boolean).map(canonical);
+  const hasPane = (panes, expected) => panes.some(pane => JSON.stringify(pane) === JSON.stringify(expected));
+  assert.equal(serialized.tree.split, 'row', 'Cmd+Alt+B creates a right pane from a single-pane layout');
+  assert.ok(hasPane(paneList(serialized), {tabs: ['1'], active: '1'}), 'single-pane shortcut keeps the tmux tab alone');
+  assert.ok(hasPane(paneList(serialized), {tabs: ['__info__'], active: '__info__'}), 'single-pane shortcut creates a separate YO!agent pane');
+
+  api.rememberFileExplorerOpenIntentForTest(true);
+  const finderSingle = api.emptyLayoutSlots();
+  finderSingle[api.layoutTreeKey] = api.splitNode('row', api.leafNode('slot1'), api.leafNode('left'), 22);
+  finderSingle.slot1 = api.paneStateWithTabs([api.fileExplorerItemId], api.fileExplorerItemId);
+  finderSingle.left = api.paneStateWithTabs(['1'], '1');
+  api.setLayoutSlotsForTest(finderSingle);
+  assert.equal(api.rightmostExistingPaneSlot(), null, 'Finder plus one content pane does not count as an existing right pane');
+  api.openYoagentRightPane();
+  serialized = api.serialize(api.currentSlots());
+  const finderSinglePanes = Object.values(serialized.panes).map(canonical);
+  assert.ok(hasPane(finderSinglePanes, {tabs: ['1'], active: '1'}), 'Finder-docked single content pane keeps the tmux tab alone');
+  assert.ok(hasPane(finderSinglePanes, {tabs: ['__files__'], active: '__files__'}), 'Finder-docked single content pane keeps Finder alone');
+  assert.ok(hasPane(finderSinglePanes, {tabs: ['__info__'], active: '__info__'}), 'Finder-docked single content pane creates a separate YO!agent pane');
+
+  api.rememberFileExplorerOpenIntentForTest(false);
+  const split = api.emptyLayoutSlots();
+  split[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
+  split.left = api.paneStateWithTabs(['2', '__info__'], '2');
+  split.slot1 = api.paneStateWithTabs(['1'], '1');
+  api.setLayoutSlotsForTest(split);
+  assert.equal(api.rightmostExistingPaneSlot(), 'slot1', 'right-pane detection uses the layout tree, not only literal right slot names');
+  api.openYoagentRightPane();
+  serialized = api.serialize(api.currentSlots());
+  const splitPanes = paneList(serialized);
+  assert.ok(hasPane(splitPanes, {tabs: ['2'], active: '2'}), `existing split removes YO!agent from the source pane: ${JSON.stringify(splitPanes)}`);
+  assert.ok(hasPane(splitPanes, {tabs: ['1', '__info__'], active: '__info__'}), `existing split places YO!agent into the right pane: ${JSON.stringify(splitPanes)}`);
 });
 
 test('t@7321', () => {
@@ -9579,14 +9755,35 @@ test('t@7423', () => {
   const es = JSON.parse(fs.readFileSync('static/locales/es.json', 'utf8'));
   assert.deepEqual(Object.keys(es).sort(), Object.keys(en).sort(), 'Phase 1: es.json has exactly the same keys as en.json (parity)');
   const contextMenuOpenKeys = ['contextmenu.openInDiffer', 'contextmenu.openNewDiffEditor', 'contextmenu.openNewEditor'];
+  const updatePreferenceKeys = [
+    'pref.general.reload_on_update.label',
+    'pref.general.reload_on_update.help',
+    'pref.general.reload_on_update_auto.label',
+    'pref.general.reload_on_update_auto.help',
+    'pref.updates.check_enabled.label',
+    'pref.updates.check_enabled.help',
+    'pref.updates.notify_level.label',
+    'pref.updates.notify_level.help',
+    'pref.updates.notify_level.major',
+    'pref.updates.notify_level.minor',
+    'pref.updates.notify_level.patch',
+    'pref.updates.notify_level.none',
+  ];
   assert.equal(en['contextmenu.openInDiffer'], 'Open in a Differ', 'en reusable Differ context label');
   assert.equal(en['contextmenu.openNewDiffEditor'], 'Open in a new Differ', 'en new Differ context label');
   assert.equal(en['contextmenu.openNewEditor'], 'Open in a new Editor', 'en new Editor context label');
+  assert.equal(en['pref.updates.check_enabled.label'], 'Check origin/main for updates', 'en origin/main update-check label is specific');
+  assert.equal(en['pref.general.reload_on_update.label'], 'Show reload prompt after server update', 'en server-version reload label is specific');
+  assert.equal(en['pref.updates.notify_level.label'], 'Notify when change in', 'en update notification threshold label is specific');
   for (const loc of ['es', 'ja', 'de', 'fr', 'pt-BR', 'ru', 'ko', 'hi', 'ar', 'he', 'vi', 'th', 'tr', 'nl', 'pl', 'it', 'zh-Hans', 'zh-Hant']) {
     const cat = JSON.parse(fs.readFileSync(`static/locales/${loc}.json`, 'utf8'));
     for (const key of contextMenuOpenKeys) {
       assert.ok(typeof cat[key] === 'string' && cat[key].length, `${loc} has ${key}`);
       assert.notEqual(cat[key], en[key], `${loc} translates ${key} instead of falling back to English`);
+    }
+    for (const key of updatePreferenceKeys) {
+      assert.ok(typeof cat[key] === 'string' && cat[key].length, `${loc} has ${key}`);
+      assert.notEqual(cat[key], en[key], `${loc} localizes ${key} instead of falling back to English`);
     }
     for (const key of ['share.maxTime', 'share.maxViewers', 'share.newShare', 'share.readOnly', 'drop.pathInserted']) {
       assert.ok(typeof cat[key] === 'string' && cat[key].length, `${loc} has ${key}`);
@@ -9700,6 +9897,7 @@ test('t@7555', () => {
   assert.equal(api.relativeTimeFormat(120), '2 minutes ago', 'Phase 3: en relative time is "2 minutes ago" via Intl');
   assert.equal(api.relativeTimeFormat(7200), '2 hours ago', 'Phase 3: hours via Intl');
   assert.equal(api.relativeTimeFormat(172800), '2 days ago', 'Phase 3: days via Intl');
+  assert.equal(api.compactRelativeTimeFormat(180), '3 min ago', 'YO!agent recent-agent chips use compact relative time');
   const src = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(/new Intl\.RelativeTimeFormat\(i18nActiveLocale/.test(src), 'Phase 3: relativeTimeFormat uses Intl.RelativeTimeFormat with the active locale');
   assert.ok(/t\('yoagent\.updated\.wrap', \{rel: relativeTimeFormat\(seconds\)\}\)/.test(src), 'Phase 3: the activity "last updated" line wraps the Intl relative time');
@@ -9894,7 +10092,7 @@ test('t@7654', () => {
       'Default shape:',
       'Use the live AI agent activity',
       'You are YO!agent',
-      'autonomous command-sending tools',
+      ['autonomous command', 'sending tools'].join('-'),
     ]) {
       assert.equal(zhHtml.includes(englishLeak), false, `${locale}: no plain-English "${englishLeak}" leaks`);
     }
@@ -10142,14 +10340,17 @@ test('t@7900', () => {
     const next = html.indexOf('data-preference-section="', start + 1);
     return next >= 0 ? html.slice(start, next) : html.slice(start);
   };
-  assert.ok(sectionHtml(api.t('pref.section.notifications')).includes('data-setting-path="general.reload_on_update"'), 'Notify when updates are available is in Notifications');
-  assert.ok(/type="radio"[^>]*value="patch"[^>]*data-setting-path="general\.reload_on_update"[\s\S]*type="radio"[^>]*value="minor"[^>]*data-setting-path="general\.reload_on_update"[\s\S]*type="radio"[^>]*value="none"[^>]*data-setting-path="general\.reload_on_update"/.test(sectionHtml(api.t('pref.section.notifications'))), 'Update notification threshold offers patch, minor, and none');
+  assert.ok(sectionHtml(api.t('pref.section.notifications')).includes('data-setting-path="general.reload_on_update"'), 'server-version reload prompt is in Notifications');
+  assert.ok(sectionHtml(api.t('pref.section.notifications')).includes('data-setting-path="general.reload_on_update_auto"'), 'server-version auto-reload is in Notifications');
+  assert.ok(sectionHtml(api.t('pref.section.notifications')).includes('data-setting-path="updates.check_enabled"'), 'origin/main update check is in Notifications');
+  assert.ok(sectionHtml(api.t('pref.section.notifications')).includes('data-setting-path="updates.notify_level"'), 'origin/main update notification threshold is in Notifications');
   const shareHtml = sectionHtml(api.t('pref.section.share'));
   assert.ok(shareHtml.includes('data-setting-path="share.ttl_seconds"'), 'YO!share Preferences exposes the default share lifetime');
   assert.ok(shareHtml.includes('data-setting-path="share.max_viewers"'), 'YO!share Preferences exposes the default viewer cap');
   assert.ok(shareHtml.includes('data-setting-path="share.read_only"'), 'YO!share Preferences exposes the read-only default');
   assert.ok(/type="radio"[^>]*value="http"[^>]*data-setting-path="share\.scheme"[\s\S]*type="radio"[^>]*value="https"[^>]*data-setting-path="share\.scheme"/.test(shareHtml), 'YO!share Preferences exposes http/https protocol defaults');
-  assert.ok(sectionHtml(api.t('pref.section.performance')).includes('data-setting-path="general.reload_on_update_auto"'), 'Auto-reload on server update is in Performance');
+  assert.equal(sectionHtml(api.t('pref.section.performance')).includes('data-setting-path="general.reload_on_update_auto"'), false, 'server-version auto-reload no longer lives in Performance');
+  assert.equal(sectionHtml(api.t('pref.section.performance')).includes('data-setting-path="updates.check_enabled"'), false, 'origin/main update check no longer lives in Performance');
   const appearanceHtml = sectionHtml(api.t('pref.section.appearance'));
   assert.ok(appearanceHtml.includes('data-setting-path="general.default_layout"'), 'Default layout is in Appearance');
   assert.ok(/type="radio"[^>]*value="split"[^>]*data-setting-path="general\.default_layout"/.test(appearanceHtml), 'Default layout offers Split');
@@ -11044,6 +11245,24 @@ test('t@8749', () => {
   assert.ok(/function commandPaletteItemLabelHtml\(item, query\)[\s\S]*item\?\.loading === true[\s\S]*commandPaletteLoadingTextHtml\(item\.label\)/.test(source), 'Cmd-P loading rows use the shared moving-dot label renderer');
   assert.equal(api.stripTrailingEllipsisText('Searching files...'), 'Searching files', 'shared moving-dot helper strips static ASCII ellipses before rendering animated dots');
   assert.ok(api.movingEllipsisHtml('test-dots').includes('moving-ellipsis test-dots'), 'shared moving-dot helper accepts per-site classes without duplicating markup');
+  const manyAgentFiles = Array.from({length: 14}, (_unused, index) => ({
+    group: 'Indexed ~/DYNAMO',
+    category: 'file',
+    label: index === 0 ? 'agentic.rs' : `agentic-${index}.md`,
+    detail: `/home/user/dynamo/docs/agentic-${index}.md`,
+    searchFields: [index === 0 ? 'agentic.rs' : `agentic-${index}.md`, `/home/user/dynamo/docs/agentic-${index}.md`],
+  }));
+  const mixedRows = api.commandPaletteRankItems([
+    ...manyAgentFiles,
+    {group: 'Tabs', category: 'pane', label: 'YO!agent', detail: 'Activity assistant', searchFields: ['YO!agent', 'yo agent activity assistant']},
+    {group: 'Menu', category: 'command', label: 'File / YO!agent', detail: 'Open YO!agent', searchFields: ['File / YO!agent', 'open agent assistant']},
+    {group: 'Settings', category: 'setting', label: 'YO!agent / Backend', detail: 'Choose agent backend', searchFields: ['YO!agent Backend', 'agent backend']},
+  ], 'agent', {surface: 'files'}).slice(0, 8);
+  const mixedDomains = new Set(mixedRows.map(item => item.category || 'command'));
+  assert.ok(mixedDomains.has('file'), 'typed Cmd-P still leads with relevant files');
+  assert.ok(mixedDomains.has('pane'), 'typed Cmd-P first screen includes a matching pane/tab row');
+  assert.ok(mixedDomains.has('command'), 'typed Cmd-P first screen includes a matching command row');
+  assert.ok(mixedDomains.has('setting'), 'typed Cmd-P first screen includes a matching setting row');
   api.setFileQuickOpenCandidatesForTest('/repo/app', []);
   api.setFileQuickOpenLoadingForTest(true);
   api.setCommandPaletteQueryForTest('');
@@ -11139,6 +11358,8 @@ test('t@tabber', () => {
   assert.ok(/\.file-tree-row\.tabber-row \.tabber-window-label \.agent-icon\s*\{[\s\S]*width:\s*calc\(var\(--file-explorer-font-size\) \+ 2px\)[\s\S]*height:\s*calc\(var\(--file-explorer-font-size\) \+ 2px\)/.test(css), 'Tabber process icons scale with the file explorer row font');
   assert.ok(/function warmTabberDataOnLaunch\(\)[\s\S]*?tabberLaunchWarmupStarted = true;[\s\S]*?fetchTabberActivity\(\);/.test(source), 'Tabber launch warmup primes only the cheap activity ledger');
   assert.ok(/transcriptMetaLoaded = true;[\s\S]*?warmTabberDataOnLaunch\(\)/.test(source), 'Tabber launch warmup runs as soon as transcript metadata is available');
+  assert.ok(/function tabberAgentForWindow\(session, windowIndex, agentKey = ''\)/.test(source), 'Tabber can look up agent transcript activity by session/window');
+  assert.ok(/const windowMtime = isAgent\s*\?\s*tabberAgentRecency\(agentActivity\)\s*:\s*Math\.max\(ledgerMtime, childMtime, fallbackSessionRecency\)/.test(source), 'Tabber agent windows sort only from agent transcript recency, never user-input or touched-path mtimes');
   assert.ok(/let tabberActivityRefreshMs = 15000;[\s\S]*tabberActivityRefreshMs = initialSetting\('performance\.tabber_activity_refresh_ms', 15000\);/.test(source), 'Tabber activity refresh defaults to 15 seconds and is Preference-backed after settings initialize');
   assert.ok(/Promise\.resolve\(state\.callback\(\)\)[\s\S]*?\.finally\(scheduleNext\)/.test(source), 'runtime intervals wait for async callbacks to settle before starting the next wait');
   assert.ok(/file-index-building', refreshBuildingFileIndexStatuses, Math\.min\(1501, proactiveMs\)/.test(source), 'DOIT.61 A5: file-index building poll keeps the odd 1501ms cadence cap');
@@ -11237,13 +11458,31 @@ test('t@tabber', () => {
   assert.ok(rowTypes.includes('tab'), 'non-tmux tabs appear in the Tabber');
   assert.ok(rowTypes.indexOf('tab') > rowTypes.lastIndexOf('session'), 'non-tmux tabs render after the sessions');
 
-  // B4 recency sort: make session 2 most recent -> its codex window renders before session 1's claude window.
+  // B4 recency sort: agent windows use the backend transcript timestamp. A fresh user-input heartbeat in
+  // session 1's Claude window and a newer touched-path mtime under it must not make it outrank the newer
+  // Codex transcript in session 2.
   api.setFileExplorerTreeSortModeForTest('newest');
-  api.setTabberActivityForTest({activity: {'2': {last_user_input_ts: 9999}, '1': {last_user_input_ts: 100}}});
+  api.setTabberSessionFilesForTest('1', [
+    {path: 'src/app.py', abs_path: '/home/u/proj/src/app.py', repo: '/home/u/proj', status: 'M', mtime: 999999},
+  ]);
+  api.setTabberActivityForTest({
+    activity: {'1:0': {last_user_input_ts: 999999}, '2:0': {last_user_input_ts: 1}},
+    agents: [
+      {session: '2', window: '0', agent_kind: 'codex', last_used_ts: 900000, sort_ts: 900000, running: false, label: "session '2' 0:codex"},
+      {session: '1', window: '0', agent_kind: 'claude', last_used_ts: 1000, sort_ts: 1000, running: false, label: "session '1' 0:claude"},
+    ],
+  });
   const recency = api.tabberRenderedRowsForTest().map(r => r.name);
   const codexAt = recency.findIndex(n => /0:codex/.test(n));
   const claudeAt = recency.findIndex(n => /0:claude/.test(n));
-  assert.ok(codexAt >= 0 && claudeAt >= 0 && codexAt < claudeAt, 'B4: the more-recently-active session sorts first (codex before claude)');
+  assert.ok(codexAt >= 0 && claudeAt >= 0 && codexAt < claudeAt, 'B4: the more-recently-used agent transcript sorts first (codex before claude)');
+  api.setFileExplorerTreeDateModeForTest('relative');
+  api.setTabberActivityForTest({
+    activity: {'1:0': {last_user_input_ts: 999999}},
+    agents: [{session: '1', window: '0', agent_kind: 'claude', last_used_ts: 1000, sort_ts: 9000, running: true, label: "session '1' 0:claude"}],
+  });
+  const runningClaude = api.tabberRenderedRowsForTest().find(r => r.type === 'window' && /0:claude/.test(r.name));
+  assert.equal(runningClaude?.date, 'running', 'B4: active agent windows show running instead of a stale heartbeat age');
 
   // B5 context-menu source guard.
   assert.ok(/data-tabber-type="repo"[\s\S]*?showFileTreeContextMenu\(row, abs,/.test(source), 'B5: right-click on an absolute path row reuses the shared file context menu');

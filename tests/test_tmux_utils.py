@@ -77,6 +77,32 @@ def test_tmux_exact_target_skips_resolution_for_unambiguous_targets(monkeypatch)
     assert tmux_utils.tmux_exact_target("1:") == "1:"
 
 
+def test_tmux_paste_text_submits_with_enter_key_not_pasted_newline(monkeypatch):
+    calls = []
+
+    def fake_subprocess_run(args, **kwargs):
+        calls.append(("subprocess", tuple(args), kwargs.get("input")))
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    def fake_tmux_run(*args, **_kwargs):
+        calls.append(("tmux_run", args, None))
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(tmux_utils.secrets, "token_hex", lambda _size: "abc123")
+    monkeypatch.setattr(tmux_utils.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(tmux_utils, "tmux_run", fake_tmux_run)
+
+    result = tmux_utils.tmux_paste_text("%6", "date", submit=True)
+
+    assert result.returncode == 0
+    assert calls == [
+        ("subprocess", ("tmux", "load-buffer", "-b", "yolomux-abc123", "-"), "date"),
+        ("tmux_run", ("paste-buffer", "-p", "-t", "%6", "-b", "yolomux-abc123"), None),
+        ("tmux_run", ("send-keys", "-t", "%6", "Enter"), None),
+        ("tmux_run", ("delete-buffer", "-b", "yolomux-abc123"), None),
+    ]
+
+
 def test_target_resolution_self_test_cases_live_in_pytest():
     sessions = ["project1", "project2", "project3", "misc"]
 

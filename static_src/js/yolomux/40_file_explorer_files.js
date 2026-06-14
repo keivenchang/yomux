@@ -698,6 +698,7 @@ function rememberFileExplorerExplicitSyncSession(session) {
   const normalizedSession = String(session || '');
   if (!isTmuxSession(normalizedSession) || !activeSessions.includes(normalizedSession)) return false;
   if (fileExplorerExplicitSyncSession !== normalizedSession) {
+    if (fileExplorerExplicitSyncSession) restoreCommittedFileExplorerRootDisplay();
     fileExplorerExplicitSyncSession = normalizedSession;
     cancelPendingFileExplorerActiveSync();
     return true;
@@ -1095,6 +1096,27 @@ function setFileExplorerPathDisplay(path = currentFileExplorerRoot(), options = 
   refreshFileExplorerRepoDisplay(normalized, {error});
 }
 
+function displayedFileExplorerRoot() {
+  const input = fileExplorerPathInputs()[0];
+  const value = input ? ('value' in input ? input.value : input.textContent) : '';
+  return normalizeDirectoryPath(value || currentFileExplorerRoot());
+}
+
+function restoreCommittedFileExplorerRootDisplay() {
+  const root = normalizeDirectoryPath(currentFileExplorerRoot());
+  if (!root) return;
+  const displayedRoot = displayedFileExplorerRoot();
+  const pendingRoot = normalizeDirectoryPath(document.querySelector('.file-explorer-tree-panel .file-tree-status-row')?.dataset?.root || '');
+  if (displayedRoot === root && (!pendingRoot || pendingRoot === root)) return;
+  setFileExplorerPathDisplay(root);
+  renderFileExplorerRootModeControls();
+  if (typeof refreshFileExplorerTreesInPlace === 'function') {
+    refreshFileExplorerTreesInPlace({root, preserveExpanded: true, preserveScroll: true}).catch(error => {
+      console.warn('Finder root display restore failed', error);
+    });
+  }
+}
+
 function repoInfoSummary(repo) {
   if (!repo?.root) return '';
   const dirty = Number.isFinite(Number(repo.dirty_count)) && Number(repo.dirty_count) > 0 ? `, ${Number(repo.dirty_count)} dirty` : '';
@@ -1379,6 +1401,7 @@ function cancelPendingFileExplorerActiveSync(options = {}) {
   fileExplorerInteractionGeneration += 1;
   if (options.invalidateOpen !== false) fileExplorerOpenGeneration += 1;
   fileExplorerSyncGeneration += 1;
+  fileExplorerSyncPathInFlight = '';
   resetFileExplorerAppliedSyncPlan();
 }
 
@@ -2806,6 +2829,37 @@ function tabberRecency(key) {
   return Math.max(Number(rec.last_user_input_ts || 0), Number(rec.last_agent_active_ts || 0), Number(rec.last_output_ts || 0));
 }
 
+function tabberRecentAgents(payload = tabberActivityPayload) {
+  return Array.isArray(payload?.agents) ? payload.agents.filter(item => item && typeof item === 'object') : [];
+}
+
+function tabberAgentForWindow(session, windowIndex, agentKey = '') {
+  const sessionText = String(session || '');
+  const windowText = String(windowIndex ?? '');
+  const kindText = String(agentKey || '').toLowerCase();
+  let best = null;
+  for (const agent of tabberRecentAgents()) {
+    if (String(agent.session || '') !== sessionText) continue;
+    if (String(agent.window ?? '') !== windowText) continue;
+    if (kindText && String(agent.agent_kind || '').toLowerCase() !== kindText) continue;
+    if (!best || Number(agent.sort_ts || agent.last_used_ts || 0) > Number(best.sort_ts || best.last_used_ts || 0)) best = agent;
+  }
+  return best;
+}
+
+function tabberAgentRecency(agent) {
+  if (!agent) return 0;
+  return Math.max(Number(agent.sort_ts || 0), Number(agent.last_used_ts || 0));
+}
+
+function tabberAgentDateText(agent) {
+  if (!agent) return '';
+  if (agent.running === true) return t('yoagent.agent.running');
+  const ts = Number(agent.last_used_ts || 0);
+  if (!Number.isFinite(ts) || ts <= 0) return '';
+  return sessionFileDisplayTimeText(ts);
+}
+
 async function fetchTabberActivity() {
   try {
     const payload = await apiFetchJson('/api/activity', {cache: 'no-store'});
@@ -2965,12 +3019,12 @@ function buildTabberTree() {
     const git = info?.project?.git;
     const branch = git?.branch ? shortBranch(git.branch) : '';
     const gitRoot = git?.root || '';
-    const sessionRecency = tabberRecency(session);
+    const fallbackSessionRecency = tabberRecency(session);
     const sessionWork = sessionWorkDescription(session, info, 200);
     const sessionNameLabel = sessionLabel(session) || session;
     const sessionDisplay = sessionWork ? `${sessionNameLabel}  ${sessionWork}` : sessionNameLabel;
     const sessionEntry = {
-      name: sessionName, kind: 'dir', mtime: sessionRecency, sortName: sessionDisplay,
+      name: sessionName, kind: 'dir', mtime: 0, sortName: sessionDisplay,
       tabber: {type: 'session', session, label: sessionNameLabel, description: sessionWork, icon: '■', branchText: branch},
     };
     topEntries.push(sessionEntry);
@@ -2978,20 +3032,26 @@ function buildTabberTree() {
       const windowName = `w_${tabberPathToken(record.index)}`;
       const windowPath = `${sessionPath}/${windowName}`;
       const isAgent = tabberWindowIsAgent(record.name);
+      const agentKey = tmuxWindowAgentKey(record.name);
+      const agentActivity = isAgent ? tabberAgentForWindow(session, record.index, agentKey) : null;
       const repoEntries = isAgent ? tabberRepoEntriesForWindow(session, record.index, branch, gitRoot) : [];
       const childMtime = repoEntries.reduce((max, entry) => Math.max(max, Number(entry.mtime || 0)), 0);
-      // Every window gets a time: its own ledger recency, else its touched-paths' latest, else the session's.
-      const windowMtime = Math.max(tabberRecency(`${session}:${record.index}`), childMtime, sessionRecency);
+      const ledgerMtime = isAgent ? 0 : tabberRecency(`${session}:${record.index}`);
+      // Agent windows use transcript activity only. Their touched repo rows may have newer file mtimes, but
+      // parent window/session recency must still answer "when was this agent last used?"
+      const windowMtime = isAgent
+        ? tabberAgentRecency(agentActivity)
+        : Math.max(ledgerMtime, childMtime, fallbackSessionRecency);
       if (repoEntries.length) entriesByDir.set(normalizeDirectoryPath(windowPath), repoEntries);
       return {
         name: windowName, kind: repoEntries.length ? 'dir' : 'file', mtime: windowMtime,
         sortName: record.indexedNameLabel || record.nameLabel,
-        tabber: {type: 'window', session, windowIndex: record.index, label: record.indexedNameLabel || `${record.indexText}:${record.nameLabel}`, icon: '▢', active: record.active === true, agentKey: tmuxWindowAgentKey(record.name)},
+        tabber: {type: 'window', session, windowIndex: record.index, label: record.indexedNameLabel || `${record.indexText}:${record.nameLabel}`, icon: '▢', active: record.active === true, agentKey, dateText: tabberAgentDateText(agentActivity)},
       };
     });
     entriesByDir.set(normalizeDirectoryPath(sessionPath), windowEntries);
     const maxChild = windowEntries.reduce((max, entry) => Math.max(max, Number(entry.mtime || 0)), 0);
-    sessionEntry.mtime = Math.max(sessionRecency, maxChild);
+    sessionEntry.mtime = Math.max(maxChild, windowEntries.length ? 0 : fallbackSessionRecency);
   });
   // The other open (non-tmux) tabs — Preferences, YO!info/YO!agent, file editors — as leaf rows after the
   // sessions. They are kind:'file', so the shared dirs-before-files sort always keeps them below sessions.
@@ -3111,7 +3171,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   updateFileTreeRowContents(row, icon, label, {
     iconClass: 'tabber-icon',
     nameHtml,
-    dateText: entry.mtime ? fileTreeMtimeText(entry) : '',
+    dateText: data.dateText || (entry.mtime ? fileTreeMtimeText(entry) : ''),
   });
   // Tabber rows use delegation (bindTabberPanel) like the Differ; clear any stale Finder per-row handlers.
   clearFileTreeRowHandlers(row);

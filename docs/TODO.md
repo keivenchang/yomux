@@ -8,7 +8,7 @@ YOLOmux-specific roadmap notes. Keep UI, terminal, YOLO approval, session state,
 
 YOLOmux should stay a lightweight local tmux browser control plane. The useful niche is not another full SaaS-style orchestration stack. It is a fast local UI for existing Claude/Codex/tmux sessions with clear state, safe YOLO controls, repo metadata, file paste/upload, and low-friction attach/reply.
 
-Borrow from other tools only when the feature improves the local control loop: know which session needs attention, understand what changed, approve or block risky work, and jump back into the right terminal quickly.
+Borrow from other tools only when the feature improves the local control loop: know which session needs attention, understand what changed, approve or block risky work, and jump back into the right terminal quickly. The DOIT.67 coordination audit found the same pattern across claude-yolo, Tmux-Orchestrator, amux, smux, claude-squad, Conductor, Crystal, Vibe Kanban, Claude hooks, Codex app-server, ACP, MCP, expect, and pexpect: tmux capture is fine for observing panes, but structured agent channels are the durable direction for approvals, state, and controlled sends.
 
 ---
 
@@ -19,7 +19,7 @@ Borrow from other tools only when the feature improves the local control loop: k
 - Code map: entry `yolomux.py` -> `yolomux_lib/cli.py`; HTTP routing `yolomux_lib/server.py`; app state + tmux actions `yolomux_lib/app.py`; session/agent discovery `yolomux_lib/sessions.py`; repo/PR/CI metadata `yolomux_lib/metadata.py`; file ops `yolomux_lib/filesystem.py`; shared helpers + paths `yolomux_lib/common.py`; HTML shell `yolomux_lib/web.py`; frontend partials `static_src/js/yolomux/*.js` -> generated `static/yolomux.js`; approval detection `yolomux_lib/approvals.py` + worker `yolomux_lib/auto_approve_worker.py`.
 - State lives in `~/.config/yolomux/state.json`; the YOLO event log (great for confirming state-machine behavior) is `~/.local/state/yolomux/events.jsonl`.
 - NAVIGATION RULE: line numbers in this TODO drift because the source changes constantly. Always GREP THE NAMED SYMBOL (`function foo`, `def foo`, an `id=`/class string) rather than trusting a line number.
-- DOIT files are the active work queues; `docs/DONE.md` is the archive. As of 2026-06-13, no active `DOIT*.md` file remains; active DOIT.63-65 and DOIT.70/71 were archived/removed, DOIT.70's YO!share architecture review moved into this TODO and `docs/GUI_SPECS.md`, and DOIT.71's concrete Finder-session bug is archived in `docs/DONE.md`. The only carried-forward item from the older era is DOIT.11's permission-hook wiring into `~/.claude/settings.json`, which remains user-gated and tracked in Big-Bang #1.
+- DOIT files are the active work queues; `docs/DONE.md` is the archive. As of 2026-06-13, no active `DOIT*.md` file remains; active DOIT.63-67 and DOIT.70/71 were archived/removed, DOIT.67's YO!agent coordination audit moved into this TODO, DOIT.70's YO!share architecture review moved into this TODO and `docs/GUI_SPECS.md`, and DOIT.71's concrete Finder-session bug is archived in `docs/DONE.md`. The only carried-forward item from the older era is DOIT.11's permission-hook wiring into `~/.claude/settings.json`, which remains user-gated and tracked in Big-Bang #1.
 
 ---
 
@@ -36,6 +36,15 @@ RECOMMENDED SEQUENCE (2026-06-04, after DOIT.36 archive): (1) Dev-velocity trio 
 - [ ] [XL] RESPONSIVE / MOBILE + WEB DELIVERY (P7) — YOLOmux is desktop-browser-shaped today. Add a responsive layout (single-column stacked panes, touch-friendly tab nav, touch drag-reorder, larger hit targets), make the editor/diff usable on a phone, and define a hosted web path. WHY: the product vision ("web and mobile coming soon") needs the UI to survive small screens and touch first.
 - [ ] [L] MULTI-MACHINE CONNECTOR (P9) — watch and drive tmux + agents across several hosts from one UI (one pane of glass over the dynamo1–4 / CI hosts you already run). Needs a connection model (SSH/agent), per-host auth, and the layout/state code generalized beyond one local tmux server. WHY: the real workflow already spans machines; today YOLOmux is single-host.
 - [ ] [L] WORKTREE-AWARE PARALLEL AGENTS + TASK HUB (P0 + P5) — git worktree management so multiple agents work isolated branches in parallel, plus a real Task Hub (the For-Review → In-Progress → Complete flow from the product vision) that aggregates tasks/changes across sessions and worktrees into one board. WHY: this is the core "identify → manage → automate tasks" product story; the session-state model exists but the hub + worktree isolation do not.
+
+### YO!agent Coordination Follow-Ups
+
+- [ ] [M] Add a visible YO!agent job list in the YO!agent tab. It should show queued, pending-confirmation, fired, failed, cancelled, and timed-out jobs; expose per-job confirm/cancel where appropriate; show included sessions and blockers for all-idle jobs; and keep batch/fanout actions per-target confirm/cancel instead of a single opaque batch button.
+- [ ] [M] Expand work-next recommendations beyond prompt context. Rank sessions needing input, blockers/errors, failing tests, failing CI, review comments, dirty repos, recently active sessions with clear next actions, and user-local context priorities; keep default answers to the top 1-3 recommendations unless the user asks for a full inventory.
+- [ ] [M] Add more watch predicates on top of the persisted YO!agent job model: needs-input, done-after-working, tests-finished, all-agents-status fanout, blocked-session status asks, review sweep, close-out finished work, pause noisy watches, and cancel pending jobs by session.
+- [ ] [L] Use structured agent channels for sends/state when they can target the same live conversation. Claude hooks and Codex app-server should become the primary channel for agent-native state/approval/send workflows; tmux paste remains the visible-pane fallback for existing live panes.
+- [ ] [L] Add golden-frame fixtures for any remaining scrape-and-type approval/send path. Record real Claude/Codex `capture-pane` frames per agent version and pin spinner/footer/approval/ready detection so upstream TUI changes fail tests instead of silently changing behavior.
+- [ ] [L] Explore exposing YOLOmux itself as an MCP or ACP-style local control plane so agents can query session/activity state and request server-verified sends through a structured API instead of requiring YO!agent to paste into their panes.
 
 
 ## Dev velocity — bottlenecks & speedups (analysis 2026-06-03)

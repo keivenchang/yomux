@@ -13125,7 +13125,8 @@ def test_diff_overview_matches_actual_todo_codemirror_rows(browser, tmp_path):
     deleted_rows = metrics["rows"]["deletedRows"]
     current_line_count = metrics["rows"]["currentLineCount"]
     inserted_rows = metrics["insertedRangeRows"]
-    todo_line_count = (REPO_ROOT / "docs" / "TODO.md").read_text(encoding="utf-8").count("\n") + 1
+    todo_text = subprocess.check_output(["git", "show", "HEAD:docs/TODO.md"], cwd=REPO_ROOT).decode()
+    todo_line_count = todo_text.count("\n") + 1
     assert remove_band == {"kind": "remove", "start": 16, "end": 16 + deleted_rows}, bands
     assert add_band["kind"] == "add", bands
     assert add_band["start"] == remove_band["end"], bands

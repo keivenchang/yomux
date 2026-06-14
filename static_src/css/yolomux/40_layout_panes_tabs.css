@@ -74,6 +74,7 @@
   align-content: flex-start;
   inline-size: 100%;
   max-inline-size: 100%;
+  min-width: 0;
   height: auto;
   min-height: calc(var(--pane-tab-height) + 2px);
   max-height: none;

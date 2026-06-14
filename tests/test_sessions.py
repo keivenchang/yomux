@@ -181,6 +181,31 @@ def test_codex_transcript_from_process_fd_accepts_deleted_suffix(tmp_path, monke
     assert sessions.codex_transcript_from_process_fd(123, root=root, fd_dir=fd_dir) == transcript
 
 
+def test_codex_transcript_session_id_reads_session_meta_payload_id(tmp_path):
+    transcript = tmp_path / "rollout.jsonl"
+    transcript.write_text(
+        "\n".join([
+            json.dumps({"type": "session_meta", "payload": {"id": "codex-session-123", "cwd": "/repo"}}),
+            json.dumps({"type": "event", "payload": {"id": "not-the-session"}}),
+        ]),
+        encoding="utf-8",
+    )
+
+    assert sessions.codex_transcript_session_id(transcript) == "codex-session-123"
+
+
+def test_read_codex_agent_uses_transcript_session_id(tmp_path, monkeypatch):
+    transcript = tmp_path / "rollout.jsonl"
+    transcript.write_text(json.dumps({"type": "session_meta", "payload": {"id": "codex-session-456", "cwd": "/repo"}}), encoding="utf-8")
+    monkeypatch.setattr(sessions, "process_cwd", lambda pid: "/repo")
+    monkeypatch.setattr(sessions, "codex_transcript_from_process_fd", lambda pid: transcript)
+
+    agent = sessions.read_codex_agent("1", _pane(100), ProcessInfo(pid=100, ppid=1, command="codex"))
+
+    assert agent.session_id == "codex-session-456"
+    assert agent.transcript == str(transcript)
+
+
 def _pane(pid=100):
     return PaneInfo(
         session="1",

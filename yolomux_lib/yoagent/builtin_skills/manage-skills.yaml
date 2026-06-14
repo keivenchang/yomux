@@ -1,0 +1,13 @@
+name: manage-skills
+kind: workflow
+description: Help users create, inspect, update, disable, or delete user-local YO!skills and context files. Built-in skill files are read-only; user-local files live under ~/.config/yolomux/skills.d/ and ~/.config/yolomux/context.d/. Validate YAML names, allowed tools, and context text before writing, then reload the skill payload and show the exact file path changed.
+tools:
+  - read_skill_files
+  - write_skill_file
+  - delete_skill_file
+triggers:
+  - create a YO!skill
+  - update my YO!skill
+  - disable a YO!skill
+  - where are my YO!skills
+confirmation: none

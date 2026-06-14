@@ -1,12 +1,12 @@
 @font-face {
   font-family: "YOLOmux UI";
-  src: url("/static/fonts/yolomux-ui.woff2") format("woff2");
+  src: url("/static/fonts/yolomux-ui.woff2") format("truetype");
   font-display: block;
 }
 
 @font-face {
   font-family: "YOLOmux Mono";
-  src: url("/static/fonts/yolomux-mono.woff2") format("woff2");
+  src: url("/static/fonts/yolomux-mono.woff2") format("truetype");
   font-display: block;
 }
 
@@ -260,6 +260,7 @@
   --ui-font-size-xl: max(14px, calc(var(--ui-font-size) + 2px));
   --ui-font-size-2xl: max(16px, calc(var(--ui-font-size) + 5px));
   --tab-label-size: 13px;
+  --terminal-font-size: 13px;
   --compact-control-height: max(16px, calc(var(--ui-font-size) + 5px));
   --compact-icon-button-size: max(16px, calc(var(--ui-font-size) + 4px));
   --pane-tab-height: max(16px, calc(var(--tab-label-size) + 6px));

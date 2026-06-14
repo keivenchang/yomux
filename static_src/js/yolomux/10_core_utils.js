@@ -1276,9 +1276,9 @@ const searchRankWeights = Object.freeze({
   recencyHalfLifeSeconds: 7 * 24 * 60 * 60,
   repoAffinity: 400,
   mixWindow: 8,
-  mixSecondarySlots: 2,
+  mixSecondarySlots: 4,
   mixFirstSecondaryIndex: 2,
-  mixSecondaryStep: 3,
+  mixSecondaryStep: 2,
 });
 
 function fuzzySubsequenceMatch(query, text) {

@@ -400,6 +400,34 @@ def codex_transcript_record_matches_cwd(line: str, cwd: str) -> bool:
     return False
 
 
+def codex_transcript_session_id(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for index, line in enumerate(handle):
+                if index >= 20:
+                    break
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                payload = record.get("payload")
+                if record.get("type") == "session_meta" and isinstance(payload, dict):
+                    value = payload.get("id")
+                    if isinstance(value, str) and value:
+                        return value
+                for key in ("session_id", "sessionId", "thread_id", "threadId", "conversation_id", "conversationId"):
+                    value = record.get(key)
+                    if isinstance(value, str) and value:
+                        return value
+    except OSError:
+        return None
+    return None
+
+
 def path_is_under(path: Path, root: Path) -> bool:
     resolved_path = path.expanduser().resolve(strict=False)
     resolved_root = root.expanduser().resolve(strict=False)
@@ -433,6 +461,7 @@ def codex_transcript_from_process_fd(pid: int, root: Path | None = None, fd_dir:
 def read_codex_agent(session: str, pane: PaneInfo, process: ProcessInfo) -> AgentInfo:
     proc_cwd = process_cwd(process.pid) or pane.current_path
     transcript_path = codex_transcript_from_process_fd(process.pid) or find_recent_codex_transcript(proc_cwd)
+    session_id = codex_transcript_session_id(transcript_path)
     return AgentInfo(
         session=session,
         kind="codex",
@@ -441,7 +470,7 @@ def read_codex_agent(session: str, pane: PaneInfo, process: ProcessInfo) -> Agen
         command=process.command,
         cwd=proc_cwd,
         status=None,
-        session_id=None,
+        session_id=session_id,
         transcript=str(transcript_path) if transcript_path else None,
         error=None if transcript_path else "codex transcript not found by process fd or cwd",
         model=agent_model_from_command(process.command),

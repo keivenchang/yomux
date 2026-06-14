@@ -23,6 +23,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
+from urllib.parse import unquote
 from urllib.parse import urlparse
 
 import yaml
@@ -514,7 +515,15 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return
         if parsed.path.startswith("/share/") and self.handle_share_shell(parsed):
             return
-        admin_only_paths = {"/api/summary-stream", "/api/share", "/ws/share-host"}
+        admin_only_paths = {
+            "/api/summary-stream",
+            "/api/share",
+            "/api/yoagent/skills",
+            "/api/yoagent/skill-files",
+            "/api/yoagent/conversation",
+            "/api/yoagent/jobs",
+            "/ws/share-host",
+        }
         if parsed.path == "/api/share" and self.share_token_text():
             required_role = "readonly"
         else:
@@ -570,6 +579,24 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 force=query_bool(qs, "force"),
                 locale=str(query_one(qs, "locale", "en") or "en"),
             ))
+            return
+        if parsed.path == "/api/yoagent/skills":
+            self.write_json(self.server.app.yoagent_skills_payload())
+            return
+        if parsed.path == "/api/yoagent/skill-files":
+            qs = parse_qs(parsed.query)
+            payload, status = self.server.app.yoagent_skill_files_payload(
+                str(query_one(qs, "kind", "") or ""),
+                str(query_one(qs, "name", "") or ""),
+            )
+            self.write_json(payload, status=status)
+            return
+        if parsed.path == "/api/yoagent/conversation":
+            self.write_json(self.server.app.yoagent_conversation_payload())
+            return
+        if parsed.path == "/api/yoagent/jobs":
+            response, status = self.server.app.yoagent_jobs_payload()
+            self.write_json(response, status=status)
             return
         if parsed.path == "/api/tmux":
             self.write_int_query_app_result(
@@ -1115,6 +1142,64 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             if payload is None:
                 return
             response, status = self.server.app.yoagent_chat(payload)
+            self.write_json(response, status=status)
+            return
+        if parsed.path == "/api/yoagent/actions/preview-send":
+            payload = self.read_json_body(64 * 1024)
+            if payload is None:
+                return
+            response, status = self.server.app.preview_yoagent_send_action(payload)
+            self.write_json(response, status=status)
+            return
+        if parsed.path == "/api/yoagent/actions/execute-send":
+            payload = self.read_json_body(16 * 1024)
+            if payload is None:
+                return
+            response, status = self.server.app.execute_yoagent_send_action(payload)
+            self.write_json(response, status=status)
+            return
+        if parsed.path == "/api/yoagent/intent":
+            payload = self.read_json_body(64 * 1024)
+            if payload is None:
+                return
+            response, status = self.server.app.yoagent_intent(payload)
+            self.write_json(response, status=status)
+            return
+        if parsed.path == "/api/yoagent/jobs":
+            payload = self.read_json_body(64 * 1024)
+            if payload is None:
+                return
+            response, status = self.server.app.create_yoagent_job(payload)
+            self.write_json(response, status=status)
+            return
+        if parsed.path.startswith("/api/yoagent/jobs/") and parsed.path.endswith("/confirm"):
+            payload = self.read_json_body(16 * 1024)
+            if payload is None:
+                return
+            job_id = unquote(parsed.path[len("/api/yoagent/jobs/"):-len("/confirm")]).strip("/")
+            response, status = self.server.app.confirm_yoagent_job(str(payload.get("id") or job_id))
+            self.write_json(response, status=status)
+            return
+        if parsed.path.startswith("/api/yoagent/jobs/") and parsed.path.endswith("/cancel"):
+            payload = self.read_json_body(16 * 1024)
+            if payload is None:
+                return
+            job_id = unquote(parsed.path[len("/api/yoagent/jobs/"):-len("/cancel")]).strip("/")
+            response, status = self.server.app.cancel_yoagent_job(str(payload.get("id") or job_id))
+            self.write_json(response, status=status)
+            return
+        if parsed.path == "/api/yoagent/skill-files/upsert":
+            payload = self.read_json_body(64 * 1024)
+            if payload is None:
+                return
+            response, status = self.server.app.upsert_yoagent_skill_file(payload)
+            self.write_json(response, status=status)
+            return
+        if parsed.path == "/api/yoagent/skill-files/delete":
+            payload = self.read_json_body(16 * 1024)
+            if payload is None:
+                return
+            response, status = self.server.app.delete_yoagent_skill_file(payload)
             self.write_json(response, status=status)
             return
         if parsed.path == "/api/yoagent/prewarm":

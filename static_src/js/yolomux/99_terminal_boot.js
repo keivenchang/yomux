@@ -530,6 +530,49 @@ function scrollYoagentChatToBottom(node = document.getElementById('yoagent-conte
   if (node) node.scrollTop = node.scrollHeight;
   const panelBody = node?.closest?.('.info-pane, .panel-overlay-root, .panel');
   if (panelBody && panelBody !== node) panelBody.scrollTop = panelBody.scrollHeight;
+  yoagentScrollbackLocked = false;
+}
+
+function yoagentChatHistoryIsNearBottom(history, threshold = 48) {
+  if (!history) return true;
+  return history.scrollHeight - history.clientHeight - history.scrollTop <= threshold;
+}
+
+function yoagentChatScrollState(node = document.getElementById('yoagent-content')) {
+  const history = node?.querySelector?.('.yoagent-chat-history');
+  const panelBody = node?.closest?.('.info-pane, .panel-overlay-root, .panel');
+  return {
+    nearBottom: yoagentChatHistoryIsNearBottom(history),
+    historyTop: history ? history.scrollTop : 0,
+    nodeTop: node ? node.scrollTop : 0,
+    panelTop: panelBody && panelBody !== node ? panelBody.scrollTop : 0,
+  };
+}
+
+function restoreYoagentChatScrollState(node, state) {
+  if (!node || !state) return;
+  const history = node.querySelector?.('.yoagent-chat-history');
+  if (history) history.scrollTop = state.historyTop || 0;
+  node.scrollTop = state.nodeTop || 0;
+  const panelBody = node.closest?.('.info-pane, .panel-overlay-root, .panel');
+  if (panelBody && panelBody !== node) panelBody.scrollTop = state.panelTop || 0;
+  yoagentScrollbackLocked = state.nearBottom === false;
+}
+
+function installYoagentChatScrollTracker(node = document.getElementById('yoagent-content')) {
+  const history = node?.querySelector?.('.yoagent-chat-history');
+  if (!history || history.dataset.yoagentScrollTracker === 'true') return;
+  history.dataset.yoagentScrollTracker = 'true';
+  history.addEventListener('scroll', () => {
+    yoagentScrollbackLocked = !yoagentChatHistoryIsNearBottom(history);
+  }, {passive: true});
+}
+
+function yoagentShouldScrollBottom(options, scrollState) {
+  if (options.scrollBottom === true) return true;
+  if (options.scrollBottom === false) return false;
+  if (yoagentScrollbackLocked) return false;
+  return scrollState?.nearBottom !== false;
 }
 
 function focusYoagentChatInput(node = document.getElementById('yoagent-content')) {
@@ -562,6 +605,7 @@ function refreshYoagentSummaryRegions(node = document.getElementById('yoagent-co
   if (!chat) return false;
   chat.outerHTML = yoagentChatHtml();
   renderYoagentMessageMarkdown(node);
+  installYoagentChatScrollTracker(node);
   return true;
 }
 
@@ -650,6 +694,8 @@ function renderYoagentMessageMarkdown(node = document.getElementById('yoagent-co
 function renderYoagentPanel(options = {}) {
   const node = document.getElementById('yoagent-content');
   if (!node) return;
+  const scrollState = yoagentChatScrollState(node);
+  const shouldScrollBottom = yoagentShouldScrollBottom(options, scrollState);
   const input = node.querySelector('[data-yoagent-chat-input]');
   const inputFocused = input && document.activeElement === input;
   const selectionStart = inputFocused ? input.selectionStart : null;
@@ -657,19 +703,26 @@ function renderYoagentPanel(options = {}) {
   if (input && options.preserveDraft !== false) yoagentDraft = input.value || '';
   if (yoagentBusyUiIsMounted(node) && options.allowBusyRebuild !== true) {
     if (refreshYoagentSummaryRegions(node)) {
+      if (shouldScrollBottom) scrollYoagentChatToBottom(node);
+      else restoreYoagentChatScrollState(node, scrollState);
       restoreYoagentChatInputFocus(node, inputFocused, selectionStart, selectionEnd);
     }
     return;
   }
   if (options.summaryOnly && refreshYoagentSummaryRegions(node)) {
+    if (shouldScrollBottom) scrollYoagentChatToBottom(node);
+    else restoreYoagentChatScrollState(node, scrollState);
     restoreYoagentChatInputFocus(node, inputFocused, selectionStart, selectionEnd);
     return;
   }
   node.innerHTML = yoagentChatHtml();
   renderYoagentMessageMarkdown(node);
-  if (options.scrollBottom !== false) {
+  installYoagentChatScrollTracker(node);
+  if (shouldScrollBottom) {
     requestAnimationFrame(() => scrollYoagentChatToBottom(node));
     setTimeout(() => scrollYoagentChatToBottom(node), 0);
+  } else {
+    restoreYoagentChatScrollState(node, scrollState);
   }
   if (options.focusInput) {
     requestAnimationFrame(() => focusYoagentChatInput(node));
@@ -1809,6 +1862,10 @@ function noteTerminalExplicitInput(session) {
   setFocusedTerminal(session, {userInitiated: true});
 }
 
+function terminalDataIsPassiveFocusReport(data) {
+  return /^\x1b\[[IO]$/.test(String(data || ''));
+}
+
 function shellQuote(value) {
   return "'" + String(value).replace(/'/g, "'\\''") + "'";
 }
@@ -2190,6 +2247,7 @@ function startTerminal(session) {
     if (socket?.readyState === WebSocket.OPEN) {
       const filtered = stripTerminalQueryResponses(data);
       if (filtered) {
+        if (!terminalDataIsPassiveFocusReport(filtered)) noteTerminalExplicitInput(session);
         socket.send(JSON.stringify({type: 'input', data: filtered}));
       }
     }
@@ -3034,7 +3092,7 @@ async function triggerSelfUpdate() {
 // with an "Update Now" action (admin-only; the endpoint rejects readonly).
 function applyUpdateAvailable(status) {
   if (!status || !status.available) return;
-  if (!updateNotificationAllowsVersion(status.current_version || status.current || bootstrap.version, status.target_version || status.target)) return;
+  if (status.notify === false) return;
   const badge = document.querySelector('[data-update-badge]');
   if (badge) {
     badge.hidden = false;
@@ -3056,6 +3114,26 @@ async function checkForUpdateOnce() {
     const status = await res.json();
     if (status && status.available) applyUpdateAvailable(status);
   } catch (_error) { /* offline / transient — the hourly push will retry */ }
+}
+
+function maybeNotifyYoagentJob(notification = {}) {
+  const title = String(notification.title || 'YO!agent');
+  const body = String(notification.body || '').trim();
+  if (!body || !notificationsEnabled) return;
+  const session = String(notification.session || '').trim();
+  const tag = `yoagent-job:${session || 'global'}:${body}`;
+  showToast(title, [body], {session});
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  try {
+    sendBrowserNotification(hostNotificationTitle(title), {
+      body,
+      tag,
+      renotify: true,
+      session,
+    });
+  } catch (error) {
+    postEvent(session || null, 'yoagent_job_notification_error', `notification failed: ${error}`, {});
+  }
 }
 
 function handleClientPushEvent(type, payload = {}) {
@@ -3089,6 +3167,18 @@ function handleClientPushEvent(type, payload = {}) {
   }
   if (type === 'activity_summary_ready') {
     if (payload.data) applyActivitySummaryPayloadFromPush(payload.data);
+    return;
+  }
+  if (type === 'yoagent_conversation_changed') {
+    loadYoagentConversation({force: true, render: infoPanelSubTab === 'yoagent', scrollBottom: 'auto'}).catch(error => console.warn('YO!agent conversation refresh failed', error));
+    return;
+  }
+  if (type === 'yoagent_jobs_changed') {
+    maybeNotifyYoagentJob(payload.notification || {});
+    return;
+  }
+  if (type === 'yoagent_skills_changed') {
+    refreshActivitySummary({force: true, render: infoPanelSubTab === 'yoagent'}).catch(error => console.warn('YO!agent skills refresh failed', error));
     return;
   }
   if (type === 'session_files_ready') {
@@ -3130,7 +3220,7 @@ function installClientEventStream() {
     recordSseDebugEvent('ping', clientEventEnvelope(event), event);
   });
   source.onerror = () => { clientEventsConnected = false; };
-  for (const type of ['settings_changed', 'auto_approve_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available']) {
+  for (const type of ['settings_changed', 'auto_approve_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed']) {
     source.addEventListener(type, event => {
       clientEventsConnected = true;
       const envelope = clientEventEnvelope(event);
@@ -5851,6 +5941,12 @@ function handleGlobalShortcutKeydown(event) {
     event.stopPropagation();
     if (event.code === 'BracketLeft') editorNavBack();
     else editorNavForward();
+    return;
+  }
+  if (platformMod && event.altKey && event.code === 'KeyB') {
+    event.preventDefault();
+    event.stopPropagation();
+    openYoagentRightPane();
     return;
   }
   if (mod && key === 'w') {

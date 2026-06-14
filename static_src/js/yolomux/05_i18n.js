@@ -72,6 +72,25 @@ function relativeTimeFormat(secondsAgo) {
   }
 }
 
+function compactRelativeTimeFormat(secondsAgo) {
+  const sec = Math.max(0, Math.round(Number(secondsAgo) || 0));
+  let value;
+  let unit;
+  if (sec < 3600) { value = Math.max(1, Math.round(sec / 60)); unit = 'minute'; }
+  else if (sec < 86400) { value = Math.max(1, Math.round(sec / 3600)); unit = 'hour'; }
+  else if (sec < 604800) { value = Math.max(1, Math.round(sec / 86400)); unit = 'day'; }
+  else if (sec < 2629800) { value = Math.max(1, Math.round(sec / 604800)); unit = 'week'; }
+  else if (sec < 31557600) { value = Math.max(1, Math.round(sec / 2629800)); unit = 'month'; }
+  else { value = Math.max(1, Math.round(sec / 31557600)); unit = 'year'; }
+  try {
+    return new Intl.RelativeTimeFormat(i18nActiveLocale, {numeric: 'always', style: 'short'})
+      .format(-value, unit)
+      .replace(/\./g, '');
+  } catch (_) {
+    return relativeTimeFormat(secondsAgo);
+  }
+}
+
 function normalizeDateTimeHourCycle(value) {
   return String(value || '') === '12' ? '12' : '24';
 }

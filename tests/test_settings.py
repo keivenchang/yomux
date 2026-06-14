@@ -24,6 +24,13 @@ def test_legacy_yoagent_default_prompts_migrate_without_overwriting_custom_text(
     settings = sanitize_settings({"yoagent": LEGACY_YOAGENT_DEFAULTS.copy()})
     defaults = default_settings()["yoagent"]
 
+    assert "background-watch the target transcript or visible pane" in defaults["system_prompt"]
+    assert "Native resume channels are not a substitute for sending to that pane" in defaults["system_prompt"]
+    assert "YO!agent is the orchestrator" in defaults["system_prompt"]
+    assert "do not reveal target-session identities to each other" in defaults["system_prompt"]
+    assert "clean task/question rather than a routing transcript" in defaults["system_prompt"]
+    assert "Address that target directly as `you`" in defaults["system_prompt"]
+    assert "~/.config/yolomux/skills.d/" in defaults["system_prompt"]
     assert settings["yoagent"]["system_prompt"] == defaults["system_prompt"]
     assert settings["yoagent"]["intro"] == defaults["intro"]
     assert settings["yoagent"]["format"] == defaults["format"]
@@ -50,6 +57,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
             "appearance": {"theme": "neon", "terminal_theme": "neon", "date_time_hour_cycle": "bogus", "ui_font_size": 1, "terminal_font_size": 100, "editor_font_size": 100, "editor_color_scheme": "bogus", "editor_dark_color_scheme": "github-light", "editor_light_color_scheme": "popular-ide-dark-plus", "editor_cursor_style": "beam", "editor_cursor_color": "bogus-cursor", "separator_color": "bogus-separator", "file_explorer_font_size": 1, "tab_width": 20, "pane_spacing": 50, "pane_ring_opacity": 1, "inactive_pane_opacity": 500},
             "file_explorer": {"root_mode": "bad", "image_open_mode": "bad", "image_preview_max_px": 5000, "refresh_seconds": 99},
             "notifications": {"notify_transitions": ["needs-input", "bogus", "done"]},
+            "updates": {"notify_level": "bogus"},
             "performance": {"latency_refresh_ms": 100, "event_log_refresh_ms": 100000},
             "terminal_editor": {"word_wrap": "yes", "line_numbers": "no"},
             "editor": {"autosave": "yes", "autosave_delay_seconds": 100},
@@ -61,7 +69,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     )
 
     assert settings["general"]["default_layout"] == "split"
-    assert settings["general"]["reload_on_update"] == "patch"
+    assert settings["general"]["reload_on_update"] is False
     assert settings["appearance"]["theme"] == "dark"
     assert settings["appearance"]["terminal_theme"] == "follow-app"
     assert settings["appearance"]["date_time_hour_cycle"] == "24"
@@ -94,6 +102,8 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["share"]["scheme"] == "http"
     assert sanitize_settings({"share": {"scheme": "https"}})["share"]["scheme"] == "https"
     assert settings["notifications"]["notify_transitions"] == ["needs-input", "done"]
+    assert settings["updates"]["notify_level"] == "patch"
+    assert sanitize_settings({"updates": {"notify_level": "minor"}})["updates"]["notify_level"] == "minor"
     assert settings["performance"]["latency_refresh_ms"] == 1000
     assert settings["performance"]["event_log_refresh_ms"] == 60000
     assert settings["terminal_editor"]["word_wrap"] is True
@@ -134,6 +144,7 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert payload["choices"]["appearance.separator_color"] == ["theme", "green", "blue", "orange", "yellow", "purple", "white"]
     assert payload["choices"]["appearance.editor_cursor_color"] == ["green", "blue", "orange", "yellow", "purple", "white", "laser-lime", "neon-green", "neon-cyan", "neon-magenta", "neon-orange", "theme"]
     assert payload["choices"]["share.view_fit"] == ["cover", "contain"]
+    assert payload["choices"]["updates.notify_level"] == ["major", "minor", "patch", "none"]
     assert payload["settings"]["general"]["startup_tips"] is True
     assert payload["settings"]["uploads"]["max_bytes"] == UPLOAD_MAX_BYTES
     assert payload["settings"]["share"] == {"ttl_seconds": 600, "max_viewers": 5, "read_only": True, "scheme": "http", "view_fit": "cover"}
@@ -141,8 +152,21 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert payload["settings"]["yoagent"]["auto_refresh"] is False
     assert payload["settings"]["yoagent"]["refresh_interval_seconds"] == 120
     assert "normal status-update style" in payload["settings"]["yoagent"]["system_prompt"]
-    assert "explicit admin UI paths" in payload["settings"]["yoagent"]["system_prompt"]
-    assert "autonomous command-sending tools" in payload["settings"]["yoagent"]["system_prompt"]
+    assert "server-verified sends" in payload["settings"]["yoagent"]["system_prompt"]
+    assert "live pane receives the text" in payload["settings"]["yoagent"]["system_prompt"]
+    assert "without an extra confirmation unless the user asks" in payload["settings"]["yoagent"]["system_prompt"]
+    assert "Maintain perspectives" in payload["settings"]["yoagent"]["system_prompt"]
+    assert "ask agent 1 to" in payload["settings"]["yoagent"]["system_prompt"]
+    assert "ask agent 1 to <do ...>" in payload["settings"]["yoagent"]["system_prompt"]
+    assert "send only the task/question meant for that target" in payload["settings"]["yoagent"]["system_prompt"]
+    assert "YO!agent is the orchestrator" in payload["settings"]["yoagent"]["system_prompt"]
+    assert "do not ask one target session to contact another target session directly" in payload["settings"]["yoagent"]["system_prompt"]
+    assert "do not reveal target-session identities to each other" in payload["settings"]["yoagent"]["system_prompt"]
+    assert "Direct agent-to-agent relay or chaining is rare" in payload["settings"]["yoagent"]["system_prompt"]
+    assert "pass explicit instructions" in payload["settings"]["yoagent"]["system_prompt"]
+    assert "source-neutral handoff prompt" in payload["settings"]["yoagent"]["system_prompt"]
+    assert "what have you done today?" in payload["settings"]["yoagent"]["system_prompt"]
+    assert "~/.config/yolomux/context.d/" in payload["settings"]["yoagent"]["system_prompt"]
     assert "If needed facts are missing" in payload["settings"]["yoagent"]["intro"]
     assert "recommend what to work on next" in payload["settings"]["yoagent"]["intro"]
     assert "refer to it as tmux session `<session-name>`" in payload["settings"]["yoagent"]["system_prompt"]
@@ -466,17 +490,12 @@ def test_upload_drop_action_settings_defaults_and_round_trip(tmp_path):
     assert updated["settings"]["uploads"]["custom_actions"] == ["Peek | shell:head -40 {qpath} | log"]
 
 
-def test_updates_check_defaults_on():
-    # Auto-update check defaults ON, surfaced as the Performance "Auto-update check" toggle.
+def test_updates_check_defaults_off():
+    # origin/main update checks are opt-in and surfaced as an explicit Notifications toggle.
     general = default_settings()["general"]
     updates = default_settings()["updates"]
-    assert general["reload_on_update"] == "patch"
+    assert general["reload_on_update"] is False
     assert general["reload_on_update_auto"] is False
-    assert updates["check_enabled"] is True
+    assert updates["check_enabled"] is False
     assert updates["check_interval_minutes"] == 60
-
-
-def test_update_notification_level_migrates_legacy_boolean():
-    assert sanitize_settings({"general": {"reload_on_update": True}})["general"]["reload_on_update"] == "patch"
-    assert sanitize_settings({"general": {"reload_on_update": False}})["general"]["reload_on_update"] == "none"
-    assert sanitize_settings({"general": {"reload_on_update": "minor"}})["general"]["reload_on_update"] == "minor"
+    assert updates["notify_level"] == "patch"

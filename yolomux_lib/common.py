@@ -38,7 +38,8 @@ DEFAULT_ROWS = 36
 MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
-YOLOMUX_VERSION = "0.3.26"
+YOLOMUX_VERSION = "0.3.27"
+UPDATE_NOTIFY_LEVELS: tuple[str, ...] = ("major", "minor", "patch", "none")
 SUMMARY_LOOKBACK_SECONDS = 3600
 SUMMARY_MAX_PROMPT_CHARS = 100_000
 SUMMARY_CODEX_TIMEOUT_SECONDS = 600
@@ -61,6 +62,7 @@ STATIC_DIR = PROJECT_ROOT / "static"
 TERMINAL_QUERY_RESPONSE_RE = re.compile(r"(?:\x1b\[[?>]?[0-9;]*c|\x1bP[>|!][^\x1b]*(?:\x1b\\|\x9c))")
 LINEAR_ID_RE = re.compile(r"(?<![A-Za-z0-9])(?:DIS|DGH|DYN|OPS|INFRA)-\d{1,6}(?![A-Za-z0-9])")
 YOLOMUX_VERSION_ASSIGNMENT_RE = re.compile(r"^\s*YOLOMUX_VERSION\s*=\s*['\"]([^'\"]+)['\"]\s*$", re.MULTILINE)
+SEMVER_RE = re.compile(r"^\s*v?(\d+)\.(\d+)\.(\d+)(?:\D.*)?$")
 
 
 class ErrorPayload(TypedDict, total=False):
@@ -424,6 +426,35 @@ def parse_yolomux_version_source(source: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
+def semver_parts(version: Any) -> tuple[int, int, int] | None:
+    match = SEMVER_RE.match(str(version or ""))
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2)), int(match.group(3))
+
+
+def version_change_level(current: Any, target: Any) -> str:
+    current_parts = semver_parts(current)
+    target_parts = semver_parts(target)
+    if current_parts is None or target_parts is None or target_parts <= current_parts:
+        return "none"
+    if target_parts[0] != current_parts[0]:
+        return "major"
+    if target_parts[1] != current_parts[1]:
+        return "minor"
+    if target_parts[2] != current_parts[2]:
+        return "patch"
+    return "none"
+
+
+def update_notify_level_allows(change_level: Any, notify_level: Any) -> bool:
+    ranks = {"none": 0, "patch": 1, "minor": 2, "major": 3}
+    threshold = str(notify_level or "patch")
+    if threshold == "none":
+        return False
+    return ranks.get(str(change_level or "none"), 0) >= ranks.get(threshold, ranks["patch"])
+
+
 def git_yolomux_version_at_ref(cwd: str, ref: str) -> tuple[str | None, str | None]:
     result = git(["show", f"{ref}:yolomux_lib/common.py"], cwd)
     if result.returncode != 0:
@@ -462,9 +493,11 @@ def update_check_status(cwd: str, branch: str = "main", dryrun: bool = False, fe
     current_sha = yolomux_commit_sha()
     base = {"available": False, "ahead": 0, "behind": 0, "current": YOLOMUX_VERSION,
             "current_version": YOLOMUX_VERSION, "current_sha": current_sha, "target": None,
-            "target_version": None, "target_sha": None, "branch": branch, "dryrun": dryrun, "error": None}
+            "target_version": None, "target_sha": None, "branch": branch, "dryrun": dryrun, "error": None,
+            "version_change_level": "none"}
     if dryrun:
-        return {**base, "available": True, "behind": 1, "target": "dryrun", "target_version": "dryrun"}
+        return {**base, "available": True, "behind": 1, "target": "dryrun",
+                "target_version": "dryrun", "version_change_level": "patch"}
     if fetch:
         fetched = git(["fetch", "--quiet", "origin", branch], cwd)
         if fetched.returncode != 0:
@@ -478,9 +511,10 @@ def update_check_status(cwd: str, branch: str = "main", dryrun: bool = False, fe
     target_version, version_error = git_yolomux_version_at_ref(cwd, f"origin/{branch}")
     if version_error:
         return {**base, "ahead": ahead, "behind": behind, "target_sha": target_sha, "error": version_error}
+    change_level = version_change_level(YOLOMUX_VERSION, target_version)
     return {**base, "available": bool(target_version and yolomux_version_is_newer(target_version, YOLOMUX_VERSION)),
             "ahead": ahead, "behind": behind, "target": target_version, "target_version": target_version,
-            "target_sha": target_sha}
+            "target_sha": target_sha, "version_change_level": change_level}
 
 
 def git_bytes(args: list[str], cwd: str, timeout: float = 3.0) -> subprocess.CompletedProcess[bytes]:
