@@ -9099,8 +9099,14 @@ function fileExplorerSyncCommandSessionTarget() {
 }
 
 function rememberFileExplorerExplicitSyncSession(session) {
-  if (!isTmuxSession(session) || !activeSessions.includes(session)) return false;
-  fileExplorerExplicitSyncSession = session;
+  const normalizedSession = String(session || '');
+  if (!isTmuxSession(normalizedSession) || !activeSessions.includes(normalizedSession)) return false;
+  if (fileExplorerExplicitSyncSession !== normalizedSession) {
+    fileExplorerExplicitSyncSession = normalizedSession;
+    cancelPendingFileExplorerActiveSync();
+    return true;
+  }
+  fileExplorerExplicitSyncSession = normalizedSession;
   return true;
 }
 
@@ -9742,9 +9748,11 @@ function scheduleFileExplorerActiveTabSync(preferredItem = null, options = {}) {
   const syncPlan = fileSyncPath ? fileExplorerSyncPlanForFile(fileSyncPath) : fileExplorerSyncPlan(syncItem);
   const expandPaths = fileExplorerSyncExpansionPaths(syncPlan);
   const syncSignature = fileExplorerSyncPlanSignature(syncPlan);
+  const staleInFlightSync = Boolean(fileExplorerSyncPathInFlight && fileExplorerSyncPathInFlight !== syncSignature);
+  if (explicit && staleInFlightSync) cancelPendingFileExplorerActiveSync();
   if (
     syncPlan.root
-    && (syncPlan.root !== currentFileExplorerRoot() || expandPaths.length)
+    && (syncPlan.root !== currentFileExplorerRoot() || expandPaths.length || (explicit && staleInFlightSync))
     && fileExplorerSyncPathInFlight !== syncSignature
     && (explicit || !fileExplorerSyncPlanAlreadyApplied(syncPlan))
   ) {
@@ -9762,6 +9770,15 @@ function scheduleFileExplorerActiveTabSync(preferredItem = null, options = {}) {
   }
 }
 
+function fileExplorerSyncPlanTargetStillCurrent(plan, options = {}) {
+  if (!plan?.root || fileExplorerRootMode !== 'sync') return false;
+  if (shareReadOnlyFinderStateIsHostOwned()) return false;
+  if (options.guardExplicitTarget === true && isTmuxSession(plan.session)) {
+    return fileExplorerExplicitSyncSessionTarget() === String(plan.session);
+  }
+  return true;
+}
+
 function cancelPendingFileExplorerActiveSync(options = {}) {
   fileExplorerInteractionGeneration += 1;
   if (options.invalidateOpen !== false) fileExplorerOpenGeneration += 1;
@@ -9772,7 +9789,10 @@ function cancelPendingFileExplorerActiveSync(options = {}) {
 async function syncFileExplorerRootToActiveTmux(preferredItem = null, options = {}) {
   if (!fileExplorerIsOpen() || fileExplorerRootMode !== 'sync') return false;
   if (shareReadOnlyFinderStateIsHostOwned()) return false;
-  return syncFileExplorerRootToPlan(fileExplorerSyncPlan(preferredItem), preferredItem, options);
+  return syncFileExplorerRootToPlan(fileExplorerSyncPlan(preferredItem), preferredItem, {
+    ...options,
+    guardExplicitTarget: options.force === true,
+  });
 }
 
 async function syncFileExplorerRootToActiveFile(path, options = {}) {
@@ -9787,6 +9807,7 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
   const signature = fileExplorerSyncPlanSignature(plan);
   const expandPaths = fileExplorerSyncExpansionPaths(plan);
   if (!plan.root || fileExplorerSyncPathInFlight === signature) return false;
+  if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
   if (options.force !== true && fileExplorerSyncPlanAlreadyApplied(plan)) {
     setFileExplorerVisibleSyncTarget(plan.session, plan.root);
     updateFileExplorerSessionHighlightRows(preferredItem);
@@ -9809,18 +9830,22 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
         showPending: options.force === true,
       });
       if (!changed) return false;
+      if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
     }
     const rememberedExpandedPaths = rememberedFileExplorerSyncExpandedPaths(plan.session, plan.root);
     if (rememberedExpandedPaths.length) {
       changed = await restoreFileExplorerExpandedPaths(rememberedExpandedPaths, plan.root) || changed;
+      if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
     }
     if (expandPaths.length) {
       const generation = ++fileExplorerSyncGeneration;
       for (const path of expandPaths) {
         if (generation !== fileExplorerSyncGeneration) return changed;
         changed = await expandFileExplorerTreesToPath(path, plan.root, generation, {scrollIntoView: false, auto: true}) || changed;
+        if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
       }
     }
+    if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
     setFileExplorerVisibleSyncTarget(plan.session, plan.root);
     rememberFileExplorerSyncExpandedState(plan.session, plan.root);
     markFileExplorerSyncPlanApplied(plan);
@@ -12464,6 +12489,24 @@ function joinAndNormalize(base, rel) {
   return (isAbs ? '/' : '') + out.join('/');
 }
 
+function apiErrorMessage(error, fallback) {
+  const status = Number(error?.status || error?.payload?.status) || 0;
+  const message = String(
+    error?.payload?.error
+    || error?.error
+    || error?.message
+    || (typeof error === 'string' ? error : '')
+    || fallback
+    || 'request failed'
+  );
+  if (!status || /\bHTTP\b|\bstatus\b/i.test(message) || message.includes(String(status))) return message;
+  return `${message} (HTTP ${status})`;
+}
+
+function fileInspectionErrorMessage(error, path) {
+  return apiErrorMessage(error, `Cannot inspect ${path}`);
+}
+
 async function fetchFileEntry(path) {
   const result = await fetchFileEntryStatus(path);
   return result.entry;
@@ -12476,7 +12519,7 @@ async function fetchFileEntryStatus(path) {
     return {
       entry: null,
       missing: error?.status === 404,
-      error: error?.error || `Cannot inspect ${path}`,
+      error: fileInspectionErrorMessage(error, path),
       network: error?.network === true,
     };
   }
@@ -12489,7 +12532,7 @@ async function fetchFileInfoStatus(path) {
   try {
     return {info: await apiFetchJson(`/api/fs/info?path=${encodeURIComponent(path)}`), error: ''};
   } catch (error) {
-    return {info: null, error: String(error?.payload?.error || error || 'failed to inspect file')};
+    return {info: null, error: apiErrorMessage(error, 'failed to inspect file')};
   }
 }
 

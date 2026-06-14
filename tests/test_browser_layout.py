@@ -6339,6 +6339,45 @@ def test_sync_mode_active_file_reveal_keeps_manual_collapse(browser, tmp_path):
     assert result["manualHasA_after"] is True, result
 
 
+def test_fetch_file_entry_status_succeeds_for_existing_preview_sample(browser, tmp_path):
+    fs_entries = {
+        "/home/test/yolomux.dev3/docs/preview-samples": [
+            {"name": "03-mixed.md", "kind": "file", "size": 128, "mtime_ns": 1781300000000000000},
+        ],
+    }
+    page = tmp_path / "live-runtime-file-entry-status-existing-preview-sample.html"
+    page.write_text(live_runtime_boot_fixture_html(fs_entries=fs_entries), encoding="utf-8")
+    browser.get(page.as_uri() + "?sessions=1&layout=left&tabs=left:1")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof fetchFileEntryStatus === 'function' && document.querySelector('#grid') !== null;"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        fetchFileEntryStatus('/home/test/yolomux.dev3/docs/preview-samples/03-mixed.md')
+          .then(result => done({
+            entry: result.entry,
+            missing: result.missing,
+            lookupError: result.error,
+            network: result.network,
+            fsFetches: window.__bootFetches
+              .filter(item => item.path === '/api/fs/list' || item.path === '/api/fs/batch')
+              .map(item => ({path: item.path, body: item.body, search: item.search})),
+          }))
+          .catch(error => done({error: String(error), stack: String(error?.stack || '')}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["entry"]["name"] == "03-mixed.md", metrics
+    assert metrics["entry"]["kind"] == "file", metrics
+    assert metrics["missing"] is False, metrics
+    assert metrics["network"] is False, metrics
+    assert metrics["lookupError"] == "", metrics
+    assert metrics["fsFetches"], metrics
+
+
 def test_sync_finder_follows_clicked_editor_file_to_repo(browser, tmp_path):
     path = "/home/test/dynamo/frontend-crates/conformance/utils/tests/parity/reasoning/table.py"
     session_files_payload = {
@@ -12140,6 +12179,16 @@ def test_share_host_editor_snapshot_tracks_codemirror_cursor_after_typing(browse
 
 def test_long_markdown_editor_scroll_survives_preferences_tab_roundtrip(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof fileEditorItemFor === 'function'
+              && typeof applyLayoutSlots === 'function'
+              && typeof createFileEditorPanel === 'function'
+              && document.querySelector('#grid') !== null;
+            """
+        )
+    )
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];

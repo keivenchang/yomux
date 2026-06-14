@@ -863,6 +863,24 @@ function joinAndNormalize(base, rel) {
   return (isAbs ? '/' : '') + out.join('/');
 }
 
+function apiErrorMessage(error, fallback) {
+  const status = Number(error?.status || error?.payload?.status) || 0;
+  const message = String(
+    error?.payload?.error
+    || error?.error
+    || error?.message
+    || (typeof error === 'string' ? error : '')
+    || fallback
+    || 'request failed'
+  );
+  if (!status || /\bHTTP\b|\bstatus\b/i.test(message) || message.includes(String(status))) return message;
+  return `${message} (HTTP ${status})`;
+}
+
+function fileInspectionErrorMessage(error, path) {
+  return apiErrorMessage(error, `Cannot inspect ${path}`);
+}
+
 async function fetchFileEntry(path) {
   const result = await fetchFileEntryStatus(path);
   return result.entry;
@@ -875,7 +893,7 @@ async function fetchFileEntryStatus(path) {
     return {
       entry: null,
       missing: error?.status === 404,
-      error: error?.error || `Cannot inspect ${path}`,
+      error: fileInspectionErrorMessage(error, path),
       network: error?.network === true,
     };
   }
@@ -888,7 +906,7 @@ async function fetchFileInfoStatus(path) {
   try {
     return {info: await apiFetchJson(`/api/fs/info?path=${encodeURIComponent(path)}`), error: ''};
   } catch (error) {
-    return {info: null, error: String(error?.payload?.error || error || 'failed to inspect file')};
+    return {info: null, error: apiErrorMessage(error, 'failed to inspect file')};
   }
 }
 

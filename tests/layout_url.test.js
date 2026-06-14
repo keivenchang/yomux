@@ -849,6 +849,7 @@ globalThis.__layoutTestApi = {
   pullRequestReviewInlineHtml,
   sessionStateHtml,
   openFileStatus,
+  fileInspectionErrorMessageForTest: fileInspectionErrorMessage,
   setOpenFileOwner,
   renderTransportWarning,
   captureFileEditorPanelViewStateForTest: captureFileEditorPanelViewState,
@@ -8039,6 +8040,12 @@ test('t@6249', () => {
   assert.ok(missingHtml.includes('a.png'), 'missing file tabs still show the basename');
   assert.equal(api.openFileStatus({kind: 'text', externalError: 'network down'}).message.includes('file state unknown'), true);
   assert.equal(api.openFileStatus({kind: 'text', externalError: 'network down'}).message.includes('deleted'), false, 'network/list refresh errors are not reported as deletion');
+  assert.equal(
+    api.fileInspectionErrorMessageForTest({payload: {error: 'outside allowed root'}, status: 403}, '/home/test/yolomux.dev3/docs/preview-samples/03-mixed.md'),
+    'outside allowed root (HTTP 403)',
+    'file inspection preserves the backend reason and HTTP status before falling back to the generic path message',
+  );
+  assert.equal(api.openFileStatus({kind: 'text', externalError: 'outside allowed root (HTTP 403)'}).message.includes('outside allowed root (HTTP 403)'), true);
 });
 
 test('t@6274', () => {
