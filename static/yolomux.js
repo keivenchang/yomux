@@ -10007,6 +10007,15 @@ async function expandFileTreeContainerToPath(container, root, path, generation =
     row = directFileTreeRow(scope, fullPath);
     if (!row) return false;
     if (row.dataset?.kind === 'dir') {
+      // An automatic reveal (following the active tab/file) must not resurrect an ancestor directory
+      // the user manually collapsed in sync mode -- the active path is often inside a repo the user
+      // just collapsed, and the deferred reveal would re-expand it, fighting the user. Stop at the
+      // collapsed ancestor. Route through the same fileExplorerSyncPathSuppressed predicate the sync
+      // expand-loop and remembered-state restore use, so all three honor one source of truth.
+      // Explicit reveals (auto !== true, e.g. the user clicked the file) still expand through.
+      if (options.auto === true && fullPath !== path && fileExplorerRootMode === 'sync' && fileExplorerSyncPathSuppressed(fullPath)) {
+        return false;
+      }
       const childScope = await ensureDirectoryRowExpanded(row, fullPath, {auto: options.auto === true});
       if (generation !== fileExplorerSyncGeneration) return false;
       if (fullPath !== path) {
@@ -15737,6 +15746,15 @@ async function expandDirectoryRow(row, fullPath, options = {}) {
   if (options.manual === true) {
     forgetFileExplorerSyncManualCollapse(fullPath);
     resetFileExplorerAppliedSyncPlan();
+  }
+  // A manual collapse can land while fetchDirectory() is in flight, so an AUTO reveal (active-tab/file
+  // reveal or sync expand-loop, both pass auto:true) must re-check suppression HERE -- the mutation
+  // point, after the await -- or it resurrects a directory the user just collapsed. Scope this to
+  // auto:true so it matches the expandFileTreeContainerToPath ancestor guard and does NOT touch the
+  // remembered-state restore path (auto:false), which has its own pre-await suppression filter and must
+  // be free to restore a directory across sync-target switches.
+  if (options.auto === true && fileExplorerRootMode === 'sync' && fileExplorerSyncPathSuppressed(fullPath)) {
+    return;
   }
   fileExplorerExpanded.add(fullPath);
   row.classList.add('expanded');

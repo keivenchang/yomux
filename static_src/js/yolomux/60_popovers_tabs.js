@@ -13,6 +13,15 @@ async function expandDirectoryRow(row, fullPath, options = {}) {
     forgetFileExplorerSyncManualCollapse(fullPath);
     resetFileExplorerAppliedSyncPlan();
   }
+  // A manual collapse can land while fetchDirectory() is in flight, so an AUTO reveal (active-tab/file
+  // reveal or sync expand-loop, both pass auto:true) must re-check suppression HERE -- the mutation
+  // point, after the await -- or it resurrects a directory the user just collapsed. Scope this to
+  // auto:true so it matches the expandFileTreeContainerToPath ancestor guard and does NOT touch the
+  // remembered-state restore path (auto:false), which has its own pre-await suppression filter and must
+  // be free to restore a directory across sync-target switches.
+  if (options.auto === true && fileExplorerRootMode === 'sync' && fileExplorerSyncPathSuppressed(fullPath)) {
+    return;
+  }
   fileExplorerExpanded.add(fullPath);
   row.classList.add('expanded');
   row.setAttribute('aria-expanded', 'true');

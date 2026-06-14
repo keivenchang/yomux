@@ -11,10 +11,18 @@ general.language) can leave a *persistent* shared config dir mutated across runs
 import os
 import tempfile
 
-# setdefault so an explicit external override (CI, a developer) still wins; otherwise use a unique
-# per-run temp dir that is naturally discarded between runs.
-os.environ.setdefault("YOLOMUX_CONFIG_DIR", tempfile.mkdtemp(prefix="yolomux-test-config-"))
-os.environ.setdefault("YOLOMUX_STATE_DIR", tempfile.mkdtemp(prefix="yolomux-test-state-"))
+# Each process needs its OWN config/state dir. Under pytest-xdist, worker subprocesses INHERIT the
+# parent's environment, so a plain setdefault makes every parallel worker share ONE YOLOMUX_CONFIG_DIR
+# -> one state.json. Concurrent TmuxWebtermApp construction in different workers then prunes each
+# other's session summaries out of that shared file (prune_yoagent_session_summaries keeps only its
+# own sessions), a ~6% KeyError flake under `-n auto`. Give each xdist worker a distinct dir; keep
+# setdefault's external override (CI/dev) for the serial / controller process.
+_xdist_worker = os.environ.get("PYTEST_XDIST_WORKER")
+for _env_var, _prefix in (("YOLOMUX_CONFIG_DIR", "yolomux-test-config-"), ("YOLOMUX_STATE_DIR", "yolomux-test-state-")):
+    if _xdist_worker:
+        os.environ[_env_var] = tempfile.mkdtemp(prefix=f"{_prefix}{_xdist_worker}-")
+    else:
+        os.environ.setdefault(_env_var, tempfile.mkdtemp(prefix=_prefix))
 
 
 SLOWEST_FIRST_TESTS = (

@@ -6251,6 +6251,94 @@ def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, t
     assert not any(row["hasExpanded"] or row["hasRepo"] or row["hasTouched"] for row in cleared), cleared
 
 
+def test_sync_mode_active_file_reveal_keeps_manual_collapse(browser, tmp_path):
+    """Deterministic guard for the ~5%-under-load flake in
+    test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs.
+
+    When the active tab's path is inside a repo the user just manually collapsed, the deferred
+    "reveal active file" auto-expand walked every ancestor and resurrected the collapsed repo,
+    leaving manualCollapsed intact but the directory re-expanded. The fix routes the auto-reveal
+    ancestor expansion through the same fileExplorerSyncPathSuppressed predicate the sync expand-loop
+    and remembered-state restore already use. Here we collapse repo-a, then fire the reveal for a
+    file inside repo-a directly (no contention needed) and assert repo-a stays collapsed.
+    """
+    session_files_payload = {
+        "session": "1",
+        "loaded": True,
+        "errors": [],
+        "repos": [{"repo": "/home/test/dynamo/repo-a"}, {"repo": "/home/test/dynamo/repo-b"}],
+        "files": [
+            {"repo": "/home/test/dynamo/repo-a", "path": "src/a.js", "abs_path": "/home/test/dynamo/repo-a/src/a.js"},
+            {"repo": "/home/test/dynamo/repo-b", "path": "lib/b.py", "abs_path": "/home/test/dynamo/repo-b/lib/b.py"},
+        ],
+    }
+    fs_entries = {
+        "/home/test": [{"name": "dynamo", "kind": "dir"}],
+        "/home/test/dynamo": [{"name": "repo-a", "kind": "dir"}, {"name": "repo-b", "kind": "dir"}],
+        "/home/test/dynamo/repo-a": [{"name": "src", "kind": "dir"}],
+        "/home/test/dynamo/repo-a/src": [{"name": "a.js", "kind": "file"}],
+        "/home/test/dynamo/repo-b": [{"name": "lib", "kind": "dir"}],
+        "/home/test/dynamo/repo-b/lib": [{"name": "b.py", "kind": "file"}],
+    }
+    page = tmp_path / "live-runtime-sync-reveal-manual-collapse.html"
+    page.write_text(
+        live_runtime_boot_fixture_html(
+            settings={"file_explorer": {"root_mode": "sync"}},
+            transcript_current_path="/home/test/dynamo/repo-a/src",
+            transcript_git_root="/home/test/dynamo/repo-a",
+            session_files_payload=session_files_payload,
+            fs_entries=fs_entries,
+        ),
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri() + "?sessions=files,1&layout=row@35(slot1,left)&tabs=slot1:files;left:1")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('.file-explorer-path-inline')?.value === '/home/test' && document.getElementById('panel-1') !== null;"
+        )
+    )
+    click_visible_panel(browser, "panel-1")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+            const rows = new Map(Array.from(tree?.querySelectorAll('.file-tree-row') || []).map(row => [row.dataset.path, row]));
+            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test/dynamo'
+              && rows.get('/home/test/dynamo/repo-a')?.getAttribute('aria-expanded') === 'true'
+              && rows.get('/home/test/dynamo/repo-b')?.getAttribute('aria-expanded') === 'true';
+            """
+        )
+    )
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const repoA = '/home/test/dynamo/repo-a';
+        const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+        tree.querySelector('.file-tree-row[data-path="' + repoA + '"]').click();
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const collapsedAfterClick = tree.querySelector('.file-tree-row[data-path="' + repoA + '"]')?.getAttribute('aria-expanded');
+          const manualHasA = fileExplorerSyncManualCollapsedPaths.has(repoA);
+          scheduleFileExplorerActiveFileReveal('/home/test/dynamo/repo-a/src/a.js');
+          requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => {
+            done({
+              collapsedAfterClick,
+              manualHasA,
+              repoAExpanded: tree.querySelector('.file-tree-row[data-path="' + repoA + '"]')?.getAttribute('aria-expanded') || '',
+              manualHasA_after: fileExplorerSyncManualCollapsedPaths.has(repoA),
+            });
+          })));
+        }));
+        """
+    )
+    # Preconditions: the click collapsed repo-a and recorded the manual collapse.
+    assert result["collapsedAfterClick"] == "false", result
+    assert result["manualHasA"] is True, result
+    # The fix: the active-file reveal must not resurrect the manually-collapsed ancestor...
+    assert result["repoAExpanded"] == "false", result
+    # ...and the manual-collapse record is left intact (matching the original flake's signature).
+    assert result["manualHasA_after"] is True, result
+
+
 def test_sync_finder_follows_clicked_editor_file_to_repo(browser, tmp_path):
     path = "/home/test/dynamo/frontend-crates/conformance/utils/tests/parity/reasoning/table.py"
     session_files_payload = {
@@ -12977,15 +13065,26 @@ def test_diff_overview_matches_actual_todo_codemirror_rows(browser, tmp_path):
     assert chunk["fromB"] == 744
     assert chunk["toB"] > chunk["fromB"]
     assert chunk["endB"] == chunk["toB"] - 1
-    assert metrics["rows"]["bands"] == [
-        {"kind": "remove", "start": 16, "end": 571},
-        {"kind": "add", "start": 571, "end": 824},
-    ]
-    assert metrics["rows"]["currentLineCount"] == 309
-    assert metrics["rows"]["deletedRows"] == 555
-    assert metrics["rows"]["totalRows"] == 864
+    # The B-side is the LIVE HEAD:docs/TODO.md, so the add-band end, currentLineCount, totalRows, and
+    # insertedRangeRows shift by one every time that roadmap doc gains/loses a line (it has, repeatedly,
+    # silently breaking this test -- it was just re-pinned 308->309). Pin the stable A-side remove band
+    # and assert the B-side via relationships + the actual current line count, so a TODO.md edit can't
+    # break it again.
+    bands = metrics["rows"]["bands"]
+    assert len(bands) == 2, bands
+    remove_band, add_band = bands[0], bands[1]
+    deleted_rows = metrics["rows"]["deletedRows"]
+    current_line_count = metrics["rows"]["currentLineCount"]
+    inserted_rows = metrics["insertedRangeRows"]
+    todo_line_count = (REPO_ROOT / "docs" / "TODO.md").read_text(encoding="utf-8").count("\n") + 1
+    assert remove_band == {"kind": "remove", "start": 16, "end": 16 + deleted_rows}, bands
+    assert add_band["kind"] == "add", bands
+    assert add_band["start"] == remove_band["end"], bands
+    assert add_band["end"] == add_band["start"] + inserted_rows, bands
+    assert current_line_count == todo_line_count, (current_line_count, todo_line_count)
+    assert metrics["rows"]["totalRows"] == deleted_rows + current_line_count
+    assert deleted_rows > 0 and inserted_rows > 0
     assert metrics["deletedDomRows"] == metrics["removedRangeRows"]
-    assert metrics["insertedRangeRows"] == 253
     assert "linear-gradient" in metrics["overviewBackground"]
     assert metrics["overviewStops"] == metrics["expectedStops"], metrics["overviewBackground"]
     assert metrics["tickCount"] == 0
