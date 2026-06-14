@@ -2490,7 +2490,7 @@ function maybeHandleServerVersionChange(serverVersion) {
   // The boot version (bootstrap.version) only updates on page load; this lets a
   // long-lived open client learn that a newer server shipped, via the metadata poll.
   if (!serverVersion || serverVersion === bootstrap.version) return;
-  if (!boolSetting('general.reload_on_update', true)) return;
+  if (!updateNotificationAllowsVersion(bootstrap.version, serverVersion)) return;
   if (serverVersionReloadHandled === serverVersion) return;
   serverVersionReloadHandled = serverVersion;
   if (boolSetting('general.reload_on_update_auto', false) && reloadIsSafe()) {
@@ -3034,6 +3034,7 @@ async function triggerSelfUpdate() {
 // with an "Update Now" action (admin-only; the endpoint rejects readonly).
 function applyUpdateAvailable(status) {
   if (!status || !status.available) return;
+  if (!updateNotificationAllowsVersion(status.current_version || status.current || bootstrap.version, status.target_version || status.target)) return;
   const badge = document.querySelector('[data-update-badge]');
   if (badge) {
     badge.hidden = false;

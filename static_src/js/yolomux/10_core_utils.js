@@ -1979,6 +1979,33 @@ function terminalSelectedText(term, container = null) {
   return term.getSelection?.() || browserSelectionTextInside(container);
 }
 
+const TERMINAL_APP_CLIPBOARD_MAX_AGE_MS = 15000;
+const terminalAppClipboardText = new Map();
+
+function rememberTerminalAppClipboardText(session, text, timestamp = Date.now()) {
+  const value = String(text ?? '');
+  if (!value) return;
+  terminalAppClipboardText.set(String(session || ''), {text: value, timestamp});
+}
+
+function recentTerminalAppClipboardText(session, timestamp = Date.now()) {
+  const key = String(session || '');
+  const entry = terminalAppClipboardText.get(key);
+  if (!entry) return '';
+  if (timestamp - entry.timestamp > TERMINAL_APP_CLIPBOARD_MAX_AGE_MS) {
+    terminalAppClipboardText.delete(key);
+    return '';
+  }
+  return entry.text;
+}
+
+function terminalContextMenuSelection(session, term, container = null, presetSelection = null) {
+  const selected = presetSelection == null ? terminalSelectedText(term, container) : String(presetSelection || '');
+  if (selected) return {text: selected, source: 'terminal'};
+  const appSelection = recentTerminalAppClipboardText(session);
+  return appSelection ? {text: appSelection, source: 'app-clipboard'} : {text: '', source: 'none'};
+}
+
 async function copyTerminalSelection(session, term, options = {}, container = null) {
   // N7: the context menu passes the selection captured at right-click time, because by the time the user
   // clicks the menu the live selection may be gone (focus moved to the menu).
@@ -2094,7 +2121,10 @@ function installTerminalOsc52Bridge(session, term) {
   term.parser.registerOscHandler(52, data => {
     const text = osc52ClipboardText(data);
     copyDebug('osc52', {session, payloadChars: String(data ?? '').length, textChars: text ? text.length : 0});
-    if (text) writeTerminalTextToClipboard(text, `copied ${text.length} chars`);
+    if (text) {
+      rememberTerminalAppClipboardText(session, text);
+      writeTerminalTextToClipboard(text, `copied ${text.length} chars`);
+    }
     return true; // consumed either way; '?' queries get no reply
   });
   return true;
@@ -2157,7 +2187,7 @@ function installTerminalCopyShortcut(session, term, container = null) {
   });
 }
 
-function showTerminalContextMenu(session, term, x, y, container = null, presetSelection = '') {
+function showTerminalContextMenu(session, term, x, y, container = null, presetSelection = null) {
   closeFileContextMenu();
   closeSessionContextMenu();
   closeFileImagePreview();
@@ -2166,7 +2196,11 @@ function showTerminalContextMenu(session, term, x, y, container = null, presetSe
   menu.className = 'terminal-context-menu';
   menu.setAttribute('role', 'menu');
   // N7: prefer the selection captured at right-click time over a live re-read (which can be empty by now).
-  const selected = presetSelection || terminalSelectedText(term, container);
+  // Claude and other TUIs may own the visible selection and only expose it through OSC 52, so fall back
+  // to the recent app clipboard payload instead of re-reading a tiny under-cursor browser fragment.
+  const selection = terminalContextMenuSelection(session, term, container, presetSelection);
+  const selected = selection.text;
+  copyDebug('contextmenu', {session, selectionSource: selection.source, chars: selected.length});
   const items = [
     ['Copy', false],
     ['Copy without indent', true],
@@ -2184,7 +2218,7 @@ function installTerminalContextMenu(session, term, container) {
   // selected text on the right-mousedown (capture phase, before xterm's handler) and stopPropagation so
   // xterm never processes that mousedown — the highlight stays visible AND the menu has the text even if
   // focus moves to the menu. No preventDefault, so the contextmenu event still fires normally.
-  let rightClickSelection = '';
+  let rightClickSelection = null;
   container.addEventListener('mousedown', event => {
     if (event.button !== 2) return;
     rightClickSelection = terminalSelectedText(term, container);
@@ -2194,7 +2228,7 @@ function installTerminalContextMenu(session, term, container) {
     event.preventDefault();
     event.stopPropagation();
     showTerminalContextMenu(session, term, event.clientX, event.clientY, container, rightClickSelection);
-    rightClickSelection = '';
+    rightClickSelection = null;
   });
 }
 

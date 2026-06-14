@@ -533,8 +533,8 @@
   "pref.general.language.label": "ภาษา",
   "pref.general.language.pseudo": "Pseudo (en-XA)",
   "pref.general.language.system": "ระบบ",
-  "pref.general.reload_on_update.help": "แสดงการแจ้งเตือนเมื่อมีอัปเดต YOLOmux ใหม่ เปิดไว้เป็นค่าเริ่มต้น",
-  "pref.general.reload_on_update.label": "แจ้งเตือนเมื่อมีอัปเดต",
+  "pref.general.reload_on_update.help": "หมายเลขเวอร์ชันใช้ MAJOR.MINOR.PATCH การเปลี่ยน Major รวมอยู่ใน Minor และ Patch ค่าเริ่มต้นคือ Patch และจะแจ้งเตือนทุกอัปเดตที่ใหม่กว่า",
+  "pref.general.reload_on_update.label": "แจ้งเตือนเมื่อ",
   "pref.general.reload_on_update_auto.help": "ถ้าเปิดการแจ้งเตือนอัปเดตไว้ ให้โหลดใหม่ทันทีแทนการแสดงการแจ้งเตือน แต่เฉพาะเมื่อปลอดภัย: ไม่มีการแก้ไขที่ยังไม่ได้บันทึกและไม่ได้กำลังพิมพ์",
   "pref.general.reload_on_update_auto.label": "Auto-reload on server update",
   "pref.general.startup_tips.help": "Show one small Tip after startup. You can hide a Tip or turn Tips off forever.",
@@ -1063,5 +1063,8 @@
   "yolo.titleForSession": "YOLO {state} for {session}",
   "yolo.titleReadonly": "YOLO {state} for {session}; readonly access",
   "pref.updates.check_enabled.label": "Automatically check for YOLOmux updates",
-  "pref.updates.check_enabled.help": "Automatically check https://github.com/keivenchang/yolomux for YOLOmux updates every hour. Installing an update is admin-only, fast-forward only, and never runs on a read-only session."
+  "pref.updates.check_enabled.help": "Automatically check https://github.com/keivenchang/yolomux for YOLOmux updates every hour. Installing an update is admin-only, fast-forward only, and never runs on a read-only session.",
+  "pref.general.reload_on_update.patch": "เวอร์ชัน Patch เปลี่ยน (ทุกอัปเดต)",
+  "pref.general.reload_on_update.minor": "เวอร์ชัน Minor เปลี่ยน",
+  "pref.general.reload_on_update.none": "ไม่แจ้งเตือน"
 }

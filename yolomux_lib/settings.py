@@ -64,6 +64,7 @@ IMAGE_DROP_ACTION_ORDER_SPECS: tuple[dict[str, Any], ...] = (
     },
 )
 DEFAULT_IMAGE_DROP_ACTION_ORDER: tuple[str, ...] = tuple(str(spec["canonical"]) for spec in IMAGE_DROP_ACTION_ORDER_SPECS)
+UPDATE_NOTIFICATION_LEVELS: tuple[str, ...] = ("patch", "minor", "none")
 SETTING_VALUE_ALIASES: dict[tuple[str, str], dict[str, str]] = {
     ("appearance", "editor_color_scheme"): {
         f"{LEGACY_EDITOR_SCHEME_PREFIX}-dark-plus": POPULAR_IDE_DARK_SCHEME,
@@ -83,7 +84,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "default_layout": "split",
         "default_sessions": [],
         "language": "system",
-        "reload_on_update": True,
+        "reload_on_update": "patch",
         "reload_on_update_auto": False,
         "startup_tips": True,
     },
@@ -343,6 +344,7 @@ SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
     },
     ("appearance", "editor_cursor_style"): {"line", "block"},
     ("appearance", "editor_cursor_color"): set(CURSOR_COLOR_CHOICES),
+    ("general", "reload_on_update"): set(UPDATE_NOTIFICATION_LEVELS),
     ("file_explorer", "root_mode"): {"fixed", "sync"},
     ("file_explorer", "image_open_mode"): {"same-tab", "new-tab"},
     ("share", "scheme"): {"http", "https"},
@@ -356,6 +358,7 @@ SETTING_PAYLOAD_CHOICE_ORDER: dict[tuple[str, str], tuple[str, ...]] = {
     ("appearance", "active_color"): UI_COLOR_CHOICES,
     ("appearance", "separator_color"): SEPARATOR_COLOR_CHOICES,
     ("appearance", "editor_cursor_color"): CURSOR_COLOR_CHOICES,
+    ("general", "reload_on_update"): UPDATE_NOTIFICATION_LEVELS,
     ("share", "view_fit"): ("cover", "contain"),
 }
 
@@ -364,8 +367,8 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("general", "default_layout"): "single | split | grid | wall. Reserved default for new visits.",
     ("general", "language"): "UI language. system matches the browser/OS; otherwise a locale code with a shipped catalog (en, zh-Hant, zh-Hans, ja, ko, es, de, fr, it, pt-BR, pl, nl, he, ar, ru, hi, vi, th, tr, en-XA pseudo).",
     ("general", "default_sessions"): "List of tmux sessions to prefer on load. Empty means discovered sessions.",
-    ("general", "reload_on_update"): "true/false. Default true. When true, an open client shows a 'YOLOmux update available' notification once the server ships a newer YOLOMUX_VERSION.",
-    ("general", "reload_on_update_auto"): "true/false. Default false. When reload_on_update is on, reload immediately instead of showing a banner — but only when it is safe (no unsaved editor changes and not mid-typing).",
+    ("general", "reload_on_update"): "patch | minor | none. Default patch. SemVer is MAJOR.MINOR.PATCH; patch notifies on any newer version, minor notifies only when MAJOR or MINOR changes, none disables update notifications.",
+    ("general", "reload_on_update_auto"): "true/false. Default false. When update notifications are enabled, reload immediately instead of showing a notification — but only when it is safe (no unsaved editor changes and not mid-typing).",
     ("general", "startup_tips"): "true/false. Default true. When true, a small startup Tip teaches one YOLOmux feature after the app loads; users can dismiss it or turn Tips off forever.",
     ("file_explorer", "indexed_dirs"): "Directories with a pre-built quick-open index, one path per line. Adding a path indexes it (also via the Finder right-click); removing a line un-indexes it.",
     ("file_explorer", "index_refresh_seconds"): "Seconds, 0-3600. How often the quick-open index is proactively refreshed in the background. 0 = only rebuild when you search.",
@@ -459,6 +462,20 @@ def coerce_bool(value: Any, default: bool) -> bool:
             return True
         if normalized in {"0", "false", "no", "off"}:
             return False
+    return default
+
+
+def coerce_update_notification_level(value: Any, default: str) -> str:
+    if isinstance(value, bool):
+        return "patch" if value else "none"
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return "patch"
+        if normalized in {"0", "false", "no", "off"}:
+            return "none"
+        if normalized in UPDATE_NOTIFICATION_LEVELS:
+            return normalized
     return default
 
 
@@ -602,7 +619,9 @@ def sanitize_settings(raw: Any, coerced: list[str] | None = None) -> dict[str, A
             legacy_markers = LEGACY_YOAGENT_PROMPT_MARKERS.get(key, []) if section == "yoagent" else []
             if isinstance(value, str) and any(marker in value for marker in legacy_markers):
                 value = default
-            if isinstance(default, bool):
+            if (section, key) == ("general", "reload_on_update"):
+                sanitized[section][key] = coerce_update_notification_level(value, default)
+            elif isinstance(default, bool):
                 sanitized[section][key] = coerce_bool(value, default)
             elif isinstance(default, (int, float)) and not isinstance(default, bool):
                 lower, upper = SETTING_LIMITS.get((section, key), (-10**9, 10**9))

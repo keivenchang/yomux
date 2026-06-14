@@ -533,8 +533,8 @@
   "pref.general.language.label": "Langue",
   "pref.general.language.pseudo": "Pseudo (en-XA)",
   "pref.general.language.system": "Système",
-  "pref.general.reload_on_update.help": "Afficher une notification lorsqu'une nouvelle mise à jour de YOLOmux est disponible. Activé par défaut.",
-  "pref.general.reload_on_update.label": "Notifier lorsque des mises à jour sont disponibles",
+  "pref.general.reload_on_update.help": "Les numéros de version utilisent MAJEUR.MINEUR.CORRECTIF. Les changements majeurs sont inclus avec Mineur et Correctif. Correctif est la valeur par défaut et notifie pour toute mise à jour plus récente.",
+  "pref.general.reload_on_update.label": "Notifier quand",
   "pref.general.reload_on_update_auto.help": "Si les notifications de mise à jour sont activées, recharger immédiatement au lieu d'afficher une notification, mais seulement quand c'est sûr : aucune modification d'éditeur non enregistrée et pas de saisie en cours.",
   "pref.general.reload_on_update_auto.label": "Recharger automatiquement à la mise à jour du serveur",
   "pref.general.startup_tips.help": "Show one small Tip after startup. You can hide a Tip or turn Tips off forever.",
@@ -1063,5 +1063,8 @@
   "yolo.titleForSession": "YOLO {state} for {session}",
   "yolo.titleReadonly": "YOLO {state} for {session}; readonly access",
   "pref.updates.check_enabled.label": "Automatically check for YOLOmux updates",
-  "pref.updates.check_enabled.help": "Automatically check https://github.com/keivenchang/yolomux for YOLOmux updates every hour. Installing an update is admin-only, fast-forward only, and never runs on a read-only session."
+  "pref.updates.check_enabled.help": "Automatically check https://github.com/keivenchang/yolomux for YOLOmux updates every hour. Installing an update is admin-only, fast-forward only, and never runs on a read-only session.",
+  "pref.general.reload_on_update.patch": "La version Correctif change (toutes les mises à jour)",
+  "pref.general.reload_on_update.minor": "La version Mineur change",
+  "pref.general.reload_on_update.none": "Aucune"
 }

@@ -507,6 +507,43 @@ function boolSetting(path, fallback) {
   return value === true || value === 'true' || value === 1;
 }
 
+const UPDATE_NOTIFICATION_LEVELS = ['patch', 'minor', 'none'];
+
+function normalizeUpdateNotificationLevel(value) {
+  if (value === true || value === 'true' || value === 1) return 'patch';
+  if (value === false || value === 'false' || value === 0) return 'none';
+  const clean = String(value || '').trim().toLowerCase();
+  return UPDATE_NOTIFICATION_LEVELS.includes(clean) ? clean : 'patch';
+}
+
+function updateNotificationLevelSetting() {
+  return normalizeUpdateNotificationLevel(initialSetting('general.reload_on_update', 'patch'));
+}
+
+function semanticVersionParts(value) {
+  const match = String(value || '').trim().match(/^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?/i);
+  if (!match) return null;
+  return [
+    Number.parseInt(match[1] || '0', 10),
+    Number.parseInt(match[2] || '0', 10),
+    Number.parseInt(match[3] || '0', 10),
+  ];
+}
+
+function updateNotificationAllowsVersion(currentVersion, targetVersion, level = updateNotificationLevelSetting()) {
+  const cleanLevel = normalizeUpdateNotificationLevel(level);
+  if (cleanLevel === 'none') return false;
+  const currentParts = semanticVersionParts(currentVersion);
+  const targetParts = semanticVersionParts(targetVersion);
+  if (!currentParts || !targetParts) {
+    return cleanLevel === 'patch' && String(targetVersion || '') !== String(currentVersion || '');
+  }
+  if (targetParts[0] !== currentParts[0]) return targetParts[0] > currentParts[0];
+  if (targetParts[1] !== currentParts[1]) return targetParts[1] > currentParts[1];
+  if (targetParts[2] !== currentParts[2]) return cleanLevel === 'patch' && targetParts[2] > currentParts[2];
+  return false;
+}
+
 function normalizeEditorCursorStyle(value) {
   return value === 'block' ? 'block' : 'line';
 }

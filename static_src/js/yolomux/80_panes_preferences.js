@@ -2141,6 +2141,15 @@ function separatorColorPreferenceChoices() {
     .map(separatorColorPreferenceChoice);
 }
 
+function updateNotificationPreferenceChoices() {
+  const choices = Array.isArray(clientSettingsPayload?.choices?.['general.reload_on_update'])
+    ? clientSettingsPayload.choices['general.reload_on_update']
+    : UPDATE_NOTIFICATION_LEVELS;
+  return choices
+    .filter(value => UPDATE_NOTIFICATION_LEVELS.includes(value))
+    .map(value => ({value, label: t(`pref.general.reload_on_update.${value}`)}));
+}
+
 function preferenceSections() {
   return [
     {title: t('pref.section.general'), items: [
@@ -2193,7 +2202,7 @@ function preferenceSections() {
       {path: 'editor.blame_all_lines', label: t('pref.editor.blame_all_lines.label'), type: 'boolean', help: t('pref.editor.blame_all_lines.help')},
     ]},
     {title: t('pref.section.notifications'), items: [
-      {path: 'general.reload_on_update', label: t('pref.general.reload_on_update.label'), type: 'boolean', help: t('pref.general.reload_on_update.help')},
+      {path: 'general.reload_on_update', label: t('pref.general.reload_on_update.label'), type: 'radio', choices: updateNotificationPreferenceChoices(), help: t('pref.general.reload_on_update.help')},
       {path: 'notifications.notify_transitions', label: t('pref.notifications.notify_transitions.label'), type: 'list', help: t('pref.notifications.notify_transitions.help')},
       {path: 'notifications.toast_duration_ms', label: t('pref.notifications.toast_duration_ms.label'), type: 'number', min: 1000, max: 60000, step: 500, suffix: 'ms', help: t('pref.notifications.toast_duration_ms.help')},
       {path: 'notifications.throttle_seconds', label: t('pref.notifications.throttle_seconds.label'), type: 'number', min: 0, max: 600, step: 5, suffix: 's', help: t('pref.notifications.throttle_seconds.help')},

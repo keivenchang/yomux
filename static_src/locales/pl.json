@@ -533,8 +533,8 @@
   "pref.general.language.label": "Język",
   "pref.general.language.pseudo": "Pseudo (en-XA)",
   "pref.general.language.system": "System",
-  "pref.general.reload_on_update.help": "Pokaż powiadomienie, gdy dostępna jest nowa aktualizacja YOLOmux. Domyślnie włączone.",
-  "pref.general.reload_on_update.label": "Powiadamiaj, gdy aktualizacje są dostępne",
+  "pref.general.reload_on_update.help": "Numery wersji używają MAJOR.MINOR.PATCH. Zmiany major są objęte opcjami Minor i Patch. Patch jest domyślny i powiadamia o każdej nowszej aktualizacji.",
+  "pref.general.reload_on_update.label": "Powiadamiaj, gdy",
   "pref.general.reload_on_update_auto.help": "Jeśli powiadomienia o aktualizacjach są włączone, przeładuj od razu zamiast pokazywać powiadomienie, ale tylko gdy jest to bezpieczne: brak niezapisanych zmian w edytorze i brak pisania.",
   "pref.general.reload_on_update_auto.label": "Auto-reload on server update",
   "pref.general.startup_tips.help": "Show one small Tip after startup. You can hide a Tip or turn Tips off forever.",
@@ -1063,5 +1063,8 @@
   "yolo.titleForSession": "YOLO {state} for {session}",
   "yolo.titleReadonly": "YOLO {state} for {session}; readonly access",
   "pref.updates.check_enabled.label": "Automatically check for YOLOmux updates",
-  "pref.updates.check_enabled.help": "Automatically check https://github.com/keivenchang/yolomux for YOLOmux updates every hour. Installing an update is admin-only, fast-forward only, and never runs on a read-only session."
+  "pref.updates.check_enabled.help": "Automatically check https://github.com/keivenchang/yolomux for YOLOmux updates every hour. Installing an update is admin-only, fast-forward only, and never runs on a read-only session.",
+  "pref.general.reload_on_update.patch": "Zmieni się wersja Patch (wszystkie aktualizacje)",
+  "pref.general.reload_on_update.minor": "Zmieni się wersja Minor",
+  "pref.general.reload_on_update.none": "Brak"
 }

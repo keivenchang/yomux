@@ -420,6 +420,8 @@ globalThis.__layoutTestApi = {
   i18nActiveLocaleId,
   i18nSetCatalogForTest,
   setActiveLocaleForTest(locale) { i18nActiveLocale = locale; },
+  updateNotificationAllowsVersionForTest: updateNotificationAllowsVersion,
+  normalizeUpdateNotificationLevelForTest: normalizeUpdateNotificationLevel,
   createAppMenuCommand,
   backgroundTabItems,
   canPaneExpand,
@@ -621,6 +623,8 @@ globalThis.__layoutTestApi = {
   installTerminalCopyShortcutForTest: installTerminalCopyShortcut,
   osc52ClipboardText,
   installTerminalOsc52BridgeForTest: installTerminalOsc52Bridge,
+  rememberTerminalAppClipboardTextForTest: rememberTerminalAppClipboardText,
+  terminalContextMenuSelectionForTest: terminalContextMenuSelection,
   setFetchForTest(fn) { globalThis.fetch = fn; },
   clipboardTextForTest() { return globalThis.__clipboardText; },
   clearClipboardTextForTest() { globalThis.__clipboardText = ''; },
@@ -2487,8 +2491,17 @@ test('t@1869', () => {
   assert.ok(/function yoagentResolvedBackend\(\)[\s\S]*?for \(const agent of \['codex', 'claude'\]\)[\s\S]*?availableAgents\.has\(agent\) && agentLoggedIn\(agent\)/.test(source), '#41: yoagentResolvedBackend prefers codex then claude among logged-in agents');
   assert.ok(source.includes("initialSetting('yoagent.backend', 'auto')"), '#41: the YO!agent backend default is auto');
   assert.ok(/function yoagentChatEnabled\(\)[\s\S]*?yoagentResolvedBackend\(\)/.test(source), '#41: chat-enabled tracks the resolved backend');
-  assert.ok(/maybeHandleServerVersionChange[\s\S]*serverVersion === bootstrap\.version[\s\S]*boolSetting\('general\.reload_on_update'/.test(source), 'server-version reload is gated on the boot version and the reload_on_update preference');
+  assert.ok(/maybeHandleServerVersionChange[\s\S]*serverVersion === bootstrap\.version[\s\S]*updateNotificationAllowsVersion\(bootstrap\.version, serverVersion\)/.test(source), 'server-version reload is gated on the boot version and the reload_on_update threshold');
+  assert.ok(/function updateNotificationAllowsVersion\([^)]*\)[\s\S]*cleanLevel === 'none'[\s\S]*targetParts\[1\] !== currentParts\[1\][\s\S]*cleanLevel === 'patch' && targetParts\[2\] > currentParts\[2\]/.test(source), 'update notification threshold follows SemVer major/minor/patch');
   assert.ok(/maybeHandleServerVersionChange[\s\S]*boolSetting\('general\.reload_on_update_auto'[\s\S]*reloadIsSafe\(\)/.test(source), 'auto-reload only fires when enabled and reloadIsSafe()');
+  const updateApi = loadYolomux('', ['1']);
+  assert.equal(updateApi.normalizeUpdateNotificationLevelForTest(true), 'patch', 'legacy true maps to patch notifications');
+  assert.equal(updateApi.normalizeUpdateNotificationLevelForTest(false), 'none', 'legacy false maps to no update notifications');
+  assert.equal(updateApi.updateNotificationAllowsVersionForTest('0.3.25', '0.3.26', 'patch'), true, 'patch threshold notifies for patch updates');
+  assert.equal(updateApi.updateNotificationAllowsVersionForTest('0.3.25', '0.3.26', 'minor'), false, 'minor threshold suppresses patch-only updates');
+  assert.equal(updateApi.updateNotificationAllowsVersionForTest('0.3.25', '0.4.0', 'minor'), true, 'minor threshold notifies for minor updates');
+  assert.equal(updateApi.updateNotificationAllowsVersionForTest('0.3.25', '1.0.0', 'minor'), true, 'minor threshold includes major updates');
+  assert.equal(updateApi.updateNotificationAllowsVersionForTest('0.3.25', '1.0.0', 'none'), false, 'none threshold suppresses update notifications');
   assert.ok(/function reloadIsSafe\(\)[\s\S]*file\?\.dirty[\s\S]*isContentEditable/.test(source), 'reloadIsSafe refuses when an editor buffer is dirty or the user is typing');
   // #40: YO!info and YO!agent are merged into ONE panel with a segmented sub-tab toggle; both sub-views
   // (the metadata table + the AI chat/summary) live in the single info panel and the active one is shown.
@@ -10129,7 +10142,8 @@ test('t@7900', () => {
     const next = html.indexOf('data-preference-section="', start + 1);
     return next >= 0 ? html.slice(start, next) : html.slice(start);
   };
-  assert.ok(sectionHtml(api.t('pref.section.notifications')).includes('data-setting-path="general.reload_on_update"'), 'Notify on server update is in Notifications');
+  assert.ok(sectionHtml(api.t('pref.section.notifications')).includes('data-setting-path="general.reload_on_update"'), 'Notify when updates are available is in Notifications');
+  assert.ok(/type="radio"[^>]*value="patch"[^>]*data-setting-path="general\.reload_on_update"[\s\S]*type="radio"[^>]*value="minor"[^>]*data-setting-path="general\.reload_on_update"[\s\S]*type="radio"[^>]*value="none"[^>]*data-setting-path="general\.reload_on_update"/.test(sectionHtml(api.t('pref.section.notifications'))), 'Update notification threshold offers patch, minor, and none');
   const shareHtml = sectionHtml(api.t('pref.section.share'));
   assert.ok(shareHtml.includes('data-setting-path="share.ttl_seconds"'), 'YO!share Preferences exposes the default share lifetime');
   assert.ok(shareHtml.includes('data-setting-path="share.max_viewers"'), 'YO!share Preferences exposes the default viewer cap');
@@ -11095,8 +11109,15 @@ test('t@8804', () => {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(/container\.addEventListener\('mousedown', event => \{[\s\S]*?event\.button !== 2[\s\S]*?rightClickSelection = terminalSelectedText\(term, container\);[\s\S]*?event\.stopPropagation\(\);[\s\S]*?\}, \{capture: true\}\)/.test(source), 'N7: a capture-phase right-mousedown captures the selection and stops xterm clearing it');
   assert.ok(/showTerminalContextMenu\(session, term, event\.clientX, event\.clientY, container, rightClickSelection\)/.test(source), 'N7: the context menu receives the selection captured at right-click time');
+  assert.ok(/function terminalContextMenuSelection\(session, term, container = null, presetSelection = null\)[\s\S]*presetSelection == null \? terminalSelectedText\(term, container\) : String\(presetSelection \|\| ''\)/.test(source), 'N7: an explicitly captured empty right-click selection is not replaced by a live under-cursor re-read');
+  assert.ok(/function terminalContextMenuSelection\(session, term, container = null, presetSelection = null\)[\s\S]*recentTerminalAppClipboardText\(session\)/.test(source), 'N7: Claude/TUI OSC 52 clipboard text is the context-menu fallback when the app owns the visible selection');
   assert.ok(/copyTerminalSelection\(session, term, \{dedent, selectionText: selected\}, container\)/.test(source), 'N7: menu Copy uses the captured selection text, not a stale live re-read');
   assert.ok(/const selected = options\.selectionText != null \? options\.selectionText : terminalSelectedText\(term, container\)/.test(source), 'N7: copyTerminalSelection honors an explicit captured selection');
+  const api = loadYolomux('', ['1']);
+  const badLiveRead = {getSelection: () => 'under cursor'};
+  assert.deepEqual(api.terminalContextMenuSelectionForTest('1', badLiveRead, null, ''), {text: '', source: 'none'}, 'captured empty right-click selection does not copy under-cursor live text');
+  api.rememberTerminalAppClipboardTextForTest('1', 'claude selected block');
+  assert.deepEqual(api.terminalContextMenuSelectionForTest('1', badLiveRead, null, ''), {text: 'claude selected block', source: 'app-clipboard'}, 'recent Claude OSC 52 app selection beats under-cursor live text');
 });
 
 // DOIT.58 B1-B7: the Tabber (Finder pane's third mode) — source guards that rows route through the

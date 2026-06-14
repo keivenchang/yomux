@@ -3338,6 +3338,33 @@ function terminalSelectedText(term, container = null) {
   return term.getSelection?.() || browserSelectionTextInside(container);
 }
 
+const TERMINAL_APP_CLIPBOARD_MAX_AGE_MS = 15000;
+const terminalAppClipboardText = new Map();
+
+function rememberTerminalAppClipboardText(session, text, timestamp = Date.now()) {
+  const value = String(text ?? '');
+  if (!value) return;
+  terminalAppClipboardText.set(String(session || ''), {text: value, timestamp});
+}
+
+function recentTerminalAppClipboardText(session, timestamp = Date.now()) {
+  const key = String(session || '');
+  const entry = terminalAppClipboardText.get(key);
+  if (!entry) return '';
+  if (timestamp - entry.timestamp > TERMINAL_APP_CLIPBOARD_MAX_AGE_MS) {
+    terminalAppClipboardText.delete(key);
+    return '';
+  }
+  return entry.text;
+}
+
+function terminalContextMenuSelection(session, term, container = null, presetSelection = null) {
+  const selected = presetSelection == null ? terminalSelectedText(term, container) : String(presetSelection || '');
+  if (selected) return {text: selected, source: 'terminal'};
+  const appSelection = recentTerminalAppClipboardText(session);
+  return appSelection ? {text: appSelection, source: 'app-clipboard'} : {text: '', source: 'none'};
+}
+
 async function copyTerminalSelection(session, term, options = {}, container = null) {
   // N7: the context menu passes the selection captured at right-click time, because by the time the user
   // clicks the menu the live selection may be gone (focus moved to the menu).
@@ -3453,7 +3480,10 @@ function installTerminalOsc52Bridge(session, term) {
   term.parser.registerOscHandler(52, data => {
     const text = osc52ClipboardText(data);
     copyDebug('osc52', {session, payloadChars: String(data ?? '').length, textChars: text ? text.length : 0});
-    if (text) writeTerminalTextToClipboard(text, `copied ${text.length} chars`);
+    if (text) {
+      rememberTerminalAppClipboardText(session, text);
+      writeTerminalTextToClipboard(text, `copied ${text.length} chars`);
+    }
     return true; // consumed either way; '?' queries get no reply
   });
   return true;
@@ -3516,7 +3546,7 @@ function installTerminalCopyShortcut(session, term, container = null) {
   });
 }
 
-function showTerminalContextMenu(session, term, x, y, container = null, presetSelection = '') {
+function showTerminalContextMenu(session, term, x, y, container = null, presetSelection = null) {
   closeFileContextMenu();
   closeSessionContextMenu();
   closeFileImagePreview();
@@ -3525,7 +3555,11 @@ function showTerminalContextMenu(session, term, x, y, container = null, presetSe
   menu.className = 'terminal-context-menu';
   menu.setAttribute('role', 'menu');
   // N7: prefer the selection captured at right-click time over a live re-read (which can be empty by now).
-  const selected = presetSelection || terminalSelectedText(term, container);
+  // Claude and other TUIs may own the visible selection and only expose it through OSC 52, so fall back
+  // to the recent app clipboard payload instead of re-reading a tiny under-cursor browser fragment.
+  const selection = terminalContextMenuSelection(session, term, container, presetSelection);
+  const selected = selection.text;
+  copyDebug('contextmenu', {session, selectionSource: selection.source, chars: selected.length});
   const items = [
     ['Copy', false],
     ['Copy without indent', true],
@@ -3543,7 +3577,7 @@ function installTerminalContextMenu(session, term, container) {
   // selected text on the right-mousedown (capture phase, before xterm's handler) and stopPropagation so
   // xterm never processes that mousedown — the highlight stays visible AND the menu has the text even if
   // focus moves to the menu. No preventDefault, so the contextmenu event still fires normally.
-  let rightClickSelection = '';
+  let rightClickSelection = null;
   container.addEventListener('mousedown', event => {
     if (event.button !== 2) return;
     rightClickSelection = terminalSelectedText(term, container);
@@ -3553,7 +3587,7 @@ function installTerminalContextMenu(session, term, container) {
     event.preventDefault();
     event.stopPropagation();
     showTerminalContextMenu(session, term, event.clientX, event.clientY, container, rightClickSelection);
-    rightClickSelection = '';
+    rightClickSelection = null;
   });
 }
 
@@ -15351,6 +15385,43 @@ function boolSetting(path, fallback) {
   return value === true || value === 'true' || value === 1;
 }
 
+const UPDATE_NOTIFICATION_LEVELS = ['patch', 'minor', 'none'];
+
+function normalizeUpdateNotificationLevel(value) {
+  if (value === true || value === 'true' || value === 1) return 'patch';
+  if (value === false || value === 'false' || value === 0) return 'none';
+  const clean = String(value || '').trim().toLowerCase();
+  return UPDATE_NOTIFICATION_LEVELS.includes(clean) ? clean : 'patch';
+}
+
+function updateNotificationLevelSetting() {
+  return normalizeUpdateNotificationLevel(initialSetting('general.reload_on_update', 'patch'));
+}
+
+function semanticVersionParts(value) {
+  const match = String(value || '').trim().match(/^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?/i);
+  if (!match) return null;
+  return [
+    Number.parseInt(match[1] || '0', 10),
+    Number.parseInt(match[2] || '0', 10),
+    Number.parseInt(match[3] || '0', 10),
+  ];
+}
+
+function updateNotificationAllowsVersion(currentVersion, targetVersion, level = updateNotificationLevelSetting()) {
+  const cleanLevel = normalizeUpdateNotificationLevel(level);
+  if (cleanLevel === 'none') return false;
+  const currentParts = semanticVersionParts(currentVersion);
+  const targetParts = semanticVersionParts(targetVersion);
+  if (!currentParts || !targetParts) {
+    return cleanLevel === 'patch' && String(targetVersion || '') !== String(currentVersion || '');
+  }
+  if (targetParts[0] !== currentParts[0]) return targetParts[0] > currentParts[0];
+  if (targetParts[1] !== currentParts[1]) return targetParts[1] > currentParts[1];
+  if (targetParts[2] !== currentParts[2]) return cleanLevel === 'patch' && targetParts[2] > currentParts[2];
+  return false;
+}
+
 function normalizeEditorCursorStyle(value) {
   return value === 'block' ? 'block' : 'line';
 }
@@ -22972,6 +23043,15 @@ function separatorColorPreferenceChoices() {
     .map(separatorColorPreferenceChoice);
 }
 
+function updateNotificationPreferenceChoices() {
+  const choices = Array.isArray(clientSettingsPayload?.choices?.['general.reload_on_update'])
+    ? clientSettingsPayload.choices['general.reload_on_update']
+    : UPDATE_NOTIFICATION_LEVELS;
+  return choices
+    .filter(value => UPDATE_NOTIFICATION_LEVELS.includes(value))
+    .map(value => ({value, label: t(`pref.general.reload_on_update.${value}`)}));
+}
+
 function preferenceSections() {
   return [
     {title: t('pref.section.general'), items: [
@@ -23024,7 +23104,7 @@ function preferenceSections() {
       {path: 'editor.blame_all_lines', label: t('pref.editor.blame_all_lines.label'), type: 'boolean', help: t('pref.editor.blame_all_lines.help')},
     ]},
     {title: t('pref.section.notifications'), items: [
-      {path: 'general.reload_on_update', label: t('pref.general.reload_on_update.label'), type: 'boolean', help: t('pref.general.reload_on_update.help')},
+      {path: 'general.reload_on_update', label: t('pref.general.reload_on_update.label'), type: 'radio', choices: updateNotificationPreferenceChoices(), help: t('pref.general.reload_on_update.help')},
       {path: 'notifications.notify_transitions', label: t('pref.notifications.notify_transitions.label'), type: 'list', help: t('pref.notifications.notify_transitions.help')},
       {path: 'notifications.toast_duration_ms', label: t('pref.notifications.toast_duration_ms.label'), type: 'number', min: 1000, max: 60000, step: 500, suffix: 'ms', help: t('pref.notifications.toast_duration_ms.help')},
       {path: 'notifications.throttle_seconds', label: t('pref.notifications.throttle_seconds.label'), type: 'number', min: 0, max: 600, step: 5, suffix: 's', help: t('pref.notifications.throttle_seconds.help')},
@@ -34188,7 +34268,7 @@ function maybeHandleServerVersionChange(serverVersion) {
   // The boot version (bootstrap.version) only updates on page load; this lets a
   // long-lived open client learn that a newer server shipped, via the metadata poll.
   if (!serverVersion || serverVersion === bootstrap.version) return;
-  if (!boolSetting('general.reload_on_update', true)) return;
+  if (!updateNotificationAllowsVersion(bootstrap.version, serverVersion)) return;
   if (serverVersionReloadHandled === serverVersion) return;
   serverVersionReloadHandled = serverVersion;
   if (boolSetting('general.reload_on_update_auto', false) && reloadIsSafe()) {
@@ -34732,6 +34812,7 @@ async function triggerSelfUpdate() {
 // with an "Update Now" action (admin-only; the endpoint rejects readonly).
 function applyUpdateAvailable(status) {
   if (!status || !status.available) return;
+  if (!updateNotificationAllowsVersion(status.current_version || status.current || bootstrap.version, status.target_version || status.target)) return;
   const badge = document.querySelector('[data-update-badge]');
   if (badge) {
     badge.hidden = false;

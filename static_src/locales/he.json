@@ -533,8 +533,8 @@
   "pref.general.language.label": "שפה",
   "pref.general.language.pseudo": "פסאודו (en-XA)",
   "pref.general.language.system": "מערכת",
-  "pref.general.reload_on_update.help": "הצג התראה כאשר עדכון חדש של YOLOmux זמין. מופעל כברירת מחדל.",
-  "pref.general.reload_on_update.label": "להודיע כאשר עדכונים זמינים",
+  "pref.general.reload_on_update.help": "מספרי גרסה משתמשים ב-MAJOR.MINOR.PATCH. שינויים מסוג Major כלולים ב-Minor וב-Patch. Patch הוא ברירת המחדל ומתריע על כל עדכון חדש יותר.",
+  "pref.general.reload_on_update.label": "להודיע כאשר",
   "pref.general.reload_on_update_auto.help": "אם התראות עדכון מופעלות, טען מחדש מיד במקום להציג התראה, אך רק כשזה בטוח: אין שינויים לא שמורים בעורך ואין הקלדה פעילה.",
   "pref.general.reload_on_update_auto.label": "טעינה מחדש אוטומטית בעדכון שרת",
   "pref.general.startup_tips.help": "Show one small Tip after startup. You can hide a Tip or turn Tips off forever.",
@@ -1063,5 +1063,8 @@
   "yolo.titleForSession": "YOLO {state} for {session}",
   "yolo.titleReadonly": "YOLO {state} for {session}; readonly access",
   "pref.updates.check_enabled.label": "Automatically check for YOLOmux updates",
-  "pref.updates.check_enabled.help": "Automatically check https://github.com/keivenchang/yolomux for YOLOmux updates every hour. Installing an update is admin-only, fast-forward only, and never runs on a read-only session."
+  "pref.updates.check_enabled.help": "Automatically check https://github.com/keivenchang/yolomux for YOLOmux updates every hour. Installing an update is admin-only, fast-forward only, and never runs on a read-only session.",
+  "pref.general.reload_on_update.patch": "גרסת Patch משתנה (כל העדכונים)",
+  "pref.general.reload_on_update.minor": "גרסת Minor משתנה",
+  "pref.general.reload_on_update.none": "ללא"
 }

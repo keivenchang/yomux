@@ -46,7 +46,7 @@ def test_legacy_yoagent_default_prompts_migrate_without_overwriting_custom_text(
 def test_sanitize_settings_clamps_numbers_and_choices():
     settings = sanitize_settings(
         {
-            "general": {"default_layout": "bad"},
+            "general": {"default_layout": "bad", "reload_on_update": "bad"},
             "appearance": {"theme": "neon", "terminal_theme": "neon", "date_time_hour_cycle": "bogus", "ui_font_size": 1, "terminal_font_size": 100, "editor_font_size": 100, "editor_color_scheme": "bogus", "editor_dark_color_scheme": "github-light", "editor_light_color_scheme": "popular-ide-dark-plus", "editor_cursor_style": "beam", "editor_cursor_color": "bogus-cursor", "separator_color": "bogus-separator", "file_explorer_font_size": 1, "tab_width": 20, "pane_spacing": 50, "pane_ring_opacity": 1, "inactive_pane_opacity": 500},
             "file_explorer": {"root_mode": "bad", "image_open_mode": "bad", "image_preview_max_px": 5000, "refresh_seconds": 99},
             "notifications": {"notify_transitions": ["needs-input", "bogus", "done"]},
@@ -61,6 +61,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     )
 
     assert settings["general"]["default_layout"] == "split"
+    assert settings["general"]["reload_on_update"] == "patch"
     assert settings["appearance"]["theme"] == "dark"
     assert settings["appearance"]["terminal_theme"] == "follow-app"
     assert settings["appearance"]["date_time_hour_cycle"] == "24"
@@ -469,7 +470,13 @@ def test_updates_check_defaults_on():
     # Auto-update check defaults ON, surfaced as the Performance "Auto-update check" toggle.
     general = default_settings()["general"]
     updates = default_settings()["updates"]
-    assert general["reload_on_update"] is True
+    assert general["reload_on_update"] == "patch"
     assert general["reload_on_update_auto"] is False
     assert updates["check_enabled"] is True
     assert updates["check_interval_minutes"] == 60
+
+
+def test_update_notification_level_migrates_legacy_boolean():
+    assert sanitize_settings({"general": {"reload_on_update": True}})["general"]["reload_on_update"] == "patch"
+    assert sanitize_settings({"general": {"reload_on_update": False}})["general"]["reload_on_update"] == "none"
+    assert sanitize_settings({"general": {"reload_on_update": "minor"}})["general"]["reload_on_update"] == "minor"

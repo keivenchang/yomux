@@ -533,8 +533,8 @@
   "pref.general.language.label": "Idioma",
   "pref.general.language.pseudo": "Pseudo (en-XA)",
   "pref.general.language.system": "Sistema",
-  "pref.general.reload_on_update.help": "Mostrar una notificación cuando haya una nueva actualización de YOLOmux disponible. Activado por defecto.",
-  "pref.general.reload_on_update.label": "Avisar cuando haya actualizaciones disponibles",
+  "pref.general.reload_on_update.help": "Los números de versión usan MAYOR.MENOR.PARCHE. Los cambios mayores se incluyen con Menor y Parche. Parche es el valor predeterminado y avisa por cualquier actualización más nueva.",
+  "pref.general.reload_on_update.label": "Avisar cuando",
   "pref.general.reload_on_update_auto.help": "Si las notificaciones de actualización están activadas, recarga inmediatamente en lugar de mostrar una notificación, pero solo cuando sea seguro: sin cambios sin guardar en el editor y sin estar escribiendo.",
   "pref.general.reload_on_update_auto.label": "Recargar automáticamente al actualizar el servidor",
   "pref.general.startup_tips.help": "Show one small Tip after startup. You can hide a Tip or turn Tips off forever.",
@@ -1063,5 +1063,8 @@
   "yolo.titleForSession": "YOLO {state} for {session}",
   "yolo.titleReadonly": "YOLO {state} for {session}; readonly access",
   "pref.updates.check_enabled.label": "Automatically check for YOLOmux updates",
-  "pref.updates.check_enabled.help": "Automatically check https://github.com/keivenchang/yolomux for YOLOmux updates every hour. Installing an update is admin-only, fast-forward only, and never runs on a read-only session."
+  "pref.updates.check_enabled.help": "Automatically check https://github.com/keivenchang/yolomux for YOLOmux updates every hour. Installing an update is admin-only, fast-forward only, and never runs on a read-only session.",
+  "pref.general.reload_on_update.patch": "Cambie la versión Parche (todas las actualizaciones)",
+  "pref.general.reload_on_update.minor": "Cambie la versión Menor",
+  "pref.general.reload_on_update.none": "Nada"
 }
