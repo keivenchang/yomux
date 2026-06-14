@@ -87,39 +87,39 @@ Full pytest may need local socket/browser access. If a sandboxed run fails with 
 
 ## Dev And Production Servers
 
-Production and development instances run side-by-side:
+Production and development instances can run side-by-side. The project does not require a fixed dev numbering scheme; choose a checkout path, HTTPS port, and user-unit name that match your machine.
 
-| Instance | Directory | Port | Purpose |
+| Role | Directory | Port | Purpose |
 |---|---|---|---|
-| prod | `~/yolomux/` | HTTPS `7777` | Stable copy, synced from dev after verification |
-| dev1 | `~/yolomux.dev1/` | HTTPS `8001` | Active development worktree 1 |
-| dev2 | `~/yolomux.dev2/` | HTTPS `8002` | Active development worktree 2 |
-| dev3 | `~/yolomux.dev3/` | HTTPS `8003` | Active development worktree 3 |
-| dev4 | `~/yolomux.dev4/` | HTTPS `8004` | Active development worktree 4 |
+| prod | Production checkout, for example `~/yolomux/` | Stable HTTPS port | Stable copy, synced from dev after verification |
+| dev | Any development checkout or git worktree | Non-conflicting HTTPS port | Active development server |
 
-The dev worktree ports are HTTPS-only in normal use. Launch them with `--self-signed --dang`; do not use plain HTTP for `8001`-`8004`.
+Development servers are HTTPS in normal use. Launch them with `--self-signed --dang` on the port you selected; avoid plain HTTP unless you are testing that path explicitly.
 
 For an ad hoc dev run:
 
 ```bash
-python3 yolomux.py --host 0.0.0.0 --port 8001 --self-signed --dang
+python3 yolomux.py --host 0.0.0.0 --port <port> --self-signed --dang
 ```
 
 ### Restart workflow
 
-For dev1, use the repo restart owner. It sets `PATH` explicitly before launch so agent CLIs under `~/.local/bin` are visible even when the caller has a stripped systemd/cron-style environment:
+If your checkout matches the repo-owned dev1 convention, use the repo restart owner. It sets `PATH` explicitly before launch so agent CLIs under `~/.local/bin` are visible even when the caller has a stripped systemd/cron-style environment:
 
 ```bash
 tools/yolomux-restart-dev1.sh
 ```
 
-The script defaults to HTTPS `8001`, `--self-signed`, and `--dang`; override with `YOLOMUX_DEV1_PORT`, `YOLOMUX_HOST`, or `YOLOMUX_DEV1_LOG` only when testing a non-standard dev1 instance. It prefers `systemd-run --user` and falls back to a detached `nohup` process with logs under `/tmp`.
+The script defaults to its local dev1 checkout and port; override with `YOLOMUX_DEV1_PORT`, `YOLOMUX_HOST`, or `YOLOMUX_DEV1_LOG` only when testing that convention. For any other checkout or port, use the manual pattern below instead of running a stale local script that might point at the wrong worktree.
 
-Manual reference: delegate the kill/relaunch chain to `systemd-run` as a transient user unit, so the server is not a child of the launching shell. Restart prod by swapping `dev1`/`8001`/`~/yolomux.dev1` for `prod`/`7777`/`~/yolomux`:
+Manual reference: delegate the kill/relaunch chain to `systemd-run` as a transient user unit, so the server is not a child of the launching shell. Set the unit name, checkout, and port first; then reuse the same values for verification.
 
 ```bash
-systemctl --user stop yolomux-dev1-8001 2>/dev/null
-systemd-run --user --quiet --collect --unit=yolomux-dev1-8001 --working-directory=/home/keivenc/yolomux.dev1 env PATH="$HOME/.local/bin:$PATH" TERM=xterm-256color PYTHONUNBUFFERED=1 /usr/bin/python3 /home/keivenc/yolomux.dev1/yolomux.py --host 0.0.0.0 --port 8001 --dangerously-yolo --self-signed
+unit=yolomux-dev-<port>
+checkout=<absolute-checkout-path>
+port=<port>
+systemctl --user stop "$unit" 2>/dev/null
+systemd-run --user --quiet --collect --unit="$unit" --working-directory="$checkout" env PATH="$HOME/.local/bin:$PATH" TERM=xterm-256color PYTHONUNBUFFERED=1 /usr/bin/python3 "$checkout/yolomux.py" --host 0.0.0.0 --port "$port" --dangerously-yolo --self-signed
 ```
 
 Fallback when `systemd-run --user` is unavailable (some AI-harness sandboxes deny the D-Bus call): kill by PID, then relaunch detached with `( cd <checkout> && nohup python3 -u yolomux.py ... >> /tmp/<log> 2>&1 </dev/null & )`. Two footguns: (1) never `pkill -f` a pattern that also appears literally in the same command's launch string — it matches your own shell and TERMs it (use a `$port` variable in the pattern and keep kill and relaunch in separate commands); (2) a backend `.py` change only takes effect after the python process restarts — `static_build.py` does not touch it.
@@ -127,21 +127,21 @@ Fallback when `systemd-run --user` is unavailable (some AI-harness sandboxes den
 Verify after restart:
 
 ```bash
-ps -ef | grep "yolomux\.py.*8001" | grep -v grep
-ss -tlnp 2>/dev/null | grep ":8001 "
-curl -sk -o /dev/null -w "ping: %{http_code} %{time_total}s\n" https://localhost:8001/api/ping
-curl -skL -u <user>:<pass> https://localhost:8001/ | grep -oE 'YOLOmux [0-9.]+' | head -1
+ps -ef | grep "yolomux\.py.*<port>" | grep -v grep
+ss -tlnp 2>/dev/null | grep ":<port> "
+curl -sk -o /dev/null -w "ping: %{http_code} %{time_total}s\n" https://localhost:<port>/api/ping
+curl -skL -u <user>:<pass> https://localhost:<port>/ | grep -oE 'YOLOmux [0-9.]+' | head -1
 ```
 
-Expected: one `yolomux.py` process, `LISTEN` on `:8001`, `ping: 401` in under roughly 100ms, and the rendered version matches `YOLOMUX_VERSION`. If verification fails, inspect the unit:
+Expected: one `yolomux.py` process, `LISTEN` on the intended port, and `ping: 401` in under roughly 100ms. If the login/setup shell does not expose the version string to `curl`, verify the running process cwd (`readlink /proc/<pid>/cwd`) and the `YOLOMUX_VERSION` file in that checkout instead of treating the missing grep as a restart failure. If verification fails, inspect the unit:
 
 ```bash
-systemctl --user status yolomux-dev1-8001 --no-pager
+systemctl --user status <unit> --no-pager
 ```
 
 ## Production Sync (`cps`)
 
-Edits happen in a dev worktree (`~/yolomux.dev1` ... `~/yolomux.dev4`, see the table above); `~/yolomux/` is the read-only production checkout sharing the same `origin`. The sequence from the dev worktree:
+Edits happen in a development checkout; the production checkout is read-only during sync and shares the same `origin`. The sequence from the dev checkout:
 
 ```bash
 python3 tools/check.py                 # the full gate (see Tests above)
@@ -154,10 +154,10 @@ cd ~/yolomux && git pull --ff-only origin main
 
 Rules:
 
-- Bump `YOLOMUX_VERSION` in `yolomux_lib/common.py` in the same commit.
+- Bump `YOLOMUX_VERSION` in `yolomux_lib/common.py` in the same commit; the auto-updater checks this value on `origin/main`, not the commit SHA, so SHA-only commits do not trigger the update cue.
 - Never use `git add -A`; screenshots and scratch files must not get swept in.
-- Production pull is `--ff-only`. Never edit, stage, or commit inside `~/yolomux/`.
-- Restart both servers after sync, then verify `/api/ping` and the rendered version on each login page.
+- Production pull is `--ff-only`. Never edit, stage, or commit inside the production checkout.
+- Restart production and the active dev server after sync, then verify `/api/ping`, the running process cwd, and `YOLOMUX_VERSION` in both checkouts. The login page may not expose the version to unauthenticated curl; do not rely on a blank version grep alone.
 
 ## xterm.js Assets
 

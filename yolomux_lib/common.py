@@ -60,6 +60,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = PROJECT_ROOT / "static"
 TERMINAL_QUERY_RESPONSE_RE = re.compile(r"(?:\x1b\[[?>]?[0-9;]*c|\x1bP[>|!][^\x1b]*(?:\x1b\\|\x9c))")
 LINEAR_ID_RE = re.compile(r"(?<![A-Za-z0-9])(?:DIS|DGH|DYN|OPS|INFRA)-\d{1,6}(?![A-Za-z0-9])")
+YOLOMUX_VERSION_ASSIGNMENT_RE = re.compile(r"^\s*YOLOMUX_VERSION\s*=\s*['\"]([^'\"]+)['\"]\s*$", re.MULTILINE)
 
 
 class ErrorPayload(TypedDict, total=False):
@@ -418,19 +419,52 @@ def git_ahead_behind_counts(cwd: str, left: str, right: str = "HEAD") -> tuple[i
         return None
 
 
-def update_check_status(cwd: str, branch: str = "main", dryrun: bool = False, fetch: bool = True) -> dict[str, Any]:
-    """Whether `origin/<branch>` has commits the running checkout at `cwd` does not have.
+def parse_yolomux_version_source(source: str) -> str | None:
+    match = YOLOMUX_VERSION_ASSIGNMENT_RE.search(source)
+    return match.group(1).strip() if match else None
 
-    Compares the running HEAD to origin/<branch> via git on the local checkout (reusing its existing
-    credentials, so this works for private repos with no GitHub token). `dryrun=True` forces
-    available=True without touching the network, so the update UX can be exercised without a real push.
-    Returns a plain dict (never raises) so the poll thread / endpoint can serialize it directly.
+
+def git_yolomux_version_at_ref(cwd: str, ref: str) -> tuple[str | None, str | None]:
+    result = git(["show", f"{ref}:yolomux_lib/common.py"], cwd)
+    if result.returncode != 0:
+        return None, (result.stderr or f"git show {ref}:yolomux_lib/common.py failed").strip()[:300]
+    version = parse_yolomux_version_source(result.stdout or "")
+    if not version:
+        return None, f"YOLOMUX_VERSION not found in {ref}:yolomux_lib/common.py"
+    return version, None
+
+
+def yolomux_version_parts(version: str) -> tuple[int, ...] | None:
+    clean = version.strip()
+    if not clean or not re.fullmatch(r"\d+(?:\.\d+)*", clean):
+        return None
+    return tuple(int(part) for part in clean.split("."))
+
+
+def yolomux_version_is_newer(target: str, current: str) -> bool:
+    target_parts = yolomux_version_parts(target)
+    current_parts = yolomux_version_parts(current)
+    if target_parts is None or current_parts is None:
+        return target.strip() != current.strip()
+    length = max(len(target_parts), len(current_parts))
+    padded_target = target_parts + (0,) * (length - len(target_parts))
+    padded_current = current_parts + (0,) * (length - len(current_parts))
+    return padded_target > padded_current
+
+
+def update_check_status(cwd: str, branch: str = "main", dryrun: bool = False, fetch: bool = True) -> dict[str, Any]:
+    """Whether `origin/<branch>` has a newer YOLOMUX_VERSION than the running checkout.
+
+    Reads `yolomux_lib/common.py` from the remote ref via git on the local checkout (reusing its
+    existing credentials, so this works for private repos with no GitHub token). SHA and ahead/behind
+    counts stay in the payload for diagnostics only; they do not decide whether to notify.
     """
-    current = yolomux_commit_sha()
-    base = {"available": False, "ahead": 0, "behind": 0, "current": current,
-            "target": None, "branch": branch, "dryrun": dryrun, "error": None}
+    current_sha = yolomux_commit_sha()
+    base = {"available": False, "ahead": 0, "behind": 0, "current": YOLOMUX_VERSION,
+            "current_version": YOLOMUX_VERSION, "current_sha": current_sha, "target": None,
+            "target_version": None, "target_sha": None, "branch": branch, "dryrun": dryrun, "error": None}
     if dryrun:
-        return {**base, "available": True, "behind": 1, "target": "dryrun"}
+        return {**base, "available": True, "behind": 1, "target": "dryrun", "target_version": "dryrun"}
     if fetch:
         fetched = git(["fetch", "--quiet", "origin", branch], cwd)
         if fetched.returncode != 0:
@@ -440,8 +474,13 @@ def update_check_status(cwd: str, branch: str = "main", dryrun: bool = False, fe
         return {**base, "error": "git rev-list failed"}
     ahead, behind = counts
     target = git(["rev-parse", "--short=12", f"origin/{branch}"], cwd)
-    return {**base, "available": behind > 0, "ahead": ahead, "behind": behind,
-            "target": target.stdout.strip() if target.returncode == 0 else None}
+    target_sha = target.stdout.strip() if target.returncode == 0 else None
+    target_version, version_error = git_yolomux_version_at_ref(cwd, f"origin/{branch}")
+    if version_error:
+        return {**base, "ahead": ahead, "behind": behind, "target_sha": target_sha, "error": version_error}
+    return {**base, "available": bool(target_version and yolomux_version_is_newer(target_version, YOLOMUX_VERSION)),
+            "ahead": ahead, "behind": behind, "target": target_version, "target_version": target_version,
+            "target_sha": target_sha}
 
 
 def git_bytes(args: list[str], cwd: str, timeout: float = 3.0) -> subprocess.CompletedProcess[bytes]:

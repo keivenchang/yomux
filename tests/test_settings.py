@@ -467,6 +467,9 @@ def test_upload_drop_action_settings_defaults_and_round_trip(tmp_path):
 
 def test_updates_check_defaults_on():
     # Auto-update check defaults ON, surfaced as the Performance "Auto-update check" toggle.
+    general = default_settings()["general"]
     updates = default_settings()["updates"]
+    assert general["reload_on_update"] is True
+    assert general["reload_on_update_auto"] is False
     assert updates["check_enabled"] is True
     assert updates["check_interval_minutes"] == 60

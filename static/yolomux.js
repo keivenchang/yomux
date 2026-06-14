@@ -34188,7 +34188,7 @@ function maybeHandleServerVersionChange(serverVersion) {
   // The boot version (bootstrap.version) only updates on page load; this lets a
   // long-lived open client learn that a newer server shipped, via the metadata poll.
   if (!serverVersion || serverVersion === bootstrap.version) return;
-  if (!boolSetting('general.reload_on_update', false)) return;
+  if (!boolSetting('general.reload_on_update', true)) return;
   if (serverVersionReloadHandled === serverVersion) return;
   serverVersionReloadHandled = serverVersion;
   if (boolSetting('general.reload_on_update_auto', false) && reloadIsSafe()) {
@@ -34715,13 +34715,13 @@ function updateActionButton(label, onClick) {
 async function triggerSelfUpdate() {
   const dry = updateDryRunEnabled();
   const confirmed = window.confirm(dry
-    ? 'Dry run: simulate "update & restart"? Nothing is pulled and the server is not restarted.'
-    : 'Update to the latest version on origin/main and restart the server now?');
+    ? 'Dry run: simulate installing a YOLOmux update? Nothing is pulled and the server is not restarted.'
+    : 'Install the latest YOLOmux update and restart now?');
   if (!confirmed) return;
   try {
     const res = await fetch(`/api/self-update${dry ? '?dryrun=1' : ''}`, {method: 'POST'});
     const data = await res.json().catch(() => ({}));
-    const title = data.ok ? (data.restarting ? 'Updating, restarting...' : 'Update') : 'Update failed';
+    const title = data.ok ? (data.restarting ? 'Installing update...' : 'Software Update') : 'Update failed';
     showToast(title, [data.message || (data.ok ? 'done' : 'see server logs')]);
   } catch (error) {
     showToast('Update failed', [String(error)]);
@@ -34729,18 +34729,18 @@ async function triggerSelfUpdate() {
 }
 
 // Non-intrusive "a newer version exists" cue: unhide the topbar badge and show one dismissible toast
-// with an "Update & restart" action (admin-only; the endpoint rejects readonly).
+// with an "Update Now" action (admin-only; the endpoint rejects readonly).
 function applyUpdateAvailable(status) {
   if (!status || !status.available) return;
   const badge = document.querySelector('[data-update-badge]');
   if (badge) {
     badge.hidden = false;
-    badge.title = `Update available${status.target ? ` (${status.target})` : ''} - click to update and restart`;
+    badge.title = `YOLOmux update available${status.target ? ` (${status.target})` : ''} - click to update now`;
   }
-  showToast('Update available', [
-    `A newer version is on origin/main${status.target ? ` (${status.target})` : ''}.`,
+  showToast('YOLOmux update available', [
+    `A new YOLOmux update is available${status.target ? ` (${status.target})` : ''}.`,
   ], {
-    actions: [updateActionButton('Update & restart', triggerSelfUpdate)],
+    actions: [updateActionButton('Update Now', triggerSelfUpdate)],
     countdownMs: 4 * 60 * 60 * 1000,  // keep the update cue up for 4 hours, not the default ~10s
     className: 'attention-alert toast toast-update',  // solid (opaque) background, not the translucent default
   });

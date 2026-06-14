@@ -83,7 +83,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "default_layout": "split",
         "default_sessions": [],
         "language": "system",
-        "reload_on_update": False,
+        "reload_on_update": True,
         "reload_on_update_auto": False,
         "startup_tips": True,
     },
@@ -137,9 +137,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "github": {
         "watched_prs": [],
     },
-    # Hourly check for a newer version on origin/main. Opt-in (default off). When on, the server polls
-    # git on its own checkout and, if origin/main is ahead, nudges admins with a non-intrusive
-    # "update available" cue offering an admin-only update+restart. Never acts on a readonly session.
+    # Hourly check for a newer version on origin/main. When on, the server polls git on its own checkout
+    # and nudges admins with a non-intrusive "update available" cue. Never acts on a readonly session.
     "updates": {
         "check_enabled": True,
         "check_interval_minutes": 60,
@@ -365,7 +364,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("general", "default_layout"): "single | split | grid | wall. Reserved default for new visits.",
     ("general", "language"): "UI language. system matches the browser/OS; otherwise a locale code with a shipped catalog (en, zh-Hant, zh-Hans, ja, ko, es, de, fr, it, pt-BR, pl, nl, he, ar, ru, hi, vi, th, tr, en-XA pseudo).",
     ("general", "default_sessions"): "List of tmux sessions to prefer on load. Empty means discovered sessions.",
-    ("general", "reload_on_update"): "true/false. Default false. When true, an open client shows a 'New version available' banner once the server ships a newer YOLOMUX_VERSION.",
+    ("general", "reload_on_update"): "true/false. Default true. When true, an open client shows a 'YOLOmux update available' notification once the server ships a newer YOLOMUX_VERSION.",
     ("general", "reload_on_update_auto"): "true/false. Default false. When reload_on_update is on, reload immediately instead of showing a banner — but only when it is safe (no unsaved editor changes and not mid-typing).",
     ("general", "startup_tips"): "true/false. Default true. When true, a small startup Tip teaches one YOLOmux feature after the app loads; users can dismiss it or turn Tips off forever.",
     ("file_explorer", "indexed_dirs"): "Directories with a pre-built quick-open index, one path per line. Adding a path indexes it (also via the Finder right-click); removing a line un-indexes it.",

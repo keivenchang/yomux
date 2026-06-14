@@ -1684,6 +1684,50 @@ def test_self_update_dryrun_is_noop_with_plan():
     assert any("git pull" in step for step in result["plan"])
 
 
+def _fake_update_git(remote_version="0.3.25", remote_sha="remoteabcdef1"):
+    def fake_git(args, cwd, timeout=3.0):
+        assert cwd == "/repo"
+        if args == ["fetch", "--quiet", "origin", "main"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if args == ["rev-parse", "--short=12", "origin/main"]:
+            return SimpleNamespace(returncode=0, stdout=f"{remote_sha}\n", stderr="")
+        if args == ["show", "origin/main:yolomux_lib/common.py"]:
+            return SimpleNamespace(returncode=0, stdout=f'YOLOMUX_VERSION = "{remote_version}"\n', stderr="")
+        raise AssertionError(f"unexpected git args: {args}")
+    return fake_git
+
+
+def test_update_check_status_ignores_sha_only_changes(monkeypatch):
+    monkeypatch.setattr(app_module.common, "YOLOMUX_VERSION", "0.3.25")
+    monkeypatch.setattr(app_module.common, "yolomux_commit_sha", lambda: "localabcdef1")
+    monkeypatch.setattr(app_module.common, "git_ahead_behind_counts", lambda cwd, left: (0, 1))
+    monkeypatch.setattr(app_module.common, "git", _fake_update_git(remote_version="0.3.25"))
+
+    status = app_module.common.update_check_status("/repo")
+
+    assert status["available"] is False
+    assert status["current"] == "0.3.25"
+    assert status["target"] == "0.3.25"
+    assert status["current_sha"] == "localabcdef1"
+    assert status["target_sha"] == "remoteabcdef1"
+    assert status["behind"] == 1
+
+
+def test_update_check_status_reports_newer_version(monkeypatch):
+    monkeypatch.setattr(app_module.common, "YOLOMUX_VERSION", "0.3.25")
+    monkeypatch.setattr(app_module.common, "yolomux_commit_sha", lambda: "localabcdef1")
+    monkeypatch.setattr(app_module.common, "git_ahead_behind_counts", lambda cwd, left: (0, 1))
+    monkeypatch.setattr(app_module.common, "git", _fake_update_git(remote_version="0.3.26"))
+
+    status = app_module.common.update_check_status("/repo")
+
+    assert status["available"] is True
+    assert status["current"] == "0.3.25"
+    assert status["target"] == "0.3.26"
+    assert status["target_version"] == "0.3.26"
+    assert status["target_sha"] == "remoteabcdef1"
+
+
 def test_update_status_dryrun_reports_available():
     webapp = app_module.TmuxWebtermApp(["1"])
     status = webapp.update_status_payload(dryrun=True)

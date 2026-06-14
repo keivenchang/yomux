@@ -533,9 +533,9 @@
   "pref.general.language.label": "언어",
   "pref.general.language.pseudo": "의사 (en-XA)",
   "pref.general.language.system": "시스템",
-  "pref.general.reload_on_update.help": "서버가 새 버전을 배포하면 열려 있는 클라이언트에 '새 버전 사용 가능 — 새로고침' 배너를 표시합니다. 기본값은 꺼짐입니다.",
-  "pref.general.reload_on_update.label": "서버 업데이트 시 알림",
-  "pref.general.reload_on_update_auto.help": "위 옵션이 켜져 있을 때 배너 없이 바로 새로고침합니다. 단, 안전한 경우에만(미저장 편집이 없고 타이핑 중이 아닐 때) 실행됩니다.",
+  "pref.general.reload_on_update.help": "새 YOLOmux 업데이트를 사용할 수 있을 때 알림을 표시합니다. 기본값은 켜짐입니다.",
+  "pref.general.reload_on_update.label": "업데이트가 있을 때 알림",
+  "pref.general.reload_on_update_auto.help": "업데이트 알림이 켜져 있으면 알림을 표시하는 대신 즉시 새로고침합니다. 단, 안전할 때만 실행합니다: 저장하지 않은 편집이 없고 입력 중이 아닐 때.",
   "pref.general.reload_on_update_auto.label": "서버 업데이트 시 자동 새로고침",
   "pref.general.startup_tips.help": "Show one small Tip after startup. You can hide a Tip or turn Tips off forever.",
   "pref.general.startup_tips.label": "Startup Tips",
@@ -981,7 +981,7 @@
   "transcript.noAgentFound": "에이전트 transcript를 찾을 수 없음",
   "transcript.tailTitle": "{session} transcript 끝",
   "unit.minute.short": "분",
-  "update.available": "새 YOLOmux 버전 사용 가능",
+  "update.available": "YOLOmux 업데이트 사용 가능",
   "update.dismiss": "닫기",
   "update.reload": "새로고침",
   "upload.copiedRsync": "rsync 예시를 복사했습니다",
@@ -1062,6 +1062,6 @@
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} for {session}",
   "yolo.titleReadonly": "YOLO {state} for {session}; readonly access",
-  "pref.updates.check_enabled.label": "Auto-update check (github.com/keivenchang/yolomux)",
-  "pref.updates.check_enabled.help": "Check https://github.com/keivenchang/yolomux for a newer version every hour and prompt admins (non-intrusively) to update and restart. Updating is admin-only, fast-forward only, and never runs on a read-only session."
+  "pref.updates.check_enabled.label": "Automatically check for YOLOmux updates",
+  "pref.updates.check_enabled.help": "Automatically check https://github.com/keivenchang/yolomux for YOLOmux updates every hour. Installing an update is admin-only, fast-forward only, and never runs on a read-only session."
 }

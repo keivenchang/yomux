@@ -533,9 +533,9 @@
   "pref.general.language.label": "Sprache",
   "pref.general.language.pseudo": "Pseudo (en-XA)",
   "pref.general.language.system": "System",
-  "pref.general.reload_on_update.help": "Wenn der Server eine neuere Version bereitstellt, zeige in diesem geöffneten Client ein Banner „Neue Version verfügbar — Neu laden“. Standardmäßig aus.",
-  "pref.general.reload_on_update.label": "Bei Serveraktualisierung benachrichtigen",
-  "pref.general.reload_on_update_auto.help": "Wenn das Obige aktiv ist, sofort neu laden statt ein Banner zu zeigen — aber nur, wenn es sicher ist (keine ungespeicherten Editoränderungen und nicht beim Tippen).",
+  "pref.general.reload_on_update.help": "Eine Benachrichtigung anzeigen, wenn ein neues YOLOmux-Update verfügbar ist. Standardmäßig aktiviert.",
+  "pref.general.reload_on_update.label": "Benachrichtigen, wenn Updates verfügbar sind",
+  "pref.general.reload_on_update_auto.help": "Wenn Update-Benachrichtigungen aktiviert sind, sofort neu laden statt eine Benachrichtigung zu zeigen, aber nur wenn es sicher ist: keine ungespeicherten Editoränderungen und keine laufende Eingabe.",
   "pref.general.reload_on_update_auto.label": "Bei Serveraktualisierung automatisch neu laden",
   "pref.general.startup_tips.help": "Show one small Tip after startup. You can hide a Tip or turn Tips off forever.",
   "pref.general.startup_tips.label": "Startup Tips",
@@ -981,7 +981,7 @@
   "transcript.noAgentFound": "kein Agent-Transkript gefunden",
   "transcript.tailTitle": "Transkriptende von {session}",
   "unit.minute.short": "Min.",
-  "update.available": "Neue YOLOmux-Version verfügbar",
+  "update.available": "YOLOmux-Update verfügbar",
   "update.dismiss": "Schließen",
   "update.reload": "Neu laden",
   "upload.copiedRsync": "rsync-Beispiel kopiert",
@@ -1062,6 +1062,6 @@
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} for {session}",
   "yolo.titleReadonly": "YOLO {state} for {session}; readonly access",
-  "pref.updates.check_enabled.label": "Auto-update check (github.com/keivenchang/yolomux)",
-  "pref.updates.check_enabled.help": "Check https://github.com/keivenchang/yolomux for a newer version every hour and prompt admins (non-intrusively) to update and restart. Updating is admin-only, fast-forward only, and never runs on a read-only session."
+  "pref.updates.check_enabled.label": "Automatically check for YOLOmux updates",
+  "pref.updates.check_enabled.help": "Automatically check https://github.com/keivenchang/yolomux for YOLOmux updates every hour. Installing an update is admin-only, fast-forward only, and never runs on a read-only session."
 }
