@@ -88,7 +88,7 @@ function topbarDurationText(seconds) {
   for (const [name, size] of units) {
     const value = Math.floor(rest / size);
     if (!value) continue;
-    parts.push(`${value} ${name}${value === 1 ? '' : 's'}`);
+    parts.push(tPlural(`duration.${name}`, value));
     rest -= value * size;
     if (parts.length >= 2) break;
   }
@@ -97,8 +97,8 @@ function topbarDurationText(seconds) {
 
 function topbarServerUptimeTitle() {
   const startedAtMs = topbarServerStartedAtMs();
-  if (!startedAtMs) return 'Server uptime unknown';
-  return `Server running for ${topbarDurationText((Date.now() - startedAtMs) / 1000)}`;
+  if (!startedAtMs) return t('server.uptimeUnknown');
+  return t('server.uptimeRunning', {duration: topbarDurationText((Date.now() - startedAtMs) / 1000)});
 }
 
 function updateBrandTitles() {
@@ -140,6 +140,7 @@ function showAboutModal() {
     <div class="about-links"><a class="about-author" href="${esc(aboutLinkedInUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.author'))}</a><span> - </span><a class="about-author about-github" href="${esc(aboutProjectUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.github'))}</a><span> (to YOLOmux)</span></div>
   </div>`;
   modal.classList.add('open');
+  scheduleSharePopupLayerPublish();
 }
 
 function currentActiveMenuItem() {
@@ -658,6 +659,9 @@ function fileMenuVirtualCommand(item, detail) {
 
 function appMenuTree() {
   const activeTmux = currentSessionActionTarget();
+  const shareSessions = shareSessionsFromLayout();
+  const shareCanOpen = shareSessions.length > 0 || Boolean(activeTmux);
+  const shareMenuActive = shareViewMode || shareHasActiveShare();
   const openItems = orderedPaneItems(activePaneItems());
   const yoloCount = yoloEnabledSessions().length;
   const debugMenuItems = debugModeEnabled ? [
@@ -669,6 +673,10 @@ function appMenuTree() {
       label: t('menu.file'),
       items: menuGroups(
         [
+          menuCommand(t('menu.file.openFile'), openFileQuickOpen, {
+            detail: appShortcutText('P'),
+            iconHtml: appMenuUiIcon('document'),
+          }),
           menuCommand(fileExplorerLabel(), () => toggleFinderPane(), {
             checked: itemInLayout(fileExplorerItemId),
             detail: t('menu.file.browseFiles'),
@@ -682,9 +690,10 @@ function appMenuTree() {
             detail: t('menu.file.yoagent.detail'),
             iconHtml: appMenuUiIcon('yoagent'),
           }),
-          menuCommand(t('menu.file.openFile'), openFileQuickOpen, {
-            detail: appShortcutText('P'),
-            iconHtml: appMenuUiIcon('document'),
+          menuCommand(t('menu.file.share'), () => showShareModal(), {
+            disabled: readOnlyMode || (!shareHasActiveShare() && !shareCanOpen),
+            detail: shareMenuActive || shareCanOpen ? t('share.menu.sharing') : t('share.noSession'),
+            iconHtml: appMenuUiIcon('share', shareMenuActive),
           }),
           menuCommand(t('menu.file.preferences'), () => selectSession(prefsItemId, {userInitiated: true}), {
             checked: itemInLayout(prefsItemId),
@@ -793,7 +802,7 @@ function appMenuIsOpen() {
 
 function topbarControlIsActive() {
   const active = document.activeElement;
-  return Boolean(active && sessionButtons?.contains(active) && active.matches?.('select, input'));
+  return Boolean(active && sessionButtons?.contains(active) && active.matches?.('select, input, .topbar-language, .app-menu-button'));
 }
 
 function flushPendingSessionButtonsRender() {
@@ -853,6 +862,7 @@ function renderSessionButtons(options = {}) {
   sessionButtons.appendChild(createTopbarActivityStatus());
   updateTopbarActivityStatus();
   scheduleTopbarMetricsUpdate();
+  if (openAppMenuId) requestAnimationFrame(() => scheduleSharePopupLayerPublish({immediate: true}));
 }
 
 // #52: the wordmark is server-rendered (YO/LO/m/u/x); localize the YO/LO glyphs client-side so a
@@ -932,29 +942,39 @@ function createTopbarSearch() {
 
 // Phase 1: a top-right language switcher (entry point #2). It writes the SAME general.language
 // setting as the Preferences picker and applies the locale optimistically (no settings-poll round-trip).
-// 'system' resolves against navigator.language; the <select> shows the raw pref so 'system' reads as Auto.
+// A native <select> cannot be mirrored to YO!share viewers, so this uses the app-menu popup owner.
 function createTopbarLanguageSwitcher() {
   const pref = String(initialSetting('general.language', 'system'));
-  const select = document.createElement('select');
-  select.className = 'topbar-language';
-  select.setAttribute('aria-label', t('language.switcher'));
-  select.title = t('language.switcher');
-  for (const choice of i18nLocaleChoices()) {
-    const option = document.createElement('option');
-    option.value = choice.value;
-    option.textContent = choice.label;
-    if (choice.value === pref) option.selected = true;
-    select.appendChild(option);
-  }
-  select.addEventListener('change', () => {
-    const value = select.value;
-    applyLocale(resolveLocalePref(value));
-    if (readOnlyMode) return;
-    saveSettingsPatch(settingPatch('general.language', value))
-      .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
+  const choices = i18nLocaleChoices();
+  const active = choices.find(choice => choice.value === pref) || choices[0] || {value: 'system', label: 'Auto'};
+  const wrapper = createAppMenu({
+    id: 'language',
+    label: active.label,
+    items: choices.map(choice => ({
+      label: choice.label,
+      detail: '',
+      checked: choice.value === pref,
+      disabled: shareViewMode,
+      action: () => {
+        const value = choice.value;
+        applyLocale(resolveLocalePref(value));
+        scheduleShareAppearancePublish();
+        if (readOnlyMode) return;
+        saveSettingsPatch(settingPatch('general.language', value))
+          .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
+      },
+    })),
   });
-  select.addEventListener('blur', flushPendingSessionButtonsRender);
-  return select;
+  wrapper.classList.add('topbar-language-menu');
+  const button = wrapper.querySelector(':scope > .app-menu-button');
+  if (button) {
+    button.classList.add('topbar-language');
+    button.title = t('language.switcher');
+    button.setAttribute('aria-label', t('language.switcher'));
+    button.addEventListener('blur', flushPendingSessionButtonsRender);
+  }
+  wrapper.querySelector(':scope > .app-menu-popover')?.classList.add('topbar-language-popover');
+  return wrapper;
 }
 
 function appMenuAnchorInlineSize(popover) {
@@ -1203,7 +1223,43 @@ function createAppSubmenu(item) {
   button.setAttribute('aria-haspopup', 'true');
   button.setAttribute('aria-expanded', 'true');
   wrapper.append(button, submenu);
+  bindAppMenuCommandMirrorActive(button, wrapper);
   return wrapper;
+}
+
+function appMenuCommandMirrorActiveStillApplies(button, owner = button) {
+  const active = document.activeElement;
+  return Boolean(
+    button?.matches?.(':hover')
+      || owner?.matches?.(':hover')
+      || (active && (button?.contains?.(active) || owner?.contains?.(active)))
+  );
+}
+
+function setAppMenuCommandMirrorActive(button, active) {
+  if (!button) return;
+  button.classList.toggle('share-mirror-active', active === true);
+  scheduleSharePopupLayerPublish({immediate: true});
+}
+
+function bindAppMenuCommandMirrorActive(button, owner = button) {
+  if (!button) return;
+  const bindKey = owner === button ? 'shareMirrorActiveBound' : 'shareMirrorOwnerActiveBound';
+  if (button.dataset[bindKey] === 'true') return;
+  button.dataset[bindKey] = 'true';
+  const activate = () => setAppMenuCommandMirrorActive(button, true);
+  const deactivate = () => {
+    requestAnimationFrame(() => {
+      if (!appMenuCommandMirrorActiveStillApplies(button, owner)) setAppMenuCommandMirrorActive(button, false);
+    });
+  };
+  const targets = owner === button ? [button] : [owner];
+  for (const target of targets.filter(Boolean)) {
+    target.addEventListener('pointerenter', activate);
+    target.addEventListener('focusin', activate);
+    target.addEventListener('pointerleave', deactivate);
+    target.addEventListener('focusout', deactivate);
+  }
 }
 
 function createAppMenuCommand(item, options = {}) {
@@ -1245,6 +1301,7 @@ function createAppMenuCommand(item, options = {}) {
     });
   }
   button.addEventListener('keydown', event => handleAppMenuCommandKeydown(event, button, item, options));
+  bindAppMenuCommandMirrorActive(button);
   return button;
 }
 
@@ -1387,6 +1444,7 @@ function openAppMenu(wrapper, options = {}) {
   openAppMenuPinned = options.pinned === true;
   openAppMenuOpenedAt = Date.now();
   wrapper.querySelector('.app-menu-button')?.setAttribute('aria-expanded', 'true');
+  scheduleSharePopupLayerPublish({immediate: true});
   if (options.focusFirst) requestAnimationFrame(() => focusFirstAppMenuCommand(wrapper));
 }
 
@@ -1396,6 +1454,9 @@ function closeAppMenus(keepOpen = null) {
     menu.classList.remove('open');
     menu.querySelector('.app-menu-button')?.setAttribute('aria-expanded', 'false');
   }
+  document.querySelectorAll('.app-menu-command.share-mirror-active').forEach(command => {
+    if (!keepOpen?.contains?.(command)) command.classList.remove('share-mirror-active');
+  });
   for (const submenu of document.querySelectorAll('.app-menu-submenu-wrap.open')) {
     if (keepOpen?.contains(submenu)) continue;
     submenu.classList.remove('open');
@@ -1406,4 +1467,5 @@ function closeAppMenus(keepOpen = null) {
     openAppMenuPinned = false;
     openAppMenuOpenedAt = 0;
   }
+  scheduleSharePopupLayerPublish({immediate: true});
 }

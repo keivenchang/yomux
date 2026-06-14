@@ -38,6 +38,13 @@ def test_single_heartbeat_is_zero_time_but_records_event(tmp_path):
     assert rec["input_bytes"] == 3
 
 
+def test_heartbeat_log_records_share_source_without_keystrokes(tmp_path):
+    led = _ledger(tmp_path)
+    led.heartbeat("6", "1", ts=1000.0, byte_count=3, source="share")
+    line = json.loads((tmp_path / "activity-heartbeats.jsonl").read_text(encoding="utf-8").strip())
+    assert line == {"ts": 1000.0, "s": "6", "w": "1", "b": 3, "src": "share"}
+
+
 def test_per_window_attribution_rolls_up_to_session(tmp_path):
     led = _ledger(tmp_path)
     led.heartbeat("6", "1", ts=1000.0)

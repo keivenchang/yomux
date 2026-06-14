@@ -291,6 +291,19 @@ def test_list_directory_not_a_dir(tmp_path):
     assert info.value.status == 400
 
 
+def test_list_directory_caps_large_directory(monkeypatch, tmp_path):
+    monkeypatch.setattr(filesystem, "MAX_DIRECTORY_ENTRIES", 2)
+    for name in ("a.txt", "b.txt", "c.txt"):
+        (tmp_path / name).write_text(name, encoding="utf-8")
+
+    payload = filesystem.list_directory(str(tmp_path))
+
+    assert payload["truncated"] is True
+    assert payload["entry_limit"] == 2
+    assert len(payload["entries"]) == 2
+    assert {entry["name"] for entry in payload["entries"]}.issubset({"a.txt", "b.txt", "c.txt"})
+
+
 def test_list_directory_sorts_dirs_first_then_case_insensitive_name(tmp_path):
     # Entries come back sorted dirs-first, then case-INsensitively by name (from the assembled entry
     # list, not raw os.listdir order). Mixed case + mixed kind exercises both sort keys.

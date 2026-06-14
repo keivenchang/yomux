@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 
 from yolomux_lib import server as server_module
+from yolomux_lib import server_auth as server_auth_module
 from yolomux_lib.common import error_payload
 from yolomux_lib.server import Handler
 from yolomux_lib.server import parse_query_float
@@ -30,6 +31,21 @@ def test_error_payload_normalizes_status_and_context():
         "session": "6",
         "status": 400,
     }
+
+
+def test_share_ui_frame_redacts_share_urls_and_tokens():
+    frame = server_module.share_ui_frame({
+        "type": "popup-layer",
+        "payload": {
+            "token": "secret-token",
+            "html": '<input value="https://host.example/share/abc123#t=secret-token">',
+            "items": [{"url": "/share/abc123#t=secret-token", "share_token": "secret-token"}],
+        },
+    })
+
+    assert b"secret-token" not in frame
+    assert b"/share/abc123" not in frame
+    assert b"..." in frame
 
 
 def test_parse_repo_refs_param_rejects_garbage():
@@ -153,6 +169,7 @@ def route_handler(path, app=None, readonly=False):
     handler.require_auth_for_post = lambda path: calls.append(("require_auth_for_post", path)) or True
     handler.auth_readonly = lambda: readonly
     handler.auth_identity = lambda: SimpleNamespace(role="readonly" if readonly else "admin")
+    handler.share_readonly_api_allowed = lambda parsed: False
     handler.write_json = lambda value, status=HTTPStatus.OK: writes.append(("json", status, value))
     handler.write_text = lambda value, status=HTTPStatus.OK, content_type="text/plain; charset=utf-8": writes.append(("text", status, value, content_type))
     handler.write_html = lambda value: writes.append(("html", HTTPStatus.OK, value))
@@ -198,6 +215,124 @@ def test_do_get_fs_routes_reject_readonly_before_file_handlers():
 
     assert calls == [("require_auth", "readonly")]
     assert writes == [("forbidden", HTTPStatus.FORBIDDEN, "readonly", "admin")]
+
+
+def test_do_get_fs_routes_allow_share_scoped_readonly_file_handlers():
+    handler, calls, writes = route_handler("/api/fs/diff?path=/repo/README.md&token=share", readonly=True)
+    handler.share_readonly_api_allowed = lambda parsed: parsed.path == "/api/fs/diff"
+    handler.handle_fs_diff = lambda parsed: writes.append(("fs-diff", parsed.path))
+
+    Handler.do_GET(handler)
+
+    assert calls == [("require_auth", "readonly")]
+    assert writes == [("fs-diff", "/api/fs/diff")]
+
+
+def test_share_scoped_transcripts_payload_filters_to_shared_sessions():
+    handler, _calls, _writes = route_handler("/", SimpleNamespace())
+    handler.share_sessions = lambda: ["6", "8"]
+    payload = {
+        "session_order": ["5", "6", "7", "8"],
+        "sessions": {"5": {"target": "5"}, "6": {"target": "6"}, "8": {"target": "8"}},
+        "cache": {"hit": True},
+    }
+
+    scoped = Handler.share_scoped_transcripts_payload(handler, payload)
+
+    assert scoped["session_order"] == ["6", "8"]
+    assert scoped["sessions"] == {"6": {"target": "6"}, "8": {"target": "8"}}
+    assert scoped["cache"] == {"hit": True}
+
+
+def share_token_auth_handler(path, method="POST"):
+    writes = []
+    record = {"token": "share-token", "mode": "ro", "session": "5", "sessions": ["5"]}
+    app = SimpleNamespace(verify_share_token=lambda token: record if token == "share-token" else None)
+    handler = object.__new__(Handler)
+    handler.path = path
+    handler.command = method
+    handler.headers = {"X-Share-Token": "share-token", "Content-Length": "12", "User-Agent": "pytest"}
+    handler.server = SimpleNamespace(app=app, tls_context=object(), server_address=("127.0.0.1", 8001))
+    handler.close_connection = False
+    handler.write_json = lambda value, status=HTTPStatus.OK: writes.append(("json", status, value))
+    handler.write_html = lambda value: writes.append(("html", HTTPStatus.OK, value))
+    handler.write_redirect = lambda value, status=HTTPStatus.SEE_OTHER: writes.append(("redirect", status, value))
+    handler.send_header = lambda *_args, **_kwargs: None
+    return handler, writes
+
+
+def test_share_token_post_auth_allows_only_readonly_fs_batch(monkeypatch):
+    monkeypatch.setattr(server_auth_module, "auth_setup_required", lambda: False)
+
+    allowed_handler, allowed_writes = share_token_auth_handler("/api/fs/batch")
+    assert Handler.require_auth_for_post(allowed_handler, "/api/fs/batch") is True
+    assert allowed_writes == []
+    assert allowed_handler.auth_identity().role == "readonly"
+    assert allowed_handler.share_token() == "share-token"
+    assert allowed_handler.close_connection is False
+
+    mutating_paths = [
+        "/api/event",
+        "/api/settings",
+        "/api/share",
+        "/api/share/stop",
+        "/api/share/extend",
+        "/api/upload",
+        "/api/tmux-window",
+        "/api/watch/roots",
+        "/api/drop-action/run",
+        "/api/yoagent/chat",
+        "/api/fs/write",
+        "/api/fs/delete",
+        "/api/fs/rename",
+        "/api/fs/mkdir",
+        "/api/fs/unindex",
+    ]
+    for path in mutating_paths:
+        handler, writes = share_token_auth_handler(path)
+        assert Handler.require_auth_for_post(handler, path) is False, path
+        assert writes and writes[0][0] == "json" and writes[0][1] == HTTPStatus.FORBIDDEN, (path, writes)
+        assert handler.close_connection is True, path
+
+
+def test_share_request_allowed_route_matrix(monkeypatch):
+    monkeypatch.setattr(server_auth_module, "auth_setup_required", lambda: False)
+    allowed_paths = [
+        "/",
+        "/share/abc",
+        "/static/yolomux.js",
+        "/api/ping",
+        "/api/activity",
+        "/api/fs/batch",
+        "/api/fs/diff?path=/repo/README.md",
+        "/api/fs/read?path=/repo/README.md",
+        "/api/fs/raw?path=/repo/README.md",
+        "/api/share-stream",
+        "/api/session-files",
+        "/api/transcripts",
+        "/ws/share-ui",
+        "/ws/share-view",
+    ]
+    denied_paths = [
+        "/api/event",
+        "/api/settings",
+        "/api/upload",
+        "/api/watch/roots",
+        "/api/drop-action/run",
+        "/api/yoagent/chat",
+        "/api/fs/write",
+        "/api/fs/delete",
+        "/api/fs/rename",
+        "/api/fs/mkdir",
+        "/api/fs/unindex",
+    ]
+
+    for path in allowed_paths:
+        handler, _writes = share_token_auth_handler(path, method="GET")
+        assert Handler.share_request_allowed(handler) is True, path
+    for path in denied_paths:
+        handler, _writes = share_token_auth_handler(path, method="POST")
+        assert Handler.share_request_allowed(handler) is False, path
 
 
 def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
@@ -252,6 +387,40 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
     assert writes == [("json", HTTPStatus.OK, {"session": "6", "copied": True})]
 
 
+def test_do_post_share_stop_passes_query_target_to_app():
+    app_calls = []
+    app = SimpleNamespace(stop_active_share=lambda target="": app_calls.append(target) or ({"ok": True, "stopped": 1}, HTTPStatus.OK))
+    handler, calls, writes = route_handler("/api/share/stop?id=short123", app)
+    handler.headers = {"Content-Length": "0"}
+    handler.server.close_inactive_share_upstreams = lambda: app_calls.append("closed-upstreams")
+    handler.write_app_result = lambda result: writes.append(("app", result))
+
+    Handler.do_POST(handler)
+
+    assert calls == [("require_auth_for_post", "/api/share/stop")]
+    assert writes == [("app", ({"ok": True, "stopped": 1}, HTTPStatus.OK))]
+    assert app_calls == ["short123", "closed-upstreams"]
+
+
+def test_do_post_share_extend_broadcasts_status():
+    app_calls = []
+    app = SimpleNamespace(
+        extend_share_token=lambda target, add_seconds, **kwargs: app_calls.append((target, add_seconds, kwargs)) or ({"ok": True, "token": "share-token-1"}, HTTPStatus.OK),
+    )
+    handler, calls, writes = route_handler("/api/share/extend", app)
+    handler.headers = {"Content-Length": "52"}
+    handler.read_json_body = lambda limit: {"token": "share-token-1", "add_seconds": 600}
+    handler.request_base_url = lambda: "http://127.0.0.1:9998"
+    handler.server.broadcast_share_status = lambda token: app_calls.append(("broadcast", token))
+    handler.write_app_result = lambda result: writes.append(("app", result))
+
+    Handler.do_POST(handler)
+
+    assert calls == [("require_auth_for_post", "/api/share/extend")]
+    assert writes == [("app", ({"ok": True, "token": "share-token-1"}, HTTPStatus.OK))]
+    assert app_calls == [("share-token-1", 600, {"base_url": "http://127.0.0.1:9998"}), ("broadcast", "share-token-1")]
+
+
 def batch_handler(payload):
     body = json.dumps(payload).encode("utf-8")
     writes = []
@@ -277,6 +446,11 @@ def test_handle_fs_batch_returns_per_item_results(monkeypatch):
             {"id": "info", "type": "info", "path": "/repo"},
             {"id": "missing", "type": "info", "path": "/missing"},
             {"id": "bad", "type": "read", "path": "/repo/README.md"},
+            {"id": "write", "type": "write", "path": "/repo/README.md"},
+            {"id": "delete", "type": "delete", "path": "/repo/README.md"},
+            {"id": "rename", "type": "rename", "path": "/repo/README.md"},
+            {"id": "mkdir", "type": "mkdir", "path": "/repo/new"},
+            {"id": "unindex", "type": "unindex", "path": "/repo"},
         ],
     })
 
@@ -287,6 +461,11 @@ def test_handle_fs_batch_returns_per_item_results(monkeypatch):
         {"id": "info", "ok": True, "status": 200, "payload": {"path": "/repo", "kind": "dir"}},
         {"id": "missing", "ok": False, "status": 404, "error": "path not found: /missing", "path": "/missing"},
         {"id": "bad", "ok": False, "status": 400, "error": "unsupported fs batch operation", "path": "/repo/README.md"},
+        {"id": "write", "ok": False, "status": 400, "error": "unsupported fs batch operation", "path": "/repo/README.md"},
+        {"id": "delete", "ok": False, "status": 400, "error": "unsupported fs batch operation", "path": "/repo/README.md"},
+        {"id": "rename", "ok": False, "status": 400, "error": "unsupported fs batch operation", "path": "/repo/README.md"},
+        {"id": "mkdir", "ok": False, "status": 400, "error": "unsupported fs batch operation", "path": "/repo/new"},
+        {"id": "unindex", "ok": False, "status": 400, "error": "unsupported fs batch operation", "path": "/repo"},
     ]})]
 
 
@@ -333,7 +512,7 @@ def test_handle_ws_payload_resize_sets_pty_and_signals_for_admin_only(monkeypatc
 def test_websocket_rejects_share_token_for_other_session():
     writes = []
     handler = SimpleNamespace(
-        share_session=lambda: "6",
+        share_sessions=lambda: ["6"],
         server=SimpleNamespace(app=SimpleNamespace(sessions=["6", "7"])),
         write_text=lambda value, status=HTTPStatus.OK: writes.append((status, value)),
     )
@@ -363,3 +542,105 @@ def test_server_source_wires_routing_ws_readonly_and_pty_setup():
     assert "self.bridge_tmux(session, readonly=self.auth_readonly())" in ws_body
     assert "if readonly:" in bridge_body and 'attach_args.append("-r")' in bridge_body
     assert "set_pty_size(slave_fd, initial_rows, initial_cols)" in bridge_body
+
+
+def test_share_write_mode_stays_terminal_input_only():
+    upstream_start = inspect.getsource(server_module.ShareTerminalUpstream.start_locked)
+    upstream_write = inspect.getsource(server_module.ShareTerminalUpstream.write_input)
+    bridge_body = inspect.getsource(Handler.bridge_shared_tmux)
+    post_body = inspect.getsource(Handler.do_POST)
+
+    assert 'record = self.server.app.verify_share_token(self.token)' in upstream_start
+    assert 'str((record or {}).get("mode") or "ro") != "rw"' in upstream_start
+    assert 'attach_args.append("-r")' in upstream_start
+    assert 'message.get("type") != "input"' in upstream_write
+    assert 'record_user_input(self.session, len(filtered), source="share")' in upstream_write
+    assert 'self.request_is_https() and str(current_record.get("mode") or "ro") == "rw"' in bridge_body
+    assert "upstream.write_input(payload)" in bridge_body
+    assert "self.server.close_inactive_share_upstreams()" in post_body
+
+
+def test_share_pointer_events_are_coalesced_server_side():
+    ui_body = inspect.getsource(Handler.handle_share_ui_message)
+    queue_body = inspect.getsource(server_module.TmuxWebtermHTTPServer.queue_share_pointer)
+    loop_body = inspect.getsource(server_module.TmuxWebtermHTTPServer.share_pointer_loop)
+    hz_body = inspect.getsource(server_module.TmuxWebtermHTTPServer.share_pointer_hz)
+
+    assert 'if msg_type == "pointer":' in ui_body
+    assert "self.server.queue_share_pointer(token, payload, sender=sender)" in ui_body
+    assert "self.share_pointer_latest[clean_token]" in queue_body
+    assert "SHARE_POINTER_CLICK_QUEUE_LIMIT" in queue_body
+    assert "threading.Thread(target=self.share_pointer_loop" in queue_body
+    assert "signature != last_sent" in loop_body
+    assert '"type": "pointer"' in loop_body
+    assert "skip_client_id=sender" in loop_body
+    assert "SHARE_POINTER_MAX_WRITES_PER_SECOND / viewers" in hz_body
+    assert "self.share_ui_client_count(token)" in hz_body
+    assert server_module.SHARE_POINTER_MAX_HZ == 30
+
+
+def test_share_ui_socket_wires_write_clients_and_host_broadcasts():
+    get_body = inspect.getsource(Handler.do_GET)
+    host_body = inspect.getsource(Handler.websocket_share_host)
+    viewer_body = inspect.getsource(Handler.websocket_share_ui)
+    bridge_body = inspect.getsource(Handler.bridge_share_ui_socket)
+    handle_body = inspect.getsource(Handler.handle_share_ui_message)
+    server_body = inspect.getsource(server_module.TmuxWebtermHTTPServer.broadcast_share_ui)
+
+    assert 'if parsed.path == "/ws/share-ui":' in get_body
+    assert "self.websocket_share_ui(parsed)" in get_body
+    assert '"/api/share" and self.share_token_text()' in get_body
+    assert "self.bridge_share_ui_socket(token, client_id)" in host_body
+    assert 'write_enabled = self.request_is_https() and str(record.get("mode") or "ro") == "rw"' in viewer_body
+    assert 'registered_viewer_id = ""' in viewer_body
+    assert 'register(token, "", viewer_id, client_ip, self.headers.get("User-Agent", ""))' in viewer_body
+    assert "receive_only=not write_enabled" in viewer_body
+    assert "viewer_id=registered_viewer_id" in viewer_body
+    assert "self.server.register_share_ui_client(token, client)" in bridge_body
+    assert "threading.Thread(target=client.write_loop" in bridge_body
+    assert "select.select([self.connection]" in bridge_body
+    assert "self.handle_share_ui_message(token, message, clean_client_id)" in bridge_body
+    assert bridge_body.index("if receive_only:") < bridge_body.index('json.loads(payload.decode("utf-8"))')
+    assert bridge_body.index("if receive_only:") < bridge_body.index("self.handle_share_ui_message(token, message, clean_client_id)")
+    assert "self.server.broadcast_share_status(token)" in inspect.getsource(Handler.websocket_share_view)
+    assert "self.server.broadcast_share_status(token)" in inspect.getsource(Handler.bridge_shared_tmux)
+    assert "self.server.app.unregister_share_viewer(token, viewer_id)" in bridge_body
+    assert "skip_client_id=sender" in handle_body
+    assert 'msg_type in {"viewport", "appearance"}' in handle_body
+    assert '"uiStatePatch": {msg_type: payload}' in handle_body
+    assert 'msg_type == "scroll"' in handle_body
+    assert '"uiStateScroll": payload' in handle_body
+    assert callable(getattr(server_module.TmuxWebtermHTTPServer, "broadcast_share_status", None))
+    assert "self.share_ui_clients" in server_body
+    assert "ui_client_ids" in server_body
+    assert "viewer.client_id in ui_client_ids" in server_body
+
+
+def test_share_viewers_receive_host_terminal_dimensions():
+    bootstrap_body = inspect.getsource(Handler.share_bootstrap_payload)
+    resize_body = inspect.getsource(server_module.TmuxWebtermHTTPServer.record_host_pty_dimensions)
+    upstream_resize_body = inspect.getsource(server_module.ShareTerminalUpstream.update_dimensions)
+
+    assert "host_pty_dimensions_for_session(session)" in bootstrap_body
+    assert '"hostDims": {"rows": rows, "cols": cols}' in bootstrap_body
+    assert '"type": "host-resize"' in resize_body
+    assert '"rows": dimensions[0]' in resize_body
+    assert '"cols": dimensions[1]' in resize_body
+    assert "upstream.update_dimensions(*dimensions, refresh=False)" in resize_body
+    assert "upstream.request_refresh_client()" in resize_body
+    assert resize_body.index("self.broadcast_share_ui") < resize_body.index("upstream.request_refresh_client()")
+    assert "refresh: bool = True" in upstream_resize_body
+    assert "self.request_refresh_client()" in upstream_resize_body
+
+
+def test_share_terminal_upstream_refreshes_existing_viewer_attach():
+    upstream = server_module.ShareTerminalUpstream(SimpleNamespace(), "token", "6")
+    upstream.reader_thread = object()
+    calls = []
+    upstream.request_refresh_client = lambda: calls.append("refresh")
+    viewer = object()
+
+    upstream.add_viewer(viewer)
+
+    assert viewer in upstream.viewers
+    assert calls == ["refresh"]

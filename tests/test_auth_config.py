@@ -227,6 +227,11 @@ def test_bootstrap_locale_resolves_language_and_serves_locale_catalogs():
     assert web.static_content_type("locales/en-XA.json") == "application/json; charset=utf-8"
     assert web.static_content_type("locales/../settings.yaml") is None
     assert web.static_content_type("locales/sub/dir.json") is None
+    # /static/fonts/<asset>.woff2 is a served font asset for mirror-stable share rendering; traversal is rejected.
+    assert web.static_content_type("fonts/yolomux-ui.woff2") == "font/woff2"
+    assert web.static_asset_path("fonts/yolomux-ui.woff2").is_file()
+    assert web.static_content_type("fonts/../settings.yaml") is None
+    assert web.static_content_type("fonts/sub/dir.woff2") is None
 
 
 def test_pre_auth_brand_wordmark_localizes_yo_lo_glyphs():

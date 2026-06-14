@@ -11,12 +11,33 @@ function toggleFileExplorer() {
   }
 }
 
+function shareReadOnlyFinderStateIsHostOwned() {
+  return shareViewMode && !shareWriteMode && !applyingShareRemoteUiState;
+}
+
 async function openFileExplorerAt(path, options = {}) {
+  if (shareReadOnlyFinderStateIsHostOwned()) return false;
   const root = normalizeDirectoryPath(expandUserPath(path));
+  if (options.manualSelection === true) {
+    cancelPendingFileExplorerActiveSync();
+  }
+  const openGeneration = ++fileExplorerOpenGeneration;
+  const openStillCurrent = () => openGeneration === fileExplorerOpenGeneration;
+  const showPendingRoot = options.manualSelection === true || options.showPending === true;
+  if (showPendingRoot) {
+    fileExplorerManualSelectionActive = options.manualSelection === true;
+    setFileExplorerPathDisplay(root);
+    renderFileExplorerRootModeControls();
+    renderFileExplorerTreeSearching(root);
+  } else if (options.syncSelection === true) {
+    fileExplorerManualSelectionActive = false;
+  }
   const entries = await fetchDirectory(root, {user: options.user === true || options.manualSelection === true});
+  if (!openStillCurrent()) return false;
   if (!entries) {
     const error = currentFileExplorerListError(root);
     if (error) setFileExplorerPathDisplay(root, {error});
+    if (showPendingRoot) renderFileExplorerTreeStatus(error || `Cannot open ${root}`, {root, error: true});
     return false;
   }
   const previousExpanded = options.preserveExpanded ? Array.from(fileExplorerExpanded) : [];
@@ -24,7 +45,7 @@ async function openFileExplorerAt(path, options = {}) {
   fileExplorerRoot = root;
   pruneFileExplorerSelectionForRoot(fileExplorerRoot);
   fileExplorerManualSelectionActive = options.manualSelection === true;
-  cancelPendingFileExplorerActiveSync();
+  if (options.syncSelection !== true) cancelPendingFileExplorerActiveSync({invalidateOpen: false});
   setFileExplorerPathDisplay(fileExplorerRoot);
   renderFileExplorerRootModeControls();
   fileExplorerExpanded.clear();
@@ -33,10 +54,15 @@ async function openFileExplorerAt(path, options = {}) {
   }
   if (options.refreshPanels !== false) {
     await refreshFileExplorerPanelTrees({root: fileExplorerRoot, entries, restoreState: false});
+    if (!openStillCurrent()) return false;
   }
-  if (previousExpanded.length) await restoreFileExplorerExpandedPaths(previousExpanded, fileExplorerRoot);
+  if (previousExpanded.length) {
+    await restoreFileExplorerExpandedPaths(previousExpanded, fileExplorerRoot);
+    if (!openStillCurrent()) return false;
+  }
   if (scrollPositions) restoreFileExplorerScrollPositions(scrollPositions);
   updateFileExplorerCurrentFileHighlight();
+  scheduleShareUiStatePublish();
   return true;
 }
 
@@ -572,8 +598,8 @@ function renderQuickAccessInto(container) {
 }
 
 function renderFileExplorerQuickAccessControls() {
-  renderQuickAccessInto(fileExplorerQuickAccess);
-  document.querySelectorAll('.file-explorer-quick-access-panel').forEach(renderQuickAccessInto);
+  fileExplorerQuickAccess?.replaceChildren?.();
+  document.querySelectorAll('.file-explorer-quick-access-panel').forEach(container => container.replaceChildren());
 }
 
 function setFileExplorerRootMode(mode, options = {}) {
@@ -586,6 +612,7 @@ function setFileExplorerRootMode(mode, options = {}) {
   if (fileExplorerRootMode === 'sync' && options.sync !== false) {
     scheduleFileExplorerActiveTabSync(fileExplorerExplicitSyncSessionTarget(), {explicit: true});
   }
+  scheduleShareUiStatePublish();
 }
 
 function fileExplorerRootModeValue() {
@@ -598,6 +625,7 @@ function toggleFileExplorerRootMode() {
 }
 
 function setFileExplorerManualRootMode() {
+  cancelPendingFileExplorerActiveSync();
   if (fileExplorerRootMode !== 'fixed') {
     setFileExplorerRootMode('fixed', {sync: false, persist: true});
   } else {
@@ -1297,6 +1325,7 @@ function fileExplorerPaneIsOpen() {
 function scheduleFileExplorerActiveTabSync(preferredItem = null, options = {}) {
   if (!fileExplorerIsOpen()) return;
   if (fileExplorerRootMode !== 'sync') return;
+  if (shareReadOnlyFinderStateIsHostOwned()) return;
   const explicit = options.explicit === true;
   if (fileExplorerManualSelectionActive && !explicit) return;
   if (explicit) fileExplorerManualSelectionActive = false;
@@ -1329,23 +1358,28 @@ function scheduleFileExplorerActiveTabSync(preferredItem = null, options = {}) {
   }
 }
 
-function cancelPendingFileExplorerActiveSync() {
+function cancelPendingFileExplorerActiveSync(options = {}) {
   fileExplorerInteractionGeneration += 1;
+  if (options.invalidateOpen !== false) fileExplorerOpenGeneration += 1;
+  fileExplorerSyncGeneration += 1;
   resetFileExplorerAppliedSyncPlan();
 }
 
 async function syncFileExplorerRootToActiveTmux(preferredItem = null, options = {}) {
   if (!fileExplorerIsOpen() || fileExplorerRootMode !== 'sync') return false;
+  if (shareReadOnlyFinderStateIsHostOwned()) return false;
   return syncFileExplorerRootToPlan(fileExplorerSyncPlan(preferredItem), preferredItem, options);
 }
 
 async function syncFileExplorerRootToActiveFile(path, options = {}) {
   if (!fileExplorerIsOpen() || fileExplorerRootMode !== 'sync') return false;
+  if (shareReadOnlyFinderStateIsHostOwned()) return false;
   forgetFileExplorerSyncManualCollapse(path);
   return syncFileExplorerRootToPlan(fileExplorerSyncPlanForFile(path), fileEditorItemFor(path), options);
 }
 
 async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = {}) {
+  if (shareReadOnlyFinderStateIsHostOwned()) return false;
   const signature = fileExplorerSyncPlanSignature(plan);
   const expandPaths = fileExplorerSyncExpansionPaths(plan);
   if (!plan.root || fileExplorerSyncPathInFlight === signature) return false;
@@ -1363,7 +1397,13 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
       rememberFileExplorerSyncExpandedState();
     }
     if (plan.root !== currentFileExplorerRoot()) {
-      changed = await openFileExplorerAt(plan.root, {preserveExpanded: false, preserveScroll: false});
+      changed = await openFileExplorerAt(plan.root, {
+        preserveExpanded: false,
+        preserveScroll: false,
+        syncSelection: true,
+        user: options.force === true,
+        showPending: options.force === true,
+      });
       if (!changed) return false;
     }
     const rememberedExpandedPaths = rememberedFileExplorerSyncExpandedPaths(plan.session, plan.root);
@@ -1390,6 +1430,7 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
 async function syncFileExplorerToActiveTab(preferredItem = null, options = {}) {
   if (!fileExplorerIsOpen()) return false;
   if (fileExplorerRootMode !== 'sync' && options.explicit !== true) return false;
+  if (shareReadOnlyFinderStateIsHostOwned()) return false;
   const path = options.explicit === true ? explicitFinderTargetPath(preferredItem) : activeFinderTargetPath(preferredItem);
   if (!path || fileExplorerSyncPathInFlight === path) return false;
   const root = currentFileExplorerRoot();
@@ -1410,6 +1451,33 @@ function fileExplorerTreeContainers() {
     if (!containers.includes(tree)) containers.push(tree);
   });
   return containers;
+}
+
+function renderFileExplorerTreeStatus(message, options = {}) {
+  const root = normalizeDirectoryPath(options.root || '');
+  const status = options.status || (options.error === true ? 'error' : 'message');
+  for (const container of fileExplorerTreeContainers()) {
+    container.style.setProperty('--tree-depth', '0');
+    const row = document.createElement('div');
+    row.className = ['file-tree-row', 'file-tree-status-row', `file-tree-status-${status}`, options.error === true ? 'file-tree-status-error' : ''].filter(Boolean).join(' ');
+    row.dataset.status = status;
+    if (root) row.dataset.root = root;
+    row.draggable = false;
+    row.style.paddingLeft = fileTreeRowPadding(0);
+    clearFileTreeRowHandlers(row);
+    setTreeItemAria(row, {selected: false, expandable: false});
+    updateFileTreeRowContents(row, options.iconText || '', '', {nameHtml: options.nameHtml || esc(message)});
+    container.replaceChildren(row);
+    container.scrollTop = 0;
+  }
+}
+
+function renderFileExplorerTreeSearching(root) {
+  renderFileExplorerTreeStatus('searching...', {
+    root,
+    status: 'searching',
+    nameHtml: textWithMovingEllipsisHtml('searching...', 'file-tree-searching-dots'),
+  });
 }
 
 function captureFileExplorerScrollPositions() {
@@ -2175,6 +2243,7 @@ function renderTreeChildren(container, parentPath, entries, depth, options = {})
 
 function rawFileUrl(path, params = {}) {
   const queryParts = [`path=${encodeURIComponent(path)}`];
+  if (shareToken) queryParts.push(`token=${encodeURIComponent(shareToken)}`);
   for (const [key, value] of Object.entries(params)) {
     if (value === null || value === undefined || value === '') continue;
     queryParts.push(`${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`);
@@ -2269,6 +2338,7 @@ function updateFileExplorerCurrentFileHighlight() {
 }
 
 function scheduleFileExplorerActiveFileReveal(path = activeFile) {
+  if (shareReadOnlyFinderStateIsHostOwned()) return;
   if (!path) {
     updateFileExplorerCurrentFileHighlight();
     return;
@@ -3018,12 +3088,14 @@ function toggleTabberCollapsed(fullPath) {
   if (fileExplorerTabberCollapsed.has(fullPath)) fileExplorerTabberCollapsed.delete(fullPath);
   else fileExplorerTabberCollapsed.add(fullPath);
   persistTabberCollapsed();
+  scheduleShareUiStatePublish();
 }
 
 function expandTabberPath(fullPath) {
   if (!fileExplorerTabberCollapsed.has(fullPath)) return;
   fileExplorerTabberCollapsed.delete(fullPath);
   persistTabberCollapsed();
+  scheduleShareUiStatePublish();
 }
 
 // Expand/collapse ALL Tabber nodes (the toolbar Expand all / Collapse all). Collapse-all records every
@@ -3045,6 +3117,7 @@ function setAllTabberCollapsed(collapsed) {
   }
   persistTabberCollapsed();
   refreshTabberPanels();
+  scheduleShareUiStatePublish();
 }
 
 // Delegated activation for Tabber rows. Clicking the disclosure icon toggles a node; clicking the row body

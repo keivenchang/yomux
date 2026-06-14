@@ -1392,6 +1392,288 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   white-space: normal;
   font-family: var(--ui-font);
 }
+.modal.share-open {
+  inset: 16vh auto auto 50%;
+  width: min(560px, calc(100vw - 28px));
+  min-height: 0;
+  z-index: var(--z-pane-modal);
+  transform: translateX(-50%);
+  background: var(--panel);
+  border: 1px solid color-mix(in srgb, var(--active-control-border) 35%, var(--line));
+  box-shadow: 0 18px 52px rgb(var(--shadow-rgb) / 0.5);
+}
+.modal.share-open #modalBody {
+  display: block;
+  white-space: normal;
+  overflow: visible;
+  font-family: var(--ui-font);
+}
+.share-modal-form,
+.share-result {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+.share-section-title {
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+  font-weight: 900;
+  font-size: var(--ui-font-size-sm);
+}
+.share-entry-list {
+  display: grid;
+  gap: 10px;
+}
+.share-entry {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel2);
+}
+.share-entry.share-mode-read {
+  border-color: color-mix(in srgb, var(--good) 55%, var(--line));
+}
+.share-entry.share-mode-write {
+  border-color: color-mix(in srgb, var(--bad) 62%, var(--line));
+}
+.share-entry-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.share-entry-heading strong {
+  min-width: 0;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.share-entry-heading span {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: var(--ui-font-size-xs);
+  font-weight: 800;
+}
+.share-create-panel {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--panel2) 80%, transparent);
+}
+.share-active-panel {
+  display: grid;
+  gap: 8px;
+}
+.share-create-controls {
+  display: grid;
+  grid-template-columns: minmax(112px, 1fr) minmax(82px, 0.7fr) max-content;
+  align-items: end;
+  gap: 8px;
+}
+.share-field {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-weight: 800;
+}
+.share-field select,
+.share-field input[type="number"],
+.share-field input[type="text"] {
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--input-bg);
+  color: var(--text);
+  font: 600 var(--ui-font-size-sm)/1 var(--ui-font);
+}
+.share-duration-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: 6px;
+}
+.share-duration-unit {
+  color: var(--muted);
+  font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
+}
+.share-url-field input {
+  font-family: var(--mono-font);
+}
+.share-url-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 30px;
+  align-items: center;
+  gap: 6px;
+}
+.share-url-control .share-url-copy-button {
+  min-width: 30px;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+}
+.share-url-control .share-url-copy-button::before {
+  inset-inline-start: 8px;
+  top: 11px;
+}
+.share-url-control .share-url-copy-button::after {
+  inset-inline-start: 11px;
+  top: 8px;
+}
+.share-checkbox,
+.share-protocol-group label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text);
+}
+.share-protocol-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+.share-protocol-group legend {
+  padding: 0 4px;
+  color: var(--muted);
+  font-weight: 800;
+}
+.share-hint,
+.share-security-note,
+.share-result-meta {
+  color: var(--muted);
+  font-size: var(--ui-font-size-xs);
+  line-height: 1.35;
+}
+.share-result-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.share-result-meta span {
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--panel2);
+}
+.share-users {
+  display: grid;
+  gap: 4px;
+  padding-top: 2px;
+}
+.share-users-title {
+  color: var(--text);
+  font-size: var(--ui-font-size-xs);
+  font-weight: 900;
+}
+.share-users-table {
+  display: grid;
+  min-width: 0;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.share-users-row {
+  display: grid;
+  grid-template-columns: minmax(78px, 0.8fr) minmax(96px, 1fr) minmax(92px, 0.9fr);
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 5px 0;
+  color: var(--text);
+  font-size: var(--ui-font-size-xs);
+  line-height: 1.25;
+  border-top: 1px solid var(--line);
+}
+.share-users-row.header {
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-weight: 900;
+  background: transparent;
+}
+.share-users-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.share-users-empty {
+  padding: 7px 0 0;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: var(--ui-font-size-xs);
+}
+.share-extend-button {
+  min-height: 24px;
+  padding: 2px 7px;
+  border: 1px solid var(--active-control-border);
+  border-radius: var(--radius-control);
+  background: var(--active-control-soft-bg);
+  color: var(--text);
+  font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
+  cursor: pointer;
+}
+.share-extend-button:hover,
+.share-extend-button:focus-visible {
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  outline: 0;
+}
+.share-error {
+  color: var(--bad);
+  font-weight: 800;
+}
+.share-modal-message {
+  padding: 16px;
+  color: var(--muted);
+  font-family: var(--ui-font);
+}
+.share-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.share-actions button {
+  min-height: 30px;
+}
+.share-actions button.danger {
+  border-color: var(--danger-strong);
+  background: var(--danger-strong);
+  color: var(--danger-text);
+}
+.share-stop-inline {
+  min-height: 24px;
+  padding: 2px 7px;
+  border-radius: var(--radius-control);
+  font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
+}
+.modal.share-open::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background: color-mix(in srgb, var(--bg) 74%, transparent);
+}
+body.theme-light .modal.share-open {
+  background: #ffffff;
+  box-shadow: 0 18px 46px rgb(var(--shadow-rgb) / 0.24);
+}
+body.app-vw-lte-760 .share-create-controls {
+  grid-template-columns: 1fr;
+}
 .about-modal {
   display: grid;
   gap: 18px;
@@ -1482,97 +1764,89 @@ body.theme-light .info-cell a.pr-status-closed:hover {
 body.theme-light .modal.about-open {
   background: #ffffff;
 }
-@media (max-width: 1500px) {
-  .topbar {
-    gap: 6px;
-    padding-inline: 6px;
-  }
-  .brand {
-    min-width: 82px;
-  }
-  .app-menu-area {
-    gap: 6px;
-  }
-  .app-menu-button {
-    padding-inline: 6px;
-  }
-  .actions {
-    gap: 4px;
-  }
+body.app-vw-lte-1500 .topbar {
+  gap: 6px;
+  padding-inline: 6px;
+}
+body.app-vw-lte-1500 .brand {
+  min-width: 82px;
+}
+body.app-vw-lte-1500 .app-menu-area {
+  gap: 6px;
+}
+body.app-vw-lte-1500 .app-menu-button {
+  padding-inline: 6px;
+}
+body.app-vw-lte-1500 .actions {
+  gap: 4px;
 }
 
-@media (max-width: 1280px) {
-  .app-menu-area {
-    justify-content: flex-start;
-  }
-  .app-menu-button {
-    padding-inline: 5px;
-  }
-  .latency-meter {
-    min-width: 62px;
-    grid-template-columns: 34px auto;
-    gap: 4px;
-    padding-inline: 4px;
-  }
-  .latency-graph {
-    width: 32px;
-  }
-  .latency-number {
-    min-width: 28px;
-  }
+body.app-vw-lte-1280 .app-menu-area {
+  justify-content: flex-start;
+}
+body.app-vw-lte-1280 .app-menu-button {
+  padding-inline: 5px;
+}
+body.app-vw-lte-1280 .latency-meter {
+  min-width: 62px;
+  grid-template-columns: 34px auto;
+  gap: 4px;
+  padding-inline: 4px;
+}
+body.app-vw-lte-1280 .latency-graph {
+  width: 32px;
+}
+body.app-vw-lte-1280 .latency-number {
+  min-width: 28px;
 }
 
-@media (max-width: 1080px) {
-  .brand {
-    min-width: 72px;
-  }
-  .title {
-    font-size: var(--ui-font-size);
-  }
-  .app-menu-area {
-    gap: 4px;
-  }
-  .app-menu-button {
-    padding-inline: 4px;
-  }
-  .session-yolo-marker {
-    min-width: 18px;
-    padding-inline: 0;
-  }
-  .latency-graph {
-    display: none;
-  }
-  .latency-meter {
-    min-width: 42px;
-    grid-template-columns: auto;
-  }
-  .actions button {
-    width: var(--compact-icon-button-size);
-    min-width: var(--compact-icon-button-size);
-    max-width: var(--compact-icon-button-size);
-    padding-inline: 0;
-    font-size: 0;
-  }
-  #status {
-    max-width: 72px;
-  }
+body.app-vw-lte-1080 .brand {
+  min-width: 72px;
+}
+body.app-vw-lte-1080 .title {
+  font-size: var(--ui-font-size);
+}
+body.app-vw-lte-1080 .app-menu-area {
+  gap: 4px;
+}
+body.app-vw-lte-1080 .app-menu-button {
+  padding-inline: 4px;
+}
+body.app-vw-lte-1080 .session-yolo-marker {
+  min-width: 18px;
+  padding-inline: 0;
+}
+body.app-vw-lte-1080 .latency-graph {
+  display: none;
+}
+body.app-vw-lte-1080 .latency-meter {
+  min-width: 42px;
+  grid-template-columns: auto;
+}
+body.app-vw-lte-1080 .actions button {
+  width: var(--compact-icon-button-size);
+  min-width: var(--compact-icon-button-size);
+  max-width: var(--compact-icon-button-size);
+  padding-inline: 0;
+  font-size: 0;
+}
+body.app-vw-lte-1080 #status {
+  max-width: 72px;
 }
 
-@media (max-width: 980px) {
-  .topbar {
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    align-items: center;
-  }
-  .actions { flex-wrap: nowrap; }
-  .panel-head {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-  .pane-tabs {
-    max-width: 100%;
-  }
-  .tabs {
-    justify-self: stretch;
-  }
+body.app-vw-lte-980 .topbar {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+}
+body.app-vw-lte-980 .actions { flex-wrap: nowrap; }
+body.app-vw-lte-980 .panel-head {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+body.app-vw-lte-980 .pane-tabs {
+  max-width: 100%;
+}
+body.app-vw-lte-980 .tabs {
+  justify-self: stretch;
 }
 
 /* File Explorer overlay panel (Phase 2 of the file-browser feature).
@@ -1749,6 +2023,14 @@ body.theme-light .modal.about-open {
 .file-tree-row:not(.selected):hover {
   background: var(--file-hover-bg);
   box-shadow: inset 4px 0 0 var(--file-hover-border), inset 0 0 0 1px var(--file-hover-outline);
+}
+.file-tree-status-row {
+  color: var(--muted);
+  cursor: default;
+}
+.file-tree-status-row:not(.selected):hover {
+  background: transparent;
+  box-shadow: none;
 }
 .file-tree-row.selected {
   color: var(--file-selection-text);

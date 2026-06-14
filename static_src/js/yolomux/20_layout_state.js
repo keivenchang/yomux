@@ -608,8 +608,22 @@ function maybeAdoptYoagentDeepLink(params) {
   }
 }
 
+function shareBootstrapLayoutParams() {
+  if (!shareViewMode || !shareBootstrap) return null;
+  const params = new URLSearchParams();
+  const layout = String(shareBootstrap.layout || '').trim();
+  const tabs = String(shareBootstrap.tabs || '').trim();
+  const sharedSessions = Array.isArray(shareBootstrap.sessions)
+    ? shareBootstrap.sessions.map(session => String(session || '').trim()).filter(Boolean)
+    : [];
+  if (layout) params.set('layout', layout);
+  if (tabs) params.set('tabs', tabs);
+  if (sharedSessions.length) params.set('sessions', sharedSessions.join(','));
+  return layout || tabs || sharedSessions.length ? params : null;
+}
+
 function initialLayoutSlots() {
-  const params = new URLSearchParams(location.search);
+  const params = shareBootstrapLayoutParams() || new URLSearchParams(location.search);
   maybeAdoptYoagentDeepLink(params);
   const layoutFromUrl = layoutFromParam(params.get('layout') || '', params.get('tabs') || '');
   if (layoutFromUrl) return layoutWithDebugPaneActive(layoutFromUrl);
@@ -3198,6 +3212,7 @@ function applyLayoutSlots(nextSlots, options = {}) {
   activeSessions = sessionsFromLayout();
   clearFocusForInactiveLayout();
   updateActiveSessionParam();
+  sharePublishLayout();
   requestLayoutRender({
     previousActive,
     prevShape,
@@ -3207,6 +3222,7 @@ function applyLayoutSlots(nextSlots, options = {}) {
     forceFull: options.forceFull === true,
   });
   for (const session of activeSessions.filter(isTmuxSession)) ensureTerminalRunning(session);
+  scheduleShareUiStatePublish();
   // do NOT re-poll the server on a pure client-side layout change. refreshTranscripts()
   // fires 3..(3+N) network round-trips and a second full render wave gated behind their latency —
   // the bulk of the "moving a tab takes several seconds" delay. Freshness is already covered by the
@@ -3284,6 +3300,7 @@ function flushPendingLayoutRender(reason = 'drag-flush') {
 }
 
 function updateActiveSessionParam() {
+  if (shareViewMode) return;
   const params = new URLSearchParams(location.search);
   params.delete('active');
   params.delete('sessions');

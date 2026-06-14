@@ -22,6 +22,7 @@ LOCALES_SRC = REPO_ROOT / "static_src" / "locales"
 LOCALES_OUT = REPO_ROOT / "static" / "locales"
 SOURCE_LOCALE = "en"
 PSEUDO_LOCALE = "en-XA"
+WINDOW_VIEWPORT_ALLOW_MARKER = "static-build-allow-window-viewport"
 _PSEUDO_ACCENTS = str.maketrans({
     "a": "á", "b": "ƀ", "c": "ç", "d": "đ", "e": "é", "f": "ƒ", "g": "ǧ", "h": "ĥ", "i": "í",
     "j": "ĵ", "k": "ķ", "l": "ł", "m": "ɱ", "n": "ñ", "o": "ó", "p": "ƥ", "q": "ɋ", "r": "ř",
@@ -457,6 +458,25 @@ def lint_undefined_css_vars() -> list[str]:
             for name in sorted(referenced - defined)]
 
 
+def lint_raw_window_viewport_reads() -> list[str]:
+    """Every JS viewport read must go through appViewport(); the one owner line is marked."""
+    errors: list[str] = []
+    pattern = re.compile(r"\bwindow\.inner(?:Width|Height)\b")
+    for part in ASSETS.get("yolomux.js", []):
+        path = repo_path(part)
+        try:
+            text = read_text(path)
+        except FileNotFoundError:
+            continue
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            if not pattern.search(line):
+                continue
+            if WINDOW_VIEWPORT_ALLOW_MARKER in line:
+                continue
+            errors.append(f"{part}:{line_no}: raw window.innerWidth/innerHeight read; use appViewport()")
+    return errors
+
+
 def check_locales() -> list[str]:
     stale: list[str] = []
     for locale, text in expected_locale_outputs().items():
@@ -553,7 +573,7 @@ def main(argv: list[str] | None = None) -> int:
             # the documented pre-commit gate runs the FULL lint set — duplicate top-level
             # declarations, undefined CSS vars, AND theme-light pairing (the last previously ran only under
             # --lint-light, so it was absent from --check / the CPS check list).
-            lint_errors = lint_duplicate_functions() + lint_undefined_css_vars() + lint_light_mode_pairs()
+            lint_errors = lint_duplicate_functions() + lint_undefined_css_vars() + lint_raw_window_viewport_reads() + lint_light_mode_pairs()
             for err in lint_errors:
                 print(err, file=sys.stderr)
             if stale or lint_errors:

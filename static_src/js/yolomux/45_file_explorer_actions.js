@@ -319,14 +319,17 @@ async function collapseAllFileExplorerDirectories() {
 async function setAllFileTreeDirectoriesExpanded(source, expand) {
   if (fileExplorerMode === 'tabber') {
     setAllTabberCollapsed(!expand);
+    scheduleShareUiStatePublish();
     return;
   }
   if (source?.closest?.('.file-explorer-changes-panel')) {
     setAllFileExplorerChangesDirectoriesExpanded(expand);
+    scheduleShareUiStatePublish();
     return;
   }
   if (expand) await expandAllFileExplorerDirectories();
   else await collapseAllFileExplorerDirectories();
+  scheduleShareUiStatePublish();
 }
 
 function bindFileExplorerHeaderActions(container = document) {
@@ -368,6 +371,7 @@ function bindFileExplorerHeaderActions(container = document) {
     writeStoredFileExplorerTreeSortMode(fileExplorerTreeSortMode);
     if (fileExplorerMode === 'tabber') refreshTabberPanels();
     else refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+    scheduleShareUiStatePublish();
   });
 }
 
@@ -478,6 +482,7 @@ function setFileTreeDirectoryExpanded(row, fullPath, expand) {
     else changesFolderCollapsed.add(fullPath);
     writeStoredChangesFolderCollapsed();
     renderFileExplorerChangesPanels({force: true});
+    scheduleShareUiStatePublish();
     return;
   }
   if (expand) expandDirectoryRow(row, fullPath, {manual: true});
@@ -1014,8 +1019,7 @@ function removePanelForItem(item) {
 // createFileExplorerPanel() bakes in at creation time and caches in panelNodes. Re-rendering only the
 // panel BODIES (rerenderForLocale's other calls) leaves that chrome stale, and the toolbar mixes direct
 // and delegated click handlers — so relabel-and-rebind would be fragile. Instead evict the cached Finder
-// panel and let renderPanels() rebuild it from the single source of truth, then repopulate the tree and
-// quick-access (state-bearing toggles read live globals / localStorage, so they survive the rebuild).
+// panel and let renderPanels() rebuild it from the single source of truth, then repopulate the tree.
 function relocalizeFileExplorerPanels() {
   if (!panelNodes.has(fileExplorerItemId)) return;
   removePanelForItem(fileExplorerItemId);
@@ -1137,7 +1141,7 @@ function fileErrorState(message) {
     original: '',
     content: '',
     dirty: false,
-    error: String(message || 'failed to load file'),
+    error: String(message || t('editor.fileLoadFailed')),
   };
 }
 
@@ -1649,7 +1653,7 @@ async function refreshOpenFileDiff(path, options = {}) {
     } catch (error) {
       markOpenFileDiffUnavailable(state, error);
       if (!options.silent) {
-        for (const panel of fileEditorPanelsForPath(path)) setFileEditorPanelStatus(panel, `diff unavailable: ${String(error)}`, 'warn');
+        for (const panel of fileEditorPanelsForPath(path)) setFileEditorPanelStatus(panel, t('editor.diffUnavailable', {error: String(error)}), 'warn');
       }
       return false;
     } finally {

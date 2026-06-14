@@ -20,7 +20,9 @@ from datetime import timezone
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import unquote
+from urllib.parse import urlsplit
+from urllib.parse import urlunsplit
 
 from . import common
 from . import filesystem
@@ -139,6 +141,9 @@ TRANSCRIPTS_PAYLOAD_CACHE_SECONDS = 15.0
 CONTEXT_ITEMS_CACHE_MAX_ITEMS = 128
 SHARE_TOKEN_DEFAULT_TTL_SECONDS = 3600.0
 SHARE_TOKEN_MAX_TTL_SECONDS = 8.0 * 3600.0
+SHARE_MAX_VIEWERS_DEFAULT = 5
+SHARE_MAX_VIEWERS_HARD_LIMIT = 300
+SHARE_SHORT_ID_BYTES = 6
 SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS = 1.25
 SERVER_WATCHED_PR_EVENT_POLL_SECONDS = 60.0
 SERVER_TABBER_ACTIVITY_CACHE_REFRESH_SECONDS = 60.0
@@ -514,6 +519,476 @@ class TmuxWebtermApp:
             return None
         return min(seconds, SHARE_TOKEN_MAX_TTL_SECONDS)
 
+    def bounded_share_max_viewers(self, value: Any) -> int | None:
+        if value is None or value == "":
+            return SHARE_MAX_VIEWERS_DEFAULT
+        try:
+            viewers = int(value)
+        except (TypeError, ValueError):
+            return None
+        if viewers <= 0:
+            return None
+        return min(viewers, SHARE_MAX_VIEWERS_HARD_LIMIT)
+
+    def normalize_share_mode(self, value: Any = None, *, read_only: Any = None) -> str:
+        if read_only is not None:
+            if isinstance(read_only, bool):
+                return "ro" if read_only else "rw"
+            if str(read_only).strip().lower() in {"1", "true", "yes", "on", "readonly", "read-only", "ro"}:
+                return "ro"
+            return "rw"
+        text = str(value or "").strip().lower()
+        if text in {"rw", "write", "writable"}:
+            return "rw"
+        return "ro"
+
+    def normalize_share_scheme(self, value: Any, *, base_url: str = "") -> str:
+        text = str(value or "").strip().lower()
+        if text in {"http", "https"}:
+            return text
+        try:
+            scheme = urlsplit(str(base_url or "")).scheme.lower()
+        except ValueError:
+            scheme = ""
+        return scheme if scheme in {"http", "https"} else "http"
+
+    def share_base_url(self, base_url: str, scheme: str) -> str:
+        root = str(base_url or "").rstrip("/")
+        if not root:
+            return ""
+        try:
+            parts = urlsplit(root)
+        except ValueError:
+            return root
+        if not parts.netloc:
+            return root
+        return urlunsplit((scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
+
+    def share_record_sessions(self, record: dict[str, Any]) -> list[str]:
+        raw_sessions = record.get("sessions")
+        if isinstance(raw_sessions, list):
+            sessions = [str(session or "").strip() for session in raw_sessions]
+        else:
+            sessions = [str(record.get("session") or "").strip()]
+        result: list[str] = []
+        for session in sessions:
+            if session and session not in result:
+                result.append(session)
+        return result
+
+    def share_record_primary_session(self, record: dict[str, Any]) -> str:
+        sessions = self.share_record_sessions(record)
+        return sessions[0] if sessions else ""
+
+    def normalize_share_client_ip(self, value: Any) -> str:
+        text = str(value or "").strip()
+        return text[:80] if text else "unknown"
+
+    def normalize_share_browser_type(self, user_agent: Any) -> str:
+        text = str(user_agent or "").strip()
+        if not text:
+            return "Unknown"
+        lower = text.lower()
+        if "edg/" in lower or "edge/" in lower:
+            return "Edge"
+        if "opr/" in lower or "opera" in lower:
+            return "Opera"
+        if "samsungbrowser/" in lower:
+            return "Samsung Internet"
+        if "firefox/" in lower or "fxios/" in lower:
+            return "Firefox"
+        if "crios/" in lower or "chrome/" in lower or "chromium/" in lower:
+            return "Chrome"
+        if "safari/" in lower:
+            return "Safari"
+        if "msie " in lower or "trident/" in lower:
+            return "Internet Explorer"
+        if "curl/" in lower:
+            return "curl"
+        if "python-requests/" in lower:
+            return "Python"
+        return "Browser"
+
+    def normalize_share_viewer_record(self, value: Any, now: float | None = None) -> dict[str, Any] | None:
+        current_time = time.time() if now is None else now
+        if isinstance(value, dict):
+            raw_count = value.get("count", value.get("refcount", 0))
+            try:
+                count = int(raw_count)
+            except (TypeError, ValueError):
+                count = 0
+            try:
+                connected_at = float(value.get("connected_at", value.get("connectedAt", current_time)) or current_time)
+            except (TypeError, ValueError):
+                connected_at = current_time
+            try:
+                last_seen_at = float(value.get("last_seen_at", value.get("lastSeenAt", connected_at)) or connected_at)
+            except (TypeError, ValueError):
+                last_seen_at = connected_at
+            ip = self.normalize_share_client_ip(value.get("ip", ""))
+            browser = str(value.get("browser") or "").strip()[:80] or self.normalize_share_browser_type(value.get("user_agent", value.get("userAgent", "")))
+        else:
+            try:
+                count = int(value)
+            except (TypeError, ValueError):
+                count = 0
+            connected_at = current_time
+            last_seen_at = current_time
+            ip = "unknown"
+            browser = "Unknown"
+        if count <= 0:
+            return None
+        return {
+            "count": count,
+            "connected_at": connected_at,
+            "last_seen_at": last_seen_at,
+            "ip": ip,
+            "browser": browser,
+        }
+
+    def share_record_viewer_ids(self, record: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        raw_viewers = record.get("viewer_ids")
+        if not isinstance(raw_viewers, dict):
+            raw_viewers = {}
+            record["viewer_ids"] = raw_viewers
+        normalized: dict[str, dict[str, Any]] = {}
+        now = time.time()
+        for viewer_id, value in raw_viewers.items():
+            clean_id = str(viewer_id or "").strip()
+            entry = self.normalize_share_viewer_record(value, now)
+            if clean_id and entry:
+                normalized[clean_id] = entry
+        record["viewer_ids"] = normalized
+        return record["viewer_ids"]
+
+    def share_record_viewer_count(self, record: dict[str, Any]) -> int:
+        return len(self.share_record_viewer_ids(record))
+
+    def share_record_viewer_details(self, record: dict[str, Any]) -> list[dict[str, Any]]:
+        now = time.time()
+        items = sorted(
+            self.share_record_viewer_ids(record).items(),
+            key=lambda item: (float(item[1].get("connected_at") or 0.0), str(item[0] or "")),
+        )
+        details: list[dict[str, Any]] = []
+        for _viewer_id, entry in items:
+            connected_at = float(entry.get("connected_at") or now)
+            details.append({
+                "connected_at": connected_at,
+                "connected_seconds": max(0.0, now - connected_at),
+                "last_seen_at": float(entry.get("last_seen_at") or connected_at),
+                "ip": self.normalize_share_client_ip(entry.get("ip", "")),
+                "browser": str(entry.get("browser") or "Unknown")[:80],
+            })
+        return details
+
+    def normalize_share_finder_state(self, value: Any, share_sessions: list[str]) -> dict[str, str]:
+        if not isinstance(value, dict):
+            return {}
+        root = str(value.get("root") or "").strip()
+        root_mode = str(value.get("rootMode") or value.get("root_mode") or "").strip()
+        mode = str(value.get("mode") or "").strip()
+        session = str(value.get("session") or "").strip()
+        result: dict[str, str] = {}
+        if root:
+            result["root"] = root
+        if root_mode in {"fixed", "sync"}:
+            result["rootMode"] = root_mode
+        if mode in {"files", "diff", "tabber"}:
+            result["mode"] = mode
+        if session and session in share_sessions:
+            result["session"] = session
+        return result
+
+    def normalize_share_ui_state(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        try:
+            normalized = json.loads(json.dumps(value)) if value else {}
+        except (TypeError, ValueError):
+            return {}
+        viewport = self.normalize_share_viewport_state(normalized.get("viewport"))
+        if viewport:
+            normalized["viewport"] = viewport
+        else:
+            normalized.pop("viewport", None)
+        appearance = self.normalize_share_appearance_state(normalized.get("appearance"))
+        if appearance:
+            normalized["appearance"] = appearance
+        else:
+            normalized.pop("appearance", None)
+        scroll = self.normalize_share_scroll_state(normalized.get("scroll"))
+        if scroll:
+            normalized["scroll"] = scroll
+        else:
+            normalized.pop("scroll", None)
+        return normalized
+
+    def normalize_share_scroll_state(self, value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        def clean_scroll_number(raw: Any) -> int:
+            try:
+                return max(0, int(round(float(raw or 0))))
+            except (TypeError, ValueError, OverflowError):
+                return 0
+
+        result: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in value[:100]:
+            if not isinstance(item, dict):
+                continue
+            target = str(item.get("target") or "").strip()
+            if not target or target in seen:
+                continue
+            seen.add(target)
+            entry: dict[str, Any] = {
+                "target": target,
+                "kind": str(item.get("kind") or "").strip()[:32],
+                "top": clean_scroll_number(item.get("top")),
+                "left": clean_scroll_number(item.get("left")),
+            }
+            for key in ("path", "item", "source", "mode", "session"):
+                value_text = str(item.get(key) or "").strip()
+                if value_text:
+                    entry[key] = value_text[:2048]
+            for key in ("anchor", "head"):
+                if key not in item:
+                    continue
+                entry[key] = clean_scroll_number(item.get(key))
+            result.append(entry)
+        return result
+
+    def normalize_share_viewport_state(self, value: Any) -> dict[str, int]:
+        if not isinstance(value, dict):
+            return {}
+        try:
+            width = int(round(float(value.get("width", value.get("w", 0)))))
+            height = int(round(float(value.get("height", value.get("h", 0)))))
+        except (TypeError, ValueError, OverflowError):
+            return {}
+        if width <= 0 or height <= 0:
+            return {}
+        return {
+            "width": max(1, min(100_000, width)),
+            "height": max(1, min(100_000, height)),
+        }
+
+    def normalize_share_appearance_state(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        number_fields: dict[str, tuple[float, float]] = {
+            "uiFontSize": (6, 20),
+            "terminalFontSize": (6, 28),
+            "terminalLineHeight": (0.8, 2.0),
+            "editorFontSize": (6, 28),
+            "previewFontSize": (6, 32),
+            "fileExplorerFontSize": (6, 24),
+            "tabWidth": (120, 420),
+            "paneSpacing": (0, 20),
+            "paneRingOpacity": (5, 100),
+            "inactivePaneOpacity": (0, 100),
+        }
+        string_fields: dict[str, set[str]] = {
+            "locale": {"en", "zh-Hant", "zh-Hans", "ja", "ko", "es", "de", "fr", "it", "pt-BR", "pl", "nl", "he", "ar", "ru", "hi", "vi", "th", "tr", "en-XA"},
+            "languagePref": {"system", "en", "zh-Hant", "zh-Hans", "ja", "ko", "es", "de", "fr", "it", "pt-BR", "pl", "nl", "he", "ar", "ru", "hi", "vi", "th", "tr", "en-XA"},
+            "theme": {"dark", "light", "system"},
+            "resolvedTheme": {"dark", "light"},
+            "terminalTheme": {"dark", "light", "follow-app"},
+            "activeColor": {"green", "blue", "orange", "yellow", "purple", "white"},
+            "separatorColor": {"theme", "green", "blue", "orange", "yellow", "purple", "white"},
+        }
+        result: dict[str, Any] = {}
+        for key, (low, high) in number_fields.items():
+            if key not in value:
+                continue
+            try:
+                number = float(value.get(key))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if not (number == number):
+                continue
+            result[key] = max(low, min(high, number))
+        for key, allowed in string_fields.items():
+            text = str(value.get(key) or "").strip()
+            if text in allowed:
+                result[key] = text
+        return result
+
+    def share_record_layout_file_paths(self, record: dict[str, Any]) -> set[str]:
+        paths: set[str] = set()
+        prefixes = ("file:", "filediff:", "image:")
+        for part in str(record.get("tabs") or "").split(";"):
+            _slot, separator, raw_items = part.partition(":")
+            if not separator:
+                continue
+            for raw_item in raw_items.split(","):
+                token = raw_item.strip()
+                if token.endswith("*"):
+                    token = token[:-1]
+                item = unquote(token)
+                if item.startswith("filecopy:"):
+                    _copy_id, copy_separator, path = item.removeprefix("filecopy:").partition(":")
+                    if copy_separator and path.startswith("/"):
+                        paths.add(path)
+                    continue
+                for prefix in prefixes:
+                    if item.startswith(prefix):
+                        path = item[len(prefix):]
+                        if path.startswith("/"):
+                            paths.add(path)
+        ui_state = record.get("ui_state")
+        editor = ui_state.get("editor") if isinstance(ui_state, dict) else None
+        modes = editor.get("modes") if isinstance(editor, dict) else None
+        if isinstance(modes, list):
+            for entry in modes:
+                path = str(entry.get("path") or "") if isinstance(entry, dict) else ""
+                if path.startswith("/"):
+                    paths.add(path)
+        return paths
+
+    def share_record_layout_sessions(self, tabs: Any) -> list[str]:
+        active_sessions = set(self.sessions)
+        sessions: list[str] = []
+        for part in str(tabs or "").split(";"):
+            _slot, separator, raw_items = part.partition(":")
+            if not separator:
+                continue
+            for raw_item in raw_items.split(","):
+                token = raw_item.strip()
+                if token.endswith("*"):
+                    token = token[:-1]
+                item = unquote(token)
+                if item in active_sessions and item not in sessions:
+                    sessions.append(item)
+        return sessions
+
+    def share_record_allows_file_path(self, record: dict[str, Any] | None, raw_path: str) -> bool:
+        if not record:
+            return False
+        path = str(raw_path or "").strip()
+        return bool(path) and path in self.share_record_layout_file_paths(record)
+
+    def normalize_share_viewer_id(self, value: Any) -> str:
+        text = str(value or "").strip()
+        return text[:128] if text else "legacy"
+
+    def share_record_sessions_are_active(self, record: dict[str, Any], active_sessions: set[str] | None = None) -> bool:
+        sessions = self.share_record_sessions(record)
+        if not sessions:
+            return False
+        current = set(self.sessions) if active_sessions is None else active_sessions
+        return all(session in current for session in sessions)
+
+    def normalize_share_session_list(self, session: Any, sessions: Any = None) -> tuple[list[str], str]:
+        raw_values: list[Any] = []
+        if isinstance(sessions, list):
+            raw_values.extend(sessions)
+        elif isinstance(sessions, tuple):
+            raw_values.extend(sessions)
+        elif isinstance(sessions, str):
+            raw_values.extend(sessions.split(","))
+        raw_values.append(session)
+        result: list[str] = []
+        for raw in raw_values:
+            value = str(raw or "").strip()
+            if not value or value in result:
+                continue
+            if value not in self.sessions:
+                return [], value
+            result.append(value)
+        return result, ""
+
+    def prune_inactive_share_tokens_locked(self, now: float) -> None:
+        for token, record in list(self.share_tokens.items()):
+            if float(record.get("expires_at") or 0.0) <= now:
+                self.share_tokens.pop(token, None)
+                continue
+            if not self.share_record_sessions_are_active(record):
+                record["revoked"] = True
+
+    def active_share_records_locked(self, now: float) -> list[dict[str, Any]]:
+        self.prune_inactive_share_tokens_locked(now)
+        records: list[dict[str, Any]] = []
+        for record in self.share_tokens.values():
+            if not record.get("revoked") and self.share_record_sessions_are_active(record) and float(record.get("expires_at") or 0.0) > now:
+                records.append(record)
+        return records
+
+    def active_share_entries_locked(self, now: float) -> list[tuple[str, dict[str, Any]]]:
+        self.prune_inactive_share_tokens_locked(now)
+        entries: list[tuple[str, dict[str, Any]]] = []
+        for token, record in self.share_tokens.items():
+            if not record.get("revoked") and self.share_record_sessions_are_active(record) and float(record.get("expires_at") or 0.0) > now:
+                entries.append((token, record))
+        return entries
+
+    def new_share_short_id_locked(self) -> str:
+        existing = {str(record.get("short_id") or "") for record in self.share_tokens.values()}
+        while True:
+            short_id = secrets.token_urlsafe(SHARE_SHORT_ID_BYTES).rstrip("=")
+            if short_id and short_id not in existing:
+                return short_id
+
+    def share_url_for_record(self, token: str, record: dict[str, Any], base_url: str = "") -> str:
+        root = self.share_base_url(base_url, str(record.get("scheme") or "http"))
+        short_id = str(record.get("short_id") or "")
+        path = f"/share/{short_id}"
+        return f"{root}{path}#t={token}" if root else f"{path}#t={token}"
+
+    def share_status_frame_for_record(self, record: dict[str, Any]) -> dict[str, Any]:
+        ui_state = record.get("ui_state") if isinstance(record.get("ui_state"), dict) else {}
+        return {
+            "active": not bool(record.get("revoked")),
+            "session": self.share_record_primary_session(record),
+            "sessions": self.share_record_sessions(record),
+            "created_at": float(record.get("created_at") or 0.0),
+            "created_by": str(record.get("created_by") or ""),
+            "expires_at": float(record.get("expires_at") or 0.0),
+            "ttl_seconds": max(0.0, float(record.get("expires_at") or 0.0) - time.time()),
+            "mode": str(record.get("mode") or "ro"),
+            "scheme": str(record.get("scheme") or "http"),
+            "short_id": str(record.get("short_id") or ""),
+            "max_viewers": int(record.get("max_viewers") or 0),
+            "viewers": self.share_record_viewer_count(record),
+            "viewer_details": self.share_record_viewer_details(record),
+            "viewport": ui_state.get("viewport") if isinstance(ui_state.get("viewport"), dict) else {},
+        }
+
+    def share_status_frame_payload(self, token: str) -> dict[str, Any] | None:
+        record = self.verify_share_token(token)
+        if record is None:
+            return None
+        return self.share_status_frame_for_record(record)
+
+    def share_payload_for_record(self, token: str, record: dict[str, Any], base_url: str = "") -> dict[str, Any]:
+        ui_state = record.get("ui_state") if isinstance(record.get("ui_state"), dict) else {}
+        return {
+            "ok": True,
+            "active": True,
+            "token": token,
+            "url": self.share_url_for_record(token, record, base_url),
+            "session": self.share_record_primary_session(record),
+            "sessions": self.share_record_sessions(record),
+            "created_at": float(record.get("created_at") or 0.0),
+            "created_by": str(record.get("created_by") or ""),
+            "expires_at": float(record.get("expires_at") or 0.0),
+            "ttl_seconds": max(0.0, float(record.get("expires_at") or 0.0) - time.time()),
+            "mode": str(record.get("mode") or "ro"),
+            "scheme": str(record.get("scheme") or "http"),
+            "short_id": str(record.get("short_id") or ""),
+            "max_viewers": int(record.get("max_viewers") or 0),
+            "viewers": self.share_record_viewer_count(record),
+            "viewer_details": self.share_record_viewer_details(record),
+            "http_allowed": bool(record.get("http_allowed")),
+            "finder": record.get("finder") if isinstance(record.get("finder"), dict) else {},
+            "layout": str(record.get("layout") or ""),
+            "tabs": str(record.get("tabs") or ""),
+            "viewport": ui_state.get("viewport") if isinstance(ui_state.get("viewport"), dict) else {},
+            "appearance": ui_state.get("appearance") if isinstance(ui_state.get("appearance"), dict) else {},
+            "uiState": ui_state,
+        }
+
     def create_share_token(
         self,
         session: str,
@@ -523,42 +998,174 @@ class TmuxWebtermApp:
         created_by: str = "",
         layout: str = "",
         tabs: str = "",
+        finder: Any = None,
+        ui_state: Any = None,
+        sessions: Any = None,
+        mode: Any = None,
+        read_only: Any = None,
+        scheme: Any = None,
+        max_viewers: Any = None,
+        request_is_https: bool = False,
+        tls_available: bool = False,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        unknown = self.require_known_session(session)
-        if unknown:
-            return unknown
+        share_sessions, bad_session = self.normalize_share_session_list(session, sessions)
+        if bad_session:
+            return {"session": bad_session, "error": f"unknown session: {bad_session}"}, HTTPStatus.NOT_FOUND
+        if not share_sessions:
+            return {"session": "", "error": "at least one tmux session is required"}, HTTPStatus.BAD_REQUEST
+        primary_session = share_sessions[0]
         bounded_ttl = self.bounded_share_ttl_seconds(ttl_seconds)
         if bounded_ttl is None:
-            return {"session": session, "error": "ttl must be a positive number of seconds"}, HTTPStatus.BAD_REQUEST
+            return {"session": primary_session, "sessions": share_sessions, "error": "ttl must be a positive number of seconds"}, HTTPStatus.BAD_REQUEST
+        bounded_viewers = self.bounded_share_max_viewers(max_viewers)
+        if bounded_viewers is None:
+            return {"session": primary_session, "sessions": share_sessions, "error": "max_viewers must be a positive integer"}, HTTPStatus.BAD_REQUEST
+        requested_mode = self.normalize_share_mode(mode, read_only=read_only)
+        requested_scheme = self.normalize_share_scheme(scheme, base_url=base_url)
+        if not tls_available:
+            share_mode = "ro"
+            share_scheme = "http"
+        elif requested_mode == "rw":
+            if requested_scheme != "https" or not request_is_https:
+                return {"session": primary_session, "sessions": share_sessions, "error": "write shares require https"}, HTTPStatus.BAD_REQUEST
+            share_mode = "rw"
+            share_scheme = "https"
+        else:
+            share_mode = "ro"
+            share_scheme = requested_scheme
         now = time.time()
         expires_at = now + bounded_ttl
         token = secrets.token_urlsafe(32)
-        record = {
-            "session": session,
-            "created_at": now,
-            "expires_at": expires_at,
-            "created_by": str(created_by or ""),
-            "revoked": False,
-            "layout": str(layout or ""),
-            "tabs": str(tabs or ""),
-        }
+        finder_state = self.normalize_share_finder_state(finder, share_sessions)
+        normalized_ui_state = self.normalize_share_ui_state(ui_state)
         with self.share_tokens_lock:
+            short_id = self.new_share_short_id_locked()
+            record = {
+                "session": primary_session,
+                "sessions": share_sessions,
+                "created_at": now,
+                "expires_at": expires_at,
+                "created_by": str(created_by or ""),
+                "revoked": False,
+                "layout": str(layout or ""),
+                "tabs": str(tabs or ""),
+                "finder": finder_state,
+                "ui_state": normalized_ui_state,
+                "mode": share_mode,
+                "max_viewers": bounded_viewers,
+                "viewers": 0,
+                "viewer_ids": {},
+                "scheme": share_scheme,
+                "short_id": short_id,
+                "http_allowed": share_scheme == "http" and share_mode == "ro",
+            }
             self.share_tokens[token] = record
-        params = {"token": token, "sessions": session}
-        if record["layout"]:
-            params["layout"] = record["layout"]
-        if record["tabs"]:
-            params["tabs"] = record["tabs"]
-        root = str(base_url or "").rstrip("/")
-        url = f"{root}/?{urlencode(params)}" if root else f"/?{urlencode(params)}"
-        return {
-            "ok": True,
-            "token": token,
-            "url": url,
-            "session": session,
-            "expires_at": expires_at,
-            "ttl_seconds": bounded_ttl,
-        }, HTTPStatus.OK
+        return self.share_payload_for_record(token, record, base_url) | {"ttl_seconds": bounded_ttl}, HTTPStatus.OK
+
+    def update_share_record_ui_state(self, token: str, payload: dict[str, Any]) -> None:
+        clean_token = str(token or "")
+        if not clean_token or not isinstance(payload, dict):
+            return
+        with self.share_tokens_lock:
+            record = self.share_tokens.get(clean_token)
+            if not record or record.get("revoked"):
+                return
+            sessions = self.share_record_sessions(record)
+            if "layout" in payload:
+                record["layout"] = str(payload.get("layout") or "")
+            layout_sessions: list[str] = []
+            if "tabs" in payload:
+                record["tabs"] = str(payload.get("tabs") or "")
+                layout_sessions = self.share_record_layout_sessions(record["tabs"])
+            finder = payload.get("finder")
+            if isinstance(finder, dict):
+                finder_session = str(finder.get("session") or "").strip()
+                if layout_sessions and finder_session in self.sessions and finder_session not in layout_sessions:
+                    layout_sessions.append(finder_session)
+                record["finder"] = self.normalize_share_finder_state(finder, layout_sessions or sessions)
+            if layout_sessions:
+                record["sessions"] = layout_sessions
+                record["session"] = layout_sessions[0]
+            ui_state = payload.get("uiState", payload.get("ui_state", None))
+            if isinstance(ui_state, dict):
+                record["ui_state"] = self.normalize_share_ui_state(ui_state)
+            ui_state_patch = payload.get("uiStatePatch", payload.get("ui_state_patch", None))
+            if isinstance(ui_state_patch, dict):
+                current_ui_state = record.get("ui_state") if isinstance(record.get("ui_state"), dict) else {}
+                record["ui_state"] = self.normalize_share_ui_state({**current_ui_state, **ui_state_patch})
+            ui_state_scroll = payload.get("uiStateScroll", payload.get("ui_state_scroll", None))
+            if isinstance(ui_state_scroll, dict):
+                current_ui_state = record.get("ui_state") if isinstance(record.get("ui_state"), dict) else {}
+                current_scroll = self.normalize_share_scroll_state(current_ui_state.get("scroll"))
+                next_scroll = self.normalize_share_scroll_state([ui_state_scroll])
+                if next_scroll:
+                    by_target = {entry["target"]: entry for entry in current_scroll}
+                    by_target[next_scroll[0]["target"]] = next_scroll[0]
+                    record["ui_state"] = self.normalize_share_ui_state({
+                        **current_ui_state,
+                        "scroll": list(by_target.values()),
+                    })
+
+    def active_share_payload(self, *, base_url: str = "") -> tuple[dict[str, Any], HTTPStatus]:
+        now = time.time()
+        with self.share_tokens_lock:
+            entries = self.active_share_entries_locked(now)
+            if not entries:
+                return {"ok": True, "active": False, "shares": []}, HTTPStatus.OK
+            shares = [self.share_payload_for_record(token, record, base_url) for token, record in entries]
+            token, record = entries[0]
+            return self.share_payload_for_record(token, record, base_url) | {"shares": shares}, HTTPStatus.OK
+
+    def share_status_payload(self, token: str, *, base_url: str = "") -> tuple[dict[str, Any], HTTPStatus]:
+        record = self.verify_share_token(token)
+        if record is None:
+            return {"ok": False, "active": False, "error": "share token expired or revoked"}, HTTPStatus.UNAUTHORIZED
+        clean_token = str(record.get("token") or token or "")
+        return self.share_payload_for_record(clean_token, record, base_url) | {"shares": []}, HTTPStatus.OK
+
+    def extend_share_token(self, token_or_short_id: str, add_seconds: Any = 600, *, base_url: str = "") -> tuple[dict[str, Any], HTTPStatus]:
+        target = str(token_or_short_id or "").strip()
+        if not target:
+            return {"ok": False, "error": "share token or id required"}, HTTPStatus.BAD_REQUEST
+        bounded_add = self.bounded_share_ttl_seconds(add_seconds)
+        if bounded_add is None:
+            return {"ok": False, "error": "extension must be a positive number of seconds"}, HTTPStatus.BAD_REQUEST
+        now = time.time()
+        with self.share_tokens_lock:
+            for token, record in self.active_share_entries_locked(now):
+                if not (
+                    hmac.compare_digest(token, target)
+                    or hmac.compare_digest(str(record.get("short_id") or ""), target)
+                ):
+                    continue
+                current_expires_at = max(now, float(record.get("expires_at") or 0.0))
+                max_expires_at = now + SHARE_TOKEN_MAX_TTL_SECONDS
+                record["expires_at"] = min(max_expires_at, current_expires_at + bounded_add)
+                return self.share_payload_for_record(token, record, base_url) | {"extended": True}, HTTPStatus.OK
+        return {"ok": False, "error": "share token expired or revoked"}, HTTPStatus.NOT_FOUND
+
+    def http_allowed_share_is_active(self) -> bool:
+        now = time.time()
+        with self.share_tokens_lock:
+            return any(bool(record.get("http_allowed")) for _token, record in self.active_share_entries_locked(now))
+
+    def stop_active_share(self, token_or_short_id: str = "") -> tuple[dict[str, Any], HTTPStatus]:
+        now = time.time()
+        stopped = 0
+        target = str(token_or_short_id or "").strip()
+        with self.share_tokens_lock:
+            for token, record in self.active_share_entries_locked(now):
+                if target and not (
+                    hmac.compare_digest(token, target)
+                    or hmac.compare_digest(str(record.get("short_id") or ""), target)
+                ):
+                    continue
+                if not record.get("revoked"):
+                    record["revoked"] = True
+                    stopped += 1
+        with self.share_tokens_lock:
+            remaining = len(self.active_share_entries_locked(time.time()))
+        return {"ok": True, "active": remaining > 0, "stopped": stopped}, HTTPStatus.OK
 
     def verify_share_token(self, token: str) -> dict[str, Any] | None:
         raw_token = str(token or "")
@@ -568,24 +1175,118 @@ class TmuxWebtermApp:
         with self.share_tokens_lock:
             for stored_token, record in list(self.share_tokens.items()):
                 expired = float(record.get("expires_at") or 0.0) <= now
-                session = str(record.get("session") or "")
                 if expired:
                     self.share_tokens.pop(stored_token, None)
                     continue
-                if session not in self.sessions:
+                if not self.share_record_sessions_are_active(record):
                     record["revoked"] = True
                 if not hmac.compare_digest(stored_token, raw_token):
                     continue
-                if record.get("revoked") or session not in self.sessions:
+                if record.get("revoked") or not self.share_record_sessions_are_active(record):
                     return None
-                return dict(record)
+                result = dict(record)
+                result["token"] = stored_token
+                return result
+        return None
+
+    def register_share_viewer(self, token: str, session: str = "", viewer_id: str = "", ip: str = "", user_agent: str = "") -> tuple[dict[str, Any], HTTPStatus]:
+        raw_token = str(token or "")
+        if not raw_token:
+            return {"error": "share token required"}, HTTPStatus.UNAUTHORIZED
+        requested_session = str(session or "").strip()
+        clean_viewer_id = self.normalize_share_viewer_id(viewer_id)
+        now = time.time()
+        with self.share_tokens_lock:
+            for stored_token, record in list(self.share_tokens.items()):
+                expired = float(record.get("expires_at") or 0.0) <= now
+                if expired:
+                    self.share_tokens.pop(stored_token, None)
+                    continue
+                if not self.share_record_sessions_are_active(record):
+                    record["revoked"] = True
+                if not hmac.compare_digest(stored_token, raw_token):
+                    continue
+                share_sessions = self.share_record_sessions(record)
+                if requested_session and requested_session not in share_sessions:
+                    return {"error": "share token is scoped to a different session"}, HTTPStatus.FORBIDDEN
+                if record.get("revoked") or not self.share_record_sessions_are_active(record):
+                    return {"error": "share token expired or revoked"}, HTTPStatus.UNAUTHORIZED
+                viewer_ids = self.share_record_viewer_ids(record)
+                viewers = len(viewer_ids)
+                max_viewers = int(record.get("max_viewers") or 0)
+                if clean_viewer_id not in viewer_ids and max_viewers > 0 and viewers >= max_viewers:
+                    return {"error": "share viewer limit reached"}, HTTPStatus.FORBIDDEN
+                current = viewer_ids.get(clean_viewer_id)
+                if not current:
+                    current = {
+                        "count": 0,
+                        "connected_at": now,
+                        "last_seen_at": now,
+                        "ip": self.normalize_share_client_ip(ip),
+                        "browser": self.normalize_share_browser_type(user_agent),
+                    }
+                current["count"] = max(0, int(current.get("count") or 0)) + 1
+                current["last_seen_at"] = now
+                clean_ip = self.normalize_share_client_ip(ip)
+                if clean_ip != "unknown":
+                    current["ip"] = clean_ip
+                browser = self.normalize_share_browser_type(user_agent)
+                if browser != "Unknown":
+                    current["browser"] = browser
+                viewer_ids[clean_viewer_id] = current
+                record["viewers"] = len(viewer_ids)
+                result = dict(record)
+                result["token"] = stored_token
+                result["viewer_id"] = clean_viewer_id
+                result["viewers"] = record["viewers"]
+                result["viewer_details"] = self.share_record_viewer_details(record)
+                return result, HTTPStatus.OK
+        return {"error": "share token expired or revoked"}, HTTPStatus.UNAUTHORIZED
+
+    def unregister_share_viewer(self, token: str, viewer_id: str = "") -> int:
+        raw_token = str(token or "")
+        if not raw_token:
+            return 0
+        clean_viewer_id = self.normalize_share_viewer_id(viewer_id)
+        with self.share_tokens_lock:
+            for stored_token, record in self.share_tokens.items():
+                if not hmac.compare_digest(stored_token, raw_token):
+                    continue
+                viewer_ids = self.share_record_viewer_ids(record)
+                current = viewer_ids.get(clean_viewer_id) or {}
+                remaining_for_viewer = max(0, int(current.get("count") or 0) - 1)
+                if remaining_for_viewer:
+                    current["count"] = remaining_for_viewer
+                    current["last_seen_at"] = time.time()
+                    viewer_ids[clean_viewer_id] = current
+                else:
+                    viewer_ids.pop(clean_viewer_id, None)
+                record["viewers"] = len(viewer_ids)
+                return record["viewers"]
+        return 0
+
+    def share_record_for_short_id(self, short_id: str) -> dict[str, Any] | None:
+        raw_short_id = str(short_id or "")
+        if not raw_short_id:
+            return None
+        now = time.time()
+        with self.share_tokens_lock:
+            self.prune_inactive_share_tokens_locked(now)
+            for token, record in self.share_tokens.items():
+                if record.get("revoked") or not self.share_record_sessions_are_active(record):
+                    continue
+                if not hmac.compare_digest(str(record.get("short_id") or ""), raw_short_id):
+                    continue
+                result = dict(record)
+                result["token"] = token
+                return result
         return None
 
     def revoke_share_tokens_for_session(self, session: str) -> int:
         revoked = 0
         with self.share_tokens_lock:
             for record in self.share_tokens.values():
-                if record.get("session") == session and not record.get("revoked"):
+                if session in self.share_record_sessions(record) and not record.get("revoked"):
                     record["revoked"] = True
                     revoked += 1
         return revoked
@@ -598,7 +1299,7 @@ class TmuxWebtermApp:
                 if float(record.get("expires_at") or 0.0) <= now:
                     self.share_tokens.pop(token, None)
                     continue
-                if str(record.get("session") or "") not in active_sessions and not record.get("revoked"):
+                if not self.share_record_sessions_are_active(record, active_sessions) and not record.get("revoked"):
                     record["revoked"] = True
                     revoked += 1
         return revoked
@@ -2127,12 +2828,12 @@ class TmuxWebtermApp:
             return None
         return active_window_for_panes(panes)
 
-    def record_user_input(self, session: str, byte_count: int) -> None:
-        """One user-input heartbeat from the WS bridge (admin keystrokes only — readonly is
-        dropped upstream). Attributes to the session and its active window."""
+    def record_user_input(self, session: str, byte_count: int, source: str = "host") -> None:
+        """One user-input heartbeat from the WS bridge. Read-only viewers are dropped upstream;
+        write-share input passes source="share" so the heartbeat log can distinguish it."""
         if not session:
             return
-        self.activity_ledger.heartbeat(session, self.active_window_for(session), byte_count=byte_count)
+        self.activity_ledger.heartbeat(session, self.active_window_for(session), byte_count=byte_count, source=source)
 
     def build_activity_payload(self) -> dict[str, Any]:
         return {"activity": self.activity_ledger.snapshot()}

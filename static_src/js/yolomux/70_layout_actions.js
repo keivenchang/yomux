@@ -660,6 +660,11 @@ function activatePaneTab(side, session, options = {}) {
   // a user-initiated tab switch IS navigation. setFocusedPanelItem records the previous
   // focused item plus the newly activated tab so Back returns to the pane the user just left.
   setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
+  if (!shareViewMode && isTmuxSession(session)) {
+    const item = terminals.get(session);
+    if (item?.term) sharePublish('host-resize', {session, rows: item.term.rows, cols: item.term.cols});
+  }
+  sharePublish('active-tab', {slot: side, item: session});
   if (activeItemForSide(side) === session) {
     focusPanel(session, {userInitiated: options.userInitiated === true});
     return;
@@ -1153,10 +1158,10 @@ async function createNextSession(agent) {
 
 function tmuxSessionNameError(name) {
   const text = String(name || '').trim();
-  if (!text) return 'session name is required';
-  if (text.length > 64) return 'session name must be 64 characters or fewer';
+  if (!text) return t('rename.error.required');
+  if (text.length > 64) return t('rename.error.tooLong');
   // Keep in sync with TMUX_SESSION_NAME_RE in yolomux_lib/app.py.
-  if (!/^[A-Za-z0-9_. -]+$/.test(text)) return 'session name may contain only letters, numbers, spaces, dot, dash, and underscore';
+  if (!/^[A-Za-z0-9_. -]+$/.test(text)) return t('rename.error.invalidChars');
   return '';
 }
 
@@ -1394,24 +1399,55 @@ function focusPanel(session, options = {}) {
   activateTab(session, 'terminal', {userInitiated: options.userInitiated === true});
 }
 
+function shareHostTerminalSize(session) {
+  if (!shareViewMode) return null;
+  const dims = shareHostDimensions.get(String(session || ""));
+  const rawRows = Math.floor(Number(dims?.rows) || 0);
+  const rawCols = Math.floor(Number(dims?.cols) || 0);
+  if (rawRows <= 0 || rawCols <= 0) return null;
+  return {rows: Math.max(10, rawRows), cols: Math.max(40, rawCols)};
+}
+
+function updateShareHostTerminalSize(session, rows, cols) {
+  if (!shareViewMode || !session) return;
+  shareHostDimensions.set(String(session), {
+    rows: Math.max(10, Math.floor(Number(rows) || 0)),
+    cols: Math.max(40, Math.floor(Number(cols) || 0)),
+  });
+  fitTerminal(session);
+}
+
 function fitTerminal(session) {
   const item = terminals.get(session);
   if (!item || !item.term || !item.container) return;
+  const hostSize = shareHostTerminalSize(session);
+  if (shareViewMode) {
+    if (!hostSize) return;
+    const changed = item.term.cols !== hostSize.cols || item.term.rows !== hostSize.rows;
+    item.term.resize(hostSize.cols, hostSize.rows);
+    if (changed) {
+      try { item.term.reset(); } catch (_) {}
+    }
+    refreshTerminal(session);
+    return;
+  }
   if (!terminalIsVisible(session, item.container)) return;
   const size = estimateTerminalSize(item.container, item.term);
   const changed = item.term.cols !== size.cols || item.term.rows !== size.rows;
   item.term.resize(size.cols, size.rows);
-  if (changed) scheduleRemoteResize(session);
+  if (!shareViewMode && changed) scheduleRemoteResize(session);
   refreshTerminal(session);
 }
 
 function sendRemoteResize(session) {
+  if (shareViewMode) return;
   const item = terminals.get(session);
   if (!item?.term || item?.socket?.readyState !== WebSocket.OPEN) return;
   item.socket.send(JSON.stringify({type: 'resize', cols: item.term.cols, rows: item.term.rows}));
 }
 
 function scheduleRemoteResize(session, delay = remoteResizeDelayMs) {
+  if (shareViewMode) return;
   const item = terminals.get(session);
   if (!item) return;
   if (item.resizeTimer) clearTimeout(item.resizeTimer);

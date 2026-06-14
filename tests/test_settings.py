@@ -54,6 +54,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
             "terminal_editor": {"word_wrap": "yes", "line_numbers": "no"},
             "editor": {"autosave": "yes", "autosave_delay_seconds": 100},
             "uploads": {"max_bytes": 999999999},
+            "share": {"ttl_seconds": 1_000_000, "max_viewers": 999, "scheme": "ftp", "read_only": "no"},
             "yoagent": {"backend": "wat", "invocation": "bad", "system_prompt": "Use facts", "intro": "Be terse", "format": "One line"},
             "yolo": {"prompt_source": "bad"},
         }
@@ -86,6 +87,11 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["editor"]["autosave_delay_seconds"] == 60
     assert settings["uploads"]["filename_template"] == DEFAULT_UPLOAD_FILENAME_TEMPLATE
     assert settings["uploads"]["max_bytes"] == 512 * 1024 * 1024
+    assert settings["share"]["ttl_seconds"] == 28800
+    assert settings["share"]["max_viewers"] == 300
+    assert settings["share"]["read_only"] is False
+    assert settings["share"]["scheme"] == "http"
+    assert sanitize_settings({"share": {"scheme": "https"}})["share"]["scheme"] == "https"
     assert settings["notifications"]["notify_transitions"] == ["needs-input", "done"]
     assert settings["performance"]["latency_refresh_ms"] == 1000
     assert settings["performance"]["event_log_refresh_ms"] == 60000
@@ -126,8 +132,10 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert payload["choices"]["appearance.active_color"] == ["green", "blue", "orange", "yellow", "purple", "white"]
     assert payload["choices"]["appearance.separator_color"] == ["theme", "green", "blue", "orange", "yellow", "purple", "white"]
     assert payload["choices"]["appearance.editor_cursor_color"] == ["green", "blue", "orange", "yellow", "purple", "white", "laser-lime", "neon-green", "neon-cyan", "neon-magenta", "neon-orange", "theme"]
+    assert payload["choices"]["share.view_fit"] == ["cover", "contain"]
     assert payload["settings"]["general"]["startup_tips"] is True
     assert payload["settings"]["uploads"]["max_bytes"] == UPLOAD_MAX_BYTES
+    assert payload["settings"]["share"] == {"ttl_seconds": 600, "max_viewers": 5, "read_only": True, "scheme": "http", "view_fit": "cover"}
     assert payload["settings"]["yoagent"]["backend"] == "auto"
     assert payload["settings"]["yoagent"]["auto_refresh"] is False
     assert payload["settings"]["yoagent"]["refresh_interval_seconds"] == 120
@@ -244,6 +252,8 @@ def test_login_locale_picker_writes_general_language():
     assert [value for value, _ in LOGIN_LOCALE_CHOICES] == ["system", "en", "zh-Hant", "zh-Hans", "ja", "ko", "es", "de", "fr", "it", "pt-BR", "pl", "nl", "he", "ar", "ru", "hi", "vi", "th", "tr"]
     page = login_html()
     assert 'name="locale"' in page
+    assert '<select name="locale"' not in page
+    assert 'data-locale-picker' in page
     assert "简体中文" in page and "繁體中文" in page  # endonym-labeled, product-priority order
     assert page.index("繁體中文") < page.index("简体中文")
     for label in ["Tiếng Việt", "ไทย", "Türkçe", "Nederlands", "Polski", "Italiano"]:
@@ -263,11 +273,14 @@ def test_login_locale_picker_writes_general_language():
     try:
         save_login_locale("vi")
         assert current_language_pref() == "vi"
-        assert ' value="vi" selected>' in login_html(current_locale=current_language_pref())
+        page = login_html(current_locale=current_language_pref())
+        assert 'name="locale" value="vi"' in page
+        assert 'data-locale-value="vi" aria-selected="true"' in page
         save_login_locale("zh-Hant")
         assert current_language_pref() == "zh-Hant"
         page = login_html(current_locale=current_language_pref())
-        assert ' value="zh-Hant" selected>' in page
+        assert 'name="locale" value="zh-Hant"' in page
+        assert 'data-locale-value="zh-Hant" aria-selected="true"' in page
         assert "使用者名稱" in page and "密碼" in page  # Username / Password localized
         save_login_locale("bogus-locale")  # invalid -> ignored, no change
         assert current_language_pref() == "zh-Hant"

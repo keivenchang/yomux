@@ -1,6 +1,15 @@
 async function apiFetch(url, options = {}) {
   const requestOptions = {...options};
   if (!requestOptions.credentials) requestOptions.credentials = 'same-origin';
+  if (shareToken) {
+    if (typeof Headers === 'function') {
+      const headers = new Headers(requestOptions.headers || {});
+      if (!headers.has('X-Share-Token')) headers.set('X-Share-Token', shareToken);
+      requestOptions.headers = headers;
+    } else {
+      requestOptions.headers = {...(requestOptions.headers || {}), 'X-Share-Token': shareToken};
+    }
+  }
   const startedAt = jsDebugPerformanceNow();
   const method = jsDebugRequestMethod(requestOptions);
   const requestBytes = jsDebugRequestBytes(url, requestOptions);
@@ -182,6 +191,116 @@ function installJsDebugEventCapture() {
 }
 
 installJsDebugEventCapture();
+
+let appViewportOverride = null;
+let appMirrorTransform = {scale: 1, tx: 0, ty: 0};
+
+function normalizeAppViewport(value, fallback = null) {
+  const source = value && typeof value === 'object' ? value : {};
+  const fallbackSource = fallback && typeof fallback === 'object' ? fallback : {};
+  const width = Math.max(1, Math.round(Number(source.width ?? source.w ?? fallbackSource.width ?? fallbackSource.w ?? 0) || 0));
+  const height = Math.max(1, Math.round(Number(source.height ?? source.h ?? fallbackSource.height ?? fallbackSource.h ?? 0) || 0));
+  return {width, height, w: width, h: height};
+}
+
+function nativeViewport() {
+  const doc = document.documentElement || {};
+  const width = Math.max(1, Math.round(Number(window.innerWidth) || Number(doc.clientWidth) || 1)); // static-build-allow-window-viewport
+  const height = Math.max(1, Math.round(Number(window.innerHeight) || Number(doc.clientHeight) || 1)); // static-build-allow-window-viewport
+  return {width, height, w: width, h: height};
+}
+
+function appViewport() {
+  return appViewportOverride ? normalizeAppViewport(appViewportOverride, nativeViewport()) : nativeViewport();
+}
+
+const appViewportBreakpointPx = [1500, 1280, 1100, 1080, 980, 760, 720];
+
+function syncAppViewportBreakpointClasses() {
+  const viewport = appViewport();
+  const targets = [document.body, appRootElement()].filter(Boolean);
+  for (const target of targets) {
+    for (const breakpoint of appViewportBreakpointPx) {
+      target.classList?.toggle(`app-vw-lte-${breakpoint}`, viewport.width <= breakpoint);
+    }
+  }
+}
+
+function appRootElement() {
+  return appRoot || document.getElementById?.('appRoot') || document.body;
+}
+
+function applyAppRootViewportSize() {
+  const root = appRootElement();
+  if (!root?.style) return;
+  if (!appViewportOverride) {
+    root.style.removeProperty('--app-root-width');
+    root.style.removeProperty('--app-root-height');
+    return;
+  }
+  const viewport = appViewport();
+  root.style.setProperty('--app-root-width', `${viewport.width}px`);
+  root.style.setProperty('--app-root-height', `${viewport.height}px`);
+}
+
+function setAppViewportOverride(viewport = null) {
+  appViewportOverride = viewport ? normalizeAppViewport(viewport) : null;
+  applyAppRootViewportSize();
+  syncAppViewportBreakpointClasses();
+  return appViewport();
+}
+
+function appMirrorTransformState() {
+  return {
+    scale: Math.max(0.0001, Number(appMirrorTransform.scale) || 1),
+    tx: Number(appMirrorTransform.tx) || 0,
+    ty: Number(appMirrorTransform.ty) || 0,
+  };
+}
+
+function setAppMirrorTransform(transform = {}) {
+  appMirrorTransform = {
+    scale: Math.max(0.0001, Number(transform.scale) || 1),
+    tx: Number(transform.tx) || 0,
+    ty: Number(transform.ty) || 0,
+  };
+  return appMirrorTransformState();
+}
+
+function appSpaceRect(elementOrRect) {
+  const rect = elementOrRect?.getBoundingClientRect ? elementOrRect.getBoundingClientRect() : elementOrRect;
+  const transform = appMirrorTransformState();
+  const left = (Number(rect?.left) || 0) - transform.tx;
+  const top = (Number(rect?.top) || 0) - transform.ty;
+  const width = Math.max(0, Number(rect?.width) || Math.max(0, (Number(rect?.right) || 0) - (Number(rect?.left) || 0))) / transform.scale;
+  const height = Math.max(0, Number(rect?.height) || Math.max(0, (Number(rect?.bottom) || 0) - (Number(rect?.top) || 0))) / transform.scale;
+  const mappedLeft = left / transform.scale;
+  const mappedTop = top / transform.scale;
+  return {
+    left: mappedLeft,
+    top: mappedTop,
+    width,
+    height,
+    right: mappedLeft + width,
+    bottom: mappedTop + height,
+  };
+}
+
+function appSpacePoint(x, y) {
+  const transform = appMirrorTransformState();
+  return {
+    x: (Number(x) - transform.tx) / transform.scale,
+    y: (Number(y) - transform.ty) / transform.scale,
+  };
+}
+
+function visualPointFromAppSpace(x, y) {
+  const transform = appMirrorTransformState();
+  return {
+    x: (Number(x) * transform.scale) + transform.tx,
+    y: (Number(y) * transform.scale) + transform.ty,
+  };
+}
 
 function agentLabel(kind) {
   const key = String(kind || '').toLowerCase();
@@ -391,6 +510,9 @@ function setFileState(path, state) {
     if (!(state.ownerSessions instanceof Set)) state.ownerSessions = previous.ownerSessions;
     if (!(state.viewMode instanceof Map)) state.viewMode = previous.viewMode;
     if (!(state.previewZoom instanceof Map)) state.previewZoom = previous.previewZoom;
+    if (!Object.prototype.hasOwnProperty.call(state, 'diffPinnedFromRef')) state.diffPinnedFromRef = previous.diffPinnedFromRef;
+    if (!Object.prototype.hasOwnProperty.call(state, 'diffPinnedToRef')) state.diffPinnedToRef = previous.diffPinnedToRef;
+    if (!Object.prototype.hasOwnProperty.call(state, 'imageMode')) state.imageMode = previous.imageMode;
     if (!Object.prototype.hasOwnProperty.call(state, 'blame')) state.blame = previous.blame;
     if (!Object.prototype.hasOwnProperty.call(state, 'conflictDialogOpen')) state.conflictDialogOpen = previous.conflictDialogOpen;
     if (!Object.prototype.hasOwnProperty.call(state, 'realpath')) state.realpath = previous.realpath;
@@ -929,6 +1051,7 @@ function setFileExplorerTreeDateMode(mode) {
   fileExplorerTreeDateMode = next;
   writeStoredFileExplorerTreeDateMode(fileExplorerTreeDateMode);
   refreshFileExplorerTreeDateModeSurfaces();
+  scheduleShareUiStatePublish();
 }
 
 function cycleFileExplorerTreeDateMode() {
@@ -950,6 +1073,7 @@ function toggleTabMetadata() {
   renderTabMetaToggle();
   renderSessionButtons();
   scheduleTopbarMetricsUpdate();
+  scheduleShareUiStatePublish();
 }
 
 function recordFocusNavTransition(previousItem, nextItem) {
@@ -995,6 +1119,7 @@ function setFocusedTerminal(session, options = {}) {
   updateSessionButtonStates();
   for (const activeSession of activeSessions) updateTypingIndicator(activeSession);
   updatePanelInactiveOverlays();
+  sharePublish('focus', {item: session});
   if (options.userInitiated === true) {
     rememberFileExplorerExplicitSyncSession(session);
     scheduleFileExplorerActiveTabSync(session, {explicit: true});
@@ -1026,6 +1151,7 @@ function setFocusedPanelItem(item, options = {}) {
   updateSessionButtonStates();
   for (const activeSession of activeSessions) updateTypingIndicator(activeSession);
   updatePanelInactiveOverlays();
+  sharePublish('focus', {item});
   if (options.userInitiated === true) {
     if (isTmuxSession(item)) rememberFileExplorerExplicitSyncSession(item);
     if (isFileEditorItem(item)) {
@@ -1263,6 +1389,10 @@ function replaceHtmlPreservingScroll(element, html) {
 
 function wsUrl(session) {
   const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  if (shareViewMode) {
+    const params = new URLSearchParams({session, token: shareToken, viewer: shareViewerId});
+    return `${scheme}//${location.host}/ws/share-view?${params.toString()}`;
+  }
   return `${scheme}//${location.host}/ws?session=${encodeURIComponent(session)}`;
 }
 
@@ -1612,6 +1742,7 @@ function createContextMenuController() {
     document.removeEventListener('pointerdown', pointerdown, true);
     document.removeEventListener('keydown', keydown, true);
     window.removeEventListener('blur', close);
+    scheduleSharePopupLayerPublish({immediate: true});
   };
   const pointerdown = event => {
     if (menu?.contains(event.target)) return;
@@ -1632,6 +1763,7 @@ function createContextMenuController() {
       document.addEventListener('pointerdown', pointerdown, true);
       document.addEventListener('keydown', keydown, true);
       window.addEventListener('blur', close);
+      scheduleSharePopupLayerPublish();
     },
   };
 }
@@ -1761,8 +1893,9 @@ function popoverEdgeGapPx() {
 function positionContextMenu(menu, x, y) {
   const rect = menu.getBoundingClientRect();
   const edgeGap = popoverEdgeGapPx();
-  const left = Math.min(Math.max(edgeGap, x), Math.max(edgeGap, window.innerWidth - rect.width - edgeGap));
-  const top = Math.min(Math.max(edgeGap, y), Math.max(edgeGap, window.innerHeight - rect.height - edgeGap));
+  const viewport = appViewport();
+  const left = Math.min(Math.max(edgeGap, x), Math.max(edgeGap, viewport.width - rect.width - edgeGap));
+  const top = Math.min(Math.max(edgeGap, y), Math.max(edgeGap, viewport.height - rect.height - edgeGap));
   menu.style.left = `${Math.round(left)}px`;
   menu.style.top = `${Math.round(top)}px`;
 }

@@ -85,9 +85,18 @@ function codeMirrorReadOnlyExtensions(api, path, panel = null, options = {}) {
   ];
 }
 
+function captureCodeMirrorPanelViewState(panel, path) {
+  const item = fileEditorPanelItem(panel) || fileEditorItemFor(path);
+  if (item) captureFileEditorPanelViewState(item, panel);
+}
+
 function codeMirrorWorkingUpdateExtension(api, panel, path) {
   return api.EditorView.updateListener.of(update => {
-    if (update.docChanged || update.selectionSet) updateCodeMirrorCursorStatus(panel);
+    if (update.docChanged || update.selectionSet) {
+      updateCodeMirrorCursorStatus(panel);
+      captureCodeMirrorPanelViewState(panel, path);
+    }
+    if (update.selectionSet) scheduleShareScrollPublishForElement(update.view?.scrollDOM || panel);
     if (update.docChanged) {
       handleFileEditorContentChanged(panel, path, update.state.doc.toString(), {syntax: false});
     }
@@ -782,7 +791,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
   }
   if (!fileStateCanRenderDiffView(path, state)) {
     if (state.diffUnavailable) {
-      const msg = `diff unavailable: ${state.diffError || 'unknown error'}`;
+      const msg = t('editor.diffUnavailable', {error: state.diffError || t('common.unknown')});
       setFileEditorPanelStatus(panel, msg, 'warn');
       return ensureCodeMirrorPanel(panel, item, path, state, {forceMode: 'edit'});
     }
@@ -793,7 +802,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
     const api = await loadCodeMirrorApi();
     if (panel._cmGeneration !== generation) return null;
     if (!api.MergeView || !api.unifiedMergeView) {
-      setFileEditorPanelStatus(panel, 'CodeMirror merge view is unavailable', 'error');
+      setFileEditorPanelStatus(panel, t('editor.codemirrorMergeUnavailable'), 'error');
       return false;
     }
     const layout = codeMirrorDiffLayout(container);
@@ -903,7 +912,11 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
         parent: container,
         dispatch(transaction) {
           panel._cmView.update([transaction]);
-          if (transaction.docChanged || transaction.selectionSet) updateCodeMirrorCursorStatus(panel);
+          if (transaction.docChanged || transaction.selectionSet) {
+            updateCodeMirrorCursorStatus(panel);
+            captureCodeMirrorPanelViewState(panel, path);
+          }
+          if (transaction.selectionSet) scheduleShareScrollPublishForElement(panel._cmView?.scrollDOM || panel);
           if (transaction.docChanged) {
             handleFileEditorContentChanged(panel, path, panel._cmView.state.doc.toString(), {syntax: false});
           }
@@ -929,7 +942,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
     console.warn('CodeMirror diff editor unavailable; showing read-only raw text', error);
     destroyCodeMirrorPanel(panel);
     container.hidden = true;
-    setFileEditorPanelStatus(panel, `CodeMirror diff unavailable; showing read-only raw text (${error})`, 'error');
+    setFileEditorPanelStatus(panel, t('editor.codemirrorDiffUnavailable', {error}), 'error');
     return false;
   }
 }
@@ -947,7 +960,7 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
   if (!panel._cmView || panel._cmPath !== path || panel._cmSignature !== signature) {
     captureFileEditorPanelViewState(item, panel);
     destroyCodeMirrorPanel(panel);
-    container.textContent = 'loading CodeMirror...';
+    container.textContent = t('editor.codemirrorLoading');
   }
   try {
     const api = await loadCodeMirrorApi();
@@ -960,7 +973,11 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
         parent: container,
         dispatch(transaction) {
           panel._cmView.update([transaction]);
-          if (transaction.docChanged || transaction.selectionSet) updateCodeMirrorCursorStatus(panel);
+          if (transaction.docChanged || transaction.selectionSet) {
+            updateCodeMirrorCursorStatus(panel);
+            captureCodeMirrorPanelViewState(panel, path);
+          }
+          if (transaction.selectionSet) scheduleShareScrollPublishForElement(panel._cmView?.scrollDOM || panel);
           if (transaction.docChanged) {
             handleFileEditorContentChanged(panel, path, panel._cmView.state.doc.toString(), {syntax: false});
           }
@@ -977,7 +994,7 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
       trackCodeMirrorThemeViews(panel, api, [panel._cmView]);
       updateCodeMirrorCursorStatus(panel);
       if (createdState.plain) {
-        setFileEditorPanelStatus(panel, 'CodeMirror language parser failed; editing as plain text', 'warn');
+        setFileEditorPanelStatus(panel, t('editor.codemirrorPlainText'), 'warn');
       }
     } else if (panel._cmView.state.doc.toString() !== currentText && !state.dirty) {
       panel._cmView.dispatch({
@@ -995,7 +1012,7 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
     if (panel._cmGeneration !== generation) return null;
     destroyCodeMirrorPanel(panel);
     container.hidden = true;
-    setFileEditorPanelStatus(panel, `CodeMirror unavailable; showing read-only raw text (${error})`, 'error');
+    setFileEditorPanelStatus(panel, t('editor.codemirrorUnavailable', {error}), 'error');
     return false;
   }
 }
@@ -1032,6 +1049,14 @@ function diffModeShouldFallBackToEdit(path, state, item = null) {
 
 function renderFileEditorPanelShouldCaptureViewState(options = {}) {
   return options.captureViewState !== false;
+}
+
+function scheduleShareFileEditorScrollRestore(item, path) {
+  if (!shareViewMode || typeof scheduleShareScrollRestoreByKey !== 'function') return;
+  const key = item || path || '';
+  if (!key) return;
+  scheduleShareScrollRestoreByKey(`editor:${key}:editor`);
+  scheduleShareScrollRestoreByKey(`editor:${key}:preview`);
 }
 
 function renderFileEditorPanel(panel, item, options = {}) {
@@ -1101,13 +1126,13 @@ function renderFileEditorPanel(panel, item, options = {}) {
       imagePane.hidden = false;
       const limit = formatFileSize(state.maxBytes || MAX_FILE_PREVIEW_BYTES);
       const size = formatFileSize(state.size);
-      const title = state.kind === 'too-large' ? 'File is too large to preview' : 'File could not be opened';
+      const title = state.kind === 'too-large' ? t('editor.fileTooLargeTitle') : t('editor.fileOpenFailedTitle');
       const detail = state.kind === 'too-large'
-        ? (state.error || `${size ? `${size}; ` : ''}limit is ${limit}`)
-        : String(state.error || 'failed to load file');
+        ? (state.error || t('editor.fileTooLargeDetail', {size: size || '', limit}))
+        : String(state.error || t('editor.fileLoadFailed'));
       imagePane.replaceChildren(fileEditorEmptyState(title, detail));
     }
-    const status = state.kind === 'too-large' ? `too large; limit ${formatFileSize(state.maxBytes || MAX_FILE_PREVIEW_BYTES)}` : state.error || 'failed to load file';
+    const status = state.kind === 'too-large' ? t('editor.fileTooLargeStatus', {limit: formatFileSize(state.maxBytes || MAX_FILE_PREVIEW_BYTES)}) : state.error || t('editor.fileLoadFailed');
     setFileEditorPanelStatus(panel, status, 'error');
     return;
   }
@@ -1214,6 +1239,7 @@ function renderFileEditorPanel(panel, item, options = {}) {
       previewPane.hidden = false;
       renderEditorPreviewPane(previewPane, path, state.content, {context: 'preview'});
     }
+    scheduleShareFileEditorScrollRestore(item, path);
   } else {
     if (rawPane) rawPane.hidden = true;
     if (previewPane) {
@@ -1223,18 +1249,20 @@ function renderFileEditorPanel(panel, item, options = {}) {
     panel.classList.remove('syntax-highlighted');
     ensureCodeMirrorPanel(panel, item, path, state).then(loaded => {
       if (loaded === false) renderFileEditorRawPane(rawPane, path, state.content);
+      else scheduleShareFileEditorScrollRestore(item, path);
     }).catch(error => {
       if (panel.dataset.filePath !== path) return;
       console.warn('CodeMirror editor unavailable; showing read-only raw text', error);
       destroyCodeMirrorPanel(panel);
       if (codeMirrorPane) codeMirrorPane.hidden = true;
-      setFileEditorPanelStatus(panel, `CodeMirror unavailable; showing read-only raw text (${error})`, 'error');
+      setFileEditorPanelStatus(panel, t('editor.codemirrorUnavailable', {error}), 'error');
       renderFileEditorRawPane(rawPane, path, state.content);
     });
   }
   const status = openFileStatus(state);
   setFileEditorPanelStatus(panel, status.message, status.level);
   focusFileEditorPanelIfReady(panel, item);
+  scheduleShareFileEditorScrollRestore(item, path);
 }
 
 function loadFileEditorState(path, panel, item) {
@@ -1886,7 +1914,7 @@ function bindMarkdownTaskCheckboxes(container, text, markdownPath) {
     if (markdownPath && !readOnlyMode) {
       input.disabled = false;
       input.removeAttribute('disabled');
-      input.setAttribute('aria-label', `Toggle task on line ${task.line}`);
+      input.setAttribute('aria-label', t('editor.toggleTaskLine', {line: task.line}));
     }
   });
   if (markdownPath && !container.dataset.mdTaskBound) {
@@ -3497,7 +3525,7 @@ function renderHtmlPreviewInto(container, path, text) {
   const frame = document.createElement('iframe');
   frame.className = 'file-editor-html-preview';
   frame.setAttribute('sandbox', '');
-  frame.setAttribute('title', 'HTML preview');
+  frame.setAttribute('title', t('preview.htmlTitle'));
   frame.srcdoc = String(text ?? '');
   children.push(frame);
   container.replaceChildren(...children);
@@ -4740,6 +4768,7 @@ async function saveFileEditor(path, panel, options = {}) {
     }
     renderSessionButtons();
     renderPaneTabStrips();
+    sharePublishFileVersion(path, {mtime: state.mtime, size: state.size});
     return true;
   } catch (err) {
     setFileEditorPanelStatus(panel, `save failed: ${err}`, 'error');

@@ -413,8 +413,9 @@ function positionDiffRefPopover(input, compact) {
   const popover = ensureDiffRefPopover();
   const rect = input?.getBoundingClientRect?.();
   if (!rect) return;
-  const viewportWidth = Math.max(320, window.innerWidth || document.documentElement?.clientWidth || 1024);
-  const viewportHeight = Math.max(240, window.innerHeight || document.documentElement?.clientHeight || 720);
+  const viewport = appViewport();
+  const viewportWidth = Math.max(320, viewport.width || 1024);
+  const viewportHeight = Math.max(240, viewport.height || 720);
   const minWidth = Math.min(compact ? 880 : 960, viewportWidth - 16);
   const maxWidth = compact ? 1040 : 1120;
   const width = Math.min(maxWidth, viewportWidth - 16, Math.max(minWidth, rect.width));
@@ -583,6 +584,7 @@ function setRepoDiffRefs(repo, fromRef, toRef, options = {}) {
   renderFileExplorerChangesPanels({force: true});
   fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
   for (const path of openFiles.keys()) renderOpenFilePath(path);
+  scheduleShareUiStatePublish();
   return true;
 }
 
@@ -612,6 +614,15 @@ function syncDiffRefControlValues(container) {
 }
 
 function fileExplorerSessionFilesTargetSession() {
+  if (shareViewMode && !shareWriteMode) {
+    if (fileExplorerChangesSelectedSession && sessions.includes(fileExplorerChangesSelectedSession)) {
+      return fileExplorerChangesSelectedSession;
+    }
+    if (fileExplorerExplicitSyncSession && sessions.includes(fileExplorerExplicitSyncSession)) {
+      return fileExplorerExplicitSyncSession;
+    }
+    return '';
+  }
   if (fileExplorerChangesSelectedSession && sessions.includes(fileExplorerChangesSelectedSession)) {
     return fileExplorerChangesSelectedSession;
   }
@@ -643,9 +654,10 @@ function switchFileExplorerChangesSession(session) {
   if (!session || !document.querySelector('.file-explorer-changes-panel')) return;
   rememberFileExplorerExplicitSyncSession(session);
   fileExplorerChangesSelectedSession = session;
+  sharePublish('finder-mode', {mode: fileExplorerMode, session});
   const cached = fileExplorerSessionFilesCache.get(sessionFilesCacheKey(session));
   const cachedPayloadIsLoaded = sessionFilesPayloadIsLoadedForSession(cached?.payload, session);
-  if (fileExplorerMode === 'diff' && cachedPayloadIsLoaded) {
+  if (cachedPayloadIsLoaded) {
     setSessionFilesPayloadForDestination('finder', cached.payload);
     fileExplorerSessionFilesPayloadSignature = cached.signature || sessionFilesPayloadSignatureForPayload(cached.payload);
   } else if (fileExplorerMode !== 'diff' && sessionFilesPayloadIsFinderWorktree(fileExplorerSessionFilesPayload, session)) {
@@ -656,12 +668,15 @@ function switchFileExplorerChangesSession(session) {
     fileExplorerSessionFilesPayloadSignature = sessionFilesPayloadSignatureForPayload(pendingPayload);
   }
   setSessionFilesLoadingForDestination('finder', !cachedPayloadIsLoaded);
+  scheduleFileExplorerActiveTabSync(session, {explicit: true});
   renderFileExplorerChangesPanels();
   fetchSessionFiles({destination: 'finder', session, silent: true, force: true, background: cachedPayloadIsLoaded});
+  scheduleShareUiStatePublish();
 }
 
 function noteFileExplorerChangesSessionInteraction(session) {
   if (!isTmuxSession(session) || !sessions.includes(session)) return false;
+  if (shareViewMode && !shareWriteMode && !applyingShareRemoteUiState) return false;
   rememberFileExplorerExplicitSyncSession(session);
   if (fileExplorerChangesSelectedSession === session) return false;
   fileExplorerChangesSelectedSession = session;
@@ -763,7 +778,7 @@ async function fetchSessionFiles(options = {}) {
     return;
   }
   if (!backgroundRefresh) setSessionFilesLoadingForDestination(destination, true);
-  if (!options.silent) statusEl.textContent = 'loading changed files...';
+  if (!options.silent) statusEl.textContent = t('status.changedFilesLoading');
   if (!options.silent) {
     renderSessionFilesDestination(destination, {force: true});
     renderPaneTabStrips();
@@ -995,6 +1010,7 @@ function setAllFileExplorerChangesCollapsed(collapsed) {
   writeStoredChangesRepoCollapsed();
   renderFileExplorerChangesPanels({force: true});
   syncFileExplorerChangesCollapseButtons();
+  scheduleShareUiStatePublish();
 }
 
 function toggleAllFileExplorerChanges() {
@@ -1013,6 +1029,7 @@ function setAllFileExplorerChangesDirectoriesExpanded(expand) {
   writeStoredChangesFolderCollapsed();
   renderFileExplorerChangesPanels({force: true});
   syncFileExplorerChangesCollapseButtons();
+  scheduleShareUiStatePublish();
 }
 
 function sessionFileIsDifferVisible(item) {
@@ -1391,7 +1408,7 @@ function sessionFilesSessionSelectHtml(target, options = {}) {
 }
 
 function fileExplorerDiffSessionControlHtml(session) {
-  return `<label class="file-explorer-diff-session-control file-explorer-mode-diff-only changes-control">${esc(t('changes.session'))}: ${sessionFilesSessionSelectHtml(session, {className: 'file-explorer-diff-session-select'})}</label>`;
+  return `<label class="file-explorer-diff-session-control file-explorer-mode-files-diff-only changes-control">${esc(t('changes.session'))}: ${sessionFilesSessionSelectHtml(session, {className: 'file-explorer-diff-session-select'})}</label>`;
 }
 
 function syncFileExplorerDiffSessionControls() {
@@ -1409,12 +1426,7 @@ function syncFileExplorerDiffSessionControls() {
 // Returns the static toolbar/header HTML for the embedded Finder Differ panel.
 function fileExplorerChangesPanelStaticHtml(options = {}) {
   if (fileExplorerMode === 'tabber') {
-    // Minimal Tabber chrome; the tree itself mounts into .changes-groups via renderTabberTree.
-    return `
-    <div class="file-explorer-changes-head">
-      <span class="changes-title">Tabber</span>
-    </div>
-    <div class="changes-groups"></div>`;
+    return '<div class="changes-groups"></div>';
   }
   const payload = fileExplorerSessionFilesPayload;
   const loading = fileExplorerSessionFilesLoading;
@@ -1592,6 +1604,7 @@ function setFileExplorerMode(mode, options = {}) {
   } else {
     fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
   }
+  scheduleShareUiStatePublish();
   return true;
 }
 
@@ -1681,7 +1694,7 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '', repo 
   if (!diffReady || !fileStateCanRenderDiffView(path, current)) {
     const reason = current?.diffError || (current?.kind !== 'text' ? 'not a text file' : 'no git diff or useful history for this file');
     const panel = panelNodes.get(item);
-    if (panel) setFileEditorPanelStatus(panel, `diff unavailable: ${reason}`, 'warn');
+    if (panel) setFileEditorPanelStatus(panel, t('editor.diffUnavailable', {error: reason}), 'warn');
   }
 }
 
@@ -1720,6 +1733,7 @@ function bindChangesPanel(panel) {
     if (sortSelect && panel.contains(sortSelect)) {
       sessionFilesSortMode = normalizeSessionFilesSortMode(sortSelect.value);
       renderFileExplorerChangesPanels({force: true});
+      scheduleShareUiStatePublish();
       return;
     }
     const diffRefInput = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
@@ -1997,9 +2011,9 @@ function validatePreferenceNumberControl(control) {
   const min = Number(item.min);
   const max = Number(item.max);
   let message = '';
-  if (!Number.isFinite(value)) message = 'Enter a number';
-  else if (Number.isFinite(min) && value < min) message = `Minimum ${min}`;
-  else if (Number.isFinite(max) && value > max) message = `Maximum ${max}`;
+  if (!Number.isFinite(value)) message = t('validation.enterNumber');
+  else if (Number.isFinite(min) && value < min) message = t('validation.minimum', {min});
+  else if (Number.isFinite(max) && value > max) message = t('validation.maximum', {max});
   control.setCustomValidity(message);
   return !message;
 }
@@ -2144,7 +2158,7 @@ function resetAllPreferences() {
       writeStoredCollapsedPreferenceSections();
       setFileEditorThemeMode(editorThemeInheritMode);
       renderPreferencesPanels({force: true});
-      statusEl.textContent = 'reset all preferences';
+      statusEl.textContent = t('status.preferencesResetAll');
     })
     .catch(error => { statusErr(localizedHtml('status.settingsResetFailed', {error})); });
 }
@@ -2178,8 +2192,9 @@ function setEditorPreviewFontSize(value) {
   applyCssSettings();
   updateEditorPreviewFontControls();
   refreshFilePreviewPopouts();
+  scheduleShareUiStatePublish();
   saveSettingsPatch(settingPatch('appearance.preview_font_size', next))
-    .then(() => { statusEl.textContent = 'saved appearance.preview_font_size'; })
+    .then(() => { statusEl.textContent = t('status.previewFontSizeSaved'); })
     .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
 }
 
@@ -2198,10 +2213,7 @@ function createFileExplorerPanel() {
           <div class="file-explorer-toolbar-row file-explorer-primary-row">
             ${fileExplorerModeSwitcherHtml()}
             ${fileExplorerDiffSessionControlHtml(fileExplorerSessionFilesTargetSession())}
-            <input class="file-explorer-path-inline file-explorer-mode-files-only" type="text" value="${esc(initialPath)}" spellcheck="false" aria-label="${esc(t('finder.toolbar.rootPath', {name: label}))}">
-            <button type="button" class="path-copy-button file-explorer-path-copy-panel file-explorer-mode-files-only" title="${esc(t('finder.toolbar.copyPath'))}" aria-label="${esc(t('finder.toolbar.copyPath'))}"></button>
             <span class="file-explorer-toolbar-spacer"></span>
-            ${fileExplorerChangesCollapseToggleHtml()}
             ${paneFrameControlsGroupHtml(fileExplorerItemId, {
               groupClass: 'file-explorer-frame-controls',
               actions: false,
@@ -2213,16 +2225,16 @@ function createFileExplorerPanel() {
               closeLabel: t('finder.hideFromLayout', {name: label}),
             })}
           </div>
-          <div class="file-explorer-toolbar-row file-explorer-scope-row file-explorer-mode-files-only">
-            <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel file-explorer-mode-files-only" title="${esc(t('finder.toolbar.hidden'))}" aria-pressed="${fileExplorerShowHidden ? 'true' : 'false'}">.*</button>
+          <div class="file-explorer-toolbar-row file-explorer-path-row file-explorer-mode-files-only">
             <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel file-explorer-mode-files-only" title="${esc(t('finder.toolbar.syncTitle'))}" aria-label="${esc(t('finder.toolbar.syncTitle'))}" aria-pressed="true">${esc(t('finder.toolbar.syncLabel'))}</button>
-            <div class="file-explorer-quick-access-panel file-explorer-mode-files-only" aria-label="${esc(t('finder.toolbar.quickPaths'))}"></div>
-            <span class="file-explorer-toolbar-spacer"></span>
+            <input class="file-explorer-path-inline file-explorer-mode-files-only" type="text" value="${esc(initialPath)}" spellcheck="false" aria-label="${esc(t('finder.toolbar.rootPath', {name: label}))}">
+            <button type="button" class="path-copy-button file-explorer-path-copy-panel file-explorer-mode-files-only" title="${esc(t('finder.toolbar.copyPath'))}" aria-label="${esc(t('finder.toolbar.copyPath'))}"></button>
           </div>
           <div class="file-explorer-toolbar-row file-explorer-actions-row file-explorer-mode-files-only">
             <button type="button" class="file-explorer-header-action file-explorer-mode-files-only" data-file-explorer-new-file title="${esc(t('finder.toolbar.newFile'))}" aria-label="${esc(t('finder.toolbar.newFile'))}">+</button>
             <button type="button" class="file-explorer-header-action file-explorer-folder-action file-explorer-mode-files-only" data-file-explorer-new-folder title="${esc(t('finder.toolbar.newFolder'))}" aria-label="${esc(t('finder.toolbar.newFolder'))}"><span class="file-explorer-folder-icon" aria-hidden="true"></span></button>
             <span class="file-explorer-toolbar-spacer"></span>
+            <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel file-explorer-mode-files-only" title="${esc(t('finder.toolbar.hidden'))}" aria-pressed="${fileExplorerShowHidden ? 'true' : 'false'}">.*</button>
             <select class="file-explorer-sort-select file-explorer-mode-files-only" data-file-explorer-tree-sort title="${esc(t('finder.toolbar.sort'))}" aria-label="${esc(t('finder.toolbar.sort'))}">
               <option value="az"${fileExplorerTreeSortMode === 'az' ? ' selected' : ''}>${esc(t('finder.sort.az'))}</option>
               <option value="za"${fileExplorerTreeSortMode === 'za' ? ' selected' : ''}>${esc(t('finder.sort.za'))}</option>
@@ -2374,6 +2386,9 @@ function renderFileExplorerChangesPanel(panel, options = {}) {
 function renderFileExplorerChangesPanels(options = {}) {
   for (const panel of document.querySelectorAll('.file-explorer-panel')) {
     renderFileExplorerChangesPanel(panel, options);
+  }
+  if (shareViewMode && typeof scheduleShareScrollRestoreByKey === 'function') {
+    scheduleShareScrollRestoreByKey(`finder:${normalizeFileExplorerMode(fileExplorerMode)}`);
   }
 }
 
@@ -2790,6 +2805,7 @@ function captureFileEditorPanelViewState(item, panel) {
   const view = panel?._cmView;
   const scrollDOM = view?.scrollDOM;
   if (!isFileEditorItem(item) || !view || !scrollDOM) return;
+  if (shareViewMode && !shareWriteMode && !applyingShareRemoteScroll && !applyingShareRemoteUiState) return;
   if (fileEditorViewState.has(item) && !fileEditorPanelViewStateCaptureHasLayout(panel, scrollDOM)) return;
   const selection = view.state?.selection?.main;
   fileEditorViewState.set(item, {

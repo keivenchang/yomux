@@ -22,9 +22,126 @@ function agentUnavailableReason(agent) {
 const accessRole = bootstrap.accessRole || 'admin';
 const readOnlyMode = accessRole !== 'admin';
 const devMode = bootstrap.dev === true;   // dev-velocity #1b: subscribe to /api/dev-reload + auto-reload
+const shareBootstrap = bootstrap.share && typeof bootstrap.share === 'object' ? bootstrap.share : null;
+const shareViewMode = shareBootstrap?.view === true;
+const shareWriteMode = shareViewMode && shareBootstrap?.mode === 'rw';
+const shareToken = (() => {
+  if (!shareViewMode) return '';
+  try {
+    return new URLSearchParams(String(location.hash || '').replace(/^#/, '')).get('t') || '';
+  } catch (_) {
+    return '';
+  }
+})();
+function randomShareViewerId() {
+  try {
+    if (crypto?.randomUUID) return crypto.randomUUID();
+    const bytes = new Uint8Array(16);
+    crypto?.getRandomValues?.(bytes);
+    const encoded = Array.from(bytes).map(value => value.toString(16).padStart(2, '0')).join('');
+    if (encoded) return encoded;
+  } catch (_) {}
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+const shareViewerId = (() => {
+  if (!shareViewMode) return '';
+  const key = `yolomux.share.viewer.${shareBootstrap?.id || 'current'}`;
+  try {
+    const existing = sessionStorage.getItem(key);
+    if (existing) return existing;
+    const created = randomShareViewerId();
+    sessionStorage.setItem(key, created);
+    return created;
+  } catch (_) {
+    return randomShareViewerId();
+  }
+})();
+const shareClientId = (() => {
+  if (shareViewMode && shareViewerId) return shareViewerId;
+  const key = shareViewMode
+    ? `yolomux.share.client.${shareBootstrap?.id || 'current'}`
+    : 'yolomux.share.hostClient';
+  try {
+    const existing = sessionStorage.getItem(key);
+    if (existing) return existing;
+    const created = randomShareViewerId();
+    sessionStorage.setItem(key, created);
+    return created;
+  } catch (_) {
+    return randomShareViewerId();
+  }
+})();
+function shareBootstrapFinderState() {
+  return shareViewMode && shareBootstrap?.finder && typeof shareBootstrap.finder === 'object'
+    ? shareBootstrap.finder
+    : {};
+}
+function shareBootstrapFinderRoot() {
+  const root = shareBootstrapFinderState().root;
+  return typeof root === 'string' && root.trim() ? root.trim() : '';
+}
+function shareBootstrapFinderRootMode(fallback = 'sync') {
+  const mode = shareBootstrapFinderState().rootMode;
+  if (mode === 'fixed' || mode === 'sync') return mode;
+  return fallback === 'fixed' ? 'fixed' : 'sync';
+}
+function shareBootstrapFinderMode(fallback = 'files') {
+  const mode = shareBootstrapFinderState().mode;
+  if (mode === 'diff' || mode === 'tabber' || mode === 'files') return mode;
+  return fallback;
+}
+function shareBootstrapFinderSession() {
+  const session = String(shareBootstrapFinderState().session || '').trim();
+  return session && sessions.includes(session) ? session : '';
+}
+const shareHostDimensions = new Map();
+if (shareViewMode && shareBootstrap?.session && shareBootstrap?.hostDims) {
+  shareHostDimensions.set(String(shareBootstrap.session), {
+    rows: Number(shareBootstrap.hostDims.rows) || 0,
+    cols: Number(shareBootstrap.hostDims.cols) || 0,
+  });
+}
+if (shareViewMode && shareBootstrap?.hostDimsBySession && typeof shareBootstrap.hostDimsBySession === 'object') {
+  for (const [session, dims] of Object.entries(shareBootstrap.hostDimsBySession)) {
+    shareHostDimensions.set(String(session), {
+      rows: Number(dims?.rows) || 0,
+      cols: Number(dims?.cols) || 0,
+    });
+  }
+}
+let activeShare = null;
+let activeShares = [];
+let shareHostSockets = new Map();
+let shareHostQueues = new Map();
+let shareUiStatePublishTimer = null;
+let shareViewportPublishTimer = null;
+let shareAppearancePublishTimer = null;
+let sharePointerFramePending = false;
+let sharePointerLastEvent = null;
+let sharePointerLastPublishedAt = -Infinity;
+const shareScrollPublishTimers = new Map();
+const shareScrollRestoreFrameTimers = new Map();
+let shareGeometryDigestTimer = null;
+let shareLastGeometryDigest = null;
+let shareLastGeometryDigestResult = null;
+let shareGeometryResyncInFlight = false;
+let sharePointerGhost = null;
+let sharePointerGhosts = new Map();
+let sharePointerHideTimer = null;
+let sharePointerHideTimers = new Map();
+let applyingShareRemoteScroll = false;
+let applyingShareRemoteUiState = 0;
+let sharePopupLayerNode = null;
+let sharePopupLayerPublishTimer = null;
+let sharePopupLayerObserver = null;
+let sharePopupLayerSequence = 0;
+const sharePopupLayerLastSeqBySender = new Map();
+const shareLastAppliedScrollByTarget = new Map();
+const shareLastAppliedScrollPayloadByTarget = new Map();
 const homePath = bootstrap.homePath;
 const repoRoot = bootstrap.repoRoot || '';
 const serverHostname = bootstrap.serverHostname;
+const appRoot = document.getElementById('appRoot') || document.body;
 const grid = document.getElementById('grid');
 const panelPool = document.getElementById('panelPool');
 const sessionButtons = document.getElementById('sessionButtons');
@@ -378,10 +495,10 @@ const fileEditorViewState = new Map();  // layout item -> CodeMirror scroll/sele
 const fileEditorDiffExpandOverrides = new Map();  // layout item -> per-editor diff context expansion
 let activeFile = null;
 let sharedImageViewerPath = null;
-let fileExplorerRoot = null;
+let fileExplorerRoot = shareBootstrapFinderRoot() || null;
 let filesystemRefreshInFlight = false;
 let fileExplorerRepoInfoCacheLoaded = false;
-let fileExplorerRootMode = readStoredFileExplorerRootMode();
+let fileExplorerRootMode = shareBootstrapFinderRootMode(readStoredFileExplorerRootMode());
 let fileExplorerShowHidden = storageGet(fileExplorerHiddenStorageKey) === '1';
 const fileEditorThemeModeStorageKey = 'yolomux.fileEditorThemeMode.v1';
 const fileEditorPreviewDisplayModeStorageKey = 'yolomux.fileEditorPreviewDisplayMode.v1';
@@ -429,7 +546,7 @@ let fileExplorerSessionFilesPayload = {session: '', files: [], repos: [], errors
 let fileExplorerSessionFilesPayloadSignature = '';
 let fileExplorerSessionFilesLoading = false;
 const fileExplorerSessionFilesGuard = makeGenerationGuard();
-let fileExplorerExplicitSyncSession = '';
+let fileExplorerExplicitSyncSession = shareBootstrapFinderSession();
 const fileExplorerExpandedBySyncTarget = new Map();
 let fileExplorerSyncManualCollapseTargetKey = '';
 const fileExplorerSyncManualCollapsedByTarget = new Map();
@@ -450,7 +567,7 @@ let fileTreeRepoPopoverPath = null;  // normalized path of the repo dir whose ho
 let diffRefFrom = readStoredDiffRef(diffRefFromStorageKey, 'HEAD');  // C6: global default FROM (per-repo fallback)
 let diffRefTo = readStoredDiffRef(diffRefToStorageKey, 'current');   // C6: global default TO (per-repo fallback)
 let diffRefsByRepo = readStoredDiffRefsByRepo();  // C6: {repoPath: {from, to}} — per-repo overrides
-let fileExplorerMode = readStoredFileExplorerMode();
+let fileExplorerMode = shareBootstrapFinderMode(readStoredFileExplorerMode());
 let commandPaletteNode = null;
 let keyboardShortcutsNode = null;
 let pendingGlobalShortcutChord = null;
@@ -502,6 +619,7 @@ const pasteCountersStorageKey = 'yolomux.pasteCounters.v1';
 const pasteLockStorageKey = 'yolomux.pasteUploadLock.v1';
 const tabMetaStorageKey = 'yolomux.showTabMeta.v1';
 const pinnedTabsStorageKey = 'yolomux.pinnedTabs.v1';
+const shareViewFitStorageKey = 'yolomux.share.viewFit.v1';
 const startupHelperIndexStorageKey = 'yolomux.startupHelper.index.v1';
 // YO!info and YO!agent are merged into one pane with an in-pane sub-tab toggle; the chosen
 // sub-tab is remembered across reloads.
@@ -540,6 +658,7 @@ let fileExplorerImageOpenMode = initialSetting('file_explorer.image_open_mode', 
 let uploadMaxBytes = initialSetting('uploads.max_bytes', 20 * 1024 * 1024);
 const uploadRsyncRecommendationBytes = 50 * 1024 * 1024;
 let terminalFontSize = initialSetting('appearance.terminal_font_size', 13);
+const terminalFontFamily = '"YOLOmux Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace';
 let editorFontSize = initialSetting('appearance.editor_font_size', 13);
 let editorPreviewFontSize = initialSetting('appearance.preview_font_size', editorFontSize + 1);
 let fileExplorerFontSize = initialSetting('appearance.file_explorer_font_size', 13);
@@ -775,8 +894,8 @@ const TAB_TYPES = [
     key: 'file-editor',
     prefix: fileEditorItemPrefix,
     prefixes: [fileEditorItemPrefix, fileEditorCopyItemPrefix, fileEditorDiffPreviewItemPrefix],
-    shortLabel: () => 'Edit',
-    terminalTitle: () => 'unavailable for file editor',
+    shortLabel: () => t('editor.mode.edit'),
+    terminalTitle: () => t('tab.unavailableFor', {name: t('popover.kind.text')}),
     sortRank: 0.75,
     className: () => 'file-editor-item',
   }),
@@ -928,7 +1047,7 @@ let yoagentError = '';
 let yoagentDraft = '';
 let yoagentNotice = null;
 let notificationsEnabled = false;
-let fileExplorerChangesSelectedSession = '';
+let fileExplorerChangesSelectedSession = shareBootstrapFinderSession();
 const sessionStateKeys = new Map();
 const notificationLastSent = new Map();
 const attentionAlertTimers = new Map();
@@ -946,6 +1065,7 @@ function setLimitedMapEntry(map, key, value, limit) {
 }
 
 let infoBranchSort = {key: 'updated', dir: 'desc'};
+let shareInfoBranchRowsOverride = null;
 const infoBranchColumnWidthStorageKey = 'yolomux.infoBranchColumnWidth.v1';
 const infoBranchColumnDefaultWidthPx = 320;
 const infoBranchColumnMinWidthPx = 230;
@@ -1002,6 +1122,7 @@ let fileExplorerLastListError = null;
 let fileImagePreviewPopover = null;
 let fileImagePreviewController = null;
 let fileExplorerInteractionGeneration = 0;
+let fileExplorerOpenGeneration = 0;
 let clipboardPasteBound = false;
 let pasteUploadInFlight = false;
 let layoutResizeState = null;

@@ -967,34 +967,27 @@ def finder_click_toolbar_fixture_html():
             <div class="pane-tabs" hidden></div>
             <div class="file-explorer-toolbar">
               <div class="file-explorer-toolbar-row file-explorer-primary-row">
-                <span class="file-explorer-mode-switcher" role="group" aria-label="Finder / Differ">
+                <span class="file-explorer-mode-switcher" role="group" aria-label="Finder / Differ / Tabber">
                   <button type="button" class="file-explorer-mode-toggle" data-file-explorer-mode-set="files" aria-pressed="true"><span class="file-explorer-mode-label">Finder</span></button>
                   <button type="button" class="file-explorer-mode-toggle" data-file-explorer-mode-set="diff" aria-pressed="false"><span class="file-explorer-mode-label">Differ</span></button>
+                  <button type="button" class="file-explorer-mode-toggle" data-file-explorer-mode-set="tabber" aria-pressed="false"><span class="file-explorer-mode-label">Tabber</span></button>
                 </span>
-                <label class="file-explorer-diff-session-control file-explorer-mode-diff-only changes-control">Session: <select class="file-explorer-diff-session-select" data-session-files-session><option>project1</option></select></label>
-                <input class="file-explorer-path-inline file-explorer-mode-files-only" value="/home/keivenc/yolomux.dev/static_src/js/yolomux">
-                <button type="button" class="path-copy-button file-explorer-path-copy-panel file-explorer-mode-files-only"></button>
+                <label class="file-explorer-diff-session-control file-explorer-mode-files-diff-only changes-control">Session: <select class="file-explorer-diff-session-select" data-session-files-session><option>project1</option></select></label>
                 <span class="file-explorer-toolbar-spacer"></span>
-                <button type="button" class="file-explorer-header-action file-explorer-changes-collapse-toggle file-explorer-mode-diff-only" data-session-files-collapse-toggle aria-pressed="false">▴</button>
                 <div class="tabs pane-frame-controls file-explorer-frame-controls">
                   <button type="button" class="tab pane-close pc-window-control pc-close file-explorer-panel-close"></button>
                 </div>
               </div>
-              <div class="file-explorer-toolbar-row file-explorer-scope-row file-explorer-mode-files-only">
-                <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel file-explorer-mode-files-only">.*</button>
+              <div class="file-explorer-toolbar-row file-explorer-path-row file-explorer-mode-files-only">
                 <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel file-explorer-mode-files-only active" aria-pressed="true">Sync</button>
-                <div class="file-explorer-quick-access-panel file-explorer-mode-files-only">
-                  <button type="button" class="file-explorer-quick-access-button">~</button>
-                  <button type="button" class="file-explorer-quick-access-button">/*</button>
-                  <button type="button" class="file-explorer-quick-access-button">/tmp</button>
-                </div>
-                <span class="file-explorer-toolbar-spacer"></span>
+                <input class="file-explorer-path-inline file-explorer-mode-files-only" value="/home/keivenc/yolomux.dev/static_src/js/yolomux">
+                <button type="button" class="path-copy-button file-explorer-path-copy-panel file-explorer-mode-files-only"></button>
               </div>
               <div class="file-explorer-toolbar-row file-explorer-actions-row file-explorer-mode-files-only">
-                <button type="button" class="file-explorer-header-action file-explorer-mode-files-only" data-file-explorer-collapse>▤</button>
                 <button type="button" class="file-explorer-header-action file-explorer-mode-files-only" id="new-file" data-file-explorer-new-file>+</button>
                 <button type="button" class="file-explorer-header-action file-explorer-folder-action file-explorer-mode-files-only" data-file-explorer-new-folder><span class="file-explorer-folder-icon" aria-hidden="true"></span></button>
                 <span class="file-explorer-toolbar-spacer"></span>
+                <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel file-explorer-mode-files-only">.*</button>
                 <select class="file-explorer-sort-select file-explorer-mode-files-only"><option>A-Z</option></select>
                 <span class="file-explorer-date-reload-cluster file-explorer-mode-files-only">
                   <button type="button" class="file-explorer-header-action file-explorer-date-toggle changes-date-toggle">日期</button>
@@ -1040,12 +1033,13 @@ def finder_click_toolbar_fixture_html():
         <script>
           document.body.classList.add('file-explorer-mode-files');
           document.querySelectorAll('[data-file-explorer-mode-set]').forEach(button => button.addEventListener('click', () => {{
-            const nextDiff = button.dataset.fileExplorerModeSet === 'diff';
-            document.body.classList.toggle('file-explorer-mode-diff', nextDiff);
-            document.body.classList.toggle('file-explorer-mode-files', !nextDiff);
-            document.getElementById('finder-panel').dataset.fileExplorerMode = nextDiff ? 'diff' : 'files';
+            const nextMode = button.dataset.fileExplorerModeSet;
+            document.body.classList.toggle('file-explorer-mode-diff', nextMode === 'diff');
+            document.body.classList.toggle('file-explorer-mode-files', nextMode === 'files');
+            document.body.classList.toggle('file-explorer-mode-tabber', nextMode === 'tabber');
+            document.getElementById('finder-panel').dataset.fileExplorerMode = nextMode;
             document.querySelectorAll('[data-file-explorer-mode-set]').forEach(toggle => {{
-              toggle.setAttribute('aria-pressed', toggle.dataset.fileExplorerModeSet === (nextDiff ? 'diff' : 'files') ? 'true' : 'false');
+              toggle.setAttribute('aria-pressed', toggle.dataset.fileExplorerModeSet === nextMode ? 'true' : 'false');
             }});
           }}));
         </script>
@@ -1634,7 +1628,7 @@ def wait_for_dockview(browser, min_tabs=1):
     )
 
 
-def wait_for_dockview_tab_geometry(browser, min_tabs=1, min_width=150, max_rows=None):
+def wait_for_dockview_tab_geometry(browser, min_tabs=1, min_width=150, max_rows=None, min_rows=None):
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
@@ -1642,15 +1636,17 @@ def wait_for_dockview_tab_geometry(browser, min_tabs=1, min_width=150, max_rows=
             if (tabs.length < arguments[0]) return false;
             const rects = tabs.map(tab => tab.getBoundingClientRect());
             if (rects.some(rect => rect.width < arguments[1] || rect.height <= 0)) return false;
+            const tops = new Set(rects.map(rect => Math.round(rect.top)));
             if (arguments[2] !== null) {
-              const tops = new Set(rects.map(rect => Math.round(rect.top)));
               if (tops.size > arguments[2]) return false;
             }
+            if (arguments[3] !== null && tops.size < arguments[3]) return false;
             return true;
             """,
             min_tabs,
             min_width,
             max_rows,
+            min_rows,
         )
     )
 
@@ -1928,6 +1924,9 @@ def dockview_layout_metrics(browser):
             return {
               height: containerRect ? Math.round(containerRect.height) : 0,
               tabsHeight: tabs ? Math.round(tabs.getBoundingClientRect().height) : 0,
+              tabsScrollWidth: tabs ? Math.round(tabs.scrollWidth) : 0,
+              tabsClientWidth: tabs ? Math.round(tabs.clientWidth) : 0,
+              tabsOverflowX: tabs ? getComputedStyle(tabs).overflowX : '',
               tabsScrollbarWidth: tabs ? getComputedStyle(tabs).scrollbarWidth : '',
               tabsWebkitScrollbarDisplay: tabs ? getComputedStyle(tabs, '::-webkit-scrollbar').display : '',
               tabsWebkitScrollbarHeight: tabs ? getComputedStyle(tabs, '::-webkit-scrollbar').height : '',
@@ -2045,6 +2044,798 @@ def test_client_events_ready_refetches_yolo_marker_after_reconnect(browser, tmp_
     assert result["autoApproveFetches"] >= 2, result
     assert result["errors"] == []
     assert result["rejections"] == []
+
+
+def test_share_viewer_banner_does_not_displace_main_grid(browser, tmp_path):
+    page = tmp_path / "share-viewer-banner-grid.html"
+    page.write_text(
+        page_html(
+            """
+        <script>document.body.classList.add('share-view-mode');</script>
+        <div id="appRoot" class="app-root">
+          <div class="topbar">
+            <div class="brand-cell"><span class="brand">YOLOmux</span></div>
+          </div>
+          <div id="grid" class="grid dockview-grid">
+            <div class="yolomux-dockview">
+              <div class="panel active-pane"><div class="tab-pane active"><div class="terminal"></div></div></div>
+            </div>
+          </div>
+        </div>
+        <div class="share-viewer-banner" role="status">Viewing keivenc's session - read-only - expires in 9:23</div>
+      """
+        ),
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const root = document.getElementById('appRoot');
+        const banner = document.querySelector('.share-viewer-banner');
+        const grid = document.getElementById('grid');
+        const dock = document.querySelector('.yolomux-dockview');
+        const rect = el => {
+          const r = el.getBoundingClientRect();
+          return {top: Math.round(r.top), height: Math.round(r.height), width: Math.round(r.width)};
+        };
+        return {
+          root: rect(root),
+          banner: rect(banner),
+          bannerPosition: getComputedStyle(banner).position,
+          grid: rect(grid),
+          dock: rect(dock),
+        };
+        """
+    )
+    assert metrics["bannerPosition"] == "fixed"
+    assert metrics["banner"]["height"] < 60
+    assert metrics["root"]["top"] == 0
+    assert metrics["grid"]["top"] < 60
+    assert metrics["grid"]["height"] > 500
+    assert metrics["dock"]["height"] > 500
+
+
+def test_share_mirror_root_transform_and_bundled_fonts_render_in_browser(browser, tmp_path):
+    shutil.copyfile(REPO_ROOT / "static" / "fonts" / "yolomux-ui.woff2", tmp_path / "yolomux-ui.woff2")
+    shutil.copyfile(REPO_ROOT / "static" / "fonts" / "yolomux-mono.woff2", tmp_path / "yolomux-mono.woff2")
+    css = app_css().replace("/static/fonts/yolomux-ui.woff2", "yolomux-ui.woff2").replace("/static/fonts/yolomux-mono.woff2", "yolomux-mono.woff2")
+    page = tmp_path / "share-mirror-root-fonts.html"
+    page.write_text(
+        f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <style>{css}</style>
+      </head>
+      <body>
+        <script>document.body.classList.add('share-view-mode');</script>
+        <div id="shareMirrorStage" class="share-mirror-stage">
+          <div id="appRoot" class="app-root" style="--app-root-width:1440px; --app-root-height:900px; --share-mirror-scale:0.5; --share-mirror-tx:20px; --share-mirror-ty:30px;">
+            <button id="mirrorTarget" style="position:absolute; left:100px; top:80px; width:120px; height:40px;">Tabs</button>
+            <div class="share-popup-mirror-layer">
+              <div id="mirrorPopupItem" class="share-popup-mirror-item" style="left:200px; top:160px; width:240px; height:80px;">
+                <div id="mirrorPopupInner" class="app-menu-popover" style="width:240px; height:80px;">YO!share</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="share-viewer-banner share-mode-read" role="status"><span class="share-viewer-mirror-status match">mirror ✓</span></div>
+      </body>
+    </html>
+      """,
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri())
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        Promise.all([
+          document.fonts.load('13px "YOLOmux UI"'),
+          document.fonts.load('13px "YOLOmux Mono"'),
+        ]).then(() => {
+          const root = document.getElementById('appRoot').getBoundingClientRect();
+          const target = document.getElementById('mirrorTarget').getBoundingClientRect();
+          const popupItem = document.getElementById('mirrorPopupItem').getBoundingClientRect();
+          const popupInner = document.getElementById('mirrorPopupInner').getBoundingClientRect();
+          const popupStyle = getComputedStyle(document.getElementById('mirrorPopupInner'));
+          const mirror = document.querySelector('.share-viewer-mirror-status');
+          const mirrorStyle = getComputedStyle(mirror);
+          done({
+            root: {left: Math.round(root.left), top: Math.round(root.top), width: Math.round(root.width), height: Math.round(root.height)},
+            target: {left: Math.round(target.left), top: Math.round(target.top), width: Math.round(target.width), height: Math.round(target.height)},
+            popupItem: {left: Math.round(popupItem.left), top: Math.round(popupItem.top), width: Math.round(popupItem.width), height: Math.round(popupItem.height)},
+            popupInner: {left: Math.round(popupInner.left), top: Math.round(popupInner.top), width: Math.round(popupInner.width), height: Math.round(popupInner.height)},
+            popupDisplay: popupStyle.display,
+            popupVisibility: popupStyle.visibility,
+            popupOpacity: popupStyle.opacity,
+            uiFontLoaded: document.fonts.check('13px "YOLOmux UI"'),
+            monoFontLoaded: document.fonts.check('13px "YOLOmux Mono"'),
+            mirrorColor: mirrorStyle.color,
+          });
+        }).catch(error => done({error: String(error)}));
+        """
+    )
+    assert metrics.get("error") is None, metrics
+    assert metrics["root"] == {"left": 20, "top": 30, "width": 720, "height": 450}
+    assert metrics["target"] == {"left": 70, "top": 70, "width": 60, "height": 20}
+    assert metrics["popupItem"] == {"left": 120, "top": 110, "width": 120, "height": 40}
+    assert metrics["popupInner"] == metrics["popupItem"]
+    assert metrics["popupDisplay"] != "none"
+    assert metrics["popupVisibility"] == "visible"
+    assert float(metrics["popupOpacity"]) == 1
+    assert metrics["uiFontLoaded"] is True
+    assert metrics["monoFontLoaded"] is True
+    assert metrics["mirrorColor"].startswith("rgb(")
+
+
+def test_share_status_modes_use_distinct_browser_colors(browser, tmp_path):
+    page = tmp_path / "share-status-mode-colors.html"
+    page.write_text(
+        page_html(
+            """
+        <button class="share-status-pill share-mode-read">YO!share: 1 viewers · 9:23 left</button>
+        <button class="share-status-pill share-mode-write">YO!share: 1 viewers · 9:23 left</button>
+        <div class="share-viewer-banner share-mode-read">Viewing keivenc's session - read-only - expires in 9:23</div>
+        <div class="share-viewer-banner share-mode-write">Viewing keivenc's session - write - expires in 9:23</div>
+      """
+        ),
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const styleFor = selector => {
+          const style = getComputedStyle(document.querySelector(selector));
+          return {background: style.backgroundColor, border: style.borderColor};
+        };
+        return {
+          readPill: styleFor('.share-status-pill.share-mode-read'),
+          writePill: styleFor('.share-status-pill.share-mode-write'),
+          readBanner: styleFor('.share-viewer-banner.share-mode-read'),
+          writeBanner: styleFor('.share-viewer-banner.share-mode-write'),
+        };
+        """
+    )
+    assert metrics["readPill"]["background"] != metrics["writePill"]["background"]
+    assert metrics["readPill"]["border"] != metrics["writePill"]["border"]
+    assert metrics["readBanner"]["background"] != metrics["writeBanner"]["background"]
+    assert metrics["readBanner"]["border"] != metrics["writeBanner"]["border"]
+
+
+def test_share_modal_copy_icon_sits_beside_url(browser, tmp_path):
+    page = tmp_path / "share-modal-copy-icon.html"
+    page.write_text(
+        page_html(
+            """
+        <section id="modal" class="modal open share-open">
+          <div class="modal-head"><div id="modalTitle">YO!share</div><button id="closeModal">Close</button></div>
+          <div id="modalBody">
+            <section class="share-entry">
+              <label class="share-field share-url-field">
+                <span>URL</span>
+                <span class="share-url-control">
+                  <input type="text" readonly value="https://localhost:8001/share/share123">
+                  <button type="button" class="path-copy-button share-url-copy-button" data-share-copy title="Copy" aria-label="Copy"></button>
+                </span>
+              </label>
+              <div class="share-actions">
+                <button type="button" class="danger" data-share-stop>Stop</button>
+              </div>
+            </section>
+          </div>
+        </section>
+      """
+        ),
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const control = document.querySelector('.share-url-control');
+        const input = control.querySelector('input');
+        const copy = control.querySelector('[data-share-copy]');
+        const actions = document.querySelector('.share-actions');
+        const rect = el => {
+          const r = el.getBoundingClientRect();
+          return {left: Math.round(r.left), right: Math.round(r.right), top: Math.round(r.top), bottom: Math.round(r.bottom), width: Math.round(r.width), height: Math.round(r.height)};
+        };
+        return {
+          control: rect(control),
+          input: rect(input),
+          copy: rect(copy),
+          copyText: copy.textContent.trim(),
+          copyTitle: copy.getAttribute('title'),
+          actionCopyCount: actions.querySelectorAll('[data-share-copy]').length,
+          stopCount: actions.querySelectorAll('[data-share-stop]').length,
+        };
+        """
+    )
+    assert metrics["copyText"] == ""
+    assert metrics["copyTitle"] == "Copy"
+    assert metrics["actionCopyCount"] == 0
+    assert metrics["stopCount"] == 1
+    assert metrics["input"]["right"] <= metrics["copy"]["left"]
+    assert metrics["copy"]["right"] <= metrics["control"]["right"]
+    assert metrics["copy"]["width"] == 30
+    assert abs(((metrics["input"]["top"] + metrics["input"]["bottom"]) / 2) - ((metrics["copy"]["top"] + metrics["copy"]["bottom"]) / 2)) <= 1
+
+
+def test_share_modal_users_section_is_inline_not_nested_card(browser, tmp_path):
+    page = tmp_path / "share-modal-users-inline.html"
+    page.write_text(
+        page_html(
+            """
+        <section id="modal" class="modal open share-open">
+          <div class="modal-head"><div id="modalTitle">YO!share</div><button id="closeModal">Close</button></div>
+          <div id="modalBody">
+            <div class="share-modal-form">
+              <div class="share-active-panel">
+                <div class="share-section-title">Active share URLs (1)</div>
+                <div class="share-entry-list">
+                  <section class="share-entry share-mode-read">
+                    <div class="share-entry-heading">
+                      <strong>5 · read-only · http</strong>
+                      <span>id UKeiu2G-</span>
+                    </div>
+                    <label class="share-field share-url-field">
+                      <span class="share-url-control">
+                        <input type="text" readonly value="http://localhost:8001/share/UKeiu2G-#t=ZD5">
+                        <button type="button" class="path-copy-button share-url-copy-button" title="Copy" aria-label="Copy"></button>
+                      </span>
+                    </label>
+                    <div class="share-result-meta">
+                      <span>expires in 99:55</span>
+                      <span>0/5 viewers</span>
+                      <span>read-only</span>
+                      <span>http</span>
+                      <button type="button" class="share-extend-button">+10 min</button>
+                      <button type="button" class="danger share-stop-inline">Stop sharing</button>
+                    </div>
+                    <div class="share-users">
+                      <div class="share-users-title">Users (0)</div>
+                      <div class="share-users-table" role="table" aria-label="Users (0)">
+                        <div class="share-users-row header" role="row">
+                          <span role="columnheader">Connected</span>
+                          <span role="columnheader">IP</span>
+                          <span role="columnheader">Browser</span>
+                        </div>
+                        <div class="share-users-empty">No connected users</div>
+                      </div>
+                    </div>
+                  </section>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      """
+        ),
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const styles = selector => {
+          const style = getComputedStyle(document.querySelector(selector));
+          return {
+            background: style.backgroundColor,
+            borderTopWidth: style.borderTopWidth,
+            borderRightWidth: style.borderRightWidth,
+            borderBottomWidth: style.borderBottomWidth,
+            borderLeftWidth: style.borderLeftWidth,
+            boxShadow: style.boxShadow,
+          };
+        };
+        const rect = selector => {
+          const r = document.querySelector(selector).getBoundingClientRect();
+          return {left: Math.round(r.left), right: Math.round(r.right), width: Math.round(r.width)};
+        };
+        return {
+          modal: styles('.modal.share-open'),
+          entry: styles('.share-entry'),
+          table: styles('.share-users-table'),
+          header: styles('.share-users-row.header'),
+          empty: styles('.share-users-empty'),
+          usersRect: rect('.share-users'),
+          tableRect: rect('.share-users-table'),
+        };
+        """
+    )
+    assert metrics["modal"]["borderTopWidth"] == "1px"
+    assert metrics["modal"]["borderLeftWidth"] == "1px"
+    assert "-4px" not in metrics["modal"]["boxShadow"]
+    assert metrics["entry"]["borderTopWidth"] == "1px"
+    assert metrics["table"]["borderTopWidth"] == "0px"
+    assert metrics["table"]["borderRightWidth"] == "0px"
+    assert metrics["table"]["borderBottomWidth"] == "0px"
+    assert metrics["table"]["borderLeftWidth"] == "0px"
+    assert metrics["table"]["background"] == "rgba(0, 0, 0, 0)"
+    assert metrics["header"]["background"] == "rgba(0, 0, 0, 0)"
+    assert metrics["header"]["borderTopWidth"] == "1px"
+    assert metrics["empty"]["borderTopWidth"] == "1px"
+    assert abs(metrics["usersRect"]["left"] - metrics["tableRect"]["left"]) <= 1
+    assert abs(metrics["usersRect"]["right"] - metrics["tableRect"]["right"]) <= 1
+
+
+def test_share_readonly_diff_scroll_and_popup_mirror_are_host_owned(browser, tmp_path):
+    css = app_css()
+    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    bootstrap = json.dumps(
+        {
+            "sessions": ["1"],
+            "availableAgents": ["term"],
+            "accessRole": "readonly",
+            "homePath": "/home/test",
+            "repoRoot": "/repo/app",
+            "maxSessionTabs": 99,
+            "serverHostname": "test-host",
+            "strings": {"en": strings},
+            "codeMirrorAssetUrl": bundle_uri,
+            "share": {"view": True, "id": "share68", "mode": "ro", "session": "1", "sessions": ["1"]},
+        },
+        separators=(",", ":"),
+    )
+    path = "/repo/app/test_app.py"
+    original_lines = [f"line {index:03d}: stable content\n" for index in range(1, 181)]
+    current_lines = original_lines[:]
+    current_lines[118] = "line 119: host diff changed this line\n"
+    current_lines.insert(119, "line 120: host diff inserted this line\n")
+    original = "".join(original_lines)
+    current = "".join(current_lines)
+    diff = "diff --git a/test_app.py b/test_app.py\n" + "".join(
+        difflib.unified_diff(
+            original.splitlines(keepends=True),
+            current.splitlines(keepends=True),
+            fromfile="a/test_app.py",
+            tofile="b/test_app.py",
+        )
+    )
+    payload = json.dumps(
+        {
+            "diff": diff,
+            "original": original,
+            "working": current,
+            "repo": "/repo/app",
+            "relative_path": "test_app.py",
+            "from_ref": "HEAD",
+            "to_ref": "current",
+            "untracked": False,
+            "working_missing": False,
+        },
+        separators=(",", ":"),
+    )
+    page = tmp_path / "share-readonly-diff-scroll-popup.html"
+    page.write_text(
+        f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style><script src="{bundle_uri}"></script>
+        <style>
+        body {{ margin: 0; padding: 0; display: block; height: auto; min-height: 0; background: #10151d; }}
+        #appRoot {{ position: relative; width: 1120px; height: 720px; }}
+        #mount {{ width: 940px; height: 640px; padding: 24px; }}
+        .file-editor-panel {{ width: 920px; height: 600px; }}
+        .file-editor-codemirror-panel {{ height: 100%; }}
+        </style></head>
+        <body class="theme-dark theme-resolved-dark editor-theme-dark share-view-mode">
+          <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
+          <div id="appRoot" class="app-root">
+            <div id="fileExplorer" class="file-explorer-panel">
+              <input id="fileExplorerPath" class="file-explorer-path-inline">
+              <button id="fileExplorerPathCopy" type="button"></button>
+              <button id="fileExplorerHiddenToggle" type="button"></button>
+              <button id="fileExplorerRootMode" type="button"></button>
+              <div id="fileExplorerQuickAccess"></div>
+              <div id="fileExplorerTree" class="file-explorer-tree-panel" role="tree"></div>
+            </div>
+            <div id="mount"></div>
+          </div>
+          <script>
+            window.__shareDiffPayload = {payload};
+            window.__shareDiffErrors = [];
+            window.addEventListener('error', event => window.__shareDiffErrors.push(event.message || String(event.error || event)));
+            window.addEventListener('unhandledrejection', event => window.__shareDiffErrors.push(String(event.reason || event)));
+            function jsonResponse(payload, status = 200) {{
+              const text = JSON.stringify(payload);
+              return Promise.resolve({{ok: status >= 200 && status < 300, status, headers: {{get: () => 'application/json'}}, json: async () => payload, text: async () => text}});
+            }}
+            window.fetch = async input => {{
+              const url = new URL(String(input), 'https://localhost');
+              if (url.pathname === '/api/fs/diff') {{
+                window.__shareDiffRequest = url.search;
+                return jsonResponse(window.__shareDiffPayload);
+              }}
+              return jsonResponse({{}});
+            }};
+          </script>
+          <script>{app_bundle_before_boot_script()}</script>
+          <script>
+            window.__shareDiffReady = (async () => {{
+              const path = {json.dumps(path)};
+              const current = {json.dumps(current).replace("</script", "<\\/script")};
+              const item = fileEditorItemFor(path);
+              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+              const waitFor = async predicate => {{
+                for (let attempt = 0; attempt < 180; attempt += 1) {{
+                  if (predicate()) return true;
+                  await frame();
+                }}
+                return false;
+              }};
+              installShareScrollPublisher();
+              installShareReadonlyInteractionBlocker();
+              setFileState(path, {{
+                mtime: 1,
+                size: current.length,
+                kind: 'text',
+                content: current,
+                original: current,
+                dirty: false,
+                language: 'python',
+                gitRoot: '/repo/app',
+                gitTracked: true,
+                gitHasHistory: true,
+                gitHistory: [{{ref: 'HEAD', short: 'HEAD'}}, {{ref: 'abc1234', short: 'abc1234'}}],
+                diffLoaded: false,
+                diffUnavailable: false,
+              }});
+              addFileEditorTabItem(path, item);
+              const panel = createFileEditorPanel(item);
+              panel.id = 'share-diff-panel';
+              panel.classList.add('active-pane');
+              panelNodes.set(item, panel);
+              document.getElementById('mount').append(panel);
+              const infoPanel = createInfoPanel();
+              document.getElementById('mount').append(infoPanel);
+              await applyShareUiState({{editor: {{modes: [{{
+                path,
+                item,
+                mode: 'diff',
+                diffFromRef: 'HEAD',
+                diffToRef: 'current',
+                diffExpandUnchanged: true,
+                viewState: {{top: 280, left: 0, anchor: 0, head: 0}},
+              }}]}}, chrome: {{tabMetaVisible: false, infoSubTab: 'yoagent'}}}});
+              renderFileEditorPanel(panel, item);
+              const modeReady = await waitFor(() => panel._cmMode === 'diff' && panel._cmView?.scrollDOM);
+              const scroller = panel._cmView?.scrollDOM;
+              applyShareScrollState({{target: `editor:${{item}}:editor`, kind: 'editor', path, item, source: 'editor', top: 2320, left: 0, anchor: 0, head: 0}});
+              await frame();
+              await frame();
+              const diffRowsVisible = await waitFor(() => panel.querySelectorAll('.cm-insertedLine, .cm-deletedLine').length > 0);
+              const hostTop = Math.round(scroller?.scrollTop || 0);
+              const insertedRows = panel.querySelectorAll('.cm-insertedLine').length;
+              const deletedRows = panel.querySelectorAll('.cm-deletedLine').length;
+              if (scroller) {{
+                scroller.scrollTop = 0;
+                scroller.dispatchEvent(new Event('scroll', {{bubbles: true}}));
+              }}
+              await frame();
+              await frame();
+              const afterLocalScrollTop = Math.round(scroller?.scrollTop || 0);
+              const wheelEvent = new WheelEvent('wheel', {{deltaY: 240, bubbles: true, cancelable: true}});
+              const wheelResult = scroller ? scroller.dispatchEvent(wheelEvent) : true;
+              await frame();
+              await frame();
+              const afterWheelTop = Math.round(scroller?.scrollTop || 0);
+              const appRoot = document.getElementById('appRoot');
+              const hostMenu = document.createElement('div');
+              hostMenu.className = 'app-menu open';
+              hostMenu.style.position = 'absolute';
+              hostMenu.style.left = '40px';
+              hostMenu.style.top = '40px';
+              hostMenu.innerHTML = '<button class="app-menu-button">Tabs</button><div class="app-menu-popover" style="width:220px;height:90px;"><button class="app-menu-command share-mirror-active">test_app.py</button></div>';
+              appRoot.append(hostMenu);
+              const hostTabPopover = document.createElement('div');
+              hostTabPopover.className = 'pane-tab-detached-popover popover-open';
+              hostTabPopover.style.position = 'absolute';
+              hostTabPopover.style.left = '300px';
+              hostTabPopover.style.top = '40px';
+              hostTabPopover.style.width = '260px';
+              hostTabPopover.style.height = '110px';
+              hostTabPopover.textContent = 'test_app.py tab detail';
+              appRoot.append(hostTabPopover);
+              const popupPayload = sharePopupLayerPayload();
+              applySharePopupLayer(popupPayload, 'host');
+              const mirrorLayer = document.querySelector('.share-popup-mirror-layer');
+              return {{
+                diffReady: modeReady && diffRowsVisible,
+                mode: panel._cmMode || '',
+                viewMode: editorViewModeFor(path, item),
+                diffLoaded: openFiles.get(path)?.diffLoaded === true,
+                diffExpandPressed: panel.querySelector('.file-editor-diff-expand-panel')?.getAttribute('aria-pressed') || '',
+                tabMetaHidden: document.body.classList.contains('tab-meta-hidden'),
+                infoSubtab: infoPanel.dataset.infoSubtab || '',
+                yoagentActive: Boolean(infoPanel.querySelector('[data-info-subview="yoagent"]')?.classList.contains('active')),
+                yoagentRendered: Boolean(infoPanel.querySelector('#yoagent-content .yoagent-chat, #yoagent-content .yoagent-global')),
+                lineClasses: Array.from(panel.querySelectorAll('.cm-line')).map(line => line.className).filter(Boolean).slice(0, 40),
+                insertedRows,
+                deletedRows,
+                hostTop,
+                afterLocalScrollTop,
+                afterWheelTop,
+                wheelPrevented: wheelEvent.defaultPrevented === true || wheelResult === false,
+                request: window.__shareDiffRequest || '',
+                popupItems: popupPayload.items.length,
+                mirrorActiveMenu: Boolean(mirrorLayer?.querySelector('.app-menu-command.share-mirror-active')),
+                mirrorTabPopover: Boolean(mirrorLayer?.querySelector('.pane-tab-detached-popover.popover-open')),
+                mirrorPointerEvents: mirrorLayer ? getComputedStyle(mirrorLayer).pointerEvents : '',
+                errors: window.__shareDiffErrors,
+              }};
+            }})();
+          </script>
+        </body></html>""",
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri())
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        window.__shareDiffReady.then(done, error => done({error: String(error), errors: window.__shareDiffErrors || []}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["diffReady"] is True, json.dumps(metrics, sort_keys=True)
+    assert metrics["mode"] == "diff", metrics
+    assert metrics["viewMode"] == "diff", metrics
+    assert metrics["diffExpandPressed"] == "true", metrics
+    assert metrics["tabMetaHidden"] is True, metrics
+    assert metrics["infoSubtab"] == "yoagent", metrics
+    assert metrics["yoagentActive"] is True, metrics
+    assert metrics["yoagentRendered"] is True, metrics
+    assert metrics["insertedRows"] > 0 and metrics["deletedRows"] > 0, metrics
+    assert metrics["hostTop"] > 0, metrics
+    assert metrics["afterLocalScrollTop"] == metrics["hostTop"], metrics
+    assert metrics["afterWheelTop"] == metrics["hostTop"], metrics
+    assert metrics["wheelPrevented"] is True, metrics
+    assert "from=HEAD" in metrics["request"] and "to=current" in metrics["request"], metrics
+    assert metrics["popupItems"] >= 2, metrics
+    assert metrics["mirrorActiveMenu"] is True, metrics
+    assert metrics["mirrorTabPopover"] is True, metrics
+    assert metrics["mirrorPointerEvents"] == "none", metrics
+    assert metrics["errors"] == [], metrics
+
+
+def test_share_readonly_info_sort_and_horizontal_scroll_are_host_owned(browser, tmp_path):
+    css = app_css()
+    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    bootstrap = json.dumps(
+        {
+            "sessions": ["alpha", "beta"],
+            "availableAgents": ["term"],
+            "accessRole": "readonly",
+            "homePath": "/home/test",
+            "repoRoot": "/repo/app",
+            "maxSessionTabs": 99,
+            "serverHostname": "test-host",
+            "strings": {"en": strings},
+            "codeMirrorAssetUrl": bundle_uri,
+            "share": {"view": True, "id": "share-info", "mode": "ro", "session": "alpha", "sessions": ["alpha", "beta"]},
+        },
+        separators=(",", ":"),
+    )
+    page = tmp_path / "share-readonly-info-scroll.html"
+    page.write_text(
+        f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style><script src="{bundle_uri}"></script>
+        <style>
+        body {{ margin: 0; padding: 0; display: block; height: auto; min-height: 0; background: #10151d; }}
+        #appRoot {{ position: relative; width: 900px; height: 520px; }}
+        #mount {{ width: 420px; height: 260px; padding: 24px; }}
+        #info-content {{ width: 320px; height: 150px; overflow: auto; }}
+        #info-content .info-row {{ min-width: 1120px; }}
+        </style></head>
+        <body class="theme-dark theme-resolved-dark editor-theme-dark share-view-mode share-view-readonly">
+          <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
+          <div id="appRoot" class="app-root"><div id="mount"></div></div>
+          <script>{app_bundle_before_boot_script()}</script>
+          <script>
+            window.__shareInfoReady = (async () => {{
+              window.__shareInfoErrors = [];
+              window.addEventListener('error', event => window.__shareInfoErrors.push(event.message || String(event.error || event)));
+              window.addEventListener('unhandledrejection', event => window.__shareInfoErrors.push(String(event.reason || event)));
+              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+              infoPanelSubTab = 'info';
+              transcriptMetaLoaded = true;
+              transcriptMetaLoading = false;
+              transcriptMetaLoadError = '';
+              transcriptMeta = {{
+                session_order: ['beta', 'alpha'],
+                sessions: {{
+                  alpha: {{session: 'alpha', project: {{git: {{root: '/repo/client-alpha', cwd: '/repo/client-alpha', branch: 'local-alpha', other_branches: {{branches: [{{name: 'local-alpha', updated: 'later', updated_ts: 200, current: true, subject: 'client alpha row'}}]}}}}, linear: []}}}},
+                  beta: {{session: 'beta', project: {{git: {{root: '/repo/client-beta', cwd: '/repo/client-beta', branch: 'local-beta', other_branches: {{branches: [{{name: 'local-beta', updated: 'earlier', updated_ts: 100, current: true, subject: 'client beta row'}}]}}}}, linear: []}}}},
+                }},
+              }};
+              const hostBranchRows = [
+                {{session: 'host-1', path: '/repo/host-one', pathLabel: '/repo/host-one', pathTitle: '/repo/host-one', branch: 'alpha', desc: 'host first row', updated: 'now', updatedText: 'now', updatedTitle: 'now', updatedTs: 300}},
+                {{session: 'host-2', path: '/repo/host-two', pathLabel: '/repo/host-two', pathTitle: '/repo/host-two', branch: 'zeta', desc: 'host second row', updated: 'later', updatedText: 'later', updatedTitle: 'later', updatedTs: 100}},
+              ];
+              installShareScrollPublisher();
+              installShareReadonlyInteractionBlocker();
+              const panel = createInfoPanel();
+              document.getElementById('mount').append(panel);
+              applyShareUiState({{info: {{branchSort: {{key: 'session', dir: 'asc'}}, columnWidths: {{branch: 520, desc: 740}}, branchRows: hostBranchRows}}}});
+              await frame();
+              const scroller = document.getElementById('info-content');
+              const rootStyle = getComputedStyle(document.documentElement);
+              const rowSessions = () => Array.from(document.querySelectorAll('#info-content .info-row:not(.header) .info-cell:first-child')).map(cell => cell.textContent.trim());
+              applyShareScrollState({{target: 'info', kind: 'info', top: 32, left: 220}});
+              await frame();
+              await frame();
+              const hostTop = Math.round(scroller.scrollTop);
+              const hostLeft = Math.round(scroller.scrollLeft);
+              scroller.scrollTop = 0;
+              scroller.scrollLeft = 0;
+              scroller.dispatchEvent(new Event('scroll', {{bubbles: true, cancelable: true}}));
+              await frame();
+              await frame();
+              return {{
+                rows: rowSessions(),
+                hostTop,
+                hostLeft,
+                afterLocalTop: Math.round(scroller.scrollTop),
+                afterLocalLeft: Math.round(scroller.scrollLeft),
+                scrollWidth: scroller.scrollWidth,
+                clientWidth: scroller.clientWidth,
+                branchWidth: rootStyle.getPropertyValue('--info-branch-column-width').trim(),
+                descWidth: rootStyle.getPropertyValue('--info-desc-column-width').trim(),
+                errors: window.__shareInfoErrors,
+              }};
+            }})();
+          </script>
+        </body></html>""",
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri())
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        window.__shareInfoReady.then(done, error => done({error: String(error), errors: window.__shareInfoErrors || []}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["rows"][:2] == ["host-1", "host-2"], metrics
+    assert metrics["scrollWidth"] > metrics["clientWidth"], metrics
+    assert metrics["branchWidth"] == "520px", metrics
+    assert metrics["descWidth"] == "740px", metrics
+    assert metrics["hostTop"] > 0, metrics
+    assert metrics["hostLeft"] > 0, metrics
+    assert metrics["afterLocalTop"] == metrics["hostTop"], metrics
+    assert metrics["afterLocalLeft"] == metrics["hostLeft"], metrics
+
+
+def test_share_readonly_finder_session_is_host_authoritative(browser, tmp_path):
+    css = app_css()
+    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    bootstrap = json.dumps(
+        {
+            "sessions": ["5", "6"],
+            "availableAgents": ["term"],
+            "accessRole": "readonly",
+            "homePath": "/home/test",
+            "repoRoot": "/repo/app",
+            "maxSessionTabs": 99,
+            "serverHostname": "test-host",
+            "strings": {"en": strings},
+            "codeMirrorAssetUrl": bundle_uri,
+            "share": {"view": True, "id": "share-finder", "mode": "ro", "session": "5", "sessions": ["5", "6"], "finder": {"session": "5", "mode": "diff"}},
+        },
+        separators=(",", ":"),
+    )
+    page = tmp_path / "share-readonly-finder-session.html"
+    page.write_text(
+        f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style><script src="{bundle_uri}"></script></head>
+        <body class="theme-dark theme-resolved-dark editor-theme-dark share-view-mode share-view-readonly">
+          <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
+          <div id="appRoot" class="app-root">
+            <div id="fileExplorer" class="file-explorer-panel">
+              <input id="fileExplorerPath" class="file-explorer-path-inline">
+              <button id="fileExplorerPathCopy" type="button"></button>
+              <button id="fileExplorerHiddenToggle" type="button"></button>
+              <button id="fileExplorerRootMode" type="button"></button>
+              <div id="fileExplorerQuickAccess"></div>
+              <div id="fileExplorerTree" class="file-explorer-tree-panel" role="tree"></div>
+            </div>
+            <div id="mount"></div>
+          </div>
+          <script>
+            function jsonResponse(payload, status = 200) {{
+              const text = JSON.stringify(payload);
+              return Promise.resolve({{ok: status >= 200 && status < 300, status, headers: {{get: () => 'application/json'}}, json: async () => payload, text: async () => text}});
+            }}
+            const fsEntries = {{
+              '/home/test/yolomux.dev1': [{{name: 'src', kind: 'dir'}}],
+              '/home/test/yolomux.dev1/src': [{{name: 'app.js', kind: 'file'}}],
+              '/home/test/other.dev': [{{name: 'src', kind: 'dir'}}],
+              '/home/test/other.dev/src': [{{name: 'main.js', kind: 'file'}}],
+            }};
+            window.fetch = async (input, options = {{}}) => {{
+              const url = new URL(String(input), 'https://localhost');
+              if (url.pathname === '/api/session-files') return jsonResponse({{session: url.searchParams.get('session') || '', loaded: true, files: [], repos: [], errors: []}});
+              if (url.pathname === '/api/fs/batch') {{
+                const body = JSON.parse(options.body || '{{}}');
+                return jsonResponse({{responses: (body.requests || []).map(request => {{
+                  const path = request.path || '';
+                  return {{id: request.id, ok: true, status: 200, payload: {{entries: fsEntries[path] || []}}}};
+                }})}});
+              }}
+              if (url.pathname === '/api/fs/list') return jsonResponse({{entries: fsEntries[url.searchParams.get('path') || ''] || []}});
+              return jsonResponse({{}});
+            }};
+          </script>
+          <script>{app_bundle_before_boot_script()}</script>
+          <script>
+            window.__shareFinderReady = (async () => {{
+              window.__shareFinderErrors = [];
+              window.addEventListener('error', event => window.__shareFinderErrors.push(event.message || String(event.error || event)));
+              window.addEventListener('unhandledrejection', event => window.__shareFinderErrors.push(String(event.reason || event)));
+              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+              transcriptMetaLoaded = true;
+              transcriptMeta = {{
+                session_order: ['5', '6'],
+                sessions: {{
+                  '5': {{session: '5', project: {{git: {{root: '/home/test/yolomux.dev1', cwd: '/home/test/yolomux.dev1/src'}}}}, selected_pane: {{current_path: '/home/test/yolomux.dev1/src'}}}},
+                  '6': {{session: '6', project: {{git: {{root: '/home/test/other.dev', cwd: '/home/test/other.dev/src'}}}}, selected_pane: {{current_path: '/home/test/other.dev/src'}}}},
+                }},
+              }};
+              const initial = fileExplorerSessionFilesTargetSession();
+              const localResult = noteFileExplorerChangesSessionInteraction('6');
+              const afterLocal = fileExplorerSessionFilesTargetSession();
+              await applyShareUiState({{finder: {{root: '/home/test/yolomux.dev1', rootMode: 'sync', mode: 'files', session: '5', expanded: ['/home/test/yolomux.dev1/src']}}}});
+              const hostRoot = fileExplorerRoot;
+              const hostExpanded = Array.from(fileExplorerExpanded);
+              setSessionFilesPayloadForDestination('finder', {{session: '6', loaded: true, files: [], repos: [], errors: []}});
+              scheduleFileExplorerActiveTabSync('6', {{explicit: true}});
+              await frame();
+              await frame();
+              const afterPayload = fileExplorerSessionFilesTargetSession();
+              const afterPayloadRoot = fileExplorerRoot;
+              const afterPayloadExpanded = Array.from(fileExplorerExpanded);
+              const localOpenResult = await openFileExplorerAt('/home/test/other.dev');
+              await applyShareUiState({{finder: {{root: '/home/test/other.dev', rootMode: 'sync', session: '6', mode: 'diff', expanded: ['/home/test/other.dev/src']}}}});
+              const afterHost = fileExplorerSessionFilesTargetSession();
+              return {{
+                initial,
+                localResult,
+                afterLocal,
+                hostRoot,
+                hostExpanded,
+                afterPayload,
+                afterPayloadRoot,
+                afterPayloadExpanded,
+                localOpenResult,
+                afterHost,
+                afterHostRoot: fileExplorerRoot,
+                afterHostExpanded: Array.from(fileExplorerExpanded),
+                errors: window.__shareFinderErrors,
+              }};
+            }})();
+          </script>
+        </body></html>""",
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri())
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        window.__shareFinderReady.then(done, error => done({error: String(error), errors: window.__shareFinderErrors || []}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["initial"] == "5", metrics
+    assert metrics["localResult"] is False, metrics
+    assert metrics["afterLocal"] == "5", metrics
+    assert metrics["hostRoot"] == "/home/test/yolomux.dev1", metrics
+    assert metrics["hostExpanded"] == ["/home/test/yolomux.dev1/src"], metrics
+    assert metrics["afterPayload"] == "5", metrics
+    assert metrics["afterPayloadRoot"] == "/home/test/yolomux.dev1", metrics
+    assert metrics["afterPayloadExpanded"] == ["/home/test/yolomux.dev1/src"], metrics
+    assert metrics["localOpenResult"] is False, metrics
+    assert metrics["afterHost"] == "6", metrics
+    assert metrics["afterHostRoot"] == "/home/test/other.dev", metrics
+    assert metrics["afterHostExpanded"] == ["/home/test/other.dev/src"], metrics
 
 
 def test_dockview_tabs_keep_yolomux_active_inactive_style(browser, tmp_path):
@@ -2707,10 +3498,11 @@ def test_dockview_header_actions_stay_on_first_row(browser, tmp_path):
         sessions=sessions,
     )
     wait_for_dockview(browser, min_tabs=7)
-    wait_for_dockview_tab_geometry(browser, min_tabs=7, min_width=60)
+    wait_for_dockview_tab_geometry(browser, min_tabs=7, min_width=150, min_rows=2)
     metrics = browser.execute_script(
         """
         const header = document.querySelector('.dv-tabs-and-actions-container');
+        const tabsContainer = header.querySelector('.dv-tabs-container');
         const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]');
         const rectFor = rect => ({left: Math.round(rect.left), right: Math.round(rect.right), top: Math.round(rect.top), bottom: Math.round(rect.bottom), width: Math.round(rect.width), height: Math.round(rect.height)});
         const tabRects = Array.from(document.querySelectorAll('.dockview-pane-tab')).map(item => rectFor(item.getBoundingClientRect()));
@@ -2740,6 +3532,9 @@ def test_dockview_header_actions_stay_on_first_row(browser, tmp_path):
           firstRowTabsRight: Math.round(Math.max(...firstRowTabs.map(rect => rect.right))),
           overlappingTabs: overlappingTabs.map(rect => rectFor(rect)),
           tabRows: new Set(tabRects.map(rect => rect.top)).size,
+          tabsOverflowX: getComputedStyle(tabsContainer).overflowX,
+          tabsScrollWidth: Math.round(tabsContainer.scrollWidth),
+          tabsClientWidth: Math.round(tabsContainer.clientWidth),
           reservedInlineSize: getComputedStyle(header).getPropertyValue('--dockview-header-actions-reserved-inline-size').trim(),
           tabCount: tabRects.length,
           headerRight: Math.round(headerRect.right),
@@ -2767,8 +3562,10 @@ def test_dockview_header_actions_stay_on_first_row(browser, tmp_path):
     assert metrics["actionsRight"] <= metrics["headerRight"] + 1
     assert metrics["actionsTopDelta"] <= 3
     assert metrics["actionsBottom"] <= metrics["tabBottom"] + 3
-    assert metrics["tabRows"] == 1
-    assert metrics["headerHeight"] <= metrics["tabHeight"] + 3
+    assert metrics["tabRows"] >= 2
+    assert metrics["tabsOverflowX"] == "visible"
+    assert metrics["tabsScrollWidth"] <= metrics["tabsClientWidth"] + 1
+    assert metrics["headerHeight"] >= (metrics["tabHeight"] * 2) - 2
     assert metrics["maxActionButtonHeight"] <= 20
     assert metrics["maxActionButtonHeight"] <= metrics["tabHeight"] + 1
 
@@ -3277,7 +4074,7 @@ def test_dockview_new_tabs_do_not_open_in_focused_finder(browser, tmp_path):
     assert "__prefs__" not in metrics["leftTabs"], metrics
 
 
-def test_dockview_many_tabs_stay_one_row_above_content(browser, tmp_path):
+def test_dockview_many_tabs_wrap_above_content(browser, tmp_path):
     sessions = [str(index) for index in range(1, 10)]
     load_dockview_runtime_boot_fixture(
         browser,
@@ -3286,7 +4083,7 @@ def test_dockview_many_tabs_stay_one_row_above_content(browser, tmp_path):
         sessions=sessions,
     )
     wait_for_dockview(browser, min_tabs=9)
-    wait_for_dockview_tab_geometry(browser, min_tabs=9, min_width=64, max_rows=1)
+    wait_for_dockview_tab_geometry(browser, min_tabs=9, min_width=150, min_rows=2)
     metrics = dockview_layout_metrics(browser)
     tab_tops = sorted({item["rect"]["top"] for item in metrics["tabStyles"]})
     tab_widths = {item["rect"]["width"] for item in metrics["tabStyles"]}
@@ -3294,10 +4091,12 @@ def test_dockview_many_tabs_stay_one_row_above_content(browser, tmp_path):
     assert metrics["errors"] == []
     assert metrics["rejections"] == []
     assert metrics["groups"][0]["tabs"] == sessions
-    assert len(tab_tops) == 1
-    assert max(tab_widths) <= 180
-    assert min(tab_widths) >= 64
-    assert metrics["header"]["height"] <= tab_height + 3
+    assert len(tab_tops) >= 2
+    assert max(tab_widths) <= 181
+    assert min(tab_widths) >= 170
+    assert metrics["header"]["height"] >= (tab_height * 2) - 2
+    assert metrics["header"]["tabsOverflowX"] == "visible"
+    assert metrics["header"]["tabsScrollWidth"] <= metrics["header"]["tabsClientWidth"] + 1
     assert metrics["header"]["tabsScrollbarWidth"] == "none"
     assert metrics["header"]["tabsWebkitScrollbarDisplay"] == "none"
     assert metrics["header"]["allTabsInsideHeader"] is True
@@ -3311,6 +4110,12 @@ def test_dockview_file_editor_tabs_stay_above_toolbar(browser, tmp_path):
         "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2Fstatic_src%2Fjs%2Fyolomux%2F60_popovers_tabs.js",
         "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2FREADME.md",
         "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2Fdocs%2FGUI_SPECS.md",
+        "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2Fdocs%2FDEVELOPMENT.md",
+        "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2Ftests%2Ftest_browser_layout.py",
+        "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2Fstatic_src%2Fcss%2Fyolomux%2F40_layout_panes_tabs.css",
+        "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2Fyolomux_lib%2Fsettings.py",
+        "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2Fpyproject.toml",
+        "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2Fpytest.ini",
     ]
     token = ",".join(encoded_files)
     load_dockview_runtime_boot_fixture(
@@ -3318,17 +4123,19 @@ def test_dockview_file_editor_tabs_stay_above_toolbar(browser, tmp_path):
         tmp_path,
         f"?sessions={token}&layout=left&tabs=left:{token}",
         sessions=[],
-        grid_width=1200,
+        grid_width=1120,
         grid_height=620,
     )
     wait_for_dockview(browser, min_tabs=len(encoded_files))
-    wait_for_dockview_tab_geometry(browser, min_tabs=len(encoded_files), min_width=64, max_rows=1)
+    wait_for_dockview_tab_geometry(browser, min_tabs=len(encoded_files), min_width=150, min_rows=2)
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script("return Boolean(document.querySelector('.file-editor-toolbar:not([hidden])'))")
     )
     metrics = browser.execute_script(
         """
         const group = document.querySelector('.file-editor-panel').closest('.dv-groupview');
+        const tabsContainer = group.querySelector('.dv-tabs-container');
+        const actions = group.querySelector('.dockview-pane-header-actions');
         const rectFor = rect => ({
           left: Math.round(rect.left),
           right: Math.round(rect.right),
@@ -3340,6 +4147,18 @@ def test_dockview_file_editor_tabs_stay_above_toolbar(browser, tmp_path):
         const header = group.querySelector('.dv-tabs-and-actions-container').getBoundingClientRect();
         const toolbar = group.querySelector('.file-editor-toolbar').getBoundingClientRect();
         const tabs = Array.from(group.querySelectorAll('.dockview-pane-tab')).map(tab => rectFor(tab.getBoundingClientRect()));
+        const rowsByTop = new Map();
+        for (const rect of tabs) {
+          const top = String(rect.top);
+          if (!rowsByTop.has(top)) rowsByTop.set(top, []);
+          rowsByTop.get(top).push(rect);
+        }
+        const rows = Array.from(rowsByTop.entries())
+          .map(([top, rects]) => ({top: Number(top), rects, right: Math.max(...rects.map(rect => rect.right))}))
+          .sort((a, b) => a.top - b.top);
+        const firstRowRight = rows[0]?.right || 0;
+        const laterRowRight = Math.max(...rows.slice(1).map(row => row.right));
+        const actionsRect = actions.getBoundingClientRect();
         const activeTab = group.querySelector('.dv-tab.dv-active-tab .dockview-pane-tab');
         const activeRect = activeTab.getBoundingClientRect();
         const hit = document.elementFromPoint(Math.round(activeRect.left + activeRect.width / 2), Math.round(activeRect.top + activeRect.height / 2));
@@ -3347,14 +4166,26 @@ def test_dockview_file_editor_tabs_stay_above_toolbar(browser, tmp_path):
           header: rectFor(header),
           toolbar: rectFor(toolbar),
           tabRows: new Set(tabs.map(rect => rect.top)).size,
+          tabHeight: tabs[0]?.height || 0,
+          tabsOverflowX: getComputedStyle(tabsContainer).overflowX,
+          tabsScrollWidth: Math.round(tabsContainer.scrollWidth),
+          tabsClientWidth: Math.round(tabsContainer.clientWidth),
+          actionLeft: Math.round(actionsRect.left),
+          firstRowRight,
+          laterRowRight,
           tabsOverlapToolbar: tabs.filter(rect => rect.bottom > toolbar.top + 1),
           activeTab: rectFor(activeRect),
           activeTabClickable: Boolean(hit?.closest?.('.dockview-pane-tab') === activeTab),
         };
         """
     )
-    assert metrics["tabRows"] == 1, metrics
+    assert metrics["tabRows"] >= 2, metrics
+    assert metrics["tabsOverflowX"] == "visible", metrics
+    assert metrics["tabsScrollWidth"] <= metrics["tabsClientWidth"] + 1, metrics
+    assert metrics["firstRowRight"] <= metrics["actionLeft"] - 1, metrics
+    assert metrics["laterRowRight"] >= metrics["actionLeft"] + 20, metrics
     assert metrics["tabsOverlapToolbar"] == [], metrics
+    assert metrics["header"]["height"] >= (metrics["tabHeight"] * 2) - 2, metrics
     assert metrics["activeTab"]["bottom"] <= metrics["toolbar"]["top"] + 1, metrics
     assert metrics["header"]["bottom"] <= metrics["toolbar"]["top"] + 1, metrics
     assert metrics["activeTabClickable"] is True, metrics
@@ -5631,7 +6462,452 @@ def test_sync_mode_remembers_collapsed_parent_directory(browser, tmp_path):
     assert collapsed_parent["yolomuxExpanded"] == "true", collapsed_parent
 
 
-def test_sync_mode_quick_access_does_not_snap_back_until_explicit_input(browser, tmp_path):
+def test_sync_mode_typed_manual_path_disables_sync_before_slow_listing(browser, tmp_path):
+    session_files_payload = {
+        "session": "5",
+        "loaded": True,
+        "errors": [],
+        "repos": [{"repo": "/home/test/yolomux.dev"}],
+        "files": [],
+    }
+    fs_entries = {
+        "/home/test": [{"name": "yolomux.dev", "kind": "dir"}],
+        "/home/test/yolomux.dev": [{"name": "src", "kind": "dir"}],
+        "/home/test/yolomux.dev/src": [{"name": "main.js", "kind": "file"}],
+        "/tmp": [{"name": "scratch.txt", "kind": "file"}],
+    }
+    page = tmp_path / "live-runtime-sync-typed-path-slow-listing.html"
+    page.write_text(
+        live_runtime_boot_fixture_html(
+            settings={"file_explorer": {"root_mode": "sync"}},
+            sessions=["5"],
+            transcript_sessions={
+                "5": {"current_path": "/home/test/yolomux.dev/src", "git_root": "/home/test/yolomux.dev"},
+            },
+            session_files_payload=session_files_payload,
+            session_files_payloads={"5": session_files_payload},
+            fs_entries=fs_entries,
+        ),
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri() + "?sessions=files,5&layout=row@35(slot1,left)&tabs=slot1:files;left:5")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test'
+              && document.getElementById('panel-5') !== null;
+            """
+        )
+    )
+    click_visible_panel(browser, "panel-5")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('.file-explorer-path-inline')?.value === '/home/test/yolomux.dev'"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const input = document.querySelector('.file-explorer-path-inline');
+        const realFetchDirectory = fetchDirectory;
+        let releaseTmp = null;
+        fetchDirectory = (path, options = {}) => {
+          if (path === '/tmp') {
+            return new Promise(resolve => {
+              releaseTmp = () => resolve([{name: 'scratch.txt', kind: 'file'}]);
+            });
+          }
+          return realFetchDirectory(path, options);
+        };
+        input.focus();
+        input.value = '/tmp';
+        const openPromise = commitFileExplorerPathInput(input);
+        requestAnimationFrame(() => {
+          const duringTree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+          const duringOpen = {
+            path: document.querySelector('.file-explorer-path-inline')?.value || '',
+            mode: fileExplorerRootModeValue(),
+            syncPressed: document.querySelector('.file-explorer-root-mode-toggle-panel')?.getAttribute('aria-pressed') || '',
+            manual: fileExplorerManualSelectionActive,
+            currentRoot: currentFileExplorerRoot(),
+            oldPathVisible: duringTree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev"], .file-tree-row[data-path="/home/test/yolomux.dev/src"]') !== null,
+            searchingVisible: duringTree.querySelector('.file-tree-status-searching .file-tree-searching-dots') !== null,
+            treeText: duringTree.textContent.trim(),
+          };
+          scheduleFileExplorerActiveTabSync('5', {explicit: true});
+          requestAnimationFrame(() => {
+            const afterTree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+            const afterSyncAttempt = {
+              path: document.querySelector('.file-explorer-path-inline')?.value || '',
+              mode: fileExplorerRootModeValue(),
+              syncPressed: document.querySelector('.file-explorer-root-mode-toggle-panel')?.getAttribute('aria-pressed') || '',
+              manual: fileExplorerManualSelectionActive,
+              currentRoot: currentFileExplorerRoot(),
+              oldPathVisible: afterTree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev"], .file-tree-row[data-path="/home/test/yolomux.dev/src"]') !== null,
+              searchingVisible: afterTree.querySelector('.file-tree-status-searching .file-tree-searching-dots') !== null,
+              treeText: afterTree.textContent.trim(),
+            };
+            releaseTmp();
+            openPromise.then(opened => {
+              requestAnimationFrame(() => requestAnimationFrame(() => {
+                fetchDirectory = realFetchDirectory;
+                const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+                done({
+                  opened,
+                  duringOpen,
+                  afterSyncAttempt,
+                  final: {
+                    path: document.querySelector('.file-explorer-path-inline')?.value || '',
+                    mode: fileExplorerRootModeValue(),
+                    syncPressed: document.querySelector('.file-explorer-root-mode-toggle-panel')?.getAttribute('aria-pressed') || '',
+                    manual: fileExplorerManualSelectionActive,
+                    currentRoot: currentFileExplorerRoot(),
+                    tmpFileVisible: tree.querySelector('.file-tree-row[data-path="/tmp/scratch.txt"]') !== null,
+                    searchingVisible: tree.querySelector('.file-tree-status-searching') !== null,
+                  },
+                });
+              }));
+            }).catch(error => {
+              fetchDirectory = realFetchDirectory;
+              done({error: String(error)});
+            });
+          });
+        });
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["duringOpen"] == {
+        "path": "/tmp",
+        "mode": "fixed",
+        "syncPressed": "false",
+        "manual": True,
+        "currentRoot": "/home/test/yolomux.dev",
+        "oldPathVisible": False,
+        "searchingVisible": True,
+        "treeText": "searching...",
+    }, metrics
+    assert metrics["afterSyncAttempt"] == metrics["duringOpen"], metrics
+    assert metrics["opened"] is True, metrics
+    assert metrics["final"] == {
+        "path": "/tmp",
+        "mode": "fixed",
+        "syncPressed": "false",
+        "manual": True,
+        "currentRoot": "/tmp",
+        "tmpFileVisible": True,
+        "searchingVisible": False,
+    }, metrics
+
+
+def test_sync_mode_stale_session_root_open_cannot_override_typed_manual_path(browser, tmp_path):
+    session_files_payload = {
+        "session": "8002",
+        "loaded": True,
+        "errors": [],
+        "repos": [{"repo": "/home/test/yolomux.dev2"}],
+        "files": [],
+    }
+    fs_entries = {
+        "/home/test": [{"name": "yolomux.dev1", "kind": "dir"}, {"name": "yolomux.dev2", "kind": "dir"}],
+        "/home/test/yolomux.dev1": [{"name": "src", "kind": "dir"}],
+        "/home/test/yolomux.dev2": [{"name": "src", "kind": "dir"}],
+        "/tmp": [{"name": "scratch.txt", "kind": "file"}],
+    }
+    page = tmp_path / "live-runtime-sync-stale-session-open.html"
+    page.write_text(
+        live_runtime_boot_fixture_html(
+            settings={"file_explorer": {"root_mode": "sync"}},
+            sessions=["5", "8002"],
+            transcript_sessions={
+                "5": {"current_path": "/home/test/yolomux.dev1/src", "git_root": "/home/test/yolomux.dev1"},
+                "8002": {"current_path": "/home/test/yolomux.dev2/src", "git_root": "/home/test/yolomux.dev2"},
+            },
+            session_files_payload=session_files_payload,
+            session_files_payloads={"8002": session_files_payload},
+            fs_entries=fs_entries,
+        ),
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri() + "?sessions=files,5,8002&layout=row@35(slot1,left)&tabs=slot1:files;left:5,8002")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test'
+              && document.getElementById('panel-5') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const input = document.querySelector('.file-explorer-path-inline');
+        const realFetchDirectory = fetchDirectory;
+        let releaseDev2 = null;
+        let releaseTmp = null;
+        const snapshot = () => {
+          const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+          const searchingRow = tree.querySelector('.file-tree-status-searching');
+          return {
+            path: document.querySelector('.file-explorer-path-inline')?.value || '',
+            mode: fileExplorerRootModeValue(),
+            syncPressed: document.querySelector('.file-explorer-root-mode-toggle-panel')?.getAttribute('aria-pressed') || '',
+            manual: fileExplorerManualSelectionActive,
+            currentRoot: currentFileExplorerRoot(),
+            searchingVisible: Boolean(searchingRow?.querySelector('.file-tree-searching-dots')),
+            dev2Visible: tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev2/src"]') !== null,
+            tmpFileVisible: tree.querySelector('.file-tree-row[data-path="/tmp/scratch.txt"]') !== null,
+            searchingText: searchingRow?.textContent.trim() || '',
+          };
+        };
+        fetchDirectory = (path, options = {}) => {
+          if (path === '/home/test/yolomux.dev2') {
+            return new Promise(resolve => {
+              releaseDev2 = () => resolve([{name: 'src', kind: 'dir'}]);
+            });
+          }
+          if (path === '/tmp') {
+            return new Promise(resolve => {
+              releaseTmp = () => resolve([{name: 'scratch.txt', kind: 'file'}]);
+            });
+          }
+          return realFetchDirectory(path, options);
+        };
+        const staleSyncPromise = syncFileExplorerRootToPlan({
+          session: '8002',
+          root: '/home/test/yolomux.dev2',
+          expandPaths: [],
+          affectedDirs: ['/home/test/yolomux.dev2'],
+        }, '8002', {force: true});
+        requestAnimationFrame(() => {
+          if (!releaseDev2) {
+            fetchDirectory = realFetchDirectory;
+            done({error: 'stale session fetch was not started'});
+            return;
+          }
+          input.focus();
+          input.value = '/tmp';
+          const manualOpenPromise = commitFileExplorerPathInput(input);
+          requestAnimationFrame(() => {
+            const duringManual = snapshot();
+            releaseDev2();
+            staleSyncPromise.then(staleOpened => {
+              requestAnimationFrame(() => {
+                const afterStaleSync = snapshot();
+                releaseTmp();
+                manualOpenPromise.then(manualOpened => {
+                  requestAnimationFrame(() => requestAnimationFrame(() => {
+                    fetchDirectory = realFetchDirectory;
+                    done({
+                      staleOpened,
+                      manualOpened,
+                      duringManual,
+                      afterStaleSync,
+                      final: snapshot(),
+                    });
+                  }));
+                }).catch(error => {
+                  fetchDirectory = realFetchDirectory;
+                  done({error: String(error)});
+                });
+              });
+            }).catch(error => {
+              fetchDirectory = realFetchDirectory;
+              done({error: String(error)});
+            });
+          });
+        });
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["duringManual"] == {
+        "path": "/tmp",
+        "mode": "fixed",
+        "syncPressed": "false",
+        "manual": True,
+        "currentRoot": "/home/test",
+        "searchingVisible": True,
+        "dev2Visible": False,
+        "tmpFileVisible": False,
+        "searchingText": "searching...",
+    }, metrics
+    assert metrics["staleOpened"] is False, metrics
+    assert metrics["afterStaleSync"] == metrics["duringManual"], metrics
+    assert metrics["manualOpened"] is True, metrics
+    assert metrics["final"] == {
+        "path": "/tmp",
+        "mode": "fixed",
+        "syncPressed": "false",
+        "manual": True,
+        "currentRoot": "/tmp",
+        "searchingVisible": False,
+        "dev2Visible": False,
+        "tmpFileVisible": True,
+        "searchingText": "",
+    }, metrics
+
+
+def test_sync_mode_user_select_session_8002_opens_transcript_root(browser, tmp_path):
+    fs_entries = {
+        "/home/test": [{"name": "yolomux.dev1", "kind": "dir"}, {"name": "yolomux.dev2", "kind": "dir"}],
+        "/home/test/yolomux.dev1": [{"name": "src", "kind": "dir"}],
+        "/home/test/yolomux.dev2": [{"name": "src", "kind": "dir"}],
+    }
+    page = tmp_path / "live-runtime-sync-user-select-8002.html"
+    page.write_text(
+        live_runtime_boot_fixture_html(
+            settings={"file_explorer": {"root_mode": "sync"}},
+            sessions=["5", "8002"],
+            transcript_sessions={
+                "5": {"current_path": "/home/test/yolomux.dev1/src", "git_root": "/home/test/yolomux.dev1"},
+                "8002": {"current_path": "/home/test/yolomux.dev2/src", "git_root": "/home/test/yolomux.dev2"},
+            },
+            session_files_payload={"session": "5", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev1"}], "files": []},
+            session_files_payloads={
+                "5": {"session": "5", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev1"}], "files": []},
+                "8002": {"session": "8002", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev2"}], "files": []},
+            },
+            fs_entries=fs_entries,
+        ),
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri() + "?sessions=files,5,8002&layout=row@35(slot1,row@50(left,slot2))&tabs=slot1:files;left:5;slot2:8002")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test'
+              && document.getElementById('panel-5') !== null
+              && document.getElementById('panel-8002') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const realPushConnected = clientPushConnectedForData;
+        const realUserActive = fileExplorerUserIsActive;
+        const realFetchFilesystemBatchItem = fetchFilesystemBatchItem;
+        let releaseDev2 = null;
+        clientPushConnectedForData = () => true;
+        fileExplorerUserIsActive = () => false;
+        fetchFilesystemBatchItem = (kind, path, options = {}) => {
+          if (kind === 'list' && path === '/home/test/yolomux.dev2') {
+            return new Promise(resolve => {
+              releaseDev2 = () => resolve({entries: [{name: 'src', kind: 'dir'}]});
+            });
+          }
+          return realFetchFilesystemBatchItem(kind, path, options);
+        };
+        const restore = () => {
+          clientPushConnectedForData = realPushConnected;
+          fileExplorerUserIsActive = realUserActive;
+          fetchFilesystemBatchItem = realFetchFilesystemBatchItem;
+        };
+        selectSession('8002', {userInitiated: true}).then(() => {
+          let attempts = 0;
+          const waitForPending = () => {
+            attempts += 1;
+            const root = document.querySelector('.file-explorer-path-inline')?.value || '';
+            const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+            const pending = {
+              root,
+              mode: fileExplorerRootModeValue(),
+              manual: fileExplorerManualSelectionActive,
+              explicitSession: fileExplorerExplicitSyncSessionTarget(),
+              targetSession: fileExplorerSessionFilesTargetSession(),
+              currentPath: terminalCurrentPath('8002'),
+              gitRoot: transcriptMeta.sessions?.['8002']?.project?.git?.root || '',
+              planRoot: fileExplorerSyncPlan('8002').root,
+              searchingVisible: tree.querySelector('.file-tree-status-searching .file-tree-searching-dots') !== null,
+              dev2Visible: tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev2/src"]') !== null,
+              heldFetch: releaseDev2 !== null,
+            };
+            if (pending.root === '/home/test/yolomux.dev2' && pending.searchingVisible && releaseDev2) {
+              releaseDev2();
+              let finalAttempts = 0;
+              const waitForFinal = () => {
+                finalAttempts += 1;
+                const finalRoot = document.querySelector('.file-explorer-path-inline')?.value || '';
+                const finalTree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+                if (finalTree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev2/src"]') || finalAttempts > 180) {
+                  const plan = fileExplorerSyncPlan('8002');
+                  const result = {
+                    pending,
+                    final: {
+                      root: finalRoot,
+                      mode: fileExplorerRootModeValue(),
+                      manual: fileExplorerManualSelectionActive,
+                      explicitSession: fileExplorerExplicitSyncSessionTarget(),
+                      targetSession: fileExplorerSessionFilesTargetSession(),
+                      currentPath: terminalCurrentPath('8002'),
+                      gitRoot: transcriptMeta.sessions?.['8002']?.project?.git?.root || '',
+                      planRoot: plan.root,
+                      syncInFlight: fileExplorerSyncPathInFlight,
+                      appliedKey: fileExplorerLastAppliedSyncPlanKey,
+                      searchingVisible: finalTree.querySelector('.file-tree-status-searching') !== null,
+                      dev2Visible: finalTree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev2/src"]') !== null,
+                    },
+                  };
+                  restore();
+                  done(result);
+                  return;
+                }
+                requestAnimationFrame(waitForFinal);
+              };
+              requestAnimationFrame(waitForFinal);
+              return;
+            }
+            if (attempts > 180) {
+              const plan = fileExplorerSyncPlan('8002');
+              restore();
+              done({
+                error: 'session 8002 did not claim Finder before held directory listing resolved',
+                pending,
+                syncInFlight: fileExplorerSyncPathInFlight,
+                appliedKey: fileExplorerLastAppliedSyncPlanKey,
+                planRoot: plan.root,
+              });
+              return;
+            }
+            requestAnimationFrame(waitForPending);
+          };
+          requestAnimationFrame(waitForPending);
+        }).catch(error => {
+          restore();
+          done({error: String(error)});
+        });
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["pending"] == {
+        "root": "/home/test/yolomux.dev2",
+        "mode": "sync",
+        "manual": False,
+        "explicitSession": "8002",
+        "targetSession": "8002",
+        "currentPath": "/home/test/yolomux.dev2/src",
+        "gitRoot": "/home/test/yolomux.dev2",
+        "planRoot": "/home/test/yolomux.dev2",
+        "searchingVisible": True,
+        "dev2Visible": False,
+        "heldFetch": True,
+    }, metrics
+    assert metrics["final"] == {
+        "root": "/home/test/yolomux.dev2",
+        "mode": "sync",
+        "manual": False,
+        "explicitSession": "8002",
+        "targetSession": "8002",
+        "currentPath": "/home/test/yolomux.dev2/src",
+        "gitRoot": "/home/test/yolomux.dev2",
+        "planRoot": "/home/test/yolomux.dev2",
+        "syncInFlight": "",
+        "appliedKey": "8002\x1f/home/test/yolomux.dev2",
+        "searchingVisible": False,
+        "dev2Visible": True,
+    }, metrics
+
+
+def test_sync_mode_typed_manual_path_does_not_snap_back_until_explicit_input(browser, tmp_path):
     session_files_payload = {
         "session": "5",
         "loaded": True,
@@ -5644,7 +6920,7 @@ def test_sync_mode_quick_access_does_not_snap_back_until_explicit_input(browser,
         "/home/test/yolomux.dev": [{"name": "src", "kind": "dir"}],
         "/home/test/yolomux.dev/src": [{"name": "main.js", "kind": "file"}],
     }
-    page = tmp_path / "live-runtime-sync-quick-access-manual.html"
+    page = tmp_path / "live-runtime-sync-typed-path-manual.html"
     page.write_text(
         live_runtime_boot_fixture_html(
             settings={"file_explorer": {"root_mode": "sync"}},
@@ -5672,14 +6948,16 @@ def test_sync_mode_quick_access_does_not_snap_back_until_explicit_input(browser,
         return {
           mode: fileExplorerRootModeValue(),
           syncPressed: document.querySelector('.file-explorer-root-mode-toggle-panel')?.getAttribute('aria-pressed') || '',
-          quickTexts: Array.from(new Set(Array.from(document.querySelectorAll('.file-explorer-quick-access-button')).map(button => button.textContent.trim()))),
+          quickButtonCount: document.querySelectorAll('.file-explorer-quick-access-button').length,
+          quickPanelCount: document.querySelectorAll('.file-explorer-quick-access-panel').length,
         };
         """
     )
     assert sync_root_metrics == {
         "mode": "sync",
         "syncPressed": "true",
-        "quickTexts": ["~", "/*", "/tmp"],
+        "quickButtonCount": 0,
+        "quickPanelCount": 0,
     }, sync_root_metrics
     click_visible_panel(browser, "panel-5")
     WebDriverWait(browser, 5).until(
@@ -5690,8 +6968,10 @@ def test_sync_mode_quick_access_does_not_snap_back_until_explicit_input(browser,
     manual_metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
-        document.querySelector('.file-explorer-quick-access-button[data-quick-path="~"]').click();
-        requestAnimationFrame(() => {
+        const input = document.querySelector('.file-explorer-path-inline');
+        input.focus();
+        input.value = '/home/test';
+        commitFileExplorerPathInput(input).then(() => {
           scheduleFileExplorerActiveTabSync();
           setSessionFilesPayloadForDestination('finder', {session: '5', loaded: true, errors: [], repos: [{repo: '/home/test/yolomux.dev'}], files: []});
           requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -5702,21 +6982,22 @@ def test_sync_mode_quick_access_does_not_snap_back_until_explicit_input(browser,
               explicitSession: fileExplorerExplicitSyncSessionTarget(),
               planRoot: fileExplorerSyncPlan('5').root,
               syncPressed: document.querySelector('.file-explorer-root-mode-toggle-panel')?.getAttribute('aria-pressed') || '',
-              homePressed: document.querySelector('.file-explorer-quick-access-button[data-quick-path="~"]')?.getAttribute('aria-pressed') || '',
-              quickTexts: Array.from(new Set(Array.from(document.querySelectorAll('.file-explorer-quick-access-button')).map(button => button.textContent.trim()))),
+              quickButtonCount: document.querySelectorAll('.file-explorer-quick-access-button').length,
+              quickPanelCount: document.querySelectorAll('.file-explorer-quick-access-panel').length,
             });
           }));
-        });
+        }).catch(error => done({error: String(error)}));
         """
     )
+    assert "error" not in manual_metrics, manual_metrics
     assert manual_metrics["root"] == "/home/test", manual_metrics
     assert manual_metrics["manual"] is True, manual_metrics
     assert manual_metrics["mode"] == "fixed", manual_metrics
     assert manual_metrics["explicitSession"] == "5", manual_metrics
     assert manual_metrics["planRoot"] == "/home/test/yolomux.dev", manual_metrics
     assert manual_metrics["syncPressed"] == "false", manual_metrics
-    assert manual_metrics["homePressed"] == "true", manual_metrics
-    assert manual_metrics["quickTexts"] == ["~", "/*", "/tmp"], manual_metrics
+    assert manual_metrics["quickButtonCount"] == 0, manual_metrics
+    assert manual_metrics["quickPanelCount"] == 0, manual_metrics
     browser.execute_script(
         """
         setFocusedTerminal('5', {userInitiated: true});
@@ -5729,19 +7010,19 @@ def test_sync_mode_quick_access_does_not_snap_back_until_explicit_input(browser,
         const done = arguments[arguments.length - 1];
         requestAnimationFrame(() => requestAnimationFrame(() => {
           done({
-            root: document.querySelector('.file-explorer-path-inline')?.value || '',
-            mode: fileExplorerRootModeValue(),
-            syncPressed: document.querySelector('.file-explorer-root-mode-toggle-panel')?.getAttribute('aria-pressed') || '',
-            homePressed: document.querySelector('.file-explorer-quick-access-button[data-quick-path="~"]')?.getAttribute('aria-pressed') || '',
-          });
-        }));
+              root: document.querySelector('.file-explorer-path-inline')?.value || '',
+              mode: fileExplorerRootModeValue(),
+              syncPressed: document.querySelector('.file-explorer-root-mode-toggle-panel')?.getAttribute('aria-pressed') || '',
+              quickButtonCount: document.querySelectorAll('.file-explorer-quick-access-button').length,
+            });
+          }));
         """
     )
     assert unchanged_metrics == {
         "root": "/home/test",
         "mode": "fixed",
         "syncPressed": "false",
-        "homePressed": "true",
+        "quickButtonCount": 0,
     }, unchanged_metrics
     browser.execute_script(
         "document.querySelector('.file-explorer-root-mode-toggle-panel')?.click();"
@@ -5753,14 +7034,14 @@ def test_sync_mode_quick_access_does_not_snap_back_until_explicit_input(browser,
               && fileExplorerRootModeValue() === 'sync'
               && fileExplorerManualSelectionActive === false
               && document.querySelector('.file-explorer-root-mode-toggle-panel')?.getAttribute('aria-pressed') === 'true'
-              && document.querySelector('.file-explorer-quick-access-button[data-quick-path="~"]')?.getAttribute('aria-pressed') === 'false';
+              && document.querySelectorAll('.file-explorer-quick-access-button').length === 0;
             """
         )
     )
 
 
-def test_root_quick_access_star_alias_opens_slash(browser, tmp_path):
-    page = tmp_path / "live-runtime-root-quick-access-star.html"
+def test_quick_access_roots_are_not_visible_in_finder_toolbar(browser, tmp_path):
+    page = tmp_path / "live-runtime-root-quick-access-hidden.html"
     page.write_text(
         live_runtime_boot_fixture_html(
             settings={"file_explorer": {"root_mode": "fixed", "quick_access_paths": ["~", "/*", "/tmp"]}},
@@ -5776,39 +7057,34 @@ def test_root_quick_access_star_alias_opens_slash(browser, tmp_path):
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-              const buttons = Array.from(document.querySelectorAll('.file-explorer-quick-access-button'));
-            return buttons.map(button => button.textContent.trim()).join('|') === '~|/*|/tmp'
-              && buttons.some(button => button.dataset.quickPath === '/*');
+            return document.querySelector('.file-explorer-panel .file-explorer-toolbar') !== null
+              && document.querySelector('.file-explorer-path-inline')?.value === '/home/test';
             """
         )
     )
-    metrics = browser.execute_async_script(
+    metrics = browser.execute_script(
         """
-        const done = arguments[arguments.length - 1];
-        document.querySelector('.file-explorer-quick-access-button[data-quick-path="/*"]').click();
-        const wait = () => {
-          const root = document.querySelector('.file-explorer-path-inline')?.value || '';
-          if (root === '/') {
-            done({
-              root,
-              mode: fileExplorerRootModeValue(),
-              starPressed: document.querySelector('.file-explorer-quick-access-button[data-quick-path="/*"]')?.getAttribute('aria-pressed') || '',
-              texts: Array.from(new Set(Array.from(document.querySelectorAll('.file-explorer-quick-access-button')).map(button => button.textContent.trim()))),
-              paths: Array.from(new Set(Array.from(document.querySelectorAll('.file-explorer-quick-access-button')).map(button => button.dataset.quickPath || ''))),
-            });
-            return;
-          }
-          requestAnimationFrame(wait);
+        return {
+          root: document.querySelector('.file-explorer-path-inline')?.value || '',
+          mode: fileExplorerRootModeValue(),
+          quickPanelCount: document.querySelectorAll('.file-explorer-quick-access-panel').length,
+          quickButtonCount: document.querySelectorAll('.file-explorer-quick-access-button').length,
+          rootLabel: displayQuickAccessPath('/'),
+          starLabel: displayQuickAccessPath('/*'),
+          starPath: expandQuickAccessPath('/*'),
+          tmpLabel: displayQuickAccessPath('/tmp'),
         };
-        requestAnimationFrame(wait);
         """
     )
     assert metrics == {
-        "root": "/",
+        "root": "/home/test",
         "mode": "fixed",
-        "starPressed": "true",
-        "texts": ["~", "/*", "/tmp"],
-        "paths": ["~", "/*", "/tmp"],
+        "quickPanelCount": 0,
+        "quickButtonCount": 0,
+        "rootLabel": "/*",
+        "starLabel": "/*",
+        "starPath": "/",
+        "tmpLabel": "/tmp",
     }, metrics
 
 
@@ -6028,6 +7304,359 @@ def test_sync_mode_does_not_follow_hovered_tmux_session(browser, tmp_path):
     assert restored_metrics["rememberedExpanded"] == "true", restored_metrics
     assert restored_metrics["childVisible"] is True, restored_metrics
     assert "/home/test/yolomux.dev/other" in restored_metrics["expandedSet"], restored_metrics
+
+
+def test_sync_mode_explicit_pane_change_wins_over_stale_sync_open(browser, tmp_path):
+    fs_entries = {
+        "/home/test": [{"name": "yolomux.dev1", "kind": "dir"}, {"name": "yolomux.dev2", "kind": "dir"}],
+        "/home/test/yolomux.dev1": [{"name": "src", "kind": "dir"}],
+        "/home/test/yolomux.dev1/src": [{"name": "main.js", "kind": "file"}],
+        "/home/test/yolomux.dev2": [{"name": "src", "kind": "dir"}],
+        "/home/test/yolomux.dev2/src": [{"name": "main.js", "kind": "file"}],
+    }
+    page = tmp_path / "live-runtime-sync-explicit-pane-race.html"
+    page.write_text(
+        live_runtime_boot_fixture_html(
+            settings={"file_explorer": {"root_mode": "sync"}},
+            sessions=["5", "6"],
+            transcript_sessions={
+                "5": {"current_path": "/home/test/yolomux.dev1/src", "git_root": "/home/test/yolomux.dev1"},
+                "6": {"current_path": "/home/test/yolomux.dev2/src", "git_root": "/home/test/yolomux.dev2"},
+            },
+            session_files_payload={"session": "5", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev1"}], "files": []},
+            session_files_payloads={
+                "5": {"session": "5", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev1"}], "files": []},
+                "6": {"session": "6", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev2"}], "files": []},
+            },
+            fs_entries=fs_entries,
+        ),
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri() + "?sessions=files,5,6&layout=row@35(slot1,row@50(left,slot2))&tabs=slot1:files;left:5;slot2:6")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test'
+              && document.getElementById('panel-5') !== null
+              && document.getElementById('panel-6') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        openFileExplorerAt('/home/test', {syncSelection: true}).then(() => {
+          fileExplorerDirListingCache?.delete?.('/home/test/yolomux.dev1');
+          fileExplorerDirListingCache?.delete?.('/home/test/yolomux.dev2');
+          fileExplorerDirListingInflight?.delete?.('/home/test/yolomux.dev1');
+          fileExplorerDirListingInflight?.delete?.('/home/test/yolomux.dev2');
+          resetFileExplorerAppliedSyncPlan();
+          const realFetchDirectory = fetchDirectory;
+          let releaseDev1 = null;
+          fetchDirectory = (path, options = {}) => {
+            if (path === '/home/test/yolomux.dev1' && !releaseDev1) {
+              return new Promise(resolve => {
+                releaseDev1 = () => realFetchDirectory(path, options).then(resolve);
+              });
+            }
+            return realFetchDirectory(path, options);
+          };
+          setFocusedTerminal('5', {userInitiated: true});
+          let holdAttempts = 0;
+          const waitForHeldSync = () => {
+            if (!releaseDev1) {
+              holdAttempts += 1;
+              if (holdAttempts > 180) {
+                done({
+                  error: 'dev1 sync did not reach held fetch',
+                  root: document.querySelector('.file-explorer-path-inline')?.value || '',
+                  explicitSession: fileExplorerExplicitSyncSessionTarget(),
+                  plan5: fileExplorerSyncPlan('5').root,
+                  plan6: fileExplorerSyncPlan('6').root,
+                });
+                return;
+              }
+              requestAnimationFrame(waitForHeldSync);
+              return;
+            }
+            setFocusedTerminal('6', {userInitiated: true});
+            releaseDev1();
+            let dev2Attempts = 0;
+            const waitForDev2 = () => {
+              dev2Attempts += 1;
+              if (dev2Attempts > 180) {
+                done({
+                  error: 'dev2 sync did not win',
+                  root: document.querySelector('.file-explorer-path-inline')?.value || '',
+                  explicitSession: fileExplorerExplicitSyncSessionTarget(),
+                  manual: fileExplorerManualSelectionActive,
+                  planRoot: fileExplorerSyncPlan('6').root,
+                });
+                return;
+              }
+            const root = document.querySelector('.file-explorer-path-inline')?.value || '';
+            if (root === '/home/test/yolomux.dev2') {
+              done({
+                root,
+                explicitSession: fileExplorerExplicitSyncSessionTarget(),
+                manual: fileExplorerManualSelectionActive,
+                planRoot: fileExplorerSyncPlan('6').root,
+              });
+              return;
+            }
+            requestAnimationFrame(waitForDev2);
+            };
+            requestAnimationFrame(waitForDev2);
+          };
+          requestAnimationFrame(waitForHeldSync);
+        }).catch(error => done({error: String(error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics == {
+        "root": "/home/test/yolomux.dev2",
+        "explicitSession": "6",
+        "manual": False,
+        "planRoot": "/home/test/yolomux.dev2",
+    }, metrics
+
+
+def test_sync_mode_session_switch_uses_transcript_root_before_session_files_refresh(browser, tmp_path):
+    fs_entries = {
+        "/home/test": [{"name": "yolomux.dev1", "kind": "dir"}, {"name": "yolomux.dev2", "kind": "dir"}],
+        "/home/test/yolomux.dev1": [{"name": "src", "kind": "dir"}],
+        "/home/test/yolomux.dev1/src": [{"name": "main.js", "kind": "file"}],
+        "/home/test/yolomux.dev2": [{"name": "src", "kind": "dir"}],
+        "/home/test/yolomux.dev2/src": [{"name": "main.js", "kind": "file"}],
+    }
+    page = tmp_path / "live-runtime-sync-session-switch-transcript-root.html"
+    page.write_text(
+        live_runtime_boot_fixture_html(
+            settings={"file_explorer": {"root_mode": "sync"}},
+            sessions=["5", "6"],
+            transcript_sessions={
+                "5": {"current_path": "/home/test/yolomux.dev1/src", "git_root": "/home/test/yolomux.dev1"},
+                "6": {"current_path": "/home/test/yolomux.dev2/src", "git_root": "/home/test/yolomux.dev2"},
+            },
+            session_files_payload={"session": "5", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev1"}], "files": []},
+            session_files_payloads={
+                "5": {"session": "5", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev1"}], "files": []},
+                "6": {"session": "6", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev2"}], "files": []},
+            },
+            fs_entries=fs_entries,
+        ),
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri() + "?sessions=files,5,6&layout=row@35(slot1,row@50(left,slot2))&tabs=slot1:files;left:5;slot2:6")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return document.querySelector('.file-explorer-path-inline') !== null
+              && document.querySelector('#panel-__files__ .file-explorer-changes-panel') !== null
+              && document.getElementById('panel-5') !== null
+              && document.getElementById('panel-6') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+        (async () => {
+          try {
+            if (fileExplorerMode !== 'files') setFileExplorerMode('files', {force: true});
+            await openFileExplorerAt('/home/test/yolomux.dev1', {syncSelection: true});
+            resetFileExplorerAppliedSyncPlan();
+            fileExplorerSessionFilesCache.delete(sessionFilesCacheKey('6'));
+            await frame();
+            const originalFetch = window.fetch;
+            let heldFetch = false;
+            let releaseFetch = null;
+            window.fetch = (input, options = {}) => {
+              const url = new URL(String(input), location.href);
+              if (url.pathname === '/api/session-files' && url.searchParams.get('session') === '6') {
+                heldFetch = true;
+                return new Promise(resolve => {
+                  releaseFetch = () => originalFetch(input, options).then(resolve);
+                });
+              }
+              return originalFetch(input, options);
+            };
+            const changed = noteFileExplorerChangesSessionInteraction('6');
+            let attempts = 0;
+            const wait = () => {
+              attempts += 1;
+              const root = document.querySelector('.file-explorer-path-inline')?.value || '';
+              if (heldFetch && root === '/home/test/yolomux.dev2') {
+                const result = {
+                  changed,
+                  heldFetch,
+                  root,
+                  explicitSession: fileExplorerExplicitSyncSessionTarget(),
+                  payloadSession: fileExplorerSessionFilesPayload?.session || '',
+                  loading: fileExplorerSessionFilesLoading,
+                  planRoot: fileExplorerSyncPlan('6').root,
+                };
+                window.fetch = originalFetch;
+                releaseFetch?.();
+                done(result);
+                return;
+              }
+              if (attempts > 180) {
+                window.fetch = originalFetch;
+                releaseFetch?.();
+                done({
+                  error: 'session switch waited for session-files instead of transcript root',
+                  changed,
+                  heldFetch,
+                  root,
+                  explicitSession: fileExplorerExplicitSyncSessionTarget(),
+                  payloadSession: fileExplorerSessionFilesPayload?.session || '',
+                  loading: fileExplorerSessionFilesLoading,
+                  planRoot: fileExplorerSyncPlan('6').root,
+                });
+                return;
+              }
+              requestAnimationFrame(wait);
+            };
+            requestAnimationFrame(wait);
+          } catch (error) {
+            done({error: String(error)});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics == {
+        "changed": True,
+        "heldFetch": True,
+        "root": "/home/test/yolomux.dev2",
+        "explicitSession": "6",
+        "payloadSession": "6",
+        "loading": True,
+        "planRoot": "/home/test/yolomux.dev2",
+    }, metrics
+
+
+def test_sync_mode_session_switch_uses_cached_payload_before_refresh(browser, tmp_path):
+    fs_entries = {
+        "/home/test": [{"name": "yolomux.dev1", "kind": "dir"}, {"name": "yolomux.dev2", "kind": "dir"}],
+        "/home/test/yolomux.dev1": [{"name": "src", "kind": "dir"}],
+        "/home/test/yolomux.dev1/src": [{"name": "main.js", "kind": "file"}],
+        "/home/test/yolomux.dev2": [{"name": "src", "kind": "dir"}],
+        "/home/test/yolomux.dev2/src": [{"name": "main.js", "kind": "file"}],
+    }
+    page = tmp_path / "live-runtime-sync-cached-session-switch.html"
+    page.write_text(
+        live_runtime_boot_fixture_html(
+            settings={"file_explorer": {"root_mode": "sync"}},
+            sessions=["5", "6"],
+            transcript_sessions={
+                "5": {"current_path": "/home/test/yolomux.dev1/src", "git_root": "/home/test/yolomux.dev1"},
+                "6": {"current_path": "/home/test/yolomux.dev2/src", "git_root": "/home/test/yolomux.dev2"},
+            },
+            session_files_payload={"session": "5", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev1"}], "files": []},
+            session_files_payloads={
+                "5": {"session": "5", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev1"}], "files": []},
+                "6": {"session": "6", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev2"}], "files": []},
+            },
+            fs_entries=fs_entries,
+        ),
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri() + "?sessions=files,5,6&layout=row@35(slot1,row@50(left,slot2))&tabs=slot1:files;left:5;slot2:6")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return document.querySelector('.file-explorer-path-inline') !== null
+              && document.querySelector('#panel-__files__ .file-explorer-changes-panel') !== null
+              && document.getElementById('panel-5') !== null
+              && document.getElementById('panel-6') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+        (async () => {
+          try {
+            if (fileExplorerMode !== 'files') setFileExplorerMode('files', {force: true});
+            await openFileExplorerAt('/home/test/yolomux.dev1', {syncSelection: true});
+            resetFileExplorerAppliedSyncPlan();
+            await frame();
+            const payload6 = {session: '6', loaded: true, errors: [], refs_by_repo: {}, repos: [{repo: '/home/test/yolomux.dev2'}], files: []};
+            fileExplorerSessionFilesCache.set(sessionFilesCacheKey('6'), {
+              payload: payload6,
+              signature: sessionFilesPayloadSignatureForPayload(payload6),
+            });
+            const originalFetch = window.fetch;
+            let heldFetch = false;
+            let releaseFetch = null;
+            window.fetch = (input, options = {}) => {
+              const url = new URL(String(input), location.href);
+              if (url.pathname === '/api/session-files' && url.searchParams.get('session') === '6') {
+                heldFetch = true;
+                return new Promise(resolve => {
+                  releaseFetch = () => originalFetch(input, options).then(resolve);
+                });
+              }
+              return originalFetch(input, options);
+            };
+            const changed = noteFileExplorerChangesSessionInteraction('6');
+            let attempts = 0;
+            const wait = () => {
+              attempts += 1;
+              const root = document.querySelector('.file-explorer-path-inline')?.value || '';
+              if (heldFetch && root === '/home/test/yolomux.dev2') {
+                const result = {
+                  changed,
+                  heldFetch,
+                  root,
+                  explicitSession: fileExplorerExplicitSyncSessionTarget(),
+                  payloadSession: fileExplorerSessionFilesPayload?.session || '',
+                  loading: fileExplorerSessionFilesLoading,
+                  planRoot: fileExplorerSyncPlan('6').root,
+                };
+                window.fetch = originalFetch;
+                releaseFetch?.();
+                done(result);
+                return;
+              }
+              if (attempts > 180) {
+                window.fetch = originalFetch;
+                releaseFetch?.();
+                done({
+                  error: 'cached session switch did not open cached root before refresh resolved',
+                  changed,
+                  heldFetch,
+                  root,
+                  explicitSession: fileExplorerExplicitSyncSessionTarget(),
+                  payloadSession: fileExplorerSessionFilesPayload?.session || '',
+                  loading: fileExplorerSessionFilesLoading,
+                  planRoot: fileExplorerSyncPlan('6').root,
+                });
+                return;
+              }
+              requestAnimationFrame(wait);
+            };
+            requestAnimationFrame(wait);
+          } catch (error) {
+            done({error: String(error)});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics == {
+        "changed": True,
+        "heldFetch": True,
+        "root": "/home/test/yolomux.dev2",
+        "explicitSession": "6",
+        "payloadSession": "6",
+        "loading": False,
+        "planRoot": "/home/test/yolomux.dev2",
+    }, metrics
 
 
 def test_fixed_finder_reveals_clicked_editor_file_without_changing_root(browser, tmp_path):
@@ -10331,6 +11960,96 @@ def test_long_markdown_editor_restores_scroll_after_codemirror_recreate(browser,
     assert abs(metrics["restoredTop"] - metrics["savedTop"]) < 32, metrics
 
 
+def test_share_host_editor_snapshot_tracks_codemirror_cursor_after_typing(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          autoFocusEnabled = false;
+          activeShares = [{
+            token: 'share-token',
+            shortId: 'share-token',
+            mode: 'ro',
+            scheme: 'http',
+            session: '1',
+            sessions: ['1'],
+            viewers: 1,
+            maxViewers: 5,
+            expiresAt: Math.floor(Date.now() / 1000) + 600,
+          }];
+          const path = '/home/test/yolomux.dev/docs/DONE.md';
+          const item = fileEditorItemFor(path);
+          const content = [
+            '# DONE',
+            '',
+            'First paragraph stays visible.',
+            'Second paragraph receives the typed text.',
+            'Third paragraph is only here to keep normal editor structure.',
+          ].join('\\n');
+          setFileState(path, {
+            kind: 'text',
+            content,
+            original: content,
+            dirty: false,
+            language: 'markdown',
+            gitRoot: '/home/test/yolomux.dev',
+            gitTracked: true,
+            gitHasHistory: true,
+            gitHistory: [{ref: 'HEAD'}],
+          });
+          setFileEditorViewMode(path, 'edit', item);
+          registerFileEditorLayoutItem(path, {item});
+          const next = emptyLayoutSlots();
+          next[layoutTreeKey] = leafNode('left');
+          next.left = paneStateWithTabs([item], item);
+          applyLayoutSlots(next, {focusSession: item, forceFull: true});
+          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const waitFor = async predicate => {
+            for (let attempt = 0; attempt < 220; attempt += 1) {
+              if (predicate()) return true;
+              await frame();
+            }
+            return false;
+          };
+          const ready = await waitFor(() => panelNodes.get(item)?._cmView?.scrollDOM);
+          if (!ready) return {error: 'CodeMirror editor did not initialize', bootErrors: window.__bootErrors || [], bootRejections: window.__bootRejections || []};
+          const panel = panelNodes.get(item);
+          const view = panel._cmView;
+          fileEditorViewState.set(item, {scrollTop: 0, scrollLeft: 0, anchor: 0, head: 0, scrollSnapshot: null});
+          const insertAt = content.indexOf('receives');
+          const insert = 'typed ';
+          view.focus();
+          view.dispatch({
+            changes: {from: insertAt, to: insertAt, insert},
+            selection: {anchor: insertAt + insert.length, head: insertAt + insert.length},
+          });
+          await frame();
+          await frame();
+          const cached = fileEditorViewState.get(item) || {};
+          const snapshot = shareUiStateSnapshot();
+          const modeEntry = (snapshot.editor?.modes || []).find(entry => entry.item === item || entry.path === path) || {};
+          return {
+            item,
+            expectedAnchor: insertAt + insert.length,
+            cachedAnchor: cached.anchor,
+            cachedHead: cached.head,
+            snapshotAnchor: modeEntry.viewState?.anchor,
+            snapshotHead: modeEntry.viewState?.head,
+            dirty: openFiles.get(path)?.dirty === true,
+            sentSockets: window.__bootSockets || [],
+          };
+        })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["dirty"] is True, metrics
+    assert metrics["cachedAnchor"] == metrics["expectedAnchor"], metrics
+    assert metrics["cachedHead"] == metrics["expectedAnchor"], metrics
+    assert metrics["snapshotAnchor"] == metrics["expectedAnchor"], metrics
+    assert metrics["snapshotHead"] == metrics["expectedAnchor"], metrics
+
+
 def test_long_markdown_editor_scroll_survives_preferences_tab_roundtrip(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path)
     metrics = browser.execute_async_script(
@@ -11260,13 +12979,13 @@ def test_diff_overview_matches_actual_todo_codemirror_rows(browser, tmp_path):
     assert chunk["endB"] == chunk["toB"] - 1
     assert metrics["rows"]["bands"] == [
         {"kind": "remove", "start": 16, "end": 571},
-        {"kind": "add", "start": 571, "end": 823},
+        {"kind": "add", "start": 571, "end": 824},
     ]
-    assert metrics["rows"]["currentLineCount"] == 308
+    assert metrics["rows"]["currentLineCount"] == 309
     assert metrics["rows"]["deletedRows"] == 555
-    assert metrics["rows"]["totalRows"] == 863
+    assert metrics["rows"]["totalRows"] == 864
     assert metrics["deletedDomRows"] == metrics["removedRangeRows"]
-    assert metrics["insertedRangeRows"] == 252
+    assert metrics["insertedRangeRows"] == 253
     assert "linear-gradient" in metrics["overviewBackground"]
     assert metrics["overviewStops"] == metrics["expectedStops"], metrics["overviewBackground"]
     assert metrics["tickCount"] == 0
@@ -11354,19 +13073,22 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
         """
         const toolbar = document.querySelector('#finder-panel .file-explorer-toolbar');
         const primaryRow = toolbar.querySelector('.file-explorer-primary-row');
-        const scopeRow = toolbar.querySelector('.file-explorer-scope-row');
+        const pathRow = toolbar.querySelector('.file-explorer-path-row');
         const actionsRow = toolbar.querySelector('.file-explorer-actions-row');
-        const collapse = actionsRow.querySelector('[data-file-explorer-collapse]');
+        const scopeRow = toolbar.querySelector('.file-explorer-scope-row');
+        const collapse = primaryRow.querySelector('[data-session-files-collapse-toggle]');
         const newFile = actionsRow.querySelector('[data-file-explorer-new-file]');
         const newFolder = actionsRow.querySelector('[data-file-explorer-new-folder]');
-        const sync = scopeRow.querySelector('.file-explorer-root-mode-toggle-panel');
-        const hidden = scopeRow.querySelector('.file-explorer-hidden-toggle-panel');
-        const quick = scopeRow.querySelector('.file-explorer-quick-access-panel');
-        const quickButtons = Array.from(quick.querySelectorAll('.file-explorer-quick-access-button'));
-        const path = primaryRow.querySelector('.file-explorer-path-inline');
-        const copy = primaryRow.querySelector('.file-explorer-path-copy-panel');
+        const actionsSpacer = actionsRow.querySelector('.file-explorer-toolbar-spacer');
+        const sync = pathRow.querySelector('.file-explorer-root-mode-toggle-panel');
+        const hidden = actionsRow.querySelector('.file-explorer-hidden-toggle-panel');
+        const sort = actionsRow.querySelector('.file-explorer-sort-select');
+        const quick = toolbar.querySelector('.file-explorer-quick-access-panel');
+        const path = pathRow.querySelector('.file-explorer-path-inline');
+        const copy = pathRow.querySelector('.file-explorer-path-copy-panel');
         const mode = primaryRow.querySelector('.file-explorer-mode-switcher');
         const diffSession = primaryRow.querySelector('.file-explorer-diff-session-control');
+        const primarySpacer = primaryRow.querySelector('.file-explorer-toolbar-spacer');
         const modeButtons = Array.from(mode.querySelectorAll('[data-file-explorer-mode-set]'));
         const modeLabels = Array.from(mode.querySelectorAll('.file-explorer-mode-label'));
         const cluster = toolbar.querySelector('.file-explorer-date-reload-cluster');
@@ -11375,18 +13097,17 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
         const close = primaryRow.querySelector('.file-explorer-panel-close');
         const toolbarRect = toolbar.getBoundingClientRect();
         const primaryRowRect = primaryRow.getBoundingClientRect();
-        const scopeRowRect = scopeRow.getBoundingClientRect();
+        const pathRowRect = pathRow.getBoundingClientRect();
         const actionsRowRect = actionsRow.getBoundingClientRect();
-        const collapseRect = collapse.getBoundingClientRect();
         const newFileRect = newFile.getBoundingClientRect();
         const newFolderRect = newFolder.getBoundingClientRect();
         const syncRect = sync.getBoundingClientRect();
         const hiddenRect = hidden.getBoundingClientRect();
-        const quickRect = quick.getBoundingClientRect();
-        const firstQuickStyle = getComputedStyle(quickButtons[0]);
+        const sortRect = sort.getBoundingClientRect();
         const pathRect = path.getBoundingClientRect();
         const copyRect = copy.getBoundingClientRect();
         const modeRect = mode.getBoundingClientRect();
+        const diffSessionRect = diffSession.getBoundingClientRect();
         const modeButtonRects = modeButtons.map(button => button.getBoundingClientRect());
         const modeButtonStyles = modeButtons.map(button => getComputedStyle(button));
         const clusterRect = cluster.getBoundingClientRect();
@@ -11398,25 +13119,34 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
         document.body.appendChild(textProbe);
         const textColor = getComputedStyle(textProbe).color;
         textProbe.remove();
+        const colorFor = value => {
+          const probe = document.createElement('span');
+          probe.style.color = value;
+          document.body.appendChild(probe);
+          const color = getComputedStyle(probe).color;
+          probe.remove();
+          return color;
+        };
+        const tabFont = getComputedStyle(document.documentElement).getPropertyValue('--tab-font').trim();
         return {
           firstRowIsPrimary: toolbar.firstElementChild === primaryRow,
+          secondRowIsPath: primaryRow.nextElementSibling === pathRow,
+          thirdRowIsActions: pathRow.nextElementSibling === actionsRow,
+          noScopeRow: scopeRow === null,
+          noQuickAccessPanel: quick === null,
           modeFirstInPrimaryRow: primaryRow.firstElementChild === mode,
           noPanelTitle: primaryRow.querySelector('.file-explorer-panel-title') === null,
-          actionsOrder: actionsRow.firstElementChild === collapse && collapse.nextElementSibling === newFile && newFile.nextElementSibling === newFolder,
+          actionsOrder: actionsRow.firstElementChild === newFile && newFile.nextElementSibling === newFolder,
           folderIconPresent: newFolder.querySelector('.file-explorer-folder-icon') !== null,
-          hiddenInScopeRow: scopeRow.firstElementChild === hidden,
-          syncAfterHidden: hidden.nextElementSibling === sync,
-          quickAfterSync: sync.nextElementSibling === quick,
+          pathRowOrder: pathRow.firstElementChild === sync && sync.nextElementSibling === path && path.nextElementSibling === copy,
+          hiddenBeforeSort: newFolder.nextElementSibling === actionsSpacer && actionsSpacer.nextElementSibling === hidden && hidden.nextElementSibling === sort,
           syncText: sync.textContent.trim(),
           syncPressed: sync.getAttribute('aria-pressed'),
-          quickTexts: quickButtons.map(button => button.textContent.trim()),
-          rootPressedCount: [sync, ...quickButtons].filter(button => button.getAttribute('aria-pressed') === 'true').length,
-          quickBorderStyle: firstQuickStyle.borderTopStyle,
-          quickBorderWidth: firstQuickStyle.borderTopWidth,
-          diffSessionAfterMode: mode.nextElementSibling === diffSession,
-          pathAfterDiffSession: diffSession.nextElementSibling === path,
-          diffSessionHiddenInFilesMode: getComputedStyle(diffSession).display === 'none',
-          collapseRight: collapseRect.right,
+          rootPressedCount: [sync].filter(button => button.getAttribute('aria-pressed') === 'true').length,
+          diffSessionImmediatelyAfterMode: mode.nextElementSibling === diffSession,
+          spacerAfterDiffSession: diffSession.nextElementSibling === primarySpacer,
+          diffSessionVisibleInFilesMode: getComputedStyle(diffSession).display !== 'none',
+          noTopCollapseButton: collapse === null,
           newFileLeft: newFileRect.left,
           newFileRight: newFileRect.right,
           newFolderLeft: newFolderRect.left,
@@ -11424,14 +13154,19 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
           syncRight: syncRect.right,
           hiddenLeft: hiddenRect.left,
           hiddenRight: hiddenRect.right,
-          quickLeft: quickRect.left,
-          scopeRowTop: scopeRowRect.top,
-          scopeRowBottom: scopeRowRect.bottom,
+          sortLeft: sortRect.left,
+          pathRowTop: pathRowRect.top,
+          pathRowBottom: pathRowRect.bottom,
+          pathRowLeft: pathRowRect.left,
+          pathRowRight: pathRowRect.right,
+          pathRowWidth: pathRowRect.width,
           pathLeft: pathRect.left,
           pathRight: pathRect.right,
           primaryRowLeft: primaryRowRect.left,
           primaryRowRight: primaryRowRect.right,
           primaryRowWidth: primaryRowRect.width,
+          diffSessionLeft: diffSessionRect.left,
+          diffSessionRight: diffSessionRect.right,
           copyLeft: copyRect.left,
           copyRight: copyRect.right,
           copyWidth: copyRect.width,
@@ -11439,11 +13174,14 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
           modeRight: modeRect.right,
           modeWidth: modeRect.width,
           modeMaxButtonWidth: Math.max(...modeButtonRects.map(rect => rect.width)),
+          modeButtonPaddingInline: Array.from(new Set(modeButtonStyles.map(style => `${style.paddingLeft}/${style.paddingRight}`))).sort(),
           modeButtonHorizontal: modeButtonRects.every(rect => rect.width > rect.height),
           modeLabelsHorizontal: modeLabels.every(label => getComputedStyle(label).writingMode === 'horizontal-tb'),
-          modeUsesCondensedControlFont: modeButtonStyles.every(style => style.fontFamily.toLowerCase().includes('narrow') || style.fontStretch === 'condensed'),
+          modeUsesTabFont: modeButtonStyles.every(style => style.fontFamily === tabFont || style.fontFamily.toLowerCase().includes('narrow')),
+          modeButtonTopRounded: modeButtonStyles.every(style => style.borderTopLeftRadius !== '0px' && style.borderTopRightRadius !== '0px' && style.borderBottomLeftRadius === '0px'),
+          activeModeUsesPaneTabColor: getComputedStyle(mode.querySelector('[aria-pressed="true"]')).backgroundColor === colorFor('var(--pane-tab-active-bg)'),
           modeTexts: Array.from(mode.querySelectorAll('[data-file-explorer-mode-set]')).map(button => button.textContent.trim()),
-          pathConsumesRemaining: pathRect.width >= primaryRowRect.width - modeRect.width - copyRect.width - closeRect.width - 36,
+          pathConsumesRemaining: pathRect.width >= pathRowRect.width - syncRect.width - copyRect.width - 36,
           actionsRowTop: actionsRowRect.top,
           primaryRowBottom: primaryRowRect.bottom,
           actionsRowRight: actionsRowRect.right,
@@ -11462,41 +13200,45 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
         """
     )
     assert metrics["firstRowIsPrimary"]
+    assert metrics["secondRowIsPath"]
+    assert metrics["thirdRowIsActions"]
+    assert metrics["noScopeRow"]
+    assert metrics["noQuickAccessPanel"]
     assert metrics["modeFirstInPrimaryRow"]
     assert metrics["noPanelTitle"]
     assert metrics["actionsOrder"]
     assert metrics["folderIconPresent"]
-    assert metrics["hiddenInScopeRow"]
-    assert metrics["syncAfterHidden"]
-    assert metrics["quickAfterSync"]
+    assert metrics["pathRowOrder"]
+    assert metrics["hiddenBeforeSort"]
     assert metrics["syncText"] == "Sync"
     assert metrics["syncPressed"] == "true"
-    assert metrics["quickTexts"] == ["~", "/*", "/tmp"]
     assert metrics["rootPressedCount"] == 1
-    assert metrics["quickBorderStyle"] == "solid"
-    assert metrics["quickBorderWidth"] == "1px"
-    assert metrics["diffSessionAfterMode"]
-    assert metrics["pathAfterDiffSession"]
-    assert metrics["diffSessionHiddenInFilesMode"]
-    assert metrics["collapseRight"] <= metrics["newFileLeft"]
+    assert metrics["diffSessionImmediatelyAfterMode"]
+    assert metrics["spacerAfterDiffSession"]
+    assert metrics["diffSessionVisibleInFilesMode"]
+    assert metrics["noTopCollapseButton"]
     assert metrics["newFileRight"] <= metrics["newFolderLeft"]
-    assert metrics["hiddenRight"] <= metrics["syncLeft"]
-    assert metrics["syncRight"] <= metrics["quickLeft"]
-    assert metrics["modeRight"] <= metrics["pathLeft"]
-    assert metrics["pathLeft"] > metrics["primaryRowLeft"]
+    assert metrics["hiddenRight"] <= metrics["sortLeft"]
+    assert metrics["syncRight"] <= metrics["pathLeft"]
+    assert metrics["pathLeft"] > metrics["pathRowLeft"]
     assert metrics["pathWidth"] >= min(90, metrics["toolbarWidth"] / 4)
     assert metrics["pathRight"] <= metrics["copyLeft"]
-    assert metrics["copyRight"] <= metrics["closeLeft"]
+    assert metrics["copyRight"] <= metrics["pathRowRight"] + 1
+    assert metrics["modeRight"] <= metrics["diffSessionLeft"]
+    assert metrics["diffSessionRight"] <= metrics["closeLeft"]
     assert metrics["modeButtonHorizontal"]
     assert metrics["modeLabelsHorizontal"]
-    assert metrics["modeUsesCondensedControlFont"]
-    assert metrics["modeMaxButtonWidth"] <= 62
+    assert metrics["modeUsesTabFont"]
+    assert metrics["modeButtonTopRounded"]
+    assert metrics["activeModeUsesPaneTabColor"]
+    assert metrics["modeButtonPaddingInline"] == ["3px/3px"]
+    assert metrics["modeMaxButtonWidth"] <= 60
     assert metrics["pathConsumesRemaining"]
-    assert metrics["modeTexts"] == ["Finder", "Differ"]
+    assert metrics["modeTexts"] == ["Finder", "Differ", "Tabber"]
     assert abs(metrics["closeRight"] - metrics["primaryRowRight"]) <= 1
     assert metrics["pathColor"] == metrics["textColor"]
-    assert metrics["scopeRowTop"] >= metrics["primaryRowBottom"]
-    assert metrics["actionsRowTop"] >= metrics["scopeRowBottom"]
+    assert metrics["pathRowTop"] >= metrics["primaryRowBottom"]
+    assert metrics["actionsRowTop"] >= metrics["pathRowBottom"]
     assert metrics["dateRight"] <= metrics["refreshLeft"]
     assert metrics["refreshRight"] <= metrics["actionsRowRight"] + 1
     assert metrics["clusterLeft"] > metrics["pathLeft"]
@@ -11529,7 +13271,7 @@ def test_finder_diff_mode_toggle_fills_pane(browser, tmp_path):
     assert not before["bodyDiff"]
     assert before["filesPressed"] == "true"
     assert before["diffPressed"] == "false"
-    assert before["texts"] == ["Finder", "Differ"]
+    assert before["texts"] == ["Finder", "Differ", "Tabber"]
     assert before["newFileDisplay"] != "none"
     assert before["treeDisplay"] != "none"
     assert before["changesDisplay"] == "none"
@@ -11577,7 +13319,7 @@ def test_finder_diff_mode_toggle_fills_pane(browser, tmp_path):
     assert after["panelMode"] == "diff"
     assert after["filesPressed"] == "false"
     assert after["diffPressed"] == "true"
-    assert after["texts"] == ["Finder", "Differ"]
+    assert after["texts"] == ["Finder", "Differ", "Tabber"]
     assert after["diffButtonBg"] != before["diffButtonBg"]
     assert after["newFileDisplay"] == "none"
     assert after["treeDisplay"] == "none"

@@ -773,27 +773,45 @@ function dockviewSyncHeaderBackgroundDragSources() {
   });
 }
 
+function dockviewClearTabRowBreaks(tabsContainer) {
+  Array.from(tabsContainer?.children || [])
+    .filter(node => node.classList?.contains('dockview-tab-row-break'))
+    .forEach(node => node.remove());
+}
+
 function dockviewSyncHeaderActionReservations() {
   if (!dockviewLayoutActive()) return;
   document.querySelectorAll('.dv-groupview').forEach(group => {
     const header = group.querySelector('.dv-tabs-and-actions-container');
     if (!header) return;
+    const tabsContainer = header.querySelector('.dv-tabs-container');
+    dockviewClearTabRowBreaks(tabsContainer);
+    const tabs = Array.from(tabsContainer?.children || [])
+      .filter(node => node.classList?.contains('dv-tab'));
     const actions = group.querySelector('.dockview-pane-header-actions:not([hidden])');
-    const width = actions ? Math.ceil(actions.getBoundingClientRect?.().width || actions.offsetWidth || 0) : 0;
+    const width = actions ? Math.ceil(appSpaceRect(actions).width || actions.offsetWidth || 0) : 0;
     const reservedWidth = width > 0 ? width + 8 : 0;
-    const tabCount = group.querySelectorAll('.dv-tabs-container > .dv-tab').length;
-    const headerWidth = Math.floor(header.getBoundingClientRect?.().width || header.clientWidth || 0);
+    const headerWidth = Math.floor(appSpaceRect(header).width || header.clientWidth || 0);
     const rootStyle = getComputedStyle(document.documentElement);
-    const maxTabWidth = Number.parseFloat(rootStyle.getPropertyValue('--pane-tab-width')) || 180;
+    const preferredTabWidth = Number.parseFloat(rootStyle.getPropertyValue('--pane-tab-width')) || 180;
     const minTabWidth = Number.parseFloat(rootStyle.getPropertyValue('--dockview-tab-min-inline-size')) || 64;
-    let tabWidth = maxTabWidth;
-    if (tabCount > 1 && headerWidth > 0) {
-      const rowGaps = Math.max(0, tabCount - 1);
-      const fitWidth = Math.floor((headerWidth - reservedWidth - rowGaps) / tabCount);
-      tabWidth = Math.min(maxTabWidth, Math.max(minTabWidth, fitWidth));
-    }
+    const availableWidth = headerWidth > reservedWidth ? headerWidth - reservedWidth : headerWidth;
+    const tabWidth = availableWidth > 0
+      ? Math.min(Math.max(minTabWidth, preferredTabWidth), Math.max(minTabWidth, availableWidth))
+      : Math.max(minTabWidth, preferredTabWidth);
     header.style.setProperty('--dockview-header-actions-reserved-inline-size', reservedWidth > 0 ? `${reservedWidth}px` : '0px');
     header.style.setProperty('--dockview-tab-inline-size', `${tabWidth}px`);
+    if (!tabsContainer || tabs.length < 2 || reservedWidth <= 0 || headerWidth <= reservedWidth) return;
+    const tabStyle = getComputedStyle(tabs[0]);
+    const tabInlineGap = (Number.parseFloat(tabStyle.marginLeft) || 0) + (Number.parseFloat(tabStyle.marginRight) || 0);
+    const tabOuterWidth = Math.max(1, tabWidth + tabInlineGap);
+    const firstRowWidth = Math.max(0, headerWidth - reservedWidth);
+    const firstRowCapacity = Math.max(1, Math.min(tabs.length, Math.floor((firstRowWidth + tabInlineGap) / tabOuterWidth)));
+    if (firstRowCapacity >= tabs.length) return;
+    const rowBreak = document.createElement('span');
+    rowBreak.className = 'dockview-tab-row-break';
+    rowBreak.setAttribute('aria-hidden', 'true');
+    tabsContainer.insertBefore(rowBreak, tabs[firstRowCapacity]);
   });
 }
 
@@ -990,6 +1008,7 @@ function dockviewJsonFromLayoutSlots(slots = layoutSlots) {
   const rootOrientation = dockviewOrientationForSplit(tree?.split === 'column' ? 'column' : 'row');
   const panelItems = paneItems(slots);
   const size = dockviewHostLayoutSize(dockviewLayoutState.host || grid);
+  const viewport = appViewport();
   const panels = {};
   for (const item of panelItems) {
     panels[item] = {
@@ -1006,8 +1025,8 @@ function dockviewJsonFromLayoutSlots(slots = layoutSlots) {
   return {
     grid: {
       root: dockviewSerializedNodeFromLayout(tree, slots, rootOrientation),
-      height: Math.max(DOCKVIEW_MIN_LAYOUT_HEIGHT, Math.round(size.height || window.innerHeight || 0)),
-      width: Math.max(DOCKVIEW_MIN_LAYOUT_WIDTH, Math.round(size.width || window.innerWidth || 0)),
+      height: Math.max(DOCKVIEW_MIN_LAYOUT_HEIGHT, Math.round(size.height || viewport.height || 0)),
+      width: Math.max(DOCKVIEW_MIN_LAYOUT_WIDTH, Math.round(size.width || viewport.width || 0)),
       orientation: rootOrientation,
     },
     panels,

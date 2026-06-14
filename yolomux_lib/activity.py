@@ -105,6 +105,7 @@ class ActivityLedger:
         window: str | None = None,
         ts: float | None = None,
         byte_count: int = 0,
+        source: str = "host",
     ) -> None:
         """Record one user-input heartbeat. Bumps the session key and, when a window
         is known, the ``session:window`` key (which rolls up via the session bump)."""
@@ -115,7 +116,7 @@ class ActivityLedger:
             self._bump_input(str(session), moment, byte_count)
             if window not in (None, ""):
                 self._bump_input(f"{session}:{window}", moment, byte_count)
-            self._append_heartbeat(session, window, moment, byte_count)
+            self._append_heartbeat(session, window, moment, byte_count, source)
 
     def note_agent_active(self, session: str, window: str | None = None, ts: float | None = None) -> None:
         if not session:
@@ -190,10 +191,10 @@ class ActivityLedger:
         with file_lock(self.path):
             atomic_write_text(self.path, json.dumps(payload, separators=(",", ":")))
 
-    def _append_heartbeat(self, session: str, window: str | None, ts: float, byte_count: int) -> None:
+    def _append_heartbeat(self, session: str, window: str | None, ts: float, byte_count: int, source: str = "host") -> None:
         if not self.heartbeat_path:
             return
-        line = json.dumps({"ts": ts, "s": session, "w": window, "b": max(0, int(byte_count))}, separators=(",", ":"))
+        line = json.dumps({"ts": ts, "s": session, "w": window, "b": max(0, int(byte_count)), "src": str(source or "host")}, separators=(",", ":"))
         self.heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
         with file_lock(self.heartbeat_path):
             with open(self.heartbeat_path, "a", encoding="utf-8") as handle:

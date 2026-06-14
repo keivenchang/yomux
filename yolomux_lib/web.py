@@ -43,18 +43,21 @@ STATIC_CONTENT_TYPES = {
 # i18n locale catalogs are served from /static/locales/<locale>.json (all-static-fetch). The strict
 # pattern (no "/" or ".." in the locale) prevents path traversal.
 _LOCALE_ASSET_RE = re.compile(r"^locales/[A-Za-z0-9_-]+\.json$")
+_FONT_ASSET_RE = re.compile(r"^fonts/[A-Za-z0-9_-]+\.woff2$")
 
 
 def static_content_type(asset: str) -> str | None:
     if _LOCALE_ASSET_RE.match(asset):
         return "application/json; charset=utf-8"
+    if _FONT_ASSET_RE.match(asset):
+        return "font/woff2"
     return STATIC_CONTENT_TYPES.get(asset)
 
 
 def static_asset_path(asset: str) -> Path | None:
     if asset in {"xterm.css", "xterm.js"}:
         return xterm_asset_path(asset)
-    if asset in STATIC_CONTENT_TYPES or _LOCALE_ASSET_RE.match(asset):
+    if asset in STATIC_CONTENT_TYPES or _LOCALE_ASSET_RE.match(asset) or _FONT_ASSET_RE.match(asset):
         path = STATIC_DIR / asset
         return path if path.is_file() else None
     return None
@@ -144,7 +147,13 @@ def brand_html(class_name: str = "brand-title", tag: str = "span", locale: str |
     )
 
 
-def html_page(sessions: list[str], access_role: str = "admin", dev: bool = False, dangerously_yolo: bool = False) -> str:
+def html_page(
+    sessions: list[str],
+    access_role: str = "admin",
+    dev: bool = False,
+    dangerously_yolo: bool = False,
+    share: dict | None = None,
+) -> str:
     settings_data = settings_payload()
     bootstrap = {
         "sessions": sessions,
@@ -176,6 +185,7 @@ def html_page(sessions: list[str], access_role: str = "admin", dev: bool = False
         "strings": bootstrap_locale_catalogs(bootstrap_locale(settings_data)),
         "yoloRulesPayload": rules_status(),
         "codeMirrorAssetUrl": static_asset_url("codemirror.js"),
+        "share": share or None,
     }
     # Embed JSON in a <script> tag WITHOUT html.escape: a script element's text content is not
     # HTML-decoded, so html.escape would leave literal &lt;/&gt;/&amp; inside parsed strings (e.g. the
@@ -203,6 +213,7 @@ def html_page(sessions: list[str], access_role: str = "admin", dev: bool = False
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js" defer></script>
 </head>
 <body>
+<div id="appRoot" class="app-root">
 <header class="topbar">
   <div class="brand-cell">
     {brand_html("brand brand-title title", "div")}
@@ -249,6 +260,7 @@ def html_page(sessions: list[str], access_role: str = "admin", dev: bool = False
   </div>
   <pre id="modalBody"></pre>
 </section>
+</div>
 <script id="yolomux-bootstrap" type="application/json">{bootstrap_json}</script>
 <script src="{static_asset_url("vendor/dockview-core.noStyle.js")}"></script>
 <script src="{static_asset_url("yolomux.js")}"></script>
@@ -311,15 +323,17 @@ def current_language_pref() -> str:
 
 
 def locale_field_html(current: str = "system", css_class: str = "login-locale") -> str:
-    """The endonym-labeled language <select>, shared by the login and setup screens."""
+    """The endonym-labeled language picker, shared by the login and setup screens."""
     def option_label(value: str, label: str) -> str:
         return server_string(current, "pref.general.language.system") if value == "system" else label
 
+    selected_value = current if current in _LOGIN_LOCALE_VALUES else "system"
+    selected_label = option_label(selected_value, dict(LOGIN_LOCALE_CHOICES).get(selected_value, "System"))
     options = "".join(
         (
-            f'<option value="{html.escape(value, quote=True)}"'
-            f'{" selected" if value == current else ""}>'
-            f"{html.escape(option_label(value, label))}</option>"
+            f'<button type="button" role="option" class="locale-option" data-locale-value="{html.escape(value, quote=True)}"'
+            f' aria-selected="{"true" if value == selected_value else "false"}">'
+            f"{html.escape(option_label(value, label))}</button>"
         )
         for value, label in LOGIN_LOCALE_CHOICES
     )
@@ -327,7 +341,11 @@ def locale_field_html(current: str = "system", css_class: str = "login-locale") 
     return (
         f'<label class="{html.escape(css_class, quote=True)}">'
         f"<span>{language_label}</span>"
-        f'<select name="locale" aria-label="{language_label}">{options}</select>'
+        f'<span class="locale-picker" data-locale-picker>'
+        f'<input type="hidden" name="locale" value="{html.escape(selected_value, quote=True)}" data-locale-input>'
+        f'<button type="button" class="locale-toggle" aria-label="{language_label}" aria-haspopup="listbox" aria-expanded="false" data-locale-toggle>{html.escape(selected_label)}</button>'
+        f'<span class="locale-options" role="listbox" aria-label="{language_label}" hidden>{options}</span>'
+        f'</span>'
         "</label>"
     )
 
@@ -398,6 +416,50 @@ def login_html(next_path: str = "/", error: str = "", secure: bool = True, curre
 </main>
 <script>
 (() => {{
+  document.querySelectorAll('[data-locale-picker]').forEach(picker => {{
+    const toggle = picker.querySelector('[data-locale-toggle]');
+    const input = picker.querySelector('[data-locale-input]');
+    const options = picker.querySelector('.locale-options');
+    if (!toggle || !input || !options) return;
+    const close = () => {{
+      options.hidden = true;
+      toggle.setAttribute('aria-expanded', 'false');
+    }};
+    toggle.addEventListener('click', event => {{
+      event.preventDefault();
+      event.stopPropagation();
+      const open = options.hidden;
+      document.querySelectorAll('.locale-options').forEach(node => {{
+        if (node !== options) node.hidden = true;
+      }});
+      options.hidden = !open;
+      toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }});
+    options.addEventListener('click', event => {{
+      const option = event.target.closest('[data-locale-value]');
+      if (!option) return;
+      event.preventDefault();
+      input.value = option.dataset.localeValue || 'system';
+      toggle.textContent = option.textContent || input.value;
+      options.querySelectorAll('[data-locale-value]').forEach(node => node.setAttribute('aria-selected', node === option ? 'true' : 'false'));
+      close();
+    }});
+    picker.addEventListener('keydown', event => {{
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      close();
+      toggle.focus();
+    }});
+  }});
+  document.addEventListener('click', event => {{
+    document.querySelectorAll('[data-locale-picker]').forEach(picker => {{
+      if (picker.contains(event.target)) return;
+      const options = picker.querySelector('.locale-options');
+      const toggle = picker.querySelector('[data-locale-toggle]');
+      if (options) options.hidden = true;
+      if (toggle) toggle.setAttribute('aria-expanded', 'false');
+    }});
+  }});
   const labels = {toggle_labels};
   const password = document.getElementById('loginPassword');
   const toggle = document.getElementById('togglePassword');

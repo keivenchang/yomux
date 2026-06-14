@@ -7,6 +7,7 @@ from tools.static_build import build_pseudo_catalog
 from tools.static_build import check_css_braces
 from tools.static_build import locale_key_errors
 from tools.static_build import lint_duplicate_functions
+from tools.static_build import lint_raw_window_viewport_reads
 from tools.static_build import pseudo_value
 from tools.static_build import repo_path
 from tools.static_build import _color_luminance_alpha
@@ -92,6 +93,23 @@ def test_undefined_css_var_lint_is_clean():
     # every var(--x) in the bundle resolves to a CSS def or a JS setProperty/inline-style.
     from tools.static_build import lint_undefined_css_vars
     assert lint_undefined_css_vars() == []
+
+
+def test_raw_window_viewport_lint_tree_is_clean():
+    assert lint_raw_window_viewport_reads() == []
+
+
+def test_raw_window_viewport_lint_flags_unowned_reads(monkeypatch, tmp_path):
+    import tools.static_build as sb
+    bad = tmp_path / "bad.js"
+    good = tmp_path / "good.js"
+    bad.write_text("const width = window.innerWidth;\n", encoding="utf-8")
+    good.write_text("const height = window.innerHeight; // static-build-allow-window-viewport\n", encoding="utf-8")
+    monkeypatch.setitem(sb.ASSETS, "yolomux.js", ["bad.js", "good.js"])
+    monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
+    assert sb.lint_raw_window_viewport_reads() == [
+        "bad.js:1: raw window.innerWidth/innerHeight read; use appViewport()"
+    ]
 
 
 def test_check_css_braces_flags_an_unbalanced_partial(monkeypatch, tmp_path):

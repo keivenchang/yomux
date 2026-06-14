@@ -23,6 +23,7 @@ async function expandDirectoryRow(row, fullPath, options = {}) {
   renderTreeChildren(children, fullPath, entries, nextDepth);
   if (!existingChildren) row.insertAdjacentElement('afterend', children);
   rememberFileExplorerSyncExpandedState();
+  scheduleShareUiStatePublish();
   if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }
 
@@ -39,6 +40,7 @@ function collapseDirectoryRow(row, fullPath, options = {}) {
     .filter(node => node.classList?.contains('file-tree-children') && node.dataset?.parent === fullPath)
     .forEach(node => node.remove());
   rememberFileExplorerSyncExpandedState();
+  scheduleShareUiStatePublish();
   if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }
 
@@ -84,8 +86,9 @@ function numericOption(value, fallback) {
 }
 
 function viewportBounds(edgeGap = popoverEdgeGapPx()) {
-  const width = Math.max(0, window.innerWidth || document.documentElement?.clientWidth || 0);
-  const height = Math.max(0, window.innerHeight || document.documentElement?.clientHeight || 0);
+  const viewport = appViewport();
+  const width = Math.max(0, viewport.width || 0);
+  const height = Math.max(0, viewport.height || 0);
   return {
     left: edgeGap,
     top: edgeGap,
@@ -111,17 +114,20 @@ function stopPopoverEvent(event) {
 
 function closeOtherSessionPopovers(current, options = {}) {
   const force = options.force === true;
+  let changed = false;
   for (const other of document.querySelectorAll('.pane-tab.popover-open, .panel-popover-zone.popover-open')) {
     if (other !== current) {
       const popover = other.querySelector?.(':scope > .session-popover, :scope > .panel-detail-popover')
         || other.__yolomuxDetachedPopover;
       if (current === null && !force && popoverStillActive(other, popover)) continue;
+      if (other.classList?.contains('popover-open') || popover?.classList?.contains('popover-open') || other.__yolomuxDetachedPopover?.classList?.contains('popover-open')) changed = true;
       other.classList.remove('popover-open');
       popover?.classList?.remove('popover-open');
       other.__yolomuxDetachedPopover?.classList?.remove('popover-open');
       delete other.dataset.popoverHoverState;
     }
   }
+  if (changed && typeof scheduleSharePopupLayerPublish === 'function') scheduleSharePopupLayerPublish({immediate: true});
 }
 
 function popoverLifecycleActive(anchor, popover) {
@@ -195,6 +201,7 @@ function createHoverPopover(options) {
     if (stateClass) anchor.classList.remove(stateClass);
     markState('');
     options.onClose?.(event);
+    if (typeof scheduleSharePopupLayerPublish === 'function') scheduleSharePopupLayerPublish({immediate: true});
   };
   const openNow = event => {
     cancelTimers();
@@ -205,6 +212,7 @@ function createHoverPopover(options) {
       options.position?.(event);
       options.onOpen?.(event);
       markState('open');
+      if (typeof scheduleSharePopupLayerPublish === 'function') scheduleSharePopupLayerPublish();
       return;
     }
     options.position?.(event);
@@ -212,6 +220,7 @@ function createHoverPopover(options) {
     options.onOpen?.(event);
     if (stateClass) anchor.classList.add(stateClass);
     markState('open');
+    if (typeof scheduleSharePopupLayerPublish === 'function') scheduleSharePopupLayerPublish();
     const activePopover = popover();
     if (activePopover && activePopover.dataset.hoverPopoverBound !== 'true') {
       bindPopoverHover(anchor, activePopover, {queueOpen, keepOpen: openNow, closeSoon});
@@ -242,6 +251,7 @@ function createHoverPopover(options) {
         hideTimer = null;
         if (stateClass) anchor.classList.remove(stateClass);
         options.onClose?.(event);
+        if (typeof scheduleSharePopupLayerPublish === 'function') scheduleSharePopupLayerPublish({immediate: true});
         return;
       }
       if (stillActive(event)) {
@@ -253,6 +263,7 @@ function createHoverPopover(options) {
       markState('');
       hideTimer = null;
       options.onClose?.(event);
+      if (typeof scheduleSharePopupLayerPublish === 'function') scheduleSharePopupLayerPublish({immediate: true});
     }, Math.max(0, delay));
   }
   const initialPopover = popover();
@@ -1011,8 +1022,9 @@ function paneDragPreviewMetrics(slot, event) {
   const fallbackHeight = 220;
   const sourceWidth = Math.max(1, Number(rect?.width) || fallbackWidth);
   const sourceHeight = Math.max(1, Number(rect?.height) || fallbackHeight);
-  const viewportWidth = Math.max(320, Number(window.innerWidth) || 1200);
-  const viewportHeight = Math.max(240, Number(window.innerHeight) || 800);
+  const viewport = appViewport();
+  const viewportWidth = Math.max(320, Number(viewport.width) || 1200);
+  const viewportHeight = Math.max(240, Number(viewport.height) || 800);
   const maxWidth = Math.min(720, Math.max(220, viewportWidth * 0.64));
   const maxHeight = Math.min(420, Math.max(160, viewportHeight * 0.58));
   const scale = Math.min(1, maxWidth / sourceWidth, maxHeight / sourceHeight);

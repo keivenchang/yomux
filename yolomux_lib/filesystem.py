@@ -151,6 +151,7 @@ SEARCH_SECRET_EXCLUDE_SIGNATURE = "fs-secret-v1"
 MAX_SEARCH_DIRS = 20_000
 MAX_SEARCH_FILES = 50_000
 MAX_SEARCH_LIMIT = 2_000
+MAX_DIRECTORY_ENTRIES = 1_000
 FS_ROOTS_ENV = "YOLOMUX_FS_ROOTS"
 DEFAULT_FS_ROOTS = ("/",)
 SECRET_DIR_COMPONENTS = frozenset({
@@ -427,8 +428,20 @@ def _physical_file_identity(path: Path) -> dict[str, Any]:
     }
 
 
-def _visible_directory_names(path: Path) -> list[str]:
-    return [name for name in os.listdir(path) if not _path_is_secret(path / name)]
+def _visible_directory_names(path: Path) -> tuple[list[str], bool]:
+    limit = max(1, int(MAX_DIRECTORY_ENTRIES))
+    names: list[str] = []
+    truncated = False
+    with os.scandir(path) as entries:
+        for entry in entries:
+            name = entry.name
+            if _path_is_secret(path / name):
+                continue
+            if len(names) >= limit:
+                truncated = True
+                break
+            names.append(name)
+    return names, truncated
 
 
 def list_directory(raw_path: str) -> dict[str, Any]:
@@ -438,7 +451,8 @@ def list_directory(raw_path: str) -> dict[str, Any]:
     if not path.is_dir():
         raise FilesystemError(f"not a directory: {path}", status=400)
     try:
-        entries = [_entry_info(path / name, name) for name in _visible_directory_names(path)]
+        names, truncated = _visible_directory_names(path)
+        entries = [_entry_info(path / name, name) for name in names]
     except PermissionError as exc:
         raise FilesystemError(str(exc), status=403)
     entries.sort(key=lambda entry: (entry.get("kind") != "dir", str(entry.get("name", "")).lower()))
@@ -447,6 +461,8 @@ def list_directory(raw_path: str) -> dict[str, Any]:
         "path": str(path),
         "parent": parent,
         "entries": entries,
+        "truncated": truncated,
+        "entry_limit": MAX_DIRECTORY_ENTRIES,
     }
 
 

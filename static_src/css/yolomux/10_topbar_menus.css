@@ -149,6 +149,259 @@
 #logoutButton {
   --action-icon: var(--icon-logout);
 }
+.share-status-pill {
+  --action-icon: var(--icon-share);
+  position: relative;
+}
+.share-status-pill.share-mode-read {
+  border-color: color-mix(in srgb, var(--good) 68%, var(--line));
+  background: color-mix(in srgb, var(--good) 24%, var(--panel2));
+  color: var(--text);
+}
+.share-status-pill.share-mode-write {
+  border-color: color-mix(in srgb, var(--bad) 72%, var(--line));
+  background: color-mix(in srgb, var(--bad) 26%, var(--panel2));
+  color: var(--text);
+}
+.share-status-pill[hidden] {
+  display: none;
+}
+.share-status-count {
+  position: absolute;
+  inset-inline-end: -3px;
+  inset-block-start: -5px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border: 1px solid var(--panel);
+  border-radius: var(--radius-pill);
+  background: var(--active-control-bg);
+  color: var(--active-control-text);
+  font: 900 var(--ui-font-size-3xs)/12px var(--ui-font);
+  text-align: center;
+}
+.share-status-pill.share-mode-read .share-status-count {
+  background: var(--good);
+  color: #041108;
+}
+.share-status-pill.share-mode-write .share-status-count {
+  background: var(--bad);
+  color: var(--danger-text);
+}
+body.share-view-mode {
+  overflow: hidden;
+  background: var(--share-stage-bg);
+}
+
+.share-mirror-stage {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  background: var(--share-stage-bg);
+}
+
+body.share-view-mode .share-mirror-stage .app-root {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  transform: translate3d(var(--share-mirror-tx, 0px), var(--share-mirror-ty, 0px), 0) scale(var(--share-mirror-scale, 1));
+  will-change: transform;
+}
+
+body.share-view-mode.share-view-readonly .share-mirror-stage .file-explorer-tree-panel,
+body.share-view-mode.share-view-readonly .share-mirror-stage .file-explorer-changes-panel,
+body.share-view-mode.share-view-readonly .share-mirror-stage .preferences-scroll,
+body.share-view-mode.share-view-readonly .share-mirror-stage .info-list,
+body.share-view-mode.share-view-readonly .share-mirror-stage .file-editor-preview-pane-panel,
+body.share-view-mode.share-view-readonly .share-mirror-stage .cm-scroller,
+body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport {
+  overflow: hidden !important;
+  overscroll-behavior: none;
+  scrollbar-width: none;
+}
+
+body.share-view-mode.share-view-readonly .share-mirror-stage .file-explorer-tree-panel::-webkit-scrollbar,
+body.share-view-mode.share-view-readonly .share-mirror-stage .file-explorer-changes-panel::-webkit-scrollbar,
+body.share-view-mode.share-view-readonly .share-mirror-stage .preferences-scroll::-webkit-scrollbar,
+body.share-view-mode.share-view-readonly .share-mirror-stage .info-list::-webkit-scrollbar,
+body.share-view-mode.share-view-readonly .share-mirror-stage .file-editor-preview-pane-panel::-webkit-scrollbar,
+body.share-view-mode.share-view-readonly .share-mirror-stage .cm-scroller::-webkit-scrollbar,
+body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.share-popup-mirror-layer {
+  position: absolute;
+  inset: 0;
+  z-index: calc(var(--z-share-presence) + 1);
+  overflow: hidden;
+  pointer-events: none;
+  font: inherit;
+}
+.share-popup-mirror-item {
+  position: absolute;
+  overflow: visible;
+  pointer-events: none;
+  font: inherit;
+}
+.share-popup-mirror-item > * {
+  position: absolute !important;
+  left: 0 !important;
+  top: 0 !important;
+  right: auto !important;
+  bottom: auto !important;
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  margin: 0;
+  visibility: visible !important;
+  opacity: 1 !important;
+  pointer-events: none !important;
+  transform: none !important;
+  transition: none !important;
+  font: inherit;
+}
+.share-popup-mirror-item > .modal {
+  width: 100% !important;
+  height: auto !important;
+  max-width: none !important;
+  max-height: none !important;
+  overflow: visible !important;
+}
+.share-popup-mirror-item > .modal.share-open {
+  width: 100% !important;
+}
+
+.share-viewer-banner {
+  position: fixed;
+  left: 50%;
+  bottom: 8px;
+  z-index: calc(var(--z-share-presence) + 2);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: center;
+  min-height: 26px;
+  max-width: calc(100vw - 16px);
+  padding: 5px 10px;
+  border: 1px solid var(--active-control-border);
+  border-radius: var(--radius-md);
+  background: var(--active-control-soft-bg);
+  color: var(--text);
+  box-shadow: var(--shadow-elevated);
+  font: 700 var(--ui-font-size-sm)/1.25 var(--ui-font);
+  transform: translateX(-50%);
+  pointer-events: auto;
+}
+.share-viewer-banner-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.share-viewer-mirror-status {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font: 800 var(--ui-font-size-xs)/1 var(--mono-font);
+}
+.share-viewer-mirror-status.match {
+  color: var(--good);
+}
+.share-viewer-mirror-status.mismatch {
+  color: var(--bad);
+}
+.share-viewer-banner.share-mode-read {
+  border-color: color-mix(in srgb, var(--good) 68%, var(--line));
+  background: color-mix(in srgb, var(--good) 18%, var(--panel2));
+}
+.share-viewer-banner.share-mode-write {
+  border-color: color-mix(in srgb, var(--bad) 72%, var(--line));
+  background: color-mix(in srgb, var(--bad) 20%, var(--panel2));
+}
+.share-view-fit-toggle {
+  flex: 0 0 auto;
+  min-height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--panel);
+  color: var(--text);
+  font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
+  cursor: pointer;
+}
+.share-view-fit-toggle:hover,
+.share-view-fit-toggle:focus-visible {
+  border-color: var(--active-control-border);
+  background: var(--active-control-bg);
+  color: var(--active-control-text);
+}
+.share-ghost-cursor {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: var(--z-share-presence);
+  width: 26px;
+  height: 26px;
+  margin: -13px 0 0 -13px;
+  pointer-events: none;
+  opacity: 0;
+  transform: translate3d(-9999px, -9999px, 0);
+  transition: transform 45ms linear, opacity 100ms ease;
+  border: 2px solid var(--share-cursor-color, var(--active-control-bg));
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.66), 0 2px 8px rgb(var(--shadow-rgb) / 0.45);
+}
+.share-ghost-cursor::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: -6px;
+  width: 2px;
+  height: 36px;
+  transform: translateX(-50%);
+  background: var(--share-cursor-color, var(--active-control-bg));
+  clip-path: none;
+}
+.share-ghost-cursor::after {
+  content: "";
+  position: absolute;
+  left: -6px;
+  top: 50%;
+  width: 36px;
+  height: 2px;
+  transform: translateY(-50%);
+  background: var(--share-cursor-color, var(--active-control-bg));
+  clip-path: none;
+}
+.share-ghost-cursor.visible {
+  opacity: 0.88;
+}
+.share-click-ripple {
+  position: fixed;
+  z-index: var(--z-share-presence);
+  width: 8px;
+  height: 8px;
+  margin: -4px 0 0 -4px;
+  pointer-events: none;
+  border: 2px solid var(--share-cursor-color, var(--active-control-bg));
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.42);
+  animation: share-click-ripple 520ms ease-out forwards;
+}
+@keyframes share-click-ripple {
+  from {
+    opacity: 0.9;
+    transform: scale(0.4);
+  }
+  to {
+    opacity: 0;
+    transform: scale(4);
+  }
+}
 #status {
   max-width: 112px;
   overflow: hidden;
@@ -266,6 +519,9 @@ body.theme-light .topbar-search {
 .topbar-language {
   flex: 0 0 auto;
   justify-self: end;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   height: var(--compact-control-height);
   max-width: 140px;
   border: 1px solid var(--line);
@@ -277,11 +533,23 @@ body.theme-light .topbar-search {
   padding: 0 6px;
   cursor: pointer;
 }
+.topbar-language-menu > .topbar-language {
+  min-width: 72px;
+}
+.topbar-language-menu.open > .topbar-language {
+  border-color: var(--active-control-border);
+  background: var(--active-control-bg);
+  color: var(--active-control-text);
+}
 body.theme-light .topbar-language {
   background: rgb(var(--overlay-slate-rgb) / 0.05);
 }
 .topbar-language:hover {
   border-color: var(--accent);
+}
+.topbar-language-popover {
+  max-height: min(60vh, 520px);
+  overflow: auto;
 }
 .topbar-search-icon {
   flex: 0 0 auto;
@@ -300,15 +568,13 @@ body.theme-light .topbar-language {
   color: var(--muted);
   background: transparent;
 }
-@media (max-width: 1100px) {
-  .topbar-search-label,
-  .topbar-search-hint {
-    display: none;
-  }
-  .topbar-search {
-    max-width: none;
-    padding: 0 6px;
-  }
+body.app-vw-lte-1100 .topbar-search-label,
+body.app-vw-lte-1100 .topbar-search-hint {
+  display: none;
+}
+body.app-vw-lte-1100 .topbar-search {
+  max-width: none;
+  padding: 0 6px;
 }
 /* Cross-session AI activity status line in the top bar (opens the YO!agent summary). */
 .topbar-activity {
@@ -348,15 +614,11 @@ body.theme-light .topbar-language {
 .topbar-activity-sep {
   opacity: 0.5;
 }
-@media (max-width: 1100px) {
-  .topbar-activity-idle {
-    display: none;
-  }
+body.app-vw-lte-1100 .topbar-activity-idle {
+  display: none;
 }
-@media (max-width: 760px) {
-  .topbar-search {
-    display: none;
-  }
+body.app-vw-lte-760 .topbar-search {
+  display: none;
 }
 .app-menu-area.drag-over {
   outline: 1px dashed var(--drop-outline);
@@ -536,6 +798,7 @@ body.theme-light .topbar-language {
 }
 .app-menu-command:hover:not(:disabled),
 .app-menu-command:focus-visible,
+.app-menu-command.share-mirror-active:not(:disabled),
 .app-menu-submenu-wrap:hover > .app-menu-command:not(:disabled),
 .app-menu-submenu-wrap.open > .app-menu-command:not(:disabled) {
   color: #f4ffe8;
@@ -659,6 +922,9 @@ body.theme-light .topbar-language {
 .app-menu-ui-icon-document {
   --app-menu-ui-icon: var(--icon-document);
 }
+.app-menu-ui-icon-share {
+  --app-menu-ui-icon: var(--icon-share);
+}
 .app-menu-ui-icon-gear {
   --app-menu-ui-icon: var(--icon-gear);
 }
@@ -773,17 +1039,15 @@ body.theme-light .topbar-language {
 .app-menu-yolo-session-command {
   min-inline-size: min(42ch, var(--app-menu-max-inline-size));
 }
-@media (max-width: 720px) {
-  .app-menu-yolo-session-command .pane-tab-core {
-    height: auto;
-    flex-wrap: wrap;
-  }
-  .app-menu-yolo-session-command .session-button-text {
-    flex: 1 0 100%;
-    height: auto;
-    min-height: 14px;
-    white-space: normal;
-  }
+body.app-vw-lte-720 .app-menu-yolo-session-command .pane-tab-core {
+  height: auto;
+  flex-wrap: wrap;
+}
+body.app-vw-lte-720 .app-menu-yolo-session-command .session-button-text {
+  flex: 1 0 100%;
+  height: auto;
+  min-height: 14px;
+  white-space: normal;
 }
 .app-menu-submenu-arrow {
   color: var(--pr-status-closed);
@@ -866,6 +1130,7 @@ body.theme-light .app-menu-command[data-checked="true"] {
 }
 body.theme-light .app-menu-command:hover:not(:disabled),
 body.theme-light .app-menu-command:focus-visible,
+body.theme-light .app-menu-command.share-mirror-active:not(:disabled),
 body.theme-light .app-menu-submenu-wrap:hover > .app-menu-command:not(:disabled),
 body.theme-light .app-menu-submenu-wrap.open > .app-menu-command:not(:disabled) {
   color: var(--pc-control-hover-fg);

@@ -1,10 +1,15 @@
 import argparse
+import socket
 import subprocess
+import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from yolomux_lib import cli
+from yolomux_lib.server import TmuxWebtermHTTPServer
 from yolomux_lib.server import https_redirect_response
 
 
@@ -142,3 +147,25 @@ def test_plain_http_on_tls_port_gets_redirect_response():
     assert b"308 Permanent Redirect" in response
     assert b"Location: https://localhost:8001/foo?bar=1" in response
     assert b"Use HTTPS" in response
+
+
+def test_tls_socket_peek_waits_for_delayed_plaintext_first_byte():
+    server_socket, client_socket = socket.socketpair()
+
+    try:
+        fake_server = SimpleNamespace(tls_context=object(), tls_peek_timeout_seconds=0.4)
+
+        def delayed_client_write():
+            time.sleep(0.15)
+            client_socket.sendall(b"G")
+
+        writer = threading.Thread(target=delayed_client_write)
+        writer.start()
+        prepared = TmuxWebtermHTTPServer.prepare_request_socket(fake_server, server_socket)
+        writer.join(timeout=1)
+
+        assert prepared is server_socket
+        assert server_socket.recv(1) == b"G"
+    finally:
+        server_socket.close()
+        client_socket.close()

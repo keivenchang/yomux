@@ -63,27 +63,38 @@
   border-bottom: 0;
   background: var(--pane-bar-bg, var(--panel2));
   align-items: flex-start;
-  height: calc(var(--pane-tab-height) + 2px);
+  height: auto;
   min-height: calc(var(--pane-tab-height) + 2px);
-  overflow: hidden;
+  overflow: visible;
 }
 .yolomux-dockview .dv-tabs-container {
   box-sizing: border-box;
   flex: 1 1 auto;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   align-content: flex-start;
-  height: calc(var(--pane-tab-height) + 2px);
+  inline-size: 100%;
+  max-inline-size: 100%;
+  height: auto;
   min-height: calc(var(--pane-tab-height) + 2px);
-  max-height: calc(var(--pane-tab-height) + 2px);
-  padding-inline-end: var(--dockview-header-actions-reserved-inline-size, 0px);
-  overflow-x: auto;
-  overflow-y: hidden;
+  max-height: none;
+  overflow: visible;
   scrollbar-width: none;
 }
 .yolomux-dockview .dv-tabs-container::-webkit-scrollbar {
   width: 0;
   height: 0;
   display: none;
+}
+.yolomux-dockview .dockview-tab-row-break {
+  flex: 0 0 100%;
+  inline-size: 100%;
+  block-size: 0;
+  min-block-size: 0;
+  max-block-size: 0;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  pointer-events: none;
 }
 .yolomux-dockview .dv-right-actions-container {
   position: absolute;

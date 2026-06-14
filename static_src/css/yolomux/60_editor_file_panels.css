@@ -595,10 +595,8 @@ body.editor-theme-light .file-editor-image-panel {
   color: transparent;
   background: rgba(255, 255, 255, 0.025);
 }
-@media (max-width: 760px) {
-  .file-editor-conflict-compare {
-    grid-template-columns: 1fr;
-  }
+body.app-vw-lte-760 .file-editor-conflict-compare {
+  grid-template-columns: 1fr;
 }
 .file-editor-wrap,
 .file-editor-gutter,
@@ -1181,14 +1179,14 @@ body.theme-light .file-tree-rename-input {
   min-width: 0;
   max-inline-size: 150px;
 }
-.file-explorer-primary-row .file-explorer-path-inline {
+.file-explorer-path-row {
+  flex: 0 0 auto;
+}
+.file-explorer-path-row .file-explorer-path-inline {
   flex: 1 1 0;
   min-width: 0;
   min-inline-size: 0;
   max-width: none;
-}
-body:not(.file-explorer-mode-diff) .file-explorer-primary-row .file-explorer-toolbar-spacer {
-  flex: 0 0 0;
 }
 .file-explorer-panel-title {
   flex: 0 0 auto;
@@ -1207,7 +1205,8 @@ body:not(.file-explorer-mode-diff) .file-explorer-primary-row .file-explorer-too
 }
 body.file-explorer-mode-diff .file-explorer-mode-files-only,
 body.file-explorer-mode-tabber .file-explorer-mode-files-only,
-body:not(.file-explorer-mode-diff) .file-explorer-mode-diff-only {
+body:not(.file-explorer-mode-diff) .file-explorer-mode-diff-only,
+body.file-explorer-mode-tabber .file-explorer-mode-files-diff-only {
   display: none;
 }
 .path-copy-button {
@@ -1689,10 +1688,11 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
 }
 .file-explorer-mode-switcher {
   display: inline-flex;
-  align-items: center;
-  gap: 2px;
+  align-items: flex-end;
+  gap: 1px;
   flex: 0 0 auto;
   min-width: 0;
+  height: var(--pane-tab-height);
 }
 .file-explorer-mode-toggle {
   display: inline-flex;
@@ -1700,16 +1700,17 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
   justify-content: center;
   gap: 0;
   flex: 0 0 auto;
-  height: 22px;
-  padding: 0 5px;
+  height: var(--pane-tab-height);
+  min-width: 0;
+  padding: 0 3px;
   box-sizing: border-box;
-  color: var(--pane-ctl-fg, var(--pc-control-fg));
-  background: color-mix(in srgb, var(--active-control-bg) 18%, var(--pane-ctl-bg, var(--pane-tab-control-bg)));
-  border: 1px solid color-mix(in srgb, var(--active-control-border) 45%, var(--pane-ctl-border, transparent));
-  border-radius: var(--radius-control);
-  font-family: var(--control-font);
+  color: var(--pane-tab-text);
+  background: var(--pane-bar-bg, var(--panel2));
+  border: 1px solid var(--pane-inactive-tab-border);
+  border-bottom-color: transparent;
+  border-radius: 6px 6px 0 0;
+  font-family: var(--tab-font);
   font-size: var(--ui-font-size-2xs);
-  font-stretch: condensed;
   font-weight: 700;
   letter-spacing: 0;
   line-height: 1;
@@ -1718,14 +1719,15 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
 }
 .file-explorer-mode-toggle:hover,
 .file-explorer-mode-toggle:focus-visible {
-  color: var(--text);
-  border-color: var(--active-control-border);
-  background: color-mix(in srgb, var(--active-control-bg) 28%, var(--pane-ctl-bg, var(--pane-tab-control-bg)));
+  color: var(--pane-tab-active-text);
+  border-color: var(--pane-tab-active-border);
+  background: color-mix(in srgb, var(--pane-tab-active-bg) 70%, var(--pane-bar-bg, var(--panel2)) 30%);
 }
 .file-explorer-mode-toggle[aria-pressed="true"] {
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
+  color: var(--pane-tab-active-text);
+  background: var(--pane-tab-active-bg);
+  border-color: var(--pane-tab-active-border);
+  border-bottom-color: var(--pane-tab-active-bg);
 }
 .file-explorer-mode-label {
   pointer-events: none;

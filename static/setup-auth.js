@@ -19,11 +19,40 @@ if (setupSecurity && location.protocol === 'https:') {
 // DOIT.13: the setup-screen language picker carries the choice in a short-lived cookie (NOT a settings
 // write — the setup screen is pre-auth/pre-users) and reloads; request_locale_pref reads the cookie,
 // and the post-sign-in save_login_locale makes it permanent. Max-Age caps a stale value.
-const setupLocaleSelect = document.querySelector('.setup-locale select');
-if (setupLocaleSelect) {
-  setupLocaleSelect.addEventListener('change', () => {
-    document.cookie = `yolomux_locale=${encodeURIComponent(setupLocaleSelect.value)}; Path=/; Max-Age=600; SameSite=Lax`;
+const setupLocalePicker = document.querySelector('.setup-locale [data-locale-picker]');
+if (setupLocalePicker) {
+  const toggle = setupLocalePicker.querySelector('[data-locale-toggle]');
+  const input = setupLocalePicker.querySelector('[data-locale-input]');
+  const options = setupLocalePicker.querySelector('.locale-options');
+  const closeLocalePicker = () => {
+    if (options) options.hidden = true;
+    if (toggle) toggle.setAttribute('aria-expanded', 'false');
+  };
+  toggle?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!options) return;
+    const open = options.hidden;
+    options.hidden = !open;
+    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+  options?.addEventListener('click', event => {
+    const option = event.target.closest('[data-locale-value]');
+    if (!option || !input) return;
+    event.preventDefault();
+    input.value = option.dataset.localeValue || 'system';
+    document.cookie = `yolomux_locale=${encodeURIComponent(input.value)}; Path=/; Max-Age=600; SameSite=Lax`;
     location.reload();
+  });
+  document.addEventListener('click', event => {
+    if (setupLocalePicker.contains(event.target)) return;
+    closeLocalePicker();
+  });
+  setupLocalePicker.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    closeLocalePicker();
+    toggle?.focus();
   });
 }
 

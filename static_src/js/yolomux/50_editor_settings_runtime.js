@@ -22,6 +22,7 @@ function setFileEditorViewMode(path, mode, item = null) {
     resetFileEditorPreviewZoomStateForPath(path, 'split:mermaid');
   }
   fileEditorViewModesForPath(path, true).set(editorViewModeKey(path, item), mode);
+  scheduleShareUiStatePublish();
 }
 
 function updateEditorModeControl(control, path, state, item = null) {
@@ -241,12 +242,14 @@ function setFileEditorThemeMode(mode) {
     writeStoredEditorPreviewDisplayMode(fileEditorPreviewDisplayMode);
   }
   applyEditorThemeMode({refreshEditors: true});
+  scheduleShareUiStatePublish();
 }
 
 function setFileEditorPreviewDisplayMode(mode) {
   fileEditorPreviewDisplayMode = normalizeEditorPreviewDisplayMode(mode);
   writeStoredEditorPreviewDisplayMode(fileEditorPreviewDisplayMode);
   applyEditorThemeMode({refreshEditors: true});
+  scheduleShareUiStatePublish();
 }
 
 function cycleEditorThemeMode(options = {}) {
@@ -341,7 +344,7 @@ async function openEditorFind(host = null) {
     ? (msg, level) => setFileEditorPanelStatus(host, msg, level)
     : () => {};
   if (!view) {
-    status('Find is available after CodeMirror finishes loading.', 'warn');
+    status(t('editor.findLoading'), 'warn');
     return false;
   }
   try {
@@ -351,7 +354,7 @@ async function openEditorFind(host = null) {
       return true;
     }
   } catch (error) {
-    status(`Find unavailable: ${error}`, 'error');
+    status(t('editor.findUnavailable', {error}), 'error');
   }
   return false;
 }
@@ -405,6 +408,7 @@ function setEditorWrapEnabled(enabled) {
   fileEditorWrapEnabled = enabled === true;
   writeStoredEditorWrap(fileEditorWrapEnabled);
   applyEditorWrapPreference();
+  scheduleShareUiStatePublish();
 }
 
 // toggle inline git blame. Fetch the blame payload for each open text file first (so the
@@ -426,6 +430,7 @@ function setFileEditorBlameEnabled(enabled) {
   fileEditorBlameEnabled = enabled === true;
   storageSet('yolomux.editorBlame', fileEditorBlameEnabled ? '1' : '0');
   applyEditorBlamePreference();
+  scheduleShareUiStatePublish();
 }
 
 function toggleFileEditorBlame() {
@@ -452,6 +457,7 @@ function setDiffExpandUnchanged(enabled) {
       renderFileEditorPanel(panel, item);
     }
   });
+  scheduleShareUiStatePublish();
 }
 
 function toggleDiffExpandUnchanged() {
@@ -472,6 +478,7 @@ function setFileEditorDiffExpandUnchangedForItem(path, item, enabled) {
   if (panel && state?.kind === 'text' && editorViewModeFor(path, item) === 'diff' && openFileDiffAvailable(state)) {
     renderFileEditorPanel(panel, item);
   }
+  scheduleShareUiStatePublish();
 }
 
 function toggleFileEditorDiffExpandUnchangedForItem(path, item) {
@@ -482,6 +489,7 @@ function setEditorLineNumbersEnabled(enabled) {
   fileEditorLineNumbersEnabled = enabled === true;
   writeStoredEditorLineNumbers(fileEditorLineNumbersEnabled);
   applyEditorWrapPreference();
+  scheduleShareUiStatePublish();
 }
 
 function toggleEditorLineNumbers() {
@@ -680,6 +688,7 @@ function applyGlobalThemeMode(options = {}) {
   // the active-color presets are theme-specific, so re-apply on every theme switch.
   applyActiveColor(initialSetting('appearance.active_color', 'green'));
   applySeparatorColor(initialSetting('appearance.separator_color', 'theme'));
+  scheduleShareUiStatePublish();
 }
 
 let globalThemeMediaListenerInstalled = false;
@@ -715,6 +724,7 @@ function applyTerminalRuntimeSettings(options = {}) {
   const minContrast = terminalMinimumContrastRatio();
   for (const [session, item] of terminals.entries()) {
     if (!item?.term) continue;
+    item.term.options.fontFamily = terminalFontFamily;
     item.term.options.fontSize = terminalFontSize;
     item.term.options.scrollback = terminalScrollback;
     item.term.options.theme = terminalThemeForSession(session, theme);
@@ -772,6 +782,11 @@ function applySettingsPayload(payload, options = {}) {
   fileExplorerImageOpenMode = normalizedImageOpenMode(initialSetting('file_explorer.image_open_mode', 'same-tab'));
   reconcileIndexedDirsFromSetting({initial: options.initial === true});
   uploadMaxBytes = numberSetting('uploads.max_bytes', 20 * 1024 * 1024);
+  shareDefaultTtlSeconds = numberSetting('share.ttl_seconds', 600);
+  shareDefaultMaxViewers = numberSetting('share.max_viewers', 5);
+  shareDefaultReadOnly = boolSetting('share.read_only', true);
+  shareDefaultScheme = initialSetting('share.scheme', 'http') === 'https' ? 'https' : 'http';
+  shareViewFit = normalizeShareViewFit(storageGet(shareViewFitStorageKey) || initialSetting('share.view_fit', shareViewFit));
   terminalFontSize = numberSetting('appearance.terminal_font_size', 13);
   editorFontSize = numberSetting('appearance.editor_font_size', 13);
   editorPreviewFontSize = numberSetting('appearance.preview_font_size', editorFontSize + 1);
@@ -827,7 +842,10 @@ function applySettingsPayload(payload, options = {}) {
   // i18n: when general.language changes, load the new catalog and re-render localized surfaces.
   const nextLocale = resolveLocalePref(initialSetting('general.language', 'system'));
   if (nextLocale !== previousLocale) applyLocale(nextLocale);
-  if (!options.initial) installRuntimeIntervals();
+  if (!options.initial) {
+    installRuntimeIntervals();
+    scheduleShareAppearancePublish();
+  }
   return true;
 }
 

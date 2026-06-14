@@ -31,6 +31,22 @@ from .web import setup_auth_html
 
 
 class AuthMixin:
+    SHARE_READONLY_GET_PATHS = {
+        "/api/activity",
+        "/api/fs/index-status",
+        "/api/fs/info",
+        "/api/fs/list",
+        "/api/share",
+        "/api/session-files",
+        "/api/transcripts",
+    }
+    SHARE_SCOPED_FILE_GET_PATHS = {
+        "/api/fs/diff",
+        "/api/fs/raw",
+        "/api/fs/read",
+    }
+    SHARE_READONLY_POST_PATHS = {"/api/fs/batch"}
+
     def basic_auth_identity(self) -> AuthIdentity | None:
         header = self.headers.get("Authorization", "")
         scheme, separator, encoded = header.partition(" ")
@@ -114,6 +130,9 @@ class AuthMixin:
         return f"{AUTH_LOGOUT_COOKIE_NAME}=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax{secure}"
 
     def request_is_https(self) -> bool:
+        marker = getattr(self, "_request_is_https", None)
+        if marker is not None:
+            return bool(marker)
         return self.server.tls_context is not None
 
     def send_auth_cookie_if_needed(self) -> None:
@@ -145,7 +164,24 @@ class AuthMixin:
 
     def share_request_allowed(self) -> bool:
         parsed = urlparse(self.path)
-        return parsed.path in {"/", "/ws"} or parsed.path.startswith("/static/")
+        if parsed.path in {"/", "/ws", "/ws/share-ui", "/ws/share-view", "/api/ping", "/api/share-stream", *self.SHARE_READONLY_GET_PATHS, *self.SHARE_SCOPED_FILE_GET_PATHS, *self.SHARE_READONLY_POST_PATHS}:
+            return True
+        if parsed.path.startswith("/share/"):
+            return True
+        return parsed.path.startswith("/static/")
+
+    def share_readonly_api_allowed_path(self, path: str) -> bool:
+        return bool(self.share_token()) and path in (self.SHARE_READONLY_GET_PATHS | self.SHARE_READONLY_POST_PATHS)
+
+    def share_scoped_file_api_allowed(self, parsed: Any) -> bool:
+        if not self.share_token() or parsed.path not in self.SHARE_SCOPED_FILE_GET_PATHS:
+            return False
+        raw_path = parse_qs(parsed.query).get("path", [""])[0].strip()
+        checker = getattr(self.server.app, "share_record_allows_file_path", None)
+        return callable(checker) and checker(self.share_record(), raw_path)
+
+    def share_readonly_api_allowed(self, parsed: Any) -> bool:
+        return self.share_readonly_api_allowed_path(parsed.path) or self.share_scoped_file_api_allowed(parsed)
 
     def reject_share_forbidden(self) -> None:
         self.close_after_unread_body()
@@ -204,7 +240,10 @@ class AuthMixin:
             return False
         self._auth_cookie_identity = None
         self._share_session = None
+        self._share_sessions = []
         self._share_token = None
+        self._share_record = None
+        self._share_mode = "ro"
         share_token = self.share_token_text()
         if share_token:
             verifier = getattr(self.server.app, "verify_share_token", None)
@@ -215,8 +254,15 @@ class AuthMixin:
                 return False
             identity = AuthIdentity(username="share", password="", role="readonly")
             self._auth_identity = identity
-            self._share_session = str(record.get("session") or "")
+            raw_sessions = record.get("sessions") if isinstance(record.get("sessions"), list) else []
+            share_sessions = [str(session or "").strip() for session in raw_sessions if str(session or "").strip()]
+            if not share_sessions and record.get("session"):
+                share_sessions = [str(record.get("session") or "")]
+            self._share_sessions = share_sessions
+            self._share_session = share_sessions[0] if share_sessions else ""
             self._share_token = share_token
+            self._share_record = dict(record)
+            self._share_mode = str(record.get("mode") or "ro") if self.request_is_https() else "ro"
             if not self.share_request_allowed():
                 self.reject_share_forbidden()
                 return False
@@ -261,8 +307,22 @@ class AuthMixin:
     def share_session(self) -> str:
         return str(getattr(self, "_share_session", "") or "")
 
+    def share_sessions(self) -> list[str]:
+        sessions = getattr(self, "_share_sessions", [])
+        return list(sessions) if isinstance(sessions, list) else []
+
+    def share_token(self) -> str:
+        return str(getattr(self, "_share_token", "") or "")
+
+    def share_record(self) -> dict[str, Any] | None:
+        record = getattr(self, "_share_record", None)
+        return dict(record) if isinstance(record, dict) else None
+
+    def share_mode(self) -> str:
+        return str(getattr(self, "_share_mode", "ro") or "ro")
+
     def require_auth_for_post(self, path: str) -> bool:
-        if path == "/api/event":
+        if path == "/api/event" or (path in self.SHARE_READONLY_POST_PATHS and self.share_token_text()):
             return self.require_auth("readonly")
         return self.require_auth("admin")
 
