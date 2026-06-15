@@ -83,7 +83,7 @@ def normalize_agent_prompt_text(action_text: str, source_text: str) -> str:
     normalized = re.sub(r"\s+command$", "", normalized).strip()
     if normalized in {"date", "current date", "today's date", "todays date"}:
         return "tell me the date"
-    if normalized in {"time", "current time", "what the time is"}:
+    if normalized in {"time", "current time", "what the time is", "what time it is"}:
         return "what time is it?"
     if normalized in {"status", "current status", "its status"}:
         return "what is your status?"

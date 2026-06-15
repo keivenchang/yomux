@@ -2411,7 +2411,7 @@ def test_yoagent_send_does_not_claim_success_when_text_remains_in_composer(monke
     assert conversation["messages"] == []
 
 
-def test_yoagent_action_preview_blocks_existing_target_composer_text(monkeypatch):
+def test_yoagent_action_preview_allows_existing_target_composer_text_with_clear(monkeypatch):
     pane = PaneInfo(
         session="1",
         window="0",
@@ -2467,9 +2467,144 @@ def test_yoagent_action_preview_blocks_existing_target_composer_text(monkeypatch
         webapp.control_server.stop()
 
     assert status == HTTPStatus.OK
-    assert preview["status"] == "waiting"
+    assert preview["status"] == "ready"
     assert preview["screen"]["key"] == "input-draft"
-    assert "already contains unsent text" in preview["acceptance_text"]
+    assert preview["screen"]["detected_text"] == "Use this context: It's 11:17 PM PDT. Task: add 10 minutes and say if that is right."
+    assert preview["screen"]["detected_text_preview"] == "Use this context: It's 11:17 PM PDT. Task: add 10 minutes and say if that is right."
+    assert "will clear it before sending" in preview["acceptance_text"]
+
+
+def test_yoagent_chat_clears_existing_draft_before_send(monkeypatch):
+    pane = PaneInfo(
+        session="1",
+        window="0",
+        window_name="claude",
+        pane="0",
+        pane_id="%1",
+        target="%1",
+        current_path="/repo/app",
+        command="claude",
+        active=True,
+        window_active=True,
+        title="",
+        pid=123,
+    )
+    info = SessionInfo(
+        session="1",
+        panes=[pane],
+        selected_pane=pane,
+        agents=[
+            AgentInfo(
+                session="1",
+                kind="claude",
+                pid=123,
+                pane_target="%1",
+                command="claude",
+                cwd="/repo/app",
+                status=None,
+                session_id="claude-session-1",
+                transcript="/tmp/claude-session-1.jsonl",
+                error=None,
+            )
+        ],
+    )
+    draft_text = "\n".join([
+        "new task? /clear to save 193.6k tokens",
+        "────────────────────────────────────────────────────────────────",
+        "❯ token=secret-value run the release",
+        "────────────────────────────────────────────────────────────────",
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+    ])
+    empty_text = "\n".join([
+        "new task? /clear to save 193.6k tokens",
+        "────────────────────────────────────────────────────────────────",
+        "❯ ",
+        "────────────────────────────────────────────────────────────────",
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+    ])
+    cleared = {"value": False}
+    webapp = app_module.TmuxWebtermApp(["1"])
+    monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["1"], None))
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"1": info}, []))
+    monkeypatch.setattr(app_module, "tmux_capture_pane", lambda target, visible_only=False: empty_text if cleared["value"] else draft_text)
+    monkeypatch.setattr(webapp, "activity_summary_payload", lambda: {
+        "generated_at": "2026-06-13T17:40:00+00:00",
+        "session_order": ["1"],
+        "global": {"headline": "Session 1 is idle."},
+        "sessions": {"1": {"local": "Claude session 1 is idle in /repo/app."}},
+        "errors": [],
+    })
+    monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "deterministic", "invocation": "cli"})
+    monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
+    operations = []
+
+    def fake_clear(target):
+        operations.append(("clear", target))
+        cleared["value"] = True
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def fake_paste(target, text, submit=False):
+        operations.append(("paste", target, text, submit))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(app_module, "tmux_clear_input", fake_clear)
+    monkeypatch.setattr(app_module, "tmux_paste_text", fake_paste)
+
+    try:
+        payload, status = webapp.yoagent_chat({"message": "ask session 1 what time it is"})
+        conversation = webapp.yoagent_conversation_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert "cleared existing target input" in payload["answer"]
+    assert operations == [
+        ("clear", "%1"),
+        ("paste", "%1", "what time is it?", True),
+    ]
+    assert "secret-value" not in payload["answer"]
+    assert "secret-value" not in payload["details"]
+    assert "secret-value" not in json.dumps(conversation)
+
+
+def test_yoagent_send_refuses_when_existing_draft_does_not_clear(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    target = {
+        "session": "1",
+        "pane_target": "%1",
+        "agent_kind": "claude",
+        "agent_model": "opus",
+        "agent_transcript": "/tmp/claude-session-1.jsonl",
+        "transport": "tmux-legacy",
+        "transport_label": "legacy tmux pane paste + Return",
+        "transport_kind": "terminal",
+        "prompt": {},
+        "screen": {"key": "input-draft", "text": "target input box already contains unsent text", "detected_text": "old draft"},
+    }
+    monkeypatch.setattr(webapp, "yoagent_action_target", lambda session: (target, HTTPStatus.OK))
+    monkeypatch.setattr(webapp, "yoagent_clear_target_composer", lambda *_args, **_kwargs: {
+        "ok": False,
+        "cleared": False,
+        "detected_text": "old draft",
+        "remaining_text": "old draft",
+        "error": "target input box did not clear",
+    })
+    monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
+    monkeypatch.setattr(app_module, "tmux_paste_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("uncleared draft must not receive paste")))
+
+    try:
+        preview, preview_status = webapp.create_yoagent_action_preview({"type": "send_prompt", "session": "1", "text": "what time is it?"})
+        result, status = webapp.execute_yoagent_send_action({"preview_id": preview["id"]})
+    finally:
+        webapp.control_server.stop()
+
+    assert preview_status == HTTPStatus.OK
+    assert preview["status"] == "ready"
+    assert status == HTTPStatus.CONFLICT
+    assert result["sent"] is False
+    assert result["cleared_input"] is False
+    assert result["cleared_text_preview"] == "old draft"
+    assert "did not clear" in result["error"]
 
 
 def test_yoagent_composer_text_ignores_completed_prompt_history():
@@ -2488,6 +2623,26 @@ def test_yoagent_composer_text_ignores_completed_prompt_history():
         "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
     ])
     webapp = app_module.TmuxWebtermApp(["2"])
+    try:
+        assert webapp.yoagent_visible_composer_text(visible_text) == ""
+    finally:
+        webapp.control_server.stop()
+
+
+def test_yoagent_composer_text_ignores_submitted_queue_above_blank_prompt():
+    visible_text = "\n".join([
+        "❯ Queue: change background to white and document agent handoffs",
+        "",
+        "● Please run /login · API Error: 401 Invalid authentication credentials",
+        "",
+        "✻ Crunched for 4s · 1 shell still running",
+        "                                          new task? /clear to save 328.2k tokens · ◎ /goal active (1d)",
+        "────────────────────────────────────────────────────────────────",
+        "❯ ",
+        "────────────────────────────────────────────────────────────────",
+        "  ⏵⏵ accept edits on · 1 shell · ← for agents · ↓ to manage",
+    ])
+    webapp = app_module.TmuxWebtermApp(["1"])
     try:
         assert webapp.yoagent_visible_composer_text(visible_text) == ""
     finally:

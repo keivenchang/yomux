@@ -110,6 +110,7 @@ from .prompt_detector import approval_prompt_state
 from .tmux_utils import cmd_error
 from .tmux_utils import list_tmux_session_names
 from .tmux_utils import tmux
+from .tmux_utils import tmux_clear_input
 from .tmux_utils import tmux_capture_pane
 from .tmux_utils import tmux_has_exact_session
 from .tmux_utils import tmux_paste_text
@@ -133,6 +134,10 @@ from .yoagent.actions import parse_yoagent_job_intent
 from .yoagent.actions import parse_yoagent_skill_file_intent
 from .yoagent.actions import redacted_action_text
 from .yoagent.actions import redacted_action_preview
+from .yoagent.preferences import yoagent_operator_response
+from .yoagent.preferences import parse_settings_read
+from .yoagent.preferences import parse_settings_write
+from .yoagent.preferences import product_state_needs_activity
 from .yoagent.skills import delete_user_skill_file
 from .yoagent.skills import list_user_skill_files
 from .yoagent.skills import load_yoagent_skills
@@ -151,7 +156,7 @@ YOAGENT_ACTION_RESULT_WAIT_SECONDS = 180.0
 YOAGENT_ACTION_RESULT_POLL_SECONDS = 1.0
 YOAGENT_ACTION_RESULT_MAX_CHARS = 6000
 YOAGENT_ACTION_AGENT_KINDS = {"claude", "codex"}
-YOAGENT_ACTION_ACCEPTING_SCREEN_KEYS = {"idle", "done", "needs-input"}
+YOAGENT_ACTION_ACCEPTING_SCREEN_KEYS = {"idle", "done", "needs-input", "input-draft"}
 YOAGENT_JOBS_STATE_KEY = "yoagent_jobs"
 YOAGENT_JOB_MAX_ITEMS = 200
 YOAGENT_JOB_POLL_SECONDS = 1.0
@@ -169,6 +174,7 @@ YOAGENT_AUTH_FAILURE_RE = re.compile(
     r"(not\s+logged\s+in|log\s*in|login|required\s+auth|authentication|unauthorized|permission\s+denied|401)",
     re.IGNORECASE,
 )
+YOAGENT_THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
 SESSION_FILES_CACHE_MAX_ITEMS = 64
 SESSION_FILES_CACHE_SECONDS = 5.0
 TRANSCRIPT_TAIL_CACHE_MAX_ITEMS = 128
@@ -376,6 +382,40 @@ class SharedWatchRootIndex:
 
 def yoagent_cli_auth_failure(text: str) -> bool:
     return bool(YOAGENT_AUTH_FAILURE_RE.search(text or ""))
+
+
+def strip_yoagent_hidden_thinking(text: str) -> tuple[str, bool]:
+    value = str(text or "")
+    cleaned, count = YOAGENT_THINK_BLOCK_RE.subn("", value)
+    return cleaned.strip(), count > 0
+
+
+def yoagent_response_details(response: dict[str, Any]) -> str:
+    timing = response.get("timing") if isinstance(response.get("timing"), dict) else {}
+    cli = response.get("cli") if isinstance(response.get("cli"), dict) else {}
+    lines: list[str] = []
+    backend_used = str(response.get("backend_used") or response.get("backend") or "").strip()
+    if backend_used:
+        lines.append(f"- backend: `{backend_used}`")
+    ttfr_ms = timing.get("ttfr_ms")
+    if isinstance(ttfr_ms, (int, float)):
+        lines.append(f"- response time: `{float(ttfr_ms) / 1000:.3f}s` (`{float(ttfr_ms):.1f}ms`)")
+    elapsed_ms = cli.get("elapsed_ms")
+    if isinstance(elapsed_ms, (int, float)):
+        lines.append(f"- model CLI time: `{float(elapsed_ms) / 1000:.3f}s`")
+    prompt_chars = cli.get("prompt_chars")
+    if isinstance(prompt_chars, int):
+        lines.append(f"- prompt size: `{prompt_chars}` chars")
+    if "resumed" in cli:
+        lines.append(f"- model session: `{'resumed' if cli.get('resumed') else 'seeded'}`")
+    if cli.get("context_changed"):
+        lines.append("- activity context changed before this model call")
+    fallback_reason = str(response.get("fallback_reason") or "").strip()
+    if fallback_reason:
+        lines.append(f"- fallback reason: {fallback_reason}")
+    if response.get("hidden_thinking_removed"):
+        lines.append("- raw model thinking was hidden; YOLOmux shows safe diagnostics instead of chain-of-thought")
+    return "\n".join(lines)
 
 
 def file_stat_signature(path: Path) -> tuple[str, int, int]:
@@ -2782,14 +2822,16 @@ class TmuxWebtermApp:
         summary = re.sub(r"(?im)^\s*state\s*:\s*[a-z-]+\s*$", "", summary).strip()
         return {"state": state, "rolling_summary": truncate_text(summary, 1200)}
 
-    def run_yoagent_direct_prompt_backend(self, backend: str, prompt: str) -> tuple[str, str, dict[str, Any]]:
+    def run_yoagent_direct_prompt_backend(self, backend: str, prompt: str, settings: dict[str, Any] | None = None) -> tuple[str, str, dict[str, Any]]:
         if backend not in {"codex", "claude"}:
             return "", f"unknown backend: {backend}", {}
         started = time.monotonic()
         if backend == "codex":
             answer, error, _session_id = self.run_yoagent_codex_cli(prompt, session_id="", resume=False)
         else:
-            answer, error = self.run_yoagent_claude_cli(prompt, session_id="", resume=False, model=YOAGENT_CLAUDE_SUMMARY_MODEL)
+            current_settings = settings or self.yoagent_settings()
+            claude_model = str(current_settings.get("claude_model") or YOAGENT_CLAUDE_SUMMARY_MODEL).strip()
+            answer, error = self.run_yoagent_claude_cli(prompt, session_id="", resume=False, model=claude_model)
         return answer, yoagent_cli_fallback_reason(backend, error), {
             "backend": backend,
             "prompt_chars": len(prompt),
@@ -2837,7 +2879,7 @@ class TmuxWebtermApp:
         invocation = str(current_settings.get("invocation") or "cli").strip().lower()
         if backend not in {"codex", "claude"} or invocation != "cli":
             return {"session": session, "updated": False, "reason": "no CLI backend available", "backend": backend}
-        answer, fallback_reason, cli_status = self.run_yoagent_direct_prompt_backend(backend, prompt)
+        answer, fallback_reason, cli_status = self.run_yoagent_direct_prompt_backend(backend, prompt, settings=current_settings)
         if not answer:
             return {"session": session, "updated": False, "reason": fallback_reason or "empty summary response", "backend": backend, "cli": cli_status}
         parsed = self.parse_yoagent_session_summary_response(answer, default_state="working" if agent.status == "running" else "idle")
@@ -3051,6 +3093,7 @@ class TmuxWebtermApp:
         created_at: str | None = None,
         kind: str = "",
         session: str = "",
+        details: str = "",
     ) -> dict[str, Any] | None:
         clean_content = redacted_action_text(str(content or ""), 100_000)
         message: dict[str, Any] = {"role": role, "content": clean_content, "createdAt": created_at or datetime.now(timezone.utc).isoformat()}
@@ -3060,6 +3103,8 @@ class TmuxWebtermApp:
             message["kind"] = kind
         if session:
             message["session"] = session
+        if details:
+            message["details"] = redacted_action_text(str(details), 10_000)
         return yoagent_conversation.append_message(message)
 
     def publish_yoagent_conversation_changed(self, trigger: str = "yoagent") -> None:
@@ -3184,6 +3229,12 @@ class TmuxWebtermApp:
         if "text" in public:
             public["text_preview"] = redacted_action_preview(str(public.get("text") or ""))
             public["text"] = redacted_action_text(str(public.get("text") or ""), YOAGENT_ACTION_TEXT_LIMIT)
+        screen = public.get("screen") if isinstance(public.get("screen"), dict) else {}
+        if "detected_text" in screen:
+            detected = str(screen.get("detected_text") or "")
+            screen["detected_text_preview"] = redacted_action_preview(detected)
+            screen["detected_text"] = redacted_action_text(detected, 240)
+            public["screen"] = screen
         handoff = public.get("handoff") if isinstance(public.get("handoff"), dict) else {}
         if "instruction" in handoff:
             handoff["instruction"] = redacted_action_text(str(handoff.get("instruction") or ""), YOAGENT_ACTION_TEXT_LIMIT)
@@ -3669,8 +3720,13 @@ class TmuxWebtermApp:
                 pane_text = tmux_capture_pane(target_pane)
                 prompt_state = hybrid_approval_prompt_state(session, visible_text, pane_text or visible_text, prompt_source=self.auto_approve_prompt_source())
             screen_state = agent_screen_state(visible_text)
-            if screen_state.get("key") == "idle" and self.yoagent_visible_composer_text(visible_text):
-                screen_state = {"key": "input-draft", "text": "target input box already contains unsent text"}
+            composer_text = self.yoagent_visible_composer_text(visible_text)
+            if screen_state.get("key") == "idle" and composer_text:
+                screen_state = {
+                    "key": "input-draft",
+                    "text": "target input box already contains unsent text",
+                    "detected_text": composer_text,
+                }
             if screen_state.get("key") == "idle":
                 infos = discovered_sessions
                 if infos is None:
@@ -3695,14 +3751,14 @@ class TmuxWebtermApp:
             return False, "target agent is at an approval prompt, not a fresh AI prompt"
         screen = target.get("screen") if isinstance(target.get("screen"), dict) else {}
         screen_key = str(screen.get("key") or "idle")
+        if screen_key == "input-draft":
+            return True, "target input box has unsent text; YO!agent will clear it before sending"
         if screen_key in YOAGENT_ACTION_ACCEPTING_SCREEN_KEYS:
             return True, "target agent is accepting an AI prompt"
         if screen_key == "working":
             return False, "target agent is still working"
         if screen_key in {"approval", "needs-approval", "yolo-approval"}:
             return False, "target agent is at an approval prompt"
-        if screen_key == "input-draft":
-            return False, str(screen.get("text") or "target input box already contains unsent text")
         if screen_key in {"disconnected", "error"}:
             return False, str(screen.get("text") or "target pane is not reachable")
         return False, f"target agent is not accepting an AI prompt ({screen_key})"
@@ -3795,14 +3851,39 @@ class TmuxWebtermApp:
         action_text = str(action.get("text") or "")
         if action.get("status") == "ready":
             where = f" in `{cwd}`" if cwd else ""
+            screen = action.get("screen") if isinstance(action.get("screen"), dict) else {}
+            clear_note = " I will clear the existing target input before sending." if str(screen.get("key") or "") == "input-draft" else ""
             return "\n".join([
-                f"I resolved tmux session `{session}`{where} and prepared a confirmed send action.",
+                f"I resolved tmux session `{session}`{where} and prepared a confirmed send action.{clear_note}",
                 "",
                 f"Transport: `{transport_label}`. Text to send:",
                 "",
                 f"```text\n{action_text}\n```",
             ])
+        screen = action.get("screen") if isinstance(action.get("screen"), dict) else {}
+        if str(screen.get("key") or "") == "input-draft":
+            detected = str(screen.get("detected_text_preview") or screen.get("detected_text") or "").strip()
+            if detected:
+                return f"I resolved tmux session `{session}`, but I did not send anything because the target input box already contains unsent text: `{detected}`."
         return f"I resolved tmux session `{session}`, but I did not send anything because {action.get('acceptance_text') or 'the target is not accepting an AI prompt'}."
+
+    def yoagent_action_preview_details(self, action: dict[str, Any]) -> str:
+        lines: list[str] = []
+        session = str(action.get("session") or "")
+        screen = action.get("screen") if isinstance(action.get("screen"), dict) else {}
+        screen_key = str(screen.get("key") or "").strip()
+        if session:
+            lines.append(f"- target session: `{session}`")
+        if screen_key:
+            lines.append(f"- target screen state: `{screen_key}`")
+        if screen_key == "input-draft":
+            detected = str(screen.get("detected_text_preview") or screen.get("detected_text") or "").strip()
+            if detected:
+                lines.append(f"- detected target composer text: `{detected}`")
+        acceptance = str(action.get("acceptance_text") or "").strip()
+        if acceptance:
+            lines.append(f"- send blocker: {acceptance}")
+        return "\n".join(lines)
 
     def yoagent_action_sent_answer(self, preview: dict[str, Any], result: dict[str, Any]) -> str:
         target = preview.get("target") if isinstance(preview.get("target"), dict) else {}
@@ -3810,8 +3891,9 @@ class TmuxWebtermApp:
         agent = " ".join(str(item) for item in [target.get("agent_kind"), target.get("agent_model")] if item)
         agent_text = f" ({agent})" if agent else ""
         transport_label = str(result.get("transport_label") or target.get("transport_label") or self.yoagent_transports.get(str(target.get("transport") or "")).label)
+        cleared = " cleared existing target input," if result.get("cleared_input") else ""
         suffix = " I'll watch it in the background and show the result here when it replies." if preview.get("return_result") else ""
-        return f"I verified tmux session `{session}`{agent_text} is accepting an AI prompt, then sent the text through `{transport_label}`.{suffix}"
+        return f"I verified tmux session `{session}`{agent_text} is accepting an AI prompt,{cleared} then sent the text through `{transport_label}`.{suffix}"
 
     def yoagent_job_answer(self, job: dict[str, Any]) -> str:
         job_type = str(job.get("type") or "")
@@ -4170,6 +4252,51 @@ class TmuxWebtermApp:
                 continue
             return False
 
+    def yoagent_clear_target_composer(
+        self,
+        target: dict[str, Any],
+        *,
+        wait_seconds: float = 0.8,
+        poll_seconds: float = 0.1,
+    ) -> dict[str, Any]:
+        pane_target = str(target.get("pane_target") or target.get("session") or "").strip()
+        if not pane_target:
+            return {"ok": False, "cleared": False, "error": "target pane is missing"}
+        try:
+            visible_text = tmux_capture_pane(pane_target, visible_only=True) or ""
+        except (OSError, subprocess.SubprocessError) as exc:
+            return {"ok": False, "cleared": False, "error": str(exc)}
+        detected = self.yoagent_visible_composer_text(visible_text)
+        if not detected:
+            return {"ok": True, "cleared": False, "detected_text": ""}
+        result = tmux_clear_input(pane_target)
+        if result.returncode != 0:
+            return {
+                "ok": False,
+                "cleared": False,
+                "detected_text": detected,
+                "error": cmd_error(result, "tmux send-keys C-u failed"),
+            }
+        deadline = time.monotonic() + max(0.0, wait_seconds)
+        pause = threading.Event()
+        while True:
+            try:
+                visible_text = tmux_capture_pane(pane_target, visible_only=True) or ""
+            except (OSError, subprocess.SubprocessError) as exc:
+                return {"ok": False, "cleared": False, "detected_text": detected, "error": str(exc)}
+            remaining = self.yoagent_visible_composer_text(visible_text)
+            if not remaining:
+                return {"ok": True, "cleared": True, "detected_text": detected}
+            if time.monotonic() >= deadline:
+                return {
+                    "ok": False,
+                    "cleared": False,
+                    "detected_text": detected,
+                    "remaining_text": remaining,
+                    "error": "target input box did not clear",
+                }
+            pause.wait(min(max(0.01, poll_seconds), max(0.0, deadline - time.monotonic())))
+
     def preview_yoagent_send_action(self, payload: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
         intent = {
             "type": str(payload.get("type") or "send_prompt"),
@@ -4209,7 +4336,11 @@ class TmuxWebtermApp:
             return {"preview_id": preview_id, "session": preview.get("session"), "error": "action target changed; create a fresh preview"}, HTTPStatus.CONFLICT
         if normalize_yoagent_transport_id(str(current.get("transport") or "")) != normalize_yoagent_transport_id(str(target.get("transport") or "")):
             return {"preview_id": preview_id, "session": preview.get("session"), "error": "action target changed; create a fresh preview"}, HTTPStatus.CONFLICT
-        target = {**target, "agent_transcript": current.get("agent_transcript") or target.get("agent_transcript") or ""}
+        target = {
+            **target,
+            "agent_transcript": current.get("agent_transcript") or target.get("agent_transcript") or "",
+            "screen": current.get("screen") if isinstance(current.get("screen"), dict) else target.get("screen") or {},
+        }
         target["transport"] = normalize_yoagent_transport_id(str(target.get("transport") or current.get("transport") or ""))
         target["transport_label"] = current.get("transport_label") or target.get("transport_label") or self.yoagent_transports.get(str(target.get("transport") or "")).label
         target["transport_kind"] = current.get("transport_kind") or target.get("transport_kind") or self.yoagent_transports.get(str(target.get("transport") or "")).kind
@@ -4218,6 +4349,28 @@ class TmuxWebtermApp:
         transport = normalize_yoagent_transport_id(str(target.get("transport") or ""))
         transport_provider = self.yoagent_transports.get(transport)
         return_result = bool(preview.get("return_result") or payload.get("return_result"))
+        clear_result: dict[str, Any] = {}
+        screen = current.get("screen") if isinstance(current.get("screen"), dict) else {}
+        if transport == TMUX_LEGACY_TRANSPORT_ID and str(screen.get("key") or "") == "input-draft":
+            clear_result = self.yoagent_clear_target_composer(target)
+            cleared_text_preview = redacted_action_preview(str(clear_result.get("detected_text") or ""))
+            if not clear_result.get("ok"):
+                self.log_event(str(preview.get("session") or ""), "yoagent_action_clear_failed", f"YO!agent could not clear input before send to {preview.get('session')}", {
+                    "preview_id": preview_id,
+                    "transport": transport,
+                    "cleared_text_preview": cleared_text_preview,
+                    "remaining_text_preview": redacted_action_preview(str(clear_result.get("remaining_text") or "")),
+                })
+                return {
+                    "preview_id": preview_id,
+                    "session": preview.get("session"),
+                    "transport": transport,
+                    "transport_label": transport_provider.label,
+                    "sent": False,
+                    "cleared_input": False,
+                    "cleared_text_preview": cleared_text_preview,
+                    "error": clear_result.get("error") or "target input box did not clear",
+                }, HTTPStatus.CONFLICT
         result_marker = self.yoagent_action_result_marker(target) if return_result else {}
         send_result = transport_provider.send(
             target,
@@ -4257,6 +4410,8 @@ class TmuxWebtermApp:
             "preview_id": preview_id,
             "transport": transport,
             "text_preview": redacted_action_preview(text),
+            "cleared_input": bool(clear_result.get("cleared")),
+            "cleared_text_preview": redacted_action_preview(str(clear_result.get("detected_text") or "")),
         })
         response = {
             "ok": True,
@@ -4270,11 +4425,15 @@ class TmuxWebtermApp:
             "return_result": return_result,
             "result_marker": result_marker,
         }
+        if clear_result.get("cleared"):
+            response["cleared_input"] = True
+            response["cleared_text_preview"] = redacted_action_preview(str(clear_result.get("detected_text") or ""))
         if persist_result:
             suffix = "\n\nI'll show the result here when the target replies." if return_result else ""
+            cleared_prefix = "Cleared existing target input first, then " if clear_result.get("cleared") else ""
             self.record_yoagent_message(
                 "assistant",
-                f"Sent to tmux session `{response['session']}` through `{response['transport_label']}`.{suffix}",
+                f"{cleared_prefix}sent to tmux session `{response['session']}` through `{response['transport_label']}`.{suffix}",
                 created_at=datetime.now(timezone.utc).isoformat(),
             )
             response["conversation"] = self.yoagent_conversation_payload()
@@ -4333,7 +4492,8 @@ class TmuxWebtermApp:
         threading.Thread(target=worker, name="yoagent-prewarm", daemon=True).start()
         return {"ok": True, "started": True, "backend": requested_backend, "backend_used": backend}, HTTPStatus.ACCEPTED
 
-    def yoagent_chat(self, payload: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
+    def yoagent_chat(self, payload: dict[str, Any], access_role: str = "admin") -> tuple[dict[str, Any], HTTPStatus]:
+        chat_started = time.monotonic()
         question = truncate_text(" ".join(str(payload.get("message") or payload.get("question") or "").split()), 4000)
         if not question:
             return {"error": "missing YO!agent message"}, HTTPStatus.BAD_REQUEST
@@ -4341,15 +4501,37 @@ class TmuxWebtermApp:
         self.record_yoagent_message("user", question)
         settings = self.yoagent_settings()
         locale = str(payload.get("locale") or "en").strip()
-        activity_payload = self.yoagent_activity_payload()
-        context_lines = yoagent_context_lines(activity_payload)
+        activity_payload_cache: dict[str, Any] | None = None
+        context_lines_cache: list[str] | None = None
+
+        def get_activity_payload() -> dict[str, Any]:
+            nonlocal activity_payload_cache
+            if activity_payload_cache is None:
+                activity_payload_cache = self.yoagent_activity_payload()
+            return activity_payload_cache
+
+        def get_context_lines() -> list[str]:
+            nonlocal context_lines_cache
+            if context_lines_cache is None:
+                context_lines_cache = yoagent_context_lines(get_activity_payload())
+            return context_lines_cache
 
         def finish(response: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
             response.setdefault("answered_at", datetime.now(timezone.utc).isoformat())
+            timing = response.get("timing") if isinstance(response.get("timing"), dict) else {}
+            timing.setdefault("ttfr_ms", round((time.monotonic() - chat_started) * 1000, 3))
+            response["timing"] = timing
             answer_text = str(response.get("answer") or "")
+            answer_text, hidden_thinking_removed = strip_yoagent_hidden_thinking(answer_text)
+            response["answer"] = answer_text
+            if hidden_thinking_removed:
+                response["hidden_thinking_removed"] = True
+            details = str(response.get("details") or "").strip()
+            generated_details = yoagent_response_details(response)
+            response["details"] = "\n".join(part for part in [details, generated_details] if part).strip()
             actions = response.get("actions") if isinstance(response.get("actions"), list) else []
             if answer_text:
-                self.record_yoagent_message("assistant", answer_text, actions=actions)
+                self.record_yoagent_message("assistant", answer_text, actions=actions, details=str(response.get("details") or ""))
             response["conversation"] = self.yoagent_conversation_payload()
             return response, HTTPStatus.OK
 
@@ -4360,8 +4542,11 @@ class TmuxWebtermApp:
             backend: str = "yolomux",
             backend_used: str = "yolomux",
             fallback_reason: str = "",
+            details: str = "",
             cli: dict[str, Any] | None = None,
+            include_activity: bool = False,
         ) -> dict[str, Any]:
+            response_activity = get_activity_payload() if include_activity else {}
             return {
                 "answer": answer,
                 "actions": actions or [],
@@ -4369,18 +4554,23 @@ class TmuxWebtermApp:
                 "backend_used": backend_used,
                 "fallback": bool(fallback_reason),
                 "fallback_reason": fallback_reason,
+                "details": details,
                 "cli": cli or {},
-                "context_lines": context_lines,
-                "generated_at": activity_payload.get("generated_at"),
-                "session_order": activity_payload.get("session_order", []),
+                "context_lines": get_context_lines() if include_activity else [],
+                "generated_at": response_activity.get("generated_at"),
+                "session_order": response_activity.get("session_order", []),
             }
 
         skill_file_intent = parse_yoagent_skill_file_intent(question)
         if skill_file_intent:
+            if access_role != "admin":
+                return finish(base_response("YO!skill and context file management requires an admin login. I did not change anything."))
             return finish(base_response(self.yoagent_skill_file_answer(skill_file_intent)))
 
         job_intent = parse_yoagent_job_intent(question, self.sessions)
         if job_intent:
+            if access_role != "admin":
+                return finish(base_response("YO!agent watch and notify jobs require an admin login. I did not create a job."))
             job_payload, job_status = self.create_yoagent_job(job_intent)
             if job_status not in {HTTPStatus.OK, HTTPStatus.CONFLICT}:
                 return {"error": job_payload.get("error") or "failed to create YO!agent job", **job_payload}, job_status
@@ -4390,6 +4580,8 @@ class TmuxWebtermApp:
 
         action_intent = parse_yoagent_action_intent(question, history, self.sessions)
         if action_intent:
+            if access_role != "admin":
+                return finish(base_response("Sending prompts to tmux sessions through YO!agent requires an admin login. I did not send anything."))
             action, action_status = self.create_yoagent_action_preview(action_intent)
             if action_status != HTTPStatus.OK:
                 return {"error": action.get("error") or "failed to create YO!agent action", **action}, action_status
@@ -4414,8 +4606,24 @@ class TmuxWebtermApp:
                     duplicate = " I reused the existing matching job." if job_payload.get("duplicate") else ""
                     return finish(base_response(self.yoagent_job_answer(job) + duplicate))
             if not confirmation_required:
-                return finish(base_response(self.yoagent_action_answer(action)))
-            return finish(base_response(self.yoagent_action_answer(action), actions=[action]))
+                return finish(base_response(self.yoagent_action_answer(action), details=self.yoagent_action_preview_details(action)))
+            return finish(base_response(self.yoagent_action_answer(action), actions=[action], details=self.yoagent_action_preview_details(action)))
+        settings_payload_data = self.settings_payload()
+        activity_for_operator = get_activity_payload() if product_state_needs_activity(question) else {}
+        if parse_settings_write(question, settings_payload_data) or parse_settings_read(question, settings_payload_data):
+            activity_for_operator = {}
+        operator_response = yoagent_operator_response(
+            question,
+            settings_payload_data,
+            activity_for_operator,
+            access_role,
+            self.save_settings,
+        )
+        if operator_response:
+            operator_response.setdefault("context_lines", yoagent_context_lines(activity_for_operator) if activity_for_operator else [])
+            operator_response.setdefault("generated_at", activity_for_operator.get("generated_at") if activity_for_operator else None)
+            operator_response.setdefault("session_order", activity_for_operator.get("session_order", []) if activity_for_operator else [])
+            return finish(operator_response)
         requested_backend = str(settings.get("backend") or "deterministic").strip().lower()
         backend = resolve_yoagent_backend(requested_backend)
         invocation = str(settings.get("invocation") or "cli").strip().lower()
@@ -4423,6 +4631,7 @@ class TmuxWebtermApp:
         backend_used = "deterministic"
         fallback_reason = ""
         cli_status: dict[str, Any] = {}
+        activity_payload = get_activity_payload()
         if backend in {"codex", "claude"} and invocation == "cli":
             answer, fallback_reason, cli_status = self.run_yoagent_cli_backend(backend, question, activity_payload, settings, history, locale)
             if answer:
@@ -4431,7 +4640,7 @@ class TmuxWebtermApp:
             fallback_reason = f"{backend} {invocation} invocation is not available yet"
         if not answer:
             answer = deterministic_yoagent_reply(question, activity_payload, settings, locale)
-        return finish(base_response(answer, backend=requested_backend, backend_used=backend_used, fallback_reason=fallback_reason, cli=cli_status))
+        return finish(base_response(answer, backend=requested_backend, backend_used=backend_used, fallback_reason=fallback_reason, cli=cli_status, include_activity=True))
 
     def run_yoagent_cli_backend(
         self,
@@ -4460,7 +4669,8 @@ class TmuxWebtermApp:
             answer, error, captured_session_id = self.run_yoagent_codex_cli(prompt, session_id=session_id, resume=not seed)
             next_session_id = captured_session_id or session_id
         else:
-            answer, error = self.run_yoagent_claude_cli(prompt, session_id=next_session_id, resume=not seed)
+            claude_model = str(settings.get("claude_model") or YOAGENT_CLAUDE_SUMMARY_MODEL).strip()
+            answer, error = self.run_yoagent_claude_cli(prompt, session_id=next_session_id, resume=not seed, model=claude_model)
         elapsed_ms = round((time.monotonic() - started) * 1000)
         fallback_reason = yoagent_cli_fallback_reason(backend, error)
         status = {

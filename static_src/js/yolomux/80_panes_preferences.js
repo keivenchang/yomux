@@ -1811,6 +1811,7 @@ function yoagentTimestampText(value) {
       day: 'numeric',
       hour: '2-digit',
       minute: '2-digit',
+      second: '2-digit',
       timeZoneName: 'short',
     }).format(date);
   } catch (_) {
@@ -1821,6 +1822,25 @@ function yoagentTimestampText(value) {
 function yoagentMessageTimestampHtml(value) {
   const text = yoagentTimestampText(value);
   return text ? `<span class="yoagent-message-time">${esc(text)}</span>` : '';
+}
+
+function yoagentMessageDetailsKey(message, index) {
+  return [
+    index,
+    message?.role || 'assistant',
+    message?.kind || '',
+    message?.session || '',
+    message?.createdAt || '',
+  ].map(part => String(part ?? '')).join('|');
+}
+
+function yoagentMessageDetailsHtml(message, key = '') {
+  const text = String(message?.details || '').trim();
+  if (!text) return '';
+  return `<details class="yoagent-message-details" data-yoagent-message-details-key="${esc(key)}">
+    <summary>${esc(t('popover.details'))}</summary>
+    <pre>${esc(text)}</pre>
+  </details>`;
 }
 
 function relativeActivityGeneratedText(payload = activitySummaryPayload) {
@@ -1872,11 +1892,12 @@ function yoagentChatMessagesHtml() {
     }
     return `<div class="yoagent-chat-empty">${esc(t('yoagent.chatEmpty', {name: yoagentTabLabel()}))}</div>`;
   }
-  const messageHtml = messages.map(message => {
+  const messageHtml = messages.map((message, index) => {
     const role = message.role === 'user' ? t('yoagent.you') : yoagentTabLabel();
     const roleClass = message.role === 'user' ? 'user' : 'assistant';
     const agentResult = roleClass === 'assistant' && message?.kind === 'agent_result';
     const messageClass = `yoagent-message ${roleClass}${agentResult ? ' yoagent-agent-result' : ''}`;
+    const detailsKey = yoagentMessageDetailsKey(message, index);
     // Assistant replies are Markdown (numbered sections, bold titles, sub-bullets); flag the body so
     // renderYoagentMessageMarkdown() can render it. The escaped text stays as the no-marked fallback.
     const bodyClass = roleClass === 'assistant' ? 'yoagent-message-body markdown-body' : 'yoagent-message-body';
@@ -1884,6 +1905,7 @@ function yoagentChatMessagesHtml() {
     return `<div class="${messageClass}">
       <div class="yoagent-message-role"><span>${esc(role)}</span>${yoagentMessageTimestampHtml(message.createdAt)}</div>
       <div class="${bodyClass}"${markdownAttr}>${esc(message.content || '')}</div>
+      ${roleClass === 'assistant' ? yoagentMessageDetailsHtml(message, detailsKey) : ''}
       ${roleClass === 'assistant' ? yoagentActionCardsHtml(message.actions) : ''}
     </div>`;
   }).join('');
@@ -2212,7 +2234,7 @@ function yoagentResolvedBackend() {
 }
 
 function yoagentChatEnabled() {
-  return ['claude', 'codex'].includes(yoagentResolvedBackend());
+  return ['claude', 'codex', 'deterministic'].includes(yoagentResolvedBackend());
 }
 
 // The composer's "Auto" pill = the real yoagent.backend setting (Auto / Claude / Codex / No agent),
@@ -2232,8 +2254,9 @@ function yoagentBackendPillHtml(disabled) {
 }
 
 function yoagentChatHtml() {
-  const disabled = yoagentBusy || readOnlyMode ? ' disabled' : '';
-  const placeholder = readOnlyMode ? t('yoagent.chatAdminPlaceholder', {name: yoagentTabLabel()}) : t('yoagent.chatPlaceholder');
+  const disabled = yoagentBusy ? ' disabled' : '';
+  const backendDisabled = yoagentBusy || readOnlyMode ? ' disabled' : '';
+  const placeholder = t('yoagent.chatPlaceholder');
   const isThinking = yoagentBusy || yoagentPrewarming;
   const startupInfo = yoagentStartupInfoVisible ? yoagentStartupInfoHtml() : '';
   const hasConversation = Boolean(yoagentMessages.length || yoagentPendingWaits.length || yoagentNotice || isThinking || yoagentError || startupInfo);
@@ -2241,16 +2264,16 @@ function yoagentChatHtml() {
   const busy = isThinking
     ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span><span class="yoagent-thinking">${thinkingHtml}</span></div>`
     : '';
-  const retry = yoagentError && yoagentDraft && yoagentChatEnabled() && !yoagentBusy && !readOnlyMode
+  const retry = yoagentError && yoagentDraft && yoagentChatEnabled() && !yoagentBusy
     ? `<button type="button" class="yoagent-chat-retry" data-yoagent-retry>${esc(t('yoagent.retry'))}</button>`
     : '';
   const error = yoagentError ? `<div class="yoagent-chat-error"><span>${esc(yoagentError)}</span>${retry}</div>` : '';
-  const clearDisabled = yoagentBusy || (!yoagentMessages.length && !yoagentNotice && !yoagentError) ? ' disabled' : '';
+  const clearDisabled = yoagentBusy || readOnlyMode || (!yoagentMessages.length && !yoagentNotice && !yoagentError) ? ' disabled' : '';
   const form = yoagentChatEnabled()
     ? `<form class="yoagent-chat-form" data-yoagent-chat-form>
       <input type="text" class="yoagent-chat-input" data-yoagent-chat-input value="${esc(yoagentDraft)}" placeholder="${esc(placeholder)}"${disabled}>
       <div class="yoagent-chat-controls">
-        ${yoagentBackendPillHtml(disabled)}
+        ${yoagentBackendPillHtml(backendDisabled)}
         <span class="yoagent-chat-controls-spacer"></span>
         <button type="button" class="yoagent-chat-clear" data-yoagent-clear${clearDisabled}>${esc(t('yoagent.clear'))}</button>
         <button type="submit" class="yoagent-chat-send"${disabled} title="${esc(t('yoagent.ask'))}" aria-label="${esc(t('yoagent.ask'))}">
@@ -2333,7 +2356,7 @@ async function clearYoagentConversation() {
 
 async function sendYoagentChatMessage(rawText) {
   const text = String(rawText || '').trim();
-  if (!text || yoagentBusy || readOnlyMode || !yoagentChatEnabled()) return;
+  if (!text || yoagentBusy || !yoagentChatEnabled()) return;
   resetYoagentComposerHistory();
   hideYoagentStartupInfo();
   installYoagentFocusTracker();
@@ -2360,6 +2383,7 @@ async function sendYoagentChatMessage(rawText) {
         role: 'assistant',
         content: payload.answer || t('yoagent.noAnswer'),
         actions: Array.isArray(payload.actions) ? payload.actions : [],
+        details: payload.details || '',
         createdAt: payload.answered_at || new Date().toISOString(),
       });
     }
@@ -2698,6 +2722,27 @@ function preferenceSections() {
         {value: 'cli', label: t('pref.yoagent.invocation.cli')},
         {value: 'api-key', label: t('pref.yoagent.invocation.api-key')},
       ], help: t('pref.yoagent.invocation.help')},
+      {path: 'yoagent.claude_model', label: t('pref.yoagent.claude_model.label'), type: 'select', choices: [
+        {value: 'claude-opus-4-8', label: t('pref.yoagent.claude_model.opus')},
+        {value: 'claude-sonnet-4-6', label: t('pref.yoagent.claude_model.sonnet')},
+        {value: 'claude-haiku-4-5', label: t('pref.yoagent.claude_model.haiku')},
+      ], help: t('pref.yoagent.claude_model.help')},
+      {path: 'yoagent.claude_effort', label: t('pref.yoagent.claude_effort.label'), type: 'radio', choices: [
+        {value: 'low', label: t('pref.yoagent.claude_effort.low')},
+        {value: 'medium', label: t('pref.yoagent.claude_effort.medium')},
+        {value: 'high', label: t('pref.yoagent.claude_effort.high')},
+      ], help: t('pref.yoagent.claude_effort.help')},
+      {path: 'yoagent.codex_model', label: t('pref.yoagent.codex_model.label'), type: 'select', choices: [
+        {value: 'gpt-5.3-codex-spark', label: t('pref.yoagent.codex_model.gpt53spark')},
+        {value: 'gpt-5.4-mini', label: t('pref.yoagent.codex_model.gpt54mini')},
+        {value: 'gpt-5.4', label: t('pref.yoagent.codex_model.gpt54')},
+        {value: 'gpt-5.5', label: t('pref.yoagent.codex_model.gpt55')},
+      ], help: t('pref.yoagent.codex_model.help')},
+      {path: 'yoagent.codex_effort', label: t('pref.yoagent.codex_effort.label'), type: 'radio', choices: [
+        {value: 'low', label: t('pref.yoagent.codex_effort.low')},
+        {value: 'medium', label: t('pref.yoagent.codex_effort.medium')},
+        {value: 'high', label: t('pref.yoagent.codex_effort.high')},
+      ], help: t('pref.yoagent.codex_effort.help')},
       {path: 'yoagent.auto_refresh', label: t('pref.yoagent.auto_refresh.label'), type: 'boolean', help: t('pref.yoagent.auto_refresh.help')},
       {path: 'yoagent.refresh_interval_seconds', label: t('pref.yoagent.refresh_interval_seconds.label'), type: 'number', min: 30, max: 3600, step: 30, suffix: 's', help: t('pref.yoagent.refresh_interval_seconds.help')},
       {path: 'yoagent.system_prompt', label: t('pref.yoagent.system_prompt.label'), type: 'textarea', help: t('pref.yoagent.system_prompt.help'), alwaysEnableReset: true},
@@ -2783,7 +2828,7 @@ const preferenceSearchAliasGroups = [
   ['yolo', 'autoapprove', 'approve', 'approval', 'permission', 'permissions', 'accept', 'confirm', 'rules', 'policy', 'safe', 'danger', 'dangerous'],
   ['yoagent', 'yo agent', 'assistant', 'chat', 'summary', 'activity', 'prompt', 'backend', 'claude', 'codex'],
   ['dry', 'simulate', 'test'],
-  ['startup', 'launch', 'open', 'start', 'split', 'grid', 'wall', 'layout'],
+  ['startup', 'launch', 'open', 'start', 'split', 'grid', 'layout'],
 ];
 const preferenceSearchAliasMap = new Map();
 for (const group of preferenceSearchAliasGroups) {
@@ -2832,7 +2877,7 @@ function preferenceSearchKeywordsForItem(item) {
   if (path === 'yolo.dry_run') add(['test', 'simulate', 'what would']);
   if (path === 'yolo.rule_file_path') add(['yaml', 'config']);
   if (path === 'general.auto_focus') add(['click', 'focus', 'hover', 'menu', 'dropdown', 'select pane', 'terminal', 'editor', 'finder', 'file explorer', 'preferences', 'everything']);
-  if (path === 'general.default_layout') add(['startup', 'launch', 'open', 'start', 'split', 'grid', 'wall']);
+  if (path === 'general.default_layout') add(['startup', 'launch', 'open', 'start', 'split', 'grid']);
   if (path === 'general.default_sessions') add(['startup', 'launch', 'which sessions']);
   if (label.includes('quick')) add(['shortcuts', 'bookmarks', 'favorites']);
   return keywords;

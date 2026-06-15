@@ -89,7 +89,7 @@ function nextLayoutSlot(slots = layoutSlots) {
 
 function normalizeLayoutMode(value) {
   const text = String(value || '').trim();
-  return layoutModeValues.includes(text) ? text : defaultLayoutMode;
+  return legacyLayoutModeValues.includes(text) ? text : defaultLayoutMode;
 }
 
 function configuredDefaultLayoutMode() {

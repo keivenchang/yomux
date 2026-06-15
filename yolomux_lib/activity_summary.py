@@ -23,6 +23,7 @@ from .transcripts import transcript_activity_state
 from .web import server_string
 from .settings import DEFAULT_SETTINGS
 from .settings import LEGACY_YOAGENT_DEFAULTS
+from .yoagent.preferences import product_capability_registry
 
 
 ACTIVITY_SUMMARY_FORMAT_VERSION = 4
@@ -785,9 +786,11 @@ def yoagent_capabilities_payload() -> dict[str, Any]:
         "send_tmux_input": "server-verified-action",
         "return_send_result": True,
         "manage_user_skills": True,
+        "settings_operator": True,
         "yoagent_action_tools": True,
         "transport": "visible-pane-paste-return",
         "examples": YOAGENT_ORCHESTRATION_EXAMPLES,
+        "registry": product_capability_registry(),
         "lines": YOAGENT_CAPABILITY_LINES,
     }
 

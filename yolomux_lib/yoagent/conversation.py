@@ -24,6 +24,7 @@ YOAGENT_CONVERSATION_PATH = YOAGENT_STATE_DIR / "conversation.jsonl"
 YOAGENT_CLI_STATE_PATH = YOAGENT_STATE_DIR / "cli-sessions.json"
 YOAGENT_CONVERSATION_MAX_MESSAGES = 500
 YOAGENT_MESSAGE_CONTENT_LIMIT = 20_000
+YOAGENT_MESSAGE_DETAILS_LIMIT = 4_000
 YOAGENT_ACTIONS_LIMIT = 8
 YOAGENT_BACKENDS = {"claude", "codex"}
 YOAGENT_MESSAGE_KINDS = {"agent_result"}
@@ -81,6 +82,9 @@ def sanitize_message(value: Any, *, role: str | None = None, content: str | None
     actions = sanitized_actions(raw.get("actions"))
     if actions and message_role == "assistant":
         message["actions"] = actions
+    details = truncate_text(str(raw.get("details") or "").strip(), YOAGENT_MESSAGE_DETAILS_LIMIT)
+    if details and message_role == "assistant":
+        message["details"] = details
     return message
 
 

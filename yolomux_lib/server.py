@@ -1456,7 +1456,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             payload = self.read_json_body(64 * 1024)
             if payload is None:
                 return
-            response, status = self.server.app.yoagent_chat(payload)
+            response, status = self.server.app.yoagent_chat(payload, access_role=self.auth_identity().role)
             self.write_json(response, status=status)
             return
         if parsed.path == "/api/yoagent/actions/preview-send":

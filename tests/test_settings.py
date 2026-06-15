@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import threading
 
 
@@ -9,7 +10,11 @@ from yolomux_lib.settings import default_settings
 from yolomux_lib.settings import read_settings_file
 from yolomux_lib.settings import save_settings
 from yolomux_lib.settings import sanitize_settings
+from yolomux_lib.settings import settings_catalog
 from yolomux_lib.settings import settings_payload
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_pane_spacing_default_is_3px():
@@ -139,7 +144,9 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert payload["settings"]["appearance"]["date_time_hour_cycle"] == "24"
     assert payload["settings"]["appearance"]["tab_width"] == 180
     assert payload["settings"]["general"]["default_layout"] == "split"
-    assert payload["choices"]["general.default_layout"] == ["single", "split", "grid", "wall"]
+    assert payload["choices"]["general.default_layout"] == ["single", "split", "grid"]
+    assert payload["catalog"]["general.default_layout"]["choices"] == ["single", "split", "grid"]
+    assert "wall" not in payload["catalog"]["general.default_layout"]["choices"]
     assert payload["choices"]["appearance.active_color"] == ["green", "blue", "orange", "yellow", "purple", "white"]
     assert payload["choices"]["appearance.separator_color"] == ["theme", "green", "blue", "orange", "yellow", "purple", "white"]
     assert payload["choices"]["appearance.editor_cursor_color"] == ["green", "blue", "orange", "yellow", "purple", "white", "laser-lime", "neon-green", "neon-cyan", "neon-magenta", "neon-orange", "theme"]
@@ -189,9 +196,67 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert loaded == updated["settings"]
 
 
+def test_settings_catalog_covers_defaults_and_gui_metadata():
+    defaults = default_settings()
+    catalog = settings_catalog(defaults)
+    expected_paths = {f"{section}.{key}" for section, values in defaults.items() for key in values}
+
+    assert set(catalog) == expected_paths
+    for path, item in catalog.items():
+        section, key = path.split(".", 1)
+        assert item["path"] == path
+        assert item["section"] == section
+        assert item["key"] == key
+        assert item["type"] in {"boolean", "integer", "number", "list", "string"}
+        assert isinstance(item["description"], str) and item["description"], path
+        assert item["read_role"] == "readonly"
+        assert item["write_role"] == "admin"
+
+    assert catalog["appearance.tab_width"]["limits"] == {"min": 120, "max": 420}
+    assert catalog["appearance.tab_width"]["units"] == "pixels"
+    assert catalog["updates.notify_level"]["choices"] == ["major", "minor", "patch", "none"]
+    assert catalog["uploads.subdir"]["empty_allowed"] is True
+    assert catalog["uploads.image_action_order"]["list_limit"] == 9
+    assert catalog["general.language"]["aliases"]["japanese"] == "ja"
+    assert catalog["yoagent.backend"]["choices"] == ["auto", "claude", "codex"]
+    assert catalog["yoagent.backend"]["accepted_choices"] == ["auto", "claude", "codex", "deterministic"]
+    assert catalog["yoagent.backend"]["hidden_choices"] == ["deterministic"]
+    assert catalog["yoagent.system_prompt"]["requires_confirmation"] is True
+    assert catalog["yoagent.system_prompt"]["sensitivity"] == "prompt"
+    assert catalog["appearance.theme"]["gui"] == {"section": "Appearance", "visible": True}
+    assert catalog["share.view_fit"]["gui"] == {"section": "", "visible": False}
+
+
+def test_preferences_source_paths_are_in_backend_catalog():
+    source = (REPO_ROOT / "static_src/js/yolomux/80_panes_preferences.js").read_text(encoding="utf-8")
+    paths = set()
+    for line in source.splitlines():
+        if "{path:" not in line:
+            continue
+        for part in line.split("{path:")[1:]:
+            quote = "'" if "'" in part[:2] else '"'
+            if quote not in part:
+                continue
+            value = part.split(quote, 2)[1]
+            if "." in value:
+                paths.add(value)
+
+    catalog = settings_catalog(default_settings())
+    assert paths, "Preferences source should declare setting paths"
+    assert paths <= set(catalog), sorted(paths - set(catalog))
+    assert "general.default_layout" in paths
+    assert "wall" not in catalog["general.default_layout"]["choices"]
+
+
 def test_startup_helpers_setting_migrates_to_startup_tips():
     migrated = sanitize_settings({"general": {"startup_helpers": False}})
     assert migrated["general"]["startup_tips"] is False
+
+
+def test_language_setting_accepts_names_and_endonyms():
+    assert sanitize_settings({"general": {"language": "Japanese"}})["general"]["language"] == "ja"
+    assert sanitize_settings({"general": {"language": "Traditional Chinese"}})["general"]["language"] == "zh-Hant"
+    assert sanitize_settings({"general": {"language": "日本語"}})["general"]["language"] == "ja"
 
 
 def test_save_settings_can_reset_all_values_to_defaults(tmp_path):

@@ -514,6 +514,8 @@ globalThis.__layoutTestApi = {
   setYoagentMessagesForTest(value) { yoagentMessages = Array.isArray(value) ? value : []; if (yoagentMessages.length) hideYoagentStartupInfo(); resetYoagentComposerHistory(); },
   showYoagentStartupInfoOnceForTest: showYoagentStartupInfoOnce,
   hideYoagentStartupInfoForTest: hideYoagentStartupInfo,
+  yoagentOpenMessageDetailsStateForTest: yoagentOpenMessageDetailsState,
+  restoreYoagentOpenMessageDetailsStateForTest: restoreYoagentOpenMessageDetailsState,
   yoagentUserMessageHistoryForTest: yoagentUserMessageHistory,
   yoagentNavigateChatHistoryForTest: yoagentNavigateChatHistory,
   resetYoagentComposerHistoryForTest: resetYoagentComposerHistory,
@@ -1927,12 +1929,10 @@ test('t@1367', () => {
   base[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
   base.left = api.paneStateWithTabs(['__files__'], '__files__');
   base.slot1 = api.paneStateWithTabs(['1', '2', '3'], '2');
-  // Binary-tree shapes round-trip EXACTLY (tree + panes). Wall uses a flat N-ary split, which
-  // Dockview's strictly-binary grid cannot represent — it re-nests as right-leaning binary splits
-  // on the way back. That rebalances the split TREE but must never move a tab to the wrong pane,
-  // so for every shape the pane->tabs assignment is the invariant that must hold.
+  // Binary-tree shapes round-trip EXACTLY (tree + panes). For every layout shape, the pane->tabs
+  // assignment is the invariant that must hold.
   const binaryTreeModes = new Set(['single', 'split', 'grid']);
-  for (const mode of ['single', 'split', 'grid', 'wall']) {
+  for (const mode of ['single', 'split', 'grid']) {
     api.setLayoutSlotsForTest(base);
     api.setFocusedPanelItem('2');
     api.applyLayoutMode(mode);
@@ -2582,7 +2582,7 @@ test('t@1869', () => {
   // so the chat input enables to match what the backend will run, and defaults to auto.
   assert.ok(/function yoagentResolvedBackend\(\)[\s\S]*?for \(const agent of \['codex', 'claude'\]\)[\s\S]*?availableAgents\.has\(agent\) && agentLoggedIn\(agent\)/.test(source), '#41: yoagentResolvedBackend prefers codex then claude among logged-in agents');
   assert.ok(source.includes("initialSetting('yoagent.backend', 'auto')"), '#41: the YO!agent backend default is auto');
-  assert.ok(/function yoagentChatEnabled\(\)[\s\S]*?yoagentResolvedBackend\(\)/.test(source), '#41: chat-enabled tracks the resolved backend');
+  assert.ok(/function yoagentChatEnabled\(\)[\s\S]*\['claude', 'codex', 'deterministic'\]\.includes\(yoagentResolvedBackend\(\)\)/.test(source), '#41/#72: chat-enabled tracks the resolved backend, including local deterministic answers');
   assert.ok(/maybeHandleServerVersionChange[\s\S]*serverVersion === bootstrap\.version[\s\S]*updateNotificationAllowsVersion\(bootstrap\.version, serverVersion\)/.test(source), 'server-version reload is gated on the boot version and the reload_on_update threshold');
   assert.ok(/function updateNotificationAllowsVersion\([^)]*\)[\s\S]*cleanLevel === 'none'[\s\S]*targetParts\[1\] !== currentParts\[1\][\s\S]*cleanLevel === 'patch' && targetParts\[2\] > currentParts\[2\]/.test(source), 'update notification threshold follows SemVer major/minor/patch');
   assert.ok(/maybeHandleServerVersionChange[\s\S]*boolSetting\('general\.reload_on_update_auto'[\s\S]*reloadIsSafe\(\)/.test(source), 'auto-reload only fires when enabled and reloadIsSafe()');
@@ -5175,7 +5175,7 @@ test('t@2560', () => {
   assert.ok(/preferences-setting-row preferences-setting-row--wide"><label class="preferences-setting-label" for="preference-yolo-rule_file_path"/.test(preferencesHtml), '#38: the YOLO rule file path is a full-width row so the long path is not clipped');
   assert.ok(/\.preferences-setting-row--wide \.preferences-setting-control\.setting-type-text input\[type="text"\][\s\S]*?\.preferences-setting-row--wide \.preferences-setting-control\.setting-type-select select\s*\{[\s\S]*?width:\s*100%/.test(preferencesCss), '#38: text/select inputs fill the full width inside wide rows');
   const radioModePaths = new Map([
-    ['general.default_layout', ['single', 'split', 'grid', 'wall']],
+    ['general.default_layout', ['single', 'split', 'grid']],
     ['appearance.theme', ['system', 'dark', 'light']],
     ['appearance.active_color', ['green', 'blue', 'orange', 'yellow', 'purple', 'white']],
     ['appearance.separator_color', ['theme', 'green', 'blue', 'orange', 'yellow', 'purple', 'white']],
@@ -9408,8 +9408,9 @@ test('t@6833', () => {
   api.setActivitySummaryPayloadForTest(baseActivitySummaryPayload);
   assert.ok(api.globalActivitySummaryHtml().includes('YO!agent'), 'global activity summary uses the YO agent label');
   assert.equal(api.globalActivitySummaryHtml().includes('Session alpha'), false, 'YO!agent default panel does not expose the per-session SESSION detail list');
-  assert.equal(api.yoagentChatHtml().includes('data-yoagent-chat-form'), false, 'No-agent YO!agent hides the chat form');
-  assert.ok(api.yoagentChatHtml().includes('Set a Claude or Codex backend in Preferences to chat.'), 'No-agent YO!agent points users to backend settings');
+  assert.ok(api.yoagentChatHtml().includes('data-yoagent-chat-form'), 'No-agent YO!agent still shows the chat form for deterministic local answers');
+  assert.equal(api.yoagentChatHtml().includes('Set a Claude or Codex backend in Preferences to chat.'), false, 'No-agent YO!agent does not show the old disabled backend message');
+  assert.ok(api.yoagentChatHtml().includes('Ask anything'), 'No-agent YO!agent composer uses the localized ask-anything placeholder');
   api.setClientSettingsPatchForTest({yoagent: {backend: 'claude'}});
   assert.equal(api.yoagentChatHtml().includes('Your most recent work is about editor fixes'), false, 'Claude-backed YO!agent does not auto-inject Recent agents until the startup one-shot is enabled');
   assert.equal(api.showYoagentStartupInfoOnceForTest(), true, 'YO!agent startup info can be shown once when the tab first opens');
@@ -9446,6 +9447,7 @@ test('t@6833', () => {
     {role: 'assistant', content: 'first answer', createdAt: '2026-06-13T17:38:01Z'},
     {role: 'user', content: 'second question', createdAt: '2026-06-13T17:39:00Z'},
   ]);
+  assert.ok(/:\d{2}\s*[AP]M\s*PDT/.test(api.yoagentChatHtml()), 'YO!agent message timestamps include seconds');
   api.setYoagentDraftForTest('new draft');
   const historyInput = {value: 'new draft', disabled: false, setSelectionRange(start, end) { this.selection = [start, end]; }};
   assert.deepStrictEqual(api.yoagentUserMessageHistoryForTest(), ['first question', 'second question'], 'YO!agent composer history contains only prior user messages');
@@ -9477,6 +9479,7 @@ test('t@6833', () => {
       role: 'assistant',
       content: 'I resolved tmux session `6` and prepared a confirmed send action.',
       createdAt: '2026-06-13T17:40:01Z',
+      details: '- backend: `claude`\n- response time: `1.234s` (`1234.0ms`)',
       actions: [{
         id: 'ya_test',
         status: 'ready',
@@ -9497,10 +9500,25 @@ test('t@6833', () => {
   assert.ok(actionHtml.includes('yoagent-message user'), 'YO!agent user turns keep a role-specific bubble');
   assert.ok(actionHtml.includes('yoagent-message assistant'), 'YO!agent assistant turns keep a role-specific bubble');
   assert.ok(actionHtml.includes('yoagent-message assistant yoagent-agent-result'), 'YO!agent target-agent result turns get a distinct result bubble class');
+  assert.ok(actionHtml.includes('class="yoagent-message-details"') && actionHtml.includes('response time:'), 'YO!agent assistant turns can expose expandable safe diagnostics');
   assert.ok(actionHtml.includes('data-yoagent-action-card="ya_test"'), 'YO!agent assistant turns render server-resolved action cards');
   assert.ok(actionHtml.includes('data-yoagent-action-send="ya_test"'), 'ready YO!agent action cards expose a confirmed send control');
   assert.ok(actionHtml.includes('Action preview') && actionHtml.includes('Send'), 'ready YO!agent action cards use localized action labels');
   assert.ok(actionHtml.includes('visible tmux pane'), 'ready YO!agent action cards label sends as visible-pane delivery');
+  const openDetail = {dataset: {yoagentMessageDetailsKey: 'assistant|1'}, open: true};
+  const closedDetail = {dataset: {yoagentMessageDetailsKey: 'assistant|2'}, open: false};
+  const stateNode = {
+    querySelectorAll(selector) {
+      if (selector === '.yoagent-message-details[open][data-yoagent-message-details-key]') return [openDetail];
+      if (selector === '.yoagent-message-details[data-yoagent-message-details-key]') return [closedDetail, openDetail];
+      return [];
+    },
+  };
+  const openKeys = api.yoagentOpenMessageDetailsStateForTest(stateNode);
+  api.restoreYoagentOpenMessageDetailsStateForTest(stateNode, openKeys);
+  assert.deepStrictEqual([...openKeys], ['assistant|1'], 'YO!agent captures the opened Details message key before repaint');
+  assert.equal(openDetail.open, true, 'YO!agent restores the matching Details block after repaint');
+  assert.equal(closedDetail.open, false, 'YO!agent does not expand unrelated Details blocks after repaint');
   api.setYoagentBusyForTest(true);
   assert.ok(api.yoagentChatHtml().includes('yoagent-chat-spinner'), 'YO!agent busy state includes an animated spinner');
   // The "thinking" label keeps its word but the trailing dots are CSS-animated, so the text updates
@@ -10066,6 +10084,11 @@ test('t@7283', () => {
   assert.ok(/\.yoagent-message\.assistant\s*\{[\s\S]*align-self:\s*flex-start[\s\S]*margin-inline-end:\s*28px[\s\S]*border-color:\s*var\(--active-control-border\)[\s\S]*background:\s*color-mix\(in srgb, var\(--active-control-soft-bg\)/.test(css), 'YO!agent assistant bubbles are left-indented and use the active theme accent');
   assert.ok(/\.yoagent-message\.assistant\.yoagent-agent-result\s*\{[\s\S]*border-inline-start-color:\s*var\(--accent-gold\)[\s\S]*border-inline-start-width:\s*6px/.test(css), 'YO!agent target-agent result bubbles have a stronger colored left rule');
   assert.ok(/\.yoagent-message\.user\s*\{[\s\S]*align-self:\s*flex-end[\s\S]*margin-inline-start:\s*28px[\s\S]*border-color:\s*var\(--link-soft\)/.test(css), 'YO!agent user bubbles are right-indented with the secondary/link border color');
+  assert.ok(/function yoagentTimestampText[\s\S]*second:\s*'2-digit'/.test(src), 'YO!agent chat timestamps include seconds');
+  assert.ok(/function yoagentMessageDetailsHtml[\s\S]*data-yoagent-message-details-key/.test(src), 'YO!agent assistant diagnostics render as an expandable details block with a stable message key');
+  assert.ok(/function refreshYoagentSummaryRegions[\s\S]*const openDetails = yoagentOpenMessageDetailsState\(node\)[\s\S]*restoreYoagentOpenMessageDetailsState\(node, openDetails\)/.test(src), 'YO!agent summary refresh preserves expanded Details blocks');
+  assert.ok(/function renderYoagentPanel[\s\S]*const openDetails = yoagentOpenMessageDetailsState\(node\)[\s\S]*node\.innerHTML = yoagentChatHtml\(\);[\s\S]*restoreYoagentOpenMessageDetailsState\(node, openDetails\)/.test(src), 'YO!agent full chat rerenders preserve expanded Details blocks');
+  assert.ok(/\.yoagent-message-details pre\s*\{[\s\S]*max-height:\s*180px/.test(css), 'YO!agent diagnostics details stay bounded inside the message');
   assert.ok(/\.yoagent-waiting-queue\s*\{[\s\S]*border:\s*1px solid var\(--active-control-soft-border\)/.test(css), 'YO!agent pending waits render as a visible compact queue');
   const actionCardStart = src.indexOf('function yoagentActionCardHtml(action)');
   const actionCardEnd = src.indexOf('function yoagentIntroMessageText', actionCardStart);
@@ -10964,7 +10987,8 @@ test('t@7900', () => {
   const appearanceHtml = sectionHtml(api.t('pref.section.appearance'));
   assert.ok(appearanceHtml.includes('data-setting-path="general.default_layout"'), 'Default layout is in Appearance');
   assert.ok(/type="radio"[^>]*value="split"[^>]*data-setting-path="general\.default_layout"/.test(appearanceHtml), 'Default layout offers Split');
-  assert.ok(appearanceHtml.includes('Single pane') && appearanceHtml.includes('Split') && appearanceHtml.includes('Grid') && appearanceHtml.includes('Wall'), 'Default layout labels match View layout labels');
+  assert.ok(appearanceHtml.includes('Single pane') && appearanceHtml.includes('Split') && appearanceHtml.includes('Grid'), 'Default layout labels match View layout labels');
+  assert.equal(appearanceHtml.includes('Wall'), false, 'Wall is no longer offered as a default layout choice');
   assert.ok(appearanceHtml.includes('Envy green'), 'Active color Green is labeled Envy green');
   assert.ok(appearanceHtml.includes('Deep ocean blue'), 'Active color Blue is labeled Deep ocean blue');
   assert.ok(appearanceHtml.includes('Blood orange'), 'Active color Orange is labeled Blood orange');

@@ -31,6 +31,8 @@ YOAGENT_USER_FILE_TEXT_LIMIT = 64 * 1024
 
 YOAGENT_SKILL_TOOLS = frozenset({
     "read_activity",
+    "read_settings_catalog",
+    "read_product_capabilities",
     "recommend_next_work",
     "watch_session",
     "watch_all_sessions",
@@ -38,6 +40,7 @@ YOAGENT_SKILL_TOOLS = frozenset({
     "read_skill_files",
     "write_skill_file",
     "delete_skill_file",
+    "write_settings_patch",
     "preview_send_prompt",
     "execute_confirmed_send",
     "summarize_sessions",

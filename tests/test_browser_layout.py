@@ -1215,7 +1215,7 @@ def split_seam_fixture_html():
     )
 
 
-def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620, file_explorer_open_intent=None, auto_approve_payload=None, access_role="admin", share_bootstrap=None, share_status_payload=None, wrap_app_root=False):
+def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620, file_explorer_open_intent=None, auto_approve_payload=None, access_role="admin", share_bootstrap=None, share_status_payload=None, wrap_app_root=False, yoagent_chat_mode=None):
     css = app_css()
     brand_css = (REPO_ROOT / "static" / "brand.css").read_text(encoding="utf-8")
     script_uri = (REPO_ROOT / "static" / "yolomux.js").as_uri()
@@ -1346,6 +1346,56 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
           headers: {'Content-Type': 'application/json'},
         }));
       }
+      function emitFixtureClientEvent(type, payload = {}) {
+        for (const source of window.__eventSources || []) {
+          if (typeof source.emit === 'function') source.emit(type, payload);
+        }
+      }
+      function applyFixtureSettingsPatch(patch) {
+        window.__settingsPayload.settings = mergeSettings(window.__settingsPayload.settings || {}, patch || {});
+        window.__settingsPayload.mtime_ns = ++window.__settingsMtime;
+        emitFixtureClientEvent('settings_changed', {data: window.__settingsPayload});
+      }
+      function fixtureSettingAnswer(path, before, after, where = 'Preferences -> Appearance') {
+        return [
+          'Updated this Preference:',
+          '',
+          '| setting | before | after | where | live apply |',
+          '| --- | --- | --- | --- | --- |',
+          `| \\`${path}\\` | \\`${before}\\` | \\`${after}\\` | ${where} | \\`live\\` |`,
+        ].join('\\n');
+      }
+      function fixtureYoagentChatResponse(message) {
+        const text = String(message || '');
+        const lower = text.toLowerCase();
+        if (window.__fixtureAccessRole !== 'admin' && /\\b(set|change|switch|make|turn|enable|disable|add|remove|reset)\\b/.test(lower)) {
+          return '`appearance.theme` is readable, but changing Preferences requires an admin login. I did not change anything.';
+        }
+        if (lower.includes('maybe theme')) {
+          return 'Which setting do you mean: `appearance.theme` or `appearance.terminal_theme`?';
+        }
+        if (lower.includes('theme') && lower.includes('light')) {
+          applyFixtureSettingsPatch({appearance: {theme: 'light'}});
+          return fixtureSettingAnswer('appearance.theme', 'dark', 'light');
+        }
+        if (lower.includes('active color') && lower.includes('blue')) {
+          applyFixtureSettingsPatch({appearance: {active_color: 'blue'}});
+          return fixtureSettingAnswer('appearance.active_color', 'green', 'blue');
+        }
+        if (lower.includes('tab width')) {
+          applyFixtureSettingsPatch({appearance: {tab_width: 220}});
+          return fixtureSettingAnswer('appearance.tab_width', '180', '220');
+        }
+        if (lower.includes('font size')) {
+          applyFixtureSettingsPatch({appearance: {terminal_font_size: 18}});
+          return fixtureSettingAnswer('appearance.terminal_font_size', '13', '18', 'Preferences -> Terminal and Editor');
+        }
+        if (lower.includes('notification level') || lower.includes('notify level')) {
+          applyFixtureSettingsPatch({updates: {notify_level: 'none'}});
+          return fixtureSettingAnswer('updates.notify_level', 'patch', 'none', 'Preferences -> Notifications');
+        }
+        return 'No fixture answer.';
+      }
       function mergeSettings(base, patch) {
         const result = Array.isArray(base) ? base.slice() : {...(base || {})};
         if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return result;
@@ -1358,10 +1408,32 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
         }
         return result;
       }
+      window.__fixtureAccessRole = JSON.parse(document.getElementById('yolomux-bootstrap').textContent).accessRole || 'admin';
+      window.__fixtureYoagentMessages = [];
       window.fetch = async (input, options = {}) => {
         const url = new URL(String(input), 'https://localhost');
         const body = options.body ? JSON.parse(options.body || '{}') : null;
         window.__bootFetches.push({path: url.pathname, search: url.search, method: options.method || 'GET', body});
+        if (url.pathname === '/api/yoagent/chat' && window.__fixtureYoagentChatMode === 'settings') {
+          const message = String(body?.message || '');
+          const answer = fixtureYoagentChatResponse(message);
+          const now = new Date().toISOString();
+          window.__fixtureYoagentMessages.push({role: 'user', content: message, createdAt: now});
+          window.__fixtureYoagentMessages.push({role: 'assistant', content: answer, createdAt: now});
+          return jsonResponse({
+            answer,
+            backend: 'yolomux',
+            backend_used: 'yolomux',
+            deterministic: true,
+            timing: {ttfr_ms: 1},
+            conversation: {
+              messages: window.__fixtureYoagentMessages,
+              transcript_path: '/home/test/.local/state/yolomux/yoagent/conversation.jsonl',
+              transcript_display_path: '~/.local/state/yolomux/yoagent/conversation.jsonl',
+              pending_waits: [],
+            },
+          });
+        }
         if (url.pathname === '/api/settings') {
           if ((options.method || 'GET') === 'POST') {
             const body = JSON.parse(options.body || '{}');
@@ -1486,6 +1558,7 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
           window.__fixtureFsEntries = {json.dumps(fs_entries, separators=(",", ":"))};
           window.__fixtureAutoApprovePayload = {json.dumps(auto_approve_payload, separators=(",", ":")) if auto_approve_payload is not None else "null"};
           window.__fixtureSharePayload = {json.dumps(share_status_payload, separators=(",", ":")) if share_status_payload is not None else "null"};
+          window.__fixtureYoagentChatMode = {json.dumps(yoagent_chat_mode)};
         </script>
         <script>{file_explorer_intent_script}</script>
         <script>{stub_script}</script>
@@ -1688,6 +1761,108 @@ def wait_for_dockview(browser, min_tabs=1):
             min_tabs,
         )
     )
+
+
+def test_yoagent_settings_operator_updates_live_gui_and_denies_readonly(browser, tmp_path):
+    base_settings = {
+        "appearance": {
+            "theme": "dark",
+            "active_color": "green",
+            "tab_width": 180,
+            "terminal_font_size": 13,
+        },
+        "updates": {"notify_level": "patch"},
+        "yoagent": {"backend": "auto"},
+    }
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        sessions=["1"],
+        settings=base_settings,
+        yoagent_chat_mode="settings",
+    )
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return typeof openInfoSubTab === 'function' && typeof sendYoagentChatMessage === 'function'"))
+    admin = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          await openInfoSubTab('yoagent');
+          for (const prompt of [
+            'set theme to light',
+            'set active color to blue',
+            'set tab width to 220',
+            'set terminal font size to 18',
+            'change notification level to none',
+            'maybe theme',
+          ]) {
+            await sendYoagentChatMessage(prompt);
+          }
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const rootStyle = getComputedStyle(document.documentElement);
+          const chat = document.querySelector('.yoagent-chat');
+          const history = document.querySelector('.yoagent-chat-history')?.getBoundingClientRect();
+          const form = document.querySelector('[data-yoagent-chat-form]')?.getBoundingClientRect();
+          done({
+            bodyClass: document.body.className,
+            theme: clientSettings.appearance?.theme,
+            activeColor: clientSettings.appearance?.active_color,
+            activeAccent: rootStyle.getPropertyValue('--active-accent').trim(),
+            tabWidth: rootStyle.getPropertyValue('--pane-tab-width').trim(),
+            terminalFontSize: rootStyle.getPropertyValue('--terminal-font-size').trim(),
+            notifyLevel: clientSettings.updates?.notify_level,
+            text: document.querySelector('#yoagent-content')?.innerText || '',
+            assistantCount: document.querySelectorAll('.yoagent-message.assistant').length,
+            formEnabled: document.querySelector('[data-yoagent-chat-input]')?.disabled === false,
+            noOverlap: Boolean(chat && history && form && history.bottom <= form.top + 1),
+          });
+        })().catch(error => done({error: String(error && error.stack || error)}));
+        """
+    )
+    assert admin.get("error") is None, admin
+    assert "theme-light" in admin["bodyClass"]
+    assert admin["theme"] == "light"
+    assert admin["activeColor"] == "blue"
+    assert admin["activeAccent"] == "#2563eb"
+    assert admin["tabWidth"] == "220px"
+    assert admin["terminalFontSize"] == "18px"
+    assert admin["notifyLevel"] == "none"
+    assert "Updated this Preference" in admin["text"]
+    assert "| `appearance.theme` | `dark` | `light` | Preferences -> Appearance | `live` |" in admin["text"]
+    assert "Which setting do you mean" in admin["text"]
+    assert admin["assistantCount"] >= 6
+    assert admin["formEnabled"] is True
+    assert admin["noOverlap"] is True
+
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        sessions=["1"],
+        settings=base_settings,
+        access_role="readonly",
+        yoagent_chat_mode="settings",
+    )
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return typeof openInfoSubTab === 'function' && typeof sendYoagentChatMessage === 'function'"))
+    readonly = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          await openInfoSubTab('yoagent');
+          await sendYoagentChatMessage('set theme to light');
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          done({
+            bodyClass: document.body.className,
+            theme: clientSettings.appearance?.theme,
+            text: document.querySelector('#yoagent-content')?.innerText || '',
+            inputDisabled: document.querySelector('[data-yoagent-chat-input]')?.disabled === true,
+          });
+        })().catch(error => done({error: String(error && error.stack || error)}));
+        """
+    )
+    assert readonly.get("error") is None, readonly
+    assert "theme-light" not in readonly["bodyClass"]
+    assert readonly["theme"] == "dark"
+    assert "requires an admin login" in readonly["text"]
+    assert readonly["inputDisabled"] is False
 
 
 def wait_for_dockview_tab_geometry(browser, min_tabs=1, min_width=150, max_rows=None, min_rows=None):
@@ -17051,10 +17226,8 @@ def test_diff_overview_matches_actual_todo_codemirror_rows(browser, tmp_path):
     assert chunk["toB"] in {expected_to_b, expected_to_b + 1}
     assert chunk["endB"] == chunk["toB"] - 1
     # The B-side is the fixture's HEAD:docs/TODO.md, so the add-band end, currentLineCount, totalRows, and
-    # insertedRangeRows shift by one every time that roadmap doc gains/loses a line (it has, repeatedly,
-    # silently breaking this test -- it was just re-pinned 308->309). Pin the stable A-side remove band
-    # and assert the B-side via relationships + the actual current line count, so a TODO.md edit can't
-    # break it again.
+    # insertedRangeRows shift whenever that roadmap doc changes. Assert the stable remove band against the
+    # actual common prefix and the B-side via relationships + the actual current line count.
     bands = metrics["rows"]["bands"]
     assert len(bands) == 2, bands
     remove_band, add_band = bands[0], bands[1]

@@ -1,0 +1,21 @@
+name: settings-operator
+kind: workflow
+description: >-
+  Answer questions about YOLOmux Preferences, current values, defaults, choices, config location, and product capability/state. For explicit safe admin setting changes, use the server settings catalog and save a validated settings patch through the settings API; never edit ~/.config/yolomux/settings.yaml directly and never ask another target agent to change YOLOmux Preferences. Preserve perspective: the user is asking YO!agent to operate YOLOmux, so target agents are not involved unless the user separately asks to coordinate agent work. Background/white/black requests map to the global Appearance theme: "change background to white" means `appearance.theme=light`, and "change background to black" means `appearance.theme=dark`. Bare UI color changes such as "change color from green to orange" mean the Appearance Active color (`appearance.active_color`) unless the user names cursor color, separator color, theme, or another specific color setting. Use the expandable Details diagnostics for backend/timing facts, but never expose raw hidden chain-of-thought or `<think>` text. Ask a concise clarification for ambiguous settings, broad resets, sensitive paths, system prompt/format changes, share access changes, YOLO rule paths, or broad list replacement.
+tools:
+  - read_settings_catalog
+  - read_product_capabilities
+  - write_settings_patch
+  - read_activity
+triggers:
+  - what is my theme
+  - set theme to light
+  - change tab width to 220
+  - change background to white
+  - change color from green to orange
+  - change active color to orange
+  - change cursor color to yellow
+  - show all notification settings
+  - where is settings.yaml
+  - what did I last work on
+confirmation: none

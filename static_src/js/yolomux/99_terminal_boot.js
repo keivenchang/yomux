@@ -568,6 +568,23 @@ function installYoagentChatScrollTracker(node = document.getElementById('yoagent
   }, {passive: true});
 }
 
+function yoagentOpenMessageDetailsState(node = document.getElementById('yoagent-content')) {
+  const openKeys = new Set();
+  (node?.querySelectorAll?.('.yoagent-message-details[open][data-yoagent-message-details-key]') || []).forEach(details => {
+    const key = details.dataset?.yoagentMessageDetailsKey || '';
+    if (key) openKeys.add(key);
+  });
+  return openKeys;
+}
+
+function restoreYoagentOpenMessageDetailsState(node, openKeys) {
+  if (!node || !openKeys?.size) return;
+  (node.querySelectorAll?.('.yoagent-message-details[data-yoagent-message-details-key]') || []).forEach(details => {
+    const key = details.dataset?.yoagentMessageDetailsKey || '';
+    if (key && openKeys.has(key)) details.open = true;
+  });
+}
+
 function yoagentShouldScrollBottom(options, scrollState) {
   if (options.scrollBottom === true) return true;
   if (options.scrollBottom === false) return false;
@@ -603,8 +620,10 @@ function refreshYoagentSummaryRegions(node = document.getElementById('yoagent-co
   if (!node) return false;
   const chat = node.querySelector('.yoagent-chat');
   if (!chat) return false;
+  const openDetails = yoagentOpenMessageDetailsState(node);
   chat.outerHTML = yoagentChatHtml();
   renderYoagentMessageMarkdown(node);
+  restoreYoagentOpenMessageDetailsState(node, openDetails);
   installYoagentChatScrollTracker(node);
   return true;
 }
@@ -695,6 +714,7 @@ function renderYoagentPanel(options = {}) {
   const node = document.getElementById('yoagent-content');
   if (!node) return;
   const scrollState = yoagentChatScrollState(node);
+  const openDetails = yoagentOpenMessageDetailsState(node);
   const shouldScrollBottom = yoagentShouldScrollBottom(options, scrollState);
   const input = node.querySelector('[data-yoagent-chat-input]');
   const inputFocused = input && document.activeElement === input;
@@ -717,6 +737,7 @@ function renderYoagentPanel(options = {}) {
   }
   node.innerHTML = yoagentChatHtml();
   renderYoagentMessageMarkdown(node);
+  restoreYoagentOpenMessageDetailsState(node, openDetails);
   installYoagentChatScrollTracker(node);
   if (shouldScrollBottom) {
     requestAnimationFrame(() => scrollYoagentChatToBottom(node));

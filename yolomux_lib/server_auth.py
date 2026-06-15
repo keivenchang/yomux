@@ -333,6 +333,8 @@ class AuthMixin:
     def require_auth_for_post(self, path: str) -> bool:
         if path == "/api/event" or (path in self.SHARE_READONLY_POST_PATHS and self.share_token_text()):
             return self.require_auth("readonly")
+        if path == "/api/yoagent/chat" and not self.share_token_text():
+            return self.require_auth("readonly")
         return self.require_auth("admin")
 
     def handle_login_page(self, parsed: Any) -> None:
