@@ -2227,7 +2227,16 @@ def test_generated_app_boots_live_runtime_without_browser_errors(browser, tmp_pa
           rejections: window.__bootRejections,
           fetchPaths: window.__bootFetches.map(item => `${item.method} ${item.path}`),
           sockets: window.__bootSockets,
-          menuLabels: Array.from(document.querySelectorAll('.app-menu-button')).map(button => button.textContent.trim()),
+          menuButtons: Array.from(document.querySelectorAll('.app-menu')).map(menu => {
+            const button = menu.querySelector(':scope > .app-menu-button');
+            const badge = button?.querySelector('.app-menu-button-badge');
+            const label = Array.from(button?.childNodes || [])
+              .filter(node => node.nodeType === Node.TEXT_NODE)
+              .map(node => node.textContent)
+              .join('')
+              .trim();
+            return {label, badge: badge?.textContent.trim() || ''};
+          }),
           panelCount: document.querySelectorAll('.panel').length,
           paneTabCount: document.querySelectorAll('.pane-tab').length,
           panelVisible: document.querySelector('#panel-1')?.isConnected === true,
@@ -2244,7 +2253,13 @@ def test_generated_app_boots_live_runtime_without_browser_errors(browser, tmp_pa
     assert "GET /api/transcripts" in metrics["fetchPaths"]
     assert "GET /api/ping" in metrics["fetchPaths"]
     assert any("/ws?session=1" in url for url in metrics["sockets"])
-    assert {"File", "View", "tmux", "Tabs", "Help"}.issubset(set(metrics["menuLabels"]))
+    assert {"File", "View", "tmux", "Tabs", "Help"}.issubset(
+        {button["label"] for button in metrics["menuButtons"]}
+    )
+    assert any(
+        button["label"] == "Tabs" and button["badge"] == "0"
+        for button in metrics["menuButtons"]
+    )
     assert metrics["panelCount"] >= 1
     assert metrics["paneTabCount"] >= 1
     assert metrics["panelVisible"]

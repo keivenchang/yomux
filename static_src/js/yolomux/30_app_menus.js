@@ -663,7 +663,7 @@ function appMenuTree() {
   const shareCanOpen = shareSessions.length > 0 || Boolean(activeTmux);
   const shareMenuActive = shareViewMode || shareHasActiveShare();
   const openItems = orderedPaneItems(activePaneItems());
-  const yoloCount = yoloEnabledSessions().length;
+  const yoloCount = yoloWorkingSessions().length;
   const debugMenuItems = debugModeEnabled ? [
     fileMenuVirtualCommand(debugPaneItemId, t('menu.file.debug.detail')),
   ] : [];
@@ -764,8 +764,8 @@ function appMenuTree() {
     {
       id: 'tabs',
       label: t('menu.tabs'),
-      badgeText: yoloCount ? String(yoloCount) : '',
-      badgeTitle: yoloCount ? tPlural('menu.tabs.yoloBadge', yoloCount) : '',
+      badgeText: String(yoloCount),
+      badgeTitle: tPlural('menu.tabs.yoloBadge', yoloCount),
       items: tabMenuItems(openItems),
     },
     {

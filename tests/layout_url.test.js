@@ -2815,16 +2815,28 @@ test('t@2082', () => {
 });
 
 test('t@2114', () => {
-  // GLOBAL activity status line: cross-session running / need-you / idle rollup in the top bar.
+  // GLOBAL activity status line: cross-session YOLO-screen RUN / QUES? / BLK / idle rollup.
   const api = loadYolomux('', ['1', '2', '3', '4']);
   const css = fs.readFileSync('static/yolomux.css', 'utf8');
-  api.setAutoApproveStateForTest('1', {screen: {key: 'working'}});
-  api.setAutoApproveStateForTest('2', {screen: {key: 'needs-input'}});
-  // '3' and '4' fall through to idle.
+  api.setAutoApproveStateForTest('1', {enabled: true, screen: {key: 'idle'}});
+  api.setAutoApproveStateForTest('2', {enabled: true});
+  const idleEnabledCounts = api.globalActivityCounts();
+  assert.equal(idleEnabledCounts.running, 0, 'YOLO enabled but idle does not count as running');
+  assert.equal(idleEnabledCounts.questions, 0, 'YOLO enabled but idle does not count as QUES?');
+  assert.equal(idleEnabledCounts.blocked, 0, 'YOLO enabled but idle does not count as BLK');
+  assert.equal(api.browserFaviconBadgeCount(idleEnabledCounts), 0, 'favicon badge is 0 when enabled sessions are idle');
+  const idleHtml = api.globalActivityStatusLineHtml();
+  assert.ok(/0 RUN/.test(idleHtml) && /0 QUES\?/.test(idleHtml) && /0 BLK/.test(idleHtml), 'status line shows explicit zero RUN / QUES? / BLK counts');
+  api.setAutoApproveStateForTest('1', {enabled: true, screen: {key: 'working'}});
+  api.setAutoApproveStateForTest('2', {enabled: true, screen: {key: 'needs-input'}});
+  api.setAutoApproveStateForTest('3', {enabled: true, screen: {key: 'blocked'}});
+  api.setAutoApproveStateForTest('4', {enabled: true, screen: {key: 'idle'}});
   const counts = api.globalActivityCounts();
   assert.equal(counts.running, 1, 'one working session counts as running');
-  assert.equal(counts.attention, 1, 'one needs-input session counts as needing the user');
-  assert.equal(counts.idle, 2, 'the remaining sessions are idle');
+  assert.equal(counts.questions, 1, 'one needs-input session counts as QUES?');
+  assert.equal(counts.blocked, 1, 'one blocked session counts as BLK');
+  assert.equal(counts.attention, 2, 'attention is QUES? plus BLK');
+  assert.equal(counts.idle, 1, 'the remaining session is idle');
   assert.equal(counts.total, 4, 'all tmux sessions are counted');
   assert.equal(api.browserFaviconBadgeCount(counts), 1, 'favicon badge counts actively running sessions only');
   assert.equal(api.browserFaviconBadgeCount({running: 0, attention: 1}), 0, 'favicon badge does not count attention-only sessions as active');
@@ -2845,10 +2857,12 @@ test('t@2114', () => {
   assert.ok(source.includes("ctx.font = '900 86px Arial, sans-serif'") && source.includes('ctx.scale(1.22, 1)') && source.includes("ctx.fillText('Y', 0, 0)"), 'favicon fills the tile with a large Y');
   assert.ok(source.includes("ctx.font = label.length > 2 ? '900 24px Arial, sans-serif' : label.length > 1 ? '900 32px Arial, sans-serif' : '900 42px Arial, sans-serif'") && source.includes("ctx.strokeText(label, 62, 50)") && source.includes("ctx.fillText(label, 62, 50)"), 'favicon overlays a prominent active count at the bottom-right');
   const html = api.globalActivityStatusLineHtml();
-  assert.ok(/1 running/.test(html) && /topbar-activity-run/.test(html), 'status line shows running count');
-  assert.ok(/1 need you/.test(html) && /topbar-activity-attn/.test(html), 'status line flags sessions needing the user');
-  assert.ok(/2 idle/.test(html), 'status line shows the idle count');
+  assert.ok(/1 RUN/.test(html) && /topbar-activity-run active/.test(html), 'status line shows running count');
+  assert.ok(/1 QUES\?/.test(html) && /topbar-activity-ques topbar-activity-attn/.test(html), 'status line shows QUES? count');
+  assert.ok(/1 BLK/.test(html) && /topbar-activity-blk topbar-activity-attn/.test(html), 'status line shows BLK count');
+  assert.ok(/1 idle/.test(html), 'status line shows the idle count');
   assert.ok(/\.topbar-activity\s*\{/.test(css), 'the top-bar activity line is styled');
+  assert.ok(/\.topbar-activity-run\.active/.test(css), 'RUN only turns green when nonzero');
   assert.ok(/\.topbar-activity\.has-attention/.test(css), 'the activity line highlights when a session needs the user');
 });
 
@@ -6692,11 +6706,15 @@ test('t@2560', () => {
   assert.equal(tmuxMenu.items.find(item => item.label === "Rename tmux session '1'").disabled, false);
   assert.equal(tmuxMenu.items.find(item => item.label === "Rename tmux session '1'").detail, '');
   api.setAutoApproveStateForTest('1', {enabled: true});
+  const idleYoloTabsMenu = api.appMenuTree().find(menu => menu.id === 'tabs');
+  assert.equal(idleYoloTabsMenu.badgeText, '0');
+  assert.equal(idleYoloTabsMenu.badgeTitle, '0 running YOLO jobs');
+  api.setAutoApproveStateForTest('1', {enabled: true, screen: {key: 'working'}});
   const yoloTmuxMenu = api.appMenuTree().find(menu => menu.id === 'tmux');
   assert.equal(yoloTmuxMenu.badgeText, undefined);
   const yoloTabsMenu = api.appMenuTree().find(menu => menu.id === 'tabs');
   assert.equal(yoloTabsMenu.badgeText, '1');
-  assert.equal(yoloTabsMenu.badgeTitle, '1 tmux session with YOLO enabled');
+  assert.equal(yoloTabsMenu.badgeTitle, '1 running YOLO job');
   assert.equal(yoloTmuxMenu.items[0].label, 'YO on');
   assert.equal(yoloTmuxMenu.items[0].keepOpen, true);
   assert.equal(yoloTmuxMenu.items[0].iconHtml.includes('session-yolo-marker'), true);
@@ -12500,14 +12518,14 @@ test('t@tabber', () => {
 
   {
     const hostTopbarApi = loadYolomux('', ['1'], 'https:', 'Linux x86_64');
-    hostTopbarApi.setAutoApproveStateForTest('1', {enabled: true});
+    hostTopbarApi.setAutoApproveStateForTest('1', {enabled: true, screen: {key: 'working'}});
     const autoSnapshot = hostTopbarApi.shareUiStateSnapshotForTest().autoApprove;
     const shareTopbarApi = loadYolomux('?shareReplay=0', ['1'], 'https:', 'Linux x86_64', 'readonly', {
       share: {view: true, id: 'share-yolo-badge', mode: 'ro', session: '1', sessions: ['1']},
     });
-    assert.equal(shareTopbarApi.appMenuTree().find(menu => menu.id === 'tabs').badgeText, '', 'share viewers start without a local YO badge before the host snapshot');
+    assert.equal(shareTopbarApi.appMenuTree().find(menu => menu.id === 'tabs').badgeText, '0', 'share viewers start with 0 running YO jobs before the host snapshot');
     await shareTopbarApi.applyShareUiStateForTest({autoApprove: autoSnapshot});
-    assert.equal(shareTopbarApi.appMenuTree().find(menu => menu.id === 'tabs').badgeText, '1', 'share viewers mirror the host Tabs YO badge from UI state');
+    assert.equal(shareTopbarApi.appMenuTree().find(menu => menu.id === 'tabs').badgeText, '1', 'share viewers mirror the host running YO badge from UI state');
     assert.equal(shareTopbarApi.appMenuTree().find(menu => menu.id === 'tmux').items[0].label, 'YO on', 'share viewers mirror host tmux YO state from UI state');
   }
 

@@ -5249,8 +5249,8 @@ function autoApproveEnabledForSession(payload) {
   return autoApproveEnabledHere(payload) || autoApproveEnabledElsewhere(payload);
 }
 
-function yoloEnabledSessions() {
-  return sessions.filter(session => autoApproveEnabledHere(autoApproveStates.get(session)));
+function yoloWorkingSessions() {
+  return sessions.filter(session => autoApproveScreenIsWorking(autoApproveStates.get(session)));
 }
 
 function autoApproveScreenIsWorking(payload) {
@@ -5263,7 +5263,7 @@ function sessionYoloIsWorking(session, payload = autoApproveStates.get(session))
 }
 
 function runningAgentCount() {
-  return sessions.filter(session => autoApproveScreenIsWorking(autoApproveStates.get(session))).length;
+  return yoloWorkingSessions().length;
 }
 
 function sessionCountsAsRunning(session, stateKey = '') {
@@ -5384,29 +5384,32 @@ function updateDocumentTitle() {
   document.title = idleMinutes ? `YOLOmux (idle for ${idleMinutes} min)` : 'YOLOmux [idle]';
 }
 
-// Cross-session "what's going on" rollup for the always-visible top-bar status line: how many tmux
-// agents are running, how many need the user, how many are idle. Running must come from live work
-// signals, not tmux's selected-pane flag; every tmux window has a selected pane even when idle.
+// Cross-session YOLO screen-state rollup for the always-visible top-bar status line. It intentionally
+// ignores "YOLO enabled" and broad session heuristics; idle enabled sessions must count as 0 RUN/QUES/BLK.
 function globalActivityCounts() {
   let running = 0;
-  let attention = 0;
+  let questions = 0;
+  let blocked = 0;
   let total = 0;
   for (const session of sessions) {
     if (!isTmuxSession(session)) continue;
     total += 1;
-    const key = sessionState(session).key;
-    if (sessionCountsAsRunning(session, key)) running += 1;
-    else if (['needs-input', 'needs-approval', 'blocked', 'disconnected'].includes(key)) attention += 1;
+    const key = String(autoApproveStates.get(session)?.screen?.key || '');
+    if (key === 'working') running += 1;
+    else if (key === 'needs-input') questions += 1;
+    else if (key === 'blocked') blocked += 1;
   }
-  return {running, attention, idle: Math.max(0, total - running - attention), total};
+  const attention = questions + blocked;
+  return {running, questions, blocked, attention, idle: Math.max(0, total - running - attention), total};
 }
 
 function globalActivityStatusLineHtml() {
   const counts = globalActivityCounts();
   if (!counts.total) return '';
   const parts = [];
-  if (counts.running) parts.push(`<span class="topbar-activity-run">${counts.running} running</span>`);
-  if (counts.attention) parts.push(`<span class="topbar-activity-attn">${counts.attention} need you</span>`);
+  parts.push(`<span class="topbar-activity-run${counts.running ? ' active' : ''}">${counts.running} RUN</span>`);
+  parts.push(`<span class="topbar-activity-ques${counts.questions ? ' topbar-activity-attn' : ''}">${counts.questions} QUES?</span>`);
+  parts.push(`<span class="topbar-activity-blk${counts.blocked ? ' topbar-activity-attn' : ''}">${counts.blocked} BLK</span>`);
   parts.push(`<span class="topbar-activity-idle">${counts.idle} idle</span>`);
   return parts.join('<span class="topbar-activity-sep" aria-hidden="true">·</span>');
 }
@@ -8124,7 +8127,7 @@ function appMenuTree() {
   const shareCanOpen = shareSessions.length > 0 || Boolean(activeTmux);
   const shareMenuActive = shareViewMode || shareHasActiveShare();
   const openItems = orderedPaneItems(activePaneItems());
-  const yoloCount = yoloEnabledSessions().length;
+  const yoloCount = yoloWorkingSessions().length;
   const debugMenuItems = debugModeEnabled ? [
     fileMenuVirtualCommand(debugPaneItemId, t('menu.file.debug.detail')),
   ] : [];
@@ -8225,8 +8228,8 @@ function appMenuTree() {
     {
       id: 'tabs',
       label: t('menu.tabs'),
-      badgeText: yoloCount ? String(yoloCount) : '',
-      badgeTitle: yoloCount ? tPlural('menu.tabs.yoloBadge', yoloCount) : '',
+      badgeText: String(yoloCount),
+      badgeTitle: tPlural('menu.tabs.yoloBadge', yoloCount),
       items: tabMenuItems(openItems),
     },
     {
@@ -38669,6 +38672,12 @@ function shareAutoApproveStateSnapshot() {
       locked: state.locked === true,
       last_action: String(state.last_action || ''),
       last_screen_sig: String(state.last_screen_sig || ''),
+      screen: state.screen && typeof state.screen === 'object'
+        ? {
+          key: String(state.screen.key || ''),
+          text: String(state.screen.text || '').slice(0, 200),
+        }
+        : {},
       lock_owner: state.lock_owner && typeof state.lock_owner === 'object'
         ? {
           pid: state.lock_owner.pid || '',

@@ -5612,6 +5612,12 @@ function shareAutoApproveStateSnapshot() {
       locked: state.locked === true,
       last_action: String(state.last_action || ''),
       last_screen_sig: String(state.last_screen_sig || ''),
+      screen: state.screen && typeof state.screen === 'object'
+        ? {
+          key: String(state.screen.key || ''),
+          text: String(state.screen.text || '').slice(0, 200),
+        }
+        : {},
       lock_owner: state.lock_owner && typeof state.lock_owner === 'object'
         ? {
           pid: state.lock_owner.pid || '',

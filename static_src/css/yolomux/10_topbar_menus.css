@@ -605,7 +605,7 @@ body.app-vw-lte-1100 .topbar-search {
 .topbar-activity.has-attention {
   border-color: var(--brand-green);
 }
-.topbar-activity-run {
+.topbar-activity-run.active {
   color: var(--brand-green);
   font-weight: 600;
 }
