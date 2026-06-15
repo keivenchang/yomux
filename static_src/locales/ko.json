@@ -43,6 +43,8 @@
   "conflict.onDisk": "디스크에 있는 내용",
   "conflict.unsaved": "미저장 에디터",
   "contextmenu.copyUrl": "URL 복사",
+  "contextmenu.copyPath": "경로 복사",
+  "contextmenu.openFile": "파일 열기",
   "contextmenu.openInDiffer": "Differ에서 열기",
   "contextmenu.openNewDiffEditor": "새 Differ에서 열기",
   "contextmenu.openNewEditor": "새 편집기에서 열기",

@@ -1445,6 +1445,7 @@ function stripTerminalQueryResponses(data) {
 }
 
 const terminalLinkPattern = /(?:https?:\/\/|file:\/\/|www\.)[^\s<>"'`]+/gi;
+const terminalFileReferencePattern = /(^|[\s([{<"'`])((?:~\/|\.{1,2}\/|\/)?[A-Za-z0-9._@%+=-]+(?:\/[A-Za-z0-9._@%+=-]+)+)(?::([1-9]\d{0,6}))?/g;
 const terminalWrappedUrlMaxRows = 8;
 const terminalLinkClosePairs = [
   [')', '('],
@@ -1487,19 +1488,12 @@ function normalizeTerminalLink(value) {
   return text;
 }
 
-function openTerminalLink(rawLink) {
-  const link = normalizeTerminalLink(rawLink);
-  if (!link) return;
-  try {
-    const opened = window.open(link, '_blank', 'noopener,noreferrer');
-    if (!opened) statusErr(localizedHtml('status.browserBlockedLink', {link}));
-  } catch (error) {
-    statusErr(localizedHtml('status.openLinkFailed', {error}));
-  }
+function terminalRangesOverlap(leftStart, leftEnd, rightStart, rightEnd) {
+  return leftStart < rightEnd && rightStart < leftEnd;
 }
 
-function terminalTextLinks(lineText, rangeForOffsets, y = null) {
-  const links = [];
+function terminalTextUrlReferences(lineText, rangeForOffsets, y = null) {
+  const refs = [];
   terminalLinkPattern.lastIndex = 0;
   for (const match of lineText.matchAll(terminalLinkPattern)) {
     const raw = match[0] || '';
@@ -1510,13 +1504,53 @@ function terminalTextLinks(lineText, rangeForOffsets, y = null) {
     const range = rangeForOffsets(startIndex, endIndex);
     if (!range) continue;
     if (Number.isFinite(y) && (range.start.y > y || range.end.y < y)) continue;
-    links.push({
+    refs.push({
+      type: 'url',
       text,
+      href: normalizeTerminalLink(text),
       range,
-      activate: () => openTerminalLink(text),
+      startIndex,
+      endIndex,
     });
   }
-  return links;
+  return refs;
+}
+
+function terminalTextFileReferences(lineText, rangeForOffsets, y = null, excludedRanges = []) {
+  const refs = [];
+  terminalFileReferencePattern.lastIndex = 0;
+  for (const match of lineText.matchAll(terminalFileReferencePattern)) {
+    const prefix = match[1] || '';
+    const path = match[2] || '';
+    if (!path || /^[a-z][a-z0-9+.-]*:/i.test(path)) continue;
+    const line = Number(match[3] || 0);
+    const startIndex = (match.index || 0) + prefix.length;
+    const endIndex = startIndex + path.length + (match[3] ? match[3].length + 1 : 0);
+    if (excludedRanges.some(range => terminalRangesOverlap(startIndex, endIndex, range.startIndex, range.endIndex))) continue;
+    const range = rangeForOffsets(startIndex, endIndex);
+    if (!range) continue;
+    if (Number.isFinite(y) && (range.start.y > y || range.end.y < y)) continue;
+    refs.push({
+      type: 'file',
+      text: line ? `${path}:${line}` : path,
+      path,
+      line: line || null,
+      range,
+      startIndex,
+      endIndex,
+    });
+  }
+  return refs;
+}
+
+function terminalTextReferences(lineText, rangeForOffsets, y = null) {
+  const urls = terminalTextUrlReferences(lineText, rangeForOffsets, y);
+  const files = terminalTextFileReferences(lineText, rangeForOffsets, y, urls);
+  return [...urls, ...files].sort((a, b) => a.range.start.y - b.range.start.y || a.range.start.x - b.range.start.x);
+}
+
+function terminalTextLinks(lineText, rangeForOffsets, y = null) {
+  return terminalTextReferences(lineText, rangeForOffsets, y).filter(ref => ref.type === 'url');
 }
 
 function terminalLineLinks(lineText, y) {
@@ -1657,17 +1691,91 @@ function terminalWrappedLineLinks(term, y) {
   return terminalTextLinks(group.text, (startIndex, endIndex) => terminalWrappedRange(group, startIndex, endIndex), y);
 }
 
+function terminalWrappedLineReferences(term, y) {
+  const group = terminalWrappedLineGroup(term, y);
+  if (!group) return [];
+  if (group.rows.length === 1) return terminalTextReferences(group.text, (startIndex, endIndex) => ({
+    start: {x: startIndex + 1, y},
+    end: {x: endIndex, y},
+  }), y);
+  return terminalTextReferences(group.text, (startIndex, endIndex) => terminalWrappedRange(group, startIndex, endIndex), y);
+}
+
 function installTerminalLinkProvider(term) {
   if (typeof term.registerLinkProvider !== 'function') return;
   term.registerLinkProvider({
     provideLinks: (y, callback) => {
       try {
-        callback(terminalWrappedLineLinks(term, y));
+        // Terminal references are context-menu actions only. Returning no xterm links prevents
+        // accidental left-click activation while the context menu still uses terminalWrappedLineReferences.
+        void y;
+        callback([]);
       } catch (_) {
         callback([]);
       }
     },
   });
+}
+
+function terminalCellDimensions(term, container) {
+  const cell = term?._core?._renderService?._renderer?.dimensions?.css?.cell
+    || term?._core?._renderService?.dimensions?.css?.cell
+    || {};
+  const width = Number(cell.width || 0);
+  const height = Number(cell.height || 0);
+  if (width > 0 && height > 0) return {width, height};
+  const node = container?.querySelector?.('.xterm-rows') || container?.querySelector?.('.xterm-screen') || container;
+  const rect = node?.getBoundingClientRect?.();
+  const cols = Number(term?.cols || 0);
+  const rows = Number(term?.rows || 0);
+  return {
+    width: cols > 0 && rect?.width ? rect.width / cols : 0,
+    height: rows > 0 && rect?.height ? rect.height / rows : 0,
+  };
+}
+
+function terminalScreenElement(container) {
+  return container?.querySelector?.('.xterm-rows')
+    || container?.querySelector?.('.xterm-screen')
+    || container?.querySelector?.('.xterm')
+    || container;
+}
+
+function terminalPositionFromClientPoint(term, container, clientX, clientY) {
+  const node = terminalScreenElement(container);
+  const rect = node?.getBoundingClientRect?.();
+  const cell = terminalCellDimensions(term, container);
+  if (!rect || !(cell.width > 0) || !(cell.height > 0)) return null;
+  const localX = Number(clientX) - rect.left;
+  const localY = Number(clientY) - rect.top;
+  if (localX < 0 || localY < 0 || localX > rect.width || localY > rect.height) return null;
+  const cols = Math.max(1, Number(term?.cols || 1));
+  const rows = Math.max(1, Number(term?.rows || 1));
+  const x = Math.max(1, Math.min(cols, Math.floor(localX / cell.width) + 1));
+  const screenRow = Math.max(1, Math.min(rows, Math.floor(localY / cell.height) + 1));
+  const viewportY = Math.max(0, Number(term?.buffer?.active?.viewportY || 0));
+  return {x, y: viewportY + screenRow};
+}
+
+function terminalRangeContainsPosition(range, position) {
+  if (!range || !position) return false;
+  const start = range.start || {};
+  const end = range.end || {};
+  if (position.y < start.y || position.y > end.y) return false;
+  if (start.y === end.y) return position.x >= start.x && position.x <= end.x;
+  if (position.y === start.y) return position.x >= start.x;
+  if (position.y === end.y) return position.x <= end.x;
+  return true;
+}
+
+function terminalReferenceAtPosition(term, position) {
+  if (!position) return null;
+  const refs = terminalWrappedLineReferences(term, position.y);
+  return refs.find(ref => terminalRangeContainsPosition(ref.range, position)) || null;
+}
+
+function terminalReferenceAtClientPoint(term, container, clientX, clientY) {
+  return terminalReferenceAtPosition(term, terminalPositionFromClientPoint(term, container, clientX, clientY));
 }
 
 function dedentSelectionText(value) {
@@ -2035,6 +2143,64 @@ function terminalContextMenuSelection(session, term, container = null, presetSel
   return appSelection ? {text: appSelection, source: 'app-clipboard'} : {text: '', source: 'none'};
 }
 
+function terminalFileReferenceAbsolutePath(session, reference) {
+  const raw = String(reference?.path || '').trim();
+  if (!raw || raw.includes('\0') || /[\r\n]/.test(raw)) return '';
+  if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) return '';
+  if (raw === '~') return normalizeDirectoryPath(homePath || '/');
+  if (raw.startsWith('~/')) return homePath ? joinAndNormalize(homePath, raw.slice(2)) : '';
+  if (raw.startsWith('/')) return normalizeDirectoryPath(raw);
+  const base = terminalCurrentPath(session) || sessionTranscriptInfo(session).gitRoot || homePath || '/';
+  return joinAndNormalize(base, raw);
+}
+
+async function terminalFileReferenceTarget(session, reference) {
+  if (reference?.type !== 'file') return null;
+  const path = terminalFileReferenceAbsolutePath(session, reference);
+  if (!path) return null;
+  try {
+    const info = await fetchFilePathInfo(path, {user: true, fresh: true});
+    if (!info || info.kind !== 'file') return null;
+    return {path, info, line: reference.line || null, text: reference.text || path};
+  } catch (_error) {
+    return null;
+  }
+}
+
+function requestFileEditorLineTarget(item, line) {
+  const cleanLine = Math.max(1, Math.floor(Number(line) || 0));
+  if (!item || !cleanLine) return false;
+  pendingFileEditorLineTargets.set(item, cleanLine);
+  const panel = panelNodes.get(item);
+  if (panel?._cmView && typeof applyPendingFileEditorLineTarget === 'function') {
+    return applyPendingFileEditorLineTarget(item, panel);
+  }
+  return true;
+}
+
+async function openTerminalFileReference(target) {
+  if (!target?.path) return;
+  const item = await openFileInEditor(target.path, target.info || {name: basenameOf(target.path)}, {viewMode: 'edit', userInitiated: true});
+  if (item && target.line) requestFileEditorLineTarget(item, target.line);
+}
+
+function appendTerminalReferenceContextMenuItems(menu, reference, fileTarget = null) {
+  if (!reference) return false;
+  if (reference.type === 'url') {
+    const href = reference.href || normalizeTerminalLink(reference.text);
+    if (!href) return false;
+    appendContextMenuButton(menu, t('contextmenu.copyUrl'), () => copyTextToClipboard(href), closeTerminalContextMenu);
+    appendContextMenuButton(menu, t('contextmenu.openUrl'), () => window.open(href, '_blank', 'noopener,noreferrer'), closeTerminalContextMenu);
+    return true;
+  }
+  if (reference.type === 'file' && fileTarget) {
+    appendContextMenuButton(menu, t('contextmenu.openFile'), () => openTerminalFileReference(fileTarget), closeTerminalContextMenu);
+    appendContextMenuButton(menu, t('contextmenu.copyPath'), () => copyTextToClipboard(fileTarget.path), closeTerminalContextMenu);
+    return true;
+  }
+  return false;
+}
+
 async function copyTerminalSelection(session, term, options = {}, container = null) {
   // N7: the context menu passes the selection captured at right-click time, because by the time the user
   // clicks the menu the live selection may be gone (focus moved to the menu).
@@ -2216,11 +2382,13 @@ function installTerminalCopyShortcut(session, term, container = null) {
   });
 }
 
-function showTerminalContextMenu(session, term, x, y, container = null, presetSelection = null) {
+async function showTerminalContextMenu(session, term, x, y, container = null, presetSelection = null, reference = null) {
   closeFileContextMenu();
   closeSessionContextMenu();
   closeFileImagePreview();
   closeOtherSessionPopovers(null);
+  const terminalReference = reference || terminalReferenceAtClientPoint(term, container, x, y);
+  const fileTarget = terminalReference?.type === 'file' ? await terminalFileReferenceTarget(session, terminalReference) : null;
   const menu = document.createElement('div');
   menu.className = 'terminal-context-menu';
   menu.setAttribute('role', 'menu');
@@ -2238,6 +2406,7 @@ function showTerminalContextMenu(session, term, x, y, container = null, presetSe
     appendContextMenuButton(menu, label, () => copyTerminalSelection(session, term, {dedent, selectionText: selected}, container), closeTerminalContextMenu, {disabled: !selected});
   }
   appendContextMenuSeparator(menu);
+  if (appendTerminalReferenceContextMenuItems(menu, terminalReference, fileTarget)) appendContextMenuSeparator(menu);
   appendContextMenuButton(menu, t('terminal.copyTmuxSelection'), () => copyTmuxSelectionToClipboard(session), closeTerminalContextMenu);
   terminalContextMenu.open(menu, x, y);
 }

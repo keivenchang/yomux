@@ -43,6 +43,8 @@
   "conflict.onDisk": "ディスク上",
   "conflict.unsaved": "未保存のエディター",
   "contextmenu.copyUrl": "URLをコピー",
+  "contextmenu.copyPath": "パスをコピー",
+  "contextmenu.openFile": "ファイルを開く",
   "contextmenu.openInDiffer": "Differで開く",
   "contextmenu.openNewDiffEditor": "新しいDifferで開く",
   "contextmenu.openNewEditor": "新しいエディタで開く",

@@ -554,6 +554,7 @@ const pendingFileEditorFocus = new Set();
 const paneViewState = new Map();  // layout item -> generic pane scroll state
 const pendingPaneViewStateCaptures = new Set();
 const fileEditorViewState = new Map();  // layout item -> CodeMirror scroll/selection state
+const pendingFileEditorLineTargets = new Map();  // layout item -> line target to apply after async CodeMirror load
 const fileEditorDiffExpandOverrides = new Map();  // layout item -> per-editor diff context expansion
 let activeFile = null;
 let sharedImageViewerPath = null;

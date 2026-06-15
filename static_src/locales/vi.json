@@ -43,6 +43,8 @@
   "conflict.onDisk": "Trên đĩa",
   "conflict.unsaved": "Trình soạn thảo chưa lưu",
   "contextmenu.copyUrl": "Sao chép URL",
+  "contextmenu.copyPath": "Sao chép đường dẫn",
+  "contextmenu.openFile": "Mở tệp",
   "contextmenu.openInDiffer": "Mở trong Differ",
   "contextmenu.openNewDiffEditor": "Mở trong Differ mới",
   "contextmenu.openNewEditor": "Mở trong trình sửa mới",

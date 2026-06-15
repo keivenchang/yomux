@@ -43,6 +43,8 @@
   "conflict.onDisk": "On disk",
   "conflict.unsaved": "Unsaved editor",
   "contextmenu.copyUrl": "คัดลอก URL",
+  "contextmenu.copyPath": "คัดลอกพาธ",
+  "contextmenu.openFile": "เปิดไฟล์",
   "contextmenu.openInDiffer": "เปิดใน Differ",
   "contextmenu.openNewDiffEditor": "เปิดใน Differ ใหม่",
   "contextmenu.openNewEditor": "เปิดในตัวแก้ไขใหม่",

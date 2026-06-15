@@ -43,6 +43,8 @@
   "conflict.onDisk": "בדיסק",
   "conflict.unsaved": "עורך לא שמור",
   "contextmenu.copyUrl": "העתק כתובת",
+  "contextmenu.copyPath": "העתק נתיב",
+  "contextmenu.openFile": "פתח קובץ",
   "contextmenu.openInDiffer": "פתח ב-Differ",
   "contextmenu.openNewDiffEditor": "פתח ב-Differ חדש",
   "contextmenu.openNewEditor": "פתח בעורך חדש",

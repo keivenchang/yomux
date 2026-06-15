@@ -1004,6 +1004,7 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
     }
     restoreFileEditorPanelViewState(item, panel);
     focusFileEditorPanelIfReady(panel, item);
+    applyPendingFileEditorLineTarget(item, panel);
     // if blame is on but this path isn't cached yet (file opened after the toggle), fetch it
     // and nudge the editor so the annotation appears without a manual toggle. Deduped; no-op otherwise.
     ensureEditorBlameForPath(path);
@@ -1049,6 +1050,24 @@ function diffModeShouldFallBackToEdit(path, state, item = null) {
 
 function renderFileEditorPanelShouldCaptureViewState(options = {}) {
   return options.captureViewState !== false;
+}
+
+function applyPendingFileEditorLineTarget(item, panel) {
+  const line = pendingFileEditorLineTargets.get(item);
+  const view = panel?._cmView;
+  if (!line || !view) return false;
+  try {
+    const docLine = view.state.doc.line(Math.min(Math.max(1, line), view.state.doc.lines));
+    const scrollEffect = view.constructor?.scrollIntoView?.(docLine.from, {y: 'start'});
+    view.dispatch({
+      selection: {anchor: docLine.from, head: docLine.from},
+      ...(scrollEffect ? {effects: scrollEffect} : {}),
+    });
+    pendingFileEditorLineTargets.delete(item);
+    return true;
+  } catch (_) {
+    return false;
+  }
 }
 
 function scheduleShareFileEditorScrollRestore(item, path) {

@@ -43,6 +43,8 @@
   "conflict.onDisk": "En disco",
   "conflict.unsaved": "Editor sin guardar",
   "contextmenu.copyUrl": "Copiar URL",
+  "contextmenu.copyPath": "Copiar ruta",
+  "contextmenu.openFile": "Abrir archivo",
   "contextmenu.openInDiffer": "Abrir en Differ",
   "contextmenu.openNewDiffEditor": "Abrir en un Differ nuevo",
   "contextmenu.openNewEditor": "Abrir en un editor nuevo",

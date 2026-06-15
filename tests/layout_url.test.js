@@ -1026,6 +1026,14 @@ globalThis.__layoutTestApi = {
   tabTypeForItem,
   terminalWheelSignedLines,
   terminalWrappedLineLinks,
+  terminalWrappedLineReferences,
+  terminalReferenceAtPosition,
+  terminalFileReferenceAbsolutePath,
+  terminalFileReferenceTarget,
+  terminalPositionFromClientPoint,
+  requestFileEditorLineTarget,
+  applyPendingFileEditorLineTarget,
+  showTerminalContextMenuForTest: showTerminalContextMenu,
   transcriptPathRowHtml,
   splitNode,
   splitSessionAtSlot,
@@ -9722,6 +9730,7 @@ test('t@6987', () => {
   const middleLinks = api.terminalWrappedLineLinks(term, 2);
   assert.equal(middleLinks.length, 1);
   assert.equal(middleLinks[0].text, 'https://example.com/abcdef');
+  assert.equal(middleLinks[0].type, 'url');
   assert.deepStrictEqual(canonical(middleLinks[0].range), {
     start: {x: 1, y: 1},
     end: {x: 6, y: 3},
@@ -9770,11 +9779,15 @@ test('t@7020', () => {
 });
 
 // Some TUIs hard-wrap long URLs as separate, flush-left rows at width-1 to avoid xterm auto-wrap.
-// The link provider still needs to stitch those rows into one clickable URL.
+// The shared reference detector still needs to stitch those rows into one URL for the context menu.
 test('t@7036', () => {
   const api = loadYolomux();
   const linkProviderSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
-  assert.ok(/registerLinkProvider\(\{[\s\S]*provideLinks: \(y, callback\) => \{[\s\S]*callback\(terminalWrappedLineLinks\(term, y\)\)/.test(linkProviderSource), 'xterm hover/click links use the same wrapped-line stitcher');
+  const providerStart = linkProviderSource.indexOf('function installTerminalLinkProvider');
+  const providerEnd = linkProviderSource.indexOf('function terminalCellDimensions', providerStart);
+  const providerSource = linkProviderSource.slice(providerStart, providerEnd);
+  assert.ok(/registerLinkProvider\(\{[\s\S]*provideLinks: \(y, callback\) => \{[\s\S]*void y;[\s\S]*callback\(\[\]\)/.test(linkProviderSource), 'xterm left-click links are disabled; terminal references are context-menu only');
+  assert.equal(providerSource.includes('window.open'), false, 'xterm link provider must not open browser tabs from left-click activation');
   const first = 'https://claude.com/cai/oauth/authorize?client_id=abc123&scope=org%3Acreate_a';
   const continuations = [
     'pi_key+user%3Aprofile+user%3Ainference&redirect_uri=http%3A%2F%2FlocalhostABCDEF',
@@ -9800,6 +9813,41 @@ test('t@7036', () => {
     }
     assert.equal(api.terminalWrappedLineLinks(term, 4).length, 0, `zero-indent width ${cols} stops before the prompt row`);
   }
+});
+
+test('t@7059', () => {
+  const api = loadYolomux();
+  api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/yolomux.dev3'}});
+  const lines = [
+    terminalLine('• Documented it in docs/specs/SHARE_TEST_INVENTORY.md:123'),
+    terminalLine('Open https://example.com/guide here'),
+  ];
+  const term = {cols: 80, rows: 10, buffer: {active: {viewportY: 0, getLine: index => lines[index] || null}}};
+  const refs = api.terminalWrappedLineReferences(term, 1);
+  const fileRef = refs.find(ref => ref.type === 'file');
+  assert.deepStrictEqual(canonical({
+    text: fileRef?.text,
+    path: fileRef?.path,
+    line: fileRef?.line,
+    range: fileRef?.range,
+  }), {
+    text: 'docs/specs/SHARE_TEST_INVENTORY.md:123',
+    path: 'docs/specs/SHARE_TEST_INVENTORY.md',
+    line: 123,
+    range: {start: {x: 20, y: 1}, end: {x: 57, y: 1}},
+  }, 'terminal output detects relative file:line references as context-menu references');
+  assert.equal(api.terminalFileReferenceAbsolutePath('1', fileRef), '/home/test/yolomux.dev3/docs/specs/SHARE_TEST_INVENTORY.md', 'relative terminal file refs resolve against the active pane cwd');
+  assert.equal(api.terminalWrappedLineLinks(term, 1).some(ref => ref.type === 'file'), false, 'file references are not xterm left-click links');
+  assert.equal(api.terminalReferenceAtPosition(term, {x: 32, y: 1})?.text, 'docs/specs/SHARE_TEST_INVENTORY.md:123', 'right-click hit-testing finds the file ref under the cursor');
+  const urlRef = api.terminalReferenceAtPosition(term, {x: 8, y: 2});
+  assert.equal(urlRef.type, 'url', 'right-click hit-testing still finds URLs');
+  assert.equal(urlRef.href, 'https://example.com/guide');
+  assert.equal(typeof urlRef.activate, 'undefined', 'URL references have no left-click activation handler');
+
+  const container = api.testElementForId('terminal-pane-1');
+  container.rect = {left: 0, top: 0, width: 800, height: 200, right: 800, bottom: 200};
+  term._core = {_renderService: {dimensions: {css: {cell: {width: 10, height: 20}}}}};
+  assert.deepStrictEqual(canonical(api.terminalPositionFromClientPoint(term, container, 315, 10)), {x: 32, y: 1}, 'client point maps to the terminal cell used by context-menu hit-testing');
 });
 
 // (no false merge): a fresh URL on the next flush-left row is its own link, not a continuation.
@@ -12981,6 +13029,40 @@ test('t@tabber', () => {
     const cachedInfo = await api.fetchFilePathInfoForTest('/home/test');
     assert.strictEqual(cachedInfo, firstInfo, 'completed path-info lookup is reused by the short TTL cache');
     assert.equal(calls.length, 1, 'short TTL cache avoids an immediate repeat path-info lookup');
+  }
+
+  {
+    const api = loadYolomux('', ['1']);
+    api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/yolomux.dev3'}});
+    const lines = [terminalLine('• Documented it in docs/specs/SHARE_TEST_INVENTORY.md:123')];
+    const term = {cols: 80, rows: 10, buffer: {active: {viewportY: 0, getLine: index => lines[index] || null}}};
+    const fileRef = api.terminalWrappedLineReferences(term, 1).find(ref => ref.type === 'file');
+    const calls = [];
+    api.setFetchForTest((url, options = {}) => {
+      const body = JSON.parse(options.body || '{}');
+      calls.push({url: String(url), method: options.method || 'GET', requests: body.requests || []});
+      return Promise.resolve(jsonResponse({
+        responses: body.requests.map(request => ({
+          id: request.id,
+          ok: true,
+          payload: {kind: 'file', name: 'SHARE_TEST_INVENTORY.md', path: request.path},
+        })),
+      }));
+    });
+    const targetPromise = api.terminalFileReferenceTarget('1', fileRef);
+    await api.flushFileExplorerFsBatchForTest();
+    const target = await targetPromise;
+    assert.deepStrictEqual(canonical(calls), [{
+      method: 'POST',
+      requests: [{id: 1, path: '/home/test/yolomux.dev3/docs/specs/SHARE_TEST_INVENTORY.md', type: 'info'}],
+      url: '/api/fs/batch',
+    }], 'terminal file refs confirm existence through the shared fs info batch path');
+    assert.deepStrictEqual(canonical(target), {
+      info: {kind: 'file', name: 'SHARE_TEST_INVENTORY.md', path: '/home/test/yolomux.dev3/docs/specs/SHARE_TEST_INVENTORY.md'},
+      line: 123,
+      path: '/home/test/yolomux.dev3/docs/specs/SHARE_TEST_INVENTORY.md',
+      text: 'docs/specs/SHARE_TEST_INVENTORY.md:123',
+    }, 'confirmed terminal file refs carry the absolute path and line for the Open file menu action');
   }
 
   {
