@@ -74,7 +74,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     )
 
     assert settings["general"]["default_layout"] == "split"
-    assert settings["general"]["reload_on_update"] is False
+    assert settings["general"]["reload_on_update"] is True
     assert settings["appearance"]["theme"] == "dark"
     assert settings["appearance"]["terminal_theme"] == "follow-app"
     assert settings["appearance"]["date_time_hour_cycle"] == "24"
@@ -579,12 +579,11 @@ def test_upload_drop_action_settings_defaults_and_round_trip(tmp_path):
     assert updated["settings"]["uploads"]["custom_actions"] == ["Peek | shell:head -40 {qpath} | log"]
 
 
-def test_updates_check_defaults_off():
-    # origin/main update checks are opt-in and surfaced as an explicit Notifications toggle.
+def test_updates_check_defaults_to_patch_threshold():
+    # origin/main update checks are controlled by the notification threshold; "none" means off.
     general = default_settings()["general"]
     updates = default_settings()["updates"]
-    assert general["reload_on_update"] is False
+    assert general["reload_on_update"] is True
     assert general["reload_on_update_auto"] is False
-    assert updates["check_enabled"] is False
     assert updates["check_interval_minutes"] == 60
     assert updates["notify_level"] == "patch"

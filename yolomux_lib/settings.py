@@ -118,7 +118,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "default_layout": "split",
         "default_sessions": [],
         "language": "system",
-        "reload_on_update": False,
+        "reload_on_update": True,
         "reload_on_update_auto": False,
         "startup_tips": True,
     },
@@ -172,10 +172,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "github": {
         "watched_prs": [],
     },
-    # Hourly check for a newer version on origin/main. When on, the server polls git on its own checkout
-    # and nudges admins with a non-intrusive "update available" cue. Never acts on a readonly session.
+    # Hourly check for a newer version on origin/main. "none" disables the check; any other threshold
+    # polls git on this checkout and nudges admins with a non-intrusive "update available" cue.
     "updates": {
-        "check_enabled": False,
         "check_interval_minutes": 60,
         "notify_level": "patch",
     },
@@ -283,6 +282,7 @@ PR_TRANSITION_KEYS = {
 NOTIFY_TRANSITION_KEYS = SESSION_STATE_KEYS | PR_TRANSITION_KEYS
 
 STALE_DEFAULT_MIGRATIONS: dict[tuple[str, str], Any] = {
+    ("general", "reload_on_update"): False,
     ("performance", "latency_refresh_ms"): 3_001,
     ("performance", "event_log_refresh_ms"): 5_003,
     ("performance", "tabber_activity_refresh_ms"): (5_000, 5_009),
@@ -419,16 +419,15 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("general", "default_layout"): "single | split | grid. Reserved default for new visits.",
     ("general", "language"): "UI language. system matches the browser/OS; otherwise a locale code with a shipped catalog (en, zh-Hant, zh-Hans, ja, ko, es, de, fr, it, pt-BR, pl, nl, he, ar, ru, hi, vi, th, tr, en-XA pseudo).",
     ("general", "default_sessions"): "Legacy reserved list of tmux sessions. The running server defaults to all discovered sessions unless launched with --sessions.",
-    ("general", "reload_on_update"): "true/false. Default false. When true, an open client shows a reload banner once the running server reports a newer YOLOMUX_VERSION than the page booted with. This does not check origin/main.",
+    ("general", "reload_on_update"): "true/false. Default true. When true, an open client shows a reload banner once the running server reports a newer YOLOMUX_VERSION than the page booted with. This does not check origin/main.",
     ("general", "reload_on_update_auto"): "true/false. Default false. When reload_on_update is on, reload immediately instead of showing a banner — but only when it is safe (no unsaved editor changes and not mid-typing).",
     ("general", "startup_tips"): "true/false. Default true. When true, a small startup Tip teaches one YOLOmux feature after the app loads; users can dismiss it or turn Tips off forever.",
     ("file_explorer", "indexed_dirs"): "Directories with a pre-built quick-open index, one path per line. Adding a path indexes it (also via the Finder right-click); removing a line un-indexes it.",
     ("file_explorer", "index_refresh_seconds"): "Seconds, 0-3600. How often the quick-open index is proactively refreshed in the background. 0 = only rebuild when you search.",
     ("file_explorer", "companion_dirs"): "Extra directories always included when computing per-session repo status (branch, dirty count, ahead/behind), one path per line. Useful for companion repos that sit alongside your session workdirs but are rarely the active pane cwd — e.g. ~/dynamo/frontend-crates.",
     ("github", "watched_prs"): "Pull requests to watch independently of any open session, one per line. Each is 'owner/repo#N' or a full https://github.com/owner/repo/pull/N URL. They show in YO!info and can notify on merge / CI / review changes (see notifications.notify_transitions).",
-    ("updates", "check_enabled"): "true/false. Default false. When true, the server checks origin/main for a newer YOLOmux version and shows admins the Update & restart card.",
-    ("updates", "check_interval_minutes"): "Minutes, 1+. How often the origin/main update checker runs when updates.check_enabled is true.",
-    ("updates", "notify_level"): "major | minor | patch | none. Minimum YOLOMUX_VERSION change that triggers the origin/main update notification. patch means any semver version bump; none disables update notifications.",
+    ("updates", "check_interval_minutes"): "Minutes, 1+. How often the origin/main update checker runs when updates.notify_level is not none.",
+    ("updates", "notify_level"): "major | minor | patch | none. Minimum YOLOMUX_VERSION change that triggers the origin/main update notification. patch means any semver version bump; none disables update checks and notifications.",
     ("appearance", "theme"): "system | dark | light. Global UI theme for menus, panes, Finder/File Explorer, Preferences, Differ, and editor defaults.",
     ("appearance", "active_color"): "green | blue | orange | yellow | purple | white. Accent color for ACTIVE/FOCUSED UI (active tab, focused-pane ring/glow, chrome strip, file selection, Markdown headings, and YO markers). Green is the default.",
     ("appearance", "separator_color"): "theme | green | blue | orange | yellow | purple | white. Color for pane separators and dashed tab/file/root drop previews. Theme preserves the dark/light defaults.",

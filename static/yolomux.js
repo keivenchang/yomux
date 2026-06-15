@@ -23960,7 +23960,6 @@ function preferenceSections() {
     {title: t('pref.section.notifications'), items: [
       {path: 'general.reload_on_update', label: t('pref.general.reload_on_update.label'), type: 'boolean', help: t('pref.general.reload_on_update.help')},
       {path: 'general.reload_on_update_auto', label: t('pref.general.reload_on_update_auto.label'), type: 'boolean', help: t('pref.general.reload_on_update_auto.help')},
-      {path: 'updates.check_enabled', label: t('pref.updates.check_enabled.label'), type: 'boolean', help: t('pref.updates.check_enabled.help')},
       {path: 'updates.notify_level', label: t('pref.updates.notify_level.label'), type: 'radio', choices: updateNotifyLevelPreferenceChoices(), help: t('pref.updates.notify_level.help')},
       {path: 'notifications.notify_transitions', label: t('pref.notifications.notify_transitions.label'), type: 'list', help: t('pref.notifications.notify_transitions.help')},
       {path: 'notifications.toast_duration_ms', label: t('pref.notifications.toast_duration_ms.label'), type: 'number', min: 1000, max: 60000, step: 500, suffix: 'ms', help: t('pref.notifications.toast_duration_ms.help')},

@@ -3878,7 +3878,7 @@ def test_update_status_dryrun_reports_available():
     assert status["available"] is True
     assert status["target"] == "dryrun"
     assert status["dryrun"] is True
-    assert status["enabled"] is False
+    assert status["enabled"] is True
     assert status["notify"] is True
     assert status["notify_level"] == "patch"
     assert status["version_change_level"] == "patch"
@@ -3894,17 +3894,19 @@ def test_update_status_notify_level_respects_semver_threshold(monkeypatch):
     }
     monkeypatch.setattr(app_module.common, "update_check_status", lambda *_args, **_kwargs: dict(status_payload))
 
-    monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"updates": {"check_enabled": True, "notify_level": "minor"}}})
+    monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"updates": {"notify_level": "minor"}}})
     assert webapp.update_status_payload()["notify"] is False
 
-    monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"updates": {"check_enabled": True, "notify_level": "patch"}}})
+    monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"updates": {"notify_level": "patch"}}})
     assert webapp.update_status_payload()["notify"] is True
 
-    monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"updates": {"check_enabled": True, "notify_level": "none"}}})
+    monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"updates": {"notify_level": "none"}}})
     assert webapp.update_status_payload()["notify"] is False
 
     monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"updates": {"check_enabled": False, "notify_level": "patch"}}})
-    assert webapp.update_status_payload()["notify"] is False
+    status = webapp.update_status_payload()
+    assert status["enabled"] is True
+    assert status["notify"] is True
 
 
 def test_version_change_level_classifies_semver_bumps():

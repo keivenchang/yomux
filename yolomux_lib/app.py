@@ -1804,14 +1804,16 @@ class TmuxWebtermApp:
         section = settings.get("updates", {}) if isinstance(settings, dict) else {}
         return section if isinstance(section, dict) else {}
 
+    def update_notify_level(self, section: dict[str, Any] | None = None) -> str:
+        notify_level = str((section or self.updates_settings()).get("notify_level", "patch"))
+        return notify_level if notify_level in common.UPDATE_NOTIFY_LEVELS else "patch"
+
     def update_status_payload(self, dryrun: bool = False) -> dict[str, Any]:
         section = self.updates_settings()
-        enabled = bool(section.get("check_enabled", False))
-        notify_level = str(section.get("notify_level", "patch"))
-        if notify_level not in common.UPDATE_NOTIFY_LEVELS:
-            notify_level = "patch"
-        # Only hit the network (git fetch) when actually checking — dryrun, or the opt-in is on. A
-        # disabled boot-time status call stays cheap (local refs only) instead of fetching every load.
+        notify_level = self.update_notify_level(section)
+        enabled = notify_level != "none"
+        # Only hit the network (git fetch) when actually checking — dryrun, or notifications are not
+        # set to none. A disabled boot-time status call stays cheap (local refs only) instead of fetching every load.
         status = common.update_check_status(str(common.PROJECT_ROOT), dryrun=dryrun, fetch=(dryrun or enabled))
         status["enabled"] = enabled
         status["version"] = YOLOMUX_VERSION
@@ -1858,12 +1860,12 @@ class TmuxWebtermApp:
             return False
 
     def update_check_loop(self) -> None:
-        # Re-reads settings every iteration so the opt-in toggle takes effect without a restart. When
-        # disabled, idles cheaply. Publishes update_available only when the available target changes,
-        # so admins are nudged once per new version, not every interval.
+        # Re-reads settings every iteration so the notification threshold takes effect without a
+        # restart. When disabled, idles cheaply. Publishes update_available only when the available
+        # target changes, so admins are nudged once per new version, not every interval.
         while True:
             section = self.updates_settings()
-            if not section.get("check_enabled", False):
+            if self.update_notify_level(section) == "none":
                 time.sleep(60)
                 continue
             try:

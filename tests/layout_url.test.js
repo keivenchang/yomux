@@ -5086,13 +5086,14 @@ test('t@2560', () => {
   assert.ok(preferencesHtml.includes('data-setting-path="file_explorer.image_preview_max_px"'), 'preferences expose Finder image preview sizing');
   assert.ok(preferencesHtml.includes('data-setting-path="performance.server_event_poll_ms"'), 'Preferences expose the server SSE editor file-change poll interval');
   assert.ok(preferencesHtml.includes('data-setting-path="updates.notify_level"'), 'Preferences expose the origin/main update notification threshold');
+  assert.equal(preferencesHtml.includes('data-setting-path="updates.check_enabled"'), false, 'Preferences do not expose a redundant origin/main update-check toggle');
   assert.ok(/value="major"[^>]*data-setting-path="updates\.notify_level"[\s\S]*value="minor"[^>]*data-setting-path="updates\.notify_level"[\s\S]*value="patch"[^>]*data-setting-path="updates\.notify_level"[^>]*checked[\s\S]*value="none"[^>]*data-setting-path="updates\.notify_level"/.test(preferencesHtml), 'Update notification threshold is a major/minor/patch/none radio group defaulting to patch');
   assert.ok(/data-setting-path="performance\.server_event_poll_ms"[\s\S]*?value="0\.850"[\s\S]*?min="0\.25"[\s\S]*?step="0\.05"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'server-side SSE editor file-change poll displays seconds with a 0.250s minimum');
   assert.ok(/data-setting-path="performance\.server_background_file_event_poll_ms"[\s\S]*?value="5\.000"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'server-side SSE background editor file-change poll defaults to 5 seconds');
   assert.ok(/data-setting-path="performance\.server_directory_event_poll_ms"[\s\S]*?value="3\.000"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'server-side SSE directory-change poll displays seconds');
+  assert.ok(/data-setting-path="performance\.tabber_activity_refresh_ms"[\s\S]*?value="15"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'Tabber server poll interval defaults to 15 seconds in Preferences');
   assert.ok(/data-setting-path="performance\.latency_refresh_ms"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'latency refresh displays seconds instead of raw milliseconds');
   assert.ok(/data-setting-path="performance\.event_log_refresh_ms"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'event-log refresh displays seconds instead of raw milliseconds');
-  assert.ok(/data-setting-path="performance\.tabber_activity_refresh_ms"[\s\S]*?value="15"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'Tabber activity refresh displays seconds and defaults to 15 seconds');
   assert.ok(/data-setting-path="performance\.popover_show_delay_ms"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'hover popover timing remains in milliseconds');
   assert.ok(/data-setting-path="performance\.menu_hover_open_delay_ms"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'menu hover timing remains in milliseconds');
   assert.ok(/data-setting-path="performance\.tab_popover_show_delay_ms"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'tab hover timing remains in milliseconds');
@@ -5102,7 +5103,7 @@ test('t@2560', () => {
   assert.ok(performanceHtml.includes('Server SSE: editor file-change poll'), 'Performance labels the server-side SSE editor file-change interval');
   assert.ok(performanceHtml.includes('Server SSE: background editor file-change poll'), 'Performance labels the server-side SSE background editor interval');
   assert.ok(performanceHtml.includes('Server SSE: directory-change poll'), 'Performance labels the server-side SSE directory-change interval');
-  assert.ok(performanceHtml.includes('Server cache: Tabber activity'), 'Performance labels the Tabber activity refresh interval as server-cached');
+  assert.ok(performanceHtml.includes('Tabber server poll interval'), 'Performance labels the Tabber activity refresh as a server poll interval');
   assert.equal(performanceHtml.includes('Client pull: file-change/Differ fallback'), false, 'Performance no longer exposes the removed client file-change fallback interval');
   for (const removedPath of [
     'file_explorer.refresh_seconds',
@@ -10423,8 +10424,6 @@ test('t@7423', () => {
     'pref.general.reload_on_update.help',
     'pref.general.reload_on_update_auto.label',
     'pref.general.reload_on_update_auto.help',
-    'pref.updates.check_enabled.label',
-    'pref.updates.check_enabled.help',
     'pref.updates.notify_level.label',
     'pref.updates.notify_level.help',
     'pref.updates.notify_level.major',
@@ -10435,7 +10434,6 @@ test('t@7423', () => {
   assert.equal(en['contextmenu.openInDiffer'], 'Open in a Differ', 'en reusable Differ context label');
   assert.equal(en['contextmenu.openNewDiffEditor'], 'Open in a new Differ', 'en new Differ context label');
   assert.equal(en['contextmenu.openNewEditor'], 'Open in a new Editor', 'en new Editor context label');
-  assert.equal(en['pref.updates.check_enabled.label'], 'Check origin/main for updates', 'en origin/main update-check label is specific');
   assert.equal(en['pref.general.reload_on_update.label'], 'Show reload prompt after server update', 'en server-version reload label is specific');
   assert.equal(en['pref.updates.notify_level.label'], 'Notify when change in', 'en update notification threshold label is specific');
   for (const loc of ['es', 'ja', 'de', 'fr', 'pt-BR', 'ru', 'ko', 'hi', 'ar', 'he', 'vi', 'th', 'tr', 'nl', 'pl', 'it', 'zh-Hans', 'zh-Hant']) {
@@ -11009,7 +11007,7 @@ test('t@7900', () => {
   };
   assert.ok(sectionHtml(api.t('pref.section.notifications')).includes('data-setting-path="general.reload_on_update"'), 'server-version reload prompt is in Notifications');
   assert.ok(sectionHtml(api.t('pref.section.notifications')).includes('data-setting-path="general.reload_on_update_auto"'), 'server-version auto-reload is in Notifications');
-  assert.ok(sectionHtml(api.t('pref.section.notifications')).includes('data-setting-path="updates.check_enabled"'), 'origin/main update check is in Notifications');
+  assert.equal(sectionHtml(api.t('pref.section.notifications')).includes('data-setting-path="updates.check_enabled"'), false, 'origin/main update check toggle is removed from Notifications');
   assert.ok(sectionHtml(api.t('pref.section.notifications')).includes('data-setting-path="updates.notify_level"'), 'origin/main update notification threshold is in Notifications');
   const shareHtml = sectionHtml(api.t('pref.section.share'));
   assert.ok(shareHtml.includes('data-setting-path="share.ttl_seconds"'), 'YO!share Preferences exposes the default share lifetime');
