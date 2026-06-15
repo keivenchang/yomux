@@ -3921,21 +3921,18 @@ def test_generated_share_link_receives_large_dom_keyframe(browser, monkeypatch, 
         assert metrics["keyframeBytes"] > 100_000, metrics
         assert metrics["keyframeRequests"] <= 2, metrics
         assert metrics["hasLargePayload"] is True, metrics
-        settled_metrics = viewer.execute_async_script(
-            """
-            const done = arguments[arguments.length - 1];
-            setTimeout(() => {
-              const root = document.getElementById('appRoot');
-              const health = window.yolomuxShareDebug?.replayHealth?.() || {};
-              done({
-                status: root?.dataset?.shareReplayStatus || health.status || '',
-                keyframeRequests: Number(health.keyframeRequests || 0),
-                rootChildren: root?.children?.length || 0,
-                hasLargePayload: Boolean(root?.innerText?.includes('large-share-keyframe')),
-              });
-            }, 2500);
-            """
-        )
+        def repaired_or_stable(_driver):
+            latest = viewer_metrics()
+            if (
+                latest["status"] == "mirrored"
+                and latest["rootChildren"] > 0
+                and latest["hasLargePayload"] is True
+                and latest["keyframeRequests"] >= metrics["keyframeRequests"]
+            ):
+                return latest
+            return False
+
+        settled_metrics = WebDriverWait(viewer, 8, poll_frequency=0.25).until(repaired_or_stable)
         assert settled_metrics["status"] == "mirrored", settled_metrics
         assert settled_metrics["rootChildren"] > 0, settled_metrics
         assert settled_metrics["hasLargePayload"] is True, settled_metrics
