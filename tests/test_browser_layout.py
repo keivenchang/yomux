@@ -3461,6 +3461,10 @@ def test_http_share_browser_keeps_finder_tabs_editor_differ_and_tabber_in_sync(b
                 "6:1": {"session": "6", "window": 1, "last_output_ts": 200},
             },
         }, HTTPStatus.OK),
+        session_files_batch_payload=lambda sessions, hours, **kwargs: ({
+            "sessions": {"6": session_files_payload | {"session": "6"}},
+            "errors": {},
+        }, HTTPStatus.OK),
         session_files_payload=lambda session, hours, **kwargs: (session_files_payload | {"session": session}, HTTPStatus.OK),
     )
     server, thread = start_browser_share_server(monkeypatch, tmp_path, app, tls_context=BrowserFakeTlsContext())

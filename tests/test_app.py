@@ -1124,6 +1124,89 @@ def test_session_files_payload_reuses_shared_disk_cache_between_apps(monkeypatch
     assert second["errors"] == []
 
 
+def test_activity_warmup_populates_session_files_payload_cache(monkeypatch, tmp_path):
+    transcript = tmp_path / "codex.jsonl"
+    transcript.write_text(json.dumps({"timestamp": "2026-06-15T00:00:00Z"}) + "\n", encoding="utf-8")
+    info = SessionInfo(
+        session="5",
+        panes=[],
+        selected_pane=None,
+        agents=[
+            AgentInfo(
+                session="5",
+                kind="codex",
+                pid=123,
+                pane_target="5:0.0",
+                command="codex",
+                cwd=str(tmp_path),
+                status="running",
+                session_id="session-5",
+                transcript=str(transcript),
+                error=None,
+            )
+        ],
+    )
+    files_payload = {"session": "5", "files": [{"path": "README.md", "repo": str(tmp_path)}], "repos": [], "errors": []}
+    calls = []
+
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
+    monkeypatch.setattr(app_module.session_files, "session_files_payload_for_info", lambda info, hours=24.0, **_kwargs: calls.append("info") or files_payload)
+    monkeypatch.setattr(app_module.session_files, "session_files_payload", lambda *_args, **_kwargs: calls.append("payload") or {"files": [], "repos": [], "errors": []})
+    webapp = app_module.TmuxWebtermApp(["5"])
+    webapp.refresh_sessions = lambda: []
+    try:
+        payload, status = webapp.session_files_payload("5")
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert payload["cache"]["hit"] is True
+    assert payload["files"] == [{"path": "README.md", "repo": str(tmp_path)}]
+    assert calls == ["info"]
+
+
+def test_session_files_batch_payload_discovers_once_and_uses_per_session_cache(monkeypatch):
+    info5 = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
+    info6 = SessionInfo(session="6", panes=[], selected_pane=None, agents=[])
+    discover_calls = []
+    payload_calls = []
+
+    def fake_discover(sessions):
+        discover_calls.append(tuple(sessions))
+        infos = {"5": info5, "6": info6}
+        return {session: infos[session] for session in sessions if session in infos}, []
+
+    def fake_session_files_payload(session, infos, hours, from_ref=None, to_ref=None, repo_refs=None, **_kwargs):
+        payload_calls.append((session, tuple(infos), hours, from_ref, to_ref, repo_refs))
+        return {"session": session, "files": [{"path": f"{session}.txt"}], "repos": [], "errors": []}, HTTPStatus.OK
+
+    monkeypatch.setattr(app_module, "discover_sessions", fake_discover)
+    monkeypatch.setattr(app_module.session_files, "session_files_payload", fake_session_files_payload)
+    webapp = app_module.TmuxWebtermApp(["5", "6"])
+    webapp.refresh_sessions = lambda: []
+    discover_calls.clear()
+    payload_calls.clear()
+    try:
+        first, first_status = webapp.session_files_batch_payload(["5", "6"])
+        second, second_status = webapp.session_files_batch_payload(["5", "6"])
+    finally:
+        webapp.control_server.stop()
+
+    assert first_status == HTTPStatus.OK
+    assert second_status == HTTPStatus.OK
+    assert discover_calls == [("5", "6"), ("5", "6")]
+    assert sorted(payload_calls) == [
+        ("5", ("5",), 24.0, None, None, None),
+        ("6", ("6",), 24.0, None, None, None),
+    ]
+    assert first["sessions"]["5"]["cache"]["hit"] is False
+    assert first["sessions"]["6"]["cache"]["hit"] is False
+    assert second["sessions"]["5"]["cache"]["hit"] is True
+    assert second["sessions"]["6"]["cache"]["hit"] is True
+    assert first["sessions"]["5"]["files"] == [{"path": "5.txt"}]
+    assert first["sessions"]["6"]["files"] == [{"path": "6.txt"}]
+
+
 def test_session_files_payload_returns_stale_cache_and_refreshes(monkeypatch):
     info = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
     calls = []

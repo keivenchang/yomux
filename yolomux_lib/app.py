@@ -15,6 +15,8 @@ import subprocess
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed
 from dataclasses import asdict
 from datetime import datetime
 from datetime import timedelta
@@ -186,6 +188,7 @@ SESSION_FILES_CACHE_MAX_ITEMS = 64
 SESSION_FILES_CACHE_SECONDS = 5.0
 SESSION_FILES_CACHE_VERSION = 1
 SESSION_FILES_CACHE_DIR = common.STATE_DIR / "session-files-cache"
+SESSION_FILES_BATCH_MAX_WORKERS = 8
 TRANSCRIPT_TAIL_CACHE_MAX_ITEMS = 128
 TRANSCRIPTS_PAYLOAD_CACHE_SECONDS = 15.0
 CONTEXT_ITEMS_CACHE_MAX_ITEMS = 128
@@ -208,6 +211,10 @@ CLIENT_WATCH_FILE_LIMIT = 128
 DIRECTORY_WATCH_ENTRY_LIMIT = 512
 # Keep in sync with tmuxSessionNameError() in static/yolomux.js.
 TMUX_SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9_. -]{1,64}$")
+
+
+def session_files_batch_worker_count(count: int) -> int:
+    return max(1, min(SESSION_FILES_BATCH_MAX_WORKERS, count))
 
 
 class SharedWatchRootIndex:
@@ -2711,7 +2718,7 @@ class TmuxWebtermApp:
         repo_refs: dict[str, dict[str, str]] | None = None,
     ) -> dict[str, Any]:
         infos = {info.session: info}
-        key = self.session_files_cache_key("info", infos, info.session, hours, from_ref, to_ref, repo_refs)
+        key = self.session_files_cache_key("payload", infos, info.session, hours, from_ref, to_ref, repo_refs)
         cached = self.get_session_files_cache(key, max_age_seconds=SESSION_FILES_CACHE_SECONDS, allow_stale=True)
         if cached:
             payload, _status, fresh, _age = cached
@@ -2723,6 +2730,80 @@ class TmuxWebtermApp:
             lambda: (session_files.session_files_payload_for_info(info, hours=hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs), HTTPStatus.OK),
         )
         return copy.deepcopy(payload)
+
+    def cached_session_files_payloads_for_infos(
+        self,
+        infos: dict[str, SessionInfo],
+        hours: float = 24.0,
+        from_ref: str | None = None,
+        to_ref: str | None = None,
+        repo_refs: dict[str, dict[str, str]] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        if not infos:
+            return {}
+        if len(infos) == 1:
+            session, info = next(iter(infos.items()))
+            return {session: self.cached_session_files_payload_for_info(info, hours=hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)}
+        payloads: dict[str, dict[str, Any]] = {}
+        with ThreadPoolExecutor(max_workers=session_files_batch_worker_count(len(infos)), thread_name_prefix="session-files-warm") as executor:
+            futures = {
+                executor.submit(self.cached_session_files_payload_for_info, info, hours, from_ref, to_ref, repo_refs): session
+                for session, info in infos.items()
+            }
+            for future in as_completed(futures):
+                payloads[futures[future]] = future.result()
+        return payloads
+
+    def session_files_payload_for_infos(
+        self,
+        session: str | None,
+        infos: dict[str, SessionInfo],
+        hours: float,
+        from_ref: str | None = None,
+        to_ref: str | None = None,
+        repo_refs: dict[str, dict[str, str]] | None = None,
+        force: bool = False,
+        extra_errors: list[str] | None = None,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        cache_key = self.session_files_cache_key("payload", infos, session, hours, from_ref, to_ref, repo_refs)
+        max_age = SESSION_FILES_CACHE_SECONDS
+        cached = None if force else self.get_session_files_cache(cache_key, max_age_seconds=max_age, allow_stale=True)
+        cache_meta: dict[str, Any]
+        if cached:
+            payload, status, fresh, age_seconds = cached
+            cache_meta = {
+                "hit": True,
+                "stale": not fresh,
+                "age_seconds": round(age_seconds, 3),
+                "refresh_seconds": max_age,
+            }
+            if not fresh:
+                refreshing = self.start_session_files_cache_refresh(cache_key, self.refresh_session_files_payload_cache, session, infos, hours, from_ref, to_ref, repo_refs)
+                cache_meta["refreshing"] = refreshing
+        else:
+            payload, status, cache_hit, age_seconds = self.compute_session_files_cache_entry(
+                cache_key,
+                lambda: session_files.session_files_payload(
+                    session,
+                    infos,
+                    hours,
+                    from_ref=from_ref,
+                    to_ref=to_ref,
+                    repo_refs=repo_refs,
+                    include_cross_session_attribution=not bool(session),
+                ),
+            )
+            cache_meta = {
+                "hit": cache_hit,
+                "stale": False,
+                "age_seconds": round(age_seconds, 3),
+                "refresh_seconds": max_age,
+                "refreshing": False,
+            }
+        payload = copy.deepcopy(payload)
+        payload["errors"] = [*(extra_errors or []), *payload.get("errors", [])]
+        payload["cache"] = cache_meta
+        return payload, status
 
     def get_transcripts_payload_cache(self, max_age_seconds: float, allow_stale: bool = False) -> tuple[dict[str, Any], bool, float] | None:
         now = time.monotonic()
@@ -5302,11 +5383,8 @@ class TmuxWebtermApp:
 
     def build_activity_payload(self) -> dict[str, Any]:
         sessions, errors = discover_sessions(self.sessions)
-        session_files_by_session: dict[str, dict[str, Any]] = {}
-        for session, info in sessions.items():
-            if session not in self.sessions or not info.agents:
-                continue
-            session_files_by_session[session] = self.cached_session_files_payload_for_info(info, hours=24.0)
+        agent_infos = {session: info for session, info in sessions.items() if session in self.sessions and info.agents}
+        session_files_by_session = self.cached_session_files_payloads_for_infos(agent_infos, hours=24.0)
         return {
             "activity": self.activity_ledger.snapshot(),
             "agents": build_recent_agents_payload(sessions, self.sessions, session_files_by_session=session_files_by_session),
@@ -5447,44 +5525,82 @@ class TmuxWebtermApp:
             return {"error": f"unknown session: {session}", "session": session}, HTTPStatus.NOT_FOUND
         scope = [session] if session else self.sessions
         infos, errors = discover_sessions(scope)
-        cache_key = self.session_files_cache_key("payload", infos, session, hours, from_ref, to_ref, repo_refs)
-        max_age = SESSION_FILES_CACHE_SECONDS
-        cached = None if force else self.get_session_files_cache(cache_key, max_age_seconds=max_age, allow_stale=True)
-        cache_meta: dict[str, Any] | None = None
-        if cached:
-            payload, status, fresh, age_seconds = cached
-            cache_meta = {
-                "hit": True,
-                "stale": not fresh,
-                "age_seconds": round(age_seconds, 3),
-                "refresh_seconds": max_age,
-            }
-            if not fresh:
-                refreshing = self.start_session_files_cache_refresh(cache_key, self.refresh_session_files_payload_cache, session, infos, hours, from_ref, to_ref, repo_refs)
-                cache_meta["refreshing"] = refreshing
-        else:
-            payload, status, cache_hit, age_seconds = self.compute_session_files_cache_entry(
-                cache_key,
-                lambda: session_files.session_files_payload(
-                    session,
-                    infos,
-                    hours,
-                    from_ref=from_ref,
-                    to_ref=to_ref,
-                    repo_refs=repo_refs,
-                    include_cross_session_attribution=not bool(session),
-                ),
+        return self.session_files_payload_for_infos(
+            session,
+            infos,
+            hours,
+            from_ref=from_ref,
+            to_ref=to_ref,
+            repo_refs=repo_refs,
+            force=force,
+            extra_errors=[*refresh_errors, *errors],
+        )
+
+    def session_files_batch_payload(
+        self,
+        sessions: list[str] | None = None,
+        hours: float = 24.0,
+        from_ref: str | None = None,
+        to_ref: str | None = None,
+        repo_refs: dict[str, dict[str, str]] | None = None,
+        force: bool = False,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        refresh_errors = self.refresh_sessions()
+        requested: list[str] = []
+        seen: set[str] = set()
+        for raw_session in sessions or self.sessions:
+            session = str(raw_session or "").strip()
+            if not session or session in seen:
+                continue
+            seen.add(session)
+            requested.append(session)
+        invalid = [session for session in requested if session not in self.sessions]
+        valid = [session for session in requested if session in self.sessions]
+        infos, errors = discover_sessions(valid)
+        payloads: dict[str, dict[str, Any]] = {}
+        statuses: dict[str, int] = {}
+        batch_infos: dict[str, SessionInfo] = {}
+        for session in requested:
+            if session in invalid:
+                payloads[session] = {"error": f"unknown session: {session}", "session": session, "errors": []}
+                statuses[session] = int(HTTPStatus.NOT_FOUND)
+                continue
+            info = infos.get(session)
+            if info is None:
+                payloads[session] = {"error": f"session unavailable: {session}", "session": session, "errors": []}
+                statuses[session] = int(HTTPStatus.NOT_FOUND)
+                continue
+            batch_infos[session] = info
+
+        def load_session_payload(name: str, info: SessionInfo) -> tuple[dict[str, Any], HTTPStatus]:
+            return self.session_files_payload_for_infos(
+                name,
+                {name: info},
+                hours,
+                from_ref=from_ref,
+                to_ref=to_ref,
+                repo_refs=repo_refs,
+                force=force,
             )
-            cache_meta = {
-                "hit": cache_hit,
-                "stale": False,
-                "age_seconds": round(age_seconds, 3),
-                "refresh_seconds": max_age,
-                "refreshing": False,
-            }
-        payload["errors"] = [*refresh_errors, *errors, *payload.get("errors", [])]
-        payload["cache"] = cache_meta
-        return payload, status
+
+        if len(batch_infos) == 1:
+            session, info = next(iter(batch_infos.items()))
+            payload, status = load_session_payload(session, info)
+            payloads[session] = payload
+            statuses[session] = int(status)
+        elif batch_infos:
+            with ThreadPoolExecutor(max_workers=session_files_batch_worker_count(len(batch_infos)), thread_name_prefix="session-files-batch") as executor:
+                futures = {executor.submit(load_session_payload, session, info): session for session, info in batch_infos.items()}
+                for future in as_completed(futures):
+                    session = futures[future]
+                    payload, status = future.result()
+                    payloads[session] = payload
+                    statuses[session] = int(status)
+        return {
+            "sessions": payloads,
+            "statuses": statuses,
+            "errors": [*refresh_errors, *errors],
+        }, HTTPStatus.OK
 
     def client_event(self, event: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
         session = event.get("session")

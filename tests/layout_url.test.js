@@ -12171,7 +12171,7 @@ test('t@tabber', () => {
   assert.ok(/\.file-tree-row\.tabber-row\[data-tabber-type="tab"\]:not\(\.selected\) > \.file-tree-name,[\s\S]*color:\s*var\(--tabber-level0-color\)/.test(css), 'non-tmux Tabber pane rows do not use purple');
   assert.ok(source.includes("movingEllipsisHtml('tabber-loading-dots')"), 'Tabber shows shared moving dots while touched paths are loading');
   assert.ok(/\.file-tree-row\.tabber-row \.tabber-window-label \.agent-icon\s*\{[\s\S]*width:\s*calc\(var\(--file-explorer-font-size\) \+ 2px\)[\s\S]*height:\s*calc\(var\(--file-explorer-font-size\) \+ 2px\)/.test(css), 'Tabber process icons scale with the file explorer row font');
-  assert.ok(/function warmTabberDataOnLaunch\(\)[\s\S]*?tabberLaunchWarmupStarted = true;[\s\S]*?fetchTabberActivity\(\);/.test(source), 'Tabber launch warmup primes only the cheap activity ledger');
+  assert.ok(/function warmTabberDataOnLaunch\(\)[\s\S]*?tabberLaunchWarmupStarted = true;[\s\S]*?fetchTabberActivity\(\);[\s\S]*?fetchTabberSessionFilesBatch\(tabberAgentSessions\(\)\);/.test(source), 'Tabber launch warmup primes activity and batch-hydrates touched paths');
   assert.ok(/transcriptMetaLoaded = true;[\s\S]*?warmTabberDataOnLaunch\(\)/.test(source), 'Tabber launch warmup runs as soon as transcript metadata is available');
   assert.ok(/function tabberAgentForWindow\(session, windowIndex, agentKey = ''\)/.test(source), 'Tabber can look up agent transcript activity by session/window');
   assert.ok(/const windowMtime = isAgent\s*\?\s*tabberAgentRecency\(agentActivity\)\s*:\s*Math\.max\(ledgerMtime, childMtime, fallbackSessionRecency\)/.test(source), 'Tabber agent windows sort only from agent transcript recency, never user-input or touched-path mtimes');
@@ -12183,6 +12183,8 @@ test('t@tabber', () => {
   assert.ok(source.includes('function setRowDataset(row, key, value)'), 'DOIT.61 B1: row dataset set/delete is centralized');
   assert.ok(source.includes('const tabberSessionFilesStates = new Map()'), 'DOIT.61 B2: Tabber session files use one state map');
   assert.equal(/tabberSessionFilesCache|tabberSessionFilesInFlight/.test(source), false, 'DOIT.61 B2: Tabber no longer has parallel cache + inflight state');
+  assert.ok(source.includes('/api/session-files-batch?') && source.includes('function fetchTabberSessionFilesBatch(sessions'), 'Tabber touched paths hydrate through one batch request');
+  assert.ok(/function ensureTabberSessionFilesFetches\(\)[\s\S]*fetchTabberSessionFilesBatch\(tabberAgentSessions\(\)\)/.test(source), 'Tabber open reuses the batch hydrator for every missing agent session');
   assert.ok(source.includes('function fileTreeRowPadding(depth, compact = false)') && source.includes('function fileTreeRowDepth(row, compact = false)'), 'DOIT.61 B3: tree indentation math is centralized');
   assert.ok(source.includes('const nextDepth = fileTreeRowDepth(row) + 1'), 'DOIT.61 B3: directory expansion uses the shared depth helper');
   assert.ok(source.includes('function clearFileTreeRowHandlers(row)') && (source.match(/clearFileTreeRowHandlers\(row\)/g) || []).length >= 2, 'DOIT.61 B4: stale row handler cleanup is shared');

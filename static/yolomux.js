@@ -11810,6 +11810,7 @@ function warmTabberDataOnLaunch() {
   if (tabberLaunchWarmupStarted || !transcriptMetaLoaded) return false;
   tabberLaunchWarmupStarted = true;
   fetchTabberActivity();
+  fetchTabberSessionFilesBatch(tabberAgentSessions());
   return true;
 }
 
@@ -11849,6 +11850,47 @@ async function fetchTabberSessionFiles(session, options = {}) {
   if (fileExplorerMode === 'tabber') refreshTabberPanels();
 }
 
+async function fetchTabberSessionFilesBatch(sessions, options = {}) {
+  const targets = [];
+  const seen = new Set();
+  for (const rawSession of sessions || []) {
+    const session = String(rawSession || '').trim();
+    if (!session || seen.has(session)) continue;
+    seen.add(session);
+    const state = tabberSessionFilesState(session);
+    if (!options.force && (state.loaded || state.loading)) continue;
+    targets.push(session);
+  }
+  if (!targets.length) return;
+  for (const session of targets) {
+    const state = tabberSessionFilesState(session);
+    state.loading = true;
+  }
+  if (fileExplorerMode === 'tabber') refreshTabberPanels();
+  try {
+    const params = new URLSearchParams();
+    for (const session of targets) params.append('session', session);
+    params.set('hours', '24');
+    const payload = await apiFetchJson(`/api/session-files-batch?${params.toString()}`, {cache: 'no-store'});
+    const payloads = payload?.sessions && typeof payload.sessions === 'object' ? payload.sessions : {};
+    for (const session of targets) {
+      const state = tabberSessionFilesState(session);
+      const sessionPayload = payloads[session] || {};
+      state.files = Array.isArray(sessionPayload.files) ? sessionPayload.files : [];
+      state.loaded = true;
+    }
+  } catch (_) {
+    for (const session of targets) {
+      const state = tabberSessionFilesState(session);
+      state.files = [];
+      state.loaded = true;
+    }
+  } finally {
+    for (const session of targets) tabberSessionFilesState(session).loading = false;
+  }
+  if (fileExplorerMode === 'tabber') refreshTabberPanels();
+}
+
 // Tabber level 0: session_order first, then any remaining live tmux sessions with panes.
 function tabberOrderedSessions() {
   const order = Array.isArray(transcriptMeta.session_order) ? transcriptMeta.session_order : [];
@@ -11871,13 +11913,17 @@ function tabberWindowIsAgent(name) {
   return key === 'claude' || key === 'codex';
 }
 
-function ensureTabberSessionFilesFetches() {
+function tabberAgentSessions() {
+  const sessions = [];
   for (const session of tabberOrderedSessions()) {
-    const state = tabberSessionFilesStates.get(session);
-    if (state?.loaded || state?.loading) continue;
     const info = transcriptMeta.sessions?.[session];
-    if (tmuxWindowRecords(info?.panes).some(record => tabberWindowIsAgent(record.name))) fetchTabberSessionFiles(session);
+    if (tmuxWindowRecords(info?.panes).some(record => tabberWindowIsAgent(record.name))) sessions.push(session);
   }
+  return sessions;
+}
+
+function ensureTabberSessionFilesFetches() {
+  fetchTabberSessionFilesBatch(tabberAgentSessions());
 }
 
 function tabberKnownRepoRoots(files, gitRoot = '') {

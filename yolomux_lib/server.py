@@ -200,6 +200,16 @@ def query_one(qs: dict[str, list[str]], name: str, default: str | None = "") -> 
     return values[0] if values else default
 
 
+def query_list(qs: dict[str, list[str]], name: str) -> list[str]:
+    values: list[str] = []
+    for raw_value in qs.get(name, []):
+        for item in str(raw_value or "").split(","):
+            value = item.strip()
+            if value:
+                values.append(value)
+    return values
+
+
 def query_bool(qs: dict[str, list[str]], name: str, default: bool = False) -> bool:
     raw_default = "1" if default else "0"
     return parse_bool(str(query_one(qs, name, raw_default) or ""))
@@ -961,6 +971,27 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if parsed.path == "/api/activity":
             # DOIT.58 Phase 1: per-session/window activity ledger (metadata; readonly-allowed).
             self.write_app_result(self.share_scoped_activity_result(self.server.app.activity_payload()))
+            return
+        if parsed.path == "/api/session-files-batch":
+            qs = parse_qs(parsed.query)
+            requested_sessions = query_list(qs, "session") or query_list(qs, "sessions")
+            hours, error = parse_query_float(qs, "hours", 24.0, max_value=24.0 * 365.0)
+            if error:
+                self.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+                return
+            from_ref = query_one(qs, "from", None)
+            to_ref = query_one(qs, "to", None)
+            force = query_bool(qs, "force")
+            share_sessions = self.share_sessions()
+            if share_sessions:
+                if not requested_sessions:
+                    requested_sessions = share_sessions
+                blocked = [session for session in requested_sessions if session not in share_sessions]
+                if blocked:
+                    self.write_json(error_payload("share token is scoped to a different session", status=HTTPStatus.FORBIDDEN), status=HTTPStatus.FORBIDDEN)
+                    return
+            repo_refs = parse_repo_refs_param(query_one(qs, "refs", None))
+            self.write_app_result(self.server.app.session_files_batch_payload(requested_sessions or None, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, force=force))
             return
         if parsed.path == "/api/session-files":
             qs = parse_qs(parsed.query)

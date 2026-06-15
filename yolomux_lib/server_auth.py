@@ -38,6 +38,7 @@ class AuthMixin:
         "/api/fs/info",
         "/api/fs/list",
         "/api/share",
+        "/api/session-files-batch",
         "/api/session-files",
         "/api/transcripts",
     }
