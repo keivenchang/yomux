@@ -438,6 +438,7 @@ globalThis.__layoutTestApi = {
   emptyPlaceholderPaneState,
   emptyLayoutSlots,
   editorNav,
+  editorNavBackForTest: editorNavBack,
   recordEditorNav,
   cursorStyleFileReference,
   fileEditorPaneTabHtml,
@@ -1294,6 +1295,9 @@ globalThis.__layoutTestApi = {
   },
   buildTabberTree,
   renderTabberTree,
+  tabberSessionForNumericKey,
+  openTabberSessionForTest: openTabberSession,
+  bindTabberPanelForTest: bindTabberPanel,
   fileExplorerModeSwitcherHtml,
   normalizeFileExplorerMode,
   setTabberActivityForTest(payload) { tabberActivityPayload = payload; },
@@ -3025,7 +3029,7 @@ test('t@2306', () => {
   assert.ok(/\.file-tree-row\.has-agent \.file-tree-name\s*\{[^}]*flex:\s*0 1 auto[\s\S]*min-width:\s*0/.test(sharedTreeCss), 'file-tree rows with agent metadata keep the AI marker directly beside the filename while allowing the filename to ellipsize');
   assert.equal(/\.file-tree-row\.has-agent \.file-tree-agent\s*\{[^}]*margin-inline-end:\s*auto/.test(sharedTreeCss), false, 'file-tree agent metadata must not use auto-margin that can push date columns out of view');
   assert.ok(/\.changes-file-list\s*\{[^}]*display:\s*grid[\s\S]*grid-template-columns:\s*minmax\(0,\s*1fr\)[\s\S]*min-inline-size:\s*0/.test(sharedTreeCss), 'Differ file-list grid constrains shared file-tree rows to the pane width instead of max-content clipping the date column');
-  assert.ok(/\.file-tree-row:has\(> \.file-tree-dir-count:not\(\[hidden\]\)\) > \.file-tree-dir-count,[\s\S]*?margin-inline-start:\s*auto/.test(sharedTreeCss), 'Finder/Differ rows push the first right-side metadata column, not the AI marker, to the right edge');
+  assert.ok(/\.file-tree-row:has\(> \.file-tree-diff:not\(\[hidden\]\)\) > \.file-tree-diff,[\s\S]*?margin-inline-start:\s*auto/.test(sharedTreeCss), 'Finder/Differ rows push the diff column, not the AI marker, to the right edge when diff data exists');
   assert.ok(/--file-tree-row-control-size:\s*calc\(var\(--file-explorer-font-size\) \+ 2px\)/.test(sharedTreeCss), 'Finder/Differ row controls scale from the Finder font size');
   assert.ok(/--file-tree-icon-size:\s*calc\(var\(--file-explorer-font-size\) \+ 2px\)/.test(sharedTreeCss), 'Finder/Differ icon boxes scale from the Finder font size');
   assert.equal(/--file-tree-row-control-size:\s*max\(18px/.test(sharedTreeCss), false, 'Finder/Differ row controls must not keep the old fixed 18px minimum');
@@ -3549,7 +3553,7 @@ test('t@2560', () => {
   assert.ok(changesHtml.includes('file-tree-row kind-file git-modified has-agent'), 'changed-file rows use the shared file-tree row renderer and inline-agent layout');
   assert.ok(/file-tree-git-status"[^>]*title="M: modified"[^>]*aria-label="M: modified"[^>]*>M<\/span>/.test(changesHtml), 'changed-file rows show and label the M status badge in the shared file-tree status slot');
   assert.ok(/file-tree-git-status"[^>]*title="A: added"[^>]*aria-label="A: added"[^>]*>A<\/span>/.test(changesHtml), 'added changed-file rows label the A status badge');
-  assert.ok(changesHtml.includes('file-tree-dir-count">2</span>'), 'changed-file folders show a recursive changed-file count from the shared row renderer');
+  assert.ok(changesHtml.includes('file-tree-dir-count">2 files changed</span>'), 'changed-file folders show a recursive changed-file count from the shared row renderer');
   assert.ok(changesHtml.includes('file-tree-icon'), 'changed-file rows show a file-type icon slot');
   assert.ok(changesHtml.includes('file-tree-date'), 'changed-file rows wrap the date for skinny styling');
   assert.ok(/class="file-tree-row kind-dir[^"]*"[^>]*data-path="\/repo\/app\/src"[\s\S]*<span class="file-tree-date"[^>]*>[^<]+<\/span>/.test(changesHtml), 'Differ directory rows show the same non-empty date slot as Finder');
@@ -3667,7 +3671,7 @@ test('t@2560', () => {
   for (const [status, expectedClass] of Object.entries(gitStatusClassCases)) {
     assert.equal(api.gitStatusRowClass(status), expectedClass, `shared git status row class for ${status}`);
   }
-  assert.ok(/file-tree-name[^>]*>README\.md<\/span>[\s\S]*file-tree-agent[\s\S]*changes-file-agent[\s\S]*file-tree-diff[\s\S]*changes-diff-add[^>]*>\+2<\/span>[\s\S]*changes-diff-remove[^>]*>-1<\/span>[\s\S]*file-tree-git-status[^>]*>M<\/span>[\s\S]*file-tree-date/.test(compactChangeHtml), 'compact changed-file row order is file, AI icon, counts, status, date');
+  assert.ok(/file-tree-name[^>]*>README\.md<\/span>[\s\S]*file-tree-agent[\s\S]*changes-file-agent[\s\S]*file-tree-diff[\s\S]*changes-diff-add[^>]*>\+2<\/span>[\s\S]*changes-diff-remove[^>]*>-1<\/span>[\s\S]*file-tree-dir-count[\s\S]*file-tree-git-status[^>]*>M<\/span>[\s\S]*file-tree-date/.test(compactChangeHtml), 'compact changed-file row order is file, AI icon, diff counts, file count, status, date');
   assert.ok(/file-tree-git-status[^>]*title="M: modified"[^>]*aria-label="M: modified"[^>]*>M<\/span>/.test(compactChangeHtml), 'compact changed-file M badge explains itself on hover');
   assert.equal(changesHtml.includes('>codex<'), false, 'changed-file rows do not spell out the agent kind');
   assert.ok(changesHtml.includes('data-open-change-file="/repo/app/src/new.py"'));
@@ -7793,10 +7797,10 @@ test('t@2560', () => {
     ['/repo/A/B/D', [{name: 'H', kind: 'file'}]],
   ]);
   const ancestorRows = Object.fromEntries(ancestorTree.querySelectorAll('.file-tree-row[data-path]').map(row => [row.dataset.path, row]));
-  assert.equal(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-dir-count').textContent, '3', 'Finder changed ancestor A shows total changed descendants');
-  assert.equal(ancestorRows['/repo/A/B'].querySelector(':scope > .file-tree-dir-count').textContent, '3', 'Finder changed ancestor B shows total changed descendants');
-  assert.equal(ancestorRows['/repo/A/B/C'].querySelector(':scope > .file-tree-dir-count').textContent, '2', 'Finder changed ancestor C counts only its subtree');
-  assert.equal(ancestorRows['/repo/A/B/D'].querySelector(':scope > .file-tree-dir-count').textContent, '1', 'Finder changed ancestor badges ignore transcript-only touched files with no diff');
+  assert.equal(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-dir-count').textContent, '3 files changed', 'Finder changed ancestor A shows total changed descendants');
+  assert.equal(ancestorRows['/repo/A/B'].querySelector(':scope > .file-tree-dir-count').textContent, '3 files changed', 'Finder changed ancestor B shows total changed descendants');
+  assert.equal(ancestorRows['/repo/A/B/C'].querySelector(':scope > .file-tree-dir-count').textContent, '2 files changed', 'Finder changed ancestor C counts only its subtree');
+  assert.equal(ancestorRows['/repo/A/B/D'].querySelector(':scope > .file-tree-dir-count').textContent, '1 file changed', 'Finder changed ancestor badges ignore transcript-only touched files with no diff');
   assert.ok(ancestorRows['/repo/A'].classList.contains('file-tree-row--changed-ancestor'), 'Finder changed ancestors are bold-marked');
   assert.ok(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-agent').innerHTML.includes('agent-icon claude'), 'Finder changed ancestor A inherits Claude marker from descendants');
   assert.ok(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-agent').innerHTML.includes('agent-icon codex'), 'Finder changed ancestor A inherits Codex marker from descendants');
@@ -7813,6 +7817,16 @@ test('t@2560', () => {
     ancestorRows['/repo/A'].querySelector(':scope > .file-tree-name').nextElementSibling,
     ancestorRows['/repo/A'].querySelector(':scope > .file-tree-agent'),
     'Finder changed ancestors place the inherited AI marker immediately after the filename',
+  );
+  assert.equal(
+    ancestorRows['/repo/A'].querySelector(':scope > .file-tree-agent').nextElementSibling,
+    ancestorRows['/repo/A'].querySelector(':scope > .file-tree-diff'),
+    'Finder changed ancestors place diff counts before the changed-file count',
+  );
+  assert.equal(
+    ancestorRows['/repo/A'].querySelector(':scope > .file-tree-diff').nextElementSibling,
+    ancestorRows['/repo/A'].querySelector(':scope > .file-tree-dir-count'),
+    'Finder changed ancestors place the changed-file count after diff counts',
   );
   assert.equal(ancestorRows['/repo/A/B/C/F'].classList.contains('file-tree-row--changed-ancestor'), false, 'changed leaf files do not get the ancestor marker');
 
@@ -12089,13 +12103,17 @@ test('t@tabber', () => {
   assert.ok(source.includes('function normalizeGitStatus(status)') && source.includes('return normalizeGitStatus(fileTreeChangedFile(path)?.status)'), 'DOIT.61 B6: git status normalization is shared');
   assert.equal(source.includes("endsWith(' ●')"), false, 'DOIT.61 B7: active window state is not parsed out of the label string');
   assert.ok(source.includes("tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true})"), 'DOIT.61 B7: active window state is passed as data');
+  assert.equal(source.includes("if (entry.tabber?.type !== 'session') fileExplorerTabberCollapsed.add(path)"), false, 'Tabber collapse-all and disclosure toggles include session rows');
+  assert.ok(/function tabberSessionForNumericKey\(key\)[\s\S]*\^\[1-9\]\$/.test(source), 'Tabber maps bare numeric keys to matching tmux sessions');
+  assert.ok(/row\.dataset\.kind === 'dir' && fullPath && onDisclosure[\s\S]*toggleTabberCollapsed\(fullPath\)[\s\S]*type === 'session' && session\)[\s\S]*openTabberSession\(session\)/.test(source), 'Tabber session row text opens the session while the shared disclosure branch toggles collapse');
 
   const api = loadYolomux();
   assert.equal(api.normalizeFileExplorerMode('tabber'), 'tabber');
   assert.equal(api.normalizeFileExplorerMode('bogus'), 'files');
   assert.equal(api.readStoredFileExplorerModeForTest('tabber'), 'files', 'Tabber is an explicit mode choice, not the default restored left Finder pane');
   assert.ok(/data-file-explorer-mode-set="files"[\s\S]*data-file-explorer-mode-set="diff"[\s\S]*data-file-explorer-mode-set="tabber"/.test(api.fileExplorerModeSwitcherHtml()), 'B1: Finder / Differ / Tabber order');
-  assert.ok(source.includes('data-tabber-session-open') && source.includes('data-tabber-expand'), 'session rows split the click target: session name opens, description expands');
+  assert.equal(source.includes('data-tabber-expand'), false, 'Tabber session descriptions are not separate expand-only targets');
+  assert.ok(source.includes('tabber-session-name') && source.includes('tabber-session-description'), 'session rows render both the session number and description inside the one clickable row body');
   assert.ok(/row\.dataset\.tabberItem === infoItemId\) openInfoSubTab\('info'\)/.test(source), 'YO!info Tabber row opens the YO!info sub-tab, not the remembered YO!agent sub-tab');
   assert.equal(/tabberOpenFile|tabberOpenStatus|tabberOpenRepo|type === 'path'|data-tabber-type="path"/.test(source), false, 'Tabber has no individual-file row data or activation path');
   api.setInfoPanelSubTabForTest('yoagent');
@@ -12142,7 +12160,8 @@ test('t@tabber', () => {
   // Render guard: real labels (never synthetic node names); active window marked; absolute path rows present.
   const rows = api.tabberRenderedRowsForTest();
   assert.equal(rows.some(r => /^[swrf]_\d/.test(r.name)), false, 'rows show human labels, not synthetic node names (got ' + JSON.stringify(rows.map(r => r.name).slice(0, 8)) + ')');
-  assert.ok(rows.some(r => r.type === 'session' && r.nameHtml.includes('tabber-session-name') && r.nameHtml.includes('tabber-session-description')), 'session rows render separate name and description click targets');
+  assert.ok(rows.some(r => r.type === 'session' && r.nameHtml.includes('tabber-session-name') && r.nameHtml.includes('tabber-session-description')), 'session rows render the number and description inside the clickable row body');
+  assert.equal(rows.some(r => r.type === 'session' && r.nameHtml.includes('data-tabber-expand')), false, 'session description text is part of the row activation target');
   assert.ok(rows.some(r => r.type === 'window' && /0:claude \(pid=12345\)/.test(r.name) && /tabber-window-active[^>]*> ●</.test(r.nameHtml)), '#2: the current window is marked separately and shows pid (got ' + JSON.stringify(rows.filter(r => r.type === 'window').map(r => ({name: r.name, html: r.nameHtml}))) + ')');
   assert.ok(rows.some(r => r.type === 'window' && r.nameHtml.includes('tabber-window-label') && r.nameHtml.includes('agent-icon claude')), 'Claude Tabber window rows show the shared Claude icon');
   assert.ok(rows.some(r => r.type === 'window' && r.nameHtml.includes('tabber-window-label') && r.nameHtml.includes('agent-icon codex')), 'Codex Tabber window rows show the shared Codex icon');
@@ -12151,8 +12170,52 @@ test('t@tabber', () => {
   api.setFileExplorerTreeSortModeForTest('newest');
   api.setTabberActivityForTest({activity: {'1:1': {last_user_input_ts: 99999}, '1:0': {last_user_input_ts: 1}}});
   api.setTabberCollapsedForTest(['/s_1']);
+  const sessionCollapsedRows = api.tabberRenderedRowsForTest({preserveCollapsed: true});
+  assert.equal(sessionCollapsedRows.some(r => r.type === 'window' && /0:claude \(pid=12345\)/.test(r.name)), false, 'collapsed Tabber session rows hide their process rows');
+  assert.equal(api.tabberSessionForNumericKey('1'), '1', 'Tabber numeric key 1 maps to tmux session 1, not typeahead text');
+  assert.equal(api.tabberSessionForNumericKey('0'), '', 'Tabber numeric keys are only visible 1-9 session shortcuts');
+  assert.equal(api.openTabberSessionForTest('1'), true, 'opening a Tabber session succeeds');
   const firstLevelExpandedRows = api.tabberRenderedRowsForTest({preserveCollapsed: true});
-  assert.ok(firstLevelExpandedRows.some(r => r.type === 'window' && /0:claude \(pid=12345\)/.test(r.name)), 'first-level Tabber session rows stay expanded so process rows remain visible');
+  assert.ok(firstLevelExpandedRows.some(r => r.type === 'window' && /0:claude \(pid=12345\)/.test(r.name)), 'opening a collapsed Tabber session expands its process rows');
+  assert.equal(api.currentSessionActionTarget(), '1', 'opening Tabber session 1 focuses tab 1');
+  api.setFocusedPanelItem('2');
+  api.editorNav.stack = [];
+  api.editorNav.index = -1;
+  assert.equal(api.openTabberSessionForTest('1'), true, 'opening Tabber session 1 from another tab records a user navigation');
+  assert.deepEqual(api.editorNav.stack, ['2', '1'], 'Tabber session open records previous tab then session 1 for Back');
+  api.setFileExplorerModeForTest('tabber');
+  const tabberClickSlots = api.emptyLayoutSlots();
+  tabberClickSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 50);
+  tabberClickSlots.left = api.paneStateWithTabs(['1'], '1');
+  tabberClickSlots.right = api.paneStateWithTabs(['2'], '2');
+  api.setLayoutSlotsForTest(tabberClickSlots);
+  api.setFocusedPanelItem('1');
+  api.editorNav.stack = [];
+  api.editorNav.index = -1;
+  const tabberPanel = new TestElement('tabber-panel');
+  const sessionTwoRow = new TestElement('tabber-session-2');
+  sessionTwoRow.classList.add('file-tree-row');
+  sessionTwoRow.dataset.kind = 'dir';
+  sessionTwoRow.dataset.path = '/s_2';
+  sessionTwoRow.dataset.tabberType = 'session';
+  sessionTwoRow.dataset.tabberSession = '2';
+  tabberPanel.appendChild(sessionTwoRow);
+  api.bindTabberPanelForTest(tabberPanel);
+  const rowBodyTarget = {
+    closest(selector) {
+      if (selector === '.file-tree-row[data-tabber-type]') return sessionTwoRow;
+      return null;
+    },
+  };
+  const delegatedClick = {
+    target: rowBodyTarget,
+    preventDefault() { this.defaultPrevented = true; },
+    stopPropagation() { this.propagationStopped = true; },
+  };
+  tabberPanel.listeners.get('click')[0](delegatedClick);
+  assert.equal(delegatedClick.defaultPrevented, true, 'clicking the green Tabber session row body is handled by Tabber');
+  assert.equal(api.currentSessionActionTarget(), '2', 'clicking the whole green "2 <desc>" session line opens Tab 2');
+  assert.deepEqual(api.editorNav.stack, ['1', '2'], `green session row body click records navigation so Back returns to the prior tab; got ${JSON.stringify(api.editorNav.stack)} index=${api.editorNav.index} navigating=${api.editorNav.navigating}`);
   assert.ok(firstLevelExpandedRows.findIndex(r => /0:claude/.test(r.name)) < firstLevelExpandedRows.findIndex(r => /1:bash/.test(r.name)), 'Tabber window rows stay in tmux window-index order even when tree sort is newest');
   assert.ok(rows.some(r => r.type === 'repo' && r.repoRoot === '/home/u/proj' && r.name === '/home/u/proj'), 'L3: path rows render with absolute paths');
   assert.ok(rows.some(r => r.type === 'repo' && r.repoRoot === '/home/u/proj' && r.icon === '📁'), 'L3: path rows use a folder icon');
@@ -12271,6 +12334,41 @@ test('t@tabber', () => {
 }
 
 (async () => {
+  {
+    const api = loadYolomux('', ['1', '2']);
+    api.setFileExplorerModeForTest('tabber');
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 50);
+    slots.left = api.paneStateWithTabs(['1'], '1');
+    slots.right = api.paneStateWithTabs(['2'], '2');
+    api.setLayoutSlotsForTest(slots);
+    api.setFocusedPanelItem('1');
+    api.editorNav.stack = [];
+    api.editorNav.index = -1;
+    const tabberPanel = new TestElement('tabber-back-panel');
+    const sessionTwoRow = new TestElement('tabber-back-session-2');
+    sessionTwoRow.classList.add('file-tree-row');
+    sessionTwoRow.dataset.kind = 'dir';
+    sessionTwoRow.dataset.path = '/s_2';
+    sessionTwoRow.dataset.tabberType = 'session';
+    sessionTwoRow.dataset.tabberSession = '2';
+    tabberPanel.appendChild(sessionTwoRow);
+    api.bindTabberPanelForTest(tabberPanel);
+    tabberPanel.listeners.get('click')[0]({
+      target: {
+        closest(selector) {
+          if (selector === '.file-tree-row[data-tabber-type]') return sessionTwoRow;
+          return null;
+        },
+      },
+      preventDefault() {},
+      stopPropagation() {},
+    });
+    assert.equal(api.currentSessionActionTarget(), '2', 'clicking the green Tabber session row opens Tab 2 before Back');
+    await api.editorNavBackForTest();
+    assert.equal(api.currentSessionActionTarget(), '1', 'Back returns to the previously active tab after a green Tabber session row click');
+  }
+
   {
     const scrollHostApi = loadYolomux('', ['1'], 'https:', 'Linux x86_64');
     const prefsScroller = new TestElement('prefs-scroll');

@@ -291,7 +291,7 @@ def pc_controls_fixture_html():
           <div id="expanded-dir" class="file-tree-row kind-dir expanded" aria-expanded="true"><span class="file-tree-icon">▾</span><span class="file-tree-name">Bravo</span></div>
           <div id="selected-file-row" class="file-tree-row kind-file selected"><span class="file-tree-icon">M</span><span class="file-tree-name">clicked.md</span></div>
           <div id="current-file-row" class="file-tree-row kind-file current-file"><span class="file-tree-icon">M</span><span class="file-tree-name">README.md</span></div>
-          <div id="repo-dir" class="file-tree-row kind-dir is-repo repo-non-main"><span class="file-tree-icon">▸</span><span class="file-tree-name">yolomux <span class="file-tree-repo-meta">[<span class="file-tree-repo-branch">feature/repo-row</span>]</span></span><span class="file-tree-dir-count" hidden></span><span class="file-tree-agent" hidden></span><span class="file-tree-diff"><span class="changes-diff-add">+5</span> <span class="changes-diff-remove">-3</span></span><span class="file-tree-git-status" hidden></span><span class="file-tree-date" hidden></span></div>
+          <div id="repo-dir" class="file-tree-row kind-dir is-repo repo-non-main"><span class="file-tree-icon">▸</span><span class="file-tree-name">yolomux <span class="file-tree-repo-meta">[<span class="file-tree-repo-branch">feature/repo-row</span>]</span></span><span class="file-tree-agent" hidden></span><span class="file-tree-diff"><span class="changes-diff-add">+5</span> <span class="changes-diff-remove">-3</span></span><span class="file-tree-dir-count" hidden></span><span class="file-tree-git-status" hidden></span><span class="file-tree-date" hidden></span></div>
         </div>
         <div id="test-context-menu" class="terminal-context-menu" style="top: 220px; left: 24px;"></div>
         <div id="test-image-preview" class="file-image-preview-popover" style="top: 220px; left: 24px;"></div>
@@ -1122,27 +1122,27 @@ def file_tree_status_alignment_fixture_html():
           <div id="status-row-m" class="file-tree-row kind-file git-modified has-agent" style="padding-left: 92px">
             <span class="file-tree-icon file-icon-code">*</span>
             <span class="file-tree-name">10_core_utils.js</span>
-            <span class="file-tree-dir-count" hidden></span>
             <span class="file-tree-agent"><span class="agent-icon codex">A</span></span>
             <span class="file-tree-diff"><span class="changes-diff-add">+7</span><span class="changes-diff-remove">-4</span></span>
+            <span class="file-tree-dir-count" hidden></span>
             <span class="file-tree-git-status">M</span>
             <span class="file-tree-date">20 min ago</span>
           </div>
           <div id="status-row-t" class="file-tree-row kind-file git-transcript has-agent" style="padding-left: 92px">
             <span class="file-tree-icon file-icon-code">*</span>
             <span class="file-tree-name">50_editor_settings_runtime.js</span>
-            <span class="file-tree-dir-count" hidden></span>
             <span class="file-tree-agent"><span class="agent-icon codex">A</span></span>
             <span class="file-tree-diff" hidden></span>
+            <span class="file-tree-dir-count" hidden></span>
             <span class="file-tree-git-status">T</span>
             <span class="file-tree-date">2.5 hrs ago</span>
           </div>
           <div id="status-row-q" class="file-tree-row kind-file git-untracked" style="padding-left: 52px">
             <span class="file-tree-icon file-icon-image">*</span>
             <span class="file-tree-name">20260605-026.png</span>
-            <span class="file-tree-dir-count" hidden></span>
             <span class="file-tree-agent" hidden></span>
             <span class="file-tree-diff" hidden></span>
+            <span class="file-tree-dir-count" hidden></span>
             <span class="file-tree-git-status">?</span>
             <span class="file-tree-date">1 hr ago</span>
           </div>
@@ -1151,9 +1151,9 @@ def file_tree_status_alignment_fixture_html():
           <div id="status-row-long" class="file-tree-row kind-file git-modified has-agent" style="padding-left: 92px">
             <span class="file-tree-icon file-icon-doc">*</span>
             <span class="file-tree-name">TOOLCALLING_STREAMING_CASES.md</span>
-            <span class="file-tree-dir-count" hidden></span>
             <span class="file-tree-agent"><span class="agent-icon codex">A</span></span>
             <span class="file-tree-diff"><span class="changes-diff-add">+66</span></span>
+            <span class="file-tree-dir-count" hidden></span>
             <span class="file-tree-git-status">M</span>
             <span class="file-tree-date">Jun 6, 21:44</span>
           </div>

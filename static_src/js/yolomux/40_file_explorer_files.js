@@ -2013,11 +2013,11 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
     date.className = 'file-tree-date';
     row.appendChild(date);
   }
-  // Keep DOM order: icon → name → agent → dir-count → diff → status → date.
+  // Keep DOM order: icon → name → agent → diff → dir-count → status → date.
   if (name.nextElementSibling !== agent) row.insertBefore(agent, name.nextElementSibling);
-  if (agent.nextElementSibling !== dirCount) row.insertBefore(dirCount, agent.nextElementSibling);
-  if (dirCount.nextElementSibling !== diff) row.insertBefore(diff, dirCount.nextElementSibling);
-  if (diff.nextElementSibling !== status) row.insertBefore(status, diff.nextElementSibling);
+  if (agent.nextElementSibling !== diff) row.insertBefore(diff, agent.nextElementSibling);
+  if (diff.nextElementSibling !== dirCount) row.insertBefore(dirCount, diff.nextElementSibling);
+  if (dirCount.nextElementSibling !== status) row.insertBefore(status, dirCount.nextElementSibling);
   if (status.nextElementSibling !== date) row.insertBefore(date, status.nextElementSibling);
   setClassNameIfChanged(icon, ['file-tree-icon', options.iconClass || ''].filter(Boolean).join(' '));
   if (icon.textContent !== iconText) icon.textContent = iconText;
@@ -2054,6 +2054,12 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
   const dateText = options.dateText || '';
   if (date.textContent !== dateText) date.textContent = dateText;
   setHiddenIfChanged(date, !dateText);
+}
+
+function fileTreeDirCountText(count) {
+  const normalized = Number(count || 0);
+  if (!normalized) return '';
+  return `${normalized} ${normalized === 1 ? 'file' : 'files'} changed`;
 }
 
 function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
@@ -2151,8 +2157,8 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   const displayName = differMode ? {text: entry.name, html: null} : fileTreeDisplayParts(fullPath, entry);
   const dirCountText = entry.kind === 'dir'
     ? (differMode
-      ? String(countChangedFilesInDir(fullPath, options.entriesByDir, options.sessionFilesMap) || '')
-      : (changedAncestor?.count ? String(changedAncestor.count) : ''))
+      ? fileTreeDirCountText(countChangedFilesInDir(fullPath, options.entriesByDir, options.sessionFilesMap))
+      : fileTreeDirCountText(changedAncestor?.count))
     : '';
   const directoryDiffParts = entry.kind === 'dir'
     ? (entry.is_repo === true ? fileTreeRepoDiffParts(fullPath) : sessionFileDiffText(changedAncestor || {}))
@@ -2452,7 +2458,7 @@ function updateFileTreeGitStatusRows() {
     row.classList.toggle('has-agent', Boolean(agentHtml));
     const dirCount = row.querySelector(':scope > .file-tree-dir-count');
     if (dirCount) {
-      const dirCountText = changedAncestor?.count ? String(changedAncestor.count) : '';
+      const dirCountText = fileTreeDirCountText(changedAncestor?.count);
       dirCount.textContent = dirCountText;
       dirCount.hidden = !dirCountText;
     }
@@ -3068,9 +3074,6 @@ function renderTabberTree(groupsEl) {
   ensureTabberSessionFilesFetches();
   const {entries, entriesByDir} = buildTabberTree();
   const collapsedSet = new Set(fileExplorerTabberCollapsed);
-  for (const entry of entries) {
-    if (entry.tabber?.type === 'session') collapsedSet.delete(`/${entry.name}`);
-  }
   if (!entries.length) {
     groupsEl.innerHTML = '<div class="changes-empty">No open tmux sessions</div>';
     return;
@@ -3156,7 +3159,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
     ? agentIcon(data.agentKey, {label: agentLabel(data.agentKey)})
     : '';
   const nameHtml = data.type === 'session'
-    ? `<span class="tabber-session-name" data-tabber-session-open>${esc(data.label || entry.name)}</span>${data.description ? `<span class="tabber-session-description" data-tabber-expand>${esc(data.description)}</span>` : ''}`
+    ? `<span class="tabber-session-name">${esc(data.label || entry.name)}</span>${data.description ? `<span class="tabber-session-description">${esc(data.description)}</span>` : ''}`
     : data.type === 'window' && windowAgentIconHtml
       ? tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true})
     : data.type === 'loading'
@@ -3197,7 +3200,7 @@ function setAllTabberCollapsed(collapsed) {
       for (const entry of list || []) {
         if (entry.kind !== 'dir') continue;
         const path = parent === '/' ? `/${entry.name}` : `${parent}/${entry.name}`;
-        if (entry.tabber?.type !== 'session') fileExplorerTabberCollapsed.add(path);
+        fileExplorerTabberCollapsed.add(path);
         walk(entriesByDir.get(normalizeDirectoryPath(path)), path);
       }
     };
@@ -3206,6 +3209,31 @@ function setAllTabberCollapsed(collapsed) {
   persistTabberCollapsed();
   refreshTabberPanels();
   scheduleShareUiStatePublish();
+}
+
+function tabberSessionPath(session) {
+  const value = String(session || '').trim();
+  return value ? `/s_${tabberPathToken(value)}` : '';
+}
+
+function tabberSessionForNumericKey(key) {
+  const value = String(key || '').trim();
+  if (!/^[1-9]$/.test(value)) return '';
+  return tabberOrderedSessions().includes(value) ? value : '';
+}
+
+function openTabberSession(session, options = {}) {
+  const target = String(session || '').trim();
+  if (!target) return false;
+  const sessionPath = tabberSessionPath(target);
+  if (sessionPath && fileExplorerTabberCollapsed.has(sessionPath)) {
+    fileExplorerTabberCollapsed.delete(sessionPath);
+    persistTabberCollapsed();
+    if (options.refresh !== false) refreshTabberPanels();
+    scheduleShareUiStatePublish();
+  }
+  selectSession(target, {userInitiated: true});
+  return true;
 }
 
 // Delegated activation for Tabber rows. Clicking the disclosure icon toggles a node; clicking the row body
@@ -3217,14 +3245,7 @@ function handleTabberRowActivate(row, event) {
   const session = row.dataset.tabberSession || '';
   const windowIndex = row.dataset.tabberWindow !== undefined ? tmuxWindowNumber(row.dataset.tabberWindow) : null;
   const onDisclosure = Boolean(event?.target?.closest?.('.file-tree-icon'));
-  const onSessionName = Boolean(event?.target?.closest?.('[data-tabber-session-open]'));
-  const onExpandTarget = Boolean(event?.target?.closest?.('[data-tabber-expand]'));
-  if (row.dataset.kind === 'dir' && fullPath && onExpandTarget) {
-    expandTabberPath(fullPath);
-    refreshTabberPanels();
-    return;
-  }
-  if (row.dataset.kind === 'dir' && fullPath && onDisclosure && type !== 'session') {
+  if (row.dataset.kind === 'dir' && fullPath && onDisclosure) {
     toggleTabberCollapsed(fullPath);
     refreshTabberPanels();
     return;
@@ -3234,11 +3255,7 @@ function handleTabberRowActivate(row, event) {
     if (row.dataset.tabberItem === infoItemId) openInfoSubTab('info');
     else selectSession(row.dataset.tabberItem, {userInitiated: true});
   } else if (type === 'session' && session) {
-    if (onSessionName) selectSession(session, {userInitiated: true});
-    else if (fullPath) {
-      expandTabberPath(fullPath);
-      refreshTabberPanels();
-    }
+    openTabberSession(session);
   } else if (type === 'window' && session) {
     selectSession(session, {userInitiated: true});
     switchWindow();
@@ -3263,6 +3280,16 @@ function bindTabberPanel(panel) {
     event.preventDefault();
     event.stopPropagation();
     handleTabberRowActivate(row, event);
+  });
+  panel.addEventListener('keydown', event => {
+    if (fileExplorerMode !== 'tabber') return;
+    if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+    const session = tabberSessionForNumericKey(event.key);
+    if (!session) return;
+    if (!eventTargetIsFileExplorerSurface(event.target) && !isFileExplorerItem(focusedPanelItem)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    openTabberSession(session);
   });
   panel.addEventListener('contextmenu', event => {
     if (fileExplorerMode !== 'tabber') return;

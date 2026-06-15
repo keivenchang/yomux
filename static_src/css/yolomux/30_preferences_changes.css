@@ -441,16 +441,6 @@
   inline-size: 100%;
   min-inline-size: 0;
 }
-/* Directory changed-file count badge */
-.file-tree-dir-count {
-  color: var(--muted);
-  font-family: var(--mono-font);
-  font-size: var(--ui-font-size-2xs);
-  font-weight: 700;
-  letter-spacing: 0;
-  flex-shrink: 0;
-  margin-inline-start: 4px;
-}
 .changes-tree {
   padding: 2px 0;
 }

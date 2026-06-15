@@ -2674,14 +2674,14 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
 .file-tree-dir-count {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   flex: 0 0 auto;
-  min-width: 1.5ch;
   color: var(--muted);
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-2xs);
   font-weight: 700;
   line-height: 1;
+  white-space: nowrap;
 }
 .file-tree-diff {
   display: inline-flex;
@@ -2700,10 +2700,10 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
   gap: 2px;
   flex: 0 0 auto;
 }
-.file-tree-row:has(> .file-tree-dir-count:not([hidden])) > .file-tree-dir-count,
-.file-tree-row:not(:has(> .file-tree-dir-count:not([hidden]))):has(> .file-tree-diff:not([hidden])) > .file-tree-diff,
-.file-tree-row:not(:has(> .file-tree-dir-count:not([hidden]))):not(:has(> .file-tree-diff:not([hidden]))):has(> .file-tree-git-status:not([hidden])) > .file-tree-git-status,
-.file-tree-row:not(:has(> .file-tree-dir-count:not([hidden]))):not(:has(> .file-tree-diff:not([hidden]))):not(:has(> .file-tree-git-status:not([hidden]))):has(> .file-tree-date:not([hidden])) > .file-tree-date {
+.file-tree-row:has(> .file-tree-diff:not([hidden])) > .file-tree-diff,
+.file-tree-row:not(:has(> .file-tree-diff:not([hidden]))):has(> .file-tree-dir-count:not([hidden])) > .file-tree-dir-count,
+.file-tree-row:not(:has(> .file-tree-diff:not([hidden]))):not(:has(> .file-tree-dir-count:not([hidden]))):has(> .file-tree-git-status:not([hidden])) > .file-tree-git-status,
+.file-tree-row:not(:has(> .file-tree-diff:not([hidden]))):not(:has(> .file-tree-dir-count:not([hidden]))):not(:has(> .file-tree-git-status:not([hidden]))):has(> .file-tree-date:not([hidden])) > .file-tree-date {
   margin-inline-start: auto;
 }
 .file-tree-agent .agent-icon {
