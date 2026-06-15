@@ -7514,15 +7514,15 @@ body.theme-light .info-cell a.pr-status-closed:hover {
 .modal {
   display: none;
   z-index: var(--z-file-conflict-dialog);
-  align-items: start;
+  align-items: center;
   justify-items: center;
-  padding: min(10vh, 82px) var(--popover-edge-gap) var(--popover-edge-gap);
+  padding: var(--popover-edge-gap);
   overflow: hidden;
 }
 .modal.open { display: grid; }
 .modal-dialog {
   width: min(86vw, var(--popover-max-inline-size));
-  max-height: min(86vh, calc(100vh - 14vh));
+  max-height: min(86vh, calc(100vh - var(--popover-edge-gap) - var(--popover-edge-gap)));
   min-height: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -7559,12 +7559,9 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   overflow-wrap: anywhere;
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
 }
-.modal.about-open {
-  padding-top: min(18vh, 128px);
-}
 .modal.about-open .modal-dialog {
   width: min(520px, var(--popover-max-inline-size));
-  max-height: min(76vh, calc(100vh - min(36vh, 256px)));
+  max-height: min(76vh, calc(100vh - var(--popover-edge-gap) - var(--popover-edge-gap)));
   background: var(--panel);
   box-shadow: var(--shadow-elevated);
 }
@@ -7573,12 +7570,9 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   overflow: auto;
   font-family: var(--ui-font);
 }
-.modal.share-open {
-  padding-top: min(10vh, 82px);
-}
 .modal.share-open .modal-dialog {
   width: min(960px, var(--popover-max-inline-size));
-  max-height: min(80vh, calc(100vh - min(20vh, 164px) - var(--popover-edge-gap)));
+  max-height: min(80vh, calc(100vh - var(--popover-edge-gap) - var(--popover-edge-gap)));
   background: var(--panel);
   border: var(--app-modal-border-width) solid var(--app-modal-border-color);
   box-shadow: 0 18px 52px rgb(var(--shadow-rgb) / 0.5);

@@ -1453,7 +1453,10 @@ function fitTerminal(session, options = {}) {
     if (!hostSize) return;
     const changed = item.term.cols !== hostSize.cols || item.term.rows !== hostSize.rows;
     item.term.resize(hostSize.cols, hostSize.rows);
-    if (changed) {
+    if (changed && item.shareTerminalBytesReceived === true) {
+      item.shareTerminalSkippedResetCount = Math.max(0, Math.round(Number(item.shareTerminalSkippedResetCount) || 0)) + 1;
+    } else if (changed) {
+      item.shareTerminalLastResetAt = Date.now();
       try { item.term.reset(); } catch (_) {}
     }
     refreshTerminal(session);

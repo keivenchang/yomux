@@ -2205,7 +2205,12 @@ function handleShareViewSocketMessage(session, item, data) {
     return;
   }
   const bytes = shareTerminalBytesFromMessage(session, message);
-  if (bytes) item.term.write(bytes);
+  if (bytes) {
+    item.shareTerminalBytesReceived = true;
+    item.shareTerminalLastByteAt = Date.now();
+    item.shareTerminalByteCount = Math.max(0, Math.round(Number(item.shareTerminalByteCount) || 0)) + bytes.length;
+    item.term.write(bytes);
+  }
 }
 
 function bindTerminalContainerForSession(session, term, container) {
@@ -2279,7 +2284,22 @@ function startTerminal(session) {
   if (term.cols !== openedSize.cols || term.rows !== openedSize.rows) {
     term.resize(openedSize.cols, openedSize.rows);
   }
-  const item = {term, socket: null, container, manualClose: false, reconnectAttempt, reconnectTimer: null, resizeTimer: null, scrollTimer: null, pendingScrollLines: 0};
+  const item = {
+    term,
+    socket: null,
+    container,
+    manualClose: false,
+    reconnectAttempt,
+    reconnectTimer: null,
+    resizeTimer: null,
+    scrollTimer: null,
+    pendingScrollLines: 0,
+    shareTerminalBytesReceived: false,
+    shareTerminalLastByteAt: 0,
+    shareTerminalByteCount: 0,
+    shareTerminalLastResetAt: 0,
+    shareTerminalSkippedResetCount: 0,
+  };
   terminals.set(session, item);
   bindTerminalContainerForSession(session, term, container);
   term.onFocus?.(() => {
@@ -3706,6 +3726,7 @@ function shareReplayNextKeyframeRequestBackoff() {
 
 function shareReplayRequestKeyframe(reason = 'replay-error', detail = {}) {
   const now = Date.now();
+  shareReplayRecordLastReplayError(reason, detail);
   const activeBackoffMs = Math.max(0, Math.round(Number(shareReplayKeyframeBackoffMs) || 0));
   const lastRequestAt = Math.max(0, Math.round(Number(shareReplayKeyframeLastRequestAt) || 0));
   const requestFloorMs = Math.max(shareReplayKeyframeRequestMinIntervalMs, shareReplayKeyframeInFlight ? activeBackoffMs : 0);
@@ -4200,6 +4221,32 @@ function shareReplayHostNodeId(node) {
   return next;
 }
 
+function shareReplayRememberSerializedNode(context, node) {
+  if (!context || !node || (typeof node !== 'object' && typeof node !== 'function')) return;
+  if (!Array.isArray(context.mirroredNodes)) context.mirroredNodes = [];
+  context.mirroredNodes.push(node);
+}
+
+function shareReplayHostMirroredNodeSet(nodes = []) {
+  const result = new WeakSet();
+  for (const node of Array.isArray(nodes) ? nodes : []) {
+    if (node && (typeof node === 'object' || typeof node === 'function')) result.add(node);
+  }
+  return result;
+}
+
+function shareReplayHostMergeMirroredNodes(nodes = []) {
+  for (const node of Array.isArray(nodes) ? nodes : []) {
+    if (node && (typeof node === 'object' || typeof node === 'function')) shareReplayHostMirroredNodes.add(node);
+  }
+}
+
+function shareReplayHostForgetMirroredSubtree(node) {
+  if (!node || (typeof node !== 'object' && typeof node !== 'function')) return;
+  shareReplayHostMirroredNodes.delete(node);
+  for (const child of Array.from(node.childNodes || node.children || [])) shareReplayHostForgetMirroredSubtree(child);
+}
+
 function shareReplaySerializedNodeId(node, context) {
   if (context?.useStableNodeIds === true) return shareReplayHostNodeId(node);
   const next = Math.max(1, Math.round(Number(context.nextNodeId) || 1));
@@ -4357,15 +4404,22 @@ function shareReplayTagIsAllowed(tag = '') {
   return shareReplayAllowedHtmlTags.has(cleanTag) || shareReplayAllowedSvgTags.has(cleanTag);
 }
 
+function shareReplaySafeSerializedTag(tag = '') {
+  const cleanTag = String(tag || '').toLowerCase();
+  if (shareReplayTagIsAllowed(cleanTag)) return cleanTag;
+  return 'span';
+}
+
 function shareReplayCreateElement(tag = '') {
   const cleanTag = String(tag || '').toLowerCase();
-  if (shareReplayBlockedTags.has(cleanTag) || !shareReplayTagIsAllowed(cleanTag)) {
+  if (shareReplayBlockedTags.has(cleanTag)) {
     throw new Error(`unsupported replay tag: ${cleanTag || 'missing'}`);
   }
+  const replayTag = shareReplaySafeSerializedTag(cleanTag);
   if (shareReplayAllowedSvgTags.has(cleanTag)) {
-    return document.createElementNS(shareReplaySvgNamespace, cleanTag);
+    return document.createElementNS(shareReplaySvgNamespace, replayTag);
   }
-  return document.createElement(cleanTag);
+  return document.createElement(replayTag);
 }
 
 function shareReplayNormalizeNodeId(value) {
@@ -4597,6 +4651,46 @@ function shareReplayFrameNumberDetail(message = {}) {
   };
 }
 
+function shareReplayErrorDetail(reason = 'replay-error', detail = {}) {
+  const cleanDetail = detail && typeof detail === 'object' ? detail : {};
+  const currentEpoch = Math.max(0, Math.round(Number(cleanDetail.currentEpoch ?? shareReplayCurrentEpoch) || 0));
+  const lastSequence = Math.max(0, Math.round(Number(cleanDetail.lastSequence ?? shareReplayLastSequence) || 0));
+  const epoch = Number(cleanDetail.epoch);
+  const sequence = Number(cleanDetail.sequence);
+  const baseSequence = Number(cleanDetail.baseSequence);
+  const expectedBaseSequence = Number(cleanDetail.expectedBaseSequence ?? lastSequence);
+  const expectedSequence = Number(cleanDetail.expectedSequence ?? (lastSequence + 1));
+  const error = cleanDetail.error instanceof Error ? cleanDetail.error.message : cleanDetail.error;
+  const entry = {
+    frameType: String(cleanDetail.frameType || cleanDetail.type || shareMirrorProtocol.frames.domDelta),
+    reason: String(reason || cleanDetail.reason || 'replay-error'),
+    error: String(error || cleanDetail.message || '').slice(0, 500),
+    currentEpoch,
+    lastSequence,
+  };
+  for (const [key, value] of Object.entries({
+    epoch,
+    sequence,
+    baseSequence,
+    expectedSequence,
+    expectedBaseSequence,
+    frameBytes: Number(cleanDetail.frameBytes),
+  })) {
+    if (Number.isFinite(value)) entry[key] = Math.round(value);
+  }
+  if (cleanDetail.digest) entry.digest = String(cleanDetail.digest || '');
+  return shareRedactDiagnosticValue(entry);
+}
+
+function shareReplayRecordLastReplayError(reason = 'replay-error', detail = {}) {
+  const cleanDetail = detail && typeof detail === 'object' ? detail : {};
+  const shouldRecord = reason !== 'join' && reason !== 'manual-debug'
+    && (cleanDetail.error || cleanDetail.reason || cleanDetail.frameType || cleanDetail.sequence || cleanDetail.baseSequence || cleanDetail.digest);
+  if (!shouldRecord) return null;
+  shareReplayLastReplayError = shareReplayErrorDetail(reason, cleanDetail);
+  return shareReplayLastReplayError;
+}
+
 function shareReplayDeltaSequenceStatus(message = {}) {
   const detail = shareReplayFrameNumberDetail(message);
   const epoch = detail.epoch;
@@ -4676,6 +4770,17 @@ function shareReplayApplyDeltaMutation(entry = {}) {
   }
 }
 
+function shareReplayApplyDeltaTerminalPlaceholders(payload = {}) {
+  const entries = Array.isArray(payload?.terminals)
+    ? payload.terminals
+    : Array.isArray(payload?.terminalPlaceholders)
+      ? payload.terminalPlaceholders
+      : [];
+  if (!entries.length) return 0;
+  shareReplayApplyTerminalPlaceholders(entries);
+  return entries.length;
+}
+
 function shareReplayApplyScrollEntry(entry = {}) {
   if (!entry || typeof entry !== 'object') return;
   const element = shareReplayNodeForDelta(entry.nodeId ?? entry.target);
@@ -4729,7 +4834,9 @@ function applyShareReplayDelta(payload = {}, message = {}) {
     shareReplayDroppedFrames += 1;
     shareReplayRequestKeyframe(sequenceStatus.reason, {
       ...sequenceStatus,
+      frameType: message.type || shareMirrorProtocol.frames.domDelta,
       digest: payload.digest,
+      frameBytes: shareReplayFrameByteLength({type: message.type || shareMirrorProtocol.frames.domDelta, payload, epoch: message.epoch, sequence: message.sequence}),
     });
     if (!shareReplayDeltaCanApplyBestEffort(sequenceStatus)) {
       setShareReplayShellStatus('viewer-behind', {sequence: message.sequence, digest: payload.digest});
@@ -4740,6 +4847,7 @@ function applyShareReplayDelta(payload = {}, message = {}) {
     for (const mutation of Array.isArray(payload.mutations) ? payload.mutations : []) {
       shareReplayApplyDeltaMutation(mutation);
     }
+    shareReplayApplyDeltaTerminalPlaceholders(payload);
     shareReplayApplyScrollEntries(payload.scroll || []);
     if (payload.pointer && typeof payload.pointer === 'object') shareReplayApplyPointer(payload.pointer, message);
     const expectedDigest = String(payload.digest || '');
@@ -4757,7 +4865,13 @@ function applyShareReplayDelta(payload = {}, message = {}) {
   } catch (error) {
     shareReplayDroppedFrames += 1;
     setShareReplayShellStatus('error', {sequence: message.sequence, digest: payload.digest});
-    shareReplayRequestKeyframe('replay-error', {error, digest: payload.digest});
+    shareReplayRequestKeyframe('replay-error', {
+      ...shareReplayFrameNumberDetail(message),
+      frameType: message.type || shareMirrorProtocol.frames.domDelta,
+      error,
+      digest: payload.digest,
+      frameBytes: shareReplayFrameByteLength({type: message.type || shareMirrorProtocol.frames.domDelta, payload, epoch: message.epoch, sequence: message.sequence}),
+    });
   }
   return true;
 }
@@ -4795,6 +4909,17 @@ function shareReplayMutationNodeIsIgnored(node) {
   return selectors.some(selector => element.closest?.(selector));
 }
 
+function shareReplayHostMutationTargetIsMirrored(node) {
+  const element = shareReplayMutationElement(node);
+  if (!element) return false;
+  const root = appRootElement();
+  const disconnected = element.isConnected === false;
+  const outsideRoot = typeof root?.contains === 'function' && !root.contains(element);
+  if (!root || (element !== root && (disconnected || outsideRoot))) return false;
+  if (Number(node?.nodeType) === 3) return shareReplayHostMirroredNodes.has(node);
+  return shareReplayHostMirroredNodes.has(node) || shareReplayHostMirroredNodes.has(element);
+}
+
 function shareReplaySanitizeMutationAttribute(name = '', value = '') {
   const cleanName = String(name || '').trim();
   const lowerName = cleanName.toLowerCase();
@@ -4807,12 +4932,16 @@ function shareReplaySanitizeMutationAttribute(name = '', value = '') {
 
 function shareReplayMutationEntries(records = []) {
   const entries = [];
+  const terminals = [];
+  const mirroredAdditions = [];
+  const mirroredRemovals = [];
   let batchNeedsKeyframe = false;
   for (const record of Array.from(records || [])) {
     if (batchNeedsKeyframe) continue;
     const type = String(record?.type || '');
     const target = record?.target || null;
     if (!target || shareReplayMutationNodeIsIgnored(target)) continue;
+    if (!shareReplayHostMutationTargetIsMirrored(target)) continue;
     const targetId = shareReplayHostNodeId(target);
     if (!targetId) continue;
     if (type === 'characterData') {
@@ -4845,9 +4974,11 @@ function shareReplayMutationEntries(records = []) {
           needsKeyframe = true;
           continue;
         }
-        const context = {nextNodeId: 1, terminals: [], removedCount: 0, useStableNodeIds: true};
+        const context = {nextNodeId: 1, terminals: [], removedCount: 0, mirroredNodes: [], useStableNodeIds: true};
         const serialized = shareReplaySerializeNode(node, context);
         if (serialized) added.push(serialized);
+        if (context.mirroredNodes.length) mirroredAdditions.push(...context.mirroredNodes);
+        if (context.terminals.length) terminals.push(...context.terminals);
       }
       const removed = [];
       for (const node of Array.from(record.removedNodes || [])) {
@@ -4855,12 +4986,18 @@ function shareReplayMutationEntries(records = []) {
           needsKeyframe = true;
           continue;
         }
+        if (!shareReplayHostMirroredNodes.has(node)) continue;
         const nodeId = shareReplayHostNodeId(node);
-        if (nodeId) removed.push(nodeId);
+        if (nodeId) {
+          removed.push(nodeId);
+          mirroredRemovals.push(node);
+        }
       }
       if (needsKeyframe) {
         batchNeedsKeyframe = true;
         entries.splice(0, entries.length);
+        mirroredAdditions.splice(0, mirroredAdditions.length);
+        mirroredRemovals.splice(0, mirroredRemovals.length);
         scheduleShareTopologyDomKeyframe();
         continue;
       }
@@ -4869,14 +5006,24 @@ function shareReplayMutationEntries(records = []) {
       }
     }
   }
+  if (entries.length || terminals.length) {
+    shareReplayHostMergeMirroredNodes(mirroredAdditions);
+    for (const node of mirroredRemovals) shareReplayHostForgetMirroredSubtree(node);
+  }
+  Object.defineProperty(entries, 'terminals', {
+    value: terminals.sort((a, b) => String(a.session || '').localeCompare(String(b.session || ''))),
+    configurable: true,
+  });
   return entries;
 }
 
 function shareReplayEnqueueMutationRecords(records = []) {
   if (shareViewMode || !shareReplayFeatureEnabled() || shareReplayMutationPublisherPaused) return [];
   const entries = shareReplayMutationEntries(records);
-  if (!entries.length) return [];
-  shareReplayPendingMutations.push(...entries);
+  const terminals = Array.isArray(entries.terminals) ? entries.terminals : [];
+  if (!entries.length && !terminals.length) return [];
+  if (entries.length) shareReplayPendingMutations.push(...entries);
+  if (terminals.length) shareReplayPendingTerminalPlaceholders.push(...terminals);
   if (!shareReplayDeltaFramePending) {
     shareReplayDeltaFramePending = true;
     requestAnimationFrame(shareReplayFlushMutationDeltas);
@@ -4891,6 +5038,7 @@ function shareReplayDrainMutationPublisher() {
     shareReplayMutationObserver = null;
   }
   shareReplayPendingMutations.splice(0, shareReplayPendingMutations.length);
+  shareReplayPendingTerminalPlaceholders.splice(0, shareReplayPendingTerminalPlaceholders.length);
   shareReplayDeltaFramePending = false;
 }
 
@@ -4941,11 +5089,13 @@ function shareReplayPublishDeltaPayload(payload = {}, reason = 'mutation') {
 function shareReplayFlushMutationDeltas() {
   shareReplayDeltaFramePending = false;
   const mutations = shareReplayPendingMutations.splice(0, shareReplayPendingMutations.length);
-  if (!mutations.length) return null;
+  const terminals = shareReplayPendingTerminalPlaceholders.splice(0, shareReplayPendingTerminalPlaceholders.length);
+  if (!mutations.length && !terminals.length) return null;
   const payload = {
     mutations,
     count: mutations.length,
   };
+  if (terminals.length) payload.terminals = terminals;
   const bytes = shareReplayFrameByteLength({type: shareMirrorProtocol.frames.domDelta, payload});
   if (bytes > shareReplayHostDeltaMaxBytes) {
     shareReplayLastDeltaBatch = {...payload, skipped: true, bytes};
@@ -5020,6 +5170,7 @@ function shareReplaySerializeNode(node, context) {
   if (nodeType === 3) {
     const text = shareReplayRedactText(node.textContent || '');
     if (!text) return null;
+    shareReplayRememberSerializedNode(context, node);
     return {nodeId: shareReplaySerializedNodeId(node, context), text};
   }
   if (nodeType !== 1) return null;
@@ -5036,6 +5187,7 @@ function shareReplaySerializeNode(node, context) {
   const nodeId = shareReplaySerializedNodeId(node, context);
   if (redactionAction === 'placeholder') {
     context.removedCount += 1;
+    shareReplayRememberSerializedNode(context, node);
     return {
       nodeId,
       tag: String(node.localName || node.tagName || 'input').toLowerCase(),
@@ -5046,6 +5198,7 @@ function shareReplaySerializeNode(node, context) {
   const terminalPlaceholder = terminalContainer ? shareReplayTerminalPlaceholderForElement(node, nodeId) : null;
   if (terminalPlaceholder) {
     context.terminals.push(terminalPlaceholder.terminal);
+    shareReplayRememberSerializedNode(context, node);
     return terminalPlaceholder.node;
   }
   if (terminalContainer) {
@@ -5058,10 +5211,11 @@ function shareReplaySerializeNode(node, context) {
     const serialized = shareReplaySerializeNode(child, context);
     if (serialized) children.push(serialized);
   }
-  const tag = String(node.localName || node.tagName || 'div').toLowerCase();
+  const tag = shareReplaySafeSerializedTag(node.localName || node.tagName || 'div');
   const entry = {nodeId, tag, attrs: shareReplayElementAttributes(node), children};
   const text = shareReplayRedactText(node.textContent || '');
   if (!children.length && text) entry.text = text;
+  shareReplayRememberSerializedNode(context, node);
   return entry;
 }
 
@@ -5130,9 +5284,10 @@ function shareReplayAssetFingerprint() {
 
 function shareCreateDomKeyframePayload(reason = 'manual-debug') {
   if (!shareReplayFeatureEnabled()) return null;
-  const context = {nextNodeId: 1, terminals: [], removedCount: 0, useStableNodeIds: true};
+  const context = {nextNodeId: 1, terminals: [], removedCount: 0, mirroredNodes: [], useStableNodeIds: true};
   const root = shareReplaySerializeNode(appRootElement(), context);
   if (!root) return null;
+  shareReplayHostMirroredNodes = shareReplayHostMirroredNodeSet(context.mirroredNodes);
   const payload = {
     shareId: String(shareBootstrap?.id || activeShares[0]?.id || activeShares[0]?.token || ''),
     reason: shareMirrorFrameReason(shareMirrorProtocol.frames.domKeyframe, {reason}),
@@ -6901,14 +7056,35 @@ function shareReplayRecordFrameMetrics(kind = '', payload = {}, message = {}) {
 }
 
 function shareReplayTerminalPlaceholderDiagnostics() {
-  const entries = Array.from(shareReplayTerminalPlaceholders.values()).map(entry => ({
-    placeholderId: entry.placeholderId,
-    session: entry.session,
-    rows: entry.rows,
-    cols: entry.cols,
-    terminalEpoch: entry.terminalEpoch,
-    connected: Boolean(document.querySelector?.(`[data-share-terminal-placeholder="${cssEscape(entry.session)}"]`)),
-  }));
+  const streamStatusForItem = item => {
+    if (!item?.term) return 'not-mounted';
+    const readyState = Number(item?.socket?.readyState);
+    if (readyState === 0) return 'connecting';
+    if (readyState === 1) return item.shareTerminalBytesReceived === true ? 'received-bytes' : 'open-no-bytes';
+    if (readyState === 2) return 'closing';
+    if (readyState === 3) return 'closed';
+    return 'no-socket';
+  };
+  const entries = Array.from(shareReplayTerminalPlaceholders.values()).map(entry => {
+    const item = terminals.get(entry.session);
+    const lastByteAt = Math.max(0, Math.round(Number(item?.shareTerminalLastByteAt) || 0));
+    const lastResetAt = Math.max(0, Math.round(Number(item?.shareTerminalLastResetAt) || 0));
+    return {
+      placeholderId: entry.placeholderId,
+      session: entry.session,
+      rows: entry.rows,
+      cols: entry.cols,
+      terminalEpoch: entry.terminalEpoch,
+      connected: Boolean(document.querySelector?.(`[data-share-terminal-placeholder="${cssEscape(entry.session)}"]`)),
+      streamStatus: streamStatusForItem(item),
+      socketReadyState: Number.isFinite(Number(item?.socket?.readyState)) ? Number(item.socket.readyState) : null,
+      receivedBytes: item?.shareTerminalBytesReceived === true,
+      byteCount: Math.max(0, Math.round(Number(item?.shareTerminalByteCount) || 0)),
+      lastByteAgeMs: lastByteAt > 0 ? Math.max(0, Math.round(Date.now() - lastByteAt)) : null,
+      lastResetAgeMs: lastResetAt > 0 ? Math.max(0, Math.round(Date.now() - lastResetAt)) : null,
+      skippedResetCount: Math.max(0, Math.round(Number(item?.shareTerminalSkippedResetCount) || 0)),
+    };
+  });
   const connected = entries.filter(entry => entry.connected).length;
   return {
     count: entries.length,
@@ -6944,6 +7120,7 @@ function shareReplayHealthDiagnostics() {
     domDigest: shareReplayCurrentDomDigest(),
     redactionPolicyVersion: shareReplayLastRedactionPolicyVersion,
     nodeCount: shareReplayNodeMap.size,
+    lastReplayError: shareReplayLastReplayError,
     terminalPlaceholders,
     context: shareDebugContextSnapshot(),
   });

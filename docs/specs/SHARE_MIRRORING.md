@@ -195,6 +195,7 @@ The host recorder should observe `#appRoot` with `MutationObserver` and a small 
 
 Frames should be coalesced per animation frame or a short debounce window. High-frequency surfaces should have explicit policies:
 
+- The host maintains a mirrored-node registry for the current replay base. A keyframe resets the registry to exactly the nodes serialized in that keyframe; child-list deltas extend or prune it. Attribute and character-data deltas must only target nodes in that registry, and character-data deltas require the exact text node, not only a mirrored parent. Mutations for detached, never-serialized, private, volatile, or ignored nodes are skipped or escalated to a topology keyframe instead of sending impossible node ids that make viewers enter a `viewer behind` loop.
 - Terminal content is excluded from DOM deltas and handled by terminal streams.
 - CodeMirror content can be mirrored by DOM replay for read-only visibility, but large editor updates should coalesce and can force a keyframe if mutation volume is too high.
 - Cursor blink, timers, spinner animation state, and transient measuring nodes should be excluded or normalized.
@@ -259,8 +260,9 @@ The viewer replay shell replaces or overlays that placeholder with a local xterm
 - The xterm rows/cols come from host terminal dimensions.
 - The byte stream comes from the existing one-upstream-per-session share terminal fanout.
 - Viewer resize changes only the mirror transform, never host tmux dimensions.
-- Host terminal resize sends `terminal-host-resize`, resets viewer xterm to host rows/cols, and requests/reuses the bounded tmux repaint path.
+- Host terminal resize sends `terminal-host-resize`, resizes viewer xterm to host rows/cols, and requests/reuses the bounded tmux repaint path without clearing an already-painted viewer buffer. Any reset must happen before terminal bytes arrive or be paired with a guaranteed repaint.
 - If a DOM keyframe moves the placeholder, the xterm instance rebinds to the new connected placeholder without reconnecting unnecessarily.
+- If a DOM delta removes and re-adds the placeholder under another pane, the delta carries terminal placeholder metadata and the viewer rebinds the same xterm instance after applying child-list mutations.
 - If the placeholder disappears, the viewer detaches or hides the xterm for that session.
 
 This keeps terminal text protocol-correct and avoids serializing xterm's internal DOM/canvas state.
@@ -349,7 +351,7 @@ Read-only replay health checks replace the legacy semantic geometry digest asser
 - `frameDigest`: epoch, sequence, and delta ring continuity.
 - `redactionDigest`: policy version and excluded-node counts.
 
-Normal viewer UI does not show internal bucket names like `slots` or `textWraps`. It shows user-facing replay status such as `mirrored`, `resyncing`, `host disconnected`, or `viewer behind`. Debug copy exposes sanitized replay health with DOM digest, epoch, sequence, dropped-frame count, stale-frame count, keyframe request count, redaction policy version, node count, and terminal placeholder health. Keyframe requests must include enough frame detail to explain a repair: `epoch`, `sequence`, `baseSequence`, `currentEpoch`, and `lastSequence`.
+Normal viewer UI does not show internal bucket names like `slots` or `textWraps`. It shows user-facing replay status such as `mirrored`, `resyncing`, `host disconnected`, or `viewer behind`. Debug copy exposes sanitized replay health with DOM digest, epoch, sequence, dropped-frame count, stale-frame count, keyframe request count, redaction policy version, node count, terminal placeholder health, and `lastReplayError`. Keyframe requests and `lastReplayError` must include enough frame detail to explain a repair: frame type, reason, error text, `epoch`, `sequence`, `baseSequence`, expected sequence/base, current epoch, last applied sequence, digest when present, and frame byte size.
 
 ## Migration Plan
 

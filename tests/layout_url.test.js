@@ -5465,6 +5465,7 @@ test('t@2560', () => {
   assert.equal(popoverForPosition.style.left, '34px', 'tab popovers carry replayable inline left instead of relying only on document CSS variables');
   assert.equal(popoverForPosition.style.top, '71px', 'tab popovers carry replayable inline top instead of relying only on document CSS variables');
   assert.equal(popoverForPosition.style.width, '520px', 'tab popovers carry replayable inline width so share viewers do not recompute vw-sized popovers against the client viewport');
+  assert.equal(popoverForPosition.style.height, '300px', 'tab popovers carry replayable inline height so share viewers do not recompute wrapped popover height');
   assert.equal(popoverStyle.getPropertyValue('--pane-tab-popover-width'), '');
   assert.ok(popoverLeft + popoverForPosition.getBoundingClientRect().width <= 1200);
   assert.ok(popoverForPosition.getBoundingClientRect().width > panelForPopover.getBoundingClientRect().width);
@@ -5641,6 +5642,7 @@ test('t@2560', () => {
   assert.ok(preferencesCss.includes('.modal.about-open .modal-dialog'), 'About modal has compact modal chrome through the shared dialog shell');
   assert.ok(/\.modal\s*\{[\s\S]*?z-index:\s*var\(--z-file-conflict-dialog\)/.test(preferencesCss), 'shared app modal sits above pane resizers, menus, and other pane-local overlays');
   assert.ok(/\.app-modal-overlay\s*\{[\s\S]*?position:\s*fixed[\s\S]*?inset:\s*0[\s\S]*?background:\s*var\(--app-modal-backdrop-bg\)/.test(preferencesCss), 'modal overlays share one dimmed full-viewport parent behavior');
+  assert.ok(/\.modal\s*\{[\s\S]*?align-items:\s*center[\s\S]*?justify-items:\s*center[\s\S]*?padding:\s*var\(--popover-edge-gap\)/.test(preferencesCss), 'shared app modal centers dialogs in the viewport instead of top-anchoring them');
   assert.ok(/--app-modal-border-width:\s*max\(2px,\s*var\(--pane-split-gap\)\)/.test(preferencesCss), 'modal dialog borders use the shared pane-spacing-width token with a visible floor');
   assert.ok(/--app-modal-border-color:\s*color-mix\(in srgb,\s*var\(--pane-tab-panel-ring\) var\(--pane-active-ring-opacity\),\s*transparent\)/.test(preferencesCss), 'modal dialog borders use the same active pane ring color and opacity');
   assert.ok(/\.modal-dialog\s*\{[\s\S]*?border:\s*var\(--app-modal-border-width\) solid var\(--app-modal-border-color\)/.test(preferencesCss), 'shared app modal dialog uses the active-pane border token');
@@ -5996,6 +5998,7 @@ test('t@2560', () => {
 	    assert.ok(/function scheduleShareTopologySnapshot\(reason = 'topology'\)[\s\S]*scheduleShareUiStatePublish\(\{reason: `topology:\$\{cleanReason\}`\}\)[\s\S]*scheduleShareTopologyDomKeyframe\(\)/.test(shareSource), 'DOIT.72 P0.3: topology changes route through one full UI-state snapshot scheduler and a replay keyframe scheduler');
 	    assert.ok(/function scheduleShareTopologyDomKeyframe\(\)[\s\S]*!shareHasActiveShare\(\)[\s\S]*shareReplayPauseMutationPublisherForTopology\(\)[\s\S]*shareReplayTopologyKeyframeTimer[\s\S]*requestAnimationFrame[\s\S]*sharePublishDomKeyframe\('topology'\)/.test(shareSource), 'default DOM replay shares pause topology mutations and coalesce topology keyframes after layout render so Finder minimize/restore cannot leave stale panes');
 	    assert.ok(/const shareReplayPostTopologyKeyframeQuietMs = 3000/.test(shareSource) && /function shareReplayDrainMutationPublisher\(\)[\s\S]*takeRecords[\s\S]*shareReplayPendingMutations\.splice\(0, shareReplayPendingMutations\.length\)[\s\S]*shareReplayDeltaFramePending = false/.test(shareSource) && /function shareReplayPauseMutationPublisherForTopology\(\)[\s\S]*shareReplayMutationPublisherPaused = true[\s\S]*shareReplayDrainMutationPublisher\(\)[\s\S]*shareReplayTopologyMutationPauseTimer = setTimeout/.test(shareSource) && /function shareReplayResetMutationPublisherForKeyframe\(reason = 'manual-debug'\)[\s\S]*shareReplayMutationPublisherPaused = true[\s\S]*shareReplayDrainMutationPublisher\(\)[\s\S]*cleanReason === 'join' \|\| cleanReason === 'topology'[\s\S]*shareReplayResumeMutationPublisherAfterFrames\(quietMs\)/.test(shareSource) && /function sharePublishDomKeyframeNow\(reason = 'manual-debug'\)[\s\S]*shareReplayResetMutationPublisherForKeyframe\(cleanReason\)[\s\S]*sharePublish\(shareMirrorProtocol\.frames\.domKeyframe/.test(shareSource), 'DOM keyframes discard pending mutation deltas and join/topology resets keep a short quiet window so boot/layout churn cannot immediately stale the viewer');
+	    assert.ok(/let shareReplayHostMirroredNodes = new WeakSet\(\)/.test(shareSource) && /function shareReplayHostMutationTargetIsMirrored\(node\)[\s\S]*const disconnected = element\.isConnected === false[\s\S]*const outsideRoot = typeof root\?\.contains === 'function' && !root\.contains\(element\)[\s\S]*shareReplayHostMirroredNodes\.has/.test(shareSource) && /function shareCreateDomKeyframePayload\(reason = 'manual-debug'\)[\s\S]*mirroredNodes: \[\][\s\S]*shareReplayHostMirroredNodes = shareReplayHostMirroredNodeSet\(context\.mirroredNodes\)/.test(shareSource) && /function shareReplayMutationEntries\(records = \[\]\)[\s\S]*!shareReplayHostMutationTargetIsMirrored\(target\)[\s\S]*continue/.test(shareSource), 'DOM replay host only publishes mutation deltas for nodes serialized into the current mirror keyframe');
 	    assert.ok(/function shareReplayMutationEntries\(records = \[\]\)[\s\S]*let needsKeyframe = false[\s\S]*shareReplayMutationNodeIsIgnored\(node\)[\s\S]*needsKeyframe = true[\s\S]*entries\.splice\(0, entries\.length\)[\s\S]*scheduleShareTopologyDomKeyframe\(\)/.test(shareSource), 'child-list mutations touching ignored Finder/private nodes do not emit partial deltas that can duplicate Finder and Differ panes');
 	    assert.ok(/const shareReplayHostDeltaMaxBytes = 48 \* 1024/.test(shareSource) && /function shareReplayFlushMutationDeltas\(\)[\s\S]*shareReplayFrameByteLength\(\{type: shareMirrorProtocol\.frames\.domDelta, payload\}\)[\s\S]*bytes > shareReplayHostDeltaMaxBytes[\s\S]*sharePublishDomKeyframe\('backpressure'\)[\s\S]*return null[\s\S]*shareReplayPublishDeltaPayload\(payload, 'mutation'\)/.test(shareSource), 'oversized DOM delta batches request a throttled keyframe instead of creating replay sequence gaps');
 	    assert.ok(/function applyLayoutSlots\(nextSlots, options = \{\}\)[\s\S]*sharePublishLayout\(\)[\s\S]*scheduleShareTopologySnapshot\(options\.shareReason \|\| 'layout'\)/.test(shareSource), 'layout commits publish share layout updates and schedule a full UI-state snapshot through the topology scheduler');
@@ -6071,8 +6074,11 @@ test('t@2560', () => {
     assert.equal(keyframeFrame.epoch, 2, 'YO!share replay keyframes use a replay-only epoch that semantic frames cannot advance');
     assert.equal(keyframeFrame.sequence, 1, 'YO!share replay keyframes use a replay-only sequence that semantic frames cannot advance');
     const interleavedUiStateFrame = metaApi.shareBuildUiMessageForTest('ui-state', {layout: 'left'}, {reason: 'finder-semantic'});
+    const interleavedGeometryFrame = metaApi.shareBuildUiMessageForTest('geometry-digest', {digest: 'safari-jitter'}, {reason: 'safari-cadence'});
     const deltaFrame = metaApi.shareBuildUiMessageForTest(protocol.frames.domDelta, {mutations: []}, {reason: 'mutation'});
     assert.ok(interleavedUiStateFrame.sequence > frames.length + 1, 'semantic frames continue their own mirror sequence between replay frames');
+    assert.equal(interleavedGeometryFrame.type, 'geometry-digest', 'Safari cadence geometry frames are semantic frames');
+    assert.ok(interleavedGeometryFrame.sequence > interleavedUiStateFrame.sequence, 'geometry digest frames continue the semantic sequence between replay frames');
     assert.equal(deltaFrame.epoch, keyframeFrame.epoch, 'YO!share replay deltas stay in the keyframe replay epoch despite interleaved semantic frames');
     assert.equal(deltaFrame.baseSequence, keyframeFrame.sequence, 'YO!share replay delta base points at the previous replay frame, not the previous semantic frame');
     assert.equal(deltaFrame.sequence, keyframeFrame.sequence + 1, 'YO!share replay delta sequence is contiguous with the replay keyframe');
@@ -6117,12 +6123,14 @@ test('t@2560', () => {
     const prefs = new TestElement('prefs-fixture', 'section');
     prefs.className = 'preferences-panel';
     prefs.textContent = 'Preferences body';
-    const popup = new TestElement('popup-fixture', 'div');
-    popup.className = 'app-menu-popover open';
-    popup.textContent = 'Popup body';
-    const privateNode = new TestElement('private-fixture', 'div');
-    privateNode.dataset.sharePrivate = '1';
-    privateNode.textContent = 'private token text';
+	    const popup = new TestElement('popup-fixture', 'div');
+	    popup.className = 'app-menu-popover open';
+	    popup.textContent = 'Popup body';
+	    const customTag = new TestElement('custom-think', 'think');
+	    customTag.textContent = 'custom think marker';
+	    const privateNode = new TestElement('private-fixture', 'div');
+	    privateNode.dataset.sharePrivate = '1';
+	    privateNode.textContent = 'private token text';
     const terminal = new TestElement('term-1', 'div');
     terminal.className = 'terminal';
     const terminalInternal = new TestElement('xterm-internal', 'div');
@@ -6152,7 +6160,7 @@ test('t@2560', () => {
     pooledTerminalInternal.textContent = 'pooled xterm internal text';
     pooledTerminal.appendChild(pooledTerminalInternal);
     panelPoolNode.appendChild(pooledTerminal);
-    replayRoot.append(finder, editor, prefs, popup, privateNode, terminal, terminalTwo, hiddenTerminal, panelPoolNode);
+	    replayRoot.append(finder, editor, prefs, popup, customTag, privateNode, terminal, terminalTwo, hiddenTerminal, panelPoolNode);
     replayApi.registerTerminalForTest('1', {rows: 28, cols: 106, focus() {}});
     replayApi.registerTerminalForTest('2', {rows: 31, cols: 120, focus() {}});
     replayApi.registerTerminalForTest('hidden', {rows: 40, cols: 140, focus() {}});
@@ -6169,9 +6177,13 @@ test('t@2560', () => {
     const walkReplayNodes = node => [node, ...(node.children || []).flatMap(walkReplayNodes)];
     const replayNodes = walkReplayNodes(replayPayload.root);
     assert.deepStrictEqual(replayNodes.map(node => node.nodeId), replayNodes.map((_node, index) => index + 1), 'DOIT.72 P1.2: node ids are stable and sequential within each keyframe');
-    const replayJson = JSON.stringify(replayPayload.root);
-    assert.ok(replayJson.includes('Finder files') && replayJson.includes('Editor body') && replayJson.includes('Preferences body') && replayJson.includes('Popup body'), 'DOIT.72 P1.2: representative app surfaces are serialized');
-    assert.equal(replayJson.includes('private token text'), false, 'DOIT.72 P1.2: private nodes are excluded from the keyframe');
+	    const replayJson = JSON.stringify(replayPayload.root);
+	    assert.ok(replayJson.includes('Finder files') && replayJson.includes('Editor body') && replayJson.includes('Preferences body') && replayJson.includes('Popup body'), 'DOIT.72 P1.2: representative app surfaces are serialized');
+	    assert.ok(replayJson.includes('custom think marker'), 'YO!share keyframes preserve text from browser-created custom tags');
+	    const customReplayNode = replayNodes.find(node => node.attrs?.id === 'custom-think');
+	    assert.equal(customReplayNode?.tag, 'span', 'YO!share keyframes coerce unsupported custom tags to inert spans');
+	    assert.equal(replayJson.includes('"tag":"think"'), false, 'YO!share keyframes never emit unsupported custom tag names');
+	    assert.equal(replayJson.includes('private token text'), false, 'DOIT.72 P1.2: private nodes are excluded from the keyframe');
     assert.equal(replayJson.includes('xterm internal text'), false, 'DOIT.72 P1.2: terminal internals are excluded from the keyframe');
     assert.equal(replayJson.includes('xterm second internal text'), false, 'DOIT.72 P3.1: second visible terminal internals are excluded from the keyframe');
     assert.equal(replayJson.includes('hidden xterm internal text'), false, 'DOIT.72 P3.1: hidden terminal internals are excluded from the keyframe');
@@ -6278,15 +6290,25 @@ test('t@2560', () => {
     const deltaRoot = deltaApi.appRootForTest();
     deltaRoot.replaceChildren();
     const deltaTarget = new TestElement('delta-target', 'div');
-    deltaTarget.textContent = 'old target';
+    deltaTarget.textContent = '';
+    const textNode = {
+      nodeType: 3,
+      textContent: 'old target',
+      parentElement: null,
+      contains(node) { return node === this; },
+      matches() { return false; },
+      closest() { return null; },
+    };
+    deltaTarget.appendChild(textNode);
     deltaRoot.append(deltaTarget);
-    const textNode = {nodeType: 3, textContent: 'Changed token=secret-token /share/abc123#t=secret-token', parentElement: deltaTarget};
     deltaTarget.setAttribute('title', 'Open /share/abc123#t=secret-token token=secret-token');
     const titleRecord = {type: 'attributes', target: deltaTarget, attributeName: 'title'};
     deltaTarget.setAttribute('href', 'javascript:alert(1)');
     const hrefRecord = {type: 'attributes', target: deltaTarget, attributeName: 'href'};
     deltaTarget.setAttribute('onclick', 'window.bad = true');
     const onclickRecord = {type: 'attributes', target: deltaTarget, attributeName: 'onclick'};
+    deltaApi.shareCreateDomKeyframePayloadForTest('join');
+    textNode.textContent = 'Changed token=secret-token /share/abc123#t=secret-token';
     const addedNode = new TestElement('delta-added', 'span');
     addedNode.setAttribute('onclick', 'window.bad = true');
     addedNode.textContent = 'Added /share/abc123#t=secret-token';
@@ -6296,12 +6318,16 @@ test('t@2560', () => {
     const terminalNode = new TestElement('term-1', 'div');
     terminalNode.className = 'terminal';
     terminalNode.textContent = 'terminal internal text';
+    const terminalWrapper = new TestElement('terminal-wrapper', 'section');
+    const movedTerminalNode = new TestElement('term-1', 'div');
+    movedTerminalNode.className = 'terminal';
+    terminalWrapper.append(movedTerminalNode);
 	    const records = [
 	      {type: 'characterData', target: textNode},
 	      titleRecord,
 	      hrefRecord,
 	      onclickRecord,
-	      {type: 'childList', target: deltaRoot, addedNodes: [addedNode], removedNodes: []},
+	      {type: 'childList', target: deltaRoot, addedNodes: [addedNode, terminalWrapper], removedNodes: []},
 	    ];
 	    const deltaEntries = deltaApi.shareReplayMutationEntriesForTest(records);
 	    const deltaJson = JSON.stringify(deltaEntries);
@@ -6313,8 +6339,17 @@ test('t@2560', () => {
 	    assert.ok(deltaEntries.some(entry => entry.kind === 'attributes' && entry.name === 'title' && entry.value.includes('[redacted-share-url]')), 'DOIT.72 P2.1: attribute mutations are captured and redacted');
 	    assert.ok(deltaEntries.some(entry => entry.kind === 'attributes' && entry.name === 'href' && entry.value === null && entry.removed === true), 'DOIT.72 P2.1: unsafe URL attribute mutations become removals');
 	    const childListEntry = deltaEntries.find(entry => entry.kind === 'childList');
-	    assert.equal(childListEntry.added.length, 1, 'DOIT.72 P2.1: childList mutations include only safe added nodes');
+	    assert.equal(childListEntry.added.length, 2, 'DOIT.72 P2.1: childList mutations include safe added nodes and terminal placeholder wrappers');
 	    assert.equal(childListEntry.added[0].attrs.onclick, undefined, 'DOIT.72 P2.1: added node serialization sanitizes attributes');
+	    const unsupportedAddedNode = new TestElement('delta-think', 'think');
+	    unsupportedAddedNode.textContent = 'delta custom marker';
+	    const unsupportedDeltaEntries = deltaApi.shareReplayMutationEntriesForTest([
+	      {type: 'childList', target: deltaRoot, addedNodes: [unsupportedAddedNode], removedNodes: []},
+	    ]);
+	    assert.equal(unsupportedDeltaEntries[0].added[0].tag, 'span', 'YO!share deltas coerce unsupported custom tags to inert spans');
+	    assert.equal(unsupportedDeltaEntries[0].added[0].text, 'delta custom marker', 'YO!share deltas preserve unsupported custom tag text');
+	    assert.equal(JSON.stringify(unsupportedDeltaEntries).includes('"tag":"think"'), false, 'YO!share deltas never emit unsupported custom tag names');
+	    assert.deepStrictEqual(JSON.parse(JSON.stringify(deltaEntries.terminals)), [{placeholderId: 'term-ph-1', session: '1', rows: 0, cols: 0, terminalEpoch: 1}], 'YO!share DOM deltas carry terminal placeholder metadata for moved terminal subtrees');
 	    const ignoredChildListEntries = deltaApi.shareReplayMutationEntriesForTest([
 	      {type: 'childList', target: deltaRoot, addedNodes: [volatileNode, terminalNode], removedNodes: []},
 	    ]);

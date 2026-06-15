@@ -116,6 +116,31 @@ def stop_browser_share_server(server, thread):
     thread.join(timeout=2)
 
 
+def install_browser_websocket_tracker(driver):
+    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+        "source": """
+        (() => {
+          const NativeWebSocket = window.WebSocket;
+          if (!NativeWebSocket || NativeWebSocket.__yolomuxTracked) return;
+          const tracked = [];
+          function TrackedWebSocket(url, protocols) {
+            const socket = protocols === undefined ? new NativeWebSocket(url) : new NativeWebSocket(url, protocols);
+            tracked.push(socket);
+            return socket;
+          }
+          Object.setPrototypeOf(TrackedWebSocket, NativeWebSocket);
+          TrackedWebSocket.prototype = NativeWebSocket.prototype;
+          for (const key of ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED']) {
+            Object.defineProperty(TrackedWebSocket, key, {value: NativeWebSocket[key]});
+          }
+          Object.defineProperty(TrackedWebSocket, '__yolomuxTracked', {value: true});
+          window.__yolomuxTrackedSockets = tracked;
+          window.WebSocket = TrackedWebSocket;
+        })();
+        """,
+    })
+
+
 def count_rect_region_pixels(image, dpr, rect, region, predicate, *, step=2):
     left = int((rect["left"] + rect["width"] * region["left"]) * dpr)
     top = int((rect["top"] + rect["height"] * region["top"]) * dpr)
@@ -2226,6 +2251,79 @@ def test_generated_app_boots_live_runtime_without_browser_errors(browser, tmp_pa
     assert metrics["terminalText"] == "fake terminal"
 
 
+def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return window.__terminalOpened >= 1 && document.querySelectorAll('.app-menu-button').length >= 5"
+        )
+    )
+
+    def menu_metrics(menu_id):
+        return browser.execute_script(
+            """
+            const menuId = arguments[0];
+            const wrapper = document.querySelector(`.app-menu[data-app-menu="${menuId}"]`);
+            const button = wrapper?.querySelector?.(':scope > .app-menu-button');
+            const popover = wrapper?.querySelector?.(':scope > .app-menu-popover');
+            const rect = popover?.getBoundingClientRect?.();
+            const style = popover ? getComputedStyle(popover) : null;
+            const commands = Array.from(popover?.querySelectorAll?.('.app-menu-command') || []);
+            const activeCommands = commands.filter(command => command.classList.contains('share-mirror-active'));
+            const openIds = Array.from(document.querySelectorAll('.app-menu.open')).map(menu => menu.dataset.appMenu || '');
+            return {
+              exists: Boolean(wrapper && button && popover),
+              open: wrapper?.classList?.contains('open') || false,
+              openIds,
+              expanded: button?.getAttribute?.('aria-expanded') || '',
+              visible: Boolean(popover && wrapper?.classList?.contains('open') && style.display !== 'none' && style.visibility !== 'hidden' && Number.parseFloat(style.opacity || '1') > 0.9 && rect.width > 20 && rect.height > 20),
+              rect: rect ? {left: Math.round(rect.left), top: Math.round(rect.top), width: Math.round(rect.width), height: Math.round(rect.height)} : null,
+              commandCount: commands.length,
+              activeCommandCount: activeCommands.length,
+              firstCommand: commands[0]?.textContent?.replace(/\\s+/g, ' ').trim() || '',
+              errors: window.__bootErrors || [],
+              rejections: window.__bootRejections || [],
+            };
+            """,
+            menu_id,
+        )
+
+    for menu_id in ["file", "view", "tmux", "tabs", "help"]:
+        browser.find_element("css selector", f'.app-menu[data-app-menu="{menu_id}"] > .app-menu-button').click()
+        metrics = WebDriverWait(browser, 5).until(
+            lambda _driver: (state if (state := menu_metrics(menu_id))["visible"] and state["commandCount"] > 0 else False)
+        )
+        assert metrics["exists"] is True, metrics
+        assert metrics["open"] is True, metrics
+        assert metrics["openIds"] == [menu_id], metrics
+        assert metrics["expanded"] == "true", metrics
+        assert metrics["rect"]["width"] >= 80, metrics
+        assert metrics["rect"]["height"] >= 24, metrics
+        assert metrics["firstCommand"], metrics
+        assert metrics["errors"] == [], metrics
+        assert metrics["rejections"] == [], metrics
+
+        first_command = browser.find_element("css selector", f'.app-menu[data-app-menu="{menu_id}"] > .app-menu-popover .app-menu-command:not([disabled])')
+        ActionChains(browser).move_to_element(first_command).perform()
+        hover = WebDriverWait(browser, 5).until(
+            lambda _driver: (state if (state := menu_metrics(menu_id))["activeCommandCount"] >= 1 else False)
+        )
+        assert hover["activeCommandCount"] >= 1, hover
+
+    browser.find_element("css selector", '.app-menu[data-app-menu="file"] > .app-menu-button').click()
+    ActionChains(browser).move_to_element(browser.find_element("css selector", '.app-menu[data-app-menu="view"] > .app-menu-button')).perform()
+    switched = WebDriverWait(browser, 5).until(
+        lambda _driver: (state if (state := menu_metrics("view"))["visible"] else False)
+    )
+    assert switched["openIds"] == ["view"], switched
+
+    browser.find_element("css selector", "#panel-1").click()
+    closed = WebDriverWait(browser, 5).until(
+        lambda _driver: (state if not (state := menu_metrics("view"))["open"] else False)
+    )
+    assert closed["openIds"] == [], closed
+
+
 def test_client_events_ready_refetches_yolo_marker_after_reconnect(browser, tmp_path):
     load_live_runtime_boot_fixture(
         browser,
@@ -2677,6 +2775,8 @@ def test_share_modal_create_controls_stay_on_one_line_when_wide(browser, tmp_pat
         const protocol = document.querySelector('.share-protocol-group').getBoundingClientRect();
         return {
           dialogWidth: Math.round(dialog.width),
+          dialogCenterDeltaX: Math.abs((dialog.left + dialog.width / 2) - (window.innerWidth / 2)),
+          dialogCenterDeltaY: Math.abs((dialog.top + dialog.height / 2) - (window.innerHeight / 2)),
           controlBottomRows: bottomRows('.share-create-controls > *'),
           protocolRows: topRows('.share-protocol-group > label, .share-protocol-group > .share-hint'),
           controlsRight: Math.round(controls.right),
@@ -2686,6 +2786,8 @@ def test_share_modal_create_controls_stay_on_one_line_when_wide(browser, tmp_pat
         """
     )
     assert metrics["dialogWidth"] >= 900, metrics
+    assert metrics["dialogCenterDeltaX"] <= 1, metrics
+    assert metrics["dialogCenterDeltaY"] <= 1, metrics
     assert len(metrics["controlBottomRows"]) == 1, metrics
     assert max(metrics["protocolRows"]) - min(metrics["protocolRows"]) <= 2, metrics
     assert metrics["controlsRight"] <= metrics["viewportWidth"], metrics
@@ -3813,6 +3915,109 @@ def test_share_host_active_share_publishes_and_answers_dom_keyframes(browser, tm
     assert metrics["hasRootChildren"][-1] is True, metrics
 
 
+def test_share_dom_keyframe_clears_pending_mutation_delta(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        sessions=["6"],
+        access_role="admin",
+        wrap_app_root=True,
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof sharePublishDomKeyframeNow === 'function'
+              && typeof shareReplayEnqueueMutationRecords === 'function'
+              && document.getElementById('appRoot');
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const waitFor = async (predicate, timeoutMs = 2500) => {
+            const deadline = Date.now() + timeoutMs;
+            while (Date.now() < deadline) {
+              if (predicate()) return true;
+              await frame();
+            }
+            return predicate();
+          };
+          const hostSockets = () => (window.__bootSocketInstances || []).filter(socket => socket.url.includes('/ws/share-host'));
+          const hostMessages = () => hostSockets().flatMap(socket => socket.sent.map(message => JSON.parse(message)));
+          const seededShare = {
+            active: true,
+            token: 'host-share-token',
+            shortId: 'host-share',
+            mode: 'ro',
+            session: '6',
+            sessions: ['6'],
+            expiresAt: 4102444800,
+            maxViewers: 5,
+          };
+          window.__fixtureSharePayload = seededShare;
+          setActiveShares([seededShare]);
+          ensureShareHostSockets();
+          const opened = await waitFor(() => hostSockets().some(socket => socket.readyState === WebSocket.OPEN));
+          const root = appRootElement();
+          const initialPayload = shareCreateDomKeyframePayload('join');
+          await frame();
+          for (const socket of hostSockets()) socket.sent.splice(0, socket.sent.length);
+          const neverMirrored = document.createElement('section');
+          neverMirrored.id = 'never-mirrored-delta-target';
+          neverMirrored.setAttribute('data-state', 'changed');
+          root.appendChild(neverMirrored);
+          const neverMirroredEntries = shareReplayEnqueueMutationRecords([{type: 'attributes', target: neverMirrored, attributeName: 'data-state'}]);
+          neverMirrored.remove();
+          const staleNode = document.createElement('section');
+          staleNode.id = 'stale-pending-mutation';
+          staleNode.textContent = 'this stale mutation must not flush after keyframe';
+          const entries = shareReplayEnqueueMutationRecords([{type: 'childList', target: root, addedNodes: [staleNode], removedNodes: []}]);
+          const pendingBefore = shareReplayPendingMutations.length;
+          const framePendingBefore = shareReplayDeltaFramePending;
+          const published = sharePublishDomKeyframeNow('topology');
+          await frame();
+          await frame();
+          const messages = hostMessages();
+          done({
+            opened,
+            initialPayloadReady: Boolean(initialPayload?.root),
+            published,
+            neverMirroredEntriesLength: neverMirroredEntries.length,
+            entriesLength: entries.length,
+            pendingBefore,
+            framePendingBefore,
+            pendingAfter: shareReplayPendingMutations.length,
+            terminalPendingAfter: shareReplayPendingTerminalPlaceholders.length,
+            framePendingAfter: shareReplayDeltaFramePending,
+            messageTypes: messages.map(message => message.type),
+            keyframeReasons: messages.filter(message => message.type === shareMirrorProtocol.frames.domKeyframe).map(message => message.reason),
+            errors: window.__bootErrors,
+            rejections: window.__bootRejections,
+          });
+        })().catch(error => done({error: String(error), stack: String(error?.stack || '')}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["rejections"] == [], metrics
+    assert metrics["opened"] is True, metrics
+    assert metrics["initialPayloadReady"] is True, metrics
+    assert metrics["published"] is True, metrics
+    assert metrics["neverMirroredEntriesLength"] == 0, metrics
+    assert metrics["entriesLength"] == 1, metrics
+    assert metrics["pendingBefore"] == 1, metrics
+    assert metrics["framePendingBefore"] is True, metrics
+    assert metrics["pendingAfter"] == 0, metrics
+    assert metrics["terminalPendingAfter"] == 0, metrics
+    assert metrics["framePendingAfter"] is False, metrics
+    assert metrics["messageTypes"].count("dom-keyframe") == 1, metrics
+    assert "dom-delta" not in metrics["messageTypes"], metrics
+    assert metrics["keyframeReasons"] == ["topology"], metrics
+
+
 def test_generated_share_link_receives_large_dom_keyframe(browser, monkeypatch, tmp_path):
     app = TmuxWebtermApp(["1"], dangerously_yolo=True)
     server, thread = start_browser_share_server(monkeypatch, tmp_path, app, auth_bypass=True)
@@ -3899,11 +4104,12 @@ def test_generated_share_link_receives_large_dom_keyframe(browser, monkeypatch, 
                 const root = document.getElementById('appRoot');
                 const health = window.yolomuxShareDebug?.replayHealth?.() || {};
                 return {
-                  status: root?.dataset?.shareReplayStatus || health.status || '',
-                  keyframeBytes: Number(health.keyframeBytes || 0),
-                  keyframeRequests: Number(health.keyframeRequests || 0),
-                  keyframeRequestsSuppressed: Number(health.keyframeRequestsSuppressed || 0),
-                  rootChildren: root?.children?.length || 0,
+	              status: root?.dataset?.shareReplayStatus || health.status || '',
+	              keyframeBytes: Number(health.keyframeBytes || 0),
+	              keyframeRequests: Number(health.keyframeRequests || 0),
+	              keyframeRequestsSuppressed: Number(health.keyframeRequestsSuppressed || 0),
+	              lastReplayError: health.lastReplayError || null,
+	              rootChildren: root?.children?.length || 0,
                   hasLargePayload: Boolean(root?.innerText?.includes('large-share-keyframe')),
                   finderText: document.getElementById('share-parity-finder')?.textContent || '',
                   differText: document.getElementById('share-parity-differ')?.textContent || '',
@@ -4025,6 +4231,7 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
     app = TmuxWebtermApp(["1"], dangerously_yolo=True)
     server, thread = start_browser_share_server(monkeypatch, tmp_path, app, auth_bypass=True)
     viewer = new_chrome_driver("1220,742")
+    install_browser_websocket_tracker(viewer)
     base_url = f"http://127.0.0.1:{server.server_address[1]}"
 
     def share_debug_url(url: str) -> str:
@@ -4061,9 +4268,26 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
             let detail = {};
             try { detail = JSON.parse(marker?.dataset?.detail || '{}'); } catch (_) {}
             const health = window.yolomuxShareDebug?.replayHealth?.() || {};
+            const terminalPlaceholders = health.terminalPlaceholders || {};
+            const trackedSockets = Array.from(window.__yolomuxTrackedSockets || []);
+            const terminalSockets = trackedSockets.filter(socket => String(socket?.url || '').includes('/ws/share-view'));
+            const liveTerminalSockets = terminalSockets.filter(socket => ![2, 3].includes(Number(socket?.readyState)));
+            const socketSession = socket => {
+              try {
+                return new URL(String(socket?.url || ''), window.location.href).searchParams.get('session') || '';
+              } catch (_) {
+                return '';
+              }
+            };
+            const terminalSocketSessions = liveTerminalSockets.map(socketSession).filter(Boolean);
+            const terminalSocketCounts = terminalSocketSessions.reduce((acc, session) => {
+              acc[session] = (acc[session] || 0) + 1;
+              return acc;
+            }, {});
             const text = root?.innerText || '';
-            const menu = root?.querySelector?.('.app-menu.open');
-            const modal = root?.querySelector?.('#modal.open');
+	            const menu = root?.querySelector?.('.app-menu.open');
+	            const menuPopover = menu?.querySelector?.(':scope > .app-menu-popover');
+	            const modal = root?.querySelector?.('#modal.open');
 	            const shortcuts = root?.querySelector?.('.keyboard-shortcuts-overlay.open');
 	            const tabPopover = root?.querySelector?.('.pane-tab-detached-popover.popover-open, .dockview-pane-tab.popover-open > .session-popover, .pane-tab.popover-open > .session-popover');
 	            const repoPopover = root?.querySelector?.('#fileTreeRepoPopover, .file-tree-repo-popover');
@@ -4083,7 +4307,7 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                   const rect = node.getBoundingClientRect();
                   return {left: Math.round(rect.left), top: Math.round(rect.top), width: Math.round(rect.width), height: Math.round(rect.height)};
                 };
-                const computedBox = node => {
+	                const computedBox = node => {
                   if (!node) return null;
                   const style = getComputedStyle(node);
                   return {
@@ -4098,9 +4322,15 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                     transform: style.transform,
                     appRect: appRect(node),
                     visualRect: visualRect(node),
-                  };
-                };
-	            return {
+	                  };
+	                };
+	                const visibleElement = node => {
+	                  if (!node) return false;
+	                  const style = getComputedStyle(node);
+	                  const rect = node.getBoundingClientRect();
+	                  return style.display !== 'none' && style.visibility !== 'hidden' && Number.parseFloat(style.opacity || '1') > 0.9 && rect.width > 20 && rect.height > 20;
+	                };
+		            return {
               phase: marker?.dataset?.phase || '',
               detail,
               status: root?.dataset?.shareReplayStatus || health.status || '',
@@ -4113,10 +4343,25 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
               keyframeRequestInFlight: health.keyframeRequestInFlight === true,
               droppedFrames: Number(health.droppedFrames || 0),
               staleFrames: Number(health.staleFrames || 0),
+              lastReplayError: health.lastReplayError || null,
+              terminalHealthy: terminalPlaceholders.healthy === true,
+              terminalCount: Number(terminalPlaceholders.count || 0),
+              terminalConnected: Number(terminalPlaceholders.connected || 0),
+              terminalDisconnected: Number(terminalPlaceholders.disconnected || 0),
+              terminalEntries: Array.isArray(terminalPlaceholders.entries) ? terminalPlaceholders.entries : [],
+              liveTerminalSocketCount: liveTerminalSockets.length,
+              terminalSocketCount: terminalSockets.length,
+              terminalSocketSessions,
+              terminalSocketCounts,
+              terminalSocketOverLimit: Object.values(terminalSocketCounts).some(count => Number(count) > 1),
               elapsedMs: Number(window.__shareMatrixViewerStartedAt ? performance.now() - window.__shareMatrixViewerStartedAt : 0),
-              menuOpen: menu?.dataset?.appMenu || '',
-              menuText: menu?.textContent || '',
-              modalTitle: modal?.querySelector?.('#modalTitle')?.textContent || '',
+	              menuOpen: menu?.dataset?.appMenu || '',
+	              menuText: menu?.textContent || '',
+	              menuVisible: visibleElement(menuPopover),
+	              menuCommandCount: menuPopover?.querySelectorAll?.('.app-menu-command')?.length || 0,
+	              menuActiveCommandCount: menuPopover?.querySelectorAll?.('.app-menu-command.share-mirror-active')?.length || 0,
+	              menuRect: appRect(menuPopover),
+	              modalTitle: modal?.querySelector?.('#modalTitle')?.textContent || '',
               modalTitles: Array.from(modal?.querySelectorAll?.('#modalTitle') || []).map(node => node.textContent || ''),
               modalText: modal?.textContent || '',
               modalClass: modal?.className || '',
@@ -4124,7 +4369,7 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
               shortcutsText: shortcuts?.textContent || '',
                   tabPopoverText: tabPopover?.textContent || '',
                   tabPopoverRect: appRect(tabPopover),
-                  tabPopoverStyle: {left: tabPopover?.style?.left || '', top: tabPopover?.style?.top || ''},
+                  tabPopoverStyle: {left: tabPopover?.style?.left || '', top: tabPopover?.style?.top || '', height: tabPopover?.style?.height || ''},
                   tabPopoverDebug: {
                     popover: computedBox(tabPopover),
                     overlay: computedBox(root?.querySelector?.('#appOverlayRoot')),
@@ -4158,6 +4403,18 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
         assert metrics["keyframeBytes"] > 0, metrics
         return metrics
 
+    def assert_terminal_health(metrics):
+        placeholder_sessions = {str(entry.get("session") or "") for entry in metrics["terminalEntries"] if entry.get("session")}
+        socket_sessions = set(metrics["terminalSocketSessions"])
+        assert metrics["terminalCount"] >= 1, metrics
+        assert placeholder_sessions, metrics
+        assert metrics["terminalHealthy"] is True, metrics
+        assert metrics["terminalConnected"] == metrics["terminalCount"], metrics
+        assert metrics["terminalDisconnected"] == 0, metrics
+        assert metrics["liveTerminalSocketCount"] >= 1, metrics
+        assert placeholder_sessions.issubset(socket_sessions), metrics
+        assert metrics["terminalSocketOverLimit"] is False, metrics
+
     try:
         browser.get(f"{base_url}/")
         WebDriverWait(browser, 10).until(
@@ -4179,6 +4436,10 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                 }
                 return predicate();
               };
+              await ensureTerminalRunning('1');
+              if (!await waitFor(() => document.querySelector('#term-1 .xterm') && terminals.get('1')?.socket?.readyState === WebSocket.OPEN, 10000)) {
+                throw new Error('host terminal did not open before share create');
+              }
               const seed = shareLayoutSeed();
               const createdShare = normalizeSharePayload(await apiFetchJson('/api/share', {
                 method: 'POST',
@@ -4306,7 +4567,13 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                     await frame();
                     wrapper.querySelector(':scope > .app-menu-popover .app-menu-command:not([disabled])')?.dispatchEvent(new PointerEvent('pointerenter', {bubbles: true}));
                     await frame();
-                    return publish(`menu-${menuId}`, {menuId, labels: Array.from(wrapper.querySelectorAll(':scope > .app-menu-popover .app-menu-command')).map(node => clean(node.textContent)).slice(0, 8)});
+                    const commands = Array.from(wrapper.querySelectorAll(':scope > .app-menu-popover .app-menu-command'));
+                    return publish(`menu-${menuId}`, {
+                      menuId,
+                      commandCount: commands.length,
+                      activeCommandCount: wrapper.querySelectorAll(':scope > .app-menu-popover .app-menu-command.share-mirror-active').length,
+                      labels: commands.map(node => clean(node.textContent)).slice(0, 8),
+                    });
                   },
                   async shortcuts() {
                     closeTransient();
@@ -4417,9 +4684,50 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
 	                      return {published: true, topologyPublished, phase: 'finder-restore-topology-keyframe', suppressedDeltas, ...state};
 	                    } finally {
 	                      shareReplayPublishDeltaPayload = originalDeltaPublisher;
-	                    }
-	                  },
-	                  async expandWithFinder() {
+		                    }
+		                  },
+		                  async finderToggleLoop(count, pauseMs, label, publishGeometryDigest) {
+		                    closeTransient();
+		                    await ensureFinder();
+		                    setFileExplorerMode('files');
+		                    await frame();
+		                    const total = Math.max(0, Math.round(Number(count) || 0));
+		                    const delay = Math.max(0, Math.round(Number(pauseMs) || 0));
+		                    let geometryDigests = 0;
+		                    for (let index = 0; index < total; index += 1) {
+		                      toggleFileExplorerShortcut();
+		                      await frame();
+		                      if (publishGeometryDigest === true) {
+		                        sharePublish(shareMirrorProtocol.frames.geometryDigest, {
+		                          digest: `forced-safari-cadence-${index}`,
+		                          snapshot: {
+		                            viewport: {width: 1220, height: 742},
+		                            fonts: {ui: 249, mono: 297},
+		                            slots: {},
+		                            tabStrips: [{index, rect: {left: 412, top: 666 + (index % 2), width: 964, height: 21}}],
+		                            terminalCells: [],
+		                            editors: [],
+		                            textWraps: [],
+		                          },
+		                        }, {reason: 'forced-safari-cadence'});
+		                        geometryDigests += 1;
+		                        await frame();
+		                      }
+		                      if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
+		                    }
+		                    if (!itemInLayout(fileExplorerItemId)) {
+		                      toggleFileExplorerShortcut();
+		                      await frame();
+		                    }
+		                    const state = detail({mode: 'files', visible: itemInLayout(fileExplorerItemId), count: total, pauseMs: delay, geometryDigests});
+		                    const phase = `finder-toggle-loop-${label || (delay ? 'paused' : 'rapid')}`;
+		                    const node = marker();
+		                    node.dataset.phase = phase;
+		                    node.dataset.detail = JSON.stringify(state);
+		                    node.textContent = `Share matrix phase=${phase} visible=${state.finderOpen} count=${total} pauseMs=${delay}`;
+		                    return publish(phase, {count: total, pauseMs: delay, visible: state.finderOpen, geometryDigests});
+		                  },
+		                  async expandWithFinder() {
 	                    closeTransient();
 	                    await ensureFinder();
                     expandPaneFromLayout('1');
@@ -4435,7 +4743,7 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                     const popoverRect = appSpaceRect(popover);
                     return publish('tab-hover-popover', {
                       tabPopoverRect: {left: Math.round(popoverRect.left), top: Math.round(popoverRect.top), width: Math.round(popoverRect.width), height: Math.round(popoverRect.height)},
-                      tabPopoverStyle: {left: popover.style.left || '', top: popover.style.top || ''},
+                      tabPopoverStyle: {left: popover.style.left || '', top: popover.style.top || '', height: popover.style.height || ''},
                     });
                   },
                   async repoPopover() {
@@ -4471,7 +4779,9 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
         WebDriverWait(viewer, 10).until(lambda driver: driver.execute_script("return document.readyState === 'complete';"))
         viewer.execute_script("window.__shareMatrixViewerStartedAt = performance.now();")
         host_phase("initial")
-        assert wait_viewer_phase("initial", timeout=20)["status"] == "mirrored"
+        initial_metrics = wait_viewer_phase("initial", timeout=20)
+        assert initial_metrics["status"] == "mirrored"
+        assert_terminal_health(initial_metrics)
 
         for menu_id in ["file", "view", "tmux", "tabs", "help"]:
             host = host_phase("menu", menu_id)
@@ -4480,6 +4790,12 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
             assert metrics["menuOpen"] == menu_id, metrics
             assert metrics["detail"]["menuId"] == menu_id, metrics
             assert metrics["menuText"].strip(), metrics
+            assert metrics["menuVisible"] is True, metrics
+            assert metrics["menuCommandCount"] >= 1, metrics
+            assert metrics["menuCommandCount"] == metrics["detail"]["commandCount"], metrics
+            assert metrics["menuActiveCommandCount"] >= 1, metrics
+            assert metrics["menuActiveCommandCount"] == metrics["detail"]["activeCommandCount"], metrics
+            assert metrics["menuRect"]["width"] >= 80 and metrics["menuRect"]["height"] >= 24, metrics
 
         host_phase("shortcuts")
         shortcuts = wait_viewer_phase("help-shortcuts")
@@ -4553,9 +4869,44 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
         assert restored_finder["staleDifferSentinel"] is False, restored_finder
         assert restored_finder["changesPanelCount"] == 0, restored_finder
 
+        before_rapid = viewer_state()
+        rapid_loop = host_phase("finderToggleLoop", 6, 0, "rapid")
+        assert rapid_loop["finderOpen"] is True, rapid_loop
+        rapid = wait_viewer_phase("finder-toggle-loop-rapid", timeout=14)
+        assert rapid["detail"]["finderOpen"] is True, rapid
+        assert rapid["detail"]["count"] == 6, rapid
+        assert_terminal_health(rapid)
+        assert rapid["droppedFrames"] == before_rapid["droppedFrames"], {"before": before_rapid, "after": rapid}
+        assert rapid["keyframeRequests"] == before_rapid["keyframeRequests"], {"before": before_rapid, "after": rapid}
+
+        before_paused = viewer_state()
+        paused_loop = host_phase("finderToggleLoop", 6, 140, "paused")
+        assert paused_loop["finderOpen"] is True, paused_loop
+        paused = wait_viewer_phase("finder-toggle-loop-paused", timeout=16)
+        assert paused["detail"]["finderOpen"] is True, paused
+        assert paused["detail"]["count"] == 6, paused
+        assert paused["detail"]["pauseMs"] == 140, paused
+        assert_terminal_health(paused)
+        assert paused["droppedFrames"] == before_paused["droppedFrames"], {"before": before_paused, "after": paused}
+        assert paused["keyframeRequests"] == before_paused["keyframeRequests"], {"before": before_paused, "after": paused}
+
+        before_safari = viewer_state()
+        safari_loop = host_phase("finderToggleLoop", 3, 2000, "safari-cadence", True)
+        assert safari_loop["finderOpen"] is True, safari_loop
+        assert safari_loop["geometryDigests"] == 3, safari_loop
+        safari = wait_viewer_phase("finder-toggle-loop-safari-cadence", timeout=20)
+        assert safari["detail"]["finderOpen"] is True, safari
+        assert safari["detail"]["count"] == 3, safari
+        assert safari["detail"]["pauseMs"] == 2000, safari
+        assert safari["detail"]["geometryDigests"] == 3, safari
+        assert_terminal_health(safari)
+        assert safari["droppedFrames"] == before_safari["droppedFrames"], {"before": before_safari, "after": safari}
+        assert safari["keyframeRequests"] == before_safari["keyframeRequests"], {"before": before_safari, "after": safari}
+
         host_phase("expandWithFinder")
         expanded = wait_viewer_phase("terminal-expand-with-finder")
         assert expanded["finderPanelCount"] <= 1, expanded
+        assert_terminal_health(expanded)
 
         browser.execute_script("tabPopoverShowDelayMs = 0; tabPopoverFollowDelayMs = 0;")
         host_tab = browser.execute_script(
@@ -4576,6 +4927,9 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
             assert abs(int(actual_rect[key]) - int(expected_rect[key])) <= 2, json.dumps(tab, indent=2, sort_keys=True)
         assert tab["tabPopoverStyle"].get("left") == tab["detail"]["tabPopoverStyle"]["left"], tab
         assert tab["tabPopoverStyle"].get("top") == tab["detail"]["tabPopoverStyle"]["top"], tab
+        actual_height = float(str(tab["tabPopoverStyle"].get("height") or "0").removesuffix("px"))
+        expected_height = float(str(tab["detail"]["tabPopoverStyle"].get("height") or "0").removesuffix("px"))
+        assert abs(actual_height - expected_height) <= 2, tab
 
         host_phase("repoPopover")
         repo = wait_viewer_phase("finder-repo-popover")
@@ -4590,6 +4944,7 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
         assert final_metrics["keyframeRequestBackoffMs"] == 0, final_metrics
         assert final_metrics["keyframeRequests"] <= max_expected_keyframe_requests, final_metrics
         assert final_metrics["rootChildren"] > 0, final_metrics
+        assert_terminal_health(final_metrics)
     finally:
         viewer.quit()
         stop_browser_share_server(server, thread)
@@ -4645,10 +5000,11 @@ def test_share_replay_shell_applies_static_keyframe_and_rejects_unsafe_nodes(bro
                 {nodeId: 5, tag: 'div', attrs: {class: 'app-menu open', 'data-testid': 'menu'}, children: [
                   {nodeId: 6, tag: 'button', attrs: {'data-testid': 'menu-button', onclick: 'window.__replayHandlerRan = true'}, text: 'Menu action'}
                 ]},
-                {nodeId: 7, tag: 'section', attrs: {class: 'preferences-panel', 'data-testid': 'prefs'}, text: 'Preferences mirrored'},
-                {nodeId: 8, tag: 'a', attrs: {'data-testid': 'unsafe-link', href: 'javascript:alert(1)', shareToken: 'secret-token'}, text: 'unsafe link'},
-                {nodeId: 9, tag: 'div', attrs: {class: 'share-terminal-placeholder', 'data-share-terminal-placeholder': '6', 'data-session': '6', 'data-rows': '24', 'data-cols': '80'}, children: []}
-              ]
+	                {nodeId: 7, tag: 'section', attrs: {class: 'preferences-panel', 'data-testid': 'prefs'}, text: 'Preferences mirrored'},
+	                {nodeId: 8, tag: 'a', attrs: {'data-testid': 'unsafe-link', href: 'javascript:alert(1)', shareToken: 'secret-token'}, text: 'unsafe link'},
+	                {nodeId: 9, tag: 'div', attrs: {class: 'share-terminal-placeholder', 'data-share-terminal-placeholder': '6', 'data-session': '6', 'data-rows': '24', 'data-cols': '80'}, children: []},
+	                {nodeId: 10, tag: 'think', attrs: {'data-testid': 'unsupported-tag'}, text: 'Unsupported custom tag text'}
+	              ]
             },
             terminals: [{placeholderId: 'term-ph-6', session: '6', rows: 24, cols: 80, terminalEpoch: 3}]
           };
@@ -4673,10 +5029,11 @@ def test_share_replay_shell_applies_static_keyframe_and_rejects_unsafe_nodes(bro
           selection.removeAllRanges();
           selection.addRange(range);
           const selectedText = selection.toString();
-          const button = document.querySelector('[data-testid="menu-button"]');
-          button?.click();
-          const unsafeLink = document.querySelector('[data-testid="unsafe-link"]');
-          const placeholder = document.querySelector('[data-share-terminal-placeholder="6"]');
+	          const button = document.querySelector('[data-testid="menu-button"]');
+	          button?.click();
+	          const unsafeLink = document.querySelector('[data-testid="unsafe-link"]');
+	          const unsupportedNode = document.querySelector('[data-testid="unsupported-tag"]');
+	          const placeholder = document.querySelector('[data-share-terminal-placeholder="6"]');
           const beforeBadText = root.textContent;
           const beforeBadMapSize = shareReplayNodeMap.size;
           const badPayload = {
@@ -4705,9 +5062,12 @@ def test_share_replay_shell_applies_static_keyframe_and_rejects_unsafe_nodes(bro
             selectedText,
             buttonHasOnclick: button?.hasAttribute('onclick') || false,
             handlerRan: window.__replayHandlerRan === true,
-            unsafeHref: unsafeLink?.getAttribute('href') || '',
-            unsafeTokenAttr: unsafeLink?.getAttribute('shareToken') || unsafeLink?.getAttribute('share-token') || '',
-            placeholderSession: placeholder?.dataset.shareTerminalPlaceholder || '',
+	            unsafeHref: unsafeLink?.getAttribute('href') || '',
+	            unsafeTokenAttr: unsafeLink?.getAttribute('shareToken') || unsafeLink?.getAttribute('share-token') || '',
+	            unsupportedTagName: unsupportedNode?.tagName || '',
+	            unsupportedText: unsupportedNode?.textContent || '',
+	            unsupportedThinkCount: document.querySelectorAll('think').length,
+	            placeholderSession: placeholder?.dataset.shareTerminalPlaceholder || '',
             placeholderRows: placeholder?.dataset.rows || '',
             nodeMapSize: beforeBadMapSize,
             terminalPlaceholderCount: shareReplayTerminalPlaceholders.size,
@@ -4737,9 +5097,12 @@ def test_share_replay_shell_applies_static_keyframe_and_rejects_unsafe_nodes(bro
     assert metrics["handlerRan"] is False, metrics
     assert metrics["unsafeHref"] == "", metrics
     assert metrics["unsafeTokenAttr"] == "", metrics
+    assert metrics["unsupportedTagName"] == "SPAN", metrics
+    assert metrics["unsupportedText"] == "Unsupported custom tag text", metrics
+    assert metrics["unsupportedThinkCount"] == 0, metrics
     assert metrics["placeholderSession"] == "6", metrics
     assert metrics["placeholderRows"] == "24", metrics
-    assert metrics["nodeMapSize"] == 9, metrics
+    assert metrics["nodeMapSize"] == 10, metrics
     assert metrics["terminalPlaceholderCount"] == 1, metrics
     assert metrics["afterBadText"] == metrics["beforeBadText"], metrics
     assert metrics["afterBadMapSize"] == metrics["nodeMapSize"], metrics
@@ -5039,10 +5402,10 @@ def test_share_replay_shell_rebinds_xterm_to_moving_terminal_placeholder(browser
     assert metrics["socketOpenAfterRemove"] is True, metrics
 
 
-def test_share_replay_terminal_host_resize_resets_before_repaint_bytes(browser, tmp_path):
+def test_share_replay_delta_rebinds_xterm_to_moved_terminal_placeholder(browser, tmp_path):
     share_bootstrap = {
         "view": True,
-        "id": "share-replay-terminal-resize",
+        "id": "share-replay-terminal-delta-placeholder",
         "mode": "ro",
         "session": "6",
         "sessions": ["6"],
@@ -5079,6 +5442,149 @@ def test_share_replay_terminal_host_resize_resets_before_repaint_bytes(browser, 
             return false;
           };
           const keyframe = {
+            digest: '',
+            viewport: {width: 1200, height: 700},
+            root: {
+              nodeId: 1,
+              tag: 'div',
+              attrs: {id: 'appRoot', class: 'app-root host-root'},
+              children: [
+                {nodeId: 2, tag: 'section', attrs: {'data-testid': 'left-pane'}, children: [
+                  {nodeId: 3, tag: 'div', attrs: {class: 'share-terminal-placeholder', 'data-share-terminal-placeholder': '6', 'data-session': '6', 'data-rows': '24', 'data-cols': '80'}, children: []}
+                ]}
+              ]
+            },
+            terminals: [{placeholderId: 'term-ph-6', session: '6', rows: 24, cols: 80, terminalEpoch: 1}]
+          };
+          applyShareUiMessage({ch: 'ui', type: shareMirrorProtocol.frames.domKeyframe, sender: 'host', epoch: 8, sequence: 40, payload: keyframe});
+          const mounted = await waitFor(() => terminals.get('6')?.socket?.readyState === WebSocket.OPEN
+            && document.querySelector('[data-testid="left-pane"] #term-6 .xterm'));
+          const firstItem = terminals.get('6');
+          const firstTerm = firstItem?.term || null;
+          const firstElement = firstTerm?.element || null;
+          const originalWrite = firstTerm.write.bind(firstTerm);
+          const writes = [];
+          firstTerm.write = data => {
+            const text = data instanceof Uint8Array ? new TextDecoder().decode(data) : String(data);
+            writes.push(text);
+            return originalWrite(data);
+          };
+          const socketsAfterMount = (window.__bootSockets || []).filter(url => url.includes('/ws/share-view') && url.includes('session=6')).length;
+          applyShareUiMessage({
+            ch: 'ui',
+            type: shareMirrorProtocol.frames.domDelta,
+            sender: 'host',
+            epoch: 8,
+            baseSequence: 40,
+            sequence: 41,
+            payload: {
+              mutations: [{
+                kind: 'childList',
+                target: 1,
+                removed: [2],
+                added: [
+                  {nodeId: 4, tag: 'section', attrs: {'data-testid': 'right-pane'}, children: [
+                    {nodeId: 5, tag: 'div', attrs: {class: 'share-terminal-placeholder', 'data-share-terminal-placeholder': '6', 'data-session': '6', 'data-rows': '24', 'data-cols': '80'}, children: []}
+                  ]}
+                ],
+              }],
+              terminals: [{placeholderId: 'term-ph-6', session: '6', rows: 24, cols: 80, terminalEpoch: 2}]
+            }
+          });
+          const moved = await waitFor(() => terminals.get('6')?.term === firstTerm
+            && terminals.get('6')?.container === document.querySelector('[data-testid="right-pane"] #term-6')
+            && document.querySelector('[data-testid="right-pane"] #term-6 .xterm') === firstElement);
+          const afterMoveItem = terminals.get('6');
+          handleShareViewSocketMessage('6', afterMoveItem, JSON.stringify({ch: 'term', pane: '6', data: btoa('terminal still visible after delta')}));
+          await frame();
+          const socketsAfterMove = (window.__bootSockets || []).filter(url => url.includes('/ws/share-view') && url.includes('session=6')).length;
+          done({
+            mounted,
+            moved,
+            status: shareReplayShellState.status,
+            dropped: shareReplayDroppedFrames,
+            requests: shareReplayKeyframeRequestCount,
+            sameTerm: afterMoveItem?.term === firstTerm,
+            sameElement: afterMoveItem?.term?.element === firstElement,
+            currentContainerTestId: afterMoveItem?.container?.closest('[data-testid]')?.dataset?.testid || '',
+            rows: afterMoveItem?.term?.rows || 0,
+            cols: afterMoveItem?.term?.cols || 0,
+            hostSize: shareHostTerminalSize('6'),
+            writes,
+            socketsAfterMount,
+            socketsAfterMove,
+            openedCount: window.__terminalOpened,
+            placeholderCount: shareReplayTerminalPlaceholders.size,
+            terminalHealthy: shareReplayHealthDiagnostics().terminalPlaceholders.healthy,
+            errors: window.__bootErrors,
+            rejections: window.__bootRejections,
+          });
+        })().catch(error => done({error: String(error), stack: String(error?.stack || '')}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["rejections"] == [], metrics
+    assert metrics["mounted"] is True, metrics
+    assert metrics["moved"] is True, metrics
+    assert metrics["status"] == "mirrored", metrics
+    assert metrics["dropped"] == 0, metrics
+    assert metrics["requests"] == 0, metrics
+    assert metrics["sameTerm"] is True, metrics
+    assert metrics["sameElement"] is True, metrics
+    assert metrics["currentContainerTestId"] == "right-pane", metrics
+    assert metrics["rows"] == 24, metrics
+    assert metrics["cols"] == 80, metrics
+    assert metrics["hostSize"] == {"rows": 24, "cols": 80}, metrics
+    assert metrics["writes"] == ["terminal still visible after delta"], metrics
+    assert metrics["socketsAfterMount"] == 1, metrics
+    assert metrics["socketsAfterMove"] == 1, metrics
+    assert metrics["openedCount"] == 1, metrics
+    assert metrics["placeholderCount"] == 1, metrics
+    assert metrics["terminalHealthy"] is True, metrics
+
+
+def test_share_replay_terminal_host_resize_preserves_existing_repaint_bytes(browser, tmp_path):
+    share_bootstrap = {
+        "view": True,
+        "id": "share-replay-terminal-resize",
+        "mode": "ro",
+        "session": "6",
+        "sessions": ["6"],
+        "createdBy": "host",
+        "expiresAt": 4102444800.0,
+        "maxViewers": 5,
+        "layout": "left",
+        "tabs": "left:6",
+        "uiState": {"viewport": {"width": 1200, "height": 700}},
+    }
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        search="?shareReplay=1#t=valid-share-token",
+        sessions=["6"],
+        access_role="readonly",
+        share_bootstrap=share_bootstrap,
+        share_status_payload={"ok": True, "active": True, "token": "valid-share-token", "mode": "ro", "expiresAt": 4102444800.0, "uiState": share_bootstrap["uiState"]},
+        wrap_app_root=True,
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return document.body.classList.contains('share-replay-shell')")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+          const waitFor = async predicate => {
+            for (let attempt = 0; attempt < 180; attempt += 1) {
+              if (predicate()) return true;
+              await frame();
+            }
+            return false;
+          };
+          const keyframe = {
             digest: 'sha256:resize-terminal',
             viewport: {width: 1200, height: 700},
             root: {
@@ -5105,8 +5611,10 @@ def test_share_replay_terminal_host_resize_resets_before_repaint_bytes(browser, 
             calls.push(['resize', cols, rows]);
             return originalResize(cols, rows);
           };
+          item.term.screenText = '';
           item.term.reset = () => {
             calls.push(['reset']);
+            item.term.screenText = '';
           };
           item.term.refresh = (start, end) => {
             calls.push(['refresh', start, end]);
@@ -5115,15 +5623,21 @@ def test_share_replay_terminal_host_resize_resets_before_repaint_bytes(browser, 
           item.term.write = data => {
             const text = data instanceof Uint8Array ? new TextDecoder().decode(data) : String(data);
             calls.push(['write', text]);
+            item.term.screenText = `${item.term.screenText || ''}${text}`;
             return originalWrite(data);
           };
+          handleShareViewSocketMessage('6', item, JSON.stringify({ch: 'term', pane: '6', data: btoa('existing host screen')}));
+          await frame();
+          const textBeforeResize = item.term.screenText || '';
           applyShareUiMessage({ch: 'ui', type: shareMirrorProtocol.frames.terminalHostResize, sender: 'host', epoch: 1, sequence: 2, payload: {session: '6', rows: 30, cols: 100}});
-          handleShareViewSocketMessage('6', item, JSON.stringify({ch: 'term', pane: '6', data: btoa('fresh repaint')}));
+          await frame();
+          await delay(320);
           await frame();
           const resizeIndex = calls.findIndex(call => call[0] === 'resize');
           const resetIndex = calls.findIndex(call => call[0] === 'reset');
           const writeIndex = calls.findIndex(call => call[0] === 'write');
           const refreshIndex = calls.findIndex(call => call[0] === 'refresh');
+          const terminalEntry = shareReplayHealthDiagnostics().terminalPlaceholders.entries.find(entry => entry.session === '6') || {};
           done({
             mounted,
             rows: item.term.rows,
@@ -5134,7 +5648,16 @@ def test_share_replay_terminal_host_resize_resets_before_repaint_bytes(browser, 
             resetIndex,
             writeIndex,
             refreshIndex,
+            resetAfterWrite: resetIndex > writeIndex,
+            refreshAfterResize: calls.some((call, index) => call[0] === 'refresh' && index > resizeIndex),
             writeText: calls.find(call => call[0] === 'write')?.[1] || '',
+            textBeforeResize,
+            textAfterResize: item.term.screenText || '',
+            bytesReceived: item.shareTerminalBytesReceived === true,
+            byteCount: item.shareTerminalByteCount || 0,
+            skippedResetCount: item.shareTerminalSkippedResetCount || 0,
+            terminalStreamStatus: terminalEntry.streamStatus || '',
+            terminalReceivedBytes: terminalEntry.receivedBytes === true,
             errors: window.__bootErrors,
             rejections: window.__bootRejections,
           });
@@ -5149,10 +5672,17 @@ def test_share_replay_terminal_host_resize_resets_before_repaint_bytes(browser, 
     assert metrics["cols"] == 100, metrics
     assert metrics["hostSize"] == {"rows": 30, "cols": 100}, metrics
     assert ["resize", 100, 30] in metrics["calls"], metrics
-    assert ["reset"] in metrics["calls"], metrics
-    assert metrics["writeText"] == "fresh repaint", metrics
-    assert 0 <= metrics["resizeIndex"] < metrics["resetIndex"] < metrics["writeIndex"], metrics
-    assert metrics["refreshIndex"] > metrics["resetIndex"], metrics
+    assert metrics["writeText"] == "existing host screen", metrics
+    assert metrics["textBeforeResize"] == "existing host screen", metrics
+    assert metrics["textAfterResize"] == "existing host screen", metrics
+    assert metrics["resetAfterWrite"] is False, metrics
+    assert 0 <= metrics["writeIndex"] < metrics["resizeIndex"], metrics
+    assert metrics["refreshAfterResize"] is True, metrics
+    assert metrics["bytesReceived"] is True, metrics
+    assert metrics["byteCount"] > 0, metrics
+    assert metrics["skippedResetCount"] >= 1, metrics
+    assert metrics["terminalStreamStatus"] == "received-bytes", metrics
+    assert metrics["terminalReceivedBytes"] is True, metrics
 
 
 def test_share_replay_gap_keeps_terminal_stream_host_sized(browser, tmp_path):
@@ -5449,11 +5979,32 @@ def test_share_replay_shell_ignores_interleaved_semantic_finder_frames(browser, 
             }
           });
           await frame();
+          applyShareUiMessage({
+            ch: 'ui',
+            type: shareMirrorProtocol.frames.geometryDigest,
+            sender: 'host',
+            epoch: 100,
+            sequence: 501,
+            payload: {
+              digest: 'safari-one-pixel-tab-strip',
+              snapshot: {
+                viewport: {width: 1220, height: 742},
+                fonts: {ui: 249, mono: 297},
+                slots: {},
+                tabStrips: [{index: 4, rect: {left: 412, top: 667, width: 964, height: 21}}],
+                terminalCells: [],
+                editors: [],
+                textWraps: [],
+              },
+            },
+          });
+          await frame();
           const afterSemantic = {
             text: document.querySelector('[data-testid="finder-replay"]')?.textContent || '',
             finderPanels: document.querySelectorAll('[data-testid="finder-replay"]').length,
             status: shareReplayShellState.status,
             requests: shareReplayKeyframeRequestCount,
+            dropped: shareReplayDroppedFrames,
           };
           applyShareUiMessage({ch: 'ui', type: shareMirrorProtocol.frames.domKeyframe, sender: 'host', epoch: 3, sequence: 2, payload: keyframe('Finder still one pane', 3)});
           await frame();
@@ -5481,7 +6032,7 @@ def test_share_replay_shell_ignores_interleaved_semantic_finder_frames(browser, 
         """
     )
     assert "error" not in metrics, metrics
-    assert metrics["afterSemantic"] == {"text": "Finder one pane", "finderPanels": 1, "status": "mirrored", "requests": 0}, metrics
+    assert metrics["afterSemantic"] == {"text": "Finder one pane", "finderPanels": 1, "status": "mirrored", "requests": 0, "dropped": 0}, metrics
     assert metrics["afterKeyframe"] == {"text": "Finder still one pane", "finderPanels": 1, "epoch": 3, "sequence": 2, "status": "mirrored", "requests": 0}, metrics
     assert metrics["afterDelta"] == {"text": "Finder delta one pane", "finderPanels": 1, "epoch": 3, "sequence": 3, "status": "mirrored", "requests": 0, "dropped": 0}, metrics
 
@@ -5764,6 +6315,108 @@ def test_share_replay_debug_copy_exports_sanitized_health(browser, tmp_path):
     assert "/share/share123" not in metrics["text"], metrics
     assert "[redacted-share-token]" in metrics["text"], metrics
     assert "[redacted-share-token]" in metrics["contextHash"], metrics
+
+
+def test_share_replay_debug_copy_exports_last_replay_error(browser, tmp_path):
+    share_bootstrap = {
+        "view": True,
+        "id": "share-replay-debug-error",
+        "mode": "ro",
+        "session": "6",
+        "sessions": ["6"],
+        "createdBy": "host",
+        "expiresAt": 4102444800.0,
+        "maxViewers": 5,
+        "layout": "left",
+        "tabs": "left:6",
+        "uiState": {"viewport": {"width": 1200, "height": 700}},
+    }
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        search="?shareReplay=1&shareDebug=1#t=valid-share-token",
+        sessions=["6"],
+        access_role="readonly",
+        share_bootstrap=share_bootstrap,
+        share_status_payload={"ok": True, "active": True, "token": "valid-share-token", "mode": "ro", "expiresAt": 4102444800.0, "uiState": share_bootstrap["uiState"]},
+        wrap_app_root=True,
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return document.body.classList.contains('share-replay-shell')")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const keyframe = {
+            digest: 'sha256:keyframe-debug-error',
+            createdAt: Date.now() / 1000,
+            viewport: {width: 1200, height: 700},
+            root: {
+              nodeId: 1,
+              tag: 'div',
+              attrs: {id: 'appRoot', class: 'app-root host-root'},
+              children: [
+                {nodeId: 2, tag: 'span', attrs: {'data-testid': 'debug-error-target'}, text: 'debug error text'}
+              ]
+            },
+            terminals: [],
+            redaction: {policyVersion: 1, removedCount: 0}
+          };
+          applyShareUiMessage({ch: 'ui', type: shareMirrorProtocol.frames.domKeyframe, sender: 'host', epoch: 17, sequence: 50, payload: keyframe});
+          await frame();
+          applyShareUiMessage({
+            ch: 'ui',
+            type: shareMirrorProtocol.frames.domDelta,
+            sender: 'host',
+            epoch: 17,
+            baseSequence: 49,
+            sequence: 52,
+            payload: {
+              mutations: []
+            }
+          });
+          await frame();
+          const text = shareDebugTextForClipboard();
+          const parsed = JSON.parse(text);
+          done({
+            text,
+            status: parsed.status,
+            droppedFrames: parsed.droppedFrames,
+            keyframeRequests: parsed.keyframeRequests,
+            lastReplayError: parsed.lastReplayError || null,
+            targetText: document.querySelector('[data-testid="debug-error-target"]')?.textContent || '',
+            errors: window.__bootErrors,
+            rejections: window.__bootRejections,
+          });
+        })().catch(error => done({error: String(error), stack: String(error?.stack || '')}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["rejections"] == [], metrics
+    assert metrics["status"] == "mirrored", metrics
+    assert metrics["droppedFrames"] == 1, metrics
+    assert metrics["keyframeRequests"] == 1, metrics
+    assert metrics["targetText"] == "debug error text", metrics
+    assert metrics["lastReplayError"] == {
+        "frameType": "dom-delta",
+        "reason": "gap",
+        "error": "non-contiguous replay delta",
+        "currentEpoch": 17,
+        "lastSequence": 50,
+        "epoch": 17,
+        "sequence": 52,
+        "baseSequence": 49,
+        "expectedSequence": 51,
+        "expectedBaseSequence": 50,
+        "frameBytes": metrics["lastReplayError"]["frameBytes"],
+    }, metrics
+    assert metrics["lastReplayError"]["frameBytes"] > 0, metrics
+    assert "valid-share-token" not in metrics["text"], metrics
+    assert "/share/share123" not in metrics["text"], metrics
+    assert "[redacted-share-token]" in metrics["text"], metrics
 
 
 def test_share_replay_health_ignores_legacy_geometry_drift_frames(browser, tmp_path):
