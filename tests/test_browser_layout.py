@@ -239,7 +239,7 @@ def pc_controls_fixture_html():
           <div id="expanded-dir" class="file-tree-row kind-dir expanded" aria-expanded="true"><span class="file-tree-icon">▾</span><span class="file-tree-name">Bravo</span></div>
           <div id="selected-file-row" class="file-tree-row kind-file selected"><span class="file-tree-icon">M</span><span class="file-tree-name">clicked.md</span></div>
           <div id="current-file-row" class="file-tree-row kind-file current-file"><span class="file-tree-icon">M</span><span class="file-tree-name">README.md</span></div>
-          <div id="repo-dir" class="file-tree-row kind-dir is-repo repo-non-main"><span class="file-tree-icon">▸</span><span class="file-tree-name">yolomux <span class="file-tree-repo-meta">[<span class="file-tree-repo-branch">feature/repo-row</span> <span class="file-tree-repo-delta">+5/-3</span>]</span></span></div>
+          <div id="repo-dir" class="file-tree-row kind-dir is-repo repo-non-main"><span class="file-tree-icon">▸</span><span class="file-tree-name">yolomux <span class="file-tree-repo-meta">[<span class="file-tree-repo-branch">feature/repo-row</span>]</span></span><span class="file-tree-dir-count" hidden></span><span class="file-tree-agent" hidden></span><span class="file-tree-diff"><span class="changes-diff-add">+5</span> <span class="changes-diff-remove">-3</span></span><span class="file-tree-git-status" hidden></span><span class="file-tree-date" hidden></span></div>
         </div>
         <div id="test-context-menu" class="terminal-context-menu" style="top: 220px; left: 24px;"></div>
         <div id="test-image-preview" class="file-image-preview-popover" style="top: 220px; left: 24px;"></div>
@@ -13641,20 +13641,47 @@ def test_platform_controls_use_pc_glyphs(browser, tmp_path):
         """
         const name = document.querySelector('#repo-dir .file-tree-name');
         const branch = document.querySelector('#repo-dir .file-tree-repo-branch');
-        const delta = document.querySelector('#repo-dir .file-tree-repo-delta');
+        const diff = document.querySelector('#repo-dir .file-tree-diff');
+        const add = document.querySelector('#repo-dir .changes-diff-add');
+        const remove = document.querySelector('#repo-dir .changes-diff-remove');
+        const nameRect = name.getBoundingClientRect();
+        const diffRect = diff.getBoundingClientRect();
+        const addRect = add.getBoundingClientRect();
+        const removeRect = remove.getBoundingClientRect();
         return {
+          text: name.textContent,
+          hasRetiredDelta: Boolean(document.querySelector('#repo-dir .file-tree-repo-delta')),
           nameWeight: getComputedStyle(name).fontWeight,
           branchWeight: getComputedStyle(branch).fontWeight,
-          deltaWeight: getComputedStyle(delta).fontWeight,
+          diffWeight: getComputedStyle(diff).fontWeight,
           branchFont: getComputedStyle(branch).fontFamily,
+          diffDisplay: getComputedStyle(diff).display,
+          diffJustify: getComputedStyle(diff).justifyContent,
+          addText: add.textContent,
+          removeText: remove.textContent,
+          addColor: getComputedStyle(add).color,
+          removeColor: getComputedStyle(remove).color,
+          diffRight: diffRect.right,
+          addLeft: addRect.left,
+          removeRight: removeRect.right,
+          diffAfterName: diffRect.left >= nameRect.right,
           nameColor: getComputedStyle(name).color,
         };
         """
     )
+    assert repo_row_metrics["text"] == "yolomux [feature/repo-row]"
+    assert not repo_row_metrics["hasRetiredDelta"]
     assert repo_row_metrics["nameWeight"] in ("400", "normal")
     assert repo_row_metrics["branchWeight"] in ("400", "normal")
-    assert repo_row_metrics["deltaWeight"] in ("400", "normal")
+    assert repo_row_metrics["diffWeight"] == "800"
     assert "mono" in repo_row_metrics["branchFont"].lower()
+    assert repo_row_metrics["diffDisplay"] == "flex"
+    assert repo_row_metrics["diffJustify"] == "flex-end"
+    assert repo_row_metrics["addText"] == "+5"
+    assert repo_row_metrics["removeText"] == "-3"
+    assert repo_row_metrics["addColor"] != repo_row_metrics["removeColor"]
+    assert abs(repo_row_metrics["removeRight"] - repo_row_metrics["diffRight"]) <= 1
+    assert repo_row_metrics["diffAfterName"]
     assert repo_row_metrics["nameColor"] != tree_metrics["collapsedColor"]
 
 

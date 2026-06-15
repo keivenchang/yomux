@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 import json
 import threading
@@ -1015,6 +1016,7 @@ def test_session_files_payload_returns_stale_cache_and_refreshes(monkeypatch):
 def test_update_client_watch_roots_filters_and_expires(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     monkeypatch.setattr(app_module.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(app_module.time, "time", lambda: 100.0)
     try:
         payload = webapp.update_client_watch_roots({
             "roots": ["/repo", "relative", "", "/repo"],
@@ -1028,11 +1030,111 @@ def test_update_client_watch_roots_filters_and_expires(monkeypatch):
         assert webapp.client_watch_files_snapshot() == ["/repo/DOIT.51.md"]
         assert webapp.client_watch_background_files_snapshot() == ["/repo/README.md"]
         monkeypatch.setattr(app_module.time, "monotonic", lambda: 1000.0)
+        monkeypatch.setattr(app_module.time, "time", lambda: 1000.0)
         assert webapp.client_watch_roots_snapshot() == []
         assert webapp.client_watch_files_snapshot() == []
         assert webapp.client_watch_background_files_snapshot() == []
     finally:
         webapp.control_server.stop()
+
+
+def test_client_watch_roots_are_shared_across_app_instances(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "WATCH_INDEX_PATH", tmp_path / "watch-index.json")
+    monkeypatch.setattr(app_module.time, "time", lambda: 100.0)
+    app1 = app_module.TmuxWebtermApp([])
+    app2 = app_module.TmuxWebtermApp([])
+    try:
+        app1.update_client_watch_roots({"roots": ["/repo/one"]})
+        app2.update_client_watch_roots({"roots": ["/repo/two"]})
+
+        assert app1.client_watch_roots_snapshot() == ["/repo/one", "/repo/two"]
+        assert app2.client_watch_roots_snapshot() == ["/repo/one", "/repo/two"]
+        payload = json.loads((tmp_path / "watch-index.json").read_text(encoding="utf-8"))
+        assert sorted(payload["owners"]) == sorted([app1.watch_root_owner_id, app2.watch_root_owner_id])
+    finally:
+        app1.control_server.stop()
+        app2.control_server.stop()
+
+
+def test_client_watch_roots_concurrent_writes_do_not_clobber(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "WATCH_INDEX_PATH", tmp_path / "watch-index.json")
+    monkeypatch.setattr(app_module.time, "time", lambda: 100.0)
+    app1 = app_module.TmuxWebtermApp([])
+    app2 = app_module.TmuxWebtermApp([])
+    barrier = threading.Barrier(2)
+
+    def update(app, root):
+        barrier.wait(timeout=5)
+        app.update_client_watch_roots({"roots": [root]})
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(update, app1, "/repo/one"),
+                executor.submit(update, app2, "/repo/two"),
+            ]
+            for future in futures:
+                future.result(timeout=5)
+        assert app1.client_watch_roots_snapshot() == ["/repo/one", "/repo/two"]
+        assert app2.client_watch_roots_snapshot() == ["/repo/one", "/repo/two"]
+    finally:
+        app1.control_server.stop()
+        app2.control_server.stop()
+
+
+def test_client_watch_roots_lock_free_read_during_write(monkeypatch, tmp_path):
+    index_path = tmp_path / "watch-index.json"
+    monkeypatch.setattr(app_module, "WATCH_INDEX_PATH", index_path)
+    monkeypatch.setattr(app_module.time, "time", lambda: 100.0)
+    writer = app_module.TmuxWebtermApp([])
+    reader = app_module.TmuxWebtermApp([])
+    try:
+        writer.update_client_watch_roots({"roots": ["/repo/old"]})
+        observed: list[list[str]] = []
+
+        with app_module.file_lock(index_path):
+            thread = threading.Thread(target=lambda: observed.append(reader.client_watch_roots_snapshot()))
+            thread.start()
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+            assert observed == [["/repo/old"]]
+            replacement = {
+                "version": 1,
+                "owners": {
+                    "other-server": {
+                        "entries": {
+                            "client:/repo/new": {
+                                "path": "/repo/new",
+                                "source": "client",
+                                "expires_at": 200.0,
+                                "updated_at": 100.0,
+                            }
+                        }
+                    }
+                },
+            }
+            app_module.atomic_write_text(index_path, json.dumps(replacement, separators=(",", ":")), mode=0o600)
+
+        assert reader.client_watch_roots_snapshot() == ["/repo/new"]
+        index_path.write_text("{not-json", encoding="utf-8")
+        assert reader.client_watch_roots_snapshot() == []
+    finally:
+        writer.control_server.stop()
+        reader.control_server.stop()
+
+
+def test_client_watch_roots_limit_keeps_multiple_owners_visible(tmp_path, caplog):
+    index_path = tmp_path / "watch-index.json"
+    clock = lambda: 100.0
+    owner_a = app_module.SharedWatchRootIndex(index_path, "owner-a", limit=2, clock=clock)
+    owner_b = app_module.SharedWatchRootIndex(index_path, "owner-b", limit=2, clock=clock)
+
+    owner_a.update_client_roots(["/repo/a1", "/repo/a2"])
+    owner_b.update_client_roots(["/repo/b1", "/repo/b2"])
+
+    with caplog.at_level("WARNING"):
+        assert owner_a.snapshot() == ["/repo/a1", "/repo/b1"]
+    assert "shared watch-root index truncated from 4 live roots across 2 owners to 2" in caplog.text
 
 
 def test_filesystem_change_summary_counts_entry_changes():
@@ -1167,14 +1269,42 @@ def test_poll_client_background_file_events_once_uses_own_signature(monkeypatch)
     assert events == [("files_changed", {"files": [{"path": "/repo/README.md", "signature": ("/repo/README.md", "file", 200, 12)}], "count": 1})]
 
 
-def test_filesystem_roots_for_watch_uses_client_roots_not_agent_cwd(monkeypatch, tmp_path):
+def test_filesystem_roots_for_watch_auto_indexes_active_directory(monkeypatch, tmp_path):
     repo = tmp_path / "repo"
+    src = repo / "src"
     watched = tmp_path / "watched"
     transcript = tmp_path / "transcripts" / "codex.jsonl"
+    src.mkdir(parents=True)
     info = SessionInfo(
         session="5",
-        panes=[],
-        selected_pane=None,
+        panes=[
+            PaneInfo(
+                session="5",
+                window="0",
+                pane="0",
+                pane_id="%5",
+                target="5:0.0",
+                current_path=str(src),
+                command="codex",
+                active=True,
+                window_active=True,
+                title="codex",
+                pid=123,
+            )
+        ],
+        selected_pane=PaneInfo(
+            session="5",
+            window="0",
+            pane="0",
+            pane_id="%5",
+            target="5:0.0",
+            current_path=str(src),
+            command="codex",
+            active=True,
+            window_active=True,
+            title="codex",
+            pid=123,
+        ),
         agents=[
             AgentInfo(
                 session="5",
@@ -1190,7 +1320,9 @@ def test_filesystem_roots_for_watch_uses_client_roots_not_agent_cwd(monkeypatch,
             )
         ],
     )
+    monkeypatch.setattr(app_module, "WATCH_INDEX_PATH", tmp_path / "watch-index.json")
     monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"file_explorer": {"companion_dirs": []}}})
+    monkeypatch.setattr(app_module.filesystem, "git_root_for_path", lambda path: str(repo) if str(path).startswith(str(repo)) else "")
     webapp = app_module.TmuxWebtermApp([])
     try:
         webapp.update_client_watch_roots({"roots": [str(watched)]})
@@ -1199,7 +1331,8 @@ def test_filesystem_roots_for_watch_uses_client_roots_not_agent_cwd(monkeypatch,
         webapp.control_server.stop()
 
     assert str(watched) in roots
-    assert str(repo) not in roots
+    assert str(repo) in roots
+    assert str(src) not in roots
     assert str(transcript.parent) not in roots
 
 

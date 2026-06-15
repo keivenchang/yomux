@@ -1732,10 +1732,14 @@ function fileTreeChangedAncestorStats(payload = fileExplorerSessionFilesPayload)
     let dir = normalizeDirectoryPath(dirnameOf(absPath));
     while (dir && dir !== '/') {
       const key = `${dir}\x1f${absPath}`;
-      const current = stats.get(dir) || {count: 0, agents: [], mtime: 0};
+      const current = stats.get(dir) || {count: 0, agents: [], mtime: 0, added: 0, removed: 0};
       if (!seen.has(key)) {
         seen.add(key);
         current.count += 1;
+        const added = Number(file.added);
+        const removed = Number(file.removed);
+        if (Number.isFinite(added)) current.added += added;
+        if (Number.isFinite(removed)) current.removed += removed;
       }
       const mtime = Number(file.mtime || 0);
       if (Number.isFinite(mtime) && mtime > Number(current.mtime || 0)) current.mtime = mtime;
@@ -1757,16 +1761,6 @@ function normalizeGitStatus(status) {
 
 function fileTreeGitStatus(path) {
   return normalizeGitStatus(fileTreeChangedFile(path)?.status);
-}
-
-function fileTreeNumstatText(path) {
-  const match = fileTreeChangedFile(path);
-  if (!match) return '';
-  const added = Number(match.added || 0);
-  const removed = Number(match.removed || 0);
-  if (!Number.isFinite(added) || !Number.isFinite(removed)) return '';
-  if (added === 0 && removed === 0) return '';
-  return ` (+${added}/-${removed})`;
 }
 
 function fileTreeRepoBranch(path) {
@@ -1793,7 +1787,7 @@ function fileTreeRepoSyncMeta(path) {
   return parts;
 }
 
-function fileTreeRepoNumstat(path) {
+function fileTreeRepoDiffParts(path) {
   const normalized = normalizeDirectoryPath(path);
   const repos = Array.isArray(fileExplorerSessionFilesPayload?.repos) ? fileExplorerSessionFilesPayload.repos : [];
   const repo = repos.find(item => normalizeDirectoryPath(item?.repo || '') === normalized);
@@ -1805,9 +1799,8 @@ function fileTreeRepoNumstat(path) {
     added = repoFiles.reduce((sum, item) => sum + (Number.isFinite(Number(item.added)) ? Number(item.added) : 0), 0);
     removed = repoFiles.reduce((sum, item) => sum + (Number.isFinite(Number(item.removed)) ? Number(item.removed) : 0), 0);
   }
-  if (!Number.isFinite(added) || !Number.isFinite(removed)) return '';
-  if (added === 0 && removed === 0) return '';
-  return `+${added}/-${removed}`;
+  if (!Number.isFinite(added) || !Number.isFinite(removed)) return [];
+  return sessionFileDiffText({added, removed});
 }
 
 function fileTreeRepoBranchIsNonMain(path) {
@@ -1822,13 +1815,11 @@ function fileTreeDisplayParts(path, entry) {
   const linkSuffixHtml = linkTarget ? ` <span class="file-tree-symlink-target">→ ${esc(linkTarget)}</span>` : '';
   if (entry.kind === 'dir' && entry.is_repo === true) {
     const branch = fileTreeRepoBranch(path);
-    const numstat = fileTreeRepoNumstat(path);
     const sync = fileTreeRepoSyncMeta(path);
-    const textParts = [branch, ...sync.map(part => part.text), numstat].filter(Boolean);
+    const textParts = [branch, ...sync.map(part => part.text)].filter(Boolean);
     const htmlParts = [];
     if (branch) htmlParts.push(`<span class="file-tree-repo-branch">${esc(branch)}</span>`);
     for (const part of sync) htmlParts.push(`<span class="${part.cls}">${esc(part.text)}</span>`);
-    if (numstat) htmlParts.push(`<span class="file-tree-repo-delta">${esc(numstat)}</span>`);
     return {
       text: (textParts.length ? `${entry.name} [${textParts.join(' ')}]` : entry.name) + linkSuffixText,
       html: (htmlParts.length
@@ -2163,6 +2154,9 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
       ? String(countChangedFilesInDir(fullPath, options.entriesByDir, options.sessionFilesMap) || '')
       : (changedAncestor?.count ? String(changedAncestor.count) : ''))
     : '';
+  const directoryDiffParts = entry.kind === 'dir'
+    ? (entry.is_repo === true ? fileTreeRepoDiffParts(fullPath) : sessionFileDiffText(changedAncestor || {}))
+    : [];
   // Set data attributes so Differ event delegation (click/drag/contextmenu) can find these rows
   setRowDataset(row, 'openChangeFile', changedFile?.abs_path || '');
   setRowDataset(row, 'openChangeSession', changedFile?.abs_path ? (changedFile.session || '') : '');
@@ -2186,7 +2180,7 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
     iconClass: [fileIconClassFor(entry.name, entry.kind), indexedDirectory ? 'file-icon-dir-indexed' : ''].filter(Boolean).join(' '),
     nameHtml: differMode ? null : displayName.html,
     dateText: fileTreeMtimeText(entry),
-    diffParts: changedFile ? sessionFileDiffText(changedFile) : [],
+    diffParts: changedFile ? sessionFileDiffText(changedFile) : directoryDiffParts,
     agentHtml: changedFile ? changeFileAgentsHtml(changedFile) : (changedAncestor ? changeFileAgentsHtml(changedAncestor) : ''),
     dirCountText,
   });

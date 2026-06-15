@@ -4,6 +4,7 @@ import copy
 import hashlib
 import hmac
 import json
+import logging
 import math
 import os
 import re
@@ -21,6 +22,7 @@ from datetime import timezone
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
+from typing import Callable
 from urllib.parse import unquote
 from urllib.parse import urlsplit
 from urllib.parse import urlunsplit
@@ -43,6 +45,8 @@ from .activity_summary import yoagent_context_lines
 from .auto_approve_worker import AutoApproveWorker
 from .auto_approve_worker import auto_approve_lock_message
 from .auto_approve_worker import auto_approve_lock_owner
+from .atomic_file import atomic_write_text
+from .atomic_file import file_lock
 from .client_events import ClientEventBroker
 from .activity import ActivityLedger
 from .common import ACTIVITY_HEARTBEATS_PATH
@@ -58,6 +62,7 @@ from .common import PROJECT_ROOT
 from .common import SERVER_HOSTNAME
 from .common import SERVER_STARTED_AT
 from .common import SUMMARY_MAX_PROMPT_CHARS
+from .common import WATCH_INDEX_PATH
 from .common import YOLOMUX_VERSION
 from .common import YOAGENT_CLAUDE_SUMMARY_MODEL
 from .common import UPLOAD_MAX_FILES
@@ -138,6 +143,7 @@ from .yoagent.transports import default_yoagent_transport_registry
 from .yoagent.transports import normalize_yoagent_transport_id
 
 
+logger = logging.getLogger(__name__)
 METADATA_BADGE_PULSE_SECONDS = 20.0
 YOAGENT_ACTION_PREVIEW_TTL_SECONDS = 5 * 60
 YOAGENT_ACTION_TEXT_LIMIT = 4000
@@ -183,6 +189,185 @@ CLIENT_WATCH_FILE_LIMIT = 128
 DIRECTORY_WATCH_ENTRY_LIMIT = 512
 # Keep in sync with tmuxSessionNameError() in static/yolomux.js.
 TMUX_SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9_. -]{1,64}$")
+
+
+class SharedWatchRootIndex:
+    """Cross-process directory watch-root index shared by every server using the same state dir."""
+
+    def __init__(
+        self,
+        path: Path,
+        owner_id: str,
+        ttl_seconds: float = CLIENT_WATCH_ROOT_TTL_SECONDS,
+        limit: int = CLIENT_WATCH_ROOT_LIMIT,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
+        self.path = Path(path)
+        self.owner_id = str(owner_id)
+        self.ttl_seconds = max(1.0, float(ttl_seconds))
+        self.limit = max(1, int(limit))
+        self._clock = clock or (lambda: time.time())
+        self._truncated_signature: tuple[Any, ...] | None = None
+
+    def normalize_paths(self, roots: Any) -> list[str]:
+        normalized: list[str] = []
+        raw_roots = roots if isinstance(roots, list) else []
+        for item in raw_roots:
+            path = str(item or "").strip()
+            if not path.startswith("/"):
+                continue
+            normalized.append(str(Path(path).expanduser()))
+        unique = sorted(set(normalized))
+        if len(unique) > self.limit:
+            logger.warning("client watch roots truncated from %s to %s for owner %s", len(unique), self.limit, self.owner_id)
+        return unique[: self.limit]
+
+    def _empty_payload(self) -> dict[str, Any]:
+        return {"version": 1, "owners": {}}
+
+    def _read_payload(self) -> dict[str, Any]:
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return self._empty_payload()
+        if not isinstance(raw, dict):
+            return self._empty_payload()
+        owners = raw.get("owners")
+        if not isinstance(owners, dict):
+            return self._empty_payload()
+        return {"version": 1, "owners": owners}
+
+    def _owner_entries(self, payload: dict[str, Any]) -> dict[str, Any]:
+        owners = payload.get("owners")
+        if not isinstance(owners, dict):
+            owners = {}
+            payload["owners"] = owners
+        owner_payload = owners.get(self.owner_id)
+        if not isinstance(owner_payload, dict):
+            owner_payload = {}
+            owners[self.owner_id] = owner_payload
+        entries = owner_payload.get("entries")
+        if not isinstance(entries, dict):
+            entries = {}
+            owner_payload["entries"] = entries
+        owner_payload["updated_at"] = self._clock()
+        return entries
+
+    def _live_owner_entries(self, entries: dict[str, Any], now: float) -> dict[str, Any]:
+        live: dict[str, Any] = {}
+        for key, entry in entries.items():
+            if not isinstance(entry, dict):
+                continue
+            path = str(entry.get("path") or "")
+            expires_at = self._entry_expires_at(entry)
+            if path.startswith("/") and expires_at > now:
+                live[str(key)] = entry
+        return live
+
+    def _entry_expires_at(self, entry: dict[str, Any]) -> float:
+        try:
+            return float(entry.get("expires_at") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _entry(self, path: str, source: str, expires_at: float, session: str = "") -> dict[str, Any]:
+        item = {
+            "path": path,
+            "source": source,
+            "expires_at": expires_at,
+            "updated_at": self._clock(),
+        }
+        if session:
+            item["session"] = session
+        return item
+
+    def _write_payload(self, payload: dict[str, Any]) -> None:
+        atomic_write_text(self.path, json.dumps(payload, separators=(",", ":"), sort_keys=True), mode=0o600)
+
+    def update_client_roots(self, roots: list[str]) -> None:
+        now = self._clock()
+        expires_at = now + self.ttl_seconds
+        with file_lock(self.path):
+            payload = self._read_payload()
+            entries = {
+                key: entry
+                for key, entry in self._live_owner_entries(self._owner_entries(payload), now).items()
+                if isinstance(entry, dict) and entry.get("source") != "client"
+            }
+            for path in roots[: self.limit]:
+                entries[f"client:{path}"] = self._entry(path, "client", expires_at)
+            self._owner_entries(payload).clear()
+            self._owner_entries(payload).update(entries)
+            self._write_payload(payload)
+
+    def update_active_roots(self, roots_by_session: dict[str, str]) -> None:
+        now = self._clock()
+        expires_at = now + self.ttl_seconds
+        with file_lock(self.path):
+            payload = self._read_payload()
+            entries = {
+                key: entry
+                for key, entry in self._live_owner_entries(self._owner_entries(payload), now).items()
+                if isinstance(entry, dict) and entry.get("source") != "active"
+            }
+            for session, path in sorted(roots_by_session.items()):
+                if not path.startswith("/"):
+                    continue
+                entries[f"active:{session}:{path}"] = self._entry(path, "active", expires_at, session=session)
+            self._owner_entries(payload).clear()
+            self._owner_entries(payload).update(entries)
+            self._write_payload(payload)
+
+    def snapshot(self) -> list[str]:
+        now = self._clock()
+        payload = self._read_payload()
+        owners = payload.get("owners")
+        if not isinstance(owners, dict):
+            return []
+        paths_by_owner: dict[str, set[str]] = {}
+        for owner, owner_payload in owners.items():
+            if not isinstance(owner_payload, dict):
+                continue
+            entries = owner_payload.get("entries")
+            if not isinstance(entries, dict):
+                continue
+            for entry in entries.values():
+                if not isinstance(entry, dict):
+                    continue
+                path = str(entry.get("path") or "")
+                if not path.startswith("/") or self._entry_expires_at(entry) <= now:
+                    continue
+                paths_by_owner.setdefault(str(owner), set()).add(path)
+        return self._limited_snapshot(paths_by_owner)
+
+    def _limited_snapshot(self, paths_by_owner: dict[str, set[str]]) -> list[str]:
+        total = sum(len(paths) for paths in paths_by_owner.values())
+        owners = [(owner, sorted(paths)) for owner, paths in sorted(paths_by_owner.items()) if paths]
+        if total <= self.limit:
+            return sorted({path for _owner, paths in owners for path in paths})
+        selected: list[str] = []
+        seen: set[str] = set()
+        index = 0
+        while len(selected) < self.limit:
+            added = False
+            for _owner, paths in owners:
+                if index >= len(paths):
+                    continue
+                path = paths[index]
+                if path not in seen:
+                    seen.add(path)
+                    selected.append(path)
+                    if len(selected) >= self.limit:
+                        break
+                added = True
+            if not added:
+                break
+            index += 1
+        signature = (total, self.limit, tuple((owner, len(paths)) for owner, paths in owners))
+        if signature != self._truncated_signature:
+            logger.warning("shared watch-root index truncated from %s live roots across %s owners to %s", total, len(owners), self.limit)
+            self._truncated_signature = signature
+        return sorted(selected)
 
 
 def yoagent_cli_auth_failure(text: str) -> bool:
@@ -454,7 +639,8 @@ class TmuxWebtermApp:
         self.metadata_badge_pulse_until: dict[str, dict[str, float]] = {}
         self.client_events = ClientEventBroker()
         self.client_watch_lock = threading.RLock()
-        self.client_watch_roots: dict[str, float] = {}
+        self.watch_root_owner_id = f"{SERVER_HOSTNAME}:{os.getpid()}:{uuid.uuid4().hex[:12]}"
+        self.watch_root_index = SharedWatchRootIndex(WATCH_INDEX_PATH, owner_id=self.watch_root_owner_id)
         self.client_watch_files: dict[str, float] = {}
         self.client_watch_background_files: dict[str, float] = {}
         self.client_watch_context_items: list[dict[str, Any]] = []
@@ -1538,15 +1724,8 @@ class TmuxWebtermApp:
     def update_client_watch_roots(self, roots: Any) -> dict[str, Any]:
         now = time.monotonic()
         payload = roots if isinstance(roots, dict) else {"roots": roots}
-        normalized: list[str] = []
         raw_roots = payload.get("roots", []) if isinstance(payload, dict) else []
-        if isinstance(raw_roots, list):
-            for item in raw_roots:
-                path = str(item or "").strip()
-                if not path.startswith("/"):
-                    continue
-                normalized.append(str(Path(path).expanduser()))
-        unique = sorted(set(normalized))[:CLIENT_WATCH_ROOT_LIMIT]
+        unique = self.watch_root_index.normalize_paths(raw_roots)
         normalized_files: list[str] = []
         raw_files = payload.get("files", []) if isinstance(payload, dict) else []
         if isinstance(raw_files, list):
@@ -1573,8 +1752,8 @@ class TmuxWebtermApp:
         context_items = self.normalized_client_context_items(payload.get("context_items", []))
         session_files_requests = self.normalized_client_session_files(payload.get("session_files", []))
         activity_summary = self.normalized_client_activity_summary(payload.get("activity_summary", {}))
+        self.watch_root_index.update_client_roots(unique)
         with self.client_watch_lock:
-            self.client_watch_roots = {path: now + CLIENT_WATCH_ROOT_TTL_SECONDS for path in unique}
             self.client_watch_files = {path: now + CLIENT_WATCH_ROOT_TTL_SECONDS for path in unique_files}
             self.client_watch_background_files = {path: now + CLIENT_WATCH_ROOT_TTL_SECONDS for path in unique_background_files}
             self.client_watch_context_items = context_items
@@ -1661,12 +1840,7 @@ class TmuxWebtermApp:
             )
 
     def client_watch_roots_snapshot(self) -> list[str]:
-        now = time.monotonic()
-        with self.client_watch_lock:
-            current = {path: expires for path, expires in self.client_watch_roots.items() if expires > now}
-            if len(current) != len(self.client_watch_roots):
-                self.client_watch_roots = current
-            return sorted(current)
+        return self.watch_root_index.snapshot()
 
     def client_watch_files_snapshot(self) -> list[str]:
         now = time.monotonic()
@@ -1706,6 +1880,7 @@ class TmuxWebtermApp:
         return tuple(rows)
 
     def filesystem_roots_for_watch(self, sessions: dict[str, SessionInfo]) -> list[str]:
+        self.watch_root_index.update_active_roots(self.active_directory_watch_roots(sessions))
         roots = set(self.client_watch_roots_snapshot())
         settings = settings_payload().get("settings", {})
         file_explorer = settings.get("file_explorer", {}) if isinstance(settings, dict) else {}
@@ -1715,6 +1890,28 @@ class TmuxWebtermApp:
                 if path.startswith("/"):
                     roots.add(path)
         return sorted(str(Path(root).expanduser()) for root in roots if str(root or "").startswith("/"))[:CLIENT_WATCH_ROOT_LIMIT]
+
+    def active_directory_watch_roots(self, sessions: dict[str, SessionInfo]) -> dict[str, str]:
+        roots: dict[str, str] = {}
+        for session, info in sorted((sessions or {}).items()):
+            path = ""
+            if info.selected_pane and info.selected_pane.current_path:
+                path = info.selected_pane.current_path
+            if not path:
+                agent = next((item for item in info.agents if item.cwd), None)
+                path = agent.cwd if agent and agent.cwd else ""
+            root = self.active_directory_watch_root(path)
+            if root:
+                roots[str(session)] = root
+        return roots
+
+    def active_directory_watch_root(self, path: str | None) -> str:
+        raw = str(path or "").strip()
+        if not raw.startswith("/"):
+            return ""
+        expanded = Path(raw).expanduser()
+        git_root = filesystem.git_root_for_path(expanded)
+        return git_root or str(expanded)
 
     def filesystem_roots_watch_signature(self, sessions: dict[str, SessionInfo]) -> tuple[Any, ...]:
         return tuple((root, filesystem_watch_signature(root)) for root in self.filesystem_roots_for_watch(sessions))

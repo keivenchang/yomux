@@ -7111,8 +7111,12 @@ test('t@2560', () => {
     {name: 'README.md', kind: 'file'},
   ]);
   const repoName = gitTree.children[0].querySelector(':scope > .file-tree-name');
-  assert.equal(repoName.textContent, 'app [feature/x +5/-3]', 'repo rows show cached branch and aggregate numstat inline');
+  const repoDiff = gitTree.children[0].querySelector(':scope > .file-tree-diff');
+  assert.equal(repoName.textContent, 'app [feature/x]', 'repo rows keep cached branch metadata inline');
+  assert.equal(repoName.textContent.includes('+5/-3'), false, 'repo rows do not append combined numstat inline');
   assert.ok(repoName.innerHTML.includes('file-tree-repo-branch'), 'repo row branch is wrapped for monospace styling');
+  assert.equal(repoName.innerHTML.includes('file-tree-repo-delta'), false, 'repo rows no longer use the retired combined numstat span');
+  assert.ok(/changes-diff-add[^>]*>\+5<\/span>[\s\S]*changes-diff-remove[^>]*>-3<\/span>/.test(repoDiff.innerHTML), 'repo rows render aggregate numstat through the shared diff element with colored spans');
   assert.equal(gitTree.children[0].classList.contains('repo-non-main'), true, 'non-main repo rows stand out');
   assert.equal(gitTree.children[1].querySelector(':scope > .file-tree-name').textContent, 'README.md', 'changed file name has no inline numstat');
   assert.ok(gitTree.children[1].querySelector(':scope > .file-tree-diff').innerHTML.includes('changes-diff-add') && gitTree.children[1].querySelector(':scope > .file-tree-diff').innerHTML.includes('changes-diff-remove'), 'changed file diff stats in separate diff element with colored spans');
@@ -7167,9 +7171,9 @@ test('t@2560', () => {
     loaded: true,
     repos: [],
     files: [
-      {abs_path: '/repo/A/B/C/F', agents: ['codex'], status: 'M', mtime: 1},
-      {abs_path: '/repo/A/B/C/G', agent: 'claude', status: 'M', mtime: 2},
-      {abs_path: '/repo/A/B/D/H', agents: ['codex'], status: 'A', mtime: 3},
+      {abs_path: '/repo/A/B/C/F', agents: ['codex'], status: 'M', mtime: 1, added: 2, removed: 1},
+      {abs_path: '/repo/A/B/C/G', agent: 'claude', status: 'M', mtime: 2, added: 3, removed: 4},
+      {abs_path: '/repo/A/B/D/H', agents: ['codex'], status: 'A', mtime: 3, added: 8, removed: 0},
       {abs_path: '/repo/A/B/D/touched-only.py', agent: 'claude', status: 'T', mtime: 4, source: 'transcript'},
     ],
   });
@@ -7195,6 +7199,9 @@ test('t@2560', () => {
   assert.ok(ancestorRows['/repo/A/B/C'].querySelector(':scope > .file-tree-agent').innerHTML.includes('agent-icon codex'), 'Finder changed ancestor C inherits Codex marker from descendants');
   assert.ok(!ancestorRows['/repo/A/B/D'].querySelector(':scope > .file-tree-agent').innerHTML.includes('agent-icon claude'), 'Finder changed ancestor D only shows agents present in that subtree');
   assert.ok(ancestorRows['/repo/A/B/D'].querySelector(':scope > .file-tree-agent').innerHTML.includes('agent-icon codex'), 'Finder changed ancestor D inherits Codex marker from descendants');
+  assert.equal(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-name').textContent.includes('+13/-5'), false, 'Finder changed ancestors do not append combined numstat inline');
+  assert.ok(/changes-diff-add[^>]*>\+13<\/span>[\s\S]*changes-diff-remove[^>]*>-5<\/span>/.test(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-diff').innerHTML), 'Finder changed ancestors render aggregate numstat through the shared diff element with colored spans');
+  assert.ok(/changes-diff-add[^>]*>\+8<\/span>/.test(ancestorRows['/repo/A/B/D'].querySelector(':scope > .file-tree-diff').innerHTML), 'Finder changed ancestors omit zero remove counts through the shared file diff helper');
   assert.ok(/agent-icon claude"[^>]*title="modified by Claude [^"]* ago"/.test(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-agent').innerHTML), 'Finder changed ancestor Claude marker hover names who modified it and when');
   assert.ok(/agent-icon codex"[^>]*title="modified by Codex [^"]* ago"/.test(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-agent').innerHTML), 'Finder changed ancestor Codex marker hover names who modified it and when');
   assert.equal(
