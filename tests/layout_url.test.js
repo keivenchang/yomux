@@ -829,6 +829,8 @@ globalThis.__layoutTestApi = {
   sessionConfirmedGone,
   globalActivityCounts,
   globalActivityStatusLineHtml,
+  browserFaviconBadgeCount,
+  browserFaviconBadgeLabel,
   setAutoApproveStateForTest(session, state) { autoApproveStates.set(session, state); },
   setAgentAuthForTest(value) { agentAuth = value || {}; },
   maxTabsPerPane,
@@ -2805,6 +2807,14 @@ test('t@2114', () => {
   assert.equal(counts.attention, 1, 'one needs-input session counts as needing the user');
   assert.equal(counts.idle, 2, 'the remaining sessions are idle');
   assert.equal(counts.total, 4, 'all tmux sessions are counted');
+  assert.equal(api.browserFaviconBadgeCount(counts), 2, 'favicon badge counts running plus attention sessions');
+  assert.equal(api.browserFaviconBadgeCount({running: 0, attention: 0}), 0, 'favicon badge renders 0 when all sessions are idle');
+  assert.equal(api.browserFaviconBadgeLabel(0), '0', 'favicon badge explicitly shows 0 when idle');
+  assert.equal(api.browserFaviconBadgeLabel(107), '99+', 'favicon badge clamps large counts to a short label');
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(source.includes('browserFaviconRoundedRect(ctx, 2, 2, 60, 60, 10)') && source.includes("ctx.fillStyle = '#99d441'"), 'favicon fills the icon with the lime YO tile instead of a dark border');
+  assert.ok(source.includes("ctx.font = '900 86px Arial, sans-serif'") && source.includes('ctx.scale(1.22, 1)') && source.includes("ctx.fillText('Y', 0, 0)"), 'favicon fills the tile with a large Y');
+  assert.ok(source.includes("ctx.font = label.length > 2 ? '900 24px Arial, sans-serif' : label.length > 1 ? '900 32px Arial, sans-serif' : '900 42px Arial, sans-serif'") && source.includes("ctx.strokeText(label, 62, 50)") && source.includes("ctx.fillText(label, 62, 50)"), 'favicon overlays a prominent active count at the bottom-right');
   const html = api.globalActivityStatusLineHtml();
   assert.ok(/1 running/.test(html) && /topbar-activity-run/.test(html), 'status line shows running count');
   assert.ok(/1 need you/.test(html) && /topbar-activity-attn/.test(html), 'status line flags sessions needing the user');
@@ -8989,6 +8999,7 @@ test('t@6493', () => {
 
 test('t@6501', () => {
   const api = loadYolomux();
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
   api.setDocumentTitleNowForTest(0);
   api.updateDocumentTitle();
   assert.equal(api.documentTitleForTest(), 'YOLOmux [idle]');
@@ -9011,6 +9022,7 @@ test('t@6501', () => {
   api.setAutoApproveStateForTest('2', {screen: {key: 'idle'}});
   api.updateDocumentTitle();
   assert.equal(api.documentTitleForTest(), 'YOLOmux [idle]', 'idle timer resets after a running period');
+  assert.ok(/function updateDocumentTitle\(\)[\s\S]*updateBrowserFavicon\(\)/.test(source), 'document title refresh also refreshes the browser favicon badge');
 });
 
 test('t@6527', () => {

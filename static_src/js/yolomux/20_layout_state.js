@@ -1287,7 +1287,97 @@ function documentTitleIdleMinutes(now) {
   return elapsedMs >= documentTitleIdleThresholdMs ? Math.max(2, Math.floor(elapsedMs / 60000)) : 0;
 }
 
+function browserFaviconBadgeCount(counts = globalActivityCounts()) {
+  const running = Math.max(0, Number(counts?.running || 0));
+  const attention = Math.max(0, Number(counts?.attention || 0));
+  return Math.floor(running + attention);
+}
+
+function browserFaviconBadgeLabel(count) {
+  const value = Math.max(0, Math.floor(Number(count) || 0));
+  return value > 99 ? '99+' : String(value);
+}
+
+function browserFaviconRoundedRect(ctx, x, y, width, height, radius) {
+  const r = Math.min(radius, width / 2, height / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + width - r, y);
+  ctx.quadraticCurveTo(x + width, y, x + width, y + r);
+  ctx.lineTo(x + width, y + height - r);
+  ctx.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+  ctx.lineTo(x + r, y + height);
+  ctx.quadraticCurveTo(x, y + height, x, y + height - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+function renderBrowserFaviconDataUrl(count) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 64;
+  canvas.height = 64;
+  const ctx = canvas.getContext?.('2d');
+  if (!ctx || typeof canvas.toDataURL !== 'function') return '';
+
+  ctx.clearRect(0, 0, 64, 64);
+  browserFaviconRoundedRect(ctx, 2, 2, 60, 60, 10);
+  ctx.fillStyle = '#99d441';
+  ctx.fill();
+
+  const label = browserFaviconBadgeLabel(count);
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#111111';
+  ctx.font = '900 86px Arial, sans-serif';
+  ctx.save();
+  ctx.translate(25, 39);
+  ctx.scale(1.22, 1);
+  ctx.fillText('Y', 0, 0);
+  ctx.restore();
+
+  ctx.textAlign = 'right';
+  ctx.font = label.length > 2 ? '900 24px Arial, sans-serif' : label.length > 1 ? '900 32px Arial, sans-serif' : '900 42px Arial, sans-serif';
+  ctx.lineWidth = 5;
+  ctx.strokeStyle = '#f9fafb';
+  ctx.strokeText(label, 62, 50);
+  ctx.fillStyle = count > 0 ? '#d92d20' : '#374151';
+  ctx.fillText(label, 62, 50);
+  return canvas.toDataURL('image/png');
+}
+
+let browserFaviconLastBadge = null;
+
+function browserFaviconLink() {
+  const existing = document.querySelector?.('link[rel~="icon"][data-yolomux-favicon]')
+    || document.querySelector?.('link[rel~="icon"]');
+  if (existing) {
+    existing.dataset.yolomuxFavicon = '1';
+    existing.type = 'image/png';
+    return existing;
+  }
+  const link = document.createElement('link');
+  link.rel = 'icon';
+  link.type = 'image/png';
+  link.dataset.yolomuxFavicon = '1';
+  (document.head || document.documentElement || document.body)?.appendChild(link);
+  return link;
+}
+
+function updateBrowserFavicon(options = {}) {
+  const count = browserFaviconBadgeCount();
+  if (!options.force && browserFaviconLastBadge === count) return false;
+  const dataUrl = renderBrowserFaviconDataUrl(count);
+  if (!dataUrl) return false;
+  const link = browserFaviconLink();
+  if (!link) return false;
+  link.href = dataUrl;
+  browserFaviconLastBadge = count;
+  return true;
+}
+
 function updateDocumentTitle() {
+  updateBrowserFavicon();
   const count = runningAgentCount();
   if (count > 0) {
     documentTitleIdleSinceMs = null;
