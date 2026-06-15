@@ -267,13 +267,15 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
 }
 .share-popup-mirror-item > .modal {
   width: 100% !important;
-  height: auto !important;
+  height: 100% !important;
   max-width: none !important;
   max-height: none !important;
-  overflow: visible !important;
 }
-.share-popup-mirror-item > .modal.share-open {
-  width: 100% !important;
+.share-popup-mirror-item > .modal.about-open .modal-dialog {
+  width: min(520px, calc(100% - 28px)) !important;
+}
+.share-popup-mirror-item > .modal.share-open .modal-dialog {
+  width: min(960px, calc(100% - 28px)) !important;
 }
 
 .share-viewer-banner {

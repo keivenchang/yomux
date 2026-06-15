@@ -32,15 +32,15 @@ body {
   box-shadow: 0 22px 70px rgba(0, 0, 0, 0.42);
 }
 .login-brand {
-  margin-bottom: 18px;
+  margin-bottom: 20px;
 }
 .login-brand-title {
   font-size: 26px;
 }
-h1 {
-  margin: 0 0 16px;
-  font-size: 20px;
-  line-height: 1.2;
+.login-brand-title .brand-version {
+  color: #697382;
+  font-size: 0.48em;
+  font-weight: 600;
 }
 .login-form {
   display: grid;

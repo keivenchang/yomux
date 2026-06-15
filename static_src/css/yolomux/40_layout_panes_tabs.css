@@ -1460,6 +1460,10 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
     0 8px 16px rgba(0, 0, 0, 0.52),
     0 0 0 1px var(--active-control-focus-ring);
 }
+body.share-replay-shell .share-mirror-stage .app-overlay-root,
+body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
+  position: absolute;
+}
 .pane-tab.popover-open {
   z-index: var(--z-pane-modal);
 }

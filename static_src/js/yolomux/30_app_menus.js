@@ -1445,6 +1445,7 @@ function openAppMenu(wrapper, options = {}) {
   openAppMenuOpenedAt = Date.now();
   wrapper.querySelector('.app-menu-button')?.setAttribute('aria-expanded', 'true');
   scheduleSharePopupLayerPublish({immediate: true});
+  scheduleShareTopologySnapshot('popup-open');
   if (options.focusFirst) requestAnimationFrame(() => focusFirstAppMenuCommand(wrapper));
 }
 
@@ -1468,4 +1469,5 @@ function closeAppMenus(keepOpen = null) {
     openAppMenuOpenedAt = 0;
   }
   scheduleSharePopupLayerPublish({immediate: true});
+  scheduleShareTopologySnapshot('popup-close');
 }

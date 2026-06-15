@@ -27,9 +27,10 @@ def read_exact(stream: Any, size: int) -> bytes:
         remaining -= len(chunk)
     return b"".join(chunks)
 
-def read_ws_frame(stream: Any) -> tuple[int, bytes]:
+def read_ws_frame_once(stream: Any) -> tuple[bool, int, bytes]:
     header = read_exact(stream, 2)
     first, second = header
+    fin = bool(first & 0x80)
     opcode = first & 0x0F
     masked = bool(second & 0x80)
     length = second & 0x7F
@@ -44,7 +45,32 @@ def read_ws_frame(stream: Any) -> tuple[int, bytes]:
     payload = read_exact(stream, length) if length else b""
     if masked:
         payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
-    return opcode, payload
+    return fin, opcode, payload
+
+def read_ws_frame(stream: Any) -> tuple[int, bytes]:
+    fin, opcode, payload = read_ws_frame_once(stream)
+    if opcode == 0:
+        raise ConnectionError("unexpected websocket continuation frame")
+    if fin or opcode not in {1, 2}:
+        return opcode, payload
+
+    chunks = [payload]
+    total_length = len(payload)
+    while True:
+        next_fin, next_opcode, next_payload = read_ws_frame_once(stream)
+        if next_opcode == 8:
+            return next_opcode, next_payload
+        if next_opcode in {9, 10}:
+            continue
+        if next_opcode != 0:
+            raise ConnectionError("unexpected websocket frame during fragmented message")
+        total_length += len(next_payload)
+        if total_length > MAX_WS_FRAME_BYTES:
+            raise ConnectionError(f"websocket frame too large: {total_length} > {MAX_WS_FRAME_BYTES}")
+        chunks.append(next_payload)
+        if next_fin:
+            break
+    return opcode, b"".join(chunks)
 
 def make_ws_frame(payload: bytes, opcode: int = 2) -> bytes:
     first = 0x80 | opcode

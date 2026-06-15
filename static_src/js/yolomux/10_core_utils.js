@@ -51,11 +51,26 @@ function clientPushConnectedForData() {
   return clientPushCanSupplyData() && clientEventsConnected === true;
 }
 
-async function redirectToLogin(response) {
+function loginRedirectUrlForCurrentLocation() {
+  const nextPath = `${window.location.pathname}${window.location.search}`;
+  return `/login?next=${encodeURIComponent(nextPath || '/')}`;
+}
+
+function claimLoginRedirect() {
   if (authRedirectStarted) return;
   authRedirectStarted = true;
-  const nextPath = `${window.location.pathname}${window.location.search}`;
-  let loginUrl = `/login?next=${encodeURIComponent(nextPath || '/')}`;
+  return true;
+}
+
+function redirectToLoginUrl(loginUrl = '') {
+  if (!claimLoginRedirect()) return false;
+  window.location.assign(loginUrl || loginRedirectUrlForCurrentLocation());
+  return true;
+}
+
+async function redirectToLogin(response) {
+  if (!claimLoginRedirect()) return;
+  let loginUrl = loginRedirectUrlForCurrentLocation();
   try {
     const payload = await response.clone().json();
     if (payload?.login_url) loginUrl = payload.login_url;
@@ -228,6 +243,20 @@ function syncAppViewportBreakpointClasses() {
 
 function appRootElement() {
   return appRoot || document.getElementById?.('appRoot') || document.body;
+}
+
+function appOverlayRootElement() {
+  const root = appRootElement();
+  if (!root || root === document.body) return document.body;
+  let overlay = document.getElementById?.('appOverlayRoot');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'appOverlayRoot';
+    overlay.className = 'app-overlay-root';
+    overlay.dataset.shareReplayOverlayRoot = 'true';
+  }
+  if (overlay.parentElement !== root) root.appendChild(overlay);
+  return overlay;
 }
 
 function applyAppRootViewportSize() {
@@ -1758,7 +1787,7 @@ function createContextMenuController() {
       close();
       menu = nextMenu;
       menu.addEventListener('pointerdown', event => event.stopPropagation());
-      document.body.appendChild(menu);
+      appOverlayRootElement().appendChild(menu);
       positionContextMenu(menu, x, y);
       document.addEventListener('pointerdown', pointerdown, true);
       document.addEventListener('keydown', keydown, true);
@@ -2251,7 +2280,7 @@ function showTabContextMenu(item, x, y, options = {}) {
       {
         checked: pinned,
         iconHtml: appMenuUiIcon('pin', pinned),
-        shortcut: `${appShortcutText('K')} Enter`,
+        shortcut: `${appShortcutText('K', {shift: true})} Enter`,
       },
     );
   }

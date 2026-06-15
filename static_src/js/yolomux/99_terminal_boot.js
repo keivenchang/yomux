@@ -1781,11 +1781,23 @@ async function uploadFiles(session, fileList, options = {}) {
     } else if (!pathInserted) {
       insertUploadPaths(session, paths, {silent: true});
     }
+    refreshTerminalAfterUpload(session);
     refreshOpenEventLogs();
     refreshTranscripts({force: true});
   } catch (error) {
     statusErr(localizedHtml('status.uploadFailed', {error: error?.payload?.error || error}));
   }
+}
+
+function refreshTerminalAfterUpload(session) {
+  if (!isTmuxSession(session)) return;
+  scheduleFit(session);
+  refreshTerminal(session);
+  requestAnimationFrame(() => {
+    scheduleFit(session);
+    refreshTerminal(session);
+    requestAnimationFrame(() => refreshTerminal(session));
+  });
 }
 
 function insertUploadPaths(session, paths, options = {}) {
@@ -1847,11 +1859,17 @@ function insertIntoTerminal(session, text) {
     return false;
   }
   const item = terminals.get(session);
-  if (!item || item.socket?.readyState !== WebSocket.OPEN) return false;
+  if (!item) return false;
   const filtered = stripTerminalQueryResponses(text);
   if (!filtered) return false;
   noteFileExplorerChangesSessionInteraction(session);
   setFocusedTerminal(session, {userInitiated: true});
+  if (shareReplayShellActive && shareWriteMode) {
+    const sent = shareSendTerminalInputIntent(session, filtered);
+    if (sent && autoFocusEnabled) item.term?.focus?.();
+    return sent;
+  }
+  if (item.socket?.readyState !== WebSocket.OPEN) return false;
   item.socket.send(JSON.stringify({type: 'input', data: filtered}));
   if (autoFocusEnabled) item.term?.focus?.();
   return true;
@@ -2073,7 +2091,9 @@ function tmuxWindow(session, key, label) {
 async function ensureTerminalRunning(session) {
   const item = terminals.get(session);
   const readyState = item?.socket?.readyState;
-  if (item && readyState !== undefined && readyState !== WebSocket.CLOSING && readyState !== WebSocket.CLOSED) return;
+  const container = document.getElementById(terminalDomId(session));
+  const boundToCurrentContainer = Boolean(item?.term && container?.isConnected && item.container === container);
+  if (item && boundToCurrentContainer && readyState !== undefined && readyState !== WebSocket.CLOSING && readyState !== WebSocket.CLOSED) return;
   if (readOnlyMode) {
     startTerminal(session);
     return;
@@ -2167,6 +2187,29 @@ function handleShareViewSocketMessage(session, item, data) {
   if (bytes) item.term.write(bytes);
 }
 
+function bindTerminalContainerForSession(session, term, container) {
+  if (!session || !term || !container) return;
+  if (container.dataset?.terminalHandlersBound === session) return;
+  if (container.dataset) container.dataset.terminalHandlersBound = session;
+  installTerminalContextMenu(session, term, container);
+  installTerminalCopyShortcut(session, term, container);
+  installTerminalFileDrop(session, container);
+  enableTerminalScroll(session, term, container);
+  observeTerminalResize(session, container);
+  container.addEventListener('focusin', () => {
+    setFocusedTerminal(session);
+  });
+  container.addEventListener('focusout', () => {
+    clearFocusedTerminal(session);
+  });
+  container.addEventListener('copy', event => {
+    copyTerminalSelectionToClipboardEvent(session, term, event, container);
+  }, {capture: true});
+  container.addEventListener('keydown', () => noteTerminalExplicitInput(session), {capture: true});
+  container.addEventListener('paste', () => noteTerminalExplicitInput(session), {capture: true});
+  container.addEventListener('beforeinput', () => noteTerminalExplicitInput(session), {capture: true});
+}
+
 function startTerminal(session) {
   const existing = terminals.get(session);
   const reconnectAttempt = existing?.reconnectAttempt || 0;
@@ -2210,46 +2253,34 @@ function startTerminal(session) {
   // match the container bg to the terminal theme so every pane shares one white.
   if (container?.style) container.style.background = terminalThemeForGlobalTheme().background;
   installTerminalLinkProvider(term);
-  installTerminalContextMenu(session, term, container);
-  installTerminalCopyShortcut(session, term, container);
   installTerminalOsc52Bridge(session, term);   // Claude/tmux OSC 52 clipboard escapes -> browser clipboard
-  installTerminalFileDrop(session, container);
   const openedSize = shareHostTerminalSize(session) || estimateTerminalSize(container, term);
   if (term.cols !== openedSize.cols || term.rows !== openedSize.rows) {
     term.resize(openedSize.cols, openedSize.rows);
   }
   const item = {term, socket: null, container, manualClose: false, reconnectAttempt, reconnectTimer: null, resizeTimer: null, scrollTimer: null, pendingScrollLines: 0};
   terminals.set(session, item);
-  enableTerminalScroll(session, term, container);
-  observeTerminalResize(session, container);
+  bindTerminalContainerForSession(session, term, container);
   term.onFocus?.(() => {
     setFocusedTerminal(session);
   });
   term.onBlur?.(() => {
     clearFocusedTerminal(session);
   });
-  container.addEventListener('focusin', () => {
-    setFocusedTerminal(session);
-  });
-  container.addEventListener('focusout', () => {
-    clearFocusedTerminal(session);
-  });
-  container.addEventListener('copy', event => {
-    copyTerminalSelectionToClipboardEvent(session, term, event, container);
-  }, {capture: true});
-  container.addEventListener('keydown', () => noteTerminalExplicitInput(session), {capture: true});
-  container.addEventListener('paste', () => noteTerminalExplicitInput(session), {capture: true});
-  container.addEventListener('beforeinput', () => noteTerminalExplicitInput(session), {capture: true});
   term.onData(data => {
     if (readOnlyMode && !shareWriteMode) return;
+    const filtered = stripTerminalQueryResponses(data);
+    if (!filtered) return;
+    if (shareReplayShellActive && shareWriteMode) {
+      if (!terminalDataIsPassiveFocusReport(filtered)) noteTerminalExplicitInput(session);
+      shareSendTerminalInputIntent(session, filtered);
+      return;
+    }
     const current = terminals.get(session);
     const socket = current?.socket;
     if (socket?.readyState === WebSocket.OPEN) {
-      const filtered = stripTerminalQueryResponses(data);
-      if (filtered) {
-        if (!terminalDataIsPassiveFocusReport(filtered)) noteTerminalExplicitInput(session);
-        socket.send(JSON.stringify({type: 'input', data: filtered}));
-      }
+      if (!terminalDataIsPassiveFocusReport(filtered)) noteTerminalExplicitInput(session);
+      socket.send(JSON.stringify({type: 'input', data: filtered}));
     }
   });
   connectTerminalSocket(session, item);
@@ -2968,6 +2999,10 @@ async function boot() {
   // resolved client-side against navigator.language (the server can't see the browser locale).
   await applyLocale(resolveLocalePref(initialSetting('general.language', 'system')));
   installGlobalThemeMediaListener();
+  if (installShareReplayShell()) {
+    installDevAutoReload();
+    return;
+  }
   applyFileExplorerStaticLabels();
   renderTransportWarning();
   renderTabMetaToggle();
@@ -3010,6 +3045,7 @@ async function boot() {
   installShareScrollPublisher();
   installShareGeometryDigestLoop();
   installSharePopupLayerPublisher();
+  installShareReplayMutationPublisher();
   startShareStatusRefresh();
   installDevAutoReload();
   document.querySelector('[data-update-badge]')?.addEventListener('click', triggerSelfUpdate);
@@ -3248,7 +3284,7 @@ function installDevAutoReload() {
 }
 
 let shareDefaultTtlSeconds = initialSetting('share.ttl_seconds', 600);
-let shareDefaultMaxViewers = initialSetting('share.max_viewers', 5);
+let shareDefaultMaxViewers = initialSetting('share.max_viewers', 2);
 let shareDefaultReadOnly = initialSetting('share.read_only', true) !== false;
 let shareDefaultScheme = initialSetting('share.scheme', 'http') === 'https' ? 'https' : 'http';
 let shareViewFit = normalizeShareViewFit(storageGet(shareViewFitStorageKey) || initialSetting('share.view_fit', 'cover'));
@@ -3256,11 +3292,31 @@ let shareStatusPill = null;
 let shareStatusTimer = null;
 let shareViewerBanner = null;
 let shareMirrorStage = null;
+let shareReplayShellActive = false;
+let shareReplayShellState = {status: 'idle'};
+let shareReplayLastKeyframe = null;
+let shareReplayNodeMap = new Map();
+let shareReplayTerminalPlaceholders = new Map();
+const shareReplayScrollPublishTimers = new Map();
+let shareReplayPointerFramePending = false;
+let shareReplayPointerLastPayload = null;
+let shareReplayLastKeyframeBytes = 0;
+let shareReplayLastDeltaBytes = 0;
+let shareReplayLastLatencyMs = null;
+let shareReplayLastFrameReceivedAt = 0;
+let shareReplayLastRedactionPolicyVersion = 1;
 let shareStatusLastRefreshAt = 0;
 let shareStatusRefreshInFlight = false;
 const shareViewerStatusBackupRefreshMs = 30000;
 const shareHostStatusBackupRefreshMs = 3000;
 const yolomuxFontReadyTimeoutMs = 2500;
+const shareReplayKeyframeRequestInitialBackoffMs = 5000;
+const shareReplayKeyframeRequestMinIntervalMs = 5000;
+const shareReplayKeyframeRequestMaxBackoffMs = 5000;
+const shareGeometryResyncMinIntervalMs = 10000;
+const shareReplayHostKeyframeMinIntervalMs = shareReplayKeyframeRequestMinIntervalMs;
+const shareReplayPostTopologyKeyframeQuietMs = 3000;
+const shareReplayHostDeltaMaxBytes = 48 * 1024;
 let yolomuxFontsReadyPromise = null;
 
 function normalizeSharePayload(payload) {
@@ -3278,6 +3334,7 @@ function normalizeSharePayload(payload) {
     viewers: Number(payload.viewers || 0) || 0,
     viewerDetails: normalizeShareViewerDetails(payload),
     createdBy: String(payload.created_by ?? payload.createdBy ?? ''),
+    debugProfile: payload.debug_profile === true || payload.debugProfile === true,
     layout: String(payload.layout || ''),
     tabs: String(payload.tabs || ''),
     viewport: payload.viewport && typeof payload.viewport === 'object' ? payload.viewport : {},
@@ -3347,6 +3404,26 @@ function shareHasActiveShare() {
 function shareSecondsRemaining(share, now = Date.now()) {
   const expiresAtMs = Number(share?.expiresAt || 0) * 1000;
   return Math.max(0, Math.ceil((expiresAtMs - now) / 1000));
+}
+
+function shareViewerCurrentShare() {
+  if (!shareViewMode) return activeShare;
+  return activeShare || normalizeSharePayload({
+    active: true,
+    token: shareToken,
+    ...shareBootstrap,
+    expires_at: shareBootstrap?.expiresAt,
+    max_viewers: shareBootstrap?.maxViewers,
+  });
+}
+
+function shareIsExpired(share) {
+  return Number(share?.expiresAt || 0) > 0 && shareSecondsRemaining(share) <= 0;
+}
+
+function redirectExpiredShareViewerToLogin() {
+  if (!shareViewMode || !shareIsExpired(shareViewerCurrentShare())) return false;
+  return redirectToLoginUrl();
 }
 
 function shareTimeLeftText(share) {
@@ -3490,6 +3567,209 @@ function ensureShareMirrorStage() {
   return shareMirrorStage;
 }
 
+function shareReadOnlyReplayModeEnabled() {
+  return shareViewMode && !shareWriteMode && shareReplayFeatureEnabled();
+}
+
+function shareReplayViewerModeEnabled() {
+  return shareViewMode && shareReplayFeatureEnabled();
+}
+
+function shareSemanticReadOnlyMirrorEnabled() {
+  return shareViewMode && !shareWriteMode && !shareReplayViewerModeEnabled();
+}
+
+function shareSemanticMirrorApplyAllowed() {
+  if (shareReplayViewerModeEnabled()) return false;
+  return (!shareViewMode && shareHasActiveShare()) || shareViewMode;
+}
+
+function shareReplayShellEnabled() {
+  return shareReplayViewerModeEnabled();
+}
+
+function shareReplayUserStatusText(status = '') {
+  const cleanStatus = String(status || '').trim();
+  if (cleanStatus === 'mirrored') return 'mirrored';
+  if (cleanStatus === 'host-disconnected') return 'host disconnected';
+  if (cleanStatus === 'viewer-behind') return 'viewer behind';
+  return 'resyncing';
+}
+
+function setShareReplayShellStatus(status = 'waiting', detail = {}) {
+  if (!shareReplayShellActive) return;
+  const cleanStatus = String(status || 'waiting');
+  shareReplayShellState = {
+    status: cleanStatus,
+    sequence: Number.isFinite(Number(detail.sequence)) ? Number(detail.sequence) : null,
+    digest: String(detail.digest || ''),
+    updatedAt: Date.now(),
+  };
+  const root = appRootElement();
+  if (root?.dataset) {
+    root.dataset.shareReplayStatus = cleanStatus;
+    if (shareReplayShellState.digest) root.dataset.shareReplayDigest = shareReplayShellState.digest;
+    else delete root.dataset.shareReplayDigest;
+    if (shareReplayShellState.sequence !== null) root.dataset.shareReplaySequence = String(shareReplayShellState.sequence);
+    else delete root.dataset.shareReplaySequence;
+  }
+  if (['viewer-behind', 'error', 'host-disconnected'].includes(cleanStatus)) {
+    void shareUploadDebugProfile(`share-replay-${cleanStatus}`, shareReplayHealthDiagnostics());
+  }
+  const node = shareViewerBanner?.querySelector?.('.share-viewer-mirror-status');
+  if (!node) return;
+  node.classList.toggle('match', cleanStatus === 'mirrored');
+  node.classList.toggle('mismatch', cleanStatus === 'error');
+  node.textContent = shareReplayUserStatusText(cleanStatus);
+}
+
+function prepareShareReplayMirrorRoot() {
+  const root = appRootElement();
+  if (!root || root === document.body) return null;
+  root.replaceChildren();
+  root.classList.add('share-replay-root');
+  root.dataset.shareReplayRoot = 'true';
+  root.dataset.shareReplayInert = 'true';
+  root.dataset.shareReplayStatus = 'waiting';
+  root.setAttribute('role', 'presentation');
+  root.setAttribute('aria-label', 'YO!share replay mirror');
+  root.setAttribute('tabindex', '-1');
+  return root;
+}
+
+function installShareReplayShell() {
+  if (!shareReplayShellEnabled()) return false;
+  shareReplayShellActive = true;
+  applyShareViewBodyClasses();
+  document.body?.classList?.add('share-replay-shell');
+  const stage = ensureShareMirrorStage();
+  if (stage?.dataset) stage.dataset.shareReplayShell = 'true';
+  prepareShareReplayMirrorRoot();
+  installShareViewerBanner();
+  setShareReplayShellStatus('waiting');
+  startShareStatusRefresh();
+  exposeShareDebugApi();
+  return true;
+}
+
+function shareReplaySendUiMessage(message = {}) {
+  if (!shareReplayShellActive || !shareToken || !message?.type) return false;
+  const socket = ensureShareHostSocket(shareToken);
+  if (!socket) return false;
+  if (socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify(message));
+    return true;
+  }
+  const shareHostQueue = shareHostQueues.get(shareToken) || [];
+  if (shareHostQueue.length < 32) shareHostQueue.push(message);
+  shareHostQueues.set(shareToken, shareHostQueue);
+  return true;
+}
+
+function shareReplayResetKeyframeRequestBackoff() {
+  shareReplayKeyframeInFlight = false;
+  shareReplayKeyframeBackoffMs = 0;
+}
+
+function shareReplayNextKeyframeRequestBackoff() {
+  const previous = Math.max(0, Math.round(Number(shareReplayKeyframeBackoffMs) || 0));
+  if (!previous) return shareReplayKeyframeRequestInitialBackoffMs;
+  return Math.min(shareReplayKeyframeRequestMaxBackoffMs, Math.round(previous * 1.7));
+}
+
+function shareReplayRequestKeyframe(reason = 'replay-error', detail = {}) {
+  const now = Date.now();
+  const activeBackoffMs = Math.max(0, Math.round(Number(shareReplayKeyframeBackoffMs) || 0));
+  const lastRequestAt = Math.max(0, Math.round(Number(shareReplayKeyframeLastRequestAt) || 0));
+  const requestFloorMs = Math.max(shareReplayKeyframeRequestMinIntervalMs, shareReplayKeyframeInFlight ? activeBackoffMs : 0);
+  if (lastRequestAt > 0 && now - lastRequestAt < requestFloorMs) {
+    shareReplayKeyframeRequestSuppressedCount = Math.max(0, Math.round(Number(shareReplayKeyframeRequestSuppressedCount) || 0)) + 1;
+    void shareUploadDebugProfile('share-keyframe-request-suppressed', {
+      reason: String(reason || 'replay-error'),
+      detail,
+      health: shareReplayHealthDiagnostics(),
+    });
+    return false;
+  }
+  shareReplayKeyframeRequestCount = Math.max(0, Math.round(Number(shareReplayKeyframeRequestCount) || 0)) + 1;
+  shareReplayKeyframeLastRequestAt = now;
+  shareReplayKeyframeBackoffMs = shareReplayNextKeyframeRequestBackoff();
+  shareReplayKeyframeInFlight = true;
+  const payload = {
+    reason: String(reason || 'replay-error'),
+    error: String(detail.error || '').slice(0, 500),
+    digest: String(detail.digest || ''),
+    backoffMs: shareReplayKeyframeBackoffMs,
+    suppressed: shareReplayKeyframeRequestSuppressedCount,
+  };
+  for (const key of ['epoch', 'sequence', 'baseSequence', 'currentEpoch', 'lastSequence']) {
+    const value = Number(detail[key]);
+    if (Number.isFinite(value)) payload[key] = Math.round(value);
+  }
+  const sent = shareReplaySendUiMessage(shareBuildUiMessage(shareMirrorProtocol.frames.domKeyframeRequest, payload, {reason: payload.reason}));
+  void shareUploadDebugProfile('share-keyframe-request', {
+    request: payload,
+    detail,
+    sent,
+    health: shareReplayHealthDiagnostics(),
+  });
+  return sent;
+}
+
+function applyShareReplayKeyframe(payload = {}, message = {}) {
+  if (!shareReplayShellActive || !payload || typeof payload !== 'object') return false;
+  shareReplayRecordFrameMetrics(shareMirrorProtocol.frames.domKeyframe, payload, message);
+  try {
+    const applied = shareReplayApplyStaticKeyframe(payload, message);
+    if (applied) shareReplayResetKeyframeRequestBackoff();
+    return applied;
+  } catch (error) {
+    console.warn('share replay keyframe apply failed', error);
+    setShareReplayShellStatus('error', {
+      digest: payload.digest,
+      sequence: message.sequence,
+    });
+    shareReplayRequestKeyframe('replay-error', {
+      digest: payload.digest,
+      error,
+    });
+  }
+  return true;
+}
+
+function applyShareReplayShellMessage(message = {}) {
+  if (!shareReplayShellActive || !message || message.ch !== 'ui') return false;
+  if (message.sender && message.sender === shareClientId) return true;
+  const payload = message.payload && typeof message.payload === 'object' ? message.payload : {};
+  if (message.type === shareMirrorProtocol.frames.domDelta) return applyShareReplayDelta(payload, message);
+  if (shareDropStaleMirrorFrame(message)) return true;
+  if (message.type === shareMirrorProtocol.frames.domKeyframe) return applyShareReplayKeyframe(payload, message);
+  if (message.type === shareMirrorProtocol.frames.shareStatus) {
+    mergeShareStatusPayload(payload);
+    renderShareStatusPill();
+    updateShareViewerBanner();
+    return true;
+  }
+  if (message.type === shareMirrorProtocol.frames.terminalHostResize || message.type === shareMirrorProtocol.frames.hostResize) {
+    updateShareHostTerminalSize(payload.session, payload.rows, payload.cols);
+    return true;
+  }
+  if (message.type === shareMirrorProtocol.frames.geometryDigest) {
+    exposeShareDebugApi();
+    return true;
+  }
+  if (message.type === shareMirrorProtocol.frames.domKeyframeRequest) {
+    const reason = String(payload.reason || message.reason || '');
+    setShareReplayShellStatus(reason === 'backpressure' ? 'viewer-behind' : 'waiting', {sequence: message.sequence});
+    return true;
+  }
+  if (shareMirrorFrameTypeIsReplay(message.type)) {
+    setShareReplayShellStatus(String(message.type || 'replay-frame'), {sequence: message.sequence});
+    return true;
+  }
+  return true;
+}
+
 function applyShareMirrorTransform() {
   const root = appRootElement();
   if (!root?.style) return;
@@ -3609,6 +3889,7 @@ function shareCreatePayloadFromForm(form) {
     mode: readOnly ? 'ro' : 'rw',
     read_only: readOnly,
     scheme,
+    debug_profile: form?.elements?.debug_profile?.checked === true,
     layout: seed.layout,
     tabs: seed.tabs,
     finder: shareFinderSeed(),
@@ -3684,6 +3965,7 @@ function ensureShareHostSockets() {
 
 function shareCanPublishUi() {
   if (applyingShareRemoteUiState) return false;
+  if (shareReplayViewerModeEnabled()) return false;
   if (shareViewMode) return shareWriteMode && Boolean(shareToken);
   return !readOnlyMode && shareHasActiveShare();
 }
@@ -3703,10 +3985,1223 @@ function beginShareRemoteUiApply() {
   };
 }
 
-function sharePublish(type, payload = {}) {
+// Share mirror protocol owner. Replay code must add names here first, then reference these constants.
+const shareMirrorFrameTypes = Object.freeze({
+  uiState: 'ui-state',
+  layout: 'layout',
+  viewport: 'viewport',
+  appearance: 'appearance',
+  popupLayer: 'popup-layer',
+  geometryDigest: 'geometry-digest',
+  hostResize: 'host-resize',
+  pointer: 'pointer',
+  scroll: 'scroll',
+  fileVersion: 'file-version',
+  activeTab: 'active-tab',
+  focus: 'focus',
+  finderMode: 'finder-mode',
+  menu: 'menu',
+  shareStatus: 'share-status',
+  domKeyframe: 'dom-keyframe',
+  domDelta: 'dom-delta',
+  domKeyframeRequest: 'dom-keyframe-request',
+  domKeyframeAck: 'dom-keyframe-ack',
+  domReplayError: 'dom-replay-error',
+  terminalHostResize: 'terminal-host-resize',
+  textWrapMetrics: 'text-wrap-metrics',
+  inputIntent: 'input-intent',
+});
+
+const shareMirrorReplayFrameTypes = Object.freeze([
+  shareMirrorFrameTypes.domKeyframe,
+  shareMirrorFrameTypes.domDelta,
+  shareMirrorFrameTypes.domKeyframeRequest,
+  shareMirrorFrameTypes.domKeyframeAck,
+  shareMirrorFrameTypes.domReplayError,
+  shareMirrorFrameTypes.terminalHostResize,
+]);
+
+const shareMirrorProtocol = Object.freeze({
+  version: 1,
+  frames: shareMirrorFrameTypes,
+  replayFrameTypes: shareMirrorReplayFrameTypes,
+  sequencedFrameTypes: Object.freeze([
+    shareMirrorFrameTypes.uiState,
+    shareMirrorFrameTypes.layout,
+    shareMirrorFrameTypes.viewport,
+    shareMirrorFrameTypes.appearance,
+    shareMirrorFrameTypes.popupLayer,
+    shareMirrorFrameTypes.geometryDigest,
+    shareMirrorFrameTypes.hostResize,
+    ...shareMirrorReplayFrameTypes,
+  ]),
+  keyframeReasons: Object.freeze(['join', 'gap', 'digest', 'replay-error', 'backpressure', 'topology', 'manual-debug']),
+  sequenceFields: Object.freeze(['epoch', 'sequence', 'baseSequence']),
+  redaction: Object.freeze({
+    policyVersion: 1,
+    metadataFields: Object.freeze(['policyVersion', 'removedCount']),
+  }),
+  terminalPlaceholder: Object.freeze({
+    dataset: 'shareTerminalPlaceholder',
+    fields: Object.freeze(['placeholderId', 'session', 'rows', 'cols', 'terminalEpoch']),
+  }),
+  inputIntentTypes: Object.freeze({
+    terminalInput: 'terminal-input',
+    terminalPaste: 'terminal-paste',
+    terminalScroll: 'terminal-scroll',
+    tabActivate: 'tab-activate',
+    menuCommand: 'menu-command',
+    hostCommand: 'host-command',
+  }),
+  debugNames: Object.freeze({
+    domKeyframe: 'DOM keyframe',
+    domDelta: 'DOM delta',
+    keyframeRequest: 'DOM keyframe request',
+    replayError: 'DOM replay error',
+    terminalPlaceholder: 'terminal placeholder',
+  }),
+});
+
+// End share mirror protocol owner.
+
+const shareMirrorSequencedFrameTypes = new Set(shareMirrorProtocol.sequencedFrameTypes);
+const shareMirrorReplayFrameTypeSet = new Set(shareMirrorProtocol.replayFrameTypes);
+
+function shareMirrorFrameTypeIsSequenced(type) {
+  return shareMirrorSequencedFrameTypes.has(String(type || ''));
+}
+
+function shareMirrorFrameTypeIsReplay(type) {
+  return shareMirrorReplayFrameTypeSet.has(String(type || ''));
+}
+
+function shareMirrorFrameTypeIsDomReplayContent(type) {
+  const cleanType = String(type || '');
+  return cleanType === shareMirrorProtocol.frames.domKeyframe || cleanType === shareMirrorProtocol.frames.domDelta;
+}
+
+function shareMirrorFrameReason(type, options = {}) {
+  const reason = String(options.reason || type || 'update').trim();
+  return reason || 'update';
+}
+
+function shareNextDomReplayFrameMetadata(type, options = {}) {
+  if (type === shareMirrorProtocol.frames.domKeyframe || options.resetEpoch === true) {
+    shareReplayMirrorEpoch = Math.max(1, Math.floor(Number(shareReplayMirrorEpoch) || 1) + 1);
+  }
+  shareReplayMirrorSequence = Math.max(0, Math.floor(Number(shareReplayMirrorSequence) || 0)) + 1;
+  return {
+    epoch: shareReplayMirrorEpoch,
+    sequence: shareReplayMirrorSequence,
+    reason: shareMirrorFrameReason(type, options),
+  };
+}
+
+function shareNextMirrorFrameMetadata(type, options = {}) {
+  if (shareMirrorFrameTypeIsDomReplayContent(type)) return shareNextDomReplayFrameMetadata(type, options);
+  if (type === shareMirrorProtocol.frames.uiState || options.resetEpoch === true) {
+    shareMirrorEpoch = Math.max(1, Math.floor(Number(shareMirrorEpoch) || 1) + 1);
+  }
+  shareMirrorSequence = Math.max(0, Math.floor(Number(shareMirrorSequence) || 0)) + 1;
+  return {
+    epoch: shareMirrorEpoch,
+    sequence: shareMirrorSequence,
+    reason: shareMirrorFrameReason(type, options),
+  };
+}
+
+function shareBuildUiMessage(type, payload = {}, options = {}) {
+  const message = {type, payload, sender: shareClientId};
+  if (shareMirrorFrameTypeIsReplay(type)) message.version = shareMirrorProtocol.version;
+  if (shareMirrorFrameTypeIsSequenced(type)) Object.assign(message, shareNextMirrorFrameMetadata(type, options));
+  if (type === shareMirrorProtocol.frames.domDelta) {
+    const explicitBase = Number(payload?.baseSequence ?? options.baseSequence);
+    message.baseSequence = Number.isFinite(explicitBase) ? Math.max(0, Math.round(explicitBase)) : Math.max(0, Number(message.sequence || 0) - 1);
+  }
+  return message;
+}
+
+function shareSendInputIntent(payload = {}, options = {}) {
+  if (!shareViewMode || !shareWriteMode || !shareToken || !payload || typeof payload !== 'object') return false;
+  if (shareReplayShellActive) {
+    return shareReplaySendUiMessage(shareBuildUiMessage(shareMirrorProtocol.frames.inputIntent, payload, options));
+  }
+  sharePublish(shareMirrorProtocol.frames.inputIntent, payload, options);
+  return true;
+}
+
+function shareSendTerminalInputIntent(session, data) {
+  const filtered = stripTerminalQueryResponses(data);
+  if (!filtered) return false;
+  return shareSendInputIntent({
+    intent: shareMirrorProtocol.inputIntentTypes.terminalInput,
+    session: String(session || ''),
+    data: filtered,
+  }, {reason: 'terminal-input'});
+}
+
+function applyShareInputIntent(payload = {}) {
+  if (shareViewMode || !payload || typeof payload !== 'object') return false;
+  const intent = String(payload.intent || '');
+  if (intent === shareMirrorProtocol.inputIntentTypes.tabActivate) {
+    const item = resolveLayoutItem(payload.item || payload.session || '');
+    const slot = slotForItem(item);
+    if (!slot) return false;
+    activatePaneTab(slot, item, {userInitiated: false});
+    return true;
+  }
+  if (intent === shareMirrorProtocol.inputIntentTypes.hostCommand && payload.command === 'request-keyframe') {
+    return sharePublishDomKeyframe('manual-debug');
+  }
+  return false;
+}
+
+function shareReplayFeatureEnabled() {
+  if (!shareViewMode && shareHasActiveShare()) return true;
+  return shareReplayEnabled === true;
+}
+
+function shareReplayHostNodeId(node) {
+  if (!node || (typeof node !== 'object' && typeof node !== 'function') || (typeof Node !== 'undefined' && !(node instanceof Node) && !node.localName && !node.tagName && Number(node.nodeType) !== 3)) {
+    return 0;
+  }
+  const existing = shareReplayHostNodeIds.get(node);
+  if (existing) return existing;
+  const next = Math.max(1, Math.round(Number(shareReplayHostNextNodeId) || 1));
+  shareReplayHostNextNodeId = next + 1;
+  shareReplayHostNodeIds.set(node, next);
+  return next;
+}
+
+function shareReplaySerializedNodeId(node, context) {
+  if (context?.useStableNodeIds === true) return shareReplayHostNodeId(node);
+  const next = Math.max(1, Math.round(Number(context.nextNodeId) || 1));
+  context.nextNodeId = next + 1;
+  return next;
+}
+
+function shareReplayDatasetAttributeName(key = '') {
+  return `data-${String(key || '').replace(/[A-Z]/g, match => `-${match.toLowerCase()}`)}`;
+}
+
+function shareReplayElementHasFlag(element, name) {
+  const dataKey = name.replace(/^data-/, '').replace(/-([a-z])/g, (_match, letter) => letter.toUpperCase());
+  return element?.hasAttribute?.(name) || element?.dataset?.[dataKey] !== undefined;
+}
+
+const shareReplayBlockedTags = new Set(['script', 'iframe', 'object', 'embed', 'style']);
+const shareReplayAllowedHtmlTags = new Set([
+  'a', 'abbr', 'article', 'aside', 'b', 'br', 'button', 'canvas', 'code', 'dd', 'del', 'details', 'div', 'dl', 'dt', 'em', 'fieldset', 'figcaption', 'figure', 'footer', 'form', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'header', 'hr', 'i', 'img', 'input', 'kbd', 'label', 'legend', 'li', 'main', 'mark', 'menu', 'nav', 'ol', 'option', 'p', 'pre', 'progress', 's', 'samp', 'section', 'select', 'small', 'span', 'strong', 'sub', 'summary', 'sup', 'table', 'tbody', 'td', 'textarea', 'tfoot', 'th', 'thead', 'time', 'tr', 'u', 'ul',
+]);
+const shareReplayAllowedSvgTags = new Set([
+  'circle', 'defs', 'ellipse', 'g', 'line', 'path', 'polyline', 'rect', 'svg', 'text', 'title', 'tspan',
+]);
+const shareReplaySvgNamespace = 'http://www.w3.org/2000/svg';
+
+function shareReplayRedactText(value) {
+  let text = String(value ?? '');
+  for (const secret of shareDebugSecretValues()) {
+    text = text.split(secret).join('[redacted-share-token]');
+  }
+  return text
+    .replace(/(?:https?:\/\/[^\s"'<>]+)?\/share\/[A-Za-z0-9_-]+(?:#[^\s"'<>]*)?/g, '[redacted-share-url]')
+    .replace(/([?#&](?:t|token|share|shareToken|share_token)=)[^&#\s"']+/gi, '$1[redacted-share-token]')
+    .replace(/\b((?:token|shareToken|share_token)=)[^&#\s"']+/gi, '$1[redacted-share-token]');
+}
+
+function shareReplayAttributeIsTokenBearing(name = '') {
+  return /(?:^|[-_:])(?:token|sharetoken|share-token|share_token|secret|password)(?:$|[-_:])/i.test(String(name || ''));
+}
+
+function shareReplayUrlAttributeIsUnsafe(name = '', value = '') {
+  const cleanName = String(name || '').toLowerCase();
+  if (!['href', 'src', 'xlink:href', 'action', 'formaction'].includes(cleanName)) return false;
+  const cleanValue = String(value || '').trim();
+  if (!cleanValue) return false;
+  if (/\/share\/[A-Za-z0-9_-]+/i.test(cleanValue) || /#t=/i.test(cleanValue)) return true;
+  return /^(?:javascript|vbscript|data):/i.test(cleanValue);
+}
+
+function shareReplayElementRedactionAction(element) {
+  const tag = String(element?.localName || element?.tagName || '').toLowerCase();
+  if (shareReplayBlockedTags.has(tag)) return 'drop';
+  if (shareReplayElementHasFlag(element, 'data-share-private') || shareReplayElementHasFlag(element, 'data-share-redact')) return 'drop';
+  const type = String(element?.getAttribute?.('type') || element?.attributes?.type || '').toLowerCase();
+  if ((tag === 'input' && type === 'password') || shareReplayElementHasFlag(element, 'data-share-secret')) return 'placeholder';
+  return 'keep';
+}
+
+function shareReplayElementInlineStyleValue(element, property = '') {
+  const style = element?.style;
+  if (!style || !property) return '';
+  if (typeof style.getPropertyValue === 'function') return String(style.getPropertyValue(property) || '');
+  const camel = String(property).replace(/-([a-z])/g, (_match, letter) => letter.toUpperCase());
+  return String(style[property] || style[camel] || '');
+}
+
+function shareReplayElementOrAncestorHidden(element) {
+  let node = element;
+  while (node) {
+    if (node.hidden === true || node.hasAttribute?.('hidden')) return true;
+    if (String(node.getAttribute?.('aria-hidden') || '').toLowerCase() === 'true') return true;
+    if (String(shareReplayElementInlineStyleValue(node, 'display')).toLowerCase() === 'none') return true;
+    if (String(shareReplayElementInlineStyleValue(node, 'visibility')).toLowerCase() === 'hidden') return true;
+    node = node.parentElement;
+  }
+  return false;
+}
+
+function shareReplayElementHasVisibleBox(element) {
+  if (!element) return false;
+  const rect = typeof element.getBoundingClientRect === 'function' ? element.getBoundingClientRect() : null;
+  const rectWidth = Number(rect?.width || 0);
+  const rectHeight = Number(rect?.height || 0);
+  const clientWidth = Number(element.clientWidth || 0);
+  const clientHeight = Number(element.clientHeight || 0);
+  const offsetWidth = Number(element.offsetWidth || 0);
+  const offsetHeight = Number(element.offsetHeight || 0);
+  return (rectWidth > 0 && rectHeight > 0) || (clientWidth > 0 && clientHeight > 0) || (offsetWidth > 0 && offsetHeight > 0);
+}
+
+function shareReplayElementIsTerminalContainer(element) {
+  return Boolean(
+    element?.classList?.contains?.('terminal')
+    || element?.dataset?.shareTerminalSession
+  );
+}
+
+function shareReplayTerminalSessionForElement(element) {
+  const id = String(element?.id || '');
+  if (element?.classList?.contains?.('terminal') && id.startsWith('term-')) return id.slice('term-'.length);
+  if (element?.dataset?.shareTerminalSession) return String(element.dataset.shareTerminalSession || '');
+  if (element?.dataset?.session && element?.classList?.contains?.('terminal')) return String(element.dataset.session || '');
+  return '';
+}
+
+function shareReplayTerminalElementIsVisible(element) {
+  if (!element || element.isConnected === false) return false;
+  if (element.closest?.('#panelPool')) return false;
+  if (shareReplayElementOrAncestorHidden(element)) return false;
+  return shareReplayElementHasVisibleBox(element);
+}
+
+function shareReplayTerminalPlaceholderForElement(element, nodeId) {
+  const session = shareReplayTerminalSessionForElement(element);
+  if (!session) return null;
+  if (!shareReplayTerminalElementIsVisible(element)) return null;
+  const item = terminals.get(session);
+  const hostSize = shareHostTerminalSize(session);
+  const rows = Math.max(0, Math.round(Number(hostSize?.rows || item?.term?.rows || element?.dataset?.rows || 0)));
+  const cols = Math.max(0, Math.round(Number(hostSize?.cols || item?.term?.cols || element?.dataset?.cols || 0)));
+  const terminalEpoch = Math.max(0, Math.round(Number(element?.dataset?.terminalEpoch || shareReplayMirrorEpoch || 0)));
+  const placeholderId = `term-ph-${session}`;
+  return {
+    node: {
+      nodeId,
+      tag: 'div',
+      attrs: {
+        class: 'share-terminal-placeholder',
+        [shareReplayDatasetAttributeName(shareMirrorProtocol.terminalPlaceholder.dataset)]: session,
+        'data-session': session,
+        'data-rows': String(rows),
+        'data-cols': String(cols),
+      },
+      children: [],
+    },
+    terminal: {placeholderId, session, rows, cols, terminalEpoch},
+  };
+}
+
+function shareReplaySanitizeAttribute(name = '', value = '') {
+  const cleanName = String(name || '').toLowerCase();
+  if (!cleanName || cleanName.startsWith('on')) return null;
+  if (cleanName === 'srcdoc') return null;
+  if (shareReplayAttributeIsTokenBearing(cleanName)) return null;
+  if (shareReplayUrlAttributeIsUnsafe(cleanName, value)) return null;
+  return [String(name || '').trim(), shareReplayRedactText(value)];
+}
+
+function shareReplayAttributeNameIsSafe(name = '') {
+  return /^[A-Za-z_:-][A-Za-z0-9_:\\.-]*$/.test(String(name || ''));
+}
+
+function shareReplayTagIsAllowed(tag = '') {
+  const cleanTag = String(tag || '').toLowerCase();
+  return shareReplayAllowedHtmlTags.has(cleanTag) || shareReplayAllowedSvgTags.has(cleanTag);
+}
+
+function shareReplayCreateElement(tag = '') {
+  const cleanTag = String(tag || '').toLowerCase();
+  if (shareReplayBlockedTags.has(cleanTag) || !shareReplayTagIsAllowed(cleanTag)) {
+    throw new Error(`unsupported replay tag: ${cleanTag || 'missing'}`);
+  }
+  if (shareReplayAllowedSvgTags.has(cleanTag)) {
+    return document.createElementNS(shareReplaySvgNamespace, cleanTag);
+  }
+  return document.createElement(cleanTag);
+}
+
+function shareReplayNormalizeNodeId(value) {
+  const nodeId = Number(value);
+  if (!Number.isSafeInteger(nodeId) || nodeId <= 0) throw new Error('invalid replay node id');
+  return nodeId;
+}
+
+function shareReplayApplyAttributes(element, attrs = {}, options = {}) {
+  if (!element || !attrs || typeof attrs !== 'object' || Array.isArray(attrs)) return;
+  for (const [rawName, rawValue] of Object.entries(attrs)) {
+    const sanitized = shareReplaySanitizeAttribute(rawName, rawValue);
+    if (!sanitized) continue;
+    const [name, value] = sanitized;
+    const cleanName = String(name || '');
+    if (!shareReplayAttributeNameIsSafe(cleanName)) continue;
+    if (options.preserveRoot === true && cleanName === 'id') continue;
+    if (options.preserveRoot === true && cleanName === 'class') continue;
+    element.setAttribute(cleanName, value);
+  }
+}
+
+function shareReplayResetMirrorRootAttributes(root, attrs = {}) {
+  if (!root) return;
+  const hostClass = String(attrs?.class || 'app-root').trim() || 'app-root';
+  root.className = `${hostClass} share-replay-root`;
+  root.id = 'appRoot';
+  root.dataset.shareReplayRoot = 'true';
+  root.dataset.shareReplayInert = 'true';
+  root.setAttribute('role', 'presentation');
+  root.setAttribute('aria-label', 'YO!share replay mirror');
+  root.setAttribute('tabindex', '-1');
+  shareReplayApplyAttributes(root, attrs, {preserveRoot: true});
+}
+
+function shareReplayBuildNode(entry = {}, context) {
+  if (!entry || typeof entry !== 'object') throw new Error('invalid replay node');
+  const nodeId = shareReplayNormalizeNodeId(entry.nodeId);
+  if (context.nodeMap.has(nodeId)) throw new Error(`duplicate replay node id: ${nodeId}`);
+  if ('text' in entry && !entry.tag) {
+    const node = document.createTextNode(shareReplayRedactText(entry.text));
+    context.nodeMap.set(nodeId, node);
+    return node;
+  }
+  const tag = String(entry.tag || '').toLowerCase();
+  const element = shareReplayCreateElement(tag);
+  if (element.dataset) element.dataset.shareReplayNodeId = String(nodeId);
+  else element.setAttribute('data-share-replay-node-id', String(nodeId));
+  shareReplayApplyAttributes(element, entry.attrs || {});
+  context.nodeMap.set(nodeId, element);
+  const children = Array.isArray(entry.children) ? entry.children : [];
+  for (const child of children) {
+    element.appendChild(shareReplayBuildNode(child, context));
+  }
+  if (!children.length && 'text' in entry) {
+    element.appendChild(document.createTextNode(shareReplayRedactText(entry.text)));
+  }
+  return element;
+}
+
+function shareReplayNormalizeTerminalPlaceholder(entry = {}) {
+  const placeholderId = String(entry?.placeholderId || '').slice(0, 200);
+  const session = String(entry?.session || '').slice(0, 200);
+  if (!placeholderId || !session) return null;
+  return {
+    placeholderId,
+    session,
+    rows: Math.max(0, Math.round(Number(entry.rows) || 0)),
+    cols: Math.max(0, Math.round(Number(entry.cols) || 0)),
+    terminalEpoch: Math.max(0, Math.round(Number(entry.terminalEpoch) || 0)),
+  };
+}
+
+function shareReplayTerminalPlaceholderElement(entry = {}) {
+  const session = String(entry?.session || '').trim();
+  if (!session) return null;
+  return document.querySelector?.(`[data-share-terminal-placeholder="${cssEscape(session)}"]`) || null;
+}
+
+function shareReplayPrepareTerminalPlaceholderElement(element, entry = {}) {
+  if (!element || !entry?.session) return null;
+  element.id = terminalDomId(entry.session);
+  element.classList?.add('terminal', 'share-terminal-placeholder-bound');
+  if (element.dataset) {
+    element.dataset.session = entry.session;
+    element.dataset.rows = String(entry.rows);
+    element.dataset.cols = String(entry.cols);
+    element.dataset.terminalEpoch = String(entry.terminalEpoch);
+    element.dataset.shareTerminalPlaceholderId = entry.placeholderId;
+  }
+  element.setAttribute?.('role', 'presentation');
+  element.setAttribute?.('aria-label', `Shared terminal ${entry.session}`);
+  return element;
+}
+
+function shareReplayDetachTerminalPlaceholder(entry = {}) {
+  const session = String(entry?.session || '');
+  if (!session) return;
+  const item = terminals.get(session);
+  const termElement = item?.term?.element || item?.container?.querySelector?.('.xterm') || null;
+  if (termElement?.parentElement) termElement.remove();
+}
+
+function shareReplayBindTerminalPlaceholder(entry = {}) {
+  const element = shareReplayPrepareTerminalPlaceholderElement(shareReplayTerminalPlaceholderElement(entry), entry);
+  if (!element) return false;
+  updateShareHostTerminalSize(entry.session, entry.rows, entry.cols);
+  const item = terminals.get(entry.session);
+  if (item?.term) {
+    const termElement = item.term.element || item.container?.querySelector?.('.xterm') || null;
+    if (item.container !== element) {
+      element.replaceChildren();
+      if (termElement) element.appendChild(termElement);
+      item.container = element;
+    } else if (termElement && termElement.parentElement !== element) {
+      element.appendChild(termElement);
+    }
+    item.placeholderId = entry.placeholderId;
+    bindTerminalContainerForSession(entry.session, item.term, element);
+    connectTerminalSocket(entry.session, item);
+    scheduleFit(entry.session);
+    return true;
+  }
+  startTerminal(entry.session);
+  const created = terminals.get(entry.session);
+  if (created) created.placeholderId = entry.placeholderId;
+  return Boolean(created?.term && created.container === element);
+}
+
+function shareReplayApplyTerminalPlaceholders(terminals = []) {
+  const next = new Map();
+  for (const raw of Array.isArray(terminals) ? terminals : []) {
+    const entry = shareReplayNormalizeTerminalPlaceholder(raw);
+    if (!entry) continue;
+    next.set(entry.placeholderId, entry);
+  }
+  for (const [placeholderId, entry] of shareReplayTerminalPlaceholders.entries()) {
+    if (!next.has(placeholderId)) shareReplayDetachTerminalPlaceholder(entry);
+  }
+  shareReplayTerminalPlaceholders = next;
+  for (const entry of shareReplayTerminalPlaceholders.values()) {
+    shareReplayBindTerminalPlaceholder(entry);
+  }
+}
+
+function bindShareReplayPaneTabPopovers(root = appRootElement()) {
+  if (!shareReplayShellActive || shareReadOnlyReplayModeEnabled() || !root?.querySelectorAll || typeof createHoverPopover !== 'function') return 0;
+  let bound = 0;
+  const tabs = root.querySelectorAll('.pane-tab, .dockview-pane-tab, .panel-popover-zone');
+  for (const tab of tabs) {
+    if (!tab || tab.dataset?.shareReplayPopoverBound === 'true') continue;
+    const popover = tab.querySelector?.(':scope > .session-popover');
+    if (!popover) continue;
+    if (tab.dataset) tab.dataset.shareReplayPopoverBound = 'true';
+    const position = event => {
+      if (typeof positionPaneTabPopover === 'function') positionPaneTabPopover(tab, popover, event);
+    };
+    createHoverPopover({
+      anchor: tab,
+      popover,
+      showDelay: () => (document.querySelector('.pane-tab.popover-open, .dockview-pane-tab.popover-open') ? tabPopoverFollowDelayMs : tabPopoverShowDelayMs),
+      hideDelay: () => popoverHideDelayMs,
+      canOpen: () => true,
+      onQueue: position,
+      onOpen: event => {
+        popover.classList?.add('popover-open');
+        position(event);
+      },
+      onClose: () => popover.classList?.remove('popover-open'),
+      position,
+      closeOthers: () => {
+        if (typeof closeOtherSessionPopovers === 'function') closeOtherSessionPopovers(tab);
+      },
+    });
+    bound += 1;
+  }
+  return bound;
+}
+
+function shareReplayApplyStaticKeyframe(payload = {}, message = {}) {
+  if (!shareReplayShellActive || !payload || typeof payload !== 'object') return false;
+  const rootEntry = payload.root && typeof payload.root === 'object' ? payload.root : null;
+  if (!rootEntry) throw new Error('replay keyframe missing root');
+  const context = {nodeMap: new Map()};
+  const rootNodeId = shareReplayNormalizeNodeId(rootEntry.nodeId);
+  context.nodeMap.set(rootNodeId, null);
+  const children = Array.isArray(rootEntry.children) ? rootEntry.children : [];
+  const fragment = document.createDocumentFragment();
+  for (const child of children) fragment.appendChild(shareReplayBuildNode(child, context));
+  const root = appRootElement();
+  if (!root || root === document.body) throw new Error('replay mirror root missing');
+  shareReplayResetMirrorRootAttributes(root, rootEntry.attrs || {});
+  root.replaceChildren(fragment);
+  root.dataset.shareReplayNodeId = String(rootNodeId);
+  context.nodeMap.set(rootNodeId, root);
+  shareReplayNodeMap = context.nodeMap;
+  shareReplayApplyTerminalPlaceholders(payload.terminals || []);
+  shareReplayApplyScrollEntries(payload.scroll || []);
+  if (payload.viewport && typeof payload.viewport === 'object') applyShareViewportState(payload.viewport);
+  bindShareReplayPaneTabPopovers(root);
+  shareReplayCurrentEpoch = Math.max(0, Math.round(Number(message.epoch) || Number(payload.epoch) || shareReplayCurrentEpoch || 1));
+  shareReplayLastSequence = Math.max(0, Math.round(Number(message.sequence) || Number(payload.sequence) || 0));
+  shareReplayLastKeyframe = {payload, message};
+  setShareReplayShellStatus('mirrored', {
+    digest: payload.digest,
+    sequence: message.sequence ?? payload.sequence,
+  });
+  return true;
+}
+
+function shareReplayCurrentDomDigest() {
+  const root = appRootElement();
+  if (!root) return '';
+  return shareHashText(String(root.textContent || ''));
+}
+
+function shareReplayFrameNumberDetail(message = {}) {
+  const payload = message?.payload && typeof message.payload === 'object' ? message.payload : {};
+  const frameNumber = value => {
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.round(number) : null;
+  };
+  return {
+    epoch: frameNumber(message.epoch),
+    sequence: frameNumber(message.sequence),
+    baseSequence: frameNumber(message.baseSequence ?? payload.baseSequence),
+    currentEpoch: Math.max(0, Math.round(Number(shareReplayCurrentEpoch) || 0)),
+    lastSequence: Math.max(0, Math.round(Number(shareReplayLastSequence) || 0)),
+  };
+}
+
+function shareReplayDeltaSequenceStatus(message = {}) {
+  const detail = shareReplayFrameNumberDetail(message);
+  const epoch = detail.epoch;
+  const sequence = detail.sequence;
+  const baseSequence = detail.baseSequence;
+  const currentEpoch = detail.currentEpoch;
+  const lastSequence = detail.lastSequence;
+  if (!Number.isFinite(epoch) || !Number.isFinite(sequence) || !Number.isFinite(baseSequence)) {
+    return {ok: false, reason: 'gap', error: 'missing replay sequence', ...detail};
+  }
+  if (!currentEpoch || epoch > currentEpoch) {
+    return {ok: false, reason: 'gap', error: 'delta epoch has no keyframe base', ...detail};
+  }
+  if (epoch < currentEpoch || sequence <= lastSequence) {
+    return {ok: false, reason: 'stale', stale: true, error: 'stale replay delta', ...detail};
+  }
+  if (baseSequence !== lastSequence || sequence !== lastSequence + 1) {
+    return {ok: false, reason: 'gap', error: 'non-contiguous replay delta', ...detail};
+  }
+  return {ok: true, epoch, sequence, baseSequence};
+}
+
+function shareReplayDeltaCanApplyBestEffort(sequenceStatus = {}) {
+  if (!sequenceStatus || sequenceStatus.ok || sequenceStatus.stale === true) return false;
+  if (sequenceStatus.reason !== 'gap') return false;
+  const epoch = Number(sequenceStatus.epoch);
+  const sequence = Number(sequenceStatus.sequence);
+  const currentEpoch = Number(sequenceStatus.currentEpoch);
+  const lastSequence = Number(sequenceStatus.lastSequence);
+  return Number.isFinite(epoch)
+    && Number.isFinite(sequence)
+    && Number.isFinite(currentEpoch)
+    && Number.isFinite(lastSequence)
+    && currentEpoch > 0
+    && epoch === currentEpoch
+    && sequence > lastSequence;
+}
+
+function shareReplayNodeForDelta(nodeId) {
+  const id = Number(nodeId);
+  if (!Number.isSafeInteger(id) || id <= 0) throw new Error('invalid replay delta node id');
+  const node = shareReplayNodeMap.get(id);
+  if (!node) throw new Error(`unknown replay node id: ${id}`);
+  return node;
+}
+
+function shareReplayApplyDeltaMutation(entry = {}) {
+  if (!entry || typeof entry !== 'object') return;
+  const kind = String(entry.kind || '');
+  const target = shareReplayNodeForDelta(entry.target);
+  if (kind === 'characterData') {
+    target.textContent = shareReplayRedactText(entry.text || '');
+    return;
+  }
+  if (kind === 'attributes') {
+    const name = String(entry.name || '');
+    if (!shareReplayAttributeNameIsSafe(name)) return;
+    if (entry.removed === true || entry.value === null || entry.value === undefined) {
+      target.removeAttribute?.(name);
+      return;
+    }
+    const sanitized = shareReplaySanitizeAttribute(name, entry.value);
+    if (!sanitized || !shareReplayAttributeNameIsSafe(sanitized[0])) return;
+    target.setAttribute?.(sanitized[0], sanitized[1]);
+    return;
+  }
+  if (kind === 'childList') {
+    for (const rawId of Array.isArray(entry.removed) ? entry.removed : []) {
+      const removed = shareReplayNodeForDelta(rawId);
+      removed.remove?.();
+      shareReplayNodeMap.delete(Number(rawId));
+    }
+    for (const child of Array.isArray(entry.added) ? entry.added : []) {
+      const node = shareReplayBuildNode(child, {nodeMap: shareReplayNodeMap});
+      target.appendChild?.(node);
+    }
+  }
+}
+
+function shareReplayApplyScrollEntry(entry = {}) {
+  if (!entry || typeof entry !== 'object') return;
+  const element = shareReplayNodeForDelta(entry.nodeId ?? entry.target);
+  if (!element || !('scrollTop' in element || 'scrollLeft' in element)) return;
+  const top = Math.max(0, Math.round(Number(entry.top || 0)));
+  const left = Math.max(0, Math.round(Number(entry.left || 0)));
+  const previous = applyingShareRemoteScroll;
+  applyingShareRemoteScroll = true;
+  try {
+    element.scrollTop = top;
+    element.scrollLeft = left;
+  } finally {
+    requestAnimationFrame(() => { applyingShareRemoteScroll = previous; });
+  }
+}
+
+function shareReplayApplyScrollEntries(scroll = []) {
+  for (const entry of Array.isArray(scroll) ? scroll : []) shareReplayApplyScrollEntry(entry);
+}
+
+function shareReplayPointerPayload(payload = {}, sender = '') {
+  if (!payload || typeof payload !== 'object') return null;
+  const x = Number(payload.x);
+  const y = Number(payload.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return {
+    scope: payload.scope || 'viewport',
+    x,
+    y,
+    visible: payload.visible !== false,
+    click: payload.click === true,
+    sender: String(payload.sender || sender || 'host'),
+  };
+}
+
+function shareReplayApplyPointer(payload = {}, message = {}) {
+  const pointer = shareReplayPointerPayload(payload, message.sender || 'host');
+  if (!pointer || pointer.visible === false) return;
+  renderSharePointerGhost(pointer);
+}
+
+function applyShareReplayDelta(payload = {}, message = {}) {
+  if (!shareReplayShellActive || !payload || typeof payload !== 'object') return false;
+  shareReplayRecordFrameMetrics(shareMirrorProtocol.frames.domDelta, payload, message);
+  const sequenceStatus = shareReplayDeltaSequenceStatus(message);
+  if (!sequenceStatus.ok) {
+    if (sequenceStatus.stale === true) {
+      shareReplayStaleFrames += 1;
+      return true;
+    }
+    shareReplayDroppedFrames += 1;
+    shareReplayRequestKeyframe(sequenceStatus.reason, {
+      ...sequenceStatus,
+      digest: payload.digest,
+    });
+    if (!shareReplayDeltaCanApplyBestEffort(sequenceStatus)) {
+      setShareReplayShellStatus('viewer-behind', {sequence: message.sequence, digest: payload.digest});
+      return true;
+    }
+  }
+  try {
+    for (const mutation of Array.isArray(payload.mutations) ? payload.mutations : []) {
+      shareReplayApplyDeltaMutation(mutation);
+    }
+    shareReplayApplyScrollEntries(payload.scroll || []);
+    if (payload.pointer && typeof payload.pointer === 'object') shareReplayApplyPointer(payload.pointer, message);
+    const expectedDigest = String(payload.digest || '');
+    const actualDigest = shareReplayCurrentDomDigest();
+    if (expectedDigest && expectedDigest !== actualDigest) {
+      throw new Error('replay DOM digest mismatch');
+    }
+    shareReplayCurrentEpoch = sequenceStatus.epoch;
+    shareReplayLastSequence = sequenceStatus.sequence;
+    setShareReplayShellStatus('mirrored', {
+      sequence: sequenceStatus.sequence,
+      digest: expectedDigest || actualDigest,
+    });
+    bindShareReplayPaneTabPopovers();
+  } catch (error) {
+    shareReplayDroppedFrames += 1;
+    setShareReplayShellStatus('error', {sequence: message.sequence, digest: payload.digest});
+    shareReplayRequestKeyframe('replay-error', {error, digest: payload.digest});
+  }
+  return true;
+}
+
+function shareReplayMutationElement(node) {
+  const value = Number(node?.nodeType);
+  if (value === 1) return node;
+  if (value === 3) return node?.parentElement || node?.parentNode || null;
+  return node?.localName || node?.tagName ? node : null;
+}
+
+function shareReplayMutationNodeIsIgnored(node) {
+  const element = shareReplayMutationElement(node);
+  if (!element) return true;
+  const selectors = [
+    '.terminal',
+    '.xterm',
+    '.xterm-screen',
+    '.xterm-viewport',
+    '.xterm-cursor',
+    '.xterm-helper-textarea',
+    '[data-share-private]',
+    '[data-share-redact]',
+    '[data-share-volatile]',
+    '[data-volatile]',
+    '.file-explorer-panel',
+    '.share-replay-volatile',
+    '#latencyMeter',
+    '#latencyNumber',
+    '#latencyLine',
+    '.latency-meter',
+    '.share-pointer-ghost',
+    '.share-viewer-banner',
+  ];
+  return selectors.some(selector => element.closest?.(selector));
+}
+
+function shareReplaySanitizeMutationAttribute(name = '', value = '') {
+  const cleanName = String(name || '').trim();
+  const lowerName = cleanName.toLowerCase();
+  if (!cleanName || lowerName.startsWith('on') || lowerName === 'srcdoc' || shareReplayAttributeIsTokenBearing(lowerName)) return null;
+  if (shareReplayUrlAttributeIsUnsafe(lowerName, value)) return [cleanName, null, true];
+  const sanitized = shareReplaySanitizeAttribute(cleanName, value);
+  if (!sanitized || !shareReplayAttributeNameIsSafe(sanitized[0])) return null;
+  return [sanitized[0], sanitized[1], false];
+}
+
+function shareReplayMutationEntries(records = []) {
+  const entries = [];
+  let batchNeedsKeyframe = false;
+  for (const record of Array.from(records || [])) {
+    if (batchNeedsKeyframe) continue;
+    const type = String(record?.type || '');
+    const target = record?.target || null;
+    if (!target || shareReplayMutationNodeIsIgnored(target)) continue;
+    const targetId = shareReplayHostNodeId(target);
+    if (!targetId) continue;
+    if (type === 'characterData') {
+      entries.push({
+        kind: 'characterData',
+        target: targetId,
+        text: shareReplayRedactText(target.textContent || ''),
+      });
+      continue;
+    }
+    if (type === 'attributes') {
+      const name = String(record.attributeName || '');
+      const rawValue = target.getAttribute?.(name);
+      const sanitized = shareReplaySanitizeMutationAttribute(name, rawValue ?? '');
+      if (!sanitized) continue;
+      entries.push({
+        kind: 'attributes',
+        target: targetId,
+        name: sanitized[0],
+        value: sanitized[2] ? null : sanitized[1],
+        removed: sanitized[2] || rawValue === null || rawValue === undefined,
+      });
+      continue;
+    }
+    if (type === 'childList') {
+      const added = [];
+      let needsKeyframe = false;
+      for (const node of Array.from(record.addedNodes || [])) {
+        if (shareReplayMutationNodeIsIgnored(node)) {
+          needsKeyframe = true;
+          continue;
+        }
+        const context = {nextNodeId: 1, terminals: [], removedCount: 0, useStableNodeIds: true};
+        const serialized = shareReplaySerializeNode(node, context);
+        if (serialized) added.push(serialized);
+      }
+      const removed = [];
+      for (const node of Array.from(record.removedNodes || [])) {
+        if (shareReplayMutationNodeIsIgnored(node)) {
+          needsKeyframe = true;
+          continue;
+        }
+        const nodeId = shareReplayHostNodeId(node);
+        if (nodeId) removed.push(nodeId);
+      }
+      if (needsKeyframe) {
+        batchNeedsKeyframe = true;
+        entries.splice(0, entries.length);
+        scheduleShareTopologyDomKeyframe();
+        continue;
+      }
+      if (added.length || removed.length) {
+        entries.push({kind: 'childList', target: targetId, added, removed});
+      }
+    }
+  }
+  return entries;
+}
+
+function shareReplayEnqueueMutationRecords(records = []) {
+  if (shareViewMode || !shareReplayFeatureEnabled() || shareReplayMutationPublisherPaused) return [];
+  const entries = shareReplayMutationEntries(records);
+  if (!entries.length) return [];
+  shareReplayPendingMutations.push(...entries);
+  if (!shareReplayDeltaFramePending) {
+    shareReplayDeltaFramePending = true;
+    requestAnimationFrame(shareReplayFlushMutationDeltas);
+  }
+  return entries;
+}
+
+function shareReplayDrainMutationPublisher() {
+  if (shareReplayMutationObserver) {
+    shareReplayMutationObserver.takeRecords?.();
+    shareReplayMutationObserver.disconnect?.();
+    shareReplayMutationObserver = null;
+  }
+  shareReplayPendingMutations.splice(0, shareReplayPendingMutations.length);
+  shareReplayDeltaFramePending = false;
+}
+
+function shareReplayResumeMutationPublisher() {
+  shareReplayMutationPublisherPaused = false;
+  installShareReplayMutationPublisher();
+}
+
+function shareReplayResumeMutationPublisherAfterFrames(delayMs = 0) {
+  if (shareReplayTopologyMutationPauseTimer) {
+    clearTimeout(shareReplayTopologyMutationPauseTimer);
+    shareReplayTopologyMutationPauseTimer = null;
+  }
+  const resume = () => shareReplayResumeMutationPublisher();
+  const delay = Math.max(0, Math.round(Number(delayMs) || 0));
+  const resumeAfterDelay = () => {
+    if (delay > 0) setTimeout(resume, delay);
+    else resume();
+  };
+  if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(() => requestAnimationFrame(resumeAfterDelay));
+  } else {
+    setTimeout(resumeAfterDelay, 32);
+  }
+}
+
+function shareReplayPauseMutationPublisherForTopology() {
+  shareReplayMutationPublisherPaused = true;
+  shareReplayDrainMutationPublisher();
+  if (shareReplayTopologyMutationPauseTimer) clearTimeout(shareReplayTopologyMutationPauseTimer);
+  shareReplayTopologyMutationPauseTimer = setTimeout(() => {
+    shareReplayTopologyMutationPauseTimer = null;
+    if (!shareReplayHostKeyframeTimer && !shareReplayTopologyKeyframeTimer) shareReplayResumeMutationPublisher();
+  }, shareReplayHostKeyframeMinIntervalMs + 1000);
+}
+
+function shareReplayPublishDeltaPayload(payload = {}, reason = 'mutation') {
+  if (shareViewMode || !shareReplayFeatureEnabled() || !payload || typeof payload !== 'object') return null;
+  const cleanPayload = {
+    ...payload,
+    capturedAt: Date.now(),
+  };
+  shareReplayLastDeltaBatch = cleanPayload;
+  sharePublish(shareMirrorProtocol.frames.domDelta, cleanPayload, {reason});
+  return cleanPayload;
+}
+
+function shareReplayFlushMutationDeltas() {
+  shareReplayDeltaFramePending = false;
+  const mutations = shareReplayPendingMutations.splice(0, shareReplayPendingMutations.length);
+  if (!mutations.length) return null;
+  const payload = {
+    mutations,
+    count: mutations.length,
+  };
+  const bytes = shareReplayFrameByteLength({type: shareMirrorProtocol.frames.domDelta, payload});
+  if (bytes > shareReplayHostDeltaMaxBytes) {
+    shareReplayLastDeltaBatch = {...payload, skipped: true, bytes};
+    sharePublishDomKeyframe('backpressure');
+    return null;
+  }
+  return shareReplayPublishDeltaPayload(payload, 'mutation');
+}
+
+function installShareReplayMutationPublisher() {
+  if (shareViewMode || !shareReplayFeatureEnabled() || shareReplayMutationPublisherPaused || shareReplayMutationObserver || typeof MutationObserver === 'undefined') return;
+  const root = appRootElement();
+  if (!root || root === document.body) return;
+  shareReplayHostNodeId(root);
+  shareReplayMutationObserver = new MutationObserver(records => shareReplayEnqueueMutationRecords(records));
+  shareReplayMutationObserver.observe(root, {
+    attributes: true,
+    characterData: true,
+    childList: true,
+    subtree: true,
+  });
+}
+
+function shareReplayResetMutationPublisherForKeyframe(reason = 'manual-debug') {
+  shareReplayMutationPublisherPaused = true;
+  shareReplayDrainMutationPublisher();
+  const cleanReason = shareReplayKeyframeReason(reason);
+  const quietMs = cleanReason === 'join' || cleanReason === 'topology' ? shareReplayPostTopologyKeyframeQuietMs : 0;
+  shareReplayResumeMutationPublisherAfterFrames(quietMs);
+}
+
+function shareReplayElementAttributes(element) {
+  const attrs = {};
+  const add = (name, value) => {
+    const attr = shareReplaySanitizeAttribute(name, value);
+    if (!attr) return;
+    attrs[attr[0]] = attr[1];
+  };
+  if (element?.id) add('id', element.id);
+  if (element?.className) add('class', element.className);
+  const rawAttrs = element?.attributes;
+  if (rawAttrs && typeof rawAttrs.length === 'number') {
+    for (const attr of Array.from(rawAttrs)) add(attr?.name, attr?.value);
+  } else if (rawAttrs && typeof rawAttrs === 'object') {
+    for (const [name, value] of Object.entries(rawAttrs)) add(name, value);
+  }
+  for (const [key, value] of Object.entries(element?.dataset || {})) add(shareReplayDatasetAttributeName(key), value);
+  return Object.fromEntries(Object.keys(attrs).sort().map(key => [key, attrs[key]]));
+}
+
+function shareReplaySerializeNode(node, context) {
+  if (!node) return null;
+  const nodeType = Number(node.nodeType || (node.localName || node.tagName ? 1 : 0));
+  if (nodeType === 3) {
+    const text = shareReplayRedactText(node.textContent || '');
+    if (!text) return null;
+    return {nodeId: shareReplaySerializedNodeId(node, context), text};
+  }
+  if (nodeType !== 1) return null;
+  const redactionAction = shareReplayElementRedactionAction(node);
+  if (redactionAction === 'drop') {
+    context.removedCount += 1;
+    return null;
+  }
+  const terminalContainer = shareReplayElementIsTerminalContainer(node);
+  if (terminalContainer && (!shareReplayTerminalSessionForElement(node) || !shareReplayTerminalElementIsVisible(node))) {
+    context.removedCount += 1;
+    return null;
+  }
+  const nodeId = shareReplaySerializedNodeId(node, context);
+  if (redactionAction === 'placeholder') {
+    context.removedCount += 1;
+    return {
+      nodeId,
+      tag: String(node.localName || node.tagName || 'input').toLowerCase(),
+      attrs: {'data-share-redacted': 'secret'},
+      children: [],
+    };
+  }
+  const terminalPlaceholder = terminalContainer ? shareReplayTerminalPlaceholderForElement(node, nodeId) : null;
+  if (terminalPlaceholder) {
+    context.terminals.push(terminalPlaceholder.terminal);
+    return terminalPlaceholder.node;
+  }
+  if (terminalContainer) {
+    context.removedCount += 1;
+    return null;
+  }
+  const children = [];
+  const childNodes = Array.from(node.childNodes || node.children || []);
+  for (const child of childNodes) {
+    const serialized = shareReplaySerializeNode(child, context);
+    if (serialized) children.push(serialized);
+  }
+  const tag = String(node.localName || node.tagName || 'div').toLowerCase();
+  const entry = {nodeId, tag, attrs: shareReplayElementAttributes(node), children};
+  const text = shareReplayRedactText(node.textContent || '');
+  if (!children.length && text) entry.text = text;
+  return entry;
+}
+
+function shareReplayScrollContainerSelector() {
+  return typeof paneScrollContainerSelector === 'string' && paneScrollContainerSelector
+    ? paneScrollContainerSelector
+    : '.preferences-scroll, .file-explorer-tree-panel, .file-explorer-changes-panel, .file-editor-preview-pane-panel, .file-editor-codemirror .cm-scroller, .file-editor-codemirror-panel .cm-scroller, #info-content';
+}
+
+function shareReplayScrollableElementAllowed(element) {
+  if (!element || shareReplayMutationNodeIsIgnored(element)) return false;
+  if (element.closest?.('.terminal, .xterm, .xterm-viewport')) return false;
+  const scrollTop = Math.max(0, Math.round(Number(element.scrollTop || 0)));
+  const scrollLeft = Math.max(0, Math.round(Number(element.scrollLeft || 0)));
+  const scrollHeight = Math.round(Number(element.scrollHeight || 0));
+  const scrollWidth = Math.round(Number(element.scrollWidth || 0));
+  const clientHeight = Math.round(Number(element.clientHeight || 0));
+  const clientWidth = Math.round(Number(element.clientWidth || 0));
+  return Boolean(
+    scrollTop
+    || scrollLeft
+    || scrollHeight > clientHeight + 1
+    || scrollWidth > clientWidth + 1
+    || element.dataset?.shareReplayScroll === 'true'
+  );
+}
+
+function shareReplayScrollableElements(root = appRootElement()) {
+  const queryRoot = root?.querySelectorAll ? root : document;
+  const selector = shareReplayScrollContainerSelector();
+  const nodes = Array.from(queryRoot.querySelectorAll?.(selector) || []);
+  if (root?.matches?.(selector)) nodes.unshift(root);
+  const seen = new Set();
+  return nodes.filter(node => {
+    if (seen.has(node) || !shareReplayScrollableElementAllowed(node)) return false;
+    seen.add(node);
+    return true;
+  });
+}
+
+function shareReplayScrollEntryForElement(element) {
+  if (!shareReplayScrollableElementAllowed(element)) return null;
+  const nodeId = shareReplayHostNodeId(element);
+  if (!nodeId) return null;
+  const semantic = typeof shareScrollPayloadForElement === 'function' ? shareScrollPayloadForElement(element) : null;
+  return {
+    nodeId,
+    target: semantic?.target || '',
+    kind: semantic?.kind || '',
+    top: Math.max(0, Math.round(Number(element.scrollTop || 0))),
+    left: Math.max(0, Math.round(Number(element.scrollLeft || 0))),
+  };
+}
+
+function shareReplayScrollSnapshot(root = appRootElement()) {
+  return shareReplayScrollableElements(root).map(shareReplayScrollEntryForElement).filter(Boolean);
+}
+
+function shareReplayAssetFingerprint() {
+  return {
+    js: String(bootstrap.versionCommit || bootstrap.version || ''),
+    css: String(bootstrap.version || ''),
+    fonts: shareFontFingerprint(),
+  };
+}
+
+function shareCreateDomKeyframePayload(reason = 'manual-debug') {
+  if (!shareReplayFeatureEnabled()) return null;
+  const context = {nextNodeId: 1, terminals: [], removedCount: 0, useStableNodeIds: true};
+  const root = shareReplaySerializeNode(appRootElement(), context);
+  if (!root) return null;
+  const payload = {
+    shareId: String(shareBootstrap?.id || activeShares[0]?.id || activeShares[0]?.token || ''),
+    reason: shareMirrorFrameReason(shareMirrorProtocol.frames.domKeyframe, {reason}),
+    createdAt: Date.now() / 1000,
+    viewport: shareViewportSnapshot(),
+    assets: shareReplayAssetFingerprint(),
+    root,
+    terminals: context.terminals.sort((a, b) => a.session.localeCompare(b.session)),
+    scroll: shareReplayScrollSnapshot(),
+    redaction: {
+      policyVersion: shareMirrorProtocol.redaction.policyVersion,
+      removedCount: context.removedCount,
+    },
+  };
+  payload.digest = shareHashText(stableDigestJson({
+    root: payload.root,
+    terminals: payload.terminals,
+    redaction: payload.redaction,
+  }));
+  return payload;
+}
+
+function shareCreateDomKeyframeMessage(reason = 'manual-debug') {
+  const payload = shareCreateDomKeyframePayload(reason);
+  return payload ? shareBuildUiMessage(shareMirrorProtocol.frames.domKeyframe, payload, {reason}) : null;
+}
+
+function shareReplayKeyframeReason(reason = 'manual-debug', fallback = 'manual-debug') {
+  const clean = String(reason || '').trim();
+  if (shareMirrorProtocol.keyframeReasons.includes(clean)) return clean;
+  return fallback;
+}
+
+function shareReplayCoalesceKeyframeReason(currentReason = '', nextReason = '') {
+  const current = shareReplayKeyframeReason(currentReason, '');
+  const next = shareReplayKeyframeReason(nextReason, '');
+  if (!current) return next || 'manual-debug';
+  if (!next) return current;
+  const priority = ['manual-debug', 'join', 'topology', 'backpressure', 'replay-error', 'digest', 'gap'];
+  return priority.indexOf(next) >= 0 && priority.indexOf(next) < priority.indexOf(current) ? next : current;
+}
+
+function sharePublishDomKeyframeNow(reason = 'manual-debug') {
+  if (shareReplayHostKeyframeTimer) {
+    clearTimeout(shareReplayHostKeyframeTimer);
+    shareReplayHostKeyframeTimer = null;
+  }
+  shareReplayHostKeyframePendingReason = '';
+  if (shareViewMode || !shareHasActiveShare()) return false;
+  const cleanReason = shareReplayKeyframeReason(reason);
+  shareReplayResetMutationPublisherForKeyframe(cleanReason);
+  const payload = shareCreateDomKeyframePayload(cleanReason);
+  if (!payload) return false;
+  sharePublish(shareMirrorProtocol.frames.domKeyframe, payload, {reason: cleanReason});
+  shareReplayHostLastKeyframeAt = Date.now();
+  return true;
+}
+
+function sharePublishDomKeyframe(reason = 'manual-debug') {
+  const cleanReason = shareReplayKeyframeReason(reason);
+  const now = Date.now();
+  const lastAt = Math.max(0, Math.round(Number(shareReplayHostLastKeyframeAt) || 0));
+  if (cleanReason === 'manual-debug' || cleanReason === 'topology' || cleanReason === 'join' || lastAt <= 0 || now - lastAt >= shareReplayHostKeyframeMinIntervalMs) {
+    return sharePublishDomKeyframeNow(cleanReason);
+  }
+  shareReplayHostKeyframeSuppressedCount = Math.max(0, Math.round(Number(shareReplayHostKeyframeSuppressedCount) || 0)) + 1;
+  shareReplayHostKeyframePendingReason = shareReplayCoalesceKeyframeReason(shareReplayHostKeyframePendingReason, cleanReason);
+  if (!shareReplayHostKeyframeTimer) {
+    const delayMs = Math.max(0, shareReplayHostKeyframeMinIntervalMs - (now - lastAt));
+    shareReplayHostKeyframeTimer = setTimeout(() => {
+      const pendingReason = shareReplayHostKeyframePendingReason || cleanReason;
+      shareReplayHostKeyframeTimer = null;
+      shareReplayHostKeyframePendingReason = '';
+      sharePublishDomKeyframeNow(pendingReason);
+    }, delayMs);
+  }
+  return true;
+}
+
+function shareMirrorFrameSequenceFamily(message = {}) {
+  return shareMirrorFrameTypeIsDomReplayContent(message?.type) ? 'dom-replay' : 'semantic';
+}
+
+function shareMirrorSenderKey(message = {}) {
+  const sender = String(message.sender || message.owner || 'host').trim() || 'host';
+  const family = shareMirrorFrameSequenceFamily(message);
+  return family === 'semantic' ? sender : `${sender}:${family}`;
+}
+
+function shareMirrorFrameNumbers(message = {}) {
+  const epoch = Math.floor(Number(message.epoch));
+  const sequence = Math.floor(Number(message.sequence));
+  if (!Number.isFinite(epoch) || !Number.isFinite(sequence)) return null;
+  return {epoch, sequence};
+}
+
+function shareDropStaleMirrorFrame(message = {}) {
+  if (!message || !shareMirrorFrameTypeIsSequenced(message.type)) return false;
+  const current = shareMirrorFrameNumbers(message);
+  if (!current) return false;
+  const sender = shareMirrorSenderKey(message);
+  const previous = shareMirrorLastFrameBySender.get(sender);
+  if (previous) {
+    if (current.epoch < previous.epoch) return true;
+    if (current.epoch === previous.epoch && current.sequence <= previous.sequence) return true;
+  }
+  shareMirrorLastFrameBySender.set(sender, current);
+  return false;
+}
+
+function sharePublish(type, payload = {}, options = {}) {
   if (type === 'scroll' && !shareCanPublishScroll()) return;
   if (!shareCanPublishUi() || !type) return;
-  const message = {type, payload, sender: shareClientId};
+  const message = shareBuildUiMessage(type, payload, options);
   const targets = shareViewMode ? [{token: shareToken}] : activeShares;
   for (const share of targets) {
     const token = share?.token || share;
@@ -3738,15 +5233,11 @@ function shareSanitizePopupHtml(html = '') {
   template.content.querySelectorAll('script, iframe, object, embed').forEach(node => node.remove());
   template.content.querySelectorAll('*').forEach(node => {
     for (const attr of Array.from(node.attributes || [])) {
-      const name = String(attr.name || '').toLowerCase();
-      if (name === 'id' || name.startsWith('on') || name === 'srcdoc') {
+      const sanitized = shareReplaySanitizeAttribute(attr.name, attr.value);
+      if (!sanitized || sanitized[0] === 'id') {
         node.removeAttribute(attr.name);
-      }
-      if (name === 'href' && String(attr.value || '').includes('/share/')) {
-        node.removeAttribute(attr.name);
-      }
-      if (name === 'data-share-token') {
-        node.removeAttribute(attr.name);
+      } else if (sanitized[1] !== String(attr.value ?? '')) {
+        node.setAttribute(sanitized[0], sanitized[1]);
       }
     }
   });
@@ -3835,7 +5326,7 @@ function ensureSharePopupLayer() {
 }
 
 function applySharePopupLayer(payload = {}, sender = '') {
-  if (!shareViewMode) return;
+  if (!shareViewMode || shareReadOnlyReplayModeEnabled()) return;
   const layer = ensureSharePopupLayer();
   if (!layer) return;
   const owner = String(payload.owner || sender || 'host');
@@ -4170,18 +5661,38 @@ function shareUiStateSnapshot() {
   };
 }
 
-function scheduleShareUiStatePublish() {
+function sharePublishUiState(options = {}) {
+  if (!shareCanPublishUi()) return;
+  sharePublish('ui-state', shareUiStateSnapshot(), options);
+}
+
+function scheduleShareUiStatePublish(options = {}) {
   if (!shareCanPublishUi()) return;
   if (shareUiStatePublishTimer) clearTimeout(shareUiStatePublishTimer);
   shareUiStatePublishTimer = setTimeout(() => {
     shareUiStatePublishTimer = null;
-    sharePublishUiState();
+    sharePublishUiState(options);
   }, 80);
 }
 
-function sharePublishUiState() {
-  if (!shareCanPublishUi()) return;
-  sharePublish('ui-state', shareUiStateSnapshot());
+function scheduleShareTopologySnapshot(reason = 'topology') {
+  const cleanReason = String(reason || 'topology').trim() || 'topology';
+  scheduleShareUiStatePublish({reason: `topology:${cleanReason}`});
+  scheduleShareTopologyDomKeyframe();
+}
+
+function scheduleShareTopologyDomKeyframe() {
+  if (shareViewMode || !shareHasActiveShare() || !shareReplayFeatureEnabled()) return;
+  shareReplayPauseMutationPublisherForTopology();
+  if (shareReplayTopologyKeyframeTimer) return;
+  shareReplayTopologyKeyframeTimer = setTimeout(() => {
+    shareReplayTopologyKeyframeTimer = null;
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        sharePublishDomKeyframe('topology');
+      });
+    });
+  }, 0);
 }
 
 function scheduleShareViewportPublish() {
@@ -4193,13 +5704,14 @@ function scheduleShareViewportPublish() {
   }, 150);
 }
 
-function scheduleShareAppearancePublish() {
+function scheduleShareAppearancePublish(options = {}) {
   if (shareViewMode || !shareCanPublishUi()) return;
   if (shareAppearancePublishTimer) clearTimeout(shareAppearancePublishTimer);
   shareAppearancePublishTimer = setTimeout(() => {
     shareAppearancePublishTimer = null;
     sharePublish('appearance', shareAppearanceSnapshot());
   }, 80);
+  if (options.topology !== false) scheduleShareTopologySnapshot(options.reason || 'appearance');
 }
 
 function applyShareViewportState(viewport = {}) {
@@ -4351,9 +5863,15 @@ async function applyShareFinderState(finder = {}) {
   syncFileExplorerTreeDateButtons();
   const root = String(finder.root || '').trim();
   const normalizedRoot = root ? normalizeDirectoryPath(expandUserPath(root)) : '';
+  if (!itemInLayout(fileExplorerItemId)) {
+    if (normalizedRoot) fileExplorerRoot = normalizedRoot;
+    renderPaneTabStrips();
+    return;
+  }
   if (normalizedRoot) {
     fileExplorerRoot = normalizedRoot;
-    if (previousRoot !== normalizedRoot) {
+    const hasRenderedTreeRows = fileExplorerTreeContainers().some(container => container.querySelector?.('.file-tree-row[data-path]'));
+    if (previousRoot !== normalizedRoot || !hasRenderedTreeRows) {
       await openFileExplorerAt(normalizedRoot, {preserveExpanded: true, preserveScroll: true});
     } else {
       setFileExplorerPathDisplay(fileExplorerRoot);
@@ -4406,15 +5924,15 @@ function applyShareAutoApproveState(autoApprove = {}) {
 }
 
 async function applyShareUiState(payload = {}) {
-  if ((!shareViewMode && !shareHasActiveShare()) || !payload || typeof payload !== 'object') return;
+  if (!shareSemanticMirrorApplyAllowed() || !payload || typeof payload !== 'object') return;
   const finishRemoteApply = beginShareRemoteUiApply();
   try {
     applyShareViewportState(payload.viewport || {});
     applyShareAppearanceState(payload.appearance || {});
     applyShareTerminalDimensionsState(payload.terminalDims || []);
     if (payload.layout || payload.tabs) {
-      const next = layoutFromParam(payload.layout || '', payload.tabs || '');
-    if (next) applyLayoutSlots(next, {prune: false});
+      const next = layoutFromParam(payload.layout || '', payload.tabs || '', {preserveMissingFileExplorer: true});
+      if (next) applyLayoutSlots(next, {prune: false, preserveMissingFileExplorer: true});
     }
     applyShareChromeState(payload.chrome || {});
     applyShareAutoApproveState(payload.autoApprove || {});
@@ -4521,7 +6039,20 @@ function renderSharePointerGhost(payload = {}) {
 function sharePublishPointerEvent(event, options = {}) {
   if (event?.isPrimary === false) return;
   const payload = sharePointerPayloadForEvent(event, options);
-  if (payload) sharePublish('pointer', payload);
+  if (!payload) return;
+  if (!shareViewMode && shareReplayFeatureEnabled()) {
+    shareReplayPointerLastPayload = {...payload, visible: true};
+    if (!shareReplayPointerFramePending) {
+      shareReplayPointerFramePending = true;
+      requestAnimationFrame(() => {
+        shareReplayPointerFramePending = false;
+        const latest = shareReplayPointerLastPayload;
+        shareReplayPointerLastPayload = null;
+        if (latest) shareReplayPublishDeltaPayload({pointer: latest}, latest.click ? 'pointer-click' : 'pointer');
+      });
+    }
+  }
+  sharePublish('pointer', payload);
 }
 
 function queueSharePointerMove(event) {
@@ -4609,6 +6140,9 @@ function shareScrollPayloadForElement(element) {
 }
 
 function scheduleShareScrollPublishForElement(element) {
+  if (!shareViewMode && shareReplayFeatureEnabled() && !applyingShareRemoteScroll) {
+    scheduleShareReplayScrollPublishForElement(element);
+  }
   if (!shareCanPublishScroll() || applyingShareRemoteScroll) {
     if (shareViewMode && !shareWriteMode) restoreShareReadonlyScrollTarget(element);
     return;
@@ -4625,6 +6159,23 @@ function scheduleShareScrollPublishForElement(element) {
     if (shareCanPublishScroll()) sharePublish('scroll', state.payload);
   }, 50);
   shareScrollPublishTimers.set(payload.target, state);
+}
+
+function scheduleShareReplayScrollPublishForElement(element) {
+  if (shareViewMode || !shareReplayFeatureEnabled() || applyingShareRemoteScroll) return;
+  const entry = shareReplayScrollEntryForElement(element);
+  if (!entry?.nodeId) return;
+  const key = String(entry.nodeId);
+  if (shareReplayScrollPublishTimers.has(key)) {
+    shareReplayScrollPublishTimers.get(key).entry = entry;
+    return;
+  }
+  const state = {entry};
+  state.timer = setTimeout(() => {
+    shareReplayScrollPublishTimers.delete(key);
+    shareReplayPublishDeltaPayload({scroll: [state.entry]}, 'scroll');
+  }, 50);
+  shareReplayScrollPublishTimers.set(key, state);
 }
 
 function sharePublishFileVersion(path, options = {}) {
@@ -4819,10 +6370,13 @@ function shareWrappedTextNodesByKey() {
 
 function applyShareTextWrapMetrics(metrics = []) {
   if (!shareViewMode || !Array.isArray(metrics)) return;
+  shareAppliedTextWrapMetricsByKey.clear();
   const nodesByKey = shareWrappedTextNodesByKey();
   for (const metric of metrics.slice(0, 80)) {
     if (!metric || typeof metric !== 'object') continue;
     const key = String(metric.key || '').trim();
+    if (!key) continue;
+    shareAppliedTextWrapMetricsByKey.set(key, metric);
     const node = nodesByKey.get(key);
     if (!node?.style) continue;
     const tag = String(node.localName || node.tagName || '').toLowerCase();
@@ -4840,8 +6394,52 @@ function applyShareTextWrapMetrics(metrics = []) {
     } else if (tag === 'input' && node.dataset?.settingPath !== undefined) {
       if (width > 0) node.style.width = `${width}px`;
       if (height > 0) node.style.height = `${height}px`;
+    } else {
+      const current = shareRoundedRect(appSpaceRect(node));
+      const widthDiffers = width > 0 && Math.round(Number(current.width || 0)) !== width;
+      const heightDiffers = height > 0 && Math.round(Number(current.height || 0)) !== height;
+      if (widthDiffers) {
+        node.style.width = `${width}px`;
+        node.style.maxWidth = `${width}px`;
+      }
+      if (heightDiffers) {
+        node.style.height = `${height}px`;
+        node.style.minHeight = `${height}px`;
+        node.style.maxHeight = `${height}px`;
+      }
+      if (widthDiffers || heightDiffers) node.style.overflow = 'hidden';
     }
   }
+}
+
+function shareTextWrapDigestEntryWithHostMetrics(entry, metric = null) {
+  if (!shareViewMode || !metric || typeof metric !== 'object') return entry;
+  const rect = metric.rect && typeof metric.rect === 'object' ? metric.rect : {};
+  const hostLeft = Math.round(Number(rect.left));
+  const hostTop = Math.round(Number(rect.top));
+  const hostWidth = Math.round(Number(rect.width || 0));
+  const hostHeight = Math.round(Number(rect.height || 0));
+  const nextRect = {...entry.rect};
+  if (Number.isFinite(hostLeft)) nextRect.left = hostLeft;
+  if (Number.isFinite(hostTop)) nextRect.top = hostTop;
+  if (hostWidth > 0) nextRect.width = hostWidth;
+  if (hostHeight > 0) nextRect.height = hostHeight;
+  return {
+    ...entry,
+    rect: nextRect,
+    clientWidth: hostWidth > 0 ? hostWidth : entry.clientWidth,
+    clientHeight: hostHeight > 0 ? hostHeight : entry.clientHeight,
+    scrollWidth: Math.round(Number(metric.scrollWidth || entry.scrollWidth || 0)),
+    scrollHeight: Math.round(Number(metric.scrollHeight || entry.scrollHeight || 0)),
+    font: String(metric.font || entry.font || '').slice(0, 200),
+    fontFamily: String(metric.fontFamily || entry.fontFamily || '').slice(0, 160),
+    fontSize: String(metric.fontSize || entry.fontSize || ''),
+    lineHeight: String(metric.lineHeight || entry.lineHeight || ''),
+    letterSpacing: String(metric.letterSpacing || entry.letterSpacing || ''),
+    whiteSpace: String(metric.whiteSpace || entry.whiteSpace || ''),
+    wordBreak: String(metric.wordBreak || entry.wordBreak || ''),
+    overflowWrap: String(metric.overflowWrap || entry.overflowWrap || ''),
+  };
 }
 
 function shareWrappedTextDigestSnapshot() {
@@ -4863,8 +6461,9 @@ function shareWrappedTextDigestSnapshot() {
     const style = getComputedStyle(node);
     const rect = shareRoundedRect(appSpaceRect(node));
     const value = shareWrappedTextValue(node);
-    return {
-      key: shareWrappedTextElementKey(node, index),
+    const key = shareWrappedTextElementKey(node, index);
+    const entry = {
+      key,
       tag: String(node.localName || node.tagName || '').toLowerCase(),
       rect,
       clientWidth: Math.round(Number(node.clientWidth || rect.width || 0)),
@@ -4882,6 +6481,7 @@ function shareWrappedTextDigestSnapshot() {
       wordBreak: String(style?.wordBreak || ''),
       overflowWrap: String(style?.overflowWrap || ''),
     };
+    return shareTextWrapDigestEntryWithHostMetrics(entry, shareAppliedTextWrapMetricsByKey.get(key));
   }).sort((a, b) => a.key.localeCompare(b.key) || a.tag.localeCompare(b.tag));
 }
 
@@ -4898,12 +6498,44 @@ function shareTerminalCellDigest(session, item) {
   };
 }
 
+function shareEditorDigest(panel) {
+  const item = panel?.dataset?.layoutItem || '';
+  const path = panel?.dataset?.filePath || '';
+  const mode = typeof fileEditorPanelMode === 'function' ? fileEditorPanelMode(panel) : '';
+  const state = openFiles.get(path);
+  const kind = state?.loading ? 'loading' : String(state?.kind || 'missing');
+  const content = kind === 'text' ? String(state?.content || '') : '';
+  const error = kind === 'error' || kind === 'too-large' || kind === 'missing'
+    ? String(state?.error || state?.message || '')
+    : '';
+  return {
+    item,
+    path,
+    mode,
+    rect: shareRoundedRect(appSpaceRect(panel)),
+    kind,
+    dirty: state?.dirty === true,
+    contentHash: content ? shareHashText(content) : '',
+    contentLength: content.length,
+    errorHash: error ? shareHashText(error) : '',
+    size: Number.isFinite(Number(state?.size)) ? Number(state.size) : 0,
+    mtime: Number.isFinite(Number(state?.mtime)) ? Number(state.mtime) : 0,
+  };
+}
+
+function shareSlotDigestSnapshot() {
+  return {
+    layout: layoutParamValue(layoutSlots),
+    slots: layoutSlotKeys().map(slot => ({
+      slot,
+      placeholder: paneIsPlaceholder(slot),
+    })),
+  };
+}
+
 function shareGeometryDigestSnapshot() {
   const viewport = appViewport();
-  const slots = layoutSlotKeys().map(slot => ({
-    slot,
-    rect: shareRoundedRect(appSpaceRect(layoutSlotScreenRect(slot))),
-  }));
+  const slots = shareSlotDigestSnapshot();
   const tabStrips = Array.from(document.querySelectorAll('.dv-tabs-container, .pane-tabs')).map((strip, index) => {
     const tabs = Array.from(strip.querySelectorAll('.dockview-pane-tab, .pane-tab'));
     const rect = shareRoundedRect(appSpaceRect(strip));
@@ -4923,12 +6555,9 @@ function shareGeometryDigestSnapshot() {
     };
   }).filter(Boolean);
   const terminalCells = Array.from(terminals.entries()).map(([session, item]) => shareTerminalCellDigest(session, item)).sort((a, b) => a.session.localeCompare(b.session));
-  const editors = Array.from(document.querySelectorAll('.file-editor-panel')).map(panel => ({
-    item: panel.dataset.layoutItem || '',
-    path: panel.dataset.filePath || '',
-    mode: typeof fileEditorPanelMode === 'function' ? fileEditorPanelMode(panel) : '',
-    scrollHeight: Math.round(Number(panel._cmView?.scrollDOM?.scrollHeight || panel.querySelector('.file-editor-preview-pane-panel')?.scrollHeight || 0)),
-  })).sort((a, b) => (a.item || a.path).localeCompare(b.item || b.path));
+  const editors = Array.from(document.querySelectorAll('.file-editor-panel'))
+    .map(shareEditorDigest)
+    .sort((a, b) => (a.item || a.path).localeCompare(b.item || b.path));
   return {
     viewport: {width: viewport.width, height: viewport.height},
     slots,
@@ -4966,17 +6595,422 @@ function shareGeometryDigestFrame() {
   return {digest: shareGeometryDigestValue(snapshot), snapshot};
 }
 
+function shareGeometryRectsWithinTolerance(hostRect = {}, localRect = {}, tolerancePx = 1) {
+  for (const key of ['left', 'top', 'width', 'height']) {
+    const hostValue = Math.round(Number(hostRect?.[key] || 0));
+    const localValue = Math.round(Number(localRect?.[key] || 0));
+    if (Math.abs(hostValue - localValue) > tolerancePx) return false;
+  }
+  return true;
+}
+
+function shareTabStripEntriesEquivalent(hostStrip = {}, localStrip = {}) {
+  return Number(hostStrip?.index) === Number(localStrip?.index)
+    && Number(hostStrip?.count || 0) === Number(localStrip?.count || 0)
+    && stableDigestJson(hostStrip?.items || []) === stableDigestJson(localStrip?.items || [])
+    && shareGeometryRectsWithinTolerance(hostStrip?.rect, localStrip?.rect)
+    && shareGeometryRectsWithinTolerance(hostStrip?.first, localStrip?.first)
+    && shareGeometryRectsWithinTolerance(hostStrip?.last, localStrip?.last);
+}
+
+function shareTabStripsEquivalent(hostTabStrips = [], localTabStrips = []) {
+  if (!Array.isArray(hostTabStrips) || !Array.isArray(localTabStrips)) return false;
+  if (hostTabStrips.length !== localTabStrips.length) return false;
+  for (let index = 0; index < hostTabStrips.length; index += 1) {
+    if (!shareTabStripEntriesEquivalent(hostTabStrips[index], localTabStrips[index])) return false;
+  }
+  return true;
+}
+
 function shareGeometryFirstDifference(host = {}, local = {}) {
   const hostSnapshot = host.snapshot && typeof host.snapshot === 'object' ? host.snapshot : {};
   const localSnapshot = local.snapshot && typeof local.snapshot === 'object' ? local.snapshot : {};
   for (const key of ['viewport', 'fonts', 'slots', 'tabStrips', 'terminalCells', 'editors', 'textWraps']) {
+    if (key === 'tabStrips' && shareTabStripsEquivalent(hostSnapshot[key], localSnapshot[key])) continue;
     if (stableDigestJson(hostSnapshot[key]) !== stableDigestJson(localSnapshot[key])) return key;
   }
   return '';
 }
 
+function shareDebugSecretValues() {
+  const values = new Set();
+  const add = value => {
+    const text = String(value || '');
+    if (text.length >= 4) values.add(text);
+  };
+  add(shareToken);
+  add(shareBootstrap?.token);
+  for (const share of activeShares || []) add(share?.token);
+  return Array.from(values).sort((a, b) => b.length - a.length);
+}
+
+function shareRedactSecretText(value) {
+  return shareReplayRedactText(value);
+}
+
+function shareRedactDiagnosticValue(value, depth = 0) {
+  if (depth > 12) return '[truncated-depth]';
+  if (typeof value === 'string') return shareRedactSecretText(value);
+  if (typeof value !== 'object' || value === null) return value;
+  if (Array.isArray(value)) return value.map(item => shareRedactDiagnosticValue(item, depth + 1));
+  const result = {};
+  for (const [key, rawValue] of Object.entries(value)) {
+    result[key] = /token|secret/i.test(key) && typeof rawValue === 'string'
+      ? '[redacted-share-token]'
+      : shareRedactDiagnosticValue(rawValue, depth + 1);
+  }
+  return result;
+}
+
+function shareDebugNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.round(number * 100) / 100 : null;
+}
+
+function shareDebugRect(rect) {
+  if (!rect) return null;
+  return {
+    left: shareDebugNumber(rect.left),
+    top: shareDebugNumber(rect.top),
+    right: shareDebugNumber(rect.right),
+    bottom: shareDebugNumber(rect.bottom),
+    width: shareDebugNumber(rect.width),
+    height: shareDebugNumber(rect.height),
+  };
+}
+
+function shareDebugVisualViewportSnapshot() {
+  const viewport = window.visualViewport;
+  if (!viewport) return null;
+  return {
+    width: shareDebugNumber(viewport.width),
+    height: shareDebugNumber(viewport.height),
+    offsetLeft: shareDebugNumber(viewport.offsetLeft),
+    offsetTop: shareDebugNumber(viewport.offsetTop),
+    pageLeft: shareDebugNumber(viewport.pageLeft),
+    pageTop: shareDebugNumber(viewport.pageTop),
+    scale: shareDebugNumber(viewport.scale),
+  };
+}
+
+function shareDebugLocationSnapshot() {
+  return {
+    protocol: location.protocol,
+    host: location.host,
+    pathname: location.pathname,
+    search: shareRedactSecretText(location.search || ''),
+    hash: location.hash ? shareRedactSecretText(location.hash) : '',
+  };
+}
+
+function shareDebugContextSnapshot() {
+  const root = appRootElement();
+  return shareRedactDiagnosticValue({
+    share: {
+      id: shareBootstrap?.id || '',
+      mode: shareBootstrap?.mode || '',
+      view: shareViewMode,
+      write: shareWriteMode,
+      fit: shareViewFit,
+      viewerId: shareViewerId || '',
+      repairInFlight: shareGeometryRepairInFlight,
+      resyncInFlight: shareGeometryResyncInFlight,
+    },
+    location: shareDebugLocationSnapshot(),
+    browser: {
+      userAgent: navigator.userAgent || '',
+      platform: navigator.platform || '',
+      language: navigator.language || '',
+      devicePixelRatio: shareDebugNumber(window.devicePixelRatio || 1),
+    },
+    viewport: {
+      native: nativeViewport(),
+      app: appViewport(),
+      visual: shareDebugVisualViewportSnapshot(),
+      documentElement: {
+        clientWidth: document.documentElement?.clientWidth || 0,
+        clientHeight: document.documentElement?.clientHeight || 0,
+      },
+    },
+    mirror: {
+      transform: appMirrorTransformState(),
+      rootRect: shareDebugRect(root?.getBoundingClientRect?.()),
+      stageRect: shareDebugRect(shareMirrorStage?.getBoundingClientRect?.()),
+    },
+  });
+}
+
+function shareGeometryDebugEntryKey(bucket, entry, index) {
+  if (!entry || typeof entry !== 'object') return String(index);
+  if (bucket === 'textWraps') return `${entry.key || index}:${entry.tag || ''}`;
+  if (bucket === 'terminalCells') return String(entry.session || index);
+  if (bucket === 'editors') return String(entry.item || entry.path || index);
+  if (bucket === 'tabStrips') return String((entry.index ?? (entry.items || []).join('|')) || index);
+  if (bucket === 'slots') return String(entry.slot || index);
+  return String(entry.key || entry.id || entry.name || index);
+}
+
+function shareGeometryDebugArrayDelta(bucket, hostValue = [], localValue = []) {
+  const hostMap = new Map(hostValue.map((entry, index) => [shareGeometryDebugEntryKey(bucket, entry, index), entry]));
+  const localMap = new Map(localValue.map((entry, index) => [shareGeometryDebugEntryKey(bucket, entry, index), entry]));
+  const hostOnly = Array.from(hostMap.keys()).filter(key => !localMap.has(key));
+  const localOnly = Array.from(localMap.keys()).filter(key => !hostMap.has(key));
+  const changed = [];
+  for (const key of hostMap.keys()) {
+    if (!localMap.has(key)) continue;
+    const hostEntry = hostMap.get(key);
+    const localEntry = localMap.get(key);
+    if (stableDigestJson(hostEntry) === stableDigestJson(localEntry)) continue;
+    changed.push({
+      key,
+      host: shareRedactDiagnosticValue(hostEntry),
+      local: shareRedactDiagnosticValue(localEntry),
+    });
+    if (changed.length >= 8) break;
+  }
+  return {
+    match: !hostOnly.length && !localOnly.length && !changed.length,
+    hostCount: hostValue.length,
+    localCount: localValue.length,
+    hostOnly: hostOnly.slice(0, 12),
+    localOnly: localOnly.slice(0, 12),
+    changed,
+  };
+}
+
+function shareGeometryDebugObjectDelta(bucket, hostValue = {}, localValue = {}) {
+  const keys = Array.from(new Set([...Object.keys(hostValue || {}), ...Object.keys(localValue || {})]));
+  const changed = [];
+  for (const key of keys) {
+    if (stableDigestJson(hostValue?.[key]) === stableDigestJson(localValue?.[key])) continue;
+    changed.push({
+      key,
+      host: shareRedactDiagnosticValue(hostValue?.[key]),
+      local: shareRedactDiagnosticValue(localValue?.[key]),
+    });
+    if (changed.length >= 12) break;
+  }
+  return {
+    match: changed.length === 0,
+    bucket,
+    changed,
+  };
+}
+
+function shareGeometryDebugBucketDelta(bucket, hostValue, localValue) {
+  if (!bucket) return {match: true};
+  if (Array.isArray(hostValue) || Array.isArray(localValue)) {
+    return shareGeometryDebugArrayDelta(bucket, Array.isArray(hostValue) ? hostValue : [], Array.isArray(localValue) ? localValue : []);
+  }
+  if (hostValue && typeof hostValue === 'object' && localValue && typeof localValue === 'object') {
+    if (bucket === 'slots') {
+      return {
+        ...shareGeometryDebugObjectDelta(bucket, hostValue, localValue),
+        slotEntries: shareGeometryDebugArrayDelta(bucket, hostValue.slots || [], localValue.slots || []),
+      };
+    }
+    return shareGeometryDebugObjectDelta(bucket, hostValue, localValue);
+  }
+  return {
+    match: stableDigestJson(hostValue) === stableDigestJson(localValue),
+    host: shareRedactDiagnosticValue(hostValue),
+    local: shareRedactDiagnosticValue(localValue),
+  };
+}
+
+function shareGeometryDebugDeltas(hostSnapshot = {}, localSnapshot = {}) {
+  return Object.fromEntries(['viewport', 'fonts', 'slots', 'tabStrips', 'terminalCells', 'editors', 'textWraps'].map(bucket => [
+    bucket,
+    shareGeometryDebugBucketDelta(bucket, hostSnapshot[bucket], localSnapshot[bucket]),
+  ]));
+}
+
+function shareReplayFrameByteLength(value = {}) {
+  const text = stableDigestJson(shareRedactDiagnosticValue(value));
+  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(text).length;
+  return text.length;
+}
+
+function shareReplayFrameLatencyMs(payload = {}) {
+  const capturedAt = Number(payload?.capturedAt);
+  const createdAt = Number(payload?.createdAt);
+  const timestampMs = Number.isFinite(capturedAt) && capturedAt > 0
+    ? capturedAt
+    : Number.isFinite(createdAt) && createdAt > 0
+      ? createdAt * 1000
+      : 0;
+  return timestampMs > 0 ? Math.max(0, Math.round(Date.now() - timestampMs)) : null;
+}
+
+function shareReplayRecordFrameMetrics(kind = '', payload = {}, message = {}) {
+  shareReplayLastFrameReceivedAt = Date.now();
+  shareReplayLastLatencyMs = shareReplayFrameLatencyMs(payload);
+  const bytes = shareReplayFrameByteLength({type: message.type || kind, payload, epoch: message.epoch, sequence: message.sequence});
+  if (kind === shareMirrorProtocol.frames.domKeyframe) {
+    shareReplayLastKeyframeBytes = bytes;
+    const policyVersion = Number(payload?.redaction?.policyVersion);
+    if (Number.isFinite(policyVersion)) shareReplayLastRedactionPolicyVersion = policyVersion;
+  } else if (kind === shareMirrorProtocol.frames.domDelta) {
+    shareReplayLastDeltaBytes = bytes;
+  }
+}
+
+function shareReplayTerminalPlaceholderDiagnostics() {
+  const entries = Array.from(shareReplayTerminalPlaceholders.values()).map(entry => ({
+    placeholderId: entry.placeholderId,
+    session: entry.session,
+    rows: entry.rows,
+    cols: entry.cols,
+    terminalEpoch: entry.terminalEpoch,
+    connected: Boolean(document.querySelector?.(`[data-share-terminal-placeholder="${cssEscape(entry.session)}"]`)),
+  }));
+  const connected = entries.filter(entry => entry.connected).length;
+  return {
+    count: entries.length,
+    connected,
+    disconnected: entries.length - connected,
+    healthy: connected === entries.length,
+    entries,
+  };
+}
+
+function shareReplayHealthDiagnostics() {
+  const terminalPlaceholders = shareReplayTerminalPlaceholderDiagnostics();
+  return shareRedactDiagnosticValue({
+    kind: 'share-replay-health',
+    at: new Date().toISOString(),
+    match: shareReplayShellState.status === 'mirrored' && terminalPlaceholders.healthy,
+    status: shareReplayShellState.status || 'idle',
+    userStatus: shareReplayUserStatusText(shareReplayShellState.status || ''),
+    epoch: shareReplayCurrentEpoch,
+    sequence: shareReplayLastSequence,
+    keyframeBytes: shareReplayLastKeyframeBytes,
+    deltaBytes: shareReplayLastDeltaBytes,
+    droppedFrames: shareReplayDroppedFrames,
+    staleFrames: shareReplayStaleFrames,
+    keyframeRequests: shareReplayKeyframeRequestCount,
+    keyframeRequestsSuppressed: shareReplayKeyframeRequestSuppressedCount,
+    keyframeRequestBackoffMs: shareReplayKeyframeBackoffMs,
+    keyframeRequestInFlight: shareReplayKeyframeInFlight,
+    hostKeyframesSuppressed: shareReplayHostKeyframeSuppressedCount,
+    hostKeyframePending: Boolean(shareReplayHostKeyframeTimer),
+    replayLatencyMs: shareReplayLastLatencyMs,
+    lastFrameAgeMs: shareReplayLastFrameReceivedAt ? Math.max(0, Math.round(Date.now() - shareReplayLastFrameReceivedAt)) : null,
+    domDigest: shareReplayCurrentDomDigest(),
+    redactionPolicyVersion: shareReplayLastRedactionPolicyVersion,
+    nodeCount: shareReplayNodeMap.size,
+    terminalPlaceholders,
+    context: shareDebugContextSnapshot(),
+  });
+}
+
+function shareDebugTextForClipboard(report = shareDebugReports[shareDebugReports.length - 1] || null) {
+  const fallback = shareReplayShellActive ? shareReplayHealthDiagnostics() : {message: 'No share debug diagnostics recorded yet'};
+  return JSON.stringify(shareRedactDiagnosticValue(report || fallback), null, 2);
+}
+
+function shareDebugProfileUploadEnabled() {
+  if (!shareViewMode || !shareToken) return false;
+  if (shareBootstrap?.debugProfile === true || shareBootstrap?.debug_profile === true) return true;
+  return Boolean(shareViewerCurrentShare()?.debugProfile);
+}
+
+function shareDebugProfileUploadKind(kind = '') {
+  return String(kind || 'share-debug-profile').replace(/[^A-Za-z0-9_.:-]+/g, '-').slice(0, 120) || 'share-debug-profile';
+}
+
+function shareDebugProfileUploadAllowed(kind = '', floorMs = shareDebugProfileUploadMinIntervalMs) {
+  const key = shareDebugProfileUploadKind(kind);
+  const now = Date.now();
+  const last = Math.max(0, Number(shareDebugProfileLastUploadAtByKind.get(key)) || 0);
+  const floor = Math.max(0, Number(floorMs) || 0);
+  if (last > 0 && now - last < floor) return false;
+  shareDebugProfileLastUploadAtByKind.set(key, now);
+  return true;
+}
+
+function shareDebugProfileUploadPayload(kind = '', detail = {}) {
+  return shareRedactDiagnosticValue({
+    kind: shareDebugProfileUploadKind(kind),
+    at: new Date().toISOString(),
+    viewerId: shareViewerId || shareClientId || '',
+    shareId: shareBootstrap?.id || shareViewerCurrentShare()?.shortId || '',
+    detail,
+  });
+}
+
+async function shareUploadDebugProfile(kind = 'share-debug-profile', detail = {}, options = {}) {
+  if (!shareDebugProfileUploadEnabled()) return false;
+  if (options.force !== true && !shareDebugProfileUploadAllowed(kind, options.floorMs ?? shareDebugProfileUploadMinIntervalMs)) return false;
+  const payload = shareDebugProfileUploadPayload(kind, detail);
+  try {
+    await apiFetchJson('/api/share/debug-profile', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    return true;
+  } catch (error) {
+    if (shareDebugEnabled) console.warn('share debug profile upload failed', error);
+    return false;
+  }
+}
+
+async function copyShareDebugDiagnostics() {
+  await copyTextToClipboard(shareDebugTextForClipboard());
+}
+
+function exposeShareDebugApi() {
+  if (!shareViewMode) return;
+  window.yolomuxShareDebug = {
+    enabled: shareDebugEnabled,
+    uploadEnabled: shareDebugProfileUploadEnabled(),
+    latest: shareDebugReports[shareDebugReports.length - 1] || null,
+    reports: shareDebugReports.slice(),
+    replayHealth: shareReplayHealthDiagnostics,
+    text: shareDebugTextForClipboard,
+    copy: copyShareDebugDiagnostics,
+    upload: shareUploadDebugProfile,
+  };
+}
+
+function recordShareGeometryDebugReport(payload = {}, local = {}, options = {}) {
+  const hostSnapshot = payload.snapshot && typeof payload.snapshot === 'object' ? payload.snapshot : {};
+  const localSnapshot = local.snapshot && typeof local.snapshot === 'object' ? local.snapshot : {};
+  const diff = options.diff || shareGeometryFirstDifference(payload, local);
+  const report = {
+    kind: 'share-geometry-drift',
+    sequence: ++shareDebugSequence,
+    at: new Date().toISOString(),
+    phase: options.phase || 'persistent',
+    match: options.match === true,
+    diff,
+    initialDiff: options.initialDiff || '',
+    hostDigest: payload.digest || shareGeometryDigestValue(hostSnapshot),
+    localDigest: local.digest || shareGeometryDigestValue(localSnapshot),
+    context: shareDebugContextSnapshot(),
+    delta: shareGeometryDebugBucketDelta(diff, hostSnapshot[diff], localSnapshot[diff]),
+    deltas: shareGeometryDebugDeltas(hostSnapshot, localSnapshot),
+    snapshots: {
+      host: shareRedactDiagnosticValue(hostSnapshot),
+      local: shareRedactDiagnosticValue(localSnapshot),
+    },
+  };
+  shareDebugReports = [...shareDebugReports, report].slice(-shareDebugReportLimit);
+  exposeShareDebugApi();
+  void shareUploadDebugProfile(report.kind, report);
+  if (shareDebugEnabled || options.phase === 'persistent') {
+    console.warn('share mirror geometry drift', report);
+  }
+  return report;
+}
+
 async function resyncShareViewerUiState() {
-  if (!shareViewMode || shareGeometryResyncInFlight) return;
+  const now = Date.now();
+  const lastStartedAt = Math.max(0, Math.round(Number(shareGeometryResyncLastStartedAt) || 0));
+  if (!shareViewMode || shareGeometryResyncInFlight) return false;
+  if (lastStartedAt > 0 && now - lastStartedAt < shareGeometryResyncMinIntervalMs) return false;
+  shareGeometryResyncLastStartedAt = now;
   shareGeometryResyncInFlight = true;
   try {
     const payload = await apiFetchJson('/api/share', {cache: 'no-store'});
@@ -4990,8 +7024,10 @@ async function resyncShareViewerUiState() {
       finder: payload?.finder || uiState.finder || {},
       terminalDims: payload?.terminalDims || uiState.terminalDims || [],
     });
+    return true;
   } catch (error) {
     console.warn('share mirror resync failed', error);
+    return false;
   } finally {
     shareGeometryResyncInFlight = false;
   }
@@ -5002,6 +7038,13 @@ function updateShareMirrorDigestStatus(result = shareLastGeometryDigestResult) {
   if (!shareViewerBanner) return;
   const node = shareViewerBanner.querySelector('.share-viewer-mirror-status');
   if (!node) return;
+  if (shareReplayShellActive) {
+    const status = shareReplayShellState.status || 'waiting';
+    node.classList.toggle('match', status === 'mirrored');
+    node.classList.toggle('mismatch', status === 'error');
+    node.textContent = shareReplayUserStatusText(status);
+    return;
+  }
   if (!result) {
     node.textContent = t('share.mirror.checking');
     node.classList.remove('mismatch', 'match');
@@ -5011,7 +7054,7 @@ function updateShareMirrorDigestStatus(result = shareLastGeometryDigestResult) {
   node.classList.toggle('mismatch', result.match === false);
   node.textContent = result.match
     ? t('share.mirror.synced')
-    : t('share.mirror.drift', {diff: result.diff || t('common.unknown')});
+    : t('share.mirror.drift');
 }
 
 function applyShareViewBodyClasses() {
@@ -5021,24 +7064,105 @@ function applyShareViewBodyClasses() {
   document.body?.classList?.toggle('share-view-write', shareWriteMode);
 }
 
-function applyShareGeometryDigest(payload = {}) {
-  if (!payload || typeof payload !== 'object') return;
-  shareLastGeometryDigest = payload;
-  if (!shareViewMode) return;
+function shareNextAnimationFrame() {
+  return new Promise(resolve => requestAnimationFrame(() => resolve()));
+}
+
+async function waitForShareGeometryResyncIdle(maxFrames = 90) {
+  for (let frame = 0; frame < maxFrames; frame += 1) {
+    if (!shareGeometryResyncInFlight) return true;
+    await shareNextAnimationFrame();
+  }
+  return !shareGeometryResyncInFlight;
+}
+
+function shareGeometryDigestCompare(payload = {}) {
   let local = shareGeometryDigestFrame();
   let match = payload.digest === local.digest;
   let diff = match ? '' : shareGeometryFirstDifference(payload, local);
+  if (!match && !diff) match = true;
   if (!match && diff === 'textWraps') {
     applyShareTextWrapMetrics(payload.snapshot?.textWraps || []);
     local = shareGeometryDigestFrame();
     match = payload.digest === local.digest;
     diff = match ? '' : shareGeometryFirstDifference(payload, local);
+    if (!match && !diff) match = true;
   }
-  updateShareMirrorDigestStatus({match, diff});
-  if (!match) {
-    console.warn('share mirror geometry drift', {diff, host: payload.snapshot, local: local.snapshot});
-    void resyncShareViewerUiState();
+  return {match, diff, local};
+}
+
+function shareGeometryRepairActionForDiff(diff = '') {
+  const bucket = String(diff || '');
+  if (bucket === 'terminalCells') return shareMirrorProtocol.frames.terminalHostResize;
+  if (bucket === 'textWraps') return shareMirrorProtocol.frames.textWrapMetrics;
+  if (bucket === shareMirrorProtocol.frames.popupLayer) return shareMirrorProtocol.frames.popupLayer;
+  if (bucket === 'domDigest') return shareMirrorProtocol.frames.domKeyframe;
+  if (['slots', 'tabStrips', 'editors', 'viewport', 'fonts'].includes(bucket)) return shareMirrorProtocol.frames.uiState;
+  return shareMirrorProtocol.frames.uiState;
+}
+
+function applyShareTerminalCellsRepair(terminalCells = []) {
+  if (!shareViewMode || !Array.isArray(terminalCells)) return false;
+  let applied = false;
+  for (const entry of terminalCells) {
+    if (!entry || typeof entry !== 'object') continue;
+    const session = String(entry.session || '').trim();
+    const rows = Math.floor(Number(entry.rows) || 0);
+    const cols = Math.floor(Number(entry.cols) || 0);
+    if (!session || rows <= 0 || cols <= 0) continue;
+    updateShareHostTerminalSize(session, rows, cols);
+    applied = true;
   }
+  return applied;
+}
+
+async function repairShareGeometryBucket(payload = {}, diff = '') {
+  const action = shareGeometryRepairActionForDiff(diff);
+  if (action === shareMirrorProtocol.frames.terminalHostResize) {
+    return applyShareTerminalCellsRepair(payload.snapshot?.terminalCells || []);
+  }
+  if (action === shareMirrorProtocol.frames.textWrapMetrics) {
+    applyShareTextWrapMetrics(payload.snapshot?.textWraps || []);
+    return true;
+  }
+  if (action === shareMirrorProtocol.frames.popupLayer || action === shareMirrorProtocol.frames.domKeyframe) {
+    return false;
+  }
+  return resyncShareViewerUiState();
+}
+
+async function repairShareGeometryDigest(payload = {}, initialDiff = '') {
+  if (shareGeometryRepairInFlight) return;
+  shareGeometryRepairInFlight = true;
+  try {
+    let {match, diff, local} = shareGeometryDigestCompare(payload);
+    for (let attempt = 0; attempt < 2 && !match; attempt += 1) {
+      if (shareGeometryResyncInFlight) await waitForShareGeometryResyncIdle();
+      else await repairShareGeometryBucket(payload, diff);
+      await waitForShareGeometryResyncIdle();
+      await shareNextAnimationFrame();
+      await shareNextAnimationFrame();
+      ({match, diff, local} = shareGeometryDigestCompare(payload));
+    }
+    updateShareMirrorDigestStatus({match, diff});
+    if (!match) {
+      recordShareGeometryDebugReport(payload, local, {phase: 'persistent', diff: diff || initialDiff, initialDiff, match});
+    }
+  } finally {
+    shareGeometryRepairInFlight = false;
+  }
+}
+
+function applyShareGeometryDigest(payload = {}) {
+  if (!payload || typeof payload !== 'object') return;
+  shareLastGeometryDigest = payload;
+  if (!shareViewMode) return;
+  const {match, diff, local} = shareGeometryDigestCompare(payload);
+  if (match) {
+    updateShareMirrorDigestStatus({match, diff});
+    return;
+  }
+  if (!shareGeometryRepairInFlight) void repairShareGeometryDigest(payload, diff);
 }
 
 function publishShareGeometryDigest() {
@@ -5053,8 +7177,23 @@ function installShareGeometryDigestLoop() {
 
 function applyShareUiMessage(message) {
   if ((!shareViewMode && !shareHasActiveShare()) || !message || message.ch !== 'ui') return;
+  if (shareReplayShellActive) {
+    applyShareReplayShellMessage(message);
+    return;
+  }
+  if (shareReadOnlyReplayModeEnabled()) return;
   if (message.sender && message.sender === shareClientId) return;
+  if (shareDropStaleMirrorFrame(message)) return;
   const payload = message.payload && typeof message.payload === 'object' ? message.payload : {};
+  if (message.type === shareMirrorProtocol.frames.inputIntent) {
+    applyShareInputIntent(payload);
+    return;
+  }
+  if (message.type === shareMirrorProtocol.frames.domKeyframeRequest) {
+    const reason = shareReplayKeyframeReason(payload.reason || message.reason || 'join', 'join');
+    sharePublishDomKeyframe(reason);
+    return;
+  }
   if (message.type === 'ui-state') {
     void applyShareUiState(payload);
     return;
@@ -5062,8 +7201,8 @@ function applyShareUiMessage(message) {
   const finishRemoteApply = beginShareRemoteUiApply();
   try {
     if (message.type === 'layout') {
-      const next = layoutFromParam(payload.layout || '', payload.tabs || '');
-      if (next) applyLayoutSlots(next, {prune: false});
+      const next = layoutFromParam(payload.layout || '', payload.tabs || '', {preserveMissingFileExplorer: true});
+      if (next) applyLayoutSlots(next, {prune: false, preserveMissingFileExplorer: true});
       return;
     }
     if (message.type === 'active-tab') {
@@ -5113,7 +7252,7 @@ function applyShareUiMessage(message) {
       renderSharePointerGhost({...payload, sender: message.sender || payload.sender || ''});
       return;
     }
-    if (message.type === 'host-resize') {
+    if (message.type === 'host-resize' || message.type === shareMirrorProtocol.frames.terminalHostResize) {
       updateShareHostTerminalSize(payload.session, payload.rows, payload.cols);
     }
   } finally {
@@ -5203,11 +7342,19 @@ async function refreshActiveShare(options = {}) {
   if (shareStatusRefreshInFlight) return activeShares;
   shareStatusRefreshInFlight = true;
   try {
+    const previousTokens = new Set(activeShares.map(share => share.token).filter(Boolean));
     setActiveShares(normalizeShareListPayload(await apiFetchJson('/api/share', {cache: 'no-store'})));
     shareStatusLastRefreshAt = Date.now();
     renderShareStatusPill();
-    if (shareHasActiveShare()) ensureShareHostSockets();
-    else closeShareHostSocket();
+    if (shareHasActiveShare()) {
+      ensureShareHostSockets();
+      installShareReplayMutationPublisher();
+      if (options.publishReplayKeyframe === true || activeShares.some(share => share?.token && !previousTokens.has(share.token))) {
+        sharePublishDomKeyframe('join');
+      }
+    } else {
+      closeShareHostSocket();
+    }
     return activeShares;
   } catch (error) {
     if (options.silent !== true) statusErr(localizedHtml('share.statusLoadFailed', {error}));
@@ -5299,7 +7446,7 @@ function shareCreateFormHtml(errorText = '') {
   }
   const ttlDefault = Math.max(60, Math.min(28800, Math.round(Number(shareDefaultTtlSeconds) || 600)));
   const ttlMinutesDefault = shareTtlMinutesFromSeconds(ttlDefault);
-  const maxViewersDefault = Math.max(1, Math.min(300, Math.round(Number(shareDefaultMaxViewers) || 5)));
+  const maxViewersDefault = Math.max(1, Math.min(300, Math.round(Number(shareDefaultMaxViewers) || 2)));
   const readOnlyChecked = shareDefaultReadOnly || !shareTlsAvailable();
   const defaultScheme = shareDefaultSchemeForForm(readOnlyChecked);
   return `<form class="share-modal-form" id="shareCreateForm">
@@ -5318,6 +7465,10 @@ function shareCreateFormHtml(errorText = '') {
     <label class="share-checkbox">
       <input name="read_only" type="checkbox" ${readOnlyChecked ? 'checked' : ''}>
       <span>${esc(t('share.readOnly'))}</span>
+    </label>
+    <label class="share-checkbox" title="${esc(t('share.debugProfileHelp'))}">
+      <input name="debug_profile" type="checkbox">
+      <span>${esc(t('share.debugProfile'))}</span>
     </label>
     </div>
     <fieldset class="share-protocol-group">
@@ -5355,7 +7506,10 @@ function shareEntryHtml(share) {
       <strong>${esc(title)}</strong>
       <span>${esc(t('share.id', {id: share.shortId || share.token.slice(0, 8)}))}</span>
     </div>
-    <label class="share-field share-url-field">
+    <label class="share-field share-url-field share-url-primary">
+      <span class="share-url-primary-head">
+        <span>${esc(t('share.url'))}</span>
+      </span>
       <span class="share-url-control">
         <input type="text" readonly value="${esc(share.url)}" data-share-secret>
         <button type="button" class="path-copy-button share-url-copy-button" data-share-copy data-share-secret title="${esc(t('share.copy'))}" aria-label="${esc(t('share.copy'))}"></button>
@@ -5366,6 +7520,7 @@ function shareEntryHtml(share) {
       <span data-share-viewer-count>${esc(t('share.resultViewers', {viewers: share.viewers, max: share.maxViewers || shareDefaultMaxViewers}))}</span>
       <span>${esc(mode)}</span>
       <span>${esc(scheme)}</span>
+      ${share.debugProfile ? `<span title="${esc(t('share.debugProfileHelp'))}">${esc(t('share.debugProfileOn'))}</span>` : ''}
       <button type="button" class="share-extend-button" data-share-extend>${esc(t('share.extendTenMinutes'))}</button>
       <button type="button" class="danger share-stop-inline" data-share-stop>${esc(t('share.stop'))}</button>
     </div>
@@ -5482,6 +7637,7 @@ async function createShareFromForm(form) {
     await refreshActiveShare({silent: true});
     sharePublishLayout();
     sharePublishUiState();
+    sharePublishDomKeyframe('join');
     renderShareStatusPill();
     renderShareManageView();
     statusOk(localizedHtml('share.created'));
@@ -5543,13 +7699,7 @@ async function showShareModal() {
 function updateShareViewerBanner() {
   if (!shareViewerBanner || !shareBootstrap) return;
   const host = shareBootstrap.createdBy || t('share.host');
-  const share = activeShare || normalizeSharePayload({
-    active: true,
-    token: shareToken,
-    ...shareBootstrap,
-    expires_at: shareBootstrap.expiresAt,
-    max_viewers: shareBootstrap.maxViewers,
-  });
+  const share = shareViewerCurrentShare();
   shareViewerBanner.classList.toggle('share-mode-write', share?.mode === 'rw');
   shareViewerBanner.classList.toggle('share-mode-read', share?.mode !== 'rw');
   const text = document.createElement('span');
@@ -5574,8 +7724,25 @@ function updateShareViewerBanner() {
   const mirror = document.createElement('span');
   mirror.className = 'share-viewer-mirror-status';
   mirror.setAttribute('aria-live', 'polite');
-  shareViewerBanner.replaceChildren(text, mirror, fit);
+  const children = [text, mirror, fit];
+  if (shareDebugEnabled) {
+    const debug = document.createElement('button');
+    debug.type = 'button';
+    debug.className = 'share-view-fit-toggle share-debug-copy';
+    debug.dataset.shareViewerControl = 'debug';
+    debug.textContent = 'debug';
+    debug.title = 'Copy share mirror diagnostics';
+    debug.setAttribute('aria-label', debug.title);
+    debug.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      copyShareDebugDiagnostics().catch(error => console.warn('share debug copy failed', error));
+    });
+    children.push(debug);
+  }
+  shareViewerBanner.replaceChildren(...children);
   updateShareMirrorDigestStatus();
+  exposeShareDebugApi();
 }
 
 function installShareViewerBanner() {
@@ -5601,6 +7768,7 @@ function startShareStatusRefresh() {
       expires_at: shareBootstrap?.expiresAt,
       max_viewers: shareBootstrap?.maxViewers,
     })].filter(Boolean));
+    if (redirectExpiredShareViewerToLogin()) return;
     ensureShareHostSockets();
     refreshShareViewerStatus({silent: true});
   } else if (!readOnlyMode) {
@@ -5608,6 +7776,7 @@ function startShareStatusRefresh() {
   }
   if (shareStatusTimer) clearInterval(shareStatusTimer);
   shareStatusTimer = setInterval(() => {
+    if (redirectExpiredShareViewerToLogin()) return;
     renderShareStatusPill();
     updateShareViewerBanner();
     renderShareCountdowns();
@@ -5779,7 +7948,7 @@ function restoreShareScrollTargetsByPrefix(prefix) {
 }
 
 function blockShareReadonlyInteraction(event) {
-  if (!shareViewMode || shareWriteMode) return;
+  if (!shareSemanticReadOnlyMirrorEnabled()) return;
   if (event.target?.closest?.('[data-share-viewer-control]')) return;
   if (event.type === 'scroll') {
     restoreShareReadonlyScrollTarget(event.target);
@@ -5793,7 +7962,7 @@ function blockShareReadonlyInteraction(event) {
 }
 
 function installShareReadonlyInteractionBlocker() {
-  if (!shareViewMode || shareWriteMode) return;
+  if (!shareSemanticReadOnlyMirrorEnabled()) return;
   const blockedEvents = [
     'auxclick',
     'beforeinput',
@@ -5839,7 +8008,7 @@ function startPinTabShortcutChord() {
   clearPendingGlobalShortcutChord();
   pendingGlobalShortcutChord = 'pin-tab';
   pendingGlobalShortcutChordTimer = setTimeout(clearPendingGlobalShortcutChord, globalShortcutChordTimeoutMs);
-  statusEl.textContent = t('shortcuts.pinTabPrompt', {keys: `${appShortcutText('K')} Enter`});
+  statusEl.textContent = t('shortcuts.pinTabPrompt', {keys: `${appShortcutText('K', {shift: true})} Enter`});
 }
 
 function handlePendingGlobalShortcutChord(event, key) {
@@ -5966,7 +8135,8 @@ function handleGlobalShortcutKeydown(event) {
     if (key === 'k') {
       event.preventDefault();
       event.stopPropagation();
-      startPinTabShortcutChord();
+      if (event.shiftKey) startPinTabShortcutChord();
+      else showShareModal();
       return;
     }
     if ((key === 'backspace' || key === 'delete') && globalShortcutTargetAllowsAppAction(event.target)) {

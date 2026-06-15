@@ -214,6 +214,7 @@ function normalizeLayoutSlots(value, options = {}) {
   if (!value || typeof value !== 'object') normalized = emptyPlaceholderLayoutSlots();
   else if (value[layoutTreeKey]) normalized = normalizeTreeLayout(value, options);
   else normalized = normalizeLegacyLayoutSlots(value, options);
+  if (options.preserveMissingFileExplorer === true && !itemInLayout(fileExplorerItemId, normalized)) return normalized;
   return normalizeFileExplorerDock(normalized);
 }
 
@@ -390,13 +391,13 @@ function layoutFromSessionList(values) {
   return layoutWithFileExplorerDockedLeft(layoutSlotsForItems(items, configuredDefaultLayoutMode()));
 }
 
-function layoutFromParam(raw, tabsRaw = '') {
+function layoutFromParam(raw, tabsRaw = '', options = {}) {
   const text = String(raw || '').trim();
   if (!text) return null;
   if (text.toLowerCase() === 'empty') return emptyPlaceholderLayoutSlots();
-  if (text.startsWith(layoutTreeParamPrefix)) return treeLayoutFromParam(text.slice(layoutTreeParamPrefix.length));
-  if (compactLayoutParamLooksLikeTree(text)) return compactTreeLayoutFromParam(text, tabsRaw);
-  const namedSlotLayout = namedSlotLayoutFromParam(text, tabsRaw);
+  if (text.startsWith(layoutTreeParamPrefix)) return treeLayoutFromParam(text.slice(layoutTreeParamPrefix.length), options);
+  if (compactLayoutParamLooksLikeTree(text)) return compactTreeLayoutFromParam(text, tabsRaw, options);
+  const namedSlotLayout = namedSlotLayoutFromParam(text, tabsRaw, options);
   if (namedSlotLayout) return namedSlotLayout;
   const sides = text.split(',');
   if (!sides.some(value => value.trim())) return null;
@@ -419,7 +420,7 @@ function layoutFromParam(raw, tabsRaw = '') {
   return layoutHasRestorableContent(next) ? next : null;
 }
 
-function namedSlotLayoutFromParam(raw, tabsRaw) {
+function namedSlotLayoutFromParam(raw, tabsRaw, options = {}) {
   const tabStates = layoutTabStatesFromParam(tabsRaw);
   if (!tabStates.size) return null;
   const slotNames = String(raw || '')
@@ -440,11 +441,11 @@ function namedSlotLayoutFromParam(raw, tabsRaw) {
   }
   if (!leaves.length) return null;
   next[layoutTreeKey] = leaves.reduce((tree, leaf) => (tree ? splitNode('row', tree, leaf) : leaf), null);
-  const normalized = normalizeLayoutSlots(next);
+  const normalized = normalizeLayoutSlots(next, options);
   return layoutHasRestorableContent(normalized) ? normalized : null;
 }
 
-function treeLayoutFromParam(raw) {
+function treeLayoutFromParam(raw, options = {}) {
   try {
     const payload = JSON.parse(raw);
     if (!payload || typeof payload !== 'object') return null;
@@ -460,7 +461,7 @@ function treeLayoutFromParam(raw) {
         ? emptyPlaceholderPaneState()
         : paneStateWithTabs(tabs.map(resolveLayoutItem), active);
     }
-    const normalized = normalizeLayoutSlots(next);
+    const normalized = normalizeLayoutSlots(next, options);
     return layoutHasRestorableContent(normalized) ? normalized : null;
   } catch (_) {
     return null;
@@ -471,7 +472,7 @@ function compactLayoutParamLooksLikeTree(text) {
   return /^(row|col|column)(?:@\d+(?:\.\d+)?)?\(/.test(text);
 }
 
-function compactTreeLayoutFromParam(raw, tabsRaw) {
+function compactTreeLayoutFromParam(raw, tabsRaw, options = {}) {
   const parser = {text: String(raw || ''), index: 0};
   const tree = parseCompactLayoutNode(parser);
   skipCompactLayoutWhitespace(parser);
@@ -482,7 +483,7 @@ function compactTreeLayoutFromParam(raw, tabsRaw) {
   for (const slot of layoutLeafSlots(tree)) {
     next[slot] = tabStates.get(slot) || emptyPlaceholderPaneState();
   }
-  const normalized = normalizeLayoutSlots(next);
+  const normalized = normalizeLayoutSlots(next, options);
   return layoutHasRestorableContent(normalized) ? normalized : null;
 }
 
@@ -651,9 +652,12 @@ function shareBootstrapLayoutParams() {
 }
 
 function initialLayoutSlots() {
-  const params = shareBootstrapLayoutParams() || new URLSearchParams(location.search);
+  const shareParams = shareBootstrapLayoutParams();
+  const params = shareParams || new URLSearchParams(location.search);
   maybeAdoptYoagentDeepLink(params);
-  const layoutFromUrl = layoutFromParam(params.get('layout') || '', params.get('tabs') || '');
+  const layoutFromUrl = layoutFromParam(params.get('layout') || '', params.get('tabs') || '', {
+    preserveMissingFileExplorer: shareParams !== null,
+  });
   if (layoutFromUrl) return layoutWithDebugPaneActive(layoutFromUrl);
   const raw = params.get('sessions') || params.get('active') || '';
   const selected = [];
@@ -1485,6 +1489,7 @@ function keyboardShortcutCatalog() {
     {section: t('shortcuts.section.app'), items: [
       {label: t('shortcuts.commandPalette'), keys: appShortcutText('P', {shift: true})},
       {label: t('shortcuts.fileQuickOpen'), keys: appShortcutText('P')},
+      {label: t('share.title'), keys: appShortcutText('K')},
       {label: t('shortcuts.toggleFinder', {name: fileExplorerLabel()}), keys: appShortcutText('B')},
       {label: t('shortcuts.openPreferences'), keys: appShortcutText(',')},
       {label: t('shortcuts.keyboardShortcuts'), keys: '?'},
@@ -1507,7 +1512,7 @@ function keyboardShortcutCatalog() {
       {label: t('shortcuts.redoChunk'), keys: appShortcutText('Z', {shift: true})},
     ]},
     {section: t('shortcuts.section.tabsPanes'), items: [
-      {label: t('shortcuts.pinTab'), keys: t('shortcuts.keys.pinTab', {k: appShortcutText('K')})},
+      {label: t('shortcuts.pinTab'), keys: t('shortcuts.keys.pinTab', {k: appShortcutText('K', {shift: true})})},
       {label: t('shortcuts.closeTab'), keys: t('shortcuts.keys.closeTab', {w: appShortcutText('W'), bs: appShortcutText('Backspace')})},
       {label: t('shortcuts.moveTab'), keys: t('shortcuts.keys.dragTab')},
       {label: t('shortcuts.sessionActions'), keys: t('shortcuts.keys.rightClick')},
@@ -1533,7 +1538,7 @@ function keyboardShortcutsHtml() {
 function ensureKeyboardShortcutsOverlay() {
   if (keyboardShortcutsNode) return keyboardShortcutsNode;
   const node = document.createElement('div');
-  node.className = 'keyboard-shortcuts-overlay';
+  node.className = 'app-modal-overlay keyboard-shortcuts-overlay';
   node.hidden = true;
   node.innerHTML = `
     <div class="keyboard-shortcuts-dialog" role="dialog" aria-modal="true" aria-label="${esc(t('shortcuts.title'))}">
@@ -1547,7 +1552,7 @@ function ensureKeyboardShortcutsOverlay() {
     if (event.target === node) closeKeyboardShortcutsOverlay();
   });
   node.querySelector('.keyboard-shortcuts-close')?.addEventListener('click', closeKeyboardShortcutsOverlay);
-  document.body.appendChild(node);
+  appOverlayRootElement().appendChild(node);
   keyboardShortcutsNode = node;
   return node;
 }
@@ -1643,6 +1648,7 @@ function commandPaletteKeybinding(label, detail = '') {
   const text = `${label} ${detail}`;
   if (/command palette/i.test(text)) return appShortcutText('P', {shift: true});
   if (/open file/i.test(text)) return appShortcutText('P');
+  if (/yo!share|sharing/i.test(text)) return appShortcutText('K');
   if (/toggle .*file explorer|toggle .*finder/i.test(text)) return appShortcutText('B');
   if (/preferences/i.test(text)) return appShortcutText(',');
   if (/keyboard shortcuts/i.test(text)) return '?';
@@ -2419,7 +2425,7 @@ function commandPaletteItemLabelHtml(item, query) {
 function ensureCommandPalette() {
   if (commandPaletteNode) return commandPaletteNode;
   const node = document.createElement('div');
-  node.className = 'command-palette';
+  node.className = 'app-modal-overlay command-palette';
   node.hidden = true;
   node.innerHTML = `
     <div class="command-palette-dialog" role="dialog" aria-modal="true" aria-label="${esc(t('palette.aria'))}">
@@ -2470,7 +2476,7 @@ function ensureCommandPalette() {
     commandPaletteIndex = Number(row.dataset.commandIndex || 0);
     invokeCommandPaletteSelection();
   });
-  document.body.appendChild(node);
+  appOverlayRootElement().appendChild(node);
   commandPaletteNode = node;
   return node;
 }
@@ -3250,7 +3256,9 @@ function applyLayoutSlots(nextSlots, options = {}) {
   // detect a same-shape change (reorder/activate/move/replace) so we can skip the full
   // topbar + grid teardown. Compute the shape signature before and after the slot reassignment.
   const prevShape = layoutShapeSignature(layoutSlots);
-  layoutSlots = normalizeLayoutSlots(nextSlots);
+  layoutSlots = normalizeLayoutSlots(nextSlots, {
+    preserveMissingFileExplorer: options.preserveMissingFileExplorer === true,
+  });
   activeSessions = sessionsFromLayout();
   clearFocusForInactiveLayout();
   updateActiveSessionParam();
@@ -3264,7 +3272,7 @@ function applyLayoutSlots(nextSlots, options = {}) {
     forceFull: options.forceFull === true,
   });
   for (const session of activeSessions.filter(isTmuxSession)) ensureTerminalRunning(session);
-  scheduleShareUiStatePublish();
+  scheduleShareTopologySnapshot(options.shareReason || 'layout');
   // do NOT re-poll the server on a pure client-side layout change. refreshTranscripts()
   // fires 3..(3+N) network round-trips and a second full render wave gated behind their latency —
   // the bulk of the "moving a tab takes several seconds" delay. Freshness is already covered by the

@@ -36,6 +36,8 @@ python3 yolomux.py --self-signed --dang
 
 Open `https://localhost:9998/`. The first launch shows a setup page — see [First launch](#first-launch) below. With no `--sessions` filter, YOLOmux discovers every tmux session from `tmux list-sessions`. `--self-signed` creates a local HTTPS certificate under `~/.local/state/yolomux/tls/`; your browser will warn because it is not signed by a public CA. `--dang` is the short alias for `--dangerously-yolo`, which makes the UI's `+ Claude` and `+ Codex` buttons launch with their dangerous bypass flags.
 
+For local automated verification only, `YOLOMUX_TEST_AUTH_BYPASS=1` starts the server with a test admin identity so scripts and Selenium can call login-gated routes without creating cookies. Do not use that environment variable for normal runs, production, or any server reachable by untrusted clients.
+
 ## First launch
 
 On first run YOLOmux creates `~/.config/yolomux/auth.yaml` with every account commented out. No login works until you uncomment one:
@@ -75,7 +77,7 @@ When a Tab is a tmux session, that session has its own internal hierarchy — tm
 
 ## Daily use
 
-Open YOLOmux after setup. Existing tmux sessions appear as tabs. (The detailed pane/tab/Finder/Differ behavior contract lives in [`docs/GUI_SPECS.md`](docs/GUI_SPECS.md); this list is the daily-driver essentials.)
+Open YOLOmux after setup. Existing tmux sessions appear as tabs. (The detailed pane/tab/Finder/Differ behavior contract lives in [`docs/specs/GUI.md`](docs/specs/GUI.md); this list is the daily-driver essentials.)
 
 - Click a tab to show it in that pane. Use the `Tabs` menu to activate minimized or inactive tabs.
 - Drag a tab between pane tab bars to move it, drop near a pane edge to split that pane, or drop on the outer root edge for a full-span pane. Pane splits are percentage-based and encode into the shareable page URL.
@@ -87,7 +89,7 @@ Open YOLOmux after setup. Existing tmux sessions appear as tabs. (The detailed p
 - Finder / File Explorer is docked by default on fresh and sessions-only URLs. Hiding it with `Mod+B`, the close button, or File -> Finder shows the restore shortcut in the status line.
 - Finder / File Explorer self-heals after reconnect, wake, or Dockview remeasure if it vanished without an explicit user close. A deliberate hide stays hidden in that browser tab until restored.
 - The pane info line shows one button per tmux window (`0:bash`, `1:codex`, ...); clicking a button switches that session to the matching tmux window. The pane toolbar shows transcripts (`Tx`), asks for an AI summary (`AI`), and opens the event log (`Log`).
-- File -> `YO!share...` creates short live magic URLs for the entire current YOLOmux layout: panes, positions, active/background tabs, Finder/Differ/Tabber, editor/Preferences state, and every tmux session in those panes. Defaults are short-lived, read-only, http links for easy viewing; write access requires https. Viewers render the host viewport inside a scaled mirror frame, so layout, tabs, terminal output, scrolling, YO!info rows/sort/columns/scroll, Finder root/expansion, saved file/editor state, host menus, and the target-shaped ghost cursor track the host without resizing host tmux panes. The host can extend active shares and see connected users with duration, IP, and browser type; viewers see updated countdowns but cannot manage the share.
+- File -> `YO!share...` creates short live magic URLs for the entire current YOLOmux layout: panes, positions, active/background tabs, Finder/Differ/Tabber, editor/Preferences state, host menus, and every tmux session in those panes. Defaults are short-lived, read-only, http links for easy viewing; write access requires https. Share viewers use host-rendered DOM replay: the host streams sanitized `#appRoot` keyframes and deltas into an inert scaled mirror, while terminal content stays on the existing host-sized tmux byte stream mounted through terminal placeholders. Write viewers do not run their own app mutations; allowed input is forwarded as validated intents and visual feedback comes back from host replay frames. The host can extend active shares and see connected users with duration, IP, and browser type; viewers see updated countdowns and replay health but cannot manage the share.
 - Finder switches between the file tree and a full-pane `Differ` mode (per-repo FROM/TO diff controls). The root toggle defaults to `Sync`, which follows the last clicked/typed session's affected repos and highlights changed paths; stale background syncs from other sessions cannot retarget it afterward.
 - File editor refresh errors preserve the backend/API reason and HTTP status before falling back to a generic `Cannot inspect <path>` message; valid files in the current worktree continue refreshing without being marked unknown.
 - YO markers resync after client-events reconnect, page wake, or network restore, and fall back to a narrow auto-status poll while the live event stream is disconnected.
@@ -159,6 +161,8 @@ python3 yolomux.py --cert fullchain.pem --key privkey.pem   # bring your own
 
 Cookies have a 90-day sliding lifetime and survive server restarts. Cookies are scoped by port, so dev and production servers on the same host do not overwrite each other. Changing a user's password invalidates existing cookies for that user.
 
+`YOLOMUX_TEST_AUTH_BYPASS=1` is the only no-login mode, and it is for local tests and one-off verification commands. When enabled, YOLOmux treats non-share requests as admin, while share-token requests remain scoped readonly guests.
+
 ## Agent permissions & YOLO
 
 **Launching agents.** Claude's auto permission mode:
@@ -210,6 +214,8 @@ The optional `risk:` field is a label shown in the YOLO event log. Keep it to th
 ## Remote access
 
 YOLOmux binds `--host 0.0.0.0` (all interfaces) by default, on purpose: the product is built for reaching your sessions from a phone or another machine on a trusted LAN, and every request is gated by the login layer. If that's your setup, restrict the port to trusted IPs at the firewall:
+
+Never combine `YOLOMUX_TEST_AUTH_BYPASS=1` with a remotely reachable bind address. The bypass is only for localhost/dev test harnesses.
 
 ```bash
 sudo ufw allow from <client-ip> to any port 9998 proto tcp

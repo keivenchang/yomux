@@ -147,7 +147,7 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert payload["choices"]["updates.notify_level"] == ["major", "minor", "patch", "none"]
     assert payload["settings"]["general"]["startup_tips"] is True
     assert payload["settings"]["uploads"]["max_bytes"] == UPLOAD_MAX_BYTES
-    assert payload["settings"]["share"] == {"ttl_seconds": 600, "max_viewers": 5, "read_only": True, "scheme": "http", "view_fit": "cover"}
+    assert payload["settings"]["share"] == {"ttl_seconds": 600, "max_viewers": 2, "read_only": True, "scheme": "http", "view_fit": "cover"}
     assert payload["settings"]["yoagent"]["backend"] == "auto"
     assert payload["settings"]["yoagent"]["auto_refresh"] is False
     assert payload["settings"]["yoagent"]["refresh_interval_seconds"] == 120
@@ -290,7 +290,9 @@ def test_login_locale_picker_writes_general_language():
     assert 'dir="rtl"' in login_html(current_locale="ar")
     assert 'dir="ltr"' in login_html(current_locale="de")
     # The login chrome localizes to the saved locale (server-side, pre-auth).
-    assert "Sign in" in login_html(current_locale="en")
+    english_login = login_html(current_locale="en")
+    assert "Sign in" in english_login
+    assert "<h1>" not in english_login
     assert "登入" in login_html(current_locale="zh-Hant")  # Sign in (Traditional)
     assert "Iniciar sesión" in login_html(current_locale="es")
     assert "ログイン" in login_html(current_locale="ja")
@@ -394,6 +396,8 @@ def test_stale_saved_poll_defaults_migrate_to_current_defaults():
     assert rounded_background_legacy["performance"]["server_background_file_event_poll_ms"] == defaults["performance"]["server_background_file_event_poll_ms"]
     rounded_directory_legacy = sanitize_settings({"performance": {"server_directory_event_poll_ms": 5000}})
     assert rounded_directory_legacy["performance"]["server_directory_event_poll_ms"] == defaults["performance"]["server_directory_event_poll_ms"]
+    stale_share = sanitize_settings({"share": {"max_viewers": 5}})
+    assert stale_share["share"]["max_viewers"] == defaults["share"]["max_viewers"]
 
     custom = sanitize_settings({
         "performance": {
@@ -403,12 +407,14 @@ def test_stale_saved_poll_defaults_migrate_to_current_defaults():
             "server_background_file_event_poll_ms": 253,
             "server_directory_event_poll_ms": 252,
         },
+        "share": {"max_viewers": 7},
     })
     assert custom["performance"]["latency_refresh_ms"] == 3002
     assert custom["performance"]["event_log_refresh_ms"] == 5004
     assert custom["performance"]["server_event_poll_ms"] == 251
     assert custom["performance"]["server_background_file_event_poll_ms"] == 253
     assert custom["performance"]["server_directory_event_poll_ms"] == 252
+    assert custom["share"]["max_viewers"] == 7
 
 
 def test_notify_transitions_accepts_pr_keys_and_drops_unknown():

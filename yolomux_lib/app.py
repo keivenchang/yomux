@@ -176,9 +176,13 @@ TRANSCRIPTS_PAYLOAD_CACHE_SECONDS = 15.0
 CONTEXT_ITEMS_CACHE_MAX_ITEMS = 128
 SHARE_TOKEN_DEFAULT_TTL_SECONDS = 3600.0
 SHARE_TOKEN_MAX_TTL_SECONDS = 8.0 * 3600.0
-SHARE_MAX_VIEWERS_DEFAULT = 5
+SHARE_MAX_VIEWERS_DEFAULT = 2
 SHARE_MAX_VIEWERS_HARD_LIMIT = 300
 SHARE_SHORT_ID_BYTES = 6
+SHARE_DEBUG_PROFILE_EVENT_LIMIT = 100
+SHARE_DEBUG_PROFILE_LOG_DIR = Path(os.environ.get("YOLOMUX_SHARE_DEBUG_DIR", "/tmp/yolomux-share-debug"))
+SHARE_DEBUG_PROFILE_KEY_RE = re.compile(r"(token|secret|password|passwd|authorization|cookie|api[_-]?key|bearer)", re.I)
+SHARE_DEBUG_PROFILE_URL_RE = re.compile(r"(?:https?://[^\"'\s<>]+)?/share/[A-Za-z0-9_-]+(?:#[^\"'\s<>]*)?")
 SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS = 1.25
 SERVER_WATCHED_PR_EVENT_POLL_SECONDS = 60.0
 DEFAULT_TABBER_ACTIVITY_REFRESH_SECONDS = 15.0
@@ -807,29 +811,67 @@ class TmuxWebtermApp:
         text = str(value or "").strip()
         return text[:80] if text else "unknown"
 
+    def share_browser_label(self, name: str, version: str = "") -> str:
+        clean_name = str(name or "").strip() or "Browser"
+        clean_version = str(version or "").strip()
+        if clean_version:
+            clean_version = re.split(r"[^0-9A-Za-z._-]", clean_version, maxsplit=1)[0]
+        return f"{clean_name} {clean_version}"[:80] if clean_version else clean_name[:80]
+
+    def share_browser_version(self, user_agent: str, *patterns: str) -> str:
+        for pattern in patterns:
+            match = re.search(pattern, user_agent, re.IGNORECASE)
+            if match:
+                return match.group(1)
+        return ""
+
     def normalize_share_browser_type(self, user_agent: Any) -> str:
         text = str(user_agent or "").strip()
         if not text:
             return "Unknown"
         lower = text.lower()
         if "edg/" in lower or "edge/" in lower:
-            return "Edge"
+            version = self.share_browser_version(
+                text,
+                r"\bEdgA?/([0-9][0-9A-Za-z._-]*)",
+                r"\bEdge/([0-9][0-9A-Za-z._-]*)",
+            )
+            return self.share_browser_label("Edge", version)
         if "opr/" in lower or "opera" in lower:
-            return "Opera"
+            version = self.share_browser_version(
+                text,
+                r"\bOPR/([0-9][0-9A-Za-z._-]*)",
+                r"\bOpera/([0-9][0-9A-Za-z._-]*)",
+            )
+            return self.share_browser_label("Opera", version)
         if "samsungbrowser/" in lower:
-            return "Samsung Internet"
+            version = self.share_browser_version(text, r"\bSamsungBrowser/([0-9][0-9A-Za-z._-]*)")
+            return self.share_browser_label("Samsung Internet", version)
         if "firefox/" in lower or "fxios/" in lower:
-            return "Firefox"
+            version = self.share_browser_version(
+                text,
+                r"\bFirefox/([0-9][0-9A-Za-z._-]*)",
+                r"\bFxiOS/([0-9][0-9A-Za-z._-]*)",
+            )
+            return self.share_browser_label("Firefox", version)
         if "crios/" in lower or "chrome/" in lower or "chromium/" in lower:
-            return "Chrome"
+            version = self.share_browser_version(
+                text,
+                r"\bCriOS/([0-9][0-9A-Za-z._-]*)",
+                r"\bChrome/([0-9][0-9A-Za-z._-]*)",
+                r"\bChromium/([0-9][0-9A-Za-z._-]*)",
+            )
+            return self.share_browser_label("Chrome", version)
         if "safari/" in lower:
-            return "Safari"
+            version = self.share_browser_version(text, r"\bVersion/([0-9][0-9A-Za-z._-]*)")
+            return self.share_browser_label("Safari", version)
         if "msie " in lower or "trident/" in lower:
             return "Internet Explorer"
         if "curl/" in lower:
-            return "curl"
+            return self.share_browser_label("curl", self.share_browser_version(text, r"\bcurl/([0-9][0-9A-Za-z._-]*)"))
         if "python-requests/" in lower:
-            return "Python"
+            version = self.share_browser_version(text, r"\bpython-requests/([0-9][0-9A-Za-z._-]*)")
+            return self.share_browser_label("Python", version)
         return "Browser"
 
     def normalize_share_viewer_record(self, value: Any, now: float | None = None) -> dict[str, Any] | None:
@@ -1175,6 +1217,7 @@ class TmuxWebtermApp:
             "max_viewers": int(record.get("max_viewers") or 0),
             "viewers": self.share_record_viewer_count(record),
             "viewer_details": self.share_record_viewer_details(record),
+            "debug_profile": bool(record.get("debug_profile")),
             "viewport": ui_state.get("viewport") if isinstance(ui_state.get("viewport"), dict) else {},
         }
 
@@ -1186,6 +1229,7 @@ class TmuxWebtermApp:
 
     def share_payload_for_record(self, token: str, record: dict[str, Any], base_url: str = "") -> dict[str, Any]:
         ui_state = record.get("ui_state") if isinstance(record.get("ui_state"), dict) else {}
+        debug_profile = bool(record.get("debug_profile"))
         return {
             "ok": True,
             "active": True,
@@ -1204,6 +1248,8 @@ class TmuxWebtermApp:
             "viewers": self.share_record_viewer_count(record),
             "viewer_details": self.share_record_viewer_details(record),
             "http_allowed": bool(record.get("http_allowed")),
+            "debug_profile": debug_profile,
+            "debugProfile": debug_profile,
             "finder": record.get("finder") if isinstance(record.get("finder"), dict) else {},
             "layout": str(record.get("layout") or ""),
             "tabs": str(record.get("tabs") or ""),
@@ -1228,6 +1274,7 @@ class TmuxWebtermApp:
         read_only: Any = None,
         scheme: Any = None,
         max_viewers: Any = None,
+        debug_profile: Any = False,
         request_is_https: bool = False,
         tls_available: bool = False,
     ) -> tuple[dict[str, Any], HTTPStatus]:
@@ -1281,6 +1328,8 @@ class TmuxWebtermApp:
                 "scheme": share_scheme,
                 "short_id": short_id,
                 "http_allowed": share_scheme == "http" and share_mode == "ro",
+                "debug_profile": bool(debug_profile),
+                "debug_profile_events": [],
             }
             self.share_tokens[token] = record
         return self.share_payload_for_record(token, record, base_url) | {"ttl_seconds": bounded_ttl}, HTTPStatus.OK
@@ -1345,6 +1394,81 @@ class TmuxWebtermApp:
             return {"ok": False, "active": False, "error": "share token expired or revoked"}, HTTPStatus.UNAUTHORIZED
         clean_token = str(record.get("token") or token or "")
         return self.share_payload_for_record(clean_token, record, base_url) | {"shares": []}, HTTPStatus.OK
+
+    def redact_share_debug_profile_value(self, value: Any, key: str = "", depth: int = 0) -> Any:
+        if depth > 12:
+            return "[truncated-depth]"
+        if SHARE_DEBUG_PROFILE_KEY_RE.search(str(key or "")):
+            return "[redacted-share-token]"
+        if isinstance(value, dict):
+            return {str(name)[:120]: self.redact_share_debug_profile_value(item, str(name), depth + 1) for name, item in value.items()}
+        if isinstance(value, list):
+            return [self.redact_share_debug_profile_value(item, key, depth + 1) for item in value[:256]]
+        if isinstance(value, str):
+            text = SHARE_DEBUG_PROFILE_URL_RE.sub("[redacted-share-url]", value)
+            text = re.sub(r"([?#&](?:t|token|share|shareToken|share_token)=)[^&#\s\"']+", r"\1[redacted-share-token]", text, flags=re.I)
+            text = re.sub(r"\b((?:token|shareToken|share_token)=)[^&#\s\"']+", r"\1[redacted-share-token]", text, flags=re.I)
+            return text[:4000] + ("[truncated]" if len(text) > 4000 else "")
+        return value
+
+    def append_share_debug_profile_event(self, event: dict[str, Any]) -> tuple[bool, str]:
+        short_id = str(event.get("share_id") or "unknown")
+        safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", short_id).strip(".")[:80] or "unknown"
+        try:
+            SHARE_DEBUG_PROFILE_LOG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+            path = SHARE_DEBUG_PROFILE_LOG_DIR / f"{safe_id}.jsonl"
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(event, sort_keys=True, separators=(",", ":"), default=str) + "\n")
+            return True, str(path)
+        except OSError as exc:
+            return False, str(exc)[:240]
+
+    def record_share_debug_profile(self, token: str, payload: dict[str, Any], *, ip: str = "", user_agent: str = "") -> tuple[dict[str, Any], HTTPStatus]:
+        raw_token = str(token or "")
+        if not raw_token:
+            return {"ok": False, "error": "share token required"}, HTTPStatus.UNAUTHORIZED
+        if not isinstance(payload, dict):
+            return {"ok": False, "error": "debug profile payload must be an object"}, HTTPStatus.BAD_REQUEST
+        now = time.time()
+        clean_payload = self.redact_share_debug_profile_value(payload)
+        event: dict[str, Any] | None = None
+        with self.share_tokens_lock:
+            self.prune_inactive_share_tokens_locked(now)
+            for stored_token, record in self.share_tokens.items():
+                if not hmac.compare_digest(stored_token, raw_token):
+                    continue
+                if record.get("revoked") or not self.share_record_sessions_are_active(record):
+                    return {"ok": False, "error": "share token expired or revoked"}, HTTPStatus.UNAUTHORIZED
+                if not bool(record.get("debug_profile")):
+                    return {"ok": False, "error": "debug/profiling upload is not enabled for this share"}, HTTPStatus.FORBIDDEN
+                event = {
+                    "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "share_id": str(record.get("short_id") or ""),
+                    "kind": str(clean_payload.get("kind") or "share-debug-profile")[:120],
+                    "viewer_id": str(clean_payload.get("viewerId") or clean_payload.get("viewer_id") or "")[:120],
+                    "client_ip": self.normalize_share_client_ip(ip),
+                    "browser": self.normalize_share_browser_type(user_agent),
+                    "payload": clean_payload,
+                }
+                events = record.setdefault("debug_profile_events", [])
+                if not isinstance(events, list):
+                    events = []
+                    record["debug_profile_events"] = events
+                events.append(event)
+                del events[:-SHARE_DEBUG_PROFILE_EVENT_LIMIT]
+                break
+        if event is None:
+            return {"ok": False, "error": "share token expired or revoked"}, HTTPStatus.UNAUTHORIZED
+        logged, log_detail = self.append_share_debug_profile_event(event)
+        result = {
+            "ok": True,
+            "stored": True,
+            "logged": logged,
+            "events": 1,
+        }
+        if not logged:
+            result["log_error"] = log_detail
+        return result, HTTPStatus.OK
 
     def extend_share_token(self, token_or_short_id: str, add_seconds: Any = 600, *, base_url: str = "") -> tuple[dict[str, Any], HTTPStatus]:
         target = str(token_or_short_id or "").strip()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import html
 import json
@@ -75,6 +76,120 @@ SHARE_REFRESH_CLIENT_MIN_SECONDS = 1.0
 SHARE_POINTER_MAX_WRITES_PER_SECOND = 1500
 SHARE_POINTER_MAX_HZ = 30
 SHARE_POINTER_CLICK_QUEUE_LIMIT = 32
+SHARE_MIRROR_PROTOCOL_VERSION = 1
+SHARE_MIRROR_FRAME_UI_STATE = "ui-state"
+SHARE_MIRROR_FRAME_LAYOUT = "layout"
+SHARE_MIRROR_FRAME_VIEWPORT = "viewport"
+SHARE_MIRROR_FRAME_APPEARANCE = "appearance"
+SHARE_MIRROR_FRAME_POPUP_LAYER = "popup-layer"
+SHARE_MIRROR_FRAME_GEOMETRY_DIGEST = "geometry-digest"
+SHARE_MIRROR_FRAME_HOST_RESIZE = "host-resize"
+SHARE_MIRROR_FRAME_POINTER = "pointer"
+SHARE_MIRROR_FRAME_SCROLL = "scroll"
+SHARE_MIRROR_FRAME_FILE_VERSION = "file-version"
+SHARE_MIRROR_FRAME_ACTIVE_TAB = "active-tab"
+SHARE_MIRROR_FRAME_FOCUS = "focus"
+SHARE_MIRROR_FRAME_FINDER_MODE = "finder-mode"
+SHARE_MIRROR_FRAME_MENU = "menu"
+SHARE_MIRROR_FRAME_SHARE_STATUS = "share-status"
+SHARE_MIRROR_FRAME_DOM_KEYFRAME = "dom-keyframe"
+SHARE_MIRROR_FRAME_DOM_DELTA = "dom-delta"
+SHARE_MIRROR_FRAME_DOM_KEYFRAME_REQUEST = "dom-keyframe-request"
+SHARE_MIRROR_FRAME_DOM_KEYFRAME_ACK = "dom-keyframe-ack"
+SHARE_MIRROR_FRAME_DOM_REPLAY_ERROR = "dom-replay-error"
+SHARE_MIRROR_FRAME_TERMINAL_HOST_RESIZE = "terminal-host-resize"
+SHARE_MIRROR_FRAME_TEXT_WRAP_METRICS = "text-wrap-metrics"
+SHARE_MIRROR_FRAME_INPUT_INTENT = "input-intent"
+SHARE_MIRROR_REPLAY_FRAME_TYPES = frozenset({
+    SHARE_MIRROR_FRAME_DOM_KEYFRAME,
+    SHARE_MIRROR_FRAME_DOM_DELTA,
+    SHARE_MIRROR_FRAME_DOM_KEYFRAME_REQUEST,
+    SHARE_MIRROR_FRAME_DOM_KEYFRAME_ACK,
+    SHARE_MIRROR_FRAME_DOM_REPLAY_ERROR,
+    SHARE_MIRROR_FRAME_TERMINAL_HOST_RESIZE,
+})
+SHARE_MIRROR_REPLAY_VIEWER_CONTROL_FRAME_TYPES = frozenset({
+    SHARE_MIRROR_FRAME_DOM_KEYFRAME_REQUEST,
+    SHARE_MIRROR_FRAME_DOM_KEYFRAME_ACK,
+    SHARE_MIRROR_FRAME_DOM_REPLAY_ERROR,
+})
+SHARE_MIRROR_FRAME_TYPES = frozenset({
+    SHARE_MIRROR_FRAME_UI_STATE,
+    SHARE_MIRROR_FRAME_LAYOUT,
+    SHARE_MIRROR_FRAME_VIEWPORT,
+    SHARE_MIRROR_FRAME_APPEARANCE,
+    SHARE_MIRROR_FRAME_POPUP_LAYER,
+    SHARE_MIRROR_FRAME_GEOMETRY_DIGEST,
+    SHARE_MIRROR_FRAME_HOST_RESIZE,
+    SHARE_MIRROR_FRAME_POINTER,
+    SHARE_MIRROR_FRAME_SCROLL,
+    SHARE_MIRROR_FRAME_FILE_VERSION,
+    SHARE_MIRROR_FRAME_ACTIVE_TAB,
+    SHARE_MIRROR_FRAME_FOCUS,
+    SHARE_MIRROR_FRAME_FINDER_MODE,
+    SHARE_MIRROR_FRAME_MENU,
+    SHARE_MIRROR_FRAME_SHARE_STATUS,
+    SHARE_MIRROR_FRAME_TEXT_WRAP_METRICS,
+    SHARE_MIRROR_FRAME_INPUT_INTENT,
+    *SHARE_MIRROR_REPLAY_FRAME_TYPES,
+})
+SHARE_MIRROR_VIEWER_SEMANTIC_MUTATION_FRAME_TYPES = frozenset({
+    SHARE_MIRROR_FRAME_UI_STATE,
+    SHARE_MIRROR_FRAME_LAYOUT,
+    SHARE_MIRROR_FRAME_VIEWPORT,
+    SHARE_MIRROR_FRAME_APPEARANCE,
+    SHARE_MIRROR_FRAME_POPUP_LAYER,
+    SHARE_MIRROR_FRAME_GEOMETRY_DIGEST,
+    SHARE_MIRROR_FRAME_HOST_RESIZE,
+    SHARE_MIRROR_FRAME_SCROLL,
+    SHARE_MIRROR_FRAME_FILE_VERSION,
+    SHARE_MIRROR_FRAME_ACTIVE_TAB,
+    SHARE_MIRROR_FRAME_FOCUS,
+    SHARE_MIRROR_FRAME_FINDER_MODE,
+    SHARE_MIRROR_FRAME_MENU,
+    SHARE_MIRROR_FRAME_TEXT_WRAP_METRICS,
+})
+SHARE_INPUT_INTENT_TERMINAL_INPUT = "terminal-input"
+SHARE_INPUT_INTENT_TERMINAL_PASTE = "terminal-paste"
+SHARE_INPUT_INTENT_TERMINAL_SCROLL = "terminal-scroll"
+SHARE_INPUT_INTENT_TAB_ACTIVATE = "tab-activate"
+SHARE_INPUT_INTENT_MENU_COMMAND = "menu-command"
+SHARE_INPUT_INTENT_HOST_COMMAND = "host-command"
+SHARE_INPUT_INTENT_TYPES = frozenset({
+    SHARE_INPUT_INTENT_TERMINAL_INPUT,
+    SHARE_INPUT_INTENT_TERMINAL_PASTE,
+    SHARE_INPUT_INTENT_TERMINAL_SCROLL,
+    SHARE_INPUT_INTENT_TAB_ACTIVATE,
+    SHARE_INPUT_INTENT_MENU_COMMAND,
+    SHARE_INPUT_INTENT_HOST_COMMAND,
+})
+SHARE_INPUT_INTENT_TERMINAL_TYPES = frozenset({
+    SHARE_INPUT_INTENT_TERMINAL_INPUT,
+    SHARE_INPUT_INTENT_TERMINAL_PASTE,
+    SHARE_INPUT_INTENT_TERMINAL_SCROLL,
+})
+SHARE_INPUT_INTENT_SCROLL_DIRECTIONS = frozenset({"up", "down"})
+SHARE_INPUT_INTENT_MENU_COMMANDS = frozenset({"tab-pin-toggle", "tab-close", "terminal-copy", "terminal-paste", "open-command-palette"})
+SHARE_INPUT_INTENT_HOST_COMMANDS = frozenset({"request-keyframe", "focus-terminal", "fit-contain", "fit-cover", "fit-toggle"})
+SHARE_INPUT_INTENT_MAX_TEXT_LENGTH = 65536
+SHARE_INPUT_INTENT_MAX_TARGET_LENGTH = 512
+SHARE_INPUT_INTENT_MAX_LINES = 1000
+SHARE_MIRROR_KEYFRAME_REASONS = frozenset({"join", "gap", "digest", "replay-error", "backpressure", "topology", "manual-debug"})
+SHARE_MIRROR_SEQUENCE_FIELDS = ("epoch", "sequence", "baseSequence")
+SHARE_MIRROR_RELAY_NUMBER_FIELDS = ("version", *SHARE_MIRROR_SEQUENCE_FIELDS)
+SHARE_MIRROR_REDACTION_POLICY_VERSION = 1
+SHARE_MIRROR_REDACTION_METADATA_FIELDS = ("policyVersion", "removedCount")
+SHARE_TERMINAL_PLACEHOLDER_FIELDS = ("placeholderId", "session", "rows", "cols", "terminalEpoch")
+SHARE_REPLAY_DELTA_RING_LIMIT = 128
+SHARE_REPLAY_SERVER_SENDER = "__server__"
+SHARE_MIRROR_DEBUG_NAMES = {
+    SHARE_MIRROR_FRAME_DOM_KEYFRAME: "DOM keyframe",
+    SHARE_MIRROR_FRAME_DOM_DELTA: "DOM delta",
+    SHARE_MIRROR_FRAME_DOM_KEYFRAME_REQUEST: "DOM keyframe request",
+    SHARE_MIRROR_FRAME_DOM_REPLAY_ERROR: "DOM replay error",
+    SHARE_MIRROR_FRAME_TERMINAL_HOST_RESIZE: "terminal host resize",
+}
+SHARE_INPUT_INTENT_COMMAND_RE = re.compile(r"^[a-z][a-z0-9_.:-]{0,79}$")
 MAX_FS_BATCH_REQUESTS = 64
 TOKEN_LOG_RE = re.compile(r"([?&]token=)[^&\s\"]+")
 SHARE_URL_SECRET_RE = re.compile(r"(?:https?://[^\"'\s<>]+)?/share/[A-Za-z0-9_-]+(?:#[^\"'\s<>]*)?")
@@ -202,6 +317,129 @@ def share_ui_frame(message: dict[str, Any]) -> bytes:
     return make_ws_frame(json.dumps({"ch": "ui", **clean_message}, separators=(",", ":")).encode("utf-8"), opcode=1)
 
 
+def share_frame_is_dom_keyframe(frame: bytes | None) -> bool:
+    return bool(frame and b'"type":"dom-keyframe"' in frame)
+
+
+def share_mirror_frame_type_allowed(frame_type: str) -> bool:
+    return str(frame_type or "") in SHARE_MIRROR_FRAME_TYPES
+
+
+def share_replay_frame_type_allowed(frame_type: str) -> bool:
+    return str(frame_type or "") in SHARE_MIRROR_REPLAY_FRAME_TYPES
+
+
+def share_replay_viewer_control_frame_allowed(frame_type: str) -> bool:
+    return str(frame_type or "") in SHARE_MIRROR_REPLAY_VIEWER_CONTROL_FRAME_TYPES
+
+
+def share_viewer_semantic_mutation_frame_disallowed(frame_type: str) -> bool:
+    return str(frame_type or "") in SHARE_MIRROR_VIEWER_SEMANTIC_MUTATION_FRAME_TYPES
+
+
+def share_input_intent_type_allowed(intent: str) -> bool:
+    return str(intent or "") in SHARE_INPUT_INTENT_TYPES
+
+
+def share_input_intent_session_allowed(session: str, share_sessions: list[str]) -> bool:
+    clean_session = str(session or "").strip()
+    return bool(clean_session and clean_session in {str(item or "").strip() for item in share_sessions})
+
+
+def share_input_intent_clean_text(value: Any, max_length: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.replace("\x00", "")
+    if not text:
+        return ""
+    return text[:max_length]
+
+
+def share_input_intent_clean_target(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if not text or len(text) > SHARE_INPUT_INTENT_MAX_TARGET_LENGTH or "\r" in text or "\n" in text:
+        return ""
+    return text
+
+
+def share_input_intent_clean_command(value: Any, allowed: frozenset[str]) -> str:
+    if not isinstance(value, str):
+        return ""
+    command = value.strip()
+    if command not in allowed:
+        return ""
+    if not SHARE_INPUT_INTENT_COMMAND_RE.match(command):
+        return ""
+    return command
+
+
+def normalize_share_input_intent_payload(payload: dict[str, Any], share_sessions: list[str]) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    intent = str(payload.get("intent") or payload.get("action") or "").strip()
+    if not share_input_intent_type_allowed(intent):
+        return None
+    session = str(payload.get("session") or "").strip()
+    if intent in SHARE_INPUT_INTENT_TERMINAL_TYPES and not share_input_intent_session_allowed(session, share_sessions):
+        return None
+    if intent in {SHARE_INPUT_INTENT_TERMINAL_INPUT, SHARE_INPUT_INTENT_TERMINAL_PASTE}:
+        data = share_input_intent_clean_text(payload.get("data"), SHARE_INPUT_INTENT_MAX_TEXT_LENGTH)
+        if not data:
+            return None
+        return {"intent": intent, "session": session, "data": data}
+    if intent == SHARE_INPUT_INTENT_TERMINAL_SCROLL:
+        direction = str(payload.get("direction") or "").strip()
+        lines = payload.get("lines")
+        if direction not in SHARE_INPUT_INTENT_SCROLL_DIRECTIONS or not isinstance(lines, int) or isinstance(lines, bool):
+            return None
+        bounded_lines = max(1, min(int(lines), SHARE_INPUT_INTENT_MAX_LINES))
+        return {"intent": intent, "session": session, "direction": direction, "lines": bounded_lines}
+    if intent == SHARE_INPUT_INTENT_TAB_ACTIVATE:
+        item = share_input_intent_clean_target(payload.get("item", payload.get("target")))
+        if not item:
+            return None
+        if session and not share_input_intent_session_allowed(session, share_sessions):
+            return None
+        result = {"intent": intent, "item": item}
+        if session:
+            result["session"] = session
+        return result
+    if intent == SHARE_INPUT_INTENT_MENU_COMMAND:
+        command = share_input_intent_clean_command(payload.get("command"), SHARE_INPUT_INTENT_MENU_COMMANDS)
+        if not command:
+            return None
+        target = share_input_intent_clean_target(payload.get("target", ""))
+        result = {"intent": intent, "command": command}
+        if target:
+            result["target"] = target
+        if session:
+            if not share_input_intent_session_allowed(session, share_sessions):
+                return None
+            result["session"] = session
+        return result
+    if intent == SHARE_INPUT_INTENT_HOST_COMMAND:
+        command = share_input_intent_clean_command(payload.get("command"), SHARE_INPUT_INTENT_HOST_COMMANDS)
+        if not command:
+            return None
+        result = {"intent": intent, "command": command}
+        if session:
+            if not share_input_intent_session_allowed(session, share_sessions):
+                return None
+            result["session"] = session
+        return result
+    return None
+
+
+def share_replay_frame_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(float(value)):
+        return None
+    return int(value)
+
+
 class ShareViewerConnection:
     def __init__(self, connection: socket.socket, client_id: str = ""):
         self.connection = connection
@@ -212,6 +450,7 @@ class ShareViewerConnection:
         self.closed = False
         self.overflow_times: list[float] = []
         self.close_reason = ""
+        self.queued_replay_keyframe = False
 
     def clear_frames_locked(self) -> None:
         while True:
@@ -221,12 +460,15 @@ class ShareViewerConnection:
                 break
             if frame is not None:
                 self.queued_bytes = max(0, self.queued_bytes - len(frame))
+        self.queued_replay_keyframe = False
 
     def enqueue(self, frame: bytes) -> str:
         with self.lock:
             if self.closed:
                 return "closed"
             if self.queued_bytes + len(frame) > SHARE_VIEWER_QUEUE_HIGH_WATER_BYTES:
+                if self.queued_replay_keyframe:
+                    return "overflow"
                 self.clear_frames_locked()
                 now = time.monotonic()
                 cutoff = now - SHARE_VIEWER_OVERFLOW_WINDOW_SECONDS
@@ -239,6 +481,20 @@ class ShareViewerConnection:
                 return "overflow"
             self.queued_bytes += len(frame)
             self.frames.put(frame)
+            if share_frame_is_dom_keyframe(frame):
+                self.queued_replay_keyframe = True
+            return "queued"
+
+    def enqueue_reset_frame(self, frame: bytes) -> str:
+        with self.lock:
+            if self.closed:
+                return "closed"
+            self.clear_frames_locked()
+            self.overflow_times = []
+            self.queued_bytes += len(frame)
+            self.frames.put(frame)
+            if share_frame_is_dom_keyframe(frame):
+                self.queued_replay_keyframe = True
             return "queued"
 
     def close(self, reason: str = "") -> None:
@@ -262,6 +518,8 @@ class ShareViewerConnection:
                     break
                 with self.lock:
                     self.queued_bytes = max(0, self.queued_bytes - len(frame))
+                    if share_frame_is_dom_keyframe(frame):
+                        self.queued_replay_keyframe = False
                 self.connection.sendall(frame)
         except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
             pass
@@ -460,6 +718,11 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if not getattr(self.server, "tls_context", None) or self.request_is_https():
             return True
         path = str(parsed.path or "")
+        def http_share_token_allowed() -> bool:
+            verifier = getattr(self.server.app, "verify_share_token", None)
+            record = verifier(self.share_token_text()) if callable(verifier) else None
+            return bool(record and record.get("http_allowed"))
+
         if path.startswith("/share/"):
             short_id = path.removeprefix("/share/").strip("/")
             finder = getattr(self.server.app, "share_record_for_short_id", None)
@@ -468,10 +731,19 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if path.startswith("/static/"):
             checker = getattr(self.server.app, "http_allowed_share_is_active", None)
             return bool(checker()) if callable(checker) else False
-        if path in {"/", "/ws/share-view", "/api/ping", "/api/share-stream"}:
-            verifier = getattr(self.server.app, "verify_share_token", None)
-            record = verifier(self.share_token_text()) if callable(verifier) else None
-            return bool(record and record.get("http_allowed"))
+        share_api_paths = {
+            "/",
+            "/ws/share-ui",
+            "/ws/share-view",
+            "/api/ping",
+            "/api/share",
+            "/api/share-stream",
+            *self.SHARE_READONLY_GET_PATHS,
+            *self.SHARE_SCOPED_FILE_GET_PATHS,
+            *self.SHARE_READONLY_POST_PATHS,
+        }
+        if path in share_api_paths:
+            return http_share_token_allowed()
         return False
 
     def redirect_plaintext_to_https_if_needed(self, parsed: Any) -> bool:
@@ -785,6 +1057,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             "createdBy": str(record.get("created_by") or ""),
             "maxViewers": max_viewers,
             "viewers": viewers,
+            "debugProfile": bool(record.get("debug_profile")),
             "hostDims": {"rows": rows, "cols": cols},
             "hostDimsBySession": host_dims,
             "layout": str(record.get("layout") or ""),
@@ -815,6 +1088,32 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             if session and session not in result:
                 result.append(session)
         return result
+
+    def normalize_share_input_intent_for_handler(self, token: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+        verifier = getattr(self.server.app, "verify_share_token", None)
+        record = verifier(str(token or "")) if callable(verifier) else None
+        if not isinstance(record, dict):
+            return None
+        if str(record.get("mode") or "ro") != "rw" or not self.request_is_https():
+            return None
+        return normalize_share_input_intent_payload(payload, self.share_record_sessions_for_handler(record))
+
+    def apply_share_input_intent_for_handler(self, token: str, payload: dict[str, Any]) -> bool:
+        intent = str(payload.get("intent") or "")
+        if intent in {SHARE_INPUT_INTENT_TERMINAL_INPUT, SHARE_INPUT_INTENT_TERMINAL_PASTE}:
+            upstream_getter = getattr(self.server, "share_terminal_upstream", None)
+            if not callable(upstream_getter):
+                return False
+            upstream = upstream_getter(str(token or ""), str(payload.get("session") or ""))
+            data = json.dumps({"type": "input", "data": str(payload.get("data") or "")}).encode("utf-8")
+            return bool(upstream.write_input(data))
+        if intent == SHARE_INPUT_INTENT_TERMINAL_SCROLL:
+            scroller = getattr(self.server.app, "tmux_scroll", None)
+            if not callable(scroller):
+                return False
+            scroller(str(payload.get("session") or ""), str(payload.get("direction") or ""), int(payload.get("lines") or 0))
+            return True
+        return False
 
     def handle_share_shell(self, parsed: Any) -> bool:
         short_id = parsed.path.removeprefix("/share/").strip("/")
@@ -1125,6 +1424,22 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 self.server.broadcast_share_status(token)
             self.write_app_result(result)
             return
+        if parsed.path == "/api/share/debug-profile":
+            payload = self.read_json_body(64 * 1024)
+            if payload is None:
+                return
+            token = self.share_token()
+            if not token:
+                self.write_json(error_payload("share token required", status=HTTPStatus.UNAUTHORIZED), status=HTTPStatus.UNAUTHORIZED)
+                return
+            client_ip = self.client_address[0] if isinstance(self.client_address, tuple) and self.client_address else ""
+            self.write_app_result(self.server.app.record_share_debug_profile(
+                token,
+                payload,
+                ip=client_ip,
+                user_agent=self.headers.get("User-Agent", ""),
+            ))
+            return
         if parsed.path == "/api/watch/roots":
             payload = self.read_json_body(64 * 1024)
             if payload is None:
@@ -1318,6 +1633,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             read_only=payload.get("read_only", payload.get("readonly", None)),
             scheme=scheme,
             max_viewers=payload.get("max_viewers", None),
+            debug_profile=payload.get("debug_profile", payload.get("debugProfile", False)),
             request_is_https=self.request_is_https(),
             tls_available=self.server.tls_context is not None,
         )
@@ -2021,45 +2337,65 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return
         self.server.broadcast_share_status(token)
         write_enabled = self.request_is_https() and str(record.get("mode") or "ro") == "rw"
-        self.bridge_share_ui_socket(token, client_id, receive_only=not write_enabled, viewer_id=registered_viewer_id)
+        self.bridge_share_ui_socket(token, client_id, receive_only=not write_enabled, viewer_id=registered_viewer_id, accept_semantic_state=False)
 
-    def handle_share_ui_message(self, token: str, message: dict[str, Any], client_id: str = "") -> None:
+    def handle_share_ui_message(self, token: str, message: dict[str, Any], client_id: str = "", *, accept_semantic_state: bool = True) -> None:
         if not isinstance(message, dict):
             return
         msg_type = str(message.get("type") or "")
         if not msg_type:
             return
+        if not share_mirror_frame_type_allowed(msg_type):
+            return
+        if not accept_semantic_state and share_viewer_semantic_mutation_frame_disallowed(msg_type):
+            return
         data = message.get("payload")
         payload = data if isinstance(data, dict) else {}
+        if msg_type == SHARE_MIRROR_FRAME_INPUT_INTENT:
+            normalized_intent = self.normalize_share_input_intent_for_handler(token, payload)
+            if normalized_intent is None:
+                return
+            payload = normalized_intent
+            self.apply_share_input_intent_for_handler(token, payload)
         sender = str(message.get("sender") or client_id or "")
-        if msg_type == "pointer":
+        if msg_type == SHARE_MIRROR_FRAME_POINTER:
             self.server.queue_share_pointer(token, payload, sender=sender)
             return
         updater = getattr(self.server.app, "update_share_record_ui_state", None)
         if callable(updater):
-            if msg_type == "layout":
+            if msg_type == SHARE_MIRROR_FRAME_LAYOUT:
                 updater(token, payload)
-            elif msg_type == "ui-state":
+            elif msg_type == SHARE_MIRROR_FRAME_UI_STATE:
                 updater(token, {
                     "uiState": payload,
                     "finder": payload.get("finder", {}),
                     "layout": payload.get("layout", ""),
                     "tabs": payload.get("tabs", ""),
                 })
-            elif msg_type in {"viewport", "appearance"}:
+            elif msg_type in {SHARE_MIRROR_FRAME_VIEWPORT, SHARE_MIRROR_FRAME_APPEARANCE}:
                 updater(token, {"uiStatePatch": {msg_type: payload}})
-            elif msg_type == "scroll":
+            elif msg_type == SHARE_MIRROR_FRAME_SCROLL:
                 updater(token, {"uiStateScroll": payload})
-        self.server.broadcast_share_ui(
-            token,
-            {"type": msg_type, "payload": payload, "sender": sender},
-            skip_client_id=sender,
-        )
+        relay_message = {"type": msg_type, "payload": payload, "sender": sender}
+        for key in SHARE_MIRROR_RELAY_NUMBER_FIELDS:
+            value = message.get(key)
+            if isinstance(value, (int, float)):
+                relay_message[key] = int(value)
+        reason = message.get("reason")
+        if isinstance(reason, str) and reason.strip():
+            relay_message["reason"] = reason.strip()[:120]
+        if msg_type == SHARE_MIRROR_FRAME_DOM_KEYFRAME:
+            self.server.record_share_replay_keyframe(token, relay_message)
+        elif msg_type == SHARE_MIRROR_FRAME_DOM_DELTA:
+            self.server.record_share_replay_delta(token, relay_message)
+        self.server.broadcast_share_ui(token, relay_message, skip_client_id=sender)
 
-    def bridge_share_ui_socket(self, token: str, client_id: str = "", receive_only: bool = False, viewer_id: str = "") -> None:
+    def bridge_share_ui_socket(self, token: str, client_id: str = "", receive_only: bool = False, viewer_id: str = "", accept_semantic_state: bool = True) -> None:
         clean_client_id = str(client_id or "")
         client = ShareViewerConnection(self.connection, clean_client_id)
         self.server.register_share_ui_client(token, client)
+        if viewer_id:
+            self.server.enqueue_share_replay_frames_for_viewer(token, client)
         writer = threading.Thread(target=client.write_loop, name="share-ui", daemon=True)
         writer.start()
         try:
@@ -2075,13 +2411,13 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                     continue
                 if opcode not in {1, 2}:
                     continue
-                if receive_only:
-                    continue
                 try:
                     message = json.loads(payload.decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError):
                     continue
-                self.handle_share_ui_message(token, message, clean_client_id)
+                if receive_only and not share_replay_viewer_control_frame_allowed(str(message.get("type") or "")):
+                    continue
+                self.handle_share_ui_message(token, message, clean_client_id, accept_semantic_state=accept_semantic_state)
         except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
             pass
         finally:
@@ -2227,6 +2563,10 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
         self.share_upstreams: dict[tuple[str, str], ShareTerminalUpstream] = {}
         self.share_ui_clients_lock = threading.Lock()
         self.share_ui_clients: dict[str, set[ShareViewerConnection]] = {}
+        self.share_replay_keyframes_lock = threading.Lock()
+        self.share_replay_keyframes: dict[str, dict[str, Any]] = {}
+        self.share_replay_deltas_lock = threading.Lock()
+        self.share_replay_deltas: dict[str, dict[int, list[dict[str, Any]]]] = {}
         self.share_pointer_lock = threading.Lock()
         self.share_pointer_latest: dict[str, dict[str, Any]] = {}
         self.share_pointer_clicks: dict[str, list[dict[str, Any]]] = {}
@@ -2254,7 +2594,7 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
             upstream.update_dimensions(*dimensions, refresh=False)
         for token in {token for token, _upstream in upstream_entries}:
             self.broadcast_share_ui(token, {
-                "type": "host-resize",
+                "type": SHARE_MIRROR_FRAME_TERMINAL_HOST_RESIZE,
                 "payload": {"session": clean_session, "rows": dimensions[0], "cols": dimensions[1]},
             })
         for _token, upstream in upstream_entries:
@@ -2325,6 +2665,203 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
                 self.share_ui_clients.pop(token, None)
         for client in stale_clients:
             client.close("share-inactive")
+        self.prune_inactive_share_replay_keyframes()
+        self.prune_inactive_share_replay_deltas()
+
+    def record_share_replay_keyframe(self, token: str, message: dict[str, Any]) -> None:
+        clean_token = str(token or "")
+        if not clean_token:
+            return
+        if self.app.verify_share_token(clean_token) is None:
+            with self.share_replay_keyframes_lock:
+                self.share_replay_keyframes.pop(clean_token, None)
+            with self.share_replay_deltas_lock:
+                self.share_replay_deltas.pop(clean_token, None)
+            return
+        if str((message or {}).get("type") or "") != SHARE_MIRROR_FRAME_DOM_KEYFRAME:
+            return
+        payload = message.get("payload") if isinstance(message, dict) else None
+        if not isinstance(payload, dict):
+            return
+        stored = redact_share_ui_value({
+            "type": SHARE_MIRROR_FRAME_DOM_KEYFRAME,
+            "payload": payload,
+            "sender": str(message.get("sender") or ""),
+        })
+        for key in SHARE_MIRROR_RELAY_NUMBER_FIELDS:
+            value = message.get(key)
+            if isinstance(value, (int, float)):
+                stored[key] = int(value)
+        reason = message.get("reason")
+        if isinstance(reason, str) and reason.strip():
+            stored["reason"] = reason.strip()[:120]
+        with self.share_replay_keyframes_lock:
+            self.share_replay_keyframes[clean_token] = stored
+        epoch = share_replay_frame_int(stored.get("epoch"))
+        sequence = share_replay_frame_int(stored.get("sequence"))
+        if epoch is not None and sequence is not None:
+            with self.share_replay_deltas_lock:
+                epoch_map = self.share_replay_deltas.get(clean_token)
+                if epoch_map is not None:
+                    for existing_epoch in list(epoch_map):
+                        if existing_epoch != epoch:
+                            epoch_map.pop(existing_epoch, None)
+                    epoch_deltas = epoch_map.get(epoch)
+                    if epoch_deltas is not None:
+                        epoch_map[epoch] = [
+                            delta for delta in epoch_deltas
+                            if (share_replay_frame_int(delta.get("sequence")) or -1) > sequence
+                        ]
+                        if not epoch_map[epoch]:
+                            epoch_map.pop(epoch, None)
+                    if not epoch_map:
+                        self.share_replay_deltas.pop(clean_token, None)
+
+    def record_share_replay_delta(self, token: str, message: dict[str, Any]) -> bool:
+        clean_token = str(token or "")
+        if not clean_token:
+            return False
+        if self.app.verify_share_token(clean_token) is None:
+            with self.share_replay_deltas_lock:
+                self.share_replay_deltas.pop(clean_token, None)
+            return False
+        if str((message or {}).get("type") or "") != SHARE_MIRROR_FRAME_DOM_DELTA:
+            return False
+        payload = message.get("payload") if isinstance(message, dict) else None
+        if not isinstance(payload, dict):
+            return False
+        epoch = share_replay_frame_int(message.get("epoch"))
+        sequence = share_replay_frame_int(message.get("sequence"))
+        base_sequence = share_replay_frame_int(message.get("baseSequence"))
+        if epoch is None or sequence is None or base_sequence is None:
+            return False
+        stored = redact_share_ui_value({
+            "type": SHARE_MIRROR_FRAME_DOM_DELTA,
+            "payload": payload,
+            "sender": str(message.get("sender") or ""),
+            "epoch": epoch,
+            "sequence": sequence,
+            "baseSequence": base_sequence,
+        })
+        version = share_replay_frame_int(message.get("version"))
+        if version is not None:
+            stored["version"] = version
+        reason = message.get("reason")
+        if isinstance(reason, str) and reason.strip():
+            stored["reason"] = reason.strip()[:120]
+        with self.share_replay_deltas_lock:
+            epoch_map = self.share_replay_deltas.setdefault(clean_token, {})
+            epoch_deltas = epoch_map.setdefault(epoch, [])
+            epoch_deltas[:] = [
+                delta for delta in epoch_deltas
+                if share_replay_frame_int(delta.get("sequence")) != sequence
+            ]
+            epoch_deltas.append(stored)
+            epoch_deltas.sort(key=lambda delta: share_replay_frame_int(delta.get("sequence")) or 0)
+            del epoch_deltas[:-SHARE_REPLAY_DELTA_RING_LIMIT]
+            for existing_epoch in list(epoch_map):
+                if existing_epoch != epoch and not epoch_map[existing_epoch]:
+                    epoch_map.pop(existing_epoch, None)
+        return True
+
+    def latest_share_replay_keyframe(self, token: str) -> dict[str, Any] | None:
+        clean_token = str(token or "")
+        if not clean_token:
+            return None
+        if self.app.verify_share_token(clean_token) is None:
+            with self.share_replay_keyframes_lock:
+                self.share_replay_keyframes.pop(clean_token, None)
+            with self.share_replay_deltas_lock:
+                self.share_replay_deltas.pop(clean_token, None)
+            return None
+        with self.share_replay_keyframes_lock:
+            frame = self.share_replay_keyframes.get(clean_token)
+            return copy.deepcopy(frame) if frame else None
+
+    def share_replay_deltas_after_keyframe(self, token: str, keyframe: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
+        clean_token = str(token or "")
+        epoch = share_replay_frame_int((keyframe or {}).get("epoch"))
+        cursor = share_replay_frame_int((keyframe or {}).get("sequence"))
+        if not clean_token or epoch is None or cursor is None:
+            return [], True
+        with self.share_replay_deltas_lock:
+            epoch_map = self.share_replay_deltas.get(clean_token, {})
+            deltas = [copy.deepcopy(delta) for delta in epoch_map.get(epoch, [])]
+        deltas.sort(key=lambda delta: share_replay_frame_int(delta.get("sequence")) or 0)
+        contiguous: list[dict[str, Any]] = []
+        for delta in deltas:
+            sequence = share_replay_frame_int(delta.get("sequence"))
+            base_sequence = share_replay_frame_int(delta.get("baseSequence"))
+            if sequence is None or base_sequence is None:
+                return contiguous, False
+            if sequence <= cursor:
+                continue
+            if base_sequence != cursor or sequence != cursor + 1:
+                return contiguous, False
+            contiguous.append(delta)
+            cursor = sequence
+        return contiguous, True
+
+    def enqueue_latest_share_replay_keyframe(self, token: str, client: ShareViewerConnection) -> bool:
+        frame = self.latest_share_replay_keyframe(token)
+        if not frame:
+            return False
+        return client.enqueue_reset_frame(share_ui_frame(frame)) == "queued"
+
+    def enqueue_share_replay_frames_for_viewer(self, token: str, client: ShareViewerConnection) -> bool:
+        frame = self.latest_share_replay_keyframe(token)
+        if not frame:
+            self.request_share_replay_keyframe(token, reason="join", skip_client_id=client.client_id, viewer_id=client.client_id)
+            return False
+        deltas, contiguous = self.share_replay_deltas_after_keyframe(token, frame)
+        if not contiguous:
+            self.request_share_replay_keyframe(token, reason="join", skip_client_id=client.client_id, viewer_id=client.client_id)
+            return False
+        frames = [frame] + (deltas if contiguous else [])
+        for index, replay_frame in enumerate(frames):
+            status = (
+                client.enqueue_reset_frame(share_ui_frame(replay_frame))
+                if index == 0 and str(replay_frame.get("type") or "") == SHARE_MIRROR_FRAME_DOM_KEYFRAME
+                else client.enqueue(share_ui_frame(replay_frame))
+            )
+            if status != "queued":
+                self.request_share_replay_keyframe(token, reason="backpressure", skip_client_id=client.client_id, viewer_id=client.client_id)
+                return False
+        return True
+
+    def request_share_replay_keyframe(self, token: str, reason: str = "gap", *, skip_client_id: str = "", viewer_id: str = "") -> None:
+        clean_token = str(token or "")
+        if not clean_token or self.app.verify_share_token(clean_token) is None:
+            return
+        clean_reason = str(reason or "gap").strip()
+        if clean_reason not in SHARE_MIRROR_KEYFRAME_REASONS:
+            clean_reason = "gap"
+        payload: dict[str, Any] = {"reason": clean_reason}
+        if viewer_id:
+            payload["viewerId"] = str(viewer_id)
+        self.broadcast_share_ui(
+            clean_token,
+            {
+                "type": SHARE_MIRROR_FRAME_DOM_KEYFRAME_REQUEST,
+                "payload": payload,
+                "sender": SHARE_REPLAY_SERVER_SENDER,
+                "version": SHARE_MIRROR_PROTOCOL_VERSION,
+                "reason": clean_reason,
+            },
+            skip_client_id=skip_client_id,
+        )
+
+    def prune_inactive_share_replay_keyframes(self) -> None:
+        with self.share_replay_keyframes_lock:
+            for token in list(self.share_replay_keyframes):
+                if self.app.verify_share_token(token) is None:
+                    self.share_replay_keyframes.pop(token, None)
+
+    def prune_inactive_share_replay_deltas(self) -> None:
+        with self.share_replay_deltas_lock:
+            for token in list(self.share_replay_deltas):
+                if self.app.verify_share_token(token) is None:
+                    self.share_replay_deltas.pop(token, None)
 
     def share_viewer_count(self, token: str) -> int:
         count = 0
@@ -2383,7 +2920,7 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
                 sender = str(payload.get("sender") or "")
                 self.broadcast_share_ui(
                     token,
-                    {"type": "pointer", "payload": payload, "sender": sender},
+                    {"type": SHARE_MIRROR_FRAME_POINTER, "payload": payload, "sender": sender},
                     skip_client_id=sender,
                 )
         with self.share_pointer_lock:
@@ -2396,6 +2933,8 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
         if skip_client_id and not clean_message.get("sender"):
             clean_message["sender"] = skip_client_id
         frame = share_ui_frame(clean_message)
+        delta_overflow = False
+        keyframe_frame = clean_message.get("type") == SHARE_MIRROR_FRAME_DOM_KEYFRAME
         with self.share_ui_clients_lock:
             clients = list(self.share_ui_clients.get(str(token or ""), set()))
         ui_client_ids = {client.client_id for client in clients if client.client_id}
@@ -2409,22 +2948,28 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
                     continue
                 if viewer.client_id and viewer.client_id in ui_client_ids:
                     continue
-                status = viewer.enqueue(frame)
+                status = viewer.enqueue_reset_frame(frame) if keyframe_frame else viewer.enqueue(frame)
+                if status == "overflow" and clean_message.get("type") == SHARE_MIRROR_FRAME_DOM_DELTA:
+                    delta_overflow = True
                 if status == "too-slow":
                     viewer.close("too-slow")
         for client in clients:
             if skip_client_id and client.client_id == skip_client_id:
                 continue
-            status = client.enqueue(frame)
+            status = client.enqueue_reset_frame(frame) if keyframe_frame else client.enqueue(frame)
+            if status == "overflow" and clean_message.get("type") == SHARE_MIRROR_FRAME_DOM_DELTA:
+                delta_overflow = True
             if status == "too-slow":
                 client.close("too-slow")
+        if delta_overflow:
+            self.request_share_replay_keyframe(str(token or ""), reason="backpressure")
 
     def broadcast_share_status(self, token: str) -> None:
         payload_builder = getattr(self.app, "share_status_frame_payload", None)
         payload = payload_builder(token) if callable(payload_builder) else None
         if not payload:
             return
-        self.broadcast_share_ui(token, {"type": "share-status", "payload": payload})
+        self.broadcast_share_ui(token, {"type": SHARE_MIRROR_FRAME_SHARE_STATUS, "payload": payload})
 
     def get_request(self) -> tuple[socket.socket, tuple[str, int]]:
         return self.socket.accept()

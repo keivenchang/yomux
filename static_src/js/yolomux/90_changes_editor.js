@@ -382,7 +382,7 @@ function ensureDiffRefPopover() {
     event.preventDefault();
     chooseDiffRefPopoverOption(Number(option.dataset.diffRefOptionIndex));
   });
-  document.body?.appendChild(diffRefPopover);
+  appOverlayRootElement()?.appendChild(diffRefPopover);
   installDiffRefPopoverListeners();
   return diffRefPopover;
 }
@@ -584,7 +584,7 @@ function setRepoDiffRefs(repo, fromRef, toRef, options = {}) {
   renderFileExplorerChangesPanels({force: true});
   fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
   for (const path of openFiles.keys()) renderOpenFilePath(path);
-  scheduleShareUiStatePublish();
+  scheduleShareTopologySnapshot('differ-refs');
   return true;
 }
 
@@ -671,7 +671,7 @@ function switchFileExplorerChangesSession(session) {
   scheduleFileExplorerActiveTabSync(session, {explicit: true});
   renderFileExplorerChangesPanels();
   fetchSessionFiles({destination: 'finder', session, silent: true, force: true, background: cachedPayloadIsLoaded});
-  scheduleShareUiStatePublish();
+  scheduleShareTopologySnapshot('finder-session');
 }
 
 function noteFileExplorerChangesSessionInteraction(session) {
@@ -1604,7 +1604,7 @@ function setFileExplorerMode(mode, options = {}) {
   } else {
     fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
   }
-  scheduleShareUiStatePublish();
+  scheduleShareTopologySnapshot('finder-mode');
   return true;
 }
 

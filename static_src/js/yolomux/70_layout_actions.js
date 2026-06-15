@@ -665,6 +665,7 @@ function activatePaneTab(side, session, options = {}) {
     if (item?.term) sharePublish('host-resize', {session, rows: item.term.rows, cols: item.term.cols});
   }
   sharePublish('active-tab', {slot: side, item: session});
+  scheduleShareTopologySnapshot('tab-activation');
   if (activeItemForSide(side) === session) {
     focusPanel(session, {userInitiated: options.userInitiated === true});
     return;
@@ -1255,7 +1256,7 @@ function showSessionRenameDialog(session) {
   closeAppMenus();
   closeSessionRenameDialog();
   const overlay = document.createElement('div');
-  overlay.className = 'session-rename-backdrop';
+  overlay.className = 'app-modal-overlay session-rename-backdrop';
   overlay.setAttribute('role', 'presentation');
   overlay.innerHTML = `
     <form class="session-rename-dialog" role="dialog" aria-modal="true" aria-label="${esc(t('rename.aria'))}">
@@ -1295,7 +1296,7 @@ function showSessionRenameDialog(session) {
       input.focus();
     }
   });
-  document.body.appendChild(overlay);
+  appOverlayRootElement().appendChild(overlay);
   sessionRenameDialog = overlay;
   document.addEventListener('keydown', sessionRenameDialogKeydown, true);
   setTimeout(() => {

@@ -697,7 +697,8 @@ function bindDelayedSessionPopover(anchor, popover, position, options = {}) {
 function detachPaneTabPopover(tab, popover) {
   cleanupDetachedPaneTabPopover(tab, popover);
   popover.classList.add('pane-tab-detached-popover');
-  if (popover.parentElement !== document.body) document.body.appendChild(popover);
+  const host = appOverlayRootElement();
+  if (popover.parentElement !== host) host.appendChild(popover);
   tab.__yolomuxDetachedPopover = popover;
 }
 
@@ -780,8 +781,16 @@ function positionPaneTabPopover(tab, popover = null) {
     height,
     {edgeGap, minTop: topbarBottom + edgeGap},
   );
-  document.documentElement.style.setProperty('--pane-tab-popover-top', `${Math.round(position.top)}px`);
-  document.documentElement.style.setProperty('--pane-tab-popover-left', `${Math.round(position.left)}px`);
+  const top = `${Math.round(position.top)}px`;
+  const left = `${Math.round(position.left)}px`;
+  const inlineSize = `${Math.round(width)}px`;
+  document.documentElement.style.setProperty('--pane-tab-popover-top', top);
+  document.documentElement.style.setProperty('--pane-tab-popover-left', left);
+  if (popover?.style) {
+    popover.style.top = top;
+    popover.style.left = left;
+    popover.style.width = inlineSize;
+  }
 }
 
 function paneInfoTabHtml(item = infoItemId, options = {}) {

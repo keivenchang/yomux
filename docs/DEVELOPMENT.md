@@ -51,6 +51,10 @@ Frontend source for the interactive UI lives in ordered partials under `static_s
 
 The approval-prompt detection pipeline lives in `yolomux_lib/approvals.py` (one shared owner: `app.py`'s read-path, the `AutoApproveWorker` act-path in `yolomux_lib/auto_approve_worker.py`, and the standalone `auto_approve_tmux.py` CLI all call it; the CLI re-exports it). One `AutoApproveWorker` wraps each enabled session.
 
+## Specs
+
+Durable behavior specs live under [`docs/specs/`](specs/). Use [`docs/specs/GUI.md`](specs/GUI.md) for pane/tab/Finder/Differ/YO!share visual contracts, [`docs/specs/EDITOR-CODEMIRROR.md`](specs/EDITOR-CODEMIRROR.md) for CodeMirror/editor behavior, [`docs/specs/SHARE_MIRRORING.md`](specs/SHARE_MIRRORING.md) for the YO!share replay architecture, and [`docs/specs/SHARE_TEST_INVENTORY.md`](specs/SHARE_TEST_INVENTORY.md) for YO!share fixture/live-server/manual-repro test coverage.
+
 ## Static Build
 
 After changing any frontend source file, rebuild the served single-file assets:
@@ -93,6 +97,8 @@ python3 -m pytest tests/test_browser_layout.py -k 'finder_path_is_first_and_read
 
 Full pytest may need local socket/browser access. If a sandboxed run fails with `PermissionError: Operation not permitted`, rerun the same command outside the sandbox before treating it as a product failure.
 
+For local verification that should skip login, start the dev server with `YOLOMUX_TEST_AUTH_BYPASS=1`. This is a test-only admin bypass for localhost/dev workflows, useful for direct curls or Selenium checks against `/api/settings` and other login-gated routes. Tests that are not validating auth and only need a logged-in host should use this path instead of minting cookies. Tests that validate setup, login, logout, cookies, Basic auth, readonly/admin role boundaries, share-token scoping, or expected 401/403 behavior must not use it. Do not use it for production or any server reachable by untrusted clients.
+
 ## Dev And Production Servers
 
 Production and development instances can run side-by-side. The project does not require a fixed dev numbering scheme; choose a checkout path, HTTPS port, and user-unit name that match your machine.
@@ -120,6 +126,12 @@ tools/yolomux-restart-dev1.sh
 
 The script defaults to HTTPS `8001`, `--self-signed`, and `--dang`; override with `YOLOMUX_DEV1_PORT`, `YOLOMUX_HOST`, or `YOLOMUX_DEV1_LOG` only when testing a non-standard dev1 instance. Logs go under `/tmp`.
 
+To restart dev1 in no-auth test mode:
+
+```bash
+YOLOMUX_TEST_AUTH_BYPASS=1 tools/yolomux-restart-dev1.sh
+```
+
 Manual reference: kill the old process narrowly by port, then relaunch detached with `nohup`. Restart prod by swapping `dev1`/`8001`/`~/yolomux.dev1` for `prod`/`7777`/`~/yolomux`:
 
 ```bash
@@ -143,6 +155,8 @@ curl -skL -u <user>:<pass> https://localhost:<port>/ | grep -oE 'YOLOmux [0-9.]+
 ```
 
 Expected: one `yolomux.py` process, `LISTEN` on the intended port, `ping: 401` in under roughly 100ms, and the rendered version matches `YOLOMUX_VERSION`. If verification fails, inspect the `/tmp/yolomux-<role>-<port>.log` log for the launch error.
+
+If you intentionally started with `YOLOMUX_TEST_AUTH_BYPASS=1`, `/api/ping` and `/api/settings` should return `200` without cookies. If a normal login-gated server returns `200` for those unauthenticated routes, auth is accidentally bypassed.
 
 ## Production Sync (`cps`)
 
@@ -192,9 +206,19 @@ The transcript tab uses Server-Sent Events from `/api/context-stream`. The AI su
 
 YOLO uses `auto_approve_tmux.py` workers behind `/api/auto-approve`. The browser polls YOLO status every `paneStateRefreshMs` and reflects the active state in each pane tab.
 
+## YO!share Transport
+
+YO!share visual sharing uses host-rendered DOM replay. The host opens `/ws/share-host` and publishes sanitized `#appRoot` keyframes, DOM deltas, replay control replies, status, and terminal placeholder metadata. Viewers open `/ws/share-ui` to receive replay frames and share status; HTTPS write viewers may also send validated `input-intent` frames there. `/ws/share-view` remains the terminal byte stream for shared tmux sessions, and terminal content is represented in replay DOM only by placeholders that bind the existing xterm stream to host rows/cols.
+
+Replay deltas are ordered by epoch, sequence, and base sequence. Old or already-applied deltas are stale and should be ignored without repair; missing future deltas are gaps and should request a keyframe. Replay debug/profiling output should expose both paths separately (`staleFrames` versus dropped frames/keyframe requests) plus the frame numbers needed to explain a `viewer behind` report.
+
+The replayed DOM is inert serialized markup. Host app event listeners do not survive keyframe rebuilds or child-list delta rebuilds, so viewer-local read-only affordances such as tab hover details must be rebound by the replay shell after replay applies, or represented as host-owned replay DOM.
+
+Write access requires HTTPS. A write viewer does not publish `layout`, `ui-state`, Finder, editor, popup, or scroll semantic state; it sends allowed input intents and waits for host replay frames for visible feedback. `shareReplay=0`, `shareSemantic=1`, bootstrap `shareReplay: false`, and `localStorage.yolomux.shareReplaySemantic=1` are temporary semantic escape hatches for diagnostics, not the normal product path.
+
 ## Webterm API
 
-All API routes require auth. Read endpoints accept `readonly` or `admin`, except `/api/summary-stream` because it launches Codex and requires `admin`. Mutating POST routes require `admin` except `/api/event`, which accepts readonly client telemetry. `/ws` accepts readonly users but attaches tmux with `-r` and ignores keyboard input, tmux-scroll, and resize messages. Share-token guests are narrower than `auth.yaml` readonly users: tokens are scoped to one session and whitelisted only to `/`, `/ws`, and static assets.
+All API routes require auth unless the process was intentionally started with the local-only `YOLOMUX_TEST_AUTH_BYPASS=1` test bypass. Read endpoints accept `readonly` or `admin`, except `/api/summary-stream` because it launches Codex and requires `admin`. Mutating POST routes require `admin` except `/api/event`, which accepts readonly client telemetry. `/ws` accepts readonly users but attaches tmux with `-r` and ignores keyboard input, tmux-scroll, and resize messages. Share-token guests are narrower than `auth.yaml` readonly users: tokens are scoped to one share and whitelisted only for share-scoped page, static, replay, terminal, status, and readonly file/data routes. The test bypass never escalates a share-token request; share-token scoping still wins.
 
 - `GET /api/transcripts` returns pane, process, and transcript-path metadata.
 - `GET /api/tmux?session=project1&lines=90` returns a tmux capture-pane snapshot.

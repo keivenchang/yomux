@@ -1274,6 +1274,17 @@ function dockviewSlotForGroupId(groupId, usedSlots = new Set()) {
   return slot;
 }
 
+function dockviewEnsureMountedTerminal(item, panel) {
+  if (!isTmuxSession(item)) return;
+  queueMicrotask(() => {
+    if (!panel?.isConnected || !itemInLayout(item)) return;
+    const slot = slotForItem(item);
+    if (slot && activeItemForSide(slot) !== item) return;
+    if (typeof ensureTerminalRunning === 'function') void ensureTerminalRunning(item);
+    if (typeof scheduleFit === 'function') scheduleFit(item);
+  });
+}
+
 function createDockviewPanelRenderer() {
   const element = document.createElement('div');
   element.className = 'dockview-panel-content';
@@ -1289,6 +1300,7 @@ function createDockviewPanelRenderer() {
     renderAttachedPanelContent(item);
     restorePaneViewState(item, panel);
     updatePanelInactiveOverlays();
+    dockviewEnsureMountedTerminal(item, panel);
   };
   const pool = () => {
     if (!panel || panel.parentElement !== element) return;
@@ -1305,7 +1317,10 @@ function createDockviewPanelRenderer() {
     onHide: pool,
     dispose: pool,
     layout: () => {
-      if (isTmuxSession(item)) scheduleFit(item);
+      if (isTmuxSession(item)) {
+        dockviewEnsureMountedTerminal(item, panel);
+        scheduleFit(item);
+      }
     },
   };
 }

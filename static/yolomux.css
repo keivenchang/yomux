@@ -198,6 +198,9 @@
   --popover-hide-delay: 300ms;
   --popover-edge-gap: 1vw;
   --popover-max-inline-size: calc(100vw - var(--popover-edge-gap) - var(--popover-edge-gap));
+  --app-modal-backdrop-bg: rgba(0, 0, 0, 0.46);
+  --app-modal-border-width: max(2px, var(--pane-split-gap));
+  --app-modal-border-color: color-mix(in srgb, var(--pane-tab-panel-ring) var(--pane-active-ring-opacity), transparent);
   --shadow-popover: 0 18px 50px rgba(0, 0, 0, 0.45);
   --shadow-elevated: 0 16px 42px rgba(0, 0, 0, 0.45);
   --share-stage-bg: #000;
@@ -380,6 +383,13 @@
   --red-reminder-easing: ease-in-out;
   --yolo-reminder-duration: 2.8s;
   --yolo-rotation-duration: 20s;
+}
+
+.app-modal-overlay {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  background: var(--app-modal-backdrop-bg);
 }
 .moving-ellipsis {
   display: inline-flex;
@@ -620,6 +630,15 @@ body {
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
   background: var(--bg);
+}
+.app-overlay-root {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-share-presence);
+  pointer-events: none;
+}
+.app-overlay-root > * {
+  pointer-events: auto;
 }
 ::selection {
   background: var(--text-selection-bg);
@@ -896,13 +915,15 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
 }
 .share-popup-mirror-item > .modal {
   width: 100% !important;
-  height: auto !important;
+  height: 100% !important;
   max-width: none !important;
   max-height: none !important;
-  overflow: visible !important;
 }
-.share-popup-mirror-item > .modal.share-open {
-  width: 100% !important;
+.share-popup-mirror-item > .modal.about-open .modal-dialog {
+  width: min(520px, calc(100% - 28px)) !important;
+}
+.share-popup-mirror-item > .modal.share-open .modal-dialog {
+  width: min(960px, calc(100% - 28px)) !important;
 }
 
 .share-viewer-banner {
@@ -3376,14 +3397,10 @@ body.theme-light .branch-link {
 }
 
 .command-palette {
-  position: fixed;
-  inset: 0;
   z-index: var(--z-ref-suggestion);
-  display: grid;
   align-items: start;
   justify-items: center;
   padding: min(12vh, 96px) var(--popover-edge-gap) var(--popover-edge-gap);
-  background: rgba(0, 0, 0, 0.42);
 }
 .command-palette[hidden] {
   display: none;
@@ -3396,7 +3413,7 @@ body.theme-light .branch-link {
   overflow: hidden;
   color: var(--text);
   background: #111820;
-  border: 1px solid #708093;
+  border: var(--app-modal-border-width) solid var(--app-modal-border-color);
   border-radius: 8px;
   box-shadow:
     0 -4px 14px rgba(0, 0, 0, 0.34),
@@ -3541,14 +3558,10 @@ body.theme-light .command-palette-view-chip {
   text-align: center;
 }
 .keyboard-shortcuts-overlay {
-  position: fixed;
-  inset: 0;
   z-index: var(--z-file-conflict-dialog);
-  display: grid;
   align-items: start;
   justify-items: center;
   padding: min(10vh, 82px) var(--popover-edge-gap) var(--popover-edge-gap);
-  background: rgba(0, 0, 0, 0.46);
 }
 .keyboard-shortcuts-overlay[hidden] {
   display: none;
@@ -3561,7 +3574,7 @@ body.theme-light .command-palette-view-chip {
   overflow: hidden;
   color: var(--text);
   background: #111820;
-  border: 1px solid #708093;
+  border: var(--app-modal-border-width) solid var(--app-modal-border-color);
   border-radius: 8px;
   box-shadow: 0 24px 70px rgb(var(--shadow-rgb) / 0.62);
 }
@@ -5461,6 +5474,10 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
     0 8px 16px rgba(0, 0, 0, 0.52),
     0 0 0 1px var(--active-control-focus-ring);
 }
+body.share-replay-shell .share-mirror-stage .app-overlay-root,
+body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
+  position: absolute;
+}
 .pane-tab.popover-open {
   z-index: var(--z-pane-modal);
 }
@@ -5950,13 +5967,9 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   min-width: 178px;
 }
 .session-rename-backdrop {
-  position: fixed;
-  inset: 0;
   z-index: var(--z-topbar);
-  display: grid;
   place-items: center;
   padding: 18px;
-  background: rgba(2, 6, 12, 0.36);
 }
 .session-rename-dialog {
   width: min(42ch, var(--popover-max-inline-size));
@@ -5965,7 +5978,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   padding: 12px;
   color: #e7ecf3;
   background: rgba(17, 24, 32, 0.98);
-  border: 1px solid #6f7b8d;
+  border: var(--app-modal-border-width) solid var(--app-modal-border-color);
   border-radius: 7px;
   box-shadow: 0 18px 56px rgb(var(--shadow-rgb) / 0.58);
 }
@@ -7456,16 +7469,24 @@ body.theme-light .info-cell a.pr-status-closed:hover {
 }
 .modal {
   display: none;
-  position: fixed;
-  z-index: var(--z-finder-quick-access);
-  inset: 7vh 7vw;
-  background: #10141b;
-  border: 1px solid var(--line);
-  border-radius: 8px;
+  z-index: var(--z-file-conflict-dialog);
+  align-items: start;
+  justify-items: center;
+  padding: min(10vh, 82px) var(--popover-edge-gap) var(--popover-edge-gap);
   overflow: hidden;
-  grid-template-rows: auto minmax(0, 1fr);
 }
 .modal.open { display: grid; }
+.modal-dialog {
+  width: min(86vw, var(--popover-max-inline-size));
+  max-height: min(86vh, calc(100vh - 14vh));
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  background: #10141b;
+  border: var(--app-modal-border-width) solid var(--app-modal-border-color);
+  border-radius: 8px;
+  overflow: hidden;
+}
 .modal-head {
   padding: 9px 11px;
   border-bottom: 1px solid var(--line);
@@ -7483,6 +7504,9 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   border-radius: 6px;
   font: 900 var(--ui-font-size-lg)/1 var(--ui-font);
 }
+#modalBody {
+  min-height: 0;
+}
 .modal pre {
   margin: 0;
   padding: 12px;
@@ -7492,32 +7516,33 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
 }
 .modal.about-open {
-  inset: 18vh auto auto 50%;
-  width: min(520px, calc(100vw - 28px));
-  min-height: 0;
-  z-index: var(--z-pane-modal);
-  transform: translateX(-50%);
+  padding-top: min(18vh, 128px);
+}
+.modal.about-open .modal-dialog {
+  width: min(520px, var(--popover-max-inline-size));
+  max-height: min(76vh, calc(100vh - min(36vh, 256px)));
   background: var(--panel);
   box-shadow: var(--shadow-elevated);
 }
 .modal.about-open #modalBody {
   white-space: normal;
+  overflow: auto;
   font-family: var(--ui-font);
 }
 .modal.share-open {
-  inset: 16vh auto auto 50%;
-  width: min(560px, calc(100vw - 28px));
-  min-height: 0;
-  z-index: var(--z-pane-modal);
-  transform: translateX(-50%);
+  padding-top: min(10vh, 82px);
+}
+.modal.share-open .modal-dialog {
+  width: min(960px, var(--popover-max-inline-size));
+  max-height: min(80vh, calc(100vh - min(20vh, 164px) - var(--popover-edge-gap)));
   background: var(--panel);
-  border: 1px solid color-mix(in srgb, var(--active-control-border) 35%, var(--line));
+  border: var(--app-modal-border-width) solid var(--app-modal-border-color);
   box-shadow: 0 18px 52px rgb(var(--shadow-rgb) / 0.5);
 }
 .modal.share-open #modalBody {
   display: block;
   white-space: normal;
-  overflow: visible;
+  overflow: auto;
   font-family: var(--ui-font);
 }
 .share-modal-form,
@@ -7584,9 +7609,9 @@ body.theme-light .info-cell a.pr-status-closed:hover {
 }
 .share-create-controls {
   display: grid;
-  grid-template-columns: minmax(112px, 1fr) minmax(82px, 0.7fr) max-content;
+  grid-template-columns: minmax(180px, 1.25fr) minmax(112px, 0.75fr) max-content max-content;
   align-items: end;
-  gap: 8px;
+  gap: 10px;
 }
 .share-field {
   display: grid;
@@ -7619,16 +7644,41 @@ body.theme-light .info-cell a.pr-status-closed:hover {
 .share-url-field input {
   font-family: var(--mono-font);
 }
+.share-url-primary {
+  gap: 8px;
+  padding: 9px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--accent) 11%, var(--panel2));
+  color: var(--text);
+}
+.share-url-primary-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.share-url-primary-head > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: var(--ui-font-size-xs);
+  font-weight: 900;
+  text-transform: uppercase;
+}
 .share-url-control {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 30px;
+  grid-template-columns: minmax(0, 1fr) 32px;
   align-items: center;
   gap: 6px;
 }
 .share-url-control .share-url-copy-button {
-  min-width: 30px;
-  width: 30px;
-  height: 30px;
+  min-width: 32px;
+  width: 32px;
+  height: 32px;
   padding: 0;
 }
 .share-url-control .share-url-copy-button::before {
@@ -7645,10 +7695,11 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   align-items: center;
   gap: 7px;
   color: var(--text);
+  white-space: nowrap;
 }
 .share-protocol-group {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 8px;
   margin: 0;
@@ -7670,15 +7721,18 @@ body.theme-light .info-cell a.pr-status-closed:hover {
 }
 .share-result-meta {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  min-width: 0;
 }
 .share-result-meta span {
+  flex: 0 0 auto;
   padding: 3px 6px;
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
   background: var(--panel2);
+  white-space: nowrap;
 }
 .share-users {
   display: grid;
@@ -7729,6 +7783,7 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   font-size: var(--ui-font-size-xs);
 }
 .share-extend-button {
+  flex: 0 0 auto;
   min-height: 24px;
   padding: 2px 7px;
   border: 1px solid var(--active-control-border);
@@ -7767,24 +7822,22 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   color: var(--danger-text);
 }
 .share-stop-inline {
+  flex: 0 0 auto;
   min-height: 24px;
   padding: 2px 7px;
   border-radius: var(--radius-control);
   font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
 }
-.modal.share-open::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  z-index: -1;
-  background: color-mix(in srgb, var(--bg) 74%, transparent);
-}
-body.theme-light .modal.share-open {
+body.theme-light .modal.share-open .modal-dialog {
   background: #ffffff;
   box-shadow: 0 18px 46px rgb(var(--shadow-rgb) / 0.24);
 }
 body.app-vw-lte-760 .share-create-controls {
   grid-template-columns: 1fr;
+}
+body.app-vw-lte-760 .share-protocol-group,
+body.app-vw-lte-760 .share-result-meta {
+  flex-wrap: wrap;
 }
 .about-modal {
   display: grid;
@@ -7864,16 +7917,7 @@ body.app-vw-lte-760 .share-create-controls {
   color: var(--markdown-link);
   text-decoration: underline;
 }
-/* Dim the live app behind the floating About panel. Without it the split-resizer line and terminal
-   text behind the panel stay visible and read as a stray line running through the dialog. */
-.modal.about-open::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  z-index: -1;
-  background: color-mix(in srgb, var(--bg) 62%, transparent);
-}
-body.theme-light .modal.about-open {
+body.theme-light .modal.about-open .modal-dialog {
   background: #ffffff;
 }
 body.app-vw-lte-1500 .topbar {
@@ -9324,13 +9368,9 @@ body.editor-theme-light .file-editor-image-panel {
   background: rgba(82, 210, 115, 0.18);
 }
 .file-editor-dialog-backdrop {
-  position: fixed;
-  inset: 0;
   z-index: var(--z-file-editor-dialog);
-  display: grid;
   place-items: center;
   padding: 24px;
-  background: rgba(2, 6, 14, 0.54);
 }
 .file-editor-dialog {
   width: min(760px, 96vw);
@@ -9338,7 +9378,7 @@ body.editor-theme-light .file-editor-image-panel {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   background: #151922;
-  border: 1px solid #455164;
+  border: var(--app-modal-border-width) solid var(--app-modal-border-color);
   box-shadow: 0 20px 46px rgb(var(--shadow-rgb) / 0.48), 0 0 0 1px var(--active-control-focus-ring);
   color: var(--text);
 }
@@ -10048,7 +10088,11 @@ body.theme-light .file-tree-rename-input {
 body.file-explorer-mode-diff .file-explorer-mode-files-only,
 body.file-explorer-mode-tabber .file-explorer-mode-files-only,
 body:not(.file-explorer-mode-diff) .file-explorer-mode-diff-only,
-body.file-explorer-mode-tabber .file-explorer-mode-files-diff-only {
+body.file-explorer-mode-tabber .file-explorer-mode-files-diff-only,
+.file-explorer-panel[data-file-explorer-mode="diff"] .file-explorer-mode-files-only,
+.file-explorer-panel[data-file-explorer-mode="tabber"] .file-explorer-mode-files-only,
+.file-explorer-panel:not([data-file-explorer-mode="diff"]) .file-explorer-mode-diff-only,
+.file-explorer-panel[data-file-explorer-mode="tabber"] .file-explorer-mode-files-diff-only {
   display: none;
 }
 .path-copy-button {
@@ -10108,17 +10152,25 @@ body.file-explorer-mode-tabber .file-explorer-mode-files-diff-only {
   --file-explorer-changes-resizer-size: 6px;
 }
 body.file-explorer-mode-files .file-explorer-changes-panel,
-body.file-explorer-mode-files .file-explorer-changes-resizer {
+body.file-explorer-mode-files .file-explorer-changes-resizer,
+.file-explorer-panel[data-file-explorer-mode="files"] .file-explorer-changes-panel,
+.file-explorer-panel[data-file-explorer-mode="files"] .file-explorer-changes-resizer {
   display: none;
 }
 body.file-explorer-mode-diff .file-explorer-tree-panel,
 body.file-explorer-mode-diff .file-explorer-changes-resizer,
 body.file-explorer-mode-tabber .file-explorer-tree-panel,
-body.file-explorer-mode-tabber .file-explorer-changes-resizer {
+body.file-explorer-mode-tabber .file-explorer-changes-resizer,
+.file-explorer-panel[data-file-explorer-mode="diff"] .file-explorer-tree-panel,
+.file-explorer-panel[data-file-explorer-mode="diff"] .file-explorer-changes-resizer,
+.file-explorer-panel[data-file-explorer-mode="tabber"] .file-explorer-tree-panel,
+.file-explorer-panel[data-file-explorer-mode="tabber"] .file-explorer-changes-resizer {
   display: none;
 }
 body.file-explorer-mode-diff .file-explorer-changes-panel,
-body.file-explorer-mode-tabber .file-explorer-changes-panel {
+body.file-explorer-mode-tabber .file-explorer-changes-panel,
+.file-explorer-panel[data-file-explorer-mode="diff"] .file-explorer-changes-panel,
+.file-explorer-panel[data-file-explorer-mode="tabber"] .file-explorer-changes-panel {
   display: block;
   flex: 1 1 auto;
   min-height: 0;

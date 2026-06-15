@@ -1369,7 +1369,7 @@ function showFileEditorDecisionDialog(options = {}) {
     : [{id: 'cancel', label: t('dialog.cancel')}];
   return new Promise(resolve => {
     const backdrop = document.createElement('div');
-    backdrop.className = `file-editor-dialog-backdrop ${options.className || ''}`.trim();
+    backdrop.className = `app-modal-overlay file-editor-dialog-backdrop ${options.className || ''}`.trim();
     const actionButtons = actions.map(action => (
       `<button type="button" class="file-editor-dialog-action ${esc(action.variant || '')}" data-dialog-action="${esc(action.id)}">${esc(action.label || action.id)}</button>`
     )).join('');
@@ -1403,7 +1403,7 @@ function showFileEditorDecisionDialog(options = {}) {
       if (event.target === backdrop) finish('cancel');
     });
     document.addEventListener('keydown', onKeydown, true);
-    document.body.appendChild(backdrop);
+    appOverlayRootElement().appendChild(backdrop);
     options.onMount?.(backdrop);
     const preferred = backdrop.querySelector('[data-dialog-action]:not(.danger)') || backdrop.querySelector('[data-dialog-action]');
     preferred?.focus?.({preventScroll: true});

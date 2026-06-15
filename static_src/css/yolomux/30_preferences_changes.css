@@ -824,14 +824,10 @@
 }
 
 .command-palette {
-  position: fixed;
-  inset: 0;
   z-index: var(--z-ref-suggestion);
-  display: grid;
   align-items: start;
   justify-items: center;
   padding: min(12vh, 96px) var(--popover-edge-gap) var(--popover-edge-gap);
-  background: rgba(0, 0, 0, 0.42);
 }
 .command-palette[hidden] {
   display: none;
@@ -844,7 +840,7 @@
   overflow: hidden;
   color: var(--text);
   background: #111820;
-  border: 1px solid #708093;
+  border: var(--app-modal-border-width) solid var(--app-modal-border-color);
   border-radius: 8px;
   box-shadow:
     0 -4px 14px rgba(0, 0, 0, 0.34),
@@ -989,14 +985,10 @@ body.theme-light .command-palette-view-chip {
   text-align: center;
 }
 .keyboard-shortcuts-overlay {
-  position: fixed;
-  inset: 0;
   z-index: var(--z-file-conflict-dialog);
-  display: grid;
   align-items: start;
   justify-items: center;
   padding: min(10vh, 82px) var(--popover-edge-gap) var(--popover-edge-gap);
-  background: rgba(0, 0, 0, 0.46);
 }
 .keyboard-shortcuts-overlay[hidden] {
   display: none;
@@ -1009,7 +1001,7 @@ body.theme-light .command-palette-view-chip {
   overflow: hidden;
   color: var(--text);
   background: #111820;
-  border: 1px solid #708093;
+  border: var(--app-modal-border-width) solid var(--app-modal-border-color);
   border-radius: 8px;
   box-shadow: 0 24px 70px rgb(var(--shadow-rgb) / 0.62);
 }

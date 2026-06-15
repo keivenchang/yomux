@@ -62,7 +62,7 @@ async function openFileExplorerAt(path, options = {}) {
   }
   if (scrollPositions) restoreFileExplorerScrollPositions(scrollPositions);
   updateFileExplorerCurrentFileHighlight();
-  scheduleShareUiStatePublish();
+  scheduleShareTopologySnapshot('finder-root');
   return true;
 }
 
@@ -612,7 +612,7 @@ function setFileExplorerRootMode(mode, options = {}) {
   if (fileExplorerRootMode === 'sync' && options.sync !== false) {
     scheduleFileExplorerActiveTabSync(fileExplorerExplicitSyncSessionTarget(), {explicit: true});
   }
-  scheduleShareUiStatePublish();
+  scheduleShareTopologySnapshot('finder-root-mode');
 }
 
 function fileExplorerRootModeValue() {
@@ -1185,7 +1185,7 @@ function fileTreeRepoPopoverNode() {
     node.id = 'fileTreeRepoPopover';
     node.className = 'file-tree-repo-popover';
     node.hidden = true;
-    document.body.appendChild(node);
+    appOverlayRootElement().appendChild(node);
   }
   return node;
 }
@@ -2329,7 +2329,7 @@ function openFileImagePreview(anchor, path, entry, point = null) {
   img.src = rawFileUrl(path);
   img.alt = entry?.name || basenameOf(path);
   popover.appendChild(img);
-  document.body.appendChild(popover);
+  appOverlayRootElement().appendChild(popover);
   fileImagePreviewPopover = popover;
   positionFileImagePreview(anchor, popover, point);
 }

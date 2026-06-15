@@ -178,6 +178,7 @@ PLACEHOLDER_AUTH_USERNAME = _auth.PLACEHOLDER_AUTH_USERNAME
 PLACEHOLDER_AUTH_PASSWORD = _auth.PLACEHOLDER_AUTH_PASSWORD
 GUEST_AUTH_USERNAME = _auth.GUEST_AUTH_USERNAME
 GUEST_AUTH_PASSWORD = _auth.GUEST_AUTH_PASSWORD
+TEST_AUTH_BYPASS_ENV = _auth.TEST_AUTH_BYPASS_ENV
 AUTH_COOKIE_NAME = _auth.AUTH_COOKIE_NAME
 AUTH_LOGOUT_COOKIE_NAME = _auth.AUTH_LOGOUT_COOKIE_NAME
 AUTH_COOKIE_MAX_AGE_SECONDS = _auth.AUTH_COOKIE_MAX_AGE_SECONDS
@@ -228,6 +229,10 @@ def current_auth_users() -> tuple[AuthUser, ...]:
 def auth_setup_required() -> bool:
     _sync_auth_overrides()
     return _auth.auth_setup_required()
+
+
+def test_auth_bypass_enabled() -> bool:
+    return _auth.test_auth_bypass_enabled()
 
 
 def load_auth_cookie_secret(path: Path | None = None) -> bytes:

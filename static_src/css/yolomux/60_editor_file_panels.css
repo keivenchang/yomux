@@ -482,13 +482,9 @@ body.editor-theme-light .file-editor-image-panel {
   background: rgba(82, 210, 115, 0.18);
 }
 .file-editor-dialog-backdrop {
-  position: fixed;
-  inset: 0;
   z-index: var(--z-file-editor-dialog);
-  display: grid;
   place-items: center;
   padding: 24px;
-  background: rgba(2, 6, 14, 0.54);
 }
 .file-editor-dialog {
   width: min(760px, 96vw);
@@ -496,7 +492,7 @@ body.editor-theme-light .file-editor-image-panel {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   background: #151922;
-  border: 1px solid #455164;
+  border: var(--app-modal-border-width) solid var(--app-modal-border-color);
   box-shadow: 0 20px 46px rgb(var(--shadow-rgb) / 0.48), 0 0 0 1px var(--active-control-focus-ring);
   color: var(--text);
 }
@@ -1206,7 +1202,11 @@ body.theme-light .file-tree-rename-input {
 body.file-explorer-mode-diff .file-explorer-mode-files-only,
 body.file-explorer-mode-tabber .file-explorer-mode-files-only,
 body:not(.file-explorer-mode-diff) .file-explorer-mode-diff-only,
-body.file-explorer-mode-tabber .file-explorer-mode-files-diff-only {
+body.file-explorer-mode-tabber .file-explorer-mode-files-diff-only,
+.file-explorer-panel[data-file-explorer-mode="diff"] .file-explorer-mode-files-only,
+.file-explorer-panel[data-file-explorer-mode="tabber"] .file-explorer-mode-files-only,
+.file-explorer-panel:not([data-file-explorer-mode="diff"]) .file-explorer-mode-diff-only,
+.file-explorer-panel[data-file-explorer-mode="tabber"] .file-explorer-mode-files-diff-only {
   display: none;
 }
 .path-copy-button {
@@ -1266,17 +1266,25 @@ body.file-explorer-mode-tabber .file-explorer-mode-files-diff-only {
   --file-explorer-changes-resizer-size: 6px;
 }
 body.file-explorer-mode-files .file-explorer-changes-panel,
-body.file-explorer-mode-files .file-explorer-changes-resizer {
+body.file-explorer-mode-files .file-explorer-changes-resizer,
+.file-explorer-panel[data-file-explorer-mode="files"] .file-explorer-changes-panel,
+.file-explorer-panel[data-file-explorer-mode="files"] .file-explorer-changes-resizer {
   display: none;
 }
 body.file-explorer-mode-diff .file-explorer-tree-panel,
 body.file-explorer-mode-diff .file-explorer-changes-resizer,
 body.file-explorer-mode-tabber .file-explorer-tree-panel,
-body.file-explorer-mode-tabber .file-explorer-changes-resizer {
+body.file-explorer-mode-tabber .file-explorer-changes-resizer,
+.file-explorer-panel[data-file-explorer-mode="diff"] .file-explorer-tree-panel,
+.file-explorer-panel[data-file-explorer-mode="diff"] .file-explorer-changes-resizer,
+.file-explorer-panel[data-file-explorer-mode="tabber"] .file-explorer-tree-panel,
+.file-explorer-panel[data-file-explorer-mode="tabber"] .file-explorer-changes-resizer {
   display: none;
 }
 body.file-explorer-mode-diff .file-explorer-changes-panel,
-body.file-explorer-mode-tabber .file-explorer-changes-panel {
+body.file-explorer-mode-tabber .file-explorer-changes-panel,
+.file-explorer-panel[data-file-explorer-mode="diff"] .file-explorer-changes-panel,
+.file-explorer-panel[data-file-explorer-mode="tabber"] .file-explorer-changes-panel {
   display: block;
   flex: 1 1 auto;
   min-height: 0;

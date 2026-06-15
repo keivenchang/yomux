@@ -35,6 +35,15 @@ def test_missing_auth_yaml_creates_commented_starter(monkeypatch, tmp_path):
     assert auth_path.parent.stat().st_mode & 0o777 == 0o700
 
 
+def test_test_auth_bypass_disables_setup_requirement(monkeypatch, tmp_path):
+    auth_path = tmp_path / "auth.yaml"
+    monkeypatch.setattr(common, "AUTH_CONFIG_PATH", auth_path)
+    monkeypatch.setenv(common.TEST_AUTH_BYPASS_ENV, "1")
+
+    assert common.auth_setup_required() is False
+    assert auth_path.exists() is False
+
+
 def test_legacy_placeholder_auth_yaml_is_replaced_with_commented_starter(monkeypatch, tmp_path):
     auth_path = tmp_path / "auth.yaml"
     auth_path.write_text(

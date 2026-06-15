@@ -92,6 +92,55 @@ def test_share_token_url_seeds_whole_layout_sessions_and_layout():
         webapp.control_server.stop()
 
 
+def test_share_debug_profile_is_opt_in_and_redacted(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "SHARE_DEBUG_PROFILE_LOG_DIR", tmp_path)
+    webapp = app_module.TmuxWebtermApp(["6"])
+    try:
+        disabled, disabled_status = webapp.create_share_token("6", 900)
+        enabled, enabled_status = webapp.create_share_token("6", 900, debug_profile=True)
+
+        assert disabled_status == HTTPStatus.OK
+        assert enabled_status == HTTPStatus.OK
+        assert disabled["debug_profile"] is False
+        assert disabled["debugProfile"] is False
+        assert enabled["debug_profile"] is True
+        assert enabled["debugProfile"] is True
+        assert webapp.verify_share_token(disabled["token"])["debug_profile"] is False
+        assert webapp.verify_share_token(enabled["token"])["debug_profile"] is True
+
+        denied, denied_status = webapp.record_share_debug_profile(disabled["token"], {"kind": "share-replay-health"})
+        assert denied_status == HTTPStatus.FORBIDDEN
+        assert denied["error"] == "debug/profiling upload is not enabled for this share"
+
+        payload, status = webapp.record_share_debug_profile(
+            enabled["token"],
+            {
+                "kind": "share-geometry-drift",
+                "viewerId": "viewer-a",
+                "url": f"https://host.example/share/{enabled['short_id']}#t={enabled['token']}",
+                "nested": {"shareToken": enabled["token"], "text": f"token={enabled['token']}"},
+            },
+            ip="203.0.113.9",
+            user_agent="Mozilla/5.0 Version/26.0 Safari/605.1.15",
+        )
+
+        assert status == HTTPStatus.OK
+        assert payload["ok"] is True
+        assert payload["logged"] is True
+        record = webapp.verify_share_token(enabled["token"])
+        stored_text = json.dumps(record["debug_profile_events"][-1], sort_keys=True)
+        assert record["debug_profile_events"][-1]["browser"] == "Safari 26.0"
+        assert "share-geometry-drift" in stored_text
+        assert enabled["token"] not in stored_text
+        assert f"/share/{enabled['short_id']}" not in stored_text
+        assert "[redacted-share-token]" in stored_text
+        log_text = (tmp_path / f"{enabled['short_id']}.jsonl").read_text(encoding="utf-8")
+        assert enabled["token"] not in log_text
+        assert f"/share/{enabled['short_id']}" not in log_text
+    finally:
+        webapp.control_server.stop()
+
+
 def test_share_token_clamps_mode_scheme_viewers_and_allows_concurrent_shares():
     webapp = app_module.TmuxWebtermApp(["6"])
     try:
@@ -242,7 +291,7 @@ def test_share_viewer_registration_enforces_cap_and_decrements():
         active = webapp.active_share_payload()[0]
         assert active["viewers"] == 1
         assert active["viewer_details"][0]["ip"] == "203.0.113.4"
-        assert active["viewer_details"][0]["browser"] == "Chrome"
+        assert active["viewer_details"][0]["browser"] == "Chrome 125.0.0.0"
         assert active["viewer_details"][0]["connected_seconds"] >= 0
 
         same_viewer, same_viewer_status = webapp.register_share_viewer(payload["token"], "7", "viewer-a")
@@ -259,7 +308,7 @@ def test_share_viewer_registration_enforces_cap_and_decrements():
         assert rejected["error"] == "share viewer limit reached"
         status_frame = webapp.share_status_frame_payload(payload["token"])
         assert status_frame["viewer_details"][0]["ip"] == "203.0.113.4"
-        assert status_frame["viewer_details"][0]["browser"] == "Chrome"
+        assert status_frame["viewer_details"][0]["browser"] == "Chrome 125.0.0.0"
 
         assert webapp.unregister_share_viewer(payload["token"], "viewer-a") == 1
         assert webapp.unregister_share_viewer(payload["token"], "viewer-a") == 0

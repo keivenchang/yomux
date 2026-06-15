@@ -253,12 +253,14 @@ def html_page(
 </aside>
 <main id="grid" class="grid"></main>
 <div id="panelPool" class="panel-pool" aria-hidden="true"></div>
-<section id="modal" class="modal">
-  <div class="modal-head">
-    <div id="modalTitle">Transcript</div>
-    <button id="closeModal" title="Close" aria-label="Close">X</button>
+<section id="modal" class="modal app-modal-overlay">
+  <div class="modal-dialog">
+    <div class="modal-head">
+      <div id="modalTitle">Transcript</div>
+      <button id="closeModal" title="Close" aria-label="Close">X</button>
+    </div>
+    <pre id="modalBody"></pre>
   </div>
-  <pre id="modalBody"></pre>
 </section>
 </div>
 <script id="yolomux-bootstrap" type="application/json">{bootstrap_json}</script>
@@ -392,7 +394,6 @@ def login_html(next_path: str = "/", error: str = "", secure: bool = True, curre
 <main class="login-shell">
   <section class="login-panel">
     <div class="login-brand">{brand_html("brand-title login-brand-title", "div", locale=current_locale)}</div>
-    <h1>{sign_in}</h1>
     {security_html}
     {agent_notice_html}
     {error_html}

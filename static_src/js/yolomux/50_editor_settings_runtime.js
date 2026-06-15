@@ -22,7 +22,7 @@ function setFileEditorViewMode(path, mode, item = null) {
     resetFileEditorPreviewZoomStateForPath(path, 'split:mermaid');
   }
   fileEditorViewModesForPath(path, true).set(editorViewModeKey(path, item), mode);
-  scheduleShareUiStatePublish();
+  scheduleShareTopologySnapshot('editor-mode');
 }
 
 function updateEditorModeControl(control, path, state, item = null) {
@@ -242,14 +242,14 @@ function setFileEditorThemeMode(mode) {
     writeStoredEditorPreviewDisplayMode(fileEditorPreviewDisplayMode);
   }
   applyEditorThemeMode({refreshEditors: true});
-  scheduleShareUiStatePublish();
+  scheduleShareTopologySnapshot('editor-theme');
 }
 
 function setFileEditorPreviewDisplayMode(mode) {
   fileEditorPreviewDisplayMode = normalizeEditorPreviewDisplayMode(mode);
   writeStoredEditorPreviewDisplayMode(fileEditorPreviewDisplayMode);
   applyEditorThemeMode({refreshEditors: true});
-  scheduleShareUiStatePublish();
+  scheduleShareTopologySnapshot('editor-preview-display');
 }
 
 function cycleEditorThemeMode(options = {}) {
@@ -730,7 +730,7 @@ function applyGlobalThemeMode(options = {}) {
   // the active-color presets are theme-specific, so re-apply on every theme switch.
   applyActiveColor(initialSetting('appearance.active_color', 'green'));
   applySeparatorColor(initialSetting('appearance.separator_color', 'theme'));
-  scheduleShareUiStatePublish();
+  scheduleShareTopologySnapshot('theme');
 }
 
 let globalThemeMediaListenerInstalled = false;
@@ -825,7 +825,7 @@ function applySettingsPayload(payload, options = {}) {
   reconcileIndexedDirsFromSetting({initial: options.initial === true});
   uploadMaxBytes = numberSetting('uploads.max_bytes', 20 * 1024 * 1024);
   shareDefaultTtlSeconds = numberSetting('share.ttl_seconds', 600);
-  shareDefaultMaxViewers = numberSetting('share.max_viewers', 5);
+  shareDefaultMaxViewers = numberSetting('share.max_viewers', 2);
   shareDefaultReadOnly = boolSetting('share.read_only', true);
   shareDefaultScheme = initialSetting('share.scheme', 'http') === 'https' ? 'https' : 'http';
   shareViewFit = normalizeShareViewFit(storageGet(shareViewFitStorageKey) || initialSetting('share.view_fit', shareViewFit));

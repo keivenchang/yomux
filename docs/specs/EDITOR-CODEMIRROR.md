@@ -1,8 +1,8 @@
-# CodeMirror Editor Research (2026-05-30)
+# Editor: CodeMirror vs textarea — research & 2-path spike (2026-05-30)
 
 > **STATUS — RESOLVED & SHIPPED (2026-05-31):** CodeMirror 6 is now the only editable file editor. The old `editor.engine` setting, `?editor=` override, textarea/highlight overlay, and textarea fallback were removed. If CodeMirror fails to load, YOLOmux shows a read-only raw-text pane with an explicit error. This document is now historical research, kept for the rationale, the success gate, and the `@codemirror/merge` diff notes.
 
-Original goal: get real Find (Cmd/Ctrl+F, `1/13`, previous/next, jump+reveal) and the rest of the editor-options list. Before the CodeMirror work, the file editor was a raw `<textarea id="fileEditorTextarea">` plus a custom highlight overlay painted by highlight.js. The decision was to adopt CodeMirror 6 and delete the textarea editor layer.
+Original goal: get a real Find (Cmd/Ctrl+F, `1/13`, ^/v, jump+reveal) and the rest of the editor-options list. Before the CodeMirror work, the file editor was a raw `<textarea id="fileEditorTextarea">` plus a custom highlight overlay painted by highlight.js. The decision was to adopt CodeMirror 6 and delete the textarea editor layer.
 
 CodeMirror 6 is a third-party editor library with upstream dependency notices recorded in [`../../THIRD_PARTY_NOTICES.md`](../../THIRD_PARTY_NOTICES.md). It gives, out of the box: Find/Replace (`@codemirror/search`) with match count + all-match highlight, multiple carets, native soft-wrap + line-number gutter (this RETIRES #6), Lezer syntax highlighting, bracket matching, auto-close, code folding, go-to-line, comment-toggle, auto-indent, configurable tab width, line ops, undo/redo, read-only mode, viewport rendering for big files. Heavier Popular IDE editor engines need more runtime plumbing and web workers, so CM6 is the right size here.
 
@@ -15,7 +15,7 @@ Build a `CmFileEditor` adapter mounted in the same `#fileEditor` panel, wired to
 
 Loading at prototype time used one hand-written `yolomux.js` and CDN/vendor fallbacks for xterm/marked/highlight.js. The current app now has a no-dependency concat build for `static/yolomux.js` / `static/yolomux.css`, but CodeMirror itself is still a vendored prebuilt bundle. Two prototype sub-options:
 - **A1 — import-map + ESM CDN.** `<script type="importmap">` mapping `codemirror` / `@codemirror/*` to esm.sh (or jsdelivr `+esm`), then `<script type="module">`. Zero local build; matches the current CDN pattern. Downside: runtime depends on the CDN (broken offline) unless cached.
-- **A2 — vendored prebuilt bundle (recommended).** One-time `esbuild` of a tiny entry that re-exports only the CM pieces YOLOmux uses -> commit `static/codemirror.js`, served locally with a CDN fallback. This matches how xterm.js is handled (`web.py:86`, local + `onerror` jsdelivr fallback), keeps YOLOmux self-hostable offline, and is the consistent choice.
+- **A2 — vendored prebuilt bundle (recommended).** One-time `esbuild` of a tiny entry that re-exports only the CM pieces YOLOmux uses -> commit `static/codemirror.js`, served locally with a CDN fallback. This is EXACTLY how xterm.js is already handled (`web.py:86`, local + `onerror` jsdelivr fallback), keeps YOLOmux self-hostable offline, and is the consistent choice.
 
 ### Vendored CodeMirror bundle record
 The rebuild manifest and exact lockfile live in `prototypes/codemirror-bundle/`. Rebuild with `cd prototypes/codemirror-bundle && npm ci && npm run build`. The committed `static/codemirror.js` currently has SHA256 `96f7c47927e35527d86f1b8a82d9f0e73d2a58ffb51005b436daa5a00b5ba081`.
@@ -24,7 +24,7 @@ Direct package versions recorded for the current bundle: `codemirror@6.0.2`, `@c
 ### Path B — extend the textarea (historical alternative, rejected)
 Keep the `<textarea>` + overlay and hand-build Find + the editor-options list on it (`setSelectionRange` + scroll for jump/reveal; overlay rectangles for all-match highlight). Lower risk, no dep/build change. Ceiling: never get multi-cursor / folding / bracket-match, and #6 (the wrap/continuation overlay) stays a char-estimate hack.
 
-## Success gate
+## Success gate (CM wins only if ALL hold)
 - Parity: open / edit / save (`Cmd/Ctrl+S`), dirty indicator + "changed on disk" reload, Edit/Preview/Split modes, split-scroll-sync, `appearance.editor_font_size` live, wrap toggle, line-numbers toggle, same language coloring set (md/sh/py/js/ts/rust/json/html/xml/css/toml/yaml), readonly-role read-only, URL-layout/tab integration, drag-file-row-to-terminal still works.
 - New wins present: Find/Replace with `1/13` + ^/v, multi-cursor, bracket match, folding, and NO #6 misalignment.
 - Non-functional: vendored bundle loads offline; bundle size acceptable; dark theme matches the UI; mobile/touch OK.

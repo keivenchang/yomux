@@ -203,6 +203,27 @@ def test_basic_auth_still_works_without_browser_challenge(monkeypatch, tmp_path)
         stop_server(server, thread)
 
 
+def test_test_auth_bypass_env_allows_api_verification_without_cookie(monkeypatch, tmp_path):
+    monkeypatch.setenv(common.TEST_AUTH_BYPASS_ENV, "1")
+    app = SimpleNamespace(
+        sessions=[],
+        dangerously_yolo=False,
+        settings_payload=lambda: {"settings": {"share": {"max_viewers": 2}}},
+    )
+    server, thread = start_server(monkeypatch, tmp_path, app=app)
+    port = server.server_address[1]
+    try:
+        status, _headers, body = request(port, "GET", "/api/settings")
+        assert status == HTTPStatus.OK
+        assert json.loads(body)["settings"]["share"]["max_viewers"] == 2
+
+        status, headers, _body = request(port, "GET", "/login?next=/api/settings")
+        assert status == HTTPStatus.SEE_OTHER
+        assert headers["Location"] == "/api/settings"
+    finally:
+        stop_server(server, thread)
+
+
 def test_html_preview_route_runs_scripts_in_sandboxed_wrapper(monkeypatch, tmp_path):
     target = tmp_path / "preview.html"
     target.write_text("<h1>ok</h1><script>window.answer = 42;</script>\n", encoding="utf-8")
@@ -443,6 +464,85 @@ def test_plaintext_on_tls_server_serves_http_share_shell(monkeypatch, tmp_path):
         stop_server(server, thread)
 
 
+def test_plaintext_on_tls_server_serves_http_share_readonly_apis(monkeypatch, tmp_path):
+    shared_file = tmp_path / "DONE.md"
+    shared_file.write_text("# DONE\n\nShare viewer parity.\n", encoding="utf-8")
+    shared_path = str(shared_file)
+    record = {
+        "session": "6",
+        "sessions": ["6"],
+        "short_id": "share123",
+        "mode": "ro",
+        "scheme": "http",
+        "expires_at": 1234567890.0,
+        "max_viewers": 5,
+        "viewers": 0,
+        "http_allowed": True,
+        "tabs": f"left:files;right:6,file:{shared_path}",
+    }
+    calls = []
+    app = SimpleNamespace(
+        sessions=["6"],
+        dangerously_yolo=False,
+        verify_share_token=lambda token: record if token == "valid-share-token" else None,
+        share_record_allows_file_path=lambda share_record, raw_path: share_record == record and raw_path == shared_path,
+        share_status_payload=lambda token, **kwargs: calls.append(("share", token, kwargs)) or ({"ok": True, "token": token}, HTTPStatus.OK),
+        activity_payload=lambda: ({"activity": {"6:0": {"session": "6", "window": 0}}}, HTTPStatus.OK),
+        session_files_payload=lambda session, hours, **kwargs: ({"session": session, "loaded": True, "files": [], "repos": [], "errors": []}, HTTPStatus.OK),
+    )
+    server, thread = start_server(monkeypatch, tmp_path, app=app, tls_context=FakeTlsContext())
+    port = server.server_address[1]
+    headers = {"X-Share-Token": "valid-share-token"}
+    try:
+        status, response_headers, body = request(port, "GET", f"/api/fs/list?{urlencode({'path': str(tmp_path)})}", headers=headers)
+        assert status == HTTPStatus.OK
+        assert "Location" not in response_headers
+        assert "DONE.md" in {entry["name"] for entry in json.loads(body)["entries"]}
+
+        status, response_headers, body = request(port, "GET", f"/api/fs/read?{urlencode({'path': shared_path})}", headers=headers)
+        assert status == HTTPStatus.OK
+        assert "Location" not in response_headers
+        assert json.loads(body)["content"].startswith("# DONE")
+
+        status, response_headers, body = request(port, "GET", "/api/session-files?session=6&hours=24", headers=headers)
+        assert status == HTTPStatus.OK
+        assert "Location" not in response_headers
+        assert json.loads(body)["loaded"] is True
+
+        status, response_headers, body = request(port, "GET", "/api/activity", headers=headers)
+        assert status == HTTPStatus.OK
+        assert "Location" not in response_headers
+        assert json.loads(body)["activity"]["6:0"]["session"] == "6"
+
+        batch_body = json.dumps({"requests": [{"id": "root", "type": "list", "path": str(tmp_path)}]})
+        status, response_headers, body = request(
+            port,
+            "POST",
+            "/api/fs/batch",
+            body=batch_body,
+            headers={**headers, "Content-Type": "application/json"},
+        )
+        assert status == HTTPStatus.OK
+        assert "Location" not in response_headers
+        assert json.loads(body)["responses"][0]["ok"] is True
+
+        status, response_headers, body = request(port, "GET", "/api/share", headers=headers)
+        assert status == HTTPStatus.OK
+        assert "Location" not in response_headers
+        assert json.loads(body)["token"] == "valid-share-token"
+
+        status, response_headers, body = request(port, "GET", "/ws/share-ui?token=valid-share-token&client=viewer-a")
+        assert status == HTTPStatus.BAD_REQUEST
+        assert "Location" not in response_headers
+        assert body == b"missing Sec-WebSocket-Key\n"
+
+        status, response_headers, _body = request(port, "GET", "/api/fs/read")
+        assert status == HTTPStatus.PERMANENT_REDIRECT
+        assert response_headers["Location"] == f"https://127.0.0.1:{port}/api/fs/read"
+    finally:
+        stop_server(server, thread)
+
+
 def test_share_create_endpoint_passes_layout_seed(monkeypatch, tmp_path):
     calls = []
 
@@ -488,6 +588,7 @@ def test_share_create_endpoint_passes_layout_seed(monkeypatch, tmp_path):
             "read_only": None,
             "scheme": "http",
             "max_viewers": 7,
+            "debug_profile": False,
             "request_is_https": False,
             "tls_available": False,
         })]

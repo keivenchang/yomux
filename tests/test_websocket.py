@@ -4,9 +4,9 @@ import struct
 from yolomux_lib import websocket
 
 
-def masked_client_frame(payload: bytes, opcode: int = 1, mask: bytes = b"\x01\x02\x03\x04") -> bytes:
+def masked_client_frame(payload: bytes, opcode: int = 1, mask: bytes = b"\x01\x02\x03\x04", fin: bool = True) -> bytes:
     masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
-    return struct.pack("!BB", 0x80 | opcode, 0x80 | len(payload)) + mask + masked
+    return struct.pack("!BB", (0x80 if fin else 0x00) | opcode, 0x80 | len(payload)) + mask + masked
 
 
 def test_read_ws_frame_unmasks_client_payload():
@@ -14,6 +14,19 @@ def test_read_ws_frame_unmasks_client_payload():
 
     assert opcode == 1
     assert payload == b"hello"
+
+
+def test_read_ws_frame_reassembles_fragmented_client_message():
+    stream = io.BytesIO(
+        masked_client_frame(b'{"type":"dom-keyframe",', opcode=1, fin=False)
+        + masked_client_frame(b'"payload":{"root":', opcode=0, fin=False)
+        + masked_client_frame(b'{"tag":"div"}}}', opcode=0)
+    )
+
+    opcode, payload = websocket.read_ws_frame(stream)
+
+    assert opcode == 1
+    assert payload == b'{"type":"dom-keyframe","payload":{"root":{"tag":"div"}}}'
 
 
 def test_make_ws_frame_round_trips_server_binary_payload():

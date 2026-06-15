@@ -177,7 +177,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     },
     "share": {
         "ttl_seconds": 600,
-        "max_viewers": 5,
+        "max_viewers": 2,
         "read_only": True,
         "scheme": "http",
         "view_fit": "cover",
@@ -252,6 +252,7 @@ STALE_DEFAULT_MIGRATIONS: dict[tuple[str, str], Any] = {
     ("performance", "server_event_poll_ms"): (5_000, 5_009),
     ("performance", "server_background_file_event_poll_ms"): (5_000, 5_009),
     ("performance", "server_directory_event_poll_ms"): (5_000, 5_009),
+    ("share", "max_viewers"): 5,
 }
 
 SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {

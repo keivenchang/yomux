@@ -197,6 +197,9 @@
   --popover-hide-delay: 300ms;
   --popover-edge-gap: 1vw;
   --popover-max-inline-size: calc(100vw - var(--popover-edge-gap) - var(--popover-edge-gap));
+  --app-modal-backdrop-bg: rgba(0, 0, 0, 0.46);
+  --app-modal-border-width: max(2px, var(--pane-split-gap));
+  --app-modal-border-color: color-mix(in srgb, var(--pane-tab-panel-ring) var(--pane-active-ring-opacity), transparent);
   --shadow-popover: 0 18px 50px rgba(0, 0, 0, 0.45);
   --shadow-elevated: 0 16px 42px rgba(0, 0, 0, 0.45);
   --share-stage-bg: #000;
@@ -379,6 +382,13 @@
   --red-reminder-easing: ease-in-out;
   --yolo-reminder-duration: 2.8s;
   --yolo-rotation-duration: 20s;
+}
+
+.app-modal-overlay {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  background: var(--app-modal-backdrop-bg);
 }
 .moving-ellipsis {
   display: inline-flex;
@@ -619,6 +629,15 @@ body {
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
   background: var(--bg);
+}
+.app-overlay-root {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-share-presence);
+  pointer-events: none;
+}
+.app-overlay-root > * {
+  pointer-events: auto;
 }
 ::selection {
   background: var(--text-selection-bg);

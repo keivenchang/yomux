@@ -33,6 +33,33 @@ const shareToken = (() => {
     return '';
   }
 })();
+const shareDebugEnabled = (() => {
+  if (!shareViewMode) return false;
+  try {
+    const query = new URLSearchParams(location.search || '');
+    if (query.get('shareDebug') === '1') return true;
+  } catch (_) {}
+  return storageGet('yolomux.shareDebug') === '1';
+})();
+const shareReplaySemanticEscapeEnabled = (() => {
+  if (!shareViewMode) return false;
+  if (bootstrap.shareReplay === false || shareBootstrap?.replay === false) return true;
+  try {
+    const query = new URLSearchParams(location.search || '');
+    if (query.get('shareReplay') === '0' || query.get('shareSemantic') === '1') return true;
+  } catch (_) {}
+  return storageGet('yolomux.shareReplaySemantic') === '1';
+})();
+const shareReplayEnabled = (() => {
+  if (shareReplaySemanticEscapeEnabled) return false;
+  if (bootstrap.shareReplay === true || shareBootstrap?.replay === true) return true;
+  try {
+    const query = new URLSearchParams(location.search || '');
+    if (query.get('shareReplay') === '1') return true;
+  } catch (_) {}
+  if (shareViewMode) return true;
+  return storageGet('yolomux.shareReplay') === '1';
+})();
 function randomShareViewerId() {
   try {
     if (crypto?.randomUUID) return crypto.randomUUID();
@@ -113,6 +140,11 @@ let activeShare = null;
 let activeShares = [];
 let shareHostSockets = new Map();
 let shareHostQueues = new Map();
+let shareMirrorEpoch = 1;
+let shareMirrorSequence = 0;
+let shareReplayMirrorEpoch = 1;
+let shareReplayMirrorSequence = 0;
+const shareMirrorLastFrameBySender = new Map();
 let shareUiStatePublishTimer = null;
 let shareViewportPublishTimer = null;
 let shareAppearancePublishTimer = null;
@@ -122,9 +154,17 @@ let sharePointerLastPublishedAt = -Infinity;
 const shareScrollPublishTimers = new Map();
 const shareScrollRestoreFrameTimers = new Map();
 let shareGeometryDigestTimer = null;
+let shareDebugSequence = 0;
+let shareDebugReports = [];
+const shareDebugReportLimit = 20;
+const shareDebugProfileUploadMinIntervalMs = 5000;
+let shareDebugProfileLastUploadAtByKind = new Map();
 let shareLastGeometryDigest = null;
 let shareLastGeometryDigestResult = null;
 let shareGeometryResyncInFlight = false;
+let shareGeometryResyncLastStartedAt = 0;
+let shareGeometryRepairInFlight = false;
+const shareAppliedTextWrapMetricsByKey = new Map();
 let sharePointerGhost = null;
 let sharePointerGhosts = new Map();
 let sharePointerHideTimer = null;
@@ -135,6 +175,28 @@ let sharePopupLayerNode = null;
 let sharePopupLayerPublishTimer = null;
 let sharePopupLayerObserver = null;
 let sharePopupLayerSequence = 0;
+let shareReplayHostNodeIds = new WeakMap();
+let shareReplayHostNextNodeId = 1;
+let shareReplayMutationObserver = null;
+let shareReplayPendingMutations = [];
+let shareReplayDeltaFramePending = false;
+let shareReplayMutationPublisherPaused = false;
+let shareReplayLastDeltaBatch = null;
+let shareReplayCurrentEpoch = 0;
+let shareReplayLastSequence = 0;
+let shareReplayDroppedFrames = 0;
+let shareReplayStaleFrames = 0;
+let shareReplayKeyframeRequestCount = 0;
+let shareReplayKeyframeRequestSuppressedCount = 0;
+let shareReplayKeyframeLastRequestAt = 0;
+let shareReplayKeyframeBackoffMs = 0;
+let shareReplayKeyframeInFlight = false;
+let shareReplayHostKeyframeTimer = null;
+let shareReplayHostKeyframePendingReason = '';
+let shareReplayHostLastKeyframeAt = 0;
+let shareReplayHostKeyframeSuppressedCount = 0;
+let shareReplayTopologyKeyframeTimer = null;
+let shareReplayTopologyMutationPauseTimer = null;
 const sharePopupLayerLastSeqBySender = new Map();
 const shareLastAppliedScrollByTarget = new Map();
 const shareLastAppliedScrollPayloadByTarget = new Map();
