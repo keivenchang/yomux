@@ -2578,6 +2578,12 @@ test('t@1869', () => {
   // trailing fit; the redundant middle timer (fitFinalTimer) is gone.
   assert.equal(source.includes('item.fitFinalTimer'), false, 'C12 F3: the redundant third fit timer is removed');
   assert.ok(/function scheduleFit[\s\S]*?requestAnimationFrame\([\s\S]*?item\.fitTimer = setTimeout/.test(source), 'C12 F3: fit scheduling is one rAF plus a single trailing timeout');
+  assert.ok(/function terminalProbeFontFamily\(container\)[\s\S]*--mono-font[\s\S]*terminalFontFamily/.test(source), 'terminal fallback cell measurement uses the shared bundled mono font token');
+  assert.equal(source.includes("probe.style.font = '13px ui-monospace"), false, 'terminal fallback cell measurement must not use a hardcoded fallback font stack');
+  assert.ok(/function terminalFitSignature\(size\)[\s\S]*contentWidth[\s\S]*cellWidth[\s\S]*terminalFontSize[\s\S]*terminalFontFamily/.test(source), 'terminal fit skips are keyed by pane size, cell metrics, and terminal font settings');
+  assert.ok(/function fitTerminal\(session, options = \{\}\)[\s\S]*terminalFitIsUnchanged\(item, size\)[\s\S]*return[\s\S]*if \(changed\) item\.term\.resize/.test(source), 'terminal fit drops duplicate observer echoes before calling term.resize again');
+  const dockviewSource = fs.readFileSync('static_src/js/yolomux/75_dockview_layout.js', 'utf8');
+  assert.ok(/function dockviewScheduleLayoutToHost\(api = dockviewLayoutState\.api, host = dockviewLayoutState\.host\)[\s\S]*requestAnimationFrame\(\(\) => \{[\s\S]*dockviewLayoutToHost\(api, host\)/.test(dockviewSource), 'Dockview host ResizeObserver layout work is coalesced to one layout per frame');
   assert.equal(source.includes('esm.sh'), false, 'CodeMirror loading never falls back to a third-party CDN');
   assert.ok(source.includes('CodeMirror local bundle is unavailable or incomplete'), 'CodeMirror loading reports local bundle failures clearly');
   assert.ok(source.includes('maybeHandleServerVersionChange(transcriptMeta.server_version)'), 'the metadata poll checks the live server version');
@@ -5926,7 +5932,7 @@ test('t@2560', () => {
     assert.ok(/function installShareGeometryDigestLoop\(\)[\s\S]*setInterval\(publishShareGeometryDigest, 2000\)/.test(shareSource), 'M9: host publishes geometry digest every two seconds');
     assert.ok(/function renderSharePointerGhost\(payload = \{\}\)[\s\S]*payload\.sender === shareClientId[\s\S]*ensureSharePointerGhost\(sender\)[\s\S]*renderShareClickRipple/.test(shareSource), 'share participants render remote ghost cursors and ignore their own echoed cursor');
     assert.ok(/function shareHostTerminalSize\(session\)[\s\S]*shareHostDimensions\.get[\s\S]*rawRows <= 0 \|\| rawCols <= 0[\s\S]*return null/.test(shareSource), 'share viewers size xterm only from positive host terminal dimensions');
-    assert.ok(/function fitTerminal\(session\)[\s\S]*if \(shareViewMode\) \{[\s\S]*if \(!hostSize\) return[\s\S]*item\.term\.resize\(hostSize\.cols, hostSize\.rows\)[\s\S]*item\.term\.reset\(\)[\s\S]*return;[\s\S]*estimateTerminalSize/.test(shareSource), 'DOIT.69: share-view fitting uses host dims only, resets on host dim changes, and never reflows from the client pane box');
+    assert.ok(/function fitTerminal\(session, options = \{\}\)[\s\S]*if \(shareViewMode\) \{[\s\S]*if \(!hostSize\) return[\s\S]*item\.term\.resize\(hostSize\.cols, hostSize\.rows\)[\s\S]*item\.term\.reset\(\)[\s\S]*return;[\s\S]*estimateTerminalSize/.test(shareSource), 'DOIT.69: share-view fitting uses host dims only, resets on host dim changes, and never reflows from the client pane box');
     const dockviewSource = fs.readFileSync('static_src/js/yolomux/75_dockview_layout.js', 'utf8');
     assert.ok(/function dockviewSyncHeaderActionReservations\(\)[\s\S]*appSpaceRect\(actions\)[\s\S]*appSpaceRect\(header\)/.test(dockviewSource), 'M2/M3: Dockview tab fitting uses app-space widths under the mirror transform');
     const shareCss = fs.readFileSync('static/yolomux.css', 'utf8');
@@ -7448,6 +7454,29 @@ test('t@2560', () => {
   api.setPanelDetailsCollapsedForTest(dockviewPanel, true);
   assert.equal(dockviewHeaderDetailToggle.getAttribute('aria-pressed'), 'false', 'Dockview header detail toggle syncs by layout item, not the left/right slot id');
   assert.equal(dockviewHeaderDetailToggle.title, showDetailsLabel, 'Dockview header detail toggle flips to Show details when collapsed');
+  const stableTerminalPane = api.testElementForId('terminal-pane-stable');
+  stableTerminalPane.classList.add('active');
+  stableTerminalPane.clientWidth = 720;
+  stableTerminalPane.clientHeight = 260;
+  const stableFits = [];
+  api.registerTerminalForTest('stable', {
+    cols: 80,
+    rows: 24,
+    _core: {_renderService: {_renderer: {dimensions: {css: {cell: {width: 9, height: 18}}}}}},
+    resize(cols, rows) {
+      this.cols = cols;
+      this.rows = rows;
+      stableFits.push({cols, rows});
+    },
+    refresh() {},
+  });
+  api.fitTerminalForTest('stable');
+  assert.deepEqual(stableFits, [{cols: 79, rows: 14}], 'terminal fit uses the full 720px pane width, not a half-width transient box');
+  api.fitTerminalForTest('stable');
+  assert.deepEqual(stableFits, [{cols: 79, rows: 14}], 'a second fit with unchanged pane and cell metrics does not re-resize xterm');
+  stableTerminalPane.clientWidth = 360;
+  api.fitTerminalForTest('stable');
+  assert.equal(stableFits.length, 2, 'a real pane width change still resizes the terminal');
   const terminalPane = api.testElementForId('terminal-pane-1');
   terminalPane.classList.add('active');
   terminalPane.clientWidth = 720;

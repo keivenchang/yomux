@@ -19042,7 +19042,34 @@ function updateShareHostTerminalSize(session, rows, cols) {
   fitTerminal(session);
 }
 
-function fitTerminal(session) {
+function terminalFitMetricKey(value, scale = 1000) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.round(number * scale) / scale;
+}
+
+function terminalFitSignature(size) {
+  if (!size) return '';
+  return [
+    Math.round(Number(size.contentWidth) || 0),
+    Math.round(Number(size.contentHeight) || 0),
+    terminalFitMetricKey(size.cellWidth),
+    terminalFitMetricKey(size.cellHeight),
+    size.cols,
+    size.rows,
+    terminalFitMetricKey(terminalFontSize),
+    terminalFontFamily,
+  ].join(':');
+}
+
+function terminalFitIsUnchanged(item, size) {
+  if (!item?.term || !size) return false;
+  return item.lastFitSignature === terminalFitSignature(size)
+    && item.term.cols === size.cols
+    && item.term.rows === size.rows;
+}
+
+function fitTerminal(session, options = {}) {
   const item = terminals.get(session);
   if (!item || !item.term || !item.container) return;
   const hostSize = shareHostTerminalSize(session);
@@ -19058,8 +19085,11 @@ function fitTerminal(session) {
   }
   if (!terminalIsVisible(session, item.container)) return;
   const size = estimateTerminalSize(item.container, item.term);
+  const signature = terminalFitSignature(size);
+  if (options.force !== true && terminalFitIsUnchanged(item, size)) return;
+  item.lastFitSignature = signature;
   const changed = item.term.cols !== size.cols || item.term.rows !== size.rows;
-  item.term.resize(size.cols, size.rows);
+  if (changed) item.term.resize(size.cols, size.rows);
   if (!shareViewMode && changed) scheduleRemoteResize(session);
   refreshTerminal(session);
 }
@@ -19299,13 +19329,20 @@ function estimateTerminalSize(container, term = null) {
     return {
       cols: Math.max(40, Math.floor((content.width - 2) / measured.width)),
       rows: Math.max(10, Math.floor((content.height - terminalFitBottomReservePx) / measured.height)),
+      contentWidth: content.width,
+      contentHeight: content.height,
+      cellWidth: measured.width,
+      cellHeight: measured.height,
+      measuredCell: 'renderer',
     };
   }
   const probe = document.createElement('span');
   probe.textContent = 'W';
   probe.style.position = 'absolute';
   probe.style.visibility = 'hidden';
-  probe.style.font = '13px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace';
+  probe.style.fontFamily = terminalProbeFontFamily(container);
+  probe.style.fontSize = `${Math.max(6, Math.round(Number(terminalFontSize) || 13))}px`;
+  probe.style.lineHeight = '1';
   document.body.appendChild(probe);
   const rect = probe.getBoundingClientRect();
   probe.remove();
@@ -19314,7 +19351,19 @@ function estimateTerminalSize(container, term = null) {
   return {
     cols: Math.max(40, Math.floor((content.width - 2) / charWidth)),
     rows: Math.max(10, Math.floor((content.height - terminalFitBottomReservePx) / charHeight)),
+    contentWidth: content.width,
+    contentHeight: content.height,
+    cellWidth: charWidth,
+    cellHeight: charHeight,
+    measuredCell: 'probe',
   };
+}
+
+function terminalProbeFontFamily(container) {
+  const localToken = getComputedStyle(container || document.documentElement)?.getPropertyValue?.('--mono-font')?.trim();
+  if (localToken) return localToken;
+  const rootToken = getComputedStyle(document.documentElement)?.getPropertyValue?.('--mono-font')?.trim();
+  return rootToken || terminalFontFamily;
 }
 
 function terminalContentSize(container) {
@@ -19811,6 +19860,8 @@ const dockviewLayoutState = {
   applyingFromLayout: false,
   adoptingFromDockview: false,
   syncQueued: false,
+  hostLayoutFrame: 0,
+  lastHostLayoutSignature: '',
   lastAppliedLayoutSignature: '',
   groupSlots: new Map(),
   pendingRootBoundaryDrop: null,
@@ -20476,12 +20527,24 @@ function dockviewInstallFileDropBridge(host) {
   };
 }
 
-function dockviewLayoutToHost(api = dockviewLayoutState.api, host = dockviewLayoutState.host) {
+function dockviewLayoutToHost(api = dockviewLayoutState.api, host = dockviewLayoutState.host, options = {}) {
   if (!api || !host) return;
   const size = dockviewHostLayoutSize(host);
   const width = Math.max(1, Math.round(size.width || 0));
   const height = Math.max(1, Math.round(size.height || 0));
+  const signature = `${width}x${height}`;
+  if (options.force !== true && dockviewLayoutState.lastHostLayoutSignature === signature) return;
+  dockviewLayoutState.lastHostLayoutSignature = signature;
   api.layout?.(width, height);
+}
+
+function dockviewScheduleLayoutToHost(api = dockviewLayoutState.api, host = dockviewLayoutState.host) {
+  if (!api || !host) return;
+  if (dockviewLayoutState.hostLayoutFrame) cancelAnimationFrame(dockviewLayoutState.hostLayoutFrame);
+  dockviewLayoutState.hostLayoutFrame = requestAnimationFrame(() => {
+    dockviewLayoutState.hostLayoutFrame = 0;
+    dockviewLayoutToHost(api, host);
+  });
 }
 
 function dockviewHostLayoutSize(host = dockviewLayoutState.host) {
@@ -20503,11 +20566,11 @@ function dockviewHostCanAdoptLayout(host = dockviewLayoutState.host) {
 
 function dockviewInstallHostResizeObserver(host, api) {
   if (typeof ResizeObserver === 'function') {
-    const observer = new ResizeObserver(() => dockviewLayoutToHost(api, host));
+    const observer = new ResizeObserver(() => dockviewScheduleLayoutToHost(api, host));
     observer.observe(host);
     return {dispose: () => observer.disconnect()};
   }
-  const resize = () => dockviewLayoutToHost(api, host);
+  const resize = () => dockviewScheduleLayoutToHost(api, host);
   window.addEventListener('resize', resize);
   return {dispose: () => window.removeEventListener('resize', resize)};
 }
@@ -20743,6 +20806,9 @@ function dockviewDispose() {
   dockviewLayoutState.api?.dispose?.();
   dockviewLayoutState.api = null;
   dockviewLayoutState.host = null;
+  if (dockviewLayoutState.hostLayoutFrame) cancelAnimationFrame(dockviewLayoutState.hostLayoutFrame);
+  dockviewLayoutState.hostLayoutFrame = 0;
+  dockviewLayoutState.lastHostLayoutSignature = '';
   dockviewLayoutState.lastAppliedLayoutSignature = '';
   dockviewLayoutState.groupSlots.clear();
 }

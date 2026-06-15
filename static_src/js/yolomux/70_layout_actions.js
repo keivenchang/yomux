@@ -1418,7 +1418,34 @@ function updateShareHostTerminalSize(session, rows, cols) {
   fitTerminal(session);
 }
 
-function fitTerminal(session) {
+function terminalFitMetricKey(value, scale = 1000) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.round(number * scale) / scale;
+}
+
+function terminalFitSignature(size) {
+  if (!size) return '';
+  return [
+    Math.round(Number(size.contentWidth) || 0),
+    Math.round(Number(size.contentHeight) || 0),
+    terminalFitMetricKey(size.cellWidth),
+    terminalFitMetricKey(size.cellHeight),
+    size.cols,
+    size.rows,
+    terminalFitMetricKey(terminalFontSize),
+    terminalFontFamily,
+  ].join(':');
+}
+
+function terminalFitIsUnchanged(item, size) {
+  if (!item?.term || !size) return false;
+  return item.lastFitSignature === terminalFitSignature(size)
+    && item.term.cols === size.cols
+    && item.term.rows === size.rows;
+}
+
+function fitTerminal(session, options = {}) {
   const item = terminals.get(session);
   if (!item || !item.term || !item.container) return;
   const hostSize = shareHostTerminalSize(session);
@@ -1434,8 +1461,11 @@ function fitTerminal(session) {
   }
   if (!terminalIsVisible(session, item.container)) return;
   const size = estimateTerminalSize(item.container, item.term);
+  const signature = terminalFitSignature(size);
+  if (options.force !== true && terminalFitIsUnchanged(item, size)) return;
+  item.lastFitSignature = signature;
   const changed = item.term.cols !== size.cols || item.term.rows !== size.rows;
-  item.term.resize(size.cols, size.rows);
+  if (changed) item.term.resize(size.cols, size.rows);
   if (!shareViewMode && changed) scheduleRemoteResize(session);
   refreshTerminal(session);
 }
@@ -1675,13 +1705,20 @@ function estimateTerminalSize(container, term = null) {
     return {
       cols: Math.max(40, Math.floor((content.width - 2) / measured.width)),
       rows: Math.max(10, Math.floor((content.height - terminalFitBottomReservePx) / measured.height)),
+      contentWidth: content.width,
+      contentHeight: content.height,
+      cellWidth: measured.width,
+      cellHeight: measured.height,
+      measuredCell: 'renderer',
     };
   }
   const probe = document.createElement('span');
   probe.textContent = 'W';
   probe.style.position = 'absolute';
   probe.style.visibility = 'hidden';
-  probe.style.font = '13px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace';
+  probe.style.fontFamily = terminalProbeFontFamily(container);
+  probe.style.fontSize = `${Math.max(6, Math.round(Number(terminalFontSize) || 13))}px`;
+  probe.style.lineHeight = '1';
   document.body.appendChild(probe);
   const rect = probe.getBoundingClientRect();
   probe.remove();
@@ -1690,7 +1727,19 @@ function estimateTerminalSize(container, term = null) {
   return {
     cols: Math.max(40, Math.floor((content.width - 2) / charWidth)),
     rows: Math.max(10, Math.floor((content.height - terminalFitBottomReservePx) / charHeight)),
+    contentWidth: content.width,
+    contentHeight: content.height,
+    cellWidth: charWidth,
+    cellHeight: charHeight,
+    measuredCell: 'probe',
   };
+}
+
+function terminalProbeFontFamily(container) {
+  const localToken = getComputedStyle(container || document.documentElement)?.getPropertyValue?.('--mono-font')?.trim();
+  if (localToken) return localToken;
+  const rootToken = getComputedStyle(document.documentElement)?.getPropertyValue?.('--mono-font')?.trim();
+  return rootToken || terminalFontFamily;
 }
 
 function terminalContentSize(container) {

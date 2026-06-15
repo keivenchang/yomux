@@ -16,6 +16,8 @@ const dockviewLayoutState = {
   applyingFromLayout: false,
   adoptingFromDockview: false,
   syncQueued: false,
+  hostLayoutFrame: 0,
+  lastHostLayoutSignature: '',
   lastAppliedLayoutSignature: '',
   groupSlots: new Map(),
   pendingRootBoundaryDrop: null,
@@ -681,12 +683,24 @@ function dockviewInstallFileDropBridge(host) {
   };
 }
 
-function dockviewLayoutToHost(api = dockviewLayoutState.api, host = dockviewLayoutState.host) {
+function dockviewLayoutToHost(api = dockviewLayoutState.api, host = dockviewLayoutState.host, options = {}) {
   if (!api || !host) return;
   const size = dockviewHostLayoutSize(host);
   const width = Math.max(1, Math.round(size.width || 0));
   const height = Math.max(1, Math.round(size.height || 0));
+  const signature = `${width}x${height}`;
+  if (options.force !== true && dockviewLayoutState.lastHostLayoutSignature === signature) return;
+  dockviewLayoutState.lastHostLayoutSignature = signature;
   api.layout?.(width, height);
+}
+
+function dockviewScheduleLayoutToHost(api = dockviewLayoutState.api, host = dockviewLayoutState.host) {
+  if (!api || !host) return;
+  if (dockviewLayoutState.hostLayoutFrame) cancelAnimationFrame(dockviewLayoutState.hostLayoutFrame);
+  dockviewLayoutState.hostLayoutFrame = requestAnimationFrame(() => {
+    dockviewLayoutState.hostLayoutFrame = 0;
+    dockviewLayoutToHost(api, host);
+  });
 }
 
 function dockviewHostLayoutSize(host = dockviewLayoutState.host) {
@@ -708,11 +722,11 @@ function dockviewHostCanAdoptLayout(host = dockviewLayoutState.host) {
 
 function dockviewInstallHostResizeObserver(host, api) {
   if (typeof ResizeObserver === 'function') {
-    const observer = new ResizeObserver(() => dockviewLayoutToHost(api, host));
+    const observer = new ResizeObserver(() => dockviewScheduleLayoutToHost(api, host));
     observer.observe(host);
     return {dispose: () => observer.disconnect()};
   }
-  const resize = () => dockviewLayoutToHost(api, host);
+  const resize = () => dockviewScheduleLayoutToHost(api, host);
   window.addEventListener('resize', resize);
   return {dispose: () => window.removeEventListener('resize', resize)};
 }
@@ -948,6 +962,9 @@ function dockviewDispose() {
   dockviewLayoutState.api?.dispose?.();
   dockviewLayoutState.api = null;
   dockviewLayoutState.host = null;
+  if (dockviewLayoutState.hostLayoutFrame) cancelAnimationFrame(dockviewLayoutState.hostLayoutFrame);
+  dockviewLayoutState.hostLayoutFrame = 0;
+  dockviewLayoutState.lastHostLayoutSignature = '';
   dockviewLayoutState.lastAppliedLayoutSignature = '';
   dockviewLayoutState.groupSlots.clear();
 }

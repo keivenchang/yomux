@@ -4,6 +4,14 @@ Archive of completed YOLOmux work, newest first. Concise by design — the full 
 
 Unless an entry says otherwise, every item shipped with the standard check gate green (`tools/check.py`: py_compile, `static_build.py --check`, both `node --check`, `node tests/layout_url.test.js`, full pytest, `git diff --check`). Entries call out only verification that goes BEYOND that gate (live user confirmation, focused browser repros, notable test counts).
 
+## 2026-06-15
+
+### DOIT.74 terminal fit oscillation
+- Completed and removed `DOIT.74.md`. Terminal fitting now uses one shared measurement contract: the pre-render fallback cell probe reads the bundled mono font token instead of a hardcoded fallback stack, local `fitTerminal` calls record a signature over content size, cell metrics, rows/cols, and terminal font settings, duplicate observer echoes skip before `term.resize()`, and Dockview host resize observer work is coalesced to one layout per animation frame.
+- The existing bundled-font-ready refit remains the only post-font refit; no second font-ready path was added. The fit signature includes terminal font settings so real font/metric changes still refit, while identical geometry does not churn the xterm grid or remote tmux size.
+- Specs and user docs now state that terminal panes fit against the full pane content box and must not self-trigger resize loops. Regression coverage lives in both `tests/layout_url.test.js` and `tests/test_browser_layout.py::test_terminal_fit_ignores_duplicate_resize_observer_echoes`, proving full-width cols, no duplicate resize on unchanged geometry, and resize on real width changes.
+- Verification: `python3 tools/static_build.py`, `node tests/layout_url.test.js`, focused Selenium `python3 -m pytest tests/test_browser_layout.py -k 'terminal_fit_ignores_duplicate_resize_observer_echoes' -q`, full `python3 tools/check.py` outside the sandbox (`CHECK PASSED in 49.63s`), dev3 restart on port 8003 with served bundle containing `terminalFitSignature`, `terminalProbeFontFamily`, and `dockviewScheduleLayoutToHost`, and throwaway real-xterm runtime capture on port 8013 with six stable samples at `cols=125 rows=62` and matching pane/container/xterm rects `1131x1258`; `/tmp/yolomux-fit-8013.png` visually confirmed the terminal filled the pane.
+
 ## 2026-06-14
 
 ### DOIT.72/73 file-tree diff stats and shared watch-root index

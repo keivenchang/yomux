@@ -95,6 +95,7 @@ Section order follows the reading path: a capabilities overview and glossary, th
 - Dockview sash hit targets are transparent at rest so only the shared separator line is visible.
 - Active/typing-ready panes feed the same active-ring color into Dockview and legacy pane chrome.
 - The active ring is a state indicator, not layout capacity. Changing pane spacing must not shift terminal text under the ring.
+- Terminal panes must fit against the full pane content box and then stay stable. The fallback pre-render cell probe uses the same bundled mono font token as xterm (`YOLOmux Mono` via the shared terminal font family), bundled-font readiness performs one shared post-font refit, duplicate ResizeObserver echoes with unchanged pane size and cell metrics must not call `term.resize()` again, and Dockview host resize observer work is coalesced to one layout per animation frame.
 
 ## Visual Preview Contract
 
@@ -186,6 +187,7 @@ Section order follows the reading path: a capabilities overview and glossary, th
 - Dockview sash hit targets are transparent at rest so only the shared separator line is visible.
 - Active/typing-ready panes feed the same active-ring color into Dockview and legacy pane chrome.
 - The active ring is a state indicator, not layout capacity. Changing pane spacing must not shift terminal text under the ring.
+- Terminal panes must fit against the full pane content box and then stay stable. The fallback pre-render cell probe uses the same bundled mono font token as xterm (`YOLOmux Mono` via the shared terminal font family), bundled-font readiness performs one shared post-font refit, duplicate ResizeObserver echoes with unchanged pane size and cell metrics must not call `term.resize()` again, and Dockview host resize observer work is coalesced to one layout per animation frame.
 
 ## File Editor And Preview Behavior
 

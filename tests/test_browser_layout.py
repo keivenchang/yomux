@@ -1269,6 +1269,7 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
       window.__bootSocketInstances = [];
       window.__eventSources = [];
       window.__terminalOpened = 0;
+      window.__terminalResizeCalls = [];
       window.__settingsMtime = 0;
       window.__settingsPayload = JSON.parse(document.getElementById('yolomux-bootstrap').textContent).settingsPayload;
       window.addEventListener('error', event => window.__bootErrors.push({
@@ -1296,7 +1297,11 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
           container.appendChild(this.element);
           window.__terminalOpened += 1;
         }
-        resize(cols, rows) { this.cols = cols; this.rows = rows; }
+        resize(cols, rows) {
+          this.cols = cols;
+          this.rows = rows;
+          window.__terminalResizeCalls.push({cols, rows});
+        }
         refresh() {}
         write(data) { this.lastWrite = data; }
         onData(callback) { this._onData = callback; return {dispose() {}}; }
@@ -7568,6 +7573,58 @@ def test_dockview_hidden_inner_header_keeps_terminal_content_full_height(browser
     assert metrics["xtermBottomDelta"] <= 1
     assert metrics["termRows"] > 20
     assert metrics["termCols"] >= 40
+
+
+def test_terminal_fit_ignores_duplicate_resize_observer_echoes(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=left&tabs=left:1",
+        sessions=["1"],
+        terminal_css=".terminal { width: 720px; height: 260px; }",
+    )
+    wait_for_dockview(browser, min_tabs=1)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof fitTerminal === 'function'
+              && document.querySelector('#term-1 .xterm')
+              && terminals.get('1')?.term;
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const container = document.getElementById('term-1');
+        const pane = document.getElementById('terminal-pane-1');
+        const item = terminals.get('1');
+        pane.classList.add('active');
+        container.style.width = '720px';
+        container.style.height = '260px';
+        container.style.padding = '0';
+        item.term.cols = 80;
+        item.term.rows = 24;
+        item.lastFitSignature = '';
+        item.term._core = {_renderService: {_renderer: {dimensions: {css: {cell: {width: 9, height: 18}}}}}};
+        window.__terminalResizeCalls = [];
+        fitTerminal('1');
+        const afterFirst = {cols: item.term.cols, rows: item.term.rows, calls: [...window.__terminalResizeCalls]};
+        fitTerminal('1');
+        const afterEcho = {cols: item.term.cols, rows: item.term.rows, calls: [...window.__terminalResizeCalls]};
+        container.style.width = '360px';
+        fitTerminal('1');
+        return {
+          afterFirst,
+          afterEcho,
+          afterWidthChange: {cols: item.term.cols, rows: item.term.rows, calls: [...window.__terminalResizeCalls]},
+        };
+        """
+    )
+    assert metrics["afterFirst"]["calls"] == [{"cols": 79, "rows": 14}]
+    assert metrics["afterEcho"]["calls"] == [{"cols": 79, "rows": 14}]
+    assert metrics["afterWidthChange"]["cols"] == 40
+    assert metrics["afterWidthChange"]["rows"] == 14
+    assert metrics["afterWidthChange"]["calls"] == [{"cols": 79, "rows": 14}, {"cols": 40, "rows": 14}]
 
 
 def test_dockview_header_actions_stay_on_first_row(browser, tmp_path):
