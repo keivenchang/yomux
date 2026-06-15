@@ -43,7 +43,6 @@ SETTING_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "general.language": ("language", "locale", "ui language"),
     "general.auto_focus": ("auto focus", "hover focus", "focus follows hover"),
     "general.default_layout": ("default layout", "startup layout", "layout mode"),
-    "general.default_sessions": ("default sessions", "startup sessions"),
     "general.reload_on_update": ("reload on update", "update reload banner"),
     "general.reload_on_update_auto": ("auto reload on update", "reload automatically on update"),
     "general.startup_tips": ("startup tips", "tips"),
@@ -96,8 +95,7 @@ SETTING_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "editor.blame_all_lines": ("blame all lines", "inline blame all lines"),
     "yoagent.backend": ("yoagent backend", "yo!agent backend", "agent backend"),
     "yoagent.invocation": ("yoagent invocation", "yo!agent invocation"),
-    "yoagent.auto_refresh": ("yoagent auto refresh", "yo!agent auto refresh", "transcript summary refresh"),
-    "yoagent.refresh_interval_seconds": ("yoagent refresh interval", "yo!agent refresh interval"),
+    "yoagent.refresh_interval_seconds": ("yoagent refresh interval", "yo!agent refresh interval", "transcript summary refresh", "background summaries", "background transcript summaries"),
     "yoagent.system_prompt": ("yoagent system prompt", "yo!agent system prompt", "agent system prompt"),
     "yoagent.intro": ("yoagent intro", "yo!agent intro"),
     "yoagent.format": ("yoagent format", "yo!agent format", "answer format"),
@@ -121,17 +119,42 @@ PR_RE = re.compile(r"(?:https://github\.com/[^/\s]+/[^/\s]+/pull/\d+|[A-Za-z0-9_
 WRITE_RE = re.compile(r"\b(?:set|change|switch|make|use|turn|enable|disable|add|remove|reset)\b", re.IGNORECASE)
 READ_RE = re.compile(r"\b(?:what|where|which|show|list|explain|tell|current|default|value|values|setting|settings|preference|preferences|affect)\b", re.IGNORECASE)
 CONFIRM_RE = re.compile(r"\b(?:confirm|confirmed|yes|go ahead|do it|apply anyway)\b", re.IGNORECASE)
+YOAGENT_HIDDEN_SETTING_PATHS = {
+    "appearance.editor_color_scheme",
+    "general.default_sessions",
+}
+GENERIC_SETTING_KEY_ALIASES = {
+    "backend",
+    "color",
+    "format",
+    "invocation",
+    "mode",
+    "scheme",
+    "source",
+    "theme",
+}
 
 
 def normalize_text(value: Any) -> str:
     return " ".join(re.sub(r"[^a-z0-9_./#:-]+", " ", str(value or "").lower()).split())
 
 
+def hidden_setting_message(question: str) -> str:
+    text = normalize_text(question)
+    if "appearance.editor_color_scheme" in text or "editor color scheme" in text or "editor scheme" in text:
+        return "`appearance.editor_color_scheme` is a legacy compatibility value and is not a live Preference. Use `appearance.editor_dark_color_scheme` or `appearance.editor_light_color_scheme` instead."
+    if "general.default_sessions" in text or "default sessions" in text:
+        return "`general.default_sessions` is legacy compatibility only. Running servers default to all discovered tmux sessions unless launched with `--sessions`."
+    return ""
+
+
 def catalog_from_payload(payload: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     if isinstance(payload, dict) and isinstance(payload.get("catalog"), dict):
-        return {str(path): item for path, item in payload["catalog"].items() if isinstance(item, dict)}
+        catalog = {str(path): item for path, item in payload["catalog"].items() if isinstance(item, dict)}
+        return {path: item for path, item in catalog.items() if path not in YOAGENT_HIDDEN_SETTING_PATHS}
     settings = payload.get("settings") if isinstance(payload, dict) and isinstance(payload.get("settings"), dict) else default_settings()
-    return settings_catalog(settings)
+    catalog = settings_catalog(settings)
+    return {path: item for path, item in catalog.items() if path not in YOAGENT_HIDDEN_SETTING_PATHS}
 
 
 def settings_from_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -173,7 +196,9 @@ def setting_candidates(question: str, catalog: dict[str, dict[str, Any]]) -> lis
         key_terms = path.replace(".", " ").replace("_", " ")
         aliases.extend([path, key_terms])
         section, key = path.split(".", 1)
-        aliases.append(key.replace("_", " "))
+        key_alias = key.replace("_", " ")
+        if key_alias not in GENERIC_SETTING_KEY_ALIASES:
+            aliases.append(key_alias)
         score = 0
         for alias in aliases:
             normalized_alias = normalize_text(alias)
@@ -244,6 +269,9 @@ def answer_settings_read(question: str, payload: dict[str, Any]) -> str:
     text = normalize_text(question)
     catalog = catalog_from_payload(payload)
     display_path = str(payload.get("display_path") or SETTINGS_DISPLAY_PATH)
+    hidden_message = hidden_setting_message(question)
+    if hidden_message:
+        return hidden_message
     if "where" in text and any(term in text for term in ["settings", "preferences", "config", "yaml"]):
         return f"YOLOmux Preferences are stored in `{display_path}`. The server exposes the current sanitized values through `GET /api/settings`."
     if "changed" in text and ("default" in text or "defaults" in text):
@@ -545,6 +573,9 @@ def parse_settings_write(question: str, payload: dict[str, Any]) -> dict[str, An
     if not WRITE_RE.search(question):
         return None
     text = normalize_text(question)
+    hidden_message = hidden_setting_message(question)
+    if hidden_message:
+        return {"type": "settings_clarify", "answer": hidden_message}
     if "reset" in text and any(term in text for term in ["all", "everything", "preferences", "settings"]):
         return {"type": "settings_clarify", "answer": "Resetting all Preferences is broad and can disrupt the running UI. Tell me the specific setting to reset, or use Preferences -> Reset all defaults."}
     catalog = catalog_from_payload(payload)
@@ -639,7 +670,7 @@ def product_capability_registry() -> list[dict[str, Any]]:
             "write_action": "server-verified prompt preview/send/watch",
             "auth": "admin",
             "backing": "yoagent action/job helpers and transport registry",
-            "setting_keys": ["yoagent.backend", "yoagent.invocation", "yoagent.auto_refresh"],
+            "setting_keys": ["yoagent.backend", "yoagent.invocation", "yoagent.refresh_interval_seconds"],
             "examples": ["ask session 1 what changed, then ask session 2 if it is correct", "notify me when all sessions are idle"],
         },
         {

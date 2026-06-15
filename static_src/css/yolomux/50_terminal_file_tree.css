@@ -974,6 +974,25 @@
   border-inline-start-width: 6px;
   background: color-mix(in srgb, var(--accent-gold) 8%, var(--panel2));
 }
+.yoagent-agent-result-body {
+  display: grid;
+  gap: 0;
+}
+.yoagent-message.assistant.yoagent-agent-result .yoagent-agent-result-output {
+  padding-inline-start: 14px;
+  border-inline-start: 3px solid var(--accent-gold);
+}
+.yoagent-message.assistant.streaming {
+  border-inline-start-style: dashed;
+}
+.yoagent-message.assistant.streaming .yoagent-message-role::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--active-control-border);
+  animation: command-palette-thinking 900ms ease-in-out infinite alternate;
+}
 .yoagent-recent-agents-message .yoagent-recent-agents {
   padding: 0;
 }

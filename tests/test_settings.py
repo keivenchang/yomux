@@ -113,14 +113,25 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["performance"]["event_log_refresh_ms"] == 60000
     assert settings["terminal_editor"]["word_wrap"] is True
     assert settings["terminal_editor"]["line_numbers"] is False
-    assert settings["yoagent"]["backend"] == "auto"
+    assert settings["yoagent"]["backend"] == "codex"
     assert settings["yoagent"]["invocation"] == "cli"
-    assert settings["yoagent"]["auto_refresh"] is False
-    assert settings["yoagent"]["refresh_interval_seconds"] == 120
+    assert "auto_refresh" not in settings["yoagent"]
+    assert settings["yoagent"]["refresh_interval_seconds"] == 0
     assert settings["yoagent"]["system_prompt"] == "Use facts"
     assert settings["yoagent"]["intro"] == "Be terse"
     assert settings["yoagent"]["format"] == "One line"
     assert settings["yolo"]["prompt_source"] == "hybrid"
+
+
+def test_legacy_yoagent_auto_refresh_migrates_to_interval():
+    disabled = sanitize_settings({"yoagent": {"auto_refresh": False, "refresh_interval_seconds": 120}})
+    enabled = sanitize_settings({"yoagent": {"auto_refresh": True, "refresh_interval_seconds": 45}})
+    enabled_without_interval = sanitize_settings({"yoagent": {"auto_refresh": True}})
+
+    assert "auto_refresh" not in disabled["yoagent"]
+    assert disabled["yoagent"]["refresh_interval_seconds"] == 0
+    assert enabled["yoagent"]["refresh_interval_seconds"] == 45
+    assert enabled_without_interval["yoagent"]["refresh_interval_seconds"] == 120
 
 
 def test_legacy_editor_scheme_ids_migrate_to_popular_ide_names():
@@ -153,11 +164,12 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert payload["choices"]["share.view_fit"] == ["cover", "contain"]
     assert payload["choices"]["updates.notify_level"] == ["major", "minor", "patch", "none"]
     assert payload["settings"]["general"]["startup_tips"] is True
+    assert payload["catalog"]["general.default_sessions"]["gui"]["visible"] is False
     assert payload["settings"]["uploads"]["max_bytes"] == UPLOAD_MAX_BYTES
     assert payload["settings"]["share"] == {"ttl_seconds": 600, "max_viewers": 2, "read_only": True, "scheme": "http", "view_fit": "cover"}
-    assert payload["settings"]["yoagent"]["backend"] == "auto"
-    assert payload["settings"]["yoagent"]["auto_refresh"] is False
-    assert payload["settings"]["yoagent"]["refresh_interval_seconds"] == 120
+    assert payload["settings"]["yoagent"]["backend"] == "codex"
+    assert "auto_refresh" not in payload["settings"]["yoagent"]
+    assert payload["settings"]["yoagent"]["refresh_interval_seconds"] == 0
     assert "normal status-update style" in payload["settings"]["yoagent"]["system_prompt"]
     assert "server-verified sends" in payload["settings"]["yoagent"]["system_prompt"]
     assert "live pane receives the text" in payload["settings"]["yoagent"]["system_prompt"]
@@ -221,6 +233,9 @@ def test_settings_catalog_covers_defaults_and_gui_metadata():
     assert catalog["yoagent.backend"]["choices"] == ["auto", "claude", "codex"]
     assert catalog["yoagent.backend"]["accepted_choices"] == ["auto", "claude", "codex", "deterministic"]
     assert catalog["yoagent.backend"]["hidden_choices"] == ["deterministic"]
+    assert catalog["yoagent.invocation"]["choices"] == ["cli"]
+    assert catalog["yoagent.invocation"]["accepted_choices"] == ["api-key", "cli"]
+    assert catalog["yoagent.invocation"]["hidden_choices"] == ["api-key"]
     assert catalog["yoagent.system_prompt"]["requires_confirmation"] is True
     assert catalog["yoagent.system_prompt"]["sensitivity"] == "prompt"
     assert catalog["appearance.theme"]["gui"] == {"section": "Appearance", "visible": True}
@@ -320,6 +335,9 @@ def test_save_settings_reports_coerced_keys(tmp_path):
     interval = save_settings({"yoagent": {"refresh_interval_seconds": 1}}, path)
     assert "yoagent.refresh_interval_seconds" in interval["coerced"]
     assert interval["settings"]["yoagent"]["refresh_interval_seconds"] == 30
+    off = save_settings({"yoagent": {"refresh_interval_seconds": 0}}, path)
+    assert off["coerced"] == []
+    assert off["settings"]["yoagent"]["refresh_interval_seconds"] == 0
     clamped_ring = save_settings({"appearance": {"pane_ring_opacity": 1}}, path)
     assert "appearance.pane_ring_opacity" in clamped_ring["coerced"]
     assert clamped_ring["settings"]["appearance"]["pane_ring_opacity"] == 5

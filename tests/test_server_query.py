@@ -867,7 +867,7 @@ def test_share_replay_protocol_constants_and_frame_allowlist():
     assert server_module.share_viewer_semantic_mutation_frame_disallowed("ui-state")
     assert not server_module.share_viewer_semantic_mutation_frame_disallowed("input-intent")
     assert server_module.SHARE_MIRROR_SEQUENCE_FIELDS == ("epoch", "sequence", "baseSequence")
-    assert server_module.SHARE_MIRROR_KEYFRAME_REASONS == frozenset({"join", "gap", "digest", "replay-error", "backpressure", "manual-debug"})
+    assert server_module.SHARE_MIRROR_KEYFRAME_REASONS == frozenset({"join", "gap", "digest", "replay-error", "backpressure", "topology", "manual-debug"})
     assert server_module.SHARE_TERMINAL_PLACEHOLDER_FIELDS == ("placeholderId", "session", "rows", "cols", "terminalEpoch")
     assert server_module.SHARE_MIRROR_REDACTION_POLICY_VERSION == 1
     assert server_module.SHARE_REPLAY_DELTA_RING_LIMIT == 128

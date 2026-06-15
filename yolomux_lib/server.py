@@ -2572,6 +2572,8 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
         self.share_pointer_clicks: dict[str, list[dict[str, Any]]] = {}
         self.share_pointer_threads: dict[str, threading.Thread] = {}
         self.share_pointer_stop = threading.Event()
+        if hasattr(self.app, "start_tabber_activity_cache_warmer"):
+            self.app.start_tabber_activity_cache_warmer()
         if hasattr(self.app, "start_client_event_watcher"):
             self.app.start_client_event_watcher()
         if hasattr(self.app, "start_update_check_thread"):

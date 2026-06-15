@@ -703,7 +703,7 @@ function renderYoagentMessageMarkdown(node = document.getElementById('yoagent-co
     installYoagentSessionLinks(body);
     body.removeAttribute('data-yoagent-global-markdown');
   });
-  (node.querySelectorAll?.('.yoagent-message.assistant .yoagent-message-body[data-yoagent-markdown]') || []).forEach(body => {
+  (node.querySelectorAll?.('.yoagent-message.assistant [data-yoagent-markdown]') || []).forEach(body => {
     renderMarkdownPreviewInto(body, yoagentTightMarkdown(body.textContent || ''));
     installYoagentSessionLinks(body);
     body.removeAttribute('data-yoagent-markdown');
@@ -3230,6 +3230,12 @@ function handleClientPushEvent(type, payload = {}) {
     loadYoagentConversation({force: true, render: infoPanelSubTab === 'yoagent', scrollBottom: 'auto'}).catch(error => console.warn('YO!agent conversation refresh failed', error));
     return;
   }
+  if (type === 'yoagent_stream_delta') {
+    if (typeof applyYoagentStreamPayload === 'function' && applyYoagentStreamPayload(payload)) {
+      renderYoagentPanel({preserveDraft: true, scrollBottom: 'auto'});
+    }
+    return;
+  }
   if (type === 'yoagent_jobs_changed') {
     maybeNotifyYoagentJob(payload.notification || {});
     return;
@@ -3277,7 +3283,7 @@ function installClientEventStream() {
     recordSseDebugEvent('ping', clientEventEnvelope(event), event);
   });
   source.onerror = () => { clientEventsConnected = false; };
-  for (const type of ['settings_changed', 'auto_approve_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed']) {
+  for (const type of ['settings_changed', 'auto_approve_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta']) {
     source.addEventListener(type, event => {
       clientEventsConnected = true;
       const envelope = clientEventEnvelope(event);
@@ -4987,6 +4993,24 @@ function shareReplayElementAttributes(element) {
     for (const [name, value] of Object.entries(rawAttrs)) add(name, value);
   }
   for (const [key, value] of Object.entries(element?.dataset || {})) add(shareReplayDatasetAttributeName(key), value);
+  if (element?.classList?.contains('pane-tab-detached-popover') && element?.classList?.contains('popover-open')) {
+    const rect = appSpaceRect(element);
+    if (rect && Number.isFinite(rect.left) && Number.isFinite(rect.top) && Number.isFinite(rect.width) && Number.isFinite(rect.height)) {
+      const fixedGeometry = [
+        `left:${rect.left.toFixed(3)}px`,
+        `top:${rect.top.toFixed(3)}px`,
+        'right:auto',
+        'bottom:auto',
+        `width:${rect.width.toFixed(3)}px`,
+        `height:${rect.height.toFixed(3)}px`,
+      ];
+      const style = String(attrs.style || '')
+        .split(';')
+        .map(part => part.trim())
+        .filter(part => part && !/^(?:inset|left|top|right|bottom|width|height)\s*:/i.test(part));
+      attrs.style = [...style, ...fixedGeometry].join(';');
+    }
+  }
   return Object.fromEntries(Object.keys(attrs).sort().map(key => [key, attrs[key]]));
 }
 

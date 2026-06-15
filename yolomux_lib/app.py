@@ -61,6 +61,7 @@ from .common import MAX_YOLOMUX_SESSION_TABS
 from .common import PROJECT_ROOT
 from .common import SERVER_HOSTNAME
 from .common import SERVER_STARTED_AT
+from .common import SUMMARY_CODEX_SERVICE_TIER
 from .common import SUMMARY_MAX_PROMPT_CHARS
 from .common import WATCH_INDEX_PATH
 from .common import YOLOMUX_VERSION
@@ -144,6 +145,7 @@ from .yoagent.skills import load_yoagent_skills
 from .yoagent.skills import read_user_skill_file
 from .yoagent.skills import write_user_skill_file
 from .yoagent.transports import TMUX_LEGACY_TRANSPORT_ID
+from .yoagent.transports import CodexAppServerSession
 from .yoagent.transports import default_yoagent_transport_registry
 from .yoagent.transports import normalize_yoagent_transport_id
 
@@ -170,6 +172,11 @@ YOAGENT_SESSION_SUMMARIES_STATE_KEY = "yoagent_session_summaries"
 YOAGENT_SESSION_SUMMARY_STATES = {"working", "waiting", "blocked", "done", "idle"}
 YOAGENT_SESSION_SUMMARY_QUIET_SECONDS = 15.0
 YOAGENT_SESSION_SUMMARY_MAX_ITEMS = 120
+YOAGENT_STARTUP_QUESTION = (
+    "The user just opened YO!agent. Read the supplied activity context and give a concise first "
+    "assistant response: what looks active, what may need attention, and one concrete next step. "
+    "Keep it short and answer as YO!agent."
+)
 YOAGENT_AUTH_FAILURE_RE = re.compile(
     r"(not\s+logged\s+in|log\s*in|login|required\s+auth|authentication|unauthorized|permission\s+denied|401)",
     re.IGNORECASE,
@@ -177,6 +184,8 @@ YOAGENT_AUTH_FAILURE_RE = re.compile(
 YOAGENT_THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
 SESSION_FILES_CACHE_MAX_ITEMS = 64
 SESSION_FILES_CACHE_SECONDS = 5.0
+SESSION_FILES_CACHE_VERSION = 1
+SESSION_FILES_CACHE_DIR = common.STATE_DIR / "session-files-cache"
 TRANSCRIPT_TAIL_CACHE_MAX_ITEMS = 128
 TRANSCRIPTS_PAYLOAD_CACHE_SECONDS = 15.0
 CONTEXT_ITEMS_CACHE_MAX_ITEMS = 128
@@ -388,6 +397,16 @@ def strip_yoagent_hidden_thinking(text: str) -> tuple[str, bool]:
     value = str(text or "")
     cleaned, count = YOAGENT_THINK_BLOCK_RE.subn("", value)
     return cleaned.strip(), count > 0
+
+
+def strip_yoagent_stream_hidden_thinking(text: str) -> tuple[str, bool]:
+    value = str(text or "")
+    cleaned, count = YOAGENT_THINK_BLOCK_RE.subn("", value)
+    open_think = re.search(r"<think\b[^>]*>", cleaned, re.IGNORECASE)
+    if open_think:
+        return cleaned[: open_think.start()].strip(), True
+    cleaned, close_count = re.subn(r"</think>", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip(), bool(count or close_count)
 
 
 def yoagent_response_details(response: dict[str, Any]) -> str:
@@ -674,6 +693,8 @@ class TmuxWebtermApp:
         self.tabber_activity_cache_lock = threading.RLock()
         self.tabber_activity_cache: tuple[float, dict[str, Any]] | None = (time.monotonic(), self.build_activity_payload())
         self.tabber_activity_cache_refreshing = False
+        self.tabber_activity_cache_warmer_thread: threading.Thread | None = None
+        self.tabber_activity_cache_warmer_running = False
         # last-logged watched-PR truncation state, so the cap is logged only when it changes.
         self._watched_pr_truncated_signature: tuple[int, tuple[str, ...]] | None = None
         self.metadata_warm_lock = threading.Lock()
@@ -713,7 +734,6 @@ class TmuxWebtermApp:
         self.client_event_next_background_file_poll_at = 0.0
         self.client_event_next_auto_poll_at = 0.0
         self.client_event_next_watched_pr_poll_at = 0.0
-        self.client_event_next_tabber_activity_refresh_at = 0.0
         self.client_event_next_yoagent_job_poll_at = 0.0
         self.activity_summary_lock = threading.RLock()
         self.activity_summary_cache: dict[str, dict[str, Any]] = {}
@@ -735,7 +755,11 @@ class TmuxWebtermApp:
         self.yoagent_jobs: dict[str, dict[str, Any]] = self.load_yoagent_jobs()
         self.yoagent_prewarm_lock = threading.Lock()
         self.yoagent_prewarm_running = False
+        self.yoagent_startup_response_running = False
         self.yoagent_prewarm_status: dict[str, Any] = {}
+        self.yoagent_codex_app_server_lock = threading.RLock()
+        self.yoagent_codex_app_server: CodexAppServerSession | None = None
+        self.yoagent_codex_app_server_key = ""
         self.yoagent_session_summary_lock = threading.RLock()
         self.yoagent_session_summaries: dict[str, dict[str, Any]] = {}
         self.yoagent_summary_worker_lock = threading.Lock()
@@ -1878,7 +1902,6 @@ class TmuxWebtermApp:
             self.client_event_next_background_file_poll_at,
             self.client_event_next_auto_poll_at,
             self.client_event_next_watched_pr_poll_at,
-            self.client_event_next_tabber_activity_refresh_at,
             self.client_event_next_yoagent_job_poll_at,
         )
         if next_due <= 0:
@@ -2459,10 +2482,6 @@ class TmuxWebtermApp:
                 if now >= self.client_event_next_watched_pr_poll_at:
                     self.poll_watched_prs_client_event_once()
                     self.client_event_next_watched_pr_poll_at = now + self.server_watched_pr_event_poll_seconds()
-                if now >= self.client_event_next_tabber_activity_refresh_at:
-                    self.refresh_tabber_activity_cache()
-                    self.client_event_next_tabber_activity_refresh_at = now + self.tabber_activity_refresh_seconds()
-                    self.publish_activity_summary_ready_events(trigger="tabber_activity")
                 if now >= self.client_event_next_yoagent_job_poll_at:
                     self.poll_yoagent_jobs_once()
                     self.client_event_next_yoagent_job_poll_at = now + YOAGENT_JOB_POLL_SECONDS
@@ -2496,6 +2515,102 @@ class TmuxWebtermApp:
             tuple((name, session_info_cache_signature(info)) for name, info in sorted(infos.items())),
         )
 
+    def session_files_disk_cache_path(self, key: tuple[Any, ...]) -> tuple[Path, str]:
+        key_text = json.dumps(key, sort_keys=True, separators=(",", ":"), default=str)
+        signature = hashlib.sha256(key_text.encode("utf-8")).hexdigest()
+        return SESSION_FILES_CACHE_DIR / f"{signature}.json", signature
+
+    def set_session_files_memory_cache(
+        self,
+        key: tuple[Any, ...],
+        payload: dict[str, Any],
+        status: HTTPStatus,
+        stored_at: float | None = None,
+    ) -> None:
+        with self.session_files_cache_lock:
+            self.cache_set_limited(
+                self.session_files_cache,
+                key,
+                (time.monotonic() if stored_at is None else stored_at, (copy.deepcopy(payload), status)),
+                SESSION_FILES_CACHE_MAX_ITEMS,
+            )
+
+    def read_session_files_disk_cache(
+        self,
+        key: tuple[Any, ...],
+        max_age_seconds: float | None = None,
+        allow_stale: bool = False,
+    ) -> tuple[dict[str, Any], HTTPStatus, bool, float] | None:
+        path, signature = self.session_files_disk_cache_path(key)
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
+            return None
+        if not isinstance(record, dict):
+            return None
+        if record.get("version") != SESSION_FILES_CACHE_VERSION or record.get("signature") != signature:
+            return None
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        try:
+            status = HTTPStatus(int(record.get("status", int(HTTPStatus.OK))))
+            stored_at_wall = float(record.get("stored_at", 0.0))
+        except (TypeError, ValueError):
+            return None
+        age_seconds = max(0.0, time.time() - stored_at_wall)
+        fresh = max_age_seconds is None or age_seconds <= max_age_seconds
+        if not fresh and not allow_stale:
+            return None
+        self.set_session_files_memory_cache(key, payload, status, stored_at=time.monotonic() - age_seconds)
+        return copy.deepcopy(payload), status, fresh, age_seconds
+
+    def write_session_files_disk_cache_unlocked(
+        self,
+        path: Path,
+        signature: str,
+        payload: dict[str, Any],
+        status: HTTPStatus,
+    ) -> None:
+        record = {
+            "version": SESSION_FILES_CACHE_VERSION,
+            "signature": signature,
+            "stored_at": time.time(),
+            "status": int(status),
+            "payload": payload,
+        }
+        atomic_write_text(path, json.dumps(record, sort_keys=True, separators=(",", ":")), mode=0o600)
+
+    def write_session_files_disk_cache(self, key: tuple[Any, ...], payload: dict[str, Any], status: HTTPStatus) -> None:
+        path, signature = self.session_files_disk_cache_path(key)
+        try:
+            with file_lock(path, dir_mode=0o700):
+                self.write_session_files_disk_cache_unlocked(path, signature, payload, status)
+        except OSError as exc:
+            logger.warning("failed to write session-files cache %s: %s", path, exc)
+
+    def compute_session_files_cache_entry(
+        self,
+        key: tuple[Any, ...],
+        compute: Callable[[], tuple[dict[str, Any], HTTPStatus]],
+    ) -> tuple[dict[str, Any], HTTPStatus, bool, float]:
+        path, signature = self.session_files_disk_cache_path(key)
+        try:
+            with file_lock(path, dir_mode=0o700):
+                cached = self.get_session_files_cache(key, max_age_seconds=SESSION_FILES_CACHE_SECONDS, allow_stale=False)
+                if cached:
+                    payload, status, _fresh, age_seconds = cached
+                    return payload, status, True, age_seconds
+                payload, status = compute()
+                self.set_session_files_memory_cache(key, payload, status)
+                self.write_session_files_disk_cache_unlocked(path, signature, payload, status)
+                return copy.deepcopy(payload), status, False, 0.0
+        except OSError as exc:
+            logger.warning("failed to lock session-files cache %s: %s", path, exc)
+            payload, status = compute()
+            self.set_session_files_memory_cache(key, payload, status)
+            return copy.deepcopy(payload), status, False, 0.0
+
     def get_session_files_cache(
         self,
         key: tuple[Any, ...],
@@ -2503,26 +2618,28 @@ class TmuxWebtermApp:
         allow_stale: bool = False,
     ) -> tuple[dict[str, Any], HTTPStatus, bool, float] | None:
         now = time.monotonic()
+        stale_cached: tuple[dict[str, Any], HTTPStatus, bool, float] | None = None
         with self.session_files_cache_lock:
             cached = self.session_files_cache.get(key)
-            if not cached:
-                return None
-            stored_at, value = cached
-            age_seconds = max(0.0, now - stored_at)
-            fresh = max_age_seconds is None or age_seconds <= max_age_seconds
-            if not fresh and not allow_stale:
-                return None
-            payload, status = value
-            return copy.deepcopy(payload), status, fresh, age_seconds
+            if cached:
+                stored_at, value = cached
+                age_seconds = max(0.0, now - stored_at)
+                fresh = max_age_seconds is None or age_seconds <= max_age_seconds
+                payload, status = value
+                if fresh:
+                    return copy.deepcopy(payload), status, True, age_seconds
+                stale_cached = (copy.deepcopy(payload), status, False, age_seconds)
+        disk_cached = self.read_session_files_disk_cache(key, max_age_seconds=max_age_seconds, allow_stale=allow_stale)
+        if disk_cached:
+            if stale_cached is None or disk_cached[3] <= stale_cached[3]:
+                return disk_cached
+        if stale_cached is not None and allow_stale:
+            return stale_cached
+        return None
 
     def set_session_files_cache(self, key: tuple[Any, ...], payload: dict[str, Any], status: HTTPStatus) -> None:
-        with self.session_files_cache_lock:
-            self.cache_set_limited(
-                self.session_files_cache,
-                key,
-                (time.monotonic(), (copy.deepcopy(payload), status)),
-                SESSION_FILES_CACHE_MAX_ITEMS,
-            )
+        self.set_session_files_memory_cache(key, payload, status)
+        self.write_session_files_disk_cache(key, payload, status)
 
     def clear_session_files_cache(self) -> None:
         with self.session_files_cache_lock:
@@ -2540,16 +2657,18 @@ class TmuxWebtermApp:
         repo_refs: dict[str, dict[str, str]] | None,
     ) -> None:
         try:
-            payload, status = session_files.session_files_payload(
-                session,
-                infos,
-                hours,
-                from_ref=from_ref,
-                to_ref=to_ref,
-                repo_refs=repo_refs,
-                include_cross_session_attribution=not bool(session),
+            self.compute_session_files_cache_entry(
+                cache_key,
+                lambda: session_files.session_files_payload(
+                    session,
+                    infos,
+                    hours,
+                    from_ref=from_ref,
+                    to_ref=to_ref,
+                    repo_refs=repo_refs,
+                    include_cross_session_attribution=not bool(session),
+                ),
             )
-            self.set_session_files_cache(cache_key, payload, status)
         finally:
             with self.session_files_cache_lock:
                 self.session_files_refreshing_cache_keys.discard(cache_key)
@@ -2564,8 +2683,10 @@ class TmuxWebtermApp:
         repo_refs: dict[str, dict[str, str]] | None,
     ) -> None:
         try:
-            payload = session_files.session_files_payload_for_info(info, hours=hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)
-            self.set_session_files_cache(cache_key, payload, HTTPStatus.OK)
+            self.compute_session_files_cache_entry(
+                cache_key,
+                lambda: (session_files.session_files_payload_for_info(info, hours=hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs), HTTPStatus.OK),
+            )
         finally:
             with self.session_files_cache_lock:
                 self.session_files_refreshing_cache_keys.discard(cache_key)
@@ -2595,8 +2716,10 @@ class TmuxWebtermApp:
             if not fresh:
                 self.start_session_files_cache_refresh(key, self.refresh_session_files_info_cache, info, hours, from_ref, to_ref, repo_refs)
             return payload
-        payload = session_files.session_files_payload_for_info(info, hours=hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)
-        self.set_session_files_cache(key, payload, HTTPStatus.OK)
+        payload, _status, _hit, _age = self.compute_session_files_cache_entry(
+            key,
+            lambda: (session_files.session_files_payload_for_info(info, hours=hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs), HTTPStatus.OK),
+        )
         return copy.deepcopy(payload)
 
     def get_transcripts_payload_cache(self, max_age_seconds: float, allow_stale: bool = False) -> tuple[dict[str, Any], bool, float] | None:
@@ -2719,7 +2842,8 @@ class TmuxWebtermApp:
             "errors": errors,
             "locale": locale,
             "yoagent_summaries": {
-                "auto_refresh": bool(settings.get("auto_refresh", False)),
+                "auto_refresh": self.yoagent_refresh_interval_seconds(settings) > 0,
+                "refresh_interval_seconds": self.yoagent_refresh_interval_seconds(settings),
                 "updated_ts": rolling_updated,
                 "updated_at": datetime.fromtimestamp(rolling_updated, timezone.utc).isoformat() if rolling_updated else "",
             },
@@ -2785,8 +2909,11 @@ class TmuxWebtermApp:
             return default
 
     def yoagent_refresh_interval_seconds(self, settings: dict[str, Any] | None = None) -> float:
-        value = (settings or self.yoagent_settings()).get("refresh_interval_seconds", 120)
-        return max(30.0, min(3600.0, self.float_value(value, 120.0)))
+        value = (settings or self.yoagent_settings()).get("refresh_interval_seconds", 0)
+        interval = self.float_value(value, 0.0)
+        if interval <= 0:
+            return 0.0
+        return max(30.0, min(3600.0, interval))
 
     def yoagent_session_summary_due(self, session: str, interval: float, now: float | None = None) -> bool:
         current = time.time() if now is None else now
@@ -2822,16 +2949,109 @@ class TmuxWebtermApp:
         summary = re.sub(r"(?im)^\s*state\s*:\s*[a-z-]+\s*$", "", summary).strip()
         return {"state": state, "rolling_summary": truncate_text(summary, 1200)}
 
+    def yoagent_codex_app_server_target(self, settings: dict[str, Any] | None = None) -> dict[str, Any]:
+        current_settings = settings or self.yoagent_settings()
+        model = str(current_settings.get("codex_model") or "").strip()
+        effort = str(current_settings.get("codex_effort") or "").strip()
+        target: dict[str, Any] = {
+            "session": "__yoagent_codex__",
+            "agent_kind": "codex",
+            "transport": "codex-app-server",
+            "managed": True,
+            "cwd": str(PROJECT_ROOT),
+            "sandbox": "read-only",
+            "approval_policy": "never",
+            "approvals_reviewer": "user",
+            "ephemeral": False,
+            "service_tier": SUMMARY_CODEX_SERVICE_TIER,
+        }
+        if model:
+            target["agent_model"] = model
+        if effort:
+            target["agent_effort"] = effort
+        return target
+
+    def yoagent_codex_app_server_target_key(self, target: dict[str, Any]) -> str:
+        return json.dumps(
+            {
+                "cwd": str(target.get("cwd") or ""),
+                "model": str(target.get("agent_model") or target.get("model") or ""),
+                "effort": str(target.get("agent_effort") or target.get("effort") or ""),
+                "service_tier": str(target.get("service_tier") or ""),
+                "sandbox": str(target.get("sandbox") or target.get("sandbox_mode") or ""),
+                "approval_policy": str(target.get("approval_policy") or target.get("approvalPolicy") or ""),
+            },
+            sort_keys=True,
+        )
+
+    def close_yoagent_codex_app_server(self) -> None:
+        with self.yoagent_codex_app_server_lock:
+            if self.yoagent_codex_app_server is not None:
+                self.yoagent_codex_app_server.close()
+            self.yoagent_codex_app_server = None
+            self.yoagent_codex_app_server_key = ""
+
+    def ensure_yoagent_codex_app_server(self, settings: dict[str, Any] | None = None, session_id: str = "") -> tuple[str, str, dict[str, Any]]:
+        if not shutil.which("codex"):
+            return "", "codex CLI not found", {"transport": "codex-app-server", "persistent": True}
+        target = self.yoagent_codex_app_server_target(settings)
+        if session_id:
+            target["agent_session_id"] = session_id
+        key = self.yoagent_codex_app_server_target_key(target)
+        started = time.monotonic()
+        with self.yoagent_codex_app_server_lock:
+            if self.yoagent_codex_app_server is None or self.yoagent_codex_app_server_key != key:
+                if self.yoagent_codex_app_server is not None:
+                    self.yoagent_codex_app_server.close()
+                self.yoagent_codex_app_server = CodexAppServerSession(target)
+                self.yoagent_codex_app_server_key = key
+            try:
+                thread_id, status = self.yoagent_codex_app_server.ensure_started(target, timeout=YOAGENT_CLI_TIMEOUT_SECONDS)
+            except (OSError, subprocess.SubprocessError) as exc:
+                self.close_yoagent_codex_app_server()
+                return "", str(exc), {"transport": "codex-app-server", "persistent": True}
+        status["elapsed_ms"] = round((time.monotonic() - started) * 1000)
+        return thread_id, "", status
+
+    def run_yoagent_codex_app_server(
+        self,
+        prompt: str,
+        session_id: str = "",
+        resume: bool = False,
+        settings: dict[str, Any] | None = None,
+        stream_callback: Any | None = None,
+    ) -> tuple[str, str, str, dict[str, Any]]:
+        if not shutil.which("codex"):
+            return "", "codex CLI not found", "", {"transport": "codex-app-server", "persistent": True}
+        target = self.yoagent_codex_app_server_target(settings)
+        if resume and session_id:
+            target["agent_session_id"] = session_id
+        key = self.yoagent_codex_app_server_target_key(target)
+        started = time.monotonic()
+        with self.yoagent_codex_app_server_lock:
+            if self.yoagent_codex_app_server is None or self.yoagent_codex_app_server_key != key:
+                if self.yoagent_codex_app_server is not None:
+                    self.yoagent_codex_app_server.close()
+                self.yoagent_codex_app_server = CodexAppServerSession(target)
+                self.yoagent_codex_app_server_key = key
+            result, status = self.yoagent_codex_app_server.send(prompt, target, timeout=YOAGENT_CLI_TIMEOUT_SECONDS, on_event=stream_callback)
+            captured_session_id = self.yoagent_codex_app_server.thread_id
+        status["elapsed_ms"] = round((time.monotonic() - started) * 1000)
+        if result.ok and result.text:
+            return result.text, "", captured_session_id, status
+        return "", result.error or "codex app-server completed without a final agent message", captured_session_id, status
+
     def run_yoagent_direct_prompt_backend(self, backend: str, prompt: str, settings: dict[str, Any] | None = None) -> tuple[str, str, dict[str, Any]]:
         if backend not in {"codex", "claude"}:
             return "", f"unknown backend: {backend}", {}
         started = time.monotonic()
+        current_settings = settings or self.yoagent_settings()
         if backend == "codex":
-            answer, error, _session_id = self.run_yoagent_codex_cli(prompt, session_id="", resume=False)
+            answer, error, _session_id = self.run_yoagent_codex_cli(prompt, session_id="", resume=False, settings=current_settings)
         else:
-            current_settings = settings or self.yoagent_settings()
             claude_model = str(current_settings.get("claude_model") or YOAGENT_CLAUDE_SUMMARY_MODEL).strip()
-            answer, error = self.run_yoagent_claude_cli(prompt, session_id="", resume=False, model=claude_model)
+            claude_effort = str(current_settings.get("claude_effort") or "").strip()
+            answer, error = self.run_yoagent_claude_cli(prompt, session_id="", resume=False, model=claude_model, effort=claude_effort)
         return answer, yoagent_cli_fallback_reason(backend, error), {
             "backend": backend,
             "prompt_chars": len(prompt),
@@ -2908,9 +3128,9 @@ class TmuxWebtermApp:
 
     def tick_yoagent_session_summaries(self, settings: dict[str, Any] | None = None) -> dict[str, Any]:
         current_settings = settings or self.yoagent_settings()
-        if not current_settings.get("auto_refresh", False):
-            return {"enabled": False, "updated": [], "skipped": []}
         interval = self.yoagent_refresh_interval_seconds(current_settings)
+        if interval <= 0:
+            return {"enabled": False, "updated": [], "skipped": []}
         sessions, errors = discover_sessions(self.sessions)
         self.prune_yoagent_session_summaries(set(sessions))
         updated: list[dict[str, Any]] = []
@@ -2932,7 +3152,7 @@ class TmuxWebtermApp:
 
     def maybe_start_yoagent_summary_worker(self) -> None:
         settings = self.yoagent_settings()
-        if not settings.get("auto_refresh", False):
+        if self.yoagent_refresh_interval_seconds(settings) <= 0:
             return
         with self.yoagent_summary_worker_lock:
             if self.yoagent_summary_worker_running:
@@ -2944,10 +3164,11 @@ class TmuxWebtermApp:
         try:
             while True:
                 settings = self.yoagent_settings()
-                if not settings.get("auto_refresh", False):
+                interval = self.yoagent_refresh_interval_seconds(settings)
+                if interval <= 0:
                     return
                 self.tick_yoagent_session_summaries(settings)
-                time.sleep(min(self.yoagent_refresh_interval_seconds(settings), 60.0))
+                time.sleep(min(interval, 60.0))
         finally:
             with self.yoagent_summary_worker_lock:
                 self.yoagent_summary_worker_running = False
@@ -3109,6 +3330,65 @@ class TmuxWebtermApp:
 
     def publish_yoagent_conversation_changed(self, trigger: str = "yoagent") -> None:
         self.publish_client_event("yoagent_conversation_changed", {"reason": trigger}, trigger=trigger, cache="ready")
+
+    def publish_yoagent_stream_delta(
+        self,
+        stream_id: str,
+        content: str,
+        *,
+        backend: str = "",
+        phase: str = "",
+        done: bool = False,
+        hidden_thinking_removed: bool = False,
+        created_at: str = "",
+    ) -> None:
+        safe_stream_id = str(stream_id or "").strip()
+        if not safe_stream_id:
+            return
+        payload: dict[str, Any] = {
+            "stream_id": safe_stream_id,
+            "content": truncate_text(str(content or ""), 20_000),
+            "done": bool(done),
+            "created_at": created_at or datetime.now(timezone.utc).isoformat(),
+        }
+        if backend:
+            payload["backend"] = backend
+        if phase:
+            payload["phase"] = phase
+        if hidden_thinking_removed:
+            payload["hidden_thinking_removed"] = True
+        self.publish_client_event("yoagent_stream_delta", payload, trigger="yoagent_stream", cache="delta")
+
+    def yoagent_stream_callback(self, stream_id: str, backend: str) -> Any:
+        state: dict[str, Any] = {"last_content": None, "hidden_thinking_removed": False}
+
+        def callback(event: dict[str, Any]) -> None:
+            event_type = str(event.get("event") or "")
+            if event_type == "thinking":
+                state["hidden_thinking_removed"] = True
+                self.publish_yoagent_stream_delta(
+                    stream_id,
+                    str(state.get("last_content") or ""),
+                    backend=backend,
+                    phase="thinking",
+                    hidden_thinking_removed=True,
+                )
+                return
+            visible_text, hidden_thinking_removed = strip_yoagent_stream_hidden_thinking(str(event.get("text") or ""))
+            hidden_changed = bool(hidden_thinking_removed and not state.get("hidden_thinking_removed"))
+            state["hidden_thinking_removed"] = bool(state.get("hidden_thinking_removed") or hidden_thinking_removed)
+            if visible_text == state.get("last_content") and not hidden_changed:
+                return
+            state["last_content"] = visible_text
+            self.publish_yoagent_stream_delta(
+                stream_id,
+                visible_text,
+                backend=backend,
+                phase="answer" if visible_text else "thinking",
+                hidden_thinking_removed=bool(state.get("hidden_thinking_removed")),
+            )
+
+        return callback
 
     def yoagent_job_prompt_text(self, action: dict[str, Any]) -> str:
         if str(action.get("type") or "") != "send_prompt":
@@ -3891,9 +4171,18 @@ class TmuxWebtermApp:
         agent = " ".join(str(item) for item in [target.get("agent_kind"), target.get("agent_model")] if item)
         agent_text = f" ({agent})" if agent else ""
         transport_label = str(result.get("transport_label") or target.get("transport_label") or self.yoagent_transports.get(str(target.get("transport") or "")).label)
-        cleared = " cleared existing target input," if result.get("cleared_input") else ""
-        suffix = " I'll watch it in the background and show the result here when it replies." if preview.get("return_result") else ""
-        return f"I verified tmux session `{session}`{agent_text} is accepting an AI prompt,{cleared} then sent the text through `{transport_label}`.{suffix}"
+        prompt_text = redacted_action_text(str(preview.get("text") or ""), YOAGENT_ACTION_TEXT_LIMIT)
+        lines = [f"I verified tmux session `{session}`{agent_text} is accepting an AI prompt."]
+        if result.get("cleared_input"):
+            lines.append("I cleared existing target input first.")
+        lines.extend([
+            f"I am sending this exact prompt through `{transport_label}`:",
+            "",
+            f"```text\n{prompt_text}\n```",
+        ])
+        if preview.get("return_result") or result.get("return_result"):
+            lines.append("I am awaiting the response and I'll show the result here when it replies.")
+        return "\n".join(lines)
 
     def yoagent_job_answer(self, job: dict[str, Any]) -> str:
         job_type = str(job.get("type") or "")
@@ -4428,12 +4717,11 @@ class TmuxWebtermApp:
         if clear_result.get("cleared"):
             response["cleared_input"] = True
             response["cleared_text_preview"] = redacted_action_preview(str(clear_result.get("detected_text") or ""))
+        response["answer"] = self.yoagent_action_sent_answer(preview, response)
         if persist_result:
-            suffix = "\n\nI'll show the result here when the target replies." if return_result else ""
-            cleared_prefix = "Cleared existing target input first, then " if clear_result.get("cleared") else ""
             self.record_yoagent_message(
                 "assistant",
-                f"{cleared_prefix}sent to tmux session `{response['session']}` through `{response['transport_label']}`.{suffix}",
+                response["answer"],
                 created_at=datetime.now(timezone.utc).isoformat(),
             )
             response["conversation"] = self.yoagent_conversation_payload()
@@ -4448,42 +4736,35 @@ class TmuxWebtermApp:
         with self.yoagent_cli_lock:
             self.yoagent_cli_sessions.clear()
             yoagent_conversation.clear_cli_sessions()
+        self.close_yoagent_codex_app_server()
         with self.yoagent_action_lock:
             self.yoagent_action_waits.clear()
         yoagent_conversation.clear_messages()
         with self.yoagent_prewarm_lock:
             self.yoagent_prewarm_status = {}
+            self.yoagent_startup_response_running = False
         return {"ok": True, "conversation": self.yoagent_conversation_payload()}
 
-    def yoagent_prewarm(self, payload: dict[str, Any] | None = None) -> tuple[dict[str, Any], HTTPStatus]:
+    def start_yoagent_backend_prewarm(self, payload: dict[str, Any] | None = None, *, reason: str = "prewarm") -> tuple[dict[str, Any], HTTPStatus]:
         settings = self.yoagent_settings()
         requested_backend = str(settings.get("backend") or "deterministic").strip().lower()
         backend = resolve_yoagent_backend(requested_backend)
         invocation = str(settings.get("invocation") or "cli").strip().lower()
-        if backend not in {"codex", "claude"} or invocation != "cli":
-            return {"ok": True, "started": False, "backend": requested_backend, "backend_used": backend, "reason": "no CLI backend available"}, HTTPStatus.OK
+        if backend != "codex" or invocation != "cli":
+            return {"ok": True, "started": False, "backend": requested_backend, "backend_used": backend, "reason": "no persistent Codex backend available"}, HTTPStatus.OK
         with self.yoagent_prewarm_lock:
             if self.yoagent_prewarm_running:
                 return {"ok": True, "started": False, "backend": requested_backend, "backend_used": backend, "reason": "already running"}, HTTPStatus.ACCEPTED
             self.yoagent_prewarm_running = True
-            self.yoagent_prewarm_status = {"backend": backend, "started_at": time.time()}
-        locale = str((payload or {}).get("locale") or "en").strip() or "en"
+            self.yoagent_prewarm_status = {"backend": backend, "reason": reason, "started_at": time.time()}
 
         def worker() -> None:
-            status: dict[str, Any] = {"backend": backend}
+            status: dict[str, Any] = {"backend": backend, "reason": reason}
             try:
-                activity_payload = self.yoagent_activity_payload()
-                answer, reason, cli_status = self.run_yoagent_cli_backend(
-                    backend,
-                    server_string(locale, "yoagent.prompt.prewarmQuestion"),
-                    activity_payload,
-                    settings,
-                    [],
-                    locale,
-                )
-                status = {"backend": backend, "warmed": bool(answer and not reason), "fallback_reason": reason, "cli": cli_status}
+                thread_id, fallback_reason, cli_status = self.ensure_yoagent_codex_app_server(settings)
+                status = {"backend": backend, "reason": reason, "warmed": bool(thread_id and not fallback_reason), "fallback_reason": fallback_reason, "cli": cli_status}
             except Exception as exc:
-                status = {"backend": backend, "warmed": False, "error": str(exc)}
+                status = {"backend": backend, "reason": reason, "warmed": False, "error": str(exc)}
             finally:
                 with self.yoagent_prewarm_lock:
                     self.yoagent_prewarm_status = status
@@ -4491,6 +4772,108 @@ class TmuxWebtermApp:
 
         threading.Thread(target=worker, name="yoagent-prewarm", daemon=True).start()
         return {"ok": True, "started": True, "backend": requested_backend, "backend_used": backend}, HTTPStatus.ACCEPTED
+
+    def yoagent_startup_response(self, payload: dict[str, Any] | None = None) -> tuple[dict[str, Any], HTTPStatus]:
+        if yoagent_conversation.load_messages(limit=1):
+            warm_payload, _warm_status = self.start_yoagent_backend_prewarm(payload, reason="startup_existing_conversation")
+            return {
+                "ok": True,
+                "started": False,
+                "visible": False,
+                "reason": "conversation already has messages",
+                "prewarm": warm_payload,
+                "conversation": self.yoagent_conversation_payload(),
+            }, HTTPStatus.OK
+        settings = self.yoagent_settings()
+        requested_backend = str(settings.get("backend") or "deterministic").strip().lower()
+        backend = resolve_yoagent_backend(requested_backend)
+        invocation = str(settings.get("invocation") or "cli").strip().lower()
+        locale = str((payload or {}).get("locale") or "en").strip() or "en"
+        if backend not in {"codex", "claude"} or invocation != "cli":
+            return {
+                "ok": True,
+                "started": False,
+                "visible": False,
+                "backend": requested_backend,
+                "backend_used": backend,
+                "reason": "no CLI backend available",
+                "conversation": self.yoagent_conversation_payload(),
+            }, HTTPStatus.OK
+        with self.yoagent_prewarm_lock:
+            if self.yoagent_startup_response_running:
+                return {
+                    "ok": True,
+                    "started": False,
+                    "visible": True,
+                    "backend": requested_backend,
+                    "backend_used": backend,
+                    "reason": "startup response already running",
+                    "conversation": self.yoagent_conversation_payload(),
+                }, HTTPStatus.ACCEPTED
+            self.yoagent_startup_response_running = True
+        stream_id = f"startup-{uuid.uuid4().hex}"
+        started = time.monotonic()
+        self.publish_yoagent_stream_delta(stream_id, "", backend=backend, phase="started")
+        try:
+            activity_payload = self.yoagent_activity_payload()
+            answer, fallback_reason, cli_status = self.run_yoagent_cli_backend(
+                backend,
+                YOAGENT_STARTUP_QUESTION,
+                activity_payload,
+                settings,
+                [],
+                locale,
+                stream_id=stream_id,
+            )
+            model_answered = bool(answer)
+            backend_used = backend if model_answered else "deterministic"
+            if not answer:
+                answer = deterministic_yoagent_reply(YOAGENT_STARTUP_QUESTION, activity_payload, settings, locale)
+            response: dict[str, Any] = {
+                "ok": True,
+                "started": True,
+                "visible": True,
+                "answer": answer,
+                "backend": requested_backend,
+                "backend_used": backend_used,
+                "fallback": bool(fallback_reason),
+                "fallback_reason": fallback_reason,
+                "cli": cli_status,
+                "timing": {"ttfr_ms": round((time.monotonic() - started) * 1000, 3)},
+                "stream_id": stream_id,
+                "generated_at": activity_payload.get("generated_at"),
+                "session_order": activity_payload.get("session_order", []),
+            }
+            answer_text, hidden_thinking_removed = strip_yoagent_hidden_thinking(str(response.get("answer") or ""))
+            response["answer"] = answer_text
+            if hidden_thinking_removed:
+                response["hidden_thinking_removed"] = True
+            response["details"] = yoagent_response_details(response)
+            if answer_text:
+                self.record_yoagent_message("assistant", answer_text, details=str(response.get("details") or ""))
+                self.publish_yoagent_conversation_changed("yoagent_startup")
+            response["conversation"] = self.yoagent_conversation_payload()
+            if not model_answered:
+                self.publish_yoagent_stream_delta(
+                    stream_id,
+                    answer_text,
+                    backend=backend_used,
+                    phase="done",
+                    done=True,
+                    hidden_thinking_removed=bool(response.get("hidden_thinking_removed")),
+                )
+            return response, HTTPStatus.OK
+        except Exception as exc:
+            self.publish_yoagent_stream_delta(stream_id, "", backend=backend, phase="error", done=True)
+            return {"ok": False, "error": str(exc), "stream_id": stream_id, "conversation": self.yoagent_conversation_payload()}, HTTPStatus.INTERNAL_SERVER_ERROR
+        finally:
+            with self.yoagent_prewarm_lock:
+                self.yoagent_startup_response_running = False
+
+    def yoagent_prewarm(self, payload: dict[str, Any] | None = None) -> tuple[dict[str, Any], HTTPStatus]:
+        if (payload or {}).get("visible"):
+            return self.yoagent_startup_response(payload)
+        return self.start_yoagent_backend_prewarm(payload, reason="client_prewarm")
 
     def yoagent_chat(self, payload: dict[str, Any], access_role: str = "admin") -> tuple[dict[str, Any], HTTPStatus]:
         chat_started = time.monotonic()
@@ -4632,15 +5015,19 @@ class TmuxWebtermApp:
         fallback_reason = ""
         cli_status: dict[str, Any] = {}
         activity_payload = get_activity_payload()
+        stream_id = f"chat-{uuid.uuid4().hex}"
         if backend in {"codex", "claude"} and invocation == "cli":
-            answer, fallback_reason, cli_status = self.run_yoagent_cli_backend(backend, question, activity_payload, settings, history, locale)
+            answer, fallback_reason, cli_status = self.run_yoagent_cli_backend(backend, question, activity_payload, settings, history, locale, stream_id=stream_id)
             if answer:
                 backend_used = backend
         elif backend in {"codex", "claude"} and invocation != "cli":
             fallback_reason = f"{backend} {invocation} invocation is not available yet"
         if not answer:
             answer = deterministic_yoagent_reply(question, activity_payload, settings, locale)
-        return finish(base_response(answer, backend=requested_backend, backend_used=backend_used, fallback_reason=fallback_reason, cli=cli_status, include_activity=True))
+        response = base_response(answer, backend=requested_backend, backend_used=backend_used, fallback_reason=fallback_reason, cli=cli_status, include_activity=True)
+        if cli_status:
+            response["stream_id"] = stream_id
+        return finish(response)
 
     def run_yoagent_cli_backend(
         self,
@@ -4650,6 +5037,7 @@ class TmuxWebtermApp:
         settings: dict[str, Any],
         history: list[dict[str, str]],
         locale: str = "en",
+        stream_id: str = "",
     ) -> tuple[str, str, dict[str, Any]]:
         if backend not in {"codex", "claude"}:
             return "", f"unknown backend: {backend}", {}
@@ -4665,15 +5053,42 @@ class TmuxWebtermApp:
             prompt += yoagent_language_directive(locale)
 
         started = time.monotonic()
+        if stream_id:
+            self.publish_yoagent_stream_delta(stream_id, "", backend=backend, phase="started")
         if backend == "codex":
-            answer, error, captured_session_id = self.run_yoagent_codex_cli(prompt, session_id=session_id, resume=not seed)
+            stream_callback = self.yoagent_stream_callback(stream_id, backend) if stream_id else None
+            if stream_callback:
+                answer, error, captured_session_id, backend_status = self.run_yoagent_codex_app_server(
+                    prompt,
+                    session_id=session_id,
+                    resume=not seed,
+                    settings=settings,
+                    stream_callback=stream_callback,
+                )
+            else:
+                answer, error, captured_session_id, backend_status = self.run_yoagent_codex_app_server(prompt, session_id=session_id, resume=not seed, settings=settings)
             next_session_id = captured_session_id or session_id
+            if error and not answer:
+                fallback_answer, fallback_error, fallback_session_id = self.run_yoagent_codex_cli(prompt, session_id=session_id, resume=not seed, settings=settings)
+                backend_status["fast_backend_error"] = error
+                backend_status["fallback_transport"] = "codex-exec"
+                if fallback_answer:
+                    answer = fallback_answer
+                    error = ""
+                    next_session_id = fallback_session_id or next_session_id
+                    backend_status["transport"] = "codex-exec"
+                    backend_status["persistent"] = False
+                else:
+                    error = fallback_error or error
         else:
             claude_model = str(settings.get("claude_model") or YOAGENT_CLAUDE_SUMMARY_MODEL).strip()
-            answer, error = self.run_yoagent_claude_cli(prompt, session_id=next_session_id, resume=not seed, model=claude_model)
+            claude_effort = str(settings.get("claude_effort") or "").strip()
+            answer, error = self.run_yoagent_claude_cli(prompt, session_id=next_session_id, resume=not seed, model=claude_model, effort=claude_effort)
+            backend_status = {"transport": "claude-cli", "persistent": False, "model": claude_model, "effort": claude_effort or None}
         elapsed_ms = round((time.monotonic() - started) * 1000)
         fallback_reason = yoagent_cli_fallback_reason(backend, error)
         status = {
+            **backend_status,
             "backend": backend,
             "resumed": not seed,
             "seeded": seed,
@@ -4695,12 +5110,28 @@ class TmuxWebtermApp:
             elif fallback_reason:
                 self.yoagent_cli_sessions.pop(backend, None)
                 yoagent_conversation.save_cli_sessions(self.yoagent_cli_sessions)
+        if stream_id:
+            visible_answer, hidden_thinking_removed = strip_yoagent_hidden_thinking(answer)
+            self.publish_yoagent_stream_delta(
+                stream_id,
+                visible_answer,
+                backend=backend,
+                phase="done",
+                done=True,
+                hidden_thinking_removed=hidden_thinking_removed,
+            )
         return answer, fallback_reason, status
 
-    def run_yoagent_codex_cli(self, prompt: str, session_id: str = "", resume: bool = False) -> tuple[str, str, str]:
+    def run_yoagent_codex_cli(self, prompt: str, session_id: str = "", resume: bool = False, settings: dict[str, Any] | None = None) -> tuple[str, str, str]:
         if not shutil.which("codex"):
             return "", "codex CLI not found", ""
-        args = codex_exec_argv(resume_session_id=session_id if resume and session_id else None)
+        current_settings = settings or self.yoagent_settings()
+        args = codex_exec_argv(
+            resume_session_id=session_id if resume and session_id else None,
+            model=str(current_settings.get("codex_model") or "").strip() or None,
+            effort=str(current_settings.get("codex_effort") or "").strip() or None,
+            service_tier=SUMMARY_CODEX_SERVICE_TIER,
+        )
         try:
             completed = subprocess.run(
                 args,
@@ -4730,12 +5161,14 @@ class TmuxWebtermApp:
         error = completed.stderr.strip() or f"codex exited {completed.returncode}"
         return "", error, captured_session_id
 
-    def run_yoagent_claude_cli(self, prompt: str, session_id: str = "", resume: bool = False, model: str = "") -> tuple[str, str]:
+    def run_yoagent_claude_cli(self, prompt: str, session_id: str = "", resume: bool = False, model: str = "", effort: str = "") -> tuple[str, str]:
         if not shutil.which("claude"):
             return "", "claude CLI not found"
         args = ["claude", "-p"]
         if model:
             args.extend(["--model", model])
+        if effort:
+            args.extend(["--effort", effort])
         if resume and session_id:
             args.extend(["--resume", session_id])
         elif session_id:
@@ -4761,7 +5194,7 @@ class TmuxWebtermApp:
         payload = save_settings(patch)
         self.publish_client_event("settings_changed", {"mtime_ns": payload.get("mtime_ns", 0), "data": payload}, trigger="manual", cache="ready")
         self.client_watch_wake_event.set()
-        if payload.get("settings", {}).get("yoagent", {}).get("auto_refresh", False):
+        if self.yoagent_refresh_interval_seconds(payload.get("settings", {}).get("yoagent", {})) > 0:
             self.maybe_start_yoagent_summary_worker()
         return payload
 
@@ -4912,9 +5345,35 @@ class TmuxWebtermApp:
             if self.tabber_activity_cache_refreshing:
                 return False
             self.tabber_activity_cache_refreshing = True
-        worker = threading.Thread(target=self.run_tabber_activity_cache_refresh, daemon=True)
+        worker = threading.Thread(target=self.run_tabber_activity_cache_refresh, name="tabber-activity-refresh", daemon=True)
         worker.start()
         return True
+
+    def start_tabber_activity_cache_warmer(self) -> bool:
+        with self.tabber_activity_cache_lock:
+            if self.tabber_activity_cache_warmer_running:
+                return False
+            self.tabber_activity_cache_warmer_running = True
+        worker = threading.Thread(target=self.tabber_activity_cache_warmer_loop, name="tabber-activity-cache", daemon=True)
+        self.tabber_activity_cache_warmer_thread = worker
+        worker.start()
+        return True
+
+    def tabber_activity_cache_warmer_loop(self) -> None:
+        try:
+            while True:
+                started = time.monotonic()
+                try:
+                    self.refresh_tabber_activity_cache()
+                    self.publish_activity_summary_ready_events(trigger="tabber_activity")
+                except (OSError, RuntimeError, ValueError) as exc:
+                    self.log_event(None, "client_event_watch_error", f"Tabber activity cache refresh failed: {exc}", {})
+                interval = self.tabber_activity_refresh_seconds()
+                elapsed = max(0.0, time.monotonic() - started)
+                time.sleep(max(0.1, interval - elapsed))
+        finally:
+            with self.tabber_activity_cache_lock:
+                self.tabber_activity_cache_warmer_running = False
 
     def activity_payload(self) -> tuple[dict[str, Any], HTTPStatus]:
         refresh_seconds = self.tabber_activity_refresh_seconds()
@@ -5002,20 +5461,22 @@ class TmuxWebtermApp:
                 refreshing = self.start_session_files_cache_refresh(cache_key, self.refresh_session_files_payload_cache, session, infos, hours, from_ref, to_ref, repo_refs)
                 cache_meta["refreshing"] = refreshing
         else:
-            payload, status = session_files.session_files_payload(
-                session,
-                infos,
-                hours,
-                from_ref=from_ref,
-                to_ref=to_ref,
-                repo_refs=repo_refs,
-                include_cross_session_attribution=not bool(session),
+            payload, status, cache_hit, age_seconds = self.compute_session_files_cache_entry(
+                cache_key,
+                lambda: session_files.session_files_payload(
+                    session,
+                    infos,
+                    hours,
+                    from_ref=from_ref,
+                    to_ref=to_ref,
+                    repo_refs=repo_refs,
+                    include_cross_session_attribution=not bool(session),
+                ),
             )
-            self.set_session_files_cache(cache_key, payload, status)
             cache_meta = {
-                "hit": False,
+                "hit": cache_hit,
                 "stale": False,
-                "age_seconds": 0,
+                "age_seconds": round(age_seconds, 3),
                 "refresh_seconds": max_age,
                 "refreshing": False,
             }
@@ -6102,4 +6563,5 @@ class TmuxWebtermApp:
             for worker in list(self.auto_workers.values()):
                 worker.stop()
             self.auto_workers.clear()
+        self.close_yoagent_codex_app_server()
         self.control_server.stop()

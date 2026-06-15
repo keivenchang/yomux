@@ -50,7 +50,10 @@ def agent_command(agent: str, dangerously_yolo: bool = False) -> str:
         return "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust" if dangerously_yolo else "codex"
     if agent == "term":
         return os.environ.get("SHELL") or "bash"
-    return "claude --dangerously-skip-permissions --bare" if dangerously_yolo else "claude"
+    # Deliberately NOT --bare: --bare makes Claude Code read auth strictly from
+    # ANTHROPIC_API_KEY/apiKeyHelper and never from the OAuth credential file or
+    # keychain, so a subscription/enterprise OAuth login shows "Not logged in".
+    return "claude --dangerously-skip-permissions" if dangerously_yolo else "claude"
 
 def available_agent_commands() -> list[str]:
     heal_server_path()

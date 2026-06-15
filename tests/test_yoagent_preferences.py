@@ -6,6 +6,7 @@ from yolomux_lib import app as app_module
 from yolomux_lib.settings import default_settings
 from yolomux_lib.settings import save_settings
 from yolomux_lib.settings import settings_payload
+from yolomux_lib.yoagent.preferences import catalog_from_payload
 from yolomux_lib.yoagent.preferences import product_capability_registry
 from yolomux_lib.yoagent.preferences import yoagent_operator_response
 
@@ -129,6 +130,35 @@ def test_operator_writes_language_name_alias(tmp_path):
     assert response is not None
     assert settings_payload(path)["settings"]["general"]["language"] == "ja"
     assert "| `general.language` |" in response["answer"]
+
+
+def test_operator_catalog_hides_reserved_and_legacy_settings(tmp_path):
+    payload = settings_payload_for_path(tmp_path / "settings.yaml")
+    catalog = catalog_from_payload(payload)
+
+    assert "general.default_sessions" not in catalog
+    assert "appearance.editor_color_scheme" not in catalog
+    assert catalog["yoagent.invocation"]["choices"] == ["cli"]
+
+
+def test_operator_does_not_write_legacy_editor_scheme(tmp_path):
+    path = tmp_path / "settings.yaml"
+    payload = settings_payload_for_path(path)
+    calls = []
+
+    response = yoagent_operator_response(
+        "set appearance.editor_color_scheme to github-light",
+        payload,
+        {},
+        "admin",
+        lambda patch: calls.append(patch) or save_settings(patch, path),
+    )
+
+    assert response is not None
+    assert "legacy compatibility" in response["answer"]
+    assert "appearance.editor_light_color_scheme" in response["answer"]
+    assert calls == []
+    assert settings_payload(path)["settings"]["appearance"]["editor_color_scheme"] == "dark"
 
 
 def test_operator_clamps_numeric_write_and_reports_range(tmp_path):

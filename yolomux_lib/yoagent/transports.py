@@ -18,6 +18,7 @@ import selectors
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -284,7 +285,13 @@ class CodexExecTransport(AgentTransport):
         session_id = str(target.get("agent_session_id") or "").strip()
         with tempfile.TemporaryDirectory(prefix="yolomux-codex-exec-") as temp_dir:
             result_path = Path(temp_dir) / "last-message.txt"
-            args = codex_exec_argv(resume_session_id=session_id or None, ephemeral=not bool(session_id))
+            args = codex_exec_argv(
+                resume_session_id=session_id or None,
+                ephemeral=not bool(session_id),
+                model=str(target.get("agent_model") or target.get("model") or "").strip() or None,
+                effort=str(target.get("agent_effort") or target.get("effort") or "").strip() or None,
+                service_tier=str(target.get("service_tier") or "").strip() or None,
+            )
             if args and args[-1] == "-":
                 args = [*args[:-1], "-o", str(result_path), args[-1]]
             else:
@@ -570,7 +577,14 @@ class CodexAppServerTransport(AgentTransport):
             process.kill()
             process.wait(timeout=1)
 
-    def _wait_turn_complete(self, process: subprocess.Popen[str], thread_id: str, deadline: float, notifications: list[dict[str, Any]]) -> tuple[str, str]:
+    def _wait_turn_complete(
+        self,
+        process: subprocess.Popen[str],
+        thread_id: str,
+        deadline: float,
+        notifications: list[dict[str, Any]],
+        on_event: Any | None = None,
+    ) -> tuple[str, str]:
         deltas: list[str] = []
         while True:
             message = self._read_message(process, deadline)
@@ -583,6 +597,27 @@ class CodexAppServerTransport(AgentTransport):
                 delta = params.get("delta")
                 if isinstance(delta, str):
                     deltas.append(delta)
+                    if callable(on_event):
+                        on_event(
+                            {
+                                "event": "delta",
+                                "thread_id": str(params.get("threadId") or ""),
+                                "turn_id": str(params.get("turnId") or ""),
+                                "item_id": str(params.get("itemId") or ""),
+                                "delta": delta,
+                                "text": "".join(deltas),
+                            }
+                        )
+            elif method in {"item/reasoning/delta", "item/thinking/delta", "item/thought/delta"}:
+                if callable(on_event):
+                    on_event(
+                        {
+                            "event": "thinking",
+                            "thread_id": str(params.get("threadId") or ""),
+                            "turn_id": str(params.get("turnId") or ""),
+                            "item_id": str(params.get("itemId") or ""),
+                        }
+                    )
             elif method == "turn/completed":
                 if str(params.get("threadId") or "") != thread_id:
                     continue
@@ -594,52 +629,153 @@ class CodexAppServerTransport(AgentTransport):
         if not can_send:
             return TransportSendResult(ok=False, sent=False, transport=self.id, transport_label=self.label, result_source="", error=reason)
         timeout = float(kwargs.get("timeout") or CODEX_APP_SERVER_TIMEOUT_SECONDS)
-        cwd = str(target.get("cwd") or PROJECT_ROOT)
         popen = kwargs.get("popen") or subprocess.Popen
-        args = ["codex", "app-server", "--listen", "stdio://"]
-        process: subprocess.Popen[str] | None = None
-        notifications: list[dict[str, Any]] = []
+        session = CodexAppServerSession(target, popen=popen, protocol=self)
         try:
-            process = popen(
-                args,
-                cwd=cwd,
-                env={**os.environ, "TERM": "xterm-256color", "NO_COLOR": "1"},
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-            )
-            deadline = time.monotonic() + max(1.0, timeout)
-            self._write_message(process, json_rpc_request("initialize-1", "initialize", codex_app_server_initialize_params()))
-            self._read_response(process, "initialize-1", deadline, notifications)
-            self._write_message(process, json_rpc_notification("initialized"))
-            requested_thread = str(target.get("thread_id") or target.get("agent_session_id") or "").strip()
-            if requested_thread:
-                thread_method = "thread/resume"
-                thread_params = {"threadId": requested_thread, **codex_app_server_thread_params(target)}
-            else:
-                thread_method = "thread/start"
-                thread_params = codex_app_server_thread_params(target)
-            self._write_message(process, json_rpc_request("thread-1", thread_method, thread_params))
-            thread_response = self._read_response(process, "thread-1", deadline, notifications)
-            thread = thread_response.get("thread") if isinstance(thread_response.get("thread"), dict) else {}
-            thread_id = str(thread.get("id") or requested_thread or "").strip()
-            if not thread_id:
-                raise OSError("codex app-server did not return a thread id")
-            self._write_message(process, json_rpc_request("turn-1", "turn/start", codex_app_server_turn_params(thread_id, text, target)))
-            self._read_response(process, "turn-1", deadline, notifications)
-            final_text, error = self._wait_turn_complete(process, thread_id, deadline, notifications)
-            if error:
-                return TransportSendResult(ok=False, sent=True, transport=self.id, transport_label=self.label, result_source="codex-app-server-json-rpc", error=error)
-            if final_text:
-                return TransportSendResult(ok=True, sent=True, transport=self.id, transport_label=self.label, result_source="codex-app-server-json-rpc", text=final_text)
-            return TransportSendResult(ok=False, sent=True, transport=self.id, transport_label=self.label, result_source="codex-app-server-json-rpc", error="codex app-server completed without a final agent message")
-        except (OSError, subprocess.SubprocessError) as exc:
-            return TransportSendResult(ok=False, sent=False, transport=self.id, transport_label=self.label, result_source="codex-app-server-json-rpc", error=str(exc))
+            result, _status = session.send(text, target, timeout=timeout, on_event=kwargs.get("on_event"))
+            return result
         finally:
-            if process is not None:
-                self._terminate_process(process)
+            session.close()
+
+
+class CodexAppServerSession:
+    """Persistent stdio client for `codex app-server`.
+
+    `CodexAppServerTransport` keeps its old one-shot semantics by creating and closing this helper
+    per send. YO!agent chat keeps one instance alive so normal queries avoid CLI process startup.
+    """
+
+    def __init__(
+        self,
+        target: dict[str, Any],
+        *,
+        popen: Any | None = None,
+        protocol: CodexAppServerTransport | None = None,
+    ):
+        self.target = dict(target)
+        self.popen = popen or subprocess.Popen
+        self.protocol = protocol or CodexAppServerTransport()
+        self.process: subprocess.Popen[str] | None = None
+        self.thread_id = ""
+        self.request_counters: dict[str, int] = {}
+        self.lock = threading.RLock()
+        self.started_ts = 0.0
+
+    def _request_id(self, prefix: str) -> str:
+        self.request_counters[prefix] = self.request_counters.get(prefix, 0) + 1
+        return f"{prefix}-{self.request_counters[prefix]}"
+
+    def alive(self) -> bool:
+        return self.process is not None and self.process.poll() is None
+
+    def close(self) -> None:
+        with self.lock:
+            if self.process is not None:
+                self.protocol._terminate_process(self.process)
+            self.process = None
+
+    def _start_process(self, target: dict[str, Any], deadline: float, notifications: list[dict[str, Any]]) -> dict[str, Any]:
+        cwd = str(target.get("cwd") or PROJECT_ROOT)
+        args = ["codex", "app-server", "--listen", "stdio://"]
+        effort = str(target.get("agent_effort") or target.get("effort") or "").strip()
+        if effort:
+            args.extend(["-c", f'model_reasoning_effort="{effort}"'])
+        service_tier = str(target.get("service_tier") or "").strip()
+        if service_tier:
+            args.extend(["-c", f'service_tier="{service_tier}"'])
+        self.process = self.popen(
+            args,
+            cwd=cwd,
+            env={**os.environ, "TERM": "xterm-256color", "NO_COLOR": "1"},
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        self.started_ts = time.time()
+        initialize_id = self._request_id("initialize")
+        self.protocol._write_message(self.process, json_rpc_request(initialize_id, "initialize", codex_app_server_initialize_params()))
+        self.protocol._read_response(self.process, initialize_id, deadline, notifications)
+        self.protocol._write_message(self.process, json_rpc_notification("initialized"))
+        return {"process_started": True, "process_reused": False}
+
+    def ensure_started(self, target: dict[str, Any] | None = None, *, timeout: float = CODEX_APP_SERVER_TIMEOUT_SECONDS) -> tuple[str, dict[str, Any]]:
+        with self.lock:
+            if target is not None:
+                self.target = dict(target)
+            deadline = time.monotonic() + max(1.0, float(timeout))
+            notifications: list[dict[str, Any]] = []
+            status: dict[str, Any] = {
+                "transport": "codex-app-server",
+                "persistent": True,
+                "process_started": False,
+                "process_reused": False,
+                "thread_started": False,
+                "thread_resumed": False,
+            }
+            requested_thread = str(self.target.get("thread_id") or self.target.get("agent_session_id") or "").strip()
+            if requested_thread and self.thread_id and requested_thread != self.thread_id:
+                self.close()
+                self.thread_id = requested_thread
+            if not self.alive():
+                status.update(self._start_process(self.target, deadline, notifications))
+            else:
+                status["process_reused"] = True
+            if self.thread_id:
+                status["thread_id"] = self.thread_id
+                return self.thread_id, status
+            thread_response: dict[str, Any]
+            if requested_thread:
+                thread_id = self._request_id("thread")
+                try:
+                    params = {"threadId": requested_thread, **codex_app_server_thread_params(self.target)}
+                    self.protocol._write_message(self.process, json_rpc_request(thread_id, "thread/resume", params))
+                    thread_response = self.protocol._read_response(self.process, thread_id, deadline, notifications)
+                    status["thread_resumed"] = True
+                except OSError as exc:
+                    status["resume_error"] = str(exc)
+                    requested_thread = ""
+            if not requested_thread:
+                thread_id = self._request_id("thread")
+                self.protocol._write_message(self.process, json_rpc_request(thread_id, "thread/start", codex_app_server_thread_params(self.target)))
+                thread_response = self.protocol._read_response(self.process, thread_id, deadline, notifications)
+                status["thread_started"] = True
+            thread = thread_response.get("thread") if isinstance(thread_response.get("thread"), dict) else {}
+            self.thread_id = str(thread.get("id") or requested_thread or "").strip()
+            if not self.thread_id:
+                raise OSError("codex app-server did not return a thread id")
+            status["thread_id"] = self.thread_id
+            return self.thread_id, status
+
+    def send(
+        self,
+        text: str,
+        target: dict[str, Any] | None = None,
+        *,
+        timeout: float = CODEX_APP_SERVER_TIMEOUT_SECONDS,
+        on_event: Any | None = None,
+    ) -> tuple[TransportSendResult, dict[str, Any]]:
+        with self.lock:
+            status: dict[str, Any] = {}
+            turn_started = False
+            try:
+                deadline = time.monotonic() + max(1.0, float(timeout))
+                thread_id, status = self.ensure_started(target, timeout=timeout)
+                notifications: list[dict[str, Any]] = []
+                turn_id = self._request_id("turn")
+                self.protocol._write_message(self.process, json_rpc_request(turn_id, "turn/start", codex_app_server_turn_params(thread_id, text, self.target)))
+                self.protocol._read_response(self.process, turn_id, deadline, notifications)
+                turn_started = True
+                final_text, error = self.protocol._wait_turn_complete(self.process, thread_id, deadline, notifications, on_event=on_event)
+                if error:
+                    return TransportSendResult(ok=False, sent=True, transport="codex-app-server", transport_label="Codex app-server", result_source="codex-app-server-json-rpc", error=error), status
+                if final_text:
+                    return TransportSendResult(ok=True, sent=True, transport="codex-app-server", transport_label="Codex app-server", result_source="codex-app-server-json-rpc", text=final_text), status
+                return TransportSendResult(ok=False, sent=True, transport="codex-app-server", transport_label="Codex app-server", result_source="codex-app-server-json-rpc", error="codex app-server completed without a final agent message"), status
+            except (OSError, subprocess.SubprocessError) as exc:
+                self.close()
+                return TransportSendResult(ok=False, sent=turn_started, transport="codex-app-server", transport_label="Codex app-server", result_source="codex-app-server-json-rpc", error=str(exc)), status
 
 
 def codex_mcp_initialize_params() -> dict[str, Any]:
@@ -681,6 +817,9 @@ def claude_stream_json_argv(target: dict[str, Any]) -> list[str]:
     model = str(target.get("model") or target.get("agent_model") or "").strip()
     if model:
         args.extend(["--model", model])
+    effort = str(target.get("agent_effort") or target.get("effort") or "").strip()
+    if effort:
+        args.extend(["--effort", effort])
     permission_mode = str(target.get("permission_mode") or target.get("permissionMode") or "").strip()
     if permission_mode:
         args.extend(["--permission-mode", permission_mode])

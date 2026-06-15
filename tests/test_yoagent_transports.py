@@ -84,7 +84,16 @@ def test_codex_exec_transport_uses_output_last_message(monkeypatch):
         return subprocess.CompletedProcess(args, 0, '{"type":"irrelevant"}\n', "")
 
     result = CodexExecTransport().send(
-        {"session": "job-1", "agent_kind": "codex", "transport": "codex-exec", "managed": True, "cwd": "/repo/app"},
+        {
+            "session": "job-1",
+            "agent_kind": "codex",
+            "transport": "codex-exec",
+            "managed": True,
+            "cwd": "/repo/app",
+            "agent_model": "gpt-5.4-mini",
+            "agent_effort": "low",
+            "service_tier": "fast",
+        },
         "summarize the diff",
         run=fake_run,
         timeout=3,
@@ -97,6 +106,9 @@ def test_codex_exec_transport_uses_output_last_message(monkeypatch):
     args, kwargs = calls[0]
     assert args[:2] == ["codex", "exec"]
     assert "--json" in args
+    assert args[args.index("-m") + 1] == "gpt-5.4-mini"
+    assert 'model_reasoning_effort="low"' in args
+    assert 'service_tier="fast"' in args
     assert "-o" in args
     assert kwargs["input"] == "summarize the diff"
     assert kwargs["cwd"] == "/repo/app"
@@ -236,7 +248,7 @@ def test_claude_stream_json_transport_uses_result_message(monkeypatch):
         return subprocess.CompletedProcess(args, 0, stdout, "")
 
     result = ClaudeStreamJsonTransport().send(
-        {"session": "job-1", "agent_kind": "claude", "transport": "claude-stream-json", "managed": True, "cwd": "/repo/app", "agent_model": "sonnet", "agent_session_id": "claude-session"},
+        {"session": "job-1", "agent_kind": "claude", "transport": "claude-stream-json", "managed": True, "cwd": "/repo/app", "agent_model": "sonnet", "agent_effort": "low", "agent_session_id": "claude-session"},
         "summarize the diff",
         run=fake_run,
         timeout=3,
@@ -251,6 +263,7 @@ def test_claude_stream_json_transport_uses_result_message(monkeypatch):
     assert "stream-json" in args
     assert ["--resume", "claude-session"] == args[args.index("--resume"):args.index("--resume") + 2]
     assert ["--model", "sonnet"] == args[args.index("--model"):args.index("--model") + 2]
+    assert ["--effort", "low"] == args[args.index("--effort"):args.index("--effort") + 2]
     assert kwargs["input"] == "summarize the diff"
     assert kwargs["cwd"] == "/repo/app"
 
@@ -425,6 +438,7 @@ def test_codex_app_server_transport_runs_stdio_json_rpc_until_turn_completed(mon
     ]
     fake_process = FakeCodexAppServerProcess(messages)
     calls = []
+    stream_events = []
 
     def fake_popen(args, **kwargs):
         calls.append((args, kwargs))
@@ -435,6 +449,7 @@ def test_codex_app_server_transport_runs_stdio_json_rpc_until_turn_completed(mon
         "summarize the diff",
         popen=fake_popen,
         timeout=3,
+        on_event=stream_events.append,
     )
 
     assert result.ok is True
@@ -448,6 +463,16 @@ def test_codex_app_server_transport_runs_stdio_json_rpc_until_turn_completed(mon
     assert fake_process.stdin.messages[2]["params"]["cwd"] == "/repo/app"
     assert fake_process.stdin.messages[2]["params"]["model"] == "gpt-5"
     assert fake_process.stdin.messages[3]["params"]["input"] == [{"type": "text", "text": "summarize the diff", "text_elements": []}]
+    assert stream_events == [
+        {
+            "event": "delta",
+            "thread_id": "thread-1",
+            "turn_id": "turn-1",
+            "item_id": "item-1",
+            "delta": "intermediate text",
+            "text": "intermediate text",
+        }
+    ]
 
 
 def test_codex_app_server_transport_resumes_existing_thread(monkeypatch):

@@ -1882,8 +1882,39 @@ function globalActivitySummaryHtml() {
   </section>`;
 }
 
+function yoagentStreamingMessagesList() {
+  if (!(yoagentStreamingMessages instanceof Map)) return [];
+  return [...yoagentStreamingMessages.values()]
+    .filter(message => message && (message.content || message.streaming || message.details))
+    .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
+}
+
+function yoagentAgentResultParts(text) {
+  const value = String(text || '');
+  const match = value.match(/^([^\r\n]*)(?:\r?\n\s*\r?\n|\r?\n)([\s\S]*)$/);
+  if (!match) return {heading: value.trim(), output: ''};
+  return {heading: String(match[1] || '').trim(), output: String(match[2] || '').trim()};
+}
+
+function yoagentMessageBodyHtml(message, roleClass, agentResult, streaming) {
+  const content = String(message?.content || (streaming ? t('yoagent.thinking') : ''));
+  if (agentResult) {
+    const parts = yoagentAgentResultParts(content);
+    const heading = parts.heading
+      ? `<div class="yoagent-agent-result-heading markdown-body" data-yoagent-markdown>${esc(parts.heading)}</div>`
+      : '';
+    const output = parts.output
+      ? `<div class="yoagent-agent-result-output markdown-body" data-yoagent-markdown>${esc(parts.output)}</div>`
+      : '';
+    return `<div class="yoagent-message-body yoagent-agent-result-body">${heading}${output}</div>`;
+  }
+  const bodyClass = roleClass === 'assistant' ? 'yoagent-message-body markdown-body' : 'yoagent-message-body';
+  const markdownAttr = roleClass === 'assistant' ? ' data-yoagent-markdown' : '';
+  return `<div class="${bodyClass}"${markdownAttr}>${esc(content)}</div>`;
+}
+
 function yoagentChatMessagesHtml() {
-  const messages = Array.isArray(yoagentMessages) ? yoagentMessages : [];
+  const messages = [...(Array.isArray(yoagentMessages) ? yoagentMessages : []), ...yoagentStreamingMessagesList()];
   const startupInfo = yoagentStartupInfoVisible ? yoagentStartupInfoHtml() : '';
   if (!messages.length) {
     if (startupInfo) return startupInfo;
@@ -1896,15 +1927,12 @@ function yoagentChatMessagesHtml() {
     const role = message.role === 'user' ? t('yoagent.you') : yoagentTabLabel();
     const roleClass = message.role === 'user' ? 'user' : 'assistant';
     const agentResult = roleClass === 'assistant' && message?.kind === 'agent_result';
-    const messageClass = `yoagent-message ${roleClass}${agentResult ? ' yoagent-agent-result' : ''}`;
+    const streaming = roleClass === 'assistant' && message?.streaming;
+    const messageClass = `yoagent-message ${roleClass}${agentResult ? ' yoagent-agent-result' : ''}${streaming ? ' streaming' : ''}`;
     const detailsKey = yoagentMessageDetailsKey(message, index);
-    // Assistant replies are Markdown (numbered sections, bold titles, sub-bullets); flag the body so
-    // renderYoagentMessageMarkdown() can render it. The escaped text stays as the no-marked fallback.
-    const bodyClass = roleClass === 'assistant' ? 'yoagent-message-body markdown-body' : 'yoagent-message-body';
-    const markdownAttr = roleClass === 'assistant' ? ' data-yoagent-markdown' : '';
     return `<div class="${messageClass}">
       <div class="yoagent-message-role"><span>${esc(role)}</span>${yoagentMessageTimestampHtml(message.createdAt)}</div>
-      <div class="${bodyClass}"${markdownAttr}>${esc(message.content || '')}</div>
+      ${yoagentMessageBodyHtml(message, roleClass, agentResult, streaming)}
       ${roleClass === 'assistant' ? yoagentMessageDetailsHtml(message, detailsKey) : ''}
       ${roleClass === 'assistant' ? yoagentActionCardsHtml(message.actions) : ''}
     </div>`;
@@ -2048,10 +2076,37 @@ function applyYoagentConversationPayload(payload = {}) {
   const messages = Array.isArray(payload.messages) ? payload.messages : [];
   yoagentPendingWaits = Array.isArray(payload.pending_waits) ? payload.pending_waits : [];
   if (messages.length) hideYoagentStartupInfo();
+  if (messages.length && yoagentStreamingMessages instanceof Map) yoagentStreamingMessages.clear();
   yoagentMessages = messages;
   yoagentConversationPath = String(payload.transcript_path || '');
   yoagentConversationDisplayPath = String(payload.transcript_display_path || yoagentConversationPath);
   yoagentConversationLoaded = true;
+  return true;
+}
+
+function applyYoagentStreamPayload(payload = {}) {
+  if (!payload || typeof payload !== 'object') return false;
+  const streamId = String(payload.stream_id || '').trim();
+  if (!streamId) return false;
+  if (!(yoagentStreamingMessages instanceof Map)) yoagentStreamingMessages = new Map();
+  const createdAt = String(payload.created_at || new Date().toISOString());
+  const content = String(payload.content || '');
+  const phase = String(payload.phase || '');
+  const hiddenThinking = Boolean(payload.hidden_thinking_removed);
+  const detailLines = [];
+  if (payload.backend) detailLines.push(`- backend: \`${payload.backend}\``);
+  if (phase) detailLines.push(`- stream phase: \`${phase}\``);
+  if (hiddenThinking) detailLines.push('- raw model thinking was hidden; YOLOmux shows safe diagnostics instead of chain-of-thought');
+  const previous = yoagentStreamingMessages.get(streamId) || {};
+  yoagentStreamingMessages.set(streamId, {
+    role: 'assistant',
+    content: content || previous.content || '',
+    createdAt: previous.createdAt || createdAt,
+    details: detailLines.join('\n') || previous.details || '',
+    streaming: payload.done !== true,
+  });
+  hideYoagentStartupInfo();
+  yoagentPrewarming = payload.done === true ? false : yoagentPrewarming;
   return true;
 }
 
@@ -2334,6 +2389,8 @@ async function clearYoagentConversation() {
   yoagentBusy = false;
   yoagentPrewarming = false;
   yoagentPrewarmStarted = false;
+  yoagentStartupLlmRequested = false;
+  if (yoagentStreamingMessages instanceof Map) yoagentStreamingMessages.clear();
   yoagentError = '';
   yoagentDraft = '';
   resetYoagentComposerHistory();
@@ -2368,6 +2425,7 @@ async function sendYoagentChatMessage(rawText) {
   yoagentPrewarming = false;
   yoagentError = '';
   yoagentNotice = null;
+  if (yoagentStreamingMessages instanceof Map) yoagentStreamingMessages.clear();
   renderYoagentPanel({preserveDraft: false, scrollBottom: true});
   try {
     const payload = await apiFetchJson('/api/yoagent/chat', {
@@ -2444,17 +2502,26 @@ async function executeYoagentActionSend(previewId) {
 
 async function prewarmYoagent(options = {}) {
   if (yoagentPrewarmStarted || readOnlyMode || !yoagentChatEnabled()) return;
+  const shouldRequestStartupAnswer = !yoagentStartupLlmRequested && !yoagentMessages.length && !yoagentConversationLoaded;
+  if (shouldRequestStartupAnswer) yoagentStartupLlmRequested = true;
   yoagentPrewarmStarted = true;
   yoagentPrewarming = true;
   renderYoagentPanel({preserveDraft: true, scrollBottom: false});
   try {
-    await apiFetchJson('/api/yoagent/prewarm', {
+    const payload = await apiFetchJson('/api/yoagent/prewarm', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({locale: i18nActiveLocaleId()}),
+      body: JSON.stringify({locale: i18nActiveLocaleId(), visible: shouldRequestStartupAnswer}),
     });
-  } catch (_) {
-    // Prewarm is opportunistic; visible chat requests handle real errors.
+    if (payload?.fallback && payload.fallback_reason) {
+      yoagentNotice = {backend: yoagentBackendLabel(payload.backend_used || payload.backend), reason: payload.fallback_reason};
+    }
+    if (payload?.conversation) applyYoagentConversationPayload(payload.conversation || {});
+  } catch (error) {
+    if (shouldRequestStartupAnswer) {
+      yoagentError = yoagentChatErrorMessage(error);
+    }
+    // Non-visible process warm-up is opportunistic; visible chat requests handle real errors.
   } finally {
     yoagentPrewarming = false;
     renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom === true});
@@ -2529,7 +2596,7 @@ function editorSchemePreferenceChoices(options = {}) {
     .filter(id => options.dark === undefined || EDITOR_SCHEMES[id]?.dark === options.dark)
     .map(id => {
       const scheme = EDITOR_SCHEMES[id];
-      return {value: id, label: scheme.label, group: scheme.dark ? 'Dark' : 'Light'};
+      return {value: id, label: scheme.label, group: scheme.dark ? t('pref.editorScheme.group.dark') : t('pref.editorScheme.group.light')};
     });
 }
 
@@ -2605,7 +2672,6 @@ function preferenceSections() {
       {path: 'general.language', label: t('pref.general.language.label'), type: 'select', choices: i18nLocaleChoices(), help: t('pref.general.language.help')},
       {path: 'general.auto_focus', label: t('pref.general.auto_focus.label'), type: 'boolean', help: t('pref.general.auto_focus.help')},
       {path: 'general.startup_tips', label: t('pref.general.startup_tips.label'), type: 'boolean', help: t('pref.general.startup_tips.help')},
-      {path: 'general.default_sessions', label: t('pref.general.default_sessions.label'), type: 'list', help: t('pref.general.default_sessions.help')},
     ]},
     {title: t('pref.section.appearance'), items: [
       {path: 'appearance.theme', label: t('pref.appearance.theme.label'), type: 'radio', choices: globalThemePreferenceChoices(), help: t('pref.appearance.theme.help')},
@@ -2720,7 +2786,6 @@ function preferenceSections() {
       ], help: t('pref.yoagent.backend.help')},
       {path: 'yoagent.invocation', label: t('pref.yoagent.invocation.label'), type: 'radio', choices: [
         {value: 'cli', label: t('pref.yoagent.invocation.cli')},
-        {value: 'api-key', label: t('pref.yoagent.invocation.api-key')},
       ], help: t('pref.yoagent.invocation.help')},
       {path: 'yoagent.claude_model', label: t('pref.yoagent.claude_model.label'), type: 'select', choices: [
         {value: 'claude-opus-4-8', label: t('pref.yoagent.claude_model.opus')},
@@ -2743,8 +2808,7 @@ function preferenceSections() {
         {value: 'medium', label: t('pref.yoagent.codex_effort.medium')},
         {value: 'high', label: t('pref.yoagent.codex_effort.high')},
       ], help: t('pref.yoagent.codex_effort.help')},
-      {path: 'yoagent.auto_refresh', label: t('pref.yoagent.auto_refresh.label'), type: 'boolean', help: t('pref.yoagent.auto_refresh.help')},
-      {path: 'yoagent.refresh_interval_seconds', label: t('pref.yoagent.refresh_interval_seconds.label'), type: 'number', min: 30, max: 3600, step: 30, suffix: 's', help: t('pref.yoagent.refresh_interval_seconds.help')},
+      {path: 'yoagent.refresh_interval_seconds', label: t('pref.yoagent.refresh_interval_seconds.label'), type: 'number', min: 0, max: 3600, step: 30, suffix: 's', help: t('pref.yoagent.refresh_interval_seconds.help')},
       {path: 'yoagent.system_prompt', label: t('pref.yoagent.system_prompt.label'), type: 'textarea', help: t('pref.yoagent.system_prompt.help'), alwaysEnableReset: true},
       {path: 'yoagent.intro', label: t('pref.yoagent.intro.label'), type: 'textarea', help: t('pref.yoagent.intro.help'), alwaysEnableReset: true},
       {path: 'yoagent.format', label: t('pref.yoagent.format.label'), type: 'textarea', help: t('pref.yoagent.format.help'), alwaysEnableReset: true},
@@ -2878,7 +2942,6 @@ function preferenceSearchKeywordsForItem(item) {
   if (path === 'yolo.rule_file_path') add(['yaml', 'config']);
   if (path === 'general.auto_focus') add(['click', 'focus', 'hover', 'menu', 'dropdown', 'select pane', 'terminal', 'editor', 'finder', 'file explorer', 'preferences', 'everything']);
   if (path === 'general.default_layout') add(['startup', 'launch', 'open', 'start', 'split', 'grid']);
-  if (path === 'general.default_sessions') add(['startup', 'launch', 'which sessions']);
   if (label.includes('quick')) add(['shortcuts', 'bookmarks', 'favorites']);
   return keywords;
 }
@@ -3089,7 +3152,7 @@ function preferencesPanelHtml() {
   return `
     <div class="preferences-search-row">
       <input type="search" class="preferences-search" data-preferences-search value="${esc(preferencesSearchText)}" placeholder="${esc(t('pref.searchPlaceholder'))}" aria-label="${esc(t('pref.searchPlaceholder'))}">
-      <button type="button" class="preferences-search-button" data-preferences-search-action>YOsearch</button>
+      <button type="button" class="preferences-search-button" data-preferences-search-action>${esc(t('pref.searchButton'))}</button>
     </div>
     <div class="preferences-path-rows">${preferencesPathRowsHtml()}${readonly}</div>
     <div class="preferences-sections">${sections}</div>

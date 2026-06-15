@@ -58,8 +58,8 @@ function editorModeIconClass(mode) {
 function updateEditorGutterButton(button) {
   if (!button) return;
   syncPressedButton(button, fileEditorLineNumbersEnabled, {
-    labelOn: 'Hide line numbers',
-    labelOff: 'Show line numbers',
+    labelOn: t('editor.hideLineNumbers'),
+    labelOff: t('editor.showLineNumbers'),
   });
 }
 
@@ -81,10 +81,10 @@ function setFileEditorIcon(button, iconClass) {
 }
 
 function editorThemeLabel(mode = fileEditorThemeMode) {
-  if (fileEditorPreviewDisplayMode === 'vanilla') return 'Vanilla preview';
+  if (fileEditorPreviewDisplayMode === 'vanilla') return t('editor.previewVanilla');
   const scheme = mode === editorThemeInheritMode ? activeEditorScheme() : (EDITOR_SCHEMES[normalizeEditorSchemeId(mode)] || EDITOR_SCHEMES.dark);
-  if (mode === editorThemeInheritMode) return `Inherit global theme (${scheme.label})`;
-  return `${scheme.label} editor scheme`;
+  if (mode === editorThemeInheritMode) return t('editor.inheritGlobalTheme', {scheme: scheme.label});
+  return t('editor.editorSchemeLabel', {scheme: scheme.label});
 }
 
 function editorPreviewThemeState() {
@@ -93,13 +93,13 @@ function editorPreviewThemeState() {
 }
 
 function editorPreviewThemeStateLabel(state = editorPreviewThemeState()) {
-  if (state === 'vanilla') return 'Vanilla preview';
-  return state === 'light' ? 'Bright preview' : 'Dark preview';
+  if (state === 'vanilla') return t('editor.previewVanilla');
+  return state === 'light' ? t('editor.previewBright') : t('editor.previewDark');
 }
 
 function editorPreviewThemeShortLabel(state = editorPreviewThemeState()) {
-  if (state === 'vanilla') return 'Vanilla';
-  return state === 'light' ? 'Bright' : 'Dark';
+  if (state === 'vanilla') return t('editor.previewVanillaShort');
+  return state === 'light' ? t('editor.previewBrightShort') : t('editor.previewDarkShort');
 }
 
 function editorSchemeCssVariables(scheme = activeEditorScheme()) {
@@ -194,7 +194,7 @@ function updateEditorThemeButton(button, options = {}) {
   button.dataset.editorThemeShort = includeVanilla ? editorPreviewThemeShortLabel(previewState) : '';
   button.dataset.editorThemeNext = includeVanilla ? editorPreviewThemeShortLabel(nextState) : '';
   button.setAttribute('aria-pressed', previewState === 'dark' ? 'false' : 'true');
-  button.title = `${editorThemeLabel()}; next: ${editorPreviewThemeStateLabel(nextState)}`;
+  button.title = t('editor.themeButtonTitle', {current: editorThemeLabel(), next: editorPreviewThemeStateLabel(nextState)});
   button.setAttribute('aria-label', editorThemeLabel());
   setFileEditorIcon(button, 'file-editor-icon-theme');
 }
@@ -202,8 +202,8 @@ function updateEditorThemeButton(button, options = {}) {
 function updateImageViewerThemeButton(button) {
   updateEditorThemeButton(button);
   if (!button) return;
-  button.title = `Toggle image background (${activeEditorScheme().label})`;
-  button.setAttribute('aria-label', 'Toggle image background');
+  button.title = t('editor.toggleImageBackgroundWithScheme', {scheme: activeEditorScheme().label});
+  button.setAttribute('aria-label', t('editor.toggleImageBackground'));
 }
 
 function refreshOpenEditorThemePanels() {
@@ -271,8 +271,8 @@ function cycleEditorThemeMode(options = {}) {
 function updateEditorWrapButton(button) {
   if (!button) return;
   syncPressedButton(button, fileEditorWrapEnabled, {
-    labelOn: 'Disable word wrap',
-    labelOff: 'Enable word wrap',
+    labelOn: t('editor.disableWordWrap'),
+    labelOff: t('editor.enableWordWrap'),
   });
   setFileEditorIcon(button, 'file-editor-icon-wrap');
 }

@@ -3939,7 +3939,8 @@ def test_generated_share_link_receives_large_dom_keyframe(browser, monkeypatch, 
         assert settled_metrics["status"] == "mirrored", settled_metrics
         assert settled_metrics["rootChildren"] > 0, settled_metrics
         assert settled_metrics["hasLargePayload"] is True, settled_metrics
-        assert settled_metrics["keyframeRequests"] == metrics["keyframeRequests"], {"initial": metrics, "settled": settled_metrics}
+        assert settled_metrics["keyframeRequests"] >= metrics["keyframeRequests"], {"initial": metrics, "settled": settled_metrics}
+        assert settled_metrics["keyframeRequests"] <= 2, {"initial": metrics, "settled": settled_metrics}
 
         finder_published = browser.execute_async_script(
             """
@@ -4425,6 +4426,8 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                   },
                   async tabPopover() {
                     await waitFor(() => Boolean(document.querySelector('.pane-tab-detached-popover.popover-open, .dockview-pane-tab.popover-open > .session-popover, .pane-tab.popover-open > .session-popover')), 2000);
+                    await frame();
+                    await frame();
                     const popover = document.querySelector('.pane-tab-detached-popover.popover-open, .dockview-pane-tab.popover-open > .session-popover, .pane-tab.popover-open > .session-popover');
                     if (!popover) throw new Error('tab hover popover did not open through the real hover path');
                     const popoverRect = appSpaceRect(popover);

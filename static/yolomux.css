@@ -3790,6 +3790,10 @@ body.theme-light .keyboard-shortcut-row kbd {
   justify-self: start;
   margin-inline-start: var(--preferences-control-left-indent);
 }
+.preferences-setting-control.setting-type-select select[data-setting-path="yoagent.claude_model"],
+.preferences-setting-control.setting-type-select select[data-setting-path="yoagent.codex_model"] {
+  width: min(calc(100% - var(--preferences-control-left-indent)), 42ch);
+}
 .preferences-setting-control.setting-type-list textarea,
 .preferences-setting-control.setting-type-textarea textarea {
   width: calc(100% - var(--preferences-control-left-indent));
@@ -6849,6 +6853,25 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   border-inline-start-color: var(--accent-gold);
   border-inline-start-width: 6px;
   background: color-mix(in srgb, var(--accent-gold) 8%, var(--panel2));
+}
+.yoagent-agent-result-body {
+  display: grid;
+  gap: 0;
+}
+.yoagent-message.assistant.yoagent-agent-result .yoagent-agent-result-output {
+  padding-inline-start: 14px;
+  border-inline-start: 3px solid var(--accent-gold);
+}
+.yoagent-message.assistant.streaming {
+  border-inline-start-style: dashed;
+}
+.yoagent-message.assistant.streaming .yoagent-message-role::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--active-control-border);
+  animation: command-palette-thinking 900ms ease-in-out infinite alternate;
 }
 .yoagent-recent-agents-message .yoagent-recent-agents {
   padding: 0;

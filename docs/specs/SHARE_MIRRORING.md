@@ -146,7 +146,7 @@ Replay frames should be explicit and versioned.
 
 Other required frame types:
 
-- `dom-keyframe-request`: viewer asks for a fresh keyframe with reason `join`, `gap`, `digest`, `replay-error`, `backpressure`, or `manual-debug`.
+- `dom-keyframe-request`: viewer asks for a fresh keyframe with reason `join`, `gap`, `digest`, `replay-error`, `backpressure`, `topology`, or `manual-debug`.
 - `dom-keyframe-ack`: viewer confirms keyframe applied and reports DOM digest plus terminal placeholder map.
 - `dom-replay-error`: viewer reports failed mutation, missing node id, unsafe attribute, digest mismatch, or xterm placeholder failure.
 - `terminal-host-resize`: existing terminal host dimensions, kept separate from DOM mutation frames.
@@ -415,7 +415,7 @@ Required test coverage:
 - Browser test for read-only viewer join applying a keyframe with Finder, editors, Preferences, menus, and terminal placeholders.
 - Browser test for pane resize/minimize/tab move producing a new epoch keyframe and no viewer-local Finder resurrection.
 - Browser test for popup open/close replay without stale resurrection.
-- Browser or Node test for replayed tab/menu popovers after keyframe and child-list rebuilds. Serialized replay DOM does not keep original app event listeners, so read-only replay must not create viewer-local hover geometry; the host must publish popovers as replayed DOM with app-space `left/top/width`, and browser tests must compare the full host/client popup rectangle.
+- Browser or Node test for replayed tab/menu popovers after keyframe and child-list rebuilds. Serialized replay DOM does not keep original app event listeners, so read-only replay must not create viewer-local hover geometry; the host must publish popovers as replayed DOM with app-space `left/top/width/height`, and browser tests must compare the full host/client popup rectangle.
 - Browser test for terminal placeholder move/rebind keeping xterm connected and host rows/cols unchanged.
 - Browser test for HTTP read-only share using replay shell and still loading allowed readonly data/terminal streams only.
 - Browser test for slow-viewer/backpressure requesting a keyframe instead of showing partial DOM.

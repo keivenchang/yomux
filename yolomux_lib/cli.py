@@ -241,6 +241,8 @@ def main() -> int:
             app.stop_auto_approve_all()
 
     server = TmuxWebtermHTTPServer((args.host, args.port), app, tls_context=tls_context, dev=args.dev)
+    if hasattr(app, "start_yoagent_backend_prewarm"):
+        app.start_yoagent_backend_prewarm(reason="server_start")
     scheme = "https" if tls_context else "http"
     if args.dev:
         print("[dev] dev mode ON: backend re-execs on yolomux_lib/*.py change; page auto-reloads on bundle change")

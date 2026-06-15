@@ -38,7 +38,7 @@ DEFAULT_ROWS = 36
 MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
-YOLOMUX_VERSION = "0.3.28"
+YOLOMUX_VERSION = "0.3.29"
 UPDATE_NOTIFY_LEVELS: tuple[str, ...] = ("major", "minor", "patch", "none")
 SUMMARY_LOOKBACK_SECONDS = 3600
 SUMMARY_MAX_PROMPT_CHARS = 100_000
@@ -139,15 +139,25 @@ def as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def codex_exec_argv(*, resume_session_id: str | None = None, ephemeral: bool = False) -> list[str]:
+def codex_exec_argv(
+    *,
+    resume_session_id: str | None = None,
+    ephemeral: bool = False,
+    model: str | None = None,
+    effort: str | None = None,
+    service_tier: str | None = None,
+) -> list[str]:
+    selected_model = str(model or SUMMARY_CODEX_MODEL).strip() or SUMMARY_CODEX_MODEL
+    selected_effort = str(effort or SUMMARY_CODEX_EFFORT).strip() or SUMMARY_CODEX_EFFORT
+    selected_service_tier = str(service_tier or SUMMARY_CODEX_SERVICE_TIER).strip() or SUMMARY_CODEX_SERVICE_TIER
     common = [
         "--json",
         "-m",
-        SUMMARY_CODEX_MODEL,
+        selected_model,
         "-c",
-        f'model_reasoning_effort="{SUMMARY_CODEX_EFFORT}"',
+        f'model_reasoning_effort="{selected_effort}"',
         "-c",
-        f'service_tier="{SUMMARY_CODEX_SERVICE_TIER}"',
+        f'service_tier="{selected_service_tier}"',
         "--ignore-rules",
     ]
     if resume_session_id:

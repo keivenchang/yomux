@@ -78,6 +78,10 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
         def restore_auto_approve(self):
             return []
 
+        def start_yoagent_backend_prewarm(self, **kwargs):
+            captured["yoagent_prewarm"] = kwargs
+            return {"ok": True}, 202
+
         def stop_auto_approve_all(self):
             captured["stopped"] = True
 
@@ -108,6 +112,7 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
     assert captured["address"] == ("0.0.0.0", 8001)
     assert captured["tls_context"] is None
     assert captured["dev"] is False  # dev mode off by default
+    assert captured["yoagent_prewarm"] == {"reason": "server_start"}
     assert captured["served"] is True
     assert captured["stopped"] is True
     assert captured["closed"] is True

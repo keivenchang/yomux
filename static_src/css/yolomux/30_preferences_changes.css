@@ -1217,6 +1217,10 @@ body.theme-light .keyboard-shortcut-row kbd {
   justify-self: start;
   margin-inline-start: var(--preferences-control-left-indent);
 }
+.preferences-setting-control.setting-type-select select[data-setting-path="yoagent.claude_model"],
+.preferences-setting-control.setting-type-select select[data-setting-path="yoagent.codex_model"] {
+  width: min(calc(100% - var(--preferences-control-left-indent)), 42ch);
+}
 .preferences-setting-control.setting-type-list textarea,
 .preferences-setting-control.setting-type-textarea textarea {
   width: calc(100% - var(--preferences-control-left-indent));

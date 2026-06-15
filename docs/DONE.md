@@ -362,7 +362,7 @@ Unless an entry says otherwise, every item shipped with the standard check gate 
 - Brightened the Finder/Differ changes tree in dark mode without changing light mode: the shared guide-line token now uses a stronger slate alpha, repo headers use a changes-scoped dark background token, and the light theme resets both tokens to the existing values. Added layout URL guards for the dark guide line, scoped repo-head token, and light-mode unchanged contract.
 
 ### DOIT.43 YO!agent rolling transcript summaries
-- Added disabled-by-default YO!agent background transcript summaries: per-session rolling state persists in YOLOmux state, updates from transcript deltas after quiet intervals, prunes dead sessions, pins cheap CLI backends, exposes `yoagent.auto_refresh` and `yoagent.refresh_interval_seconds`, and injects cached rolling summaries into YO!agent context. Added backend/settings/UI regressions for delta-only updates, idempotent no-op ticks, disabled-by-default behavior, bounded settings, and Preferences visibility.
+- Added disabled-by-default YO!agent background transcript summaries: per-session rolling state persists in YOLOmux state, updates from transcript deltas after quiet intervals, prunes dead sessions, pins cheap CLI backends, exposes the refresh interval, and injects cached rolling summaries into YO!agent context. Current builds migrate the old `yoagent.auto_refresh` boolean into `yoagent.refresh_interval_seconds` and keep only the interval visible. Added backend/settings/UI regressions for delta-only updates, idempotent no-op ticks, disabled-by-default behavior, bounded settings, and Preferences visibility.
 
 ## 2026-06-06
 
