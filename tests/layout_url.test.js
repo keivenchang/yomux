@@ -631,6 +631,7 @@ globalThis.__layoutTestApi = {
   focusTerminalWhenAutoFocus,
   focusPanel,
   focusTerminalFromUserAction,
+  handleTerminalDataForTest: handleTerminalData,
   toggleFileExplorerShortcut,
   focusedTerminalForTest() { return focusedTerminal; },
   globalShortcutTargetAllowsAppAction,
@@ -3882,6 +3883,20 @@ test('t@2560', () => {
     assert.equal(hoverApi.fileExplorerSessionFilesTargetSessionForTest(), '6', 'D1: explicit selectSession commits the Differ target in diff mode');
     hoverApi.setFileExplorerModeForTest('files');
   }
+  {
+    const mouseReportApi = loadYolomux('', ['1', '8002']);
+    mouseReportApi.setFileExplorerModeForTest('diff');
+    mouseReportApi.noteFileExplorerChangesSessionInteractionForTest('1');
+    mouseReportApi.noteFileExplorerChangesSessionInteractionForTest('8002');
+    const socketMessages = [];
+    mouseReportApi.registerTerminalForTest('1', {focus() {}}, {
+      readyState: 1,
+      send(message) { socketMessages.push(JSON.parse(message)); },
+    });
+    assert.equal(mouseReportApi.handleTerminalDataForTest('1', '\x1b[<35;12;7M'), true, 'xterm mouse-report bytes are still forwarded to the terminal backend');
+    assert.equal(socketMessages[0]?.data, '\x1b[<35;12;7M', 'xterm mouse-report bytes stay a transport concern');
+    assert.equal(mouseReportApi.fileExplorerSessionFilesTargetSessionForTest(), '8002', 'xterm hover/mouse-report bytes from pane 1 do not auto-select Differ session 1');
+  }
   // C15/C6: the redundant global "N files changed in '1'" summary and global comparison line are gone;
   // each repo owns its own compact comparison line instead.
   const compactFinderPanel = api.fileExplorerChangesPanelHtml();
@@ -4567,10 +4582,15 @@ test('t@2560', () => {
   const terminalContainerBindingStart = appSource.indexOf('function bindTerminalContainerForSession(');
   const terminalContainerBindingEnd = appSource.indexOf('function startTerminal(', terminalContainerBindingStart);
   const terminalContainerBindingBody = appSource.slice(terminalContainerBindingStart, terminalContainerBindingEnd);
+  const terminalDataHandlerStart = appSource.indexOf('function handleTerminalData(');
+  const terminalDataHandlerBody = appSource.slice(terminalDataHandlerStart, appSource.indexOf('function shellQuote(', terminalDataHandlerStart));
   assert.ok(terminalContainerBindingBody.includes("container.addEventListener('keydown', () => noteTerminalExplicitInput(session), {capture: true});"), 'terminal keydown commits the Finder Modified-files target');
   assert.ok(terminalContainerBindingBody.includes("container.addEventListener('paste', () => noteTerminalExplicitInput(session), {capture: true});"), 'terminal paste commits the Finder Modified-files target');
   assert.ok(terminalInputBody.includes('bindTerminalContainerForSession(session, term, container);'), 'startTerminal uses the shared terminal container binding path');
+  assert.ok(terminalInputBody.includes('term.onData(data => handleTerminalData(session, data));'), 'startTerminal routes terminal bytes through the shared transport-only handler');
   assert.equal(/term\.onData\(data => \{[^]*?noteFileExplorerChangesSessionInteraction\(session\)/.test(terminalInputBody), false, 'xterm data transport does not commit Finder because hover focus can emit focus/mouse reports');
+  assert.equal(/term\.onData\(data => \{[^]*?noteTerminalExplicitInput\(session\)/.test(terminalInputBody), false, 'xterm data transport does not commit Finder indirectly through explicit-input helpers because hover mouse reports can emit terminal bytes');
+  assert.equal(terminalDataHandlerBody.includes('noteTerminalExplicitInput'), false, 'terminal byte handling stays transport-only; DOM keydown/paste/beforeinput own explicit-input commits');
   assert.ok(/fetchSessionFiles\(\{destination: 'finder', session, silent: true, force: true, background: cachedPayloadIsLoaded\}\)/.test(appSource), 'explicit session changes force a fresh Finder modified-files fetch even if an older request is in flight');
   assert.ok(/function sessionFilesCacheKey\(session\)[\s\S]*sessionFilesRequestQueryString\(\)/.test(appSource), 'Differ cached payloads are keyed by session plus effective FROM/TO/refs query');
   assert.ok(/const cached = fileExplorerSessionFilesCache\.get\(sessionFilesCacheKey\(session\)\)/.test(appSource), 'Differ session switches do not reuse payloads from a different ref pair');
@@ -5853,7 +5873,7 @@ test('t@2560', () => {
     assert.ok(/const shareWriteMode = shareViewMode && shareBootstrap\?\.mode === 'rw'/.test(shareSource), 'share-view write mode is explicit and token-driven');
     assert.ok(/disableStdin:\s*readOnlyMode && !shareWriteMode/.test(shareSource), 'rw share-view terminals are created with stdin enabled');
     assert.ok(/function insertIntoTerminal\(session, text\)[\s\S]*readOnlyMode && !shareWriteMode/.test(shareSource), 'rw share-view can send terminal insertions while ro share-view stays blocked');
-    assert.ok(/term\.onData\(data => \{[\s\S]*readOnlyMode && !shareWriteMode/.test(shareSource), 'rw share-view can type into the focused terminal only through terminal input frames');
+    assert.ok(/function handleTerminalData\(session, data\)[\s\S]*readOnlyMode && !shareWriteMode/.test(shareSource) && shareSource.includes('term.onData(data => handleTerminalData(session, data));'), 'rw share-view can type into the focused terminal only through terminal input frames');
     assert.ok(shareSource.includes('function renderShareStatusPill') && shareSource.includes('share.pill'), 'host topbar renders the YO!share status pill');
     assert.ok(shareSource.includes('share.pillMultiple'), 'host topbar aggregates multiple active YO!share URLs into one status pill');
     assert.ok(/const shareViewerId = \(\(\) => \{[\s\S]*sessionStorage\.getItem\(key\)[\s\S]*randomShareViewerId/.test(shareSource), 'share-view pages keep one viewer id across all terminal websockets in the page');
@@ -9536,6 +9556,55 @@ test('t@6802', () => {
   assert.equal(row.pathTitle, '/home/test/yolomux.dev3 (worktree of /home/test/yolomux)', 'YO!info path tooltip keeps the absolute path and parent');
 });
 
+test('t@info-branch-repo-inventory', () => {
+  const api = loadYolomux('', ['s1']);
+  api.setTranscriptInfoForTest('s1', {
+    project: {
+      git: {
+        root: '/repo/app',
+        branch: 'main',
+        other_branches: {
+          branches: [
+            {name: 'main', current: true, updated: '1 minute ago', updated_ts: 300, subject: 'app current'},
+            {name: 'feature/app', current: false, updated: '2 minutes ago', updated_ts: 200, subject: 'app feature'},
+          ],
+        },
+      },
+      repos: [
+        {
+          root: '/repo/app',
+          branch: 'main',
+          other_branches: {
+            branches: [
+              {name: 'main', current: true, updated: '1 minute ago', updated_ts: 300, subject: 'duplicate app current'},
+            ],
+          },
+        },
+        {
+          root: '/repo/lib',
+          branch: 'lib-main',
+          other_branches: {
+            branches: [
+              {name: 'lib-main', current: true, updated: 'today', updated_ts: 400, subject: 'lib current'},
+              {name: 'feature/lib', current: false, updated: 'yesterday', updated_ts: 100, subject: 'lib feature'},
+            ],
+          },
+        },
+      ],
+      pull_request: null,
+      linear: [],
+    },
+  });
+  const rowKey = row => `${row.path}\n${row.branch}`;
+  const rows = new Map(api.infoBranchRows().map(row => [rowKey(row), row]));
+  assert.equal(rows.get('/repo/app\nmain').session, 's1', 'YO!info keeps the session label for the primary checked-out branch');
+  assert.equal(rows.get('/repo/app\nfeature/app').session, '', 'YO!info leaves non-current primary repo branches unassigned');
+  assert.equal(rows.get('/repo/lib\nlib-main').session, 's1', 'YO!info assigns the session to a checked-out branch in a secondary touched repo');
+  assert.equal(rows.get('/repo/lib\nfeature/lib').session, '', 'YO!info shows secondary repo branches without pretending the session owns them');
+  assert.equal(rows.get('/repo/lib\nfeature/lib').updatedTs, 100, 'YO!info keeps the branch last-modified timestamp from the touched repo inventory');
+  assert.equal(rows.get('/repo/lib\nfeature/lib').pathLabel, '/repo/lib', 'YO!info shows the secondary touched repo path');
+});
+
 test('t@6833', () => {
   const api = loadYolomux('', ['alpha', 'beta']);
   const baseActivitySummaryPayload = {
@@ -9696,9 +9765,10 @@ test('t@6833', () => {
     project: {
       git: {
         root: '/repo/alpha',
+        branch: 'zeta',
         other_branches: {
           branches: [
-            {name: 'zeta', updated: 'yesterday', updated_ts: 100, subject: 'second item', linear_ids: ['GH-2']},
+            {name: 'zeta', current: true, updated: 'yesterday', updated_ts: 100, subject: 'second item', linear_ids: ['GH-2']},
           ],
         },
       },
@@ -9708,9 +9778,10 @@ test('t@6833', () => {
     project: {
       git: {
         root: '/repo/beta',
+        branch: 'alpha',
         other_branches: {
           branches: [
-            {name: 'alpha', updated: 'today', updated_ts: 200, subject: 'first item', linear_ids: ['GH-1']},
+            {name: 'alpha', current: true, updated: 'today', updated_ts: 200, subject: 'first item', linear_ids: ['GH-1']},
           ],
         },
       },
@@ -9743,9 +9814,10 @@ test('t@6833', () => {
     project: {
       git: {
         root: '/repo/client-only',
+        branch: 'client-local',
         other_branches: {
           branches: [
-            {name: 'client-local', updated: 'now', updated_ts: 999, subject: 'must not render'},
+            {name: 'client-local', current: true, updated: 'now', updated_ts: 999, subject: 'must not render'},
           ],
         },
       },

@@ -42,6 +42,12 @@ def test_session_repo_summaries_lists_every_touched_repo(tmp_path):
         (repo / "f.txt").write_text("x\n", encoding="utf-8")
         _git(repo, "add", "f.txt")
         _git(repo, "commit", "-m", "init")
+        base_branch = _git(repo, "branch", "--show-current").stdout.strip()
+        _git(repo, "checkout", "-b", f"feature/{name}")
+        (repo / "branch.txt").write_text(f"{name}\n", encoding="utf-8")
+        _git(repo, "add", "branch.txt")
+        _git(repo, "commit", "-m", f"feature {name}")
+        _git(repo, "checkout", base_branch)
         made.append(repo)
     (made[1] / "f.txt").write_text("changed\n", encoding="utf-8")  # leave repoB dirty
     rootA = str(Path(made[0]).resolve())
@@ -56,6 +62,9 @@ def test_session_repo_summaries_lists_every_touched_repo(tmp_path):
     assert by_root[rootA]["primary"] is True
     assert by_root[rootB]["primary"] is False
     assert by_root[rootB]["dirty_count"] == 1
+    branches = {branch["name"]: branch for branch in by_root[rootB]["other_branches"]["branches"]}
+    assert f"feature/{made[1].name}" in branches
+    assert branches[f"feature/{made[1].name}"]["updated_ts"] > 0
 
 
 def test_session_repo_summaries_single_repo_has_no_extra(tmp_path):

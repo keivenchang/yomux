@@ -543,10 +543,17 @@ function finderSearchAliases(item) {
 function tabSearchFields(item) {
   const info = transcriptMeta.sessions?.[item] || {};
   const filePath = fileItemPath(item) || '';
-  // also index the repo's OTHER-branch PRs/branches/Linear IDs (the same data YO!info shows),
-  // so a session is findable by ANY PR (e.g. #10289 on a non-current branch), branch name, or Linear ID
-  // — not just its current-branch PR. Already in the metadata payload, so no extra fetch.
-  const otherBranches = info.project?.git?.other_branches?.branches || [];
+  // Also index the touched repos' branch/PR/Linear metadata (the same data YO!info shows), so a
+  // session is findable by any related branch even when it is not the currently checked-out branch.
+  const primaryRoot = info.project?.git?.root || info.project?.git?.cwd || '';
+  const branchSources = [
+    ...(info.project?.git?.other_branches?.branches || []),
+    ...(Array.isArray(info.project?.repos)
+      ? info.project.repos
+        .filter(repo => (repo?.root || repo?.cwd || '') !== primaryRoot)
+        .flatMap(repo => repo?.other_branches?.branches || [])
+      : []),
+  ];
   const pr = displayPullRequest(info);
   return [
     item,
@@ -564,7 +571,7 @@ function tabSearchFields(item) {
     ...pullRequestSearchFields(pr),
     ...linearSearchFields(info.linear),
     ...linearSearchFields(info.project?.linear),
-    ...otherBranches.flatMap(branch => [
+    ...branchSources.flatMap(branch => [
       branch.name,
       branch.subject,
       ...pullRequestSearchFields(branch.pull_request),

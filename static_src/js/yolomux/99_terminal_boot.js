@@ -794,79 +794,119 @@ function infoPathTitle(git) {
   return `${path} (worktree of ${parent})`;
 }
 
+function infoGitRoot(git) {
+  return String(git?.root || git?.cwd || '');
+}
+
+function infoBranchSourcesForSession(session, info) {
+  const project = info?.project || {};
+  const primaryGit = project.git;
+  const primaryRoot = infoGitRoot(primaryGit);
+  const sources = [];
+  const seenRoots = new Set();
+  const addSource = (git, primary) => {
+    const root = infoGitRoot(git);
+    const branches = git?.other_branches?.branches;
+    if (!root || !Array.isArray(branches) || !branches.length || seenRoots.has(root)) return;
+    seenRoots.add(root);
+    sources.push({session, info, project, git, primary: primary === true});
+  };
+  addSource(primaryGit, true);
+  for (const repo of Array.isArray(project.repos) ? project.repos : []) {
+    addSource(repo, Boolean(primaryRoot && infoGitRoot(repo) === primaryRoot));
+  }
+  return sources;
+}
+
+function infoBranchOwnedBySource(git, branch) {
+  const branchName = String(branch?.name || '');
+  const currentBranch = String(git?.branch || '');
+  return branch?.current === true && Boolean(branchName) && (!currentBranch || currentBranch === branchName);
+}
+
+function infoBranchRowForSource(source, branch, ownsSession) {
+  const {session, info, project, git, primary} = source;
+  const useCurrentProjectMetadata = ownsSession && primary;
+  const currentPr = useCurrentProjectMetadata ? displayPullRequest(info) : null;
+  const currentLinear = useCurrentProjectMetadata ? project.linear || [] : [];
+  const linearIds = currentLinear.length
+    ? currentLinear.map(issue => issue.identifier).filter(Boolean)
+    : branch.linear_ids || [];
+  const linearHtml = currentLinear.length
+    ? currentLinear.map(issue => linearIssueHtml(issue)).join(' ')
+    : linearIds.map(linearIssueLinkHtml).filter(Boolean).join(' ');
+  const prHtml = currentPr?.number ? pullRequestColumnLinkHtml(currentPr) : pullRequestLinkForBranch(git, branch);
+  const prValue = currentPr?.number ? currentPr : branch.pull_request;
+  const prTitle = pullRequestTextForBranch(prValue, branch.subject || '');
+  const repoUrl = git?.github_repo?.url || '';
+  const prUrl = prValue?.url || (prValue?.number && repoUrl ? `${repoUrl}/pull/${prValue.number}` : '');
+  const prLabel = prValue?.number ? pullRequestLinkLabel(prValue) : '';
+  const prClass = prValue?.number ? pullRequestStatusClass(prValue) : '';
+  const linearTitle = currentLinear.length
+    ? currentLinear.map(issue => [issue.identifier, issue.state, issue.title].filter(Boolean).join(' ')).filter(Boolean).join(' · ')
+    : linearIds.join(' ');
+  const linearItems = currentLinear.length
+    ? currentLinear.map(issue => ({
+      identifier: String(issue?.identifier || ''),
+      state: String(issue?.state || ''),
+      title: String(issue?.title || ''),
+      url: String(issue?.url || ''),
+    })).filter(issue => issue.identifier || issue.url)
+    : linearIds.map(identifier => ({identifier: String(identifier || '')})).filter(issue => issue.identifier);
+  const desc = shortText(
+    currentPr?.title
+      || currentPr?.description
+      || currentLinear.find(issue => issue.title)?.title
+      || branch.subject
+      || '',
+    180,
+  );
+  return {
+    session: ownsSession ? session : '',
+    path: infoGitRoot(git),
+    pathLabel: infoPathLabel(git),
+    pathTitle: infoPathTitle(git),
+    branch: branch.name || '',
+    branchHtml: branchLinkHtml(git, branch.name),
+    desc,
+    updated: branch.updated || '',
+    updatedText: branchUpdatedText(branch),
+    updatedTitle: branch.updated || branchUpdatedText(branch),
+    updatedTs: Number.isFinite(branch.updated_ts) ? branch.updated_ts : 0,
+    prHtml: prHtml || '',
+    prTitle,
+    prUrl,
+    prLabel,
+    prClass,
+    prSort: prTitle || (prValue?.number ? String(prValue.number) : ''),
+    linearHtml,
+    linearItems,
+    linearTitle,
+    current: ownsSession,
+    sourcePrimary: primary,
+  };
+}
+
+function preferInfoBranchRow(existing, next) {
+  if (!existing) return next;
+  if (next.session && !existing.session) return next;
+  if (next.session && next.sourcePrimary && !existing.sourcePrimary) return next;
+  return existing;
+}
+
 function rawInfoBranchRows() {
-  const rows = [];
-  const seen = new Set();
+  const rowsByKey = new Map();
   for (const session of sessions) {
     const info = transcriptMeta.sessions?.[session];
-    const project = info?.project || {};
-    const git = project.git;
-    const branches = git?.other_branches?.branches || [];
-    for (const branch of branches) {
-      const key = `${git?.root || ''}\n${branch.name || ''}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const current = branch.current === true;
-      const currentPr = current ? displayPullRequest(info) : null;
-      const currentLinear = current ? project.linear || [] : [];
-      const linearIds = currentLinear.length
-        ? currentLinear.map(issue => issue.identifier).filter(Boolean)
-        : branch.linear_ids || [];
-      const linearHtml = currentLinear.length
-        ? currentLinear.map(issue => linearIssueHtml(issue)).join(' ')
-        : linearIds.map(linearIssueLinkHtml).filter(Boolean).join(' ');
-      const prHtml = currentPr?.number ? pullRequestColumnLinkHtml(currentPr) : pullRequestLinkForBranch(git, branch);
-      const prValue = currentPr?.number ? currentPr : branch.pull_request;
-      const prTitle = pullRequestTextForBranch(prValue, branch.subject || '');
-      const repoUrl = git?.github_repo?.url || '';
-      const prUrl = prValue?.url || (prValue?.number && repoUrl ? `${repoUrl}/pull/${prValue.number}` : '');
-      const prLabel = prValue?.number ? pullRequestLinkLabel(prValue) : '';
-      const prClass = prValue?.number ? pullRequestStatusClass(prValue) : '';
-      const linearTitle = currentLinear.length
-        ? currentLinear.map(issue => [issue.identifier, issue.state, issue.title].filter(Boolean).join(' ')).filter(Boolean).join(' · ')
-        : linearIds.join(' ');
-      const linearItems = currentLinear.length
-        ? currentLinear.map(issue => ({
-          identifier: String(issue?.identifier || ''),
-          state: String(issue?.state || ''),
-          title: String(issue?.title || ''),
-          url: String(issue?.url || ''),
-        })).filter(issue => issue.identifier || issue.url)
-        : linearIds.map(identifier => ({identifier: String(identifier || '')})).filter(issue => issue.identifier);
-      const desc = shortText(
-        currentPr?.title
-          || currentPr?.description
-          || currentLinear.find(issue => issue.title)?.title
-          || branch.subject
-          || '',
-        180,
-      );
-      rows.push({
-        session,
-        path: git?.root || git?.cwd || '',
-        pathLabel: infoPathLabel(git),
-        pathTitle: infoPathTitle(git),
-        branch: branch.name || '',
-        branchHtml: branchLinkHtml(git, branch.name),
-        desc,
-        updated: branch.updated || '',
-        updatedText: branchUpdatedText(branch),
-        updatedTitle: branch.updated || branchUpdatedText(branch),
-        updatedTs: Number.isFinite(branch.updated_ts) ? branch.updated_ts : 0,
-        prHtml: prHtml || '',
-        prTitle,
-        prUrl,
-        prLabel,
-        prClass,
-        prSort: prTitle || (prValue?.number ? String(prValue.number) : ''),
-        linearHtml,
-        linearItems,
-        linearTitle,
-        current,
-      });
+    for (const source of infoBranchSourcesForSession(session, info)) {
+      for (const branch of source.git?.other_branches?.branches || []) {
+        const key = `${infoGitRoot(source.git)}\n${branch.name || ''}`;
+        const row = infoBranchRowForSource(source, branch, infoBranchOwnedBySource(source.git, branch));
+        rowsByKey.set(key, preferInfoBranchRow(rowsByKey.get(key), row));
+      }
     }
   }
-  return rows;
+  return [...rowsByKey.values()];
 }
 
 function setInfoBranchSort(key) {
@@ -1911,8 +1951,19 @@ function noteTerminalExplicitInput(session) {
   setFocusedTerminal(session, {userInitiated: true});
 }
 
-function terminalDataIsPassiveFocusReport(data) {
-  return /^\x1b\[[IO]$/.test(String(data || ''));
+function handleTerminalData(session, data) {
+  if (readOnlyMode && !shareWriteMode) return false;
+  const filtered = stripTerminalQueryResponses(data);
+  if (!filtered) return false;
+  if (shareReplayShellActive && shareWriteMode) {
+    shareSendTerminalInputIntent(session, filtered);
+    return true;
+  }
+  const current = terminals.get(session);
+  const socket = current?.socket;
+  if (socket?.readyState !== WebSocket.OPEN) return false;
+  socket.send(JSON.stringify({type: 'input', data: filtered}));
+  return true;
 }
 
 function shellQuote(value) {
@@ -2318,22 +2369,9 @@ function startTerminal(session) {
   term.onBlur?.(() => {
     clearFocusedTerminal(session);
   });
-  term.onData(data => {
-    if (readOnlyMode && !shareWriteMode) return;
-    const filtered = stripTerminalQueryResponses(data);
-    if (!filtered) return;
-    if (shareReplayShellActive && shareWriteMode) {
-      if (!terminalDataIsPassiveFocusReport(filtered)) noteTerminalExplicitInput(session);
-      shareSendTerminalInputIntent(session, filtered);
-      return;
-    }
-    const current = terminals.get(session);
-    const socket = current?.socket;
-    if (socket?.readyState === WebSocket.OPEN) {
-      if (!terminalDataIsPassiveFocusReport(filtered)) noteTerminalExplicitInput(session);
-      socket.send(JSON.stringify({type: 'input', data: filtered}));
-    }
-  });
+  // xterm can emit focus and mouse-tracking bytes from hover. Keep Differ commits on DOM
+  // keydown/paste/beforeinput and pane pointerdown, not on the terminal transport stream.
+  term.onData(data => handleTerminalData(session, data));
   connectTerminalSocket(session, item);
 }
 

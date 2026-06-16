@@ -561,9 +561,8 @@ def repo_commit_activity_ts(cwd: str) -> float:
 
 
 def repo_summary(cwd: str | None) -> dict[str, Any] | None:
-    # C9: a LIGHT per-repo summary (branch + dirty + ahead/behind) using only cheap LOCAL git — no PR/CI
-    # network call and no branch inventory. Used to list every repo a session touches in the detail-bar
-    # popover without a per-poll GitHub fetch storm (only the primary repo's PR is fetched eagerly).
+    # C9: a per-repo local summary. It stays network-free, but includes branch inventory so YO!info can
+    # show every branch in every repo a session touches; only the primary repo's PRs are enriched eagerly.
     if not cwd:
         return None
     root = git(["rev-parse", "--show-toplevel"], cwd)
@@ -572,22 +571,34 @@ def repo_summary(cwd: str | None) -> dict[str, Any] | None:
     branch = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
     upstream = git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], cwd)
     status = git(["status", "--short"], cwd)
+    origin_url = git(["config", "--get", "remote.origin.url"], cwd)
     upstream_name = upstream.stdout.strip() if upstream.returncode == 0 else None
+    branch_name = branch.stdout.strip() if branch.returncode == 0 else None
     ahead, behind = git_ahead_behind(cwd, upstream_name)
     status_lines = [line for line in status.stdout.splitlines() if line.strip()] if status.returncode == 0 else []
-    dirty_activity_ts = repo_dirty_activity_ts(root.stdout.strip(), status_lines)
+    root_text = root.stdout.strip()
+    dirty_activity_ts = repo_dirty_activity_ts(root_text, status_lines)
     commit_activity_ts = repo_commit_activity_ts(cwd)
     activity_ts = max(dirty_activity_ts, commit_activity_ts)
+    worktree = git_worktree_identity(cwd, root_text)
+    linked_branches = set() if worktree is not None else linked_worktree_branch_names(cwd, root_text)
     return {
-        "root": root.stdout.strip(),
+        "root": root_text,
         "cwd": str(Path(cwd).expanduser().resolve()),
-        "branch": branch.stdout.strip() if branch.returncode == 0 else None,
+        "branch": branch_name,
         "ahead": ahead,
         "behind": behind,
         "dirty_count": len(status_lines),
         "activity_ts": activity_ts,
         "activity_source": "dirty" if dirty_activity_ts >= commit_activity_ts and dirty_activity_ts > 0 else ("commit" if commit_activity_ts > 0 else ""),
-        "worktree": git_worktree_identity(cwd, root.stdout.strip()),
+        "github_repo": parse_github_remote(origin_url.stdout.strip()) if origin_url.returncode == 0 else None,
+        "other_branches": local_branch_inventory(
+            cwd,
+            branch_name,
+            worktree=worktree,
+            linked_worktree_branches=linked_branches,
+        ),
+        "worktree": worktree,
     }
 
 
