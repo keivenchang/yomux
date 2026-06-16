@@ -6,6 +6,7 @@ from http import HTTPStatus
 from types import SimpleNamespace
 
 
+from yolomux_lib import app as app_module
 from yolomux_lib import server as server_module
 from yolomux_lib import server_auth as server_auth_module
 from yolomux_lib.common import error_payload
@@ -27,6 +28,14 @@ def server_ws_json(frame: bytes) -> dict:
         payload_length = int.from_bytes(frame[offset:offset + 8], "big")
         offset += 8
     return json.loads(frame[offset:offset + payload_length].decode("utf-8"))
+
+
+class FakeShareConnection:
+    def __init__(self) -> None:
+        self.sent: list[bytes] = []
+
+    def sendall(self, frame: bytes) -> None:
+        self.sent.append(frame)
 
 
 def test_parse_repo_refs_param_decodes_per_repo_overrides():
@@ -206,6 +215,12 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
     assert calls == [("require_auth", "readonly")]
     assert writes == [("json", HTTPStatus.OK, {"force": True, "locale": "ja"})]
 
+    app = SimpleNamespace(tmux_signals_payload=lambda force=False: ({"force": force}, HTTPStatus.OK))
+    handler, calls, writes = route_handler("/api/tmux-signals?force=1", app)
+    Handler.do_GET(handler)
+    assert calls == [("require_auth", "readonly")]
+    assert writes == [("json", HTTPStatus.OK, {"force": True})]
+
     app = SimpleNamespace(yoagent_skills_payload=lambda: {"skills": []})
     handler, calls, writes = route_handler("/api/yoagent/skills", app)
     Handler.do_GET(handler)
@@ -288,7 +303,7 @@ def share_token_auth_handler(path, method="POST"):
     handler.path = path
     handler.command = method
     handler.headers = {"X-Share-Token": "share-token", "Content-Length": "12", "User-Agent": "pytest"}
-    handler.server = SimpleNamespace(app=app, tls_context=object(), server_address=("127.0.0.1", 8001))
+    handler.server = SimpleNamespace(app=app, tls_context=object(), server_address=("127.0.0.1", 19001))
     handler.close_connection = False
     handler.write_json = lambda value, status=HTTPStatus.OK: writes.append(("json", status, value))
     handler.write_html = lambda value: writes.append(("html", HTTPStatus.OK, value))
@@ -353,6 +368,18 @@ def test_test_auth_bypass_does_not_escalate_share_token_to_admin(monkeypatch):
     )]
     assert handler.auth_identity().role == "readonly"
     assert handler.share_token() == "share-token"
+
+
+def test_tmux_signal_event_watcher_is_owned_by_client_event_lifecycle():
+    app_start_body = inspect.getsource(app_module.TmuxWebtermApp.start_client_event_watcher)
+    app_event_body = inspect.getsource(app_module.TmuxWebtermApp.handle_tmux_signal_event)
+    server_close_body = inspect.getsource(server_module.TmuxWebtermHTTPServer.server_close)
+
+    assert "self.start_tmux_signal_event_watcher()" in app_start_body
+    assert "self.tmux_signal_cache.clear()" in app_event_body
+    assert "self.client_event_next_tmux_signal_poll_at = 0.0" in app_event_body
+    assert "self.client_watch_wake_event.set()" in app_event_body
+    assert "self.app.stop_tmux_signal_event_watcher()" in server_close_body
 
 
 def test_share_request_allowed_route_matrix(monkeypatch):
@@ -658,6 +685,10 @@ def test_handle_ws_payload_resize_sets_pty_and_signals_for_admin_only(monkeypatc
     assert calls == [("size", 11, 24, 80), ("signal", 123, server_module.signal.SIGWINCH)]
     calls.clear()
 
+    Handler.handle_ws_payload(handler, "6", 10, 11, process, json.dumps({"type": "resize", "rows": 12, "cols": 40, "foreground": False}).encode(), readonly=False)
+
+    assert calls == []
+
     Handler.handle_ws_payload(handler, "6", 10, 11, process, json.dumps({"type": "resize", "rows": 30, "cols": 100}).encode(), readonly=True)
 
     assert calls == []
@@ -690,12 +721,22 @@ def test_server_source_wires_routing_ws_readonly_and_pty_setup():
     post_body = inspect.getsource(Handler.do_POST)
     ws_body = inspect.getsource(Handler.websocket)
     bridge_body = inspect.getsource(Handler.bridge_tmux)
+    initial_payload_body = inspect.getsource(Handler.read_initial_ws_payloads)
+    payload_body = inspect.getsource(Handler.handle_ws_payload)
 
     assert 'if parsed.path == "/api/upload":' in post_body
     assert 'if parsed.path == "/api/event":' in post_body
     assert "self.bridge_tmux(session, readonly=self.auth_readonly())" in ws_body
     assert "if readonly:" in bridge_body and 'attach_args.append("-r")' in bridge_body
+    assert 'tmux_command(["attach-session"])' in bridge_body
+    assert 'tmux_command(["has-session", "-t", target])' in bridge_body
     assert "set_pty_size(slave_fd, initial_rows, initial_cols)" in bridge_body
+    assert "saw_initial_resize" in bridge_body
+    assert "host_pty_dimensions_for_session(session)" in bridge_body
+    assert "record_host_pty_dimensions(session, initial_rows, initial_cols)" in bridge_body
+    assert 'message.get("foreground") is False' in initial_payload_body
+    assert "saw_resize = True" in initial_payload_body
+    assert 'message.get("foreground") is False' in payload_body
 
 
 def test_share_write_mode_stays_terminal_input_only():
@@ -706,6 +747,7 @@ def test_share_write_mode_stays_terminal_input_only():
 
     assert 'record = self.server.app.verify_share_token(self.token)' in upstream_start
     assert 'str((record or {}).get("mode") or "ro") != "rw"' in upstream_start
+    assert 'tmux_command(["attach-session"])' in upstream_start
     assert 'attach_args.append("-r")' in upstream_start
     assert 'message.get("type") != "input"' in upstream_write
     assert 'record_user_input(self.session, len(filtered), source="share")' in upstream_write
@@ -1260,6 +1302,61 @@ def test_share_replay_live_delta_overflow_requests_keyframe():
     assert not terminal_viewer.is_closed()
 
 
+def test_share_viewer_connection_coalesces_latest_pointer_frames():
+    connection = FakeShareConnection()
+    viewer = server_module.ShareViewerConnection(connection, "viewer-pointer")
+    first = server_module.share_ui_frame({"type": "pointer", "payload": {"x": 1, "y": 1}})
+    second = server_module.share_ui_frame({"type": "pointer", "payload": {"x": 2, "y": 2}})
+
+    assert viewer.enqueue(first) == "queued"
+    assert viewer.enqueue(second) == "queued"
+    viewer.close("done")
+    viewer.write_loop()
+
+    assert [server_ws_json(frame)["payload"] for frame in connection.sent] == [{"x": 2, "y": 2}]
+    assert viewer.queued_bytes == 0
+
+    replay_viewer = server_module.ShareViewerConnection(object(), "viewer-replay-pointer")
+    replay_first = server_module.share_ui_frame({"type": "dom-delta", "payload": {"pointer": {"x": 3, "y": 3}}, "sequence": 3})
+    replay_second = server_module.share_ui_frame({"type": "dom-delta", "payload": {"pointer": {"x": 4, "y": 4}}, "sequence": 4})
+    assert replay_viewer.enqueue(replay_first) == "queued"
+    assert replay_viewer.enqueue(replay_second) == "queued"
+    assert [server_ws_json(replay_viewer.frames.get_nowait())["sequence"] for _ in range(2)] == [3, 4]
+
+    click_connection = FakeShareConnection()
+    click_viewer = server_module.ShareViewerConnection(click_connection, "viewer-pointer-click")
+    click_frame = server_module.share_ui_frame({"type": "pointer", "payload": {"x": 5, "y": 5, "click": True}})
+    move_frame = server_module.share_ui_frame({"type": "pointer", "payload": {"x": 6, "y": 6}})
+    assert click_viewer.enqueue(click_frame) == "queued"
+    assert click_viewer.enqueue(move_frame) == "queued"
+    click_viewer.close("done")
+    click_viewer.write_loop()
+    assert [server_ws_json(frame)["payload"]["x"] for frame in click_connection.sent] == [5, 6]
+
+
+def test_share_viewer_connection_prioritizes_latest_pointer_around_keyframes():
+    connection = FakeShareConnection()
+    viewer = server_module.ShareViewerConnection(connection, "viewer-priority-pointer")
+    keyframe = server_module.share_ui_frame({
+        "type": "dom-keyframe",
+        "payload": {"digest": "sha256:pending", "root": {"nodeId": 1}},
+        "epoch": 4,
+        "sequence": 23,
+    })
+    pointer = server_module.share_ui_frame({"type": "pointer", "payload": {"x": 7, "y": 8}})
+
+    assert viewer.enqueue_reset_frame(keyframe) == "queued"
+    assert viewer.enqueue(pointer) == "queued"
+    assert viewer.queued_bytes == len(keyframe)
+    viewer.close("done")
+    viewer.write_loop()
+
+    sent = [server_ws_json(frame) for frame in connection.sent]
+    assert [frame["type"] for frame in sent] == ["pointer", "dom-keyframe"]
+    assert sent[0]["payload"] == {"x": 7, "y": 8}
+    assert sent[1]["payload"]["digest"] == "sha256:pending"
+
+
 def test_share_replay_keyframe_broadcast_resets_backlogged_viewer_queue():
     server = object.__new__(server_module.TmuxWebtermHTTPServer)
     server.share_ui_clients_lock = server_module.threading.Lock()
@@ -1291,7 +1388,8 @@ def test_share_replay_keyframe_broadcast_resets_backlogged_viewer_queue():
     assert requests == []
     assert not viewer.is_closed()
 
-    protected_viewer = server_module.ShareViewerConnection(object(), "viewer-protected-keyframe")
+    protected_connection = FakeShareConnection()
+    protected_viewer = server_module.ShareViewerConnection(protected_connection, "viewer-protected-keyframe")
     keyframe = server_module.share_ui_frame({
         "type": "dom-keyframe",
         "payload": {"digest": "sha256:pending", "root": {"nodeId": 1}},
@@ -1306,12 +1404,18 @@ def test_share_replay_keyframe_broadcast_resets_backlogged_viewer_queue():
     })
     assert protected_viewer.enqueue_reset_frame(keyframe) == "queued"
     assert protected_viewer.enqueue_reset_frame(replacement_keyframe) == "queued"
+    pointer_frame = server_module.share_ui_frame({"type": "pointer", "payload": {"x": 9, "y": 10}})
+    assert protected_viewer.enqueue(pointer_frame) == "queued"
     assert protected_viewer.enqueue(b"x" * server_module.SHARE_VIEWER_QUEUE_HIGH_WATER_BYTES) == "overflow"
     queued = server_ws_json(protected_viewer.frames.get_nowait())
     assert queued["type"] == "dom-keyframe"
     assert queued["sequence"] == 24
     assert queued["payload"]["digest"] == "sha256:replacement"
-    assert protected_viewer.frames.empty()
+    protected_viewer.close("done")
+    protected_viewer.write_loop()
+    sent = [server_ws_json(frame) for frame in protected_connection.sent]
+    assert [frame["type"] for frame in sent] == ["pointer"]
+    assert sent[0]["payload"] == {"x": 9, "y": 10}
 
 
 def test_share_viewers_receive_host_terminal_dimensions():

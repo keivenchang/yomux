@@ -1833,7 +1833,7 @@ function fileTreeDisplayParts(path, entry) {
 }
 
 function fileTreeMtimeText(entry) {
-  return sessionFileDisplayTimeText(entry?.mtime);
+  return sessionFileDisplayTimeTextForEntry(entry);
 }
 
 function sortedFileTreeEntries(entries, sortMode = fileExplorerTreeSortMode, options = {}) {
@@ -2059,7 +2059,7 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
 function fileTreeDirCountText(count) {
   const normalized = Number(count || 0);
   if (!normalized) return '';
-  return `${normalized} ${normalized === 1 ? 'file' : 'files'} changed`;
+  return String(normalized);
 }
 
 function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
@@ -2118,8 +2118,9 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   const changedFile = entry.kind === 'file'
     ? (options.sessionFilesMap ? (options.sessionFilesMap.get(fullPath) || null) : fileTreeChangedFile(fullPath))
     : null;
+  const changedFileStatus = changedFile ? sessionFileDisplayStatus(changedFile) : '';
   const gitStatus = entry.kind === 'file'
-    ? (options.sessionFilesMap ? (changedFile ? normalizeGitStatus(changedFile.status || 'M') : '') : fileTreeGitStatus(fullPath))
+    ? (options.sessionFilesMap ? changedFileStatus : fileTreeGitStatus(fullPath))
     : (differMode ? '' : fileExplorerIndexBadgeText(fullPath));
   const gitStatusTitle = entry.kind === 'dir' && !differMode ? fileExplorerIndexBadgeTitle(fullPath) : gitStatusBadgeTitle(gitStatus);
   const gitClass = fileTreeGitStatusClass(gitStatus);
@@ -2166,7 +2167,7 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   // Set data attributes so Differ event delegation (click/drag/contextmenu) can find these rows
   setRowDataset(row, 'openChangeFile', changedFile?.abs_path || '');
   setRowDataset(row, 'openChangeSession', changedFile?.abs_path ? (changedFile.session || '') : '');
-  setRowDataset(row, 'openChangeStatus', changedFile?.abs_path ? normalizeGitStatus(changedFile.status || 'M') : '');
+  setRowDataset(row, 'openChangeStatus', changedFile?.abs_path ? changedFileStatus : '');
   setRowDataset(row, 'changeRel', changedFile?.abs_path ? (changedFile.path || '') : '');
   setRowDataset(row, 'openChangeRepo', changedFile?.abs_path ? (changedFile.repo || '') : '');
   setRowDataset(row, 'changeSize', changedFile?.abs_path && changedFile.size !== null && changedFile.size !== undefined ? changedFile.size : '');

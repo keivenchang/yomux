@@ -831,6 +831,7 @@
   "shortcuts.section.tabsPanes": "Tabs / Panes",
   "shortcuts.section.terminal": "Terminal",
   "shortcuts.sessionActions": "Session actions",
+  "shortcuts.switchTmuxWindow": "Previous / next tab",
   "shortcuts.title": "Phím tắt",
   "shortcuts.toggleComment": "Toggle line comment",
   "shortcuts.toggleFinder": "Toggle {name}",

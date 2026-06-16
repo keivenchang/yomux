@@ -831,6 +831,7 @@
   "shortcuts.section.tabsPanes": "Tabs / Panes",
   "shortcuts.section.terminal": "Terminal",
   "shortcuts.sessionActions": "Session क्रियाएं",
+  "shortcuts.switchTmuxWindow": "Previous / next tab",
   "shortcuts.title": "कीबोर्ड शॉर्टकट",
   "shortcuts.toggleComment": "लाइन कमेंट toggle करें",
   "shortcuts.toggleFinder": "{name} toggle करें",

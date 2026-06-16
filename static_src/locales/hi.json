@@ -810,6 +810,7 @@
   "shortcuts.closeTab": "सक्रिय editor/viewer टैब बंद करें",
   "shortcuts.commandPalette": "Command palette",
   "shortcuts.copyTmuxSelection": "Copy tmux selection",
+  "shortcuts.switchTmuxWindow": "Previous / next tab",
   "shortcuts.editorNav": "एडिटर पीछे / आगे",
   "shortcuts.fileQuickOpen": "File quick-open",
   "shortcuts.find": "खोजें",

@@ -810,6 +810,7 @@
   "shortcuts.closeTab": "關閉使用中的編輯器／檢視器分頁",
   "shortcuts.commandPalette": "命令面板",
   "shortcuts.copyTmuxSelection": "複製 tmux 選取內容",
+  "shortcuts.switchTmuxWindow": "Previous / next tab",
   "shortcuts.editorNav": "編輯器上一步／下一步",
   "shortcuts.fileQuickOpen": "快速開啟檔案",
   "shortcuts.find": "尋找",

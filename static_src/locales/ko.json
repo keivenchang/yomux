@@ -810,6 +810,7 @@
   "shortcuts.closeTab": "활성 에디터/뷰어 탭 닫기",
   "shortcuts.commandPalette": "명령 팔레트",
   "shortcuts.copyTmuxSelection": "Copy tmux selection",
+  "shortcuts.switchTmuxWindow": "Previous / next tab",
   "shortcuts.editorNav": "편집기 뒤로 / 앞으로",
   "shortcuts.fileQuickOpen": "파일 빠른 열기",
   "shortcuts.find": "찾기",

@@ -51,6 +51,7 @@ from .common import error_payload
 from .common import parse_bool
 from .common import terminate_process_group
 from .filesystem import FilesystemError
+from .tmux_utils import tmux_command
 from .tmux_utils import tmux_session_target
 from .transcripts import codex_event_text
 from .transcripts import compact_transcript_items
@@ -70,6 +71,7 @@ PTY_DIMENSION_MIN = 1
 PTY_DIMENSION_MAX = 1000
 WEBSOCKET_FRAME_READ_TIMEOUT_SECONDS = 5.0
 SHARE_VIEWER_QUEUE_HIGH_WATER_BYTES = 256 * 1024
+SHARE_VIEWER_POINTER_WAKE_FRAME = b""
 SHARE_VIEWER_OVERFLOW_LIMIT = 3
 SHARE_VIEWER_OVERFLOW_WINDOW_SECONDS = 60.0
 SHARE_REFRESH_CLIENT_MIN_SECONDS = 1.0
@@ -331,6 +333,12 @@ def share_frame_is_dom_keyframe(frame: bytes | None) -> bool:
     return bool(frame and b'"type":"dom-keyframe"' in frame)
 
 
+def share_frame_is_latest_pointer(frame: bytes | None) -> bool:
+    if not frame or b'"click":true' in frame:
+        return False
+    return b'"type":"pointer"' in frame
+
+
 def share_mirror_frame_type_allowed(frame_type: str) -> bool:
     return str(frame_type or "") in SHARE_MIRROR_FRAME_TYPES
 
@@ -461,6 +469,8 @@ class ShareViewerConnection:
         self.overflow_times: list[float] = []
         self.close_reason = ""
         self.queued_replay_keyframe = False
+        self.latest_pointer_frame: bytes | None = None
+        self.pointer_wakeup_queued = False
 
     def clear_frames_locked(self) -> None:
         while True:
@@ -471,11 +481,31 @@ class ShareViewerConnection:
             if frame is not None:
                 self.queued_bytes = max(0, self.queued_bytes - len(frame))
         self.queued_replay_keyframe = False
+        self.pointer_wakeup_queued = False
+
+    def queue_latest_pointer_frame_locked(self, frame: bytes) -> None:
+        self.latest_pointer_frame = frame
+        if not self.pointer_wakeup_queued:
+            self.pointer_wakeup_queued = True
+            self.frames.put(SHARE_VIEWER_POINTER_WAKE_FRAME)
+
+    def pop_latest_pointer_frame(self) -> bytes | None:
+        with self.lock:
+            frame = self.latest_pointer_frame
+            self.latest_pointer_frame = None
+            return frame
+
+    def mark_pointer_wakeup_drained(self) -> None:
+        with self.lock:
+            self.pointer_wakeup_queued = False
 
     def enqueue(self, frame: bytes) -> str:
         with self.lock:
             if self.closed:
                 return "closed"
+            if share_frame_is_latest_pointer(frame):
+                self.queue_latest_pointer_frame_locked(frame)
+                return "queued"
             if self.queued_bytes + len(frame) > SHARE_VIEWER_QUEUE_HIGH_WATER_BYTES:
                 if self.queued_replay_keyframe:
                     return "overflow"
@@ -526,6 +556,15 @@ class ShareViewerConnection:
                 frame = self.frames.get()
                 if frame is None:
                     break
+                if frame == SHARE_VIEWER_POINTER_WAKE_FRAME:
+                    self.mark_pointer_wakeup_drained()
+                    pointer_frame = self.pop_latest_pointer_frame()
+                    if pointer_frame is not None:
+                        self.connection.sendall(pointer_frame)
+                    continue
+                pointer_frame = self.pop_latest_pointer_frame() if share_frame_is_dom_keyframe(frame) else None
+                if pointer_frame is not None:
+                    self.connection.sendall(pointer_frame)
                 with self.lock:
                     self.queued_bytes = max(0, self.queued_bytes - len(frame))
                     if share_frame_is_dom_keyframe(frame):
@@ -579,14 +618,14 @@ class ShareTerminalUpstream:
         env = os.environ.copy()
         env["TERM"] = "xterm-256color"
         subprocess.run(
-            ["tmux", "set-option", "-s", "set-clipboard", "on"],
+            tmux_command(["set-option", "-s", "set-clipboard", "on"]),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
         )
         record = self.server.app.verify_share_token(self.token)
         readonly = str((record or {}).get("mode") or "ro") != "rw"
-        attach_args = ["tmux", "attach-session"]
+        attach_args = tmux_command(["attach-session"])
         if readonly:
             attach_args.append("-r")
         attach_args.extend(["-t", tmux_session_target(self.session)])
@@ -679,7 +718,7 @@ class ShareTerminalUpstream:
             return
         self.last_refresh_at = now
         subprocess.run(
-            ["tmux", "refresh-client", "-t", tmux_session_target(self.session)],
+            tmux_command(["refresh-client", "-t", tmux_session_target(self.session)]),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
@@ -888,6 +927,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 MAX_TRANSCRIPT_TAIL_LINES,
                 lambda qs, lines: self.server.app.tmux_snapshot(str(query_one(qs, "session", "") or ""), lines),
             )
+            return
+        if parsed.path == "/api/tmux-signals":
+            self.write_app_result(self.server.app.tmux_signals_payload(force=query_bool(parse_qs(parsed.query), "force")))
             return
         if parsed.path == "/api/transcript":
             self.write_int_query_app_result(
@@ -2206,8 +2248,10 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.bridge_shared_tmux(token, session, viewer_id)
 
     def bridge_tmux(self, session: str, readonly: bool = False) -> None:
-        initial_rows, initial_cols, pending_payloads = self.read_initial_ws_payloads()
-        if not readonly:
+        initial_rows, initial_cols, saw_initial_resize, pending_payloads = self.read_initial_ws_payloads()
+        if not saw_initial_resize:
+            initial_rows, initial_cols = self.server.host_pty_dimensions_for_session(session)
+        if not readonly and saw_initial_resize:
             self.server.record_host_pty_dimensions(session, initial_rows, initial_cols)
         master_fd, slave_fd = pty.openpty()
         set_pty_size(slave_fd, initial_rows, initial_cols)
@@ -2218,12 +2262,12 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         # OSC 52 entirely (verified empirically on tmux 3.4: external drops it, on forwards it), so
         # ensure `on` before attaching. Idempotent, best-effort, self-healing across tmux restarts.
         subprocess.run(
-            ["tmux", "set-option", "-s", "set-clipboard", "on"],
+            tmux_command(["set-option", "-s", "set-clipboard", "on"]),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
         )
-        attach_args = ["tmux", "attach-session"]
+        attach_args = tmux_command(["attach-session"])
         if readonly:
             attach_args.append("-r")
         target = tmux_session_target(session)
@@ -2231,7 +2275,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
 
         def session_exists() -> bool:
             return subprocess.run(
-                ["tmux", "has-session", "-t", target],
+                tmux_command(["has-session", "-t", target]),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
@@ -2459,9 +2503,10 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 self.server.broadcast_share_status(token)
             writer.join(timeout=1.0)
 
-    def read_initial_ws_payloads(self) -> tuple[int, int, list[bytes]]:
+    def read_initial_ws_payloads(self) -> tuple[int, int, bool, list[bytes]]:
         rows = DEFAULT_ROWS
         cols = DEFAULT_COLS
+        saw_resize = False
         pending_payloads: list[bytes] = []
         deadline = time.monotonic() + 0.75
         while time.monotonic() < deadline:
@@ -2483,13 +2528,16 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 pending_payloads.append(payload)
                 continue
             if message.get("type") == "resize":
+                if message.get("foreground") is False:
+                    continue
                 dimensions = ws_resize_dimensions(message, rows, cols)
                 if dimensions:
                     rows, cols = dimensions
+                    saw_resize = True
                 continue
             pending_payloads.append(payload)
             break
-        return rows, cols, pending_payloads
+        return rows, cols, saw_resize, pending_payloads
 
     def read_ws_frame_with_timeout(self) -> tuple[int, bytes]:
         previous_timeout = self.connection.gettimeout()
@@ -2522,6 +2570,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                     self.server.app.record_user_input(session, len(filtered))
         elif msg_type == "resize":
             if readonly:
+                return
+            if message.get("foreground") is False:
                 return
             dimensions = ws_resize_dimensions(message, DEFAULT_ROWS, DEFAULT_COLS)
             if dimensions:
@@ -2612,6 +2662,8 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
 
     def server_close(self) -> None:
         self.share_pointer_stop.set()
+        if hasattr(self.app, "stop_tmux_signal_event_watcher"):
+            self.app.stop_tmux_signal_event_watcher()
         super().server_close()
 
     def record_host_pty_dimensions(self, session: str, rows: int, cols: int) -> None:

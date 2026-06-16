@@ -955,8 +955,17 @@ function systemPrefersDarkTheme() {
   return query ? query.matches === true : true;
 }
 
+function normalizeResolvedGlobalThemeMode(value = '') {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized === 'dark' || normalized === 'light' ? normalized : '';
+}
+
 function resolvedGlobalThemeMode(mode = globalThemeMode) {
   const normalized = normalizeGlobalThemeMode(mode);
+  if (shareViewMode && normalized === 'system') {
+    const shareResolved = normalizeResolvedGlobalThemeMode(shareResolvedGlobalThemeMode);
+    if (shareResolved) return shareResolved;
+  }
   if (normalized === 'system') return systemPrefersDarkTheme() ? 'dark' : 'light';
   return normalized;
 }
@@ -2076,6 +2085,17 @@ function rootCssLengthPx(name) {
   return Math.max(0, width);
 }
 
+const MIN_SPLIT_PANE_WIDTH_FALLBACK_PX = 320;
+const MIN_SPLIT_PANE_HEIGHT_FALLBACK_PX = 220;
+
+function minSplitPaneWidthPx() {
+  return rootCssLengthPx('--min-split-pane-width') || MIN_SPLIT_PANE_WIDTH_FALLBACK_PX;
+}
+
+function minSplitPaneHeightPx() {
+  return rootCssLengthPx('--min-split-pane-height') || MIN_SPLIT_PANE_HEIGHT_FALLBACK_PX;
+}
+
 function popoverEdgeGapPx() {
   return rootCssLengthPx('--popover-edge-gap');
 }
@@ -2421,17 +2441,34 @@ function handleTerminalCopyShortcutKeydown(session, term, container, event) {
   return true;
 }
 
+function terminalTmuxWindowShortcutDirection(event) {
+  if (!event || event.type !== 'keydown' || !event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return 0;
+  if (event.key === 'ArrowLeft' || event.code === 'ArrowLeft') return -1;
+  if (event.key === 'ArrowRight' || event.code === 'ArrowRight') return 1;
+  return 0;
+}
+
+function handleTerminalTmuxWindowShortcutKeydown(session, event) {
+  const direction = terminalTmuxWindowShortcutDirection(event);
+  if (!direction) return false;
+  event.preventDefault?.();
+  if (typeof selectAdjacentPaneTab === 'function') {
+    selectAdjacentPaneTab(direction, {item: session, userInitiated: true});
+  }
+  return true;
+}
+
 function installTerminalCopyShortcut(session, term, container = null) {
   // Ctrl-C / Cmd-C copy the xterm selection. Plain Ctrl-C with NO selection
   // must still send SIGINT to the PTY, and Cmd-C must stay browser/xterm copy
   // only. Tmux copy-mode text has a separate explicit shortcut/menu action.
   container?.addEventListener?.('keydown', event => {
-    if (!handleTerminalCopyShortcutKeydown(session, term, container, event)) return;
+    if (!handleTerminalTmuxWindowShortcutKeydown(session, event) && !handleTerminalCopyShortcutKeydown(session, term, container, event)) return;
     event.stopImmediatePropagation?.();
     event.stopPropagation?.();
   }, {capture: true});
   term.attachCustomKeyEventHandler?.(event => {
-    return handleTerminalCopyShortcutKeydown(session, term, container, event) ? false : true;
+    return (handleTerminalTmuxWindowShortcutKeydown(session, event) || handleTerminalCopyShortcutKeydown(session, term, container, event)) ? false : true;
   });
 }
 

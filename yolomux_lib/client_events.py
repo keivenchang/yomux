@@ -22,6 +22,7 @@ CLIENT_EVENT_TYPES: frozenset[str] = frozenset({
     "session_files_ready",
     "settings_changed",
     "transcripts_changed",
+    "tmux_signals_changed",
     "update_available",
     "watched_prs_changed",
     "yoagent_conversation_changed",

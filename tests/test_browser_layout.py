@@ -3,11 +3,13 @@ import difflib
 from http import HTTPStatus
 from io import BytesIO
 import json
+import os
 import re
 import shutil
 import subprocess
 import threading
 from types import SimpleNamespace
+import uuid
 from urllib.parse import parse_qsl
 from urllib.parse import urlencode
 from urllib.parse import urlsplit
@@ -16,9 +18,16 @@ from urllib.parse import urlunsplit
 import pytest
 
 from yolomux_lib import common
+from yolomux_lib import app as app_module
+from yolomux_lib import auto_approve_worker as auto_approve_worker_module
+from yolomux_lib import control as control_module
+from yolomux_lib import events as events_module
+from yolomux_lib import settings as settings_module
+from yolomux_lib import yolo_rules as yolo_rules_module
 from yolomux_lib import server_auth
 from yolomux_lib.app import TmuxWebtermApp
 from yolomux_lib.server import TmuxWebtermHTTPServer
+from yolomux_lib.tmux_utils import YOLOMUX_TMUX_SOCKET_ENV
 
 pytestmark = [pytest.mark.browser, pytest.mark.socket]
 
@@ -97,6 +106,118 @@ class BrowserFakeTlsContext:
         raise AssertionError("plain HTTP share requests should not be TLS-wrapped")
 
 
+def isolate_browser_runtime_paths(monkeypatch, tmp_path):
+    config_dir = tmp_path / "yolomux-config"
+    state_dir = tmp_path / "yolomux-state"
+    config_dir.mkdir(exist_ok=True)
+    state_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("YOLOMUX_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("YOLOMUX_STATE_DIR", str(state_dir))
+    state_path = config_dir / "state.json"
+    event_log_path = state_dir / "events.jsonl"
+    activity_path = state_dir / "activity.json"
+    activity_heartbeats_path = state_dir / "activity-heartbeats.jsonl"
+    watch_index_path = state_dir / "watch-index.json"
+    auto_approve_lock_dir = state_dir / "locks"
+    control_socket_dir = Path("/tmp") / f"ycs-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    control_socket_dir.mkdir(mode=0o700)
+    for module in (common,):
+        monkeypatch.setattr(module, "CONFIG_DIR", config_dir)
+        monkeypatch.setattr(module, "STATE_DIR", state_dir)
+        monkeypatch.setattr(module, "STATE_PATH", state_path)
+        monkeypatch.setattr(module, "EVENT_LOG_PATH", event_log_path)
+        monkeypatch.setattr(module, "ACTIVITY_PATH", activity_path)
+        monkeypatch.setattr(module, "ACTIVITY_HEARTBEATS_PATH", activity_heartbeats_path)
+        monkeypatch.setattr(module, "WATCH_INDEX_PATH", watch_index_path)
+        monkeypatch.setattr(module, "AUTO_APPROVE_LOCK_DIR", auto_approve_lock_dir)
+        monkeypatch.setattr(module, "CONTROL_SOCKET_DIR", control_socket_dir)
+    monkeypatch.setattr(app_module, "ACTIVITY_PATH", activity_path)
+    monkeypatch.setattr(app_module, "ACTIVITY_HEARTBEATS_PATH", activity_heartbeats_path)
+    monkeypatch.setattr(app_module, "EVENT_LOG_PATH", event_log_path)
+    monkeypatch.setattr(app_module, "WATCH_INDEX_PATH", watch_index_path)
+    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", state_dir / "session-files-cache")
+    monkeypatch.setattr(events_module, "STATE_PATH", state_path)
+    monkeypatch.setattr(control_module, "CONTROL_SOCKET_DIR", control_socket_dir)
+    monkeypatch.setattr(auto_approve_worker_module, "AUTO_APPROVE_LOCK_DIR", auto_approve_lock_dir)
+    monkeypatch.setattr(settings_module, "SETTINGS_PATH", config_dir / "settings.yaml")
+    monkeypatch.setattr(app_module, "SETTINGS_PATH", config_dir / "settings.yaml")
+    monkeypatch.setattr(yolo_rules_module, "YOLO_RULES_PATH", config_dir / "yolo-rules.yaml")
+    return SimpleNamespace(config_dir=config_dir, state_dir=state_dir, control_socket_dir=control_socket_dir)
+
+
+def cleanup_isolated_browser_runtime_paths(paths):
+    control_socket_dir = getattr(paths, "control_socket_dir", None)
+    if control_socket_dir:
+        shutil.rmtree(control_socket_dir, ignore_errors=True)
+
+
+def start_isolated_tmux_runtime(monkeypatch, tmp_path, session_count=1):
+    tmux_binary = shutil.which("tmux")
+    if not tmux_binary:
+        pytest.skip("tmux is not installed")
+    socket_dir = Path("/tmp") / f"yts-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    socket_dir.mkdir(mode=0o700)
+    socket_path = socket_dir / "s"
+    session_names = [f"yt-{os.getpid()}-{uuid.uuid4().hex[:10]}-{index + 1}" for index in range(session_count)]
+    monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
+    for session in session_names:
+        result = subprocess.run(
+            [tmux_binary, "-S", str(socket_path), "new-session", "-d", "-s", session, "-x", "120", "-y", "36"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if result.returncode != 0:
+            shutil.rmtree(socket_dir, ignore_errors=True)
+            raise AssertionError(f"isolated tmux session failed: {result.stderr or result.stdout}")
+        subprocess.run(
+            [tmux_binary, "-S", str(socket_path), "send-keys", "-t", f"{session}:", f"printf 'isolated {session}\\n'", "Enter"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+    return SimpleNamespace(socket_path=socket_path, socket_dir=socket_dir, sessions=session_names)
+
+
+def stop_isolated_tmux_runtime(runtime):
+    socket_path = getattr(runtime, "socket_path", None)
+    if socket_path:
+        subprocess.run(
+            ["tmux", "-S", str(socket_path), "kill-server"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+    socket_dir = getattr(runtime, "socket_dir", None)
+    if socket_dir:
+        shutil.rmtree(socket_dir, ignore_errors=True)
+
+
+def start_isolated_browser_share_app(monkeypatch, tmp_path, session_count=1, *, dangerously_yolo=True):
+    paths = None
+    tmux_runtime = None
+    try:
+        paths = isolate_browser_runtime_paths(monkeypatch, tmp_path)
+        tmux_runtime = start_isolated_tmux_runtime(monkeypatch, tmp_path, session_count=session_count)
+        app = TmuxWebtermApp(list(tmux_runtime.sessions), dangerously_yolo=dangerously_yolo)
+        return SimpleNamespace(app=app, sessions=list(tmux_runtime.sessions), tmux=tmux_runtime, paths=paths)
+    except Exception:
+        stop_isolated_tmux_runtime(tmux_runtime)
+        cleanup_isolated_browser_runtime_paths(paths)
+        raise
+
+
+def stop_isolated_browser_share_app(runtime):
+    control_server = getattr(getattr(runtime, "app", None), "control_server", None)
+    if control_server is not None:
+        control_server.stop()
+    stop_isolated_tmux_runtime(getattr(runtime, "tmux", None))
+    cleanup_isolated_browser_runtime_paths(getattr(runtime, "paths", None))
+
+
 def start_browser_share_server(monkeypatch, tmp_path, app, *, tls_context=None, auth_bypass=False):
     auth_path = tmp_path / "auth.yaml"
     auth_path.write_text(browser_auth_yaml(), encoding="utf-8")
@@ -114,6 +235,9 @@ def stop_browser_share_server(server, thread):
     server.shutdown()
     server.server_close()
     thread.join(timeout=2)
+    control_server = getattr(getattr(server, "app", None), "control_server", None)
+    if control_server is not None:
+        control_server.stop()
 
 
 def install_browser_websocket_tracker(driver):
@@ -2571,7 +2695,7 @@ def test_share_modal_copy_icon_sits_beside_url(browser, tmp_path):
               <label class="share-field share-url-field share-url-primary">
                 <span class="share-url-primary-head"><span>URL</span></span>
                 <span class="share-url-control">
-                  <input type="text" readonly value="https://localhost:8001/share/share123">
+                  <input type="text" readonly value="https://share.example.test/share/share123">
                   <button type="button" class="path-copy-button share-url-copy-button" data-share-copy title="Copy" aria-label="Copy"></button>
                 </span>
               </label>
@@ -2648,7 +2772,7 @@ def test_share_modal_users_section_is_inline_not_nested_card(browser, tmp_path):
                     </div>
                     <label class="share-field share-url-field">
                       <span class="share-url-control">
-                        <input type="text" readonly value="http://localhost:8001/share/UKeiu2G-#t=ZD5">
+                        <input type="text" readonly value="http://share.example.test/share/UKeiu2G-#t=ZD5">
                         <button type="button" class="path-copy-button share-url-copy-button" title="Copy" aria-label="Copy"></button>
                       </span>
                     </label>
@@ -2815,7 +2939,7 @@ def test_share_modal_long_active_list_scrolls_inside_dialog(browser, tmp_path):
         <section class="share-entry share-mode-read">
           <div class="share-entry-heading"><strong>{index} · read-only · http</strong><span>id share{index}</span></div>
           <label class="share-field share-url-field">
-            <span class="share-url-control"><input type="text" readonly value="http://localhost:8001/share/share{index}"><button type="button" class="path-copy-button share-url-copy-button" title="Copy" aria-label="Copy"></button></span>
+            <span class="share-url-control"><input type="text" readonly value="http://share.example.test/share/share{index}"><button type="button" class="path-copy-button share-url-copy-button" title="Copy" aria-label="Copy"></button></span>
           </label>
           <div class="share-result-meta"><span>expires in 99:{index:02d}</span><span>0/2 viewers</span><span>read-only</span><span>http</span><button type="button" class="share-extend-button">+10 min</button><button type="button" class="danger share-stop-inline">Stop sharing</button></div>
         </section>
@@ -4038,8 +4162,9 @@ def test_share_dom_keyframe_clears_pending_mutation_delta(browser, tmp_path):
 
 
 def test_generated_share_link_receives_large_dom_keyframe(browser, monkeypatch, tmp_path):
-    app = TmuxWebtermApp(["1"], dangerously_yolo=True)
-    server, thread = start_browser_share_server(monkeypatch, tmp_path, app, auth_bypass=True)
+    runtime = start_isolated_browser_share_app(monkeypatch, tmp_path)
+    session = runtime.sessions[0]
+    server, thread = start_browser_share_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
     viewer = new_chrome_driver("1220,742")
     base_url = f"http://127.0.0.1:{server.server_address[1]}"
 
@@ -4058,6 +4183,7 @@ def test_generated_share_link_receives_large_dom_keyframe(browser, monkeypatch, 
         )
         created = browser.execute_async_script(
             """
+            const session = arguments[0];
             const done = arguments[arguments.length - 1];
             (async () => {
               const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
@@ -4078,8 +4204,8 @@ def test_generated_share_link_receives_large_dom_keyframe(browser, monkeypatch, 
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
-                  session: '1',
-                  sessions: ['1'],
+                  session,
+                  sessions: [session],
                   ttl_seconds: 600,
                   max_viewers: 5,
                   mode: 'ro',
@@ -4106,7 +4232,8 @@ def test_generated_share_link_receives_large_dom_keyframe(browser, monkeypatch, 
                 keyframeChildren: keyframe?.root?.children?.length || 0,
               });
             })().catch(error => done({error: String(error), stack: String(error?.stack || '')}));
-            """
+            """,
+            session,
         )
         assert "error" not in created, created
         assert created["opened"] is True, created
@@ -4237,6 +4364,7 @@ def test_generated_share_link_receives_large_dom_keyframe(browser, monkeypatch, 
     finally:
         viewer.quit()
         stop_browser_share_server(server, thread)
+        stop_isolated_browser_share_app(runtime)
 
 
 def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, monkeypatch, tmp_path):
@@ -4247,8 +4375,9 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
     (repo_root / "src" / "app.py").write_text("print('share matrix')\n", encoding="utf-8")
     (repo_root / "docs" / "DONE.md").write_text("# DONE\n\nShare matrix coverage.\n", encoding="utf-8")
 
-    app = TmuxWebtermApp(["1"], dangerously_yolo=True)
-    server, thread = start_browser_share_server(monkeypatch, tmp_path, app, auth_bypass=True)
+    runtime = start_isolated_browser_share_app(monkeypatch, tmp_path)
+    session = runtime.sessions[0]
+    server, thread = start_browser_share_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
     viewer = new_chrome_driver("1220,742")
     install_browser_websocket_tracker(viewer)
     base_url = f"http://127.0.0.1:{server.server_address[1]}"
@@ -4444,6 +4573,7 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
         created = browser.execute_async_script(
             """
             const repo = arguments[0];
+            const session = arguments[1];
             const done = arguments[arguments.length - 1];
             (async () => {
               const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
@@ -4455,8 +4585,8 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                 }
                 return predicate();
               };
-              await ensureTerminalRunning('1');
-              if (!await waitFor(() => document.querySelector('#term-1 .xterm') && terminals.get('1')?.socket?.readyState === WebSocket.OPEN, 10000)) {
+              await ensureTerminalRunning(session);
+              if (!await waitFor(() => document.getElementById(terminalDomId(session))?.querySelector?.('.xterm') && terminals.get(session)?.socket?.readyState === WebSocket.OPEN, 10000)) {
                 throw new Error('host terminal did not open before share create');
               }
               const seed = shareLayoutSeed();
@@ -4464,8 +4594,8 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
-                  session: '1',
-                  sessions: ['1'],
+                  session,
+                  sessions: [session],
                   ttl_seconds: 600,
                   max_viewers: 5,
                   mode: 'ro',
@@ -4536,14 +4666,14 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                   setFileExplorerRootMode('fixed', {sync: false, persist: false});
                   await openFileExplorerAt(repo);
                   fileExplorerSessionFilesPayload = {
-                    session: '1',
+                    session,
                     loaded: true,
                     errors: [],
                     repos: [{repo, from_ref: 'HEAD', to_ref: 'current', added: 3, removed: 1}],
                     files: [
-                      {session: '1', agent: 'codex', status: 'M', repo, path: 'README.md', abs_path: `${repo}/README.md`, mtime: 200, added: 2, removed: 1},
-                      {session: '1', agent: 'codex', status: 'M', repo, path: 'src/app.py', abs_path: `${repo}/src/app.py`, mtime: 100, added: 1, removed: 0},
-                      {session: '1', agent: 'codex', status: '?', repo, path: 'docs/DONE.md', abs_path: `${repo}/docs/DONE.md`, mtime: 300, added: 1, removed: 0},
+                      {session, agent: 'codex', status: 'M', repo, path: 'README.md', abs_path: `${repo}/README.md`, mtime: 200, added: 2, removed: 1},
+                      {session, agent: 'codex', status: 'M', repo, path: 'src/app.py', abs_path: `${repo}/src/app.py`, mtime: 100, added: 1, removed: 0},
+                      {session, agent: 'codex', status: '?', repo, path: 'docs/DONE.md', abs_path: `${repo}/docs/DONE.md`, mtime: 300, added: 1, removed: 0},
                     ],
                   };
                   cacheFileExplorerRepoInfo(repo, {root: repo, name: 'repo-app', branch: 'feature/share-matrix', upstream: 'origin/feature/share-matrix', ahead: 2, behind: 1, dirty_count: 3});
@@ -4551,6 +4681,38 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                   refreshFileExplorerPanelTree(document.querySelector('.file-explorer-panel'), {preserveExpanded: true, preserveScroll: true});
                   await frame();
                   return document.querySelector('.file-explorer-panel');
+                };
+                const terminalVisible = () => {
+                  const terminal = document.getElementById(terminalDomId(session));
+                  if (!terminal || terminal.isConnected === false) return false;
+                  const rect = terminal.getBoundingClientRect();
+                  const style = getComputedStyle(terminal);
+                  return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+                };
+                const ensureVisibleTerminalWithFinder = async () => {
+                  await ensureTerminalRunning(session);
+                  if (!itemInLayout(session)) {
+                    await placeTmuxSession(session);
+                    await frame();
+                  }
+                  const slot = slotForSession(session);
+                  if (slot) activatePaneTab(slot, session);
+                  await frame();
+                  if (!itemInLayout(fileExplorerItemId)) {
+                    await openFileExplorerPane();
+                    await frame();
+                  }
+                  dockFileExplorerPane();
+                  await frame();
+                  if (!terminalVisible()) {
+                    await placeTmuxSession(session);
+                    await frame();
+                    if (itemInLayout(fileExplorerItemId)) {
+                      dockFileExplorerPane();
+                      await frame();
+                    }
+                  }
+                  return terminalVisible();
                 };
                 const clickRootMode = async rootMode => {
                   const panel = await ensureFinder();
@@ -4663,7 +4825,7 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
 	                  async staleDifferPrecondition() {
 	                    closeTransient();
 	                    await ensureFinder();
-	                    const sentinelFile = {session: '1', agent: 'codex', status: 'M', repo, path: 'STALE_DIFF_SENTINEL.md', abs_path: `${repo}/STALE_DIFF_SENTINEL.md`, mtime: 400, added: 8, removed: 2};
+	                    const sentinelFile = {session, agent: 'codex', status: 'M', repo, path: 'STALE_DIFF_SENTINEL.md', abs_path: `${repo}/STALE_DIFF_SENTINEL.md`, mtime: 400, added: 8, removed: 2};
 	                    fileExplorerSessionFilesPayload = {
 	                      ...fileExplorerSessionFilesPayload,
 	                      files: [sentinelFile, ...(fileExplorerSessionFilesPayload.files || [])],
@@ -4738,6 +4900,7 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
 		                      toggleFileExplorerShortcut();
 		                      await frame();
 		                    }
+		                    await ensureVisibleTerminalWithFinder();
 		                    const state = detail({mode: 'files', visible: itemInLayout(fileExplorerItemId), count: total, pauseMs: delay, geometryDigests});
 		                    const phase = `finder-toggle-loop-${label || (delay ? 'paused' : 'rapid')}`;
 		                    const node = marker();
@@ -4746,11 +4909,13 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
 		                    node.textContent = `Share matrix phase=${phase} visible=${state.finderOpen} count=${total} pauseMs=${delay}`;
 		                    return publish(phase, {count: total, pauseMs: delay, visible: state.finderOpen, geometryDigests});
 		                  },
-		                  async expandWithFinder() {
+	                  async expandWithFinder() {
 	                    closeTransient();
 	                    await ensureFinder();
-                    expandPaneFromLayout('1');
+                    await ensureVisibleTerminalWithFinder();
+                    expandPaneFromLayout(session);
                     await frame();
+                    await ensureVisibleTerminalWithFinder();
                     return publish('terminal-expand-with-finder');
                   },
                   async tabPopover() {
@@ -4768,7 +4933,9 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                   async repoPopover() {
                     closeTransient();
                     const panel = await ensureFinder();
-                    const tree = panel?.querySelector('.file-explorer-tree-panel') || panel;
+                    await ensureVisibleTerminalWithFinder();
+                    const currentPanel = document.querySelector('.file-explorer-panel') || panel;
+                    const tree = currentPanel?.querySelector('.file-explorer-tree-panel') || currentPanel;
                     let row = tree?.querySelector(`.file-tree-row[data-path="${CSS.escape(repo)}"]`);
                     if (!row) {
                       row = document.createElement('div');
@@ -4790,6 +4957,7 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
             })().catch(error => done({error: String(error), stack: String(error?.stack || '')}));
             """,
             str(repo_root),
+            session,
         )
         assert "error" not in created, created
         assert created["initial"]["published"] is True, created
@@ -4895,7 +5063,15 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
         assert rapid["detail"]["finderOpen"] is True, rapid
         assert rapid["detail"]["count"] == 6, rapid
         assert_terminal_health(rapid)
-        assert rapid["droppedFrames"] == before_rapid["droppedFrames"], {"before": before_rapid, "after": rapid}
+        assert rapid["droppedFrames"] == before_rapid["droppedFrames"], json.dumps({
+            "beforeDropped": before_rapid["droppedFrames"],
+            "afterDropped": rapid["droppedFrames"],
+            "lastReplayError": rapid["lastReplayError"],
+            "keyframeRequests": rapid["keyframeRequests"],
+            "keyframeRequestsSuppressed": rapid["keyframeRequestsSuppressed"],
+            "staleFrames": rapid["staleFrames"],
+            "status": rapid["status"],
+        }, sort_keys=True)
         assert rapid["keyframeRequests"] == before_rapid["keyframeRequests"], {"before": before_rapid, "after": rapid}
 
         before_paused = viewer_state()
@@ -4906,7 +5082,15 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
         assert paused["detail"]["count"] == 6, paused
         assert paused["detail"]["pauseMs"] == 140, paused
         assert_terminal_health(paused)
-        assert paused["droppedFrames"] == before_paused["droppedFrames"], {"before": before_paused, "after": paused}
+        assert paused["droppedFrames"] == before_paused["droppedFrames"], json.dumps({
+            "beforeDropped": before_paused["droppedFrames"],
+            "afterDropped": paused["droppedFrames"],
+            "lastReplayError": paused["lastReplayError"],
+            "keyframeRequests": paused["keyframeRequests"],
+            "keyframeRequestsSuppressed": paused["keyframeRequestsSuppressed"],
+            "staleFrames": paused["staleFrames"],
+            "status": paused["status"],
+        }, sort_keys=True)
         assert paused["keyframeRequests"] == before_paused["keyframeRequests"], {"before": before_paused, "after": paused}
 
         before_safari = viewer_state()
@@ -4919,7 +5103,15 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
         assert safari["detail"]["pauseMs"] == 2000, safari
         assert safari["detail"]["geometryDigests"] == 3, safari
         assert_terminal_health(safari)
-        assert safari["droppedFrames"] == before_safari["droppedFrames"], {"before": before_safari, "after": safari}
+        assert safari["droppedFrames"] == before_safari["droppedFrames"], json.dumps({
+            "beforeDropped": before_safari["droppedFrames"],
+            "afterDropped": safari["droppedFrames"],
+            "lastReplayError": safari["lastReplayError"],
+            "keyframeRequests": safari["keyframeRequests"],
+            "keyframeRequestsSuppressed": safari["keyframeRequestsSuppressed"],
+            "staleFrames": safari["staleFrames"],
+            "status": safari["status"],
+        }, sort_keys=True)
         assert safari["keyframeRequests"] == before_safari["keyframeRequests"], {"before": before_safari, "after": safari}
 
         host_phase("expandWithFinder")
@@ -4967,6 +5159,7 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
     finally:
         viewer.quit()
         stop_browser_share_server(server, thread)
+        stop_isolated_browser_share_app(runtime)
 
 
 def test_share_replay_shell_applies_static_keyframe_and_rejects_unsafe_nodes(browser, tmp_path):
@@ -5875,8 +6068,8 @@ def test_share_replay_shell_applies_only_contiguous_deltas(browser, tmp_path):
           const afterGap = {epoch: shareReplayCurrentEpoch, sequence: shareReplayLastSequence, requests: shareReplayKeyframeRequestCount, suppressed: shareReplayKeyframeRequestSuppressedCount, dropped: shareReplayDroppedFrames, text: target.textContent, status: shareReplayShellState.status};
           applyShareUiMessage({ch: 'ui', type: shareMirrorProtocol.frames.domDelta, sender: 'host', epoch: 7, baseSequence: 13, sequence: 14, payload: {mutations: [{kind: 'characterData', target: 999, text: 'unknown'}]}});
           await frame();
-          const afterUnknown = {epoch: shareReplayCurrentEpoch, sequence: shareReplayLastSequence, requests: shareReplayKeyframeRequestCount, suppressed: shareReplayKeyframeRequestSuppressedCount, dropped: shareReplayDroppedFrames, text: target.textContent, status: shareReplayShellState.status};
-          applyShareUiMessage({ch: 'ui', type: shareMirrorProtocol.frames.domDelta, sender: 'host', epoch: 7, baseSequence: 13, sequence: 14, payload: {digest: 'sha256:not-current-dom', mutations: [{kind: 'characterData', target: 2, text: 'digest mismatch'}]}});
+          const afterUnknown = {epoch: shareReplayCurrentEpoch, sequence: shareReplayLastSequence, requests: shareReplayKeyframeRequestCount, suppressed: shareReplayKeyframeRequestSuppressedCount, dropped: shareReplayDroppedFrames, stale: shareReplayStaleFrames, text: target.textContent, status: shareReplayShellState.status};
+          applyShareUiMessage({ch: 'ui', type: shareMirrorProtocol.frames.domDelta, sender: 'host', epoch: 7, baseSequence: 14, sequence: 15, payload: {digest: 'sha256:not-current-dom', mutations: [{kind: 'characterData', target: 2, text: 'digest mismatch'}]}});
           await frame();
           const afterDigest = {epoch: shareReplayCurrentEpoch, sequence: shareReplayLastSequence, requests: shareReplayKeyframeRequestCount, suppressed: shareReplayKeyframeRequestSuppressedCount, dropped: shareReplayDroppedFrames, stale: shareReplayStaleFrames, text: target.textContent, status: shareReplayShellState.status};
           const repairKeyframe = {
@@ -5892,7 +6085,7 @@ def test_share_replay_shell_applies_only_contiguous_deltas(browser, tmp_path):
             },
             terminals: []
           };
-          applyShareUiMessage({ch: 'ui', type: shareMirrorProtocol.frames.domKeyframe, sender: 'host', epoch: 7, sequence: 14, payload: repairKeyframe});
+          applyShareUiMessage({ch: 'ui', type: shareMirrorProtocol.frames.domKeyframe, sender: 'host', epoch: 7, sequence: 16, payload: repairKeyframe});
           await frame();
           const repairedTarget = document.querySelector('[data-testid="delta-target"]');
           const afterRepair = {epoch: shareReplayCurrentEpoch, sequence: shareReplayLastSequence, requests: shareReplayKeyframeRequestCount, suppressed: shareReplayKeyframeRequestSuppressedCount, inFlight: shareReplayKeyframeInFlight, backoffMs: shareReplayKeyframeBackoffMs, text: repairedTarget?.textContent || '', status: shareReplayShellState.status};
@@ -5917,20 +6110,21 @@ def test_share_replay_shell_applies_only_contiguous_deltas(browser, tmp_path):
     assert metrics["afterGap"]["dropped"] == 1, metrics
     assert metrics["afterGap"]["text"] == "gap", metrics
     assert metrics["afterGap"]["status"] == "mirrored", metrics
-    assert metrics["afterUnknown"]["sequence"] == 13, metrics
+    assert metrics["afterUnknown"]["sequence"] == 14, metrics
     assert metrics["afterUnknown"]["requests"] == 1, metrics
-    assert metrics["afterUnknown"]["suppressed"] >= 1, metrics
-    assert metrics["afterUnknown"]["dropped"] == 2, metrics
+    assert metrics["afterUnknown"]["suppressed"] == 0, metrics
+    assert metrics["afterUnknown"]["dropped"] == 1, metrics
+    assert metrics["afterUnknown"]["stale"] == 2, metrics
     assert metrics["afterUnknown"]["text"] == "gap", metrics
-    assert metrics["afterUnknown"]["status"] == "error", metrics
-    assert metrics["afterDigest"]["sequence"] == 13, metrics
+    assert metrics["afterUnknown"]["status"] == "mirrored", metrics
+    assert metrics["afterDigest"]["sequence"] == 14, metrics
     assert metrics["afterDigest"]["requests"] == 1, metrics
-    assert metrics["afterDigest"]["suppressed"] >= 2, metrics
-    assert metrics["afterDigest"]["dropped"] == 3, metrics
-    assert metrics["afterDigest"]["stale"] == 1, metrics
+    assert metrics["afterDigest"]["suppressed"] >= 1, metrics
+    assert metrics["afterDigest"]["dropped"] == 2, metrics
+    assert metrics["afterDigest"]["stale"] == 2, metrics
     assert metrics["afterDigest"]["text"] == "digest mismatch", metrics
     assert metrics["afterDigest"]["status"] == "error", metrics
-    assert metrics["afterRepair"]["sequence"] == 14, metrics
+    assert metrics["afterRepair"]["sequence"] == 16, metrics
     assert metrics["afterRepair"]["requests"] == 1, metrics
     assert metrics["afterRepair"]["inFlight"] is False, metrics
     assert metrics["afterRepair"]["backoffMs"] == 0, metrics
@@ -10880,6 +11074,60 @@ def test_legacy_changes_url_opens_finder_diff_mode(browser, tmp_path, legacy_tok
     assert metrics["sessionFilesFetches"] >= 1
 
 
+def test_finder_differ_directory_diff_counts_are_bare_numbers(browser, tmp_path):
+    payload = {
+        "session": "1",
+        "loaded": True,
+        "errors": [],
+        "repos": [{"repo": "/repo/app", "count": 3, "added": 14, "removed": 5}],
+        "files": [
+            {"session": "1", "repo": "/repo/app", "path": "src/a.py", "abs_path": "/repo/app/src/a.py", "status": "M", "mtime": 100, "added": 2, "removed": 1},
+            {"session": "1", "repo": "/repo/app", "path": "src/b.py", "abs_path": "/repo/app/src/b.py", "status": "M", "mtime": 110, "added": 3, "removed": 4},
+            {"session": "1", "repo": "/repo/app", "path": "docs/only.md", "abs_path": "/repo/app/docs/only.md", "status": "A", "mtime": 120, "added": 9, "removed": 0},
+        ],
+    }
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?layout=left&tabs=left:__changes__",
+        sessions=["1"],
+        session_files_payload=payload,
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return Array.from(document.querySelectorAll('#panel-__files__ .file-tree-dir-count:not([hidden])')).some(node => node.textContent.trim() === '1')"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const panel = document.querySelector('#panel-__files__');
+        const rows = Array.from(panel.querySelectorAll('.file-tree-row.kind-dir'));
+        const records = rows.map(row => {
+          const count = row.querySelector(':scope > .file-tree-dir-count');
+          return {
+            path: row.dataset.path || '',
+            text: row.textContent.trim().replace(/\\s+/g, ' '),
+            diff: row.querySelector(':scope > .file-tree-diff')?.textContent.trim().replace(/\\s+/g, ' ') || '',
+            count: count?.textContent.trim() || '',
+            hidden: count?.hidden !== false,
+          };
+        });
+        return {
+          errors: window.__bootErrors,
+          rejections: window.__bootRejections,
+          records,
+          visibleCounts: records.filter(record => !record.hidden).map(record => record.count),
+          hasFileChangedLabel: records.some(record => /\\bfiles? changed\\b/.test(record.text)),
+        };
+        """
+    )
+    assert metrics["errors"] == []
+    assert metrics["rejections"] == []
+    assert not metrics["hasFileChangedLabel"], metrics
+    assert {"2", "1"}.issubset(set(metrics["visibleCounts"])), metrics
+    assert all(re.fullmatch(r"[0-9]+", count) for count in metrics["visibleCounts"]), metrics
+
+
 def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, tmp_path):
     session_files_payload = {
         "session": "1",
@@ -12834,6 +13082,80 @@ def test_active_pane_ring_opacity_follows_preference(browser, tmp_path):
     assert metrics["low"]["normalOpacity"] == "5%", metrics
     assert metrics["defaultish"]["activeOpacity"] == "75%", metrics
     assert metrics["low"]["borderColor"] != metrics["defaultish"]["borderColor"], metrics
+
+
+def test_meta_arrow_walks_visible_pane_tabs_in_live_runtime(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1,2,__prefs__&layout=row@50(left,right)&tabs=left:files,1;right:__prefs__,2",
+        sessions=["1", "2"],
+    )
+    wait_for_dockview(browser, min_tabs=4)
+    wait_for_dockview_tab_geometry(browser, min_tabs=4, min_width=45)
+    result = browser.execute_script(
+        """
+        const fireMetaArrow = key => {
+          const event = new KeyboardEvent('keydown', {
+            key,
+            code: key,
+            metaKey: true,
+            ctrlKey: false,
+            altKey: false,
+            shiftKey: false,
+            bubbles: true,
+            cancelable: true,
+          });
+          (document.activeElement || window).dispatchEvent(event);
+          return event.defaultPrevented;
+        };
+        activatePaneTab('left', fileExplorerItemId, {userInitiated: true});
+        setFocusedPanelItem(fileExplorerItemId, {userInitiated: true});
+        const firstPrevented = fireMetaArrow('ArrowRight');
+        const afterFinderRight = {
+          left: activeItemForSide('left'),
+          right: activeItemForSide('right'),
+          focus: visualActivePaneItem(),
+        };
+        const secondPrevented = fireMetaArrow('ArrowRight');
+        const afterPaneSpill = {
+          left: activeItemForSide('left'),
+          right: activeItemForSide('right'),
+          focus: visualActivePaneItem(),
+        };
+        const thirdPrevented = fireMetaArrow('ArrowLeft');
+        const afterBack = {
+          left: activeItemForSide('left'),
+          right: activeItemForSide('right'),
+          focus: visualActivePaneItem(),
+        };
+        const editor = document.createElement('div');
+        editor.className = 'cm-editor';
+        editor.tabIndex = 0;
+        document.body.appendChild(editor);
+        editor.focus();
+        const blockedPrevented = fireMetaArrow('ArrowRight');
+        return {
+          firstPrevented,
+          secondPrevented,
+          thirdPrevented,
+          blockedPrevented,
+          afterFinderRight,
+          afterPaneSpill,
+          afterBack,
+          finalLeft: activeItemForSide('left'),
+          finalRight: activeItemForSide('right'),
+        };
+        """
+    )
+    assert result["firstPrevented"] is True, result
+    assert result["afterFinderRight"] == {"left": "1", "right": "__prefs__", "focus": "1"}, result
+    assert result["secondPrevented"] is True, result
+    assert result["afterPaneSpill"] == {"left": "1", "right": "__prefs__", "focus": "__prefs__"}, result
+    assert result["thirdPrevented"] is True, result
+    assert result["afterBack"] == {"left": "1", "right": "__prefs__", "focus": "1"}, result
+    assert result["blockedPrevented"] is False, result
+    assert result["finalLeft"] == "1" and result["finalRight"] == "__prefs__", result
 
 
 def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):

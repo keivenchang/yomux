@@ -1036,7 +1036,7 @@ function dockviewJsonFromLayoutSlots(slots = layoutSlots) {
       renderer: dockviewPanelRenderer,
       params: {item},
       minimumWidth: minWidthForLayoutItem(item),
-      minimumHeight: rootCssLengthPx('--min-split-pane-height') || 220,
+      minimumHeight: minSplitPaneHeightPx(),
     };
   }
   return {

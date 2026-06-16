@@ -831,6 +831,7 @@
   "shortcuts.section.tabsPanes": "タブ / ペイン",
   "shortcuts.section.terminal": "Terminal",
   "shortcuts.sessionActions": "セッション操作",
+  "shortcuts.switchTmuxWindow": "Previous / next tab",
   "shortcuts.title": "キーボードショートカット",
   "shortcuts.toggleComment": "行コメントを切り替え",
   "shortcuts.toggleFinder": "{name} を切り替え",

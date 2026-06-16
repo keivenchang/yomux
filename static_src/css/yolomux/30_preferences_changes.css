@@ -882,7 +882,7 @@
   gap: 8px;
   align-items: center;
   padding: 5px 7px;
-  color: #dfe6ef;
+  color: var(--pane-tab-text);
   background: transparent;
   border: 1px solid transparent;
   border-radius: 5px;
@@ -892,7 +892,7 @@
 }
 .command-palette-row.active,
 .command-palette-row:hover {
-  color: #f4ffe8;
+  color: var(--pane-tab-panel-head-text);
   background: #273140;
   border-color: var(--accent-gold);
 }
@@ -1051,7 +1051,7 @@ body.theme-light .command-palette-view-chip {
 }
 .keyboard-shortcut-row kbd {
   padding: 2px 5px;
-  color: #dfe6ef;
+  color: var(--pane-tab-text);
   background: #0b1017;
   border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: var(--radius-control);
@@ -1098,10 +1098,10 @@ body.theme-light .diff-ref-suggestion-popover {
 }
 body.theme-light .info-refresh:hover,
 body.theme-light .info-refresh:focus-visible {
-  color: #10230b;
+  color: var(--file-selection-text);
 }
 body.theme-light .changes-error {
-  color: #b91c1c;
+  color: var(--danger-strong-hover);
 }
 body.theme-light .file-explorer-changes-panel,
 body.theme-light .changes-toolbar,
@@ -1111,7 +1111,7 @@ body.theme-light .changes-repo-group {
   --changes-indent-line: var(--tree-indent-line);
   --changes-repo-head-bg: var(--panel2);
   --changes-folder-text: var(--accent-gold);
-  --changes-path-text: #59636e;
+  --changes-path-text: var(--lt-muted);
   --changes-icon-text: var(--menu-accent);
 }
 body.theme-light .changes-toolbar,
@@ -1144,12 +1144,12 @@ body.theme-light .changes-diff-add-neutral {
   color: var(--muted);
 }
 body.theme-light .changes-diff-remove {
-  color: #b91c1c;
+  color: var(--danger-strong-hover);
 }
 body.theme-light .keyboard-shortcut-row kbd {
-  color: #17202c;
+  color: var(--text);
   background: #f8fafc;
-  border-color: #c9d2df;
+  border-color: var(--line);
 }
 .preferences-setting-control input[type="checkbox"] {
   justify-self: start;

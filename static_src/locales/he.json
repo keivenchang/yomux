@@ -810,6 +810,7 @@
   "shortcuts.closeTab": "סגור לשונית עורך/מציג פעילה",
   "shortcuts.commandPalette": "לוח פקודות",
   "shortcuts.copyTmuxSelection": "Copy tmux selection",
+  "shortcuts.switchTmuxWindow": "Previous / next tab",
   "shortcuts.editorNav": "עורך אחורה / קדימה",
   "shortcuts.fileQuickOpen": "פתיחה מהירה של קובץ",
   "shortcuts.find": "חפש",

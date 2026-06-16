@@ -810,6 +810,7 @@
   "shortcuts.closeTab": "アクティブなエディター/ビューアータブを閉じる",
   "shortcuts.commandPalette": "コマンドパレット",
   "shortcuts.copyTmuxSelection": "Copy tmux selection",
+  "shortcuts.switchTmuxWindow": "Previous / next tab",
   "shortcuts.editorNav": "エディタ 戻る／進む",
   "shortcuts.fileQuickOpen": "ファイルのクイックオープン",
   "shortcuts.find": "検索",

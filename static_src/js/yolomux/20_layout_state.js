@@ -222,7 +222,7 @@ function normalizeTreeLayout(value, options = {}) {
   const next = emptyLayoutSlots();
   const seen = new Set();
   next[layoutTreeKey] = normalizeLayoutNode(value[layoutTreeKey], value, next, seen, options);
-  return compactLayoutSlots(next);
+  return compactLayoutSlots(next, options);
 }
 
 function normalizeLayoutNode(node, value, next, seen, options = {}) {
@@ -263,20 +263,20 @@ function legacyColumnTree(column, slots) {
   return topNode || bottomNode;
 }
 
-function compactLayoutSlots(slots) {
+function compactLayoutSlots(slots, options = {}) {
   const next = emptyLayoutSlots();
   for (const key of layoutSlotKeys(slots)) next[key] = paneStateForLayoutSlot(key, slots);
-  next[layoutTreeKey] = compactLayoutNode(slots[layoutTreeKey], next);
+  next[layoutTreeKey] = compactLayoutNode(slots[layoutTreeKey], next, options);
   const keys = layoutSlotKeys(next);
   if (keys.length && keys.every(key => paneIsPlaceholder(key, next))) return emptyPlaceholderLayoutSlots(keys[0] || 'left');
   return next[layoutTreeKey] ? next : emptyPlaceholderLayoutSlots();
 }
 
-function compactLayoutNode(node, slots) {
-  return compactLayoutNodeInfo(node, slots)?.node || null;
+function compactLayoutNode(node, slots, options = {}) {
+  return compactLayoutNodeInfo(node, slots, options)?.node || null;
 }
 
-function compactLayoutNodeInfo(node, slots) {
+function compactLayoutNodeInfo(node, slots, options = {}) {
   if (!node) return null;
   if (node.slot) {
     if (!paneHasLayoutContent(node.slot, slots)) return null;
@@ -290,7 +290,7 @@ function compactLayoutNodeInfo(node, slots) {
     };
   }
   const direction = node.split === 'column' ? 'column' : 'row';
-  const children = (node.children || []).map(child => compactLayoutNodeInfo(child, slots)).filter(Boolean);
+  const children = (node.children || []).map(child => compactLayoutNodeInfo(child, slots, options)).filter(Boolean);
   if (!children.length) return null;
   if (children.length === 1) return children[0];
   const hasFileExplorer = children.some(child => child.containsFileExplorer);
@@ -300,13 +300,28 @@ function compactLayoutNodeInfo(node, slots) {
     : children.filter(child => !child.placeholderOnly);
   const compacted = kept.length ? kept : [children[0]];
   if (compacted.length < 2) return compacted[0];
-  const nextNode = splitNode(direction, compacted[0].node, compacted[1].node, node.pct);
+  const pct = splitPercentForCompactedLayoutNode(direction, node.pct, compacted, {
+    preserveMissingFileExplorer: options.preserveMissingFileExplorer === true,
+  });
+  const nextNode = splitNode(direction, compacted[0].node, compacted[1].node, pct);
   return {
     node: nextNode,
     containsFileExplorer: compacted.some(child => child.containsFileExplorer),
     directFileExplorerLeaf: false,
     placeholderOnly: compacted.every(child => child.placeholderOnly),
   };
+}
+
+function splitPercentForCompactedLayoutNode(direction, pct, children, options = {}) {
+  const value = splitPercent(pct);
+  if (direction === 'row'
+    && options.preserveMissingFileExplorer !== true
+    && value >= fileExplorerSplitPercent
+    && value < minNonFileExplorerSplitPercent
+    && !children?.[0]?.containsFileExplorer) {
+    return defaultSplitPercent;
+  }
+  return value;
 }
 
 function layoutNodeHasContent(node, slots = layoutSlots) {
@@ -1206,6 +1221,10 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
   if (screenKey === 'approval') {
     return stateValue('needs-approval', screenText || approvalPromptText || stateReason('approvalPromptVisible'));
   }
+  const tmuxSignalStateForSession = tmuxSignalAgentStateForSession(session);
+  if (tmuxSignalStateForSession) {
+    return tmuxSignalStateForSession;
+  }
   if (screenKey === 'working') {
     return stateValue('working', screenText || stateReason('agentWorking'));
   }
@@ -1300,6 +1319,162 @@ function browserFaviconBadgeCount(counts = globalActivityCounts()) {
 function browserFaviconBadgeLabel(count) {
   const value = Math.max(0, Math.floor(Number(count) || 0));
   return value > 99 ? '99+' : String(value);
+}
+
+function tmuxSignalWindows() {
+  return Array.isArray(tmuxSignalState?.windows) ? tmuxSignalState.windows : [];
+}
+
+const tmuxSignalAgentCommands = new Set(['claude', 'codex']);
+
+function tmuxSignalWindowSession(windowRecord) {
+  return String(windowRecord?.session || windowRecord?.session_name || '').trim();
+}
+
+function tmuxSignalWindowActivityTs(windowRecord) {
+  const value = Number(windowRecord?.activity_ts ?? windowRecord?.window_activity ?? 0);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function tmuxSignalWindowIsRecentlyActive(windowRecord, nowMs = documentTitleNowMs()) {
+  const activityTs = tmuxSignalWindowActivityTs(windowRecord);
+  if (activityTs <= 0) return false;
+  return Math.max(0, nowMs - activityTs * 1000) <= tmuxSignalActivityWindowMs;
+}
+
+function tmuxSignalPanes() {
+  return tmuxSignalWindows().flatMap(windowRecord => {
+    const panes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
+    return panes.map(pane => ({...pane, _tmux_window: windowRecord}));
+  });
+}
+
+function tmuxSignalPaneCommand(pane) {
+  return String(pane?.agent || pane?.current_command || pane?.pane_current_command || '').trim().toLowerCase();
+}
+
+function tmuxSignalPaneIsAgent(pane) {
+  return tmuxSignalAgentCommands.has(tmuxSignalPaneCommand(pane));
+}
+
+function tmuxSignalPaneTarget(pane) {
+  return String(pane?.target || pane?.pane_id || '').trim();
+}
+
+function tmuxSignalPaneSession(pane) {
+  return String(pane?.session || pane?._tmux_window?.session || '').trim();
+}
+
+function tmuxSignalPaneWindowKey(pane) {
+  return String(pane?.window_key || pane?._tmux_window?.key || `${tmuxSignalPaneSession(pane)}:${pane?.window_index || ''}`).trim();
+}
+
+function tmuxSignalWindowForPane(pane) {
+  if (pane?._tmux_window) return pane._tmux_window;
+  const key = tmuxSignalPaneWindowKey(pane);
+  return tmuxSignalWindows().find(windowRecord => String(windowRecord?.key || '') === key) || null;
+}
+
+function tmuxSignalWindowsForSession(session) {
+  const sessionText = String(session || '').trim();
+  if (!sessionText) return [];
+  return tmuxSignalWindows().filter(windowRecord => tmuxSignalWindowSession(windowRecord) === sessionText);
+}
+
+function tmuxSignalWindowForSessionIndex(session, windowIndex) {
+  const sessionText = String(session || '').trim();
+  const windowText = String(windowIndex ?? '').trim();
+  if (!sessionText || !windowText) return null;
+  return tmuxSignalWindowsForSession(sessionText).find(windowRecord => String(windowRecord?.window_index ?? '').trim() === windowText) || null;
+}
+
+function tmuxSignalSessionActivityTs(session) {
+  const sessionText = String(session || '').trim();
+  if (!sessionText) return 0;
+  const sessionRecord = tmuxSignalState?.sessions?.[sessionText];
+  const sessionTs = Number(sessionRecord?.activity_ts || 0);
+  const windowTs = tmuxSignalWindowsForSession(sessionText).reduce((max, windowRecord) => Math.max(max, tmuxSignalWindowActivityTs(windowRecord)), 0);
+  return Math.max(Number.isFinite(sessionTs) ? sessionTs : 0, windowTs);
+}
+
+function tmuxSignalActivePaneForSession(session) {
+  const windows = tmuxSignalWindowsForSession(session);
+  const windowRecord = windows.find(item => item?.active === true) || windows[0] || null;
+  const panes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
+  return panes.find(pane => pane?.active === true) || panes[0] || null;
+}
+
+function tmuxSignalPanePathForSession(session) {
+  const path = String(tmuxSignalActivePaneForSession(session)?.current_path || '').trim();
+  return path ? normalizeDirectoryPath(path) : '';
+}
+
+function tmuxSignalPaneForTarget(target) {
+  const value = String(target || '').trim();
+  if (!value) return null;
+  return tmuxSignalPanes().find(pane => value === tmuxSignalPaneTarget(pane) || value === String(pane?.pane_id || '').trim()) || null;
+}
+
+function tmuxSignalAgentPanesForSession(session) {
+  const sessionText = String(session || '').trim();
+  if (!sessionText) return [];
+  return tmuxSignalPanes().filter(pane => tmuxSignalPaneSession(pane) === sessionText && tmuxSignalPaneIsAgent(pane));
+}
+
+function tmuxSignalPaneModeLabels(pane) {
+  const labels = [];
+  if (pane?.in_mode === true || String(pane?.mode || '').trim()) labels.push(String(pane?.mode || 'copy-mode'));
+  if (pane?.input_off === true) labels.push('read-only');
+  if (pane?.synchronized === true) labels.push('sync');
+  return labels;
+}
+
+function tmuxSignalWindowClientNames(windowRecord) {
+  const details = Array.isArray(windowRecord?.active_client_details) ? windowRecord.active_client_details : [];
+  const names = details.map(client => String(client?.name || client?.client_name || '').trim()).filter(Boolean);
+  if (names.length) return names;
+  return String(windowRecord?.active_clients_list || '').replace(/,/g, ' ').split(/\s+/).map(item => item.trim()).filter(Boolean);
+}
+
+function tmuxSignalWindowPresenceText(windowRecord) {
+  const count = Math.max(0, Math.round(Number(windowRecord?.active_clients ?? tmuxSignalWindowClientNames(windowRecord).length) || 0));
+  if (count <= 0) return '';
+  return `${count} ${count === 1 ? 'viewer' : 'viewers'}`;
+}
+
+function tmuxSignalDeadText(pane) {
+  if (pane?.dead !== true) return '';
+  const status = pane?.dead_status;
+  const signal = pane?.dead_signal;
+  if (status !== null && status !== undefined && status !== '') return `agent exited (status ${status})`;
+  if (signal !== null && signal !== undefined && signal !== '') return `agent exited (signal ${signal})`;
+  return 'agent exited';
+}
+
+function tmuxSignalAgentStateForSession(session) {
+  const panes = tmuxSignalAgentPanesForSession(session);
+  if (!panes.length) return null;
+  const livePanes = panes.filter(pane => pane?.dead !== true);
+  const deadPanes = panes.filter(pane => pane?.dead === true);
+  const windows = panes.map(tmuxSignalWindowForPane).filter(Boolean);
+  const bellWindow = windows.find(windowRecord => windowRecord?.bell_flag === true);
+  if (bellWindow) {
+    return stateValue('needs-input', 'tmux bell alert', {tmuxSignal: 'bell'});
+  }
+  const quietWindow = windows.find(windowRecord => windowRecord?.silence_flag === true && !tmuxSignalWindowIsRecentlyActive(windowRecord));
+  if (quietWindow && livePanes.length) {
+    return stateValue('done', 'tmux silence alert: agent quiet', {tmuxSignal: 'silence', showBadge: true});
+  }
+  if (!livePanes.length && deadPanes.length) {
+    return stateValue('done', tmuxSignalDeadText(deadPanes[0]), {tmuxSignal: 'agent-exited', showBadge: true});
+  }
+  const runningPane = livePanes.find(pane => tmuxSignalAgentCommands.has(tmuxSignalPaneCommand(pane)) && (pane?.alternate_on === true || Number(pane?.pid || 0) > 0));
+  if (runningPane) {
+    const command = tmuxSignalPaneCommand(runningPane);
+    const mode = runningPane?.alternate_on === true ? 'alternate screen' : 'process';
+    return stateValue('working', `tmux reports ${command} running (${mode})`, {tmuxSignal: 'agent-running'});
+  }
+  return null;
 }
 
 function browserFaviconRoundedRect(ctx, x, y, width, height, radius) {
@@ -1397,18 +1572,35 @@ function updateDocumentTitle() {
 // Cross-session YOLO screen-state rollup for the always-visible top-bar status line. It intentionally
 // ignores "YOLO enabled" and broad session heuristics; idle enabled sessions must count as 0 RUN/QUES/BLK.
 function globalActivityCounts() {
+  const signalWindows = tmuxSignalWindows();
   let running = 0;
   let questions = 0;
   let blocked = 0;
-  let total = 0;
-  for (const session of sessions) {
+  const signalSessions = new Set(signalWindows.map(tmuxSignalWindowSession).filter(Boolean));
+  const runningSignalSessions = new Set();
+  const bellSignalWindows = new Set();
+  for (const windowRecord of signalWindows) {
+    if (windowRecord?.bell_flag === true) {
+      bellSignalWindows.add(String(windowRecord?.key || `${tmuxSignalWindowSession(windowRecord)}:${windowRecord?.window_index || ''}`));
+    }
+    if (!tmuxSignalWindowIsRecentlyActive(windowRecord)) continue;
+    running += 1;
+    const session = tmuxSignalWindowSession(windowRecord);
+    if (session) runningSignalSessions.add(session);
+  }
+  questions += bellSignalWindows.size;
+  const countedSessions = new Set([...sessions, ...autoApproveStates.keys()].map(value => String(value || '')).filter(Boolean));
+  for (const session of countedSessions) {
     if (!isTmuxSession(session)) continue;
-    total += 1;
     const key = String(autoApproveStates.get(session)?.screen?.key || '');
-    if (key === 'working') running += 1;
+    if (key === 'working' && !runningSignalSessions.has(session)) running += 1;
     else if (key === 'needs-input') questions += 1;
     else if (key === 'blocked') blocked += 1;
   }
+  const fallbackTotal = [...countedSessions].filter(isTmuxSession).length;
+  const total = signalWindows.length
+    ? signalWindows.length + [...countedSessions].filter(session => isTmuxSession(session) && !signalSessions.has(session)).length
+    : fallbackTotal;
   const attention = questions + blocked;
   return {running, questions, blocked, attention, idle: Math.max(0, total - running - attention), total};
 }
@@ -1481,7 +1673,7 @@ function stateBadgeHtml(key, short, title) {
 function sessionStateHtml(state) {
   // 'ready-review' is dropped — the dedicated #NNNN / CI / Approved PR chips already convey
   // "PR ready", so the standalone "PR" state pill is redundant on the tab.
-  if (!state || ['working', 'tests-running', 'done', 'disconnected', 'yolo-approval', 'ready-review'].includes(state.key)) return '';
+  if (!state || (!state.showBadge && ['working', 'tests-running', 'done', 'disconnected', 'yolo-approval', 'ready-review'].includes(state.key))) return '';
   return stateBadgeHtml(state.key, state.short || stateDef(state.key).short, `${state.label}: ${state.reason}`);
 }
 
@@ -1593,6 +1785,7 @@ function keyboardShortcutCatalog() {
     ]},
     {section: t('shortcuts.section.terminal'), items: [
       {label: t('shortcuts.copyTmuxSelection'), keys: appShortcutText('C', {alt: true})},
+      {label: t('shortcuts.switchTmuxWindow'), keys: `${metaShortcutText('←')} / ${metaShortcutText('→')}`},
     ]},
     {section: t('shortcuts.section.editor'), items: [
       {label: t('shortcuts.saveEditor'), keys: appShortcutText('S')},

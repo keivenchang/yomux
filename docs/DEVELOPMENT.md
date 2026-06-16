@@ -97,6 +97,8 @@ python3 -m pytest tests/test_browser_layout.py -k 'finder_path_is_first_and_read
 
 Full pytest may need local socket/browser access. If a sandboxed run fails with `PermissionError: Operation not permitted`, rerun the same command outside the sandbox before treating it as a product failure.
 
+Browser/live tests may launch local throwaway HTTP servers, but they must also isolate tmux and state. Use fixture-owned config/state directories, ephemeral HTTP ports, a private tmux socket, and fixture-created session names such as `yt-<pid>-<uuid>-1`; automated tests must not touch live dev/prod servers on ports like `8001` or `7777`, and live dev/prod access is limited to explicit smoke checks after a requested restart or sync.
+
 For local verification that should skip login, start the dev server with `YOLOMUX_TEST_AUTH_BYPASS=1`. This is a test-only admin bypass for localhost/dev workflows, useful for direct curls or Selenium checks against `/api/settings` and other login-gated routes. Tests that are not validating auth and only need a logged-in host should use this path instead of minting cookies. Tests that validate setup, login, logout, cookies, Basic auth, readonly/admin role boundaries, share-token scoping, or expected 401/403 behavior must not use it. Do not use it for production or any server reachable by untrusted clients.
 
 ## Dev And Production Servers

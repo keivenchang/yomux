@@ -4,12 +4,15 @@
 
 from __future__ import annotations
 
+import os
 import re
 import secrets
 import subprocess
 import time
 
 from .cache import TtlCache
+
+YOLOMUX_TMUX_SOCKET_ENV = "YOLOMUX_TMUX_SOCKET"
 
 
 def run_cmd(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
@@ -19,8 +22,17 @@ def run_cmd(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProces
         return subprocess.CompletedProcess(args, 124, exc.stdout or "", exc.stderr or f"timed out after {timeout}s")
 
 
+def tmux_command(args: list[str] | tuple[str, ...]) -> list[str]:
+    socket_path = os.environ.get(YOLOMUX_TMUX_SOCKET_ENV, "").strip()
+    command = ["tmux"]
+    if socket_path:
+        command.extend(["-S", socket_path])
+    command.extend(str(arg) for arg in args)
+    return command
+
+
 def tmux(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
-    return run_cmd(["tmux", *args], timeout=timeout)
+    return run_cmd(tmux_command(args), timeout=timeout)
 
 
 def cmd_error(result: subprocess.CompletedProcess, fallback: str) -> str:
@@ -32,7 +44,7 @@ def cmd_error(result: subprocess.CompletedProcess, fallback: str) -> str:
 
 
 def tmux_run(*args: str, check: bool = True, timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
-    result = run_cmd(["tmux", *args], timeout=timeout)
+    result = run_cmd(tmux_command(args), timeout=timeout)
     if check and result.returncode != 0:
         raise subprocess.CalledProcessError(result.returncode, result.args, output=result.stdout, stderr=result.stderr)
     return result
@@ -164,7 +176,7 @@ def tmux_paste_text(target: str, text: str, submit: bool = False, timeout: float
     buffer_name = f"yolomux-{secrets.token_hex(8)}"
     payload = str(text or "")
     load = subprocess.run(
-        ["tmux", "load-buffer", "-b", buffer_name, "-"],
+        tmux_command(["load-buffer", "-b", buffer_name, "-"]),
         input=payload,
         capture_output=True,
         text=True,

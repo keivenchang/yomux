@@ -831,6 +831,7 @@
   "shortcuts.section.tabsPanes": "标签／窗格",
   "shortcuts.section.terminal": "终端",
   "shortcuts.sessionActions": "会话操作",
+  "shortcuts.switchTmuxWindow": "Previous / next tab",
   "shortcuts.title": "键盘快捷键",
   "shortcuts.toggleComment": "切换行注释",
   "shortcuts.toggleFinder": "切换{name}",

@@ -1274,7 +1274,7 @@ body.theme-light .pane-tab:not(.active) .session-button-detail {
   color: var(--pane-tab-active-text);
 }
 .pane-tab.active .session-yolo-marker.inactive {
-  color: #d7dde5;
+  color: var(--pane-meta-branch);
   background: var(--divider);
   border-color: #5d6878;
 }
@@ -1654,7 +1654,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
 .tmux-window-button[data-window-agent="editor"] { --window-agent-color: #56d4c6; }
 .tmux-window-button[data-window-agent="repl"]   { --window-agent-color: #7cb3f0; }
 .tmux-window-button[data-window-agent="git"]    { --window-agent-color: #ff9a76; }
-.tmux-window-button[data-window-agent="other"]  { --window-agent-color: #9aa5b1; }
+.tmux-window-button[data-window-agent="other"]  { --window-agent-color: var(--muted); }
 .tmux-window-button[data-window-agent] {
   border-inline-start: 3px solid var(--window-agent-color, transparent);
 }
@@ -1828,7 +1828,7 @@ body.theme-light .tab.active {
   box-shadow: 0 0 0 1px rgb(var(--active-accent-rgb) / 0.28), 0 0 14px var(--active-control-focus-ring);
 }
 body.theme-light .panel.empty-pane-panel {
-  background: #edf2f8;
+  background: var(--panel2);
   border-color: var(--pc-control-border);
 }
 body.theme-light .empty-pane-fill {
@@ -1872,7 +1872,7 @@ body.theme-light .popover-value a.pr-status-merged,
 body.theme-light .meta a.pr-status-merged,
 body.theme-light .summary-context a.pr-status-merged,
 body.theme-light .branch-meta a.pr-status-merged {
-  color: #8250df;
+  color: var(--lt-code-function);
 }
 body.theme-light .meta a.pr-status-merged:hover,
 body.theme-light .summary-context a.pr-status-merged:hover {

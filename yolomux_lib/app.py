@@ -21,6 +21,7 @@ from dataclasses import asdict
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
+from functools import wraps
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
@@ -49,6 +50,8 @@ from .auto_approve_worker import auto_approve_lock_message
 from .auto_approve_worker import auto_approve_lock_owner
 from .atomic_file import atomic_write_text
 from .atomic_file import file_lock
+from .cache import MISS as CACHE_MISS
+from .cache import TtlCache
 from .client_events import ClientEventBroker
 from .activity import ActivityLedger
 from .common import ACTIVITY_HEARTBEATS_PATH
@@ -118,6 +121,8 @@ from .tmux_utils import tmux_capture_pane
 from .tmux_utils import tmux_has_exact_session
 from .tmux_utils import tmux_paste_text
 from .tmux_utils import tmux_session_target
+from .tmux_signals import fetch_tmux_signal_snapshot
+from .tmux_signals import TmuxSignalEventWatcher
 from .types import AutoApproveState
 from .types import AutoApproveStatusPayload
 from .types import RunHistoryEntry
@@ -202,6 +207,9 @@ SHARE_DEBUG_PROFILE_LOG_DIR = Path(os.environ.get("YOLOMUX_SHARE_DEBUG_DIR", "/t
 SHARE_DEBUG_PROFILE_KEY_RE = re.compile(r"(token|secret|password|passwd|authorization|cookie|api[_-]?key|bearer)", re.I)
 SHARE_DEBUG_PROFILE_URL_RE = re.compile(r"(?:https?://[^\"'\s<>]+)?/share/[A-Za-z0-9_-]+(?:#[^\"'\s<>]*)?")
 SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS = 1.25
+SERVER_TMUX_SIGNAL_EVENT_POLL_SECONDS = 1.009
+TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS = 1.009
+TMUX_SIGNAL_ACTIVITY_WINDOW_SECONDS = 120.0
 SERVER_WATCHED_PR_EVENT_POLL_SECONDS = 60.0
 DEFAULT_TABBER_ACTIVITY_REFRESH_SECONDS = 15.0
 SERVER_ACTIVITY_HEARTBEAT_ROTATE_SECONDS = 3600.0
@@ -680,11 +688,28 @@ def normalized_prompt_state(prompt: dict[str, Any] | None = None) -> dict[str, A
     return state
 
 
+def requires_known_session(refresh: bool = False) -> Callable[[Callable[..., tuple[Any, HTTPStatus]]], Callable[..., tuple[Any, HTTPStatus]]]:
+    def decorator(func: Callable[..., tuple[Any, HTTPStatus]]) -> Callable[..., tuple[Any, HTTPStatus]]:
+        @wraps(func)
+        def wrapper(self: Any, session: str, *args: Any, **kwargs: Any) -> tuple[Any, HTTPStatus]:
+            if refresh:
+                self.refresh_sessions()
+            unknown = self.require_known_session(session)
+            if unknown:
+                return unknown
+            return func(self, session, *args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
 class TmuxWebtermApp:
     def __init__(self, sessions: list[str], dangerously_yolo: bool = False):
         self.sessions = sessions
         self.dangerously_yolo = dangerously_yolo
         self.auto_workers: dict[str, AutoApproveWorker] = {}
+        self.auto_worker_sessions: dict[str, str] = {}
         self.auto_workers_lock = threading.RLock()
         self.share_tokens: dict[str, dict[str, Any]] = {}
         self.share_tokens_lock = threading.RLock()
@@ -702,6 +727,10 @@ class TmuxWebtermApp:
         self.tabber_activity_cache_refreshing = False
         self.tabber_activity_cache_warmer_thread: threading.Thread | None = None
         self.tabber_activity_cache_warmer_running = False
+        self.tmux_signal_cache = TtlCache(TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS, max_entries=1)
+        self.tmux_signal_event_watcher: TmuxSignalEventWatcher | None = None
+        self.tmux_snapshot_history_lock = threading.RLock()
+        self.tmux_snapshot_history_signatures: dict[tuple[str, str, int], tuple[int, int]] = {}
         # last-logged watched-PR truncation state, so the cap is logged only when it changes.
         self._watched_pr_truncated_signature: tuple[int, tuple[str, ...]] | None = None
         self.metadata_warm_lock = threading.Lock()
@@ -725,6 +754,7 @@ class TmuxWebtermApp:
         self.client_watch_file_signature: tuple[Any, ...] | None = None
         self.client_watch_background_file_signature: tuple[Any, ...] | None = None
         self.client_watch_auto_approve_signature: str = ""
+        self.client_watch_tmux_signal_signature: str = ""
         self.client_watch_watched_prs_signature: str = ""
         self.client_watch_context_item_payload_signatures: dict[str, str] = {}
         self.client_watch_session_file_payload_signatures: dict[str, str] = {}
@@ -740,6 +770,7 @@ class TmuxWebtermApp:
         self.client_event_next_file_poll_at = 0.0
         self.client_event_next_background_file_poll_at = 0.0
         self.client_event_next_auto_poll_at = 0.0
+        self.client_event_next_tmux_signal_poll_at = 0.0
         self.client_event_next_watched_pr_poll_at = 0.0
         self.client_event_next_yoagent_job_poll_at = 0.0
         self.activity_summary_lock = threading.RLock()
@@ -779,9 +810,8 @@ class TmuxWebtermApp:
         self.maybe_start_yoagent_summary_worker()
 
     def require_known_session(self, session: str) -> tuple[dict[str, Any], HTTPStatus] | None:
-        # the standard "unknown session -> 404" guard, written ~10 times verbatim. Returns the
-        # error pair to send, or None when the session exists. (The handlers that intentionally allow an
-        # empty session, or return a non-HTTP {"ok": False} shape, keep their own inline check.)
+        # The standard "unknown session -> 404" guard. Decorated handlers use requires_known_session();
+        # payload-driven helpers and non-HTTP response shapes keep explicit checks.
         if session not in self.sessions:
             return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
         return None
@@ -1740,7 +1770,13 @@ class TmuxWebtermApp:
 
     def persist_auto_sessions(self) -> None:
         with self.auto_workers_lock:
-            local_enabled = {name for name, worker in self.auto_workers.items() if worker.alive()}
+            worker_sessions = self.auto_worker_session_map()
+            local_enabled = {
+                worker_sessions.get(name, name)
+                for name, worker in self.auto_workers.items()
+                if worker.alive()
+            }
+            local_enabled = {session for session in local_enabled if session in self.sessions}
         current = read_yolomux_state().get("auto_approve_enabled", [])
         if isinstance(current, list):
             external_enabled = {
@@ -1802,8 +1838,176 @@ class TmuxWebtermApp:
     def server_auto_approve_event_poll_seconds(self) -> float:
         return SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS
 
+    def server_tmux_signal_event_poll_seconds(self) -> float:
+        return SERVER_TMUX_SIGNAL_EVENT_POLL_SECONDS
+
     def server_watched_pr_event_poll_seconds(self) -> float:
         return SERVER_WATCHED_PR_EVENT_POLL_SECONDS
+
+    def tmux_signal_snapshot(self, force: bool = False) -> dict[str, Any]:
+        if not force:
+            cached = self.tmux_signal_cache.get_or_miss("snapshot")
+            if cached is not CACHE_MISS:
+                return copy.deepcopy(cached)
+        payload = fetch_tmux_signal_snapshot()
+        self.tmux_signal_cache.set("snapshot", copy.deepcopy(payload))
+        return payload
+
+    def tmux_signals_payload(self, force: bool = False) -> tuple[dict[str, Any], HTTPStatus]:
+        payload = self.tmux_signal_snapshot(force=force)
+        return payload, HTTPStatus.OK if payload.get("ok") else HTTPStatus.SERVICE_UNAVAILABLE
+
+    def tmux_signal_signature_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: value
+            for key, value in payload.items()
+            if key not in {"generated_at", "compute_ms"}
+        }
+
+    def tmux_signal_window_for_target(self, target: str, payload: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        raw_target = str(target or "").strip()
+        if not raw_target:
+            return None
+        signal_payload = payload if payload is not None else self.tmux_signal_snapshot()
+        windows = signal_payload.get("windows") if isinstance(signal_payload, dict) else None
+        if not isinstance(windows, list):
+            return None
+        if raw_target.startswith("%"):
+            for window in windows:
+                if not isinstance(window, dict):
+                    continue
+                panes = window.get("panes")
+                if not isinstance(panes, list):
+                    continue
+                for pane in panes:
+                    if isinstance(pane, dict) and raw_target in {str(pane.get("target") or ""), str(pane.get("pane_id") or "")}:
+                        return window
+            return None
+        target = raw_target[:-1] if raw_target.endswith(":") else raw_target
+        match = re.fullmatch(r"(?P<session>[^:]+):(?P<window>\d+)(?:\..*)?", target)
+        if match:
+            key = f"{match.group('session')}:{match.group('window')}"
+            return next((window for window in windows if isinstance(window, dict) and window.get("key") == key), None)
+        session_windows = [
+            window
+            for window in windows
+            if isinstance(window, dict) and str(window.get("session") or "") == target
+        ]
+        return next((window for window in session_windows if window.get("active") is True), session_windows[0] if session_windows else None)
+
+    def tmux_signal_pane_for_target(self, target: str, payload: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        raw_target = str(target or "").strip()
+        if not raw_target:
+            return None
+        signal_payload = payload if payload is not None else self.tmux_signal_snapshot()
+        windows = signal_payload.get("windows") if isinstance(signal_payload, dict) else None
+        if not isinstance(windows, list):
+            return None
+        if raw_target.startswith("%"):
+            for window in windows:
+                panes = window.get("panes") if isinstance(window, dict) else None
+                if not isinstance(panes, list):
+                    continue
+                match = next((pane for pane in panes if isinstance(pane, dict) and raw_target in {str(pane.get("target") or ""), str(pane.get("pane_id") or "")}), None)
+                if match is not None:
+                    return match
+            return None
+        window = self.tmux_signal_window_for_target(raw_target, payload=signal_payload)
+        panes = window.get("panes") if isinstance(window, dict) else None
+        if not isinstance(panes, list):
+            return None
+        return next((pane for pane in panes if isinstance(pane, dict) and pane.get("active") is True), panes[0] if panes else None)
+
+    def tmux_snapshot_history_signature(self, target: str) -> tuple[int, int] | None:
+        pane = self.tmux_signal_pane_for_target(target)
+        if not isinstance(pane, dict):
+            return None
+        history_size = int(self.float_value(pane.get("history_size"), -1))
+        history_bytes = int(self.float_value(pane.get("history_bytes"), -1))
+        if history_size < 0 or history_bytes < 0:
+            return None
+        return history_size, history_bytes
+
+    def tmux_snapshot_capture_lines(self, requested_lines: int, history_signature: tuple[int, int] | None) -> int:
+        safe_lines = max(1, min(requested_lines, 1000))
+        if history_signature is None:
+            return safe_lines
+        history_size, _history_bytes = history_signature
+        return max(1, min(safe_lines, max(1, history_size)))
+
+    def tmux_signal_window_recently_active(
+        self,
+        target: str,
+        payload: dict[str, Any] | None = None,
+        threshold_seconds: float = TMUX_SIGNAL_ACTIVITY_WINDOW_SECONDS,
+    ) -> bool:
+        window = self.tmux_signal_window_for_target(target, payload=payload)
+        if window is None:
+            return True
+        if window.get("activity_flag") is True:
+            return True
+        activity_ts = self.float_value(window.get("activity_ts"), 0.0)
+        if activity_ts <= 0:
+            return True
+        return time.time() - activity_ts <= threshold_seconds
+
+    def tmux_recency_ordered_sessions(
+        self,
+        sessions: list[str] | tuple[str, ...] | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> list[str]:
+        ordered_source: list[str] = []
+        seen: set[str] = set()
+        source_sessions = sessions if sessions is not None else self.sessions
+        for raw_session in source_sessions:
+            session = str(raw_session or "").strip()
+            if not session or session in seen:
+                continue
+            seen.add(session)
+            ordered_source.append(session)
+        if not ordered_source or "tmux_signal_cache" not in self.__dict__:
+            return ordered_source
+        signal_payload = payload if payload is not None else self.tmux_signal_snapshot()
+        if not isinstance(signal_payload, dict):
+            return ordered_source
+        original_index = {session: index for index, session in enumerate(ordered_source)}
+        scores = {session: 0.0 for session in ordered_source}
+        session_records = signal_payload.get("sessions")
+        if isinstance(session_records, dict):
+            for session in ordered_source:
+                record = session_records.get(session)
+                if not isinstance(record, dict):
+                    continue
+                scores[session] = max(
+                    scores[session],
+                    self.float_value(record.get("activity_ts"), 0.0),
+                    self.float_value(record.get("last_attached_ts"), 0.0),
+                )
+        windows = signal_payload.get("windows")
+        if isinstance(windows, list):
+            for window in windows:
+                if not isinstance(window, dict):
+                    continue
+                session = str(window.get("session") or "").strip()
+                if session not in scores:
+                    continue
+                scores[session] = max(
+                    scores[session],
+                    self.float_value(window.get("activity_ts"), 0.0),
+                    self.float_value(window.get("session_activity_ts"), 0.0),
+                    self.float_value(window.get("session_last_attached_ts"), 0.0),
+                )
+        return sorted(
+            ordered_source,
+            key=lambda session: (
+                0 if scores[session] > 0 else 1,
+                -scores[session],
+                original_index[session],
+            ),
+        )
+
+    def auto_approve_capture_allowed_for_target(self, target: str) -> bool:
+        return self.tmux_signal_window_recently_active(target)
 
     # --- self-update: hourly check for a newer origin/main + admin-only update+restart -------------
     def updates_settings(self) -> dict[str, Any]:
@@ -1910,6 +2114,7 @@ class TmuxWebtermApp:
             self.client_event_next_file_poll_at,
             self.client_event_next_background_file_poll_at,
             self.client_event_next_auto_poll_at,
+            self.client_event_next_tmux_signal_poll_at,
             self.client_event_next_watched_pr_poll_at,
             self.client_event_next_yoagent_job_poll_at,
         )
@@ -2427,6 +2632,49 @@ class TmuxWebtermApp:
         )
         return ["auto_approve_changed"]
 
+    def poll_tmux_signals_client_event_once(self) -> list[str]:
+        started = time.perf_counter()
+        payload = self.tmux_signal_snapshot(force=True)
+        signature = self.client_event_payload_signature(self.tmux_signal_signature_payload(payload))
+        with self.client_watch_lock:
+            previous = self.client_watch_tmux_signal_signature
+            self.client_watch_tmux_signal_signature = signature
+        if previous == signature:
+            return []
+        self.publish_client_event(
+            "tmux_signals_changed",
+            {"data": payload},
+            trigger="timer",
+            cache="ready",
+            compute_ms=(time.perf_counter() - started) * 1000,
+        )
+        return ["tmux_signals_changed"]
+
+    def handle_tmux_signal_event(self, event: dict[str, Any]) -> None:
+        self.tmux_signal_cache.clear()
+        with self.client_watch_lock:
+            self.client_event_next_auto_poll_at = 0.0
+            self.client_event_next_tmux_signal_poll_at = 0.0
+        self.client_watch_wake_event.set()
+
+    def log_tmux_signal_event_error(self, message: str) -> None:
+        self.log_event(None, "tmux_signal_event_error", message, {})
+
+    def start_tmux_signal_event_watcher(self) -> bool:
+        with self.client_watch_lock:
+            if self.tmux_signal_event_watcher is not None:
+                return False
+            watcher = TmuxSignalEventWatcher(lambda: list(self.sessions), self.handle_tmux_signal_event, self.log_tmux_signal_event_error)
+            self.tmux_signal_event_watcher = watcher
+        return watcher.start()
+
+    def stop_tmux_signal_event_watcher(self) -> None:
+        with self.client_watch_lock:
+            watcher = self.tmux_signal_event_watcher
+            self.tmux_signal_event_watcher = None
+        if watcher is not None:
+            watcher.stop()
+
     def poll_watched_prs_client_event_once(self) -> list[str]:
         started = time.perf_counter()
         payload = self.watched_prs_payload()
@@ -2446,6 +2694,7 @@ class TmuxWebtermApp:
         return ["watched_prs_changed"]
 
     def start_client_event_watcher(self) -> None:
+        self.start_tmux_signal_event_watcher()
         with self.client_watch_lock:
             if self.client_watch_running:
                 return
@@ -2488,6 +2737,9 @@ class TmuxWebtermApp:
                 if now >= self.client_event_next_auto_poll_at:
                     self.poll_auto_approve_client_event_once()
                     self.client_event_next_auto_poll_at = now + self.server_auto_approve_event_poll_seconds()
+                if now >= self.client_event_next_tmux_signal_poll_at:
+                    self.poll_tmux_signals_client_event_once()
+                    self.client_event_next_tmux_signal_poll_at = now + self.server_tmux_signal_event_poll_seconds()
                 if now >= self.client_event_next_watched_pr_poll_at:
                     self.poll_watched_prs_client_event_once()
                     self.client_event_next_watched_pr_poll_at = now + self.server_watched_pr_event_poll_seconds()
@@ -2881,6 +3133,7 @@ class TmuxWebtermApp:
     def activity_summary_payload(self, force: bool = False, locale: str = "en") -> dict[str, Any]:
         locale = str(locale or "en").strip() or "en"
         sessions, errors = discover_sessions(self.sessions)
+        ordered_sessions = self.tmux_recency_ordered_sessions(self.sessions)
         self.warm_metadata_cache_async(sessions)
         self.prune_yoagent_session_summaries(set(sessions))
         summaries: dict[str, Any] = {}
@@ -2890,7 +3143,7 @@ class TmuxWebtermApp:
             if force:
                 self.activity_summary_cache.clear()
                 self.clear_session_files_cache()
-            for session in self.sessions:
+            for session in ordered_sessions:
                 info = sessions.get(session)
                 if info is None:
                     continue
@@ -2917,7 +3170,7 @@ class TmuxWebtermApp:
         return {
             "generated_at": generated.isoformat(),
             "generated_ts": generated.timestamp(),
-            "session_order": [session for session in self.sessions if session in summaries],
+            "session_order": [session for session in ordered_sessions if session in summaries],
             "sessions": summaries,
             "agents": self.tabber_activity_agents_snapshot(force=force),
             "global": build_global_activity_summary(ordered_summaries, errors),
@@ -3219,7 +3472,7 @@ class TmuxWebtermApp:
         updated: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
         now = time.time()
-        for session in self.sessions:
+        for session in self.tmux_recency_ordered_sessions(self.sessions):
             info = sessions.get(session)
             if info is None:
                 continue
@@ -4034,11 +4287,8 @@ class TmuxWebtermApp:
             "transport_capabilities": list(transport_provider.capabilities),
         }
 
+    @requires_known_session(refresh=True)
     def yoagent_action_target(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
-        self.refresh_sessions()
-        unknown = self.require_known_session(session)
-        if unknown:
-            return unknown
         discovered, errors = discover_sessions([session])
         info = discovered.get(session)
         if info is None:
@@ -5383,11 +5633,12 @@ class TmuxWebtermApp:
 
     def build_activity_payload(self) -> dict[str, Any]:
         sessions, errors = discover_sessions(self.sessions)
-        agent_infos = {session: info for session, info in sessions.items() if session in self.sessions and info.agents}
+        ordered_sessions = self.tmux_recency_ordered_sessions(self.sessions)
+        agent_infos = {session: sessions[session] for session in ordered_sessions if session in sessions and sessions[session].agents}
         session_files_by_session = self.cached_session_files_payloads_for_infos(agent_infos, hours=24.0)
         return {
             "activity": self.activity_ledger.snapshot(),
-            "agents": build_recent_agents_payload(sessions, self.sessions, session_files_by_session=session_files_by_session),
+            "agents": build_recent_agents_payload(sessions, ordered_sessions, session_files_by_session=session_files_by_session),
             "errors": errors,
         }
 
@@ -5638,14 +5889,22 @@ class TmuxWebtermApp:
         if not isinstance(session, str) or session not in self.sessions:
             return {"ok": False, "error": f"unknown session: {session}"}
         with self.auto_workers_lock:
-            worker = self.auto_workers.get(session)
-            if worker is None:
+            worker_sessions = self.auto_worker_session_map()
+            workers = [
+                (key, worker)
+                for key, worker in self.auto_workers.items()
+                if worker_sessions.get(key, key) == session
+            ]
+            if not workers:
                 return {"ok": True, "session": session, "enabled": False, "message": "YOLO was not enabled here"}
             # confirm the worker thread actually exited (and released its flock) BEFORE
             # reporting released — otherwise the requester could re-acquire while this worker is still
             # alive and about to fire one more keystroke (two workers on one session).
-            released = worker.stop()
-            self.auto_workers.pop(session, None)
+            released = True
+            for key, worker in workers:
+                released = worker.stop() and released
+                self.auto_workers.pop(key, None)
+                worker_sessions.pop(key, None)
         if not released:
             self.log_event(session, "yolo_release_timeout", "YOLO worker did not stop in time", {"requester": requester})
             return {"ok": False, "session": session, "error": "YOLO worker did not stop in time"}
@@ -5894,29 +6153,49 @@ class TmuxWebtermApp:
             with self.metadata_warm_lock:
                 self.metadata_warm_running = False
 
+    @requires_known_session()
     def tmux_snapshot(self, session: str, lines: int) -> tuple[dict[str, Any], HTTPStatus]:
-        unknown = self.require_known_session(session)
-        if unknown:
-            return unknown
         sessions, errors = discover_sessions([session])
         info = sessions.get(session)
         target = info.selected_pane.target if info and info.selected_pane else session
+        history_signature = self.tmux_snapshot_history_signature(target)
+        safe_lines = self.tmux_snapshot_capture_lines(lines, history_signature)
+        cache_key = (session, target, safe_lines)
+        if history_signature is not None:
+            with self.tmux_snapshot_history_lock:
+                previous_signature = self.tmux_snapshot_history_signatures.get(cache_key)
+                if previous_signature == history_signature:
+                    return {
+                        "session": session,
+                        "target": target,
+                        "text": "",
+                        "lines": safe_lines,
+                        "unchanged": True,
+                        "history_size": history_signature[0],
+                        "history_bytes": history_signature[1],
+                        "errors": errors,
+                    }, HTTPStatus.OK
         # -J rejoins tmux-wrapped lines so a wrapped command is captured as one logical line.
-        result = tmux(["capture-pane", "-t", target, "-p", "-J", "-S", f"-{max(1, min(lines, 1000))}"], timeout=3.0)
+        result = tmux(["capture-pane", "-t", target, "-p", "-J", "-S", f"-{safe_lines}"], timeout=3.0)
         if result.returncode != 0:
             error = cmd_error(result, "tmux capture-pane failed")
             return {"session": session, "target": target, "errors": [*errors, error]}, HTTPStatus.INTERNAL_SERVER_ERROR
+        if history_signature is not None:
+            with self.tmux_snapshot_history_lock:
+                self.cache_set_limited(self.tmux_snapshot_history_signatures, cache_key, history_signature, TRANSCRIPT_TAIL_CACHE_MAX_ITEMS)
         return {
             "session": session,
             "target": target,
+            "lines": safe_lines,
             "text": result.stdout.rstrip("\n"),
+            "unchanged": False,
+            "history_size": history_signature[0] if history_signature is not None else None,
+            "history_bytes": history_signature[1] if history_signature is not None else None,
             "errors": errors,
         }, HTTPStatus.OK
 
+    @requires_known_session()
     def transcript_tail(self, session: str, lines: int) -> tuple[dict[str, Any], HTTPStatus]:
-        unknown = self.require_known_session(session)
-        if unknown:
-            return unknown
         sessions, errors = discover_sessions([session])
         info = sessions.get(session)
         if not info or not info.agents:
@@ -6059,10 +6338,8 @@ class TmuxWebtermApp:
             "errors": [*payload.get("errors", []), *discovery_errors],
         }, HTTPStatus.OK
 
+    @requires_known_session()
     def summary(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
-        unknown = self.require_known_session(session)
-        if unknown:
-            return unknown
         sessions, errors = discover_sessions([session])
         info = sessions.get(session)
         selected = info.selected_pane if info else None
@@ -6119,19 +6396,16 @@ class TmuxWebtermApp:
             "errors": errors,
         }, HTTPStatus.OK
 
+    @requires_known_session()
     def tmux_next_window(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
-        unknown = self.require_known_session(session)
-        if unknown:
-            return unknown
         result = tmux(["next-window", "-t", tmux_session_target(session)], timeout=3.0)
         if result.returncode != 0:
             error = cmd_error(result, "tmux next-window failed")
             return {"session": session, "error": error}, HTTPStatus.INTERNAL_SERVER_ERROR
         return {"session": session, "ok": True}, HTTPStatus.OK
 
+    @requires_known_session()
     def tmux_select_window(self, session: str, window: str) -> tuple[dict[str, Any], HTTPStatus]:
-        if session not in self.sessions:
-            return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
         window_text = str(window or "").strip()
         if not window_text.isdigit():
             return {"session": session, "error": "window must be a non-negative integer"}, HTTPStatus.BAD_REQUEST
@@ -6144,17 +6418,22 @@ class TmuxWebtermApp:
 
     def stop_auto_approve_worker(self, session: str) -> None:
         with self.auto_workers_lock:
-            worker = self.auto_workers.pop(session, None)
-        if worker is not None:
+            worker_sessions = self.auto_worker_session_map()
+            workers = [
+                self.auto_workers.pop(key)
+                for key in self.auto_approve_worker_keys_for_session_locked(session)
+                if key in self.auto_workers
+            ]
+            for key, owner_session in list(worker_sessions.items()):
+                if owner_session == session:
+                    worker_sessions.pop(key, None)
+        for worker in workers:
             worker.stop()
         self.set_persisted_auto_session(session, False)
 
+    @requires_known_session(refresh=True)
     def rename_session(self, session: str, new_name: str) -> tuple[dict[str, Any], HTTPStatus]:
-        self.refresh_sessions()
         new_name = str(new_name or "").strip()
-        unknown = self.require_known_session(session)
-        if unknown:
-            return unknown
         name_error = tmux_session_name_error(new_name)
         if name_error:
             return {"session": session, "new_name": new_name, "error": name_error}, HTTPStatus.BAD_REQUEST
@@ -6174,12 +6453,8 @@ class TmuxWebtermApp:
         self.log_event(new_name, "session_renamed", f"renamed {session} to {new_name}", {"old_session": session, "new_session": new_name})
         return {"session": session, "new_session": new_name, "renamed": True, "sessions": self.sessions, "ok": True}, HTTPStatus.OK
 
+    @requires_known_session(refresh=True)
     def kill_session(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
-        self.refresh_sessions()
-        unknown = self.require_known_session(session)
-        if unknown:
-            return unknown
-
         result = tmux(["kill-session", "-t", tmux_session_target(session)], timeout=3.0)
         if result.returncode != 0:
             error = cmd_error(result, "tmux kill-session failed")
@@ -6203,12 +6478,8 @@ class TmuxWebtermApp:
             command = "scroll-down"
         tmux(["send-keys", "-t", target, "-X", "-N", bounded_lines, command], timeout=1.0)
 
+    @requires_known_session(refresh=True)
     def tmux_copy_selection(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
-        self.refresh_sessions()
-        unknown = self.require_known_session(session)
-        if unknown:
-            return unknown
-
         sessions, errors = discover_sessions([session])
         info = sessions.get(session)
         target = info.selected_pane.target if info and info.selected_pane else tmux_session_target(session)
@@ -6263,12 +6534,8 @@ class TmuxWebtermApp:
             "errors": errors,
         }, HTTPStatus.OK
 
+    @requires_known_session(refresh=True)
     def ensure_session(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
-        self.refresh_sessions()
-        unknown = self.require_known_session(session)
-        if unknown:
-            return unknown
-
         if tmux_has_exact_session(session):
             return {"session": session, "created": False, "ok": True}, HTTPStatus.OK
 
@@ -6332,10 +6599,8 @@ class TmuxWebtermApp:
             "ok": True,
         }, HTTPStatus.OK
 
+    @requires_known_session()
     def upload_files(self, session: str, files: list[UploadedFile]) -> tuple[dict[str, Any], HTTPStatus]:
-        unknown = self.require_known_session(session)
-        if unknown:
-            return unknown
         if not files:
             return {"session": session, "error": "no files supplied"}, HTTPStatus.BAD_REQUEST
         if len(files) > UPLOAD_MAX_FILES:
@@ -6453,53 +6718,148 @@ class TmuxWebtermApp:
                 return resolved, "pane_current_path"
         return None, "session_workdir"
 
+    @requires_known_session()
     def set_auto_approve(self, session: str, enabled: bool, persist: bool = True, takeover: bool = True) -> tuple[AutoApproveState, HTTPStatus]:
-        unknown = self.require_known_session(session)
-        if unknown:
-            return unknown
-
         with self.auto_workers_lock:
-            existing = self.auto_workers.get(session)
-            if existing and not existing.alive():
-                self.auto_workers.pop(session, None)
-                existing = None
-                if persist:
-                    self.persist_auto_sessions()
+            self.prune_auto_approve_workers_locked(session)
 
             if enabled:
-                if existing:
+                if self.auto_approve_worker_keys_for_session_locked(session):
+                    self.ensure_auto_approve_agent_workers_locked(session, takeover=takeover)
                     return self.auto_approve_session_status(session), HTTPStatus.OK
                 if not tmux_has_exact_session(session):
                     return {"session": session, "enabled": False, "error": f"tmux session not found: {session}"}, HTTPStatus.NOT_FOUND
-                worker, status = self.start_auto_approve_worker(session, takeover=takeover)
-                if worker is None:
+                started, status = self.ensure_auto_approve_agent_workers_locked(session, takeover=takeover)
+                if not started:
                     return status, HTTPStatus.CONFLICT
-                self.auto_workers[session] = worker
                 if persist:
                     self.set_persisted_auto_session(session, True)
                 self.log_event(session, "yolo_enabled", "YOLO enabled", {"persist": persist})
                 return self.auto_approve_session_status(session), HTTPStatus.OK
 
-            if existing:
-                existing.stop()
-                self.auto_workers.pop(session, None)
+            keys = self.auto_approve_worker_keys_for_session_locked(session)
+            worker_sessions = self.auto_worker_session_map()
+            for key in keys:
+                worker = self.auto_workers.pop(key, None)
+                worker_sessions.pop(key, None)
+                if worker is not None:
+                    worker.stop()
+            if keys:
                 if persist:
                     self.set_persisted_auto_session(session, False)
                 self.log_event(session, "yolo_disabled", "YOLO disabled", {"persist": persist})
         return self.auto_approve_session_status(session), HTTPStatus.OK
 
-    def start_auto_approve_worker(self, session: str, takeover: bool) -> tuple[AutoApproveWorker | None, AutoApproveState]:
+    def auto_worker_session_map(self) -> dict[str, str]:
+        mapping = getattr(self, "auto_worker_sessions", None)
+        if not isinstance(mapping, dict):
+            mapping = {}
+            self.auto_worker_sessions = mapping
+        return mapping
+
+    def prune_auto_approve_workers_locked(self, session: str | None = None) -> bool:
+        removed = False
+        worker_sessions = self.auto_worker_session_map()
+        for key, worker in list(self.auto_workers.items()):
+            worker_session = worker_sessions.get(key, key)
+            if session is not None and worker_session != session:
+                continue
+            if worker.alive():
+                continue
+            self.auto_workers.pop(key, None)
+            worker_sessions.pop(key, None)
+            removed = True
+        return removed
+
+    def auto_approve_worker_keys_for_session_locked(self, session: str) -> list[str]:
+        worker_sessions = self.auto_worker_session_map()
+        return [
+            key
+            for key in self.auto_workers
+            if worker_sessions.get(key, key) == session
+        ]
+
+    def auto_approve_agent_targets(self, session: str, payload: dict[str, Any] | None = None) -> list[str]:
+        signal_payload = payload if payload is not None else self.tmux_signal_snapshot()
+        agents = signal_payload.get("agents") if isinstance(signal_payload, dict) else None
+        if not isinstance(agents, list):
+            return []
+        targets: list[str] = []
+        seen: set[str] = set()
+        for agent in agents:
+            if not isinstance(agent, dict):
+                continue
+            if str(agent.get("session") or "") != session or agent.get("dead") is True:
+                continue
+            target = str(agent.get("target") or agent.get("pane_id") or "").strip()
+            if not target or target in seen:
+                continue
+            seen.add(target)
+            targets.append(target)
+        return targets
+
+    def ensure_auto_approve_agent_workers_locked(self, session: str, takeover: bool) -> tuple[bool, AutoApproveState]:
+        worker_sessions = self.auto_worker_session_map()
+        desired_targets = self.auto_approve_agent_targets(session) or [session]
+        desired = set(desired_targets)
+        for key in self.auto_approve_worker_keys_for_session_locked(session):
+            if key in desired:
+                continue
+            worker = self.auto_workers.pop(key, None)
+            worker_sessions.pop(key, None)
+            if worker is not None:
+                worker.stop()
+        first_error: AutoApproveState | None = None
+        started_any = False
+        for target in desired_targets:
+            existing = self.auto_workers.get(target)
+            if existing is not None and existing.alive():
+                started_any = True
+                worker_sessions[target] = session
+                continue
+            worker, status = self.start_auto_approve_worker(session, takeover=takeover, target=target)
+            if worker is None:
+                if first_error is None:
+                    first_error = status
+                continue
+            self.auto_workers[target] = worker
+            worker_sessions[target] = session
+            started_any = True
+        if started_any:
+            return True, {"session": session, "target": session, "enabled": True}
+        return False, first_error or {"session": session, "enabled": False, "error": "failed to start YOLO worker"}
+
+    def sync_auto_approve_agent_workers(self, takeover: bool = False) -> None:
+        with self.auto_workers_lock:
+            self.prune_auto_approve_workers_locked()
+            worker_sessions = self.auto_worker_session_map()
+            sessions = sorted({
+                worker_sessions.get(key, key)
+                for key, worker in self.auto_workers.items()
+                if worker.alive()
+            })
+            for session in sessions:
+                if session in self.sessions:
+                    self.ensure_auto_approve_agent_workers_locked(session, takeover=takeover)
+
+    def start_auto_approve_worker(self, session: str, takeover: bool, target: str | None = None) -> tuple[AutoApproveWorker | None, AutoApproveState]:
+        worker_target = str(target or session)
+        owner_extra = self.control_server.owner_payload()
+        owner_extra["session"] = session
         worker = AutoApproveWorker(
-            session,
+            worker_target,
             interval=self.auto_approve_interval_seconds(),
             event_callback=self.log_auto_event,
-            owner_extra=self.control_server.owner_payload(),
+            owner_extra=owner_extra,
             dangerously_yolo=self.dangerously_yolo,
             prompt_source=self.auto_approve_prompt_source(),
+            capture_gate=self.auto_approve_capture_allowed_for_target,
         )
         started, owner = worker.start()
         if started:
-            return worker, worker.status()
+            status = worker.status()
+            status["session"] = session
+            return worker, status
         locked_owner = owner
         if takeover and self.request_auto_approve_release(session, owner):
             # #69: re-acquire with the SINGLE atomic non-blocking flock (worker.start), retried briefly to
@@ -6508,23 +6868,29 @@ class TmuxWebtermApp:
             # never a double-owner.
             deadline = time.monotonic() + 2.0
             while True:
+                owner_extra = self.control_server.owner_payload()
+                owner_extra["session"] = session
                 worker = AutoApproveWorker(
-                    session,
+                    worker_target,
                     interval=self.auto_approve_interval_seconds(),
                     event_callback=self.log_auto_event,
-                    owner_extra=self.control_server.owner_payload(),
+                    owner_extra=owner_extra,
                     dangerously_yolo=self.dangerously_yolo,
                     prompt_source=self.auto_approve_prompt_source(),
+                    capture_gate=self.auto_approve_capture_allowed_for_target,
                 )
                 started, owner = worker.start()
                 if started:
                     self.log_event(session, "yolo_takeover", "YOLO moved from another server", {"owner": locked_owner or {}})
-                    return worker, worker.status()
+                    status = worker.status()
+                    status["session"] = session
+                    return worker, status
                 if time.monotonic() >= deadline:
                     break
                 time.sleep(0.05)
         payload: AutoApproveState = worker.status()
         payload.update({
+            "session": session,
             "enabled": False,
             "enabled_elsewhere": True,
             "locked": True,
@@ -6562,10 +6928,24 @@ class TmuxWebtermApp:
         else:
             info = discovered_sessions.get(session)
         if info is not None:
+            selected = info.selected_pane
+            agent_targets = {item.pane_target for item in info.agents if item.pane_target}
+            if selected is not None and selected.target in agent_targets:
+                return selected.target
             agent = next((item for item in info.agents if item.pane_target), None)
             if agent is not None:
                 return agent.pane_target
         return session
+
+    def auto_approve_session_has_pending_prompt(self, session: str) -> bool:
+        with self.auto_workers_lock:
+            worker_sessions = self.auto_worker_session_map()
+            workers = [
+                worker
+                for key, worker in self.auto_workers.items()
+                if worker_sessions.get(key, key) == session
+            ]
+        return any(worker.has_pending_prompt() for worker in workers)
 
     def prompt_and_screen_status(
         self,
@@ -6575,6 +6955,8 @@ class TmuxWebtermApp:
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         hidden_prompt = normalized_prompt_state()
         target = self.auto_approve_capture_target(session, discovered_sessions=discovered_sessions)
+        if not self.auto_approve_session_has_pending_prompt(session) and not self.auto_approve_capture_allowed_for_target(target):
+            return hidden_prompt, {"key": "idle", "text": "tmux activity quiet"}
         if not capture_pane:
             # Roster path: derive working/idle from the LIVE pane via a cheap visible-only capture
             # plus cheap prompt presence from the already-captured text. This avoids the expensive
@@ -6621,9 +7003,22 @@ class TmuxWebtermApp:
         include_live_prompt: bool = True,
     ) -> AutoApproveState:
         with self.auto_workers_lock:
-            worker = self.auto_workers.get(session)
-        if worker:
-            payload: AutoApproveState = worker.status()
+            worker_sessions = self.auto_worker_session_map()
+            worker_items = [
+                (key, worker)
+                for key, worker in self.auto_workers.items()
+                if worker_sessions.get(key, key) == session
+            ]
+        if worker_items:
+            statuses = [worker.status() for _key, worker in worker_items]
+            primary = next((status for status in statuses if status.get("target") == session), statuses[0])
+            payload: AutoApproveState = dict(primary)
+            payload["target"] = session
+            payload["worker_target"] = primary.get("target")
+            payload["worker_targets"] = [status.get("target") for status in statuses if status.get("target")]
+            payload["enabled"] = any(status.get("enabled") is True for status in statuses)
+            payload["approved"] = sum(int(status.get("approved") or 0) for status in statuses)
+            payload["blocked"] = sum(int(status.get("blocked") or 0) for status in statuses)
             payload["enabled_elsewhere"] = False
             payload["locked"] = False
         else:
@@ -6656,11 +7051,15 @@ class TmuxWebtermApp:
             return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
         removed = False
         with self.auto_workers_lock:
+            worker_sessions = self.auto_worker_session_map()
             for name, worker in list(self.auto_workers.items()):
                 if not worker.alive():
-                    self.log_event(name, "worker_stopped", "YOLO worker stopped", worker.status())
+                    worker_session = worker_sessions.get(name, name)
+                    self.log_event(worker_session, "worker_stopped", "YOLO worker stopped", worker.status())
                     self.auto_workers.pop(name, None)
+                    worker_sessions.pop(name, None)
                     removed = True
+            self.sync_auto_approve_agent_workers(takeover=False)
         if removed:
             self.persist_auto_sessions()
         if session is not None:
@@ -6681,5 +7080,6 @@ class TmuxWebtermApp:
             for worker in list(self.auto_workers.values()):
                 worker.stop()
             self.auto_workers.clear()
+            self.auto_worker_session_map().clear()
         self.close_yoagent_codex_app_server()
         self.control_server.stop()

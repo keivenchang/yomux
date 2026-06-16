@@ -831,6 +831,7 @@
   "shortcuts.section.tabsPanes": "分頁／窗格",
   "shortcuts.section.terminal": "終端機",
   "shortcuts.sessionActions": "工作階段動作",
+  "shortcuts.switchTmuxWindow": "Previous / next tab",
   "shortcuts.title": "鍵盤快速鍵",
   "shortcuts.toggleComment": "切換行註解",
   "shortcuts.toggleFinder": "切換{name}",

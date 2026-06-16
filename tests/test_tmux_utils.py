@@ -32,6 +32,12 @@ def test_tmux_run_check_raises_after_timeout(monkeypatch):
         raise AssertionError("tmux_run(check=True) should raise on timeout")
 
 
+def test_tmux_command_uses_configured_socket(monkeypatch):
+    monkeypatch.setenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, "/tmp/yolomux-test-tmux.sock")
+
+    assert tmux_utils.tmux_command(["list-sessions"]) == ["tmux", "-S", "/tmp/yolomux-test-tmux.sock", "list-sessions"]
+
+
 def test_tmux_move_to_option_walks_highlight_without_crashing(monkeypatch):
     # exercise the REAL tmux_move_to_option body (only tmux_run is stubbed). The auto-approve
     # tests fake the whole tmux module, so they never run this loop — which masked a missing `import time`

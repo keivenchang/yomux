@@ -898,10 +898,34 @@ function sessionFileRelativeTimeText(mtime, nowSeconds = Date.now() / 1000) {
   return compactRelativeFileTimeText('day', daysText);
 }
 
-function sessionFileDisplayTimeText(mtime) {
-  if (fileExplorerTreeDateMode === 'date') return sessionFileTimeText(mtime);
-  if (fileExplorerTreeDateMode === 'relative') return sessionFileRelativeTimeText(mtime);
-  return '';
+function sessionFileMissingTimeText() {
+  return '—';
+}
+
+function sessionFileDisplayTimeText(mtime, options = {}) {
+  if (fileExplorerTreeDateMode === 'none') return '';
+  const text = fileExplorerTreeDateMode === 'date' ? sessionFileTimeText(mtime)
+    : fileExplorerTreeDateMode === 'relative' ? sessionFileRelativeTimeText(mtime)
+      : '';
+  if (!text && options.placeholderForMissingTime === true) return sessionFileMissingTimeText();
+  return text;
+}
+
+function sessionFileDisplayStatus(item) {
+  const status = normalizeGitStatus(item?.status || 'M');
+  return item?.missing === true && !['A', '?'].includes(status) ? 'D' : status;
+}
+
+function sessionFileHasMissingTime(item) {
+  return Number(item?.mtime || 0) <= 0;
+}
+
+function sessionFileDatePlaceholderNeeded(item) {
+  return Boolean(item && sessionFileHasMissingTime(item));
+}
+
+function sessionFileDisplayTimeTextForEntry(entry) {
+  return sessionFileDisplayTimeText(entry?.mtime, {placeholderForMissingTime: entry?.changedFileMissingTime === true});
 }
 
 function sessionFileDiffText(item) {
@@ -1239,7 +1263,7 @@ function buildSessionFileTree(repoPath, sessionFiles) {
     if (!entriesByDir.has(key)) entriesByDir.set(key, []);
     const siblings = entriesByDir.get(key);
     if (!siblings.some(e => e.name === fileName)) {
-      siblings.push({name: fileName, kind: 'file', mtime: item.mtime, size: item.size});
+      siblings.push({name: fileName, kind: 'file', mtime: item.mtime, size: item.size, missing: item.missing === true, changedFileMissingTime: sessionFileDatePlaceholderNeeded(item)});
     }
   }
   const topLevel = entriesByDir.get(normalizeDirectoryPath(repoPath)) || [];

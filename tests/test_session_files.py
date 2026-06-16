@@ -285,6 +285,28 @@ def test_file_mtime_or_fallback_uses_fallback_for_missing_path(tmp_path):
     assert session_files.file_mtime_or_fallback(tmp_path / "missing.txt", fallback=1234) == 1234
 
 
+def test_session_files_payload_marks_statless_touched_path_missing(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test User")
+    tracked = repo / "README.md"
+    tracked.write_text("base\n", encoding="utf-8")
+    git(repo, "add", "README.md")
+    git(repo, "commit", "-m", "base")
+    transcript = tmp_path / "rollout.jsonl"
+    transcript.write_text('{"msg":"*** Begin Patch\\n*** Update File: docs/GUI_SPECS.md\\n"}\n', encoding="utf-8")
+    os.utime(transcript, (2000, 2000))
+    info = SessionInfo(session="s1", panes=[], selected_pane=None, agents=[agent("codex", transcript, repo)])
+
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=2500)
+
+    item = next(file for file in payload["files"] if file["path"] == "docs/GUI_SPECS.md")
+    assert item["missing"] is True
+    assert item["source"] == "transcript"
+
+
 def test_session_files_payload_collects_multiple_agents_for_one_file(tmp_path):
     # C5: when both Claude and Codex touch the same file, the entry lists BOTH (no overwrite), so the UI
     # can render two agent icons.

@@ -831,6 +831,7 @@
   "shortcuts.section.tabsPanes": "Pestañas / Paneles",
   "shortcuts.section.terminal": "Terminal",
   "shortcuts.sessionActions": "Acciones de sesión",
+  "shortcuts.switchTmuxWindow": "Previous / next tab",
   "shortcuts.title": "Atajos de teclado",
   "shortcuts.toggleComment": "Alternar comentario de línea",
   "shortcuts.toggleFinder": "Alternar {name}",

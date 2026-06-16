@@ -810,6 +810,7 @@
   "shortcuts.closeTab": "إغلاق تبويب المحرر/العارض النشط",
   "shortcuts.commandPalette": "لوحة الأوامر",
   "shortcuts.copyTmuxSelection": "Copy tmux selection",
+  "shortcuts.switchTmuxWindow": "Previous / next tab",
   "shortcuts.editorNav": "المحرر: رجوع / تقدّم",
   "shortcuts.fileQuickOpen": "الفتح السريع للملف",
   "shortcuts.find": "بحث",

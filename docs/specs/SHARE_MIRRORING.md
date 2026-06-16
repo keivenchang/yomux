@@ -241,7 +241,7 @@ The replayed DOM must be inert:
 - No form submission or local mutation handlers.
 - Harmless text selection and copy remain allowed where the browser permits it.
 
-The viewer should apply frames only when `epoch` and `sequence` are valid. A gap means request a keyframe. A mutation targeting an unknown node means request a keyframe. A digest mismatch means request a keyframe and preserve the failing debug report.
+The viewer should apply frames only when `epoch` and `sequence` are valid. A gap means request a keyframe. A digest mismatch means request a keyframe and preserve the failing debug report. A digestless mutation targeting an unknown node is treated as a stale mutation from a replaced subtree: the viewer advances the replay cursor, increments stale-frame diagnostics, stays `mirrored`, and waits for the next scheduled keyframe instead of creating a `viewer behind` loop during topology churn.
 
 Repair requests must be rate-limited. A broken viewer or repeated digest mismatch can otherwise create a denial-of-service loop: viewer asks for repair, host serializes a large DOM keyframe, viewer misses or rejects it, and the cycle repeats. Viewers keep one keyframe repair in flight and back off repeated requests; hosts coalesce repeated `dom-keyframe-request` messages and serialize at most one full DOM keyframe per throttle window. Debug health exposes request/keyframe suppression counts so this failure mode is visible before it melts the host or server queues.
 
@@ -338,7 +338,7 @@ Metrics to collect:
 - Keyframe frequency by reason.
 - Viewer replay latency.
 - Dropped frame count.
-- Stale frame count, separate from dropped frames. A stale frame means an old epoch or already-applied sequence was ignored; it must not put the viewer into `viewer behind`.
+- Stale frame count, separate from dropped frames. A stale frame means an old epoch, already-applied sequence, or digestless unknown-node mutation was ignored; it must not put the viewer into `viewer behind`.
 - Digest mismatch rate.
 - Terminal placeholder rebind count.
 

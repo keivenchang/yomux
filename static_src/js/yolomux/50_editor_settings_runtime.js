@@ -731,6 +731,9 @@ function applyGlobalThemeMode(options = {}) {
   applyActiveColor(initialSetting('appearance.active_color', 'green'));
   applySeparatorColor(initialSetting('appearance.separator_color', 'theme'));
   scheduleShareTopologySnapshot('theme');
+  if (typeof scheduleShareAppearancePublish === 'function') {
+    scheduleShareAppearancePublish({reason: options.reason || 'theme', topology: false});
+  }
 }
 
 let globalThemeMediaListenerInstalled = false;
@@ -741,7 +744,7 @@ function installGlobalThemeMediaListener() {
   if (!query) return;
   const handler = () => {
     if (normalizeGlobalThemeMode(globalThemeMode) !== 'system') return;
-    applyGlobalThemeMode({updateEditor: true, updateTerminals: true});
+    applyGlobalThemeMode({updateEditor: true, updateTerminals: true, reason: 'theme-system'});
     renderSessionButtons();
     renderPaneTabStrips();
   };
@@ -771,6 +774,8 @@ function applyTerminalRuntimeSettings(options = {}) {
     item.term.options.scrollback = terminalScrollback;
     item.term.options.theme = terminalThemeForSession(session, theme);
     item.term.options.minimumContrastRatio = minContrast;
+    item.term.clearTextureAtlas?.();
+    refreshTerminal(session);
     if (item.container?.style) item.container.style.background = theme.background;
     if (options.fit !== false) scheduleFit(session);
   }

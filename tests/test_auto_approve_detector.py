@@ -540,6 +540,18 @@ VISIBLE_AGENT_WORKING_CASES = [
         None,
         id="working-line-with-real-shell-prompt-below-is-stale",
     ),
+    pytest.param(
+        "\n".join([
+            "Working (12m 56s · esc to interrupt)",
+            "",
+            "› Write tests for @filename",
+            "",
+            "  gpt-5.5 xhigh · ~/yolomux.dev1 Goal achieved (42.1k tokens)",
+        ]),
+        True,
+        "working",
+        id="codex-bare-working-row-above-composer",
+    ),
 ]
 
 
@@ -644,7 +656,7 @@ def test_approval_prompt_state_reports_selected_codex_option():
     visible_text = "\n".join([
         "  Would you like to run the following command?",
         "",
-        "  $ curl -sk -u yolomux:yolomux https://localhost:7777/",
+        "  $ curl -sk -u yolomux:yolomux https://localhost:19077/",
         "",
         "  1. Yes, proceed (y)",
         "› 2. Yes, and don't ask again for commands that start with `curl -sk -u` (p)",

@@ -591,6 +591,7 @@ def session_file_entry(
     rel_path = repo_relative_path(path, repo) if repo else None
     agent_list = [a for a in agents if a]
     tracked_diff = bool(repo) and source == "git" and status != "?"
+    missing = not path.exists()
     if diff_tracked is not None:
         tracked_diff = diff_tracked
     return {
@@ -605,6 +606,7 @@ def session_file_entry(
         "abs_path": str(path),
         "mtime": file_mtime(path) if mtime is None else mtime,
         "size": file_size(path),
+        "missing": missing,
         "source": source,
         "added": added,
         "removed": removed,

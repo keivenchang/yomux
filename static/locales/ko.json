@@ -831,6 +831,7 @@
   "shortcuts.section.tabsPanes": "탭 / 창",
   "shortcuts.section.terminal": "Terminal",
   "shortcuts.sessionActions": "세션 동작",
+  "shortcuts.switchTmuxWindow": "Previous / next tab",
   "shortcuts.title": "키보드 단축키",
   "shortcuts.toggleComment": "줄 주석 전환",
   "shortcuts.toggleFinder": "{name} 전환",

@@ -810,6 +810,7 @@
   "shortcuts.closeTab": "Закрыть активную вкладку редактора/просмотрщика",
   "shortcuts.commandPalette": "Палитра команд",
   "shortcuts.copyTmuxSelection": "Copy tmux selection",
+  "shortcuts.switchTmuxWindow": "Previous / next tab",
   "shortcuts.editorNav": "Редактор назад / вперёд",
   "shortcuts.fileQuickOpen": "Быстрое открытие файла",
   "shortcuts.find": "Найти",

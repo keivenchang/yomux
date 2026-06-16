@@ -702,6 +702,38 @@ async function selectSession(session, options = {}) {
   await activateTabInExistingPane(session);
 }
 
+function paneTabTraversalPositions(slots = layoutSlots) {
+  return layoutLeafSlots(slots?.[layoutTreeKey])
+    .flatMap(slot => paneTabs(slot, slots).map(item => ({slot, item})))
+    .filter(position => position.item);
+}
+
+function adjacentPaneTabPosition(direction, options = {}) {
+  const slots = options.slots || layoutSlots;
+  const positions = paneTabTraversalPositions(slots);
+  if (positions.length < 2) return null;
+  const currentItem = String(options.item || visualActivePaneItem() || activePaneItems(slots)[0] || '');
+  const currentSlot = options.slot || slotForItem(currentItem, slots);
+  if (!currentItem || !currentSlot) return null;
+  const index = positions.findIndex(position => position.slot === currentSlot && position.item === currentItem);
+  if (index < 0) return null;
+  const offset = direction < 0 ? -1 : 1;
+  return positions[(index + offset + positions.length) % positions.length] || null;
+}
+
+function selectAdjacentPaneTab(direction, options = {}) {
+  const target = adjacentPaneTabPosition(direction, options);
+  if (!target?.item || !target.slot) return false;
+  const currentItem = String(options.item || visualActivePaneItem() || '');
+  if (target.item === currentItem && target.slot === (options.slot || slotForItem(currentItem))) return false;
+  const activationOptions = {...options};
+  delete activationOptions.item;
+  delete activationOptions.slot;
+  delete activationOptions.slots;
+  activatePaneTab(target.slot, target.item, activationOptions);
+  return true;
+}
+
 function sessionAgentKind(session) {
   const info = transcriptMeta.sessions?.[session];
   const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
@@ -1454,6 +1486,10 @@ function terminalFitIsUnchanged(item, size) {
     && item.term.rows === size.rows;
 }
 
+function terminalCanPublishRemoteSize() {
+  return !shareViewMode && document.visibilityState !== 'hidden';
+}
+
 function fitTerminal(session, options = {}) {
   const item = terminals.get(session);
   if (!item || !item.term || !item.container) return;
@@ -1478,22 +1514,25 @@ function fitTerminal(session, options = {}) {
   item.lastFitSignature = signature;
   const changed = item.term.cols !== size.cols || item.term.rows !== size.rows;
   if (changed) item.term.resize(size.cols, size.rows);
-  if (!shareViewMode && changed) scheduleRemoteResize(session);
+  if (changed) scheduleRemoteResize(session);
   refreshTerminal(session);
 }
 
 function sendRemoteResize(session) {
-  if (shareViewMode) return;
+  if (!terminalCanPublishRemoteSize()) return;
   const item = terminals.get(session);
   if (!item?.term || item?.socket?.readyState !== WebSocket.OPEN) return;
-  item.socket.send(JSON.stringify({type: 'resize', cols: item.term.cols, rows: item.term.rows}));
+  item.socket.send(JSON.stringify({type: 'resize', cols: item.term.cols, rows: item.term.rows, foreground: true}));
 }
 
 function scheduleRemoteResize(session, delay = remoteResizeDelayMs) {
-  if (shareViewMode) return;
   const item = terminals.get(session);
   if (!item) return;
   if (item.resizeTimer) clearTimeout(item.resizeTimer);
+  if (!terminalCanPublishRemoteSize()) {
+    item.resizeTimer = null;
+    return;
+  }
   item.resizeTimer = setTimeout(() => {
     item.resizeTimer = null;
     sendRemoteResize(session);
@@ -1837,10 +1876,10 @@ function dropZoneForRect(event, rect) {
   if (!rect.width || !rect.height) return 'middle';
   const x = (event.clientX - rect.left) / rect.width;
   const y = (event.clientY - rect.top) / rect.height;
-  if (y < 0.24) return rect.height / 2 >= (rootCssLengthPx('--min-split-pane-height') || 220) ? 'top' : 'middle';
-  if (y > 0.76) return rect.height / 2 >= (rootCssLengthPx('--min-split-pane-height') || 220) ? 'bottom' : 'middle';
-  if (x < 0.24) return rect.width / 2 >= (rootCssLengthPx('--min-split-pane-width') || 320) ? 'left' : 'middle';
-  if (x > 0.76) return rect.width / 2 >= (rootCssLengthPx('--min-split-pane-width') || 320) ? 'right' : 'middle';
+  if (y < 0.24) return rect.height / 2 >= minSplitPaneHeightPx() ? 'top' : 'middle';
+  if (y > 0.76) return rect.height / 2 >= minSplitPaneHeightPx() ? 'bottom' : 'middle';
+  if (x < 0.24) return rect.width / 2 >= minSplitPaneWidthPx() ? 'left' : 'middle';
+  if (x > 0.76) return rect.width / 2 >= minSplitPaneWidthPx() ? 'right' : 'middle';
   return 'middle';
 }
 
@@ -1870,7 +1909,7 @@ function dropIntentTargetRect(intent) {
 }
 
 function minHeightForLayoutItem(_item) {
-  return rootCssLengthPx('--min-split-pane-height') || 220;
+  return minSplitPaneHeightPx();
 }
 
 function dropIntentInlineSize(intent) {

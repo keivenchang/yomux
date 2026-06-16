@@ -947,6 +947,8 @@ async function openDraggedFilesInEditor(payload, options = {}) {
 }
 
 function terminalCurrentPath(session) {
+  const signalPath = tmuxSignalPanePathForSession(session);
+  if (signalPath) return signalPath;
   const info = transcriptMeta.sessions?.[session];
   return terminalDisplayPane(info)?.current_path || info?.selected_pane?.current_path || '';
 }

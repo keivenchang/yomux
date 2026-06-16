@@ -368,7 +368,15 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     performance: {now: () => 0},
     requestAnimationFrame(callback) { return callback(); },
     setInterval() {},
-    setTimeout() {},
+    // The bundle schedules the batched /api/fs/batch directory-listing flush via
+    // setTimeout(flushFileExplorerFsBatch, fileExplorerFsBatchDelayMs) — and 8ms is UNIQUE to that flush
+    // (verified: no other bundle timer uses an 8ms delay). All other bundle timers (polls, debounces,
+    // share publishers) must stay no-ops here. So fire ONLY the 8ms flush, on a real setImmediate, so any
+    // code that `await`s a directory listing settles instead of hanging forever (which used to leave the
+    // trailing suite IIFE unsettled and silently exit 0 — see the suite watchdog + AGENTS.md note).
+    // Synchronous back-to-back enqueues still batch into one request (no await between them = no yield),
+    // so batching/coalescing tests are unaffected.
+    setTimeout(callback, ms) { if (ms === 8 && typeof callback === 'function') return setImmediate(callback); },
     window: {
       __listeners: windowListeners,
       addEventListener(type, listener) {
@@ -616,6 +624,8 @@ globalThis.__layoutTestApi = {
   prefsItemId,
   menuTabCommand,
   activatePaneTab,
+  adjacentPaneTabPosition,
+  selectAdjacentPaneTab,
   currentSessionActionTarget,
   setFocusedPanelItem,
   setFocusedTerminal,
@@ -633,6 +643,7 @@ globalThis.__layoutTestApi = {
   focusTerminalFromUserAction,
   handleTerminalDataForTest: handleTerminalData,
   toggleFileExplorerShortcut,
+  clearFileExplorerShortcutRestoreSlotsForTest() { fileExplorerShortcutRestoreSlots = null; },
   focusedTerminalForTest() { return focusedTerminal; },
   globalShortcutTargetAllowsAppAction,
   installTerminalCopyShortcutForTest: installTerminalCopyShortcut,
@@ -653,6 +664,8 @@ globalThis.__layoutTestApi = {
     delete window.getSelection;
   },
   bindClipboardPasteForTest: bindClipboardPaste,
+  dataTransferHasImagePayloadForTest: dataTransferHasImagePayload,
+  dataTransferImageFilesForTest: dataTransferImageFiles,
   documentListenersForTest(type) { return [...(document.__listeners.get(type) || [])]; },
   setDocumentQuerySelectorForTest(fn) { document.querySelector = fn; },
   setDocumentQuerySelectorAllForTest(fn) { document.querySelectorAll = fn; },
@@ -825,6 +838,8 @@ globalThis.__layoutTestApi = {
   terminalMinimumContrastRatio,
   globalThemeModeForTest() { return globalThemeMode; },
   setGlobalThemeModeForTest(value) { globalThemeMode = normalizeGlobalThemeMode(value); },
+  resolvedGlobalThemeModeForTest: resolvedGlobalThemeMode,
+  shareResolvedGlobalThemeModeForTest() { return shareResolvedGlobalThemeMode; },
   terminalThemeModeForTest() { return terminalThemeMode; },
   setTerminalThemeModeForTest(value) { terminalThemeMode = normalizeTerminalThemeMode(value); },
   expandPaneFromLayout,
@@ -834,6 +849,9 @@ globalThis.__layoutTestApi = {
   globalActivityStatusLineHtml,
   browserFaviconBadgeCount,
   browserFaviconBadgeLabel,
+  tmuxSignalPaneForTarget,
+  tmuxSignalAgentStateForSession,
+  setTmuxSignalStateForTest(payload) { tmuxSignalState = payload; },
   setAutoApproveStateForTest(session, state) { autoApproveStates.set(session, state); },
   setAgentAuthForTest(value) { agentAuth = value || {}; },
   maxTabsPerPane,
@@ -1005,6 +1023,8 @@ globalThis.__layoutTestApi = {
   slotCanAutoPrune,
   splitPercentForPointer,
   layoutNodeMinWidth,
+  minSplitPaneWidthPx,
+  minSplitPaneHeightPx,
   layoutVisiblePaneCount,
   fileImagePreviewMinShowDelayMs,
   splitPercentForNewItem,
@@ -1111,6 +1131,7 @@ globalThis.__layoutTestApi = {
   setActivitySummaryPayloadForTest(payload) {
     activitySummaryPayload = payload;
   },
+  yoagentRecentAgentsHtmlForTest: yoagentRecentAgentsHtml,
   applyServerMetadataPulsesForTest(session, pulses) {
     updateMetadataBadgePulses({sessions: {[session]: {metadata_badge_pulse_remaining_ms: pulses}}});
   },
@@ -1144,6 +1165,10 @@ globalThis.__layoutTestApi = {
   shareCreateFormHtmlForTest: shareCreateFormHtml,
   shareCreatePayloadFromFormForTest: shareCreatePayloadFromForm,
   shareBuildUiMessageForTest: shareBuildUiMessage,
+  setActiveSharesForTest(shares) { setActiveShares(shares || []); },
+  setShareHostSocketForTest(token, socket) { shareHostSockets.set(String(token || ''), socket); },
+  shareHostQueueForTest(token) { return [...(shareHostQueues.get(String(token || '')) || [])]; },
+  sharePublishPointerEventForTest: sharePublishPointerEvent,
   applyShareUiMessageForTest: applyShareUiMessage,
   shareMirrorProtocolForTest: shareMirrorProtocol,
   shareReplayFeatureEnabledForTest: shareReplayFeatureEnabled,
@@ -1205,6 +1230,10 @@ globalThis.__layoutTestApi = {
   shareCreateDomKeyframeMessageForTest: shareCreateDomKeyframeMessage,
   shareDropStaleMirrorFrameForTest: shareDropStaleMirrorFrame,
   scheduleShareTopologySnapshotForTest: scheduleShareTopologySnapshot,
+  shareTopologyDomKeyframeDelayMsForTest: shareTopologyDomKeyframeDelayMs,
+  setSharePointerLastPublishedAtForTest(value) { sharePointerLastPublishedAt = Number(value); },
+  setShareReplayHostLastKeyframeAtForTest(value) { shareReplayHostLastKeyframeAt = Number(value) || 0; },
+  setShareReplayTopologyKeyframeQueuedAtForTest(value) { shareReplayTopologyKeyframeQueuedAt = Number(value) || 0; },
   shareMirrorLastFrameForTest(sender = '', family = '') {
     const cleanSender = String(sender || 'host');
     const key = family ? cleanSender + ':' + family : cleanSender;
@@ -1228,15 +1257,18 @@ globalThis.__layoutTestApi = {
   shareCanPublishScrollForTest: shareCanPublishScroll,
   setShareLastAppliedScrollForTest(target, state, payload = {}) {
     const cleanTarget = String(target || '');
-    shareLastAppliedScrollByTarget.set(cleanTarget, state || {});
-    shareLastAppliedScrollPayloadByTarget.set(cleanTarget, {...payload, target: cleanTarget, ...(state || {})});
+    const cleanState = state || {};
+    shareLastAppliedScrollByTarget.set(cleanTarget, {
+      ...cleanState,
+      payload: {...payload, target: cleanTarget, ...cleanState},
+    });
   },
   shareLastAppliedScrollForTest(target) {
     const state = shareLastAppliedScrollByTarget.get(String(target || ''));
-    return state ? {...state} : null;
+    return state ? {top: state.top, left: state.left} : null;
   },
   shareLastAppliedScrollPayloadForTest(target) {
-    const state = shareLastAppliedScrollPayloadByTarget.get(String(target || ''));
+    const state = shareLastAppliedScrollByTarget.get(String(target || ''))?.payload;
     return state ? {...state} : null;
   },
   restoreShareReadonlyScrollTargetForTest: restoreShareReadonlyScrollTarget,
@@ -2844,6 +2876,30 @@ test('t@2114', () => {
   assert.equal(api.browserFaviconBadgeCount({running: 0, attention: 0}), 0, 'favicon badge renders 0 when all sessions are idle');
   assert.equal(api.browserFaviconBadgeLabel(0), '0', 'favicon badge explicitly shows 0 when idle');
   assert.equal(api.browserFaviconBadgeLabel(107), '99+', 'favicon badge clamps large counts to a short label');
+  const signalApi = loadYolomux('', ['1', '2']);
+  signalApi.setDocumentTitleNowForTest(200000);
+  signalApi.setTmuxSignalStateForTest({
+    windows: [
+      {session: 'background-agent', window_index: '0', activity_ts: 199},
+      {session: 'old-output', window_index: '0', activity_ts: 10},
+    ],
+  });
+  signalApi.setAutoApproveStateForTest('1', {enabled: true, screen: {key: 'working'}});
+  signalApi.setAutoApproveStateForTest('2', {enabled: true, screen: {key: 'blocked'}});
+  const signalCounts = signalApi.globalActivityCounts();
+  assert.equal(signalCounts.running, 2, 'server-wide tmux signals count a recent active window outside the current tab plus YO-active sessions');
+  assert.equal(signalCounts.blocked, 1, 'attention counts still come from YO screen state');
+  assert.equal(signalCounts.total, 4, 'signal windows and configured tmux sessions share one total without requiring every window in the tab URL');
+  assert.equal(signalCounts.idle, 1, 'an old tmux window outside the activity window remains idle');
+  assert.equal(signalApi.browserFaviconBadgeCount(signalCounts), 2, 'favicon badge counts server-wide active windows');
+  signalApi.setTmuxSignalStateForTest({
+    windows: [
+      {key: 'background-agent:0', session: 'background-agent', window_index: '0', activity_ts: 10, bell_flag: true},
+    ],
+  });
+  const bellCounts = signalApi.globalActivityCounts();
+  assert.equal(bellCounts.questions, 1, 'tmux bell windows count as QUES? attention');
+  assert.equal(bellCounts.attention, 2, 'tmux bell attention combines with YO blocked attention');
   const falsePositiveApi = loadYolomux('', ['1', '2', '3', '4', '8001', '8002', '8003', '9']);
   for (const session of ['1', '2', '3', '4', '8001', '8002', '8003', '9']) {
     falsePositiveApi.setAutoApproveStateForTest(session, {screen: {key: 'idle'}});
@@ -3334,6 +3390,13 @@ test('t@2463', () => {
   assert.equal(api.splitPercentForPointer(section, row, {clientX: 990, clientY: 0}), 68);
   const nested = api.splitNode('row', api.leafNode('left'), api.splitNode('row', api.leafNode('slot1'), api.leafNode('slot2'), 50), 50);
   assert.equal(api.layoutNodeMinWidth(nested), 960);
+  const css = fs.readFileSync('static/yolomux.css', 'utf8');
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(css.includes('--min-split-pane-width: 320px'));
+  assert.ok(css.includes('--min-split-pane-height: 220px'));
+  assert.equal(api.minSplitPaneWidthPx(), 320, 'minSplitPaneWidthPx follows the CSS token/fallback value');
+  assert.equal(api.minSplitPaneHeightPx(), 220, 'minSplitPaneHeightPx follows the CSS token/fallback value');
+  assert.equal(/rootCssLengthPx\('--min-split-pane-(width|height)'\)\s*\|\|\s*(320|220)/.test(source), false, 'min split-pane fallback literals stay behind shared helpers');
 });
 
 test('t@2474', () => {
@@ -3585,7 +3648,8 @@ test('t@2560', () => {
   assert.ok(changesHtml.includes('file-tree-row kind-file git-modified has-agent'), 'changed-file rows use the shared file-tree row renderer and inline-agent layout');
   assert.ok(/file-tree-git-status"[^>]*title="M: modified"[^>]*aria-label="M: modified"[^>]*>M<\/span>/.test(changesHtml), 'changed-file rows show and label the M status badge in the shared file-tree status slot');
   assert.ok(/file-tree-git-status"[^>]*title="A: added"[^>]*aria-label="A: added"[^>]*>A<\/span>/.test(changesHtml), 'added changed-file rows label the A status badge');
-  assert.ok(changesHtml.includes('file-tree-dir-count">2 files changed</span>'), 'changed-file folders show a recursive changed-file count from the shared row renderer');
+  assert.ok(changesHtml.includes('file-tree-dir-count">2</span>'), 'changed-file folders show a bare recursive changed-file count from the shared row renderer');
+  assert.equal(changesHtml.includes('files changed</span>'), false, 'changed-file folders do not repeat the file-count label in the tree row metadata');
   assert.ok(changesHtml.includes('file-tree-icon'), 'changed-file rows show a file-type icon slot');
   assert.ok(changesHtml.includes('file-tree-date'), 'changed-file rows wrap the date for skinny styling');
   assert.ok(/class="file-tree-row kind-dir[^"]*"[^>]*data-path="\/repo\/app\/src"[\s\S]*<span class="file-tree-date"[^>]*>[^<]+<\/span>/.test(changesHtml), 'Differ directory rows show the same non-empty date slot as Finder');
@@ -3705,6 +3769,11 @@ test('t@2560', () => {
   }
   assert.ok(/file-tree-name[^>]*>README\.md<\/span>[\s\S]*file-tree-agent[\s\S]*changes-file-agent[\s\S]*file-tree-diff[\s\S]*changes-diff-add[^>]*>\+2<\/span>[\s\S]*changes-diff-remove[^>]*>-1<\/span>[\s\S]*file-tree-dir-count[\s\S]*file-tree-git-status[^>]*>M<\/span>[\s\S]*file-tree-date/.test(compactChangeHtml), 'compact changed-file row order is file, AI icon, diff counts, file count, status, date');
   assert.ok(/file-tree-git-status[^>]*title="M: modified"[^>]*aria-label="M: modified"[^>]*>M<\/span>/.test(compactChangeHtml), 'compact changed-file M badge explains itself on hover');
+  const missingChangeHtml = api.changesGroupsSnapshotHtmlForTest([
+    {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'docs/GUI_SPECS.md', abs_path: '/repo/app/docs/GUI_SPECS.md', mtime: 0, added: 1, removed: 0, missing: true},
+  ], {compact: true});
+  assert.ok(/file-tree-git-status[^>]*title="D: deleted"[^>]*aria-label="D: deleted"[^>]*>D<\/span>/.test(missingChangeHtml), 'stat-less changed-file rows display as missing/deleted instead of ordinary modified');
+  assert.ok(/file-tree-date[^>]*>—<\/span>/.test(missingChangeHtml), 'stat-less changed-file rows keep the date column visible with a placeholder');
   assert.equal(changesHtml.includes('>codex<'), false, 'changed-file rows do not spell out the agent kind');
   assert.ok(changesHtml.includes('data-open-change-file="/repo/app/src/new.py"'));
   assert.ok(changesHtml.includes('data-open-change-status="A"'), 'changed-file clicks carry status for deleted-file diff opens');
@@ -3835,6 +3904,21 @@ test('t@2560', () => {
     });
     unpinnedShareApi.setSessionFilesPayloadForTest({session: '6', loaded: true, files: [], repos: [], errors: []});
     assert.equal(unpinnedShareApi.fileExplorerSessionFilesTargetSessionForTest(), '', 'read-only share without a host Finder pin does not fall back to payload session or sessions[0]');
+  }
+  {
+    const signalPathApi = loadYolomux('', ['5']);
+    signalPathApi.setTranscriptInfoForTest('5', {
+      selected_pane: {current_path: '/home/test/stale-transcript-path'},
+    });
+    signalPathApi.setTmuxSignalStateForTest({
+      windows: [{
+        key: '5:0',
+        session: '5',
+        active: true,
+        panes: [{session: '5', active: true, current_path: '/home/test/live-tmux-path'}],
+      }],
+    });
+    assert.equal(signalPathApi.activeTmuxDirectoryPath('5'), '/home/test/live-tmux-path', 'Finder sync prefers direct tmux pane_current_path over stale transcript metadata');
   }
   {
     const hoverApi = loadYolomux('', ['5', '6']);
@@ -4738,6 +4822,23 @@ test('t@2560', () => {
   assert.equal(singlePaneUrlApi.canPaneExpand('1'), false);
   assert.ok(singlePaneUrlApi.panelControlsHtml('1').includes('hidden type="button" data-pane-expand="1"'));
 
+  const staleFinderWidthUrlApi = loadYolomux(
+    '?sessions=1,2&layout=row@22(left,slot1)&tabs=left:1;slot1:2',
+    ['1', '2'],
+    'http:',
+    'Linux x86_64',
+    'admin',
+    fileExplorerClosedOptions(),
+  );
+  assert.deepStrictEqual(canonical(staleFinderWidthUrlApi.serialize(staleFinderWidthUrlApi.currentSlots())), {
+    tree: {split: 'row', pct: 50, children: [{slot: 'left'}, {slot: 'slot1'}]},
+    panes: {
+      left: {tabs: ['1'], active: '1'},
+      slot1: {tabs: ['2'], active: '2'},
+    },
+  }, 'stale Finder-width URLs do not restore a non-Finder terminal pane at 22%');
+  assert.equal(staleFinderWidthUrlApi.layoutParamValue(staleFinderWidthUrlApi.currentSlots()), 'row@50(left,slot1)');
+
   const finderBesideSinglePaneUrlApi = loadYolomux(
     '?sessions=files,3&layout=row@22(slot1,left)&tabs=slot1:files;left:1,6,5,2,ant,4,3*',
     ['1', '2', '3', '4', '5', '6', 'ant'],
@@ -4764,14 +4865,39 @@ test('t@2560', () => {
   const finderLayoutBeforeToggle = api.layoutParamValue(api.currentSlots());
   api.toggleFileExplorerShortcut();
   assert.equal(api.itemInLayout('__files__'), false, 'app shortcut hides the Finder pane');
-  assert.equal(api.sessionStorageValueForTest(FILE_EXPLORER_OPEN_INTENT_STORAGE_KEY_FOR_TEST), '0', 'hiding Finder records explicit per-tab close intent');
-  assert.equal(api.fileExplorerClosedByUserForTest(), true, 'Finder self-heal sees the explicit close intent');
+  assert.equal(api.sessionStorageValueForTest(FILE_EXPLORER_OPEN_INTENT_STORAGE_KEY_FOR_TEST), null, 'keyboard-hiding Finder does not write the sticky closed intent');
+  assert.equal(api.fileExplorerClosedByUserForTest(), false, 'keyboard-hiding Finder is reversible and does not block self-heal');
   assert.equal(api.statusTextForTest(), `${api.fileExplorerLabel()} hidden - ${api.appShortcutText('B')} restores`, 'hiding Finder announces how to restore it');
   assert.equal(api.focusedPanelItemForTest(), '1', 'hiding Finder keeps focus on the active terminal');
   api.toggleFileExplorerShortcut();
   assert.equal(api.sessionStorageValueForTest(FILE_EXPLORER_OPEN_INTENT_STORAGE_KEY_FOR_TEST), '1', 'restoring Finder records explicit per-tab open intent');
   assert.equal(api.layoutParamValue(api.currentSlots()), finderLayoutBeforeToggle, 'app shortcut restores the prior Finder position and split size');
   assert.equal(api.focusedPanelItemForTest(), '1', 'restoring Finder keeps focus on the active terminal');
+  api.toggleFileExplorerShortcut();
+  api.clearFileExplorerShortcutRestoreSlotsForTest();
+  api.toggleFileExplorerShortcut();
+  assert.equal(api.itemInLayout('__files__'), true, 'app shortcut reopens Finder even when the in-memory restore snapshot is gone');
+
+  const focusedEditor = api.testElementForId('shortcut-editor');
+  focusedEditor.className = 'cm-editor';
+  api.setDocumentActiveElementForTest(focusedEditor);
+  const shortcutListeners = api.windowListenersForTest('keydown');
+  const shortcutEvent = {
+    key: 'b',
+    code: 'KeyB',
+    metaKey: false,
+    ctrlKey: true,
+    altKey: false,
+    shiftKey: false,
+    target: focusedEditor,
+    prevented: false,
+    preventDefault() { this.prevented = true; },
+    stopPropagation() {},
+  };
+  shortcutListeners.forEach(listener => listener(shortcutEvent));
+  assert.equal(shortcutEvent.prevented, false, 'Cmd/Ctrl-B is not stolen while editor focus owns text formatting');
+  assert.equal(api.itemInLayout('__files__'), true, 'blocked Cmd/Ctrl-B does not hide Finder from editor focus');
+  api.setDocumentActiveElementForTest(null);
 
   const fileEditorItem = api.registerFileEditorLayoutItem('/home/test/yolomux.dev/README.md');
   const fileEditorSlots = api.emptyLayoutSlots();
@@ -5364,6 +5490,23 @@ test('t@2560', () => {
   api.setTerminalThemeModeForTest('follow-app');
   assert.equal(api.terminalThemeForGlobalTheme('light').background, '#ffffff', 'follow-app maps to the resolved app theme');
   assert.equal(api.terminalThemeForGlobalTheme('dark').background, '#11151d');
+  {
+    const refreshCalls = [];
+    let textureClears = 0;
+    const term = {
+      rows: 24,
+      cols: 80,
+      options: {},
+      refresh(start, end) { refreshCalls.push([start, end]); },
+      clearTextureAtlas() { textureClears += 1; },
+    };
+    api.registerTerminalForTest('1', term);
+    api.setGlobalThemeModeForTest('dark');
+    api.applyGlobalThemeMode({updateEditor: false, updateTerminals: true});
+    assert.equal(term.options.theme.background, '#11151d', 'terminal runtime theme follows the dark app theme');
+    assert.deepStrictEqual(refreshCalls, [[0, 23]], 'terminal theme changes force an xterm repaint of already-painted cells');
+    assert.equal(textureClears, 1, 'terminal theme changes clear cached glyph colors before repaint');
+  }
   api.setTerminalThemeModeForTest('dark');
   assert.equal(api.terminalThemeForGlobalTheme('dark').selectionBackground, UI_PINS.textSelectionBg, 'dark terminal selection uses a prominent blue fill');
   assert.equal(api.terminalThemeForGlobalTheme('dark').selectionForeground, '#ffffff', 'dark terminal selection forces readable selected text');
@@ -5886,7 +6029,7 @@ test('t@2560', () => {
     assert.ok(/const shareViewerStatusBackupRefreshMs = 30000/.test(shareSource), 'read-only share viewers use push for live state and keep /api/share status polling as a low-frequency backup');
     assert.ok(/function shareCanPublishUi\(\)[\s\S]*applyingShareRemoteUiState[\s\S]*shareReplayViewerModeEnabled\(\)[\s\S]*shareViewMode[\s\S]*shareWriteMode[\s\S]*shareToken[\s\S]*shareHasActiveShare/.test(shareSource), 'DOIT.72 P5.3: share UI publication is allowed for hosts with shares and legacy rw viewers, but replay viewers cannot publish semantic UI frames');
     assert.ok(/function beginShareRemoteUiApply\(\)[\s\S]*applyingShareRemoteUiState[\s\S]*\+ 1[\s\S]*return \(\) => \{[\s\S]*applyingShareRemoteUiState[\s\S]*- 1/.test(shareSource), 'remote UI apply uses a depth counter so overlapping async/sync mirror applies cannot leave rw viewers non-publishable');
-    assert.ok(/function sharePublish\(type, payload = \{\}, options = \{\}\)[\s\S]*const message = shareBuildUiMessage\(type, payload, options\)[\s\S]*const targets = shareViewMode \? \[\{token: shareToken\}\] : activeShares[\s\S]*ensureShareHostSocket\(token\)[\s\S]*socket\.send\(JSON\.stringify\(message\)\)/.test(shareSource), 'sharePublish fans host and rw-viewer UI-state publication with sender ids');
+    assert.ok(/function sharePublish\(type, payload = \{\}, options = \{\}\)[\s\S]*shareBuildUiMessage\(type, payload, \{\.\.\.options, commitSequence: false\}\)[\s\S]*const serialized = JSON\.stringify\(message\)[\s\S]*shareCommitBuiltUiMessage\(message\)[\s\S]*socket\.send\(serialized\)/.test(shareSource), 'sharePublish fans host and rw-viewer UI-state publication with one serialized message and sender ids');
     assert.ok(/function shareBuildUiMessage\(type, payload = \{\}, options = \{\}\)[\s\S]*shareNextMirrorFrameMetadata\(type, options\)/.test(shareSource), 'DOIT.72 P0.1: sharePublish stamps mirror metadata through one message builder');
     assert.ok(/function applyShareUiMessage\(message\)[\s\S]*shareDropStaleMirrorFrame\(message\)[\s\S]*return/.test(shareSource), 'DOIT.72 P0.1: share viewers drop stale sequenced mirror frames before applying payloads');
     assert.ok(/function shareBaseUiStateSnapshot\(options = \{\}\)[\s\S]*viewport:\s*shareViewportSnapshot\(\)[\s\S]*appearance:\s*shareAppearanceSnapshot\(\)[\s\S]*terminalDims:\s*shareTerminalDimensionsSnapshot\(\)[\s\S]*chrome:[\s\S]*tabMetaVisible:[\s\S]*infoSubTab:[\s\S]*autoApprove:\s*shareAutoApproveStateSnapshot\(\)[\s\S]*info:\s*shareInfoStateSnapshot\(\{includeRows: !compact\}\)[\s\S]*finder:\s*shareFinderStateSnapshot\(\{compact\}\)[\s\S]*editor:\s*shareEditorStateSnapshot\(\{compact\}\)[\s\S]*preferences:\s*sharePreferencesStateSnapshot\(\{compact\}\)/.test(shareSource), 'YO!share snapshots chrome, YO!info, Finder/Differ/Tabber, editor, and Preferences state through shared compact/full helpers');
@@ -5933,8 +6076,10 @@ test('t@2560', () => {
     assert.ok(/function refreshTerminalAfterUpload\(session\)[\s\S]*scheduleFit\(session\)[\s\S]*refreshTerminal\(session\)[\s\S]*requestAnimationFrame/.test(shareSource), 'upload repaint uses the shared fit and xterm refresh helpers');
     assert.ok(/async function resyncShareViewerUiState\(\)[\s\S]*now - lastStartedAt < shareGeometryResyncMinIntervalMs[\s\S]*shareGeometryResyncLastStartedAt = now[\s\S]*terminalDims:\s*payload\?\.terminalDims \|\| uiState\.terminalDims \|\| \[\]/.test(shareSource), 'DOIT.69: geometry drift resync also re-pins host terminal dimensions and is rate-limited');
     assert.ok(/function shareReplayRequestKeyframe\(reason = 'replay-error', detail = \{\}\)[\s\S]*requestFloorMs = Math\.max\(shareReplayKeyframeRequestMinIntervalMs[\s\S]*now - lastRequestAt < requestFloorMs[\s\S]*shareReplayKeyframeRequestSuppressedCount/.test(shareSource), 'YO!share replay keyframe repair requests share the five-second floor');
+    assert.ok(/function shareReplayDeltaSequenceStatus\(message = \{\}\)[\s\S]*epoch < currentEpoch \|\| sequence <= lastSequence[\s\S]*reason: 'stale'/.test(shareSource), 'DOM deltas from older epochs or already-applied sequences are stale, not viewer-behind gaps');
     assert.ok(/function shareReplayDeltaCanApplyBestEffort\(sequenceStatus = \{\}\)[\s\S]*sequenceStatus\.reason !== 'gap'[\s\S]*epoch === currentEpoch[\s\S]*sequence > lastSequence/.test(shareSource), 'YO!share replay gaps keep applying same-epoch incremental updates while complete DOM replay is throttled');
     assert.ok(/function shareNextMirrorFrameMetadata\(type, options = \{\}\)[\s\S]*shareMirrorFrameTypeIsDomReplayContent\(type\)[\s\S]*shareNextDomReplayFrameMetadata/.test(shareSource), 'YO!share DOM replay frames use a sequence stream independent from semantic mirror frames');
+    assert.ok(/function sharePublishDomKeyframeNow\(reason = 'manual-debug'\)[\s\S]*cancelsScheduledTopology[\s\S]*followsRecentTopology[\s\S]*shareReplayResetMutationPublisherForKeyframe\(cancelsScheduledTopology \|\| followsRecentTopology \? 'topology' : cleanReason\)/.test(shareSource), 'a manual/debug keyframe that supersedes or follows topology keeps the topology mutation quiet window');
     assert.ok(/function applyShareViewBodyClasses\(\)[\s\S]*share-view-mode[\s\S]*share-view-readonly[\s\S]*share-view-write/.test(shareSource), 'DOIT.69: share viewer body classes distinguish read-only from write share view');
     assert.ok(/const preferencesReadOnlyVisual = readOnlyMode && !shareViewMode/.test(shareSource), 'DOIT.69: Preferences stay visually host-identical in read-only share view');
     assert.ok(/const readonly = readOnlyMode && !shareViewMode \? `<span class="preferences-readonly">/.test(shareSource), 'DOIT.69: read-only Preferences chrome is suppressed inside mirrored share view');
@@ -5953,10 +6098,11 @@ test('t@2560', () => {
     assert.ok(/function shareScrollPayloadForElement\(element\)[\s\S]*target: descriptor\.target[\s\S]*anchor[\s\S]*head/.test(shareSource), 'M5: share scroll payloads carry editor scroll and selection state through one helper');
     assert.ok(/function shareScrollTargetForElement\(element\)[\s\S]*element\.closest\('#info-content'\)[\s\S]*target: 'info'/.test(shareSource), 'YO!info scroll is a mirrored share scroll target');
     assert.ok(/function applyShareScrollState\(payload = \{\}\)[\s\S]*applyingShareRemoteScroll = true[\s\S]*scrollTop = top[\s\S]*view\.dispatch\(\{selection/.test(shareSource), 'M5: share scroll apply sets scroll and editor selection under an echo guard');
-    assert.ok(/function applyShareScrollState\(payload = \{\}\)[\s\S]*shareLastAppliedScrollByTarget\.set\(target, \{top, left\}\)[\s\S]*shareLastAppliedScrollPayloadByTarget\.set\(target, \{[\s\S]*shareRememberEditorViewState\(payload, top, left\)[\s\S]*shareScrollElementForPayload/.test(shareSource), 'DOIT.68: host scroll frames become authoritative before the client DOM scroller exists');
-    assert.ok(/shareLastAppliedScrollByTarget\.set\(target, \{top, left\}\)/.test(shareSource), 'DOIT.67: share viewers remember the last host scroll frame for local-scroll restoration');
+    assert.ok(/function applyShareScrollState\(payload = \{\}\)[\s\S]*shareLastAppliedScrollByTarget\.set\(target, \{top, left, payload: \{[\s\S]*shareRememberEditorViewState\(payload, top, left\)[\s\S]*shareScrollElementForPayload/.test(shareSource), 'DOIT.68: host scroll frames become authoritative before the client DOM scroller exists');
+    assert.ok(/shareLastAppliedScrollByTarget\.set\(target, \{top, left, payload: \{/.test(shareSource), 'DOIT.67: share viewers remember the last host scroll frame and payload for local-scroll restoration');
     assert.ok(/function restoreShareReadonlyScrollTarget\(target\)[\s\S]*shareScrollTargetForElement\(target\)[\s\S]*shareLastAppliedScrollByTarget\.get\(descriptor\.target\)[\s\S]*descriptor\.element\.scrollTop = top/.test(shareSource), 'DOIT.67: read-only local scroll restores the event target directly to the last host-authored value');
-    assert.ok(/function restoreShareScrollTargetByKey\(target\)[\s\S]*shareLastAppliedScrollPayloadByTarget\.get\(cleanTarget\)[\s\S]*shareScrollElementForPayload\(payload\)[\s\S]*scrollTop = payload\.top/.test(shareSource), 'DOIT.69: pending host scroll frames replay from the full remembered payload after pane DOM rebuilds');
+    assert.equal(shareSource.includes('shareLastAppliedScrollPayloadByTarget'), false, 'share scroll restore state uses one target-keyed map');
+    assert.ok(/function restoreShareScrollTargetByKey\(target\)[\s\S]*const state = shareLastAppliedScrollByTarget\.get\(cleanTarget\)[\s\S]*\.\.\.\(state\.payload \|\| \{\}\)[\s\S]*shareScrollElementForPayload\(payload\)[\s\S]*scrollTop = payload\.top/.test(shareSource), 'DOIT.69: pending host scroll frames replay from the full remembered payload after pane DOM rebuilds');
     assert.ok(/function scheduleShareScrollRestoreByKey\(target, options = \{\}\)[\s\S]*shareScrollRestoreFrameTimers\.set\(cleanTarget, state\)[\s\S]*requestAnimationFrame\(run\)/.test(shareSource), 'readonly share scroll restore retries across render frames');
     assert.ok(/function applyShareScrollState\(payload = \{\}\)[\s\S]*scheduleShareScrollRestoreByKey\(target\)/.test(shareSource), 'host scroll frames schedule replay even when the current DOM scroller is not ready');
     assert.ok(/function shareScrollStateSnapshot\(\)[\s\S]*shareScrollPayloadForElement\(element\)/.test(shareSource), 'full UI-state snapshots reuse the shared scroll payload helper instead of inventing a second scroll format');
@@ -6008,8 +6154,9 @@ test('t@2560', () => {
     assert.ok(/--ui-font:\s*"YOLOmux UI",/.test(shareCss) && /--mono-font:\s*"YOLOmux Mono",/.test(shareCss), 'M8: bundled fonts are first in the shared font tokens');
     assert.ok(/\.share-viewer-mirror-status\.match\s*\{[\s\S]*var\(--good\)/.test(shareCss), 'M9: mirror match status is visible in the share banner');
     assert.ok(/message\.type === 'host-resize' \|\| message\.type === shareMirrorProtocol\.frames\.terminalHostResize[\s\S]*updateShareHostTerminalSize/.test(shareSource), 'share viewers apply host-resize and terminal-host-resize UI events');
-    assert.ok(/const sharePointerPublishIntervalMs = 33/.test(shareSource), 'share hosts throttle pointer publication to about 30Hz before server coalescing');
+    assert.ok(/const sharePointerPublishIntervalMs = 50/.test(shareSource), 'share hosts throttle pointer publication to about 20Hz before latest-wins server coalescing');
     assert.ok(/function installSharePointerPublisher\(\)[\s\S]*pointermove[\s\S]*queueSharePointerMove[\s\S]*pointerdown[\s\S]*sharePublishPointerEvent/.test(shareSource), 'share hosts publish throttled pointer movement and click events');
+    assert.ok(/function sharePublishPointerEvent\(event, options = \{\}\)[\s\S]*shareReplayFeatureEnabled\(\)[\s\S]*sharePublish\('pointer', \{\.\.\.payload, visible: true\}\)[\s\S]*return[\s\S]*sharePublish\('pointer', payload\)/.test(shareSource), 'default DOM replay shares publish pointer through one unsequenced pointer frame instead of double-sending sequenced replay deltas');
     assert.ok(/function queueSharePointerMove\(event\)[\s\S]*if \(!shareCanPublishUi\(\)\) return/.test(shareSource), 'share pointer publishing is shared by hosts and rw viewers');
     assert.ok(/function shareReadOnlyReplayModeEnabled\(\)[\s\S]*shareViewMode && !shareWriteMode && shareReplayFeatureEnabled/.test(shareSource), 'DOIT.72 P4.2: read-only replay mode has one shared predicate');
     assert.ok(/function shareReplayViewerModeEnabled\(\)[\s\S]*shareViewMode && shareReplayFeatureEnabled/.test(shareSource), 'DOIT.72 P5.2: write and read-only replay viewers share one replay shell predicate');
@@ -6053,11 +6200,13 @@ test('t@2560', () => {
     assert.ok(/\.share-popup-mirror-item > \.modal\.share-open \.modal-dialog\s*\{[\s\S]*width:\s*min\(960px,\s*calc\(100% - 28px\)\)\s*!important/.test(shareCss), 'mirrored YO!share dialog width is relative to the host-measured modal shell');
     assert.ok(/function shareTerminalBytesFromMessage\(session, message\)[\s\S]*message\.ch !== 'term'[\s\S]*atob\(message\.data\)/.test(shareSource), 'share-view terminal output is decoded from tagged terminal frames');
 	    assert.ok(/function scheduleShareTopologySnapshot\(reason = 'topology'\)[\s\S]*scheduleShareUiStatePublish\(\{reason: `topology:\$\{cleanReason\}`\}\)[\s\S]*scheduleShareTopologyDomKeyframe\(\)/.test(shareSource), 'DOIT.72 P0.3: topology changes route through one full UI-state snapshot scheduler and a replay keyframe scheduler');
-	    assert.ok(/function scheduleShareTopologyDomKeyframe\(\)[\s\S]*!shareHasActiveShare\(\)[\s\S]*shareReplayPauseMutationPublisherForTopology\(\)[\s\S]*shareReplayTopologyKeyframeTimer[\s\S]*requestAnimationFrame[\s\S]*sharePublishDomKeyframe\('topology'\)/.test(shareSource), 'default DOM replay shares pause topology mutations and coalesce topology keyframes after layout render so Finder minimize/restore cannot leave stale panes');
-	    assert.ok(/const shareReplayPostTopologyKeyframeQuietMs = 3000/.test(shareSource) && /function shareReplayDrainMutationPublisher\(\)[\s\S]*takeRecords[\s\S]*shareReplayPendingMutations\.splice\(0, shareReplayPendingMutations\.length\)[\s\S]*shareReplayDeltaFramePending = false/.test(shareSource) && /function shareReplayPauseMutationPublisherForTopology\(\)[\s\S]*shareReplayMutationPublisherPaused = true[\s\S]*shareReplayDrainMutationPublisher\(\)[\s\S]*shareReplayTopologyMutationPauseTimer = setTimeout/.test(shareSource) && /function shareReplayResetMutationPublisherForKeyframe\(reason = 'manual-debug'\)[\s\S]*shareReplayMutationPublisherPaused = true[\s\S]*shareReplayDrainMutationPublisher\(\)[\s\S]*cleanReason === 'join' \|\| cleanReason === 'topology'[\s\S]*shareReplayResumeMutationPublisherAfterFrames\(quietMs\)/.test(shareSource) && /function sharePublishDomKeyframeNow\(reason = 'manual-debug'\)[\s\S]*shareReplayResetMutationPublisherForKeyframe\(cleanReason\)[\s\S]*sharePublish\(shareMirrorProtocol\.frames\.domKeyframe/.test(shareSource), 'DOM keyframes discard pending mutation deltas and join/topology resets keep a short quiet window so boot/layout churn cannot immediately stale the viewer');
+	    assert.ok(/const shareTopologyKeyframePointerQuietMs = 500/.test(shareSource) && /const shareTopologyKeyframeMaxDeferralMs = shareReplayHostKeyframeMinIntervalMs/.test(shareSource) && /function shareTopologyDomKeyframeDelayMs\(\)[\s\S]*shareReplayTopologyKeyframeQueuedAt[\s\S]*shareReplayHostLastKeyframeAt[\s\S]*sharePointerQuietDelayMs\(\)/.test(shareSource), 'topology replay keyframes wait for a pointer-quiet window and respect the host keyframe floor');
+	    assert.ok(/function sharePublishDomKeyframeNow\(reason = 'manual-debug'\)[\s\S]*const cleanReason = shareReplayKeyframeReason\(reason\)[\s\S]*if \(cleanReason !== 'topology'\) clearScheduledShareTopologyDomKeyframe\(\)/.test(shareSource), 'manual/debug/join keyframes cancel redundant pending topology keyframes after they capture the current DOM');
+	    assert.ok(/function scheduleShareTopologyDomKeyframe\(\)[\s\S]*!shareHasActiveShare\(\)[\s\S]*shareReplayPauseMutationPublisherForTopology\(\)[\s\S]*shareReplayTopologyKeyframeQueuedAt[\s\S]*shareReplayTopologyKeyframeTimer = setTimeout\(runScheduledShareTopologyDomKeyframe, 0\)/.test(shareSource) && /function runScheduledShareTopologyDomKeyframe\(\)[\s\S]*shareTopologyDomKeyframeDelayMs\(\)[\s\S]*requestAnimationFrame[\s\S]*sharePublishDomKeyframe\('topology'\)/.test(shareSource), 'default DOM replay shares pause topology mutations and coalesce delayed topology keyframes after layout render so Finder minimize/restore cannot leave stale panes');
+	    assert.ok(/const shareReplayPostTopologyKeyframeQuietMs = shareReplayHostKeyframeMinIntervalMs \+ 1000/.test(shareSource) && /function shareReplayDrainMutationPublisher\(\)[\s\S]*takeRecords[\s\S]*shareReplayPendingMutations\.splice\(0, shareReplayPendingMutations\.length\)[\s\S]*shareReplayDeltaFramePending = false/.test(shareSource) && /function shareReplayPauseMutationPublisherForTopology\(\)[\s\S]*shareReplayMutationPublisherPaused = true[\s\S]*shareReplayDrainMutationPublisher\(\)[\s\S]*shareReplayTopologyMutationPauseTimer = setTimeout/.test(shareSource) && /function shareReplayResetMutationPublisherForKeyframe\(reason = 'manual-debug'\)[\s\S]*shareReplayMutationPublisherPaused = true[\s\S]*shareReplayDrainMutationPublisher\(\)[\s\S]*cleanReason === 'join' \|\| cleanReason === 'topology'[\s\S]*shareReplayResumeMutationPublisherAfterFrames\(quietMs\)/.test(shareSource) && /function sharePublishDomKeyframeNow\(reason = 'manual-debug'\)[\s\S]*followsRecentTopology[\s\S]*shareReplayResetMutationPublisherForKeyframe\(cancelsScheduledTopology \|\| followsRecentTopology \? 'topology' : cleanReason\)[\s\S]*sharePublish\(shareMirrorProtocol\.frames\.domKeyframe/.test(shareSource), 'DOM keyframes discard pending mutation deltas and join/topology resets keep a keyframe-floor quiet window so boot/layout churn cannot immediately stale the viewer');
 	    assert.ok(/let shareReplayHostMirroredNodes = new WeakSet\(\)/.test(shareSource) && /function shareReplayHostMutationTargetIsMirrored\(node\)[\s\S]*const disconnected = element\.isConnected === false[\s\S]*const outsideRoot = typeof root\?\.contains === 'function' && !root\.contains\(element\)[\s\S]*shareReplayHostMirroredNodes\.has/.test(shareSource) && /function shareCreateDomKeyframePayload\(reason = 'manual-debug'\)[\s\S]*mirroredNodes: \[\][\s\S]*shareReplayHostMirroredNodes = shareReplayHostMirroredNodeSet\(context\.mirroredNodes\)/.test(shareSource) && /function shareReplayMutationEntries\(records = \[\]\)[\s\S]*!shareReplayHostMutationTargetIsMirrored\(target\)[\s\S]*continue/.test(shareSource), 'DOM replay host only publishes mutation deltas for nodes serialized into the current mirror keyframe');
 	    assert.ok(/function shareReplayMutationEntries\(records = \[\]\)[\s\S]*let needsKeyframe = false[\s\S]*shareReplayMutationNodeIsIgnored\(node\)[\s\S]*needsKeyframe = true[\s\S]*entries\.splice\(0, entries\.length\)[\s\S]*scheduleShareTopologyDomKeyframe\(\)/.test(shareSource), 'child-list mutations touching ignored Finder/private nodes do not emit partial deltas that can duplicate Finder and Differ panes');
-	    assert.ok(/const shareReplayHostDeltaMaxBytes = 48 \* 1024/.test(shareSource) && /function shareReplayFlushMutationDeltas\(\)[\s\S]*shareReplayFrameByteLength\(\{type: shareMirrorProtocol\.frames\.domDelta, payload\}\)[\s\S]*bytes > shareReplayHostDeltaMaxBytes[\s\S]*sharePublishDomKeyframe\('backpressure'\)[\s\S]*return null[\s\S]*shareReplayPublishDeltaPayload\(payload, 'mutation'\)/.test(shareSource), 'oversized DOM delta batches request a throttled keyframe instead of creating replay sequence gaps');
+	    assert.ok(/const shareReplayHostDeltaMaxBytes = 48 \* 1024/.test(shareSource) && /function shareReplayFlushMutationDeltas\(\)[\s\S]*shareReplayPublishDeltaPayload\(payload, 'mutation', \{maxBytes: shareReplayHostDeltaMaxBytes\}\)[\s\S]*published\?\.skipped[\s\S]*sharePublishDomKeyframe\('backpressure'\)[\s\S]*return null[\s\S]*return published/.test(shareSource), 'oversized DOM delta batches request a throttled keyframe through the single-serialize publish path instead of creating replay sequence gaps');
 	    assert.ok(/function applyLayoutSlots\(nextSlots, options = \{\}\)[\s\S]*sharePublishLayout\(\)[\s\S]*scheduleShareTopologySnapshot\(options\.shareReason \|\| 'layout'\)/.test(shareSource), 'layout commits publish share layout updates and schedule a full UI-state snapshot through the topology scheduler');
     assert.ok(/function activatePaneTab\(side, session, options = \{\}\)[\s\S]*sharePublish\('active-tab', \{slot: side, item: session\}\)[\s\S]*scheduleShareTopologySnapshot\('tab-activation'\)/.test(fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8')), 'tab activation schedules a full topology snapshot behind the narrow active-tab frame');
     assert.ok(/async function openFileExplorerAt\(path, options = \{\}\)[\s\S]*scheduleShareTopologySnapshot\('finder-root'\)/.test(fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8')), 'Finder root changes schedule a full topology snapshot');
@@ -6065,6 +6214,8 @@ test('t@2560', () => {
     assert.ok(/function switchFileExplorerChangesSession\(session\)[\s\S]*scheduleShareTopologySnapshot\('finder-session'\)/.test(fs.readFileSync('static_src/js/yolomux/90_changes_editor.js', 'utf8')), 'Finder/Differ/Tabber session changes schedule a full topology snapshot');
     assert.ok(/function setFileEditorViewMode\(path, mode, item = null\)[\s\S]*scheduleShareTopologySnapshot\('editor-mode'\)/.test(fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8')), 'editor mode changes schedule a full topology snapshot');
     assert.ok(/function setFileEditorThemeMode\(mode\)[\s\S]*scheduleShareTopologySnapshot\('editor-theme'\)/.test(fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8')), 'editor theme changes schedule a full topology snapshot');
+    assert.ok(/function applyGlobalThemeMode\(options = \{\}\)[\s\S]*scheduleShareTopologySnapshot\('theme'\)[\s\S]*scheduleShareAppearancePublish\(\{reason: options\.reason \|\| 'theme', topology: false\}\)/.test(fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8')), 'all host theme applications publish appearance frames through the shared apply parent');
+    assert.ok(/function installGlobalThemeMediaListener\(\)[\s\S]*applyGlobalThemeMode\(\{updateEditor: true, updateTerminals: true, reason: 'theme-system'\}\)/.test(fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8')), 'system OS theme changes identify their appearance publish reason through the shared parent');
     assert.ok(/function openAppMenu\(wrapper, options = \{\}\)[\s\S]*scheduleSharePopupLayerPublish\(\{immediate: true\}\)[\s\S]*scheduleShareTopologySnapshot\('popup-open'\)/.test(fs.readFileSync('static_src/js/yolomux/30_app_menus.js', 'utf8')), 'popup opens schedule a full topology snapshot');
     assert.ok(/function closeAppMenus\(keepOpen = null\)[\s\S]*scheduleSharePopupLayerPublish\(\{immediate: true\}\)[\s\S]*scheduleShareTopologySnapshot\('popup-close'\)/.test(fs.readFileSync('static_src/js/yolomux/30_app_menus.js', 'utf8')), 'popup closes schedule a full topology snapshot');
     assert.ok(/function createShareFromForm\(form\)[\s\S]*sharePublishLayout\(\)[\s\S]*sharePublishUiState\(\)/.test(shareSource), 'newly-created shares immediately receive the full host UI state');
@@ -6262,6 +6413,27 @@ test('t@2560', () => {
     assert.deepStrictEqual({...replayPayload.redaction}, {policyVersion: 1, removedCount: 3}, 'DOIT.72 P3.1: keyframe records redaction metadata for private, hidden terminal, and pooled terminal exclusions');
     const replayPayloadAgain = replayApi.shareCreateDomKeyframePayloadForTest('join');
     assert.equal(replayApi.stableDigestJson(replayPayloadAgain.root), replayApi.stableDigestJson(replayPayload.root), 'DOIT.72 P1.2: unchanged DOM serializes with stable per-keyframe ids');
+
+    const scopedReplayApi = loadYolomux('?shareReplay=1', ['allowed-session', 'blocked-session'], 'https:');
+    scopedReplayApi.setActiveSharesForTest([{token: 'share-token', session: 'allowed-session', sessions: ['allowed-session']}]);
+    const scopedRoot = scopedReplayApi.appRootForTest();
+    scopedRoot.replaceChildren();
+    const allowedTerminal = new TestElement('term-allowed-session', 'div');
+    allowedTerminal.className = 'terminal';
+    allowedTerminal.appendChild(new TestElement('allowed-internal', 'div'));
+    allowedTerminal.children[0].textContent = 'allowed terminal internals';
+    const blockedTerminal = new TestElement('term-blocked-session', 'div');
+    blockedTerminal.className = 'terminal';
+    blockedTerminal.appendChild(new TestElement('blocked-internal', 'div'));
+    blockedTerminal.children[0].textContent = 'blocked terminal internals';
+    scopedRoot.append(allowedTerminal, blockedTerminal);
+    scopedReplayApi.registerTerminalForTest('allowed-session', {rows: 24, cols: 80, focus() {}});
+    scopedReplayApi.registerTerminalForTest('blocked-session', {rows: 24, cols: 80, focus() {}});
+    const scopedPayload = scopedReplayApi.shareCreateDomKeyframePayloadForTest('join');
+    const scopedNodes = walkReplayNodes(scopedPayload.root);
+    assert.deepStrictEqual([...scopedPayload.terminals.map(entry => entry.session)], ['allowed-session'], 'DOIT.0: replay terminal metadata is filtered to the active share session scope');
+    assert.deepStrictEqual([...scopedNodes.filter(node => node.attrs?.['data-share-terminal-placeholder']).map(node => node.attrs['data-share-terminal-placeholder'])], ['allowed-session'], 'DOIT.0: unauthorized terminal DOM is not serialized as a healthy placeholder');
+    assert.equal(JSON.stringify(scopedPayload.root).includes('blocked terminal internals'), false, 'DOIT.0: unauthorized terminal internals are dropped with the placeholder');
 
     replayRoot.replaceChildren();
     const scrollSurface = new TestElement('replay-scroll-surface', 'div');
@@ -6639,6 +6811,35 @@ test('t@2560', () => {
   assert.equal(appearance.locale, 'ja', 'share appearance snapshot includes the active locale');
   assert.equal(appearance.languagePref, 'system', 'share appearance snapshot includes the persisted language preference');
   api.setActiveLocaleForTest('en');
+
+  const shareThemeApi = loadYolomux('', ['1'], 'https:', 'MacIntel', 'readonly', {
+    shareReplay: true,
+    share: {view: true, id: 'share-theme', mode: 'ro', session: '1', sessions: ['1']},
+  });
+  shareThemeApi.applyShareAppearanceStateForTest({theme: 'system', resolvedTheme: 'light', terminalTheme: 'system'});
+  assert.equal(shareThemeApi.globalThemeModeForTest(), 'system', 'share viewers preserve the host theme preference value');
+  assert.equal(shareThemeApi.shareResolvedGlobalThemeModeForTest(), 'light', 'share viewers store the host resolved system theme');
+  assert.equal(shareThemeApi.resolvedGlobalThemeModeForTest(), 'light', 'share viewers resolve system theme from the host frame, not local matchMedia');
+  assert.ok(shareThemeApi.testElementForId('body').classList.contains('theme-resolved-light'), 'share viewer body uses the host-resolved light class');
+  shareThemeApi.applyShareAppearanceStateForTest({theme: 'system', resolvedTheme: 'dark', terminalTheme: 'system'});
+  assert.equal(shareThemeApi.resolvedGlobalThemeModeForTest(), 'dark', 'a later host OS flip updates the share viewer resolved theme');
+  assert.ok(shareThemeApi.testElementForId('body').classList.contains('theme-resolved-dark'), 'share viewer body follows the later host-resolved dark class');
+
+  const topologyDelayApi = loadYolomux('', ['1']);
+  topologyDelayApi.setShareReplayTopologyKeyframeQueuedAtForTest(Date.now());
+  topologyDelayApi.setShareReplayHostLastKeyframeAtForTest(0);
+  topologyDelayApi.setSharePointerLastPublishedAtForTest(-100);
+  const pointerQuietDelay = topologyDelayApi.shareTopologyDomKeyframeDelayMsForTest();
+  assert.ok(pointerQuietDelay >= 350 && pointerQuietDelay <= 500, `topology replay waits for pointer quiet instead of serializing during active cursor movement (${pointerQuietDelay})`);
+  topologyDelayApi.setSharePointerLastPublishedAtForTest(-1000);
+  topologyDelayApi.setShareReplayHostLastKeyframeAtForTest(Date.now() - 1000);
+  const keyframeFloorDelay = topologyDelayApi.shareTopologyDomKeyframeDelayMsForTest();
+  assert.ok(keyframeFloorDelay >= 3500 && keyframeFloorDelay <= 5000, `topology replay respects the host keyframe floor after a recent keyframe (${keyframeFloorDelay})`);
+  topologyDelayApi.setShareReplayTopologyKeyframeQueuedAtForTest(Date.now() - 6000);
+  topologyDelayApi.setShareReplayHostLastKeyframeAtForTest(Date.now());
+  topologyDelayApi.setSharePointerLastPublishedAtForTest(0);
+  assert.equal(topologyDelayApi.shareTopologyDomKeyframeDelayMsForTest(), 0, 'topology replay max deferral eventually permits a keyframe even under continuous pointer movement');
+
   const sharePointerSlots = api.emptyLayoutSlots();
   sharePointerSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
   sharePointerSlots.left = api.paneStateWithTabs(['1'], '1');
@@ -6657,6 +6858,18 @@ test('t@2560', () => {
   assert.equal(viewerPoint.x, 320, 'M7: received app-space pointer maps into the local visual mirror x');
   assert.equal(viewerPoint.y, 230, 'M7: received app-space pointer maps into the local visual mirror y');
   assert.equal(api.sharePointFromPointerPayload({scope: 'pane', x: 600, y: 400}), null, 'M7: old pane-relative pointer payloads are rejected');
+
+  const pointerPublishApi = loadYolomux('', ['1']);
+  pointerPublishApi.setActiveSharesForTest([{token: 'share-token'}]);
+  const pointerFrames = [];
+  pointerPublishApi.setShareHostSocketForTest('share-token', {
+    readyState: 1,
+    send(message) { pointerFrames.push(JSON.parse(message)); },
+  });
+  pointerPublishApi.sharePublishPointerEventForTest({clientX: 44, clientY: 55, isPrimary: true});
+  assert.equal(pointerFrames.length, 1, 'DOM replay pointer publication sends one frame per host pointer tick');
+  assert.equal(pointerFrames[0].type, 'pointer');
+  assert.deepStrictEqual(canonical(pointerFrames[0].payload), {scope: 'viewport', visible: true, x: 44, y: 55});
   api.setAppMirrorTransformForTest({scale: 1, tx: 0, ty: 0});
   const digestA = {snapshot: {viewport: {width: 1, height: 2}, fonts: {ui: 12}, slots: [], tabStrips: [], terminalCells: [], editors: []}};
   const digestB = {snapshot: {editors: [], terminalCells: [], tabStrips: [], slots: [], fonts: {ui: 12}, viewport: {height: 2, width: 1}}};
@@ -6861,11 +7074,17 @@ test('t@2560', () => {
   assert.ok(source.includes('function keyboardShortcutCatalog()'), 'shortcut help is driven from one catalog');
   assert.ok(api.keyboardShortcutsHtml().includes('Pin / unpin active tab'), 'shortcut overlay lists the Pin Tab chord');
   assert.ok(api.keyboardShortcutsHtml().includes('Ctrl+K Enter'), 'shortcut overlay renders the platform Pin Tab chord on PC/Linux');
+  assert.ok(api.keyboardShortcutsHtml().includes('Previous / next tab') && api.keyboardShortcutsHtml().includes('Meta+← / Meta+→'), 'shortcut overlay documents Meta+Arrow pane-tab navigation');
   assert.ok(api.keyboardShortcutsHtml().includes('Drag a tab'), 'shortcut overlay is honest that tab/pane layout changes are pointer-driven');
   assert.equal(/Move or split tab[\s\S]{0,120}(Ctrl|Cmd|Alt|Shift)\+/.test(api.keyboardShortcutsHtml()), false, 'shortcut overlay does not advertise keyboard tab/pane movement');
   assert.ok(api.keyboardShortcutsHtml().includes('outside text'), 'shortcut overlay scopes the Backspace close-tab fallback');
   assert.ok(/async function copyTextToClipboard\(text\)[\s\S]*?if \(clipboard\?\.writeText\) \{[\s\S]*?try \{[\s\S]*?await clipboard\.writeText\(value\);[\s\S]*?\} catch/.test(source), 'clipboard copy falls back when navigator.clipboard exists but rejects');
   assert.ok(source.includes('function copyTerminalSelectionToClipboardEvent(session, term, event, container = null)'), 'terminal copy has a DOM copy-event fallback');
+  assert.ok(source.includes('function handleTerminalTmuxWindowShortcutKeydown(session, event)'), 'terminal Meta+Arrow navigation shares the terminal shortcut guard');
+  assert.ok(/function paneTabTraversalPositions\(slots = layoutSlots\)[\s\S]*layoutLeafSlots\(slots\?\.\[layoutTreeKey\]\)[\s\S]*paneTabs\(slot, slots\)\.map\(item => \(\{slot, item\}\)\)/.test(source), 'Meta+Arrow traversal follows visual pane order and each pane tab strip');
+  assert.ok(/function selectAdjacentPaneTab\(direction, options = \{\}\)[\s\S]*adjacentPaneTabPosition\(direction, options\)[\s\S]*activatePaneTab\(target\.slot, target\.item, activationOptions\)/.test(source), 'terminal/global Meta+Arrow navigation shares the pane-tab activation parent');
+  assert.ok(/const paneTabShortcutDirection = terminalTmuxWindowShortcutDirection\(event\);[\s\S]*if \(paneTabShortcutDirection && globalShortcutTargetAllowsAppAction\(event\.target\)\) \{[\s\S]*selectAdjacentPaneTab\(paneTabShortcutDirection, \{userInitiated: true\}\)/.test(source), 'global Meta+Arrow handler routes Finder/Differ/Tabber focus through the same pane-tab selector');
+  assert.equal(source.includes('function selectAdjacentTmuxSession('), false, 'old tmux-session-only Meta+Arrow shortcut path is removed');
   assert.ok(source.includes("container.addEventListener('copy', event => {"), 'terminal container handles browser copy events');
   assert.ok(source.includes("event.clipboardData.setData('text/plain', selected);"), 'terminal copy-event fallback writes the xterm selection to clipboardData');
   assert.ok(source.includes('function copyTextToClipboardViaCopyEvent(text)'), 'terminal shortcut copy has a synchronous copy-event clipboard path');
@@ -7035,6 +7254,79 @@ test('t@2560', () => {
   assert.deepStrictEqual(fetchCalls, [], 'Mac Cmd-C with browser selection does not ask tmux for copy-mode text');
   assert.equal(terminalCopyApi.clipboardTextForTest(), 'selected browser text', 'Mac Cmd-C with browser selection writes browser-selected terminal text to clipboardData');
   assert.equal(clearSelectionCount, 1, 'Mac Cmd-C with browser selection clears xterm selection state after copying');
+  const terminalNavApi = loadYolomux('?platform=mac', ['1', '2', '3'], 'https:', 'MacIntel');
+  const terminalNavEditor = terminalNavApi.fileEditorItemFor('/repo/app/README.md');
+  const terminalNavSlots = terminalNavApi.emptyLayoutSlots();
+  terminalNavSlots[terminalNavApi.layoutTreeKey] = terminalNavApi.splitNode(
+    'row',
+    terminalNavApi.leafNode('left'),
+    terminalNavApi.splitNode('column', terminalNavApi.leafNode('slot1'), terminalNavApi.leafNode('slot2'), 50),
+    50,
+  );
+  terminalNavSlots.left = terminalNavApi.paneStateWithTabs([terminalNavApi.fileExplorerItemId, '1'], '1');
+  terminalNavSlots.slot1 = terminalNavApi.paneStateWithTabs(['2', terminalNavApi.prefsItemId], '2');
+  terminalNavSlots.slot2 = terminalNavApi.paneStateWithTabs([terminalNavEditor, '3'], terminalNavEditor);
+  terminalNavApi.setLayoutSlotsForTest(terminalNavSlots);
+  assert.equal(terminalNavApi.adjacentPaneTabPosition(1, {item: '1'}).item, '2', 'Meta+Right spills from the last tab in a pane to the next pane');
+  assert.equal(terminalNavApi.adjacentPaneTabPosition(-1, {item: '1'}).item, terminalNavApi.fileExplorerItemId, 'Meta+Left moves within a mixed pane to the previous non-tmux tab');
+  assert.equal(terminalNavApi.adjacentPaneTabPosition(1, {item: '3'}).item, terminalNavApi.fileExplorerItemId, 'Meta+Right wraps from the last pane tab to the first visible tab');
+  let navShortcutHandler = null;
+  terminalNavApi.installTerminalCopyShortcutForTest('1', {
+    getSelection: () => '',
+    attachCustomKeyEventHandler(handler) { navShortcutHandler = handler; },
+  });
+  prevented = 0;
+  const navRightResult = navShortcutHandler({
+    type: 'keydown',
+    code: 'ArrowRight',
+    key: 'ArrowRight',
+    metaKey: true,
+    ctrlKey: false,
+    altKey: false,
+    shiftKey: false,
+    preventDefault() { prevented += 1; },
+  });
+  assert.equal(navRightResult, false, 'Mac Cmd-Right is handled by the terminal shortcut guard');
+  assert.equal(prevented, 1, 'Mac Cmd-Right prevents the terminal/xterm default');
+  assert.equal(terminalNavApi.currentSessionActionTarget(), '2', 'Mac Cmd-Right moves from session 1 to the next visible pane tab');
+  terminalNavApi.registerTerminalForTest('2', {getSelection: () => ''});
+  terminalNavApi.setFocusedTerminal('2');
+  prevented = 0;
+  stopped = 0;
+  stoppedImmediate = 0;
+  const focusedNavResult = terminalNavApi.handleFocusedTerminalCopyShortcutForTest({
+    type: 'keydown',
+    code: 'ArrowLeft',
+    key: 'ArrowLeft',
+    metaKey: true,
+    ctrlKey: false,
+    altKey: false,
+    shiftKey: false,
+    preventDefault() { prevented += 1; },
+    stopPropagation() { stopped += 1; },
+    stopImmediatePropagation() { stoppedImmediate += 1; },
+  });
+  assert.equal(focusedNavResult, true, 'focused terminal capture guard handles Mac Cmd-Left');
+  assert.equal(prevented, 1, 'focused terminal Cmd-Left prevents browser/xterm defaults');
+  assert.equal(stopped, 1, 'focused terminal Cmd-Left stops propagation before target handlers');
+  assert.equal(stoppedImmediate, 1, 'focused terminal Cmd-Left stops sibling handlers');
+  assert.equal(terminalNavApi.currentSessionActionTarget(), '1', 'Mac Cmd-Left moves back to the previous visible pane tab');
+  const finderNavApi = loadYolomux('?platform=mac', ['1', '2'], 'https:', 'MacIntel');
+  const finderNavEditor = finderNavApi.fileEditorItemFor('/repo/app/notes.md');
+  const finderNavSlots = finderNavApi.emptyLayoutSlots();
+  finderNavSlots[finderNavApi.layoutTreeKey] = finderNavApi.splitNode('row', finderNavApi.leafNode('left'), finderNavApi.leafNode('slot1'), 50);
+  finderNavSlots.left = finderNavApi.paneStateWithTabs([finderNavApi.fileExplorerItemId, '1'], finderNavApi.fileExplorerItemId);
+  finderNavSlots.slot1 = finderNavApi.paneStateWithTabs([finderNavEditor, '2'], finderNavEditor);
+  finderNavApi.setLayoutSlotsForTest(finderNavSlots);
+  finderNavApi.setFocusedPanelItem(finderNavApi.fileExplorerItemId);
+  assert.equal(finderNavApi.globalShortcutTargetAllowsAppAction(null), true, 'Finder focus is eligible for app-level Meta+Arrow');
+  assert.equal(finderNavApi.selectAdjacentPaneTab(1, {userInitiated: true}), true, 'Finder Meta+Right uses the shared pane-tab selector');
+  assert.equal(finderNavApi.activeItemForSide('left'), '1', 'Finder Cmd-Right moves to the next tab in the same pane');
+  const cmActive = {closest: selector => selector === '.cm-editor' ? cmActive : null};
+  finderNavApi.setDocumentActiveElementForTest(cmActive);
+  finderNavApi.setFocusedPanelItem('1');
+  assert.equal(finderNavApi.globalShortcutTargetAllowsAppAction(null), false, 'Cmd-Right remains native line navigation inside the code editor');
+  assert.equal(finderNavApi.activeItemForSide('left'), '1', 'editor Cmd-Right does not move app pane tabs');
   fetchCalls.length = 0;
   prevented = 0;
   clearSelectionCount = 0;
@@ -7573,6 +7865,9 @@ test('t@2560', () => {
   stableTerminalPane.clientWidth = 360;
   api.fitTerminalForTest('stable');
   assert.equal(stableFits.length, 2, 'a real pane width change still resizes the terminal');
+  assert.ok(/function terminalCanPublishRemoteSize\(\)\s*\{[\s\S]*document\.visibilityState !== 'hidden'/.test(source), 'hidden/background browser tabs cannot publish terminal resize authority');
+  assert.ok(/function sendRemoteResize\(session\)[\s\S]*terminalCanPublishRemoteSize\(\)[\s\S]*foreground:\s*true/.test(source), 'terminal resize frames carry explicit foreground authority');
+  assert.ok(/function scheduleRemoteResize\(session,[\s\S]*terminalCanPublishRemoteSize\(\)[\s\S]*item\.resizeTimer = null/.test(source), 'hidden/background tabs cancel pending terminal resize timers instead of shrinking tmux later');
   const terminalPane = api.testElementForId('terminal-pane-1');
   terminalPane.classList.add('active');
   terminalPane.clientWidth = 720;
@@ -7922,10 +8217,10 @@ test('t@2560', () => {
     ['/repo/A/B/D', [{name: 'H', kind: 'file'}]],
   ]);
   const ancestorRows = Object.fromEntries(ancestorTree.querySelectorAll('.file-tree-row[data-path]').map(row => [row.dataset.path, row]));
-  assert.equal(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-dir-count').textContent, '3 files changed', 'Finder changed ancestor A shows total changed descendants');
-  assert.equal(ancestorRows['/repo/A/B'].querySelector(':scope > .file-tree-dir-count').textContent, '3 files changed', 'Finder changed ancestor B shows total changed descendants');
-  assert.equal(ancestorRows['/repo/A/B/C'].querySelector(':scope > .file-tree-dir-count').textContent, '2 files changed', 'Finder changed ancestor C counts only its subtree');
-  assert.equal(ancestorRows['/repo/A/B/D'].querySelector(':scope > .file-tree-dir-count').textContent, '1 file changed', 'Finder changed ancestor badges ignore transcript-only touched files with no diff');
+  assert.equal(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-dir-count').textContent, '3', 'Finder changed ancestor A shows total changed descendants as a bare count');
+  assert.equal(ancestorRows['/repo/A/B'].querySelector(':scope > .file-tree-dir-count').textContent, '3', 'Finder changed ancestor B shows total changed descendants as a bare count');
+  assert.equal(ancestorRows['/repo/A/B/C'].querySelector(':scope > .file-tree-dir-count').textContent, '2', 'Finder changed ancestor C counts only its subtree as a bare count');
+  assert.equal(ancestorRows['/repo/A/B/D'].querySelector(':scope > .file-tree-dir-count').textContent, '1', 'Finder changed ancestor badges ignore transcript-only touched files with no diff and render a bare count');
   assert.ok(ancestorRows['/repo/A'].classList.contains('file-tree-row--changed-ancestor'), 'Finder changed ancestors are bold-marked');
   assert.ok(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-agent').innerHTML.includes('agent-icon claude'), 'Finder changed ancestor A inherits Claude marker from descendants');
   assert.ok(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-agent').innerHTML.includes('agent-icon codex'), 'Finder changed ancestor A inherits Codex marker from descendants');
@@ -8933,6 +9228,110 @@ test('t@6335', () => {
   const state = api.sessionState('1', {agents: [{kind: 'codex'}], panes: []});
   assert.equal(state.key, 'needs-approval', 'roster screen approval state lights EXEC? even when prompt.visible is absent');
   assert.equal(state.reason, 'Do you want to proceed?');
+});
+
+test('t@6341', () => {
+  const api = loadYolomux('', ['1']);
+  api.setDocumentTitleNowForTest(200000);
+  api.setTmuxSignalStateForTest({
+    windows: [{
+      key: '1:0',
+      session: '1',
+      window_index: '0',
+      activity_ts: 199,
+      bell_flag: false,
+      silence_flag: false,
+      panes: [{
+        window_key: '1:0',
+        session: '1',
+        window_index: '0',
+        pane_index: '0',
+        target: '%11',
+        pane_id: '%11',
+        current_command: 'codex',
+        alternate_on: true,
+        pid: 1234,
+        dead: false,
+      }],
+    }],
+  });
+  assert.equal(api.sessionState('1', {agents: [], panes: []}).key, 'working', 'tmux command + pid/alternate screen marks an agent running');
+  api.setTmuxSignalStateForTest({
+    windows: [{
+      key: '1:0',
+      session: '1',
+      window_index: '0',
+      activity_ts: 10,
+      bell_flag: false,
+      silence_flag: true,
+      panes: [{
+        window_key: '1:0',
+        session: '1',
+        window_index: '0',
+        pane_index: '0',
+        target: '%11',
+        pane_id: '%11',
+        current_command: 'codex',
+        alternate_on: true,
+        pid: 1234,
+        dead: false,
+      }],
+    }],
+  });
+  const silent = api.sessionState('1', {agents: [], panes: []});
+  assert.equal(silent.key, 'done', 'tmux silence alert marks a quiet live agent done');
+  assert.ok(api.sessionStateHtml(silent).includes('session-state-done'), 'tmux silence done state renders a tab badge');
+  api.setTmuxSignalStateForTest({
+    windows: [{
+      key: '1:0',
+      session: '1',
+      window_index: '0',
+      activity_ts: 10,
+      bell_flag: true,
+      silence_flag: false,
+      panes: [{
+        window_key: '1:0',
+        session: '1',
+        window_index: '0',
+        pane_index: '0',
+        target: '%11',
+        pane_id: '%11',
+        current_command: 'codex',
+        alternate_on: false,
+        pid: 0,
+        dead: true,
+        dead_status: 2,
+      }],
+    }],
+  });
+  assert.equal(api.sessionState('1', {agents: [], panes: []}).key, 'needs-input', 'tmux bell alert has attention priority');
+  api.setTmuxSignalStateForTest({
+    windows: [{
+      key: '1:0',
+      session: '1',
+      window_index: '0',
+      activity_ts: 10,
+      bell_flag: false,
+      silence_flag: false,
+      panes: [{
+        window_key: '1:0',
+        session: '1',
+        window_index: '0',
+        pane_index: '0',
+        target: '%11',
+        pane_id: '%11',
+        current_command: 'codex',
+        alternate_on: false,
+        pid: 0,
+        dead: true,
+        dead_status: 2,
+      }],
+    }],
+  });
+  const exited = api.sessionState('1', {agents: [], panes: []});
+  assert.equal(exited.key, 'done', 'dead tmux agent pane marks the session done');
+  assert.equal(exited.reason, 'agent exited (status 2)');
+  assert.ok(api.sessionStateHtml(exited).includes('session-state-done'), 'dead-agent done state renders a tab badge');
 });
 
 test('t@6347', () => {
@@ -10188,7 +10587,7 @@ test('t@7149', () => {
   assert.ok(/function backgroundFileEditorWatchFiles\(\)[\s\S]*?paneItems\(\)[\s\S]*?!visible\.has\(path\)/.test(source), 'client reports background editor files separately from active visible editor files');
   assert.ok(source.includes('files: visibleFileEditorWatchFiles()'), 'watch state includes visible editor file paths for the fast files_changed stream');
   assert.ok(source.includes('background_files: backgroundFileEditorWatchFiles()'), 'watch state includes background editor file paths for the slower files_changed stream');
-  assert.ok(source.includes("['settings_changed', 'auto_approve_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta']"), 'client listens for the expected push event types');
+  assert.ok(source.includes("['settings_changed', 'auto_approve_changed', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta']"), 'client listens for the expected push event types');
   assert.ok(/addEventListener\('ready',[\s\S]{0,260}refreshAutoStatuses\(\)\.catch/.test(source), 'client-events ready re-fetches auto status so stale YO markers are backfilled after reconnect');
   assert.ok(/function installReconnectResyncHandlers\(\)[\s\S]*document\.addEventListener\('visibilitychange'[\s\S]*document\.visibilityState === 'visible'[\s\S]*scheduleReconnectResync\('visible'\)[\s\S]*window\.addEventListener\('online'[\s\S]*scheduleReconnectResync\('online'\)/.test(source), 'page wake and network restore schedule a shared refreshAll resync');
   assert.ok(/function scheduleReconnectResync\(reason = ''\)[\s\S]*setTimeout\(\(\) => \{[\s\S]*refreshAll\(\)/.test(source), 'wake/network reconnect resync is debounced before refreshAll');
@@ -10196,6 +10595,7 @@ test('t@7149', () => {
   assert.ok(runtimeSrc.includes("resetRuntimeInterval('auto-approve', () => {\n    if (clientEventsConnected === true) return null;\n    return refreshAutoStatuses();\n  }, autoApproveDisconnectedPollMs);"), 'auto-approve fallback poll only runs while client-events is disconnected');
   assert.ok(/if \(type === 'settings_changed'\)[\s\S]{0,220}applySettingsPayload\(payload\.data, \{force: true\}\)/.test(source), 'settings_changed applies direct payloads without polling settings again');
   assert.ok(/if \(type === 'auto_approve_changed'\)[\s\S]{0,120}applyAutoApprovePayload\(payload\.data\)/.test(source), 'auto_approve_changed applies direct payloads');
+  assert.ok(/if \(type === 'tmux_signals_changed'\)[\s\S]{0,120}applyTmuxSignalsPayload\(payload\)/.test(source), 'tmux_signals_changed applies direct payloads');
   assert.ok(/if \(type === 'watched_prs_changed'\)[\s\S]{0,120}applyWatchedPrsPayload\(payload\.data\)/.test(source), 'watched_prs_changed applies direct payloads');
   assert.ok(/if \(type === 'transcripts_changed'\)[\s\S]{0,220}applyTranscriptsPayload\(payload\.data, \{refreshAuto: false, refreshContext: false, refreshActivity: false\}\)/.test(source), 'transcripts_changed applies direct metadata payloads');
   assert.ok(/if \(type === 'context_items_ready'\)[\s\S]{0,160}applyContextItemsPayloadFromPush\(payload\.data/.test(source), 'context_items_ready applies direct context payloads');
@@ -10327,7 +10727,7 @@ test('t@7283', () => {
   assert.ok(/\.yoagent-chat-send\s*\{[^}]*border-radius:\s*50%/.test(css), 'send button is circular');
   assert.ok(/\.yoagent-backend-pill\s*\{/.test(css), 'backend pill is styled as a pill');
   assert.ok(/\.yoagent-recent-agents-list\s*\{[^}]*display:\s*grid/.test(css), 'YO!agent recent agents render as a compact bullet list inside the chat history');
-  assert.ok(/function yoagentRecentAgentPathText\(agent\)[\s\S]*agent\?\.recent_paths[\s\S]*compactHomePath/.test(src), 'YO!agent recent agents display backend recent_paths with compact home paths');
+  assert.ok(/function yoagentRecentAgentPathText\(agent, signal = yoagentRecentAgentSignal\(agent\)\)[\s\S]*agent\?\.recent_paths[\s\S]*compactHomePath/.test(src), 'YO!agent recent agents display backend recent_paths with compact home paths');
   assert.ok(/function yoagentRecentAgentsHtml\(\)[\s\S]*activitySummaryPayload\?\.agents[\s\S]*<ul class="yoagent-recent-agents-list">/.test(src), 'YO!agent recent agents render from backend activity-summary agents as a list');
   assert.ok(/function yoagentRecentAgentsMessageHtml\(\)[\s\S]*yoagentRecentAgentsHtml\(\)[\s\S]*yoagent-message assistant yoagent-recent-agents-message/.test(src), 'YO!agent recent agents are wrapped as an assistant response for the startup one-shot');
   assert.ok(/let yoagentStreamingMessages = new Map\(\)/.test(src), 'YO!agent keeps transient streaming assistant messages in chat state');
@@ -10395,6 +10795,97 @@ test('t@7283', () => {
   assert.equal(en['yoagent.chatPlaceholder'], 'Ask anything…', 'composer placeholder matches the mockup ("Ask anything…")');
   assert.equal(en['yoagent.waiting.count.other'], 'Waiting for {count} replies', 'YO!agent pending-wait count is localized');
   assert.equal(en['yoagent.waiting.handoff'], 'Waiting for tmux session `{source}` to respond (regarding {sourceRegarding}), before handing off the next request to tmux session `{target}` (regarding {targetRegarding})', 'YO!agent handoff wait text names both sessions and both regarding summaries');
+});
+
+test('t@7287', () => {
+  const api = loadYolomux('', ['1', '2']);
+  api.setDocumentTitleNowForTest(200000);
+  api.setTmuxSignalStateForTest({
+    windows: [
+      {
+        key: '1:0',
+        session: '1',
+        window_index: '0',
+        activity_ts: 190,
+        bell_flag: true,
+        silence_flag: true,
+        active_clients: 2,
+        active_clients_list: 'client-a,client-b',
+        active_client_details: [{name: 'client-a', user: 'keiven'}, {name: 'client-b', user: 'viewer'}],
+        zoomed: true,
+        layout: 'layout-host',
+        visible_layout: 'visible-layout-host',
+        panes: [{
+          window_key: '1:0',
+          session: '1',
+          window_index: '0',
+          pane_index: '0',
+          target: '%11',
+          pane_id: '%11',
+          current_path: '/home/keivenc/live-project',
+          current_command: 'codex',
+          mode: 'copy-mode',
+          in_mode: true,
+          input_off: true,
+          synchronized: true,
+          dead: true,
+          dead_status: 9,
+        }],
+      },
+      {
+        key: '2:0',
+        session: '2',
+        window_index: '0',
+        activity_ts: 10,
+        panes: [{
+          window_key: '2:0',
+          session: '2',
+          window_index: '0',
+          pane_index: '0',
+          target: '%22',
+          pane_id: '%22',
+          current_path: '/home/keivenc/old-project',
+          current_command: 'claude',
+        }],
+      },
+    ],
+  });
+  api.setActivitySummaryPayloadForTest({
+    agents: [{
+      label: "session '2' 0:claude",
+      session: '2',
+      window: '0',
+      window_label: '0:claude',
+      pane: '0',
+      pane_target: '%22',
+      agent_kind: 'claude',
+      cwd: '/home/keivenc/old-project',
+      transcript: '/tmp/claude.jsonl',
+      sort_ts: 999,
+    }, {
+      label: "session '1' 0:codex",
+      session: '1',
+      window: '0',
+      window_label: '0:codex',
+      pane: '0',
+      pane_target: '%11',
+      agent_kind: 'codex',
+      cwd: '/home/keivenc/project',
+      transcript: '/tmp/codex.jsonl',
+    }],
+  });
+  const html = api.yoagentRecentAgentsHtmlForTest();
+  assert.ok(html.includes('agent exited (status 9)'), 'recent agents surface dead tmux agent status');
+  assert.ok(html.indexOf('session 1') < html.indexOf('session 2'), 'tmux window_activity sorts recent agents ahead of stale backend order');
+  assert.ok(html.includes('yoagent-recent-agent tmux-idle'), 'old tmux window_activity dims idle recent-agent rows');
+  assert.ok(html.includes('signal-bell') && html.includes('signal-silence'), 'recent agents surface tmux bell and silence signal chips');
+  assert.ok(html.includes('signal-presence') && html.includes('2 viewers'), 'recent agents surface tmux active-client presence');
+  assert.ok(html.includes('signal-zoom') && html.includes('zoom'), 'recent agents surface tmux zoom state');
+  assert.ok(html.includes('/home/keivenc/live-project'), 'recent agents prefer live tmux pane_current_path');
+  assert.ok(html.includes('client-a') && html.includes('layout-host') && html.includes('visible-layout-host'), 'recent agent title includes tmux viewer and layout details');
+  assert.ok(html.includes('copy-mode') && html.includes('read-only') && html.includes('sync'), 'recent agents surface pane mode/read-only/sync chips');
+  assert.ok(html.includes('data-yolomux-agent-restart="codex"'), 'dead agent row offers a restart action for the same agent kind');
+  assert.ok(html.includes('tmux'), 'recent agents prefer tmux recency text when window_activity is available');
 });
 
 test('t@7290', () => {
@@ -12512,6 +13003,18 @@ test('t@tabber', () => {
   assert.ok(source.includes("path: 'uploads.custom_actions'") && source.includes("path: 'uploads.suggestion_autorun'") && source.includes("path: 'uploads.image_action_order'"), 'Uploads Preferences expose custom actions, image ordering, and autorun');
 }
 
+// Gate-integrity watchdog: a single hung `await` in the trailing suite block (e.g. an un-flushed batched
+// fs listing) used to leave this IIFE unsettled, so its .finally never ran, the event loop drained, and
+// node exited 0 with NO summary — silently masking every later test and passing the cps gate. This timer
+// runs in the REAL node context (the harness setTimeout stub only affects vm-eval'd bundle code), so it
+// both keeps the process alive to detect the hang AND fails loud instead of false-green. Cleared on settle.
+const SUITE_WATCHDOG_MS = 60000;
+const suiteWatchdog = setTimeout(() => {
+  console.error(`\n✗ layout suite DID NOT SETTLE within ${SUITE_WATCHDOG_MS}ms — a trailing await is hung (commonly an un-flushed batched /api/fs/batch listing; drive flushFileExplorerFsBatchForTest). Failing instead of exiting 0.`);
+  process.exitCode = 1;
+  process.exit(1);
+}, SUITE_WATCHDOG_MS);
+
 (async () => {
   {
     const api = loadYolomux('', ['1', '2']);
@@ -12888,6 +13391,16 @@ test('t@tabber', () => {
     const shareFinderDiffApi = loadYolomux('?shareReplay=0', ['1'], 'https:', 'Linux x86_64', 'readonly', {
       share: {view: true, id: 'share-finder-diff', mode: 'ro', session: '1', sessions: ['1']},
     });
+    // applyShareUiState -> applyShareFinderState -> openFileExplorerAt enqueues a BATCHED /api/fs/batch
+    // directory listing; the 8ms flush now fires via the harness setTimeout shim, so the apply settles
+    // instead of hanging. Stub /api/fs/batch so the auto-flushed listing resolves cleanly.
+    shareFinderDiffApi.setFetchForTest((url, options = {}) => {
+      if (String(url).startsWith('/api/fs/batch')) {
+        const requests = JSON.parse(options.body || '{}').requests || [];
+        return Promise.resolve(jsonResponse({responses: requests.map(request => ({id: request.id, ok: true, status: 200, payload: {path: request.path, entries: []}}))}));
+      }
+      return Promise.resolve(jsonResponse({items: [], session: '1'}));
+    });
     await shareFinderDiffApi.applyShareUiStateForTest({finder: finderSnapshot});
     assert.deepStrictEqual(canonical(shareFinderDiffApi.diffRefParams('/repo/app')), {from: 'abc1234', to: 'def5678'}, 'YO!share clients apply repo-scoped Differ TO refs instead of sticking on current');
   }
@@ -12924,7 +13437,7 @@ test('t@tabber', () => {
       expanded: ['/home/test/yolomux.dev1/src'],
     }});
     assert.equal(shareFinderJumpApi.fileExplorerRootForTest(), '/home/test/yolomux.dev1', 'read-only share applies the host Finder root');
-    assert.deepStrictEqual(shareFinderJumpApi.fileExplorerExpandedForTest(), ['/home/test/yolomux.dev1/src'], 'read-only share applies the host Finder expansion');
+    assert.deepStrictEqual(canonical(shareFinderJumpApi.fileExplorerExpandedForTest()), ['/home/test/yolomux.dev1/src'], 'read-only share applies the host Finder expansion');
 
     shareFinderJumpApi.setSessionFilesPayloadForDestinationForTest({
       session: '6',
@@ -12938,7 +13451,7 @@ test('t@tabber', () => {
     await Promise.resolve();
     await Promise.resolve();
     assert.equal(shareFinderJumpApi.fileExplorerRootForTest(), '/home/test/yolomux.dev1', 'read-only share local payloads cannot jump Finder to the client context');
-    assert.deepStrictEqual(shareFinderJumpApi.fileExplorerExpandedForTest(), ['/home/test/yolomux.dev1/src'], 'read-only share local payloads cannot collapse or replace the host expansion');
+    assert.deepStrictEqual(canonical(shareFinderJumpApi.fileExplorerExpandedForTest()), ['/home/test/yolomux.dev1/src'], 'read-only share local payloads cannot collapse or replace the host expansion');
 
     await shareFinderJumpApi.applyShareUiStateForTest({finder: {
       root: '/home/test/yolomux.dev1',
@@ -12948,7 +13461,7 @@ test('t@tabber', () => {
       expanded: ['/home/test/yolomux.dev1/src'],
     }});
     assert.equal(shareFinderJumpApi.fileExplorerRootForTest(), '/home/test/yolomux.dev1', 'repeated same-root host frames keep the Finder on the host root');
-    assert.deepStrictEqual(shareFinderJumpApi.fileExplorerExpandedForTest(), ['/home/test/yolomux.dev1/src'], 'repeated same-root host frames keep the host expansion stable');
+    assert.deepStrictEqual(canonical(shareFinderJumpApi.fileExplorerExpandedForTest()), ['/home/test/yolomux.dev1/src'], 'repeated same-root host frames keep the host expansion stable');
   }
 
   {
@@ -13189,6 +13702,106 @@ test('t@tabber', () => {
     }, 'pasted image upload inserts the image reference into xterm');
   }
 
+  // DOIT.78 payload-matrix contract (78.5): the ONE shared image-payload detector/extractor used by BOTH
+  // paste and drop must recognize EVERY browser exposure (File item, plain File list, image MIME type,
+  // rich text/html <img>) and extract every image — so no exposure slips past the claim and leaks as an
+  // attachment. Headless clipboard/drag image injection is unreliable, so the shared logic (not a flaky
+  // Selenium clipboard test) is the regression surface; live event wiring is covered by the paste
+  // contracts below + the source-grep invariant.
+  {
+    const api = loadYolomux();
+    const dt = over => ({
+      items: over.items || [],
+      files: over.files || [],
+      types: over.types || [],
+      getData(type) { return (over.data || {})[type] || ''; },
+    });
+    const fileItem = (type = 'image/png') => ({kind: 'file', type, getAsFile() { return {name: 'x', type, size: 4}; }});
+    const has = api.dataTransferHasImagePayloadForTest;
+    const files = api.dataTransferImageFilesForTest;
+    assert.equal(has(dt({items: [fileItem()]})), true, '78.5: image File item is image-bearing');
+    assert.equal(has(dt({files: [{type: 'image/png'}]})), true, '78.5: plain image File list is image-bearing');
+    assert.equal(has(dt({types: ['image/png']})), true, '78.5: image MIME type is image-bearing');
+    assert.equal(has(dt({types: ['text/html'], data: {'text/html': '<img src="https://x/y.png">'}})), true, '78.5: rich text/html <img> is image-bearing');
+    assert.equal(has(dt({items: [fileItem('image/png'), fileItem('image/jpeg')]})), true, '78.5: multiple image items are image-bearing');
+    assert.equal(has(dt({types: ['text/plain'], data: {'text/plain': 'hello'}})), false, '78.5: plain text is not image-bearing');
+    assert.equal(has(dt({items: [{kind: 'file', type: 'application/pdf', getAsFile() { return {name: 'a.pdf', type: 'application/pdf'}; }}]})), false, '78.5: a non-image file item is not image-bearing');
+    assert.equal(has(null), false, '78.5: missing payload is not image-bearing');
+    assert.equal(files(dt({items: [fileItem(), fileItem('image/jpeg')]})).length, 2, '78.5: extracts every image File item (multi-image)');
+    assert.equal(files(dt({files: [{type: 'image/png', name: 'p.png'}, {type: 'text/plain', name: 'n.txt'}]})).length, 1, '78.5: extracts only image entries from a plain File list');
+  }
+
+  // DOIT.78 (78.1): an image pasted as RICH DATA (text/html <img>, NO File) must still be CLAIMED
+  // (preventDefault + stopPropagation) so the raw image cannot leak to the agent as an attachment.
+  {
+    const api = loadYolomux('', ['1']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.leafNode('left');
+    slots.left = api.paneStateWithTabs(['1'], '1');
+    api.setLayoutSlotsForTest(slots);
+    api.registerTerminalForTest('1', {focus() {}}, {readyState: 1, send() {}});
+    api.setFetchForTest(() => Promise.resolve(jsonResponse({items: [], session: '1'})));
+    api.bindClipboardPasteForTest();
+    const pasteListeners = api.documentListenersForTest('paste');
+    const richPaste = {
+      clipboardData: {
+        items: [],
+        types: ['text/html'],
+        getData(type) { return type === 'text/html' ? '<img src="https://example.com/x.png" alt="">' : ''; },
+      },
+      target: null,
+      defaultPrevented: false,
+      propagationStopped: false,
+      preventDefault() { this.defaultPrevented = true; },
+      stopPropagation() { this.propagationStopped = true; },
+    };
+    pasteListeners[0](richPaste);
+    await flushAsyncWork();
+    assert.equal(richPaste.defaultPrevented, true, '78.1: rich-data image paste is claimed so it cannot leak to the agent as an attachment');
+    assert.equal(richPaste.propagationStopped, true, '78.1: rich-data image paste stops propagation once claimed');
+  }
+
+  // DOIT.78 (78.4): pasting MULTIPLE image Files in one event uploads ALL of them and inserts a text
+  // reference for each — never one ref + one attachment.
+  {
+    const api = loadYolomux('', ['1']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.leafNode('left');
+    slots.left = api.paneStateWithTabs(['1'], '1');
+    api.setLayoutSlotsForTest(slots);
+    const sent = [];
+    api.registerTerminalForTest('1', {focus() {}}, {readyState: 1, send(message) { sent.push(JSON.parse(message)); }});
+    api.setFetchForTest(url => {
+      if (String(url).startsWith('/api/upload')) return Promise.resolve(jsonResponse({files: [{path: '/home/test/multi-a.png'}, {path: '/home/test/multi-b.png'}]}));
+      return Promise.resolve(jsonResponse({items: [], session: '1'}));
+    });
+    api.setClientSettingsPatchForTest({uploads: {show_suggestions: false}});
+    api.bindClipboardPasteForTest();
+    const pasteListeners = api.documentListenersForTest('paste');
+    const imageItem = name => ({kind: 'file', type: 'image/png', getAsFile() { return {name, type: 'image/png', size: 7}; }});
+    const multiPaste = {
+      clipboardData: {items: [imageItem('a.png'), imageItem('b.png')], types: ['Files'], getData() { return ''; }},
+      target: null,
+      defaultPrevented: false,
+      preventDefault() { this.defaultPrevented = true; },
+      stopPropagation() {},
+    };
+    pasteListeners[0](multiPaste);
+    await flushAsyncWork();
+    assert.equal(multiPaste.defaultPrevented, true, '78.4: multi-image paste is claimed');
+    const allSent = sent.map(message => message.data).join('');
+    assert.ok(allSent.includes('multi-a.png') && allSent.includes('multi-b.png'), '78.4: both pasted images become text references in the terminal (no attachment)');
+  }
+
+  // DOIT.78 (78.6): invariant guard — paste and drop must route through the ONE shared image-payload
+  // detector so a new entry point can't reintroduce a divergent leak path.
+  {
+    const imgSource = fs.readFileSync('static/yolomux.js', 'utf8');
+    assert.ok(/document\.addEventListener\('paste', event => \{\s*if \(!dataTransferHasImagePayload\(event\.clipboardData\)\) return;/.test(imgSource), '78.6: the document paste handler claims via the shared dataTransferHasImagePayload detector');
+    assert.ok(imgSource.includes('function hasUploadableDrag(event)') && /addEventListener\('drop', event => \{\s*if \(!hasUploadableDrag\(event\)\) return;/.test(imgSource), '78.6: the file-drop handler claims via hasUploadableDrag (file OR image rich-data)');
+    assert.ok(imgSource.includes('function dataTransferImageFiles(dt)') && imgSource.includes('function dataTransferHasImagePayload(dt)'), '78.6: the shared image-payload parent exists');
+  }
+
   {
     const api = loadYolomux();
     const calls = [];
@@ -13361,6 +13974,7 @@ test('t@tabber', () => {
   console.error(error);
   process.exitCode = 1;
 }).finally(() => {
+  clearTimeout(suiteWatchdog);
   console.log(`\nlayout suite: ${__testPass} passed, ${__testFail} failed`);
   if (__testFail) process.exitCode = 1;
 });

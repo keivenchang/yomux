@@ -197,12 +197,13 @@ let shareReplayKeyframeInFlight = false;
 let shareReplayHostKeyframeTimer = null;
 let shareReplayHostKeyframePendingReason = '';
 let shareReplayHostLastKeyframeAt = 0;
+let shareReplayHostLastKeyframeReason = '';
 let shareReplayHostKeyframeSuppressedCount = 0;
 let shareReplayTopologyKeyframeTimer = null;
+let shareReplayTopologyKeyframeQueuedAt = 0;
 let shareReplayTopologyMutationPauseTimer = null;
 const sharePopupLayerLastSeqBySender = new Map();
 const shareLastAppliedScrollByTarget = new Map();
-const shareLastAppliedScrollPayloadByTarget = new Map();
 const homePath = bootstrap.homePath;
 const repoRoot = bootstrap.repoRoot || '';
 const serverHostname = bootstrap.serverHostname;
@@ -663,6 +664,7 @@ let clientSettings = clientSettingsPayload.settings || {};
 let clientSettingsDefaults = clientSettingsPayload.defaults || {};
 let clientSettingsMtimeNs = Number(clientSettingsPayload.mtime_ns || 0);
 let globalThemeMode = initialSetting('appearance.theme', defaultGlobalTheme);
+let shareResolvedGlobalThemeMode = '';
 let terminalThemeMode = initialSetting('appearance.terminal_theme', defaultTerminalTheme);
 let dateTimeHourCycle = initialSetting('appearance.date_time_hour_cycle', '24') === '12' ? '12' : '24';
 fileEditorThemeMode = readConfiguredEditorScheme();
@@ -676,6 +678,7 @@ const transcriptStreams = new Map();
 const summaryStreams = new Map();
 const autoApproveStates = new Map();
 const documentTitleIdleThresholdMs = 120000;
+const tmuxSignalActivityWindowMs = documentTitleIdleThresholdMs;
 let documentTitleIdleSinceMs = null;
 const uploadResultsBySession = new Map();
 const uploadCleanupTimers = new Map();
@@ -697,6 +700,7 @@ let watchedPrsData = {watched_prs: [], truncated: 0, invalid: []};
 const watchedPrLastStatus = new Map();
 let latencyRefreshMs = initialSetting('performance.latency_refresh_ms', 3000);
 let eventLogRefreshMs = initialSetting('performance.event_log_refresh_ms', 5000);
+let tmuxSignalState = null;
 tabberActivityRefreshMs = initialSetting('performance.tabber_activity_refresh_ms', 15000);
 let redReminderMs = initialSetting('appearance.red_reminder_ms', 1550);
 let yoloRotateMs = initialSetting('appearance.yolo_rotate_ms', 20000);
@@ -745,6 +749,7 @@ const layoutTreeParamPrefix = 'tree:';
 
 const defaultSplitPercent = 50;
 const fileExplorerSplitPercent = 22;
+const minNonFileExplorerSplitPercent = 30;
 const defaultLayoutMode = 'split';
 const layoutModeValues = ['single', 'split', 'grid'];
 const legacyLayoutModeValues = [...layoutModeValues, 'wall'];
@@ -863,7 +868,7 @@ function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTit
     createPanel: item => createFileEditorPanel(item),
     className,
     icon: 'document',
-    minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
+    minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 1,
   };
 }
@@ -891,7 +896,7 @@ const TAB_TYPES = [
     },
     className: () => 'info',
     icon: 'branch-info',
-    minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
+    minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 0,
   },
   {
@@ -909,7 +914,7 @@ const TAB_TYPES = [
     createPanel: () => createFileExplorerPanel(),
     className: () => 'file-explorer',
     icon: 'finder',
-    minWidth: () => rootCssLengthPx('--file-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
+    minWidth: () => rootCssLengthPx('--file-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 0,
   },
   {
@@ -927,7 +932,7 @@ const TAB_TYPES = [
     createPanel: () => createPreferencesPanel(),
     className: () => 'preferences-item',
     icon: 'gear',
-    minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
+    minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 0,
   },
   ...(debugModeEnabled ? [{
@@ -946,7 +951,7 @@ const TAB_TYPES = [
     renderAttached: () => renderDebugPanels(),
     className: () => 'debug-item',
     icon: 'tab-meta',
-    minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
+    minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 0,
   }] : []),
   filePanelTabType({
@@ -1047,6 +1052,10 @@ function appShortcutModifierLabel() {
 function appShortcutText(key, options = {}) {
   const alt = options.alt ? `${isMacPlatform() ? '⌥' : 'Alt'}+` : '';
   return `${options.shift ? 'Shift+' : ''}${appShortcutModifierLabel()}+${alt}${key}`;
+}
+
+function metaShortcutText(key) {
+  return `${isMacPlatform() ? '⌘' : 'Meta'}+${key}`;
 }
 
 function platformWindowControlClass(kind) {

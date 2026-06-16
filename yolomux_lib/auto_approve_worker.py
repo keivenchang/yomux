@@ -13,6 +13,7 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
+from typing import Callable
 
 import auto_approve_tmux
 
@@ -141,12 +142,14 @@ class AutoApproveWorker:
         owner_extra: dict[str, Any] | None = None,
         dangerously_yolo: bool = False,
         prompt_source: str = "hybrid",
+        capture_gate: Callable[[str], bool] | None = None,
     ):
         self.target = target
         self.interval = interval
         self.event_callback = event_callback
         self.dangerously_yolo = dangerously_yolo
         self.prompt_source = prompt_source if prompt_source in {"pane", "hybrid"} else "hybrid"
+        self.capture_gate = capture_gate
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self.run, name=f"auto-approve-{target}", daemon=True)
         self.lock = threading.Lock()
@@ -158,6 +161,8 @@ class AutoApproveWorker:
         self.last_hash = ""
         self.last_hash_at = 0.0
         self.last_blocked_hash = ""
+        self.pending_prompt = False
+        self.capture_gate_observed = False
         self.process_lock = AutoApproveProcessLock(target, owner_extra)
         self.lock_owner: dict[str, Any] | None = None
 
@@ -195,6 +200,9 @@ class AutoApproveWorker:
                 "lock_owner": self.lock_owner,
                 "prompt_source": self.prompt_source,
             }
+
+    def has_pending_prompt(self) -> bool:
+        return self.pending_prompt or bool(self.last_hash) or bool(self.last_blocked_hash)
 
     def update(self, **values: Any) -> None:
         with self.lock:
@@ -240,10 +248,21 @@ class AutoApproveWorker:
             self.process_lock.release()
 
     def process_once(self, module: Any) -> bool:
+        if self.capture_gate is not None and self.capture_gate_observed and not self.pending_prompt and not self.last_hash and not self.last_blocked_hash:
+            try:
+                should_capture = self.capture_gate(self.target)
+            except EXPECTED_AUTO_APPROVE_ERRORS as exc:
+                self.update(error=str(exc), last_action="tmux activity gate error")
+                should_capture = True
+            if should_capture is False:
+                self.update(last_action="idle; tmux activity quiet")
+                return False
+
         visible_text = module.tmux_capture_pane(self.target, visible_only=True)
         if visible_text is None:
             self.update(last_action="failed to capture pane")
             return False
+        self.capture_gate_observed = True
 
         if hasattr(module, "hybrid_approval_prompt_state"):
             prompt_state = module.hybrid_approval_prompt_state(self.target, visible_text, prompt_source=self.prompt_source)
@@ -254,9 +273,11 @@ class AutoApproveWorker:
             self.last_hash = ""
             self.last_hash_at = 0.0
             self.last_blocked_hash = ""
+            self.pending_prompt = False
             reason = str(prompt_state.get("reason") or "")
             self.update(last_action=f"idle; {reason}" if reason else "idle")
             return False
+        self.pending_prompt = True
 
         action_value = prompt_state.get("action")
         action = action_value if isinstance(action_value, str) and action_value else None

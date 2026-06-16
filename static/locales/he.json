@@ -831,6 +831,7 @@
   "shortcuts.section.tabsPanes": "לשוניות / חלוניות",
   "shortcuts.section.terminal": "Terminal",
   "shortcuts.sessionActions": "פעולות הפעלה",
+  "shortcuts.switchTmuxWindow": "Previous / next tab",
   "shortcuts.title": "קיצורי מקלדת",
   "shortcuts.toggleComment": "החלף הערת שורה",
   "shortcuts.toggleFinder": "החלף {name}",

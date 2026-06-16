@@ -810,6 +810,7 @@
   "shortcuts.closeTab": "Fechar aba de editor/visualizador ativa",
   "shortcuts.commandPalette": "Paleta de comandos",
   "shortcuts.copyTmuxSelection": "Copy tmux selection",
+  "shortcuts.switchTmuxWindow": "Previous / next tab",
   "shortcuts.editorNav": "Editor voltar / avançar",
   "shortcuts.fileQuickOpen": "Abertura rápida de arquivo",
   "shortcuts.find": "Localizar",

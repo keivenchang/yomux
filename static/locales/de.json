@@ -831,6 +831,7 @@
   "shortcuts.section.tabsPanes": "Tabs / Fenster",
   "shortcuts.section.terminal": "Terminal",
   "shortcuts.sessionActions": "Sitzungsaktionen",
+  "shortcuts.switchTmuxWindow": "Previous / next tab",
   "shortcuts.title": "Tastenkürzel",
   "shortcuts.toggleComment": "Zeilenkommentar umschalten",
   "shortcuts.toggleFinder": "{name} umschalten",

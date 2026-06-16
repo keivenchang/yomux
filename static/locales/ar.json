@@ -831,6 +831,7 @@
   "shortcuts.section.tabsPanes": "التبويبات / الأجزاء",
   "shortcuts.section.terminal": "Terminal",
   "shortcuts.sessionActions": "إجراءات الجلسة",
+  "shortcuts.switchTmuxWindow": "Previous / next tab",
   "shortcuts.title": "اختصارات لوحة المفاتيح",
   "shortcuts.toggleComment": "تبديل تعليق السطر",
   "shortcuts.toggleFinder": "تبديل {name}",

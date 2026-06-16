@@ -39,9 +39,11 @@ class DummyProcessModule(DummyApproveModule):
     def __init__(self, prompt_state: dict[str, Any]):
         super().__init__()
         self.prompt_state = prompt_state
+        self.capture_calls: list[tuple[str, bool]] = []
 
     def tmux_capture_pane(self, _target: str, visible_only: bool = False) -> str:
-        return "visible prompt" if visible_only else "curl -sk -u yolomux:yolomux https://localhost:7777/"
+        self.capture_calls.append((_target, visible_only))
+        return "visible prompt" if visible_only else "curl -sk -u yolomux:yolomux https://localhost:19077/"
 
     def approval_prompt_state(self, _visible_text: str) -> dict[str, Any]:
         return self.prompt_state
@@ -167,7 +169,7 @@ def test_bash_prompt_handler_truncates_command_without_crashing(monkeypatch):
     )
     monkeypatch.setattr(auto_approve_worker.yolo_rules, "evaluate", approving_decision)
 
-    acted = worker.handle_bash_prompt(module, "curl -sk -u yolomux:yolomux https://localhost:7777/", "hash-1", "option1")
+    acted = worker.handle_bash_prompt(module, "curl -sk -u yolomux:yolomux https://localhost:19077/", "hash-1", "option1")
 
     assert acted is True
     assert module.sent == [("option", "6", 1, 1)]
@@ -175,7 +177,7 @@ def test_bash_prompt_handler_truncates_command_without_crashing(monkeypatch):
     assert worker.error is None
     assert worker.last_action.startswith("approved bash: curl -sk -u")
     assert events[0][1] == "approval_approved"
-    assert events[0][3]["command"] == "curl -sk -u yolomux:yolomux https://localhost:7777/"
+    assert events[0][3]["command"] == "curl -sk -u yolomux:yolomux https://localhost:19077/"
 
 
 def test_bash_prompt_decline_sends_no_option(monkeypatch):
@@ -223,6 +225,43 @@ def test_process_once_uses_live_prompt_command_not_stale_pane_command(monkeypatc
     assert evaluated == ["cp -r src/ dist/"]
     assert worker.last_blocked_hash == "hash-cp"
     assert worker.last_action == "blocked bash: cp -r src/ dist/"
+
+
+def test_process_once_skips_capture_after_initial_tmux_activity_observation():
+    module = DummyProcessModule({
+        "visible": False,
+        "type": "",
+        "hash": "",
+        "reason": "no approval prompt",
+    })
+    worker = auto_approve_worker.AutoApproveWorker("6", interval=0.01, capture_gate=lambda _target: False)
+
+    first = worker.process_once(module)
+    module.capture_calls.clear()
+    second = worker.process_once(module)
+
+    assert first is False
+    assert second is False
+    assert module.capture_calls == []
+    assert worker.last_action == "idle; tmux activity quiet"
+
+
+def test_process_once_captures_idle_target_when_prompt_hash_is_pending():
+    module = DummyProcessModule({
+        "visible": False,
+        "type": "",
+        "hash": "",
+        "reason": "prompt cleared",
+    })
+    worker = auto_approve_worker.AutoApproveWorker("6", interval=0.01, capture_gate=lambda _target: False)
+    worker.last_hash = "hash-pending"
+
+    acted = worker.process_once(module)
+
+    assert acted is False
+    assert module.capture_calls == [("6", True)]
+    assert worker.last_action == "idle; prompt cleared"
+    assert worker.last_hash == ""
 
 
 def test_bash_prompt_dry_run_does_not_send_key(monkeypatch):

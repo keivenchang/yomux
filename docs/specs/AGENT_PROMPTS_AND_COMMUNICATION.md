@@ -19,6 +19,8 @@ This file records the working knowledge YOLOmux uses to detect Claude and Codex 
 - App status fan-out from pane text, approval state, and transcript state: `yolomux_lib/app.py::TmuxWebtermApp.prompt_and_screen_status`.
 - Regression fixtures: `tests/test_auto_approve_detector.py` and `tests/test_transcripts.py`.
 
+When one tmux session contains multiple detected agent panes, session-level YO status captures the selected/preferred agent pane first. If the selected/preferred pane is not an agent pane, it falls back to a deterministic detected-agent pane. This keeps YO activity tied to the pane the user is actually looking at instead of the first agent discovered by tmux enumeration.
+
 ## State Model
 
 | State | Meaning | Safe to type? | Primary detection source |

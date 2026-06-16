@@ -205,7 +205,7 @@
   font-size: max(10px, var(--ui-font-size));
 }
 .session-yolo-marker.inactive {
-  color: #d7dde5;
+  color: var(--pane-meta-branch);
   background: var(--divider);
   border-color: #5d6878;
 }
@@ -489,7 +489,7 @@ body.theme-light .popover-desc {
 }
 body.theme-light .session-popover a,
 body.theme-light .branch-link {
-  color: #2563eb;
+  color: var(--accent);
 }
 .popover-head {
   display: flex;

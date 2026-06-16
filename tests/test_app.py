@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 import io
 import json
+from pathlib import Path
 import threading
 from types import SimpleNamespace
 from urllib.parse import parse_qs
@@ -31,6 +32,15 @@ def isolated_yoagent_conversation_state(monkeypatch, tmp_path):
     monkeypatch.setattr(app_module.yoagent_conversation, "YOAGENT_CONVERSATION_PATH", state_dir / "conversation.jsonl")
     monkeypatch.setattr(app_module.yoagent_conversation, "YOAGENT_CLI_STATE_PATH", state_dir / "cli-sessions.json")
     monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
+
+
+def test_session_http_guards_use_shared_decorator():
+    source = Path(app_module.__file__).read_text(encoding="utf-8")
+
+    assert "def requires_known_session(" in source
+    assert source.count("unknown = self.require_known_session(session)") == 3
+    assert "@requires_known_session(refresh=True)\n    def rename_session" in source
+    assert "@requires_known_session()\n    def tmux_snapshot" in source
 
 
 class FakeCodexAppServerStdin:
@@ -677,6 +687,290 @@ def test_auto_approve_roster_uses_live_pane_working_signal(monkeypatch):
     assert payload["sessions"]["6"]["prompt"]["visible"] is True
 
 
+def test_auto_approve_fans_out_to_server_wide_agent_panes(monkeypatch):
+    created_targets = []
+
+    class FakeAutoApproveWorker:
+        def __init__(self, target, **kwargs):
+            self.target = target
+            self.kwargs = kwargs
+            self.stopped = False
+            created_targets.append(target)
+
+        def start(self):
+            return True, None
+
+        def alive(self):
+            return not self.stopped
+
+        def stop(self):
+            self.stopped = True
+            return True
+
+        def status(self):
+            return {
+                "target": self.target,
+                "enabled": self.alive(),
+                "approved": 1 if self.target == "%11" else 2,
+                "blocked": 0,
+                "last_action": f"watching {self.target}",
+            }
+
+        def has_pending_prompt(self):
+            return False
+
+    signal_payload = {
+        "ok": True,
+        "agents": [
+            {"session": "6", "target": "%11", "pane_id": "%11", "agent": "codex", "dead": False},
+            {"session": "6", "target": "%12", "pane_id": "%12", "agent": "claude", "dead": False},
+            {"session": "7", "target": "%21", "pane_id": "%21", "agent": "codex", "dead": False},
+        ],
+        "windows": [],
+    }
+    monkeypatch.setattr(app_module, "AutoApproveWorker", FakeAutoApproveWorker)
+    monkeypatch.setattr(app_module, "tmux_has_exact_session", lambda session: session == "6")
+    webapp = app_module.TmuxWebtermApp(["6"])
+    monkeypatch.setattr(webapp, "tmux_signal_snapshot", lambda force=False: signal_payload)
+    monkeypatch.setattr(webapp, "prompt_and_screen_status", lambda *args, **kwargs: (app_module.normalized_prompt_state(), {"key": "idle", "text": ""}))
+    try:
+        payload, status = webapp.set_auto_approve("6", True, persist=False)
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert created_targets == ["%11", "%12"]
+    assert set(webapp.auto_workers) == {"%11", "%12"}
+    assert webapp.auto_worker_sessions == {"%11": "6", "%12": "6"}
+    assert payload["target"] == "6"
+    assert payload["worker_targets"] == ["%11", "%12"]
+    assert payload["approved"] == 3
+    assert payload["enabled"] is True
+
+
+def test_prompt_and_screen_status_skips_idle_tmux_signal_capture(monkeypatch):
+    capture_calls = []
+    monkeypatch.setattr(app_module, "tmux_capture_pane", lambda *args, **kwargs: capture_calls.append((args, kwargs)) or "should not capture")
+    webapp = app_module.TmuxWebtermApp(["6"])
+    monkeypatch.setattr(webapp, "auto_approve_capture_allowed_for_target", lambda _target: False)
+    try:
+        prompt, screen = webapp.prompt_and_screen_status("6", capture_pane=False)
+    finally:
+        webapp.control_server.stop()
+
+    assert prompt["visible"] is False
+    assert screen == {"key": "idle", "text": "tmux activity quiet"}
+    assert capture_calls == []
+
+
+def test_tmux_signal_window_recently_active_resolves_pane_targets(monkeypatch):
+    monkeypatch.setattr(app_module.time, "time", lambda: 1000.0)
+    webapp = app_module.TmuxWebtermApp(["6"])
+    payload = {
+        "windows": [
+            {
+                "key": "6:0",
+                "session": "6",
+                "active": True,
+                "activity_ts": 800,
+                "activity_flag": False,
+                "panes": [{"target": "%11", "pane_id": "%11"}],
+            },
+            {
+                "key": "6:1",
+                "session": "6",
+                "active": False,
+                "activity_ts": 990,
+                "activity_flag": False,
+                "panes": [{"target": "%12", "pane_id": "%12"}],
+            },
+        ],
+    }
+    try:
+        assert webapp.tmux_signal_window_recently_active("%11", payload=payload, threshold_seconds=120.0) is False
+        assert webapp.tmux_signal_window_recently_active("%12", payload=payload, threshold_seconds=120.0) is True
+    finally:
+        webapp.control_server.stop()
+
+
+def test_tmux_recency_ordered_sessions_uses_session_and_window_activity(monkeypatch):
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+    webapp = app_module.TmuxWebtermApp(["1", "2", "3", "4"])
+    payload = {
+        "sessions": {
+            "1": {"activity_ts": 20, "last_attached_ts": 0},
+            "2": {"activity_ts": 0, "last_attached_ts": 90},
+            "3": {"activity_ts": 0, "last_attached_ts": 0},
+        },
+        "windows": [
+            {"session": "3", "activity_ts": 120, "session_activity_ts": 0, "session_last_attached_ts": 0},
+            {"session": "outside", "activity_ts": 999},
+        ],
+    }
+    try:
+        assert webapp.tmux_recency_ordered_sessions(payload=payload) == ["3", "2", "1", "4"]
+    finally:
+        webapp.control_server.stop()
+
+
+def test_activity_summary_payload_prioritizes_tmux_recent_sessions(monkeypatch):
+    infos = {
+        name: SessionInfo(session=name, panes=[], selected_pane=None, agents=[])
+        for name in ("1", "2", "3")
+    }
+    calls = []
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: (infos, []))
+    monkeypatch.setattr(app_module, "session_project_metadata", lambda info, cache, allow_network=False: {})
+
+    def fake_build_summary(info, project, files):
+        calls.append(info.session)
+        return {
+            "session": info.session,
+            "agent": "",
+            "active": False,
+            "repos": [],
+            "files": {"count": 0, "added": 0, "removed": 0},
+            "lines": [],
+        }
+
+    monkeypatch.setattr(app_module, "build_session_activity_summary", fake_build_summary)
+    webapp = app_module.TmuxWebtermApp(["1", "2", "3"])
+    webapp.warm_metadata_cache_async = lambda sessions: None
+    webapp.cached_session_files_payload_for_info = lambda info, hours=24.0: {"files": [], "repos": [], "errors": []}
+    webapp.tmux_signal_snapshot = lambda force=False: {
+        "sessions": {
+            "1": {"activity_ts": 10, "last_attached_ts": 0},
+            "2": {"activity_ts": 100, "last_attached_ts": 0},
+            "3": {"activity_ts": 0, "last_attached_ts": 0},
+        },
+        "windows": [{"session": "3", "activity_ts": 200}],
+    }
+    try:
+        payload = webapp.activity_summary_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert calls[-3:] == ["3", "2", "1"]
+    assert payload["session_order"] == ["3", "2", "1"]
+
+
+def test_activity_payload_and_summary_tick_prioritize_tmux_recent_sessions(monkeypatch):
+    agent_infos = {
+        name: SessionInfo(
+            session=name,
+            panes=[],
+            selected_pane=None,
+            agents=[
+                AgentInfo(
+                    session=name,
+                    kind="codex",
+                    pid=100 + index,
+                    pane_target=f"{name}:0.0",
+                    command="codex",
+                    cwd="/repo",
+                    status="running",
+                    session_id=f"sid-{name}",
+                    transcript=None,
+                    error=None,
+                )
+            ],
+        )
+        for index, name in enumerate(("1", "2"))
+    }
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+    webapp = app_module.TmuxWebtermApp(["1", "2"])
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: (agent_infos, []))
+    webapp.tmux_signal_snapshot = lambda force=False: {
+        "sessions": {
+            "1": {"activity_ts": 50, "last_attached_ts": 0},
+            "2": {"activity_ts": 150, "last_attached_ts": 0},
+        },
+        "windows": [],
+    }
+    warmed_sessions = []
+
+    def fake_cached_session_files_payloads(infos, hours=24.0):
+        warmed_sessions.append(list(infos))
+        return {session: {"files": [], "repos": []} for session in infos}
+
+    webapp.cached_session_files_payloads_for_infos = fake_cached_session_files_payloads
+    try:
+        activity = webapp.build_activity_payload()
+        updated = []
+        webapp.yoagent_session_summary_due = lambda session, interval, now=None: True
+
+        def fake_update_summary(session, info, settings=None, force=False):
+            updated.append(session)
+            return {"session": session, "updated": False, "reason": "test"}
+
+        webapp.update_yoagent_session_summary = fake_update_summary
+        tick = webapp.tick_yoagent_session_summaries({"refresh_interval_seconds": 60})
+    finally:
+        webapp.control_server.stop()
+
+    assert warmed_sessions == [["2", "1"]]
+    assert [row["session"] for row in activity["agents"]] == ["2", "1"]
+    assert updated == ["2", "1"]
+    assert [item["session"] for item in tick["skipped"]] == ["2", "1"]
+
+
+def test_tmux_snapshot_bounds_and_skips_unchanged_history(monkeypatch):
+    pane = PaneInfo(
+        session="6",
+        window="0",
+        pane="0",
+        pane_id="%11",
+        target="%11",
+        current_path="/repo/app",
+        command="codex",
+        active=True,
+        window_active=True,
+        title="codex",
+        pid=1234,
+    )
+    info = SessionInfo(session="6", panes=[pane], selected_pane=pane, agents=[])
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"6": info}, []))
+    calls = []
+
+    def fake_tmux(args, timeout=0):
+        calls.append((args, timeout))
+        return SimpleNamespace(returncode=0, stdout="line one\nline two\n", stderr="")
+
+    monkeypatch.setattr(app_module, "tmux", fake_tmux)
+    signal_payload = {
+        "windows": [{
+            "key": "6:0",
+            "session": "6",
+            "active": True,
+            "panes": [{"target": "%11", "pane_id": "%11", "active": True, "history_size": 12, "history_bytes": 120}],
+        }],
+    }
+    webapp = app_module.TmuxWebtermApp(["6"])
+    webapp.tmux_signal_snapshot = lambda force=False: signal_payload
+    try:
+        first, first_status = webapp.tmux_snapshot("6", 1000)
+        second, second_status = webapp.tmux_snapshot("6", 1000)
+        signal_payload["windows"][0]["panes"][0]["history_bytes"] = 121
+        third, third_status = webapp.tmux_snapshot("6", 1000)
+    finally:
+        webapp.control_server.stop()
+
+    assert first_status == HTTPStatus.OK
+    assert second_status == HTTPStatus.OK
+    assert third_status == HTTPStatus.OK
+    assert first["lines"] == 12
+    assert first["history_size"] == 12
+    assert first["history_bytes"] == 120
+    assert first["unchanged"] is False
+    assert second["unchanged"] is True
+    assert second["text"] == ""
+    assert third["history_bytes"] == 121
+    assert [call[0] for call in calls] == [
+        ["capture-pane", "-t", "%11", "-p", "-J", "-S", "-12"],
+        ["capture-pane", "-t", "%11", "-p", "-J", "-S", "-12"],
+    ]
+
+
 def test_transcripts_payload_exposes_server_version(monkeypatch):
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
     webapp = app_module.TmuxWebtermApp([])
@@ -852,6 +1146,84 @@ def test_prompt_and_screen_status_captures_discovered_agent_pane(monkeypatch):
     assert screen["key"] == "approval"
     assert capture_calls == [("6:1.0", True), ("6:1.0", False)]
     assert hybrid_targets == [("6", False), ("6", True)]
+
+
+def test_prompt_and_screen_status_prefers_selected_agent_pane(monkeypatch):
+    idle_claude = PaneInfo(
+        session="6",
+        window="0",
+        pane="0",
+        pane_id="%155",
+        target="%155",
+        current_path="/tmp",
+        command="claude",
+        active=False,
+        window_active=False,
+        title="",
+        pid=155,
+    )
+    selected_codex = PaneInfo(
+        session="6",
+        window="1",
+        pane="0",
+        pane_id="%146",
+        target="%146",
+        current_path="/tmp",
+        command="codex",
+        active=True,
+        window_active=True,
+        title="",
+        pid=146,
+    )
+    info = SessionInfo(
+        session="6",
+        panes=[idle_claude, selected_codex],
+        selected_pane=selected_codex,
+        agents=[
+            AgentInfo(
+                session="6",
+                kind="claude",
+                pid=155,
+                pane_target="%155",
+                command="claude",
+                cwd=None,
+                status=None,
+                session_id=None,
+                transcript=None,
+                error=None,
+            ),
+            AgentInfo(
+                session="6",
+                kind="codex",
+                pid=146,
+                pane_target="%146",
+                command="codex",
+                cwd=None,
+                status=None,
+                session_id=None,
+                transcript=None,
+                error=None,
+            ),
+        ],
+    )
+    capture_calls = []
+
+    def fake_capture(target, visible_only=False):
+        capture_calls.append((target, visible_only))
+        if target == "%146":
+            return "Working (12m 56s · esc to interrupt)"
+        return "› "
+
+    monkeypatch.setattr(app_module, "tmux_capture_pane", fake_capture)
+    webapp = app_module.TmuxWebtermApp(["6"])
+    try:
+        prompt, screen = webapp.prompt_and_screen_status("6", discovered_sessions={"6": info}, capture_pane=False)
+    finally:
+        webapp.control_server.stop()
+
+    assert prompt["visible"] is False
+    assert screen["key"] == "working"
+    assert capture_calls == [("%146", True)]
 
 
 def test_prompt_and_screen_status_reports_os_errors(monkeypatch):

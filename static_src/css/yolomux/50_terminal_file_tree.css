@@ -114,9 +114,9 @@
   min-width: 0;
   height: 30px;
   padding: 4px 7px;
-  color: #f4ffe8;
+  color: var(--pane-tab-panel-head-text);
   background: #07110d;
-  border: 1px solid #9be33d;
+  border: 1px solid var(--auto-border);
   border-radius: var(--radius-control);
   font: 600 var(--ui-font-size)/1.2 var(--mono-font);
   outline: 0;
@@ -387,7 +387,7 @@
   position: absolute;
   left: 8px;
   top: 8px;
-  /* #258: above the topbar (z-index:180) so a top-row pane's toast is never painted UNDER it and
+  /* #258: above the topbar (--z-topbar) so a top-row pane's toast is never painted UNDER it and
      clipped — the whole toast incl. the Keep/x buttons stays visible. */
   z-index: var(--z-full-screen-overlay);
   width: calc(100% - 16px);
@@ -417,7 +417,7 @@
   overflow: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  color: #dfe6ef;
+  color: var(--pane-tab-text);
   background: #11151d;
   font: var(--ui-font-size-sm)/1.3 var(--mono-font);
 }
@@ -674,7 +674,7 @@
   max-width: 100%;
   margin: 0 0 10px;
   padding: 8px 10px;
-  color: #dfe6ef;
+  color: var(--pane-tab-text);
   background: #151d24;
   border: 1px solid #314154;
   border-inline-start: 3px solid var(--active-accent-bright);
@@ -807,6 +807,67 @@
   flex: 0 0 auto;
   color: var(--muted);
 }
+.yoagent-recent-agent.tmux-idle {
+  opacity: 0.68;
+}
+.yoagent-recent-agent-signals {
+  display: inline-flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  gap: 3px;
+  min-width: 0;
+}
+.yoagent-recent-agent-signal {
+  display: inline-flex;
+  align-items: center;
+  min-height: 16px;
+  border: 1px solid var(--divider);
+  border-radius: 4px;
+  padding: 1px 4px;
+  color: var(--text);
+  background: var(--panel);
+  font: 800 max(9px, calc(var(--terminal-font-size) - 3px))/1 var(--mono-font);
+  white-space: nowrap;
+}
+.yoagent-recent-agent-signal.signal-dead,
+.yoagent-recent-agent-signal.signal-bell {
+  border-color: var(--danger-border);
+  color: var(--danger-border);
+}
+.yoagent-recent-agent-signal.signal-silence {
+  border-color: var(--accent-gold);
+  color: var(--accent-gold);
+}
+.yoagent-recent-agent-signal.signal-presence {
+  border-color: var(--active-control-soft-border);
+  color: var(--active-control-bg);
+}
+.yoagent-recent-agent-signal.signal-presence::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  margin-inline-end: 4px;
+  border-radius: 50%;
+  background: var(--active-control-bg);
+}
+.yoagent-recent-agent-signal.signal-zoom {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.yoagent-recent-agent-restart {
+  flex: 0 0 auto;
+  min-height: 18px;
+  border: 1px solid var(--divider);
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: var(--auto-text);
+  background: var(--brand-green);
+  font: 800 max(9px, calc(var(--terminal-font-size) - 3px))/1 var(--ui-font);
+  cursor: pointer;
+}
+.yoagent-recent-agent-restart:hover {
+  background: var(--accent-lime);
+}
 .yoagent-transcript-path {
   display: flex;
   align-items: center;
@@ -934,7 +995,7 @@
 .yoagent-chat-retry {
   height: 22px;
   padding: 0 8px;
-  color: #071000;
+  color: var(--auto-text);
   background: var(--pane-tab-badge-gold);
   border: 1px solid #ffe27a;
   border-radius: var(--radius-control);
@@ -1103,7 +1164,7 @@
 .yoagent-action-row code {
   min-width: 0;
   overflow-wrap: anywhere;
-  color: #dfe6ef;
+  color: var(--pane-tab-text);
   background: rgba(255, 255, 255, 0.06);
   border: 1px solid var(--line);
   border-radius: 4px;
@@ -1342,7 +1403,7 @@ body.theme-light .yoagent-global .markdown-body pre code {
     + (var(--info-table-inline-padding) * 2)
   );
   border-bottom: 1px solid #263044;
-  color: #dfe6ef;
+  color: var(--pane-tab-text);
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
 }
 .info-row.header {
@@ -1494,7 +1555,7 @@ body.theme-light .info-cell a.pr-status-passing:hover {
 }
 body.theme-light .info-cell a.pr-status-merged,
 body.theme-light .info-cell a.pr-status-merged:hover {
-  color: #8250df;
+  color: var(--lt-code-function);
 }
 body.theme-light .info-cell a.pr-status-closed,
 body.theme-light .info-cell a.pr-status-closed:hover {
@@ -1579,7 +1640,7 @@ body.theme-light .info-cell a.pr-status-closed:hover {
 .err { color: var(--bad); }
 .attention-alerts {
   position: fixed;
-  /* Clear the topbar: it is z-index:180 and occupies the top band (~--compact-control-height + padding),
+  /* Clear the topbar: it uses --z-topbar and occupies the top band (~--compact-control-height + padding),
      so a top:12px / z:140 toast rendered INSIDE that band was painted over by the topbar (the Keep/x row
      was clipped). Drop below the topbar height + a gap, and sit above it in z so it is never covered. */
   top: calc(var(--compact-control-height) + 20px);
@@ -2650,7 +2711,7 @@ body.theme-light .file-tree-row.indexed-directory:not(.selected) .file-tree-git-
   color: #3f6312;
 }
 body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed {
-  color: #5f9800;
+  color: var(--brand-green);
   text-shadow: none;
 }
 .file-tree-name {
@@ -2827,10 +2888,10 @@ body.theme-light .file-tree-row.git-untracked:not(.selected) .file-tree-name {
   color: #166534;
 }
 body.theme-light .file-tree-row.git-deleted:not(.selected) .file-tree-name {
-  color: #b91c1c;
+  color: var(--danger-strong-hover);
 }
 body.theme-light .file-tree-row.git-staged:not(.selected) .file-tree-name {
-  color: #2f7d20;
+  color: var(--good);
 }
 body.theme-light .file-tree-git-status.file-tree-git-status-unknown {
   border-color: rgb(var(--overlay-slate-rgb) / 0.12);
@@ -2838,17 +2899,17 @@ body.theme-light .file-tree-git-status.file-tree-git-status-unknown {
   color: rgb(var(--overlay-slate-rgb) / 0.36);
 }
 body.theme-light .file-tree-row.kind-dir > .file-tree-icon {
-  color: #64748b;
+  color: var(--git-transcript-badge);
 }
 body.theme-light .file-tree-row.kind-dir.expanded > .file-tree-icon,
 body.theme-light .file-tree-row.kind-dir[aria-expanded="true"] > .file-tree-icon {
   color: var(--brand-green);
 }
 body.theme-light .file-tree-row.indexed-directory:not(.selected) .file-tree-name {
-  color: #2f7d20;
+  color: var(--good);
 }
 body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed {
-  color: #2f7d20;
+  color: var(--good);
   text-shadow: none;
 }
 body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed::after {

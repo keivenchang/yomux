@@ -242,7 +242,7 @@ body.editor-theme-light .file-editor-image-panel {
   padding: 5px 9px;
   color: #17210f;
   background: #f6e6a8;
-  border-bottom: 1px solid #b7791f;
+  border-bottom: 1px solid var(--accent-gold);
   font: 700 var(--ui-font-size-sm)/1.25 var(--ui-font);
 }
 .file-editor-html-js-notice a {
@@ -491,7 +491,7 @@ body.editor-theme-light .file-editor-image-panel {
   max-height: 86vh;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
-  background: #151922;
+  background: var(--panel);
   border: var(--app-modal-border-width) solid var(--app-modal-border-color);
   box-shadow: 0 20px 46px rgb(var(--shadow-rgb) / 0.48), 0 0 0 1px var(--active-control-focus-ring);
   color: var(--text);
@@ -504,7 +504,7 @@ body.editor-theme-light .file-editor-image-panel {
 .file-editor-dialog-body {
   padding: 12px;
   overflow: auto;
-  color: #d7deea;
+  color: var(--inactive-tab-bg-hover);
   font: var(--ui-font-size-sm)/1.35 var(--ui-font);
   white-space: pre-wrap;
 }
@@ -636,7 +636,7 @@ body.app-vw-lte-760 .file-editor-conflict-compare {
 }
 .file-editor-theme.theme-light,
 .file-editor-theme-panel.theme-light {
-  color: #f8dfa3;
+  color: var(--code-number);
   background: transparent;
   border-color: #c69a15;
   box-shadow: inset 0 0 0 1px rgba(245, 197, 66, 0.20);
@@ -700,7 +700,7 @@ body.editor-theme-light .file-editor-image {
   flex: 0 0 auto;
   margin-inline-end: 5px;
   padding: 0 4px;
-  color: #071000;
+  color: var(--auto-text);
   background: var(--brand-green);
   border: 1px solid #a8e95a;
   border-radius: 3px;
@@ -1005,7 +1005,7 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 .file-editor-preview-pane.vanilla-preview-body,
 .file-editor-preview-pane-panel.vanilla-preview-body {
   background: #ffffff;
-  color: #111827;
+  color: rgb(17, 24, 39);
   font-family: Arial, Helvetica, sans-serif;
   line-height: 1.45;
 }
@@ -1021,7 +1021,7 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 .file-editor-preview-pane-panel.vanilla-preview-body h4,
 .file-editor-preview-pane-panel.vanilla-preview-body h5,
 .file-editor-preview-pane-panel.vanilla-preview-body h6 {
-  color: #111827;
+  color: rgb(17, 24, 39);
   background: transparent;
 }
 .file-editor-preview-pane.vanilla-preview-body a,
@@ -1036,13 +1036,13 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 }
 .file-editor-preview-pane.vanilla-preview-body code,
 .file-editor-preview-pane-panel.vanilla-preview-body code {
-  color: #111827;
+  color: rgb(17, 24, 39);
   background: var(--lt-panel);
   border-color: var(--lt-line);
 }
 .file-editor-preview-pane.vanilla-preview-body pre,
 .file-editor-preview-pane-panel.vanilla-preview-body pre {
-  color: #111827;
+  color: rgb(17, 24, 39);
   background: var(--lt-panel);
   border-color: var(--lt-line);
 }
@@ -1056,7 +1056,7 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 }
 .file-editor-preview-pane.vanilla-preview-body blockquote,
 .file-editor-preview-pane-panel.vanilla-preview-body blockquote {
-  color: #4b5563;
+  color: var(--pane-meta-desc);
   border-inline-start-color: var(--lt-line);
 }
 .file-editor-preview-pane.vanilla-preview-body th,
@@ -1780,7 +1780,7 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
   --diff-remove-line-bg: #540c06;
   --diff-search-match-bg: #ffd54a;
   --diff-search-match-fg: #0b1020;
-  --diff-search-match-ring: #fff2a8;
+  --diff-search-match-ring: var(--file-hover-bg);
   --diff-search-selected-bg: #ff9f1c;
   --diff-search-selected-ring: #fff7c2;
 }
@@ -2327,7 +2327,7 @@ body.editor-theme-light .file-editor-content .markdown-body pre {
 }
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body {
   background: #ffffff;
-  color: #111827;
+  color: rgb(17, 24, 39);
 }
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h1,
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h2,
@@ -2335,7 +2335,7 @@ body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h4,
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h5,
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h6 {
-  color: #111827;
+  color: rgb(17, 24, 39);
   background: transparent;
 }
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body a {
@@ -2346,12 +2346,12 @@ body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body
   color: inherit;
 }
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body code {
-  color: #111827;
+  color: rgb(17, 24, 39);
   background: var(--lt-panel);
   border-color: var(--lt-line);
 }
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body pre {
-  color: #111827;
+  color: rgb(17, 24, 39);
   background: var(--lt-panel);
   border-color: var(--lt-line);
 }
@@ -2872,7 +2872,7 @@ body.editor-theme-light .file-editor-codemirror .cm-search .cm-button:hover,
 body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-button:hover,
 body.editor-theme-light .file-editor-codemirror .cm-search label:hover,
 body.editor-theme-light .file-editor-codemirror-panel .cm-search label:hover {
-  color: #0550ae;
+  color: var(--lt-code-atom);
   background: var(--lt-code-inline-bg);
   border-color: var(--lt-markdown-link);
 }
@@ -3198,7 +3198,7 @@ body.editor-theme-light .file-editor-native-video {
   z-index: 1;
   max-width: min(60ch, 100%);
   padding: 16px;
-  color: #dfe6ef;
+  color: var(--pane-tab-text);
   text-align: center;
   overflow-wrap: anywhere;
 }

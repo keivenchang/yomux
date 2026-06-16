@@ -831,6 +831,7 @@
   "shortcuts.section.tabsPanes": "Вкладки / Панели",
   "shortcuts.section.terminal": "Terminal",
   "shortcuts.sessionActions": "Действия с сессией",
+  "shortcuts.switchTmuxWindow": "Previous / next tab",
   "shortcuts.title": "Горячие клавиши",
   "shortcuts.toggleComment": "Переключить комментарий строки",
   "shortcuts.toggleFinder": "Переключить {name}",

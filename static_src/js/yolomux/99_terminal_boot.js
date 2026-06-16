@@ -1104,33 +1104,42 @@ function hasFileDrag(event) {
   return types.includes('Files') || Boolean(event.dataTransfer?.files?.length);
 }
 
+function hasUploadableDrag(event) {
+  // External file drops (any type) OR an image exposed as rich data with no File entry — both must be
+  // claimed so a dragged image never leaks to the terminal-backed agent as a rich [Image #N] attachment.
+  return hasFileDrag(event) || dataTransferHasImagePayload(event?.dataTransfer);
+}
+
 function bindFileUpload(panel, session) {
   if (readOnlyMode) return;
   panel.addEventListener('dragenter', event => {
-    if (!hasFileDrag(event)) return;
+    if (!hasUploadableDrag(event)) return;
     event.preventDefault();
     event.stopPropagation();
     panel.classList.add(CLS.fileDragOver);
   });
   panel.addEventListener('dragover', event => {
-    if (!hasFileDrag(event)) return;
+    if (!hasUploadableDrag(event)) return;
     event.preventDefault();
     event.stopPropagation();
     event.dataTransfer.dropEffect = 'copy';
     panel.classList.add(CLS.fileDragOver);
   });
   panel.addEventListener('dragleave', event => {
-    if (!hasFileDrag(event)) return;
+    if (!hasUploadableDrag(event)) return;
     if (panel.contains(event.relatedTarget)) return;
     panel.classList.remove(CLS.fileDragOver);
   });
   panel.addEventListener('drop', event => {
-    if (!hasFileDrag(event)) return;
+    if (!hasUploadableDrag(event)) return;
     event.preventDefault();
     event.stopPropagation();
     panel.classList.remove(CLS.fileDragOver);
     // DOIT.57: remember the drop point so the post-upload suggestion overlay can anchor there.
-    uploadFiles(session, event.dataTransfer?.files || [], {suggestAt: {x: event.clientX, y: event.clientY}});
+    // Prefer the plain File list; fall back to images extracted from rich data (text/html <img>,
+    // image MIME) so a dragged image exposed without a File still uploads instead of leaking.
+    const dropped = event.dataTransfer?.files?.length ? event.dataTransfer.files : dataTransferImageFiles(event.dataTransfer);
+    uploadFiles(session, dropped, {suggestAt: {x: event.clientX, y: event.clientY}});
   });
 }
 
@@ -1681,31 +1690,89 @@ function bindClipboardPaste() {
   if (clipboardPasteBound) return;
   clipboardPasteBound = true;
   document.addEventListener('paste', event => {
-    const file = pastedImageFile(event);
-    if (!file) return;
+    if (!dataTransferHasImagePayload(event.clipboardData)) return;
+    // Image-bearing paste: ALWAYS claim it (preventDefault + stopPropagation) so the raw image can never
+    // reach the terminal-backed agent as a rich [Image #N] attachment (the mixed text+attachment bug).
+    // Then upload ALL pasted images and insert only their textual uploaded-path references.
+    event.preventDefault();
+    event.stopPropagation();
     const session = pasteTargetSession(event);
     if (!session) {
       statusErr(localizedHtml('status.selectPaneForImagePaste'));
       return;
     }
-    event.preventDefault();
-    event.stopPropagation();
+    const files = dataTransferImageFiles(event.clipboardData);
+    if (!files.length) {
+      // Claimed (so nothing leaks to the agent) but the image was exposed only as un-extractable rich
+      // data (e.g. a remote <img> URL with no File and no data: URL).
+      statusErr(localizedHtml('status.selectPaneForImagePaste'));
+      return;
+    }
     if (!beginPasteUpload(session)) return;
-    uploadFiles(session, [file], {source: 'paste'}).finally(() => {
+    uploadFiles(session, files, {source: 'paste'}).finally(() => {
       pasteUploadInFlight = false;
     });
   }, {capture: true});
 }
 
-function pastedImageFile(event) {
-  const items = Array.from(event.clipboardData?.items || []);
-  const imageItems = items.filter(item => item.kind === 'file' && String(item.type || '').startsWith('image/'));
-  const item = imageItems.find(candidate => candidate.type === 'image/png') || imageItems[0];
-  if (!item) return null;
-  const file = item.getAsFile();
-  if (!file) return null;
-  const type = file.type || item.type || 'image/png';
-  return new File([file], pastedImageFilename(file.name, type), {type});
+// ONE shared image-payload contract for BOTH paste (clipboardData) and drop (dataTransfer). A browser may
+// expose an image as a File, OR as rich data (a text/html <img>, an image MIME type) with NO File. ALL of
+// these must be detectable so the handlers can CLAIM the event and never let a raw image reach the
+// terminal-backed agent as a rich [Image #N] attachment. See AGENTS.md (rich-data drag/paste note).
+function dataTransferHasImagePayload(dt) {
+  if (!dt) return false;
+  if (Array.from(dt.items || []).some(item => item.kind === 'file' && String(item.type || '').startsWith('image/'))) return true;
+  if (dt.files && Array.from(dt.files).some(file => String(file.type || '').startsWith('image/'))) return true;
+  const types = Array.from(dt.types || []);
+  if (types.some(type => String(type).startsWith('image/'))) return true;
+  if (types.includes('text/html') && /<img\b/i.test(typeof dt.getData === 'function' ? (dt.getData('text/html') || '') : '')) return true;
+  return false;
+}
+
+// Extract EVERY image in the payload as a renamed upload File, so multi-image prompts are deterministic
+// (N images -> N uploaded path references, never one text ref + one attachment). Handles File items, a
+// plain File list, and data: URL <img> sources embedded in text/html (browser image copies).
+function dataTransferImageFiles(dt) {
+  if (!dt) return [];
+  const files = [];
+  for (const item of Array.from(dt.items || [])) {
+    if (item.kind !== 'file' || !String(item.type || '').startsWith('image/')) continue;
+    const file = item.getAsFile?.();
+    if (!file) continue;
+    const type = file.type || item.type || 'image/png';
+    files.push(new File([file], pastedImageFilename(file.name, type), {type}));
+  }
+  if (!files.length && dt.files) {
+    for (const file of Array.from(dt.files)) {
+      if (!String(file.type || '').startsWith('image/')) continue;
+      const type = file.type || 'image/png';
+      files.push(new File([file], pastedImageFilename(file.name, type), {type}));
+    }
+  }
+  if (!files.length && typeof dt.getData === 'function') {
+    const html = dt.getData('text/html') || '';
+    const re = /<img\b[^>]*\bsrc\s*=\s*["']?(data:image\/[^"'\s>]+)/gi;
+    let match;
+    while ((match = re.exec(html))) {
+      const file = dataUrlToImageFile(match[1]);
+      if (file) files.push(file);
+    }
+  }
+  return files;
+}
+
+function dataUrlToImageFile(dataUrl) {
+  const match = /^data:(image\/[a-z0-9.+-]+);base64,(.*)$/i.exec(String(dataUrl || ''));
+  if (!match) return null;
+  const type = match[1];
+  try {
+    const binary = atob(match[2]);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return new File([bytes], pastedImageFilename('', type), {type});
+  } catch (_) {
+    return null;
+  }
 }
 
 function beginPasteUpload(session) {
@@ -3067,7 +3134,10 @@ function scheduleReconnectResync(reason = '') {
 
 function installReconnectResyncHandlers() {
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') scheduleReconnectResync('visible');
+    if (document.visibilityState === 'visible') {
+      scheduleReconnectResync('visible');
+      for (const session of activeSessions.filter(isTmuxSession)) scheduleFit(session);
+    }
   });
   window.addEventListener('online', () => scheduleReconnectResync('online'));
 }
@@ -3264,6 +3334,12 @@ function maybeNotifyYoagentJob(notification = {}) {
   }
 }
 
+function applyTmuxSignalsPayload(payload = {}) {
+  const data = payload?.data && typeof payload.data === 'object' ? payload.data : payload;
+  if (!data || typeof data !== 'object') return;
+  tmuxSignalState = data;
+}
+
 function handleClientPushEvent(type, payload = {}) {
   if (type === 'update_available') {
     applyUpdateAvailable(payload && payload.available !== undefined ? payload : (payload.data || {}));
@@ -3277,6 +3353,10 @@ function handleClientPushEvent(type, payload = {}) {
   }
   if (type === 'auto_approve_changed') {
     if (payload.data) applyAutoApprovePayload(payload.data);
+    return;
+  }
+  if (type === 'tmux_signals_changed') {
+    applyTmuxSignalsPayload(payload);
     return;
   }
   if (type === 'watched_prs_changed') {
@@ -3354,7 +3434,7 @@ function installClientEventStream() {
     recordSseDebugEvent('ping', clientEventEnvelope(event), event);
   });
   source.onerror = () => { clientEventsConnected = false; };
-  for (const type of ['settings_changed', 'auto_approve_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta']) {
+  for (const type of ['settings_changed', 'auto_approve_changed', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta']) {
     source.addEventListener(type, event => {
       clientEventsConnected = true;
       const envelope = clientEventEnvelope(event);
@@ -3396,8 +3476,6 @@ let shareReplayLastKeyframe = null;
 let shareReplayNodeMap = new Map();
 let shareReplayTerminalPlaceholders = new Map();
 const shareReplayScrollPublishTimers = new Map();
-let shareReplayPointerFramePending = false;
-let shareReplayPointerLastPayload = null;
 let shareReplayLastKeyframeBytes = 0;
 let shareReplayLastDeltaBytes = 0;
 let shareReplayLastLatencyMs = null;
@@ -3413,8 +3491,10 @@ const shareReplayKeyframeRequestMinIntervalMs = 5000;
 const shareReplayKeyframeRequestMaxBackoffMs = 5000;
 const shareGeometryResyncMinIntervalMs = 10000;
 const shareReplayHostKeyframeMinIntervalMs = shareReplayKeyframeRequestMinIntervalMs;
-const shareReplayPostTopologyKeyframeQuietMs = 3000;
+const shareReplayPostTopologyKeyframeQuietMs = shareReplayHostKeyframeMinIntervalMs + 1000;
 const shareReplayHostDeltaMaxBytes = 48 * 1024;
+const shareTopologyKeyframePointerQuietMs = 500;
+const shareTopologyKeyframeMaxDeferralMs = shareReplayHostKeyframeMinIntervalMs;
 let yolomuxFontsReadyPromise = null;
 
 function normalizeSharePayload(payload) {
@@ -3840,6 +3920,10 @@ function applyShareReplayShellMessage(message = {}) {
   if (!shareReplayShellActive || !message || message.ch !== 'ui') return false;
   if (message.sender && message.sender === shareClientId) return true;
   const payload = message.payload && typeof message.payload === 'object' ? message.payload : {};
+  if (message.type === 'pointer') {
+    renderSharePointerGhost({...payload, sender: message.sender || payload.sender || ''});
+    return true;
+  }
   if (message.type === shareMirrorProtocol.frames.domDelta) return applyShareReplayDelta(payload, message);
   if (shareDropStaleMirrorFrame(message)) return true;
   if (message.type === shareMirrorProtocol.frames.domKeyframe) return applyShareReplayKeyframe(payload, message);
@@ -4022,7 +4106,7 @@ function flushShareHostQueue(token) {
   const shareHostQueue = shareHostQueues.get(token) || [];
   const pending = shareHostQueue.splice(0, shareHostQueue.length);
   shareHostQueues.set(token, shareHostQueue);
-  for (const message of pending) socket.send(JSON.stringify(message));
+  for (const message of pending) socket.send(typeof message === 'string' ? message : JSON.stringify(message));
 }
 
 function ensureShareHostSocket(token) {
@@ -4184,35 +4268,77 @@ function shareMirrorFrameReason(type, options = {}) {
   return reason || 'update';
 }
 
-function shareNextDomReplayFrameMetadata(type, options = {}) {
+function shareDomReplayFrameMetadata(type, options = {}, commit = true) {
+  let epoch = Math.max(1, Math.floor(Number(shareReplayMirrorEpoch) || 1));
+  let sequence = Math.max(0, Math.floor(Number(shareReplayMirrorSequence) || 0));
   if (type === shareMirrorProtocol.frames.domKeyframe || options.resetEpoch === true) {
-    shareReplayMirrorEpoch = Math.max(1, Math.floor(Number(shareReplayMirrorEpoch) || 1) + 1);
+    epoch += 1;
   }
-  shareReplayMirrorSequence = Math.max(0, Math.floor(Number(shareReplayMirrorSequence) || 0)) + 1;
+  sequence += 1;
+  if (commit) {
+    shareReplayMirrorEpoch = epoch;
+    shareReplayMirrorSequence = sequence;
+  }
   return {
-    epoch: shareReplayMirrorEpoch,
-    sequence: shareReplayMirrorSequence,
+    epoch,
+    sequence,
     reason: shareMirrorFrameReason(type, options),
   };
 }
 
-function shareNextMirrorFrameMetadata(type, options = {}) {
-  if (shareMirrorFrameTypeIsDomReplayContent(type)) return shareNextDomReplayFrameMetadata(type, options);
+function shareSemanticFrameMetadata(type, options = {}, commit = true) {
+  let epoch = Math.max(1, Math.floor(Number(shareMirrorEpoch) || 1));
+  let sequence = Math.max(0, Math.floor(Number(shareMirrorSequence) || 0));
   if (type === shareMirrorProtocol.frames.uiState || options.resetEpoch === true) {
-    shareMirrorEpoch = Math.max(1, Math.floor(Number(shareMirrorEpoch) || 1) + 1);
+    epoch += 1;
   }
-  shareMirrorSequence = Math.max(0, Math.floor(Number(shareMirrorSequence) || 0)) + 1;
+  sequence += 1;
+  if (commit) {
+    shareMirrorEpoch = epoch;
+    shareMirrorSequence = sequence;
+  }
   return {
-    epoch: shareMirrorEpoch,
-    sequence: shareMirrorSequence,
+    epoch,
+    sequence,
     reason: shareMirrorFrameReason(type, options),
   };
+}
+
+function shareNextDomReplayFrameMetadata(type, options = {}) {
+  return shareDomReplayFrameMetadata(type, options, true);
+}
+
+function shareNextMirrorFrameMetadata(type, options = {}) {
+  if (shareMirrorFrameTypeIsDomReplayContent(type)) return shareNextDomReplayFrameMetadata(type, options);
+  return shareSemanticFrameMetadata(type, options, true);
+}
+
+function sharePeekMirrorFrameMetadata(type, options = {}) {
+  if (shareMirrorFrameTypeIsDomReplayContent(type)) return shareDomReplayFrameMetadata(type, options, false);
+  return shareSemanticFrameMetadata(type, options, false);
+}
+
+function shareCommitBuiltUiMessage(message = {}) {
+  if (!message || !shareMirrorFrameTypeIsSequenced(message.type)) return;
+  const epoch = Math.max(1, Math.round(Number(message.epoch) || 1));
+  const sequence = Math.max(0, Math.round(Number(message.sequence) || 0));
+  if (shareMirrorFrameTypeIsDomReplayContent(message.type)) {
+    shareReplayMirrorEpoch = Math.max(shareReplayMirrorEpoch, epoch);
+    shareReplayMirrorSequence = Math.max(shareReplayMirrorSequence, sequence);
+    return;
+  }
+  shareMirrorEpoch = Math.max(shareMirrorEpoch, epoch);
+  shareMirrorSequence = Math.max(shareMirrorSequence, sequence);
 }
 
 function shareBuildUiMessage(type, payload = {}, options = {}) {
   const message = {type, payload, sender: shareClientId};
   if (shareMirrorFrameTypeIsReplay(type)) message.version = shareMirrorProtocol.version;
-  if (shareMirrorFrameTypeIsSequenced(type)) Object.assign(message, shareNextMirrorFrameMetadata(type, options));
+  if (shareMirrorFrameTypeIsSequenced(type)) {
+    Object.assign(message, options.commitSequence === false
+      ? sharePeekMirrorFrameMetadata(type, options)
+      : shareNextMirrorFrameMetadata(type, options));
+  }
   if (type === shareMirrorProtocol.frames.domDelta) {
     const explicitBase = Number(payload?.baseSequence ?? options.baseSequence);
     message.baseSequence = Number.isFinite(explicitBase) ? Math.max(0, Math.round(explicitBase)) : Math.max(0, Number(message.sequence || 0) - 1);
@@ -4403,6 +4529,34 @@ function shareReplayTerminalSessionForElement(element) {
   return '';
 }
 
+function shareScopedTerminalSessions() {
+  const allowed = new Set();
+  const add = value => {
+    const session = String(value || '').trim();
+    if (!session) return false;
+    allowed.add(session);
+    return true;
+  };
+  const addRecord = record => {
+    if (!record || typeof record !== 'object') return;
+    let added = false;
+    if (Array.isArray(record.sessions)) {
+      for (const session of record.sessions) added = add(session) || added;
+    }
+    if (!added) add(record.session);
+  };
+  if (shareBootstrap?.view) addRecord(shareBootstrap);
+  for (const share of activeShares || []) addRecord(share);
+  return allowed.size ? allowed : null;
+}
+
+function shareTerminalSessionAllowedForReplay(session) {
+  const clean = String(session || '').trim();
+  if (!clean) return false;
+  const allowed = shareScopedTerminalSessions();
+  return !allowed || allowed.has(clean);
+}
+
 function shareReplayTerminalElementIsVisible(element) {
   if (!element || element.isConnected === false) return false;
   if (element.closest?.('#panelPool')) return false;
@@ -4413,6 +4567,7 @@ function shareReplayTerminalElementIsVisible(element) {
 function shareReplayTerminalPlaceholderForElement(element, nodeId) {
   const session = shareReplayTerminalSessionForElement(element);
   if (!session) return null;
+  if (!shareTerminalSessionAllowedForReplay(session)) return null;
   if (!shareReplayTerminalElementIsVisible(element)) return null;
   const item = terminals.get(session);
   const hostSize = shareHostTerminalSize(session);
@@ -4873,6 +5028,22 @@ function shareReplayApplyPointer(payload = {}, message = {}) {
   renderSharePointerGhost(pointer);
 }
 
+function shareReplayErrorIsUnknownNode(error) {
+  return /unknown replay node id/i.test(String(error?.message || error || ''));
+}
+
+function shareReplaySkipUnknownNodeDelta(payload = {}, sequenceStatus = {}) {
+  if (!payload || payload.digest) return false;
+  const sequence = Number(sequenceStatus.sequence);
+  const epoch = Number(sequenceStatus.epoch);
+  if (!Number.isFinite(epoch) || !Number.isFinite(sequence)) return false;
+  shareReplayStaleFrames += 1;
+  shareReplayCurrentEpoch = epoch;
+  shareReplayLastSequence = sequence;
+  setShareReplayShellStatus('mirrored', {sequence});
+  return true;
+}
+
 function applyShareReplayDelta(payload = {}, message = {}) {
   if (!shareReplayShellActive || !payload || typeof payload !== 'object') return false;
   shareReplayRecordFrameMetrics(shareMirrorProtocol.frames.domDelta, payload, message);
@@ -4914,6 +5085,9 @@ function applyShareReplayDelta(payload = {}, message = {}) {
     });
     bindShareReplayPaneTabPopovers();
   } catch (error) {
+    if (shareReplayErrorIsUnknownNode(error) && shareReplaySkipUnknownNodeDelta(payload, sequenceStatus)) {
+      return true;
+    }
     shareReplayDroppedFrames += 1;
     setShareReplayShellStatus('error', {sequence: message.sequence, digest: payload.digest});
     shareReplayRequestKeyframe('replay-error', {
@@ -4955,6 +5129,8 @@ function shareReplayMutationNodeIsIgnored(node) {
     '#latencyLine',
     '.latency-meter',
     '.share-pointer-ghost',
+    '.share-ghost-cursor',
+    '.share-click-ripple',
     '.share-viewer-banner',
   ];
   return selectors.some(selector => element.closest?.(selector));
@@ -5126,15 +5302,17 @@ function shareReplayPauseMutationPublisherForTopology() {
   }, shareReplayHostKeyframeMinIntervalMs + 1000);
 }
 
-function shareReplayPublishDeltaPayload(payload = {}, reason = 'mutation') {
+function shareReplayPublishDeltaPayload(payload = {}, reason = 'mutation', options = {}) {
   if (shareViewMode || !shareReplayFeatureEnabled() || !payload || typeof payload !== 'object') return null;
   const cleanPayload = {
     ...payload,
     capturedAt: Date.now(),
   };
-  shareReplayLastDeltaBatch = cleanPayload;
-  sharePublish(shareMirrorProtocol.frames.domDelta, cleanPayload, {reason});
-  return cleanPayload;
+  const result = sharePublish(shareMirrorProtocol.frames.domDelta, cleanPayload, {reason, maxBytes: options.maxBytes});
+  shareReplayLastDeltaBatch = result?.dropped
+    ? {...cleanPayload, skipped: true, bytes: result.bytes}
+    : cleanPayload;
+  return shareReplayLastDeltaBatch;
 }
 
 function shareReplayFlushMutationDeltas() {
@@ -5147,13 +5325,12 @@ function shareReplayFlushMutationDeltas() {
     count: mutations.length,
   };
   if (terminals.length) payload.terminals = terminals;
-  const bytes = shareReplayFrameByteLength({type: shareMirrorProtocol.frames.domDelta, payload});
-  if (bytes > shareReplayHostDeltaMaxBytes) {
-    shareReplayLastDeltaBatch = {...payload, skipped: true, bytes};
+  const published = shareReplayPublishDeltaPayload(payload, 'mutation', {maxBytes: shareReplayHostDeltaMaxBytes});
+  if (published?.skipped) {
     sharePublishDomKeyframe('backpressure');
     return null;
   }
-  return shareReplayPublishDeltaPayload(payload, 'mutation');
+  return published;
 }
 
 function installShareReplayMutationPublisher() {
@@ -5389,11 +5566,18 @@ function sharePublishDomKeyframeNow(reason = 'manual-debug') {
   shareReplayHostKeyframePendingReason = '';
   if (shareViewMode || !shareHasActiveShare()) return false;
   const cleanReason = shareReplayKeyframeReason(reason);
-  shareReplayResetMutationPublisherForKeyframe(cleanReason);
+  const now = Date.now();
+  const cancelsScheduledTopology = cleanReason !== 'topology' && Boolean(shareReplayTopologyKeyframeTimer || shareReplayTopologyKeyframeQueuedAt);
+  const followsRecentTopology = cleanReason !== 'topology'
+    && shareReplayHostLastKeyframeReason === 'topology'
+    && now - Math.max(0, Math.round(Number(shareReplayHostLastKeyframeAt) || 0)) < shareReplayPostTopologyKeyframeQuietMs;
+  if (cleanReason !== 'topology') clearScheduledShareTopologyDomKeyframe();
+  shareReplayResetMutationPublisherForKeyframe(cancelsScheduledTopology || followsRecentTopology ? 'topology' : cleanReason);
   const payload = shareCreateDomKeyframePayload(cleanReason);
   if (!payload) return false;
   sharePublish(shareMirrorProtocol.frames.domKeyframe, payload, {reason: cleanReason});
-  shareReplayHostLastKeyframeAt = Date.now();
+  shareReplayHostLastKeyframeAt = now;
+  shareReplayHostLastKeyframeReason = cleanReason;
   return true;
 }
 
@@ -5450,23 +5634,37 @@ function shareDropStaleMirrorFrame(message = {}) {
 }
 
 function sharePublish(type, payload = {}, options = {}) {
-  if (type === 'scroll' && !shareCanPublishScroll()) return;
-  if (!shareCanPublishUi() || !type) return;
-  const message = shareBuildUiMessage(type, payload, options);
+  if (type === 'scroll' && !shareCanPublishScroll()) return {sent: false, queued: 0, bytes: 0};
+  if (!shareCanPublishUi() || !type) return {sent: false, queued: 0, bytes: 0};
+  const message = shareBuildUiMessage(type, payload, {...options, commitSequence: false});
+  const serialized = JSON.stringify(message);
+  const bytes = shareSerializedByteLength(serialized);
+  const maxBytes = Math.max(0, Math.round(Number(options.maxBytes) || 0));
+  if (maxBytes > 0 && bytes > maxBytes) {
+    return {sent: false, queued: 0, dropped: true, bytes, message};
+  }
+  shareCommitBuiltUiMessage(message);
   const targets = shareViewMode ? [{token: shareToken}] : activeShares;
+  let sent = 0;
+  let queued = 0;
   for (const share of targets) {
     const token = share?.token || share;
     if (!token) continue;
     const socket = ensureShareHostSocket(token);
     if (!socket) continue;
     if (socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify(message));
+      socket.send(serialized);
+      sent += 1;
       continue;
     }
     const shareHostQueue = shareHostQueues.get(token) || [];
-    if (shareHostQueue.length < 32) shareHostQueue.push(message);
+    if (shareHostQueue.length < 32) {
+      shareHostQueue.push(serialized);
+      queued += 1;
+    }
     shareHostQueues.set(token, shareHostQueue);
   }
+  return {sent: sent > 0, sentCount: sent, queued, bytes, message};
 }
 
 function shareRedactSecretNode(node) {
@@ -5938,18 +6136,56 @@ function scheduleShareTopologySnapshot(reason = 'topology') {
   scheduleShareTopologyDomKeyframe();
 }
 
+function clearScheduledShareTopologyDomKeyframe() {
+  if (shareReplayTopologyKeyframeTimer) {
+    clearTimeout(shareReplayTopologyKeyframeTimer);
+    shareReplayTopologyKeyframeTimer = null;
+  }
+  shareReplayTopologyKeyframeQueuedAt = 0;
+}
+
+function sharePointerQuietDelayMs(now = (typeof performance !== 'undefined' && performance?.now ? performance.now() : 0)) {
+  const lastPointerAt = Number(sharePointerLastPublishedAt);
+  if (!Number.isFinite(lastPointerAt)) return 0;
+  return Math.max(0, shareTopologyKeyframePointerQuietMs - (Number(now) - lastPointerAt));
+}
+
+function shareTopologyDomKeyframeDelayMs() {
+  const now = Date.now();
+  const queuedAt = Math.max(0, Math.round(Number(shareReplayTopologyKeyframeQueuedAt) || 0));
+  const maxDelay = queuedAt > 0 ? Math.max(0, shareTopologyKeyframeMaxDeferralMs - (now - queuedAt)) : shareTopologyKeyframeMaxDeferralMs;
+  const lastKeyframeAt = Math.max(0, Math.round(Number(shareReplayHostLastKeyframeAt) || 0));
+  const keyframeFloorDelay = lastKeyframeAt > 0 ? Math.max(0, shareReplayHostKeyframeMinIntervalMs - (now - lastKeyframeAt)) : 0;
+  return Math.min(maxDelay, Math.max(keyframeFloorDelay, sharePointerQuietDelayMs()));
+}
+
+function runScheduledShareTopologyDomKeyframe() {
+  shareReplayTopologyKeyframeTimer = null;
+  const delayMs = shareTopologyDomKeyframeDelayMs();
+  if (delayMs > 0) {
+    shareReplayTopologyKeyframeTimer = setTimeout(runScheduledShareTopologyDomKeyframe, delayMs);
+    return;
+  }
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      const nextDelayMs = shareTopologyDomKeyframeDelayMs();
+      if (nextDelayMs > 0) {
+        if (!shareReplayTopologyKeyframeQueuedAt) shareReplayTopologyKeyframeQueuedAt = Date.now();
+        shareReplayTopologyKeyframeTimer = setTimeout(runScheduledShareTopologyDomKeyframe, nextDelayMs);
+        return;
+      }
+      shareReplayTopologyKeyframeQueuedAt = 0;
+      sharePublishDomKeyframe('topology');
+    });
+  });
+}
+
 function scheduleShareTopologyDomKeyframe() {
   if (shareViewMode || !shareHasActiveShare() || !shareReplayFeatureEnabled()) return;
   shareReplayPauseMutationPublisherForTopology();
+  if (!shareReplayTopologyKeyframeQueuedAt) shareReplayTopologyKeyframeQueuedAt = Date.now();
   if (shareReplayTopologyKeyframeTimer) return;
-  shareReplayTopologyKeyframeTimer = setTimeout(() => {
-    shareReplayTopologyKeyframeTimer = null;
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        sharePublishDomKeyframe('topology');
-      });
-    });
-  }, 0);
+  shareReplayTopologyKeyframeTimer = setTimeout(runScheduledShareTopologyDomKeyframe, 0);
 }
 
 function scheduleShareViewportPublish() {
@@ -6017,6 +6253,7 @@ function applyShareAppearanceState(appearance = {}) {
     applyShareAppearanceNumber(appearance, 'paneRingOpacity', 'pane_ring_opacity', 5, 100, numberSetting('appearance.pane_ring_opacity', 75));
     applyShareAppearanceNumber(appearance, 'inactivePaneOpacity', 'inactive_pane_opacity', 0, 100, numberSetting('appearance.inactive_pane_opacity', 60));
     globalThemeMode = normalizeGlobalThemeMode(appearance.theme || globalThemeMode);
+    shareResolvedGlobalThemeMode = normalizeResolvedGlobalThemeMode(appearance.resolvedTheme || '');
     terminalThemeMode = normalizeTerminalThemeMode(appearance.terminalTheme || terminalThemeMode);
     clientSettings = mergeSettingObjects(clientSettings, {appearance: {
       theme: globalThemeMode,
@@ -6204,7 +6441,7 @@ async function applyShareUiState(payload = {}) {
   }
 }
 
-const sharePointerPublishIntervalMs = 33;
+const sharePointerPublishIntervalMs = 50;
 
 function sharePointerPayloadForPoint(clientX, clientY, options = {}) {
   const point = appSpacePoint(clientX, clientY);
@@ -6298,16 +6535,8 @@ function sharePublishPointerEvent(event, options = {}) {
   const payload = sharePointerPayloadForEvent(event, options);
   if (!payload) return;
   if (!shareViewMode && shareReplayFeatureEnabled()) {
-    shareReplayPointerLastPayload = {...payload, visible: true};
-    if (!shareReplayPointerFramePending) {
-      shareReplayPointerFramePending = true;
-      requestAnimationFrame(() => {
-        shareReplayPointerFramePending = false;
-        const latest = shareReplayPointerLastPayload;
-        shareReplayPointerLastPayload = null;
-        if (latest) shareReplayPublishDeltaPayload({pointer: latest}, latest.click ? 'pointer-click' : 'pointer');
-      });
-    }
+    sharePublish('pointer', {...payload, visible: true});
+    return;
   }
   sharePublish('pointer', payload);
 }
@@ -6492,8 +6721,7 @@ function applyShareScrollState(payload = {}) {
   const top = Math.max(0, Math.round(Number(payload.top || 0)));
   const left = Math.max(0, Math.round(Number(payload.left || 0)));
   if (target) {
-    shareLastAppliedScrollByTarget.set(target, {top, left});
-    shareLastAppliedScrollPayloadByTarget.set(target, {...payload, target, top, left});
+    shareLastAppliedScrollByTarget.set(target, {top, left, payload: {...payload, target, top, left}});
   }
   if (String(payload.kind || '') === 'editor' || target.startsWith('editor:')) {
     shareRememberEditorViewState(payload, top, left);
@@ -6834,6 +7062,12 @@ function stableDigestJson(value) {
   return JSON.stringify(value);
 }
 
+function shareSerializedByteLength(text = '') {
+  const value = String(text || '');
+  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(value).length;
+  return value.length;
+}
+
 function shareHashText(text) {
   let hash = 2166136261;
   for (let index = 0; index < text.length; index += 1) {
@@ -7084,8 +7318,7 @@ function shareGeometryDebugDeltas(hostSnapshot = {}, localSnapshot = {}) {
 
 function shareReplayFrameByteLength(value = {}) {
   const text = stableDigestJson(shareRedactDiagnosticValue(value));
-  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(text).length;
-  return text.length;
+  return shareSerializedByteLength(text);
 }
 
 function shareReplayFrameLatencyMs(payload = {}) {
@@ -8175,7 +8408,7 @@ function restoreShareScrollTargetByKey(target) {
   const state = shareLastAppliedScrollByTarget.get(cleanTarget);
   if (!state) return false;
   const payload = {
-    ...(shareLastAppliedScrollPayloadByTarget.get(cleanTarget) || {}),
+    ...(state.payload || {}),
     target: cleanTarget,
     top: Math.max(0, Math.round(Number(state.top || 0))),
     left: Math.max(0, Math.round(Number(state.left || 0))),
@@ -8314,7 +8547,12 @@ function itemCanCloseWithAppShortcut(item) {
 function toggleFileExplorerShortcut() {
   if (itemInLayout(fileExplorerItemId)) {
     fileExplorerShortcutRestoreSlots = cloneLayoutSlots();
-    removeSessionFromLayout(fileExplorerItemId);
+    applyLayoutSlots(layoutWithoutItem(fileExplorerItemId, {
+      preservePlaceholders: false,
+    }), {
+      preserveMissingFileExplorer: true,
+      message: fileExplorerHiddenStatusMessage(),
+    });
     return;
   }
   if (fileExplorerShortcutRestoreSlots && itemInLayout(fileExplorerItemId, fileExplorerShortcutRestoreSlots)) {
@@ -8335,7 +8573,7 @@ function handleFocusedTerminalCopyShortcut(event) {
   if (!session) return false;
   const item = terminals.get(session);
   if (!item?.term) return false;
-  if (!handleTerminalCopyShortcutKeydown(session, item.term, item.container, event)) return false;
+  if (!handleTerminalTmuxWindowShortcutKeydown(session, event) && !handleTerminalCopyShortcutKeydown(session, item.term, item.container, event)) return false;
   event.stopImmediatePropagation?.();
   event.stopPropagation?.();
   return true;
@@ -8380,6 +8618,13 @@ function handleGlobalShortcutKeydown(event) {
   const key = String(event.key || '').toLowerCase();
   const platformActionAllowed = globalShortcutTargetAllowsPlatformAction(event.target);
   if (handlePendingGlobalShortcutChord(event, key)) return;
+  const paneTabShortcutDirection = terminalTmuxWindowShortcutDirection(event);
+  if (paneTabShortcutDirection && globalShortcutTargetAllowsAppAction(event.target)) {
+    event.preventDefault();
+    event.stopPropagation();
+    selectAdjacentPaneTab(paneTabShortcutDirection, {userInitiated: true});
+    return;
+  }
   // editor back/forward history via the keyboard — Mod+Alt+[ / Mod+Alt+]. (appModifier() is
   // false when Alt is held, so test the platform modifier directly.) Matched by event.code so a layout
   // where Alt remaps the bracket char still works; plain Mod+[ / Mod+] stay with CodeMirror (indent).
@@ -8424,7 +8669,7 @@ function handleGlobalShortcutKeydown(event) {
       if (itemCanCloseWithAppShortcut(item)) removeSessionFromLayout(item);
       return;
     }
-    if (key === 'b') {
+    if (key === 'b' && globalShortcutTargetAllowsAppAction(event.target)) {
       event.preventDefault();
       toggleFileExplorerShortcut();
       return;

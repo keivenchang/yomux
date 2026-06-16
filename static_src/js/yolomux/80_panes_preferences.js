@@ -217,10 +217,10 @@ function splitPercentForPointer(section, nodeOrDirection, event) {
   const children = Array.isArray(nodeOrDirection?.children) ? nodeOrDirection.children : null;
   const minFirst = children
     ? (direction === 'column' ? layoutNodeMinHeight(children[0]) : layoutNodeMinWidth(children[0]))
-    : (direction === 'column' ? rootCssLengthPx('--min-split-pane-height') || 220 : rootCssLengthPx('--min-split-pane-width') || 320);
+    : (direction === 'column' ? minSplitPaneHeightPx() : minSplitPaneWidthPx());
   const minSecond = children
     ? (direction === 'column' ? layoutNodeMinHeight(children[1]) : layoutNodeMinWidth(children[1]))
-    : (direction === 'column' ? rootCssLengthPx('--min-split-pane-height') || 220 : rootCssLengthPx('--min-split-pane-width') || 320);
+    : (direction === 'column' ? minSplitPaneHeightPx() : minSplitPaneWidthPx());
   if (size >= minFirst + minSecond) {
     const minFirstPct = (minFirst / size) * 100;
     const maxFirstPct = 100 - (minSecond / size) * 100;
@@ -250,7 +250,7 @@ function pruneSmallLayoutSlots() {
 function minWidthForLayoutItem(item) {
   const type = tabTypeForItem(item);
   if (type?.minWidth) return type.minWidth(item);
-  return rootCssLengthPx('--min-split-pane-width') || 320;
+  return minSplitPaneWidthPx();
 }
 
 function minWidthForLayoutSlot(slot, slots = layoutSlots) {
@@ -262,19 +262,19 @@ function layoutVisiblePaneCount(slots = layoutSlots) {
 }
 
 function layoutNodeMinWidth(node, slots = layoutSlots) {
-  if (!node) return rootCssLengthPx('--min-split-pane-width') || 320;
-  if (node.slot) return paneHasLayoutContent(node.slot, slots) ? minWidthForLayoutSlot(node.slot, slots) : rootCssLengthPx('--min-split-pane-width') || 320;
+  if (!node) return minSplitPaneWidthPx();
+  if (node.slot) return paneHasLayoutContent(node.slot, slots) ? minWidthForLayoutSlot(node.slot, slots) : minSplitPaneWidthPx();
   const children = node.children || [];
-  if (node.split === 'column') return Math.max(...children.map(child => layoutNodeMinWidth(child, slots)), rootCssLengthPx('--min-split-pane-width') || 320);
+  if (node.split === 'column') return Math.max(...children.map(child => layoutNodeMinWidth(child, slots)), minSplitPaneWidthPx());
   return children.reduce((sum, child) => sum + layoutNodeMinWidth(child, slots), 0);
 }
 
 function layoutNodeMinHeight(node, slots = layoutSlots) {
-  if (!node) return rootCssLengthPx('--min-split-pane-height') || 220;
-  if (node.slot) return paneHasLayoutContent(node.slot, slots) ? rootCssLengthPx('--min-split-pane-height') || 220 : rootCssLengthPx('--min-split-pane-height') || 220;
+  if (!node) return minSplitPaneHeightPx();
+  if (node.slot) return minSplitPaneHeightPx();
   const children = node.children || [];
   if (node.split === 'column') return children.reduce((sum, child) => sum + layoutNodeMinHeight(child, slots), 0);
-  return Math.max(...children.map(child => layoutNodeMinHeight(child, slots)), rootCssLengthPx('--min-split-pane-height') || 220);
+  return Math.max(...children.map(child => layoutNodeMinHeight(child, slots)), minSplitPaneHeightPx());
 }
 
 function prunePriorityForLayoutSlot(slot) {
@@ -302,7 +302,7 @@ function smallLayoutSlotCandidate() {
     if (isVirtualItem(item) && (!virtualCandidate || area < virtualCandidate.area)) {
       virtualCandidate = {slot, area, priority};
     }
-    const tooSmall = rect.width < minWidthForLayoutSlot(slot) || rect.height < (rootCssLengthPx('--min-split-pane-height') || 220);
+    const tooSmall = rect.width < minWidthForLayoutSlot(slot) || rect.height < minSplitPaneHeightPx();
     if (!tooSmall) continue;
     const nextCandidate = {slot, area, priority};
     if (!candidate || priority < candidate.priority || (priority === candidate.priority && area < candidate.area)) {
@@ -1584,6 +1584,12 @@ function createInfoPanel() {
       sendYoagentChatMessage(input?.value || yoagentDraft);
       return;
     }
+    const agentRestart = event.target.closest('[data-yolomux-agent-restart]');
+    if (agentRestart && panel.contains(agentRestart)) {
+      event.preventDefault();
+      createNextSession(agentRestart.dataset.yolomuxAgentRestart || 'claude');
+      return;
+    }
     const actionSend = event.target.closest('[data-yoagent-action-send]');
     if (actionSend && panel.contains(actionSend)) {
       event.preventDefault();
@@ -2190,13 +2196,73 @@ function yoagentTranscriptPathHtml() {
 }
 
 function yoagentRecentAgentActivityText(agent) {
+  const signal = yoagentRecentAgentSignal(agent);
+  if (signal.pane?.dead === true) return tmuxSignalDeadText(signal.pane);
+  const activityTs = tmuxSignalWindowActivityTs(signal.window);
+  if (activityTs > 0) {
+    const seconds = Math.max(0, Math.round(Date.now() / 1000 - activityTs));
+    return `tmux ${compactRelativeTimeFormat(seconds)}`;
+  }
   if (agent?.running === true) return t('yoagent.agent.running');
   const ts = Number(agent?.last_used_ts || agent?.sort_ts || 0);
   if (!Number.isFinite(ts) || ts <= 0) return '';
   return compactRelativeTimeFormat(Math.max(0, Math.round(Date.now() / 1000 - ts)));
 }
 
-function yoagentRecentAgentPathText(agent) {
+function yoagentRecentAgentSortTs(agent, signal = yoagentRecentAgentSignal(agent)) {
+  const activityTs = tmuxSignalWindowActivityTs(signal.window);
+  if (activityTs > 0) return activityTs;
+  const sessionActivityTs = tmuxSignalSessionActivityTs(agent?.session);
+  if (sessionActivityTs > 0) return sessionActivityTs;
+  const ts = Number(agent?.last_used_ts || agent?.sort_ts || 0);
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+function yoagentRecentAgentSignal(agent) {
+  const target = String(agent?.pane_target || '').trim();
+  let pane = target ? tmuxSignalPaneForTarget(target) : null;
+  if (!pane) {
+    const session = String(agent?.session || '').trim();
+    const windowText = String(agent?.window ?? '').trim();
+    const paneText = String(agent?.pane ?? '').trim();
+    pane = tmuxSignalPanes().find(candidate => (
+      tmuxSignalPaneSession(candidate) === session
+      && String(candidate?.window_index ?? '').trim() === windowText
+      && (!paneText || String(candidate?.pane_index ?? '').trim() === paneText)
+      && tmuxSignalPaneIsAgent(candidate)
+    )) || null;
+  }
+  const windowRecord = pane ? tmuxSignalWindowForPane(pane) : tmuxSignalWindowForSessionIndex(agent?.session, agent?.window);
+  return {pane, window: windowRecord};
+}
+
+function yoagentRecentAgentSignalBadgesHtml(signal) {
+  const pane = signal?.pane || null;
+  const windowRecord = signal?.window || null;
+  const badges = [];
+  const deadText = tmuxSignalDeadText(pane);
+  if (deadText) badges.push({kind: 'dead', text: deadText});
+  if (windowRecord?.bell_flag === true) badges.push({kind: 'bell', text: 'bell'});
+  if (windowRecord?.silence_flag === true) badges.push({kind: 'silence', text: 'silent'});
+  const presenceText = tmuxSignalWindowPresenceText(windowRecord);
+  if (presenceText) badges.push({kind: 'presence', text: presenceText});
+  if (windowRecord?.zoomed === true) badges.push({kind: 'zoom', text: 'zoom'});
+  for (const label of tmuxSignalPaneModeLabels(pane)) badges.push({kind: 'mode', text: label});
+  if (!badges.length) return '';
+  return `<span class="yoagent-recent-agent-signals">${badges.map(badge => `<span class="yoagent-recent-agent-signal signal-${esc(badge.kind)}">${esc(badge.text)}</span>`).join('')}</span>`;
+}
+
+function yoagentRecentAgentRestartHtml(agent, signal) {
+  if (readOnlyMode || signal?.pane?.dead !== true) return '';
+  const kind = String(agent?.agent_kind || tmuxSignalPaneCommand(signal.pane) || '').toLowerCase();
+  if (!tmuxSignalAgentCommands.has(kind)) return '';
+  return `<button type="button" class="yoagent-recent-agent-restart" data-yolomux-agent-restart="${esc(kind)}" title="Create a new ${esc(agentLabel(kind))} session">Restart</button>`;
+}
+
+function yoagentRecentAgentPathText(agent, signal = yoagentRecentAgentSignal(agent)) {
+  const rawSignalPath = String(signal?.pane?.current_path || '').trim();
+  const signalPath = rawSignalPath ? normalizeDirectoryPath(rawSignalPath) : '';
+  if (signalPath) return compactHomePath(signalPath);
   const paths = Array.isArray(agent?.recent_paths)
     ? agent.recent_paths
       .map(item => compactHomePath(item?.path || ''))
@@ -2214,26 +2280,44 @@ function yoagentRecentAgentsHtml() {
   const agents = Array.isArray(activitySummaryPayload?.agents) ? activitySummaryPayload.agents : [];
   const items = agents
     .filter(agent => agent && typeof agent === 'object' && agent.label)
+    .map(agent => {
+      const signal = yoagentRecentAgentSignal(agent);
+      return {agent, signal, sortTs: yoagentRecentAgentSortTs(agent, signal)};
+    })
+    .sort((left, right) => right.sortTs - left.sortTs)
     .slice(0, 6);
   if (!items.length) return '';
-  const rows = items.map(agent => {
+  const rows = items.map(({agent, signal}) => {
     const kind = String(agent.agent_kind || '').toLowerCase();
     const activity = yoagentRecentAgentActivityText(agent);
     const windowText = String(agent.window_label || [agent.window, agent.window_name || kind].filter(Boolean).join(':') || kind || '').trim();
-    const pathText = yoagentRecentAgentPathText(agent);
+    const pathText = yoagentRecentAgentPathText(agent, signal);
+    const signalBadges = yoagentRecentAgentSignalBadgesHtml(signal);
+    const restart = yoagentRecentAgentRestartHtml(agent, signal);
+    const idleClass = signal.window && !tmuxSignalWindowIsRecentlyActive(signal.window) ? ' tmux-idle' : '';
     const title = [
       agent.cwd ? `cwd: ${agent.cwd}` : '',
       pathText ? `paths: ${pathText}` : '',
       agent.transcript ? `transcript: ${agent.transcript}` : '',
+      signal.window?.activity_ts ? `tmux activity: ${new Date(Number(signal.window.activity_ts) * 1000).toISOString()}` : '',
+      tmuxSignalWindowClientNames(signal.window).length ? `tmux viewers: ${tmuxSignalWindowClientNames(signal.window).join(', ')}` : '',
+      signal.window?.layout ? `tmux layout: ${signal.window.layout}` : '',
+      signal.window?.visible_layout ? `tmux visible layout: ${signal.window.visible_layout}` : '',
+      signal.window?.bell_flag ? 'tmux bell alert' : '',
+      signal.window?.silence_flag ? 'tmux silence alert' : '',
+      signal.pane?.dead ? tmuxSignalDeadText(signal.pane) : '',
+      tmuxSignalPaneModeLabels(signal.pane).join(', '),
       agent.state_text || '',
     ].filter(Boolean).join('\n');
-    return `<li class="yoagent-recent-agent" data-agent-kind="${esc(kind)}" title="${esc(title)}">
+    return `<li class="yoagent-recent-agent${idleClass}" data-agent-kind="${esc(kind)}" title="${esc(title)}">
       <span class="yoagent-recent-agent-line">
         ${kind ? agentIcon(kind, {label: agentLabel(kind)}) : ''}
         <span class="yoagent-recent-agent-session">${esc(t('yoagent.sessionLabel', {session: agent.session || ''}))}</span>
         <span class="yoagent-recent-agent-window">${esc(windowText)}</span>
         ${pathText ? `<span class="yoagent-recent-agent-paths">${esc(pathText)}</span>` : ''}
         ${activity ? `<span class="yoagent-recent-agent-activity">${esc(activity)}</span>` : ''}
+        ${signalBadges}
+        ${restart}
       </span>
     </li>`;
   }).join('');
