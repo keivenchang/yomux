@@ -2825,10 +2825,20 @@ test('t@2114', () => {
   assert.equal(counts.attention, 1, 'one needs-input session counts as needing the user');
   assert.equal(counts.idle, 2, 'the remaining sessions are idle');
   assert.equal(counts.total, 4, 'all tmux sessions are counted');
-  assert.equal(api.browserFaviconBadgeCount(counts), 2, 'favicon badge counts running plus attention sessions');
+  assert.equal(api.browserFaviconBadgeCount(counts), 1, 'favicon badge counts actively running sessions only');
+  assert.equal(api.browserFaviconBadgeCount({running: 0, attention: 1}), 0, 'favicon badge does not count attention-only sessions as active');
   assert.equal(api.browserFaviconBadgeCount({running: 0, attention: 0}), 0, 'favicon badge renders 0 when all sessions are idle');
   assert.equal(api.browserFaviconBadgeLabel(0), '0', 'favicon badge explicitly shows 0 when idle');
   assert.equal(api.browserFaviconBadgeLabel(107), '99+', 'favicon badge clamps large counts to a short label');
+  const falsePositiveApi = loadYolomux('', ['1', '2', '3', '4', '8001', '8002', '8003', '9']);
+  for (const session of ['1', '2', '3', '4', '8001', '8002', '8003', '9']) {
+    falsePositiveApi.setAutoApproveStateForTest(session, {screen: {key: 'idle'}});
+    falsePositiveApi.setTranscriptInfoForTest(session, {agents: [], panes: [{active: true, window_active: true}]});
+  }
+  const idlePaneCounts = falsePositiveApi.globalActivityCounts();
+  assert.equal(idlePaneCounts.running, 0, 'tmux selected panes are not active work');
+  assert.equal(idlePaneCounts.idle, 8, 'all eight selected-pane sessions remain idle');
+  assert.equal(falsePositiveApi.browserFaviconBadgeCount(idlePaneCounts), 0, 'favicon does not show 8 for idle tmux sessions');
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(source.includes('browserFaviconRoundedRect(ctx, 2, 2, 60, 60, 10)') && source.includes("ctx.fillStyle = '#99d441'"), 'favicon fills the icon with the lime YO tile instead of a dark border');
   assert.ok(source.includes("ctx.font = '900 86px Arial, sans-serif'") && source.includes('ctx.scale(1.22, 1)') && source.includes("ctx.fillText('Y', 0, 0)"), 'favicon fills the tile with a large Y');

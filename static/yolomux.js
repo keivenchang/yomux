@@ -5212,6 +5212,11 @@ function runningAgentCount() {
   return sessions.filter(session => autoApproveScreenIsWorking(autoApproveStates.get(session))).length;
 }
 
+function sessionCountsAsRunning(session, stateKey = '') {
+  if (autoApproveScreenIsWorking(autoApproveStates.get(session))) return true;
+  return ['tests-running', 'yolo-approval'].includes(String(stateKey || ''));
+}
+
 function documentTitleNowMs() {
   const testNow = Number(window.__yolomuxDocumentTitleNowMs);
   return Number.isFinite(testNow) ? testNow : Date.now();
@@ -5225,8 +5230,7 @@ function documentTitleIdleMinutes(now) {
 
 function browserFaviconBadgeCount(counts = globalActivityCounts()) {
   const running = Math.max(0, Number(counts?.running || 0));
-  const attention = Math.max(0, Number(counts?.attention || 0));
-  return Math.floor(running + attention);
+  return Math.floor(running);
 }
 
 function browserFaviconBadgeLabel(count) {
@@ -5327,8 +5331,8 @@ function updateDocumentTitle() {
 }
 
 // Cross-session "what's going on" rollup for the always-visible top-bar status line: how many tmux
-// agents are running, how many need the user, how many are idle. Reads the same live per-session
-// state the tabs use (stateful, no recompute).
+// agents are running, how many need the user, how many are idle. Running must come from live work
+// signals, not tmux's selected-pane flag; every tmux window has a selected pane even when idle.
 function globalActivityCounts() {
   let running = 0;
   let attention = 0;
@@ -5337,7 +5341,7 @@ function globalActivityCounts() {
     if (!isTmuxSession(session)) continue;
     total += 1;
     const key = sessionState(session).key;
-    if (['working', 'tests-running', 'yolo-approval'].includes(key)) running += 1;
+    if (sessionCountsAsRunning(session, key)) running += 1;
     else if (['needs-input', 'needs-approval', 'blocked', 'disconnected'].includes(key)) attention += 1;
   }
   return {running, attention, idle: Math.max(0, total - running - attention), total};

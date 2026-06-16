@@ -145,6 +145,7 @@ Section order follows the reading path: a capabilities overview and glossary, th
 ## Reconnect And Wake Rules
 
 - Client-events reconnect must backfill live auto-approve status so YO markers reflect the current working/idle state immediately after the stream is ready again. Page visibility returning to visible and browser `online` events must schedule the shared refresh path, and a narrow auto-status fallback poll may run only while the client-events stream is disconnected.
+- The YO browser favicon badge counts active work only: sessions whose live auto-status screen state is `working`, plus explicit active states such as tests-running or YOLO approval. It must not count tmux's selected pane/window flags, open terminal websockets, idle Claude/Codex processes, or attention-only states as active work; every tmux window has a selected pane even when idle.
 
 ## Tabber Pane Rules
 
