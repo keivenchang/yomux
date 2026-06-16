@@ -514,12 +514,50 @@ def enrich_branch_pull_requests(git_data: dict[str, Any], cache: MetadataCache, 
             branch["pull_request"] = found
 
 def session_git_inventory(info: SessionInfo) -> dict[str, Any] | None:
-    for cwd in candidate_session_cwds(info):
+    for summary in session_repo_summaries(info, None):
+        cwd = summary.get("cwd") or summary.get("root")
         git_data = git_inventory(cwd)
         if git_data is not None:
             git_data["cwd"] = cwd
+            git_data["activity_ts"] = summary.get("activity_ts", 0)
+            git_data["activity_source"] = summary.get("activity_source", "")
             return git_data
     return None
+
+
+def status_entry_path(line: str) -> str:
+    if len(line) < 4:
+        return ""
+    path = line[3:].strip()
+    if " -> " in path:
+        path = path.rsplit(" -> ", 1)[-1].strip()
+    if len(path) >= 2 and path[0] == path[-1] == '"':
+        path = path[1:-1]
+    return path
+
+
+def repo_dirty_activity_ts(root: str, status_lines: list[str]) -> float:
+    latest = 0.0
+    repo = Path(root)
+    for line in status_lines[:200]:
+        rel_path = status_entry_path(line)
+        if not rel_path:
+            continue
+        try:
+            latest = max(latest, (repo / rel_path).stat().st_mtime)
+        except OSError:
+            continue
+    return latest
+
+
+def repo_commit_activity_ts(cwd: str) -> float:
+    result = git(["log", "-1", "--format=%ct"], cwd)
+    if result.returncode != 0:
+        return 0.0
+    try:
+        return float(result.stdout.strip() or 0)
+    except ValueError:
+        return 0.0
 
 
 def repo_summary(cwd: str | None) -> dict[str, Any] | None:
@@ -537,12 +575,18 @@ def repo_summary(cwd: str | None) -> dict[str, Any] | None:
     upstream_name = upstream.stdout.strip() if upstream.returncode == 0 else None
     ahead, behind = git_ahead_behind(cwd, upstream_name)
     status_lines = [line for line in status.stdout.splitlines() if line.strip()] if status.returncode == 0 else []
+    dirty_activity_ts = repo_dirty_activity_ts(root.stdout.strip(), status_lines)
+    commit_activity_ts = repo_commit_activity_ts(cwd)
+    activity_ts = max(dirty_activity_ts, commit_activity_ts)
     return {
         "root": root.stdout.strip(),
+        "cwd": str(Path(cwd).expanduser().resolve()),
         "branch": branch.stdout.strip() if branch.returncode == 0 else None,
         "ahead": ahead,
         "behind": behind,
         "dirty_count": len(status_lines),
+        "activity_ts": activity_ts,
+        "activity_source": "dirty" if dirty_activity_ts >= commit_activity_ts and dirty_activity_ts > 0 else ("commit" if commit_activity_ts > 0 else ""),
         "worktree": git_worktree_identity(cwd, root.stdout.strip()),
     }
 
@@ -559,7 +603,12 @@ def session_repo_summaries(info: SessionInfo, primary_root: str | None) -> list[
         seen.add(summary["root"])
         summary["primary"] = summary["root"] == primary_root
         summaries.append(summary)
-    return summaries
+    return [
+        summary for _index, summary in sorted(
+            enumerate(summaries),
+            key=lambda item: (-(float(item[1].get("activity_ts") or 0)), item[0]),
+        )
+    ]
 
 def candidate_session_cwds(info: SessionInfo) -> list[str]:
     # the LIVE pane cwd wins. The session-number default workdir (session "1" -> dynamo1) is

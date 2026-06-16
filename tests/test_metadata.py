@@ -14,6 +14,7 @@ from yolomux_lib.metadata import extract_linear_ids
 from yolomux_lib.metadata import github_checks_unknown
 from yolomux_lib.metadata import linear_issue_metadata
 from yolomux_lib.metadata import project_pull_request
+from yolomux_lib.metadata import session_git_inventory
 from yolomux_lib.metadata import session_repo_summaries
 from yolomux_lib.metadata import summarize_github_checks
 
@@ -73,6 +74,32 @@ def test_session_repo_summaries_single_repo_has_no_extra(tmp_path):
 
     roots = {s["root"] for s in session_repo_summaries(info, root)}
     assert roots == {root}
+
+
+def test_session_git_inventory_prefers_recent_dirty_repo(tmp_path):
+    repos = []
+    for name in ("old", "recent"):
+        repo = tmp_path / name
+        repo.mkdir()
+        _git(repo, "init")
+        _git(repo, "config", "user.email", "t@t")
+        _git(repo, "config", "user.name", "t")
+        (repo / "f.txt").write_text("x\n", encoding="utf-8")
+        _git(repo, "add", "f.txt")
+        _git(repo, "commit", "-m", "init")
+        repos.append(repo)
+    (repos[1] / "f.txt").write_text("changed\n", encoding="utf-8")
+    os.utime(repos[1] / "f.txt", (2_000_000_000, 2_000_000_000))
+    panes = [_pane("s3", 0, repos[0]), _pane("s3", 1, repos[1])]
+    info = SessionInfo(session="s3", panes=panes, selected_pane=panes[0], agents=[])
+
+    git_data = session_git_inventory(info)
+    summaries = session_repo_summaries(info, git_data["root"] if git_data else None)
+
+    assert git_data is not None
+    assert git_data["root"] == str(repos[1].resolve())
+    assert summaries[0]["root"] == str(repos[1].resolve())
+    assert summaries[0]["activity_source"] == "dirty"
 
 
 REPO = {

@@ -1001,38 +1001,48 @@ function compactHomePath(path) {
 
 function projectMetaHtml(session, info) {
   const project = info?.project || {};
-  const git = project.git;
+  const repos = sessionRepoSummaries(info);
+  const repoIndex = selectedSessionRepoIndex(session, info);
+  const selectedRepo = repoIndex >= 0 ? repos[repoIndex] : null;
+  const git = displayedSessionGit(session, info);
+  const showingPrimaryGit = !selectedRepo || repoRootKey(project.git?.root) === repoRootKey(selectedRepo.root);
   const parts = [];
-  const fullPath = panelFullPath(session, info);
+  const fullPath = selectedRepo?.cwd || selectedRepo?.root || panelFullPath(session, info);
+  const repoSwitchHtml = repos.length > 1 ? (() => {
+    const position = Math.max(0, repoIndex) + 1;
+    const switchLabel = `${position}/${repos.length}`;
+    return `<span class="meta-repo-switch" aria-label="${esc(t('detail.repos.switch', {position, count: repos.length}))}">
+      <button type="button" class="meta-repo-cycle" data-repo-cycle="${esc(session)}" data-repo-cycle-dir="-1" title="${esc(t('detail.repos.previous'))}" aria-label="${esc(t('detail.repos.previous'))}">&lt;</button>
+      <button type="button" class="meta-repo-chip" data-repo-chip="${esc(session)}" title="${esc(t('detail.repos.more', {count: repos.length - 1}))}" aria-label="${esc(t('detail.repos.switch', {position, count: repos.length}))}">${esc(switchLabel)}</button>
+      <button type="button" class="meta-repo-cycle" data-repo-cycle="${esc(session)}" data-repo-cycle-dir="1" title="${esc(t('detail.repos.next'))}" aria-label="${esc(t('detail.repos.next'))}">&gt;</button>
+    </span>`;
+  })() : '';
   if (!git) {
+    if (repoSwitchHtml) parts.push(repoSwitchHtml);
     if (fullPath) parts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
     parts.push(`<span class="meta-muted">${esc(t('git.noCheckout'))}</span>`);
     return metaJoin(parts);
   }
   const pr = displayPullRequest(info);
-  if (pr?.number) parts.push(pullRequestLinkHtml(pr));
+  if (repoSwitchHtml) parts.push(repoSwitchHtml);
+  if (showingPrimaryGit && pr?.number) parts.push(pullRequestLinkHtml(pr));
   if (git.branch) parts.push(`<span class="meta-branch">${esc(shortBranch(git.branch))}</span>`);
   if (fullPath) parts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
   if (Number.isFinite(git.behind) && git.behind > 0) parts.push(`<span class="meta-muted">${esc(t('git.behind', {count: git.behind}))}</span>`);
   if (Number.isFinite(git.ahead) && git.ahead > 0) parts.push(`<span class="meta-muted">${esc(t('git.ahead', {count: git.ahead}))}</span>`);
   if (Number.isFinite(git.dirty_count) && git.dirty_count > 0) parts.push(`<span class="meta-muted">${esc(t('git.dirty', {count: git.dirty_count}))}</span>`);
-  if (pr?.number) {
+  if (showingPrimaryGit && pr?.number) {
     if (!pullRequestIsMerged(pr) && pr.checks?.state && pr.checks.state !== 'unknown') {
       parts.push(`<span class="meta-pr-status ${pullRequestCiStatusClass(pr)}">${esc(pr.checks.summary || pullRequestStatusLabel(pr))}</span>`);
     }
   }
-  for (const issue of project.linear || []) {
-    const state = issue.state ? ` ${issue.state}` : '';
-    parts.push(linkHtml(issue.url, `${issue.identifier}${state}`, issue.title || ''));
-  }
-  const desc = pr?.title || pr?.description || (project.linear || []).find(issue => issue.title)?.title || '';
-  if (desc) parts.push(`<span class="meta-desc">${esc(shortText(desc, 160))}</span>`);
-  // C9: a session can touch several repos; the detail line shows the focused one. When there are more,
-  // append a "+N repos" chip that opens a popover listing every touched repo (keeps the line one row tall).
-  const repos = Array.isArray(project.repos) ? project.repos : [];
-  if (repos.length > 1) {
-    const extra = repos.length - 1;
-    parts.push(`<button type="button" class="meta-repo-chip" data-repo-chip="${esc(session)}" title="${esc(t('detail.repos.more', {count: extra}))}" aria-label="${esc(t('detail.repos.more', {count: extra}))}">+${extra} ${esc(t('detail.repos.label'))}</button>`);
+  if (showingPrimaryGit) {
+    for (const issue of project.linear || []) {
+      const state = issue.state ? ` ${issue.state}` : '';
+      parts.push(linkHtml(issue.url, `${issue.identifier}${state}`, issue.title || ''));
+    }
+    const desc = pr?.title || pr?.description || (project.linear || []).find(issue => issue.title)?.title || '';
+    if (desc) parts.push(`<span class="meta-desc">${esc(shortText(desc, 160))}</span>`);
   }
   return parts.length ? metaJoin(parts) : `<span class="meta-muted">${esc(t('git.checkoutDetected'))}</span>`;
 }
@@ -1055,13 +1065,12 @@ function repoChipMenuRowHtml(repo) {
 
 function showRepoChipMenu(session, x, y) {
   const info = transcriptMeta.sessions?.[session];
-  const repos = Array.isArray(info?.project?.repos) ? info.project.repos : [];
+  const repos = sessionRepoSummaries(info);
   if (repos.length < 2) return;
   const menu = document.createElement('div');
   menu.className = 'terminal-context-menu repo-chip-menu';
   menu.setAttribute('role', 'menu');
-  const ordered = [...repos].sort((a, b) => (b.primary === true) - (a.primary === true));
-  menu.innerHTML = ordered.map(repoChipMenuRowHtml).join('');
+  menu.innerHTML = repos.map(repoChipMenuRowHtml).join('');
   delegate(menu, 'click', '[data-repo-chip-open]', (event, row) => {
     const root = row.dataset.repoChipOpen || '';
     repoChipContextMenu.close();

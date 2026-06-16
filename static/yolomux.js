@@ -1132,6 +1132,7 @@ const sessionStateKeys = new Map();
 const notificationLastSent = new Map();
 const attentionAlertTimers = new Map();
 const metadataBadgePulseUntil = new Map();
+const sessionRepoDisplayRoot = new Map();
 
 function setLimitedMapEntry(map, key, value, limit) {
   if (!map || !key) return;
@@ -2112,6 +2113,59 @@ function sessionTranscriptInfo(session) {
     selectedPath: info.selected_pane?.current_path || '',
     info,
   };
+}
+
+function repoRootKey(value) {
+  return String(value || '').replace(/\/+$/, '');
+}
+
+function sessionRepoSummaries(info) {
+  return (Array.isArray(info?.project?.repos) ? info.project.repos : [])
+    .filter(repo => repo && repo.root)
+    .map(repo => ({...repo, root: repoRootKey(repo.root), cwd: repo.cwd || repo.root}));
+}
+
+function selectedSessionRepoIndex(session, info) {
+  const repos = sessionRepoSummaries(info);
+  if (!repos.length) return -1;
+  const selectedRoot = repoRootKey(sessionRepoDisplayRoot.get(session));
+  const selectedIndex = selectedRoot ? repos.findIndex(repo => repoRootKey(repo.root) === selectedRoot) : -1;
+  return selectedIndex >= 0 ? selectedIndex : 0;
+}
+
+function selectedSessionRepo(session, info) {
+  const repos = sessionRepoSummaries(info);
+  const index = selectedSessionRepoIndex(session, info);
+  return index >= 0 ? repos[index] : null;
+}
+
+function displayedSessionGit(session, info) {
+  const project = info?.project || {};
+  const git = project.git || null;
+  const repo = selectedSessionRepo(session, info);
+  if (!repo) return git;
+  if (git && repoRootKey(git.root) === repoRootKey(repo.root)) return git;
+  return {
+    root: repo.root || '',
+    cwd: repo.cwd || repo.root || '',
+    branch: repo.branch || '',
+    ahead: repo.ahead,
+    behind: repo.behind,
+    dirty_count: repo.dirty_count,
+    activity_ts: repo.activity_ts,
+    activity_source: repo.activity_source || '',
+    worktree: repo.worktree || null,
+  };
+}
+
+function cycleSessionRepoDisplay(session, info, direction) {
+  const repos = sessionRepoSummaries(info);
+  if (repos.length < 2) return null;
+  const current = selectedSessionRepoIndex(session, info);
+  const delta = Number(direction) < 0 ? -1 : 1;
+  const next = (Math.max(0, current) + delta + repos.length) % repos.length;
+  sessionRepoDisplayRoot.set(session, repos[next].root);
+  return repos[next];
 }
 
 // Centralized status-line writers: the err/ok pill markup is defined here, not re-inlined at the ~55
@@ -16918,7 +16972,8 @@ function tabMenuDetailText(item, info = transcriptMeta.sessions?.[item]) {
 function projectDirName(session, info) {
   if (!info) return t('common.loading');
   const {gitRoot, gitCwd, selectedPath} = sessionTranscriptInfo(session);
-  const path = gitRoot || gitCwd || selectedPath;
+  const repo = selectedSessionRepo(session, info);
+  const path = repo?.cwd || repo?.root || gitRoot || gitCwd || selectedPath;
   return pathBasename(path) || 'no path';
 }
 
@@ -18632,38 +18687,48 @@ function compactHomePath(path) {
 
 function projectMetaHtml(session, info) {
   const project = info?.project || {};
-  const git = project.git;
+  const repos = sessionRepoSummaries(info);
+  const repoIndex = selectedSessionRepoIndex(session, info);
+  const selectedRepo = repoIndex >= 0 ? repos[repoIndex] : null;
+  const git = displayedSessionGit(session, info);
+  const showingPrimaryGit = !selectedRepo || repoRootKey(project.git?.root) === repoRootKey(selectedRepo.root);
   const parts = [];
-  const fullPath = panelFullPath(session, info);
+  const fullPath = selectedRepo?.cwd || selectedRepo?.root || panelFullPath(session, info);
+  const repoSwitchHtml = repos.length > 1 ? (() => {
+    const position = Math.max(0, repoIndex) + 1;
+    const switchLabel = `${position}/${repos.length}`;
+    return `<span class="meta-repo-switch" aria-label="${esc(t('detail.repos.switch', {position, count: repos.length}))}">
+      <button type="button" class="meta-repo-cycle" data-repo-cycle="${esc(session)}" data-repo-cycle-dir="-1" title="${esc(t('detail.repos.previous'))}" aria-label="${esc(t('detail.repos.previous'))}">&lt;</button>
+      <button type="button" class="meta-repo-chip" data-repo-chip="${esc(session)}" title="${esc(t('detail.repos.more', {count: repos.length - 1}))}" aria-label="${esc(t('detail.repos.switch', {position, count: repos.length}))}">${esc(switchLabel)}</button>
+      <button type="button" class="meta-repo-cycle" data-repo-cycle="${esc(session)}" data-repo-cycle-dir="1" title="${esc(t('detail.repos.next'))}" aria-label="${esc(t('detail.repos.next'))}">&gt;</button>
+    </span>`;
+  })() : '';
   if (!git) {
+    if (repoSwitchHtml) parts.push(repoSwitchHtml);
     if (fullPath) parts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
     parts.push(`<span class="meta-muted">${esc(t('git.noCheckout'))}</span>`);
     return metaJoin(parts);
   }
   const pr = displayPullRequest(info);
-  if (pr?.number) parts.push(pullRequestLinkHtml(pr));
+  if (repoSwitchHtml) parts.push(repoSwitchHtml);
+  if (showingPrimaryGit && pr?.number) parts.push(pullRequestLinkHtml(pr));
   if (git.branch) parts.push(`<span class="meta-branch">${esc(shortBranch(git.branch))}</span>`);
   if (fullPath) parts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
   if (Number.isFinite(git.behind) && git.behind > 0) parts.push(`<span class="meta-muted">${esc(t('git.behind', {count: git.behind}))}</span>`);
   if (Number.isFinite(git.ahead) && git.ahead > 0) parts.push(`<span class="meta-muted">${esc(t('git.ahead', {count: git.ahead}))}</span>`);
   if (Number.isFinite(git.dirty_count) && git.dirty_count > 0) parts.push(`<span class="meta-muted">${esc(t('git.dirty', {count: git.dirty_count}))}</span>`);
-  if (pr?.number) {
+  if (showingPrimaryGit && pr?.number) {
     if (!pullRequestIsMerged(pr) && pr.checks?.state && pr.checks.state !== 'unknown') {
       parts.push(`<span class="meta-pr-status ${pullRequestCiStatusClass(pr)}">${esc(pr.checks.summary || pullRequestStatusLabel(pr))}</span>`);
     }
   }
-  for (const issue of project.linear || []) {
-    const state = issue.state ? ` ${issue.state}` : '';
-    parts.push(linkHtml(issue.url, `${issue.identifier}${state}`, issue.title || ''));
-  }
-  const desc = pr?.title || pr?.description || (project.linear || []).find(issue => issue.title)?.title || '';
-  if (desc) parts.push(`<span class="meta-desc">${esc(shortText(desc, 160))}</span>`);
-  // C9: a session can touch several repos; the detail line shows the focused one. When there are more,
-  // append a "+N repos" chip that opens a popover listing every touched repo (keeps the line one row tall).
-  const repos = Array.isArray(project.repos) ? project.repos : [];
-  if (repos.length > 1) {
-    const extra = repos.length - 1;
-    parts.push(`<button type="button" class="meta-repo-chip" data-repo-chip="${esc(session)}" title="${esc(t('detail.repos.more', {count: extra}))}" aria-label="${esc(t('detail.repos.more', {count: extra}))}">+${extra} ${esc(t('detail.repos.label'))}</button>`);
+  if (showingPrimaryGit) {
+    for (const issue of project.linear || []) {
+      const state = issue.state ? ` ${issue.state}` : '';
+      parts.push(linkHtml(issue.url, `${issue.identifier}${state}`, issue.title || ''));
+    }
+    const desc = pr?.title || pr?.description || (project.linear || []).find(issue => issue.title)?.title || '';
+    if (desc) parts.push(`<span class="meta-desc">${esc(shortText(desc, 160))}</span>`);
   }
   return parts.length ? metaJoin(parts) : `<span class="meta-muted">${esc(t('git.checkoutDetected'))}</span>`;
 }
@@ -18686,13 +18751,12 @@ function repoChipMenuRowHtml(repo) {
 
 function showRepoChipMenu(session, x, y) {
   const info = transcriptMeta.sessions?.[session];
-  const repos = Array.isArray(info?.project?.repos) ? info.project.repos : [];
+  const repos = sessionRepoSummaries(info);
   if (repos.length < 2) return;
   const menu = document.createElement('div');
   menu.className = 'terminal-context-menu repo-chip-menu';
   menu.setAttribute('role', 'menu');
-  const ordered = [...repos].sort((a, b) => (b.primary === true) - (a.primary === true));
-  menu.innerHTML = ordered.map(repoChipMenuRowHtml).join('');
+  menu.innerHTML = repos.map(repoChipMenuRowHtml).join('');
   delegate(menu, 'click', '[data-repo-chip-open]', (event, row) => {
     const root = row.dataset.repoChipOpen || '';
     repoChipContextMenu.close();
@@ -33985,7 +34049,17 @@ function bindPanelControls(panel, session) {
   });
   panel.querySelector('.meta')?.addEventListener('click', event => {
     event.stopPropagation();
-    // C9: the "+N repos" chip opens the per-session multi-repo popover (delegated, since .meta re-renders).
+    const cycle = event.target.closest('[data-repo-cycle]');
+    if (cycle) {
+      event.preventDefault();
+      const targetSession = cycle.dataset.repoCycle || session;
+      cycleSessionRepoDisplay(targetSession, transcriptMeta.sessions?.[targetSession], cycle.dataset.repoCycleDir || 1);
+      updatePanelHeader(targetSession, transcriptMeta.sessions?.[targetSession]);
+      renderSessionButtons();
+      renderPaneTabStrips();
+      return;
+    }
+    // The repo count opens the per-session multi-repo popover (delegated, since .meta re-renders).
     const chip = event.target.closest('[data-repo-chip]');
     if (chip) {
       event.preventDefault();
@@ -35597,15 +35671,10 @@ async function applyTranscriptsPayload(payload, options = {}) {
   renderYoagentPanel();
   if (options.refreshActivity !== false) refreshActivitySummary({silent: true});
   for (const session of activeSessions.filter(isTmuxSession)) {
-    const meta = document.getElementById(`meta-${session}`);
     const preview = document.getElementById(transcriptDomId(session));
     const info = transcriptMeta.sessions?.[session];
     const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
     updatePanelHeader(session, info);
-    if (meta) {
-      meta.innerHTML = stripTitleAttrs(projectMetaHtml(session, info));
-      meta.removeAttribute('title');
-    }
     renderSummaryContext(session, info, agent);
     if (!preview) continue;
     if (agent?.transcript) {
@@ -35666,6 +35735,13 @@ async function refreshTranscripts(options = {}) {
   return transcriptMetaRefreshPromise;
 }
 
+function updatePanelMeta(session, info) {
+  const meta = document.getElementById(`meta-${session}`);
+  if (!meta) return;
+  meta.innerHTML = stripTitleAttrs(projectMetaHtml(session, info));
+  meta.removeAttribute('title');
+}
+
 function updatePanelHeader(session, info) {
   const tab = document.getElementById(paneTabDomId(session));
   const panel = document.getElementById(panelDomId(session));
@@ -35679,6 +35755,7 @@ function updatePanelHeader(session, info) {
     tab.innerHTML = panelHeaderStateHtml(state);
     tab.removeAttribute('title');
   }
+  updatePanelMeta(session, info);
   const popover = panel?.querySelector(':scope .panel-popover-zone > .session-popover');
   if (popover) {
     const agentKind = sessionAgentKind(session);

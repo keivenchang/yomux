@@ -542,7 +542,8 @@ function tabMenuDetailText(item, info = transcriptMeta.sessions?.[item]) {
 function projectDirName(session, info) {
   if (!info) return t('common.loading');
   const {gitRoot, gitCwd, selectedPath} = sessionTranscriptInfo(session);
-  const path = gitRoot || gitCwd || selectedPath;
+  const repo = selectedSessionRepo(session, info);
+  const path = repo?.cwd || repo?.root || gitRoot || gitCwd || selectedPath;
   return pathBasename(path) || 'no path';
 }
 

@@ -5070,22 +5070,52 @@ body.theme-light .drop-slot.drag-over {
 .meta-sep {
   color: var(--sep-muted);
 }
-/* C9: the "+N repos" chip on the detail bar and its multi-repo popover rows. Tokens only (light/dark). */
+/* Multi-repo detail controls and popover rows. Tokens only (light/dark). */
+.meta-repo-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  max-width: 100%;
+  vertical-align: middle;
+}
 .meta-repo-chip {
   display: inline-flex;
   align-items: center;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-pill);
-  padding: 0 6px;
+  min-width: 0;
+  padding: 0 1px;
+  border: 0;
+  border-radius: 0;
+  appearance: none;
   font: inherit;
   font-weight: 600;
   color: var(--pane-meta-branch);
-  background: color-mix(in srgb, var(--panel) 70%, transparent);
+  background: transparent;
+  cursor: pointer;
+}
+.meta-repo-cycle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  width: auto;
+  height: auto;
+  padding: 0 1px;
+  border: 0;
+  border-radius: 0;
+  appearance: none;
+  font: inherit;
+  font-weight: 800;
+  line-height: 1;
+  color: var(--pane-meta-branch);
+  background: transparent;
   cursor: pointer;
 }
 .meta-repo-chip:hover,
-.meta-repo-chip:focus-visible {
-  background: color-mix(in srgb, var(--accent-gold) 22%, transparent);
+.meta-repo-chip:focus-visible,
+.meta-repo-cycle:hover,
+.meta-repo-cycle:focus-visible {
+  color: var(--active-accent-bright);
+  background: transparent;
   outline: none;
 }
 .repo-chip-menu .repo-chip-row {

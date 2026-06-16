@@ -1131,6 +1131,7 @@ const sessionStateKeys = new Map();
 const notificationLastSent = new Map();
 const attentionAlertTimers = new Map();
 const metadataBadgePulseUntil = new Map();
+const sessionRepoDisplayRoot = new Map();
 
 function setLimitedMapEntry(map, key, value, limit) {
   if (!map || !key) return;

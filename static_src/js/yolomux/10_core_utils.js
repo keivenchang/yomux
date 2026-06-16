@@ -657,6 +657,59 @@ function sessionTranscriptInfo(session) {
   };
 }
 
+function repoRootKey(value) {
+  return String(value || '').replace(/\/+$/, '');
+}
+
+function sessionRepoSummaries(info) {
+  return (Array.isArray(info?.project?.repos) ? info.project.repos : [])
+    .filter(repo => repo && repo.root)
+    .map(repo => ({...repo, root: repoRootKey(repo.root), cwd: repo.cwd || repo.root}));
+}
+
+function selectedSessionRepoIndex(session, info) {
+  const repos = sessionRepoSummaries(info);
+  if (!repos.length) return -1;
+  const selectedRoot = repoRootKey(sessionRepoDisplayRoot.get(session));
+  const selectedIndex = selectedRoot ? repos.findIndex(repo => repoRootKey(repo.root) === selectedRoot) : -1;
+  return selectedIndex >= 0 ? selectedIndex : 0;
+}
+
+function selectedSessionRepo(session, info) {
+  const repos = sessionRepoSummaries(info);
+  const index = selectedSessionRepoIndex(session, info);
+  return index >= 0 ? repos[index] : null;
+}
+
+function displayedSessionGit(session, info) {
+  const project = info?.project || {};
+  const git = project.git || null;
+  const repo = selectedSessionRepo(session, info);
+  if (!repo) return git;
+  if (git && repoRootKey(git.root) === repoRootKey(repo.root)) return git;
+  return {
+    root: repo.root || '',
+    cwd: repo.cwd || repo.root || '',
+    branch: repo.branch || '',
+    ahead: repo.ahead,
+    behind: repo.behind,
+    dirty_count: repo.dirty_count,
+    activity_ts: repo.activity_ts,
+    activity_source: repo.activity_source || '',
+    worktree: repo.worktree || null,
+  };
+}
+
+function cycleSessionRepoDisplay(session, info, direction) {
+  const repos = sessionRepoSummaries(info);
+  if (repos.length < 2) return null;
+  const current = selectedSessionRepoIndex(session, info);
+  const delta = Number(direction) < 0 ? -1 : 1;
+  const next = (Math.max(0, current) + delta + repos.length) % repos.length;
+  sessionRepoDisplayRoot.set(session, repos[next].root);
+  return repos[next];
+}
+
 // Centralized status-line writers: the err/ok pill markup is defined here, not re-inlined at the ~55
 // call sites that report a result. Both take already-built (and esc'd) inner HTML.
 function statusErr(html) {

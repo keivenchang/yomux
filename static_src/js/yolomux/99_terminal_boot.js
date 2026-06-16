@@ -1038,7 +1038,17 @@ function bindPanelControls(panel, session) {
   });
   panel.querySelector('.meta')?.addEventListener('click', event => {
     event.stopPropagation();
-    // C9: the "+N repos" chip opens the per-session multi-repo popover (delegated, since .meta re-renders).
+    const cycle = event.target.closest('[data-repo-cycle]');
+    if (cycle) {
+      event.preventDefault();
+      const targetSession = cycle.dataset.repoCycle || session;
+      cycleSessionRepoDisplay(targetSession, transcriptMeta.sessions?.[targetSession], cycle.dataset.repoCycleDir || 1);
+      updatePanelHeader(targetSession, transcriptMeta.sessions?.[targetSession]);
+      renderSessionButtons();
+      renderPaneTabStrips();
+      return;
+    }
+    // The repo count opens the per-session multi-repo popover (delegated, since .meta re-renders).
     const chip = event.target.closest('[data-repo-chip]');
     if (chip) {
       event.preventDefault();
@@ -2650,15 +2660,10 @@ async function applyTranscriptsPayload(payload, options = {}) {
   renderYoagentPanel();
   if (options.refreshActivity !== false) refreshActivitySummary({silent: true});
   for (const session of activeSessions.filter(isTmuxSession)) {
-    const meta = document.getElementById(`meta-${session}`);
     const preview = document.getElementById(transcriptDomId(session));
     const info = transcriptMeta.sessions?.[session];
     const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
     updatePanelHeader(session, info);
-    if (meta) {
-      meta.innerHTML = stripTitleAttrs(projectMetaHtml(session, info));
-      meta.removeAttribute('title');
-    }
     renderSummaryContext(session, info, agent);
     if (!preview) continue;
     if (agent?.transcript) {
@@ -2719,6 +2724,13 @@ async function refreshTranscripts(options = {}) {
   return transcriptMetaRefreshPromise;
 }
 
+function updatePanelMeta(session, info) {
+  const meta = document.getElementById(`meta-${session}`);
+  if (!meta) return;
+  meta.innerHTML = stripTitleAttrs(projectMetaHtml(session, info));
+  meta.removeAttribute('title');
+}
+
 function updatePanelHeader(session, info) {
   const tab = document.getElementById(paneTabDomId(session));
   const panel = document.getElementById(panelDomId(session));
@@ -2732,6 +2744,7 @@ function updatePanelHeader(session, info) {
     tab.innerHTML = panelHeaderStateHtml(state);
     tab.removeAttribute('title');
   }
+  updatePanelMeta(session, info);
   const popover = panel?.querySelector(':scope .panel-popover-zone > .session-popover');
   if (popover) {
     const agentKind = sessionAgentKind(session);

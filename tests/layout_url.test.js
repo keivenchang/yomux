@@ -492,6 +492,7 @@ globalThis.__layoutTestApi = {
   fileExplorerChangesAllReposCollapsedForTest: fileExplorerChangesAllReposCollapsed,
   toggleAllFileExplorerChangesForTest: toggleAllFileExplorerChanges,
   projectMetaHtml,
+  cycleSessionRepoDisplayForTest: cycleSessionRepoDisplay,
   diffRefControlsHtml,
   diffRefResetButtonHtml,
   diffRefSelectOptionsHtml,
@@ -3956,26 +3957,38 @@ test('t@2560', () => {
   assert.equal(api.fileExplorerChangesPanelHtml().includes('>Compact</button>'), false, 'Finder density toggle is an icon, not paired text buttons');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-diff-add">+2</span>'), 'Finder modified-files panel shows green added counts');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-diff-remove">-1</span>'), 'Finder modified-files panel shows red removed counts');
-  // C9: the per-session detail bar shows a "+N repos" chip when the session touches more than one repo,
-  // and no chip for a single-repo session. Clicking the chip opens a popover that scopes the Finder.
+  // C9: the per-session detail bar shows a repo carousel when the session touches more than one repo,
+  // starts on the backend-provided first repo, and no control appears for a single-repo session.
   const multiRepoInfo = {
     agents: [], selected_pane: {current_path: '/repo/app'},
     project: {
       git: {root: '/repo/app', branch: 'main', dirty_count: 0}, pull_request: null, linear: [],
       repos: [
-        {root: '/repo/app', branch: 'main', dirty_count: 0, primary: true},
-        {root: '/repo/lib', branch: 'feature', dirty_count: 2, ahead: 1, primary: false},
+        {root: '/repo/lib', cwd: '/repo/lib', branch: 'feature', dirty_count: 2, ahead: 1, primary: true, activity_ts: 200},
+        {root: '/repo/app', cwd: '/repo/app', branch: 'main', dirty_count: 0, primary: false, activity_ts: 100},
       ],
     },
   };
-  const multiMetaHtml = api.projectMetaHtml('1', multiRepoInfo);
-  assert.ok(/data-repo-chip="1"/.test(multiMetaHtml), 'C9: a multi-repo session shows a +N repos chip');
-  assert.ok(multiMetaHtml.includes('+1 '), 'C9: the chip counts the EXTRA repos (2 repos -> +1)');
+  const multiMetaHtml = api.projectMetaHtml('repo-cycle', multiRepoInfo);
+  assert.ok(/data-repo-cycle="repo-cycle"/.test(multiMetaHtml), 'C9: a multi-repo session shows repo cycle arrows');
+  assert.ok(/data-repo-chip="repo-cycle"/.test(multiMetaHtml), 'C9: the repo count still opens the repo menu');
+  assert.ok(multiMetaHtml.includes('/repo/lib'), 'C9: the first displayed repo is the first backend-ordered repo');
+  assert.ok(multiMetaHtml.includes('>1/2</button>'), 'C9: the repo control shows only the current repo position');
+  assert.equal(multiMetaHtml.includes('1/2 repos'), false, 'C9: the repo control omits the repo label');
+  assert.ok(multiMetaHtml.indexOf('data-repo-cycle="repo-cycle"') < multiMetaHtml.indexOf('/repo/lib'), 'C9: the repo carousel is the leftmost metadata control before path/description text');
+  api.cycleSessionRepoDisplayForTest('repo-cycle', multiRepoInfo, 1);
+  const cycledMetaHtml = api.projectMetaHtml('repo-cycle', multiRepoInfo);
+  assert.ok(cycledMetaHtml.includes('/repo/app'), 'C9: the next arrow cycles the informational row to the next repo');
+  assert.ok(cycledMetaHtml.includes('>2/2</button>'), 'C9: the repo control updates the current repo position');
   const singleRepoInfo = {...multiRepoInfo, project: {...multiRepoInfo.project, repos: [multiRepoInfo.project.repos[0]]}};
-  assert.equal(api.projectMetaHtml('1', singleRepoInfo).includes('meta-repo-chip'), false, 'C9: a single-repo session shows no chip');
+  assert.equal(api.projectMetaHtml('single-repo-cycle', singleRepoInfo).includes('meta-repo-switch'), false, 'C9: a single-repo session shows no carousel');
   const c9Src = fs.readFileSync('static/yolomux.js', 'utf8');
-  assert.ok(c9Src.includes('function showRepoChipMenu('), 'C9: the +N repos chip opens a popover');
+  const c9Css = fs.readFileSync('static/yolomux.css', 'utf8');
+  assert.ok(c9Src.includes('function showRepoChipMenu('), 'C9: the repo count opens a popover');
   assert.ok(/showRepoChipMenu\([\s\S]*?openFileExplorerAt\(root\)/.test(c9Src), 'C9: clicking a repo row scopes the Finder to that repo');
+  assert.ok(/\.meta-repo-chip\s*\{[\s\S]*padding:\s*0 1px/.test(c9Css), 'C9: the repo position button has at most 2px horizontal padding');
+  assert.ok(/\.meta-repo-cycle\s*\{[\s\S]*width:\s*auto/.test(c9Css), 'C9: the repo arrow buttons are content-sized, not fixed-width');
+  assert.ok(/\.meta-repo-cycle\s*\{[\s\S]*padding:\s*0 1px/.test(c9Css), 'C9: the repo arrow buttons have at most 2px horizontal padding');
   // C10: Finder delete shortcut — Command-Delete on Mac, plain Delete on PC, gated to the Finder surface
   // and taking precedence over the global Mod+Delete tab-close.
   assert.ok(c9Src.includes('function handleFileExplorerDeleteShortcut('), 'C10: a Finder delete-shortcut handler exists');
