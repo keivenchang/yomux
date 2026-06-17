@@ -8,6 +8,8 @@ without attaching clients, so it cannot resize user windows.
 
 from __future__ import annotations
 
+import ctypes
+import signal
 import subprocess
 import threading
 import time
@@ -146,6 +148,29 @@ def tmux_control_attach_command(session: str) -> list[str]:
     ])
 
 
+# PR_SET_PDEATHSIG (linux/prctl.h) — value is stable across Linux releases.
+_PR_SET_PDEATHSIG = 1
+try:
+    _LIBC = ctypes.CDLL("libc.so.6", use_errno=True)
+except OSError:
+    _LIBC = None
+
+
+def set_control_client_parent_death_signal() -> None:
+    """preexec_fn: ask the kernel to SIGTERM this control client when the yolomux parent dies.
+
+    The tmux control-mode signal client is a child of the yolomux server. A graceful SIGTERM
+    lets run_control_client's finally terminate it, but a hard SIGKILL or crash skips that
+    teardown, orphaning the `tmux -C attach-session` client on the shared socket where it lingers
+    forever — one leaked read-only/ignore-size client per hard kill. PR_SET_PDEATHSIG makes the
+    kernel reap it together with the parent. Runs in the forked child before exec, so it does
+    nothing but one prctl syscall on the pre-loaded libc to stay fork-safe; Linux-only and
+    best-effort (no-op when libc/prctl is unavailable).
+    """
+    if _LIBC is not None:
+        _LIBC.prctl(_PR_SET_PDEATHSIG, signal.SIGTERM)
+
+
 def tmux_signal_subscription_commands() -> list[list[str]]:
     return [["refresh-client", "-B", f"{name}:{fmt}"] for name, fmt in TMUX_SIGNAL_SUBSCRIPTIONS]
 
@@ -257,6 +282,7 @@ class TmuxSignalEventWatcher:
                 stdin=subprocess.PIPE,
                 text=True,
                 bufsize=1,
+                preexec_fn=set_control_client_parent_death_signal,
             )
         except OSError as exc:
             self.emit_error(f"tmux control-mode start failed: {exc}")

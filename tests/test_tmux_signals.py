@@ -1,3 +1,5 @@
+import signal
+
 from yolomux_lib import tmux_signals
 from yolomux_lib.tmux_signals import install_tmux_signal_monitoring
 from yolomux_lib.tmux_signals import parse_tmux_signal_snapshot
@@ -113,6 +115,57 @@ def test_tmux_control_attach_command_is_readonly_and_ignores_size(monkeypatch):
         "-t",
         "alpha:",
     ]
+
+
+def test_control_client_parent_death_signal_requests_sigterm(monkeypatch):
+    # The control client must die with the yolomux parent so a hard SIGKILL/crash does not orphan
+    # a read-only ignore-size tmux client on the shared socket. The preexec hook asks the kernel
+    # for PR_SET_PDEATHSIG=SIGTERM; it must be a no-op (not raise) when libc/prctl is unavailable.
+    calls = []
+
+    class FakeLibc:
+        def prctl(self, *args):
+            calls.append(args)
+            return 0
+
+    monkeypatch.setattr(tmux_signals, "_LIBC", FakeLibc())
+    tmux_signals.set_control_client_parent_death_signal()
+    assert calls == [(tmux_signals._PR_SET_PDEATHSIG, signal.SIGTERM)]
+
+    monkeypatch.setattr(tmux_signals, "_LIBC", None)
+    tmux_signals.set_control_client_parent_death_signal()
+
+
+def test_run_control_client_spawns_with_parent_death_preexec(monkeypatch):
+    # run_control_client must spawn the control client with the parent-death preexec hook so the
+    # leaked-orphan-on-hard-kill path is closed at the source, not mopped up later.
+    captured = {}
+
+    class FakeStdin:
+        def write(self, *_):
+            pass
+
+        def flush(self):
+            pass
+
+    class FakeProcess:
+        def __init__(self):
+            self.stdin = FakeStdin()
+            self.stdout = iter(())  # empty stream -> reader loop exits immediately
+
+        def poll(self):
+            return 0  # already exited -> finally skips terminate/kill
+
+    def fake_popen(command, **kwargs):
+        captured["kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setattr(tmux_signals.subprocess, "Popen", fake_popen)
+
+    watcher = tmux_signals.TmuxSignalEventWatcher(sessions=lambda: ["alpha"], on_event=lambda event: None)
+    watcher.run_control_client("alpha")
+
+    assert captured["kwargs"].get("preexec_fn") is tmux_signals.set_control_client_parent_death_signal
 
 
 def test_tmux_control_event_filter_accepts_signal_notifications():
