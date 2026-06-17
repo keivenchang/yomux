@@ -6959,10 +6959,13 @@ class TmuxWebtermApp:
         session: str,
         discovered_sessions: dict[str, SessionInfo] | None = None,
         capture_pane: bool = True,
+        capture_bare_session_when_roster: bool = False,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         hidden_prompt = normalized_prompt_state()
         target = self.auto_approve_capture_target(session, discovered_sessions=discovered_sessions)
-        if not self.auto_approve_session_has_pending_prompt(session) and not self.auto_approve_capture_allowed_for_target(target):
+        capture_roster_target = not capture_pane and discovered_sessions is not None and session in discovered_sessions
+        capture_idle_bare_session = capture_bare_session_when_roster and not capture_pane and target == session
+        if not capture_roster_target and not capture_idle_bare_session and not self.auto_approve_session_has_pending_prompt(session) and not self.auto_approve_capture_allowed_for_target(target):
             return hidden_prompt, {"key": "idle", "text": "tmux activity quiet"}
         if not capture_pane:
             # Roster path: derive working/idle from the LIVE pane via a cheap visible-only capture
@@ -7008,6 +7011,7 @@ class TmuxWebtermApp:
         session: str,
         discovered_sessions: dict[str, SessionInfo] | None = None,
         include_live_prompt: bool = True,
+        capture_bare_session_when_roster: bool = False,
     ) -> AutoApproveState:
         with self.auto_workers_lock:
             worker_sessions = self.auto_worker_session_map()
@@ -7047,7 +7051,12 @@ class TmuxWebtermApp:
                     "last_action": auto_approve_lock_message(owner),
                     "error": auto_approve_lock_message(owner),
                 })
-        prompt, screen = self.prompt_and_screen_status(session, discovered_sessions=discovered_sessions, capture_pane=include_live_prompt)
+        prompt, screen = self.prompt_and_screen_status(
+            session,
+            discovered_sessions=discovered_sessions,
+            capture_pane=include_live_prompt,
+            capture_bare_session_when_roster=capture_bare_session_when_roster,
+        )
         payload["prompt"] = prompt
         payload["screen"] = screen
         return payload
@@ -7075,7 +7084,12 @@ class TmuxWebtermApp:
         return {
             "session_order": self.sessions,
             "sessions": {
-                name: self.auto_approve_session_status(name, discovered_sessions=discovered_sessions, include_live_prompt=False)
+                name: self.auto_approve_session_status(
+                    name,
+                    discovered_sessions=discovered_sessions,
+                    include_live_prompt=False,
+                    capture_bare_session_when_roster=True,
+                )
                 for name in self.sessions
             },
             "errors": [*refresh_errors, *discovery_errors],

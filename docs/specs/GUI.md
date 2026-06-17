@@ -80,6 +80,7 @@ Section order follows the reading path: a capabilities overview and glossary, th
 - The tab insertion preview is a visible dashed box between tabs and uses the same configurable color as the pane separator.
 - The active tab keeps rounded top corners. Inactive tabs use the same background as the tab container.
 - The active pane's tab container is slightly brighter than inactive panes. Inactive tabs inside the active pane use that same active-pane tab-container background.
+- `Cmd+Left` / `Cmd+Right` on Mac and `Ctrl+Left` / `Ctrl+Right` on PC/Linux move to the previous/next visible pane tab in visual pane order, including file tabs and virtual tabs such as YO!info. The shortcut starts from the active tab in the pane, not from a stale focused terminal session, so a terminal capture handler cannot trap navigation between the terminal tab and a neighboring file or YO!info tab.
 - Tab hover details must show the session/file information popover. Dockview tab popovers must not be clipped by the Dockview tab scroller.
 - Header actions such as back/forward, minimize, close, and add must stay on the first header row when there is room.
 - The pane info (detail) row reads `path · dirty-count | tmux window buttons | ×` with NO separate agent badge — terminal agent identity is carried by the window buttons (an agent window's name falls back to its process label, so it reads `N:claude` / `N:codex`). The agent marker must never appear in the first tab-title row.

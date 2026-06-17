@@ -7126,6 +7126,7 @@ test('t@2560', () => {
   assert.ok(/async function copyTextToClipboard\(text\)[\s\S]*?if \(clipboard\?\.writeText\) \{[\s\S]*?try \{[\s\S]*?await clipboard\.writeText\(value\);[\s\S]*?\} catch/.test(source), 'clipboard copy falls back when navigator.clipboard exists but rejects');
   assert.ok(source.includes('function copyTerminalSelectionToClipboardEvent(session, term, event, container = null)'), 'terminal copy has a DOM copy-event fallback');
   assert.ok(source.includes('function handleTerminalTmuxWindowShortcutKeydown(session, event)'), 'terminal Meta+Arrow navigation shares the terminal shortcut guard');
+  assert.ok(/function terminalTmuxWindowShortcutItem\(session\)[\s\S]*?visualActivePaneItem\(\)[\s\S]*?slotForItem\(activeItem\) === sessionSlot[\s\S]*?return activeItem/.test(source), 'terminal Meta+Arrow starts from the active tab in the terminal pane, not always the tmux session');
   assert.ok(/function paneTabTraversalPositions\(slots = layoutSlots\)[\s\S]*layoutLeafSlots\(slots\?\.\[layoutTreeKey\]\)[\s\S]*paneTabs\(slot, slots\)\.map\(item => \(\{slot, item\}\)\)/.test(source), 'Meta+Arrow traversal follows visual pane order and each pane tab strip');
   assert.ok(/function selectAdjacentPaneTab\(direction, options = \{\}\)[\s\S]*adjacentPaneTabPosition\(direction, options\)[\s\S]*activatePaneTab\(target\.slot, target\.item, activationOptions\)/.test(source), 'terminal/global Meta+Arrow navigation shares the pane-tab activation parent');
   assert.ok(/const paneTabShortcutDirection = terminalTmuxWindowShortcutDirection\(event\);[\s\S]*if \(paneTabShortcutDirection && globalShortcutTargetAllowsAppAction\(event\.target\)\) \{[\s\S]*selectAdjacentPaneTab\(paneTabShortcutDirection, \{userInitiated: true\}\)/.test(source), 'global Meta+Arrow handler routes Finder/Differ/Tabber focus through the same pane-tab selector');
@@ -7393,6 +7394,64 @@ test('t@2560', () => {
   assert.equal(stopped, 1, 'focused terminal Cmd-Left stops propagation before target handlers');
   assert.equal(stoppedImmediate, 1, 'focused terminal Cmd-Left stops sibling handlers');
   assert.equal(terminalNavApi.currentSessionActionTarget(), '1', 'Mac Cmd-Left moves back to the previous visible pane tab');
+  const screenshotNavApi = loadYolomux('?platform=mac', ['8001', '8002', '8003'], 'https:', 'MacIntel');
+  const screenshotEditor = screenshotNavApi.fileEditorItemFor('/home/keivenc/yolomux.dev2/docs/specs/SHARE_TEST_INVENTORY.md');
+  const screenshotNavSlots = screenshotNavApi.emptyLayoutSlots();
+  screenshotNavSlots[screenshotNavApi.layoutTreeKey] = screenshotNavApi.splitNode(
+    'row',
+    screenshotNavApi.leafNode('left'),
+    screenshotNavApi.splitNode(
+      'row',
+      screenshotNavApi.splitNode('column', screenshotNavApi.leafNode('slot1'), screenshotNavApi.leafNode('slot2'), 66),
+      screenshotNavApi.leafNode('slot3'),
+      66,
+    ),
+    20,
+  );
+  screenshotNavSlots.left = screenshotNavApi.paneStateWithTabs([screenshotNavApi.fileExplorerItemId], screenshotNavApi.fileExplorerItemId);
+  screenshotNavSlots.slot1 = screenshotNavApi.paneStateWithTabs(['8001', screenshotEditor], screenshotEditor);
+  screenshotNavSlots.slot2 = screenshotNavApi.paneStateWithTabs(['8002'], '8002');
+  screenshotNavSlots.slot3 = screenshotNavApi.paneStateWithTabs(['8003', screenshotNavApi.infoItemId], screenshotNavApi.infoItemId);
+  screenshotNavApi.setLayoutSlotsForTest(screenshotNavSlots);
+  let screenshotNavShortcutHandler = null;
+  screenshotNavApi.installTerminalCopyShortcutForTest('8001', {
+    getSelection: () => '',
+    attachCustomKeyEventHandler(handler) { screenshotNavShortcutHandler = handler; },
+  });
+  prevented = 0;
+  const fileBackResult = screenshotNavShortcutHandler({
+    type: 'keydown',
+    code: 'ArrowLeft',
+    key: 'ArrowLeft',
+    metaKey: true,
+    ctrlKey: false,
+    altKey: false,
+    shiftKey: false,
+    preventDefault() { prevented += 1; },
+  });
+  assert.equal(fileBackResult, false, 'stale terminal capture handles Cmd-Left from an active file tab');
+  assert.equal(prevented, 1, 'stale terminal capture prevents the terminal default from an active file tab');
+  assert.equal(screenshotNavApi.activeItemForSide('slot1'), '8001', 'Cmd-Left from SHARE_TEST_INVENTORY goes to 8001, not the previous pane boundary');
+  screenshotNavApi.setFocusedPanelItem(screenshotNavApi.infoItemId);
+  screenshotNavShortcutHandler = null;
+  screenshotNavApi.installTerminalCopyShortcutForTest('8003', {
+    getSelection: () => '',
+    attachCustomKeyEventHandler(handler) { screenshotNavShortcutHandler = handler; },
+  });
+  prevented = 0;
+  const infoBackResult = screenshotNavShortcutHandler({
+    type: 'keydown',
+    code: 'ArrowLeft',
+    key: 'ArrowLeft',
+    metaKey: true,
+    ctrlKey: false,
+    altKey: false,
+    shiftKey: false,
+    preventDefault() { prevented += 1; },
+  });
+  assert.equal(infoBackResult, false, 'stale terminal capture handles Cmd-Left from YO!info');
+  assert.equal(prevented, 1, 'stale terminal capture prevents the terminal default from YO!info');
+  assert.equal(screenshotNavApi.activeItemForSide('slot3'), '8003', 'Cmd-Left from YO!info goes to 8003 instead of reselecting YO!info');
   const finderNavApi = loadYolomux('?platform=mac', ['1', '2'], 'https:', 'MacIntel');
   const finderNavEditor = finderNavApi.fileEditorItemFor('/repo/app/notes.md');
   const finderNavSlots = finderNavApi.emptyLayoutSlots();

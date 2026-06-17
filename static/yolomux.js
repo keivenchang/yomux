@@ -4059,12 +4059,19 @@ function terminalTmuxWindowShortcutDirection(event) {
   return 0;
 }
 
+function terminalTmuxWindowShortcutItem(session) {
+  const activeItem = visualActivePaneItem();
+  const sessionSlot = slotForItem(session);
+  if (activeItem && sessionSlot && slotForItem(activeItem) === sessionSlot) return activeItem;
+  return session;
+}
+
 function handleTerminalTmuxWindowShortcutKeydown(session, event) {
   const direction = terminalTmuxWindowShortcutDirection(event);
   if (!direction) return false;
   event.preventDefault?.();
   if (typeof selectAdjacentPaneTab === 'function') {
-    selectAdjacentPaneTab(direction, {item: session, userInitiated: true});
+    selectAdjacentPaneTab(direction, {item: terminalTmuxWindowShortcutItem(session), userInitiated: true});
   }
   return true;
 }
