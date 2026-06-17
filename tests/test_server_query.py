@@ -155,6 +155,37 @@ def test_websocket_resize_dimensions_are_clamped():
     assert ws_resize_dimensions({"rows": "24", "cols": 80}, 36, 120) is None
 
 
+def test_configure_session_tmux_options_pins_window_to_largest_client(monkeypatch):
+    # Two browser surfaces on one session attach as two differently-sized tmux clients. Under the
+    # default `latest` policy the most-recently-active (often smaller) client keeps resizing the
+    # shared window; when it shrinks below a larger client's height that client's xterm smears the
+    # green tmux status line across the orphaned rows. The attach-time options must forward OSC 52
+    # copy AND pin the window to the largest viewing client so the larger view never smears. All
+    # three are no-ops when only one client views the session.
+    monkeypatch.delenv("YOLOMUX_TMUX_SOCKET", raising=False)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(server_module.subprocess, "run", lambda cmd, **_: calls.append(list(cmd)))
+
+    server_module.configure_session_tmux_options("3")
+
+    assert ["tmux", "set-option", "-s", "set-clipboard", "on"] in calls
+    assert ["tmux", "set-option", "-t", "3:", "window-size", "largest"] in calls
+    assert ["tmux", "set-option", "-wg", "aggressive-resize", "on"] in calls
+
+
+def test_both_attach_paths_route_through_shared_tmux_options():
+    # The host-browser and share-upstream attach paths must both go through the one shared option
+    # helper, so the window-size smear fix can't regress by re-introducing an inline set-clipboard
+    # block (which omits window-size) on either path.
+    bridge_body = inspect.getsource(Handler.bridge_tmux)
+    upstream_body = inspect.getsource(server_module.ShareTerminalUpstream.start_locked)
+
+    assert "configure_session_tmux_options(session)" in bridge_body
+    assert "configure_session_tmux_options(self.session)" in upstream_body
+    assert "set-clipboard" not in bridge_body
+    assert "set-clipboard" not in upstream_body
+
+
 def test_html_uses_browser_highlight_js_bundle():
     html = html_page(["6"], "admin")
 

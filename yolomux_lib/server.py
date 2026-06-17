@@ -303,6 +303,37 @@ def ws_resize_dimensions(message: dict[str, Any], default_rows: int, default_col
     return clamp_pty_dimension(rows), clamp_pty_dimension(cols)
 
 
+def configure_session_tmux_options(session: str) -> None:
+    """Set the shared tmux options every YOLOmux attach needs, idempotent and best-effort.
+
+    Runs before each attach so it self-heals across tmux restarts. All three are no-ops when
+    only one client views the session, and only change behavior in the multi-client case:
+
+    - set-clipboard on: tmux's default `external` IGNORES application OSC 52, so Claude's copy
+      would never reach the browser; `on` forwards it to this client.
+    - window-size largest + aggressive-resize on: YOLOmux spawns one `attach-session` client per
+      WebSocket, so two browser surfaces on the same session attach as two differently-sized
+      clients. Under tmux's default `latest`, the most-recently-active (often smaller) client
+      keeps resizing the shared window; when it shrinks below a larger client's height that
+      client's xterm is left rendering tmux's now-shorter grid and the status line smears across
+      the orphaned rows. `largest` pins the window to the largest viewing client so the larger
+      view never smears or minimizes (smaller duplicates clip instead); `aggressive-resize`
+      scopes that to clients actually viewing the window rather than the whole session.
+    """
+    target = tmux_session_target(session)
+    for args in (
+        ["set-option", "-s", "set-clipboard", "on"],
+        ["set-option", "-t", target, "window-size", "largest"],
+        ["set-option", "-wg", "aggressive-resize", "on"],
+    ):
+        subprocess.run(
+            tmux_command(args),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+
+
 def share_terminal_frame(session: str, data: bytes) -> bytes:
     payload = {
         "ch": "term",
@@ -617,12 +648,7 @@ class ShareTerminalUpstream:
         self.slave_fd = slave_fd
         env = os.environ.copy()
         env["TERM"] = "xterm-256color"
-        subprocess.run(
-            tmux_command(["set-option", "-s", "set-clipboard", "on"]),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
+        configure_session_tmux_options(self.session)
         record = self.server.app.verify_share_token(self.token)
         readonly = str((record or {}).get("mode") or "ro") != "rw"
         attach_args = tmux_command(["attach-session"])
@@ -2257,16 +2283,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         set_pty_size(slave_fd, initial_rows, initial_cols)
         env = os.environ.copy()
         env["TERM"] = "xterm-256color"
-        # the browser copy bridge needs tmux to FORWARD application OSC 52 clipboard escapes
-        # (Claude's copy) to this client. tmux's default `set-clipboard external` IGNORES application
-        # OSC 52 entirely (verified empirically on tmux 3.4: external drops it, on forwards it), so
-        # ensure `on` before attaching. Idempotent, best-effort, self-healing across tmux restarts.
-        subprocess.run(
-            tmux_command(["set-option", "-s", "set-clipboard", "on"]),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
+        configure_session_tmux_options(session)
         attach_args = tmux_command(["attach-session"])
         if readonly:
             attach_args.append("-r")
