@@ -134,18 +134,19 @@ To restart dev1 in no-auth test mode:
 YOLOMUX_TEST_AUTH_BYPASS=1 tools/yolomux-restart-dev1.sh
 ```
 
-Manual reference: kill the old process narrowly by port, then relaunch detached with `nohup`. Restart prod by swapping `dev1`/`8001`/`~/yolomux.dev1` for `prod`/`7777`/`~/yolomux`:
+For any other active dev worktree, use the actual checkout path and port. Kill only the listener for that port, then relaunch detached with an explicit `PATH`. Invoke this from outside long-lived test/browser runs so you do not kill your own verifier:
 
 ```bash
-port=8001
-checkout="$HOME/yolomux.dev1"
-log="/tmp/yolomux-dev1-${port}.log"
+role=dev3
+port=8003
+checkout="$HOME/yolomux.dev3"
+log="/tmp/yolomux-${role}-${port}.log"
 pid="$(ps -eo pid=,args= | awk -v port="$port" '$0 ~ /yolomux.py/ && $0 ~ ("--port " port) {print $1; exit}')"
 if [ -n "$pid" ]; then kill "$pid"; fi
 ( cd "$checkout" && nohup env PATH="$HOME/.local/bin:$PATH" TERM=xterm-256color PYTHONUNBUFFERED=1 python3 -u yolomux.py --host 0.0.0.0 --port "$port" --self-signed --dang > "$log" 2>&1 < /dev/null & )
 ```
 
-Two footguns: (1) never `pkill -f` a pattern that also appears literally in the same command's launch string because it can match the launching shell; use a port variable and keep kill and relaunch steps separate; (2) a backend `.py` change only takes effect after the Python process restarts, because `static_build.py` does not touch backend code.
+Two footguns: (1) never `pkill -f` a pattern that also appears literally in the same command's launch string because it can match the launching shell; use a port variable and keep kill and relaunch steps separate; (2) do not use stale local helper scripts that point at a different checkout or port; (3) a backend `.py` change only takes effect after the Python process restarts, because `static_build.py` does not touch backend code.
 
 Verify after restart:
 

@@ -2,7 +2,7 @@
 
 YO!agent skills are local product instructions for YOLOmux's built-in assistant. They are not Codex or Claude skills, and they are not arbitrary executable plugins. A YO!skill teaches YO!agent how to decide, phrase, monitor, or coordinate work; YOLOmux server code still owns the actual tools, auth checks, target resolution, risk checks, audit events, and pane sends.
 
-For common user intents, expected YO!agent behavior, multi-agent handoff examples, and the cross-agent communication reliability ladder, see [`docs/specs/YOAGENT_COMMON_INTENTS_AND_AGENT_COMMUNICATION.md`](specs/YOAGENT_COMMON_INTENTS_AND_AGENT_COMMUNICATION.md).
+For common user intents, expected YO!agent behavior, multi-agent handoff examples, and the cross-agent communication reliability ladder, see [`specs/YOAGENT_COMMON_INTENTS_AND_AGENT_COMMUNICATION.md`](specs/YOAGENT_COMMON_INTENTS_AND_AGENT_COMMUNICATION.md).
 
 ## Locations
 
@@ -109,7 +109,7 @@ The file-management API is admin-only: `GET /api/yoagent/skill-files?kind=skill&
 
 ## Coordination Rules
 
-The detailed coordination spec lives in [`docs/specs/YOAGENT_COMMON_INTENTS_AND_AGENT_COMMUNICATION.md`](specs/YOAGENT_COMMON_INTENTS_AND_AGENT_COMMUNICATION.md). The rules below are the short version that built-in and user-local skills must preserve.
+The detailed coordination spec lives in [`specs/YOAGENT_COMMON_INTENTS_AND_AGENT_COMMUNICATION.md`](specs/YOAGENT_COMMON_INTENTS_AND_AGENT_COMMUNICATION.md). The rules below are the short version that built-in and user-local skills must preserve.
 
 ### Transports
 
