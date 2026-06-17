@@ -1,0 +1,13 @@
+name: notify-when-idle
+kind: watch
+description: Watch one target session until it becomes stably idle after activity, then notify the user with the last known state.
+tools:
+  - read_activity
+  - watch_session
+  - notify_user
+triggers:
+  - notify me when session is idle
+  - tell me when this session is idling
+confirmation: none
+default_timeout_minutes: 120
+

@@ -8,6 +8,8 @@ import pytest
 from yolomux_lib import filesystem
 from yolomux_lib.filesystem import FilesystemError
 
+from _git_helpers import git, init_repo
+
 
 def test_list_directory_returns_entries(tmp_path):
     (tmp_path / "sub").mkdir()
@@ -39,8 +41,8 @@ def test_list_directory_returns_entries(tmp_path):
 def test_list_directory_eagerly_returns_git_repo_info(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "checkout", "-b", "feature/repo-row"], cwd=repo, check=True, capture_output=True, text=True)
+    git(repo, "init")
+    git(repo, "checkout", "-b", "feature/repo-row")
 
     payload = filesystem.list_directory(str(tmp_path))
 
@@ -51,19 +53,21 @@ def test_list_directory_eagerly_returns_git_repo_info(tmp_path):
     assert entries["repo"]["repo"]["branch"] == "feature/repo-row"
 
 
-def test_list_directory_rejects_root_outside_default_allowlist():
+def test_list_directory_allows_root_by_default(monkeypatch):
+    monkeypatch.delenv(filesystem.FS_ROOTS_ENV, raising=False)
+    payload = filesystem.list_directory("/")
+    assert payload["path"] == "/"
+    assert payload["parent"] is None
+
+
+def test_filesystem_allowlist_env_can_narrow_scope(monkeypatch, tmp_path):
+    monkeypatch.setenv(filesystem.FS_ROOTS_ENV, str(tmp_path))
     with pytest.raises(FilesystemError) as info:
         filesystem.list_directory("/")
     assert info.value.status == 403
 
 
-def test_filesystem_allowlist_can_include_root(monkeypatch):
-    monkeypatch.setenv(filesystem.FS_ROOTS_ENV, "/")
-    payload = filesystem.list_directory("/")
-    assert payload["parent"] is None
-
-
-def test_filesystem_blocks_secret_paths(monkeypatch, tmp_path):
+def test_filesystem_blocks_home_secret_paths(monkeypatch, tmp_path):
     home = tmp_path / "home"
     secret = home / ".ssh" / "id_rsa"
     secret.parent.mkdir(parents=True)
@@ -73,6 +77,41 @@ def test_filesystem_blocks_secret_paths(monkeypatch, tmp_path):
     with pytest.raises(FilesystemError) as info:
         filesystem.read_file(str(secret))
     assert info.value.status == 403
+
+
+def test_list_directory_hides_secret_entries(tmp_path):
+    visible = tmp_path / "visible.txt"
+    visible.write_text("ok", encoding="utf-8")
+    for path in (
+        tmp_path / ".ssh" / "id_rsa",
+        tmp_path / ".config" / "gh" / "hosts.yml",
+        tmp_path / ".config" / "git" / "config",
+        tmp_path / ".config" / "gitlab-token",
+        tmp_path / ".cache" / "huggingface" / "token",
+        tmp_path / ".docker" / "config.json",
+        tmp_path / ".ngc" / "config",
+        tmp_path / ".netrc",
+        tmp_path / ".npmrc",
+        tmp_path / ".pypirc",
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("secret\n", encoding="utf-8")
+
+    names = {entry["name"] for entry in filesystem.list_directory(str(tmp_path))["entries"]}
+
+    assert "visible.txt" in names
+    assert ".ssh" not in names
+    assert ".netrc" not in names
+    assert ".npmrc" not in names
+    assert ".pypirc" not in names
+    config_names = {entry["name"] for entry in filesystem.list_directory(str(tmp_path / ".config"))["entries"]}
+    assert "gh" not in config_names
+    assert "git" not in config_names
+    assert "gitlab-token" not in config_names
+    docker_names = {entry["name"] for entry in filesystem.list_directory(str(tmp_path / ".docker"))["entries"]}
+    ngc_names = {entry["name"] for entry in filesystem.list_directory(str(tmp_path / ".ngc"))["entries"]}
+    assert "config.json" not in docker_names
+    assert "config" not in ngc_names
 
 
 def test_filesystem_blocks_symlink_escape_from_allowed_root(monkeypatch, tmp_path):
@@ -90,6 +129,10 @@ def test_filesystem_blocks_symlink_escape_from_allowed_root(monkeypatch, tmp_pat
         filesystem.read_file(str(link))
 
     assert info.value.status == 403
+    listed_link = {entry["name"]: entry for entry in filesystem.list_directory(str(allowed))["entries"]}["link.txt"]
+    assert "file_id" not in listed_link
+    assert "file_identity" not in listed_link
+    assert "realpath" not in listed_link
 
 
 def test_filesystem_blocks_exact_secret_files(monkeypatch, tmp_path):
@@ -118,15 +161,100 @@ def test_filesystem_blocks_exact_secret_files(monkeypatch, tmp_path):
         assert info.value.status == 403
 
 
-def test_read_raw_streams_image_with_mime_type(tmp_path):
-    image = tmp_path / "tiny.png"
-    data = b"\x89PNG\r\n\x1a\n"
-    image.write_bytes(data)
+def test_filesystem_blocks_secret_patterns_outside_home(tmp_path):
+    secret_paths = [
+        tmp_path / ".ssh" / "id_rsa",
+        tmp_path / ".gnupg" / "private-keys-v1.d" / "key",
+        tmp_path / ".aws" / "credentials",
+        tmp_path / ".azure" / "accessTokens.json",
+        tmp_path / ".kube" / "config",
+        tmp_path / ".config" / "gh" / "hosts.yml",
+        tmp_path / ".config" / "git" / "credentials",
+        tmp_path / ".config" / "gitlab-token",
+        tmp_path / ".cache" / "huggingface" / "token",
+        tmp_path / ".docker" / "config.json",
+        tmp_path / ".ngc" / "config",
+        tmp_path / ".netrc",
+        tmp_path / ".npmrc",
+        tmp_path / ".pypirc",
+    ]
+    for path in secret_paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("secret\n", encoding="utf-8")
 
-    payload, mime = filesystem.read_raw(str(image))
+    for path in secret_paths:
+        with pytest.raises(FilesystemError) as info:
+            filesystem.read_file(str(path))
+        assert info.value.status == 403
 
-    assert payload == data
-    assert mime == "image/png"
+
+def test_filesystem_allows_non_secret_docker_like_directories(tmp_path):
+    compose = tmp_path / ".docker" / "compose.yaml"
+    compose.parent.mkdir()
+    compose.write_text("services: {}\n", encoding="utf-8")
+
+    payload = filesystem.read_file(str(compose))
+
+    assert payload["content"] == "services: {}\n"
+
+
+def test_search_files_skips_secret_paths(tmp_path):
+    visible = tmp_path / "visible-target.txt"
+    visible.write_text("target\n", encoding="utf-8")
+    secrets = [
+        tmp_path / ".ssh" / "secret-target.txt",
+        tmp_path / ".config" / "gh" / "secret-target.txt",
+        tmp_path / ".config" / "gitlab-token",
+        tmp_path / ".docker" / "config.json",
+        tmp_path / ".ngc" / "config",
+        tmp_path / ".netrc",
+    ]
+    for path in secrets:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("target\n", encoding="utf-8")
+
+    payload = filesystem.search_files(str(tmp_path), "target", 50, recursive=True)
+    paths = {item["path"] for item in payload["files"]}
+
+    assert str(visible) in paths
+    assert all(str(path) not in paths for path in secrets)
+
+
+def test_read_raw_streams_preview_media_with_mime_type(tmp_path):
+    cases = [
+        ("tiny.png", b"\x89PNG\r\n\x1a\n", "image/png"),
+        ("photo.avif", b"\x00\x00\x00 ftypavif", "image/avif"),
+        ("spec.pdf", b"%PDF-1.7\n", "application/pdf"),
+        ("spec", b"%PDF-1.7\n", "application/pdf"),
+        ("renamed.bin", b"\x89PNG\r\n\x1a\n", "image/png"),
+        ("photo.tiff", b"II*\x00rest", "image/tiff"),
+        ("photo.heic", b"\x00\x00\x00 ftypheic", "image/heic"),
+        ("sound.mp3", b"ID3\x03\x00\x00", "audio/mpeg"),
+        ("sound.aac", b"not-sniffed", "audio/aac"),
+        ("movie.mp4", b"\x00\x00\x00 ftypmp42", "video/mp4"),
+        ("book.xlsx", b"PK\x03\x04", "application/zip"),
+        ("data.parquet", b"PAR1data", "application/vnd.apache.parquet"),
+        ("data.sqlite", b"SQLite format 3\x00", "application/vnd.sqlite3"),
+        ("archive.zip", b"PK\x03\x04", "application/zip"),
+    ]
+    for name, data, expected_mime in cases:
+        target = tmp_path / name
+        target.write_bytes(data)
+
+        payload, mime = filesystem.read_raw(str(target))
+
+        assert payload == data
+        assert mime == expected_mime
+
+
+def test_path_info_returns_sniffed_preview_mime_for_misleading_extension(tmp_path):
+    target = tmp_path / "renamed.bin"
+    target.write_bytes(b"\x89PNG\r\n\x1a\npayload")
+
+    result = filesystem.path_info(str(target))
+
+    assert result["size"] == target.stat().st_size
+    assert result["preview_mime"] == "image/png"
 
 
 def test_delete_path_refuses_configured_root(monkeypatch, tmp_path):
@@ -163,19 +291,34 @@ def test_list_directory_not_a_dir(tmp_path):
     assert info.value.status == 400
 
 
-def test_list_directory_sorts_from_entry_info_not_extra_stats():
-    source = Path("yolomux_lib/filesystem.py").read_text(encoding="utf-8")
-    start = source.index("def list_directory")
-    end = source.index("def _fuzzy_subsequence_match", start)
-    body = source[start:end]
+def test_list_directory_caps_large_directory(monkeypatch, tmp_path):
+    monkeypatch.setattr(filesystem, "MAX_DIRECTORY_ENTRIES", 2)
+    for name in ("a.txt", "b.txt", "c.txt"):
+        (tmp_path / name).write_text(name, encoding="utf-8")
 
-    assert "entries.sort" in body
-    assert "sorted(os.listdir" not in body
-    assert "lambda n" not in body
+    payload = filesystem.list_directory(str(tmp_path))
+
+    assert payload["truncated"] is True
+    assert payload["entry_limit"] == 2
+    assert len(payload["entries"]) == 2
+    assert {entry["name"] for entry in payload["entries"]}.issubset({"a.txt", "b.txt", "c.txt"})
+
+
+def test_list_directory_sorts_dirs_first_then_case_insensitive_name(tmp_path):
+    # Entries come back sorted dirs-first, then case-INsensitively by name (from the assembled entry
+    # list, not raw os.listdir order). Mixed case + mixed kind exercises both sort keys.
+    (tmp_path / "Zebra").mkdir()
+    (tmp_path / "alpha").mkdir()
+    (tmp_path / "beta.txt").write_text("b", encoding="utf-8")
+    (tmp_path / "Apple.txt").write_text("a", encoding="utf-8")
+
+    names = [entry["name"] for entry in filesystem.list_directory(str(tmp_path))["entries"]]
+
+    assert names == ["alpha", "Zebra", "Apple.txt", "beta.txt"]
 
 
 def test_search_files_returns_fuzzy_matches_and_skips_heavy_dirs_inside_repo(tmp_path):
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    git(tmp_path, "init")
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "hello_x_and_y.py").write_text("print('ok')\n", encoding="utf-8")
     (tmp_path / "node_modules").mkdir()
@@ -187,10 +330,29 @@ def test_search_files_returns_fuzzy_matches_and_skips_heavy_dirs_inside_repo(tmp
     paths = [item["relative_path"] for item in payload["files"]]
     assert "src/hello_x_and_y.py" in paths
     assert "node_modules/hello_x_and_y.js" not in paths
-    # DOIT.6 #25: search hits carry realpath + size so the client can fold symlink/mirror duplicates.
+    # search hits carry realpath + size so the client can fold symlink/mirror duplicates.
     hit = next(item for item in payload["files"] if item["relative_path"] == "src/hello_x_and_y.py")
     assert hit["realpath"] == os.path.realpath(str(tmp_path / "src" / "hello_x_and_y.py"))
     assert hit["size"] == len("print('ok')\n")
+
+
+def test_search_files_doit_queries_require_project_doc_prefix(tmp_path):
+    git(tmp_path, "init")
+    (tmp_path / "DOIT.57.md").write_text("# doit\n", encoding="utf-8")
+    (tmp_path / "parser-toolkits").mkdir()
+    (tmp_path / "parser-toolkits" / "DOIT.parser-performance-v2-audit.md").write_text("# audit\n", encoding="utf-8")
+    (tmp_path / "static_src" / "js" / "yolomux").mkdir(parents=True)
+    (tmp_path / "static_src" / "js" / "yolomux" / "75_dockview_layout.js").write_text("export {}\n", encoding="utf-8")
+
+    broad = filesystem.search_files(str(tmp_path), "DOIT", 20)
+    exactish = filesystem.search_files(str(tmp_path), "doit57", 20)
+
+    broad_paths = {item["relative_path"] for item in broad["files"]}
+    exactish_paths = {item["relative_path"] for item in exactish["files"]}
+    assert "DOIT.57.md" in broad_paths
+    assert "parser-toolkits/DOIT.parser-performance-v2-audit.md" in broad_paths
+    assert "static_src/js/yolomux/75_dockview_layout.js" not in broad_paths
+    assert exactish_paths == {"DOIT.57.md"}
 
 
 def test_search_files_non_repo_root_stays_shallow_but_indexes_child_repos(tmp_path):
@@ -203,7 +365,7 @@ def test_search_files_non_repo_root_stays_shallow_but_indexes_child_repos(tmp_pa
     (root / ".cache" / "cache.txt").write_text("skip\n", encoding="utf-8")
     repo = root / "project"
     repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    git(repo, "init")
     (repo / "src").mkdir()
     (repo / "src" / "deep.py").write_text("print('repo')\n", encoding="utf-8")
 
@@ -232,6 +394,21 @@ def test_search_files_recursive_walks_indexed_non_repo_root_but_skips_heavy_dirs
     assert "node_modules/target_file.js" not in paths
 
 
+def test_search_files_canonicalizes_symlink_root(tmp_path):
+    real_root = tmp_path / "vortex" / "notes"
+    real_root.mkdir(parents=True)
+    (real_root / "ABC-2218.md").write_text("# notes\n", encoding="utf-8")
+    link_root = tmp_path / "notes"
+    link_root.symlink_to(real_root, target_is_directory=True)
+
+    payload = filesystem.search_files(str(link_root), "ABC-2218", 20, recursive=True)
+
+    assert payload["root"] == str(real_root)
+    assert payload["root_realpath"] == os.path.realpath(real_root)
+    assert [item["path"] for item in payload["files"]] == [str(real_root / "ABC-2218.md")]
+    assert payload["files"][0]["realpath"] == os.path.realpath(real_root / "ABC-2218.md")
+
+
 def test_search_files_ranks_exact_filename_above_large_generated_sibling(tmp_path):
     root = tmp_path / "vortex"
     logs = root / "commits" / "logs"
@@ -252,7 +429,7 @@ def test_search_files_ranks_exact_filename_above_large_generated_sibling(tmp_pat
 def test_search_files_matches_absolute_path_segments(tmp_path):
     project = tmp_path / "home" / "keivenc" / "project"
     project.mkdir(parents=True)
-    subprocess.run(["git", "init"], cwd=project, check=True, capture_output=True, text=True)
+    git(project, "init")
     (project / "README.md").write_text("# ok\n", encoding="utf-8")
 
     payload = filesystem.search_files(str(project), "hokread", 20)
@@ -261,7 +438,7 @@ def test_search_files_matches_absolute_path_segments(tmp_path):
 
 
 def test_search_files_marks_generated_upload_names(tmp_path):
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    git(tmp_path, "init")
     upload = tmp_path / "20260531-001-diagram.png"
     normal = tmp_path / "diagram.png"
     upload.write_bytes(b"png")
@@ -296,24 +473,47 @@ def test_read_file_returns_text(tmp_path):
 def test_read_file_reports_git_tracked(tmp_path):
     # A committed file is tracked; an untracked sibling and a file outside any repo are not.
     # The editor uses this flag to hide its blame/diff buttons for files with no git history.
-    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    init_repo(tmp_path)
     tracked = tmp_path / "tracked.txt"
     tracked.write_text("committed\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(tmp_path), "add", "tracked.txt"], check=True)
-    subprocess.run(
-        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "-C", str(tmp_path), "commit", "-q", "-m", "add"],
-        check=True,
-    )
+    git(tmp_path, "add", "tracked.txt")
+    git(tmp_path, "commit", "-q", "-m", "add")
     untracked = tmp_path / "untracked.txt"
     untracked.write_text("new\n", encoding="utf-8")
-    assert filesystem.read_file(str(tracked))["git_tracked"] is True
-    assert filesystem.read_file(str(untracked))["git_tracked"] is False
+    tracked_payload = filesystem.read_file(str(tracked))
+    untracked_payload = filesystem.read_file(str(untracked))
+    assert tracked_payload["git_tracked"] is True
+    assert tracked_payload["git_root"] == str(tmp_path)
+    assert tracked_payload["git_has_history"] is False
+    assert len(tracked_payload["git_history"]) == 1
+    assert untracked_payload["git_root"] == str(tmp_path)
+    assert untracked_payload["git_tracked"] is False
+
+
+def test_read_file_reports_file_level_git_history(tmp_path):
+    init_repo(tmp_path)
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("one\n", encoding="utf-8")
+    git(tmp_path, "add", "tracked.txt")
+    git(tmp_path, "commit", "-q", "-m", "add tracked")
+    tracked.write_text("two\n", encoding="utf-8")
+    git(tmp_path, "add", "tracked.txt")
+    git(tmp_path, "commit", "-q", "-m", "update tracked")
+
+    payload = filesystem.read_file(str(tracked))
+
+    assert payload["git_tracked"] is True
+    assert payload["git_has_history"] is True
+    assert [item["subject"] for item in payload["git_history"]] == ["update tracked", "add tracked"]
+    assert all(item["ref"] and item["short"] for item in payload["git_history"])
 
 
 def test_read_file_outside_repo_is_not_tracked(tmp_path):
     file_path = tmp_path / "loose.txt"
     file_path.write_text("loose\n", encoding="utf-8")
-    assert filesystem.read_file(str(file_path))["git_tracked"] is False
+    payload = filesystem.read_file(str(file_path))
+    assert payload["git_root"] == ""
+    assert payload["git_tracked"] is False
 
 
 def test_read_file_rejects_binary(tmp_path):
@@ -384,12 +584,25 @@ def test_write_file_mtime_conflict_uses_nanoseconds(tmp_path):
     target.write_text("a", encoding="utf-8")
     base_ns = 1_800_000_000_123_456_000
     os.utime(target, ns=(base_ns, base_ns))
-    os.utime(target, ns=(base_ns + 1, base_ns + 1))
+    actual_ns = base_ns + filesystem.MTIME_NS_CONFLICT_TOLERANCE + 1
+    os.utime(target, ns=(actual_ns, actual_ns))
 
     with pytest.raises(FilesystemError) as info:
         filesystem.write_file(str(target), "b", expected_mtime=base_ns)
 
     assert info.value.status == 409
+
+
+def test_write_file_accepts_tiny_nanosecond_mtime_drift(tmp_path):
+    target = tmp_path / "race-ns-jitter.txt"
+    target.write_text("a", encoding="utf-8")
+    base_ns = 1_800_000_000_123_456_000
+    os.utime(target, ns=(base_ns, base_ns))
+    os.utime(target, ns=(base_ns + 85, base_ns + 85))
+
+    result = filesystem.write_file(str(target), "b", expected_mtime=base_ns)
+
+    assert result["size"] == 1
 
 
 def test_write_file_accepts_legacy_second_mtime(tmp_path):
@@ -437,7 +650,7 @@ def test_delete_path_removes_directory_tree(tmp_path):
 
 
 def test_path_info_returns_git_relative_path(tmp_path):
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    git(tmp_path, "init")
     target = tmp_path / "src" / "main.py"
     target.parent.mkdir()
     target.write_text("print('hi')\n", encoding="utf-8")
@@ -449,14 +662,40 @@ def test_path_info_returns_git_relative_path(tmp_path):
     assert result["kind"] == "file"
 
 
+def test_file_identity_payloads_follow_symlinks_and_hardlinks(tmp_path):
+    target = tmp_path / "target.txt"
+    target.write_text("hello\n", encoding="utf-8")
+    symlink = tmp_path / "alias.txt"
+    symlink.symlink_to(target)
+    hardlink = tmp_path / "hard.txt"
+    os.link(target, hardlink)
+    broken = tmp_path / "broken.txt"
+    broken.symlink_to(tmp_path / "missing.txt")
+
+    target_read = filesystem.read_file(str(target))
+    symlink_read = filesystem.read_file(str(symlink))
+    hardlink_info = filesystem.path_info(str(hardlink))
+    entries = {entry["name"]: entry for entry in filesystem.list_directory(str(tmp_path))["entries"]}
+    broken_info = filesystem.path_info(str(broken))
+
+    assert target_read["file_id"]
+    assert target_read["file_identity"] == f"id:{target_read['file_id']}"
+    assert symlink_read["file_id"] == target_read["file_id"]
+    assert symlink_read["realpath"] == os.path.realpath(target)
+    assert entries["alias.txt"]["file_id"] == target_read["file_id"]
+    assert entries["alias.txt"]["realpath"] == os.path.realpath(target)
+    assert hardlink_info["file_id"] == target_read["file_id"]
+    assert hardlink_info["realpath"] == os.path.realpath(hardlink)
+    assert "file_id" not in broken_info
+    assert "file_identity" not in broken_info
+
+
 def test_diff_file_returns_git_diff_for_tracked_file(tmp_path):
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    init_repo(tmp_path)
     target = tmp_path / "app.py"
     target.write_text("print('one')\n", encoding="utf-8")
-    subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "commit", "-m", "base"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    git(tmp_path, "add", "app.py")
+    git(tmp_path, "commit", "-m", "base")
     target.write_text("print('two')\n", encoding="utf-8")
 
     result = filesystem.diff_file(str(target))
@@ -471,7 +710,7 @@ def test_diff_file_returns_git_diff_for_tracked_file(tmp_path):
 
 
 def test_diff_file_returns_no_index_diff_for_untracked_file(tmp_path):
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    git(tmp_path, "init")
     target = tmp_path / "new.txt"
     target.write_text("hello\n", encoding="utf-8")
 
@@ -484,13 +723,11 @@ def test_diff_file_returns_no_index_diff_for_untracked_file(tmp_path):
 
 
 def test_diff_file_returns_head_content_for_deleted_file(tmp_path):
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    init_repo(tmp_path)
     target = tmp_path / "gone.txt"
     target.write_text("old\n", encoding="utf-8")
-    subprocess.run(["git", "add", "gone.txt"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "commit", "-m", "base"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    git(tmp_path, "add", "gone.txt")
+    git(tmp_path, "commit", "-m", "base")
     target.unlink()
 
     result = filesystem.diff_file(str(target))
@@ -501,17 +738,15 @@ def test_diff_file_returns_head_content_for_deleted_file(tmp_path):
 
 
 def test_diff_file_supports_commit_to_commit_refs(tmp_path):
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    init_repo(tmp_path)
     target = tmp_path / "app.py"
     target.write_text("one\n", encoding="utf-8")
-    subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "commit", "-m", "one"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    older = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+    git(tmp_path, "add", "app.py")
+    git(tmp_path, "commit", "-m", "one")
+    older = git(tmp_path, "rev-parse", "HEAD").stdout.strip()
     target.write_text("two\n", encoding="utf-8")
-    subprocess.run(["git", "commit", "-am", "two"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    newer = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+    git(tmp_path, "commit", "-am", "two")
+    newer = git(tmp_path, "rev-parse", "HEAD").stdout.strip()
 
     result = filesystem.diff_file(str(target), from_ref=older, to_ref=newer)
 
@@ -524,13 +759,11 @@ def test_diff_file_supports_commit_to_commit_refs(tmp_path):
 
 
 def test_diff_file_falls_back_when_requested_ref_is_unknown_in_repo(tmp_path):
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    init_repo(tmp_path)
     target = tmp_path / "app.py"
     target.write_text("one\n", encoding="utf-8")
-    subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "commit", "-m", "one"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    git(tmp_path, "add", "app.py")
+    git(tmp_path, "commit", "-m", "one")
     target.write_text("two\n", encoding="utf-8")
 
     result = filesystem.diff_file(str(target), from_ref="not-in-this-repo", to_ref="current")
@@ -542,17 +775,15 @@ def test_diff_file_falls_back_when_requested_ref_is_unknown_in_repo(tmp_path):
 
 
 def test_diff_file_falls_back_when_requested_ref_order_is_invalid(tmp_path):
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    init_repo(tmp_path)
     target = tmp_path / "app.py"
     target.write_text("one\n", encoding="utf-8")
-    subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "commit", "-m", "one"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    older = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+    git(tmp_path, "add", "app.py")
+    git(tmp_path, "commit", "-m", "one")
+    older = git(tmp_path, "rev-parse", "HEAD").stdout.strip()
     target.write_text("two\n", encoding="utf-8")
-    subprocess.run(["git", "commit", "-am", "two"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    newer = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+    git(tmp_path, "commit", "-am", "two")
+    newer = git(tmp_path, "rev-parse", "HEAD").stdout.strip()
     target.write_text("three\n", encoding="utf-8")
 
     result = filesystem.diff_file(str(target), from_ref=newer, to_ref=older)
@@ -630,8 +861,38 @@ def test_blame_file_on_a_tracked_repo_file():
     assert first["author"]
 
 
+def test_rename_path_uses_git_mv_for_tracked_file(tmp_path):
+    # Renaming a git-TRACKED file uses `git mv`, so the new path lands TRACKED (staged), not untracked
+    # like a plain rename would leave it.
+    def run(*args):
+        subprocess.run(args, cwd=str(tmp_path), check=True, capture_output=True)
+
+    run("git", "init", "-q")
+    run("git", "config", "user.email", "t@example.com")
+    run("git", "config", "user.name", "T")
+    (tmp_path / "old.txt").write_text("hi\n", encoding="utf-8")
+    run("git", "add", "old.txt")
+    run("git", "commit", "-qm", "init")
+
+    result = filesystem.rename_path(str(tmp_path / "old.txt"), "new.txt")
+    assert result["name"] == "new.txt"
+    assert (tmp_path / "new.txt").exists()
+    assert not (tmp_path / "old.txt").exists()
+    tracked = subprocess.run(["git", "ls-files", "--error-unmatch", "new.txt"], cwd=str(tmp_path), capture_output=True)
+    assert tracked.returncode == 0, "git mv staged the new path (a plain mv would leave it untracked)"
+
+
+def test_rename_path_plain_rename_for_untracked_file(tmp_path):
+    # No repo / untracked: a plain rename still works (git mv path returns False, caller falls back).
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    result = filesystem.rename_path(str(tmp_path / "a.txt"), "b.txt")
+    assert result["name"] == "b.txt"
+    assert (tmp_path / "b.txt").exists() and not (tmp_path / "a.txt").exists()
+    assert filesystem._git_mv_if_tracked(tmp_path / "b.txt", tmp_path / "c.txt") is False
+
+
 def test_list_directory_flags_symlinks_with_target(tmp_path):
-    # DOIT.31: symlink entries carry is_symlink + symlink_target; a symlink to a dir resolves kind=dir,
+    # symlink entries carry is_symlink + symlink_target; a symlink to a dir resolves kind=dir,
     # to a file kind=file, and a dangling link is kind=symlink-broken. Plain entries are not flagged.
     (tmp_path / "real_dir").mkdir()
     (tmp_path / "real_file.txt").write_text("hi", encoding="utf-8")

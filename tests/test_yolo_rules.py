@@ -1,8 +1,6 @@
 import os
 from pathlib import Path
 
-os.environ.setdefault("YOLOMUX_CONFIG_DIR", "/tmp/yolomux-test-config")
-os.environ.setdefault("YOLOMUX_STATE_DIR", "/tmp/yolomux-test-state")
 
 import auto_approve_tmux
 from yolomux_lib import yolo_rules
@@ -90,15 +88,6 @@ def test_hard_floor_blocks_unrelaxable_cases():
     assert yolo_rules.hard_floor_decision("mkfs.ext4 /dev/sda1")["action"] == "block"
 
 
-def test_dangerously_yolo_still_hits_the_hard_floor():
-    # DOIT.6 #62: --dangerously-yolo opts out of the soft ruleset / ask-default, NOT the catastrophic
-    # floor — rm -rf /, mkfs, dd to a block device, and fork bombs are blocked even under the flag.
-    for cmd in ["rm -rf /", "mkfs.ext4 /dev/sda1", "dd if=/dev/zero of=/dev/sda", ":(){ :|:& };:"]:
-        decision = yolo_rules.evaluate(cmd, "bash", dangerously_yolo=True)
-        assert decision["action"] == "block", cmd
-        assert decision["source"] == "hard-floor", cmd
-
-
 def test_schema_validation_reports_errors():
     bad = {
         "default": "approve",
@@ -117,7 +106,7 @@ def test_schema_validation_reports_errors():
 
 def test_builtin_default_reproduces_current_block_and_allow_sets(monkeypatch):
     rules = yolo_rules.validate_rules(yolo_rules.default_rule_data("approve"), source="built-in")
-    # DOIT.6 #68: is_dangerous now reads the ACTIVE cached ruleset; pin it to the built-in default here
+    # is_dangerous now reads the ACTIVE cached ruleset; pin it to the built-in default here
     # so this test still validates the built-in block/allow classification deterministically.
     monkeypatch.setattr(yolo_rules, "cached_rules", lambda: (rules, ""))
     dangerous_cmds = [
@@ -248,7 +237,7 @@ def test_dry_run_downgrades_active_rule_actions(monkeypatch):
 
 
 def test_is_dangerous_uses_active_ruleset_and_flags_non_approve(monkeypatch):
-    # DOIT.6 #68: the UI danger badge reflects the USER's active ruleset (what the worker acts on) and
+    # the UI danger badge reflects the USER's active ruleset (what the worker acts on) and
     # treats ANY non-approve outcome (block / decline / ask) as dangerous — only a clean approve is safe.
     rules = ruleset({
         "default": "ask",
@@ -265,7 +254,7 @@ def test_is_dangerous_uses_active_ruleset_and_flags_non_approve(monkeypatch):
 
 
 def test_dangerously_yolo_keeps_the_hard_floor(monkeypatch):
-    # DOIT.6 #62: --dangerously-yolo only opts out of the soft ruleset / ask-default — the catastrophic
+    # --dangerously-yolo only opts out of the soft ruleset / ask-default — the catastrophic
     # hard floor ALWAYS applies. rm -rf / is blocked under the flag; a non-catastrophic command the
     # ruleset approves is still approved (so the flag's broad relaxation is preserved).
     rules = ruleset({
@@ -277,10 +266,13 @@ def test_dangerously_yolo_keeps_the_hard_floor(monkeypatch):
     monkeypatch.setattr(yolo_rules, "cached_rules", lambda: (rules, ""))
     monkeypatch.setattr(yolo_rules, "yolo_settings", lambda: {"dry_run": False, "rule_file_path": "/tmp/yolo-rules-test.yaml"})
 
-    for flag in (False, True):
-        catastrophic = yolo_rules.evaluate("rm -rf /", dangerously_yolo=flag)
-        assert catastrophic["action"] == "block", flag
-        assert catastrophic["source"] == "hard-floor", flag
+    # The catastrophic floor (rm -rf /, mkfs, dd to a block device, fork bomb) blocks under BOTH flags
+    # even with an approve-all ruleset active (merged from the former test_dangerously_yolo_still_*).
+    for cmd in ["rm -rf /", "mkfs.ext4 /dev/sda1", "dd if=/dev/zero of=/dev/sda", ":(){ :|:& };:"]:
+        for flag in (False, True):
+            catastrophic = yolo_rules.evaluate(cmd, dangerously_yolo=flag)
+            assert catastrophic["action"] == "block", (cmd, flag)
+            assert catastrophic["source"] == "hard-floor", (cmd, flag)
 
     safe = yolo_rules.evaluate("ls -la", dangerously_yolo=True)
     assert safe["action"] == "approve"
@@ -295,3 +287,24 @@ def test_rule_file_text_validation_reports_yaml_errors():
         assert "regex error" in str(exc)
     else:
         raise AssertionError("invalid YOLO rules should fail validation")
+
+
+def test_normalize_risk_canonicalizes_for_display():
+    # S5: blank -> "unknown", storage-destruction synonyms -> "delete", case/space
+    # insensitive, and custom labels pass through (the engine never rejects a risk label).
+    assert yolo_rules.normalize_risk("") == "unknown"
+    assert yolo_rules.normalize_risk(None) == "unknown"
+    assert yolo_rules.normalize_risk("  DELETE ") == "delete"
+    assert yolo_rules.normalize_risk("device") == "delete"
+    assert yolo_rules.normalize_risk("format") == "delete"
+    assert yolo_rules.normalize_risk("custom-label") == "custom-label"
+    for label in yolo_rules.YOLO_RISK_LABELS:
+        assert yolo_rules.normalize_risk(label) == label
+
+
+def test_hard_floor_risks_normalize_to_canonical_labels():
+    # S5: the internal mkfs / block-device "format"/"device" hard floors display as canonical "delete".
+    mkfs = yolo_rules.hard_floor_decision("mkfs.ext4 /dev/sda1")
+    assert mkfs and yolo_rules.normalize_risk(mkfs["risk"]) == "delete"
+    forkbomb = yolo_rules.hard_floor_decision(":(){ :|:& };:")
+    assert forkbomb and yolo_rules.normalize_risk(forkbomb["risk"]) == "process"

@@ -1,34 +1,56 @@
 function toggleHiddenFiles() {
+  setFileExplorerManualRootMode();
   fileExplorerShowHidden = !fileExplorerShowHidden;
   storageSet(fileExplorerHiddenStorageKey, fileExplorerShowHidden ? '1' : '0');
   syncFileExplorerHiddenButton(fileExplorerHiddenToggle);
   if (fileExplorerRoot) refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
 }
 
-async function expandDirectoryRow(row, fullPath) {
+async function expandDirectoryRow(row, fullPath, options = {}) {
   const entries = await fetchDirectory(fullPath);
   if (!entries) return;
+  if (options.manual === true) {
+    forgetFileExplorerSyncManualCollapse(fullPath);
+    resetFileExplorerAppliedSyncPlan();
+  }
+  // A manual collapse can land while fetchDirectory() is in flight, so an AUTO reveal (active-tab/file
+  // reveal or sync expand-loop, both pass auto:true) must re-check suppression HERE -- the mutation
+  // point, after the await -- or it resurrects a directory the user just collapsed. Scope this to
+  // auto:true so it matches the expandFileTreeContainerToPath ancestor guard and does NOT touch the
+  // remembered-state restore path (auto:false), which has its own pre-await suppression filter and must
+  // be free to restore a directory across sync-target switches.
+  if (options.auto === true && fileExplorerRootMode === 'sync' && fileExplorerSyncPathSuppressed(fullPath)) {
+    return;
+  }
   fileExplorerExpanded.add(fullPath);
   row.classList.add('expanded');
   row.setAttribute('aria-expanded', 'true');
   row.querySelector('.file-tree-icon').textContent = '▾';
   const existingChildren = childContainerForRow(row, fullPath);
   const children = existingChildren || createFileTreeChildContainer(fullPath);
-  const depth = parseInt(row.style.paddingLeft, 10);
-  const nextDepth = Math.round((depth - 8) / 14) + 1;
+  const nextDepth = fileTreeRowDepth(row) + 1;
   renderTreeChildren(children, fullPath, entries, nextDepth);
   if (!existingChildren) row.insertAdjacentElement('afterend', children);
+  rememberFileExplorerSyncExpandedState();
+  scheduleShareUiStatePublish();
+  if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }
 
-function collapseDirectoryRow(row, fullPath) {
+function collapseDirectoryRow(row, fullPath, options = {}) {
+  if (options.manual === true) {
+    rememberFileExplorerSyncManualCollapse(fullPath);
+    resetFileExplorerAppliedSyncPlan();
+  }
   fileExplorerExpanded.delete(fullPath);
   row.classList.remove('expanded');
   row.setAttribute('aria-expanded', 'false');
   row.querySelector('.file-tree-icon').textContent = '▸';
-  const next = row.nextElementSibling;
-  if (next && next.classList.contains('file-tree-children') && next.dataset.parent === fullPath) {
-    next.remove();
-  }
+  Array.from(row.parentElement?.children || [])
+    .filter(node => node.classList?.contains('file-tree-children') && node.dataset?.parent === fullPath)
+    .forEach(node => node.remove());
+  rememberFileExplorerSyncExpandedState();
+  scheduleShareUiStatePublish();
+  if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }
 
 if (fileExplorerClose) fileExplorerClose.addEventListener('click', () => toggleFileExplorer());
@@ -56,7 +78,7 @@ function bindFilePopoverActions(container) {
     button.addEventListener('click', event => {
       event.preventDefault();
       event.stopPropagation();
-      copyFilePath(button.dataset.copyPopoverPath || '', 'full');
+      copyFilePath(button.dataset.copyPopoverPath || '', 'path');
     });
   });
 }
@@ -73,8 +95,9 @@ function numericOption(value, fallback) {
 }
 
 function viewportBounds(edgeGap = popoverEdgeGapPx()) {
-  const width = Math.max(0, window.innerWidth || document.documentElement?.clientWidth || 0);
-  const height = Math.max(0, window.innerHeight || document.documentElement?.clientHeight || 0);
+  const viewport = appViewport();
+  const width = Math.max(0, viewport.width || 0);
+  const height = Math.max(0, viewport.height || 0);
   return {
     left: edgeGap,
     top: edgeGap,
@@ -100,14 +123,20 @@ function stopPopoverEvent(event) {
 
 function closeOtherSessionPopovers(current, options = {}) {
   const force = options.force === true;
+  let changed = false;
   for (const other of document.querySelectorAll('.pane-tab.popover-open, .panel-popover-zone.popover-open')) {
     if (other !== current) {
-      const popover = other.querySelector?.(':scope > .session-popover, :scope > .panel-detail-popover');
+      const popover = other.querySelector?.(':scope > .session-popover, :scope > .panel-detail-popover')
+        || other.__yolomuxDetachedPopover;
       if (current === null && !force && popoverStillActive(other, popover)) continue;
+      if (other.classList?.contains('popover-open') || popover?.classList?.contains('popover-open') || other.__yolomuxDetachedPopover?.classList?.contains('popover-open')) changed = true;
       other.classList.remove('popover-open');
+      popover?.classList?.remove('popover-open');
+      other.__yolomuxDetachedPopover?.classList?.remove('popover-open');
       delete other.dataset.popoverHoverState;
     }
   }
+  if (changed && typeof scheduleSharePopupLayerPublish === 'function') scheduleSharePopupLayerPublish({immediate: true});
 }
 
 function popoverLifecycleActive(anchor, popover) {
@@ -181,6 +210,7 @@ function createHoverPopover(options) {
     if (stateClass) anchor.classList.remove(stateClass);
     markState('');
     options.onClose?.(event);
+    if (typeof scheduleSharePopupLayerPublish === 'function') scheduleSharePopupLayerPublish({immediate: true});
   };
   const openNow = event => {
     cancelTimers();
@@ -188,7 +218,10 @@ function createHoverPopover(options) {
     if (anchor.isConnected === false || !canOpen(event)) return;
     if (event && !stillActive(event)) return;
     if (stateClass && anchor.classList.contains(stateClass) && stillActive(event)) {
+      options.position?.(event);
+      options.onOpen?.(event);
       markState('open');
+      if (typeof scheduleSharePopupLayerPublish === 'function') scheduleSharePopupLayerPublish();
       return;
     }
     options.position?.(event);
@@ -196,6 +229,7 @@ function createHoverPopover(options) {
     options.onOpen?.(event);
     if (stateClass) anchor.classList.add(stateClass);
     markState('open');
+    if (typeof scheduleSharePopupLayerPublish === 'function') scheduleSharePopupLayerPublish();
     const activePopover = popover();
     if (activePopover && activePopover.dataset.hoverPopoverBound !== 'true') {
       bindPopoverHover(anchor, activePopover, {queueOpen, keepOpen: openNow, closeSoon});
@@ -226,6 +260,7 @@ function createHoverPopover(options) {
         hideTimer = null;
         if (stateClass) anchor.classList.remove(stateClass);
         options.onClose?.(event);
+        if (typeof scheduleSharePopupLayerPublish === 'function') scheduleSharePopupLayerPublish({immediate: true});
         return;
       }
       if (stillActive(event)) {
@@ -237,6 +272,7 @@ function createHoverPopover(options) {
       markState('');
       hideTimer = null;
       options.onClose?.(event);
+      if (typeof scheduleSharePopupLayerPublish === 'function') scheduleSharePopupLayerPublish({immediate: true});
     }, Math.max(0, delay));
   }
   const initialPopover = popover();
@@ -333,10 +369,10 @@ function yoloMarkerHtml(session, auto, options = {}) {
   const yoloAttr = ` data-yolo-session="${esc(session)}"`;
   const toggleAttr = options.toggle && !readOnlyMode ? ` data-auto-session="${esc(session)}"` : '';
   const rotationStyle = options.yoloWorking ? ` style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}"` : '';
-  const stateText = auto ? 'on here' : (locked ? 'on elsewhere' : 'off');
+  const stateText = auto ? t('yolo.state.onHere') : (locked ? t('yolo.state.onElsewhere') : t('yolo.state.off'));
   const title = options.toggle && readOnlyMode
-    ? `YOLO ${stateText} for ${sessionLabel(session)}; readonly access`
-    : (options.toggle ? `YOLO ${stateText} for ${sessionLabel(session)}` : `YOLO ${stateText}`);
+    ? t('yolo.titleReadonly', {state: stateText, session: sessionLabel(session)})
+    : (options.toggle ? t('yolo.titleForSession', {state: stateText, session: sessionLabel(session)}) : t('yolo.title', {state: stateText}));
   return `<span class="${esc(classes.join(' '))}"${yoloAttr}${toggleAttr}${rotationStyle} title="${esc(title)}">${esc(t('brand.marker'))}</span>`;
 }
 
@@ -412,8 +448,13 @@ function defaultBranchHeadPullRequest(info) {
   };
 }
 
+function currentBranchInventoryPullRequest(info) {
+  const branches = info?.project?.git?.other_branches?.branches || [];
+  return branches.find(branch => branch.current === true)?.pull_request || null;
+}
+
 function displayPullRequest(info) {
-  return defaultBranchHeadPullRequest(info) || info?.project?.pull_request || null;
+  return defaultBranchHeadPullRequest(info) || info?.project?.pull_request || currentBranchInventoryPullRequest(info);
 }
 
 function metadataBadgeKey(session, badge) {
@@ -457,9 +498,8 @@ function sessionWorkDescription(session, info, limit = 96) {
   const git = project.git;
   const pr = displayPullRequest(info);
   if (pr?.number) {
-    const status = pullRequestStatusLabel(pr);
     const title = pr.title || pr.description || '';
-    const prefix = `#${pr.number}${status && status !== 'unknown' ? ` ${status}` : ''}`;
+    const prefix = pullRequestLinkLabel(pr);
     return shortText(title ? `${prefix}: ${title}` : prefix, limit);
   }
   const linear = project.linear || [];
@@ -481,7 +521,7 @@ function sessionTabDescription(session, info) {
 }
 
 function tabMenuDetailText(item, info = transcriptMeta.sessions?.[item]) {
-  if (isInfoItem(item)) return 'all branches sorted by recent activity';
+  if (isInfoItem(item)) return t('tab.info.detail');
   const project = info?.project || {};
   const git = project.git;
   const parts = [];
@@ -492,8 +532,7 @@ function tabMenuDetailText(item, info = transcriptMeta.sessions?.[item]) {
   const linear = (project.linear || []).map(issue => issue.identifier).filter(Boolean).join(', ');
   if (linear) parts.push(linear);
   if (pr?.number) {
-    const status = pullRequestStatusLabel(pr);
-    parts.push(`#${pr.number}${status && status !== 'unknown' ? ` ${status}` : ''}`);
+    parts.push(pullRequestLinkLabel(pr));
   }
   const desc = sessionWorkDescription(item, info, 180);
   if (desc && !parts.includes(desc)) parts.push(desc);
@@ -502,9 +541,9 @@ function tabMenuDetailText(item, info = transcriptMeta.sessions?.[item]) {
 
 function projectDirName(session, info) {
   if (!info) return t('common.loading');
-  const project = info?.project || {};
-  const git = project.git;
-  const path = git?.root || git?.cwd || info?.selected_pane?.current_path || '';
+  const {gitRoot, gitCwd, selectedPath} = sessionTranscriptInfo(session);
+  const repo = selectedSessionRepo(session, info);
+  const path = repo?.cwd || repo?.root || gitRoot || gitCwd || selectedPath;
   return pathBasename(path) || 'no path';
 }
 
@@ -552,6 +591,57 @@ function filePopoverPathHtml(path) {
   return `<span class="popover-copy-value">${esc(path)}</span>${pathCopyButtonHtml(path, {className: 'popover-copy-button', dataAttr: 'data-copy-popover-path'})}`;
 }
 
+function sessionPopoverSubtitleHtml(session, info, fallback = '') {
+  const project = info?.project || {};
+  const git = project.git;
+  const pr = displayPullRequest(info);
+  const chips = [];
+  if (isDefaultBranch(git)) chips.push(defaultBranchBadgeHtml(session, info));
+  if (pr?.number) chips.push(pullRequestNumberIndicatorHtml(session, pr));
+  const text = pr?.number
+    ? shortText(pr.title || pr.description || '', 220)
+    : String(fallback || '');
+  const textHtml = text ? `<span class="popover-subtitle-text">${esc(text)}</span>` : '';
+  return `<div class="popover-subtitle">${chips.join('')}${textHtml}</div>`;
+}
+
+function sessionBranchValueHtml(session, info) {
+  const git = info?.project?.git;
+  if (!git?.branch) return '';
+  const branchHtml = isDefaultBranch(git)
+    ? defaultBranchBadgeHtml(session, info)
+    : branchLinkHtml(git, git.branch);
+  return `${branchHtml}${git.upstream ? `<span class="meta-muted"> -> ${esc(git.upstream)}</span>` : ''}`;
+}
+
+function pullRequestPopoverRowHtml(session, pr) {
+  const prParts = [pullRequestNumberIndicatorHtml(session, pr), pullRequestAuthorHtml(pr)].filter(Boolean);
+  const checks = pullRequestChecksHtml(pr);
+  if (checks) prParts.push(checks);
+  const review = pullRequestReviewInlineHtml(pr);
+  if (review) prParts.push(review);
+  return metaJoin(prParts);
+}
+
+function gitStatusHasFacts(git) {
+  return Number.isFinite(git?.dirty_count) || Number.isFinite(git?.ahead) || Number.isFinite(git?.behind);
+}
+
+function popoverActivityText(session, git) {
+  const text = String(sessionActivitySummary(session)?.local || '').trim();
+  if (!text) return '';
+  return gitStatusHasFacts(git)
+    ? text.replace(/\s*Status check:\s*[^.]+\.?\s*$/i, '').trim()
+    : text;
+}
+
+function gitHeadValueHtml(git) {
+  const head = String(git?.head || '').trim();
+  const match = head.match(/^([0-9a-f]{7,40})\b/i);
+  if (match) return esc(match[1]);
+  return esc(shortText(subjectWithoutPullRequestNumber(gitHeadSubject(git)), 120));
+}
+
 function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessionState(session, info)) {
   const project = info?.project || {};
   const git = project.git;
@@ -560,22 +650,20 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const pane = info?.selected_pane;
   const description = sessionWorkDescription(session, info, 220);
   const title = `${sessionLabel(session)} · ${projectDirName(session, info)}`;
-  const subtitle = description || git?.branch || pane?.current_path || 'no checkout detected';
+  const subtitle = description || git?.branch || pane?.current_path || t('git.noCheckout');
+  const subtitleHtml = sessionPopoverSubtitleHtml(session, info, subtitle);
   const rows = [];
   const stateValue = `${sessionStateHtml(state)} <span class="meta-muted">${esc(state.reason)}</span>`;
   const autoPayload = autoApproveStates.get(session);
   const autoElsewhere = autoApproveEnabledElsewhere(autoPayload);
-  const autoText = autoEnabled ? 'YOLO on' : (autoElsewhere ? 'YOLO elsewhere' : '');
-  const agentValue = agentKind ? `${agentName(agentKind)}${autoText ? ` · ${autoText}` : ''}` : (autoText || 'not detected');
-  const displayPath = panelFullPath(session, info) || pane?.current_path || 'not available';
+  const autoText = autoEnabled ? t('yolo.on') : (autoElsewhere ? t('yolo.elsewhere') : '');
+  const agentValue = agentKind ? `${agentName(agentKind)}${autoText ? ` · ${autoText}` : ''}` : (autoText || t('agent.notDetected'));
+  const displayPath = panelFullPath(session, info) || pane?.current_path || t('common.notAvailable');
   rows.push(popoverPairRow(t('popover.state'), stateValue, t('popover.agent'), agentValue));
-  const activity = sessionActivitySummary(session);
-  if (activity?.local) rows.push(popoverRow(yoagentTabLabel(), esc(activity.local)));
+  const activityText = popoverActivityText(session, git);
+  if (activityText) rows.push(popoverRow(yoagentTabLabel(), esc(activityText)));
   rows.push(popoverRow(t('popover.path'), displayPath));
-  if (git?.branch) rows.push(popoverRow(t('popover.branch'), `${branchLinkHtml(git, git.branch)}${git.upstream ? `<span class="meta-muted"> -> ${esc(git.upstream)}</span>` : ''}`));
-  if (Number.isFinite(git?.dirty_count) || Number.isFinite(git?.ahead) || Number.isFinite(git?.behind)) {
-    rows.push(popoverRow(t('popover.git'), gitStatusText(git)));
-  }
+  if (git?.branch) rows.push(popoverRow(t('popover.branch'), sessionBranchValueHtml(session, info)));
   let linearValue = '';
   let linearDesc = '';
   if (linear.length) {
@@ -584,32 +672,25 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
     if (linearValue) rows.push(popoverRow('Linear', linearValue));
     if (linearDesc) rows.push(popoverRow(t('popover.details'), linearDesc));
   }
-  let prDesc = '';
   if (pr?.number) {
-    const prParts = [pullRequestLinkHtml(pr), pullRequestAuthorHtml(pr)].filter(Boolean);
-    const checks = pullRequestChecksHtml(pr);
-    if (checks) prParts.push(checks);
-    const review = pullRequestReviewInlineHtml(pr);
-    if (review) prParts.push(review);
-    rows.push(popoverRow('PR', metaJoin(prParts)));
-    prDesc = pullRequestDescriptionInlineHtml(pr);
-  }
-  if (prDesc) {
-    rows.push(popoverRow(t('popover.desc'), prDesc));
+    rows.push(popoverRow('PR', pullRequestPopoverRowHtml(session, pr)));
   }
   const subject = currentBranchSubject(git);
   if (subject && !pr?.number) rows.push(popoverRow(t('popover.desc'), `<div class="popover-desc">${esc(subject)}</div>`));
   if (git?.root && git.root !== displayPath) rows.push(popoverRow(t('popover.repo'), git.root));
-  if (git?.head) rows.push(popoverRow('HEAD', git.head));
+  // S7: name a linked worktree vs its parent repo so the focused path isn't mistaken for the main checkout.
+  if (git?.worktree) rows.push(popoverRow(t('popover.worktree'), `${esc(git.worktree.name || git.worktree.path)} — worktree of ${esc(git.worktree.parent_root)}`));
+  if (git?.head) rows.push(popoverRow('HEAD', gitHeadValueHtml(git)));
+  if (gitStatusHasFacts(git)) rows.push(popoverRow(t('popover.git'), gitStatusText(git)));
   return `<div class="session-popover" role="tooltip">
     <div class="popover-head">
       <div>
         <div class="popover-title">${esc(title)}</div>
-        <div class="popover-subtitle">${esc(subtitle)}</div>
+        ${subtitleHtml}
       </div>
     </div>
     ${rows.join('')}
-    ${otherBranchesHtml(git)}
+    ${otherBranchesHtml(session, info)}
   </div>`;
 }
 
@@ -626,14 +707,6 @@ function popoverPairRow(leftLabel, leftValueHtml, rightLabel, rightValueHtml) {
 
 function stripTitleAttrs(html) {
   return String(html || '').replace(/\s+title="[^"]*"/g, '');
-}
-
-function pullRequestDescriptionInlineHtml(pr) {
-  const title = String(pr?.title || '').trim();
-  const description = String(pr?.description || '').trim();
-  const body = description && description !== title ? description.replace(/^#+\s*Overview:\s*/i, '').trim() : '';
-  const text = [title, body].filter(Boolean).join(' · ');
-  return text ? esc(shortText(text, 180)) : '';
 }
 
 function linearInlineHtml(issues) {
@@ -661,10 +734,10 @@ function linearDescriptionsInlineHtml(issues) {
 
 function gitStatusText(git) {
   const parts = [];
-  if (Number.isFinite(git.dirty_count)) parts.push(`${git.dirty_count} dirty`);
-  if (Number.isFinite(git.ahead) && git.ahead > 0) parts.push(`${git.ahead} ahead`);
-  if (Number.isFinite(git.behind) && git.behind > 0) parts.push(`${git.behind} behind`);
-  return esc(parts.length ? parts.join(' · ') : 'clean');
+  if (Number.isFinite(git.dirty_count)) parts.push(t('git.dirty', {count: git.dirty_count}));
+  if (Number.isFinite(git.ahead) && git.ahead > 0) parts.push(t('git.ahead', {count: git.ahead}));
+  if (Number.isFinite(git.behind) && git.behind > 0) parts.push(t('git.behind', {count: git.behind}));
+  return esc(parts.length ? parts.join(' · ') : t('git.clean'));
 }
 
 function branchLinkHtml(git, branchName) {
@@ -686,32 +759,91 @@ function pullRequestLinkForBranch(git, branch) {
   const repoUrl = git?.github_repo?.url;
   if (!pr?.number) return '';
   const url = pr.url || (repoUrl ? `${repoUrl}/pull/${pr.number}` : '');
-  const status = pullRequestStatusDisplay(pr);
-  const label = `#${pr.number}${status && status !== 'unknown' ? ` ${status}` : ''}`;
-  return linkHtml(url, label, pr.title || pr.description || branch.subject || '', pullRequestStatusClass(pr));
+  return linkHtml(url, pullRequestLinkLabel(pr), pr.title || pr.description || branch.subject || '', pullRequestStatusClass(pr));
+}
+
+function pullRequestNumberChipLinkHtml(session, pr) {
+  if (!pr?.number) return '';
+  const chip = pullRequestNumberIndicatorHtml(session, pr);
+  if (!pr.url) return chip;
+  const title = pr.title || pr.description || '';
+  const titleAttr = title ? ` title="${esc(title)}"` : '';
+  return `<a href="${esc(pr.url)}" target="_blank" rel="noreferrer noopener" draggable="false"${titleAttr} class="popover-chip-link">${chip}</a>`;
+}
+
+function pullRequestForBranch(git, branch, info) {
+  const pr = branch?.current ? displayPullRequest(info) || branch.pull_request : branch?.pull_request;
+  if (!pr?.number) return null;
+  return {
+    ...pr,
+    url: pr.url || githubPullRequestUrlFromGit(git, pr.number),
+  };
+}
+
+function branchListBranchHtml(session, git, branch) {
+  const branchName = branch?.name || '';
+  if (isDefaultBranch({branch: branchName})) {
+    const classes = branch?.current
+      ? metadataBadgeClasses(session, 'main', 'ci-indicator tab-symbol branch-indicator')
+      : 'ci-indicator tab-symbol branch-indicator';
+    return `<span class="${esc(classes)}">MAIN</span>`;
+  }
+  return branchLinkHtml(git, branchName);
+}
+
+function normalizeBranchSubjectText(value) {
+  return subjectWithoutPullRequestNumber(value).replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function branchListSubjectHtml(branch, pr) {
+  const subject = subjectWithoutPullRequestNumber(branch?.subject || '');
+  if (!subject) return '';
+  if (branch?.current) {
+    const currentTitles = [pr?.title, pr?.description].map(normalizeBranchSubjectText).filter(Boolean);
+    if (currentTitles.includes(normalizeBranchSubjectText(subject))) return '';
+  }
+  return `<div class="branch-subject">${esc(shortText(subject, 240))}</div>`;
+}
+
+function branchPullRequestMetaHtml(session, pr) {
+  if (!pr?.number) return '';
+  const parts = [pullRequestNumberChipLinkHtml(session, pr)];
+  const status = pullRequestInlineStatusDisplay(pr);
+  if (status) parts.push(`<span class="meta-pr-status ${esc(pullRequestStatusClass(pr))}">${esc(status)}</span>`);
+  return metaJoin(parts);
 }
 
 function pullRequestTextForBranch(pr, fallback = '') {
   if (!pr?.number) return '';
-  const status = pullRequestStatusDisplay(pr);
-  return [`#${pr.number}${status && status !== 'unknown' ? ` ${status}` : ''}`, pr.title || pr.description || fallback].filter(Boolean).join(' ');
+  return [pullRequestLinkLabel(pr), pr.title || pr.description || fallback].filter(Boolean).join(' ');
 }
 
-function otherBranchesHtml(git) {
+function branchUpdatedText(branch) {
+  const ts = Number(branch?.updated_ts || 0);
+  if (Number.isFinite(ts) && ts > 0) {
+    const seconds = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+    return relativeTimeFormat(seconds);
+  }
+  return branch?.updated || '';
+}
+
+function otherBranchesHtml(session, info) {
+  const git = info?.project?.git;
   const inventory = git?.other_branches || {};
   const branches = inventory.branches || [];
   if (!branches.length) {
     return `<div class="branch-list"><div class="branch-list-title">${esc(t('branch.all'))}</div><div class="meta-muted">${esc(t('branch.none'))}</div></div>`;
   }
   const items = branches.map(branch => {
-    const branchLink = branchLinkHtml(git, branch.name);
-    const prLink = pullRequestLinkForBranch(git, branch);
+    const pr = pullRequestForBranch(git, branch, info);
+    const branchLink = branchListBranchHtml(session, git, branch);
+    const prLink = branchPullRequestMetaHtml(session, pr);
     const linearLinks = (branch.linear_ids || []).map(linearIssueLinkHtml).filter(Boolean).join(' ');
-    const meta = [prLink, linearLinks, esc(branch.updated || '')].filter(Boolean).join(' ');
+    const meta = [prLink, linearLinks, esc(branchUpdatedText(branch))].filter(Boolean).join(' ');
     return `<div class="branch-item">
-      <div class="branch-name">${branch.current ? `<span class="info-branch-current">${esc(t('branch.current'))}</span> ` : ''}${branchLink}</div>
+      <div class="branch-name">${branchLink}</div>
       <div class="branch-meta">${meta}</div>
-      <div class="branch-subject">${esc(shortText(branch.subject || '', 240))}</div>
+      ${branchListSubjectHtml(branch, pr)}
     </div>`;
   }).join('');
   const hidden = Number(inventory.hidden_count || 0) > 0
@@ -722,6 +854,7 @@ function otherBranchesHtml(git) {
 
 function dragPayload(event) {
   const raw = event.dataTransfer?.getData('application/x-yolomux-session') || '';
+  if (!raw && dragPaneSlot) return null;
   if (!raw && dragSession) return {session: dragSession, sourceSlot: dragSourceSlot};
   if (!raw) return null;
   try {
@@ -729,6 +862,18 @@ function dragPayload(event) {
     return isLayoutItem(parsed.session) ? parsed : null;
   } catch (_) {
     return isLayoutItem(raw) ? {session: raw, sourceSlot: null} : null;
+  }
+}
+
+function paneDragPayload(event) {
+  const raw = event.dataTransfer?.getData('application/x-yolomux-pane') || '';
+  if (!raw && dragPaneSlot) return {slot: dragPaneSlot};
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return layoutSlotKeys().includes(parsed.slot) ? parsed : null;
+  } catch (_) {
+    return layoutSlotKeys().includes(raw) ? {slot: raw} : null;
   }
 }
 
@@ -769,10 +914,11 @@ async function openDraggedFilesInEditor(payload, options = {}) {
         targetSlot: options.targetSlot || null,
         targetZone: options.targetZone || 'middle',
         targetIndex: options.targetIndex == null ? null : Number(options.targetIndex) + index,
+        rehomeExisting: true,
       });
       // Unify with double-click: a dragged CHANGED (tracked, has-diff) file opens in the SAME diff
       // view (ensureCodeMirrorDiffPanel) as openChangedFileInDiff, not a plain edit-mode editor.
-      // Unchanged/untracked files have no diff available and stay in edit.
+      // Files with no diff payload stay in edit.
       await refreshOpenFileDiff(path, {silent: true});
       const draggedState = openFiles.get(path);
       if (draggedState && openFileDiffAvailable(draggedState)) {
@@ -801,6 +947,8 @@ async function openDraggedFilesInEditor(payload, options = {}) {
 }
 
 function terminalCurrentPath(session) {
+  const signalPath = tmuxSignalPanePathForSession(session);
+  if (signalPath) return signalPath;
   const info = transcriptMeta.sessions?.[session];
   return terminalDisplayPane(info)?.current_path || info?.selected_pane?.current_path || '';
 }
@@ -847,18 +995,30 @@ function moveCustomDragPreview(event) {
   customDragPreview.style.top = `${Math.round(event.clientY - customDragPreviewOffset.y)}px`;
 }
 
+const customDragPreviewCleanupEvents = ['drop', 'dragend', 'pointerup', 'mouseup', 'blur', 'visibilitychange'];
+
+function customDragPreviewEventTargets() {
+  return [document, window].filter(Boolean);
+}
+
 function bindCustomDragPreviewListeners() {
-  document.addEventListener?.('dragover', moveCustomDragPreview, true);
-  document.addEventListener?.('drag', moveCustomDragPreview, true);
-  document.addEventListener?.('drop', stopCustomDragPreview, true);
-  document.addEventListener?.('dragend', stopCustomDragPreview, true);
+  for (const target of customDragPreviewEventTargets()) {
+    target.addEventListener?.('dragover', moveCustomDragPreview, true);
+    target.addEventListener?.('drag', moveCustomDragPreview, true);
+    for (const eventName of customDragPreviewCleanupEvents) {
+      target.addEventListener?.(eventName, stopCustomDragPreview, true);
+    }
+  }
 }
 
 function unbindCustomDragPreviewListeners() {
-  document.removeEventListener?.('dragover', moveCustomDragPreview, true);
-  document.removeEventListener?.('drag', moveCustomDragPreview, true);
-  document.removeEventListener?.('drop', stopCustomDragPreview, true);
-  document.removeEventListener?.('dragend', stopCustomDragPreview, true);
+  for (const target of customDragPreviewEventTargets()) {
+    target.removeEventListener?.('dragover', moveCustomDragPreview, true);
+    target.removeEventListener?.('drag', moveCustomDragPreview, true);
+    for (const eventName of customDragPreviewCleanupEvents) {
+      target.removeEventListener?.(eventName, stopCustomDragPreview, true);
+    }
+  }
 }
 
 function stopCustomDragPreview() {
@@ -866,6 +1026,71 @@ function stopCustomDragPreview() {
   customDragPreview?.remove();
   customDragPreview = null;
   closeFileImagePreview();
+}
+
+function paneDragPreviewMetrics(slot, event) {
+  const rect = layoutSlotScreenRect(slot);
+  const fallbackWidth = 360;
+  const fallbackHeight = 220;
+  const sourceWidth = Math.max(1, Number(rect?.width) || fallbackWidth);
+  const sourceHeight = Math.max(1, Number(rect?.height) || fallbackHeight);
+  const viewport = appViewport();
+  const viewportWidth = Math.max(320, Number(viewport.width) || 1200);
+  const viewportHeight = Math.max(240, Number(viewport.height) || 800);
+  const maxWidth = Math.min(720, Math.max(220, viewportWidth * 0.64));
+  const maxHeight = Math.min(420, Math.max(160, viewportHeight * 0.58));
+  const scale = Math.min(1, maxWidth / sourceWidth, maxHeight / sourceHeight);
+  const width = Math.max(180, Math.round(sourceWidth * scale));
+  const height = Math.max(120, Math.round(sourceHeight * scale));
+  const sourceOffsetX = rect ? (Number(event?.clientX) || rect.left) - rect.left : width * 0.12;
+  const sourceOffsetY = rect ? (Number(event?.clientY) || rect.top) - rect.top : 18;
+  return {
+    width,
+    height,
+    offsetX: Math.max(16, Math.min(width - 16, Math.round(sourceOffsetX * scale))),
+    offsetY: Math.max(16, Math.min(height - 16, Math.round(sourceOffsetY * scale))),
+  };
+}
+
+function paneDragPreviewHtml(slot) {
+  const tabs = paneTabs(slot);
+  const active = activeItemForSide(slot) || tabs[0] || slot;
+  const title = itemLabel(active);
+  const count = tabs.length;
+  const extra = tabs
+    .filter(item => item !== active)
+    .slice(0, 3)
+    .map(item => `<span>${esc(itemLabel(item))}</span>`)
+    .join('');
+  return `
+    <div class="pane-drag-image-frame">
+      <div class="pane-drag-image-title">${esc(title)}</div>
+      <div class="pane-drag-image-meta">${esc(count === 1 ? '1 tab' : `${count} tabs`)}</div>
+      ${extra ? `<div class="pane-drag-image-tabs">${extra}</div>` : ''}
+    </div>`;
+}
+
+function startPaneDragPreview(event, slot, options = {}) {
+  stopCustomDragPreview();
+  const metrics = paneDragPreviewMetrics(slot, event);
+  const preview = document.createElement('div');
+  preview.className = 'pane-drag-image drag-image';
+  preview.dataset.dragSlot = slot;
+  preview.innerHTML = paneDragPreviewHtml(slot);
+  preview.style.position = 'fixed';
+  preview.style.pointerEvents = 'none';
+  preview.style.zIndex = '99999';
+  preview.style.width = `${metrics.width}px`;
+  preview.style.height = `${metrics.height}px`;
+  document.body.appendChild(preview);
+  customDragPreview = preview;
+  customDragPreviewOffset = {x: metrics.offsetX, y: metrics.offsetY};
+  moveCustomDragPreview(event);
+  if (options.nativeDrag === true) {
+    bindCustomDragPreviewListeners();
+    preview.getBoundingClientRect();
+    event.dataTransfer?.setDragImage?.(transparentNativeDragImage(), 0, 0);
+  }
 }
 
 // #47: tab drags use the native drag image (see startSessionDrag) — the clone-follow tab preview is
@@ -903,16 +1128,77 @@ function startFileDragPreview(event, paths, entry) {
 
 function fileDragPreviewMedia(path, entry) {
   const kind = entry?.kind || 'file';
-  if (kind === 'file' && IMAGE_EXTENSIONS.has(fileExtensionOf(path))) {
+  if (kind === 'file' && previewMediaKindForPath(path) === 'image') {
     return `<img class="file-drag-thumb" src="${rawFileUrl(path)}" alt="">`;
   }
   const icon = kind === 'dir' ? '▸' : '📄';
   return `<span class="file-drag-thumb file-drag-icon" aria-hidden="true">${icon}</span>`;
 }
 
+// S14: OPT-IN tab-drag timing to diagnose the ~500ms first-drag delay without guessing. Off by
+// default (no permanent user-visible perf log). Enable by setting storage key 'yolomux.debugDragTiming' to
+// '1' (via storageSet in the console), drag a tab, then read the per-bucket console.table at drop. Marks
+// the buckets the DOIT calls out: pointerdown -> dragstart/startSessionDrag (begin/end) -> first dragover
+// -> first dragMeasureStrip / paneTabDropPlacement. dragTimingMarkOnce dedups the repeating measure calls.
+let dragTimingMarks = null;
+const dragTimingSeen = new Set();
+function dragTimingEnabled() {
+  return storageGet('yolomux.debugDragTiming') === '1';
+}
+function dragTimingReset() {
+  dragTimingSeen.clear();
+  dragTimingMarks = dragTimingEnabled() ? [] : null;
+}
+function dragTimingMark(label) {
+  if (dragTimingMarks) dragTimingMarks.push({label, t: performance.now()});
+}
+function dragTimingMarkOnce(label) {
+  if (dragTimingMarks && !dragTimingSeen.has(label)) { dragTimingSeen.add(label); dragTimingMark(label); }
+}
+function dragTimingReport() {
+  if (dragTimingMarks && dragTimingMarks.length >= 2) {
+    const first = dragTimingMarks[0].t;
+    const rows = dragTimingMarks.map((mark, i) => ({
+      mark: mark.label,
+      deltaMs: i ? Number((mark.t - dragTimingMarks[i - 1].t).toFixed(1)) : 0,
+      sinceStartMs: Number((mark.t - first).toFixed(1)),
+    }));
+    console.table(rows);
+    showDragTimingOverlay(rows);   // copyable on-page readout — no DevTools needed
+  }
+  dragTimingMarks = null;
+  dragTimingSeen.clear();
+}
+
+// S14: render the last drag's timing into a fixed, click-to-select-all box so it can be
+// copy-pasted (or screenshotted) back without opening DevTools. Created lazily; only the flag-gated
+// dragTimingReport calls it, so it never appears in normal use.
+function showDragTimingOverlay(rows) {
+  let el = document.getElementById('drag-timing-overlay');
+  if (!el) {
+    el = document.createElement('pre');
+    el.id = 'drag-timing-overlay';
+    el.className = 'drag-timing-overlay';
+    el.title = 'drag timing (flag: yolomux.debugDragTiming) — click to select, then copy';
+    el.addEventListener('click', () => {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
+    document.body.appendChild(el);
+  }
+  const width = Math.max(...rows.map(row => row.mark.length));
+  el.textContent = ['drag timing (ms) — click to select, copy, paste back:',
+    ...rows.map(row => `${row.mark.padEnd(width)}  +${String(row.deltaMs).padStart(7)}  total ${String(row.sinceStartMs).padStart(7)}`)].join('\n');
+}
+
 function startSessionDrag(event, session, sourceSlot = null) {
+  dragTimingMark('startSessionDrag:begin');
   dragSession = session;
   dragSourceSlot = sourceSlot;
+  dragPaneSlot = null;
   const payload = JSON.stringify({session, sourceSlot});
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('application/x-yolomux-session', payload);
@@ -930,18 +1216,43 @@ function startSessionDrag(event, session, sourceSlot = null) {
     event.dataTransfer.setDragImage(source, offsetX, offsetY);
   }
   resetDragTabRectCache();
+  dragTimingMark('startSessionDrag:end');
+}
+
+function startPaneDrag(event, sourceSlot) {
+  const slot = layoutSlotKeys().includes(sourceSlot) ? sourceSlot : null;
+  if (!slot || slotIsFileExplorerPane(slot)) {
+    event.preventDefault?.();
+    return;
+  }
+  const active = activeItemForSide(slot);
+  if (!active) {
+    event.preventDefault?.();
+    return;
+  }
+  dragTimingMark('startPaneDrag');
+  dragSession = active;
+  dragSourceSlot = slot;
+  dragPaneSlot = slot;
+  const payload = JSON.stringify({slot});
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('application/x-yolomux-pane', payload);
+  event.dataTransfer.setData('text/plain', paneTabs(slot).map(itemLabel).join('\n'));
+  startPaneDragPreview(event, slot, {nativeDrag: true});
 }
 
 function endSessionDrag(event) {
   dragSession = null;
   dragSourceSlot = null;
+  dragPaneSlot = null;
   resetDragTabRectCache();
   stopCustomDragPreview();
-  sessionButtons.classList.remove('drag-over');
+  sessionButtons.classList.remove(CLS.dragOver);
   clearDropPreview();
-  // DOIT.6 #30: flush any tab/preferences re-renders that were deferred during the drag.
+  // flush any tab/preferences re-renders that were deferred during the drag.
   if (pendingTabStripRender) { pendingTabStripRender = false; renderPaneTabStrips(); }
   if (pendingPreferencesRender) { pendingPreferencesRender = false; renderPreferencesPanels(); }
-  // DOIT.6 #114: flush the full panel re-render deferred during the drag (dragSession is null now).
-  if (pendingPanelsRender) { pendingPanelsRender = false; renderPanels(); }
+  // flush through the shared layout render scheduler so same-shape drops keep the cheap path.
+  flushPendingLayoutRender();
+  dragTimingReport();
 }

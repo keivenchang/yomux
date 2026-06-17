@@ -8,10 +8,12 @@ from pathlib import Path
 from .common import AUTH_CONFIG_DISPLAY_PATH
 from .common import MAX_YOLOMUX_SESSION_TABS
 from .common import SERVER_HOSTNAME
+from .common import SERVER_STARTED_AT
 from .common import STATIC_DIR
 from .common import YOLOMUX_VERSION
 from .common import login_username
 from .common import xterm_asset_path
+from .common import yolomux_commit_sha
 from .common import yolomux_commit_time_pt
 from .settings import save_settings
 from .settings import settings_payload
@@ -32,24 +34,30 @@ STATIC_CONTENT_TYPES = {
     "xterm.js": "application/javascript; charset=utf-8",
     "yolomux.css": "text/css; charset=utf-8",
     "yolomux.js": "application/javascript; charset=utf-8",
+    "vendor/dockview.css": "text/css; charset=utf-8",
+    "vendor/dockview-core.noStyle.js": "application/javascript; charset=utf-8",
+    "vendor/mermaid.min.js": "application/javascript; charset=utf-8",
 }
 
 
 # i18n locale catalogs are served from /static/locales/<locale>.json (all-static-fetch). The strict
 # pattern (no "/" or ".." in the locale) prevents path traversal.
 _LOCALE_ASSET_RE = re.compile(r"^locales/[A-Za-z0-9_-]+\.json$")
+_FONT_ASSET_RE = re.compile(r"^fonts/[A-Za-z0-9_-]+\.woff2$")
 
 
 def static_content_type(asset: str) -> str | None:
     if _LOCALE_ASSET_RE.match(asset):
         return "application/json; charset=utf-8"
+    if _FONT_ASSET_RE.match(asset):
+        return "font/woff2"
     return STATIC_CONTENT_TYPES.get(asset)
 
 
 def static_asset_path(asset: str) -> Path | None:
     if asset in {"xterm.css", "xterm.js"}:
         return xterm_asset_path(asset)
-    if asset in STATIC_CONTENT_TYPES or _LOCALE_ASSET_RE.match(asset):
+    if asset in STATIC_CONTENT_TYPES or _LOCALE_ASSET_RE.match(asset) or _FONT_ASSET_RE.match(asset):
         path = STATIC_DIR / asset
         return path if path.is_file() else None
     return None
@@ -65,7 +73,7 @@ def bootstrap_locale(settings_data: dict) -> str:
 def bootstrap_locale_catalogs(locale: str) -> dict:
     """Inline the active locale's catalog (+ the en fallback) so t() resolves on the first render.
 
-    DOIT.8: boot-time surfaces (menu bar, tabs, wordmark) render synchronously before a client-side
+    boot-time surfaces (menu bar, tabs, wordmark) render synchronously before a client-side
     fetch could complete, so the active + fallback catalogs are embedded in the bootstrap. Other locales
     are still fetched from /static/locales on a language switch.
     """
@@ -82,7 +90,7 @@ def bootstrap_locale_catalogs(locale: str) -> dict:
 
 
 def html_lang_dir_attrs(locale: str) -> str:
-    """`lang="…" dir="…"` for the <html> shell. DOIT.8 Phase 2: RTL locales (ar) get dir="rtl" so the
+    """`lang="…" dir="…"` for the <html> shell. Phase 2: RTL locales (ar) get dir="rtl" so the
     server-rendered first paint already mirrors before the JS i18n runtime sets it."""
     code = str(locale or "en")
     base = code.lower().split("-")[0]
@@ -118,8 +126,8 @@ def static_asset_url(asset: str) -> str:
 
 
 def brand_html(class_name: str = "brand-title", tag: str = "span", locale: str | None = None) -> str:
-    version_title = html.escape(f"Last commit: {yolomux_commit_time_pt()}", quote=True)
-    # DOIT.13 follow-up: the server-rendered pre-auth screens (login / auth-setup) are NOT localized by
+    version_title = html.escape(f"SHA: {yolomux_commit_sha()}\nLast commit: {yolomux_commit_time_pt()}", quote=True)
+    # follow-up: the server-rendered pre-auth screens (login / auth-setup) are NOT localized by
     # the JS renderBrandWordmark(), so localize the YO/LO glyphs here too — otherwise a Chinese locale
     # showed "YO/LOmux" instead of 優樂mux / 优乐mux. Pass a locale on those pages; the main app leaves it
     # None (English) and re-localizes client-side after bootstrap.
@@ -133,11 +141,19 @@ def brand_html(class_name: str = "brand-title", tag: str = "span", locale: str |
         '<span class="brand-red">u</span>'
         '<span class="brand-yellow">x</span>'
         f'<span class="brand-version" title="{version_title}">{html.escape(YOLOMUX_VERSION)}</span>'
+        '<button type="button" class="brand-update-badge" data-update-badge hidden '
+        'title="Update available — click to update and restart" aria-label="Update available">update</button>'
         f"</{tag}>"
     )
 
 
-def html_page(sessions: list[str], access_role: str = "admin", dev: bool = False, dangerously_yolo: bool = False) -> str:
+def html_page(
+    sessions: list[str],
+    access_role: str = "admin",
+    dev: bool = False,
+    dangerously_yolo: bool = False,
+    share: dict | None = None,
+) -> str:
     settings_data = settings_payload()
     bootstrap = {
         "sessions": sessions,
@@ -147,7 +163,7 @@ def html_page(sessions: list[str], access_role: str = "admin", dev: bool = False
         # The exact launch command per agent (incl. the --dangerously-* flags when in YOLO mode), so the
         # new-session menu can show "Claude — <params>" instead of just "+ Claude".
         "agentLaunchCommands": {agent: agent_command(agent, dangerously_yolo) for agent in ("claude", "codex", "term")},
-        # DOIT.6 #39: per-agent {installed, logged_in} so the GUI can grey an installed-but-logged-out
+        # per-agent {installed, logged_in} so the GUI can grey an installed-but-logged-out
         # agent in the new-session picker (cached server-side; not probed per request).
         "agentAuth": agent_auth_status(),
         "accessRole": access_role,
@@ -155,10 +171,13 @@ def html_page(sessions: list[str], access_role: str = "admin", dev: bool = False
         "repoRoot": str(Path(__file__).resolve().parents[1]),
         "maxSessionTabs": MAX_YOLOMUX_SESSION_TABS,
         "serverHostname": SERVER_HOSTNAME,
+        "serverStartedAt": SERVER_STARTED_AT,
+        "serverStartedAtMs": int(SERVER_STARTED_AT * 1000),
         "version": YOLOMUX_VERSION,
+        "versionCommit": yolomux_commit_sha(),
         "versionCommitTime": yolomux_commit_time_pt(),
         "settingsPayload": settings_data,
-        # i18n (DOIT.8): resolved active locale for first paint ("system" -> en server-side; the client
+        # i18n: resolved active locale for first paint ("system" -> en server-side; the client
         # may refine via navigator.language). The active locale's catalog (+ the en fallback) is INLINED
         # so t() resolves SYNCHRONOUSLY on the first render — the menu bar, tabs, and wordmark paint at
         # boot before any fetch could complete. Other locales are still fetched on a language switch.
@@ -166,6 +185,7 @@ def html_page(sessions: list[str], access_role: str = "admin", dev: bool = False
         "strings": bootstrap_locale_catalogs(bootstrap_locale(settings_data)),
         "yoloRulesPayload": rules_status(),
         "codeMirrorAssetUrl": static_asset_url("codemirror.js"),
+        "share": share or None,
     }
     # Embed JSON in a <script> tag WITHOUT html.escape: a script element's text content is not
     # HTML-decoded, so html.escape would leave literal &lt;/&gt;/&amp; inside parsed strings (e.g. the
@@ -185,13 +205,15 @@ def html_page(sessions: list[str], access_role: str = "admin", dev: bool = False
 <title>YOLOmux</title>
 <link rel="stylesheet" href="{static_asset_url("xterm.css")}" onerror="this.onerror=null;this.href='https://cdn.jsdelivr.net/npm/@xterm/xterm/css/xterm.css';">
 <link rel="stylesheet" href="{static_asset_url("brand.css")}">
+<link rel="stylesheet" href="{static_asset_url("vendor/dockview.css")}">
 <link rel="stylesheet" href="{static_asset_url("yolomux.css")}">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
 <script src="{static_asset_url("xterm.js")}" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/@xterm/xterm/lib/xterm.js';"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js" defer></script>
-<script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/common.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js" defer></script>
 </head>
 <body>
+<div id="appRoot" class="app-root">
 <header class="topbar">
   <div class="brand-cell">
     {brand_html("brand brand-title title", "div")}
@@ -215,15 +237,15 @@ def html_page(sessions: list[str], access_role: str = "admin", dev: bool = False
 <aside id="fileExplorer" class="file-explorer" hidden aria-label="File Explorer">
   <div class="file-explorer-tree-col">
     <div class="file-explorer-head">
+      <input class="file-explorer-path" id="fileExplorerPath" type="text" value="/" spellcheck="false" aria-label="File Explorer root path">
+      <button type="button" id="fileExplorerPathCopy" class="path-copy-button file-explorer-path-copy" title="Copy current path" aria-label="Copy current path"></button>
+      <button type="button" class="file-explorer-header-action" data-file-explorer-collapse title="Collapse all" aria-label="Collapse all">▤</button>
       <button type="button" id="fileExplorerHiddenToggle" class="file-explorer-hidden-toggle" title="Show hidden files (dotfiles)" aria-pressed="false">.*</button>
-      <button type="button" id="fileExplorerRootMode" class="file-explorer-root-mode-toggle" title="Root mode: fixed" aria-pressed="false">Root</button>
+      <button type="button" id="fileExplorerRootMode" class="file-explorer-root-mode-toggle active" title="Sync: follow active session" aria-pressed="true">Sync</button>
       <div id="fileExplorerQuickAccess" class="file-explorer-quick-access" aria-label="Quick paths"></div>
       <button type="button" class="file-explorer-header-action" data-file-explorer-new-file title="New file" aria-label="New file">+</button>
       <button type="button" class="file-explorer-header-action" data-file-explorer-new-folder title="New folder" aria-label="New folder">▣</button>
       <button type="button" class="file-explorer-header-action" data-file-explorer-refresh title="Refresh" aria-label="Refresh">↻</button>
-      <button type="button" class="file-explorer-header-action" data-file-explorer-collapse title="Collapse all" aria-label="Collapse all">▤</button>
-      <input class="file-explorer-path" id="fileExplorerPath" type="text" value="/" spellcheck="false" aria-label="File Explorer root path">
-      <button type="button" id="fileExplorerPathCopy" class="path-copy-button file-explorer-path-copy" title="Copy current path" aria-label="Copy current path"></button>
       <button type="button" id="fileExplorerClose" class="file-explorer-close" title="Close File Explorer" aria-label="Close"></button>
     </div>
     <div class="file-explorer-tree" id="fileExplorerTree" role="tree" tabindex="0"></div>
@@ -231,14 +253,18 @@ def html_page(sessions: list[str], access_role: str = "admin", dev: bool = False
 </aside>
 <main id="grid" class="grid"></main>
 <div id="panelPool" class="panel-pool" aria-hidden="true"></div>
-<section id="modal" class="modal">
-  <div class="modal-head">
-    <div id="modalTitle">Transcript</div>
-    <button id="closeModal">Close</button>
+<section id="modal" class="modal app-modal-overlay">
+  <div class="modal-dialog">
+    <div class="modal-head">
+      <div id="modalTitle">Transcript</div>
+      <button id="closeModal" title="Close" aria-label="Close">X</button>
+    </div>
+    <pre id="modalBody"></pre>
   </div>
-  <pre id="modalBody"></pre>
 </section>
+</div>
 <script id="yolomux-bootstrap" type="application/json">{bootstrap_json}</script>
+<script src="{static_asset_url("vendor/dockview-core.noStyle.js")}"></script>
 <script src="{static_asset_url("yolomux.js")}"></script>
 </body>
 </html>
@@ -246,7 +272,7 @@ def html_page(sessions: list[str], access_role: str = "admin", dev: bool = False
 
 
 def agent_login_notice_html(css_class: str = "login-warning") -> str:
-    # DOIT.6 #39: if an installed agent (claude/codex) is not logged in, tell the user the exact login
+    # if an installed agent (claude/codex) is not logged in, tell the user the exact login
     # command on the login + auth-setup screens. If NEITHER installed agent is logged in, lead with a
     # stronger "Please login to Claude or Codex". Returns '' when every installed agent is logged in
     # (or none are installed — a terminal-only host needs no agent login).
@@ -264,25 +290,30 @@ def agent_login_notice_html(css_class: str = "login-warning") -> str:
     return f'<div class="{html.escape(css_class)}">{lead} — run {commands}</div>'
 
 
-# DOIT.8 Phase 1: the login-screen language picker (entry point #1). Endonym-labeled (each language in
-# its own script) so the pre-auth screen needs no localization; Traditional Chinese before Simplified.
-# 'system' = follow the browser. A choice here is saved to general.language after a successful sign-in,
-# so all three entry points (login / topbar / Preferences) write the SAME setting.
+# Phase 1: the login-screen language picker (entry point #1). Endonym-labeled in the same
+# product-priority order as the client switchers. 'system' = follow the browser. A choice here is saved
+# to general.language after a successful sign-in, so all three entry points write the SAME setting.
 LOGIN_LOCALE_CHOICES: list[tuple[str, str]] = [
     ("system", "System"),
     ("en", "English"),
     ("zh-Hant", "繁體中文"),
     ("zh-Hans", "简体中文"),
-    ("es", "Español"),
     ("ja", "日本語"),
+    ("ko", "한국어"),
+    ("es", "Español"),
     ("de", "Deutsch"),
     ("fr", "Français"),
+    ("it", "Italiano"),
     ("pt-BR", "Português (BR)"),
-    ("ru", "Русский"),
-    ("ko", "한국어"),
-    ("hi", "हिन्दी"),
-    ("ar", "العربية"),
+    ("pl", "Polski"),
+    ("nl", "Nederlands"),
     ("he", "עברית"),
+    ("ar", "العربية"),
+    ("ru", "Русский"),
+    ("hi", "हिन्दी"),
+    ("vi", "Tiếng Việt"),
+    ("th", "ไทย"),
+    ("tr", "Türkçe"),
 ]
 _LOGIN_LOCALE_VALUES = {value for value, _ in LOGIN_LOCALE_CHOICES}
 
@@ -294,16 +325,29 @@ def current_language_pref() -> str:
 
 
 def locale_field_html(current: str = "system", css_class: str = "login-locale") -> str:
-    """The endonym-labeled language <select>, shared by the login and setup screens (DOIT.13)."""
+    """The endonym-labeled language picker, shared by the login and setup screens."""
+    def option_label(value: str, label: str) -> str:
+        return server_string(current, "pref.general.language.system") if value == "system" else label
+
+    selected_value = current if current in _LOGIN_LOCALE_VALUES else "system"
+    selected_label = option_label(selected_value, dict(LOGIN_LOCALE_CHOICES).get(selected_value, "System"))
     options = "".join(
-        f'<option value="{html.escape(value, quote=True)}"{" selected" if value == current else ""}>{html.escape(label)}</option>'
+        (
+            f'<button type="button" role="option" class="locale-option" data-locale-value="{html.escape(value, quote=True)}"'
+            f' aria-selected="{"true" if value == selected_value else "false"}">'
+            f"{html.escape(option_label(value, label))}</button>"
+        )
         for value, label in LOGIN_LOCALE_CHOICES
     )
     language_label = html.escape(server_string(current, "login.language"))
     return (
         f'<label class="{html.escape(css_class, quote=True)}">'
         f"<span>{language_label}</span>"
-        f'<select name="locale" aria-label="{language_label}">{options}</select>'
+        f'<span class="locale-picker" data-locale-picker>'
+        f'<input type="hidden" name="locale" value="{html.escape(selected_value, quote=True)}" data-locale-input>'
+        f'<button type="button" class="locale-toggle" aria-label="{language_label}" aria-haspopup="listbox" aria-expanded="false" data-locale-toggle>{html.escape(selected_label)}</button>'
+        f'<span class="locale-options" role="listbox" aria-label="{language_label}" hidden>{options}</span>'
+        f'</span>'
         "</label>"
     )
 
@@ -321,7 +365,7 @@ def save_login_locale(value: str) -> None:
 
 def login_html(next_path: str = "/", error: str = "", secure: bool = True, current_locale: str = "system") -> str:
     safe_next = html.escape(next_path if next_path.startswith("/") else "/", quote=True)
-    # DOIT.8 Phase 1: localize the pre-auth login chrome via the SAVED locale (the JS i18n runtime is not
+    # Phase 1: localize the pre-auth login chrome via the SAVED locale (the JS i18n runtime is not
     # loaded here). The HTTPS warning + agent-login notice carry shell commands, so they stay English.
     sign_in = html.escape(server_string(current_locale, "login.signIn"))
     username_label = html.escape(server_string(current_locale, "login.username"))
@@ -350,7 +394,6 @@ def login_html(next_path: str = "/", error: str = "", secure: bool = True, curre
 <main class="login-shell">
   <section class="login-panel">
     <div class="login-brand">{brand_html("brand-title login-brand-title", "div", locale=current_locale)}</div>
-    <h1>{sign_in}</h1>
     {security_html}
     {agent_notice_html}
     {error_html}
@@ -374,6 +417,50 @@ def login_html(next_path: str = "/", error: str = "", secure: bool = True, curre
 </main>
 <script>
 (() => {{
+  document.querySelectorAll('[data-locale-picker]').forEach(picker => {{
+    const toggle = picker.querySelector('[data-locale-toggle]');
+    const input = picker.querySelector('[data-locale-input]');
+    const options = picker.querySelector('.locale-options');
+    if (!toggle || !input || !options) return;
+    const close = () => {{
+      options.hidden = true;
+      toggle.setAttribute('aria-expanded', 'false');
+    }};
+    toggle.addEventListener('click', event => {{
+      event.preventDefault();
+      event.stopPropagation();
+      const open = options.hidden;
+      document.querySelectorAll('.locale-options').forEach(node => {{
+        if (node !== options) node.hidden = true;
+      }});
+      options.hidden = !open;
+      toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }});
+    options.addEventListener('click', event => {{
+      const option = event.target.closest('[data-locale-value]');
+      if (!option) return;
+      event.preventDefault();
+      input.value = option.dataset.localeValue || 'system';
+      toggle.textContent = option.textContent || input.value;
+      options.querySelectorAll('[data-locale-value]').forEach(node => node.setAttribute('aria-selected', node === option ? 'true' : 'false'));
+      close();
+    }});
+    picker.addEventListener('keydown', event => {{
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      close();
+      toggle.focus();
+    }});
+  }});
+  document.addEventListener('click', event => {{
+    document.querySelectorAll('[data-locale-picker]').forEach(picker => {{
+      if (picker.contains(event.target)) return;
+      const options = picker.querySelector('.locale-options');
+      const toggle = picker.querySelector('[data-locale-toggle]');
+      if (options) options.hidden = true;
+      if (toggle) toggle.setAttribute('aria-expanded', 'false');
+    }});
+  }});
   const labels = {toggle_labels};
   const password = document.getElementById('loginPassword');
   const toggle = document.getElementById('togglePassword');
@@ -398,7 +485,7 @@ def setup_auth_html(current_locale: str = "system") -> str:
     # here), the same way login_html() does. The HTTPS recommendation + agent-login notice carry shell
     # commands, so — matching login_html — they stay English. The auth.yaml example block is literal
     # config, not UI. The locale is carried pre-auth by request_locale_pref (query/cookie), so the
-    # setup-screen picker can switch language WITHOUT writing settings (DOIT.13).
+    # setup-screen picker can switch language WITHOUT writing settings.
     locale = current_locale if current_locale in _LOGIN_LOCALE_VALUES else "system"
     locale_picker = locale_field_html(locale, "setup-locale")
     auth_path = html.escape(AUTH_CONFIG_DISPLAY_PATH)

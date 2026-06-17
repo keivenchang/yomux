@@ -1,10 +1,15 @@
 import argparse
+import socket
 import subprocess
+import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from yolomux_lib import cli
+from yolomux_lib.server import TmuxWebtermHTTPServer
 from yolomux_lib.server import https_redirect_response
 
 
@@ -39,13 +44,13 @@ def test_parse_args_supports_sessions_dangerous_yolo_and_self_signed(monkeypatch
     monkeypatch.setattr(
         cli.sys,
         "argv",
-        ["yolomux.py", "--host", "0.0.0.0", "--port", "7778", "--sessions", "1,2", "ant", "--dang", "--self-signed"],
+        ["yolomux.py", "--host", "0.0.0.0", "--port", "19001", "--sessions", "1,2", "ant", "--dang", "--self-signed"],
     )
 
     args = cli.parse_args()
 
     assert args.host == "0.0.0.0"
-    assert args.port == 7778
+    assert args.port == 19001
     assert args.sessions == ["1,2", "ant"]
     assert args.dangerously_yolo is True
     assert args.self_signed is True
@@ -55,7 +60,7 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
     captured = {}
     args = argparse.Namespace(
         host="0.0.0.0",
-        port=7778,
+        port=19001,
         sessions=["1,2", "ant"],
         dangerously_yolo=True,
         self_signed=False,
@@ -72,6 +77,10 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
 
         def restore_auto_approve(self):
             return []
+
+        def start_yoagent_backend_prewarm(self, **kwargs):
+            captured["yoagent_prewarm"] = kwargs
+            return {"ok": True}, 202
 
         def stop_auto_approve_all(self):
             captured["stopped"] = True
@@ -100,9 +109,10 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert captured["sessions"] == ["1", "2", "ant"]
     assert captured["dangerously_yolo"] is True
-    assert captured["address"] == ("0.0.0.0", 7778)
+    assert captured["address"] == ("0.0.0.0", 19001)
     assert captured["tls_context"] is None
     assert captured["dev"] is False  # dev mode off by default
+    assert captured["yoagent_prewarm"] == {"reason": "server_start"}
     assert captured["served"] is True
     assert captured["stopped"] is True
     assert captured["closed"] is True
@@ -135,10 +145,32 @@ def test_self_signed_cert_generation_is_persistent(monkeypatch, tmp_path):
 
 def test_plain_http_on_tls_port_gets_redirect_response():
     response = https_redirect_response(
-        b"GET /foo?bar=1 HTTP/1.1\r\nHost: localhost:7778\r\n\r\n",
-        "fallback:7778",
+        b"GET /foo?bar=1 HTTP/1.1\r\nHost: localhost:19001\r\n\r\n",
+        "fallback:19001",
     )
 
     assert b"308 Permanent Redirect" in response
-    assert b"Location: https://localhost:7778/foo?bar=1" in response
+    assert b"Location: https://localhost:19001/foo?bar=1" in response
     assert b"Use HTTPS" in response
+
+
+def test_tls_socket_peek_waits_for_delayed_plaintext_first_byte():
+    server_socket, client_socket = socket.socketpair()
+
+    try:
+        fake_server = SimpleNamespace(tls_context=object(), tls_peek_timeout_seconds=0.4)
+
+        def delayed_client_write():
+            time.sleep(0.15)
+            client_socket.sendall(b"G")
+
+        writer = threading.Thread(target=delayed_client_write)
+        writer.start()
+        prepared = TmuxWebtermHTTPServer.prepare_request_socket(fake_server, server_socket)
+        writer.join(timeout=1)
+
+        assert prepared is server_socket
+        assert server_socket.recv(1) == b"G"
+    finally:
+        server_socket.close()
+        client_socket.close()

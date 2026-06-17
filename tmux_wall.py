@@ -27,8 +27,11 @@ from typing import Any
 from urllib.parse import parse_qs
 from urllib.parse import urlparse
 
+from yolomux_lib.common import split_csv
+from yolomux_lib.tmux_utils import cmd_error
 from yolomux_lib.tmux_utils import run_cmd
 from yolomux_lib.tmux_utils import tmux
+from yolomux_lib.tmux_utils import tmux_capture_pane
 
 
 DEFAULT_SESSIONS = ("project1", "project2", "project3", "project4")
@@ -111,7 +114,7 @@ def list_panes() -> tuple[list[PaneInfo], str | None]:
     )
     result = tmux(["list-panes", "-a", "-F", fmt])
     if result.returncode != 0:
-        err = (result.stderr or result.stdout or "tmux list-panes failed").strip()
+        err = cmd_error(result, "tmux list-panes failed")
         return [], err
 
     panes: list[PaneInfo] = []
@@ -135,14 +138,8 @@ def list_panes() -> tuple[list[PaneInfo], str | None]:
     return panes, None
 
 
-def split_specs(specs: list[str]) -> list[str]:
-    parts: list[str] = []
-    for spec in specs:
-        for item in spec.split(","):
-            item = item.strip()
-            if item:
-                parts.append(item)
-    return parts
+# comma-flattening is common.split_csv (also used by auto_approve_tmux); was a third copy here.
+split_specs = split_csv
 
 
 def pane_sort_key(pane: PaneInfo) -> tuple[str, int, int]:
@@ -232,11 +229,13 @@ def default_targets(panes: list[PaneInfo], slots: int) -> list[str]:
 
 
 def capture_pane(target: str, lines: int) -> tuple[str, str | None]:
-    result = tmux(["capture-pane", "-t", target, "-p", "-S", f"-{lines}"], timeout=3.0)
-    if result.returncode != 0:
-        err = (result.stderr or result.stdout or "tmux capture-pane failed").strip()
-        return "", err
-    return result.stdout.rstrip("\n"), None
+    # route through the shared tmux_utils.tmux_capture_pane so the wall gets the same -J
+    # wrapped-line rejoin + exact-target resolution as the main app. The wall previously
+    # forked this with a bare capture-pane that dropped -J, so a wrapped command rendered differently here.
+    output = tmux_capture_pane(target, lines=lines, timeout=3.0)
+    if output is None:
+        return "", "tmux capture-pane failed"
+    return output.rstrip("\n"), None
 
 
 def parse_container_table(text: str) -> list[dict[str, str]]:
@@ -269,7 +268,7 @@ def load_container_info() -> tuple[list[dict[str, str]], str | None]:
         return [], f"missing container helper: {CONTAINER_HELPER}"
     result = run_cmd(["python3", str(CONTAINER_HELPER)], timeout=8.0)
     if result.returncode != 0:
-        err = (result.stderr or result.stdout or "container helper failed").strip()
+        err = cmd_error(result, "container helper failed")
         return [], err
     return parse_container_table(result.stdout), None
 

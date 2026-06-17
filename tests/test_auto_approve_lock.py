@@ -6,8 +6,12 @@ import tempfile
 import time
 from pathlib import Path
 
+import pytest
+
 from yolomux_lib import auto_approve_worker
 from yolomux_lib import control
+
+pytestmark = pytest.mark.socket
 
 
 def test_auto_approve_lock_blocks_second_process(tmp_path, monkeypatch):

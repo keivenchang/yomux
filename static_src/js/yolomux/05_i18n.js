@@ -6,7 +6,8 @@
 let i18nActiveLocale = (typeof bootstrap === 'object' && bootstrap && bootstrap.locale) ? String(bootstrap.locale) : 'en';
 const i18nFallbackLocale = 'en';
 const i18nCatalogs = new Map();  // locale -> {dottedKey: string}
-// DOIT.8: seed from the INLINED bootstrap catalogs (active locale + en fallback) so t() resolves
+let i18nApplyLocaleRequestId = 0;
+// seed from the INLINED bootstrap catalogs (active locale + en fallback) so t() resolves
 // SYNCHRONOUSLY on the very first render — the menu bar/tabs/wordmark paint at boot before any fetch.
 if (typeof bootstrap === 'object' && bootstrap && bootstrap.strings && typeof bootstrap.strings === 'object') {
   for (const [loc, catalog] of Object.entries(bootstrap.strings)) {
@@ -52,19 +53,71 @@ function i18nActiveLocaleId() {
   return i18nActiveLocale;
 }
 
-// DOIT.8 Phase 3: render an "N units ago" relative time in the active locale's native phrasing via
-// Intl.RelativeTimeFormat. Falls back to a plain English string if the API is unavailable.
+// Phase 3: render a relative time in the active locale's native phrasing via
+// Intl.RelativeTimeFormat. Falls back through local catalog strings if the browser API is unavailable.
 function relativeTimeFormat(secondsAgo) {
   const sec = Math.max(0, Math.round(Number(secondsAgo) || 0));
   let value;
   let unit;
   if (sec < 3600) { value = Math.round(sec / 60); unit = 'minute'; }
   else if (sec < 86400) { value = Math.round(sec / 3600); unit = 'hour'; }
-  else { value = Math.round(sec / 86400); unit = 'day'; }
+  else if (sec < 604800) { value = Math.round(sec / 86400); unit = 'day'; }
+  else if (sec < 2629800) { value = Math.round(sec / 604800); unit = 'week'; }
+  else if (sec < 31557600) { value = Math.round(sec / 2629800); unit = 'month'; }
+  else { value = Math.round(sec / 31557600); unit = 'year'; }
   try {
     return new Intl.RelativeTimeFormat(i18nActiveLocale, {numeric: 'always'}).format(-value, unit);
   } catch (_) {
-    return `${value} ${unit}${value === 1 ? '' : 's'} ago`;
+    return t(`relative.${unit}`, {count: value});
+  }
+}
+
+function compactRelativeTimeFormat(secondsAgo) {
+  const sec = Math.max(0, Math.round(Number(secondsAgo) || 0));
+  let value;
+  let unit;
+  if (sec < 3600) { value = Math.max(1, Math.round(sec / 60)); unit = 'minute'; }
+  else if (sec < 86400) { value = Math.max(1, Math.round(sec / 3600)); unit = 'hour'; }
+  else if (sec < 604800) { value = Math.max(1, Math.round(sec / 86400)); unit = 'day'; }
+  else if (sec < 2629800) { value = Math.max(1, Math.round(sec / 604800)); unit = 'week'; }
+  else if (sec < 31557600) { value = Math.max(1, Math.round(sec / 2629800)); unit = 'month'; }
+  else { value = Math.max(1, Math.round(sec / 31557600)); unit = 'year'; }
+  try {
+    return new Intl.RelativeTimeFormat(i18nActiveLocale, {numeric: 'always', style: 'short'})
+      .format(-value, unit)
+      .replace(/\./g, '');
+  } catch (_) {
+    return relativeTimeFormat(secondsAgo);
+  }
+}
+
+function normalizeDateTimeHourCycle(value) {
+  return String(value || '') === '12' ? '12' : '24';
+}
+
+function dateTimeFormatOptionsForHourCycle(options = {}) {
+  const next = {...(options || {})};
+  if (!Object.prototype.hasOwnProperty.call(next, 'hour')) return next;
+  if (Object.prototype.hasOwnProperty.call(next, 'hour12')) return next;
+  if (Object.prototype.hasOwnProperty.call(next, 'hourCycle')) return next;
+  if (normalizeDateTimeHourCycle(dateTimeHourCycle) === '12') next.hour12 = true;
+  else next.hourCycle = 'h23';
+  return next;
+}
+
+function localizedDateTimeFormat(timestampSeconds, options = {}) {
+  const value = Number(timestampSeconds || 0);
+  if (!value) return '';
+  const date = new Date(value * 1000);
+  const dateTimeOptions = dateTimeFormatOptionsForHourCycle(options);
+  try {
+    return new Intl.DateTimeFormat(i18nActiveLocale, dateTimeOptions).format(date);
+  } catch (_) {
+    try {
+      return new Intl.DateTimeFormat(i18nFallbackLocale, dateTimeOptions).format(date);
+    } catch (_) {
+      return '';
+    }
   }
 }
 
@@ -90,48 +143,58 @@ async function i18nLoadCatalog(locale) {
 // Switch the active locale: ensure the en fallback + the active catalog are loaded, then re-render
 // the localized surfaces. Safe to call before the render functions exist (guarded).
 async function applyLocale(locale) {
+  const requestId = ++i18nApplyLocaleRequestId;
   const next = String(locale || i18nFallbackLocale);
   await i18nLoadCatalog(i18nFallbackLocale);
   if (next !== i18nFallbackLocale) await i18nLoadCatalog(next);
+  if (requestId !== i18nApplyLocaleRequestId) return;
   i18nActiveLocale = next;
-  // DOIT.8 Phase 2: flip the document direction so RTL locales (ar) mirror the whole layout.
+  // Phase 2: flip the document direction so RTL locales (ar) mirror the whole layout.
   if (typeof document !== 'undefined' && document.documentElement) {
     document.documentElement.setAttribute('dir', i18nIsRtl(next) ? 'rtl' : 'ltr');
     document.documentElement.setAttribute('lang', next);
   }
-  rerenderForLocale();
+  rerenderForLocale({localeChange: true});
+  if (typeof scheduleShareAppearancePublish === 'function') scheduleShareAppearancePublish();
+  if (typeof scheduleSharePopupLayerPublish === 'function') scheduleSharePopupLayerPublish({immediate: true});
 }
 
-// The real (non-pseudo) locales that ship a catalog, most-specific first. 'system' resolves against
-// navigator.language to one of these. Add new locales here as their catalogs ship.
+// The real (non-pseudo) locales that ship a catalog, in product-priority order. 'system' resolves
+// against navigator.language to one of these. Add new locales here as their catalogs ship.
 function i18nSupportedLocales() {
-  return ['zh-Hant', 'zh-Hans', 'es', 'ja', 'de', 'fr', 'pt-BR', 'ru', 'ko', 'hi', 'ar', 'he', 'en'];
+  return ['en', 'zh-Hant', 'zh-Hans', 'ja', 'ko', 'es', 'de', 'fr', 'it', 'pt-BR', 'pl', 'nl', 'he', 'ar', 'ru', 'hi', 'vi', 'th', 'tr'];
 }
 
-// DOIT.8 Phase 2: right-to-left locales. Drives document.dir so the browser mirrors the layout.
+// Phase 2: right-to-left locales. Drives document.dir so the browser mirrors the layout.
 function i18nIsRtl(locale) {
   const base = String(locale || '').toLowerCase().split('-')[0];
   return base === 'ar' || base === 'he' || base === 'fa' || base === 'ur';
 }
 
 // The language-switcher choices (Preferences picker + topbar switcher). Endonyms stay in their own
-// script (never translated); 'system'/pseudo are localized. Traditional Chinese before Simplified.
+// script (never translated); 'system'/pseudo are localized. en-XA stays last as the QA pseudo-locale.
 function i18nLocaleChoices() {
   return [
     {value: 'system', label: t('pref.general.language.system')},
     {value: 'en', label: 'English'},
     {value: 'zh-Hant', label: '繁體中文'},
     {value: 'zh-Hans', label: '简体中文'},
-    {value: 'es', label: 'Español'},
     {value: 'ja', label: '日本語'},
+    {value: 'ko', label: '한국어'},
+    {value: 'es', label: 'Español'},
     {value: 'de', label: 'Deutsch'},
     {value: 'fr', label: 'Français'},
+    {value: 'it', label: 'Italiano'},
     {value: 'pt-BR', label: 'Português (BR)'},
-    {value: 'ru', label: 'Русский'},
-    {value: 'ko', label: '한국어'},
-    {value: 'hi', label: 'हिन्दी'},
-    {value: 'ar', label: 'العربية'},
+    {value: 'pl', label: 'Polski'},
+    {value: 'nl', label: 'Nederlands'},
     {value: 'he', label: 'עברית'},
+    {value: 'ar', label: 'العربية'},
+    {value: 'ru', label: 'Русский'},
+    {value: 'hi', label: 'हिन्दी'},
+    {value: 'vi', label: 'Tiếng Việt'},
+    {value: 'th', label: 'ไทย'},
+    {value: 'tr', label: 'Türkçe'},
     {value: 'en-XA', label: t('pref.general.language.pseudo')},
   ];
 }
@@ -151,22 +214,23 @@ function resolveLocalePref(pref) {
   return 'en';
 }
 
-function rerenderForLocale() {
-  // DOIT.6 #50: force-re-render EVERY localized surface so a language switch repaints the open UI on
+function rerenderForLocale(options = {}) {
+  // force-re-render EVERY localized surface so a language switch repaints the open UI on
   // the same interaction. Guarded so this is safe at any load order. Preferences must be forced past
   // the active-control guard (the language <select> is the active control when the switch fires).
   if (typeof renderPreferencesPanels === 'function') renderPreferencesPanels({force: true});
-  if (typeof renderSessionButtons === 'function') renderSessionButtons();  // rebuilds the app menu bar
+  if (typeof renderSessionButtons === 'function') renderSessionButtons({force: true});  // rebuilds the app menu bar
   if (typeof renderPaneTabStrips === 'function') renderPaneTabStrips();
+  if (typeof relocalizeInfoPanelChrome === 'function') relocalizeInfoPanelChrome();
   if (typeof renderInfoPanel === 'function') renderInfoPanel();
-  if (typeof renderYoagentPanel === 'function') renderYoagentPanel({preserveDraft: true});
+  if (typeof renderYoagentPanel === 'function') renderYoagentPanel({preserveDraft: true, allowBusyRebuild: options.localeChange === true});
+  if (typeof relocalizeInfoPanelChrome === 'function') relocalizeInfoPanelChrome();
+  if (options.localeChange === true && typeof refreshActivitySummary === 'function') refreshActivitySummary({force: true, silent: true, localeChange: true});
   if (typeof renderBrandWordmark === 'function') renderBrandWordmark();
-  // The Modified-files / Changes panels (the Finder's panel AND the standalone Changes tab) localize
-  // their title, FROM/TO, session/sort, and Refresh strings in the panel head — but the loop above
-  // never touched them, so a language switch left them stale. Force-re-render BOTH destinations so the
-  // head repaints in the new locale on the same switch (force bypasses the active-control guard).
+  if (document.getElementById('modal')?.classList?.contains('about-open') && typeof showAboutModal === 'function') showAboutModal();
+  // The Finder diff panel localizes its title, FROM/TO, session/sort, and Refresh strings in the panel
+  // head. Force-re-render it so a language switch repaints the head in the new locale.
   if (typeof renderFileExplorerChangesPanels === 'function') renderFileExplorerChangesPanels({force: true});
-  if (typeof renderChangesPanels === 'function') renderChangesPanels({force: true});
   // The Finder's toolbar chrome (root/dates/sort labels) is baked into the panel at creation time, so the
   // body re-renders above never touch it — rebuild the Finder panel from source so a language switch
   // repaints its buttons too (the bug where switching to Hebrew left the toolbar in the previous locale).

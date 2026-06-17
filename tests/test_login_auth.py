@@ -7,11 +7,15 @@ from types import SimpleNamespace
 from urllib.parse import urlencode
 from urllib.parse import urlparse
 
+import pytest
+
 from yolomux_lib import common
 from yolomux_lib import server_auth
 from yolomux_lib import web
 from yolomux_lib.server import Handler
 from yolomux_lib.server import TmuxWebtermHTTPServer
+
+pytestmark = pytest.mark.socket
 
 
 def active_auth_yaml() -> str:
@@ -50,7 +54,7 @@ def auth_header(username, password):
     return {"Authorization": f"Basic {encoded}"}
 
 
-def start_server(monkeypatch, tmp_path):
+def start_server(monkeypatch, tmp_path, app=None, tls_context=None):
     auth_path = tmp_path / "auth.yaml"
     auth_path.write_text(active_auth_yaml(), encoding="utf-8")
     monkeypatch.setattr(common, "AUTH_CONFIG_PATH", auth_path)
@@ -59,8 +63,8 @@ def start_server(monkeypatch, tmp_path):
     # depend on the developer's saved locale or on test import order. request_locale_pref resolves the
     # name in server_auth's namespace, so patch it there; the yolomux_locale cookie branch stays live.
     monkeypatch.setattr(server_auth, "current_language_pref", lambda: "system")
-    app = SimpleNamespace(sessions=[])
-    server = TmuxWebtermHTTPServer(("127.0.0.1", 0), app)
+    app = app or SimpleNamespace(sessions=[], dangerously_yolo=False)
+    server = TmuxWebtermHTTPServer(("127.0.0.1", 0), app, tls_context=tls_context)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server, thread
@@ -158,8 +162,11 @@ def test_login_page_localizes_via_locale_cookie(monkeypatch, tmp_path):
         localized = web.server_string("zh-Hant", "login.showPassword")
         assert localized == "顯示密碼"
         assert f'aria-label="{localized}"'.encode("utf-8") in body
+        localized_system = web.server_string("zh-Hant", "pref.general.language.system")
+        assert f">{localized_system}<".encode("utf-8") in body
         # The English default must NOT appear when the cookie selects another locale.
         assert b'aria-label="Show password"' not in body
+        assert b">System<" not in body
     finally:
         stop_server(server, thread)
 
@@ -182,7 +189,7 @@ def test_basic_auth_still_works_without_browser_challenge(monkeypatch, tmp_path)
         assert status == HTTPStatus.FORBIDDEN
         assert json.loads(body)["error"] == "admin access required"
 
-        # DOIT.34 #1: blame reads repository file history, so a readonly identity is forbidden — same as
+        # blame reads repository file history, so a readonly identity is forbidden — same as
         # the rest of the file/repo API (it must NOT bypass the readonly guard at /api/blame).
         status, headers, body = request(port, "GET", f"/api/blame?{urlencode({'path': str(tmp_path)})}", headers=auth_header("guest", "guest"))
         assert status == HTTPStatus.FORBIDDEN
@@ -192,6 +199,27 @@ def test_basic_auth_still_works_without_browser_challenge(monkeypatch, tmp_path)
         # production never exposes it (the test server is constructed without dev).
         status, headers, body = request(port, "GET", "/api/dev-reload", headers=auth_header("guest", "guest"))
         assert status == HTTPStatus.NOT_FOUND
+    finally:
+        stop_server(server, thread)
+
+
+def test_test_auth_bypass_env_allows_api_verification_without_cookie(monkeypatch, tmp_path):
+    monkeypatch.setenv(common.TEST_AUTH_BYPASS_ENV, "1")
+    app = SimpleNamespace(
+        sessions=[],
+        dangerously_yolo=False,
+        settings_payload=lambda: {"settings": {"share": {"max_viewers": 2}}},
+    )
+    server, thread = start_server(monkeypatch, tmp_path, app=app)
+    port = server.server_address[1]
+    try:
+        status, _headers, body = request(port, "GET", "/api/settings")
+        assert status == HTTPStatus.OK
+        assert json.loads(body)["settings"]["share"]["max_viewers"] == 2
+
+        status, headers, _body = request(port, "GET", "/login?next=/api/settings")
+        assert status == HTTPStatus.SEE_OTHER
+        assert headers["Location"] == "/api/settings"
     finally:
         stop_server(server, thread)
 
@@ -216,6 +244,22 @@ def test_html_preview_route_runs_scripts_in_sandboxed_wrapper(monkeypatch, tmp_p
 
     assert written["json_status"] == HTTPStatus.BAD_REQUEST
     assert written["json"]["error"] == "path must be an HTML file"
+
+
+def test_preview_popout_placeholder_route_returns_same_origin_shell():
+    written = {}
+    handler = SimpleNamespace(
+        write_html=lambda body, status=HTTPStatus.OK: written.update({"html_status": status, "html": body}),
+    )
+
+    Handler.handle_preview_popout_placeholder(
+        handler,
+        urlparse(f"/preview-popout?{urlencode({'path': '/home/test/README.md'})}"),
+    )
+
+    assert written["html_status"] == HTTPStatus.OK
+    assert "<title>README.md preview</title>" in written["html"]
+    assert "<body></body>" in written["html"]
 
 
 def test_html_preview_route_accepts_logged_in_cookie(monkeypatch, tmp_path):
@@ -251,6 +295,456 @@ def test_readonly_identity_cannot_call_mutating_post(monkeypatch, tmp_path):
 
         assert status == HTTPStatus.FORBIDDEN
         assert json.loads(body) == {"error": "admin access required", "role": "readonly"}
+    finally:
+        stop_server(server, thread)
+
+
+def test_share_token_is_limited_to_root_and_websocket(monkeypatch, tmp_path):
+    app = SimpleNamespace(
+        sessions=["6", "7"],
+        dangerously_yolo=False,
+        verify_share_token=lambda token: {"session": "6", "sessions": ["6", "7"]} if token == "valid-share-token" else None,
+    )
+    server, thread = start_server(monkeypatch, tmp_path, app=app)
+    port = server.server_address[1]
+    try:
+        status, _headers, body = request(port, "GET", "/?token=valid-share-token")
+        assert status == HTTPStatus.OK
+        assert b'"accessRole":"readonly"' in body
+        assert b'"sessions":["6","7"]' in body
+
+        status, _headers, body = request(port, "GET", "/api/ping?token=valid-share-token")
+        assert status == HTTPStatus.OK
+        assert json.loads(body)["ok"] is True
+
+        status, _headers, body = request(port, "POST", "/api/upload?token=valid-share-token")
+        assert status == HTTPStatus.FORBIDDEN
+        assert json.loads(body)["error"] == "share token is limited to the shared page and websocket"
+
+        status, _headers, body = request(port, "GET", "/api/ping?token=wrong")
+        assert status == HTTPStatus.UNAUTHORIZED
+        assert json.loads(body)["error"] == "authentication required"
+    finally:
+        stop_server(server, thread)
+
+
+def test_share_token_allows_only_shared_editor_file_reads(monkeypatch, tmp_path):
+    shared_file = tmp_path / "shared.md"
+    private_file = tmp_path / "private.md"
+    shared_file.write_text("# Shared\n", encoding="utf-8")
+    private_file.write_text("# Private\n", encoding="utf-8")
+    shared_path = str(shared_file)
+    record = {"session": "6", "sessions": ["6"], "tabs": f"slot1:file:{shared_path}"}
+    app = SimpleNamespace(
+        sessions=["6"],
+        dangerously_yolo=False,
+        verify_share_token=lambda token: record if token == "valid-share-token" else None,
+        share_record_allows_file_path=lambda share_record, raw_path: share_record == record and raw_path == shared_path,
+    )
+    server, thread = start_server(monkeypatch, tmp_path, app=app)
+    port = server.server_address[1]
+    try:
+        status, _headers, body = request(port, "GET", f"/api/fs/read?{urlencode({'path': shared_path, 'token': 'valid-share-token'})}")
+        assert status == HTTPStatus.OK
+        assert json.loads(body)["content"] == "# Shared\n"
+
+        status, _headers, body = request(port, "GET", f"/api/fs/read?{urlencode({'path': str(private_file), 'token': 'valid-share-token'})}")
+        assert status == HTTPStatus.FORBIDDEN
+        assert json.loads(body) == {"error": "admin access required", "role": "readonly"}
+    finally:
+        stop_server(server, thread)
+
+
+def test_share_short_id_shell_boots_without_login(monkeypatch, tmp_path):
+    record = {
+        "session": "6",
+        "sessions": ["6", "7"],
+        "short_id": "share123",
+        "mode": "ro",
+        "scheme": "http",
+        "expires_at": 1234567890.0,
+        "max_viewers": 5,
+        "viewers": 0,
+        "layout": "row@50(left,slot1)",
+        "tabs": "slot1:6",
+        "finder": {"root": "/home/keivenc/yolomux.dev1", "rootMode": "fixed", "mode": "tabber", "session": "7"},
+        "ui_state": {"finder": {"mode": "tabber"}, "editor": {"modes": [{"path": "/tmp/a.md", "mode": "split"}]}},
+    }
+    app = SimpleNamespace(
+        sessions=["6", "7"],
+        dangerously_yolo=False,
+        share_record_for_short_id=lambda short_id: record if short_id == "share123" else None,
+    )
+    server, thread = start_server(monkeypatch, tmp_path, app=app)
+    port = server.server_address[1]
+    try:
+        status, _headers, body = request(port, "GET", "/share/share123")
+
+        assert status == HTTPStatus.OK
+        assert b'"accessRole":"readonly"' in body
+        assert b'"sessions":["6","7"]' in body
+        assert b'"share":{"view":true,"id":"share123","session":"6","sessions":["6","7"],"mode":"ro"' in body
+        assert b'"finder":{"root":"/home/keivenc/yolomux.dev1","rootMode":"fixed","mode":"tabber","session":"7"}' in body
+        assert b'"uiState":{"finder":{"mode":"tabber"},"editor":{"modes":[{"path":"/tmp/a.md","mode":"split"}]}}' in body
+        assert b'"tokenInFragment":true' in body
+    finally:
+        stop_server(server, thread)
+
+
+def test_share_short_id_shell_rejects_when_viewer_cap_is_full(monkeypatch, tmp_path):
+    record = {
+        "session": "6",
+        "short_id": "share123",
+        "mode": "ro",
+        "expires_at": 1234567890.0,
+        "max_viewers": 1,
+        "viewers": 1,
+    }
+    app = SimpleNamespace(
+        sessions=["6"],
+        dangerously_yolo=False,
+        share_record_for_short_id=lambda short_id: record if short_id == "share123" else None,
+    )
+    server, thread = start_server(monkeypatch, tmp_path, app=app)
+    port = server.server_address[1]
+    try:
+        status, _headers, body = request(port, "GET", "/share/share123")
+
+        assert status == HTTPStatus.FORBIDDEN
+        assert body == b"share viewer limit reached\n"
+    finally:
+        stop_server(server, thread)
+
+
+class FakeTlsContext:
+    def wrap_socket(self, *_args, **_kwargs):
+        raise AssertionError("plain HTTP request should not be TLS-wrapped")
+
+
+def test_plaintext_on_tls_server_redirects_non_share_requests(monkeypatch, tmp_path):
+    app = SimpleNamespace(sessions=["6"], dangerously_yolo=False)
+    server, thread = start_server(monkeypatch, tmp_path, app=app, tls_context=FakeTlsContext())
+    port = server.server_address[1]
+    try:
+        status, headers, body = request(port, "GET", "/api/ping")
+
+        assert status == HTTPStatus.PERMANENT_REDIRECT
+        assert headers["Location"] == f"https://127.0.0.1:{port}/api/ping"
+        assert b"Use HTTPS" in body
+    finally:
+        stop_server(server, thread)
+
+
+def test_plaintext_on_tls_server_serves_http_share_shell(monkeypatch, tmp_path):
+    record = {
+        "session": "6",
+        "short_id": "share123",
+        "mode": "ro",
+        "scheme": "http",
+        "expires_at": 1234567890.0,
+        "max_viewers": 5,
+        "viewers": 0,
+        "http_allowed": True,
+    }
+    app = SimpleNamespace(
+        sessions=["6"],
+        dangerously_yolo=False,
+        share_record_for_short_id=lambda short_id: record if short_id == "share123" else None,
+        http_allowed_share_is_active=lambda: True,
+    )
+    server, thread = start_server(monkeypatch, tmp_path, app=app, tls_context=FakeTlsContext())
+    port = server.server_address[1]
+    try:
+        status, headers, body = request(port, "GET", "/share/share123")
+
+        assert status == HTTPStatus.OK
+        assert "Location" not in headers
+        assert b'"share":{"view":true,"id":"share123","session":"6","sessions":["6"],"mode":"ro"' in body
+    finally:
+        stop_server(server, thread)
+
+
+def test_plaintext_on_tls_server_serves_http_share_readonly_apis(monkeypatch, tmp_path):
+    shared_file = tmp_path / "DONE.md"
+    shared_file.write_text("# DONE\n\nShare viewer parity.\n", encoding="utf-8")
+    shared_path = str(shared_file)
+    record = {
+        "session": "6",
+        "sessions": ["6"],
+        "short_id": "share123",
+        "mode": "ro",
+        "scheme": "http",
+        "expires_at": 1234567890.0,
+        "max_viewers": 5,
+        "viewers": 0,
+        "http_allowed": True,
+        "tabs": f"left:files;right:6,file:{shared_path}",
+    }
+    calls = []
+    app = SimpleNamespace(
+        sessions=["6"],
+        dangerously_yolo=False,
+        verify_share_token=lambda token: record if token == "valid-share-token" else None,
+        share_record_allows_file_path=lambda share_record, raw_path: share_record == record and raw_path == shared_path,
+        share_status_payload=lambda token, **kwargs: calls.append(("share", token, kwargs)) or ({"ok": True, "token": token}, HTTPStatus.OK),
+        activity_payload=lambda: ({"activity": {"6:0": {"session": "6", "window": 0}}}, HTTPStatus.OK),
+        session_files_payload=lambda session, hours, **kwargs: ({"session": session, "loaded": True, "files": [], "repos": [], "errors": []}, HTTPStatus.OK),
+    )
+    server, thread = start_server(monkeypatch, tmp_path, app=app, tls_context=FakeTlsContext())
+    port = server.server_address[1]
+    headers = {"X-Share-Token": "valid-share-token"}
+    try:
+        status, response_headers, body = request(port, "GET", f"/api/fs/list?{urlencode({'path': str(tmp_path)})}", headers=headers)
+        assert status == HTTPStatus.OK
+        assert "Location" not in response_headers
+        assert "DONE.md" in {entry["name"] for entry in json.loads(body)["entries"]}
+
+        status, response_headers, body = request(port, "GET", f"/api/fs/read?{urlencode({'path': shared_path})}", headers=headers)
+        assert status == HTTPStatus.OK
+        assert "Location" not in response_headers
+        assert json.loads(body)["content"].startswith("# DONE")
+
+        status, response_headers, body = request(port, "GET", "/api/session-files?session=6&hours=24", headers=headers)
+        assert status == HTTPStatus.OK
+        assert "Location" not in response_headers
+        assert json.loads(body)["loaded"] is True
+
+        status, response_headers, body = request(port, "GET", "/api/activity", headers=headers)
+        assert status == HTTPStatus.OK
+        assert "Location" not in response_headers
+        assert json.loads(body)["activity"]["6:0"]["session"] == "6"
+
+        batch_body = json.dumps({"requests": [{"id": "root", "type": "list", "path": str(tmp_path)}]})
+        status, response_headers, body = request(
+            port,
+            "POST",
+            "/api/fs/batch",
+            body=batch_body,
+            headers={**headers, "Content-Type": "application/json"},
+        )
+        assert status == HTTPStatus.OK
+        assert "Location" not in response_headers
+        assert json.loads(body)["responses"][0]["ok"] is True
+
+        status, response_headers, body = request(port, "GET", "/api/share", headers=headers)
+        assert status == HTTPStatus.OK
+        assert "Location" not in response_headers
+        assert json.loads(body)["token"] == "valid-share-token"
+
+        status, response_headers, body = request(port, "GET", "/ws/share-ui?token=valid-share-token&client=viewer-a")
+        assert status == HTTPStatus.BAD_REQUEST
+        assert "Location" not in response_headers
+        assert body == b"missing Sec-WebSocket-Key\n"
+
+        status, response_headers, _body = request(port, "GET", "/api/fs/read")
+        assert status == HTTPStatus.PERMANENT_REDIRECT
+        assert response_headers["Location"] == f"https://127.0.0.1:{port}/api/fs/read"
+    finally:
+        stop_server(server, thread)
+
+
+def test_share_create_endpoint_passes_layout_seed(monkeypatch, tmp_path):
+    calls = []
+
+    def create_share_token(session, ttl_seconds=None, **kwargs):
+        calls.append((session, ttl_seconds, kwargs))
+        return {"ok": True, "url": "http://127.0.0.1/share", "token": "token", "session": session}, HTTPStatus.OK
+
+    app = SimpleNamespace(sessions=["6"], dangerously_yolo=False, create_share_token=create_share_token)
+    server, thread = start_server(monkeypatch, tmp_path, app=app)
+    port = server.server_address[1]
+    try:
+        body = json.dumps({
+            "session": "6",
+            "sessions": ["6", "7"],
+            "ttl_seconds": 900,
+            "layout": "row@50(left,slot1)",
+            "tabs": "left:6;slot1:7",
+            "finder": {"root": "/home/keivenc/yolomux.dev1", "rootMode": "fixed", "mode": "tabber", "session": "7"},
+            "ui_state": {"finder": {"mode": "tabber"}, "editor": {"modes": [{"path": "/tmp/a.md", "mode": "split"}]}},
+            "mode": "ro",
+            "scheme": "http",
+            "max_viewers": 7,
+        })
+        status, _headers, response = request(
+            port,
+            "POST",
+            "/api/share",
+            body=body,
+            headers={**auth_header("keivenc", "random-password"), "Content-Type": "application/json"},
+        )
+
+        assert status == HTTPStatus.OK
+        assert json.loads(response)["token"] == "token"
+        assert calls == [("6", 900, {
+            "base_url": f"http://127.0.0.1:{port}",
+            "created_by": "keivenc",
+            "layout": "row@50(left,slot1)",
+            "tabs": "left:6;slot1:7",
+            "finder": {"root": "/home/keivenc/yolomux.dev1", "rootMode": "fixed", "mode": "tabber", "session": "7"},
+            "ui_state": {"finder": {"mode": "tabber"}, "editor": {"modes": [{"path": "/tmp/a.md", "mode": "split"}]}},
+            "sessions": ["6", "7"],
+            "mode": "ro",
+            "read_only": None,
+            "scheme": "http",
+            "max_viewers": 7,
+            "debug_profile": False,
+            "request_is_https": False,
+            "tls_available": False,
+        })]
+    finally:
+        stop_server(server, thread)
+
+
+def test_share_status_is_admin_or_share_scoped_and_stop_is_admin_only(monkeypatch, tmp_path):
+    calls = []
+    record = {"session": "6", "sessions": ["6"], "mode": "ro", "expires_at": 1234567890.0}
+
+    app = SimpleNamespace(
+        sessions=["6"],
+        dangerously_yolo=False,
+        active_share_payload=lambda **kwargs: calls.append(("status", kwargs)) or ({"ok": True, "active": False}, HTTPStatus.OK),
+        verify_share_token=lambda token: record | {"token": token} if token == "valid-share-token" else None,
+        share_status_payload=lambda token, **kwargs: calls.append(("share-status", token, kwargs)) or ({"ok": True, "active": True, "token": token}, HTTPStatus.OK),
+        stop_active_share=lambda token_or_short_id="": calls.append(("stop", token_or_short_id)) or ({"ok": True, "active": False, "stopped": 1}, HTTPStatus.OK),
+    )
+    server, thread = start_server(monkeypatch, tmp_path, app=app)
+    port = server.server_address[1]
+    try:
+        status, _headers, body = request(port, "GET", "/api/share", headers=auth_header("guest", "guest"))
+        assert status == HTTPStatus.FORBIDDEN
+        assert json.loads(body)["error"] == "admin access required"
+
+        status, _headers, body = request(port, "GET", "/api/share", headers=auth_header("keivenc", "random-password"))
+        assert status == HTTPStatus.OK
+        assert json.loads(body) == {"ok": True, "active": False}
+
+        status, _headers, body = request(port, "GET", "/api/share", headers={"X-Share-Token": "valid-share-token"})
+        assert status == HTTPStatus.OK
+        assert json.loads(body) == {"ok": True, "active": True, "token": "valid-share-token"}
+
+        status, _headers, body = request(port, "POST", "/api/share/stop", headers=auth_header("guest", "guest"))
+        assert status == HTTPStatus.FORBIDDEN
+        assert json.loads(body)["error"] == "admin access required"
+
+        status, _headers, body = request(
+            port,
+            "POST",
+            "/api/share/stop",
+            body=json.dumps({"token": "share-token-1"}),
+            headers={**auth_header("keivenc", "random-password"), "Content-Type": "application/json"},
+        )
+        assert status == HTTPStatus.OK
+        assert json.loads(body) == {"ok": True, "active": False, "stopped": 1}
+        assert calls == [
+            ("status", {"base_url": f"http://127.0.0.1:{port}"}),
+            ("share-status", "valid-share-token", {"base_url": f"http://127.0.0.1:{port}"}),
+            ("stop", "share-token-1"),
+        ]
+    finally:
+        stop_server(server, thread)
+
+
+def test_share_view_websocket_rejects_missing_key_before_registering(monkeypatch, tmp_path):
+    calls = []
+    record = {
+        "session": "6",
+        "short_id": "share123",
+        "mode": "ro",
+        "expires_at": 1234567890.0,
+        "max_viewers": 5,
+        "viewers": 0,
+    }
+
+    def verify_share_token(token):
+        return record | {"token": token} if token == "valid-share-token" else None
+
+    def register_share_viewer(token, session="", viewer_id="", ip="", user_agent=""):
+        calls.append(("register", token, session, viewer_id, ip, user_agent))
+        return record | {"token": token, "viewers": 1, "viewer_id": viewer_id or "legacy"}, HTTPStatus.OK
+
+    def unregister_share_viewer(token, viewer_id=""):
+        calls.append(("unregister", token, viewer_id))
+        return 0
+
+    app = SimpleNamespace(
+        sessions=["6"],
+        dangerously_yolo=False,
+        verify_share_token=verify_share_token,
+        register_share_viewer=register_share_viewer,
+        unregister_share_viewer=unregister_share_viewer,
+    )
+    server, thread = start_server(monkeypatch, tmp_path, app=app)
+    port = server.server_address[1]
+    try:
+        status, _headers, body = request(port, "GET", "/ws/share-view?token=valid-share-token")
+
+        assert status == HTTPStatus.BAD_REQUEST
+        assert body == b"missing Sec-WebSocket-Key\n"
+        assert calls == []
+    finally:
+        stop_server(server, thread)
+
+
+def test_share_host_websocket_is_admin_only_and_verifies_share(monkeypatch, tmp_path):
+    calls = []
+    record = {
+        "session": "6",
+        "short_id": "share123",
+        "mode": "ro",
+        "expires_at": 1234567890.0,
+        "max_viewers": 5,
+        "viewers": 0,
+    }
+
+    def verify_share_token(token):
+        calls.append(token)
+        return record | {"token": token} if token == "valid-share-token" else None
+
+    app = SimpleNamespace(
+        sessions=["6"],
+        dangerously_yolo=False,
+        verify_share_token=verify_share_token,
+    )
+    server, thread = start_server(monkeypatch, tmp_path, app=app)
+    port = server.server_address[1]
+    try:
+        status, _headers, body = request(port, "GET", "/ws/share-host?share=valid-share-token", headers=auth_header("guest", "guest"))
+        assert status == HTTPStatus.FORBIDDEN
+        assert json.loads(body)["error"] == "admin access required"
+
+        status, _headers, body = request(port, "GET", "/ws/share-host?share=wrong", headers=auth_header("keivenc", "random-password"))
+        assert status == HTTPStatus.NOT_FOUND
+        assert body == b"unknown active share\n"
+
+        status, _headers, body = request(port, "GET", "/ws/share-host?share=valid-share-token", headers=auth_header("keivenc", "random-password"))
+        assert status == HTTPStatus.BAD_REQUEST
+        assert body == b"missing Sec-WebSocket-Key\n"
+        assert calls == ["wrong", "valid-share-token"]
+    finally:
+        stop_server(server, thread)
+
+
+def test_readonly_share_ui_websocket_accepts_receive_only_viewer(monkeypatch, tmp_path):
+    record = {
+        "session": "6",
+        "short_id": "share123",
+        "mode": "ro",
+        "expires_at": 1234567890.0,
+        "max_viewers": 5,
+        "viewers": 0,
+    }
+    app = SimpleNamespace(
+        sessions=["6"],
+        dangerously_yolo=False,
+        verify_share_token=lambda token: record | {"token": token} if token == "valid-share-token" else None,
+    )
+    server, thread = start_server(monkeypatch, tmp_path, app=app)
+    port = server.server_address[1]
+    try:
+        status, _headers, body = request(port, "GET", "/ws/share-ui?token=valid-share-token&client=viewer-a")
+        assert status == HTTPStatus.BAD_REQUEST
+        assert body == b"missing Sec-WebSocket-Key\n"
     finally:
         stop_server(server, thread)
 

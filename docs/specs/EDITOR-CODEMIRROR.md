@@ -4,7 +4,7 @@
 
 Original goal: get a real Find (Cmd/Ctrl+F, `1/13`, ^/v, jump+reveal) and the rest of the editor-options list. Before the CodeMirror work, the file editor was a raw `<textarea id="fileEditorTextarea">` plus a custom highlight overlay painted by highlight.js. The decision was to adopt CodeMirror 6 and delete the textarea editor layer.
 
-CodeMirror 6 is a third-party editor library with upstream dependency notices recorded in [`../../THIRD_PARTY_NOTICES.md`](../../THIRD_PARTY_NOTICES.md). It gives, out of the box: Find/Replace (`@codemirror/search`) with match count + all-match highlight, multiple cursors, native soft-wrap + line-number gutter (this RETIRES #6), Lezer syntax highlighting, bracket matching, auto-close, code folding, go-to-line, comment-toggle, auto-indent, configurable tab width, line ops, undo/redo, read-only mode, viewport rendering for big files. Monaco (VS Code's editor) is the heavier alternative (much larger, needs web workers) — out of scope; CM6 is the right size.
+CodeMirror 6 is a third-party editor library with upstream dependency notices recorded in [`../../THIRD_PARTY_NOTICES.md`](../../THIRD_PARTY_NOTICES.md). It gives, out of the box: Find/Replace (`@codemirror/search`) with match count + all-match highlight, multiple carets, native soft-wrap + line-number gutter (this RETIRES #6), Lezer syntax highlighting, bracket matching, auto-close, code folding, go-to-line, comment-toggle, auto-indent, configurable tab width, line ops, undo/redo, read-only mode, viewport rendering for big files. Heavier Popular IDE editor engines need more runtime plumbing and web workers, so CM6 is the right size here.
 
 ## Two paths to prototype (behind one toggle, then compare)
 
@@ -17,6 +17,10 @@ Loading at prototype time used one hand-written `yolomux.js` and CDN/vendor fall
 - **A1 — import-map + ESM CDN.** `<script type="importmap">` mapping `codemirror` / `@codemirror/*` to esm.sh (or jsdelivr `+esm`), then `<script type="module">`. Zero local build; matches the current CDN pattern. Downside: runtime depends on the CDN (broken offline) unless cached.
 - **A2 — vendored prebuilt bundle (recommended).** One-time `esbuild` of a tiny entry that re-exports only the CM pieces YOLOmux uses -> commit `static/codemirror.js`, served locally with a CDN fallback. This is EXACTLY how xterm.js is already handled (`web.py:86`, local + `onerror` jsdelivr fallback), keeps YOLOmux self-hostable offline, and is the consistent choice.
 
+### Vendored CodeMirror bundle record
+The rebuild manifest and exact lockfile live in `prototypes/codemirror-bundle/`. Rebuild with `cd prototypes/codemirror-bundle && npm ci && npm run build`. The committed `static/codemirror.js` currently has SHA256 `96f7c47927e35527d86f1b8a82d9f0e73d2a58ffb51005b436daa5a00b5ba081`.
+Direct package versions recorded for the current bundle: `codemirror@6.0.2`, `@codemirror/autocomplete@6.20.2` (transitive via `codemirror` and language packages), `@codemirror/commands@6.10.3`, `@codemirror/lang-css@6.3.1`, `@codemirror/lang-html@6.4.11`, `@codemirror/lang-javascript@6.2.5`, `@codemirror/lang-json@6.0.2`, `@codemirror/lang-markdown@6.5.0`, `@codemirror/lang-python@6.2.1`, `@codemirror/lang-rust@6.0.2`, `@codemirror/lang-xml@6.1.0`, `@codemirror/lang-yaml@6.1.3`, `@codemirror/language@6.12.3`, `@codemirror/legacy-modes@6.5.3`, `@codemirror/lint@6.9.6` (transitive via JavaScript/codemirror), `@codemirror/merge@6.12.1`, `@codemirror/search@6.7.0`, `@codemirror/state@6.6.0`, and `@codemirror/view@6.43.0`. The lockfile also records the exact Lezer parser packages, `style-mod`, `crelt`, `w3c-keyname`, and `esbuild` versions with npm integrity hashes.
+
 ### Path B — extend the textarea (historical alternative, rejected)
 Keep the `<textarea>` + overlay and hand-build Find + the editor-options list on it (`setSelectionRange` + scroll for jump/reveal; overlay rectangles for all-match highlight). Lower risk, no dep/build change. Ceiling: never get multi-cursor / folding / bracket-match, and #6 (the wrap/continuation overlay) stays a char-estimate hack.
 
@@ -26,7 +30,8 @@ Keep the `<textarea>` + overlay and hand-build Find + the editor-options list on
 - Non-functional: vendored bundle loads offline; bundle size acceptable; dark theme matches the UI; mobile/touch OK.
 
 ## What got removed when CM won (concrete)
-- JS editor-layer functions (`static/yolomux.js`): `renderStandaloneSyntaxHighlight`, `renderSyntaxHighlight`, `renderSyntaxHighlightInto`, `editorVisualHighlightHtml`, `editorVisualColumnCount`, `editorVisualLineFragments`, `applyEditorWrapToTextarea`, `simpleCodeSyntaxHtml`, `highlightLanguageAvailable`, `syncFileEditorSplitScroll`, the wrap/gutter toggles' textarea plumbing, and most of `renderEditorForActive` (~4842-9734). ~53 `fileEditorTextarea`/`fileEditorHighlight` refs collapse into the CM adapter.
+- JS editor-layer functions (`static/yolomux.js`): `renderStandaloneSyntaxHighlight`, `renderSyntaxHighlight`, `renderSyntaxHighlightInto`, `editorVisualColumnCount`, `editorVisualLineFragments`, `applyEditorWrapToTextarea`, `highlightLanguageAvailable`, the wrap/gutter toggles' textarea plumbing, and the textarea-era `renderEditorForActive`. ~53 `fileEditorTextarea`/`fileEditorHighlight` refs collapse into the CM adapter.
+  - Correction: `editorVisualHighlightHtml`, `simpleCodeSyntaxHtml`, and `syncFileEditorSplitScroll` were previously listed here as removed but are still defined+used in `95_codemirror_editor.js` (the editor module's CodeMirror half, split out of `90_changes_editor.js`); they power the raw/preview render + split-scroll. Only the textarea layer itself (`renderStandaloneSyntaxHighlight`, `fileEditorTextarea`) is gone.
 - CSS (`static/yolomux.css`): the ~121 lines for `.file-editor-textarea`, `.file-editor-highlight`, `.syntax-highlighted`, `.editor-wrap`, the `--editor-line-number*` / `--editor-wrap-marker*` vars, and the visual-overlay grid. (CM owns gutter/wrap/highlight.)
 - `web.py`: the `#fileEditorHighlight` `<pre><code>` + `#fileEditorTextarea` markup (`web.py:138-139`); the `#`/wrap toolbar buttons if CM commands replace them.
 - KEEP: marked.js + `#fileEditorPreviewPane` (markdown Preview), the Edit/Preview/Split mode control, `editor_font_size`/`word_wrap`/`line_numbers` settings (now drive CM config). DECIDE on highlight.js: keep it only for the code-file Preview read view, or let a read-only CM render that too and drop highlight.js entirely.
@@ -35,7 +40,7 @@ Keep the `<textarea>` + overlay and hand-build Find + the editor-options list on
 ## Adapter surface (what CM must hook into — keep the rest of the app unchanged)
 - `openFiles` per-file state `{content, original, dirty, kind}`; the input -> `state.content` / dirty -> `setEditorStatus` path (~4966).
 - `saveCurrentEditor` on `Cmd/Ctrl+S`.
-- `renderEditorForActive` / view modes (`editorViewModeFor`, `setFileEditorViewMode`).
+- `renderFileEditorRawPane` (the textarea-era `renderEditorForActive` is gone) / view modes (`editorViewModeFor`, `setFileEditorViewMode`).
 - Language from `fileExtensionOf`; `--editor-font-size` CSS var; readonly-role -> `EditorState.readOnly`.
 - Split-Preview right pane stays `renderEditorPreviewPane` (marked).
 

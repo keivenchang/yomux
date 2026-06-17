@@ -1,0 +1,10 @@
+renderer = "structured"
+format = "toml"
+
+[[items]]
+name = "alpha"
+count = 1
+
+[[items]]
+name = "beta"
+count = 2

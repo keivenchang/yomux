@@ -27,7 +27,7 @@
 }
 /* A .panel-overlay-root must NOT be the scroll container — put `overflow:auto` on an INNER child.
    The inactive-pane dim below is a full-bleed ::after (inset 0) on this element; if this element
-   scrolls, the dim scrolls away with the content and only covers the top viewport (DOIT.16 C3). */
+   scrolls, the dim scrolls away with the content and only covers the top viewport. */
 .panel-overlay-root {
   position: relative;
 }
@@ -35,12 +35,13 @@
    — terminal, Finder, Preferences, Info, Changes, editor — dims identically; there is no per-pane JS
    overlay <div> (and so no isVirtualItem special-case). pointer-events:none lets a click on a dimmed
    pane fall through to focus it (the old overlay swallowed the first click). The focused/typing-ready
-   pane is not dimmed. */
-.panel:not(.focused-pane):not(.typing-ready-pane) .panel-overlay-root::after {
+   pane is not dimmed. A stale typing-ready terminal is still inactive when another pane owns
+   .focused-pane, so do not exempt .typing-ready-pane here. */
+.panel:not(.focused-pane) .panel-overlay-root::after {
   content: "";
   position: absolute;
   inset: 0;
-  z-index: 6;
+  z-index: var(--z-terminal-overlay-low);
   background: var(--inactive-pane-overlay);
   pointer-events: none;
 }
@@ -69,16 +70,20 @@
   box-sizing: content-box;
 }
 .terminal .xterm-viewport {
+  /* Terminal and YO!info scrollbars must always inherit a shared pane scrollbar rule from layout CSS;
+     never customize scrollbar colors or hover behavior here. */
+  --pane-scrollbar-track: transparent;
+  --pane-scrollbar-track-active: transparent;
   overflow-y: auto;
 }
 .terminal-context-menu {
   position: fixed;
-  z-index: 240;
+  z-index: var(--z-terminal-popover);
   min-width: 150px;
   padding: 4px;
   color: #e7ecf3;
   background: rgba(17, 24, 32, 0.98);
-  border: 1px solid #5e6878;
+  border: 1px solid var(--sep-muted);
   border-radius: 7px;
   box-shadow: var(--shadow-elevated);
 }
@@ -86,13 +91,9 @@
   min-width: 178px;
 }
 .session-rename-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 180;
-  display: grid;
+  z-index: var(--z-topbar);
   place-items: center;
   padding: 18px;
-  background: rgba(2, 6, 12, 0.36);
 }
 .session-rename-dialog {
   width: min(42ch, var(--popover-max-inline-size));
@@ -101,14 +102,11 @@
   padding: 12px;
   color: #e7ecf3;
   background: rgba(17, 24, 32, 0.98);
-  border: 1px solid #6f7b8d;
+  border: var(--app-modal-border-width) solid var(--app-modal-border-color);
   border-radius: 7px;
-  box-shadow: 0 18px 56px rgba(0, 0, 0, 0.58);
+  box-shadow: 0 18px 56px rgb(var(--shadow-rgb) / 0.58);
 }
 .session-rename-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   font: 700 var(--ui-font-size)/1.25 var(--ui-font);
 }
 .session-rename-input {
@@ -116,10 +114,10 @@
   min-width: 0;
   height: 30px;
   padding: 4px 7px;
-  color: #f4ffe8;
+  color: var(--pane-tab-panel-head-text);
   background: #07110d;
-  border: 1px solid #9be33d;
-  border-radius: 4px;
+  border: 1px solid var(--auto-border);
+  border-radius: var(--radius-control);
   font: 600 var(--ui-font-size)/1.2 var(--mono-font);
   outline: 0;
 }
@@ -136,15 +134,15 @@
   padding: 4px 9px;
   color: #e7ecf3;
   background: #222b3a;
-  border: 1px solid #5e6878;
+  border: 1px solid var(--sep-muted);
   border-radius: 5px;
   font: var(--ui-font-size-sm)/1.25 var(--ui-font);
   cursor: pointer;
 }
 .session-rename-actions .session-rename-submit {
-  color: #081205;
-  background: var(--brand-green);
-  border-color: #9be33d;
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 .terminal-context-menu button {
   width: 100%;
@@ -158,11 +156,39 @@
   font: var(--ui-font-size-sm)/1.25 var(--ui-font);
   cursor: pointer;
 }
+.context-menu-line {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+.context-menu-icon {
+  display: inline-flex;
+  align-items: center;
+}
+.context-menu-icon .app-menu-ui-icon {
+  width: 20px;
+  height: 18px;
+  border-radius: 4px;
+}
+.context-menu-icon .app-menu-ui-icon::before {
+  width: 12px;
+  height: 12px;
+}
+.context-menu-label {
+  min-width: 0;
+}
+.context-menu-shortcut {
+  color: var(--muted);
+  font: 600 var(--ui-font-size-xs)/1.2 var(--mono-font);
+  white-space: nowrap;
+}
 .terminal-context-menu button:hover,
 .terminal-context-menu button:focus-visible {
   outline: 0;
-  color: #081205;
-  background: var(--brand-green);
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
 }
 .terminal-context-menu button.danger {
   color: #ffd6dc;
@@ -193,14 +219,14 @@
 }
 .file-image-preview-popover {
   position: fixed;
-  z-index: 150;
+  z-index: var(--z-terminal-badge);
   max-width: var(--file-image-preview-max-inline-size);
   max-height: var(--file-image-preview-max-block-size);
   padding: 6px;
   background: rgba(17, 24, 32, 0.98);
   border: 1px solid #6f7b8d;
   border-radius: 7px;
-  box-shadow: 10px 14px 32px rgba(0, 0, 0, 0.62);
+  box-shadow: 10px 14px 32px rgb(var(--shadow-rgb) / 0.62);
   pointer-events: none;
 }
 .file-image-preview-popover img {
@@ -227,8 +253,14 @@
   background: rgba(255, 244, 194, 0.58);
   border: 1px solid var(--accent-gold);
   border-radius: 8px;
-  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.38), inset 0 0 0 1px rgba(255, 255, 255, 0.26);
+  box-shadow: 0 16px 42px rgb(var(--shadow-rgb) / 0.38), inset 0 0 0 1px rgba(255, 255, 255, 0.26);
   backdrop-filter: blur(2px);
+}
+/* The update-available cue uses a solid (opaque) background instead of the translucent default, so it
+   reads clearly over busy terminal content while it sits for its 4-hour window. */
+.toast.toast-update {
+  background: #fff4c2;
+  backdrop-filter: none;
 }
 .toast-header {
   min-width: 0;
@@ -319,13 +351,45 @@
   margin-top: 6px;
   justify-content: flex-end;
 }
+.toast-action {
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--active-control-border, var(--line));
+  border-radius: 6px;
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
+  cursor: pointer;
+}
+.toast-action:hover {
+  filter: brightness(1.08);
+}
+.startup-helper-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+}
+.toast .startup-helper-nav-button {
+  min-width: 28px;
+  width: 28px;
+  height: 22px;
+  padding: 0;
+  font: 800 var(--ui-font-size-sm)/1 var(--ui-font);
+}
+.toast .startup-helper-nav-button:first-child {
+  border-radius: 8px 0 0 8px;
+}
+.toast .startup-helper-nav-button:last-child {
+  margin-inline-start: -1px;
+  border-radius: 0 8px 8px 0;
+}
 .panel-toast-stack {
   position: absolute;
   left: 8px;
   top: 8px;
-  /* #258: above the topbar (z-index:180) so a top-row pane's toast is never painted UNDER it and
+  /* #258: above the topbar (--z-topbar) so a top-row pane's toast is never painted UNDER it and
      clipped — the whole toast incl. the Keep/x buttons stays visible. */
-  z-index: 200;
+  z-index: var(--z-full-screen-overlay);
   width: calc(100% - 16px);
   display: flex;
   flex-direction: column;
@@ -335,6 +399,10 @@
 .panel-toast-stack .toast {
   width: 100%;
   pointer-events: auto;
+}
+.panel-toast-stack .startup-helper-toast {
+  width: min(720px, 100%);
+  align-self: flex-end;
 }
 .upload-result {
   width: 100%;
@@ -349,7 +417,7 @@
   overflow: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  color: #dfe6ef;
+  color: var(--pane-tab-text);
   background: #11151d;
   font: var(--ui-font-size-sm)/1.3 var(--mono-font);
 }
@@ -387,22 +455,18 @@
 .transcript-path-value {
   min-width: 0;
   flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   color: var(--text);
 }
 .transcript-path-missing {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .transcript-path-copy {
   width: 20px;
   height: 20px;
 }
 .transcript-preview {
+  /* Scrollable YO!info bodies always inherit a shared pane scrollbar rule from layout CSS; never
+     customize scrollbar colors or hover behavior here. */
   min-height: 0;
   padding: 8px;
   overflow: auto;
@@ -419,9 +483,9 @@
 .transcript-item.user { border-color: #60a5fa; background: color-mix(in srgb, #60a5fa 12%, var(--panel)); }
 .transcript-item.assistant { border-color: #4ade80; background: color-mix(in srgb, #4ade80 12%, var(--panel)); }
 .transcript-item.tool_use { border-color: #f59e0b; background: color-mix(in srgb, #f59e0b 12%, var(--panel)); }
-.transcript-item.tool_result { border-color: #c084fc; background: color-mix(in srgb, #c084fc 12%, var(--panel)); }
+.transcript-item.tool_result { border-color: var(--pr-status-merged); background: color-mix(in srgb, var(--pr-status-merged) 12%, var(--panel)); }
 .transcript-item.summary { border-color: #f472b6; background: color-mix(in srgb, #f472b6 12%, var(--panel)); }
-.transcript-item.system { border-color: #94a3b8; background: color-mix(in srgb, #94a3b8 12%, var(--panel)); }
+.transcript-item.system { border-color: var(--git-transcript-badge); background: color-mix(in srgb, var(--git-transcript-badge) 12%, var(--panel)); }
 .transcript-role {
   color: var(--text);
   font-weight: 700;
@@ -447,9 +511,6 @@
   overflow: hidden;
 }
 .summary-context-line {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .summary-context-label {
   color: var(--text);
@@ -493,7 +554,7 @@
   text-transform: uppercase;
 }
 .event-message {
-  /* DOIT.25: wrap the command across lines instead of one-line ellipsis (no horizontal scroll). */
+  /* wrap the command across lines instead of one-line ellipsis (no horizontal scroll). */
   min-width: 0;
   white-space: normal;
   overflow-wrap: anywhere;
@@ -515,7 +576,7 @@
   flex-direction: column;
   background: #11151d;
 }
-/* DOIT.6 #40: the merged YO!info / YO!agent sub-views share the pane; only the active one is shown,
+/* the merged YO!info / YO!agent sub-views share the pane; only the active one is shown,
    and it fills the available height (head row + scrolling list). */
 .info-subview {
   display: none;
@@ -527,17 +588,13 @@
 .info-subview.active {
   display: flex;
 }
-.info-subview .info-head {
-  flex: 0 0 auto;
-}
 .info-subview .info-list {
   flex: 1;
 }
-/* #48: the merged info panel has FOUR rows — window-tab strip, detail row, the YO!info|YO!agent sub-tab
-   toggle, then the body. `.panel` only declares three tracks, so give the info panel its own template so
-   the sub-tab row gets a real track (and stays visible when the detail header is collapsed away). */
+/* #48: the merged info panel has three rows: window-tab strip, the YO!info|YO!agent sub-tab toggle,
+   then the body. Give the sub-tab row a real track so it stays visible. */
 .info-panel {
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
 }
 .info-panel.details-collapsed {
   grid-template-rows: auto auto minmax(0, 1fr);
@@ -545,20 +602,42 @@
 /* The segmented sub-tab toggle that switches between YO!info and YO!agent (its own row under the tabs). */
 .info-subtabs {
   display: flex;
-  gap: 0;
-  padding: 6px 10px 4px;
-  /* DOIT.28 C1: route through a theme token so it flips light/dark — the hardcoded near-black slab
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  /* route through a theme token so it flips light/dark — the hardcoded near-black slab
      was a black band on the light pane. */
-  background: var(--panel2);
+  background: var(--pane-bar-bg, var(--panel2));
+  border-block-end: 1px solid var(--line);
+}
+.info-subtab-group {
+  display: flex;
+  min-width: 0;
+}
+.info-subtab-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-inline-start: auto;
 }
 .info-subtab {
   flex: 0 0 auto;
-  padding: 4px 14px;
-  border: 1px solid var(--line);
-  background: transparent;
-  color: var(--muted);
+  min-height: var(--pane-tab-height);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 14px;
+  border: 1px solid var(--pane-inactive-tab-border);
+  background: var(--pane-inactive-tab-bg);
+  color: var(--pane-tab-text);
   font: inherit;
+  font-weight: 700;
+  line-height: 1;
   cursor: pointer;
+}
+.info-subtab .session-button-dir {
+  color: inherit;
+  line-height: 1;
 }
 .info-subtab:first-child {
   border-radius: 6px 0 0 6px;
@@ -569,18 +648,25 @@
 }
 .info-subtab.active {
   color: var(--pane-tab-active-text);
-  background: var(--brand-green);
-  border-color: var(--brand-green);
+  background: var(--pane-tab-active-bg);
+  border-color: var(--pane-tab-active-border);
 }
 .info-subtab:not(.active):hover {
-  color: var(--text);
-  /* DOIT.28 C1: a token-based hover tint (the white tint was invisible on a light band). */
-  background: color-mix(in srgb, var(--text) 8%, transparent);
+  color: var(--pane-tab-text);
+  /* a token-based hover tint (the white tint was invisible on a light band). */
+  background: var(--pane-inactive-tab-bg-hover);
 }
 .info-list {
+  /* YO!info table scrollbars always inherit a shared pane scrollbar rule from layout CSS; never
+     customize scrollbar colors or hover behavior here. */
   min-height: 0;
   overflow: auto;
   padding: 8px 10px;
+}
+.yoagent-list {
+  display: flex;
+  flex-direction: column;
+  font-size: var(--terminal-font-size);
 }
 .yoagent-global {
   width: 100%;
@@ -588,12 +674,12 @@
   max-width: 100%;
   margin: 0 0 10px;
   padding: 8px 10px;
-  color: #dfe6ef;
+  color: var(--pane-tab-text);
   background: #151d24;
   border: 1px solid #314154;
-  border-inline-start: 3px solid var(--brand-green);
-  border-radius: 4px;
-  font: var(--ui-font-size-sm)/1.35 var(--mono-font);
+  border-inline-start: 3px solid var(--active-accent-bright);
+  border-radius: var(--radius-control);
+  font: var(--terminal-font-size)/1.35 var(--mono-font);
 }
 .yoagent-global-head {
   display: flex;
@@ -609,8 +695,8 @@
   height: 3px;
   margin: 2px 0 7px;
   overflow: hidden;
-  background: color-mix(in srgb, var(--brand-green) 12%, var(--panel2));
-  border-radius: 999px;
+  background: color-mix(in srgb, var(--active-control-bg) 12%, var(--panel2));
+  border-radius: var(--radius-pill);
 }
 .yoagent-refresh-progress::before {
   content: "";
@@ -618,8 +704,8 @@
   inset-block: 0;
   left: -35%;
   width: 35%;
-  background: var(--brand-green);
-  box-shadow: 0 0 12px color-mix(in srgb, var(--brand-green) 65%, transparent);
+  background: var(--active-control-bg);
+  box-shadow: 0 0 12px var(--active-control-focus-ring);
   animation: yoagent-refresh-sweep 1s linear infinite;
 }
 @keyframes yoagent-refresh-sweep {
@@ -633,64 +719,181 @@
 .yoagent-headline {
   margin-bottom: 5px;
   color: #f4f7fb;
-  font-size: var(--ui-font-size-sm);
+  font-size: var(--terminal-font-size);
   line-height: 1.35;
 }
 .yoagent-line {
   padding: 2px 0;
   color: #d6dee9;
 }
-.yoagent-session-summaries {
-  width: 100%;
-  min-width: 0;
-  max-width: 100%;
-  display: grid;
-  gap: 6px;
-  margin: 0 0 10px;
-}
-.yoagent-session-summary {
-  padding: 7px 9px;
-  color: var(--text);
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-inline-start: 3px solid var(--inactive-tab-border);
-  border-radius: 4px;
-}
-.yoagent-session-summary.active {
-  border-left-color: var(--brand-green);
-}
-.yoagent-session-summary-head {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 4px;
-  color: var(--muted);
-  font: 800 var(--ui-font-size-2xs)/1.2 var(--mono-font);
-  text-transform: uppercase;
-}
-.yoagent-session-summary-body {
-  overflow-wrap: anywhere;
-  font: var(--ui-font-size-sm)/1.35 var(--ui-font);
+.yoagent-global .markdown-body {
+  white-space: normal;
 }
 .yoagent-chat {
   width: 100%;
   min-width: 0;
   max-width: 100%;
   display: grid;
-  grid-template-rows: minmax(140px, 1fr) auto;
-  gap: 8px;
-  padding: 8px 10px;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 6px;
+  margin-top: auto;
+  padding: 6px 8px;
   color: var(--text);
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
 }
 .yoagent-chat.empty {
-  grid-template-rows: auto auto;
+  grid-template-rows: auto auto auto;
   align-content: start;
 }
 .yoagent-chat.empty .yoagent-chat-history {
   overflow: visible;
+}
+.yoagent-recent-agents {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 0 0 2px;
+}
+.yoagent-recent-agents-label {
+  color: var(--muted);
+  font: 800 max(9px, calc(var(--terminal-font-size) - 3px))/1 var(--mono-font);
+  text-transform: uppercase;
+}
+.yoagent-recent-agents-list {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  margin: 0;
+  padding-inline-start: 18px;
+}
+.yoagent-recent-agent {
+  padding: 0;
+  color: var(--text);
+  font: 600 max(10px, calc(var(--terminal-font-size) - 1px))/1.25 var(--ui-font);
+}
+.yoagent-recent-agent::marker {
+  color: var(--muted);
+}
+.yoagent-recent-agent-line {
+  display: inline-flex;
+  align-items: baseline;
+  max-width: 100%;
+  min-width: 0;
+  gap: 6px;
+}
+.yoagent-recent-agent .agent-icon {
+  width: max(12px, calc(var(--terminal-font-size) + 1px));
+  height: max(12px, calc(var(--terminal-font-size) + 1px));
+  flex: 0 0 auto;
+}
+.yoagent-recent-agent-session,
+.yoagent-recent-agent-window {
+  flex: 0 0 auto;
+  color: var(--text);
+}
+.yoagent-recent-agent-window {
+  color: var(--muted);
+}
+.yoagent-recent-agent-paths {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted-strong);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.yoagent-recent-agent-activity {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+.yoagent-recent-agent.tmux-idle {
+  opacity: 0.68;
+}
+.yoagent-recent-agent-signals {
+  display: inline-flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  gap: 3px;
+  min-width: 0;
+}
+.yoagent-recent-agent-signal {
+  display: inline-flex;
+  align-items: center;
+  min-height: 16px;
+  border: 1px solid var(--divider);
+  border-radius: 4px;
+  padding: 1px 4px;
+  color: var(--text);
+  background: var(--panel);
+  font: 800 max(9px, calc(var(--terminal-font-size) - 3px))/1 var(--mono-font);
+  white-space: nowrap;
+}
+.yoagent-recent-agent-signal.signal-dead,
+.yoagent-recent-agent-signal.signal-bell {
+  border-color: var(--danger-border);
+  color: var(--danger-border);
+}
+.yoagent-recent-agent-signal.signal-silence {
+  border-color: var(--accent-gold);
+  color: var(--accent-gold);
+}
+.yoagent-recent-agent-signal.signal-presence {
+  border-color: var(--active-control-soft-border);
+  color: var(--active-control-bg);
+}
+.yoagent-recent-agent-signal.signal-presence::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  margin-inline-end: 4px;
+  border-radius: 50%;
+  background: var(--active-control-bg);
+}
+.yoagent-recent-agent-signal.signal-zoom {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.yoagent-recent-agent-restart {
+  flex: 0 0 auto;
+  min-height: 18px;
+  border: 1px solid var(--divider);
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: var(--auto-text);
+  background: var(--brand-green);
+  font: 800 max(9px, calc(var(--terminal-font-size) - 3px))/1 var(--ui-font);
+  cursor: pointer;
+}
+.yoagent-recent-agent-restart:hover {
+  background: var(--accent-lime);
+}
+.yoagent-transcript-path {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 0 0 2px;
+  color: var(--muted);
+  font: 600 max(9px, calc(var(--terminal-font-size) - 3px))/1.2 var(--mono-font);
+}
+.yoagent-transcript-label {
+  flex: 0 0 auto;
+  text-transform: uppercase;
+}
+.yoagent-transcript-value {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.yoagent-transcript-loading {
+  color: var(--muted);
+}
+.yoagent-transcript-copy {
+  flex: 0 0 auto;
 }
 .yoagent-chat-clear {
   height: 24px;
@@ -698,15 +901,17 @@
   color: var(--muted);
   background: var(--panel2);
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
 }
 .yoagent-chat-clear:hover:not(:disabled),
 .yoagent-chat-clear:focus-visible {
   color: var(--text);
-  border-color: color-mix(in srgb, var(--brand-green) 45%, var(--line));
+  border-color: var(--active-control-soft-border);
 }
 .yoagent-chat-history {
+  /* YO!agent chat scrollbars always inherit a shared pane scrollbar rule from layout CSS; never
+     customize scrollbar colors or hover behavior here. */
   min-height: 0;
   overflow: auto;
   display: flex;
@@ -717,39 +922,68 @@
 .yoagent-chat-status,
 .yoagent-chat-error {
   color: var(--muted);
-  font: var(--ui-font-size-sm)/1.35 var(--ui-font);
+  font: var(--terminal-font-size)/1.35 var(--ui-font);
 }
 .yoagent-chat-status {
   display: flex;
   align-items: center;
   gap: 7px;
 }
+.yoagent-waiting-queue {
+  display: grid;
+  gap: 5px;
+  padding: 7px 8px;
+  color: var(--text);
+  background: var(--panel2);
+  border: 1px solid var(--active-control-soft-border);
+  border-radius: var(--radius-control);
+  font: var(--terminal-font-size)/1.35 var(--ui-font);
+}
+.yoagent-waiting-title {
+  color: var(--muted);
+  font: 800 max(9px, calc(var(--terminal-font-size) - 3px))/1 var(--mono-font);
+  text-transform: uppercase;
+}
+.yoagent-waiting-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.yoagent-waiting-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.yoagent-waiting-spinner {
+  width: 16px;
+  min-width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  font-size: 9px;
+}
+.yoagent-waiting-label {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.yoagent-waiting-age {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
 .yoagent-chat-spinner {
   min-width: 18px;
   height: 18px;
   flex: 0 0 auto;
 }
-/* "thinking" with three dots that bounce in sequence, so it reads as a live agent, not static text. */
+/* "thinking" with a blinking, moving ellipsis so it reads as live agent work, not static text. */
 .yoagent-thinking {
   display: inline-flex;
   align-items: baseline;
-}
-.yoagent-thinking-dots {
-  display: inline-flex;
-}
-.yoagent-thinking-dots i {
-  display: inline-block;
-  font-style: normal;
-  animation: yoagent-thinking-bounce 1.25s infinite ease-in-out both;
-}
-.yoagent-thinking-dots i:nth-child(2) { animation-delay: 0.16s; }
-.yoagent-thinking-dots i:nth-child(3) { animation-delay: 0.32s; }
-@keyframes yoagent-thinking-bounce {
-  0%, 70%, 100% { transform: translateY(0); opacity: 0.3; }
-  35% { transform: translateY(-3px); opacity: 1; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .yoagent-thinking-dots i { animation: none; opacity: 1; }
 }
 .yoagent-chat-error {
   display: flex;
@@ -761,19 +995,19 @@
 .yoagent-chat-retry {
   height: 22px;
   padding: 0 8px;
-  color: #071000;
+  color: var(--auto-text);
   background: var(--pane-tab-badge-gold);
   border: 1px solid #ffe27a;
-  border-radius: 4px;
-  font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
+  border-radius: var(--radius-control);
+  font: 800 max(10px, calc(var(--terminal-font-size) - 2px))/1 var(--ui-font);
 }
 .yoagent-chat-notice {
   padding: 7px 8px;
   color: #2a1e00;
   background: #ffe7a3;
   border: 1px solid #c8941e;
-  border-radius: 4px;
-  font: var(--ui-font-size-sm)/1.35 var(--ui-font);
+  border-radius: var(--radius-control);
+  font: var(--terminal-font-size)/1.35 var(--ui-font);
 }
 .yoagent-chat-notice-backend {
   font-weight: 800;
@@ -781,29 +1015,172 @@
 .yoagent-message {
   display: grid;
   gap: 3px;
+  width: calc(100% - 28px);
+  max-width: calc(100% - 28px);
   padding: 7px 8px;
   border: 1px solid var(--line);
   border-radius: 5px;
   background: var(--panel2);
 }
+.yoagent-message.assistant {
+  align-self: flex-start;
+  margin-inline-end: 28px;
+  padding-inline-start: 12px;
+  border-color: var(--active-control-border);
+  border-inline-start-width: 4px;
+  background: color-mix(in srgb, var(--active-control-soft-bg) 62%, var(--panel2));
+}
+.yoagent-message.assistant.yoagent-agent-result {
+  border-inline-start-color: var(--accent-gold);
+  border-inline-start-width: 6px;
+  background: color-mix(in srgb, var(--accent-gold) 8%, var(--panel2));
+}
+.yoagent-agent-result-body {
+  display: grid;
+  gap: 0;
+}
+.yoagent-message.assistant.yoagent-agent-result .yoagent-agent-result-output {
+  padding-inline-start: 14px;
+  border-inline-start: 3px solid var(--accent-gold);
+}
+.yoagent-message.assistant.streaming {
+  border-inline-start-style: dashed;
+}
+.yoagent-message.assistant.streaming .yoagent-message-role::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--active-control-border);
+  animation: command-palette-thinking 900ms ease-in-out infinite alternate;
+}
+.yoagent-recent-agents-message .yoagent-recent-agents {
+  padding: 0;
+}
 .yoagent-message.user {
-  border-color: color-mix(in srgb, var(--brand-green) 45%, var(--line));
+  align-self: flex-end;
+  margin-inline-start: 28px;
+  padding-inline-end: 12px;
+  border-color: var(--link-soft);
+  border-inline-end-width: 4px;
 }
 .yoagent-message-role {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   color: var(--muted);
-  font: 800 var(--ui-font-size-2xs)/1 var(--mono-font);
+  font: 800 max(9px, calc(var(--terminal-font-size) - 3px))/1 var(--mono-font);
   text-transform: uppercase;
+}
+.yoagent-message-time {
+  color: var(--muted);
+  font-weight: 600;
+  text-transform: none;
 }
 .yoagent-message-body {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font: var(--ui-font-size-sm)/1.35 var(--ui-font);
+  font: var(--terminal-font-size)/1.35 var(--ui-font);
 }
 /* Rendered Markdown brings its own block layout — keep pre-wrap only for the plain-text fallback/user
    messages. On a markdown body it would preserve the newlines between/inside the generated <ul><li>
    HTML as blank lines, which is why the bullets looked far too widely spaced. */
 .yoagent-message-body.markdown-body {
   white-space: normal;
+}
+.yoagent-message-details {
+  margin-top: 5px;
+  font: max(9px, calc(var(--terminal-font-size) - 2px))/1.35 var(--mono-font);
+  color: var(--muted);
+}
+.yoagent-message-details summary {
+  cursor: pointer;
+  user-select: none;
+  width: fit-content;
+  color: var(--muted);
+}
+.yoagent-message-details pre {
+  margin: 5px 0 0;
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 7px 8px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel2) 72%, var(--bg));
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.yoagent-action-card {
+  display: grid;
+  gap: 7px;
+  margin-top: 7px;
+  padding: 8px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel2) 70%, var(--bg));
+  border: 1px solid rgba(112, 167, 255, 0.65);
+  border-radius: 6px;
+}
+.yoagent-action-card.sent {
+  border-color: var(--active-control-border);
+}
+.yoagent-action-card.error {
+  border-color: var(--bad);
+}
+.yoagent-action-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+  color: #dbeafe;
+  font: 800 max(10px, calc(var(--terminal-font-size) - 2px))/1 var(--ui-font);
+}
+.yoagent-action-send {
+  height: 24px;
+  padding: 0 10px;
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border: 1px solid var(--active-control-border);
+  border-radius: var(--radius-pill);
+  font: 800 max(10px, calc(var(--terminal-font-size) - 2px))/1 var(--ui-font);
+  cursor: pointer;
+}
+.yoagent-action-state {
+  color: var(--muted);
+  font: 700 max(10px, calc(var(--terminal-font-size) - 2px))/1 var(--ui-font);
+}
+.yoagent-action-rows {
+  display: grid;
+  gap: 4px;
+}
+.yoagent-action-row {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+  color: var(--muted);
+  font: max(10px, calc(var(--terminal-font-size) - 2px))/1.25 var(--ui-font);
+}
+.yoagent-action-row code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--pane-tab-text);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+.yoagent-action-text {
+  min-width: 0;
+  max-height: 170px;
+  overflow: auto;
+  margin: 0;
+  padding: 7px 8px;
+  color: #eef4ff;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  white-space: pre-wrap;
 }
 /* Composer (mockup 044): one rounded container with the input on top and a control row below —
    the backend "Auto" pill on the left, a subtle Clear, and a circular send-arrow on the right. */
@@ -817,7 +1194,7 @@
   border-radius: 14px;
 }
 .yoagent-chat-form:focus-within {
-  border-color: color-mix(in srgb, var(--brand-green) 55%, var(--line));
+  border-color: var(--active-control-border);
 }
 .yoagent-chat-input {
   min-width: 0;
@@ -827,7 +1204,7 @@
   color: var(--text);
   background: transparent;
   border: 0;
-  font: var(--ui-font-size-sm)/1.3 var(--ui-font);
+  font: var(--terminal-font-size)/1.3 var(--ui-font);
 }
 .yoagent-chat-input:focus { outline: none; }
 .yoagent-chat-controls {
@@ -845,15 +1222,15 @@
   color: var(--text);
   background: var(--panel2);
   border: 1px solid var(--line);
-  border-radius: 999px;
-  font: 600 var(--ui-font-size-xs)/1 var(--ui-font);
+  border-radius: var(--radius-pill);
+  font: 600 max(10px, calc(var(--terminal-font-size) - 2px))/1 var(--ui-font);
 }
 .yoagent-backend-pill-dot {
   width: 9px;
   height: 9px;
   flex: 0 0 auto;
   border-radius: 50%;
-  border: 2px solid var(--brand-green);
+  border: 2px solid var(--active-control-bg);
 }
 .yoagent-backend-pill select {
   height: 22px;
@@ -871,8 +1248,8 @@
   color: var(--muted);
   background: transparent;
   border: 0;
-  border-radius: 999px;
-  font: 600 var(--ui-font-size-xs)/1 var(--ui-font);
+  border-radius: var(--radius-pill);
+  font: 600 max(10px, calc(var(--terminal-font-size) - 2px))/1 var(--ui-font);
   cursor: pointer;
 }
 .yoagent-chat-clear:hover:not(:disabled),
@@ -889,9 +1266,9 @@
   height: 30px;
   flex: 0 0 auto;
   padding: 0;
-  color: #071000;
-  background: var(--brand-green);
-  border: 1px solid var(--auto-border);
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border: 1px solid var(--active-control-border);
   border-radius: 50%;
   cursor: pointer;
 }
@@ -899,53 +1276,140 @@
 .yoagent-chat-send-icon { width: 16px; height: 16px; }
 /* YO!agent rendered code blocks: soft rounded boxes (not the editor's near-black slab). */
 .yoagent-chat .markdown-body pre,
-.yoagent-session-summary .markdown-body pre {
+.yoagent-global .markdown-body pre {
   background: color-mix(in srgb, var(--panel2) 60%, var(--bg));
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 8px 10px;
 }
 body.theme-light .info-pane {
-  background: var(--bg);
+  background: #ffffff;
+}
+body.theme-light .info-list,
+body.theme-light .info-watched {
+  background: #ffffff;
 }
 body.theme-light .yoagent-global {
   color: var(--text);
   background: #ffffff;
   border-color: var(--line);
 }
+body.theme-light .yoagent-chat,
+body.theme-light .yoagent-message {
+  color: var(--lt-text);
+  background: var(--panel);
+  border-color: var(--line);
+}
+body.theme-light .yoagent-message.assistant {
+  border-color: var(--active-control-border);
+  background: color-mix(in srgb, var(--active-control-soft-bg) 78%, #ffffff);
+}
+body.theme-light .yoagent-message.assistant.yoagent-agent-result {
+  border-inline-start-color: var(--accent-gold);
+  background: color-mix(in srgb, var(--accent-gold) 10%, #ffffff);
+}
+body.theme-light .yoagent-message.user {
+  border-color: var(--link-soft);
+}
 body.theme-light .yoagent-global-head,
 body.theme-light .yoagent-headline,
 body.theme-light .yoagent-line {
   color: var(--text);
 }
+body.theme-light .yoagent-generated,
+body.theme-light .yoagent-empty,
+body.theme-light .yoagent-message-role {
+  color: var(--lt-muted-strong);
+}
+body.theme-light .yoagent-message-body.markdown-body,
+body.theme-light .yoagent-global .markdown-body {
+  color: var(--lt-text);
+}
+body.theme-light .yoagent-message-details summary {
+  color: var(--lt-muted-strong);
+}
+body.theme-light .yoagent-message-details pre {
+  color: var(--lt-text);
+  background: var(--lt-code-block-bg);
+  border-color: var(--lt-code-block-border);
+}
+body.theme-light .yoagent-action-card {
+  color: var(--lt-text);
+  background: var(--lt-code-block-bg);
+  border-color: var(--link-soft);
+}
+body.theme-light .yoagent-action-head {
+  color: #0f4c81;
+}
+body.theme-light .yoagent-action-row code {
+  color: var(--lt-text);
+  background: #eef6ff;
+  border-color: #8ab4f8;
+}
+body.theme-light .yoagent-action-text {
+  color: var(--lt-code-block-text);
+  background: var(--lt-code-block-bg);
+  border-color: var(--lt-code-block-border);
+}
+body.theme-light .yoagent-chat .markdown-body strong,
+body.theme-light .yoagent-global .markdown-body strong {
+  color: var(--lt-text);
+}
+body.theme-light .yoagent-chat .markdown-body em,
+body.theme-light .yoagent-global .markdown-body em {
+  color: #374151;
+}
+body.theme-light .yoagent-chat .markdown-body :not(pre) > code,
+body.theme-light .yoagent-global .markdown-body :not(pre) > code {
+  color: #0f4c81;
+  background: #eef6ff;
+  border-color: #8ab4f8;
+}
 /* Light mode: the composer + pills adapt via theme tokens; the rendered code blocks need an explicit
    light box + dark text (the shared `.markdown-body pre` is dark-only and only the file editor had a
    light override). Matches the soft gray code boxes in mockup 044. */
 body.theme-light .yoagent-chat .markdown-body pre,
-body.theme-light .yoagent-session-summary .markdown-body pre {
-  background: #f3f4f6;
-  border-color: #e4e7ec;
-  color: #1f2328;
+body.theme-light .yoagent-global .markdown-body pre {
+  background: var(--lt-code-block-bg);
+  border-color: var(--lt-code-block-border);
+  color: var(--lt-code-block-text);
 }
 body.theme-light .yoagent-chat .markdown-body pre code,
-body.theme-light .yoagent-session-summary .markdown-body pre code {
-  color: #1f2328;
+body.theme-light .yoagent-global .markdown-body pre code {
+  color: var(--lt-code-block-text);
 }
 .info-row {
   display: grid;
-  grid-template-columns: 120px 150px minmax(230px, 1fr) 170px 170px minmax(310px, 1fr) 112px;
-  gap: 10px;
+  grid-template-columns:
+    var(--info-session-column-width)
+    var(--info-path-column-width)
+    minmax(var(--info-branch-column-width), var(--info-branch-column-width))
+    var(--info-pr-column-width)
+    var(--info-linear-column-width)
+    minmax(var(--info-desc-column-width), 1fr)
+    var(--info-updated-column-width);
+  gap: var(--info-table-column-gap);
   align-items: baseline;
-  padding: 7px 8px;
-  min-width: 1380px;
+  padding: 7px var(--info-table-inline-padding);
+  min-width: calc(
+    var(--info-session-column-width)
+    + var(--info-path-column-width)
+    + var(--info-branch-column-width)
+    + var(--info-pr-column-width)
+    + var(--info-linear-column-width)
+    + var(--info-desc-column-width)
+    + var(--info-updated-column-width)
+    + (var(--info-table-column-gap) * 6)
+    + (var(--info-table-inline-padding) * 2)
+  );
   border-bottom: 1px solid #263044;
-  color: #dfe6ef;
+  color: var(--pane-tab-text);
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
 }
 .info-row.header {
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: var(--z-stacking-base);
   color: #9ea8b7;
   background: #151b25;
   font-weight: 700;
@@ -953,17 +1417,12 @@ body.theme-light .yoagent-session-summary .markdown-body pre code {
 .info-sort-button {
   width: 100%;
   min-width: 0;
-  display: inline-flex;
-  align-items: center;
   gap: 5px;
   padding: 0;
   color: inherit;
-  background: transparent;
-  border: 0;
   font: inherit;
   font-weight: 700;
   text-align: start;
-  cursor: pointer;
 }
 .info-sort-button span:first-child {
   min-width: 0;
@@ -980,7 +1439,7 @@ body.theme-light .yoagent-session-summary .markdown-body pre code {
   color: var(--accent-gold);
   font-size: var(--ui-font-size-2xs);
 }
-/* DOIT.28 C2: the current-branch row reuses the shared selection tokens (they flip light/dark) plus a
+/* the current-branch row reuses the shared selection tokens (they flip light/dark) plus a
    left accent bar, mirroring the Finder's selected-file treatment — the old dim navy barely stood out
    on the dark table. The separate body.theme-light override below is now redundant (tokens carry it). */
 .info-row.current {
@@ -990,52 +1449,86 @@ body.theme-light .yoagent-session-summary .markdown-body pre code {
 }
 .info-cell {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+}
+.info-resizable-header-cell {
+  position: relative;
+  overflow: visible;
+  padding-inline-end: calc(var(--info-column-resizer-hit-width) / 2 + 4px);
+}
+.info-column-resizer {
+  position: absolute;
+  inset-block: -7px;
+  inset-inline-end: calc(var(--info-column-resizer-hit-width) / -2);
+  z-index: 1;
+  width: var(--info-column-resizer-hit-width);
+  min-width: var(--info-column-resizer-hit-width);
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  cursor: col-resize;
+}
+.info-column-resizer::before {
+  content: "";
+  position: absolute;
+  inset-block: 5px;
+  inset-inline-start: 50%;
+  width: var(--info-column-resizer-line-width);
+  background: color-mix(in srgb, var(--muted) 48%, transparent);
+  transform: translateX(-50%);
+}
+.info-column-resizer:hover::before,
+.info-column-resizer:focus-visible::before,
+body.info-column-resizing .info-column-resizer::before {
+  background: var(--pane-resizer-hover-bg);
+  box-shadow: var(--drop-outline-shadow);
+}
+body.info-column-resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 .info-cell a {
-  color: #93c5fd;
+  color: var(--link-soft);
   text-decoration: none;
 }
 .info-cell a.pr-status-failing {
-  color: #ff8a95;
+  color: var(--pr-status-failing);
 }
 .info-cell a.pr-status-pending,
 .info-cell a.pr-status-draft {
   color: var(--accent-gold);
 }
 .info-cell a.pr-status-passing {
-  color: #52d273;
+  color: var(--pr-status-passing);
 }
 .info-cell a.pr-status-merged {
-  color: #c084fc;
+  color: var(--pr-status-merged);
 }
 .info-cell a.pr-status-closed {
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
 }
 .info-cell a:hover {
-  color: #bfdbfe;
+  color: var(--link-soft-hover);
   text-decoration: underline;
 }
 .info-cell a.pr-status-failing:hover {
-  color: #ff8a95;
+  color: var(--pr-status-failing);
 }
 .info-cell a.pr-status-pending:hover,
 .info-cell a.pr-status-draft:hover {
   color: var(--accent-gold);
 }
 .info-cell a.pr-status-passing:hover {
-  color: #52d273;
+  color: var(--pr-status-passing);
 }
 .branch-meta a.pr-status-merged:hover,
 .info-cell a.pr-status-merged:hover {
-  color: #c084fc;
+  color: var(--pr-status-merged);
 }
 .info-cell a.pr-status-closed:hover {
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
 }
-/* Light mode (DOIT.18 C1): the whole YO!info table hardcoded dark-mode colors with NO light
+/* Light mode: the whole YO!info table hardcoded dark-mode colors with NO light
    override — near-white row text vanished on the white pane, header/current rows were dark bars,
    and the PR/branch links were low-contrast pastels. Repaint for the white surface; dark unchanged. */
 body.theme-light .info-row {
@@ -1044,13 +1537,13 @@ body.theme-light .info-row {
 }
 body.theme-light .info-row.header {
   color: var(--muted);
-  background: var(--panel2);
+  background: #ffffff;
 }
 body.theme-light .info-cell a {
-  color: #1d4ed8;
+  color: var(--link-soft);
 }
 body.theme-light .info-cell a:hover {
-  color: #0a3bc0;
+  color: var(--link-soft-hover);
 }
 body.theme-light .info-cell a.pr-status-failing,
 body.theme-light .info-cell a.pr-status-failing:hover {
@@ -1062,7 +1555,7 @@ body.theme-light .info-cell a.pr-status-passing:hover {
 }
 body.theme-light .info-cell a.pr-status-merged,
 body.theme-light .info-cell a.pr-status-merged:hover {
-  color: #8250df;
+  color: var(--lt-code-function);
 }
 body.theme-light .info-cell a.pr-status-closed,
 body.theme-light .info-cell a.pr-status-closed:hover {
@@ -1077,7 +1570,23 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   color: var(--muted);
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
 }
-/* DOIT.29: the Watched PRs section of YO!info (PRs tracked independent of any open session). Its own
+.info-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.info-loading-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid color-mix(in srgb, var(--muted) 28%, transparent);
+  border-top-color: var(--pane-tab-active-bg);
+  border-radius: 50%;
+  animation: metadata-refresh-spin 0.9s linear infinite;
+}
+.info-error {
+  color: var(--bad);
+}
+/* the Watched PRs section of YO!info (PRs tracked independent of any open session). Its own
    container below the branch table, separated by a rule; rows reuse .info-cell but a tighter 4-col grid. */
 .info-watched {
   border-block-start: 1px solid var(--line);
@@ -1111,10 +1620,10 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   place-items: center;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   background: transparent;
   color: var(--muted);
-  font-size: var(--ui-font-size-md);
+  font-size: var(--ui-font-size);
   line-height: 1;
   cursor: pointer;
 }
@@ -1131,14 +1640,14 @@ body.theme-light .info-cell a.pr-status-closed:hover {
 .err { color: var(--bad); }
 .attention-alerts {
   position: fixed;
-  /* Clear the topbar: it is z-index:180 and occupies the top band (~--compact-control-height + padding),
+  /* Clear the topbar: it uses --z-topbar and occupies the top band (~--compact-control-height + padding),
      so a top:12px / z:140 toast rendered INSIDE that band was painted over by the topbar (the Keep/x row
      was clipped). Drop below the topbar height + a gap, and sit above it in z so it is never covered. */
   top: calc(var(--compact-control-height) + 20px);
   right: 12px;
   bottom: auto;
   left: auto;
-  z-index: 200;
+  z-index: var(--z-full-screen-overlay);
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -1155,7 +1664,7 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   top: 12px;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 200;
+  z-index: var(--z-full-screen-overlay);
   display: flex;
   align-items: center;
   gap: 10px;
@@ -1165,46 +1674,73 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   border-radius: 6px;
   background: #1b2230;
   color: #e8edf4;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 6px 20px rgb(var(--shadow-rgb) / 0.45);
   font: 600 var(--ui-font-size-xs, 12px)/1.2 var(--mono-font);
 }
 .server-update-banner-reload {
   cursor: pointer;
-  border: 1px solid var(--accent-gold, #f0b85d);
-  border-radius: 4px;
-  background: var(--accent-gold, #f0b85d);
-  color: #1b2230;
+  border: 1px solid var(--danger-strong-hover);
+  border-radius: var(--radius-control);
+  background: var(--danger-strong);
+  color: #ffffff;
   font: inherit;
   font-weight: 800;
   padding: 2px 10px;
+}
+.server-update-banner-reload:hover,
+.server-update-banner-reload:focus-visible {
+  border-color: var(--danger-strong-border);
+  background: var(--danger-strong-hover);
+  color: #ffffff;
 }
 .server-update-banner-dismiss {
   cursor: pointer;
   border: none;
   background: transparent;
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
   font-size: 16px;
   line-height: 1;
   padding: 0 4px;
 }
 .modal {
   display: none;
-  position: fixed;
-  z-index: 40;
-  inset: 7vh 7vw;
-  background: #10141b;
-  border: 1px solid var(--line);
-  border-radius: 8px;
+  z-index: var(--z-file-conflict-dialog);
+  align-items: center;
+  justify-items: center;
+  padding: var(--popover-edge-gap);
   overflow: hidden;
-  grid-template-rows: auto minmax(0, 1fr);
 }
 .modal.open { display: grid; }
+.modal-dialog {
+  width: min(86vw, var(--popover-max-inline-size));
+  max-height: min(86vh, calc(100vh - var(--popover-edge-gap) - var(--popover-edge-gap)));
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  background: #10141b;
+  border: var(--app-modal-border-width) solid var(--app-modal-border-color);
+  border-radius: 8px;
+  overflow: hidden;
+}
 .modal-head {
   padding: 9px 11px;
   border-bottom: 1px solid var(--line);
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+#closeModal {
+  inline-size: 32px;
+  block-size: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 6px;
+  font: 900 var(--ui-font-size-lg)/1 var(--ui-font);
+}
+#modalBody {
+  min-height: 0;
 }
 .modal pre {
   margin: 0;
@@ -1214,97 +1750,488 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   overflow-wrap: anywhere;
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
 }
-@media (max-width: 1500px) {
-  .topbar {
-    gap: 6px;
-    padding-inline: 6px;
-  }
-  .brand {
-    min-width: 82px;
-  }
-  .app-menu-area {
-    gap: 6px;
-  }
-  .app-menu-button {
-    padding-inline: 6px;
-  }
-  .actions {
-    gap: 4px;
-  }
+.modal.about-open .modal-dialog {
+  width: min(520px, var(--popover-max-inline-size));
+  max-height: min(76vh, calc(100vh - var(--popover-edge-gap) - var(--popover-edge-gap)));
+  background: var(--panel);
+  box-shadow: var(--shadow-elevated);
+}
+.modal.about-open #modalBody {
+  white-space: normal;
+  overflow: auto;
+  font-family: var(--ui-font);
+}
+.modal.share-open .modal-dialog {
+  width: min(960px, var(--popover-max-inline-size));
+  max-height: min(80vh, calc(100vh - var(--popover-edge-gap) - var(--popover-edge-gap)));
+  background: var(--panel);
+  border: var(--app-modal-border-width) solid var(--app-modal-border-color);
+  box-shadow: 0 18px 52px rgb(var(--shadow-rgb) / 0.5);
+}
+.modal.share-open #modalBody {
+  display: block;
+  white-space: normal;
+  overflow: auto;
+  font-family: var(--ui-font);
+}
+.share-modal-form,
+.share-result {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+.share-section-title {
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+  font-weight: 900;
+  font-size: var(--ui-font-size-sm);
+}
+.share-entry-list {
+  display: grid;
+  gap: 10px;
+}
+.share-entry {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel2);
+}
+.share-entry.share-mode-read {
+  border-color: color-mix(in srgb, var(--good) 55%, var(--line));
+}
+.share-entry.share-mode-write {
+  border-color: color-mix(in srgb, var(--bad) 62%, var(--line));
+}
+.share-entry-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.share-entry-heading strong {
+  min-width: 0;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.share-entry-heading span {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: var(--ui-font-size-xs);
+  font-weight: 800;
+}
+.share-create-panel {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--panel2) 80%, transparent);
+}
+.share-active-panel {
+  display: grid;
+  gap: 8px;
+}
+.share-create-controls {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.25fr) minmax(112px, 0.75fr) max-content max-content;
+  align-items: end;
+  gap: 10px;
+}
+.share-field {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-weight: 800;
+}
+.share-field select,
+.share-field input[type="number"],
+.share-field input[type="text"] {
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--input-bg);
+  color: var(--text);
+  font: 600 var(--ui-font-size-sm)/1 var(--ui-font);
+}
+.share-duration-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: 6px;
+}
+.share-duration-unit {
+  color: var(--muted);
+  font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
+}
+.share-url-field input {
+  font-family: var(--mono-font);
+}
+.share-url-primary {
+  gap: 8px;
+  padding: 9px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--accent) 11%, var(--panel2));
+  color: var(--text);
+}
+.share-url-primary-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.share-url-primary-head > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: var(--ui-font-size-xs);
+  font-weight: 900;
+  text-transform: uppercase;
+}
+.share-url-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 32px;
+  align-items: center;
+  gap: 6px;
+}
+.share-url-control .share-url-copy-button {
+  min-width: 32px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+}
+.share-url-control .share-url-copy-button::before {
+  inset-inline-start: 8px;
+  top: 11px;
+}
+.share-url-control .share-url-copy-button::after {
+  inset-inline-start: 11px;
+  top: 8px;
+}
+.share-checkbox,
+.share-protocol-group label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text);
+  white-space: nowrap;
+}
+.share-protocol-group {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+.share-protocol-group legend {
+  padding: 0 4px;
+  color: var(--muted);
+  font-weight: 800;
+}
+.share-hint,
+.share-security-note,
+.share-result-meta {
+  color: var(--muted);
+  font-size: var(--ui-font-size-xs);
+  line-height: 1.35;
+}
+.share-result-meta {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.share-result-meta span {
+  flex: 0 0 auto;
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--panel2);
+  white-space: nowrap;
+}
+.share-users {
+  display: grid;
+  gap: 4px;
+  padding-top: 2px;
+}
+.share-users-title {
+  color: var(--text);
+  font-size: var(--ui-font-size-xs);
+  font-weight: 900;
+}
+.share-users-table {
+  display: grid;
+  min-width: 0;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.share-users-row {
+  display: grid;
+  grid-template-columns: minmax(78px, 0.8fr) minmax(96px, 1fr) minmax(92px, 0.9fr);
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 5px 0;
+  color: var(--text);
+  font-size: var(--ui-font-size-xs);
+  line-height: 1.25;
+  border-top: 1px solid var(--line);
+}
+.share-users-row.header {
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-weight: 900;
+  background: transparent;
+}
+.share-users-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.share-users-empty {
+  padding: 7px 0 0;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: var(--ui-font-size-xs);
+}
+.share-extend-button {
+  flex: 0 0 auto;
+  min-height: 24px;
+  padding: 2px 7px;
+  border: 1px solid var(--active-control-border);
+  border-radius: var(--radius-control);
+  background: var(--active-control-soft-bg);
+  color: var(--text);
+  font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
+  cursor: pointer;
+}
+.share-extend-button:hover,
+.share-extend-button:focus-visible {
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  outline: 0;
+}
+.share-error {
+  color: var(--bad);
+  font-weight: 800;
+}
+.share-modal-message {
+  padding: 16px;
+  color: var(--muted);
+  font-family: var(--ui-font);
+}
+.share-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.share-actions button {
+  min-height: 30px;
+}
+.share-actions button.danger {
+  border-color: var(--danger-strong);
+  background: var(--danger-strong);
+  color: var(--danger-text);
+}
+.share-stop-inline {
+  flex: 0 0 auto;
+  min-height: 24px;
+  padding: 2px 7px;
+  border-radius: var(--radius-control);
+  font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
+}
+body.theme-light .modal.share-open .modal-dialog {
+  background: #ffffff;
+  box-shadow: 0 18px 46px rgb(var(--shadow-rgb) / 0.24);
+}
+body.app-vw-lte-760 .share-create-controls {
+  grid-template-columns: 1fr;
+}
+body.app-vw-lte-760 .share-protocol-group,
+body.app-vw-lte-760 .share-result-meta {
+  flex-wrap: wrap;
+}
+.about-modal {
+  display: grid;
+  gap: 18px;
+  padding: 18px;
+}
+.about-brand-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  white-space: nowrap;
+}
+.about-brand-row [class^="about-brand-"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 46px;
+  line-height: 0.9;
+  font-weight: 900;
+  letter-spacing: 0;
+}
+.about-brand-yo {
+  padding: 3px 6px 5px;
+  color: var(--pane-tab-yolo-text);
+  background: var(--pane-tab-yolo-bg);
+  border-radius: var(--radius-control);
+  transform-origin: center;
+  animation: yolo-marker-rotate var(--yolo-rotation-duration, 20s) linear infinite;
+  animation-delay: var(--yolo-rotate-delay, 0s);
+}
+.about-brand-lo {
+  color: var(--brand-green, #76b900);
+}
+.about-brand-m {
+  color: #3b82f6;
+}
+.about-brand-u {
+  color: #ef4444;
+}
+.about-brand-x {
+  color: #f59e0b;
+}
+.about-version {
+  color: var(--muted);
+  font: 900 var(--ui-font-size-xl)/1 var(--mono-font);
+}
+.about-details {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+.about-details div {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 10px;
+}
+.about-details dt {
+  color: var(--muted);
+  font-weight: 800;
+}
+.about-details dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-family: var(--mono-font);
+}
+.about-links {
+  justify-self: start;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: var(--ui-font-size-sm);
+  font-weight: 800;
+}
+.about-author {
+  justify-self: start;
+  color: var(--markdown-link);
+  text-decoration: underline;
+}
+body.theme-light .modal.about-open .modal-dialog {
+  background: #ffffff;
+}
+body.app-vw-lte-1500 .topbar {
+  gap: 6px;
+  padding-inline: 6px;
+}
+body.app-vw-lte-1500 .brand {
+  min-width: 82px;
+}
+body.app-vw-lte-1500 .app-menu-area {
+  gap: 6px;
+}
+body.app-vw-lte-1500 .app-menu-button {
+  padding-inline: 6px;
+}
+body.app-vw-lte-1500 .actions {
+  gap: 4px;
 }
 
-@media (max-width: 1280px) {
-  .app-menu-area {
-    justify-content: flex-start;
-  }
-  .app-menu-button {
-    padding-inline: 5px;
-  }
-  .latency-meter {
-    min-width: 62px;
-    grid-template-columns: 34px auto;
-    gap: 4px;
-    padding-inline: 4px;
-  }
-  .latency-graph {
-    width: 32px;
-  }
-  .latency-number {
-    min-width: 28px;
-  }
+body.app-vw-lte-1280 .app-menu-area {
+  justify-content: flex-start;
+}
+body.app-vw-lte-1280 .app-menu-button {
+  padding-inline: 5px;
+}
+body.app-vw-lte-1280 .latency-meter {
+  min-width: 62px;
+  grid-template-columns: 34px auto;
+  gap: 4px;
+  padding-inline: 4px;
+}
+body.app-vw-lte-1280 .latency-graph {
+  width: 32px;
+}
+body.app-vw-lte-1280 .latency-number {
+  min-width: 28px;
 }
 
-@media (max-width: 1080px) {
-  .brand {
-    min-width: 72px;
-  }
-  .title {
-    font-size: var(--ui-font-size);
-  }
-  .app-menu-area {
-    gap: 4px;
-  }
-  .app-menu-button {
-    padding-inline: 4px;
-  }
-  .session-yolo-marker {
-    min-width: 18px;
-    padding-inline: 0;
-  }
-  .latency-graph {
-    display: none;
-  }
-  .latency-meter {
-    min-width: 42px;
-    grid-template-columns: auto;
-  }
-  .actions button {
-    width: var(--compact-icon-button-size);
-    min-width: var(--compact-icon-button-size);
-    max-width: var(--compact-icon-button-size);
-    padding-inline: 0;
-    font-size: 0;
-  }
-  #status {
-    max-width: 72px;
-  }
+body.app-vw-lte-1080 .brand {
+  min-width: 72px;
+}
+body.app-vw-lte-1080 .title {
+  font-size: var(--ui-font-size);
+}
+body.app-vw-lte-1080 .app-menu-area {
+  gap: 4px;
+}
+body.app-vw-lte-1080 .app-menu-button {
+  padding-inline: 4px;
+}
+body.app-vw-lte-1080 .session-yolo-marker {
+  min-width: 18px;
+  padding-inline: 0;
+}
+body.app-vw-lte-1080 .latency-graph {
+  display: none;
+}
+body.app-vw-lte-1080 .latency-meter {
+  min-width: 42px;
+  grid-template-columns: auto;
+}
+body.app-vw-lte-1080 .actions button {
+  width: var(--compact-icon-button-size);
+  min-width: var(--compact-icon-button-size);
+  max-width: var(--compact-icon-button-size);
+  padding-inline: 0;
+  font-size: 0;
+}
+body.app-vw-lte-1080 #status {
+  max-width: 72px;
 }
 
-@media (max-width: 980px) {
-  .topbar {
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    align-items: center;
-  }
-  .actions { flex-wrap: nowrap; }
-  .panel-head {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-  .pane-tabs {
-    max-width: 100%;
-  }
-  .tabs {
-    justify-self: stretch;
-  }
+body.app-vw-lte-980 .topbar {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+}
+body.app-vw-lte-980 .actions { flex-wrap: nowrap; }
+body.app-vw-lte-980 .panel-head {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+body.app-vw-lte-980 .pane-tabs {
+  max-width: 100%;
+}
+body.app-vw-lte-980 .tabs {
+  justify-self: stretch;
 }
 
 /* File Explorer overlay panel (Phase 2 of the file-browser feature).
@@ -1315,12 +2242,12 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   bottom: 0;
   left: 0;
   width: var(--file-explorer-tree-inline-size);
-  z-index: 60;
+  z-index: var(--z-file-tree-drag);
   display: flex;
   flex-direction: column;
   background: var(--panel);
   border-inline-end: 1px solid var(--line);
-  box-shadow: 4px 0 18px rgba(0, 0, 0, 0.35);
+  box-shadow: 4px 0 18px rgb(var(--shadow-rgb) / 0.35);
   overflow: hidden;
   font-family: var(--ui-font);
   font-size: var(--file-explorer-font-size);
@@ -1334,7 +2261,7 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   align-items: center;
   gap: 6px;
   padding: 4px 8px;
-  background: var(--panel2);
+  background: var(--pane-bar-bg, var(--panel2));
   border-bottom: 1px solid var(--line);
   min-height: 26px;
 }
@@ -1342,20 +2269,19 @@ body.theme-light .info-cell a.pr-status-closed:hover {
 .file-explorer-path-inline {
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-xs);
-  color: var(--muted);
-  background: rgba(255, 255, 255, 0.025);
-  border: 1px solid transparent;
-  border-radius: 4px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
   direction: ltr;
   text-align: start;
   outline: none;
 }
 .file-explorer-path {
-  flex: 1;
-  min-width: 0;
+  flex-grow: 1;
+  flex-shrink: 0;
+  flex-basis: min(34ch, 100%);
+  min-width: min(32ch, 100%);
   height: 22px;
   padding: 2px 6px;
 }
@@ -1363,8 +2289,8 @@ body.theme-light .info-cell a.pr-status-closed:hover {
 .file-explorer-path-inline:focus {
   color: var(--text);
   background: rgba(10, 14, 20, 0.98);
-  border-color: var(--brand-green);
-  box-shadow: 0 0 0 2px rgba(118, 185, 0, 0.14);
+  border-color: var(--active-control-border);
+  box-shadow: 0 0 0 2px var(--active-control-focus-ring);
 }
 .file-explorer-path.invalid,
 .file-explorer-path-inline.invalid {
@@ -1436,7 +2362,7 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   left: 50%;
   width: var(--panel-close-glyph-width);
   height: var(--panel-close-glyph-height);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: currentColor;
 }
 .file-explorer-close::before,
@@ -1457,9 +2383,17 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   padding: 4px 0;
 }
 .file-tree-row {
+  --file-tree-row-control-size: calc(var(--file-explorer-font-size) + 2px);
+  --file-tree-icon-size: calc(var(--file-explorer-font-size) + 2px);
+  --file-tree-icon-font-size: max(6px, calc(var(--file-explorer-font-size) - 1px));
+  --file-tree-date-column-width: 16ch;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   gap: 4px;
+  inline-size: 100%;
+  max-inline-size: 100%;
+  min-inline-size: 0;
   padding: 2px 8px;
   font-size: var(--file-explorer-font-size);
   line-height: 1.4;
@@ -1467,23 +2401,36 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   white-space: nowrap;
   user-select: none;
 }
-.file-tree-row:hover {
-  background: rgba(255, 255, 255, 0.04);
+.file-tree-row.compact {
+  line-height: 1.05;
+  gap: 5px;
+}
+.file-tree-row:not(.selected):hover {
+  background: var(--file-hover-bg);
+  box-shadow: inset 4px 0 0 var(--file-hover-border), inset 0 0 0 1px var(--file-hover-outline);
+}
+.file-tree-status-row {
+  color: var(--muted);
+  cursor: default;
+}
+.file-tree-status-row:not(.selected):hover {
+  background: transparent;
+  box-shadow: none;
 }
 .file-tree-row.selected {
   color: var(--file-selection-text);
   background: var(--file-selection-bg);
-  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px rgba(158, 232, 93, 0.24);
+  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px var(--active-control-focus-ring);
 }
 .file-tree-row.current-file:not(.selected) {
-  color: #eaf6df;
-  background: rgba(144, 196, 82, 0.12);
-  box-shadow: inset 3px 0 0 rgba(118, 185, 0, 0.55);
+  color: var(--file-selection-text);
+  background: var(--file-selection-bg);
+  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px var(--active-control-focus-ring);
 }
 .file-tree-row.current-directory:not(.selected) {
-  color: #f2ffe8;
-  background: rgba(118, 185, 0, 0.16);
-  box-shadow: inset 3px 0 0 rgba(118, 185, 0, 0.72);
+  color: var(--text);
+  background: var(--active-control-soft-bg);
+  box-shadow: inset 3px 0 0 var(--active-control-border);
 }
 .file-tree-row.renaming {
   background: rgba(82, 210, 115, 0.18);
@@ -1494,18 +2441,36 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   box-shadow: inset 3px 0 0 var(--accent-gold);
 }
 .file-tree-row.git-modified:not(.selected) .file-tree-name {
-  color: #f5c542;
+  color: var(--git-modified);
+}
+.file-tree-row.git-modified:not(.selected) .file-tree-git-status:not([hidden]) {
+  background: var(--git-modified-badge);
 }
 .file-tree-row.git-untracked:not(.selected) .file-tree-name {
-  color: #7ee787;
+  color: var(--git-untracked-name);
+}
+.file-tree-row.git-untracked:not(.selected) .file-tree-git-status:not([hidden]) {
+  background: var(--git-untracked-badge);
 }
 .file-tree-row.git-deleted:not(.selected) .file-tree-name {
-  color: #ff8585;
+  color: var(--git-deleted);
   text-decoration: line-through;
 }
+.file-tree-row.git-deleted:not(.selected) .file-tree-git-status:not([hidden]) {
+  background: var(--git-deleted-badge);
+}
 .file-tree-row.git-staged:not(.selected) .file-tree-name {
-  color: #c4f970;
+  color: var(--git-staged);
   font-weight: 700;
+}
+.file-tree-row.git-staged:not(.selected) .file-tree-git-status:not([hidden]) {
+  background: var(--git-staged-badge);
+}
+.file-tree-row.git-transcript:not(.selected) .file-tree-name {
+  color: var(--git-transcript);
+}
+.file-tree-row.git-transcript:not(.selected) .file-tree-git-status:not([hidden]) {
+  background: var(--git-transcript-badge);
 }
 .file-tree-row.kind-dir {
   color: var(--text);
@@ -1519,6 +2484,14 @@ body.theme-light .info-cell a.pr-status-closed:hover {
 }
 .file-tree-row.kind-file .file-tree-name {
   color: var(--muted);
+}
+.file-tree-row.selected,
+.file-tree-row.current-file:not(.selected) {
+  color: var(--file-selection-text);
+}
+.file-tree-row.selected .file-tree-name,
+.file-tree-row.current-file:not(.selected) .file-tree-name {
+  color: currentColor;
 }
 .file-tree-row.is-repo .file-tree-name {
   color: var(--accent-gold);
@@ -1562,13 +2535,13 @@ body.theme-light .info-cell a.pr-status-closed:hover {
 /* Rich hover popover for a repo dir (replaces the native title tooltip). */
 .file-tree-repo-popover {
   position: fixed;
-  z-index: 9000;
+  z-index: var(--z-rename-input);
   max-width: 360px;
   padding: 6px 9px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--panel2);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 6px 20px rgb(var(--shadow-rgb) / 0.35);
   font-size: var(--ui-font-size-2xs);
   pointer-events: none;
 }
@@ -1593,15 +2566,19 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   word-break: break-all;
 }
 .file-tree-icon {
-  display: inline-block;
-  width: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 var(--file-tree-icon-size);
+  width: var(--file-tree-icon-size);
+  height: var(--file-tree-icon-size);
   text-align: center;
-  font-size: var(--ui-font-size-xs);
-  flex: 0 0 20px;
+  font-size: var(--file-tree-icon-font-size);
+  line-height: 1;
   border-radius: 3px;
 }
-/* DOIT.31: symlinks keep their target-type icon (dir icon for a linked dir, code icon for a linked .py)
-   and get a small arrow badge overlaid — macOS-Finder / VS Code style. Broken links go red + struck. */
+/* symlinks keep their target-type icon (dir icon for a linked dir, code icon for a linked .py)
+   and get a small arrow badge overlaid — macOS-Finder / Popular IDE style. Broken links go red + struck. */
 .file-tree-row.is-symlink > .file-tree-icon {
   position: relative;
 }
@@ -1621,7 +2598,7 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   color: var(--bad);
   text-decoration: line-through;
 }
-/* DOIT.31: the inline "→ target" reads as secondary to the name; broken links tint it red too. */
+/* the inline "→ target" reads as secondary to the name; broken links tint it red too. */
 .file-tree-symlink-target {
   color: var(--muted);
 }
@@ -1629,35 +2606,35 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   color: var(--bad);
 }
 .file-tree-icon.file-icon-code {
-  color: #7dd3fc;
+  color: var(--icon-code);
 }
 .file-tree-icon.file-icon-doc {
-  color: #facc15;
+  color: var(--icon-doc);
 }
 .file-tree-icon.file-icon-config {
-  color: #c084fc;
+  color: var(--pr-status-merged);
 }
 .file-tree-icon.file-icon-image {
-  color: #86efac;
+  color: var(--icon-image);
 }
 .file-tree-icon.file-icon-archive {
-  color: #fb923c;
+  color: var(--icon-archive);
 }
 .file-tree-icon.file-icon-generic {
-  color: #94a3b8;
+  color: var(--git-transcript-badge);
 }
 .file-tree-row.kind-dir > .file-tree-icon {
-  font-size: 1.28em;
+  font-size: 1.18em;
   font-weight: 800;
-  line-height: 0.9;
-  color: #8b95a5;
+  line-height: 1;
+  color: var(--text-muted-strong);
 }
 .file-tree-row.kind-dir.expanded > .file-tree-icon,
 .file-tree-row.kind-dir[aria-expanded="true"] > .file-tree-icon {
   color: var(--brand-green);
 }
 .file-tree-row.indexed-directory:not(.selected) .file-tree-name {
-  color: #c4f970;
+  color: var(--accent-lime);
   font-weight: 700;
 }
 .file-tree-row.indexed-directory:not(.selected) .file-tree-git-status {
@@ -1665,9 +2642,8 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   letter-spacing: 0;
   text-transform: uppercase;
 }
-/* C11 #1: a directory covered by an indexed ancestor — a quiet muted marker (not the bright indexed
-   green), so it reads as "already handled, don't index separately". Token-based: flips with the theme. */
-.file-tree-row.covered-directory:not(.selected) .file-tree-git-status {
+/* A directory under an indexed ancestor stays visually quiet; only the indexed root carries the badge. */
+.file-tree-row.indexed-descendant-directory:not(.selected) .file-tree-git-status {
   color: var(--muted);
   font-style: italic;
   letter-spacing: 0;
@@ -1675,7 +2651,7 @@ body.theme-light .info-cell a.pr-status-closed:hover {
 }
 .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed {
   position: relative;
-  color: #c4f970;
+  color: var(--accent-lime);
   text-shadow: 0 0 8px rgba(196, 249, 112, 0.35);
 }
 .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed::after {
@@ -1690,26 +2666,41 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   box-shadow: 0 0 0 1px rgba(12, 15, 20, 0.9), 0 0 7px rgba(245, 197, 66, 0.75);
 }
 /* ============================================================================
-   Light mode (DOIT.12 B5): the update banner is a dark navy slab, and the file-tree
+   Light mode: the update banner is a dark navy slab, and the file-tree
    "current"/"repo-non-main"/"indexed" rows hardcode near-white-green or washed-amber
    text that vanishes on the white tree. Darken the text; strengthen the selection
    ring (the --file-selection-* fill/border tokens are already theme-aware).
    ============================================================================ */
 body.theme-light .server-update-banner {
   background: #ffffff;
-  color: #1f2937;
+  color: var(--pc-control-fg);
   border-color: #d68c1e;
-  box-shadow: 0 6px 20px rgba(15, 23, 42, 0.18);
+  box-shadow: 0 6px 20px rgb(var(--overlay-slate-rgb) / 0.18);
 }
 body.theme-light .server-update-banner-dismiss {
   color: #586072;
 }
+body.theme-light .server-update-banner-reload {
+  border-color: var(--danger-strong-hover);
+  background: var(--danger-strong);
+  color: #ffffff;
+}
+body.theme-light .server-update-banner-reload:hover,
+body.theme-light .server-update-banner-reload:focus-visible {
+  border-color: var(--danger-strong-border);
+  background: var(--danger-strong-hover);
+  color: #ffffff;
+}
 body.theme-light .file-tree-row.selected {
   box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px rgba(63, 143, 45, 0.5);
 }
-body.theme-light .file-tree-row.current-file:not(.selected),
 body.theme-light .file-tree-row.current-directory:not(.selected) {
-  color: #1f2937;
+  color: var(--pc-control-fg);
+}
+body.theme-light .file-tree-row.current-file:not(.selected) {
+  color: var(--file-selection-text);
+  background: var(--file-selection-bg);
+  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px rgba(63, 143, 45, 0.5);
 }
 body.theme-light .file-tree-row.repo-non-main:not(.selected) .file-tree-name {
   color: #b06a00;
@@ -1720,30 +2711,121 @@ body.theme-light .file-tree-row.indexed-directory:not(.selected) .file-tree-git-
   color: #3f6312;
 }
 body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed {
-  color: #5f9800;
+  color: var(--brand-green);
   text-shadow: none;
 }
 .file-tree-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-inline-size: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   color: currentColor;
 }
-.file-tree-git-status {
-  margin-inline-start: auto;
-  padding-inline-start: 6px;
-  color: currentColor;
+.file-tree-row.has-agent .file-tree-name {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.file-tree-dir-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-2xs);
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+}
+.file-tree-diff {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  flex: 0 0 6.5ch;
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-2xs);
   font-weight: 800;
+  line-height: 1;
 }
-.file-tree-date {
+.file-tree-agent {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+.file-tree-row:has(> .file-tree-diff:not([hidden])) > .file-tree-diff,
+.file-tree-row:not(:has(> .file-tree-diff:not([hidden]))):has(> .file-tree-dir-count:not([hidden])) > .file-tree-dir-count,
+.file-tree-row:not(:has(> .file-tree-diff:not([hidden]))):not(:has(> .file-tree-dir-count:not([hidden]))):has(> .file-tree-git-status:not([hidden])) > .file-tree-git-status,
+.file-tree-row:not(:has(> .file-tree-diff:not([hidden]))):not(:has(> .file-tree-dir-count:not([hidden]))):not(:has(> .file-tree-git-status:not([hidden]))):has(> .file-tree-date:not([hidden])) > .file-tree-date {
   margin-inline-start: auto;
-  padding-inline-start: 8px;
-  color: var(--muted);
+}
+.file-tree-agent .agent-icon {
+  width: calc(var(--file-explorer-font-size) + 3px);
+  min-width: calc(var(--file-explorer-font-size) + 3px);
+  height: calc(var(--file-explorer-font-size) + 1px);
+  margin: 0;
+  padding: 0;
+  vertical-align: 0;
+}
+.file-tree-agent .agent-icon svg {
+  flex-basis: calc(var(--file-explorer-font-size) + 1px);
+  width: calc(var(--file-explorer-font-size) + 1px);
+  height: calc(var(--file-explorer-font-size) + 1px);
+}
+.file-tree-git-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  box-sizing: border-box;
+  flex: 0 0 var(--file-tree-row-control-size);
+  min-width: var(--file-tree-row-control-size);
+  height: var(--file-tree-row-control-size);
+  padding: 0;
+  border-radius: 3px;
+  color: #061207;
+  font-family: var(--mono-font);
+  font-size: max(6px, calc(var(--file-explorer-font-size) - 2px));
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0;
+  overflow: hidden;
+  text-overflow: clip;
   white-space: nowrap;
 }
-.file-tree-git-status:not([hidden]) + .file-tree-date:not([hidden]) {
-  margin-inline-start: 4px;
+.file-tree-git-status.file-tree-git-status-unknown {
+  border: 1px solid rgba(226, 232, 240, 0.16);
+  background: rgba(226, 232, 240, 0.10) !important;
+  color: rgba(226, 232, 240, 0.46);
+}
+.file-tree-date {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  align-self: center;
+  box-sizing: border-box;
+  flex: 0 0 var(--file-tree-date-column-width);
+  inline-size: var(--file-tree-date-column-width);
+  min-height: var(--file-tree-row-control-size);
+  padding-inline-start: 4px;
+  color: var(--muted);
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-3xs);
+  line-height: 1;
+  font-stretch: condensed;
+  letter-spacing: 0;
+  overflow: hidden;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+.file-tree-dir-count[hidden],
+.file-tree-agent[hidden],
+.file-tree-diff[hidden],
+.file-tree-git-status[hidden],
+.file-tree-date[hidden] {
+  display: none;
 }
 .file-tree-children {
   position: relative;
@@ -1753,8 +2835,8 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
   position: absolute;
   top: 0;
   bottom: 0;
-  left: 15px;
-  border-inline-start: 1px solid rgba(148, 163, 184, 0.18);
+  left: calc(15px + (var(--tree-depth, 1) - 1) * 14px);
+  border-inline-start: 1px solid var(--tree-indent-line);
   pointer-events: none;
 }
 .file-tree-children {
@@ -1768,13 +2850,14 @@ body.theme-light .file-explorer-tree-col {
 }
 body.theme-light .file-explorer-head {
   color: var(--text);
-  background: var(--panel2);
+  background: var(--pane-bar-bg, var(--panel2));
   border-color: var(--line);
 }
 body.theme-light .file-explorer-path,
 body.theme-light .file-explorer-path-inline {
-  color: var(--muted);
-  background: rgba(15, 23, 42, 0.035);
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.58);
+  border-color: rgba(37, 99, 235, 0.18);
 }
 body.theme-light .file-explorer-path:focus,
 body.theme-light .file-explorer-path-inline:focus {
@@ -1785,16 +2868,14 @@ body.theme-light .file-explorer-path.invalid,
 body.theme-light .file-explorer-path-inline.invalid {
   color: var(--bad);
 }
-body.theme-light .file-tree-row:hover {
-  background: rgba(15, 23, 42, 0.05);
-}
 body.theme-light .file-tree-row.current-file:not(.selected) {
-  color: #173a13;
-  background: rgba(95, 152, 0, 0.12);
+  color: var(--file-selection-text);
+  background: var(--file-selection-bg);
+  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px rgba(63, 143, 45, 0.5);
 }
 body.theme-light .file-tree-row.current-directory:not(.selected) {
-  color: #10230b;
-  background: rgba(95, 152, 0, 0.16);
+  color: var(--text);
+  background: var(--active-control-soft-bg);
 }
 body.theme-light .file-tree-row.new-entry:not(.selected) {
   color: #4f3600;
@@ -1807,23 +2888,28 @@ body.theme-light .file-tree-row.git-untracked:not(.selected) .file-tree-name {
   color: #166534;
 }
 body.theme-light .file-tree-row.git-deleted:not(.selected) .file-tree-name {
-  color: #b91c1c;
+  color: var(--danger-strong-hover);
 }
 body.theme-light .file-tree-row.git-staged:not(.selected) .file-tree-name {
-  color: #2f7d20;
+  color: var(--good);
+}
+body.theme-light .file-tree-git-status.file-tree-git-status-unknown {
+  border-color: rgb(var(--overlay-slate-rgb) / 0.12);
+  background: rgb(var(--overlay-slate-rgb) / 0.06) !important;
+  color: rgb(var(--overlay-slate-rgb) / 0.36);
 }
 body.theme-light .file-tree-row.kind-dir > .file-tree-icon {
-  color: #64748b;
+  color: var(--git-transcript-badge);
 }
 body.theme-light .file-tree-row.kind-dir.expanded > .file-tree-icon,
 body.theme-light .file-tree-row.kind-dir[aria-expanded="true"] > .file-tree-icon {
   color: var(--brand-green);
 }
 body.theme-light .file-tree-row.indexed-directory:not(.selected) .file-tree-name {
-  color: #2f7d20;
+  color: var(--good);
 }
 body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed {
-  color: #2f7d20;
+  color: var(--good);
   text-shadow: none;
 }
 body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed::after {
@@ -1852,26 +2938,28 @@ body.theme-light .file-tree-children::before {
 .file-explorer-hidden-toggle,
 .file-explorer-root-mode-toggle,
 .file-explorer-header-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 30px;
-  height: 18px;
+  height: 20px;
   flex: 0 0 30px;
   padding: 0 4px;
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   background: transparent;
   color: var(--muted);
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-2xs);
+  line-height: 1;
+  white-space: nowrap;
   font-weight: 700;
   cursor: pointer;
 }
 .file-explorer-root-mode-toggle {
-  width: 38px;
-  flex-basis: 38px;
-}
-.file-explorer-date-toggle {
-  width: 34px;
-  flex-basis: 34px;
+  width: auto;
+  min-width: 38px;
+  flex: 0 0 auto;
 }
 .file-explorer-header-action {
   width: 20px;
@@ -1879,15 +2967,21 @@ body.theme-light .file-tree-children::before {
   padding: 0;
   line-height: 1;
 }
+.file-explorer-header-action.file-explorer-date-toggle {
+  width: auto;
+  min-width: 42px;
+  flex-basis: auto;
+  padding: 0 5px;
+}
 .file-explorer-sort-select {
   width: 50px;
-  height: 18px;
+  height: 20px;
   flex: 0 0 50px;
   padding: 0 2px;
   color: var(--muted);
   background: transparent;
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   font: 700 var(--ui-font-size-2xs)/1 var(--mono-font);
 }
 .file-explorer-sort-select:hover,
@@ -1906,10 +3000,16 @@ body.theme-light .file-tree-children::before {
 }
 .file-explorer-hidden-toggle.active,
 .file-explorer-root-mode-toggle.active,
+.file-explorer-quick-access-button.active,
 .file-explorer-date-toggle.active {
-  color: #061207;
-  border-color: var(--brand-green);
-  background: rgba(118, 185, 0, 0.88);
+  color: var(--active-control-text);
+  border-color: var(--active-control-border);
+  background: var(--active-control-bg);
+}
+.file-explorer-date-toggle[data-date-mode="none"] {
+  text-decoration-line: line-through;
+  text-decoration-thickness: 2px;
+  text-decoration-color: currentColor;
 }
 .file-explorer-quick-access,
 .file-explorer-quick-access-panel {
@@ -1921,17 +3021,22 @@ body.theme-light .file-tree-children::before {
   overflow: visible;
 }
 .file-explorer-quick-access-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   min-width: 24px;
   height: 20px;
   padding: 0 7px;
-  border-radius: 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
   color: var(--muted);
   background: transparent;
   font: 700 var(--ui-font-size-2xs) var(--mono-font);
+  cursor: pointer;
 }
 .file-explorer-quick-access-button:hover {
   color: var(--text);
-  border-color: rgba(118, 185, 0, 0.55);
+  border-color: var(--active-control-soft-border);
 }
 .file-editor {
   display: flex;
@@ -1954,4 +3059,57 @@ body.theme-light .file-tree-children::before {
   background: var(--panel);
   border-bottom: 1px solid var(--line);
   min-height: 26px;
+}
+
+/* DOIT.57: the transient drop-suggestion overlay (1..9 actions when a file is dropped on a
+   terminal). Non-modal, auto-dismisses; the terminal keeps focus. */
+.terminal-drop-suggestions {
+  position: fixed;
+  z-index: var(--z-drop-suggestions);
+  min-width: 248px;
+  max-width: 380px;
+  padding: 6px;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-popover);
+  color: var(--text);
+  font: var(--ui-font-size) var(--ui-font);
+}
+.terminal-drop-suggestions-head {
+  padding: 4px 8px 6px;
+  color: var(--muted);
+  font-size: var(--ui-font-size-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.terminal-drop-suggestion {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.terminal-drop-suggestion:hover {
+  background: var(--active-control-soft-bg);
+}
+/* The number you press to pick this row, drawn as a keycap so the keyboard shortcut is obvious. */
+.terminal-drop-suggestion-combo {
+  flex: none;
+  min-width: 22px;
+  text-align: center;
+  padding: 1px 6px;
+  border: 1px solid var(--active-accent-text);
+  border-radius: var(--radius-sm);
+  background: var(--active-accent-bright);
+  color: var(--active-accent-text);
+  font: var(--ui-font-size-sm) var(--mono-font);
+  box-shadow: 0 1px 0 var(--active-accent-text);
+}
+.terminal-drop-suggestion-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

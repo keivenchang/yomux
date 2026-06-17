@@ -1,12 +1,15 @@
 import json
+import os
 from pathlib import Path
 
 from yolomux_lib import sessions
+from yolomux_lib.common import PaneInfo, ProcessInfo
+from yolomux_lib.sessions import pane_process_label
 
 
 def clear_transcript_lookup_cache():
-    with sessions._TRANSCRIPT_LOOKUP_CACHE_LOCK:
-        sessions._TRANSCRIPT_LOOKUP_CACHE.clear()
+    # the lookup cache is now a shared TtlCache (was a hand-rolled dict + lock).
+    sessions._TRANSCRIPT_LOOKUP_CACHE.clear()
 
 
 def test_find_recent_codex_transcript_matches_session_meta_header(tmp_path):
@@ -22,7 +25,7 @@ def test_find_recent_codex_transcript_matches_session_meta_header(tmp_path):
     assert sessions.find_recent_codex_transcript(cwd, root=root) == transcript
 
 
-def test_find_recent_codex_transcript_keeps_tail_fallback(tmp_path):
+def test_find_recent_codex_transcript_keeps_structured_tail_fallback(tmp_path):
     clear_transcript_lookup_cache()
     root = tmp_path / "codex" / "sessions"
     transcript = root / "2026" / "05" / "rollout-tail.jsonl"
@@ -31,6 +34,20 @@ def test_find_recent_codex_transcript_keeps_tail_fallback(tmp_path):
     transcript.write_text("\n".join([json.dumps({"type": "session_meta", "payload": {"cwd": "/other"}}), json.dumps({"cwd": cwd})]), encoding="utf-8")
 
     assert sessions.find_recent_codex_transcript(cwd, root=root) == transcript
+
+
+def test_find_recent_codex_transcript_ignores_plain_tail_mentions(tmp_path):
+    clear_transcript_lookup_cache()
+    root = tmp_path / "codex" / "sessions"
+    transcript = root / "2026" / "05" / "rollout-tail.jsonl"
+    transcript.parent.mkdir(parents=True)
+    cwd = "/repo/project"
+    transcript.write_text("\n".join([
+        json.dumps({"type": "session_meta", "payload": {"cwd": "/other"}}),
+        json.dumps({"message": f"the user mentioned {cwd}, but no tool ran there"}),
+    ]), encoding="utf-8")
+
+    assert sessions.find_recent_codex_transcript(cwd, root=root) is None
 
 
 def test_find_recent_codex_transcript_refuses_global_newest_without_cwd(tmp_path):
@@ -80,6 +97,28 @@ def test_find_recent_codex_transcript_orders_by_name_without_stat_storm(tmp_path
     # Newest-by-name wins, and ordering issues no per-rollout-file stat() (no syscall storm).
     assert sessions.find_recent_codex_transcript(cwd, root=root) == newer
     assert [path for path in stat_calls if path.name.startswith("rollout-")] == []
+
+
+def test_find_recent_codex_transcript_falls_back_to_mtime_for_resumed_old_file(tmp_path):
+    clear_transcript_lookup_cache()
+    root = tmp_path / "codex" / "sessions"
+    cwd = "/repo/resumed"
+    old_day = root / "2026" / "06" / "08"
+    old_day.mkdir(parents=True)
+    resumed = old_day / "rollout-2026-06-08T08-00-00-old.jsonl"
+    resumed.write_text("\n".join([
+        json.dumps({"type": "session_meta", "payload": {"cwd": "/repo/other"}}),
+        json.dumps({"payload": {"arguments": json.dumps({"workdir": cwd})}}),
+    ]), encoding="utf-8")
+    new_day = root / "2026" / "06" / "12"
+    new_day.mkdir(parents=True)
+    for index in range(sessions.CODEX_TRANSCRIPT_SCAN_LIMIT + 5):
+        path = new_day / f"rollout-2026-06-12T10-{index:02d}-new.jsonl"
+        path.write_text(json.dumps({"type": "session_meta", "payload": {"cwd": "/repo/new"}}), encoding="utf-8")
+        os.utime(path, (1000 + index, 1000 + index))
+    os.utime(resumed, (5000, 5000))
+
+    assert sessions.find_recent_codex_transcript(cwd, root=root) == resumed
 
 
 def test_find_transcript_by_session_id_caches_glob(tmp_path, monkeypatch):
@@ -140,3 +179,76 @@ def test_codex_transcript_from_process_fd_accepts_deleted_suffix(tmp_path, monke
     monkeypatch.setattr(sessions.os, "readlink", fake_readlink)
 
     assert sessions.codex_transcript_from_process_fd(123, root=root, fd_dir=fd_dir) == transcript
+
+
+def test_codex_transcript_session_id_reads_session_meta_payload_id(tmp_path):
+    transcript = tmp_path / "rollout.jsonl"
+    transcript.write_text(
+        "\n".join([
+            json.dumps({"type": "session_meta", "payload": {"id": "codex-session-123", "cwd": "/repo"}}),
+            json.dumps({"type": "event", "payload": {"id": "not-the-session"}}),
+        ]),
+        encoding="utf-8",
+    )
+
+    assert sessions.codex_transcript_session_id(transcript) == "codex-session-123"
+
+
+def test_read_codex_agent_uses_transcript_session_id(tmp_path, monkeypatch):
+    transcript = tmp_path / "rollout.jsonl"
+    transcript.write_text(json.dumps({"type": "session_meta", "payload": {"id": "codex-session-456", "cwd": "/repo"}}), encoding="utf-8")
+    monkeypatch.setattr(sessions, "process_cwd", lambda pid: "/repo")
+    monkeypatch.setattr(sessions, "codex_transcript_from_process_fd", lambda pid: transcript)
+
+    agent = sessions.read_codex_agent("1", _pane(100), ProcessInfo(pid=100, ppid=1, command="codex"))
+
+    assert agent.session_id == "codex-session-456"
+    assert agent.transcript == str(transcript)
+
+
+def _pane(pid=100):
+    return PaneInfo(
+        session="1",
+        window="0",
+        pane="0",
+        pane_id="%1",
+        target="1:0.0",
+        current_path="/repo",
+        command="bash",
+        active=True,
+        window_active=True,
+        title="",
+        pid=pid,
+    )
+
+
+def test_active_window_for_panes_supports_typed_and_cached_payloads():
+    inactive = _pane(100)
+    inactive = PaneInfo(**{**inactive.__dict__, "window": "0", "window_active": False})
+    active = _pane(101)
+    active = PaneInfo(**{**active.__dict__, "window": "2", "window_active": True})
+    assert sessions.active_window_for_panes([inactive, active]) == "2"
+    assert sessions.active_window_for_panes([
+        {"window": "0", "window_active": False},
+        {"window": "3", "window_active": True},
+    ]) == "3"
+
+
+def test_pane_process_label_returns_displayed_process_pid():
+    label, pid = pane_process_label(
+        _pane(100),
+        [
+            ProcessInfo(pid=100, ppid=1, command="bash"),
+            ProcessInfo(pid=321, ppid=100, command="python3 mock_server.py"),
+        ],
+    )
+
+    assert label == "mock_server.py"
+    assert pid == 321
+
+
+def test_pane_process_label_falls_back_to_pane_pid_for_shell():
+    label, pid = pane_process_label(_pane(100), [ProcessInfo(pid=100, ppid=1, command="bash")])
+
+    assert label == "bash"
+    assert pid == 100

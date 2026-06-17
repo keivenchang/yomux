@@ -17,12 +17,19 @@ from .common import auth_setup_required
 from .common import default_session_names
 from .common import split_csv
 from .common import unique_session_names
+from .common import warn_unavailable_agent_commands_once
 from .server import TmuxWebtermHTTPServer
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Attach local tmux sessions in a browser.")
-    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help="interface to bind. Default 0.0.0.0 (all interfaces), on purpose: the product is built for "
+             "reaching sessions from a phone or another machine on a trusted LAN, and every request is "
+             "gated by the login layer. Pass --host 127.0.0.1 to restrict to localhost and tunnel in.",
+    )
     parser.add_argument("--port", type=int, default=9998)
     parser.add_argument(
         "--sessions",
@@ -35,7 +42,7 @@ def parse_args() -> argparse.Namespace:
         "--dangerously-yolo",
         dest="dangerously_yolo",
         action="store_true",
-        help="launch Claude/Codex sessions with their dangerous approval/sandbox bypass flags",
+        help="launch Claude/Codex sessions with their dangerous permission, sandbox, and hook bypass flags",
     )
     parser.add_argument(
         "--self-signed",
@@ -214,6 +221,7 @@ def print_auth_setup_error() -> None:
 
 def main() -> int:
     args = parse_args()
+    warn_unavailable_agent_commands_once()
     try:
         tls_context, tls_message = tls_context_for_args(args)
     except (OSError, RuntimeError, ValueError, ssl.SSLError) as error:
@@ -233,6 +241,8 @@ def main() -> int:
             app.stop_auto_approve_all()
 
     server = TmuxWebtermHTTPServer((args.host, args.port), app, tls_context=tls_context, dev=args.dev)
+    if hasattr(app, "start_yoagent_backend_prewarm"):
+        app.start_yoagent_backend_prewarm(reason="server_start")
     scheme = "https" if tls_context else "http"
     if args.dev:
         print("[dev] dev mode ON: backend re-execs on yolomux_lib/*.py change; page auto-reloads on bundle change")

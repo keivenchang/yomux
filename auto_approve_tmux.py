@@ -66,7 +66,6 @@ from yolomux_lib.prompt_detector import (
     yes_is_selected,
 )
 from yolomux_lib import yolo_rules
-from yolomux_lib.sessions import discover_sessions
 from yolomux_lib.tmux_utils import tmux_capture_pane
 from yolomux_lib.tmux_utils import tmux_exact_target_from_sessions
 from yolomux_lib.tmux_utils import tmux_has_session
@@ -75,7 +74,6 @@ from yolomux_lib.tmux_utils import tmux_move_to_option
 from yolomux_lib.tmux_utils import tmux_send_enter
 from yolomux_lib.tmux_utils import tmux_send_option
 from yolomux_lib.tmux_utils import tmux_session_names
-from yolomux_lib.transcripts import transcript_pending_approval
 
 _DETECTOR_REEXPORTS = (
     action_for_bash_prompt,
@@ -97,11 +95,16 @@ _DETECTOR_REEXPORTS = (
 
 log = logging.getLogger("auto_approve")
 
-# If Enter is missed, a current prompt should not be stuck forever behind the
-# de-dup hash. Retry only after the exact prompt remains visible briefly.
-PROMPT_RETRY_SECONDS = 5.0
-PROMPT_SOURCE_CHOICES = ("pane", "hybrid")
-DEFAULT_PROMPT_SOURCE = "hybrid"
+# The approval-prompt detection pipeline now lives in yolomux_lib.approvals (one shared library home,
+# so app.py / the worker no longer reach detection through this CLI script). Re-exported here so this
+# script's own CLI keeps the same module-level names.
+from yolomux_lib.approvals import DEFAULT_PROMPT_SOURCE
+from yolomux_lib.approvals import PROMPT_RETRY_SECONDS
+from yolomux_lib.approvals import PROMPT_SOURCE_CHOICES
+from yolomux_lib.approvals import blank_prompt_state
+from yolomux_lib.approvals import hybrid_approval_prompt_state
+from yolomux_lib.approvals import target_session_name
+from yolomux_lib.approvals import transcript_approval_prompt_state
 
 # Re-export detector helpers from yolomux_lib.prompt_detector so existing
 # callers can keep importing them from this script.
@@ -268,75 +271,6 @@ class SessionState:
         self.last_blocked_hash = ""
         self.approved = 0
         self.blocked = 0
-
-
-def target_session_name(target: str) -> str:
-    if target.startswith("%"):
-        return ""
-    return target.split(":", 1)[0]
-
-
-def blank_prompt_state(reason: str = "") -> dict[str, object]:
-    state: dict[str, object] = {
-        "visible": False,
-        "type": "",
-        "text": "",
-        "yes_selected": False,
-        "selected_option": 0,
-        "action": "",
-        "command": None,
-        "dangerous": False,
-        "hash": "",
-        "source": "pane",
-    }
-    if reason:
-        state["reason"] = reason
-    return state
-
-
-def transcript_approval_prompt_state(target: str, visible_text: str) -> dict[str, object]:
-    selected_option = selected_prompt_option(visible_text)
-    yes_selected = yes_is_selected(visible_text)
-    if not yes_selected and selected_option <= 0:
-        return blank_prompt_state("transcript candidate ignored: no visible selectable prompt")
-    session_name = target_session_name(target)
-    if not session_name:
-        return blank_prompt_state("transcript candidate ignored: tmux pane target has no session name")
-    infos, errors = discover_sessions([session_name])
-    info = infos.get(session_name)
-    if not info:
-        reason = "; ".join(errors) if errors else "session metadata unavailable"
-        return blank_prompt_state(f"transcript candidate ignored: {reason}")
-    agent = next((item for item in info.agents if item.transcript), None)
-    if agent is None:
-        return blank_prompt_state("transcript candidate ignored: no agent transcript found")
-    state = transcript_pending_approval(agent.transcript, agent.kind)
-    if state.get("visible") is not True:
-        reason = str(state.get("reason") or "no recent pending approval in transcript")
-        return blank_prompt_state(reason)
-    prompt_type = str(state.get("type") or "")
-    action = action_for_bash_prompt(visible_text) if prompt_type == "bash" else action_for_prompt(prompt_type)
-    state.update({
-        "visible": True,
-        "yes_selected": yes_selected,
-        "selected_option": selected_option,
-        "action": action or "",
-        "source": "transcript",
-    })
-    return state
-
-
-def hybrid_approval_prompt_state(target: str, visible_text: str, pane_text: str | None = None, prompt_source: str = DEFAULT_PROMPT_SOURCE) -> dict[str, object]:
-    pane_state = approval_prompt_state(visible_text, pane_text)
-    pane_state["source"] = "pane"
-    if pane_state.get("visible") is True or prompt_source == "pane":
-        return pane_state
-    transcript_state = transcript_approval_prompt_state(target, visible_text)
-    if transcript_state.get("visible") is True:
-        return transcript_state
-    if transcript_state.get("reason"):
-        pane_state["reason"] = transcript_state["reason"]
-    return pane_state
 
 
 def main() -> None:

@@ -5,11 +5,12 @@ import os
 import re
 import shutil
 import subprocess
-import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from .cache import TtlCache
 from .common import PROJECT_ROOT
+from .common import heal_server_path
 
 
 def resolved_upload_dir(path: Path, allow_home: bool = False) -> tuple[Path | None, bool]:
@@ -46,18 +47,22 @@ def numbered_session_workdir(session: str) -> Path | None:
 
 def agent_command(agent: str, dangerously_yolo: bool = False) -> str:
     if agent == "codex":
-        return "codex --dangerously-bypass-approvals-and-sandbox" if dangerously_yolo else "codex"
+        return "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust" if dangerously_yolo else "codex"
     if agent == "term":
         return os.environ.get("SHELL") or "bash"
+    # Deliberately NOT --bare: --bare makes Claude Code read auth strictly from
+    # ANTHROPIC_API_KEY/apiKeyHelper and never from the OAuth credential file or
+    # keychain, so a subscription/enterprise OAuth login shows "Not logged in".
     return "claude --dangerously-skip-permissions" if dangerously_yolo else "claude"
 
 def available_agent_commands() -> list[str]:
+    heal_server_path()
     agents = [agent for agent in ("claude", "codex") if shutil.which(agent)]
     # A plain terminal (a shell) is always launchable, so always offer Term — even when Claude/Codex
     # are installed (it used to be a no-agent fallback only, which left Term greyed "unavailable").
     return agents + ["term"]
 
-# DOIT.6 #39: surface claude/codex login status. The CLIs have purpose-built non-interactive status
+# surface claude/codex login status. The CLIs have purpose-built non-interactive status
 # commands; logout (or a missing binary) must NOT silently fall back to a deterministic agent without
 # telling the user to log in. These are subprocess calls, so the result is cached with a short TTL —
 # never probe per request.
@@ -82,7 +87,7 @@ _AGENT_LOGGED_OUT_MARKERS = (
 )
 _AGENT_AUTH_PROBE_TIMEOUT = 4.0
 _AGENT_AUTH_CACHE_TTL = 45.0
-_agent_auth_cache: dict[str, tuple[float, dict[str, dict[str, bool]]]] = {}
+_agent_auth_cache = TtlCache(_AGENT_AUTH_CACHE_TTL, max_entries=4)
 
 
 def _logged_in_flag_from_json(stdout: str) -> bool | None:
@@ -116,11 +121,11 @@ def _probe_agent_logged_in(agent: str) -> bool:
     return not any(marker in combined for marker in _AGENT_LOGGED_OUT_MARKERS)
 
 
-def agent_auth_status(force: bool = False) -> dict[str, dict[str, bool]]:
-    now = time.monotonic()
+def agent_auth_status(force: bool = False) -> dict[str, dict[str, object]]:
+    heal_server_path()
     cached = _agent_auth_cache.get("status")
-    if not force and cached is not None and now - cached[0] < _AGENT_AUTH_CACHE_TTL:
-        return cached[1]
+    if not force and cached is not None:
+        return cached
     agents = ("claude", "codex")
     installed = {agent: shutil.which(agent) is not None for agent in agents}
     to_probe = [agent for agent in agents if installed[agent]]
@@ -130,6 +135,11 @@ def agent_auth_status(force: bool = False) -> dict[str, dict[str, bool]]:
         with ThreadPoolExecutor(max_workers=len(to_probe)) as pool:
             for agent, result in zip(to_probe, pool.map(_probe_agent_logged_in, to_probe)):
                 logged_in[agent] = result
-    status = {agent: {"installed": installed[agent], "logged_in": logged_in[agent]} for agent in agents}
-    _agent_auth_cache["status"] = (now, status)
+    status = {}
+    for agent in agents:
+        entry = {"installed": installed[agent], "logged_in": logged_in[agent]}
+        if not installed[agent]:
+            entry["unavailable_reason"] = "not-on-path"
+        status[agent] = entry
+    _agent_auth_cache.set("status", status)
     return status

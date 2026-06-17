@@ -1,0 +1,14 @@
+name: all-idle-summary
+kind: watch
+description: Watch the included session roster until every session is stably idle, then notify with the session that finished last and a short summary.
+tools:
+  - read_activity
+  - watch_all_sessions
+  - notify_user
+  - summarize_sessions
+triggers:
+  - notify me when all sessions are idle
+  - tell me when everything is done
+confirmation: none
+default_timeout_minutes: 240
+

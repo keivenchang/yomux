@@ -1,0 +1,39 @@
+flowchart TD
+  Start([Open file]) --> Kind{Preview kind}
+  Kind -->|Markdown| MarkdownFlow
+  Kind -->|Mermaid| MermaidFlow
+  Kind -->|Media| MediaFlow
+
+  subgraph MarkdownFlow[Markdown pipeline]
+    direction LR
+    MD[Markdown text] --> Parse[Parse blocks]
+    Parse --> SafeHtml[Sanitize HTML]
+    SafeHtml --> Enhance[Resolve links and images]
+  end
+
+  subgraph MermaidFlow[Mermaid pipeline]
+    direction LR
+    Source[Diagram source] --> Bundle[Local Mermaid bundle]
+    Bundle --> SafeSvg[Sanitize SVG]
+    SafeSvg --> SvgImage[SVG image]
+  end
+
+  subgraph MediaFlow[Media pipeline]
+    direction LR
+    Raw[Raw file URL] --> Browser[Browser renderer]
+    Browser --> Fallback[Open and Download fallback]
+  end
+
+  Enhance --> Preview[Preview pane]
+  SvgImage --> Preview
+  Fallback --> Preview
+  Preview --> Done([Visible result])
+
+  classDef input fill:#dbeafe,stroke:#2563eb,color:#0f172a
+  classDef process fill:#dcfce7,stroke:#16a34a,color:#0f172a
+  classDef decision fill:#fef3c7,stroke:#ca8a04,color:#0f172a
+  classDef output fill:#fae8ff,stroke:#c026d3,color:#0f172a
+  class MD,Source,Raw input
+  class Parse,SafeHtml,Enhance,Bundle,SafeSvg,Browser process
+  class Kind decision
+  class Preview,Done,SvgImage,Fallback output

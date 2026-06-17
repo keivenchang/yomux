@@ -35,6 +35,15 @@ def test_missing_auth_yaml_creates_commented_starter(monkeypatch, tmp_path):
     assert auth_path.parent.stat().st_mode & 0o777 == 0o700
 
 
+def test_test_auth_bypass_disables_setup_requirement(monkeypatch, tmp_path):
+    auth_path = tmp_path / "auth.yaml"
+    monkeypatch.setattr(common, "AUTH_CONFIG_PATH", auth_path)
+    monkeypatch.setenv(common.TEST_AUTH_BYPASS_ENV, "1")
+
+    assert common.auth_setup_required() is False
+    assert auth_path.exists() is False
+
+
 def test_legacy_placeholder_auth_yaml_is_replaced_with_commented_starter(monkeypatch, tmp_path):
     auth_path = tmp_path / "auth.yaml"
     auth_path.write_text(
@@ -129,6 +138,35 @@ def test_commit_time_display_uses_pt(monkeypatch):
     assert common.yolomux_commit_time_pt() == "2026-01-15 04:34:56 PT"
 
 
+def test_commit_sha_display_uses_git_head(monkeypatch):
+    class GitResult:
+        stdout = "abcdef123456\n"
+
+    monkeypatch.setattr(common, "_YOLOMUX_COMMIT_SHA", None)
+    monkeypatch.setattr(common.subprocess, "run", lambda *args, **kwargs: GitResult())
+
+    assert common.yolomux_commit_sha() == "abcdef123456"
+
+
+def test_main_page_bootstrap_includes_version_commit(monkeypatch):
+    monkeypatch.setattr(web, "available_agent_commands", lambda: [])
+    monkeypatch.setattr(web, "agent_auth_status", lambda: {})
+    monkeypatch.setattr(web, "rules_status", lambda: {})
+    monkeypatch.setattr(web, "settings_payload", lambda: {"settings": {"general": {"language": "en"}}})
+    monkeypatch.setattr(web, "yolomux_commit_sha", lambda: "abcdef123456")
+    monkeypatch.setattr(web, "yolomux_commit_time_pt", lambda: "2026-01-15 04:34:56 PT")
+    monkeypatch.setattr(web, "SERVER_STARTED_AT", 1234.5)
+
+    page = web.html_page([])
+    match = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
+    assert match
+    payload = json.loads(match.group(1))
+    assert payload["versionCommit"] == "abcdef123456"
+    assert payload["serverStartedAt"] == 1234.5
+    assert payload["serverStartedAtMs"] == 1234500
+    assert "SHA: abcdef123456" in page
+
+
 def test_setup_auth_page_recommends_https(monkeypatch):
     monkeypatch.setattr(web, "login_username", lambda: "keivenc")
 
@@ -198,10 +236,15 @@ def test_bootstrap_locale_resolves_language_and_serves_locale_catalogs():
     assert web.static_content_type("locales/en-XA.json") == "application/json; charset=utf-8"
     assert web.static_content_type("locales/../settings.yaml") is None
     assert web.static_content_type("locales/sub/dir.json") is None
+    # /static/fonts/<asset>.woff2 is a served font asset for mirror-stable share rendering; traversal is rejected.
+    assert web.static_content_type("fonts/yolomux-ui.woff2") == "font/woff2"
+    assert web.static_asset_path("fonts/yolomux-ui.woff2").is_file()
+    assert web.static_content_type("fonts/../settings.yaml") is None
+    assert web.static_content_type("fonts/sub/dir.woff2") is None
 
 
 def test_pre_auth_brand_wordmark_localizes_yo_lo_glyphs():
-    # DOIT.13 follow-up: the server-rendered login / auth-setup screens are NOT localized by the JS
+    # follow-up: the server-rendered login / auth-setup screens are NOT localized by the JS
     # renderBrandWordmark(), so brand_html must localize YO/LO itself — a Chinese locale showed
     # "YO/LOmux" instead of 優樂mux / 优乐mux.
     assert "優" in web.brand_html(locale="zh-Hant") and "樂" in web.brand_html(locale="zh-Hant")
@@ -235,7 +278,7 @@ def test_bootstrap_exposes_agent_launch_commands_and_term_always_available():
         return json.loads(match.group(1))
     yolo = boot(web.html_page([], "admin", dangerously_yolo=True))
     assert yolo["agentLaunchCommands"]["claude"] == "claude --dangerously-skip-permissions"
-    assert yolo["agentLaunchCommands"]["codex"] == "codex --dangerously-bypass-approvals-and-sandbox"
+    assert yolo["agentLaunchCommands"]["codex"] == "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
     assert "term" in yolo["agentLaunchCommands"]
     # Without --dangerously-yolo the commands carry no bypass flags.
     plain = boot(web.html_page([], "admin"))
@@ -260,34 +303,19 @@ def test_bootstrap_dev_flag_is_off_by_default_and_set_under_dev():
     assert boot(web.html_page([], "admin", dev=True))["dev"] is True
 
 
-def test_bootstrap_json_not_html_escaped_so_angle_brackets_round_trip():
-    # TODO "Bug Fixes": a <script> element's text is NOT HTML-decoded, so the bootstrap JSON must be
-    # JSON-unicode-escaped (</>/&), NOT html.escape'd — otherwise a value like the
-    # YO!agent answer-format "<topic>" comes back as the literal "&lt;topic&gt;" and the prefs textarea
-    # double-escapes it. The default yoagent.format contains "<topic>", so it exercises this.
-    page = web.html_page([])
-    script = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL).group(1)
-    # The raw script text uses the JSON \u escape for breakout chars, never HTML entities.
-    assert "\\u003c" in script and "&lt;" not in script
-    # JSON.parse (here json.loads) of the script text yields the literal characters, not entities.
-    fmt = json.loads(script)["settingsPayload"]["settings"]["yoagent"]["format"]
-    assert "<topic>" in fmt and "&lt;topic&gt;" not in fmt
-
-
 def test_bootstrap_json_escapes_breakout_chars_without_html_entities():
     page = web.html_page([])
     match = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
     assert match, "bootstrap script tag is present"
     raw = match.group(1)
-    # The YO!agent answer-format default contains <topic>; it must NOT be HTML-entity-escaped (that
-    # would leave literal &lt;topic&gt; after JSON.parse) and must NOT contain a raw </script> breakout.
-    assert "&lt;topic&gt;" not in raw
-    assert "\\u003ctopic\\u003e" in raw
+    # The YO!agent answer-format default is embedded as JSON, not HTML; it must not contain a raw
+    # </script> breakout or HTML-entity escaped text that would survive JSON.parse.
+    assert "&lt;" not in raw
     assert "</script>" not in raw
-    # The breakout chars round-trip back to literal <, >, & through JSON.parse (json.loads here).
     parsed = json.loads(raw)
     fmt = parsed["settingsPayload"]["settings"]["yoagent"]["format"]
-    assert "<topic>" in fmt
+    assert "columns: tmux session, full path, last worked, details" in fmt
+    assert "[`2`](?yoagent-session=2)" in fmt
     assert "&lt;" not in fmt
 
 

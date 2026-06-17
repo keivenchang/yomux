@@ -1,0 +1,12 @@
+name: work-next
+kind: recommendation
+description: Recommend the next work to pick up using session state, recent transcript activity, dirty repos, PR/CI state, blockers, and stale work.
+tools:
+  - read_activity
+  - recommend_next_work
+triggers:
+  - what should I work on
+  - what is next
+  - prioritize my sessions
+confirmation: none
+

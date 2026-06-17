@@ -22,6 +22,7 @@ from .common import auth_cookie_value
 from .common import auth_identity_for_credentials
 from .common import auth_setup_required
 from .common import current_auth_users
+from .common import test_auth_bypass_enabled
 from .web import _LOGIN_LOCALE_VALUES
 from .web import current_language_pref
 from .web import login_html
@@ -31,6 +32,23 @@ from .web import setup_auth_html
 
 
 class AuthMixin:
+    SHARE_READONLY_GET_PATHS = {
+        "/api/activity",
+        "/api/fs/index-status",
+        "/api/fs/info",
+        "/api/fs/list",
+        "/api/share",
+        "/api/session-files-batch",
+        "/api/session-files",
+        "/api/transcripts",
+    }
+    SHARE_SCOPED_FILE_GET_PATHS = {
+        "/api/fs/diff",
+        "/api/fs/raw",
+        "/api/fs/read",
+    }
+    SHARE_READONLY_POST_PATHS = {"/api/fs/batch", "/api/share/debug-profile"}
+
     def basic_auth_identity(self) -> AuthIdentity | None:
         header = self.headers.get("Authorization", "")
         scheme, separator, encoded = header.partition(" ")
@@ -65,7 +83,7 @@ class AuthMixin:
         return False
 
     def request_locale_pref(self) -> str:
-        """Resolve the pre-auth UI locale for the setup/login screens (DOIT.13): the short-lived
+        """Resolve the pre-auth UI locale for the setup/login screens: the short-lived
         `yolomux_locale` cookie (set by the setup/login language picker, which must NOT write settings
         pre-auth) wins, else the saved general.language. The permanent write happens post-auth via
         save_login_locale; the cookie is a carrier with a Max-Age backstop."""
@@ -114,6 +132,9 @@ class AuthMixin:
         return f"{AUTH_LOGOUT_COOKIE_NAME}=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax{secure}"
 
     def request_is_https(self) -> bool:
+        marker = getattr(self, "_request_is_https", None)
+        if marker is not None:
+            return bool(marker)
         return self.server.tls_context is not None
 
     def send_auth_cookie_if_needed(self) -> None:
@@ -136,13 +157,48 @@ class AuthMixin:
             return identity.role == "admin"
         return False
 
+    def share_token_text(self) -> str:
+        header_token = self.headers.get("X-Share-Token", "").strip()
+        if header_token:
+            return header_token
+        parsed = urlparse(self.path)
+        return parse_qs(parsed.query).get("token", [""])[0].strip()
+
+    def share_request_allowed(self) -> bool:
+        parsed = urlparse(self.path)
+        if parsed.path in {"/", "/ws", "/ws/share-ui", "/ws/share-view", "/api/ping", "/api/share-stream", *self.SHARE_READONLY_GET_PATHS, *self.SHARE_SCOPED_FILE_GET_PATHS, *self.SHARE_READONLY_POST_PATHS}:
+            return True
+        if parsed.path.startswith("/share/"):
+            return True
+        return parsed.path.startswith("/static/")
+
+    def share_readonly_api_allowed_path(self, path: str) -> bool:
+        return bool(self.share_token()) and path in (self.SHARE_READONLY_GET_PATHS | self.SHARE_READONLY_POST_PATHS)
+
+    def share_scoped_file_api_allowed(self, parsed: Any) -> bool:
+        if not self.share_token() or parsed.path not in self.SHARE_SCOPED_FILE_GET_PATHS:
+            return False
+        raw_path = parse_qs(parsed.query).get("path", [""])[0].strip()
+        checker = getattr(self.server.app, "share_record_allows_file_path", None)
+        return callable(checker) and checker(self.share_record(), raw_path)
+
+    def share_readonly_api_allowed(self, parsed: Any) -> bool:
+        return self.share_readonly_api_allowed_path(parsed.path) or self.share_scoped_file_api_allowed(parsed)
+
+    def reject_share_forbidden(self) -> None:
+        self.close_after_unread_body()
+        self.write_json(
+            {"error": "share token is limited to the shared page and websocket", "role": "readonly"},
+            status=HTTPStatus.FORBIDDEN,
+        )
+
     def reject_forbidden(self, identity: AuthIdentity, required_role: str) -> None:
         self.close_after_unread_body()
         self.write_json({"error": f"{required_role} access required", "role": identity.role}, status=HTTPStatus.FORBIDDEN)
 
     def safe_next_path(self, value: str | None) -> str:
         text = str(value or "/").strip()
-        # DOIT.6 #76: also reject backslashes — a browser normalizes `/\evil.com` to `//evil.com`, an
+        # also reject backslashes — a browser normalizes `/\evil.com` to `//evil.com`, an
         # external open redirect after login. Protocol-relative `//` and CR/LF are rejected too.
         if not text.startswith("/") or text.startswith("//") or "\\" in text or "\r" in text or "\n" in text:
             return "/"
@@ -181,10 +237,49 @@ class AuthMixin:
         )
 
     def require_auth(self, required_role: str = "readonly") -> bool:
-        if auth_setup_required():
+        self._auth_cookie_identity = None
+        self._share_session = None
+        self._share_sessions = []
+        self._share_token = None
+        self._share_record = None
+        self._share_mode = "ro"
+        bypass_auth = test_auth_bypass_enabled()
+        if auth_setup_required() and not bypass_auth:
             self.write_html(setup_auth_html(self.request_locale_pref()))
             return False
-        self._auth_cookie_identity = None
+        share_token = self.share_token_text()
+        if share_token:
+            verifier = getattr(self.server.app, "verify_share_token", None)
+            record = verifier(share_token) if callable(verifier) else None
+            if record is None:
+                self._auth_identity = None
+                self.reject_unauthorized()
+                return False
+            identity = AuthIdentity(username="share", password="", role="readonly")
+            self._auth_identity = identity
+            raw_sessions = record.get("sessions") if isinstance(record.get("sessions"), list) else []
+            share_sessions = [str(session or "").strip() for session in raw_sessions if str(session or "").strip()]
+            if not share_sessions and record.get("session"):
+                share_sessions = [str(record.get("session") or "")]
+            self._share_sessions = share_sessions
+            self._share_session = share_sessions[0] if share_sessions else ""
+            self._share_token = share_token
+            self._share_record = dict(record)
+            self._share_mode = str(record.get("mode") or "ro") if self.request_is_https() else "ro"
+            if not self.share_request_allowed():
+                self.reject_share_forbidden()
+                return False
+            if self.role_allows(identity, required_role):
+                return True
+            self.reject_forbidden(identity, required_role)
+            return False
+        if bypass_auth:
+            identity = AuthIdentity(username="test-auth-bypass", password="", role="admin")
+            self._auth_identity = identity
+            if self.role_allows(identity, required_role):
+                return True
+            self.reject_forbidden(identity, required_role)
+            return False
         identity = self.cookie_auth_identity()
         if identity is not None:
             # Do not re-mint an existing cookie. Polling requests in flight
@@ -219,28 +314,53 @@ class AuthMixin:
     def auth_readonly(self) -> bool:
         return self.auth_identity().role == "readonly"
 
+    def share_session(self) -> str:
+        return str(getattr(self, "_share_session", "") or "")
+
+    def share_sessions(self) -> list[str]:
+        sessions = getattr(self, "_share_sessions", [])
+        return list(sessions) if isinstance(sessions, list) else []
+
+    def share_token(self) -> str:
+        return str(getattr(self, "_share_token", "") or "")
+
+    def share_record(self) -> dict[str, Any] | None:
+        record = getattr(self, "_share_record", None)
+        return dict(record) if isinstance(record, dict) else None
+
+    def share_mode(self) -> str:
+        return str(getattr(self, "_share_mode", "ro") or "ro")
+
     def require_auth_for_post(self, path: str) -> bool:
-        if path == "/api/event":
+        if path == "/api/event" or (path in self.SHARE_READONLY_POST_PATHS and self.share_token_text()):
+            return self.require_auth("readonly")
+        if path == "/api/yoagent/chat" and not self.share_token_text():
             return self.require_auth("readonly")
         return self.require_auth("admin")
 
     def handle_login_page(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        next_path = self.safe_next_path(qs.get("next", ["/"])[0])
+        if test_auth_bypass_enabled():
+            self.write_redirect(self.login_success_path(next_path))
+            return
         if auth_setup_required():
             self.write_html(setup_auth_html(self.request_locale_pref()))
             return
-        qs = parse_qs(parsed.query)
-        next_path = self.safe_next_path(qs.get("next", ["/"])[0])
         if not self.has_logout_marker() and self.cookie_auth_identity() is not None:
             self.write_redirect(self.login_success_path(next_path))
             return
         self.write_html(login_html(next_path=next_path, secure=self.request_is_https(), current_locale=self.request_locale_pref()))
 
     def handle_login_submit(self, parsed: Any) -> None:
+        form = self.read_urlencoded_form()
+        next_path = self.safe_next_path(form.get("next", ["/"])[0])
+        if test_auth_bypass_enabled():
+            self.write_redirect(self.login_success_path(next_path))
+            return
         if auth_setup_required():
             self.write_html(setup_auth_html(self.request_locale_pref()))
             return
-        form = self.read_urlencoded_form()
-        next_path = self.safe_next_path(form.get("next", ["/"])[0])
         username = form.get("username", [""])[0]
         password = form.get("password", [""])[0]
         identity = auth_identity_for_credentials(username, password)
@@ -257,7 +377,7 @@ class AuthMixin:
                 status=HTTPStatus.UNAUTHORIZED,
             )
             return
-        # DOIT.8 Phase 1: persist the login-screen language choice to general.language now that auth
+        # Phase 1: persist the login-screen language choice to general.language now that auth
         # succeeded, so the picked language carries into the app (the same setting the topbar/Preferences
         # switchers write). Done post-auth so an unauthenticated POST can't mutate settings.
         save_login_locale(form.get("locale", [""])[0])

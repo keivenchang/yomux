@@ -1,0 +1,15 @@
+name: wait-then-run
+kind: workflow
+description: Wait for a target session to become idle or done, then send the user's prompt to that same resolved agent pane. Use direct execution for explicit requests; use preview only when the user asks to confirm first. Preserve perspectives by composing the target prompt from the target agent's point of view and stripping routing wrappers like "ask agent 1 to", so "ask agent 1 to <do ...>" sends only "<do ...>", "ask agent 1 to list changed files" becomes "list changed files", and "tell it what it has done" becomes "what have you done?", while quoted commands or explicit "run ..." text stay raw. When the user asks to show, print, return, or tell them the result here, send as soon as the target is accepting a prompt, answer immediately that the prompt was sent, then background-watch the target transcript or visible pane and append the result to the YO!agent conversation.
+tools:
+  - read_activity
+  - watch_session
+  - preview_send_prompt
+  - execute_confirmed_send
+triggers:
+  - wait for session to finish then run
+  - when this is done tell it to run
+  - wait for session 6 then ask for date
+  - wait for session 6 then ask for date and tell me the result
+confirmation: none
+default_timeout_minutes: 120

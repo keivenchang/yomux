@@ -23,14 +23,23 @@ function layoutWithoutItem(item, options = {}) {
   return layoutWithoutItemFromSlots(item, layoutSlots, options);
 }
 
-function removeSessionFromLayout(item) {
+function fileExplorerHiddenStatusMessage() {
+  return t('finder.hiddenStatus', {name: fileExplorerLabel(), keys: appShortcutText('B')});
+}
+
+function hiddenFromLayoutStatusMessage(item) {
+  return isFileExplorerItem(item) ? fileExplorerHiddenStatusMessage() : `${itemLabel(item)} hidden from layout`;
+}
+
+function removeSessionFromLayout(item, options = {}) {
   if (!itemInLayout(item)) return;
   const isFiles = isFileExplorerItem(item);
+  if (isFiles) rememberFileExplorerOpenIntent(false);
   applyLayoutSlots(layoutWithoutItem(item, {
     preserveRemovedSlot: !isFiles,
     preservePlaceholders: !isFiles,
   }), {
-    message: `${itemLabel(item)} hidden from layout`,
+    message: options.message || hiddenFromLayoutStatusMessage(item),
   });
 }
 
@@ -38,6 +47,7 @@ function removePaneFromLayout(item) {
   const slot = slotForSession(item);
   if (!slot) return;
   const moved = paneTabs(slot);
+  if (moved.includes(fileExplorerItemId)) rememberFileExplorerOpenIntent(false);
   applyLayoutSlots(layoutWithoutSlot(slot, {preserveRemovedSlot: shouldPreserveClosedPaneSlot(slot)}), {
     message: moved.length ? `${moved.map(itemLabel).join(', ')} hidden from layout` : '',
   });
@@ -80,10 +90,10 @@ function maxTabsPerPane() {
   return Math.max(2, Math.min(30, raw));
 }
 
-// A tab may be auto-evicted unless it is the one being kept active, the Finder dock, or a
-// dirty/unsaved editor (never silently drop unsaved edits).
+// A tab may be auto-evicted unless it is the one being kept active, pinned, the Finder dock,
+// or a dirty/unsaved editor (never silently drop unsaved edits).
 function tabIsEvictableForCap(item, keepItem) {
-  if (item === keepItem || isFileExplorerItem(item)) return false;
+  if (item === keepItem || tabIsPinned(item) || isFileExplorerItem(item)) return false;
   if (isFileEditorItem(item)) {
     const state = openFiles.get(fileItemPath(item));
     if (state && state.dirty) return false;
@@ -192,87 +202,87 @@ function firstNonFinderPaneSlot(slots = layoutSlots) {
   return layoutSlotKeys(slots).find(slot => !isFileExplorerItem(activeItemForSide(slot, slots)) && paneTabsWithoutFinder(slot, slots).length > 0) || null;
 }
 
-function setLayoutToSinglePane() {
-  const items = visibleNonFinderPaneItems();
-  if (!items.length) return;
-  const active = items.includes(focusedPanelItem) ? focusedPanelItem : items[0];
-  const finderSlot = slotForSession(fileExplorerItemId);
-  const targetSlot = firstNonFinderPaneSlot() || (finderSlot === 'left' ? 'right' : 'left');
-  const next = emptyLayoutSlots();
-  next[targetSlot] = paneStateWithTabs(items, active);
-  if (finderSlot) {
-    next[finderSlot] = paneStateWithTabs([fileExplorerItemId], fileExplorerItemId);
-    const finderFirst = finderLeadsExpandedPane(finderSlot, targetSlot);
-    next[layoutTreeKey] = finderFirst
-      ? splitNode('row', leafNode(finderSlot), leafNode(targetSlot), fileExplorerSplitPercent)
-      : splitNode('row', leafNode(targetSlot), leafNode(finderSlot), 100 - fileExplorerSplitPercent);
-  } else {
-    next[layoutTreeKey] = leafNode(targetSlot);
-  }
-  applyLayoutSlots(next, {focusSession: active, prune: false, message: 'single pane layout'});
+function preferredNonFinderLayoutSlots(finderSlot = null) {
+  return layoutSlotKeys().filter(slot => slot !== finderSlot && paneTabsWithoutFinder(slot).length > 0);
 }
 
-function setLayoutToSplitPanes() {
+function layoutModeStatusMessage(mode) {
+  const normalized = normalizeLayoutMode(mode);
+  if (normalized === 'single') return 'single pane layout';
+  if (normalized === 'split') return 'split layout';
+  if (normalized === 'grid') return 'grid layout';
+  return 'wall layout';
+}
+
+function applyNonFinderLayoutMode(mode) {
   const items = visibleNonFinderPaneItems();
   if (!items.length) return;
-  const finderSlot = slotForSession(fileExplorerItemId);
-  const preferredSlots = basePaneKeys.filter(slot => slot !== finderSlot);
-  while (preferredSlots.length < 2) preferredSlots.push(nextLayoutSlot({...layoutSlots, [preferredSlots[0] || 'left']: emptyPaneState()}));
-  const leftSlot = preferredSlots[0] || 'left';
-  const rightSlot = preferredSlots[1] || 'right';
-  const groups = [[], []];
-  const assigned = new Set();
-  for (const item of items) {
-    const slot = slotForSession(item);
-    if (slot === leftSlot) {
-      groups[0].push(item);
-      assigned.add(item);
-    } else if (slot === rightSlot) {
-      groups[1].push(item);
-      assigned.add(item);
-    }
-  }
-  for (const item of items) {
-    if (assigned.has(item)) continue;
-    groups[groups[0].length <= groups[1].length ? 0 : 1].push(item);
-  }
-  if (!groups[1].length && groups[0].length > 1) groups[1].push(...groups[0].splice(Math.ceil(groups[0].length / 2)));
+  const normalized = normalizeLayoutMode(mode);
   const active = items.includes(focusedPanelItem) ? focusedPanelItem : items[0];
-  const next = emptyLayoutSlots();
-  next[leftSlot] = paneStateWithTabs(groups[0], groups[0].includes(active) ? active : groups[0][0]);
-  if (groups[1].length) next[rightSlot] = paneStateWithTabs(groups[1], groups[1].includes(active) ? active : groups[1][0]);
-  const nonFinderTree = groups[1].length
-    ? splitNode('row', leafNode(leftSlot), leafNode(rightSlot), defaultSplitPercent)
-    : leafNode(leftSlot);
+  const finderSlot = slotForSession(fileExplorerItemId);
+  const preserveSlots = normalized === 'single' || normalized === 'split';
+  const next = layoutSlotsForItems(items, normalized, {
+    active,
+    finderSlot,
+    preferredSlots: preserveSlots ? preferredNonFinderLayoutSlots(finderSlot) : [],
+  });
   if (finderSlot) {
     next[finderSlot] = paneStateWithTabs([fileExplorerItemId], fileExplorerItemId);
-    const finderFirst = finderLeadsExpandedPane(finderSlot, leftSlot);
+    const targetSlot = layoutLeafSlots(next[layoutTreeKey]).find(slot => slot !== finderSlot) || firstNonFinderPaneSlot() || 'right';
+    const nonFinderTree = next[layoutTreeKey];
+    const finderFirst = finderLeadsExpandedPane(finderSlot, targetSlot);
     next[layoutTreeKey] = finderFirst
       ? splitNode('row', leafNode(finderSlot), nonFinderTree, fileExplorerSplitPercent)
       : splitNode('row', nonFinderTree, leafNode(finderSlot), 100 - fileExplorerSplitPercent);
-  } else {
-    next[layoutTreeKey] = nonFinderTree;
   }
-  applyLayoutSlots(next, {focusSession: active, prune: false, message: 'split layout'});
+  applyLayoutSlots(next, {focusSession: active, prune: false, message: layoutModeStatusMessage(normalized)});
 }
 
-function layoutWithFileExplorerDockedLeft(slots = layoutSlots) {
-  const right = compactLayoutSlots(layoutWithoutItemFromSlots(fileExplorerItemId, slots, {preservePlaceholders: true}));
+function applyLayoutMode(mode) {
+  applyNonFinderLayoutMode(normalizeLayoutMode(mode));
+}
+
+function setLayoutToSinglePane() {
+  applyLayoutMode('single');
+}
+
+function setLayoutToSplitPanes() {
+  applyLayoutMode('split');
+}
+
+function setLayoutToGridPanes() {
+  applyLayoutMode('grid');
+}
+
+function setLayoutToWallPanes() {
+  applyLayoutMode('wall');
+}
+
+function layoutWithFileExplorerDockedLeft(slots = layoutSlots, options = {}) {
+  const rightRaw = layoutWithoutItemFromSlots(fileExplorerItemId, slots, {
+    preservePlaceholders: options.preservePlaceholders !== false,
+  });
+  const right = options.preservePlaceholders === false && !paneItems(rightRaw).length
+    ? rightRaw
+    : compactLayoutSlots(rightRaw);
   const rightSlots = layoutSlotKeys(right).filter(slot => paneHasLayoutContent(slot, right));
   const next = emptyLayoutSlots();
   for (const slot of rightSlots) next[slot] = paneStateForLayoutSlot(slot, right);
   const used = new Set(rightSlots);
   const currentSlot = slotForItem(fileExplorerItemId, slots);
+  const preferredSlot = options.preferredSlot && !used.has(options.preferredSlot) ? options.preferredSlot : null;
   let finderSlot = currentSlot && !used.has(currentSlot) ? currentSlot : null;
+  if (!finderSlot) finderSlot = preferredSlot;
   if (!finderSlot) finderSlot = !used.has('left') ? 'left' : nextLayoutSlot(next);
   next[finderSlot] = paneStateWithTabs([fileExplorerItemId], fileExplorerItemId);
   next[layoutTreeKey] = rightSlots.length
     ? splitNode('row', leafNode(finderSlot), right[layoutTreeKey], fileExplorerSplitPercent)
     : leafNode(finderSlot);
-  return compactLayoutSlots(next);
+  return layoutWithFileExplorerPeerPane(compactLayoutSlots(next));
 }
 
 function dockFileExplorerPane() {
+  rememberFileExplorerOpenIntent(true);
   applyLayoutSlots(layoutWithFileExplorerDockedLeft(), {
     focusSession: fileExplorerItemId,
     prune: false,
@@ -293,10 +303,23 @@ function slotForNewSession() {
   return 'left';
 }
 
+function focusedActivationSlot() {
+  const item = currentActiveMenuItem();
+  const slot = item ? slotForSession(item) : null;
+  return slot && !slotIsFileExplorerPane(slot) ? slot : null;
+}
+
+function fileEditorActivationSlot() {
+  const focusedSlot = focusedActivationSlot();
+  if (focusedSlot) return focusedSlot;
+  const previousSlot = lastActiveNonFileExplorerPaneItem ? slotForSession(lastActiveNonFileExplorerPaneItem) : null;
+  return previousSlot && !slotIsFileExplorerPane(previousSlot) ? previousSlot : null;
+}
+
 function slotForTabActivation(item) {
   const currentSlot = slotForSession(item);
   if (currentSlot) return currentSlot;
-  return largestNonFileExplorerPaneSlot() || firstEmptyPane() || largestPaneSlot() || slotForNewSession();
+  return fileEditorActivationSlot() || largestNonFileExplorerPaneSlot() || firstEmptyPane() || largestPaneSlot() || slotForNewSession();
 }
 
 async function activateTabInExistingPane(item) {
@@ -351,7 +374,7 @@ async function placeTmuxSession(session) {
   await moveSessionToSlot(session, targetSlot, null, paneTabs(targetSlot).length);
 }
 
-// DOIT.6: File -> Finder toggles. Hide the Finder when it is already in the layout (same path as the
+// File -> Finder toggles. Hide the Finder when it is already in the layout (same path as the
 // Finder panel's close button), otherwise open/focus it. The menu's `checked` state tracks this.
 function toggleFinderPane() {
   if (itemInLayout(fileExplorerItemId)) {
@@ -363,6 +386,7 @@ function toggleFinderPane() {
 }
 
 async function openFileExplorerPane() {
+  rememberFileExplorerOpenIntent(true);
   const currentSlot = slotForSession(fileExplorerItemId);
   if (currentSlot) {
     if (paneTabs(currentSlot).length === 1 && !fileExplorerNeedsLeftDock()) {
@@ -617,19 +641,31 @@ function replaceLayoutNodeAtPath(node, path, replacement) {
 
 function activatePaneTab(side, session, options = {}) {
   if (!layoutSlotKeys().includes(side) || !itemInLayout(session)) return;
+  if (options.userInitiated === true && isTmuxSession(session)) {
+    noteFileExplorerChangesSessionInteraction(session);
+  }
+  if (options.userInitiated === true && isFileEditorItem(session)) {
+    const path = fileItemPath(session);
+    const owners = openFileOwnerSessionsForPath(path);
+    const owner = changedFileOwnerSessionForPath(path, {owners}) || (owners.length === 1 ? owners[0] : '');
+    if (owner) noteFileExplorerChangesSessionInteraction(owner);
+  }
   recordTabActivation(session);
   const previous = activeItemForSide(side);
-  if (previous && previous !== session && typeof captureFileEditorPanelViewStateForItem === 'function') {
-    captureFileEditorPanelViewStateForItem(previous);
-  }
+  if (previous && previous !== session) capturePaneViewStateForItemIfPresent(previous);
   if (isFileEditorItem(session)) {
     activeFile = fileItemPath(session);
     updateFileExplorerCurrentFileHighlight();
   }
-  // DOIT.21: a user-initiated tab switch IS navigation — record EVERY tab kind (file, terminal, Finder,
-  // Prefs, …) so Back returns to the previous tab worked on, not just files. (No-op while navigating.)
-  if (options.userInitiated === true) recordEditorNav(session);
-  setFocusedPanelItem(session);
+  // a user-initiated tab switch IS navigation. setFocusedPanelItem records the previous
+  // focused item plus the newly activated tab so Back returns to the pane the user just left.
+  setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
+  if (!shareViewMode && isTmuxSession(session)) {
+    const item = terminals.get(session);
+    if (item?.term) sharePublish('host-resize', {session, rows: item.term.rows, cols: item.term.cols});
+  }
+  sharePublish('active-tab', {slot: side, item: session});
+  scheduleShareTopologySnapshot('tab-activation');
   if (activeItemForSide(side) === session) {
     focusPanel(session, {userInitiated: options.userInitiated === true});
     return;
@@ -639,25 +675,24 @@ function activatePaneTab(side, session, options = {}) {
   for (const key of layoutSlotKeys()) next[key] = paneStateForLayoutSlot(key);
   next[side].active = session;
   applyLayoutSlots(next, {focusSession: session});
-  if (isPreferencesItem(session) && options.userInitiated === true && autoFocusEnabled) {
-    focusFreshPreferencesSearchSoon();
-  }
   if (options.userInitiated && isTmuxSession(session)) focusTerminalFromUserAction(session, 25);
 }
 
-async function selectSession(session) {
+async function selectSession(session, options = {}) {
+  if (options.userInitiated === true && isTmuxSession(session)) {
+    noteFileExplorerChangesSessionInteraction(session);
+  }
   if (isFileEditorItem(session)) {
     activeFile = fileItemPath(session);
     updateFileExplorerCurrentFileHighlight();
   }
-  const shouldFocusPreferencesSearch = isPreferencesItem(session);
   if (isFileExplorerItem(session)) {
     await openFileExplorerPane();
     scheduleFileExplorerActiveTabSync();
     return;
   }
   if (activeSessions.includes(session)) {
-    focusPanel(session, {userInitiated: true});
+    focusPanel(session, {userInitiated: options.userInitiated === true});
     return;
   }
   if (isTmuxSession(session) && filesOnlySlotForSession(session)) {
@@ -665,7 +700,38 @@ async function selectSession(session) {
     return;
   }
   await activateTabInExistingPane(session);
-  if (shouldFocusPreferencesSearch) focusFreshPreferencesSearchSoon();
+}
+
+function paneTabTraversalPositions(slots = layoutSlots) {
+  return layoutLeafSlots(slots?.[layoutTreeKey])
+    .flatMap(slot => paneTabs(slot, slots).map(item => ({slot, item})))
+    .filter(position => position.item);
+}
+
+function adjacentPaneTabPosition(direction, options = {}) {
+  const slots = options.slots || layoutSlots;
+  const positions = paneTabTraversalPositions(slots);
+  if (positions.length < 2) return null;
+  const currentItem = String(options.item || visualActivePaneItem() || activePaneItems(slots)[0] || '');
+  const currentSlot = options.slot || slotForItem(currentItem, slots);
+  if (!currentItem || !currentSlot) return null;
+  const index = positions.findIndex(position => position.slot === currentSlot && position.item === currentItem);
+  if (index < 0) return null;
+  const offset = direction < 0 ? -1 : 1;
+  return positions[(index + offset + positions.length) % positions.length] || null;
+}
+
+function selectAdjacentPaneTab(direction, options = {}) {
+  const target = adjacentPaneTabPosition(direction, options);
+  if (!target?.item || !target.slot) return false;
+  const currentItem = String(options.item || visualActivePaneItem() || '');
+  if (target.item === currentItem && target.slot === (options.slot || slotForItem(currentItem))) return false;
+  const activationOptions = {...options};
+  delete activationOptions.item;
+  delete activationOptions.slot;
+  delete activationOptions.slots;
+  activatePaneTab(target.slot, target.item, activationOptions);
+  return true;
 }
 
 function sessionAgentKind(session) {
@@ -675,12 +741,15 @@ function sessionAgentKind(session) {
   return kind === 'claude' || kind === 'codex' ? kind : '';
 }
 
-function agentIcon(kind) {
+function agentIcon(kind, options = {}) {
+  const name = agentLabel(kind);
+  const label = options.label || name;
+  const labelAttr = label ? ` aria-label="${esc(label)}" title="${esc(label)}"` : '';
   if (kind === 'codex') {
-    return `<span class="agent-icon codex" aria-label="Codex" title="Codex">${codexIcon()}</span>`;
+    return `<span class="agent-icon codex"${labelAttr}>${codexIcon()}</span>`;
   }
   if (kind === 'claude') {
-    return `<span class="agent-icon claude" aria-label="Claude" title="Claude">${claudeIcon()}</span>`;
+    return `<span class="agent-icon claude"${labelAttr}>${claudeIcon()}</span>`;
   }
   return '';
 }
@@ -795,16 +864,29 @@ function pullRequestStatusDisplay(pr) {
   if (!status) return '';
   const key = status.toLowerCase();
   if (key === 'unknown') return '';
-  if (key === 'merged') return 'MERGED';
-  if (key === 'draft') return 'DRAFT';
-  if (key === 'closed') return 'CLOSED';
-  if (key === 'open') return 'OPEN';
+  if (key === 'merged') return t('pr.status.merged');
+  if (key === 'draft') return t('pr.status.draft');
+  if (key === 'closed') return t('pr.status.closed');
+  if (key === 'open') return t('pr.status.open');
+  if (key.includes('failing')) return t('pr.status.failing');
+  if (key.includes('pending')) return t('pr.status.pending');
+  if (key.includes('passing')) return t('pr.status.passing');
   return status.replace(/\bci\b/gi, 'CI').toUpperCase();
 }
 
+function pullRequestIsMerged(pr) {
+  return pullRequestStatusLabel(pr).toLowerCase() === 'merged';
+}
+
+function pullRequestInlineStatusDisplay(pr) {
+  const key = pullRequestStatusLabel(pr).toLowerCase();
+  if (key === 'merged' || key === 'open') return '';
+  return pullRequestStatusDisplay(pr);
+}
+
 function pullRequestLinkLabel(pr) {
-  const status = pullRequestStatusDisplay(pr);
-  return `PR #${pr.number}${status ? ` ${status}` : ''}`;
+  const status = pullRequestInlineStatusDisplay(pr);
+  return `#${pr.number}${status ? ` ${status}` : ''}`;
 }
 
 function pullRequestStatusClass(pr) {
@@ -829,12 +911,12 @@ function pullRequestCiStatusClass(pr) {
 function pullRequestStatusIndicatorHtml(session, pr) {
   if (!pr?.number) return '';
   const status = pullRequestStatusLabel(pr).toLowerCase();
-  if (!['merged', 'draft', 'closed'].includes(status)) return '';
-  return `<span class="${metadataBadgeClasses(session, 'status', `ci-indicator tab-symbol ${pullRequestStatusClass(pr)}`)}">${pullRequestStatusDisplay(pr)}</span>`;
+  if (!['draft', 'closed'].includes(status)) return '';
+  return `<span class="${metadataBadgeClasses(session, 'status', `ci-indicator tab-symbol ${pullRequestStatusClass(pr)}`)}">${esc(pullRequestStatusDisplay(pr))}</span>`;
 }
 
 function pullRequestCiIndicatorHtml(session, pr) {
-  if (pullRequestStatusLabel(pr).toLowerCase() === 'merged') return '';
+  if (pullRequestIsMerged(pr)) return '';
   const state = pr?.checks?.state;
   if (!state || state === 'unknown') return '';
   return `<span class="${metadataBadgeClasses(session, 'ci', `ci-indicator tab-symbol ${pullRequestCiStatusClass(pr)}`)}">CI</span>`;
@@ -843,8 +925,11 @@ function pullRequestCiIndicatorHtml(session, pr) {
 function pullRequestNumberIndicatorHtml(session, pr) {
   if (!pr?.number) return '';
   // No native title — the rich custom session popover already shows PR #, CI, and review state
-  // (DOIT.6: avoid a duplicate browser tooltip alongside the popover).
-  return `<span class="ci-indicator tab-symbol pr-number-chip">#${esc(String(pr.number))}</span>`;
+  // (avoid a duplicate browser tooltip alongside the popover).
+  const classes = pullRequestIsMerged(pr)
+    ? metadataBadgeClasses(session, 'status', `ci-indicator tab-symbol pr-number-chip ${pullRequestStatusClass(pr)}`)
+    : 'ci-indicator tab-symbol pr-number-chip';
+  return `<span class="${esc(classes)}">#${esc(String(pr.number))}</span>`;
 }
 
 // #38: GitHub reviewDecision (APPROVED / CHANGES_REQUESTED / REVIEW_REQUIRED) per PR.
@@ -860,9 +945,9 @@ function pullRequestApprovalClass(decision) {
 }
 
 function pullRequestApprovalLabel(decision) {
-  if (decision === 'APPROVED') return 'Approved';
-  if (decision === 'CHANGES_REQUESTED') return 'Changes';
-  if (decision === 'REVIEW_REQUIRED') return 'Review';
+  if (decision === 'APPROVED') return t('pr.review.approvedShort');
+  if (decision === 'CHANGES_REQUESTED') return t('pr.review.changesShort');
+  if (decision === 'REVIEW_REQUIRED') return t('pr.review.reviewShort');
   return '';
 }
 
@@ -874,11 +959,11 @@ function pullRequestApprovalIndicatorHtml(session, pr) {
   const cls = pullRequestApprovalClass(decision);
   if (!cls) return '';
   const label = pullRequestApprovalLabel(decision);
-  // No native title — the session popover carries the review state (DOIT.6: no duplicate tooltip).
+  // No native title — the session popover carries the review state (no duplicate tooltip).
   return `<span class="${metadataBadgeClasses(session, 'review', `ci-indicator tab-symbol pr-review-chip ${cls}`)}">${esc(label)}</span>`;
 }
 
-// DOIT.6: review status + reviewer(s) for the session popover PR row ("Approved by alice" /
+// review status + reviewer(s) for the session popover PR row ("Approved by alice" /
 // "Changes requested by bob" / "Review required"). Reuses the meta-pr-status color classes.
 function pullRequestReviewInlineHtml(pr) {
   const decision = pullRequestReviewDecision(pr);
@@ -901,28 +986,27 @@ function pullRequestLinkHtml(pr) {
 
 function pullRequestAuthorHtml(pr) {
   const author = String(pr?.author_login || '').trim();
-  return author ? `<span class="meta-muted">by ${esc(author)}</span>` : '';
+  return author ? `<span class="meta-muted">${esc(t('pr.authorBy', {author}))}</span>` : '';
 }
 
 function pullRequestColumnLinkHtml(pr) {
-  const status = pullRequestStatusDisplay(pr);
-  const label = `#${pr.number}${status ? ` ${status}` : ''}`;
-  return linkHtml(pr.url, label, pr.title || pr.description || '', pullRequestStatusClass(pr));
+  return linkHtml(pr.url, pullRequestLinkLabel(pr), pr.title || pr.description || '', pullRequestStatusClass(pr));
 }
 
 function pullRequestChecksHtml(pr) {
+  if (pullRequestIsMerged(pr)) return '';
   const checks = pr?.checks;
   if (!checks || !checks.state || checks.state === 'unknown') return '';
   const cls = pullRequestCiStatusClass(pr);
-  const parts = [`<span class="meta-pr-status ${cls}">${esc(checks.summary || `CI ${checks.state}`)}</span>`];
+  const parts = [`<span class="meta-pr-status ${cls}">${esc(checks.summary || t('pr.checks.state', {state: checks.state}))}</span>`];
   const checkLinks = items => (items || []).map(item => (
     item?.name ? linkHtml(item.url || '', item.name, item.state || '') : ''
   )).filter(Boolean).join(', ');
   const failing = checkLinks(checks.failing);
   const pending = checkLinks(checks.pending);
-  if (failing) parts.push(`<span class="meta-muted">failing: ${failing}</span>`);
-  if (pending) parts.push(`<span class="meta-muted">pending: ${pending}</span>`);
-  if (Number.isFinite(checks.total)) parts.push(`<span class="meta-muted">${checks.total} checks</span>`);
+  if (failing) parts.push(`<span class="meta-muted">${esc(t('pr.checks.failing'))}: ${failing}</span>`);
+  if (pending) parts.push(`<span class="meta-muted">${esc(t('pr.checks.pending'))}: ${pending}</span>`);
+  if (Number.isFinite(checks.total)) parts.push(`<span class="meta-muted">${esc(t('pr.checks.count', {count: checks.total}))}</span>`);
   return metaJoin(parts);
 }
 
@@ -949,40 +1033,50 @@ function compactHomePath(path) {
 
 function projectMetaHtml(session, info) {
   const project = info?.project || {};
-  const git = project.git;
+  const repos = sessionRepoSummaries(info);
+  const repoIndex = selectedSessionRepoIndex(session, info);
+  const selectedRepo = repoIndex >= 0 ? repos[repoIndex] : null;
+  const git = displayedSessionGit(session, info);
+  const showingPrimaryGit = !selectedRepo || repoRootKey(project.git?.root) === repoRootKey(selectedRepo.root);
   const parts = [];
-  const fullPath = panelFullPath(session, info);
+  const fullPath = selectedRepo?.cwd || selectedRepo?.root || panelFullPath(session, info);
+  const repoSwitchHtml = repos.length > 1 ? (() => {
+    const position = Math.max(0, repoIndex) + 1;
+    const switchLabel = `${position}/${repos.length}`;
+    return `<span class="meta-repo-switch" aria-label="${esc(t('detail.repos.switch', {position, count: repos.length}))}">
+      <button type="button" class="meta-repo-cycle" data-repo-cycle="${esc(session)}" data-repo-cycle-dir="-1" title="${esc(t('detail.repos.previous'))}" aria-label="${esc(t('detail.repos.previous'))}">&lt;</button>
+      <button type="button" class="meta-repo-chip" data-repo-chip="${esc(session)}" title="${esc(t('detail.repos.more', {count: repos.length - 1}))}" aria-label="${esc(t('detail.repos.switch', {position, count: repos.length}))}">${esc(switchLabel)}</button>
+      <button type="button" class="meta-repo-cycle" data-repo-cycle="${esc(session)}" data-repo-cycle-dir="1" title="${esc(t('detail.repos.next'))}" aria-label="${esc(t('detail.repos.next'))}">&gt;</button>
+    </span>`;
+  })() : '';
   if (!git) {
+    if (repoSwitchHtml) parts.push(repoSwitchHtml);
     if (fullPath) parts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
-    parts.push('<span class="meta-muted">no git checkout detected</span>');
+    parts.push(`<span class="meta-muted">${esc(t('git.noCheckout'))}</span>`);
     return metaJoin(parts);
   }
   const pr = displayPullRequest(info);
-  if (pr?.number) parts.push(pullRequestLinkHtml(pr));
+  if (repoSwitchHtml) parts.push(repoSwitchHtml);
+  if (showingPrimaryGit && pr?.number) parts.push(pullRequestLinkHtml(pr));
   if (git.branch) parts.push(`<span class="meta-branch">${esc(shortBranch(git.branch))}</span>`);
   if (fullPath) parts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
-  if (Number.isFinite(git.behind) && git.behind > 0) parts.push(`<span class="meta-muted">behind ${git.behind}</span>`);
-  if (Number.isFinite(git.ahead) && git.ahead > 0) parts.push(`<span class="meta-muted">ahead ${git.ahead}</span>`);
-  if (Number.isFinite(git.dirty_count) && git.dirty_count > 0) parts.push(`<span class="meta-muted">dirty ${git.dirty_count}</span>`);
-  if (pr?.number) {
-    if (pr.checks?.state && pr.checks.state !== 'unknown') {
+  if (Number.isFinite(git.behind) && git.behind > 0) parts.push(`<span class="meta-muted">${esc(t('git.behind', {count: git.behind}))}</span>`);
+  if (Number.isFinite(git.ahead) && git.ahead > 0) parts.push(`<span class="meta-muted">${esc(t('git.ahead', {count: git.ahead}))}</span>`);
+  if (Number.isFinite(git.dirty_count) && git.dirty_count > 0) parts.push(`<span class="meta-muted">${esc(t('git.dirty', {count: git.dirty_count}))}</span>`);
+  if (showingPrimaryGit && pr?.number) {
+    if (!pullRequestIsMerged(pr) && pr.checks?.state && pr.checks.state !== 'unknown') {
       parts.push(`<span class="meta-pr-status ${pullRequestCiStatusClass(pr)}">${esc(pr.checks.summary || pullRequestStatusLabel(pr))}</span>`);
     }
   }
-  for (const issue of project.linear || []) {
-    const state = issue.state ? ` ${issue.state}` : '';
-    parts.push(linkHtml(issue.url, `${issue.identifier}${state}`, issue.title || ''));
+  if (showingPrimaryGit) {
+    for (const issue of project.linear || []) {
+      const state = issue.state ? ` ${issue.state}` : '';
+      parts.push(linkHtml(issue.url, `${issue.identifier}${state}`, issue.title || ''));
+    }
+    const desc = pr?.title || pr?.description || (project.linear || []).find(issue => issue.title)?.title || '';
+    if (desc) parts.push(`<span class="meta-desc">${esc(shortText(desc, 160))}</span>`);
   }
-  const desc = pr?.title || pr?.description || (project.linear || []).find(issue => issue.title)?.title || '';
-  if (desc) parts.push(`<span class="meta-desc">${esc(shortText(desc, 160))}</span>`);
-  // C9: a session can touch several repos; the detail line shows the focused one. When there are more,
-  // append a "+N repos" chip that opens a popover listing every touched repo (keeps the line one row tall).
-  const repos = Array.isArray(project.repos) ? project.repos : [];
-  if (repos.length > 1) {
-    const extra = repos.length - 1;
-    parts.push(`<button type="button" class="meta-repo-chip" data-repo-chip="${esc(session)}" title="${esc(t('detail.repos.more', {count: extra}))}" aria-label="${esc(t('detail.repos.more', {count: extra}))}">+${extra} ${esc(t('detail.repos.label'))}</button>`);
-  }
-  return parts.length ? metaJoin(parts) : '<span class="meta-muted">git checkout detected</span>';
+  return parts.length ? metaJoin(parts) : `<span class="meta-muted">${esc(t('git.checkoutDetected'))}</span>`;
 }
 
 // C9: popover listing every repo a session touches (focused first), each row: path, branch, dirty,
@@ -991,9 +1085,9 @@ function repoChipMenuRowHtml(repo) {
   const label = compactHomePath(repo.root || '');
   const bits = [];
   if (repo.branch) bits.push(`<span class="meta-branch">${esc(shortBranch(repo.branch))}</span>`);
-  if (Number.isFinite(repo.dirty_count) && repo.dirty_count > 0) bits.push(`<span class="meta-muted">dirty ${repo.dirty_count}</span>`);
-  if (Number.isFinite(repo.ahead) && repo.ahead > 0) bits.push(`<span class="meta-muted">ahead ${repo.ahead}</span>`);
-  if (Number.isFinite(repo.behind) && repo.behind > 0) bits.push(`<span class="meta-muted">behind ${repo.behind}</span>`);
+  if (Number.isFinite(repo.dirty_count) && repo.dirty_count > 0) bits.push(`<span class="meta-muted">${esc(t('git.dirty', {count: repo.dirty_count}))}</span>`);
+  if (Number.isFinite(repo.ahead) && repo.ahead > 0) bits.push(`<span class="meta-muted">${esc(t('git.ahead', {count: repo.ahead}))}</span>`);
+  if (Number.isFinite(repo.behind) && repo.behind > 0) bits.push(`<span class="meta-muted">${esc(t('git.behind', {count: repo.behind}))}</span>`);
   const primary = repo.primary ? ' repo-chip-row-primary' : '';
   return `<button type="button" class="repo-chip-row${primary}" data-repo-chip-open="${esc(repo.root || '')}">
     <span class="repo-chip-path">${esc(label)}</span>
@@ -1003,19 +1097,16 @@ function repoChipMenuRowHtml(repo) {
 
 function showRepoChipMenu(session, x, y) {
   const info = transcriptMeta.sessions?.[session];
-  const repos = Array.isArray(info?.project?.repos) ? info.project.repos : [];
+  const repos = sessionRepoSummaries(info);
   if (repos.length < 2) return;
   const menu = document.createElement('div');
   menu.className = 'terminal-context-menu repo-chip-menu';
   menu.setAttribute('role', 'menu');
-  const ordered = [...repos].sort((a, b) => (b.primary === true) - (a.primary === true));
-  menu.innerHTML = ordered.map(repoChipMenuRowHtml).join('');
-  menu.querySelectorAll('[data-repo-chip-open]').forEach(row => {
-    row.addEventListener('click', () => {
-      const root = row.dataset.repoChipOpen || '';
-      repoChipContextMenu.close();
-      if (root) openFileExplorerAt(root);
-    });
+  menu.innerHTML = repos.map(repoChipMenuRowHtml).join('');
+  delegate(menu, 'click', '[data-repo-chip-open]', (event, row) => {
+    const root = row.dataset.repoChipOpen || '';
+    repoChipContextMenu.close();
+    if (root) openFileExplorerAt(root);
   });
   repoChipContextMenu.open(menu, x, y);
 }
@@ -1037,6 +1128,8 @@ function summaryContextHtml(session, info, agent) {
   if (git) {
     lines.push(summaryContextLine('branch', `${git.branch || 'unknown'}${git.upstream ? ` -> ${git.upstream}` : ''}`));
     if (git.root) lines.push(summaryContextLine('repo', git.root));
+    // S7: name a linked worktree vs its parent repo so the focused path isn't mistaken for the main checkout.
+    if (git.worktree) lines.push(summaryContextLine('worktree', `${git.worktree.name || git.worktree.path} — worktree of ${git.worktree.parent_root}`));
     if (git.head) lines.push(summaryContextLine('head', git.head));
   } else {
     lines.push(summaryContextLine('repo', 'no git checkout detected'));
@@ -1063,56 +1156,54 @@ function summaryContextLine(label, text, url = '', linkLabel = '', linkClass = '
 async function ensureSession(session) {
   if (readOnlyMode) return true;
   try {
-    const response = await apiFetch(`/api/ensure-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
-    const payload = await response.json();
-    if (!response.ok) {
-      statusErr(`${esc(payload.error || 'session create failed')}`);
-      return false;
-    }
+    const payload = await apiFetchJson(`/api/ensure-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
     statusEl.innerHTML = payload.created
       ? `<span class="ok">created ${esc(sessionLabel(session))} with Claude</span>`
       : `<span class="ok">${esc(sessionLabel(session))} ready</span>`;
     return true;
   } catch (error) {
-    statusErr(`session check failed: ${esc(error)}`);
+    if (error?.status) {
+      statusErr(esc(error.payload?.error || t('status.sessionCreateFailedDefault')));
+      return false;
+    }
+    statusErr(localizedHtml('status.sessionCheckFailed', {error}));
     return false;
   }
 }
 
 async function createNextSession(agent) {
   if (readOnlyMode) {
-    statusErr('readonly access cannot create sessions');
+    statusErr(localizedHtml('status.readOnlyCreateSessions'));
     return;
   }
   const agentLabel = agentName(agent) || 'agent';
   statusEl.textContent = `creating ${agentLabel} session...`;
   try {
-    const response = await apiFetch(`/api/create-session?agent=${encodeURIComponent(agent)}`, {method: 'POST'});
-    const payload = await response.json();
-    if (!response.ok) {
-      statusErr(`${esc(payload.error || 'session create failed')}`);
-      return;
-    }
+    const payload = await apiFetchJson(`/api/create-session?agent=${encodeURIComponent(agent)}`, {method: 'POST'});
     const previousActive = activeSessions.slice();
     updateSessionList(payload.sessions || []);
     renderSessionButtons();
     renderPanels(previousActive);
     await placeTmuxSession(payload.session);
     await ensureTerminalRunning(payload.session);
-    refreshTranscripts();
+    refreshTranscripts({force: true});
     renderAutoApproveButtons();
     statusOk(`created ${esc(sessionLabel(payload.session))} (${esc(payload.session)}) with ${esc(agentName(payload.agent) || agentLabel)}`);
   } catch (error) {
-    statusErr(`session create failed: ${esc(error)}`);
+    if (error?.status) {
+      statusErr(esc(error.payload?.error || t('status.sessionCreateFailedDefault')));
+      return;
+    }
+    statusErr(localizedHtml('status.sessionCreateFailed', {error}));
   }
 }
 
 function tmuxSessionNameError(name) {
   const text = String(name || '').trim();
-  if (!text) return 'session name is required';
-  if (text.length > 64) return 'session name must be 64 characters or fewer';
+  if (!text) return t('rename.error.required');
+  if (text.length > 64) return t('rename.error.tooLong');
   // Keep in sync with TMUX_SESSION_NAME_RE in yolomux_lib/app.py.
-  if (!/^[A-Za-z0-9_. -]+$/.test(text)) return 'session name may contain only letters, numbers, spaces, dot, dash, and underscore';
+  if (!/^[A-Za-z0-9_. -]+$/.test(text)) return t('rename.error.invalidChars');
   return '';
 }
 
@@ -1122,12 +1213,24 @@ function rekeyMap(map, oldKey, newKey) {
   map.delete(oldKey);
 }
 
+function clearSessionUiState(session) {
+  stopTranscriptStream(session);
+  stopSummaryStream(session);
+  autoApproveStates.delete(session);
+  paneViewState.delete(session);
+  pendingPaneViewStateCaptures.delete(session);
+  uploadResultsBySession.delete(session);
+  if (uploadCleanupTimers.has(session)) {
+    clearTimeout(uploadCleanupTimers.get(session));
+    uploadCleanupTimers.delete(session);
+  }
+}
+
 function stopSessionUi(session) {
   const item = terminals.get(session);
   if (item) closeTerminalItem(session, item);
   terminals.delete(session);
-  stopTranscriptStream(session);
-  stopSummaryStream(session);
+  clearSessionUiState(session);
   const panel = panelNodes.get(session);
   if (panel) panel.remove();
   panelNodes.delete(session);
@@ -1143,7 +1246,8 @@ function replaceSessionMetadata(oldSession, newSession) {
     uploadResultsBySession,
     uploadCleanupTimers,
     pasteCounters,
-    // DOIT.6 #73: carry the per-pane LRU timestamp across a session rename too, or the renamed tab's
+    paneViewState,
+    // carry the per-pane LRU timestamp across a session rename too, or the renamed tab's
     // eviction ordering glitches (it reads as never-activated).
     tabLastActivatedAt,
   ]) {
@@ -1185,7 +1289,7 @@ function sessionRenameDialogKeydown(event) {
 
 function showSessionRenameDialog(session) {
   if (readOnlyMode) {
-    statusErr('readonly access cannot rename sessions');
+    statusErr(localizedHtml('status.readOnlyRenameSessions'));
     return false;
   }
   if (!isTmuxSession(session)) return false;
@@ -1193,7 +1297,7 @@ function showSessionRenameDialog(session) {
   closeAppMenus();
   closeSessionRenameDialog();
   const overlay = document.createElement('div');
-  overlay.className = 'session-rename-backdrop';
+  overlay.className = 'app-modal-overlay session-rename-backdrop';
   overlay.setAttribute('role', 'presentation');
   overlay.innerHTML = `
     <form class="session-rename-dialog" role="dialog" aria-modal="true" aria-label="${esc(t('rename.aria'))}">
@@ -1229,11 +1333,11 @@ function showSessionRenameDialog(session) {
     errorNode.hidden = true;
     const renamed = await renameTmuxSession(session, nextName);
     if (!renamed) {
-      showError('rename failed; see status line');
+      showError(t('status.renameFailedSeeStatus'));
       input.focus();
     }
   });
-  document.body.appendChild(overlay);
+  appOverlayRootElement().appendChild(overlay);
   sessionRenameDialog = overlay;
   document.addEventListener('keydown', sessionRenameDialogKeydown, true);
   setTimeout(() => {
@@ -1245,7 +1349,7 @@ function showSessionRenameDialog(session) {
 
 async function renameTmuxSession(session, proposedName) {
   if (readOnlyMode) {
-    statusErr('readonly access cannot rename sessions');
+    statusErr(localizedHtml('status.readOnlyRenameSessions'));
     return false;
   }
   if (!isTmuxSession(session)) return false;
@@ -1263,41 +1367,35 @@ async function renameTmuxSession(session, proposedName) {
   }
   statusEl.textContent = `renaming ${sessionLabel(session)}...`;
   try {
-    const response = await apiFetch(`/api/rename-session?session=${encodeURIComponent(session)}&new_name=${encodeURIComponent(newName)}`, {method: 'POST'});
-    const payload = await response.json();
-    if (!response.ok) {
-      statusErr(`${esc(payload.error || 'session rename failed')}`);
-      return false;
-    }
+    const payload = await apiFetchJson(`/api/rename-session?session=${encodeURIComponent(session)}&new_name=${encodeURIComponent(newName)}`, {method: 'POST'});
     const renamed = payload.new_session || newName;
     replaceTmuxSessionInClient(session, renamed, payload.sessions);
     closeSessionRenameDialog();
     await ensureTerminalRunning(renamed);
-    refreshTranscripts();
+    refreshTranscripts({force: true});
     renderAutoApproveButtons();
     statusOk(`renamed ${esc(session)} to ${esc(renamed)}`);
     return true;
   } catch (error) {
-    statusErr(`session rename failed: ${esc(error)}`);
+    if (error?.status) {
+      statusErr(esc(error.payload?.error || t('status.sessionRenameFailedDefault')));
+      return false;
+    }
+    statusErr(localizedHtml('status.sessionRenameFailed', {error}));
     return false;
   }
 }
 
 async function killTmuxSession(session) {
   if (readOnlyMode) {
-    statusErr('readonly access cannot kill sessions');
+    statusErr(localizedHtml('status.readOnlyKillSessions'));
     return false;
   }
   if (!isTmuxSession(session)) return false;
   if (!window.confirm(`Kill tmux session ${sessionLabel(session)}?`)) return false;
   statusEl.textContent = `killing ${sessionLabel(session)}...`;
   try {
-    const response = await apiFetch(`/api/kill-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
-    const payload = await response.json();
-    if (!response.ok) {
-      statusErr(`${esc(payload.error || 'session kill failed')}`);
-      return false;
-    }
+    const payload = await apiFetchJson(`/api/kill-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
     const previousActive = activeSessions.slice();
     stopSessionUi(session);
     const sessionsChanged = updateSessionList(payload.sessions || []);
@@ -1306,25 +1404,29 @@ async function killTmuxSession(session) {
     renderSessionButtons();
     renderPanels(previousActive);
     if (sessionsChanged) renderPaneTabStrips();
-    refreshTranscripts();
+    refreshTranscripts({force: true});
     renderAutoApproveButtons();
     statusOk(`killed ${esc(sessionLabel(session))}`);
     return true;
   } catch (error) {
-    statusErr(`session kill failed: ${esc(error)}`);
+    if (error?.status) {
+      statusErr(esc(error.payload?.error || t('status.sessionKillFailedDefault')));
+      return false;
+    }
+    statusErr(localizedHtml('status.sessionKillFailed', {error}));
     return false;
   }
 }
 
 function focusPanel(session, options = {}) {
-  const panel = document.getElementById(`panel-${session}`);
+  const panel = document.getElementById(panelDomId(session));
   if (!panel) return;
   if (options.userInitiated === true || options.scrollIntoView === true) {
     panel.scrollIntoView({block: 'nearest', inline: 'nearest'});
   }
   if (isFileEditorItem(session)) {
     focusedTerminal = null;
-    setFocusedPanelItem(session);
+    setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
     if (autoFocusEnabled) {
       requestFileEditorPanelFocus(session);
       focusFileEditorPanelIfReady(panel, session);
@@ -1333,36 +1435,104 @@ function focusPanel(session, options = {}) {
   }
   if (isVirtualItem(session)) {
     focusedTerminal = null;
-    setFocusedPanelItem(session);
-    if (isPreferencesItem(session) && options.userInitiated === true && autoFocusEnabled) {
-      focusFreshPreferencesSearchSoon(panel);
-    }
+    setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
     return;
   }
   activateTab(session, 'terminal', {userInitiated: options.userInitiated === true});
 }
 
-function fitTerminal(session) {
+function shareHostTerminalSize(session) {
+  if (!shareViewMode) return null;
+  const dims = shareHostDimensions.get(String(session || ""));
+  const rawRows = Math.floor(Number(dims?.rows) || 0);
+  const rawCols = Math.floor(Number(dims?.cols) || 0);
+  if (rawRows <= 0 || rawCols <= 0) return null;
+  return {rows: Math.max(10, rawRows), cols: Math.max(40, rawCols)};
+}
+
+function updateShareHostTerminalSize(session, rows, cols) {
+  if (!shareViewMode || !session) return;
+  shareHostDimensions.set(String(session), {
+    rows: Math.max(10, Math.floor(Number(rows) || 0)),
+    cols: Math.max(40, Math.floor(Number(cols) || 0)),
+  });
+  fitTerminal(session);
+}
+
+function terminalFitMetricKey(value, scale = 1000) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.round(number * scale) / scale;
+}
+
+function terminalFitSignature(size) {
+  if (!size) return '';
+  return [
+    Math.round(Number(size.contentWidth) || 0),
+    Math.round(Number(size.contentHeight) || 0),
+    terminalFitMetricKey(size.cellWidth),
+    terminalFitMetricKey(size.cellHeight),
+    size.cols,
+    size.rows,
+    terminalFitMetricKey(terminalFontSize),
+    terminalFontFamily,
+  ].join(':');
+}
+
+function terminalFitIsUnchanged(item, size) {
+  if (!item?.term || !size) return false;
+  return item.lastFitSignature === terminalFitSignature(size)
+    && item.term.cols === size.cols
+    && item.term.rows === size.rows;
+}
+
+function terminalCanPublishRemoteSize() {
+  return !shareViewMode && document.visibilityState !== 'hidden';
+}
+
+function fitTerminal(session, options = {}) {
   const item = terminals.get(session);
   if (!item || !item.term || !item.container) return;
+  const hostSize = shareHostTerminalSize(session);
+  if (shareViewMode) {
+    if (!hostSize) return;
+    const changed = item.term.cols !== hostSize.cols || item.term.rows !== hostSize.rows;
+    item.term.resize(hostSize.cols, hostSize.rows);
+    if (changed && item.shareTerminalBytesReceived === true) {
+      item.shareTerminalSkippedResetCount = Math.max(0, Math.round(Number(item.shareTerminalSkippedResetCount) || 0)) + 1;
+    } else if (changed) {
+      item.shareTerminalLastResetAt = Date.now();
+      try { item.term.reset(); } catch (_) {}
+    }
+    refreshTerminal(session);
+    return;
+  }
   if (!terminalIsVisible(session, item.container)) return;
   const size = estimateTerminalSize(item.container, item.term);
+  const signature = terminalFitSignature(size);
+  if (options.force !== true && terminalFitIsUnchanged(item, size)) return;
+  item.lastFitSignature = signature;
   const changed = item.term.cols !== size.cols || item.term.rows !== size.rows;
-  item.term.resize(size.cols, size.rows);
+  if (changed) item.term.resize(size.cols, size.rows);
   if (changed) scheduleRemoteResize(session);
   refreshTerminal(session);
 }
 
 function sendRemoteResize(session) {
+  if (!terminalCanPublishRemoteSize()) return;
   const item = terminals.get(session);
   if (!item?.term || item?.socket?.readyState !== WebSocket.OPEN) return;
-  item.socket.send(JSON.stringify({type: 'resize', cols: item.term.cols, rows: item.term.rows}));
+  item.socket.send(JSON.stringify({type: 'resize', cols: item.term.cols, rows: item.term.rows, foreground: true}));
 }
 
 function scheduleRemoteResize(session, delay = remoteResizeDelayMs) {
   const item = terminals.get(session);
   if (!item) return;
   if (item.resizeTimer) clearTimeout(item.resizeTimer);
+  if (!terminalCanPublishRemoteSize()) {
+    item.resizeTimer = null;
+    return;
+  }
   item.resizeTimer = setTimeout(() => {
     item.resizeTimer = null;
     sendRemoteResize(session);
@@ -1502,12 +1672,12 @@ function dismissTerminalConnectionToasts(session) {
 function showTerminalConnectionToast(session, text, countdownMs = toastDurationMs) {
   dismissTerminalConnectionToasts(session);
   const node = showToast(
-    `YOLOmux - ${serverHostname}: ${sessionLabel(session)} terminal`,
+    compactNotificationTitle(sessionLabel(session), 'terminal'),
     text,
     {
       container: displayToastContainer(session),
       countdownMs,
-      onClick: () => selectSession(session),
+      onClick: () => selectSession(session, {userInitiated: true}),
     },
   );
   if (node) {
@@ -1519,10 +1689,11 @@ function showTerminalConnectionToast(session, text, countdownMs = toastDurationM
 function scheduleTerminalReconnect(session, item) {
   if (item.manualClose || terminals.get(session) !== item || !activeSessions.includes(session)) return;
   const delay = Math.min(8000, 1000 * 2 ** item.reconnectAttempt);
+  const seconds = Math.round(delay / 1000);
   item.reconnectAttempt += 1;
   if (item.reconnectTimer) clearTimeout(item.reconnectTimer);
-  statusErr(`${esc(sessionLabel(session))} disconnected; reconnecting in ${Math.round(delay / 1000)}s`);
-  showTerminalConnectionToast(session, `Disconnected. Reconnecting in ${Math.round(delay / 1000)}s.`, delay);
+  statusErr(localizedHtml('terminal.connection.reconnectingStatus', {session: sessionLabel(session), seconds}));
+  showTerminalConnectionToast(session, t('terminal.connection.reconnectingToast', {seconds}), delay);
   item.reconnectTimer = setTimeout(() => {
     if (item.manualClose || terminals.get(session) !== item || !activeSessions.includes(session)) return;
     item.reconnectTimer = null;
@@ -1554,7 +1725,7 @@ function pruneDeadSession(session) {
 // prune it from the UI immediately instead of reconnecting and waiting for the next poll to notice.
 async function confirmSessionGoneOrReconnect(session, item) {
   if (item.manualClose || terminals.get(session) !== item) return;
-  // DOIT.6 #86: one in-flight confirmation per terminal. A flapping WS could otherwise run several
+  // one in-flight confirmation per terminal. A flapping WS could otherwise run several
   // concurrent confirmations, each scheduling a reconnect and double-incrementing reconnectAttempt
   // (distorting the backoff).
   if (item.confirmingGone) return;
@@ -1562,8 +1733,7 @@ async function confirmSessionGoneOrReconnect(session, item) {
   try {
     let order = null;
     try {
-      const response = await apiFetch('/api/auto-approve');
-      const payload = await response.json();
+      const payload = await apiFetchJson('/api/auto-approve');
       if (Array.isArray(payload.session_order)) order = payload.session_order;
     } catch (_) {}
     if (item.manualClose || terminals.get(session) !== item) return;
@@ -1586,13 +1756,20 @@ function estimateTerminalSize(container, term = null) {
     return {
       cols: Math.max(40, Math.floor((content.width - 2) / measured.width)),
       rows: Math.max(10, Math.floor((content.height - terminalFitBottomReservePx) / measured.height)),
+      contentWidth: content.width,
+      contentHeight: content.height,
+      cellWidth: measured.width,
+      cellHeight: measured.height,
+      measuredCell: 'renderer',
     };
   }
   const probe = document.createElement('span');
   probe.textContent = 'W';
   probe.style.position = 'absolute';
   probe.style.visibility = 'hidden';
-  probe.style.font = '13px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace';
+  probe.style.fontFamily = terminalProbeFontFamily(container);
+  probe.style.fontSize = `${Math.max(6, Math.round(Number(terminalFontSize) || 13))}px`;
+  probe.style.lineHeight = '1';
   document.body.appendChild(probe);
   const rect = probe.getBoundingClientRect();
   probe.remove();
@@ -1601,7 +1778,19 @@ function estimateTerminalSize(container, term = null) {
   return {
     cols: Math.max(40, Math.floor((content.width - 2) / charWidth)),
     rows: Math.max(10, Math.floor((content.height - terminalFitBottomReservePx) / charHeight)),
+    contentWidth: content.width,
+    contentHeight: content.height,
+    cellWidth: charWidth,
+    cellHeight: charHeight,
+    measuredCell: 'probe',
   };
+}
+
+function terminalProbeFontFamily(container) {
+  const localToken = getComputedStyle(container || document.documentElement)?.getPropertyValue?.('--mono-font')?.trim();
+  if (localToken) return localToken;
+  const rootToken = getComputedStyle(document.documentElement)?.getPropertyValue?.('--mono-font')?.trim();
+  return rootToken || terminalFontFamily;
 }
 
 function terminalContentSize(container) {
@@ -1662,6 +1851,7 @@ function rootBoundaryDropIntentForEvent(event) {
   const targetRect = grid.getBoundingClientRect();
   const zone = rootBoundaryDropZoneForEvent(event, targetRect);
   if (!zone) return null;
+  if (rootBoundaryDropOverDockedFileExplorer(event, zone)) return null;
   return {targetSlot: slotForDropEvent(event), zone, previewNode: grid, targetRect, boundary: 'root'};
 }
 
@@ -1686,10 +1876,10 @@ function dropZoneForRect(event, rect) {
   if (!rect.width || !rect.height) return 'middle';
   const x = (event.clientX - rect.left) / rect.width;
   const y = (event.clientY - rect.top) / rect.height;
-  if (y < 0.24) return rect.height / 2 >= minSplitPaneHeightPx ? 'top' : 'middle';
-  if (y > 0.76) return rect.height / 2 >= minSplitPaneHeightPx ? 'bottom' : 'middle';
-  if (x < 0.24) return rect.width / 2 >= minSplitPaneWidthPx ? 'left' : 'middle';
-  if (x > 0.76) return rect.width / 2 >= minSplitPaneWidthPx ? 'right' : 'middle';
+  if (y < 0.24) return rect.height / 2 >= minSplitPaneHeightPx() ? 'top' : 'middle';
+  if (y > 0.76) return rect.height / 2 >= minSplitPaneHeightPx() ? 'bottom' : 'middle';
+  if (x < 0.24) return rect.width / 2 >= minSplitPaneWidthPx() ? 'left' : 'middle';
+  if (x > 0.76) return rect.width / 2 >= minSplitPaneWidthPx() ? 'right' : 'middle';
   return 'middle';
 }
 
@@ -1713,42 +1903,163 @@ function slotIsFileExplorerPane(slot) {
   return isFileExplorerItem(activeItemForSide(slot));
 }
 
-function slotIsChangesPane(slot) {
-  return isChangesItem(activeItemForSide(slot));
+function dropIntentTargetRect(intent) {
+  if (!intent || typeof intent === 'string') return null;
+  return intent.targetRect || intent.previewNode?.getBoundingClientRect?.() || null;
+}
+
+function minHeightForLayoutItem(_item) {
+  return minSplitPaneHeightPx();
 }
 
 function dropIntentInlineSize(intent) {
   if (!intent || typeof intent === 'string') return 0;
-  const rect = intent.targetRect || intent.previewNode?.getBoundingClientRect?.();
+  const rect = dropIntentTargetRect(intent);
   return Math.max(0, Number(rect?.width) || 0);
+}
+
+function dropItemCanBeDragged(item, options = {}) {
+  if (isLayoutItem(item)) return !isFileExplorerItem(item);
+  return options.allowCandidate === true && isFileEditorItem(item);
+}
+
+function rectCanShowLayoutItem(rect, item) {
+  if (!rect) return true;
+  return (Number(rect.width) || 0) >= minWidthForLayoutItem(item)
+    && (Number(rect.height) || 0) >= minHeightForLayoutItem(item);
+}
+
+function rectCanShowPaneTabs(rect, tabs) {
+  if (!rect) return true;
+  const items = (tabs || []).filter(isLayoutItem);
+  if (!items.length) return false;
+  const minWidth = Math.max(...items.map(minWidthForLayoutItem));
+  const minHeight = Math.max(...items.map(minHeightForLayoutItem));
+  return (Number(rect.width) || 0) >= minWidth
+    && (Number(rect.height) || 0) >= minHeight;
+}
+
+function paneSwapAllowed(sourceSlot, targetSlot, slots = layoutSlots) {
+  if (!sourceSlot || !targetSlot || sourceSlot === targetSlot) return false;
+  const keys = layoutSlotKeys(slots);
+  if (!keys.includes(sourceSlot) || !keys.includes(targetSlot)) return false;
+  if (paneIsPlaceholder(sourceSlot, slots) || paneIsPlaceholder(targetSlot, slots)) return false;
+  if (isFileExplorerItem(activeItemForSide(sourceSlot, slots)) || isFileExplorerItem(activeItemForSide(targetSlot, slots))) return false;
+  const sourceTabs = paneTabs(sourceSlot, slots);
+  const targetTabs = paneTabs(targetSlot, slots);
+  if (!sourceTabs.length || !targetTabs.length) return false;
+  return rectCanShowPaneTabs(layoutSlotScreenRect(targetSlot), sourceTabs)
+    && rectCanShowPaneTabs(layoutSlotScreenRect(sourceSlot), targetTabs);
+}
+
+function paneSwapTargetForEvent(event) {
+  const slotNode = event.target?.closest?.('.drop-slot');
+  if (slotNode?.dataset.slot) return {slot: slotNode.dataset.slot, previewNode: slotNode};
+  const panel = event.target?.closest?.('.panel');
+  if (panel?.dataset.slot) return {slot: panel.dataset.slot, previewNode: panel.closest?.('.drop-slot') || panel};
+  if (typeof dockviewSlotForGroupElement === 'function') {
+    const group = event.target?.closest?.('.dv-groupview');
+    const slot = group ? dockviewSlotForGroupElement(group) : null;
+    if (slot) return {slot, previewNode: group};
+  }
+  return {slot: null, previewNode: null};
+}
+
+function paneSwapIntentForEvent(event, sourceSlot) {
+  const target = paneSwapTargetForEvent(event);
+  if (!target.slot || target.slot === sourceSlot) return null;
+  return {
+    sourceSlot,
+    targetSlot: target.slot,
+    zone: 'middle',
+    swap: true,
+    previewNode: target.previewNode,
+    targetRect: layoutSlotScreenRect(target.slot),
+  };
+}
+
+function paneSwapIntentAllowed(intent) {
+  return Boolean(intent?.swap && paneSwapAllowed(intent.sourceSlot, intent.targetSlot));
+}
+
+function swapPaneSlots(sourceSlot, targetSlot) {
+  if (!paneSwapAllowed(sourceSlot, targetSlot)) return false;
+  const next = cloneLayoutSlots(layoutSlots);
+  const sourceState = paneStateForLayoutSlot(sourceSlot);
+  const targetState = paneStateForLayoutSlot(targetSlot);
+  next[sourceSlot] = targetState;
+  next[targetSlot] = sourceState;
+  applyLayoutSlots(next, {
+    focusSession: activeItemForSide(targetSlot, next) || activeItemForSide(sourceSlot, next),
+    prune: false,
+    forceFull: dockviewLayoutActive(),
+    message: 'panes swapped',
+  });
+  return true;
+}
+
+function dropIntentHasRoomForItem(item, intent) {
+  if (!intent || typeof intent === 'string') return true;
+  if (intent.boundary === 'root' || intent.boundary === 'gutter') return true;
+  const rect = dropIntentTargetRect(intent);
+  if (!rect) return true;
+  const zone = intent.zone || 'middle';
+  if (!layoutSplitZone(zone)) return rectCanShowLayoutItem(rect, item);
+  const targetItem = activeItemForSide(intent.targetSlot);
+  const targetMinWidth = minWidthForLayoutItem(targetItem);
+  const itemMinWidth = minWidthForLayoutItem(item);
+  const targetMinHeight = minHeightForLayoutItem(targetItem);
+  const itemMinHeight = minHeightForLayoutItem(item);
+  if (zone === 'left' || zone === 'right') {
+    return (Number(rect.width) || 0) >= targetMinWidth + itemMinWidth
+      && (Number(rect.height) || 0) >= Math.max(targetMinHeight, itemMinHeight);
+  }
+  return (Number(rect.width) || 0) >= Math.max(targetMinWidth, itemMinWidth)
+    && (Number(rect.height) || 0) >= targetMinHeight + itemMinHeight;
 }
 
 function itemCanSplitSinglePurposePane(item, intent) {
   const zone = typeof intent === 'string' ? intent : intent?.zone;
-  if (zone !== 'top' && zone !== 'bottom') return false;
-  if (isFileExplorerItem(item) || isChangesItem(item)) return false;
-  const inlineSize = dropIntentInlineSize(intent);
-  return !inlineSize || inlineSize >= minWidthForLayoutItem(item);
+  if (zone !== 'bottom') return false;
+  if (isFileExplorerItem(item)) return false;
+  if (!dropIntentTargetRect(intent)) return false;
+  return dropIntentHasRoomForItem(item, intent);
 }
 
-function dropIntentAllowsSession(session, intent) {
-  if (!isLayoutItem(session)) return false;
+function dropIntentAllowsSession(session, intent, options = {}) {
+  if (!dropItemCanBeDragged(session, options)) return false;
   if ((intent?.boundary === 'root' || intent?.boundary === 'gutter') && layoutSplitZone(intent.zone)) return true;
   if (!intent?.targetSlot) return false;
-  if (slotIsFileExplorerPane(intent.targetSlot) || slotIsChangesPane(intent.targetSlot)) {
+  if (slotIsFileExplorerPane(intent.targetSlot)) {
     return itemCanSplitSinglePurposePane(session, intent);
   }
-  return true;
+  return dropIntentHasRoomForItem(session, intent);
+}
+
+function fileDragLayoutItem(payload) {
+  const path = payload?.path || payload?.paths?.find?.(Boolean) || '';
+  if (!path || payload?.kind === 'dir') return null;
+  return fileEditorItemFor(path);
+}
+
+function fileDropIntentAllowsPayload(payload, intent) {
+  const item = fileDragLayoutItem(payload);
+  return Boolean(item && dropIntentAllowsSession(item, intent, {allowCandidate: true}));
+}
+
+function pathDropIntentAllowsPayload(payload, intent) {
+  const path = payload?.path || payload?.paths?.find?.(Boolean) || '';
+  const item = path ? fileEditorItemFor(path) : null;
+  return Boolean(item && dropIntentAllowsSession(item, intent, {allowCandidate: true}));
 }
 
 function clearDropPreview() {
-  const classes = ['drag-over', 'tab-drag-over', 'tab-drop-preview', 'drop-preview', 'drop-preview-top', 'drop-preview-bottom', 'drop-preview-left', 'drop-preview-right', 'drop-preview-middle', 'drop-preview-root', 'drop-preview-gutter'];
   const nodes = new Set([grid]);
-  for (const className of classes) {
+  for (const className of DROP_PREVIEW_CLASSES) {
     grid.querySelectorAll(`.${className}`).forEach(node => nodes.add(node));
   }
   nodes.forEach(node => {
-    node.classList.remove(...classes);
+    node.classList.remove(...DROP_PREVIEW_CLASSES);
     node.style?.removeProperty('--tab-drop-x');
     node.style?.removeProperty('--tab-drop-y');
     node.style?.removeProperty('--tab-drop-height');
@@ -1786,7 +2097,7 @@ function applyGutterDropPreviewGeometry(node, intent) {
 
 function layoutNodeScreenRect(layoutNode) {
   const rects = layoutLeafSlots(layoutNode)
-    .map(slot => layoutColumnNode(slot)?.getBoundingClientRect?.())
+    .map(slot => layoutSlotScreenRect(slot))
     .filter(rect => rect && rect.width > 0 && rect.height > 0);
   if (!rects.length) return null;
   const left = Math.min(...rects.map(rect => rect.left));
@@ -1794,6 +2105,42 @@ function layoutNodeScreenRect(layoutNode) {
   const right = Math.max(...rects.map(rect => rect.right));
   const bottom = Math.max(...rects.map(rect => rect.bottom));
   return {left, top, right, bottom, width: right - left, height: bottom - top};
+}
+
+function layoutSlotScreenRect(slot) {
+  const column = layoutColumnNode(slot);
+  const columnRect = column?.getBoundingClientRect?.();
+  if (columnRect?.width > 0 && columnRect?.height > 0) return columnRect;
+  const panel = grid?.querySelector(`.dockview-panel-content > .panel[data-slot="${cssEscape(slot)}"]`);
+  const panelGroup = panel?.closest?.('.dv-groupview');
+  const panelGroupRect = panelGroup?.getBoundingClientRect?.();
+  if (panelGroupRect?.width > 0 && panelGroupRect?.height > 0) return panelGroupRect;
+  const item = activeItemForSide(slot) || paneTabs(slot)[0] || '';
+  const tabGroup = item
+    ? grid?.querySelector(`.dockview-pane-tab[data-pane-tab="${cssEscape(item)}"]`)?.closest?.('.dv-groupview')
+    : null;
+  const tabGroupRect = tabGroup?.getBoundingClientRect?.();
+  return tabGroupRect?.width > 0 && tabGroupRect?.height > 0 ? tabGroupRect : null;
+}
+
+function dockedFileExplorerScreenRect(slots = layoutSlots) {
+  const root = slots?.[layoutTreeKey];
+  const docked = dockedFileExplorerRootSplit(root, slots);
+  if (!docked) return null;
+  return layoutNodeScreenRect(root?.children?.[docked.finderIndex]);
+}
+
+function eventInsideRect(event, rect) {
+  return Boolean(
+    event && rect
+    && event.clientX >= rect.left && event.clientX <= rect.right
+    && event.clientY >= rect.top && event.clientY <= rect.bottom
+  );
+}
+
+function rootBoundaryDropOverDockedFileExplorer(event, zone, slots = layoutSlots) {
+  if (!layoutSplitZone(zone)) return false;
+  return eventInsideRect(event, dockedFileExplorerScreenRect(slots));
 }
 
 function applyDockedFileExplorerBoundaryPreviewGeometry(node, intent) {
@@ -1814,9 +2161,11 @@ function showDropPreview(intent) {
   const node = intent?.boundary ? grid : intent?.previewNode;
   if (!node) return;
   const zone = intent.zone || 'middle';
-  node.classList.add('drag-over', 'drop-preview', `drop-preview-${zone}`);
+  node.classList.add(CLS.dragOver, CLS.dropPreview, `drop-preview-${zone}`);
   if (intent.boundary) node.classList.add(`drop-preview-${intent.boundary}`);
-  node.dataset.dropLabel = intent.boundary === 'root'
+  node.dataset.dropLabel = intent.swap === true
+    ? 'swap'
+    : intent.boundary === 'root'
     ? `full ${zone}`
     : intent.boundary === 'gutter'
       ? 'full span'
@@ -1828,16 +2177,23 @@ function showDropPreview(intent) {
 }
 
 function dropSessionAtEvent(event) {
+  const panePayload = paneDragPayload(event);
+  if (panePayload?.slot) {
+    event.preventDefault();
+    event.stopPropagation();
+    const intent = paneSwapIntentForEvent(event, panePayload.slot);
+    clearDropPreview();
+    if (paneSwapIntentAllowed(intent)) swapPaneSlots(intent.sourceSlot, intent.targetSlot);
+    return;
+  }
   const filePayload = fileDragPayload(event);
   if (filePayload?.path) {
     event.preventDefault();
     event.stopPropagation();
     const intent = dropIntentForEvent(event, {allowBoundary: false});
     clearDropPreview();
-    if (!intent?.targetSlot) return;
-    if ((slotIsFileExplorerPane(intent.targetSlot) || slotIsChangesPane(intent.targetSlot)) && intent.zone === 'middle') return;
-    const zone = slotIsFileExplorerPane(intent.targetSlot) && intent.zone === 'middle' ? 'right' : intent.zone;
-    openDraggedFilesInEditor(filePayload, {targetSlot: intent.targetSlot, targetZone: zone});
+    if (!intent?.targetSlot || !fileDropIntentAllowsPayload(filePayload, intent)) return;
+    openDraggedFilesInEditor(filePayload, {targetSlot: intent.targetSlot, targetZone: intent.zone});
     return;
   }
   const payload = dragPayload(event);
@@ -1857,10 +2213,24 @@ function dropSessionAtEvent(event) {
 }
 
 function handleDropDragOver(event) {
+  const panePayload = paneDragPayload(event);
+  if (panePayload?.slot) {
+    const intent = paneSwapIntentForEvent(event, panePayload.slot);
+    event.preventDefault();
+    event.stopPropagation();
+    if (!paneSwapIntentAllowed(intent)) {
+      event.dataTransfer.dropEffect = 'none';
+      clearDropPreview();
+      return;
+    }
+    event.dataTransfer.dropEffect = 'move';
+    showDropPreview(intent);
+    return;
+  }
   const filePayload = fileDragPayload(event);
   if (filePayload?.path) {
     const intent = dropIntentForEvent(event, {allowBoundary: false});
-    if ((slotIsFileExplorerPane(intent.targetSlot) || slotIsChangesPane(intent.targetSlot)) && intent.zone === 'middle') {
+    if (!fileDropIntentAllowsPayload(filePayload, intent)) {
       event.preventDefault();
       event.stopPropagation();
       event.dataTransfer.dropEffect = 'none';

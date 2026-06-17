@@ -1,9 +1,10 @@
-.preferences-panel {
+.preferences-panel,
+.js-debug-panel {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
 }
 .preferences-body {
-  /* DOIT.16 C3: the inactive-pane dim is a full-bleed .panel-overlay-root::after (inset 0). If the
+  /* the inactive-pane dim is a full-bleed .panel-overlay-root::after (inset 0). If the
      overlay-root is ALSO the scroll container, the dim scrolls away with the content and only covers
      the top viewport. So the overlay-root must be a stable, non-scrolling pane-filling layer; the
      scrolling lives on the inner .preferences-scroll. */
@@ -14,56 +15,115 @@
   background: var(--bg);
 }
 .preferences-scroll {
+  /* Preferences scrollbars must always inherit a shared pane scrollbar rule from layout CSS; never
+     customize scrollbar colors or hover behavior here. */
   flex: 1;
   min-height: 0;
   overflow: auto;
   padding: 10px;
 }
-.changes-panel {
+.js-debug-scroll {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
-}
-.info-head {
-  display: flex;
-  align-items: center;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 8px;
+}
+.js-debug-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+.js-debug-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+.js-debug-stat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+  padding: 4px 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+}
+.js-debug-stat span {
+  color: var(--muted);
+  font: 600 var(--ui-font-size-xs)/1 var(--ui-font);
+}
+.js-debug-stat strong {
+  color: var(--text);
+  font: 700 var(--ui-font-size-xs)/1 var(--mono-font);
+}
+.js-debug-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.js-debug-log {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  resize: none;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--panel);
+  font: 11px/1.35 var(--mono-font);
+  white-space: pre;
 }
 .info-refresh {
   margin-inline-start: auto;
   height: 22px;
+  justify-content: center;
+  gap: 5px;
   padding: 0 8px;
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   background: var(--panel2);
   color: var(--text);
   font-size: var(--ui-font-size-xs);
-  cursor: pointer;
+  line-height: 1;
+  white-space: nowrap;
 }
 .info-refresh:hover,
 .info-refresh:focus-visible {
-  border-color: var(--brand-green);
+  border-color: var(--active-control-border);
   color: #f2ffe8;
 }
-.changes-body {
-  --changes-row-hover-bg: rgba(118, 185, 0, 0.10);
+.info-refresh.loading {
+  cursor: wait;
+  opacity: 0.86;
+}
+.info-refresh.loading::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  border: 2px solid color-mix(in srgb, currentColor 32%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: metadata-refresh-spin 0.9s linear infinite;
+}
+#refreshMeta.loading::before {
+  animation: metadata-refresh-spin 0.9s linear infinite;
+}
+@keyframes metadata-refresh-spin {
+  to { transform: rotate(360deg); }
+}
+.file-explorer-changes-panel {
+  --changes-row-hover-bg: var(--active-control-soft-bg);
   --changes-folder-bg: color-mix(in srgb, var(--panel2) 76%, transparent);
-  --changes-indent-line: rgba(148, 163, 184, 0.18);
-  --changes-folder-text: var(--text);
+  --changes-indent-line: rgba(148, 163, 184, 0.50);
+  --changes-repo-head-bg: color-mix(in srgb, var(--panel2) 88%, var(--text) 12%);
+  --changes-folder-text: var(--accent-gold);
   --changes-path-text: var(--muted);
   --changes-icon-text: #a7c7ff;
-  /* DOIT.16 C3: overlay-root must not be the scroll container (see .preferences-body) — scrolling
-     moves to the inner .changes-scroll so the inactive-pane dim covers the full pane at any scroll. */
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  background: var(--bg);
-}
-.changes-scroll {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-  padding: 10px;
 }
 .changes-toolbar {
   display: flex;
@@ -79,6 +139,11 @@
   font-family: var(--ui-font);
   font-size: var(--ui-font-size-sm);
 }
+.file-explorer-changes-panel:hover > .changes-toolbar,
+.file-explorer-changes-panel:focus-within > .changes-toolbar {
+  background: var(--pane-tab-strip-bg);
+  color: var(--text);
+}
 .changes-control {
   display: inline-flex;
   align-items: center;
@@ -86,11 +151,11 @@
 }
 .changes-control select,
 .changes-refresh,
-.diff-ref-control input,
-.diff-ref-select {
+.diff-ref-input,
+.diff-ref-control input {
   height: 24px;
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   background: var(--panel2);
   color: var(--text);
   font: inherit;
@@ -110,38 +175,122 @@
   font-size: var(--ui-font-size-2xs);
   font-weight: 800;
 }
+.diff-ref-input,
 .diff-ref-control input {
   width: clamp(64px, 10vw, 130px);
   padding: 0 5px;
   font-size: var(--ui-font-size-xs);
 }
-.diff-ref-select {
-  width: clamp(92px, 16vw, 220px);
-  min-width: 0;
-  padding: 0 5px;
-  font: var(--ui-font-size-xs) var(--mono-font);
-}
 .diff-ref-controls.compact {
   gap: 3px;
 }
+.diff-ref-controls.compact .diff-ref-input,
 .diff-ref-controls.compact .diff-ref-control input {
   width: clamp(46px, 7vw, 82px);
   height: 20px;
 }
-.diff-ref-controls.compact .diff-ref-select {
-  width: clamp(54px, 10vw, 110px);
+.diff-ref-reset {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  min-width: 46px;
+  height: 24px;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--panel2);
+  color: var(--muted);
+  font-size: var(--ui-font-size-xs);
+  cursor: pointer;
+}
+.diff-ref-reset:hover {
+  background: var(--active-control-soft-bg);
+  color: var(--text);
+}
+.diff-ref-controls.compact .diff-ref-reset {
   height: 20px;
+  min-width: 44px;
+  padding: 0 6px;
+}
+.diff-ref-suggestion-popover {
+  position: fixed;
+  z-index: var(--z-ref-suggestion);
+  min-width: min(520px, 90vw);
+  max-height: min(320px, 42vh);
+  overflow: auto;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel2);
+  color: var(--text);
+  box-shadow: var(--shadow-elevated);
+  font-family: var(--ui-font);
+}
+.diff-ref-suggestion-popover[hidden] {
+  display: none;
+}
+.diff-ref-suggestion-popover.compact {
+  max-height: min(230px, 34vh);
+}
+.diff-ref-suggestion-option {
+  width: 100%;
+  min-width: 0;
+  height: 24px;
+  display: grid;
+  grid-template-columns: minmax(7ch, 9ch) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+.diff-ref-suggestion-popover.compact .diff-ref-suggestion-option {
+  height: 22px;
+}
+.diff-ref-suggestion-option:hover,
+.diff-ref-suggestion-option.active {
+  background: var(--active-control-soft-bg);
+}
+.diff-ref-suggestion-option:hover .diff-ref-suggestion-subject,
+.diff-ref-suggestion-option.active .diff-ref-suggestion-subject,
+.diff-ref-suggestion-option:hover .diff-ref-suggestion-meta,
+.diff-ref-suggestion-option.active .diff-ref-suggestion-meta {
+  color: var(--text);
+  opacity: 0.95;
+}
+.diff-ref-suggestion-ref {
+  min-width: 0;
+  font: 800 var(--ui-font-size-xs)/1 var(--mono-font);
+  color: var(--text);
+}
+.diff-ref-suggestion-subject {
+  min-width: 0;
+  font: 600 var(--ui-font-size-xs)/1 var(--ui-font);
+  color: var(--muted);
+}
+.diff-ref-suggestion-meta {
+  min-width: 0;
+  font: 500 var(--ui-font-size-2xs)/1 var(--mono-font);
+  color: var(--muted);
+  opacity: 0.7;
+  justify-self: end;
+}
+.diff-ref-suggestion-empty {
+  padding: 5px 7px;
+  color: var(--muted);
+  font: 600 var(--ui-font-size-xs)/1.2 var(--ui-font);
 }
 .changes-refresh {
   padding: 0 8px;
   cursor: pointer;
 }
-.changes-summary {
-  margin-inline-start: auto;
-  color: var(--muted);
-}
-.changes-summary-separator {
-  color: var(--muted);
+.changes-toolbar .changes-date-toggle {
+  height: 24px;
 }
 .changes-comparison-head {
   display: flex;
@@ -160,15 +309,39 @@
 }
 .changes-comparison-title {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   font-weight: 700;
 }
 .changes-comparison-summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
   color: var(--muted);
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-xs);
+}
+.changes-summary-label {
+  min-width: 0;
+}
+.changes-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+.changes-loading-yolo {
+  min-width: 17px;
+  height: 17px;
+  font-size: var(--ui-font-size-2xs);
+}
+.changes-summary-totals {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-inline-start: auto;
+  white-space: nowrap;
 }
 .changes-error,
 .changes-empty {
@@ -184,31 +357,28 @@
 }
 .changes-repo-group {
   margin-bottom: 10px;
+  min-inline-size: 0;
   border: 1px solid var(--line);
   border-radius: 6px;
   overflow: hidden;
   background: var(--panel);
 }
 .changes-repo-head {
-  /* DOIT.23: now a collapse toggle (button), mirroring .changes-uploaded-toggle. */
   width: 100%;
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
   padding: 6px 8px;
-  background: var(--panel2);
+  background: var(--changes-repo-head-bg);
   color: var(--text);
-  border: 0;
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
   text-align: start;
-  cursor: pointer;
 }
 .changes-repo-head:hover,
 .changes-repo-head:focus-visible {
-  color: var(--brand-green);
+  color: var(--active-control-bg);
   outline: none;
 }
 .changes-repo-caret {
@@ -217,10 +387,20 @@
   width: 12px;
 }
 .changes-repo-title {
+  flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  color: var(--accent-gold);
+  font-weight: 800;
+}
+.changes-repo-totals {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-inline-start: auto;
   white-space: nowrap;
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-xs);
 }
 .changes-repo-compare-meta {
   display: inline-flex;
@@ -253,196 +433,21 @@
   font-weight: 600;
 }
 .changes-repo-refs .diff-ref-controls {
-  margin-inline-start: auto;
-}
-.changes-uploaded-toggle {
-  width: 100%;
-  border: 0;
-  cursor: pointer;
-  text-align: start;
-}
-.changes-uploaded-toggle:hover,
-.changes-uploaded-toggle:focus-visible {
-  color: var(--brand-green);
-}
-.changes-uploaded-caret {
-  display: inline-block;
-  width: 12px;
+  margin-inline-start: 0;
 }
 .changes-file-list {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  inline-size: 100%;
+  min-inline-size: 0;
 }
 .changes-tree {
   padding: 2px 0;
 }
-.changes-tree-folder {
-  position: relative;
-}
-.changes-tree-folder::before {
-  content: "";
-  position: absolute;
-  top: 22px;
-  bottom: 0;
-  left: calc(10px + (var(--changes-tree-depth, 0) * 16px));
-  border-inline-start: 1px solid var(--changes-indent-line);
-  pointer-events: none;
-}
-.changes-tree-folder.collapsed::before {
-  display: none;
-}
-.changes-tree-folder-row {
-  display: grid;
-  grid-template-columns: 12px 16px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 5px;
-  width: 100%;
-  padding: 3px 7px 3px calc(7px + (var(--changes-tree-depth, 0) * 16px));
-  border: 0;
-  border-top: 1px solid var(--changes-indent-line);
-  background: var(--changes-folder-bg);
-  color: var(--changes-folder-text);
-  font: 700 var(--ui-font-size-sm)/1.15 var(--ui-font);
-  text-align: start;
-  cursor: pointer;
-}
-.changes-tree-folder-row:hover,
-.changes-tree-folder-row:focus-visible {
-  background: var(--changes-row-hover-bg);
-}
-.changes-tree-caret,
-.changes-tree-folder-icon,
-.changes-tree-folder-count {
+.changes-tree-caret {
   color: var(--muted);
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-2xs);
-}
-.changes-tree-folder-name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.changes-file-row {
-  display: grid;
-  grid-template-columns: 16px 18px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 7px;
-  width: 100%;
-  padding: 4px 7px 4px calc(7px + (var(--changes-tree-depth, 0) * 16px));
-  border: 0;
-  border-top: 1px solid rgba(148, 163, 184, 0.18);
-  background: transparent;
-  color: var(--text);
-  text-align: start;
-  font-family: var(--ui-font);
-  /* DOIT.6 #46: Modified-files rows read like the Finder file tree (same font size + line-height). */
-  font-size: var(--file-explorer-font-size);
-  line-height: 1.4;
-  cursor: pointer;
-}
-.changes-file-row.compact {
-  grid-template-columns: 14px 16px minmax(0, 1fr) auto;
-  gap: 5px;
-  padding: 2px 4px 2px calc(4px + (var(--changes-tree-depth, 0) * 14px));
-  line-height: 1.05;
-}
-.changes-file-row.compact .changes-file-meta {
-  grid-column: 4;
-}
-.changes-file-row.compact .changes-file-path {
-  display: none;
-}
-.changes-file-row:hover {
-  background: var(--changes-row-hover-bg);
-}
-/* C5: Finder-like single-click selection highlight — the hover tint plus a gold left bar (the same
-   --accent-gold marker the file tree uses for the current row). Both tokens flip with the theme. */
-.changes-file-row.selected {
-  background: var(--changes-row-hover-bg);
-  box-shadow: inset 3px 0 0 var(--accent-gold);
-}
-.changes-file-row:disabled {
-  cursor: default;
-  opacity: 0.65;
-}
-.changes-status {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 13px;
-  height: 18px;
-  border-radius: 3px;
-  color: #061207;
-  font-family: var(--mono-font);
-  font-size: var(--ui-font-size-xs);
-  font-stretch: condensed;
-  font-weight: 700;
-  letter-spacing: 0;
-}
-.changes-status-a {
-  background: #76b900;
-}
-.changes-status-m {
-  /* Clarity (image 046): use the BRIGHT amber as a fixed badge fill (like the other vibrant status
-     badges) so the near-black "M" pops. The theme-aware --accent-gold flips to a dark brown (#b7791f)
-     in light mode → near-black-on-dark = muddy/illegible. */
-  background: #f5c542;
-}
-.changes-status-d {
-  background: #ff5d5d;
-}
-.changes-status-r,
-.changes-status-c {
-  background: #38bdf8;
-}
-.changes-status-u,
-.changes-status-unknown {
-  /* Untracked/unknown = teal (a vibrant "new content" color). Purple is RESERVED for MERGED PR status
-     (pr-status-merged) across the app, so this badge must not be purple — it used to be violet, which
-     read as a merged indicator next to the PR badges. */
-  background: #2dd4bf;
-}
-.changes-file-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  color: var(--changes-icon-text);
-  font-size: var(--ui-font-size-sm);
-  line-height: 1;
-}
-.changes-file-main {
-  min-width: 0;
-  display: grid;
-  gap: 2px;
-}
-.changes-file-title {
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-.changes-file-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  /* DOIT.6 #46: match the Finder file tree — regular weight + the file-explorer font size (inherited
-     from the row), not a larger semibold bright filename. */
-}
-.changes-file-path,
-.changes-file-meta {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--changes-path-text);
-  font-family: var(--mono-font);
-  font-size: var(--ui-font-size-2xs);
-}
-.changes-file-meta {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 6px;
 }
 .changes-file-agent {
   display: inline-flex;
@@ -463,12 +468,6 @@
   width: 14px;
   height: 14px;
 }
-.changes-file-date {
-  font-family: var(--mono-font);
-  font-size: var(--ui-font-size-3xs);
-  font-stretch: condensed;
-  letter-spacing: 0;
-}
 .changes-meta-separator {
   color: rgba(174, 184, 199, 0.62);
 }
@@ -476,8 +475,12 @@
   color: #78dd6f;
   font-weight: 800;
 }
+.changes-diff-add-neutral {
+  color: var(--muted);
+  font-weight: 800;
+}
 .changes-diff-remove {
-  color: #ff6673;
+  color: var(--bad);
   font-weight: 800;
 }
 .changes-count-badge {
@@ -497,9 +500,6 @@
   font-size: var(--ui-font-size-xs);
 }
 .preferences-path-value {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   color: var(--text);
 }
 .preferences-readonly {
@@ -540,8 +540,8 @@
   border: 0;
   border-bottom: 1px solid var(--line);
   border-radius: 6px 6px 0 0;
-  color: var(--text);
-  background: transparent;
+  color: var(--pane-tab-text);
+  background: var(--pane-bar-bg, var(--panel2));
   font: 700 var(--ui-font-size)/1.2 var(--ui-font);
   text-align: start;
   cursor: pointer;
@@ -567,7 +567,8 @@
   text-overflow: ellipsis;
 }
 .preferences-section-count {
-  color: var(--muted);
+  color: currentColor;
+  opacity: 0.72;
   font-size: var(--ui-font-size-xs);
 }
 .preferences-settings {
@@ -592,7 +593,15 @@
   display: flex;
   flex-wrap: wrap;
   gap: 6px 16px;
-  justify-content: end;
+  justify-content: start;
+  padding-inline-start: var(--preferences-control-left-indent);
+}
+.preferences-radio-group.has-swatches {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+  align-items: center;
+  column-gap: 16px;
+  row-gap: 6px;
 }
 .preferences-radio {
   display: inline-flex;
@@ -601,9 +610,51 @@
   cursor: pointer;
   color: var(--text);
 }
+.preferences-radio.has-swatches {
+  display: inline-grid;
+  grid-template-columns: 18px 34px minmax(0, 1fr);
+  align-items: center;
+  column-gap: 6px;
+  min-width: 0;
+}
+.preferences-radio.has-swatches input[type="radio"] {
+  justify-self: center;
+}
+.preferences-radio-swatches {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  width: 34px;
+}
+.preferences-radio-swatches.joined {
+  gap: 0;
+}
+.preferences-radio-swatch {
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  background: var(--preferences-radio-swatch);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.28);
+}
+.preferences-radio-swatches.joined .preferences-radio-swatch {
+  border-radius: 0;
+}
+.preferences-radio-swatches.joined .preferences-radio-swatch + .preferences-radio-swatch {
+  margin-inline-start: -1px;
+}
+.preferences-radio-swatches.joined .preferences-radio-swatch:first-child {
+  border-start-start-radius: 2px;
+  border-end-start-radius: 2px;
+}
+.preferences-radio-swatches.joined .preferences-radio-swatch:last-child {
+  border-start-end-radius: 2px;
+  border-end-end-radius: 2px;
+}
 .preferences-radio input[type="radio"] {
   cursor: pointer;
-  accent-color: var(--brand-green);
+  accent-color: var(--active-control-bg);
 }
 .preferences-radio input[type="radio"]:disabled,
 .preferences-radio:has(input:disabled) {
@@ -616,6 +667,13 @@
 .preferences-setting-row--wide {
   grid-template-columns: minmax(0, 1fr);
 }
+.preferences-setting-note {
+  grid-template-columns: minmax(0, 1fr);
+  padding-block: 6px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--panel2) 78%, transparent);
+  font: 600 var(--ui-font-size-xs)/1.35 var(--ui-font);
+}
 .preferences-setting-advisory {
   grid-column: 1 / -1;
   display: flex;
@@ -626,12 +684,12 @@
   color: #2a1e00;
   background: #ffe7a3;
   border: 1px solid #c8941e;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   font: var(--ui-font-size-xs)/1.3 var(--ui-font);
 }
 .preferences-setting-advisory code {
   padding: 2px 4px;
-  color: #111827;
+  color: var(--lt-text);
   background: rgba(255, 255, 255, 0.45);
   border: 1px solid rgba(42, 30, 0, 0.2);
   border-radius: 3px;
@@ -669,8 +727,8 @@
   outline: none;
 }
 .preferences-search:focus {
-  border-color: var(--brand-green);
-  box-shadow: 0 0 0 2px rgba(118, 185, 0, 0.14);
+  border-color: var(--active-control-border);
+  box-shadow: 0 0 0 2px var(--active-control-focus-ring);
 }
 .preferences-search-button,
 .preferences-reset-all {
@@ -682,16 +740,16 @@
   font: 700 var(--ui-font-size-xs)/1 var(--control-font);
 }
 .preferences-search-button {
-  color: #061400;
-  background: var(--brand-green);
-  border-color: #a8e95a;
-  box-shadow: 0 0 0 1px rgba(118, 185, 0, 0.18);
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
+  box-shadow: 0 0 0 1px var(--active-control-focus-ring);
   font: 700 var(--ui-font-size-sm)/1.1 var(--ui-font);
 }
 .preferences-search-button:hover,
 .preferences-search-button:focus-visible {
-  background: #8bd41f;
-  border-color: #c3ff74;
+  background: color-mix(in srgb, var(--active-control-bg) 84%, #ffffff 16%);
+  border-color: var(--active-control-border);
 }
 .preferences-global-reset {
   display: grid;
@@ -700,9 +758,9 @@
   gap: 12px;
   margin-top: 12px;
   padding: 10px;
-  color: #ffe7b7;
-  background: rgba(100, 45, 0, 0.28);
-  border: 1px solid rgba(255, 177, 66, 0.72);
+  color: #ffd7d7;
+  background: rgba(95, 18, 18, 0.26);
+  border: 1px solid rgba(255, 120, 120, 0.72);
   border-radius: 6px;
 }
 .preferences-global-reset.confirming {
@@ -711,24 +769,24 @@
   box-shadow: 0 0 0 2px rgba(255, 142, 90, 0.12);
 }
 .preferences-global-reset-title {
-  color: #ffd36b;
-  font: 800 var(--ui-font-size-sm)/1.2 var(--ui-font);
-  letter-spacing: 0.02em;
+  color: #ff9b9b;
+  font: 700 var(--ui-font-size-sm)/1.2 var(--ui-font);
 }
 .preferences-global-reset-warning {
   margin-top: 3px;
-  color: #ffe9c8;
+  color: #ffdede;
   font: 600 var(--ui-font-size-xs)/1.28 var(--ui-font);
 }
 .preferences-global-reset .preferences-reset-all {
-  color: #240700;
-  background: #ffb142;
-  border-color: #ffd08a;
+  color: #ffffff;
+  background: #d92d20;
+  border-color: #ff8a80;
+  font: 600 var(--ui-font-size-sm)/1.1 var(--ui-font);
 }
 .preferences-global-reset .preferences-reset-all:hover,
 .preferences-global-reset .preferences-reset-all:focus-visible {
-  background: #ffc46d;
-  border-color: #ffe0b2;
+  background: #b42318;
+  border-color: #ffb4ad;
 }
 .preferences-reset-confirm {
   display: inline-flex;
@@ -756,14 +814,10 @@
 }
 
 .command-palette {
-  position: fixed;
-  inset: 0;
-  z-index: 260;
-  display: grid;
+  z-index: var(--z-ref-suggestion);
   align-items: start;
   justify-items: center;
   padding: min(12vh, 96px) var(--popover-edge-gap) var(--popover-edge-gap);
-  background: rgba(0, 0, 0, 0.42);
 }
 .command-palette[hidden] {
   display: none;
@@ -772,11 +826,11 @@
   width: min(760px, var(--popover-max-inline-size));
   max-height: min(70vh, 760px);
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   overflow: hidden;
   color: var(--text);
   background: #111820;
-  border: 1px solid #708093;
+  border: var(--app-modal-border-width) solid var(--app-modal-border-color);
   border-radius: 8px;
   box-shadow:
     0 -4px 14px rgba(0, 0, 0, 0.34),
@@ -793,6 +847,28 @@
   outline: none;
   font: var(--ui-font-size-lg)/1.2 var(--ui-font);
 }
+.command-palette-status {
+  padding: 4px 10px 5px;
+  color: var(--muted);
+  background: rgb(var(--overlay-slate-rgb) / 0.28);
+  border-bottom: 1px solid var(--line);
+  font: 700 var(--ui-font-size-2xs)/1 var(--mono-font);
+}
+.command-palette-status::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-inline-end: 7px;
+  border-radius: 999px;
+  background: var(--accent-gold);
+  animation: command-palette-thinking 900ms ease-in-out infinite alternate;
+  vertical-align: 1px;
+}
+@keyframes command-palette-thinking {
+  from { opacity: 0.35; }
+  to { opacity: 1; }
+}
 .command-palette-results {
   min-height: 0;
   overflow: auto;
@@ -806,7 +882,7 @@
   gap: 8px;
   align-items: center;
   padding: 5px 7px;
-  color: #dfe6ef;
+  color: var(--pane-tab-text);
   background: transparent;
   border: 1px solid transparent;
   border-radius: 5px;
@@ -816,7 +892,7 @@
 }
 .command-palette-row.active,
 .command-palette-row:hover {
-  color: #f4ffe8;
+  color: var(--pane-tab-panel-head-text);
   background: #273140;
   border-color: var(--accent-gold);
 }
@@ -845,14 +921,11 @@
 .command-palette-label,
 .command-palette-detail {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .command-palette-label {
   font-weight: 700;
 }
-/* DOIT.22: view-mode chips on a deduped file row (one row for a file open as editor + preview). */
+/* view-mode chips on a deduped file row (one row for a file open as editor + preview). */
 .command-palette-views {
   flex: 0 0 auto;
   display: inline-flex;
@@ -861,22 +934,22 @@
 }
 .command-palette-view-chip {
   padding: 0 5px;
-  border: 1px solid rgba(158, 232, 93, 0.34);
-  border-radius: 999px;
-  color: #bddcaf;
-  background: rgba(118, 185, 0, 0.12);
+  border: 1px solid var(--active-control-soft-border);
+  border-radius: var(--radius-pill);
+  color: var(--text);
+  background: var(--active-control-soft-bg);
   font: 700 var(--ui-font-size-3xs)/1.5 var(--mono-font);
   text-transform: lowercase;
-  cursor: pointer;   /* DOIT.22 follow-up: chips are clickable — jump to that view */
+  cursor: pointer;   /* follow-up: chips are clickable — jump to that view */
 }
 .command-palette-view-chip:hover {
-  border-color: var(--brand-green);
+  border-color: var(--active-control-border);
   color: var(--text);
 }
 body.theme-light .command-palette-view-chip {
-  border-color: rgba(95, 150, 42, 0.4);
-  color: #3f6312;
-  background: rgba(118, 185, 0, 0.14);
+  border-color: var(--active-control-soft-border);
+  color: var(--text);
+  background: var(--active-control-soft-bg);
 }
 .command-palette-label .fuzzy-match,
 .command-palette-detail .fuzzy-match {
@@ -887,7 +960,7 @@ body.theme-light .command-palette-view-chip {
   box-decoration-break: clone;
 }
 .command-palette-detail {
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
   font: var(--ui-font-size-xs)/1.2 var(--mono-font);
 }
 .command-palette-keybinding {
@@ -902,14 +975,10 @@ body.theme-light .command-palette-view-chip {
   text-align: center;
 }
 .keyboard-shortcuts-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 270;
-  display: grid;
+  z-index: var(--z-file-conflict-dialog);
   align-items: start;
   justify-items: center;
   padding: min(10vh, 82px) var(--popover-edge-gap) var(--popover-edge-gap);
-  background: rgba(0, 0, 0, 0.46);
 }
 .keyboard-shortcuts-overlay[hidden] {
   display: none;
@@ -922,9 +991,9 @@ body.theme-light .command-palette-view-chip {
   overflow: hidden;
   color: var(--text);
   background: #111820;
-  border: 1px solid #708093;
+  border: var(--app-modal-border-width) solid var(--app-modal-border-color);
   border-radius: 8px;
-  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.62);
+  box-shadow: 0 24px 70px rgb(var(--shadow-rgb) / 0.62);
 }
 .keyboard-shortcuts-head {
   display: flex;
@@ -945,7 +1014,7 @@ body.theme-light .command-palette-view-chip {
   color: var(--text);
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   cursor: pointer;
 }
 .keyboard-shortcuts-close:hover,
@@ -963,7 +1032,7 @@ body.theme-light .command-palette-view-chip {
 }
 .keyboard-shortcuts-section h3 {
   margin: 0 0 6px;
-  color: var(--brand-green);
+  color: var(--active-accent-bright);
   font: 800 var(--ui-font-size-xs)/1.1 var(--mono-font);
   text-transform: uppercase;
 }
@@ -982,14 +1051,16 @@ body.theme-light .command-palette-view-chip {
 }
 .keyboard-shortcut-row kbd {
   padding: 2px 5px;
-  color: #dfe6ef;
+  color: var(--pane-tab-text);
   background: #0b1017;
   border: 1px solid rgba(255, 255, 255, 0.18);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   font: 800 var(--ui-font-size-2xs)/1 var(--mono-font);
   white-space: nowrap;
 }
 .preferences-setting-control {
+  --preferences-control-left-indent: 14px;
+  --preferences-number-control-width: 11ch;
   min-width: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
@@ -1007,7 +1078,7 @@ body.theme-light .command-palette-view-chip {
   min-width: 0;
   width: 100%;
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   background: #10151d;
   color: var(--text);
   font: var(--ui-font-size-sm) var(--mono-font);
@@ -1019,30 +1090,40 @@ body.theme-light .preferences-setting-control select,
 body.theme-light .preferences-setting-control textarea,
 body.theme-light .changes-control select,
 body.theme-light .changes-refresh,
+body.theme-light .diff-ref-input,
 body.theme-light .diff-ref-control input,
-body.theme-light .diff-ref-select {
+body.theme-light .diff-ref-suggestion-popover {
   background: #ffffff;
   color: var(--text);
 }
 body.theme-light .info-refresh:hover,
 body.theme-light .info-refresh:focus-visible {
-  color: #10230b;
+  color: var(--file-selection-text);
 }
 body.theme-light .changes-error {
-  color: #b91c1c;
+  color: var(--danger-strong-hover);
 }
-body.theme-light .changes-body,
+body.theme-light .file-explorer-changes-panel,
 body.theme-light .changes-toolbar,
 body.theme-light .changes-repo-group {
   --changes-row-hover-bg: rgba(31, 111, 235, 0.08);
-  --changes-folder-bg: #f6f8fa;
-  --changes-indent-line: rgba(100, 116, 139, 0.26);
-  --changes-folder-text: #1f2937;
-  --changes-path-text: #59636e;
-  --changes-icon-text: #1d4ed8;
+  --changes-folder-bg: var(--lt-panel);
+  --changes-indent-line: var(--tree-indent-line);
+  --changes-repo-head-bg: var(--panel2);
+  --changes-folder-text: var(--accent-gold);
+  --changes-path-text: var(--lt-muted);
+  --changes-icon-text: var(--menu-accent);
+}
+body.theme-light .changes-toolbar,
+body.theme-light .changes-repo-group {
   color: var(--text);
   background: var(--panel);
   border-color: var(--line);
+}
+body.theme-light .file-explorer-changes-panel:hover > .changes-toolbar,
+body.theme-light .file-explorer-changes-panel:focus-within > .changes-toolbar {
+  background: var(--pane-tab-strip-bg);
+  color: var(--text);
 }
 body.theme-light .changes-comparison-head {
   color: var(--text);
@@ -1053,68 +1134,110 @@ body.theme-light .changes-repo-head {
   color: var(--text);
   background: var(--panel2);
 }
-body.theme-light .changes-file-row {
-  color: var(--text);
-  border-top-color: rgba(100, 116, 139, 0.24);
-}
-body.theme-light .changes-file-row:hover {
-  background: rgba(95, 152, 0, 0.10);
+body.theme-light .changes-repo-title {
+  color: var(--accent-gold);
 }
 body.theme-light .changes-diff-add {
   color: #166534;
 }
+body.theme-light .changes-diff-add-neutral {
+  color: var(--muted);
+}
 body.theme-light .changes-diff-remove {
-  color: #b91c1c;
+  color: var(--danger-strong-hover);
 }
 body.theme-light .keyboard-shortcut-row kbd {
-  color: #17202c;
-  background: #f8fafc;
-  border-color: #c9d2df;
+  color: var(--text);
+  background: var(--panel2);
+  border-color: var(--line);
 }
 .preferences-setting-control input[type="checkbox"] {
   justify-self: start;
+  margin-inline-start: var(--preferences-control-left-indent);
+}
+.preferences-setting-control.setting-type-range {
+  grid-template-columns: minmax(calc(var(--preferences-control-left-indent) + 140px), 1fr) 4ch auto minmax(0, 1fr) auto;
+}
+.preferences-setting-control.setting-type-range input[type="range"] {
+  min-width: 140px;
+  width: 100%;
+  justify-self: stretch;
+  margin-inline-start: var(--preferences-control-left-indent);
+  accent-color: var(--active-control-bg);
+}
+.preferences-setting-control.setting-type-range .preferences-range-value {
+  grid-column: 2;
+  min-width: 4ch;
+  color: var(--text);
+  font: 700 var(--ui-font-size-sm)/1 var(--mono-font);
+  text-align: end;
+}
+.preferences-setting-control.setting-type-range .preferences-setting-suffix {
+  grid-column: 3;
+  justify-self: start;
+}
+.preferences-setting-control.setting-type-range .preferences-reset {
+  grid-column: 5;
+  justify-self: end;
 }
 .preferences-setting-control.setting-type-number {
-  grid-template-columns: minmax(6ch, 8ch) auto auto;
-  justify-content: end;
+  grid-template-columns: calc(var(--preferences-control-left-indent) + var(--preferences-number-control-width)) auto minmax(0, 1fr) auto;
 }
-/* #257: right-align select + text controls the same way the number controls are, so the dropdowns
-   line up under the number inputs at the right edge (the reset button still trails at the far edge). */
 .preferences-setting-control.setting-type-select,
 .preferences-setting-control.setting-type-text {
-  justify-content: end;
+  justify-content: start;
 }
 .preferences-setting-control.setting-type-number input[type="number"] {
-  width: 8ch;
+  width: var(--preferences-number-control-width);
+  justify-self: start;
+  margin-inline-start: var(--preferences-control-left-indent);
+  padding-inline-end: 18px;
+}
+.preferences-setting-control.setting-type-number .preferences-setting-suffix {
+  grid-column: 2;
+  justify-self: start;
+}
+.preferences-setting-control.setting-type-number .preferences-reset {
+  grid-column: 4;
+  justify-self: end;
 }
 .preferences-setting-control.setting-type-text input[type="text"],
 .preferences-setting-control.setting-type-select select {
-  width: min(100%, 24ch);
-  /* C4: the first grid track is minmax(0, 1fr), so it absorbs all free space and justify-content on the
-     row has nothing to align. Right-align the control INSIDE its own track instead — its right edge then
-     lands 6px (the grid gap) left of Reset, matching where the number controls' px suffix ends. Wide
-     rows below force width:100%, so justify-self is a harmless no-op there. */
-  justify-self: end;
+  width: min(calc(100% - var(--preferences-control-left-indent)), 24ch);
+  justify-self: start;
+  margin-inline-start: var(--preferences-control-left-indent);
+}
+.preferences-setting-control.setting-type-select select[data-setting-path="yoagent.claude_model"],
+.preferences-setting-control.setting-type-select select[data-setting-path="yoagent.codex_model"] {
+  width: min(calc(100% - var(--preferences-control-left-indent)), 42ch);
 }
 .preferences-setting-control.setting-type-list textarea,
 .preferences-setting-control.setting-type-textarea textarea {
-  width: 100%;
+  width: calc(100% - var(--preferences-control-left-indent));
+  justify-self: start;
+  margin-inline-start: var(--preferences-control-left-indent);
 }
 .preferences-setting-row--wide .preferences-setting-control textarea {
   grid-column: 1 / -1;
-  min-height: min(34vh, 15lh);
+  width: 100%;
+  margin-inline-start: 0;
+  min-height: 5lh;
 }
 /* #38: long-value text/select fields (e.g. the upload filename template, the YOLO rule path) render
    as full-width --wide rows so the whole value is visible instead of clipping at the 24ch cap. */
 .preferences-setting-row--wide .preferences-setting-control.setting-type-text input[type="text"],
 .preferences-setting-row--wide .preferences-setting-control.setting-type-select select {
   width: 100%;
+  margin-inline-start: 0;
 }
 .preferences-setting-row--wide .preferences-reset {
   justify-self: end;
 }
 .preferences-setting-control textarea {
   resize: vertical;
+}
+.preferences-setting-control textarea[data-setting-autosize="true"] {
+  overflow-y: hidden;
 }
 .preferences-setting-suffix,
 .preferences-setting-help {
@@ -1130,21 +1253,19 @@ body.theme-light .keyboard-shortcut-row kbd {
   min-width: 0;
   height: 24px;
   padding: 0 7px;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   font-size: var(--ui-font-size-xs);
 }
 .preferences-inline-action {
-  border-color: rgba(118, 185, 0, 0.55);
-  color: #d9f99d;
+  border-color: var(--active-control-soft-border);
+  color: var(--active-control-bg);
 }
-/* Light mode: the light-green #d9f99d is near-invisible on the light prefs panel — use a darker green
-   (caught by tools/static_build.py --lint-light). */
 body.theme-light .preferences-inline-action {
-  color: #3f6312;
+  color: var(--active-control-bg);
 }
 .popover-value a:hover,
 .branch-link:hover {
-  color: #bfdbfe;
+  color: var(--link-soft-hover);
   text-decoration: underline;
 }
 .popover-value a.pr-status-merged:hover,
@@ -1152,7 +1273,7 @@ body.theme-light .preferences-inline-action {
 .summary-context a.pr-status-merged:hover,
 .branch-meta a.pr-status-merged:hover,
 .info-cell a.pr-status-merged:hover {
-  color: #c084fc;
+  color: var(--pr-status-merged);
 }
 .branch-list {
   margin-top: 8px;
@@ -1173,12 +1294,9 @@ body.theme-light .preferences-inline-action {
   font: inherit;
 }
 .branch-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .branch-meta {
-  color: #8b95a5;
+  color: var(--text-muted-strong);
   white-space: nowrap;
 }
 .branch-subject {
@@ -1222,71 +1340,81 @@ body.theme-light .preferences-inline-action {
   color: #ffffff;
 }
 /* ============================================================================
-   Light mode (DOIT.12 B5): dialogs and warning chrome hardcode dark fills + light
+   Light mode: dialogs and warning chrome hardcode dark fills + light
    text. The dialogs combine a dark bg with theme-aware `var(--text)` (dark in light)
    → dark-on-dark. Repaint as light cards with dark/readable text. The white agent
    glyphs are invisible on the white Changes panel → darken.
    ============================================================================ */
 body.theme-light .command-palette-dialog,
 body.theme-light .keyboard-shortcuts-dialog {
-  background: #ffffff;
-  border-color: #cdd5e0;
-  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.22);
+  background: var(--panel);
+  border-color: var(--line);
+  box-shadow: 0 24px 70px rgb(var(--overlay-slate-rgb) / 0.22);
 }
 body.theme-light .command-palette-input {
-  background: #f3f6fa;
+  background: var(--panel2);
 }
 body.theme-light .command-palette-row {
-  color: #1f2937;
+  color: var(--pc-control-fg);
 }
 body.theme-light .command-palette-row.active,
 body.theme-light .command-palette-row:hover {
-  color: #1f2937;
-  background: #e6f1dd;
-  border-color: rgba(118, 185, 0, 0.55);
+  color: var(--pc-control-fg);
+  background: var(--active-control-soft-bg);
+  border-color: var(--active-control-soft-border);
 }
 body.theme-light .command-palette-group,
 body.theme-light .command-palette-detail,
 body.theme-light .command-palette-keybinding {
-  color: #586072;
+  color: var(--muted);
 }
 body.theme-light .keyboard-shortcuts-section h3 {
-  color: #5f9800;
+  color: var(--active-accent-bright);
 }
 body.theme-light .keyboard-shortcuts-close:hover,
 body.theme-light .keyboard-shortcuts-close:focus-visible {
-  background: rgba(15, 23, 42, 0.06);
+  background: rgb(var(--overlay-slate-rgb) / 0.06);
 }
 body.theme-light .keyboard-shortcut-row {
-  border-bottom-color: rgba(15, 23, 42, 0.08);
+  border-bottom-color: rgb(var(--overlay-slate-rgb) / 0.08);
 }
 body.theme-light .keyboard-shortcut-row kbd {
-  color: #1f2937;
-  background: #eef1f5;
-  border-color: rgba(15, 23, 42, 0.18);
+  color: var(--pc-control-fg);
+  background: var(--panel2);
+  border-color: rgb(var(--overlay-slate-rgb) / 0.18);
 }
 body.theme-light .preferences-global-reset {
-  color: #7a4a00;
-  background: rgba(255, 177, 66, 0.16);
-  border-color: rgba(214, 140, 30, 0.6);
+  color: var(--danger-light-text);
+  background: #fff5f5;
+  border-color: rgba(220, 38, 38, 0.46);
 }
 body.theme-light .preferences-global-reset.confirming {
-  background: rgba(220, 40, 30, 0.10);
+  background: #fff1f0;
   border-color: #d9534f;
 }
 body.theme-light .preferences-global-reset-title {
-  color: #9a5b00;
+  color: var(--danger-strong-border);
 }
 body.theme-light .preferences-global-reset-warning {
-  color: #7a4a00;
+  color: var(--danger-light-text);
+}
+body.theme-light .preferences-global-reset .preferences-reset-all {
+  color: #ffffff;
+  background: var(--danger-strong);
+  border-color: #ef4444;
+}
+body.theme-light .preferences-global-reset .preferences-reset-all:hover,
+body.theme-light .preferences-global-reset .preferences-reset-all:focus-visible {
+  background: var(--danger-strong-hover);
+  border-color: var(--danger-strong);
 }
 body.theme-light .preferences-reset-cancel {
-  background: rgba(15, 23, 42, 0.05);
-  border-color: rgba(15, 23, 42, 0.18);
+  background: rgb(var(--overlay-slate-rgb) / 0.05);
+  border-color: rgb(var(--overlay-slate-rgb) / 0.18);
 }
 body.theme-light .agent-icon.codex,
 body.theme-light .agent-icon.claude {
-  color: #1f2937;
+  color: var(--pc-control-fg);
 }
 button {
   min-width: 34px;

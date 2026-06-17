@@ -7,6 +7,7 @@ from datetime import timezone
 
 from yolomux_lib.transcripts import transcript_activity_state
 from yolomux_lib.transcripts import transcript_activity_state_from_text
+from yolomux_lib.transcripts import transcript_delta_result_state
 from yolomux_lib.transcripts import transcript_pending_approval
 from yolomux_lib.transcripts import transcript_pending_approval_from_text
 
@@ -54,6 +55,48 @@ def test_transcript_activity_state_clears_claude_tool_result():
     )
 
     assert transcript_activity_state_from_text(text, "claude")["key"] == "idle"
+
+
+def test_transcript_delta_result_state_waits_for_final_claude_message_after_tool_result():
+    text_before_final = jsonl(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Checking the clock now:"}],
+                "stop_reason": "tool_use",
+            },
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "date"}}],
+                "stop_reason": "tool_use",
+            },
+        },
+        {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "18:17:57"}],
+            },
+        },
+    )
+    text_after_final = "\n".join([
+        text_before_final,
+        json.dumps({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Done."}],
+                "stop_reason": "end_turn",
+            },
+        }),
+    ])
+
+    assert transcript_delta_result_state(text_before_final) == {"has_lifecycle": True, "working": True, "complete": False}
+    assert transcript_delta_result_state(text_after_final) == {"has_lifecycle": True, "working": False, "complete": True}
 
 
 def test_transcript_activity_state_detects_codex_streaming_turn():

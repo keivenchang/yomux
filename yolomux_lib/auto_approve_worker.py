@@ -13,6 +13,7 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
+from typing import Callable
 
 import auto_approve_tmux
 
@@ -21,8 +22,9 @@ from .common import AUTO_APPROVE_LOCK_DIR
 from .common import PROJECT_ROOT
 from .common import SERVER_HOSTNAME
 from .common import truncate_text
+from .types import AutoApproveState
 
-# DOIT.6 #70: stop() joins for at least this long so an in-flight capture + keystroke walk (~0.6s) and
+# stop() joins for at least this long so an in-flight capture + keystroke walk (~0.6s) and
 # the post-approval / max-interval sleep (interruptible via stop_event, but the send is not) can finish
 # and the thread can release its flock before a takeover re-acquires.
 AUTO_APPROVE_STOP_JOIN_SECONDS = 5.0
@@ -140,12 +142,14 @@ class AutoApproveWorker:
         owner_extra: dict[str, Any] | None = None,
         dangerously_yolo: bool = False,
         prompt_source: str = "hybrid",
+        capture_gate: Callable[[str], bool] | None = None,
     ):
         self.target = target
         self.interval = interval
         self.event_callback = event_callback
         self.dangerously_yolo = dangerously_yolo
         self.prompt_source = prompt_source if prompt_source in {"pane", "hybrid"} else "hybrid"
+        self.capture_gate = capture_gate
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self.run, name=f"auto-approve-{target}", daemon=True)
         self.lock = threading.Lock()
@@ -157,6 +161,8 @@ class AutoApproveWorker:
         self.last_hash = ""
         self.last_hash_at = 0.0
         self.last_blocked_hash = ""
+        self.pending_prompt = False
+        self.capture_gate_observed = False
         self.process_lock = AutoApproveProcessLock(target, owner_extra)
         self.lock_owner: dict[str, Any] | None = None
 
@@ -170,7 +176,7 @@ class AutoApproveWorker:
         return True, None
 
     def stop(self) -> bool:
-        # DOIT.6 #70: join long enough for the thread to finish any in-flight capture/send (the relative
+        # join long enough for the thread to finish any in-flight capture/send (the relative
         # keystroke walk alone is ~0.6s) and exit + release its flock. A 1.0s join could return while the
         # thread is still alive and about to fire ONE more keystroke after a takeover (two workers, one
         # session). Returns True only when the thread has actually exited.
@@ -181,7 +187,7 @@ class AutoApproveWorker:
     def alive(self) -> bool:
         return self.thread.is_alive() and not self.stop_event.is_set()
 
-    def status(self) -> dict[str, Any]:
+    def status(self) -> AutoApproveState:
         with self.lock:
             return {
                 "target": self.target,
@@ -194,6 +200,9 @@ class AutoApproveWorker:
                 "lock_owner": self.lock_owner,
                 "prompt_source": self.prompt_source,
             }
+
+    def has_pending_prompt(self) -> bool:
+        return self.pending_prompt or bool(self.last_hash) or bool(self.last_blocked_hash)
 
     def update(self, **values: Any) -> None:
         with self.lock:
@@ -239,10 +248,21 @@ class AutoApproveWorker:
             self.process_lock.release()
 
     def process_once(self, module: Any) -> bool:
+        if self.capture_gate is not None and self.capture_gate_observed and not self.pending_prompt and not self.last_hash and not self.last_blocked_hash:
+            try:
+                should_capture = self.capture_gate(self.target)
+            except EXPECTED_AUTO_APPROVE_ERRORS as exc:
+                self.update(error=str(exc), last_action="tmux activity gate error")
+                should_capture = True
+            if should_capture is False:
+                self.update(last_action="idle; tmux activity quiet")
+                return False
+
         visible_text = module.tmux_capture_pane(self.target, visible_only=True)
         if visible_text is None:
             self.update(last_action="failed to capture pane")
             return False
+        self.capture_gate_observed = True
 
         if hasattr(module, "hybrid_approval_prompt_state"):
             prompt_state = module.hybrid_approval_prompt_state(self.target, visible_text, prompt_source=self.prompt_source)
@@ -253,9 +273,11 @@ class AutoApproveWorker:
             self.last_hash = ""
             self.last_hash_at = 0.0
             self.last_blocked_hash = ""
+            self.pending_prompt = False
             reason = str(prompt_state.get("reason") or "")
             self.update(last_action=f"idle; {reason}" if reason else "idle")
             return False
+        self.pending_prompt = True
 
         action_value = prompt_state.get("action")
         action = action_value if isinstance(action_value, str) and action_value else None
@@ -304,7 +326,7 @@ class AutoApproveWorker:
             if current_option > 0 and current_option != selected_option:
                 self.update(last_action=f"approval option moved from {selected_option} to {current_option}; waiting for next capture")
                 return False
-        # DOIT.6 #66: walk the highlight to the target, then RE-VERIFY it landed there before pressing
+        # walk the highlight to the target, then RE-VERIFY it landed there before pressing
         # Enter — the menu can redraw/move during the ~0.6s relative walk, so confirm the FINAL state
         # instead of confirming blind (which could pick the wrong option, even "No"). Abort+retry if it
         # is not on the target (or the highlight is unreadable).
@@ -352,7 +374,7 @@ class AutoApproveWorker:
             "prompt_type": "bash",
             "action": rule_action,
             "rule_name": decision.get("rule_name") or "unknown",
-            "risk": decision.get("risk") or "unknown",
+            "risk": yolo_rules.normalize_risk(decision.get("risk")),
             "ruleset_source": decision.get("source") or "",
             "ruleset_path": decision.get("path") or "",
             "dry_run": decision.get("dry_run") is True,
@@ -435,7 +457,7 @@ class AutoApproveWorker:
             "prompt_type": prompt_type,
             "action": rule_action,
             "rule_name": decision.get("rule_name") or "unknown",
-            "risk": decision.get("risk") or "unknown",
+            "risk": yolo_rules.normalize_risk(decision.get("risk")),
             "ruleset_source": decision.get("source") or "",
             "ruleset_path": decision.get("path") or "",
             "dry_run": decision.get("dry_run") is True,

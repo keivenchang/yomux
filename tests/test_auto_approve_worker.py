@@ -3,10 +3,17 @@ from typing import Any
 
 import pytest
 
-os.environ.setdefault("YOLOMUX_CONFIG_DIR", "/tmp/yolomux-test-config")
-os.environ.setdefault("YOLOMUX_STATE_DIR", "/tmp/yolomux-test-state")
 
 from yolomux_lib import auto_approve_worker
+
+
+@pytest.fixture(autouse=True)
+def _no_real_sleep(monkeypatch):
+    # process_once's post-action settle is `self.stop_event.wait(3.0)` (~3s of real wall time per test
+    # with no effect on the mocked screen). Make Event.wait return its set-state immediately instead of
+    # blocking — semantics preserved (False = not stopped), ~3s saved per test. Also no-op time.sleep.
+    monkeypatch.setattr(auto_approve_worker.threading.Event, "wait", lambda self, timeout=None: self.is_set())
+    monkeypatch.setattr(auto_approve_worker.time, "sleep", lambda *_args, **_kwargs: None)
 
 
 class DummyApproveModule:
@@ -32,9 +39,11 @@ class DummyProcessModule(DummyApproveModule):
     def __init__(self, prompt_state: dict[str, Any]):
         super().__init__()
         self.prompt_state = prompt_state
+        self.capture_calls: list[tuple[str, bool]] = []
 
     def tmux_capture_pane(self, _target: str, visible_only: bool = False) -> str:
-        return "visible prompt" if visible_only else "curl -sk -u yolomux:yolomux https://localhost:7777/"
+        self.capture_calls.append((_target, visible_only))
+        return "visible prompt" if visible_only else "curl -sk -u yolomux:yolomux https://localhost:19077/"
 
     def approval_prompt_state(self, _visible_text: str) -> dict[str, Any]:
         return self.prompt_state
@@ -61,13 +70,36 @@ class DummyHybridProcessModule(DummyProcessModule):
         return self.prompt_state
 
 
+class StalePaneCommandModule(DummyProcessModule):
+    PROMPT_RETRY_SECONDS = 5.0
+
+    def __init__(self):
+        super().__init__({
+            "type": "bash",
+            "hash": "hash-cp",
+            "action": "option1",
+            "selected_option": 1,
+            "yes_selected": True,
+            "source": "pane",
+            "command": "cp -r src/ dist/",
+        })
+
+    def tmux_capture_pane(self, _target: str, visible_only: bool = False) -> str:
+        if visible_only:
+            return "live prompt for cp -r src/ dist/"
+        return "● Bash(chmod +x scripts/deploy.sh)\n⎿ ok\nPermission rule Bash requires confirmation"
+
+    def hybrid_approval_prompt_state(self, _target: str, _visible_text: str, pane_text: str | None = None, prompt_source: str = "hybrid") -> dict[str, Any]:
+        return self.prompt_state
+
+
 class MovingOptionModule(DummyProcessModule):
     def selected_prompt_option(self, _visible_text: str) -> int:
         return 2
 
 
 class StableWalkModule(DummyProcessModule):
-    # DOIT.6 #66: highlight stays on the target through the walk; records the walk + Enter.
+    # highlight stays on the target through the walk; records the walk + Enter.
     def __init__(self, prompt_state: dict[str, Any]):
         super().__init__(prompt_state)
         self.moved: list[Any] = []
@@ -91,7 +123,7 @@ class PostWalkMoveModule(StableWalkModule):
 
 
 def test_send_action_confirms_after_reverifying_the_walked_highlight():
-    # DOIT.6 #66: walk to the target, re-verify it landed there, THEN press Enter.
+    # walk to the target, re-verify it landed there, THEN press Enter.
     worker = auto_approve_worker.AutoApproveWorker("6", interval=0.01)
     module = StableWalkModule({"type": "bash", "selected_option": 1})
     assert worker.send_action(module, "option1", selected_option=1) is True
@@ -100,7 +132,7 @@ def test_send_action_confirms_after_reverifying_the_walked_highlight():
 
 
 def test_send_action_aborts_when_highlight_moves_during_the_walk():
-    # DOIT.6 #66: if the highlight moved during the ~0.6s walk, do NOT press Enter (could confirm "No").
+    # if the highlight moved during the ~0.6s walk, do NOT press Enter (could confirm "No").
     worker = auto_approve_worker.AutoApproveWorker("6", interval=0.01)
     module = PostWalkMoveModule({"type": "bash", "selected_option": 1})
     assert worker.send_action(module, "option1", selected_option=1) is False
@@ -137,7 +169,7 @@ def test_bash_prompt_handler_truncates_command_without_crashing(monkeypatch):
     )
     monkeypatch.setattr(auto_approve_worker.yolo_rules, "evaluate", approving_decision)
 
-    acted = worker.handle_bash_prompt(module, "curl -sk -u yolomux:yolomux https://localhost:7777/", "hash-1", "option1")
+    acted = worker.handle_bash_prompt(module, "curl -sk -u yolomux:yolomux https://localhost:19077/", "hash-1", "option1")
 
     assert acted is True
     assert module.sent == [("option", "6", 1, 1)]
@@ -145,7 +177,7 @@ def test_bash_prompt_handler_truncates_command_without_crashing(monkeypatch):
     assert worker.error is None
     assert worker.last_action.startswith("approved bash: curl -sk -u")
     assert events[0][1] == "approval_approved"
-    assert events[0][3]["command"] == "curl -sk -u yolomux:yolomux https://localhost:7777/"
+    assert events[0][3]["command"] == "curl -sk -u yolomux:yolomux https://localhost:19077/"
 
 
 def test_bash_prompt_decline_sends_no_option(monkeypatch):
@@ -174,6 +206,62 @@ def test_bash_prompt_passive_actions_do_not_send_keys(monkeypatch):
         assert module.sent == []
         assert worker.blocked == 1
         assert worker.last_blocked_hash == f"hash-{action}"
+
+
+def test_process_once_uses_live_prompt_command_not_stale_pane_command(monkeypatch):
+    module = StalePaneCommandModule()
+    worker = auto_approve_worker.AutoApproveWorker("6", interval=0.01)
+    evaluated: list[str] = []
+
+    def evaluate(command: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        evaluated.append(command)
+        return rule_decision("block", rule_name="block cp")
+
+    monkeypatch.setattr(auto_approve_worker.yolo_rules, "evaluate", evaluate)
+
+    acted = worker.process_once(module)
+
+    assert acted is True
+    assert evaluated == ["cp -r src/ dist/"]
+    assert worker.last_blocked_hash == "hash-cp"
+    assert worker.last_action == "blocked bash: cp -r src/ dist/"
+
+
+def test_process_once_skips_capture_after_initial_tmux_activity_observation():
+    module = DummyProcessModule({
+        "visible": False,
+        "type": "",
+        "hash": "",
+        "reason": "no approval prompt",
+    })
+    worker = auto_approve_worker.AutoApproveWorker("6", interval=0.01, capture_gate=lambda _target: False)
+
+    first = worker.process_once(module)
+    module.capture_calls.clear()
+    second = worker.process_once(module)
+
+    assert first is False
+    assert second is False
+    assert module.capture_calls == []
+    assert worker.last_action == "idle; tmux activity quiet"
+
+
+def test_process_once_captures_idle_target_when_prompt_hash_is_pending():
+    module = DummyProcessModule({
+        "visible": False,
+        "type": "",
+        "hash": "",
+        "reason": "prompt cleared",
+    })
+    worker = auto_approve_worker.AutoApproveWorker("6", interval=0.01, capture_gate=lambda _target: False)
+    worker.last_hash = "hash-pending"
+
+    acted = worker.process_once(module)
+
+    assert acted is False
+    assert module.capture_calls == [("6", True)]
+    assert worker.last_action == "idle; prompt cleared"
+    assert worker.last_hash == ""
 
 
 def test_bash_prompt_dry_run_does_not_send_key(monkeypatch):

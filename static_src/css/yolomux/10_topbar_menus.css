@@ -1,19 +1,24 @@
 .topbar {
-  /* DOIT.12 A1/A2: the "big space" above the green tabs was the topbar's OWN cool-gray bg showing where
-     the shorter pills sit centered in a too-tall bar. Fix: paint the topbar the same green as the tab
-     strip (so it's one continuous green, no contrasting band) and tighten the height (+4px, not +8px). */
+  /* the "big space" above the green tabs was the topbar's OWN cool-gray bg showing where
+     the shorter pills sit centered in a too-tall bar. Keep the tightened height (+4px, not +8px), but
+     leave the bar neutral at rest and use the shared tab-strip green only for hover/focus feedback. */
   min-height: calc(var(--compact-control-height) + 4px);
   position: relative;
-  z-index: 180;
+  z-index: var(--z-topbar);
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
   padding: 3px 8px;
   border-bottom: 1px solid var(--line);
-  background: var(--pane-tab-strip-bg);
+  background: var(--panel2);
+  transition: background 100ms ease;
   overflow: visible;
   white-space: nowrap;
+}
+.topbar:hover,
+.topbar:focus-within {
+  background: var(--pane-tab-strip-bg);
 }
 /* cap the brand title's line-box so it doesn't make the bar tall (it drove most of the centering band). */
 .topbar .title,
@@ -38,6 +43,23 @@
 .brand {
   min-width: 92px;
 }
+.brand-update-badge {
+  margin-inline-start: 8px;
+  padding: 1px 7px;
+  border: 1px solid var(--active-control-border, var(--line));
+  border-radius: 999px;
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
+  cursor: pointer;
+  vertical-align: middle;
+}
+.brand-update-badge:hover {
+  filter: brightness(1.08);
+}
+.brand-update-badge[hidden] {
+  display: none;
+}
 .transport-warning {
   position: relative;
   width: 18px;
@@ -46,10 +68,10 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #fff4f5;
-  background: #b42332;
-  border: 1px solid #ff8a95;
-  border-radius: 999px;
+  color: var(--transport-warning-text);
+  background: var(--transport-warning-bg);
+  border: 1px solid var(--transport-warning-border);
+  border-radius: var(--radius-pill);
   font: 900 var(--ui-font-size-sm)/1 var(--ui-font);
   cursor: help;
 }
@@ -64,14 +86,14 @@
   position: fixed;
   top: calc(var(--topbar-height) - 2px);
   left: var(--popover-edge-gap);
-  z-index: 160;
+  z-index: var(--z-transport-warning);
   width: min(60ch, var(--popover-max-inline-size));
   padding: 8px 10px;
   color: #ffd8dc;
   background: rgba(42, 14, 18, 0.98);
-  border: 1px solid #ff8a95;
+  border: 1px solid var(--pr-status-failing);
   border-radius: 7px;
-  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.42);
+  box-shadow: 0 14px 38px rgb(var(--shadow-rgb) / 0.42);
   white-space: normal;
   font: var(--ui-font-size-sm)/1.35 var(--ui-font);
   opacity: 0;
@@ -97,8 +119,6 @@
   min-width: var(--compact-icon-button-size);
   max-width: var(--compact-icon-button-size);
   height: var(--compact-icon-button-size);
-  display: inline-flex;
-  align-items: center;
   justify-content: center;
   padding: 0;
   overflow: hidden;
@@ -122,12 +142,267 @@
   --action-icon: var(--icon-tab-meta);
 }
 #tabMetaToggle.active {
-  color: #081205;
-  background: #8cc63f;
-  border-color: #b8ee5c;
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 #logoutButton {
   --action-icon: var(--icon-logout);
+}
+.share-status-pill {
+  --action-icon: var(--icon-share);
+  position: relative;
+}
+.share-status-pill.share-mode-read {
+  border-color: color-mix(in srgb, var(--good) 68%, var(--line));
+  background: color-mix(in srgb, var(--good) 24%, var(--panel2));
+  color: var(--text);
+}
+.share-status-pill.share-mode-write {
+  border-color: color-mix(in srgb, var(--bad) 72%, var(--line));
+  background: color-mix(in srgb, var(--bad) 26%, var(--panel2));
+  color: var(--text);
+}
+.share-status-pill[hidden] {
+  display: none;
+}
+.share-status-count {
+  position: absolute;
+  inset-inline-end: -3px;
+  inset-block-start: -5px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border: 1px solid var(--panel);
+  border-radius: var(--radius-pill);
+  background: var(--active-control-bg);
+  color: var(--active-control-text);
+  font: 900 var(--ui-font-size-3xs)/12px var(--ui-font);
+  text-align: center;
+}
+.share-status-pill.share-mode-read .share-status-count {
+  background: var(--good);
+  color: #041108;
+}
+.share-status-pill.share-mode-write .share-status-count {
+  background: var(--bad);
+  color: var(--danger-text);
+}
+body.share-view-mode {
+  overflow: hidden;
+  background: var(--share-stage-bg);
+}
+
+.share-mirror-stage {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  background: var(--share-stage-bg);
+}
+
+body.share-view-mode .share-mirror-stage .app-root {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  transform: translate3d(var(--share-mirror-tx, 0px), var(--share-mirror-ty, 0px), 0) scale(var(--share-mirror-scale, 1));
+  will-change: transform;
+}
+
+body.share-view-mode.share-view-readonly .share-mirror-stage .file-explorer-tree-panel,
+body.share-view-mode.share-view-readonly .share-mirror-stage .file-explorer-changes-panel,
+body.share-view-mode.share-view-readonly .share-mirror-stage .preferences-scroll,
+body.share-view-mode.share-view-readonly .share-mirror-stage .info-list,
+body.share-view-mode.share-view-readonly .share-mirror-stage .file-editor-preview-pane-panel,
+body.share-view-mode.share-view-readonly .share-mirror-stage .cm-scroller,
+body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport {
+  overflow: hidden !important;
+  overscroll-behavior: none;
+  scrollbar-width: none;
+}
+
+body.share-view-mode.share-view-readonly .share-mirror-stage .file-explorer-tree-panel::-webkit-scrollbar,
+body.share-view-mode.share-view-readonly .share-mirror-stage .file-explorer-changes-panel::-webkit-scrollbar,
+body.share-view-mode.share-view-readonly .share-mirror-stage .preferences-scroll::-webkit-scrollbar,
+body.share-view-mode.share-view-readonly .share-mirror-stage .info-list::-webkit-scrollbar,
+body.share-view-mode.share-view-readonly .share-mirror-stage .file-editor-preview-pane-panel::-webkit-scrollbar,
+body.share-view-mode.share-view-readonly .share-mirror-stage .cm-scroller::-webkit-scrollbar,
+body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.share-popup-mirror-layer {
+  position: absolute;
+  inset: 0;
+  z-index: calc(var(--z-share-presence) + 1);
+  overflow: hidden;
+  pointer-events: none;
+  font: inherit;
+}
+.share-popup-mirror-item {
+  position: absolute;
+  overflow: visible;
+  pointer-events: none;
+  font: inherit;
+}
+.share-popup-mirror-item > * {
+  position: absolute !important;
+  left: 0 !important;
+  top: 0 !important;
+  right: auto !important;
+  bottom: auto !important;
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  margin: 0;
+  visibility: visible !important;
+  opacity: 1 !important;
+  pointer-events: none !important;
+  transform: none !important;
+  transition: none !important;
+  font: inherit;
+}
+.share-popup-mirror-item > .modal {
+  width: 100% !important;
+  height: 100% !important;
+  max-width: none !important;
+  max-height: none !important;
+}
+.share-popup-mirror-item > .modal.about-open .modal-dialog {
+  width: min(520px, calc(100% - 28px)) !important;
+}
+.share-popup-mirror-item > .modal.share-open .modal-dialog {
+  width: min(960px, calc(100% - 28px)) !important;
+}
+
+.share-viewer-banner {
+  position: fixed;
+  left: 50%;
+  bottom: 8px;
+  z-index: calc(var(--z-share-presence) + 2);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: center;
+  min-height: 26px;
+  max-width: calc(100vw - 16px);
+  padding: 5px 10px;
+  border: 1px solid var(--active-control-border);
+  border-radius: var(--radius-md);
+  background: var(--active-control-soft-bg);
+  color: var(--text);
+  box-shadow: var(--shadow-elevated);
+  font: 700 var(--ui-font-size-sm)/1.25 var(--ui-font);
+  transform: translateX(-50%);
+  pointer-events: auto;
+}
+.share-viewer-banner-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.share-viewer-mirror-status {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font: 800 var(--ui-font-size-xs)/1 var(--mono-font);
+}
+.share-viewer-mirror-status.match {
+  color: var(--good);
+}
+.share-viewer-mirror-status.mismatch {
+  color: var(--bad);
+}
+.share-viewer-banner.share-mode-read {
+  border-color: color-mix(in srgb, var(--good) 68%, var(--line));
+  background: color-mix(in srgb, var(--good) 18%, var(--panel2));
+}
+.share-viewer-banner.share-mode-write {
+  border-color: color-mix(in srgb, var(--bad) 72%, var(--line));
+  background: color-mix(in srgb, var(--bad) 20%, var(--panel2));
+}
+.share-view-fit-toggle {
+  flex: 0 0 auto;
+  min-height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--panel);
+  color: var(--text);
+  font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
+  cursor: pointer;
+}
+.share-view-fit-toggle:hover,
+.share-view-fit-toggle:focus-visible {
+  border-color: var(--active-control-border);
+  background: var(--active-control-bg);
+  color: var(--active-control-text);
+}
+.share-ghost-cursor {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: var(--z-share-presence);
+  width: 26px;
+  height: 26px;
+  margin: -13px 0 0 -13px;
+  pointer-events: none;
+  opacity: 0;
+  transform: translate3d(-9999px, -9999px, 0);
+  transition: transform 45ms linear, opacity 100ms ease;
+  border: 2px solid var(--share-cursor-color, var(--active-control-bg));
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.66), 0 2px 8px rgb(var(--shadow-rgb) / 0.45);
+}
+.share-ghost-cursor::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: -6px;
+  width: 2px;
+  height: 36px;
+  transform: translateX(-50%);
+  background: var(--share-cursor-color, var(--active-control-bg));
+  clip-path: none;
+}
+.share-ghost-cursor::after {
+  content: "";
+  position: absolute;
+  left: -6px;
+  top: 50%;
+  width: 36px;
+  height: 2px;
+  transform: translateY(-50%);
+  background: var(--share-cursor-color, var(--active-control-bg));
+  clip-path: none;
+}
+.share-ghost-cursor.visible {
+  opacity: 0.88;
+}
+.share-click-ripple {
+  position: fixed;
+  z-index: var(--z-share-presence);
+  width: 8px;
+  height: 8px;
+  margin: -4px 0 0 -4px;
+  pointer-events: none;
+  border: 2px solid var(--share-cursor-color, var(--active-control-bg));
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.42);
+  animation: share-click-ripple 520ms ease-out forwards;
+}
+@keyframes share-click-ripple {
+  from {
+    opacity: 0.9;
+    transform: scale(0.4);
+  }
+  to {
+    opacity: 0;
+    transform: scale(4);
+  }
 }
 #status {
   max-width: 112px;
@@ -180,7 +455,7 @@
   min-height: var(--compact-control-height);
   overflow: visible;
 }
-/* DOIT.21: editor back/forward history, immediately before the search box. An auto inline-start margin
+/* editor back/forward history, immediately before the search box. An auto inline-start margin
    on the group + an auto inline-end margin on the search centers the nav+search PAIR as one unit. */
 .topbar-nav {
   flex: 0 0 auto;
@@ -198,7 +473,7 @@
   padding: 0;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: var(--input-bg, #11151c);
+  background: var(--input-bg);
   color: var(--text);
   font: inherit;
   font-size: var(--ui-font-size-sm);
@@ -206,10 +481,10 @@
   cursor: pointer;
 }
 body.theme-light .topbar-nav-button {
-  background: rgba(15, 23, 42, 0.05);
+  background: rgb(var(--overlay-slate-rgb) / 0.05);
 }
 .topbar-nav-button:hover:not(:disabled) {
-  border-color: var(--accent, #6ea8fe);
+  border-color: var(--accent);
 }
 .topbar-nav-button:disabled {
   opacity: 0.34;
@@ -228,49 +503,61 @@ body.theme-light .topbar-nav-button {
   padding: 0 8px;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: var(--input-bg, #11151c);
-  color: var(--muted, #8b95a5);
+  background: var(--input-bg);
+  color: var(--muted);
   cursor: text;
   font: inherit;
   overflow: hidden;
 }
 .topbar-search:hover {
-  border-color: var(--accent, #6ea8fe);
+  border-color: var(--accent);
 }
-/* DOIT.6 #33: --input-bg is undefined, so the fallback #11151c made this a DARK pill in both themes.
+/* --input-bg is undefined, so the fallback #11151c made this a DARK pill in both themes.
    In light mode blend it into the topbar as a subtle bordered box (keep the border + muted text). */
 body.theme-light .topbar-search {
-  background: rgba(15, 23, 42, 0.05);
+  background: rgb(var(--overlay-slate-rgb) / 0.05);
 }
-/* DOIT.8 Phase 1: the top-right language switcher. A compact pill matching the topbar search. */
+/* Phase 1: the top-right language switcher. A compact pill matching the topbar search. */
 .topbar-language {
   flex: 0 0 auto;
   justify-self: end;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   height: var(--compact-control-height);
   max-width: 140px;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: var(--input-bg, #11151c);
+  background: var(--input-bg);
   color: var(--text);
   font: inherit;
   font-size: var(--ui-font-size-sm);
   padding: 0 6px;
   cursor: pointer;
 }
+.topbar-language-menu > .topbar-language {
+  min-width: 72px;
+}
+.topbar-language-menu.open > .topbar-language {
+  border-color: var(--active-control-border);
+  background: var(--active-control-bg);
+  color: var(--active-control-text);
+}
 body.theme-light .topbar-language {
-  background: rgba(15, 23, 42, 0.05);
+  background: rgb(var(--overlay-slate-rgb) / 0.05);
 }
 .topbar-language:hover {
-  border-color: var(--accent, #6ea8fe);
+  border-color: var(--accent);
+}
+.topbar-language-popover {
+  max-height: min(60vh, 520px);
+  overflow: auto;
 }
 .topbar-search-icon {
   flex: 0 0 auto;
 }
 .topbar-search-label {
   flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   text-align: start;
 }
 .topbar-search-hint {
@@ -280,18 +567,16 @@ body.theme-light .topbar-language {
   border: 1px solid var(--line);
   border-radius: 3px;
   padding: 0 4px;
-  color: var(--muted, #8b95a5);
+  color: var(--muted);
   background: transparent;
 }
-@media (max-width: 1100px) {
-  .topbar-search-label,
-  .topbar-search-hint {
-    display: none;
-  }
-  .topbar-search {
-    max-width: none;
-    padding: 0 6px;
-  }
+body.app-vw-lte-1100 .topbar-search-label,
+body.app-vw-lte-1100 .topbar-search-hint {
+  display: none;
+}
+body.app-vw-lte-1100 .topbar-search {
+  max-width: none;
+  padding: 0 6px;
 }
 /* Cross-session AI activity status line in the top bar (opens the YO!agent summary). */
 .topbar-activity {
@@ -304,7 +589,7 @@ body.theme-light .topbar-language {
   border: 1px solid var(--line);
   border-radius: 6px;
   background: transparent;
-  color: var(--muted, #8b95a5);
+  color: var(--muted);
   font: inherit;
   font-size: var(--ui-font-size-2xs);
   cursor: pointer;
@@ -314,13 +599,13 @@ body.theme-light .topbar-language {
   display: none;
 }
 .topbar-activity:hover {
-  border-color: var(--accent, #6ea8fe);
+  border-color: var(--accent);
   color: var(--text);
 }
 .topbar-activity.has-attention {
   border-color: var(--brand-green);
 }
-.topbar-activity-run {
+.topbar-activity-run.active {
   color: var(--brand-green);
   font-weight: 600;
 }
@@ -331,15 +616,11 @@ body.theme-light .topbar-language {
 .topbar-activity-sep {
   opacity: 0.5;
 }
-@media (max-width: 1100px) {
-  .topbar-activity-idle {
-    display: none;
-  }
+body.app-vw-lte-1100 .topbar-activity-idle {
+  display: none;
 }
-@media (max-width: 760px) {
-  .topbar-search {
-    display: none;
-  }
+body.app-vw-lte-760 .topbar-search {
+  display: none;
 }
 .app-menu-area.drag-over {
   outline: 1px dashed var(--drop-outline);
@@ -364,7 +645,7 @@ body.theme-light .topbar-language {
   align-items: center;
   gap: 4px;
   padding: 0 0.46em;
-  color: #dfe6ef;
+  color: var(--pane-tab-text);
   background: transparent;
   border: 1px solid transparent;
   border-radius: 6px;
@@ -378,10 +659,10 @@ body.theme-light .topbar-language {
   align-items: center;
   justify-content: center;
   padding: 0 4px;
-  color: #071000;
-  background: var(--brand-green);
-  border: 1px solid #b8ee5c;
-  border-radius: 999px;
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border: 1px solid var(--active-control-border);
+  border-radius: var(--radius-pill);
   font: 800 var(--ui-font-size-2xs)/1 var(--mono-font);
 }
 .app-menu-button::after {
@@ -396,9 +677,9 @@ body.theme-light .topbar-language {
 .app-menu-button:hover,
 .app-menu-button:focus-visible,
 .app-menu.open > .app-menu-button {
-  color: #f4ffe8;
+  color: var(--pane-tab-panel-head-text);
   background: #1d2531;
-  border-color: #5e6878;
+  border-color: var(--sep-muted);
   outline: 0;
 }
 .app-menu.open > .app-menu-button {
@@ -409,7 +690,7 @@ body.theme-light .topbar-language {
   opacity: 0;
   pointer-events: none;
   position: absolute;
-  z-index: 92;
+  z-index: var(--z-menu-dropdown);
   width: var(--app-menu-fit-width, max-content);
   max-width: var(--app-menu-max-inline-size);
   max-height: var(--app-menu-max-block-size);
@@ -418,7 +699,7 @@ body.theme-light .topbar-language {
   padding: 7px;
   color: #e7ecf3;
   background: #111820;
-  border: 1px solid #5e6878;
+  border: 1px solid var(--sep-muted);
   border-radius: 8px;
   box-shadow:
     0 -3px 12px rgba(0, 0, 0, 0.30),
@@ -438,9 +719,11 @@ body.theme-light .topbar-language {
 }
 .app-submenu-popover {
   display: none;
+  --app-submenu-inline-offset: 22px;
   width: var(--app-menu-fit-width, max-content);
-  max-width: var(--app-menu-max-inline-size);
-  margin: 2px 0 5px 22px;
+  max-width: calc(100% - var(--app-submenu-inline-offset));
+  margin-block: 2px 5px;
+  margin-inline: var(--app-submenu-inline-offset) 0;
   padding: 4px;
   color: #e7ecf3;
   background: #0d131b;
@@ -464,7 +747,7 @@ body.theme-light .topbar-language {
 }
 .app-menu-section {
   padding: 4px 7px 5px;
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
   letter-spacing: 0;
@@ -473,7 +756,7 @@ body.theme-light .topbar-language {
 .app-menu-separator {
   height: 1px;
   margin: 6px 2px;
-  background: #384356;
+  background: var(--divider);
 }
 .app-menu-submenu-wrap {
   position: relative;
@@ -487,7 +770,7 @@ body.theme-light .topbar-language {
   align-items: center;
   gap: 6px;
   padding: 5px 7px;
-  color: #dfe6ef;
+  color: var(--pane-tab-text);
   background: transparent;
   border: 1px solid transparent;
   border-radius: 6px;
@@ -498,16 +781,16 @@ body.theme-light .topbar-language {
   display: block;
   width: 4px;
   align-self: stretch;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   opacity: 0;
 }
 .app-menu-command[data-checked="true"] {
-  background: rgba(118, 185, 0, 0.07);
+  background: var(--active-control-soft-bg);
   border-color: transparent;
 }
 .app-menu-command[data-checked="true"] .app-menu-check {
   opacity: 1;
-  background: var(--brand-green);
+  background: var(--active-control-bg);
 }
 .app-menu-command + .app-menu-command,
 .app-menu-submenu-wrap + .app-menu-command,
@@ -517,9 +800,10 @@ body.theme-light .topbar-language {
 }
 .app-menu-command:hover:not(:disabled),
 .app-menu-command:focus-visible,
+.app-menu-command.share-mirror-active:not(:disabled),
 .app-menu-submenu-wrap:hover > .app-menu-command:not(:disabled),
 .app-menu-submenu-wrap.open > .app-menu-command:not(:disabled) {
-  color: #f4ffe8;
+  color: var(--pane-tab-panel-head-text);
   background: #273140;
   border-color: var(--accent-gold);
   outline: 0;
@@ -527,6 +811,52 @@ body.theme-light .topbar-language {
 .app-menu-command:disabled {
   color: #748093;
   cursor: default;
+}
+.app-menu-setting-row {
+  width: 100%;
+  min-width: 0;
+  min-height: 32px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 7px 5px 17px;
+  color: var(--pane-tab-text);
+  font: var(--ui-font-size)/1.2 var(--ui-font);
+}
+.app-menu-setting-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.app-menu-setting-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.app-menu-setting-control input[type="number"] {
+  width: 8ch;
+  min-width: 0;
+  height: var(--compact-control-height);
+  padding: 0 5px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--input-bg);
+  color: var(--text);
+  font: var(--ui-font-size-sm)/1 var(--mono-font);
+}
+.app-menu-setting-control input[type="number"]:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.app-menu-setting-control input[type="number"]:disabled {
+  opacity: 0.55;
+}
+.app-menu-setting-suffix {
+  color: var(--pr-status-closed);
+  font: var(--ui-font-size-xs)/1 var(--mono-font);
 }
 .app-menu-content {
   min-width: 0;
@@ -559,8 +889,8 @@ body.theme-light .topbar-language {
   align-items: center;
   justify-content: center;
   color: #c8d2df;
-  background: #1e2430;
-  border: 1px solid #303948;
+  background: var(--panel2);
+  border: 1px solid var(--line);
   border-radius: 6px;
 }
 .app-menu-ui-icon::before {
@@ -572,9 +902,9 @@ body.theme-light .topbar-language {
   mask: var(--app-menu-ui-icon) center / contain no-repeat;
 }
 .app-menu-ui-icon.active {
-  color: #081205;
-  background: #8cc63f;
-  border-color: #b8ee5c;
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 .app-menu-ui-icon-notify {
   --app-menu-ui-icon: var(--icon-notify);
@@ -594,8 +924,14 @@ body.theme-light .topbar-language {
 .app-menu-ui-icon-document {
   --app-menu-ui-icon: var(--icon-document);
 }
+.app-menu-ui-icon-share {
+  --app-menu-ui-icon: var(--icon-share);
+}
 .app-menu-ui-icon-gear {
   --app-menu-ui-icon: var(--icon-gear);
+}
+.app-menu-ui-icon-pin {
+  --app-menu-ui-icon: var(--icon-pin);
 }
 .app-menu-ui-icon-branch-info {
   --app-menu-ui-icon: var(--icon-branch-info);
@@ -621,11 +957,8 @@ body.theme-light .topbar-language {
      (a wrapping block's max-content is ~one word, so fitAppMenuPopover computed a tiny width). On one
      line the fit-width grows to the longest detail (capped at max-width), so the menu is wider + shorter.
      Full text stays available via the item's title/aria-label. */
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  max-width: 42ch;
-  color: #aeb8c7;
+  max-width: min(58ch, calc(var(--app-menu-max-inline-size) - 74px));
+  color: var(--pr-status-closed);
   font: var(--ui-font-size-xs)/1.2 var(--mono-font);
 }
 .app-menu-rich {
@@ -645,7 +978,7 @@ body.theme-light .topbar-language {
   grid-template-columns: 4px minmax(0, 1fr);
   gap: 4px;
   padding: 1px 5px;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   font-size: var(--ui-font-size-sm);
   line-height: 1;
 }
@@ -708,20 +1041,18 @@ body.theme-light .topbar-language {
 .app-menu-yolo-session-command {
   min-inline-size: min(42ch, var(--app-menu-max-inline-size));
 }
-@media (max-width: 720px) {
-  .app-menu-yolo-session-command .pane-tab-core {
-    height: auto;
-    flex-wrap: wrap;
-  }
-  .app-menu-yolo-session-command .session-button-text {
-    flex: 1 0 100%;
-    height: auto;
-    min-height: 14px;
-    white-space: normal;
-  }
+body.app-vw-lte-720 .app-menu-yolo-session-command .pane-tab-core {
+  height: auto;
+  flex-wrap: wrap;
+}
+body.app-vw-lte-720 .app-menu-yolo-session-command .session-button-text {
+  flex: 1 0 100%;
+  height: auto;
+  min-height: 14px;
+  white-space: normal;
 }
 .app-menu-submenu-arrow {
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
   font-weight: 700;
 }
 .app-menu-submenu-wrap:hover > .app-menu-command .app-menu-submenu-arrow,
@@ -730,16 +1061,20 @@ body.theme-light .topbar-language {
   transform: rotate(90deg);
 }
 body.theme-light .topbar {
+  background: var(--panel2);
+}
+body.theme-light .topbar:hover,
+body.theme-light .topbar:focus-within {
   background: var(--pane-tab-strip-bg);
 }
-/* DOIT.12 A4: light-mode topbar coloring fixes — each was tuned only for the dark topbar and read wrong
-   on the light (now green) bar. */
+/* light-mode topbar coloring fixes — each was tuned only for the dark topbar and read wrong
+   on the light neutral/hover-green bar. */
 body.theme-light #tabMetaToggle.active {
-  background: #5f9800;           /* match the .app-menu-ui-icon.active light tuning, not the garish #8cc63f */
-  border-color: #5f9800;
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 body.theme-light .app-menu-button-badge {
-  border-color: var(--brand-green); /* border matches the green count fill — drops the bright #b8ee5c halo */
+  border-color: var(--active-control-border);
 }
 body.theme-light .transport-warning::after {
   color: #5a1116;                /* light tooltip (dark-red text on a light-red surface), not near-black */
@@ -755,25 +1090,25 @@ body.theme-light .app-menu-button {
 body.theme-light .app-menu-button:hover,
 body.theme-light .app-menu-button:focus-visible,
 body.theme-light .app-menu.open > .app-menu-button {
-  color: #0f172a;
+  color: var(--pc-control-hover-fg);
   background: #dfe7f2;
-  border-color: #9aa6b6;
+  border-color: var(--pc-control-border);
 }
 body.theme-light .app-menu-popover {
   color: var(--text);
   background: #ffffff;
-  border-color: #9aa6b6;
+  border-color: var(--pc-control-border);
   box-shadow:
-    0 -3px 12px rgba(15, 23, 42, 0.10),
+    0 -3px 12px rgb(var(--overlay-slate-rgb) / 0.10),
     var(--shadow-popover);
 }
 body.theme-light .app-submenu-popover {
   color: var(--text);
   background: #f8fafc;
-  border-color: #c9d2df;
+  border-color: var(--line);
   box-shadow:
-    0 -2px 10px rgba(15, 23, 42, 0.10),
-    0 12px 32px rgba(15, 23, 42, 0.18);
+    0 -2px 10px rgb(var(--overlay-slate-rgb) / 0.10),
+    0 12px 32px rgb(var(--overlay-slate-rgb) / 0.18);
 }
 body.theme-light .app-menu-section,
 body.theme-light .app-menu-detail {
@@ -785,44 +1120,51 @@ body.theme-light .app-menu-separator {
 body.theme-light .app-menu-command {
   color: var(--text);
 }
+body.theme-light .app-menu-setting-row {
+  color: var(--text);
+}
+body.theme-light .app-menu-setting-control input[type="number"] {
+  background: #ffffff;
+}
 body.theme-light .app-menu-command[data-checked="true"] {
-  background: rgba(95, 152, 0, 0.08);
+  background: var(--active-control-soft-bg);
   border-color: transparent;
 }
 body.theme-light .app-menu-command:hover:not(:disabled),
 body.theme-light .app-menu-command:focus-visible,
+body.theme-light .app-menu-command.share-mirror-active:not(:disabled),
 body.theme-light .app-menu-submenu-wrap:hover > .app-menu-command:not(:disabled),
 body.theme-light .app-menu-submenu-wrap.open > .app-menu-command:not(:disabled) {
-  color: #0f172a;
+  color: var(--pc-control-hover-fg);
   background: #e8f0fb;
-  border-color: #1d4ed8;
+  border-color: var(--menu-accent);
 }
 body.theme-light .app-menu-command:disabled {
-  color: #8b95a5;
+  color: var(--text-muted-strong);
 }
 body.theme-light .app-menu-ui-icon {
-  color: #17202c;
-  background: #f7f9fc;
-  border-color: #c9d2df;
+  color: var(--text);
+  background: var(--pane-tab-control-bg);
+  border-color: var(--line);
 }
 /* #251 (image 032): finish the light-mode coverage so NO app-menu icon button shows a dark fill. The
    default + hover/open + ui-icon base are handled above; the active and hover/focus icon-button states
    still kept dark-mode fills. Active stays green (the on-state cue) but tuned for a white topbar. */
 body.theme-light .app-menu-ui-icon:hover,
 body.theme-light .app-menu-ui-icon:focus-visible {
-  color: #0f172a;
+  color: var(--pc-control-hover-fg);
   background: #dfe7f2;
-  border-color: #9aa6b6;
+  border-color: var(--pc-control-border);
 }
 body.theme-light .app-menu-ui-icon.active {
-  color: #08120a;
-  background: #5f9800;
-  border-color: #4a7600;
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 body.theme-light .app-menu-ui-icon.active:hover,
 body.theme-light .app-menu-ui-icon.active:focus-visible {
-  background: #6fab0a;
-  border-color: #4a7600;
+  background: color-mix(in srgb, var(--active-control-bg) 88%, #ffffff 12%);
+  border-color: var(--active-control-border);
 }
 /* #252 (image 033): the rich Tabs/Changes dropdown rows are `.app-menu-tab-command` (NOT
    `.app-menu-command`), so the light text/hover overrides above never reach them — their text children
@@ -837,19 +1179,19 @@ body.theme-light .app-menu-tab-command .session-button-dir {
 }
 body.theme-light .app-menu-tab-command:hover:not(:disabled),
 body.theme-light .app-menu-tab-command:focus-visible {
-  color: #0f172a;
+  color: var(--pc-control-hover-fg);
   background: #e8f0fb;
-  border-color: #1d4ed8;
+  border-color: var(--menu-accent);
 }
 body.theme-light .latency-meter {
   background: #ffffff;
   border-color: var(--line);
 }
-/* B1/DOIT.12: this rule was TRUNCATED (open brace, no body) and unbalanced the file's braces, so in the
+/* this rule was TRUNCATED (open brace, no body) and unbalanced the file's braces, so in the
    concatenated bundle it swallowed the start of the next partial's CSS. Completed: an enabled Notify
    toggle reads as active/pressed = brand green (theme-aware), like the other topbar toggles. */
 .notify-toggle.active {
-  color: #081205;
-  background: var(--brand-green);
-  border-color: var(--brand-green);
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }

@@ -39,7 +39,12 @@ main {
   font-size: 12px;
   color: var(--muted);
 }
-.setup-locale select {
+.locale-picker {
+  position: relative;
+  display: inline-grid;
+  min-width: 140px;
+}
+.locale-toggle {
   font: inherit;
   color: var(--text);
   background: var(--bg);
@@ -47,6 +52,46 @@ main {
   border-radius: 6px;
   padding: 3px 6px;
   cursor: pointer;
+  text-align: start;
+}
+.locale-toggle::after {
+  content: "⌄";
+  margin-inline-start: 10px;
+  color: var(--muted);
+}
+.locale-options {
+  position: absolute;
+  z-index: 4;
+  inset-inline: 0;
+  top: calc(100% + 4px);
+  display: grid;
+  max-height: min(260px, 48vh);
+  overflow: auto;
+  padding: 4px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.42);
+}
+.locale-options[hidden] {
+  display: none;
+}
+.locale-option {
+  height: 28px;
+  padding: 0 8px;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+.locale-option:hover,
+.locale-option[aria-selected="true"] {
+  color: #2a1e00;
+  background: var(--accent);
 }
 h1 {
   margin: 0 0 8px;

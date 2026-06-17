@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
 import json
 import re
 import sys
@@ -21,6 +22,8 @@ LOCALES_SRC = REPO_ROOT / "static_src" / "locales"
 LOCALES_OUT = REPO_ROOT / "static" / "locales"
 SOURCE_LOCALE = "en"
 PSEUDO_LOCALE = "en-XA"
+WINDOW_VIEWPORT_ALLOW_MARKER = "static-build-allow-window-viewport"
+RAW_TOKEN_LITERAL_IGNORED_VALUES = {"#ffffff"}
 _PSEUDO_ACCENTS = str.maketrans({
     "a": "á", "b": "ƀ", "c": "ç", "d": "đ", "e": "é", "f": "ƒ", "g": "ǧ", "h": "ĥ", "i": "í",
     "j": "ĵ", "k": "ķ", "l": "ł", "m": "ɱ", "n": "ñ", "o": "ó", "p": "ƥ", "q": "ɋ", "r": "ř",
@@ -38,11 +41,14 @@ ASSETS: dict[str, list[str]] = {
         "static_src/js/yolomux/20_layout_state.js",
         "static_src/js/yolomux/30_app_menus.js",
         "static_src/js/yolomux/40_file_explorer_files.js",
+        "static_src/js/yolomux/45_file_explorer_actions.js",
         "static_src/js/yolomux/50_editor_settings_runtime.js",
         "static_src/js/yolomux/60_popovers_tabs.js",
         "static_src/js/yolomux/70_layout_actions.js",
+        "static_src/js/yolomux/75_dockview_layout.js",
         "static_src/js/yolomux/80_panes_preferences.js",
         "static_src/js/yolomux/90_changes_editor.js",
+        "static_src/js/yolomux/95_codemirror_editor.js",
         "static_src/js/yolomux/99_terminal_boot.js",
     ],
     "yolomux.css": [
@@ -97,7 +103,7 @@ def check_css_braces() -> None:
 
     A truncated/incomplete rule (open brace, no close) is invisible in isolation but, once the partials
     are concatenated, silently swallows the start of the NEXT partial's CSS until a stray } rebalances
-    it (this exact bug shipped once — DOIT.12 B1). Strips /* */ comments and quoted strings first so
+    it (this exact bug shipped once — B1). Strips /* */ comments and quoted strings first so
     braces inside content/url() values don't false-positive.
     """
     for asset, parts in ASSETS.items():
@@ -117,7 +123,7 @@ def check_css_braces() -> None:
 
 # Option-2 / "Durable Fix B": flag a DARK-default rule that hardcodes a theme-extreme literal color on a
 # theme-sensitive property with NO body.theme-light counterpart — the root cause of every recurring
-# light-mode dark-box / invisible-text bug (DOIT.18/19/25/28). Precision-first: only near-opaque,
+# light-mode dark-box / invisible-text bug (/19/25/28). Precision-first: only near-opaque,
 # near-extreme literals (very dark backgrounds / very light text) are flagged, so vibrant brand/status
 # colors that read in both themes don't false-positive. Selectors that are intentionally theme-
 # independent live in LIGHT_LINT_ALLOWLIST (vetted, with a reason).
@@ -410,6 +416,107 @@ def write_locales() -> bool:
     return changed
 
 
+def lint_duplicate_functions() -> list[str]:
+    """Return error lines for top-level declarations made in more than one JS source file.
+
+    The partials concatenate into one bundle sharing one scope, so a name declared in two partials lets the
+    last-concatenated one win silently (AGENTS.md). this covers top-level `const`/`let`/`class`
+    too, not just `function` — a duplicate const would otherwise only surface as a `node --check`
+    redeclaration error, which the manual lane can miss.
+    """
+    js_sources = ASSETS.get("yolomux.js", [])
+    name_to_files: dict[str, list[str]] = defaultdict(list)
+    decl = re.compile(r"^(?:function\s+(\w+)\s*\(|(?:const|let|class)\s+(\w+)\b)")
+    for part in js_sources:
+        path = repo_path(part)
+        try:
+            text = read_text(path)
+        except FileNotFoundError:
+            continue
+        for line in text.splitlines():
+            m = decl.match(line)
+            if m:
+                name_to_files[m.group(1) or m.group(2)].append(str(part))
+    errors = []
+    for name, files in sorted(name_to_files.items()):
+        if len(files) > 1:
+            errors.append(f"duplicate top-level declaration '{name}' in: {', '.join(files)}")
+    return errors
+
+
+def lint_undefined_css_vars() -> list[str]:
+    """Every `var(--x)` in the CSS bundle must resolve to a `--x:` definition (CSS) or a JS
+    `setProperty('--x', …)` / inline `style="--x:…"`. a typo'd or removed token name otherwise
+    degrades silently (a hover that does nothing, an invalid `font` shorthand)."""
+    css = build_asset("yolomux.css")
+    js = build_asset("yolomux.js")
+    css_no_comments = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
+    defined = set(re.findall(r"(--[\w-]+)\s*:", css_no_comments))
+    defined |= set(re.findall(r"setProperty\(\s*[`'\"]\s*(--[\w-]+)", js))
+    defined |= set(re.findall(r"(--[\w-]+)\s*:", js))
+    referenced = set(re.findall(r"var\(\s*(--[\w-]+)", css_no_comments))
+    return [f"undefined CSS var {name} (referenced via var() but never defined in CSS or set from JS)"
+            for name in sorted(referenced - defined)]
+
+
+def _token_hex_values() -> dict[str, list[str]]:
+    token_file = repo_path("static_src/css/yolomux/00_tokens_base.css")
+    css = re.sub(r"/\*.*?\*/", "", read_text(token_file), flags=re.DOTALL)
+    values: dict[str, list[str]] = defaultdict(list)
+    for match in re.finditer(r"(--[\w-]+)\s*:\s*(#[0-9a-fA-F]{6})\b", css):
+        values[match.group(2).lower()].append(match.group(1))
+    return values
+
+
+def lint_raw_literal_equals_token() -> list[str]:
+    """Semantic token colors should be referenced through `var(--token)`, not copied as raw hex.
+
+    White and `var(--x, #fallback)` literals are intentionally left alone: white is used as real paint in
+    shadows/surfaces, and fallback literals are part of the token reference rather than a parallel copy.
+    """
+    token_values = _token_hex_values()
+    errors: list[str] = []
+    for part in ASSETS.get("yolomux.css", []):
+        if part.endswith("00_tokens_base.css"):
+            continue
+        path = repo_path(part)
+        try:
+            text = read_text(path)
+        except FileNotFoundError:
+            continue
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            for match in re.finditer(r"#[0-9a-fA-F]{6}\b", line):
+                literal = match.group(0).lower()
+                if literal not in token_values:
+                    continue
+                if literal in RAW_TOKEN_LITERAL_IGNORED_VALUES:
+                    continue
+                if "var(" in line:
+                    continue
+                tokens = ", ".join(sorted(set(token_values[literal])))
+                errors.append(f"{part}:{line_no}: raw color {literal} duplicates token value(s) {tokens}; use var(--token)")
+    return errors
+
+
+def lint_raw_window_viewport_reads() -> list[str]:
+    """Every JS viewport read must go through appViewport(); the one owner line is marked."""
+    errors: list[str] = []
+    pattern = re.compile(r"\bwindow\.inner(?:Width|Height)\b")
+    for part in ASSETS.get("yolomux.js", []):
+        path = repo_path(part)
+        try:
+            text = read_text(path)
+        except FileNotFoundError:
+            continue
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            if not pattern.search(line):
+                continue
+            if WINDOW_VIEWPORT_ALLOW_MARKER in line:
+                continue
+            errors.append(f"{part}:{line_no}: raw window.innerWidth/innerHeight read; use appViewport()")
+    return errors
+
+
 def check_locales() -> list[str]:
     stale: list[str] = []
     for locale, text in expected_locale_outputs().items():
@@ -499,18 +606,31 @@ def main(argv: list[str] | None = None) -> int:
     if args.watch:
         return watch_loop(assets)
     try:
-        check_css_braces()
         if args.check:
+            check_css_braces()
             stale = [asset for asset in assets if not check_asset(asset)]
             stale += check_locales()
-            if stale:
-                print("stale static assets: " + ", ".join(stale), file=sys.stderr)
+            # the documented pre-commit gate runs the FULL lint set — duplicate top-level
+            # declarations, undefined CSS vars, AND theme-light pairing (the last previously ran only under
+            # --lint-light, so it was absent from --check / the CPS check list).
+            lint_errors = (
+                lint_duplicate_functions()
+                + lint_undefined_css_vars()
+                + lint_raw_literal_equals_token()
+                + lint_raw_window_viewport_reads()
+                + lint_light_mode_pairs()
+            )
+            for err in lint_errors:
+                print(err, file=sys.stderr)
+            if stale or lint_errors:
+                if stale:
+                    print("stale static assets: " + ", ".join(stale), file=sys.stderr)
                 return 1
             return 0
 
-        changed = [asset for asset in assets if write_asset(asset)]
-        if write_locales():
-            changed.append("locales")
+        # a plain build goes through build_once (the same path --watch uses), so an invariant
+        # added there (e.g. check_css_braces) can never be skipped by the non-watch build.
+        changed = build_once(assets)
         if changed:
             print("rebuilt static assets: " + ", ".join(changed))
         return 0

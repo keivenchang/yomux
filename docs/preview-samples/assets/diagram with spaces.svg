@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 220" role="img" aria-labelledby="title desc">
+  <title id="title">Diagram with spaces in the filename</title>
+  <desc id="desc">A small flow diagram used to verify Markdown local image paths with spaces.</desc>
+  <rect width="640" height="220" fill="#ffffff"/>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="#334155"/>
+    </marker>
+  </defs>
+  <rect x="36" y="70" width="150" height="72" rx="10" fill="#dbeafe" stroke="#2563eb" stroke-width="3"/>
+  <text x="111" y="113" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="20" fill="#172033">Markdown</text>
+  <line x1="198" y1="106" x2="290" y2="106" stroke="#334155" stroke-width="4" marker-end="url(#arrow)"/>
+  <rect x="304" y="70" width="150" height="72" rx="10" fill="#dcfce7" stroke="#16a34a" stroke-width="3"/>
+  <text x="379" y="113" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="20" fill="#172033">Raw file</text>
+  <line x1="466" y1="106" x2="558" y2="106" stroke="#334155" stroke-width="4" marker-end="url(#arrow)"/>
+  <rect x="572" y="70" width="32" height="72" rx="10" fill="#fef3c7" stroke="#d97706" stroke-width="3"/>
+</svg>

@@ -15,8 +15,10 @@ from .common import METADATA_CACHE_TTL_SECONDS
 from .common import OTHER_BRANCH_LIMIT
 from .common import PaneInfo
 from .common import SessionInfo
+from .cache import TtlCache
 from .common import _CACHE_MISS
 from .common import git
+from .common import git_ahead_behind_counts
 from .github_client import extract_linear_ids
 from .github_client import github_checks_unknown
 from .github_client import github_pull_request_by_branch
@@ -25,6 +27,7 @@ from .github_client import github_pull_request_url
 from .github_client import pull_request_status_label  # noqa: F401 - re-exported for existing metadata callers
 from .github_client import summarize_github_checks  # noqa: F401 - re-exported for existing metadata callers
 from .linear_client import linear_issue_metadata
+from .settings import settings_payload
 from .workdir import numbered_session_workdir
 from .workdir import session_workdir
 
@@ -96,6 +99,48 @@ def path_within(path_text: str, root_text: str) -> bool:
         return False
     return path == root or path.is_relative_to(root)
 
+def git_worktree_identity(cwd: str, toplevel: str) -> dict[str, str] | None:
+    """S7: name a LINKED git worktree vs its parent repo, cheaply (one local git call).
+    A linked worktree's per-worktree git dir (`.../.git/worktrees/<name>`) differs from the shared
+    common dir (`.../.git`); the main worktree's two are identical. Returns the worktree path, its
+    name, and the parent (main) repo root — or None when `cwd` is the main worktree / not a worktree."""
+    res = git(["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], cwd)
+    if res.returncode != 0:
+        return None
+    parts = [line.strip() for line in res.stdout.splitlines() if line.strip()]
+    if len(parts) < 2:
+        return None
+    git_dir, common_dir = parts[0], parts[1]
+    if not git_dir or not common_dir or git_dir == common_dir:
+        return None
+    return {"path": toplevel, "parent_root": str(Path(common_dir).parent), "name": Path(git_dir).name}
+
+
+def linked_worktree_branch_names(cwd: str, toplevel: str) -> set[str]:
+    result = git(["worktree", "list", "--porcelain"], cwd)
+    if result.returncode != 0:
+        return set()
+    try:
+        root = Path(toplevel).resolve()
+    except OSError:
+        root = Path(toplevel)
+    branches: set[str] = set()
+    worktree_path: str | None = None
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            worktree_path = line.removeprefix("worktree ").strip()
+            continue
+        if not worktree_path or not line.startswith("branch refs/heads/"):
+            continue
+        try:
+            is_current_root = Path(worktree_path).resolve() == root
+        except OSError:
+            is_current_root = Path(worktree_path) == root
+        if not is_current_root:
+            branches.add(line.removeprefix("branch refs/heads/").strip())
+    return branches
+
+
 def git_inventory(cwd: str | None) -> dict[str, Any] | None:
     if not cwd:
         return None
@@ -112,8 +157,11 @@ def git_inventory(cwd: str | None) -> dict[str, Any] | None:
     branch_name = branch.stdout.strip() if branch.returncode == 0 else None
     ahead, behind = git_ahead_behind(cwd, upstream_name)
     status_lines = [line for line in status.stdout.splitlines() if line.strip()] if status.returncode == 0 else []
+    root_text = root.stdout.strip()
+    worktree = git_worktree_identity(cwd, root_text)
+    linked_branches = set() if worktree is not None else linked_worktree_branch_names(cwd, root_text)
     return {
-        "root": root.stdout.strip(),
+        "root": root_text,
         "branch": branch_name,
         "upstream": upstream_name,
         "head": head.stdout.strip() if head.returncode == 0 else None,
@@ -123,68 +171,141 @@ def git_inventory(cwd: str | None) -> dict[str, Any] | None:
         "dirty_count": len(status_lines),
         "status": status_lines[:30],
         "github_repo": parse_github_remote(origin_url.stdout.strip()) if origin_url.returncode == 0 else None,
-        "other_branches": local_branch_inventory(cwd, branch_name),
+        "other_branches": local_branch_inventory(
+            cwd,
+            branch_name,
+            worktree=worktree,
+            linked_worktree_branches=linked_branches,
+        ),
+        "worktree": worktree,
     }
 
 def git_ahead_behind(cwd: str, upstream: str | None) -> tuple[int | None, int | None]:
+    # ahead/behind counting lives in common.git_ahead_behind_counts (one ref order, one parse).
+    # HEAD relative to its upstream: ahead = local commits not pushed, behind = upstream commits not pulled.
     if not upstream:
         return None, None
-    result = git(["rev-list", "--left-right", "--count", f"{upstream}...HEAD"], cwd)
-    if result.returncode != 0:
-        return None, None
-    parts = result.stdout.split()
-    if len(parts) != 2:
-        return None, None
-    try:
-        behind = int(parts[0])
-        ahead = int(parts[1])
-    except ValueError:
-        return None, None
-    return ahead, behind
+    counts = git_ahead_behind_counts(cwd, upstream, "HEAD")
+    return counts if counts is not None else (None, None)
 
-def local_branch_inventory(cwd: str, current_branch: str | None) -> dict[str, Any]:
+def local_branch_inventory(
+    cwd: str,
+    current_branch: str | None,
+    worktree: dict[str, str] | None = None,
+    linked_worktree_branches: set[str] | None = None,
+) -> dict[str, Any]:
     result = git(
         [
             "for-each-ref",
             "--sort=-committerdate",
-            "--format=%(refname:short)\t%(objectname)\t%(committerdate:unix)\t%(committerdate:relative)\t%(subject)",
+            "--format=%(refname)\t%(refname:short)\t%(objectname)\t%(committerdate:unix)"
+            "\t%(committerdate:relative)\t%(subject)",
             "refs/heads",
+            "refs/remotes/origin",
         ],
         cwd,
     )
     if result.returncode != 0:
         return {"branches": [], "hidden_count": 0}
     pr_by_sha = local_pull_request_by_sha(cwd)
-    branches: list[dict[str, Any]] = []
-    hidden_count = 0
+    entries: list[dict[str, Any]] = []
+    all_local_names: set[str] = set()
     for line in result.stdout.splitlines():
-        name, _, rest = line.partition("\t")
+        full_ref, _, rest = line.partition("\t")
+        short_ref, _, rest = rest.partition("\t")
         sha, _, rest = rest.partition("\t")
         updated_ts_text, _, rest = rest.partition("\t")
         updated, _, subject = rest.partition("\t")
-        if not name:
+        source, name = branch_inventory_ref(full_ref, short_ref)
+        if not source or not name:
             continue
+        if source == "local":
+            all_local_names.add(name)
+        entries.append(
+            {
+                "source": source,
+                "name": name,
+                "sha": sha,
+                "updated_ts_text": updated_ts_text,
+                "updated": updated,
+                "subject": subject,
+            }
+        )
+    branches: list[dict[str, Any]] = []
+    hidden_count = 0
+    seen_names: set[str] = set()
+    local_entries = [entry for entry in entries if entry["source"] == "local"]
+    remote_entries = [entry for entry in entries if entry["source"] == "remote"]
+    if worktree is not None:
+        # Linked worktrees share refs/heads in the common git dir. Let the main checkout own the shared
+        # branch inventory; each linked checkout only reports the branch it has checked out.
+        local_entries = [entry for entry in local_entries if entry["name"] == current_branch]
+        remote_entries = []
+    else:
+        linked_worktree_branches = linked_worktree_branches or set()
+        local_entries = [
+            entry
+            for entry in local_entries
+            if entry["name"] == current_branch or entry["name"] not in linked_worktree_branches
+        ]
+    local_names = {entry["name"] for entry in local_entries}
+    local_namespaces = {
+        namespace
+        for namespace in (branch_namespace(name) for name in local_names)
+        if namespace
+    }
+    for entry in [*local_entries, *remote_entries]:
+        name = entry["name"]
+        sha = entry["sha"]
+        if name in seen_names:
+            continue
+        remote_only_pr = entry["source"] == "remote" and name not in all_local_names and sha in pr_by_sha
+        if entry["source"] == "remote":
+            # Remote refs are huge in shared repos; only promote PR branches from namespaces already present
+            # locally so stale or unrelated remote PR refs do not crowd out the checked-out work.
+            if not remote_only_pr or branch_namespace(name) not in local_namespaces:
+                continue
         if len(branches) >= OTHER_BRANCH_LIMIT and name != current_branch:
-            hidden_count += 1
+            if entry["source"] == "local":
+                hidden_count += 1
             continue
         try:
-            updated_ts = int(updated_ts_text)
+            updated_ts = int(entry["updated_ts_text"])
         except ValueError:
             updated_ts = None
         local_pr = pr_by_sha.get(sha)
+        seen_names.add(name)
         branches.append(
             {
                 "name": name,
                 "current": name == current_branch,
-                "updated": updated or None,
+                "remote": entry["source"] == "remote",
+                "updated": entry["updated"] or None,
                 "updated_ts": updated_ts,
                 "head": sha[:12] if sha else None,
-                "subject": subject or None,
+                "subject": entry["subject"] or None,
                 "pull_request": local_pr,
-                "linear_ids": extract_linear_ids(name, subject),
+                "linear_ids": extract_linear_ids(name, entry["subject"]),
             }
         )
     return {"branches": branches, "hidden_count": hidden_count}
+
+
+def branch_inventory_ref(full_ref: str, short_ref: str) -> tuple[str | None, str | None]:
+    if full_ref.startswith("refs/heads/"):
+        return "local", full_ref.removeprefix("refs/heads/")
+    if full_ref.startswith("refs/remotes/origin/"):
+        name = full_ref.removeprefix("refs/remotes/origin/")
+        if name == "HEAD" or name.startswith("pull-request/"):
+            return None, None
+        return "remote", name
+    return None, short_ref or None
+
+
+def branch_namespace(name: str) -> str | None:
+    namespace, separator, _ = name.partition("/")
+    return namespace if separator and namespace else None
+
 
 def local_pull_request_by_sha(cwd: str) -> dict[str, dict[str, Any]]:
     result = git(
@@ -240,7 +361,7 @@ def parse_github_remote(remote_url: str) -> dict[str, str] | None:
         "url": f"https://github.com/{quote(owner)}/{quote(name)}",
     }
 
-# DOIT.29: a watched-PR entry is either "owner/repo#N" (or "owner/repo/N") or a full GitHub PR URL.
+# a watched-PR entry is either "owner/repo#N" (or "owner/repo/N") or a full GitHub PR URL.
 # An owner/repo segment is a conservative `[A-Za-z0-9._-]+` (GitHub's own allowed set).
 _PR_REF_SHORT = re.compile(r"^([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)(?:#|/(?:pull/)?)(\d+)$")
 
@@ -321,43 +442,16 @@ def watched_pr_metadata(
         results.append(pr)
     return {"watched_prs": results, "truncated": truncated, "invalid": invalid}
 
-class MetadataCache:
-    # DOIT.6 #83: bound the cache so dead branch/sha keys (e.g. github-checks:<old_sha> after a push)
-    # don't live for the whole process lifetime. Expired entries are swept on write, and a hard cap
-    # evicts the soonest-to-expire keys.
-    MAX_ENTRIES = 1024
-
+class MetadataCache(TtlCache):
+    # now a thin TtlCache subclass (which owns the bounded-eviction algorithm this duplicated —
+    # #83). Two behaviors preserved via the parent's knobs: get() returns the _CACHE_MISS sentinel
+    # (callers distinguish a cached empty value from a miss), and the TTL is measured on the WALL clock
+    # (time.time), as the original did, via clock=. Per-entry TTL on set() is inherited.
     def __init__(self, ttl_seconds: int = METADATA_CACHE_TTL_SECONDS):
-        self.ttl_seconds = ttl_seconds
-        self.lock = threading.Lock()
-        self.values: dict[str, tuple[float, Any]] = {}
+        super().__init__(ttl_seconds=ttl_seconds, max_entries=1024, clock=time.time)
 
     def get(self, key: str) -> Any:
-        with self.lock:
-            item = self.values.get(key)
-            if item is None:
-                return _CACHE_MISS
-            expires_at, value = item
-            if expires_at <= time.time():
-                self.values.pop(key, None)
-                return _CACHE_MISS
-            return value
-
-    def set(self, key: str, value: Any, ttl: float | None = None) -> None:
-        # DOIT.6 #71: allow a per-entry TTL so a failed/empty fetch can be cached briefly (retry soon)
-        # instead of for the full positive TTL.
-        with self.lock:
-            now = time.time()
-            self.values[key] = (now + (self.ttl_seconds if ttl is None else ttl), value)
-            # DOIT.6 #83: sweep expired entries on write, then evict the soonest-to-expire keys if still
-            # over the cap, so the cache stays bounded and dead keys don't leak.
-            if len(self.values) > self.MAX_ENTRIES:
-                for dead in [k for k, (expires_at, _) in self.values.items() if expires_at <= now]:
-                    self.values.pop(dead, None)
-                if len(self.values) > self.MAX_ENTRIES:
-                    overflow = len(self.values) - self.MAX_ENTRIES
-                    for stale in sorted(self.values, key=lambda k: self.values[k][0])[:overflow]:
-                        self.values.pop(stale, None)
+        return self.get_or_miss(key)
 
 def session_project_metadata(info: SessionInfo, cache: MetadataCache, allow_network: bool = True) -> dict[str, Any]:
     git_data = session_git_inventory(info)
@@ -396,30 +490,79 @@ def enrich_branch_pull_requests(git_data: dict[str, Any], cache: MetadataCache, 
             continue
         local_pr = branch.get("pull_request")
         number = local_pr.get("number") if isinstance(local_pr, dict) else None
-        if not isinstance(number, int):
+        if isinstance(number, int):
+            branch["pull_request"] = pull_request_by_number_or_fallback(
+                repo,
+                number,
+                cache,
+                allow_network,
+                "local-ref",
+                local_pr.get("title") if isinstance(local_pr.get("title"), str) else branch.get("subject"),
+            )
             continue
-        branch["pull_request"] = pull_request_by_number_or_fallback(
-            repo,
-            number,
-            cache,
-            allow_network,
-            "local-ref",
-            local_pr.get("title") if isinstance(local_pr.get("title"), str) else branch.get("subject"),
-        )
+        # No local (#N) marker — that only appears after a squash-merge, so an OPEN PR on this branch
+        # has none and the by-number path above can't find it. Resolve it by HEAD BRANCH instead,
+        # mirroring project_pull_request's fallback, so YO!info surfaces open PRs on non-current
+        # branches (not just merged ones). Skip the current branch (project_pull_request already
+        # resolved its PR) and main/HEAD (no feature PR). github_pull_request_by_branch is cache-keyed,
+        # so this is bounded to at most OTHER_BRANCH_LIMIT branch lookups per repo per cache window.
+        name = branch.get("name")
+        if branch.get("current") or not isinstance(name, str) or name in MAIN_BRANCHES or name == "HEAD":
+            continue
+        found = github_pull_request_by_branch(repo, name, cache, allow_network=allow_network)
+        if found:
+            branch["pull_request"] = found
 
 def session_git_inventory(info: SessionInfo) -> dict[str, Any] | None:
-    for cwd in candidate_session_cwds(info):
+    for summary in session_repo_summaries(info, None):
+        cwd = summary.get("cwd") or summary.get("root")
         git_data = git_inventory(cwd)
         if git_data is not None:
             git_data["cwd"] = cwd
+            git_data["activity_ts"] = summary.get("activity_ts", 0)
+            git_data["activity_source"] = summary.get("activity_source", "")
             return git_data
     return None
 
 
+def status_entry_path(line: str) -> str:
+    if len(line) < 4:
+        return ""
+    path = line[3:].strip()
+    if " -> " in path:
+        path = path.rsplit(" -> ", 1)[-1].strip()
+    if len(path) >= 2 and path[0] == path[-1] == '"':
+        path = path[1:-1]
+    return path
+
+
+def repo_dirty_activity_ts(root: str, status_lines: list[str]) -> float:
+    latest = 0.0
+    repo = Path(root)
+    for line in status_lines[:200]:
+        rel_path = status_entry_path(line)
+        if not rel_path:
+            continue
+        try:
+            latest = max(latest, (repo / rel_path).stat().st_mtime)
+        except OSError:
+            continue
+    return latest
+
+
+def repo_commit_activity_ts(cwd: str) -> float:
+    result = git(["log", "-1", "--format=%ct"], cwd)
+    if result.returncode != 0:
+        return 0.0
+    try:
+        return float(result.stdout.strip() or 0)
+    except ValueError:
+        return 0.0
+
+
 def repo_summary(cwd: str | None) -> dict[str, Any] | None:
-    # C9: a LIGHT per-repo summary (branch + dirty + ahead/behind) using only cheap LOCAL git — no PR/CI
-    # network call and no branch inventory. Used to list every repo a session touches in the detail-bar
-    # popover without a per-poll GitHub fetch storm (only the primary repo's PR is fetched eagerly).
+    # C9: a per-repo local summary. It stays network-free, but includes branch inventory so YO!info can
+    # show every branch in every repo a session touches; only the primary repo's PRs are enriched eagerly.
     if not cwd:
         return None
     root = git(["rev-parse", "--show-toplevel"], cwd)
@@ -428,15 +571,34 @@ def repo_summary(cwd: str | None) -> dict[str, Any] | None:
     branch = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
     upstream = git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], cwd)
     status = git(["status", "--short"], cwd)
+    origin_url = git(["config", "--get", "remote.origin.url"], cwd)
     upstream_name = upstream.stdout.strip() if upstream.returncode == 0 else None
+    branch_name = branch.stdout.strip() if branch.returncode == 0 else None
     ahead, behind = git_ahead_behind(cwd, upstream_name)
     status_lines = [line for line in status.stdout.splitlines() if line.strip()] if status.returncode == 0 else []
+    root_text = root.stdout.strip()
+    dirty_activity_ts = repo_dirty_activity_ts(root_text, status_lines)
+    commit_activity_ts = repo_commit_activity_ts(cwd)
+    activity_ts = max(dirty_activity_ts, commit_activity_ts)
+    worktree = git_worktree_identity(cwd, root_text)
+    linked_branches = set() if worktree is not None else linked_worktree_branch_names(cwd, root_text)
     return {
-        "root": root.stdout.strip(),
-        "branch": branch.stdout.strip() if branch.returncode == 0 else None,
+        "root": root_text,
+        "cwd": str(Path(cwd).expanduser().resolve()),
+        "branch": branch_name,
         "ahead": ahead,
         "behind": behind,
         "dirty_count": len(status_lines),
+        "activity_ts": activity_ts,
+        "activity_source": "dirty" if dirty_activity_ts >= commit_activity_ts and dirty_activity_ts > 0 else ("commit" if commit_activity_ts > 0 else ""),
+        "github_repo": parse_github_remote(origin_url.stdout.strip()) if origin_url.returncode == 0 else None,
+        "other_branches": local_branch_inventory(
+            cwd,
+            branch_name,
+            worktree=worktree,
+            linked_worktree_branches=linked_branches,
+        ),
+        "worktree": worktree,
     }
 
 
@@ -452,10 +614,15 @@ def session_repo_summaries(info: SessionInfo, primary_root: str | None) -> list[
         seen.add(summary["root"])
         summary["primary"] = summary["root"] == primary_root
         summaries.append(summary)
-    return summaries
+    return [
+        summary for _index, summary in sorted(
+            enumerate(summaries),
+            key=lambda item: (-(float(item[1].get("activity_ts") or 0)), item[0]),
+        )
+    ]
 
 def candidate_session_cwds(info: SessionInfo) -> list[str]:
-    # DOIT.32: the LIVE pane cwd wins. The session-number default workdir (session "1" -> vortex1) is
+    # the LIVE pane cwd wins. The session-number default workdir (session "1" -> vortex1) is
     # only a fallback for a fresh shell sitting in home / a non-repo — it must NOT out-rank a pane that
     # has `cd`'d into a different repo (which previously kept the project pinned to vortex1 forever).
     paths: list[str] = []
@@ -469,6 +636,10 @@ def candidate_session_cwds(info: SessionInfo) -> list[str]:
     numbered_workdir = numbered_session_workdir(info.session)   # fallback: numbered workdir
     if numbered_workdir and numbered_workdir.is_dir():
         paths.append(str(numbered_workdir))
+    for raw in settings_payload().get("settings", {}).get("file_explorer", {}).get("companion_dirs", []):
+        expanded = str(Path(raw).expanduser()) if raw else ""
+        if expanded:
+            paths.append(expanded)
     return unique_existing_paths(paths)
 
 def unique_existing_paths(paths: list[str]) -> list[str]:
@@ -565,10 +736,19 @@ def fallback_pull_request(repo: dict[str, str], number: int, source: str, title:
     }
 
 def session_to_json(info: SessionInfo, metadata_cache: MetadataCache, allow_network: bool = True) -> dict[str, Any]:
+    transcript_mtime = 0.0
+    for agent in info.agents:
+        if not agent.transcript:
+            continue
+        try:
+            transcript_mtime = max(transcript_mtime, Path(agent.transcript).stat().st_mtime)
+        except OSError:
+            continue
     return {
         "session": info.session,
         "panes": [asdict(pane) for pane in info.panes],
         "selected_pane": asdict(info.selected_pane) if info.selected_pane else None,
         "agents": [asdict(agent) for agent in info.agents],
+        "transcript_mtime": transcript_mtime,
         "project": session_project_metadata(info, metadata_cache, allow_network=allow_network),
     }

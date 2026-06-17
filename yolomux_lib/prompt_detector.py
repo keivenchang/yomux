@@ -1,8 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-from __future__ import annotations
+"""Pure prompt detection, approval state, and command safety helpers.
 
-"""Pure prompt detection, approval state, and command safety helpers."""
+Keep the detector contract and raw prompt examples synced with
+docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md.
+"""
+
+from __future__ import annotations
 
 import hashlib
 import re
@@ -14,7 +18,7 @@ from . import yolo_rules
 def is_dangerous(cmd_line: str) -> bool:
     """Return True when the shared YOLO rule engine would not auto-approve this command.
 
-    DOIT.6 #68: evaluate the USER's active ruleset (the same one the worker acts on), not the built-in
+    evaluate the USER's active ruleset (the same one the worker acts on), not the built-in
     default, so the UI danger badge matches the real auto-approve decision. Any non-approve outcome
     (block / decline / ask / unknown) is "dangerous" for badge purposes — only a clean approve is safe.
     The catastrophic hard floor still flags regardless of the ruleset.
@@ -52,7 +56,7 @@ _SKIP_LINE = re.compile(
 
 # Lines that look like commands (contain special shell chars, flags, or are long).
 _CMD_CHARS = re.compile(r"[/|&;$=(>`~]|--|\s-[a-zA-Z]")
-# DOIT.6 #79: the canonical Claude bullet `● Bash(<cmd>)` / `• Bash(<cmd>)` — the parenthesized arg is
+# the canonical Claude bullet `● Bash(<cmd>)` / `• Bash(<cmd>)` — the parenthesized arg is
 # the exact command, so anchoring to it avoids folding the adjacent description prose.
 _BASH_CALL_RE = re.compile(r"[●•]\s*Bash\((.+)\)\s*$")
 
@@ -111,7 +115,7 @@ def extract_command(pane_text: str) -> str | None:
                     # Heredocs span their own delimited body; keep the existing single-line handling.
                     if "<<" in cmd:
                         return cmd or None
-                    # DOIT.6 #61: do NOT early-return on the first shlex-complete prefix — a wrapped
+                    # do NOT early-return on the first shlex-complete prefix — a wrapped
                     # command (e.g. `$ git push` continuing with `--force-with-lease`) would classify
                     # on the safe-looking prefix and auto-approve the dangerous tail. ALWAYS gather every
                     # continuation line up to the selector/stop boundary and classify the FULL command.
@@ -147,7 +151,7 @@ def extract_command(pane_text: str) -> str | None:
     if trigger_idx is None:
         return None
 
-    # DOIT.17: find the top of the CURRENT prompt block FIRST, so neither the `● Bash(<cmd>)` anchor
+    # find the top of the CURRENT prompt block FIRST, so neither the `● Bash(<cmd>)` anchor
     # search nor the command gather can cross a `─────` separator (or a prior `●` transcript bullet) into
     # the PREVIOUS step and return its (stale, often safe-looking) command. Before this fix the unbounded
     # backward search grabbed the prior `● Bash(chmod …)` when the live prompt — correctly matching real
@@ -162,7 +166,7 @@ def extract_command(pane_text: str) -> str | None:
             break
 
         if stripped.startswith("●"):
-            # DOIT.6 #79: a `● Bash(<cmd>)` bullet at the block top IS the command (the post-approval
+            # a `● Bash(<cmd>)` bullet at the block top IS the command (the post-approval
             # transcript form); otherwise the bullet just bounds the block (prior step's output).
             bash_call = _BASH_CALL_RE.search(lines[i])
             if bash_call:
@@ -177,7 +181,7 @@ def extract_command(pane_text: str) -> str | None:
         if stripped:
             found_content = True
 
-    # DOIT.6 #79: anchor to the canonical `● Bash(<cmd>)` arg WITHIN the block (bounded by top_idx — never
+    # anchor to the canonical `● Bash(<cmd>)` arg WITHIN the block (bounded by top_idx — never
     # crosses into a prior step) so we never fold the adjacent description prose into the danger string.
     for i in range(top_idx, trigger_idx):
         bash_call = _BASH_CALL_RE.search(lines[i])
@@ -301,7 +305,7 @@ def _approval_prompt_defaults_to_yes(pane_text: str) -> bool:
 def yes_is_selected(pane_text: str) -> bool:
     """Check that the first option is currently highlighted by an ACTUAL selector glyph (❯/›/>).
 
-    DOIT.6 #67: do NOT authorize from a positional "option 1 is Yes before No" guess — on a redraw
+    do NOT authorize from a positional "option 1 is Yes before No" guess — on a redraw
     frame with nothing highlighted that wrongly reports the first option as selected, which can confirm
     the wrong option. A send requires a visible selector glyph.
     """
@@ -393,6 +397,9 @@ _WORKING_LINE_RE = re.compile(
     rf"^\s*{_WORKING_LEADING_SYMBOL_RE}\s+\S.*(?:…|\.{{3}}).*"
     r"(?:\([^)]*(?:thinking|tokens|effort|esc\s+to\s+interrupt|[↑↓]|\b\d+(?:\.\d+)?\s*[smh]\b)[^)]*\)|\b\d+(?:\.\d+)?\s*[smh]\b)"
     r"|^[^\n]*\([^)]*\besc\s+to\s+interrupt\b[^)]*\)"
+    # Claude Code auto-compact progress line: "Compacting conversation... (Nm Ns → Nk tokens) NN%"
+    # Starts with a capital letter (no leading symbol), so the symbol-gated branch above misses it.
+    r"|^\s*Compacting\s+conversation\.{3}.*\([^)]*(?:tokens|→)[^)]*\)"
     r")",
     re.IGNORECASE,
 )
@@ -408,6 +415,14 @@ _BOX_DRAWING_ONLY_LINE_RE = re.compile(r"^[\s│┃╭╮╰╯┌┐└┘├�
 _BOXED_EMPTY_INPUT_LINE_RE = re.compile(r"^\s*[│┃]\s*[❯›>]?\s*[█▉▊▋▌▍▎▏_ ]*[│┃]\s*$")
 _EFFORT_STATUS_LINE_RE = re.compile(r"^\s*(?:[^\w\s]\s*)?\S+\s+/effort\b", re.IGNORECASE)
 _WORK_QUEUE_HINT_RE = re.compile(r"(?:↑/↓\s+to\s+select|enter\s+to\s+view|↑\s+to\s+manage)", re.IGNORECASE)
+_CODEX_INPUT_HINT_RE = re.compile(
+    r"^\s*(?:[│┃]\s*)?(?:Use\s+/\S+\s+to\s+.+|(?:type|ask)\s+.+)(?:\s*[│┃])?\s*$",
+    re.IGNORECASE,
+)
+_CODEX_MODEL_STATUS_LINE_RE = re.compile(
+    r"^\s*(?:gpt|o\d|codex)[A-Za-z0-9_.-]*\s+\S+(?:\s+\S+)?\s+(?:~|/)[^\s]*(?:\s+\d+%\s+context\s+(?:used|left|remaining))?\s*$",
+    re.IGNORECASE,
+)
 # Header of the Ctrl-T todo overlay, e.g. "11 tasks (0 done, 1 in progress, 10 open)" — also matches
 # singular "1 task (...)". The whole overlay is a bounded block: everything below this header is
 # persistent chrome rendered under a LIVE prompt, not newer agent output.
@@ -427,11 +442,11 @@ _FOOTER_LINE_RE = re.compile(
 )
 _FOOTER_HINT_SEPARATOR_RE = re.compile(r"\s*(?:[·•]|\.(?=\s))\s*")
 _FOOTER_HINT_PART_RE = re.compile(
-    # DOIT.6 #43: also cover Claude's AskUserQuestion footer parts — the arrow cluster "↑/↓ to navigate"
+    # also cover Claude's AskUserQuestion footer parts — the arrow cluster "↑/↓ to navigate"
     # (and ←/→), and a bare single-letter key like "n to add notes".
     r"^(?:"
     r"\? for shortcuts"
-    # DOIT.6 #143: accept ONE-OR-MORE key tokens plus an optional parenthetical before "to", so a
+    # accept ONE-OR-MORE key tokens plus an optional parenthetical before "to", so a
     # footer like "ctrl+b ctrl+b (twice) to run in background" is recognized as a footer hint (not a
     # live command/prompt). Single-key footers like "n to add notes" still match.
     r"|(?:(?:esc|escape|enter|return|tab|shift\+tab|ctrl\+[a-z0-9]|cmd\+[a-z0-9]|alt\+[a-z0-9]|option\+[a-z0-9]|↑/↓|←/→|↑|↓|←|→|[a-z])\s+)+(?:\([^)]*\)\s+)?to\s+.+"
@@ -439,7 +454,7 @@ _FOOTER_HINT_PART_RE = re.compile(
     re.IGNORECASE,
 )
 _QUESTION_RE = re.compile(r"(?:^|\b)(?:Q\d+\s*/\s*\d+\s*:\s*)?.+\?\s*$")
-# DOIT.6 #43: Claude Code's AskUserQuestion footer. Its distinctive combo ("Enter to select" plus a
+# Claude Code's AskUserQuestion footer. Its distinctive combo ("Enter to select" plus a
 # navigate / add-notes / switch-questions hint) identifies the multi-option ask UI, whose selected
 # option is box-highlighted (no ❯ glyph) and which puts a preview / "Notes:" / "Chat about this" block
 # between the options and the footer.
@@ -456,7 +471,10 @@ def _is_working_line(line: str) -> bool:
 
 
 def visible_agent_working(visible_text: str) -> bool:
-    """Return True when the visible pane is showing an active thinking/working row."""
+    """Return True when the visible pane is showing an active thinking/working row.
+
+    Spec: docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md#detector-principles
+    """
     lines = visible_text.splitlines()[-25:]
     working_index = _last_working_index(lines)
     return working_index >= 0 and not _working_line_has_later_prompt(lines, working_index)
@@ -599,6 +617,8 @@ def _is_prompt_trailing_ui_line(line: str) -> bool:
         return True
     if _WORK_QUEUE_HINT_RE.search(stripped) or _WORK_QUEUE_ROW_RE.match(stripped):
         return True
+    if _CODEX_INPUT_HINT_RE.match(stripped) or _CODEX_MODEL_STATUS_LINE_RE.match(stripped):
+        return True
     if _CLAUDE_AGENT_TOKEN_SUBLINE_RE.search(stripped):
         return True
     if re.match(r"^[⎿└]\s+Tip:", stripped, re.IGNORECASE):
@@ -614,7 +634,7 @@ def _is_prompt_trailing_ui_line(line: str) -> bool:
     # Ctrl-T task/todo list rows shown below an approval prompt (pending ☐, done ☑/☒/◼, active ◐),
     # optionally led by a tree/box connector. Defense-in-depth for a partial overlay (header scrolled
     # off): these are prompt-trailing UI, not new activity. The header break above is the durable fix.
-    # DOIT.35 C1: include this Claude version's task glyphs — □ (U+25A1) pending, ✓/✔ done, ✗/✘ failed,
+    # include this Claude version's task glyphs — □ (U+25A1) pending, ✓/✔ done, ✗/✘ failed,
     # ◯ (U+25EF) — alongside the U+2610 ballot-box family. Otherwise a working session with a Ctrl-T task
     # list reads as new output (visible_agent_working -> False) and the YO ball stops spinning.
     if re.match(r"^[│├└╰⎿]?\s*[☐☑☒▢▣◻◼◐◓□✓✔✗✘◯]\s+\S", stripped):
@@ -624,6 +644,9 @@ def _is_prompt_trailing_ui_line(line: str) -> bool:
     if re.fullmatch(r"[❯›>][\s█▉▊▋▌▍▎▏]*", stripped):
         return True
     if re.search(r"\b(?:bypass\s+permissions|esc\s+to\s+interrupt|\d+\s+shells?\b)", stripped, re.IGNORECASE):
+        return True
+    # Claude Code auto-compact countdown footer: "Ns until auto-compact · /model sonnet[Nm"
+    if re.search(r"\buntil\s+auto-compact\b", stripped, re.IGNORECASE):
         return True
     return False
 
@@ -644,7 +667,7 @@ def _is_ask_user_question_footer(line: str) -> bool:
 def ask_user_question_prompt_text(visible_text: str) -> str:
     """Return the question text when the visible pane shows Claude Code's AskUserQuestion UI.
 
-    DOIT.6 #43: that UI is NOT a yes/no permission prompt (``detect_prompt`` returns None) and its
+    that UI is NOT a yes/no permission prompt (``detect_prompt`` returns None) and its
     selected option is box-highlighted (no ``❯``), so the generic choice detector misses it. Recognize
     it by its footer ("Enter to select" + a navigate / add-notes / switch-questions hint) below ≥2
     numbered options and a ``?``-question line — even with a preview box / "Notes:" / "Chat about this"
@@ -680,7 +703,7 @@ def visible_choice_prompt_text(visible_text: str) -> str:
     if re.search(r"accept edits on\s*\(", visible_text, re.IGNORECASE):
         return ""
 
-    # DOIT.6 #43: the box-highlighted AskUserQuestion multi-option UI is a question, not a yes/no prompt.
+    # the box-highlighted AskUserQuestion multi-option UI is a question, not a yes/no prompt.
     ask_question = ask_user_question_prompt_text(visible_text)
     if ask_question:
         return ask_question
@@ -711,10 +734,10 @@ def visible_choice_prompt_text(visible_text: str) -> str:
         stripped = _clean_prompt_block_line(line)
         if not stripped or _is_footer_hint_line(stripped) or stripped.startswith(("keivenc@", "$ ")):
             continue
-        if _QUESTION_RE.match(stripped):
-            return stripped
         if re.match(r"^\s*[❯›>]\s+\S", line):
             break
+        if _QUESTION_RE.match(stripped):
+            return stripped
     return ""
 
 
@@ -723,6 +746,7 @@ def agent_screen_state(visible_text: str) -> dict[str, object]:
 
     Approval detection and auto-approval use the same visible pane text as this
     UI state, so the browser does not need its own stale scrollback parser.
+    Spec: docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md#state-model
     """
     prompt_state = approval_prompt_state(visible_text)
     prompt_type = prompt_state.get("type") or None
@@ -790,6 +814,8 @@ def approval_prompt_state(visible_text: str, pane_text: str | None = None) -> di
     ``visible_text`` must be captured with ``visible_only=True``. ``pane_text``
     may include scrollback and is used only to extract command context after a
     visible bash prompt has already been confirmed.
+    Spec: docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md#claude-approval-patterns
+    and docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md#codex-approval-patterns.
     """
     prompt_type = detect_prompt(visible_text)
     selected = yes_is_selected(visible_text)

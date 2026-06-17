@@ -1,0 +1,10 @@
+{
+  "_comment": "Single source for UI color literals that BOTH the node suite (tests/layout_url.test.js) and the Selenium suite (tests/test_browser_layout.py) pin. Each value is validated against its real origin (a 00_tokens_base.css token or a JS source literal) by test_ui_pins_match_sources so this file cannot silently drift from what ships. Add a pin here instead of hardcoding the hex in two test layers.",
+  "diffOverviewAdd": "#38d878",
+  "diffOverviewDelete": "#ff5d6c",
+  "paneRingAttention": "#ff3347",
+  "paneMetaPathLight": "#111827",
+  "textSelectionBg": "#2563eb",
+  "paneTabTextLight": "#1f2937",
+  "activeAccentBright": "#86d600"
+}

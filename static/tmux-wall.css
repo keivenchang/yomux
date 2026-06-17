@@ -1,13 +1,17 @@
 :root {
+  /* these mirror the canonical dark-theme tokens in
+     static_src/css/yolomux/00_tokens_base.css (--bg/--panel/--panel2/--text/--muted/--line). They used to
+     be near-but-not-equal copies, so the wall looked subtly different from the app with no clear "right".
+     Keep these in sync with 00_tokens_base.css. (--green/--red are the wall's own status colors.) */
   color-scheme: dark;
-  --bg: #101317;
-  --panel: #171b20;
-  --panel2: #20262d;
-  --text: #d7dde5;
-  --muted: #8f9baa;
+  --bg: #0f1115;
+  --panel: #151922;
+  --panel2: #1e2430;
+  --text: #e4e8ee;
+  --muted: #9aa5b1;
   --green: #4ade80;
   --red: #fb7185;
-  --border: #313944;
+  --border: #303948;
 }
 * { box-sizing: border-box; }
 body {

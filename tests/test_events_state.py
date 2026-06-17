@@ -2,7 +2,6 @@ import json
 import os
 import threading
 
-os.environ.setdefault("YOLOMUX_CONFIG_DIR", "/tmp/yolomux-test-config")
 
 from yolomux_lib import events
 

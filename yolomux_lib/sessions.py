@@ -15,8 +15,10 @@ from .common import AgentInfo
 from .common import PaneInfo
 from .common import ProcessInfo
 from .common import SessionInfo
+from .cache import TtlCache
 from .common import _CACHE_MISS
 from .common import tail_file_lines
+from .tmux_utils import cmd_error
 from .tmux_utils import run_cmd
 from .tmux_utils import tmux
 
@@ -24,32 +26,21 @@ from .tmux_utils import tmux
 TRANSCRIPT_LOOKUP_CACHE_TTL_SECONDS = 2.0
 # Newest-by-name rollout files to consider per cwd lookup (bounds work on a large tree).
 CODEX_TRANSCRIPT_SCAN_LIMIT = 80
-_TRANSCRIPT_LOOKUP_CACHE_LOCK = threading.Lock()
-_TRANSCRIPT_LOOKUP_CACHE: dict[tuple[str, str, str], tuple[float, Path | None]] = {}
+# the shared TtlCache instead of a hand-rolled dict+lock+TTL. get_or_miss() preserves the
+# _CACHE_MISS-vs-cached-None distinction the callers rely on.
+_TRANSCRIPT_LOOKUP_CACHE = TtlCache(ttl_seconds=TRANSCRIPT_LOOKUP_CACHE_TTL_SECONDS)
 
 
-def transcript_lookup_cache_key(kind: str, root: Path, needle: str) -> tuple[str, str, str]:
-    return kind, str(root.expanduser().resolve(strict=False)), needle
+def transcript_lookup_cache_key(kind: str, root: Path, needle: str) -> str:
+    return "\x1f".join([kind, str(root.expanduser().resolve(strict=False)), needle])
 
 
 def cached_transcript_lookup(kind: str, root: Path, needle: str) -> Path | None | object:
-    key = transcript_lookup_cache_key(kind, root, needle)
-    now = time.monotonic()
-    with _TRANSCRIPT_LOOKUP_CACHE_LOCK:
-        cached = _TRANSCRIPT_LOOKUP_CACHE.get(key)
-        if cached is None:
-            return _CACHE_MISS
-        expires_at, path = cached
-        if expires_at <= now:
-            _TRANSCRIPT_LOOKUP_CACHE.pop(key, None)
-            return _CACHE_MISS
-        return path
+    return _TRANSCRIPT_LOOKUP_CACHE.get_or_miss(transcript_lookup_cache_key(kind, root, needle))
 
 
 def set_cached_transcript_lookup(kind: str, root: Path, needle: str, path: Path | None) -> Path | None:
-    key = transcript_lookup_cache_key(kind, root, needle)
-    with _TRANSCRIPT_LOOKUP_CACHE_LOCK:
-        _TRANSCRIPT_LOOKUP_CACHE[key] = (time.monotonic() + TRANSCRIPT_LOOKUP_CACHE_TTL_SECONDS, path)
+    _TRANSCRIPT_LOOKUP_CACHE.set(transcript_lookup_cache_key(kind, root, needle), path)
     return path
 
 
@@ -58,6 +49,7 @@ def list_tmux_panes() -> tuple[list[PaneInfo], str | None]:
         [
             "#{session_name}",
             "#{window_index}",
+            "#{window_name}",
             "#{pane_index}",
             "#{pane_id}",
             "#{pane_current_path}",
@@ -70,15 +62,15 @@ def list_tmux_panes() -> tuple[list[PaneInfo], str | None]:
     )
     result = tmux(["list-panes", "-a", "-F", fmt])
     if result.returncode != 0:
-        error = (result.stderr or result.stdout or "tmux list-panes failed").strip()
+        error = cmd_error(result, "tmux list-panes failed")
         return [], error
 
     panes: list[PaneInfo] = []
     for line in result.stdout.splitlines():
         parts = line.split("\t")
-        if len(parts) != 10:
+        if len(parts) != 11:
             continue
-        session, window, pane, pane_id, path, command, active, window_active, title, pid_text = parts
+        session, window, window_name, pane, pane_id, path, command, active, window_active, title, pid_text = parts
         try:
             pid = int(pid_text)
         except ValueError:
@@ -87,6 +79,7 @@ def list_tmux_panes() -> tuple[list[PaneInfo], str | None]:
             PaneInfo(
                 session=session,
                 window=window,
+                window_name=window_name,
                 pane=pane,
                 pane_id=pane_id,
                 target=pane_id,
@@ -104,7 +97,7 @@ def list_tmux_panes() -> tuple[list[PaneInfo], str | None]:
 def list_processes() -> tuple[dict[int, ProcessInfo], str | None]:
     result = run_cmd(["ps", "-eww", "-o", "pid=,ppid=,cmd="], timeout=8.0)
     if result.returncode != 0:
-        error = (result.stderr or result.stdout or "ps failed").strip()
+        error = cmd_error(result, "ps failed")
         return {}, error
 
     processes: dict[int, ProcessInfo] = {}
@@ -191,19 +184,19 @@ def agent_model_from_metadata(metadata: dict[str, Any]) -> str | None:
     return None
 
 
-def pane_process_label(pane: PaneInfo, candidates: list[ProcessInfo]) -> str:
+def pane_process_label(pane: PaneInfo, candidates: list[ProcessInfo]) -> tuple[str, int]:
     for process in candidates:
         label = process_display_label(process.command)
         if label in AGENT_COMMANDS or (label.startswith("mock_") and label.endswith(".py")):
-            return label
+            return label, process.pid
     for process in candidates:
         kind = classify_agent(process.command)
         if kind:
-            return kind
+            return kind, process.pid
     for process in candidates:
         if process.pid == pane.pid:
-            return process_display_label(process.command) or pane.command
-    return pane.command
+            return process_display_label(process.command) or pane.command, process.pid
+    return pane.command, pane.pid
 
 
 def classify_agent(command: str) -> str | None:
@@ -321,23 +314,118 @@ def find_recent_codex_transcript(cwd: str | None, root: Path | None = None) -> P
     cached = cached_transcript_lookup("codex-cwd", root, cwd)
     if cached is not _CACHE_MISS:
         return cached
-    # rollout files are named rollout-<ISO timestamp>-<uuid>.jsonl, so a reverse
-    # lexicographic sort by filename is recency-ordered without a per-file stat() —
-    # avoiding an O(files) syscall storm over the whole tree on every cache miss.
-    # Capping the candidate window also bounds work on a large ~/.codex/sessions tree.
-    files = sorted(root.glob("**/rollout-*.jsonl"), key=lambda path: path.name, reverse=True)[:CODEX_TRANSCRIPT_SCAN_LIMIT]
+    all_files = list(root.glob("**/rollout-*.jsonl"))
+    files = sorted(all_files, key=lambda path: path.name, reverse=True)[:CODEX_TRANSCRIPT_SCAN_LIMIT]
+    found = find_codex_transcript_in_candidates(files, cwd)
+    if found is not None:
+        return set_cached_transcript_lookup("codex-cwd", root, cwd, found)
+    # Resumed Codex sessions keep the original rollout filename, so filename order can miss an old-name
+    # transcript that was written seconds ago. Only pay the stat cost after the cheap filename pass misses.
+    files_by_mtime = sorted(all_files, key=path_mtime, reverse=True)[:CODEX_TRANSCRIPT_SCAN_LIMIT]
+    found = find_codex_transcript_in_candidates(files_by_mtime, cwd)
+    if found is not None:
+        return set_cached_transcript_lookup("codex-cwd", root, cwd, found)
+    return set_cached_transcript_lookup("codex-cwd", root, cwd, None)
+
+
+def recent_codex_transcript_candidates(root: Path | None = None, limit: int = CODEX_TRANSCRIPT_SCAN_LIMIT) -> list[Path]:
+    root = root or Path.home() / ".codex" / "sessions"
+    if not root.exists():
+        return []
+    all_files = list(root.glob("**/rollout-*.jsonl"))
+    # Filename order is cheap and catches ordinary new sessions. Mtime order catches resumed sessions whose
+    # old rollout filename is still being appended to today.
+    candidates = [
+        *sorted(all_files, key=lambda path: path.name, reverse=True)[:limit],
+        *sorted(all_files, key=path_mtime, reverse=True)[:limit],
+    ]
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for path in candidates:
+        if path in seen:
+            continue
+        seen.add(path)
+        unique.append(path)
+    return unique
+
+
+def path_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def find_codex_transcript_in_candidates(files: list[Path], cwd: str) -> Path | None:
     for path in files:
         if codex_transcript_header_cwd(path) == cwd:
-            return set_cached_transcript_lookup("codex-cwd", root, cwd, path)
-    needle = json.dumps(cwd)
+            return path
     for path in files:
         try:
             tail = tail_file_lines(path, 300)
         except OSError:
             continue
-        if needle in tail:
-            return set_cached_transcript_lookup("codex-cwd", root, cwd, path)
-    return set_cached_transcript_lookup("codex-cwd", root, cwd, None)
+        if codex_transcript_tail_matches_cwd(tail, cwd):
+            return path
+    return None
+
+
+def codex_transcript_tail_matches_cwd(tail: str, cwd: str) -> bool:
+    for line in tail.splitlines():
+        if codex_transcript_record_matches_cwd(line, cwd):
+            return True
+    return False
+
+
+def codex_transcript_record_matches_cwd(line: str, cwd: str) -> bool:
+    try:
+        record = json.loads(line)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(record, dict):
+        return False
+    payload = record.get("payload")
+    if record.get("cwd") == cwd:
+        return True
+    if isinstance(payload, dict) and payload.get("cwd") == cwd:
+        return True
+    arguments = payload.get("arguments") if isinstance(payload, dict) else None
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError:
+            arguments = None
+    if isinstance(arguments, dict):
+        return arguments.get("cwd") == cwd or arguments.get("workdir") == cwd
+    return False
+
+
+def codex_transcript_session_id(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for index, line in enumerate(handle):
+                if index >= 20:
+                    break
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                payload = record.get("payload")
+                if record.get("type") == "session_meta" and isinstance(payload, dict):
+                    value = payload.get("id")
+                    if isinstance(value, str) and value:
+                        return value
+                for key in ("session_id", "sessionId", "thread_id", "threadId", "conversation_id", "conversationId"):
+                    value = record.get(key)
+                    if isinstance(value, str) and value:
+                        return value
+    except OSError:
+        return None
+    return None
 
 
 def path_is_under(path: Path, root: Path) -> bool:
@@ -373,6 +461,7 @@ def codex_transcript_from_process_fd(pid: int, root: Path | None = None, fd_dir:
 def read_codex_agent(session: str, pane: PaneInfo, process: ProcessInfo) -> AgentInfo:
     proc_cwd = process_cwd(process.pid) or pane.current_path
     transcript_path = codex_transcript_from_process_fd(process.pid) or find_recent_codex_transcript(proc_cwd)
+    session_id = codex_transcript_session_id(transcript_path)
     return AgentInfo(
         session=session,
         kind="codex",
@@ -381,7 +470,7 @@ def read_codex_agent(session: str, pane: PaneInfo, process: ProcessInfo) -> Agen
         command=process.command,
         cwd=proc_cwd,
         status=None,
-        session_id=None,
+        session_id=session_id,
         transcript=str(transcript_path) if transcript_path else None,
         error=None if transcript_path else "codex transcript not found by process fd or cwd",
         model=agent_model_from_command(process.command),
@@ -397,6 +486,16 @@ def process_cwd(pid: int) -> str | None:
 
 def pane_sort_key(pane: PaneInfo) -> tuple[str, int, int]:
     return (pane.session, int(pane.window), int(pane.pane))
+
+
+def active_window_for_panes(panes: list[PaneInfo] | list[dict[str, Any]]) -> str | None:
+    for pane in panes:
+        if isinstance(pane, PaneInfo):
+            if pane.window_active and pane.window not in (None, ""):
+                return str(pane.window)
+        elif isinstance(pane, dict) and pane.get("window_active") and pane.get("window") not in (None, ""):
+            return str(pane.get("window"))
+    return None
 
 
 def preferred_pane(panes: list[PaneInfo], agents: list[AgentInfo]) -> PaneInfo | None:
@@ -451,7 +550,8 @@ def discover_sessions(sessions: list[str]) -> tuple[dict[str, SessionInfo], list
             if root_process:
                 candidates.append(root_process)
             candidates.extend(descendants(raw_pane.pid, children))
-            pane = replace(raw_pane, process_label=pane_process_label(raw_pane, candidates))
+            process_label, process_label_pid = pane_process_label(raw_pane, candidates)
+            pane = replace(raw_pane, process_label=process_label, process_label_pid=process_label_pid)
             session_panes.append(pane)
             for process in candidates:
                 kind = classify_agent(process.command)

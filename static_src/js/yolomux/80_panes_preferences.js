@@ -1,11 +1,20 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 function renderPanels(previousActive = [], options = {}) {
-  // DOIT.6 #114: a full panel re-render pools every panel and clears the grid, which detaches
+  if (renderPanelsDockview(previousActive, options)) return;
+  // a full panel re-render pools every panel and clears the grid, which detaches
   // the node being dragged and aborts the native HTML5 drag. Defer the re-render until the drag
-  // ends; endSessionDrag flushes pendingPanelsRender. Drops still render because endSessionDrag
-  // clears dragSession before flushing.
-  if (dragSession != null) { pendingPanelsRender = true; return; }
+  // ends. The shared layout scheduler stores a forced-full request so metadata-driven renders do
+  // not get mistaken for a cheap same-shape layout update on drop.
+  if (dragSession != null) {
+    requestLayoutRender({
+      previousActive,
+      options,
+      reason: 'renderPanels',
+      forceFull: true,
+    });
+    return;
+  }
   movePanelsToPool();
   const activePaneCount = layoutSlotKeys().filter(side => activeItemForSide(side) || paneIsPlaceholder(side)).length;
   grid.className = `grid ${activePaneCount === 1 ? 'full' : ''} ${activePaneCount === 0 ? 'empty' : ''}`.trim();
@@ -28,14 +37,14 @@ function renderPanels(previousActive = [], options = {}) {
 
 function movePanelsToPool() {
   for (const [item, panel] of panelNodes.entries()) {
-    if (isFileEditorItem(item)) captureFileEditorPanelViewState(item, panel);
+    capturePaneViewState(item, panel);
     panel.classList.remove('active-pane');
     panel.dataset.slot = '';
     panelPool.appendChild(panel);
   }
 }
 
-// DOIT.9 S2: the registered item for a mounted panel node (reverse lookup of panelNodes).
+// the registered item for a mounted panel node (reverse lookup of panelNodes).
 function panelItemForNode(node) {
   if (!node) return null;
   for (const [item, panel] of panelNodes.entries()) {
@@ -44,21 +53,25 @@ function panelItemForNode(node) {
   return null;
 }
 
-// DOIT.9 S2: move ONE displaced panel back to the pool (preserving editor state), like movePanelsToPool
+// move ONE displaced panel back to the pool (preserving editor state), like movePanelsToPool
 // does for all. An empty-pane placeholder (not in panelNodes) is just dropped.
 function poolDisplacedPanel(node) {
   const item = panelItemForNode(node);
   if (item == null) return;
-  if (isFileEditorItem(item)) captureFileEditorPanelViewState(item, node);
+  capturePaneViewState(item, node);
   node.classList.remove('active-pane');
   node.dataset.slot = '';
   panelPool.appendChild(node);
 }
 
-// DOIT.9 S2: for a SAME-SHAPE layout change, swap only the slots whose ACTIVE item changed — no
+// for a SAME-SHAPE layout change, swap only the slots whose ACTIVE item changed — no
 // grid.innerHTML='' / topbar teardown, no detach/reattach of unrelated panes. A pure reorder touches
 // zero panels (active unchanged) and only reconciles the tab strip via updatePanelSlot.
 function syncActivePanelsInPlace() {
+  if (dockviewLayoutActive()) {
+    syncActivePanelsDockview();
+    return;
+  }
   for (const dropSlot of grid.querySelectorAll('.drop-slot[data-slot]')) {
     const slot = dropSlot.dataset.slot;
     const item = activeItemForSide(slot);
@@ -78,7 +91,14 @@ function syncActivePanelsInPlace() {
     poolDisplacedPanel(mounted);
     dropSlot.replaceChildren(desired);
     updatePanelSlot(desired, item, slot);
+    renderAttachedPanelContent(item);
+    restorePaneViewState(item, desired);
   }
+}
+
+function renderAttachedPanelContent(item) {
+  const renderAttached = tabTypeForItem(item)?.renderAttached;
+  if (typeof renderAttached === 'function') renderAttached(item);
 }
 
 function bindDropTargets() {
@@ -197,10 +217,10 @@ function splitPercentForPointer(section, nodeOrDirection, event) {
   const children = Array.isArray(nodeOrDirection?.children) ? nodeOrDirection.children : null;
   const minFirst = children
     ? (direction === 'column' ? layoutNodeMinHeight(children[0]) : layoutNodeMinWidth(children[0]))
-    : (direction === 'column' ? minSplitPaneHeightPx : minSplitPaneWidthPx);
+    : (direction === 'column' ? minSplitPaneHeightPx() : minSplitPaneWidthPx());
   const minSecond = children
     ? (direction === 'column' ? layoutNodeMinHeight(children[1]) : layoutNodeMinWidth(children[1]))
-    : (direction === 'column' ? minSplitPaneHeightPx : minSplitPaneWidthPx);
+    : (direction === 'column' ? minSplitPaneHeightPx() : minSplitPaneWidthPx());
   if (size >= minFirst + minSecond) {
     const minFirstPct = (minFirst / size) * 100;
     const maxFirstPct = 100 - (minSecond / size) * 100;
@@ -230,7 +250,7 @@ function pruneSmallLayoutSlots() {
 function minWidthForLayoutItem(item) {
   const type = tabTypeForItem(item);
   if (type?.minWidth) return type.minWidth(item);
-  return minSplitPaneWidthPx;
+  return minSplitPaneWidthPx();
 }
 
 function minWidthForLayoutSlot(slot, slots = layoutSlots) {
@@ -242,19 +262,19 @@ function layoutVisiblePaneCount(slots = layoutSlots) {
 }
 
 function layoutNodeMinWidth(node, slots = layoutSlots) {
-  if (!node) return minSplitPaneWidthPx;
-  if (node.slot) return paneHasLayoutContent(node.slot, slots) ? minWidthForLayoutSlot(node.slot, slots) : minSplitPaneWidthPx;
+  if (!node) return minSplitPaneWidthPx();
+  if (node.slot) return paneHasLayoutContent(node.slot, slots) ? minWidthForLayoutSlot(node.slot, slots) : minSplitPaneWidthPx();
   const children = node.children || [];
-  if (node.split === 'column') return Math.max(...children.map(child => layoutNodeMinWidth(child, slots)), minSplitPaneWidthPx);
+  if (node.split === 'column') return Math.max(...children.map(child => layoutNodeMinWidth(child, slots)), minSplitPaneWidthPx());
   return children.reduce((sum, child) => sum + layoutNodeMinWidth(child, slots), 0);
 }
 
 function layoutNodeMinHeight(node, slots = layoutSlots) {
-  if (!node) return minSplitPaneHeightPx;
-  if (node.slot) return paneHasLayoutContent(node.slot, slots) ? minSplitPaneHeightPx : minSplitPaneHeightPx;
+  if (!node) return minSplitPaneHeightPx();
+  if (node.slot) return minSplitPaneHeightPx();
   const children = node.children || [];
   if (node.split === 'column') return children.reduce((sum, child) => sum + layoutNodeMinHeight(child, slots), 0);
-  return Math.max(...children.map(child => layoutNodeMinHeight(child, slots)), minSplitPaneHeightPx);
+  return Math.max(...children.map(child => layoutNodeMinHeight(child, slots)), minSplitPaneHeightPx());
 }
 
 function prunePriorityForLayoutSlot(slot) {
@@ -265,7 +285,7 @@ function prunePriorityForLayoutSlot(slot) {
 }
 
 function slotCanAutoPrune(slot) {
-  return !isFileExplorerItem(activeItemForSide(slot));
+  return !paneTabs(slot).some(isFileExplorerItem);
 }
 
 function smallLayoutSlotCandidate() {
@@ -282,7 +302,7 @@ function smallLayoutSlotCandidate() {
     if (isVirtualItem(item) && (!virtualCandidate || area < virtualCandidate.area)) {
       virtualCandidate = {slot, area, priority};
     }
-    const tooSmall = rect.width < minWidthForLayoutSlot(slot) || rect.height < minSplitPaneHeightPx;
+    const tooSmall = rect.width < minWidthForLayoutSlot(slot) || rect.height < minSplitPaneHeightPx();
     if (!tooSmall) continue;
     const nextCandidate = {slot, area, priority};
     if (!candidate || priority < candidate.priority || (priority === candidate.priority && area < candidate.area)) {
@@ -299,7 +319,6 @@ function renderLayoutColumn(side) {
   column.className = 'layout-column';
   if (isFileExplorerItem(session)) column.classList.add('file-explorer-column');
   if (isPreferencesItem(session)) column.classList.add('preferences-column');
-  if (isChangesItem(session)) column.classList.add('changes-column');
   if (isFileEditorItem(session)) column.classList.add('file-editor-column');
   if (!session) column.classList.add('empty-pane-column');
   column.dataset.slot = side;
@@ -320,6 +339,8 @@ function renderDropSlot(slot, session) {
   const panel = getOrCreatePanel(session);
   updatePanelSlot(panel, session, slot);
   node.appendChild(panel);
+  renderAttachedPanelContent(session);
+  restorePaneViewState(session, panel);
   return node;
 }
 
@@ -334,7 +355,12 @@ function renderEmptyPane(slot) {
 }
 
 function renderPaneTabStrips() {
-  // DOIT.6 #30: do not rebuild tab DOM while a tab is being dragged — replacing the dragged node
+  if (dockviewLayoutActive()) {
+    dockviewRefreshTabs();
+    dockviewSyncMountedPanels();
+    return;
+  }
+  // do not rebuild tab DOM while a tab is being dragged — replacing the dragged node
   // aborts the native drag. Defer to the endSessionDrag flush.
   if (dragSession != null) { pendingTabStripRender = true; return; }
   for (const side of layoutSlotKeys()) {
@@ -363,17 +389,17 @@ function updatePaneTabStrip(panel, side) {
   const activeItem = activeItemForSide(side);
   const items = stack.slice();
   if (activeItem && !items.includes(activeItem)) items.push(activeItem);
-  reconcilePaneTabChildren(strip, side, items);
+  reconcilePaneTabChildren(strip, side, items, paneTabDisplayContext(items));
   bindPaneTabStrip(strip, side);
   restorePaneTabPopover(strip, restorePopoverItem);
   scheduleTabStripOverflowCheck(strip);
 }
 
-function reconcilePaneTabChildren(strip, side, items) {
+function reconcilePaneTabChildren(strip, side, items, displayContext = {}) {
   const existingByItem = new Map(Array.from(strip.querySelectorAll(':scope > .pane-tab')).map(tab => [tab.dataset.paneTab || '', tab]));
   const nextNodes = [];
   for (const item of items) {
-    const fresh = createPaneTab(side, item);
+    const fresh = createPaneTab(side, item, displayContext);
     const existing = existingByItem.get(item);
     if (existing && paneTabShouldPreserve(existing)) {
       syncPreservedPaneTab(existing, fresh);
@@ -387,8 +413,49 @@ function reconcilePaneTabChildren(strip, side, items) {
   reconcileChildNodes(strip, nextNodes, {lockedNodes: nextNodes.filter(paneTabShouldPreserve)});
 }
 
+function paneTabDisplayContext(items) {
+  return {fileParentLabels: fileTabParentDisambiguators(items)};
+}
+
+function fileTabParentDisambiguators(items) {
+  const byName = new Map();
+  for (const item of items) {
+    if (!isFileEditorItem(item)) continue;
+    const path = fileItemPath(item);
+    if (!path) continue;
+    const name = basenameOf(path);
+    if (!byName.has(name)) byName.set(name, new Map());
+    byName.get(name).set(path, item);
+  }
+  const labels = new Map();
+  for (const pathsByName of byName.values()) {
+    const paths = Array.from(pathsByName.keys());
+    if (paths.length <= 1) continue;
+    const parentSegments = paths.map(path => dirnameOf(path).split('/').filter(Boolean));
+    const maxDepth = Math.max(1, ...parentSegments.map(parts => parts.length));
+    let depth = 1;
+    for (; depth <= maxDepth; depth++) {
+      const seen = new Set(parentSegments.map(parts => fileTabParentSuffix(parts, depth)));
+      if (seen.size === paths.length) break;
+    }
+    for (let index = 0; index < paths.length; index++) {
+      labels.set(paths[index], fileTabParentSuffix(parentSegments[index], depth));
+    }
+  }
+  return labels;
+}
+
+function fileTabParentSuffix(segments, depth) {
+  if (!segments.length) return '/';
+  return segments.slice(Math.max(0, segments.length - depth)).join('/');
+}
+
+function paneTabPopoverForAnchor(tab) {
+  return tab?.querySelector?.(':scope > .session-popover') || tab?.__yolomuxDetachedPopover || null;
+}
+
 function paneTabShouldPreserve(tab) {
-  const popover = tab.querySelector(':scope > .session-popover');
+  const popover = paneTabPopoverForAnchor(tab);
   return Boolean(popover && (popoverLifecycleActive(tab, popover) || popoverStillActive(tab, popover)));
 }
 
@@ -430,7 +497,7 @@ function syncPreservedPaneTab(tab, fresh) {
 
 function paneTabPopoverItemToRestore(strip) {
   for (const tab of strip.querySelectorAll(':scope > .pane-tab')) {
-    const popover = tab.querySelector(':scope > .session-popover');
+    const popover = paneTabPopoverForAnchor(tab);
     if (popover && (popoverLifecycleActive(tab, popover) || popoverStillActive(tab, popover))) return tab.dataset.paneTab || null;
   }
   return null;
@@ -439,15 +506,19 @@ function paneTabPopoverItemToRestore(strip) {
 function restorePaneTabPopover(strip, item) {
   if (!item) return;
   const tab = strip.querySelector(`:scope > .pane-tab[data-pane-tab="${cssEscape(item)}"]`);
-  const popover = tab?.querySelector(':scope > .session-popover');
+  const popover = paneTabPopoverForAnchor(tab);
   if (!tab || !popover) return;
   if (tab.classList.contains('popover-open') && popoverLifecycleActive(tab, popover)) return;
-  positionPaneTabPopover(tab);
+  positionPaneTabPopover(tab, popover);
   closeOtherSessionPopovers(tab);
   tab.classList.add('popover-open');
 }
 
-function createPaneTab(side, item) {
+// the inner markup of a pane tab — pin icon + row (virtual rowHtml or tmux) + close button +
+// the file/session popover — built once here and shared by BOTH the DOM factory (createPaneTab) and the
+// Dockview string builder (dockviewPaneTabHtml in 75_dockview_layout.js), so pin/close/popover parity is
+// enforced in one place instead of by hand across two renderers.
+function paneTabInnerHtml(item, rowOptions = {}) {
   const type = tabTypeForItem(item);
   const isFiles = type?.key === 'files';
   const isEditor = isFileEditorItem(item);
@@ -456,34 +527,49 @@ function createPaneTab(side, item) {
   const auto = autoApproveStates.get(item)?.enabled === true && !isVirtual;
   const state = isVirtual ? null : sessionState(item, info);
   const agentKind = isVirtual ? '' : sessionAgentKind(item);
+  let html = type?.rowHtml ? type.rowHtml(item, rowOptions) : tmuxPaneTabHtml(item, info, state, auto);
+  html = `${pinnedTabIconHtml(item)}${html}`;
+  if (!isFiles) {
+    const closeTitle = isEditor ? `Close ${itemLabel(item)}` : `hide ${itemLabel(item)} from layout`;
+    const closeLabel = isEditor ? `Close ${itemLabel(item)}` : `Hide ${itemLabel(item)} from layout`;
+    const controlKind = isEditor ? 'close' : 'minimize';
+    html += `<button type="button" class="pane-tab-close ${platformWindowControlClass(controlKind)}" data-pane-tab-close title="${esc(closeTitle)}" aria-label="${esc(closeLabel)}"></button>`;
+  }
+  if (isEditor) html += filePopoverHtml(item);
+  else if (!isVirtual) html += sessionPopoverHtml(item, info, agentKind, auto, state);
+  return html;
+}
+
+function createPaneTab(side, item, displayContext = {}) {
+  const type = tabTypeForItem(item);
+  const isEditor = isFileEditorItem(item);
+  const isVirtual = Boolean(type);
+  const info = transcriptMeta.sessions?.[item];
+  const state = isVirtual ? null : sessionState(item, info);
   const active = item === activeItemForSide(side);
   const tab = document.createElement('div');
   tab.role = 'button';
   tab.tabIndex = 0;
   const virtualClass = type?.className?.(item) || '';
   const missingFileClass = isEditor && openFileIsMissing(fileItemPath(item)) ? 'file-missing' : '';
-  tab.className = `pane-tab ${virtualClass} ${missingFileClass} ${active ? 'active' : ''}`;
+  tab.className = `pane-tab ${virtualClass} ${missingFileClass} ${tabIsPinned(item) ? 'pinned-tab' : ''} ${active ? 'active' : ''}`;
   applySessionStateClasses(tab, state);
   tab.draggable = true;
   tab.dataset.paneTab = item;
-  if (type?.rowHtml) tab.innerHTML = type.rowHtml(item);
-  else tab.innerHTML = tmuxPaneTabHtml(item, info, state, auto);
-  if (!isFiles) {
-    const closeTitle = isEditor ? `Close ${itemLabel(item)}` : `hide ${itemLabel(item)} from layout`;
-    const closeLabel = isEditor ? `Close ${itemLabel(item)}` : `Hide ${itemLabel(item)} from layout`;
-    const controlKind = isEditor ? 'close' : 'minimize';
-    tab.insertAdjacentHTML('beforeend', `<button type="button" class="pane-tab-close ${platformWindowControlClass(controlKind)}" data-pane-tab-close title="${esc(closeTitle)}" aria-label="${esc(closeLabel)}"></button>`);
-  }
+  const rowOptions = isEditor ? {parentLabel: displayContext.fileParentLabels?.get(fileItemPath(item)) || ''} : {};
+  tab.innerHTML = paneTabInnerHtml(item, rowOptions);
   if (isEditor) {
-    tab.insertAdjacentHTML('beforeend', filePopoverHtml(item));
     bindFilePopoverActions(tab);
     bindPaneTabPopover(tab, item);
   } else if (!isVirtual) {
-    tab.insertAdjacentHTML('beforeend', sessionPopoverHtml(item, info, agentKind, auto, state));
     bindPaneTabPopover(tab, item);
   }
-  tab.setAttribute('aria-label', type ? itemLabel(item) : isEditor ? `${itemLabel(item)}${missingFileClass ? ' missing on disk' : ''}` : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
+  tab.setAttribute('aria-label', isEditor
+    ? `${itemLabel(item)} ${fileItemPath(item)}${missingFileClass ? ' missing on disk' : ''}`
+    : type ? itemLabel(item) : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
   tab.addEventListener('pointerdown', event => {
+    dragTimingReset();           // S14: starts the opt-in drag-timing window (no-op unless the flag is on)
+    dragTimingMark('pointerdown');
     if (event.target.closest('[data-pane-tab-close]')) {
       event.stopPropagation();
       return;
@@ -535,10 +621,12 @@ function createPaneTab(side, item) {
       event.stopPropagation();
       beginPaneTabRename(tab, item);
     });
+  }
+  if (isPinnableTab(item)) {
     tab.addEventListener('contextmenu', event => {
       event.preventDefault();
       event.stopPropagation();
-      showSessionContextMenu(item, event.clientX, event.clientY, {tab});
+      showTabContextMenu(item, event.clientX, event.clientY, {tab});
     });
   }
   tab.addEventListener('dragstart', event => {
@@ -567,7 +655,7 @@ function beginFileTabRename(tab, item) {
     return;
   }
   if (readOnlyMode) {
-    statusErr('readonly access cannot rename files');
+    statusErr(localizedHtml('status.readOnlyRenameFiles'));
     return;
   }
   const currentName = basenameOf(path);
@@ -579,10 +667,16 @@ function beginFileTabRename(tab, item) {
 function bindPaneTabPopover(tab, session) {
   const popover = tab.querySelector?.(':scope > .session-popover');
   if (!popover) return;
-  bindDelayedSessionPopover(tab, popover, () => positionPaneTabPopover(tab));
+  const detached = tab.classList?.contains('dockview-pane-tab') === true;
+  if (detached) detachPaneTabPopover(tab, popover);
+  bindDelayedSessionPopover(tab, popover, () => positionPaneTabPopover(tab, popover), {
+    onOpen: () => maybeLoadFileTabForPopover(tab, session),
+    onStateOpen: () => popover.classList.add('popover-open'),
+    onClose: () => popover.classList.remove('popover-open'),
+  });
 }
 
-function bindDelayedSessionPopover(anchor, popover, position) {
+function bindDelayedSessionPopover(anchor, popover, position, options = {}) {
   createHoverPopover({
     anchor,
     popover,
@@ -590,14 +684,84 @@ function bindDelayedSessionPopover(anchor, popover, position) {
     hideDelay: () => popoverHideDelayMs,
     canOpen: () => !appMenuIsOpen() && !topbar?.matches?.(':hover'),
     onQueue: position,
+    onOpen: event => {
+      options.onStateOpen?.(event);
+      options.onOpen?.(event);
+    },
+    onClose: options.onClose,
     position,
     closeOthers: () => closeOtherSessionPopovers(anchor),
   });
 }
 
-function positionPaneTabPopover(tab) {
+function detachPaneTabPopover(tab, popover) {
+  cleanupDetachedPaneTabPopover(tab, popover);
+  popover.classList.add('pane-tab-detached-popover');
+  const host = appOverlayRootElement();
+  if (popover.parentElement !== host) host.appendChild(popover);
+  tab.__yolomuxDetachedPopover = popover;
+}
+
+function cleanupDetachedPaneTabPopover(tab, keep = null) {
+  const previous = tab?.__yolomuxDetachedPopover;
+  if (previous && previous !== keep) previous.remove();
+  if (previous && previous !== keep) tab.__yolomuxDetachedPopover = null;
+}
+
+function maybeLoadFileTabForPopover(tab, item) {
+  if (!isFileEditorItem(item)) return;
+  const state = ensureFileTabStateForItem(item);
+  refreshFileTabPopover(tab, item);
+  if (!state?.loading) return;
+  const path = fileItemPath(item);
+  if (!state.loadingPromise) loadFileEditorState(path, panelNodes.get(item), item);
+  const pending = openFiles.get(path)?.loadingPromise;
+  pending?.finally?.(() => refreshFilePopoversForPath(path));
+}
+
+function ensureFileTabStateForItem(item) {
+  const path = fileItemPath(item);
+  if (!path) return null;
+  if (!isImageViewerItem(item)) addFileEditorTabItem(path, item);
+  let state = fileStateFor(path);
+  if (!state || !state.kind) {
+    state = ensureFileState(path, {
+      mtime: 0,
+      kind: isImageViewerItem(item) ? 'image' : 'file',
+      original: '',
+      content: '',
+      dirty: false,
+      loading: true,
+    });
+  }
+  return state;
+}
+
+function refreshFilePopoversForPath(path) {
+  for (const item of [imageViewerItemFor(path), fileEditorItemFor(path)]) {
+    document.querySelectorAll(`.pane-tab[data-pane-tab="${cssEscape(item)}"]`).forEach(tab => refreshFileTabPopover(tab, item));
+  }
+}
+
+function refreshFileTabPopover(tab, item) {
+  const detached = tab?.__yolomuxDetachedPopover?.classList?.contains('file-popover') ? tab.__yolomuxDetachedPopover : null;
+  const popover = tab?.querySelector?.(':scope > .file-popover') || detached;
+  if (!popover) return;
+  const path = fileItemPath(item);
+  const rows = filePopoverRows(path, fileStateFor(path) || {});
+  popover.innerHTML = `
+    <div class="popover-head">
+      <div>
+        <div class="popover-title">${esc(basenameOf(path))}</div>
+      </div>
+    </div>
+    ${rows.join('')}`;
+  bindFilePopoverActions(popover);
+}
+
+function positionPaneTabPopover(tab, popover = null) {
   const rect = tab.getBoundingClientRect();
-  const popover = tab.querySelector?.(':scope > .session-popover');
+  popover = popover || paneTabPopoverForAnchor(tab);
   const bridgeGap = 3;
   const edgeGap = popoverEdgeGapPx();
   const topbarBottom = Math.ceil(topbar?.getBoundingClientRect?.().bottom || rootCssLengthPx('--topbar-height') || 0);
@@ -607,9 +771,11 @@ function positionPaneTabPopover(tab) {
   // CSS inline size (capped to the viewport) — NOT the tiny tab width. Over-estimating only pulls a
   // near-right-edge popover further left; clamping to the tab width let a wide needs-input popover
   // overflow and clip off the top-right corner.
+  if (popover?.style) popover.style.height = '';
   const measured = Math.ceil(popover?.getBoundingClientRect?.().width || 0);
   const width = Math.min(maxInline, measured || rootCssLengthPx('--pane-tab-popover-inline-size') || maxInline);
   const height = Math.ceil(popover?.getBoundingClientRect?.().height || 0);
+  const blockSize = height > 0 ? `${Math.round(height)}px` : '';
   const position = clampToViewport(
     Math.floor(rect.left),
     Math.ceil(rect.bottom) + bridgeGap,
@@ -617,12 +783,22 @@ function positionPaneTabPopover(tab) {
     height,
     {edgeGap, minTop: topbarBottom + edgeGap},
   );
-  document.documentElement.style.setProperty('--pane-tab-popover-top', `${Math.round(position.top)}px`);
-  document.documentElement.style.setProperty('--pane-tab-popover-left', `${Math.round(position.left)}px`);
+  const top = `${Math.round(position.top)}px`;
+  const left = `${Math.round(position.left)}px`;
+  const inlineSize = `${Math.round(width)}px`;
+  document.documentElement.style.setProperty('--pane-tab-popover-top', top);
+  document.documentElement.style.setProperty('--pane-tab-popover-left', left);
+  if (popover?.style) {
+    popover.style.top = top;
+    popover.style.left = left;
+    popover.style.width = inlineSize;
+    if (blockSize) popover.style.height = blockSize;
+    else popover.style.height = '';
+  }
 }
 
 function paneInfoTabHtml(item = infoItemId, options = {}) {
-  // DOIT.6: use .session-button-dir (like the Finder/Prefs tabs) so the label gets the themed
+  // use .session-button-dir (like the Finder/Prefs tabs) so the label gets the themed
   // active/inactive colors; the old .pane-tab-info-label set no color and went white-on-white in light.
   return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir pane-tab-info-label">${esc(itemLabel(item))}</span></span>`;
 }
@@ -635,10 +811,8 @@ function preferencesPaneTabHtml(item = prefsItemId, options = {}) {
   return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir">${esc(t('tab.preferences'))}</span></span>`;
 }
 
-function changesPaneTabHtml(item = changesItemId, options = {}) {
-  const count = sessionFilesPayload.files?.length || 0;
-  const badge = count ? `<span class="session-state-badge changes-count-badge">${count}</span>` : '';
-  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir">${esc(t('tab.changes'))}</span>${badge}</span>`;
+function debugPaneTabHtml(item = debugPaneItemId, options = {}) {
+  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir">${esc(t('tab.debug'))}</span></span>`;
 }
 
 function fileEditorPaneTabHtml(item, options = {}) {
@@ -650,8 +824,8 @@ function fileEditorPaneTabHtml(item, options = {}) {
   const owner = ownerText ? `<span class="file-tab-owner" title="${esc(ownerTitle)}">${esc(ownerText)}</span>` : '';
   const dirty = state.dirty ? `<span class="file-tab-dirty" title="${esc(t('filetab.modified'))}" aria-label="${esc(t('filetab.modified'))}"></span>` : '';
   const missing = openFileIsMissing(path) ? `<span class="file-tab-missing-badge" title="${esc(t('filetab.missingTitle'))}" aria-label="${esc(t('filetab.missingTitle'))}">${esc(t('filetab.missing'))}</span>` : '';
-  const kind = isFilePreviewItem(item) ? `<span class="file-tab-kind" title="${esc(t('tab.previewOnly'))}">${esc(t('tab.preview'))}</span>` : '';
-  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-text">${owner}${dirty}${missing}${kind}<span class="session-button-dir">${esc(basenameOf(path))}</span></span></span>`;
+  const parentLabel = options.parentLabel ? `<span class="file-tab-parent" title="${esc(path)}">${esc(options.parentLabel)}</span>` : '';
+  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-text">${owner}${dirty}${missing}<span class="session-button-dir">${esc(basenameOf(path))}</span>${parentLabel}</span></span>`;
 }
 
 function tmuxPaneTabHtml(session, info, state, auto) {
@@ -668,7 +842,7 @@ function bindPaneTabStrip(strip, side) {
     if (filePayload?.path) {
       event.preventDefault();
       event.stopImmediatePropagation();
-      if (slotIsFileExplorerPane(side) || slotIsChangesPane(side)) {
+      if (slotIsFileExplorerPane(side)) {
         event.dataTransfer.dropEffect = 'none';
         clearPaneTabDropPreview(strip);
         return;
@@ -682,7 +856,7 @@ function bindPaneTabStrip(strip, side) {
     if (!payload?.session) return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    if (slotIsFileExplorerPane(side) || slotIsChangesPane(side)) {
+    if (slotIsFileExplorerPane(side)) {
       event.dataTransfer.dropEffect = 'none';
       clearPaneTabDropPreview(strip);
       return;
@@ -697,11 +871,11 @@ function bindPaneTabStrip(strip, side) {
   };
   strip.ondrop = event => {
     const filePayload = fileDragPayload(event);
-    if (filePayload?.path) {
+  if (filePayload?.path) {
       clearPaneTabDropPreview(strip);
       event.preventDefault();
       event.stopImmediatePropagation();
-      if (slotIsFileExplorerPane(side) || slotIsChangesPane(side)) return;
+      if (slotIsFileExplorerPane(side)) return;
       openDraggedFilesInEditor(filePayload, {targetSlot: side, targetIndex: paneTabDropIndex(strip, event, '')});
       return;
     }
@@ -710,21 +884,27 @@ function bindPaneTabStrip(strip, side) {
     if (!payload?.session) return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    if (slotIsFileExplorerPane(side) || slotIsChangesPane(side)) return;
-    moveSessionToSlot(payload.session, side, payload.sourceSlot || slotForSession(payload.session), paneTabDropIndex(strip, event, payload.session));
+    if (slotIsFileExplorerPane(side)) return;
+    const placement = paneTabDropPlacement(strip, event, payload.session);
+    if (placement.noop) return;
+    moveSessionToSlot(payload.session, side, payload.sourceSlot || slotForSession(payload.session), placement.index);
   };
 }
 
 function showPaneTabDropPreview(strip, event, movingSession) {
   const placement = paneTabDropPlacement(strip, event, movingSession);
+  if (placement.noop) {
+    clearPaneTabDropPreview(strip);
+    return;
+  }
   strip.style.setProperty('--tab-drop-x', `${Math.round(placement.x)}px`);
   strip.style.setProperty('--tab-drop-y', `${Math.round(placement.y)}px`);
   strip.style.setProperty('--tab-drop-height', `${Math.round(placement.height)}px`);
-  strip.classList.add('drag-over', 'tab-drop-preview');
+  strip.classList.add(CLS.dragOver, CLS.tabDropPreview);
 }
 
 function clearPaneTabDropPreview(strip) {
-  strip.classList.remove('drag-over', 'tab-drop-preview');
+  strip.classList.remove(CLS.dragOver, CLS.tabDropPreview);
   strip.style.removeProperty('--tab-drop-x');
   strip.style.removeProperty('--tab-drop-y');
   strip.style.removeProperty('--tab-drop-height');
@@ -739,6 +919,7 @@ function resetDragTabRectCache() {
 // its tab rects ONCE and reuse them for every dragover instead of forcing sync layout on every move.
 // Outside a drag (e.g. unit tests calling paneTabDropPlacement directly), measure fresh each time.
 function dragMeasureStrip(strip) {
+  dragTimingMarkOnce('dragMeasureStrip:first');   // S14: first strip getBoundingClientRect of the drag
   if (dragSession != null) {
     if (!dragTabRectCache || dragTabRectCache.strip !== strip) {
       dragTabRectCache = {strip, stripRect: strip.getBoundingClientRect(), rects: new Map()};
@@ -757,7 +938,18 @@ function dragMeasureTab(cache, tab) {
   return rect;
 }
 
+function paneTabDropPlacementResult(index, x, y, height, sourceVisualIndex = -1) {
+  return {
+    index,
+    x,
+    y,
+    height,
+    noop: sourceVisualIndex >= 0 && index === sourceVisualIndex,
+  };
+}
+
 function paneTabDropPlacement(strip, event, movingSession) {
+  dragTimingMarkOnce('paneTabDropPlacement:first');   // S14: first drop-placement pass (first real dragover)
   const allTabs = Array.from(strip.querySelectorAll('.pane-tab'));
   // The source's position in the FULL strip (before filtering) drives a directional insert threshold
   // for same-strip reorder; -1 means a cross-pane move (keep the centered threshold).
@@ -769,12 +961,13 @@ function paneTabDropPlacement(strip, event, movingSession) {
   const clampY = (value, height) => Math.max(0, Math.min(Math.max(0, stripRect.height - height), value));
   const defaultHeight = Math.min(32, Math.max(24, stripRect.height || 27));
   if (!tabs.length) {
-    return {
-      index: 0,
-      x: clampX(event.clientX - stripRect.left),
-      y: clampY(event.clientY - stripRect.top - defaultHeight / 2, defaultHeight),
-      height: defaultHeight,
-    };
+    return paneTabDropPlacementResult(
+      0,
+      clampX(event.clientX - stripRect.left),
+      clampY(event.clientY - stripRect.top - defaultHeight / 2, defaultHeight),
+      defaultHeight,
+      sourceVisualIndex,
+    );
   }
   const rows = paneTabRows(tabs, tab => dragMeasureTab(measure, tab));
   const row = rows.reduce((best, item) => {
@@ -791,21 +984,23 @@ function paneTabDropPlacement(strip, event, movingSession) {
     let threshold = rect.left + rect.width / 2;
     if (sameStrip) threshold = item.index >= sourceVisualIndex ? rect.left : rect.right;
     if (event.clientX < threshold) {
-      return {
-        index: item.index,
-        x: clampX(rect.left - stripRect.left),
-        y: clampY(row.top - stripRect.top, row.height),
-        height: row.height,
-      };
+      return paneTabDropPlacementResult(
+        item.index,
+        clampX(rect.left - stripRect.left),
+        clampY(row.top - stripRect.top, row.height),
+        row.height,
+        sourceVisualIndex,
+      );
     }
   }
   const last = rowTabs[rowTabs.length - 1];
-  return {
-    index: last.index + 1,
-    x: clampX(last.rect.right - stripRect.left),
-    y: clampY(row.top - stripRect.top, row.height),
-    height: row.height,
-  };
+  return paneTabDropPlacementResult(
+    last.index + 1,
+    clampX(last.rect.right - stripRect.left),
+    clampY(row.top - stripRect.top, row.height),
+    row.height,
+    sourceVisualIndex,
+  );
 }
 
 function paneTabRows(tabs, rectFor = tab => tab.getBoundingClientRect()) {
@@ -847,38 +1042,59 @@ function bindPanelShell(panel, session) {
   bindPaneFrameControls(panel, session);
   panel.addEventListener('pointerenter', () => selectPanelOnHover(session));
   panel.addEventListener('pointerdown', event => {
-    if (!isTmuxSession(session)) {
-      setFocusedPanelItem(session, {
-        focusPreferencesSearch: !preferenceFocusTargetIsInteractive(event.target),
-      });
+    if (isTmuxSession(session)) {
+      noteFileExplorerChangesSessionInteraction(session);
+      setFocusedTerminal(session, {userInitiated: true});
+    } else {
+      setFocusedPanelItem(session, {userInitiated: true});
     }
   }, {capture: true});
   panel.addEventListener('focusin', event => {
     if (!isTmuxSession(session)) {
-      setFocusedPanelItem(session, {
-        focusPreferencesSearch: !preferenceFocusTargetIsInteractive(event.target),
-      });
+      setFocusedPanelItem(session);
     }
   });
+  panel.addEventListener('scroll', event => {
+    const target = event.target;
+    if (target?.matches?.(paneScrollContainerSelector) && panel.contains(target)) {
+      schedulePaneViewStateCapture(session, panel);
+    }
+  }, true);
   const head = panel.querySelector('.panel-head');
   if (head) {
     head.draggable = true;
     head.dataset.dragSession = session;
-    head.addEventListener('dragstart', event => startSessionDrag(event, session, head.dataset.dragSlot || null));
+    head.addEventListener('dragstart', event => startPaneDrag(event, head.dataset.dragSlot || slotForSession(session)));
     head.addEventListener('dragend', endSessionDrag);
     head.addEventListener('dragover', event => {
+      const panePayload = paneDragPayload(event);
+      if (panePayload?.slot) {
+        event.preventDefault();
+        event.stopPropagation();
+        clearDropPreview();
+        const targetSlot = head.dataset.dragSlot || slotForSession(session);
+        const intent = paneSwapIntentForEvent(event, panePayload.slot) || {sourceSlot: panePayload.slot, targetSlot, swap: true};
+        if (!paneSwapIntentAllowed(intent)) {
+          event.dataTransfer.dropEffect = 'none';
+          head.classList.remove(CLS.tabDragOver);
+          return;
+        }
+        event.dataTransfer.dropEffect = 'move';
+        head.classList.add(CLS.tabDragOver);
+        return;
+      }
       const filePayload = fileDragPayload(event);
       if (filePayload?.path) {
         event.preventDefault();
         event.stopPropagation();
         clearDropPreview();
         const targetSlot = head.dataset.dragSlot || slotForSession(session);
-        if (slotIsFileExplorerPane(targetSlot) || slotIsChangesPane(targetSlot)) {
+        if (slotIsFileExplorerPane(targetSlot)) {
           event.dataTransfer.dropEffect = 'none';
           return;
         }
         event.dataTransfer.dropEffect = 'copy';
-        head.classList.add('tab-drag-over');
+        head.classList.add(CLS.tabDragOver);
         return;
       }
       const payload = dragPayload(event);
@@ -888,35 +1104,46 @@ function bindPanelShell(panel, session) {
       clearDropPreview();
       if (event.target.closest('.pane-tabs')) return;
       const targetSlot = head.dataset.dragSlot || slotForSession(session);
-      if (slotIsFileExplorerPane(targetSlot) || slotIsChangesPane(targetSlot)) {
+      if (slotIsFileExplorerPane(targetSlot)) {
         event.dataTransfer.dropEffect = 'none';
         return;
       }
       event.dataTransfer.dropEffect = 'move';
-      head.classList.add('tab-drag-over');
+      head.classList.add(CLS.tabDragOver);
     });
     head.addEventListener('dragleave', event => {
-      if (!head.contains(event.relatedTarget)) head.classList.remove('tab-drag-over');
+      if (!head.contains(event.relatedTarget)) head.classList.remove(CLS.tabDragOver);
     });
     head.addEventListener('drop', event => {
-      const filePayload = fileDragPayload(event);
-      if (filePayload?.path && !event.target.closest('.pane-tabs')) {
-        head.classList.remove('tab-drag-over');
+      const panePayload = paneDragPayload(event);
+      if (panePayload?.slot && !event.target.closest('.pane-tabs')) {
+        head.classList.remove(CLS.tabDragOver);
         event.preventDefault();
         event.stopPropagation();
         const targetSlot = head.dataset.dragSlot || slotForSession(session);
-        if (slotIsFileExplorerPane(targetSlot) || slotIsChangesPane(targetSlot)) return;
+        const intent = paneSwapIntentForEvent(event, panePayload.slot) || {sourceSlot: panePayload.slot, targetSlot, swap: true};
+        clearDropPreview();
+        if (paneSwapIntentAllowed(intent)) swapPaneSlots(intent.sourceSlot, intent.targetSlot);
+        return;
+      }
+      const filePayload = fileDragPayload(event);
+      if (filePayload?.path && !event.target.closest('.pane-tabs')) {
+        head.classList.remove(CLS.tabDragOver);
+        event.preventDefault();
+        event.stopPropagation();
+        const targetSlot = head.dataset.dragSlot || slotForSession(session);
+        if (slotIsFileExplorerPane(targetSlot)) return;
         if (targetSlot) openDraggedFilesInEditor(filePayload, {targetSlot});
         return;
       }
       const payload = dragPayload(event);
-      head.classList.remove('tab-drag-over');
+      head.classList.remove(CLS.tabDragOver);
       if (!payload?.session || event.target.closest('.pane-tabs')) return;
       event.preventDefault();
       event.stopPropagation();
       const targetSlot = head.dataset.dragSlot || slotForSession(session);
       if (!targetSlot) return;
-      if (slotIsFileExplorerPane(targetSlot) || slotIsChangesPane(targetSlot)) return;
+      if (slotIsFileExplorerPane(targetSlot)) return;
       if (isFileExplorerItem(payload.session)) {
         dockFileExplorerPane();
         return;
@@ -971,29 +1198,76 @@ function bindPanelPopover(panel) {
   });
 }
 
+function panelDetailsToggleLabel(collapsed) {
+  return collapsed ? t('pane.details.show') : t('pane.details.hide');
+}
+
+function syncPanelDetailsToggleButton(button, collapsed) {
+  if (!button) return;
+  const detailsLabel = panelDetailsToggleLabel(collapsed);
+  button.classList.toggle('active', !collapsed);
+  button.title = detailsLabel;
+  button.setAttribute('aria-label', detailsLabel);
+  button.setAttribute('aria-pressed', collapsed ? 'false' : 'true');
+}
+
+function panelDetailToggleButtons(panel) {
+  if (!panel) return [];
+  const buttons = [];
+  const seen = new Set();
+  const add = button => {
+    if (!button || seen.has(button)) return;
+    seen.add(button);
+    buttons.push(button);
+  };
+  panel.querySelectorAll?.('[data-detail-toggle]')?.forEach(add);
+  const item = panel.dataset?.layoutItem || String(panel.id || '').replace(/^panel-/, '') || panel.dataset?.slot || '';
+  if (item) {
+    document.body?.querySelectorAll?.(`[data-detail-toggle="${cssEscape(item)}"]`)?.forEach(add);
+  }
+  return buttons;
+}
+
+function syncPanelDetailsToggleState(panel) {
+  const collapsed = panel?.classList?.contains('details-collapsed') === true;
+  panelDetailToggleButtons(panel).forEach(button => syncPanelDetailsToggleButton(button, collapsed));
+}
+
 function setPanelDetailsCollapsed(panel, collapsed) {
   panel.classList.toggle('details-collapsed', collapsed);
-  const button = panel.querySelector('[data-detail-toggle]');
-  if (button) {
-    button.classList.toggle('active', !collapsed);
-    const detailsLabel = collapsed ? t('pane.details.show') : t('pane.details.hide');
-    button.title = detailsLabel;
-    button.setAttribute('aria-label', detailsLabel);
-    button.setAttribute('aria-pressed', collapsed ? 'false' : 'true');
-  }
+  syncPanelDetailsToggleState(panel);
+  schedulePanelDetailsFit(panel);
+}
+
+function panelItemFromPanel(panel) {
+  const id = String(panel?.id || '');
+  return id.startsWith('panel-') ? id.slice('panel-'.length) : '';
+}
+
+function schedulePanelDetailsFit(panel) {
+  const item = panelItemFromPanel(panel);
+  if (item && isTmuxSession(item)) scheduleFit(item);
+}
+
+function terminalTabDisplayLabel(session, info) {
+  return 'Term';
+}
+
+function terminalTabDetailLabel(session, info) {
+  const label = terminalProcessLabel(info);
+  return label || 'Term';
 }
 
 function terminalTabLabel(session, info) {
   const type = tabTypeForItem(session);
   if (type?.shortLabel) return type.shortLabel(session);
-  const label = terminalProcessLabel(info);
-  return shortText(label || 'Term', 16);
+  return shortText(terminalTabDisplayLabel(session, info), 16);
 }
 
 function terminalTabTitle(session, info) {
   const type = tabTypeForItem(session);
   if (type?.terminalTitle) return type.terminalTitle(session);
-  return `terminal: ${terminalProcessLabel(info) || 'Term'}`;
+  return `terminal: ${terminalTabDetailLabel(session, info)}`;
 }
 
 function terminalProcessLabel(info) {
@@ -1032,14 +1306,100 @@ function tmuxWindowIndices(panes) {
   return windows.sort((left, right) => left - right);
 }
 
-function windowStepVisibility(panes) {
-  const windows = tmuxWindowIndices(panes);
-  if (windows.length <= 1) return {prev: false, next: false};
-  const activeIndex = tmuxWindowNumber((Array.isArray(panes) ? panes : []).find(pane => pane.window_active)?.window) ?? windows[0];
-  return {
-    prev: windows.some(index => index < activeIndex),
-    next: windows.some(index => index > activeIndex),
-  };
+const tmuxWindowBarNumericFallbackCount = 8;
+const tmuxWindowBarNamedCharLimit = 80;
+
+function tmuxWindowDisplayName(pane) {
+  const process = String(pane?.process_label || '').trim();
+  if (process) return process;
+  const name = String(pane?.window_name || '').trim();
+  if (name) return name;
+  const inferred = processLabelFromCommand(pane?.command || '');
+  return String(inferred || '').trim() || `window ${pane?.window ?? ''}`.trim() || 'window';
+}
+
+function tmuxWindowProcessPid(pane) {
+  const value = Number(pane?.process_label_pid || pane?.pid || 0);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : null;
+}
+
+function tmuxWindowDisplayLabel(name, pid) {
+  return pid ? `${name} (pid=${pid})` : name;
+}
+
+function tmuxWindowRecords(panes) {
+  const byIndex = new Map();
+  for (const pane of Array.isArray(panes) ? panes : []) {
+    const index = tmuxWindowNumber(pane.window);
+    if (index === null) continue;
+    const indexText = String(pane.window);
+    const existing = byIndex.get(index);
+    const active = pane.window_active === true;
+    const record = existing || {index, indexText, name: tmuxWindowDisplayName(pane), pid: tmuxWindowProcessPid(pane), active: false};
+    if (!existing || active || !record.name) {
+      record.name = tmuxWindowDisplayName(pane);
+      record.pid = tmuxWindowProcessPid(pane);
+    }
+    record.active = record.active || active;
+    byIndex.set(index, record);
+  }
+  const records = [...byIndex.values()].sort((left, right) => left.index - right.index);
+  const nameCounts = new Map();
+  records.forEach(record => {
+    nameCounts.set(record.name, (nameCounts.get(record.name) || 0) + 1);
+  });
+  return records.map(record => ({
+    ...record,
+    buttonNameLabel: nameCounts.get(record.name) > 1 ? `${record.name}(${record.indexText})` : record.name,
+    processLabel: tmuxWindowDisplayLabel(record.name, record.pid),
+    nameLabel: tmuxWindowDisplayLabel(nameCounts.get(record.name) > 1 ? `${record.name}(${record.indexText})` : record.name, record.pid),
+    numberLabel: record.indexText,
+  })).map(record => ({
+    ...record,
+    indexedButtonLabel: `${record.indexText}:${record.buttonNameLabel}`,
+    indexedNameLabel: `${record.indexText}:${record.nameLabel}`,
+  }));
+}
+
+function tmuxWindowBarLabelMode(records, options = {}) {
+  if (options.labelMode === 'numbers' || options.labelMode === 'names') return options.labelMode;
+  const items = Array.isArray(records) ? records : [];
+  const fallbackCount = Number.isFinite(options.fallbackCount) ? options.fallbackCount : tmuxWindowBarNumericFallbackCount;
+  const charLimit = Number.isFinite(options.namedCharLimit) ? options.namedCharLimit : tmuxWindowBarNamedCharLimit;
+  const namedChars = items.reduce((total, item) => total + String(item.indexedButtonLabel || item.buttonNameLabel || '').length, 0);
+  return items.length > fallbackCount || namedChars > charLimit ? 'numbers' : 'names';
+}
+
+// Classify a tmux window by the program it runs so the window-switcher buttons can be tinted per agent
+// (claude/codex/shell/editor/repl/git/other). Drives the per-agent color via [data-window-agent] in CSS.
+function tmuxWindowAgentKey(name) {
+  const base = String(name || '').trim().toLowerCase().replace(/\(\d+\)$/, '').split(/[\s:/]/)[0];
+  if (base === 'claude' || base === 'codex') return base;
+  if (['bash', 'sh', 'zsh', 'fish', 'shell', '-bash', '-zsh'].includes(base)) return 'shell';
+  if (['vim', 'nvim', 'vi', 'nano', 'emacs', 'hx', 'helix'].includes(base)) return 'editor';
+  if (['python', 'python3', 'ipython', 'node', 'ruby', 'irb', 'bun', 'deno'].includes(base)) return 'repl';
+  if (['git', 'lazygit', 'tig', 'gh'].includes(base)) return 'git';
+  return 'other';
+}
+
+function tmuxWindowBarHtml(session, info, options = {}) {
+  const panes = Array.isArray(info) ? info : info?.panes;
+  const records = tmuxWindowRecords(panes);
+  if (!records.length) return '';
+  const disabled = options.disabled === true || readOnlyMode;
+  const labelMode = tmuxWindowBarLabelMode(records, options);
+  const disabledTitle = readOnlyMode ? t('terminal.window.adminRequired') : t('tab.unavailableFor', {name: itemLabel(session)});
+  const buttons = records.map(record => {
+    const pressed = record.active ? 'true' : 'false';
+    const activeClass = record.active ? ' active' : '';
+    const visibleName = record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.nameLabel}`;
+    const title = t('terminal.window.title', {name: visibleName});
+    const attrs = disabled
+      ? `disabled title="${esc(disabledTitle)}" aria-label="${esc(title)}"`
+      : `data-window-index="${esc(record.indexText)}" data-window-session="${esc(session)}" data-window-label="${esc(visibleName)}" title="${esc(title)}" aria-label="${esc(title)}" aria-pressed="${pressed}"`;
+    return `<button type="button" class="tab tmux-window-button${activeClass}" data-window-agent="${esc(tmuxWindowAgentKey(record.name))}" ${attrs}><span class="tmux-window-name-label">${esc(visibleName)}</span><span class="tmux-window-number-label">${esc(record.numberLabel)}</span></button>`;
+  }).join('');
+  return `<div class="tmux-window-bar" data-tmux-window-bar="${esc(session)}" data-tmux-window-label-mode="${esc(labelMode)}" role="group" aria-label="${esc(t('terminal.window.groupAria'))}">${buttons}</div>`;
 }
 
 function previewTmuxWindowInfo(info, key) {
@@ -1048,9 +1408,13 @@ function previewTmuxWindowInfo(info, key) {
   if (windows.length < 2) return null;
   const activePane = terminalDisplayPane(info);
   const activeIndex = tmuxWindowNumber(activePane?.window);
-  const current = Math.max(0, windows.findIndex(index => index === activeIndex));
-  const delta = key === 'p' ? -1 : 1;
-  const target = windows[(current + delta + windows.length) % windows.length];
+  let target = tmuxWindowNumber(key?.windowIndex);
+  if (target === null) {
+    const current = Math.max(0, windows.findIndex(index => index === activeIndex));
+    const delta = key === 'p' ? -1 : 1;
+    target = windows[(current + delta + windows.length) % windows.length];
+  }
+  if (!windows.includes(target)) return null;
   const nextPanes = panes.map(pane => ({...pane, window_active: tmuxWindowNumber(pane.window) === target}));
   return {
     ...info,
@@ -1077,51 +1441,47 @@ function previewTmuxWindowLabel(session, key) {
 }
 
 function handleWindowStepButtonClick(event) {
-  const button = event.currentTarget;
+  const button = windowStepButtonFromEvent(event);
+  if (!button) return;
+  if (button.dataset.windowIndex !== undefined) {
+    const label = button.dataset.windowLabel || button.dataset.windowIndex;
+    tmuxWindow(button.dataset.windowSession, {windowIndex: button.dataset.windowIndex}, `tmux window ${label}`);
+    return;
+  }
   const key = button.dataset.windowDir === 'prev' ? 'p' : 'n';
   const label = button.dataset.windowDir === 'prev' ? 'previous tmux window' : 'next tmux window';
   tmuxWindow(button.dataset.windowSession, key, label);
 }
 
-function createWindowStepButton(session, dir) {
-  const label = windowStepButtonLabel(dir);
-  const button = document.createElement('button');
-  button.className = 'tab tmux-window-step';
-  button.dataset.windowStepButton = dir;
-  button.textContent = dir === 'prev' ? '<' : '>';
-  if (readOnlyMode) {
-    button.type = 'button';
-    button.disabled = true;
-    button.title = `${label} tmux window requires admin access`;
-    return button;
-  }
-  button.dataset.windowDir = dir;
-  button.dataset.windowSession = session;
-  button.title = `${label} tmux window`;
-  button.addEventListener('click', handleWindowStepButtonClick);
-  return button;
+function windowStepButtonFromEvent(event) {
+  const current = event?.currentTarget;
+  if (current?.matches?.('[data-window-dir]')) return current;
+  if (current?.matches?.('[data-window-index]')) return current;
+  return event?.target?.closest?.('[data-window-index]') || event?.target?.closest?.('[data-window-dir]') || null;
 }
 
-function syncWindowStepButton(controls, terminalButton, session, dir, visible) {
-  const selector = `[data-window-step-button="${dir}"]`;
-  const existing = controls.querySelector(selector);
-  if (!visible) {
-    existing?.remove();
-    return;
-  }
-  if (existing) return;
-  const button = createWindowStepButton(session, dir);
-  if (dir === 'prev') controls.insertBefore(button, terminalButton);
-  else controls.insertBefore(button, terminalButton.nextSibling || null);
+function syncTmuxWindowBarOverflow(session) {
+  document.body?.querySelectorAll?.(`[data-tmux-window-bar="${cssEscape(session)}"]`)?.forEach(bar => {
+    if (!bar || bar.dataset.tmuxWindowLabelMode === 'numbers') return;
+    if (bar.scrollWidth > bar.clientWidth + 1) bar.dataset.tmuxWindowLabelMode = 'numbers';
+  });
 }
 
 function updatePanelWindowStepButtons(session, info) {
-  const controls = document.getElementById(`panel-${session}`)?.querySelector('.tabs');
-  const terminalButton = controls?.querySelector('.terminal-tab');
-  if (!controls || !terminalButton) return;
-  const steps = windowStepVisibility(info?.panes);
-  syncWindowStepButton(controls, terminalButton, session, 'prev', steps.prev);
-  syncWindowStepButton(controls, terminalButton, session, 'next', steps.next);
+  const bars = [...(document.body?.querySelectorAll?.(`[data-tmux-window-bar="${cssEscape(session)}"]`) || [])];
+  if (!bars.length) return;
+  const html = tmuxWindowBarHtml(session, info);
+  if (!html) {
+    syncTmuxWindowBarOverflow(session);
+    return;
+  }
+  bars.forEach(existing => {
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = html;
+    const replacement = wrapper.firstElementChild;
+    if (replacement) existing.replaceWith(replacement);
+  });
+  syncTmuxWindowBarOverflow(session);
 }
 
 function agentForPane(info, pane) {
@@ -1143,58 +1503,50 @@ function updatePanelControlLabels(session, info) {
   const button = document.querySelector(`[data-tab="${cssEscape(session)}"][data-tab-name="terminal"]`);
   updatePanelWindowStepButtons(session, info);
   if (button) {
-    button.textContent = terminalTabLabel(session, info);
-    button.title = terminalTabTitle(session, info);
+    const title = terminalTabTitle(session, info);
+    button.title = title;
+    button.setAttribute('aria-label', title);
   }
 }
 
-// DOIT.6 #40: ONE merged panel hosting both YO!info (repo metadata) and YO!agent (chat + activity
-// summary), switched by a segmented sub-tab row under the pane tabs. Both sub-views render into their
+// ONE merged panel hosting both YO!info (repo metadata) and YO!agent (chat + activity
+// context), switched by a segmented sub-tab row under the pane tabs. Both sub-views render into their
 // own containers (#info-content / #yoagent-content) and the active one is shown via CSS; the chosen
 // sub-tab is remembered across reloads (infoPanelSubTab).
 function createInfoPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel info-panel';
-  panel.id = `panel-${infoItemId}`;
+  panel.id = panelDomId(infoItemId);
   panel.dataset.infoSubtab = infoPanelSubTab;
   panel.innerHTML = `
       <div class="panel-head">
-        ${virtualPanelControlsHtml(infoItemId, infoTabLabel())}
+        ${virtualPanelControlsHtml(infoItemId)}
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
-      <div class="panel-detail-row">
-        <div class="panel-copy">
-          <div id="panel-tab-${infoItemId}" class="panel-session-label"><span class="session-button-dir">${esc(infoTabLabel())}</span></div>
-          <div id="meta-${infoItemId}" class="meta">${esc(t('info.subtitle'))}</div>
-        </div>
-        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(infoItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
-      </div>
       <div class="info-subtabs" role="tablist" aria-label="${esc(infoTabLabel())} / ${esc(yoagentTabLabel())}">
-        <button type="button" class="info-subtab" role="tab" data-info-subtab="info"><span class="session-button-dir">${esc(infoTabLabel())}</span></button>
-        <button type="button" class="info-subtab" role="tab" data-info-subtab="yoagent"><span class="session-button-dir">${esc(yoagentTabLabel())}</span></button>
+        <div class="info-subtab-group" role="presentation">
+          <button type="button" class="info-subtab" role="tab" data-info-subtab="info"><span class="session-button-dir">${esc(infoTabLabel())}</span></button>
+          <button type="button" class="info-subtab" role="tab" data-info-subtab="yoagent"><span class="session-button-dir">${esc(yoagentTabLabel())}</span></button>
+        </div>
+        <div class="info-subtab-actions">
+          <button type="button" class="info-refresh" data-info-subtab-action="info" data-info-refresh title="${esc(t('info.refreshRepo'))}">${esc(t('info.refreshRepo'))}</button>
+          <button type="button" class="info-refresh" data-info-subtab-action="yoagent" data-yoagent-refresh title="${esc(t('yoagent.refreshTitle'))}">${esc(t('yoagent.refresh'))}</button>
+        </div>
       </div>
       <div class="info-pane panel-overlay-root">
         <div id="panel-toasts-${infoItemId}" class="panel-toast-stack"></div>
         <div class="info-subview" data-info-subview="info">
-          <div class="transcript-head info-head">
-            <span>${esc(infoTabLabel())}</span>
-            <button type="button" class="info-refresh" data-info-refresh title="${esc(t('info.refreshRepo'))}">${esc(t('info.refreshRepo'))}</button>
-          </div>
           <div id="info-content" class="info-list"></div>
           <div id="info-watched" class="info-watched"></div>
         </div>
         <div class="info-subview yoagent-subview" data-info-subview="yoagent">
-          <div class="transcript-head info-head">
-            <span>${esc(yoagentTabLabel())}</span>
-            <button type="button" class="info-refresh" data-yoagent-refresh title="${esc(t('yoagent.refreshTitle'))}">${esc(t('yoagent.refresh'))}</button>
-          </div>
           <div id="yoagent-content" class="info-list yoagent-list"></div>
         </div>
       </div>`;
   bindPanelShell(panel, infoItemId);
   panel.querySelector('[data-info-refresh]')?.addEventListener('click', event => {
     event.preventDefault();
-    refreshTranscripts();
+    refreshTranscripts({force: true});
   });
   panel.querySelector('[data-yoagent-refresh]')?.addEventListener('click', event => {
     event.preventDefault();
@@ -1215,6 +1567,7 @@ function createInfoPanel() {
     const value = input?.value || '';
     if (input) input.value = '';
     yoagentDraft = '';
+    resetYoagentComposerHistory();
     sendYoagentChatMessage(value);
   });
   panel.addEventListener('click', event => {
@@ -1229,11 +1582,30 @@ function createInfoPanel() {
       event.preventDefault();
       const input = panel.querySelector('[data-yoagent-chat-input]');
       sendYoagentChatMessage(input?.value || yoagentDraft);
+      return;
+    }
+    const agentRestart = event.target.closest('[data-yolomux-agent-restart]');
+    if (agentRestart && panel.contains(agentRestart)) {
+      event.preventDefault();
+      createNextSession(agentRestart.dataset.yolomuxAgentRestart || 'claude');
+      return;
+    }
+    const actionSend = event.target.closest('[data-yoagent-action-send]');
+    if (actionSend && panel.contains(actionSend)) {
+      event.preventDefault();
+      executeYoagentActionSend(actionSend.dataset.yoagentActionSend || '');
     }
   });
   panel.addEventListener('input', event => {
     const input = event.target.closest('[data-yoagent-chat-input]');
-    if (input && panel.contains(input)) yoagentDraft = input.value || '';
+    if (input && panel.contains(input)) {
+      yoagentDraft = input.value || '';
+      if (yoagentHistoryCursor === null) yoagentHistoryDraft = '';
+    }
+  });
+  panel.addEventListener('keydown', event => {
+    const input = event.target.closest('[data-yoagent-chat-input]');
+    if (input && panel.contains(input)) handleYoagentChatHistoryKeydown(event, input);
   });
   panel.addEventListener('change', event => {
     // The composer's backend pill writes the real yoagent.backend setting and re-renders (which also
@@ -1241,17 +1613,72 @@ function createInfoPanel() {
     const backend = event.target.closest('[data-yoagent-backend]');
     if (!backend || !panel.contains(backend) || readOnlyMode) return;
     saveSettingsPatch(settingPatch('yoagent.backend', backend.value))
-      .then(() => { statusEl.textContent = `YO!agent backend: ${yoagentBackendLabel(backend.value)}`; renderYoagentPanel(); })
-      .catch(error => { statusErr(`settings save failed: ${esc(error)}`); refreshSettings({force: true}); });
+      .then(() => { statusEl.textContent = t('yoagent.statusBackend', {backend: yoagentBackendLabel(backend.value)}); renderYoagentPanel(); })
+      .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
   });
   applyInfoSubTab(panel);
   renderInfoPanel();
+  if (infoPanelSubTab === 'yoagent') showYoagentStartupInfoOnce();
   renderYoagentPanel();
+  if (infoPanelSubTab === 'yoagent') {
+    loadYoagentConversation({silent: true});
+    prewarmYoagent();
+  }
   return panel;
 }
 
+// The merged YO!info pane keeps its outer chrome and sub-tab row mounted between language changes so the
+// YO!agent chat draft and active sub-tab survive. Re-label those persistent controls in place.
+function relocalizeInfoPanelChrome(panel = document.getElementById(panelDomId(infoItemId))) {
+  if (!panel) return;
+  const infoLabel = infoTabLabel();
+  const agentLabel = yoagentTabLabel();
+  const setLabel = (node, label) => {
+    if (!node) return;
+    node.textContent = label;
+    node.title = label;
+    node.setAttribute('aria-label', label);
+  };
+  const minimizeLabel = t('pane.minimize');
+  const expandLabel = t('pane.expand');
+  panel.querySelectorAll('[data-pane-minimize]').forEach(button => {
+    button.title = minimizeLabel;
+    button.setAttribute('aria-label', minimizeLabel);
+  });
+  panel.querySelectorAll('[data-pane-expand]').forEach(button => {
+    button.title = expandLabel;
+    button.setAttribute('aria-label', expandLabel);
+  });
+  panel.querySelector('.info-subtabs')?.setAttribute('aria-label', `${infoLabel} / ${agentLabel}`);
+  panel.querySelectorAll('[data-info-subtab]').forEach(button => {
+    const label = button.dataset.infoSubtab === 'yoagent' ? agentLabel : infoLabel;
+    const labelNode = button.querySelector('.session-button-dir') || button;
+    labelNode.textContent = label;
+    button.title = label;
+    button.setAttribute('aria-label', label);
+  });
+  const infoRefresh = panel.querySelector('[data-info-refresh]');
+  if (infoRefresh) {
+    if (typeof setMetadataRefreshButtonLoading === 'function') {
+      setMetadataRefreshButtonLoading(infoRefresh, transcriptMetaLoading, t('info.refreshRepo'), t('info.refreshRepo'));
+    } else {
+      const label = t('info.refreshRepo');
+      infoRefresh.textContent = label;
+      infoRefresh.title = label;
+      infoRefresh.setAttribute('aria-label', label);
+    }
+  }
+  const agentRefresh = panel.querySelector('[data-yoagent-refresh]');
+  if (agentRefresh) {
+    agentRefresh.textContent = t('yoagent.refresh');
+    agentRefresh.title = t('yoagent.refreshTitle');
+    agentRefresh.setAttribute('aria-label', t('yoagent.refreshTitle'));
+  }
+  applyInfoSubTab(panel);
+}
+
 // Reflect the active sub-tab onto the merged panel (button highlight + which sub-view is visible).
-function applyInfoSubTab(panel = document.getElementById(`panel-${infoItemId}`)) {
+function applyInfoSubTab(panel = document.getElementById(panelDomId(infoItemId))) {
   if (!panel) return;
   panel.dataset.infoSubtab = infoPanelSubTab;
   panel.querySelectorAll('[data-info-subtab]').forEach(button => {
@@ -1262,6 +1689,9 @@ function applyInfoSubTab(panel = document.getElementById(`panel-${infoItemId}`))
   panel.querySelectorAll('[data-info-subview]').forEach(view => {
     view.classList.toggle('active', view.dataset.infoSubview === infoPanelSubTab);
   });
+  panel.querySelectorAll('[data-info-subtab-action]').forEach(button => {
+    button.hidden = button.dataset.infoSubtabAction !== infoPanelSubTab;
+  });
 }
 
 function setInfoSubTab(tab, options = {}) {
@@ -1271,7 +1701,14 @@ function setInfoSubTab(tab, options = {}) {
     writeStoredInfoSubTab(next);
   }
   applyInfoSubTab();
-  if (next === 'yoagent') renderYoagentPanel({preserveDraft: true, focusInput: options.focusChat === true});
+  if (next === 'yoagent') {
+    showYoagentStartupInfoOnce();
+    renderYoagentPanel({preserveDraft: true, focusInput: options.focusChat === true});
+    loadYoagentConversation({silent: true});
+    refreshActivitySummary({silent: true});
+    prewarmYoagent();
+  }
+  scheduleShareUiStatePublish();
 }
 
 // Open the merged YO!info pane on a given sub-tab — used by the File menu, command palette, the topbar
@@ -1281,24 +1718,146 @@ async function openInfoSubTab(tab) {
   writeStoredInfoSubTab(infoPanelSubTab);
   await selectSession(infoItemId);
   applyInfoSubTab();
-  if (infoPanelSubTab === 'yoagent') renderYoagentPanel({preserveDraft: true, focusInput: true});
+  if (infoPanelSubTab === 'yoagent') {
+    showYoagentStartupInfoOnce();
+    renderYoagentPanel({preserveDraft: true, focusInput: true});
+    loadYoagentConversation({silent: true});
+    refreshActivitySummary({silent: true});
+    prewarmYoagent();
+  }
+  scheduleShareUiStatePublish();
+}
+
+function rightmostLeafSlotWithRowSplit(node, insideRow = false, slots = layoutSlots, options = {}) {
+  if (!node) return null;
+  if (node.slot) {
+    if (!insideRow) return null;
+    if (options.excludeFileExplorer && isFileExplorerItem(activeItemForSide(node.slot, slots))) return null;
+    return node.slot;
+  }
+  const children = Array.isArray(node.children) ? node.children : [];
+  if (node.split === 'row') {
+    return rightmostLeafSlotWithRowSplit(children[1], true, slots, options)
+      || rightmostLeafSlotWithRowSplit(children[0], true, slots, options);
+  }
+  return rightmostLeafSlotWithRowSplit(children[0], insideRow, slots, options)
+    || rightmostLeafSlotWithRowSplit(children[1], insideRow, slots, options);
+}
+
+function layoutTreeHasRowSplit(node) {
+  if (!node || node.slot) return false;
+  if (node.split === 'row') return true;
+  return (node.children || []).some(layoutTreeHasRowSplit);
+}
+
+function nonFileExplorerLeafSlots(root, slots = layoutSlots) {
+  return layoutLeafSlots(root).filter(slot => !isFileExplorerItem(activeItemForSide(slot, slots)));
+}
+
+function rightmostExistingPaneSlot(slots = layoutSlots) {
+  const root = slots?.[layoutTreeKey] || null;
+  if (!root || nonFileExplorerLeafSlots(root, slots).length < 2 || !layoutTreeHasRowSplit(root)) return null;
+  return rightmostLeafSlotWithRowSplit(root, false, slots, {excludeFileExplorer: true})
+    || rightmostLeafSlotWithRowSplit(root, false, slots);
+}
+
+function focusYoagentChatSoon() {
+  setTimeout(() => setInfoSubTab('yoagent', {focusChat: true}), 80);
+}
+
+function splitInfoItemToRightPane(sourceSlot = null) {
+  const next = layoutWithoutItem(infoItemId);
+  const root = next[layoutTreeKey] || legacyLayoutTree(next);
+  if (!root) {
+    const targetSlot = sourceSlot || slotForNewSession();
+    next[layoutTreeKey] = leafNode(targetSlot);
+    next[targetSlot] = paneStateWithTabs([infoItemId], infoItemId);
+    applyLayoutSlots(next, {focusSession: infoItemId, prune: false});
+    return;
+  }
+  const newSlot = nextLayoutSlot(next);
+  next[newSlot] = paneStateWithTabs([infoItemId], infoItemId);
+  next[layoutTreeKey] = splitNode('row', root, leafNode(newSlot), splitPercentForNewItem(infoItemId, 'right'));
+  applyLayoutSlots(next, {focusSession: infoItemId, prune: false});
+}
+
+function openYoagentRightPane() {
+  const sourceSlot = slotForSession(infoItemId);
+  const targetSlot = rightmostExistingPaneSlot();
+  if (targetSlot) {
+    if (sourceSlot === targetSlot) {
+      activatePaneTab(targetSlot, infoItemId);
+    } else {
+      moveSessionToSlot(infoItemId, targetSlot, sourceSlot, paneTabs(targetSlot).length);
+    }
+  } else {
+    splitInfoItemToRightPane(sourceSlot);
+  }
+  setInfoSubTab('yoagent', {focusChat: true});
+  focusYoagentChatSoon();
 }
 
 function sessionActivitySummary(session) {
   return activitySummaryPayload?.sessions?.[session] || null;
 }
 
+function activitySummaryMarkdownBlockHtml(text, className) {
+  return `<div class="${esc(className)} markdown-body" data-yoagent-global-markdown>${esc(text)}</div>`;
+}
+
 function activitySummaryLinesHtml(lines, options = {}) {
   const items = Array.isArray(lines) ? lines.filter(Boolean) : [];
   if (!items.length) return options.empty ? `<div class="yoagent-empty">${esc(options.empty)}</div>` : '';
-  return items.map(line => `<div class="yoagent-line">${esc(line)}</div>`).join('');
+  return items.map(line => activitySummaryMarkdownBlockHtml(String(line), 'yoagent-line')).join('');
+}
+
+function yoagentTimestampText(value) {
+  const date = value ? new Date(value) : new Date();
+  if (!Number.isFinite(date.getTime())) return '';
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      timeZone: 'America/Los_Angeles',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      timeZoneName: 'short',
+    }).format(date);
+  } catch (_) {
+    return date.toLocaleString();
+  }
+}
+
+function yoagentMessageTimestampHtml(value) {
+  const text = yoagentTimestampText(value);
+  return text ? `<span class="yoagent-message-time">${esc(text)}</span>` : '';
+}
+
+function yoagentMessageDetailsKey(message, index) {
+  return [
+    index,
+    message?.role || 'assistant',
+    message?.kind || '',
+    message?.session || '',
+    message?.createdAt || '',
+  ].map(part => String(part ?? '')).join('|');
+}
+
+function yoagentMessageDetailsHtml(message, key = '') {
+  const text = String(message?.details || '').trim();
+  if (!text) return '';
+  return `<details class="yoagent-message-details" data-yoagent-message-details-key="${esc(key)}">
+    <summary>${esc(t('popover.details'))}</summary>
+    <pre>${esc(text)}</pre>
+  </details>`;
 }
 
 function relativeActivityGeneratedText(payload = activitySummaryPayload) {
   const ts = Number(payload?.generated_ts || 0) || Date.parse(payload?.generated_at || '') / 1000;
   if (!Number.isFinite(ts) || ts <= 0) return {text: t('yoagent.notLoaded'), title: ''};
   const seconds = Math.max(0, Math.round(Date.now() / 1000 - ts));
-  // DOIT.8 Phase 3: render the relative time with Intl.RelativeTimeFormat(activeLocale) for native
+  // Phase 3: render the relative time with Intl.RelativeTimeFormat(activeLocale) for native
   // locale phrasing, wrapped by the localized "last updated {rel}" string.
   const text = seconds < 60
     ? t('yoagent.updated.justNow')
@@ -1328,62 +1887,469 @@ function globalActivitySummaryHtml() {
       <span class="yoagent-generated" title="${esc(generated.title)}">(${esc(generated.text)})</span>
     </div>
     ${refreshBar}
-    ${headline ? `<div class="yoagent-headline">${esc(headline)}</div>` : activitySummaryLinesHtml([], {empty: t('yoagent.emptyGlobal')})}
+    ${headline ? activitySummaryMarkdownBlockHtml(headline, 'yoagent-headline') : activitySummaryLinesHtml([], {empty: t('yoagent.emptyGlobal')})}
     ${activitySummaryLinesHtml(detailLines)}
   </section>`;
 }
 
-function yoagentSessionSummariesHtml() {
-  const sessions = activitySummaryPayload?.sessions || {};
-  const order = Array.isArray(activitySummaryPayload?.session_order) ? activitySummaryPayload.session_order : Object.keys(sessions);
-  const rows = order
-    .map(session => {
-      const summary = sessions?.[session];
-      if (!summary?.local) return '';
-      const status = summary.active ? 'active' : 'idle';
-      const files = summary.files?.count ? t('yoagent.files', {count: summary.files.count, added: summary.files.added || 0, removed: summary.files.removed || 0}) : t('yoagent.noFiles');
-      return `<article class="yoagent-session-summary ${esc(status)}">
-        <div class="yoagent-session-summary-head">
-          <span>${esc(t('yoagent.sessionLabel', {session}))}</span>
-          <span>${esc(summary.agent_label || summary.agent || t('yoagent.agentFallback'))}</span>
-          <span>${esc(files)}</span>
-        </div>
-        <div class="yoagent-session-summary-body markdown-body" data-yoagent-summary-markdown>${esc(summary.local)}</div>
-      </article>`;
-    })
-    .filter(Boolean)
-    .join('');
-  return `<section class="yoagent-session-summaries" aria-label="${esc(t('yoagent.perSessionAria'))}">
-    ${rows || `<div class="yoagent-empty">${esc(t('yoagent.emptyPerSession'))}</div>`}
-  </section>`;
+function yoagentStreamingMessagesList() {
+  if (!(yoagentStreamingMessages instanceof Map)) return [];
+  return [...yoagentStreamingMessages.values()]
+    .filter(message => message && (message.content || message.streaming || message.details))
+    .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
+}
+
+function yoagentAgentResultParts(text) {
+  const value = String(text || '');
+  const match = value.match(/^([^\r\n]*)(?:\r?\n\s*\r?\n|\r?\n)([\s\S]*)$/);
+  if (!match) return {heading: value.trim(), output: ''};
+  return {heading: String(match[1] || '').trim(), output: String(match[2] || '').trim()};
+}
+
+function yoagentMessageBodyHtml(message, roleClass, agentResult, streaming) {
+  const content = String(message?.content || (streaming ? t('yoagent.thinking') : ''));
+  if (agentResult) {
+    const parts = yoagentAgentResultParts(content);
+    const heading = parts.heading
+      ? `<div class="yoagent-agent-result-heading markdown-body" data-yoagent-markdown>${esc(parts.heading)}</div>`
+      : '';
+    const output = parts.output
+      ? `<div class="yoagent-agent-result-output markdown-body" data-yoagent-markdown>${esc(parts.output)}</div>`
+      : '';
+    return `<div class="yoagent-message-body yoagent-agent-result-body">${heading}${output}</div>`;
+  }
+  const bodyClass = roleClass === 'assistant' ? 'yoagent-message-body markdown-body' : 'yoagent-message-body';
+  const markdownAttr = roleClass === 'assistant' ? ' data-yoagent-markdown' : '';
+  return `<div class="${bodyClass}"${markdownAttr}>${esc(content)}</div>`;
 }
 
 function yoagentChatMessagesHtml() {
-  const messages = Array.isArray(yoagentMessages) ? yoagentMessages : [];
+  const messages = [...(Array.isArray(yoagentMessages) ? yoagentMessages : []), ...yoagentStreamingMessagesList()];
+  const startupInfo = yoagentStartupInfoVisible ? yoagentStartupInfoHtml() : '';
   if (!messages.length) {
+    if (startupInfo) return startupInfo;
     if (!yoagentChatEnabled()) {
       return `<div class="yoagent-chat-empty">${esc(t('yoagent.chatDisabled'))}</div>`;
     }
     return `<div class="yoagent-chat-empty">${esc(t('yoagent.chatEmpty', {name: yoagentTabLabel()}))}</div>`;
   }
-  return messages.map(message => {
+  const messageHtml = messages.map((message, index) => {
     const role = message.role === 'user' ? t('yoagent.you') : yoagentTabLabel();
     const roleClass = message.role === 'user' ? 'user' : 'assistant';
-    // Assistant replies are Markdown (numbered sections, bold titles, sub-bullets); flag the body so
-    // renderYoagentMessageMarkdown() can render it. The escaped text stays as the no-marked fallback.
-    const bodyClass = roleClass === 'assistant' ? 'yoagent-message-body markdown-body' : 'yoagent-message-body';
-    const markdownAttr = roleClass === 'assistant' ? ' data-yoagent-markdown' : '';
-    return `<div class="yoagent-message ${roleClass}">
-      <div class="yoagent-message-role">${esc(role)}</div>
-      <div class="${bodyClass}"${markdownAttr}>${esc(message.content || '')}</div>
+    const agentResult = roleClass === 'assistant' && message?.kind === 'agent_result';
+    const streaming = roleClass === 'assistant' && message?.streaming;
+    const messageClass = `yoagent-message ${roleClass}${agentResult ? ' yoagent-agent-result' : ''}${streaming ? ' streaming' : ''}`;
+    const detailsKey = yoagentMessageDetailsKey(message, index);
+    return `<div class="${messageClass}">
+      <div class="yoagent-message-role"><span>${esc(role)}</span>${yoagentMessageTimestampHtml(message.createdAt)}</div>
+      ${yoagentMessageBodyHtml(message, roleClass, agentResult, streaming)}
+      ${roleClass === 'assistant' ? yoagentMessageDetailsHtml(message, detailsKey) : ''}
+      ${roleClass === 'assistant' ? yoagentActionCardsHtml(message.actions) : ''}
     </div>`;
   }).join('');
+  return `${messageHtml}${startupInfo}`;
+}
+
+function yoagentActionCardsHtml(actions) {
+  const items = Array.isArray(actions) ? actions : [];
+  return items.map(yoagentActionCardHtml).join('');
+}
+
+function yoagentActionCardHtml(action) {
+  if (!action || typeof action !== 'object') return '';
+  const target = action.target && typeof action.target === 'object' ? action.target : {};
+  const status = String(action.status || 'ready');
+  const transport = String(target.transport || 'tmux-legacy');
+  const transportLabel = yoagentActionTransportText(transport, target.transport_label);
+  const canSend = status === 'ready' && action.id && !readOnlyMode && !yoagentBusy;
+  const button = canSend
+    ? `<button type="button" class="yoagent-action-send" data-yoagent-action-send="${esc(action.id)}">${esc(t('yoagent.action.send'))}</button>`
+    : `<span class="yoagent-action-state">${esc(yoagentActionStatusText(action))}</span>`;
+  const rows = [
+    [t('yoagent.action.row.session'), target.session || action.session || ''],
+    [t('yoagent.action.row.agent'), [target.agent_kind, target.agent_model].filter(Boolean).join(' ')],
+    [t('yoagent.action.row.transport'), transportLabel],
+    [t('yoagent.action.row.pane'), target.pane_target || ''],
+    [t('yoagent.action.row.path'), target.cwd || ''],
+  ].filter(row => row[1]);
+  const rowHtml = rows.map(([label, value]) => `<div class="yoagent-action-row"><span>${esc(label)}</span><code>${esc(value)}</code></div>`).join('');
+  return `<div class="yoagent-action-card ${esc(status)}" data-yoagent-action-card="${esc(action.id || '')}">
+    <div class="yoagent-action-head"><span>${esc(t('yoagent.action.preview'))}</span>${button}</div>
+    <div class="yoagent-action-rows">${rowHtml}</div>
+    <pre class="yoagent-action-text">${esc(action.text || '')}</pre>
+  </div>`;
+}
+
+function yoagentActionTransportText(transport, fallback = '') {
+  if (transport === 'tmux-legacy' || transport === 'pane-paste') return `${t('yoagent.action.transport.panePasteFallback')} (tmux-legacy)`;
+  return transport === 'agent-native-resume'
+    ? t('yoagent.action.transport.agentNativeResume')
+    : (String(fallback || '') || transport);
+}
+
+function yoagentActionStatusText(action) {
+  const status = String(action?.status || '');
+  if (status === 'sent') return t('yoagent.action.state.sent');
+  if (String(action?.status_text || '') === 'sending') return t('yoagent.action.state.sending');
+  return action?.status_text || status;
+}
+
+function yoagentIntroMessageText() {
+  const summary = activitySummaryPayload?.global || {};
+  const lines = Array.isArray(summary.lines) ? summary.lines : [];
+  const headline = String(summary.headline || lines[0] || '').trim();
+  if (!headline) return '';
+  const details = lines
+    .filter(line => line && line !== headline && !/^Session\s+\S+:/i.test(String(line)))
+    .slice(0, 2)
+    .map(line => `- ${String(line).trim()}`);
+  return ["Here's what I see right now:", "", headline, ...details].filter(Boolean).join('\n');
+}
+
+function yoagentIntroMessageHtml() {
+  const text = yoagentIntroMessageText();
+  if (!text || !yoagentChatEnabled()) return '';
+  return `<div class="yoagent-message assistant yoagent-intro-message">
+    <div class="yoagent-message-role"><span>${esc(yoagentTabLabel())}</span>${yoagentMessageTimestampHtml(activitySummaryPayload?.generated_at)}</div>
+    <div class="yoagent-message-body markdown-body" data-yoagent-markdown>${esc(text)}</div>
+  </div>`;
+}
+
+function yoagentStartupInfoHtml() {
+  return `${yoagentIntroMessageHtml()}${yoagentRecentAgentsMessageHtml()}`;
+}
+
+function showYoagentStartupInfoOnce() {
+  if (yoagentStartupInfoShown) return false;
+  yoagentStartupInfoShown = true;
+  yoagentStartupInfoVisible = true;
+  return true;
+}
+
+function showYoagentStartupInfoForLatestActivity() {
+  yoagentStartupInfoShown = false;
+  return showYoagentStartupInfoOnce();
+}
+
+function hideYoagentStartupInfo() {
+  yoagentStartupInfoVisible = false;
 }
 
 function yoagentNoticeHtml() {
   if (!yoagentNotice?.reason) return '';
   const backend = yoagentNotice.backend ? `<span class="yoagent-chat-notice-backend">${esc(yoagentNotice.backend)}</span> ` : '';
   return `<div class="yoagent-chat-notice">${backend}${esc(yoagentNotice.reason)}</div>`;
+}
+
+function yoagentAutoRefreshStatusHtml() {
+  const summary = activitySummaryPayload?.yoagent_summaries || {};
+  if (!summary.auto_refresh) return '';
+  const generated = summary.updated_ts
+    ? relativeActivityGeneratedText({generated_ts: summary.updated_ts, generated_at: summary.updated_at})
+    : {text: t('yoagent.notLoaded'), title: ''};
+  return `<div class="yoagent-chat-notice yoagent-auto-refresh-status" title="${esc(generated.title)}">${esc(t('yoagent.autoRefreshStatus', {updated: generated.text}))}</div>`;
+}
+
+function yoagentPendingWaitsHtml() {
+  const waits = Array.isArray(yoagentPendingWaits) ? yoagentPendingWaits : [];
+  if (!waits.length) return '';
+  const title = tPlural('yoagent.waiting.count', waits.length);
+  const rows = waits.map(wait => {
+    const session = String(wait?.session || '');
+    const handoff = wait?.handoff && typeof wait.handoff === 'object' ? wait.handoff : null;
+    const handoffTarget = String(handoff?.session || '');
+    const handoffSource = String(handoff?.source_session || session);
+    const sourceRegarding = String(handoff?.source_regarding || t('yoagent.waiting.currentRequest'));
+    const targetRegarding = String(handoff?.target_regarding || t('yoagent.waiting.nextRequest'));
+    const label = handoffTarget
+      ? t('yoagent.waiting.handoff', {source: handoffSource, target: handoffTarget, sourceRegarding, targetRegarding})
+      : (session ? t('yoagent.waiting.session', {session}) : String(wait?.label || t('yoagent.waiting.generic')));
+    const startedTs = Number(wait?.started_ts || 0);
+    const age = Number.isFinite(startedTs) && startedTs > 0
+      ? compactRelativeTimeFormat(Math.max(0, Math.round(Date.now() / 1000 - startedTs)))
+      : '';
+    const transcript = String(wait?.transcript || '');
+    return `<li class="yoagent-waiting-item" title="${esc(transcript)}">
+      <span class="session-yolo-marker active working yoagent-waiting-spinner" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span>
+      <span class="yoagent-waiting-label">${esc(label)}</span>
+      ${age ? `<span class="yoagent-waiting-age">${esc(age)}</span>` : ''}
+    </li>`;
+  }).join('');
+  return `<div class="yoagent-waiting-queue" aria-live="polite" aria-label="${esc(title)}">
+    <div class="yoagent-waiting-title">${esc(title)}</div>
+    <ul class="yoagent-waiting-list">${rows}</ul>
+  </div>`;
+}
+
+function applyYoagentConversationPayload(payload = {}) {
+  if (!payload || typeof payload !== 'object') return false;
+  const messages = Array.isArray(payload.messages) ? payload.messages : [];
+  yoagentPendingWaits = Array.isArray(payload.pending_waits) ? payload.pending_waits : [];
+  if (messages.length) hideYoagentStartupInfo();
+  if (messages.length && yoagentStreamingMessages instanceof Map) yoagentStreamingMessages.clear();
+  yoagentMessages = messages;
+  yoagentConversationPath = String(payload.transcript_path || '');
+  yoagentConversationDisplayPath = String(payload.transcript_display_path || yoagentConversationPath);
+  yoagentConversationLoaded = true;
+  return true;
+}
+
+function applyYoagentStreamPayload(payload = {}) {
+  if (!payload || typeof payload !== 'object') return false;
+  const streamId = String(payload.stream_id || '').trim();
+  if (!streamId) return false;
+  if (!(yoagentStreamingMessages instanceof Map)) yoagentStreamingMessages = new Map();
+  const createdAt = String(payload.created_at || new Date().toISOString());
+  const content = String(payload.content || '');
+  const phase = String(payload.phase || '');
+  const hiddenThinking = Boolean(payload.hidden_thinking_removed);
+  const detailLines = [];
+  if (payload.backend) detailLines.push(`- backend: \`${payload.backend}\``);
+  if (phase) detailLines.push(`- stream phase: \`${phase}\``);
+  if (hiddenThinking) detailLines.push('- raw model thinking was hidden; YOLOmux shows safe diagnostics instead of chain-of-thought');
+  const previous = yoagentStreamingMessages.get(streamId) || {};
+  yoagentStreamingMessages.set(streamId, {
+    role: 'assistant',
+    content: content || previous.content || '',
+    createdAt: previous.createdAt || createdAt,
+    details: detailLines.join('\n') || previous.details || '',
+    streaming: payload.done !== true,
+  });
+  hideYoagentStartupInfo();
+  yoagentPrewarming = payload.done === true ? false : yoagentPrewarming;
+  return true;
+}
+
+function resetYoagentComposerHistory() {
+  yoagentHistoryCursor = null;
+  yoagentHistoryDraft = '';
+}
+
+function yoagentUserMessageHistory() {
+  return (Array.isArray(yoagentMessages) ? yoagentMessages : [])
+    .filter(message => message?.role === 'user')
+    .map(message => String(message.content || '').trim())
+    .filter(Boolean);
+}
+
+function setYoagentChatInputValue(input, value) {
+  if (!input) return;
+  const nextValue = String(value || '');
+  input.value = nextValue;
+  yoagentDraft = nextValue;
+  const end = nextValue.length;
+  try { input.setSelectionRange(end, end); } catch (_) {}
+}
+
+function yoagentNavigateChatHistory(input, direction) {
+  if (!input || input.disabled) return false;
+  const history = yoagentUserMessageHistory();
+  const latest = yoagentHistoryCursor === null;
+  if (direction === 'up') {
+    if (!history.length) return false;
+    if (latest) {
+      yoagentHistoryDraft = input.value || yoagentDraft || '';
+      yoagentHistoryCursor = history.length - 1;
+    } else {
+      yoagentHistoryCursor = Math.max(0, Math.min(history.length - 1, Number(yoagentHistoryCursor) - 1));
+    }
+    setYoagentChatInputValue(input, history[yoagentHistoryCursor] || '');
+    return true;
+  }
+  if (direction === 'down') {
+    if (latest) return false;
+    const next = Math.min(history.length, Number(yoagentHistoryCursor) + 1);
+    if (next >= history.length) {
+      yoagentHistoryCursor = null;
+      setYoagentChatInputValue(input, yoagentHistoryDraft);
+      yoagentHistoryDraft = '';
+    } else {
+      yoagentHistoryCursor = next;
+      setYoagentChatInputValue(input, history[yoagentHistoryCursor] || '');
+    }
+    return true;
+  }
+  return false;
+}
+
+function handleYoagentChatHistoryKeydown(event, input) {
+  if (!input || event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return false;
+  const direction = event.key === 'ArrowUp' ? 'up' : (event.key === 'ArrowDown' ? 'down' : '');
+  if (!direction || !yoagentNavigateChatHistory(input, direction)) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function yoagentTranscriptPathHtml() {
+  if (readOnlyMode) return '';
+  const path = yoagentConversationPath || '';
+  const display = yoagentConversationDisplayPath || path;
+  if (!path && !yoagentConversationLoading && !yoagentConversationLoaded) return '';
+  const value = path
+    ? `<code class="yoagent-transcript-value" title="${esc(path)}">${esc(display)}</code>${pathCopyButtonHtml(path, {className: 'yoagent-transcript-copy', title: t('yoagent.transcript.copy')})}`
+    : `<span class="yoagent-transcript-loading">${esc(t('yoagent.transcript.loading'))}</span>`;
+  return `<div class="yoagent-transcript-path">
+    <span class="yoagent-transcript-label">${esc(t('yoagent.transcript.label'))}</span>
+    ${value}
+  </div>`;
+}
+
+function yoagentRecentAgentActivityText(agent) {
+  const signal = yoagentRecentAgentSignal(agent);
+  if (signal.pane?.dead === true) return tmuxSignalDeadText(signal.pane);
+  const activityTs = tmuxSignalWindowActivityTs(signal.window);
+  if (activityTs > 0) {
+    const seconds = Math.max(0, Math.round(Date.now() / 1000 - activityTs));
+    return `tmux ${compactRelativeTimeFormat(seconds)}`;
+  }
+  if (agent?.running === true) return t('yoagent.agent.running');
+  const ts = Number(agent?.last_used_ts || agent?.sort_ts || 0);
+  if (!Number.isFinite(ts) || ts <= 0) return '';
+  return compactRelativeTimeFormat(Math.max(0, Math.round(Date.now() / 1000 - ts)));
+}
+
+function yoagentRecentAgentSortTs(agent, signal = yoagentRecentAgentSignal(agent)) {
+  const activityTs = tmuxSignalWindowActivityTs(signal.window);
+  if (activityTs > 0) return activityTs;
+  const sessionActivityTs = tmuxSignalSessionActivityTs(agent?.session);
+  if (sessionActivityTs > 0) return sessionActivityTs;
+  const ts = Number(agent?.last_used_ts || agent?.sort_ts || 0);
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+function yoagentRecentAgentSignal(agent) {
+  const target = String(agent?.pane_target || '').trim();
+  let pane = target ? tmuxSignalPaneForTarget(target) : null;
+  if (!pane) {
+    const session = String(agent?.session || '').trim();
+    const windowText = String(agent?.window ?? '').trim();
+    const paneText = String(agent?.pane ?? '').trim();
+    pane = tmuxSignalPanes().find(candidate => (
+      tmuxSignalPaneSession(candidate) === session
+      && String(candidate?.window_index ?? '').trim() === windowText
+      && (!paneText || String(candidate?.pane_index ?? '').trim() === paneText)
+      && tmuxSignalPaneIsAgent(candidate)
+    )) || null;
+  }
+  const windowRecord = pane ? tmuxSignalWindowForPane(pane) : tmuxSignalWindowForSessionIndex(agent?.session, agent?.window);
+  return {pane, window: windowRecord};
+}
+
+function yoagentRecentAgentSignalBadgesHtml(signal) {
+  const pane = signal?.pane || null;
+  const windowRecord = signal?.window || null;
+  const badges = [];
+  const deadText = tmuxSignalDeadText(pane);
+  if (deadText) badges.push({kind: 'dead', text: deadText});
+  if (windowRecord?.bell_flag === true) badges.push({kind: 'bell', text: 'bell'});
+  if (windowRecord?.silence_flag === true) badges.push({kind: 'silence', text: 'silent'});
+  const presenceText = tmuxSignalWindowPresenceText(windowRecord);
+  if (presenceText) badges.push({kind: 'presence', text: presenceText});
+  if (windowRecord?.zoomed === true) badges.push({kind: 'zoom', text: 'zoom'});
+  for (const label of tmuxSignalPaneModeLabels(pane)) badges.push({kind: 'mode', text: label});
+  if (!badges.length) return '';
+  return `<span class="yoagent-recent-agent-signals">${badges.map(badge => `<span class="yoagent-recent-agent-signal signal-${esc(badge.kind)}">${esc(badge.text)}</span>`).join('')}</span>`;
+}
+
+function yoagentRecentAgentRestartHtml(agent, signal) {
+  if (readOnlyMode || signal?.pane?.dead !== true) return '';
+  const kind = String(agent?.agent_kind || tmuxSignalPaneCommand(signal.pane) || '').toLowerCase();
+  if (!tmuxSignalAgentCommands.has(kind)) return '';
+  return `<button type="button" class="yoagent-recent-agent-restart" data-yolomux-agent-restart="${esc(kind)}" title="Create a new ${esc(agentLabel(kind))} session">Restart</button>`;
+}
+
+function yoagentRecentAgentPathText(agent, signal = yoagentRecentAgentSignal(agent)) {
+  const rawSignalPath = String(signal?.pane?.current_path || '').trim();
+  const signalPath = rawSignalPath ? normalizeDirectoryPath(rawSignalPath) : '';
+  if (signalPath) return compactHomePath(signalPath);
+  const paths = Array.isArray(agent?.recent_paths)
+    ? agent.recent_paths
+      .map(item => compactHomePath(item?.path || ''))
+      .filter(Boolean)
+    : [];
+  if (paths.length) {
+    const visible = paths.slice(0, 2);
+    const extra = paths.length - visible.length;
+    return `${visible.join(', ')}${extra > 0 ? ` +${extra}` : ''}`;
+  }
+  return agent?.cwd ? compactHomePath(agent.cwd) : '';
+}
+
+function yoagentRecentAgentsHtml() {
+  const agents = Array.isArray(activitySummaryPayload?.agents) ? activitySummaryPayload.agents : [];
+  const items = agents
+    .filter(agent => agent && typeof agent === 'object' && agent.label)
+    .map(agent => {
+      const signal = yoagentRecentAgentSignal(agent);
+      return {agent, signal, sortTs: yoagentRecentAgentSortTs(agent, signal)};
+    })
+    .sort((left, right) => right.sortTs - left.sortTs)
+    .slice(0, 6);
+  if (!items.length) return '';
+  const rows = items.map(({agent, signal}) => {
+    const kind = String(agent.agent_kind || '').toLowerCase();
+    const activity = yoagentRecentAgentActivityText(agent);
+    const windowText = String(agent.window_label || [agent.window, agent.window_name || kind].filter(Boolean).join(':') || kind || '').trim();
+    const pathText = yoagentRecentAgentPathText(agent, signal);
+    const signalBadges = yoagentRecentAgentSignalBadgesHtml(signal);
+    const restart = yoagentRecentAgentRestartHtml(agent, signal);
+    const idleClass = signal.window && !tmuxSignalWindowIsRecentlyActive(signal.window) ? ' tmux-idle' : '';
+    const title = [
+      agent.cwd ? `cwd: ${agent.cwd}` : '',
+      pathText ? `paths: ${pathText}` : '',
+      agent.transcript ? `transcript: ${agent.transcript}` : '',
+      signal.window?.activity_ts ? `tmux activity: ${new Date(Number(signal.window.activity_ts) * 1000).toISOString()}` : '',
+      tmuxSignalWindowClientNames(signal.window).length ? `tmux viewers: ${tmuxSignalWindowClientNames(signal.window).join(', ')}` : '',
+      signal.window?.layout ? `tmux layout: ${signal.window.layout}` : '',
+      signal.window?.visible_layout ? `tmux visible layout: ${signal.window.visible_layout}` : '',
+      signal.window?.bell_flag ? 'tmux bell alert' : '',
+      signal.window?.silence_flag ? 'tmux silence alert' : '',
+      signal.pane?.dead ? tmuxSignalDeadText(signal.pane) : '',
+      tmuxSignalPaneModeLabels(signal.pane).join(', '),
+      agent.state_text || '',
+    ].filter(Boolean).join('\n');
+    return `<li class="yoagent-recent-agent${idleClass}" data-agent-kind="${esc(kind)}" title="${esc(title)}">
+      <span class="yoagent-recent-agent-line">
+        ${kind ? agentIcon(kind, {label: agentLabel(kind)}) : ''}
+        <span class="yoagent-recent-agent-session">${esc(t('yoagent.sessionLabel', {session: agent.session || ''}))}</span>
+        <span class="yoagent-recent-agent-window">${esc(windowText)}</span>
+        ${pathText ? `<span class="yoagent-recent-agent-paths">${esc(pathText)}</span>` : ''}
+        ${activity ? `<span class="yoagent-recent-agent-activity">${esc(activity)}</span>` : ''}
+        ${signalBadges}
+        ${restart}
+      </span>
+    </li>`;
+  }).join('');
+  return `<div class="yoagent-recent-agents" aria-label="${esc(t('yoagent.recentAgents.label'))}">
+    <span class="yoagent-recent-agents-label">${esc(t('yoagent.recentAgents.label'))}</span>
+    <ul class="yoagent-recent-agents-list">${rows}</ul>
+  </div>`;
+}
+
+function yoagentRecentAgentsMessageHtml() {
+  const html = yoagentRecentAgentsHtml();
+  if (!html || !yoagentChatEnabled()) return '';
+  return `<div class="yoagent-message assistant yoagent-recent-agents-message">
+    <div class="yoagent-message-role"><span>${esc(yoagentTabLabel())}</span>${yoagentMessageTimestampHtml(activitySummaryPayload?.generated_at)}</div>
+    ${html}
+  </div>`;
+}
+
+async function loadYoagentConversation(options = {}) {
+  if (readOnlyMode || yoagentConversationLoading) return;
+  if (yoagentConversationLoaded && options.force !== true) return;
+  yoagentConversationLoading = true;
+  if (options.render !== false) renderYoagentPanel({preserveDraft: true, scrollBottom: false});
+  try {
+    const payload = await apiFetchJson('/api/yoagent/conversation', {cache: 'no-store'});
+    applyYoagentConversationPayload(payload);
+  } catch (error) {
+    if (!options.silent) statusErr(localizedHtml('yoagent.conversationLoadFailed', {error}));
+  } finally {
+    yoagentConversationLoading = false;
+    if (options.render !== false) renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom ?? false});
+  }
 }
 
 function yoagentBackendLabel(value) {
@@ -1411,7 +2377,7 @@ function yoagentResolvedBackend() {
 }
 
 function yoagentChatEnabled() {
-  return ['claude', 'codex'].includes(yoagentResolvedBackend());
+  return ['claude', 'codex', 'deterministic'].includes(yoagentResolvedBackend());
 }
 
 // The composer's "Auto" pill = the real yoagent.backend setting (Auto / Claude / Codex / No agent),
@@ -1431,24 +2397,26 @@ function yoagentBackendPillHtml(disabled) {
 }
 
 function yoagentChatHtml() {
-  const disabled = yoagentBusy || readOnlyMode ? ' disabled' : '';
-  const placeholder = readOnlyMode ? t('yoagent.chatAdminPlaceholder', {name: yoagentTabLabel()}) : t('yoagent.chatPlaceholder');
-  const hasConversation = Boolean(yoagentMessages.length || yoagentNotice || yoagentBusy || yoagentError);
-  // Strip any trailing dots/ellipsis from the localized label so the three animated dots carry the motion.
-  const thinkingLabel = esc(t('yoagent.thinking').replace(/[.…\s]+$/, ''));
-  const busy = yoagentBusy
-    ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span><span class="yoagent-thinking">${thinkingLabel}<span class="yoagent-thinking-dots" aria-hidden="true"><i>.</i><i>.</i><i>.</i></span></span></div>`
+  const disabled = yoagentBusy ? ' disabled' : '';
+  const backendDisabled = yoagentBusy || readOnlyMode ? ' disabled' : '';
+  const placeholder = t('yoagent.chatPlaceholder');
+  const isThinking = yoagentBusy || yoagentPrewarming;
+  const startupInfo = yoagentStartupInfoVisible ? yoagentStartupInfoHtml() : '';
+  const hasConversation = Boolean(yoagentMessages.length || yoagentPendingWaits.length || yoagentNotice || isThinking || yoagentError || startupInfo);
+  const thinkingHtml = textWithMovingEllipsisHtml(t('yoagent.thinking'), 'yoagent-thinking-dots');
+  const busy = isThinking
+    ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span><span class="yoagent-thinking">${thinkingHtml}</span></div>`
     : '';
-  const retry = yoagentError && yoagentDraft && yoagentChatEnabled() && !yoagentBusy && !readOnlyMode
+  const retry = yoagentError && yoagentDraft && yoagentChatEnabled() && !yoagentBusy
     ? `<button type="button" class="yoagent-chat-retry" data-yoagent-retry>${esc(t('yoagent.retry'))}</button>`
     : '';
   const error = yoagentError ? `<div class="yoagent-chat-error"><span>${esc(yoagentError)}</span>${retry}</div>` : '';
-  const clearDisabled = yoagentBusy || (!yoagentMessages.length && !yoagentNotice && !yoagentError) ? ' disabled' : '';
+  const clearDisabled = yoagentBusy || readOnlyMode || (!yoagentMessages.length && !yoagentNotice && !yoagentError) ? ' disabled' : '';
   const form = yoagentChatEnabled()
     ? `<form class="yoagent-chat-form" data-yoagent-chat-form>
       <input type="text" class="yoagent-chat-input" data-yoagent-chat-input value="${esc(yoagentDraft)}" placeholder="${esc(placeholder)}"${disabled}>
       <div class="yoagent-chat-controls">
-        ${yoagentBackendPillHtml(disabled)}
+        ${yoagentBackendPillHtml(backendDisabled)}
         <span class="yoagent-chat-controls-spacer"></span>
         <button type="button" class="yoagent-chat-clear" data-yoagent-clear${clearDisabled}>${esc(t('yoagent.clear'))}</button>
         <button type="submit" class="yoagent-chat-send"${disabled} title="${esc(t('yoagent.ask'))}" aria-label="${esc(t('yoagent.ask'))}">
@@ -1458,7 +2426,8 @@ function yoagentChatHtml() {
     </form>`
     : '';
   return `<section class="yoagent-chat ${hasConversation ? 'has-history' : 'empty'}" aria-label="${esc(t('yoagent.chatAria', {name: yoagentTabLabel()}))}">
-    <div class="yoagent-chat-history">${yoagentNoticeHtml()}${yoagentChatMessagesHtml()}${busy}${error}</div>
+    ${yoagentTranscriptPathHtml()}
+    <div class="yoagent-chat-history">${yoagentAutoRefreshStatusHtml()}${yoagentNoticeHtml()}${yoagentChatMessagesHtml()}${yoagentPendingWaitsHtml()}${busy}${error}</div>
     ${form}
   </section>`;
 }
@@ -1475,16 +2444,56 @@ function yoagentChatErrorMessage(error) {
   return t('yoagent.chatFailed', {error: error?.message || error});
 }
 
+let yoagentFocusSerial = 0;
+let yoagentFocusTrackerInstalled = false;
+
+function yoagentDocumentHasFocus() {
+  if (typeof document !== 'undefined' && document.visibilityState && document.visibilityState !== 'visible') return false;
+  if (typeof document !== 'undefined' && typeof document.hasFocus === 'function') return document.hasFocus();
+  return true;
+}
+
+function yoagentEventIsInsideComposer(event) {
+  return Boolean(event?.target?.closest?.('[data-yoagent-chat-form]'));
+}
+
+function installYoagentFocusTracker() {
+  if (yoagentFocusTrackerInstalled || typeof document === 'undefined') return;
+  yoagentFocusTrackerInstalled = true;
+  document.addEventListener('pointerdown', event => {
+    if (!yoagentEventIsInsideComposer(event)) yoagentFocusSerial += 1;
+  }, true);
+  document.addEventListener('focusin', event => {
+    if (!yoagentEventIsInsideComposer(event)) yoagentFocusSerial += 1;
+  }, true);
+  if (typeof window !== 'undefined') {
+    window.addEventListener('blur', () => { yoagentFocusSerial += 1; });
+  }
+}
+
 async function clearYoagentConversation() {
   yoagentMessages = [];
+  yoagentPendingWaits = [];
   yoagentBusy = false;
+  yoagentPrewarming = false;
+  yoagentPrewarmStarted = false;
+  yoagentStartupLlmRequested = false;
+  if (yoagentStreamingMessages instanceof Map) yoagentStreamingMessages.clear();
   yoagentError = '';
   yoagentDraft = '';
+  resetYoagentComposerHistory();
   yoagentNotice = null;
+  showYoagentStartupInfoForLatestActivity();
   renderYoagentPanel({preserveDraft: false, scrollBottom: true});
   try {
-    await apiFetch('/api/yoagent/reset', {method: 'POST'});
+    const payload = await apiFetchJson('/api/yoagent/reset', {method: 'POST'});
+    applyYoagentConversationPayload(payload.conversation || {});
+    showYoagentStartupInfoForLatestActivity();
+    renderYoagentPanel({preserveDraft: false, scrollBottom: true});
     statusEl.textContent = t('yoagent.statusCleared');
+    await refreshActivitySummary({force: true, silent: true});
+    showYoagentStartupInfoForLatestActivity();
+    renderYoagentPanel({preserveDraft: false, scrollBottom: true});
   } catch (error) {
     statusErr(`${esc(t('yoagent.statusClearFailed', {error}))}`);
   }
@@ -1492,48 +2501,141 @@ async function clearYoagentConversation() {
 
 async function sendYoagentChatMessage(rawText) {
   const text = String(rawText || '').trim();
-  if (!text || yoagentBusy || readOnlyMode || !yoagentChatEnabled()) return;
-  yoagentMessages.push({role: 'user', content: text});
+  if (!text || yoagentBusy || !yoagentChatEnabled()) return;
+  resetYoagentComposerHistory();
+  hideYoagentStartupInfo();
+  installYoagentFocusTracker();
+  const focusSerial = yoagentFocusSerial;
+  const shouldRestoreFocus = yoagentChatInputIsFocused() && yoagentDocumentHasFocus();
+  yoagentMessages.push({role: 'user', content: text, createdAt: new Date().toISOString()});
   yoagentDraft = '';
   yoagentBusy = true;
+  yoagentPrewarming = false;
   yoagentError = '';
   yoagentNotice = null;
+  if (yoagentStreamingMessages instanceof Map) yoagentStreamingMessages.clear();
   renderYoagentPanel({preserveDraft: false, scrollBottom: true});
   try {
-    const response = await apiFetch('/api/yoagent/chat', {
+    const payload = await apiFetchJson('/api/yoagent/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      // DOIT.8 Phase 1: pass the active UI locale so the LLM backend replies in that language.
-      body: JSON.stringify({message: text, history: yoagentMessages.slice(-10), locale: i18nActiveLocaleId()}),
+      body: JSON.stringify({message: text, history: yoagentMessages.slice(-11, -1), locale: i18nActiveLocaleId()}),
     });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
     if (payload.fallback && payload.fallback_reason) {
       yoagentNotice = {backend: yoagentBackendLabel(payload.backend_used || payload.backend), reason: payload.fallback_reason};
     }
-    yoagentMessages.push({role: 'assistant', content: payload.answer || t('yoagent.noAnswer')});
+    if (!applyYoagentConversationPayload(payload.conversation || {})) {
+      yoagentMessages.push({
+        role: 'assistant',
+        content: payload.answer || t('yoagent.noAnswer'),
+        actions: Array.isArray(payload.actions) ? payload.actions : [],
+        details: payload.details || '',
+        createdAt: payload.answered_at || new Date().toISOString(),
+      });
+    }
     statusEl.textContent = t('yoagent.statusAnswered', {backend: yoagentBackendLabel(payload.backend_used || payload.backend)});
   } catch (error) {
     if (yoagentChatNetworkError(error)) yoagentDraft = text;
     yoagentError = yoagentChatErrorMessage(error);
   } finally {
     yoagentBusy = false;
-    renderYoagentPanel({preserveDraft: true, scrollBottom: true, focusInput: true});
+    renderYoagentPanel({
+      preserveDraft: true,
+      scrollBottom: true,
+      focusInput: shouldRestoreFocus && focusSerial === yoagentFocusSerial && yoagentDocumentHasFocus(),
+    });
   }
 }
 
+function updateYoagentActionPreview(previewId, patch) {
+  let changed = false;
+  for (const message of yoagentMessages) {
+    if (!Array.isArray(message.actions)) continue;
+    message.actions = message.actions.map(action => {
+      if (action?.id !== previewId) return action;
+      changed = true;
+      return {...action, ...patch};
+    });
+  }
+  return changed;
+}
+
+async function executeYoagentActionSend(previewId) {
+  if (!previewId || readOnlyMode || yoagentBusy) return;
+  hideYoagentStartupInfo();
+  yoagentBusy = true;
+  updateYoagentActionPreview(previewId, {status_text: 'sending'});
+  renderYoagentPanel({preserveDraft: true, scrollBottom: false});
+  try {
+    const payload = await apiFetchJson('/api/yoagent/actions/execute-send', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({preview_id: previewId}),
+    });
+    applyYoagentConversationPayload(payload.conversation || {});
+    updateYoagentActionPreview(previewId, {status: 'sent', status_text: 'sent'});
+    const answer = payload.answer
+      ? t('yoagent.action.sentWithAnswer', {session: payload.session, transport: payload.transport, answer: payload.answer})
+      : t('yoagent.action.sent', {session: payload.session, transport: payload.transport});
+    if (!payload.conversation) yoagentMessages.push({role: 'assistant', content: answer, createdAt: new Date().toISOString()});
+    statusEl.textContent = t('yoagent.statusActionSent', {session: payload.session});
+  } catch (error) {
+    updateYoagentActionPreview(previewId, {status: 'error', status_text: error?.message || String(error)});
+    yoagentError = yoagentChatErrorMessage(error);
+  } finally {
+    yoagentBusy = false;
+    renderYoagentPanel({preserveDraft: true, scrollBottom: true});
+  }
+}
+
+async function prewarmYoagent(options = {}) {
+  if (yoagentPrewarmStarted || readOnlyMode || !yoagentChatEnabled()) return;
+  const shouldRequestStartupAnswer = !yoagentStartupLlmRequested && !yoagentMessages.length && !yoagentConversationLoaded;
+  if (shouldRequestStartupAnswer) yoagentStartupLlmRequested = true;
+  yoagentPrewarmStarted = true;
+  yoagentPrewarming = true;
+  renderYoagentPanel({preserveDraft: true, scrollBottom: false});
+  try {
+    const payload = await apiFetchJson('/api/yoagent/prewarm', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({locale: i18nActiveLocaleId(), visible: shouldRequestStartupAnswer}),
+    });
+    if (payload?.fallback && payload.fallback_reason) {
+      yoagentNotice = {backend: yoagentBackendLabel(payload.backend_used || payload.backend), reason: payload.fallback_reason};
+    }
+    if (payload?.conversation) applyYoagentConversationPayload(payload.conversation || {});
+  } catch (error) {
+    if (shouldRequestStartupAnswer) {
+      yoagentError = yoagentChatErrorMessage(error);
+    }
+    // Non-visible process warm-up is opportunistic; visible chat requests handle real errors.
+  } finally {
+    yoagentPrewarming = false;
+    renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom === true});
+  }
+}
+
+function activitySummaryIsVisible() {
+  return infoPanelSubTab === 'yoagent' && itemIsActivePaneTab(infoItemId);
+}
+
 async function refreshActivitySummary(options = {}) {
+  if (options.silent === true) {
+    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+    return;
+  }
   if (activitySummaryRefreshing && options.force !== true) return;
-  const requestId = ++activitySummaryRequestId;
-  const requestIsCurrent = () => requestId === activitySummaryRequestId;
+  const requestIsCurrent = activitySummaryGuard.begin();
   activitySummaryRefreshing = true;
   renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
   try {
-    const response = await apiFetch(`/api/activity-summary${options.force ? '?force=1' : ''}`, {cache: 'no-store'});
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || response.status);
+    const params = new URLSearchParams();
+    if (options.force) params.set('force', '1');
+    params.set('locale', i18nActiveLocaleId());
+    const payload = await apiFetchJson(`/api/activity-summary?${params.toString()}`, {cache: 'no-store'});
     if (!requestIsCurrent()) return;
-    activitySummaryPayload = payload;
+    applyActivitySummaryPayloadFromPush(payload);
   } catch (error) {
     if (!requestIsCurrent()) return;
     activitySummaryPayload = {
@@ -1541,25 +2643,37 @@ async function refreshActivitySummary(options = {}) {
       errors: [String(error)],
       global: {lines: [`activity summary unavailable: ${String(error)}`]},
     };
-    if (!options.silent) statusErr(`activity summary failed: ${esc(error)}`);
+    if (!options.silent) statusErr(localizedHtml('status.activitySummaryFailed', {error}));
   } finally {
     if (requestIsCurrent()) {
       activitySummaryRefreshing = false;
       renderInfoPanel();
       renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
+      if (infoPanelSubTab === 'yoagent') prewarmYoagent();
     }
   }
+}
+
+function applyActivitySummaryPayloadFromPush(payload = {}) {
+  if (!payload || typeof payload !== 'object') return false;
+  activitySummaryPayload = payload;
+  activitySummaryLastRefreshTs = Date.now();
+  activitySummaryRefreshing = false;
+  renderInfoPanel();
+  renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
+  if (infoPanelSubTab === 'yoagent') prewarmYoagent();
+  return true;
 }
 
 function editorSchemePreferenceChoices(options = {}) {
   const preferredOrder = [
     'dark',
-    'vscode-dark-plus',
+    'popular-ide-dark-plus',
     'one-dark',
     'dracula',
     'monokai',
     'nord',
-    'vscode-light-plus',
+    'popular-ide-light-plus',
     'yolomux-light',
     'github-light',
     'one-light',
@@ -1570,134 +2684,221 @@ function editorSchemePreferenceChoices(options = {}) {
     .filter(id => options.dark === undefined || EDITOR_SCHEMES[id]?.dark === options.dark)
     .map(id => {
       const scheme = EDITOR_SCHEMES[id];
-      return {value: id, label: scheme.label, group: scheme.dark ? 'Dark' : 'Light'};
+      return {value: id, label: scheme.label, group: scheme.dark ? t('pref.editorScheme.group.dark') : t('pref.editorScheme.group.light')};
     });
+}
+
+function globalThemePreferenceChoices() {
+  return [
+    {value: 'system', label: t('pref.appearance.theme.system')},
+    {value: 'dark', label: t('pref.appearance.theme.dark')},
+    {value: 'light', label: t('pref.appearance.theme.light')},
+  ];
+}
+
+function layoutModePreferenceChoices() {
+  return layoutModeValues.map(value => ({value, label: t(`menu.view.layout.${value}`)}));
+}
+
+function activeColorPreferenceChoice(value, label) {
+  const dark = uiColorVisualPreset(value, false);
+  const light = uiColorVisualPreset(value, true);
+  const swatches = dark && light ? [dark.bright, light.bright] : ['#86d600', '#4f9e3a'];
+  return {value, label, swatches, joinedSwatches: true};
+}
+
+function activeColorPreferenceChoices() {
+  return UI_COLOR_CHOICES.map(value => activeColorPreferenceChoice(value, t(UI_COLOR_PRESETS[value].labelKey)));
+}
+
+function cursorColorPreferenceChoice(value) {
+  const preset = UI_COLOR_PRESETS[value];
+  const label = value === 'theme'
+    ? t('pref.appearance.editor_cursor_color.theme')
+    : preset?.cursorLabelKey ? t(preset.cursorLabelKey) : preferenceChoiceLabel(value);
+  if (value === 'theme') return {value, label, swatches: [activeEditorScheme().cursor]};
+  const dark = cursorColorForPreset(value, false);
+  const light = cursorColorForPreset(value, true);
+  if (dark && light && dark !== light) return {value, label, swatches: [dark, light], joinedSwatches: true};
+  return dark ? {value, label, swatches: [dark]} : {value, label};
+}
+
+function cursorColorPreferenceChoices() {
+  const choices = Array.isArray(clientSettingsPayload?.choices?.['appearance.editor_cursor_color'])
+    ? clientSettingsPayload.choices['appearance.editor_cursor_color']
+    : CURSOR_COLOR_CHOICES;
+  return choices
+    .filter(value => value === 'theme' || UI_COLOR_PRESETS[value]?.cursor)
+    .map(cursorColorPreferenceChoice);
+}
+
+function separatorColorPreferenceChoice(value) {
+  if (value === 'theme') return {value, label: t('pref.appearance.editor_cursor_color.theme')};
+  return activeColorPreferenceChoice(value, t(UI_COLOR_PRESETS[value].labelKey));
+}
+
+function separatorColorPreferenceChoices() {
+  const choices = Array.isArray(clientSettingsPayload?.choices?.['appearance.separator_color'])
+    ? clientSettingsPayload.choices['appearance.separator_color']
+    : SEPARATOR_COLOR_CHOICES;
+  return choices
+    .filter(value => value === 'theme' || UI_COLOR_PRESETS[value])
+    .map(separatorColorPreferenceChoice);
+}
+
+function updateNotifyLevelPreferenceChoices() {
+  const choices = Array.isArray(clientSettingsPayload?.choices?.['updates.notify_level'])
+    ? clientSettingsPayload.choices['updates.notify_level']
+    : ['major', 'minor', 'patch', 'none'];
+  return choices.map(value => ({value, label: t(`pref.updates.notify_level.${value}`)}));
 }
 
 function preferenceSections() {
   return [
     {title: t('pref.section.general'), items: [
       // #51: Language is the FIRST General preference.
-      {path: 'general.language', label: t('pref.general.language.label'), type: 'select', choices: [
-        // Endonym labels (each language in its own script); Traditional Chinese before Simplified.
-        {value: 'system', label: t('pref.general.language.system')},
-        {value: 'en', label: 'English'},
-        {value: 'zh-Hant', label: '繁體中文'},
-        {value: 'zh-Hans', label: '简体中文'},
-        {value: 'es', label: 'Español'},
-        {value: 'ja', label: '日本語'},
-        {value: 'de', label: 'Deutsch'},
-        {value: 'fr', label: 'Français'},
-        {value: 'pt-BR', label: 'Português (BR)'},
-        {value: 'ru', label: 'Русский'},
-        {value: 'ko', label: '한국어'},
-        {value: 'hi', label: 'हिन्दी'},
-        {value: 'ar', label: 'العربية'},
-        {value: 'en-XA', label: t('pref.general.language.pseudo')},
-      ], help: t('pref.general.language.help')},
+      {path: 'general.language', label: t('pref.general.language.label'), type: 'select', choices: i18nLocaleChoices(), help: t('pref.general.language.help')},
       {path: 'general.auto_focus', label: t('pref.general.auto_focus.label'), type: 'boolean', help: t('pref.general.auto_focus.help')},
-      {path: 'general.default_layout', label: t('pref.general.default_layout.label'), type: 'select', choices: ['single', 'grid', 'wall'], help: t('pref.general.default_layout.help')},
-      {path: 'general.default_sessions', label: t('pref.general.default_sessions.label'), type: 'list', help: t('pref.general.default_sessions.help')},
-      {path: 'general.reload_on_update', label: t('pref.general.reload_on_update.label'), type: 'boolean', help: t('pref.general.reload_on_update.help')},
-      {path: 'general.reload_on_update_auto', label: t('pref.general.reload_on_update_auto.label'), type: 'boolean', help: t('pref.general.reload_on_update_auto.help')},
+      {path: 'general.startup_tips', label: t('pref.general.startup_tips.label'), type: 'boolean', help: t('pref.general.startup_tips.help')},
     ]},
     {title: t('pref.section.appearance'), items: [
-      {path: 'appearance.theme', label: t('pref.appearance.theme.label'), type: 'radio', choices: [
-        {value: 'system', label: t('pref.appearance.theme.system')},
-        {value: 'dark', label: t('pref.appearance.theme.dark')},
-        {value: 'light', label: t('pref.appearance.theme.light')},
-      ], help: t('pref.appearance.theme.help')},
-      {path: 'appearance.terminal_theme', label: t('pref.appearance.terminal_theme.label'), type: 'select', choices: [
+      {path: 'appearance.theme', label: t('pref.appearance.theme.label'), type: 'radio', choices: globalThemePreferenceChoices(), help: t('pref.appearance.theme.help')},
+      {path: 'general.default_layout', label: t('pref.general.default_layout.label'), type: 'radio', choices: layoutModePreferenceChoices(), help: t('pref.general.default_layout.help')},
+      {path: 'appearance.ui_font_size', label: t('pref.appearance.ui_font_size.label'), type: 'number', min: 6, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.ui_font_size.help')},
+      {path: 'appearance.file_explorer_font_size', label: t('pref.appearance.file_explorer_font_size.label', {name: fileExplorerLabel()}), type: 'number', min: 6, max: 24, step: 1, suffix: 'px', help: t('pref.appearance.file_explorer_font_size.help')},
+      {type: 'note', text: t('pref.appearance.font_sizes.note')},
+      {path: 'appearance.tab_width', label: t('pref.appearance.tab_width.label'), type: 'number', min: 120, max: 420, step: 5, suffix: 'px', help: t('pref.appearance.tab_width.help')},
+      {path: 'appearance.max_tabs_per_pane', label: t('pref.appearance.max_tabs_per_pane.label'), type: 'number', min: 2, max: 30, step: 1, help: t('pref.appearance.max_tabs_per_pane.help')},
+      {path: 'appearance.pane_spacing', label: t('pref.appearance.pane_spacing.label'), type: 'number', min: 0, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.pane_spacing.help')},
+      {path: 'appearance.pane_ring_opacity', label: t('pref.appearance.pane_ring_opacity.label'), type: 'range', min: 5, max: 100, step: 5, suffix: '%', help: t('pref.appearance.pane_ring_opacity.help')},
+      {path: 'appearance.inactive_pane_opacity', label: t('pref.appearance.inactive_pane_opacity.label'), type: 'range', min: 0, max: 100, step: 5, suffix: '%', help: t('pref.appearance.inactive_pane_opacity.help')},
+      {path: 'appearance.active_color', label: t('pref.appearance.active_color.label'), type: 'radio', choices: activeColorPreferenceChoices(), help: t('pref.appearance.active_color.help')},
+      {path: 'appearance.separator_color', label: t('pref.appearance.separator_color.label'), type: 'radio', choices: separatorColorPreferenceChoices(), help: t('pref.appearance.separator_color.help')},
+      {path: 'appearance.editor_cursor_color', label: t('pref.appearance.editor_cursor_color.label'), type: 'radio', choices: cursorColorPreferenceChoices(), help: t('pref.appearance.editor_cursor_color.help')},
+      {path: 'appearance.yolo_rotate_ms', label: t('pref.appearance.yolo_rotate_ms.label'), type: 'number', min: 0, max: 60000, step: 250, suffix: 'ms', help: t('pref.appearance.yolo_rotate_ms.help')},
+      {path: 'appearance.date_time_hour_cycle', label: t('pref.appearance.date_time_hour_cycle.label'), type: 'radio', choices: [
+        {value: '24', label: t('pref.appearance.date_time_hour_cycle.24')},
+        {value: '12', label: t('pref.appearance.date_time_hour_cycle.12')},
+      ], help: t('pref.appearance.date_time_hour_cycle.help')},
+    ]},
+    {title: t('pref.section.terminal_editor'), items: [
+      {path: 'appearance.terminal_theme', label: t('pref.appearance.terminal_theme.label'), type: 'radio', choices: [
+        {value: 'follow-app', label: t('pref.appearance.terminal_theme.follow-app')},
         {value: 'dark', label: t('pref.appearance.terminal_theme.dark')},
         {value: 'light', label: t('pref.appearance.terminal_theme.light')},
-        {value: 'follow-app', label: t('pref.appearance.terminal_theme.follow-app')},
       ], help: t('pref.appearance.terminal_theme.help')},
-      {path: 'appearance.ui_font_size', label: t('pref.appearance.ui_font_size.label'), type: 'number', min: 8, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.ui_font_size.help')},
-      {path: 'appearance.terminal_font_size', label: t('pref.appearance.terminal_font_size.label'), type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.terminal_font_size.help')},
-      {path: 'appearance.editor_font_size', label: t('pref.appearance.editor_font_size.label'), type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.editor_font_size.help')},
-      {path: 'appearance.file_explorer_font_size', label: t('pref.appearance.file_explorer_font_size.label', {name: fileExplorerLabel()}), type: 'number', min: 8, max: 24, step: 1, suffix: 'px', help: t('pref.appearance.file_explorer_font_size.help')},
+      {path: 'appearance.terminal_font_size', label: t('pref.appearance.terminal_font_size.label'), type: 'number', min: 6, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.terminal_font_size.help')},
+      {path: 'appearance.editor_font_size', label: t('pref.appearance.editor_font_size.label'), type: 'number', min: 6, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.editor_font_size.help')},
+      {path: 'appearance.preview_font_size', label: t('pref.appearance.preview_font_size.label'), type: 'number', min: 6, max: 32, step: 1, suffix: 'px', help: t('pref.appearance.preview_font_size.help')},
+      {path: 'terminal_editor.scrollback', label: t('pref.terminal_editor.scrollback.label'), type: 'number', min: 1000, max: 50000, step: 500, suffix: 'lines', help: t('pref.terminal_editor.scrollback.help')},
       {path: 'appearance.editor_dark_color_scheme', label: t('pref.appearance.editor_dark_color_scheme.label'), type: 'select', choices: editorSchemePreferenceChoices({dark: true}), help: t('pref.appearance.editor_dark_color_scheme.help')},
       {path: 'appearance.editor_light_color_scheme', label: t('pref.appearance.editor_light_color_scheme.label'), type: 'select', choices: editorSchemePreferenceChoices({dark: false}), help: t('pref.appearance.editor_light_color_scheme.help')},
-      {path: 'appearance.editor_cursor_style', label: t('pref.appearance.editor_cursor_style.label'), type: 'select', choices: [
+      {path: 'appearance.editor_cursor_style', label: t('pref.appearance.editor_cursor_style.label'), type: 'radio', choices: [
         {value: 'line', label: t('pref.appearance.editor_cursor_style.line')},
         {value: 'block', label: t('pref.appearance.editor_cursor_style.block')},
       ], help: t('pref.appearance.editor_cursor_style.help')},
-      {path: 'appearance.editor_cursor_color', label: t('pref.appearance.editor_cursor_color.label'), type: 'select', choices: [
-        {value: 'yellow', label: t('pref.appearance.editor_cursor_color.yellow')},
-        {value: 'theme', label: t('pref.appearance.editor_cursor_color.theme')},
-      ], help: t('pref.appearance.editor_cursor_color.help')},
-      {path: 'appearance.tab_width', label: t('pref.appearance.tab_width.label'), type: 'number', min: 120, max: 420, step: 5, suffix: 'px', help: t('pref.appearance.tab_width.help')},
-      {path: 'appearance.pane_spacing', label: t('pref.appearance.pane_spacing.label'), type: 'number', min: 0, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.pane_spacing.help')},
-      {path: 'appearance.pane_ring_opacity', label: t('pref.appearance.pane_ring_opacity.label'), type: 'number', min: 20, max: 100, step: 5, suffix: '%', help: t('pref.appearance.pane_ring_opacity.help')},
-      {path: 'appearance.max_tabs_per_pane', label: t('pref.appearance.max_tabs_per_pane.label'), type: 'number', min: 2, max: 30, step: 1, help: t('pref.appearance.max_tabs_per_pane.help')},
-      {path: 'appearance.red_reminder_ms', label: t('pref.appearance.red_reminder_ms.label'), type: 'number', min: 0, max: 10000, step: 50, suffix: 'ms', help: t('pref.appearance.red_reminder_ms.help')},
-      {path: 'appearance.yolo_rotate_ms', label: t('pref.appearance.yolo_rotate_ms.label'), type: 'number', min: 0, max: 60000, step: 250, suffix: 'ms', help: t('pref.appearance.yolo_rotate_ms.help')},
-      {path: 'appearance.metadata_badge_pulse_seconds', label: t('pref.appearance.metadata_badge_pulse_seconds.label'), type: 'number', min: 0, max: 120, step: 1, suffix: 's', help: t('pref.appearance.metadata_badge_pulse_seconds.help')},
-    ]},
-    {title: t('pref.section.yolo'), items: [
-      {path: 'yolo.rule_file_path', label: t('pref.yolo.rule_file_path.label'), type: 'text', action: 'open-yolo-rule', wide: true, help: t('pref.yolo.rule_file_path.help')},
-      {path: 'yolo.dry_run', label: t('pref.yolo.dry_run.label'), type: 'boolean', help: t('pref.yolo.dry_run.help')},
-      {path: 'yolo.prompt_source', label: t('pref.yolo.prompt_source.label'), type: 'select', choices: [
-        {value: 'hybrid', label: t('pref.yolo.prompt_source.hybrid')},
-        {value: 'pane', label: t('pref.yolo.prompt_source.pane')},
-      ], help: t('pref.yolo.prompt_source.help')},
-    ]},
-    {title: t('pref.section.notifications'), items: [
-      {path: 'notifications.toast_duration_ms', label: t('pref.notifications.toast_duration_ms.label'), type: 'number', min: 1000, max: 60000, step: 500, suffix: 'ms', help: t('pref.notifications.toast_duration_ms.help')},
-      {path: 'notifications.throttle_seconds', label: t('pref.notifications.throttle_seconds.label'), type: 'number', min: 0, max: 600, step: 5, suffix: 's', help: t('pref.notifications.throttle_seconds.help')},
-      {path: 'notifications.notify_transitions', label: t('pref.notifications.notify_transitions.label'), type: 'list', help: t('pref.notifications.notify_transitions.help')},
-    ]},
-    {title: t('pref.section.terminal_editor'), items: [
-      {path: 'terminal_editor.scrollback', label: t('pref.terminal_editor.scrollback.label'), type: 'number', min: 1000, max: 50000, step: 500, suffix: 'lines', help: t('pref.terminal_editor.scrollback.help')},
       {path: 'terminal_editor.word_wrap', label: t('pref.terminal_editor.word_wrap.label'), type: 'boolean', help: t('pref.terminal_editor.word_wrap.help')},
       {path: 'terminal_editor.line_numbers', label: t('pref.terminal_editor.line_numbers.label'), type: 'boolean', help: t('pref.terminal_editor.line_numbers.help')},
       {path: 'editor.autosave', label: t('pref.editor.autosave.label'), type: 'boolean', help: t('pref.editor.autosave.help')},
       {path: 'editor.autosave_delay_seconds', label: t('pref.editor.autosave_delay_seconds.label'), type: 'number', min: 0.5, max: 60, step: 0.5, suffix: 's', help: t('pref.editor.autosave_delay_seconds.help')},
       {path: 'editor.blame_all_lines', label: t('pref.editor.blame_all_lines.label'), type: 'boolean', help: t('pref.editor.blame_all_lines.help')},
     ]},
+    {title: t('pref.section.notifications'), items: [
+      {path: 'general.reload_on_update', label: t('pref.general.reload_on_update.label'), type: 'boolean', help: t('pref.general.reload_on_update.help')},
+      {path: 'general.reload_on_update_auto', label: t('pref.general.reload_on_update_auto.label'), type: 'boolean', help: t('pref.general.reload_on_update_auto.help')},
+      {path: 'updates.notify_level', label: t('pref.updates.notify_level.label'), type: 'radio', choices: updateNotifyLevelPreferenceChoices(), help: t('pref.updates.notify_level.help')},
+      {path: 'notifications.notify_transitions', label: t('pref.notifications.notify_transitions.label'), type: 'list', help: t('pref.notifications.notify_transitions.help')},
+      {path: 'notifications.toast_duration_ms', label: t('pref.notifications.toast_duration_ms.label'), type: 'number', min: 1000, max: 60000, step: 500, suffix: 'ms', help: t('pref.notifications.toast_duration_ms.help')},
+      {path: 'notifications.throttle_seconds', label: t('pref.notifications.throttle_seconds.label'), type: 'number', min: 0, max: 600, step: 5, suffix: 's', help: t('pref.notifications.throttle_seconds.help')},
+      {path: 'appearance.red_reminder_ms', label: t('pref.appearance.red_reminder_ms.label'), type: 'number', min: 0, max: 10000, step: 50, suffix: 'ms', help: t('pref.appearance.red_reminder_ms.help')},
+      {path: 'appearance.metadata_badge_pulse_seconds', label: t('pref.appearance.metadata_badge_pulse_seconds.label'), type: 'number', min: 0, max: 120, step: 1, suffix: 's', help: t('pref.appearance.metadata_badge_pulse_seconds.help')},
+    ]},
     {title: fileExplorerLabel(), items: [
-      {path: 'file_explorer.root_mode', label: t('pref.file_explorer.root_mode.label'), type: 'select', choices: ['fixed', 'sync'], help: t('pref.file_explorer.root_mode.help')},
-      {path: 'file_explorer.image_open_mode', label: t('pref.file_explorer.image_open_mode.label'), type: 'select', choices: ['same-tab', 'new-tab'], help: t('pref.file_explorer.image_open_mode.help')},
+      {path: 'file_explorer.root_mode', label: t('pref.file_explorer.root_mode.label'), type: 'radio', choices: ['fixed', 'sync'], help: t('pref.file_explorer.root_mode.help')},
+      {path: 'file_explorer.image_open_mode', label: t('pref.file_explorer.image_open_mode.label'), type: 'radio', choices: ['same-tab', 'new-tab'], help: t('pref.file_explorer.image_open_mode.help')},
       {path: 'file_explorer.image_preview_max_px', label: t('pref.file_explorer.image_preview_max_px.label'), type: 'number', min: 120, max: 1200, step: 20, suffix: 'px', help: t('pref.file_explorer.image_preview_max_px.help')},
       {path: 'file_explorer.quick_access_paths', label: t('pref.file_explorer.quick_access_paths.label'), type: 'list', help: t('pref.file_explorer.quick_access_paths.help')},
       {path: 'file_explorer.indexed_dirs', label: t('pref.file_explorer.indexed_dirs.label'), type: 'list', help: t('pref.file_explorer.indexed_dirs.help')},
-      {path: 'file_explorer.refresh_ms', label: t('pref.file_explorer.refresh_ms.label', {name: fileExplorerLabel()}), type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: t('pref.file_explorer.refresh_ms.help')},
+      {path: 'file_explorer.index_refresh_seconds', label: t('pref.file_explorer.index_refresh_seconds.label'), type: 'number', min: 0, max: 3600, step: 10, suffix: 's', help: t('pref.file_explorer.index_refresh_seconds.help')},
+      {path: 'file_explorer.companion_dirs', label: t('pref.file_explorer.companion_dirs.label'), type: 'list', help: t('pref.file_explorer.companion_dirs.help')},
+      {path: 'file_explorer.dir_cache_ms', label: t('pref.file_explorer.dir_cache_ms.label'), type: 'number', min: 0, max: 10000, step: 100, suffix: 'ms', help: t('pref.file_explorer.dir_cache_ms.help')},
       {path: 'file_explorer.new_entry_highlight_ms', label: t('pref.file_explorer.new_entry_highlight_ms.label'), type: 'number', min: 0, max: 600000, step: 1000, suffix: 'ms', help: t('pref.file_explorer.new_entry_highlight_ms.help')},
     ]},
     {title: t('pref.section.uploads'), items: [
       {path: 'uploads.filename_template', label: t('pref.uploads.filename_template.label'), type: 'text', wide: true, help: t('pref.uploads.filename_template.help')},
+      {path: 'uploads.subdir', label: t('pref.uploads.subdir.label'), type: 'text', help: t('pref.uploads.subdir.help')},
+      {path: 'uploads.show_suggestions', label: t('pref.uploads.show_suggestions.label'), type: 'boolean', help: t('pref.uploads.show_suggestions.help')},
+      {path: 'uploads.suggestion_autorun', label: t('pref.uploads.suggestion_autorun.label'), type: 'boolean', help: t('pref.uploads.suggestion_autorun.help')},
+      {path: 'uploads.image_action_order', label: t('pref.uploads.image_action_order.label'), type: 'list', wide: true, rows: 7, maxItems: 9, autosize: true, help: t('pref.uploads.image_action_order.help')},
+      {path: 'uploads.custom_actions', label: t('pref.uploads.custom_actions.label'), type: 'list', wide: true, help: t('pref.uploads.custom_actions.help')},
       {path: 'uploads.max_bytes', label: t('pref.uploads.max_bytes.label'), type: 'number', min: 1, max: 512, step: 1, suffix: 'MB', scale: 1048576, help: t('pref.uploads.max_bytes.help')},
     ]},
+    {title: t('pref.section.share'), items: [
+      {path: 'share.ttl_seconds', label: t('pref.share.ttl_seconds.label'), type: 'number', min: 1, max: 480, step: 1, suffix: t('unit.minute.short'), scale: 60, help: t('pref.share.ttl_seconds.help')},
+      {path: 'share.max_viewers', label: t('pref.share.max_viewers.label'), type: 'number', min: 1, max: 300, step: 1, help: t('pref.share.max_viewers.help')},
+      {path: 'share.read_only', label: t('pref.share.read_only.label'), type: 'boolean', help: t('pref.share.read_only.help')},
+      {path: 'share.scheme', label: t('pref.share.scheme.label'), type: 'radio', choices: ['http', 'https'], help: t('pref.share.scheme.help')},
+    ]},
     {title: t('pref.section.performance'), items: [
-      {path: 'performance.metadata_refresh_ms', label: t('pref.performance.metadata_refresh_ms.label'), type: 'number', min: 3000, max: 120000, step: 100, suffix: 'ms', help: t('pref.performance.metadata_refresh_ms.help')},
-      {path: 'performance.watched_pr_refresh_ms', label: t('pref.performance.watched_pr_refresh_ms.label'), type: 'number', min: 15000, max: 600000, step: 1000, suffix: 'ms', help: t('pref.performance.watched_pr_refresh_ms.help')},
-      {path: 'performance.pane_state_refresh_ms', label: t('pref.performance.pane_state_refresh_ms.label'), type: 'number', min: 500, max: 30000, step: 100, suffix: 'ms', help: t('pref.performance.pane_state_refresh_ms.help')},
-      {path: 'performance.latency_refresh_ms', label: t('pref.performance.latency_refresh_ms.label'), type: 'number', min: 1000, max: 30000, step: 100, suffix: 'ms', help: t('pref.performance.latency_refresh_ms.help')},
-      {path: 'performance.event_log_refresh_ms', label: t('pref.performance.event_log_refresh_ms.label'), type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: t('pref.performance.event_log_refresh_ms.help')},
+      {path: 'performance.server_event_poll_ms', label: t('pref.performance.server_event_poll_ms.label'), type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.server_event_poll_ms.help')},
+      {path: 'performance.server_background_file_event_poll_ms', label: t('pref.performance.server_background_file_event_poll_ms.label'), type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.server_background_file_event_poll_ms.help')},
+      {path: 'performance.server_directory_event_poll_ms', label: t('pref.performance.server_directory_event_poll_ms.label'), type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.server_directory_event_poll_ms.help')},
+      {path: 'performance.latency_refresh_ms', label: t('pref.performance.latency_refresh_ms.label'), type: 'number', min: 1, max: 30, step: 0.1, suffix: 's', scale: 1000, help: t('pref.performance.latency_refresh_ms.help')},
+      {path: 'performance.event_log_refresh_ms', label: t('pref.performance.event_log_refresh_ms.label'), type: 'number', min: 1, max: 60, step: 0.1, suffix: 's', scale: 1000, help: t('pref.performance.event_log_refresh_ms.help')},
+      {path: 'performance.tabber_activity_refresh_ms', label: t('pref.performance.tabber_activity_refresh_ms.label'), type: 'number', min: 1, max: 60, step: 0.5, suffix: 's', scale: 1000, help: t('pref.performance.tabber_activity_refresh_ms.help')},
       {path: 'performance.popover_show_delay_ms', label: t('pref.performance.popover_show_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.popover_show_delay_ms.help')},
       {path: 'performance.popover_hide_delay_ms', label: t('pref.performance.popover_hide_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.popover_hide_delay_ms.help')},
       {path: 'performance.menu_hover_open_delay_ms', label: t('pref.performance.menu_hover_open_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.menu_hover_open_delay_ms.help')},
       {path: 'performance.tab_popover_show_delay_ms', label: t('pref.performance.tab_popover_show_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.tab_popover_show_delay_ms.help')},
       {path: 'performance.tab_popover_follow_delay_ms', label: t('pref.performance.tab_popover_follow_delay_ms.label'), type: 'number', min: 0, max: 1000, step: 20, suffix: 'ms', help: t('pref.performance.tab_popover_follow_delay_ms.help')},
       {path: 'performance.remote_resize_delay_ms', label: t('pref.performance.remote_resize_delay_ms.label'), type: 'number', min: 50, max: 2000, step: 10, suffix: 'ms', help: t('pref.performance.remote_resize_delay_ms.help')},
-      {path: 'performance.auto_approve_interval_seconds', label: t('pref.performance.auto_approve_interval_seconds.label'), type: 'number', min: 0.1, max: 10, step: 0.1, suffix: 's', help: t('pref.performance.auto_approve_interval_seconds.help')},
     ]},
     {title: t('pref.section.github'), items: [
       {path: 'github.watched_prs', label: t('pref.github.watched_prs.label'), type: 'list', wide: true, help: t('pref.github.watched_prs.help')},
     ]},
+    {id: 'yolo', title: t('pref.section.yolo'), items: [
+      {path: 'performance.auto_approve_interval_seconds', label: t('pref.performance.auto_approve_interval_seconds.label'), type: 'number', min: 0.1, max: 10, step: 0.1, suffix: 's', help: t('pref.performance.auto_approve_interval_seconds.help')},
+      {path: 'yolo.rule_file_path', label: t('pref.yolo.rule_file_path.label'), type: 'text', action: 'open-yolo-rule', wide: true, help: t('pref.yolo.rule_file_path.help')},
+      {path: 'yolo.dry_run', label: t('pref.yolo.dry_run.label'), type: 'boolean', help: t('pref.yolo.dry_run.help')},
+      {path: 'yolo.prompt_source', label: t('pref.yolo.prompt_source.label'), type: 'radio', choices: [
+        {value: 'hybrid', label: t('pref.yolo.prompt_source.hybrid')},
+        {value: 'pane', label: t('pref.yolo.prompt_source.pane')},
+      ], help: t('pref.yolo.prompt_source.help')},
+    ]},
     {title: t('pref.section.yoagent'), items: [
-      {path: 'yoagent.backend', label: t('pref.yoagent.backend.label'), type: 'select', choices: [
+      {path: 'yoagent.backend', label: t('pref.yoagent.backend.label'), type: 'radio', choices: [
         {value: 'auto', label: t('pref.yoagent.backend.auto')},
         {value: 'codex', label: t('pref.yoagent.backend.codex')},
         {value: 'claude', label: t('pref.yoagent.backend.claude')},
       ], help: t('pref.yoagent.backend.help')},
-      {path: 'yoagent.invocation', label: t('pref.yoagent.invocation.label'), type: 'select', choices: [
+      {path: 'yoagent.invocation', label: t('pref.yoagent.invocation.label'), type: 'radio', choices: [
         {value: 'cli', label: t('pref.yoagent.invocation.cli')},
-        {value: 'api-key', label: t('pref.yoagent.invocation.api-key')},
       ], help: t('pref.yoagent.invocation.help')},
-      {path: 'yoagent.system_prompt', label: t('pref.yoagent.system_prompt.label'), type: 'textarea', help: t('pref.yoagent.system_prompt.help')},
-      {path: 'yoagent.intro', label: t('pref.yoagent.intro.label'), type: 'textarea', help: t('pref.yoagent.intro.help')},
-      {path: 'yoagent.format', label: t('pref.yoagent.format.label'), type: 'textarea', help: t('pref.yoagent.format.help')},
+      {path: 'yoagent.claude_model', label: t('pref.yoagent.claude_model.label'), type: 'select', choices: [
+        {value: 'claude-opus-4-8', label: t('pref.yoagent.claude_model.opus')},
+        {value: 'claude-sonnet-4-6', label: t('pref.yoagent.claude_model.sonnet')},
+        {value: 'claude-haiku-4-5', label: t('pref.yoagent.claude_model.haiku')},
+      ], help: t('pref.yoagent.claude_model.help')},
+      {path: 'yoagent.claude_effort', label: t('pref.yoagent.claude_effort.label'), type: 'radio', choices: [
+        {value: 'low', label: t('pref.yoagent.claude_effort.low')},
+        {value: 'medium', label: t('pref.yoagent.claude_effort.medium')},
+        {value: 'high', label: t('pref.yoagent.claude_effort.high')},
+      ], help: t('pref.yoagent.claude_effort.help')},
+      {path: 'yoagent.codex_model', label: t('pref.yoagent.codex_model.label'), type: 'select', choices: [
+        {value: 'gpt-5.3-codex-spark', label: t('pref.yoagent.codex_model.gpt53spark')},
+        {value: 'gpt-5.4-mini', label: t('pref.yoagent.codex_model.gpt54mini')},
+        {value: 'gpt-5.4', label: t('pref.yoagent.codex_model.gpt54')},
+        {value: 'gpt-5.5', label: t('pref.yoagent.codex_model.gpt55')},
+      ], help: t('pref.yoagent.codex_model.help')},
+      {path: 'yoagent.codex_effort', label: t('pref.yoagent.codex_effort.label'), type: 'radio', choices: [
+        {value: 'low', label: t('pref.yoagent.codex_effort.low')},
+        {value: 'medium', label: t('pref.yoagent.codex_effort.medium')},
+        {value: 'high', label: t('pref.yoagent.codex_effort.high')},
+      ], help: t('pref.yoagent.codex_effort.help')},
+      {path: 'yoagent.refresh_interval_seconds', label: t('pref.yoagent.refresh_interval_seconds.label'), type: 'number', min: 0, max: 3600, step: 30, suffix: 's', help: t('pref.yoagent.refresh_interval_seconds.help')},
+      {path: 'yoagent.system_prompt', label: t('pref.yoagent.system_prompt.label'), type: 'textarea', help: t('pref.yoagent.system_prompt.help'), alwaysEnableReset: true},
+      {path: 'yoagent.intro', label: t('pref.yoagent.intro.label'), type: 'textarea', help: t('pref.yoagent.intro.help'), alwaysEnableReset: true},
+      {path: 'yoagent.format', label: t('pref.yoagent.format.label'), type: 'textarea', help: t('pref.yoagent.format.help'), alwaysEnableReset: true},
     ]},
   ];
 }
@@ -1719,20 +2920,37 @@ function preferenceDefault(path) {
 }
 
 function preferenceStatusText() {
-  if (clientSettingsPayload.error) return `settings error: ${clientSettingsPayload.error}`;
-  if (yoloRulesPayload.error) return `YOLO rules error: ${yoloRulesPayload.error}`;
-  return `loaded ${compactHomePath(settingsConfigPath())}`;
+  if (clientSettingsPayload.error) return t('pref.status.settingsError', {error: clientSettingsPayload.error});
+  if (yoloRulesPayload.error) return t('pref.status.rulesError', {error: yoloRulesPayload.error});
+  return settingsLoadedAgeText();
+}
+
+function settingsLoadedAgeText(nowMs = Date.now()) {
+  const loadedMs = Number(clientSettingsPayload.mtime_ns || 0) / 1000000;
+  if (!Number.isFinite(loadedMs) || loadedMs <= 0) return t('pref.status.loaded');
+  const ageSeconds = Math.max(0, Math.floor((Number(nowMs) - loadedMs) / 1000));
+  if (ageSeconds < 60) return t('pref.status.loadedSeconds', {count: ageSeconds});
+  const ageMinutes = Math.floor(ageSeconds / 60);
+  if (ageMinutes < 60) return t('pref.status.loadedMinutes', {count: ageMinutes});
+  const ageHours = Math.floor(ageMinutes / 60);
+  if (ageHours < 24) return t('pref.status.loadedHours', {count: ageHours});
+  const ageDays = Math.floor(ageHours / 24);
+  return tPlural('pref.status.loadedDays', ageDays);
 }
 
 function preferencesPathRowsHtml() {
   const settingsPath = settingsConfigPath();
+  return `
+    <div class="preferences-path-row">
+      <span class="preferences-path-label">${esc(t('pref.path.settings'))}</span><span class="preferences-path-value">${esc(settingsPath)} ${esc(settingsLoadedAgeText())}</span>${pathCopyButtonHtml(settingsPath, {className: 'preferences-path-copy', title: t('pref.path.copySettings')})}
+    </div>`;
+}
+
+function preferencesYoloRulesPathHtml() {
   const rulesPath = yoloRulePath();
   const rulesDetail = yoloRulesPayload.source ? ` · ${yoloRuleStatusDetail()}` : '';
   return `
-    <div class="preferences-path-row">
-      <span class="preferences-path-label">${esc(t('pref.path.settings'))}</span><span class="preferences-path-value">${esc(settingsPath)}</span>${pathCopyButtonHtml(settingsPath, {className: 'preferences-path-copy', title: t('pref.path.copySettings')})}
-    </div>
-    <div class="preferences-path-row">
+    <div class="preferences-path-row preferences-path-row--section">
       <span class="preferences-path-label">${esc(t('pref.path.rules'))}</span><span class="preferences-path-value">${esc(rulesPath)}${esc(rulesDetail)}</span>${pathCopyButtonHtml(rulesPath, {className: 'preferences-path-copy', title: t('pref.path.copyRules')})}
     </div>`;
 }
@@ -1761,7 +2979,7 @@ const preferenceSearchAliasGroups = [
   ['yolo', 'autoapprove', 'approve', 'approval', 'permission', 'permissions', 'accept', 'confirm', 'rules', 'policy', 'safe', 'danger', 'dangerous'],
   ['yoagent', 'yo agent', 'assistant', 'chat', 'summary', 'activity', 'prompt', 'backend', 'claude', 'codex'],
   ['dry', 'simulate', 'test'],
-  ['startup', 'launch', 'open', 'start', 'split', 'grid', 'wall', 'layout'],
+  ['startup', 'launch', 'open', 'start', 'split', 'grid', 'layout'],
 ];
 const preferenceSearchAliasMap = new Map();
 for (const group of preferenceSearchAliasGroups) {
@@ -1783,21 +3001,26 @@ function preferenceSearchKeywordsForItem(item) {
   const add = terms => keywords.push(...terms);
   if (path.includes('font_size') || path === 'appearance.tab_width') add(['large', 'larger', 'big', 'bigger', 'huge', 'small', 'smaller', 'tiny', 'text', 'scale', 'zoom', 'wide', 'narrow']);
   if (/(_ms|_seconds|_delay|_refresh|_interval|duration|period|pulse|rotate|throttle|resize)/.test(path)) add(['duration', 'timeout', 'time', 'timing', 'milliseconds', 'seconds', 'speed', 'fast', 'slow', 'quick', 'lag', 'wait', 'debounce', 'period', 'rate', 'frequency', 'often']);
-  if (path.includes('_refresh_ms') || path === 'file_explorer.refresh_ms') add(['reload', 'update', 'poll', 'polling', 'sync', 'live', 'auto']);
+  if (path.includes('_refresh_ms')) add(['reload', 'update', 'poll', 'polling', 'sync', 'live', 'auto']);
   if (path.includes('popover') || path.includes('hover')) add(['tooltip', 'popup', 'peek', 'flyout']);
   if (path.includes('red_reminder') || path.includes('yolo_rotate') || path.includes('badge_pulse')) add(['animation', 'animate', 'blink', 'flash', 'glow', 'attention', 'reminder']);
   if (path.startsWith('appearance.')) add(['color', 'colour', 'theme', 'dark', 'light', 'background', 'bg', 'contrast', 'style', 'look']);
+  if (path === 'appearance.date_time_hour_cycle') add(['date', 'time', 'clock', 'hour', 'hours', '12', '24', 'am', 'pm']);
   if (path === 'terminal_editor.scrollback' || path === 'appearance.terminal_font_size' || path === 'appearance.terminal_theme') add(['shell', 'history', 'buffer', 'backlog', 'lines', 'terminal', 'tui', 'ansi', 'xterm', 'codex', 'claude']);
   if (path.startsWith('editor.') || path.includes('editor_') || path.startsWith('terminal_editor.')) add(['code', 'edit', 'codemirror', 'monaco']);
   if (path === 'terminal_editor.word_wrap') add(['softwrap', 'wrapping']);
   if (path === 'terminal_editor.line_numbers') add(['numbers', 'gutter']);
   if (path.startsWith('notifications.')) add(['notify', 'alert', 'toast', 'message', 'banner', 'sound', 'ding', 'ping', 'bell', 'beep', 'desktop', 'dismiss']);
+  if (path.startsWith('updates.')) add(['notify', 'notification', 'alert', 'update', 'version', 'major', 'minor', 'patch', 'release', 'origin', 'main']);
   if (path.includes('throttle')) add(['mute', 'quiet', 'spam', 'cooldown', 'rate limit']);
   if (path.startsWith('file_explorer.')) add(['finder', 'files', 'tree', 'sidebar', 'browser', 'directory', 'folder', 'navigator']);
   if (path.startsWith('uploads.')) add(['upload', 'paste', 'drop', 'filename', 'template', 'file']);
+  if (path.startsWith('share.')) add(['share', 'sharing', 'viewer', 'viewers', 'url', 'http', 'https', 'read-only', 'write']);
   if (path === 'file_explorer.root_mode') add(['root', 'home', 'base', 'working', 'cwd', 'follow', 'track']);
   if (path === 'file_explorer.quick_access_paths') add(['shortcuts', 'bookmarks', 'favorites', 'pinned', 'jump']);
   if (path === 'file_explorer.indexed_dirs') add(['index', 'indexed', 'quick open', 'quick-open', 'search', 'scan', 'directories', 'folders']);
+  if (path === 'file_explorer.index_refresh_seconds') add(['index', 'refresh', 'auto', 'rebuild', 'background', 'quick-open', 'interval', 'stale']);
+  if (path === 'file_explorer.companion_dirs') add(['companion', 'repos', 'sibling', 'extra', 'always', 'dirty', 'branch', 'status', 'parser-toolkits']);
   if (path === 'file_explorer.image_preview_max_px') add(['image', 'picture', 'photo', 'preview', 'thumbnail', 'hover', 'popup', 'large', 'small', 'size']);
   if (path === 'file_explorer.new_entry_highlight_ms') add(['new file', 'recent']);
   if (path.startsWith('yolo.')) add(['auto approve', 'approve', 'approval', 'permission', 'accept', 'confirm', 'rules', 'policy', 'safe', 'danger']);
@@ -1805,15 +3028,14 @@ function preferenceSearchKeywordsForItem(item) {
   if (path === 'yolo.dry_run') add(['test', 'simulate', 'what would']);
   if (path === 'yolo.rule_file_path') add(['yaml', 'config']);
   if (path === 'general.auto_focus') add(['click', 'focus', 'hover', 'menu', 'dropdown', 'select pane', 'terminal', 'editor', 'finder', 'file explorer', 'preferences', 'everything']);
-  if (path === 'general.default_layout') add(['startup', 'launch', 'open', 'start', 'split', 'grid', 'wall']);
-  if (path === 'general.default_sessions') add(['startup', 'launch', 'which sessions']);
+  if (path === 'general.default_layout') add(['startup', 'launch', 'open', 'start', 'split', 'grid']);
   if (label.includes('quick')) add(['shortcuts', 'bookmarks', 'favorites']);
   return keywords;
 }
 
 function preferenceSearchHaystack(item) {
   const choices = Array.isArray(item.choices) ? item.choices.map(choice => [preferenceChoiceValue(choice), preferenceChoiceLabel(choice), preferenceChoiceGroup(choice)]).flat() : [];
-  return [item.label, item.path, item.help, item.suffix, item.keywords, choices, preferenceSearchKeywordsForItem(item)]
+  return [item.label, item.path, item.help, item.text, item.suffix, item.keywords, choices, preferenceSearchKeywordsForItem(item)]
     .flat(Infinity)
     .filter(Boolean)
     .join(' ')
@@ -1845,7 +3067,10 @@ function preferenceChoiceValue(choice) {
 }
 
 function preferenceChoiceLabel(choice) {
-  return typeof choice === 'object' && choice !== null ? (choice.label || choice.value) : choice;
+  if (typeof choice === 'object' && choice !== null) return choice.label || choice.value;
+  return String(choice || '')
+    .replace(/-/g, ' ')
+    .replace(/\b\w/g, match => match.toUpperCase());
 }
 
 function preferenceChoiceGroup(choice) {
@@ -1881,9 +3106,13 @@ function preferenceSelectOptionsHtml(item, value) {
 
 function preferenceControlHtml(item, query = '') {
   if (!preferenceItemMatches(item, query)) return '';
+  if (item.type === 'note') {
+    return `<div class="preferences-setting-row preferences-setting-note">${esc(item.text || '')}</div>`;
+  }
   const value = preferenceValue(item.path);
   const defaultValue = preferenceDefault(item.path);
-  const disabled = readOnlyMode ? ' disabled' : '';
+  const preferencesReadOnlyVisual = readOnlyMode && !shareViewMode;
+  const disabled = preferencesReadOnlyVisual ? ' disabled' : '';
   const controlId = `preference-${item.path.replace(/[^A-Za-z0-9_-]+/g, '-')}`;
   const minAttr = item.min !== undefined ? ` data-setting-min="${esc(item.min)}"` : '';
   const maxAttr = item.max !== undefined ? ` data-setting-max="${esc(item.max)}"` : '';
@@ -1892,39 +3121,61 @@ function preferenceControlHtml(item, query = '') {
   if (item.type === 'boolean') {
     control = `<input type="checkbox" ${baseAttrs}${value ? ' checked' : ''}>`;
   } else if (item.type === 'number') {
-    control = `<input type="number" ${baseAttrs} inputmode="decimal" value="${esc(clampPreferenceNumber(item, item.scale ? Number(value) / item.scale : value))}" min="${esc(item.min)}" max="${esc(item.max)}" step="${esc(item.step || 1)}">`;
+    control = `<input type="number" ${baseAttrs} inputmode="decimal" value="${esc(preferenceNumberDisplayValue(item, value))}" min="${esc(item.min)}" max="${esc(item.max)}" step="${esc(item.step || 1)}">`;
+  } else if (item.type === 'range') {
+    const rangeValue = preferenceNumberDisplayValue(item, value);
+    control = `<input type="range" ${baseAttrs} value="${esc(rangeValue)}" min="${esc(item.min)}" max="${esc(item.max)}" step="${esc(item.step || 1)}"><output class="preferences-range-value" for="${esc(controlId)}">${esc(rangeValue)}</output>`;
   } else if (item.type === 'select') {
     control = `<select ${baseAttrs}>${preferenceSelectOptionsHtml(item, value)}</select>`;
   } else if (item.type === 'radio') {
     // #260: plain radio-button group (replaced the macOS-style theme-cards). One input + label per
     // choice; each input carries data-setting-path so the shared change handler -> savePreferenceControl
     // persists it (and live-applies appearance.theme). The current value is checked.
-    const radios = (item.choices || []).map(choice => {
-      const selected = String(value) === String(choice.value);
-      const radioId = `${controlId}-${String(choice.value).replace(/[^A-Za-z0-9_-]+/g, '-')}`;
-      return `<label class="preferences-radio" for="${esc(radioId)}">
-        <input type="radio" id="${esc(radioId)}" name="${esc(controlId)}" value="${esc(choice.value)}" data-setting-path="${esc(item.path)}" data-setting-type="radio"${selected ? ' checked' : ''}${disabled}>
-        <span>${esc(choice.label)}</span>
+    const choices = item.choices || [];
+    const groupHasSwatches = choices.some(choice => Array.isArray(choice?.swatches));
+    const radios = choices.map(choice => {
+      const choiceValue = String(preferenceChoiceValue(choice));
+      const selected = String(value) === choiceValue;
+      const radioId = `${controlId}-${choiceValue.replace(/[^A-Za-z0-9_-]+/g, '-')}`;
+      const swatches = Array.isArray(choice?.swatches)
+        ? `<span class="preferences-radio-swatches${choice.joinedSwatches ? ' joined' : ''}" aria-hidden="true">${choice.swatches.map(color => `<span class="preferences-radio-swatch" style="--preferences-radio-swatch:${esc(color)}"></span>`).join('')}</span>`
+        : '';
+      return `<label class="preferences-radio${swatches ? ' has-swatches' : ''}" for="${esc(radioId)}">
+        <input type="radio" id="${esc(radioId)}" name="${esc(controlId)}" value="${esc(choiceValue)}" data-setting-path="${esc(item.path)}" data-setting-type="radio"${selected ? ' checked' : ''}${disabled}>
+        ${swatches}<span>${esc(preferenceChoiceLabel(choice))}</span>
       </label>`;
     }).join('');
-    control = `<div class="preferences-radio-group" role="radiogroup" aria-label="${esc(item.label)}">${radios}</div>`;
+    control = `<div class="preferences-radio-group${groupHasSwatches ? ' has-swatches' : ''}" role="radiogroup" aria-label="${esc(item.label)}">${radios}</div>`;
   } else if (item.type === 'list') {
     const text = Array.isArray(value) ? value.join('\n') : String(value || '');
-    control = `<textarea ${baseAttrs} rows="3">${esc(text)}</textarea>`;
+    const rows = Number.isFinite(Number(item.rows)) ? Math.max(1, Math.min(9, Math.floor(Number(item.rows)))) : 3;
+    const maxItems = Number.isFinite(Number(item.maxItems)) ? Math.max(1, Math.floor(Number(item.maxItems))) : 0;
+    const autosize = item.autosize ? ' data-setting-autosize="true"' : '';
+    const maxItemsAttr = maxItems ? ` data-setting-max-items="${esc(maxItems)}"` : '';
+    control = `<textarea ${baseAttrs}${autosize}${maxItemsAttr} rows="${esc(rows)}">${esc(text)}</textarea>`;
   } else if (item.type === 'textarea') {
-    control = `<textarea ${baseAttrs} rows="12">${esc(String(value || ''))}</textarea>`;
+    control = `<textarea ${baseAttrs} rows="3" data-setting-autosize="true">${esc(String(value || ''))}</textarea>`;
   } else {
     control = `<input type="text" ${baseAttrs} value="${esc(value)}">`;
   }
-  const resetDisabled = readOnlyMode || JSON.stringify(value) === JSON.stringify(defaultValue) ? ' disabled' : '';
+  const resetDisabled = preferencesReadOnlyVisual || (!item.alwaysEnableReset && JSON.stringify(value) === JSON.stringify(defaultValue)) ? ' disabled' : '';
   const extraControl = item.action === 'open-yolo-rule'
-    ? `<button type="button" class="preferences-inline-action" data-yolo-rule-open${readOnlyMode ? ' disabled' : ''}>${esc(t('pref.openAction'))}</button>`
+    ? `<button type="button" class="preferences-inline-action" data-yolo-rule-open${preferencesReadOnlyVisual ? ' disabled' : ''}>${esc(t('pref.openAction'))}</button>`
     : '';
   const suffix = item.suffix ? `<span class="preferences-setting-suffix">${esc(item.suffix)}</span>` : '';
   const help = item.help ? `<span class="preferences-setting-help">${esc(item.help)}</span>` : '';
   const advisory = preferenceAdvisoryHtml(item, value);
   const rowClass = item.type === 'textarea' || item.wide ? ' preferences-setting-row--wide' : '';
   return `<div class="preferences-setting-row${rowClass}"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}</label><span class="preferences-setting-control setting-type-${esc(item.type)}">${control}${suffix}${extraControl}<button type="button" class="preferences-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>${esc(t('pref.reset.row'))}</button></span>${advisory}</div>`;
+}
+
+function preferenceNumberDisplayValue(item, value) {
+  const scale = Number(item.scale) || 1;
+  const raw = scale !== 1 ? Number(value) / scale : value;
+  const clamped = Number(clampPreferenceNumber(item, raw));
+  if (!Number.isFinite(clamped)) return clampPreferenceNumber(item, raw);
+  if (Number.isFinite(Number(item.displayDecimals))) return clamped.toFixed(Number(item.displayDecimals));
+  return clamped;
 }
 
 function uploadRsyncExampleCommand() {
@@ -1943,12 +3194,6 @@ function preferenceAdvisoryHtml(item, value) {
   </div>`;
 }
 
-function preferencesAllDefault() {
-  return preferenceSections().every(section => section.items.every(item => (
-    JSON.stringify(preferenceValue(item.path)) === JSON.stringify(preferenceDefault(item.path))
-  )));
-}
-
 function preferencesPanelHtml() {
   const query = preferenceSearchNeedle();
   const sections = preferenceSections()
@@ -1957,7 +3202,10 @@ function preferencesPanelHtml() {
       const titleMatches = textMatchesPreferenceQuery(section.title, query);
       const visibleItems = section.items.filter(item => titleMatches || preferenceItemMatches(item, query));
       const collapsed = !query && collapsedPreferenceSections.has(section.title);
-      const rows = visibleItems.map(item => preferenceControlHtml(item)).join('');
+      const sectionIntro = section.id === 'yolo' && (!query || textMatchesPreferenceQuery('yolo rules rule file yaml auto approve approval', query))
+        ? preferencesYoloRulesPathHtml()
+        : '';
+      const rows = `${sectionIntro}${visibleItems.map(item => preferenceControlHtml(item)).join('')}`;
       const count = visibleItems.length;
       return `
         <section class="preferences-section${collapsed ? ' collapsed' : ''}" data-preference-section="${esc(section.title)}">
@@ -1969,7 +3217,7 @@ function preferencesPanelHtml() {
           <div class="preferences-settings"${collapsed ? ' hidden' : ''}>${rows}</div>
         </section>`;
     }).join('');
-  const readonly = readOnlyMode ? `<span class="preferences-readonly">${esc(t('pref.readonly'))}</span>` : '';
+  const readonly = readOnlyMode && !shareViewMode ? `<span class="preferences-readonly">${esc(t('pref.readonly'))}</span>` : '';
   const resetDisabled = readOnlyMode ? ' disabled' : '';
   const resetTitle = preferencesResetConfirmVisible ? t('pref.reset.confirmTitle') : t('pref.reset.title');
   const resetWarning = preferencesResetConfirmVisible
@@ -1980,7 +3228,7 @@ function preferencesPanelHtml() {
         <button type="button" class="preferences-reset-continue" data-preferences-reset-confirm${resetDisabled}>${esc(t('pref.reset.continue'))}</button>
         <button type="button" class="preferences-reset-cancel" data-preferences-reset-cancel>${esc(t('pref.reset.cancel'))}</button>
       </div>` : `<button type="button" class="preferences-reset-all" data-preferences-reset-all${resetDisabled}>${esc(t('pref.reset.all'))}</button>`;
-  const resetBlock = preferencesAllDefault() && !preferencesResetConfirmVisible ? '' : `
+  const resetBlock = `
     <div class="preferences-global-reset${preferencesResetConfirmVisible ? ' confirming' : ''}" role="group" aria-label="${esc(t('pref.reset.aria'))}">
       <div>
         <div class="preferences-global-reset-title">${resetTitle}</div>
@@ -1991,22 +3239,340 @@ function preferencesPanelHtml() {
   return `
     <div class="preferences-search-row">
       <input type="search" class="preferences-search" data-preferences-search value="${esc(preferencesSearchText)}" placeholder="${esc(t('pref.searchPlaceholder'))}" aria-label="${esc(t('pref.searchPlaceholder'))}">
-      <button type="button" class="preferences-search-button" data-preferences-search-action>YOsearch</button>
+      <button type="button" class="preferences-search-button" data-preferences-search-action>${esc(t('pref.searchButton'))}</button>
     </div>
     <div class="preferences-path-rows">${preferencesPathRowsHtml()}${readonly}</div>
-    <div class="preferences-status" data-level="${clientSettingsPayload.error || yoloRulesPayload.error ? 'error' : 'ok'}">${esc(preferenceStatusText())}</div>
     <div class="preferences-sections">${sections}</div>
     ${resetBlock}`;
 }
 
-function createPreferencesPanel() {
-  preferencesSearchFresh = true;
+function debugEventCounts() {
+  const apiCalls = jsDebugEvents.filter(event => event.type === 'api').length;
+  const sseEvents = jsDebugEvents.filter(event => event.type === 'sse').length;
+  const errors = jsDebugEvents.filter(event => event.type === 'error' || event.type === 'unhandledrejection' || event.error).length;
+  const apiRequestBytes = jsDebugEvents.reduce((total, event) => total + (event.type === 'api' && Number.isFinite(event.requestBytes) ? event.requestBytes : 0), 0);
+  const apiResponseBytes = jsDebugEvents.reduce((total, event) => total + (event.type === 'api' && Number.isFinite(event.responseBytes) ? event.responseBytes : 0), 0);
+  const sseBytes = jsDebugEvents.reduce((total, event) => total + (event.type === 'sse' && Number.isFinite(event.frameBytes) ? event.frameBytes : 0), 0);
+  return {apiCalls, sseEvents, errors, apiRequestBytes, apiResponseBytes, sseBytes};
+}
+
+function debugMetaText() {
+  return t('debug.meta', {count: jsDebugEvents.length});
+}
+
+function debugStatHtml(label, value, key = '') {
+  const data = key ? ` data-js-debug-stat="${esc(key)}"` : '';
+  return `<div class="js-debug-stat"><span>${esc(label)}</span><strong${data}>${esc(value)}</strong></div>`;
+}
+
+function debugTimeText(value) {
+  const match = String(value || '').match(/T(\d\d:\d\d:\d\d)/);
+  return match ? match[1] : String(value || '');
+}
+
+function debugEventTypeLabel(type) {
+  if (type === 'api') return 'API';
+  if (type === 'sse') return 'SSE';
+  if (type === 'unhandledrejection') return 'Promise';
+  if (type === 'error') return 'Error';
+  return String(type || 'Event');
+}
+
+function debugEventStatusText(event) {
+  if (event.error) return 'error';
+  if (Number.isFinite(event.status)) return `HTTP ${event.status}`;
+  if (typeof event.ok === 'boolean') return event.ok ? 'ok' : 'not ok';
+  return '';
+}
+
+function debugEventDetailText(event) {
+  if (event.type === 'api') return `${event.method || 'GET'} ${event.url || ''}`.trim();
+  if (event.type === 'sse') return [
+    event.eventType || 'event',
+    event.trigger ? `trigger=${event.trigger}` : '',
+    event.cache ? `cache=${event.cache}` : '',
+    debugFilesystemEventSummaryText(event),
+    event.key ? `key=${event.key}` : '',
+  ].filter(Boolean).join(' ');
+  return event.message || event.reason || event.source || '';
+}
+
+function debugCountToken(prefix, value, {includeZero = false} = {}) {
+  const count = Number(value);
+  if (!Number.isFinite(count)) return '';
+  if (!includeZero && count === 0) return '';
+  return `${prefix}${count}`;
+}
+
+function debugFilesystemEventSummaryText(event) {
+  if (event.type !== 'sse' || event.eventType !== 'fs_changed') return '';
+  const change = event.changeSummary && typeof event.changeSummary === 'object' ? event.changeSummary : {};
+  const listing = event.listingSummary && typeof event.listingSummary === 'object' ? event.listingSummary : {};
+  const parts = [];
+  const rootsChanged = debugCountToken('roots:', change.roots_changed);
+  const entriesAdded = debugCountToken('+', change.entries_added);
+  const entriesRemoved = debugCountToken('-', change.entries_removed);
+  const entriesModified = debugCountToken('~', change.entries_modified);
+  const entryParts = [entriesAdded, entriesRemoved, entriesModified].filter(Boolean).join(' ');
+  if (rootsChanged || entryParts) parts.push(`changed=${[rootsChanged, entryParts].filter(Boolean).join(' ')}`);
+  const filesAdded = debugCountToken('+', change.files_added);
+  const filesRemoved = debugCountToken('-', change.files_removed);
+  const filesModified = debugCountToken('~', change.files_modified);
+  const fileParts = [filesAdded, filesRemoved, filesModified].filter(Boolean).join(' ');
+  if (fileParts) parts.push(`files=${fileParts}`);
+  const dirsAdded = debugCountToken('+', change.dirs_added);
+  const dirsRemoved = debugCountToken('-', change.dirs_removed);
+  const dirsModified = debugCountToken('~', change.dirs_modified);
+  const dirParts = [dirsAdded, dirsRemoved, dirsModified].filter(Boolean).join(' ');
+  if (dirParts) parts.push(`dirs=${dirParts}`);
+  const listedEntries = debugCountToken('listed=', listing.entries_listed, {includeZero: true});
+  const listedRoots = debugCountToken('/', listing.roots_listed, {includeZero: true});
+  if (listedEntries) parts.push(`${listedEntries}${listedRoots}`);
+  const rootErrors = debugCountToken('errors=', listing.roots_error);
+  if (rootErrors) parts.push(rootErrors);
+  return parts.length ? `fs=${parts.join(' ')}` : '';
+}
+
+function debugEventMetaText(event) {
+  return [
+    debugTimeText(event.ts),
+    Number.isFinite(event.durationMs) ? `${event.durationMs} ms` : '',
+    Number.isFinite(event.computeMs) ? `server ${event.computeMs} ms` : '',
+    Number.isFinite(event.receiveLatencyMs) ? `receive ${event.receiveLatencyMs} ms` : '',
+    Number.isFinite(event.frameBytes) ? `rx ${event.frameBytes} B` : '',
+    Number.isFinite(event.bytes) && event.bytes !== event.frameBytes ? `data ${event.bytes} B` : '',
+    Number.isFinite(event.responseBytes) ? `${event.responseBytes} B rx` : '',
+    debugEventStatusText(event),
+    event.source ? `source: ${event.source}` : '',
+    event.line ? `line ${event.line}${event.column ? `:${event.column}` : ''}` : '',
+  ].filter(Boolean).join(' | ');
+}
+
+function debugEventLineText(event) {
+  const status = debugEventStatusText(event);
+  const durationMs = Number.isFinite(event.durationMs)
+    ? event.durationMs
+    : (event.type === 'sse' && Number.isFinite(event.receiveLatencyMs) ? event.receiveLatencyMs : NaN);
+  const duration = Number.isFinite(durationMs) ? `${durationMs}ms` : '';
+  const sseMeta = event.type === 'sse'
+    ? [
+      Number.isFinite(event.frameBytes) ? `rx=${event.frameBytes}B` : '',
+    ].filter(Boolean).join(' ')
+    : '';
+  const location = event.source ? `${event.source}${event.line ? `:${event.line}${event.column ? `:${event.column}` : ''}` : ''}` : '';
+  return [
+    debugTimeText(event.ts),
+    debugEventTypeLabel(event.type).padEnd(7),
+    status.padEnd(8),
+    duration.padStart(8),
+    sseMeta,
+    debugEventDetailText(event) || t('debug.event'),
+    location,
+  ].filter(Boolean).join(' ');
+}
+
+function debugApiSummaryKey(url) {
+  const value = String(url || '');
+  try {
+    const parsed = new URL(value, window.location.origin);
+    return parsed.pathname || value;
+  } catch (_) {
+    return value.split('?')[0] || value;
+  }
+}
+
+function debugApiSummaryRows(limit = 6) {
+  const summaries = new Map();
+  for (const event of jsDebugEvents) {
+    if (event.type !== 'api' || !Number.isFinite(event.durationMs)) continue;
+    const key = `${event.method || 'GET'} ${debugApiSummaryKey(event.url)}`;
+    const item = summaries.get(key) || {key, count: 0, total: 0, max: 0, bytes: 0, lastStatus: ''};
+    item.count += 1;
+    item.total += event.durationMs;
+    item.max = Math.max(item.max, event.durationMs);
+    item.bytes += Number.isFinite(event.responseBytes) ? event.responseBytes : 0;
+    item.lastStatus = debugEventStatusText(event);
+    summaries.set(key, item);
+  }
+  return [...summaries.values()]
+    .sort((a, b) => (b.max - a.max) || (b.total - a.total) || a.key.localeCompare(b.key))
+    .slice(0, limit)
+    .map(item => {
+      const avg = item.count ? item.total / item.count : 0;
+      return `${item.key.padEnd(28)} max=${item.max.toFixed(1).padStart(7)}ms avg=${avg.toFixed(1).padStart(7)}ms count=${String(item.count).padStart(3)} rx=${String(item.bytes).padStart(7)}B ${item.lastStatus}`.trimEnd();
+    });
+}
+
+function debugSseSummaryRows(limit = 6) {
+  return jsDebugEvents
+    .filter(event => event.type === 'sse' && Number.isFinite(event.computeMs))
+    .sort((a, b) => (b.computeMs - a.computeMs) || String(a.eventType || '').localeCompare(String(b.eventType || '')))
+    .slice(0, limit)
+    .map(event => `${String(event.eventType || 'event').padEnd(28)} server=${event.computeMs.toFixed(1).padStart(7)}ms rx=${String(event.frameBytes || event.bytes || 0).padStart(7)}B ${event.trigger || ''}`.trimEnd());
+}
+
+function debugSseLatencySummaryRows(limit = 6) {
+  const summaries = new Map();
+  for (const event of jsDebugEvents) {
+    if (event.type !== 'sse' || !Number.isFinite(event.receiveLatencyMs)) continue;
+    const key = String(event.eventType || 'event');
+    const item = summaries.get(key) || {key, count: 0, total: 0, max: 0, bytes: 0};
+    item.count += 1;
+    item.total += event.receiveLatencyMs;
+    item.max = Math.max(item.max, event.receiveLatencyMs);
+    item.bytes += Number.isFinite(event.frameBytes) ? event.frameBytes : Number(event.bytes || 0);
+    summaries.set(key, item);
+  }
+  return [...summaries.values()]
+    .sort((a, b) => (b.max - a.max) || (b.total - a.total) || a.key.localeCompare(b.key))
+    .slice(0, limit)
+    .map(item => {
+      const avg = item.count ? item.total / item.count : 0;
+      return `${item.key.padEnd(28)} max=${item.max.toFixed(1).padStart(7)}ms avg=${avg.toFixed(1).padStart(7)}ms count=${String(item.count).padStart(3)} rx=${String(item.bytes).padStart(7)}B`;
+    });
+}
+
+function jsDebugTextForClipboard() {
+  const page = `${location.pathname || ''}${location.search || ''}${location.hash || ''}`;
+  const counts = debugEventCounts();
+  const header = [
+    `JS Debug ${new Date().toISOString()}`,
+    `page=${page || '/'}`,
+    `events=${jsDebugEvents.length}`,
+    `api=${counts.apiCalls}`,
+    `sse=${counts.sseEvents}`,
+    `errors=${counts.errors}`,
+    `api_tx=${counts.apiRequestBytes}B`,
+    `api_rx=${counts.apiResponseBytes}B`,
+    `sse_rx=${counts.sseBytes}B`,
+  ].join(' ');
+  const apiSummaryRows = debugApiSummaryRows();
+  const sseSummaryRows = debugSseSummaryRows();
+  const sseLatencySummaryRows = debugSseLatencySummaryRows();
+  const rows = jsDebugEvents.map(debugEventLineText);
+  return [
+    header,
+    ...(apiSummaryRows.length ? ['Slow API by max latency:', ...apiSummaryRows, ''] : []),
+    ...(sseSummaryRows.length ? ['Slow SSE server work:', ...sseSummaryRows, ''] : []),
+    ...(sseLatencySummaryRows.length ? ['Slow SSE receive latency:', ...sseLatencySummaryRows, ''] : []),
+    ...rows,
+  ].join('\n');
+}
+
+function debugPanelHtml() {
+  const counts = debugEventCounts();
+  return `
+    <div class="js-debug-toolbar">
+      <div class="js-debug-summary" aria-label="${esc(t('debug.summary'))}">
+        ${debugStatHtml(t('debug.events'), jsDebugEvents.length, 'events')}
+        ${debugStatHtml(t('debug.apiCalls'), counts.apiCalls, 'api')}
+        ${debugStatHtml('SSE', counts.sseEvents, 'sse')}
+        ${debugStatHtml(t('debug.errors'), counts.errors, 'errors')}
+      </div>
+      <div class="js-debug-actions">
+        <button type="button" class="preferences-inline-action" data-js-debug-copy>${esc(t('debug.copy'))}</button>
+        <button type="button" class="preferences-inline-action" data-js-debug-clear>${esc(t('debug.clear'))}</button>
+      </div>
+    </div>
+    <textarea class="js-debug-log" data-js-debug-log readonly spellcheck="false" aria-label="${esc(t('debug.recent'))}">${esc(jsDebugTextForClipboard())}</textarea>`;
+}
+
+function createDebugPanel() {
   const panel = document.createElement('article');
-  panel.className = 'panel preferences-panel';
-  panel.id = `panel-${prefsItemId}`;
+  panel.className = 'panel js-debug-panel';
+  panel.id = panelDomId(debugPaneItemId);
   panel.innerHTML = `
       <div class="panel-head preferences-panel-head">
-        ${virtualPanelControlsHtml(prefsItemId, t('tab.preferences'))}
+        ${virtualPanelControlsHtml(debugPaneItemId)}
+        <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
+      </div>
+      <div class="panel-detail-row">
+        <div class="panel-copy">
+          <div id="panel-tab-${debugPaneItemId}" class="panel-session-label"><span class="session-button-dir">${esc(t('tab.debug'))}</span></div>
+          <div id="meta-${debugPaneItemId}" class="meta">${esc(debugMetaText())}</div>
+        </div>
+        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(debugPaneItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
+      </div>
+      <div class="preferences-body js-debug-body panel-overlay-root">
+        <div id="panel-toasts-${debugPaneItemId}" class="panel-toast-stack"></div>
+        <div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>
+      </div>`;
+  bindPanelShell(panel, debugPaneItemId);
+  bindDebugPanel(panel);
+  return panel;
+}
+
+function renderDebugPanels(options = {}) {
+  if (dragSession != null) return;
+  for (const panel of document.querySelectorAll('.js-debug-panel')) {
+    const body = panel.querySelector('.js-debug-body');
+    refreshDebugPanelFromEvents(panel, options);
+    if (body && (options.force === true || !body.querySelector('[data-js-debug-log]'))) {
+      body.innerHTML = `<div id="panel-toasts-${debugPaneItemId}" class="panel-toast-stack"></div><div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>`;
+      refreshDebugPanelFromEvents(panel, {force: true});
+    }
+    bindDebugPanel(panel);
+  }
+}
+
+function refreshDebugPanelsFromEvents() {
+  for (const panel of document.querySelectorAll('.js-debug-panel')) {
+    refreshDebugPanelFromEvents(panel);
+  }
+}
+
+function refreshDebugPanelFromEvents(panel, options = {}) {
+  if (!panel) return;
+  const meta = panel.querySelector(`#meta-${cssEscape(debugPaneItemId)}`);
+  if (meta) meta.textContent = debugMetaText();
+  const counts = debugEventCounts();
+  const statEvents = panel.querySelector('[data-js-debug-stat="events"]');
+  const statApi = panel.querySelector('[data-js-debug-stat="api"]');
+  const statSse = panel.querySelector('[data-js-debug-stat="sse"]');
+  const statErrors = panel.querySelector('[data-js-debug-stat="errors"]');
+  if (statEvents) statEvents.textContent = String(jsDebugEvents.length);
+  if (statApi) statApi.textContent = String(counts.apiCalls);
+  if (statSse) statSse.textContent = String(counts.sseEvents);
+  if (statErrors) statErrors.textContent = String(counts.errors);
+  const log = panel.querySelector('[data-js-debug-log]');
+  if (!log || (document.activeElement === log && options.force !== true)) return;
+  const text = jsDebugTextForClipboard();
+  if (log.value === text) return;
+  const oldTop = log.scrollTop;
+  const maxScroll = Math.max(0, log.scrollHeight - log.clientHeight);
+  const nearBottom = maxScroll - oldTop <= 20;
+  log.value = text;
+  log.scrollTop = nearBottom || options.force === true ? log.scrollHeight : oldTop;
+}
+
+function bindDebugPanel(panel) {
+  if (!panel || panel.dataset.debugBound === 'true') return;
+  panel.dataset.debugBound = 'true';
+  panel.addEventListener('click', event => {
+    const copy = event.target.closest('[data-js-debug-copy]');
+    if (copy && panel.contains(copy)) {
+      event.preventDefault();
+      copyTextToClipboard(jsDebugTextForClipboard())
+        .then(() => { statusEl.textContent = t('debug.copied'); })
+        .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
+      return;
+    }
+    const clear = event.target.closest('[data-js-debug-clear]');
+    if (clear && panel.contains(clear)) {
+      event.preventDefault();
+      clearJsDebugEvents();
+      statusEl.textContent = t('debug.cleared');
+    }
+  });
+}
+
+function createPreferencesPanel() {
+  const panel = document.createElement('article');
+  panel.className = 'panel preferences-panel';
+  panel.id = panelDomId(prefsItemId);
+  panel.innerHTML = `
+      <div class="panel-head preferences-panel-head">
+        ${virtualPanelControlsHtml(prefsItemId)}
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
       <div class="panel-detail-row">
@@ -2022,16 +3588,11 @@ function createPreferencesPanel() {
       </div>`;
   bindPanelShell(panel, prefsItemId);
   bindPreferencesPanel(panel);
-  focusPreferencesSearchSoon(panel);
   return panel;
 }
 
-function markPreferencesInteracted() {
-  preferencesSearchFresh = false;
-}
-
 function focusPreferencesSearch(panel = null) {
-  // DOIT.6 #30: never steal focus into the search box while a tab is being dragged — focus() during a
+  // never steal focus into the search box while a tab is being dragged — focus() during a
   // drag (and the re-render it triggers) aborts the native drag.
   if (dragSession != null) return false;
   const root = panel && panel.isConnected !== false
@@ -2045,22 +3606,38 @@ function focusPreferencesSearch(panel = null) {
   return true;
 }
 
-function focusPreferencesSearchSoon(panel = null) {
-  focusPreferencesSearch(panel);
-  requestAnimationFrame(() => focusPreferencesSearch(panel));
-  setTimeout(() => focusPreferencesSearch(panel), 0);
-  setTimeout(() => focusPreferencesSearch(panel), 80);
+function preferencesScrollIsActive(now = Date.now()) {
+  return Number(now) < preferencesScrollActiveUntil;
 }
 
-function focusFreshPreferencesSearchSoon(panel = null) {
-  if (!preferencesSearchFresh) return;
-  focusPreferencesSearchSoon(panel);
+function schedulePreferencesScrollFlush() {
+  if (preferencesScrollFlushTimer) clearTimeout(preferencesScrollFlushTimer);
+  preferencesScrollFlushTimer = setTimeout(() => {
+    preferencesScrollFlushTimer = null;
+    if (!pendingPreferencesRender) return;
+    if (preferencesScrollIsActive()) {
+      schedulePreferencesScrollFlush();
+      return;
+    }
+    pendingPreferencesRender = false;
+    renderPreferencesPanels();
+  }, preferencesScrollRenderDeferMs);
+}
+
+function notePreferencesScrollActivity(now = Date.now()) {
+  preferencesScrollActiveUntil = Math.max(preferencesScrollActiveUntil, Number(now) + preferencesScrollRenderDeferMs);
+  schedulePreferencesScrollFlush();
 }
 
 function renderPreferencesPanels(options = {}) {
-  // DOIT.6 #30: defer Preferences re-render while a tab drag is in flight (a rebuild + the auto-focus
-  // steal the drag and abort it — the worst case the user hit with Preferences active).
+  // defer Preferences re-render while a tab drag is in flight; rebuilding the dragged tab
+  // node aborts the native HTML5 drag.
   if (dragSession != null) { pendingPreferencesRender = true; return; }
+  if (options.force !== true && preferencesScrollIsActive()) {
+    pendingPreferencesRender = true;
+    schedulePreferencesScrollFlush();
+    return;
+  }
   for (const panel of document.querySelectorAll('.preferences-panel')) {
     const body = panel.querySelector('.preferences-body');
     const meta = panel.querySelector(`#meta-${cssEscape(prefsItemId)}`);
@@ -2068,19 +3645,14 @@ function renderPreferencesPanels(options = {}) {
     if (body) {
       const activeControl = activePreferenceControl(panel);
       const shouldKeepDom = activeControl && options.force !== true;
-      // DOIT.16 C3: the scroller is the inner .preferences-scroll, not the overlay-root body.
+      // the scroller is the inner .preferences-scroll, not the overlay-root body.
       const scroller = () => body.querySelector('.preferences-scroll') || body;
       const prevScroll = scroller();
       const scrollTop = prevScroll.scrollTop;
       const scrollLeft = prevScroll.scrollLeft;
       if (shouldKeepDom) {
-        const status = body.querySelector('.preferences-status');
-        if (status) {
-          status.dataset.level = clientSettingsPayload.error || yoloRulesPayload.error ? 'error' : 'ok';
-          status.textContent = preferenceStatusText();
-        }
         const pathRows = body.querySelector('.preferences-path-rows');
-        if (pathRows) pathRows.innerHTML = `${preferencesPathRowsHtml()}${readOnlyMode ? '<span class="preferences-readonly">readonly access</span>' : ''}`;
+        if (pathRows) pathRows.innerHTML = `${preferencesPathRowsHtml()}${readOnlyMode && !shareViewMode ? `<span class="preferences-readonly">${esc(t('pref.readonly'))}</span>` : ''}`;
       } else {
         body.innerHTML = `<div id="panel-toasts-${prefsItemId}" class="panel-toast-stack"></div><div class="preferences-scroll">${preferencesPanelHtml()}</div>`;
       }
@@ -2091,8 +3663,54 @@ function renderPreferencesPanels(options = {}) {
       }
     }
     bindPreferencesPanel(panel);
+    autosizePreferenceTextareas(panel);
     if (options.focusSearch) focusPreferencesSearch(panel);
   }
+  if (shareViewMode && typeof scheduleShareScrollRestoreByKey === 'function') {
+    scheduleShareScrollRestoreByKey('preferences');
+  }
+}
+
+function autosizePreferenceTextarea(textarea) {
+  if (!textarea || textarea.dataset.settingAutosize !== 'true') return;
+  const maxRows = Number(textarea.dataset.settingMaxItems || textarea.getAttribute('rows') || 0);
+  textarea.style.height = 'auto';
+  let height = textarea.scrollHeight;
+  if (Number.isFinite(maxRows) && maxRows > 0) {
+    const style = window.getComputedStyle?.(textarea);
+    const lineHeight = Number.parseFloat(style?.lineHeight || '');
+    const paddingTop = Number.parseFloat(style?.paddingTop || '0') || 0;
+    const paddingBottom = Number.parseFloat(style?.paddingBottom || '0') || 0;
+    const borderTop = Number.parseFloat(style?.borderTopWidth || '0') || 0;
+    const borderBottom = Number.parseFloat(style?.borderBottomWidth || '0') || 0;
+    if (Number.isFinite(lineHeight) && lineHeight > 0) {
+      const maxHeight = Math.ceil((lineHeight * maxRows) + paddingTop + paddingBottom + borderTop + borderBottom);
+      height = Math.min(height, maxHeight);
+      textarea.style.overflowY = textarea.scrollHeight > maxHeight ? 'auto' : '';
+    }
+  }
+  textarea.style.height = `${height}px`;
+}
+
+function clampPreferenceListControl(control) {
+  const maxItems = Number(control?.dataset?.settingMaxItems || 0);
+  if (!Number.isFinite(maxItems) || maxItems <= 0) return;
+  const lines = String(control.value || '').split('\n');
+  const kept = [];
+  let used = 0;
+  for (const line of lines) {
+    if (line.trim()) {
+      if (used >= maxItems) continue;
+      used += 1;
+    }
+    kept.push(line);
+  }
+  const next = kept.join('\n');
+  if (next !== control.value) control.value = next;
+}
+
+function autosizePreferenceTextareas(root) {
+  root.querySelectorAll?.('textarea[data-setting-autosize="true"]').forEach(autosizePreferenceTextarea);
 }
 
 function bindPreferencesPanel(panel) {
@@ -2101,22 +3719,44 @@ function bindPreferencesPanel(panel) {
   panel.addEventListener('input', event => {
     const search = event.target.closest('[data-preferences-search]');
     if (search && panel.contains(search)) {
-      markPreferencesInteracted();
       preferencesSearchText = search.value || '';
       preferencesResetConfirmVisible = false;
       renderPreferencesPanels({force: true, focusSearch: true});
+      scheduleShareUiStatePublish();
       return;
     }
     const control = event.target.closest('[data-setting-path]');
-    if (!control || !panel.contains(control) || control.dataset.settingType !== 'number') return;
-    validatePreferenceNumberControl(control);
+    if (!control || !panel.contains(control)) return;
+    if (control.dataset.settingAutosize === 'true') {
+      if (control.dataset.settingType === 'list') clampPreferenceListControl(control);
+      autosizePreferenceTextarea(control);
+    }
+    if (control.dataset.settingType === 'number') {
+      validatePreferenceNumberControl(control);
+      return;
+    }
+    if (control.dataset.settingType === 'range') {
+      const value = valueFromPreferenceControl(control);
+      const output = control.parentElement?.querySelector('.preferences-range-value');
+      if (output) output.textContent = String(control.value);
+      if (control.dataset.settingPath === 'appearance.inactive_pane_opacity') applyInactivePaneOpacity(value);
+      if (control.dataset.settingPath === 'appearance.pane_ring_opacity') applyPaneRingOpacity(value);
+    }
   });
   panel.addEventListener('change', event => {
     const control = event.target.closest('[data-setting-path]');
     if (!control || !panel.contains(control)) return;
-    markPreferencesInteracted();
     savePreferenceControl(control);
   });
+  panel.addEventListener('wheel', event => {
+    if (event.target.closest?.('.preferences-scroll')) notePreferencesScrollActivity();
+  }, {passive: true});
+  panel.addEventListener('touchmove', event => {
+    if (event.target.closest?.('.preferences-scroll')) notePreferencesScrollActivity();
+  }, {passive: true});
+  panel.addEventListener('scroll', event => {
+    if (event.target?.classList?.contains('preferences-scroll')) notePreferencesScrollActivity();
+  }, true);
   panel.addEventListener('focusout', () => {
     setTimeout(() => {
       if (!activePreferenceControl(panel)) renderPreferencesPanels();
@@ -2127,7 +3767,8 @@ function bindPreferencesPanel(panel) {
     if (searchAction && panel.contains(searchAction)) {
       event.preventDefault();
       preferencesResetConfirmVisible = false;
-      renderPreferencesPanels({force: true, focusSearch: true});
+      renderPreferencesPanels({force: true});
+      focusPreferencesSearch(panel);
       return;
     }
     const resetAll = event.target.closest('[data-preferences-reset-all]');
@@ -2145,7 +3786,6 @@ function bindPreferencesPanel(panel) {
     const resetConfirm = event.target.closest('[data-preferences-reset-confirm]');
     if (resetConfirm && panel.contains(resetConfirm)) {
       event.preventDefault();
-      markPreferencesInteracted();
       preferencesResetConfirmVisible = false;
       resetAllPreferences();
       return;
@@ -2162,7 +3802,7 @@ function bindPreferencesPanel(panel) {
       event.preventDefault();
       copyTextToClipboard(copy.dataset.copyPath || '')
         .then(() => { statusEl.textContent = 'copied path'; })
-        .catch(error => { statusErr(`copy failed: ${esc(error)}`); });
+        .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
       return;
     }
     const copyText = event.target.closest('[data-copy-text]');
@@ -2170,7 +3810,7 @@ function bindPreferencesPanel(panel) {
       event.preventDefault();
       copyTextToClipboard(copyText.dataset.copyText || '')
         .then(() => { statusEl.textContent = 'copied text'; })
-        .catch(error => { statusErr(`copy failed: ${esc(error)}`); });
+        .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
       return;
     }
     const yoloRuleOpen = event.target.closest('[data-yolo-rule-open]');
@@ -2198,12 +3838,12 @@ function bindPreferencesPanel(panel) {
       } else {
         renderPreferencesPanels({force: true});
       }
+      scheduleShareUiStatePublish();
       return;
     }
     const reset = event.target.closest('[data-setting-reset]');
     if (!reset || !panel.contains(reset)) return;
     event.preventDefault();
-    markPreferencesInteracted();
     resetPreference(reset.dataset.settingReset || '');
   });
 }

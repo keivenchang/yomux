@@ -1,10 +1,11 @@
-import subprocess
+import os
 from pathlib import Path
 
 from yolomux_lib import github_client
 from yolomux_lib import linear_client
 from yolomux_lib import metadata
 from yolomux_lib.common import _CACHE_MISS
+from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import PaneInfo
 from yolomux_lib.common import SessionInfo
 from yolomux_lib.common import tail_file_lines
@@ -13,12 +14,11 @@ from yolomux_lib.metadata import extract_linear_ids
 from yolomux_lib.metadata import github_checks_unknown
 from yolomux_lib.metadata import linear_issue_metadata
 from yolomux_lib.metadata import project_pull_request
+from yolomux_lib.metadata import session_git_inventory
 from yolomux_lib.metadata import session_repo_summaries
 from yolomux_lib.metadata import summarize_github_checks
 
-
-def _git(repo, *args):
-    subprocess.run(["git", "-C", str(repo), *args], capture_output=True, check=True, text=True)
+from _git_helpers import git as _git
 
 
 def _pane(session, index, path):
@@ -42,6 +42,12 @@ def test_session_repo_summaries_lists_every_touched_repo(tmp_path):
         (repo / "f.txt").write_text("x\n", encoding="utf-8")
         _git(repo, "add", "f.txt")
         _git(repo, "commit", "-m", "init")
+        base_branch = _git(repo, "branch", "--show-current").stdout.strip()
+        _git(repo, "checkout", "-b", f"feature/{name}")
+        (repo / "branch.txt").write_text(f"{name}\n", encoding="utf-8")
+        _git(repo, "add", "branch.txt")
+        _git(repo, "commit", "-m", f"feature {name}")
+        _git(repo, "checkout", base_branch)
         made.append(repo)
     (made[1] / "f.txt").write_text("changed\n", encoding="utf-8")  # leave repoB dirty
     rootA = str(Path(made[0]).resolve())
@@ -56,6 +62,9 @@ def test_session_repo_summaries_lists_every_touched_repo(tmp_path):
     assert by_root[rootA]["primary"] is True
     assert by_root[rootB]["primary"] is False
     assert by_root[rootB]["dirty_count"] == 1
+    branches = {branch["name"]: branch for branch in by_root[rootB]["other_branches"]["branches"]}
+    assert f"feature/{made[1].name}" in branches
+    assert branches[f"feature/{made[1].name}"]["updated_ts"] > 0
 
 
 def test_session_repo_summaries_single_repo_has_no_extra(tmp_path):
@@ -74,6 +83,32 @@ def test_session_repo_summaries_single_repo_has_no_extra(tmp_path):
 
     roots = {s["root"] for s in session_repo_summaries(info, root)}
     assert roots == {root}
+
+
+def test_session_git_inventory_prefers_recent_dirty_repo(tmp_path):
+    repos = []
+    for name in ("old", "recent"):
+        repo = tmp_path / name
+        repo.mkdir()
+        _git(repo, "init")
+        _git(repo, "config", "user.email", "t@t")
+        _git(repo, "config", "user.name", "t")
+        (repo / "f.txt").write_text("x\n", encoding="utf-8")
+        _git(repo, "add", "f.txt")
+        _git(repo, "commit", "-m", "init")
+        repos.append(repo)
+    (repos[1] / "f.txt").write_text("changed\n", encoding="utf-8")
+    os.utime(repos[1] / "f.txt", (2_000_000_000, 2_000_000_000))
+    panes = [_pane("s3", 0, repos[0]), _pane("s3", 1, repos[1])]
+    info = SessionInfo(session="s3", panes=panes, selected_pane=panes[0], agents=[])
+
+    git_data = session_git_inventory(info)
+    summaries = session_repo_summaries(info, git_data["root"] if git_data else None)
+
+    assert git_data is not None
+    assert git_data["root"] == str(repos[1].resolve())
+    assert summaries[0]["root"] == str(repos[1].resolve())
+    assert summaries[0]["activity_source"] == "dirty"
 
 
 REPO = {
@@ -112,6 +147,29 @@ def test_feature_branch_can_use_head_subject_pr_hint():
 def test_metadata_public_helpers_remain_available_after_client_split():
     assert github_checks_unknown()["state"] == "unknown"
     assert extract_linear_ids("OPS-123 is linked to INFRA-44 and OPS-123") == ["OPS-123", "INFRA-44"]
+
+
+def test_session_to_json_includes_latest_agent_transcript_mtime(tmp_path):
+    older = tmp_path / "older.jsonl"
+    newer = tmp_path / "newer.jsonl"
+    older.write_text("{}\n", encoding="utf-8")
+    newer.write_text("{}\n", encoding="utf-8")
+    older_mtime = 1_770_000_000
+    newer_mtime = 1_780_000_000
+    older.touch()
+    newer.touch()
+    os.utime(older, (older_mtime, older_mtime))
+    os.utime(newer, (newer_mtime, newer_mtime))
+    agents = [
+        AgentInfo("1", "codex", 1, "1:0.0", "codex", None, "running", "old", str(older), None),
+        AgentInfo("1", "claude", 2, "1:0.1", "claude", None, "running", "new", str(newer), None),
+        AgentInfo("1", "codex", 3, "1:0.2", "codex", None, "running", "missing", str(tmp_path / "missing.jsonl"), None),
+    ]
+    info = SessionInfo(session="1", panes=[], selected_pane=None, agents=agents)
+
+    payload = metadata.session_to_json(info, MetadataCache(), allow_network=False)
+
+    assert payload["transcript_mtime"] == newer_mtime
 
 
 def test_metadata_cache_expires_entries(monkeypatch):
@@ -244,6 +302,64 @@ def test_github_graphql_requires_token(monkeypatch):
     assert github_client.github_graphql("query{}", {}) is None
 
 
+def test_github_graphql_posts_query_with_token(monkeypatch):
+    calls = []
+
+    def fake_http_json(url, headers, timeout, payload=None):
+        calls.append({"url": url, "headers": headers, "timeout": timeout, "payload": payload})
+        return {"ok": True}
+
+    monkeypatch.setattr(github_client, "github_token", lambda: "test-token")
+    monkeypatch.setattr(github_client, "http_json", fake_http_json)
+
+    result = github_client.github_graphql("query($id:Int!){x}", {"id": 7})
+
+    assert result == {"ok": True}
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["url"].endswith("/graphql")
+    assert call["headers"]["Accept"] == "application/vnd.github+json"
+    assert call["headers"]["User-Agent"] == "YOLOmux"
+    assert call["headers"]["Content-Type"] == "application/json"
+    assert call["headers"]["Authorization"] == "token test-token"
+    assert call["payload"] == {"query": "query($id:Int!){x}", "variables": {"id": 7}}
+
+
+def test_linear_issue_from_api_posts_query_with_token(monkeypatch):
+    calls = []
+
+    def fake_http_json(url, headers, timeout, payload=None):
+        calls.append({"url": url, "headers": headers, "timeout": timeout, "payload": payload})
+        return {
+            "data": {
+                "issue": {
+                    "identifier": "OPS-123",
+                    "title": "Fix tabs",
+                    "url": "https://linear.app/vortex/issue/OPS-123",
+                    "state": {"name": "Done"},
+                }
+            }
+        }
+
+    monkeypatch.setattr(linear_client, "linear_key", lambda: "linear-token")
+    monkeypatch.setattr(linear_client, "http_json", fake_http_json)
+
+    issue = linear_client.linear_issue_from_api("OPS-123")
+
+    assert issue == {
+        "identifier": "OPS-123",
+        "title": "Fix tabs",
+        "state": "Done",
+        "url": "https://linear.app/vortex/issue/OPS-123",
+        "source": "linear-api",
+    }
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["headers"] == {"Authorization": "linear-token", "Content-Type": "application/json"}
+    assert call["payload"]["variables"] == {"id": "OPS-123"}
+    assert "issue(id: $id)" in call["payload"]["query"]
+
+
 def test_review_decision_is_cached(monkeypatch):
     calls = []
 
@@ -259,7 +375,7 @@ def test_review_decision_is_cached(monkeypatch):
 
 
 def test_cached_metadata_gives_failures_a_short_negative_ttl():
-    # DOIT.6 #71: a None result (transient 403/429/5xx/timeout, or genuinely no PR) is cached only
+    # a None result (transient 403/429/5xx/timeout, or genuinely no PR) is cached only
     # briefly so it retries soon, while a real value keeps the full positive TTL.
     cache = MetadataCache(ttl_seconds=300)
     github_client.cached_metadata(cache, "real", True, lambda: {"x": 1})
@@ -271,7 +387,7 @@ def test_cached_metadata_gives_failures_a_short_negative_ttl():
 
 
 def test_tail_file_lines_reads_a_bounded_window_from_eof(tmp_path):
-    # DOIT.6 #72: return the last N lines without scanning the whole file.
+    # return the last N lines without scanning the whole file.
     big = tmp_path / "transcript.jsonl"
     big.write_text("".join(f"row-{i}\n" for i in range(5000)))
     assert tail_file_lines(big, 3).splitlines() == ["row-4997", "row-4998", "row-4999"]
@@ -281,23 +397,25 @@ def test_tail_file_lines_reads_a_bounded_window_from_eof(tmp_path):
 
 
 def test_metadata_cache_is_bounded_and_sweeps_expired_on_write():
-    # DOIT.6 #83: the cache stays bounded (cap + sweep expired) so dead branch/sha keys don't leak for
+    # the cache stays bounded (cap + sweep expired) so dead branch/sha keys don't leak for
     # the process lifetime.
+    # MetadataCache is now a TtlCache subclass; max_entries is the (inherited) cap.
     cache = MetadataCache(ttl_seconds=300)
-    for i in range(MetadataCache.MAX_ENTRIES + 1):
+    cap = cache.max_entries
+    for i in range(cap + 1):
         cache.set(f"expired{i}", i, ttl=0)  # immediately expired
     cache.set("fresh", 1)
-    assert len(cache.values) <= MetadataCache.MAX_ENTRIES
+    assert len(cache.values) <= cap
     assert "fresh" in cache.values
     # a large burst of live entries is also capped.
     cache2 = MetadataCache(ttl_seconds=300)
-    for i in range(MetadataCache.MAX_ENTRIES + 100):
+    for i in range(cap + 100):
         cache2.set(f"k{i}", i)
-    assert len(cache2.values) <= MetadataCache.MAX_ENTRIES
+    assert len(cache2.values) <= cap
 
 
 def test_parse_pull_request_ref_accepts_short_and_url_forms():
-    # DOIT.29: owner/repo#N, owner/repo/N, and full PR URLs normalize to the canonical owner/repo#N.
+    # owner/repo#N, owner/repo/N, and full PR URLs normalize to the canonical owner/repo#N.
     from yolomux_lib.metadata import parse_pull_request_ref
 
     for text in ("ai-vortex/parser-toolkits#18", "ai-vortex/parser-toolkits/18",
@@ -314,7 +432,7 @@ def test_parse_pull_request_ref_accepts_short_and_url_forms():
 
 
 def test_parse_pull_request_ref_rejects_invalid():
-    # DOIT.29: non-github hosts, missing/zero PR numbers, repo-only refs, and issue URLs are rejected.
+    # non-github hosts, missing/zero PR numbers, repo-only refs, and issue URLs are rejected.
     from yolomux_lib.metadata import parse_pull_request_ref
 
     for text in ("https://gitlab.com/owner/repo/pull/7", "owner/repo", "owner/repo#0",
@@ -323,7 +441,7 @@ def test_parse_pull_request_ref_rejects_invalid():
 
 
 def test_watched_pr_metadata_dedupes_caps_and_flags_invalid():
-    # DOIT.29: dedupe by canonical ref, cap at WATCHED_PR_LIMIT, collect invalid entries, and (offline)
+    # dedupe by canonical ref, cap at WATCHED_PR_LIMIT, collect invalid entries, and (offline)
     # return the fallback PR shape carrying {ref, url}.
     from yolomux_lib.metadata import watched_pr_metadata, WATCHED_PR_LIMIT
 
@@ -343,7 +461,7 @@ def test_watched_pr_metadata_dedupes_caps_and_flags_invalid():
 
 
 def test_candidate_session_cwds_prefers_live_pane_cwd_over_default(monkeypatch, tmp_path):
-    # DOIT.32: the focused pane's live cwd (after `cd`) outranks the session-number default workdir, so
+    # the focused pane's live cwd (after `cd`) outranks the session-number default workdir, so
     # the project follows the pane instead of staying pinned to vortexN.
     from yolomux_lib.common import PaneInfo, SessionInfo
 
@@ -379,3 +497,139 @@ def test_candidate_session_cwds_falls_back_to_default_without_live_cwd(monkeypat
     monkeypatch.setattr(metadata, "numbered_session_workdir", lambda session: None)
     info = SessionInfo(session="1", panes=[], selected_pane=None, agents=[])
     assert metadata.candidate_session_cwds(info) == [str(default_dir.resolve())]
+
+
+def test_git_worktree_identity_names_linked_worktree_vs_parent(tmp_path):
+    # S7: a linked worktree resolves to its parent repo; the main checkout returns None.
+    import subprocess
+
+    def run(*args, cwd):
+        subprocess.run(args, cwd=str(cwd), check=True, capture_output=True)
+
+    main = tmp_path / "main"
+    main.mkdir()
+    run("git", "init", "-q", cwd=main)
+    run("git", "config", "user.email", "t@example.com", cwd=main)
+    run("git", "config", "user.name", "T", cwd=main)
+    (main / "f.txt").write_text("hi\n", encoding="utf-8")
+    run("git", "add", "f.txt", cwd=main)
+    run("git", "commit", "-qm", "init", cwd=main)
+    wt = tmp_path / "wt"
+    run("git", "worktree", "add", "-q", str(wt), "-b", "feature", cwd=main)
+
+    assert metadata.git_worktree_identity(str(main), str(main)) is None
+    ident = metadata.git_worktree_identity(str(wt), str(wt))
+    assert ident is not None
+    assert Path(ident["parent_root"]).name == "main"
+    assert ident["name"] == "wt"
+    assert ident["path"] == str(wt)
+
+
+def test_linked_worktree_inventory_only_reports_checked_out_branch(tmp_path):
+    main = tmp_path / "main"
+    wt = tmp_path / "wt"
+    main.mkdir()
+    _git(main, "init", "-b", "main")
+    _git(main, "config", "user.email", "t@example.com")
+    _git(main, "config", "user.name", "T")
+    (main / "f.txt").write_text("hi\n", encoding="utf-8")
+    _git(main, "add", "f.txt")
+    _git(main, "commit", "-m", "init")
+    _git(main, "branch", "spare")
+    _git(main, "worktree", "add", "-q", str(wt), "-b", "feature")
+
+    main_names = [branch["name"] for branch in metadata.git_inventory(str(main))["other_branches"]["branches"]]
+    wt_names = [branch["name"] for branch in metadata.git_inventory(str(wt))["other_branches"]["branches"]]
+
+    assert "main" in main_names
+    assert "spare" in main_names
+    assert "feature" not in main_names
+    assert wt_names == ["feature"]
+
+
+def test_local_branch_inventory_includes_remote_only_pr_branch(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "T")
+    (repo / "base.txt").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", "base.txt")
+    _git(repo, "commit", "-m", "init")
+    current_branch = "keivenchang/ABC-2223__current"
+    _git(repo, "checkout", "-b", current_branch)
+    (repo / "current.txt").write_text("current\n", encoding="utf-8")
+    _git(repo, "add", "current.txt")
+    _git(repo, "commit", "-m", "current")
+    pr_branch = "keivenchang/ABC-2212__cut-over-parsers-to-parser-toolkits"
+    _git(repo, "checkout", "-b", pr_branch)
+    (repo / "parser.txt").write_text("parser\n", encoding="utf-8")
+    _git(repo, "add", "parser.txt")
+    _git(repo, "commit", "-m", "chore(parsers): cut over lib/parsers to vortex-parsers crate")
+    pr_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    _git(repo, "checkout", current_branch)
+    _git(repo, "branch", "-D", pr_branch)
+    _git(repo, "update-ref", f"refs/remotes/origin/{pr_branch}", pr_sha)
+    _git(repo, "update-ref", "refs/remotes/origin/pull-request/10423", pr_sha)
+
+    inventory = metadata.local_branch_inventory(str(repo), current_branch)
+    branches = {branch["name"]: branch for branch in inventory["branches"]}
+
+    assert pr_branch in branches
+    assert branches[pr_branch]["remote"] is True
+    assert branches[pr_branch]["pull_request"]["number"] == 10423
+
+
+def test_open_pr_on_other_branch_resolves_by_head_branch(monkeypatch):
+    # An OPEN PR on a non-current branch has no local (#N) marker (that only appears after a
+    # squash-merge), so enrich_branch_pull_requests must fall back to a by-head-branch lookup —
+    # otherwise YO!info shows the branch + Linear ID but never the open PR number (the vortex2
+    # ABC-2212 / PR #10423 bug). The current branch (resolved separately) and main are skipped.
+    queried = []
+
+    def fake_by_branch(repo, branch, cache, allow_network=True):
+        queried.append(branch)
+        if branch == "keivenchang/ABC-2212__cut-over-parsers-to-parser-toolkits":
+            return {"number": 10423, "state": "open", "source": "github-api", "title": "chore(parsers): cut over"}
+        return None
+
+    monkeypatch.setattr(metadata, "github_pull_request_by_branch", fake_by_branch)
+    git_data = {
+        "github_repo": REPO,
+        "other_branches": {
+            "branches": [
+                {"name": "keivenchang/ABC-2223__current", "current": True, "pull_request": None},
+                {"name": "main", "current": False, "pull_request": None},
+                {"name": "keivenchang/ABC-2212__cut-over-parsers-to-parser-toolkits", "current": False, "pull_request": None},
+            ],
+        },
+    }
+    metadata.enrich_branch_pull_requests(git_data, MetadataCache(), allow_network=True)
+    branches = {b["name"]: b for b in git_data["other_branches"]["branches"]}
+    # the open PR on the other branch is now resolved by head branch
+    assert branches["keivenchang/ABC-2212__cut-over-parsers-to-parser-toolkits"]["pull_request"]["number"] == 10423
+    # the current branch and main are NOT queried by this fallback
+    assert "keivenchang/ABC-2223__current" not in queried
+    assert "main" not in queried
+    assert "keivenchang/ABC-2212__cut-over-parsers-to-parser-toolkits" in queried
+
+
+def test_other_branch_with_local_pr_number_still_uses_by_number(monkeypatch):
+    # The existing merged-PR path (local (#N) -> by-number) must keep working and must NOT trigger
+    # the by-branch fallback.
+    branch_queries = []
+    monkeypatch.setattr(metadata, "github_pull_request_by_branch",
+                        lambda repo, branch, cache, allow_network=True: branch_queries.append(branch))
+    git_data = {
+        "github_repo": REPO,
+        "other_branches": {
+            "branches": [
+                {"name": "keivenc/merged", "current": False, "subject": "fix (#9981)",
+                 "pull_request": {"number": 9981, "title": "fix"}},
+            ],
+        },
+    }
+    metadata.enrich_branch_pull_requests(git_data, MetadataCache(), allow_network=False)
+    pr = git_data["other_branches"]["branches"][0]["pull_request"]
+    assert pr["number"] == 9981
+    assert branch_queries == []  # by-number path used; no by-branch fallback

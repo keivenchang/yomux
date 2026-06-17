@@ -1,5 +1,9 @@
+.uploads
 __pycache__/
 *.py[cod]
 .DS_Store
 .venv/
 node_modules/
+
+# Scratch worklists — never committed (kept local only)
+DOIT*.md

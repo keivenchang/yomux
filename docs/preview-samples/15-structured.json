@@ -1,0 +1,8 @@
+{
+  "renderer": "structured",
+  "format": "json",
+  "items": [
+    {"name": "alpha", "count": 1},
+    {"name": "beta", "count": 2}
+  ]
+}

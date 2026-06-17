@@ -50,9 +50,6 @@
 }
 .session-button-dir {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   color: #e7ecf3;
   font-size: var(--tab-label-size);
   font-weight: 500;
@@ -63,20 +60,20 @@
   font: var(--ui-font-size-xs)/1 var(--mono-font);
 }
 .session-button-detail.pr-status-failing {
-  color: #ff8a95;
+  color: var(--pr-status-failing);
 }
 .session-button-detail.pr-status-pending,
 .session-button-detail.pr-status-draft {
   color: var(--accent-gold);
 }
 .session-button-detail.pr-status-passing {
-  color: #52d273;
+  color: var(--pr-status-passing);
 }
 .session-button-detail.pr-status-merged {
-  color: #c084fc;
+  color: var(--pr-status-merged);
 }
 .session-button-detail.pr-status-closed {
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
 }
 .session-state-badge {
   min-width: 26px;
@@ -84,33 +81,29 @@
   align-items: center;
   justify-content: center;
   padding: 1px 3px;
-  border: 1px solid #384356;
+  border: 1px solid var(--divider);
   border-radius: 5px;
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
   background: #161d29;
   font: var(--ui-font-size-3xs)/1.15 var(--mono-font);
   text-transform: uppercase;
 }
-.session-state-needs-approval {
-  color: #fff3f4;
-  background: #c61f38;
-  border-color: #ff7a86;
-}
+.session-state-needs-approval,
 .session-state-needs-input {
-  color: #fff3f4;
-  background: #c61f38;
-  border-color: #ff7a86;
+  color: var(--danger-text);
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
 }
 .session-state-yolo-approval {
-  color: #081205;
-  background: var(--brand-green);
-  border-color: #9be33d;
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 .session-state-blocked,
 .session-state-disconnected {
-  color: #fff3f4;
-  background: #5b1e28;
-  border-color: #ff6673;
+  color: var(--danger-text);
+  background: var(--danger-muted-bg);
+  border-color: var(--bad);
 }
 .session-state-tests-running {
   color: #10151f;
@@ -119,7 +112,7 @@
 }
 .session-state-ready-review {
   color: #082014;
-  background: #52d273;
+  background: var(--pr-status-passing);
   border-color: #9befad;
 }
 .session-state-working {
@@ -212,8 +205,8 @@
   font-size: max(10px, var(--ui-font-size));
 }
 .session-yolo-marker.inactive {
-  color: #d7dde5;
-  background: #384356;
+  color: var(--pane-meta-branch);
+  background: var(--divider);
   border-color: #5d6878;
 }
 .session-yolo-marker.locked {
@@ -223,7 +216,7 @@
 }
 /* Light mode: the NEUTRAL badges/markers hardcode dark slate boxes (the saturated
    status colors — red/blue/green — already read on white and are left alone).
-   Repaint the neutral chips as light gray with dark text (DOIT.12 B5). */
+   Repaint the neutral chips as light gray with dark text. */
 body.theme-light .session-state-badge {
   color: #52617a;
   background: #eef1f5;
@@ -239,7 +232,7 @@ body.theme-light .session-yolo-marker.inactive {
   background: #e2e6ec;
   border-color: #c2cad6;
 }
-/* DOIT.6 #23: the YO ball spins ONLY when the agent is working, and SLOWLY — at the
+/* the YO ball spins ONLY when the agent is working, and SLOWLY — at the
    "Active YO rotation period" setting (appearance.yolo_rotate_ms, default 20s), not a fast hardcoded
    value. An idle marker (auto-on or not) is STATIC — there is no ambient idle rotation rule.
    yolo_rotate_ms = 0 -> --yolo-rotation-duration: 0s -> the rotation renders static (disabled). */
@@ -266,13 +259,10 @@ body.theme-light .session-yolo-marker.inactive {
   justify-content: center;
   padding: 0 2px;
   border-radius: 0;
-  border: 1px solid #384356;
-  color: #aeb8c7;
+  border: 1px solid var(--divider);
+  color: var(--pr-status-closed);
   background: #161d29;
   font: 800 var(--ui-font-size-3xs)/1 var(--mono-font);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 body.tab-meta-hidden .pane-tab .tab-symbol {
   display: none;
@@ -283,10 +273,20 @@ body.tab-meta-hidden .pane-tab .tab-symbol {
   border-color: #000;
   padding: 0 4px;
 }
+.popover-chip-link {
+  display: inline-flex;
+  align-items: center;
+  color: inherit;
+  text-decoration: none;
+  vertical-align: middle;
+}
+.popover-chip-link:hover {
+  text-decoration: none;
+}
 .ci-indicator.pr-status-failing {
-  color: #fff3f4;
-  background: #c61f38;
-  border-color: #ff7a86;
+  color: var(--danger-text);
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
   box-shadow: none;
 }
 .ci-indicator.pr-status-pending,
@@ -297,12 +297,12 @@ body.tab-meta-hidden .pane-tab .tab-symbol {
 }
 .ci-indicator.pr-status-passing {
   color: #051408;
-  background: #52d273;
+  background: var(--pr-status-passing);
   border-color: #8ff2a7;
 }
 .ci-indicator.pr-status-merged {
   color: #170326;
-  background: #c084fc;
+  background: var(--pr-status-merged);
   border-color: #e9d5ff;
 }
 /* #38: PR reviewDecision badge — green Approved, red Changes, crossed-out neutral Review. */
@@ -312,27 +312,27 @@ body.tab-meta-hidden .pane-tab .tab-symbol {
 }
 .ci-indicator.pr-review-approved {
   color: #051408;
-  background: #52d273;
+  background: var(--pr-status-passing);
   border-color: #8ff2a7;
 }
 .ci-indicator.pr-review-changes {
-  color: #fff3f4;
-  background: #c61f38;
-  border-color: #ff7a86;
+  color: var(--danger-text);
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
 }
 .ci-indicator.pr-review-required {
-  color: #c4ccd6;
-  background: transparent;
-  border-color: var(--line);
+  color: #172033;
+  background: #e7ebf1;
+  border-color: #aab4c4;
   text-decoration: line-through;
-  opacity: 0.85;
+  opacity: 1;
 }
 .ci-indicator.branch-indicator {
   color: #071321;
   background: #9fd8ff;
   border-color: #c9ebff;
 }
-/* DOIT.6: the .ci-indicator chips are tuned for dark mode; on a bright/green tab in light theme they
+/* the .ci-indicator chips are tuned for dark mode; on a bright/green tab in light theme they
    are illegible (worst: pr-review-required = light-gray text + strikethrough on transparent). Light
    theme uses dark text on light/saturated fills, and a readable (un-faded) review-required chip. */
 body.theme-light .ci-indicator {
@@ -404,22 +404,22 @@ body.theme-light .ci-indicator.branch-indicator {
   position: absolute;
   top: calc(100% + 2px);
   left: 0;
-  z-index: 80;
+  z-index: var(--z-session-popover);
   width: var(--pane-tab-popover-inline-size);
   max-width: var(--popover-max-inline-size);
   max-height: calc(100vh - var(--topbar-height) - var(--popover-edge-gap));
   overflow: auto;
   padding: 8px 10px;
-  color: #eefbe6;
+  color: var(--text);
   font-family: var(--ui-font);
   font-size: var(--ui-font-size);
   font-stretch: normal;
   line-height: 1.25;
   font-weight: 400;
-  background: #081f08;
-  border: 1px solid rgba(95, 150, 42, 0.64);
+  background: var(--panel2);
+  border: 1px solid var(--active-control-soft-border);
   border-radius: 8px;
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.42);
+  box-shadow: 0 18px 50px rgb(var(--shadow-rgb) / 0.42);
   transform: translateY(-2px);
   transition:
     opacity 90ms ease var(--popover-hide-delay),
@@ -434,26 +434,45 @@ body.theme-light .ci-indicator.branch-indicator {
   width: 10px;
   height: 10px;
   transform: rotate(45deg);
-  background: #081f08;
-  border-inline-start: 1px solid rgba(95, 150, 42, 0.64);
-  border-top: 1px solid rgba(95, 150, 42, 0.64);
+  background: var(--panel2);
+  border-inline-start: 1px solid var(--active-control-soft-border);
+  border-top: 1px solid var(--active-control-soft-border);
 }
-/* Light mode: the dark-green popover (#081f08 + pale-green text) is unreadable on
-   white. Repaint as a light card with dark text and re-tint the muted text cluster
-   so every label/value/desc/legend line meets contrast (DOIT.12 B5 — highest fix). */
+/* S14: opt-in drag-timing readout — a copyable on-page box so the timing can be captured
+   without DevTools. Only shown after a tab drag while the yolomux.debugDragTiming flag is set; click
+   it to select-all, then copy. Theme-aware (no hardcoded colors). */
+.drag-timing-overlay {
+  position: fixed;
+  top: 8px;
+  right: 8px;
+  z-index: var(--z-terminal-popover);
+  max-width: 460px;
+  margin: 0;
+  padding: 8px 10px;
+  color: var(--text);
+  background: var(--panel2);
+  border: 1px solid var(--active-control-soft-border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgb(var(--shadow-rgb) / 0.5);
+  font: 11px/1.4 var(--mono-font);
+  white-space: pre;
+  user-select: text;
+  cursor: text;
+}
+/* Light mode: use a neutral card with the active accent only as border/labels. */
 body.theme-light .session-popover {
-  color: #1f2937;
+  color: var(--pc-control-fg);
   background: #ffffff;
-  border-color: rgba(95, 150, 42, 0.45);
-  box-shadow: 0 18px 50px rgba(15, 23, 42, 0.16);
+  border-color: var(--active-control-soft-border);
+  box-shadow: 0 18px 50px rgb(var(--overlay-slate-rgb) / 0.16);
 }
 body.theme-light .session-popover::before {
   background: #ffffff;
-  border-inline-start-color: rgba(95, 150, 42, 0.45);
-  border-top-color: rgba(95, 150, 42, 0.45);
+  border-inline-start-color: var(--active-control-soft-border);
+  border-top-color: var(--active-control-soft-border);
 }
 body.theme-light .popover-row {
-  border-top-color: rgba(15, 23, 42, 0.10);
+  border-top-color: rgb(var(--overlay-slate-rgb) / 0.10);
 }
 body.theme-light .popover-subtitle,
 body.theme-light .popover-label,
@@ -466,11 +485,11 @@ body.theme-light .session-popover .meta-sep {
   color: #9aa3b2;
 }
 body.theme-light .popover-desc {
-  color: #1f2937;
+  color: var(--pc-control-fg);
 }
 body.theme-light .session-popover a,
 body.theme-light .branch-link {
-  color: #2563eb;
+  color: var(--accent);
 }
 .popover-head {
   display: flex;
@@ -485,23 +504,30 @@ body.theme-light .branch-link {
 }
 .popover-subtitle {
   margin-top: 1px;
-  color: #bddcaf;
+  color: var(--muted);
   font: inherit;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
   overflow-wrap: anywhere;
+}
+.popover-subtitle-text {
+  min-width: 0;
 }
 .popover-row {
   display: grid;
   grid-template-columns: 62px minmax(0, 1fr);
   gap: 6px;
   padding: 2px 0;
-  border-top: 1px solid rgba(180, 230, 140, 0.22);
+  border-top: 1px solid var(--line);
 }
 .popover-row.compact {
   grid-template-columns: 44px minmax(0, 0.8fr) 44px minmax(0, 1fr);
   gap: 6px 8px;
 }
 .popover-label {
-  color: #a2c98d;
+  color: var(--active-accent-bright);
   font-weight: 500;
 }
 .popover-value {
@@ -520,15 +546,12 @@ body.theme-light .branch-link {
   overflow-wrap: anywhere;
 }
 .popover-row.compact .popover-value {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .session-popover .meta-muted {
-  color: #b5d2a7;
+  color: var(--muted);
 }
 .session-popover .meta-sep {
-  color: #87aa76;
+  color: var(--muted);
 }
 .drag-image {
   opacity: 0.50 !important;
@@ -538,12 +561,62 @@ body.theme-light .branch-link {
   width: min(36ch, 42vw, var(--popover-max-inline-size));
   max-width: min(36ch, 42vw, var(--popover-max-inline-size));
   padding: 4px 6px;
-  color: #eefbe6;
-  background: rgba(8, 31, 8, 0.96);
-  border: 1px solid rgba(118, 185, 0, 0.72);
-  border-radius: 4px;
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.40);
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel2) 96%, black 4%);
+  border: 1px solid var(--active-control-soft-border);
+  border-radius: var(--radius-control);
+  box-shadow: 0 10px 28px rgb(var(--shadow-rgb) / 0.40);
   opacity: 0.82 !important;
+}
+.pane-drag-image.drag-image {
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  border: 2px dotted var(--pane-resizer-hover-bg);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 14px 34px rgb(var(--shadow-rgb) / 0.42);
+  overflow: hidden;
+  opacity: 0.86 !important;
+}
+.pane-drag-image-frame {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 4px;
+  width: 100%;
+  height: 100%;
+  padding: 9px 10px;
+  background:
+    linear-gradient(to bottom, var(--pane-bar-bg, var(--panel2)) 0 30px, transparent 30px),
+    color-mix(in srgb, var(--panel) 94%, black 6%);
+}
+.pane-drag-image-title {
+  min-width: 0;
+  font-weight: 700;
+  font-size: 12px;
+  line-height: 1.2;
+}
+.pane-drag-image-meta {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.2;
+}
+.pane-drag-image-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 4px;
+  min-height: 0;
+  overflow: hidden;
+  padding-top: 4px;
+}
+.pane-drag-image-tabs span {
+  max-width: min(18ch, 42%);
+  padding: 2px 5px;
+  color: var(--text);
+  background: var(--pane-bar-bg, var(--panel2));
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  font-size: 11px;
+  line-height: 1.15;
 }
 .file-drag-main {
   display: flex;
@@ -558,13 +631,13 @@ body.theme-light .branch-link {
   object-fit: contain;
   border-radius: 3px;
   background: rgba(255, 255, 255, 0.07);
-  border: 1px solid rgba(180, 230, 140, 0.26);
+  border: 1px solid var(--active-control-soft-border);
 }
 .file-drag-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #eaf6df;
+  color: var(--active-accent-bright);
   font-family: var(--tab-font);
   font-size: var(--ui-font-size-xl);
   font-weight: 700;
@@ -575,22 +648,16 @@ body.theme-light .branch-link {
 }
 .file-drag-title {
   margin-bottom: 1px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: #f6ffe8;
+  color: var(--text);
   font: 600 var(--ui-font-size-2xs)/1.15 var(--ui-font);
 }
 .file-drag-path,
 .file-drag-more {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: #bddcaf;
+  color: var(--muted);
   font: var(--ui-font-size-3xs)/1.15 var(--mono-font);
 }
 .file-drag-more {
-  color: #9fc68f;
+  color: var(--muted);
 }
 .state-legend {
   display: flex;
@@ -601,12 +668,12 @@ body.theme-light .branch-link {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  color: #dbeed2;
+  color: var(--muted);
   font-size: var(--ui-font-size-xs);
   white-space: nowrap;
 }
 .popover-desc {
-  color: #e5f6dc;
+  color: var(--text);
   line-height: 1.35;
 }
 .popover-desc-title {
@@ -614,21 +681,21 @@ body.theme-light .branch-link {
 }
 .popover-desc-body {
   margin-top: 4px;
-  color: #bddcaf;
+  color: var(--muted);
 }
 .popover-desc-line + .popover-desc-line {
   margin-top: 4px;
 }
 .popover-value a,
 .branch-link {
-  color: #93c5fd;
+  color: var(--link-soft);
   text-decoration: none;
 }
 .popover-value a.pr-status-failing,
 .meta a.pr-status-failing,
 .summary-context a.pr-status-failing,
 .info-cell a.pr-status-failing {
-  color: #ff8a95;
+  color: var(--pr-status-failing);
 }
 .popover-value a.pr-status-pending,
 .popover-value a.pr-status-draft,
@@ -644,18 +711,18 @@ body.theme-light .branch-link {
 .meta a.pr-status-passing,
 .summary-context a.pr-status-passing,
 .info-cell a.pr-status-passing {
-  color: #52d273;
+  color: var(--pr-status-passing);
 }
 .popover-value a.pr-status-merged,
 .meta a.pr-status-merged,
 .summary-context a.pr-status-merged,
 .branch-meta a.pr-status-merged,
 .info-cell a.pr-status-merged {
-  color: #c084fc;
+  color: var(--pr-status-merged);
 }
 .popover-value a.pr-status-closed,
 .meta a.pr-status-closed,
 .summary-context a.pr-status-closed,
 .info-cell a.pr-status-closed {
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
 }

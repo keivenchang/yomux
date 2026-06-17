@@ -14,6 +14,10 @@ function menuSeparator() {
   return {type: 'separator'};
 }
 
+function menuNumberSetting(path, label, options = {}) {
+  return {type: 'number-setting', path, label, ...options};
+}
+
 function menuGroups(...groups) {
   const items = [];
   for (const group of groups) {
@@ -23,6 +27,120 @@ function menuGroups(...groups) {
     items.push(...commands);
   }
   return items;
+}
+
+function layoutMenuCommand(mode) {
+  const normalized = normalizeLayoutMode(mode);
+  const detail = normalized === 'single'
+    ? t('menu.view.layout.single.detail', {name: fileExplorerLabel()})
+    : normalized === 'split'
+      ? t('menu.view.layout.split.detail', {name: fileExplorerLabel()})
+      : '';
+  return menuCommand(t(`menu.view.layout.${normalized}`), () => applyLayoutMode(normalized), {detail});
+}
+
+const aboutLinkedInUrl = 'https://www.linkedin.com/in/keiven/';
+const aboutProjectUrl = 'https://github.com/keivenchang/yolomux';
+
+function aboutDateTimeText() {
+  if (bootstrap.versionCommitTime) return bootstrap.versionCommitTime;
+  try {
+    return new Date().toLocaleString([], {dateStyle: 'medium', timeStyle: 'medium'});
+  } catch (_) {
+    return new Date().toString();
+  }
+}
+
+function openAboutLinkedIn() {
+  window.open(aboutLinkedInUrl, '_blank', 'noopener,noreferrer');
+}
+
+function aboutCommitShaText() {
+  return bootstrap.versionCommit || bootstrap.commitSha || bootstrap.commit_sha || bootstrap.gitSha || bootstrap.git_sha || '';
+}
+
+function topbarVersionTitle() {
+  const sha = aboutCommitShaText();
+  const lines = [];
+  if (sha) lines.push(`SHA: ${sha}`);
+  if (bootstrap.versionCommitTime) lines.push(`Last commit: ${bootstrap.versionCommitTime}`);
+  return lines.join('\n') || 'SHA unknown';
+}
+
+function topbarServerStartedAtMs() {
+  const explicitMs = Number(bootstrap.serverStartedAtMs);
+  if (Number.isFinite(explicitMs) && explicitMs > 0) return explicitMs;
+  const seconds = Number(bootstrap.serverStartedAt);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0;
+}
+
+function topbarDurationText(seconds) {
+  const remaining = Math.max(0, Math.floor(Number(seconds) || 0));
+  if (remaining < 1) return 'under 1 second';
+  const units = [
+    ['day', 86400],
+    ['hour', 3600],
+    ['minute', 60],
+    ['second', 1],
+  ];
+  const parts = [];
+  let rest = remaining;
+  for (const [name, size] of units) {
+    const value = Math.floor(rest / size);
+    if (!value) continue;
+    parts.push(tPlural(`duration.${name}`, value));
+    rest -= value * size;
+    if (parts.length >= 2) break;
+  }
+  return parts.join(', ');
+}
+
+function topbarServerUptimeTitle() {
+  const startedAtMs = topbarServerStartedAtMs();
+  if (!startedAtMs) return t('server.uptimeUnknown');
+  return t('server.uptimeRunning', {duration: topbarDurationText((Date.now() - startedAtMs) / 1000)});
+}
+
+function updateBrandTitles() {
+  for (const brand of document.querySelectorAll('.brand-title')) {
+    brand.title = topbarServerUptimeTitle();
+    brand.onpointerenter = updateBrandTitles;
+  }
+  for (const version of document.querySelectorAll('.brand-title .brand-version')) {
+    version.title = topbarVersionTitle();
+    version.onpointerenter = updateBrandTitles;
+  }
+}
+
+function aboutBrandHtml() {
+  return `<span class="about-brand-yo" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}">${esc(t('brand.wordmark.yo'))}</span><span class="about-brand-lo">${esc(t('brand.wordmark.lo'))}</span><span class="about-brand-m">m</span><span class="about-brand-u">u</span><span class="about-brand-x">x</span>`;
+}
+
+function showAboutModal() {
+  const modal = document.getElementById('modal');
+  const title = document.getElementById('modalTitle');
+  const body = document.getElementById('modalBody');
+  const close = document.getElementById('closeModal');
+  if (!modal || !title || !body) return;
+  title.textContent = t('menu.help.about');
+  if (close) {
+    close.title = t('common.close');
+    close.setAttribute('aria-label', t('common.close'));
+  }
+  modal.classList.add('about-open');
+  const version = bootstrap.version || '';
+  const sha = aboutCommitShaText();
+  body.innerHTML = `<div class="about-modal">
+    <div class="about-brand-row">${aboutBrandHtml()}${version ? `<span class="about-version">${esc(version)}</span>` : ''}</div>
+    <dl class="about-details">
+      <div><dt>${esc(t('menu.help.about.datetime'))}</dt><dd>${esc(aboutDateTimeText())}</dd></div>
+      <div><dt>SHA</dt><dd>${esc(sha || t('common.unknown'))}</dd></div>
+      <div><dt>${esc(t('menu.help.about.version'))}</dt><dd>${esc(version || t('common.unknown'))}</dd></div>
+    </dl>
+    <div class="about-links"><a class="about-author" href="${esc(aboutLinkedInUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.author'))}</a><span> - </span><a class="about-author about-github" href="${esc(aboutProjectUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.github'))}</a><span> (to YOLOmux)</span></div>
+  </div>`;
+  modal.classList.add('open');
+  scheduleSharePopupLayerPublish();
 }
 
 function currentActiveMenuItem() {
@@ -56,15 +174,27 @@ function orderedPaneItems(items = activePaneItems()) {
 function menuTabDetail(item) {
   const type = tabTypeForItem(item);
   if (type?.detail) return type.detail(item);
-  return tabMenuDetailText(item, transcriptMeta.sessions?.[item]);
+  const detail = tabMenuDetailText(item, transcriptMeta.sessions?.[item]);
+  // A non-numeric tmux session name (e.g. "PA exploration") is shown in the tab label only as its
+  // assigned number (e.g. "9"), so the real name is otherwise invisible. Surface it in the menu/search
+  // detail so a result like label "9" reads "9 · PA exploration · main · …" and is identifiable.
+  if (numericSessionName(item) === null) return detail ? `${item} · ${detail}` : String(item);
+  return detail;
 }
 
-function changesTabDetail() {
-  const count = sessionFilesPayload.files?.length || 0;
-  const session = sessionFilesPayload.session || sessionFilesTargetSession();
-  if (sessionFilesLoading) return 'loading AI-changed files';
-  if (count) return `${count} changed file${count === 1 ? '' : 's'}${session ? ` for ${sessionLabel(session)}` : ''}`;
-  return session ? `no AI-changed files loaded for ${sessionLabel(session)}` : 'AI-changed files';
+function commandPaletteTabDetail(item) {
+  const detail = menuTabDetail(item);
+  const pr = displayPullRequest(transcriptMeta.sessions?.[item]);
+  if (!pr?.number) return detail;
+  const bareNumber = `#${pr.number}`;
+  const visibleNumber = `PR ${bareNumber}`;
+  const rest = detail
+    .replace(visibleNumber, '')
+    .replace(bareNumber, '')
+    .replace(/\s*·\s*·\s*/g, ' · ')
+    .replace(/^\s*·\s*|\s*·\s*$/g, '')
+    .trim();
+  return rest ? `${visibleNumber} · ${rest}` : visibleNumber;
 }
 
 function menuTabRowHtml(item, options = {}) {
@@ -86,8 +216,9 @@ function menuTabCommand(item, options = {}) {
   const active = item === currentActiveMenuItem();
   const detail = options.detail || (visible ? menuTabDetail(item) : (itemIsBackgroundPaneTab(item) ? t('menu.tabs.minimizedDetail') : t('menu.tabs.inactiveDetail')));
   return menuCommand(itemLabel(item), () => {
-    if (slot && visible && !options.openAsPane) return activatePaneTab(slot, item);
-    return selectSession(item);
+    if (item === infoItemId) return openInfoSubTab('info');
+    if (slot && visible && !options.openAsPane) return activatePaneTab(slot, item, {userInitiated: true});
+    return selectSession(item, {userInitiated: true});
   }, {
     checked: options.checked ?? active,
     detail: '',
@@ -178,7 +309,7 @@ function applyAndSaveGlobalTheme(next) {
       statusEl.textContent = `theme: ${globalThemeLabel(next)}`;
     })
     .catch(error => {
-      statusErr(`theme save failed: ${esc(error)}`);
+      statusErr(localizedHtml('status.themeSaveFailed', {error}));
       refreshSettings({force: true});
     });
 }
@@ -204,55 +335,57 @@ function yoloRuleStatusDetail() {
 
 async function openYoloRuleFile() {
   if (readOnlyMode) {
-    statusErr('readonly access cannot create YOLO rule files');
+    statusErr(localizedHtml('status.yoloReadOnlyCreateRules'));
     return;
   }
   try {
-    const response = await apiFetch('/api/yolo-rules/open', {method: 'POST'});
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    const payload = await apiFetchJson('/api/yolo-rules/open', {method: 'POST'});
     yoloRulesPayload = payload;
     renderPreferencesPanels();
     await openFileInEditor(payload.path || yoloRulePath(), {name: basenameOf(payload.path || yoloRulePath())});
     statusEl.textContent = t('status.openedYoloRule');
   } catch (error) {
-    statusErr(`open YOLO rule file failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.yoloOpenRuleFailed', {error}));
   }
 }
 
 async function reloadYoloRules() {
   try {
-    const response = await apiFetch('/api/yolo-rules/reload', {method: 'POST'});
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    const payload = await apiFetchJson('/api/yolo-rules/reload', {method: 'POST'});
     yoloRulesPayload = payload;
     renderPreferencesPanels();
     const level = payload.error ? 'error' : '';
     statusEl.innerHTML = payload.error
-      ? `<span class="err">YOLO rule reload failed: ${esc(payload.error)}</span>`
-      : `<span class="ok">reloaded YOLO rules</span>`;
-    showToast('YOLO rules', payload.error || yoloRuleStatusDetail(), {level});
+      ? `<span class="err">${localizedHtml('status.yoloReloadFailed', {error: payload.error})}</span>`
+      : `<span class="ok">${localizedHtml('status.yoloReloaded')}</span>`;
+    showToast(t('status.yoloToastTitle'), payload.error || yoloRuleStatusDetail(), {level});
   } catch (error) {
-    statusErr(`reload YOLO rules failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.yoloReloadRequestFailed', {error}));
   }
 }
 
 async function refreshYoloRulesStatus(options = {}) {
   try {
-    const response = await apiFetch('/api/yolo-rules');
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    const payload = await apiFetchJson('/api/yolo-rules');
     yoloRulesPayload = payload;
     renderPreferencesPanels();
     return payload;
   } catch (error) {
-    if (!options.silent) statusErr(`YOLO rule status failed: ${esc(error)}`);
+    if (!options.silent) statusErr(localizedHtml('status.yoloStatusFailed', {error}));
     return null;
   }
 }
 
 function tmuxYoloMenuItems() {
   return [
+    menuNumberSetting('appearance.yolo_rotate_ms', t('pref.appearance.yolo_rotate_ms.label'), {
+      min: 0,
+      max: 60000,
+      step: 250,
+      suffix: 'ms',
+      fallback: 20000,
+      detail: t('pref.appearance.yolo_rotate_ms.help'),
+    }),
     menuCommand(t('menu.yolo.openRuleFile'), openYoloRuleFile, {
       disabled: readOnlyMode,
       detail: compactHomePath(yoloRulePath()),
@@ -319,7 +452,7 @@ function tmuxSessionViewCommands(session) {
     }),
     menuCommand(t('menu.tmux.paneDetails'), () => {
       if (!active) return;
-      const panel = document.getElementById(`panel-${session}`);
+      const panel = document.getElementById(panelDomId(session));
       if (panel) setPanelDetailsCollapsed(panel, !panel.classList.contains('details-collapsed'));
     }, {
       disabled: !active,
@@ -339,6 +472,11 @@ function agentLaunchParams(agent) {
   return space >= 0 ? command.slice(space + 1).trim() : command;
 }
 
+function agentUnavailableDetail(agent) {
+  if (agentUnavailableReason(agent) === 'not-on-path') return t('menu.tmux.agentUnavailablePath');
+  return t('menu.tmux.agentUnavailable', {name: agentName(agent)});
+}
+
 function newTmuxSessionItems() {
   return ['claude', 'codex', 'term'].map(agent => {
     const available = availableAgents.has(agent);
@@ -354,7 +492,7 @@ function newTmuxSessionItems() {
       detail: readOnlyMode
         ? t('menu.common.adminOnly')
         : (!available
-          ? t('menu.tmux.agentUnavailable', {name: agentName(agent)})
+          ? agentUnavailableDetail(agent)
           : (loggedOut
             ? t('menu.tmux.runLogin', {command: agentLoginCommand(agent)})
             : (capped ? t('menu.tmux.limitReached') : agentLaunchParams(agent)))),
@@ -366,20 +504,57 @@ function tabCommandsForItems(items, options) {
   return items.map(item => menuTabCommand(item, options));
 }
 
-// DOIT.33: a PR number in any of the forms a user types (#N, PR#N, PR N, N).
+// a PR number in any of the forms a user types (#N, PR#N, PR N, N).
 function prNumberSearchForms(number) {
   if (!number) return [];
   return [`#${number}`, `PR#${number}`, `PR ${number}`, String(number)];
 }
 
+function linearSearchFields(linear) {
+  if (!Array.isArray(linear)) return [];
+  return linear.flatMap(item => {
+    if (!item) return [];
+    if (typeof item === 'string') return [item];
+    return [item.identifier, item.title, item.state, item.url];
+  }).filter(Boolean);
+}
+
+function pullRequestSearchFields(pr) {
+  if (!pr) return [];
+  return [
+    pr.title,
+    pr.description,
+    pr.url,
+    pr.state,
+    pr.status_label,
+    pr.review_decision,
+    pr.author_login,
+    pr.number ? 'PR' : '',
+    ...prNumberSearchForms(pr.number),
+    ...linearSearchFields(pr.linear_ids),
+  ].filter(Boolean);
+}
+
+function finderSearchAliases(item) {
+  if (!isFileExplorerItem(item)) return [];
+  return ['Finder', 'File Explorer', t('finder.label.finder'), t('finder.label.explorer')];
+}
+
 function tabSearchFields(item) {
   const info = transcriptMeta.sessions?.[item] || {};
   const filePath = fileItemPath(item) || '';
+  // Also index the touched repos' branch/PR/Linear metadata (the same data YO!info shows), so a
+  // session is findable by any related branch even when it is not the currently checked-out branch.
+  const primaryRoot = info.project?.git?.root || info.project?.git?.cwd || '';
+  const branchSources = [
+    ...(info.project?.git?.other_branches?.branches || []),
+    ...(Array.isArray(info.project?.repos)
+      ? info.project.repos
+        .filter(repo => (repo?.root || repo?.cwd || '') !== primaryRoot)
+        .flatMap(repo => repo?.other_branches?.branches || [])
+      : []),
+  ];
   const pr = displayPullRequest(info);
-  // DOIT.33: also index the repo's OTHER-branch PRs/branches/Linear IDs (the same data YO!info shows),
-  // so a session is findable by ANY PR (e.g. #10289 on a non-current branch), branch name, or Linear ID
-  // — not just its current-branch PR. Already in the metadata payload, so no extra fetch.
-  const otherBranches = info.project?.git?.other_branches?.branches || [];
   return [
     item,
     itemLabel(item),
@@ -392,16 +567,15 @@ function tabSearchFields(item) {
     info.status,
     info.description,
     info.goal,
-    pr?.title,
-    pr?.url,
-    pr?.number ? 'PR' : '',
-    ...prNumberSearchForms(pr?.number),
-    ...(Array.isArray(info.linear) ? info.linear : []),
-    ...otherBranches.flatMap(branch => [
+    ...finderSearchAliases(item),
+    ...pullRequestSearchFields(pr),
+    ...linearSearchFields(info.linear),
+    ...linearSearchFields(info.project?.linear),
+    ...branchSources.flatMap(branch => [
       branch.name,
-      branch.pull_request?.title,
-      ...prNumberSearchForms(branch.pull_request?.number),
-      ...(Array.isArray(branch.linear_ids) ? branch.linear_ids : []),
+      branch.subject,
+      ...pullRequestSearchFields(branch.pull_request),
+      ...linearSearchFields(branch.linear_ids),
     ]),
   ].filter(Boolean);
 }
@@ -482,7 +656,7 @@ function tabMenuItems(openItems = orderedPaneItems(activePaneItems())) {
 }
 
 function fileMenuVirtualCommand(item, detail) {
-  return menuCommand(itemLabel(item), () => selectSession(item), {
+  return menuCommand(itemLabel(item), () => (item === infoItemId ? openInfoSubTab('info') : selectSession(item, {userInitiated: true})), {
     checked: itemInLayout(item),
     detail,
     iconHtml: tabTypeIconHtml(item, {menu: true}),
@@ -492,14 +666,24 @@ function fileMenuVirtualCommand(item, detail) {
 
 function appMenuTree() {
   const activeTmux = currentSessionActionTarget();
+  const shareSessions = shareSessionsFromLayout();
+  const shareCanOpen = shareSessions.length > 0 || Boolean(activeTmux);
+  const shareMenuActive = shareViewMode || shareHasActiveShare();
   const openItems = orderedPaneItems(activePaneItems());
-  const yoloCount = yoloEnabledSessions().length;
+  const yoloCount = yoloWorkingSessions().length;
+  const debugMenuItems = debugModeEnabled ? [
+    fileMenuVirtualCommand(debugPaneItemId, t('menu.file.debug.detail')),
+  ] : [];
   return [
     {
       id: 'file',
       label: t('menu.file'),
       items: menuGroups(
         [
+          menuCommand(t('menu.file.openFile'), openFileQuickOpen, {
+            detail: appShortcutText('P'),
+            iconHtml: appMenuUiIcon('document'),
+          }),
           menuCommand(fileExplorerLabel(), () => toggleFinderPane(), {
             checked: itemInLayout(fileExplorerItemId),
             detail: t('menu.file.browseFiles'),
@@ -513,16 +697,18 @@ function appMenuTree() {
             detail: t('menu.file.yoagent.detail'),
             iconHtml: appMenuUiIcon('yoagent'),
           }),
-          menuCommand(t('menu.file.openFile'), openFileQuickOpen, {
-            detail: appShortcutText('P'),
-            iconHtml: appMenuUiIcon('document'),
+          menuCommand(t('menu.file.share'), () => showShareModal(), {
+            disabled: readOnlyMode || (!shareHasActiveShare() && !shareCanOpen),
+            detail: shareMenuActive || shareCanOpen ? t('share.menu.sharing') : t('share.noSession'),
+            iconHtml: appMenuUiIcon('share', shareMenuActive),
           }),
-          menuCommand(t('menu.file.preferences'), () => selectSession(prefsItemId), {
+          menuCommand(t('menu.file.preferences'), () => selectSession(prefsItemId, {userInitiated: true}), {
             checked: itemInLayout(prefsItemId),
             detail: compactHomePath(settingsConfigPath()),
             iconHtml: tabTypeIconHtml(prefsItemId, {menu: true}),
             targetItem: prefsItemId,
           }),
+          ...debugMenuItems,
         ],
         [
           menuCommand(t('menu.file.logout'), logOut, {
@@ -555,12 +741,7 @@ function appMenuTree() {
           menuCommand(t('menu.view.theme.dark'), () => setGlobalThemeMode('dark'), {checked: normalizeGlobalThemeMode() === 'dark'}),
           menuCommand(t('menu.view.theme.light'), () => setGlobalThemeMode('light'), {checked: normalizeGlobalThemeMode() === 'light'}),
         ]),
-        menuSubmenu(t('menu.view.layout'), [
-          menuCommand(t('menu.view.layout.single'), setLayoutToSinglePane, {detail: t('menu.view.layout.single.detail', {name: fileExplorerLabel()})}),
-          menuCommand(t('menu.view.layout.split'), setLayoutToSplitPanes, {detail: t('menu.view.layout.split.detail', {name: fileExplorerLabel()})}),
-          menuCommand(t('menu.view.layout.grid'), null, {disabled: true, detail: t('menu.view.layout.grid.detail')}),
-          menuCommand(t('menu.view.layout.wall'), null, {disabled: true}),
-        ]),
+        menuSubmenu(t('menu.view.layout'), layoutModeValues.map(layoutMenuCommand)),
         menuSubmenu(t('menu.view.sortTabs'), [
           menuCommand(t('menu.view.sortTabs.default'), () => setTabsMenuSortMode('default'), {checked: tabsMenuSortMode === 'default', detail: t('menu.view.sortTabs.default.detail')}),
           menuCommand(t('menu.view.sortTabs.attention'), () => setTabsMenuSortMode('attention'), {checked: tabsMenuSortMode === 'attention', detail: t('menu.view.sortTabs.attention.detail')}),
@@ -590,8 +771,8 @@ function appMenuTree() {
     {
       id: 'tabs',
       label: t('menu.tabs'),
-      badgeText: yoloCount ? String(yoloCount) : '',
-      badgeTitle: yoloCount ? tPlural('menu.tabs.yoloBadge', yoloCount) : '',
+      badgeText: String(yoloCount),
+      badgeTitle: tPlural('menu.tabs.yoloBadge', yoloCount),
       items: tabMenuItems(openItems),
     },
     {
@@ -613,6 +794,9 @@ function appMenuTree() {
             disabled: !projectReadmePath(),
             detail: t('menu.help.localReadme'),
           }),
+        ],
+        [
+          menuCommand(t('menu.help.about'), showAboutModal),
         ]
       ),
     },
@@ -623,12 +807,29 @@ function appMenuIsOpen() {
   return Boolean(sessionButtons?.querySelector('.app-menu.open'));
 }
 
+function topbarControlIsActive() {
+  const active = document.activeElement;
+  return Boolean(active && sessionButtons?.contains(active) && active.matches?.('select, input, .topbar-language, .app-menu-button'));
+}
+
+function flushPendingSessionButtonsRender() {
+  if (!pendingSessionButtonsRender || topbarControlIsActive()) return;
+  pendingSessionButtonsRender = false;
+  renderSessionButtons();
+}
+
 function renderSessionButtons(options = {}) {
   if (!sessionButtons) return;
   if (!options.force && appMenuIsOpen()) {
     scheduleTopbarMetricsUpdate();
     return;
   }
+  if (!options.force && topbarControlIsActive()) {
+    pendingSessionButtonsRender = true;
+    scheduleTopbarMetricsUpdate();
+    return;
+  }
+  pendingSessionButtonsRender = false;
   const openMenu = sessionButtons.querySelector('.app-menu.open');
   if (openMenu) {
     openAppMenuId = openMenu.dataset.appMenu || null;
@@ -644,20 +845,20 @@ function renderSessionButtons(options = {}) {
     event.preventDefault();
     event.dataTransfer.dropEffect = 'move';
     clearDropPreview();
-    sessionButtons.classList.add('drag-over');
+    sessionButtons.classList.add(CLS.dragOver);
   };
   sessionButtons.ondragleave = event => {
-    if (!sessionButtons.contains(event.relatedTarget)) sessionButtons.classList.remove('drag-over');
+    if (!sessionButtons.contains(event.relatedTarget)) sessionButtons.classList.remove(CLS.dragOver);
   };
   sessionButtons.ondrop = event => {
     const payload = dragPayload(event);
-    sessionButtons.classList.remove('drag-over');
+    sessionButtons.classList.remove(CLS.dragOver);
     if (!payload?.session) return;
     event.preventDefault();
     event.stopPropagation();
     removeSessionFromLayout(payload.session);
   };
-  sessionButtons.classList.remove('drag-over');
+  sessionButtons.classList.remove(CLS.dragOver);
   sessionButtons.appendChild(createAppMenuBar());
   sessionButtons.appendChild(createTopbarNav());
   sessionButtons.appendChild(createTopbarSearch());
@@ -668,6 +869,7 @@ function renderSessionButtons(options = {}) {
   sessionButtons.appendChild(createTopbarActivityStatus());
   updateTopbarActivityStatus();
   scheduleTopbarMetricsUpdate();
+  if (openAppMenuId) requestAnimationFrame(() => scheduleSharePopupLayerPublish({immediate: true}));
 }
 
 // #52: the wordmark is server-rendered (YO/LO/m/u/x); localize the YO/LO glyphs client-side so a
@@ -676,6 +878,7 @@ function renderSessionButtons(options = {}) {
 function renderBrandWordmark() {
   for (const yo of document.querySelectorAll('.brand-title .brand-yolo')) yo.textContent = t('brand.wordmark.yo');
   for (const lo of document.querySelectorAll('.brand-title .brand-lo')) lo.textContent = t('brand.wordmark.lo');
+  updateBrandTitles();
 }
 
 function createAppMenuBar() {
@@ -687,7 +890,7 @@ function createAppMenuBar() {
   return bar;
 }
 
-// DOIT.21: the editor back/forward history control lives in the GLOBAL topbar (left of the search
+// the editor back/forward history control lives in the GLOBAL topbar (left of the search
 // box), not per editor pane — it's one file-history control for the whole window, like a browser's.
 // Buttons are always visible; updateEditorNavButtons() toggles their disabled state from editorNav.
 function createTopbarNav() {
@@ -695,24 +898,24 @@ function createTopbarNav() {
   group.className = 'topbar-nav';
   group.setAttribute('role', 'group');
   group.setAttribute('aria-label', t('editor.nav.aria'));
-  const back = document.createElement('button');
-  back.type = 'button';
-  back.id = 'topbarNavBack';
-  back.className = 'topbar-nav-button';
-  back.title = t('editor.nav.back');
-  back.setAttribute('aria-label', t('editor.nav.back'));
-  back.disabled = true;
-  back.textContent = '←';
-  back.addEventListener('click', event => { event.preventDefault(); editorNavBack(); });
-  const forward = document.createElement('button');
-  forward.type = 'button';
-  forward.id = 'topbarNavForward';
-  forward.className = 'topbar-nav-button';
-  forward.title = t('editor.nav.forward');
-  forward.setAttribute('aria-label', t('editor.nav.forward'));
-  forward.disabled = true;
-  forward.textContent = '→';
-  forward.addEventListener('click', event => { event.preventDefault(); editorNavForward(); });
+  const back = makeButton({
+    id: 'topbarNavBack',
+    className: 'topbar-nav-button',
+    title: t('editor.nav.back'),
+    ariaLabel: t('editor.nav.back'),
+    disabled: true,
+    label: '←',
+    onClick: event => { event.preventDefault(); editorNavBack(); },
+  });
+  const forward = makeButton({
+    id: 'topbarNavForward',
+    className: 'topbar-nav-button',
+    title: t('editor.nav.forward'),
+    ariaLabel: t('editor.nav.forward'),
+    disabled: true,
+    label: '→',
+    onClick: event => { event.preventDefault(); editorNavForward(); },
+  });
   group.append(back, forward);
   return group;
 }
@@ -723,12 +926,12 @@ function createTopbarNav() {
 function createTopbarSearch() {
   const isMac = /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent || '');
   const mod = isMac ? 'Cmd' : 'Ctrl';
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.id = 'topbarSearch';
-  button.className = 'topbar-search';
-  button.setAttribute('aria-label', t('topbar.search.aria'));
-  button.title = t('topbar.search.title', {mod});
+  const button = makeButton({
+    id: 'topbarSearch',
+    className: 'topbar-search',
+    ariaLabel: t('topbar.search.aria'),
+    title: t('topbar.search.title', {mod}),
+  });
   const icon = document.createElement('span');
   icon.className = 'topbar-search-icon';
   icon.setAttribute('aria-hidden', 'true');
@@ -744,30 +947,41 @@ function createTopbarSearch() {
   return button;
 }
 
-// DOIT.8 Phase 1: a top-right language switcher (entry point #2). It writes the SAME general.language
+// Phase 1: a top-right language switcher (entry point #2). It writes the SAME general.language
 // setting as the Preferences picker and applies the locale optimistically (no settings-poll round-trip).
-// 'system' resolves against navigator.language; the <select> shows the raw pref so 'system' reads as Auto.
+// A native <select> cannot be mirrored to YO!share viewers, so this uses the app-menu popup owner.
 function createTopbarLanguageSwitcher() {
   const pref = String(initialSetting('general.language', 'system'));
-  const select = document.createElement('select');
-  select.className = 'topbar-language';
-  select.setAttribute('aria-label', t('language.switcher'));
-  select.title = t('language.switcher');
-  for (const choice of i18nLocaleChoices()) {
-    const option = document.createElement('option');
-    option.value = choice.value;
-    option.textContent = choice.label;
-    if (choice.value === pref) option.selected = true;
-    select.appendChild(option);
-  }
-  select.addEventListener('change', () => {
-    const value = select.value;
-    applyLocale(resolveLocalePref(value));
-    if (readOnlyMode) return;
-    saveSettingsPatch(settingPatch('general.language', value))
-      .catch(error => { statusErr(`settings save failed: ${esc(error)}`); refreshSettings({force: true}); });
+  const choices = i18nLocaleChoices();
+  const active = choices.find(choice => choice.value === pref) || choices[0] || {value: 'system', label: 'Auto'};
+  const wrapper = createAppMenu({
+    id: 'language',
+    label: active.label,
+    items: choices.map(choice => ({
+      label: choice.label,
+      detail: '',
+      checked: choice.value === pref,
+      disabled: shareViewMode,
+      action: () => {
+        const value = choice.value;
+        applyLocale(resolveLocalePref(value));
+        scheduleShareAppearancePublish();
+        if (readOnlyMode) return;
+        saveSettingsPatch(settingPatch('general.language', value))
+          .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
+      },
+    })),
   });
-  return select;
+  wrapper.classList.add('topbar-language-menu');
+  const button = wrapper.querySelector(':scope > .app-menu-button');
+  if (button) {
+    button.classList.add('topbar-language');
+    button.title = t('language.switcher');
+    button.setAttribute('aria-label', t('language.switcher'));
+    button.addEventListener('blur', flushPendingSessionButtonsRender);
+  }
+  wrapper.querySelector(':scope > .app-menu-popover')?.classList.add('topbar-language-popover');
+  return wrapper;
 }
 
 function appMenuAnchorInlineSize(popover) {
@@ -794,6 +1008,12 @@ function measureAppMenuContentWidth(popover) {
   // C14: a standalone submenu popover (measured on its own, with no .open parent) matches the base
   // `.app-submenu-popover { display:none }` rule and would measure 0 — force it visible for measurement.
   if (clone.classList?.contains('app-submenu-popover')) clone.style.display = 'block';
+  clone.querySelectorAll('.app-submenu-popover').forEach(submenu => {
+    submenu.style.display = 'block';
+    submenu.style.width = 'max-content';
+    submenu.style.minWidth = '0';
+    submenu.style.maxWidth = 'none';
+  });
   clone.querySelectorAll('.app-menu-command').forEach(command => {
     command.style.width = 'max-content';
     command.style.minWidth = '0';
@@ -901,8 +1121,80 @@ function createAppMenuItem(item) {
     node.textContent = item.label;
     return node;
   }
+  if (item.type === 'number-setting') return createAppMenuNumberSetting(item);
   if (item.type === 'submenu') return createAppSubmenu(item);
   return createAppMenuCommand(item);
+}
+
+function clampAppMenuNumberSetting(item, rawValue) {
+  const fallback = Number.isFinite(Number(item.fallback)) ? Number(item.fallback) : 0;
+  let value = Number(rawValue);
+  if (!Number.isFinite(value)) value = fallback;
+  if (Number.isFinite(Number(item.min))) value = Math.max(Number(item.min), value);
+  if (Number.isFinite(Number(item.max))) value = Math.min(Number(item.max), value);
+  return Number.isInteger(value) ? Math.round(value) : value;
+}
+
+function applyAppMenuNumberSettingPreview(path, value) {
+  if (path === 'appearance.yolo_rotate_ms') {
+    yoloRotateMs = Math.max(0, Number(value) || 0);
+    applyCssSettings();
+  }
+}
+
+function createAppMenuNumberSetting(item) {
+  const row = document.createElement('label');
+  row.className = ['app-menu-setting-row', 'app-menu-number-setting', item.className || ''].filter(Boolean).join(' ');
+  row.setAttribute('role', 'none');
+  row.dataset.settingPath = item.path || '';
+  const label = document.createElement('span');
+  label.className = 'app-menu-setting-label';
+  label.textContent = item.label || item.path || '';
+  const control = document.createElement('span');
+  control.className = 'app-menu-setting-control';
+  const input = document.createElement('input');
+  input.type = 'number';
+  input.inputMode = 'decimal';
+  input.dataset.settingPath = item.path || '';
+  input.min = String(item.min ?? '');
+  input.max = String(item.max ?? '');
+  input.step = String(item.step || 1);
+  input.value = String(clampAppMenuNumberSetting(item, numberSetting(item.path, item.fallback ?? 0)));
+  input.disabled = readOnlyMode || item.disabled === true;
+  if (item.detail) input.title = item.detail;
+  input.setAttribute('aria-label', item.label || item.path || '');
+  input.addEventListener('click', event => event.stopPropagation());
+  input.addEventListener('keydown', event => event.stopPropagation());
+  input.addEventListener('input', event => {
+    event.stopPropagation();
+    const next = clampAppMenuNumberSetting(item, input.value);
+    applyAppMenuNumberSettingPreview(item.path, next);
+  });
+  input.addEventListener('change', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    const next = clampAppMenuNumberSetting(item, input.value);
+    input.value = String(next);
+    applyAppMenuNumberSettingPreview(item.path, next);
+    saveSettingsPatch(settingPatch(item.path, next))
+      .then(() => {
+        renderPreferencesPanels();
+        statusEl.textContent = `saved ${item.path}`;
+      })
+      .catch(error => {
+        statusErr(localizedHtml('status.settingsSaveFailed', {error}));
+        refreshSettings({force: true});
+      });
+  });
+  control.appendChild(input);
+  if (item.suffix) {
+    const suffix = document.createElement('span');
+    suffix.className = 'app-menu-setting-suffix';
+    suffix.textContent = item.suffix;
+    control.appendChild(suffix);
+  }
+  row.append(label, control);
+  return row;
 }
 
 function createAppSubmenu(item) {
@@ -938,7 +1230,43 @@ function createAppSubmenu(item) {
   button.setAttribute('aria-haspopup', 'true');
   button.setAttribute('aria-expanded', 'true');
   wrapper.append(button, submenu);
+  bindAppMenuCommandMirrorActive(button, wrapper);
   return wrapper;
+}
+
+function appMenuCommandMirrorActiveStillApplies(button, owner = button) {
+  const active = document.activeElement;
+  return Boolean(
+    button?.matches?.(':hover')
+      || owner?.matches?.(':hover')
+      || (active && (button?.contains?.(active) || owner?.contains?.(active)))
+  );
+}
+
+function setAppMenuCommandMirrorActive(button, active) {
+  if (!button) return;
+  button.classList.toggle('share-mirror-active', active === true);
+  scheduleSharePopupLayerPublish({immediate: true});
+}
+
+function bindAppMenuCommandMirrorActive(button, owner = button) {
+  if (!button) return;
+  const bindKey = owner === button ? 'shareMirrorActiveBound' : 'shareMirrorOwnerActiveBound';
+  if (button.dataset[bindKey] === 'true') return;
+  button.dataset[bindKey] = 'true';
+  const activate = () => setAppMenuCommandMirrorActive(button, true);
+  const deactivate = () => {
+    requestAnimationFrame(() => {
+      if (!appMenuCommandMirrorActiveStillApplies(button, owner)) setAppMenuCommandMirrorActive(button, false);
+    });
+  };
+  const targets = owner === button ? [button] : [owner];
+  for (const target of targets.filter(Boolean)) {
+    target.addEventListener('pointerenter', activate);
+    target.addEventListener('focusin', activate);
+    target.addEventListener('pointerleave', deactivate);
+    target.addEventListener('focusout', deactivate);
+  }
 }
 
 function createAppMenuCommand(item, options = {}) {
@@ -980,6 +1308,7 @@ function createAppMenuCommand(item, options = {}) {
     });
   }
   button.addEventListener('keydown', event => handleAppMenuCommandKeydown(event, button, item, options));
+  bindAppMenuCommandMirrorActive(button);
   return button;
 }
 
@@ -993,11 +1322,11 @@ function runAppMenuCommand(item) {
         if (keepOpen) renderSessionButtons({force: true});
       })
       .catch(error => {
-        statusErr(`menu command failed: ${esc(error)}`);
+        statusErr(localizedHtml('status.menuCommandFailed', {error}));
         if (keepOpen) renderSessionButtons({force: true});
       });
   } catch (error) {
-    statusErr(`menu command failed: ${esc(error)}`);
+    statusErr(localizedHtml('status.menuCommandFailed', {error}));
     if (keepOpen) renderSessionButtons({force: true});
   }
 }
@@ -1122,6 +1451,8 @@ function openAppMenu(wrapper, options = {}) {
   openAppMenuPinned = options.pinned === true;
   openAppMenuOpenedAt = Date.now();
   wrapper.querySelector('.app-menu-button')?.setAttribute('aria-expanded', 'true');
+  scheduleSharePopupLayerPublish({immediate: true});
+  scheduleShareTopologySnapshot('popup-open');
   if (options.focusFirst) requestAnimationFrame(() => focusFirstAppMenuCommand(wrapper));
 }
 
@@ -1131,6 +1462,9 @@ function closeAppMenus(keepOpen = null) {
     menu.classList.remove('open');
     menu.querySelector('.app-menu-button')?.setAttribute('aria-expanded', 'false');
   }
+  document.querySelectorAll('.app-menu-command.share-mirror-active').forEach(command => {
+    if (!keepOpen?.contains?.(command)) command.classList.remove('share-mirror-active');
+  });
   for (const submenu of document.querySelectorAll('.app-menu-submenu-wrap.open')) {
     if (keepOpen?.contains(submenu)) continue;
     submenu.classList.remove('open');
@@ -1141,4 +1475,6 @@ function closeAppMenus(keepOpen = null) {
     openAppMenuPinned = false;
     openAppMenuOpenedAt = 0;
   }
+  scheduleSharePopupLayerPublish({immediate: true});
+  scheduleShareTopologySnapshot('popup-close');
 }

@@ -12,7 +12,6 @@ import os
 import re
 import shutil
 import stat
-import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -21,20 +20,30 @@ from .common import AUTH_CONFIG_PATH
 from .common import AUTH_COOKIE_SECRET_PATH
 from .common import CONFIG_DIR
 from .common import git
+from .common import git_bytes
+from .tmux_utils import cmd_error
 from .common import is_generated_upload_name
-from .common import run_cmd
 from . import file_index
 
 MAX_READ_BYTES = 20 * 1024 * 1024  # 20 MB cap on file read
 MAX_WRITE_BYTES = 5 * 1024 * 1024  # 5 MB cap on file write
 BINARY_SNIFF_BYTES = 8 * 1024  # bytes inspected for NUL when classifying
+# Save conflict detection compares the mtime captured when YOLOmux loaded the file with the mtime on
+# disk at save time. Some filesystems and browser/JSON round trips cannot preserve nanosecond mtimes
+# exactly: JavaScript Number cannot represent current epoch nanoseconds safely, and remote/synced
+# filesystems can report tiny timestamp drift without changing content. The tolerance is deliberately
+# small: 10 ms absorbs precision/rounding jitter like the observed 85 ns drift, while still treating
+# normal editor/tool writes as real conflicts so YOLOmux does not overwrite newer disk content.
+MTIME_NS_CONFLICT_TOLERANCE = 10_000_000
 
 TEXT_EXTENSIONS = {
-    ".rs", ".py", ".md", ".txt", ".json", ".js", ".ts", ".tsx", ".jsx",
+    ".rs", ".py", ".md", ".txt", ".json", ".jsonl", ".ndjson", ".geojson", ".ipynb", ".js", ".ts", ".tsx", ".jsx",
     ".css", ".scss", ".html", ".htm", ".xml", ".yaml", ".yml", ".toml",
     ".sh", ".bash", ".zsh", ".fish", ".c", ".h", ".cpp", ".hpp", ".cc",
-    ".go", ".rb", ".pl", ".lua", ".sql", ".env", ".cfg", ".ini", ".conf",
-    ".log", ".gitignore", ".dockerignore", ".dockerfile",
+    ".go", ".rb", ".pl", ".lua", ".sql", ".env", ".cfg", ".ini", ".conf", ".properties", ".props",
+    ".mmd", ".mermaid", ".drawio", ".dio", ".excalidraw", ".dot", ".gv", ".puml", ".plantuml",
+    ".log", ".trace", ".out", ".rst", ".adoc", ".asciidoc", ".diff", ".patch", ".srt", ".vtt",
+    ".gitignore", ".dockerignore", ".dockerfile",
 }
 
 EXTENSIONLESS_TEXT_NAMES = {
@@ -44,6 +53,7 @@ EXTENSIONLESS_TEXT_NAMES = {
 
 IMAGE_EXTENSIONS = {
     ".png": "image/png",
+    ".apng": "image/apng",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".gif": "image/gif",
@@ -51,7 +61,84 @@ IMAGE_EXTENSIONS = {
     ".svg": "image/svg+xml",
     ".ico": "image/x-icon",
     ".bmp": "image/bmp",
+    ".avif": "image/avif",
+    ".tif": "image/tiff",
+    ".tiff": "image/tiff",
+    ".heic": "image/heic",
+    ".heif": "image/heif",
+    ".pdf": "application/pdf",
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".ogg": "audio/ogg",
+    ".oga": "audio/ogg",
+    ".flac": "audio/flac",
+    ".m4a": "audio/mp4",
+    ".aac": "audio/aac",
+    ".opus": "audio/opus",
+    ".mp4": "video/mp4",
+    ".m4v": "video/mp4",
+    ".webm": "video/webm",
+    ".mov": "video/quicktime",
+    ".mkv": "video/x-matroska",
+    ".ogv": "video/ogg",
+    ".3gp": "video/3gpp",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".sqlite": "application/vnd.sqlite3",
+    ".sqlite3": "application/vnd.sqlite3",
+    ".db": "application/vnd.sqlite3",
+    ".parquet": "application/vnd.apache.parquet",
+    ".arrow": "application/vnd.apache.arrow.file",
+    ".feather": "application/vnd.apache.arrow.file",
+    ".zip": "application/zip",
+    ".tar": "application/x-tar",
+    ".gz": "application/gzip",
+    ".tgz": "application/gzip",
+    ".bz2": "application/x-bzip2",
+    ".xz": "application/x-xz",
+    ".7z": "application/x-7z-compressed",
+    ".rar": "application/vnd.rar",
 }
+
+
+def _sniff_raw_mime(data: bytes) -> str:
+    sample = data[:64]
+    if sample.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if sample.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if sample.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if sample.startswith((b"II*\x00", b"MM\x00*")):
+        return "image/tiff"
+    if sample.startswith(b"%PDF-"):
+        return "application/pdf"
+    if sample.startswith(b"ID3"):
+        return "audio/mpeg"
+    if sample.startswith(b"SQLite format 3\x00"):
+        return "application/vnd.sqlite3"
+    if sample.startswith(b"PAR1"):
+        return "application/vnd.apache.parquet"
+    if sample.startswith(b"PK\x03\x04"):
+        return "application/zip"
+    if sample.startswith(b"RIFF") and sample[8:12] == b"WEBP":
+        return "image/webp"
+    if sample.startswith(b"RIFF") and sample[8:12] == b"WAVE":
+        return "audio/wav"
+    if len(sample) >= 12 and sample[4:8] == b"ftyp":
+        brand = sample[8:12]
+        if brand in {b"avif", b"avis"}:
+            return "image/avif"
+        if brand in {b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1"}:
+            return "image/heic"
+        if brand in {b"mp41", b"mp42", b"isom", b"M4A ", b"M4V "}:
+            return "video/mp4" if brand not in {b"M4A "} else "audio/mp4"
+    return ""
+
 
 MAX_RAW_BYTES = 20 * 1024 * 1024  # 20 MB cap on raw (image) reads
 REPO_MARKERS = (".git", ".hg", ".svn", ".jj")
@@ -60,10 +147,35 @@ SEARCH_SKIP_DIRS = {
     ".ruff_cache", ".tox", ".venv", "venv", "node_modules", "__pycache__",
     "dist", "build", "target",
 }
+SEARCH_SECRET_EXCLUDE_SIGNATURE = "fs-secret-v1"
 MAX_SEARCH_DIRS = 20_000
 MAX_SEARCH_FILES = 50_000
 MAX_SEARCH_LIMIT = 2_000
+MAX_DIRECTORY_ENTRIES = 1_000
 FS_ROOTS_ENV = "YOLOMUX_FS_ROOTS"
+DEFAULT_FS_ROOTS = ("/",)
+SECRET_DIR_COMPONENTS = frozenset({
+    ".ssh",
+    ".gnupg",
+    ".aws",
+    ".azure",
+    ".kube",
+})
+SECRET_FILE_NAMES = frozenset({
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+})
+SECRET_DIR_SUFFIXES = (
+    (".config", "gh"),
+    (".config", "git"),
+)
+SECRET_FILE_SUFFIXES = (
+    (".config", "gitlab-token"),
+    (".cache", "huggingface", "token"),
+    (".docker", "config.json"),
+    (".ngc", "config"),
+)
 
 
 class FilesystemError(Exception):
@@ -100,6 +212,11 @@ def _validated_path(raw: str) -> Path:
     return path
 
 
+def _canonical_root(path: Path) -> Path:
+    """Use the real directory as a search/index root so symlink aliases don't duplicate results."""
+    return _normalized_scope_path(path)
+
+
 def _normalized_scope_path(path: Path) -> Path:
     return path.expanduser().resolve(strict=False)
 
@@ -114,7 +231,7 @@ def _path_is_within(path: Path, root: Path) -> bool:
 
 def _configured_fs_roots() -> tuple[Path, ...]:
     raw = os.environ.get(FS_ROOTS_ENV, "")
-    values = [item for item in raw.split(os.pathsep) if item.strip()] if raw else [str(Path.home()), "/tmp"]
+    values = [item for item in raw.split(os.pathsep) if item.strip()] if raw else list(DEFAULT_FS_ROOTS)
     roots: list[Path] = []
     for value in values:
         try:
@@ -156,7 +273,23 @@ def _path_is_secret(path: Path) -> bool:
     resolved = _normalized_scope_path(path)
     if any(resolved == secret for secret in _secret_exact_paths()):
         return True
-    return any(resolved == secret or _path_is_within(resolved, secret) for secret in _secret_directories())
+    if any(resolved == secret or _path_is_within(resolved, secret) for secret in _secret_directories()):
+        return True
+    parts = resolved.parts
+    if any(part in SECRET_DIR_COMPONENTS for part in parts):
+        return True
+    if resolved.name in SECRET_FILE_NAMES:
+        return True
+    for suffix in SECRET_DIR_SUFFIXES:
+        size = len(suffix)
+        for index in range(0, len(parts) - size + 1):
+            if parts[index:index + size] == suffix:
+                return True
+    for suffix in SECRET_FILE_SUFFIXES:
+        size = len(suffix)
+        if size <= len(parts) and parts[-size:] == suffix:
+            return True
+    return False
 
 
 def _ensure_path_allowed(path: Path) -> None:
@@ -268,7 +401,7 @@ def _entry_info(path: Path, name: str) -> dict[str, Any]:
         "is_symlink": stat.S_ISLNK(mode),
     }
     if stat.S_ISLNK(mode):
-        # DOIT.31: surface where the link points so the Finder row can show "name → target".
+        # surface where the link points so the Finder row can show "name → target".
         try:
             info["symlink_target"] = os.readlink(path)
         except OSError:
@@ -277,7 +410,38 @@ def _entry_info(path: Path, name: str) -> dict[str, Any]:
         info["is_repo"] = _directory_is_repo(path)
         if info["is_repo"]:
             info["repo"] = git_repo_info(path, include_status=False)
+    info.update(_physical_file_identity(path))
     return info
+
+
+def _physical_file_identity(path: Path) -> dict[str, Any]:
+    try:
+        _ensure_path_allowed(path)
+        st = path.stat()
+    except (FilesystemError, OSError):
+        return {}
+    file_id = f"{st.st_dev}:{st.st_ino}"
+    return {
+        "realpath": os.path.realpath(path),
+        "file_id": file_id,
+        "file_identity": f"id:{file_id}",
+    }
+
+
+def _visible_directory_names(path: Path) -> tuple[list[str], bool]:
+    limit = max(1, int(MAX_DIRECTORY_ENTRIES))
+    names: list[str] = []
+    truncated = False
+    with os.scandir(path) as entries:
+        for entry in entries:
+            name = entry.name
+            if _path_is_secret(path / name):
+                continue
+            if len(names) >= limit:
+                truncated = True
+                break
+            names.append(name)
+    return names, truncated
 
 
 def list_directory(raw_path: str) -> dict[str, Any]:
@@ -287,7 +451,8 @@ def list_directory(raw_path: str) -> dict[str, Any]:
     if not path.is_dir():
         raise FilesystemError(f"not a directory: {path}", status=400)
     try:
-        entries = [_entry_info(path / name, name) for name in os.listdir(path)]
+        names, truncated = _visible_directory_names(path)
+        entries = [_entry_info(path / name, name) for name in names]
     except PermissionError as exc:
         raise FilesystemError(str(exc), status=403)
     entries.sort(key=lambda entry: (entry.get("kind") != "dir", str(entry.get("name", "")).lower()))
@@ -296,6 +461,8 @@ def list_directory(raw_path: str) -> dict[str, Any]:
         "path": str(path),
         "parent": parent,
         "entries": entries,
+        "truncated": truncated,
+        "entry_limit": MAX_DIRECTORY_ENTRIES,
     }
 
 
@@ -305,6 +472,15 @@ def _fuzzy_subsequence_match(query: str, text: str) -> bool:
 
 def _compact_search_text(value: str) -> str:
     return "".join(str(value or "").lower().split())
+
+
+def _alnum_search_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _doit_search_token(value: str) -> str:
+    needle = _alnum_search_text(value)
+    return needle if needle.startswith("doit") and len(needle) >= 4 else ""
 
 
 def _fuzzy_subsequence_span(query: str, text: str) -> int | None:
@@ -334,6 +510,22 @@ def _search_token_rank(token: str, path: Path, rel: str) -> int | None:
     stem = _compact_search_text(path.stem)
     rel_text = _compact_search_text(rel)
     path_text = _compact_search_text(str(path))
+    doit_needle = _doit_search_token(token)
+    if doit_needle:
+        basename_alnum = _alnum_search_text(path.name)
+        stem_alnum = _alnum_search_text(path.stem)
+        rel_alnum = _alnum_search_text(rel)
+        if doit_needle in (stem_alnum, basename_alnum):
+            return 0
+        if stem_alnum.startswith(doit_needle) or basename_alnum.startswith(doit_needle):
+            return 10
+        if stem_alnum.find(doit_needle) >= 0:
+            return 20 + stem_alnum.find(doit_needle)
+        if basename_alnum.find(doit_needle) >= 0:
+            return 30 + basename_alnum.find(doit_needle)
+        if rel_alnum.find(doit_needle) >= 0:
+            return 90 + rel_alnum.find(doit_needle)
+        return None
 
     if needle in (stem, basename):
         return 0
@@ -398,13 +590,13 @@ def _search_file_entry(root: Path, path: Path, tokens: list[str]) -> dict[str, A
     return {
         "name": path.name,
         "path": str(path),
-        "realpath": os.path.realpath(path),
         "relative_path": rel,
         "kind": "file",
         "size": int(st.st_size),
         "mtime": int(st.st_mtime),
         "uploaded": is_generated_upload_name(path),
         "_sort_key": sort_key,
+        **_physical_file_identity(path),
     }
 
 
@@ -419,6 +611,7 @@ def _annotate_search_dedupe_fields(entry: dict[str, Any]) -> None:
             entry["size"] = int(os.stat(path_str).st_size)
         except OSError:
             entry["size"] = None
+    entry.update({key: value for key, value in _physical_file_identity(Path(path_str)).items() if key not in entry})
 
 
 def _search_full_tree(root: Path, search_root: Path, tokens: list[str], results: list[dict[str, Any]]) -> tuple[int, int, bool]:
@@ -433,7 +626,7 @@ def _search_full_tree(root: Path, search_root: Path, tokens: list[str], results:
             dirs[:] = []
             break
         dirs[:] = sorted(
-            [name for name in dirs if name not in SEARCH_SKIP_DIRS],
+            [name for name in dirs if name not in SEARCH_SKIP_DIRS and not _path_is_secret(Path(current) / name)],
             key=str.lower,
         )
         for name in sorted(files, key=str.lower):
@@ -442,7 +635,10 @@ def _search_full_tree(root: Path, search_root: Path, tokens: list[str], results:
                 truncated = True
                 dirs[:] = []
                 break
-            entry = _search_file_entry(root, Path(current) / name, tokens)
+            path = Path(current) / name
+            if _path_is_secret(path):
+                continue
+            entry = _search_file_entry(root, path, tokens)
             if entry is not None:
                 results.append(entry)
         if visited_files > MAX_SEARCH_FILES:
@@ -451,7 +647,7 @@ def _search_full_tree(root: Path, search_root: Path, tokens: list[str], results:
 
 
 def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, recursive: bool = False) -> dict[str, Any]:
-    root = _validated_path(raw_root)
+    root = _canonical_root(_validated_path(raw_root))
     if not root.exists():
         raise FilesystemError(f"path not found: {root}", status=404)
     if not root.is_dir():
@@ -464,7 +660,12 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
         # whole tree (no 20k/50k walk cap) and needs no per-query walk. Warm/refresh
         # it in the background; until it is ready we fall back to the live walk below
         # (stale-while-revalidate), so search never blocks on indexing.
-        index = file_index.ensure_index(root, SEARCH_SKIP_DIRS)
+        index = file_index.ensure_index(
+            root,
+            SEARCH_SKIP_DIRS,
+            exclude_path=_path_is_secret,
+            exclude_signature=SEARCH_SECRET_EXCLUDE_SIGNATURE,
+        )
         if tokens and index.ready:
             def _match(path_str: str, name: str, rel: str) -> dict[str, Any] | None:
                 sort_key = _search_entry_sort_key(Path(path_str), rel, tokens)
@@ -486,6 +687,7 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
                 _annotate_search_dedupe_fields(entry)
             return {
                 "root": str(root),
+                "root_realpath": os.path.realpath(root),
                 "query": str(query or ""),
                 "limit": max_results,
                 "truncated": indexed_truncated,
@@ -510,6 +712,7 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
                     _annotate_search_dedupe_fields(entry)
                 return {
                     "root": str(root),
+                    "root_realpath": os.path.realpath(root),
                     "query": "",
                     "limit": max_results,
                     "truncated": recent_truncated,
@@ -518,6 +721,7 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
                 }
             return {
                 "root": str(root),
+                "root_realpath": os.path.realpath(root),
                 "query": "",
                 "limit": max_results,
                 "truncated": False,
@@ -535,9 +739,9 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
             visited_dirs = 1
             direct_names = sorted(os.listdir(root), key=str.lower)
             for name in direct_names:
-                if name in SEARCH_SKIP_DIRS:
-                    continue
                 path = root / name
+                if name in SEARCH_SKIP_DIRS or _path_is_secret(path):
+                    continue
                 if path.is_dir() and _directory_is_repo(path):
                     child_dirs, child_files, child_truncated = _search_full_tree(root, path, tokens, results)
                     visited_dirs += child_dirs
@@ -567,6 +771,7 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
         entry.pop("_sort_key", None)
     return {
         "root": str(root),
+        "root_realpath": os.path.realpath(root),
         "query": str(query or ""),
         "limit": max_results,
         "truncated": truncated,
@@ -578,10 +783,15 @@ def index_status(raw_root: str) -> dict[str, Any]:
     """Warm the persistent quick-open index for a root (kick the background build if missing/stale)
     and report its build state, so the client can eagerly index and show a stable indexing/indexed
     badge instead of paying a cold live walk on the first query."""
-    root = _validated_path(raw_root)
+    root = _canonical_root(_validated_path(raw_root))
     if not root.is_dir():
         raise FilesystemError(f"not a directory: {root}", status=400)
-    index = file_index.ensure_index(root, SEARCH_SKIP_DIRS)
+    index = file_index.ensure_index(
+        root,
+        SEARCH_SKIP_DIRS,
+        exclude_path=_path_is_secret,
+        exclude_signature=SEARCH_SECRET_EXCLUDE_SIGNATURE,
+    )
     with index.lock:
         ready = bool(index.ready)
         building = bool(index.building)
@@ -593,6 +803,7 @@ def index_status(raw_root: str) -> dict[str, Any]:
     state = "ready" if ready else ("building" if building else "missing")
     return {
         "root": str(root),
+        "root_realpath": os.path.realpath(root),
         "building": building,
         "ready": ready,
         "count": count,
@@ -605,7 +816,7 @@ def index_status(raw_root: str) -> dict[str, Any]:
 
 def unindex_root(raw_root: str) -> dict[str, Any]:
     """Drop the persistent quick-open index for a root (cancel any build, free memory + on-disk)."""
-    root = _validated_path(raw_root)
+    root = _canonical_root(_validated_path(raw_root))
     file_index.unindex(root)
     return {"root": str(root), "ok": True}
 
@@ -624,6 +835,46 @@ def git_tracks_path(path: Path) -> bool:
     # is enough; returncode is non-zero both when untracked AND when not in a repo.
     result = git(["ls-files", "--error-unmatch", "--", path.name], cwd=str(path.parent), timeout=1.5)
     return result.returncode == 0
+
+
+def git_file_history(path: Path, limit: int = 60) -> list[dict[str, Any]]:
+    if path.is_dir():
+        return []
+    repo_root = git_root_for_path(path)
+    if not repo_root:
+        return []
+    repo = Path(repo_root)
+    try:
+        rel_path = path.relative_to(repo).as_posix()
+    except ValueError:
+        return []
+    result = git([
+        "log",
+        "--follow",
+        f"--max-count={max(1, min(int(limit), 100))}",
+        "--format=%H%x1f%h%x1f%s%x1f%ct%x1f%an",
+        "--",
+        rel_path,
+    ], cwd=str(repo), timeout=3.0)
+    if result.returncode != 0:
+        return []
+    history: list[dict[str, Any]] = []
+    for line in (result.stdout or "").splitlines():
+        full, short, subject, date, author = (line.split("\x1f") + ["", "", "", "", ""])[:5]
+        if not full:
+            continue
+        try:
+            date_value = int(date)
+        except ValueError:
+            date_value = 0
+        history.append({
+            "ref": full,
+            "short": short or full[:9],
+            "subject": subject,
+            "date": date_value,
+            "author": author,
+        })
+    return history
 
 
 def read_file(raw_path: str) -> dict[str, Any]:
@@ -648,6 +899,9 @@ def read_file(raw_path: str) -> dict[str, Any]:
         content = raw.decode("utf-8")
     except UnicodeDecodeError:
         content = raw.decode("utf-8", errors="replace")
+    git_root = git_root_for_path(path)
+    git_tracked = git_tracks_path(path) if git_root else False
+    git_history = git_file_history(path) if git_tracked else []
     return {
         "path": str(path),
         "size": int(size),
@@ -656,7 +910,11 @@ def read_file(raw_path: str) -> dict[str, Any]:
         "content": content,
         "extension": path.suffix.lower(),
         "is_text_extension": path.suffix.lower() in TEXT_EXTENSIONS,
-        "git_tracked": git_tracks_path(path),
+        "git_root": git_root,
+        "git_tracked": git_tracked,
+        "git_history": git_history,
+        "git_has_history": len(git_history) > 1,
+        **_physical_file_identity(path),
     }
 
 
@@ -674,7 +932,7 @@ def write_file(raw_path: str, content: str, expected_mtime: int | None = None) -
         actual_stat = path.stat()
         actual = int(actual_stat.st_mtime_ns)
         actual_legacy = int(actual_stat.st_mtime)
-        if expected_mtime not in {actual, actual_legacy}:
+        if not _mtime_matches_expected(int(expected_mtime), actual, actual_legacy):
             raise FilesystemError(
                 f"file changed on disk (expected mtime {expected_mtime}, got {actual})",
                 status=409,
@@ -689,7 +947,14 @@ def write_file(raw_path: str, content: str, expected_mtime: int | None = None) -
         "size": len(data),
         "mtime": int(file_stat.st_mtime),
         "mtime_ns": int(file_stat.st_mtime_ns),
+        **_physical_file_identity(path),
     }
+
+
+def _mtime_matches_expected(expected: int, actual_ns: int, actual_legacy: int) -> bool:
+    if expected == actual_legacy:
+        return True
+    return abs(expected - actual_ns) <= MTIME_NS_CONFLICT_TOLERANCE
 
 
 def _validated_child_name(raw_name: str) -> str:
@@ -718,6 +983,25 @@ def delete_path(raw_path: str) -> dict[str, Any]:
     return {"path": str(path), "deleted": True, "kind": kind}
 
 
+def _git_mv_if_tracked(src: Path, dst: Path) -> bool:
+    """If `src` is a git-TRACKED file, move it with `git mv` (preserves history, updates the index) and
+    return True. Returns False for untracked files / paths outside any repo / cross-repo moves / git errors,
+    so the caller falls back to a plain rename. dst is assumed to be in the same repo (a sibling rename)."""
+    repo_root = git_root_for_path(src)
+    if not repo_root:
+        return False
+    repo = Path(repo_root)
+    try:
+        rel_src = src.relative_to(repo).as_posix()
+        rel_dst = dst.relative_to(repo).as_posix()
+    except ValueError:
+        return False
+    tracked = git(["ls-files", "--error-unmatch", "--", rel_src], cwd=str(repo), timeout=2.0)
+    if tracked.returncode != 0:
+        return False   # untracked inside a repo -> plain rename
+    return git(["mv", "--", rel_src, rel_dst], cwd=str(repo), timeout=5.0).returncode == 0
+
+
 def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
     path = _validated_path(raw_path)
     _ensure_not_configured_root(path, "rename")
@@ -727,8 +1011,10 @@ def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
     target = path.with_name(name)
     if target.exists() or target.is_symlink():
         raise FilesystemError(f"target already exists: {target}", status=409)
-    with _fs_io_errors():
-        path.rename(target)
+    # A tracked file moves with `git mv` (history-preserving, index-aware); everything else uses a plain rename.
+    if not _git_mv_if_tracked(path, target):
+        with _fs_io_errors():
+            path.rename(target)
     return {"path": str(target), "old_path": str(path), "name": name}
 
 
@@ -746,6 +1032,20 @@ def path_info(raw_path: str) -> dict[str, Any]:
     if not path.exists() and not path.is_symlink():
         raise FilesystemError(f"path not found: {path}", status=404)
     kind = "dir" if path.is_dir() else "file"
+    size: int | None = None
+    mtime: int | None = None
+    mtime_ns: int | None = None
+    preview_mime = ""
+    if kind == "file":
+        try:
+            file_stat = path.stat()
+            size = int(file_stat.st_size)
+            mtime = int(file_stat.st_mtime)
+            mtime_ns = int(file_stat.st_mtime_ns)
+            with path.open("rb") as fh:
+                preview_mime = _sniff_raw_mime(fh.read(512)) or IMAGE_EXTENSIONS.get(path.suffix.lower(), "")
+        except OSError:
+            preview_mime = IMAGE_EXTENSIONS.get(path.suffix.lower(), "")
     repo_root = git_root_for_path(path)
     relative_path = ""
     repo_info: dict[str, Any] | None = None
@@ -760,19 +1060,19 @@ def path_info(raw_path: str) -> dict[str, Any]:
         "path": str(path),
         "name": path.name,
         "kind": kind,
+        "size": size,
+        "mtime": mtime,
+        "mtime_ns": mtime_ns,
+        "preview_mime": preview_mime,
         "repo_root": repo_root,
         "relative_path": relative_path,
         "repo": repo_info,
+        **_physical_file_identity(path),
     }
 
 
 def _git_blob_text(repo: Path, ref: str, rel_path: str, label: str) -> tuple[str, str]:
-    result = subprocess.run(
-        ["git", "-C", str(repo), "show", f"{ref}:{rel_path}"],
-        capture_output=True,
-        timeout=5.0,
-        check=False,
-    )
+    result = git_bytes(["show", f"{ref}:{rel_path}"], cwd=str(repo), timeout=5.0)
     if result.returncode != 0:
         return "", ""
     if len(result.stdout) > MAX_READ_BYTES:
@@ -852,7 +1152,7 @@ def diff_file(raw_path: str, from_ref: str | None = None, to_ref: str | None = N
     working = ""
     working_error = ""
     if diff_to == "current" and tracked.returncode != 0:
-        result = run_cmd(["git", "-C", str(repo), "diff", "--no-index", "--", "/dev/null", str(path)], timeout=5.0)
+        result = git(["diff", "--no-index", "--", "/dev/null", str(path)], cwd=str(repo), timeout=5.0)
         untracked = True
     else:
         if diff_to == "current":
@@ -865,7 +1165,7 @@ def diff_file(raw_path: str, from_ref: str | None = None, to_ref: str | None = N
             working, working_error = _git_blob_text(repo, diff_to, rel_path, "working")
         untracked = False
     if result.returncode not in {0, 1}:
-        message = (result.stderr or result.stdout or "git diff failed").strip()
+        message = cmd_error(result, "git diff failed")
         raise FilesystemError(message, status=500)
     diff = result.stdout or ""
     if len(diff.encode("utf-8", errors="replace")) > MAX_READ_BYTES:
@@ -886,7 +1186,7 @@ def diff_file(raw_path: str, from_ref: str | None = None, to_ref: str | None = N
     }
 
 
-# DOIT.26: inline git blame for the editor. PR number is extracted from the commit summary the same
+# inline git blame for the editor. PR number is extracted from the commit summary the same
 # way the metadata code does (`(#1234)`). Cached per (path, HEAD sha, file mtime, ref) — blame is the
 # expensive call, and it only changes when the file or HEAD moves.
 _BLAME_PR_RE = re.compile(r"\(#(\d+)\)")
@@ -1011,5 +1311,5 @@ def read_raw(raw_path: str) -> tuple[bytes, str]:
     with _fs_io_errors():
         with path.open("rb") as fh:
             data = fh.read(MAX_RAW_BYTES + 1)
-    mime = IMAGE_EXTENSIONS.get(path.suffix.lower(), "application/octet-stream")
+    mime = _sniff_raw_mime(data) or IMAGE_EXTENSIONS.get(path.suffix.lower(), "application/octet-stream")
     return data, mime

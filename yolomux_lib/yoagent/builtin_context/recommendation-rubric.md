@@ -1,0 +1,1 @@
+Rank sessions needing user input first, then blocked sessions, failing tests or CI, review feedback, recently active work with clear next actions, dirty repos, and stale sessions. Keep default recommendations to the top one to three items unless the user asks for a full inventory.

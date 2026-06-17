@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>HTML Preview Renderer Sample</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 24px; }
+      table { border-collapse: collapse; }
+      th, td { border: 1px solid #94a3b8; padding: 6px 10px; }
+    </style>
+  </head>
+  <body>
+    <h1>HTML Preview Renderer Sample</h1>
+    <p>This file should render inside the sandboxed HTML Preview.</p>
+    <table>
+      <tr><th>Feature</th><th>Expected behavior</th></tr>
+      <tr><td>Sandbox</td><td>Preview stays isolated</td></tr>
+      <tr><td>Script</td><td>YOLOmux shows the disabled-JavaScript notice</td></tr>
+    </table>
+    <script>document.body.dataset.scriptRan = "true";</script>
+  </body>
+</html>

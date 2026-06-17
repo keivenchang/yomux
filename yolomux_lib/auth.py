@@ -22,6 +22,8 @@ GUEST_AUTH_USERNAME = "guest"
 GUEST_AUTH_PASSWORD = "guest"
 PASSWORD_HASH_PREFIX = "pbkdf2_sha256"
 PASSWORD_HASH_ITERATIONS = 210_000
+TEST_AUTH_BYPASS_ENV = "YOLOMUX_TEST_AUTH_BYPASS"
+TEST_AUTH_BYPASS_TRUE_VALUES = {"1", "true", "yes", "on"}
 
 
 @dataclass(frozen=True)
@@ -222,6 +224,10 @@ def current_auth_users() -> tuple[AuthUser, ...]:
     return initialize_auth_config(AUTH_CONFIG_PATH)
 
 
+def test_auth_bypass_enabled() -> bool:
+    return os.environ.get(TEST_AUTH_BYPASS_ENV, "").strip().lower() in TEST_AUTH_BYPASS_TRUE_VALUES
+
+
 def legacy_placeholder_auth_active(users: tuple[AuthUser, ...]) -> bool:
     return len(users) == 1 and users[0].username == PLACEHOLDER_AUTH_USERNAME and users[0].password == PLACEHOLDER_AUTH_PASSWORD
 
@@ -257,6 +263,8 @@ def hash_plaintext_auth_users(users: tuple[AuthUser, ...]) -> tuple[AuthUser, ..
 
 
 def auth_setup_required() -> bool:
+    if test_auth_bypass_enabled():
+        return False
     users = current_auth_users()
     return not users or legacy_placeholder_auth_active(users)
 
