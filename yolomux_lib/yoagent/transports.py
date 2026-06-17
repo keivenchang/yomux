@@ -27,6 +27,7 @@ from typing import Any
 from ..common import PROJECT_ROOT
 from ..common import YOLOMUX_VERSION
 from ..common import codex_exec_argv
+from ..common import codex_runtime_env
 from ..tmux_utils import cmd_error
 from ..tmux_utils import tmux_paste_text
 from ..transcripts import codex_event_text
@@ -302,7 +303,7 @@ class CodexExecTransport(AgentTransport):
                     args,
                     input=text,
                     cwd=cwd,
-                    env={**os.environ, "TERM": "xterm-256color", "NO_COLOR": "1"},
+                    env=codex_runtime_env(),
                     text=True,
                     capture_output=True,
                     timeout=timeout,
@@ -686,7 +687,7 @@ class CodexAppServerSession:
         self.process = self.popen(
             args,
             cwd=cwd,
-            env={**os.environ, "TERM": "xterm-256color", "NO_COLOR": "1"},
+            env=codex_runtime_env(),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -883,7 +884,7 @@ class CodexMcpServerTransport(CodexAppServerTransport):
             process = popen(
                 args,
                 cwd=cwd,
-                env={**os.environ, "TERM": "xterm-256color", "NO_COLOR": "1"},
+                env=codex_runtime_env(),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

@@ -9,7 +9,10 @@ general.language) can leave a *persistent* shared config dir mutated across runs
 """
 
 import os
+import socket
 import tempfile
+
+import pytest
 
 # Each process needs its OWN config/state dir. Under pytest-xdist, worker subprocesses INHERIT the
 # parent's environment, so a plain setdefault makes every parallel worker share ONE YOLOMUX_CONFIG_DIR
@@ -46,6 +49,33 @@ SLOWEST_FIRST_TESTS = (
 
 SLOWEST_FIRST_RANK = {nodeid: index for index, nodeid in enumerate(SLOWEST_FIRST_TESTS)}
 
+_SOCKET_AVAILABILITY: tuple[bool, str] | None = None
+
+
+def local_socket_capability() -> tuple[bool, str]:
+    global _SOCKET_AVAILABILITY
+    if _SOCKET_AVAILABILITY is not None:
+        return _SOCKET_AVAILABILITY
+    try:
+        bind_probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            bind_probe.bind(("127.0.0.1", 0))
+        finally:
+            bind_probe.close()
+        left, right = socket.socketpair()
+        try:
+            right.sendall(b"Y")
+            if left.recv(1) != b"Y":
+                raise OSError("socketpair probe returned unexpected payload")
+        finally:
+            left.close()
+            right.close()
+    except (OSError, PermissionError) as exc:
+        _SOCKET_AVAILABILITY = (False, f"local sockets are blocked in this sandbox: {exc}")
+        return _SOCKET_AVAILABILITY
+    _SOCKET_AVAILABILITY = (True, "")
+    return _SOCKET_AVAILABILITY
+
 
 def pytest_collection_modifyitems(config, items):
     indexed = list(enumerate(items))
@@ -60,3 +90,11 @@ def pytest_collection_modifyitems(config, items):
 
     indexed.sort(key=sort_key)
     items[:] = [item for _original_index, item in indexed]
+
+
+def pytest_runtest_setup(item):
+    if item.get_closest_marker("socket") is None:
+        return
+    socket_ok, reason = local_socket_capability()
+    if not socket_ok:
+        pytest.skip(reason)

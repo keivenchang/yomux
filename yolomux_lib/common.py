@@ -38,7 +38,7 @@ DEFAULT_ROWS = 36
 MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
-YOLOMUX_VERSION = "0.4.5"
+YOLOMUX_VERSION = "0.4.7"
 UPDATE_NOTIFY_LEVELS: tuple[str, ...] = ("major", "minor", "patch", "none")
 SUMMARY_LOOKBACK_SECONDS = 3600
 SUMMARY_MAX_PROMPT_CHARS = 100_000
@@ -49,6 +49,7 @@ SUMMARY_CODEX_SERVICE_TIER = os.environ.get("YOLOMUX_SUMMARY_SERVICE_TIER", "fas
 YOAGENT_CLAUDE_SUMMARY_MODEL = os.environ.get("YOLOMUX_YOAGENT_CLAUDE_SUMMARY_MODEL", "claude-haiku-4-5")
 CONFIG_DIR = Path(os.environ.get("YOLOMUX_CONFIG_DIR", str(Path.home() / ".config" / "yolomux")))
 STATE_DIR = Path(os.environ.get("YOLOMUX_STATE_DIR", str(Path.home() / ".local" / "state" / "yolomux")))
+YOAGENT_CODEX_HOME = Path(os.environ.get("YOLOMUX_CODEX_HOME", str(STATE_DIR / "codex-home")))
 STATE_PATH = CONFIG_DIR / "state.json"
 EVENT_LOG_PATH = STATE_DIR / "events.jsonl"
 ACTIVITY_PATH = STATE_DIR / "activity.json"
@@ -118,6 +119,19 @@ def heal_server_path() -> str:
     if additions:
         os.environ["PATH"] = os.pathsep.join([*additions, *current_entries])
     return os.environ.get("PATH", "")
+
+
+def codex_runtime_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
+    """Build a Codex subprocess environment with a writable state home."""
+    env = dict(base_env or os.environ)
+    heal_server_path()
+    codex_home = Path(env.get("YOLOMUX_CODEX_HOME", str(YOAGENT_CODEX_HOME))).expanduser()
+    codex_home.mkdir(parents=True, exist_ok=True)
+    env["PATH"] = os.environ.get("PATH", env.get("PATH", ""))
+    env["CODEX_HOME"] = str(codex_home)
+    env["TERM"] = "xterm-256color"
+    env["NO_COLOR"] = "1"
+    return env
 
 
 def warn_unavailable_agent_commands_once(agents: tuple[str, ...] = ("claude", "codex")) -> None:

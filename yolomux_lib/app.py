@@ -75,6 +75,7 @@ from .common import UPLOAD_MAX_FILES
 from .common import UPLOAD_MAX_BYTES
 from .common import as_dict
 from .common import codex_exec_argv
+from .common import codex_runtime_env
 from .common import next_numbered_session_name
 from .common import tail_file_lines
 from .common import truncate_text
@@ -5466,14 +5467,14 @@ class TmuxWebtermApp:
             service_tier=SUMMARY_CODEX_SERVICE_TIER,
         )
         try:
-            completed = subprocess.run(
-                args,
-                input=prompt,
-                cwd=str(PROJECT_ROOT),
-                env={**os.environ, "TERM": "xterm-256color", "NO_COLOR": "1"},
-                text=True,
-                capture_output=True,
-                timeout=YOAGENT_CLI_TIMEOUT_SECONDS,
+                completed = subprocess.run(
+                    args,
+                    input=prompt,
+                    cwd=str(PROJECT_ROOT),
+                    env=codex_runtime_env(),
+                    text=True,
+                    capture_output=True,
+                    timeout=YOAGENT_CLI_TIMEOUT_SECONDS,
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:

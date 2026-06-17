@@ -671,6 +671,7 @@ def test_auto_approve_roster_uses_live_pane_working_signal(monkeypatch):
     monkeypatch.setattr(app_module, "hybrid_approval_prompt_state", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("roster must not run the prompt-detection fan-out")))
     monkeypatch.setattr(app_module, "auto_approve_lock_owner", lambda _session: None)
     webapp = app_module.TmuxWebtermApp(["5", "6"])
+    monkeypatch.setattr(webapp, "auto_approve_capture_allowed_for_target", lambda _target: True)
     discover_calls.clear()
     try:
         payload, status = webapp.auto_approve_status()
@@ -3887,6 +3888,9 @@ def test_yoagent_codex_backend_reuses_persistent_app_server(monkeypatch):
     assert calls[0][0][:4] == ["codex", "app-server", "--listen", "stdio://"]
     assert 'model_reasoning_effort="low"' in calls[0][0]
     assert 'service_tier="fast"' in calls[0][0]
+    assert calls[0][1]["env"]["CODEX_HOME"].endswith("codex-home")
+    assert calls[0][1]["env"]["TERM"] == "xterm-256color"
+    assert calls[0][1]["env"]["NO_COLOR"] == "1"
     assert first_status["transport"] == "codex-app-server"
     assert first_status["persistent"] is True
     assert first_status["process_started"] is True
@@ -4158,9 +4162,11 @@ def test_codex_event_session_id_extracts_common_shapes():
 def test_yoagent_codex_cli_persists_then_resumes(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["5"])
     calls = []
+    envs = []
 
     def fake_run(args, input, cwd, env, text, capture_output, timeout, check):
         calls.append(args)
+        envs.append(env)
         stdout = "\n".join([
             json.dumps({"type": "thread.started", "thread_id": "codex-session"}),
             json.dumps({"type": "agent_message", "text": "answer"}),
@@ -4195,6 +4201,9 @@ def test_yoagent_codex_cli_persists_then_resumes(monkeypatch):
     # the resume call must NOT pass them — passing them raised "unexpected argument '--sandbox'".
     assert "--sandbox" not in calls[1]
     assert "--cd" not in calls[1]
+    assert envs[0]["CODEX_HOME"].endswith("codex-home")
+    assert envs[0]["TERM"] == "xterm-256color"
+    assert envs[0]["NO_COLOR"] == "1"
 
 
 def test_watched_prs_payload_shapes_result_and_logs_truncation_once(monkeypatch):

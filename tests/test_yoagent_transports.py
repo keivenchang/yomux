@@ -112,6 +112,9 @@ def test_codex_exec_transport_uses_output_last_message(monkeypatch):
     assert "-o" in args
     assert kwargs["input"] == "summarize the diff"
     assert kwargs["cwd"] == "/repo/app"
+    assert kwargs["env"]["CODEX_HOME"].endswith("codex-home")
+    assert kwargs["env"]["TERM"] == "xterm-256color"
+    assert kwargs["env"]["NO_COLOR"] == "1"
 
 
 def test_codex_exec_transport_reports_timeout(monkeypatch):
@@ -458,6 +461,9 @@ def test_codex_app_server_transport_runs_stdio_json_rpc_until_turn_completed(mon
     assert result.text == "Final app-server answer."
     assert calls[0][0] == ["codex", "app-server", "--listen", "stdio://"]
     assert calls[0][1]["cwd"] == "/repo/app"
+    assert calls[0][1]["env"]["CODEX_HOME"].endswith("codex-home")
+    assert calls[0][1]["env"]["TERM"] == "xterm-256color"
+    assert calls[0][1]["env"]["NO_COLOR"] == "1"
     assert fake_process.terminated is True
     assert [message["method"] for message in fake_process.stdin.messages] == ["initialize", "initialized", "thread/start", "turn/start"]
     assert fake_process.stdin.messages[2]["params"]["cwd"] == "/repo/app"
