@@ -12,6 +12,7 @@ import secrets
 import shutil
 import shlex
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -2056,15 +2057,28 @@ class TmuxWebtermApp:
                            else "updated; restart the server manually (no restart hook for this checkout)"}
 
     def _spawn_self_restart(self) -> bool:
-        # Only auto-restart the prod deployment (~/yolomux via its restart script). A dev worktree must
-        # never restart prod, so non-prod checkouts report "restart manually". The 1s delay lets the
-        # HTTP response flush before the script kills this process; the browser SSE auto-reconnects.
-        script = Path.home() / ".local" / "bin" / "yolomux-restart-prod.sh"
+        # Only auto-restart the prod deployment (~/yolomux). A dev worktree must never restart prod,
+        # so non-prod checkouts report "restart manually". Keep this portable: no systemd dependency
+        # and no broad pkill pattern. The helper kills only this server PID, then relaunches the same
+        # Python entrypoint with the same argv under nohup.
         prod_root = (Path.home() / "yolomux").resolve()
-        if common.PROJECT_ROOT.resolve() != prod_root or not script.exists():
+        if common.PROJECT_ROOT.resolve() != prod_root:
             return False
         try:
-            subprocess.Popen(["setsid", "bash", "-c", f"sleep 1; exec {shlex.quote(str(script))}"],
+            restart_argv = [sys.executable or "python3", *sys.argv]
+            restart_cmd = (
+                "sleep 1; "
+                f"kill {os.getpid()} 2>/dev/null || true; "
+                "sleep 2; "
+                f"kill -9 {os.getpid()} 2>/dev/null || true; "
+                f"cd {shlex.quote(str(common.PROJECT_ROOT))} && "
+                "nohup env PYTHONUNBUFFERED=1 "
+                f"{' '.join(shlex.quote(arg) for arg in restart_argv)} "
+                ">> /tmp/yolomux-self-update-restart.log 2>&1 < /dev/null &"
+            )
+            subprocess.Popen([
+                "nohup", "bash", "-lc", restart_cmd,
+            ],
                              cwd=str(common.PROJECT_ROOT), stdin=subprocess.DEVNULL,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
             return True

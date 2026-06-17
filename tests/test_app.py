@@ -4292,6 +4292,38 @@ def test_self_update_dryrun_is_noop_with_plan():
     assert any("git pull" in step for step in result["plan"])
 
 
+def test_self_update_restart_uses_portable_nohup_helper(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    prod_root = home / "yolomux"
+    captured = {}
+
+    def fake_popen(args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return SimpleNamespace()
+
+    monkeypatch.setattr(app_module.Path, "home", lambda: home)
+    monkeypatch.setattr(app_module.common, "PROJECT_ROOT", prod_root)
+    monkeypatch.setattr(app_module.subprocess, "Popen", fake_popen)
+    webapp = app_module.TmuxWebtermApp.__new__(app_module.TmuxWebtermApp)
+    assert webapp._spawn_self_restart() is True
+
+    args = captured["args"]
+    assert args[:3] == ["nohup", "bash", "-lc"]
+    helper_cmd = args[-1]
+    assert "kill " in helper_cmd
+    assert "sleep 2" in helper_cmd
+    assert "kill -9 " in helper_cmd
+    assert f"cd {prod_root}" in helper_cmd
+    assert "nohup env PYTHONUNBUFFERED=1" in helper_cmd
+    assert "/tmp/yolomux-self-update-restart.log" in helper_cmd
+    assert "systemd-run" not in helper_cmd
+    assert "systemctl" not in helper_cmd
+    assert "pkill" not in helper_cmd
+    assert "setsid" not in args
+    assert captured["kwargs"]["cwd"] == str(prod_root)
+
+
 def _fake_update_git(remote_version="0.3.25", remote_sha="remoteabcdef1"):
     def fake_git(args, cwd, timeout=3.0):
         assert cwd == "/repo"
