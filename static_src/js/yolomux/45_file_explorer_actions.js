@@ -1546,6 +1546,10 @@ function openFilesSetAndShow(path, state, options = {}) {
   return showFileEditorPaneForPath(path, {...options, item});
 }
 
+function openFileStateHasLoadedEditorPayload(state) {
+  return Boolean(state?.kind && state.loading !== true && state.kind !== 'file');
+}
+
 function refreshOpenFileDiffDecorations(path) {
   for (const panel of fileEditorPanelsForPath(path)) {
     if (panel._cmView) panel._cmView.dispatch({});
@@ -1732,7 +1736,7 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
   const defaultItem = kind === 'image' && imageOpenUsesSharedViewer(options)
     ? imageViewerItemFor(fullPath)
     : fileEditorItemFor(fullPath);
-  const alreadyOpen = Boolean(openFiles.get(fullPath)?.kind);
+  const alreadyOpen = openFileStateHasLoadedEditorPayload(openFiles.get(fullPath));
   const item = identityDedupe && alreadyOpen
     ? primaryEditorItemForPath(fullPath, options.item || defaultItem)
     : (options.item || defaultItem);

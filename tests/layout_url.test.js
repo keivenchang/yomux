@@ -13370,6 +13370,52 @@ const suiteWatchdog = setTimeout(() => {
 
   {
     const api = loadYolomux('', ['1']);
+    const firstPath = '/repo/app/src/first.py';
+    const secondPath = '/repo/app/src/second.py';
+    const localBasename = path => String(path || '').split('/').pop() || '';
+    api.setFetchForTest(url => {
+      const text = String(url);
+      const path = decodeURIComponent((text.match(/path=([^&]+)/) || [])[1] || '');
+      if (text.startsWith('/api/fs/read')) {
+        return Promise.resolve(jsonResponse({
+          path,
+          content: `print("${localBasename(path)}")\n`,
+          size: 16,
+          mtime: 1,
+          mtime_ns: 1,
+          realpath: path,
+          file_id: path.endsWith('first.py') ? 'dev:10:ino:20' : 'dev:10:ino:21',
+          git_root: '/repo/app',
+          git_tracked: true,
+          git_history: [{ref: 'a'}, {ref: 'b'}],
+          git_has_history: true,
+        }));
+      }
+      if (text.startsWith('/api/fs/diff')) {
+        return Promise.resolve(jsonResponse({
+          repo: '/repo/app',
+          relative_path: path.replace('/repo/app/', ''),
+          diff: `@@ -1 +1 @@\n-print("old")\n+print("${localBasename(path)}")\n`,
+          original: 'print("old")\n',
+          working: `print("${localBasename(path)}")\n`,
+        }));
+      }
+      return Promise.resolve(jsonResponse({ok: true}));
+    });
+
+    await api.openChangedFileInDiffForTest(firstPath, '1', 'M', '/repo/app', {userInitiated: true});
+    const firstItem = api.fileEditorDiffPreviewItemFor(firstPath);
+    assert.deepStrictEqual(canonical(api.filePanelItemsForPath(firstPath)), [firstItem], 'first Differ row uses the reusable Differ preview tab');
+    await api.openChangedFileInDiffForTest(secondPath, '1', 'M', '/repo/app', {userInitiated: true});
+    const secondItem = api.fileEditorDiffPreviewItemFor(secondPath);
+
+    assert.deepStrictEqual(canonical(api.filePanelItemsForPath(firstPath)), [], 'second Differ row removes the old preview owner');
+    assert.deepStrictEqual(canonical(api.filePanelItemsForPath(secondPath)), [secondItem], 'second Differ row owns the preview tab under the new path');
+    assert.equal(api.editorViewModeFor(secondPath, secondItem), 'diff', 'second Differ row opens the next file in Diff mode, not Edit mode');
+  }
+
+  {
+    const api = loadYolomux('', ['1']);
     const path = '/repo/app/src/main.py';
     const existingItem = api.fileEditorItemFor(path);
     api.setOpenFileOwner(path, existingItem);
