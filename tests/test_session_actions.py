@@ -170,6 +170,8 @@ def test_tmux_copy_selection_reads_fresh_tmux_buffer(monkeypatch):
             return FakeTmuxResult(stdout=f"{buffer_signature.pop(0)}\n")
         if args == ["send-keys", "-t", "%42", "-X", "copy-selection-no-clear"]:
             return FakeTmuxResult()
+        if args == ["send-keys", "-t", "%42", "-X", "cancel"]:
+            return FakeTmuxResult()
         if args == ["save-buffer", "-"]:
             return FakeTmuxResult(stdout="fresh text\n")
         raise AssertionError(f"unexpected tmux call: {args}")
@@ -188,14 +190,17 @@ def test_tmux_copy_selection_reads_fresh_tmux_buffer(monkeypatch):
         ["send-keys", "-t", "%42", "-X", "copy-selection-no-clear"],
         ["display-message", "-p", "-t", "%42", "#{buffer_created}:#{buffer_size}:#{buffer_sample}"],
         ["save-buffer", "-"],
+        ["send-keys", "-t", "%42", "-X", "cancel"],
     ]
 
 
 def test_tmux_copy_selection_does_not_return_stale_buffer(monkeypatch):
     app = make_app(["1"])
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+    calls = []
 
     def fake_tmux(args, timeout=5.0):
+        calls.append(args)
         if args[:3] == ["display-message", "-p", "-t"] and args[-1] == "#{pane_in_mode}":
             return FakeTmuxResult(stdout="1\n")
         if args[:3] == ["display-message", "-p", "-t"] and args[-1] == "#{buffer_created}:#{buffer_size}:#{buffer_sample}":
@@ -214,3 +219,4 @@ def test_tmux_copy_selection_does_not_return_stale_buffer(monkeypatch):
     assert payload["copied"] is False
     assert payload["text"] == ""
     assert payload["error"] == "no tmux selection copied"
+    assert calls[-1] == ["send-keys", "-t", "1:", "-X", "cancel"]

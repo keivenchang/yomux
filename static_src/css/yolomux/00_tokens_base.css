@@ -344,6 +344,10 @@
   --lt-code-inline: #a40e26;
   --lt-code-inline-bg: #fff1d6;
   --lt-code-inline-border: #d8a657;
+  --lt-code-block-bg: #f3f4f6;
+  --lt-code-block-border: #e4e7ec;
+  --lt-code-block-text: #1f2328;
+  --lt-muted-strong: #475569;
   --lt-code-invalid: #82071e;
   --lt-code-control: var(--lt-code-keyword);
   --tab-line-height: 1;

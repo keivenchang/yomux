@@ -643,8 +643,8 @@ body.app-vw-lte-760 .file-editor-conflict-compare {
 }
 .file-editor-theme-panel.theme-vanilla {
   color: var(--lt-text);
-  background: #ffffff;
-  border-color: #cbd5e1;
+  background: var(--lt-editor-bg);
+  border-color: var(--lt-line);
   box-shadow: inset 0 0 0 1px rgb(var(--overlay-slate-rgb) / 0.12);
 }
 .file-editor-wrap.active,
@@ -804,8 +804,8 @@ body.editor-theme-light .file-editor-image {
    `body.editor-theme-light .file-editor-content` so a dark editor keeps a dark block. */
 body.theme-light .yoagent-message-body pre,
 body.theme-light .summary-preview pre {
-  color: var(--pc-control-fg);
-  background: #f3f6fa;
+  color: var(--lt-code-block-text);
+  background: var(--lt-code-block-bg);
 }
 .markdown-body pre code {
   color: inherit;
@@ -2238,8 +2238,8 @@ body.editor-theme-light .file-editor-content {
 }
 .file-editor-theme-panel.theme-vanilla {
   color: var(--lt-text);
-  background: #ffffff;
-  border-color: #cbd5e1;
+  background: var(--lt-editor-bg);
+  border-color: var(--lt-line);
   box-shadow: inset 0 0 0 1px rgb(var(--overlay-slate-rgb) / 0.12);
 }
 .file-editor-find-panel:disabled {

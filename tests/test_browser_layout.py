@@ -1386,7 +1386,7 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
         "versionCommitTime": "test",
         "settingsPayload": {
             "settings": settings,
-            "defaults": {"appearance": {"inactive_pane_opacity": 60}},
+            "defaults": settings_module.default_settings(),
             "mtime_ns": 0,
         },
         "yoloRulesPayload": {
@@ -2388,6 +2388,54 @@ def test_generated_app_boots_live_runtime_without_browser_errors(browser, tmp_pa
     assert metrics["paneTabCount"] >= 1
     assert metrics["panelVisible"]
     assert metrics["terminalText"] == "fake terminal"
+
+
+def test_terminal_visible_selection_cleanup_clears_browser_and_xterm_state(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof clearTerminalVisibleSelection === 'function'
+              && typeof terminalVisibleSelectionState === 'function'
+              && terminals.get('1')?.term
+              && document.querySelector('#term-1 .xterm');
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const container = document.getElementById('term-1');
+        const xterm = container.querySelector('.xterm');
+        xterm.textContent = 'browser selected terminal text';
+        const range = document.createRange();
+        range.selectNodeContents(xterm);
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+        const item = terminals.get('1');
+        window.__xtermClearCount = 0;
+        item.term.getSelection = () => 'xterm selected terminal text';
+        item.term.clearSelection = () => { window.__xtermClearCount += 1; };
+        rememberTerminalAppClipboardText('1', 'osc52 terminal text');
+        const before = terminalVisibleSelectionState('1', item.term, container);
+        const result = clearTerminalVisibleSelection('1', item.term, container, 'selenium-test');
+        const after = terminalVisibleSelectionState('1', item.term, container);
+        return {
+          before,
+          result,
+          after,
+          browserSelection: window.getSelection().toString(),
+          xtermClearCount: window.__xtermClearCount,
+        };
+        """
+    )
+    assert metrics["before"]["browserChars"] == len("browser selected terminal text")
+    assert metrics["before"]["xtermChars"] == len("xterm selected terminal text")
+    assert metrics["before"]["recentOsc52Chars"] == len("osc52 terminal text")
+    assert metrics["result"]["browserCleared"] is True
+    assert metrics["browserSelection"] == ""
+    assert metrics["xtermClearCount"] == 1
+    assert metrics["after"]["browserChars"] == 0
 
 
 def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp_path):

@@ -6485,6 +6485,9 @@ class TmuxWebtermApp:
         info = sessions.get(session)
         target = info.selected_pane.target if info and info.selected_pane else tmux_session_target(session)
 
+        def cancel_copy_mode_selection() -> None:
+            tmux(["send-keys", "-t", target, "-X", "cancel"], timeout=1.0)
+
         mode = tmux(["display-message", "-p", "-t", target, "#{pane_in_mode}"], timeout=1.0)
         if mode.returncode != 0:
             error = cmd_error(mode, "tmux pane mode check failed")
@@ -6511,6 +6514,7 @@ class TmuxWebtermApp:
             error = cmd_error(after, "tmux buffer check failed")
             return {"session": session, "target": target, "error": error, "errors": errors}, HTTPStatus.INTERNAL_SERVER_ERROR
         if after.stdout.strip() == before_signature:
+            cancel_copy_mode_selection()
             return {
                 "session": session,
                 "target": target,
@@ -6522,10 +6526,12 @@ class TmuxWebtermApp:
 
         buffer_result = tmux(["save-buffer", "-"], timeout=1.0)
         if buffer_result.returncode != 0:
+            cancel_copy_mode_selection()
             error = cmd_error(buffer_result, "tmux save buffer failed")
             return {"session": session, "target": target, "error": error, "errors": errors}, HTTPStatus.INTERNAL_SERVER_ERROR
 
         text = buffer_result.stdout
+        cancel_copy_mode_selection()
         return {
             "session": session,
             "target": target,

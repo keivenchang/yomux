@@ -2032,13 +2032,17 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
   if (agent.innerHTML !== agentHtml) agent.innerHTML = agentHtml;
   setHiddenIfChanged(agent, !agentHtml);
   row.classList.toggle('has-agent', Boolean(agentHtml));
-  const dirCountText = options.dirCountText || '';
-  if (dirCount.textContent !== dirCountText) dirCount.textContent = dirCountText;
-  setHiddenIfChanged(dirCount, !dirCountText);
-  const diffParts = options.diffParts || [];
-  const diffHtml = diffParts.map(p => `<span class="changes-diff-${esc(p.kind)}">${esc(p.text)}</span>`).join(' ');
-  if (diff.innerHTML !== diffHtml) diff.innerHTML = diffHtml;
-  setHiddenIfChanged(diff, !diffParts.length);
+  if (options.preserveDirCount !== true) {
+    const dirCountText = options.dirCountText || '';
+    if (dirCount.textContent !== dirCountText) dirCount.textContent = dirCountText;
+    setHiddenIfChanged(dirCount, !dirCountText);
+  }
+  if (options.preserveDiff !== true) {
+    const diffParts = options.diffParts || [];
+    const diffHtml = diffParts.map(p => `<span class="changes-diff-${esc(p.kind)}">${esc(p.text)}</span>`).join(' ');
+    if (diff.innerHTML !== diffHtml) diff.innerHTML = diffHtml;
+    setHiddenIfChanged(diff, !diffParts.length);
+  }
   const statusText = options.gitStatus || '';
   setClassNameIfChanged(status, ['file-tree-git-status', fileTreeGitStatusBadgeClass(statusText)].filter(Boolean).join(' '));
   if (status.textContent !== statusText) status.textContent = statusText;
@@ -2051,15 +2055,73 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
     status.removeAttribute('aria-label');
   }
   setHiddenIfChanged(status, !statusText);
-  const dateText = options.dateText || '';
-  if (date.textContent !== dateText) date.textContent = dateText;
-  setHiddenIfChanged(date, !dateText);
+  if (options.preserveDate !== true) {
+    const dateText = options.dateText || '';
+    if (date.textContent !== dateText) date.textContent = dateText;
+    setHiddenIfChanged(date, !dateText);
+  }
 }
 
 function fileTreeDirCountText(count) {
   const normalized = Number(count || 0);
   if (!normalized) return '';
   return String(normalized);
+}
+
+function fileTreeRowDerivedState(fullPath, entry, options = {}) {
+  const differMode = options.differMode === true;
+  const indexedDirectory = !differMode && entry.kind === 'dir' && fileExplorerDirectoryIsIndexed(fullPath);
+  const changedAncestor = !differMode && entry.kind === 'dir' && options.changedAncestorStats instanceof Map
+    ? (options.changedAncestorStats.get(fullPath) || null)
+    : null;
+  const changedFile = entry.kind === 'file'
+    ? (options.sessionFilesMap ? (options.sessionFilesMap.get(fullPath) || null) : fileTreeChangedFile(fullPath))
+    : null;
+  const changedFileStatus = changedFile ? sessionFileDisplayStatus(changedFile) : '';
+  const gitStatus = entry.kind === 'file'
+    ? (options.sessionFilesMap ? changedFileStatus : fileTreeGitStatus(fullPath))
+    : (differMode ? '' : fileExplorerIndexBadgeText(fullPath));
+  const displayName = differMode ? {text: entry.name, html: null} : fileTreeDisplayParts(fullPath, entry);
+  const dirCountText = entry.kind === 'dir'
+    ? (differMode
+      ? fileTreeDirCountText(countChangedFilesInDir(fullPath, options.entriesByDir, options.sessionFilesMap))
+      : fileTreeDirCountText(changedAncestor?.count))
+    : '';
+  const directoryDiffParts = entry.kind === 'dir'
+    ? (entry.is_repo === true ? fileTreeRepoDiffParts(fullPath) : sessionFileDiffText(changedAncestor || {}))
+    : [];
+  const icon = options.iconText != null
+    ? String(options.iconText)
+    : (entry.kind === 'dir' ? (options.expanded === true ? '▾' : '▸') : (entry.kind === 'file' ? fileIconFor(entry.name) : '·'));
+  return {
+    changedAncestor,
+    changedFile,
+    changedFileStatus,
+    gitClass: fileTreeGitStatusClass(gitStatus),
+    repoNonMain: entry.kind === 'dir' && entry.is_repo === true && fileTreeRepoBranchIsNonMain(fullPath),
+    icon,
+    displayName,
+    contentOptions: {
+      gitStatus,
+      gitStatusTitle: entry.kind === 'dir' && !differMode ? fileExplorerIndexBadgeTitle(fullPath) : gitStatusBadgeTitle(gitStatus),
+      iconClass: [fileIconClassFor(entry.name, entry.kind), indexedDirectory ? 'file-icon-dir-indexed' : ''].filter(Boolean).join(' '),
+      nameHtml: differMode ? null : displayName.html,
+      dateText: options.dateText || '',
+      diffParts: changedFile ? sessionFileDiffText(changedFile) : directoryDiffParts,
+      agentHtml: changedFile ? changeFileAgentsHtml(changedFile) : (changedAncestor ? changeFileAgentsHtml(changedAncestor) : ''),
+      dirCountText,
+      preserveDirCount: options.preserveDirCount === true,
+      preserveDate: options.preserveDate === true,
+      preserveDiff: options.preserveDiff === true,
+    },
+  };
+}
+
+function applyFileTreeRowDerivedState(row, state) {
+  applyGitStatusRowClass(row, state.gitClass);
+  row.classList.toggle('repo-non-main', state.repoNonMain === true);
+  row.classList.toggle('file-tree-row--changed-ancestor', Boolean(state.changedAncestor?.count));
+  updateFileTreeRowContents(row, state.icon, state.displayName.text, state.contentOptions);
 }
 
 function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
@@ -2099,7 +2161,6 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   row.classList.toggle('expanded', expanded);
   row.classList.toggle('collapsed', entry.kind === 'dir' && !expanded);
   row.classList.toggle('is-repo', entry.kind === 'dir' && entry.is_repo === true);
-  row.classList.toggle('repo-non-main', entry.kind === 'dir' && entry.is_repo === true && fileTreeRepoBranchIsNonMain(fullPath));
   row.classList.toggle('indexed-directory', indexedDirectory);
   row.classList.toggle('indexed-descendant-directory', indexedDescendantDirectory);
   const sessionHighlightClass = fileExplorerSessionHighlightClassForPath(fullPath, entry.kind, {
@@ -2107,24 +2168,17 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
     sessionHighlightSets: options.sessionHighlightSets,
   });
   applySessionHighlightRowClass(row, sessionHighlightClass);
-  const changedAncestor = !differMode && entry.kind === 'dir' && options.changedAncestorStats instanceof Map
-    ? (options.changedAncestorStats.get(fullPath) || null)
-    : null;
-  row.classList.toggle('file-tree-row--changed-ancestor', Boolean(changedAncestor?.count));
   // flag symlinks so the icon gets an arrow-badge overlay (target-type icon is kept); a broken
   // link gets a red badge + struck-through name. The backend sets is_symlink + kind=symlink-broken.
   row.classList.toggle('is-symlink', entry.is_symlink === true);
   row.classList.toggle('symlink-broken', entry.kind === 'symlink-broken');
-  const changedFile = entry.kind === 'file'
-    ? (options.sessionFilesMap ? (options.sessionFilesMap.get(fullPath) || null) : fileTreeChangedFile(fullPath))
-    : null;
-  const changedFileStatus = changedFile ? sessionFileDisplayStatus(changedFile) : '';
-  const gitStatus = entry.kind === 'file'
-    ? (options.sessionFilesMap ? changedFileStatus : fileTreeGitStatus(fullPath))
-    : (differMode ? '' : fileExplorerIndexBadgeText(fullPath));
-  const gitStatusTitle = entry.kind === 'dir' && !differMode ? fileExplorerIndexBadgeTitle(fullPath) : gitStatusBadgeTitle(gitStatus);
-  const gitClass = fileTreeGitStatusClass(gitStatus);
-  applyGitStatusRowClass(row, gitClass);
+  const derivedState = fileTreeRowDerivedState(fullPath, entry, {
+    ...options,
+    expanded,
+    dateText: fileTreeMtimeText(entry),
+  });
+  applyFileTreeRowDerivedState(row, derivedState);
+  const {changedFile, changedFileStatus} = derivedState;
   if (!differMode && entry.kind === 'dir' && entry.is_repo === true) {
     row.removeAttribute('title');
     row.onmouseenter = event => { fileTreeRepoPopoverCursor = {x: event.clientX, y: event.clientY}; scheduleRepoRowHoverPopover(row, fullPath); };
@@ -2154,16 +2208,6 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
     if (currentFile || currentDirectoryRow) row.setAttribute('aria-current', 'true');
     else row.removeAttribute('aria-current');
   }
-  const icon = entry.kind === 'dir' ? (expanded ? '▾' : '▸') : (entry.kind === 'file' ? fileIconFor(entry.name) : '·');
-  const displayName = differMode ? {text: entry.name, html: null} : fileTreeDisplayParts(fullPath, entry);
-  const dirCountText = entry.kind === 'dir'
-    ? (differMode
-      ? fileTreeDirCountText(countChangedFilesInDir(fullPath, options.entriesByDir, options.sessionFilesMap))
-      : fileTreeDirCountText(changedAncestor?.count))
-    : '';
-  const directoryDiffParts = entry.kind === 'dir'
-    ? (entry.is_repo === true ? fileTreeRepoDiffParts(fullPath) : sessionFileDiffText(changedAncestor || {}))
-    : [];
   // Set data attributes so Differ event delegation (click/drag/contextmenu) can find these rows
   setRowDataset(row, 'openChangeFile', changedFile?.abs_path || '');
   setRowDataset(row, 'openChangeSession', changedFile?.abs_path ? (changedFile.session || '') : '');
@@ -2181,16 +2225,6 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
     setRowDataset(row, 'changesFolderToggle', '');
     setRowDataset(row, 'openChangeDirectory', '');
   }
-  updateFileTreeRowContents(row, icon, displayName.text, {
-    gitStatus,
-    gitStatusTitle,
-    iconClass: [fileIconClassFor(entry.name, entry.kind), indexedDirectory ? 'file-icon-dir-indexed' : ''].filter(Boolean).join(' '),
-    nameHtml: differMode ? null : displayName.html,
-    dateText: fileTreeMtimeText(entry),
-    diffParts: changedFile ? sessionFileDiffText(changedFile) : directoryDiffParts,
-    agentHtml: changedFile ? changeFileAgentsHtml(changedFile) : (changedAncestor ? changeFileAgentsHtml(changedAncestor) : ''),
-    dirCountText,
-  });
   if (entry.kind === 'file' && previewMediaKindForPath(entry.name) === 'image' && Number(entry.size || 0) <= MAX_FILE_PREVIEW_BYTES) {
     bindFileImagePreview(row, fullPath, entry);
   }
@@ -2422,53 +2456,23 @@ function updateFileTreeGitStatusRows() {
   // git-status/name refresh would rewrite the label to the path basename (s_1/w_0/r_00000) and clobber
   // the Tabber's own render. The Tabber owns its rows via updateTabberRow / refreshTabberPanels.
   document.querySelectorAll('.file-tree-row[data-path]:not([data-tabber-type])').forEach(row => {
-    const gitStatus = row.dataset.kind === 'file' ? fileTreeGitStatus(row.dataset.path) : '';
-    const gitClass = fileTreeGitStatusClass(gitStatus);
-    applyGitStatusRowClass(row, gitClass);
-    const status = row.querySelector(':scope > .file-tree-git-status');
-    if (status) {
-      setClassNameIfChanged(status, ['file-tree-git-status', fileTreeGitStatusBadgeClass(gitStatus)].filter(Boolean).join(' '));
-      status.textContent = gitStatus;
-      const title = gitStatusBadgeTitle(gitStatus);
-      if (title) {
-        status.setAttribute('title', title);
-        status.setAttribute('aria-label', title);
-      } else {
-        status.removeAttribute('title');
-        status.removeAttribute('aria-label');
-      }
-      status.hidden = !gitStatus;
-    }
+    const fullPath = row.dataset.path || '';
     const entry = {
       kind: row.dataset.kind,
-      name: row.dataset.name || basenameOf(row.dataset.path),
+      name: row.dataset.name || basenameOf(fullPath),
       is_repo: row.dataset.isRepo === 'true',
       is_symlink: row.dataset.isSymlink === 'true',
       symlink_target: row.dataset.symlinkTarget || '',
     };
-    row.classList.toggle('repo-non-main', entry.kind === 'dir' && entry.is_repo === true && fileTreeRepoBranchIsNonMain(row.dataset.path));
-    const changedAncestor = entry.kind === 'dir' ? (changedAncestorStats.get(row.dataset.path) || null) : null;
-    row.classList.toggle('file-tree-row--changed-ancestor', Boolean(changedAncestor?.count));
-    const changedFile = entry.kind === 'file' ? fileTreeChangedFile(row.dataset.path) : null;
-    const agentHtml = changedFile ? changeFileAgentsHtml(changedFile) : (changedAncestor ? changeFileAgentsHtml(changedAncestor) : '');
-    const agent = row.querySelector(':scope > .file-tree-agent');
-    if (agent) {
-      if (agent.innerHTML !== agentHtml) agent.innerHTML = agentHtml;
-      agent.hidden = !agentHtml;
-    }
-    row.classList.toggle('has-agent', Boolean(agentHtml));
-    const dirCount = row.querySelector(':scope > .file-tree-dir-count');
-    if (dirCount) {
-      const dirCountText = fileTreeDirCountText(changedAncestor?.count);
-      dirCount.textContent = dirCountText;
-      dirCount.hidden = !dirCountText;
-    }
-    const name = row.querySelector(':scope > .file-tree-name');
-    const nextName = fileTreeDisplayParts(row.dataset.path, entry);
-    if (name && name.textContent !== nextName.text) {
-      if (nextName.html) name.innerHTML = nextName.html;
-      if (!name.children?.length) name.textContent = nextName.text;
-    }
+    const inDiffer = Boolean(row.closest?.('.file-explorer-changes-panel') || row.dataset.changesFolderToggle || row.dataset.openChangeFile || row.dataset.openChangeDirectory);
+    applyFileTreeRowDerivedState(row, fileTreeRowDerivedState(fullPath, entry, {
+      changedAncestorStats,
+      differMode: inDiffer,
+      iconText: row.querySelector(':scope > .file-tree-icon')?.textContent || '',
+      preserveDate: true,
+      preserveDiff: true,
+      preserveDirCount: inDiffer,
+    }));
   });
   updateFileExplorerSessionHighlightRows();
 }

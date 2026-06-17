@@ -3,6 +3,30 @@ const fs = require('fs');
 const UI_PINS = JSON.parse(fs.readFileSync('tests/ui_pins.json', 'utf8'));  // shared color pins (see test_ui_pins.py)
 const vm = require('vm');
 const FILE_EXPLORER_OPEN_INTENT_STORAGE_KEY_FOR_TEST = 'yolomux.fileExplorerOpen.v1';
+const DEFAULT_TEST_SETTINGS = Object.freeze({
+  appearance: Object.freeze({
+    red_reminder_ms: 1550,
+    yolo_rotate_ms: 20000,
+  }),
+  file_explorer: Object.freeze({
+    index_refresh_seconds: 120,
+    new_entry_highlight_ms: 60000,
+  }),
+  notifications: Object.freeze({
+    toast_duration_ms: 10000,
+  }),
+  performance: Object.freeze({
+    latency_refresh_ms: 3000,
+    event_log_refresh_ms: 5000,
+    tabber_activity_refresh_ms: 15000,
+    popover_show_delay_ms: 1000,
+    popover_hide_delay_ms: 300,
+    menu_hover_open_delay_ms: 800,
+    tab_popover_show_delay_ms: 1000,
+    tab_popover_follow_delay_ms: 120,
+    remote_resize_delay_ms: 220,
+  }),
+});
 
 class TestClassList {
   constructor() {
@@ -290,6 +314,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     // Seed the en catalog the way production inlines bootstrap.strings, so localized labels (the brand
     // tab labels infoTabLabel()/yoagentTabLabel() etc.) resolve synchronously at first render under en.
     strings: {en: JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))},
+    settingsPayload: {defaults: DEFAULT_TEST_SETTINGS, settings: {}, mtime_ns: 1},
     ...bootstrapOverrides,
   };
   const bootstrap = JSON.stringify(bootstrapPayload);
@@ -651,17 +676,31 @@ globalThis.__layoutTestApi = {
   installTerminalOsc52BridgeForTest: installTerminalOsc52Bridge,
   rememberTerminalAppClipboardTextForTest: rememberTerminalAppClipboardText,
   terminalContextMenuSelectionForTest: terminalContextMenuSelection,
+  terminalVisibleSelectionStateForTest: terminalVisibleSelectionState,
+  clearTerminalVisibleSelectionForTest: clearTerminalVisibleSelection,
   setFetchForTest(fn) { globalThis.fetch = fn; },
   clipboardTextForTest() { return globalThis.__clipboardText; },
   clearClipboardTextForTest() { globalThis.__clipboardText = ''; },
   setBrowserSelectionForTest(text, anchorNode = null, focusNode = anchorNode) {
-    const selection = {toString: () => String(text || ''), anchorNode, focusNode};
+    globalThis.__browserSelectionClearCount = 0;
+    let value = String(text || '');
+    const selection = {
+      toString: () => value,
+      anchorNode,
+      focusNode,
+      removeAllRanges() {
+        value = '';
+        globalThis.__browserSelectionClearCount += 1;
+      },
+    };
     globalThis.getSelection = () => selection;
     window.getSelection = globalThis.getSelection;
   },
+  browserSelectionClearCountForTest() { return globalThis.__browserSelectionClearCount || 0; },
   clearBrowserSelectionForTest() {
     delete globalThis.getSelection;
     delete window.getSelection;
+    globalThis.__browserSelectionClearCount = 0;
   },
   bindClipboardPasteForTest: bindClipboardPaste,
   dataTransferHasImagePayloadForTest: dataTransferHasImagePayload,
@@ -1311,7 +1350,7 @@ globalThis.__layoutTestApi = {
   },
   updateFileTreeGitStatusRowsForTest(rows) {
     const previousQuerySelectorAll = document.querySelectorAll;
-    document.querySelectorAll = selector => selector === '.file-tree-row[data-path]' ? rows : previousQuerySelectorAll(selector);
+    document.querySelectorAll = selector => selector === '.file-tree-row[data-path]:not([data-tabber-type])' || selector === '.file-tree-row[data-path]' ? rows : previousQuerySelectorAll(selector);
     try {
       updateFileTreeGitStatusRows();
     } finally {
@@ -3107,6 +3146,10 @@ test('t@2306', () => {
   assert.equal(/function renderChangesPanels[\s\S]*renderChangesRoot\(/.test(source), false, 'standalone Changes render loop is removed');
   assert.ok(/function renderFileExplorerChangesPanel[\s\S]*renderChangesRoot\(/.test(source), 'Finder diff panel / embedded Differ refreshes through the shared incremental render root');
   assert.ok(source.includes('function updateFileTreeRowContents('), 'Finder row text/icon updates are localized');
+  assert.ok(source.includes('function fileTreeRowDerivedState(') && source.includes('function applyFileTreeRowDerivedState('), 'R3: Finder derived row state has one builder and one applier');
+  assert.ok(/function updateFileTreeRow\([\s\S]*fileTreeRowDerivedState\(fullPath, entry,[\s\S]*applyFileTreeRowDerivedState\(row, derivedState\)/.test(source), 'R3: full Finder/Differ render applies the shared derived row state');
+  assert.ok(/function updateFileTreeGitStatusRows\(\)[\s\S]*applyFileTreeRowDerivedState\(row, fileTreeRowDerivedState\(fullPath, entry,/.test(source), 'R3: lightweight Finder refresh applies the shared derived row state');
+  assert.equal(/const gitStatus = row\.dataset\.kind === 'file' \? fileTreeGitStatus/.test(source), false, 'R3: lightweight Finder refresh no longer has its own git-status derivation fork');
   const updateStart = source.indexOf('function updateFileTreeRowContents(');
   const updateEnd = source.indexOf('function updateFileTreeRow(', updateStart);
   assert.ok(updateStart > 0 && updateEnd > updateStart, 'could not locate updateFileTreeRowContents body');
@@ -5326,7 +5369,9 @@ test('t@2560', () => {
   assert.ok(diffBundle.includes("path: 'performance.server_event_poll_ms'") && diffBundle.includes('displayDecimals: 3'), 'server file-change poll stores milliseconds but displays 0.850-style seconds');
   assert.ok(diffBundle.includes("path: 'performance.server_background_file_event_poll_ms'") && diffBundle.includes('displayDecimals: 3'), 'server background file-change poll stores milliseconds but displays 5.000-style seconds');
   assert.ok(diffBundle.includes("path: 'performance.server_directory_event_poll_ms'") && diffBundle.includes('displayDecimals: 3'), 'server directory-change poll stores milliseconds but displays 0.850-style seconds');
-  assert.ok(diffBundle.includes("path: 'performance.tabber_activity_refresh_ms'") && diffBundle.includes("initialSetting('performance.tabber_activity_refresh_ms', 15000)"), 'Tabber activity refresh is backed by the Performance preference');
+  assert.ok(diffBundle.includes("path: 'performance.tabber_activity_refresh_ms'") && diffBundle.includes("initialSetting('performance.tabber_activity_refresh_ms')"), 'Tabber activity refresh is backed by the Performance preference through settings defaults');
+  assert.equal(diffBundle.includes("initialSetting('performance.tabber_activity_refresh_ms', 15000)"), false, 'Tabber activity refresh does not duplicate the server default in bootstrap JS');
+  assert.equal(diffBundle.includes("numberSetting('performance.tabber_activity_refresh_ms', 15000)"), false, 'Tabber activity refresh does not duplicate the server default on settings reload');
   assert.ok(preferencesHtml.includes('data-setting-path="uploads.max_bytes"'), 'preferences expose the upload size cap');
   api.setClientSettingsPatchForTest({uploads: {max_bytes: 64 * 1024 * 1024}});
   const largeUploadPreferencesHtml = api.preferencesPanelHtmlForTest('upload', []);
@@ -7090,9 +7135,10 @@ test('t@2560', () => {
   assert.ok(source.includes('function copyTextToClipboardViaCopyEvent(text)'), 'terminal shortcut copy has a synchronous copy-event clipboard path');
   // the sync-then-async clipboard chain lives in ONE shared parent (writeTerminalTextToClipboard)
   // used by both the shortcut copy and the OSC 52 bridge.
-  assert.ok(/function writeTerminalTextToClipboard\(text, label = 'copied'\)[\s\S]*?copyTextToClipboardViaCopyEvent\(text\)[\s\S]*?copyTextToClipboard\(text\)/.test(source), 'terminal clipboard writes use the synchronous copy-event path before async clipboard fallback (shared parent)');
-  assert.ok(/function copyTerminalSelectionFromShortcut\(session, term, options = \{\}, container = null\)[\s\S]*?writeTerminalTextToClipboard\(text/.test(source), 'terminal shortcut copy routes through the shared clipboard-write chain');
-  assert.ok(source.includes('async function copyTmuxSelectionToClipboard(session)'), 'terminal tmux copy-mode selection can bridge to the browser clipboard');
+  assert.ok(/const TERMINAL_COPY_ACTIONS = Object\.freeze\(\{[\s\S]*selected:[\s\S]*selectedDedent:[\s\S]*tmux:[\s\S]*osc52:/.test(source), 'terminal copy menu/status/cleanup choices are described by one action table');
+  assert.ok(/function writeTerminalTextToClipboard\(text, options = \{\}\)[\s\S]*?terminalCopyStatusText\(action[\s\S]*?copyTextToClipboardViaCopyEvent\(text\)[\s\S]*?copyTextToClipboard\(text\)/.test(source), 'terminal clipboard writes use the synchronous copy-event path before async clipboard fallback (shared parent)');
+  assert.ok(/function copyTerminalSelectionFromShortcut\(session, term, options = \{\}, container = null\)[\s\S]*?writeTerminalTextToClipboard\(text, \{[\s\S]*?afterCopy: \(\) => clearTerminalVisibleSelection\(session, term, container, action\.reason\)/.test(source), 'terminal shortcut copy routes through the shared clipboard-write chain and visible-selection cleanup');
+  assert.ok(source.includes('async function copyTmuxSelectionToClipboard(session, term = null, container = null)'), 'terminal tmux copy-mode selection can bridge to the browser clipboard and clear visible terminal selection');
   assert.ok(source.includes("apiFetchJson(`/api/tmux-copy-selection?session=${encodeURIComponent(session)}`, {method: 'POST'})"), 'tmux copy bridge calls the authenticated tmux-copy endpoint');
   assert.ok(source.includes("new ClipboardItem({'text/plain': textBlob})"), 'tmux copy bridge starts deferred clipboard writes during the shortcut activation');
   assert.ok(/function terminalSelectedText\(term, container = null\)[\s\S]*browserSelectionTextInside\(container\)/.test(source), 'terminal copy shortcuts prefer visible browser selection before tmux copy-mode fallback');
@@ -7100,10 +7146,44 @@ test('t@2560', () => {
   assert.ok(/function handleFocusedTerminalCopyShortcut\(event\)[\s\S]*handleTerminalCopyShortcutKeydown\(session, item\.term, item\.container, event\)[\s\S]*stopImmediatePropagation/.test(source), 'focused-terminal copy guard runs at window capture before terminal internals');
   assert.ok(/function handleGlobalShortcutKeydown\(event\) \{[\s\S]*?if \(handleFocusedTerminalCopyShortcut\(event\)\) return/.test(source), 'global shortcuts first give focused terminal copy handling a chance');
   assert.ok(source.includes('const isTmuxCopyShortcut = event.altKey'), 'tmux copy-mode bridge is on a separate terminal shortcut');
-  assert.ok(source.includes("appendContextMenuButton(menu, t('terminal.copyTmuxSelection'), () => copyTmuxSelectionToClipboard(session), closeTerminalContextMenu)"), 'terminal context menu exposes explicit tmux copy');
-  assert.ok(/if \(!selected\) \{[\s\S]*?if \(isCmdC\) \{[\s\S]*?event\.preventDefault\(\);[\s\S]*?statusEl\.textContent = isMacPlatform\(\)[\s\S]*?nothing selected — Option-drag selects while Claude\/tmux owns the mouse[\s\S]*?return true;[\s\S]*?return false; \/\/ no selection: let Ctrl-C through as SIGINT/.test(source), 'Cmd-C without browser selection is swallowed (with a how-to-select hint) while Ctrl-C still falls through as SIGINT');
+  assert.ok(source.includes('appendContextMenuButton(menu, terminalCopyActionLabel(TERMINAL_COPY_ACTIONS.tmux), () => copyTmuxSelectionToClipboard(session, term, container), closeTerminalContextMenu)'), 'terminal context menu exposes explicit tmux copy through the shared action descriptor');
+  assert.ok(/function withTerminalVisibleSelectionCleanup\(session, term, container, reason, handler\)[\s\S]*clearTerminalVisibleSelection\(session, term, container, reason\)/.test(source), 'terminal menu actions share one cleanup wrapper after consuming selected text');
+  assert.ok(/function copyTerminalSelectionToClipboardEvent\(session, term, event, container = null\)[\s\S]*event\.clipboardData\.setData\('text\/plain', selected\)[\s\S]*clearTerminalVisibleSelection\(session, term, container, TERMINAL_COPY_ACTIONS\.selected\.reason\)/.test(source), 'terminal DOM copy-event path also clears visible terminal selection after capturing clipboard text');
+  assert.ok(/function appendUrlContextMenuItems\(menu, href, closeMenu, options = \{\}\)[\s\S]*consumeTerminalSelection\(options\.session, options\.term, options\.container, reason, handler\)[\s\S]*appendContextMenuButton\(menu, t\('contextmenu\.openUrl'\)[\s\S]*appendContextMenuButton\(menu, t\('contextmenu\.copyUrl'\)/.test(source), 'terminal URL menu open/copy actions route through visible-selection cleanup');
+  assert.ok(/if \(!selected\) \{[\s\S]*?if \(isCmdC\) \{[\s\S]*?event\.preventDefault\(\);[\s\S]*?statusEl\.textContent = isMacPlatform\(\)[\s\S]*?t\('terminal\.copyHintMac'\)[\s\S]*?t\('terminal\.copyHintPc'\)[\s\S]*?return true;[\s\S]*?return false; \/\/ no selection: let Ctrl-C through as SIGINT/.test(source), 'Cmd-C without browser selection is swallowed with localized select/copy hints while Ctrl-C still falls through as SIGINT');
+  assert.equal(source.includes("'Copy without indent'"), false, 'terminal copy menu labels are locale keys, not raw strings in the bundle');
+  assert.equal(source.includes('copied ${text.length} chars'), false, 'terminal copied-count status text is locale/plural-key driven');
   assert.equal(source.includes('else copyTmuxSelectionToClipboard(session);'), false, 'Cmd-C no longer falls back to tmux copy-mode');
   assert.ok(api.keyboardShortcutsHtml().includes('Copy tmux selection'), 'keyboard shortcuts list includes the explicit tmux copy shortcut');
+  const cleanupContainer = new TestElement('terminal-cleanup-container');
+  const cleanupAnchor = new TestElement('terminal-cleanup-anchor');
+  cleanupContainer.appendChild(cleanupAnchor);
+  let contextMenuClearCount = 0;
+  api.setBrowserSelectionForTest('browser selected text', cleanupAnchor);
+  api.rememberTerminalAppClipboardTextForTest('1', 'osc52 selected text');
+  const cleanupResult = api.clearTerminalVisibleSelectionForTest('1', {
+    getSelection: () => 'xterm selected text',
+    clearSelection() { contextMenuClearCount += 1; },
+  }, cleanupContainer, 'unit-test');
+  assert.equal(cleanupResult.before.xtermChars, 'xterm selected text'.length, 'visible-selection classifier records xterm selection length');
+  assert.equal(cleanupResult.before.browserChars, 'browser selected text'.length, 'visible-selection classifier records browser selection length inside the terminal container');
+  assert.equal(cleanupResult.before.recentOsc52Chars, 'osc52 selected text'.length, 'visible-selection classifier records recent OSC 52 fallback length');
+  assert.equal(cleanupResult.browserCleared, true, 'terminal selection cleanup clears browser selection only when it touches the terminal container');
+  assert.equal(contextMenuClearCount, 1, 'terminal selection cleanup clears xterm selection');
+  assert.equal(api.browserSelectionClearCountForTest(), 1, 'browser removeAllRanges is called exactly once for terminal-owned selection');
+  api.clearBrowserSelectionForTest();
+  const terminalContextMenuNode = () => api.testElementForId('appOverlayRoot').children.find(child => child.classList?.contains('terminal-context-menu'));
+  const urlReference = {type: 'url', href: 'https://github.com/ai-dynamo/dynamo/pull/172'};
+  api.showTerminalContextMenuForTest('1', {getSelection: () => ''}, 10, 10, null, urlReference.href, urlReference);
+  let terminalUrlMenu = terminalContextMenuNode();
+  let terminalUrlLabels = Array.from(terminalUrlMenu.children).map(child => child.textContent).filter(Boolean);
+  assert.deepStrictEqual(canonical(terminalUrlLabels), ['Open URL in a new tab', 'Copy URL', 'Copy tmux selection', 'Copy without indent'], 'terminal URL menu puts the link action first and drops the redundant generic Copy row when the selection already equals the href');
+  assert.equal(terminalUrlLabels.includes('Copy'), false, 'terminal URL menu does not show the ambiguous generic Copy row when it would duplicate Copy URL');
+  api.showTerminalContextMenuForTest('1', {getSelection: () => ''}, 10, 10, null, 'YOLOmux PR 172', urlReference);
+  terminalUrlMenu = terminalContextMenuNode();
+  terminalUrlLabels = Array.from(terminalUrlMenu.children).map(child => child.textContent).filter(Boolean);
+  assert.deepStrictEqual(canonical(terminalUrlLabels), ['Open URL in a new tab', 'Copy URL', 'Copy selected text', 'Copy tmux selection', 'Copy without indent'], 'terminal URL menu labels the selected-text copy path explicitly when the visible text differs from the href');
+  assert.ok(/function appendUrlContextMenuItems\(menu, href, closeMenu, options = \{\}\)[\s\S]*appendContextMenuButton\(menu, t\('contextmenu.openUrl'\)[\s\S]*appendContextMenuButton\(menu, t\('contextmenu.copyUrl'\)[\s\S]*options\.includeSelectedText && selectedText && selectedText !== url[\s\S]*appendContextMenuButton\(menu, t\('contextmenu.copySelectedText'\)/.test(source), 'link menus share one helper that orders Open URL before copy actions and only shows Copy selected text when the selected text differs from the href');
   const terminalCopyApi = loadYolomux('?platform=mac', ['1'], 'https:', 'MacIntel');
   const fetchCalls = [];
   terminalCopyApi.setFetchForTest((url, options = {}) => {
@@ -7248,12 +7328,14 @@ test('t@2560', () => {
     altKey: false,
     preventDefault() { prevented += 1; },
   });
+  const browserSelectionClearCount = terminalCopyApi.browserSelectionClearCountForTest();
   terminalCopyApi.clearBrowserSelectionForTest();
   assert.equal(browserSelectedCmdCResult, false, 'Mac Cmd-C with browser selection inside the terminal is handled by browser copy');
   assert.equal(prevented, 1, 'Mac Cmd-C with browser selection prevents the terminal default');
   assert.deepStrictEqual(fetchCalls, [], 'Mac Cmd-C with browser selection does not ask tmux for copy-mode text');
   assert.equal(terminalCopyApi.clipboardTextForTest(), 'selected browser text', 'Mac Cmd-C with browser selection writes browser-selected terminal text to clipboardData');
   assert.equal(clearSelectionCount, 1, 'Mac Cmd-C with browser selection clears xterm selection state after copying');
+  assert.equal(browserSelectionClearCount, 1, 'Mac Cmd-C with browser selection clears browser selection inside the terminal after copying');
   const terminalNavApi = loadYolomux('?platform=mac', ['1', '2', '3'], 'https:', 'MacIntel');
   const terminalNavEditor = terminalNavApi.fileEditorItemFor('/repo/app/README.md');
   const terminalNavSlots = terminalNavApi.emptyLayoutSlots();
@@ -8249,6 +8331,61 @@ test('t@2560', () => {
     'Finder changed ancestors place the changed-file count after diff counts',
   );
   assert.equal(ancestorRows['/repo/A/B/C/F'].classList.contains('file-tree-row--changed-ancestor'), false, 'changed leaf files do not get the ancestor marker');
+
+  const derivedSnapshot = row => {
+    const status = row.querySelector(':scope > .file-tree-git-status');
+    const agent = row.querySelector(':scope > .file-tree-agent');
+    const count = row.querySelector(':scope > .file-tree-dir-count');
+    const name = row.querySelector(':scope > .file-tree-name');
+    const ownedClasses = ['file-tree-row--changed-ancestor', 'repo-non-main', 'has-agent', 'git-modified', 'git-untracked', 'git-deleted', 'git-staged', 'git-transcript']
+      .filter(className => row.classList.contains(className));
+    return {
+      classes: ownedClasses,
+      statusText: status?.textContent || '',
+      statusTitle: status?.getAttribute('title') || '',
+      statusAria: status?.getAttribute('aria-label') || '',
+      statusHidden: status?.hidden === true,
+      agentHtml: agent?.innerHTML || '',
+      agentHidden: agent?.hidden === true,
+      countText: count?.textContent || '',
+      countHidden: count?.hidden === true,
+      nameText: name?.textContent || '',
+      nameHtml: name?.innerHTML || '',
+    };
+  };
+  api.setFileExplorerTreeDateModeForTest('none');
+  api.setFileExplorerIndexedDirsForTest(['/repo/indexed']);
+  api.setFileExplorerIndexStatusForTest('/repo/indexed', 'building');
+  api.setFileExplorerSessionFilesPayloadForTest({
+    loaded: true,
+    repos: [],
+    files: [{abs_path: '/repo/indexed/a.py', agents: ['codex'], status: 'M', mtime: 1, added: 2, removed: 0}],
+  });
+  api.setFileExplorerExpandedForTest(['/repo/indexed']);
+  const incrementalTree = new TestElement('incremental-tree');
+  incrementalTree.setAttribute('role', 'tree');
+  incrementalTree.classList.add('file-explorer-tree-panel');
+  const indexedEntriesByDir = [['/repo/indexed', [{name: 'a.py', kind: 'file'}]]];
+  api.renderTreeChildrenForTest(incrementalTree, '/repo', [{name: 'indexed', kind: 'dir'}], 0, indexedEntriesByDir);
+  const incrementalRows = Object.fromEntries(incrementalTree.querySelectorAll('.file-tree-row[data-path]').map(row => [row.dataset.path, row]));
+  assert.equal(incrementalRows['/repo/indexed'].querySelector(':scope > .file-tree-git-status').textContent, '…', 'indexed directory starts with the building badge');
+  api.setFileExplorerIndexStatusForTest('/repo/indexed', 'ready');
+  api.setFileExplorerSessionFilesPayloadForTest({
+    loaded: true,
+    repos: [],
+    files: [
+      {abs_path: '/repo/indexed/a.py', agents: ['claude'], status: '?', mtime: 2, added: 4, removed: 1},
+      {abs_path: '/repo/indexed/b.py', agents: ['codex'], status: 'A', mtime: 3, added: 5, removed: 0},
+    ],
+  });
+  const expectedTree = new TestElement('expected-incremental-tree');
+  expectedTree.setAttribute('role', 'tree');
+  expectedTree.classList.add('file-explorer-tree-panel');
+  api.renderTreeChildrenForTest(expectedTree, '/repo', [{name: 'indexed', kind: 'dir'}], 0, indexedEntriesByDir);
+  const expectedRows = Object.fromEntries(expectedTree.querySelectorAll('.file-tree-row[data-path]').map(row => [row.dataset.path, row]));
+  api.updateFileTreeGitStatusRowsForTest([incrementalRows['/repo/indexed'], incrementalRows['/repo/indexed/a.py']]);
+  assert.deepStrictEqual(derivedSnapshot(incrementalRows['/repo/indexed']), derivedSnapshot(expectedRows['/repo/indexed']), 'lightweight Finder refresh matches full render for directory status/title/agent/count/name state');
+  assert.deepStrictEqual(derivedSnapshot(incrementalRows['/repo/indexed/a.py']), derivedSnapshot(expectedRows['/repo/indexed/a.py']), 'lightweight Finder refresh matches full render for changed-file status/title/agent/name state');
 
   api.setFileExplorerSessionFilesPayloadForTest({loaded: true, repos: [], files: []});
   const symlinkTree = new TestElement('symlink-tree');
@@ -10769,6 +10906,12 @@ test('t@7283', () => {
   assert.ok(src.includes("t('yoagent.statusActionSent'") && src.includes("t('yoagent.statusBackend'"), 'YO!agent action/backend status strings are localized');
   assert.ok(/\.yoagent-chat \.markdown-body pre[\s\S]*?border-radius:\s*8px/.test(css), 'YO!agent code blocks are soft rounded boxes');
   assert.ok(/body\.theme-light \.yoagent-chat \.markdown-body pre/.test(css), 'YO!agent code blocks get a light box + dark text in light mode');
+  assert.ok(/--lt-code-block-bg:\s*#f3f4f6;[\s\S]*--lt-code-block-border:\s*#e4e7ec;[\s\S]*--lt-code-block-text:\s*#1f2328;/.test(css), 'R4: neutral light code-block values live in the shared lt token owner');
+  assert.ok(/body\.theme-light \.yoagent-chat,[\s\S]*body\.theme-light \.yoagent-message\s*\{[\s\S]*background:\s*var\(--panel\);[\s\S]*border-color:\s*var\(--line\);/.test(css), 'R4: YO!agent light bubbles use shared panel and line tokens');
+  assert.ok(/body\.theme-light \.yoagent-message-details pre\s*\{[\s\S]*background:\s*var\(--lt-code-block-bg\);[\s\S]*border-color:\s*var\(--lt-code-block-border\);/.test(css), 'R4: YO!agent details code blocks use shared neutral code-block tokens');
+  assert.ok(/body\.theme-light \.yoagent-chat \.markdown-body pre,[\s\S]*body\.theme-light \.yoagent-global \.markdown-body pre\s*\{[\s\S]*background:\s*var\(--lt-code-block-bg\);[\s\S]*border-color:\s*var\(--lt-code-block-border\);[\s\S]*color:\s*var\(--lt-code-block-text\);/.test(css), 'R4: YO!agent markdown code blocks use shared neutral code-block tokens');
+  assert.ok(/\.file-editor-theme-panel\.theme-vanilla\s*\{[\s\S]*background:\s*var\(--lt-editor-bg\);[\s\S]*border-color:\s*var\(--lt-line\);/.test(css), 'R4: editor vanilla swatch uses light editor tokens');
+  assert.ok(/body\.theme-light \.command-palette-dialog,[\s\S]*body\.theme-light \.keyboard-shortcuts-dialog\s*\{[\s\S]*background:\s*var\(--panel\);[\s\S]*border-color:\s*var\(--line\);/.test(css), 'R4: command palette and shortcuts dialogs use shared light panel tokens');
   assert.ok(/body\.theme-light \.yoagent-message-body\.markdown-body,[\s\S]*?\.yoagent-global \.markdown-body\s*\{[^}]*color:\s*var\(--lt-text\)/.test(css), 'YO!agent light-mode markdown bodies use dark app text instead of editor markdown colors');
   assert.ok(/body\.theme-light \.yoagent-chat \.markdown-body strong,[\s\S]*?\.yoagent-global \.markdown-body strong\s*\{[^}]*color:\s*var\(--lt-text\)/.test(css), 'YO!agent light-mode bold text is readable, not white-on-light');
   assert.ok(/body\.theme-light \.yoagent-chat \.markdown-body :not\(pre\) > code,[\s\S]*?\.yoagent-global \.markdown-body :not\(pre\) > code\s*\{[^}]*color:\s*#0f4c81/.test(css), 'YO!agent light-mode inline code uses a readable app-blue chip');
@@ -12713,7 +12856,7 @@ test('t@8771', () => {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(source.includes('installTerminalOsc52Bridge(session, term);'), 'OSC 52 bridge is wired into terminal startup');
   assert.ok(/registerOscHandler\(52, data =>/.test(source), 'bridge registers the OSC 52 parser handler');
-  assert.ok(source.includes('writeTerminalTextToClipboard(text, `copied ${text.length} chars`)'), 'bridge routes through the shared terminal clipboard-write chain');
+  assert.ok(source.includes('writeTerminalTextToClipboard(text, {action: TERMINAL_COPY_ACTIONS.osc52, params: {count: text.length}})'), 'bridge routes through the shared terminal clipboard-write chain and pluralized status action');
   assert.ok(source.includes("storageGet('yolomux.debugCopy') === '1'"), 'copy-path debug logging is gated behind an opt-in storage flag');
   assert.ok(source.includes("copyDebug('shortcut'") && source.includes("copyDebug('osc52'") && source.includes("copyDebug('clipboard'"), 'N1: shortcut, OSC 52, and clipboard-write stages each log one compact debug event');
 });
@@ -12726,7 +12869,7 @@ test('t@8804', () => {
   assert.ok(/showTerminalContextMenu\(session, term, event\.clientX, event\.clientY, container, rightClickSelection\)/.test(source), 'N7: the context menu receives the selection captured at right-click time');
   assert.ok(/function terminalContextMenuSelection\(session, term, container = null, presetSelection = null\)[\s\S]*presetSelection == null \? terminalSelectedText\(term, container\) : String\(presetSelection \|\| ''\)/.test(source), 'N7: an explicitly captured empty right-click selection is not replaced by a live under-cursor re-read');
   assert.ok(/function terminalContextMenuSelection\(session, term, container = null, presetSelection = null\)[\s\S]*recentTerminalAppClipboardText\(session\)/.test(source), 'N7: Claude/TUI OSC 52 clipboard text is the context-menu fallback when the app owns the visible selection');
-  assert.ok(/copyTerminalSelection\(session, term, \{dedent, selectionText: selected\}, container\)/.test(source), 'N7: menu Copy uses the captured selection text, not a stale live re-read');
+  assert.ok(/copyTerminalSelection\(session, term, \{action, dedent, selectionText: selected\}, container\)/.test(source), 'N7: menu Copy uses the captured selection text, not a stale live re-read');
   assert.ok(/const selected = options\.selectionText != null \? options\.selectionText : terminalSelectedText\(term, container\)/.test(source), 'N7: copyTerminalSelection honors an explicit captured selection');
   const api = loadYolomux('', ['1']);
   const badLiveRead = {getSelection: () => 'under cursor'};
@@ -12756,7 +12899,9 @@ test('t@tabber', () => {
   assert.ok(/transcriptMetaLoaded = true;[\s\S]*?warmTabberDataOnLaunch\(\)/.test(source), 'Tabber launch warmup runs as soon as transcript metadata is available');
   assert.ok(/function tabberAgentForWindow\(session, windowIndex, agentKey = ''\)/.test(source), 'Tabber can look up agent transcript activity by session/window');
   assert.ok(/const windowMtime = isAgent\s*\?\s*tabberAgentRecency\(agentActivity\)\s*:\s*Math\.max\(ledgerMtime, childMtime, fallbackSessionRecency\)/.test(source), 'Tabber agent windows sort only from agent transcript recency, never user-input or touched-path mtimes');
-  assert.ok(/let tabberActivityRefreshMs = 15000;[\s\S]*tabberActivityRefreshMs = initialSetting\('performance\.tabber_activity_refresh_ms', 15000\);/.test(source), 'Tabber activity refresh defaults to 15 seconds and is Preference-backed after settings initialize');
+  assert.ok(/let tabberActivityRefreshMs;[\s\S]*tabberActivityRefreshMs = initialSetting\('performance\.tabber_activity_refresh_ms'\);/.test(source), 'Tabber activity refresh initializes from server-provided settings defaults');
+  assert.equal(source.includes("initialSetting('performance.tabber_activity_refresh_ms', 15000)"), false, 'Tabber activity refresh does not keep a duplicated bootstrap fallback');
+  assert.equal(source.includes("numberSetting('performance.tabber_activity_refresh_ms', 15000)"), false, 'Tabber activity refresh does not keep a duplicated reload fallback');
   assert.ok(/Promise\.resolve\(state\.callback\(\)\)[\s\S]*?\.finally\(scheduleNext\)/.test(source), 'runtime intervals wait for async callbacks to settle before starting the next wait');
   assert.ok(/file-index-building', refreshBuildingFileIndexStatuses, Math\.min\(1501, proactiveMs\)/.test(source), 'DOIT.61 A5: file-index building poll keeps the odd 1501ms cadence cap');
   assert.equal(source.includes('tabber-row-detail'), false, 'DOIT.61 A4: Tabber no longer carries a dead visible detail slot');

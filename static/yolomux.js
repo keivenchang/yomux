@@ -606,7 +606,7 @@ const fileExplorerTabberCollapsed = readStoredSet(fileExplorerTabberCollapsedSto
 // Tabber activity ledger snapshot (GET /api/activity): {activity: {sessionKey|session:window: ActivityRecord}}.
 // Drives per-row recency timestamps + most-recent-first sort. Refreshed only while the Tabber is open.
 let tabberActivityPayload = {activity: {}, agents: []};
-let tabberActivityRefreshMs = 15000;
+let tabberActivityRefreshMs;
 let tabberLaunchWarmupStarted = false;
 // per-repo collapse state for the Modified-files panel repo headers (keyed by repo path).
 let changesRepoCollapsed = readStoredSet(changesRepoCollapsedStorageKey);
@@ -695,35 +695,35 @@ const startupHelperIndexStorageKey = 'yolomux.startupHelper.index.v1';
 // sub-tab is remembered across reloads.
 const infoSubTabStorageKey = 'yolomux.infoPanel.activeSubTab.v1';
 const transcriptPreviewMessages = 200;
-let remoteResizeDelayMs = initialSetting('performance.remote_resize_delay_ms', 220);
+let remoteResizeDelayMs = initialSetting('performance.remote_resize_delay_ms');
 // The latest watched-PR payload + last-seen status per PR ref (for notify-on-transition diffing) live here.
 let watchedPrsData = {watched_prs: [], truncated: 0, invalid: []};
 const watchedPrLastStatus = new Map();
-let latencyRefreshMs = initialSetting('performance.latency_refresh_ms', 3000);
-let eventLogRefreshMs = initialSetting('performance.event_log_refresh_ms', 5000);
+let latencyRefreshMs = initialSetting('performance.latency_refresh_ms');
+let eventLogRefreshMs = initialSetting('performance.event_log_refresh_ms');
 let tmuxSignalState = null;
-tabberActivityRefreshMs = initialSetting('performance.tabber_activity_refresh_ms', 15000);
-let redReminderMs = initialSetting('appearance.red_reminder_ms', 1550);
-let yoloRotateMs = initialSetting('appearance.yolo_rotate_ms', 20000);
+tabberActivityRefreshMs = initialSetting('performance.tabber_activity_refresh_ms');
+let redReminderMs = initialSetting('appearance.red_reminder_ms');
+let yoloRotateMs = initialSetting('appearance.yolo_rotate_ms');
 const latencySamplesMax = 24;
-let toastDurationMs = initialSetting('notifications.toast_duration_ms', 10000);
+let toastDurationMs = initialSetting('notifications.toast_duration_ms');
 const toastMaxLines = 3;
 const toastMaxLineChars = 180;
 let pinnedTabItems = readStoredPinnedTabs();
-let popoverShowDelayMs = initialSetting('performance.popover_show_delay_ms', 1000);
-let hoverCloseDelayMs = initialSetting('performance.popover_hide_delay_ms', 300);
+let popoverShowDelayMs = initialSetting('performance.popover_show_delay_ms');
+let hoverCloseDelayMs = initialSetting('performance.popover_hide_delay_ms');
 let popoverHideDelayMs = hoverCloseDelayMs;
-let menuHoverOpenDelayMs = initialSetting('performance.menu_hover_open_delay_ms', 800);
+let menuHoverOpenDelayMs = initialSetting('performance.menu_hover_open_delay_ms');
 let menuHoverCloseDelayMs = hoverCloseDelayMs;
-let tabPopoverShowDelayMs = initialSetting('performance.tab_popover_show_delay_ms', 1000);
-let tabPopoverFollowDelayMs = initialSetting('performance.tab_popover_follow_delay_ms', 120);
+let tabPopoverShowDelayMs = initialSetting('performance.tab_popover_show_delay_ms');
+let tabPopoverFollowDelayMs = initialSetting('performance.tab_popover_follow_delay_ms');
 const fileImagePreviewMinShowDelayMs = 800;
 const fileEditorScrollSyncSuppressMs = 150;
 let serverWatchRootsSignature = '';
 let serverWatchRootsInFlight = false;
 let serverWatchRootsSyncedAt = 0;
-let fileExplorerIndexRefreshSeconds = initialSetting('file_explorer.index_refresh_seconds', 120);
-let fileExplorerNewEntryHighlightMs = initialSetting('file_explorer.new_entry_highlight_ms', 60000);
+let fileExplorerIndexRefreshSeconds = initialSetting('file_explorer.index_refresh_seconds');
+let fileExplorerNewEntryHighlightMs = initialSetting('file_explorer.new_entry_highlight_ms');
 let fileExplorerImagePreviewMaxPx = initialSetting('file_explorer.image_preview_max_px', 320);
 let fileExplorerImageOpenMode = initialSetting('file_explorer.image_open_mode', 'same-tab');
 let uploadMaxBytes = initialSetting('uploads.max_bytes', 20 * 1024 * 1024);
@@ -3369,10 +3369,21 @@ function copyTextToClipboardViaCopyEvent(text) {
 // ONE clipboard-write chain for terminal-initiated copies (shortcut copy AND the OSC 52
 // bridge): synchronous copy-event first — it stays inside any live user activation — then the async
 // navigator.clipboard path as fallback. Status text reports success/failure either way.
-function writeTerminalTextToClipboard(text, label = 'copied') {
+function writeTerminalTextToClipboard(text, options = {}) {
+  const config = typeof options === 'string' ? {label: options} : (options || {});
+  const action = config.action || TERMINAL_COPY_ACTIONS.selected;
+  const label = config.label || terminalCopyStatusText(action, config.params || {});
+  const afterCopy = typeof config.afterCopy === 'function' ? config.afterCopy : null;
+  let cleanupDone = false;
+  const cleanup = () => {
+    if (cleanupDone || !afterCopy) return;
+    cleanupDone = true;
+    afterCopy();
+  };
   if (copyTextToClipboardViaCopyEvent(text)) {
     copyDebug('clipboard', {via: 'copy-event', chars: String(text ?? '').length, ok: true});
     statusEl.textContent = label;
+    cleanup();
     return;
   }
   copyTextToClipboard(text)
@@ -3384,6 +3395,7 @@ function writeTerminalTextToClipboard(text, label = 'copied') {
       copyDebug('clipboard', {via: 'async', chars: String(text ?? '').length, ok: false, error: String(error)});
       statusErr(localizedHtml('status.copyFailed', {error}));
     });
+  cleanup();
 }
 
 // opt-in live instrumentation for the copy path. Set storage key 'yolomux.debugCopy' to '1'
@@ -3600,7 +3612,24 @@ function closeContextMenus() {
   closeLinkContextMenu();
 }
 
-// right-click menu for links in AI/markdown content — Copy URL / Open URL. Bound on the
+function appendUrlContextMenuItems(menu, href, closeMenu, options = {}) {
+  const url = String(href || '');
+  if (!url) return false;
+  const selectedText = String(options.selectionText || '');
+  const action = (reason, handler) => (
+    options.term || options.container
+      ? consumeTerminalSelection(options.session, options.term, options.container, reason, handler)
+      : handler
+  );
+  appendContextMenuButton(menu, t('contextmenu.openUrl'), action('open-url', () => window.open(url, '_blank', 'noopener,noreferrer')), closeMenu);
+  appendContextMenuButton(menu, t('contextmenu.copyUrl'), action('copy-url', () => copyTextToClipboard(url)), closeMenu);
+  if (options.includeSelectedText && selectedText && selectedText !== url) {
+    appendContextMenuButton(menu, t('contextmenu.copySelectedText'), action('copy-selected-text', () => copyTextToClipboard(selectedText)), closeMenu);
+  }
+  return true;
+}
+
+// right-click menu for links in AI/markdown content — Open URL / Copy URL. Bound on the
 // YO!agent body and markdown previews via installLinkContextMenu(container).
 function showLinkContextMenu(anchor, x, y) {
   closeTerminalContextMenu();
@@ -3612,8 +3641,7 @@ function showLinkContextMenu(anchor, x, y) {
   const menu = document.createElement('div');
   menu.className = 'terminal-context-menu link-context-menu';
   menu.setAttribute('role', 'menu');
-  appendContextMenuButton(menu, t('contextmenu.copyUrl'), () => copyTextToClipboard(href), closeLinkContextMenu);
-  appendContextMenuButton(menu, t('contextmenu.openUrl'), () => window.open(href, '_blank', 'noopener,noreferrer'), closeLinkContextMenu);
+  appendUrlContextMenuItems(menu, href, closeLinkContextMenu);
   linkContextMenu.open(menu, x, y);
 }
 
@@ -3654,6 +3682,110 @@ function browserSelectionTextInside(container) {
 
 function terminalSelectedText(term, container = null) {
   return term.getSelection?.() || browserSelectionTextInside(container);
+}
+
+function browserSelectionTouchesContainer(container, selection = null) {
+  if (!container) return false;
+  const current = selection || globalThis.getSelection?.() || globalThis.window?.getSelection?.();
+  if (!current) return false;
+  const anchorNode = current.anchorNode || null;
+  const focusNode = current.focusNode || null;
+  if (!anchorNode && !focusNode) return false;
+  return nodeInsideElement(container, anchorNode) || nodeInsideElement(container, focusNode);
+}
+
+function terminalVisibleSelectionState(session, term, container = null) {
+  const xtermText = String(term?.getSelection?.() || '');
+  const selection = globalThis.getSelection?.() || globalThis.window?.getSelection?.();
+  const browserInside = browserSelectionTouchesContainer(container, selection);
+  const browserText = browserInside ? String(selection?.toString?.() || '') : '';
+  const appClipboard = recentTerminalAppClipboardText(session);
+  let paneMode = '';
+  try {
+    const panes = typeof tmuxSignalAgentPanesForSession === 'function' ? tmuxSignalAgentPanesForSession(session) : [];
+    const labels = typeof tmuxSignalPaneModeLabels === 'function'
+      ? panes.flatMap(pane => tmuxSignalPaneModeLabels(pane))
+      : [];
+    paneMode = labels.join(',');
+  } catch (_error) {
+    paneMode = '';
+  }
+  return {
+    xtermChars: xtermText.length,
+    browserChars: browserText.length,
+    browserInside,
+    recentOsc52Chars: String(appClipboard || '').length,
+    paneMode,
+  };
+}
+
+function clearTerminalVisibleSelection(session, term, container = null, reason = 'terminal-selection-consumed') {
+  const before = terminalVisibleSelectionState(session, term, container);
+  const selection = globalThis.getSelection?.() || globalThis.window?.getSelection?.();
+  let browserCleared = false;
+  if (browserSelectionTouchesContainer(container, selection) && typeof selection?.removeAllRanges === 'function') {
+    selection.removeAllRanges();
+    browserCleared = true;
+  }
+  const xtermClearCalled = typeof term?.clearSelection === 'function';
+  if (xtermClearCalled) term.clearSelection();
+  if (browserCleared || xtermClearCalled || before.xtermChars || before.browserChars || before.recentOsc52Chars || before.paneMode) {
+    copyDebug('selection-clear', {session, reason, ...before, browserCleared, xtermClearCalled});
+  }
+  return {before, browserCleared, xtermClearCalled};
+}
+
+function withTerminalVisibleSelectionCleanup(session, term, container, reason, handler) {
+  return async () => {
+    try {
+      return await handler();
+    } finally {
+      clearTerminalVisibleSelection(session, term, container, reason);
+    }
+  };
+}
+
+const TERMINAL_COPY_ACTIONS = Object.freeze({
+  selected: Object.freeze({
+    labelKey: 'terminal.copySelected',
+    statusKey: 'status.copied',
+    reason: 'copy-selection',
+    dedent: false,
+  }),
+  selectedDedent: Object.freeze({
+    labelKey: 'terminal.copyWithoutIndent',
+    statusKey: 'status.copiedWithoutIndent',
+    reason: 'copy-without-indent',
+    dedent: true,
+  }),
+  tmux: Object.freeze({
+    labelKey: 'terminal.copyTmuxSelection',
+    statusPluralKey: 'status.copiedTmuxSelection',
+    reason: 'copy-tmux-selection',
+  }),
+  osc52: Object.freeze({
+    statusPluralKey: 'status.copiedTerminalChars',
+    reason: 'copy-osc52-selection',
+  }),
+});
+
+function terminalCopyActionForOptions(options = {}) {
+  if (options.action) return options.action;
+  return options.dedent ? TERMINAL_COPY_ACTIONS.selectedDedent : TERMINAL_COPY_ACTIONS.selected;
+}
+
+function terminalCopyActionLabel(action) {
+  return action?.labelKey ? t(action.labelKey) : '';
+}
+
+function terminalCopyStatusText(action, params = {}) {
+  if (action?.statusPluralKey) return tPlural(action.statusPluralKey, params.count, params);
+  return t(action?.statusKey || 'status.copied', params);
+}
+
+function consumeTerminalSelection(session, term, container, action, handler) {
+  const reason = typeof action === 'string' ? action : (action?.reason || 'terminal-selection-consumed');
+  return withTerminalVisibleSelectionCleanup(session, term, container, reason, handler);
 }
 
 const TERMINAL_APP_CLIPBOARD_MAX_AGE_MS = 15000;
@@ -3724,14 +3856,18 @@ async function openTerminalFileReference(target) {
   if (item && target.line) requestFileEditorLineTarget(item, target.line);
 }
 
-function appendTerminalReferenceContextMenuItems(menu, reference, fileTarget = null) {
+function appendTerminalReferenceContextMenuItems(menu, reference, fileTarget = null, options = {}) {
   if (!reference) return false;
   if (reference.type === 'url') {
     const href = reference.href || normalizeTerminalLink(reference.text);
     if (!href) return false;
-    appendContextMenuButton(menu, t('contextmenu.copyUrl'), () => copyTextToClipboard(href), closeTerminalContextMenu);
-    appendContextMenuButton(menu, t('contextmenu.openUrl'), () => window.open(href, '_blank', 'noopener,noreferrer'), closeTerminalContextMenu);
-    return true;
+    return appendUrlContextMenuItems(menu, href, closeTerminalContextMenu, {
+      includeSelectedText: true,
+      selectionText: options.selectionText,
+      session: options.session,
+      term: options.term,
+      container: options.container,
+    });
   }
   if (reference.type === 'file' && fileTarget) {
     appendContextMenuButton(menu, t('contextmenu.openFile'), () => openTerminalFileReference(fileTarget), closeTerminalContextMenu);
@@ -3745,27 +3881,34 @@ async function copyTerminalSelection(session, term, options = {}, container = nu
   // N7: the context menu passes the selection captured at right-click time, because by the time the user
   // clicks the menu the live selection may be gone (focus moved to the menu).
   const selected = options.selectionText != null ? options.selectionText : terminalSelectedText(term, container);
+  const action = terminalCopyActionForOptions(options);
   if (!selected) {
-    statusEl.textContent = 'nothing selected';
+    statusEl.textContent = t('status.nothingSelected');
     return;
   }
-  const text = options.dedent ? dedentSelectionText(selected) : selected;
+  const text = action.dedent ? dedentSelectionText(selected) : selected;
   try {
     await copyTextToClipboard(text);
-    statusEl.textContent = options.dedent ? 'copied without indent' : 'copied';
+    statusEl.textContent = terminalCopyStatusText(action);
   } catch (error) {
     statusErr(localizedHtml('status.copyFailed', {error}));
+  } finally {
+    clearTerminalVisibleSelection(session, term, container, action.reason);
   }
 }
 
 function copyTerminalSelectionFromShortcut(session, term, options = {}, container = null) {
   const selected = terminalSelectedText(term, container);
+  const action = terminalCopyActionForOptions(options);
   if (!selected) {
-    statusEl.textContent = 'nothing selected';
+    statusEl.textContent = t('status.nothingSelected');
     return false;
   }
-  const text = options.dedent ? dedentSelectionText(selected) : selected;
-  writeTerminalTextToClipboard(text, options.dedent ? 'copied without indent' : 'copied');
+  const text = action.dedent ? dedentSelectionText(selected) : selected;
+  writeTerminalTextToClipboard(text, {
+    action,
+    afterCopy: () => clearTerminalVisibleSelection(session, term, container, action.reason),
+  });
   return true;
 }
 
@@ -3775,25 +3918,27 @@ function copyTerminalSelectionToClipboardEvent(session, term, event, container =
   event.clipboardData.setData('text/plain', selected);
   event.preventDefault();
   event.stopPropagation();
-  statusEl.textContent = 'copied';
-  term.clearSelection?.();
+  statusEl.textContent = terminalCopyStatusText(TERMINAL_COPY_ACTIONS.selected);
+  clearTerminalVisibleSelection(session, term, container, TERMINAL_COPY_ACTIONS.selected.reason);
   return true;
 }
 
-async function copyTmuxSelectionToClipboard(session) {
+async function copyTmuxSelectionToClipboard(session, term = null, container = null) {
   const payloadPromise = fetchTmuxSelectionText(session);
   try {
     const {payload, text} = await copyDeferredTextToClipboard(payloadPromise);
     const chars = Number.isFinite(Number(payload.chars)) ? Number(payload.chars) : text.length;
-    statusEl.textContent = `copied ${chars} chars from tmux`;
+    statusEl.textContent = terminalCopyStatusText(TERMINAL_COPY_ACTIONS.tmux, {count: chars});
     return true;
   } catch (error) {
     if (error?.noClipboardText) {
-      statusEl.textContent = error.message || 'nothing selected';
+      statusEl.textContent = error.message || t('status.nothingSelected');
       return false;
     }
     statusErr(localizedHtml('status.copyFailed', {error}));
     return false;
+  } finally {
+    clearTerminalVisibleSelection(session, term, container, 'copy-tmux-selection');
   }
 }
 
@@ -3801,7 +3946,7 @@ async function fetchTmuxSelectionText(session) {
   const payload = await apiFetchJson(`/api/tmux-copy-selection?session=${encodeURIComponent(session)}`, {method: 'POST'});
   const text = payload?.copied ? String(payload.text || '') : '';
   if (!text) {
-    const error = new Error(payload?.error === 'tmux copy mode is not active' ? 'nothing selected' : (payload?.error || 'nothing selected'));
+    const error = new Error(payload?.error === 'tmux copy mode is not active' ? t('status.nothingSelected') : (payload?.error || t('status.nothingSelected')));
     error.noClipboardText = true;
     throw error;
   }
@@ -3858,7 +4003,7 @@ function installTerminalOsc52Bridge(session, term) {
     copyDebug('osc52', {session, payloadChars: String(data ?? '').length, textChars: text ? text.length : 0});
     if (text) {
       rememberTerminalAppClipboardText(session, text);
-      writeTerminalTextToClipboard(text, `copied ${text.length} chars`);
+      writeTerminalTextToClipboard(text, {action: TERMINAL_COPY_ACTIONS.osc52, params: {count: text.length}});
     }
     return true; // consumed either way; '?' queries get no reply
   });
@@ -3874,7 +4019,7 @@ function handleTerminalCopyShortcutKeydown(session, term, container, event) {
       || (!isMacPlatform() && event.ctrlKey && !event.metaKey));
   if (isTmuxCopyShortcut) {
     event.preventDefault();
-    copyTmuxSelectionToClipboard(session);
+    copyTmuxSelectionToClipboard(session, term, container);
     return true;
   }
   const isCmdC = event.metaKey && !event.ctrlKey && !event.altKey;
@@ -3896,15 +4041,14 @@ function handleTerminalCopyShortcutKeydown(session, term, container, event) {
       // in a Claude/tmux pane the APP owns the mouse, so a plain drag never creates an xterm
       // selection — tell the user the working gestures instead of dead-ending.
       statusEl.textContent = isMacPlatform()
-        ? 'nothing selected — Option-drag selects while Claude/tmux owns the mouse; Cmd-Option-C copies the tmux selection'
-        : 'nothing selected — Shift-drag selects while the app owns the mouse; Ctrl-Alt-C copies the tmux selection';
+        ? t('terminal.copyHintMac')
+        : t('terminal.copyHintPc');
       return true;
     }
     return false; // no selection: let Ctrl-C through as SIGINT
   }
   event.preventDefault();
   copyTerminalSelectionFromShortcut(session, term, {}, container);
-  term.clearSelection?.(); // so a second Ctrl-C falls through to SIGINT
   return true;
 }
 
@@ -3955,16 +4099,26 @@ async function showTerminalContextMenu(session, term, x, y, container = null, pr
   const selection = terminalContextMenuSelection(session, term, container, presetSelection);
   const selected = selection.text;
   copyDebug('contextmenu', {session, selectionSource: selection.source, chars: selected.length});
-  const items = [
-    ['Copy', false],
-    ['Copy without indent', true],
-  ];
-  for (const [label, dedent] of items) {
-    appendContextMenuButton(menu, label, () => copyTerminalSelection(session, term, {dedent, selectionText: selected}, container), closeTerminalContextMenu, {disabled: !selected});
+  const hasUrlReference = terminalReference?.type === 'url';
+  if (hasUrlReference) {
+    if (appendTerminalReferenceContextMenuItems(menu, terminalReference, fileTarget, {selectionText: selected, session, term, container})) {
+      appendContextMenuSeparator(menu);
+    }
+  } else {
+    const items = [
+      [TERMINAL_COPY_ACTIONS.selected, false],
+      [TERMINAL_COPY_ACTIONS.selectedDedent, true],
+    ];
+    for (const [action, dedent] of items) {
+      appendContextMenuButton(menu, terminalCopyActionLabel(action), () => copyTerminalSelection(session, term, {action, dedent, selectionText: selected}, container), closeTerminalContextMenu, {disabled: !selected});
+    }
+    appendContextMenuSeparator(menu);
+    if (appendTerminalReferenceContextMenuItems(menu, terminalReference, fileTarget, {selectionText: selected, session, term, container})) appendContextMenuSeparator(menu);
   }
-  appendContextMenuSeparator(menu);
-  if (appendTerminalReferenceContextMenuItems(menu, terminalReference, fileTarget)) appendContextMenuSeparator(menu);
-  appendContextMenuButton(menu, t('terminal.copyTmuxSelection'), () => copyTmuxSelectionToClipboard(session), closeTerminalContextMenu);
+  appendContextMenuButton(menu, terminalCopyActionLabel(TERMINAL_COPY_ACTIONS.tmux), () => copyTmuxSelectionToClipboard(session, term, container), closeTerminalContextMenu);
+  if (hasUrlReference) {
+    appendContextMenuButton(menu, terminalCopyActionLabel(TERMINAL_COPY_ACTIONS.selectedDedent), () => copyTerminalSelection(session, term, {action: TERMINAL_COPY_ACTIONS.selectedDedent, dedent: true, selectionText: selected}, container), closeTerminalContextMenu, {disabled: !selected});
+  }
   terminalContextMenu.open(menu, x, y);
 }
 
@@ -11215,13 +11369,17 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
   if (agent.innerHTML !== agentHtml) agent.innerHTML = agentHtml;
   setHiddenIfChanged(agent, !agentHtml);
   row.classList.toggle('has-agent', Boolean(agentHtml));
-  const dirCountText = options.dirCountText || '';
-  if (dirCount.textContent !== dirCountText) dirCount.textContent = dirCountText;
-  setHiddenIfChanged(dirCount, !dirCountText);
-  const diffParts = options.diffParts || [];
-  const diffHtml = diffParts.map(p => `<span class="changes-diff-${esc(p.kind)}">${esc(p.text)}</span>`).join(' ');
-  if (diff.innerHTML !== diffHtml) diff.innerHTML = diffHtml;
-  setHiddenIfChanged(diff, !diffParts.length);
+  if (options.preserveDirCount !== true) {
+    const dirCountText = options.dirCountText || '';
+    if (dirCount.textContent !== dirCountText) dirCount.textContent = dirCountText;
+    setHiddenIfChanged(dirCount, !dirCountText);
+  }
+  if (options.preserveDiff !== true) {
+    const diffParts = options.diffParts || [];
+    const diffHtml = diffParts.map(p => `<span class="changes-diff-${esc(p.kind)}">${esc(p.text)}</span>`).join(' ');
+    if (diff.innerHTML !== diffHtml) diff.innerHTML = diffHtml;
+    setHiddenIfChanged(diff, !diffParts.length);
+  }
   const statusText = options.gitStatus || '';
   setClassNameIfChanged(status, ['file-tree-git-status', fileTreeGitStatusBadgeClass(statusText)].filter(Boolean).join(' '));
   if (status.textContent !== statusText) status.textContent = statusText;
@@ -11234,15 +11392,73 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
     status.removeAttribute('aria-label');
   }
   setHiddenIfChanged(status, !statusText);
-  const dateText = options.dateText || '';
-  if (date.textContent !== dateText) date.textContent = dateText;
-  setHiddenIfChanged(date, !dateText);
+  if (options.preserveDate !== true) {
+    const dateText = options.dateText || '';
+    if (date.textContent !== dateText) date.textContent = dateText;
+    setHiddenIfChanged(date, !dateText);
+  }
 }
 
 function fileTreeDirCountText(count) {
   const normalized = Number(count || 0);
   if (!normalized) return '';
   return String(normalized);
+}
+
+function fileTreeRowDerivedState(fullPath, entry, options = {}) {
+  const differMode = options.differMode === true;
+  const indexedDirectory = !differMode && entry.kind === 'dir' && fileExplorerDirectoryIsIndexed(fullPath);
+  const changedAncestor = !differMode && entry.kind === 'dir' && options.changedAncestorStats instanceof Map
+    ? (options.changedAncestorStats.get(fullPath) || null)
+    : null;
+  const changedFile = entry.kind === 'file'
+    ? (options.sessionFilesMap ? (options.sessionFilesMap.get(fullPath) || null) : fileTreeChangedFile(fullPath))
+    : null;
+  const changedFileStatus = changedFile ? sessionFileDisplayStatus(changedFile) : '';
+  const gitStatus = entry.kind === 'file'
+    ? (options.sessionFilesMap ? changedFileStatus : fileTreeGitStatus(fullPath))
+    : (differMode ? '' : fileExplorerIndexBadgeText(fullPath));
+  const displayName = differMode ? {text: entry.name, html: null} : fileTreeDisplayParts(fullPath, entry);
+  const dirCountText = entry.kind === 'dir'
+    ? (differMode
+      ? fileTreeDirCountText(countChangedFilesInDir(fullPath, options.entriesByDir, options.sessionFilesMap))
+      : fileTreeDirCountText(changedAncestor?.count))
+    : '';
+  const directoryDiffParts = entry.kind === 'dir'
+    ? (entry.is_repo === true ? fileTreeRepoDiffParts(fullPath) : sessionFileDiffText(changedAncestor || {}))
+    : [];
+  const icon = options.iconText != null
+    ? String(options.iconText)
+    : (entry.kind === 'dir' ? (options.expanded === true ? '▾' : '▸') : (entry.kind === 'file' ? fileIconFor(entry.name) : '·'));
+  return {
+    changedAncestor,
+    changedFile,
+    changedFileStatus,
+    gitClass: fileTreeGitStatusClass(gitStatus),
+    repoNonMain: entry.kind === 'dir' && entry.is_repo === true && fileTreeRepoBranchIsNonMain(fullPath),
+    icon,
+    displayName,
+    contentOptions: {
+      gitStatus,
+      gitStatusTitle: entry.kind === 'dir' && !differMode ? fileExplorerIndexBadgeTitle(fullPath) : gitStatusBadgeTitle(gitStatus),
+      iconClass: [fileIconClassFor(entry.name, entry.kind), indexedDirectory ? 'file-icon-dir-indexed' : ''].filter(Boolean).join(' '),
+      nameHtml: differMode ? null : displayName.html,
+      dateText: options.dateText || '',
+      diffParts: changedFile ? sessionFileDiffText(changedFile) : directoryDiffParts,
+      agentHtml: changedFile ? changeFileAgentsHtml(changedFile) : (changedAncestor ? changeFileAgentsHtml(changedAncestor) : ''),
+      dirCountText,
+      preserveDirCount: options.preserveDirCount === true,
+      preserveDate: options.preserveDate === true,
+      preserveDiff: options.preserveDiff === true,
+    },
+  };
+}
+
+function applyFileTreeRowDerivedState(row, state) {
+  applyGitStatusRowClass(row, state.gitClass);
+  row.classList.toggle('repo-non-main', state.repoNonMain === true);
+  row.classList.toggle('file-tree-row--changed-ancestor', Boolean(state.changedAncestor?.count));
+  updateFileTreeRowContents(row, state.icon, state.displayName.text, state.contentOptions);
 }
 
 function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
@@ -11282,7 +11498,6 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   row.classList.toggle('expanded', expanded);
   row.classList.toggle('collapsed', entry.kind === 'dir' && !expanded);
   row.classList.toggle('is-repo', entry.kind === 'dir' && entry.is_repo === true);
-  row.classList.toggle('repo-non-main', entry.kind === 'dir' && entry.is_repo === true && fileTreeRepoBranchIsNonMain(fullPath));
   row.classList.toggle('indexed-directory', indexedDirectory);
   row.classList.toggle('indexed-descendant-directory', indexedDescendantDirectory);
   const sessionHighlightClass = fileExplorerSessionHighlightClassForPath(fullPath, entry.kind, {
@@ -11290,24 +11505,17 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
     sessionHighlightSets: options.sessionHighlightSets,
   });
   applySessionHighlightRowClass(row, sessionHighlightClass);
-  const changedAncestor = !differMode && entry.kind === 'dir' && options.changedAncestorStats instanceof Map
-    ? (options.changedAncestorStats.get(fullPath) || null)
-    : null;
-  row.classList.toggle('file-tree-row--changed-ancestor', Boolean(changedAncestor?.count));
   // flag symlinks so the icon gets an arrow-badge overlay (target-type icon is kept); a broken
   // link gets a red badge + struck-through name. The backend sets is_symlink + kind=symlink-broken.
   row.classList.toggle('is-symlink', entry.is_symlink === true);
   row.classList.toggle('symlink-broken', entry.kind === 'symlink-broken');
-  const changedFile = entry.kind === 'file'
-    ? (options.sessionFilesMap ? (options.sessionFilesMap.get(fullPath) || null) : fileTreeChangedFile(fullPath))
-    : null;
-  const changedFileStatus = changedFile ? sessionFileDisplayStatus(changedFile) : '';
-  const gitStatus = entry.kind === 'file'
-    ? (options.sessionFilesMap ? changedFileStatus : fileTreeGitStatus(fullPath))
-    : (differMode ? '' : fileExplorerIndexBadgeText(fullPath));
-  const gitStatusTitle = entry.kind === 'dir' && !differMode ? fileExplorerIndexBadgeTitle(fullPath) : gitStatusBadgeTitle(gitStatus);
-  const gitClass = fileTreeGitStatusClass(gitStatus);
-  applyGitStatusRowClass(row, gitClass);
+  const derivedState = fileTreeRowDerivedState(fullPath, entry, {
+    ...options,
+    expanded,
+    dateText: fileTreeMtimeText(entry),
+  });
+  applyFileTreeRowDerivedState(row, derivedState);
+  const {changedFile, changedFileStatus} = derivedState;
   if (!differMode && entry.kind === 'dir' && entry.is_repo === true) {
     row.removeAttribute('title');
     row.onmouseenter = event => { fileTreeRepoPopoverCursor = {x: event.clientX, y: event.clientY}; scheduleRepoRowHoverPopover(row, fullPath); };
@@ -11337,16 +11545,6 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
     if (currentFile || currentDirectoryRow) row.setAttribute('aria-current', 'true');
     else row.removeAttribute('aria-current');
   }
-  const icon = entry.kind === 'dir' ? (expanded ? '▾' : '▸') : (entry.kind === 'file' ? fileIconFor(entry.name) : '·');
-  const displayName = differMode ? {text: entry.name, html: null} : fileTreeDisplayParts(fullPath, entry);
-  const dirCountText = entry.kind === 'dir'
-    ? (differMode
-      ? fileTreeDirCountText(countChangedFilesInDir(fullPath, options.entriesByDir, options.sessionFilesMap))
-      : fileTreeDirCountText(changedAncestor?.count))
-    : '';
-  const directoryDiffParts = entry.kind === 'dir'
-    ? (entry.is_repo === true ? fileTreeRepoDiffParts(fullPath) : sessionFileDiffText(changedAncestor || {}))
-    : [];
   // Set data attributes so Differ event delegation (click/drag/contextmenu) can find these rows
   setRowDataset(row, 'openChangeFile', changedFile?.abs_path || '');
   setRowDataset(row, 'openChangeSession', changedFile?.abs_path ? (changedFile.session || '') : '');
@@ -11364,16 +11562,6 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
     setRowDataset(row, 'changesFolderToggle', '');
     setRowDataset(row, 'openChangeDirectory', '');
   }
-  updateFileTreeRowContents(row, icon, displayName.text, {
-    gitStatus,
-    gitStatusTitle,
-    iconClass: [fileIconClassFor(entry.name, entry.kind), indexedDirectory ? 'file-icon-dir-indexed' : ''].filter(Boolean).join(' '),
-    nameHtml: differMode ? null : displayName.html,
-    dateText: fileTreeMtimeText(entry),
-    diffParts: changedFile ? sessionFileDiffText(changedFile) : directoryDiffParts,
-    agentHtml: changedFile ? changeFileAgentsHtml(changedFile) : (changedAncestor ? changeFileAgentsHtml(changedAncestor) : ''),
-    dirCountText,
-  });
   if (entry.kind === 'file' && previewMediaKindForPath(entry.name) === 'image' && Number(entry.size || 0) <= MAX_FILE_PREVIEW_BYTES) {
     bindFileImagePreview(row, fullPath, entry);
   }
@@ -11605,53 +11793,23 @@ function updateFileTreeGitStatusRows() {
   // git-status/name refresh would rewrite the label to the path basename (s_1/w_0/r_00000) and clobber
   // the Tabber's own render. The Tabber owns its rows via updateTabberRow / refreshTabberPanels.
   document.querySelectorAll('.file-tree-row[data-path]:not([data-tabber-type])').forEach(row => {
-    const gitStatus = row.dataset.kind === 'file' ? fileTreeGitStatus(row.dataset.path) : '';
-    const gitClass = fileTreeGitStatusClass(gitStatus);
-    applyGitStatusRowClass(row, gitClass);
-    const status = row.querySelector(':scope > .file-tree-git-status');
-    if (status) {
-      setClassNameIfChanged(status, ['file-tree-git-status', fileTreeGitStatusBadgeClass(gitStatus)].filter(Boolean).join(' '));
-      status.textContent = gitStatus;
-      const title = gitStatusBadgeTitle(gitStatus);
-      if (title) {
-        status.setAttribute('title', title);
-        status.setAttribute('aria-label', title);
-      } else {
-        status.removeAttribute('title');
-        status.removeAttribute('aria-label');
-      }
-      status.hidden = !gitStatus;
-    }
+    const fullPath = row.dataset.path || '';
     const entry = {
       kind: row.dataset.kind,
-      name: row.dataset.name || basenameOf(row.dataset.path),
+      name: row.dataset.name || basenameOf(fullPath),
       is_repo: row.dataset.isRepo === 'true',
       is_symlink: row.dataset.isSymlink === 'true',
       symlink_target: row.dataset.symlinkTarget || '',
     };
-    row.classList.toggle('repo-non-main', entry.kind === 'dir' && entry.is_repo === true && fileTreeRepoBranchIsNonMain(row.dataset.path));
-    const changedAncestor = entry.kind === 'dir' ? (changedAncestorStats.get(row.dataset.path) || null) : null;
-    row.classList.toggle('file-tree-row--changed-ancestor', Boolean(changedAncestor?.count));
-    const changedFile = entry.kind === 'file' ? fileTreeChangedFile(row.dataset.path) : null;
-    const agentHtml = changedFile ? changeFileAgentsHtml(changedFile) : (changedAncestor ? changeFileAgentsHtml(changedAncestor) : '');
-    const agent = row.querySelector(':scope > .file-tree-agent');
-    if (agent) {
-      if (agent.innerHTML !== agentHtml) agent.innerHTML = agentHtml;
-      agent.hidden = !agentHtml;
-    }
-    row.classList.toggle('has-agent', Boolean(agentHtml));
-    const dirCount = row.querySelector(':scope > .file-tree-dir-count');
-    if (dirCount) {
-      const dirCountText = fileTreeDirCountText(changedAncestor?.count);
-      dirCount.textContent = dirCountText;
-      dirCount.hidden = !dirCountText;
-    }
-    const name = row.querySelector(':scope > .file-tree-name');
-    const nextName = fileTreeDisplayParts(row.dataset.path, entry);
-    if (name && name.textContent !== nextName.text) {
-      if (nextName.html) name.innerHTML = nextName.html;
-      if (!name.children?.length) name.textContent = nextName.text;
-    }
+    const inDiffer = Boolean(row.closest?.('.file-explorer-changes-panel') || row.dataset.changesFolderToggle || row.dataset.openChangeFile || row.dataset.openChangeDirectory);
+    applyFileTreeRowDerivedState(row, fileTreeRowDerivedState(fullPath, entry, {
+      changedAncestorStats,
+      differMode: inDiffer,
+      iconText: row.querySelector(':scope > .file-tree-icon')?.textContent || '',
+      preserveDate: true,
+      preserveDiff: true,
+      preserveDirCount: inDiffer,
+    }));
   });
   updateFileExplorerSessionHighlightRows();
 }
@@ -16560,22 +16718,22 @@ function applySettingsPayload(payload, options = {}) {
   clientSettingsDefaults = payload.defaults || clientSettingsDefaults;
   clientSettings = mergeSettingObjects(clientSettingsDefaults, payload.settings || {});
   clientSettingsMtimeNs = nextMtime;
-  remoteResizeDelayMs = numberSetting('performance.remote_resize_delay_ms', 220);
-  latencyRefreshMs = numberSetting('performance.latency_refresh_ms', 3000);
-  eventLogRefreshMs = numberSetting('performance.event_log_refresh_ms', 5000);
-  tabberActivityRefreshMs = numberSetting('performance.tabber_activity_refresh_ms', 15000);
-  redReminderMs = numberSetting('appearance.red_reminder_ms', 1550);
-  yoloRotateMs = numberSetting('appearance.yolo_rotate_ms', 20000);
-  toastDurationMs = numberSetting('notifications.toast_duration_ms', 10000);
-  popoverShowDelayMs = numberSetting('performance.popover_show_delay_ms', 1000);
-  hoverCloseDelayMs = numberSetting('performance.popover_hide_delay_ms', 300);
+  remoteResizeDelayMs = numberSetting('performance.remote_resize_delay_ms');
+  latencyRefreshMs = numberSetting('performance.latency_refresh_ms');
+  eventLogRefreshMs = numberSetting('performance.event_log_refresh_ms');
+  tabberActivityRefreshMs = numberSetting('performance.tabber_activity_refresh_ms');
+  redReminderMs = numberSetting('appearance.red_reminder_ms');
+  yoloRotateMs = numberSetting('appearance.yolo_rotate_ms');
+  toastDurationMs = numberSetting('notifications.toast_duration_ms');
+  popoverShowDelayMs = numberSetting('performance.popover_show_delay_ms');
+  hoverCloseDelayMs = numberSetting('performance.popover_hide_delay_ms');
   popoverHideDelayMs = hoverCloseDelayMs;
-  menuHoverOpenDelayMs = numberSetting('performance.menu_hover_open_delay_ms', 800);
+  menuHoverOpenDelayMs = numberSetting('performance.menu_hover_open_delay_ms');
   menuHoverCloseDelayMs = hoverCloseDelayMs;
-  tabPopoverShowDelayMs = numberSetting('performance.tab_popover_show_delay_ms', 1000);
-  tabPopoverFollowDelayMs = numberSetting('performance.tab_popover_follow_delay_ms', 120);
-  fileExplorerIndexRefreshSeconds = numberSetting('file_explorer.index_refresh_seconds', 120);
-  fileExplorerNewEntryHighlightMs = numberSetting('file_explorer.new_entry_highlight_ms', 60000);
+  tabPopoverShowDelayMs = numberSetting('performance.tab_popover_show_delay_ms');
+  tabPopoverFollowDelayMs = numberSetting('performance.tab_popover_follow_delay_ms');
+  fileExplorerIndexRefreshSeconds = numberSetting('file_explorer.index_refresh_seconds');
+  fileExplorerNewEntryHighlightMs = numberSetting('file_explorer.new_entry_highlight_ms');
   fileExplorerImagePreviewMaxPx = numberSetting('file_explorer.image_preview_max_px', 320);
   fileExplorerImageOpenMode = normalizedImageOpenMode(initialSetting('file_explorer.image_open_mode', 'same-tab'));
   reconcileIndexedDirsFromSetting({initial: options.initial === true});

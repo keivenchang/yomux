@@ -1297,8 +1297,8 @@ body.theme-light .yoagent-global {
 body.theme-light .yoagent-chat,
 body.theme-light .yoagent-message {
   color: var(--lt-text);
-  background: #ffffff;
-  border-color: #cbd5e1;
+  background: var(--panel);
+  border-color: var(--line);
 }
 body.theme-light .yoagent-message.assistant {
   border-color: var(--active-control-border);
@@ -1319,23 +1319,23 @@ body.theme-light .yoagent-line {
 body.theme-light .yoagent-generated,
 body.theme-light .yoagent-empty,
 body.theme-light .yoagent-message-role {
-  color: #475569;
+  color: var(--lt-muted-strong);
 }
 body.theme-light .yoagent-message-body.markdown-body,
 body.theme-light .yoagent-global .markdown-body {
   color: var(--lt-text);
 }
 body.theme-light .yoagent-message-details summary {
-  color: #475569;
+  color: var(--lt-muted-strong);
 }
 body.theme-light .yoagent-message-details pre {
   color: var(--lt-text);
-  background: #f8fafc;
-  border-color: #e4e7ec;
+  background: var(--lt-code-block-bg);
+  border-color: var(--lt-code-block-border);
 }
 body.theme-light .yoagent-action-card {
   color: var(--lt-text);
-  background: #f8fafc;
+  background: var(--lt-code-block-bg);
   border-color: var(--link-soft);
 }
 body.theme-light .yoagent-action-head {
@@ -1347,9 +1347,9 @@ body.theme-light .yoagent-action-row code {
   border-color: #8ab4f8;
 }
 body.theme-light .yoagent-action-text {
-  color: #1f2328;
-  background: #f3f4f6;
-  border-color: #e4e7ec;
+  color: var(--lt-code-block-text);
+  background: var(--lt-code-block-bg);
+  border-color: var(--lt-code-block-border);
 }
 body.theme-light .yoagent-chat .markdown-body strong,
 body.theme-light .yoagent-global .markdown-body strong {
@@ -1370,13 +1370,13 @@ body.theme-light .yoagent-global .markdown-body :not(pre) > code {
    light override). Matches the soft gray code boxes in mockup 044. */
 body.theme-light .yoagent-chat .markdown-body pre,
 body.theme-light .yoagent-global .markdown-body pre {
-  background: #f3f4f6;
-  border-color: #e4e7ec;
-  color: #1f2328;
+  background: var(--lt-code-block-bg);
+  border-color: var(--lt-code-block-border);
+  color: var(--lt-code-block-text);
 }
 body.theme-light .yoagent-chat .markdown-body pre code,
 body.theme-light .yoagent-global .markdown-body pre code {
-  color: #1f2328;
+  color: var(--lt-code-block-text);
 }
 .info-row {
   display: grid;

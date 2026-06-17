@@ -605,7 +605,7 @@ const fileExplorerTabberCollapsed = readStoredSet(fileExplorerTabberCollapsedSto
 // Tabber activity ledger snapshot (GET /api/activity): {activity: {sessionKey|session:window: ActivityRecord}}.
 // Drives per-row recency timestamps + most-recent-first sort. Refreshed only while the Tabber is open.
 let tabberActivityPayload = {activity: {}, agents: []};
-let tabberActivityRefreshMs = 15000;
+let tabberActivityRefreshMs;
 let tabberLaunchWarmupStarted = false;
 // per-repo collapse state for the Modified-files panel repo headers (keyed by repo path).
 let changesRepoCollapsed = readStoredSet(changesRepoCollapsedStorageKey);
@@ -694,35 +694,35 @@ const startupHelperIndexStorageKey = 'yolomux.startupHelper.index.v1';
 // sub-tab is remembered across reloads.
 const infoSubTabStorageKey = 'yolomux.infoPanel.activeSubTab.v1';
 const transcriptPreviewMessages = 200;
-let remoteResizeDelayMs = initialSetting('performance.remote_resize_delay_ms', 220);
+let remoteResizeDelayMs = initialSetting('performance.remote_resize_delay_ms');
 // The latest watched-PR payload + last-seen status per PR ref (for notify-on-transition diffing) live here.
 let watchedPrsData = {watched_prs: [], truncated: 0, invalid: []};
 const watchedPrLastStatus = new Map();
-let latencyRefreshMs = initialSetting('performance.latency_refresh_ms', 3000);
-let eventLogRefreshMs = initialSetting('performance.event_log_refresh_ms', 5000);
+let latencyRefreshMs = initialSetting('performance.latency_refresh_ms');
+let eventLogRefreshMs = initialSetting('performance.event_log_refresh_ms');
 let tmuxSignalState = null;
-tabberActivityRefreshMs = initialSetting('performance.tabber_activity_refresh_ms', 15000);
-let redReminderMs = initialSetting('appearance.red_reminder_ms', 1550);
-let yoloRotateMs = initialSetting('appearance.yolo_rotate_ms', 20000);
+tabberActivityRefreshMs = initialSetting('performance.tabber_activity_refresh_ms');
+let redReminderMs = initialSetting('appearance.red_reminder_ms');
+let yoloRotateMs = initialSetting('appearance.yolo_rotate_ms');
 const latencySamplesMax = 24;
-let toastDurationMs = initialSetting('notifications.toast_duration_ms', 10000);
+let toastDurationMs = initialSetting('notifications.toast_duration_ms');
 const toastMaxLines = 3;
 const toastMaxLineChars = 180;
 let pinnedTabItems = readStoredPinnedTabs();
-let popoverShowDelayMs = initialSetting('performance.popover_show_delay_ms', 1000);
-let hoverCloseDelayMs = initialSetting('performance.popover_hide_delay_ms', 300);
+let popoverShowDelayMs = initialSetting('performance.popover_show_delay_ms');
+let hoverCloseDelayMs = initialSetting('performance.popover_hide_delay_ms');
 let popoverHideDelayMs = hoverCloseDelayMs;
-let menuHoverOpenDelayMs = initialSetting('performance.menu_hover_open_delay_ms', 800);
+let menuHoverOpenDelayMs = initialSetting('performance.menu_hover_open_delay_ms');
 let menuHoverCloseDelayMs = hoverCloseDelayMs;
-let tabPopoverShowDelayMs = initialSetting('performance.tab_popover_show_delay_ms', 1000);
-let tabPopoverFollowDelayMs = initialSetting('performance.tab_popover_follow_delay_ms', 120);
+let tabPopoverShowDelayMs = initialSetting('performance.tab_popover_show_delay_ms');
+let tabPopoverFollowDelayMs = initialSetting('performance.tab_popover_follow_delay_ms');
 const fileImagePreviewMinShowDelayMs = 800;
 const fileEditorScrollSyncSuppressMs = 150;
 let serverWatchRootsSignature = '';
 let serverWatchRootsInFlight = false;
 let serverWatchRootsSyncedAt = 0;
-let fileExplorerIndexRefreshSeconds = initialSetting('file_explorer.index_refresh_seconds', 120);
-let fileExplorerNewEntryHighlightMs = initialSetting('file_explorer.new_entry_highlight_ms', 60000);
+let fileExplorerIndexRefreshSeconds = initialSetting('file_explorer.index_refresh_seconds');
+let fileExplorerNewEntryHighlightMs = initialSetting('file_explorer.new_entry_highlight_ms');
 let fileExplorerImagePreviewMaxPx = initialSetting('file_explorer.image_preview_max_px', 320);
 let fileExplorerImageOpenMode = initialSetting('file_explorer.image_open_mode', 'same-tab');
 let uploadMaxBytes = initialSetting('uploads.max_bytes', 20 * 1024 * 1024);

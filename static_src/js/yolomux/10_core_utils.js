@@ -1902,10 +1902,21 @@ function copyTextToClipboardViaCopyEvent(text) {
 // ONE clipboard-write chain for terminal-initiated copies (shortcut copy AND the OSC 52
 // bridge): synchronous copy-event first — it stays inside any live user activation — then the async
 // navigator.clipboard path as fallback. Status text reports success/failure either way.
-function writeTerminalTextToClipboard(text, label = 'copied') {
+function writeTerminalTextToClipboard(text, options = {}) {
+  const config = typeof options === 'string' ? {label: options} : (options || {});
+  const action = config.action || TERMINAL_COPY_ACTIONS.selected;
+  const label = config.label || terminalCopyStatusText(action, config.params || {});
+  const afterCopy = typeof config.afterCopy === 'function' ? config.afterCopy : null;
+  let cleanupDone = false;
+  const cleanup = () => {
+    if (cleanupDone || !afterCopy) return;
+    cleanupDone = true;
+    afterCopy();
+  };
   if (copyTextToClipboardViaCopyEvent(text)) {
     copyDebug('clipboard', {via: 'copy-event', chars: String(text ?? '').length, ok: true});
     statusEl.textContent = label;
+    cleanup();
     return;
   }
   copyTextToClipboard(text)
@@ -1917,6 +1928,7 @@ function writeTerminalTextToClipboard(text, label = 'copied') {
       copyDebug('clipboard', {via: 'async', chars: String(text ?? '').length, ok: false, error: String(error)});
       statusErr(localizedHtml('status.copyFailed', {error}));
     });
+  cleanup();
 }
 
 // opt-in live instrumentation for the copy path. Set storage key 'yolomux.debugCopy' to '1'
@@ -2133,7 +2145,24 @@ function closeContextMenus() {
   closeLinkContextMenu();
 }
 
-// right-click menu for links in AI/markdown content — Copy URL / Open URL. Bound on the
+function appendUrlContextMenuItems(menu, href, closeMenu, options = {}) {
+  const url = String(href || '');
+  if (!url) return false;
+  const selectedText = String(options.selectionText || '');
+  const action = (reason, handler) => (
+    options.term || options.container
+      ? consumeTerminalSelection(options.session, options.term, options.container, reason, handler)
+      : handler
+  );
+  appendContextMenuButton(menu, t('contextmenu.openUrl'), action('open-url', () => window.open(url, '_blank', 'noopener,noreferrer')), closeMenu);
+  appendContextMenuButton(menu, t('contextmenu.copyUrl'), action('copy-url', () => copyTextToClipboard(url)), closeMenu);
+  if (options.includeSelectedText && selectedText && selectedText !== url) {
+    appendContextMenuButton(menu, t('contextmenu.copySelectedText'), action('copy-selected-text', () => copyTextToClipboard(selectedText)), closeMenu);
+  }
+  return true;
+}
+
+// right-click menu for links in AI/markdown content — Open URL / Copy URL. Bound on the
 // YO!agent body and markdown previews via installLinkContextMenu(container).
 function showLinkContextMenu(anchor, x, y) {
   closeTerminalContextMenu();
@@ -2145,8 +2174,7 @@ function showLinkContextMenu(anchor, x, y) {
   const menu = document.createElement('div');
   menu.className = 'terminal-context-menu link-context-menu';
   menu.setAttribute('role', 'menu');
-  appendContextMenuButton(menu, t('contextmenu.copyUrl'), () => copyTextToClipboard(href), closeLinkContextMenu);
-  appendContextMenuButton(menu, t('contextmenu.openUrl'), () => window.open(href, '_blank', 'noopener,noreferrer'), closeLinkContextMenu);
+  appendUrlContextMenuItems(menu, href, closeLinkContextMenu);
   linkContextMenu.open(menu, x, y);
 }
 
@@ -2187,6 +2215,110 @@ function browserSelectionTextInside(container) {
 
 function terminalSelectedText(term, container = null) {
   return term.getSelection?.() || browserSelectionTextInside(container);
+}
+
+function browserSelectionTouchesContainer(container, selection = null) {
+  if (!container) return false;
+  const current = selection || globalThis.getSelection?.() || globalThis.window?.getSelection?.();
+  if (!current) return false;
+  const anchorNode = current.anchorNode || null;
+  const focusNode = current.focusNode || null;
+  if (!anchorNode && !focusNode) return false;
+  return nodeInsideElement(container, anchorNode) || nodeInsideElement(container, focusNode);
+}
+
+function terminalVisibleSelectionState(session, term, container = null) {
+  const xtermText = String(term?.getSelection?.() || '');
+  const selection = globalThis.getSelection?.() || globalThis.window?.getSelection?.();
+  const browserInside = browserSelectionTouchesContainer(container, selection);
+  const browserText = browserInside ? String(selection?.toString?.() || '') : '';
+  const appClipboard = recentTerminalAppClipboardText(session);
+  let paneMode = '';
+  try {
+    const panes = typeof tmuxSignalAgentPanesForSession === 'function' ? tmuxSignalAgentPanesForSession(session) : [];
+    const labels = typeof tmuxSignalPaneModeLabels === 'function'
+      ? panes.flatMap(pane => tmuxSignalPaneModeLabels(pane))
+      : [];
+    paneMode = labels.join(',');
+  } catch (_error) {
+    paneMode = '';
+  }
+  return {
+    xtermChars: xtermText.length,
+    browserChars: browserText.length,
+    browserInside,
+    recentOsc52Chars: String(appClipboard || '').length,
+    paneMode,
+  };
+}
+
+function clearTerminalVisibleSelection(session, term, container = null, reason = 'terminal-selection-consumed') {
+  const before = terminalVisibleSelectionState(session, term, container);
+  const selection = globalThis.getSelection?.() || globalThis.window?.getSelection?.();
+  let browserCleared = false;
+  if (browserSelectionTouchesContainer(container, selection) && typeof selection?.removeAllRanges === 'function') {
+    selection.removeAllRanges();
+    browserCleared = true;
+  }
+  const xtermClearCalled = typeof term?.clearSelection === 'function';
+  if (xtermClearCalled) term.clearSelection();
+  if (browserCleared || xtermClearCalled || before.xtermChars || before.browserChars || before.recentOsc52Chars || before.paneMode) {
+    copyDebug('selection-clear', {session, reason, ...before, browserCleared, xtermClearCalled});
+  }
+  return {before, browserCleared, xtermClearCalled};
+}
+
+function withTerminalVisibleSelectionCleanup(session, term, container, reason, handler) {
+  return async () => {
+    try {
+      return await handler();
+    } finally {
+      clearTerminalVisibleSelection(session, term, container, reason);
+    }
+  };
+}
+
+const TERMINAL_COPY_ACTIONS = Object.freeze({
+  selected: Object.freeze({
+    labelKey: 'terminal.copySelected',
+    statusKey: 'status.copied',
+    reason: 'copy-selection',
+    dedent: false,
+  }),
+  selectedDedent: Object.freeze({
+    labelKey: 'terminal.copyWithoutIndent',
+    statusKey: 'status.copiedWithoutIndent',
+    reason: 'copy-without-indent',
+    dedent: true,
+  }),
+  tmux: Object.freeze({
+    labelKey: 'terminal.copyTmuxSelection',
+    statusPluralKey: 'status.copiedTmuxSelection',
+    reason: 'copy-tmux-selection',
+  }),
+  osc52: Object.freeze({
+    statusPluralKey: 'status.copiedTerminalChars',
+    reason: 'copy-osc52-selection',
+  }),
+});
+
+function terminalCopyActionForOptions(options = {}) {
+  if (options.action) return options.action;
+  return options.dedent ? TERMINAL_COPY_ACTIONS.selectedDedent : TERMINAL_COPY_ACTIONS.selected;
+}
+
+function terminalCopyActionLabel(action) {
+  return action?.labelKey ? t(action.labelKey) : '';
+}
+
+function terminalCopyStatusText(action, params = {}) {
+  if (action?.statusPluralKey) return tPlural(action.statusPluralKey, params.count, params);
+  return t(action?.statusKey || 'status.copied', params);
+}
+
+function consumeTerminalSelection(session, term, container, action, handler) {
+  const reason = typeof action === 'string' ? action : (action?.reason || 'terminal-selection-consumed');
+  return withTerminalVisibleSelectionCleanup(session, term, container, reason, handler);
 }
 
 const TERMINAL_APP_CLIPBOARD_MAX_AGE_MS = 15000;
@@ -2257,14 +2389,18 @@ async function openTerminalFileReference(target) {
   if (item && target.line) requestFileEditorLineTarget(item, target.line);
 }
 
-function appendTerminalReferenceContextMenuItems(menu, reference, fileTarget = null) {
+function appendTerminalReferenceContextMenuItems(menu, reference, fileTarget = null, options = {}) {
   if (!reference) return false;
   if (reference.type === 'url') {
     const href = reference.href || normalizeTerminalLink(reference.text);
     if (!href) return false;
-    appendContextMenuButton(menu, t('contextmenu.copyUrl'), () => copyTextToClipboard(href), closeTerminalContextMenu);
-    appendContextMenuButton(menu, t('contextmenu.openUrl'), () => window.open(href, '_blank', 'noopener,noreferrer'), closeTerminalContextMenu);
-    return true;
+    return appendUrlContextMenuItems(menu, href, closeTerminalContextMenu, {
+      includeSelectedText: true,
+      selectionText: options.selectionText,
+      session: options.session,
+      term: options.term,
+      container: options.container,
+    });
   }
   if (reference.type === 'file' && fileTarget) {
     appendContextMenuButton(menu, t('contextmenu.openFile'), () => openTerminalFileReference(fileTarget), closeTerminalContextMenu);
@@ -2278,27 +2414,34 @@ async function copyTerminalSelection(session, term, options = {}, container = nu
   // N7: the context menu passes the selection captured at right-click time, because by the time the user
   // clicks the menu the live selection may be gone (focus moved to the menu).
   const selected = options.selectionText != null ? options.selectionText : terminalSelectedText(term, container);
+  const action = terminalCopyActionForOptions(options);
   if (!selected) {
-    statusEl.textContent = 'nothing selected';
+    statusEl.textContent = t('status.nothingSelected');
     return;
   }
-  const text = options.dedent ? dedentSelectionText(selected) : selected;
+  const text = action.dedent ? dedentSelectionText(selected) : selected;
   try {
     await copyTextToClipboard(text);
-    statusEl.textContent = options.dedent ? 'copied without indent' : 'copied';
+    statusEl.textContent = terminalCopyStatusText(action);
   } catch (error) {
     statusErr(localizedHtml('status.copyFailed', {error}));
+  } finally {
+    clearTerminalVisibleSelection(session, term, container, action.reason);
   }
 }
 
 function copyTerminalSelectionFromShortcut(session, term, options = {}, container = null) {
   const selected = terminalSelectedText(term, container);
+  const action = terminalCopyActionForOptions(options);
   if (!selected) {
-    statusEl.textContent = 'nothing selected';
+    statusEl.textContent = t('status.nothingSelected');
     return false;
   }
-  const text = options.dedent ? dedentSelectionText(selected) : selected;
-  writeTerminalTextToClipboard(text, options.dedent ? 'copied without indent' : 'copied');
+  const text = action.dedent ? dedentSelectionText(selected) : selected;
+  writeTerminalTextToClipboard(text, {
+    action,
+    afterCopy: () => clearTerminalVisibleSelection(session, term, container, action.reason),
+  });
   return true;
 }
 
@@ -2308,25 +2451,27 @@ function copyTerminalSelectionToClipboardEvent(session, term, event, container =
   event.clipboardData.setData('text/plain', selected);
   event.preventDefault();
   event.stopPropagation();
-  statusEl.textContent = 'copied';
-  term.clearSelection?.();
+  statusEl.textContent = terminalCopyStatusText(TERMINAL_COPY_ACTIONS.selected);
+  clearTerminalVisibleSelection(session, term, container, TERMINAL_COPY_ACTIONS.selected.reason);
   return true;
 }
 
-async function copyTmuxSelectionToClipboard(session) {
+async function copyTmuxSelectionToClipboard(session, term = null, container = null) {
   const payloadPromise = fetchTmuxSelectionText(session);
   try {
     const {payload, text} = await copyDeferredTextToClipboard(payloadPromise);
     const chars = Number.isFinite(Number(payload.chars)) ? Number(payload.chars) : text.length;
-    statusEl.textContent = `copied ${chars} chars from tmux`;
+    statusEl.textContent = terminalCopyStatusText(TERMINAL_COPY_ACTIONS.tmux, {count: chars});
     return true;
   } catch (error) {
     if (error?.noClipboardText) {
-      statusEl.textContent = error.message || 'nothing selected';
+      statusEl.textContent = error.message || t('status.nothingSelected');
       return false;
     }
     statusErr(localizedHtml('status.copyFailed', {error}));
     return false;
+  } finally {
+    clearTerminalVisibleSelection(session, term, container, 'copy-tmux-selection');
   }
 }
 
@@ -2334,7 +2479,7 @@ async function fetchTmuxSelectionText(session) {
   const payload = await apiFetchJson(`/api/tmux-copy-selection?session=${encodeURIComponent(session)}`, {method: 'POST'});
   const text = payload?.copied ? String(payload.text || '') : '';
   if (!text) {
-    const error = new Error(payload?.error === 'tmux copy mode is not active' ? 'nothing selected' : (payload?.error || 'nothing selected'));
+    const error = new Error(payload?.error === 'tmux copy mode is not active' ? t('status.nothingSelected') : (payload?.error || t('status.nothingSelected')));
     error.noClipboardText = true;
     throw error;
   }
@@ -2391,7 +2536,7 @@ function installTerminalOsc52Bridge(session, term) {
     copyDebug('osc52', {session, payloadChars: String(data ?? '').length, textChars: text ? text.length : 0});
     if (text) {
       rememberTerminalAppClipboardText(session, text);
-      writeTerminalTextToClipboard(text, `copied ${text.length} chars`);
+      writeTerminalTextToClipboard(text, {action: TERMINAL_COPY_ACTIONS.osc52, params: {count: text.length}});
     }
     return true; // consumed either way; '?' queries get no reply
   });
@@ -2407,7 +2552,7 @@ function handleTerminalCopyShortcutKeydown(session, term, container, event) {
       || (!isMacPlatform() && event.ctrlKey && !event.metaKey));
   if (isTmuxCopyShortcut) {
     event.preventDefault();
-    copyTmuxSelectionToClipboard(session);
+    copyTmuxSelectionToClipboard(session, term, container);
     return true;
   }
   const isCmdC = event.metaKey && !event.ctrlKey && !event.altKey;
@@ -2429,15 +2574,14 @@ function handleTerminalCopyShortcutKeydown(session, term, container, event) {
       // in a Claude/tmux pane the APP owns the mouse, so a plain drag never creates an xterm
       // selection — tell the user the working gestures instead of dead-ending.
       statusEl.textContent = isMacPlatform()
-        ? 'nothing selected — Option-drag selects while Claude/tmux owns the mouse; Cmd-Option-C copies the tmux selection'
-        : 'nothing selected — Shift-drag selects while the app owns the mouse; Ctrl-Alt-C copies the tmux selection';
+        ? t('terminal.copyHintMac')
+        : t('terminal.copyHintPc');
       return true;
     }
     return false; // no selection: let Ctrl-C through as SIGINT
   }
   event.preventDefault();
   copyTerminalSelectionFromShortcut(session, term, {}, container);
-  term.clearSelection?.(); // so a second Ctrl-C falls through to SIGINT
   return true;
 }
 
@@ -2488,16 +2632,26 @@ async function showTerminalContextMenu(session, term, x, y, container = null, pr
   const selection = terminalContextMenuSelection(session, term, container, presetSelection);
   const selected = selection.text;
   copyDebug('contextmenu', {session, selectionSource: selection.source, chars: selected.length});
-  const items = [
-    ['Copy', false],
-    ['Copy without indent', true],
-  ];
-  for (const [label, dedent] of items) {
-    appendContextMenuButton(menu, label, () => copyTerminalSelection(session, term, {dedent, selectionText: selected}, container), closeTerminalContextMenu, {disabled: !selected});
+  const hasUrlReference = terminalReference?.type === 'url';
+  if (hasUrlReference) {
+    if (appendTerminalReferenceContextMenuItems(menu, terminalReference, fileTarget, {selectionText: selected, session, term, container})) {
+      appendContextMenuSeparator(menu);
+    }
+  } else {
+    const items = [
+      [TERMINAL_COPY_ACTIONS.selected, false],
+      [TERMINAL_COPY_ACTIONS.selectedDedent, true],
+    ];
+    for (const [action, dedent] of items) {
+      appendContextMenuButton(menu, terminalCopyActionLabel(action), () => copyTerminalSelection(session, term, {action, dedent, selectionText: selected}, container), closeTerminalContextMenu, {disabled: !selected});
+    }
+    appendContextMenuSeparator(menu);
+    if (appendTerminalReferenceContextMenuItems(menu, terminalReference, fileTarget, {selectionText: selected, session, term, container})) appendContextMenuSeparator(menu);
   }
-  appendContextMenuSeparator(menu);
-  if (appendTerminalReferenceContextMenuItems(menu, terminalReference, fileTarget)) appendContextMenuSeparator(menu);
-  appendContextMenuButton(menu, t('terminal.copyTmuxSelection'), () => copyTmuxSelectionToClipboard(session), closeTerminalContextMenu);
+  appendContextMenuButton(menu, terminalCopyActionLabel(TERMINAL_COPY_ACTIONS.tmux), () => copyTmuxSelectionToClipboard(session, term, container), closeTerminalContextMenu);
+  if (hasUrlReference) {
+    appendContextMenuButton(menu, terminalCopyActionLabel(TERMINAL_COPY_ACTIONS.selectedDedent), () => copyTerminalSelection(session, term, {action: TERMINAL_COPY_ACTIONS.selectedDedent, dedent: true, selectionText: selected}, container), closeTerminalContextMenu, {disabled: !selected});
+  }
   terminalContextMenu.open(menu, x, y);
 }
 

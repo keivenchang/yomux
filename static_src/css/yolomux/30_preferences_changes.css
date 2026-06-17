@@ -1148,7 +1148,7 @@ body.theme-light .changes-diff-remove {
 }
 body.theme-light .keyboard-shortcut-row kbd {
   color: var(--text);
-  background: #f8fafc;
+  background: var(--panel2);
   border-color: var(--line);
 }
 .preferences-setting-control input[type="checkbox"] {
@@ -1347,12 +1347,12 @@ body.theme-light .preferences-inline-action {
    ============================================================================ */
 body.theme-light .command-palette-dialog,
 body.theme-light .keyboard-shortcuts-dialog {
-  background: #ffffff;
-  border-color: #cdd5e0;
+  background: var(--panel);
+  border-color: var(--line);
   box-shadow: 0 24px 70px rgb(var(--overlay-slate-rgb) / 0.22);
 }
 body.theme-light .command-palette-input {
-  background: #f3f6fa;
+  background: var(--panel2);
 }
 body.theme-light .command-palette-row {
   color: var(--pc-control-fg);
@@ -1366,7 +1366,7 @@ body.theme-light .command-palette-row:hover {
 body.theme-light .command-palette-group,
 body.theme-light .command-palette-detail,
 body.theme-light .command-palette-keybinding {
-  color: #586072;
+  color: var(--muted);
 }
 body.theme-light .keyboard-shortcuts-section h3 {
   color: var(--active-accent-bright);
@@ -1380,7 +1380,7 @@ body.theme-light .keyboard-shortcut-row {
 }
 body.theme-light .keyboard-shortcut-row kbd {
   color: var(--pc-control-fg);
-  background: #eef1f5;
+  background: var(--panel2);
   border-color: rgb(var(--overlay-slate-rgb) / 0.18);
 }
 body.theme-light .preferences-global-reset {
