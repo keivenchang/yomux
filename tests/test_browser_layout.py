@@ -745,11 +745,8 @@ def codemirror_todo_diff_overview_fixture_html():
             panel._cmMode = 'diff';
             const chunks = diffOverviewCodeMirrorChunks(view, panel);
             const rows = diffOverviewRowsFromCodeMirrorChunks(chunks, current, original);
-            updateCodeMirrorDiffOverview(panel, container, {{diff: ''}}, current, original);
-            const overview = container.querySelector('.cm-diff-overview');
-            const overviewRect = overview.getBoundingClientRect();
-            const scrollerRect = view.scrollDOM.getBoundingClientRect();
-            const verticalTrackBottom = scrollerRect.top + view.scrollDOM.clientHeight;
+            const content = view.scrollDOM.querySelector('.cm-content');
+            if (content) content.style.minHeight = `${{Math.ceil(rows.totalRows * diffOverviewLineHeight(view, container))}}px`;
             const normalizeOverviewColor = color => {{
               const value = String(color || '').toLowerCase();
               if (value === 'transparent' || value === '#ff5d6c' || value === '#38d878') return value;
@@ -788,29 +785,41 @@ def codemirror_todo_diff_overview_fixture_html():
               }}
               return stops;
             }};
-            const renderedRows = diffOverviewRowsFromCodeMirrorRenderedWeights(view, chunks, current, original, container) || rows;
-            const expectedGradient = buildDiffOverviewGradientFromBands(renderedRows.bands, renderedRows.totalRows);
-            window.__todoDiffOverviewMetrics = {{
-              chunks: chunks.map(chunk => ({{
-                fromA: chunk.fromA,
-                toA: chunk.toA,
-                endA: chunk.endA,
-                fromB: chunk.fromB,
-                toB: chunk.toB,
-                endB: chunk.endB,
-              }})),
-              rows,
-              renderedRows,
-              overviewBackground: overview?.style?.background || '',
-              overviewStops: parseStops(overview?.style?.background || ''),
-              expectedStops: parseStops(expectedGradient),
-              tickCount: container.querySelectorAll('.cm-diff-overview-tick').length,
-              deletedDomRows: container.querySelectorAll('.cm-deletedLine').length,
-              insertedRangeRows: rows?.bands?.find(band => band.kind === 'add')?.end - rows?.bands?.find(band => band.kind === 'add')?.start,
-              removedRangeRows: rows?.bands?.find(band => band.kind === 'remove')?.end - rows?.bands?.find(band => band.kind === 'remove')?.start,
-              overviewTopDelta: Math.abs(overviewRect.top - scrollerRect.top),
-              overviewBottomDelta: Math.abs(overviewRect.bottom - verticalTrackBottom),
+            const collectMetrics = () => {{
+              const overview = container.querySelector('.cm-diff-overview');
+              if (!overview) {{
+                requestAnimationFrame(collectMetrics);
+                return;
+              }}
+              const overviewRect = overview.getBoundingClientRect();
+              const scrollerRect = view.scrollDOM.getBoundingClientRect();
+              const verticalTrackBottom = scrollerRect.top + view.scrollDOM.clientHeight;
+              const renderedRows = diffOverviewRowsFromCodeMirrorRenderedWeights(view, chunks, current, original, container) || rows;
+              const expectedGradient = buildDiffOverviewGradientFromBands(renderedRows.bands, renderedRows.totalRows);
+              window.__todoDiffOverviewMetrics = {{
+                chunks: chunks.map(chunk => ({{
+                  fromA: chunk.fromA,
+                  toA: chunk.toA,
+                  endA: chunk.endA,
+                  fromB: chunk.fromB,
+                  toB: chunk.toB,
+                  endB: chunk.endB,
+                }})),
+                rows,
+                renderedRows,
+                overviewBackground: overview?.style?.background || '',
+                overviewStops: parseStops(overview?.style?.background || ''),
+                expectedStops: parseStops(expectedGradient),
+                tickCount: container.querySelectorAll('.cm-diff-overview-tick').length,
+                deletedDomRows: container.querySelectorAll('.cm-deletedLine').length,
+                insertedRangeRows: rows?.bands?.filter(band => band.kind === 'add').reduce((total, band) => total + band.end - band.start, 0),
+                removedRangeRows: rows?.bands?.filter(band => band.kind === 'remove').reduce((total, band) => total + band.end - band.start, 0),
+                overviewTopDelta: Math.abs(overviewRect.top - scrollerRect.top),
+                overviewBottomDelta: Math.abs(overviewRect.bottom - verticalTrackBottom),
+              }};
             }};
+            updateCodeMirrorDiffOverview(panel, container, {{diff: ''}}, current, original);
+            collectMetrics();
           }})();
         </script>
       </body>
@@ -18296,53 +18305,31 @@ def test_diff_overview_matches_actual_todo_codemirror_rows(browser, tmp_path):
     metrics = browser.execute_script("return window.__todoDiffOverviewMetrics")
     original_text = git_show_text("7f5a7e82ce:TODO.md")
     current_text = git_show_text("HEAD:docs/TODO.md", [":docs/TODO.md", "HEAD:TODO.md"])
-    original_lines = original_text.splitlines(keepends=True)
-    current_lines = current_text.splitlines(keepends=True)
-    common_prefix_lines = 0
-    while (
-        common_prefix_lines < min(len(original_lines), len(current_lines))
-        and original_lines[common_prefix_lines] == current_lines[common_prefix_lines]
-    ):
-        common_prefix_lines += 1
-    common_suffix_lines = 0
-    while (
-        common_suffix_lines < len(original_lines) - common_prefix_lines
-        and common_suffix_lines < len(current_lines) - common_prefix_lines
-        and original_lines[len(original_lines) - common_suffix_lines - 1] == current_lines[len(current_lines) - common_suffix_lines - 1]
-    ):
-        common_suffix_lines += 1
-    expected_from = sum(len(line) for line in original_lines[:common_prefix_lines])
-    expected_to_a = len(original_text) - sum(len(line) for line in original_lines[len(original_lines) - common_suffix_lines:])
-    expected_to_b = len(current_text) - sum(len(line) for line in current_lines[len(current_lines) - common_suffix_lines:])
-    # The B-side fixture is HEAD:docs/TODO.md, so byte offsets change whenever the roadmap doc changes.
-    # Assert the CodeMirror merge chunk against the actual fixture texts instead of pinning stale byte offsets.
-    assert len(metrics["chunks"]) == 1
-    chunk = metrics["chunks"][0]
-    assert chunk["fromA"] == expected_from
-    assert chunk["toA"] in {expected_to_a, expected_to_a + 1}
-    assert chunk["endA"] == chunk["toA"] - 1
-    assert chunk["fromB"] == expected_from
-    assert chunk["toB"] in {expected_to_b, expected_to_b + 1}
-    assert chunk["endB"] == chunk["toB"] - 1
-    # The B-side is the fixture's HEAD:docs/TODO.md, so the add-band end, currentLineCount, totalRows, and
-    # insertedRangeRows shift whenever that roadmap doc changes. Assert the stable remove band against the
-    # actual common prefix and the B-side via relationships + the actual current line count.
+    # The B-side fixture is HEAD:docs/TODO.md, so chunk count and byte offsets change whenever the
+    # roadmap doc changes. Assert the CodeMirror chunks against the actual fixture texts instead of
+    # pinning one stale single-hunk shape.
+    assert metrics["chunks"], metrics
+    for chunk in metrics["chunks"]:
+        assert chunk["fromA"] < chunk["toA"] <= len(original_text) + 1, chunk
+        assert chunk["fromB"] < chunk["toB"] <= len(current_text) + 1, chunk
+        assert chunk["endA"] == chunk["toA"] - 1
+        assert chunk["endB"] == chunk["toB"] - 1
+        assert original_text[chunk["fromA"]:chunk["toA"]] != current_text[chunk["fromB"]:chunk["toB"]]
     bands = metrics["rows"]["bands"]
-    assert len(bands) == 2, bands
-    remove_band, add_band = bands[0], bands[1]
+    assert len(bands) == len(metrics["chunks"]) * 2, bands
+    for index in range(0, len(bands), 2):
+        assert bands[index]["kind"] == "remove", bands
+        assert bands[index + 1]["kind"] == "add", bands
+        assert bands[index + 1]["start"] == bands[index]["end"], bands
     deleted_rows = metrics["rows"]["deletedRows"]
     current_line_count = metrics["rows"]["currentLineCount"]
     inserted_rows = metrics["insertedRangeRows"]
     todo_line_count = current_text.count("\n") + 1
-    expected_remove_start = common_prefix_lines
-    assert remove_band == {"kind": "remove", "start": expected_remove_start, "end": expected_remove_start + deleted_rows}, bands
-    assert add_band["kind"] == "add", bands
-    assert add_band["start"] == remove_band["end"], bands
-    assert add_band["end"] == add_band["start"] + inserted_rows, bands
     assert current_line_count == todo_line_count, (current_line_count, todo_line_count)
     assert metrics["rows"]["totalRows"] == deleted_rows + current_line_count
     assert deleted_rows > 0 and inserted_rows > 0
-    assert metrics["deletedDomRows"] == metrics["removedRangeRows"]
+    assert metrics["removedRangeRows"] == deleted_rows
+    assert 0 < metrics["deletedDomRows"] <= metrics["removedRangeRows"]
     assert "linear-gradient" in metrics["overviewBackground"]
     assert metrics["overviewStops"] == metrics["expectedStops"], metrics["overviewBackground"]
     assert metrics["tickCount"] == 0

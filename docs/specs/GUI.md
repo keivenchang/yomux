@@ -98,7 +98,7 @@ Section order follows the reading path: a capabilities overview and glossary, th
 - Active/typing-ready panes feed the same active-ring color into Dockview and legacy pane chrome.
 - The active ring is a state indicator, not layout capacity. Changing pane spacing must not shift terminal text under the ring.
 - Terminal panes must fit against the full pane content box and then stay stable. The fallback pre-render cell probe uses the same bundled mono font token as xterm (`YOLOmux Mono` via the shared terminal font family), bundled-font readiness performs one shared post-font refit, duplicate ResizeObserver echoes with unchanged pane size and cell metrics must not call `term.resize()` again, and Dockview host resize observer work is coalesced to one layout per animation frame.
-- Browser tabs that are hidden/backgrounded must not publish terminal resize frames or assert host tmux dimensions. A terminal WebSocket attach with no explicit foreground resize reuses the last known host dimensions for that session instead of attaching a small default PTY that can become tmux's latest client size and shrink the foreground pane.
+- Browser tabs that are hidden/backgrounded must not publish terminal resize frames or assert host tmux dimensions. When a YOLOmux browser window becomes active, it scans the currently visible pane tabs and sends foreground resize claims for each visible xterm; those claims make only that browser's visible tmux clients count for window sizing. A terminal WebSocket attach with no explicit foreground resize reuses the last known host dimensions for that session instead of attaching a small default PTY that can shrink the foreground pane.
 
 ## Visual Preview Contract
 

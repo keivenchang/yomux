@@ -1484,7 +1484,8 @@ function wsUrl(session) {
     const params = new URLSearchParams({session, token: shareToken, viewer: shareViewerId});
     return `${scheme}//${location.host}/ws/share-view?${params.toString()}`;
   }
-  return `${scheme}//${location.host}/ws?session=${encodeURIComponent(session)}`;
+  const params = new URLSearchParams({session, client: shareClientId});
+  return `${scheme}//${location.host}/ws?${params.toString()}`;
 }
 
 function renderTransportWarning() {

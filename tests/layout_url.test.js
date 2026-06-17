@@ -663,6 +663,7 @@ globalThis.__layoutTestApi = {
   autoFocusEnabledForTest() { return autoFocusEnabled; },
   selectSession,
   selectPanelOnHover,
+  claimVisibleTerminalResizeAuthorityForTest: claimVisibleTerminalResizeAuthority,
   focusTerminalWhenAutoFocus,
   focusPanel,
   focusTerminalFromUserAction,
@@ -6067,7 +6068,7 @@ test('t@2560', () => {
     assert.ok(/const shareViewerId = \(\(\) => \{[\s\S]*sessionStorage\.getItem\(key\)[\s\S]*randomShareViewerId/.test(shareSource), 'share-view pages keep one viewer id across all terminal websockets in the page');
     assert.ok(/const shareClientId = \(\(\) => \{[\s\S]*shareViewMode[\s\S]*sessionStorage\.getItem\(key\)[\s\S]*randomShareViewerId/.test(shareSource), 'every host/viewer browser gets a stable share client id for echo suppression and cursor color');
     assert.ok(/function wsUrl\(session\)[\s\S]*shareViewMode[\s\S]*URLSearchParams\(\{session, token: shareToken, viewer: shareViewerId\}\)[\s\S]*\/ws\/share-view\?/.test(shareSource), 'share-view terminals use /ws/share-view with the fragment token and shared viewer id');
-    assert.ok(/function sendRemoteResize\(session\)[\s\S]*if \(shareViewMode\) return/.test(shareSource), 'share-view terminals cannot send remote resize frames');
+    assert.ok(/function terminalCanPublishRemoteSize\(\)[\s\S]*!shareViewMode/.test(shareSource), 'share-view terminals cannot send remote resize frames');
     assert.ok(/function shareHostWsUrl\(token\)[\s\S]*URLSearchParams\(\{share: token, client: shareClientId\}\)[\s\S]*\/ws\/share-host\?\$\{params\.toString\(\)\}/.test(shareSource), 'share hosts publish UI state through /ws/share-host with a sender client id');
     assert.ok(/function shareViewerUiWsUrl\(token\)[\s\S]*\/ws\/share-ui\?/.test(shareSource), 'share-view clients receive UI state through the share-scoped /ws/share-ui socket');
     assert.ok(/function startShareStatusRefresh\(\)[\s\S]*if \(shareViewMode\)[\s\S]*ensureShareHostSockets\(\)/.test(shareSource), 'read-only share viewers also open the UI socket so editor/Finder-only layouts receive mirror frames');
@@ -6225,7 +6226,7 @@ test('t@2560', () => {
     assert.ok(/'touchstart'[\s\S]*'touchmove'[\s\S]*'wheel'/.test(shareSource.slice(shareSource.indexOf('function installShareReadonlyInteractionBlocker'))), 'DOIT.67: read-only share blocker captures touch/wheel before mirrored panes can scroll locally');
     assert.ok(/function shareReadonlyPointerEventHitsScrollContainer\(event\)[\s\S]*shareScrollTargetForElement\(event\.target\)[\s\S]*descriptor\.element === event\.target/.test(shareSource), 'read-only share pointerdown on native scroll containers is blocked so scrollbar drags cannot mutate local scroll');
     assert.ok(/function blockShareReadonlyInteraction\(event\)[\s\S]*shareSemanticReadOnlyMirrorEnabled\(\)[\s\S]*\[data-share-viewer-control\][\s\S]*preventDefault/.test(shareSource), 'semantic read-only share blocking exempts only viewer chrome controls');
-    assert.ok(/installShareReadonlyInteractionBlocker\(\);\s*window\.addEventListener\('keydown', handleGlobalShortcutKeydown, true\)/.test(shareSource), 'read-only share interaction blocking is installed before global shortcuts can mutate local UI');
+    assert.ok(/installShareReadonlyInteractionBlocker\(\);[\s\S]*window\.addEventListener\('keydown', handleGlobalShortcutKeydown, true\)/.test(shareSource), 'read-only share interaction blocking is installed before global shortcuts can mutate local UI');
     assert.ok(/function openAppMenu\(wrapper, options = \{\}\)[\s\S]*scheduleSharePopupLayerPublish\(\{immediate: true\}\)/.test(shareSource), 'DOIT.67: top-level app menu opens immediately publish the host-owned popup layer');
     assert.ok(/function closeAppMenus\(keepOpen = null\)[\s\S]*scheduleSharePopupLayerPublish\(\{immediate: true\}\)/.test(shareSource), 'DOIT.67: top-level app menu closes immediately clear the host-owned popup layer');
     assert.ok(/function sharePopupLayerElements\(\)[\s\S]*'\.app-menu\.open \.app-menu-popover'/.test(shareSource), 'topbar File/tmux/Tabs/language dropdowns are captured through the shared popup-layer selector');
@@ -8007,8 +8008,39 @@ test('t@2560', () => {
   api.fitTerminalForTest('stable');
   assert.equal(stableFits.length, 2, 'a real pane width change still resizes the terminal');
   assert.ok(/function terminalCanPublishRemoteSize\(\)\s*\{[\s\S]*document\.visibilityState !== 'hidden'/.test(source), 'hidden/background browser tabs cannot publish terminal resize authority');
-  assert.ok(/function sendRemoteResize\(session\)[\s\S]*terminalCanPublishRemoteSize\(\)[\s\S]*foreground:\s*true/.test(source), 'terminal resize frames carry explicit foreground authority');
+  assert.ok(/function wsUrl\(session\)[\s\S]*new URLSearchParams\(\{session, client: shareClientId\}\)/.test(source), 'terminal sockets carry a stable browser client id for resize authority');
+  assert.ok(/function sendRemoteResize\(session, options = \{\}\)[\s\S]*terminalCanPublishRemoteSize\(\)[\s\S]*foreground:\s*true[\s\S]*message\.activate = true[\s\S]*message\.client = shareClientId/.test(source), 'terminal resize frames carry explicit foreground authority and browser identity');
+  assert.ok(/function claimVisibleTerminalResizeAuthority\(reason = '', options = \{\}\)[\s\S]*visibleTerminalResizeAuthorityEntries\(\)[\s\S]*fitTerminal\(session, \{claim: true\}\)/.test(source), 'browser activation claims every visible xterm pane through the shared fit path');
+  assert.ok(/function installTerminalResizeAuthorityHandlers\(\)[\s\S]*window\.addEventListener\('focus'[\s\S]*document\.addEventListener\('visibilitychange'/.test(source), 'browser focus/visibility activates visible xterm resize authority');
   assert.ok(/function scheduleRemoteResize\(session,[\s\S]*terminalCanPublishRemoteSize\(\)[\s\S]*item\.resizeTimer = null/.test(source), 'hidden/background tabs cancel pending terminal resize timers instead of shrinking tmux later');
+  const authorityApi = loadYolomux('', ['1', '2', '3']);
+  const authoritySlots = authorityApi.emptyLayoutSlots();
+  authoritySlots[authorityApi.layoutTreeKey] = authorityApi.splitNode('row', authorityApi.leafNode('left'), authorityApi.leafNode('right'), 50);
+  authoritySlots.left = authorityApi.paneStateWithTabs(['1'], '1');
+  authoritySlots.right = authorityApi.paneStateWithTabs(['2'], '2');
+  authorityApi.setLayoutSlotsForTest(authoritySlots);
+  const authoritySends = [];
+  for (const session of ['1', '2', '3']) {
+    const pane = authorityApi.testElementForId(`terminal-pane-${session}`);
+    pane.classList.add('active');
+    pane.clientWidth = session === '2' ? 900 : 720;
+    pane.clientHeight = 260;
+    authorityApi.registerTerminalForTest(session, {
+      cols: 80,
+      rows: 24,
+      _core: {_renderService: {_renderer: {dimensions: {css: {cell: {width: 9, height: 18}}}}}},
+      resize(cols, rows) {
+        this.cols = cols;
+        this.rows = rows;
+      },
+      refresh() {},
+    }, {readyState: WebSocket.OPEN, send(message) { authoritySends.push({session, message: JSON.parse(message)}); }});
+  }
+  authorityApi.claimVisibleTerminalResizeAuthorityForTest('test', {force: true});
+  assert.deepEqual(authoritySends.map(item => item.session).sort(), ['1', '2'], 'browser activation claims all visible xterm panes and skips hidden/background tabs');
+  assert.equal(authoritySends.every(item => item.message.type === 'resize' && item.message.foreground === true && item.message.activate === true && item.message.client), true, 'activation resize frames carry foreground authority, activation, and browser id');
+  authorityApi.claimVisibleTerminalResizeAuthorityForTest('test');
+  assert.equal(authoritySends.length, 2, 'same browser surface does not keep re-sending unchanged visible terminal authority');
   const terminalPane = api.testElementForId('terminal-pane-1');
   terminalPane.classList.add('active');
   terminalPane.clientWidth = 720;

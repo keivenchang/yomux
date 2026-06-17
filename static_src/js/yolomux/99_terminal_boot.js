@@ -8691,6 +8691,7 @@ function handleGlobalShortcutKeydown(event) {
   }
 }
 installShareReadonlyInteractionBlocker();
+installTerminalResizeAuthorityHandlers();
 window.addEventListener('keydown', handleGlobalShortcutKeydown, true);
 window.addEventListener('resize', () => {
   syncAppViewportBreakpointClasses();

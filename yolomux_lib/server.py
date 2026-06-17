@@ -70,6 +70,7 @@ from .websocket import set_pty_size
 PTY_DIMENSION_MIN = 1
 PTY_DIMENSION_MAX = 1000
 WEBSOCKET_FRAME_READ_TIMEOUT_SECONDS = 5.0
+RESIZE_AUTHORITY_CLIENT_ID_MAX = 128
 SHARE_VIEWER_QUEUE_HIGH_WATER_BYTES = 256 * 1024
 SHARE_VIEWER_POINTER_WAKE_FRAME = b""
 SHARE_VIEWER_OVERFLOW_LIMIT = 3
@@ -303,6 +304,118 @@ def ws_resize_dimensions(message: dict[str, Any], default_rows: int, default_col
     return clamp_pty_dimension(rows), clamp_pty_dimension(cols)
 
 
+def clean_resize_authority_client_id(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return re.sub(r"[^A-Za-z0-9_.:-]+", "-", text)[:RESIZE_AUTHORITY_CLIENT_ID_MAX]
+
+
+def tmux_attach_command(readonly: bool = False) -> list[str]:
+    args = tmux_command(["attach-session"])
+    if readonly:
+        args.append("-r")
+    args.extend(["-f", "ignore-size"])
+    return args
+
+
+def tmux_client_name_for_fd(fd: int) -> str:
+    try:
+        return os.ttyname(fd)
+    except OSError:
+        return ""
+
+
+def proc_status_parent_pid(pid: int) -> int | None:
+    try:
+        for line in Path(f"/proc/{pid}/status").read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("PPid:"):
+                return int(line.split(":", 1)[1].strip() or "0")
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def proc_cmdline(pid: int) -> str:
+    try:
+        data = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return ""
+    return data.replace(b"\0", b" ").decode("utf-8", errors="replace").strip()
+
+
+def tmux_client_pid_is_yolomux_managed(pid: int) -> bool:
+    cmdline = proc_cmdline(pid)
+    if "tmux" not in cmdline or "attach-session" not in cmdline:
+        return False
+    parent_pid = proc_status_parent_pid(pid)
+    if not parent_pid:
+        return False
+    return "yolomux.py" in proc_cmdline(parent_pid)
+
+
+def tmux_resize_authority_client_rows(session: str) -> list[dict[str, Any]]:
+    fmt = "\t".join(("#{client_name}", "#{client_session}", "#{client_pid}", "#{client_flags}"))
+    result = subprocess.run(
+        tmux_command(["list-clients", "-F", fmt]),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return []
+    rows: list[dict[str, Any]] = []
+    clean_session = str(session or "")
+    for line in result.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 4 or parts[1] != clean_session:
+            continue
+        try:
+            pid = int(parts[2])
+        except ValueError:
+            continue
+        if not tmux_client_pid_is_yolomux_managed(pid):
+            continue
+        rows.append({"name": parts[0], "session": parts[1], "pid": pid, "flags": parts[3]})
+    return rows
+
+
+def tmux_client_has_flag(row: dict[str, Any], flag: str) -> bool:
+    return flag in {item.strip() for item in str(row.get("flags") or "").split(",") if item.strip()}
+
+
+def refresh_tmux_client_ignore_size(client_name: str, ignore_size: bool) -> bool:
+    if not client_name:
+        return False
+    result = subprocess.run(
+        tmux_command(["refresh-client", "-t", client_name, "-f", "ignore-size" if ignore_size else "!ignore-size"]),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def claim_tmux_resize_authority(session: str, client_name: str) -> bool:
+    clean_client_name = str(client_name or "").strip()
+    if not clean_client_name:
+        return False
+    changed = False
+    found_current = False
+    for row in tmux_resize_authority_client_rows(session):
+        name = str(row.get("name") or "")
+        if name == clean_client_name:
+            found_current = True
+        should_ignore = name != clean_client_name
+        if tmux_client_has_flag(row, "ignore-size") == should_ignore:
+            continue
+        changed = refresh_tmux_client_ignore_size(name, should_ignore) or changed
+    if not found_current:
+        changed = refresh_tmux_client_ignore_size(clean_client_name, False) or changed
+    return changed
+
+
 def configure_session_tmux_options(session: str) -> None:
     """Set the shared tmux options every YOLOmux attach needs, idempotent and best-effort.
 
@@ -312,13 +425,11 @@ def configure_session_tmux_options(session: str) -> None:
     - set-clipboard on: tmux's default `external` IGNORES application OSC 52, so Claude's copy
       would never reach the browser; `on` forwards it to this client.
     - window-size largest + aggressive-resize on: YOLOmux spawns one `attach-session` client per
-      WebSocket, so two browser surfaces on the same session attach as two differently-sized
-      clients. Under tmux's default `latest`, the most-recently-active (often smaller) client
-      keeps resizing the shared window; when it shrinks below a larger client's height that
-      client's xterm is left rendering tmux's now-shorter grid and the status line smears across
-      the orphaned rows. `largest` pins the window to the largest viewing client so the larger
-      view never smears or minimizes (smaller duplicates clip instead); `aggressive-resize`
-      scopes that to clients actually viewing the window rather than the whole session.
+      WebSocket, so two browser surfaces on one session attach as differently-sized clients. The
+      attach itself starts with `ignore-size`; browser activation later clears that flag for the
+      active YOLOmux surface and sets it for the other YOLOmux clients on the same session. Keeping
+      `largest` avoids the old tmux `latest` status-line smear while active-surface authority keeps
+      a wide background browser from stretching the foreground browser.
     """
     target = tmux_session_target(session)
     for args in (
@@ -651,9 +762,7 @@ class ShareTerminalUpstream:
         configure_session_tmux_options(self.session)
         record = self.server.app.verify_share_token(self.token)
         readonly = str((record or {}).get("mode") or "ro") != "rw"
-        attach_args = tmux_command(["attach-session"])
-        if readonly:
-            attach_args.append("-r")
+        attach_args = tmux_attach_command(readonly=readonly)
         attach_args.extend(["-t", tmux_session_target(self.session)])
         self.process = subprocess.Popen(
             attach_args,
@@ -2218,7 +2327,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def websocket(self, parsed: Any) -> None:
-        session = parse_qs(parsed.query).get("session", [""])[0]
+        qs = parse_qs(parsed.query)
+        session = qs.get("session", [""])[0]
+        resize_client_id = clean_resize_authority_client_id(qs.get("client", [""])[0])
         share_sessions = self.share_sessions()
         if share_sessions and session not in share_sessions:
             self.write_text("share token is scoped to a different session\n", status=HTTPStatus.FORBIDDEN)
@@ -2228,7 +2339,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return
         if not self.accept_websocket():
             return
-        self.bridge_tmux(session, readonly=self.auth_readonly())
+        self.bridge_tmux(session, readonly=self.auth_readonly(), resize_client_id=resize_client_id)
 
     def accept_websocket(self) -> bool:
         key = self.headers.get("Sec-WebSocket-Key")
@@ -2273,7 +2384,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.server.broadcast_share_status(token)
         self.bridge_shared_tmux(token, session, viewer_id)
 
-    def bridge_tmux(self, session: str, readonly: bool = False) -> None:
+    def bridge_tmux(self, session: str, readonly: bool = False, resize_client_id: str = "") -> None:
         initial_rows, initial_cols, saw_initial_resize, pending_payloads = self.read_initial_ws_payloads()
         if not saw_initial_resize:
             initial_rows, initial_cols = self.server.host_pty_dimensions_for_session(session)
@@ -2281,12 +2392,12 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.server.record_host_pty_dimensions(session, initial_rows, initial_cols)
         master_fd, slave_fd = pty.openpty()
         set_pty_size(slave_fd, initial_rows, initial_cols)
+        tmux_client_name = tmux_client_name_for_fd(slave_fd)
+        resize_state = {"rows": initial_rows, "cols": initial_cols}
         env = os.environ.copy()
         env["TERM"] = "xterm-256color"
         configure_session_tmux_options(session)
-        attach_args = tmux_command(["attach-session"])
-        if readonly:
-            attach_args.append("-r")
+        attach_args = tmux_attach_command(readonly=readonly)
         target = tmux_session_target(session)
         attach_args.extend(["-t", target])
 
@@ -2310,10 +2421,22 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             )
 
         process = attach_tmux()
+        if not readonly and saw_initial_resize:
+            self.server.claim_resize_authority(session, tmux_client_name, resize_client_id)
 
         try:
             for payload in pending_payloads:
-                self.handle_ws_payload(session, master_fd, slave_fd, process, payload, readonly=readonly)
+                self.handle_ws_payload(
+                    session,
+                    master_fd,
+                    slave_fd,
+                    process,
+                    payload,
+                    readonly=readonly,
+                    resize_state=resize_state,
+                    tmux_client_name=tmux_client_name,
+                    resize_client_id=resize_client_id,
+                )
             connected = True
             while connected:
                 while process.poll() is None:
@@ -2333,7 +2456,17 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                             continue
                         if opcode not in {1, 2}:
                             continue
-                        self.handle_ws_payload(session, master_fd, slave_fd, process, payload, readonly=readonly)
+                        self.handle_ws_payload(
+                            session,
+                            master_fd,
+                            slave_fd,
+                            process,
+                            payload,
+                            readonly=readonly,
+                            resize_state=resize_state,
+                            tmux_client_name=tmux_client_name,
+                            resize_client_id=resize_client_id,
+                        )
                 if not connected:
                     break
                 returncode = process.poll()
@@ -2566,7 +2699,18 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         finally:
             self.connection.settimeout(previous_timeout)
 
-    def handle_ws_payload(self, session: str, master_fd: int, resize_fd: int, process: subprocess.Popen[Any], payload: bytes, readonly: bool = False) -> None:
+    def handle_ws_payload(
+        self,
+        session: str,
+        master_fd: int,
+        resize_fd: int,
+        process: subprocess.Popen[Any],
+        payload: bytes,
+        readonly: bool = False,
+        resize_state: dict[str, int] | None = None,
+        tmux_client_name: str = "",
+        resize_client_id: str = "",
+    ) -> None:
         try:
             message = json.loads(payload.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -2593,14 +2737,29 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             dimensions = ws_resize_dimensions(message, DEFAULT_ROWS, DEFAULT_COLS)
             if dimensions:
                 rows, cols = dimensions
-                set_pty_size(resize_fd, rows, cols)
+                authority_changed = False
+                if message.get("foreground") is True or message.get("activate") is True:
+                    claimer = getattr(self.server, "claim_resize_authority", None)
+                    if callable(claimer):
+                        authority_changed = bool(claimer(session, tmux_client_name, resize_client_id))
+                previous = (
+                    resize_state.get("rows"),
+                    resize_state.get("cols"),
+                ) if isinstance(resize_state, dict) else (None, None)
+                size_changed = previous != (rows, cols)
+                if size_changed:
+                    set_pty_size(resize_fd, rows, cols)
+                    if isinstance(resize_state, dict):
+                        resize_state["rows"] = rows
+                        resize_state["cols"] = cols
                 recorder = getattr(self.server, "record_host_pty_dimensions", None)
-                if callable(recorder):
+                if callable(recorder) and (size_changed or authority_changed):
                     recorder(session, rows, cols)
-                try:
-                    os.killpg(process.pid, signal.SIGWINCH)
-                except OSError:
-                    pass
+                if size_changed:
+                    try:
+                        os.killpg(process.pid, signal.SIGWINCH)
+                    except OSError:
+                        pass
         elif msg_type == "tmux-scroll":
             if readonly:
                 return
@@ -2705,6 +2864,10 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
     def host_pty_dimensions_for_session(self, session: str) -> tuple[int, int]:
         with self.host_pty_dimensions_lock:
             return self.host_pty_dimensions.get(str(session or ""), (DEFAULT_ROWS, DEFAULT_COLS))
+
+    def claim_resize_authority(self, session: str, tmux_client_name: str, resize_client_id: str = "") -> bool:
+        del resize_client_id
+        return claim_tmux_resize_authority(session, tmux_client_name)
 
     def share_terminal_upstream(self, token: str, session: str) -> ShareTerminalUpstream:
         key = (str(token or ""), str(session or ""))

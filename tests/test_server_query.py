@@ -155,13 +155,12 @@ def test_websocket_resize_dimensions_are_clamped():
     assert ws_resize_dimensions({"rows": "24", "cols": 80}, 36, 120) is None
 
 
-def test_configure_session_tmux_options_pins_window_to_largest_client(monkeypatch):
+def test_configure_session_tmux_options_uses_active_surface_authority(monkeypatch):
     # Two browser surfaces on one session attach as two differently-sized tmux clients. Under the
     # default `latest` policy the most-recently-active (often smaller) client keeps resizing the
     # shared window; when it shrinks below a larger client's height that client's xterm smears the
-    # green tmux status line across the orphaned rows. The attach-time options must forward OSC 52
-    # copy AND pin the window to the largest viewing client so the larger view never smears. All
-    # three are no-ops when only one client views the session.
+    # green tmux status line across the orphaned rows. YOLOmux keeps `largest`, starts each attach
+    # as ignore-size, and lets the active browser surface clear ignore-size only for its own client.
     monkeypatch.delenv("YOLOMUX_TMUX_SOCKET", raising=False)
     calls: list[list[str]] = []
     monkeypatch.setattr(server_module.subprocess, "run", lambda cmd, **_: calls.append(list(cmd)))
@@ -171,6 +170,38 @@ def test_configure_session_tmux_options_pins_window_to_largest_client(monkeypatc
     assert ["tmux", "set-option", "-s", "set-clipboard", "on"] in calls
     assert ["tmux", "set-option", "-t", "3:", "window-size", "largest"] in calls
     assert ["tmux", "set-option", "-wg", "aggressive-resize", "on"] in calls
+    assert server_module.tmux_attach_command(readonly=False) == ["tmux", "attach-session", "-f", "ignore-size"]
+    assert server_module.tmux_attach_command(readonly=True) == ["tmux", "attach-session", "-r", "-f", "ignore-size"]
+
+
+def test_claim_tmux_resize_authority_ignores_other_yolomux_clients(monkeypatch):
+    monkeypatch.delenv("YOLOMUX_TMUX_SOCKET", raising=False)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        if "list-clients" in cmd:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    "/dev/pts/1\t6\t101\tattached,ignore-size,UTF-8\n"
+                    "/dev/pts/2\t6\t102\tattached,UTF-8\n"
+                    "/dev/pts/3\t6\t103\tattached,UTF-8\n"
+                    "/dev/pts/4\t7\t104\tattached,UTF-8\n"
+                ),
+                stderr="",
+            )
+        calls.append(list(cmd))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(server_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(server_module, "tmux_client_pid_is_yolomux_managed", lambda pid: pid != 103)
+
+    assert server_module.claim_tmux_resize_authority("6", "/dev/pts/1") is True
+
+    assert ["tmux", "refresh-client", "-t", "/dev/pts/1", "-f", "!ignore-size"] in calls
+    assert ["tmux", "refresh-client", "-t", "/dev/pts/2", "-f", "ignore-size"] in calls
+    assert all("/dev/pts/3" not in call for call in calls)
+    assert all("/dev/pts/4" not in call for call in calls)
 
 
 def test_both_attach_paths_route_through_shared_tmux_options():
@@ -757,17 +788,19 @@ def test_server_source_wires_routing_ws_readonly_and_pty_setup():
 
     assert 'if parsed.path == "/api/upload":' in post_body
     assert 'if parsed.path == "/api/event":' in post_body
-    assert "self.bridge_tmux(session, readonly=self.auth_readonly())" in ws_body
-    assert "if readonly:" in bridge_body and 'attach_args.append("-r")' in bridge_body
-    assert 'tmux_command(["attach-session"])' in bridge_body
+    assert "resize_client_id = clean_resize_authority_client_id" in ws_body
+    assert "self.bridge_tmux(session, readonly=self.auth_readonly(), resize_client_id=resize_client_id)" in ws_body
+    assert "tmux_attach_command(readonly=readonly)" in bridge_body
     assert 'tmux_command(["has-session", "-t", target])' in bridge_body
     assert "set_pty_size(slave_fd, initial_rows, initial_cols)" in bridge_body
     assert "saw_initial_resize" in bridge_body
     assert "host_pty_dimensions_for_session(session)" in bridge_body
     assert "record_host_pty_dimensions(session, initial_rows, initial_cols)" in bridge_body
+    assert "self.server.claim_resize_authority(session, tmux_client_name, resize_client_id)" in bridge_body
     assert 'message.get("foreground") is False' in initial_payload_body
     assert "saw_resize = True" in initial_payload_body
     assert 'message.get("foreground") is False' in payload_body
+    assert 'message.get("activate") is True' in payload_body
 
 
 def test_share_write_mode_stays_terminal_input_only():
@@ -778,8 +811,7 @@ def test_share_write_mode_stays_terminal_input_only():
 
     assert 'record = self.server.app.verify_share_token(self.token)' in upstream_start
     assert 'str((record or {}).get("mode") or "ro") != "rw"' in upstream_start
-    assert 'tmux_command(["attach-session"])' in upstream_start
-    assert 'attach_args.append("-r")' in upstream_start
+    assert "tmux_attach_command(readonly=readonly)" in upstream_start
     assert 'message.get("type") != "input"' in upstream_write
     assert 'record_user_input(self.session, len(filtered), source="share")' in upstream_write
     assert 'self.request_is_https() and str(current_record.get("mode") or "ro") == "rw"' in bridge_body

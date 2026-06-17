@@ -1490,6 +1490,44 @@ function terminalCanPublishRemoteSize() {
   return !shareViewMode && document.visibilityState !== 'hidden';
 }
 
+let lastTerminalResizeAuthoritySignature = '';
+let terminalResizeAuthorityHandlersInstalled = false;
+
+function visibleTerminalResizeAuthorityEntries() {
+  if (!terminalCanPublishRemoteSize()) return [];
+  return activeSessions
+    .filter(isTmuxSession)
+    .map(session => ({session, item: terminals.get(session)}))
+    .filter(entry => entry.item?.term && entry.item?.socket?.readyState === WebSocket.OPEN && terminalIsVisible(entry.session, entry.item.container));
+}
+
+function terminalResizeAuthoritySignature(entries) {
+  return entries
+    .map(({session, item}) => `${session}:${terminalFitSignature(estimateTerminalSize(item.container, item.term))}`)
+    .join('|');
+}
+
+function claimVisibleTerminalResizeAuthority(reason = '', options = {}) {
+  const entries = visibleTerminalResizeAuthorityEntries();
+  if (!entries.length) return;
+  const signature = terminalResizeAuthoritySignature(entries);
+  if (options.force !== true && signature === lastTerminalResizeAuthoritySignature) return;
+  lastTerminalResizeAuthoritySignature = signature;
+  for (const {session} of entries) {
+    fitTerminal(session, {claim: true});
+  }
+}
+
+function installTerminalResizeAuthorityHandlers() {
+  if (terminalResizeAuthorityHandlersInstalled || shareViewMode) return;
+  terminalResizeAuthorityHandlersInstalled = true;
+  window.addEventListener('focus', () => claimVisibleTerminalResizeAuthority('window-focus', {force: true}));
+  window.addEventListener('pointerdown', () => claimVisibleTerminalResizeAuthority('pointerdown'), {capture: true});
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') claimVisibleTerminalResizeAuthority('visible', {force: true});
+  });
+}
+
 function fitTerminal(session, options = {}) {
   const item = terminals.get(session);
   if (!item || !item.term || !item.container) return;
@@ -1510,22 +1548,27 @@ function fitTerminal(session, options = {}) {
   if (!terminalIsVisible(session, item.container)) return;
   const size = estimateTerminalSize(item.container, item.term);
   const signature = terminalFitSignature(size);
-  if (options.force !== true && terminalFitIsUnchanged(item, size)) return;
+  const claim = options.claim === true;
+  if (options.force !== true && !claim && terminalFitIsUnchanged(item, size)) return;
   item.lastFitSignature = signature;
   const changed = item.term.cols !== size.cols || item.term.rows !== size.rows;
   if (changed) item.term.resize(size.cols, size.rows);
-  if (changed) scheduleRemoteResize(session);
+  if (claim) sendRemoteResize(session, {activate: true});
+  else if (changed) scheduleRemoteResize(session);
   refreshTerminal(session);
 }
 
-function sendRemoteResize(session) {
+function sendRemoteResize(session, options = {}) {
   if (!terminalCanPublishRemoteSize()) return;
   const item = terminals.get(session);
   if (!item?.term || item?.socket?.readyState !== WebSocket.OPEN) return;
-  item.socket.send(JSON.stringify({type: 'resize', cols: item.term.cols, rows: item.term.rows, foreground: true}));
+  const message = {type: 'resize', cols: item.term.cols, rows: item.term.rows, foreground: true};
+  if (options.activate === true) message.activate = true;
+  if (shareClientId) message.client = shareClientId;
+  item.socket.send(JSON.stringify(message));
 }
 
-function scheduleRemoteResize(session, delay = remoteResizeDelayMs) {
+function scheduleRemoteResize(session, delay = remoteResizeDelayMs, options = {}) {
   const item = terminals.get(session);
   if (!item) return;
   if (item.resizeTimer) clearTimeout(item.resizeTimer);
@@ -1535,7 +1578,7 @@ function scheduleRemoteResize(session, delay = remoteResizeDelayMs) {
   }
   item.resizeTimer = setTimeout(() => {
     item.resizeTimer = null;
-    sendRemoteResize(session);
+    sendRemoteResize(session, options);
   }, delay);
 }
 
