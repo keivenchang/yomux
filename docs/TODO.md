@@ -82,7 +82,7 @@ Borrow from other tools only when the feature improves the local control loop: k
 ## Global Summaries
 
 - [ ] [XL] Add a background session summarizer that maintains rolling per-session summaries and a global overview: which sessions need attention, what each is doing, who is blocked, and what finished. Use incremental summaries (`prior_summary + transcript delta`) instead of re-sending full transcripts each tick.
-- [ ] [M] Infer an agent's effective working directory from transcript/file activity and use it for Finder sync, per-tab jump-to-working-path, and summary context.
+- [ ] [M] Extend the transcript/file-activity working-directory inference to Finder sync, per-tab jump-to-working-path, and summary context. Session repo metadata already uses it: `candidate_session_cwds` feeds each agent's edited dirs into `session_git_inventory` and the YO!info repo list, so a session launched from `$HOME` still surfaces the real repo/branch (see DONE 2026-06-17). Remaining: Finder sync, per-tab jump, and summary context.
 - [ ] [M] Gate summary providers behind settings and availability checks. Defaults should come from the backend settings catalog, not copied literals in docs.
 
 ## Refactor Audit Backlog
