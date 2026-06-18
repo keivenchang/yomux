@@ -8,6 +8,7 @@ the app actually renders.
 """
 
 import json
+import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +28,12 @@ def test_ui_pins_match_sources():
     }
     for pin, token in token_pins.items():
         assert f"{token}: {PINS[pin]};" in TOKENS_CSS, f"{pin} ({PINS[pin]}) no longer matches {token} in 00_tokens_base.css"
+    scoped_token_pins = {
+        "activeAccentBrightLight": ("body.theme-light", "--active-accent-bright"),
+    }
+    for pin, (scope, token) in scoped_token_pins.items():
+        pattern = rf"{re.escape(scope)}\s*\{{[\s\S]*?{re.escape(token)}:\s*{re.escape(PINS[pin])};"
+        assert re.search(pattern, TOKENS_CSS), f"{pin} ({PINS[pin]}) no longer matches {token} in {scope}"
     # JS-literal pins: the diff overview band colors are literals in the shipping editor source
     assert f"'{PINS['diffOverviewAdd']}'" in CM_JS, "diffOverviewAdd no longer matches the JS diff-overview band color"
     assert f"'{PINS['diffOverviewDelete']}'" in CM_JS, "diffOverviewDelete no longer matches the JS diff-overview band color"

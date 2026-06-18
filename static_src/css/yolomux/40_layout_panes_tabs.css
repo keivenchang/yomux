@@ -1810,13 +1810,13 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   font-weight: 700;
 }
 /* Fallback for any .tab.active OUTSIDE a pane head (e.g. detached/menu contexts). */
-.tab.active {
+.tab.active:not(.tmux-window-button) {
   color: var(--text);
   background: #263044;
   border-color: #566176;
   font-weight: 700;
 }
-body.theme-light .tab.active {
+body.theme-light .tab.active:not(.tmux-window-button) {
   background: #dce3ec;
   border-color: #b3bdcb;
 }

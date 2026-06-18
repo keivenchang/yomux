@@ -6,5 +6,6 @@
   "paneMetaPathLight": "#111827",
   "textSelectionBg": "#2563eb",
   "paneTabTextLight": "#1f2937",
-  "activeAccentBright": "#86d600"
+  "activeAccentBright": "#86d600",
+  "activeAccentBrightLight": "#4f9e3a"
 }

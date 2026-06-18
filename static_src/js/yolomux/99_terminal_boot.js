@@ -2195,6 +2195,7 @@ function activateTab(session, name, options = {}) {
   if (name === 'terminal') {
     scheduleFit(session);
     setTimeout(() => refreshTerminal(session), 120);
+    scheduleTerminalBlankScreenRefresh(session);
     if (options.userInitiated) focusTerminalFromUserAction(session);
     else focusTerminalWhenAutoFocus(session, 25);
   } else {
@@ -2268,6 +2269,7 @@ function connectTerminalSocket(session, item) {
     dismissTerminalConnectionToasts(session);
     if (terminalIsVisible(session, item.container)) {
       scheduleFit(session);
+      scheduleTerminalBlankScreenRefresh(session);
       if (!shareViewMode) scheduleRemoteResize(session, 50);
     }
     updateTypingIndicator(session);
@@ -2284,6 +2286,7 @@ function connectTerminalSocket(session, item) {
       } else {
         item.term.write(String(event.data));
       }
+      scheduleTerminalBlankScreenRefresh(session);
     } catch (_) {
       if (terminals.get(session) === item) closeTerminalItem(session, item);
     }
@@ -2432,6 +2435,8 @@ function startTerminal(session) {
     shareTerminalByteCount: 0,
     shareTerminalLastResetAt: 0,
     shareTerminalSkippedResetCount: 0,
+    blankScreenRefreshTimer: 0,
+    blankScreenRefreshAttempts: 0,
   };
   terminals.set(session, item);
   bindTerminalContainerForSession(session, term, container);
@@ -3942,6 +3947,14 @@ function applyShareReplayShellMessage(message = {}) {
   }
   if (message.type === shareMirrorProtocol.frames.domDelta) return applyShareReplayDelta(payload, message);
   if (shareDropStaleMirrorFrame(message)) return true;
+  if (message.type === shareMirrorProtocol.frames.viewport) {
+    applyShareViewportState(payload);
+    return true;
+  }
+  if (message.type === shareMirrorProtocol.frames.appearance) {
+    applyShareAppearanceState(payload);
+    return true;
+  }
   if (message.type === shareMirrorProtocol.frames.domKeyframe) return applyShareReplayKeyframe(payload, message);
   if (message.type === shareMirrorProtocol.frames.shareStatus) {
     mergeShareStatusPayload(payload);
@@ -8345,6 +8358,20 @@ function globalShortcutTargetAllowsPlatformAction(target) {
   return isMacPlatform() || globalShortcutTargetAllowsAppAction(target);
 }
 
+function globalShortcutTargetIsTerminalSurface(target) {
+  const node = typeof Element !== 'undefined' && target instanceof Element ? target : document.activeElement;
+  return Boolean(node?.closest?.('.xterm') || node?.closest?.('.terminal-pane'));
+}
+
+function globalShortcutTargetAllowsFinderShortcut(target) {
+  if (globalShortcutTargetAllowsAppAction(target)) return true;
+  return isMacPlatform() && globalShortcutTargetIsTerminalSurface(target);
+}
+
+function globalShortcutShouldToggleFinder(event, key = String(event?.key || '').toLowerCase(), mod = appModifier(event)) {
+  return Boolean(mod && key === 'b' && globalShortcutTargetAllowsFinderShortcut(event?.target));
+}
+
 const shareReadonlyPreventDefaultEvents = new Set(['beforeinput', 'change', 'drop', 'dragstart', 'input', 'paste', 'submit']);
 const shareReadonlyActivationEvents = new Set(['auxclick', 'click', 'dblclick']);
 const shareReadonlyNavigationKeys = new Set([
@@ -8563,6 +8590,7 @@ function itemCanCloseWithAppShortcut(item) {
 function toggleFileExplorerShortcut() {
   if (itemInLayout(fileExplorerItemId)) {
     fileExplorerShortcutRestoreSlots = cloneLayoutSlots();
+    rememberFileExplorerOpenIntent(false);
     applyLayoutSlots(layoutWithoutItem(fileExplorerItemId, {
       preservePlaceholders: false,
     }), {
@@ -8685,7 +8713,7 @@ function handleGlobalShortcutKeydown(event) {
       if (itemCanCloseWithAppShortcut(item)) removeSessionFromLayout(item);
       return;
     }
-    if (key === 'b' && globalShortcutTargetAllowsAppAction(event.target)) {
+    if (globalShortcutShouldToggleFinder(event, key, mod)) {
       event.preventDefault();
       toggleFileExplorerShortcut();
       return;

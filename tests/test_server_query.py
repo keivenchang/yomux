@@ -308,6 +308,14 @@ def test_both_attach_paths_route_through_shared_tmux_options():
     assert "set-clipboard" not in upstream_body
 
 
+def test_tmux_attach_paths_refresh_clients_after_attach():
+    bridge_body = inspect.getsource(Handler.bridge_tmux)
+    upstream_body = inspect.getsource(server_module.ShareTerminalUpstream.start_locked)
+
+    assert "refresh_tmux_session_clients_after_attach(session)" in bridge_body
+    assert "refresh_tmux_session_clients_after_attach(self.session)" in upstream_body
+
+
 def test_configure_session_tmux_options_uses_bounded_tmux_helper():
     body = inspect.getsource(server_module.configure_session_tmux_options)
 
@@ -831,6 +839,17 @@ def test_handle_ws_payload_readonly_discards_input_and_scroll(monkeypatch):
 
     assert writes == []
     assert scrolls == []
+
+
+def test_handle_ws_payload_refreshes_tmux_session_even_when_readonly(monkeypatch):
+    refreshes = []
+    process = SimpleNamespace(pid=123)
+    handler = SimpleNamespace(server=SimpleNamespace(app=SimpleNamespace(tmux_scroll=lambda *_args: None)))
+    monkeypatch.setattr(server_module, "refresh_tmux_session_clients", lambda session: refreshes.append(session) or True)
+
+    Handler.handle_ws_payload(handler, "6", 10, 11, process, json.dumps({"type": "refresh", "reason": "blank-screen"}).encode(), readonly=True)
+
+    assert refreshes == ["6"]
 
 
 def test_handle_ws_payload_resize_sets_pty_and_signals_for_admin_only(monkeypatch):

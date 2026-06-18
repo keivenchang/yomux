@@ -79,6 +79,7 @@ SHARE_VIEWER_OVERFLOW_LIMIT = 3
 SHARE_VIEWER_OVERFLOW_WINDOW_SECONDS = 60.0
 SHARE_VIEWER_SEND_TIMEOUT_SECONDS = 5.0
 SHARE_REFRESH_CLIENT_MIN_SECONDS = 1.0
+TMUX_ATTACH_REFRESH_DELAYS_SECONDS = (0.1, 0.5)
 SHARE_POINTER_MAX_WRITES_PER_SECOND = 1500
 SHARE_POINTER_MAX_HZ = 30
 SHARE_POINTER_CLICK_QUEUE_LIMIT = 32
@@ -378,6 +379,31 @@ def refresh_tmux_client_ignore_size(client_name: str, ignore_size: bool) -> bool
     return result.returncode == 0
 
 
+def refresh_tmux_session_clients(session: str) -> bool:
+    clean_session = str(session or "").strip()
+    if not clean_session:
+        return False
+    result = subprocess.run(
+        tmux_command(["refresh-client", "-t", tmux_session_target(clean_session)]),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def refresh_tmux_session_clients_after_attach(session: str) -> bool:
+    clean_session = str(session or "").strip()
+    if not clean_session:
+        return False
+    refreshed = refresh_tmux_session_clients(clean_session)
+    for delay in TMUX_ATTACH_REFRESH_DELAYS_SECONDS:
+        timer = threading.Timer(float(delay), refresh_tmux_session_clients, args=(clean_session,))
+        timer.daemon = True
+        timer.start()
+    return refreshed
+
+
 def claim_tmux_resize_authority(session: str, client_name: str, active_cols: int | None = None) -> bool:
     """Make `client_name` the column authority for `session`: silence every WIDER client.
 
@@ -390,7 +416,7 @@ def claim_tmux_resize_authority(session: str, client_name: str, active_cols: int
 
     Width-only by design (per the column-overflow symptom): clients at or below the active width
     don't inflate it and are left untouched, so the blast radius is exactly the clients that would
-    break the active surface. Idempotent — when nothing is wider and the active client already
+    break the active surface. Idempotent -- when nothing is wider and the active client already
     counts, it issues no tmux calls (the "current width already == active width" fast path).
     """
     clean_client_name = str(client_name or "").strip()
@@ -786,6 +812,7 @@ class ShareTerminalUpstream:
                 env=env,
                 start_new_session=True,
             )
+            refresh_tmux_session_clients_after_attach(self.session)
             self.process = process
             self.reader_thread = threading.Thread(target=self.reader_loop, name=f"share-terminal-{self.session}", daemon=True)
             self.reader_thread.start()
@@ -2455,7 +2482,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         def attach_tmux() -> subprocess.Popen:
             if slave_fd is None:
                 raise OSError("tmux attach pty is closed")
-            return subprocess.Popen(
+            attached = subprocess.Popen(
                 attach_args,
                 stdin=slave_fd,
                 stdout=slave_fd,
@@ -2464,6 +2491,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 env=env,
                 start_new_session=True,
             )
+            refresh_tmux_session_clients_after_attach(session)
+            return attached
 
         try:
             master_fd, slave_fd = pty.openpty()
@@ -2772,7 +2801,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             os.write(master_fd, payload)
             return
         msg_type = message.get("type")
-        if msg_type == "input":
+        if msg_type == "refresh":
+            refresh_tmux_session_clients(session)
+        elif msg_type == "input":
             if readonly:
                 return
             data = message.get("data")

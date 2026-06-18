@@ -374,8 +374,8 @@ async function placeTmuxSession(session) {
   await moveSessionToSlot(session, targetSlot, null, paneTabs(targetSlot).length);
 }
 
-// File -> Finder toggles. Hide the Finder when it is already in the layout (same path as the
-// Finder panel's close button), otherwise open/focus it. The menu's `checked` state tracks this.
+// File -> Finder and Mod+B toggle the reserved Finder/Differ/Tabber pane. Hide it when it is already in
+// the layout (same path as the close button), otherwise open/focus it. The menu's `checked` state tracks this.
 function toggleFinderPane() {
   if (itemInLayout(fileExplorerItemId)) {
     removeSessionFromLayout(fileExplorerItemId);
@@ -702,10 +702,56 @@ async function selectSession(session, options = {}) {
   await activateTabInExistingPane(session);
 }
 
-function paneTabTraversalPositions(slots = layoutSlots) {
+function layoutPaneTabTraversalPositions(slots = layoutSlots) {
   return layoutLeafSlots(slots?.[layoutTreeKey])
     .flatMap(slot => paneTabs(slot, slots).map(item => ({slot, item})))
     .filter(position => position.item);
+}
+
+function renderedPaneTabTraversalPositions(slots = layoutSlots) {
+  const groups = Array.from(grid?.querySelectorAll?.('.dv-groupview') || []);
+  const knownSlots = new Set(layoutSlotKeys(slots));
+  const seenSlots = new Set();
+  const records = [];
+  groups.forEach((group, index) => {
+    const slot = typeof dockviewSlotForGroupElement === 'function' ? dockviewSlotForGroupElement(group) : '';
+    if (!knownSlots.has(slot) || seenSlots.has(slot)) return;
+    const rect = group.getBoundingClientRect?.() || {};
+    const width = Number(rect.width || 0);
+    const height = Number(rect.height || 0);
+    if (width <= 0 && height <= 0) return;
+    seenSlots.add(slot);
+    records.push({
+      slot,
+      group,
+      index,
+      left: Number.isFinite(Number(rect.left)) ? Number(rect.left) : index,
+      top: Number.isFinite(Number(rect.top)) ? Number(rect.top) : index,
+    });
+  });
+  if (!records.length) return [];
+  records.sort((a, b) => (a.left - b.left) || (a.top - b.top) || (a.index - b.index));
+  const positions = [];
+  const seenItems = new Set();
+  const appendItem = (slot, item) => {
+    if (!item || seenItems.has(item) || !paneTabs(slot, slots).includes(item)) return;
+    seenItems.add(item);
+    positions.push({slot, item});
+  };
+  for (const record of records) {
+    const renderedTabs = Array.from(record.group.querySelectorAll?.('.dockview-pane-tab') || [])
+      .map(tab => tab?.dataset?.paneTab || '')
+      .filter(Boolean);
+    const tabItems = renderedTabs.length ? renderedTabs : paneTabs(record.slot, slots);
+    tabItems.forEach(item => appendItem(record.slot, item));
+  }
+  for (const position of layoutPaneTabTraversalPositions(slots)) appendItem(position.slot, position.item);
+  return positions;
+}
+
+function paneTabTraversalPositions(slots = layoutSlots) {
+  const rendered = renderedPaneTabTraversalPositions(slots);
+  return rendered.length ? rendered : layoutPaneTabTraversalPositions(slots);
 }
 
 function adjacentPaneTabPosition(direction, options = {}) {
@@ -1612,6 +1658,74 @@ function terminalIsVisible(session, container) {
   );
 }
 
+const terminalBlankScreenRefreshDelaysMs = Object.freeze([220, 650, 1400, 2800]);
+
+function terminalRenderedContentPresent(session, item = terminals.get(session)) {
+  if (!item?.term) return false;
+  const buffer = item.term.buffer?.active;
+  const bufferLength = Number(buffer?.length);
+  const visibleRows = Math.max(1, Number(item.term.rows || 0));
+  if (Number.isFinite(bufferLength) && typeof buffer?.getLine === 'function') {
+    const start = Math.max(0, Number(buffer.viewportY || 0));
+    const end = Math.min(bufferLength, start + visibleRows);
+    for (let index = start; index < end; index += 1) {
+      const line = buffer.getLine(index);
+      const text = typeof line?.translateToString === 'function' ? line.translateToString(true) : '';
+      if (String(text || '').trim()) return true;
+    }
+  }
+  const rows = item.container?.querySelectorAll?.('.xterm-rows > div, .xterm-rows div') || [];
+  for (const row of rows) {
+    if (String(row?.textContent || '').trim()) return true;
+  }
+  return false;
+}
+
+function requestTerminalScreenRefresh(session, item = terminals.get(session)) {
+  if (shareViewMode || item?.socket?.readyState !== WebSocket.OPEN) return false;
+  try {
+    item.socket.send(JSON.stringify({type: 'refresh', reason: 'blank-screen'}));
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function runTerminalBlankScreenRefresh(session) {
+  const item = terminals.get(session);
+  if (!item) return;
+  item.blankScreenRefreshTimer = 0;
+  if (!terminalIsVisible(session, item.container)) return;
+  if (terminalRenderedContentPresent(session, item)) {
+    item.blankScreenRefreshAttempts = 0;
+    return;
+  }
+  const attempts = Math.max(0, Number(item.blankScreenRefreshAttempts || 0));
+  if (attempts >= terminalBlankScreenRefreshDelaysMs.length) return;
+  item.blankScreenRefreshAttempts = attempts + 1;
+  if (requestTerminalScreenRefresh(session, item)) scheduleTerminalBlankScreenRefresh(session);
+}
+
+function scheduleTerminalBlankScreenRefresh(session, options = {}) {
+  const item = terminals.get(session);
+  if (!item || shareViewMode || !terminalIsVisible(session, item.container)) return;
+  if (terminalRenderedContentPresent(session, item)) {
+    item.blankScreenRefreshAttempts = 0;
+    if (item.blankScreenRefreshTimer) {
+      clearTimeout(item.blankScreenRefreshTimer);
+      item.blankScreenRefreshTimer = 0;
+    }
+    return;
+  }
+  const attempts = Math.max(0, Number(item.blankScreenRefreshAttempts || 0));
+  if (attempts >= terminalBlankScreenRefreshDelaysMs.length) return;
+  if (item.blankScreenRefreshTimer) clearTimeout(item.blankScreenRefreshTimer);
+  const delayMs = Number.isFinite(Number(options.delayMs))
+    ? Math.max(1, Number(options.delayMs))
+    : terminalBlankScreenRefreshDelaysMs[attempts];
+  item.blankScreenRefreshTimer = setTimeout(() => runTerminalBlankScreenRefresh(session), delayMs);
+}
+
 function scheduleFit(session) {
   const item = terminals.get(session);
   if (item) {
@@ -1623,10 +1737,12 @@ function scheduleFit(session) {
     item.fitFrame = requestAnimationFrame(() => {
       item.fitFrame = 0;
       fitTerminal(session);
+      scheduleTerminalBlankScreenRefresh(session);
     });
     item.fitTimer = setTimeout(() => {
       item.fitTimer = 0;
       fitTerminal(session);
+      scheduleTerminalBlankScreenRefresh(session);
     }, 250);
     return;
   }
@@ -1753,8 +1869,10 @@ function closeTerminalItem(session, item) {
   if (item.scrollTimer) clearTimeout(item.scrollTimer);
   if (item.fitFrame) cancelAnimationFrame(item.fitFrame);
   if (item.fitTimer) clearTimeout(item.fitTimer);
+  if (item.blankScreenRefreshTimer) clearTimeout(item.blankScreenRefreshTimer);
   item.fitFrame = 0;
   item.fitTimer = 0;
+  item.blankScreenRefreshTimer = 0;
   const observer = resizeObservers.get(session);
   if (observer) {
     observer.disconnect();

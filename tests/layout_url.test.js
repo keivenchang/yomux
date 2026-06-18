@@ -649,6 +649,7 @@ globalThis.__layoutTestApi = {
   prefsItemId,
   menuTabCommand,
   activatePaneTab,
+  paneTabTraversalPositionsForTest: paneTabTraversalPositions,
   adjacentPaneTabPosition,
   selectAdjacentPaneTab,
   currentSessionActionTarget,
@@ -672,6 +673,8 @@ globalThis.__layoutTestApi = {
   clearFileExplorerShortcutRestoreSlotsForTest() { fileExplorerShortcutRestoreSlots = null; },
   focusedTerminalForTest() { return focusedTerminal; },
   globalShortcutTargetAllowsAppAction,
+  globalShortcutTargetAllowsFinderShortcut,
+  globalShortcutShouldToggleFinderForTest: globalShortcutShouldToggleFinder,
   installTerminalCopyShortcutForTest: installTerminalCopyShortcut,
   osc52ClipboardText,
   installTerminalOsc52BridgeForTest: installTerminalOsc52Bridge,
@@ -879,6 +882,7 @@ globalThis.__layoutTestApi = {
   globalThemeModeForTest() { return globalThemeMode; },
   setGlobalThemeModeForTest(value) { globalThemeMode = normalizeGlobalThemeMode(value); },
   resolvedGlobalThemeModeForTest: resolvedGlobalThemeMode,
+  setSystemPrefersDarkForTest(value) { window.matchMedia = () => ({matches: value === true, addEventListener() {}, addListener() {}}); },
   shareResolvedGlobalThemeModeForTest() { return shareResolvedGlobalThemeMode; },
   terminalThemeModeForTest() { return terminalThemeMode; },
   setTerminalThemeModeForTest(value) { terminalThemeMode = normalizeTerminalThemeMode(value); },
@@ -4910,8 +4914,8 @@ test('t@2560', () => {
   const finderLayoutBeforeToggle = api.layoutParamValue(api.currentSlots());
   api.toggleFileExplorerShortcut();
   assert.equal(api.itemInLayout('__files__'), false, 'app shortcut hides the Finder pane');
-  assert.equal(api.sessionStorageValueForTest(FILE_EXPLORER_OPEN_INTENT_STORAGE_KEY_FOR_TEST), null, 'keyboard-hiding Finder does not write the sticky closed intent');
-  assert.equal(api.fileExplorerClosedByUserForTest(), false, 'keyboard-hiding Finder is reversible and does not block self-heal');
+  assert.equal(api.sessionStorageValueForTest(FILE_EXPLORER_OPEN_INTENT_STORAGE_KEY_FOR_TEST), '0', 'keyboard-hiding Finder writes the explicit closed intent');
+  assert.equal(api.fileExplorerClosedByUserForTest(), true, 'keyboard-hiding Finder suppresses self-heal until the shortcut restores it');
   assert.equal(api.statusTextForTest(), `${api.fileExplorerLabel()} hidden - ${api.appShortcutText('B')} restores`, 'hiding Finder announces how to restore it');
   assert.equal(api.focusedPanelItemForTest(), '1', 'hiding Finder keeps focus on the active terminal');
   api.toggleFileExplorerShortcut();
@@ -4942,6 +4946,34 @@ test('t@2560', () => {
   shortcutListeners.forEach(listener => listener(shortcutEvent));
   assert.equal(shortcutEvent.prevented, false, 'Cmd/Ctrl-B is not stolen while editor focus owns text formatting');
   assert.equal(api.itemInLayout('__files__'), true, 'blocked Cmd/Ctrl-B does not hide Finder from editor focus');
+  api.setDocumentActiveElementForTest(null);
+  const macFinderShortcutApi = loadYolomux('?platform=mac', ['1'], 'http:', 'MacIntel');
+  const macTerminalTarget = macFinderShortcutApi.testElementForId('mac-shortcut-xterm');
+  macTerminalTarget.className = 'xterm';
+  macFinderShortcutApi.setDocumentActiveElementForTest(macTerminalTarget);
+  assert.equal(macFinderShortcutApi.globalShortcutTargetAllowsAppAction(macTerminalTarget), false, 'terminal focus is still blocked for generic app shortcuts');
+  assert.equal(macFinderShortcutApi.globalShortcutTargetAllowsFinderShortcut(macTerminalTarget), true, 'Mac Cmd-B is allowed from terminal focus');
+  assert.equal(macFinderShortcutApi.globalShortcutShouldToggleFinderForTest({
+    key: 'b',
+    code: 'KeyB',
+    metaKey: true,
+    ctrlKey: false,
+    altKey: false,
+    shiftKey: false,
+    target: macTerminalTarget,
+  }), true, 'Mac Cmd-B toggles Finder even when terminal focus owns the hidden xterm textarea');
+  const pcTerminalTarget = api.testElementForId('pc-shortcut-xterm');
+  pcTerminalTarget.className = 'xterm';
+  api.setDocumentActiveElementForTest(pcTerminalTarget);
+  assert.equal(api.globalShortcutShouldToggleFinderForTest({
+    key: 'b',
+    code: 'KeyB',
+    metaKey: false,
+    ctrlKey: true,
+    altKey: false,
+    shiftKey: false,
+    target: pcTerminalTarget,
+  }), false, 'PC/Linux Ctrl-B is not stolen from a focused terminal because tmux owns it');
   api.setDocumentActiveElementForTest(null);
 
   const fileEditorItem = api.registerFileEditorLayoutItem('/home/test/yolomux.dev/README.md');
@@ -5553,6 +5585,41 @@ test('t@2560', () => {
     assert.equal(term.options.theme.background, '#11151d', 'terminal runtime theme follows the dark app theme');
     assert.deepStrictEqual(refreshCalls, [[0, 23]], 'terminal theme changes force an xterm repaint of already-painted cells');
     assert.equal(textureClears, 1, 'terminal theme changes clear cached glyph colors before repaint');
+  }
+  {
+    const refreshCalls = [];
+    let textureClears = 0;
+    const term = {
+      rows: 24,
+      cols: 80,
+      options: {},
+      refresh(start, end) { refreshCalls.push([start, end]); },
+      clearTextureAtlas() { textureClears += 1; },
+    };
+    api.registerTerminalForTest('system-repaint', term);
+    api.setTerminalThemeModeForTest('follow-app');
+    api.setSystemPrefersDarkForTest(false);
+    api.setGlobalThemeModeForTest('dark');
+    api.applyGlobalThemeMode({updateEditor: false, updateTerminals: true});
+    refreshCalls.length = 0;
+    textureClears = 0;
+    api.setGlobalThemeModeForTest('system');
+    api.applyGlobalThemeMode({updateEditor: false, updateTerminals: true});
+    assert.equal(term.options.theme.background, '#ffffff', 'System repaints follow-app terminals to the OS-resolved light theme from Dark');
+    assert.deepStrictEqual(refreshCalls, [[0, 23]], 'System from Dark forces a terminal repaint');
+    assert.equal(textureClears, 1, 'System from Dark clears cached glyph colors');
+    refreshCalls.length = 0;
+    textureClears = 0;
+    api.setSystemPrefersDarkForTest(true);
+    api.setGlobalThemeModeForTest('light');
+    api.applyGlobalThemeMode({updateEditor: false, updateTerminals: true});
+    refreshCalls.length = 0;
+    textureClears = 0;
+    api.setGlobalThemeModeForTest('system');
+    api.applyGlobalThemeMode({updateEditor: false, updateTerminals: true});
+    assert.equal(term.options.theme.background, '#11151d', 'System repaints follow-app terminals to the OS-resolved dark theme from Light');
+    assert.deepStrictEqual(refreshCalls, [[0, 23]], 'System from Light forces a terminal repaint');
+    assert.equal(textureClears, 1, 'System from Light clears cached glyph colors');
   }
   api.setTerminalThemeModeForTest('dark');
   assert.equal(api.terminalThemeForGlobalTheme('dark').selectionBackground, UI_PINS.textSelectionBg, 'dark terminal selection uses a prominent blue fill');
@@ -6863,14 +6930,44 @@ test('t@2560', () => {
     shareReplay: true,
     share: {view: true, id: 'share-theme', mode: 'ro', session: '1', sessions: ['1']},
   });
-  shareThemeApi.applyShareAppearanceStateForTest({theme: 'system', resolvedTheme: 'light', terminalTheme: 'system'});
+  const shareTermCalls = [];
+  let shareTextureClears = 0;
+  shareThemeApi.registerTerminalForTest('1', {
+    rows: 24,
+    cols: 80,
+    options: {},
+    refresh(start, end) { shareTermCalls.push(['refresh', start, end]); },
+    clearTextureAtlas() { shareTextureClears += 1; },
+  });
+  shareThemeApi.applyShareAppearanceStateForTest({theme: 'system', resolvedTheme: 'light', terminalTheme: 'follow-app'});
   assert.equal(shareThemeApi.globalThemeModeForTest(), 'system', 'share viewers preserve the host theme preference value');
   assert.equal(shareThemeApi.shareResolvedGlobalThemeModeForTest(), 'light', 'share viewers store the host resolved system theme');
   assert.equal(shareThemeApi.resolvedGlobalThemeModeForTest(), 'light', 'share viewers resolve system theme from the host frame, not local matchMedia');
   assert.ok(shareThemeApi.testElementForId('body').classList.contains('theme-resolved-light'), 'share viewer body uses the host-resolved light class');
-  shareThemeApi.applyShareAppearanceStateForTest({theme: 'system', resolvedTheme: 'dark', terminalTheme: 'system'});
+  assert.equal(shareThemeApi.terminalThemeModeForTest(), 'follow-app', 'share viewers keep the real terminal theme setting value');
+  assert.equal(shareTermCalls.at(-1)?.join(':'), 'refresh:0:23', 'share appearance applies a terminal repaint');
+  assert.equal(shareTextureClears, 1, 'share appearance clears cached terminal glyph colors');
+  shareThemeApi.applyShareAppearanceStateForTest({theme: 'system', resolvedTheme: 'dark', terminalTheme: 'follow-app'});
   assert.equal(shareThemeApi.resolvedGlobalThemeModeForTest(), 'dark', 'a later host OS flip updates the share viewer resolved theme');
   assert.ok(shareThemeApi.testElementForId('body').classList.contains('theme-resolved-dark'), 'share viewer body follows the later host-resolved dark class');
+  assert.equal(shareTermCalls.at(-1)?.join(':'), 'refresh:0:23', 'later share appearance frames repaint terminal cells too');
+  assert.equal(shareTextureClears, 2, 'later share appearance frames clear cached glyph colors too');
+
+  const replayThemeApi = loadYolomux('', ['1'], 'https:', 'MacIntel', 'readonly', {
+    shareReplay: true,
+    share: {view: true, id: 'share-replay-theme', mode: 'ro', session: '1', sessions: ['1']},
+  });
+  replayThemeApi.setShareReplaySequenceStateForTest(1, 0);
+  replayThemeApi.applyShareUiMessageForTest({
+    ch: 'ui',
+    type: replayThemeApi.shareMirrorProtocolForTest.frames.appearance,
+    sender: 'host',
+    epoch: 1,
+    sequence: 1,
+    payload: {theme: 'system', resolvedTheme: 'light', terminalTheme: 'follow-app'},
+  });
+  assert.equal(replayThemeApi.resolvedGlobalThemeModeForTest(), 'light', 'replay-shell share viewers apply live appearance frames instead of swallowing them');
+  assert.ok(replayThemeApi.testElementForId('body').classList.contains('theme-resolved-light'), 'replay-shell appearance frames repaint the viewer body');
 
   const topologyDelayApi = loadYolomux('', ['1']);
   topologyDelayApi.setShareReplayTopologyKeyframeQueuedAtForTest(Date.now());
@@ -7129,7 +7226,9 @@ test('t@2560', () => {
   assert.ok(source.includes('function copyTerminalSelectionToClipboardEvent(session, term, event, container = null)'), 'terminal copy has a DOM copy-event fallback');
   assert.ok(source.includes('function handleTerminalTmuxWindowShortcutKeydown(session, event)'), 'terminal Meta+Arrow navigation shares the terminal shortcut guard');
   assert.ok(/function terminalTmuxWindowShortcutItem\(session\)[\s\S]*?visualActivePaneItem\(\)[\s\S]*?slotForItem\(activeItem\) === sessionSlot[\s\S]*?return activeItem/.test(source), 'terminal Meta+Arrow starts from the active tab in the terminal pane, not always the tmux session');
-  assert.ok(/function paneTabTraversalPositions\(slots = layoutSlots\)[\s\S]*layoutLeafSlots\(slots\?\.\[layoutTreeKey\]\)[\s\S]*paneTabs\(slot, slots\)\.map\(item => \(\{slot, item\}\)\)/.test(source), 'Meta+Arrow traversal follows visual pane order and each pane tab strip');
+  assert.ok(source.includes("grid?.querySelectorAll?.('.dv-groupview')"), 'Meta+Arrow traversal can read rendered Dockview group order');
+  assert.ok(source.includes("record.group.querySelectorAll?.('.dockview-pane-tab')"), 'Meta+Arrow traversal can read rendered Dockview tab strip order');
+  assert.ok(/function paneTabTraversalPositions\(slots = layoutSlots\)[\s\S]*const rendered = renderedPaneTabTraversalPositions\(slots\);[\s\S]*return rendered\.length \? rendered : layoutPaneTabTraversalPositions\(slots\);/.test(source), 'Meta+Arrow traversal follows rendered Dockview order and falls back to serialized layout order');
   assert.ok(/function selectAdjacentPaneTab\(direction, options = \{\}\)[\s\S]*adjacentPaneTabPosition\(direction, options\)[\s\S]*activatePaneTab\(target\.slot, target\.item, activationOptions\)/.test(source), 'terminal/global Meta+Arrow navigation shares the pane-tab activation parent');
   assert.ok(/const paneTabShortcutDirection = terminalTmuxWindowShortcutDirection\(event\);[\s\S]*if \(paneTabShortcutDirection && globalShortcutTargetAllowsAppAction\(event\.target\)\) \{[\s\S]*selectAdjacentPaneTab\(paneTabShortcutDirection, \{userInitiated: true\}\)/.test(source), 'global Meta+Arrow handler routes Finder/Differ/Tabber focus through the same pane-tab selector');
   assert.equal(source.includes('function selectAdjacentTmuxSession('), false, 'old tmux-session-only Meta+Arrow shortcut path is removed');
@@ -7454,6 +7553,40 @@ test('t@2560', () => {
   assert.equal(infoBackResult, false, 'stale terminal capture handles Cmd-Left from YO!info');
   assert.equal(prevented, 1, 'stale terminal capture prevents the terminal default from YO!info');
   assert.equal(screenshotNavApi.activeItemForSide('slot3'), '8003', 'Cmd-Left from YO!info goes to 8003 instead of reselecting YO!info');
+  const renderedOrderApi = loadYolomux('?platform=mac', ['8001', '8002', '8003'], 'https:', 'MacIntel');
+  const renderedOrderSlots = renderedOrderApi.emptyLayoutSlots();
+  renderedOrderSlots[renderedOrderApi.layoutTreeKey] = renderedOrderApi.splitNode(
+    'row',
+    renderedOrderApi.leafNode('left'),
+    renderedOrderApi.splitNode('row', renderedOrderApi.leafNode('slot1'), renderedOrderApi.leafNode('slot3'), 66),
+    20,
+  );
+  renderedOrderSlots.left = renderedOrderApi.paneStateWithTabs([renderedOrderApi.fileExplorerItemId], renderedOrderApi.fileExplorerItemId);
+  renderedOrderSlots.slot1 = renderedOrderApi.paneStateWithTabs(['8001', '8002'], '8001');
+  renderedOrderSlots.slot3 = renderedOrderApi.paneStateWithTabs(['8003'], '8003');
+  renderedOrderApi.setLayoutSlotsForTest(renderedOrderSlots);
+  const renderedTab = item => ({dataset: {paneTab: item}});
+  const renderedGroup = (slot, left, items) => ({
+    getBoundingClientRect: () => ({left, top: 0, width: 300, height: 600}),
+    querySelector: selector => selector === '.dockview-panel-content > .panel' ? {dataset: {slot}} : null,
+    querySelectorAll: selector => selector === '.dockview-pane-tab' ? items.map(renderedTab) : [],
+  });
+  renderedOrderApi.gridForTest().querySelectorAll = selector => selector === '.dv-groupview' ? [
+    renderedGroup('left', 0, [renderedOrderApi.fileExplorerItemId]),
+    renderedGroup('slot1', 400, ['8002', '8001']),
+    renderedGroup('slot3', 900, ['8003']),
+  ] : [];
+  assert.deepStrictEqual(
+    canonical(renderedOrderApi.paneTabTraversalPositionsForTest().map(position => position.item)),
+    [renderedOrderApi.fileExplorerItemId, '8002', '8001', '8003'],
+    'Meta+Arrow traversal follows the rendered Dockview tab order when serialized pane tabs are stale',
+  );
+  assert.equal(renderedOrderApi.adjacentPaneTabPosition(1, {item: renderedOrderApi.fileExplorerItemId}).item, '8002', 'Cmd-Right moves Finder to the first rendered middle tab');
+  assert.equal(renderedOrderApi.adjacentPaneTabPosition(-1, {item: '8002'}).item, renderedOrderApi.fileExplorerItemId, 'Cmd-Left moves 8002 back to Finder');
+  assert.equal(renderedOrderApi.adjacentPaneTabPosition(1, {item: '8002'}).item, '8001', 'Cmd-Right follows rendered middle tab order');
+  assert.equal(renderedOrderApi.adjacentPaneTabPosition(-1, {item: '8001'}).item, '8002', 'Cmd-Left reverses rendered middle tab order');
+  assert.equal(renderedOrderApi.adjacentPaneTabPosition(1, {item: '8003'}).item, renderedOrderApi.fileExplorerItemId, 'Cmd-Right wraps from 8003 to Finder');
+  assert.equal(renderedOrderApi.adjacentPaneTabPosition(-1, {item: renderedOrderApi.fileExplorerItemId}).item, '8003', 'Cmd-Left wraps from Finder to 8003');
   const finderNavApi = loadYolomux('?platform=mac', ['1', '2'], 'https:', 'MacIntel');
   const finderNavEditor = finderNavApi.fileEditorItemFor('/repo/app/notes.md');
   const finderNavSlots = finderNavApi.emptyLayoutSlots();

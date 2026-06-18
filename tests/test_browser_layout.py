@@ -338,9 +338,9 @@ def pane_fixture_html(width):
           <div class="panel-head">
             <div class="tabs" role="tablist">
               <div class="tmux-window-bar" data-tmux-window-label-mode="names">
-                <button class="tab tmux-window-button"><span class="tmux-window-name-label">bash</span><span class="tmux-window-number-label">0</span></button>
-                <button class="tab tmux-window-button active" aria-pressed="true"><span class="tmux-window-name-label">codex</span><span class="tmux-window-number-label">1</span></button>
-                <button class="tab tmux-window-button"><span class="tmux-window-name-label">pytest</span><span class="tmux-window-number-label">2</span></button>
+                <button class="tab tmux-window-button" data-window-agent="shell"><span class="tmux-window-name-label">bash</span><span class="tmux-window-number-label">0</span></button>
+                <button class="tab tmux-window-button active" data-window-agent="codex" aria-pressed="true"><span class="tmux-window-name-label">codex</span><span class="tmux-window-number-label">1</span></button>
+                <button class="tab tmux-window-button" data-window-agent="other"><span class="tmux-window-name-label">pytest</span><span class="tmux-window-number-label">2</span></button>
               </div>
               <button class="tab">Tx</button>
               <button class="tab">AI</button>
@@ -13587,6 +13587,8 @@ def test_pane_tab_active_accent_theming(browser, tmp_path):
           const inactiveTab = panel.querySelector('.pane-tab:not(.active)');
           const panelHead = panel.querySelector('.panel-head');
           const toolbarActive = panel.querySelector('.panel-head .tab.active:not(.auto-toggle)');
+          const activeWindow = panel.querySelector('.tmux-window-button.active[data-window-agent]');
+          const inactiveWindow = panel.querySelector('.tmux-window-button[data-window-agent]:not(.active)');
           const paneControl = panel.querySelector('.tabs .pane-minimize');
           const zoomControl = panel.querySelector('.tabs .pc-zoom');
           return {
@@ -13603,6 +13605,10 @@ def test_pane_tab_active_accent_theming(browser, tmp_path):
             inactiveDirColor: getComputedStyle(inactiveTab.querySelector('.session-button-dir') || inactiveTab).color,
             toolbarActiveBg: getComputedStyle(toolbarActive).backgroundColor,
             toolbarActiveBorder: getComputedStyle(toolbarActive).borderTopColor,
+            activeWindowBg: getComputedStyle(activeWindow).backgroundColor,
+            activeWindowBorder: getComputedStyle(activeWindow).borderTopColor,
+            activeWindowColor: getComputedStyle(activeWindow).color,
+            inactiveWindowBg: getComputedStyle(inactiveWindow).backgroundColor,
             paneControlBg: getComputedStyle(paneControl).backgroundColor,
             paneControlBorder: getComputedStyle(paneControl).borderTopColor,
             zoomControlBg: getComputedStyle(zoomControl).backgroundColor,
@@ -13637,7 +13643,7 @@ def test_pane_tab_active_accent_theming(browser, tmp_path):
     # dark keeps #285a2f, so it must NOT be required equal across themes.
     # toolbarActiveBg/Border are the PRESSED control tab's green, which is theme-specific (light #4f9e3a /
     # dark #86d600); detail-row bg now follows --pane-bar-bg so it is theme-specific too.
-    theme_specific = {"panelHeadBg", "activeTabBg", "activeTabColor", "inactiveActiveTabBg", "inactiveActiveTabColor", "inactiveTabBg", "inactiveTabBorder", "inactiveDirColor", "paneControlBg", "paneControlBorder", "zoomControlBg", "toolbarActiveBg", "toolbarActiveBorder"}
+    theme_specific = {"panelHeadBg", "activeTabBg", "activeTabColor", "inactiveActiveTabBg", "inactiveActiveTabColor", "inactiveTabBg", "inactiveTabBorder", "inactiveDirColor", "paneControlBg", "paneControlBorder", "zoomControlBg", "toolbarActiveBg", "toolbarActiveBorder", "activeWindowBg", "activeWindowBorder", "activeWindowColor", "inactiveWindowBg"}
     for key, value in theme_metrics["dark"].items():
         if key not in theme_specific:
             assert theme_metrics["light"][key] == value
@@ -13645,6 +13651,10 @@ def test_pane_tab_active_accent_theming(browser, tmp_path):
     # source) and stands out from the unpressed control bg — true for any active-color preset.
     assert theme_metrics["dark"]["activeTabBg"] == theme_metrics["dark"]["toolbarActiveBg"]
     assert theme_metrics["light"]["activeTabBg"] == theme_metrics["light"]["toolbarActiveBg"]
+    assert theme_metrics["dark"]["activeWindowBg"] == theme_metrics["dark"]["activeTabBg"]
+    assert theme_metrics["light"]["activeWindowBg"] == theme_metrics["light"]["activeTabBg"]
+    assert theme_metrics["light"]["activeWindowBg"] != theme_metrics["light"]["inactiveWindowBg"]
+    assert theme_metrics["light"]["activeWindowColor"] != theme_metrics["light"]["activeWindowBg"]
     assert theme_metrics["dark"]["activeTabBg"] != theme_metrics["dark"]["paneControlBg"]
     assert theme_metrics["light"]["activeTabBg"] != theme_metrics["dark"]["activeTabBg"]
     assert theme_metrics["light"]["inactiveActiveTabBg"] != theme_metrics["dark"]["inactiveActiveTabBg"]
