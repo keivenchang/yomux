@@ -11071,9 +11071,12 @@ body.editor-theme-light .file-editor-content {
 .file-editor-diff-ref-panel[hidden] {
   display: none;
 }
-.file-editor-diff-ref-panel .diff-ref-input,
-.file-editor-diff-ref-panel .diff-ref-control input {
-  width: clamp(44px, 7vw, 88px);
+.file-editor-diff-ref-panel .diff-ref-controls.compact {
+  gap: 2px;
+}
+.file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-input,
+.file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-control input {
+  width: clamp(38px, 5vw, 68px);
 }
 .file-editor-toolbar-separator {
   width: 1px;
@@ -11148,7 +11151,6 @@ body.editor-theme-light .file-editor-content {
   justify-content: center;
   padding: 0;
 }
-.file-editor-wrap-panel,
 .file-editor-gutter-panel,
 .file-editor-find-panel,
 .file-editor-diff-expand-panel,
@@ -11162,6 +11164,16 @@ body.editor-theme-light .file-editor-content {
   justify-content: center;
   padding: 0;
   line-height: 1;
+}
+.file-editor-wrap-panel {
+  width: auto;
+  min-width: 72px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 5px;
+  line-height: 1;
+  white-space: nowrap;
 }
 .file-editor-theme-panel.theme-with-label {
   width: auto;
@@ -12427,20 +12439,14 @@ body.theme-light .file-tree-row.tabber-row {
 .file-tree-row.tabber-active-window:not(.selected) .file-tree-name {
   font-weight: 800;
 }
-/* Tabber rows: the session/work name is the priority. Let its column take all available width and only
-   ellipsize as a last resort; keep the date from forcing the name to truncate by letting it shrink, and
-   drop the date entirely when the pane is genuinely narrow so the name is never starved. */
+/* Tabber rows keep recency visible at every width; the tree/path text truncates first. */
 .file-tree-row.tabber-row .file-tree-name {
   flex: 1 1 auto;
   min-width: 0;
 }
 .file-tree-row.tabber-row .file-tree-date {
-  flex: 0 1 auto;
+  flex: 0 0 var(--file-tree-date-column-width);
+  inline-size: var(--file-tree-date-column-width);
   color: var(--tabber-detail-color);
   font-weight: 600;
-}
-@container (max-width: 380px) {
-  .file-explorer-changes-panel .file-tree-row.tabber-row .file-tree-date {
-    display: none;
-  }
 }

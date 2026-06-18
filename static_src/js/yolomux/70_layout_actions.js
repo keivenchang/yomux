@@ -1056,9 +1056,59 @@ function pullRequestChecksHtml(pr) {
   return metaJoin(parts);
 }
 
+function activeWindowPaneForProjectMeta(info) {
+  const panes = Array.isArray(info?.panes) ? info.panes : [];
+  return panes.length ? terminalDisplayPane(info) : null;
+}
+
+function repoSummaryAsGit(repo) {
+  if (!repo) return null;
+  return {
+    root: repo.root || '',
+    cwd: repo.cwd || repo.root || '',
+    branch: repo.branch || '',
+    ahead: repo.ahead,
+    behind: repo.behind,
+    dirty_count: repo.dirty_count,
+    activity_ts: repo.activity_ts,
+    activity_source: repo.activity_source || '',
+    worktree: repo.worktree || null,
+  };
+}
+
+function projectMetaSelection(session, info) {
+  const project = info?.project || {};
+  const repos = sessionRepoSummaries(info);
+  const explicitRoot = repoRootKey(sessionRepoDisplayRoot.get(session));
+  const activePane = activeWindowPaneForProjectMeta(info);
+  const activePath = normalizeDirectoryPath(activePane?.current_path || '');
+  const activeAgent = activePane ? agentForPane(info, activePane) : null;
+  const activeAgentKind = String(activeAgent?.kind || activePane?.process_label || activePane?.command || '').toLowerCase();
+  const activeWindowUsesTranscript = activeAgent && ['claude', 'codex'].includes(activeAgentKind);
+  let repoIndex = selectedSessionRepoIndex(session, info);
+  if (!explicitRoot && activePath && repos.length) {
+    const activeRepoIndex = repos.findIndex(repo => repo?.root && pathIsInsideDirectory(activePath, repo.root));
+    if (activeRepoIndex >= 0) repoIndex = activeRepoIndex;
+  }
+  let selectedRepo = repoIndex >= 0 ? repos[repoIndex] : null;
+  let git = selectedRepo ? repoSummaryAsGit(selectedRepo) : displayedSessionGit(session, info);
+  let repoSwitchRepos = repos;
+  let fullPath = selectedRepo?.cwd || selectedRepo?.root || panelFullPath(session, info);
+  if (!explicitRoot && activePane && git?.root && activePath && !pathIsInsideDirectory(activePath, git.root) && !activeWindowUsesTranscript) {
+    git = null;
+    selectedRepo = null;
+    repoIndex = -1;
+    repoSwitchRepos = [];
+    fullPath = activePath;
+  }
+  return {project, repos: repoSwitchRepos, repoIndex, selectedRepo, git, fullPath};
+}
+
 function panelFullPath(session, info) {
   const project = info?.project || {};
   const git = project.git;
+  const activePane = activeWindowPaneForProjectMeta(info);
+  if (activePane?.current_path) return activePane.current_path;
   const panes = Array.isArray(info?.panes) ? info.panes : [];
   const nonHomePane = panes.find(pane => pane?.current_path && pane.current_path !== homePath && !['claude', 'codex'].includes(String(pane.command || '').toLowerCase()));
   if (nonHomePane?.current_path) return nonHomePane.current_path;
@@ -1078,14 +1128,9 @@ function compactHomePath(path) {
 }
 
 function projectMetaHtml(session, info) {
-  const project = info?.project || {};
-  const repos = sessionRepoSummaries(info);
-  const repoIndex = selectedSessionRepoIndex(session, info);
-  const selectedRepo = repoIndex >= 0 ? repos[repoIndex] : null;
-  const git = displayedSessionGit(session, info);
+  const {project, repos, repoIndex, selectedRepo, git, fullPath} = projectMetaSelection(session, info);
   const showingPrimaryGit = !selectedRepo || repoRootKey(project.git?.root) === repoRootKey(selectedRepo.root);
   const parts = [];
-  const fullPath = selectedRepo?.cwd || selectedRepo?.root || panelFullPath(session, info);
   const repoSwitchHtml = repos.length > 1 ? (() => {
     const position = Math.max(0, repoIndex) + 1;
     const switchLabel = `${position}/${repos.length}`;

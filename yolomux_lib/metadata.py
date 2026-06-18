@@ -605,48 +605,61 @@ def repo_summary(cwd: str | None) -> dict[str, Any] | None:
 
 def session_repo_summaries(info: SessionInfo, primary_root: str | None) -> list[dict[str, Any]]:
     # C9: every git repo the session's panes/agents sit in (cwd -> git root), deduped, with the focused
-    # repo flagged. Cheap local git per repo; no transcript scan, no network.
-    summaries: list[dict[str, Any]] = []
+    # repo flagged. Edited-file transcript evidence is the strongest signal; activity only ranks repos
+    # inside the same signal tier.
+    summaries: list[tuple[int, dict[str, Any]]] = []
     seen: set[str] = set()
-    for cwd in candidate_session_cwds(info):
+    for cwd, priority in candidate_session_cwd_entries(info):
         summary = repo_summary(cwd)
         if not summary or not summary["root"] or summary["root"] in seen:
             continue
         seen.add(summary["root"])
         summary["primary"] = summary["root"] == primary_root
-        summaries.append(summary)
+        summaries.append((priority, summary))
     return [
-        summary for _index, summary in sorted(
+        summary for _index, (priority, summary) in sorted(
             enumerate(summaries),
-            key=lambda item: (-(float(item[1].get("activity_ts") or 0)), item[0]),
+            key=lambda item: (item[1][0], -(float(item[1][1].get("activity_ts") or 0)), item[0]),
         )
     ]
 
 def candidate_session_cwds(info: SessionInfo) -> list[str]:
-    # the LIVE pane cwd wins. The session-number default workdir (session "1" -> dynamo1) is
-    # only a fallback for a fresh shell sitting in home / a non-repo — it must NOT out-rank a pane that
-    # has `cd`'d into a different repo (which previously kept the project pinned to dynamo1 forever).
-    paths: list[str] = []
+    return [path for path, _priority in candidate_session_cwd_entries(info)]
+
+def candidate_session_cwd_entries(info: SessionInfo) -> list[tuple[str, int]]:
+    # Edited files in transcripts are stronger than cwd because they prove where work actually happened.
+    # Live/launch/pane cwd signals share a tier so git activity can still pick the active repo among them.
+    paths: list[tuple[str, int]] = []
+    paths.extend((path, 0) for path in session_touched_dirs(info))
     if info.selected_pane:
-        paths.append(info.selected_pane.current_path)        # focused pane's live cwd (follows `cd`)
-    paths.extend(agent.cwd for agent in info.agents if agent.cwd)   # agent launch dirs
-    paths.extend(pane.current_path for pane in info.panes if pane.current_path)  # other panes
-    # transcript signal: dirs the agents have actually EDITED files in. This is what surfaces the real
-    # repo when the pane/agent cwd is $HOME or another non-repo (e.g. a claude launched from ~ that is
-    # editing ~/yolomux.dev8003). It is a real work signal, so it outranks the session-number default
-    # below; final primary selection across all these candidates is by git activity in repo_summary.
-    paths.extend(session_touched_dirs(info))
+        paths.append((info.selected_pane.current_path, 10))        # focused pane's live cwd (follows `cd`)
+    paths.extend((agent.cwd, 10) for agent in info.agents if agent.cwd)   # agent launch dirs
+    paths.extend((pane.current_path, 10) for pane in info.panes if pane.current_path)  # other panes
     default_workdir = session_workdir(info.session)          # fallback: session-number default workspace
     if default_workdir.is_dir():
-        paths.append(str(default_workdir))
+        paths.append((str(default_workdir), 90))
     numbered_workdir = numbered_session_workdir(info.session)   # fallback: numbered workdir
     if numbered_workdir and numbered_workdir.is_dir():
-        paths.append(str(numbered_workdir))
+        paths.append((str(numbered_workdir), 90))
     for raw in settings_payload().get("settings", {}).get("file_explorer", {}).get("companion_dirs", []):
         expanded = str(Path(raw).expanduser()) if raw else ""
         if expanded:
-            paths.append(expanded)
-    return unique_existing_paths(paths)
+            paths.append((expanded, 100))
+    return unique_existing_path_entries(paths)
+
+def unique_existing_path_entries(paths: list[tuple[str, int]]) -> list[tuple[str, int]]:
+    result: list[tuple[str, int]] = []
+    seen: set[str] = set()
+    for raw_path, priority in paths:
+        try:
+            path = str(Path(raw_path).expanduser().resolve())
+        except OSError:
+            continue
+        if path in seen:
+            continue
+        seen.add(path)
+        result.append((path, priority))
+    return result
 
 def unique_existing_paths(paths: list[str]) -> list[str]:
     result: list[str] = []

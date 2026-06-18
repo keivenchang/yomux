@@ -12371,9 +12371,26 @@ function tabberKnownRootForPath(path, roots) {
   return '';
 }
 
+function tabberFileMatchesWindow(file, windowIndex, agentKey = '') {
+  const targetWindow = String(windowIndex ?? '');
+  const targetAgent = String(agentKey || '').toLowerCase();
+  const windows = Array.isArray(file?.agent_windows) ? file.agent_windows : [];
+  if (windows.length) {
+    return windows.some(item => {
+      const itemWindow = String(item?.window ?? (item?.window_index ?? ''));
+      const itemAgent = String(item?.kind || '').toLowerCase();
+      if (targetWindow && itemWindow !== targetWindow) return false;
+      return !targetAgent || !itemAgent || itemAgent === targetAgent;
+    });
+  }
+  const agents = Array.isArray(file?.agents) ? file.agents : [file?.agent].filter(Boolean);
+  if (!targetAgent || !agents.length) return true;
+  return agents.map(item => String(item || '').toLowerCase()).includes(targetAgent);
+}
+
 // Absolute touched-path entries for the paths a session's agent touched, attached under an agent window.
 // These are intentionally leaves: the Tabber shows where work happened, not every changed file.
-function tabberRepoEntriesForWindow(session, windowIndex, gitBranch, gitRoot) {
+function tabberRepoEntriesForWindow(session, windowIndex, agentKey, gitBranch, gitRoot) {
   const cached = tabberSessionFilesStates.get(session);
   if (!cached?.loaded) {
     if (!cached?.loading) return [];
@@ -12387,6 +12404,7 @@ function tabberRepoEntriesForWindow(session, windowIndex, gitBranch, gitRoot) {
   const byPath = new Map();
   for (const file of cached.files) {
     if (file.uploaded === true) continue;
+    if (!tabberFileMatchesWindow(file, windowIndex, agentKey)) continue;
     const rawRepo = String(file.repo || '').trim();
     const rawAbsPath = String(file.abs_path || '').trim();
     const repo = rawRepo ? normalizeDirectoryPath(rawRepo) : '';
@@ -12438,7 +12456,7 @@ function buildTabberTree() {
       const isAgent = tabberWindowIsAgent(record.name);
       const agentKey = tmuxWindowAgentKey(record.name);
       const agentActivity = isAgent ? tabberAgentForWindow(session, record.index, agentKey) : null;
-      const repoEntries = isAgent ? tabberRepoEntriesForWindow(session, record.index, branch, gitRoot) : [];
+      const repoEntries = isAgent ? tabberRepoEntriesForWindow(session, record.index, agentKey, branch, gitRoot) : [];
       const childMtime = repoEntries.reduce((max, entry) => Math.max(max, Number(entry.mtime || 0)), 0);
       const ledgerMtime = isAgent ? 0 : tabberRecency(`${session}:${record.index}`);
       // Agent windows use transcript activity only. Their touched repo rows may have newer file mtimes, but
@@ -16203,7 +16221,7 @@ function updateEditorWrapButton(button) {
     labelOn: t('editor.disableWordWrap'),
     labelOff: t('editor.enableWordWrap'),
   });
-  setFileEditorIcon(button, 'file-editor-icon-wrap');
+  if (button.textContent !== 'Wrap around') button.textContent = 'Wrap around';
 }
 
 function updateEditorFindButton(button, state, host = null) {
@@ -19223,9 +19241,59 @@ function pullRequestChecksHtml(pr) {
   return metaJoin(parts);
 }
 
+function activeWindowPaneForProjectMeta(info) {
+  const panes = Array.isArray(info?.panes) ? info.panes : [];
+  return panes.length ? terminalDisplayPane(info) : null;
+}
+
+function repoSummaryAsGit(repo) {
+  if (!repo) return null;
+  return {
+    root: repo.root || '',
+    cwd: repo.cwd || repo.root || '',
+    branch: repo.branch || '',
+    ahead: repo.ahead,
+    behind: repo.behind,
+    dirty_count: repo.dirty_count,
+    activity_ts: repo.activity_ts,
+    activity_source: repo.activity_source || '',
+    worktree: repo.worktree || null,
+  };
+}
+
+function projectMetaSelection(session, info) {
+  const project = info?.project || {};
+  const repos = sessionRepoSummaries(info);
+  const explicitRoot = repoRootKey(sessionRepoDisplayRoot.get(session));
+  const activePane = activeWindowPaneForProjectMeta(info);
+  const activePath = normalizeDirectoryPath(activePane?.current_path || '');
+  const activeAgent = activePane ? agentForPane(info, activePane) : null;
+  const activeAgentKind = String(activeAgent?.kind || activePane?.process_label || activePane?.command || '').toLowerCase();
+  const activeWindowUsesTranscript = activeAgent && ['claude', 'codex'].includes(activeAgentKind);
+  let repoIndex = selectedSessionRepoIndex(session, info);
+  if (!explicitRoot && activePath && repos.length) {
+    const activeRepoIndex = repos.findIndex(repo => repo?.root && pathIsInsideDirectory(activePath, repo.root));
+    if (activeRepoIndex >= 0) repoIndex = activeRepoIndex;
+  }
+  let selectedRepo = repoIndex >= 0 ? repos[repoIndex] : null;
+  let git = selectedRepo ? repoSummaryAsGit(selectedRepo) : displayedSessionGit(session, info);
+  let repoSwitchRepos = repos;
+  let fullPath = selectedRepo?.cwd || selectedRepo?.root || panelFullPath(session, info);
+  if (!explicitRoot && activePane && git?.root && activePath && !pathIsInsideDirectory(activePath, git.root) && !activeWindowUsesTranscript) {
+    git = null;
+    selectedRepo = null;
+    repoIndex = -1;
+    repoSwitchRepos = [];
+    fullPath = activePath;
+  }
+  return {project, repos: repoSwitchRepos, repoIndex, selectedRepo, git, fullPath};
+}
+
 function panelFullPath(session, info) {
   const project = info?.project || {};
   const git = project.git;
+  const activePane = activeWindowPaneForProjectMeta(info);
+  if (activePane?.current_path) return activePane.current_path;
   const panes = Array.isArray(info?.panes) ? info.panes : [];
   const nonHomePane = panes.find(pane => pane?.current_path && pane.current_path !== homePath && !['claude', 'codex'].includes(String(pane.command || '').toLowerCase()));
   if (nonHomePane?.current_path) return nonHomePane.current_path;
@@ -19245,14 +19313,9 @@ function compactHomePath(path) {
 }
 
 function projectMetaHtml(session, info) {
-  const project = info?.project || {};
-  const repos = sessionRepoSummaries(info);
-  const repoIndex = selectedSessionRepoIndex(session, info);
-  const selectedRepo = repoIndex >= 0 ? repos[repoIndex] : null;
-  const git = displayedSessionGit(session, info);
+  const {project, repos, repoIndex, selectedRepo, git, fullPath} = projectMetaSelection(session, info);
   const showingPrimaryGit = !selectedRepo || repoRootKey(project.git?.root) === repoRootKey(selectedRepo.root);
   const parts = [];
-  const fullPath = selectedRepo?.cwd || selectedRepo?.root || panelFullPath(session, info);
   const repoSwitchHtml = repos.length > 1 ? (() => {
     const position = Math.max(0, repoIndex) + 1;
     const switchLabel = `${position}/${repos.length}`;
@@ -28704,6 +28767,7 @@ function createFileEditorPanel(item) {
       <div class="file-editor-toolbar" role="toolbar" aria-label="${esc(t('editor.toolbar.aria'))}" hidden>
         <div class="file-editor-toolbar-zone file-editor-toolbar-left">
           <button type="button" class="file-editor-gutter-panel" title="${esc(t('editor.toggleLineNumbers'))}" aria-label="${esc(t('editor.toggleLineNumbers'))}" hidden>#</button>
+          <button type="button" class="file-editor-wrap-panel" title="${esc(t('editor.toggleWordWrap'))}" aria-label="${esc(t('editor.toggleWordWrap'))}" hidden>Wrap around</button>
           <button type="button" class="file-editor-diff-panel" title="${esc(t('editor.diff'))}" aria-label="${esc(t('editor.diff'))}" hidden>Differ</button>
           <button type="button" class="file-editor-diff-expand-panel" title="${esc(t('editor.diffExpand'))}" aria-label="${esc(t('editor.diffExpand'))}" aria-pressed="${fileEditorDiffExpandUnchangedForItem(item) ? 'true' : 'false'}" hidden>↕</button>
           <span class="file-editor-diff-ref-panel" hidden>${diffRefControlsHtml({compact: true})}</span>
@@ -28724,7 +28788,6 @@ function createFileEditorPanel(item) {
             <button type="button" class="file-editor-popout-preview-panel" title="${esc(t('editor.popoutPreview'))}" aria-label="${esc(t('editor.popoutPreview'))}" hidden><span class="file-editor-icon file-editor-icon-popout-preview" aria-hidden="true"></span></button>
           </div>
           <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="mode" aria-hidden="true" hidden></span>
-          <button type="button" class="file-editor-wrap-panel" title="${esc(t('editor.toggleWordWrap'))}" aria-label="${esc(t('editor.toggleWordWrap'))}" hidden><span class="file-editor-icon file-editor-icon-wrap" aria-hidden="true"></span></button>
           <button type="button" class="file-editor-find-panel" title="${esc(t('editor.findInFile', {shortcut: appShortcutText('F')}))}" aria-label="${esc(t('editor.findInFileAria'))}" aria-pressed="false" hidden><span class="file-editor-icon file-editor-icon-find" aria-hidden="true"></span></button>
           <button type="button" class="file-editor-blame-panel" title="${esc(t('editor.blame.toggle'))}" aria-label="${esc(t('editor.blame.toggle'))}" aria-pressed="${fileEditorBlameEnabled ? 'true' : 'false'}" hidden><span class="file-editor-icon file-editor-icon-blame" aria-hidden="true"></span></button>
           <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="tools" aria-hidden="true" hidden></span>

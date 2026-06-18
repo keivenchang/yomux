@@ -2058,16 +2058,11 @@ class TmuxWebtermApp:
         restarting = self._spawn_self_restart()
         return {"ok": True, "dryrun": False, "restarting": restarting, "plan": plan,
                 "message": "updated; restarting now" if restarting
-                           else "updated; restart the server manually (no restart hook for this checkout)"}
+                           else "updated; restart spawn failed; restart the server manually"}
 
     def _spawn_self_restart(self) -> bool:
-        # Only auto-restart the prod deployment (~/yolomux). A dev worktree must never restart prod,
-        # so non-prod checkouts report "restart manually". Keep this portable: no systemd dependency
-        # and no broad pkill pattern. The helper kills only this server PID, then relaunches the same
-        # Python entrypoint with the same argv under nohup.
-        prod_root = (Path.home() / "yolomux").resolve()
-        if common.PROJECT_ROOT.resolve() != prod_root:
-            return False
+        # Restart the checkout that is running this process. The update path pulls and builds in the
+        # same PROJECT_ROOT, so dev worktrees can safely bounce themselves without touching prod.
         try:
             restart_argv = [sys.executable or "python3", *sys.argv]
             restart_cmd = (
@@ -2086,7 +2081,8 @@ class TmuxWebtermApp:
                              cwd=str(common.PROJECT_ROOT), stdin=subprocess.DEVNULL,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
             return True
-        except Exception:
+        except OSError as exc:
+            logging.warning("self-update restart spawn failed: %s", exc)
             return False
 
     def update_check_loop(self) -> None:

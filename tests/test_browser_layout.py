@@ -620,6 +620,7 @@ def editor_diff_ref_toolbar_fixture_html():
           <div class="file-editor-toolbar" role="toolbar">
             <div class="file-editor-toolbar-zone file-editor-toolbar-left">
               <button id="gutter-button" type="button" class="file-editor-gutter-panel active" aria-pressed="true">#</button>
+              <button id="wrap-button" type="button" class="file-editor-wrap-panel active" aria-pressed="true">Wrap around</button>
               <button id="diff-button" type="button" class="file-editor-diff-panel active" aria-pressed="true">Differ</button>
               <button id="diff-expand-button" type="button" class="file-editor-diff-expand-panel" aria-pressed="true">↕</button>
               <span id="diff-ref-panel" class="file-editor-diff-ref-panel">
@@ -642,7 +643,6 @@ def editor_diff_ref_toolbar_fixture_html():
                 <button type="button" data-editor-mode="split"><span class="file-editor-icon file-editor-icon-split"></span></button>
                 <button type="button" class="file-editor-popout-preview-panel"><span class="file-editor-icon file-editor-icon-popout-preview"></span></button>
               </div>
-              <button type="button" class="file-editor-wrap-panel active"><span class="file-editor-icon file-editor-icon-wrap"></span></button>
               <button type="button" class="file-editor-find-panel"><span class="file-editor-icon file-editor-icon-find"></span></button>
               <button type="button" class="file-editor-theme-panel"><span class="file-editor-icon file-editor-icon-theme"></span></button>
               <button type="button" class="file-editor-save-panel"><span class="file-editor-icon file-editor-icon-save"></span></button>
@@ -19176,6 +19176,7 @@ def test_editor_diff_ref_reset_is_visible_and_hittable(browser, tmp_path):
         const centerZone = document.querySelector('.file-editor-toolbar-center').getBoundingClientRect();
         const rightZone = document.querySelector('.file-editor-toolbar-right').getBoundingClientRect();
         const gutter = document.getElementById('gutter-button').getBoundingClientRect();
+        const wrap = document.getElementById('wrap-button').getBoundingClientRect();
         const diff = document.getElementById('diff-button').getBoundingClientRect();
         const expand = document.getElementById('diff-expand-button').getBoundingClientRect();
         const font = document.getElementById('font-panel').getBoundingClientRect();
@@ -19199,6 +19200,9 @@ def test_editor_diff_ref_reset_is_visible_and_hittable(browser, tmp_path):
           rightZoneRight: rightZone.right,
           gutterLeft: gutter.left,
           gutterRight: gutter.right,
+          wrapLeft: wrap.left,
+          wrapRight: wrap.right,
+          wrapText: document.getElementById('wrap-button').textContent.trim(),
           diffLeft: diff.left,
           diffRight: diff.right,
           diffText: document.getElementById('diff-button').textContent.trim(),
@@ -19229,7 +19233,9 @@ def test_editor_diff_ref_reset_is_visible_and_hittable(browser, tmp_path):
     assert metrics["modeLeft"] >= metrics["centerZoneCenter"] + 20, metrics
     assert metrics["modeLeft"] >= metrics["leftZoneRight"], metrics
     assert metrics["gutterLeft"] <= metrics["toolbarLeft"] + 8, metrics
-    assert 0 <= metrics["diffLeft"] - metrics["gutterRight"] <= 6, metrics
+    assert 0 <= metrics["wrapLeft"] - metrics["gutterRight"] <= 6, metrics
+    assert metrics["wrapText"] == "Wrap around", metrics
+    assert 0 <= metrics["diffLeft"] - metrics["wrapRight"] <= 6, metrics
     assert metrics["diffText"] == "Differ", metrics
     assert 0 <= metrics["expandLeft"] - metrics["diffRight"] <= 6, metrics
     assert 0 <= metrics["panelLeft"] - metrics["expandRight"] <= 6, metrics

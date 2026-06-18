@@ -81,6 +81,40 @@ def test_session_touched_dirs_collects_edited_dirs(tmp_path):
     assert dirs == {str(tmp_path / "repo" / "a"), str(tmp_path / "repo" / "b")}
 
 
+def test_session_files_payload_carries_agent_window_attribution(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test User")
+    touched = repo / "app.py"
+    touched.write_text("print('hi')\n", encoding="utf-8")
+    git(repo, "add", "app.py")
+    git(repo, "commit", "-m", "base")
+
+    transcript = tmp_path / "codex.jsonl"
+    transcript.write_text(
+        '{"msg":"*** Begin Patch\\n*** Update File: app.py\\n"}\n',
+        encoding="utf-8",
+    )
+    os.utime(transcript, (time.time(), time.time()))
+    panes = [
+        PaneInfo(session="s1", window="0", pane="0", pane_id="%10", target="s1:0.0", current_path=str(repo), command="codex", active=True, window_active=True, title="", pid=10, process_label="codex"),
+        PaneInfo(session="s1", window="1", pane="0", pane_id="%11", target="s1:1.0", current_path=str(tmp_path), command="bash", active=True, window_active=False, title="", pid=11, process_label="bash"),
+    ]
+    info = SessionInfo(
+        session="s1",
+        panes=panes,
+        selected_pane=panes[0],
+        agents=[AgentInfo("s1", "codex", 10, "s1:0.0", "codex", str(repo), "running", "sid", str(transcript), None)],
+    )
+
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time())
+    item = next(row for row in payload["files"] if row["path"] == "app.py")
+
+    assert item["agent_windows"] == [{"kind": "codex", "window": "0", "window_index": 0, "pane": "0", "pane_target": "s1:0.0"}]
+
+
 def test_scan_claude_transcript_refreshes_cache_on_change(tmp_path):
     # the (path, mtime, size) cache must not serve stale results after the transcript is appended to.
     transcript = tmp_path / "c.jsonl"

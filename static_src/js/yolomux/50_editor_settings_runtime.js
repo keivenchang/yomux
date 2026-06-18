@@ -274,7 +274,7 @@ function updateEditorWrapButton(button) {
     labelOn: t('editor.disableWordWrap'),
     labelOff: t('editor.enableWordWrap'),
   });
-  setFileEditorIcon(button, 'file-editor-icon-wrap');
+  if (button.textContent !== 'Wrap around') button.textContent = 'Wrap around';
 }
 
 function updateEditorFindButton(button, state, host = null) {

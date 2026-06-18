@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 
@@ -27,6 +28,16 @@ def _pane(session, index, path):
         target=f"{session}:0.{index}", current_path=str(path), command="zsh",
         active=index == 0, window_active=True, title="", pid=10 + index,
     )
+
+
+def _init_repo(repo: Path) -> None:
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / "f.txt").write_text("x\n", encoding="utf-8")
+    _git(repo, "add", "f.txt")
+    _git(repo, "commit", "-m", "init")
 
 
 def test_session_repo_summaries_lists_every_touched_repo(tmp_path):
@@ -116,8 +127,6 @@ def test_candidate_session_cwds_surfaces_transcript_touched_repo(monkeypatch, tm
     # surface that repo: the transcript-touched dir is fed into candidate_session_cwds, so repo
     # detection finds it even though the live pane cwd has no git checkout. This is the "8003 says
     # 'no git checkout detected' while actually working in ~/yolomux.dev8003" bug.
-    import json
-
     repo = tmp_path / "project"
     repo.mkdir()
     _git(repo, "init")
@@ -161,6 +170,51 @@ def test_candidate_session_cwds_surfaces_transcript_touched_repo(monkeypatch, tm
     assert git_data["root"] == repo_root
     roots = {s["root"] for s in session_repo_summaries(info, repo_root)}
     assert repo_root in roots
+
+
+def test_session_git_inventory_prefers_transcript_edit_over_recent_live_repo(monkeypatch, tmp_path):
+    edited_repo = tmp_path / "edited"
+    live_repo = tmp_path / "live"
+    _init_repo(edited_repo)
+    _init_repo(live_repo)
+    edited_root = str(edited_repo.resolve())
+    live_root = str(live_repo.resolve())
+    (live_repo / "f.txt").write_text("newer live edit\n", encoding="utf-8")
+    os.utime(live_repo / "f.txt", (2_000_000_000, 2_000_000_000))
+
+    home_like = tmp_path / "home"
+    home_like.mkdir()
+    transcript = tmp_path / "claude.jsonl"
+    transcript.write_text(
+        json.dumps({
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "tool_use", "name": "Edit", "input": {"file_path": str(edited_repo / "f.txt")}},
+            ]},
+        }) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(metadata, "session_workdir", lambda session: home_like)
+    monkeypatch.setattr(metadata, "numbered_session_workdir", lambda session: None)
+    monkeypatch.setattr(metadata, "settings_payload", lambda: {"settings": {"file_explorer": {"companion_dirs": []}}})
+
+    pane = _pane("8002", 0, live_repo)
+    agent = AgentInfo(
+        session="8002", kind="claude", pid=1, pane_target="8002:0.0", command="claude",
+        cwd=str(home_like), status="running", session_id=None, transcript=str(transcript), error=None,
+    )
+    info = SessionInfo(session="8002", panes=[pane], selected_pane=pane, agents=[agent])
+
+    candidates = metadata.candidate_session_cwds(info)
+    assert candidates.index(edited_root) < candidates.index(live_root)
+
+    git_data = session_git_inventory(info)
+    summaries = session_repo_summaries(info, git_data["root"] if git_data else None)
+    assert git_data is not None
+    assert git_data["root"] == edited_root
+    assert summaries[0]["root"] == edited_root
+    assert summaries[1]["root"] == live_root
+    assert summaries[1]["activity_source"] == "dirty"
 
 
 REPO = {

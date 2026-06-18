@@ -3271,6 +3271,14 @@ test('t@2355', () => {
   assert.ok(editorToolbarIdx < editorLeftZoneIdx && editorLeftZoneIdx < editorCenterZoneIdx && editorCenterZoneIdx < editorRightZoneIdx, 'editor toolbar renders shared left/center/right parent zones');
   const editorToolbarTemplateEnd = source.indexOf('<div class="file-editor-panel-body panel-overlay-root">', editorToolbarIdx);
   const editorToolbarTemplate = source.slice(editorToolbarIdx, editorToolbarTemplateEnd);
+  const editorLeftTemplate = editorToolbarTemplate.slice(editorLeftZoneIdx - editorToolbarIdx, editorCenterZoneIdx - editorToolbarIdx);
+  const editorRightTemplate = editorToolbarTemplate.slice(editorRightZoneIdx - editorToolbarIdx);
+  assert.ok(
+    editorLeftTemplate.indexOf('class="file-editor-gutter-panel"') < editorLeftTemplate.indexOf('class="file-editor-wrap-panel"')
+      && editorLeftTemplate.indexOf('class="file-editor-wrap-panel"') < editorLeftTemplate.indexOf('class="file-editor-diff-panel"'),
+    'editor toolbar left/front controls render as #, Wrap around, Differ'
+  );
+  assert.equal(editorRightTemplate.includes('file-editor-wrap-panel'), false, 'editor toolbar no longer renders the redundant right-side wrap icon');
   assert.ok(
     editorToolbarTemplate.indexOf('class="file-editor-theme-panel"') < editorToolbarTemplate.indexOf('data-editor-mode="edit"'),
     'editor toolbar renders the Bright/Dark/Vanilla selector immediately before Edit'
@@ -3291,6 +3299,7 @@ test('t@2355', () => {
   assert.ok(/\.file-editor-toolbar-center\s*\{[^}]*position:\s*absolute[\s\S]*left:\s*50%[\s\S]*transform:\s*translate\(-50%, -50%\)/.test(css), 'editor toolbar center zone stays centered');
   assert.ok(/\.file-editor-toolbar-right\s*\{[^}]*margin-inline-start:\s*auto[\s\S]*justify-content:\s*flex-end/.test(css), 'editor toolbar right zone is the only spacer-backed zone');
   assert.ok(/\.file-editor-diff-panel\s*\{[^}]*min-width:\s*44px/.test(css), 'editor toolbar gives Differ text-button width');
+  assert.ok(/\.file-editor-wrap-panel\s*\{[^}]*min-width:\s*72px[\s\S]*white-space:\s*nowrap/.test(css), 'editor toolbar gives Wrap around a text-button width');
   assert.ok(/\.file-editor-toolbar\s*\{[^}]*justify-content:\s*flex-start/.test(css), 'editor toolbar left-aligns # and Differ by default, including after browser refresh');
   const toolbarCssStart = css.indexOf('.file-editor-toolbar {');
   const toolbarCssEnd = css.indexOf('.file-editor-preview-font-panel button', toolbarCssStart);
@@ -3301,6 +3310,8 @@ test('t@2355', () => {
   const editorPressedBlock = css.slice(editorPressedStart, css.indexOf('{', editorPressedStart));
   assert.ok(editorPressedBlock.includes('.file-editor-gutter-panel.active') && editorPressedBlock.includes('.file-editor-find-panel[aria-pressed="true"]') && editorPressedBlock.includes('.file-editor-wrap-panel[aria-pressed="true"]'), '#, Search, and wrap active states share the pressed control treatment');
   assert.ok(source.includes('>Differ</button>'), 'editor Diff toolbar button renders as Differ text');
+  assert.ok(source.includes('>Wrap around</button>'), 'editor Wrap toolbar button renders as text in the left zone');
+  assert.ok(/function updateEditorWrapButton\(button\)[\s\S]*button\.textContent = 'Wrap around'/.test(source), 'wrap button renderer preserves the left-zone text label');
   assert.ok(source.includes('toggleEditorFind(panel);'), 'Search toolbar button toggles the CodeMirror search panel');
   assert.ok(source.includes('const currentText = String(state.content || \'\');'), 'plain CodeMirror editor mode owns its current text value');
   assert.ok(source.includes('function setLimitedMapEntry'), 'long-lived frontend maps share a bounded LRU setter');
@@ -4144,6 +4155,28 @@ test('t@2560', () => {
   assert.ok(cycledMetaHtml.includes('>2/2</button>'), 'C9: the repo control updates the current repo position');
   const singleRepoInfo = {...multiRepoInfo, project: {...multiRepoInfo.project, repos: [multiRepoInfo.project.repos[0]]}};
   assert.equal(api.projectMetaHtml('single-repo-cycle', singleRepoInfo).includes('meta-repo-switch'), false, 'C9: a single-repo session shows no carousel');
+  const windowScopedInfo = {
+    agents: [{kind: 'codex', pane_target: '5:0.0'}],
+    selected_pane: {target: '5:0.0', window: '0', pane: '0', current_path: '/home/u'},
+    panes: [
+      {target: '5:0.0', window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', command: 'codex', current_path: '/home/u'},
+      {target: '5:1.0', window: '1', pane: '0', window_active: false, active: true, process_label: 'bash', command: 'bash', current_path: '/tmp/shell'},
+    ],
+    project: {
+      git: {root: '/repo/agent', cwd: '/repo/agent/src', branch: 'agent-work', dirty_count: 8}, pull_request: null, linear: [],
+      repos: [{root: '/repo/agent', cwd: '/repo/agent/src', branch: 'agent-work', dirty_count: 8, primary: true}],
+    },
+  };
+  const codexMetaHtml = api.projectMetaHtml('window-scope', windowScopedInfo);
+  const bashWindowInfo = {
+    ...windowScopedInfo,
+    selected_pane: windowScopedInfo.panes[1],
+    panes: windowScopedInfo.panes.map(pane => ({...pane, window_active: pane.window === '1'})),
+  };
+  const bashMetaHtml = api.projectMetaHtml('window-scope', bashWindowInfo);
+  assert.ok(codexMetaHtml.includes('/repo/agent/src') && codexMetaHtml.includes('8 dirty'), 'active agent window keeps transcript-derived repo metadata');
+  assert.equal(bashMetaHtml.includes('/repo/agent'), false, 'non-agent active window outside the repo does not inherit the agent touched repo');
+  assert.ok(bashMetaHtml.includes('/tmp/shell'), 'non-agent active window shows its own cwd in the detail row');
   const c9Src = fs.readFileSync('static/yolomux.js', 'utf8');
   const c9Css = fs.readFileSync('static/yolomux.css', 'utf8');
   assert.ok(c9Src.includes('function showRepoChipMenu('), 'C9: the repo count opens a popover');
@@ -13157,6 +13190,8 @@ test('t@tabber', () => {
   assert.ok(/\.file-tree-row\.tabber-row\[data-tabber-type="tab"\]:not\(\.selected\) > \.file-tree-name,[\s\S]*color:\s*var\(--tabber-level0-color\)/.test(css), 'non-tmux Tabber pane rows do not use purple');
   assert.ok(source.includes("movingEllipsisHtml('tabber-loading-dots')"), 'Tabber shows shared moving dots while touched paths are loading');
   assert.ok(/\.file-tree-row\.tabber-row \.tabber-window-label \.agent-icon\s*\{[\s\S]*width:\s*calc\(var\(--file-explorer-font-size\) \+ 2px\)[\s\S]*height:\s*calc\(var\(--file-explorer-font-size\) \+ 2px\)/.test(css), 'Tabber process icons scale with the file explorer row font');
+  assert.ok(/\.file-tree-row\.tabber-row \.file-tree-date\s*\{[\s\S]*flex:\s*0 0 var\(--file-tree-date-column-width\)[\s\S]*inline-size:\s*var\(--file-tree-date-column-width\)/.test(css), 'Tabber keeps the recency column reserved at narrow widths');
+  assert.equal(/@container[\s\S]*tabber-row \.file-tree-date[\s\S]*display:\s*none/.test(css), false, 'Tabber never hides the <time> ago recency column for narrow panes');
   assert.ok(/function warmTabberDataOnLaunch\(\)[\s\S]*?tabberLaunchWarmupStarted = true;[\s\S]*?fetchTabberActivity\(\);[\s\S]*?fetchTabberSessionFilesBatch\(tabberAgentSessions\(\)\);/.test(source), 'Tabber launch warmup primes activity and batch-hydrates touched paths');
   assert.ok(/transcriptMetaLoaded = true;[\s\S]*?warmTabberDataOnLaunch\(\)/.test(source), 'Tabber launch warmup runs as soon as transcript metadata is available');
   assert.ok(/function tabberAgentForWindow\(session, windowIndex, agentKey = ''\)/.test(source), 'Tabber can look up agent transcript activity by session/window');
@@ -13233,6 +13268,27 @@ test('t@tabber', () => {
   assert.equal(repos.some(row => /\/home\/u\/proj\/src/.test(row.tabber.label)), false, 'L3: descendant paths fold into the known repo root');
   assert.equal(repos.some(row => /^\/tmp/.test(row.tabber.label)), false, 'L3: non-repo touched paths are omitted from Tabber');
   assert.equal(entriesByDir.has('/' + s1.name + '/' + claudeWin.name + '/' + repos[0].name), false, 'L3: Tabber does not list individual files under the path row');
+
+  api.setTranscriptInfoForTest('3', {
+    project: {git: {branch: 'scoped', root: '/home/u/codex-a'}},
+    panes: [
+      {window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', process_label_pid: 111, command: 'codex', current_path: '/home/u'},
+      {window: '1', pane: '0', window_active: false, active: true, process_label: 'codex', process_label_pid: 222, command: 'codex', current_path: '/home/u'},
+    ],
+  });
+  api.setTabberSessionFilesForTest('3', [
+    {path: 'a.py', abs_path: '/home/u/codex-a/a.py', repo: '/home/u/codex-a', status: 'M', mtime: 7000, agents: ['codex'], agent_windows: [{kind: 'codex', window: '0', window_index: 0, pane: '0', pane_target: '3:0.0'}]},
+    {path: 'b.py', abs_path: '/home/u/codex-b/b.py', repo: '/home/u/codex-b', status: 'M', mtime: 8000, agents: ['codex'], agent_windows: [{kind: 'codex', window: '1', window_index: 1, pane: '0', pane_target: '3:1.0'}]},
+  ]);
+  const scopedTree = api.buildTabberTree();
+  const scopedSession = scopedTree.entries.find(e => e.tabber?.session === '3');
+  const scopedWindows = scopedTree.entriesByDir.get('/' + scopedSession.name);
+  const scopedWindow0 = scopedWindows.find(row => row.tabber.windowIndex === 0);
+  const scopedWindow1 = scopedWindows.find(row => row.tabber.windowIndex === 1);
+  const scopedRepos0 = scopedTree.entriesByDir.get('/' + scopedSession.name + '/' + scopedWindow0.name).map(row => row.tabber.label);
+  const scopedRepos1 = scopedTree.entriesByDir.get('/' + scopedSession.name + '/' + scopedWindow1.name).map(row => row.tabber.label);
+  assert.deepEqual(scopedRepos0, ['/home/u/codex-a'], 'Tabber repo rows under window 0 use only files attributed to tmux window 0');
+  assert.deepEqual(scopedRepos1, ['/home/u/codex-b'], 'Tabber repo rows under window 1 use only files attributed to tmux window 1');
 
   // Render guard: real labels (never synthetic node names); active window marked; absolute path rows present.
   const rows = api.tabberRenderedRowsForTest();

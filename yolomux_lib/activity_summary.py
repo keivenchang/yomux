@@ -202,12 +202,31 @@ def agent_window_name_for_summary(info: SessionInfo, agent: AgentInfo, window: s
     return str(agent.command or agent.kind or "").strip()
 
 
-def recent_agent_paths_from_files(files_payload: dict[str, Any] | None, limit: int = 3) -> list[dict[str, Any]]:
+def session_file_matches_agent_window(item: dict[str, Any], agent: AgentInfo | None, window: str = "") -> bool:
+    windows = item.get("agent_windows")
+    if not isinstance(windows, list) or not windows:
+        return True
+    agent_target = str(agent.pane_target or "") if agent else ""
+    agent_kind = str(agent.kind or "").lower() if agent else ""
+    window_text = str(window or "")
+    for raw in windows:
+        if not isinstance(raw, dict):
+            continue
+        if agent_target and str(raw.get("pane_target") or "") == agent_target:
+            return True
+        if window_text and str(raw.get("window") or "") == window_text and str(raw.get("kind") or "").lower() == agent_kind:
+            return True
+    return False
+
+
+def recent_agent_paths_from_files(files_payload: dict[str, Any] | None, limit: int = 3, agent: AgentInfo | None = None, window: str = "") -> list[dict[str, Any]]:
     if not isinstance(files_payload, dict):
         return []
     by_path: dict[str, dict[str, Any]] = {}
     files = [item for item in files_payload.get("files", []) if isinstance(item, dict)]
     for item in files:
+        if not session_file_matches_agent_window(item, agent, window):
+            continue
         raw_repo = str(item.get("repo") or "").strip()
         raw_abs_path = str(item.get("abs_path") or "").strip()
         if raw_abs_path and is_generated_upload_name(raw_abs_path):
@@ -262,7 +281,7 @@ def build_recent_agents_payload(
                 "agent_model": agent.model or "",
                 "cwd": agent.cwd or "",
                 "transcript": agent.transcript or "",
-                "recent_paths": recent_agent_paths_from_files((session_files_by_session or {}).get(session)),
+                "recent_paths": recent_agent_paths_from_files((session_files_by_session or {}).get(session), agent=agent, window=window),
                 "last_used_ts": float(last_used_ts or 0.0),
                 "last_used_text": last_activity.get("text") or "",
                 "running": running,

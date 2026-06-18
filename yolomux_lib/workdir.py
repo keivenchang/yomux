@@ -24,10 +24,9 @@ def resolved_upload_dir(path: Path, allow_home: bool = False) -> tuple[Path | No
 def session_workdir(session: str) -> Path:
     match = re.fullmatch(r"(?:yolomux|project)?(\d+)", session)
     session_index = match.group(1) if match else None
-    if session_index == "6":
-        dev_path = Path(os.environ.get("YOLOMUX_DEV_WORKDIR", str(PROJECT_ROOT)))
-        if dev_path.is_dir():
-            return dev_path
+    dev_workdir = session_dev_workdir(session_index)
+    if dev_workdir is not None:
+        return dev_workdir
     repo_name = f"project{session_index}" if session_index else session
     workspace_base = Path(os.environ.get("YOLOMUX_WORKSPACE_BASE", str(Path.home() / "workspaces")))
     repo_path = workspace_base / repo_name
@@ -37,10 +36,19 @@ def numbered_session_workdir(session: str) -> Path | None:
     match = re.fullmatch(r"\d+", session)
     if not match:
         return None
-    if session == "6":
+    return session_dev_workdir(session) or numbered_project_workdir(session)
+
+def session_dev_workdir(session_index: str | None) -> Path | None:
+    if not session_index:
+        return None
+    if session_index == "6":
         dev_path = Path(os.environ.get("YOLOMUX_DEV_WORKDIR", str(PROJECT_ROOT)))
         if dev_path.is_dir():
             return dev_path
+    dev_path = Path.home() / f"yolomux.dev{session_index}"
+    return dev_path if dev_path.is_dir() else None
+
+def numbered_project_workdir(session: str) -> Path | None:
     workspace_base = Path(os.environ.get("YOLOMUX_WORKSPACE_BASE", str(Path.home() / "workspaces")))
     repo_path = workspace_base / f"project{session}"
     return repo_path if repo_path.is_dir() else None

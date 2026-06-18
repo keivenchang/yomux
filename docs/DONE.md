@@ -6,6 +6,12 @@ Unless an entry says otherwise, every item shipped with the standard check gate 
 
 ## 2026-06-18
 
+### DOIT.83 editor toolbar, Tabber recency, and selected-window repo metadata
+- Completed and removed `DOIT.83.md`. The editor Info Panel front controls now render as `#`, `Wrap around`, then `Differ`; the old right-side wrap icon is gone, and compact editor FROM/TO controls stay hittable without overlapping the right mode controls.
+- Tabber now keeps the `<time> ago` recency column visible at narrow widths and lets the tree/path label truncate first. Session-file rows carry `agent_windows` attribution, so Tabber touched repo rows and YO!agent Recent Agents attach paths only to the matching tmux agent window.
+- The terminal Info Pane path/repo metadata now follows the selected tmux window. A Codex window can show its transcript-touched repo while a separate bash window in the same tmux session shows its own cwd and does not inherit that repo.
+- Verification beyond the standard gate: focused `test_editor_diff_ref_reset_is_visible_and_hittable`, focused session-files/recent-agent pytest checks, `node tests/layout_url.test.js`, and full `python3 tools/check.py` (`CHECK PASSED in 36.75s`).
+
 ### DOIT.82 light window buttons, share theme sync, System repaint, and blank terminals
 - Completed and removed `DOIT.82.md`. Light-mode active tmux window buttons now keep the shared pressed-fill token even when `data-window-agent` is present; replay-shell YO!share viewers apply live `appearance` and `viewport` frames so host light/dark/system changes flip the mirrored viewer and terminal theme; System/follow-app terminal repaint is covered from both Dark and Light OS-resolved paths; and tmux attaches request immediate plus delayed `refresh-client` passes so a newly opened terminal paints the current PTY screen without manual input.
 - Reopened stale prior DONE claims for terminal-theme repaint, share-theme sync, and active tmux window buttons. Live verification after rebuild/restart: active light window button and active pane tab both `rgb(79,158,58)`; real `/share/<id>` viewer flipped light/dark/system with xterm background following `follow-app`; blank terminal crop advanced from one background color to rendered rows without external refresh. Verification: focused pytest/Selenium, `node tests/layout_url.test.js`, and full `python3 tools/check.py` (`CHECK PASSED in 39.64s`).

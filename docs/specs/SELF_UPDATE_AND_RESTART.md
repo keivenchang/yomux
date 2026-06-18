@@ -26,17 +26,17 @@ Because `main` is checked out in `~/yolomux`, it cannot also be checked out in a
 
 The toast text reports the restart outcome:
 
-- `updated; restarting now` — the auto-restart was spawned (prod only; see next section).
-- `updated; restart the server manually (no restart hook for this checkout)` — the pull+build happened but this checkout will not auto-restart, so the running process is now serving stale code until you restart it yourself. This is the expected message on every dev worktree.
+- `updated; restarting now` — the auto-restart helper was spawned for the checkout that handled the update request.
+- `updated; restart spawn failed; restart the server manually` — the pull+build happened but YOLOmux could not spawn the detached restart helper, so the running process is now serving stale code until you restart it yourself.
 
-## Auto-restart condition: prod checkout only
+## Auto-restart condition: running checkout only
 
-`_spawn_self_restart` (`app.py:2063`) auto-restarts **only when `PROJECT_ROOT.resolve() == (~/yolomux).resolve()`**. Any other checkout returns `False` -> "restart manually". The reason in the code: a dev worktree must never restart prod, and the guard is deliberately conservative.
+`_spawn_self_restart` (`app.py:2063`) auto-restarts the checkout that is running the current process. If the server was started from `~/yolomux.dev8001/yolomux.py`, update pulls and builds in `~/yolomux.dev8001`, then the helper restarts that same process from `~/yolomux.dev8001`. Dev worktrees must never restart prod; the safety rule is that the helper only kills its own PID and relaunches its own argv from the same `PROJECT_ROOT`.
 
 The mechanism, when it does fire, is intentionally portable — no systemd, no broad `pkill`:
 
 - It builds `restart_argv = [sys.executable, *sys.argv]` (the exact same entrypoint and flags) and a shell command that `kill <own pid>`, waits, `kill -9 <own pid>`, then relaunches that argv under `nohup env PYTHONUNBUFFERED=1 ... < /dev/null &`, logging to `/tmp/yolomux-self-update-restart.log`.
-- It only ever kills its **own** PID and relaunches its **own** argv. That means restarting a checkout's own process is safe for any checkout — the prod-only guard is stricter than the kill is dangerous. If a dev worktree should auto-restart *itself* (not prod), the correct change is to widen the guard to "PROJECT_ROOT is prod OR the update was applied to this same checkout", not to remove it.
+- It only ever kills its **own** PID and relaunches its **own** argv from `PROJECT_ROOT`. That makes auto-restart safe for prod and dev worktrees because the update, build, kill, and relaunch all target the checkout that served the request.
 
 Manual restart, when the toast asks for it (or any time you change source under a running server): use **kill-by-PID + nohup**, never `systemd-run --user` (denied by the harness D-Bus in this environment). Build the kill pattern around the explicit `$port` so you never match the relaunch command itself, exclude `$$`, and keep the kill and the relaunch as separate commands. A running server does NOT pick up edited `.py`/bundle files until restarted.
 

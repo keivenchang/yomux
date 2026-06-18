@@ -964,6 +964,34 @@ def test_activity_payload_and_summary_tick_prioritize_tmux_recent_sessions(monke
     assert [item["session"] for item in tick["skipped"]] == ["2", "1"]
 
 
+def test_recent_agents_payload_filters_paths_by_agent_window():
+    panes = [
+        PaneInfo(session="5", window="0", pane="0", pane_id="%50", target="5:0.0", current_path="/repo/codex", command="codex", active=True, window_active=True, title="", pid=50, process_label="codex"),
+        PaneInfo(session="5", window="1", pane="0", pane_id="%51", target="5:1.0", current_path="/repo/claude", command="claude", active=True, window_active=False, title="", pid=51, process_label="claude"),
+    ]
+    info = SessionInfo(
+        session="5",
+        panes=panes,
+        selected_pane=panes[0],
+        agents=[
+            AgentInfo("5", "codex", 50, "5:0.0", "codex", "/repo/codex", "running", "codex-sid", None, None),
+            AgentInfo("5", "claude", 51, "5:1.0", "claude", "/repo/claude", "running", "claude-sid", None, None),
+        ],
+    )
+    files_payload = {
+        "files": [
+            {"repo": "/repo/codex", "abs_path": "/repo/codex/app.py", "mtime": 20, "status": "M", "agent_windows": [{"kind": "codex", "window": "0", "window_index": 0, "pane": "0", "pane_target": "5:0.0"}]},
+            {"repo": "/repo/claude", "abs_path": "/repo/claude/app.py", "mtime": 10, "status": "M", "agent_windows": [{"kind": "claude", "window": "1", "window_index": 1, "pane": "0", "pane_target": "5:1.0"}]},
+        ]
+    }
+
+    rows = app_module.build_recent_agents_payload({"5": info}, ["5"], session_files_by_session={"5": files_payload})
+    by_target = {row["pane_target"]: row for row in rows}
+
+    assert [item["path"] for item in by_target["5:0.0"]["recent_paths"]] == ["/repo/codex"]
+    assert [item["path"] for item in by_target["5:1.0"]["recent_paths"]] == ["/repo/claude"]
+
+
 def test_tmux_snapshot_bounds_and_skips_unchanged_history(monkeypatch):
     pane = PaneInfo(
         session="6",
@@ -4341,9 +4369,8 @@ def test_self_update_dryrun_is_noop_with_plan():
     assert any("git pull" in step for step in result["plan"])
 
 
-def test_self_update_restart_uses_portable_nohup_helper(monkeypatch, tmp_path):
-    home = tmp_path / "home"
-    prod_root = home / "yolomux"
+def test_self_update_restart_uses_running_checkout(monkeypatch, tmp_path):
+    checkout_root = tmp_path / "xyz"
     captured = {}
 
     def fake_popen(args, **kwargs):
@@ -4351,8 +4378,7 @@ def test_self_update_restart_uses_portable_nohup_helper(monkeypatch, tmp_path):
         captured["kwargs"] = kwargs
         return SimpleNamespace()
 
-    monkeypatch.setattr(app_module.Path, "home", lambda: home)
-    monkeypatch.setattr(app_module.common, "PROJECT_ROOT", prod_root)
+    monkeypatch.setattr(app_module.common, "PROJECT_ROOT", checkout_root)
     monkeypatch.setattr(app_module.subprocess, "Popen", fake_popen)
     webapp = app_module.TmuxWebtermApp.__new__(app_module.TmuxWebtermApp)
     assert webapp._spawn_self_restart() is True
@@ -4363,14 +4389,14 @@ def test_self_update_restart_uses_portable_nohup_helper(monkeypatch, tmp_path):
     assert "kill " in helper_cmd
     assert "sleep 2" in helper_cmd
     assert "kill -9 " in helper_cmd
-    assert f"cd {prod_root}" in helper_cmd
+    assert f"cd {checkout_root}" in helper_cmd
     assert "nohup env PYTHONUNBUFFERED=1" in helper_cmd
     assert "/tmp/yolomux-self-update-restart.log" in helper_cmd
     assert "systemd-run" not in helper_cmd
     assert "systemctl" not in helper_cmd
     assert "pkill" not in helper_cmd
     assert "setsid" not in args
-    assert captured["kwargs"]["cwd"] == str(prod_root)
+    assert captured["kwargs"]["cwd"] == str(checkout_root)
 
 
 def _fake_update_git(remote_version="0.3.25", remote_sha="remoteabcdef1"):

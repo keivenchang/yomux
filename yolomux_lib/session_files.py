@@ -626,6 +626,7 @@ def session_file_entry(
     removed: int | None = None,
     mtime: float | None = None,
     diff_tracked: bool | None = None,
+    agent_windows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     rel_path = repo_relative_path(path, repo) if repo else None
     agent_list = [a for a in agents if a]
@@ -639,6 +640,7 @@ def session_file_entry(
         # renders 0-to-N icons from it). `agent` stays as a scalar first-agent alias for legacy consumers.
         "agents": agent_list,
         "agent": agent_list[0] if agent_list else "",
+        "agent_windows": agent_windows or [],
         "status": status,
         "repo": str(repo) if repo else "",
         "path": rel_path or str(path),
@@ -674,6 +676,53 @@ def merge_agent_lists(*agent_lists: list[str]) -> list[str]:
     return merged
 
 
+def agent_window_for_info(info: SessionInfo, agent: AgentInfo) -> tuple[str, str]:
+    for pane in info.panes:
+        if pane.target == agent.pane_target or pane.pane_id == agent.pane_target:
+            return str(pane.window or ""), str(pane.pane or "")
+    match = re.match(r"^[^:]+:(?P<window>[^.]+)(?:\.(?P<pane>.*))?$", str(agent.pane_target or ""))
+    if not match:
+        return "", ""
+    return match.group("window") or "", match.group("pane") or ""
+
+
+def agent_window_attribution(info: SessionInfo, agent: AgentInfo) -> dict[str, Any]:
+    window, pane = agent_window_for_info(info, agent)
+    try:
+        window_index: int | None = int(window)
+    except ValueError:
+        window_index = None
+    return {
+        "kind": str(agent.kind or ""),
+        "window": window,
+        "window_index": window_index,
+        "pane": pane,
+        "pane_target": str(agent.pane_target or ""),
+    }
+
+
+def merge_agent_window_lists(*window_lists: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for window_list in window_lists:
+        for raw in window_list:
+            if not isinstance(raw, dict):
+                continue
+            item = {
+                "kind": str(raw.get("kind") or ""),
+                "window": str(raw.get("window") or ""),
+                "window_index": raw.get("window_index") if isinstance(raw.get("window_index"), int) else None,
+                "pane": str(raw.get("pane") or ""),
+                "pane_target": str(raw.get("pane_target") or ""),
+            }
+            key = (item["kind"], item["window"], item["pane"], item["pane_target"])
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+    return merged
+
+
 def touched_files_for_info(info: SessionInfo, cutoff: float, errors: list[str] | None = None) -> dict[str, dict[str, Any]]:
     touched: dict[str, dict[str, Any]] = {}
     for agent in info.agents:
@@ -688,13 +737,14 @@ def touched_files_for_info(info: SessionInfo, cutoff: float, errors: list[str] |
         for path_text, markers in scan_agent_changes(agent).items():
             # C5: accumulate every agent that touched this path instead of overwriting, so a file edited
             # by both Claude and Codex keeps both attributions (rendered as two icons).
-            entry = touched.setdefault(path_text, {"agents": [], "status": "", "mtime": 0.0})
+            entry = touched.setdefault(path_text, {"agents": [], "agent_windows": [], "status": "", "mtime": 0.0})
             if agent.kind and agent.kind not in entry["agents"]:
                 entry["agents"].append(agent.kind)
+            entry["agent_windows"] = merge_agent_window_lists(entry.get("agent_windows", []), [agent_window_attribution(info, agent)])
             entry["status"] = classify_change(markers)
             entry["mtime"] = max(float(entry.get("mtime") or 0.0), transcript_mtime)
     for path_text, metadata in historical_codex_changes_for_info(info, cutoff).items():
-        entry = touched.setdefault(path_text, {"agents": [], "status": "", "mtime": 0.0})
+        entry = touched.setdefault(path_text, {"agents": [], "agent_windows": [], "status": "", "mtime": 0.0})
         if "codex" not in entry["agents"]:
             entry["agents"].append("codex")
         entry["status"] = str(metadata.get("status") or "M")
@@ -850,7 +900,18 @@ def session_files_payload_for_info(
             # C5: attribute the file to exactly the agents the transcripts say touched it — no fallback.
             # A repo-only change with no transcript attribution gets an empty list (zero agent icons).
             agents = merge_agent_lists(touched_by_rel.get(rel_path, {}).get("agents", []), (agent_attribution or {}).get(str(path), []))
-            repo_entries.append(session_file_entry(info.session, agents, status, path, repo, "git", added=added, removed=removed, diff_tracked=diff_tracked))
+            repo_entries.append(session_file_entry(
+                info.session,
+                agents,
+                status,
+                path,
+                repo,
+                "git",
+                added=added,
+                removed=removed,
+                diff_tracked=diff_tracked,
+                agent_windows=merge_agent_window_lists(touched_by_rel.get(rel_path, {}).get("agent_windows", [])),
+            ))
         for rel_path, metadata in touched_by_rel.items():
             if rel_path in statuses:
                 continue
@@ -865,6 +926,7 @@ def session_files_payload_for_info(
                 repo,
                 "transcript",
                 mtime=file_mtime_or_fallback(path, metadata.get("mtime")),
+                agent_windows=merge_agent_window_lists(metadata.get("agent_windows", [])),
             ))
         repo_entries.sort(key=lambda item: (-float(item.get("mtime") or 0), item["path"]))
         files.extend(repo_entries)
@@ -900,6 +962,7 @@ def session_files_payload_for_info(
                 0 if path.exists() and path.is_file() else None,
                 mtime=file_mtime_or_fallback(path, metadata.get("mtime")),
                 diff_tracked=False,
+                agent_windows=merge_agent_window_lists(metadata.get("agent_windows", [])),
             ))
         outside_entries.sort(key=lambda item: (-float(item.get("mtime") or 0), item["path"]))
         files.extend(outside_entries)

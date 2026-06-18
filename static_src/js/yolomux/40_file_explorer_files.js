@@ -3018,9 +3018,26 @@ function tabberKnownRootForPath(path, roots) {
   return '';
 }
 
+function tabberFileMatchesWindow(file, windowIndex, agentKey = '') {
+  const targetWindow = String(windowIndex ?? '');
+  const targetAgent = String(agentKey || '').toLowerCase();
+  const windows = Array.isArray(file?.agent_windows) ? file.agent_windows : [];
+  if (windows.length) {
+    return windows.some(item => {
+      const itemWindow = String(item?.window ?? (item?.window_index ?? ''));
+      const itemAgent = String(item?.kind || '').toLowerCase();
+      if (targetWindow && itemWindow !== targetWindow) return false;
+      return !targetAgent || !itemAgent || itemAgent === targetAgent;
+    });
+  }
+  const agents = Array.isArray(file?.agents) ? file.agents : [file?.agent].filter(Boolean);
+  if (!targetAgent || !agents.length) return true;
+  return agents.map(item => String(item || '').toLowerCase()).includes(targetAgent);
+}
+
 // Absolute touched-path entries for the paths a session's agent touched, attached under an agent window.
 // These are intentionally leaves: the Tabber shows where work happened, not every changed file.
-function tabberRepoEntriesForWindow(session, windowIndex, gitBranch, gitRoot) {
+function tabberRepoEntriesForWindow(session, windowIndex, agentKey, gitBranch, gitRoot) {
   const cached = tabberSessionFilesStates.get(session);
   if (!cached?.loaded) {
     if (!cached?.loading) return [];
@@ -3034,6 +3051,7 @@ function tabberRepoEntriesForWindow(session, windowIndex, gitBranch, gitRoot) {
   const byPath = new Map();
   for (const file of cached.files) {
     if (file.uploaded === true) continue;
+    if (!tabberFileMatchesWindow(file, windowIndex, agentKey)) continue;
     const rawRepo = String(file.repo || '').trim();
     const rawAbsPath = String(file.abs_path || '').trim();
     const repo = rawRepo ? normalizeDirectoryPath(rawRepo) : '';
@@ -3085,7 +3103,7 @@ function buildTabberTree() {
       const isAgent = tabberWindowIsAgent(record.name);
       const agentKey = tmuxWindowAgentKey(record.name);
       const agentActivity = isAgent ? tabberAgentForWindow(session, record.index, agentKey) : null;
-      const repoEntries = isAgent ? tabberRepoEntriesForWindow(session, record.index, branch, gitRoot) : [];
+      const repoEntries = isAgent ? tabberRepoEntriesForWindow(session, record.index, agentKey, branch, gitRoot) : [];
       const childMtime = repoEntries.reduce((max, entry) => Math.max(max, Number(entry.mtime || 0)), 0);
       const ledgerMtime = isAgent ? 0 : tabberRecency(`${session}:${record.index}`);
       // Agent windows use transcript activity only. Their touched repo rows may have newer file mtimes, but

@@ -16,6 +16,15 @@ def test_agent_command_uses_plain_agent_cli_unless_dangerously_yolo():
     assert agent_command("codex", dangerously_yolo=True) == "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
 
 
+def test_numeric_session_workdir_uses_matching_yolomux_dev_checkout(monkeypatch, tmp_path):
+    dev_checkout = tmp_path / "yolomux.dev8002"
+    dev_checkout.mkdir()
+    monkeypatch.setattr(workdir.Path, "home", lambda: tmp_path)
+
+    assert workdir.session_workdir("8002") == dev_checkout
+    assert workdir.numbered_session_workdir("8002") == dev_checkout
+
+
 def _fake_run(results: dict[str, subprocess.CompletedProcess]):
     def run(cmd, *args, **kwargs):
         agent = cmd[0]
