@@ -227,7 +227,8 @@ def test_configure_session_tmux_options_uses_active_surface_authority(monkeypatc
     # default `latest` policy the most-recently-active (often smaller) client keeps resizing the
     # shared window; when it shrinks below a larger client's height that client's xterm smears the
     # green tmux status line across the orphaned rows. YOLOmux keeps `largest`, starts each attach
-    # as ignore-size, and lets the active browser surface clear ignore-size only for its own client.
+    # as ignore-size, and lets the active browser surface clear ignore-size for its own client while
+    # silencing every wider client on the session (see claim_tmux_resize_authority).
     monkeypatch.delenv("YOLOMUX_TMUX_SOCKET", raising=False)
     calls: list[list[str]] = []
     monkeypatch.setattr(server_module, "tmux", lambda args: calls.append(list(args)))
@@ -241,34 +242,57 @@ def test_configure_session_tmux_options_uses_active_surface_authority(monkeypatc
     assert server_module.tmux_attach_command(readonly=True) == ["tmux", "attach-session", "-r", "-f", "ignore-size"]
 
 
-def test_claim_tmux_resize_authority_ignores_other_yolomux_clients(monkeypatch):
-    monkeypatch.delenv("YOLOMUX_TMUX_SOCKET", raising=False)
-    calls: list[list[str]] = []
-
+def _client_list_runner(stdout, calls):
+    # `#{client_name}\t#{client_session}\t#{client_width}\t#{client_flags}` per row.
     def fake_run(cmd, **kwargs):
         if "list-clients" in cmd:
-            return SimpleNamespace(
-                returncode=0,
-                stdout=(
-                    "/dev/pts/1\t6\t101\tattached,ignore-size,UTF-8\n"
-                    "/dev/pts/2\t6\t102\tattached,UTF-8\n"
-                    "/dev/pts/3\t6\t103\tattached,UTF-8\n"
-                    "/dev/pts/4\t7\t104\tattached,UTF-8\n"
-                ),
-                stderr="",
-            )
+            return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
         calls.append(list(cmd))
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(server_module.subprocess, "run", fake_run)
-    monkeypatch.setattr(server_module, "tmux_client_pid_is_yolomux_managed", lambda pid: pid != 103)
+    return fake_run
 
-    assert server_module.claim_tmux_resize_authority("6", "/dev/pts/1") is True
+
+def test_claim_tmux_resize_authority_silences_wider_clients(monkeypatch):
+    # The active surface owns the column width: every WIDER client on its session is flagged
+    # ignore-size so `window-size largest` collapses to the active width — including a foreign,
+    # hand-attached terminal, not just sibling browser surfaces. Clients at/below the active width
+    # never overflow it and are left untouched.
+    monkeypatch.delenv("YOLOMUX_TMUX_SOCKET", raising=False)
+    calls: list[list[str]] = []
+    stdout = (
+        "/dev/pts/1\t6\t100\tattached,ignore-size,UTF-8\n"  # active surface, wrongly ignored
+        "/dev/pts/2\t6\t120\tattached,UTF-8\n"              # wider browser surface -> silence
+        "/dev/pts/3\t6\t90\tattached,UTF-8\n"               # narrower co-viewer -> leave alone
+        "/dev/pts/4\t6\t130\tattached,ignore-size,UTF-8\n"  # wider but already silent -> no call
+        "/dev/pts/5\t7\t200\tattached,UTF-8\n"              # other session -> not our concern
+    )
+    monkeypatch.setattr(server_module.subprocess, "run", _client_list_runner(stdout, calls))
+
+    assert server_module.claim_tmux_resize_authority("6", "/dev/pts/1", 100) is True
 
     assert ["tmux", "refresh-client", "-t", "/dev/pts/1", "-f", "!ignore-size"] in calls
     assert ["tmux", "refresh-client", "-t", "/dev/pts/2", "-f", "ignore-size"] in calls
     assert all("/dev/pts/3" not in call for call in calls)
     assert all("/dev/pts/4" not in call for call in calls)
+    assert all("/dev/pts/5" not in call for call in calls)
+
+
+def test_claim_tmux_resize_authority_noop_when_active_is_widest(monkeypatch):
+    # The "current width already == active width" fast path: when no other voting client is wider
+    # and the active surface already counts, claiming makes zero tmux calls so frequent focus/resize
+    # events stay cheap.
+    monkeypatch.delenv("YOLOMUX_TMUX_SOCKET", raising=False)
+    calls: list[list[str]] = []
+    stdout = (
+        "/dev/pts/1\t6\t120\tattached,UTF-8\n"              # active surface, already widest
+        "/dev/pts/2\t6\t100\tattached,UTF-8\n"              # narrower -> harmless
+        "/dev/pts/3\t6\t130\tattached,ignore-size,UTF-8\n"  # wider but already silenced
+    )
+    monkeypatch.setattr(server_module.subprocess, "run", _client_list_runner(stdout, calls))
+
+    assert server_module.claim_tmux_resize_authority("6", "/dev/pts/1", 120) is False
+    assert calls == []
 
 
 def test_both_attach_paths_route_through_shared_tmux_options():

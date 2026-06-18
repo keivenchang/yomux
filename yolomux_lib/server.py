@@ -329,36 +329,16 @@ def tmux_client_name_for_fd(fd: int) -> str:
         return ""
 
 
-def proc_status_parent_pid(pid: int) -> int | None:
-    try:
-        for line in Path(f"/proc/{pid}/status").read_text(encoding="utf-8", errors="replace").splitlines():
-            if line.startswith("PPid:"):
-                return int(line.split(":", 1)[1].strip() or "0")
-    except (OSError, ValueError):
-        return None
-    return None
+def tmux_session_client_rows(session: str) -> list[dict[str, Any]]:
+    """Every client attached to `session`, with its column width and flags.
 
-
-def proc_cmdline(pid: int) -> str:
-    try:
-        data = Path(f"/proc/{pid}/cmdline").read_bytes()
-    except OSError:
-        return ""
-    return data.replace(b"\0", b" ").decode("utf-8", errors="replace").strip()
-
-
-def tmux_client_pid_is_yolomux_managed(pid: int) -> bool:
-    cmdline = proc_cmdline(pid)
-    if "tmux" not in cmdline or "attach-session" not in cmdline:
-        return False
-    parent_pid = proc_status_parent_pid(pid)
-    if not parent_pid:
-        return False
-    return "yolomux.py" in proc_cmdline(parent_pid)
-
-
-def tmux_resize_authority_client_rows(session: str) -> list[dict[str, Any]]:
-    fmt = "\t".join(("#{client_name}", "#{client_session}", "#{client_pid}", "#{client_flags}"))
+    Deliberately NOT limited to yolomux-spawned clients: under `window-size largest` ANY wider
+    client pins the shared window wider than the focused browser surface, so the active surface
+    must be able to see — and silence — a hand-attached terminal too, not just sibling browsers.
+    Only columns are collected; rows never overflow the browser the same way, and tmux's status
+    line makes window rows differ from client rows, which would only muddy the comparison.
+    """
+    fmt = "\t".join(("#{client_name}", "#{client_session}", "#{client_width}", "#{client_flags}"))
     result = subprocess.run(
         tmux_command(["list-clients", "-F", fmt]),
         stdout=subprocess.PIPE,
@@ -375,12 +355,10 @@ def tmux_resize_authority_client_rows(session: str) -> list[dict[str, Any]]:
         if len(parts) != 4 or parts[1] != clean_session:
             continue
         try:
-            pid = int(parts[2])
+            width = int(parts[2])
         except ValueError:
             continue
-        if not tmux_client_pid_is_yolomux_managed(pid):
-            continue
-        rows.append({"name": parts[0], "session": parts[1], "pid": pid, "flags": parts[3]})
+        rows.append({"name": parts[0], "session": parts[1], "width": width, "flags": parts[3]})
     return rows
 
 
@@ -400,22 +378,44 @@ def refresh_tmux_client_ignore_size(client_name: str, ignore_size: bool) -> bool
     return result.returncode == 0
 
 
-def claim_tmux_resize_authority(session: str, client_name: str) -> bool:
+def claim_tmux_resize_authority(session: str, client_name: str, active_cols: int | None = None) -> bool:
+    """Make `client_name` the column authority for `session`: silence every WIDER client.
+
+    Called when a browser surface activates a pane. Under `window-size largest` the shared window
+    is as wide as the widest non-`ignore-size` client, so a wider sibling (a second browser surface
+    OR a hand-attached terminal) makes the focused surface's content overflow its viewport. Flag
+    those wider clients `ignore-size` so they stop voting and the window collapses to the active
+    width; `active_cols` is the width the surface is asking for, preferred over its last-reported
+    width since the pty resize for this same message lands just after this call.
+
+    Width-only by design (per the column-overflow symptom): clients at or below the active width
+    don't inflate it and are left untouched, so the blast radius is exactly the clients that would
+    break the active surface. Idempotent — when nothing is wider and the active client already
+    counts, it issues no tmux calls (the "current width already == active width" fast path).
+    """
     clean_client_name = str(client_name or "").strip()
     if not clean_client_name:
         return False
+    rows = tmux_session_client_rows(session)
+    current = next((row for row in rows if str(row.get("name") or "") == clean_client_name), None)
+    if current is None:
+        # The active client is not listed yet (just attached); best-effort make it count.
+        return refresh_tmux_client_ignore_size(clean_client_name, False)
+    width = active_cols if isinstance(active_cols, int) and active_cols > 0 else int(current.get("width") or 0)
+    active_ignored = tmux_client_has_flag(current, "ignore-size")
+    wider = [
+        row for row in rows
+        if str(row.get("name") or "") != clean_client_name
+        and not tmux_client_has_flag(row, "ignore-size")
+        and int(row.get("width") or 0) > width
+    ]
+    if not active_ignored and not wider:
+        return False
     changed = False
-    found_current = False
-    for row in tmux_resize_authority_client_rows(session):
-        name = str(row.get("name") or "")
-        if name == clean_client_name:
-            found_current = True
-        should_ignore = name != clean_client_name
-        if tmux_client_has_flag(row, "ignore-size") == should_ignore:
-            continue
-        changed = refresh_tmux_client_ignore_size(name, should_ignore) or changed
-    if not found_current:
+    if active_ignored:
         changed = refresh_tmux_client_ignore_size(clean_client_name, False) or changed
+    for row in wider:
+        changed = refresh_tmux_client_ignore_size(str(row.get("name") or ""), True) or changed
     return changed
 
 
@@ -429,10 +429,11 @@ def configure_session_tmux_options(session: str) -> None:
       would never reach the browser; `on` forwards it to this client.
     - window-size largest + aggressive-resize on: YOLOmux spawns one `attach-session` client per
       WebSocket, so two browser surfaces on one session attach as differently-sized clients. The
-      attach itself starts with `ignore-size`; browser activation later clears that flag for the
-      active YOLOmux surface and sets it for the other YOLOmux clients on the same session. Keeping
-      `largest` avoids the old tmux `latest` status-line smear while active-surface authority keeps
-      a wide background browser from stretching the foreground browser.
+      attach itself starts with `ignore-size`; activating a browser surface clears that flag for
+      its own client and sets it on every WIDER client on the session — a second browser surface OR
+      a hand-attached terminal — so they stop voting on the column width. Keeping `largest` avoids
+      the old tmux `latest` status-line smear while active-surface authority keeps a wider client
+      from stretching the focused surface.
     """
     target = tmux_session_target(session)
     for args in (
@@ -2793,7 +2794,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 if message.get("foreground") is True or message.get("activate") is True:
                     claimer = getattr(self.server, "claim_resize_authority", None)
                     if callable(claimer):
-                        authority_changed = bool(claimer(session, tmux_client_name, resize_client_id))
+                        authority_changed = bool(claimer(session, tmux_client_name, resize_client_id, cols))
                 previous = (
                     resize_state.get("rows"),
                     resize_state.get("cols"),
@@ -2917,9 +2918,9 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
         with self.host_pty_dimensions_lock:
             return self.host_pty_dimensions.get(str(session or ""), (DEFAULT_ROWS, DEFAULT_COLS))
 
-    def claim_resize_authority(self, session: str, tmux_client_name: str, resize_client_id: str = "") -> bool:
+    def claim_resize_authority(self, session: str, tmux_client_name: str, resize_client_id: str = "", active_cols: int | None = None) -> bool:
         del resize_client_id
-        return claim_tmux_resize_authority(session, tmux_client_name)
+        return claim_tmux_resize_authority(session, tmux_client_name, active_cols)
 
     def share_terminal_upstream(self, token: str, session: str) -> ShareTerminalUpstream:
         key = (str(token or ""), str(session or ""))
