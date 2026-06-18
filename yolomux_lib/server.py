@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import codecs
 import copy
 import hashlib
 import html
@@ -51,6 +52,7 @@ from .common import error_payload
 from .common import parse_bool
 from .common import terminate_process_group
 from .filesystem import FilesystemError
+from .tmux_utils import tmux
 from .tmux_utils import tmux_command
 from .tmux_utils import tmux_session_target
 from .transcripts import codex_event_text
@@ -75,6 +77,7 @@ SHARE_VIEWER_QUEUE_HIGH_WATER_BYTES = 256 * 1024
 SHARE_VIEWER_POINTER_WAKE_FRAME = b""
 SHARE_VIEWER_OVERFLOW_LIMIT = 3
 SHARE_VIEWER_OVERFLOW_WINDOW_SECONDS = 60.0
+SHARE_VIEWER_SEND_TIMEOUT_SECONDS = 5.0
 SHARE_REFRESH_CLIENT_MIN_SECONDS = 1.0
 SHARE_POINTER_MAX_WRITES_PER_SECOND = 1500
 SHARE_POINTER_MAX_HZ = 30
@@ -437,12 +440,7 @@ def configure_session_tmux_options(session: str) -> None:
         ["set-option", "-t", target, "window-size", "largest"],
         ["set-option", "-wg", "aggressive-resize", "on"],
     ):
-        subprocess.run(
-            tmux_command(args),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
+        tmux(args)
 
 
 def share_terminal_frame(session: str, data: bytes) -> bytes:
@@ -692,6 +690,18 @@ class ShareViewerConnection:
         with self.lock:
             return self.closed
 
+    def send_frame(self, frame: bytes) -> None:
+        previous_timeout = None
+        timeout_supported = hasattr(self.connection, "gettimeout") and hasattr(self.connection, "settimeout")
+        if timeout_supported:
+            previous_timeout = self.connection.gettimeout()
+            self.connection.settimeout(SHARE_VIEWER_SEND_TIMEOUT_SECONDS)
+        try:
+            self.connection.sendall(frame)
+        finally:
+            if timeout_supported:
+                self.connection.settimeout(previous_timeout)
+
     def write_loop(self) -> None:
         try:
             while True:
@@ -702,16 +712,16 @@ class ShareViewerConnection:
                     self.mark_pointer_wakeup_drained()
                     pointer_frame = self.pop_latest_pointer_frame()
                     if pointer_frame is not None:
-                        self.connection.sendall(pointer_frame)
+                        self.send_frame(pointer_frame)
                     continue
                 pointer_frame = self.pop_latest_pointer_frame() if share_frame_is_dom_keyframe(frame) else None
                 if pointer_frame is not None:
-                    self.connection.sendall(pointer_frame)
+                    self.send_frame(pointer_frame)
                 with self.lock:
                     self.queued_bytes = max(0, self.queued_bytes - len(frame))
                     if share_frame_is_dom_keyframe(frame):
                         self.queued_replay_keyframe = False
-                self.connection.sendall(frame)
+                self.send_frame(frame)
         except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
             pass
         finally:
@@ -754,27 +764,42 @@ class ShareTerminalUpstream:
     def start_locked(self) -> None:
         rows, cols = self.server.host_pty_dimensions_for_session(self.session)
         master_fd, slave_fd = pty.openpty()
-        set_pty_size(slave_fd, rows, cols)
-        self.master_fd = master_fd
-        self.slave_fd = slave_fd
-        env = os.environ.copy()
-        env["TERM"] = "xterm-256color"
-        configure_session_tmux_options(self.session)
-        record = self.server.app.verify_share_token(self.token)
-        readonly = str((record or {}).get("mode") or "ro") != "rw"
-        attach_args = tmux_attach_command(readonly=readonly)
-        attach_args.extend(["-t", tmux_session_target(self.session)])
-        self.process = subprocess.Popen(
-            attach_args,
-            stdin=slave_fd,
-            stdout=slave_fd,
-            stderr=slave_fd,
-            close_fds=True,
-            env=env,
-            start_new_session=True,
-        )
-        self.reader_thread = threading.Thread(target=self.reader_loop, name=f"share-terminal-{self.session}", daemon=True)
-        self.reader_thread.start()
+        process: subprocess.Popen[Any] | None = None
+        try:
+            set_pty_size(slave_fd, rows, cols)
+            self.master_fd = master_fd
+            self.slave_fd = slave_fd
+            env = os.environ.copy()
+            env["TERM"] = "xterm-256color"
+            configure_session_tmux_options(self.session)
+            record = self.server.app.verify_share_token(self.token)
+            readonly = str((record or {}).get("mode") or "ro") != "rw"
+            attach_args = tmux_attach_command(readonly=readonly)
+            attach_args.extend(["-t", tmux_session_target(self.session)])
+            process = subprocess.Popen(
+                attach_args,
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                close_fds=True,
+                env=env,
+                start_new_session=True,
+            )
+            self.process = process
+            self.reader_thread = threading.Thread(target=self.reader_loop, name=f"share-terminal-{self.session}", daemon=True)
+            self.reader_thread.start()
+        except (OSError, subprocess.SubprocessError):
+            self.master_fd = None
+            self.slave_fd = None
+            self.process = None
+            for fd in (master_fd, slave_fd):
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            if process is not None and process.poll() is None:
+                terminate_process_group(process)
+            raise
 
     def write_input(self, payload: bytes) -> bool:
         try:
@@ -815,24 +840,38 @@ class ShareTerminalUpstream:
             self.request_refresh_client()
 
     def reader_loop(self) -> None:
+        reader_fd: int | None = None
         try:
-            while not self.stop_event.is_set():
+            with self.lock:
                 master_fd = self.master_fd
                 process = self.process
                 if master_fd is None or process is None:
+                    return
+                reader_fd = os.dup(master_fd)
+            while not self.stop_event.is_set():
+                with self.lock:
+                    process = self.process
+                if process is None:
                     break
                 if process.poll() is not None:
                     break
-                readable, _, _ = select.select([master_fd], [], [], 0.1)
-                if master_fd not in readable:
+                readable, _, _ = select.select([reader_fd], [], [], 0.1)
+                if reader_fd not in readable:
                     continue
-                data = os.read(master_fd, 65536)
+                if self.stop_event.is_set():
+                    break
+                data = os.read(reader_fd, 65536)
                 if not data:
                     break
                 self.broadcast(data)
         except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
             pass
         finally:
+            if reader_fd is not None:
+                try:
+                    os.close(reader_fd)
+                except OSError:
+                    pass
             self.stop()
 
     def broadcast(self, data: bytes) -> None:
@@ -2141,6 +2180,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return
         fd = process.stdout.fileno()
         buffer = ""
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         last_ping = time.monotonic()
         deadline = time.monotonic() + SUMMARY_CODEX_TIMEOUT_SECONDS
         while True:
@@ -2154,7 +2194,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             if readable:
                 chunk = os.read(fd, 4096)
                 if chunk:
-                    buffer += chunk.decode("utf-8", errors="replace")
+                    buffer += decoder.decode(chunk)
                     while "\n" in buffer:
                         line, buffer = buffer.split("\n", 1)
                         self.write_codex_summary_line(line)
@@ -2169,6 +2209,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             if not readable:
                 break
 
+        buffer += decoder.decode(b"", final=True)
         if buffer.strip():
             self.write_codex_summary_line(buffer)
         return_code = process.wait(timeout=1.0)
@@ -2346,7 +2387,12 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if not key:
             self.write_text("missing Sec-WebSocket-Key\n", status=HTTPStatus.BAD_REQUEST)
             return False
-        accept = base64.b64encode(hashlib.sha1((key + WEBSOCKET_GUID).encode("ascii")).digest()).decode("ascii")
+        try:
+            accept_source = (key + WEBSOCKET_GUID).encode("ascii")
+        except UnicodeEncodeError:
+            self.write_text("invalid Sec-WebSocket-Key\n", status=HTTPStatus.BAD_REQUEST)
+            return False
+        accept = base64.b64encode(hashlib.sha1(accept_source).digest()).decode("ascii")
         self.send_response(HTTPStatus.SWITCHING_PROTOCOLS)
         self.send_header("Upgrade", "websocket")
         self.send_header("Connection", "Upgrade")
@@ -2390,16 +2436,12 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             initial_rows, initial_cols = self.server.host_pty_dimensions_for_session(session)
         if not readonly and saw_initial_resize:
             self.server.record_host_pty_dimensions(session, initial_rows, initial_cols)
-        master_fd, slave_fd = pty.openpty()
-        set_pty_size(slave_fd, initial_rows, initial_cols)
-        tmux_client_name = tmux_client_name_for_fd(slave_fd)
-        resize_state = {"rows": initial_rows, "cols": initial_cols}
-        env = os.environ.copy()
-        env["TERM"] = "xterm-256color"
-        configure_session_tmux_options(session)
-        attach_args = tmux_attach_command(readonly=readonly)
         target = tmux_session_target(session)
-        attach_args.extend(["-t", target])
+        resize_state = {"rows": initial_rows, "cols": initial_cols}
+        tmux_client_name = ""
+        master_fd: int | None = None
+        slave_fd: int | None = None
+        process: subprocess.Popen[Any] | None = None
 
         def session_exists() -> bool:
             return subprocess.run(
@@ -2410,6 +2452,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             ).returncode == 0
 
         def attach_tmux() -> subprocess.Popen:
+            if slave_fd is None:
+                raise OSError("tmux attach pty is closed")
             return subprocess.Popen(
                 attach_args,
                 stdin=slave_fd,
@@ -2420,11 +2464,18 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 start_new_session=True,
             )
 
-        process = attach_tmux()
-        if not readonly and saw_initial_resize:
-            self.server.claim_resize_authority(session, tmux_client_name, resize_client_id)
-
         try:
+            master_fd, slave_fd = pty.openpty()
+            set_pty_size(slave_fd, initial_rows, initial_cols)
+            tmux_client_name = tmux_client_name_for_fd(slave_fd)
+            env = os.environ.copy()
+            env["TERM"] = "xterm-256color"
+            configure_session_tmux_options(session)
+            attach_args = tmux_attach_command(readonly=readonly)
+            attach_args.extend(["-t", target])
+            process = attach_tmux()
+            if not readonly and saw_initial_resize:
+                self.server.claim_resize_authority(session, tmux_client_name, resize_client_id)
             for payload in pending_payloads:
                 self.handle_ws_payload(
                     session,
@@ -2477,24 +2528,24 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
             pass
         finally:
-            try:
-                os.close(master_fd)
-            except OSError:
-                pass
-            try:
-                os.close(slave_fd)
-            except OSError:
-                pass
-            if process.poll() is None:
+            for fd in (master_fd, slave_fd):
+                if fd is None:
+                    continue
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            if process is not None and process.poll() is None:
                 terminate_process_group(process)
 
     def bridge_shared_tmux(self, token: str, session: str, viewer_id: str = "") -> None:
         viewer = ShareViewerConnection(self.connection, viewer_id)
         upstream = self.server.share_terminal_upstream(token, session)
-        upstream.add_viewer(viewer)
-        writer = threading.Thread(target=viewer.write_loop, name=f"share-viewer-{session}", daemon=True)
-        writer.start()
+        writer: threading.Thread | None = None
         try:
+            upstream.add_viewer(viewer)
+            writer = threading.Thread(target=viewer.write_loop, name=f"share-viewer-{session}", daemon=True)
+            writer.start()
             while not viewer.is_closed():
                 record = self.server.app.verify_share_token(token)
                 if record is None:
@@ -2522,7 +2573,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.server.release_share_terminal_upstream(token, session, viewer)
             self.server.app.unregister_share_viewer(token, viewer_id)
             self.server.broadcast_share_status(token)
-            writer.join(timeout=1.0)
+            if writer is not None:
+                writer.join(timeout=1.0)
 
     def websocket_share_host(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)

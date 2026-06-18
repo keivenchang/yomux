@@ -19726,13 +19726,15 @@ function fitTerminal(session, options = {}) {
 }
 
 function sendRemoteResize(session, options = {}) {
-  if (!terminalCanPublishRemoteSize()) return;
+  if (!terminalCanPublishRemoteSize()) return false;
   const item = terminals.get(session);
-  if (!item?.term || item?.socket?.readyState !== WebSocket.OPEN) return;
+  if (!item?.term || item?.socket?.readyState !== WebSocket.OPEN) return false;
   const message = {type: 'resize', cols: item.term.cols, rows: item.term.rows, foreground: true};
   if (options.activate === true) message.activate = true;
   if (shareClientId) message.client = shareClientId;
   item.socket.send(JSON.stringify(message));
+  item.remoteResizePending = false;
+  return true;
 }
 
 function scheduleRemoteResize(session, delay = remoteResizeDelayMs, options = {}) {
@@ -19740,6 +19742,7 @@ function scheduleRemoteResize(session, delay = remoteResizeDelayMs, options = {}
   if (!item) return;
   if (item.resizeTimer) clearTimeout(item.resizeTimer);
   if (!terminalCanPublishRemoteSize()) {
+    item.remoteResizePending = true;
     item.resizeTimer = null;
     return;
   }
@@ -19747,6 +19750,16 @@ function scheduleRemoteResize(session, delay = remoteResizeDelayMs, options = {}
     item.resizeTimer = null;
     sendRemoteResize(session, options);
   }, delay);
+}
+
+function forceRemoteResize(session) {
+  const item = terminals.get(session);
+  if (!item) return false;
+  if (item.resizeTimer) {
+    clearTimeout(item.resizeTimer);
+    item.resizeTimer = null;
+  }
+  return sendRemoteResize(session);
 }
 
 function refreshTerminal(session) {
@@ -19905,6 +19918,10 @@ function closeTerminalItem(session, item) {
   if (item.reconnectTimer) clearTimeout(item.reconnectTimer);
   if (item.resizeTimer) clearTimeout(item.resizeTimer);
   if (item.scrollTimer) clearTimeout(item.scrollTimer);
+  if (item.fitFrame) cancelAnimationFrame(item.fitFrame);
+  if (item.fitTimer) clearTimeout(item.fitTimer);
+  item.fitFrame = 0;
+  item.fitTimer = 0;
   const observer = resizeObservers.get(session);
   if (observer) {
     observer.disconnect();
@@ -35999,12 +36016,17 @@ function connectTerminalSocket(session, item) {
     refreshTrackedSessionChrome(session);
   };
   socket.onmessage = event => {
-    if (shareViewMode) {
-      handleShareViewSocketMessage(session, item, event.data);
-    } else if (event.data instanceof ArrayBuffer) {
-      item.term.write(new Uint8Array(event.data));
-    } else {
-      item.term.write(String(event.data));
+    if (terminals.get(session) !== item || !item.term) return;
+    try {
+      if (shareViewMode) {
+        handleShareViewSocketMessage(session, item, event.data);
+      } else if (event.data instanceof ArrayBuffer) {
+        item.term.write(new Uint8Array(event.data));
+      } else {
+        item.term.write(String(event.data));
+      }
+    } catch (_) {
+      if (terminals.get(session) === item) closeTerminalItem(session, item);
     }
   };
   socket.onclose = () => {
@@ -36856,14 +36878,25 @@ function scheduleReconnectResync(reason = '') {
   }, reconnectResyncDebounceMs);
 }
 
+function resyncVisibleTerminalRemoteSizes(reason = '') {
+  void reason;
+  for (const session of activeSessions.filter(isTmuxSession)) {
+    scheduleFit(session);
+    forceRemoteResize(session);
+  }
+}
+
 function installReconnectResyncHandlers() {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
       scheduleReconnectResync('visible');
-      for (const session of activeSessions.filter(isTmuxSession)) scheduleFit(session);
+      resyncVisibleTerminalRemoteSizes('visible');
     }
   });
-  window.addEventListener('online', () => scheduleReconnectResync('online'));
+  window.addEventListener('online', () => {
+    scheduleReconnectResync('online');
+    resyncVisibleTerminalRemoteSizes('online');
+  });
 }
 
 async function boot() {

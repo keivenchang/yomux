@@ -10876,6 +10876,17 @@ test('t@7149', () => {
   assert.ok(source.includes("recordJsDebugEvent('sse'"), 'SSE events are captured in JS Debug');
 });
 
+test('t@7185-terminal-resize-recovery-and-dispose-guards', () => {
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(/function scheduleRemoteResize\(session[\s\S]*?!terminalCanPublishRemoteSize\(\)[\s\S]*item\.remoteResizePending = true/.test(source), 'hidden-tab resize skips are marked pending instead of silently disappearing');
+  assert.ok(/function forceRemoteResize\(session\)[\s\S]*sendRemoteResize\(session\)/.test(source), 'forced remote resize bypasses unchanged-fit dedupe by sending current terminal dims');
+  assert.ok(/function resyncVisibleTerminalRemoteSizes\(reason = ''\)[\s\S]*scheduleFit\(session\)[\s\S]*forceRemoteResize\(session\)/.test(source), 'page-visible and online recovery force-publish current terminal geometry');
+  assert.ok(/document\.addEventListener\('visibilitychange'[\s\S]*resyncVisibleTerminalRemoteSizes\('visible'\)/.test(source), 'visibility return resends terminal geometry');
+  assert.ok(/window\.addEventListener\('online'[\s\S]*resyncVisibleTerminalRemoteSizes\('online'\)/.test(source), 'network return resends terminal geometry');
+  assert.ok(/function closeTerminalItem\(session, item\)[\s\S]*cancelAnimationFrame\(item\.fitFrame\)[\s\S]*clearTimeout\(item\.fitTimer\)[\s\S]*item\.fitFrame = 0[\s\S]*item\.fitTimer = 0/.test(source), 'terminal teardown cancels pending fit callbacks');
+  assert.ok(/socket\.onmessage = event => \{[\s\S]*terminals\.get\(session\) !== item[\s\S]*try \{[\s\S]*item\.term\.write/.test(source), 'late websocket frames are ignored after terminal item replacement/dispose');
+});
+
 // Finder symlink badge — the row toggles is-symlink/symlink-broken, shows a name→target
 // title, and the CSS overlays an arrow badge (red + struck-through for broken).
 test('t@7192', () => {

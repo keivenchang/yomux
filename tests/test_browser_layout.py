@@ -680,6 +680,28 @@ def git_show_text(rev_path, fallback_rev_paths=()):
     raise subprocess.CalledProcessError(128, ["git", "show", rev_path])
 
 
+def codemirror_todo_diff_overview_texts():
+    """Frozen (original, current) pair for the TODO CodeMirror diff-overview fixture.
+
+    Both sides are pinned so the merge-view chunk shape can't drift. ``original`` is the immutable
+    ``7f5a7e82ce:TODO.md`` snapshot; ``current`` is a deterministic single-block replacement of it
+    (stable common prefix + a rewritten middle + stable common suffix). This preserves the realistic
+    large-doc geometry the test asserts while removing the dependency on the moving ``docs/TODO.md``
+    roadmap doc, whose edits had grown the diff from one chunk to many and broke the test.
+    """
+    original = git_show_text("7f5a7e82ce:TODO.md")
+    original_lines = original.splitlines(keepends=True)
+    # Keep the changed region near the top of the editor (a tiny common prefix) so the deleted-row
+    # block widget renders inside the initial viewport. CodeMirror virtualizes the merge view's
+    # deleted chunk by the position of the first changed current line; if that line sits below the
+    # fold the deleted widgets never mount and ``deletedDomRows`` reads 0.
+    prefix = original_lines[:2]
+    suffix = original_lines[-2:]
+    replacement = [f"rewritten roadmap line {index:03d}\n" for index in range(1, 121)]
+    current = "".join(prefix + replacement + suffix)
+    return original, current
+
+
 def codemirror_todo_diff_overview_fixture_html():
     css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
@@ -696,8 +718,7 @@ def codemirror_todo_diff_overview_fixture_html():
             "strings": {"en": strings},
         }
     )
-    original = git_show_text("7f5a7e82ce:TODO.md")
-    current = git_show_text("HEAD:docs/TODO.md", [":docs/TODO.md", "HEAD:TODO.md"])
+    original, current = codemirror_todo_diff_overview_texts()
     app_script = app_bundle_before_boot_script()
     original_json = json.dumps(original).replace("</script", "<\\/script")
     current_json = json.dumps(current).replace("</script", "<\\/script")
@@ -18303,18 +18324,36 @@ def test_diff_overview_matches_actual_todo_codemirror_rows(browser, tmp_path):
         lambda driver: driver.execute_script("return window.__todoDiffOverviewMetrics != null")
     )
     metrics = browser.execute_script("return window.__todoDiffOverviewMetrics")
-    original_text = git_show_text("7f5a7e82ce:TODO.md")
-    current_text = git_show_text("HEAD:docs/TODO.md", [":docs/TODO.md", "HEAD:TODO.md"])
-    # The B-side fixture is HEAD:docs/TODO.md, so chunk count and byte offsets change whenever the
-    # roadmap doc changes. Assert the CodeMirror chunks against the actual fixture texts instead of
-    # pinning one stale single-hunk shape.
-    assert metrics["chunks"], metrics
-    for chunk in metrics["chunks"]:
-        assert chunk["fromA"] < chunk["toA"] <= len(original_text) + 1, chunk
-        assert chunk["fromB"] < chunk["toB"] <= len(current_text) + 1, chunk
-        assert chunk["endA"] == chunk["toA"] - 1
-        assert chunk["endB"] == chunk["toB"] - 1
-        assert original_text[chunk["fromA"]:chunk["toA"]] != current_text[chunk["fromB"]:chunk["toB"]]
+    original_text, current_text = codemirror_todo_diff_overview_texts()
+    original_lines = original_text.splitlines(keepends=True)
+    current_lines = current_text.splitlines(keepends=True)
+    common_prefix_lines = 0
+    while (
+        common_prefix_lines < min(len(original_lines), len(current_lines))
+        and original_lines[common_prefix_lines] == current_lines[common_prefix_lines]
+    ):
+        common_prefix_lines += 1
+    common_suffix_lines = 0
+    while (
+        common_suffix_lines < len(original_lines) - common_prefix_lines
+        and common_suffix_lines < len(current_lines) - common_prefix_lines
+        and original_lines[len(original_lines) - common_suffix_lines - 1] == current_lines[len(current_lines) - common_suffix_lines - 1]
+    ):
+        common_suffix_lines += 1
+    expected_from = sum(len(line) for line in original_lines[:common_prefix_lines])
+    expected_to_a = len(original_text) - sum(len(line) for line in original_lines[len(original_lines) - common_suffix_lines:])
+    expected_to_b = len(current_text) - sum(len(line) for line in current_lines[len(current_lines) - common_suffix_lines:])
+    # Both fixture sides are frozen (codemirror_todo_diff_overview_texts) as one contiguous block
+    # replacement, so the merge view is a single chunk with stable byte offsets derived from the
+    # actual common prefix/suffix instead of the moving docs/TODO.md.
+    assert len(metrics["chunks"]) == 1
+    chunk = metrics["chunks"][0]
+    assert chunk["fromA"] == expected_from
+    assert chunk["toA"] in {expected_to_a, expected_to_a + 1}
+    assert chunk["endA"] == chunk["toA"] - 1
+    assert chunk["fromB"] == expected_from
+    assert chunk["toB"] in {expected_to_b, expected_to_b + 1}
+    assert chunk["endB"] == chunk["toB"] - 1
     bands = metrics["rows"]["bands"]
     assert len(bands) == len(metrics["chunks"]) * 2, bands
     for index in range(0, len(bands), 2):

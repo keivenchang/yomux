@@ -28,6 +28,7 @@ from .types import AutoApproveState
 # the post-approval / max-interval sleep (interruptible via stop_event, but the send is not) can finish
 # and the thread can release its flock before a takeover re-acquires.
 AUTO_APPROVE_STOP_JOIN_SECONDS = 5.0
+AUTO_APPROVE_MISSING_CAPTURE_LIMIT = 3
 
 
 LOGGER = logging.getLogger(__name__)
@@ -162,6 +163,7 @@ class AutoApproveWorker:
         self.last_hash_at = 0.0
         self.last_blocked_hash = ""
         self.pending_prompt = False
+        self.missing_capture_count = 0
         self.capture_gate_observed = False
         self.process_lock = AutoApproveProcessLock(target, owner_extra)
         self.lock_owner: dict[str, Any] | None = None
@@ -260,8 +262,15 @@ class AutoApproveWorker:
 
         visible_text = module.tmux_capture_pane(self.target, visible_only=True)
         if visible_text is None:
-            self.update(last_action="failed to capture pane")
+            self.missing_capture_count += 1
+            if self.missing_capture_count >= AUTO_APPROVE_MISSING_CAPTURE_LIMIT:
+                self.update(last_action="session vanished; auto approve stopped")
+                self.emit_event("worker_stopped", "auto approve stopped because the tmux session vanished", failures=self.missing_capture_count)
+                self.stop_event.set()
+            else:
+                self.update(last_action="failed to capture pane")
             return False
+        self.missing_capture_count = 0
         self.capture_gate_observed = True
 
         if hasattr(module, "hybrid_approval_prompt_state"):

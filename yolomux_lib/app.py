@@ -1050,6 +1050,13 @@ class TmuxWebtermApp:
             })
         return details
 
+    def share_record_snapshot(self, record: dict[str, Any], token: str = "") -> dict[str, Any]:
+        result = copy.deepcopy(record)
+        result["viewer_ids"] = {viewer_id: dict(entry) for viewer_id, entry in self.share_record_viewer_ids(record).items()}
+        if token:
+            result["token"] = token
+        return result
+
     def normalize_share_finder_state(self, value: Any, share_sessions: list[str]) -> dict[str, str]:
         if not isinstance(value, dict):
             return {}
@@ -1634,9 +1641,7 @@ class TmuxWebtermApp:
                     continue
                 if record.get("revoked") or not self.share_record_sessions_are_active(record):
                     return None
-                result = dict(record)
-                result["token"] = stored_token
-                return result
+                return self.share_record_snapshot(record, stored_token)
         return None
 
     def register_share_viewer(self, token: str, session: str = "", viewer_id: str = "", ip: str = "", user_agent: str = "") -> tuple[dict[str, Any], HTTPStatus]:
@@ -1685,8 +1690,7 @@ class TmuxWebtermApp:
                     current["browser"] = browser
                 viewer_ids[clean_viewer_id] = current
                 record["viewers"] = len(viewer_ids)
-                result = dict(record)
-                result["token"] = stored_token
+                result = self.share_record_snapshot(record, stored_token)
                 result["viewer_id"] = clean_viewer_id
                 result["viewers"] = record["viewers"]
                 result["viewer_details"] = self.share_record_viewer_details(record)

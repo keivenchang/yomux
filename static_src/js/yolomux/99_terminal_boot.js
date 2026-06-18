@@ -2275,12 +2275,17 @@ function connectTerminalSocket(session, item) {
     refreshTrackedSessionChrome(session);
   };
   socket.onmessage = event => {
-    if (shareViewMode) {
-      handleShareViewSocketMessage(session, item, event.data);
-    } else if (event.data instanceof ArrayBuffer) {
-      item.term.write(new Uint8Array(event.data));
-    } else {
-      item.term.write(String(event.data));
+    if (terminals.get(session) !== item || !item.term) return;
+    try {
+      if (shareViewMode) {
+        handleShareViewSocketMessage(session, item, event.data);
+      } else if (event.data instanceof ArrayBuffer) {
+        item.term.write(new Uint8Array(event.data));
+      } else {
+        item.term.write(String(event.data));
+      }
+    } catch (_) {
+      if (terminals.get(session) === item) closeTerminalItem(session, item);
     }
   };
   socket.onclose = () => {
@@ -3132,14 +3137,25 @@ function scheduleReconnectResync(reason = '') {
   }, reconnectResyncDebounceMs);
 }
 
+function resyncVisibleTerminalRemoteSizes(reason = '') {
+  void reason;
+  for (const session of activeSessions.filter(isTmuxSession)) {
+    scheduleFit(session);
+    forceRemoteResize(session);
+  }
+}
+
 function installReconnectResyncHandlers() {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
       scheduleReconnectResync('visible');
-      for (const session of activeSessions.filter(isTmuxSession)) scheduleFit(session);
+      resyncVisibleTerminalRemoteSizes('visible');
     }
   });
-  window.addEventListener('online', () => scheduleReconnectResync('online'));
+  window.addEventListener('online', () => {
+    scheduleReconnectResync('online');
+    resyncVisibleTerminalRemoteSizes('online');
+  });
 }
 
 async function boot() {

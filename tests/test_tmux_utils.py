@@ -5,7 +5,9 @@ from yolomux_lib import tmux_utils
 
 
 def test_tmux_run_converts_timeout_to_completed_process(monkeypatch):
-    def fake_run(args, capture_output, text, timeout, check):
+    def fake_run(args, capture_output, text, encoding, errors, timeout, check):
+        assert encoding == "utf-8"
+        assert errors == "replace"
         raise subprocess.TimeoutExpired(args, timeout, output="partial", stderr="")
 
     monkeypatch.setattr(tmux_utils.subprocess, "run", fake_run)
@@ -18,7 +20,9 @@ def test_tmux_run_converts_timeout_to_completed_process(monkeypatch):
 
 
 def test_tmux_run_check_raises_after_timeout(monkeypatch):
-    def fake_run(args, capture_output, text, timeout, check):
+    def fake_run(args, capture_output, text, encoding, errors, timeout, check):
+        assert encoding == "utf-8"
+        assert errors == "replace"
         raise subprocess.TimeoutExpired(args, timeout, output="", stderr="hung")
 
     monkeypatch.setattr(tmux_utils.subprocess, "run", fake_run)
@@ -30,6 +34,22 @@ def test_tmux_run_check_raises_after_timeout(monkeypatch):
         assert exc.stderr == "hung"
     else:
         raise AssertionError("tmux_run(check=True) should raise on timeout")
+
+
+def test_run_cmd_decodes_with_replacement_errors(monkeypatch):
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(args, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(tmux_utils.subprocess, "run", fake_run)
+
+    result = tmux_utils.run_cmd(["tmux", "capture-pane"])
+
+    assert result.stdout == "ok"
+    assert calls[0]["encoding"] == "utf-8"
+    assert calls[0]["errors"] == "replace"
 
 
 def test_tmux_command_uses_configured_socket(monkeypatch):

@@ -5,6 +5,8 @@ import os
 from http import HTTPStatus
 from types import SimpleNamespace
 
+import pytest
+
 
 from yolomux_lib import app as app_module
 from yolomux_lib import server as server_module
@@ -38,6 +40,20 @@ class FakeShareConnection:
         self.sent.append(frame)
 
 
+class TimeoutShareConnection(FakeShareConnection):
+    def __init__(self) -> None:
+        super().__init__()
+        self.timeout = 1.25
+        self.timeouts: list[float | None] = []
+
+    def gettimeout(self) -> float | None:
+        return self.timeout
+
+    def settimeout(self, timeout: float | None) -> None:
+        self.timeout = timeout
+        self.timeouts.append(timeout)
+
+
 def test_parse_repo_refs_param_decodes_per_repo_overrides():
     # C6: decode the per-repo FROM/TO JSON map; keep only well-formed string ref pairs.
     raw = json.dumps({"/repo/a": {"from": "abc123", "to": "current"}, "/repo/b": {"from": "  ", "to": "HEAD"}})
@@ -67,6 +83,47 @@ def test_share_ui_frame_redacts_share_urls_and_tokens():
     assert b"secret-token" not in frame
     assert b"/share/abc123" not in frame
     assert b"..." in frame
+
+
+def test_verify_share_token_snapshots_viewer_ids_before_status_iteration():
+    app = object.__new__(app_module.TmuxWebtermApp)
+    app.sessions = ["6"]
+    app.share_tokens_lock = app_module.threading.Lock()
+    app.share_tokens = {
+        "share-token": {
+            "session": "6",
+            "sessions": ["6"],
+            "created_at": app_module.time.time(),
+            "expires_at": app_module.time.time() + 60,
+            "revoked": False,
+            "mode": "ro",
+            "scheme": "http",
+            "short_id": "abc",
+            "max_viewers": 5,
+            "viewer_ids": {"viewer-1": {"count": 1, "connected_at": 10.0, "last_seen_at": 10.0}},
+            "ui_state": {},
+        },
+    }
+
+    snapshot = app.verify_share_token("share-token")
+    app.share_tokens["share-token"]["viewer_ids"]["viewer-2"] = {"count": 1, "connected_at": 20.0, "last_seen_at": 20.0}
+    payload = app.share_status_frame_for_record(snapshot)
+
+    assert snapshot is not app.share_tokens["share-token"]
+    assert snapshot["viewer_ids"] is not app.share_tokens["share-token"]["viewer_ids"]
+    assert sorted(snapshot["viewer_ids"]) == ["viewer-1"]
+    assert payload["viewers"] == 1
+
+
+def test_share_viewer_send_frame_restores_bounded_timeout():
+    connection = TimeoutShareConnection()
+    viewer = server_module.ShareViewerConnection(connection, "viewer-timeout")
+
+    viewer.send_frame(b"frame")
+
+    assert connection.sent == [b"frame"]
+    assert connection.timeouts == [server_module.SHARE_VIEWER_SEND_TIMEOUT_SECONDS, 1.25]
+    assert connection.timeout == 1.25
 
 
 def test_parse_repo_refs_param_rejects_garbage():
@@ -155,6 +212,16 @@ def test_websocket_resize_dimensions_are_clamped():
     assert ws_resize_dimensions({"rows": "24", "cols": 80}, 36, 120) is None
 
 
+def test_accept_websocket_rejects_non_ascii_key_cleanly():
+    writes = []
+    handler = object.__new__(Handler)
+    handler.headers = {"Sec-WebSocket-Key": "bad-\N{SNOWMAN}"}
+    handler.write_text = lambda value, status=HTTPStatus.OK: writes.append((status, value))
+
+    assert Handler.accept_websocket(handler) is False
+    assert writes == [(HTTPStatus.BAD_REQUEST, "invalid Sec-WebSocket-Key\n")]
+
+
 def test_configure_session_tmux_options_uses_active_surface_authority(monkeypatch):
     # Two browser surfaces on one session attach as two differently-sized tmux clients. Under the
     # default `latest` policy the most-recently-active (often smaller) client keeps resizing the
@@ -163,13 +230,13 @@ def test_configure_session_tmux_options_uses_active_surface_authority(monkeypatc
     # as ignore-size, and lets the active browser surface clear ignore-size only for its own client.
     monkeypatch.delenv("YOLOMUX_TMUX_SOCKET", raising=False)
     calls: list[list[str]] = []
-    monkeypatch.setattr(server_module.subprocess, "run", lambda cmd, **_: calls.append(list(cmd)))
+    monkeypatch.setattr(server_module, "tmux", lambda args: calls.append(list(args)))
 
     server_module.configure_session_tmux_options("3")
 
-    assert ["tmux", "set-option", "-s", "set-clipboard", "on"] in calls
-    assert ["tmux", "set-option", "-t", "3:", "window-size", "largest"] in calls
-    assert ["tmux", "set-option", "-wg", "aggressive-resize", "on"] in calls
+    assert ["set-option", "-s", "set-clipboard", "on"] in calls
+    assert ["set-option", "-t", "3:", "window-size", "largest"] in calls
+    assert ["set-option", "-wg", "aggressive-resize", "on"] in calls
     assert server_module.tmux_attach_command(readonly=False) == ["tmux", "attach-session", "-f", "ignore-size"]
     assert server_module.tmux_attach_command(readonly=True) == ["tmux", "attach-session", "-r", "-f", "ignore-size"]
 
@@ -215,6 +282,13 @@ def test_both_attach_paths_route_through_shared_tmux_options():
     assert "configure_session_tmux_options(self.session)" in upstream_body
     assert "set-clipboard" not in bridge_body
     assert "set-clipboard" not in upstream_body
+
+
+def test_configure_session_tmux_options_uses_bounded_tmux_helper():
+    body = inspect.getsource(server_module.configure_session_tmux_options)
+
+    assert "tmux(args)" in body
+    assert "subprocess.run" not in body
 
 
 def test_html_uses_browser_highlight_js_bundle():
@@ -775,6 +849,34 @@ def test_write_sse_json_formats_event_stream():
     Handler.write_sse_json(handler, "delta", {"text": "hello"})
 
     assert handler.wfile.getvalue() == b'event: delta\ndata: {"text": "hello"}\n\n'
+
+
+def test_stream_codex_process_decodes_utf8_across_chunks(monkeypatch):
+    chunks = [b"caf\xc3", b"\xa9\n", b""]
+    events = []
+
+    class FakeStdout:
+        def fileno(self) -> int:
+            return 123
+
+    class FakeProcess:
+        stdout = FakeStdout()
+
+        def poll(self):
+            return None if chunks and chunks[0] else 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(server_module.select, "select", lambda read, _write, _error, _timeout: (read, [], []))
+    monkeypatch.setattr(server_module.os, "read", lambda _fd, _size: chunks.pop(0))
+    handler = object.__new__(Handler)
+    handler.write_sse_json = lambda event, value: events.append((event, value))
+
+    Handler.stream_codex_process(handler, FakeProcess())
+
+    assert ("log", {"text": "café"}) in events
+    assert events[-1] == ("done", {"return_code": 0})
 
 
 def test_server_source_wires_routing_ws_readonly_and_pty_setup():
@@ -1528,3 +1630,54 @@ def test_share_terminal_upstream_refreshes_existing_viewer_attach():
 
     assert viewer in upstream.viewers
     assert calls == ["refresh"]
+
+
+def test_share_terminal_upstream_start_closes_openpty_fds_on_setup_error(monkeypatch):
+    master_fd = os.open(os.devnull, os.O_RDONLY)
+    slave_fd = os.open(os.devnull, os.O_RDONLY)
+    upstream = server_module.ShareTerminalUpstream(
+        SimpleNamespace(host_pty_dimensions_for_session=lambda _session: (24, 80)),
+        "token",
+        "6",
+    )
+    monkeypatch.setattr(server_module.pty, "openpty", lambda: (master_fd, slave_fd))
+    monkeypatch.setattr(server_module, "set_pty_size", lambda *_args: (_ for _ in ()).throw(OSError("pty failed")))
+
+    with pytest.raises(OSError):
+        upstream.start_locked()
+
+    assert upstream.master_fd is None
+    assert upstream.slave_fd is None
+    for fd in (master_fd, slave_fd):
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
+
+def test_share_terminal_reader_uses_owned_fd_duplicate_before_reading():
+    body = inspect.getsource(server_module.ShareTerminalUpstream.reader_loop)
+
+    assert "reader_fd = os.dup(master_fd)" in body
+    assert "if self.stop_event.is_set():" in body
+    assert "os.read(reader_fd" in body
+    assert "os.close(reader_fd)" in body
+
+
+def test_bridge_shared_tmux_cleans_registration_when_add_viewer_fails():
+    calls = []
+    upstream = SimpleNamespace(add_viewer=lambda _viewer: (_ for _ in ()).throw(OSError("openpty failed")))
+    handler = object.__new__(Handler)
+    handler.connection = FakeShareConnection()
+    handler.server = SimpleNamespace(
+        share_terminal_upstream=lambda token, session: upstream,
+        release_share_terminal_upstream=lambda token, session, viewer: calls.append(("release", token, session, viewer.client_id)),
+        app=SimpleNamespace(unregister_share_viewer=lambda token, viewer_id: calls.append(("unregister", token, viewer_id))),
+        broadcast_share_status=lambda token: calls.append(("broadcast", token)),
+    )
+
+    Handler.bridge_shared_tmux(handler, "share-token", "6", "viewer-1")
+
+    assert calls == [
+        ("release", "share-token", "6", "viewer-1"),
+        ("unregister", "share-token", "viewer-1"),
+        ("broadcast", "share-token"),
+    ]

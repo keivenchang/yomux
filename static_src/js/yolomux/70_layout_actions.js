@@ -1559,13 +1559,15 @@ function fitTerminal(session, options = {}) {
 }
 
 function sendRemoteResize(session, options = {}) {
-  if (!terminalCanPublishRemoteSize()) return;
+  if (!terminalCanPublishRemoteSize()) return false;
   const item = terminals.get(session);
-  if (!item?.term || item?.socket?.readyState !== WebSocket.OPEN) return;
+  if (!item?.term || item?.socket?.readyState !== WebSocket.OPEN) return false;
   const message = {type: 'resize', cols: item.term.cols, rows: item.term.rows, foreground: true};
   if (options.activate === true) message.activate = true;
   if (shareClientId) message.client = shareClientId;
   item.socket.send(JSON.stringify(message));
+  item.remoteResizePending = false;
+  return true;
 }
 
 function scheduleRemoteResize(session, delay = remoteResizeDelayMs, options = {}) {
@@ -1573,6 +1575,7 @@ function scheduleRemoteResize(session, delay = remoteResizeDelayMs, options = {}
   if (!item) return;
   if (item.resizeTimer) clearTimeout(item.resizeTimer);
   if (!terminalCanPublishRemoteSize()) {
+    item.remoteResizePending = true;
     item.resizeTimer = null;
     return;
   }
@@ -1580,6 +1583,16 @@ function scheduleRemoteResize(session, delay = remoteResizeDelayMs, options = {}
     item.resizeTimer = null;
     sendRemoteResize(session, options);
   }, delay);
+}
+
+function forceRemoteResize(session) {
+  const item = terminals.get(session);
+  if (!item) return false;
+  if (item.resizeTimer) {
+    clearTimeout(item.resizeTimer);
+    item.resizeTimer = null;
+  }
+  return sendRemoteResize(session);
 }
 
 function refreshTerminal(session) {
@@ -1738,6 +1751,10 @@ function closeTerminalItem(session, item) {
   if (item.reconnectTimer) clearTimeout(item.reconnectTimer);
   if (item.resizeTimer) clearTimeout(item.resizeTimer);
   if (item.scrollTimer) clearTimeout(item.scrollTimer);
+  if (item.fitFrame) cancelAnimationFrame(item.fitFrame);
+  if (item.fitTimer) clearTimeout(item.fitTimer);
+  item.fitFrame = 0;
+  item.fitTimer = 0;
   const observer = resizeObservers.get(session);
   if (observer) {
     observer.disconnect();

@@ -122,6 +122,11 @@ class PostWalkMoveModule(StableWalkModule):
         return 1 if self._calls == 1 else 2
 
 
+class MissingPaneModule(DummyApproveModule):
+    def tmux_capture_pane(self, _target: str, visible_only: bool = False) -> None:
+        return None
+
+
 def test_send_action_confirms_after_reverifying_the_walked_highlight():
     # walk to the target, re-verify it landed there, THEN press Enter.
     worker = auto_approve_worker.AutoApproveWorker("6", interval=0.01)
@@ -244,6 +249,29 @@ def test_process_once_skips_capture_after_initial_tmux_activity_observation():
     assert second is False
     assert module.capture_calls == []
     assert worker.last_action == "idle; tmux activity quiet"
+
+
+def test_process_once_self_stops_after_repeated_missing_capture():
+    events: list[tuple[str, str, str, dict[str, Any]]] = []
+    module = MissingPaneModule()
+    worker = auto_approve_worker.AutoApproveWorker(
+        "6",
+        interval=0.01,
+        event_callback=lambda target, event_type, message, details: events.append((target, event_type, message, details)),
+    )
+
+    for _ in range(auto_approve_worker.AUTO_APPROVE_MISSING_CAPTURE_LIMIT):
+        assert worker.process_once(module) is False
+
+    assert worker.stop_event.is_set()
+    assert worker.alive() is False
+    assert worker.last_action == "session vanished; auto approve stopped"
+    assert events == [(
+        "6",
+        "worker_stopped",
+        "auto approve stopped because the tmux session vanished",
+        {"failures": auto_approve_worker.AUTO_APPROVE_MISSING_CAPTURE_LIMIT},
+    )]
 
 
 def test_process_once_captures_idle_target_when_prompt_hash_is_pending():

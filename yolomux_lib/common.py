@@ -616,6 +616,10 @@ def terminate_process_group(process: subprocess.Popen[Any]) -> None:
         return
     except subprocess.TimeoutExpired:
         os.killpg(process.pid, signal.SIGKILL)
+        try:
+            process.wait(timeout=2.0)
+        except (ProcessLookupError, subprocess.TimeoutExpired):
+            return
 
 def truncate_text(text: str, limit: int) -> str:
     if len(text) <= limit:
