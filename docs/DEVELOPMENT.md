@@ -163,23 +163,35 @@ If you intentionally started with `YOLOMUX_TEST_AUTH_BYPASS=1`, `/api/ping` and 
 
 ## Production Sync (`cps`)
 
-Edits happen in a development checkout; the production checkout is read-only during sync and shares the same `origin`. The sequence from the dev checkout:
+`cps` (the `yolo-cps` skill) has two modes, chosen by the trigger word:
+
+- **LOCAL (default — "cps" / "yolo-cps" with no qualifier):** rebase the dev branch onto LOCAL `main` and land it on local `main`. NO version bump, NO push.
+- **ORIGIN ("cps origin" / "cps remote"):** rebase onto `origin/main`, bump the version, land on local `main`, then push to `origin/main`.
+
+Edits happen in a dev checkout; the integration/production checkout (`~/yolomux`, which holds `main`) is read-only during sync and shares the same `origin`. Because `main` is checked out in `~/yolomux`, you cannot check it out in a dev worktree — land work by committing on the dev branch, rebasing it onto `main` / `origin/main`, then fast-forwarding `main` from `~/yolomux`.
+
+ORIGIN-mode sequence from the dev checkout:
 
 ```bash
-python3 tools/check.py                 # the full gate (see Tests above)
+python3 tools/check.py                       # the full gate (see Tests above)
+git fetch origin && git rebase origin/main   # rebase onto the published tip
+# bump YOLOMUX_VERSION in yolomux_lib/common.py, folded into the work commit
 git add -- <explicit-files>
-git commit -m "<message including Version: 0.2.N>"
-git push origin <branch>:main
-cd ~/yolomux && git pull --ff-only origin main
-# restart prod + the dev server (see Restart workflow above)
+git commit -m "<message including Version: 0.4.N>"
+git -C ~/yolomux merge --ff-only <branch>    # land on local main — its OWN exit-checked command
+git -C ~/yolomux push origin main            # only after the ff-merge succeeds
 ```
+
+LOCAL mode is the same minus the version bump and the final `push` (stop after the ff-merge).
 
 Rules:
 
-- Bump `YOLOMUX_VERSION` in `yolomux_lib/common.py` in the same commit; the auto-updater checks this value on `origin/main`, not the commit SHA, so SHA-only commits do not trigger the update cue.
+- ORIGIN mode MUST bump `YOLOMUX_VERSION` in `yolomux_lib/common.py` in the same commit; the auto-updater checks this value on `origin/main`, not the commit SHA, so SHA-only commits do not cue the update. LOCAL mode does NOT bump.
 - Never use `git add -A`; screenshots and scratch files must not get swept in.
-- Production pull is `--ff-only`. Never edit, stage, or commit inside the production checkout.
-- Restart production and the active dev server after sync, then verify `/api/ping`, the running process cwd, and `YOLOMUX_VERSION` in both checkouts. The login page may not expose the version to unauthenticated curl; do not rely on a blank version grep alone.
+- The `merge --ff-only` into `~/yolomux` MUST be its own exit-checked command — NOT piped through `tail`/`grep` and NOT `&&`-chained straight into the push. A pipe's exit status is the last stage's, so a DIVERGED ff-merge fails silently and a chained `push origin main` then publishes whatever local `main` already points at, not your commit. Confirm the merge succeeded before pushing.
+- This is a shared multi-worktree: local `main` can advance from another worktree mid-`cps`, so your ff-merge can suddenly refuse (diverged). Recovery: `git fetch origin`, `git rebase origin/main` your dev branch (disjoint files rebase clean), re-run the gate, then ff-merge + push. No force-push, nothing lost — the other commit is usually a sibling off the same base.
+- Production pull/merge is `--ff-only`. Never edit, stage, or commit inside `~/yolomux`.
+- Restart is NOT part of `cps`. Restart prod/dev only when explicitly asked (see Restart workflow above), then verify `/api/ping`, the process cwd, and `YOLOMUX_VERSION`. The login page may not expose the version to unauthenticated curl; do not rely on a blank version grep alone.
 
 ## xterm.js Assets
 
