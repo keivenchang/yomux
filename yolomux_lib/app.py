@@ -1788,7 +1788,7 @@ class TmuxWebtermApp:
             external_enabled = {
                 session
                 for session in current
-                if isinstance(session, str) and session not in self.auto_workers and auto_approve_lock_owner(session)
+                if isinstance(session, str) and session not in self.auto_workers and self.auto_approve_session_lock_owner(session)
             }
         else:
             external_enabled = set()
@@ -6823,6 +6823,25 @@ class TmuxWebtermApp:
             targets.append(target)
         return targets
 
+    def auto_approve_session_lock_owner(self, session: str) -> dict[str, Any] | None:
+        """The owner of session's YO lock when another server holds it, else None.
+
+        YO workers lock per agent-pane target (auto_approve_agent_targets), NOT the bare session,
+        so a server without a local worker must probe those pane-target locks to notice another
+        server's ownership. The bare session is probed too, covering the no-agent fallback path and
+        any legacy session-named lock. Checking only the session lock missed every agent-backed
+        session, which is what silently dropped the cross-server "YO running elsewhere" (yellow)
+        marker on the other servers.
+        """
+        targets = self.auto_approve_agent_targets(session) or [session]
+        if session not in targets:
+            targets = [*targets, session]
+        for target in targets:
+            owner = auto_approve_lock_owner(target)
+            if owner:
+                return owner
+        return None
+
     def ensure_auto_approve_agent_workers_locked(self, session: str, takeover: bool) -> tuple[bool, AutoApproveState]:
         worker_sessions = self.auto_worker_session_map()
         desired_targets = self.auto_approve_agent_targets(session) or [session]
@@ -7060,7 +7079,7 @@ class TmuxWebtermApp:
                 "blocked": 0,
                 "last_action": "off",
             }
-            owner = auto_approve_lock_owner(session)
+            owner = self.auto_approve_session_lock_owner(session)
             if owner:
                 payload.update({
                     "enabled_elsewhere": True,

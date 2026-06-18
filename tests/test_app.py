@@ -93,6 +93,55 @@ def test_auto_approve_status_refreshes_session_order(monkeypatch):
     assert payload["sessions"] == {"new": {"target": "new"}}
 
 
+def test_auto_approve_session_lock_owner_probes_agent_pane_targets(monkeypatch):
+    # Regression: YO workers lock the agent PANE target (e.g. %7), NOT the bare session, so a server
+    # without a local worker must probe the pane-target lock to notice another server's ownership.
+    # Probing only the session lock (None here) missed every agent-backed session and silently
+    # dropped the cross-server "YO running elsewhere" (yellow) marker.
+    webapp = app_module.TmuxWebtermApp(["6"])
+    try:
+        monkeypatch.setattr(webapp, "auto_approve_agent_targets", lambda session, *a, **k: ["%7"] if session == "7" else [])
+        owners = {"%7": {"pid": 4242, "project_root": "/home/x/remote-worktree"}}
+        monkeypatch.setattr(app_module, "auto_approve_lock_owner", lambda target: owners.get(target))
+        # The pane-target lock is found even though the bare-session lock is unheld.
+        assert webapp.auto_approve_session_lock_owner("7") == owners["%7"]
+        # A session whose pane target is unlocked stays None, so no false yellow.
+        assert webapp.auto_approve_session_lock_owner("5") is None
+    finally:
+        webapp.control_server.stop()
+
+
+def test_auto_approve_session_lock_owner_falls_back_to_bare_session(monkeypatch):
+    # No detected agent (e.g. a plain shell): the worker locks the bare session, so the detector
+    # must still probe it.
+    webapp = app_module.TmuxWebtermApp(["6"])
+    try:
+        monkeypatch.setattr(webapp, "auto_approve_agent_targets", lambda session, *a, **k: [])
+        owners = {"9": {"pid": 99}}
+        monkeypatch.setattr(app_module, "auto_approve_lock_owner", lambda target: owners.get(target))
+        assert webapp.auto_approve_session_lock_owner("9") == owners["9"]
+    finally:
+        webapp.control_server.stop()
+
+
+def test_auto_approve_status_reports_elsewhere_for_agent_pane_lock(monkeypatch):
+    # End to end: with the agent pane locked by another server and no local worker, the roster
+    # payload for that session must carry enabled_elsewhere/locked so the UI paints it yellow.
+    webapp = app_module.TmuxWebtermApp(["6"])
+    try:
+        monkeypatch.setattr(webapp, "auto_approve_agent_targets", lambda session, *a, **k: ["%7"] if session == "7" else [])
+        owners = {"%7": {"pid": 4242, "project_root": "/home/x/remote-worktree"}}
+        monkeypatch.setattr(app_module, "auto_approve_lock_owner", lambda target: owners.get(target))
+        monkeypatch.setattr(webapp, "prompt_and_screen_status", lambda *a, **k: (app_module.blank_prompt_state(), {"key": "idle", "text": ""}))
+        payload = webapp.auto_approve_session_status("7")
+        assert payload["enabled"] is False
+        assert payload["enabled_elsewhere"] is True
+        assert payload["locked"] is True
+        assert payload["lock_owner"] == owners["%7"]
+    finally:
+        webapp.control_server.stop()
+
+
 def test_share_token_url_seeds_whole_layout_sessions_and_layout():
     webapp = app_module.TmuxWebtermApp(["6", "7"])
     try:
