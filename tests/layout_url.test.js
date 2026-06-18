@@ -658,6 +658,7 @@ globalThis.__layoutTestApi = {
   clearFocusedTerminal,
   handleFocusedTerminalCopyShortcutForTest: handleFocusedTerminalCopyShortcut,
   visualActivePaneItemForTest: visualActivePaneItem,
+  codeMirrorWrapMarkerRowsForBlock,
   lastActivePaneItemForTest() { return lastActivePaneItem; },
   focusedPanelItemForTest() { return focusedPanelItem; },
   setAutoFocusEnabledForTest(value) { autoFocusEnabled = Boolean(value); },
@@ -3276,7 +3277,7 @@ test('t@2355', () => {
   assert.ok(
     editorLeftTemplate.indexOf('class="file-editor-gutter-panel"') < editorLeftTemplate.indexOf('class="file-editor-wrap-panel"')
       && editorLeftTemplate.indexOf('class="file-editor-wrap-panel"') < editorLeftTemplate.indexOf('class="file-editor-diff-panel"'),
-    'editor toolbar left/front controls render as #, Wrap around, Differ'
+    'editor toolbar left/front controls render as #, wrap icon, Differ'
   );
   assert.equal(editorRightTemplate.includes('file-editor-wrap-panel'), false, 'editor toolbar no longer renders the redundant right-side wrap icon');
   assert.ok(
@@ -3299,7 +3300,7 @@ test('t@2355', () => {
   assert.ok(/\.file-editor-toolbar-center\s*\{[^}]*position:\s*absolute[\s\S]*left:\s*50%[\s\S]*transform:\s*translate\(-50%, -50%\)/.test(css), 'editor toolbar center zone stays centered');
   assert.ok(/\.file-editor-toolbar-right\s*\{[^}]*margin-inline-start:\s*auto[\s\S]*justify-content:\s*flex-end/.test(css), 'editor toolbar right zone is the only spacer-backed zone');
   assert.ok(/\.file-editor-diff-panel\s*\{[^}]*min-width:\s*44px/.test(css), 'editor toolbar gives Differ text-button width');
-  assert.ok(/\.file-editor-wrap-panel\s*\{[^}]*min-width:\s*72px[\s\S]*white-space:\s*nowrap/.test(css), 'editor toolbar gives Wrap around a text-button width');
+  assert.ok(/\.file-editor-gutter-panel,\s*\n\.file-editor-wrap-panel,\s*\n\.file-editor-find-panel,\s*\n\.file-editor-diff-expand-panel/.test(css), 'editor toolbar gives Wrap around the same compact icon-button sizing as # and Search');
   assert.ok(/\.file-editor-toolbar\s*\{[^}]*justify-content:\s*flex-start/.test(css), 'editor toolbar left-aligns # and Differ by default, including after browser refresh');
   const toolbarCssStart = css.indexOf('.file-editor-toolbar {');
   const toolbarCssEnd = css.indexOf('.file-editor-preview-font-panel button', toolbarCssStart);
@@ -3310,8 +3311,8 @@ test('t@2355', () => {
   const editorPressedBlock = css.slice(editorPressedStart, css.indexOf('{', editorPressedStart));
   assert.ok(editorPressedBlock.includes('.file-editor-gutter-panel.active') && editorPressedBlock.includes('.file-editor-find-panel[aria-pressed="true"]') && editorPressedBlock.includes('.file-editor-wrap-panel[aria-pressed="true"]'), '#, Search, and wrap active states share the pressed control treatment');
   assert.ok(source.includes('>Differ</button>'), 'editor Diff toolbar button renders as Differ text');
-  assert.ok(source.includes('>Wrap around</button>'), 'editor Wrap toolbar button renders as text in the left zone');
-  assert.ok(/function updateEditorWrapButton\(button\)[\s\S]*button\.textContent = 'Wrap around'/.test(source), 'wrap button renderer preserves the left-zone text label');
+  assert.ok(/class="file-editor-wrap-panel"[^>]*><span class="file-editor-icon file-editor-icon-wrap"/.test(source), 'editor Wrap toolbar button renders the original icon in the left zone');
+  assert.ok(/function updateEditorWrapButton\(button\)[\s\S]*setFileEditorIcon\(button, 'file-editor-icon-wrap'\)/.test(source), 'wrap button renderer preserves the original icon');
   assert.ok(source.includes('toggleEditorFind(panel);'), 'Search toolbar button toggles the CodeMirror search panel');
   assert.ok(source.includes('const currentText = String(state.content || \'\');'), 'plain CodeMirror editor mode owns its current text value');
   assert.ok(source.includes('function setLimitedMapEntry'), 'long-lived frontend maps share a bounded LRU setter');
@@ -4267,6 +4268,10 @@ test('t@2560', () => {
   assert.ok(appSource.includes("api.EditorView?.contentAttributes?.of?.({class: 'cm-lineWrapping'})"), 'word wrap falls back to CodeMirror contentAttributes when EditorView.lineWrapping is not exported');
   assert.ok(appSource.includes("&& (api?.EditorView?.lineWrapping || api?.EditorView?.contentAttributes?.of)"), 'CodeMirror API validation requires a usable wrapping extension path');
   assert.ok(/function codeMirrorWrapMarkerExtension\(api\)[\s\S]{0,140}const scheme = activeEditorScheme\(\)/.test(appSource), 'wrap marker plugin defines its active editor scheme before using scheme.dark');
+  assert.equal(api.codeMirrorWrapMarkerRowsForBlock({type: 0, height: 60}, 20), 3, 'wrap marker counts visual rows for real text blocks');
+  assert.equal(api.codeMirrorWrapMarkerRowsForBlock({type: 1, height: 60}, 20), 1, 'wrap marker skips widget-before blocks such as deleted diff chunks');
+  assert.equal(api.codeMirrorWrapMarkerRowsForBlock({type: 3, height: 60}, 20), 1, 'wrap marker skips widget-range blocks such as replacement/deleted diff chunks');
+  assert.equal(api.codeMirrorWrapMarkerRowsForBlock({height: 60, widget: {}}, 20), 1, 'wrap marker skips widget-backed blocks even when type metadata is missing');
   const wrapApplyStart = appSource.indexOf('function applyEditorWrapPreference');
   const wrapApplyBody = appSource.slice(wrapApplyStart, appSource.indexOf('function setEditorWrapEnabled', wrapApplyStart));
   assert.ok(wrapApplyBody.includes('codeMirrorCurrentText(panel)'), 'wrap toggles capture the live CodeMirror document before any fallback render');
@@ -7486,7 +7491,7 @@ test('t@2560', () => {
   terminalNavApi.setLayoutSlotsForTest(terminalNavSlots);
   assert.equal(terminalNavApi.adjacentPaneTabPosition(1, {item: '1'}).item, '2', 'Meta+Right spills from the last tab in a pane to the next pane');
   assert.equal(terminalNavApi.adjacentPaneTabPosition(-1, {item: '1'}).item, terminalNavApi.fileExplorerItemId, 'Meta+Left moves within a mixed pane to the previous non-tmux tab');
-  assert.equal(terminalNavApi.adjacentPaneTabPosition(1, {item: '3'}).item, terminalNavApi.fileExplorerItemId, 'Meta+Right wraps from the last pane tab to the first visible tab');
+  assert.equal(terminalNavApi.adjacentPaneTabPosition(1, {item: '3'}), null, 'Meta+Right stops at the last pane tab instead of wrapping back to the first visible tab');
   let navShortcutHandler = null;
   terminalNavApi.installTerminalCopyShortcutForTest('1', {
     getSelection: () => '',
@@ -7586,6 +7591,30 @@ test('t@2560', () => {
   assert.equal(infoBackResult, false, 'stale terminal capture handles Cmd-Left from YO!info');
   assert.equal(prevented, 1, 'stale terminal capture prevents the terminal default from YO!info');
   assert.equal(screenshotNavApi.activeItemForSide('slot3'), '8003', 'Cmd-Left from YO!info goes to 8003 instead of reselecting YO!info');
+  const noPingPongApi = loadYolomux('?platform=mac', ['8002'], 'https:', 'MacIntel');
+  const noPingPongSlots = noPingPongApi.emptyLayoutSlots();
+  noPingPongSlots[noPingPongApi.layoutTreeKey] = noPingPongApi.leafNode('slot1');
+  noPingPongSlots.slot1 = noPingPongApi.paneStateWithTabs(['8002', noPingPongApi.prefsItemId], '8002');
+  noPingPongApi.setLayoutSlotsForTest(noPingPongSlots);
+  let noPingPongShortcutHandler = null;
+  noPingPongApi.installTerminalCopyShortcutForTest('8002', {
+    getSelection: () => '',
+    attachCustomKeyEventHandler(handler) { noPingPongShortcutHandler = handler; },
+  });
+  const cmdRightFrom8002 = {
+    type: 'keydown',
+    code: 'ArrowRight',
+    key: 'ArrowRight',
+    metaKey: true,
+    ctrlKey: false,
+    altKey: false,
+    shiftKey: false,
+    preventDefault() {},
+  };
+  assert.equal(noPingPongShortcutHandler(cmdRightFrom8002), false, 'stale terminal capture handles first Cmd-Right from 8002');
+  assert.equal(noPingPongApi.activeItemForSide('slot1'), noPingPongApi.prefsItemId, 'first Cmd-Right moves 8002 to Preferences');
+  assert.equal(noPingPongShortcutHandler(cmdRightFrom8002), false, 'stale terminal capture still owns the repeated Cmd-Right');
+  assert.equal(noPingPongApi.activeItemForSide('slot1'), noPingPongApi.prefsItemId, 'repeated Cmd-Right stops on Preferences instead of toggling back to 8002');
   const renderedOrderApi = loadYolomux('?platform=mac', ['8001', '8002', '8003'], 'https:', 'MacIntel');
   const renderedOrderSlots = renderedOrderApi.emptyLayoutSlots();
   renderedOrderSlots[renderedOrderApi.layoutTreeKey] = renderedOrderApi.splitNode(
@@ -7618,8 +7647,8 @@ test('t@2560', () => {
   assert.equal(renderedOrderApi.adjacentPaneTabPosition(-1, {item: '8002'}).item, renderedOrderApi.fileExplorerItemId, 'Cmd-Left moves 8002 back to Finder');
   assert.equal(renderedOrderApi.adjacentPaneTabPosition(1, {item: '8002'}).item, '8001', 'Cmd-Right follows rendered middle tab order');
   assert.equal(renderedOrderApi.adjacentPaneTabPosition(-1, {item: '8001'}).item, '8002', 'Cmd-Left reverses rendered middle tab order');
-  assert.equal(renderedOrderApi.adjacentPaneTabPosition(1, {item: '8003'}).item, renderedOrderApi.fileExplorerItemId, 'Cmd-Right wraps from 8003 to Finder');
-  assert.equal(renderedOrderApi.adjacentPaneTabPosition(-1, {item: renderedOrderApi.fileExplorerItemId}).item, '8003', 'Cmd-Left wraps from Finder to 8003');
+  assert.equal(renderedOrderApi.adjacentPaneTabPosition(1, {item: '8003'}), null, 'Cmd-Right stops at the last rendered tab instead of wrapping to Finder');
+  assert.equal(renderedOrderApi.adjacentPaneTabPosition(-1, {item: renderedOrderApi.fileExplorerItemId}), null, 'Cmd-Left stops at Finder instead of wrapping to the last rendered tab');
   const finderNavApi = loadYolomux('?platform=mac', ['1', '2'], 'https:', 'MacIntel');
   const finderNavEditor = finderNavApi.fileEditorItemFor('/repo/app/notes.md');
   const finderNavSlots = finderNavApi.emptyLayoutSlots();
@@ -9886,6 +9915,25 @@ test('t@6404', () => {
   });
   api.tmuxWindowForTest('1', {windowIndex: '3'}, 'tmux window 3:codex(3)');
   assert.deepStrictEqual(calls, [{url: '/api/tmux-window?session=1&window=3', method: 'POST'}], 'P5: clicking a window button posts direct select-window for that index');
+  calls.length = 0;
+  api.setTranscriptInfoForTest('meta-preview', {
+    agents: [{kind: 'codex', pane_target: 'meta-preview:0.0'}],
+    selected_pane: {target: 'meta-preview:0.0', window: '0', pane: '0', current_path: '/home/u'},
+    panes: [
+      {target: 'meta-preview:0.0', window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', command: 'codex', current_path: '/home/u'},
+      {target: 'meta-preview:1.0', window: '1', pane: '0', window_active: false, active: true, process_label: 'bash', command: 'bash', current_path: '/tmp/shell'},
+    ],
+    project: {
+      git: {root: '/repo/agent', cwd: '/repo/agent/src', branch: 'agent-work', dirty_count: 8}, pull_request: null, linear: [],
+      repos: [{root: '/repo/agent', cwd: '/repo/agent/src', branch: 'agent-work', dirty_count: 8, primary: true}],
+    },
+  });
+  const metaNode = api.testElementForId('meta-meta-preview');
+  metaNode.innerHTML = 'stale';
+  api.tmuxWindowForTest('meta-preview', {windowIndex: '1'}, 'tmux window 1:bash');
+  assert.ok(metaNode.innerHTML.includes('/tmp/shell'), 'clicking a tmux window immediately repaints the Info Bar directory from the local metadata preview');
+  assert.equal(metaNode.innerHTML.includes('/repo/agent'), false, 'the immediate Info Bar repaint does not wait on the metadata poll to suppress the previous window repo');
+  assert.deepStrictEqual(calls, [{url: '/api/tmux-window?session=meta-preview&window=1', method: 'POST'}], 'immediate Info Bar repaint still posts the tmux select-window request');
 });
 
 test('t@6424', () => {

@@ -2511,9 +2511,20 @@ function codeMirrorThemeExtension(api) {
   }, {dark: scheme.dark});
 }
 
+function codeMirrorWrapMarkerRowsForBlock(block, lineHeight, textBlockType = 0) {
+  if (!block) return 1;
+  if (block.type !== undefined && block.type !== textBlockType) return 1;
+  if (block.widget) return 1;
+  const rowHeight = Math.max(1, Number(lineHeight) || 1);
+  const height = Number(block.height);
+  const measuredHeight = Number.isFinite(height) && height > 0 ? height : rowHeight;
+  return Math.max(1, Math.round(measuredHeight / rowHeight));
+}
+
 function codeMirrorWrapMarkerExtension(api) {
   if (!api.ViewPlugin) return [];
   const scheme = activeEditorScheme();
+  const textBlockType = Number.isFinite(Number(api.BlockType?.Text)) ? Number(api.BlockType.Text) : 0;
   return api.ViewPlugin.fromClass(class {
     constructor(view) {
       this.view = view;
@@ -2547,7 +2558,7 @@ function codeMirrorWrapMarkerExtension(api) {
       const blocks = Array.from(view.viewportLineBlocks || []);
       const nodes = [];
       for (const block of blocks) {
-        const rows = Math.max(1, Math.round((block.height || lineHeight) / Math.max(1, lineHeight)));
+        const rows = codeMirrorWrapMarkerRowsForBlock(block, lineHeight, textBlockType);
         for (let row = 1; row < rows; row += 1) {
           const marker = document.createElement('span');
           marker.className = 'cm-wrap-marker';

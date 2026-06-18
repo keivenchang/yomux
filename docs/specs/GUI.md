@@ -185,7 +185,7 @@ Section order follows the reading path: a capabilities overview and glossary, th
 - A fit-mode diagram must not visibly jump/resize after it first appears. A file editor pane opens at a transient height and Dockview re-lays-it-out shortly after (and a hover that triggers a relayout does the same), so the zoom surface keeps the diagram hidden (stage `visibility:hidden`, viewport still laid out and measurable) until its viewport size has settled — debounced after the last size change — then reveals it once at the settled fit, instead of fitting against the transient size and re-fitting.
 - Useful rendered Preview paths must have concrete sample files under `docs/preview-samples/`. Do not add sample files that only show ordinary text rendering, broken-by-design audio/video decode fallbacks, archive fallbacks, or unsupported placeholders; DOT/PlantUML stay out of the sample set until YOLOmux actually renders those diagram formats.
 - The file editor Differ button appears only when blame/diff capability exists for that file. Blame and Differ controls appear or hide as a pair.
-- File editor toolbar front controls render in this order: `#`, `Wrap around`, then `Differ`. `Wrap around` is a left-group text button and must not be duplicated as a right-side icon.
+- File editor toolbar front controls render in this order: `#`, the wrap icon, then `Differ`. The wrap control stays in the left group and must not be duplicated on the right side.
 - A clean git-tracked file with meaningful history can stay in diff mode so the FROM/TO picker remains usable.
 - Preview pop-outs and preview panes must not drive Differ editor scrolling.
 

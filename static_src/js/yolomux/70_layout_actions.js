@@ -764,7 +764,9 @@ function adjacentPaneTabPosition(direction, options = {}) {
   const index = positions.findIndex(position => position.slot === currentSlot && position.item === currentItem);
   if (index < 0) return null;
   const offset = direction < 0 ? -1 : 1;
-  return positions[(index + offset + positions.length) % positions.length] || null;
+  const nextIndex = index + offset;
+  if (nextIndex < 0 || nextIndex >= positions.length) return null;
+  return positions[nextIndex] || null;
 }
 
 function selectAdjacentPaneTab(direction, options = {}) {

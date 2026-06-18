@@ -2055,9 +2055,24 @@ body.editor-theme-light .file-editor-content {
 .file-editor-diff-ref-panel .diff-ref-controls.compact {
   gap: 2px;
 }
+.file-editor-diff-ref-panel .diff-ref-control {
+  gap: 1px;
+  font-size: 0;
+}
 .file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-input,
 .file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-control input {
-  width: clamp(38px, 5vw, 68px);
+  width: 38px;
+}
+.file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-reset {
+  width: 22px;
+  min-width: 22px;
+  padding: 0;
+  font-size: 0;
+}
+.file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-reset::before {
+  content: "↺";
+  font-size: var(--ui-font-size-xs);
+  line-height: 1;
 }
 .file-editor-toolbar-separator {
   width: 1px;
@@ -2133,6 +2148,7 @@ body.editor-theme-light .file-editor-content {
   padding: 0;
 }
 .file-editor-gutter-panel,
+.file-editor-wrap-panel,
 .file-editor-find-panel,
 .file-editor-diff-expand-panel,
 .file-editor-popout-preview-panel,
@@ -2145,16 +2161,6 @@ body.editor-theme-light .file-editor-content {
   justify-content: center;
   padding: 0;
   line-height: 1;
-}
-.file-editor-wrap-panel {
-  width: auto;
-  min-width: 72px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0 5px;
-  line-height: 1;
-  white-space: nowrap;
 }
 .file-editor-theme-panel.theme-with-label {
   width: auto;

@@ -15236,9 +15236,20 @@ function codeMirrorThemeExtension(api) {
   }, {dark: scheme.dark});
 }
 
+function codeMirrorWrapMarkerRowsForBlock(block, lineHeight, textBlockType = 0) {
+  if (!block) return 1;
+  if (block.type !== undefined && block.type !== textBlockType) return 1;
+  if (block.widget) return 1;
+  const rowHeight = Math.max(1, Number(lineHeight) || 1);
+  const height = Number(block.height);
+  const measuredHeight = Number.isFinite(height) && height > 0 ? height : rowHeight;
+  return Math.max(1, Math.round(measuredHeight / rowHeight));
+}
+
 function codeMirrorWrapMarkerExtension(api) {
   if (!api.ViewPlugin) return [];
   const scheme = activeEditorScheme();
+  const textBlockType = Number.isFinite(Number(api.BlockType?.Text)) ? Number(api.BlockType.Text) : 0;
   return api.ViewPlugin.fromClass(class {
     constructor(view) {
       this.view = view;
@@ -15272,7 +15283,7 @@ function codeMirrorWrapMarkerExtension(api) {
       const blocks = Array.from(view.viewportLineBlocks || []);
       const nodes = [];
       for (const block of blocks) {
-        const rows = Math.max(1, Math.round((block.height || lineHeight) / Math.max(1, lineHeight)));
+        const rows = codeMirrorWrapMarkerRowsForBlock(block, lineHeight, textBlockType);
         for (let row = 1; row < rows; row += 1) {
           const marker = document.createElement('span');
           marker.className = 'cm-wrap-marker';
@@ -16221,7 +16232,7 @@ function updateEditorWrapButton(button) {
     labelOn: t('editor.disableWordWrap'),
     labelOff: t('editor.enableWordWrap'),
   });
-  if (button.textContent !== 'Wrap around') button.textContent = 'Wrap around';
+  setFileEditorIcon(button, 'file-editor-icon-wrap');
 }
 
 function updateEditorFindButton(button, state, host = null) {
@@ -18949,7 +18960,9 @@ function adjacentPaneTabPosition(direction, options = {}) {
   const index = positions.findIndex(position => position.slot === currentSlot && position.item === currentItem);
   if (index < 0) return null;
   const offset = direction < 0 ? -1 : 1;
-  return positions[(index + offset + positions.length) % positions.length] || null;
+  const nextIndex = index + offset;
+  if (nextIndex < 0 || nextIndex >= positions.length) return null;
+  return positions[nextIndex] || null;
 }
 
 function selectAdjacentPaneTab(direction, options = {}) {
@@ -23819,7 +23832,8 @@ function previewTmuxWindowLabel(session, key) {
       [session]: nextInfo,
     },
   };
-  updatePanelControlLabels(session, nextInfo);
+  updatePanelHeader(session, nextInfo);
+  renderInfoPanel();
 }
 
 function handleWindowStepButtonClick(event) {
@@ -28767,7 +28781,7 @@ function createFileEditorPanel(item) {
       <div class="file-editor-toolbar" role="toolbar" aria-label="${esc(t('editor.toolbar.aria'))}" hidden>
         <div class="file-editor-toolbar-zone file-editor-toolbar-left">
           <button type="button" class="file-editor-gutter-panel" title="${esc(t('editor.toggleLineNumbers'))}" aria-label="${esc(t('editor.toggleLineNumbers'))}" hidden>#</button>
-          <button type="button" class="file-editor-wrap-panel" title="${esc(t('editor.toggleWordWrap'))}" aria-label="${esc(t('editor.toggleWordWrap'))}" hidden>Wrap around</button>
+          <button type="button" class="file-editor-wrap-panel" title="${esc(t('editor.toggleWordWrap'))}" aria-label="${esc(t('editor.toggleWordWrap'))}" hidden><span class="file-editor-icon file-editor-icon-wrap" aria-hidden="true"></span></button>
           <button type="button" class="file-editor-diff-panel" title="${esc(t('editor.diff'))}" aria-label="${esc(t('editor.diff'))}" hidden>Differ</button>
           <button type="button" class="file-editor-diff-expand-panel" title="${esc(t('editor.diffExpand'))}" aria-label="${esc(t('editor.diffExpand'))}" aria-pressed="${fileEditorDiffExpandUnchangedForItem(item) ? 'true' : 'false'}" hidden>↕</button>
           <span class="file-editor-diff-ref-panel" hidden>${diffRefControlsHtml({compact: true})}</span>
