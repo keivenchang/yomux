@@ -5607,6 +5607,14 @@ function tmuxSignalPanePathForSession(session) {
   return path ? normalizeDirectoryPath(path) : '';
 }
 
+// An alternate-screen pane is a mouse-owning TUI (claude, codex, vim, less): it has its own
+// scroll view and its tmux pane carries no scrollback (history_size stays 0), so routing the
+// wheel into tmux copy-mode is a dead end. Callers use this to let xterm forward the wheel to
+// the app instead of hijacking it.
+function sessionPaneIsAlternateScreen(session) {
+  return tmuxSignalActivePaneForSession(session)?.alternate_on === true;
+}
+
 function tmuxSignalPaneForTarget(target) {
   const value = String(target || '').trim();
   if (!value) return null;
@@ -19788,8 +19796,15 @@ function observeTerminalResize(session, container) {
   resizeObservers.set(session, observer);
 }
 
+// Carries the synthetic wheel events we re-dispatch at xterm (see forwardAltScreenWheel) so the
+// capture-phase handler below lets them through to xterm instead of re-processing them.
+let dispatchingSyntheticWheel = false;
+// Per-session fractional remainder so small touchpad deltas still accumulate into whole lines.
+const altScreenWheelRemainder = new Map();
+
 function enableTerminalScroll(session, term, container) {
   container.addEventListener('wheel', event => {
+    if (dispatchingSyntheticWheel) return;
     if (event.ctrlKey && event.deltaY !== 0) {
       event.preventDefault();
       event.stopPropagation();
@@ -19797,6 +19812,18 @@ function enableTerminalScroll(session, term, container) {
     }
     const signedLines = terminalWheelSignedLines(event, term.rows);
     if (!signedLines) return;
+    // Alt-screen TUIs (claude, codex, vim, less) own the mouse and keep their own scroll view,
+    // and their tmux pane has no scrollback, so hijacking the wheel into tmux copy-mode scrolls
+    // nothing. Forward the wheel to the app instead — but xterm emits only ONE mouse-wheel report
+    // per accumulated cell regardless of delta magnitude, which feels like "several scrolls per
+    // line". Drive it ourselves with the same line count the tmux path uses for consistent speed.
+    if (sessionPaneIsAlternateScreen(session)) {
+      event.preventDefault();
+      event.stopPropagation();
+      forwardAltScreenWheel(session, container, signedLines);
+      return;
+    }
+    altScreenWheelRemainder.delete(session);
     event.preventDefault();
     event.stopPropagation();
     const item = terminals.get(session);
@@ -19806,6 +19833,29 @@ function enableTerminalScroll(session, term, container) {
     }
     queueLocalTerminalScroll(term, signedLines);
   }, {capture: true, passive: false});
+}
+
+// Re-emit `lines` worth of single-line wheel events at xterm's screen element. xterm encodes each
+// one into the app's negotiated mouse protocol and sends it over the data stream, so the alt-screen
+// app scrolls one line per synthetic event — i.e. our full computed line count, not xterm's capped one.
+function forwardAltScreenWheel(session, container, signedLines) {
+  if (typeof WheelEvent !== 'function') return;
+  const node = terminalScreenElement(container);
+  if (!node?.dispatchEvent) return;
+  const accumulated = (altScreenWheelRemainder.get(session) || 0) + signedLines;
+  const whole = Math.trunc(accumulated);
+  altScreenWheelRemainder.set(session, accumulated - whole);
+  if (!whole) return;
+  const count = Math.min(terminalWheelMaxLinesPerEvent, Math.abs(whole));
+  const deltaY = whole < 0 ? -1 : 1;
+  dispatchingSyntheticWheel = true;
+  try {
+    for (let i = 0; i < count; i++) {
+      node.dispatchEvent(new WheelEvent('wheel', {deltaY, deltaMode: 1, bubbles: true, cancelable: true}));
+    }
+  } finally {
+    dispatchingSyntheticWheel = false;
+  }
 }
 
 function terminalWheelSignedLines(event, rows = 0) {

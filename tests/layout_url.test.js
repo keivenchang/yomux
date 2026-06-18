@@ -1088,6 +1088,7 @@ globalThis.__layoutTestApi = {
   TAB_TYPES,
   tabTypeForItem,
   terminalWheelSignedLines,
+  sessionPaneIsAlternateScreen,
   terminalWrappedLineLinks,
   terminalWrappedLineReferences,
   terminalReferenceAtPosition,
@@ -9434,6 +9435,32 @@ test('t@6312', () => {
   assert.equal(api.terminalWheelSignedLines({deltaY: 999, deltaMode: 0}, 40), 12);
   assert.equal(api.terminalWheelSignedLines({deltaY: 4, deltaMode: 0, ctrlKey: true}, 40), 0);
   assert.equal(api.terminalWheelSignedLines({deltaY: 4, deltaMode: 0, shiftKey: true}, 40), 34);
+});
+
+test('t@6318', () => {
+  // Regression: alt-screen panes (claude/codex/vim) must NOT route the wheel into tmux copy-mode.
+  // Their tmux pane has no scrollback, so the wheel has to reach the app instead. The wheel handler
+  // gates on sessionPaneIsAlternateScreen.
+  const api = loadYolomux('', ['1']);
+  const altScreenPane = {
+    windows: [{
+      key: '1:0', session: '1', window_index: '0', active: true,
+      panes: [{
+        window_key: '1:0', session: '1', window_index: '0', pane_index: '0',
+        target: '%11', pane_id: '%11', current_command: 'claude',
+        active: true, alternate_on: true, pid: 1234, dead: false,
+      }],
+    }],
+  };
+  api.setTmuxSignalStateForTest(altScreenPane);
+  assert.equal(api.sessionPaneIsAlternateScreen('1'), true, 'claude alt-screen pane defers the wheel to the app');
+  const shellPane = JSON.parse(JSON.stringify(altScreenPane));
+  shellPane.windows[0].panes[0].current_command = 'bash';
+  shellPane.windows[0].panes[0].alternate_on = false;
+  api.setTmuxSignalStateForTest(shellPane);
+  assert.equal(api.sessionPaneIsAlternateScreen('1'), false, 'a normal shell pane keeps tmux copy-mode scrollback');
+  api.setTmuxSignalStateForTest(null);
+  assert.equal(api.sessionPaneIsAlternateScreen('1'), false, 'no signal state means no alt-screen claim');
 });
 
 test('t@6325', () => {

@@ -1409,6 +1409,14 @@ function tmuxSignalPanePathForSession(session) {
   return path ? normalizeDirectoryPath(path) : '';
 }
 
+// An alternate-screen pane is a mouse-owning TUI (claude, codex, vim, less): it has its own
+// scroll view and its tmux pane carries no scrollback (history_size stays 0), so routing the
+// wheel into tmux copy-mode is a dead end. Callers use this to let xterm forward the wheel to
+// the app instead of hijacking it.
+function sessionPaneIsAlternateScreen(session) {
+  return tmuxSignalActivePaneForSession(session)?.alternate_on === true;
+}
+
 function tmuxSignalPaneForTarget(target) {
   const value = String(target || '').trim();
   if (!value) return null;
