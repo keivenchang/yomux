@@ -94,7 +94,13 @@ def lanes() -> list[Lane]:
         Lane(
             "pytest",
             "pytest full",
-            (Step("pytest full", ["python3", "-m", "pytest", "tests", "-n", "auto", "-q"]),),
+            # Exclude node_bridge: test_node_suite.py shells out to `node tests/layout_url.test.js`,
+            # the exact command the always-on node-layout lane already runs. Without this, the gate
+            # runs that ~20s node suite twice concurrently (it was the single slowest pytest item)
+            # and the two node processes thrash the cores the browser workers need. The node-layout
+            # lane keeps node coverage in the default gate; a bare `python3 -m pytest tests` still
+            # runs the bridge for anyone not going through check.py.
+            (Step("pytest full", ["python3", "-m", "pytest", "tests", "-n", "auto", "-m", "not node_bridge", "-q"]),),
             True,
         ),
         Lane(

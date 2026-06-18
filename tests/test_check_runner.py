@@ -24,7 +24,10 @@ def test_default_check_lanes_keep_full_pytest_gate():
     default_names = [lane.name for lane in lanes if lane.default]
     assert default_names == ["py-compile", "static", "node-syntax", "node-layout", "pytest", "whitespace"]
     pytest_lane = next(lane for lane in lanes if lane.name == "pytest")
-    assert pytest_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-n", "auto", "-q"]
+    # The default pytest lane runs the full suite EXCEPT node_bridge: test_node_suite.py shells out
+    # to the same `node tests/layout_url.test.js` the always-on node-layout lane runs, so including it
+    # ran that ~20s node suite twice concurrently. The node-layout lane keeps node coverage in the gate.
+    assert pytest_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-n", "auto", "-m", "not node_bridge", "-q"]
     assert "pytest-unit" not in default_names
     assert "pytest-socket" not in default_names
     assert "pytest-browser" not in default_names
