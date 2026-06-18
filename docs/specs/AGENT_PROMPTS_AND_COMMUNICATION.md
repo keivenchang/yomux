@@ -142,7 +142,7 @@ This stale example is idle, not `needs-input`, because the current bottom prompt
 ```text
 ❯ Where are the DOIT files?
 
-● They're gone from ~/yolomux.dev2 — and that's by the project's design, not a loss.
+● They're gone from ~/yolomux.dev8002 — and that's by the project's design, not a loss.
 
 ✻ Baked for 1m 33s · 1 shell still running
 
@@ -198,7 +198,7 @@ Codex can show a working row above an input-looking composer and model line. The
 │ Use /skills to list available skills       │
 │ >                                          │
 ╰────────────────────────────────────────────╯
-gpt-5.5 xhigh   ~/yolomux.dev2
+gpt-5.5 xhigh   ~/yolomux.dev8002
 ```
 
 Codex working examples embedded in explanatory text are not live state when a bottom composer follows them as part of an old response.

@@ -73,7 +73,7 @@ python3 tools/static_build.py --check
 
 `python3 tools/check.py` runs the local gate as parallel lanes and exits non-zero if any lane fails — use it as the one pre-commit/CPS command. Use `python3 tools/check.py --serial` when debugging order, process load, or interleaved output. Use `python3 tools/check.py --list-lanes` to see lane names and repeat `--lane <name>` for focused runs.
 
-The default lanes are `py-compile`, `static`, `node-syntax`, `node-layout`, `pytest`, and `whitespace`, where `pytest` is the same full `python3 -m pytest tests -n auto -q` gate used before the runner was parallelized. Focused opt-in lanes are `pytest-unit`, `pytest-socket`, and `pytest-browser`; use them with `--lane` while iterating. Slow known tests are collected first so expensive failures show up earlier.
+The default lanes are `py-compile`, `static`, `node-syntax`, `node-layout`, `pytest`, and `whitespace`. The `pytest` lane runs `python3 -m pytest tests -n auto -m "not node_bridge" -q`: it excludes the `node_bridge` marker because `test_node_suite.py` shells out to the same `node tests/layout_url.test.js` the always-on `node-layout` lane already runs, so the gate would otherwise run that ~20s node suite twice concurrently (and the two node processes thrash the cores the browser workers need). The `node-layout` lane keeps node coverage in the gate; a bare `python3 -m pytest tests` (outside check.py) still runs the bridge. Focused opt-in lanes are `pytest-unit`, `pytest-socket`, and `pytest-browser`; use them with `--lane` while iterating. Slow known tests are collected first so expensive failures show up earlier.
 
 Individual commands remain useful while iterating:
 
@@ -120,15 +120,15 @@ python3 yolomux.py --host 0.0.0.0 --port <port> --self-signed --dang
 
 ### Restart workflow
 
-For dev1, use the repo restart owner. It sets `PATH` explicitly before launch so agent CLIs under `~/.local/bin` are visible even when the caller has a stripped environment:
+For the dev8001 worktree (HTTPS `8001`), use the repo restart owner (`tools/yolomux-restart-dev1.sh` — the filename and its `YOLOMUX_DEV1_*` env vars predate the `dev1`->`dev8001` worktree rename; it still targets port `8001`). It sets `PATH` explicitly before launch so agent CLIs under `~/.local/bin` are visible even when the caller has a stripped environment:
 
 ```bash
 tools/yolomux-restart-dev1.sh
 ```
 
-The script defaults to HTTPS `8001`, `--self-signed`, and `--dang`; override with `YOLOMUX_DEV1_PORT`, `YOLOMUX_HOST`, or `YOLOMUX_DEV1_LOG` only when testing a non-standard dev1 instance. Logs go under `/tmp`.
+The script defaults to HTTPS `8001`, `--self-signed`, and `--dang`; override with `YOLOMUX_DEV1_PORT`, `YOLOMUX_HOST`, or `YOLOMUX_DEV1_LOG` only when testing a non-standard instance. Logs go under `/tmp`. For the dev8002/dev8003 worktrees use the generic recipe below (port `8002`/`8003`), not this script.
 
-To restart dev1 in no-auth test mode:
+To restart dev8001 in no-auth test mode:
 
 ```bash
 YOLOMUX_TEST_AUTH_BYPASS=1 tools/yolomux-restart-dev1.sh
@@ -137,9 +137,9 @@ YOLOMUX_TEST_AUTH_BYPASS=1 tools/yolomux-restart-dev1.sh
 For any other active dev worktree, use the actual checkout path and port. Kill only the listener for that port, then relaunch detached with an explicit `PATH`. Invoke this from outside long-lived test/browser runs so you do not kill your own verifier:
 
 ```bash
-role=dev3
+role=dev8003
 port=8003
-checkout="$HOME/yolomux.dev3"
+checkout="$HOME/yolomux.dev8003"
 log="/tmp/yolomux-${role}-${port}.log"
 pid="$(ps -eo pid=,args= | awk -v port="$port" '$0 ~ /yolomux.py/ && $0 ~ ("--port " port) {print $1; exit}')"
 if [ -n "$pid" ]; then kill "$pid"; fi
