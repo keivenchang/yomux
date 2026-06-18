@@ -111,6 +111,58 @@ def test_session_git_inventory_prefers_recent_dirty_repo(tmp_path):
     assert summaries[0]["activity_source"] == "dirty"
 
 
+def test_candidate_session_cwds_surfaces_transcript_touched_repo(monkeypatch, tmp_path):
+    # A claude launched from a NON-repo cwd (e.g. $HOME) that edits files in a real repo must still
+    # surface that repo: the transcript-touched dir is fed into candidate_session_cwds, so repo
+    # detection finds it even though the live pane cwd has no git checkout. This is the "8003 says
+    # 'no git checkout detected' while actually working in ~/yolomux.dev8003" bug.
+    import json
+
+    repo = tmp_path / "project"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / "f.py").write_text("x\n", encoding="utf-8")
+    _git(repo, "add", "f.py")
+    _git(repo, "commit", "-m", "init")
+    repo_root = str(repo.resolve())
+
+    home_like = tmp_path / "home"   # a non-repo dir standing in for $HOME
+    home_like.mkdir()
+
+    transcript = tmp_path / "claude.jsonl"
+    transcript.write_text(
+        json.dumps({
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "tool_use", "name": "Edit", "input": {"file_path": str(repo / "f.py")}},
+            ]},
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    # isolate the session-number fallbacks so only the live cwd + transcript signal matter
+    monkeypatch.setattr(metadata, "session_workdir", lambda session: home_like)
+    monkeypatch.setattr(metadata, "numbered_session_workdir", lambda session: None)
+
+    pane = _pane("8003", 0, home_like)
+    agent = AgentInfo(
+        session="8003", kind="claude", pid=1, pane_target="8003:0.0", command="claude",
+        cwd=str(home_like), status="running", session_id=None, transcript=str(transcript), error=None,
+    )
+    info = SessionInfo(session="8003", panes=[pane], selected_pane=pane, agents=[agent])
+
+    candidates = metadata.candidate_session_cwds(info)
+    assert repo_root in candidates, "the transcript-touched repo dir is a candidate cwd"
+
+    git_data = session_git_inventory(info)
+    assert git_data is not None, "repo detected from the transcript even though the pane cwd is a non-repo"
+    assert git_data["root"] == repo_root
+    roots = {s["root"] for s in session_repo_summaries(info, repo_root)}
+    assert repo_root in roots
+
+
 REPO = {
     "owner": "ai-project",
     "name": "project",

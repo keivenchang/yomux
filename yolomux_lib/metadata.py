@@ -27,6 +27,7 @@ from .github_client import github_pull_request_url
 from .github_client import pull_request_status_label  # noqa: F401 - re-exported for existing metadata callers
 from .github_client import summarize_github_checks  # noqa: F401 - re-exported for existing metadata callers
 from .linear_client import linear_issue_metadata
+from .session_files import session_touched_dirs
 from .settings import settings_payload
 from .workdir import numbered_session_workdir
 from .workdir import session_workdir
@@ -630,6 +631,11 @@ def candidate_session_cwds(info: SessionInfo) -> list[str]:
         paths.append(info.selected_pane.current_path)        # focused pane's live cwd (follows `cd`)
     paths.extend(agent.cwd for agent in info.agents if agent.cwd)   # agent launch dirs
     paths.extend(pane.current_path for pane in info.panes if pane.current_path)  # other panes
+    # transcript signal: dirs the agents have actually EDITED files in. This is what surfaces the real
+    # repo when the pane/agent cwd is $HOME or another non-repo (e.g. a claude launched from ~ that is
+    # editing ~/yolomux.dev8003). It is a real work signal, so it outranks the session-number default
+    # below; final primary selection across all these candidates is by git activity in repo_summary.
+    paths.extend(session_touched_dirs(info))
     default_workdir = session_workdir(info.session)          # fallback: session-number default workspace
     if default_workdir.is_dir():
         paths.append(str(default_workdir))

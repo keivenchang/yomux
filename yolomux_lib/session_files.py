@@ -31,6 +31,8 @@ SHELL_RUNNERS = {"bash", "sh", "zsh"}
 SESSION_FILES_MAX_HOURS = 24 * 14
 _CODEX_TRANSCRIPT_SCAN_CACHE_MAX = 64
 _CODEX_TRANSCRIPT_SCAN_CACHE: dict[tuple[str, str, bool, float, int], dict[str, set[str]]] = {}
+_CLAUDE_TRANSCRIPT_SCAN_CACHE_MAX = 64
+_CLAUDE_TRANSCRIPT_SCAN_CACHE: dict[tuple[str, str, float, int], dict[str, set[str]]] = {}
 
 
 def classify_change(markers: set[str]) -> str:
@@ -81,6 +83,13 @@ def file_mtime_or_fallback(path: Path, fallback: Any = 0.0) -> float:
 
 
 def scan_claude_transcript(path: Path, cwd: str | None = None) -> dict[str, set[str]]:
+    # Same (path, mtime, size) memoization the codex scanner uses: candidate_session_cwds now scans
+    # transcripts on the hot metadata-refresh path, so an unchanged transcript must read from disk once.
+    cache_key = claude_transcript_scan_cache_key(path, cwd)
+    if cache_key is not None:
+        cached = _CLAUDE_TRANSCRIPT_SCAN_CACHE.get(cache_key)
+        if cached is not None:
+            return copy_change_set(cached)
     changes: dict[str, set[str]] = {}
     try:
         with path.open("r", encoding="utf-8", errors="replace") as handle:
@@ -108,7 +117,19 @@ def scan_claude_transcript(path: Path, cwd: str | None = None) -> dict[str, set[
                     changes.setdefault(str(resolved), set()).add("A" if tool == "Write" else "M")
     except OSError:
         return changes
+    if cache_key is not None:
+        if len(_CLAUDE_TRANSCRIPT_SCAN_CACHE) >= _CLAUDE_TRANSCRIPT_SCAN_CACHE_MAX:
+            _CLAUDE_TRANSCRIPT_SCAN_CACHE.pop(next(iter(_CLAUDE_TRANSCRIPT_SCAN_CACHE)))
+        _CLAUDE_TRANSCRIPT_SCAN_CACHE[cache_key] = copy_change_set(changes)
     return changes
+
+
+def claude_transcript_scan_cache_key(path: Path, cwd: str | None) -> tuple[str, str, float, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (str(path.expanduser().resolve(strict=False)), str(cwd or ""), stat.st_mtime, stat.st_size)
 
 
 def scan_codex_transcript(path: Path, cwd: str | None = None, include_patch_text: bool = True) -> dict[str, set[str]]:
@@ -332,6 +353,24 @@ def scan_agent_changes(agent: AgentInfo) -> dict[str, set[str]]:
     if agent.kind == "codex":
         return scan_codex_transcript(path, agent.cwd)
     return {}
+
+
+def session_touched_dirs(info: SessionInfo) -> list[str]:
+    """Directories the session's agents have actually EDITED files in, derived from each agent's
+    transcript (the same edit-tool scan the Modified-files / Tabber panes use, so it counts edits, not
+    reads). This is the signal that lets repo detection find the real project repo even when the live
+    pane cwd is $HOME or another non-repo: a claude launched from ~ but editing files in
+    ~/yolomux.dev8003 still surfaces that repo. Returns unique containing directories in first-seen
+    order; git-root resolution and dedupe across repos happen in the caller's repo_summary pass."""
+    dirs: list[str] = []
+    seen: set[str] = set()
+    for agent in info.agents:
+        for path_text in scan_agent_changes(agent):
+            parent = str(Path(path_text).parent)
+            if parent and parent != "." and parent not in seen:
+                seen.add(parent)
+                dirs.append(parent)
+    return dirs
 
 
 def bounded_session_files_hours(value: Any) -> float:

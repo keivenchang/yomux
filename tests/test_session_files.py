@@ -59,6 +59,46 @@ def test_scans_claude_and_codex_tool_changes(tmp_path):
     assert codex[str(tmp_path / "old.py")] == {"D"}
 
 
+def test_session_touched_dirs_collects_edited_dirs(tmp_path):
+    # session_touched_dirs returns the unique containing dirs of files the agents EDITED (not read),
+    # so repo detection can find the real repo even when the live cwd is a non-repo.
+    transcript = tmp_path / "claude.jsonl"
+    transcript.write_text(
+        json.dumps({
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "tool_use", "name": "Edit", "input": {"file_path": str(tmp_path / "repo" / "a" / "x.py")}},
+                {"type": "tool_use", "name": "Write", "input": {"file_path": str(tmp_path / "repo" / "a" / "y.py")}},
+                {"type": "tool_use", "name": "Edit", "input": {"file_path": str(tmp_path / "repo" / "b" / "z.py")}},
+                {"type": "tool_use", "name": "Read", "input": {"file_path": str(tmp_path / "other" / "r.py")}},
+            ]},
+        }) + "\n",
+        encoding="utf-8",
+    )
+    info = SessionInfo(session="s1", panes=[], selected_pane=None, agents=[agent("claude", transcript, tmp_path)])
+    dirs = set(session_files.session_touched_dirs(info))
+    # dir 'a' deduped across two edited files; 'b' included; the Read-only 'other' dir is excluded.
+    assert dirs == {str(tmp_path / "repo" / "a"), str(tmp_path / "repo" / "b")}
+
+
+def test_scan_claude_transcript_refreshes_cache_on_change(tmp_path):
+    # the (path, mtime, size) cache must not serve stale results after the transcript is appended to.
+    transcript = tmp_path / "c.jsonl"
+    transcript.write_text(
+        json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "Edit", "input": {"file_path": "/tmp/a.py"}}]}}) + "\n",
+        encoding="utf-8",
+    )
+    assert session_files.scan_claude_transcript(transcript, None) == {"/tmp/a.py": {"M"}}
+    transcript.write_text(
+        json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "Write", "input": {"file_path": "/tmp/b.py"}}]}}) + "\n\n",
+        encoding="utf-8",
+    )
+    refreshed = session_files.scan_claude_transcript(transcript, None)
+    assert refreshed == {"/tmp/b.py": {"A"}}, "size/mtime change invalidates the cache, no stale hit"
+
+
 def test_session_files_payload_merges_tool_attribution_with_git_status(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
