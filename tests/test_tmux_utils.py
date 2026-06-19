@@ -103,6 +103,23 @@ def test_tmux_exact_target_skips_resolution_for_unambiguous_targets(monkeypatch)
     assert tmux_utils.tmux_exact_target("1:") == "1:"
 
 
+def test_tmux_clear_input_moves_to_end_before_clearing(monkeypatch):
+    calls = []
+
+    def fake_tmux_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(tmux_utils, "tmux_run", fake_tmux_run)
+
+    result = tmux_utils.tmux_clear_input("%6")
+
+    assert result.returncode == 0
+    assert calls == [
+        (("send-keys", "-t", "%6", "C-e", "C-u"), {"check": False, "timeout": 5.0}),
+    ]
+
+
 def test_tmux_paste_text_submits_with_enter_key_not_pasted_newline(monkeypatch):
     calls = []
 

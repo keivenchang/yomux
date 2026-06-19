@@ -5686,6 +5686,17 @@ test('t@2560', () => {
     assert.deepStrictEqual(refreshCalls, [[0, 23]], 'System from Light forces a terminal repaint');
     assert.equal(textureClears, 1, 'System from Light clears cached glyph colors');
   }
+  api.setSystemPrefersDarkForTest(false);
+  api.setGlobalThemeModeForTest('system');
+  api.applyGlobalThemeMode({updateEditor: true, updateTerminals: false});
+  assert.ok(api.bodyClassListForTest().contains('theme-system'), 'system theme keeps the preference marker on the body');
+  assert.ok(api.bodyClassListForTest().contains('theme-light'), 'system-resolved-light applies the same body class as explicit light');
+  assert.ok(api.bodyClassListForTest().contains('theme-resolved-light'), 'system-resolved-light keeps the resolved marker for share/editor logic');
+  api.setSystemPrefersDarkForTest(true);
+  api.applyGlobalThemeMode({updateEditor: true, updateTerminals: false});
+  assert.ok(api.bodyClassListForTest().contains('theme-system'), 'system theme keeps the preference marker after OS dark changes');
+  assert.ok(api.bodyClassListForTest().contains('theme-dark'), 'system-resolved-dark applies the same body class as explicit dark');
+  assert.ok(api.bodyClassListForTest().contains('theme-resolved-dark'), 'system-resolved-dark keeps the resolved marker for share/editor logic');
   api.setTerminalThemeModeForTest('dark');
   assert.equal(api.terminalThemeForGlobalTheme('dark').selectionBackground, UI_PINS.textSelectionBg, 'dark terminal selection uses a prominent blue fill');
   assert.equal(api.terminalThemeForGlobalTheme('dark').selectionForeground, '#ffffff', 'dark terminal selection forces readable selected text');
@@ -7009,12 +7020,15 @@ test('t@2560', () => {
   assert.equal(shareThemeApi.shareResolvedGlobalThemeModeForTest(), 'light', 'share viewers store the host resolved system theme');
   assert.equal(shareThemeApi.resolvedGlobalThemeModeForTest(), 'light', 'share viewers resolve system theme from the host frame, not local matchMedia');
   assert.ok(shareThemeApi.testElementForId('body').classList.contains('theme-resolved-light'), 'share viewer body uses the host-resolved light class');
+  assert.ok(shareThemeApi.testElementForId('body').classList.contains('theme-light'), 'share viewer body applies normal light CSS for host-resolved System light');
+  assert.ok(shareThemeApi.testElementForId('body').classList.contains('theme-system'), 'share viewer body preserves the host System preference marker');
   assert.equal(shareThemeApi.terminalThemeModeForTest(), 'follow-app', 'share viewers keep the real terminal theme setting value');
   assert.equal(shareTermCalls.at(-1)?.join(':'), 'refresh:0:23', 'share appearance applies a terminal repaint');
   assert.equal(shareTextureClears, 1, 'share appearance clears cached terminal glyph colors');
   shareThemeApi.applyShareAppearanceStateForTest({theme: 'system', resolvedTheme: 'dark', terminalTheme: 'follow-app'});
   assert.equal(shareThemeApi.resolvedGlobalThemeModeForTest(), 'dark', 'a later host OS flip updates the share viewer resolved theme');
   assert.ok(shareThemeApi.testElementForId('body').classList.contains('theme-resolved-dark'), 'share viewer body follows the later host-resolved dark class');
+  assert.ok(shareThemeApi.testElementForId('body').classList.contains('theme-dark'), 'share viewer body applies normal dark CSS for host-resolved System dark');
   assert.equal(shareTermCalls.at(-1)?.join(':'), 'refresh:0:23', 'later share appearance frames repaint terminal cells too');
   assert.equal(shareTextureClears, 2, 'later share appearance frames clear cached glyph colors too');
 
@@ -7033,6 +7047,7 @@ test('t@2560', () => {
   });
   assert.equal(replayThemeApi.resolvedGlobalThemeModeForTest(), 'light', 'replay-shell share viewers apply live appearance frames instead of swallowing them');
   assert.ok(replayThemeApi.testElementForId('body').classList.contains('theme-resolved-light'), 'replay-shell appearance frames repaint the viewer body');
+  assert.ok(replayThemeApi.testElementForId('body').classList.contains('theme-light'), 'replay-shell appearance frames activate normal light CSS for System light');
 
   const topologyDelayApi = loadYolomux('', ['1']);
   topologyDelayApi.setShareReplayTopologyKeyframeQueuedAtForTest(Date.now());

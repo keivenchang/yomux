@@ -163,7 +163,7 @@ def tmux_send_enter(target: str) -> None:
 
 def tmux_clear_input(target: str, timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
     """Clear the current prompt input line in a target pane without submitting it."""
-    return tmux_run("send-keys", "-t", tmux_exact_target(target), "C-u", check=False, timeout=timeout)
+    return tmux_run("send-keys", "-t", tmux_exact_target(target), "C-e", "C-u", check=False, timeout=timeout)
 
 
 def tmux_paste_text(target: str, text: str, submit: bool = False, timeout: float = 5.0) -> subprocess.CompletedProcess[str]:

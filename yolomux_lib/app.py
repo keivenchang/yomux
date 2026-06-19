@@ -4618,6 +4618,8 @@ class TmuxWebtermApp:
             visible_text = tmux_capture_pane(pane_target, visible_only=True)
         except (OSError, subprocess.SubprocessError):
             return ""
+        if self.yoagent_visible_composer_text(str(visible_text or "")):
+            return ""
         lines = [line.rstrip() for line in str(visible_text or "").splitlines() if line.strip()]
         return truncate_text("\n".join(lines[-40:]), YOAGENT_ACTION_RESULT_MAX_CHARS)
 

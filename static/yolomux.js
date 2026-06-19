@@ -16679,7 +16679,8 @@ function applyGlobalThemeMode(options = {}) {
   globalThemeMode = normalizeGlobalThemeMode(globalThemeMode);
   const resolved = resolvedGlobalThemeMode();
   document.body?.classList.remove('theme-system', 'theme-dark', 'theme-light', 'theme-resolved-dark', 'theme-resolved-light');
-  document.body?.classList.add(`theme-${globalThemeMode}`, `theme-resolved-${resolved}`);
+  document.body?.classList.add(`theme-${resolved}`, `theme-resolved-${resolved}`);
+  if (globalThemeMode === 'system') document.body?.classList.add('theme-system');
   if (document.documentElement?.style) document.documentElement.style.colorScheme = resolved;
   if (options.updateEditor !== false) applyEditorThemeMode({refreshEditors: options.refreshEditors !== false});
   if (options.updateTerminals) applyTerminalRuntimeSettings({fit: false});

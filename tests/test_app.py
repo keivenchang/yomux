@@ -2755,6 +2755,47 @@ def test_yoagent_action_result_watcher_waits_for_codex_task_complete(monkeypatch
     assert "I will check the clock now" not in conversation["messages"][-1]["content"]
 
 
+def test_yoagent_action_result_watcher_does_not_record_visible_composer_draft(monkeypatch):
+    visible_text = "\n".join([
+        "● The current time is 21:26 (9:26 PM) PDT, Thursday, June 18, 2026 (Pacific Time).",
+        "",
+        "✻ Cogitated for 7s",
+        "",
+        "────────────────────────────────────────────────────────────────",
+        "❯ what's the date in UTC",
+        "────────────────────────────────────────────────────────────────",
+        "  ▶▶ bypass permissions on (shift+tab to cycle) · ← for agents",
+    ])
+    webapp = app_module.TmuxWebtermApp(["1"])
+    target = {
+        "session": "1",
+        "pane_target": "%1",
+        "agent_kind": "claude",
+        "agent_transcript": "",
+        "transport": "pane-paste",
+    }
+    preview = {"session": "1", "text": "what is the time?", "return_result": True, "target": target}
+    monkeypatch.setattr(app_module, "tmux_capture_pane", lambda target, visible_only=False: visible_text)
+    monkeypatch.setattr(webapp, "yoagent_action_pane_status", lambda *_args, **_kwargs: ({}, {"key": "idle", "text": ""}))
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: {})
+    monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
+
+    try:
+        assert webapp.yoagent_visible_composer_text(visible_text) == "what's the date in UTC"
+        assert webapp.yoagent_action_visible_result_text(target) == ""
+        result = webapp.run_yoagent_action_result_watcher(preview, {"transcript": ""}, wait_seconds=1, poll_seconds=0.01)
+        conversation = webapp.yoagent_conversation_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert result["ok"] is False
+    assert result["source"] == ""
+    assert result["timed_out"] is True
+    assert "did not see a result before the wait timed out" in conversation["messages"][-1]["content"]
+    assert "what's the date in UTC" not in conversation["messages"][-1]["content"]
+    assert "Partial result" not in conversation["messages"][-1]["content"]
+
+
 def test_yoagent_pending_waits_show_and_clear(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["6"])
     target = {
