@@ -1051,6 +1051,156 @@ def codemirror_file_explorer_diff_overview_fixture_html():
     """
 
 
+def codemirror_diff_wrapped_inserted_line_fixture_html():
+    """Reproduce the screenshot bug: a long INSERTED line that soft-wraps in the unified merge diff.
+
+    In @codemirror/merge the inserted/deleted text are inline marks (``Decoration.mark`` -> ``<ins>`` /
+    ``<del>`` with class ``cm-insertedLine`` / ``cm-deletedLine``) nested inside a block
+    ``.cm-line.cm-changedLine``. The earlier diff CSS applied the full-bleed
+    ``box-shadow``/``clip-path: inset(0 -100vw)`` trick to those inline marks too; on a soft-wrapped
+    inline element that buried the wrapped continuation rows' text under the parent block's green band
+    (gutter numbers stayed, text went blank). This fixture builds that exact state with word-wrap on so
+    the regression asserts the continuation visual row paints visible inserted text.
+    """
+    css = app_css()
+    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    bootstrap = json.dumps(
+        {
+            "sessions": [],
+            "availableAgents": [],
+            "accessRole": "admin",
+            "homePath": "/home/test",
+            "repoRoot": str(REPO_ROOT),
+            "maxSessionTabs": 99,
+            "serverHostname": "test-host",
+            "strings": {"en": strings},
+        }
+    )
+    app_script = app_bundle_before_boot_script()
+    # A long inserted bullet (the screenshot's "### Gate speedup" added block) plus a run of unchanged
+    # lines so collapseUnchanged engages and the collapsed-unchanged state is also covered. TAILTOKEN_END
+    # is the marker on the LAST wrapped fragment, so seeing it proves the final continuation row rendered.
+    long_line = (
+        "- The default tools check gate ran the node layout suite twice concurrently once as the "
+        "node-syntax lane and again folded into the pytest lane so every push paid the cost a second "
+        "time for no added coverage TAILTOKEN_END"
+    )
+    unchanged = "".join(f"unchanged context line {index:03d}\n" for index in range(40))
+    original = "# DONE\n" + unchanged + "tail unchanged a\ntail unchanged b\n"
+    current = "# DONE\n" + unchanged + "### Gate speedup\n" + long_line + "\ntail unchanged a\ntail unchanged b\n"
+    original_json = json.dumps(original).replace("</script", "<\\/script")
+    current_json = json.dumps(current).replace("</script", "<\\/script")
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <style>{css}</style>
+        <script src="{bundle_uri}"></script>
+        <style>
+          body {{ margin: 0; padding: 8px; display: block; background: #11151d; }}
+          #mount {{ width: 460px; height: 520px; }}
+          .file-editor-panel {{ width: 460px; height: 520px; }}
+          .file-editor-codemirror-panel {{ height: 100%; }}
+        </style>
+      </head>
+      <body class="theme-dark editor-theme-dark file-editor-open">
+        <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
+        <div id="mount"></div>
+        <script>{app_script}</script>
+        <script>
+          (function() {{
+            const original = {original_json};
+            const current = {current_json};
+            const CM = window.YOLOmuxCodeMirror;
+            // editor-wrap on the panel + EditorView.lineWrapping is the word-wrap-on state.
+            const panel = document.createElement('article');
+            panel.className = 'panel file-editor-panel active-pane editor-wrap';
+            const container = document.createElement('div');
+            container.className = 'file-editor-codemirror-panel file-editor-diff-codemirror';
+            panel.append(container);
+            document.getElementById('mount').append(panel);
+            const view = new CM.EditorView({{
+              state: CM.EditorState.create({{
+                doc: current,
+                extensions: [
+                  CM.unifiedMergeView({{original, highlightChanges: false, gutter: true, collapseUnchanged: {{margin: 3, minSize: 8}}}}),
+                  CM.lineNumbers(),
+                  CM.EditorView.lineWrapping,
+                ],
+              }}),
+              parent: container,
+            }});
+            panel._cmView = view;
+            panel._cmMode = 'diff';
+            const settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            window.__diffWrapMetrics = async function() {{
+              await settle();
+              const inserted = Array.from(container.querySelectorAll('.cm-insertedLine'))
+                .find(node => node.textContent.includes('TAILTOKEN_END'));
+              if (!inserted) {{ await settle(); }}
+              const ins = Array.from(container.querySelectorAll('.cm-insertedLine'))
+                .find(node => node.textContent.includes('TAILTOKEN_END'));
+              if (!ins) return {{insertedFound: false}};
+              ins.scrollIntoView({{block: 'center'}});
+              await settle();
+              const lineHeight = Math.max(1, Number(view.defaultLineHeight || 0));
+              const bcr = ins.getBoundingClientRect();
+              const wraps = bcr.height > lineHeight * 1.5;
+              // Probe every visual row of the wrapped inserted mark. For each row record the topmost
+              // painted element (elementsFromPoint) and the rendered text under the caret. The bug
+              // painted the parent .cm-changedLine block band OVER continuation rows, so the topmost
+              // element was the block, not the inserted mark, and the text was buried.
+              const rows = [];
+              let rowIndex = 0;
+              for (let y = bcr.top + lineHeight * 0.5; y < bcr.bottom - 1; y += lineHeight) {{
+                const x = bcr.left + 30;
+                const topEl = document.elementsFromPoint(x, y)[0];
+                const range = document.caretRangeFromPoint ? document.caretRangeFromPoint(x, y) : null;
+                const caretText = range && range.startContainer ? String(range.startContainer.textContent || '') : '';
+                rows.push({{
+                  rowIndex: rowIndex++,
+                  topElInsideInserted: Boolean(topEl && topEl.closest && topEl.closest('.cm-insertedLine')),
+                  topElClass: topEl ? (topEl.className || topEl.tagName) : null,
+                  caretTextLen: caretText.length,
+                }});
+              }}
+              const continuationRows = rows.slice(1);
+              // The collapsed-unchanged widget must stay in normal flow and not vertically overlap the
+              // inserted block (W5: it only LOOKED like it floated over the green block because the
+              // continuation rows were blank).
+              const collapse = container.querySelector('.cm-collapsedLines');
+              let collapseOverlapPx = 0;
+              let collapsePosition = null;
+              if (collapse) {{
+                const cr = collapse.getBoundingClientRect();
+                const cs = getComputedStyle(collapse);
+                collapsePosition = cs.position;
+                collapseOverlapPx = Math.max(0, Math.min(cr.bottom, bcr.bottom) - Math.max(cr.top, bcr.top));
+              }}
+              return {{
+                insertedFound: true,
+                wraps,
+                boundingHeight: Math.round(bcr.height),
+                lineHeight,
+                hasTailText: ins.textContent.includes('TAILTOKEN_END'),
+                rowCount: rows.length,
+                rows,
+                continuationRowsAllVisible: continuationRows.length > 0
+                  && continuationRows.every(row => row.topElInsideInserted && row.caretTextLen > 0),
+                collapsePresent: Boolean(collapse),
+                collapsePosition,
+                collapseOverlapPx: Math.round(collapseOverlapPx),
+              }};
+            }};
+          }})();
+        </script>
+      </body>
+    </html>
+    """
+
+
 def app_bundle_before_boot_script():
     source = (REPO_ROOT / "static" / "yolomux.js").read_text(encoding="utf-8")
     boot_start = source.index("if (refreshMeta) {")
@@ -1881,6 +2031,12 @@ def load_codemirror_todo_diff_overview_fixture(browser, tmp_path):
 def load_codemirror_file_explorer_diff_overview_fixture(browser, tmp_path):
     page = tmp_path / "codemirror-file-explorer-diff-overview.html"
     page.write_text(codemirror_file_explorer_diff_overview_fixture_html(), encoding="utf-8")
+    browser.get(page.as_uri())
+
+
+def load_codemirror_diff_wrapped_inserted_line_fixture(browser, tmp_path):
+    page = tmp_path / "codemirror-diff-wrapped-inserted-line.html"
+    page.write_text(codemirror_diff_wrapped_inserted_line_fixture_html(), encoding="utf-8")
     browser.get(page.as_uri())
 
 
@@ -18384,6 +18540,42 @@ def test_diff_overview_matches_actual_todo_codemirror_rows(browser, tmp_path):
     assert metrics["tickCount"] == 0
     assert metrics["overviewTopDelta"] <= 1
     assert metrics["overviewBottomDelta"] <= 1
+
+
+def test_diff_wrapped_inserted_line_continuation_rows_show_text(browser, tmp_path):
+    # Regression for the screenshot bug: a long INSERTED line that soft-wraps in the unified merge diff
+    # rendered only its first visual row; continuation rows were blank green (gutter numbers present,
+    # text buried). Root cause was the full-bleed box-shadow/clip-path being applied to the INLINE
+    # cm-insertedLine/cm-deletedLine marks, letting the parent .cm-changedLine block band paint over the
+    # wrapped rows. Assert each wrapped continuation row has VISIBLE inserted text (bounding-box height
+    # > 0 AND non-empty caret text AND the inserted mark is the topmost painted element), with word-wrap
+    # on and the collapsed-unchanged state active.
+    load_codemirror_diff_wrapped_inserted_line_fixture(browser, tmp_path)
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        window.__diffWrapMetrics().then(done);
+        """
+    )
+    assert metrics["insertedFound"] is True, metrics
+    assert metrics["hasTailText"] is True, metrics
+    # The inserted bullet is long enough to occupy more than one visual row in a 460px pane.
+    assert metrics["wraps"] is True, metrics
+    assert metrics["boundingHeight"] > metrics["lineHeight"] * 1.5, metrics
+    assert metrics["rowCount"] >= 2, metrics
+    # Every continuation visual row must paint visible inserted text (height > 0 and non-empty content),
+    # not a blank band. This is the exact assertion the box demands.
+    continuation_rows = metrics["rows"][1:]
+    assert continuation_rows, metrics
+    for row in continuation_rows:
+        assert row["topElInsideInserted"] is True, (row, metrics)
+        assert row["caretTextLen"] > 0, (row, metrics)
+    assert metrics["continuationRowsAllVisible"] is True, metrics
+    # W5: the collapsed-unchanged widget stays in normal flow and does not overlap the inserted block;
+    # it only LOOKED like it floated over the green block because the continuation rows were blank.
+    assert metrics["collapsePresent"] is True, metrics
+    assert metrics["collapsePosition"] == "static", metrics
+    assert metrics["collapseOverlapPx"] == 0, metrics
 
 
 def test_diff_overview_matches_actual_file_explorer_visible_rows_after_scroll(browser, tmp_path):

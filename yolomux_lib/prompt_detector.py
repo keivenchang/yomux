@@ -56,6 +56,12 @@ _SKIP_LINE = re.compile(
 
 # Lines that look like commands (contain special shell chars, flags, or are long).
 _CMD_CHARS = re.compile(r"[/|&;$=(>`~]|--|\s-[a-zA-Z]")
+# Claude's per-step progress/description marker `[i/N] <description>`, e.g.
+# `[1/10] Create the build output directory`. This is DESCRIPTION prose, not the command — but the
+# `/` in `[1/10]` matches _CMD_CHARS, so without this guard the whole line folds into the danger
+# string ("mkdir -p build/output [1/10] Create the build output directory") and classification skews.
+# Treat the step marker (and the description it leads) as chrome.
+_STEP_MARKER_RE = re.compile(r"^\[\d+\s*/\s*\d+\]")
 # the canonical Claude bullet `● Bash(<cmd>)` / `• Bash(<cmd>)` — the parenthesized arg is
 # the exact command, so anchoring to it avoids folding the adjacent description prose.
 _BASH_CALL_RE = re.compile(r"[●•]\s*Bash\((.+)\)\s*$")
@@ -194,6 +200,10 @@ def extract_command(pane_text: str) -> str | None:
         if not stripped:
             continue
         if _SKIP_LINE.match(stripped):
+            continue
+        # The `[i/N] <description>` progress marker is a DESCRIPTION line, never the command. Drop it
+        # before the _CMD_CHARS filter (whose `/` clause would otherwise fold "[1/10] ..." into the cmd).
+        if _STEP_MARKER_RE.match(stripped):
             continue
         # #79: only fold genuinely command-ish lines. Dropped the `len > 60` fallback — it pulled long
         # DESCRIPTION prose into the "command" and skewed the danger verdict; a long command almost

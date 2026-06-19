@@ -28,6 +28,11 @@ MODEL = "Opus 4.7 (1M context)"
 EFFORT = "low"
 MODEL_LINE = f"{MODEL} with {EFFORT} effort · API Usage Billing"
 DEFAULT_WIDTH = 126
+# Real Claude AND real Codex both render the permission-choice selector and the input prompt with
+# `›` (U+203A SINGLE RIGHT-POINTING ANGLE QUOTATION MARK), NOT `❯` (U+276F). The mocks exist to
+# exercise the real-agent-tuned detector, so they must match the real glyph: real Claude uses ❯
+# (U+276F), real Codex uses › (U+203A). Each mock overrides these per-agent; detection is
+# glyph-agnostic regardless (the choice/selector regexes accept ❯, ›, and >).
 PROMPT_GLYPH = "❯"
 SELECTOR_GLYPH = "❯"
 PERMISSION_STYLE = "claude"

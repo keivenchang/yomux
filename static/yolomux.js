@@ -27719,6 +27719,7 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
   const loaded = payload.loaded === true;
   const session = payload.session || fileExplorerSessionFilesTargetSession();
   const errorHtml = (payload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
+  const warningHtml = (payload.warnings || []).map(warning => `<div class="changes-warning">${esc(warning)}</div>`).join('');
   const full = options.full === true || fileExplorerMode === 'diff';
   const showEmptyRepoSections = full && !files.length && payloadHasExplicitRepoSections(payload);
   const empty = !loading && loaded && !files.length && !showEmptyRepoSections ? `<div class="changes-empty">${esc(t('changes.emptyModified'))}</div>` : '';
@@ -27732,6 +27733,7 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
       </div>
       ${changesComparisonHeaderHtml(payload, files, {loading})}
       ${errorHtml}
+      ${warningHtml}
       ${empty ? empty : '<div class="changes-groups"></div>'}`;
   }
   const titleText = session ? t('changes.titleForSession', {session: sessionLabel(session) || session}) : t('changes.title');
@@ -27746,6 +27748,7 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
     </div>
     ${changesComparisonHeaderHtml(payload, files, {loading, compact: true})}
     ${errorHtml}
+    ${warningHtml}
     ${empty ? empty : '<div class="changes-groups"></div>'}`;
 }
 

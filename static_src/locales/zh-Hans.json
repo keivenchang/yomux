@@ -1152,5 +1152,8 @@
   "yolo.state.onHere": "在此开启",
   "yolo.title": "优乐 {state}",
   "yolo.titleForSession": "优乐 {session} {state}",
-  "yolo.titleReadonly": "优乐 {session} {state}；只读访问"
+  "yolo.titleReadonly": "优乐 {session} {state}；只读访问",
+  "det.noBackend.noProvider": "No AI provider is selected; showing the activity context. Pick Codex, Claude, or Auto under Preferences -> YO!agent -> Backend to chat.",
+  "det.noBackend.moduleMissing": "The {provider} backend is not installed; showing the activity context. Install the {provider} CLI or the {module} managed SDK, then chat.",
+  "det.noBackend.noCredentials": "The {provider} backend is not logged in; showing the activity context. Run {command}, then chat."
 }

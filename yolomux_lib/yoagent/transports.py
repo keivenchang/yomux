@@ -215,6 +215,166 @@ def optional_python_module_available(module_name: str) -> bool:
     return importlib.util.find_spec(module_name) is not None
 
 
+# Managed SDK Python package per chat provider. These are the `optional_python_module_available`
+# guards used by ClaudeSdkTransport / CodexSdkTransport; the diagnostic reuses the SAME names so the
+# "module not installed" classification cannot drift from what those transports actually require.
+YOAGENT_PROVIDER_SDK_MODULES = {
+    "claude": "claude_code_sdk",
+    "codex": "openai_codex",
+}
+
+# Structured reason codes for "why is no AI backend answering YO!agent chat". The UI maps each code to
+# a specific, actionable locale string instead of the single generic det.noBackend fallback.
+BACKEND_REASON_AVAILABLE = "available"
+BACKEND_REASON_NO_PROVIDER = "no-provider"
+BACKEND_REASON_MODULE_MISSING = "module-missing"
+BACKEND_REASON_NO_CREDENTIALS = "no-credentials"
+
+
+@dataclass(frozen=True)
+class BackendAvailability:
+    """Why YO!agent's OWN chat can (or cannot) answer right now.
+
+    `reason` is one of the BACKEND_REASON_* codes so the UI can be specific instead of always showing
+    the generic det.noBackend string. `available` is True only when reason == BACKEND_REASON_AVAILABLE.
+    """
+
+    available: bool
+    reason: str
+    backend: str
+    provider: str = ""
+    sdk_module: str = ""
+    login_command: str = ""
+    detail: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "available": self.available,
+            "reason": self.reason,
+            "backend": self.backend,
+        }
+        if self.provider:
+            payload["provider"] = self.provider
+        if self.sdk_module:
+            payload["sdk_module"] = self.sdk_module
+        if self.login_command:
+            payload["login_command"] = self.login_command
+        if self.detail:
+            payload["detail"] = self.detail
+        return payload
+
+
+def _provider_login_command(provider: str) -> str:
+    return {"claude": "claude auth login", "codex": "codex login"}.get(provider, "")
+
+
+def _classify_provider_backend(
+    provider: str,
+    auth_status: dict[str, dict[str, Any]],
+    module_available: Any,
+) -> BackendAvailability:
+    """Classify one concrete provider (claude/codex) into available / module-missing / no-credentials.
+
+    A provider can answer YO!agent chat through EITHER the installed CLI (logged in) OR the managed SDK
+    package. So it is unusable only when both routes are unavailable, and the reason distinguishes a
+    missing managed SDK (no CLI on PATH at all) from a present-but-not-logged-in CLI.
+    """
+    entry = auth_status.get(provider) if isinstance(auth_status, dict) else None
+    entry = entry if isinstance(entry, dict) else {}
+    cli_installed = bool(entry.get("installed"))
+    cli_logged_in = bool(entry.get("logged_in"))
+    sdk_module = YOAGENT_PROVIDER_SDK_MODULES.get(provider, "")
+    sdk_installed = bool(sdk_module) and bool(module_available(sdk_module))
+    if (cli_installed and cli_logged_in) or sdk_installed:
+        return BackendAvailability(
+            available=True,
+            reason=BACKEND_REASON_AVAILABLE,
+            backend=provider,
+            provider=provider,
+            sdk_module=sdk_module if sdk_installed else "",
+        )
+    if not cli_installed and not sdk_installed:
+        # No CLI on PATH and no managed SDK package: the host has nothing to run this provider with.
+        return BackendAvailability(
+            available=False,
+            reason=BACKEND_REASON_MODULE_MISSING,
+            backend=provider,
+            provider=provider,
+            sdk_module=sdk_module,
+            detail=f"neither the {provider} CLI nor the `{sdk_module}` managed SDK package is installed",
+        )
+    # CLI is installed (or SDK route exists) but it is not authenticated: credentials/login are missing.
+    return BackendAvailability(
+        available=False,
+        reason=BACKEND_REASON_NO_CREDENTIALS,
+        backend=provider,
+        provider=provider,
+        sdk_module=sdk_module,
+        login_command=_provider_login_command(provider),
+        detail=f"the {provider} CLI is installed but not logged in",
+    )
+
+
+def backend_availability(
+    backend: str,
+    auth_status: dict[str, dict[str, Any]] | None = None,
+    *,
+    module_available: Any | None = None,
+) -> BackendAvailability:
+    """Report WHY YO!agent's own chat backend is (un)available, as a structured reason.
+
+    Today the UI shows the generic det.noBackend string regardless of cause. This returns which
+    precondition failed so the caller can be specific:
+      - BACKEND_REASON_NO_PROVIDER: the `deterministic` backend is selected (no AI provider chosen), or
+        `auto` resolved to nothing because no provider is both installed and logged in.
+      - BACKEND_REASON_MODULE_MISSING: the chosen provider has neither its CLI on PATH nor its managed
+        SDK package (`claude_code_sdk` / `openai_codex`) installed.
+      - BACKEND_REASON_NO_CREDENTIALS: the chosen provider is installed but not logged in.
+      - BACKEND_REASON_AVAILABLE: a provider can answer.
+
+    `backend` is the resolved yoagent.backend preference (`auto` / `codex` / `claude` / `deterministic`).
+    `auth_status` is the {provider: {installed, logged_in}} map from workdir.agent_auth_status(); it is
+    injected so this stays a pure, testable function with no subprocess probing of its own.
+    """
+    selected = str(backend or "").strip().lower() or "deterministic"
+    auth_status = auth_status if isinstance(auth_status, dict) else {}
+    check_module = module_available or optional_python_module_available
+    if selected in {"deterministic", ""}:
+        return BackendAvailability(
+            available=False,
+            reason=BACKEND_REASON_NO_PROVIDER,
+            backend="deterministic",
+            detail="yoagent.backend is set to deterministic; no AI provider is selected",
+        )
+    if selected == "auto":
+        # auto prefers codex, then claude. Surface the first provider that can answer; if none can,
+        # report the most actionable blocker (a present-but-logged-out CLI beats a wholly missing one).
+        results = [_classify_provider_backend(provider, auth_status, check_module) for provider in ("codex", "claude")]
+        for result in results:
+            if result.available:
+                return result
+        for result in results:
+            if result.reason == BACKEND_REASON_NO_CREDENTIALS:
+                return result
+        if results:
+            return results[0]
+        return BackendAvailability(
+            available=False,
+            reason=BACKEND_REASON_NO_PROVIDER,
+            backend="auto",
+            detail="no AI provider is installed for the auto backend",
+        )
+    if selected in YOAGENT_PROVIDER_SDK_MODULES:
+        return _classify_provider_backend(selected, auth_status, check_module)
+    # An unknown backend value is treated as "no usable provider selected".
+    return BackendAvailability(
+        available=False,
+        reason=BACKEND_REASON_NO_PROVIDER,
+        backend=selected,
+        detail=f"unknown yoagent.backend value `{selected}`",
+    )
+
+
 class TmuxLegacyTransport(AgentTransport):
     id = TMUX_LEGACY_TRANSPORT_ID
     label = "legacy tmux pane paste + Return"

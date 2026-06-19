@@ -22,12 +22,16 @@ def test_default_check_lanes_keep_full_pytest_gate():
     check = load_check_module()
     lanes = check.lanes()
     default_names = [lane.name for lane in lanes if lane.default]
-    assert default_names == ["py-compile", "static", "node-syntax", "node-layout", "pytest", "whitespace"]
+    assert default_names == ["py-compile", "static", "node-syntax", "node-layout", "pytest", "pytest-e2e", "whitespace"]
     pytest_lane = next(lane for lane in lanes if lane.name == "pytest")
-    # The default pytest lane runs the full suite EXCEPT node_bridge: test_node_suite.py shells out
-    # to the same `node tests/layout_url.test.js` the always-on node-layout lane runs, so including it
-    # ran that ~20s node suite twice concurrently. The node-layout lane keeps node coverage in the gate.
-    assert pytest_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-n", "auto", "-m", "not node_bridge", "-q"]
+    # The default pytest lane runs the full suite EXCEPT node_bridge and e2e: test_node_suite.py shells
+    # out to the same `node tests/layout_url.test.js` the always-on node-layout lane runs (so including
+    # it ran that ~20s node suite twice concurrently), and e2e tests launch real tmux + mock agents and
+    # run in their own parallel pytest-e2e lane. The node-layout lane keeps node coverage in the gate.
+    assert pytest_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-n", "auto", "-m", "not node_bridge and not e2e", "-q"]
+    e2e_lane = next(lane for lane in lanes if lane.name == "pytest-e2e")
+    assert e2e_lane.default is True
+    assert e2e_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-n", "auto", "-m", "e2e", "-q"]
     assert "pytest-unit" not in default_names
     assert "pytest-socket" not in default_names
     assert "pytest-browser" not in default_names

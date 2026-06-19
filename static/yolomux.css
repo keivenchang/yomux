@@ -2921,6 +2921,7 @@ body.theme-light .branch-link {
   white-space: nowrap;
 }
 .changes-error,
+.changes-warning,
 .changes-empty {
   padding: 8px;
   border: 1px solid var(--line);
@@ -2930,6 +2931,10 @@ body.theme-light .branch-link {
   font-size: var(--ui-font-size-sm);
 }
 .changes-empty {
+  color: var(--muted);
+}
+/* Non-blocking notice (e.g. a per-agent transcript-missing warning) — must NOT read as a red blocking error. */
+.changes-warning {
   color: var(--muted);
 }
 .changes-repo-group {
@@ -10839,15 +10844,29 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
 .file-editor-diff-codemirror .cm-content .cm-activeLine {
   background: var(--diff-full-line-bg, transparent);
 }
+/* Extend the colored line band to both editor edges. This box-shadow + clip-path full-bleed trick is
+   ONLY safe on BLOCK-level line elements (.cm-changedLine / .cm-deletedChunk / .cm-insertedChunk /
+   .cm-inlineChangedLine). It must NOT be applied to .cm-insertedLine / .cm-deletedLine: in
+   @codemirror/merge those are inline marks (Decoration.mark -> <ins>/<del>), and on a soft-wrapped
+   inline element the clip-path establishes a clip box over the element's whole multi-row bounding box
+   while the parent .cm-changedLine block paints its own full-bleed band on top, burying the wrapped
+   continuation rows' text (gutter line numbers stay, text goes blank). The parent block already paints
+   the full-width fill, so the inline mark does not need it. Regression:
+   test_diff_wrapped_inserted_line_continuation_rows_show_text. */
 .file-editor-diff-codemirror .cm-merge-a .cm-changedLine,
 .file-editor-diff-codemirror .cm-merge-b .cm-changedLine,
 .file-editor-diff-codemirror .cm-inlineChangedLine,
 .file-editor-diff-codemirror .cm-deletedChunk,
-.file-editor-diff-codemirror .cm-insertedChunk,
-.file-editor-diff-codemirror .cm-deletedLine,
-.file-editor-diff-codemirror .cm-insertedLine {
+.file-editor-diff-codemirror .cm-insertedChunk {
   box-shadow: -100vw 0 0 var(--diff-full-line-bg), 100vw 0 0 var(--diff-full-line-bg);
   clip-path: inset(0 -100vw);
+}
+/* Inline inserted/deleted marks: keep them inert for layout so a long added/removed line that
+   soft-wraps shows text on every visual row. No full-bleed box-shadow/clip-path here. */
+.file-editor-diff-codemirror .cm-insertedLine,
+.file-editor-diff-codemirror .cm-deletedLine {
+  box-shadow: none;
+  clip-path: none;
 }
 .file-editor-diff-codemirror .cm-searchMatch {
   position: relative;

@@ -269,6 +269,127 @@ def test_extract_command_does_not_fold_long_description_prose():
     assert prompt_detector.extract_command(visible_text) == "rm -rf /tmp/build"
 
 
+# Fixtures transcribed verbatim from DOIT.3.md "Captured shapes" — the EXACT mock renders
+# (mock Claude 2-option, mock Codex 3-option), including the leading `● Mock build script` status line,
+# the box-border `────` rule, the `›` (U+203A) selector glyph, and the `[i/N]` step marker. These pin
+# the auto-approve contract so a future mock-UI change fails the test instead of silently breaking it.
+MOCK_CLAUDE_YESNO_PROMPT = "\n".join([
+    "● Mock build script — 10 steps, each needs Yes/No.",
+    "────────────────────────────",
+    " Bash command (unsandboxed)",
+    "",
+    "   mkdir -p build/output",
+    "   [1/10] Create the build output directory",
+    "",
+    " Permission rule Bash requires confirmation for this command.",
+    "",
+    " Do you want to proceed?",
+    " ❯ 1. Yes",
+    "   2. No",
+    "",
+    " Esc to cancel",
+])
+
+MOCK_CODEX_YESNO_PROMPT = "\n".join([
+    "● Mock build script — 10 steps, each needs Yes/No.",
+    "────────────────────────────",
+    " Codex wants to run a shell command",
+    "",
+    " Would you like to run the following command?",
+    "",
+    "   Reason: [1/10] Create the build output directory",
+    "",
+    "   $ mkdir -p build/output",
+    "",
+    " › 1. Yes",
+    "   2. Yes, and don't ask again for commands that start with `mkdir -p`",
+    "   3. No",
+    "",
+    " Esc to cancel · Tab to amend",
+])
+
+
+def test_mock_claude_yesno_extract_command_drops_step_marker():
+    # Y3: the `[1/10] <description>` line is DESCRIPTION prose, not the command. Before the fix the `/`
+    # in `[1/10]` matched _CMD_CHARS and the whole line folded into the command
+    # ("mkdir -p build/output [1/10] Create the build output directory"), skewing classification.
+    assert prompt_detector.extract_command(MOCK_CLAUDE_YESNO_PROMPT) == "mkdir -p build/output"
+
+
+def test_mock_claude_yesno_approve_targets_option_1():
+    # Y5/Y6: the mock Claude yesno render is a live bash prompt with `1. Yes` selected by `›`.
+    state = prompt_detector.approval_prompt_state(MOCK_CLAUDE_YESNO_PROMPT, MOCK_CLAUDE_YESNO_PROMPT)
+    assert state["visible"] is True
+    assert state["type"] == "bash"
+    assert state["yes_selected"] is True
+    assert state["selected_option"] == 1
+    assert state["action"] == "option1"
+    assert state["command"] == "mkdir -p build/output"
+
+
+def test_mock_codex_yesno_extract_command_drops_reason_and_step_marker():
+    # Y8: the `$ `-prefixed command is the only command; the `Reason: [1/10] ...` line is description.
+    assert prompt_detector.extract_command(MOCK_CODEX_YESNO_PROMPT) == "mkdir -p build/output"
+
+
+def test_mock_codex_3_option_approve_targets_option_1_yes():
+    # Y8: Codex offers `1. Yes` / `2. Yes, and don't ask again ...` / `3. No`. `No` is option 3, NOT 2.
+    # The approve action MUST target the `›`-selected `1. Yes` and never assume "2 == No" or exactly two
+    # options. The option-2 "don't ask again" prefix (`mkdir -p`) is NOT a generic recurring prefix, so
+    # it stays at option 1.
+    state = prompt_detector.approval_prompt_state(MOCK_CODEX_YESNO_PROMPT, MOCK_CODEX_YESNO_PROMPT)
+    assert state["visible"] is True
+    assert state["type"] == "bash"
+    assert state["yes_selected"] is True
+    assert state["selected_option"] == 1
+    assert state["action"] == "option1"
+    assert prompt_detector.action_for_bash_prompt(MOCK_CODEX_YESNO_PROMPT) == "option1"
+
+
+def test_mock_codex_3_option_worker_walks_to_option_1():
+    # Y8 act-path: the worker derives the target option from the approve action and walks the highlight
+    # to `1. Yes` (not `2`, not `3. No`), re-verifies it landed on 1, then confirms. Drives the worker's
+    # send_action against a fake tmux module seam so the chosen option is observable without a live tmux.
+    import types
+
+    recorded: dict[str, object] = {}
+
+    def fake_move(target, option, selected_option=None):
+        recorded["moved_to"] = option
+
+    def fake_send_enter(target):
+        recorded["sent_enter"] = True
+
+    module = types.SimpleNamespace(
+        tmux_capture_pane=lambda target, visible_only=False: MOCK_CODEX_YESNO_PROMPT,
+        selected_prompt_option=prompt_detector.selected_prompt_option,
+        extract_command=prompt_detector.extract_command,
+        PROMPT_RETRY_SECONDS=8.0,
+        tmux_move_to_option=fake_move,
+        tmux_send_enter=fake_send_enter,
+    )
+
+    from yolomux_lib.auto_approve_worker import AutoApproveWorker
+
+    worker = AutoApproveWorker("codex-test")
+    action = prompt_detector.action_for_bash_prompt(MOCK_CODEX_YESNO_PROMPT)
+    assert worker.send_action(module, action, selected_option=1) is True
+    assert recorded == {"moved_to": 1, "sent_enter": True}
+
+
+@pytest.mark.parametrize("glyph", ["❯", "›", ">"])
+@pytest.mark.parametrize("prompt", [MOCK_CLAUDE_YESNO_PROMPT, MOCK_CODEX_YESNO_PROMPT])
+def test_selector_glyph_agnostic_detection(prompt, glyph):
+    # Detection must NOT depend on which selector glyph the agent renders. Real Claude uses ❯, real
+    # Codex uses ›, and `>` is the plain-ASCII fallback — all three must resolve identically to the
+    # `1. Yes` option with the bare command. (The mock glyph is cosmetic; this is the durable guarantee.)
+    text = prompt.replace("❯", glyph).replace("›", glyph)
+    assert prompt_detector.detect_prompt(text) == "bash"
+    assert prompt_detector.action_for_bash_prompt(text) == "option1"
+    assert prompt_detector.selected_prompt_option(text) == 1
+    assert prompt_detector.extract_command(text) == "mkdir -p build/output"
+
+
 def test_approval_prompt_ignores_exact_claude_ctrl_b_footer():
     visible_text = claude_bash_prompt_with_footer(
         " Esc to cancel · Tab to amend · ctrl+e to explain",

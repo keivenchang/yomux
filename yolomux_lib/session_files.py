@@ -723,12 +723,18 @@ def merge_agent_window_lists(*window_lists: list[dict[str, Any]]) -> list[dict[s
     return merged
 
 
-def touched_files_for_info(info: SessionInfo, cutoff: float, errors: list[str] | None = None) -> dict[str, dict[str, Any]]:
+def touched_files_for_info(info: SessionInfo, cutoff: float, warnings: list[str] | None = None) -> dict[str, dict[str, Any]]:
     touched: dict[str, dict[str, Any]] = {}
     for agent in info.agents:
         if not agent.transcript:
-            if agent.error and errors is not None:
-                errors.append(agent.error)
+            # D2: a missing/undiscoverable transcript is inherently a PER-AGENT condition (e.g. an inactive
+            # background Codex pane that never wrote a discoverable rollout). It is NOT a session-level
+            # failure: the other agents and git-derived repo data in the same session are still valid. Surface
+            # it as a non-blocking warning so the Differ keeps rendering the changed files/repos instead of
+            # treating the whole session as failed (the frontend renders payload["errors"] as red blocking
+            # rows; warnings are a separate, non-blocking channel).
+            if agent.error and warnings is not None:
+                warnings.append(agent.error)
             continue
         transcript = Path(agent.transcript).expanduser()
         transcript_mtime = file_mtime(transcript)
@@ -838,7 +844,10 @@ def session_files_payload_for_info(
     refs_active = refs_requested(from_ref, to_ref)
     selected_from, selected_to = diff_refs(from_ref, to_ref) if refs_active else ("", "")
     errors: list[str] = []
-    touched = touched_files_for_info(info, cutoff, errors)
+    # D2: per-agent transcript-discovery problems land here, separate from the blocking `errors` list, so a
+    # single inactive agent's missing transcript does not read as a session-level Differ failure.
+    warnings: list[str] = []
+    touched = touched_files_for_info(info, cutoff, warnings)
 
     repos: dict[str, set[str]] = {}
     outside_repo_paths: set[str] = set()
@@ -989,6 +998,7 @@ def session_files_payload_for_info(
         "from_ref": payload_from_ref,
         "to_ref": payload_to_ref,
         "errors": errors,
+        "warnings": warnings,
     }
 
 
@@ -1015,10 +1025,12 @@ def session_files_payload(
     repos: dict[str, dict[str, Any]] = {}
     refs_by_repo: dict[str, list[dict[str, str]]] = {}
     errors: list[str] = []
+    warnings: list[str] = []
     for info in infos.values():
         payload = session_files_payload_for_info(info, hours, now=now, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, agent_attribution=attribution)
         files.extend(payload["files"])
         errors.extend(payload["errors"])
+        warnings.extend(payload.get("warnings", []))
         refs_by_repo.update(payload.get("refs_by_repo", {}))
         for repo in payload["repos"]:
             key = repo["repo"]
@@ -1041,4 +1053,5 @@ def session_files_payload(
         "from_ref": diff_refs(from_ref, to_ref)[0] if refs_requested(from_ref, to_ref) else "default",
         "to_ref": diff_refs(from_ref, to_ref)[1] if refs_requested(from_ref, to_ref) else "base",
         "errors": errors,
+        "warnings": warnings,
     }, HTTPStatus.OK

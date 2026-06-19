@@ -3604,6 +3604,19 @@ test('t@2560', () => {
   const comparisonSummaryStart = changesHtml.indexOf('class="changes-comparison-summary"');
   const comparisonSummary = changesHtml.slice(comparisonSummaryStart, changesHtml.indexOf('</div>', comparisonSummaryStart));
   assert.equal(/changes-summary-totals|changes-diff-add|changes-diff-remove|changes-repo-count/.test(comparisonSummary), false, 'Finder diff summary does not repeat global +line/-line/file totals');
+  // D4: a per-agent transcript-missing message arrives in payload.warnings (NOT payload.errors) and must
+  // render as a non-blocking changes-warning notice while valid changed files/repos still render.
+  api.setSessionFilesPayloadForTest({
+    session: '3', loaded: true, errors: [],
+    warnings: ['codex transcript not found by process fd or cwd'],
+    refs_by_repo: {}, repos: [{repo: '/repo/app', count: 1, added: 1, removed: 0}],
+    files: [{session: '3', agent: 'codex', repo: '/repo/app', path: 'a.py', abs_path: '/repo/app/a.py', mtime: 100, added: 1, removed: 0}],
+  });
+  api.setFileExplorerModeForTest('diff');
+  const warnHtml = api.fileExplorerChangesPanelHtml();
+  assert.ok(warnHtml.includes('<div class="changes-warning">codex transcript not found by process fd or cwd</div>'), 'a per-agent transcript-missing message renders as a non-blocking changes-warning notice');
+  assert.equal(warnHtml.includes('class="changes-error"'), false, 'a non-blocking warning is NOT rendered as a red changes-error');
+  assert.ok(warnHtml.includes('/repo/app'), 'the valid changed repo still renders alongside the warning (not blocked)');
   api.setSessionFilesPayloadForTest({session: '2', loaded: false, errors: [], refs_by_repo: {}, repos: [], files: []});
   api.setSessionFilesLoadingForTest(true);
   const loadingDifferHtml = api.fileExplorerChangesPanelHtml();
@@ -5361,6 +5374,20 @@ test('t@2560', () => {
   assert.ok(/body\.theme-light \.file-explorer-changes-panel \.changes-comparison-head\s*\{[\s\S]*background:\s*transparent/.test(preferencesCss), '#253: the Finder "Comparing…" caption has no box chrome in light mode (blends as text)');
   assert.equal(/\.cm-deletedLineGutter\s*\{[^}]*color:\s*transparent/.test(preferencesCss), false, 'deleted rows carry no number via unified-merge read-only widgets, not a transparent-text gutter hack');
   assert.ok(preferencesCss.includes('clip-path: inset(0 -100vw)'), 'diff line backgrounds extend to the full editor width');
+  // Wrapped-line diff bug: the full-bleed box-shadow/clip-path trick is ONLY for BLOCK line elements.
+  // In @codemirror/merge the inserted/deleted text are inline marks (<ins>/<del> with class
+  // cm-insertedLine/cm-deletedLine). Applying clip-path to a soft-wrapped inline element let the parent
+  // .cm-changedLine block band paint over the wrapped continuation rows, blanking their text. They must
+  // reset box-shadow + clip-path so a long added/removed line that wraps shows text on every visual row.
+  assert.ok(
+    /\.file-editor-diff-codemirror \.cm-insertedLine,\s*\n\.file-editor-diff-codemirror \.cm-deletedLine\s*\{[^}]*box-shadow:\s*none[\s\S]*?clip-path:\s*none/.test(preferencesCss),
+    'inline inserted/deleted diff marks reset box-shadow + clip-path so soft-wrapped continuation rows keep visible text',
+  );
+  const preferencesCssNoComments = preferencesCss.replace(/\/\*[\s\S]*?\*\//g, '');
+  const fullBleedRule = /([^{};]*)\{\s*box-shadow:\s*-100vw 0 0 var\(--diff-full-line-bg\)[^}]*clip-path:\s*inset\(0 -100vw\)/.exec(preferencesCssNoComments);
+  assert.ok(fullBleedRule, 'the full-bleed box-shadow/clip-path rule for block diff lines exists');
+  assert.equal(/\.cm-insertedLine\b/.test(fullBleedRule[1]), false, 'the full-bleed box-shadow rule must not list the inline cm-insertedLine mark (it buries wrapped rows)');
+  assert.equal(/\.cm-deletedLine\b/.test(fullBleedRule[1]), false, 'the full-bleed box-shadow rule must not list the inline cm-deletedLine mark (it buries wrapped rows)');
   // #44: diffs render as full-line red/green only (highlightChanges:false in both merge views). The old
   // YOLOmux intra-line token overlay stays gone; CodeMirror still emits its built-in changed/deleted
   // text spans, which we only style for light-theme contrast.

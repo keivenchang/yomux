@@ -100,7 +100,19 @@ def lanes() -> list[Lane]:
             # and the two node processes thrash the cores the browser workers need. The node-layout
             # lane keeps node coverage in the default gate; a bare `python3 -m pytest tests` still
             # runs the bridge for anyone not going through check.py.
-            (Step("pytest full", ["python3", "-m", "pytest", "tests", "-n", "auto", "-m", "not node_bridge", "-q"]),),
+            # Exclude e2e too: end-to-end tests launch real tmux + mock agents + a TmuxWebtermApp and are
+            # an order of magnitude slower; they run as their own parallel `pytest-e2e` lane (below) so a
+            # fast unit failure surfaces immediately and the two pools do not thrash each other's cores.
+            (Step("pytest full", ["python3", "-m", "pytest", "tests", "-n", "auto", "-m", "not node_bridge and not e2e", "-q"]),),
+            True,
+        ),
+        Lane(
+            "pytest-e2e",
+            "pytest e2e",
+            # End-to-end auto-approve etc.: real tmux + mock_*.py + AutoApproveWorker. Runs in PARALLEL
+            # with the unit `pytest` lane (separate Lane = separate process), and the `socket` marker
+            # makes each test self-skip when the sandbox blocks local sockets/tmux.
+            (Step("pytest e2e", ["python3", "-m", "pytest", "tests", "-n", "auto", "-m", "e2e", "-q"]),),
             True,
         ),
         Lane(

@@ -15,6 +15,11 @@ from ..settings import SETTINGS_DISPLAY_PATH
 from ..settings import canonical_image_action_order_item
 from ..settings import default_settings
 from ..settings import settings_catalog
+from .transports import BACKEND_REASON_AVAILABLE
+from .transports import BACKEND_REASON_MODULE_MISSING
+from .transports import BACKEND_REASON_NO_CREDENTIALS
+from .transports import BACKEND_REASON_NO_PROVIDER
+from .transports import BackendAvailability
 
 
 SETTING_NAME_ALIASES: dict[str, tuple[str, ...]] = {
@@ -625,6 +630,46 @@ def parse_settings_read(question: str, payload: dict[str, Any]) -> dict[str, Any
         return None
     answer = answer_settings_read(question, payload)
     return {"type": "settings_read", "answer": answer} if answer else None
+
+
+# Maps a structured BackendAvailability reason to the locale key + substitution params the UI should
+# render instead of the generic det.noBackend string. The keys live in static_src/locales/en.json.
+BACKEND_REASON_LOCALE_KEYS = {
+    BACKEND_REASON_NO_PROVIDER: "det.noBackend.noProvider",
+    BACKEND_REASON_MODULE_MISSING: "det.noBackend.moduleMissing",
+    BACKEND_REASON_NO_CREDENTIALS: "det.noBackend.noCredentials",
+}
+
+
+def backend_no_backend_notice(availability: BackendAvailability) -> dict[str, Any]:
+    """Translate a structured backend diagnostic into a UI notice.
+
+    Returns the specific locale key plus params (provider / module / command) so the YO!agent chat can
+    say WHICH precondition failed and point at the exact fix, rather than the generic det.noBackend
+    "set or log in a backend" message. When the backend IS available, falls back to the generic key so
+    callers still have something to show for an unexpected empty answer.
+    """
+    if availability.available or availability.reason == BACKEND_REASON_AVAILABLE:
+        return {"reason": availability.reason, "locale_key": "det.noBackend", "params": {}}
+    locale_key = BACKEND_REASON_LOCALE_KEYS.get(availability.reason, "det.noBackend")
+    params: dict[str, str] = {}
+    if availability.reason == BACKEND_REASON_MODULE_MISSING:
+        params = {
+            "provider": availability.provider or availability.backend,
+            "module": availability.sdk_module,
+        }
+    elif availability.reason == BACKEND_REASON_NO_CREDENTIALS:
+        params = {
+            "provider": availability.provider or availability.backend,
+            "command": availability.login_command,
+        }
+    return {
+        "reason": availability.reason,
+        "locale_key": locale_key,
+        "params": params,
+        "backend": availability.backend,
+        "detail": availability.detail,
+    }
 
 
 def product_capability_registry() -> list[dict[str, Any]]:

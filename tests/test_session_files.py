@@ -485,6 +485,57 @@ def test_session_files_payload_includes_non_repo_transcript_files_without_counti
     assert by_repo[""]["removed"] == 0
 
 
+def test_session_files_payload_demotes_missing_transcript_to_per_agent_warning(tmp_path):
+    # D2: a multi-agent session where ONE Codex pane has no discoverable transcript (AgentInfo.error set,
+    # e.g. an inactive background pane) must NOT read as a session-level Differ failure. The valid agent's
+    # changed file/repo must still render, and the missing-transcript message must be demoted to a
+    # non-blocking per-agent warning (out of the blocking `errors` list the Differ renders as red rows).
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test User")
+    tracked = repo / "tracked.txt"
+    tracked.write_text("one\n", encoding="utf-8")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-m", "base")
+    tracked.write_text("two\n", encoding="utf-8")
+
+    rollout = tmp_path / "rollout.jsonl"
+    rollout.write_text('{"msg":"*** Begin Patch\\n*** Update File: tracked.txt\\n"}\n', encoding="utf-8")
+
+    valid_codex = agent("codex", rollout, repo)
+    missing_codex = AgentInfo(
+        session="s1",
+        kind="codex",
+        pid=2,
+        pane_target="%2",
+        command="codex",
+        cwd=str(tmp_path / "vllm-0.22.0"),
+        status=None,
+        session_id=None,
+        transcript=None,
+        error="codex transcript not found by process fd or cwd",
+    )
+    info = SessionInfo(session="s1", panes=[], selected_pane=None, agents=[valid_codex, missing_codex])
+
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time())
+
+    # The valid agent's changed file and its repo are still present.
+    by_path = {item["path"]: item for item in payload["files"]}
+    assert by_path["tracked.txt"]["repo"] == str(repo)
+    assert by_path["tracked.txt"]["status"] == "M"
+    assert str(repo) in {repo_summary["repo"] for repo_summary in payload["repos"]}
+
+    # The missing-transcript error is NOT a blocking/session-level error: the Differ renders payload["errors"]
+    # as red failure rows, so the message must be absent there.
+    assert "codex transcript not found by process fd or cwd" not in payload["errors"]
+    assert payload["errors"] == []
+
+    # It is surfaced as a non-blocking, per-agent warning instead.
+    assert payload["warnings"] == ["codex transcript not found by process fd or cwd"]
+
+
 def test_git_status_parses_renames_and_tab_paths(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()

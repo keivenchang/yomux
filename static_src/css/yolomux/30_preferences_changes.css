@@ -344,6 +344,7 @@
   white-space: nowrap;
 }
 .changes-error,
+.changes-warning,
 .changes-empty {
   padding: 8px;
   border: 1px solid var(--line);
@@ -353,6 +354,10 @@
   font-size: var(--ui-font-size-sm);
 }
 .changes-empty {
+  color: var(--muted);
+}
+/* Non-blocking notice (e.g. a per-agent transcript-missing warning) — must NOT read as a red blocking error. */
+.changes-warning {
   color: var(--muted);
 }
 .changes-repo-group {
