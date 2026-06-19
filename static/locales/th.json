@@ -686,7 +686,6 @@
   "pref.yoagent.codex_effort.label": "ระดับคิดของ Codex",
   "pref.yoagent.codex_effort.low": "ต่ำ (เร็วกว่า)",
   "pref.yoagent.codex_effort.medium": "กลาง",
-  "pref.yoagent.codex_model.gpt53spark": "GPT-5.3 Codex Spark (เร็วมาก)",
   "pref.yoagent.codex_model.gpt54": "GPT-5.4 (เขียนโค้ดทั่วไป)",
   "pref.yoagent.codex_model.gpt54mini": "GPT-5.4 mini (เล็ก/เร็ว)",
   "pref.yoagent.codex_model.gpt55": "GPT-5.5 (งานซับซ้อน)",

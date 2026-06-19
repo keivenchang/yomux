@@ -3950,7 +3950,7 @@ def test_yoagent_codex_backend_reuses_persistent_app_server(monkeypatch):
     monkeypatch.setattr(app_module.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
     monkeypatch.setattr(transport_module.subprocess, "Popen", fake_popen)
     try:
-        settings = {"codex_model": "gpt-5.3-codex-spark", "codex_effort": "low"}
+        settings = {"codex_model": "gpt-5.4-mini", "codex_effort": "low"}
         first, first_reason, first_status = webapp.run_yoagent_cli_backend("codex", "first?", activity, settings, [])
         second, second_reason, second_status = webapp.run_yoagent_cli_backend("codex", "second?", activity, settings, [{"role": "user", "content": "first?"}])
         terminated_before_shutdown = fake_process.terminated
@@ -3979,7 +3979,7 @@ def test_yoagent_codex_backend_reuses_persistent_app_server(monkeypatch):
     assert webapp.yoagent_cli_sessions["codex"]["session_id"] == "thread-1"
     methods = [message["method"] for message in fake_process.stdin.messages]
     assert methods == ["initialize", "initialized", "thread/start", "turn/start", "turn/start"]
-    assert fake_process.stdin.messages[2]["params"]["model"] == "gpt-5.3-codex-spark"
+    assert fake_process.stdin.messages[2]["params"]["model"] == "gpt-5.4-mini"
     assert "first?" in fake_process.stdin.messages[3]["params"]["input"][0]["text"]
     assert "second?" in fake_process.stdin.messages[4]["params"]["input"][0]["text"]
     assert terminated_before_shutdown is False
@@ -3999,7 +3999,7 @@ def test_yoagent_codex_backend_falls_back_to_exec_when_app_server_fails(monkeypa
     monkeypatch.setattr(transport_module.subprocess, "Popen", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("app-server failed")))
     monkeypatch.setattr(webapp, "run_yoagent_codex_cli", lambda prompt, session_id="", resume=False, **_kwargs: ("exec fallback answer", "", "exec-thread"))
     try:
-        answer, reason, status = webapp.run_yoagent_cli_backend("codex", "status?", activity, {"codex_model": "gpt-5.3-codex-spark", "codex_effort": "low"}, [])
+        answer, reason, status = webapp.run_yoagent_cli_backend("codex", "status?", activity, {"codex_model": "gpt-5.4-mini", "codex_effort": "low"}, [])
     finally:
         webapp.stop_auto_approve_all()
 
@@ -4073,7 +4073,7 @@ def test_yoagent_visible_prewarm_persists_startup_response(monkeypatch):
     webapp.warm_metadata_cache_async = lambda sessions: None
     events = []
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})) or {"type": event_type, "payload": payload or {}})
-    monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "codex", "invocation": "cli", "codex_model": "gpt-5.3-codex-spark"})
+    monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "codex", "invocation": "cli", "codex_model": "gpt-5.4-mini"})
     monkeypatch.setattr(webapp, "activity_summary_payload", lambda: {
         "generated_at": "2026-05-31T00:00:00+00:00",
         "session_order": ["5"],

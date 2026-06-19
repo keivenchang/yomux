@@ -686,7 +686,6 @@
   "pref.yoagent.codex_effort.label": "Esforço do Codex",
   "pref.yoagent.codex_effort.low": "Baixo (mais rápido)",
   "pref.yoagent.codex_effort.medium": "Médio",
-  "pref.yoagent.codex_model.gpt53spark": "GPT-5.3 Codex Spark (ultrarrápido)",
   "pref.yoagent.codex_model.gpt54": "GPT-5.4 (codificação diária)",
   "pref.yoagent.codex_model.gpt54mini": "GPT-5.4 mini (pequeno/rápido)",
   "pref.yoagent.codex_model.gpt55": "GPT-5.5 (trabalho complexo)",

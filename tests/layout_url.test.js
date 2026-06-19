@@ -7263,7 +7263,7 @@ test('t@2560', () => {
   assert.ok(/async function copyTextToClipboard\(text\)[\s\S]*?if \(clipboard\?\.writeText\) \{[\s\S]*?try \{[\s\S]*?await clipboard\.writeText\(value\);[\s\S]*?\} catch/.test(source), 'clipboard copy falls back when navigator.clipboard exists but rejects');
   assert.ok(source.includes('function copyTerminalSelectionToClipboardEvent(session, term, event, container = null)'), 'terminal copy has a DOM copy-event fallback');
   assert.ok(source.includes('function handleTerminalTmuxWindowShortcutKeydown(session, event)'), 'terminal Meta+Arrow navigation shares the terminal shortcut guard');
-  assert.ok(/function terminalTmuxWindowShortcutItem\(session\)[\s\S]*?visualActivePaneItem\(\)[\s\S]*?slotForItem\(activeItem\) === sessionSlot[\s\S]*?return activeItem/.test(source), 'terminal Meta+Arrow starts from the active tab in the terminal pane, not always the tmux session');
+  assert.ok(/function terminalTmuxWindowShortcutItem\(session\)[\s\S]*?const activeItem = visualActivePaneItem\(\);[\s\S]*?return activeItem \|\| session/.test(source), 'terminal Meta+Arrow starts from the active pane tab even when a stale terminal handler still owns the key event');
   assert.ok(source.includes("grid?.querySelectorAll?.('.dv-groupview')"), 'Meta+Arrow traversal can read rendered Dockview group order');
   assert.ok(source.includes("record.group.querySelectorAll?.('.dockview-pane-tab')"), 'Meta+Arrow traversal can read rendered Dockview tab strip order');
   assert.ok(/function paneTabTraversalPositions\(slots = layoutSlots\)[\s\S]*const rendered = renderedPaneTabTraversalPositions\(slots\);[\s\S]*return rendered\.length \? rendered : layoutPaneTabTraversalPositions\(slots\);/.test(source), 'Meta+Arrow traversal follows rendered Dockview order and falls back to serialized layout order');
@@ -7476,6 +7476,53 @@ test('t@2560', () => {
   assert.equal(terminalCopyApi.clipboardTextForTest(), 'selected browser text', 'Mac Cmd-C with browser selection writes browser-selected terminal text to clipboardData');
   assert.equal(clearSelectionCount, 1, 'Mac Cmd-C with browser selection clears xterm selection state after copying');
   assert.equal(browserSelectionClearCount, 1, 'Mac Cmd-C with browser selection clears browser selection inside the terminal after copying');
+  const cmdArrowEvent = direction => ({
+    type: 'keydown',
+    code: direction < 0 ? 'ArrowLeft' : 'ArrowRight',
+    key: direction < 0 ? 'ArrowLeft' : 'ArrowRight',
+    metaKey: true,
+    ctrlKey: false,
+    altKey: false,
+    shiftKey: false,
+    preventDefault() {},
+    stopPropagation() {},
+    stopImmediatePropagation() {},
+  });
+  const assertPaneTabTraversalRoundTrips = (navApi, label) => {
+    const positions = navApi.paneTabTraversalPositionsForTest();
+    assert.ok(positions.length >= 2, `${label}: traversal has multiple tabs`);
+    assert.equal(navApi.adjacentPaneTabPosition(-1, {item: positions[0].item}), null, `${label}: Cmd-Left stops at the first tab`);
+    assert.equal(navApi.adjacentPaneTabPosition(1, {item: positions.at(-1).item}), null, `${label}: Cmd-Right stops at the last tab`);
+    for (let index = 0; index < positions.length - 1; index += 1) {
+      const current = positions[index];
+      const next = positions[index + 1];
+      assert.deepStrictEqual(canonical(navApi.adjacentPaneTabPosition(1, {item: current.item})), canonical(next), `${label}: Cmd-Right ${current.item} -> ${next.item}`);
+      assert.deepStrictEqual(canonical(navApi.adjacentPaneTabPosition(-1, {item: next.item})), canonical(current), `${label}: Cmd-Left ${next.item} -> ${current.item}`);
+      navApi.activatePaneTab(current.slot, current.item, {userInitiated: true});
+      assert.equal(navApi.selectAdjacentPaneTab(1, {userInitiated: true}), true, `${label}: selector moves right from ${current.item}`);
+      assert.equal(navApi.visualActivePaneItemForTest(), next.item, `${label}: selector lands on ${next.item}`);
+      assert.equal(navApi.selectAdjacentPaneTab(-1, {userInitiated: true}), true, `${label}: selector moves left from ${next.item}`);
+      assert.equal(navApi.visualActivePaneItemForTest(), current.item, `${label}: selector returns to ${current.item}`);
+    }
+  };
+  const assertStaleTerminalHandlerRoundTrips = (navApi, staleSession, label) => {
+    let staleHandler = null;
+    navApi.installTerminalCopyShortcutForTest(staleSession, {
+      getSelection: () => '',
+      attachCustomKeyEventHandler(handler) { staleHandler = handler; },
+    });
+    assert.equal(typeof staleHandler, 'function', `${label}: stale terminal handler was installed`);
+    const positions = navApi.paneTabTraversalPositionsForTest();
+    for (let index = 0; index < positions.length - 1; index += 1) {
+      const current = positions[index];
+      const next = positions[index + 1];
+      navApi.activatePaneTab(current.slot, current.item, {userInitiated: true});
+      assert.equal(staleHandler(cmdArrowEvent(1)), false, `${label}: stale handler owns Cmd-Right from ${current.item}`);
+      assert.equal(navApi.visualActivePaneItemForTest(), next.item, `${label}: stale handler lands on ${next.item}`);
+      assert.equal(staleHandler(cmdArrowEvent(-1)), false, `${label}: stale handler owns Cmd-Left from ${next.item}`);
+      assert.equal(navApi.visualActivePaneItemForTest(), current.item, `${label}: stale handler returns to ${current.item}`);
+    }
+  };
   const terminalNavApi = loadYolomux('?platform=mac', ['1', '2', '3'], 'https:', 'MacIntel');
   const terminalNavEditor = terminalNavApi.fileEditorItemFor('/repo/app/README.md');
   const terminalNavSlots = terminalNavApi.emptyLayoutSlots();
@@ -7492,6 +7539,41 @@ test('t@2560', () => {
   assert.equal(terminalNavApi.adjacentPaneTabPosition(1, {item: '1'}).item, '2', 'Meta+Right spills from the last tab in a pane to the next pane');
   assert.equal(terminalNavApi.adjacentPaneTabPosition(-1, {item: '1'}).item, terminalNavApi.fileExplorerItemId, 'Meta+Left moves within a mixed pane to the previous non-tmux tab');
   assert.equal(terminalNavApi.adjacentPaneTabPosition(1, {item: '3'}), null, 'Meta+Right stops at the last pane tab instead of wrapping back to the first visible tab');
+  const roundTripApi = loadYolomux('?platform=mac', ['1', '2', '3'], 'https:', 'MacIntel');
+  const roundTripEditorA = roundTripApi.registerFileEditorLayoutItemForTest('/repo/app/README.md');
+  const roundTripEditorB = roundTripApi.registerFileEditorLayoutItemForTest('/repo/app/settings.json');
+  const roundTripSlots = roundTripApi.emptyLayoutSlots();
+  roundTripSlots[roundTripApi.layoutTreeKey] = roundTripApi.splitNode(
+    'row',
+    roundTripApi.leafNode('left'),
+    roundTripApi.splitNode('column', roundTripApi.leafNode('slot1'), roundTripApi.leafNode('slot2'), 50),
+    50,
+  );
+  roundTripSlots.left = roundTripApi.paneStateWithTabs([roundTripApi.fileExplorerItemId, '1', roundTripEditorA], '1');
+  roundTripSlots.slot1 = roundTripApi.paneStateWithTabs(['2', roundTripApi.prefsItemId, roundTripEditorB], '2');
+  roundTripSlots.slot2 = roundTripApi.paneStateWithTabs(['3'], '3');
+  roundTripApi.setLayoutSlotsForTest(roundTripSlots);
+  assert.deepStrictEqual(
+    canonical(roundTripApi.paneTabTraversalPositionsForTest().map(position => position.item)),
+    [roundTripApi.fileExplorerItemId, '1', roundTripEditorA, '2', roundTripApi.prefsItemId, roundTripEditorB, '3'],
+    'Meta+Arrow traversal is the pane list expanded as Pane1 tabs, then Pane2 tabs, then Pane3 tabs',
+  );
+  assertPaneTabTraversalRoundTrips(roundTripApi, 'serialized pane/tab structure');
+  const staleRoundTripApi = loadYolomux('?platform=mac', ['1', '2', '3'], 'https:', 'MacIntel');
+  const staleRoundTripEditorA = staleRoundTripApi.registerFileEditorLayoutItemForTest('/repo/app/README.md');
+  const staleRoundTripEditorB = staleRoundTripApi.registerFileEditorLayoutItemForTest('/repo/app/settings.json');
+  const staleRoundTripSlots = staleRoundTripApi.emptyLayoutSlots();
+  staleRoundTripSlots[staleRoundTripApi.layoutTreeKey] = staleRoundTripApi.splitNode(
+    'row',
+    staleRoundTripApi.leafNode('left'),
+    staleRoundTripApi.splitNode('column', staleRoundTripApi.leafNode('slot1'), staleRoundTripApi.leafNode('slot2'), 50),
+    50,
+  );
+  staleRoundTripSlots.left = staleRoundTripApi.paneStateWithTabs([staleRoundTripApi.fileExplorerItemId, '1', staleRoundTripEditorA], '1');
+  staleRoundTripSlots.slot1 = staleRoundTripApi.paneStateWithTabs(['2', staleRoundTripApi.prefsItemId, staleRoundTripEditorB], '2');
+  staleRoundTripSlots.slot2 = staleRoundTripApi.paneStateWithTabs(['3'], '3');
+  staleRoundTripApi.setLayoutSlotsForTest(staleRoundTripSlots);
+  assertStaleTerminalHandlerRoundTrips(staleRoundTripApi, '1', 'stale terminal handler across panes');
   let navShortcutHandler = null;
   terminalNavApi.installTerminalCopyShortcutForTest('1', {
     getSelection: () => '',
@@ -7643,6 +7725,8 @@ test('t@2560', () => {
     [renderedOrderApi.fileExplorerItemId, '8002', '8001', '8003'],
     'Meta+Arrow traversal follows the rendered Dockview tab order when serialized pane tabs are stale',
   );
+  assertPaneTabTraversalRoundTrips(renderedOrderApi, 'rendered Dockview tab order');
+  assertStaleTerminalHandlerRoundTrips(renderedOrderApi, '8001', 'stale terminal handler with rendered Dockview tab order');
   assert.equal(renderedOrderApi.adjacentPaneTabPosition(1, {item: renderedOrderApi.fileExplorerItemId}).item, '8002', 'Cmd-Right moves Finder to the first rendered middle tab');
   assert.equal(renderedOrderApi.adjacentPaneTabPosition(-1, {item: '8002'}).item, renderedOrderApi.fileExplorerItemId, 'Cmd-Left moves 8002 back to Finder');
   assert.equal(renderedOrderApi.adjacentPaneTabPosition(1, {item: '8002'}).item, '8001', 'Cmd-Right follows rendered middle tab order');

@@ -686,7 +686,6 @@
   "pref.yoagent.codex_effort.label": "جهد Codex",
   "pref.yoagent.codex_effort.low": "منخفض (أسرع)",
   "pref.yoagent.codex_effort.medium": "متوسط",
-  "pref.yoagent.codex_model.gpt53spark": "GPT-5.3 Codex Spark (سريع جدا)",
   "pref.yoagent.codex_model.gpt54": "GPT-5.4 (للبرمجة اليومية)",
   "pref.yoagent.codex_model.gpt54mini": "GPT-5.4 mini (صغير/سريع)",
   "pref.yoagent.codex_model.gpt55": "GPT-5.5 (للعمل المعقد)",

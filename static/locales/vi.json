@@ -686,7 +686,6 @@
   "pref.yoagent.codex_effort.label": "Mức suy luận Codex",
   "pref.yoagent.codex_effort.low": "Thấp (nhanh hơn)",
   "pref.yoagent.codex_effort.medium": "Trung bình",
-  "pref.yoagent.codex_model.gpt53spark": "GPT-5.3 Codex Spark (cực nhanh)",
   "pref.yoagent.codex_model.gpt54": "GPT-5.4 (lập trình hằng ngày)",
   "pref.yoagent.codex_model.gpt54mini": "GPT-5.4 mini (nhỏ/nhanh)",
   "pref.yoagent.codex_model.gpt55": "GPT-5.5 (việc phức tạp)",

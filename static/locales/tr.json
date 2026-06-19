@@ -686,7 +686,6 @@
   "pref.yoagent.codex_effort.label": "Codex çabası",
   "pref.yoagent.codex_effort.low": "Düşük (daha hızlı)",
   "pref.yoagent.codex_effort.medium": "Orta",
-  "pref.yoagent.codex_model.gpt53spark": "GPT-5.3 Codex Spark (ultra hızlı)",
   "pref.yoagent.codex_model.gpt54": "GPT-5.4 (günlük kodlama)",
   "pref.yoagent.codex_model.gpt54mini": "GPT-5.4 mini (küçük/hızlı)",
   "pref.yoagent.codex_model.gpt55": "GPT-5.5 (karmaşık işler)",

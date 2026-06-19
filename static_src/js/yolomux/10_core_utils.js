@@ -2595,9 +2595,7 @@ function terminalTmuxWindowShortcutDirection(event) {
 
 function terminalTmuxWindowShortcutItem(session) {
   const activeItem = visualActivePaneItem();
-  const sessionSlot = slotForItem(session);
-  if (activeItem && sessionSlot && slotForItem(activeItem) === sessionSlot) return activeItem;
-  return session;
+  return activeItem || session;
 }
 
 function handleTerminalTmuxWindowShortcutKeydown(session, event) {

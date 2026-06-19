@@ -686,7 +686,6 @@
   "pref.yoagent.codex_effort.label": "Codex प्रयास",
   "pref.yoagent.codex_effort.low": "कम (तेज)",
   "pref.yoagent.codex_effort.medium": "मध्यम",
-  "pref.yoagent.codex_model.gpt53spark": "GPT-5.3 Codex Spark (बहुत तेज)",
   "pref.yoagent.codex_model.gpt54": "GPT-5.4 (रोजमर्रा की कोडिंग)",
   "pref.yoagent.codex_model.gpt54mini": "GPT-5.4 mini (छोटा/तेज)",
   "pref.yoagent.codex_model.gpt55": "GPT-5.5 (जटिल काम)",

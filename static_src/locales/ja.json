@@ -686,7 +686,6 @@
   "pref.yoagent.codex_effort.label": "Codex の思考量",
   "pref.yoagent.codex_effort.low": "低（速い）",
   "pref.yoagent.codex_effort.medium": "中",
-  "pref.yoagent.codex_model.gpt53spark": "GPT-5.3 Codex Spark（超高速）",
   "pref.yoagent.codex_model.gpt54": "GPT-5.4（日常的なコーディング）",
   "pref.yoagent.codex_model.gpt54mini": "GPT-5.4 mini（小型/高速）",
   "pref.yoagent.codex_model.gpt55": "GPT-5.5（複雑な作業）",

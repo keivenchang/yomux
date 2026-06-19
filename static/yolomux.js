@@ -4062,9 +4062,7 @@ function terminalTmuxWindowShortcutDirection(event) {
 
 function terminalTmuxWindowShortcutItem(session) {
   const activeItem = visualActivePaneItem();
-  const sessionSlot = slotForItem(session);
-  if (activeItem && sessionSlot && slotForItem(activeItem) === sessionSlot) return activeItem;
-  return session;
+  return activeItem || session;
 }
 
 function handleTerminalTmuxWindowShortcutKeydown(session, event) {
@@ -25149,6 +25147,33 @@ function updateNotifyLevelPreferenceChoices() {
   return choices.map(value => ({value, label: t(`pref.updates.notify_level.${value}`)}));
 }
 
+const YOAGENT_CLAUDE_MODEL_LABEL_KEYS = {
+  'claude-opus-4-8': 'pref.yoagent.claude_model.opus',
+  'claude-sonnet-4-6': 'pref.yoagent.claude_model.sonnet',
+  'claude-haiku-4-5': 'pref.yoagent.claude_model.haiku',
+};
+
+const YOAGENT_CODEX_MODEL_LABEL_KEYS = {
+  'gpt-5.4-mini': 'pref.yoagent.codex_model.gpt54mini',
+  'gpt-5.4': 'pref.yoagent.codex_model.gpt54',
+  'gpt-5.5': 'pref.yoagent.codex_model.gpt55',
+};
+
+function modelPreferenceChoices(path, fallbackValues, labelKeys) {
+  const choices = Array.isArray(clientSettingsPayload?.choices?.[path])
+    ? clientSettingsPayload.choices[path]
+    : fallbackValues;
+  return choices.map(value => ({value, label: labelKeys[value] ? t(labelKeys[value]) : preferenceChoiceLabel(value)}));
+}
+
+function yoagentClaudeModelPreferenceChoices() {
+  return modelPreferenceChoices('yoagent.claude_model', Object.keys(YOAGENT_CLAUDE_MODEL_LABEL_KEYS), YOAGENT_CLAUDE_MODEL_LABEL_KEYS);
+}
+
+function yoagentCodexModelPreferenceChoices() {
+  return modelPreferenceChoices('yoagent.codex_model', Object.keys(YOAGENT_CODEX_MODEL_LABEL_KEYS), YOAGENT_CODEX_MODEL_LABEL_KEYS);
+}
+
 function preferenceSections() {
   return [
     {title: t('pref.section.general'), items: [
@@ -25270,22 +25295,13 @@ function preferenceSections() {
       {path: 'yoagent.invocation', label: t('pref.yoagent.invocation.label'), type: 'radio', choices: [
         {value: 'cli', label: t('pref.yoagent.invocation.cli')},
       ], help: t('pref.yoagent.invocation.help')},
-      {path: 'yoagent.claude_model', label: t('pref.yoagent.claude_model.label'), type: 'select', choices: [
-        {value: 'claude-opus-4-8', label: t('pref.yoagent.claude_model.opus')},
-        {value: 'claude-sonnet-4-6', label: t('pref.yoagent.claude_model.sonnet')},
-        {value: 'claude-haiku-4-5', label: t('pref.yoagent.claude_model.haiku')},
-      ], help: t('pref.yoagent.claude_model.help')},
+      {path: 'yoagent.claude_model', label: t('pref.yoagent.claude_model.label'), type: 'select', choices: yoagentClaudeModelPreferenceChoices(), help: t('pref.yoagent.claude_model.help')},
       {path: 'yoagent.claude_effort', label: t('pref.yoagent.claude_effort.label'), type: 'radio', choices: [
         {value: 'low', label: t('pref.yoagent.claude_effort.low')},
         {value: 'medium', label: t('pref.yoagent.claude_effort.medium')},
         {value: 'high', label: t('pref.yoagent.claude_effort.high')},
       ], help: t('pref.yoagent.claude_effort.help')},
-      {path: 'yoagent.codex_model', label: t('pref.yoagent.codex_model.label'), type: 'select', choices: [
-        {value: 'gpt-5.3-codex-spark', label: t('pref.yoagent.codex_model.gpt53spark')},
-        {value: 'gpt-5.4-mini', label: t('pref.yoagent.codex_model.gpt54mini')},
-        {value: 'gpt-5.4', label: t('pref.yoagent.codex_model.gpt54')},
-        {value: 'gpt-5.5', label: t('pref.yoagent.codex_model.gpt55')},
-      ], help: t('pref.yoagent.codex_model.help')},
+      {path: 'yoagent.codex_model', label: t('pref.yoagent.codex_model.label'), type: 'select', choices: yoagentCodexModelPreferenceChoices(), help: t('pref.yoagent.codex_model.help')},
       {path: 'yoagent.codex_effort', label: t('pref.yoagent.codex_effort.label'), type: 'radio', choices: [
         {value: 'low', label: t('pref.yoagent.codex_effort.low')},
         {value: 'medium', label: t('pref.yoagent.codex_effort.medium')},

@@ -236,10 +236,26 @@ def test_settings_catalog_covers_defaults_and_gui_metadata():
     assert catalog["yoagent.invocation"]["choices"] == ["cli"]
     assert catalog["yoagent.invocation"]["accepted_choices"] == ["api-key", "cli"]
     assert catalog["yoagent.invocation"]["hidden_choices"] == ["api-key"]
+    assert catalog["yoagent.codex_model"]["default"] == "gpt-5.4-mini"
+    assert catalog["yoagent.codex_model"]["choices"] == ["gpt-5.4-mini", "gpt-5.4", "gpt-5.5"]
+    assert "gpt-5.3-codex-spark" not in catalog["yoagent.codex_model"]["accepted_choices"]
+    assert catalog["yoagent.claude_model"]["choices"] == ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"]
     assert catalog["yoagent.system_prompt"]["requires_confirmation"] is True
     assert catalog["yoagent.system_prompt"]["sensitivity"] == "prompt"
     assert catalog["appearance.theme"]["gui"] == {"section": "Appearance", "visible": True}
     assert catalog["share.view_fit"]["gui"] == {"section": "", "visible": False}
+
+
+def test_stale_yoagent_model_settings_revert_to_valid_defaults():
+    sanitized = sanitize_settings({
+        "yoagent": {
+            "codex_model": "gpt-5.3-codex-spark",
+            "claude_model": "claude-fable-5",
+        },
+    })
+
+    assert sanitized["yoagent"]["codex_model"] == "gpt-5.4-mini"
+    assert sanitized["yoagent"]["claude_model"] == "claude-haiku-4-5"
 
 
 def test_preferences_source_paths_are_in_backend_catalog():

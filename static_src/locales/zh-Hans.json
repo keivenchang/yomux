@@ -686,7 +686,6 @@
   "pref.yoagent.codex_effort.label": "Codex 推理量",
   "pref.yoagent.codex_effort.low": "低（更快）",
   "pref.yoagent.codex_effort.medium": "中",
-  "pref.yoagent.codex_model.gpt53spark": "GPT-5.3 Codex Spark（超快）",
   "pref.yoagent.codex_model.gpt54": "GPT-5.4（日常编程）",
   "pref.yoagent.codex_model.gpt54mini": "GPT-5.4 mini（小型/快速）",
   "pref.yoagent.codex_model.gpt55": "GPT-5.5（复杂工作）",
