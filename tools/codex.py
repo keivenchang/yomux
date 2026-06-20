@@ -6,7 +6,7 @@
 This intentionally talks to the structured JSON-RPC app-server instead of scraping a
 visible Codex TUI. It is a prototype for the kind of client YOLOmux can own directly:
 start/resume a Codex thread, send turns, stream answer deltas, optionally display
-reasoning summaries/raw reasoning events when the server emits them, and relay basic
+Codex reasoning/thinking summaries and raw events when the server emits them, and relay basic
 approval prompts.
 
 Usage:
@@ -29,7 +29,11 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from text_client_common import (
+    CODEX_CONFIG_KEYS,
+    CODEX_OUTPUT_TERMS,
+    CLIENT_PERMISSION_DEFAULTS,
     TextClientBase,
+    TOOL_OUTPUT_PREFIX,
     collect_token_usage,
     command_text,
     config_value_text,
@@ -38,12 +42,20 @@ from text_client_common import (
     parse_bool,
     parse_config_bool,
     parse_config_value,
+    prefixed_output_labels,
 )
 
 
 CLIENT_VERSION = "prototype"
 APP_SERVER_TIMEOUT_SECONDS = 300.0
 HELP_MODEL_QUERY_TIMEOUT_SECONDS = 2.0
+DEFAULT_SANDBOX = CLIENT_PERMISSION_DEFAULTS.codex_sandbox
+DEFAULT_APPROVAL_POLICY = CLIENT_PERMISSION_DEFAULTS.codex_approval_policy
+DEFAULT_BYPASS_HOOK_TRUST = CLIENT_PERMISSION_DEFAULTS.codex_bypass_hook_trust
+DEFAULT_TEXT_CLIENT_APPROVAL_MODE = CLIENT_PERMISSION_DEFAULTS.codex_text_client_approval_mode
+CODEX_BYPASS_APPROVALS_FLAG = CLIENT_PERMISSION_DEFAULTS.codex_bypass_approvals_flag
+CODEX_BYPASS_HOOK_TRUST_FLAG = CLIENT_PERMISSION_DEFAULTS.codex_bypass_hook_trust_flag
+CODEX_YOLO_ALIAS = CLIENT_PERMISSION_DEFAULTS.codex_yolo_alias
 APPROVAL_METHODS = {
     "item/commandExecution/requestApproval",
     "item/fileChange/requestApproval",
@@ -130,22 +142,23 @@ REASONING_SUMMARIES = {"none", "auto", "concise", "detailed"}
 REASONING_SUMMARY_ALIASES = {"summary": "concise"}
 KNOWN_CONFIG_KEYS = {
     "approval_policy",
-    "model",
-    "model_reasoning_effort",
+    "bypass_hook_trust",
+    CODEX_CONFIG_KEYS.model,
+    CODEX_CONFIG_KEYS.effort,
     "model_reasoning_summary",
     "sandbox",
     "sandbox_mode",
     "service_tier",
     "text_client.approval_mode",
     "text_client.include_hidden_models",
-    "text_client.raw_output",
+    CODEX_CONFIG_KEYS.raw_output,
     "text_client.debug_json",
-    "text_client.show_metrics",
-    "text_client.show_raw_reasoning",
-    "text_client.show_reasoning_summary",
-    "text_client.show_tool_output",
-    "text_client.thread_id",
-    "text_client.timeout",
+    CODEX_CONFIG_KEYS.metrics,
+    CODEX_CONFIG_KEYS.hidden_work_raw,
+    CODEX_CONFIG_KEYS.hidden_work_summary,
+    CODEX_CONFIG_KEYS.tool_output,
+    CODEX_CONFIG_KEYS.session,
+    CODEX_CONFIG_KEYS.timeout,
     "web_search",
 }
 
@@ -263,13 +276,14 @@ def format_model_catalog_lines(rows: list[dict[str, Any]]) -> list[str]:
 
 def build_config_help(model_rows: list[dict[str, Any]] | None = None, catalog_error: str = "") -> str:
     accepted_efforts = reasoning_efforts_text(REASONING_EFFORT_ORDER)
+    reasoning_label = CODEX_OUTPUT_TERMS.lower_label
     lines = ["Models:"]
     if model_rows:
         lines.append("  All models reported by local Codex app-server, including hidden models:")
         lines.extend(f"  {line}" for line in format_model_catalog_lines(model_rows))
         catalog_efforts = reasoning_efforts_text(model_catalog_efforts(model_rows))
         if catalog_efforts and catalog_efforts != accepted_efforts:
-            lines.append(f"  Catalog-advertised effort values: {catalog_efforts}")
+            lines.append(f"  Catalog-advertised {reasoning_label} effort values: {catalog_efforts}")
     elif catalog_error:
         lines.append(f"  Live model catalog unavailable: {catalog_error}")
         lines.append("  Run /model inside the REPL after startup to query the local Codex app-server.")
@@ -278,30 +292,32 @@ def build_config_help(model_rows: list[dict[str, Any]] | None = None, catalog_er
         lines.append("  Run /model inside the REPL to query the same catalog manually.")
     lines.extend(
         [
-            f"  Client accepted effort values: {accepted_efforts}",
+            f"  Client accepted {reasoning_label} effort values: {accepted_efforts}",
             "  Select one with: -m gpt-5.5",
-            "  Select reasoning effort with: -c model_reasoning_effort=\"low\"",
+            f"  Select {reasoning_label} effort with: -c {CODEX_CONFIG_KEYS.effort}=\"low\"",
             "  Inside the REPL, use: /model gpt-5.5 low",
             "",
             "Common -c settings:",
-            f"  -c model_reasoning_effort=\"low\"       values: {accepted_efforts}",
-            "  -c model_reasoning_summary=\"concise\"  values: none, auto, concise, detailed; summary aliases to concise; default: concise",
+            f"  -c {CODEX_CONFIG_KEYS.effort}=\"low\"       {reasoning_label} effort values: {accepted_efforts}",
+            f"  -c model_reasoning_summary=\"concise\"  {reasoning_label} summary values: none, auto, concise, detailed; summary aliases to concise; default: concise",
             "  -c service_tier=\"fast\"                enable Fast mode",
-            "  -c approval_policy=\"never\"            values: untrusted, on-failure, on-request, never",
+            f"  -c approval_policy=\"{DEFAULT_APPROVAL_POLICY}\"            values: untrusted, on-failure, on-request, never; default: {DEFAULT_APPROVAL_POLICY}",
+            f"  -c sandbox=\"{DEFAULT_SANDBOX}\"       values: read-only, workspace-write, danger-full-access; default: {DEFAULT_SANDBOX}",
+            f"  -c bypass_hook_trust={str(DEFAULT_BYPASS_HOOK_TRUST).lower()}              default: {str(DEFAULT_BYPASS_HOOK_TRUST).lower()}",
             "  -c web_search=\"live\"                  enable live web search",
-            "  -c text_client.show_reasoning_summary=false",
-            "  -c text_client.show_raw_reasoning=true",
-            "  -c text_client.show_tool_output=false",
-            "  -c text_client.show_metrics=true          print TTFT/token/tool timing after each turn",
+            f"  -c {CODEX_CONFIG_KEYS.hidden_work_summary}=false toggle {CODEX_OUTPUT_TERMS.summary_label}",
+            f"  -c {CODEX_CONFIG_KEYS.hidden_work_raw}=true      toggle {CODEX_OUTPUT_TERMS.raw_label}",
+            f"  -c {CODEX_CONFIG_KEYS.tool_output}=false",
+            f"  -c {CODEX_CONFIG_KEYS.metrics}=true          print TTFT/token/tool timing after each turn",
             "  -c text_client.debug_json=true            dump raw JSON-RPC messages to stderr",
-            "  -c text_client.thread_id=\"<id>\"        or use: resume <thread-id>",
-            "  -c text_client.timeout=300              app-server request timeout; during turns this is an idle timeout",
-            "  -c text_client.approval_mode=\"accept\" values: prompt, accept, accept-session, deny, abort",
+            f"  -c {CODEX_CONFIG_KEYS.session}=\"<id>\"        or use: resume <thread-id>",
+            f"  -c {CODEX_CONFIG_KEYS.timeout}=300              app-server request timeout; during turns this is an idle timeout",
+            f"  -c text_client.approval_mode=\"{DEFAULT_TEXT_CLIENT_APPROVAL_MODE}\" values: prompt, accept, accept-session, deny, abort; default: {DEFAULT_TEXT_CLIENT_APPROVAL_MODE}",
             "",
             "Inside the REPL:",
-            "  /config model_reasoning_summary=auto",
-            "  /config model_reasoning_summary=concise",
-            "  /config text_client.show_raw_reasoning=true",
+            f"  /config model_reasoning_summary=auto    show {CODEX_OUTPUT_TERMS.summary_label}",
+            f"  /config model_reasoning_summary=concise show concise {CODEX_OUTPUT_TERMS.summary_label}",
+            f"  /config {CODEX_CONFIG_KEYS.hidden_work_raw}=true show {CODEX_OUTPUT_TERMS.raw_label}",
         ]
     )
     return "\n".join(lines)
@@ -402,7 +418,7 @@ def normalize_reasoning_summary(value: Any) -> str:
     summary = REASONING_SUMMARY_ALIASES.get(summary, summary)
     if summary not in REASONING_SUMMARIES:
         allowed = sorted([*REASONING_SUMMARIES, *REASONING_SUMMARY_ALIASES])
-        raise ValueError(f"model_reasoning_summary must be one of: {', '.join(allowed)}")
+        raise ValueError(f"model_reasoning_summary, the {CODEX_OUTPUT_TERMS.lower_label} summary setting, must be one of: {', '.join(allowed)}")
     return summary
 
 
@@ -414,7 +430,7 @@ def turn_id_from_turn(turn: Any) -> str:
 
 class CodexTextClient(TextClientBase):
     def __init__(self, args: argparse.Namespace):
-        super().__init__(str(args.cwd), ["reasoning", "tool", "metrics"])
+        super().__init__(str(args.cwd), prefixed_output_labels(CODEX_OUTPUT_TERMS))
         self.args = args
         self.process: subprocess.Popen[str] | None = None
         self.request_counter = 0
@@ -435,8 +451,10 @@ class CodexTextClient(TextClientBase):
         if not codex_path:
             raise RuntimeError("codex CLI not found on PATH")
         command = [codex_path, "app-server", "--listen", "stdio://"]
+        if self.args.dangerously_bypass_hook_trust:
+            command.extend(["-c", f"bypass_hook_trust={str(DEFAULT_BYPASS_HOOK_TRUST).lower()}"])
         if self.args.effort:
-            command.extend(["-c", f'model_reasoning_effort="{self.args.effort}"'])
+            command.extend(["-c", f'{CODEX_CONFIG_KEYS.effort}="{self.args.effort}"'])
         if self.args.service_tier:
             command.extend(["-c", f'service_tier="{self.args.service_tier}"'])
         self.process = subprocess.Popen(
@@ -506,12 +524,14 @@ class CodexTextClient(TextClientBase):
             command.extend(["--local-provider", self.args.local_provider])
         if self.args.profile:
             command.extend(["--profile", self.args.profile])
-        if self.args.sandbox != "read-only":
+        if CLIENT_PERMISSION_DEFAULTS.codex_is_permissive(self.args.sandbox, self.args.approval_policy):
+            command.append(CODEX_BYPASS_APPROVALS_FLAG)
+        elif self.args.sandbox != DEFAULT_SANDBOX:
             command.extend(["--sandbox", self.args.sandbox])
-        if self.args.approval_policy != "on-request":
+        if not CLIENT_PERMISSION_DEFAULTS.codex_is_permissive(self.args.sandbox, self.args.approval_policy) and self.args.approval_policy != DEFAULT_APPROVAL_POLICY:
             command.extend(["--ask-for-approval", self.args.approval_policy])
         if self.args.dangerously_bypass_hook_trust:
-            command.append("--dangerously-bypass-hook-trust")
+            command.append(CODEX_BYPASS_HOOK_TRUST_FLAG)
         command.extend(["-C", str(Path(self.args.cwd).expanduser().resolve())])
         for add_dir in self.args.add_dir:
             command.extend(["--add-dir", str(Path(add_dir).expanduser().resolve())])
@@ -533,38 +553,38 @@ class CodexTextClient(TextClientBase):
     def resume_config_values(self) -> dict[str, Any]:
         values = dict(self.args.config_values)
         values.pop("approval_policy", None)
-        values.pop("model", None)
+        values.pop(CODEX_CONFIG_KEYS.model, None)
         values.pop("sandbox", None)
         values.pop("sandbox_mode", None)
-        values.pop("text_client.thread_id", None)
+        values.pop(CODEX_CONFIG_KEYS.session, None)
         values.pop("web_search", None)
         if self.args.effort:
-            values["model_reasoning_effort"] = self.args.effort
+            values[CODEX_CONFIG_KEYS.effort] = self.args.effort
         if self.args.reasoning_summary != "concise" or "model_reasoning_summary" in self.args.config_values:
             values["model_reasoning_summary"] = self.args.reasoning_summary
         if self.args.service_tier:
             values["service_tier"] = self.args.service_tier
         client_defaults = {
-            "text_client.approval_mode": "prompt",
+            "text_client.approval_mode": DEFAULT_TEXT_CLIENT_APPROVAL_MODE,
             "text_client.debug_json": False,
             "text_client.include_hidden_models": False,
-            "text_client.raw_output": True,
-            "text_client.show_metrics": False,
-            "text_client.show_raw_reasoning": False,
-            "text_client.show_reasoning_summary": True,
-            "text_client.show_tool_output": True,
-            "text_client.timeout": APP_SERVER_TIMEOUT_SECONDS,
+            CODEX_CONFIG_KEYS.raw_output: True,
+            CODEX_CONFIG_KEYS.metrics: False,
+            CODEX_CONFIG_KEYS.hidden_work_raw: False,
+            CODEX_CONFIG_KEYS.hidden_work_summary: True,
+            CODEX_CONFIG_KEYS.tool_output: True,
+            CODEX_CONFIG_KEYS.timeout: APP_SERVER_TIMEOUT_SECONDS,
         }
         client_values = {
             "text_client.approval_mode": self.args.approval_mode,
             "text_client.debug_json": self.args.debug_json,
             "text_client.include_hidden_models": self.args.include_hidden_models,
-            "text_client.raw_output": self.args.raw_output,
-            "text_client.show_metrics": self.args.show_metrics,
-            "text_client.show_raw_reasoning": self.args.show_raw_reasoning,
-            "text_client.show_reasoning_summary": self.args.show_reasoning_summary,
-            "text_client.show_tool_output": self.args.show_tool_output,
-            "text_client.timeout": self.args.timeout,
+            CODEX_CONFIG_KEYS.raw_output: self.args.raw_output,
+            CODEX_CONFIG_KEYS.metrics: self.args.show_metrics,
+            CODEX_CONFIG_KEYS.hidden_work_raw: self.args.show_raw_reasoning,
+            CODEX_CONFIG_KEYS.hidden_work_summary: self.args.show_reasoning_summary,
+            CODEX_CONFIG_KEYS.tool_output: self.args.show_tool_output,
+            CODEX_CONFIG_KEYS.timeout: self.args.timeout,
         }
         for key, value in client_values.items():
             if value != client_defaults[key] or key in self.args.config_values:
@@ -706,8 +726,8 @@ class CodexTextClient(TextClientBase):
     def print_repl_help(self) -> None:
         print("Slash commands:")
         print("  /status                       show current session configuration")
-        print("  /model [model] [effort]       choose model and reasoning effort")
-        print("  /effort [level]               choose reasoning effort")
+        print(f"  /model [model] [effort]       choose model and {CODEX_OUTPUT_TERMS.lower_label} effort")
+        print(f"  /effort [level]               choose {CODEX_OUTPUT_TERMS.lower_label} effort")
         print("  /permissions [mode]           choose what Codex is allowed to do")
         print("  /fast [on|off]                toggle Fast mode for later turns")
         print("  /config [key=value ...]       show or change -c style settings")
@@ -730,7 +750,7 @@ class CodexTextClient(TextClientBase):
 
     def print_status(self) -> None:
         print("OpenAI Codex")
-        print(f"  Model:                {display_value(self.args.model)} (reasoning {display_value(self.args.effort)}, summaries {self.args.reasoning_summary})")
+        print(f"  Model:                {display_value(self.args.model)} ({CODEX_OUTPUT_TERMS.title_label} {display_value(self.args.effort)}, summaries {self.args.reasoning_summary})")
         print("  Model provider:       Codex app-server")
         print(f"  Directory:            {self.display_cwd()}")
         print(f"  Permissions:          {self.permissions_text()}")
@@ -741,7 +761,7 @@ class CodexTextClient(TextClientBase):
         print(f"  Session file:         {self.session_file_path()}")
         print(f"  Fast mode:            {'on' if self.args.service_tier == 'fast' else 'off'}")
         print(f"  Raw output:           {'on' if self.args.raw_output else 'off'}")
-        print(f"  Show reasoning:       {'on' if self.args.show_reasoning_summary else 'off'} summaries, {'on' if self.args.show_raw_reasoning else 'off'} raw")
+        print(f"  {CODEX_OUTPUT_TERMS.show_label}: {'on' if self.args.show_reasoning_summary else 'off'} summaries, {'on' if self.args.show_raw_reasoning else 'off'} raw")
         print(f"  Show tool output:     {'on' if self.args.show_tool_output else 'off'}")
         print(f"  Metrics:              {'on' if self.args.show_metrics else 'off'}")
         print(f"  Terminal bg:          {self.terminal_background_text()}")
@@ -756,7 +776,7 @@ class CodexTextClient(TextClientBase):
         model = parts[0]
         effort = parts[1] if len(parts) > 1 else self.args.effort
         if effort and effort not in REASONING_EFFORTS:
-            print(f"reasoning effort must be one of: {', '.join(sorted(REASONING_EFFORTS))}")
+            print(f"{CODEX_OUTPUT_TERMS.lower_label} effort must be one of: {', '.join(sorted(REASONING_EFFORTS))}")
             return
         self.args.model = model
         self.args.effort = effort
@@ -764,31 +784,31 @@ class CodexTextClient(TextClientBase):
         print(f"model changed: {model}" + (f" ({effort})" if effort else ""))
 
     def handle_effort_command(self, rest: str) -> None:
-        self.print_compat_note("effort", "Codex", "Claude has a native /effort command; this clone maps it to Codex reasoning effort.")
+        self.print_compat_note("effort", "Codex", f"Claude has a native /effort command; codex.py maps it to Codex {CODEX_OUTPUT_TERMS.lower_label} effort.")
         parts = shlex.split(rest)
         if not parts:
-            print(f"Reasoning effort: {display_value(self.args.effort)}")
+            print(f"{CODEX_OUTPUT_TERMS.title_label} effort: {display_value(self.args.effort)}")
             print(f"Usage: /effort [{'|'.join(sorted(REASONING_EFFORTS))}]")
             return
         effort = parts[0].strip().lower()
         if effort not in REASONING_EFFORTS:
-            print(f"reasoning effort must be one of: {', '.join(sorted(REASONING_EFFORTS))}")
+            print(f"{CODEX_OUTPUT_TERMS.lower_label} effort must be one of: {', '.join(sorted(REASONING_EFFORTS))}")
             return
         self.args.effort = effort
         self.update_thread_settings(effort=effort)
-        print(f"reasoning effort changed: {effort}")
+        print(f"{CODEX_OUTPUT_TERMS.lower_label} effort changed: {effort}")
 
     def handle_permissions_command(self, rest: str) -> None:
         parts = shlex.split(rest)
         if not parts:
             print(f"Permissions: {self.permissions_text()}")
-            print("Usage: /permissions [read-only|workspace-write|danger-full-access|untrusted|on-failure|on-request|never|yolo]")
+            print(f"Usage: /permissions [read-only|workspace-write|{DEFAULT_SANDBOX}|untrusted|on-failure|on-request|never|{CODEX_YOLO_ALIAS}]")
             return
         for value in parts:
             normalized = value.strip().lower()
-            if normalized == "yolo":
-                self.args.sandbox = "danger-full-access"
-                self.args.approval_policy = "never"
+            if normalized == CODEX_YOLO_ALIAS:
+                self.args.sandbox = DEFAULT_SANDBOX
+                self.args.approval_policy = DEFAULT_APPROVAL_POLICY
                 continue
             if normalized in SANDBOX_MODES:
                 self.args.sandbox = normalized
@@ -840,7 +860,7 @@ class CodexTextClient(TextClientBase):
             print(str(exc))
             print("Usage: /metrics [on|off|last]")
             return
-        self.args.config_values["text_client.show_metrics"] = self.args.show_metrics
+        self.args.config_values[CODEX_CONFIG_KEYS.metrics] = self.args.show_metrics
         print(f"Metrics {'on' if self.args.show_metrics else 'off'}")
 
     def handle_config_command(self, rest: str) -> None:
@@ -864,7 +884,7 @@ class CodexTextClient(TextClientBase):
                 print(str(exc))
                 return
             self.args.config_values[key] = normalized_config_value(key, value)
-            if key == "text_client.thread_id":
+            if key == CODEX_CONFIG_KEYS.session:
                 self.thread_id = self.args.thread_id
             runtime_settings = self.thread_settings_for_config_key(key)
             if runtime_settings:
@@ -875,22 +895,23 @@ class CodexTextClient(TextClientBase):
 
     def print_config_settings(self) -> None:
         rows = {
-            "model": self.args.model,
-            "model_reasoning_effort": self.args.effort,
+            CODEX_CONFIG_KEYS.model: self.args.model,
+            CODEX_CONFIG_KEYS.effort: self.args.effort,
             "model_reasoning_summary": self.args.reasoning_summary,
             "approval_policy": self.args.approval_policy,
+            "bypass_hook_trust": self.args.dangerously_bypass_hook_trust,
             "sandbox": self.args.sandbox,
             "service_tier": self.args.service_tier,
             "web_search": self.args.search,
-            "text_client.show_reasoning_summary": self.args.show_reasoning_summary,
-            "text_client.show_raw_reasoning": self.args.show_raw_reasoning,
-            "text_client.show_tool_output": self.args.show_tool_output,
-            "text_client.show_metrics": self.args.show_metrics,
-            "text_client.timeout": self.args.timeout,
-            "text_client.thread_id": self.thread_id,
+            CODEX_CONFIG_KEYS.hidden_work_summary: self.args.show_reasoning_summary,
+            CODEX_CONFIG_KEYS.hidden_work_raw: self.args.show_raw_reasoning,
+            CODEX_CONFIG_KEYS.tool_output: self.args.show_tool_output,
+            CODEX_CONFIG_KEYS.metrics: self.args.show_metrics,
+            CODEX_CONFIG_KEYS.timeout: self.args.timeout,
+            CODEX_CONFIG_KEYS.session: self.thread_id,
             "text_client.approval_mode": self.args.approval_mode,
             "text_client.include_hidden_models": self.args.include_hidden_models,
-            "text_client.raw_output": self.args.raw_output,
+            CODEX_CONFIG_KEYS.raw_output: self.args.raw_output,
             "text_client.debug_json": self.args.debug_json,
         }
         for key, value in rows.items():
@@ -913,9 +934,9 @@ class CodexTextClient(TextClientBase):
         self.request("thread/settings/update", params)
 
     def thread_settings_for_config_key(self, key: str) -> dict[str, Any]:
-        if key == "model":
+        if key == CODEX_CONFIG_KEYS.model:
             return {"model": self.args.model or None}
-        if key == "model_reasoning_effort":
+        if key == CODEX_CONFIG_KEYS.effort:
             return {"effort": self.args.effort or None}
         if key == "model_reasoning_summary":
             return {"summary": self.args.reasoning_summary or None}
@@ -933,12 +954,12 @@ class CodexTextClient(TextClientBase):
         return self.prompt_text_for(model, effort)
 
     def permissions_text(self) -> str:
-        if self.args.sandbox == "danger-full-access" and self.args.approval_policy == "never":
+        if CLIENT_PERMISSION_DEFAULTS.codex_is_permissive(self.args.sandbox, self.args.approval_policy):
             return "YOLO mode"
         labels = {
             "read-only": "Read Only",
             "workspace-write": "Workspace Write",
-            "danger-full-access": "Danger Full Access",
+            DEFAULT_SANDBOX: "Danger Full Access",
         }
         return f"{labels[self.args.sandbox]} ({self.args.approval_policy})"
 
@@ -956,7 +977,7 @@ class CodexTextClient(TextClientBase):
         return ", ".join(paths) if paths else "<none>"
 
     def sandbox_policy_param(self) -> dict[str, Any]:
-        if self.args.sandbox == "danger-full-access":
+        if self.args.sandbox == DEFAULT_SANDBOX:
             return {"type": "dangerFullAccess"}
         if self.args.sandbox == "workspace-write":
             return {"type": "workspaceWrite", "networkAccess": bool(self.args.search), "writableRoots": [str(Path(self.args.cwd).expanduser().resolve())]}
@@ -967,13 +988,13 @@ class CodexTextClient(TextClientBase):
             return
         summary = self.tool_item_summary(event, item)
         if summary:
-            self.write_prefixed_line("tool", summary)
+            self.write_prefixed_line(TOOL_OUTPUT_PREFIX, summary)
         if event == "done" and item.get("type") == "commandExecution":
             item_id = str(item.get("id") or "").strip()
             aggregated_output = str(item.get("aggregatedOutput") or "")
             if aggregated_output and item_id not in self.tool_output_item_ids:
-                self.write_prefixed_line("tool", "output:")
-                self.write_prefixed_stdout("tool", aggregated_output)
+                self.write_prefixed_line(TOOL_OUTPUT_PREFIX, "output:")
+                self.write_prefixed_stdout(TOOL_OUTPUT_PREFIX, aggregated_output)
 
     def tool_item_summary(self, event: str, item: dict[str, Any]) -> str:
         item_type = str(item.get("type") or "")
@@ -1085,7 +1106,7 @@ class CodexTextClient(TextClientBase):
             self.reasoning_summary_buffer = []
             self.raw_reasoning_buffer = []
             self.final_item_text = ""
-            self.prefixed_output_at_line_start = {"reasoning": True, "tool": True, "metrics": True}
+            self.prefixed_output_at_line_start = {label: True for label in prefixed_output_labels(CODEX_OUTPUT_TERMS)}
             self.answer_output_at_line_start = True
             self.tool_output_item_ids = set()
             if self.current_metrics is not None:
@@ -1162,7 +1183,7 @@ class CodexTextClient(TextClientBase):
                     metrics.record_reasoning_summary(delta, now)
                 self.reasoning_summary_buffer.append(delta)
                 if self.args.show_reasoning_summary:
-                    self.write_prefixed_stdout("reasoning", delta)
+                    self.write_prefixed_stdout(CODEX_OUTPUT_TERMS.prefix, delta)
             return False
         if method == "item/reasoning/summaryPartAdded":
             return False
@@ -1173,13 +1194,13 @@ class CodexTextClient(TextClientBase):
                     metrics.record_raw_reasoning(delta, now)
                 self.raw_reasoning_buffer.append(delta)
                 if self.args.show_raw_reasoning:
-                    self.write_prefixed_stdout("reasoning", delta)
+                    self.write_prefixed_stdout(CODEX_OUTPUT_TERMS.prefix, delta)
             return False
         if method in {"item/reasoning/delta", "item/thinking/delta", "item/thought/delta"}:
             if metrics is not None and not metrics.first_reasoning_at:
                 metrics.first_reasoning_at = now
             if self.args.show_reasoning_summary or self.args.show_raw_reasoning:
-                self.write_prefixed_line("reasoning", "event")
+                self.write_prefixed_line(CODEX_OUTPUT_TERMS.prefix, "event")
             return False
         if method in {"item/commandExecution/outputDelta", "item/fileChange/outputDelta"}:
             delta = str(params.get("delta") or "")
@@ -1190,13 +1211,13 @@ class CodexTextClient(TextClientBase):
                 self.tool_output_item_ids.add(item_id)
             if self.args.show_tool_output:
                 if delta:
-                    self.write_prefixed_stdout("tool", delta)
+                    self.write_prefixed_stdout(TOOL_OUTPUT_PREFIX, delta)
             return False
         if method == "item/commandExecution/terminalInteraction":
             if metrics is not None and not metrics.first_tool_at:
                 metrics.first_tool_at = now
             if self.args.show_tool_output:
-                self.write_prefixed_line("tool", "terminal interaction")
+                self.write_prefixed_line(TOOL_OUTPUT_PREFIX, "terminal interaction")
             return False
         if method == "item/mcpToolCall/progress":
             if metrics is not None and not metrics.first_tool_at:
@@ -1204,7 +1225,7 @@ class CodexTextClient(TextClientBase):
             if self.args.show_tool_output:
                 progress = str(params.get("message") or "").strip()
                 if progress:
-                    self.write_prefixed_line("tool", progress)
+                    self.write_prefixed_line(TOOL_OUTPUT_PREFIX, progress)
             return False
         if method == "item/started":
             item = params.get("item") if isinstance(params.get("item"), dict) else {}
@@ -1259,9 +1280,9 @@ class CodexTextClient(TextClientBase):
             print("", flush=True)
             self.answer_output_at_line_start = True
         if self.reasoning_summary_buffer and not self.args.show_reasoning_summary:
-            self.print_aux_stderr("[reasoning summary received; rerun with -c text_client.show_reasoning_summary=true to display it]")
+            self.print_aux_stderr(f"[{CODEX_OUTPUT_TERMS.lower_label} summary received; rerun with -c {CODEX_CONFIG_KEYS.hidden_work_summary}=true to display it]")
         if self.raw_reasoning_buffer and not self.args.show_raw_reasoning:
-            self.print_aux_stderr("[raw reasoning received but hidden; rerun with -c text_client.show_raw_reasoning=true to display it]")
+            self.print_aux_stderr(f"[raw {CODEX_OUTPUT_TERMS.lower_label} received but hidden; rerun with -c {CODEX_CONFIG_KEYS.hidden_work_raw}=true to display it]")
 
     def handle_server_request(self, message: dict[str, Any], deadline: float) -> None:
         del deadline
@@ -1269,7 +1290,7 @@ class CodexTextClient(TextClientBase):
         method = str(message.get("method") or "")
         params = message.get("params") if isinstance(message.get("params"), dict) else {}
         if method not in APPROVAL_METHODS:
-            self.write_prefixed_line("tool", f"unsupported server request: {method}")
+            self.write_prefixed_line(TOOL_OUTPUT_PREFIX, f"unsupported server request: {method}")
             self.write(json_rpc_error(request_id, f"unsupported server request: {method}"))
             return
         if self.current_metrics is not None:
@@ -1278,22 +1299,22 @@ class CodexTextClient(TextClientBase):
         self.write(json_rpc_response(request_id, {"decision": decision}))
 
     def approval_decision(self, method: str, params: dict[str, Any]) -> str:
-        self.write_prefixed_line("tool", "approval requested")
-        self.write_prefixed_line("tool", f"method: {method}")
+        self.write_prefixed_line(TOOL_OUTPUT_PREFIX, "approval requested")
+        self.write_prefixed_line(TOOL_OUTPUT_PREFIX, f"method: {method}")
         reason = str(params.get("reason") or "").strip()
         if reason:
-            self.write_prefixed_line("tool", f"reason: {reason}")
+            self.write_prefixed_line(TOOL_OUTPUT_PREFIX, f"reason: {reason}")
         command = shell_command_text(params.get("command"))
         if command:
-            self.write_prefixed_line("tool", f"command: {command}")
+            self.write_prefixed_line(TOOL_OUTPUT_PREFIX, f"command: {command}")
         cwd = str(params.get("cwd") or "").strip()
         if cwd:
-            self.write_prefixed_line("tool", f"cwd: {cwd}")
+            self.write_prefixed_line(TOOL_OUTPUT_PREFIX, f"cwd: {cwd}")
         file_changes = params.get("fileChanges")
         if isinstance(file_changes, dict):
-            self.write_prefixed_line("tool", "files:")
+            self.write_prefixed_line(TOOL_OUTPUT_PREFIX, "files:")
             for path in file_changes:
-                self.write_prefixed_line("tool", f"  {path}")
+                self.write_prefixed_line(TOOL_OUTPUT_PREFIX, f"  {path}")
         mode = self.args.approval_mode
         if mode == "prompt" and not sys.stdin.isatty():
             mode = "deny"
@@ -1346,17 +1367,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--oss", action="store_true", help="Accepted for Codex CLI compatibility; local OSS provider mode is not implemented by this prototype.")
     parser.add_argument("--local-provider", default="", metavar="OSS_PROVIDER", help="Accepted for Codex CLI compatibility.")
     parser.add_argument("-p", "--profile", default="", metavar="CONFIG_PROFILE_V2", help="Accepted for Codex CLI compatibility.")
-    parser.add_argument("-s", "--sandbox", choices=sorted(SANDBOX_MODES), default="read-only", help="Select the sandbox policy to use.")
-    parser.add_argument("--dangerously-bypass-approvals-and-sandbox", action="store_true", help="Skip approval prompts and run without sandboxing.")
-    parser.add_argument("--dangerously-bypass-hook-trust", action="store_true", help="Accepted for Codex CLI compatibility.")
+    parser.add_argument("-s", "--sandbox", choices=sorted(SANDBOX_MODES), default=DEFAULT_SANDBOX, help=f"Select the sandbox policy to use. Default: {DEFAULT_SANDBOX}.")
+    parser.add_argument(CODEX_BYPASS_APPROVALS_FLAG, action="store_true", help="Skip approval prompts and run without sandboxing.")
+    parser.add_argument(CODEX_BYPASS_HOOK_TRUST_FLAG, action="store_true", default=DEFAULT_BYPASS_HOOK_TRUST, help="Run enabled hooks without persisted hook trust. Default: on for this client.")
     parser.add_argument("-C", "--cd", dest="cwd", default=os.getcwd(), metavar="DIR", help="Tell the agent to use the specified directory as its working root.")
     parser.add_argument("--add-dir", action="append", default=[], metavar="DIR", help="Additional writable directories; accepted for Codex CLI compatibility.")
-    parser.add_argument("-a", "--ask-for-approval", dest="approval_policy", choices=sorted(APPROVAL_POLICIES), default="on-request", metavar="APPROVAL_POLICY", help="Configure when Codex requires human approval.")
+    parser.add_argument("-a", "--ask-for-approval", dest="approval_policy", choices=sorted(APPROVAL_POLICIES), default=DEFAULT_APPROVAL_POLICY, metavar="APPROVAL_POLICY", help=f"Configure when Codex requires human approval. Default: {DEFAULT_APPROVAL_POLICY}.")
     parser.add_argument("--search", action="store_true", help="Enable live web search.")
     parser.add_argument("--no-alt-screen", action="store_true", help="Accepted for Codex CLI compatibility.")
     parser.add_argument("-V", "--version", action="version", version=f"codex-text-client {CLIENT_VERSION}")
     args = parser.parse_args()
-    args.approval_mode = "prompt"
+    args.approval_mode = DEFAULT_TEXT_CLIENT_APPROVAL_MODE
     args.debug_json = False
     args.effort = ""
     args.ephemeral = False
@@ -1388,8 +1409,8 @@ def parse_args() -> argparse.Namespace:
         apply_config_override(args, key, value, parser)
         args.config_values[key] = normalized_config_value(key, value)
     if args.dangerously_bypass_approvals_and_sandbox:
-        args.sandbox = "danger-full-access"
-        args.approval_policy = "never"
+        args.sandbox = DEFAULT_SANDBOX
+        args.approval_policy = DEFAULT_APPROVAL_POLICY
     if args.search:
         args.config_values["web_search"] = "live"
     args.cwd = str(Path(args.cwd).expanduser().resolve())
@@ -1408,21 +1429,23 @@ def parse_args() -> argparse.Namespace:
 def normalized_config_value(key: str, value: Any) -> Any:
     if key == "model_reasoning_summary":
         return normalize_reasoning_summary(value)
-    if key == "model_reasoning_effort":
+    if key == CODEX_CONFIG_KEYS.effort:
         return str(value).strip().lower()
-    if key in {"approval_policy", "sandbox", "sandbox_mode", "service_tier", "text_client.thread_id", "text_client.approval_mode", "model"}:
+    if key in {"approval_policy", "sandbox", "sandbox_mode", "service_tier", CODEX_CONFIG_KEYS.session, "text_client.approval_mode", CODEX_CONFIG_KEYS.model}:
         return str(value)
+    if key == "bypass_hook_trust":
+        return parse_config_bool(value)
     if key in {
-        "text_client.show_reasoning_summary",
-        "text_client.show_raw_reasoning",
-        "text_client.show_tool_output",
+        CODEX_CONFIG_KEYS.hidden_work_summary,
+        CODEX_CONFIG_KEYS.hidden_work_raw,
+        CODEX_CONFIG_KEYS.tool_output,
         "text_client.include_hidden_models",
-        "text_client.raw_output",
+        CODEX_CONFIG_KEYS.raw_output,
         "text_client.debug_json",
-        "text_client.show_metrics",
+        CODEX_CONFIG_KEYS.metrics,
     }:
         return parse_config_bool(value)
-    if key == "text_client.timeout":
+    if key == CODEX_CONFIG_KEYS.timeout:
         return float(value)
     if key == "web_search":
         if value == "live":
@@ -1432,13 +1455,13 @@ def normalized_config_value(key: str, value: Any) -> Any:
 
 
 def set_config_override(args: argparse.Namespace, key: str, value: Any) -> None:
-    if key == "model":
+    if key == CODEX_CONFIG_KEYS.model:
         args.model = str(value)
         return
-    if key == "model_reasoning_effort":
+    if key == CODEX_CONFIG_KEYS.effort:
         effort = str(value).strip().lower()
         if effort not in REASONING_EFFORTS:
-            raise ValueError(f"model_reasoning_effort must be one of: {', '.join(sorted(REASONING_EFFORTS))}")
+            raise ValueError(f"{CODEX_CONFIG_KEYS.effort}, the {CODEX_OUTPUT_TERMS.lower_label} effort setting, must be one of: {', '.join(sorted(REASONING_EFFORTS))}")
         args.effort = effort
         return
     if key == "model_reasoning_summary":
@@ -1449,6 +1472,9 @@ def set_config_override(args: argparse.Namespace, key: str, value: Any) -> None:
         if approval_policy not in APPROVAL_POLICIES:
             raise ValueError(f"approval_policy must be one of: {', '.join(sorted(APPROVAL_POLICIES))}")
         args.approval_policy = approval_policy
+        return
+    if key == "bypass_hook_trust":
+        args.dangerously_bypass_hook_trust = parse_config_bool(value)
         return
     if key in {"sandbox", "sandbox_mode"}:
         sandbox = str(value)
@@ -1462,22 +1488,22 @@ def set_config_override(args: argparse.Namespace, key: str, value: Any) -> None:
     if key == "web_search":
         args.search = value == "live" or parse_config_bool(value)
         return
-    if key == "text_client.show_reasoning_summary":
+    if key == CODEX_CONFIG_KEYS.hidden_work_summary:
         args.show_reasoning_summary = parse_config_bool(value)
         return
-    if key == "text_client.show_raw_reasoning":
+    if key == CODEX_CONFIG_KEYS.hidden_work_raw:
         args.show_raw_reasoning = parse_config_bool(value)
         return
-    if key == "text_client.show_tool_output":
+    if key == CODEX_CONFIG_KEYS.tool_output:
         args.show_tool_output = parse_config_bool(value)
         return
-    if key == "text_client.show_metrics":
+    if key == CODEX_CONFIG_KEYS.metrics:
         args.show_metrics = parse_config_bool(value)
         return
-    if key == "text_client.timeout":
+    if key == CODEX_CONFIG_KEYS.timeout:
         args.timeout = float(value)
         return
-    if key == "text_client.thread_id":
+    if key == CODEX_CONFIG_KEYS.session:
         args.thread_id = str(value)
         return
     if key == "text_client.approval_mode":
@@ -1489,7 +1515,7 @@ def set_config_override(args: argparse.Namespace, key: str, value: Any) -> None:
     if key == "text_client.include_hidden_models":
         args.include_hidden_models = parse_config_bool(value)
         return
-    if key == "text_client.raw_output":
+    if key == CODEX_CONFIG_KEYS.raw_output:
         args.raw_output = parse_config_bool(value)
         return
     if key == "text_client.debug_json":

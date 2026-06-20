@@ -27,6 +27,8 @@ ANSI_RESET = "\033[0m"
 OSC11_QUERY_TIMEOUT_SECONDS = 0.12
 READLINE_START_IGNORE = "\001"
 READLINE_END_IGNORE = "\002"
+TOOL_OUTPUT_PREFIX = "tool"
+METRICS_OUTPUT_PREFIX = "metrics"
 TRUE_VALUES = {"1", "true", "yes", "y", "on", "enable", "enabled"}
 FALSE_VALUES = {"0", "false", "no", "n", "off", "disable", "disabled"}
 ANSI_16_RGB = {
@@ -157,6 +159,186 @@ class TerminalPalette:
     background: TerminalBackground
     aux_color: str
     prompt_color: str
+
+
+@dataclass(frozen=True)
+class OutputTerminology:
+    client_name: str
+    upstream_name: str
+    primary: str
+    aka: str
+    prefix: str
+    summary_config_key: str = ""
+    raw_config_key: str = ""
+    visibility_config_key: str = ""
+
+    @property
+    def title_label(self) -> str:
+        return f"{self.primary} (aka {self.aka})"
+
+    @property
+    def lower_label(self) -> str:
+        return f"{self.primary.lower()} (aka {self.aka.lower()})"
+
+    @property
+    def output_label(self) -> str:
+        return f"{self.primary} output (aka {self.aka})"
+
+    @property
+    def show_label(self) -> str:
+        return f"Show {self.title_label}"
+
+    @property
+    def raw_label(self) -> str:
+        return f"raw {self.client_name} {self.lower_label}"
+
+    @property
+    def summary_label(self) -> str:
+        return f"{self.client_name} {self.lower_label} summaries"
+
+    @property
+    def prefix_code(self) -> str:
+        return markdown_code_cell(f"{self.prefix}| ...")
+
+
+@dataclass(frozen=True)
+class ClientPermissionDefaults:
+    claude_permission_mode: str
+    codex_sandbox: str
+    codex_approval_policy: str
+    codex_bypass_hook_trust: bool
+    codex_text_client_approval_mode: str
+    claude_skip_permissions_flag: str
+    codex_bypass_approvals_flag: str
+    codex_bypass_hook_trust_flag: str
+    codex_yolo_alias: str
+
+    def codex_is_permissive(self, sandbox: str, approval_policy: str) -> bool:
+        return sandbox == self.codex_sandbox and approval_policy == self.codex_approval_policy
+
+
+@dataclass(frozen=True)
+class SharedClientConfigKeys:
+    model: str
+    tool_output: str
+    metrics: str
+    timeout: str
+
+
+@dataclass(frozen=True)
+class ClientConfigKeys:
+    model: str
+    effort: str
+    tool_output: str
+    metrics: str
+    timeout: str
+    session: str
+    raw_output: str
+    permission: str = ""
+    hidden_work_summary: str = ""
+    hidden_work_raw: str = ""
+    hidden_work_visibility: str = ""
+
+
+@dataclass(frozen=True)
+class ClientIntentRow:
+    concept: str
+    codex: str
+    claude: str
+    same_idea: str
+    notes: str
+
+
+def markdown_code_cell(text: str) -> str:
+    escaped = text.replace("&", "&amp;").replace("|", "&#124;").replace("<", "&lt;").replace(">", "&gt;")
+    return f"<code>{escaped}</code>"
+
+
+def prefixed_output_labels(output_terms: OutputTerminology) -> tuple[str, str, str]:
+    return output_terms.prefix, TOOL_OUTPUT_PREFIX, METRICS_OUTPUT_PREFIX
+
+
+CODEX_OUTPUT_TERMS = OutputTerminology(
+    client_name="codex.py",
+    upstream_name="Codex",
+    primary="Reasoning",
+    aka="Thinking",
+    prefix="reasoning",
+    summary_config_key="text_client.show_reasoning_summary",
+    raw_config_key="text_client.show_raw_reasoning",
+)
+CLAUDE_OUTPUT_TERMS = OutputTerminology(
+    client_name="claude.py",
+    upstream_name="Claude",
+    primary="Thinking",
+    aka="Reasoning",
+    prefix="thinking",
+    visibility_config_key="text_client.show_thinking",
+)
+CLIENT_SHARED_CONFIG_KEYS = SharedClientConfigKeys(
+    model="model",
+    tool_output="text_client.show_tool_output",
+    metrics="text_client.show_metrics",
+    timeout="text_client.timeout",
+)
+CODEX_CONFIG_KEYS = ClientConfigKeys(
+    model=CLIENT_SHARED_CONFIG_KEYS.model,
+    effort="model_reasoning_effort",
+    tool_output=CLIENT_SHARED_CONFIG_KEYS.tool_output,
+    metrics=CLIENT_SHARED_CONFIG_KEYS.metrics,
+    timeout=CLIENT_SHARED_CONFIG_KEYS.timeout,
+    session="text_client.thread_id",
+    raw_output="text_client.raw_output",
+    hidden_work_summary=CODEX_OUTPUT_TERMS.summary_config_key,
+    hidden_work_raw=CODEX_OUTPUT_TERMS.raw_config_key,
+)
+CLAUDE_CONFIG_KEYS = ClientConfigKeys(
+    model=CLIENT_SHARED_CONFIG_KEYS.model,
+    effort="effort",
+    permission="permission_mode",
+    tool_output=CLIENT_SHARED_CONFIG_KEYS.tool_output,
+    metrics=CLIENT_SHARED_CONFIG_KEYS.metrics,
+    timeout=CLIENT_SHARED_CONFIG_KEYS.timeout,
+    session="text_client.session_id",
+    raw_output="text_client.raw_json",
+    hidden_work_visibility=CLAUDE_OUTPUT_TERMS.visibility_config_key,
+)
+CLIENT_PERMISSION_DEFAULTS = ClientPermissionDefaults(
+    claude_permission_mode="bypassPermissions",
+    codex_sandbox="danger-full-access",
+    codex_approval_policy="never",
+    codex_bypass_hook_trust=True,
+    codex_text_client_approval_mode="accept",
+    claude_skip_permissions_flag="--dangerously-skip-permissions",
+    codex_bypass_approvals_flag="--dangerously-bypass-approvals-and-sandbox",
+    codex_bypass_hook_trust_flag="--dangerously-bypass-hook-trust",
+    codex_yolo_alias="yolo",
+)
+CLIENT_INTENT_ROWS = (
+    ClientIntentRow("Hidden model work", CODEX_OUTPUT_TERMS.title_label, CLAUDE_OUTPUT_TERMS.title_label, "Yes", "Both are internal progress/analysis streams. The prototypes expose only what the upstream stream emits."),
+    ClientIntentRow("Effort level", f"`{CODEX_CONFIG_KEYS.effort}`, `/effort`, `-c {CODEX_CONFIG_KEYS.effort}=high`", "`--effort`, `/effort`, `/config effort=high`", "Yes", "codex.py maps `/effort` to Codex reasoning effort; claude.py passes `--effort` to Claude."),
+    ClientIntentRow("Reasoning/thinking summary", f"`model_reasoning_summary`, `{CODEX_CONFIG_KEYS.hidden_work_summary}`", f"No separate summary setting; use `{CLAUDE_CONFIG_KEYS.hidden_work_visibility}` for thinking output", "Similar", "Codex has summary controls; Claude stream-json emits thinking deltas when available and enabled."),
+    ClientIntentRow("Raw reasoning/thinking", f"`{CODEX_CONFIG_KEYS.hidden_work_raw}=true`", f"`{CLAUDE_CONFIG_KEYS.hidden_work_visibility}=true`", "Similar", "codex.py separates summary and raw reasoning; claude.py has one thinking output toggle."),
+    ClientIntentRow("Output prefix", CODEX_OUTPUT_TERMS.prefix_code, CLAUDE_OUTPUT_TERMS.prefix_code, "Yes", "Prefixes intentionally match each upstream product's native term."),
+    ClientIntentRow("Tool output", f"{markdown_code_cell(TOOL_OUTPUT_PREFIX + '| ...')}, `{CLIENT_SHARED_CONFIG_KEYS.tool_output}`", f"{markdown_code_cell(TOOL_OUTPUT_PREFIX + '| ...')}, `{CLIENT_SHARED_CONFIG_KEYS.tool_output}`", "Yes", "Both clients print tool events in gray through the shared base class."),
+    ClientIntentRow("Model selector", f"`-m`, `/model`, `/config {CLIENT_SHARED_CONFIG_KEYS.model}=...`", f"`-m`, `/model`, `/config {CLIENT_SHARED_CONFIG_KEYS.model}=...`", "Yes", "Values are passed to different upstream model systems."),
+    ClientIntentRow("Resume id", f"Codex thread id, `resume <thread-id>`, `{CODEX_CONFIG_KEYS.session}`", f"Claude session id, `--resume <session-id>`, `{CLAUDE_CONFIG_KEYS.session}`", "Same purpose", "The id formats and transcript locations differ."),
+    ClientIntentRow("Permissive mode", f"`{CLIENT_PERMISSION_DEFAULTS.codex_bypass_approvals_flag}`, `{CLIENT_PERMISSION_DEFAULTS.codex_bypass_hook_trust_flag}`, `sandbox={CLIENT_PERMISSION_DEFAULTS.codex_sandbox}`, `approval_policy={CLIENT_PERMISSION_DEFAULTS.codex_approval_policy}`, `bypass_hook_trust=true`", f"`{CLIENT_PERMISSION_DEFAULTS.claude_skip_permissions_flag}`, `{CLAUDE_CONFIG_KEYS.permission}={CLIENT_PERMISSION_DEFAULTS.claude_permission_mode}`", "Same intent", "Both prototypes default to this permissive mode. Codex separates approval/sandbox bypass from hook-trust bypass; Claude has one broad permission bypass."),
+    ClientIntentRow("Approval handling", "`approval_policy`, `text_client.approval_mode`", "`permission_mode`", "Similar", "codex.py can also auto-answer app-server approval requests with `text_client.approval_mode=accept`. claude.py delegates permission handling to Claude CLI."),
+    ClientIntentRow("Web access", "`--search`, `web_search=live` for Codex web search", "`WebFetch` / web tools through Claude tool permissions", "Similar", "Different upstream tool names and permission controls."),
+    ClientIntentRow("Diagnostics", "`text_client.debug_json`, `text_client.raw_output`, `/raw`", "`text_client.raw_json`, `/raw`", "Similar", "Both are prototype diagnostics, not the main answer stream."),
+    ClientIntentRow("Metrics", f"`{CLIENT_SHARED_CONFIG_KEYS.metrics}`, `/metrics`", f"`{CLIENT_SHARED_CONFIG_KEYS.metrics}`, `/metrics`", "Yes", "Shared metric names and formatting come from `TextClientBase`."),
+)
+
+
+def client_intent_markdown_rows() -> list[str]:
+    lines = [
+        "| User concept | `codex.py` / Codex wording | `claude.py` / Claude wording | Same idea? | Notes |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for row in CLIENT_INTENT_ROWS:
+        lines.append(f"| {row.concept} | {row.codex} | {row.claude} | {row.same_idea} | {row.notes} |")
+    return lines
 
 
 def background_for_rgb(rgb: tuple[int, int, int], source: str) -> TerminalBackground:

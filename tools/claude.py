@@ -5,7 +5,7 @@
 
 This uses Claude Code's structured print mode instead of scraping the terminal UI:
 each turn runs `claude -p --verbose --output-format stream-json`, streams text
-deltas to stdout, prints tool/thinking metadata in gray, captures the returned
+deltas to stdout, prints tool/Claude thinking metadata in gray, captures the returned
 session id, and resumes that session on later turns.
 
 Usage:
@@ -28,7 +28,11 @@ from pathlib import Path
 from typing import Any
 
 from text_client_common import (
+    CLAUDE_CONFIG_KEYS,
+    CLAUDE_OUTPUT_TERMS,
+    CLIENT_PERMISSION_DEFAULTS,
     TextClientBase,
+    TOOL_OUTPUT_PREFIX,
     collect_token_usage,
     command_text,
     config_value_text,
@@ -37,24 +41,27 @@ from text_client_common import (
     parse_bool,
     parse_config_bool,
     parse_config_value,
+    prefixed_output_labels,
 )
 
 
 CLIENT_VERSION = "prototype"
 DEFAULT_TIMEOUT_SECONDS = 900.0
+DEFAULT_PERMISSION_MODE = CLIENT_PERMISSION_DEFAULTS.claude_permission_mode
+CLAUDE_SKIP_PERMISSIONS_FLAG = CLIENT_PERMISSION_DEFAULTS.claude_skip_permissions_flag
 EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 PERMISSION_MODES = {"acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"}
 KNOWN_CONFIG_KEYS = {
-    "effort",
-    "model",
-    "permission_mode",
-    "text_client.raw_json",
-    "text_client.session_id",
-    "text_client.show_metrics",
+    CLAUDE_CONFIG_KEYS.effort,
+    CLAUDE_CONFIG_KEYS.model,
+    CLAUDE_CONFIG_KEYS.permission,
+    CLAUDE_CONFIG_KEYS.raw_output,
+    CLAUDE_CONFIG_KEYS.session,
+    CLAUDE_CONFIG_KEYS.metrics,
     "text_client.show_status",
-    "text_client.show_thinking",
-    "text_client.show_tool_output",
-    "text_client.timeout",
+    CLAUDE_CONFIG_KEYS.hidden_work_visibility,
+    CLAUDE_CONFIG_KEYS.tool_output,
+    CLAUDE_CONFIG_KEYS.timeout,
 }
 REPL_COMMANDS = [
     "agents",
@@ -115,7 +122,7 @@ def claude_env() -> dict[str, str]:
 
 class ClaudeTextClient(TextClientBase):
     def __init__(self, args: argparse.Namespace):
-        super().__init__(str(args.cwd), ["thinking", "tool", "metrics"])
+        super().__init__(str(args.cwd), prefixed_output_labels(CLAUDE_OUTPUT_TERMS))
         self.args = args
         self.session_id = str(args.resume or args.session_id or "").strip()
         self.current_process: subprocess.Popen[str] | None = None
@@ -154,7 +161,9 @@ class ClaudeTextClient(TextClientBase):
             command.extend(["--disallowedTools", value])
         for value in self.args.tools:
             command.extend(["--tools", value])
-        if self.args.permission_mode != "default":
+        if self.args.permission_mode == DEFAULT_PERMISSION_MODE:
+            command.append(CLAUDE_SKIP_PERMISSIONS_FLAG)
+        elif self.args.permission_mode:
             command.extend(["--permission-mode", self.args.permission_mode])
         if self.args.system_prompt:
             command.extend(["--system-prompt", self.args.system_prompt])
@@ -198,7 +207,9 @@ class ClaudeTextClient(TextClientBase):
             command.extend(["--model", self.args.model])
         if self.args.effort:
             command.extend(["--effort", self.args.effort])
-        if self.args.permission_mode:
+        if self.args.permission_mode == DEFAULT_PERMISSION_MODE:
+            command.append(CLAUDE_SKIP_PERMISSIONS_FLAG)
+        elif self.args.permission_mode:
             command.extend(["--permission-mode", self.args.permission_mode])
         if self.session_id:
             command.extend(["--resume", self.session_id])
@@ -229,7 +240,7 @@ class ClaudeTextClient(TextClientBase):
             return
         self.start_metrics(text)
         self.answer_output_at_line_start = True
-        self.prefixed_output_at_line_start = {"thinking": True, "tool": True, "metrics": True}
+        self.prefixed_output_at_line_start = {label: True for label in prefixed_output_labels(CLAUDE_OUTPUT_TERMS)}
         self.blocks = {}
         self.tool_inputs_printed = set()
         self.last_result = ""
@@ -276,7 +287,7 @@ class ClaudeTextClient(TextClientBase):
         finally:
             self.current_process = None
         if stderr_text.strip():
-            self.write_prefixed_stdout("tool", stderr_text if stderr_text.endswith("\n") else stderr_text + "\n")
+            self.write_prefixed_stdout(TOOL_OUTPUT_PREFIX, stderr_text if stderr_text.endswith("\n") else stderr_text + "\n")
         if return_code not in {0, None}:
             self.print_aux_stderr(f"claude exited with status {return_code}")
 
@@ -310,7 +321,7 @@ class ClaudeTextClient(TextClientBase):
             try:
                 message = json.loads(line)
             except json.JSONDecodeError as exc:
-                self.write_prefixed_line("tool", f"invalid JSON from claude: {exc}")
+                self.write_prefixed_line(TOOL_OUTPUT_PREFIX, f"invalid JSON from claude: {exc}")
                 continue
             if isinstance(message, dict):
                 self.handle_message(message)
@@ -357,7 +368,7 @@ class ClaudeTextClient(TextClientBase):
         if subtype == "status" and self.args.show_status:
             status = str(message.get("status") or "").strip()
             if status:
-                self.write_prefixed_line("tool", f"status: {status}")
+                self.write_prefixed_line(TOOL_OUTPUT_PREFIX, f"status: {status}")
 
     def handle_stream_event(self, event: dict[str, Any]) -> None:
         now = time.monotonic()
@@ -374,7 +385,7 @@ class ClaudeTextClient(TextClientBase):
                 metrics.record_tool_item("start", {"type": "tool_use"}, now)
             if block_type == "tool_use" and self.args.show_tool_output:
                 name = str(block.get("name") or "tool")
-                self.write_prefixed_line("tool", f"start {name}")
+                self.write_prefixed_line(TOOL_OUTPUT_PREFIX, f"start {name}")
             return
         if event_type == "content_block_delta":
             index = int(event.get("index") or 0)
@@ -399,7 +410,7 @@ class ClaudeTextClient(TextClientBase):
                 if thinking:
                     if metrics is not None:
                         metrics.record_raw_reasoning(thinking, now)
-                    self.write_prefixed_stdout("thinking", thinking)
+                    self.write_prefixed_stdout(CLAUDE_OUTPUT_TERMS.prefix, thinking)
                 return
         if event_type == "content_block_stop":
             index = int(event.get("index") or 0)
@@ -430,13 +441,13 @@ class ClaudeTextClient(TextClientBase):
         stdout = str(result.get("stdout") or "")
         stderr = str(result.get("stderr") or "")
         interrupted = bool(result.get("interrupted"))
-        self.write_prefixed_line("tool", "result" + (" interrupted" if interrupted else ""))
+        self.write_prefixed_line(TOOL_OUTPUT_PREFIX, "result" + (" interrupted" if interrupted else ""))
         if stdout:
-            self.write_prefixed_line("tool", "stdout:")
-            self.write_prefixed_stdout("tool", stdout if stdout.endswith("\n") else stdout + "\n")
+            self.write_prefixed_line(TOOL_OUTPUT_PREFIX, "stdout:")
+            self.write_prefixed_stdout(TOOL_OUTPUT_PREFIX, stdout if stdout.endswith("\n") else stdout + "\n")
         if stderr:
-            self.write_prefixed_line("tool", "stderr:")
-            self.write_prefixed_stdout("tool", stderr if stderr.endswith("\n") else stderr + "\n")
+            self.write_prefixed_line(TOOL_OUTPUT_PREFIX, "stderr:")
+            self.write_prefixed_stdout(TOOL_OUTPUT_PREFIX, stderr if stderr.endswith("\n") else stderr + "\n")
 
     def handle_result_message(self, message: dict[str, Any]) -> None:
         metrics = self.current_metrics
@@ -489,7 +500,7 @@ class ClaudeTextClient(TextClientBase):
         name = str(item.get("name") or "tool")
         tool_input = item.get("input")
         summary = self.tool_input_summary(name, tool_input)
-        self.write_prefixed_line("tool", f"call {name}" + (f": {summary}" if summary else ""))
+        self.write_prefixed_line(TOOL_OUTPUT_PREFIX, f"call {name}" + (f": {summary}" if summary else ""))
 
     def tool_input_summary(self, name: str, tool_input: Any) -> str:
         if isinstance(tool_input, dict):
@@ -569,7 +580,7 @@ class ClaudeTextClient(TextClientBase):
         print("  /permissions [mode]             alias for /permission-mode")
         print("  /config [key=value ...]         show or change client settings")
         print("  /resume <session-id>            continue a specific Claude session")
-        print("  /thinking [on|off]              toggle gray thinking output")
+        print(f"  /thinking [on|off]              toggle gray {CLAUDE_OUTPUT_TERMS.lower_label} output")
         print("  /raw [on|off]                   toggle raw stream-json diagnostics")
         print("  /clear                          clear the terminal")
         print("  /quit                           exit")
@@ -578,10 +589,10 @@ class ClaudeTextClient(TextClientBase):
         print("Common settings:")
         print("  /config model=sonnet")
         print("  /config effort=high")
-        print("  /config permission_mode=dontAsk")
-        print("  /config text_client.show_tool_output=false")
-        print("  /config text_client.show_metrics=true")
-        print("  /config text_client.show_thinking=true")
+        print(f"  /config {CLAUDE_CONFIG_KEYS.permission}={DEFAULT_PERMISSION_MODE}")
+        print(f"  /config {CLAUDE_CONFIG_KEYS.tool_output}=false")
+        print(f"  /config {CLAUDE_CONFIG_KEYS.metrics}=true")
+        print(f"  /config {CLAUDE_CONFIG_KEYS.hidden_work_visibility}=true")
         print("Keyboard shortcuts:")
         print("  Ctrl-A start, Ctrl-E end, Ctrl-K kill to end, Ctrl-U kill line")
         print("  Ctrl-W kill word, Ctrl-Y yank, Ctrl-P/N history, Ctrl-R history search")
@@ -595,7 +606,7 @@ class ClaudeTextClient(TextClientBase):
         print(f"  Permission mode:    {self.args.permission_mode}" + (f" ({self.init_permission_mode})" if self.init_permission_mode else ""))
         print(f"  Session:            {self.session_id or '<not started>'}")
         print(f"  Tool output:        {'on' if self.args.show_tool_output else 'off'}")
-        print(f"  Thinking output:    {'on' if self.args.show_thinking else 'off'}")
+        print(f"  {CLAUDE_OUTPUT_TERMS.output_label}: {'on' if self.args.show_thinking else 'off'}")
         print(f"  Metrics:            {'on' if self.args.show_metrics else 'off'}")
         print(f"  Raw JSON:           {'on' if self.args.raw_json else 'off'}")
         print(f"  Terminal bg:        {self.terminal_background_text()}")
@@ -701,14 +712,14 @@ class ClaudeTextClient(TextClientBase):
         print(f"permission mode changed: {mode}")
 
     def handle_thinking_command(self, rest: str) -> None:
-        self.print_compat_note("thinking", "Claude", "Implemented by this text client to toggle clone-specific thinking display.")
+        self.print_compat_note("thinking", "Claude", f"Implemented by claude.py to toggle clone-specific {CLAUDE_OUTPUT_TERMS.lower_label} display.")
         value = rest.strip().lower()
         try:
             self.args.show_thinking = not self.args.show_thinking if not value else parse_bool(value)
         except ValueError as exc:
             print(str(exc))
             return
-        print(f"Thinking output {'on' if self.args.show_thinking else 'off'}")
+        print(f"{CLAUDE_OUTPUT_TERMS.output_label} {'on' if self.args.show_thinking else 'off'}")
 
     def handle_resume_command(self, rest: str) -> None:
         session_id = rest.strip()
@@ -754,55 +765,55 @@ class ClaudeTextClient(TextClientBase):
 
     def print_config_settings(self) -> None:
         rows = {
-            "model": self.args.model,
-            "effort": self.args.effort,
-            "permission_mode": self.args.permission_mode,
-            "text_client.show_metrics": self.args.show_metrics,
-            "text_client.show_tool_output": self.args.show_tool_output,
-            "text_client.show_thinking": self.args.show_thinking,
+            CLAUDE_CONFIG_KEYS.model: self.args.model,
+            CLAUDE_CONFIG_KEYS.effort: self.args.effort,
+            CLAUDE_CONFIG_KEYS.permission: self.args.permission_mode,
+            CLAUDE_CONFIG_KEYS.metrics: self.args.show_metrics,
+            CLAUDE_CONFIG_KEYS.tool_output: self.args.show_tool_output,
+            CLAUDE_CONFIG_KEYS.hidden_work_visibility: self.args.show_thinking,
             "text_client.show_status": self.args.show_status,
-            "text_client.raw_json": self.args.raw_json,
-            "text_client.timeout": self.args.timeout,
-            "text_client.session_id": self.session_id,
+            CLAUDE_CONFIG_KEYS.raw_output: self.args.raw_json,
+            CLAUDE_CONFIG_KEYS.timeout: self.args.timeout,
+            CLAUDE_CONFIG_KEYS.session: self.session_id,
         }
         for key, value in rows.items():
             print(f"{key} = {config_value_text(value)}")
 
     def apply_config_override(self, key: str, value: Any) -> Any:
-        if key == "model":
+        if key == CLAUDE_CONFIG_KEYS.model:
             self.args.model = str(value)
             return self.args.model
-        if key == "effort":
+        if key == CLAUDE_CONFIG_KEYS.effort:
             effort = str(value).strip().lower()
             if effort not in EFFORTS:
-                raise ValueError(f"effort must be one of: {', '.join(sorted(EFFORTS))}")
+                raise ValueError(f"{CLAUDE_CONFIG_KEYS.effort} must be one of: {', '.join(sorted(EFFORTS))}")
             self.args.effort = effort
             return effort
-        if key == "permission_mode":
+        if key == CLAUDE_CONFIG_KEYS.permission:
             mode = str(value)
             if mode not in PERMISSION_MODES:
-                raise ValueError(f"permission_mode must be one of: {', '.join(sorted(PERMISSION_MODES))}")
+                raise ValueError(f"{CLAUDE_CONFIG_KEYS.permission} must be one of: {', '.join(sorted(PERMISSION_MODES))}")
             self.args.permission_mode = mode
             return mode
-        if key == "text_client.show_tool_output":
+        if key == CLAUDE_CONFIG_KEYS.tool_output:
             self.args.show_tool_output = parse_config_bool(value)
             return self.args.show_tool_output
-        if key == "text_client.show_metrics":
+        if key == CLAUDE_CONFIG_KEYS.metrics:
             self.args.show_metrics = parse_config_bool(value)
             return self.args.show_metrics
-        if key == "text_client.show_thinking":
+        if key == CLAUDE_CONFIG_KEYS.hidden_work_visibility:
             self.args.show_thinking = parse_config_bool(value)
             return self.args.show_thinking
         if key == "text_client.show_status":
             self.args.show_status = parse_config_bool(value)
             return self.args.show_status
-        if key == "text_client.raw_json":
+        if key == CLAUDE_CONFIG_KEYS.raw_output:
             self.args.raw_json = parse_config_bool(value)
             return self.args.raw_json
-        if key == "text_client.timeout":
+        if key == CLAUDE_CONFIG_KEYS.timeout:
             self.args.timeout = float(value)
             return self.args.timeout
-        if key == "text_client.session_id":
+        if key == CLAUDE_CONFIG_KEYS.session:
             self.session_id = str(value)
             self.args.resume = self.session_id
             self.args.continue_last = False
@@ -823,7 +834,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--allowedTools", "--allowed-tools", dest="allowed_tools", action="append", default=[], metavar="TOOLS", help="Comma-separated Claude tools to allow.")
     parser.add_argument("--disallowedTools", "--disallowed-tools", dest="disallowed_tools", action="append", default=[], metavar="TOOLS", help="Comma-separated Claude tools to deny.")
     parser.add_argument("--tools", action="append", default=[], metavar="TOOLS", help="Comma-separated built-in tools, or an empty string to disable all tools.")
-    parser.add_argument("--permission-mode", choices=sorted(PERMISSION_MODES), default="default", help="Claude permission mode.")
+    parser.add_argument("--permission-mode", choices=sorted(PERMISSION_MODES), default=DEFAULT_PERMISSION_MODE, help=f"Claude permission mode. Default: {DEFAULT_PERMISSION_MODE}.")
+    parser.add_argument(CLAUDE_SKIP_PERMISSIONS_FLAG, action="store_true", help=f"Claude-compatible alias for --permission-mode {DEFAULT_PERMISSION_MODE}.")
     parser.add_argument("-r", "--resume", default="", metavar="SESSION_ID", help="Resume a Claude session id.")
     parser.add_argument("-c", "--continue", dest="continue_last", action="store_true", help="Continue the most recent conversation in this directory.")
     parser.add_argument("--session-id", default="", metavar="UUID", help="Use a specific session id for a new conversation.")
@@ -832,8 +844,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-budget-usd", default="", metavar="USD", help="Maximum dollar amount to spend for a print-mode turn.")
     parser.add_argument("--show-status", action="store_true", help="Show Claude status events as tool lines.")
     parser.add_argument("--hide-tool-output", dest="show_tool_output", action="store_false", help="Hide gray tool lines.")
-    parser.add_argument("--show-thinking", dest="show_thinking", action="store_true", help="Show gray thinking lines when Claude emits them.")
-    parser.add_argument("--hide-thinking", dest="show_thinking", action="store_false", help="Hide gray thinking lines.")
+    parser.add_argument("--show-thinking", dest="show_thinking", action="store_true", help=f"Show gray {CLAUDE_OUTPUT_TERMS.lower_label} lines when Claude emits them.")
+    parser.add_argument("--hide-thinking", dest="show_thinking", action="store_false", help=f"Hide gray {CLAUDE_OUTPUT_TERMS.lower_label} lines.")
     parser.add_argument("--show-metrics", dest="show_metrics", action="store_true", help="Show TTFT, ISL/OSL, token rate, and tool timing after each turn.")
     parser.add_argument("--hide-metrics", dest="show_metrics", action="store_false", help="Hide turn metrics.")
     parser.add_argument("--raw-json", action="store_true", help="Echo raw stream-json events to stderr.")
@@ -841,6 +853,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("-V", "--version", action="version", version=f"claude-text-client {CLIENT_VERSION}")
     parser.set_defaults(show_tool_output=True, show_thinking=False, show_metrics=False)
     args = parser.parse_args()
+    if args.dangerously_skip_permissions:
+        args.permission_mode = DEFAULT_PERMISSION_MODE
     args.cwd = str(Path(args.cwd).expanduser().resolve())
     return args
 
