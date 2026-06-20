@@ -27,6 +27,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from yolomux_lib.agent_comms.stream_events import ClaudeStreamJsonNormalizer
 from text_client_common import (
     CLAUDE_CONFIG_KEYS,
     CLAUDE_OUTPUT_TERMS,
@@ -113,6 +118,8 @@ class ClaudeTextClient(TextClientBase):
         self.init_permission_mode = ""
         self.init_tools: list[str] = []
         self.init_slash_commands: list[str] = []
+        self.stream_normalizer = ClaudeStreamJsonNormalizer()
+        self.last_normalized_events: list[dict[str, Any]] = []
 
     def print_exit_hint(self) -> None:
         if self.exit_hint_printed or not self.session_id:
@@ -306,6 +313,7 @@ class ClaudeTextClient(TextClientBase):
     def handle_message(self, message: dict[str, Any]) -> None:
         now = time.monotonic()
         message_type = str(message.get("type") or "")
+        self.last_normalized_events = self.normalized_stream_events(message)
         metrics = self.current_metrics
         if metrics is not None:
             metrics.mark_server_message(message_type, now)
@@ -329,6 +337,12 @@ class ClaudeTextClient(TextClientBase):
             return
         if message_type == "result":
             self.handle_result_message(message)
+
+    def normalized_stream_events(self, message: dict[str, Any]) -> list[dict[str, Any]]:
+        if str(message.get("type") or "") == "stream_event":
+            event = message.get("event") if isinstance(message.get("event"), dict) else {}
+            return self.stream_normalizer.normalize_item(event)
+        return self.stream_normalizer.normalize_item(message)
 
     def handle_system_message(self, message: dict[str, Any]) -> None:
         subtype = str(message.get("subtype") or "")

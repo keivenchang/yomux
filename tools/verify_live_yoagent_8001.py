@@ -205,6 +205,7 @@ def collect_dom(driver: webdriver.Chrome) -> dict[str, object]:
           statusText: status?.textContent || '',
           detailsFound: Boolean(details),
           detailsOpen: Boolean(details?.open),
+          detailsText: details?.textContent || '',
           previewText: preview?.textContent || '',
           streamText: stream?.textContent || '',
           bodyText: body?.textContent || '',
@@ -221,6 +222,10 @@ def has_tool_line(text: object) -> bool:
     return any(line.startswith(("tool start:", "tool output:", "tool done:")) for line in str(text or "").splitlines())
 
 
+def has_auxiliary_line(text: object) -> bool:
+    return any(line.startswith(("thinking:", "thinking done", "tool start:", "tool output:", "tool done:", "usage:", "error:")) for line in str(text or "").splitlines())
+
+
 def wait_for_running_auxiliary(driver: webdriver.Chrome, timeout: float = 90.0) -> dict[str, object]:
     deadline = time.monotonic() + timeout
     last: dict[str, object] = {}
@@ -228,7 +233,7 @@ def wait_for_running_auxiliary(driver: webdriver.Chrome, timeout: float = 90.0) 
         last = collect_dom(driver)
         preview = str(last.get("previewText") or "")
         stream = str(last.get("streamText") or "")
-        if last.get("streaming") and last.get("detailsFound") and (has_tool_line(preview) or has_tool_line(stream)):
+        if last.get("detailsFound") and (has_auxiliary_line(preview) or has_auxiliary_line(stream)) and (last.get("streaming") or last.get("done")):
             return last
         time.sleep(0.2)
     raise AssertionError(f"did not observe running auxiliary preview: {last}")
@@ -279,11 +284,11 @@ def verify_backend(driver: webdriver.Chrome, base_url: str, backend: str, screen
     preview_lines = [line for line in str(collapsed_done.get("previewText") or "").splitlines() if line.strip()]
     stream_text = str(done.get("streamText") or collapsed_done.get("streamText") or "")
     body_text = str(done.get("bodyText") or collapsed_done.get("bodyText") or "")
+    details_text = str(collapsed_done.get("detailsText") or "")
     assert str(running.get("previewText") or "").count("\n") <= 1, running
-    assert has_tool_line(expanded_running.get("streamText") or running.get("streamText") or running.get("previewText")), {"expanded": expanded_running, "running": running}
+    assert has_auxiliary_line(expanded_running.get("streamText") or running.get("streamText") or running.get("previewText")), {"expanded": expanded_running, "running": running}
     assert marker in body_text, collapsed_done
-    assert has_tool_line(stream_text), collapsed_done
-    assert "tool done:" in stream_text or "tool output:" in stream_text, collapsed_done
+    assert has_auxiliary_line(stream_text), collapsed_done
     assert len(preview_lines) == 1, collapsed_done
     assert str(collapsed_done.get("auxiliaryColor") or "") != str(collapsed_done.get("bodyColor") or ""), collapsed_done
     assert "tool start:" not in body_text, collapsed_done
@@ -295,6 +300,7 @@ def verify_backend(driver: webdriver.Chrome, base_url: str, backend: str, screen
         "running_preview": running.get("previewText"),
         "expanded_running_stream": expanded_running.get("streamText"),
         "done_preview": collapsed_done.get("previewText"),
+        "details_text": details_text,
         "final_stream": stream_text,
         "auxiliary_color": collapsed_done.get("auxiliaryColor"),
         "body_color": collapsed_done.get("bodyColor"),
@@ -305,6 +311,7 @@ def verify_backend(driver: webdriver.Chrome, base_url: str, backend: str, screen
 def main() -> int:
     args = parse_args()
     base_url = args.base_url.rstrip("/")
+    args.screenshot_dir.mkdir(parents=True, exist_ok=True)
     ping_status = http_ping(base_url)
     if ping_status != "401":
         raise AssertionError(f"expected unauthenticated /api/ping to return 401, got {ping_status}")

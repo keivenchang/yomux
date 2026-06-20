@@ -607,7 +607,7 @@ function isHtmlPath(path) {
 }
 
 function editorPreviewModeAvailable(path, state = null) {
-  return previewKindForPath(path, state || openFiles.get(path)) !== 'unsupported';
+  return previewPathIsPreviewable(path, state || openFiles.get(path));
 }
 
 function editorVisualLineFragments(line, columnCount, wrapEnabled = fileEditorWrapEnabled) {

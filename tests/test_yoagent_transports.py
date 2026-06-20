@@ -1,6 +1,7 @@
 import io
 import json
 import subprocess
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,6 +16,7 @@ from yolomux_lib.yoagent.transports import CodexMcpServerTransport
 from yolomux_lib.yoagent.transports import CodexSdkTransport
 from yolomux_lib.yoagent.transports import TMUX_LEGACY_TRANSPORT_ID
 from yolomux_lib.yoagent.transports import TmuxLegacyTransport
+from yolomux_lib.yoagent.transports import TransportInterrupted
 from yolomux_lib.yoagent.transports import default_yoagent_transport_registry
 from yolomux_lib.yoagent.transports import normalize_yoagent_transport_id
 
@@ -325,6 +327,35 @@ def test_claude_stream_json_transport_reports_result_error(monkeypatch):
     assert result.error == "permission denied"
 
 
+def test_claude_stream_json_transport_reports_interrupted_turn(monkeypatch):
+    cancel_event = threading.Event()
+    callback_args = []
+    monkeypatch.setattr(transport_module.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "claude" else None)
+
+    def fake_stream_json_run(*_args, cancel_event=None, process_callback=None, **_kwargs):
+        callback_args.append((cancel_event, callable(process_callback)))
+        if callable(process_callback):
+            process_callback("fake-process")
+        raise TransportInterrupted("interrupted")
+
+    monkeypatch.setattr(transport_module, "claude_stream_json_run", fake_stream_json_run)
+    process_records = []
+
+    result = ClaudeStreamJsonTransport().send(
+        {"session": "job-1", "agent_kind": "claude", "transport": "claude-stream-json", "managed": True, "cwd": "/repo/app"},
+        "summarize the diff",
+        cancel_event=cancel_event,
+        process_callback=process_records.append,
+        timeout=3,
+    )
+
+    assert result.ok is False
+    assert result.sent is True
+    assert result.reason_code == "interrupted"
+    assert callback_args == [(cancel_event, True)]
+    assert process_records == ["fake-process"]
+
+
 def test_codex_sdk_transport_reports_missing_sdk(monkeypatch):
     monkeypatch.setattr(transport_module.importlib.util, "find_spec", lambda name: None)
 
@@ -463,6 +494,18 @@ class FakeCodexAppServerProcess:
 
     def kill(self):
         self._returncode = -9
+
+
+def test_codex_app_server_session_interrupt_terminates_current_process():
+    fake_process = FakeCodexAppServerProcess([])
+    session = CodexAppServerSession({"session": "job-1", "agent_kind": "codex", "transport": "codex-app-server", "managed": True})
+    session.process = fake_process
+
+    result = session.interrupt()
+
+    assert result == {"ok": True, "interrupted": True, "transport": "codex-app-server"}
+    assert session.interrupted.is_set()
+    assert fake_process.terminated is True
 
 
 def test_codex_app_server_transport_runs_stdio_json_rpc_until_turn_completed(monkeypatch, tmp_path):

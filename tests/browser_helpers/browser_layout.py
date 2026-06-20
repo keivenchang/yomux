@@ -1545,7 +1545,7 @@ def split_seam_fixture_html():
     )
 
 
-def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620, file_explorer_open_intent=None, auto_approve_payload=None, access_role="admin", share_bootstrap=None, share_status_payload=None, wrap_app_root=False, yoagent_chat_mode=None):
+def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620, file_explorer_open_intent=None, auto_approve_payload=None, access_role="admin", share_bootstrap=None, share_status_payload=None, wrap_app_root=False, yoagent_chat_mode=None, available_agents=None, agent_auth=None):
     css = app_css()
     brand_css = (REPO_ROOT / "static" / "brand.css").read_text(encoding="utf-8")
     script_uri = (REPO_ROOT / "static" / "yolomux.js").as_uri()
@@ -1557,7 +1557,7 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
     fs_entries = fs_entries or {}
     bootstrap = {
         "sessions": sessions,
-        "availableAgents": ["term"],
+        "availableAgents": list(available_agents) if available_agents is not None else ["term"],
         "accessRole": access_role,
         "homePath": "/home/test",
         "repoRoot": "/home/test/yolomux.dev",
@@ -1584,6 +1584,8 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
     }
     if share_bootstrap is not None:
         bootstrap["share"] = share_bootstrap
+    if agent_auth is not None:
+        bootstrap["agentAuth"] = agent_auth
     file_explorer_intent_script = ""
     if file_explorer_open_intent is not None:
         file_explorer_intent_script = f"""

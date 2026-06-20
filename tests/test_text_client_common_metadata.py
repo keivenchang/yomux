@@ -32,6 +32,9 @@ from text_client_common import (  # noqa: E402
 )
 import claude  # noqa: E402
 import codex  # noqa: E402
+from yolomux_lib.agent_comms.stream_events import ClaudeStreamJsonNormalizer  # noqa: E402
+from yolomux_lib.agent_comms.stream_events import normalize_codex_app_server_message  # noqa: E402
+from yolomux_lib.yoagent.backends import yoagent_response_details  # noqa: E402
 from claude import ClaudeTextClient  # noqa: E402
 from codex import APP_SERVER_TIMEOUT_SECONDS, CodexTextClient  # noqa: E402
 
@@ -86,6 +89,10 @@ def slash_commands_printed_by_help(output: str) -> set[str]:
     return set(re.findall(r"(?m)(?<!\S)/([A-Za-z0-9-]+)\b", output))
 
 
+def stable_stream_events(events: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [{key: value for key, value in event.items() if key != "timestamp"} for event in events]
+
+
 def test_output_terminology_uses_cross_product_names():
     assert CODEX_OUTPUT_TERMS.title_label == "Reasoning (aka Thinking)"
     assert CODEX_OUTPUT_TERMS.lower_label == "reasoning (aka thinking)"
@@ -124,6 +131,65 @@ def test_shared_config_keys_map_same_intent_names():
 def test_prefixed_output_labels_share_common_tool_and_metrics_labels():
     assert prefixed_output_labels(CODEX_OUTPUT_TERMS) == ("reasoning", TOOL_OUTPUT_PREFIX, METRICS_OUTPUT_PREFIX)
     assert prefixed_output_labels(CLAUDE_OUTPUT_TERMS) == ("thinking", TOOL_OUTPUT_PREFIX, METRICS_OUTPUT_PREFIX)
+
+
+def test_text_clients_use_shared_agent_comms_primitives():
+    codex_source = (TOOLS_DIR / "codex.py").read_text()
+    claude_source = (TOOLS_DIR / "claude.py").read_text()
+    transport_source = (ROOT / "yolomux_lib" / "yoagent" / "transports.py").read_text()
+    assert "from yolomux_lib.agent_comms.codex_app_server import CodexAppServerProtocol" in codex_source
+    assert "from yolomux_lib.agent_comms.json_rpc import json_rpc_request" in codex_source
+    assert "from yolomux_lib.agent_comms.stream_events import normalize_codex_app_server_message" in codex_source
+    assert "def json_rpc_request(" not in codex_source
+    assert "def json_rpc_notification(" not in codex_source
+    assert "from yolomux_lib.agent_comms.stream_events import ClaudeStreamJsonNormalizer" in claude_source
+    assert "def _readline(" not in transport_source
+    assert "def _read_message(" not in transport_source
+    assert "def _read_response(" not in transport_source
+    assert "def _wait_turn_complete(" not in transport_source
+    assert isinstance(codex.CodexTextClient(codex_args()).last_normalized_events, list)
+    assert isinstance(claude.ClaudeTextClient(claude_args()).stream_normalizer, object)
+
+
+def test_text_client_normalized_events_match_shared_agent_comms(capsys):
+    codex_message = {
+        "jsonrpc": "2.0",
+        "method": "item/agentMessage/delta",
+        "params": {"threadId": "thread-1", "turnId": "turn-1", "itemId": "item-1", "delta": "Hello"},
+    }
+    codex_client = CodexTextClient(codex_args())
+    codex_client.thread_id = "thread-1"
+    codex_client.handle_async_message(codex_message, 999999999.0)
+    assert stable_stream_events(codex_client.last_normalized_events) == stable_stream_events(normalize_codex_app_server_message(codex_message))
+
+    claude_message = {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hi"}}
+    claude_client = ClaudeTextClient(claude_args())
+    claude_client.handle_message(claude_message)
+    assert stable_stream_events(claude_client.last_normalized_events) == stable_stream_events(ClaudeStreamJsonNormalizer().normalize_item(claude_message))
+    capsys.readouterr()
+
+
+def test_yoagent_response_details_reports_codex_transport_timing():
+    details = yoagent_response_details({
+        "backend_used": "codex",
+        "timing": {"ttfr_ms": 1500},
+        "cli": {
+            "transport": "codex-app-server",
+            "process_reused": True,
+            "thread_started": False,
+            "thread_ready_ms": 1.2,
+            "turn_start_ack_ms": 3.4,
+            "first_stream_event_ms": 5.6,
+            "first_assistant_delta_ms": 7.8,
+            "turn_complete_ms": 9.0,
+            "elapsed_ms": 10,
+            "prompt_chars": 42,
+        },
+    })
+
+    assert "- Codex transport: `warm reuse`, `thread reused`" in details
+    assert "first answer delta 7.8ms" in details
+    assert "- model CLI time: `0.010s`" in details
 
 
 def test_terminology_markdown_rows_are_valid_table_rows():

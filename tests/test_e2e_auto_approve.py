@@ -102,7 +102,7 @@ def test_e2e_mock_prompt_reaches_structured_ask_payload(monkeypatch, tmp_path, m
 
     created = _tmux(
         socket_path, "new-session", "-d", "-s", session, "-x", "120", "-y", "40",
-        f"cd {REPO_ROOT} && exec python3 mock/{mock_name}",
+        f"cd {REPO_ROOT} && exec python3 tools/{mock_name}",
     )
     assert created.returncode == 0, f"tmux new-session failed: {created.stderr or created.stdout}"
 
@@ -146,7 +146,7 @@ def test_e2e_mock_codex_sleep_10_prompt_reaches_structured_ask_payload(monkeypat
 
     created = _tmux(
         socket_path, "new-session", "-d", "-s", session, "-x", "120", "-y", "40",
-        f"cd {REPO_ROOT} && exec python3 mock/mock_codex.py",
+        f"cd {REPO_ROOT} && exec python3 tools/mock_codex.py",
     )
     assert created.returncode == 0, f"tmux new-session failed: {created.stderr or created.stdout}"
 
@@ -197,7 +197,7 @@ def test_e2e_yoagent_mock_sends_capture_multiple_results(monkeypatch, tmp_path):
     for agent, session in sessions.items():
         created = _tmux(
             socket_path, "new-session", "-d", "-s", session, "-x", "120", "-y", "40",
-            f"cd {REPO_ROOT} && exec python3 mock/mock_{agent}.py",
+            f"cd {REPO_ROOT} && exec python3 tools/mock_{agent}.py",
         )
         assert created.returncode == 0, f"tmux new-session failed for {agent}: {created.stderr or created.stdout}"
 
@@ -287,7 +287,7 @@ def test_e2e_yo_auto_approves_mock_yesno(monkeypatch, tmp_path, mock_name, steps
 
     created = _tmux(
         socket_path, "new-session", "-d", "-s", session, "-x", "120", "-y", "40",
-        f"cd {REPO_ROOT} && exec python3 mock/{mock_name}",
+        f"cd {REPO_ROOT} && exec python3 tools/{mock_name}",
     )
     assert created.returncode == 0, f"tmux new-session failed: {created.stderr or created.stdout}"
 

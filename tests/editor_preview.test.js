@@ -78,16 +78,27 @@ async function runEditorPreviewSuite() {
     const nowMs = 2_000_000;
     const nowSeconds = nowMs / 1000;
     const entries = [
+      {name: 'just.md', kind: 'file', mtime: nowSeconds - 5},
+      {name: 'hot.md', kind: 'file', mtime: nowSeconds - 30},
       {name: 'fresh.md', kind: 'file', mtime: nowSeconds - 4 * 60},
       {name: 'ten.md', kind: 'file', mtime: nowSeconds - 9 * 60},
       {name: 'hour.md', kind: 'file', mtime: nowSeconds - 50 * 60},
-      {name: 'just.md', kind: 'file', mtime: nowSeconds - 30},
       {name: 'old.md', kind: 'file', mtime: nowSeconds - 3 * 24 * 60 * 60},
     ];
     const rowMap = tree => Object.fromEntries(tree.querySelectorAll('.file-tree-row[data-path]').map(row => [row.dataset.path, row]));
+    const dateCell = row => row.querySelector(':scope > .file-tree-date');
+    const sessionsCss = fs.readFileSync('static_src/css/yolomux/20_sessions_popovers.css', 'utf8');
+    const treeCss = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
+    const fileTreeSource = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
+    assert.ok(/\.attention-pulse\s*\{[^}]*animation-name:\s*attention-ring-fade/.test(sessionsCss), 'recency and attention share the attention-ring-fade animation parent');
+    assert.ok(/\.attention-pulse\s*\{[^}]*animation-duration:\s*var\(--red-reminder-duration\)/.test(sessionsCss), 'shared attention pulse uses the red-reminder duration token');
+    assert.ok(/\.attention-pulse\s*\{[^}]*animation-timing-function:\s*var\(--red-reminder-easing\)/.test(sessionsCss), 'shared attention pulse uses the red-reminder easing token');
+    assert.equal(/file-tree-recency-pulse/.test(treeCss + fileTreeSource), false, 'the old standalone file-tree recency pulse is gone');
+    assert.equal(/10s ease-out/.test(treeCss), false, 'recency no longer uses the old one-shot ten-second pulse');
 
     api.setFileTreeRecencyNowForTest(nowMs);
-    assert.equal(api.fileTreeRecencyStateForMtimeForTest(nowSeconds - 30, nowMs).key, 'hot', 'sub-minute mtime maps to the brightest recency bucket');
+    assert.equal(api.fileTreeRecencyStateForMtimeForTest(nowSeconds - 5, nowMs).key, 'just-updated', 'very recent mtime maps to the pulse-eligible recency bucket');
+    assert.equal(api.fileTreeRecencyStateForMtimeForTest(nowSeconds - 30, nowMs).key, 'hot', 'sub-minute mtime maps to the brightest non-pulsing recency bucket');
     assert.equal(api.fileTreeRecencyStateForMtimeForTest(nowSeconds - 4 * 60, nowMs).key, 'fresh', 'five-minute-window mtime maps to the fresh recency bucket');
     assert.equal(api.fileTreeRecencyStateForMtimeForTest(nowSeconds - 9 * 60, nowMs).key, 'recent', 'sub-ten-minute mtime still gets a recent recency bucket');
     assert.equal(api.fileTreeRecencyStateForMtimeForTest(nowSeconds - 50 * 60, nowMs).key, 'recent', 'hour-window mtime maps to a middle recency bucket');
@@ -99,41 +110,56 @@ async function runEditorPreviewSuite() {
     tree.classList.add('file-explorer-tree-panel');
     api.renderTreeChildrenForTest(tree, '/repo', entries);
     const rows = rowMap(tree);
-    assert.equal(rows['/repo/just.md'].dataset.recency, 'hot', 'Ago mode marks sub-minute Finder rows hot');
-    assert.equal(rows['/repo/just.md'].classList.contains('file-tree-recency-hot'), true, 'Ago mode applies the hot row class');
-    assert.equal(rows['/repo/just.md'].classList.contains('file-tree-recency-pulse'), true, 'sub-minute Finder rows pulse at first render');
-    assert.equal(rows['/repo/just.md'].style.getPropertyValue('--file-tree-recency-date-color'), 'var(--file-tree-recency-hot)', 'hot rows expose the token-backed date color');
+    assert.equal(rows['/repo/just.md'].dataset.recency, 'just-updated', 'Ago mode marks very recent Finder rows just-updated');
+    assert.equal(rows['/repo/just.md'].classList.contains('file-tree-recency-just-updated'), true, 'Ago mode applies the just-updated row class');
+    assert.equal(dateCell(rows['/repo/just.md']).classList.contains('attention-pulse'), true, 'very recent Finder rows pulse their date cell with the shared attention class');
+    assert.notEqual(dateCell(rows['/repo/just.md']).style.getPropertyValue('--attention-animation-delay'), '', 'date-cell pulse is phase-aligned with attentionAnimationDelay');
+    assert.equal(rows['/repo/just.md'].style.getPropertyValue('--file-tree-recency-date-color'), 'var(--file-tree-recency-hot)', 'just-updated rows expose the token-backed date color');
+    assert.equal(rows['/repo/hot.md'].dataset.recency, 'hot', 'Ago mode marks sub-minute Finder rows hot after the pulse window');
+    assert.equal(dateCell(rows['/repo/hot.md']).classList.contains('attention-pulse'), false, 'hot-but-not-just-updated rows do not pulse');
     assert.equal(rows['/repo/fresh.md'].dataset.recency, 'fresh', 'Ago mode marks fresh Finder rows without pulsing');
-    assert.equal(rows['/repo/fresh.md'].classList.contains('file-tree-recency-pulse'), false, 'fresh recency rows do not pulse');
+    assert.equal(dateCell(rows['/repo/fresh.md']).classList.contains('attention-pulse'), false, 'fresh recency rows do not pulse');
     assert.equal(rows['/repo/ten.md'].dataset.recency, 'recent', 'Ago mode marks sub-ten-minute Finder rows recent without pulsing');
     assert.equal(rows['/repo/hour.md'].dataset.recency, 'recent', 'Ago mode marks hour-window Finder rows without pulsing');
-    assert.equal(rows['/repo/hour.md'].classList.contains('file-tree-recency-pulse'), false, 'hour-window recency rows do not pulse');
+    assert.equal(dateCell(rows['/repo/hour.md']).classList.contains('attention-pulse'), false, 'hour-window recency rows do not pulse');
     assert.equal(rows['/repo/old.md'].dataset.recency, 'old', 'Ago mode keeps old Finder rows in the gray bucket');
-    assert.equal(rows['/repo/old.md'].classList.contains('file-tree-recency-pulse'), false, 'old Finder rows never pulse');
+    assert.equal(dateCell(rows['/repo/old.md']).classList.contains('attention-pulse'), false, 'old Finder rows never pulse');
 
-    const firstPulseUntil = rows['/repo/just.md'].__fileTreeRecencyPulseUntilMs;
+    api.setFileExplorerSelectionForTest(['/repo/just.md']);
     api.renderTreeChildrenForTest(tree, '/repo', entries);
-    assert.equal(rows['/repo/just.md'].__fileTreeRecencyPulseUntilMs, firstPulseUntil, 'same-mtime Finder refresh does not restart the pulse');
+    assert.equal(rows['/repo/just.md'].dataset.recency, 'just-updated', 'selected rows still track the recency tier');
+    assert.equal(dateCell(rows['/repo/just.md']).classList.contains('attention-pulse'), false, 'selected rows suppress the recency attention pulse so selection colors win');
+    api.setFileExplorerSelectionForTest([]);
+    api.renderTreeChildrenForTest(tree, '/repo', entries);
+    assert.equal(dateCell(rows['/repo/just.md']).classList.contains('attention-pulse'), true, 'clearing selection restores the pulse while the mtime is still fresh');
+
+    const firstPulseUntil = rows['/repo/just.md'].__fileTreeRecencyAttentionUntilMs;
+    api.renderTreeChildrenForTest(tree, '/repo', entries);
+    assert.equal(rows['/repo/just.md'].__fileTreeRecencyAttentionUntilMs, firstPulseUntil, 'same-mtime Finder refresh keeps the same stop time');
     api.setFileTreeRecencyNowForTest(nowMs + 10001);
     api.renderTreeChildrenForTest(tree, '/repo', entries);
-    assert.equal(rows['/repo/just.md'].classList.contains('file-tree-recency-pulse'), false, 'pulse class expires after ten seconds');
+    assert.equal(rows['/repo/just.md'].dataset.recency, 'hot', 'rows settle into the hot tier after the fifteen-second pulse window');
+    assert.equal(dateCell(rows['/repo/just.md']).classList.contains('attention-pulse'), false, 'pulse class stops after the fifteen-second mtime window');
 
     const updatedEntries = entries.map(entry => entry.name === 'just.md'
       ? {...entry, mtime: (nowMs + 10001) / 1000 - 5}
       : entry);
     api.renderTreeChildrenForTest(tree, '/repo', updatedEntries);
-    assert.equal(rows['/repo/just.md'].classList.contains('file-tree-recency-pulse'), true, 'mtime changes restart the recent-row pulse');
-    assert.ok(rows['/repo/just.md'].__fileTreeRecencyPulseUntilMs > firstPulseUntil, 'mtime-change pulse gets a new stop time');
+    assert.equal(rows['/repo/just.md'].dataset.recency, 'just-updated', 'mtime changes put the row back in the just-updated tier');
+    assert.equal(dateCell(rows['/repo/just.md']).classList.contains('attention-pulse'), true, 'mtime changes restart the shared date-cell pulse');
+    assert.ok(rows['/repo/just.md'].__fileTreeRecencyAttentionUntilMs > firstPulseUntil, 'mtime-change pulse gets a new stop time');
 
     api.setFileExplorerTreeDateModeForTest('date');
     api.renderTreeChildrenForTest(tree, '/repo', updatedEntries);
-    assert.equal(rows['/repo/just.md'].dataset.recency, 'hot', 'Date mode preserves Finder recency data');
-    assert.equal(rows['/repo/just.md'].classList.contains('file-tree-recency-hot'), true, 'Date mode preserves Finder recency classes');
+    assert.equal(rows['/repo/just.md'].dataset.recency, 'just-updated', 'Date mode preserves Finder recency data');
+    assert.equal(rows['/repo/just.md'].classList.contains('file-tree-recency-just-updated'), true, 'Date mode preserves Finder recency classes');
+    assert.equal(dateCell(rows['/repo/just.md']).classList.contains('attention-pulse'), true, 'Date mode keeps the shared pulse on the date cell');
     assert.equal(rows['/repo/ten.md'].dataset.recency, 'recent', 'Date mode preserves sub-ten-minute Finder recency');
 
     api.setFileExplorerTreeDateModeForTest('none');
     api.renderTreeChildrenForTest(tree, '/repo', updatedEntries);
     assert.equal(rows['/repo/just.md'].dataset.recency, undefined, 'None mode also leaves Finder recency data unset');
+    assert.equal(dateCell(rows['/repo/just.md']).classList.contains('attention-pulse'), false, 'None mode removes date-cell attention pulse');
 
     api.setFileExplorerTreeDateModeForTest('relative');
     const differTree = new TestElement('differ-recency-tree');
@@ -141,12 +167,13 @@ async function runEditorPreviewSuite() {
     differTree.classList.add('file-explorer-tree-panel');
     api.renderTreeChildrenForTest(differTree, '/repo', updatedEntries, 0, [], {differMode: true});
     const differRows = rowMap(differTree);
-    assert.equal(differRows['/repo/just.md'].dataset.recency, 'hot', 'Differ Ago rows use the shared recency state');
-    assert.equal(differRows['/repo/just.md'].classList.contains('file-tree-recency-pulse'), true, 'Differ sub-minute rows pulse from shared recency rules');
+    assert.equal(differRows['/repo/just.md'].dataset.recency, 'just-updated', 'Differ Ago rows use the shared recency state');
+    assert.equal(dateCell(differRows['/repo/just.md']).classList.contains('attention-pulse'), true, 'Differ very recent rows pulse from shared recency rules');
     assert.equal(differRows['/repo/ten.md'].dataset.recency, 'recent', 'Differ Ago rows keep graduated recent styling');
     api.setFileExplorerTreeDateModeForTest('date');
     api.renderTreeChildrenForTest(differTree, '/repo', updatedEntries, 0, [], {differMode: true});
-    assert.equal(differRows['/repo/just.md'].dataset.recency, 'hot', 'Differ Date rows preserve the recency signal');
+    assert.equal(differRows['/repo/just.md'].dataset.recency, 'just-updated', 'Differ Date rows preserve the recency signal');
+    assert.equal(dateCell(differRows['/repo/just.md']).classList.contains('attention-pulse'), true, 'Differ Date rows keep the shared pulse');
     api.setFileTreeRecencyNowForTest(null);
   });
 
@@ -596,9 +623,8 @@ async function runEditorPreviewSuite() {
     const metaNode = api.testElementForId('meta-meta-preview');
     metaNode.innerHTML = 'stale';
     api.tmuxWindowForTest('meta-preview', {windowIndex: '1'}, 'tmux window 1:bash');
-    assert.ok(metaNode.innerHTML.includes('/tmp/shell'), 'clicking a tmux window immediately repaints the Info Bar directory from the local metadata preview');
-    assert.equal(metaNode.innerHTML.includes('/repo/agent'), false, 'the immediate Info Bar repaint does not wait on the metadata poll to suppress the previous window repo');
-    assert.deepStrictEqual(calls, [{url: '/api/tmux-window?session=meta-preview&window=1', method: 'POST'}], 'immediate Info Bar repaint still posts the tmux select-window request');
+    assert.equal(metaNode.innerHTML, 'stale', 'clicking a tmux window does not repaint from a predicted local window index');
+    assert.deepStrictEqual(calls, [{url: '/api/tmux-window?session=meta-preview&window=1', method: 'POST'}], 'tmux window click still posts the authoritative select-window request');
     api.setTranscriptInfoForTest('meta-preview', {
       selected_pane: {target: 'meta-preview:0.0', window: '0', pane: '0', current_path: '/repo/agent/src'},
       panes: [
@@ -611,16 +637,19 @@ async function runEditorPreviewSuite() {
     metaNode.innerHTML = 'stale';
     assert.equal(api.handleTerminalDataForTest('meta-preview', '\x02n'), true, 'Ctrl-b n terminal bytes are still accepted by the transport path');
     assert.equal(terminalFrames.at(-1).data, '\x02n', 'Ctrl-b n is still sent verbatim to tmux');
-    assert.ok(metaNode.innerHTML.includes('/tmp/shell'), 'Ctrl-b n immediately mirrors the next tmux window into the Info Bar');
-    assert.equal(metaNode.innerHTML.includes('/repo/agent'), false, 'Ctrl-b n preview suppresses the previous window repo immediately');
+    assert.equal(metaNode.innerHTML, 'stale', 'Ctrl-b n does not locally predict which tmux window became active');
     metaNode.innerHTML = 'stale again';
     assert.equal(api.handleTerminalDataForTest('meta-preview', '\x02'), true, 'a split Ctrl-b prefix is still sent verbatim');
     assert.equal(api.handleTerminalDataForTest('meta-preview', '0'), true, 'a split tmux numeric selection key is still sent verbatim');
     assert.deepStrictEqual(terminalFrames.slice(-2).map(frame => frame.data), ['\x02', '0'], 'split tmux prefix and digit are not swallowed or merged');
-    assert.ok(metaNode.innerHTML.includes('/repo/agent/src'), 'Ctrl-b then 0 mirrors direct tmux window selection into the Info Bar');
+    assert.equal(metaNode.innerHTML, 'stale again', 'Ctrl-b then 0 waits for backend/tmux read-back instead of local prediction');
     const tmuxPrefixObserver = source.slice(source.indexOf('function observeTerminalTmuxPrefixWindowSwitches(session, data)'), source.indexOf('function handleTerminalData(session, data)'));
     assert.ok(tmuxPrefixObserver.includes("char === '\\x02'") && tmuxPrefixObserver.includes('terminalTmuxPrefixWindowShortcut(char)'), 'terminal transport observes tmux prefix window shortcuts without owning the bytes');
+    assert.equal(source.includes('function previewTmuxWindowInfo'), false, 'tmux window switching has no relative-index predictor');
+    assert.equal(source.includes('function previewTmuxWindowLabel'), false, 'tmux window switching has no optimistic local label repaint');
+    assert.ok(/function noteTerminalTmuxWindowSwitch\(session, shortcut\)[\s\S]*scheduleTmuxWindowReadback\(session\)/.test(source), 'terminal prefix observer schedules backend read-back instead of predicting active window');
     assert.ok(/function handleTerminalData\(session, data\)[\s\S]*observeTerminalTmuxPrefixWindowSwitches\(session, filtered\);[\s\S]*socket\.send\(JSON\.stringify\(\{type: 'input', data: filtered\}\)\)/.test(source), 'tmux prefix observation happens before sending the unchanged terminal bytes');
+    assert.ok(/apiFetchJson\(`\/api\/tmux-window\?session=\$\{encodeURIComponent\(session\)\}&window=\$\{encodeURIComponent\(String\(directIndex\)\)\}`[\s\S]*\.then\(\(\) => scheduleTmuxWindowReadback\(session, \{delayMs: 0\}\)\)/.test(source), 'direct window buttons read back after the authoritative tmux select-window request');
   });
 
   test('t@6424', () => {
@@ -1230,7 +1259,15 @@ async function runEditorPreviewSuite() {
   });
 
   test('t@6833', () => {
-    const api = loadYolomux('', ['alpha', 'beta']);
+    const api = loadYolomux('', ['alpha', 'beta'], 'http:', 'Linux x86_64', 'admin', {
+      bootstrapOverrides: {
+        availableAgents: ['codex', 'claude'],
+        agentAuth: {
+          codex: {installed: true, logged_in: true},
+          claude: {installed: true, logged_in: true},
+        },
+      },
+    });
     const baseActivitySummaryPayload = {
       generated_at: '2026-05-31T12:00:00+00:00',
       global: {
@@ -1248,12 +1285,24 @@ async function runEditorPreviewSuite() {
         {session: '6', window: '1', window_name: 'claude', window_label: '1:claude', agent_kind: 'claude', label: "session '6' 1:claude", last_used_ts: Date.now() / 1000 - 180, sort_ts: Date.now() / 1000 - 180, cwd: '/home/test/other', recent_paths: [{path: '/home/test/other', mtime: Date.now() / 1000 - 180, count: 1}]},
       ],
     };
+    const noAgentApi = loadYolomux('', ['alpha', 'beta']);
+    noAgentApi.setActivitySummaryPayloadForTest(baseActivitySummaryPayload);
+    const noAgentHtml = noAgentApi.yoagentChatHtml();
+    assert.ok(noAgentHtml.includes('data-yoagent-chat-form'), 'No-backend YO!agent still shows a disabled chat form');
+    assert.ok(noAgentHtml.includes('Set a Claude or Codex backend in Preferences to chat.'), 'No-backend YO!agent shows the disabled backend message');
+    assert.ok(/data-yoagent-backend[\s\S]*disabled[\s\S]*No agent/.test(noAgentHtml), 'No-backend composer shows a disabled none backend state');
+    const claudeOnlyApi = loadYolomux('', ['alpha', 'beta'], 'http:', 'Linux x86_64', 'admin', {
+      bootstrapOverrides: {
+        availableAgents: ['claude'],
+        agentAuth: {claude: {installed: true, logged_in: true}},
+      },
+    });
+    const claudeOnlyHtml = claudeOnlyApi.yoagentChatHtml();
+    assert.ok(/data-yoagent-backend[\s\S]*<option value="claude" selected/.test(claudeOnlyHtml), 'Composer selects the only installed logged-in backend');
+    assert.equal(/data-yoagent-backend[\s\S]*<option value="codex"/.test(claudeOnlyHtml), false, 'Composer hides unavailable backends');
     api.setActivitySummaryPayloadForTest(baseActivitySummaryPayload);
     assert.ok(api.globalActivitySummaryHtml().includes('YO!agent'), 'global activity summary uses the YO agent label');
     assert.equal(api.globalActivitySummaryHtml().includes('Session alpha'), false, 'YO!agent default panel does not expose the per-session SESSION detail list');
-    assert.ok(api.yoagentChatHtml().includes('data-yoagent-chat-form'), 'No-agent YO!agent still shows the chat form for deterministic local answers');
-    assert.equal(api.yoagentChatHtml().includes('Set a Claude or Codex backend in Preferences to chat.'), false, 'No-agent YO!agent does not show the old disabled backend message');
-    assert.ok(api.yoagentChatHtml().includes('Ask anything'), 'No-agent YO!agent composer uses the localized ask-anything placeholder');
     api.setClientSettingsPatchForTest({yoagent: {backend: 'claude'}});
     assert.equal(api.yoagentChatHtml().includes('Your most recent work is about editor fixes'), false, 'Claude-backed YO!agent does not auto-inject Recent agents until the startup one-shot is enabled');
     assert.equal(api.showYoagentStartupInfoOnceForTest(), true, 'YO!agent startup info can be shown once when the tab first opens');
@@ -1276,13 +1325,16 @@ async function runEditorPreviewSuite() {
     assert.equal(enabledChatHtml.includes('yoagent-chat empty'), false, 'YO!agent intro is a regular message, not a special empty layout');
     assert.equal(enabledChatHtml.includes('yoagent-chat-toolbar'), false, 'YO!agent chat does not put Clear in a detached toolbar');
     assert.ok(enabledChatHtml.includes('yoagent-chat-controls'), 'YO!agent composer has a control row');
-    assert.ok(enabledChatHtml.includes('data-yoagent-backend'), 'YO!agent composer shows the backend (Auto) pill mapped to yoagent.backend');
-    // The composer pill offers only Auto / Claude / Codex — never "No agent" (deterministic), which stays
-    // an internal Auto fallback.
-    assert.ok(/data-yoagent-backend[\s\S]*?<option value="auto"/.test(enabledChatHtml), 'YO!agent composer pill offers Auto');
-    assert.ok(/data-yoagent-backend[\s\S]*?<option value="claude"/.test(enabledChatHtml), 'YO!agent composer pill offers Claude');
-    assert.ok(/data-yoagent-backend[\s\S]*?<option value="codex"/.test(enabledChatHtml), 'YO!agent composer pill offers Codex');
-    assert.equal(/data-yoagent-backend[\s\S]*?<option value="deterministic"/.test(enabledChatHtml), false, 'YO!agent composer pill does not offer No agent (deterministic)');
+    assert.ok(enabledChatHtml.includes('data-yoagent-backend'), 'YO!agent composer shows the backend selector mapped to yoagent.backend');
+    assert.ok(enabledChatHtml.includes('data-yoagent-model'), 'YO!agent composer shows the model selector');
+    assert.ok(enabledChatHtml.includes('data-yoagent-effort'), 'YO!agent composer shows the effort selector');
+    assert.ok(enabledChatHtml.indexOf('data-yoagent-backend') < enabledChatHtml.indexOf('data-yoagent-model'), 'YO!agent composer renders backend before model');
+    assert.ok(enabledChatHtml.indexOf('data-yoagent-model') < enabledChatHtml.indexOf('data-yoagent-effort'), 'YO!agent composer renders model before effort');
+    assert.ok(/data-yoagent-backend[\s\S]*?<option value="claude" selected/.test(enabledChatHtml), 'YO!agent composer selects the saved backend');
+    assert.ok(/data-yoagent-model[\s\S]*data-yoagent-setting-path="yoagent\.claude_model"[\s\S]*?<option value="claude-opus-4-8"/.test(enabledChatHtml), 'YO!agent composer model options follow the selected backend');
+    assert.ok(/data-yoagent-effort[\s\S]*data-yoagent-setting-path="yoagent\.claude_effort"[\s\S]*?<option value="low"/.test(enabledChatHtml), 'YO!agent composer effort options follow the selected backend');
+    assert.equal(/data-yoagent-backend[\s\S]*?<option value="auto"/.test(enabledChatHtml), false, 'YO!agent composer backend selector does not offer Auto');
+    assert.equal(/data-yoagent-backend[\s\S]*?<option value="deterministic"/.test(enabledChatHtml), false, 'YO!agent composer backend selector does not offer No agent as a selectable backend');
     assert.ok(enabledChatHtml.includes('yoagent-chat-send-icon'), 'YO!agent send button is a circular arrow icon');
     assert.ok(enabledChatHtml.indexOf('yoagent-chat-clear') < enabledChatHtml.indexOf('yoagent-chat-send'), 'YO!agent send arrow is the last (far-right) control, after Clear');
     api.setYoagentMessagesForTest([
@@ -1997,16 +2049,16 @@ async function runEditorPreviewSuite() {
 
   test('t@7283', () => {
     // YO!agent composer redesign (mockup 044): a rounded input bar with the input on top and a control
-    // row below — backend "Auto" pill (wired to yoagent.backend) + subtle Clear + a circular send arrow.
+    // row below — backend/model/effort selectors (wired to YO!agent settings) + subtle Clear + a circular send arrow.
     const src = fs.readFileSync('static/yolomux.js', 'utf8');
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
     assert.ok(/class="yoagent-chat-controls"/.test(src), 'YO!agent composer has a control row');
-    assert.ok(/function yoagentBackendPillHtml/.test(src) && /data-yoagent-backend/.test(src), 'composer renders the backend (Auto) pill');
-    assert.ok(/\[data-yoagent-backend\][\s\S]*?saveSettingsPatch\(settingPatch\('yoagent\.backend'/.test(src), 'changing the backend pill writes the real yoagent.backend setting');
+    assert.ok(/function yoagentComposerControlsHtml/.test(src) && /kind: 'backend'/.test(src) && /kind: 'model'/.test(src) && /kind: 'effort'/.test(src), 'composer renders backend/model/effort selectors');
+    assert.ok(/data-yoagent-setting-path/.test(src) && /saveSettingsPatch\(settingPatch\(path, yoagentSetting\.value\)/.test(src), 'changing a composer selector writes the real YO!agent setting path');
     assert.ok(/class="yoagent-chat-send-icon"[\s\S]*?<path/.test(src), 'send button is a circular arrow icon (not a text "Ask" button)');
     assert.ok(/\.yoagent-chat-form\s*\{[^}]*border-radius:\s*14px/.test(css), 'composer is one rounded container');
     assert.ok(/\.yoagent-chat-send\s*\{[^}]*border-radius:\s*50%/.test(css), 'send button is circular');
-    assert.ok(/\.yoagent-backend-pill\s*\{/.test(css), 'backend pill is styled as a pill');
+    assert.ok(/\.yoagent-composer-pill,\s*\n\.yoagent-backend-pill\s*\{/.test(css), 'composer selectors are styled as compact pills');
     assert.ok(/\.yoagent-recent-agents-list\s*\{[^}]*display:\s*grid/.test(css), 'YO!agent recent agents render as a compact bullet list inside the chat history');
     assert.ok(/function yoagentRecentAgentPathText\(agent, signal = yoagentRecentAgentSignal\(agent\)\)[\s\S]*agent\?\.recent_paths[\s\S]*compactHomePath/.test(src), 'YO!agent recent agents display backend recent_paths with compact home paths');
     assert.ok(/function yoagentRecentAgentsHtml\(\)[\s\S]*activitySummaryPayload\?\.agents[\s\S]*<ul class="yoagent-recent-agents-list">/.test(src), 'YO!agent recent agents render from backend activity-summary agents as a list');
@@ -2049,13 +2101,17 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.yoagent-agent-result-body\s*\{[\s\S]*display:\s*grid[\s\S]*gap:\s*0/.test(css), 'YO!agent target-agent result body stacks heading and output without extra vertical gap');
     assert.ok(/\.yoagent-message\.assistant\.yoagent-agent-result \.yoagent-agent-result-output\s*\{[\s\S]*padding-inline-start:\s*14px[\s\S]*border-inline-start:\s*3px solid var\(--accent-gold\)/.test(css), 'YO!agent target-agent result output is indented behind a full-height left bar');
     assert.ok(/\.yoagent-message\.user\s*\{[\s\S]*align-self:\s*flex-end[\s\S]*margin-inline-start:\s*28px[\s\S]*border-color:\s*var\(--link-soft\)/.test(css), 'YO!agent user bubbles are right-indented with the secondary/link border color');
+    assert.ok(/\.yoagent-message\s*\{[\s\S]*overflow:\s*visible[\s\S]*overscroll-behavior:\s*auto/.test(css), 'YO!agent message bubbles are not vertical scroll containers that swallow wheel input');
+    assert.ok(/\.yoagent-message-body\s*\{[\s\S]*overflow-x:\s*visible[\s\S]*overflow-y:\s*visible[\s\S]*overscroll-behavior:\s*auto/.test(css), 'YO!agent message bodies leave vertical wheel scrolling to the chat history owner');
     assert.ok(/function yoagentTimestampText[\s\S]*second:\s*'2-digit'/.test(src), 'YO!agent chat timestamps include seconds');
     assert.ok(/function yoagentMessageDetailsHtml[\s\S]*data-yoagent-message-details-key/.test(src), 'YO!agent assistant diagnostics render as an expandable details block with a stable message key');
     assert.ok(/function yoagentMessageDetailsHtml[\s\S]*yoagent-details-preview[\s\S]*yoagent-auxiliary-stream[\s\S]*yoagent-details-note/.test(src), 'YO!agent assistant diagnostics render a collapsed auxiliary preview, expanded stream, and truncation note');
     assert.ok(/function refreshYoagentSummaryRegions[\s\S]*const openDetails = yoagentOpenMessageDetailsState\(node\)[\s\S]*restoreYoagentOpenMessageDetailsState\(node, openDetails\)/.test(src), 'YO!agent summary refresh preserves expanded Details blocks');
     assert.ok(/function renderYoagentPanel[\s\S]*const openDetails = yoagentOpenMessageDetailsState\(node\)[\s\S]*node\.innerHTML = yoagentChatHtml\(\);[\s\S]*restoreYoagentOpenMessageDetailsState\(node, openDetails\)/.test(src), 'YO!agent full chat rerenders preserve expanded Details blocks');
     assert.ok(/\.yoagent-message-details pre\s*\{[\s\S]*max-height:\s*180px/.test(css), 'YO!agent diagnostics details stay bounded inside the message');
+    assert.ok(/\.yoagent-message-details pre\s*\{[\s\S]*overscroll-behavior:\s*auto/.test(css), 'YO!agent diagnostics details allow vertical wheel chaining at scroll edges');
     assert.ok(/\.yoagent-details-preview\s*\{[\s\S]*max-height:\s*calc\(2 \* max/.test(css), 'YO!agent collapsed auxiliary preview reserves at most two lines while running');
+    assert.ok(/\.yoagent-details-preview\s*\{[\s\S]*overflow:\s*clip/.test(css), 'YO!agent collapsed auxiliary preview clips without becoming a hidden scroll container');
     assert.ok(/\.yoagent-message-details pre\.yoagent-auxiliary-stream\s*\{[\s\S]*color:\s*color-mix/.test(css), 'YO!agent auxiliary stream is visually quieter than normal chat text');
     assert.ok(/\.yoagent-chat-history\s*\{[\s\S]*overflow-x:\s*hidden[\s\S]*overflow-y:\s*auto[\s\S]*scrollbar-gutter:\s*stable/.test(css), 'YO!agent chat history is the single normal vertical scrollbar with a stable gutter');
     assert.ok(/\.yoagent-chat-history\s*\{[\s\S]*--pane-scrollbar-current-thumb:\s*var\(--pane-scrollbar-thumb\)[\s\S]*--pane-scrollbar-current-track:\s*var\(--pane-scrollbar-track\)/.test(css), 'YO!agent history keeps the normal rail neutral during active-pane hover');
@@ -2070,6 +2126,7 @@ async function runEditorPreviewSuite() {
     assert.ok(actionCardBody.includes("t('yoagent.action.preview')") && actionCardBody.includes("t('yoagent.action.send')"), 'YO!agent action card labels are localized');
     assert.ok(src.includes("t('yoagent.statusActionSent'") && src.includes("t('yoagent.statusBackend'"), 'YO!agent action/backend status strings are localized');
     assert.ok(/\.yoagent-chat \.markdown-body pre[\s\S]*?border-radius:\s*8px/.test(css), 'YO!agent code blocks are soft rounded boxes');
+    assert.ok(/\.yoagent-chat \.markdown-body pre,[\s\S]*\.yoagent-global \.markdown-body pre\s*\{[\s\S]*overflow-x:\s*auto[\s\S]*overflow-y:\s*auto[\s\S]*overscroll-behavior:\s*auto/.test(css), 'YO!agent code blocks keep horizontal scrolling and normal vertical wheel chaining');
     assert.ok(/body\.theme-light \.yoagent-chat \.markdown-body pre/.test(css), 'YO!agent code blocks get a light box + dark text in light mode');
     assert.ok(/--lt-code-block-bg:\s*#f3f4f6;[\s\S]*--lt-code-block-border:\s*#e4e7ec;[\s\S]*--lt-code-block-text:\s*#1f2328;/.test(css), 'R4: neutral light code-block values live in the shared lt token owner');
     assert.ok(/body\.theme-light \.yoagent-chat,[\s\S]*body\.theme-light \.yoagent-message\s*\{[\s\S]*background:\s*var\(--panel\);[\s\S]*border-color:\s*var\(--line\);/.test(css), 'R4: YO!agent light bubbles use shared panel and line tokens');

@@ -499,6 +499,10 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.previewKindForPath('/repo/archive.zip'), 'unsupported', 'archives are recognized fallback, not unpacked');
     assert.equal(api.previewKindForPath('/repo/app.py'), 'text', 'known code files get the code-preview fallback');
     assert.equal(api.previewRendererForPath('/repo/config.json').id, 'structured', 'preview dispatch comes from the shared renderer registry');
+    assert.equal(api.previewPathIsPreviewable('/repo/app.py'), false, 'generic code/text renderer is not a distinct Preview affordance');
+    assert.equal(api.previewPathIsPreviewable('/repo/notes.txt'), false, 'plain text renderer is not a distinct Preview affordance');
+    assert.equal(api.previewPathIsPreviewable('/repo/config.json'), true, 'structured JSON preview stays available because it differs from the editor');
+    assert.equal(api.previewRendererForPath('/repo/notes.txt').previewable, false, 'text preview availability is owned by the renderer registry flag');
     assert.equal(api.previewRendererForPath('/repo/photo.tiff').id, 'unsupported-image', 'recognized image fallbacks are registry-owned');
     assert.equal(api.previewRendererForPath('/repo/archive.zip').id, 'unsupported-archive', 'recognized archive fallbacks are registry-owned');
     const previewRendererSamples = {
@@ -780,7 +784,9 @@ async function runLayoutRestoreSuite() {
     const api = loadYolomux('', ['1']);
     assert.equal(api.editorPreviewModeAvailable('/home/test/README.md'), true);
     assert.equal(api.editorPreviewModeAvailable('/home/test/index.html'), true);
-    assert.equal(api.editorPreviewModeAvailable('/home/test/app.py'), true);
+    assert.equal(api.editorPreviewModeAvailable('/home/test/app.py'), false);
+    assert.equal(api.editorPreviewModeAvailable('/home/test/notes.txt'), false);
+    assert.equal(api.editorPreviewModeAvailable('/home/test/config.json'), true);
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.ok(source.includes('function sanitizeMarkdownPreviewHtml'), 'Markdown previews pass through a sanitizer');
     assert.ok(source.includes('MARKDOWN_PREVIEW_BLOCKED_TAGS'), 'Markdown sanitizer blocks executable/embedded HTML tags');
@@ -808,7 +814,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(htmlPreview.scrollTop, 37, 'HTML preview refresh preserves vertical scroll');
     assert.equal(htmlPreview.scrollLeft, 6, 'HTML preview refresh preserves horizontal scroll');
     api.setFileEditorViewMode('/home/test/app.py', 'split');
-    assert.equal(api.editorViewModeFor('/home/test/app.py'), 'split');
+    assert.equal(api.editorViewModeFor('/home/test/app.py'), 'edit');
     api.setFileEditorViewMode('/home/test/README.md', 'split');
     assert.equal(api.editorViewModeFor('/home/test/README.md'), 'split');
     const changedPath = '/repo/app/README.md';
@@ -1053,9 +1059,9 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes('if (transcriptMeta.agentAuth) agentAuth = transcriptMeta.agentAuth;'), '#39: the metadata poll refreshes agent login status');
     // #41: the frontend mirrors the server's auto backend resolution (codex -> claude -> deterministic)
     // so the chat input enables to match what the backend will run, and defaults to auto.
-    assert.ok(/function yoagentResolvedBackend\(\)[\s\S]*?for \(const agent of \['codex', 'claude'\]\)[\s\S]*?availableAgents\.has\(agent\) && agentLoggedIn\(agent\)/.test(source), '#41: yoagentResolvedBackend prefers codex then claude among logged-in agents');
+    assert.ok(/const YOAGENT_CHAT_BACKENDS = \['codex', 'claude'\]/.test(source) && /function yoagentResolvedBackend\(\)[\s\S]*?for \(const agent of YOAGENT_CHAT_BACKENDS\)[\s\S]*?yoagentBackendUsable\(agent\)/.test(source), '#41: yoagentResolvedBackend prefers codex then claude among logged-in agents');
     assert.ok(source.includes("initialSetting('yoagent.backend', 'auto')"), '#41: the YO!agent backend default is auto');
-    assert.ok(/function yoagentChatEnabled\(\)[\s\S]*\['claude', 'codex', 'deterministic'\]\.includes\(yoagentResolvedBackend\(\)\)/.test(source), '#41/#72: chat-enabled tracks the resolved backend, including local deterministic answers');
+    assert.ok(/function yoagentChatEnabled\(\)[\s\S]*YOAGENT_CHAT_BACKENDS\.includes\(yoagentResolvedBackend\(\)\)/.test(source), '#41/#72: chat-enabled tracks only usable model-backed chat');
     assert.ok(/maybeHandleServerVersionChange[\s\S]*serverVersion === bootstrap\.version[\s\S]*updateNotificationAllowsVersion\(bootstrap\.version, serverVersion\)/.test(source), 'server-version reload is gated on the boot version and the reload_on_update threshold');
     assert.ok(/function updateNotificationAllowsVersion\([^)]*\)[\s\S]*cleanLevel === 'none'[\s\S]*targetParts\[1\] !== currentParts\[1\][\s\S]*cleanLevel === 'patch' && targetParts\[2\] > currentParts\[2\]/.test(source), 'update notification threshold follows SemVer major/minor/patch');
     assert.ok(/maybeHandleServerVersionChange[\s\S]*boolSetting\('general\.reload_on_update_auto'[\s\S]*reloadIsSafe\(\)/.test(source), 'auto-reload only fires when enabled and reloadIsSafe()');

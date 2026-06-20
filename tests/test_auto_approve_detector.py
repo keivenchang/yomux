@@ -453,19 +453,18 @@ MOCK_CLAUDE_YESNO_PROMPT = "\n".join([
 MOCK_CODEX_YESNO_PROMPT = "\n".join([
     "● Mock build script — 10 steps, each needs Yes/No.",
     "────────────────────────────",
-    " Codex wants to run a shell command",
+    "◦ Running mkdir -p build/output",
     "",
-    " Would you like to run the following command?",
     "",
-    "   Reason: [1/10] Create the build output directory",
+    "  Would you like to run the following command?",
     "",
-    "   $ mkdir -p build/output",
+    "  $ mkdir -p build/output",
     "",
-    " › 1. Yes",
-    "   2. Yes, and don't ask again for commands that start with `mkdir -p`",
-    "   3. No",
+    "› 1. Yes, proceed (y)",
+    "  2. Yes, and don't ask again for commands that start with `mkdir -p` (p)",
+    "  3. No, and tell Codex what to do differently (esc)",
     "",
-    " Esc to cancel · Tab to amend",
+    "  Press enter to confirm or esc to cancel",
 ])
 
 
@@ -538,12 +537,12 @@ def test_mock_claude_yesno_approve_targets_option_1():
 
 
 def test_mock_codex_yesno_extract_command_drops_reason_and_step_marker():
-    # Y8: the `$ `-prefixed command is the only command; the `Reason: [1/10] ...` line is description.
+    # Y8: the `$ `-prefixed command is the only command; the `◦ Running ...` line is chrome.
     assert prompt_detector.extract_command(MOCK_CODEX_YESNO_PROMPT) == "mkdir -p build/output"
 
 
 def test_mock_codex_3_option_approve_targets_option_1_yes():
-    # Y8: Codex offers `1. Yes` / `2. Yes, and don't ask again ...` / `3. No`. `No` is option 3, NOT 2.
+    # Y8: Codex offers `1. Yes, proceed` / `2. Yes, and don't ask again ...` / `3. No ...`. `No` is option 3, NOT 2.
     # The approve action MUST target the `›`-selected `1. Yes` and never assume "2 == No" or exactly two
     # options. The option-2 "don't ask again" prefix (`mkdir -p`) is NOT a generic recurring prefix, so
     # it stays at option 1.

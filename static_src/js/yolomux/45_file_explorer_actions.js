@@ -812,6 +812,14 @@ function previewKindForPath(path, state = null) {
   return previewRendererForPath(path, state)?.kind || 'unsupported';
 }
 
+function previewRendererIsPreviewable(renderer) {
+  return Boolean(renderer) && renderer.kind !== 'unsupported' && renderer.previewable !== false;
+}
+
+function previewPathIsPreviewable(path, state = null) {
+  return previewRendererIsPreviewable(previewRendererForPath(path, state));
+}
+
 function previewKindIsTextBacked(kind) {
   return PREVIEW_RENDERERS.some(renderer => renderer.kind === kind && renderer.textBacked);
 }

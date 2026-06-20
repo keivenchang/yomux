@@ -70,6 +70,7 @@ YOAGENT_JOB_MAX_ITEMS = 200
 YOAGENT_JOB_POLL_SECONDS = 1.0
 YOAGENT_JOB_DEFAULT_TIMEOUT_MINUTES = 120
 YOAGENT_JOB_IDLE_QUIET_SECONDS = 3.0
+YOAGENT_CHAT_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,120}$")
 
 
 def normalized_prompt_state(prompt: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -91,6 +92,110 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             object.__setattr__(self, name, value)
             return
         setattr(self.deps, name, value)
+
+    def normalize_yoagent_chat_request_id(self, value: Any) -> str:
+        text = str(value or "").strip()
+        return text if YOAGENT_CHAT_REQUEST_ID_RE.match(text) else ""
+
+    def prune_yoagent_chat_requests_locked(self, now: float | None = None) -> None:
+        cutoff = (now if now is not None else time.time()) - 300
+        requests = self.yoagent_chat_requests
+        for request_id, entry in list(requests.items()):
+            if bool(entry.get("active")):
+                continue
+            if float(entry.get("updated_ts") or entry.get("created_ts") or 0.0) < cutoff:
+                requests.pop(request_id, None)
+
+    def register_yoagent_chat_request(self, request_id: str, stream_id: str, backend: str = "") -> threading.Event:
+        safe_request_id = self.normalize_yoagent_chat_request_id(request_id) or f"chat-{uuid.uuid4().hex}"
+        safe_stream_id = self.normalize_yoagent_chat_request_id(stream_id) or safe_request_id
+        cancel_event = threading.Event()
+        with self.yoagent_chat_request_lock:
+            self.prune_yoagent_chat_requests_locked()
+            self.yoagent_chat_requests[safe_request_id] = {
+                "request_id": safe_request_id,
+                "stream_id": safe_stream_id,
+                "backend": str(backend or ""),
+                "created_ts": time.time(),
+                "updated_ts": time.time(),
+                "active": True,
+                "cancelled": False,
+                "cancel_event": cancel_event,
+                "interrupt": None,
+            }
+        return cancel_event
+
+    def set_yoagent_chat_request_interrupt(self, request_id: str, interrupt: Any) -> None:
+        safe_request_id = self.normalize_yoagent_chat_request_id(request_id)
+        if not safe_request_id:
+            return
+        with self.yoagent_chat_request_lock:
+            entry = self.yoagent_chat_requests.get(safe_request_id)
+            if entry is not None:
+                entry["interrupt"] = interrupt if callable(interrupt) else None
+                entry["updated_ts"] = time.time()
+
+    def yoagent_chat_request_cancel_event(self, request_id: str) -> threading.Event | None:
+        safe_request_id = self.normalize_yoagent_chat_request_id(request_id)
+        if not safe_request_id:
+            return None
+        with self.yoagent_chat_request_lock:
+            entry = self.yoagent_chat_requests.get(safe_request_id)
+            event = entry.get("cancel_event") if isinstance(entry, dict) else None
+        return event if hasattr(event, "is_set") and hasattr(event, "set") else None
+
+    def yoagent_chat_request_cancelled(self, request_id: str) -> bool:
+        event = self.yoagent_chat_request_cancel_event(request_id)
+        return bool(event is not None and event.is_set())
+
+    def complete_yoagent_chat_request(self, request_id: str) -> None:
+        safe_request_id = self.normalize_yoagent_chat_request_id(request_id)
+        if not safe_request_id:
+            return
+        with self.yoagent_chat_request_lock:
+            entry = self.yoagent_chat_requests.get(safe_request_id)
+            if entry is not None:
+                entry["active"] = False
+                entry["interrupt"] = None
+                entry["updated_ts"] = time.time()
+
+    def interrupt_yoagent_claude_process(self, process: subprocess.Popen[str]) -> dict[str, Any]:
+        if process.poll() is not None:
+            return {"ok": True, "interrupted": False, "reason": "claude process already exited"}
+        process.terminate()
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=1)
+        return {"ok": True, "interrupted": True, "transport": "claude-stream-json"}
+
+    def cancel_yoagent_chat(self, request_id: str) -> tuple[dict[str, Any], HTTPStatus]:
+        safe_request_id = self.normalize_yoagent_chat_request_id(request_id)
+        if not safe_request_id:
+            return {"ok": False, "error": "missing YO!agent request id"}, HTTPStatus.BAD_REQUEST
+        interrupt = None
+        stream_id = safe_request_id
+        with self.yoagent_chat_request_lock:
+            entry = self.yoagent_chat_requests.get(safe_request_id)
+            if not isinstance(entry, dict):
+                return {"ok": True, "cancelled": False, "request_id": safe_request_id, "reason": "request is not active"}, HTTPStatus.OK
+            entry["cancelled"] = True
+            entry["updated_ts"] = time.time()
+            event = entry.get("cancel_event")
+            if hasattr(event, "set"):
+                event.set()
+            stream_id = str(entry.get("stream_id") or safe_request_id)
+            interrupt = entry.get("interrupt")
+        interrupt_result: dict[str, Any] = {}
+        if callable(interrupt):
+            try:
+                value = interrupt()
+                interrupt_result = value if isinstance(value, dict) else {"ok": True, "result": str(value)}
+            except Exception as exc:
+                interrupt_result = {"ok": False, "error": str(exc)}
+        self.publish_yoagent_stream_delta(stream_id, "", phase="stopped", done=True, aborted=True, auxiliary_done=True)
+        return {"ok": True, "cancelled": True, "request_id": safe_request_id, "stream_id": stream_id, "interrupt": interrupt_result}, HTTPStatus.OK
 
     def yoagent_job_prompt_text(self, action: dict[str, Any]) -> str:
         if str(action.get("type") or "") != "send_prompt":
@@ -1620,6 +1725,9 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         question = truncate_text(" ".join(str(payload.get("message") or payload.get("question") or "").split()), 4000)
         if not question:
             return {"error": "missing YO!agent message"}, HTTPStatus.BAD_REQUEST
+        request_id = self.normalize_yoagent_chat_request_id(payload.get("request_id")) or f"chat-{uuid.uuid4().hex}"
+        stream_id = self.normalize_yoagent_chat_request_id(payload.get("stream_id")) or request_id
+        self.register_yoagent_chat_request(request_id, stream_id)
         history = self.deps.yoagent_prompt_history(payload.get("history", []), question)
         self.record_yoagent_message("user", question)
         settings = self.yoagent_settings()
@@ -1640,7 +1748,11 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             return context_lines_cache
 
         def finish(response: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
+            if self.deps.yoagent_chat_request_cancelled(request_id):
+                return finish_cancelled()
             response.setdefault("answered_at", datetime.now(timezone.utc).isoformat())
+            response.setdefault("request_id", request_id)
+            response.setdefault("stream_id", stream_id)
             timing = response.get("timing") if isinstance(response.get("timing"), dict) else {}
             timing.setdefault("ttfr_ms", round((time.monotonic() - chat_started) * 1000, 3))
             response["timing"] = timing
@@ -1657,7 +1769,19 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                 stream_fields = self.deps.yoagent_stream_auxiliary_message_fields(str(response.get("stream_id") or ""))
                 self.record_yoagent_message("assistant", answer_text, actions=actions, details=str(response.get("details") or ""), **stream_fields)
             response["conversation"] = self.yoagent_conversation_payload()
+            self.deps.complete_yoagent_chat_request(request_id)
             return response, HTTPStatus.OK
+
+        def finish_cancelled() -> tuple[dict[str, Any], HTTPStatus]:
+            self.publish_yoagent_stream_delta(stream_id, "", phase="stopped", done=True, aborted=True, auxiliary_done=True)
+            self.deps.complete_yoagent_chat_request(request_id)
+            return {
+                "ok": True,
+                "cancelled": True,
+                "request_id": request_id,
+                "stream_id": stream_id,
+                "conversation": self.yoagent_conversation_payload(),
+            }, HTTPStatus.OK
 
         def base_response(
             answer: str,
@@ -1697,6 +1821,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                 return finish(base_response("YO!agent watch and notify jobs require an admin login. I did not create a job."))
             job_payload, job_status = self.deps.create_yoagent_job(job_intent)
             if job_status not in {HTTPStatus.OK, HTTPStatus.CONFLICT}:
+                self.deps.complete_yoagent_chat_request(request_id)
                 return {"error": job_payload.get("error") or "failed to create YO!agent job", **job_payload}, job_status
             job = job_payload.get("job") if isinstance(job_payload.get("job"), dict) else {}
             duplicate = " I reused the existing matching job." if job_payload.get("duplicate") else ""
@@ -1708,6 +1833,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                 return finish(base_response("Sending prompts to tmux sessions through YO!agent requires an admin login. I did not send anything."))
             action, action_status = self.deps.create_yoagent_action_preview(action_intent)
             if action_status != HTTPStatus.OK:
+                self.deps.complete_yoagent_chat_request(request_id)
                 return {"error": action.get("error") or "failed to create YO!agent action", **action}, action_status
             confirmation_required = bool(action_intent.get("requires_confirmation") or action.get("requires_confirmation"))
             if action.get("status") == "ready" and not confirmation_required:
@@ -1762,9 +1888,10 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         fallback_reason = ""
         cli_status: dict[str, Any] = {}
         activity_payload = get_activity_payload()
-        stream_id = f"chat-{uuid.uuid4().hex}"
         if backend in {"codex", "claude"} and invocation == "cli":
-            answer, fallback_reason, cli_status = self.deps.run_yoagent_cli_backend(backend, question, activity_payload, settings, history, locale, stream_id=stream_id)
+            answer, fallback_reason, cli_status = self.deps.run_yoagent_cli_backend(backend, question, activity_payload, settings, history, locale, stream_id=stream_id, request_id=request_id)
+            if self.deps.yoagent_chat_request_cancelled(request_id):
+                return finish_cancelled()
             if answer:
                 backend_used = backend
         elif backend in {"codex", "claude"} and invocation != "cli":

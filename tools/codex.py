@@ -28,6 +28,16 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from yolomux_lib.agent_comms.codex_app_server import CodexAppServerProtocol
+from yolomux_lib.agent_comms.json_rpc import json_rpc_error
+from yolomux_lib.agent_comms.json_rpc import json_rpc_notification
+from yolomux_lib.agent_comms.json_rpc import json_rpc_request
+from yolomux_lib.agent_comms.json_rpc import json_rpc_response
+from yolomux_lib.agent_comms.stream_events import normalize_codex_app_server_message
 from text_client_common import (
     CODEX_CONFIG_KEYS,
     CODEX_OUTPUT_TERMS,
@@ -122,28 +132,6 @@ KNOWN_CONFIG_KEYS = {
     CODEX_CONFIG_KEYS.timeout,
     "web_search",
 }
-
-
-def json_rpc_request(request_id: str, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-    payload: dict[str, Any] = {"jsonrpc": "2.0", "id": request_id, "method": method}
-    if params is not None:
-        payload["params"] = params
-    return payload
-
-
-def json_rpc_notification(method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-    payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
-    if params is not None:
-        payload["params"] = params
-    return payload
-
-
-def json_rpc_response(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": request_id, "result": result}
-
-
-def json_rpc_error(request_id: Any, message: str, code: int = -32601) -> dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
 
 def initialize_params() -> dict[str, Any]:
@@ -403,6 +391,8 @@ class CodexTextClient(TextClientBase):
         self.raw_reasoning_buffer: list[str] = []
         self.final_item_text = ""
         self.tool_output_item_ids: set[str] = set()
+        self.last_normalized_events: list[dict[str, Any]] = []
+        self.app_server_protocol = CodexAppServerProtocol()
     def next_id(self, prefix: str) -> str:
         self.request_counter += 1
         return f"{prefix}-{self.request_counter}"
@@ -439,12 +429,7 @@ class CodexTextClient(TextClientBase):
         process = self.process
         self.process = None
         if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=1)
+            self.app_server_protocol.terminate_process(process)
 
     def restart_after_timeout(self, exc: TimeoutError) -> None:
         self.finish_prefixed_output()
@@ -566,32 +551,27 @@ class CodexTextClient(TextClientBase):
     def write(self, message: dict[str, Any]) -> None:
         if self.process is None or self.process.stdin is None:
             raise RuntimeError("codex app-server is not running")
-        self.process.stdin.write(json.dumps(message, separators=(",", ":")) + "\n")
-        self.process.stdin.flush()
+        self.app_server_protocol.write_message(self.process, message)
         if self.args.debug_json:
             print(f"> {json.dumps(message, sort_keys=True)}", file=sys.stderr)
 
     def readline(self, deadline: float) -> str:
         if self.process is None or self.process.stdout is None:
             raise RuntimeError("codex app-server is not running")
-        timeout = max(0.0, deadline - time.monotonic())
-        with selectors.DefaultSelector() as selector:
-            selector.register(self.process.stdout, selectors.EVENT_READ)
-            if not selector.select(timeout):
-                raise TimeoutError("timed out waiting for codex app-server")
-        line = self.process.stdout.readline()
-        if not line:
-            raise RuntimeError("codex app-server exited without a JSON-RPC message")
-        return line
+        try:
+            return self.app_server_protocol.readline(self.process, deadline)
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError("timed out waiting for codex app-server") from exc
 
     def read_message(self, deadline: float) -> dict[str, Any]:
-        line = self.readline(deadline)
+        if self.process is None or self.process.stdout is None:
+            raise RuntimeError("codex app-server is not running")
         try:
-            message = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(f"codex app-server emitted invalid JSON-RPC: {exc}") from exc
-        if not isinstance(message, dict):
-            raise RuntimeError("codex app-server emitted a non-object JSON-RPC message")
+            message = self.app_server_protocol.read_message(self.process, deadline)
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError("timed out waiting for codex app-server") from exc
+        except OSError as exc:
+            raise RuntimeError(str(exc)) from exc
         if self.args.debug_json:
             print(f"< {json.dumps(message, sort_keys=True)}", file=sys.stderr)
         return message
@@ -1193,6 +1173,7 @@ class CodexTextClient(TextClientBase):
     def handle_async_message(self, message: dict[str, Any], deadline: float) -> bool:
         now = time.monotonic()
         metrics = self.current_metrics
+        self.last_normalized_events = normalize_codex_app_server_message(message)
         if message.get("id") is not None and message.get("method"):
             if metrics is not None:
                 metrics.mark_server_message(str(message.get("method") or ""), now)

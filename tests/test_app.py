@@ -2280,6 +2280,25 @@ def test_yoagent_session_summary_refresh_interval_zero_is_disabled(monkeypatch):
     assert result == {"enabled": False, "updated": [], "skipped": []}
 
 
+def test_cancel_yoagent_chat_marks_request_and_interrupts_active_backend(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["5"])
+    stream_events = []
+    interrupts = []
+    monkeypatch.setattr(webapp, "publish_yoagent_stream_delta", lambda *args, **kwargs: stream_events.append((args, kwargs)))
+    try:
+        event = webapp.yoagent_controller.register_yoagent_chat_request("chat-test", "stream-test", "codex")
+        webapp.set_yoagent_chat_request_interrupt("chat-test", lambda: interrupts.append("called") or {"ok": True, "interrupted": True})
+        payload, status = webapp.cancel_yoagent_chat("chat-test")
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert payload["cancelled"] is True
+    assert event.is_set()
+    assert interrupts == ["called"]
+    assert stream_events == [(("stream-test", ""), {"phase": "stopped", "done": True, "aborted": True, "auxiliary_done": True})]
+
+
 def test_yoagent_chat_uses_deterministic_fallback(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["5"])
     webapp.warm_metadata_cache_async = lambda sessions: None
@@ -4362,7 +4381,7 @@ def test_yoagent_composer_text_ignores_numbered_choice_and_approval_rows(monkeyp
 def test_yoagent_composer_text_ignores_codex_template_placeholder():
     visible_text = "\n".join([
         "╭─────────────────────────────────────────────╮",
-        "│ >_ OpenAI Codex (v0.140.0)                  │",
+        "│ >_ OpenAI Codex (v0.141.0)                  │",
         "╰─────────────────────────────────────────────╯",
         "",
         "› Implement {feature}",
@@ -5153,7 +5172,7 @@ def test_yoagent_chat_appends_language_directive_to_the_llm_prompt(monkeypatch):
     monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "auto", "invocation": "cli"})
     captured = {}
 
-    def fake_codex(prompt, session_id="", resume=False, settings=None, stream_callback=None):
+    def fake_codex(prompt, session_id="", resume=False, settings=None, stream_callback=None, request_id=""):
         captured["prompt"] = prompt
         return ("respuesta", "", "s1", {"transport": "codex-app-server", "persistent": True})
     monkeypatch.setattr(webapp, "run_yoagent_codex_app_server", fake_codex)
@@ -5175,7 +5194,7 @@ def test_yoagent_chat_auto_runs_logged_in_agent(monkeypatch):
         "codex": {"installed": True, "logged_in": True},
     })
     monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "auto", "invocation": "cli"})
-    monkeypatch.setattr(webapp, "run_yoagent_codex_app_server", lambda prompt, session_id="", resume=False, settings=None, stream_callback=None: ("codex answer", "", "codex-session-1", {"transport": "codex-app-server", "persistent": True}))
+    monkeypatch.setattr(webapp, "run_yoagent_codex_app_server", lambda prompt, session_id="", resume=False, settings=None, stream_callback=None, request_id="": ("codex answer", "", "codex-session-1", {"transport": "codex-app-server", "persistent": True}))
     try:
         payload, status = webapp.yoagent_chat({"message": "status?"})
     finally:
@@ -5238,8 +5257,16 @@ def test_yoagent_codex_backend_reuses_persistent_app_server(monkeypatch, tmp_pat
     assert first_status["persistent"] is True
     assert first_status["process_started"] is True
     assert first_status["thread_started"] is True
+    assert first_status["thread_ready_ms"] >= 0
+    assert first_status["turn_start_ack_ms"] >= first_status["turn_start_request_ms"] >= 0
+    assert first_status["first_stream_event_ms"] >= first_status["turn_start_ack_ms"]
+    assert first_status["turn_complete_ms"] >= first_status["turn_start_ack_ms"]
     assert second_status["process_reused"] is True
     assert second_status["thread_started"] is False
+    assert second_status["thread_ready_ms"] >= 0
+    assert second_status["turn_start_ack_ms"] >= second_status["turn_start_request_ms"] >= 0
+    assert second_status["first_stream_event_ms"] >= second_status["turn_start_ack_ms"]
+    assert second_status["turn_complete_ms"] >= second_status["turn_start_ack_ms"]
     assert first_status["session_id"] == "thread-1"
     assert second_status["session_id"] == "thread-1"
     assert webapp.yoagent_cli_sessions["codex"]["session_id"] == "thread-1"

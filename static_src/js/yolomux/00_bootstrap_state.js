@@ -455,7 +455,9 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.ogv': 'video/ogg',
     '.3gp': 'video/3gpp',
   }},
-  {id: 'text', kind: 'text', extensions: ['.txt', '.log', '.trace', '.out', '.rst', '.adoc', '.asciidoc', '.diff', '.patch', '.dot', '.gv', '.puml', '.plantuml', '.srt', '.vtt'], textBacked: true, defaultMode: 'edit', languageByExtension: {
+  // Generic text/code preview is the same syntax-highlighted text the editor already shows. Keep the
+  // renderer for language/fallback routing, but do not expose Preview until a distinct renderer exists.
+  {id: 'text', kind: 'text', extensions: ['.txt', '.log', '.trace', '.out', '.rst', '.adoc', '.asciidoc', '.diff', '.patch', '.dot', '.gv', '.puml', '.plantuml', '.srt', '.vtt'], textBacked: true, previewable: false, defaultMode: 'edit', languageByExtension: {
     '.txt': 'text',
     '.log': 'text',
     '.trace': 'text',
@@ -1150,6 +1152,9 @@ let yoagentPrewarming = false;
 let yoagentPrewarmStarted = false;
 let yoagentStartupLlmRequested = false;
 let yoagentStreamingMessages = new Map();
+let yoagentActiveChatRequest = null;
+let yoagentChatQueue = [];
+let yoagentChatQueueSerial = 0;
 let yoagentError = '';
 let yoagentDraft = '';
 let yoagentHistoryCursor = null;

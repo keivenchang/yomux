@@ -3,6 +3,7 @@
 
 import atexit
 import os
+from pathlib import Path
 import random
 import re
 import readline
@@ -15,6 +16,8 @@ import threading
 import textwrap
 import time
 import tty
+
+import yaml
 
 
 AGENT_NAME = "claude"
@@ -37,6 +40,8 @@ PROMPT_GLYPH = "❯"
 SELECTOR_GLYPH = "❯"
 PERMISSION_STYLE = "claude"
 STARTUP_STYLE = "default"
+PROMPT_CORPUS_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "prompt_corpus"
+MOCK_FIXTURE_CASES: list[dict[str, object]] | None = None
 
 VERBS = [
     "Hashing", "Cooking", "Pondering", "Distilling", "Considering",
@@ -69,7 +74,7 @@ PAST_VERBS = [
     "Stewed", "Braised", "Roasted", "Grilled", "Whisked",
 ]
 
-FRAMES = ["✻", "✶", "✷", "✸", "✹", "✺"]
+FRAMES = ["·", "✢", "✶", "✻", "✽", "*"]
 CLAUDE_WORKING_VERBS = VERBS + [
     "Imagining", "Transmogrifying", "Combobulating", "Recombobulating",
     "Perambulating", "Doodling", "Frobnitzing", "Hypernoodling",
@@ -172,7 +177,18 @@ def describe_shell_command(value: str) -> str:
 
 
 def terminal_width() -> int:
-    return max(88, min(shutil.get_terminal_size((DEFAULT_WIDTH, 24)).columns, 150))
+    try:
+        columns = os.get_terminal_size(sys.stdout.fileno()).columns
+    except OSError:
+        columns = shutil.get_terminal_size((DEFAULT_WIDTH, 24)).columns
+    return max(88, min(columns, 150))
+
+
+def terminal_height() -> int:
+    try:
+        return max(1, os.get_terminal_size(sys.stdout.fileno()).lines)
+    except OSError:
+        return shutil.get_terminal_size((DEFAULT_WIDTH, 40)).lines
 
 
 def clipped(text: str, width: int) -> str:
@@ -351,7 +367,7 @@ def print_welcome_box() -> None:
 
 
 def print_codex_startup() -> None:
-    inner = 45
+    inner = 56
 
     def box_line(text: str = "") -> str:
         return "│" + clipped(text, inner) + "│"
@@ -361,7 +377,10 @@ def print_codex_startup() -> None:
     print(box_line())
     print(box_line(f" model:     {MODEL} {EFFORT}   /model to change"))
     print(box_line(f" directory: {display_cwd()}"))
+    print(box_line(" permissions: danger-full-access"))
     print("╰" + ("─" * inner) + "╯")
+    print()
+    print("  ⚠ `--dangerously-bypass-hook-trust` enabled")
     print()
     print("  Tip: NEW: Codex can now generate and use memories. Try it now with /memories")
     print()
@@ -449,7 +468,7 @@ def claude_working_status_lines(frame: int, started_at: float, verb: str, tip: s
 
 def codex_working_status_lines(frame: int, started_at: float) -> list[str]:
     elapsed = max(1, time.time() - started_at)
-    return [f"• {codex_working_word(frame, sys.stdout.isatty())} ({format_working_elapsed(elapsed)} • esc to interrupt)"]
+    return [f"◦ {codex_working_word(frame, sys.stdout.isatty())} ({format_working_elapsed(elapsed)} • esc to interrupt)"]
 
 
 def agent_working_status_lines(frame: int, started_at: float, verb: str, tip: str) -> list[str]:
@@ -641,18 +660,13 @@ def print_bash_prompt(command: str, description: str = "Run shell command") -> i
     prompt_rule(terminal_width()); n += 1
     print(); n += 1
     if PERMISSION_STYLE == "codex":
-        print(" Codex wants to run a shell command"); n += 1
+        print(f"◦ {preview_verb(command)} {command}"); n += 1
         print(); n += 1
-        print(" Would you like to run the following command?"); n += 1
         print(); n += 1
-        # Real Codex prints the Reason FIRST, then the command on a `$ `-prefixed line (continuations
-        # indented under it). The detector's Codex extractor keys on that `$ ` line and stops at the
-        # selector boundary, so the command MUST be `$ `-prefixed and the Reason MUST come before it —
-        # otherwise extract_command folds the Reason into the command or returns nothing.
-        print(f"   Reason: {description}"); n += 1
+        print("  Would you like to run the following command?"); n += 1
         print(); n += 1
         for i, line in enumerate(cmd_lines):
-            print(f"   {'$ ' if i == 0 else '  '}{line}"); n += 1
+            print(f"  {'$ ' if i == 0 else '  '}{line}"); n += 1
         print(); n += 1
     else:
         print(" Bash command (unsandboxed)"); n += 1
@@ -826,11 +840,11 @@ def permission_choice_lines(selected: int, command: str | None = None) -> list[s
         prefix = reusable_command_prefix(command or "")
         markers = [SELECTOR_GLYPH if selected == i else " " for i in range(3)]
         return [
-            f" {markers[0]} 1. Yes",
-            f" {markers[1]} 2. Yes, and don't ask again for commands that start with `{prefix}`",
-            f" {markers[2]} 3. No",
+            f"{markers[0]} 1. Yes, proceed (y)",
+            f"{markers[1]} 2. Yes, and don't ask again for commands that start with `{prefix}` (p)",
+            f"{markers[2]} 3. No, and tell Codex what to do differently (esc)",
             "",
-            " Esc to cancel · Tab to amend",
+            "  Press enter to confirm or esc to cancel",
             "",
         ]
     yes_marker = SELECTOR_GLYPH if selected == 0 else " "
@@ -1020,6 +1034,119 @@ def session_increment_tokens(state: dict[str, str], delta: int = 39) -> None:
     state["tokens_out"] = str(int(state.get("tokens_out", "0")) + delta)
 
 
+def mock_fixture_key(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(value or "").lower()).strip("_")
+
+
+def mock_fixture_path(inventory_path: Path, file_name: object) -> Path:
+    value = str(file_name or "")
+    if inventory_path.parent.name == "captures":
+        return inventory_path.parent / value
+    return PROMPT_CORPUS_DIR / value
+
+
+def fixture_agent_name(data: dict[str, object], inventory_item: dict[str, object]) -> str:
+    expected = inventory_item.get("expected") if isinstance(inventory_item.get("expected"), dict) else {}
+    return str(data.get("agent") or expected.get("agent") or "")
+
+
+def fixture_case_names(data: dict[str, object], inventory_item: dict[str, object], path: Path) -> set[str]:
+    names = {
+        data.get("case_name"),
+        data.get("fixture_scenario"),
+        data.get("fixture_id"),
+        data.get("id"),
+        inventory_item.get("case_name"),
+        inventory_item.get("scenario"),
+        inventory_item.get("fixture_id"),
+        inventory_item.get("id"),
+        inventory_item.get("family"),
+        path.stem,
+    }
+    agent = fixture_agent_name(data, inventory_item)
+    keys = {mock_fixture_key(name) for name in names if name}
+    if agent:
+        keys.update({mock_fixture_key(f"{agent}_{name}") for name in names if name})
+    return {key for key in keys if key}
+
+
+def load_mock_fixture_cases() -> list[dict[str, object]]:
+    global MOCK_FIXTURE_CASES
+    if MOCK_FIXTURE_CASES is not None:
+        return MOCK_FIXTURE_CASES
+    cases: list[dict[str, object]] = []
+    for inventory_path in [PROMPT_CORPUS_DIR / "captures" / "inventory.yaml", PROMPT_CORPUS_DIR / "inventory.yaml"]:
+        inventory = yaml.safe_load(inventory_path.read_text(encoding="utf-8")) or {}
+        for inventory_item in inventory.get("fixtures", []):
+            if not isinstance(inventory_item, dict):
+                continue
+            path = mock_fixture_path(inventory_path, inventory_item.get("file"))
+            if not path.exists():
+                continue
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            if not isinstance(data, dict):
+                continue
+            styled_capture = str(data.get("styled_capture") or data.get("raw_capture") or data.get("visible_text") or "")
+            raw_capture = str(data.get("raw_capture") or data.get("visible_text") or "")
+            cursor = data.get("cursor") if isinstance(data.get("cursor"), dict) else {}
+            cases.append({
+                "agent": fixture_agent_name(data, inventory_item),
+                "case_name": str(data.get("case_name") or inventory_item.get("case_name") or inventory_item.get("scenario") or path.stem),
+                "keys": fixture_case_names(data, inventory_item, path),
+                "path": path,
+                "raw_capture": raw_capture,
+                "styled_capture": styled_capture,
+                "cursor": cursor,
+            })
+    MOCK_FIXTURE_CASES = cases
+    return cases
+
+
+def find_mock_fixture_case(name: str) -> dict[str, object] | None:
+    key = mock_fixture_key(name)
+    if not key:
+        return None
+    matches = [case for case in load_mock_fixture_cases() if key in case["keys"]]
+    current_agent_matches = [case for case in matches if case.get("agent") == AGENT_NAME]
+    if current_agent_matches:
+        return current_agent_matches[0]
+    return matches[0] if matches else None
+
+
+def print_mock_fixture_list() -> None:
+    print("● Mock fixture cases")
+    for case in load_mock_fixture_cases():
+        agent = str(case.get("agent") or "generic")
+        print(f"  ⎿  {agent}: {case['case_name']} ({Path(case['path']).name})")
+    print()
+
+
+def cmd_mock_fixture(state: dict[str, str], name: str) -> None:
+    case = find_mock_fixture_case(name)
+    if case is None:
+        print(f"● Unknown mock fixture case: {name}")
+        print()
+        print_mock_fixture_list()
+        return
+    capture = str(case.get("styled_capture") or "")
+    cursor = case.get("cursor") if isinstance(case.get("cursor"), dict) else {}
+    sys.stdout.write("\x1b[H\x1b[J")
+    height = terminal_height()
+    line_count = len(capture.splitlines()) if capture else 0
+    top_padding = max(0, height - line_count) if line_count and line_count < height else 0
+    if top_padding:
+        sys.stdout.write("\n" * top_padding)
+    sys.stdout.write(capture)
+    if "x" in cursor and "y" in cursor:
+        x = int(cursor.get("x") or 0)
+        y = min(height - 1, int(cursor.get("y") or 0) + top_padding)
+        if x >= 0 and y >= 0:
+            sys.stdout.write(f"\x1b[{y + 1};{x + 1}H")
+    sys.stdout.flush()
+    state["pending"] = "fixture"
+    state["fixture_case"] = str(case.get("case_name") or name)
+
+
 def cmd_help() -> None:
     print("● Keyboard shortcuts")
     print("  ⎿  Enter             Submit message")
@@ -1046,6 +1173,8 @@ def cmd_help() -> None:
     print('     !<cmd>            Bash mode — REAL shell exec, NO permission prompt')
     print('     sleep N           Real sleep behind a permission prompt (working state)')
     print('     yesno [N]         Mock build script — N Yes/No prompts in a row (default 3)')
+    print('     mockcase <case>   Render a prompt-corpus fixture and freeze the pane')
+    print('     mockcase list     List prompt-corpus fixture cases')
     print('     ask, question     AskUserQuestion demo (arrow-key choice)')
     print('     todos             Ctrl-T style task-list overlay')
     print()
@@ -1109,6 +1238,8 @@ def print_capabilities() -> None:
     print("  Built-in actions:")
     print("    sleep N            ← real time.sleep behind a permission prompt")
     print("    yesno [N]          ← N Yes/No permission prompts in a row (default 3)")
+    print("    mockcase <case>    ← render a prompt-corpus fixture and freeze")
+    print("    mockcase list      ← list available fixture cases")
     print("    ask                ← AskUserQuestion demo with arrow-key nav")
     print("    todos              ← Ctrl-T style task-list overlay")
     print()
@@ -1153,6 +1284,15 @@ def handle_command(user_input: str, state: dict[str, str]) -> None:
         return
     if lower == "/status":
         cmd_status(state)
+        return
+
+    m = re.match(r"^(?:mockcase|fixture|case)\s+(.+)$", value, re.IGNORECASE)
+    if m:
+        name = m.group(1).strip()
+        if mock_fixture_key(name) in {"list", "ls"}:
+            print_mock_fixture_list()
+        else:
+            cmd_mock_fixture(state, name)
         return
 
     # !<cmd> — bash mode, runs for real with NO permission prompt.
@@ -1239,6 +1379,9 @@ def main() -> None:
                 continue
             if state.get("pending") == "question" and sys.stdin.isatty():
                 handle_pending_question_tty(state)
+                continue
+            if state.get("pending") == "fixture":
+                time.sleep(0.25)
                 continue
             pending = state.get("pending") == "permission"
             prompt = "" if pending else f"{PROMPT_GLYPH} "

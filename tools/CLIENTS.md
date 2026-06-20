@@ -39,6 +39,15 @@ TEXT_CLIENT_BACKGROUND=dark python3 tools/claude.py -C .
 
 `codex.py` keeps a persistent app-server process for the client lifetime. `claude.py` starts a Claude subprocess per turn and passes `--resume` or `--continue` as needed.
 
+## Mock Agent Fixture Replay
+
+`tools/mock_claude.py` and `tools/mock_codex.py` are TUI mocks for detector, auto-approve, and browser tests. They replay the real and synthetic prompt corpus from `tests/fixtures/prompt_corpus/` so tests exercise current Claude Code and Codex CLI chrome without launching the real clients for every case.
+
+- `mockcase list`: print every replayable prompt-corpus case with the owning agent and fixture file.
+- `mockcase <case>`: clear the pane, render that fixture, bottom-align short captures in the current tmux pane, and freeze the process so `tmux capture-pane` sees the prompt exactly as a live client would.
+- Case names accept the fixture scenario, fixture id, inventory id, file stem, and agent-prefixed forms such as `claude_ask_user_question` or `codex_shell_sleep_10_3_option`.
+- `yesno [N]`, `ask N`, `sleep N`, and shell commands still drive interactive permission prompts; use `mockcase` for corpus parity and the older commands for auto-approve flow tests that need keyboard interaction.
+
 ## Terminology Map
 
 | User concept | `codex.py` / Codex wording | `claude.py` / Claude wording | Same idea? | Notes |

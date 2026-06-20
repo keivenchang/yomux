@@ -343,7 +343,6 @@
   --file-tree-recency-recent: #bfe87e;
   --file-tree-recency-warm: #aab8c4;
   --file-tree-recency-old: var(--muted);
-  --file-tree-recency-pulse-shadow: rgba(196, 249, 112, 0.36);
   --editor-font: var(--mono-font);
   --editor-font-size: var(--ui-font-size);
   --editor-ui-font-size: max(10px, calc(var(--editor-font-size) - 2px));
@@ -609,7 +608,6 @@ body.theme-light {
   --file-tree-recency-recent: #4d7f21;
   --file-tree-recency-warm: #566271;
   --file-tree-recency-old: var(--muted);
-  --file-tree-recency-pulse-shadow: rgba(95, 152, 0, 0.22);
   --pc-control-bg: #f7f9fc;
   --pc-control-fg: #1f2937;
   --pc-control-border: #9aa6b6;

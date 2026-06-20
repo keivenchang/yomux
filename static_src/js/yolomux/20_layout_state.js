@@ -1733,6 +1733,7 @@ function attentionAnimationStyle() {
 
 function syncAttentionAnimation(node, active) {
   if (!node?.style) return;
+  node.classList?.toggle?.('attention-pulse', active === true);
   if (active) {
     if (!node.style.getPropertyValue('--attention-animation-delay')) {
       node.style.setProperty('--attention-animation-delay', attentionAnimationDelay());
@@ -1745,7 +1746,7 @@ function syncAttentionAnimation(node, active) {
 function stateBadgeHtml(key, short, title, options = {}) {
   const classes = ['session-state-badge', 'tab-symbol', `session-state-${key}`];
   const attention = stateDef(key).attention;
-  if (attention) classes.push('session-state-reminder');
+  if (attention) classes.push('session-state-reminder', 'attention-pulse');
   const style = attention ? ` style="${attentionAnimationStyle()}"` : '';
   const clearable = options.clearable === true && options.session && options.promptSignature;
   const attrs = clearable

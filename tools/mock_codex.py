@@ -9,7 +9,7 @@ configure(
     agent_display_name="Codex",
     agent_product_name="OpenAI Codex",
     history_file="~/.cache/yolomux/mock_codex_history",
-    version="0.140.0",
+    version="0.141.0",
     model="gpt-5.5",
     effort="xhigh",
     model_line="gpt-5.5 xhigh · API Usage Billing",

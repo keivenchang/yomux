@@ -718,6 +718,15 @@ def post_yoagent_chat(request: Any, parsed: Any, route: Route) -> None:
     request.write_json(response, status=status)
 
 
+def post_yoagent_chat_cancel(request: Any, parsed: Any, route: Route) -> None:
+    payload = _json_body(request, route)
+    if payload is None:
+        return
+    request_id = unquote(parsed.path[len("/api/yoagent/chat/"):-len("/cancel")]).strip("/")
+    response, status = request.server.app.cancel_yoagent_chat(str(payload.get("request_id") or request_id))
+    request.write_json(response, status=status)
+
+
 def post_yoagent_preview_send(request: Any, parsed: Any, route: Route) -> None:
     del parsed
     payload = _json_body(request, route)
@@ -941,6 +950,7 @@ YOAGENT_ROUTES = (
     Route("GET", "/api/yoagent/conversation", "admin", get_yoagent_conversation, group="yoagent"),
     Route("GET", "/api/yoagent/jobs", "admin", get_yoagent_jobs, group="yoagent"),
     Route("POST", "/api/yoagent/chat", yoagent_chat_post_role, post_yoagent_chat, body_limit=64 * 1024, group="yoagent"),
+    Route("POST", "/api/yoagent/chat/*/cancel", "admin", post_yoagent_chat_cancel, body_limit=16 * 1024, group="yoagent"),
     Route("POST", "/api/yoagent/actions/preview-send", "admin", post_yoagent_preview_send, body_limit=64 * 1024, group="yoagent"),
     Route("POST", "/api/yoagent/actions/execute-send", "admin", post_yoagent_execute_send, body_limit=16 * 1024, group="yoagent"),
     Route("POST", "/api/yoagent/intent", "admin", post_yoagent_intent, body_limit=64 * 1024, group="yoagent"),

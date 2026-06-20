@@ -1407,45 +1407,6 @@ function tmuxWindowBarHtml(session, info, options = {}) {
   return `<div class="tmux-window-bar" data-tmux-window-bar="${esc(session)}" data-tmux-window-label-mode="${esc(labelMode)}" role="group" aria-label="${esc(t('terminal.window.groupAria'))}">${buttons}</div>`;
 }
 
-function previewTmuxWindowInfo(info, key) {
-  const panes = Array.isArray(info?.panes) ? info.panes : [];
-  const windows = tmuxWindowIndices(panes);
-  if (windows.length < 2) return null;
-  const activePane = terminalDisplayPane(info);
-  const activeIndex = tmuxWindowNumber(activePane?.window);
-  let target = tmuxWindowNumber(key?.windowIndex);
-  if (target === null) {
-    const current = Math.max(0, windows.findIndex(index => index === activeIndex));
-    const delta = key === 'p' ? -1 : 1;
-    target = windows[(current + delta + windows.length) % windows.length];
-  }
-  if (!windows.includes(target)) return null;
-  const nextPanes = panes.map(pane => ({...pane, window_active: tmuxWindowNumber(pane.window) === target}));
-  return {
-    ...info,
-    panes: nextPanes,
-    selected_pane: nextPanes.find(pane => pane.window_active && pane.active)
-      || nextPanes.find(pane => pane.window_active)
-      || info?.selected_pane
-      || null,
-  };
-}
-
-function previewTmuxWindowLabel(session, key) {
-  const info = transcriptMeta.sessions?.[session];
-  const nextInfo = previewTmuxWindowInfo(info, key);
-  if (!nextInfo) return;
-  transcriptMeta = {
-    ...transcriptMeta,
-    sessions: {
-      ...(transcriptMeta.sessions || {}),
-      [session]: nextInfo,
-    },
-  };
-  updatePanelHeader(session, nextInfo);
-  renderInfoPanel();
-}
-
 function handleWindowStepButtonClick(event) {
   const button = windowStepButtonFromEvent(event);
   if (!button) return;

@@ -1162,8 +1162,7 @@ function renderFileEditorPanel(panel, item, options = {}) {
     setFileEditorViewMode(path, 'edit', item);
   }
   mode = editorViewModeFor(path, item);
-  const previewKind = previewKindForPath(path, state);
-  const previewable = previewKind !== 'unsupported';
+  const previewable = editorPreviewModeAvailable(path, state);
   updateEditorThemeButton(themeButton, {includeVanilla: true});
   updateEditorModeControl(modeControl, path, state, item);
   if (previewFontPanel) {

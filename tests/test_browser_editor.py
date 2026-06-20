@@ -604,6 +604,7 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
         const archive = makePanel('/home/test/repo/archive.zip', {kind: 'media', mediaKind: 'unsupported-archive', mime: 'application/zip', mtime: 154, size: 9234, content: '', original: '', dirty: false});
         const parquet = makePanel('/home/test/repo/data.parquet', {kind: 'media', mediaKind: 'unsupported-data', mime: 'application/vnd.apache.parquet', mtime: 155, size: 10234, content: '', original: '', dirty: false});
         const code = makePanel('/home/test/repo/app.py', {kind: 'text', mtime: 16, size: 64, content: 'print("hello")\\n', original: 'print("hello")\\n', dirty: false, language: 'python'});
+        const text = makePanel('/home/test/repo/notes.txt', {kind: 'text', mtime: 17, size: 24, content: 'plain notes\\n', original: 'plain notes\\n', dirty: false, language: 'text'});
         const unsupported = makePanel('/home/test/repo/archive.bin', {kind: 'too-large', size: 999999, maxBytes: 1024, error: 'binary preview blocked'});
         const imageInfo = ({panel}) => {
           const img = panel.querySelector('.file-editor-image-panel img.file-editor-image');
@@ -629,7 +630,13 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
           modeControlHidden: panel.querySelector('.file-editor-mode-control-panel')?.hidden === true,
         });
         const pdfFrame = pdf.panel.querySelector('.file-editor-pdf-preview');
-        const codeBlock = code.panel.querySelector('.file-editor-preview-pane-panel code.language-python');
+        const editorOnlyInfo = ({panel}) => ({
+          mode: editorViewModeFor(panel.dataset.filePath, panel.dataset.layoutItem),
+          previewPaneHidden: panel.querySelector('.file-editor-preview-pane-panel')?.hidden === true,
+          codeMirrorHidden: panel.querySelector('.file-editor-codemirror-panel')?.hidden === true,
+          modeControlHidden: panel.querySelector('.file-editor-mode-control-panel')?.hidden === true,
+          popoutHidden: panel.querySelector('.file-editor-popout-preview-panel')?.hidden === true,
+        });
         return {
           png: imageInfo(png),
           apng: imageInfo(apng),
@@ -663,11 +670,8 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
           tiff: fallbackInfo(tiff),
           archive: fallbackInfo(archive),
           parquet: fallbackInfo(parquet),
-          code: {
-            previewPaneHidden: code.panel.querySelector('.file-editor-preview-pane-panel')?.hidden === true,
-            codeText: codeBlock?.textContent || '',
-            codeClass: codeBlock?.className || '',
-          },
+          code: editorOnlyInfo(code),
+          text: editorOnlyInfo(text),
           unsupported: {
             imagePaneHidden: unsupported.panel.querySelector('.file-editor-image-panel')?.hidden === true,
             previewPaneHidden: unsupported.panel.querySelector('.file-editor-preview-pane-panel')?.hidden === true,
@@ -721,9 +725,14 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
     assert "application/zip" in metrics["archive"]["text"], metrics
     assert "external viewer" in metrics["parquet"]["title"], metrics
     assert "application/vnd.apache.parquet" in metrics["parquet"]["text"], metrics
-    assert metrics["code"]["previewPaneHidden"] is False, metrics
-    assert "print" in metrics["code"]["codeText"], metrics
-    assert "language-python" in metrics["code"]["codeClass"], metrics
+    assert metrics["code"]["mode"] == "edit", metrics
+    assert metrics["code"]["previewPaneHidden"] is True, metrics
+    assert metrics["code"]["modeControlHidden"] is True, metrics
+    assert metrics["code"]["popoutHidden"] is True, metrics
+    assert metrics["text"]["mode"] == "edit", metrics
+    assert metrics["text"]["previewPaneHidden"] is True, metrics
+    assert metrics["text"]["modeControlHidden"] is True, metrics
+    assert metrics["text"]["popoutHidden"] is True, metrics
     assert metrics["unsupported"]["modeControlHidden"] is True, metrics
     assert "File is too large to preview" in metrics["unsupported"]["text"], metrics
     assert "binary preview blocked" in metrics["unsupported"]["text"], metrics
@@ -3484,4 +3493,3 @@ def test_long_markdown_editor_restores_scroll_after_codemirror_recreate(browser,
     assert metrics["savedTop"] > metrics["clientHeight"], metrics
     assert metrics["restored"] is True, metrics
     assert abs(metrics["restoredTop"] - metrics["savedTop"]) < 32, metrics
-

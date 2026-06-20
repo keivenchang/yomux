@@ -1702,22 +1702,30 @@ function noteTerminalExplicitInput(session) {
 }
 
 const terminalTmuxPrefixPendingBySession = new Map();
+const tmuxWindowReadbackDelayMs = 120;
 
 function terminalTmuxPrefixWindowShortcut(key) {
   const value = String(key || '');
-  if (value === 'n') return {previewKey: 'n', label: 'next tmux window'};
-  if (value === 'p') return {previewKey: 'p', label: 'previous tmux window'};
-  if (/^[0-9]$/.test(value)) return {previewKey: {windowIndex: value}, label: `tmux window ${value}`};
+  if (value === 'n') return {label: 'next tmux window'};
+  if (value === 'p') return {label: 'previous tmux window'};
+  if (/^[0-9]$/.test(value)) return {label: `tmux window ${value}`};
   return null;
 }
 
-function mirrorTerminalTmuxWindowSwitch(session, shortcut) {
+function scheduleTmuxWindowReadback(session, options = {}) {
+  const delayMs = Number.isFinite(options.delayMs) ? Math.max(0, options.delayMs) : tmuxWindowReadbackDelayMs;
+  const run = () => refreshTranscripts({force: true});
+  if (delayMs <= 0) return run();
+  setTimeout(run, delayMs);
+  return null;
+}
+
+function noteTerminalTmuxWindowSwitch(session, shortcut) {
   if (!shortcut) return false;
-  previewTmuxWindowLabel(session, shortcut.previewKey);
   statusOk(`${esc(shortcut.label)}: ${esc(sessionLabel(session))}`);
   scheduleFit(session);
   focusTerminalFromUserAction(session, 75);
-  setTimeout(() => refreshTranscripts({force: true}), 250);
+  scheduleTmuxWindowReadback(session);
   return true;
 }
 
@@ -1728,7 +1736,7 @@ function observeTerminalTmuxPrefixWindowSwitches(session, data) {
   let mirrored = false;
   for (const char of text) {
     if (pending) {
-      mirrored = mirrorTerminalTmuxWindowSwitch(session, terminalTmuxPrefixWindowShortcut(char)) || mirrored;
+      mirrored = noteTerminalTmuxWindowSwitch(session, terminalTmuxPrefixWindowShortcut(char)) || mirrored;
       pending = false;
       continue;
     }
@@ -1937,12 +1945,11 @@ function tmuxWindow(session, key, label) {
   }
   const directIndex = tmuxWindowNumber(key?.windowIndex);
   if (directIndex !== null) {
-    previewTmuxWindowLabel(session, {windowIndex: directIndex});
     statusOk(`${esc(label)}: ${esc(sessionLabel(session))}`);
     scheduleFit(session);
     focusTerminalFromUserAction(session, 75);
     apiFetchJson(`/api/tmux-window?session=${encodeURIComponent(session)}&window=${encodeURIComponent(String(directIndex))}`, {method: 'POST'})
-      .then(() => setTimeout(() => refreshTranscripts({force: true}), 250))
+      .then(() => scheduleTmuxWindowReadback(session, {delayMs: 0}))
       .catch(error => statusErr(localizedHtml('terminal.window.failed', {error: error.message || error})));
     return;
   }
@@ -1953,11 +1960,10 @@ function tmuxWindow(session, key, label) {
   }
   fitTerminal(session);
   item.socket.send(JSON.stringify({type: 'input', data: String.fromCharCode(2) + key}));
-  previewTmuxWindowLabel(session, key);
   statusOk(`${esc(label)}: ${esc(sessionLabel(session))}`);
   scheduleFit(session);
   focusTerminalFromUserAction(session, 75);
-  setTimeout(() => refreshTranscripts({force: true}), 250);
+  scheduleTmuxWindowReadback(session);
 }
 
 async function ensureTerminalRunning(session) {

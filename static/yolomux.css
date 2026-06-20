@@ -344,7 +344,6 @@
   --file-tree-recency-recent: #bfe87e;
   --file-tree-recency-warm: #aab8c4;
   --file-tree-recency-old: var(--muted);
-  --file-tree-recency-pulse-shadow: rgba(196, 249, 112, 0.36);
   --editor-font: var(--mono-font);
   --editor-font-size: var(--ui-font-size);
   --editor-ui-font-size: max(10px, calc(var(--editor-font-size) - 2px));
@@ -610,7 +609,6 @@ body.theme-light {
   --file-tree-recency-recent: #4d7f21;
   --file-tree-recency-warm: #566271;
   --file-tree-recency-old: var(--muted);
-  --file-tree-recency-pulse-shadow: rgba(95, 152, 0, 0.22);
   --pc-control-bg: #f7f9fc;
   --pc-control-fg: #1f2937;
   --pc-control-border: #9aa6b6;
@@ -2023,11 +2021,16 @@ body.theme-light .latency-meter {
     box-shadow: 0 0 0 2px rgba(255, 51, 71, 0.72), 0 0 26px rgba(255, 51, 71, 0.68);
   }
 }
-.session-state-badge.session-state-reminder,
-.session-state-badge.session-state-needs-approval,
-.session-state-badge.session-state-needs-input,
-.session-state-badge.session-state-blocked,
-.session-state-badge.session-state-disconnected,
+.attention-pulse {
+  --attention-ring-border: 1px;
+  transform-origin: center;
+  animation-name: attention-ring-fade;
+  animation-duration: var(--red-reminder-duration);
+  animation-delay: var(--attention-animation-delay, 0s);
+  animation-timing-function: var(--red-reminder-easing);
+  animation-iteration-count: infinite;
+}
+.session-state-badge.attention-pulse,
 .ci-indicator.pr-status-failing {
   --attention-ring-border: 1px;
   transform-origin: center;
@@ -2052,6 +2055,7 @@ body.theme-light .latency-meter {
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .attention-pulse,
   .session-state-needs-approval,
   .session-state-needs-input,
   .session-state-blocked,
@@ -5001,13 +5005,11 @@ body.theme-light .drop-slot.drag-over {
 .panel.typing-ready-pane.needs-blocked-pane {
   --panel-ring-color: var(--pane-ring-attention);
 }
-/* needs-* panes PULSE the red ring (the keyframes drive border-color directly on the gutter border). */
+/* needs-* panes get the shared .attention-pulse class from syncAttentionAnimation. */
 .panel.needs-input-pane,
 .panel.needs-exec-pane,
 .panel.needs-blocked-pane {
   --attention-ring-border: 1px;
-  animation: attention-ring-fade var(--red-reminder-duration) var(--red-reminder-easing) infinite;
-  animation-delay: var(--attention-animation-delay, 0s);
 }
 .panel.active-pane .panel-head {
   /* bg comes from --pane-bar-bg (focused = bright strip); no per-state override here. */
@@ -7086,6 +7088,70 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   color: var(--text);
   outline: none;
 }
+.yoagent-chat-queue {
+  display: grid;
+  gap: 5px;
+  padding: 7px 8px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel2) 88%, var(--active-control-soft-bg));
+  border: 1px dashed var(--active-control-soft-border);
+  border-radius: var(--radius-control);
+  font: var(--terminal-font-size)/1.35 var(--ui-font);
+}
+.yoagent-chat-queue-title {
+  color: var(--muted);
+  font: 800 max(9px, calc(var(--terminal-font-size) - 3px))/1 var(--mono-font);
+  text-transform: uppercase;
+}
+.yoagent-chat-queue-items {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.yoagent-chat-queue-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.yoagent-chat-queue-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-radius: 50%;
+  font: 800 10px/1 var(--mono-font);
+}
+.yoagent-chat-queue-text {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.yoagent-chat-queue-cancel {
+  appearance: none;
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+  font: 800 max(10px, calc(var(--terminal-font-size) - 2px))/1 var(--ui-font);
+  padding: 4px 7px;
+}
+.yoagent-chat-queue-cancel:hover,
+.yoagent-chat-queue-cancel:focus-visible {
+  border-color: var(--active-control-focus-ring);
+  color: var(--text);
+  outline: none;
+}
 .yoagent-jobs-list {
   display: grid;
   gap: 5px;
@@ -7218,12 +7284,15 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 .yoagent-message {
   display: grid;
   gap: 3px;
+  min-width: 0;
   width: calc(100% - 28px);
   max-width: calc(100% - 28px);
   padding: 7px 8px;
   border: 1px solid var(--line);
   border-radius: 5px;
   background: var(--panel2);
+  overflow: visible;
+  overscroll-behavior: auto;
 }
 .yoagent-message.assistant {
   align-self: flex-start;
@@ -7248,6 +7317,15 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 }
 .yoagent-message.assistant.streaming {
   border-inline-start-style: dashed;
+}
+.yoagent-message.assistant.stopped {
+  opacity: 0.82;
+  border-inline-start-color: var(--muted);
+  border-inline-start-style: solid;
+}
+.yoagent-message-state {
+  color: var(--muted);
+  font: 11px/1.2 var(--ui-font);
 }
 .yoagent-message.assistant.streaming .yoagent-message-role::after {
   content: "";
@@ -7281,6 +7359,10 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   text-transform: none;
 }
 .yoagent-message-body {
+  min-width: 0;
+  overflow-x: visible;
+  overflow-y: visible;
+  overscroll-behavior: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font: var(--terminal-font-size)/1.35 var(--ui-font);
@@ -7289,12 +7371,15 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
    messages. On a markdown body it would preserve the newlines between/inside the generated <ul><li>
    HTML as blank lines, which is why the bullets looked far too widely spaced. */
 .yoagent-message-body.markdown-body {
+  overflow-y: visible;
   white-space: normal;
 }
 .yoagent-message-details {
   margin-top: 5px;
   font: max(9px, calc(var(--terminal-font-size) - 2px))/1.35 var(--mono-font);
   color: var(--muted);
+  overflow: visible;
+  overscroll-behavior: auto;
 }
 .yoagent-message-details summary {
   display: flex;
@@ -7312,7 +7397,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   flex: 1 1 auto;
   min-width: 0;
   max-height: calc(2 * max(9px, calc(var(--terminal-font-size) - 2px)) * 1.35);
-  overflow: hidden;
+  overflow: clip;
   color: color-mix(in srgb, var(--muted) 78%, var(--text));
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -7324,6 +7409,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   margin: 5px 0 0;
   max-height: 180px;
   overflow: auto;
+  overscroll-behavior: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   padding: 7px 8px;
@@ -7335,6 +7421,13 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 .yoagent-message-details pre.yoagent-auxiliary-stream {
   color: color-mix(in srgb, var(--muted) 72%, var(--text));
   background: color-mix(in srgb, var(--panel2) 78%, var(--bg));
+}
+.yoagent-toolcall-details summary > span:first-child {
+  color: var(--accent-gold);
+}
+.yoagent-message-details pre.yoagent-toolcall-stream {
+  color: color-mix(in srgb, var(--accent-gold) 58%, var(--text));
+  border-color: color-mix(in srgb, var(--accent-gold) 35%, var(--line));
 }
 .yoagent-details-note {
   margin-top: 5px;
@@ -7440,8 +7533,10 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-wrap: wrap;
 }
 .yoagent-chat-controls-spacer { flex: 1 1 auto; }
+.yoagent-composer-pill,
 .yoagent-backend-pill {
   display: inline-flex;
   align-items: center;
@@ -7454,6 +7549,12 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   border-radius: var(--radius-pill);
   font: 600 max(10px, calc(var(--terminal-font-size) - 2px))/1 var(--ui-font);
 }
+.yoagent-composer-pill-model {
+  max-width: min(34ch, 100%);
+}
+.yoagent-composer-pill-effort {
+  max-width: 13ch;
+}
 .yoagent-backend-pill-dot {
   width: 9px;
   height: 9px;
@@ -7461,7 +7562,10 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   border-radius: 50%;
   border: 2px solid var(--active-control-bg);
 }
+.yoagent-composer-pill select,
 .yoagent-backend-pill select {
+  min-width: 0;
+  max-width: 100%;
   height: 22px;
   padding: 0;
   color: inherit;
@@ -7469,8 +7573,19 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   border: 0;
   font: inherit;
   cursor: pointer;
+  text-overflow: ellipsis;
 }
+.yoagent-composer-pill select:disabled,
+.yoagent-backend-pill select:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+.yoagent-composer-pill select:focus { outline: none; }
 .yoagent-backend-pill select:focus { outline: none; }
+.yoagent-chat-disabled {
+  color: var(--muted);
+  font-size: max(11px, calc(var(--terminal-font-size) - 1px));
+}
 .yoagent-chat-clear {
   height: 24px;
   padding: 0 9px;
@@ -7503,12 +7618,36 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 }
 .yoagent-chat-send:disabled { opacity: 0.5; cursor: default; }
 .yoagent-chat-send-icon { width: 16px; height: 16px; }
+.yoagent-chat-stop {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  padding: 0;
+  color: var(--text);
+  background: color-mix(in srgb, var(--bad) 24%, var(--panel2));
+  border: 1px solid color-mix(in srgb, var(--bad) 70%, var(--line));
+  border-radius: 50%;
+  cursor: pointer;
+  font: 900 18px/1 var(--ui-font);
+}
+.yoagent-chat-stop:hover,
+.yoagent-chat-stop:focus-visible {
+  color: var(--auto-text);
+  background: var(--bad);
+  outline: none;
+}
 /* YO!agent rendered code blocks: soft rounded boxes (not the editor's near-black slab). */
 .yoagent-chat .markdown-body pre,
 .yoagent-global .markdown-body pre {
   background: color-mix(in srgb, var(--panel2) 60%, var(--bg));
   border: 1px solid var(--line);
   border-radius: 8px;
+  overflow-x: auto;
+  overflow-y: auto;
+  overscroll-behavior: auto;
   padding: 8px 10px;
 }
 body.theme-light .info-pane {
@@ -7572,6 +7711,20 @@ body.theme-light .yoagent-message-details pre.yoagent-auxiliary-stream {
 }
 body.theme-light .yoagent-details-note {
   color: #667085;
+}
+body.theme-light .yoagent-chat-queue {
+  color: var(--lt-text);
+  background: color-mix(in srgb, var(--active-control-soft-bg) 72%, #ffffff);
+  border-color: var(--active-control-soft-border);
+}
+body.theme-light .yoagent-chat-queue-title,
+body.theme-light .yoagent-chat-queue-cancel {
+  color: var(--lt-muted-strong);
+}
+body.theme-light .yoagent-message-details pre.yoagent-toolcall-stream {
+  color: #7a5b00;
+  background: #fff9e8;
+  border-color: #e3bf57;
 }
 body.theme-light .yoagent-action-card {
   color: var(--lt-text);
@@ -9155,32 +9308,13 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
 .file-tree-row:not(.selected):not(.current-file)[data-recency] > .file-tree-date {
   color: var(--file-tree-recency-date-color, var(--muted));
 }
+.file-tree-row:not(.selected):not(.current-file).file-tree-recency-just-updated > .file-tree-date,
 .file-tree-row:not(.selected):not(.current-file).file-tree-recency-hot > .file-tree-date,
 .file-tree-row:not(.selected):not(.current-file).file-tree-recency-fresh > .file-tree-date {
   font-weight: 800;
 }
 .file-tree-row:not(.selected):not(.current-file).file-tree-recency-recent > .file-tree-date {
   font-weight: 700;
-}
-.file-tree-row:not(.selected):not(.current-file).file-tree-recency-pulse > .file-tree-date {
-  animation: file-tree-recency-pulse 10s ease-out 1;
-}
-@keyframes file-tree-recency-pulse {
-  0%, 100% {
-    opacity: 1;
-    text-shadow: none;
-    transform: translateY(0);
-  }
-  10%, 34% {
-    opacity: 1;
-    text-shadow: 0 0 0.7em var(--file-tree-recency-pulse-shadow);
-    transform: translateY(-1px);
-  }
-  22%, 48% {
-    opacity: 0.76;
-    text-shadow: none;
-    transform: translateY(0);
-  }
 }
 .file-tree-dir-count[hidden],
 .file-tree-agent[hidden],

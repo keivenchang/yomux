@@ -725,6 +725,15 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
     assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "id": "yj_1"})]
 
+    app = SimpleNamespace(cancel_yoagent_chat=lambda request_id: ({"ok": True, "request_id": request_id, "cancelled": True}, HTTPStatus.OK))
+    handler, calls, writes = route_handler("/api/yoagent/chat/chat-abc/cancel", app)
+    handler.read_json_body = lambda limit: {}
+
+    Handler.do_POST(handler)
+
+    assert calls == [("require_auth", "admin")]
+    assert writes == [("json", HTTPStatus.OK, {"ok": True, "request_id": "chat-abc", "cancelled": True})]
+
     app = SimpleNamespace(clear_yoagent_action_wait=lambda wait_id: ({"ok": True, "id": wait_id}, HTTPStatus.OK))
     handler, calls, writes = route_handler("/api/yoagent/waits/yw_1/clear", app)
     handler.read_json_body = lambda limit: {}

@@ -1836,10 +1836,10 @@ function fileTreeMtimeText(entry) {
   return sessionFileDisplayTimeTextForEntry(entry);
 }
 
-const FILE_TREE_RECENCY_PULSE_MAX_AGE_SECONDS = 60;
-const FILE_TREE_RECENCY_PULSE_DURATION_MS = 10000;
+const FILE_TREE_RECENCY_JUST_UPDATED_MAX_AGE_SECONDS = 15;
 const FILE_TREE_RECENCY_THRESHOLDS = Object.freeze([
-  {key: 'hot', maxAgeSeconds: FILE_TREE_RECENCY_PULSE_MAX_AGE_SECONDS, colorVar: 'var(--file-tree-recency-hot)'},
+  {key: 'just-updated', maxAgeSeconds: FILE_TREE_RECENCY_JUST_UPDATED_MAX_AGE_SECONDS, colorVar: 'var(--file-tree-recency-hot)', pulseEligible: true},
+  {key: 'hot', maxAgeSeconds: 60, colorVar: 'var(--file-tree-recency-hot)'},
   {key: 'fresh', maxAgeSeconds: 5 * 60, colorVar: 'var(--file-tree-recency-fresh)'},
   {key: 'recent', maxAgeSeconds: 60 * 60, colorVar: 'var(--file-tree-recency-recent)'},
   {key: 'warm', maxAgeSeconds: 24 * 60 * 60, colorVar: 'var(--file-tree-recency-warm)'},
@@ -1873,48 +1873,50 @@ function fileTreeRecencyStateForMtime(mtime, nowMs = fileTreeRecencyNowMs()) {
     colorVar: threshold?.colorVar || FILE_TREE_RECENCY_OLD_STATE.colorVar,
     mtimeKey: String(value),
     ageSeconds,
-    pulseEligible: key === 'hot',
+    pulseEligible: threshold?.pulseEligible === true,
   };
 }
 
-function clearFileTreeRecencyPulseTimer(row) {
-  if (row?.__fileTreeRecencyPulseTimer) clearTimeout(row.__fileTreeRecencyPulseTimer);
+function fileTreeRecencyDateCell(row) {
+  return row?.querySelector?.(':scope > .file-tree-date') || null;
+}
+
+function clearFileTreeRecencyAttentionTimer(row) {
+  if (row?.__fileTreeRecencyAttentionTimer) clearTimeout(row.__fileTreeRecencyAttentionTimer);
   if (row) {
-    row.__fileTreeRecencyPulseTimer = null;
-    row.__fileTreeRecencyPulseTimerUntilMs = 0;
+    row.__fileTreeRecencyAttentionTimer = null;
+    row.__fileTreeRecencyAttentionTimerUntilMs = 0;
   }
 }
 
-function setFileTreeRecencyPulseClass(row, enabled, restart = false) {
-  if (!row?.classList) return;
+function setFileTreeRecencyAttentionClass(row, enabled, nowMs = fileTreeRecencyNowMs()) {
+  const date = fileTreeRecencyDateCell(row);
+  if (!row?.classList || !date?.classList) return;
   if (!enabled) {
-    row.classList.remove('file-tree-recency-pulse');
+    date.classList.remove('attention-pulse');
+    date.style?.removeProperty('--attention-animation-delay');
     return;
   }
-  if (restart && row.classList.contains('file-tree-recency-pulse')) {
-    row.classList.remove('file-tree-recency-pulse');
-    const date = row.querySelector?.(':scope > .file-tree-date');
-    if (date?.offsetWidth !== undefined) void date.offsetWidth;
-  }
-  row.classList.add('file-tree-recency-pulse');
+  date.classList.add('attention-pulse');
+  date.style?.setProperty('--attention-animation-delay', attentionAnimationDelay(nowMs));
 }
 
-function scheduleFileTreeRecencyPulseStop(row, untilMs) {
+function scheduleFileTreeRecencyAttentionStop(row, untilMs) {
   if (!row) return;
   const until = Number(untilMs) || 0;
   const delay = until - fileTreeRecencyNowMs();
   if (delay <= 0) {
-    setFileTreeRecencyPulseClass(row, false);
-    clearFileTreeRecencyPulseTimer(row);
+    setFileTreeRecencyAttentionClass(row, false);
+    clearFileTreeRecencyAttentionTimer(row);
     return;
   }
-  if (row.__fileTreeRecencyPulseTimerUntilMs === until) return;
-  clearFileTreeRecencyPulseTimer(row);
-  row.__fileTreeRecencyPulseTimerUntilMs = until;
-  row.__fileTreeRecencyPulseTimer = setTimeout(() => {
-    if ((Number(row.__fileTreeRecencyPulseUntilMs) || 0) <= fileTreeRecencyNowMs()) {
-      setFileTreeRecencyPulseClass(row, false);
-      clearFileTreeRecencyPulseTimer(row);
+  if (row.__fileTreeRecencyAttentionTimerUntilMs === until) return;
+  clearFileTreeRecencyAttentionTimer(row);
+  row.__fileTreeRecencyAttentionTimerUntilMs = until;
+  row.__fileTreeRecencyAttentionTimer = setTimeout(() => {
+    if ((Number(row.__fileTreeRecencyAttentionUntilMs) || 0) <= fileTreeRecencyNowMs()) {
+      setFileTreeRecencyAttentionClass(row, false);
+      clearFileTreeRecencyAttentionTimer(row);
     }
   }, delay);
 }
@@ -1922,7 +1924,9 @@ function scheduleFileTreeRecencyPulseStop(row, untilMs) {
 function clearFileTreeRowRecency(row) {
   if (!row) return;
   for (const className of FILE_TREE_RECENCY_CLASSES) row.classList.remove(className);
-  row.classList.remove('file-tree-recency-pulse');
+  const date = fileTreeRecencyDateCell(row);
+  date?.classList?.remove?.('attention-pulse');
+  date?.style?.removeProperty?.('--attention-animation-delay');
   setRowDataset(row, 'recency', '');
   row.style?.removeProperty('--file-tree-recency-date-color');
 }
@@ -1936,29 +1940,28 @@ function applyFileTreeRowRecency(row, entry, options = {}) {
   const state = fileTreeRecencyStateForMtime(entry?.mtime, nowMs);
   if (!state) {
     clearFileTreeRowRecency(row);
-    clearFileTreeRecencyPulseTimer(row);
-    row.__fileTreeRecencyPulseMtimeKey = '';
-    row.__fileTreeRecencyPulseUntilMs = 0;
+    clearFileTreeRecencyAttentionTimer(row);
+    row.__fileTreeRecencyAttentionMtimeKey = '';
+    row.__fileTreeRecencyAttentionUntilMs = 0;
     return;
   }
   for (const className of FILE_TREE_RECENCY_CLASSES) row.classList.toggle(className, className === state.className);
   setRowDataset(row, 'recency', state.key);
   row.style?.setProperty('--file-tree-recency-date-color', state.colorVar);
   if (!state.pulseEligible) {
-    setFileTreeRecencyPulseClass(row, false);
-    clearFileTreeRecencyPulseTimer(row);
+    setFileTreeRecencyAttentionClass(row, false);
+    clearFileTreeRecencyAttentionTimer(row);
+    row.__fileTreeRecencyAttentionUntilMs = 0;
     return;
   }
-  const mtimeChanged = row.__fileTreeRecencyPulseMtimeKey !== state.mtimeKey;
-  if (mtimeChanged) {
-    row.__fileTreeRecencyPulseMtimeKey = state.mtimeKey;
-    row.__fileTreeRecencyPulseUntilMs = nowMs + FILE_TREE_RECENCY_PULSE_DURATION_MS;
-  }
-  const pulseUntilMs = Number(row.__fileTreeRecencyPulseUntilMs) || 0;
-  const pulseActive = pulseUntilMs > nowMs && row.__fileTreeRecencyPulseMtimeKey === state.mtimeKey;
-  setFileTreeRecencyPulseClass(row, pulseActive, mtimeChanged);
-  if (pulseActive) scheduleFileTreeRecencyPulseStop(row, pulseUntilMs);
-  else clearFileTreeRecencyPulseTimer(row);
+  row.__fileTreeRecencyAttentionMtimeKey = state.mtimeKey;
+  row.__fileTreeRecencyAttentionUntilMs = (Number(state.mtimeKey) * 1000) + (FILE_TREE_RECENCY_JUST_UPDATED_MAX_AGE_SECONDS * 1000);
+  const attentionUntilMs = Number(row.__fileTreeRecencyAttentionUntilMs) || 0;
+  const rowSuppressesAttention = row.classList?.contains('selected') || row.classList?.contains('current-file');
+  const attentionActive = !rowSuppressesAttention && attentionUntilMs > nowMs && row.__fileTreeRecencyAttentionMtimeKey === state.mtimeKey;
+  setFileTreeRecencyAttentionClass(row, attentionActive, nowMs);
+  if (attentionActive) scheduleFileTreeRecencyAttentionStop(row, attentionUntilMs);
+  else clearFileTreeRecencyAttentionTimer(row);
 }
 
 function sortedFileTreeEntries(entries, sortMode = fileExplorerTreeSortMode, options = {}) {

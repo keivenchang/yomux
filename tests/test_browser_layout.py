@@ -46,7 +46,7 @@ def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser
     try:
         created = tmux_cmd(
             "new-session", "-d", "-s", session, "-x", "120", "-y", "40",
-            f"cd {REPO_ROOT} && exec python3 mock/{mock_name}",
+            f"cd {REPO_ROOT} && exec python3 tools/{mock_name}",
         )
         assert created.returncode == 0, f"tmux new-session failed: {created.stderr or created.stdout}"
         booted, pane = wait_until(lambda text: "❯" in text or "›" in text)
@@ -427,6 +427,8 @@ def test_yoagent_settings_operator_updates_live_gui_and_denies_readonly(browser,
         sessions=["1"],
         settings=base_settings,
         yoagent_chat_mode="settings",
+        available_agents=["term", "codex"],
+        agent_auth={"codex": {"installed": True, "logged_in": True}},
     )
     WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return typeof openInfoSubTab === 'function' && typeof sendYoagentChatMessage === 'function'"))
     admin = browser.execute_async_script(
@@ -487,6 +489,8 @@ def test_yoagent_settings_operator_updates_live_gui_and_denies_readonly(browser,
         settings=base_settings,
         access_role="readonly",
         yoagent_chat_mode="settings",
+        available_agents=["term", "codex"],
+        agent_auth={"codex": {"installed": True, "logged_in": True}},
     )
     WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return typeof openInfoSubTab === 'function' && typeof sendYoagentChatMessage === 'function'"))
     readonly = browser.execute_async_script(
@@ -522,6 +526,8 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
             settings={"yoagent": {"backend": "auto"}},
             grid_width=grid_width,
             grid_height=460,
+            available_agents=["term", "codex"],
+            agent_auth={"codex": {"installed": True, "logged_in": True}},
         )
         WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return typeof openInfoSubTab === 'function' && typeof sendYoagentChatMessage === 'function'"))
         metrics = browser.execute_async_script(
@@ -559,12 +565,25 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
               return {
                 overflowX: style.overflowX,
                 overflowY: style.overflowY,
+                overscrollBehaviorX: style.overscrollBehaviorX,
+                overscrollBehaviorY: style.overscrollBehaviorY,
                 scrollHeight: element.scrollHeight,
                 clientHeight: element.clientHeight,
                 scrollWidth: element.scrollWidth,
                 clientWidth: element.clientWidth,
                 scrollTop: element.scrollTop,
                 rect: rectFor(element),
+              };
+            };
+            const styleFor = element => {
+              if (!element) return null;
+              const style = getComputedStyle(element);
+              return {
+                overflowX: style.overflowX,
+                overflowY: style.overflowY,
+                overscrollBehaviorX: style.overscrollBehaviorX,
+                overscrollBehaviorY: style.overscrollBehaviorY,
+                pointerEvents: style.pointerEvents,
               };
             };
             const collect = () => {
@@ -576,11 +595,22 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
               const status = document.querySelector('.yoagent-chat-status');
               const streaming = document.querySelector('.yoagent-message.streaming');
               const pre = document.querySelector('.yoagent-chat .markdown-body pre');
-              const details = document.querySelector('.yoagent-message-details');
-              const auxPreview = document.querySelector('.yoagent-details-preview');
-              const auxStream = document.querySelector('.yoagent-auxiliary-stream');
+              const details = document.querySelector('.yoagent-message-details:not(.yoagent-toolcall-details)');
+              const toolDetails = document.querySelector('.yoagent-toolcall-details');
+              const auxPreview = details?.querySelector('.yoagent-details-preview');
+              const auxStream = details?.querySelector('.yoagent-auxiliary-stream');
+              const toolPreview = toolDetails?.querySelector('.yoagent-details-preview');
+              const toolStream = toolDetails?.querySelector('.yoagent-toolcall-stream');
+              const assistantMessage = document.querySelector('.yoagent-message.assistant');
+              const userMessage = document.querySelector('.yoagent-message.user');
+              const messageBody = document.querySelector('.yoagent-message-body');
+              const markdownBody = document.querySelector('.yoagent-message-body.markdown-body');
               const streamingBody = streaming?.querySelector?.('.yoagent-message-body');
               const actionText = document.querySelector('.yoagent-action-text');
+              const input = document.querySelector('[data-yoagent-chat-input]');
+              const stopButton = document.querySelector('[data-yoagent-chat-cancel]');
+              const queue = document.querySelector('.yoagent-chat-queue');
+              const queueCancel = document.querySelector('[data-yoagent-queued-cancel]');
               const boxes = {
                 infoPane: boxFor(infoPane),
                 outer: boxFor(outer),
@@ -590,8 +620,17 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
                 details: boxFor(details),
                 actionText: boxFor(actionText),
               };
+              const targetStyles = {
+                assistantMessage: styleFor(assistantMessage),
+                userMessage: styleFor(userMessage),
+                messageBody: styleFor(messageBody),
+                markdownBody: styleFor(markdownBody),
+                auxPreview: styleFor(auxPreview),
+                auxStream: styleFor(auxStream),
+              };
               return {
                 ...boxes,
+                targetStyles,
                 verticalOverflowKeys: Object.entries(boxes)
                   .filter(([, box]) => box && box.scrollHeight > box.clientHeight + 1)
                   .map(([key]) => key),
@@ -600,8 +639,17 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
                 noHistoryFormOverlap: Boolean(history && form && history.getBoundingClientRect().bottom <= form.getBoundingClientRect().top + 1),
                 statusInsideHistory: Boolean(status && history && history.contains(status)),
                 streamingInsideHistory: Boolean(streaming && history && history.contains(streaming)),
+                inputDisabled: input?.disabled === true,
+                hasStopButton: Boolean(stopButton),
+                hasQueue: Boolean(queue),
+                queueText: queue?.textContent || '',
+                hasQueuedCancel: Boolean(queueCancel),
+                thinkingDetailsOpen: details?.open === true,
+                toolDetailsOpen: toolDetails?.open === true,
                 auxPreviewText: auxPreview?.textContent || '',
                 auxStreamText: auxStream?.textContent || '',
+                toolPreviewText: toolPreview?.textContent || '',
+                toolStreamText: toolStream?.textContent || '',
                 streamingBodyText: streamingBody?.textContent || '',
                 errors: window.__bootErrors || [],
                 rejections: window.__bootRejections || [],
@@ -614,7 +662,9 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
                 transcript_display_path: '~/.local/state/yolomux/yoagent/conversation.jsonl',
                 messages: Array.from({length: 80}, (_, index) => ({
                   role: index % 2 ? 'assistant' : 'user',
-                  content: `message ${index + 1} ` + Array.from({length: 10}, (_line, lineIndex) => `detail-${lineIndex + 1}-for-message-${index + 1}`).join(' '),
+                  content: index === 1
+                    ? 'message 2 with a wide code block\\n\\n```js\\nconst wide = "' + Array.from({length: 36}, () => 'wide_token').join('_') + '";\\n```'
+                    : `message ${index + 1} ` + Array.from({length: 10}, (_line, lineIndex) => `detail-${lineIndex + 1}-for-message-${index + 1}`).join(' '),
                   createdAt: `2026-06-19T08:${String(index).padStart(2, '0')}:00Z`,
                 })),
                 pending_waits: [{id: 'wait-1', session: '1', started_ts: Math.round(Date.now() / 1000) - 45, transcript: '/tmp/yolomux-transcript.jsonl'}],
@@ -623,25 +673,50 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
               await raf();
               const originalFetch = window.fetch;
               let releaseChat = null;
+              const fetchCalls = [];
               window.fetch = (input, options = {}) => {
                 const url = new URL(String(input), window.location.href);
+                fetchCalls.push({path: url.pathname, method: options.method || 'GET', body: String(options.body || ''), hasSignal: Boolean(options.signal)});
                 if (url.pathname === '/api/yoagent/chat') {
-                  return new Promise(resolve => {
+                  return new Promise((resolve, reject) => {
                     releaseChat = () => resolve(new Response(JSON.stringify(responsePayload), {status: 200, headers: {'Content-Type': 'application/json'}}));
+                    options.signal?.addEventListener?.('abort', () => {
+                      const error = new Error('aborted');
+                      error.name = 'AbortError';
+                      reject(error);
+                    });
                   });
+                }
+                if (/^\/api\/yoagent\/chat\/.+\/cancel$/.test(url.pathname)) {
+                  return Promise.resolve(new Response(JSON.stringify({ok: true, cancelled: true}), {status: 200, headers: {'Content-Type': 'application/json'}}));
                 }
                 return originalFetch(input, options);
               };
               const sendPromise = sendYoagentChatMessage('summarize activity');
               await raf();
+              const active = yoagentActiveChatRequest ? {id: yoagentActiveChatRequest.id, streamId: yoagentActiveChatRequest.streamId} : null;
+              const immediate = collect();
+              const input = document.querySelector('[data-yoagent-chat-input]');
+              const form = document.querySelector('[data-yoagent-chat-form]');
+              if (input && form) {
+                input.value = 'queued followup';
+                input.dispatchEvent(new Event('input', {bubbles: true}));
+                form.dispatchEvent(new Event('submit', {bubbles: true, cancelable: true}));
+              }
+              await raf();
+              const queueBeforeCancel = collect();
+              document.querySelector('[data-yoagent-queued-cancel]')?.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+              await raf();
+              const queueAfterCancel = collect();
               applyYoagentStreamPayload({
-                stream_id: 'busy-stream',
+                stream_id: active?.streamId || active?.id || '',
                 backend: 'claude',
                 phase: 'delta',
                 content: Array.from({length: 24}, (_, index) => `streamed line ${index + 1}: working through the activity context`).join('\\n'),
-                auxiliary_lines: ['thinking: reading activity context', 'tool output: command: collected files'],
-                auxiliary_preview: 'thinking: reading activity context\\ntool output: command: collected files',
+                auxiliary_lines: ['thinking: scanning recent events', 'thinking: reading activity context', 'thinking: final synthesis', 'tool output: command: collected files'],
+                auxiliary_preview: 'thinking: reading activity context\\nthinking: final synthesis\\ntool output: command: collected files',
                 hidden_work_active: true,
+                tool_active: true,
               });
               renderYoagentPanel({preserveDraft: true, scrollBottom: 'auto', allowBusyRebuild: true});
               await raf();
@@ -652,13 +727,39 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
               renderYoagentPanel({preserveDraft: true, scrollBottom: 'auto'});
               await raf();
               const measured = collect();
+              const thinkingDetails = document.querySelector('.yoagent-message-details:not(.yoagent-toolcall-details)');
+              const toolDetails = document.querySelector('.yoagent-toolcall-details');
+              const collapsedThinkingHeight = thinkingDetails?.getBoundingClientRect?.().height || 0;
+              const collapsedToolHeight = toolDetails?.getBoundingClientRect?.().height || 0;
+              if (thinkingDetails) thinkingDetails.open = true;
+              if (toolDetails) toolDetails.open = true;
+              await raf();
+              measured.expandedThinkingStreamText = thinkingDetails?.querySelector('.yoagent-auxiliary-stream')?.textContent || '';
+              measured.expandedToolStreamText = toolDetails?.querySelector('.yoagent-toolcall-stream')?.textContent || '';
+              measured.expandedThinkingHeight = thinkingDetails?.getBoundingClientRect?.().height || 0;
+              measured.expandedToolHeight = toolDetails?.getBoundingClientRect?.().height || 0;
+              measured.collapsedThinkingHeight = collapsedThinkingHeight;
+              measured.collapsedToolHeight = collapsedToolHeight;
               measured.manualScrollTop = manualScrollTop;
               const refreshedHistory = document.querySelector('.yoagent-chat-history');
               measured.afterRefreshScrollTop = refreshedHistory?.scrollTop || 0;
               measured.afterRefreshBottomGap = refreshedHistory ? refreshedHistory.scrollHeight - refreshedHistory.clientHeight - refreshedHistory.scrollTop : 0;
               measured.releaseAvailable = typeof releaseChat === 'function';
-              if (releaseChat) releaseChat();
+              measured.activeRequest = active;
+              measured.immediate = immediate;
+              measured.queueBeforeCancel = queueBeforeCancel;
+              measured.queueAfterCancel = queueAfterCancel;
+              document.querySelector('[data-yoagent-chat-cancel]')?.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
               await sendPromise;
+              await raf();
+              measured.afterCancel = {
+                activeRequest: yoagentActiveChatRequest ? {id: yoagentActiveChatRequest.id, streamId: yoagentActiveChatRequest.streamId} : null,
+                busy: yoagentBusy === true,
+                inputDisabled: document.querySelector('[data-yoagent-chat-input]')?.disabled === true,
+                stoppedText: document.querySelector('.yoagent-message.stopped')?.textContent || '',
+                cancelCallCount: fetchCalls.filter(call => /^\\/api\\/yoagent\\/chat\\/.+\\/cancel$/.test(call.path)).length,
+              };
+              measured.chatRequestBodies = fetchCalls.filter(call => call.path === '/api/yoagent/chat').map(call => JSON.parse(call.body || '{}'));
               window.fetch = originalFetch;
               done(measured);
             })().catch(error => done({error: String(error && error.stack || error), errors: window.__bootErrors || [], rejections: window.__bootRejections || []}));
@@ -668,19 +769,50 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
         assert metrics["errors"] == [], (label, metrics)
         assert metrics["rejections"] == [], (label, metrics)
         assert metrics["releaseAvailable"] is True, (label, metrics)
+        assert metrics["activeRequest"]["id"] and metrics["activeRequest"]["streamId"], (label, metrics)
+        assert metrics["chatRequestBodies"][0]["request_id"] == metrics["activeRequest"]["id"], (label, metrics)
+        assert metrics["chatRequestBodies"][0]["stream_id"] == metrics["activeRequest"]["streamId"], (label, metrics)
+        assert metrics["immediate"]["inputDisabled"] is False, (label, metrics)
+        assert metrics["immediate"]["hasStopButton"] is True, (label, metrics)
+        assert "thinking" in metrics["immediate"]["auxPreviewText"], (label, metrics)
+        assert metrics["queueBeforeCancel"]["hasQueue"] is True, (label, metrics)
+        assert metrics["queueBeforeCancel"]["hasQueuedCancel"] is True, (label, metrics)
+        assert "queued followup" in metrics["queueBeforeCancel"]["queueText"], (label, metrics)
+        assert metrics["queueAfterCancel"]["hasQueue"] is False, (label, metrics)
         assert metrics["hasStatus"] is True, (label, metrics)
         assert metrics["hasStreaming"] is True, (label, metrics)
         assert metrics["statusInsideHistory"] is True, (label, metrics)
         assert metrics["streamingInsideHistory"] is True, (label, metrics)
-        assert metrics["auxPreviewText"] == "thinking: reading activity context\ntool output: command: collected files", (label, metrics)
+        assert metrics["hasStopButton"] is True, (label, metrics)
+        assert metrics["inputDisabled"] is False, (label, metrics)
+        assert metrics["thinkingDetailsOpen"] is False, (label, metrics)
+        assert metrics["toolDetailsOpen"] is False, (label, metrics)
+        assert metrics["auxPreviewText"] == "thinking: reading activity context\nthinking: final synthesis", (label, metrics)
+        assert metrics["toolPreviewText"] == "tool output: command: collected files", (label, metrics)
         assert "thinking: reading activity context" in metrics["auxStreamText"], (label, metrics)
-        assert "tool output: command: collected files" in metrics["auxStreamText"], (label, metrics)
+        assert "tool output: command: collected files" not in metrics["auxStreamText"], (label, metrics)
+        assert "tool output: command: collected files" in metrics["toolStreamText"], (label, metrics)
+        assert "thinking: scanning recent events" in metrics["expandedThinkingStreamText"], (label, metrics)
+        assert "tool output: command: collected files" in metrics["expandedToolStreamText"], (label, metrics)
+        assert metrics["expandedThinkingHeight"] > metrics["collapsedThinkingHeight"], (label, metrics)
+        assert metrics["expandedToolHeight"] > metrics["collapsedToolHeight"], (label, metrics)
         assert "thinking: reading activity context" not in metrics["streamingBodyText"], (label, metrics)
+        assert metrics["afterCancel"]["activeRequest"] is None, (label, metrics)
+        assert metrics["afterCancel"]["busy"] is False, (label, metrics)
+        assert metrics["afterCancel"]["inputDisabled"] is False, (label, metrics)
+        assert metrics["afterCancel"]["cancelCallCount"] == 1, (label, metrics)
+        assert "Stopped." in metrics["afterCancel"]["stoppedText"], (label, metrics)
         assert metrics["outer"]["overflowY"] == "hidden", (label, metrics)
         assert metrics["outer"]["scrollHeight"] <= metrics["outer"]["clientHeight"] + 1, (label, metrics)
         assert metrics["history"]["overflowY"] == "auto", (label, metrics)
+        assert metrics["history"]["overscrollBehaviorY"] == "auto", (label, metrics)
         assert metrics["history"]["scrollHeight"] > metrics["history"]["clientHeight"], (label, metrics)
         assert metrics["verticalOverflowKeys"] == ["history"], (label, metrics)
+        for target in ("assistantMessage", "userMessage", "messageBody", "markdownBody"):
+            assert metrics["targetStyles"][target]["overflowY"] == "visible", (label, target, metrics)
+            assert metrics["targetStyles"][target]["overscrollBehaviorY"] == "auto", (label, target, metrics)
+        assert metrics["targetStyles"]["auxPreview"]["overflowY"] == "clip", (label, metrics)
+        assert metrics["targetStyles"]["auxStream"]["overscrollBehaviorY"] == "auto", (label, metrics)
         assert metrics["chat"]["rect"]["bottom"] <= metrics["outer"]["rect"]["bottom"] + 1, (label, metrics)
         assert metrics["noHistoryFormOverlap"] is True, (label, metrics)
         assert metrics["manualScrollTop"] > 0, (label, metrics)

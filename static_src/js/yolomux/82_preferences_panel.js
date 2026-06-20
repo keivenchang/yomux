@@ -117,6 +117,29 @@ function yoagentCodexModelPreferenceChoices() {
   return modelPreferenceChoices('yoagent.codex_model', Object.keys(YOAGENT_CODEX_MODEL_LABEL_KEYS), YOAGENT_CODEX_MODEL_LABEL_KEYS);
 }
 
+function effortPreferenceChoices(path, fallbackValues, labelPrefix) {
+  const choices = Array.isArray(clientSettingsPayload?.choices?.[path])
+    ? clientSettingsPayload.choices[path]
+    : fallbackValues;
+  return choices.map(value => ({value, label: t(`${labelPrefix}.${value}`)}));
+}
+
+function yoagentClaudeEffortPreferenceChoices() {
+  return effortPreferenceChoices('yoagent.claude_effort', ['low', 'medium', 'high'], 'pref.yoagent.claude_effort');
+}
+
+function yoagentCodexEffortPreferenceChoices() {
+  return effortPreferenceChoices('yoagent.codex_effort', ['low', 'medium', 'high'], 'pref.yoagent.codex_effort');
+}
+
+function yoagentModelPreferenceChoicesForBackend(backend) {
+  return backend === 'claude' ? yoagentClaudeModelPreferenceChoices() : backend === 'codex' ? yoagentCodexModelPreferenceChoices() : [];
+}
+
+function yoagentEffortPreferenceChoicesForBackend(backend) {
+  return backend === 'claude' ? yoagentClaudeEffortPreferenceChoices() : backend === 'codex' ? yoagentCodexEffortPreferenceChoices() : [];
+}
+
 function preferenceSections() {
   return [
     {title: t('pref.section.general'), items: [
@@ -241,17 +264,9 @@ function preferenceSections() {
         {value: 'cli', label: t('pref.yoagent.invocation.cli')},
       ], help: t('pref.yoagent.invocation.help')},
       {path: 'yoagent.claude_model', label: t('pref.yoagent.claude_model.label'), type: 'select', choices: yoagentClaudeModelPreferenceChoices(), help: t('pref.yoagent.claude_model.help')},
-      {path: 'yoagent.claude_effort', label: t('pref.yoagent.claude_effort.label'), type: 'radio', choices: [
-        {value: 'low', label: t('pref.yoagent.claude_effort.low')},
-        {value: 'medium', label: t('pref.yoagent.claude_effort.medium')},
-        {value: 'high', label: t('pref.yoagent.claude_effort.high')},
-      ], help: t('pref.yoagent.claude_effort.help')},
+      {path: 'yoagent.claude_effort', label: t('pref.yoagent.claude_effort.label'), type: 'radio', choices: yoagentClaudeEffortPreferenceChoices(), help: t('pref.yoagent.claude_effort.help')},
       {path: 'yoagent.codex_model', label: t('pref.yoagent.codex_model.label'), type: 'select', choices: yoagentCodexModelPreferenceChoices(), help: t('pref.yoagent.codex_model.help')},
-      {path: 'yoagent.codex_effort', label: t('pref.yoagent.codex_effort.label'), type: 'radio', choices: [
-        {value: 'low', label: t('pref.yoagent.codex_effort.low')},
-        {value: 'medium', label: t('pref.yoagent.codex_effort.medium')},
-        {value: 'high', label: t('pref.yoagent.codex_effort.high')},
-      ], help: t('pref.yoagent.codex_effort.help')},
+      {path: 'yoagent.codex_effort', label: t('pref.yoagent.codex_effort.label'), type: 'radio', choices: yoagentCodexEffortPreferenceChoices(), help: t('pref.yoagent.codex_effort.help')},
       {path: 'yoagent.refresh_interval_seconds', label: t('pref.yoagent.refresh_interval_seconds.label'), type: 'number', min: 0, max: 3600, step: 30, suffix: 's', help: t('pref.yoagent.refresh_interval_seconds.help')},
       {path: 'yoagent.system_prompt', label: t('pref.yoagent.system_prompt.label'), type: 'textarea', help: t('pref.yoagent.system_prompt.help'), alwaysEnableReset: true},
       {path: 'yoagent.intro', label: t('pref.yoagent.intro.label'), type: 'textarea', help: t('pref.yoagent.intro.help'), alwaysEnableReset: true},

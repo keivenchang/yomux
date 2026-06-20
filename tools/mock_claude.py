@@ -9,7 +9,7 @@ configure(
     agent_display_name="Claude",
     agent_product_name="Claude Code",
     history_file="~/.cache/yolomux/mock_claude_history",
-    version="2.1.159",
+    version="2.1.183",
     model="Opus 4.8 (1M context)",
     effort="xhigh",
     model_line="Opus 4.8 (1M context) with xhigh effort · API Usage Billing",

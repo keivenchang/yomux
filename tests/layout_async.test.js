@@ -1400,6 +1400,120 @@ async function runLayoutAsyncSuite() {
     }
 
     {
+      const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
+      const calls = [];
+      let firstChatResolve = null;
+      api.setFetchForTest((url, options = {}) => {
+        const call = {url: String(url), method: options.method || 'GET', body: options.body || '', hasSignal: Boolean(options.signal)};
+        calls.push(call);
+        if (String(url) === '/api/yoagent/chat') {
+          const body = JSON.parse(String(options.body || '{}'));
+          if (body.message === 'first') {
+            return new Promise(resolve => {
+              firstChatResolve = () => resolve(jsonResponse({
+                answer: 'first done',
+                backend: 'codex',
+                backend_used: 'codex',
+                conversation: {messages: [{role: 'user', content: 'first'}, {role: 'assistant', content: 'first done'}]},
+              }));
+            });
+          }
+          if (body.message === 'second') {
+            return Promise.resolve(jsonResponse({
+              answer: 'second done',
+              backend: 'codex',
+              backend_used: 'codex',
+              conversation: {messages: [{role: 'user', content: 'second'}, {role: 'assistant', content: 'second done'}]},
+            }));
+          }
+        }
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      });
+      const firstTurn = api.sendYoagentChatMessageForTest('first');
+      await Promise.resolve();
+      await api.sendYoagentChatMessageForTest('second');
+      assert.equal(api.yoagentChatQueueForTest().length, 1, 'submitting while YO!agent is busy enqueues the next ask instead of dropping it');
+      assert.ok(api.yoagentChatHtml().includes('yoagent-chat-queue'), 'queued chat turns render in their own queue, separate from pending result waits');
+      firstChatResolve();
+      await firstTurn;
+      await new Promise(resolve => setTimeout(resolve, 0));
+      assert.equal(api.yoagentChatQueueForTest().length, 0, 'finishing the active ask drains the next queued ask');
+      const chatBodies = calls.filter(call => call.url === '/api/yoagent/chat').map(call => JSON.parse(call.body));
+      assert.deepStrictEqual(chatBodies.map(body => body.message), ['first', 'second'], 'queued asks run FIFO after the active turn completes');
+      assert.ok(chatBodies.every(body => body.request_id && body.stream_id && body.request_id === body.stream_id), 'chat sends carry one request/stream id so local thinking and backend deltas update the same row');
+      const source = fs.readFileSync('static/yolomux.js', 'utf8');
+      assert.ok(/new AbortController\(\)|typeof AbortController === 'function'/.test(source) && /signal:\s*controller\?\.signal/.test(source), 'active chat fetch uses AbortController when the browser provides it');
+    }
+
+    {
+      const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
+      const calls = [];
+      api.setYoagentBusyForTest(true);
+      await api.sendYoagentChatMessageForTest('queued only');
+      const queued = api.yoagentChatQueueForTest()[0];
+      assert.ok(queued?.id, 'busy submit creates a cancelable queued item');
+      api.cancelQueuedYoagentChatMessageForTest(queued.id);
+      assert.equal(api.yoagentChatQueueForTest().length, 0, 'canceling a queued item removes only that pending ask');
+      api.setYoagentBusyForTest(false);
+      api.setFetchForTest((url, options = {}) => {
+        calls.push({url: String(url), method: options.method || 'GET', body: options.body || ''});
+        if (String(url) === '/api/yoagent/chat') {
+          return new Promise((_resolve, reject) => {
+            options.signal?.addEventListener('abort', () => {
+              const error = new Error('aborted');
+              error.name = 'AbortError';
+              reject(error);
+            });
+          });
+        }
+        if (/^\/api\/yoagent\/chat\/.+\/cancel$/.test(String(url))) {
+          return Promise.resolve(jsonResponse({ok: true, cancelled: true}));
+        }
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      });
+      api.sendYoagentChatMessageForTest('stop me');
+      await Promise.resolve();
+      const active = api.yoagentActiveChatRequestForTest();
+      assert.ok(active?.id, 'active YO!agent request records the request id');
+      assert.ok(api.cancelActiveYoagentChatRequestForTest(), 'active cancel aborts the running request');
+      await Promise.resolve();
+      assert.equal(api.yoagentActiveChatRequestForTest(), null, 'active cancel frees the composer immediately');
+      assert.ok(api.yoagentChatHtml().includes('Stopped.'), 'active cancel leaves a stopped message state');
+      assert.deepStrictEqual(canonical(calls.map(call => ({method: call.method, url: call.url}))), [
+        {method: 'POST', url: '/api/yoagent/chat'},
+        {method: 'POST', url: `/api/yoagent/chat/${active.id}/cancel`},
+      ], 'active cancel posts to the request-scoped cancel route');
+    }
+
+    {
+      const api = loadYolomux('', ['1']);
+      const detailsPreviews = html => [...String(html || '').matchAll(/<span class="yoagent-details-preview">([\s\S]*?)<\/span>/g)].map(match => match[1]);
+      const thinkingLines = ['thinking: scanning files', 'thinking: reading activity context', 'thinking: final synthesis'];
+      api.applyYoagentStreamPayloadForTest({
+        stream_id: 'stream-thinking',
+        phase: 'delta',
+        content: 'partial answer',
+        auxiliary_lines: [...thinkingLines, 'tool output: command: collected files'],
+        auxiliary_preview: 'thinking: reading activity context\nthinking: final synthesis\ntool output: command: collected files',
+        hidden_work_active: true,
+        tool_active: true,
+      });
+      const runningPreviews = detailsPreviews(api.yoagentChatHtml());
+      assert.equal(runningPreviews[0], 'thinking: reading activity context\nthinking: final synthesis', 'running thinking preview shows the last two thinking lines only');
+      assert.equal(runningPreviews[1], 'tool output: command: collected files', 'tool calls use their own one-line TC preview');
+      api.applyYoagentStreamPayloadForTest({
+        stream_id: 'stream-thinking',
+        phase: 'hidden_work_done',
+        done: true,
+        auxiliary_done: true,
+        auxiliary_lines: [...thinkingLines, 'tool output: command: collected files'],
+      });
+      const donePreviews = detailsPreviews(api.yoagentChatHtml());
+      assert.equal(donePreviews[0], 'thinking: final synthesis', 'completed thinking preview collapses to the final thinking line');
+      assert.equal(donePreviews[1], 'tool output: command: collected files', 'completed tool-call preview remains separate from thinking');
+    }
+
+    {
       const api = loadYolomux('', ['1']);
       api.applyYoagentConversationPayloadForTest({
         messages: [],

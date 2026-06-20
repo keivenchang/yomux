@@ -795,6 +795,8 @@ class TmuxWebtermApp:
         self.yoagent_managed_targets: dict[str, dict[str, Any]] = {}
         self.yoagent_stream_lock = threading.RLock()
         self.yoagent_stream_states: dict[str, dict[str, Any]] = {}
+        self.yoagent_chat_request_lock = threading.RLock()
+        self.yoagent_chat_requests: dict[str, dict[str, Any]] = {}
         self.yoagent_action_lock = threading.RLock()
         self.yoagent_action_previews: dict[str, dict[str, Any]] = {}
         self.yoagent_action_waits: dict[str, dict[str, Any]] = {}
@@ -3937,6 +3939,24 @@ class TmuxWebtermApp:
 
     def yoagent_chat(self, *args: Any, **kwargs: Any) -> Any:
         return self.yoagent_controller.yoagent_chat(*args, **kwargs)
+
+    def cancel_yoagent_chat(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.cancel_yoagent_chat(*args, **kwargs)
+
+    def set_yoagent_chat_request_interrupt(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.set_yoagent_chat_request_interrupt(*args, **kwargs)
+
+    def yoagent_chat_request_cancel_event(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_chat_request_cancel_event(*args, **kwargs)
+
+    def yoagent_chat_request_cancelled(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_chat_request_cancelled(*args, **kwargs)
+
+    def complete_yoagent_chat_request(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.complete_yoagent_chat_request(*args, **kwargs)
+
+    def interrupt_yoagent_claude_process(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.interrupt_yoagent_claude_process(*args, **kwargs)
 
     def run_yoagent_cli_backend(self, *args: Any, **kwargs: Any) -> Any:
         return self.yoagent_controller.run_yoagent_cli_backend(*args, **kwargs)

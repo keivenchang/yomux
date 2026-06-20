@@ -1148,16 +1148,18 @@ async function runTabberSuite() {
     api.setFileTreeRecencyNowForTest(2_000_000);
     api.setFileExplorerTreeDateModeForTest('relative');
     api.setTabberActivityForTest({
-      activity: {'1:1': {last_user_input_ts: 2000 - 30}},
+      activity: {'1:1': {last_user_input_ts: 2000 - 5}},
       agents: [{session: '1', window: '0', agent_kind: 'claude', last_used_ts: 2000 - 9 * 60, sort_ts: 2000 - 9 * 60, running: true, label: "session '1' 0:claude"}],
     });
     const recentTabberAgoRows = api.tabberRenderedRowsForTest();
-    assert.equal(recentTabberAgoRows.find(r => r.type === 'window' && /1:bash/.test(r.name))?.recency, 'hot', 'Tabber Ago timestamp rows mark sub-minute process activity hot');
-    assert.equal(recentTabberAgoRows.find(r => r.type === 'window' && /1:bash/.test(r.name))?.classes.includes('file-tree-recency-pulse'), true, 'Tabber Ago sub-minute rows pulse');
+    assert.equal(recentTabberAgoRows.find(r => r.type === 'window' && /1:bash/.test(r.name))?.recency, 'just-updated', 'Tabber Ago timestamp rows mark very recent process activity just-updated');
+    assert.equal(recentTabberAgoRows.find(r => r.type === 'window' && /1:bash/.test(r.name))?.dateClasses.includes('attention-pulse'), true, 'Tabber Ago very recent rows pulse the timestamp cell with the shared attention class');
+    assert.notEqual(recentTabberAgoRows.find(r => r.type === 'window' && /1:bash/.test(r.name))?.dateAttentionDelay, '', 'Tabber timestamp pulses are phase-aligned');
     assert.equal(recentTabberAgoRows.find(r => r.type === 'window' && /0:claude/.test(r.name))?.recency, 'recent', 'Tabber Ago timestamp rows keep sub-ten-minute graduated styling');
     api.setFileExplorerTreeDateModeForTest('date');
     const recentTabberDateRows = api.tabberRenderedRowsForTest();
-    assert.equal(recentTabberDateRows.find(r => r.type === 'window' && /1:bash/.test(r.name))?.recency, 'hot', 'Tabber Date timestamp rows preserve sub-minute recency');
+    assert.equal(recentTabberDateRows.find(r => r.type === 'window' && /1:bash/.test(r.name))?.recency, 'just-updated', 'Tabber Date timestamp rows preserve very recent recency');
+    assert.equal(recentTabberDateRows.find(r => r.type === 'window' && /1:bash/.test(r.name))?.dateClasses.includes('attention-pulse'), true, 'Tabber Date timestamp rows keep the shared pulse');
     assert.equal(recentTabberDateRows.find(r => r.type === 'window' && /0:claude/.test(r.name))?.recency, 'recent', 'Tabber Date timestamp rows preserve graduated recency');
     api.setFileExplorerTreeDateModeForTest('none');
     const noDateTabberRows = api.tabberRenderedRowsForTest();

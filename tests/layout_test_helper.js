@@ -593,9 +593,16 @@ globalThis.__layoutTestApi = {
   yoagentChatHtml,
   setYoagentDraftForTest(value) { yoagentDraft = String(value || ''); },
   setYoagentBusyForTest(value) { yoagentBusy = Boolean(value); },
+  setYoagentActiveChatRequestForTest(value) { yoagentActiveChatRequest = value; },
+  yoagentActiveChatRequestForTest() { return yoagentActiveChatRequest; },
+  yoagentChatQueueForTest() { return yoagentChatQueue.slice(); },
+  cancelQueuedYoagentChatMessageForTest: cancelQueuedYoagentChatMessage,
+  cancelActiveYoagentChatRequestForTest: cancelActiveYoagentChatRequest,
+  sendYoagentChatMessageForTest: sendYoagentChatMessage,
   setYoagentErrorForTest(value) { yoagentError = String(value || ''); },
   setYoagentNoticeForTest(value) { yoagentNotice = value; },
   setYoagentMessagesForTest(value) { yoagentMessages = Array.isArray(value) ? value : []; if (yoagentMessages.length) hideYoagentStartupInfo(); resetYoagentComposerHistory(); },
+  applyYoagentStreamPayloadForTest: applyYoagentStreamPayload,
   showYoagentStartupInfoOnceForTest: showYoagentStartupInfoOnce,
   hideYoagentStartupInfoForTest: hideYoagentStartupInfo,
   yoagentOpenMessageDetailsStateForTest: yoagentOpenMessageDetailsState,
@@ -1021,6 +1028,7 @@ globalThis.__layoutTestApi = {
   imageViewerItemFor,
   markdownPreviewInputAllowed,
   previewRendererForPath,
+  previewPathIsPreviewable,
   previewKindForPath,
   previewMediaKindForPath,
   previewMimeForPath,
@@ -1532,25 +1540,30 @@ globalThis.__layoutTestApi = {
     const el = document.createElement('div');
     el.className = 'changes-groups';
     renderTabberTree(el);
-    return Array.from(el.querySelectorAll('.file-tree-row')).map(row => ({
-      type: row.dataset.tabberType || '',
-      name: (row.querySelector('.file-tree-name') || {}).textContent || '',
-      icon: (row.querySelector('.file-tree-icon') || {}).textContent || '',
-      path: row.dataset.path || '',
-      repoRoot: row.dataset.tabberRepoRoot || '',
-      branch: row.dataset.tabberBranch || '',
-      nameHtml: (row.querySelector('.file-tree-name') || {}).innerHTML || '',
-      status: (row.querySelector('.file-tree-git-status') || {}).textContent || '',
-      statusHidden: row.querySelector('.file-tree-git-status')?.hidden !== false,
-      date: (row.querySelector('.file-tree-date') || {}).textContent || '',
-      recency: row.dataset.recency || '',
-      title: row.getAttribute('title') || '',
-      ariaCurrent: row.getAttribute('aria-current') || '',
-      ariaExpanded: row.getAttribute('aria-expanded') || '',
-      ariaSelected: row.getAttribute('aria-selected') || '',
-      classes: Array.from(row.classList?.names || row.classList || []).sort(),
-      datasetKeys: Object.keys(row.dataset).sort(),
-    }));
+    return Array.from(el.querySelectorAll('.file-tree-row')).map(row => {
+      const dateCell = row.querySelector('.file-tree-date') || {};
+      return {
+        type: row.dataset.tabberType || '',
+        name: (row.querySelector('.file-tree-name') || {}).textContent || '',
+        icon: (row.querySelector('.file-tree-icon') || {}).textContent || '',
+        path: row.dataset.path || '',
+        repoRoot: row.dataset.tabberRepoRoot || '',
+        branch: row.dataset.tabberBranch || '',
+        nameHtml: (row.querySelector('.file-tree-name') || {}).innerHTML || '',
+        status: (row.querySelector('.file-tree-git-status') || {}).textContent || '',
+        statusHidden: row.querySelector('.file-tree-git-status')?.hidden !== false,
+        date: dateCell.textContent || '',
+        recency: row.dataset.recency || '',
+        title: row.getAttribute('title') || '',
+        ariaCurrent: row.getAttribute('aria-current') || '',
+        ariaExpanded: row.getAttribute('aria-expanded') || '',
+        ariaSelected: row.getAttribute('aria-selected') || '',
+        classes: Array.from(row.classList?.names || row.classList || []).sort(),
+        dateClasses: Array.from(dateCell.classList?.names || dateCell.classList || []).sort(),
+        dateAttentionDelay: dateCell.style?.getPropertyValue?.('--attention-animation-delay') || '',
+        datasetKeys: Object.keys(row.dataset).sort(),
+      };
+    });
   },
   tabberRenderedNamesForTest() {
     fileExplorerTabberCollapsed.clear();

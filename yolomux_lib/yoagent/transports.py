@@ -14,7 +14,6 @@ import os
 import importlib
 import importlib.util
 import json
-import selectors
 import shutil
 import subprocess
 import tempfile
@@ -26,6 +25,16 @@ from pathlib import Path
 from typing import Any
 
 from ..agent_tui import send_prompt
+from ..agent_comms.claude_stream_json import claude_stream_json_argv
+from ..agent_comms.claude_stream_json import claude_stream_json_env
+from ..agent_comms.claude_stream_json import claude_stream_json_result
+from ..agent_comms.claude_stream_json import claude_stream_json_run
+from ..agent_comms.codex_app_server import CodexAppServerProtocol
+from ..agent_comms.codex_app_server import CodexAppServerResult
+from ..agent_comms.codex_app_server import CodexAppServerSession as SharedCodexAppServerSession
+from ..agent_comms.exceptions import TransportInterrupted
+from ..agent_comms.json_rpc import json_rpc_notification
+from ..agent_comms.json_rpc import json_rpc_request
 from ..common import PROJECT_ROOT
 from ..common import YOLOMUX_VERSION
 from ..common import codex_exec_argv
@@ -38,7 +47,6 @@ from ..tmux_utils import tmux_paste_text
 from ..transcripts import codex_event_text
 from .stream_events import ClaudeStreamJsonNormalizer
 from .stream_events import ERROR
-from .stream_events import normalize_codex_app_server_message
 
 
 TMUX_LEGACY_TRANSPORT_ID = "tmux-legacy"
@@ -53,72 +61,6 @@ def normalize_yoagent_transport_id(value: str | None) -> str:
     if text in TMUX_TRANSPORT_ALIASES:
         return TMUX_LEGACY_TRANSPORT_ID
     return text
-
-
-def json_rpc_request(request_id: str, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-    payload: dict[str, Any] = {"jsonrpc": "2.0", "id": request_id, "method": method}
-    if params is not None:
-        payload["params"] = params
-    return payload
-
-
-def json_rpc_notification(method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-    payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
-    if params is not None:
-        payload["params"] = params
-    return payload
-
-
-def codex_app_server_initialize_params() -> dict[str, Any]:
-    return {
-        "clientInfo": {"name": "yolomux", "title": "YOLOmux", "version": YOLOMUX_VERSION},
-        "capabilities": {"experimentalApi": True, "requestAttestation": False},
-    }
-
-
-def codex_app_server_thread_params(target: dict[str, Any]) -> dict[str, Any]:
-    params: dict[str, Any] = {
-        "approvalPolicy": str(target.get("approval_policy") or target.get("approvalPolicy") or "on-request"),
-        "approvalsReviewer": str(target.get("approvals_reviewer") or target.get("approvalsReviewer") or "user"),
-        "sandbox": str(target.get("sandbox") or target.get("sandbox_mode") or "read-only"),
-        "ephemeral": target.get("ephemeral") is not False,
-    }
-    cwd = str(target.get("cwd") or PROJECT_ROOT).strip()
-    if cwd:
-        params["cwd"] = cwd
-    model = str(target.get("model") or target.get("agent_model") or "").strip()
-    if model:
-        params["model"] = model
-    base_instructions = str(target.get("base_instructions") or "").strip()
-    if base_instructions:
-        params["baseInstructions"] = base_instructions
-    return params
-
-
-def codex_app_server_turn_params(thread_id: str, text: str, target: dict[str, Any]) -> dict[str, Any]:
-    params: dict[str, Any] = {
-        "threadId": thread_id,
-        "input": [{"type": "text", "text": text, "text_elements": []}],
-    }
-    cwd = str(target.get("cwd") or "").strip()
-    if cwd:
-        params["cwd"] = cwd
-    return params
-
-
-def codex_app_server_turn_text(turn: Any) -> str:
-    if not isinstance(turn, dict):
-        return ""
-    items = turn.get("items")
-    if not isinstance(items, list):
-        return ""
-    parts: list[str] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        if item.get("type") == "agentMessage" and isinstance(item.get("text"), str):
-            parts.append(item["text"])
-    return "\n".join(part.strip() for part in parts if part.strip()).strip()
 
 
 @dataclass(frozen=True)
@@ -720,107 +662,13 @@ class CodexAppServerTransport(AgentTransport):
             return False, "codex CLI not found"
         return True, "target can run through codex app-server stdio"
 
-    def _write_message(self, process: subprocess.Popen[str], message: dict[str, Any]) -> None:
-        if process.stdin is None:
-            raise OSError("codex app-server stdin is closed")
-        process.stdin.write(json.dumps(message, separators=(",", ":")) + "\n")
-        process.stdin.flush()
-
-    def _readline(self, process: subprocess.Popen[str], deadline: float) -> str:
-        if process.stdout is None:
-            raise OSError("codex app-server stdout is closed")
-        timeout = max(0.0, deadline - time.monotonic())
-        fileno: int | None = None
-        try:
-            fileno = process.stdout.fileno()
-        except (OSError, ValueError):
-            fileno = None
-        if fileno is not None:
-            with selectors.DefaultSelector() as selector:
-                selector.register(process.stdout, selectors.EVENT_READ)
-                if not selector.select(timeout):
-                    raise subprocess.TimeoutExpired(["codex", "app-server"], timeout)
-        line = process.stdout.readline()
-        if not line:
-            raise OSError("codex app-server exited without a JSON-RPC message")
-        return line
-
-    def _read_message(self, process: subprocess.Popen[str], deadline: float) -> dict[str, Any]:
-        line = self._readline(process, deadline)
-        try:
-            message = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise OSError(f"codex app-server emitted invalid JSON-RPC: {exc}") from exc
-        if not isinstance(message, dict):
-            raise OSError("codex app-server emitted a non-object JSON-RPC message")
-        return message
-
-    def _read_response(self, process: subprocess.Popen[str], request_id: str, deadline: float, notifications: list[dict[str, Any]]) -> dict[str, Any]:
-        while True:
-            message = self._read_message(process, deadline)
-            if str(message.get("id") or "") == request_id and ("result" in message or "error" in message):
-                if message.get("error"):
-                    raise OSError(f"codex app-server {request_id} failed: {message.get('error')}")
-                result = message.get("result")
-                return result if isinstance(result, dict) else {}
-            notifications.append(message)
-
-    def _terminate_process(self, process: subprocess.Popen[str]) -> None:
-        if process.poll() is not None:
-            return
-        process.terminate()
-        try:
-            process.wait(timeout=1)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=1)
-
-    def _wait_turn_complete(
-        self,
-        process: subprocess.Popen[str],
-        thread_id: str,
-        deadline: float,
-        notifications: list[dict[str, Any]],
-        on_event: Any | None = None,
-    ) -> tuple[str, str]:
-        deltas: list[str] = []
-        while True:
-            message = self._read_message(process, deadline)
-            notifications.append(message)
-            method = str(message.get("method") or "")
-            params = message.get("params") if isinstance(message.get("params"), dict) else {}
-            if message.get("id") is not None and method:
-                if callable(on_event):
-                    for event in normalize_codex_app_server_message(message):
-                        on_event(event)
-                return "", f"codex app-server requested client handling for `{method}`; approval relay is not implemented yet"
-            if callable(on_event):
-                for event in normalize_codex_app_server_message(message):
-                    on_event(event)
-            if method == "item/agentMessage/delta":
-                delta = params.get("delta")
-                if isinstance(delta, str):
-                    deltas.append(delta)
-            elif method in {"item/reasoning/delta", "item/thinking/delta", "item/thought/delta"}:
-                pass
-            elif method == "turn/completed":
-                if str(params.get("threadId") or "") != thread_id:
-                    continue
-                final_text = codex_app_server_turn_text(params.get("turn"))
-                return final_text or "".join(deltas).strip(), ""
-            elif method == "thread/status/changed":
-                status = params.get("status") if isinstance(params.get("status"), dict) else {}
-                message_thread_id = str(params.get("threadId") or "")
-                if status.get("type") == "idle" and (not message_thread_id or message_thread_id == thread_id):
-                    return "".join(deltas).strip(), ""
-
     def send(self, target: dict[str, Any], text: str, *, submit: bool = True, **kwargs: Any) -> TransportSendResult:
         can_send, reason = self.can_send(target)
         if not can_send:
             return TransportSendResult(ok=False, sent=False, transport=self.id, transport_label=self.label, result_source="", error=reason)
         timeout = float(kwargs.get("timeout") or CODEX_APP_SERVER_TIMEOUT_SECONDS)
         popen = kwargs.get("popen") or subprocess.Popen
-        session = CodexAppServerSession(target, popen=popen, protocol=self)
+        session = CodexAppServerSession(target, popen=popen)
         try:
             result, _status = session.send(text, target, timeout=timeout, on_event=kwargs.get("on_event"))
             return result
@@ -828,117 +676,30 @@ class CodexAppServerTransport(AgentTransport):
             session.close()
 
 
-class CodexAppServerSession:
-    """Persistent stdio client for `codex app-server`.
-
-    `CodexAppServerTransport` keeps its old one-shot semantics by creating and closing this helper
-    per send. YO!agent chat keeps one instance alive so normal queries avoid CLI process startup.
-    """
+class CodexAppServerSession(SharedCodexAppServerSession):
+    """YO!agent compatibility adapter around the shared Codex app-server session."""
 
     def __init__(
         self,
         target: dict[str, Any],
         *,
         popen: Any | None = None,
-        protocol: CodexAppServerTransport | None = None,
+        protocol: CodexAppServerProtocol | None = None,
     ):
-        self.target = dict(target)
-        self.popen = popen or subprocess.Popen
-        self.protocol = protocol or CodexAppServerTransport()
-        self.process: subprocess.Popen[str] | None = None
-        self.thread_id = ""
-        self.request_counters: dict[str, int] = {}
-        self.lock = threading.RLock()
-        self.started_ts = 0.0
+        super().__init__(target, popen=popen, protocol=protocol)
 
-    def _request_id(self, prefix: str) -> str:
-        self.request_counters[prefix] = self.request_counters.get(prefix, 0) + 1
-        return f"{prefix}-{self.request_counters[prefix]}"
-
-    def alive(self) -> bool:
-        return self.process is not None and self.process.poll() is None
-
-    def close(self) -> None:
-        with self.lock:
-            if self.process is not None:
-                self.protocol._terminate_process(self.process)
-            self.process = None
-
-    def _start_process(self, target: dict[str, Any], deadline: float, notifications: list[dict[str, Any]]) -> dict[str, Any]:
-        cwd = str(target.get("cwd") or PROJECT_ROOT)
-        args = ["codex", "app-server", "--listen", "stdio://"]
-        effort = str(target.get("agent_effort") or target.get("effort") or "").strip()
-        if effort:
-            args.extend(["-c", f'model_reasoning_effort="{effort}"'])
-        service_tier = str(target.get("service_tier") or "").strip()
-        if service_tier:
-            args.extend(["-c", f'service_tier="{service_tier}"'])
-        self.process = self.popen(
-            args,
-            cwd=cwd,
-            env=codex_runtime_env(),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
+    @staticmethod
+    def _transport_result(result: CodexAppServerResult) -> TransportSendResult:
+        return TransportSendResult(
+            ok=result.ok,
+            sent=result.sent,
+            transport="codex-app-server",
+            transport_label="Codex app-server",
+            result_source="codex-app-server-json-rpc",
+            text=result.text,
+            error=result.error,
+            reason_code=result.reason_code,
         )
-        self.started_ts = time.time()
-        initialize_id = self._request_id("initialize")
-        self.protocol._write_message(self.process, json_rpc_request(initialize_id, "initialize", codex_app_server_initialize_params()))
-        self.protocol._read_response(self.process, initialize_id, deadline, notifications)
-        self.protocol._write_message(self.process, json_rpc_notification("initialized"))
-        return {"process_started": True, "process_reused": False}
-
-    def ensure_started(self, target: dict[str, Any] | None = None, *, timeout: float = CODEX_APP_SERVER_TIMEOUT_SECONDS) -> tuple[str, dict[str, Any]]:
-        with self.lock:
-            if target is not None:
-                self.target = dict(target)
-            deadline = time.monotonic() + max(1.0, float(timeout))
-            notifications: list[dict[str, Any]] = []
-            status: dict[str, Any] = {
-                "transport": "codex-app-server",
-                "persistent": True,
-                "process_started": False,
-                "process_reused": False,
-                "thread_started": False,
-                "thread_resumed": False,
-            }
-            requested_thread = str(self.target.get("thread_id") or self.target.get("agent_session_id") or "").strip()
-            if requested_thread and self.thread_id and requested_thread != self.thread_id:
-                self.close()
-                self.thread_id = ""
-            if not self.alive():
-                status.update(self._start_process(self.target, deadline, notifications))
-            else:
-                status["process_reused"] = True
-            if self.thread_id and not status["process_started"]:
-                status["thread_id"] = self.thread_id
-                return self.thread_id, status
-            if self.thread_id and not requested_thread:
-                requested_thread = self.thread_id
-            thread_response: dict[str, Any]
-            if requested_thread:
-                thread_id = self._request_id("thread")
-                try:
-                    params = {"threadId": requested_thread, **codex_app_server_thread_params(self.target)}
-                    self.protocol._write_message(self.process, json_rpc_request(thread_id, "thread/resume", params))
-                    thread_response = self.protocol._read_response(self.process, thread_id, deadline, notifications)
-                    status["thread_resumed"] = True
-                except OSError as exc:
-                    status["resume_error"] = str(exc)
-                    requested_thread = ""
-            if not requested_thread:
-                thread_id = self._request_id("thread")
-                self.protocol._write_message(self.process, json_rpc_request(thread_id, "thread/start", codex_app_server_thread_params(self.target)))
-                thread_response = self.protocol._read_response(self.process, thread_id, deadline, notifications)
-                status["thread_started"] = True
-            thread = thread_response.get("thread") if isinstance(thread_response.get("thread"), dict) else {}
-            self.thread_id = str(thread.get("id") or requested_thread or "").strip()
-            if not self.thread_id:
-                raise OSError("codex app-server did not return a thread id")
-            status["thread_id"] = self.thread_id
-            return self.thread_id, status
 
     def send(
         self,
@@ -948,26 +709,8 @@ class CodexAppServerSession:
         timeout: float = CODEX_APP_SERVER_TIMEOUT_SECONDS,
         on_event: Any | None = None,
     ) -> tuple[TransportSendResult, dict[str, Any]]:
-        with self.lock:
-            status: dict[str, Any] = {}
-            turn_started = False
-            try:
-                deadline = time.monotonic() + max(1.0, float(timeout))
-                thread_id, status = self.ensure_started(target, timeout=timeout)
-                notifications: list[dict[str, Any]] = []
-                turn_id = self._request_id("turn")
-                self.protocol._write_message(self.process, json_rpc_request(turn_id, "turn/start", codex_app_server_turn_params(thread_id, text, self.target)))
-                self.protocol._read_response(self.process, turn_id, deadline, notifications)
-                turn_started = True
-                final_text, error = self.protocol._wait_turn_complete(self.process, thread_id, deadline, notifications, on_event=on_event)
-                if error:
-                    return TransportSendResult(ok=False, sent=True, transport="codex-app-server", transport_label="Codex app-server", result_source="codex-app-server-json-rpc", error=error), status
-                if final_text:
-                    return TransportSendResult(ok=True, sent=True, transport="codex-app-server", transport_label="Codex app-server", result_source="codex-app-server-json-rpc", text=final_text), status
-                return TransportSendResult(ok=False, sent=True, transport="codex-app-server", transport_label="Codex app-server", result_source="codex-app-server-json-rpc", error="codex app-server completed without a final agent message"), status
-            except (OSError, subprocess.SubprocessError) as exc:
-                self.close()
-                return TransportSendResult(ok=False, sent=turn_started, transport="codex-app-server", transport_label="Codex app-server", result_source="codex-app-server-json-rpc", error=str(exc)), status
+        result, status = super().send(text, target, timeout=timeout, on_event=on_event)
+        return self._transport_result(result), status
 
 
 def codex_mcp_initialize_params() -> dict[str, Any]:
@@ -991,128 +734,6 @@ def codex_mcp_tool_result_text(result: dict[str, Any]) -> str:
                 parts.append(item["text"])
         return "\n".join(part.strip() for part in parts if part.strip()).strip()
     return ""
-
-
-def claude_stream_json_argv(target: dict[str, Any]) -> list[str]:
-    args = [
-        "claude",
-        "-p",
-        "--verbose",
-        "--input-format",
-        "text",
-        "--output-format",
-        "stream-json",
-    ]
-    session_id = str(target.get("thread_id") or target.get("agent_session_id") or "").strip()
-    if session_id:
-        if target.get("resume") is False:
-            args.extend(["--session-id", session_id])
-        else:
-            args.extend(["--resume", session_id])
-    model = str(target.get("model") or target.get("agent_model") or "").strip()
-    if model:
-        args.extend(["--model", model])
-    effort = str(target.get("agent_effort") or target.get("effort") or "").strip()
-    if effort:
-        args.extend(["--effort", effort])
-    permission_mode = str(target.get("permission_mode") or target.get("permissionMode") or "").strip()
-    if permission_mode:
-        args.extend(["--permission-mode", permission_mode])
-    return args
-
-
-def claude_stream_json_result(stdout: str) -> tuple[str, str]:
-    assistant_parts: list[str] = []
-    for line in str(stdout or "").splitlines():
-        try:
-            item = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(item, dict):
-            continue
-        item_type = str(item.get("type") or "")
-        if item_type == "assistant":
-            message = item.get("message") if isinstance(item.get("message"), dict) else {}
-            content = message.get("content")
-            if isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
-                        assistant_parts.append(block["text"])
-        elif item_type == "result":
-            if item.get("is_error"):
-                return "", str(item.get("result") or item.get("api_error_status") or "Claude stream-json result error")
-            result = str(item.get("result") or "").strip()
-            return result or "".join(assistant_parts).strip(), ""
-    return "".join(assistant_parts).strip(), ""
-
-
-def claude_stream_json_run(
-    args: list[str],
-    text: str,
-    *,
-    cwd: str,
-    env: dict[str, str],
-    timeout: float,
-    on_event: Any | None = None,
-    popen: Any | None = None,
-) -> tuple[int, str, str]:
-    launch = popen or subprocess.Popen
-    process: subprocess.Popen[str] | None = None
-    stdout_parts: list[str] = []
-    stderr_text = ""
-    normalizer = ClaudeStreamJsonNormalizer()
-    try:
-        process = launch(
-            args,
-            cwd=cwd,
-            env=env,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-        )
-        if process.stdin is None or process.stdout is None:
-            raise OSError("claude stream-json pipes are unavailable")
-        process.stdin.write(text)
-        process.stdin.close()
-        deadline = time.monotonic() + max(1.0, timeout)
-        selector = selectors.DefaultSelector()
-        try:
-            selector.register(process.stdout, selectors.EVENT_READ)
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise subprocess.TimeoutExpired(args, timeout)
-                ready = selector.select(timeout=min(0.25, remaining))
-                for key, _mask in ready:
-                    line = key.fileobj.readline()
-                    if line:
-                        stdout_parts.append(line)
-                        if callable(on_event):
-                            for event in normalizer.normalize_line(line):
-                                on_event(event)
-                if process.poll() is not None:
-                    for line in process.stdout.readlines():
-                        stdout_parts.append(line)
-                        if callable(on_event):
-                            for event in normalizer.normalize_line(line):
-                                on_event(event)
-                    break
-        finally:
-            selector.close()
-        if process.stderr is not None:
-            stderr_text = process.stderr.read()
-        return process.wait(timeout=max(0.1, deadline - time.monotonic())), "".join(stdout_parts), stderr_text
-    except BaseException:
-        if process is not None and process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=1)
-        raise
 
 
 class CodexMcpServerTransport(CodexAppServerTransport):
@@ -1143,6 +764,7 @@ class CodexMcpServerTransport(CodexAppServerTransport):
         args = ["codex", "mcp-server"]
         process: subprocess.Popen[str] | None = None
         notifications: list[dict[str, Any]] = []
+        protocol = CodexAppServerProtocol()
         try:
             process = popen(
                 args,
@@ -1155,11 +777,11 @@ class CodexMcpServerTransport(CodexAppServerTransport):
                 bufsize=1,
             )
             deadline = time.monotonic() + max(1.0, timeout)
-            self._write_message(process, json_rpc_request("initialize-1", "initialize", codex_mcp_initialize_params()))
-            self._read_response(process, "initialize-1", deadline, notifications)
-            self._write_message(process, json_rpc_notification("notifications/initialized"))
-            self._write_message(process, json_rpc_request("tools-1", "tools/list", {}))
-            tools_response = self._read_response(process, "tools-1", deadline, notifications)
+            protocol.write_message(process, json_rpc_request("initialize-1", "initialize", codex_mcp_initialize_params()))
+            protocol.read_response(process, "initialize-1", deadline, notifications)
+            protocol.write_message(process, json_rpc_notification("notifications/initialized"))
+            protocol.write_message(process, json_rpc_request("tools-1", "tools/list", {}))
+            tools_response = protocol.read_response(process, "tools-1", deadline, notifications)
             tools = tools_response.get("tools") if isinstance(tools_response.get("tools"), list) else []
             tool_names = {str(tool.get("name") or "") for tool in tools if isinstance(tool, dict)}
             thread_id = str(target.get("thread_id") or target.get("agent_session_id") or "").strip()
@@ -1182,8 +804,8 @@ class CodexMcpServerTransport(CodexAppServerTransport):
                 developer_instructions = str(target.get("developer_instructions") or "").strip()
                 if developer_instructions:
                     arguments["developer-instructions"] = developer_instructions
-            self._write_message(process, json_rpc_request("call-1", "tools/call", {"name": tool_name, "arguments": arguments}))
-            call_response = self._read_response(process, "call-1", deadline, notifications)
+            protocol.write_message(process, json_rpc_request("call-1", "tools/call", {"name": tool_name, "arguments": arguments}))
+            call_response = protocol.read_response(process, "call-1", deadline, notifications)
             final_text = codex_mcp_tool_result_text(call_response)
             if final_text:
                 return TransportSendResult(ok=True, sent=True, transport=self.id, transport_label=self.label, result_source="codex-mcp-json-rpc", text=final_text)
@@ -1192,7 +814,7 @@ class CodexMcpServerTransport(CodexAppServerTransport):
             return TransportSendResult(ok=False, sent=False, transport=self.id, transport_label=self.label, result_source="codex-mcp-json-rpc", error=str(exc))
         finally:
             if process is not None:
-                self._terminate_process(process)
+                protocol.terminate_process(process)
 
 
 class ClaudeStreamJsonTransport(AgentTransport):
@@ -1223,7 +845,7 @@ class ClaudeStreamJsonTransport(AgentTransport):
         args = claude_stream_json_argv(target)
         on_event = kwargs.get("on_event")
         try:
-            env = {**os.environ, "TERM": "xterm-256color", "NO_COLOR": "1"}
+            env = claude_stream_json_env()
             if kwargs.get("run") is not None:
                 completed = run(
                     args,
@@ -1252,7 +874,13 @@ class ClaudeStreamJsonTransport(AgentTransport):
                     timeout=timeout,
                     on_event=on_event,
                     popen=kwargs.get("popen"),
+                    cancel_event=kwargs.get("cancel_event"),
+                    process_callback=kwargs.get("process_callback"),
                 )
+        except TransportInterrupted as exc:
+            if callable(on_event):
+                on_event({"kind": ERROR, "event": ERROR, "backend": "claude", "native_type": "subprocess", "text": str(exc)})
+            return TransportSendResult(ok=False, sent=True, transport=self.id, transport_label=self.label, result_source="claude-stream-json", error=str(exc), reason_code="interrupted")
         except (OSError, subprocess.TimeoutExpired) as exc:
             if callable(on_event):
                 on_event({"kind": ERROR, "event": ERROR, "backend": "claude", "native_type": "subprocess", "text": str(exc)})

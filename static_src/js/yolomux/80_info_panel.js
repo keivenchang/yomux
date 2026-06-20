@@ -99,6 +99,18 @@ function createInfoPanel() {
       sendYoagentChatMessage(input?.value || yoagentDraft);
       return;
     }
+    const activeCancel = event.target.closest('[data-yoagent-chat-cancel]');
+    if (activeCancel && panel.contains(activeCancel)) {
+      event.preventDefault();
+      cancelActiveYoagentChatRequest();
+      return;
+    }
+    const queuedCancel = event.target.closest('[data-yoagent-queued-cancel]');
+    if (queuedCancel && panel.contains(queuedCancel)) {
+      event.preventDefault();
+      cancelQueuedYoagentChatMessage(queuedCancel.dataset.yoagentQueuedCancel || '');
+      return;
+    }
     const agentRestart = event.target.closest('[data-yolomux-agent-restart]');
     if (agentRestart && panel.contains(agentRestart)) {
       event.preventDefault();
@@ -146,12 +158,11 @@ function createInfoPanel() {
       setInfoSessionFileLookbackHours(lookback.value);
       return;
     }
-    // The composer's backend pill writes the real yoagent.backend setting and re-renders (which also
-    // flips chat enablement when switching to/from No agent).
-    const backend = event.target.closest('[data-yoagent-backend]');
-    if (!backend || !panel.contains(backend) || readOnlyMode) return;
-    saveSettingsPatch(settingPatch('yoagent.backend', backend.value))
-      .then(() => { statusEl.textContent = t('yoagent.statusBackend', {backend: yoagentBackendLabel(backend.value)}); renderYoagentPanel(); })
+    const yoagentSetting = event.target.closest('[data-yoagent-setting-path]');
+    if (!yoagentSetting || !panel.contains(yoagentSetting) || readOnlyMode) return;
+    const path = yoagentSetting.dataset.yoagentSettingPath || '';
+    saveSettingsPatch(settingPatch(path, yoagentSetting.value))
+      .then(() => { statusEl.textContent = t('yoagent.statusBackend', {backend: yoagentBackendLabel(yoagentComposerBackendKey())}); renderYoagentPanel(); })
       .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
   });
   applyInfoSubTab(panel);

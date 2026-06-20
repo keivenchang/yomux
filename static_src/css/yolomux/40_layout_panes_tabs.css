@@ -945,13 +945,11 @@ body.theme-light .drop-slot.drag-over {
 .panel.typing-ready-pane.needs-blocked-pane {
   --panel-ring-color: var(--pane-ring-attention);
 }
-/* needs-* panes PULSE the red ring (the keyframes drive border-color directly on the gutter border). */
+/* needs-* panes get the shared .attention-pulse class from syncAttentionAnimation. */
 .panel.needs-input-pane,
 .panel.needs-exec-pane,
 .panel.needs-blocked-pane {
   --attention-ring-border: 1px;
-  animation: attention-ring-fade var(--red-reminder-duration) var(--red-reminder-easing) infinite;
-  animation-delay: var(--attention-animation-delay, 0s);
 }
 .panel.active-pane .panel-head {
   /* bg comes from --pane-bar-bg (focused = bright strip); no per-state override here. */

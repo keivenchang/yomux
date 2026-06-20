@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 from typing import Any
@@ -76,6 +77,24 @@ def yoagent_response_details(response: dict[str, Any]) -> str:
     elapsed_ms = cli.get("elapsed_ms")
     if isinstance(elapsed_ms, (int, float)):
         lines.append(f"- model CLI time: `{float(elapsed_ms) / 1000:.3f}s`")
+    transport = str(cli.get("transport") or "").strip()
+    if transport == "codex-app-server":
+        warm_state = "warm reuse" if cli.get("process_reused") else "cold start" if cli.get("process_started") else "ready"
+        thread_state = "thread resumed" if cli.get("thread_resumed") else "thread started" if cli.get("thread_started") else "thread reused"
+        lines.append(f"- Codex transport: `{warm_state}`, `{thread_state}`")
+        timing_parts: list[str] = []
+        for key, label in (
+            ("thread_ready_ms", "thread ready"),
+            ("turn_start_ack_ms", "turn ack"),
+            ("first_stream_event_ms", "first event"),
+            ("first_assistant_delta_ms", "first answer delta"),
+            ("turn_complete_ms", "complete"),
+        ):
+            value = cli.get(key)
+            if isinstance(value, (int, float)):
+                timing_parts.append(f"{label} {float(value):.1f}ms")
+        if timing_parts:
+            lines.append(f"- Codex timing: `{'; '.join(timing_parts)}`")
     prompt_chars = cli.get("prompt_chars")
     if isinstance(prompt_chars, int):
         lines.append(f"- prompt size: `{prompt_chars}` chars")
@@ -225,6 +244,7 @@ class YoagentBackendsMixin:
         resume: bool = False,
         settings: dict[str, Any] | None = None,
         stream_callback: Any | None = None,
+        request_id: str = "",
     ) -> tuple[str, str, str, dict[str, Any]]:
         if not shutil.which("codex"):
             return "", "codex CLI not found", "", {"transport": "codex-app-server", "persistent": True}
@@ -239,6 +259,9 @@ class YoagentBackendsMixin:
                     self.yoagent_codex_app_server.close()
                 self.yoagent_codex_app_server = CodexAppServerSession(target)
                 self.yoagent_codex_app_server_key = key
+            if request_id:
+                session = self.yoagent_codex_app_server
+                self.deps.set_yoagent_chat_request_interrupt(request_id, session.interrupt)
             result, status = self.yoagent_codex_app_server.send(prompt, target, timeout=YOAGENT_CLI_TIMEOUT_SECONDS, on_event=stream_callback)
             captured_session_id = self.yoagent_codex_app_server.thread_id
         status["elapsed_ms"] = round((time.monotonic() - started) * 1000)
@@ -275,6 +298,7 @@ class YoagentBackendsMixin:
         history: list[dict[str, str]],
         locale: str = "en",
         stream_id: str = "",
+        request_id: str = "",
     ) -> tuple[str, str, dict[str, Any]]:
         if backend not in {"codex", "claude"}:
             return "", f"unknown backend: {backend}", {}
@@ -301,11 +325,15 @@ class YoagentBackendsMixin:
                     resume=not seed,
                     settings=settings,
                     stream_callback=stream_callback,
+                    request_id=request_id,
                 )
             else:
-                answer, error, captured_session_id, backend_status = self.deps.run_yoagent_codex_app_server(prompt, session_id=session_id, resume=not seed, settings=settings)
+                answer, error, captured_session_id, backend_status = self.deps.run_yoagent_codex_app_server(prompt, session_id=session_id, resume=not seed, settings=settings, request_id=request_id)
             next_session_id = captured_session_id or session_id
-            if error and not answer:
+            if request_id and self.deps.yoagent_chat_request_cancelled(request_id):
+                backend_status["cancelled"] = True
+                error = "interrupted"
+            elif error and not answer:
                 fallback_answer, fallback_error, fallback_session_id = self.deps.run_yoagent_codex_cli(prompt, session_id=session_id, resume=not seed, settings=settings)
                 backend_status["fast_backend_error"] = error
                 backend_status["fallback_transport"] = "codex-exec"
@@ -321,7 +349,8 @@ class YoagentBackendsMixin:
             claude_model = str(settings.get("claude_model") or YOAGENT_CLAUDE_SUMMARY_MODEL).strip()
             claude_effort = str(settings.get("claude_effort") or "").strip()
             stream_callback = self.yoagent_stream_callback(stream_id, backend) if stream_id else None
-            answer, error = self.deps.run_yoagent_claude_cli(prompt, session_id=next_session_id, resume=not seed, model=claude_model, effort=claude_effort, stream_callback=stream_callback)
+            cancel_event = self.deps.yoagent_chat_request_cancel_event(request_id) if request_id else None
+            answer, error = self.deps.run_yoagent_claude_cli(prompt, session_id=next_session_id, resume=not seed, model=claude_model, effort=claude_effort, stream_callback=stream_callback, request_id=request_id, cancel_event=cancel_event)
             backend_status = {"transport": "claude-stream-json", "persistent": False, "model": claude_model, "effort": claude_effort or None}
         elapsed_ms = round((time.monotonic() - started) * 1000)
         fallback_reason = self.deps.yoagent_cli_fallback_reason(backend, error)
@@ -409,6 +438,8 @@ class YoagentBackendsMixin:
         model: str = "",
         effort: str = "",
         stream_callback: Any | None = None,
+        request_id: str = "",
+        cancel_event: threading.Event | None = None,
     ) -> tuple[str, str]:
         if not shutil.which("claude"):
             return "", "claude CLI not found"
@@ -430,6 +461,8 @@ class YoagentBackendsMixin:
             prompt,
             timeout=YOAGENT_CLI_TIMEOUT_SECONDS,
             on_event=stream_callback,
+            cancel_event=cancel_event,
+            process_callback=(lambda process: self.deps.set_yoagent_chat_request_interrupt(request_id, lambda: self.deps.interrupt_yoagent_claude_process(process))) if request_id else None,
         )
         if result.ok and result.text:
             return result.text, ""
