@@ -23,6 +23,8 @@ from text_client_common import (  # noqa: E402
     CODEX_CONFIG_KEYS,
     CODEX_OUTPUT_TERMS,
     METRICS_OUTPUT_PREFIX,
+    PromptInputSession,
+    PromptLineEditor,
     TOOL_OUTPUT_PREFIX,
     TurnMetrics,
     client_slash_commands,
@@ -126,6 +128,43 @@ def test_shared_config_keys_map_same_intent_names():
     assert CLAUDE_CONFIG_KEYS.effort == "effort"
     assert CODEX_CONFIG_KEYS.hidden_work_raw == "text_client.show_raw_reasoning"
     assert CLAUDE_CONFIG_KEYS.hidden_work_visibility == "text_client.show_thinking"
+
+
+def test_codex_resolves_prompt_defaults_from_model_catalog():
+    rows = [
+        {"model": "gpt-5.4-mini", "defaultReasoningEffort": "medium", "hidden": False, "isDefault": False},
+        {"model": "gpt-5.5", "defaultReasoningEffort": "xhigh", "hidden": False, "isDefault": True},
+    ]
+    assert codex.resolved_model_settings_from_catalog(rows, "", "") == ("gpt-5.4-mini", "medium")
+    assert codex.resolved_model_settings_from_catalog(rows, "", "low") == ("gpt-5.4-mini", "low")
+    assert codex.resolved_model_settings_from_catalog(rows, "gpt-5.4-mini", "") == ("gpt-5.4-mini", "medium")
+    assert codex.resolved_model_settings_from_catalog(rows, "custom-model", "") == ("gpt-5.4-mini", "medium")
+    assert codex.resolved_model_settings_from_catalog(rows, "gpt-5.1", "xhigh") == ("gpt-5.4-mini", "medium")
+
+    client = CodexTextClient(codex_args(model="", effort=""))
+    client.model_catalog_rows = lambda include_hidden: rows
+    client.resolve_default_model_settings()
+    assert client.args.model == "gpt-5.4-mini"
+    assert client.args.effort == "medium"
+    assert client.args.config_values[CODEX_CONFIG_KEYS.effort] == "medium"
+    assert client.prompt_text().startswith("gpt-5.4-mini[medium] ")
+
+
+def test_codex_human_error_message_extracts_json_detail():
+    assert codex.human_error_message('{"detail":"bad model"}') == "bad model"
+    assert codex.human_error_message({"message": '{"detail":"bad model"}'}) == "bad model"
+
+
+def test_prompt_editor_renders_paste_as_placeholder():
+    editor = PromptLineEditor(PromptInputSession(["help", "status"]), "P> ")
+    editor.insert_text("ask ")
+    editor.insert_paste("line1\nline2")
+    rendered, cursor = editor.rendered_text_and_cursor()
+    assert rendered == "ask [Pasted content 11 chars]"
+    assert cursor == len(rendered)
+    assert editor.text == "ask line1\nline2"
+    editor.backspace()
+    assert editor.text == "ask "
 
 
 def test_prefixed_output_labels_share_common_tool_and_metrics_labels():

@@ -44,6 +44,7 @@ from text_client_common import (
     CLIENT_PERMISSION_DEFAULTS,
     TextClientBase,
     TOOL_OUTPUT_PREFIX,
+    PromptInputSession,
     client_slash_commands,
     client_slash_help_rows,
     collect_token_usage,
@@ -111,6 +112,8 @@ REASONING_EFFORT_ORDER = ["minimal", "low", "medium", "high", "xhigh"]
 REASONING_EFFORTS = set(REASONING_EFFORT_ORDER)
 REASONING_SUMMARIES = {"none", "auto", "concise", "detailed"}
 REASONING_SUMMARY_ALIASES = {"summary": "concise"}
+DEFAULT_CODEX_MODEL = "gpt-5.4-mini"
+DEFAULT_CODEX_EFFORT = "medium"
 KNOWN_CONFIG_KEYS = {
     "approval_policy",
     "bypass_hook_trust",
@@ -164,6 +167,19 @@ def turn_text(turn: Any) -> str:
     return "\n".join(part for part in parts if part).strip()
 
 
+def turn_error_message(turn: Any) -> str:
+    if not isinstance(turn, dict):
+        return ""
+    for key in ("error", "lastError", "failure", "failedReason"):
+        message = human_error_message(turn.get(key))
+        if message:
+            return message
+    status = str(turn.get("status") or "").strip()
+    if status in {"failed", "cancelled", "canceled"}:
+        return f"turn {status}"
+    return ""
+
+
 def app_server_env() -> dict[str, str]:
     env = dict(os.environ)
     local_bin = str(Path.home() / ".local" / "bin")
@@ -206,6 +222,79 @@ def model_catalog_efforts(rows: list[dict[str, Any]]) -> list[str]:
     for row in rows:
         efforts.extend(model_effort_values(row))
     return ordered_reasoning_efforts(efforts)
+
+
+def model_catalog_row_model(row: dict[str, Any]) -> str:
+    return str(row.get("model") or row.get("id") or "").strip()
+
+
+def model_catalog_row_matches(row: dict[str, Any], model: str) -> bool:
+    target = model.strip()
+    if not target:
+        return False
+    folded = target.casefold()
+    for key in ("model", "id", "displayName"):
+        value = str(row.get(key) or "").strip()
+        if value and (value == target or value.casefold() == folded):
+            return True
+    return False
+
+
+def default_model_catalog_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    preferred = next((row for row in rows if not row.get("hidden") and model_catalog_row_matches(row, DEFAULT_CODEX_MODEL)), None)
+    if preferred is not None:
+        return preferred
+    for row in rows:
+        model = model_catalog_row_model(row).casefold()
+        text = " ".join(str(row.get(key) or "") for key in ("id", "model", "displayName", "description")).casefold()
+        if not row.get("hidden") and model.startswith("gpt-") and ("mini" in text or "cost" in text):
+            return row
+    for row in rows:
+        if not row.get("hidden") and model_catalog_row_model(row).casefold().startswith("gpt-"):
+            return row
+    for row in rows:
+        if row.get("isDefault") is True:
+            return row
+    return rows[0] if rows else None
+
+
+def resolved_model_settings_from_catalog(rows: list[dict[str, Any]], model: str, effort: str) -> tuple[str, str]:
+    requested_model = model.strip()
+    requested_effort = effort.strip().lower()
+    resolved_model = requested_model
+    resolved_effort = requested_effort
+    matched_row = next((item for item in rows if model_catalog_row_matches(item, requested_model)), None) if requested_model else None
+    row = matched_row or default_model_catalog_row(rows)
+    if row is None:
+        return resolved_model or DEFAULT_CODEX_MODEL, resolved_effort or DEFAULT_CODEX_EFFORT
+    row_model = model_catalog_row_model(row)
+    if row_model:
+        resolved_model = row_model
+    efforts = model_effort_values(row)
+    row_default_effort = str(row.get("defaultReasoningEffort") or "").strip().lower()
+    fallback_effort = DEFAULT_CODEX_EFFORT if not efforts or DEFAULT_CODEX_EFFORT in efforts else row_default_effort
+    unsupported_model = bool(requested_model and matched_row is None)
+    if not resolved_effort or unsupported_model or (efforts and resolved_effort not in efforts):
+        resolved_effort = fallback_effort
+    if not resolved_effort:
+        resolved_effort = DEFAULT_CODEX_EFFORT
+    return resolved_model, resolved_effort
+
+
+def human_error_message(value: Any) -> str:
+    if isinstance(value, dict):
+        message = str(value.get("message") or value.get("detail") or value.get("error") or "").strip()
+    else:
+        message = str(value or "").strip()
+    if not message:
+        return ""
+    try:
+        decoded = json.loads(message)
+    except json.JSONDecodeError:
+        return message
+    if isinstance(decoded, dict):
+        return str(decoded.get("detail") or decoded.get("message") or message).strip()
+    return message
 
 
 def format_model_catalog_lines(rows: list[dict[str, Any]]) -> list[str]:
@@ -299,7 +388,7 @@ def help_model_request(process: subprocess.Popen[str], request_id: str, method: 
         message = read_help_model_message(process, deadline)
         if message.get("id") == request_id and ("result" in message or "error" in message):
             if message.get("error"):
-                raise RuntimeError(f"{method} failed: {message.get('error')}")
+                raise RuntimeError(f"{method} failed: {human_error_message(message.get('error')) or message.get('error')}")
             result = message.get("result")
             return result if isinstance(result, dict) else {}
 
@@ -393,6 +482,9 @@ class CodexTextClient(TextClientBase):
         self.tool_output_item_ids: set[str] = set()
         self.last_normalized_events: list[dict[str, Any]] = []
         self.app_server_protocol = CodexAppServerProtocol()
+        self.turn_error_message = ""
+        self.turn_error_printed = False
+
     def next_id(self, prefix: str) -> str:
         self.request_counter += 1
         return f"{prefix}-{self.request_counter}"
@@ -420,6 +512,7 @@ class CodexTextClient(TextClientBase):
         )
         response = self.request("initialize", initialize_params())
         self.write(json_rpc_notification("initialized"))
+        self.resolve_default_model_settings()
         if self.args.debug_json:
             print(f"[initialized] {json.dumps(response, sort_keys=True)}", file=sys.stderr)
 
@@ -430,6 +523,21 @@ class CodexTextClient(TextClientBase):
         self.process = None
         if process.poll() is None:
             self.app_server_protocol.terminate_process(process)
+
+    def app_server_exit_details(self) -> str:
+        process = self.process
+        if process is None:
+            return "codex app-server is not running"
+        exit_code = process.poll()
+        parts = ["codex app-server closed its pipe"]
+        if exit_code is not None:
+            parts.append(f"exit={exit_code}")
+            if process.stderr is not None:
+                stderr_text = process.stderr.read().strip()
+                if stderr_text:
+                    tail = "\n".join(stderr_text.splitlines()[-20:])
+                    parts.append(f"stderr:\n{tail}")
+        return "; ".join(parts)
 
     def restart_after_timeout(self, exc: TimeoutError) -> None:
         self.finish_prefixed_output()
@@ -551,7 +659,12 @@ class CodexTextClient(TextClientBase):
     def write(self, message: dict[str, Any]) -> None:
         if self.process is None or self.process.stdin is None:
             raise RuntimeError("codex app-server is not running")
-        self.app_server_protocol.write_message(self.process, message)
+        if self.process.poll() is not None:
+            raise RuntimeError(self.app_server_exit_details())
+        try:
+            self.app_server_protocol.write_message(self.process, message)
+        except (BrokenPipeError, ConnectionResetError) as exc:
+            raise RuntimeError(self.app_server_exit_details()) from exc
         if self.args.debug_json:
             print(f"> {json.dumps(message, sort_keys=True)}", file=sys.stderr)
 
@@ -584,7 +697,7 @@ class CodexTextClient(TextClientBase):
             message = self.read_message(deadline)
             if message.get("id") == request_id and ("result" in message or "error" in message):
                 if message.get("error"):
-                    raise RuntimeError(f"{method} failed: {message.get('error')}")
+                    raise RuntimeError(f"{method} failed: {human_error_message(message.get('error')) or message.get('error')}")
                 result = message.get("result")
                 if self.current_metrics is not None:
                     collect_token_usage(result, self.current_metrics)
@@ -607,6 +720,36 @@ class CodexTextClient(TextClientBase):
             if not cursor:
                 break
         return rows
+
+    def resolve_default_model_settings(self) -> None:
+        requested_model = str(self.args.model or "").strip()
+        requested_effort = str(self.args.effort or "").strip().lower()
+        try:
+            rows = self.model_catalog_rows(include_hidden=True)
+        except (TimeoutError, RuntimeError, OSError, json.JSONDecodeError) as exc:
+            self.print_aux_stderr(f"could not resolve Codex default model settings: {exc}")
+            if not self.args.model:
+                self.args.model = DEFAULT_CODEX_MODEL
+            if not self.args.effort:
+                self.args.effort = DEFAULT_CODEX_EFFORT
+            self.sync_resolved_model_settings_config()
+            return
+        model, effort = resolved_model_settings_from_catalog(rows, self.args.model, self.args.effort)
+        if model:
+            self.args.model = model
+        if effort:
+            self.args.effort = effort
+        self.sync_resolved_model_settings_config()
+        if requested_model and requested_model != self.args.model:
+            self.print_aux_stderr(f"Codex model {requested_model} is not available; using {self.args.model}[{self.args.effort}]")
+        elif requested_effort and requested_effort != self.args.effort:
+            self.print_aux_stderr(f"Codex {CODEX_OUTPUT_TERMS.lower_label} effort {requested_effort} is not available for {self.args.model}; using {self.args.effort}")
+
+    def sync_resolved_model_settings_config(self) -> None:
+        if self.args.effort:
+            self.args.config_values[CODEX_CONFIG_KEYS.effort] = self.args.effort
+        if CODEX_CONFIG_KEYS.model in self.args.config_values:
+            self.args.config_values[CODEX_CONFIG_KEYS.model] = self.args.model
 
     def list_models(self, include_hidden: bool | None = None) -> None:
         rows = self.model_catalog_rows(bool(self.args.include_hidden_models) if include_hidden is None else include_hidden)
@@ -973,8 +1116,8 @@ class CodexTextClient(TextClientBase):
         return {}
 
     def prompt_text(self) -> str:
-        model = self.args.model or "default"
-        effort = self.args.effort or "default"
+        model = self.args.model or "codex"
+        effort = self.args.effort
         return self.prompt_text_for(model, effort)
 
     def permissions_text(self) -> str:
@@ -1012,7 +1155,11 @@ class CodexTextClient(TextClientBase):
             return
         summary = self.tool_item_summary(event, item)
         if summary:
-            self.write_prefixed_line(TOOL_OUTPUT_PREFIX, summary)
+            head, _, tail = summary.partition(": ")
+            if tail:
+                self.write_prefixed_highlighted_line(TOOL_OUTPUT_PREFIX, head, tail)
+            else:
+                self.write_prefixed_line(TOOL_OUTPUT_PREFIX, summary)
         if event == "done" and item.get("type") == "commandExecution":
             item_id = str(item.get("id") or "").strip()
             aggregated_output = str(item.get("aggregatedOutput") or "")
@@ -1118,9 +1265,9 @@ class CodexTextClient(TextClientBase):
             params["serviceTier"] = self.args.service_tier
         return params
 
-    def send_turn(self, text: str) -> None:
+    def send_turn(self, text: str) -> bool:
         if not text.strip():
-            return
+            return True
         self.start_metrics(text)
         try:
             self.ensure_thread()
@@ -1130,6 +1277,8 @@ class CodexTextClient(TextClientBase):
             self.reasoning_summary_buffer = []
             self.raw_reasoning_buffer = []
             self.final_item_text = ""
+            self.turn_error_message = ""
+            self.turn_error_printed = False
             self.prefixed_output_at_line_start = {label: True for label in prefixed_output_labels(CODEX_OUTPUT_TERMS)}
             self.answer_output_at_line_start = True
             self.tool_output_item_ids = set()
@@ -1143,16 +1292,36 @@ class CodexTextClient(TextClientBase):
             if self.args.debug_json:
                 print(f"[turn] {json.dumps(turn_response, sort_keys=True)}", file=sys.stderr)
             self.wait_for_turn()
-            self.finish_metrics("complete", self.args.show_metrics)
+            ok = not self.turn_error_message
+            self.finish_metrics("complete" if ok else "error", self.args.show_metrics)
+            return ok
         except TimeoutError as exc:
             self.finish_metrics("timeout", self.args.show_metrics)
             self.restart_after_timeout(exc)
+            return False
+        except (RuntimeError, OSError, json.JSONDecodeError) as exc:
+            self.finish_metrics("error", self.args.show_metrics)
+            self.finish_prefixed_output()
+            self.finish_answer_output()
+            self.print_aux_stderr(f"codex app-server error: {exc}")
+            self.active_turn_id = ""
+            if self.process is not None and self.process.poll() is not None:
+                self.close()
+                try:
+                    self.start()
+                except (TimeoutError, RuntimeError, OSError, json.JSONDecodeError) as start_exc:
+                    self.close()
+                    self.print_aux_stderr(f"failed to restart codex app-server: {start_exc}")
+                else:
+                    self.print_aux_stderr("restarted codex app-server; try the turn again")
+            return False
         except KeyboardInterrupt:
             self.finish_metrics("interrupted", self.args.show_metrics)
             self.interrupt_turn()
             self.finish_prefixed_output()
             self.finish_answer_output()
             self.print_aux_stderr("interrupted current turn; returned to prompt")
+            return False
 
     def wait_for_turn(self) -> None:
         deadline = time.monotonic() + self.args.timeout
@@ -1185,6 +1354,20 @@ class CodexTextClient(TextClientBase):
         if metrics is not None:
             metrics.mark_server_message(method, now)
             collect_token_usage(message, metrics)
+        if method == "warning":
+            warning = human_error_message(params.get("message") or params.get("warning") or params.get("error") or params)
+            if warning:
+                self.print_aux_stderr(f"codex app-server warning: {warning}")
+            return False
+        if method == "error":
+            error = human_error_message(params.get("error") or params.get("message") or params)
+            self.turn_error_message = error or "codex app-server error"
+            self.turn_error_printed = True
+            self.finish_prefixed_output()
+            self.finish_answer_output()
+            self.print_aux_stderr(f"codex app-server error: {self.turn_error_message}")
+            self.active_turn_id = ""
+            return True
         if method == "turn/started":
             if str(params.get("threadId") or "") == self.thread_id:
                 self.active_turn_id = turn_id_from_turn(params.get("turn")) or self.active_turn_id
@@ -1286,7 +1469,16 @@ class CodexTextClient(TextClientBase):
         if method == "turn/completed":
             if str(params.get("threadId") or "") != self.thread_id:
                 return False
-            final_text = turn_text(params.get("turn"))
+            turn = params.get("turn")
+            turn_error = turn_error_message(turn)
+            if turn_error:
+                self.turn_error_message = turn_error
+                if not self.turn_error_printed:
+                    self.turn_error_printed = True
+                    self.finish_prefixed_output()
+                    self.finish_answer_output()
+                    self.print_aux_stderr(f"codex app-server error: {turn_error}")
+            final_text = turn_text(turn)
             if final_text:
                 self.final_item_text = final_text
                 if metrics is not None and not self.answer_buffer and metrics.answer_chars == 0:
@@ -1564,14 +1756,15 @@ def main() -> int:
             return 0
         initial_prompt = " ".join(args.prompt).strip()
         if initial_prompt:
-            client.send_turn(initial_prompt)
+            ok = client.send_turn(initial_prompt)
             if not args.interactive:
-                return 0
+                return 0 if ok else 1
         configure_readline(REPL_COMMANDS)
-        print("Codex text client. Type /quit to exit.", file=sys.stderr)
+        prompt_session = PromptInputSession(REPL_COMMANDS)
+        print(f"Codex text client. Type /quit to exit.\n  session: {client.thread_id or 'new'} jsonl: {client.session_file_path()}", file=sys.stderr)
         while True:
             try:
-                text = input(client.prompt_text())
+                text = prompt_session.read(client.prompt_text())
             except EOFError:
                 print("", file=sys.stderr)
                 return 0
@@ -1589,6 +1782,9 @@ def main() -> int:
             client.send_turn(text)
     except TimeoutError as exc:
         client.print_aux_stderr(f"codex app-server timeout: {exc}")
+        return 1
+    except (RuntimeError, OSError, json.JSONDecodeError) as exc:
+        client.print_aux_stderr(f"codex app-server error: {exc}")
         return 1
     except KeyboardInterrupt:
         client.print_aux_stderr("\ninterrupted")

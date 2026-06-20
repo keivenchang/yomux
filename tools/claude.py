@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -38,6 +39,7 @@ from text_client_common import (
     CLIENT_PERMISSION_DEFAULTS,
     TextClientBase,
     TOOL_OUTPUT_PREFIX,
+    PromptInputSession,
     client_slash_commands,
     client_slash_help_rows,
     collect_token_usage,
@@ -58,6 +60,8 @@ DEFAULT_TIMEOUT_SECONDS = 900.0
 DEFAULT_PERMISSION_MODE = CLIENT_PERMISSION_DEFAULTS.claude_permission_mode
 CLAUDE_SKIP_PERMISSIONS_FLAG = CLIENT_PERMISSION_DEFAULTS.claude_skip_permissions_flag
 EFFORTS = {"low", "medium", "high", "xhigh", "max"}
+DEFAULT_CLAUDE_MODEL = "haiku"
+DEFAULT_CLAUDE_EFFORT = "medium"
 PERMISSION_MODES = {"acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"}
 KNOWN_CONFIG_KEYS = {
     CLAUDE_CONFIG_KEYS.effort,
@@ -121,6 +125,13 @@ class ClaudeTextClient(TextClientBase):
         self.stream_normalizer = ClaudeStreamJsonNormalizer()
         self.last_normalized_events: list[dict[str, Any]] = []
 
+    def session_file_path(self) -> str:
+        if not self.session_id:
+            return "<not started>"
+        slug = re.sub(r"[^a-zA-Z0-9]", "-", self.cwd)
+        session_path = Path.home() / ".claude" / "projects" / slug / f"{self.session_id}.jsonl"
+        return str(session_path) if session_path.exists() else f"<not found: {session_path}>"
+
     def print_exit_hint(self) -> None:
         if self.exit_hint_printed or not self.session_id:
             return
@@ -169,8 +180,8 @@ class ClaudeTextClient(TextClientBase):
         return command_text(command)
 
     def prompt_text(self) -> str:
-        model = self.args.model or "claude"
-        effort = self.args.effort or "default"
+        model = self.init_model or self.args.model or DEFAULT_CLAUDE_MODEL
+        effort = self.args.effort or DEFAULT_CLAUDE_EFFORT
         return self.prompt_text_for(model, effort)
 
     def command_for_turn(self, text: str) -> list[str]:
@@ -347,7 +358,8 @@ class ClaudeTextClient(TextClientBase):
     def handle_system_message(self, message: dict[str, Any]) -> None:
         subtype = str(message.get("subtype") or "")
         if subtype == "init":
-            self.init_model = str(message.get("model") or "").strip()
+            raw = str(message.get("model") or "").strip()
+            self.init_model = re.sub(r"\x1b?\[\d+m\]?$", "", raw).strip()
             self.init_permission_mode = str(message.get("permissionMode") or "").strip()
             tools = message.get("tools")
             self.init_tools = [str(tool) for tool in tools] if isinstance(tools, list) else []
@@ -411,6 +423,9 @@ class ClaudeTextClient(TextClientBase):
 
     def handle_assistant_message(self, message: dict[str, Any]) -> None:
         payload = message.get("message") if isinstance(message.get("message"), dict) else {}
+        model = str(payload.get("model") or "").strip()
+        if model:
+            self.init_model = model
         content = payload.get("content") if isinstance(payload.get("content"), list) else []
         for item in content:
             if isinstance(item, dict) and item.get("type") == "tool_use":
@@ -489,7 +504,10 @@ class ClaudeTextClient(TextClientBase):
         name = str(item.get("name") or "tool")
         tool_input = item.get("input")
         summary = self.tool_input_summary(name, tool_input)
-        self.write_prefixed_line(TOOL_OUTPUT_PREFIX, f"call {name}" + (f": {summary}" if summary else ""))
+        if summary:
+            self.write_prefixed_highlighted_line(TOOL_OUTPUT_PREFIX, f"call {name}", summary)
+        else:
+            self.write_prefixed_line(TOOL_OUTPUT_PREFIX, f"call {name}")
 
     def tool_input_summary(self, name: str, tool_input: Any) -> str:
         if isinstance(tool_input, dict):
@@ -669,11 +687,13 @@ class ClaudeTextClient(TextClientBase):
         print(f"Metrics {'on' if self.args.show_metrics else 'off'}")
 
     def handle_model_command(self, rest: str) -> None:
-        self.print_compat_note("model", "Claude", "Implemented here to match Codex-style runtime model switching.")
         parts = shlex.split(rest)
         if not parts:
-            print(f"Model: {display_value(self.args.model)}")
+            print(f"Model: {self.args.model}")
+            print("Available: haiku, sonnet, opus, fable")
+            print("Usage: /model <name>")
             return
+        self.print_compat_note("model", "Claude", "Implemented here to match Codex-style runtime model switching.")
         self.args.model = parts[0]
         print(f"model changed: {self.args.model}")
 
@@ -822,8 +842,8 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("prompt", nargs="*", help="Optional user prompt to start the session.")
-    parser.add_argument("-m", "--model", default="", metavar="MODEL", help="Model or alias, e.g. sonnet, opus, fable.")
-    parser.add_argument("--effort", choices=sorted(EFFORTS), default="", metavar="LEVEL", help="Effort for the current session.")
+    parser.add_argument("-m", "--model", default=DEFAULT_CLAUDE_MODEL, metavar="MODEL", help="Model or alias, e.g. sonnet, opus, fable.")
+    parser.add_argument("--effort", choices=sorted(EFFORTS), default=DEFAULT_CLAUDE_EFFORT, metavar="LEVEL", help="Effort for the current session.")
     parser.add_argument("-C", "--cd", dest="cwd", default=os.getcwd(), metavar="DIR", help="Client convenience: run Claude with this working directory.")
     parser.add_argument("--add-dir", action="append", default=[], metavar="DIR", help="Additional directories to allow tool access to.")
     parser.add_argument("--allowedTools", "--allowed-tools", dest="allowed_tools", action="append", default=[], metavar="TOOLS", help="Comma-separated Claude tools to allow.")
@@ -863,10 +883,11 @@ def main() -> int:
             client.send_turn(initial_prompt)
             return 0
         configure_readline(REPL_COMMANDS)
-        print("Claude text client. Type /quit to exit.", file=sys.stderr)
+        prompt_session = PromptInputSession(REPL_COMMANDS)
+        print(f"Claude text client. Type /quit to exit.\n  session: {client.session_id or 'new'} jsonl: {client.session_file_path()}", file=sys.stderr)
         while True:
             try:
-                text = input(client.prompt_text())
+                text = prompt_session.read(client.prompt_text())
             except EOFError:
                 print("", file=sys.stderr)
                 return 0
