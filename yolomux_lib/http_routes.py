@@ -611,7 +611,9 @@ def post_upload(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = parse_qs(parsed.query)
     session = str(query_one(qs, "session", "") or "")
-    request.write_app_result(request.handle_upload(session))
+    editor_path = str(query_one(qs, "editor_path", "") or "")
+    base_dir = str(query_one(qs, "base_dir", "") or "")
+    request.write_app_result(request.handle_upload(session, editor_path=editor_path, base_dir=base_dir))
 
 
 def post_auto_approve(request: Any, parsed: Any, route: Route) -> None:
@@ -767,6 +769,15 @@ def post_yoagent_job_cancel(request: Any, parsed: Any, route: Route) -> None:
         return
     job_id = unquote(parsed.path[len("/api/yoagent/jobs/"):-len("/cancel")]).strip("/")
     response, status = request.server.app.cancel_yoagent_job(str(payload.get("id") or job_id))
+    request.write_json(response, status=status)
+
+
+def post_yoagent_wait_clear(request: Any, parsed: Any, route: Route) -> None:
+    payload = _json_body(request, route)
+    if payload is None:
+        return
+    wait_id = unquote(parsed.path[len("/api/yoagent/waits/"):-len("/clear")]).strip("/")
+    response, status = request.server.app.clear_yoagent_action_wait(str(payload.get("id") or wait_id))
     request.write_json(response, status=status)
 
 
@@ -936,6 +947,7 @@ YOAGENT_ROUTES = (
     Route("POST", "/api/yoagent/jobs", "admin", post_yoagent_jobs, body_limit=64 * 1024, group="yoagent"),
     Route("POST", "/api/yoagent/jobs/*/confirm", "admin", post_yoagent_job_confirm, body_limit=16 * 1024, group="yoagent"),
     Route("POST", "/api/yoagent/jobs/*/cancel", "admin", post_yoagent_job_cancel, body_limit=16 * 1024, group="yoagent"),
+    Route("POST", "/api/yoagent/waits/*/clear", "admin", post_yoagent_wait_clear, body_limit=16 * 1024, group="yoagent"),
     Route("POST", "/api/yoagent/skill-files/upsert", "admin", post_yoagent_skill_file_upsert, body_limit=64 * 1024, group="yoagent"),
     Route("POST", "/api/yoagent/skill-files/delete", "admin", post_yoagent_skill_file_delete, body_limit=16 * 1024, group="yoagent"),
     Route("POST", "/api/yoagent/prewarm", "admin", post_yoagent_prewarm, body_limit=64 * 1024, group="yoagent"),

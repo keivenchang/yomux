@@ -609,6 +609,7 @@ globalThis.__layoutTestApi = {
   loadYoagentJobsForTest: loadYoagentJobs,
   confirmYoagentJobForTest: confirmYoagentJob,
   cancelYoagentJobForTest: cancelYoagentJob,
+  clearYoagentPendingWaitForTest: clearYoagentPendingWait,
   sessionActivitySummary,
   fitAppMenuPopover,
   finderDirectoryForItem,

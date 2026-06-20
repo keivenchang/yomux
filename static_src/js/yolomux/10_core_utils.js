@@ -504,8 +504,9 @@ function primaryOpenPathForFileIdentity(identity) {
   const text = String(identity || '').trim();
   if (!text) return '';
   const mapped = openFilePathByIdentity.get(text);
-  if (mapped && openFiles.has(mapped)) return mapped;
+  if (mapped && openFiles.has(mapped) && fileStateFor(mapped)?.externalMissing !== true) return mapped;
   for (const [path, state] of openFiles.entries()) {
+    if (state?.externalMissing === true) continue;
     if (physicalFileIdentityFromPayload(state) === text) {
       openFilePathByIdentity.set(text, path);
       return path;

@@ -390,6 +390,7 @@ def test_http_route_registry_groups_dispatch_and_keeps_verbs_thin():
     assert route_by_path("GET", "/ws/share-ui").handler is http_routes.get_share_ui_websocket
     assert route_by_path("POST", "/api/share/extend").body_limit == 4096
     assert route_by_path("POST", "/api/yoagent/jobs/*/confirm").handler is http_routes.post_yoagent_job_confirm
+    assert route_by_path("POST", "/api/yoagent/waits/*/clear").handler is http_routes.post_yoagent_wait_clear
     assert route_by_path("POST", "/api/fs/batch").role is http_routes.share_readonly_post_role
 
 
@@ -628,6 +629,14 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
     assert calls == [("require_auth", "readonly")]
     assert writes == [("json", HTTPStatus.ACCEPTED, {"ok": True})]
 
+    handler, calls, writes = route_handler("/api/upload?session=1&editor_path=%2Frepo%2Fdocs%2Fnote.md")
+    handler.handle_upload = lambda session, **kwargs: ({"session": session, **kwargs}, HTTPStatus.CREATED)
+
+    Handler.do_POST(handler)
+
+    assert calls == [("require_auth", "admin")]
+    assert writes == [("json", HTTPStatus.CREATED, {"session": "1", "editor_path": "/repo/docs/note.md", "base_dir": ""})]
+
     handler, calls, writes = route_handler("/api/fs/delete")
     handler.handle_fs_delete = lambda parsed: writes.append(("fs-delete", parsed.path))
 
@@ -715,6 +724,15 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
 
     assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "id": "yj_1"})]
+
+    app = SimpleNamespace(clear_yoagent_action_wait=lambda wait_id: ({"ok": True, "id": wait_id}, HTTPStatus.OK))
+    handler, calls, writes = route_handler("/api/yoagent/waits/yw_1/clear", app)
+    handler.read_json_body = lambda limit: {}
+
+    Handler.do_POST(handler)
+
+    assert calls == [("require_auth", "admin")]
+    assert writes == [("json", HTTPStatus.OK, {"ok": True, "id": "yw_1"})]
 
     app = SimpleNamespace(upsert_yoagent_skill_file=lambda payload: ({"ok": True, "name": payload["name"]}, HTTPStatus.OK))
     handler, calls, writes = route_handler("/api/yoagent/skill-files/upsert", app)

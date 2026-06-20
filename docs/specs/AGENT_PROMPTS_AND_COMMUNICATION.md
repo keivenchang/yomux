@@ -34,6 +34,7 @@ When one tmux session contains multiple detected agent panes, session-level YO s
 ## Detector Principles
 
 - Prefer structured event channels over terminal scraping whenever they exist. Terminal text is a fallback because TUI wording, glyphs, and layout change across versions.
+- For YO!agent send-result watchers, transcript result text wins first, transcript-derived edited-file deltas win next, and visible pane scraping is only a final fallback when those stronger signals are missing or stale.
 - Use the newest bounded visible block. Do not scan the whole scrollback and treat an old prompt as current.
 - A live working line wins over older questions above it. A current approval prompt wins over an older working header above it.
 - Footer/chrome/task rows are not later activity by themselves. Examples include `esc to interrupt`, `bypass permissions`, context usage, model/effort labels, Ctrl-T task rows, and composer boxes.
@@ -280,6 +281,7 @@ Use these examples to test the difference between prompts the agent presents to 
 | AskUserQuestion footer `Enter to select · ↑/↓ to navigate · n to add notes · Tab to switch questions · Esc to cancel` | `needs-input` | It is a modal decision UI, not a permission prompt. |
 | `Do you want to make this edit to SKILL.md?` with Yes/No options | `approval` | It is a tool/file permission decision. |
 | `Would you like to run the following command?` with `$ <command>` and Codex options | `approval` | It is a command permission decision. |
+| Bottom composer ghost suggestion text such as `❯ commit the DYN_PARSER_DEBUG change` or dim Codex text like `› Summarize recent commits` | `idle` | It is placeholder UI exposed by tmux capture, not a draft the user typed; Claude can preserve NBSP spacing and Codex can preserve ANSI dim styling. |
 | Old `❯ Where are the DOIT files?` above a current bare `❯ ` prompt | `idle` | The bottom prompt proves the old question is scrollback. |
 | Text explaining `• Working (10s • esc to interrupt)` followed by the bottom Codex composer | `idle` | The working row is an example in conversation, not live chrome. |
 

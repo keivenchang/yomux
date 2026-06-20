@@ -274,10 +274,15 @@ function yoagentPendingWaitsHtml() {
       ? compactRelativeTimeFormat(Math.max(0, Math.round(Date.now() / 1000 - startedTs)))
       : '';
     const transcript = String(wait?.transcript || '');
+    const id = String(wait?.id || '');
+    const clearButton = id && !readOnlyMode
+      ? `<button type="button" class="yoagent-waiting-clear" data-yoagent-wait-clear="${esc(id)}" title="${esc(t('yoagent.clear'))}" aria-label="${esc(t('yoagent.clear'))}">${esc(t('yoagent.clear'))}</button>`
+      : '';
     return `<li class="yoagent-waiting-item" title="${esc(transcript)}">
       <span class="session-yolo-marker active working yoagent-waiting-spinner" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span>
       <span class="yoagent-waiting-label">${esc(label)}</span>
       ${age ? `<span class="yoagent-waiting-age">${esc(age)}</span>` : ''}
+      ${clearButton}
     </li>`;
   }).join('');
   return `<div class="yoagent-waiting-queue" aria-live="polite" aria-label="${esc(title)}">
@@ -818,6 +823,24 @@ function confirmYoagentJob(jobId) {
 
 function cancelYoagentJob(jobId) {
   return updateYoagentJob(jobId, 'cancel');
+}
+
+async function clearYoagentPendingWait(waitId) {
+  const id = String(waitId || '');
+  if (!id || readOnlyMode) return;
+  try {
+    const payload = await apiFetchJson(`/api/yoagent/waits/${encodeURIComponent(id)}/clear`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({id}),
+    });
+    applyYoagentConversationPayload(payload.conversation || {});
+    renderYoagentPanel({preserveDraft: true, scrollBottom: false});
+  } catch (error) {
+    if (error?.payload?.conversation) applyYoagentConversationPayload(error.payload.conversation);
+    yoagentError = yoagentChatErrorMessage(error);
+    renderYoagentPanel({preserveDraft: true, scrollBottom: false});
+  }
 }
 
 async function sendYoagentChatMessage(rawText) {

@@ -498,6 +498,55 @@ async function runLayoutAsyncSuite() {
 
     {
       const api = loadYolomux('', ['1']);
+      const oldPath = '/repo/app/something.md';
+      const newPath = '/repo/app/blah/something.md';
+      const fileId = 'dev:10:ino:20';
+      const calls = [];
+      api.setFetchForTest(url => {
+        const text = String(url);
+        calls.push(text);
+        const path = decodeURIComponent((text.match(/path=([^&]+)/) || [])[1] || '');
+        if (text.startsWith('/api/fs/read')) {
+          return Promise.resolve(jsonResponse({
+            path,
+            content: path === newPath ? '# moved\n' : '# original\n',
+            size: path === newPath ? 8 : 11,
+            mtime: path === newPath ? 2 : 1,
+            mtime_ns: path === newPath ? 2 : 1,
+            realpath: path,
+            file_id: fileId,
+            git_root: '/repo/app',
+            git_tracked: true,
+            git_history: [{ref: 'a'}, {ref: 'b'}],
+            git_has_history: true,
+          }));
+        }
+        return Promise.resolve(jsonResponse({ok: true}));
+      });
+
+      const oldItem = await api.openFileInEditorForTest(oldPath, {name: 'something.md', realpath: oldPath, file_id: fileId}, {viewMode: 'edit'});
+      const oldState = api.currentFileStateForTest(oldPath);
+      api.setOpenFileStateForTest(oldPath, {
+        ...oldState,
+        kind: 'error',
+        original: '',
+        content: '',
+        dirty: false,
+        error: 'path not found: /repo/app/something.md',
+        externalMissing: true,
+      });
+      calls.length = 0;
+
+      const newItem = await api.openFileInEditorForTest(newPath, {name: 'something.md', realpath: newPath, file_id: fileId}, {viewMode: 'edit'});
+
+      assert.notEqual(newItem, oldItem, 'opening the moved full path does not focus the stale missing editor tab');
+      assert.equal(api.currentFileStateForTest(oldPath).externalMissing, true, 'old path remains marked missing');
+      assert.equal(api.currentFileStateForTest(newPath).content, '# moved\n', 'new path loads fresh file content');
+      assert.deepStrictEqual(calls.filter(url => url.startsWith('/api/fs/read')).map(url => decodeURIComponent((url.match(/path=([^&]+)/) || [])[1] || '')), [newPath], 'new full path forces a fresh read');
+    }
+
+    {
+      const api = loadYolomux('', ['1']);
       const path = '/repo/app/src/main.py';
       const readResolvers = [];
       const calls = [];
@@ -952,6 +1001,7 @@ async function runLayoutAsyncSuite() {
       assert.equal(has(null), false, '78.5: missing payload is not image-bearing');
       assert.equal(files(dt({items: [fileItem(), fileItem('image/jpeg')]})).length, 2, '78.5: extracts every image File item (multi-image)');
       assert.equal(files(dt({files: [{type: 'image/png', name: 'p.png'}, {type: 'text/plain', name: 'n.txt'}]})).length, 1, '78.5: extracts only image entries from a plain File list');
+      assert.equal(files(dt({types: ['text/html'], data: {'text/html': '<img src="data:image/png;base64,AAAA">'}})).length, 1, '78.5: extracts image data URLs from rich text/html');
     }
 
     // DOIT.78 (78.1): an image pasted as RICH DATA (text/html <img>, NO File) must still be CLAIMED
@@ -1016,13 +1066,158 @@ async function runLayoutAsyncSuite() {
       assert.ok(allSent.includes('multi-a.png') && allSent.includes('multi-b.png'), '78.4: both pasted images become text references in the terminal (no attachment)');
     }
 
+    // Markdown editor image paste uploads beside the Markdown file and inserts relative image links into CodeMirror.
+    {
+      const api = loadYolomux('', ['1']);
+      const sent = [];
+      api.registerTerminalForTest('1', {focus() {}}, {readyState: 1, send(message) { sent.push(JSON.parse(message)); }});
+      api.setFocusedTerminal('1');
+      const path = '/repo/docs/note.md';
+      const item = api.fileEditorItemFor(path);
+      api.registerFileEditorLayoutItemForTest(path, {item});
+      api.setOpenFileStateForTest(path, {kind: 'text', original: 'hello\n', content: 'hello\n', dirty: false});
+      let content = 'hello\n';
+      let focused = false;
+      const view = {
+        state: {doc: {length: content.length}, selection: {main: {from: content.length, to: content.length}}},
+        dispatch(transaction) {
+          const change = transaction.changes;
+          content = `${content.slice(0, change.from)}${change.insert}${content.slice(change.to)}`;
+          this.state.doc.length = content.length;
+          this.state.selection.main = {from: transaction.selection.anchor, to: transaction.selection.anchor};
+        },
+        focus() { focused = true; },
+      };
+      const panel = new TestElement('panel-editor-note');
+      panel.className = 'panel file-editor-panel';
+      panel.dataset.filePath = path;
+      panel.dataset.layoutItem = item;
+      panel._cmView = view;
+      panel._cmMode = 'edit';
+      const cmTarget = new TestElement('cm-target');
+      panel.appendChild(cmTarget);
+      const calls = [];
+      api.setFetchForTest((url, options = {}) => {
+        calls.push({url: String(url), method: options.method || 'GET', body: options.body});
+        if (String(url).startsWith('/api/upload')) {
+          return Promise.resolve(jsonResponse({files: [
+            {path: '/repo/docs/.uploads/one.png', relative_path: '.uploads/one.png'},
+            {path: '/repo/docs/.uploads/two file.png', relative_path: '.uploads/two file.png'},
+          ]}));
+        }
+        return Promise.resolve(jsonResponse({items: [], session: '1'}));
+      });
+      api.bindClipboardPasteForTest();
+      const pasteListeners = api.documentListenersForTest('paste');
+      const imageItem = name => ({kind: 'file', type: 'image/png', getAsFile() { return {name, type: 'image/png', size: 7}; }});
+      const pasteEvent = {
+        clipboardData: {items: [imageItem('one.png'), imageItem('two.png')], types: ['Files'], getData() { return ''; }},
+        target: cmTarget,
+        defaultPrevented: false,
+        propagationStopped: false,
+        preventDefault() { this.defaultPrevented = true; },
+        stopPropagation() { this.propagationStopped = true; },
+      };
+      pasteListeners[0](pasteEvent);
+      await flushAsyncWork();
+      assert.equal(pasteEvent.defaultPrevented, true, 'Markdown editor image paste is claimed before terminal handling');
+      assert.equal(pasteEvent.propagationStopped, true, 'Markdown editor image paste stops propagation');
+      assert.equal(calls[0].url, `/api/upload?editor_path=${encodeURIComponent(path)}`, 'Markdown editor paste uploads with the editor path');
+      assert.equal(calls[0].method, 'POST');
+      assert.equal(calls[0].body.fields.length, 2, 'Markdown editor paste uploads every image');
+      assert.equal(content, 'hello\n![image](.uploads/one.png)\n![image](.uploads/two%20file.png)', 'Markdown editor paste inserts relative image links at the cursor');
+      assert.equal(focused, true, 'Markdown editor paste restores CodeMirror focus');
+      assert.equal(sent.length, 0, 'Markdown editor paste never sends raw image data to xterm');
+    }
+
+    // Rich remote images are still claimed for Markdown editors even when no uploadable File can be extracted.
+    {
+      const api = loadYolomux('', ['1']);
+      const sent = [];
+      api.registerTerminalForTest('1', {focus() {}}, {readyState: 1, send(message) { sent.push(JSON.parse(message)); }});
+      api.setFocusedTerminal('1');
+      const path = '/repo/docs/note.md';
+      const item = api.fileEditorItemFor(path);
+      api.registerFileEditorLayoutItemForTest(path, {item});
+      const panel = new TestElement('panel-editor-remote');
+      panel.className = 'panel file-editor-panel';
+      panel.dataset.filePath = path;
+      panel.dataset.layoutItem = item;
+      panel._cmView = {state: {doc: {length: 0}, selection: {main: {from: 0, to: 0}}}, dispatch() {}};
+      panel._cmMode = 'edit';
+      const cmTarget = new TestElement('cm-remote-target');
+      panel.appendChild(cmTarget);
+      const calls = [];
+      api.setFetchForTest((url, options = {}) => {
+        calls.push({url: String(url), method: options.method || 'GET'});
+        return Promise.resolve(jsonResponse({items: [], session: '1'}));
+      });
+      api.bindClipboardPasteForTest();
+      const pasteEvent = {
+        clipboardData: {
+          items: [],
+          types: ['text/html'],
+          getData(type) { return type === 'text/html' ? '<img src="https://example.com/remote.png">' : ''; },
+        },
+        target: cmTarget,
+        defaultPrevented: false,
+        propagationStopped: false,
+        preventDefault() { this.defaultPrevented = true; },
+        stopPropagation() { this.propagationStopped = true; },
+      };
+      api.documentListenersForTest('paste')[0](pasteEvent);
+      await flushAsyncWork();
+      assert.equal(pasteEvent.defaultPrevented, true, 'remote Markdown image paste is claimed');
+      assert.equal(pasteEvent.propagationStopped, true, 'remote Markdown image paste stops propagation');
+      assert.equal(calls.length, 0, 'remote Markdown image paste does not upload without an extractable File');
+      assert.equal(sent.length, 0, 'remote Markdown image paste never leaks to xterm');
+    }
+
+    // Non-Markdown editors do not steal the terminal image paste path.
+    {
+      const api = loadYolomux('', ['1']);
+      const sent = [];
+      api.registerTerminalForTest('1', {focus() {}}, {readyState: 1, send(message) { sent.push(JSON.parse(message)); }});
+      api.setFocusedTerminal('1');
+      const path = '/repo/src/app.py';
+      const panel = new TestElement('panel-editor-python');
+      panel.className = 'panel file-editor-panel';
+      panel.dataset.filePath = path;
+      panel.dataset.layoutItem = api.fileEditorItemFor(path);
+      panel._cmView = {state: {doc: {length: 0}, selection: {main: {from: 0, to: 0}}}, dispatch() {}};
+      panel._cmMode = 'edit';
+      const cmTarget = new TestElement('cm-python-target');
+      panel.appendChild(cmTarget);
+      const calls = [];
+      api.setFetchForTest(url => {
+        calls.push(String(url));
+        if (String(url).startsWith('/api/upload')) return Promise.resolve(jsonResponse({files: [{path: '/repo/.uploads/python.png'}]}));
+        return Promise.resolve(jsonResponse({items: [], session: '1'}));
+      });
+      api.setClientSettingsPatchForTest({uploads: {show_suggestions: false}});
+      api.bindClipboardPasteForTest();
+      const imageItem = {kind: 'file', type: 'image/png', getAsFile() { return {name: 'python.png', type: 'image/png', size: 7}; }};
+      const pasteEvent = {
+        clipboardData: {items: [imageItem], types: ['Files'], getData() { return ''; }},
+        target: cmTarget,
+        defaultPrevented: false,
+        preventDefault() { this.defaultPrevented = true; },
+        stopPropagation() {},
+      };
+      api.documentListenersForTest('paste')[0](pasteEvent);
+      await flushAsyncWork();
+      assert.equal(calls[0], '/api/upload?session=1', 'non-Markdown editor paste falls back to terminal upload');
+      assert.ok(sent.some(message => String(message.data || '').includes('/repo/.uploads/python.png')), 'non-Markdown editor paste keeps terminal reference insertion');
+    }
+
     // DOIT.78 (78.6): invariant guard — paste and drop must route through the ONE shared image-payload
     // detector so a new entry point can't reintroduce a divergent leak path.
     {
       const imgSource = fs.readFileSync('static/yolomux.js', 'utf8');
-      assert.ok(/document\.addEventListener\('paste', event => \{\s*if \(!dataTransferHasImagePayload\(event\.clipboardData\)\) return;/.test(imgSource), '78.6: the document paste handler claims via the shared dataTransferHasImagePayload detector');
+      assert.ok(/document\.addEventListener\('paste', event => \{\s*if \(!dataTransferHasImagePayload\(event\.clipboardData\)\) return;[\s\S]*markdownEditorPasteTarget\(event\)/.test(imgSource), '78.6: the document paste handler claims via the shared dataTransferHasImagePayload detector before editor or terminal routing');
       assert.ok(imgSource.includes('function hasUploadableDrag(event)') && /addEventListener\('drop', event => \{\s*if \(!hasUploadableDrag\(event\)\) return;/.test(imgSource), '78.6: the file-drop handler claims via hasUploadableDrag (file OR image rich-data)');
       assert.ok(imgSource.includes('function dataTransferImageFiles(dt)') && imgSource.includes('function dataTransferHasImagePayload(dt)'), '78.6: the shared image-payload parent exists');
+      assert.ok(/const files = dataTransferImageFiles\(event\.clipboardData\);[\s\S]*uploadEditorFiles\(editorTarget, files\)/.test(imgSource), '78.6: Markdown editor paste uploads through the shared image-payload extractor');
     }
 
     {
@@ -1202,6 +1397,35 @@ async function runLayoutAsyncSuite() {
         {method: 'POST', url: '/api/yoagent/jobs/job-1/cancel'},
         {method: 'GET', url: '/api/yoagent/jobs'},
       ], 'YO!agent job confirm/cancel controls call the existing job routes and refresh the list');
+    }
+
+    {
+      const api = loadYolomux('', ['1']);
+      api.applyYoagentConversationPayloadForTest({
+        messages: [],
+        pending_waits: [{id: 'wait-1', session: '1', label: 'Waiting for tmux session `1` to reply', started_ts: Math.round(Date.now() / 1000) - 65}],
+      });
+      assert.ok(api.yoagentChatHtml().includes('data-yoagent-wait-clear="wait-1"'), 'YO!agent pending wait rows expose a Clear control');
+      const calls = [];
+      api.setFetchForTest((url, options = {}) => {
+        calls.push({url: String(url), method: options.method || 'GET', body: options.body || ''});
+        if (String(url) === '/api/yoagent/waits/wait-1/clear') {
+          return Promise.resolve(jsonResponse({
+            conversation: {
+              messages: [{role: 'assistant', kind: 'agent_result', session: '1', content: 'Result from tmux session `1`: done'}],
+              pending_waits: [],
+            },
+          }));
+        }
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      });
+      await api.clearYoagentPendingWaitForTest('wait-1');
+      assert.deepStrictEqual(canonical(calls.map(call => ({method: call.method, url: call.url, body: JSON.parse(call.body || '{}')}))), [
+        {method: 'POST', url: '/api/yoagent/waits/wait-1/clear', body: {id: 'wait-1'}},
+      ], 'YO!agent wait Clear posts to the existing wait clear endpoint');
+      const html = api.yoagentChatHtml();
+      assert.equal(html.includes('yoagent-waiting-queue'), false, 'clearing a stale wait removes the pending row');
+      assert.ok(html.includes('Result from tmux session') && html.includes('done'), 'clearing a stale wait preserves recorded result messages');
     }
 
     test('self-update: Update Now removes toast and reloads after restart ping', async () => {

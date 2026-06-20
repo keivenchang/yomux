@@ -1114,6 +1114,23 @@
   flex: 0 0 auto;
   color: var(--muted);
 }
+.yoagent-waiting-clear {
+  appearance: none;
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+  font: 800 max(10px, calc(var(--terminal-font-size) - 2px))/1 var(--ui-font);
+  padding: 4px 7px;
+}
+.yoagent-waiting-clear:hover,
+.yoagent-waiting-clear:focus-visible {
+  border-color: var(--active-control-focus-ring);
+  color: var(--text);
+  outline: none;
+}
 .yoagent-jobs-list {
   display: grid;
   gap: 5px;

@@ -7069,6 +7069,23 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   flex: 0 0 auto;
   color: var(--muted);
 }
+.yoagent-waiting-clear {
+  appearance: none;
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+  font: 800 max(10px, calc(var(--terminal-font-size) - 2px))/1 var(--ui-font);
+  padding: 4px 7px;
+}
+.yoagent-waiting-clear:hover,
+.yoagent-waiting-clear:focus-visible {
+  border-color: var(--active-control-focus-ring);
+  color: var(--text);
+  outline: none;
+}
 .yoagent-jobs-list {
   display: grid;
   gap: 5px;
@@ -12806,11 +12823,13 @@ body.theme-light .file-tree-row.tabber-row {
   display: inline-flex;
   align-items: center;
   gap: 3px;
+  flex: 1 1 auto;
   min-width: 0;
-  max-inline-size: min(var(--pane-tab-width), 100%);
+  inline-size: 100%;
+  max-inline-size: 100%;
   height: var(--pane-tab-height);
   padding: 1px 5px 0;
-  color: var(--pane-tab-text);
+  color: var(--tabber-detail-color);
   background: var(--pane-bar-bg, var(--panel2));
   border: 1px solid var(--pane-inactive-tab-border);
   border-bottom-color: var(--pane-inactive-tab-border);

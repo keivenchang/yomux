@@ -3383,11 +3383,13 @@ body.theme-light .file-tree-row.tabber-row {
   display: inline-flex;
   align-items: center;
   gap: 3px;
+  flex: 1 1 auto;
   min-width: 0;
-  max-inline-size: min(var(--pane-tab-width), 100%);
+  inline-size: 100%;
+  max-inline-size: 100%;
   height: var(--pane-tab-height);
   padding: 1px 5px 0;
-  color: var(--pane-tab-text);
+  color: var(--tabber-detail-color);
   background: var(--pane-bar-bg, var(--panel2));
   border: 1px solid var(--pane-inactive-tab-border);
   border-bottom-color: var(--pane-inactive-tab-border);

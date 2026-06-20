@@ -962,9 +962,10 @@ async function runTabberSuite() {
     assert.ok(/\.file-tree-row\.tabber-row\[data-tabber-type="tab"\]:not\(\.selected\) > \.file-tree-name,[\s\S]*color:\s*var\(--tabber-level0-color\)/.test(css), 'non-tmux Tabber pane rows do not use purple');
     const tabberSessionTabCss = css.match(/\.file-tree-row\.tabber-row \.tabber-session-tab\s*\{([\s\S]*?)\}/)?.[1] || '';
     assert.ok(/height:\s*var\(--pane-tab-height\)/.test(tabberSessionTabCss), 'A2: Tabber session label uses the shared pane-tab height');
-    assert.ok(/max-inline-size:\s*min\(var\(--pane-tab-width\), 100%\)/.test(tabberSessionTabCss), 'A2/A4: Tabber session label is bounded by the shared pane-tab width');
+    assert.ok(/inline-size:\s*100%/.test(tabberSessionTabCss) && /max-inline-size:\s*100%/.test(tabberSessionTabCss), 'A2/A4: Tabber session label stretches to the row instead of the pane tab width cap');
+    assert.equal(/max-inline-size:\s*min\(var\(--pane-tab-width\), 100%\)/.test(tabberSessionTabCss), false, 'A2/A4: Tabber session label has no shared pane-tab-width max cap');
     assert.ok(/padding:\s*1px 5px 0/.test(tabberSessionTabCss), 'A2: Tabber session label uses pane-tab padding');
-    assert.ok(/color:\s*var\(--pane-tab-text\)/.test(tabberSessionTabCss), 'A2: inactive Tabber session text uses pane-tab text');
+    assert.ok(/color:\s*var\(--tabber-detail-color\)/.test(tabberSessionTabCss), 'A2: inactive Tabber session text uses the dim Tabber detail color');
     assert.ok(/background:\s*var\(--pane-bar-bg, var\(--panel2\)\)/.test(tabberSessionTabCss), 'A2: inactive Tabber session background matches dockview inactive tabs');
     assert.ok(/border:\s*1px solid var\(--pane-inactive-tab-border\)/.test(tabberSessionTabCss), 'A2: inactive Tabber session border uses the shared pane-tab border token');
     assert.ok(/border-radius:\s*6px 6px 0 0/.test(tabberSessionTabCss), 'A2: Tabber session label uses pane-tab top radius');

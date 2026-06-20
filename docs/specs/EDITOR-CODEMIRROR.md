@@ -6,6 +6,12 @@ Original goal: get a real Find (Cmd/Ctrl+F, `1/13`, ^/v, jump+reveal) and the re
 
 CodeMirror 6 is a third-party editor library with upstream dependency notices recorded in [`../../THIRD_PARTY_NOTICES.md`](../../THIRD_PARTY_NOTICES.md). It gives, out of the box: Find/Replace (`@codemirror/search`) with match count + all-match highlight, multiple carets, native soft-wrap + line-number gutter (this RETIRES #6), Lezer syntax highlighting, bracket matching, auto-close, code folding, go-to-line, comment-toggle, auto-indent, configurable tab width, line ops, undo/redo, read-only mode, viewport rendering for big files. Heavier Popular IDE editor engines need more runtime plumbing and web workers, so CM6 is the right size here.
 
+## Current paste contract
+
+- Image paste is owned by the focused surface before browser default paste can leak rich image data: a focused Markdown CodeMirror editor uploads through the editor upload route and inserts relative Markdown image links, while a terminal-focused paste uploads through the session route and inserts terminal-safe `[Image #N] '/abs/path'` text.
+- Editor image paste is Markdown-only: `.md` and `.markdown` editors receive `![image](.uploads/name.png)` references relative to the Markdown file's directory; non-Markdown editors, Finder, Preferences, YO!agent, and terminal focus continue through the existing terminal paste path when a terminal target exists.
+- The editor and terminal paste paths share `dataTransferHasImagePayload` and `dataTransferImageFiles`; File items, File lists, image MIME items, multiple images, and extractable `text/html` data URLs are claimed and uploaded, and unextractable remote `<img>` HTML is still claimed with an error so raw image clipboard data never reaches an agent TUI.
+
 ## Two paths to prototype (behind one toggle, then compare)
 
 Historical prototype plan: add an `editor.engine` setting / `?editor=` override with values `textarea` and `codemirror`, build both, compare against the success gate, and keep the winner. The shipped result kept CodeMirror and deleted the textarea engine.

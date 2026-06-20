@@ -240,6 +240,11 @@ async function runEditorPreviewSuite() {
     assert.equal(api.editorWrapValue(true), 'soft');
     assert.equal(api.rawFileUrl('/repo/app/a b.txt', {v: 7}), '/api/fs/raw?path=%2Frepo%2Fapp%2Fa%20b.txt&v=7');
     assert.equal(api.rawFileDownloadUrl('/repo/app/a b.txt'), '/api/fs/raw?path=%2Frepo%2Fapp%2Fa%20b.txt&download=1');
+    assert.deepStrictEqual({...api.markdownPreviewImageTarget('.uploads/pasted image.png', '/repo/docs/note.md')}, {
+      src: '/api/fs/raw?path=%2Frepo%2Fdocs%2F.uploads%2Fpasted%20image.png',
+      path: '/repo/docs/.uploads/pasted image.png',
+      external: false,
+    }, 'Markdown preview resolves editor-pasted relative .uploads images beside the Markdown file');
   });
 
   test('t@6312', () => {
@@ -1310,8 +1315,21 @@ async function runEditorPreviewSuite() {
     const pendingWaitsHtml = api.yoagentChatHtml();
     assert.ok(pendingWaitsHtml.includes('yoagent-waiting-queue'), 'pending result waits render as a visible queue');
     assert.equal((pendingWaitsHtml.match(/class="yoagent-waiting-item"/g) || []).length, 2, 'multiple pending waits render as separate rows');
+    assert.ok(pendingWaitsHtml.includes('data-yoagent-wait-clear="wait-6"'), 'pending waits expose a clear control');
+    assert.ok(pendingWaitsHtml.includes('data-yoagent-wait-clear="wait-7"'), 'each pending wait can be cleared independently');
     assert.ok(/data-yoagent-chat-input[^>]*placeholder="Ask anything…"(?![^>]* disabled)/.test(pendingWaitsHtml), 'pending waits do not disable the YO!agent composer input');
     assert.ok(/class="yoagent-chat-send"(?![^>]* disabled)/.test(pendingWaitsHtml), 'pending waits do not disable the YO!agent send button');
+    api.applyYoagentConversationPayloadForTest({
+      messages: [
+        {role: 'user', content: 'ask 6 for status', createdAt: '2026-06-13T17:39:00Z'},
+        {role: 'assistant', kind: 'agent_result', session: '6', content: 'I sent the request to tmux session `6`, but I did not see a result before the wait timed out.', createdAt: '2026-06-13T17:40:00Z'},
+      ],
+      pending_waits: [],
+    });
+    const clearedWaitsHtml = api.yoagentChatHtml();
+    assert.equal(clearedWaitsHtml.includes('yoagent-waiting-queue'), false, 'cleared server waits remove the pending queue');
+    assert.ok(clearedWaitsHtml.includes('did not see a result before the wait timed out'), 'cleared waits leave the visible timeout/result message');
+    assert.ok(/data-yoagent-chat-input[^>]*placeholder="Ask anything…"(?![^>]* disabled)/.test(clearedWaitsHtml), 'cleared waits keep the YO!agent composer input enabled');
     api.applyYoagentJobsPayloadForTest({
       jobs: [
         {id: 'job-confirm', type: 'wait_then_send', status: 'pending_confirmation', target: {session: '6'}, public_text: 'send date', last_observed_state: {blockers: ['target is busy']}},
@@ -1995,6 +2013,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/function applyYoagentConversationPayload\(payload = \{\}\)[\s\S]*yoagentPendingWaits = Array\.isArray\(payload\.pending_waits\)/.test(src), 'YO!agent conversation payload carries pending background waits');
     assert.ok(/function yoagentPendingWaitsHtml\(\)[\s\S]*tPlural\('yoagent\.waiting\.count'[\s\S]*yoagent-waiting-queue/.test(src), 'YO!agent renders a waiting queue for one or more background result waits');
     assert.ok(/function yoagentPendingWaitsHtml\(\)[\s\S]*sourceRegarding[\s\S]*targetRegarding[\s\S]*yoagent\.waiting\.handoff[\s\S]*yoagent\.waiting\.session/.test(src), 'YO!agent waiting rows distinguish handoff waits from direct session waits and include both regarding summaries');
+    assert.ok(/data-yoagent-wait-clear/.test(src) && /async function clearYoagentPendingWait/.test(src), 'YO!agent pending waits expose a clear affordance through the existing wait store');
     assert.ok(/function applyYoagentJobsPayload\(payload = \{\}\)[\s\S]*yoagentJobs = Array\.isArray\(payload\.jobs\)/.test(src), 'YO!agent keeps server-reported jobs in chat state');
     assert.ok(/function yoagentJobsHtml\(\)[\s\S]*yoagent-jobs-list/.test(src), 'YO!agent renders queued jobs as a visible list');
     assert.ok(/data-yoagent-job-confirm/.test(src) && /data-yoagent-job-cancel/.test(src), 'YO!agent job rows expose confirm/cancel controls');

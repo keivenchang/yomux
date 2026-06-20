@@ -1291,11 +1291,24 @@ function bindClipboardPaste() {
   clipboardPasteBound = true;
   document.addEventListener('paste', event => {
     if (!dataTransferHasImagePayload(event.clipboardData)) return;
+    const editorTarget = markdownEditorPasteTarget(event);
     // Image-bearing paste: ALWAYS claim it (preventDefault + stopPropagation) so the raw image can never
-    // reach the terminal-backed agent as a rich [Image #N] attachment (the mixed text+attachment bug).
-    // Then upload ALL pasted images and insert only their textual uploaded-path references.
+    // reach a CodeMirror editor or terminal-backed agent as a rich [Image #N] attachment.
+    // Then upload ALL pasted images and insert only textual references for the focused surface.
     event.preventDefault();
     event.stopPropagation();
+    if (editorTarget) {
+      const files = dataTransferImageFiles(event.clipboardData);
+      if (!files.length) {
+        statusErr(localizedHtml('status.selectPaneForImagePaste'));
+        return;
+      }
+      if (!beginPasteUpload(`editor:${editorTarget.path}`)) return;
+      uploadEditorFiles(editorTarget, files).finally(() => {
+        pasteUploadInFlight = false;
+      });
+      return;
+    }
     const session = pasteTargetSession(event);
     if (!session) {
       statusErr(localizedHtml('status.selectPaneForImagePaste'));
@@ -1313,6 +1326,17 @@ function bindClipboardPaste() {
       pasteUploadInFlight = false;
     });
   }, {capture: true});
+}
+
+function markdownEditorPasteTarget(event) {
+  const eventPanel = event.target?.closest?.('.file-editor-panel') || null;
+  const focusedPanel = !eventPanel && !focusedTerminal && isFileEditorItem(focusedPanelItem) ? panelNodes.get(focusedPanelItem) || null : null;
+  const panel = eventPanel || focusedPanel;
+  const view = panel?._cmView || null;
+  if (!panel || !view || panel._cmMode === 'diff') return null;
+  const path = fileEditorPanelPath(panel) || fileItemPath(fileEditorPanelItem(panel) || focusedPanelItem);
+  if (!path || previewRendererForPath(path)?.id !== 'markdown') return null;
+  return {panel, view, path};
 }
 
 // ONE shared image-payload contract for BOTH paste (clipboardData) and drop (dataTransfer). A browser may
@@ -1527,6 +1551,35 @@ async function uploadFiles(session, fileList, options = {}) {
   }
 }
 
+async function uploadEditorFiles(editorTarget, fileList) {
+  if (readOnlyMode) {
+    statusErr(localizedHtml('status.readOnlyUploadFiles'));
+    return;
+  }
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  const totalBytes = files.reduce((total, file) => total + (Number(file?.size) || 0), 0);
+  if (uploadMaxBytes > 0 && totalBytes > uploadMaxBytes) {
+    statusErr(localizedHtml('status.uploadTooLarge', {selected: formatFileSize(totalBytes), limit: formatFileSize(uploadMaxBytes)}));
+    return;
+  }
+  const formData = new FormData();
+  for (const file of files) {
+    formData.append('files', file, file.name || 'upload.bin');
+  }
+  try {
+    const payload = await apiFetchJson(`/api/upload?editor_path=${encodeURIComponent(editorTarget.path)}`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      body: formData,
+    });
+    syncPasteCountersFromPayload(payload);
+    insertEditorPasteUploadReferences(editorTarget, payload.files || []);
+  } catch (error) {
+    statusErr(localizedHtml('status.uploadFailed', {error: error?.payload?.error || error}));
+  }
+}
+
 function refreshTerminalAfterUpload(session) {
   if (!isTmuxSession(session)) return;
   scheduleFit(session);
@@ -1568,6 +1621,36 @@ function pasteUploadReferences(files) {
     const number = pasteUploadIndexFromPath(path) || index + 1;
     return `[Image #${number}] ${shellQuote(path)}`;
   }).filter(Boolean);
+}
+
+function insertEditorPasteUploadReferences(editorTarget, files) {
+  const references = markdownImageUploadReferences(files);
+  if (!references.length) return false;
+  const view = editorTarget?.view;
+  if (!view?.state?.doc || typeof view.dispatch !== 'function') return false;
+  const selection = view.state.selection?.main || {};
+  const docLength = Number(view.state.doc.length) || 0;
+  const from = Math.max(0, Math.min(docLength, Number.isFinite(selection.from) ? selection.from : docLength));
+  const to = Math.max(from, Math.min(docLength, Number.isFinite(selection.to) ? selection.to : from));
+  const insert = references.join('\n');
+  view.dispatch({
+    changes: {from, to, insert},
+    selection: {anchor: from + insert.length},
+  });
+  view.focus?.();
+  return true;
+}
+
+function markdownImageUploadReferences(files) {
+  return (files || []).map(file => {
+    const path = file.relative_path || pathBasename(file.path || '') || file.saved_name || '';
+    if (!path) return '';
+    return `![image](${markdownLinkTarget(path)})`;
+  }).filter(Boolean);
+}
+
+function markdownLinkTarget(path) {
+  return String(path || '').split('/').map(part => encodeURIComponent(part)).join('/');
 }
 
 function syncPasteCountersFromPayload(payload) {

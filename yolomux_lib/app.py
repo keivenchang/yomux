@@ -126,6 +126,7 @@ from .tmux_utils import list_tmux_session_names
 from .tmux_utils import tmux
 from .tmux_utils import tmux_clear_input
 from .tmux_utils import tmux_capture_pane
+from .tmux_utils import tmux_capture_pane_styled
 from .tmux_utils import tmux_has_exact_session
 from .tmux_utils import tmux_paste_text
 from .tmux_utils import tmux_session_target
@@ -3668,6 +3669,9 @@ class TmuxWebtermApp:
     def finish_yoagent_action_wait(self, *args: Any, **kwargs: Any) -> Any:
         return self.yoagent_controller.finish_yoagent_action_wait(*args, **kwargs)
 
+    def clear_yoagent_action_wait(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.clear_yoagent_action_wait(*args, **kwargs)
+
     def yoagent_prompt_history(self, *args: Any, **kwargs: Any) -> Any:
         return self.yoagent_controller.yoagent_prompt_history(*args, **kwargs)
 
@@ -5047,6 +5051,29 @@ class TmuxWebtermApp:
             "ok": True,
         }, HTTPStatus.OK
 
+    def _save_uploaded_files(self, target_dir: Path, files: list[UploadedFile]) -> tuple[list[dict[str, Any]], dict[str, Any] | None, HTTPStatus]:
+        saved: list[dict[str, Any]] = []
+        upload_template = settings_payload().get("settings", {}).get("uploads", {}).get("filename_template")
+        for upload in files:
+            safe_name = sanitize_upload_filename(upload.filename)
+            path = unique_upload_path(target_dir, safe_name, str(upload_template or ""))
+            try:
+                path.write_bytes(upload.content)
+            except OSError as exc:
+                return [], {
+                    "error": f"failed to save {safe_name}: {exc}",
+                    "target_dir": str(target_dir),
+                }, HTTPStatus.INTERNAL_SERVER_ERROR
+            saved.append(
+                {
+                    "name": upload.filename,
+                    "saved_name": path.name,
+                    "path": str(path),
+                    "size": len(upload.content),
+                }
+            )
+        return saved, None, HTTPStatus.OK
+
     @requires_known_session()
     def upload_files(self, session: str, files: list[UploadedFile]) -> tuple[dict[str, Any], HTTPStatus]:
         if not files:
@@ -5067,27 +5094,10 @@ class TmuxWebtermApp:
         if not target_dir.is_dir():
             return {"session": session, "error": f"upload target is not a directory: {target_dir}"}, HTTPStatus.NOT_FOUND
 
-        saved: list[dict[str, Any]] = []
-        upload_template = settings_payload().get("settings", {}).get("uploads", {}).get("filename_template")
-        for upload in files:
-            safe_name = sanitize_upload_filename(upload.filename)
-            path = unique_upload_path(target_dir, safe_name, str(upload_template or ""))
-            try:
-                path.write_bytes(upload.content)
-            except OSError as exc:
-                return {
-                    "session": session,
-                    "error": f"failed to save {safe_name}: {exc}",
-                    "target_dir": str(target_dir),
-                }, HTTPStatus.INTERNAL_SERVER_ERROR
-            saved.append(
-                {
-                    "name": upload.filename,
-                    "saved_name": path.name,
-                    "path": str(path),
-                    "size": len(upload.content),
-                }
-            )
+        saved, error, status = self._save_uploaded_files(target_dir, files)
+        if error is not None:
+            error["session"] = session
+            return error, status
         self.log_event(
             session,
             "upload",
@@ -5103,6 +5113,54 @@ class TmuxWebtermApp:
             "session": session,
             "target_dir": str(target_dir),
             "target_source": target_source,
+            "files": saved,
+        }, HTTPStatus.OK
+
+    def upload_editor_files(self, files: list[UploadedFile], *, editor_path: str = "", base_dir: str = "") -> tuple[dict[str, Any], HTTPStatus]:
+        if not files:
+            return {"error": "no files supplied"}, HTTPStatus.BAD_REQUEST
+        if len(files) > UPLOAD_MAX_FILES:
+            return {"error": f"too many files; limit is {UPLOAD_MAX_FILES}"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+        raw_base = str(base_dir or "").strip()
+        raw_editor_path = str(editor_path or "").strip()
+        if raw_base:
+            base = Path(raw_base).expanduser()
+            target_source = "editor_base_dir"
+        elif raw_editor_path:
+            base = Path(raw_editor_path).expanduser().parent
+            target_source = "editor_path"
+        else:
+            return {"error": "missing editor_path or base_dir"}, HTTPStatus.BAD_REQUEST
+        if not base.is_dir():
+            return {"error": f"editor upload base is not a directory: {base}", "base_dir": str(base)}, HTTPStatus.NOT_FOUND
+        target_dir = self._apply_upload_subdir(base)
+        if not target_dir.is_dir():
+            return {"error": f"upload target is not a directory: {target_dir}", "base_dir": str(base)}, HTTPStatus.NOT_FOUND
+        saved, error, status = self._save_uploaded_files(target_dir, files)
+        if error is not None:
+            error["base_dir"] = str(base)
+            return error, status
+        for item in saved:
+            try:
+                item["relative_path"] = Path(item["path"]).relative_to(base).as_posix()
+            except ValueError:
+                item["relative_path"] = Path(item["path"]).name
+        self.log_event(
+            "",
+            "editor_upload",
+            f"uploaded {len(saved)} editor file{'s' if len(saved) != 1 else ''}",
+            {
+                "target_dir": str(target_dir),
+                "target_source": target_source,
+                "base_dir": str(base),
+                "files": [item["path"] for item in saved],
+                "sizes": [item["size"] for item in saved],
+            },
+        )
+        return {
+            "target_dir": str(target_dir),
+            "target_source": target_source,
+            "base_dir": str(base),
             "files": saved,
         }, HTTPStatus.OK
 

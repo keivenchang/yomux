@@ -28,6 +28,9 @@ from ..activity_summary import yoagent_question_requests_work_next
 from ..common import SessionInfo
 from ..common import truncate_text
 from ..prompt_detector import agent_screen_state
+from ..session_files import classify_change
+from ..session_files import scan_claude_transcript
+from ..session_files import scan_codex_transcript
 from ..tmux_utils import cmd_error
 from ..tmux_utils import tmux_session_target
 from ..transcripts import codex_event_text
@@ -65,6 +68,22 @@ YOAGENT_JOB_MAX_ITEMS = 200
 YOAGENT_JOB_POLL_SECONDS = 1.0
 YOAGENT_JOB_DEFAULT_TIMEOUT_MINUTES = 120
 YOAGENT_JOB_IDLE_QUIET_SECONDS = 3.0
+YOAGENT_IDLE_SUGGESTION_TEXTS = {
+    "commit the DYN_PARSER_DEBUG change",
+    "Summarize recent commits",
+}
+ANSI_SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
+
+
+def strip_ansi_sgr(text: str) -> str:
+    return ANSI_SGR_RE.sub("", text)
+
+
+def ansi_sgr_has_param(text: str, param: str) -> bool:
+    for match in ANSI_SGR_RE.finditer(text):
+        if param in {part for part in match.group(1).split(";") if part}:
+            return True
+    return False
 
 
 def normalized_prompt_state(prompt: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -621,6 +640,27 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             self.publish_yoagent_conversation_changed(reason)
 
 
+    def clear_yoagent_action_wait(self, watch_id: str) -> tuple[dict[str, Any], HTTPStatus]:
+        clean_id = str(watch_id or "").strip()
+        if not clean_id:
+            return {"ok": False, "error": "missing wait id"}, HTTPStatus.BAD_REQUEST
+        with self.yoagent_action_lock:
+            exists = clean_id in self.yoagent_action_waits
+        if not exists:
+            return {
+                "ok": False,
+                "id": clean_id,
+                "error": "wait not found",
+                "conversation": self.deps.yoagent_conversation_payload(),
+            }, HTTPStatus.NOT_FOUND
+        self.deps.finish_yoagent_action_wait(clean_id, "yoagent_wait_cleared")
+        return {
+            "ok": True,
+            "id": clean_id,
+            "conversation": self.deps.yoagent_conversation_payload(),
+        }, HTTPStatus.OK
+
+
     def yoagent_prompt_history(self, raw_history: Any, question: str) -> list[dict[str, str]]:
         source = raw_history if isinstance(raw_history, list) and raw_history else yoagent_conversation.load_messages()
         sanitized = [message for message in (yoagent_conversation.sanitize_message(item) for item in source) if message is not None]
@@ -726,7 +766,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                 pane_text = self.deps.tmux_capture_pane(target_pane)
                 prompt_state = hybrid_approval_prompt_state(session, visible_text, pane_text or visible_text, prompt_source=self.auto_approve_prompt_source())
             screen_state = agent_screen_state(visible_text)
-            composer_text = self.deps.yoagent_visible_composer_text(visible_text)
+            composer_text = self.deps.yoagent_visible_composer_text(self.yoagent_visible_composer_source(target_pane, visible_text))
             if screen_state.get("key") == "idle" and composer_text:
                 screen_state = {
                     "key": "input-draft",
@@ -939,6 +979,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             "size": 0,
             "mtime_ns": 0,
             "started_ts": time.time(),
+            "edited_files": self.yoagent_action_edited_files_snapshot(target),
         }
         if not transcript:
             return marker
@@ -949,6 +990,35 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         marker["size"] = int(stat.st_size)
         marker["mtime_ns"] = int(stat.st_mtime_ns)
         return marker
+
+
+    def yoagent_action_edited_files_snapshot(self, target: dict[str, Any]) -> dict[str, str]:
+        transcript = str(target.get("agent_transcript") or "").strip()
+        agent_kind = str(target.get("agent_kind") or "").strip().lower()
+        cwd = str(target.get("cwd") or "").strip() or None
+        if not transcript or agent_kind not in YOAGENT_ACTION_AGENT_KINDS:
+            return {}
+        transcript_path = Path(transcript).expanduser()
+        if agent_kind == "claude":
+            changes = scan_claude_transcript(transcript_path, cwd)
+        elif agent_kind == "codex":
+            changes = scan_codex_transcript(transcript_path, cwd)
+        else:
+            changes = {}
+        return {path_text: classify_change(markers) for path_text, markers in sorted(changes.items()) if path_text}
+
+
+    def yoagent_edited_file_delta_text(self, marker: dict[str, Any], target: dict[str, Any]) -> str:
+        before = marker.get("edited_files") if isinstance(marker.get("edited_files"), dict) else {}
+        current = self.yoagent_action_edited_files_snapshot(target)
+        rows = [(path_text, status) for path_text, status in current.items() if before.get(path_text) != status]
+        if not rows:
+            return ""
+        lines = [f"{status} {path_text}" for path_text, status in rows[:20]]
+        extra = len(rows) - len(lines)
+        if extra > 0:
+            lines.append(f"... and {extra} more")
+        return "Edited files detected after the request:\n" + "\n".join(lines)
 
 
     def yoagent_transcript_delta_text(self, marker: dict[str, Any]) -> str:
@@ -1162,6 +1232,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             poll = max(0.1, float(poll_seconds))
             saw_work = False
             last_text = ""
+            last_edited_text = ""
             last_change = started
             pause = threading.Event()
             while time.monotonic() < deadline:
@@ -1171,6 +1242,10 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                 text = self.deps.yoagent_action_result_text_from_transcript_delta(delta_text)
                 if text != last_text:
                     last_text = text
+                    last_change = now
+                edited_text = self.yoagent_edited_file_delta_text(marker, target)
+                if edited_text != last_edited_text:
+                    last_edited_text = edited_text
                     last_change = now
                 _prompt, screen = self.deps.yoagent_action_pane_status(session, pane_target)
                 screen_key = str(screen.get("key") or "idle")
@@ -1196,10 +1271,16 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                 ):
                     self.deps.finish_yoagent_action_result(preview, last_text)
                     return {"ok": True, "session": session, "source": "transcript", "timed_out": False}
+                if last_edited_text and screen_key in YOAGENT_ACTION_ACCEPTING_SCREEN_KEYS:
+                    self.deps.finish_yoagent_action_result(preview, last_edited_text)
+                    return {"ok": True, "session": session, "source": "edited-files", "timed_out": False}
                 pause.wait(min(poll, max(0.0, deadline - time.monotonic())))
             if last_text:
                 self.deps.record_yoagent_action_result(preview, last_text, timed_out=True, partial=True)
                 return {"ok": True, "session": session, "source": "transcript", "timed_out": True, "partial": True}
+            if last_edited_text:
+                self.deps.record_yoagent_action_result(preview, last_edited_text, timed_out=True, partial=True)
+                return {"ok": True, "session": session, "source": "edited-files", "timed_out": True, "partial": True}
             visible_text = self.deps.yoagent_action_visible_result_text(target)
             self.deps.record_yoagent_action_result(preview, visible_text, timed_out=True, partial=bool(visible_text))
             return {"ok": bool(visible_text), "session": session, "source": "screen" if visible_text else "", "timed_out": True}
@@ -1220,17 +1301,34 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         return {"id": watch_id, "started": True, "wait_seconds": YOAGENT_ACTION_RESULT_WAIT_SECONDS}
 
 
-    def yoagent_composer_text_is_idle_placeholder(self, text: str) -> bool:
+    def yoagent_composer_text_is_idle_placeholder(self, text: str, *, prompt_suggestion: bool = False) -> bool:
         candidate = " ".join(str(text or "").split()).strip()
         if not candidate:
             return False
         if re.fullmatch(r'Try\s+(?:"[^"\n]{1,200}"|“[^“”\n]{1,200}”)', candidate):
             return True
-        return re.fullmatch(r"Implement\s+\{[^{}\n]{1,80}\}", candidate) is not None
+        if re.fullmatch(r"Implement\s+\{[^{}\n]{1,80}\}", candidate):
+            return True
+        return prompt_suggestion and candidate in YOAGENT_IDLE_SUGGESTION_TEXTS
+
+
+    def yoagent_visible_composer_source(self, pane_target: str, visible_text: str = "") -> str:
+        try:
+            styled_text = self.deps.tmux_capture_pane_styled(pane_target, visible_only=True) or ""
+        except (OSError, subprocess.SubprocessError):
+            styled_text = ""
+        if styled_text and visible_text:
+            styled_plain = " ".join(strip_ansi_sgr(styled_text).split())
+            visible_plain = " ".join(str(visible_text or "").split())
+            if styled_plain != visible_plain:
+                styled_text = ""
+        return styled_text or str(visible_text or "")
 
 
     def yoagent_visible_composer_text(self, visible_text: str) -> str:
-        lines = [line.replace("\xa0", " ") for line in str(visible_text or "").splitlines()[-80:]]
+        raw_lines = str(visible_text or "").splitlines()[-80:]
+        plain_raw_lines = [strip_ansi_sgr(line) for line in raw_lines]
+        lines = [line.replace("\xa0", " ") for line in plain_raw_lines]
         footer_index = -1
         for index in range(len(lines) - 1, -1, -1):
             stripped = lines[index].strip()
@@ -1239,33 +1337,27 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                 break
         if footer_index < 0:
             return ""
-        end_index = footer_index
-        for index in range(footer_index - 1, -1, -1):
-            if re.match(r"^[─━╌╍]{3,}$", lines[index].strip()):
-                end_index = index
-                break
-        start_index = max(0, end_index - 8)
-        for index in range(end_index - 1, -1, -1):
-            if re.match(r"^[─━╌╍]{3,}$", lines[index].strip()):
-                start_index = index + 1
-                break
-        lines = lines[start_index:end_index]
         prompt_index = -1
         first_line = ""
-        for index in range(len(lines) - 1, -1, -1):
+        prompt_suggestion = False
+        start_index = max(0, footer_index - 12)
+        for index in range(footer_index - 1, start_index - 1, -1):
+            raw_line = raw_lines[index]
+            plain_raw_line = plain_raw_lines[index]
             line = lines[index]
-            match = re.match(r"^\s*[❯›>]\s+(?P<text>\S.*)$", line)
+            match = re.match(r"^\s*[❯›>](?P<gap>[ \xa0]+)(?P<text>\S.*)$", plain_raw_line)
             if not match:
                 continue
             if re.match(r"^\s*[❯›>]\s*\d+[.:]\s+\S", line):
                 continue
             prompt_index = index
-            first_line = match.group("text").strip()
+            first_line = match.group("text").replace("\xa0", " ").strip()
+            prompt_suggestion = "\xa0" in match.group("gap") or ansi_sgr_has_param(raw_line, "2")
             break
         if prompt_index < 0 or not first_line:
             return ""
         block = [first_line]
-        for line in lines[prompt_index + 1:]:
+        for line in lines[prompt_index + 1:footer_index]:
             stripped = line.strip()
             if re.match(r"^[─━╌╍]{3,}$", stripped):
                 break
@@ -1276,7 +1368,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             block.append(stripped)
         parts = [part for part in block if part]
         composer_text = " ".join(parts).strip()
-        if len(parts) == 1 and self.deps.yoagent_composer_text_is_idle_placeholder(composer_text):
+        if len(parts) == 1 and self.deps.yoagent_composer_text_is_idle_placeholder(composer_text, prompt_suggestion=prompt_suggestion):
             return ""
         return composer_text
 
@@ -1290,7 +1382,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         pause = threading.Event()
         while True:
             try:
-                visible_text = self.deps.tmux_capture_pane(pane_target, visible_only=True) or ""
+                visible_text = self.yoagent_visible_composer_source(pane_target, self.deps.tmux_capture_pane(pane_target, visible_only=True) or "")
             except (OSError, subprocess.SubprocessError):
                 return False
             pending = " ".join(self.deps.yoagent_visible_composer_text(visible_text).split())
@@ -1316,7 +1408,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         if not pane_target:
             return {"ok": False, "cleared": False, "error": "target pane is missing"}
         try:
-            visible_text = self.deps.tmux_capture_pane(pane_target, visible_only=True) or ""
+            visible_text = self.yoagent_visible_composer_source(pane_target, self.deps.tmux_capture_pane(pane_target, visible_only=True) or "")
         except (OSError, subprocess.SubprocessError) as exc:
             return {"ok": False, "cleared": False, "error": str(exc)}
         detected = self.deps.yoagent_visible_composer_text(visible_text)
@@ -1336,7 +1428,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         pause = threading.Event()
         while True:
             try:
-                visible_text = self.deps.tmux_capture_pane(pane_target, visible_only=True) or ""
+                visible_text = self.yoagent_visible_composer_source(pane_target, self.deps.tmux_capture_pane(pane_target, visible_only=True) or "")
             except (OSError, subprocess.SubprocessError) as exc:
                 return {"ok": False, "cleared": False, "detected_text": detected, "error": str(exc)}
             remaining = self.deps.yoagent_visible_composer_text(visible_text)

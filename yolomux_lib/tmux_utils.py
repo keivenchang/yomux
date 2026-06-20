@@ -157,6 +157,18 @@ def tmux_capture_pane(target: str, lines: int = 80, visible_only: bool = False, 
     return result.stdout
 
 
+def tmux_capture_pane_styled(target: str, lines: int = 80, visible_only: bool = False, timeout: float = 3.0) -> str | None:
+    """Capture pane text with SGR attributes preserved for UI-state checks that need dim/ghost text."""
+    exact_target = tmux_exact_target(target)
+    if visible_only:
+        result = tmux_run("capture-pane", "-e", "-t", exact_target, "-p", "-J", check=False, timeout=timeout)
+    else:
+        result = tmux_run("capture-pane", "-e", "-t", exact_target, "-p", "-J", "-S", f"-{lines}", check=False, timeout=timeout)
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
 def tmux_send_enter(target: str) -> None:
     tmux_run("send-keys", "-t", tmux_exact_target(target), "Enter", check=False)
 

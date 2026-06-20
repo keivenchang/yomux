@@ -121,6 +121,12 @@ function createInfoPanel() {
     if (jobCancel && panel.contains(jobCancel)) {
       event.preventDefault();
       cancelYoagentJob(jobCancel.dataset.yoagentJobCancel || '');
+      return;
+    }
+    const waitClear = event.target.closest('[data-yoagent-wait-clear]');
+    if (waitClear && panel.contains(waitClear)) {
+      event.preventDefault();
+      clearYoagentPendingWait(waitClear.dataset.yoagentWaitClear || '');
     }
   });
   panel.addEventListener('input', event => {

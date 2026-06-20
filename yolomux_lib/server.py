@@ -1381,7 +1381,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return error_payload("event must be an object", status=HTTPStatus.BAD_REQUEST), HTTPStatus.BAD_REQUEST
         return self.server.app.client_event(event)
 
-    def handle_upload(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
+    def handle_upload(self, session: str, *, editor_path: str = "", base_dir: str = "") -> tuple[dict[str, Any], HTTPStatus]:
         content_length_text = self.headers.get("Content-Length")
         if not content_length_text:
             return {"session": session, "error": "missing Content-Length"}, HTTPStatus.LENGTH_REQUIRED
@@ -1405,6 +1405,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             files = parse_multipart_upload(self.headers.get("Content-Type", ""), body, max_part_bytes=upload_max_bytes)
         except ValueError as exc:
             return {"session": session, "error": str(exc)}, HTTPStatus.BAD_REQUEST
+        if editor_path or base_dir:
+            return self.server.app.upload_editor_files(files, editor_path=editor_path, base_dir=base_dir)
         return self.server.app.upload_files(session, files)
 
     def do_HEAD(self) -> None:
