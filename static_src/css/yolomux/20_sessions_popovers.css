@@ -50,13 +50,13 @@
 }
 .session-button-dir {
   min-width: 0;
-  color: #e7ecf3;
+  color: var(--chrome-text-strong);
   font-size: var(--tab-label-size);
   font-weight: 500;
 }
 .session-button-detail {
   max-width: 86px;
-  color: #9ea8b7;
+  color: var(--text-muted-cool);
   font: var(--ui-font-size-xs)/1 var(--mono-font);
 }
 .session-button-detail.pr-status-failing {
@@ -218,7 +218,7 @@
    status colors — red/blue/green — already read on white and are left alone).
    Repaint the neutral chips as light gray with dark text. */
 body.theme-light .session-state-badge {
-  color: #52617a;
+  color: var(--neutral-text-strong);
   background: #eef1f5;
   border-color: #cdd5e0;
 }
@@ -228,7 +228,7 @@ body.theme-light .session-state-done {
   border-color: #b8c2d2;
 }
 body.theme-light .session-yolo-marker.inactive {
-  color: #52617a;
+  color: var(--neutral-text-strong);
   background: #e2e6ec;
   border-color: #c2cad6;
 }
@@ -329,7 +329,7 @@ body.tab-meta-hidden .pane-tab .tab-symbol {
 }
 .ci-indicator.branch-indicator {
   color: #071321;
-  background: #9fd8ff;
+  background: var(--accent-sky-strong);
   border-color: #c9ebff;
 }
 /* the .ci-indicator chips are tuned for dark mode; on a bright/green tab in light theme they

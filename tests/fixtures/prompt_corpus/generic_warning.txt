@@ -1,0 +1,4 @@
+Warning: Do you want to proceed? appears in this log file.
+The command already finished and no agent prompt is active.
+
+❯

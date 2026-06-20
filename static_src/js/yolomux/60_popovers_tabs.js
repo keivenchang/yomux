@@ -367,7 +367,7 @@ function yoloMarkerHtml(session, auto, options = {}) {
   if (options.yoloWorking) classes.push('working');
   if (readOnlyMode) classes.push('readonly');
   const yoloAttr = ` data-yolo-session="${esc(session)}"`;
-  const toggleAttr = options.toggle && !readOnlyMode ? ` data-auto-session="${esc(session)}"` : '';
+  const toggleAttr = options.toggle && !readOnlyMode ? ` data-auto-session="${esc(session)}" data-action="pane-tab-auto-approve"` : '';
   const rotationStyle = options.yoloWorking ? ` style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}"` : '';
   const stateText = auto ? t('yolo.state.onHere') : (locked ? t('yolo.state.onElsewhere') : t('yolo.state.off'));
   const title = options.toggle && readOnlyMode
@@ -386,8 +386,8 @@ function pullRequestCompactBadgesHtml(session, pr) {
 
 function applySessionStateClasses(node, state) {
   node.classList.toggle('needs-attention', state?.attention === true);
-  node.classList.toggle('needs-input', state?.key === 'needs-input');
-  node.classList.toggle('needs-exec', state?.key === 'needs-approval');
+  node.classList.toggle('needs-input', state?.key === 'needs-input' && state?.attention === true);
+  node.classList.toggle('needs-exec', state?.key === 'needs-approval' && state?.attention === true);
   node.classList.toggle('needs-blocked', state?.key === 'blocked');
   syncAttentionAnimation(node, state?.attention === true);
 }

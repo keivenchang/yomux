@@ -67,6 +67,38 @@ def test_filesystem_allowlist_env_can_narrow_scope(monkeypatch, tmp_path):
     assert info.value.status == 403
 
 
+def test_filesystem_entrypoints_reject_outside_root_through_paths_validator(monkeypatch, tmp_path):
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed.mkdir()
+    outside.mkdir()
+    outside_file = outside / "note.txt"
+    outside_file.write_text("outside\n", encoding="utf-8")
+    monkeypatch.setenv(filesystem.FS_ROOTS_ENV, str(allowed))
+    calls = []
+    original = filesystem.paths._validated_path
+
+    def tracking_validator(raw):
+        calls.append(raw)
+        return original(raw)
+
+    monkeypatch.setattr(filesystem.paths, "_validated_path", tracking_validator)
+
+    cases = [
+        ("listing", lambda: filesystem.list_directory(str(outside))),
+        ("read", lambda: filesystem.read_file(str(outside_file))),
+        ("write", lambda: filesystem.write_file(str(outside / "new.txt"), "x")),
+        ("search", lambda: filesystem.search_files(str(outside), "note")),
+        ("git", lambda: filesystem.diff_file(str(outside_file))),
+    ]
+    for name, action in cases:
+        before = len(calls)
+        with pytest.raises(FilesystemError) as info:
+            action()
+        assert info.value.status == 403
+        assert len(calls) == before + 1, name
+
+
 def test_filesystem_blocks_home_secret_paths(monkeypatch, tmp_path):
     home = tmp_path / "home"
     secret = home / ".ssh" / "id_rsa"

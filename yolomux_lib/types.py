@@ -63,12 +63,40 @@ class AutoApproveStatusPayload(TypedDict, total=False):
     error: str
 
 
+class SearchResultTarget(TypedDict, total=False):
+    type: str
+    session: str
+    timestamp: str
+    tab: str
+
+
+class SearchResult(TypedDict, total=False):
+    session: str
+    timestamp: str
+    kind: str
+    source: str
+    title: str
+    snippet: str
+    target: SearchResultTarget
+
+
 class RunHistoryEntry(TypedDict, total=False):
+    id: str
     session: str
     agent: dict[str, Any] | None
+    prompt: str
     cwd: str
     tmux_target: str
     tmux_command: str
+    started_at: str
+    started_ts: float
+    ended_at: str
+    ended_ts: float
+    final_state: str
+    pr: dict[str, Any] | None
+    latest_summary: str
+    latest_summary_updated_ts: float
+    transcript: str
     transcript_mtime: float
     project: dict[str, Any]
     recent_events: list[dict[str, Any]]

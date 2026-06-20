@@ -157,7 +157,6 @@ let shareGeometryDigestTimer = null;
 let shareDebugSequence = 0;
 let shareDebugReports = [];
 const shareDebugReportLimit = 20;
-const shareDebugProfileUploadMinIntervalMs = 5000;
 let shareDebugProfileLastUploadAtByKind = new Map();
 let shareLastGeometryDigest = null;
 let shareLastGeometryDigestResult = null;
@@ -253,6 +252,7 @@ const fileExplorerIndexedDirsMigratedKey = 'yolomux.fileExplorer.indexedDirs.mig
 const fileExplorerModeStorageKey = 'yolomux.fileExplorerMode.v1';
 const fileExplorerOpenIntentStorageKey = 'yolomux.fileExplorerOpen.v1';
 const fileExplorerTabberCollapsedStorageKey = 'yolomux.fileExplorer.tabberCollapsed.v1';
+const fileExplorerTabberLookbackHoursStorageKey = 'yolomux.fileExplorer.tabberLookbackHours.v1';
 const legacyFileExplorerChangesHiddenStorageKey = 'yolomux.fileExplorerChangesHidden';
 const changesFolderCollapsedStorageKey = 'yolomux.modifiedFiles.folderCollapsed.v1';
 const changesRepoCollapsedStorageKey = 'yolomux.modifiedFiles.repoCollapsed.v1';
@@ -677,6 +677,7 @@ const resizeObservers = new Map();
 const transcriptStreams = new Map();
 const summaryStreams = new Map();
 const autoApproveStates = new Map();
+const promptAttentionClears = new Map();
 const documentTitleIdleThresholdMs = 120000;
 const tmuxSignalActivityWindowMs = documentTitleIdleThresholdMs;
 let documentTitleIdleSinceMs = null;
@@ -693,6 +694,7 @@ const startupHelperIndexStorageKey = 'yolomux.startupHelper.index.v1';
 // YO!info and YO!agent are merged into one pane with an in-pane sub-tab toggle; the chosen
 // sub-tab is remembered across reloads.
 const infoSubTabStorageKey = 'yolomux.infoPanel.activeSubTab.v1';
+const infoLookbackHoursStorageKey = 'yolomux.infoPanel.lookbackHours.v1';
 const transcriptPreviewMessages = 200;
 let remoteResizeDelayMs = initialSetting('performance.remote_resize_delay_ms');
 // The latest watched-PR payload + last-seen status per PR ref (for notify-on-transition diffing) live here.
@@ -768,6 +770,8 @@ function yoagentTabLabel() { return t('brand.tab.agent'); }
 // the active sub-tab within the merged YO!info pane ('info' | 'yoagent'), remembered.
 let infoPanelSubTab = readStoredInfoSubTab();
 const fileExplorerItemId = '__files__';
+const searchHistoryItemId = '__search_history__';
+function searchHistoryTabLabel() { return t('tab.searchHistory'); }
 const prefsItemId = '__prefs__';
 const debugPaneItemId = '__debug__';
 const emptyPaneParam = '__empty_pane__';
@@ -915,6 +919,25 @@ const TAB_TYPES = [
     className: () => 'file-explorer',
     icon: 'finder',
     minWidth: () => rootCssLengthPx('--file-pane-min-inline-size') || minSplitPaneWidthPx(),
+    prunePriority: () => 0,
+  },
+  {
+    key: 'search-history',
+    id: searchHistoryItemId,
+    aliases: ['search', 'history', 'run-history', 'search-history', searchHistoryItemId],
+    match: item => item === searchHistoryItemId,
+    label: () => searchHistoryTabLabel(),
+    shortLabel: () => t('tab.searchHistory.short'),
+    terminalTitle: () => t('tab.unavailableFor', {name: searchHistoryTabLabel()}),
+    sortRank: 0.6,
+    param: () => 'search-history',
+    detail: () => t('searchHistory.detail'),
+    rowHtml: (item, options) => searchHistoryPaneTabHtml(item, options),
+    createPanel: () => createSearchHistoryPanel(),
+    renderAttached: () => loadSearchHistoryPanelData({silent: true}),
+    className: () => 'search-history-item',
+    icon: 'document',
+    minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 0,
   },
   {
@@ -1093,8 +1116,8 @@ function applyFileExplorerStaticLabels() {
 const syntaxLanguageByExtension = new Map(Object.entries(HIGHLIGHTABLE_EXTENSIONS));
 function virtualTabItems() {
   return debugModeEnabled
-    ? [infoItemId, fileExplorerItemId, prefsItemId, debugPaneItemId]
-    : [infoItemId, fileExplorerItemId, prefsItemId];
+    ? [infoItemId, fileExplorerItemId, searchHistoryItemId, prefsItemId, debugPaneItemId]
+    : [infoItemId, fileExplorerItemId, searchHistoryItemId, prefsItemId];
 }
 let visibleSessions = sessions.slice(0, maxSessionTabs);
 let layoutItems = [...virtualTabItems(), ...visibleSessions];
@@ -1109,7 +1132,6 @@ let clientEventsSource = null;
 let clientEventsConnected = false;
 let reconnectResyncTimer = null;
 const reconnectResyncDebounceMs = 751;
-const autoApproveDisconnectedPollMs = 5003;
 let serverVersionReloadHandled = '';
 let activitySummaryPayload = {sessions: {}, global: {lines: []}, session_order: []};
 let activitySummaryRefreshing = false;
@@ -1117,6 +1139,8 @@ let activitySummaryLastRefreshTs = 0;
 const activitySummaryGuard = makeGenerationGuard();
 let yoagentMessages = [];
 let yoagentPendingWaits = [];
+let yoagentJobs = [];
+let yoagentJobsLoading = false;
 let yoagentConversationLoaded = false;
 let yoagentConversationLoading = false;
 let yoagentConversationPath = '';
@@ -1134,6 +1158,13 @@ let yoagentNotice = null;
 let yoagentScrollbackLocked = false;
 let yoagentStartupInfoShown = false;
 let yoagentStartupInfoVisible = false;
+let searchHistoryQuery = '';
+let searchHistoryPayload = {query: '', results: []};
+let searchHistoryLoading = false;
+let searchHistoryError = '';
+let runHistoryPayload = {runs: []};
+let runHistoryLoading = false;
+let runHistoryError = '';
 let notificationsEnabled = false;
 let fileExplorerChangesSelectedSession = shareBootstrapFinderSession();
 const sessionStateKeys = new Map();

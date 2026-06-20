@@ -489,6 +489,67 @@ function setFileTreeDirectoryExpanded(row, fullPath, expand) {
   else collapseDirectoryRow(row, fullPath, {manual: true});
 }
 
+const finderTreeInteractionController = createSharedTreeInteractionController({
+  name: 'finder',
+  rowSelector: '.file-tree-row[data-path]',
+  allowRange: true,
+  allowSelectAll: true,
+  applyCurrentClasses: false,
+  isRowSelectable: row => Boolean(
+    row
+    && !row.dataset.tabberType
+    && !row.closest?.('.file-explorer-changes-panel')
+    && (row.dataset.kind === 'file' || row.dataset.kind === 'dir'),
+  ),
+  selectedIds: () => fileExplorerSelectedPaths,
+  getLeadId: () => fileExplorerSelectionLead,
+  setLeadId: id => { fileExplorerSelectionLead = id; },
+  selectRow(row, id) {
+    fileExplorerManualSelectionActive = true;
+    selectFileTreePath(id || row?.dataset?.path || '');
+  },
+  selectRange(row, id) {
+    fileExplorerManualSelectionActive = true;
+    selectFileTreeRange(row, id || row?.dataset?.path || '', {clear: true});
+  },
+  afterSelectAll(rows) {
+    fileExplorerManualSelectionActive = true;
+    fileExplorerSelectionAnchor = rows[0]?.dataset?.path || null;
+  },
+  isExpanded: row => row?.dataset?.kind === 'dir' && fileTreeDirectoryExpanded(row, row.dataset.path || ''),
+  setExpanded(row, expanded) {
+    const path = row?.dataset?.path || '';
+    if (!path || row?.dataset?.kind !== 'dir') return;
+    setFileTreeDirectoryExpanded(row, path, expanded === true);
+  },
+});
+
+function finderTreeContainerForEvent(event) {
+  const treeSel = '.file-explorer-tree-panel';
+  return event?.target?.closest?.(treeSel)
+    || (fileExplorerSelectionLead && document.querySelector(`.file-tree-row[data-path="${cssEscape(fileExplorerSelectionLead)}"]`)?.closest?.(treeSel))
+    || document.querySelector(`.panel.file-explorer-panel ${treeSel}`)
+    || document.querySelector(treeSel)
+    || document;
+}
+
+function finderTreeLeadRow(container) {
+  const rows = finderTreeInteractionController.rows(container);
+  const leadIndex = rows.findIndex(item => item.dataset.path === fileExplorerSelectionLead);
+  return {
+    rows,
+    leadIndex: leadIndex >= 0 ? leadIndex : rows.findIndex(item => fileExplorerSelectedPaths.has(item.dataset.path)),
+  };
+}
+
+function finderTreeRowEntry(row, path) {
+  return {
+    kind: row?.dataset?.kind,
+    name: row?.dataset?.name || basenameOf(path),
+    is_repo: row?.dataset?.isRepo === 'true',
+  };
+}
+
 // File Explorer / Finder-style keyboard nav over the SHARED selection (Finder AND Differ render
 // .file-tree-row). Dispatches the PURE fileExplorerKeyIntent map onto the live tree. Same surface gating
 // as the delete shortcut. Returns true if it handled the key.
@@ -506,45 +567,18 @@ function handleFileExplorerArrowNav(event) {
     if (parent && parent !== root) openFileExplorerManualRoot(parent);
     return true;
   }
-  // Scope to ONE tree: the event's tree, else the tree holding the lead, else the active tree. Matches BOTH
-  // the Finder (.file-explorer-tree-panel) and the Differ (.file-explorer-changes-panel) so the exact same
-  // handler drives both surfaces.
-  const treeSel = '.file-explorer-tree-panel, .file-explorer-changes-panel';
-  const container = event.target?.closest?.(treeSel)
-    || (fileExplorerSelectionLead && document.querySelector(`.file-tree-row[data-path="${cssEscape(fileExplorerSelectionLead)}"]`)?.closest?.(treeSel))
-    || document.querySelector(`.panel.file-explorer-panel ${treeSel.split(', ').join(', .panel.file-explorer-panel ')}`)
-    || document.querySelector(treeSel)
-    || document;
-  const rows = selectableFileTreeRows(container);
+  const container = finderTreeContainerForEvent(event);
+  const {rows, leadIndex} = finderTreeLeadRow(container);
   if (!rows.length) return false;
-  const selectLead = (row, extend = false) => {
-    fileExplorerManualSelectionActive = true;
-    if (extend) selectFileTreeRange(row, row.dataset.path, {clear: true});
-    else selectFileTreePath(row.dataset.path);
-    fileExplorerSelectionLead = row.dataset.path;
-    row.scrollIntoView({block: 'nearest'});
-  };
-  if (intent === 'select-all') {
-    consume();
-    fileExplorerManualSelectionActive = true;
-    fileExplorerSelectedPaths.clear();
-    for (const item of rows) fileExplorerSelectedPaths.add(item.dataset.path);
-    fileExplorerSelectionAnchor = rows[0].dataset.path;
-    fileExplorerSelectionLead = rows[rows.length - 1].dataset.path;
-    updateFileExplorerCurrentFileHighlight();
-    return true;
-  }
-  let leadIndex = rows.findIndex(item => item.dataset.path === fileExplorerSelectionLead);
-  if (leadIndex < 0) leadIndex = rows.findIndex(item => fileExplorerSelectedPaths.has(item.dataset.path));
+  const selectLead = row => finderTreeInteractionController.selectRow(container, row, event);
   if (intent === 'typeahead') { consume(); fileExplorerTypeaheadSelect(rows, leadIndex, event.key, selectLead); return true; }
   // Intents that act on the current lead row.
-  if (intent === 'rename' || intent === 'open' || intent === 'preview' || intent === 'expand' || intent === 'collapse') {
+  if (intent === 'rename' || intent === 'open' || intent === 'preview') {
     if (leadIndex < 0) return false;
     const leadRow = rows[leadIndex];
     const leadPath = leadRow.dataset.path;
     const isDir = leadRow.dataset.kind === 'dir';
-    const inDiffer = Boolean(leadRow.closest('.file-explorer-changes-panel'));
-    const entry = {kind: leadRow.dataset.kind, name: leadRow.dataset.name || basenameOf(leadPath), is_repo: leadRow.dataset.isRepo === 'true'};
+    const entry = finderTreeRowEntry(leadRow, leadPath);
     if (intent === 'rename') {                     // Finder Return = rename; tracked files move via git mv (backend)
       consume();
       beginFileTreeRename(leadRow, leadPath, entry);
@@ -552,9 +586,7 @@ function handleFileExplorerArrowNav(event) {
     }
     if (intent === 'open') {                       // Cmd-O / Cmd-Down: open
       consume();
-      if (!isDir && inDiffer && leadRow.dataset.openChangeFile) openChangedFileInDiff(leadRow.dataset.openChangeFile, leadRow.dataset.openChangeSession || '', leadRow.dataset.openChangeStatus || '', leadRow.dataset.openChangeRepo || '');
-      else if (!isDir) openFileInEditor(leadPath, entry);
-      else if (inDiffer) setFileTreeDirectoryExpanded(leadRow, leadPath, !fileTreeDirectoryExpanded(leadRow, leadPath));
+      if (!isDir) openFileInEditor(leadPath, entry);
       else openFileExplorerManualRoot(leadPath);   // Finder: open a folder = descend into it
       return true;
     }
@@ -564,31 +596,8 @@ function handleFileExplorerArrowNav(event) {
       else if (!isDir) openFileImagePreview(leadRow, leadPath, entry);
       return true;
     }
-    const expanded = fileTreeDirectoryExpanded(leadRow, leadPath);
-    if (intent === 'expand') {
-      consume();
-      if (isDir && !expanded) setFileTreeDirectoryExpanded(leadRow, leadPath, true);
-      else if (isDir && expanded) { const child = rows[leadIndex + 1]; if (child && pathIsInsideDirectory(child.dataset.path, leadPath)) selectLead(child); }
-      return true;
-    }
-    // collapse: collapse an expanded folder, else step to the parent row
-    consume();
-    if (isDir && expanded) setFileTreeDirectoryExpanded(leadRow, leadPath, false);
-    else { const parentRow = rows.find(item => item.dataset.path === dirnameOf(leadPath)); if (parentRow) selectLead(parentRow); }
-    return true;
   }
-  // Movement intents (move/extend up/down/home/end).
-  const lastIndex = rows.length - 1;
-  let nextIndex;
-  if (intent === 'move-home' || intent === 'extend-home') nextIndex = 0;
-  else if (intent === 'move-end' || intent === 'extend-end') nextIndex = lastIndex;
-  else {
-    const delta = (intent === 'move-down' || intent === 'extend-down') ? 1 : -1;
-    nextIndex = leadIndex < 0 ? (delta > 0 ? 0 : lastIndex) : Math.max(0, Math.min(lastIndex, leadIndex + delta));
-  }
-  consume();
-  selectLead(rows[nextIndex], intent.startsWith('extend'));
-  return true;
+  return finderTreeInteractionController.handleKeydown(event, container);
 }
 
 function handleFileExplorerDeleteShortcut(event) {
@@ -2086,6 +2095,8 @@ function clientServerWatchState() {
     state.activity_summary = {
       visible: activitySummaryIsVisible(),
       locale: typeof i18nActiveLocaleId === 'function' ? i18nActiveLocaleId() : 'en',
+      scope: 'all',
+      hours: typeof infoSessionFileLookbackHours === 'number' ? infoSessionFileLookbackHours : 24,
     };
   }
   if (document.querySelector('.file-explorer-changes-panel') && typeof clientSessionFilesWatchRequests === 'function') {
@@ -3040,7 +3051,12 @@ function openCodeMirrorFindForView(api, view) {
 function updateCodeMirrorCursorStatus(panel) {
   const view = panel?._cmView;
   const status = panel?.querySelector?.('.file-editor-cursor-status');
-  if (!view || !status) return;
+  updateFileEditorCountStatus(panel);
+  if (!status) return;
+  if (!view) {
+    status.textContent = '';
+    return;
+  }
   const main = view.state.selection.main;
   const line = view.state.doc.lineAt(main.head);
   const column = main.head - line.from + 1;
@@ -3048,6 +3064,37 @@ function updateCodeMirrorCursorStatus(panel) {
   const selections = view.state.selection.ranges.length;
   const selectionText = selectedChars ? ` · ${selections} sel · ${selectedChars} chars` : '';
   status.textContent = `${line.number}:${column}${selectionText}`;
+}
+
+function fileEditorTextMetrics(text) {
+  const value = String(text ?? '');
+  const words = (value.trim().match(/\S+/g) || []).length;
+  return {
+    lines: value ? value.split('\n').length : 1,
+    words,
+    characters: value.length,
+  };
+}
+
+function fileEditorCountStatusText(text) {
+  return t('editor.status.counts', fileEditorTextMetrics(text));
+}
+
+function fileEditorStatusSourceText(panel) {
+  const viewText = panel?._cmView?.state?.doc?.toString?.();
+  if (viewText !== undefined && viewText !== null) return viewText;
+  const path = panel?.dataset?.filePath || '';
+  const state = openFiles.get(path);
+  return state?.kind === 'text' ? state.content || '' : '';
+}
+
+function updateFileEditorCountStatus(panel) {
+  const status = panel?.querySelector?.('.file-editor-count-status');
+  if (!status) return;
+  const path = panel?.dataset?.filePath || '';
+  const state = path ? openFiles.get(path) : null;
+  const text = fileEditorStatusSourceText(panel);
+  status.textContent = state?.kind === 'text' || panel?._cmView ? fileEditorCountStatusText(text) : '';
 }
 
 function codeMirrorExtensions(api, panel, path, options = {}) {

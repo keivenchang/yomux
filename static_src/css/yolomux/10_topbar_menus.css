@@ -196,7 +196,7 @@ body.share-view-mode {
 .share-mirror-stage {
   position: fixed;
   inset: 0;
-  z-index: 0;
+  z-index: var(--z-share-mirror-stage);
   overflow: hidden;
   background: var(--share-stage-bg);
 }
@@ -697,8 +697,8 @@ body.app-vw-lte-760 .topbar-search {
   overflow-x: hidden;
   overflow-y: auto;
   padding: 7px;
-  color: #e7ecf3;
-  background: #111820;
+  color: var(--chrome-text-strong);
+  background: var(--overlay-surface);
   border: 1px solid var(--sep-muted);
   border-radius: 8px;
   box-shadow:
@@ -725,7 +725,7 @@ body.app-vw-lte-760 .topbar-search {
   margin-block: 2px 5px;
   margin-inline: var(--app-submenu-inline-offset) 0;
   padding: 4px;
-  color: #e7ecf3;
+  color: var(--chrome-text-strong);
   background: #0d131b;
   border: 1px solid #2f3a4b;
   border-radius: 7px;
@@ -1079,7 +1079,7 @@ body.theme-light .app-menu-button-badge {
 body.theme-light .transport-warning::after {
   color: #5a1116;                /* light tooltip (dark-red text on a light-red surface), not near-black */
   background: #fdeaec;
-  border-color: #d56b7a;
+  border-color: var(--danger-border-soft);
 }
 body.theme-light .app-menu-tab-command + .app-menu-tab-command {
   border-top-color: rgba(70, 80, 95, 0.22);  /* a visible row separator on the white menu */

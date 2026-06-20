@@ -9,6 +9,7 @@ import pytest
 
 
 from yolomux_lib import app as app_module
+from yolomux_lib import http_routes
 from yolomux_lib import server as server_module
 from yolomux_lib import server_auth as server_auth_module
 from yolomux_lib.common import error_payload
@@ -359,6 +360,8 @@ def route_handler(path, app=None, readonly=False):
     handler.auth_readonly = lambda: readonly
     handler.auth_identity = lambda: SimpleNamespace(role="readonly" if readonly else "admin")
     handler.share_readonly_api_allowed = lambda parsed: False
+    handler.share_token_text = lambda: ""
+    handler.share_token = lambda: ""
     handler.write_json = lambda value, status=HTTPStatus.OK: writes.append(("json", status, value))
     handler.write_text = lambda value, status=HTTPStatus.OK, content_type="text/plain; charset=utf-8": writes.append(("text", status, value, content_type))
     handler.write_html = lambda value: writes.append(("html", HTTPStatus.OK, value))
@@ -367,10 +370,33 @@ def route_handler(path, app=None, readonly=False):
     return handler, calls, writes
 
 
+def route_by_path(method, path):
+    for route in http_routes.routes_for_method(method):
+        if route.path == path:
+            return route
+    raise AssertionError(f"missing route: {method} {path}")
+
+
+def test_http_route_registry_groups_dispatch_and_keeps_verbs_thin():
+    get_body = inspect.getsource(Handler.do_GET)
+    post_body = inspect.getsource(Handler.do_POST)
+
+    assert 'dispatch_http_route(self, "GET")' in get_body
+    assert 'dispatch_http_route(self, "POST")' in post_body
+    assert "if parsed.path" not in get_body
+    assert "if parsed.path" not in post_body
+    assert set(http_routes.ROUTE_GROUPS) == {"core", "share", "yoagent", "filesystem", "tmux"}
+    assert route_by_path("GET", "/api/activity-summary").group == "core"
+    assert route_by_path("GET", "/ws/share-ui").handler is http_routes.get_share_ui_websocket
+    assert route_by_path("POST", "/api/share/extend").body_limit == 4096
+    assert route_by_path("POST", "/api/yoagent/jobs/*/confirm").handler is http_routes.post_yoagent_job_confirm
+    assert route_by_path("POST", "/api/fs/batch").role is http_routes.share_readonly_post_role
+
+
 def test_do_get_routes_authenticated_json_and_stream_handlers():
     app = SimpleNamespace(
         transcripts_payload=lambda force=False: {"transcripts": [], "force": force},
-        activity_summary_payload=lambda force=False, locale="en": {"force": force, "locale": locale},
+        activity_summary_payload=lambda force=False, locale="en", session_scope="configured", hours="24": {"force": force, "locale": locale},
     )
 
     handler, calls, writes = route_handler("/api/transcripts?force=1", app)
@@ -599,7 +625,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
 
     Handler.do_POST(handler)
 
-    assert calls == [("require_auth_for_post", "/api/event")]
+    assert calls == [("require_auth", "readonly")]
     assert writes == [("json", HTTPStatus.ACCEPTED, {"ok": True})]
 
     handler, calls, writes = route_handler("/api/fs/delete")
@@ -607,7 +633,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
 
     Handler.do_POST(handler)
 
-    assert calls == [("require_auth_for_post", "/api/fs/delete")]
+    assert calls == [("require_auth", "admin")]
     assert writes == [("fs-delete", "/api/fs/delete")]
 
     handler, calls, writes = route_handler("/api/fs/batch")
@@ -615,7 +641,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
 
     Handler.do_POST(handler)
 
-    assert calls == [("require_auth_for_post", "/api/fs/batch")]
+    assert calls == [("require_auth", "admin")]
     assert writes == [("fs-batch", "/api/fs/batch")]
 
     app = SimpleNamespace(update_client_watch_roots=lambda roots: {"ok": True, "roots": roots})
@@ -624,7 +650,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
 
     Handler.do_POST(handler)
 
-    assert calls == [("require_auth_for_post", "/api/watch/roots")]
+    assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "roots": {"roots": ["/repo"]}})]
 
     app = SimpleNamespace(run_file_drop_action=lambda payload: ({"ok": True, "action": payload["action"]}, HTTPStatus.OK))
@@ -633,7 +659,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
 
     Handler.do_POST(handler)
 
-    assert calls == [("require_auth_for_post", "/api/drop-action/run")]
+    assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "action": "server-info"})]
 
     app = SimpleNamespace(preview_yoagent_send_action=lambda payload: ({"ok": True, "preview": payload["session"]}, HTTPStatus.OK))
@@ -642,7 +668,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
 
     Handler.do_POST(handler)
 
-    assert calls == [("require_auth_for_post", "/api/yoagent/actions/preview-send")]
+    assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "preview": "6"})]
 
     app = SimpleNamespace(execute_yoagent_send_action=lambda payload: ({"ok": True, "preview_id": payload["preview_id"]}, HTTPStatus.OK))
@@ -651,7 +677,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
 
     Handler.do_POST(handler)
 
-    assert calls == [("require_auth_for_post", "/api/yoagent/actions/execute-send")]
+    assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "preview_id": "ya_1"})]
 
     app = SimpleNamespace(yoagent_intent=lambda payload: ({"ok": True, "intent": payload["type"]}, HTTPStatus.OK))
@@ -660,7 +686,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
 
     Handler.do_POST(handler)
 
-    assert calls == [("require_auth_for_post", "/api/yoagent/intent")]
+    assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "intent": "notify_session_idle"})]
 
     app = SimpleNamespace(create_yoagent_job=lambda payload: ({"ok": True, "job": payload["type"]}, HTTPStatus.OK))
@@ -669,7 +695,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
 
     Handler.do_POST(handler)
 
-    assert calls == [("require_auth_for_post", "/api/yoagent/jobs")]
+    assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "job": "notify_session_idle"})]
 
     app = SimpleNamespace(confirm_yoagent_job=lambda job_id: ({"ok": True, "id": job_id}, HTTPStatus.OK))
@@ -678,7 +704,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
 
     Handler.do_POST(handler)
 
-    assert calls == [("require_auth_for_post", "/api/yoagent/jobs/yj_1/confirm")]
+    assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "id": "yj_1"})]
 
     app = SimpleNamespace(cancel_yoagent_job=lambda job_id: ({"ok": True, "id": job_id}, HTTPStatus.OK))
@@ -687,7 +713,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
 
     Handler.do_POST(handler)
 
-    assert calls == [("require_auth_for_post", "/api/yoagent/jobs/yj_1/cancel")]
+    assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "id": "yj_1"})]
 
     app = SimpleNamespace(upsert_yoagent_skill_file=lambda payload: ({"ok": True, "name": payload["name"]}, HTTPStatus.OK))
@@ -696,7 +722,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
 
     Handler.do_POST(handler)
 
-    assert calls == [("require_auth_for_post", "/api/yoagent/skill-files/upsert")]
+    assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "name": "local-checks"})]
 
     app = SimpleNamespace(delete_yoagent_skill_file=lambda payload: ({"ok": True, "name": payload["name"]}, HTTPStatus.OK))
@@ -705,7 +731,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
 
     Handler.do_POST(handler)
 
-    assert calls == [("require_auth_for_post", "/api/yoagent/skill-files/delete")]
+    assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "name": "local-checks"})]
 
     app = SimpleNamespace(tmux_copy_selection=lambda session: ({"session": session, "copied": True}, HTTPStatus.OK))
@@ -713,7 +739,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
 
     Handler.do_POST(handler)
 
-    assert calls == [("require_auth_for_post", "/api/tmux-copy-selection")]
+    assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"session": "6", "copied": True})]
 
 
@@ -727,7 +753,7 @@ def test_do_post_share_stop_passes_query_target_to_app():
 
     Handler.do_POST(handler)
 
-    assert calls == [("require_auth_for_post", "/api/share/stop")]
+    assert calls == [("require_auth", "admin")]
     assert writes == [("app", ({"ok": True, "stopped": 1}, HTTPStatus.OK))]
     assert app_calls == ["short123", "closed-upstreams"]
 
@@ -746,7 +772,7 @@ def test_do_post_share_extend_broadcasts_status():
 
     Handler.do_POST(handler)
 
-    assert calls == [("require_auth_for_post", "/api/share/extend")]
+    assert calls == [("require_auth", "admin")]
     assert writes == [("app", ({"ok": True, "token": "share-token-1"}, HTTPStatus.OK))]
     assert app_calls == [("share-token-1", 600, {"base_url": "http://127.0.0.1:9998"}), ("broadcast", "share-token-1")]
 
@@ -765,7 +791,7 @@ def test_do_post_share_debug_profile_records_with_share_token():
 
     Handler.do_POST(handler)
 
-    assert calls == [("require_auth_for_post", "/api/share/debug-profile")]
+    assert calls == [("require_auth", "admin")]
     assert writes == [("app", ({"ok": True, "stored": True}, HTTPStatus.OK))]
     assert app_calls == [("share-token-1", {"kind": "share-replay-health"}, {"ip": "203.0.113.9", "user_agent": "Safari"})]
 
@@ -923,16 +949,19 @@ def test_stream_codex_process_decodes_utf8_across_chunks(monkeypatch):
 
 
 def test_server_source_wires_routing_ws_readonly_and_pty_setup():
-    # Scoped per method (inspect, not full-file string offsets): POST routing in do_POST, the
-    # read-only WS attach in websocket(), and the readonly `-r` + pty sizing in bridge_tmux.
-    post_body = inspect.getsource(Handler.do_POST)
+    # Scoped per owner: POST routes in the registry, the read-only WS attach in websocket(),
+    # and the readonly `-r` + pty sizing in bridge_tmux.
+    upload_route = route_by_path("POST", "/api/upload")
+    event_route = route_by_path("POST", "/api/event")
     ws_body = inspect.getsource(Handler.websocket)
     bridge_body = inspect.getsource(Handler.bridge_tmux)
     initial_payload_body = inspect.getsource(Handler.read_initial_ws_payloads)
     payload_body = inspect.getsource(Handler.handle_ws_payload)
 
-    assert 'if parsed.path == "/api/upload":' in post_body
-    assert 'if parsed.path == "/api/event":' in post_body
+    assert upload_route.handler is http_routes.post_upload
+    assert upload_route.role == "admin"
+    assert event_route.handler is http_routes.post_event
+    assert event_route.role == "readonly"
     assert "resize_client_id = clean_resize_authority_client_id" in ws_body
     assert "self.bridge_tmux(session, readonly=self.auth_readonly(), resize_client_id=resize_client_id)" in ws_body
     assert "tmux_attach_command(readonly=readonly)" in bridge_body
@@ -952,7 +981,7 @@ def test_share_write_mode_stays_terminal_input_only():
     upstream_start = inspect.getsource(server_module.ShareTerminalUpstream.start_locked)
     upstream_write = inspect.getsource(server_module.ShareTerminalUpstream.write_input)
     bridge_body = inspect.getsource(Handler.bridge_shared_tmux)
-    post_body = inspect.getsource(Handler.do_POST)
+    share_stop_body = inspect.getsource(http_routes.post_share_stop)
 
     assert 'record = self.server.app.verify_share_token(self.token)' in upstream_start
     assert 'str((record or {}).get("mode") or "ro") != "rw"' in upstream_start
@@ -961,7 +990,7 @@ def test_share_write_mode_stays_terminal_input_only():
     assert 'record_user_input(self.session, len(filtered), source="share")' in upstream_write
     assert 'self.request_is_https() and str(current_record.get("mode") or "ro") == "rw"' in bridge_body
     assert "upstream.write_input(payload)" in bridge_body
-    assert "self.server.close_inactive_share_upstreams()" in post_body
+    assert "request.server.close_inactive_share_upstreams()" in share_stop_body
 
 
 def test_share_pointer_events_are_coalesced_server_side():
@@ -984,16 +1013,17 @@ def test_share_pointer_events_are_coalesced_server_side():
 
 
 def test_share_ui_socket_wires_write_clients_and_host_broadcasts():
-    get_body = inspect.getsource(Handler.do_GET)
+    share_ui_route = route_by_path("GET", "/ws/share-ui")
+    share_status_route = route_by_path("GET", "/api/share")
     host_body = inspect.getsource(Handler.websocket_share_host)
     viewer_body = inspect.getsource(Handler.websocket_share_ui)
     bridge_body = inspect.getsource(Handler.bridge_share_ui_socket)
     handle_body = inspect.getsource(Handler.handle_share_ui_message)
     server_body = inspect.getsource(server_module.TmuxWebtermHTTPServer.broadcast_share_ui)
 
-    assert 'if parsed.path == "/ws/share-ui":' in get_body
-    assert "self.websocket_share_ui(parsed)" in get_body
-    assert '"/api/share" and self.share_token_text()' in get_body
+    assert share_ui_route.handler is http_routes.get_share_ui_websocket
+    assert http_routes.route_required_role(share_status_route, SimpleNamespace(share_token_text=lambda: "share-token"), SimpleNamespace(path="/api/share")) == "readonly"
+    assert http_routes.route_required_role(share_status_route, SimpleNamespace(share_token_text=lambda: ""), SimpleNamespace(path="/api/share")) == "admin"
     assert "self.bridge_share_ui_socket(token, client_id)" in host_body
     assert 'write_enabled = self.request_is_https() and str(record.get("mode") or "ro") == "rw"' in viewer_body
     assert 'registered_viewer_id = ""' in viewer_body

@@ -21,6 +21,16 @@
   --input-bg: var(--panel2);
   --text: #e4e8ee;
   --muted: #9aa5b1;
+  --chrome-text-strong: #e7ecf3;
+  --accent-sky-strong: #9fd8ff;
+  --surface-ink: #11151d;
+  --status-tool: #f59e0b;
+  --danger-border-soft: #d56b7a;
+  --text-muted-cool: #9ea8b7;
+  --neutral-border-strong: #6f7b8c;
+  --neutral-text-strong: #52617a;
+  --overlay-surface: #111820;
+  --success-text-strong: #064e3b;
   /* The stronger/cooler muted shade (darker than --muted) — one owner for what was the bare #8b95a5
      repeated across the editor scheme, code comments, and several muted-text component rules. */
   --text-muted-strong: #8b95a5;
@@ -71,6 +81,7 @@
   --danger-bg: #c61f38;
   --danger-border: #ff7a86;
   --danger-muted-bg: #5b1e28;
+  --danger: var(--danger-strong);
   --danger-strong: #dc2626;
   --danger-strong-hover: #b91c1c;
   --danger-strong-border: #991b1b;
@@ -217,6 +228,22 @@
   --file-explorer-open-inline-size: calc(var(--file-explorer-tree-inline-size) + var(--file-explorer-editor-inline-size));
   --min-split-pane-width: 320px;
   --min-split-pane-height: 220px;
+  --z-layer-background: 0;
+  --z-layer-raised: 1;
+  --z-layer-control: 2;
+  --z-layer-editor: 3;
+  --z-layer-preview: 4;
+  --z-layer-sticky: 6;
+  --z-layer-marker: 8;
+  --z-share-mirror-stage: var(--z-layer-background);
+  --z-pane-tab: var(--z-layer-raised);
+  --z-inline-control: var(--z-layer-raised);
+  --z-panel-resizer-inline: var(--z-layer-control);
+  --z-file-editor-layer: var(--z-layer-editor);
+  --z-file-editor-preview-layer: var(--z-layer-preview);
+  --z-tabs-row: var(--z-layer-preview);
+  --z-sticky-pane-head: var(--z-layer-sticky);
+  --z-editor-wrap-marker: var(--z-layer-marker);
   --z-stacking-base: 1;
   --z-terminal-overlay-low: 30;
   --z-pane-tab-strip: 7;
@@ -312,6 +339,12 @@
   --file-selection-bg: rgb(var(--active-accent-rgb) / 0.46);
   --file-selection-border: var(--active-accent-bright);
   --file-selection-text: #f7fff0;
+  --file-tree-recency-hot: #f8ffd8;
+  --file-tree-recency-fresh: #dcffa6;
+  --file-tree-recency-recent: #bfe87e;
+  --file-tree-recency-warm: #aab8c4;
+  --file-tree-recency-old: var(--muted);
+  --file-tree-recency-pulse-shadow: rgba(196, 249, 112, 0.36);
   --editor-font: var(--mono-font);
   --editor-font-size: var(--ui-font-size);
   --editor-ui-font-size: max(10px, calc(var(--editor-font-size) - 2px));
@@ -572,6 +605,12 @@ body.theme-light {
   --file-selection-bg: rgb(var(--active-accent-rgb) / 0.34);
   --file-selection-border: var(--active-accent-bright);
   --file-selection-text: #10230b;
+  --file-tree-recency-hot: #24520f;
+  --file-tree-recency-fresh: #356f12;
+  --file-tree-recency-recent: #4d7f21;
+  --file-tree-recency-warm: #566271;
+  --file-tree-recency-old: var(--muted);
+  --file-tree-recency-pulse-shadow: rgba(95, 152, 0, 0.22);
   --pc-control-bg: #f7f9fc;
   --pc-control-fg: #1f2937;
   --pc-control-border: #9aa6b6;
@@ -848,7 +887,7 @@ body.share-view-mode {
 .share-mirror-stage {
   position: fixed;
   inset: 0;
-  z-index: 0;
+  z-index: var(--z-share-mirror-stage);
   overflow: hidden;
   background: var(--share-stage-bg);
 }
@@ -1349,8 +1388,8 @@ body.app-vw-lte-760 .topbar-search {
   overflow-x: hidden;
   overflow-y: auto;
   padding: 7px;
-  color: #e7ecf3;
-  background: #111820;
+  color: var(--chrome-text-strong);
+  background: var(--overlay-surface);
   border: 1px solid var(--sep-muted);
   border-radius: 8px;
   box-shadow:
@@ -1377,7 +1416,7 @@ body.app-vw-lte-760 .topbar-search {
   margin-block: 2px 5px;
   margin-inline: var(--app-submenu-inline-offset) 0;
   padding: 4px;
-  color: #e7ecf3;
+  color: var(--chrome-text-strong);
   background: #0d131b;
   border: 1px solid #2f3a4b;
   border-radius: 7px;
@@ -1731,7 +1770,7 @@ body.theme-light .app-menu-button-badge {
 body.theme-light .transport-warning::after {
   color: #5a1116;                /* light tooltip (dark-red text on a light-red surface), not near-black */
   background: #fdeaec;
-  border-color: #d56b7a;
+  border-color: var(--danger-border-soft);
 }
 body.theme-light .app-menu-tab-command + .app-menu-tab-command {
   border-top-color: rgba(70, 80, 95, 0.22);  /* a visible row separator on the white menu */
@@ -1899,13 +1938,13 @@ body.theme-light .latency-meter {
 }
 .session-button-dir {
   min-width: 0;
-  color: #e7ecf3;
+  color: var(--chrome-text-strong);
   font-size: var(--tab-label-size);
   font-weight: 500;
 }
 .session-button-detail {
   max-width: 86px;
-  color: #9ea8b7;
+  color: var(--text-muted-cool);
   font: var(--ui-font-size-xs)/1 var(--mono-font);
 }
 .session-button-detail.pr-status-failing {
@@ -2067,7 +2106,7 @@ body.theme-light .latency-meter {
    status colors — red/blue/green — already read on white and are left alone).
    Repaint the neutral chips as light gray with dark text. */
 body.theme-light .session-state-badge {
-  color: #52617a;
+  color: var(--neutral-text-strong);
   background: #eef1f5;
   border-color: #cdd5e0;
 }
@@ -2077,7 +2116,7 @@ body.theme-light .session-state-done {
   border-color: #b8c2d2;
 }
 body.theme-light .session-yolo-marker.inactive {
-  color: #52617a;
+  color: var(--neutral-text-strong);
   background: #e2e6ec;
   border-color: #c2cad6;
 }
@@ -2178,7 +2217,7 @@ body.tab-meta-hidden .pane-tab .tab-symbol {
 }
 .ci-indicator.branch-indicator {
   color: #071321;
-  background: #9fd8ff;
+  background: var(--accent-sky-strong);
   border-color: #c9ebff;
 }
 /* the .ci-indicator chips are tuned for dark mode; on a bright/green tab in light theme they
@@ -3411,7 +3450,7 @@ body.theme-light .branch-link {
   grid-template-rows: auto auto minmax(0, 1fr);
   overflow: hidden;
   color: var(--text);
-  background: #111820;
+  background: var(--overlay-surface);
   border: var(--app-modal-border-width) solid var(--app-modal-border-color);
   border-radius: 8px;
   box-shadow:
@@ -3572,7 +3611,7 @@ body.theme-light .command-palette-view-chip {
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
   color: var(--text);
-  background: #111820;
+  background: var(--overlay-surface);
   border: var(--app-modal-border-width) solid var(--app-modal-border-color);
   border-radius: 8px;
   box-shadow: 0 24px 70px rgb(var(--shadow-rgb) / 0.62);
@@ -3883,7 +3922,7 @@ body.theme-light .preferences-inline-action {
 }
 .branch-subject {
   grid-column: 1 / -1;
-  color: #9ea8b7;
+  color: var(--text-muted-cool);
   overflow-wrap: anywhere;
   display: -webkit-box;
   -webkit-box-orient: vertical;
@@ -4604,8 +4643,10 @@ body.theme-light .drop-slot.drag-over {
   --pane-scrollbar-current-thumb: var(--pane-scrollbar-thumb-active);
   --pane-scrollbar-current-track: var(--pane-scrollbar-track-active);
 }
-/* Pane scrollbars must always inherit a shared pane scrollbar contract from this block. Never customize
-   thumb/track colors in pane-specific CSS; add new pane scroll containers to this shared list instead. */
+/* Pane scrollbars must always inherit a shared pane scrollbar contract from this block. Add new pane scroll
+   containers to this shared list instead of forking full scrollbar rules.
+   YO!agent's normal vertical owner is .yoagent-chat-history; its outer .yoagent-list only keeps horizontal
+   overflow so thinking/activity refreshes do not show nested vertical rails. */
 :where(
   .preferences-scroll,
   .terminal .xterm-viewport,
@@ -4613,6 +4654,7 @@ body.theme-light .drop-slot.drag-over {
   .summary-preview,
   .event-list,
   .info-list,
+  .search-history-scroll,
   .yoagent-chat-history,
   .yoagent-chat .markdown-body pre,
   .yoagent-global .markdown-body pre,
@@ -4642,6 +4684,7 @@ body.theme-light .drop-slot.drag-over {
   .summary-preview,
   .event-list,
   .info-list,
+  .search-history-scroll,
   .yoagent-chat-history,
   .yoagent-chat .markdown-body pre,
   .yoagent-global .markdown-body pre,
@@ -4671,6 +4714,7 @@ body.theme-light .drop-slot.drag-over {
   .summary-preview,
   .event-list,
   .info-list,
+  .search-history-scroll,
   .yoagent-chat-history,
   .yoagent-chat .markdown-body pre,
   .yoagent-global .markdown-body pre,
@@ -4699,6 +4743,7 @@ body.theme-light .drop-slot.drag-over {
   .summary-preview,
   .event-list,
   .info-list,
+  .search-history-scroll,
   .yoagent-chat-history,
   .yoagent-chat .markdown-body pre,
   .yoagent-global .markdown-body pre,
@@ -4727,6 +4772,7 @@ body.theme-light .drop-slot.drag-over {
   .summary-preview,
   .event-list,
   .info-list,
+  .search-history-scroll,
   .yoagent-chat-history,
   .yoagent-chat .markdown-body pre,
   .yoagent-global .markdown-body pre,
@@ -5195,7 +5241,7 @@ body.theme-light .drop-slot.drag-over {
   height: var(--pane-tab-height);
   display: inline-flex;
   position: relative;
-  z-index: 1;
+  z-index: var(--z-pane-tab);
   vertical-align: top;
   align-items: center;
   gap: 3px;
@@ -5298,7 +5344,7 @@ body.theme-light .pane-tab:not(.active) .session-button-detail {
 .pane-tab.file-missing {
   color: #ffdbe1;
   background: #55313a;
-  border-color: #d56b7a;
+  border-color: var(--danger-border-soft);
 }
 .pane-tab.file-missing:hover {
   background: #653843;
@@ -5333,7 +5379,7 @@ body.theme-light .pane-tab.file-missing {
 }
 body.theme-light .pane-tab.file-missing:hover {
   background: #fbe0e4;
-  border-color: #d56b7a;
+  border-color: var(--danger-border-soft);
 }
 body.theme-light .pane-tab.file-missing.active {
   color: #7a1f2c;
@@ -5346,7 +5392,7 @@ body.theme-light .pane-tab.file-missing.active .file-tab-missing-badge {
   color: #b3263a;
 }
 body.theme-light .pane-tab.active .session-yolo-marker.inactive {
-  color: #52617a;
+  color: var(--neutral-text-strong);
   background: #e2e6ec;
   border-color: #c2cad6;
 }
@@ -5558,7 +5604,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
 }
 .tabs {
   position: relative;
-  z-index: 4;
+  z-index: var(--z-tabs-row);
   float: right;
   display: flex;
   align-items: center;
@@ -5990,7 +6036,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   z-index: var(--z-terminal-popover);
   min-width: 150px;
   padding: 4px;
-  color: #e7ecf3;
+  color: var(--chrome-text-strong);
   background: rgba(17, 24, 32, 0.98);
   border: 1px solid var(--sep-muted);
   border-radius: 7px;
@@ -6009,7 +6055,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   display: grid;
   gap: 9px;
   padding: 12px;
-  color: #e7ecf3;
+  color: var(--chrome-text-strong);
   background: rgba(17, 24, 32, 0.98);
   border: var(--app-modal-border-width) solid var(--app-modal-border-color);
   border-radius: 7px;
@@ -6041,7 +6087,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 }
 .session-rename-actions button {
   padding: 4px 9px;
-  color: #e7ecf3;
+  color: var(--chrome-text-strong);
   background: #222b3a;
   border: 1px solid var(--sep-muted);
   border-radius: 5px;
@@ -6149,7 +6195,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   margin: 0;
   padding: 10px;
   color: var(--bad);
-  background: #11151d;
+  background: var(--surface-ink);
   white-space: pre-wrap;
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
 }
@@ -6327,7 +6373,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   color: var(--pane-tab-text);
-  background: #11151d;
+  background: var(--surface-ink);
   font: var(--ui-font-size-sm)/1.3 var(--mono-font);
 }
 .transcript {
@@ -6391,7 +6437,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 }
 .transcript-item.user { border-color: #60a5fa; background: color-mix(in srgb, #60a5fa 12%, var(--panel)); }
 .transcript-item.assistant { border-color: #4ade80; background: color-mix(in srgb, #4ade80 12%, var(--panel)); }
-.transcript-item.tool_use { border-color: #f59e0b; background: color-mix(in srgb, #f59e0b 12%, var(--panel)); }
+.transcript-item.tool_use { border-color: var(--status-tool); background: color-mix(in srgb, var(--status-tool) 12%, var(--panel)); }
 .transcript-item.tool_result { border-color: var(--pr-status-merged); background: color-mix(in srgb, var(--pr-status-merged) 12%, var(--panel)); }
 .transcript-item.summary { border-color: #f472b6; background: color-mix(in srgb, #f472b6 12%, var(--panel)); }
 .transcript-item.system { border-color: var(--git-transcript-badge); background: color-mix(in srgb, var(--git-transcript-badge) 12%, var(--panel)); }
@@ -6483,7 +6529,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  background: #11151d;
+  background: var(--surface-ink);
 }
 /* the merged YO!info / YO!agent sub-views share the pane; only the active one is shown,
    and it fills the available height (head row + scrolling list). */
@@ -6529,6 +6575,24 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   gap: 6px;
   margin-inline-start: auto;
 }
+.info-lookback-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: var(--ui-font-size-xs);
+  white-space: nowrap;
+}
+.info-lookback-control select {
+  min-width: 74px;
+  height: 22px;
+  padding: 0 20px 0 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--panel);
+  color: var(--text);
+  font-size: var(--ui-font-size-xs);
+}
 .info-subtab {
   flex: 0 0 auto;
   min-height: var(--pane-tab-height);
@@ -6572,10 +6636,118 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   overflow: auto;
   padding: 8px 10px;
 }
+.search-history-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.search-history-search {
+  display: grid;
+  grid-template-columns: minmax(10ch, 1fr) auto auto;
+  gap: 6px;
+  align-items: center;
+}
+.search-history-input {
+  min-width: 0;
+  height: 28px;
+  padding: 3px 8px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  font: var(--ui-font-size-sm)/1.2 var(--ui-font);
+}
+.search-history-input:focus {
+  outline: none;
+  border-color: var(--active-control-border);
+  box-shadow: 0 0 0 2px var(--active-control-focus-ring);
+}
+.search-history-error,
+.search-history-empty {
+  padding: 8px;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: var(--ui-font-size-xs)/1.35 var(--ui-font);
+}
+.search-history-error {
+  color: var(--bad);
+}
+.search-history-section {
+  min-width: 0;
+}
+.search-history-section-head {
+  margin: 0 0 5px;
+  color: var(--pane-tab-text);
+  font: 800 var(--ui-font-size-xs)/1.2 var(--ui-font);
+  text-transform: uppercase;
+}
+.search-history-list {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+}
+.search-history-result,
+.search-history-run {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 3px;
+  padding: 7px 8px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: var(--ui-font-size-xs)/1.35 var(--ui-font);
+  text-align: start;
+  cursor: pointer;
+}
+.search-history-result:hover,
+.search-history-result:focus-visible,
+.search-history-run:not(:disabled):hover,
+.search-history-run:not(:disabled):focus-visible {
+  outline: none;
+  border-color: var(--active-control-border);
+  background: color-mix(in srgb, var(--active-control-bg) 12%, var(--panel));
+}
+.search-history-run:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+.search-history-row-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--markdown-heading);
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.search-history-row-meta {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.search-history-row-snippet,
+.search-history-row-field {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+.search-history-row-field span {
+  margin-inline-end: 6px;
+  color: var(--muted);
+  font-weight: 700;
+}
 .yoagent-list {
   display: flex;
   flex-direction: column;
   font-size: var(--terminal-font-size);
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 .yoagent-global {
   width: 100%;
@@ -6642,6 +6814,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   width: 100%;
   min-width: 0;
   max-width: 100%;
+  min-height: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 6px;
@@ -6652,7 +6825,11 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
 }
+.yoagent-chat.has-history {
+  flex: 1 1 auto;
+}
 .yoagent-chat.empty {
+  flex: 0 0 auto;
   grid-template-rows: auto auto auto;
   align-content: start;
 }
@@ -6819,13 +6996,21 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   border-color: var(--active-control-soft-border);
 }
 .yoagent-chat-history {
-  /* YO!agent chat scrollbars always inherit a shared pane scrollbar rule from layout CSS; never
-     customize scrollbar colors or hover behavior here. */
+  /* One normal vertical owner for YO!agent activity. The outer #yoagent-content only keeps horizontal
+     overflow, so thinking/stream refreshes do not expose nested rails. */
+  --pane-scrollbar-current-thumb: var(--pane-scrollbar-thumb);
+  --pane-scrollbar-current-track: var(--pane-scrollbar-track);
   min-height: 0;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+.yoagent-chat-history::-webkit-scrollbar-thumb:hover,
+.yoagent-chat-history::-webkit-scrollbar-thumb:active {
+  background: var(--pane-scrollbar-thumb-active);
 }
 .yoagent-chat-empty,
 .yoagent-chat-status,
@@ -6883,6 +7068,98 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 .yoagent-waiting-age {
   flex: 0 0 auto;
   color: var(--muted);
+}
+.yoagent-jobs-list {
+  display: grid;
+  gap: 5px;
+  padding: 7px 8px;
+  color: var(--text);
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  font: var(--terminal-font-size)/1.35 var(--ui-font);
+}
+.yoagent-jobs-title {
+  color: var(--muted);
+  font: 800 max(9px, calc(var(--terminal-font-size) - 3px))/1 var(--mono-font);
+  text-transform: uppercase;
+}
+.yoagent-jobs-items {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.yoagent-job-item {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 6px;
+  border: 1px solid var(--active-control-soft-border);
+  border-radius: var(--radius-control);
+  background: color-mix(in srgb, var(--panel) 82%, transparent);
+}
+.yoagent-job-failed,
+.yoagent-job-timed_out {
+  border-color: color-mix(in srgb, var(--danger) 65%, var(--line));
+}
+.yoagent-job-cancelled {
+  opacity: 0.78;
+}
+.yoagent-job-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.yoagent-job-status {
+  flex: 0 0 auto;
+  color: var(--accent-gold);
+  font-weight: 800;
+}
+.yoagent-job-meta,
+.yoagent-job-text {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.yoagent-job-meta {
+  flex: 1 1 auto;
+}
+.yoagent-job-text {
+  color: var(--text);
+}
+.yoagent-job-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.yoagent-job-confirm,
+.yoagent-job-cancel {
+  appearance: none;
+  border: 1px solid var(--active-control-border);
+  border-radius: var(--radius-control);
+  background: var(--active-control-soft-bg);
+  color: var(--text);
+  cursor: pointer;
+  font: 800 max(10px, calc(var(--terminal-font-size) - 2px))/1 var(--ui-font);
+  padding: 5px 8px;
+}
+.yoagent-job-cancel {
+  border-color: var(--line);
+  background: var(--panel);
+  color: var(--muted);
+}
+.yoagent-job-confirm:hover,
+.yoagent-job-confirm:focus-visible,
+.yoagent-job-cancel:hover,
+.yoagent-job-cancel:focus-visible {
+  border-color: var(--active-control-focus-ring);
+  color: var(--text);
+  outline: none;
 }
 .yoagent-chat-spinner {
   min-width: 18px;
@@ -7319,7 +7596,7 @@ body.theme-light .yoagent-global .markdown-body pre code {
   position: sticky;
   top: 0;
   z-index: var(--z-stacking-base);
-  color: #9ea8b7;
+  color: var(--text-muted-cool);
   background: #151b25;
   font-weight: 700;
 }
@@ -7340,7 +7617,7 @@ body.theme-light .yoagent-global .markdown-body pre code {
 }
 .info-sort-button:hover,
 .info-sort-button:focus-visible {
-  color: #e7ecf3;
+  color: var(--chrome-text-strong);
   outline: 0;
 }
 .info-sort-marker {
@@ -7359,6 +7636,98 @@ body.theme-light .yoagent-global .markdown-body pre code {
 .info-cell {
   min-width: 0;
 }
+.info-session-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.info-session-drawer-toggle {
+  width: 18px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: inherit;
+  font: 700 var(--ui-font-size-xs)/1 var(--mono-font);
+  cursor: pointer;
+}
+.info-session-drawer-toggle::before {
+  content: "▸";
+}
+.info-session-drawer-toggle[aria-expanded="true"]::before {
+  content: "▾";
+}
+.info-session-drawer-toggle:hover,
+.info-session-drawer-toggle:focus-visible {
+  border-color: var(--line);
+  background: var(--pane-tab-active-bg);
+  outline: 0;
+}
+.info-row.info-session-drawer-row {
+  display: block;
+  min-width: calc(
+    var(--info-session-column-width)
+    + var(--info-path-column-width)
+    + var(--info-branch-column-width)
+    + var(--info-pr-column-width)
+    + var(--info-linear-column-width)
+    + var(--info-desc-column-width)
+    + var(--info-updated-column-width)
+    + (var(--info-table-column-gap) * 6)
+    + (var(--info-table-inline-padding) * 2)
+  );
+  padding: 0 var(--info-table-inline-padding) 10px;
+  background: color-mix(in srgb, var(--panel) 78%, var(--panel2));
+}
+.info-session-drawer {
+  display: grid;
+  gap: 8px;
+  margin-inline-start: calc(var(--info-session-column-width) + var(--info-table-column-gap));
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--panel2);
+  color: var(--pane-tab-text);
+}
+.info-session-drawer-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 7px 12px;
+}
+.info-session-drawer-field,
+.info-session-drawer-summary,
+.info-session-drawer-section {
+  min-width: 0;
+}
+.info-session-drawer-label,
+.info-session-drawer-summary > span,
+.info-session-drawer-section > span {
+  display: block;
+  margin-block-end: 2px;
+  color: var(--muted);
+  font: 700 var(--ui-font-size-xs)/1.25 var(--mono-font);
+}
+.info-session-drawer-value,
+.info-session-drawer-summary p,
+.info-session-drawer-events,
+.info-session-drawer-empty {
+  color: var(--pane-tab-text);
+  font: var(--ui-font-size-sm)/1.35 var(--mono-font);
+}
+.info-session-drawer-summary p {
+  margin: 0;
+}
+.info-session-drawer-events {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  padding-inline-start: 18px;
+}
+.info-session-drawer-empty {
+  color: var(--muted);
+}
 .info-resizable-header-cell {
   position: relative;
   overflow: visible;
@@ -7368,7 +7737,7 @@ body.theme-light .yoagent-global .markdown-body pre code {
   position: absolute;
   inset-block: -7px;
   inset-inline-end: calc(var(--info-column-resizer-hit-width) / -2);
-  z-index: 1;
+  z-index: var(--z-inline-control);
   width: var(--info-column-resizer-hit-width);
   min-width: var(--info-column-resizer-hit-width);
   padding: 0;
@@ -8016,7 +8385,7 @@ body.app-vw-lte-760 .share-result-meta {
   color: #ef4444;
 }
 .about-brand-x {
-  color: #f59e0b;
+  color: var(--status-tool);
 }
 .about-version {
   color: var(--muted);
@@ -8547,7 +8916,7 @@ body.app-vw-lte-980 .tabs {
   font-weight: 700;
 }
 .file-tree-row.indexed-directory:not(.selected) .file-tree-git-status {
-  color: #d9ff9a;
+  color: var(--file-tree-recency-fresh);
   letter-spacing: 0;
   text-transform: uppercase;
 }
@@ -8728,6 +9097,36 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
   overflow: hidden;
   text-overflow: clip;
   white-space: nowrap;
+}
+.file-tree-row:not(.selected):not(.current-file)[data-recency] > .file-tree-date {
+  color: var(--file-tree-recency-date-color, var(--muted));
+}
+.file-tree-row:not(.selected):not(.current-file).file-tree-recency-hot > .file-tree-date,
+.file-tree-row:not(.selected):not(.current-file).file-tree-recency-fresh > .file-tree-date {
+  font-weight: 800;
+}
+.file-tree-row:not(.selected):not(.current-file).file-tree-recency-recent > .file-tree-date {
+  font-weight: 700;
+}
+.file-tree-row:not(.selected):not(.current-file).file-tree-recency-pulse > .file-tree-date {
+  animation: file-tree-recency-pulse 10s ease-out 1;
+}
+@keyframes file-tree-recency-pulse {
+  0%, 100% {
+    opacity: 1;
+    text-shadow: none;
+    transform: translateY(0);
+  }
+  10%, 34% {
+    opacity: 1;
+    text-shadow: 0 0 0.7em var(--file-tree-recency-pulse-shadow);
+    transform: translateY(-1px);
+  }
+  22%, 48% {
+    opacity: 0.76;
+    text-shadow: none;
+    transform: translateY(0);
+  }
 }
 .file-tree-dir-count[hidden],
 .file-tree-agent[hidden],
@@ -9270,7 +9669,7 @@ body.editor-theme-light .file-editor-image-panel {
   font: 700 var(--ui-font-size-sm)/1.25 var(--ui-font);
 }
 .file-editor-html-js-notice a {
-  color: #064e3b;
+  color: var(--success-text-strong);
   text-decoration: underline;
   white-space: nowrap;
 }
@@ -9649,8 +10048,8 @@ body.app-vw-lte-760 .file-editor-conflict-compare {
 .file-editor-gutter.active,
 .file-editor-find:hover,
 .file-editor-theme:hover {
-  color: #9fd8ff;
-  border-color: #9fd8ff;
+  color: var(--accent-sky-strong);
+  border-color: var(--accent-sky-strong);
 }
 .file-editor-theme.theme-dark,
 .file-editor-theme-panel.theme-dark {
@@ -9682,7 +10081,7 @@ body.app-vw-lte-760 .file-editor-conflict-compare {
 .file-editor-codemirror {
   position: absolute;
   inset: 0;
-  z-index: 3;
+  z-index: var(--z-file-editor-layer);
   width: 100%;
   height: 100%;
 }
@@ -9785,7 +10184,7 @@ body.editor-theme-light .file-editor-image {
 .file-editor-preview-pane {
   position: absolute;
   inset: 0;
-  z-index: 4;
+  z-index: var(--z-file-editor-preview-layer);
   overflow: auto;
   padding: 12px 16px;
   background: var(--editor-preview-bg);
@@ -10333,7 +10732,7 @@ body.resizing-file-explorer-changes {
    centered ::before. Light/dark flip automatically via the tokens (no hardcoded hex). */
 .file-explorer-changes-resizer {
   position: relative;
-  z-index: 2;
+  z-index: var(--z-panel-resizer-inline);
   flex: 0 0 var(--file-explorer-changes-resizer-size);
   min-height: var(--file-explorer-changes-resizer-size);
   cursor: row-resize;
@@ -10386,7 +10785,7 @@ body.theme-light .file-explorer-changes-panel {
 .file-explorer-changes-head {
   position: sticky;
   top: 0;
-  z-index: 6;
+  z-index: var(--z-sticky-pane-head);
   display: grid;
   /* C6 moved the diff-ref controls into each repo header; C8 added a compact sort. Children are now
      title (flex), sort, date mode, refresh, close. */
@@ -10870,7 +11269,7 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
 }
 .file-editor-diff-codemirror .cm-searchMatch {
   position: relative;
-  z-index: 1;
+  z-index: var(--z-inline-control);
   color: var(--diff-search-match-fg) !important;
   background: var(--diff-search-match-bg) !important;
   box-shadow: inset 0 0 0 1px var(--diff-search-match-ring), 0 0 0 1px rgb(var(--shadow-rgb) / 0.54) !important;
@@ -10899,7 +11298,7 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
   position: absolute !important;
   inset-block-start: 2px;
   inset-inline-end: 8px !important;
-  z-index: 2;
+  z-index: var(--z-panel-resizer-inline);
   display: inline-flex;
   gap: 2px;
   align-items: center;
@@ -10919,14 +11318,14 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
   position: absolute;
   inset-block: 0;
   inset-inline-end: 14px;
-  z-index: 4;
+  z-index: var(--z-file-editor-preview-layer);
   width: 4px;
   pointer-events: none;
 }
 .file-editor-diff-codemirror .cm-diff-overview-viewport {
   position: absolute;
   inset-inline: -2px;
-  z-index: 1;
+  z-index: var(--z-inline-control);
   box-sizing: border-box;
   min-height: 6px;
   border: 1px solid rgba(226, 238, 248, 0.18);
@@ -10962,9 +11361,9 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-deletedChunk .cm-delete
   text-decoration-color: var(--danger-light-text);
 }
 body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText {
-  color: #064e3b;
+  color: var(--success-text-strong);
   background: #b9e7c2;
-  text-decoration-color: #064e3b;
+  text-decoration-color: var(--success-text-strong);
 }
 /* Inline (non-mergeview) editor diff decorations read --code-diff-* from the content
    scope; the light values were scoped ONLY to .file-editor-diff-codemirror, so the
@@ -11550,7 +11949,7 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
 }
 .file-editor-codemirror,
 .file-editor-codemirror-panel {
-  z-index: 3;
+  z-index: var(--z-file-editor-layer);
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -11597,7 +11996,7 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
 .cm-wrap-marker-layer {
   position: absolute;
   inset: 0 auto auto 0;
-  z-index: 8;
+  z-index: var(--z-editor-wrap-marker);
   pointer-events: none;
 }
 .cm-wrap-marker {
@@ -11606,7 +12005,7 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #9fd8ff;
+  color: var(--accent-sky-strong);
   font-weight: 900;
   opacity: 0.86;
   text-indent: 0;
@@ -11704,12 +12103,12 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   grid-column: 1;
   grid-row: 2;
   margin-inline-start: 0;
-  border-color: #6f7b8c;
+  border-color: var(--neutral-border-strong);
   box-shadow: none;
 }
 .file-editor-codemirror .cm-search .cm-textfield:focus,
 .file-editor-codemirror-panel .cm-search .cm-textfield:focus {
-  border-color: #9fd8ff;
+  border-color: var(--accent-sky-strong);
   outline: none;
   box-shadow: 0 0 0 2px rgba(159, 216, 255, 0.22);
 }
@@ -11726,7 +12125,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   color: var(--text);
   background: rgba(255, 255, 255, 0.055);
   background-image: none;
-  border: 1px solid #6f7b8c;
+  border: 1px solid var(--neutral-border-strong);
   border-radius: var(--radius-control);
   font: 700 0/1 var(--ui-font);
   white-space: nowrap;
@@ -11805,7 +12204,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
 .file-editor-codemirror .cm-search .cm-button:hover,
 .file-editor-codemirror-panel .cm-search .cm-button:hover {
   color: #ffffff;
-  border-color: #9fd8ff;
+  border-color: var(--accent-sky-strong);
   background: rgba(159, 216, 255, 0.12);
 }
 .file-editor-codemirror .cm-search label,
@@ -11821,7 +12220,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   margin: 0;
   color: var(--muted);
   background: rgba(255, 255, 255, 0.045);
-  border: 1px solid #6f7b8c;
+  border: 1px solid var(--neutral-border-strong);
   border-radius: var(--radius-control);
   font: 700 0/1 var(--ui-font);
   white-space: nowrap;
@@ -11953,7 +12352,7 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
   color: var(--lt-markdown-heading);
 }
 .file-editor-raw-panel {
-  z-index: 3;
+  z-index: var(--z-file-editor-layer);
   margin: 0;
   overflow: auto;
   padding: 8px 10px;
@@ -12147,7 +12546,7 @@ body.editor-theme-light .cm-content .md-code {
   color: var(--code-tag);
 }
 .file-editor-preview-pane-panel {
-  z-index: 4;
+  z-index: var(--z-file-editor-preview-layer);
   min-height: 0;
   overflow: auto;
   padding: 12px 16px;
@@ -12229,7 +12628,7 @@ body.editor-theme-light .file-editor-native-video {
   background: #000;
 }
 .file-editor-image-panel {
-  z-index: 4;
+  z-index: var(--z-file-editor-preview-layer);
   min-height: 0;
   display: grid;
   place-items: center;
@@ -12251,7 +12650,7 @@ body.editor-theme-light .file-editor-native-video {
 }
 .file-editor-empty-state {
   position: relative;
-  z-index: 1;
+  z-index: var(--z-inline-control);
   max-width: min(60ch, 100%);
   padding: 16px;
   color: var(--pane-tab-text);
@@ -12378,8 +12777,8 @@ body.editor-theme-light .file-editor-native-video {
   white-space: nowrap;
 }
 
-/* Tabber (Finder pane 3rd mode) rows reuse the .file-tree-row DOM; only the detail column (pane cwd /
-   session work description, carried in the agent slot) and the active-window emphasis are tabber-specific. */
+/* Tabber (Finder pane 3rd mode) rows reuse the .file-tree-row DOM; only the level-0 session label shape,
+   the window/process detail, and the active-window emphasis are tabber-specific. */
 .file-tree-row.tabber-row {
   --tabber-level0-color: var(--markdown-heading);
   --tabber-level1-color: var(--code-function);
@@ -12396,9 +12795,53 @@ body.theme-light .file-tree-row.tabber-row {
   background: var(--file-hover-bg);
   box-shadow: inset 4px 0 0 var(--file-hover-border), inset 0 0 0 1px var(--file-hover-outline);
 }
-.file-tree-row.tabber-row .tabber-session-name,
-.file-tree-row.tabber-row .tabber-session-description {
+.file-tree-row.tabber-row[data-tabber-type="session"] > .file-tree-name {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-inline-size: 100%;
+}
+.file-tree-row.tabber-row .tabber-session-tab {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  max-inline-size: min(var(--pane-tab-width), 100%);
+  height: var(--pane-tab-height);
+  padding: 1px 5px 0;
+  color: var(--pane-tab-text);
+  background: var(--pane-bar-bg, var(--panel2));
+  border: 1px solid var(--pane-inactive-tab-border);
+  border-bottom-color: var(--pane-inactive-tab-border);
+  border-radius: 6px 6px 0 0;
+  font-family: var(--tab-font);
+  font-size: var(--tab-label-size);
+  font-stretch: condensed;
+  font-weight: 500;
+  line-height: var(--tab-line-height);
+  text-align: start;
+  white-space: nowrap;
+  overflow: hidden;
   cursor: pointer;
+}
+.file-tree-row.tabber-row[data-tabber-type="session"]:not(.tabber-active-session):not(.selected):hover .tabber-session-tab {
+  color: var(--pane-tab-text);
+  background: var(--pane-inactive-tab-bg-hover);
+  border-color: rgba(255, 255, 255, 0.92);
+}
+body.theme-light .file-tree-row.tabber-row[data-tabber-type="session"]:not(.tabber-active-session):not(.selected):hover .tabber-session-tab {
+  border-color: rgb(var(--overlay-slate-rgb) / 0.5);
+}
+.file-tree-row.tabber-row.tabber-active-session .tabber-session-tab,
+.file-tree-row.tabber-row .tabber-session-tab.active {
+  color: var(--pane-tab-active-text);
+  background: var(--pane-tab-active-bg);
+  border-color: var(--pane-tab-active-border);
+  border-bottom-color: var(--pane-tab-active-bg);
+}
+.file-tree-row.tabber-row.selected .tabber-session-tab {
+  box-shadow: 0 0 0 1px var(--active-control-focus-ring);
 }
 .file-tree-row.tabber-row .tabber-window-label {
   min-width: 0;
@@ -12425,14 +12868,21 @@ body.theme-light .file-tree-row.tabber-row {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.file-tree-row.tabber-row .tabber-session-description {
-  color: var(--tabber-level0-color);
-  margin-inline-start: 8px;
-  font-weight: 500;
-}
-.file-tree-row.tabber-row[data-tabber-type="session"]:not(.selected) .tabber-session-name {
-  color: var(--tabber-level0-color);
+.file-tree-row.tabber-row .tabber-session-name {
+  flex: 0 0 auto;
+  min-width: 0;
+  max-inline-size: clamp(4ch, 28%, 10ch);
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-weight: 800;
+}
+.file-tree-row.tabber-row .tabber-session-description {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: currentColor;
+  font-weight: 500;
 }
 .file-tree-row.tabber-row[data-tabber-type="session"]:not(.selected) > .file-tree-icon {
   color: var(--tabber-level0-color);

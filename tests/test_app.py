@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 import io
 import json
+import os
 from pathlib import Path
 import threading
 from types import SimpleNamespace
@@ -32,15 +33,17 @@ def isolated_yoagent_conversation_state(monkeypatch, tmp_path):
     monkeypatch.setattr(app_module.yoagent_conversation, "YOAGENT_CONVERSATION_PATH", state_dir / "conversation.jsonl")
     monkeypatch.setattr(app_module.yoagent_conversation, "YOAGENT_CLI_STATE_PATH", state_dir / "cli-sessions.json")
     monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
+    monkeypatch.setattr(app_module, "EVENT_LOG_PATH", tmp_path / "events.jsonl")
 
 
 def test_session_http_guards_use_shared_decorator():
     source = Path(app_module.__file__).read_text(encoding="utf-8")
 
     assert "def requires_known_session(" in source
-    assert source.count("unknown = self.require_known_session(session)") == 3
+    assert source.count("unknown = self.require_known_session(session)") == 1
     assert "@requires_known_session(refresh=True)\n    def rename_session" in source
     assert "@requires_known_session()\n    def tmux_snapshot" in source
+    assert source.count("@requires_known_session(") >= 10
 
 
 class FakeCodexAppServerStdin:
@@ -904,6 +907,49 @@ def test_activity_summary_payload_prioritizes_tmux_recent_sessions(monkeypatch):
     assert payload["session_order"] == ["3", "2", "1"]
 
 
+def test_activity_summary_payload_all_scope_includes_visible_tmux_sessions(monkeypatch):
+    infos = {
+        name: SessionInfo(session=name, panes=[], selected_pane=None, agents=[])
+        for name in ("1", "external")
+    }
+    discovered = []
+    monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["1", "external"], None))
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: discovered.append(list(sessions)) or ({name: infos[name] for name in sessions if name in infos}, []))
+    monkeypatch.setattr(app_module, "session_project_metadata", lambda info, cache, allow_network=False: {})
+    monkeypatch.setattr(app_module, "build_session_activity_summary", lambda info, project, files: {"session": info.session, "agent": "", "active": False, "repos": [], "files": {"count": 0, "added": 0, "removed": 0}, "lines": []})
+    webapp = app_module.TmuxWebtermApp(["1"])
+    webapp.warm_metadata_cache_async = lambda sessions: None
+    summary_hours = []
+
+    def fake_cached_session_files_payload_for_info(info, hours=24.0):
+        summary_hours.append(hours)
+        return {"files": [], "repos": [], "errors": []}
+
+    webapp.cached_session_files_payload_for_info = fake_cached_session_files_payload_for_info
+    webapp.tmux_signal_snapshot = lambda force=False: {
+        "sessions": {
+            "1": {"activity_ts": 10, "last_attached_ts": 0},
+            "external": {"activity_ts": 100, "last_attached_ts": 0},
+        },
+        "windows": [],
+    }
+    try:
+        configured = webapp.activity_summary_payload()
+        all_sessions = webapp.activity_summary_payload(session_scope="all", hours=336)
+    finally:
+        webapp.control_server.stop()
+
+    assert ["1"] in discovered
+    assert ["1", "external"] in discovered
+    assert configured["session_order"] == ["1"]
+    assert configured["session_scope"] == "configured"
+    assert all_sessions["session_order"] == ["external", "1"]
+    assert all_sessions["session_scope"] == "all"
+    assert all_sessions["session_file_hours"] == 336.0
+    assert set(all_sessions["sessions"]) == {"1", "external"}
+    assert summary_hours[-2:] == [336.0, 336.0]
+
+
 def test_activity_payload_and_summary_tick_prioritize_tmux_recent_sessions(monkeypatch):
     agent_infos = {
         name: SessionInfo(
@@ -962,6 +1008,63 @@ def test_activity_payload_and_summary_tick_prioritize_tmux_recent_sessions(monke
     assert [row["session"] for row in activity["agents"]] == ["2", "1"]
     assert updated == ["2", "1"]
     assert [item["session"] for item in tick["skipped"]] == ["2", "1"]
+
+
+def test_activity_payload_all_scope_uses_visible_tmux_sessions(monkeypatch):
+    agent_infos = {
+        name: SessionInfo(
+            session=name,
+            panes=[],
+            selected_pane=None,
+            agents=[
+                AgentInfo(
+                    session=name,
+                    kind="codex",
+                    pid=200 + index,
+                    pane_target=f"{name}:0.0",
+                    command="codex",
+                    cwd="/repo",
+                    status="running",
+                    session_id=f"sid-{name}",
+                    transcript=None,
+                    error=None,
+                )
+            ],
+        )
+        for index, name in enumerate(("1", "external"))
+    }
+    discovered = []
+    monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["1", "external"], None))
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: discovered.append(list(sessions)) or ({name: agent_infos[name] for name in sessions if name in agent_infos}, []))
+    webapp = app_module.TmuxWebtermApp(["1"])
+    webapp.tmux_signal_snapshot = lambda force=False: {
+        "sessions": {
+            "1": {"activity_ts": 10, "last_attached_ts": 0},
+            "external": {"activity_ts": 100, "last_attached_ts": 0},
+        },
+        "windows": [],
+    }
+    activity_hours = []
+
+    def fake_cached_session_files_payloads_for_infos(infos, hours=24.0):
+        activity_hours.append(hours)
+        return {session: {"files": [], "repos": []} for session in infos}
+
+    webapp.cached_session_files_payloads_for_infos = fake_cached_session_files_payloads_for_infos
+    try:
+        configured = webapp.build_activity_payload()
+        all_sessions = webapp.build_activity_payload(session_scope="all", hours=0.5)
+    finally:
+        webapp.control_server.stop()
+
+    assert ["1"] in discovered
+    assert ["1", "external"] in discovered
+    assert [row["session"] for row in configured["agents"]] == ["1"]
+    assert configured["session_scope"] == "configured"
+    assert [row["session"] for row in all_sessions["agents"]] == ["external", "1"]
+    assert all_sessions["session_scope"] == "all"
+    assert all_sessions["session_file_hours"] == 0.5
+    assert activity_hours[-1] == 0.5
 
 
 def test_recent_agents_payload_filters_paths_by_agent_window():
@@ -1354,7 +1457,18 @@ def test_activity_summary_payload_reuses_cached_session_summary(monkeypatch, tmp
     calls = []
 
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
-    monkeypatch.setattr(app_module, "session_project_metadata", lambda info, cache, allow_network=False: {"git": {"root": str(tmp_path), "branch": "main", "dirty_count": 1}, "pull_request": None, "linear": []})
+    project_payload = {
+        "git": {"root": str(tmp_path), "cwd": str(tmp_path), "branch": "main", "dirty_count": 1, "ahead": 2, "behind": 3},
+        "pull_request": {
+            "number": 42,
+            "title": "Add info drawer",
+            "url": "https://example.test/pull/42",
+            "status_label": "passing",
+            "checks": {"status_label": "passing"},
+        },
+        "linear": [{"identifier": "GUI-7", "title": "Info drawer metadata", "state": "In Progress"}],
+    }
+    monkeypatch.setattr(app_module, "session_project_metadata", lambda info, cache, allow_network=False: project_payload)
     monkeypatch.setattr(app_module.session_files, "session_files_payload_for_info", lambda info, hours=24.0, **_kwargs: files_payload)
 
     def fake_build(info, project, files):
@@ -1365,6 +1479,7 @@ def test_activity_summary_payload_reuses_cached_session_summary(monkeypatch, tmp
     webapp = app_module.TmuxWebtermApp(["5"])
     webapp.warm_metadata_cache_async = lambda sessions: None
     try:
+        webapp.log_event("5", "state_changed", "ready", {})
         first = webapp.activity_summary_payload()
         second = webapp.activity_summary_payload()
         third = webapp.activity_summary_payload(force=True)
@@ -1376,6 +1491,13 @@ def test_activity_summary_payload_reuses_cached_session_summary(monkeypatch, tmp
     assert first["global"]["files"] == {"count": 1, "added": 1, "removed": 0}
     assert first["agents"][0]["label"] == "session '5' 0:codex"
     assert first["agents"][0]["recent_paths"][0]["path"] == str(tmp_path)
+    assert first["session_info"]["5"]["path"] == str(tmp_path)
+    assert first["session_info"]["5"]["git"] == project_payload["git"]
+    assert first["session_info"]["5"]["pull_request"]["number"] == 42
+    assert first["session_info"]["5"]["ci"] == {"status_label": "passing"}
+    assert first["session_info"]["5"]["linear"][0]["identifier"] == "GUI-7"
+    assert first["session_info"]["5"]["latest_summary"] == "cached test"
+    assert first["session_info"]["5"]["recent_events"][0]["message"] == "ready"
     assert second["sessions"]["5"]["local"] == "cached test"
     assert third["sessions"]["5"]["local"] == "cached test"
     assert localized["locale"] == "zh-Hant"
@@ -1511,6 +1633,21 @@ def test_corrupt_activity_ledger_does_not_break_app_start(monkeypatch, tmp_path)
 
     assert status == HTTPStatus.OK
     assert payload["activity"] == {}
+
+
+def test_normalized_client_session_files_uses_shared_lookback_bounds():
+    webapp = app_module.TmuxWebtermApp(["5"])
+    try:
+        items = webapp.normalized_client_session_files([
+            {"session": "half-hour", "hours": 0.5},
+            {"session": "two-weeks", "hours": 336},
+            {"session": "too-high", "hours": 24 * 365},
+        ])
+    finally:
+        webapp.control_server.stop()
+
+    assert [item["session"] for item in items] == ["half-hour", "two-weeks", "too-high"]
+    assert [item["hours"] for item in items] == [0.5, 336.0, float(app_module.session_files.SESSION_FILES_MAX_HOURS)]
 
 
 def test_session_files_payload_reuses_short_cache(monkeypatch):
@@ -2139,7 +2276,7 @@ def test_yoagent_chat_uses_deterministic_fallback(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["5"])
     webapp.warm_metadata_cache_async = lambda sessions: None
     monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "deterministic", "invocation": "cli"})
-    monkeypatch.setattr(webapp, "activity_summary_payload", lambda: {
+    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {
         "generated_at": "2026-05-31T00:00:00+00:00",
         "session_order": ["5"],
         "global": {"headline": "You have 1 AI agent working on editor fixes across yolomux."},
@@ -2208,7 +2345,7 @@ def test_yoagent_chat_sends_to_accepting_agent_pane_without_extra_confirmation(m
     monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["6"], None))
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"6": info}, []))
     monkeypatch.setattr(webapp, "yoagent_action_pane_status", lambda session, target, **_kwargs: ({}, {"key": "idle", "text": ""}))
-    monkeypatch.setattr(webapp, "activity_summary_payload", lambda: {
+    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {
         "generated_at": "2026-06-13T17:40:00+00:00",
         "session_order": ["6"],
         "global": {"headline": "Session 6 is idle."},
@@ -2279,7 +2416,7 @@ def test_yoagent_chat_sends_to_agent_waiting_for_input(monkeypatch):
     monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["1"], None))
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"1": info}, []))
     monkeypatch.setattr(webapp, "yoagent_action_pane_status", lambda session, target, **_kwargs: ({}, {"key": "needs-input", "text": "Want me to keep using system PT?"}))
-    monkeypatch.setattr(webapp, "activity_summary_payload", lambda: {
+    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {
         "generated_at": "2026-06-13T17:40:00+00:00",
         "session_order": ["1"],
         "global": {"headline": "Session 1 is waiting for input."},
@@ -2350,7 +2487,88 @@ def test_yoagent_chat_sends_and_starts_background_result_watch(monkeypatch):
     monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["6"], None))
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"6": info}, []))
     monkeypatch.setattr(webapp, "yoagent_action_pane_status", lambda session, target, **_kwargs: ({}, {"key": "idle", "text": ""}))
-    monkeypatch.setattr(webapp, "activity_summary_payload", lambda: {
+    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {
+        "generated_at": "2026-06-13T17:40:00+00:00",
+        "session_order": ["6"],
+        "global": {"headline": "Session 6 is idle."},
+        "sessions": {"6": {"local": "Claude session 6 is idle in /repo/app."}},
+        "errors": [],
+    })
+    monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "deterministic", "invocation": "cli"})
+    monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: {})
+    monkeypatch.setattr(app_module, "tmux_paste_text", lambda target, text, submit=False: SimpleNamespace(returncode=0, stdout="", stderr=""))
+    watchers = []
+
+    def fake_start_result_watcher(preview, marker):
+        watchers.append((preview, marker))
+        webapp.register_yoagent_action_wait("wait-1", preview, marker)
+        return {"id": "wait-1", "started": True}
+
+    monkeypatch.setattr(webapp, "start_yoagent_action_result_watcher", fake_start_result_watcher)
+
+    try:
+        payload, status = webapp.yoagent_chat({"message": "send `date` to tmux session 6"})
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert "I am awaiting the response" in payload["answer"]
+    assert "```text\ndate\n```" in payload["answer"]
+    assert watchers
+    preview, marker = watchers[0]
+    assert preview["return_result"] is True
+    assert preview["target"]["transport"] == "tmux-legacy"
+    assert preview["target"]["transport_label"] == "legacy tmux pane paste + Return"
+    assert preview["target"]["agent_transcript"] == "/tmp/claude-session-6.jsonl"
+    assert marker["transcript"] == "/tmp/claude-session-6.jsonl"
+    pending_waits = payload["conversation"]["pending_waits"]
+    assert len(pending_waits) == 1
+    assert pending_waits[0]["id"] == "wait-1"
+    assert pending_waits[0]["session"] == "6"
+    assert pending_waits[0]["transcript"] == "/tmp/claude-session-6.jsonl"
+
+
+def test_yoagent_chat_direct_send_can_opt_out_of_background_result_watch(monkeypatch):
+    pane = PaneInfo(
+        session="6",
+        window="0",
+        window_name="claude",
+        pane="0",
+        pane_id="%6",
+        target="%6",
+        current_path="/repo/app",
+        command="claude",
+        active=True,
+        window_active=True,
+        title="",
+        pid=123,
+    )
+    info = SessionInfo(
+        session="6",
+        panes=[pane],
+        selected_pane=pane,
+        agents=[
+            AgentInfo(
+                session="6",
+                kind="claude",
+                pid=123,
+                pane_target="%6",
+                command="claude",
+                cwd="/repo/app",
+                status=None,
+                session_id="claude-session-6",
+                transcript="/tmp/claude-session-6.jsonl",
+                error=None,
+                model="opus",
+            )
+        ],
+    )
+    webapp = app_module.TmuxWebtermApp(["6"])
+    monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["6"], None))
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"6": info}, []))
+    monkeypatch.setattr(webapp, "yoagent_action_pane_status", lambda session, target, **_kwargs: ({}, {"key": "idle", "text": ""}))
+    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {
         "generated_at": "2026-06-13T17:40:00+00:00",
         "session_order": ["6"],
         "global": {"headline": "Session 6 is idle."},
@@ -2364,21 +2582,13 @@ def test_yoagent_chat_sends_and_starts_background_result_watch(monkeypatch):
     monkeypatch.setattr(webapp, "start_yoagent_action_result_watcher", lambda preview, marker: watchers.append((preview, marker)) or {"started": True})
 
     try:
-        payload, status = webapp.yoagent_chat({"message": "send `date` to tmux session 6 and show the result here"})
+        payload, status = webapp.yoagent_chat({"message": "send `date` to tmux session 6 but do not wait for the result"})
     finally:
         webapp.control_server.stop()
 
     assert status == HTTPStatus.OK
-    assert "show the result here" in payload["answer"]
-    assert "I am awaiting the response" in payload["answer"]
-    assert "```text\ndate\n```" in payload["answer"]
-    assert watchers
-    preview, marker = watchers[0]
-    assert preview["return_result"] is True
-    assert preview["target"]["transport"] == "tmux-legacy"
-    assert preview["target"]["transport_label"] == "legacy tmux pane paste + Return"
-    assert preview["target"]["agent_transcript"] == "/tmp/claude-session-6.jsonl"
-    assert marker["transcript"] == "/tmp/claude-session-6.jsonl"
+    assert "I am awaiting the response" not in payload["answer"]
+    assert watchers == []
 
 
 def test_yoagent_managed_transport_result_is_recorded_without_tmux_watcher(monkeypatch):
@@ -2835,6 +3045,58 @@ def test_yoagent_pending_waits_show_and_clear(monkeypatch):
     ]
 
 
+def test_yoagent_pending_waits_multiple_in_flight_coexist_and_clear_independently(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["6", "7"])
+    preview_one = {
+        "session": "6",
+        "text": "tell me the date",
+        "return_result": True,
+        "target": {"session": "6", "pane_target": "%6", "agent_kind": "claude", "agent_transcript": "/tmp/claude-session-6.jsonl", "transport": "pane-paste"},
+    }
+    preview_two = {
+        "session": "7",
+        "text": "what time is it?",
+        "return_result": True,
+        "target": {"session": "7", "pane_target": "%7", "agent_kind": "codex", "agent_transcript": "/tmp/codex-session-7.jsonl", "transport": "pane-paste"},
+    }
+    events = []
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
+    monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
+
+    try:
+        webapp.register_yoagent_action_wait("wait-1", preview_one, {"transcript": "/tmp/claude-session-6.jsonl"})
+        webapp.register_yoagent_action_wait("wait-2", preview_two, {"transcript": "/tmp/codex-session-7.jsonl"})
+        waiting = webapp.yoagent_conversation_payload()["pending_waits"]
+        webapp.record_yoagent_action_result(preview_one, "Session 6 date result.")
+        webapp.finish_yoagent_action_wait("wait-1", "yoagent_wait_finished")
+        remaining = webapp.yoagent_conversation_payload()["pending_waits"]
+        webapp.record_yoagent_action_result(preview_two, "Session 7 time result.")
+        webapp.finish_yoagent_action_wait("wait-2", "yoagent_wait_finished")
+        conversation = webapp.yoagent_conversation_payload()
+        cleared = conversation["pending_waits"]
+    finally:
+        webapp.control_server.stop()
+
+    assert [item["id"] for item in waiting] == ["wait-1", "wait-2"]
+    assert [item["session"] for item in waiting] == ["6", "7"]
+    assert [item["transcript"] for item in waiting] == ["/tmp/claude-session-6.jsonl", "/tmp/codex-session-7.jsonl"]
+    assert [item["wait_seconds"] for item in waiting] == [app_module.YOAGENT_ACTION_RESULT_WAIT_SECONDS, app_module.YOAGENT_ACTION_RESULT_WAIT_SECONDS]
+    assert [item["id"] for item in remaining] == ["wait-2"]
+    assert cleared == []
+    result_messages = [item for item in conversation["messages"] if item.get("kind") == "agent_result"]
+    assert [item["session"] for item in result_messages] == ["6", "7"]
+    assert "Session 6 date result." in result_messages[0]["content"]
+    assert "Session 7 time result." in result_messages[1]["content"]
+    assert events == [
+        ("yoagent_conversation_changed", {"reason": "yoagent_wait_started"}),
+        ("yoagent_conversation_changed", {"reason": "yoagent_wait_started"}),
+        ("yoagent_conversation_changed", {"reason": "yoagent_result"}),
+        ("yoagent_conversation_changed", {"reason": "yoagent_wait_finished"}),
+        ("yoagent_conversation_changed", {"reason": "yoagent_result"}),
+        ("yoagent_conversation_changed", {"reason": "yoagent_wait_finished"}),
+    ]
+
+
 def test_yoagent_handoff_pending_wait_label_includes_regarding(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["1", "2"])
     preview = {
@@ -3210,7 +3472,7 @@ def test_yoagent_chat_clears_existing_draft_before_send(monkeypatch):
     monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["1"], None))
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"1": info}, []))
     monkeypatch.setattr(app_module, "tmux_capture_pane", lambda target, visible_only=False: empty_text if cleared["value"] else draft_text)
-    monkeypatch.setattr(webapp, "activity_summary_payload", lambda: {
+    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {
         "generated_at": "2026-06-13T17:40:00+00:00",
         "session_order": ["1"],
         "global": {"headline": "Session 1 is idle."},
@@ -3291,6 +3553,103 @@ def test_yoagent_send_refuses_when_existing_draft_does_not_clear(monkeypatch):
     assert "did not clear" in result["error"]
 
 
+def test_yoagent_claude_try_suggestion_is_idle_and_accepting(monkeypatch):
+    visible_text = "\n".join([
+        "✻ Welcome back",
+        "────────────────────────────────────────────────────────────────",
+        "❯ Try \"fix typecheck errors\"",
+        "────────────────────────────────────────────────────────────────",
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+    ])
+    webapp = app_module.TmuxWebtermApp(["target-agent"])
+    monkeypatch.setattr(app_module, "tmux_capture_pane", lambda target, visible_only=False: visible_text)
+    info = SessionInfo(session="target-agent", panes=[], selected_pane=None, agents=[])
+
+    try:
+        prompt, screen = webapp.yoagent_action_pane_status("target-agent", "%77", discovered_sessions={"target-agent": info})
+        accepting, acceptance_text = webapp.yoagent_action_acceptance({
+            "agent_kind": "claude",
+            "pane_target": "%77",
+            "prompt": prompt,
+            "screen": screen,
+        })
+    finally:
+        webapp.control_server.stop()
+
+    assert webapp.yoagent_visible_composer_text(visible_text) == ""
+    assert screen["key"] == "idle"
+    assert screen["text"] == ""
+    assert screen["negative_reason"] == "idle composer"
+    assert accepting is True
+    assert acceptance_text == "target agent is accepting an AI prompt"
+
+
+def test_yoagent_send_to_claude_try_suggestion_does_not_clear(monkeypatch):
+    pane = PaneInfo(
+        session="target-agent",
+        window="0",
+        window_name="claude",
+        pane="0",
+        pane_id="%77",
+        target="%77",
+        current_path="/repo/app",
+        command="claude",
+        active=True,
+        window_active=True,
+        title="",
+        pid=123,
+    )
+    info = SessionInfo(
+        session="target-agent",
+        panes=[pane],
+        selected_pane=pane,
+        agents=[
+            AgentInfo(
+                session="target-agent",
+                kind="claude",
+                pid=123,
+                pane_target="%77",
+                command="claude",
+                cwd="/repo/app",
+                status=None,
+                session_id="claude-session-target-agent",
+                transcript="/tmp/claude-session-target-agent.jsonl",
+                error=None,
+            )
+        ],
+    )
+    visible_text = "\n".join([
+        "────────────────────────────────────────────────────────────────",
+        "❯ Try \"fix typecheck errors\"",
+        "────────────────────────────────────────────────────────────────",
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+    ])
+    operations = []
+    webapp = app_module.TmuxWebtermApp(["target-agent"])
+    monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["target-agent"], None))
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"target-agent": info}, []))
+    monkeypatch.setattr(app_module, "tmux_capture_pane", lambda target, visible_only=False: visible_text)
+    monkeypatch.setattr(app_module, "tmux_clear_input", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("placeholder must not be cleared")))
+    monkeypatch.setattr(app_module, "tmux_paste_text", lambda target, text, submit=False: operations.append(("paste", target, text, submit)) or SimpleNamespace(returncode=0, stdout="", stderr=""))
+    monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
+
+    try:
+        preview, preview_status = webapp.create_yoagent_action_preview({"type": "send_prompt", "session": "target-agent", "text": "tell me the date"})
+        result, result_status = webapp.execute_yoagent_send_action({"preview_id": preview["id"]})
+    finally:
+        webapp.control_server.stop()
+
+    assert preview_status == HTTPStatus.OK
+    assert preview["screen"]["key"] == "idle"
+    assert preview["screen"]["text"] == ""
+    assert preview["screen"]["negative_reason"] == "idle composer"
+    assert preview["acceptance_text"] == "target agent is accepting an AI prompt"
+    assert result_status == HTTPStatus.OK
+    assert result["sent"] is True
+    assert result.get("cleared_input") is None
+    assert operations == [("paste", "%77", "tell me the date", True)]
+
+
 def test_yoagent_composer_text_ignores_completed_prompt_history():
     visible_text = "\n".join([
         "❯ what time it is",
@@ -3366,6 +3725,53 @@ def test_yoagent_composer_text_keeps_real_multiline_draft():
         webapp.control_server.stop()
 
 
+def test_yoagent_composer_text_keeps_real_claude_draft(monkeypatch):
+    visible_text = "\n".join([
+        "new task? /clear to save 193.6k tokens",
+        "────────────────────────────────────────────────────────────────",
+        "❯ Write tests for @filename",
+        "────────────────────────────────────────────────────────────────",
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+    ])
+    webapp = app_module.TmuxWebtermApp(["1"])
+    monkeypatch.setattr(app_module, "tmux_capture_pane", lambda target, visible_only=False: visible_text)
+    info = SessionInfo(session="1", panes=[], selected_pane=None, agents=[])
+
+    try:
+        prompt, screen = webapp.yoagent_action_pane_status("1", "%1", discovered_sessions={"1": info})
+        accepting, acceptance_text = webapp.yoagent_action_acceptance({
+            "agent_kind": "claude",
+            "pane_target": "%1",
+            "prompt": prompt,
+            "screen": screen,
+        })
+    finally:
+        webapp.control_server.stop()
+
+    assert webapp.yoagent_visible_composer_text(visible_text) == "Write tests for @filename"
+    assert screen["key"] == "input-draft"
+    assert screen["detected_text"] == "Write tests for @filename"
+    assert accepting is True
+    assert acceptance_text == "target input box has unsent text; YO!agent will clear it before sending"
+
+
+def test_yoagent_composer_text_ignores_codex_template_placeholder():
+    visible_text = "\n".join([
+        "╭─────────────────────────────────────────────╮",
+        "│ >_ OpenAI Codex (v0.140.0)                  │",
+        "╰─────────────────────────────────────────────╯",
+        "",
+        "› Implement {feature}",
+        "",
+        "  gpt-5.5 xhigh · ~/yolomux.dev8001",
+    ])
+    webapp = app_module.TmuxWebtermApp(["9"])
+    try:
+        assert webapp.yoagent_visible_composer_text(visible_text) == ""
+    finally:
+        webapp.control_server.stop()
+
+
 def test_yoagent_composer_text_keeps_codex_bottom_draft():
     visible_text = "\n".join([
         "• Wrote /tmp/hangman.py and verified it.",
@@ -3379,6 +3785,86 @@ def test_yoagent_composer_text_keeps_codex_bottom_draft():
         assert webapp.yoagent_visible_composer_text(visible_text) == "Write tests for @filename"
     finally:
         webapp.control_server.stop()
+
+
+def test_yoagent_clear_target_composer_ignores_claude_try_placeholder(monkeypatch):
+    visible_text = "\n".join([
+        "────────────────────────────────────────────────────────────────",
+        "❯ Try \"fix typecheck errors\"",
+        "────────────────────────────────────────────────────────────────",
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+    ])
+    webapp = app_module.TmuxWebtermApp(["target-agent"])
+    clear_calls = []
+    monkeypatch.setattr(app_module, "tmux_capture_pane", lambda target, visible_only=False: visible_text)
+    monkeypatch.setattr(app_module, "tmux_clear_input", lambda target: clear_calls.append(target) or SimpleNamespace(returncode=0, stdout="", stderr=""))
+
+    try:
+        result = webapp.yoagent_clear_target_composer({"session": "target-agent", "pane_target": "%77"}, wait_seconds=0)
+    finally:
+        webapp.control_server.stop()
+
+    assert result == {"ok": True, "cleared": False, "detected_text": ""}
+    assert clear_calls == []
+
+
+def test_yoagent_clear_target_composer_accepts_claude_placeholder_after_clear(monkeypatch):
+    draft_text = "\n".join([
+        "────────────────────────────────────────────────────────────────",
+        "❯ Write tests for @filename",
+        "────────────────────────────────────────────────────────────────",
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+    ])
+    placeholder_text = "\n".join([
+        "────────────────────────────────────────────────────────────────",
+        "❯ Try \"fix typecheck errors\"",
+        "────────────────────────────────────────────────────────────────",
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+    ])
+    cleared = {"value": False}
+    webapp = app_module.TmuxWebtermApp(["1"])
+    clear_calls = []
+    monkeypatch.setattr(app_module, "tmux_capture_pane", lambda target, visible_only=False: placeholder_text if cleared["value"] else draft_text)
+
+    def fake_clear(target):
+        clear_calls.append(target)
+        cleared["value"] = True
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(app_module, "tmux_clear_input", fake_clear)
+
+    try:
+        result = webapp.yoagent_clear_target_composer({"session": "1", "pane_target": "%1"}, wait_seconds=0)
+    finally:
+        webapp.control_server.stop()
+
+    assert result == {"ok": True, "cleared": True, "detected_text": "Write tests for @filename"}
+    assert clear_calls == ["%1"]
+
+
+def test_yoagent_clear_target_composer_still_fails_when_real_draft_remains(monkeypatch):
+    visible_text = "\n".join([
+        "────────────────────────────────────────────────────────────────",
+        "❯ Write tests for @filename",
+        "────────────────────────────────────────────────────────────────",
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+    ])
+    webapp = app_module.TmuxWebtermApp(["1"])
+    clear_calls = []
+    monkeypatch.setattr(app_module, "tmux_capture_pane", lambda target, visible_only=False: visible_text)
+    monkeypatch.setattr(app_module, "tmux_clear_input", lambda target: clear_calls.append(target) or SimpleNamespace(returncode=0, stdout="", stderr=""))
+
+    try:
+        result = webapp.yoagent_clear_target_composer({"session": "1", "pane_target": "%1"}, wait_seconds=0)
+    finally:
+        webapp.control_server.stop()
+
+    assert result["ok"] is False
+    assert result["cleared"] is False
+    assert result["detected_text"] == "Write tests for @filename"
+    assert result["remaining_text"] == "Write tests for @filename"
+    assert "did not clear" in result["error"]
+    assert clear_calls == ["%1"]
 
 
 def test_yoagent_chat_preview_only_when_confirmation_requested(monkeypatch):
@@ -3420,7 +3906,7 @@ def test_yoagent_chat_preview_only_when_confirmation_requested(monkeypatch):
     monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["6"], None))
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"6": info}, []))
     monkeypatch.setattr(webapp, "yoagent_action_pane_status", lambda session, target, **_kwargs: ({}, {"key": "idle", "text": ""}))
-    monkeypatch.setattr(webapp, "activity_summary_payload", lambda: {
+    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {
         "generated_at": "2026-06-13T17:40:00+00:00",
         "session_order": ["6"],
         "global": {"headline": "Session 6 is idle."},
@@ -3483,7 +3969,7 @@ def test_yoagent_chat_does_not_send_when_target_agent_is_working(monkeypatch):
     monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["6"], None))
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"6": info}, []))
     monkeypatch.setattr(webapp, "yoagent_action_pane_status", lambda session, target, **_kwargs: ({}, {"key": "working", "text": "agent is working"}))
-    monkeypatch.setattr(webapp, "activity_summary_payload", lambda: {
+    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {
         "generated_at": "2026-06-13T17:40:00+00:00",
         "session_order": ["6"],
         "global": {"headline": "Session 6 is working."},
@@ -3601,7 +4087,7 @@ def test_yoagent_risky_chat_send_requires_preview_confirmation_and_redacts_secre
         "screen": {"key": "idle", "text": ""},
     }
     monkeypatch.setattr(webapp, "yoagent_action_target", lambda session: (target, HTTPStatus.OK))
-    monkeypatch.setattr(webapp, "activity_summary_payload", lambda: {"generated_at": "now", "session_order": ["6"], "global": {"headline": "Session 6 is idle."}, "sessions": {}, "errors": []})
+    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {"generated_at": "now", "session_order": ["6"], "global": {"headline": "Session 6 is idle."}, "sessions": {}, "errors": []})
     monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "deterministic", "invocation": "cli"})
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {"time": "event"})
     monkeypatch.setattr(app_module, "tmux_paste_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("risky target text must wait for confirmation")))
@@ -3768,7 +4254,7 @@ def test_yoagent_chat_wait_then_send_queues_job_when_target_is_working(monkeypat
         "screen": {"key": "working", "text": "working"},
     }
     monkeypatch.setattr(webapp, "yoagent_action_target", lambda session: (target, HTTPStatus.OK))
-    monkeypatch.setattr(webapp, "activity_summary_payload", lambda: {"generated_at": "now", "session_order": ["6"], "global": {"headline": "Session 6 is working."}, "sessions": {}, "errors": []})
+    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {"generated_at": "now", "session_order": ["6"], "global": {"headline": "Session 6 is working."}, "sessions": {}, "errors": []})
     monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "deterministic", "invocation": "cli"})
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {"time": "event"})
     monkeypatch.setattr(app_module, "tmux_paste_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("queued job must not paste now")))
@@ -3791,7 +4277,7 @@ def test_yoagent_capability_question_is_grounded_and_readonly(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["5"])
     webapp.warm_metadata_cache_async = lambda sessions: None
     monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "deterministic", "invocation": "cli"})
-    monkeypatch.setattr(webapp, "activity_summary_payload", lambda: {
+    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {
         "generated_at": "2026-05-31T00:00:00+00:00",
         "session_order": ["5"],
         "global": {"headline": "You have 1 AI agent working on editor fixes across yolomux."},
@@ -3823,7 +4309,7 @@ def test_yoagent_chat_can_update_user_skill_files(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["5"])
     webapp.warm_metadata_cache_async = lambda sessions: None
     monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "deterministic", "invocation": "cli"})
-    monkeypatch.setattr(webapp, "activity_summary_payload", lambda: {
+    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {
         "generated_at": "2026-05-31T00:00:00+00:00",
         "session_order": ["5"],
         "global": {"headline": "You have 1 AI agent working on editor fixes across yolomux."},
@@ -3862,7 +4348,7 @@ def test_yoagent_cli_auth_failure_is_actionable(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["5"])
     webapp.warm_metadata_cache_async = lambda sessions: None
     monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "claude", "invocation": "cli"})
-    monkeypatch.setattr(webapp, "activity_summary_payload", lambda: {
+    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {
         "generated_at": "2026-05-31T00:00:00+00:00",
         "session_order": ["5"],
         "global": {"headline": "You have 1 AI agent working on editor fixes across yolomux."},
@@ -4087,7 +4573,7 @@ def test_yoagent_chat_persists_conversation_until_reset(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["5"])
     webapp.warm_metadata_cache_async = lambda sessions: None
     monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "deterministic", "invocation": "cli"})
-    monkeypatch.setattr(webapp, "activity_summary_payload", lambda: {
+    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {
         "generated_at": "2026-05-31T00:00:00+00:00",
         "session_order": ["5"],
         "global": {"headline": "Session 5 is editing YO!agent."},
@@ -4115,7 +4601,7 @@ def test_yoagent_visible_prewarm_persists_startup_response(monkeypatch):
     events = []
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})) or {"type": event_type, "payload": payload or {}})
     monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "codex", "invocation": "cli", "codex_model": "gpt-5.4-mini"})
-    monkeypatch.setattr(webapp, "activity_summary_payload", lambda: {
+    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {
         "generated_at": "2026-05-31T00:00:00+00:00",
         "session_order": ["5"],
         "global": {"headline": "Session 5 is editing YO!agent."},
@@ -4410,8 +4896,100 @@ def test_self_update_dryrun_is_noop_with_plan():
     assert any("git pull" in step for step in result["plan"])
 
 
+def _self_restart_context(monkeypatch, tmp_path, argv, *, main_module_name=None):
+    checkout_root = tmp_path / "xyz"
+    checkout_root.mkdir()
+    (checkout_root / "yolomux.py").write_text("from yolomux_lib.cli import main\n", encoding="utf-8")
+    monkeypatch.setattr(app_module.common, "PROJECT_ROOT", checkout_root)
+    monkeypatch.setattr(app_module.sys, "argv", list(argv))
+    monkeypatch.setattr(app_module.sys, "executable", "/usr/bin/python3")
+    if main_module_name:
+        monkeypatch.setattr(
+            app_module.sys.modules["__main__"],
+            "__spec__",
+            SimpleNamespace(name=main_module_name),
+            raising=False,
+        )
+    webapp = app_module.TmuxWebtermApp.__new__(app_module.TmuxWebtermApp)
+    return checkout_root, webapp._self_restart_context()
+
+
+def test_self_update_restart_context_resolves_relative_script_launcher(monkeypatch, tmp_path):
+    checkout_root, context = _self_restart_context(
+        monkeypatch,
+        tmp_path,
+        ["yolomux.py", "--host", "0.0.0.0", "--port", "9101", "--dang", "--self-signed", "--dev"],
+    )
+
+    assert context.root == str(checkout_root.resolve())
+    assert context.argv == [
+        "/usr/bin/python3",
+        str((checkout_root / "yolomux.py").resolve()),
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "9101",
+        "--dang",
+        "--self-signed",
+        "--dev",
+    ]
+
+
+def test_self_update_restart_context_preserves_absolute_script_launcher(monkeypatch, tmp_path):
+    checkout_root, context = _self_restart_context(
+        monkeypatch,
+        tmp_path,
+        [str(tmp_path / "xyz" / "yolomux.py"), "--port", "8002", "--sessions", "2"],
+    )
+
+    assert context.root == str(checkout_root.resolve())
+    assert context.argv == [
+        "/usr/bin/python3",
+        str((checkout_root / "yolomux.py").resolve()),
+        "--port",
+        "8002",
+        "--sessions",
+        "2",
+    ]
+
+
+def test_self_update_restart_context_preserves_module_launcher(monkeypatch, tmp_path):
+    checkout_root, context = _self_restart_context(
+        monkeypatch,
+        tmp_path,
+        [str(tmp_path / "xyz" / "yolomux.py"), "--port", "8003", "--sessions", "3"],
+        main_module_name="yolomux",
+    )
+
+    assert context.root == str(checkout_root.resolve())
+    assert context.argv == ["/usr/bin/python3", "-m", "yolomux", "--port", "8003", "--sessions", "3"]
+
+
+def test_self_update_restart_context_preserves_stripped_launcher_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("YOLOMUX_EXTRA_PATH", "/opt/yolomux-agents")
+    monkeypatch.setenv("YOLOMUX_TEST_AUTH_BYPASS", "1")
+    monkeypatch.delenv("TERM", raising=False)
+    monkeypatch.delenv("PYTHONUNBUFFERED", raising=False)
+    _checkout_root, context = _self_restart_context(
+        monkeypatch,
+        tmp_path,
+        ["yolomux.py", "--port", "8004"],
+    )
+
+    path_parts = context.env["PATH"].split(os.pathsep)
+    assert path_parts[0] == "/opt/yolomux-agents"
+    assert "/usr/bin" in path_parts
+    assert str(Path.home() / ".local" / "bin") in path_parts
+    assert context.env["TERM"] == "xterm-256color"
+    assert context.env["PYTHONUNBUFFERED"] == "1"
+    assert context.env["YOLOMUX_TEST_AUTH_BYPASS"] == "1"
+
+
 def test_self_update_restart_uses_running_checkout(monkeypatch, tmp_path):
     checkout_root = tmp_path / "xyz"
+    checkout_root.mkdir()
+    (checkout_root / "yolomux.py").write_text("from yolomux_lib.cli import main\n", encoding="utf-8")
     captured = {}
 
     def fake_popen(args, **kwargs):
@@ -4420,6 +4998,11 @@ def test_self_update_restart_uses_running_checkout(monkeypatch, tmp_path):
         return SimpleNamespace()
 
     monkeypatch.setattr(app_module.common, "PROJECT_ROOT", checkout_root)
+    monkeypatch.setattr(app_module.sys, "argv", ["yolomux.py", "--host", "0.0.0.0", "--port", "9101", "--dang", "--self-signed"])
+    monkeypatch.setattr(app_module.sys, "executable", "/usr/bin/python3")
+    monkeypatch.setattr(app_module.os, "getpid", lambda: 424242)
+    monkeypatch.setenv("PATH", "/home/test/.local/bin:/usr/bin")
+    monkeypatch.setenv("TERM", "xterm-256color")
     monkeypatch.setattr(app_module.subprocess, "Popen", fake_popen)
     webapp = app_module.TmuxWebtermApp.__new__(app_module.TmuxWebtermApp)
     assert webapp._spawn_self_restart() is True
@@ -4427,17 +5010,26 @@ def test_self_update_restart_uses_running_checkout(monkeypatch, tmp_path):
     args = captured["args"]
     assert args[:3] == ["nohup", "bash", "-lc"]
     helper_cmd = args[-1]
-    assert "kill " in helper_cmd
+    assert "kill 424242" in helper_cmd
     assert "sleep 2" in helper_cmd
-    assert "kill -9 " in helper_cmd
-    assert f"cd {checkout_root}" in helper_cmd
-    assert "nohup env PYTHONUNBUFFERED=1" in helper_cmd
-    assert "/tmp/yolomux-self-update-restart.log" in helper_cmd
+    assert "kill -9 424242" in helper_cmd
+    assert f"cd {checkout_root.resolve()}" in helper_cmd
+    assert "nohup env" in helper_cmd
+    assert "PATH=" in helper_cmd
+    assert "/home/test/.local/bin:/usr/bin" in helper_cmd
+    assert "TERM=xterm-256color" in helper_cmd
+    assert "PYTHONUNBUFFERED=1" in helper_cmd
+    assert str((checkout_root / "yolomux.py").resolve()) in helper_cmd
+    assert "--host 0.0.0.0 --port 9101 --dang --self-signed" in helper_cmd
+    assert app_module.SELF_RESTART_LOG_PATH in helper_cmd
     assert "systemd-run" not in helper_cmd
     assert "systemctl" not in helper_cmd
     assert "pkill" not in helper_cmd
-    assert "setsid" not in args
-    assert captured["kwargs"]["cwd"] == str(checkout_root)
+    assert captured["kwargs"]["cwd"] == str(checkout_root.resolve())
+    assert captured["kwargs"]["stdin"] is app_module.subprocess.DEVNULL
+    assert captured["kwargs"]["stdout"] is app_module.subprocess.DEVNULL
+    assert captured["kwargs"]["stderr"] is app_module.subprocess.DEVNULL
+    assert captured["kwargs"]["start_new_session"] is True
 
 
 def _fake_update_git(remote_version="0.3.25", remote_sha="remoteabcdef1"):

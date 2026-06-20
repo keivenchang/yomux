@@ -20,6 +20,16 @@
   --input-bg: var(--panel2);
   --text: #e4e8ee;
   --muted: #9aa5b1;
+  --chrome-text-strong: #e7ecf3;
+  --accent-sky-strong: #9fd8ff;
+  --surface-ink: #11151d;
+  --status-tool: #f59e0b;
+  --danger-border-soft: #d56b7a;
+  --text-muted-cool: #9ea8b7;
+  --neutral-border-strong: #6f7b8c;
+  --neutral-text-strong: #52617a;
+  --overlay-surface: #111820;
+  --success-text-strong: #064e3b;
   /* The stronger/cooler muted shade (darker than --muted) — one owner for what was the bare #8b95a5
      repeated across the editor scheme, code comments, and several muted-text component rules. */
   --text-muted-strong: #8b95a5;
@@ -70,6 +80,7 @@
   --danger-bg: #c61f38;
   --danger-border: #ff7a86;
   --danger-muted-bg: #5b1e28;
+  --danger: var(--danger-strong);
   --danger-strong: #dc2626;
   --danger-strong-hover: #b91c1c;
   --danger-strong-border: #991b1b;
@@ -216,6 +227,22 @@
   --file-explorer-open-inline-size: calc(var(--file-explorer-tree-inline-size) + var(--file-explorer-editor-inline-size));
   --min-split-pane-width: 320px;
   --min-split-pane-height: 220px;
+  --z-layer-background: 0;
+  --z-layer-raised: 1;
+  --z-layer-control: 2;
+  --z-layer-editor: 3;
+  --z-layer-preview: 4;
+  --z-layer-sticky: 6;
+  --z-layer-marker: 8;
+  --z-share-mirror-stage: var(--z-layer-background);
+  --z-pane-tab: var(--z-layer-raised);
+  --z-inline-control: var(--z-layer-raised);
+  --z-panel-resizer-inline: var(--z-layer-control);
+  --z-file-editor-layer: var(--z-layer-editor);
+  --z-file-editor-preview-layer: var(--z-layer-preview);
+  --z-tabs-row: var(--z-layer-preview);
+  --z-sticky-pane-head: var(--z-layer-sticky);
+  --z-editor-wrap-marker: var(--z-layer-marker);
   --z-stacking-base: 1;
   --z-terminal-overlay-low: 30;
   --z-pane-tab-strip: 7;
@@ -311,6 +338,12 @@
   --file-selection-bg: rgb(var(--active-accent-rgb) / 0.46);
   --file-selection-border: var(--active-accent-bright);
   --file-selection-text: #f7fff0;
+  --file-tree-recency-hot: #f8ffd8;
+  --file-tree-recency-fresh: #dcffa6;
+  --file-tree-recency-recent: #bfe87e;
+  --file-tree-recency-warm: #aab8c4;
+  --file-tree-recency-old: var(--muted);
+  --file-tree-recency-pulse-shadow: rgba(196, 249, 112, 0.36);
   --editor-font: var(--mono-font);
   --editor-font-size: var(--ui-font-size);
   --editor-ui-font-size: max(10px, calc(var(--editor-font-size) - 2px));
@@ -571,6 +604,12 @@ body.theme-light {
   --file-selection-bg: rgb(var(--active-accent-rgb) / 0.34);
   --file-selection-border: var(--active-accent-bright);
   --file-selection-text: #10230b;
+  --file-tree-recency-hot: #24520f;
+  --file-tree-recency-fresh: #356f12;
+  --file-tree-recency-recent: #4d7f21;
+  --file-tree-recency-warm: #566271;
+  --file-tree-recency-old: var(--muted);
+  --file-tree-recency-pulse-shadow: rgba(95, 152, 0, 0.22);
   --pc-control-bg: #f7f9fc;
   --pc-control-fg: #1f2937;
   --pc-control-border: #9aa6b6;

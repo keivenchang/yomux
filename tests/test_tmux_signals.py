@@ -15,8 +15,8 @@ def test_parse_tmux_signal_snapshot_maps_window_and_pane_fields():
         "alpha\t$1\t1710000010\t1710000000\t1\tclient-a\t1\t@2\tbash\t0\t1710000001\t0\t1\t0\t0\t\t1\t80\t24\t1\tlayout-b\tvisible-b",
     ])
     panes_stdout = "\n".join([
-        "alpha\t0\t@1\t0\t%1\t1\t/home/keivenc/project\tcodex\t0\t\t\t\t1\t0\t\t0\t0\t1234\t120\t36\t4000\t120000",
-        "alpha\t1\t@2\t0\t%2\t1\t/home/keivenc/project\tbash\t1\t2\t\t1710000111\t0\t1\tcopy-mode\t1\t1\t4321\t80\t24\t12\t300",
+        "alpha\t0\t@1\t0\t%1\t1\t/home/keivenc/project\tcodex\t\t0\t\t\t\t1\t0\t\t0\t0\t1234\t120\t36\t4000\t120000",
+        "alpha\t1\t@2\t0\t%2\t1\t/home/keivenc/project\tbash\t\t1\t2\t\t1710000111\t0\t1\tcopy-mode\t1\t1\t4321\t80\t24\t12\t300",
     ])
     clients_stdout = "\n".join([
         "client-a\talpha\t1710000200\t120\t36\tattached,focused\t0\t0\tkeiven",

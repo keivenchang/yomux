@@ -1,0 +1,14 @@
+● Mock build script - 10 steps, each needs Yes/No.
+────────────────────────────
+ Bash command (unsandboxed)
+
+   mkdir -p build/output
+   [1/10] Create the build output directory
+
+ Permission rule Bash requires confirmation for this command.
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. No
+
+ Esc to cancel

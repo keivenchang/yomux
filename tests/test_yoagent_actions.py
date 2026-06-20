@@ -10,7 +10,7 @@ def test_parse_wait_then_send_to_numeric_session():
         ["6"],
     )
 
-    assert intent == {"type": "wait_then_send", "session": "6", "text": "date", "submit": True}
+    assert intent == {"type": "wait_then_send", "session": "6", "text": "date", "submit": True, "return_result": True}
 
 
 def test_parse_direct_tell_session_to_run():
@@ -21,6 +21,7 @@ def test_parse_direct_tell_session_to_run():
         "session": "6",
         "text": "python3 tools/check.py",
         "submit": True,
+        "return_result": True,
     }
 
 
@@ -32,6 +33,7 @@ def test_parse_direct_agent_alias_strips_routing_perspective():
         "session": "1",
         "text": "list changed files",
         "submit": True,
+        "return_result": True,
     }
 
 
@@ -72,31 +74,31 @@ def test_parse_target_agent_prompts_use_second_person_point_of_view():
     ]
     for question, expected in cases:
         intent = parse_yoagent_action_intent(question, [], ["1"])
-        assert intent == {"type": "send_prompt", "session": "1", "text": expected, "submit": True}
+        assert intent == {"type": "send_prompt", "session": "1", "text": expected, "submit": True, "return_result": True}
 
 
 def test_parse_target_agent_prompt_does_not_rewrite_object_it():
     intent = parse_yoagent_action_intent("ask session 1 to review it for regressions", [], ["1"])
 
-    assert intent == {"type": "send_prompt", "session": "1", "text": "review it for regressions", "submit": True}
+    assert intent == {"type": "send_prompt", "session": "1", "text": "review it for regressions", "submit": True, "return_result": True}
 
 
 def test_parse_direct_send_text_to_session():
     intent = parse_yoagent_action_intent("send `date` to tmux session 6", [], ["6"])
 
-    assert intent == {"type": "send_prompt", "session": "6", "text": "date", "submit": True}
+    assert intent == {"type": "send_prompt", "session": "6", "text": "date", "submit": True, "return_result": True}
 
 
 def test_parse_natural_date_command_as_agent_prompt():
     intent = parse_yoagent_action_intent("send a date command session 6", [], ["6"])
 
-    assert intent == {"type": "send_prompt", "session": "6", "text": "tell me the date", "submit": True}
+    assert intent == {"type": "send_prompt", "session": "6", "text": "tell me the date", "submit": True, "return_result": True}
 
 
 def test_parse_run_date_keeps_shell_command():
     intent = parse_yoagent_action_intent("tell session 6 to run date", [], ["6"])
 
-    assert intent == {"type": "send_prompt", "session": "6", "text": "date", "submit": True}
+    assert intent == {"type": "send_prompt", "session": "6", "text": "date", "submit": True, "return_result": True}
 
 
 def test_parse_direct_uses_recent_session_from_history():
@@ -106,7 +108,7 @@ def test_parse_direct_uses_recent_session_from_history():
         ["6"],
     )
 
-    assert intent == {"type": "send_prompt", "session": "6", "text": "git status", "submit": True}
+    assert intent == {"type": "send_prompt", "session": "6", "text": "git status", "submit": True, "return_result": True}
 
 
 def test_parse_direct_send_can_request_confirmation():
@@ -118,6 +120,7 @@ def test_parse_direct_send_can_request_confirmation():
         "text": "date",
         "submit": True,
         "requires_confirmation": True,
+        "return_result": True,
     }
 
 
@@ -130,6 +133,21 @@ def test_parse_direct_send_can_request_result_here():
         "text": "date",
         "submit": True,
         "return_result": True,
+    }
+
+
+def test_parse_direct_send_can_opt_out_of_result_wait():
+    assert parse_yoagent_action_intent("send `date` to tmux session 6 but do not wait for the result", [], ["6"]) == {
+        "type": "send_prompt",
+        "session": "6",
+        "text": "date",
+        "submit": True,
+    }
+    assert parse_yoagent_action_intent("tell session 6 to run date and just send it", [], ["6"]) == {
+        "type": "send_prompt",
+        "session": "6",
+        "text": "date",
+        "submit": True,
     }
 
 

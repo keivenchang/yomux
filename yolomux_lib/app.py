@@ -19,6 +19,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import as_completed
 from dataclasses import asdict
+from dataclasses import dataclass
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -46,6 +47,7 @@ from .activity_summary import build_yoagent_resume_prompt
 from .activity_summary import deterministic_yoagent_reply
 from .activity_summary import yoagent_capabilities_payload
 from .activity_summary import yoagent_context_lines
+from .activity_summary import yoagent_question_requests_work_next
 from .auto_approve_worker import AutoApproveWorker
 from .auto_approve_worker import auto_approve_lock_message
 from .auto_approve_worker import auto_approve_lock_owner
@@ -65,6 +67,7 @@ from .common import MAX_EVENT_TAIL_LINES
 from .common import MAX_TRANSCRIPT_TAIL_LINES
 from .common import MAX_YOLOMUX_SESSION_TABS
 from .common import PROJECT_ROOT
+from .common import RUN_HISTORY_PATH
 from .common import SERVER_HOSTNAME
 from .common import SERVER_STARTED_AT
 from .common import SUMMARY_CODEX_SERVICE_TIER
@@ -84,6 +87,8 @@ from .control import YolomuxControlServer
 from .control import send_yolomux_control_request
 from .drop_actions import run_drop_action
 from .events import EventLog
+from .events import RunHistoryStore
+from .events import search_snippet
 from .events import read_yolomux_state
 from .events import update_yolomux_state
 from .metadata import MetadataCache
@@ -111,6 +116,7 @@ from .transcripts import format_transcript_item
 from .transcripts import newest_transcript_timestamp
 from .transcripts import transcript_activity_is_recent
 from .transcripts import transcript_delta_result_state
+from .transcripts import transcript_run_metadata
 from .transcripts import session_transcript_activity_state
 from .transcripts import trim_prompt_text
 from .prompt_detector import agent_screen_state
@@ -129,6 +135,7 @@ from .types import AutoApproveState
 from .types import AutoApproveStatusPayload
 from .types import RunHistoryEntry
 from .types import RunHistoryPayload
+from .types import SearchResult
 from .uploads import sanitize_upload_filename
 from .uploads import unique_upload_path
 from .web import server_string
@@ -138,6 +145,7 @@ from .workdir import agent_auth_status
 from .workdir import available_agent_commands
 from .workdir import resolved_upload_dir
 from .workdir import session_workdir
+from .yoagent import backends as yoagent_backends
 from .yoagent import conversation as yoagent_conversation
 from .yoagent.actions import parse_yoagent_action_intent
 from .yoagent.actions import parse_yoagent_job_intent
@@ -157,40 +165,41 @@ from .yoagent.transports import TMUX_LEGACY_TRANSPORT_ID
 from .yoagent.transports import CodexAppServerSession
 from .yoagent.transports import default_yoagent_transport_registry
 from .yoagent.transports import normalize_yoagent_transport_id
+from .yoagent.backends import YOAGENT_CLI_TIMEOUT_SECONDS
+from .yoagent.backends import YOAGENT_STARTUP_QUESTION
+from .yoagent.backends import codex_event_session_id
+from .yoagent.backends import resolve_yoagent_backend
+from .yoagent.backends import strip_yoagent_hidden_thinking
+from .yoagent.backends import strip_yoagent_stream_hidden_thinking
+from .yoagent.backends import yoagent_activity_payload_signature
+from .yoagent.backends import yoagent_cli_auth_failure
+from .yoagent.backends import yoagent_cli_fallback_reason
+from .yoagent.backends import yoagent_language_directive
+from .yoagent.backends import yoagent_response_details
+from .yoagent.controller import YOAGENT_ACTION_ACCEPTING_SCREEN_KEYS
+from .yoagent.controller import YOAGENT_ACTION_AGENT_KINDS
+from .yoagent.controller import YOAGENT_ACTION_PREVIEW_TTL_SECONDS
+from .yoagent.controller import YOAGENT_ACTION_RESULT_MAX_CHARS
+from .yoagent.controller import YOAGENT_ACTION_RESULT_POLL_SECONDS
+from .yoagent.controller import YOAGENT_ACTION_RESULT_WAIT_SECONDS
+from .yoagent.controller import YOAGENT_ACTION_TEXT_LIMIT
+from .yoagent.controller import YOAGENT_JOB_DEFAULT_TIMEOUT_MINUTES
+from .yoagent.controller import YOAGENT_JOB_IDLE_QUIET_SECONDS
+from .yoagent.controller import YOAGENT_JOB_MAX_ITEMS
+from .yoagent.controller import YOAGENT_JOB_POLL_SECONDS
+from .yoagent.controller import YOAGENT_JOBS_STATE_KEY
+from .yoagent.controller import YoagentController
+from .yoagent.session_summaries import YOAGENT_SESSION_SUMMARIES_STATE_KEY
+from .yoagent.session_summaries import YOAGENT_SESSION_SUMMARY_MAX_ITEMS
+from .yoagent.session_summaries import YOAGENT_SESSION_SUMMARY_QUIET_SECONDS
+from .yoagent.session_summaries import YOAGENT_SESSION_SUMMARY_STATES
 
 
 logger = logging.getLogger(__name__)
 METADATA_BADGE_PULSE_SECONDS = 20.0
-YOAGENT_ACTION_PREVIEW_TTL_SECONDS = 5 * 60
-YOAGENT_ACTION_TEXT_LIMIT = 4000
-YOAGENT_ACTION_RESULT_WAIT_SECONDS = 180.0
-YOAGENT_ACTION_RESULT_POLL_SECONDS = 1.0
-YOAGENT_ACTION_RESULT_MAX_CHARS = 6000
-YOAGENT_ACTION_AGENT_KINDS = {"claude", "codex"}
-YOAGENT_ACTION_ACCEPTING_SCREEN_KEYS = {"idle", "done", "needs-input", "input-draft"}
-YOAGENT_JOBS_STATE_KEY = "yoagent_jobs"
-YOAGENT_JOB_MAX_ITEMS = 200
-YOAGENT_JOB_POLL_SECONDS = 1.0
-YOAGENT_JOB_DEFAULT_TIMEOUT_MINUTES = 120
-YOAGENT_JOB_IDLE_QUIET_SECONDS = 3.0
 METADATA_BADGES = ("main", "pr", "status", "ci")
 METADATA_BADGE_SIGNATURES_STATE_KEY = "metadata_badge_signatures"
 METADATA_BADGE_PULSE_UNTIL_STATE_KEY = "metadata_badge_pulse_until"
-YOAGENT_CLI_TIMEOUT_SECONDS = 45
-YOAGENT_SESSION_SUMMARIES_STATE_KEY = "yoagent_session_summaries"
-YOAGENT_SESSION_SUMMARY_STATES = {"working", "waiting", "blocked", "done", "idle"}
-YOAGENT_SESSION_SUMMARY_QUIET_SECONDS = 15.0
-YOAGENT_SESSION_SUMMARY_MAX_ITEMS = 120
-YOAGENT_STARTUP_QUESTION = (
-    "The user just opened YO!agent. Read the supplied activity context and give a concise first "
-    "assistant response: what looks active, what may need attention, and one concrete next step. "
-    "Keep it short and answer as YO!agent."
-)
-YOAGENT_AUTH_FAILURE_RE = re.compile(
-    r"(not\s+logged\s+in|log\s*in|login|required\s+auth|authentication|unauthorized|permission\s+denied|401)",
-    re.IGNORECASE,
-)
-YOAGENT_THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
 SESSION_FILES_CACHE_MAX_ITEMS = 64
 SESSION_FILES_CACHE_SECONDS = 5.0
 SESSION_FILES_CACHE_VERSION = 1
@@ -221,6 +230,26 @@ CLIENT_WATCH_FILE_LIMIT = 128
 DIRECTORY_WATCH_ENTRY_LIMIT = 512
 # Keep in sync with tmuxSessionNameError() in static/yolomux.js.
 TMUX_SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9_. -]{1,64}$")
+SELF_RESTART_LOG_PATH = "/tmp/yolomux-self-update-restart.log"
+SELF_RESTART_ENV_KEYS = (
+    "PATH",
+    "TERM",
+    "PYTHONUNBUFFERED",
+    "YOLOMUX_EXTRA_PATH",
+    "YOLOMUX_CONFIG_DIR",
+    "YOLOMUX_STATE_DIR",
+    "YOLOMUX_TEST_AUTH_BYPASS",
+    "VIRTUAL_ENV",
+)
+
+
+@dataclass(frozen=True)
+class SelfRestartContext:
+    root: str
+    argv: list[str]
+    env: dict[str, str]
+    pid: int
+    log_path: str = SELF_RESTART_LOG_PATH
 
 
 def session_files_batch_worker_count(count: int) -> int:
@@ -406,54 +435,6 @@ class SharedWatchRootIndex:
         return sorted(selected)
 
 
-def yoagent_cli_auth_failure(text: str) -> bool:
-    return bool(YOAGENT_AUTH_FAILURE_RE.search(text or ""))
-
-
-def strip_yoagent_hidden_thinking(text: str) -> tuple[str, bool]:
-    value = str(text or "")
-    cleaned, count = YOAGENT_THINK_BLOCK_RE.subn("", value)
-    return cleaned.strip(), count > 0
-
-
-def strip_yoagent_stream_hidden_thinking(text: str) -> tuple[str, bool]:
-    value = str(text or "")
-    cleaned, count = YOAGENT_THINK_BLOCK_RE.subn("", value)
-    open_think = re.search(r"<think\b[^>]*>", cleaned, re.IGNORECASE)
-    if open_think:
-        return cleaned[: open_think.start()].strip(), True
-    cleaned, close_count = re.subn(r"</think>", "", cleaned, flags=re.IGNORECASE)
-    return cleaned.strip(), bool(count or close_count)
-
-
-def yoagent_response_details(response: dict[str, Any]) -> str:
-    timing = response.get("timing") if isinstance(response.get("timing"), dict) else {}
-    cli = response.get("cli") if isinstance(response.get("cli"), dict) else {}
-    lines: list[str] = []
-    backend_used = str(response.get("backend_used") or response.get("backend") or "").strip()
-    if backend_used:
-        lines.append(f"- backend: `{backend_used}`")
-    ttfr_ms = timing.get("ttfr_ms")
-    if isinstance(ttfr_ms, (int, float)):
-        lines.append(f"- response time: `{float(ttfr_ms) / 1000:.3f}s` (`{float(ttfr_ms):.1f}ms`)")
-    elapsed_ms = cli.get("elapsed_ms")
-    if isinstance(elapsed_ms, (int, float)):
-        lines.append(f"- model CLI time: `{float(elapsed_ms) / 1000:.3f}s`")
-    prompt_chars = cli.get("prompt_chars")
-    if isinstance(prompt_chars, int):
-        lines.append(f"- prompt size: `{prompt_chars}` chars")
-    if "resumed" in cli:
-        lines.append(f"- model session: `{'resumed' if cli.get('resumed') else 'seeded'}`")
-    if cli.get("context_changed"):
-        lines.append("- activity context changed before this model call")
-    fallback_reason = str(response.get("fallback_reason") or "").strip()
-    if fallback_reason:
-        lines.append(f"- fallback reason: {fallback_reason}")
-    if response.get("hidden_thinking_removed"):
-        lines.append("- raw model thinking was hidden; YOLOmux shows safe diagnostics instead of chain-of-thought")
-    return "\n".join(lines)
-
-
 def file_stat_signature(path: Path) -> tuple[str, int, int]:
     stat = path.stat()
     return (str(path), int(stat.st_mtime_ns), int(stat.st_size))
@@ -615,62 +596,8 @@ def repo_refs_cache_signature(repo_refs: dict[str, dict[str, str]] | None) -> tu
     return tuple(sorted(rows))
 
 
-def yoagent_cli_fallback_reason(backend: str, error: str) -> str:
-    text = truncate_text(" ".join(str(error or "").split()), 600)
-    if not text:
-        return ""
-    if not yoagent_cli_auth_failure(text):
-        return text
-    label = "Claude CLI" if backend == "claude" else "Codex CLI" if backend == "codex" else f"{backend} CLI"
-    # Use the canonical login command (verified `claude auth login`, not `claude login`).
-    login_command = AGENT_LOGIN_COMMANDS.get(backend, f"{backend} login")
-    return f"{label} is not logged in. Run `{login_command}`; showing the No agent YO!agent summary."
-
-
-def yoagent_language_directive(locale: str) -> str:
-    locale_id = str(locale or "").strip()
-    if locale_id in {"", "en", "en-XA", "system"}:
-        return ""
-    directive = server_string(locale_id, "yoagent.prompt.answerLanguage").strip()
-    return f"\n\n{directive}" if directive else ""
-
-
 def resolve_yoagent_backend(backend: str) -> str:
-    # the default backend is "auto" — prefer codex, then claude, falling back to the
-    # deterministic ("No agent") summary if neither is installed AND logged in. Explicit choices
-    # (claude / codex / deterministic) pass through unchanged.
-    if backend != "auto":
-        return backend
-    status = agent_auth_status()
-    for agent in ("codex", "claude"):
-        entry = status.get(agent, {})
-        if entry.get("installed") and entry.get("logged_in"):
-            return agent
-    return "deterministic"
-
-
-def codex_event_session_id(event: dict[str, Any]) -> str:
-    for key in ("session_id", "sessionId", "thread_id", "threadId", "conversation_id", "conversationId"):
-        value = event.get(key)
-        if isinstance(value, str) and value:
-            return value
-    for key in ("session", "thread", "conversation"):
-        value = event.get(key)
-        if isinstance(value, dict):
-            nested_id = value.get("id")
-            if isinstance(nested_id, str) and nested_id:
-                return nested_id
-            nested = codex_event_session_id(value)
-            if nested:
-                return nested
-    return ""
-
-
-def yoagent_activity_payload_signature(activity_payload: dict[str, Any]) -> str:
-    try:
-        return json.dumps(activity_payload, sort_keys=True, separators=(",", ":"), default=str)
-    except (TypeError, ValueError):
-        return str(activity_payload)
+    return yoagent_backends.resolve_yoagent_backend(backend, auth_status=agent_auth_status())
 
 
 def tmux_session_name_error(name: str) -> str | None:
@@ -690,6 +617,25 @@ def normalized_prompt_state(prompt: dict[str, Any] | None = None) -> dict[str, A
     return state
 
 
+def utc_iso_from_ts(value: Any) -> str:
+    try:
+        timestamp = float(value or 0)
+    except (TypeError, ValueError):
+        timestamp = 0.0
+    return datetime.fromtimestamp(timestamp, timezone.utc).isoformat() if timestamp > 0 else ""
+
+
+def compact_pull_request_for_history(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    result: dict[str, Any] = {}
+    for key in ("number", "title", "url", "state", "draft", "source"):
+        item = value.get(key)
+        if isinstance(item, (str, int, float, bool)) and item not in ("", None):
+            result[key] = truncate_text(item, 500) if isinstance(item, str) else item
+    return result or None
+
+
 def requires_known_session(refresh: bool = False) -> Callable[[Callable[..., tuple[Any, HTTPStatus]]], Callable[..., tuple[Any, HTTPStatus]]]:
     def decorator(func: Callable[..., tuple[Any, HTTPStatus]]) -> Callable[..., tuple[Any, HTTPStatus]]:
         @wraps(func)
@@ -704,6 +650,52 @@ def requires_known_session(refresh: bool = False) -> Callable[[Callable[..., tup
         return wrapper
 
     return decorator
+
+
+class YoagentAppDeps:
+    def __init__(self, app: Any):
+        object.__setattr__(self, "_app", app)
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return getattr(self._app, name)
+        except AttributeError:
+            if name in globals():
+                return globals()[name]
+            raise
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        setattr(self._app, name, value)
+
+    def normalized_prompt_state(self, prompt: dict[str, Any] | None = None) -> dict[str, Any]:
+        return normalized_prompt_state(prompt)
+
+    def yoagent_cli_auth_failure(self, text: str) -> bool:
+        return yoagent_cli_auth_failure(text)
+
+    def strip_yoagent_hidden_thinking(self, text: str) -> tuple[str, bool]:
+        return strip_yoagent_hidden_thinking(text)
+
+    def strip_yoagent_stream_hidden_thinking(self, text: str) -> tuple[str, bool]:
+        return strip_yoagent_stream_hidden_thinking(text)
+
+    def yoagent_response_details(self, response: dict[str, Any]) -> str:
+        return yoagent_response_details(response)
+
+    def yoagent_cli_fallback_reason(self, backend: str, error: str) -> str:
+        return yoagent_cli_fallback_reason(backend, error)
+
+    def yoagent_language_directive(self, locale: str) -> str:
+        return yoagent_language_directive(locale)
+
+    def resolve_yoagent_backend(self, backend: str) -> str:
+        return resolve_yoagent_backend(backend)
+
+    def codex_event_session_id(self, event: dict[str, Any]) -> str:
+        return codex_event_session_id(event)
+
+    def yoagent_activity_payload_signature(self, activity_payload: dict[str, Any]) -> str:
+        return yoagent_activity_payload_signature(activity_payload)
 
 
 class TmuxWebtermApp:
@@ -787,6 +779,7 @@ class TmuxWebtermApp:
         self.yoagent_cli_lock = threading.RLock()
         self.yoagent_cli_sessions: dict[str, dict[str, Any]] = yoagent_conversation.load_cli_sessions(monotonic_now=time.monotonic())
         self.yoagent_transports = default_yoagent_transport_registry()
+        self.yoagent_controller = YoagentController(YoagentAppDeps(self))
         self.yoagent_managed_targets: dict[str, dict[str, Any]] = {}
         self.yoagent_action_lock = threading.RLock()
         self.yoagent_action_previews: dict[str, dict[str, Any]] = {}
@@ -807,6 +800,7 @@ class TmuxWebtermApp:
         self.load_metadata_badge_state()
         self.load_yoagent_session_summaries()
         self.event_log = EventLog(EVENT_LOG_PATH)
+        self.run_history_store = RunHistoryStore(RUN_HISTORY_PATH)
         self.control_server = YolomuxControlServer(self.handle_control_request)
         self.control_server.start()
         self.maybe_start_yoagent_summary_worker()
@@ -2012,6 +2006,27 @@ class TmuxWebtermApp:
             ),
         )
 
+    def normalized_activity_session_scope(self, value: Any = None) -> str:
+        scope = str(value or "configured").strip().lower()
+        return "all" if scope in {"all", "tmux", "visible"} else "configured"
+
+    def activity_session_names(self, session_scope: Any = "configured") -> tuple[list[str], list[str], str]:
+        scope = self.normalized_activity_session_scope(session_scope)
+        if scope != "all":
+            return list(self.sessions), [], scope
+        sessions, error = list_tmux_session_names()
+        if error is not None:
+            return list(self.sessions), [error], scope
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for raw_session in sessions:
+            session = str(raw_session or "").strip()
+            if not session or session in seen:
+                continue
+            seen.add(session)
+            ordered.append(session)
+        return ordered, [], scope
+
     def auto_approve_capture_allowed_for_target(self, target: str) -> bool:
         return self.tmux_signal_window_recently_active(target)
 
@@ -2060,25 +2075,71 @@ class TmuxWebtermApp:
                 "message": "updated; restarting now" if restarting
                            else "updated; restart spawn failed; restart the server manually"}
 
+    def _resolved_self_restart_argv(self, root: Path) -> list[str]:
+        executable = sys.executable or "python3"
+        raw_argv = list(sys.argv)
+        main_module = sys.modules.get("__main__")
+        main_spec = vars(main_module).get("__spec__") if main_module is not None else None
+        if main_spec is not None and main_spec.name == "yolomux":
+            return [executable, "-m", "yolomux", *raw_argv[1:]]
+        if raw_argv[:2] == ["-m", "yolomux"]:
+            return [executable, "-m", "yolomux", *raw_argv[2:]]
+        entrypoint = raw_argv[0] if raw_argv else "yolomux.py"
+        entry_path = Path(entrypoint)
+        if entry_path.is_absolute():
+            resolved_entrypoint = str(entry_path.resolve())
+        else:
+            candidate = (root / entry_path).resolve()
+            resolved_entrypoint = str(candidate) if candidate.exists() or entry_path.suffix == ".py" else entrypoint
+        return [executable, resolved_entrypoint, *raw_argv[1:]]
+
+    def _self_restart_env(self) -> dict[str, str]:
+        common.heal_server_path()
+        env = {
+            key: value
+            for key in SELF_RESTART_ENV_KEYS
+            if (value := os.environ.get(key)) not in (None, "")
+        }
+        env["PATH"] = os.environ.get("PATH", env.get("PATH", ""))
+        env["TERM"] = os.environ.get("TERM", env.get("TERM", "xterm-256color")) or "xterm-256color"
+        env["PYTHONUNBUFFERED"] = "1"
+        return env
+
+    def _self_restart_context(self) -> SelfRestartContext:
+        root = Path(common.PROJECT_ROOT).resolve()
+        return SelfRestartContext(
+            root=str(root),
+            argv=self._resolved_self_restart_argv(root),
+            env=self._self_restart_env(),
+            pid=os.getpid(),
+        )
+
     def _spawn_self_restart(self) -> bool:
         # Restart the checkout that is running this process. The update path pulls and builds in the
         # same PROJECT_ROOT, so dev worktrees can safely bounce themselves without touching prod.
         try:
-            restart_argv = [sys.executable or "python3", *sys.argv]
+            context = self._self_restart_context()
+            env_cmd = " ".join(
+                shlex.quote(item)
+                for item in [
+                    "env",
+                    *(f"{key}={value}" for key, value in context.env.items()),
+                    *context.argv,
+                ]
+            )
             restart_cmd = (
                 "sleep 1; "
-                f"kill {os.getpid()} 2>/dev/null || true; "
+                f"kill {context.pid} 2>/dev/null || true; "
                 "sleep 2; "
-                f"kill -9 {os.getpid()} 2>/dev/null || true; "
-                f"cd {shlex.quote(str(common.PROJECT_ROOT))} && "
-                "nohup env PYTHONUNBUFFERED=1 "
-                f"{' '.join(shlex.quote(arg) for arg in restart_argv)} "
-                ">> /tmp/yolomux-self-update-restart.log 2>&1 < /dev/null &"
+                f"kill -9 {context.pid} 2>/dev/null || true; "
+                f"cd {shlex.quote(context.root)} && "
+                f"nohup {env_cmd} "
+                f">> {shlex.quote(context.log_path)} 2>&1 < /dev/null &"
             )
             subprocess.Popen([
                 "nohup", "bash", "-lc", restart_cmd,
             ],
-                             cwd=str(common.PROJECT_ROOT), stdin=subprocess.DEVNULL,
+                             cwd=context.root, stdin=subprocess.DEVNULL,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
             return True
         except OSError as exc:
@@ -2220,7 +2281,7 @@ class TmuxWebtermApp:
             if not isinstance(item, dict):
                 continue
             session = str(item.get("session") or "").strip() or None
-            hours = max(1.0, min(168.0, self.float_value(item.get("hours"), 24.0)))
+            hours = session_files.bounded_session_files_hours(self.float_value(item.get("hours"), 24.0))
             from_ref = str(item.get("from_ref") or item.get("from") or "").strip() or None
             to_ref = str(item.get("to_ref") or item.get("to") or "").strip() or None
             repo_refs = item.get("repo_refs")
@@ -2245,7 +2306,9 @@ class TmuxWebtermApp:
             return {}
         locale = str(value.get("locale") or "en").strip() or "en"
         visible = value.get("visible") is True
-        return {"locale": locale, "visible": visible}
+        scope = self.normalized_activity_session_scope(value.get("scope"))
+        hours = session_files.bounded_session_files_hours(self.float_value(value.get("hours"), 24.0))
+        return {"locale": locale, "visible": visible, "scope": scope, "hours": hours}
 
     def client_watch_state_snapshot(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
         with self.client_watch_lock:
@@ -2577,7 +2640,11 @@ class TmuxWebtermApp:
         if activity_summary.get("visible") is not True:
             return []
         started = time.perf_counter()
-        payload = self.activity_summary_payload(locale=str(activity_summary.get("locale") or "en"))
+        payload = self.activity_summary_payload(
+            locale=str(activity_summary.get("locale") or "en"),
+            session_scope=activity_summary.get("scope"),
+            hours=activity_summary.get("hours"),
+        )
         stable_payload = {key: value for key, value in payload.items() if key not in {"generated_at", "generated_ts"}}
         signature = self.client_event_payload_signature(stable_payload)
         with self.client_watch_lock:
@@ -3145,15 +3212,51 @@ class TmuxWebtermApp:
         agents = payload.get("agents") if isinstance(payload, dict) else []
         return copy.deepcopy(agents) if isinstance(agents, list) else []
 
-    def activity_summary_payload(self, force: bool = False, locale: str = "en") -> dict[str, Any]:
+    def activity_session_info_payload(
+        self,
+        session: str,
+        info: SessionInfo,
+        project: dict[str, Any],
+        files_payload: dict[str, Any],
+        summary: dict[str, Any],
+    ) -> dict[str, Any]:
+        selected = info.selected_pane
+        agent = next((item for item in info.agents if item.transcript), info.agents[0] if info.agents else None)
+        git_data = project.get("git") if isinstance(project.get("git"), dict) else None
+        pull_request = project.get("pull_request") if isinstance(project.get("pull_request"), dict) else None
+        rolling = self.yoagent_session_summary_record(session)
+        latest_summary = str(rolling.get("rolling_summary") or summary.get("local") or "").strip()
+        return {
+            "session": session,
+            "path": str((git_data or {}).get("root") or (git_data or {}).get("cwd") or (agent.cwd if agent else "") or (selected.current_path if selected else "")),
+            "cwd": str((agent.cwd if agent else "") or (selected.current_path if selected else "")),
+            "tmux_target": str(selected.target if selected else ""),
+            "agent": self.compact_agent_for_run_history(agent),
+            "git": git_data,
+            "pull_request": pull_request,
+            "ci": pull_request.get("checks") if isinstance(pull_request, dict) and isinstance(pull_request.get("checks"), dict) else None,
+            "linear": project.get("linear") if isinstance(project.get("linear"), list) else [],
+            "files": summary.get("files") if isinstance(summary.get("files"), dict) else {},
+            "recent_paths": build_recent_agents_payload({session: info}, [session], session_files_by_session={session: files_payload}),
+            "latest_summary": truncate_text(latest_summary, 1200),
+            "latest_summary_updated_ts": max(0.0, self.float_value(rolling.get("updated_ts"), 0.0)),
+            "recent_events": self.event_log.tail(session=session, limit=5),
+            "project": project,
+        }
+
+    def activity_summary_payload(self, force: bool = False, locale: str = "en", session_scope: Any = "configured", hours: Any = 24.0) -> dict[str, Any]:
         locale = str(locale or "en").strip() or "en"
-        sessions, errors = discover_sessions(self.sessions)
-        ordered_sessions = self.tmux_recency_ordered_sessions(self.sessions)
+        session_names, scope_errors, scope = self.activity_session_names(session_scope)
+        bounded_hours = session_files.bounded_session_files_hours(self.float_value(hours, 24.0))
+        sessions, errors = discover_sessions(session_names)
+        errors = [*scope_errors, *errors]
+        ordered_sessions = self.tmux_recency_ordered_sessions(session_names)
         self.warm_metadata_cache_async(sessions)
         self.prune_yoagent_session_summaries(set(sessions))
         summaries: dict[str, Any] = {}
         ordered_summaries: list[dict[str, Any]] = []
         session_files_by_session: dict[str, dict[str, Any]] = {}
+        session_info: dict[str, Any] = {}
         with self.activity_summary_lock:
             if force:
                 self.activity_summary_cache.clear()
@@ -3163,7 +3266,7 @@ class TmuxWebtermApp:
                 if info is None:
                     continue
                 project = session_project_metadata(info, self.metadata_cache, allow_network=False)
-                files_payload = self.cached_session_files_payload_for_info(info, hours=24.0)
+                files_payload = self.cached_session_files_payload_for_info(info, hours=bounded_hours)
                 session_files_by_session[session] = files_payload
                 signature = activity_signature(info, project, files_payload)
                 cached = self.activity_summary_cache.get(session)
@@ -3176,6 +3279,7 @@ class TmuxWebtermApp:
                 self.attach_yoagent_session_summary(session, summary)
                 summaries[session] = summary
                 ordered_summaries.append(summary)
+                session_info[session] = self.activity_session_info_payload(session, info, project, files_payload, summary)
             for session in list(self.activity_summary_cache):
                 if session not in sessions:
                     self.activity_summary_cache.pop(session, None)
@@ -3187,11 +3291,14 @@ class TmuxWebtermApp:
             "generated_ts": generated.timestamp(),
             "session_order": [session for session in ordered_sessions if session in summaries],
             "sessions": summaries,
+            "session_info": session_info,
             "agents": self.tabber_activity_agents_snapshot(force=force),
             "global": build_global_activity_summary(ordered_summaries, errors),
             "capabilities": yoagent_capabilities_payload(),
             "errors": errors,
             "locale": locale,
+            "session_scope": scope,
+            "session_file_hours": bounded_hours,
             "yoagent_summaries": {
                 "auto_refresh": self.yoagent_refresh_interval_seconds(settings) > 0,
                 "refresh_interval_seconds": self.yoagent_refresh_interval_seconds(settings),
@@ -3200,58 +3307,23 @@ class TmuxWebtermApp:
             },
         }
 
-    def sanitized_yoagent_session_summaries(self, value: Any) -> dict[str, dict[str, Any]]:
-        if not isinstance(value, dict):
-            return {}
-        clean: dict[str, dict[str, Any]] = {}
-        for session, item in value.items():
-            if not isinstance(session, str) or not isinstance(item, dict):
-                continue
-            summary = truncate_text(str(item.get("rolling_summary") or "").strip(), 1200)
-            if not summary:
-                continue
-            state = str(item.get("state") or "idle").strip().lower()
-            if state not in YOAGENT_SESSION_SUMMARY_STATES:
-                state = "idle"
-            clean[session] = {
-                "rolling_summary": summary,
-                "last_processed_ts": max(0.0, self.float_value(item.get("last_processed_ts"), 0.0)),
-                "updated_ts": max(0.0, self.float_value(item.get("updated_ts"), 0.0)),
-                "state": state,
-            }
-        return clean
+    def sanitized_yoagent_session_summaries(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.sanitized_yoagent_session_summaries(*args, **kwargs)
 
-    def load_yoagent_session_summaries(self) -> None:
-        state = read_yolomux_state()
-        with self.yoagent_session_summary_lock:
-            self.yoagent_session_summaries = self.sanitized_yoagent_session_summaries(
-                state.get(YOAGENT_SESSION_SUMMARIES_STATE_KEY)
-            )
+    def load_yoagent_session_summaries(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.load_yoagent_session_summaries(*args, **kwargs)
 
-    def persist_yoagent_session_summaries_locked(self) -> None:
-        update_yolomux_state({YOAGENT_SESSION_SUMMARIES_STATE_KEY: self.yoagent_session_summaries})
+    def persist_yoagent_session_summaries_locked(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.persist_yoagent_session_summaries_locked(*args, **kwargs)
 
-    def prune_yoagent_session_summaries(self, live_sessions: set[str]) -> None:
-        with self.yoagent_session_summary_lock:
-            stale = [session for session in self.yoagent_session_summaries if session not in live_sessions]
-            if not stale:
-                return
-            for session in stale:
-                self.yoagent_session_summaries.pop(session, None)
-            self.persist_yoagent_session_summaries_locked()
+    def prune_yoagent_session_summaries(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.prune_yoagent_session_summaries(*args, **kwargs)
 
-    def attach_yoagent_session_summary(self, session: str, summary: dict[str, Any]) -> None:
-        with self.yoagent_session_summary_lock:
-            rolling = dict(self.yoagent_session_summaries.get(session) or {})
-        if not rolling.get("rolling_summary"):
-            return
-        summary["rolling_summary"] = rolling["rolling_summary"]
-        summary["rolling_state"] = rolling.get("state") or "idle"
-        summary["rolling_updated_ts"] = rolling.get("updated_ts") or 0
+    def attach_yoagent_session_summary(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.attach_yoagent_session_summary(*args, **kwargs)
 
-    def latest_yoagent_session_summary_updated_ts(self) -> float:
-        with self.yoagent_session_summary_lock:
-            return max((float(item.get("updated_ts") or 0) for item in self.yoagent_session_summaries.values()), default=0.0)
+    def latest_yoagent_session_summary_updated_ts(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.latest_yoagent_session_summary_updated_ts(*args, **kwargs)
 
     def float_value(self, value: Any, default: float = 0.0) -> float:
         try:
@@ -3259,270 +3331,47 @@ class TmuxWebtermApp:
         except (TypeError, ValueError):
             return default
 
-    def yoagent_refresh_interval_seconds(self, settings: dict[str, Any] | None = None) -> float:
-        value = (settings or self.yoagent_settings()).get("refresh_interval_seconds", 0)
-        interval = self.float_value(value, 0.0)
-        if interval <= 0:
-            return 0.0
-        return max(30.0, min(3600.0, interval))
+    def yoagent_refresh_interval_seconds(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_refresh_interval_seconds(*args, **kwargs)
 
-    def yoagent_session_summary_due(self, session: str, interval: float, now: float | None = None) -> bool:
-        current = time.time() if now is None else now
-        with self.yoagent_session_summary_lock:
-            updated = self.float_value((self.yoagent_session_summaries.get(session) or {}).get("updated_ts"), 0.0)
-        return updated <= 0 or current - updated >= interval
+    def yoagent_session_summary_due(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_session_summary_due(*args, **kwargs)
 
-    def build_yoagent_session_summary_update_prompt(
-        self,
-        session: str,
-        transcript_path: str,
-        prior_summary: str,
-        transcript_text: str,
-    ) -> str:
-        return "\n\n".join([
-            "Update one YO!agent rolling summary for a single tmux session.",
-            f"tmux session: `{session}`",
-            f"transcript: `{transcript_path}`",
-            "Use the prior summary plus only the new transcript lines below. Do not invent facts.",
-            "Return exactly two fields:\nstate: working|waiting|blocked|done|idle\nsummary: 1-3 short factual lines about what this session is doing now.",
-            "Prior summary:\n" + (prior_summary or "(none)"),
-            "New transcript lines:\n" + transcript_text,
-        ])
+    def build_yoagent_session_summary_update_prompt(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.build_yoagent_session_summary_update_prompt(*args, **kwargs)
 
-    def parse_yoagent_session_summary_response(self, text: str, default_state: str = "idle") -> dict[str, str]:
-        raw = str(text or "").strip()
-        state = default_state if default_state in YOAGENT_SESSION_SUMMARY_STATES else "idle"
-        match = re.search(r"(?im)^\s*state\s*:\s*([a-z-]+)\s*$", raw)
-        if match and match.group(1).lower() in YOAGENT_SESSION_SUMMARY_STATES:
-            state = match.group(1).lower()
-        summary_match = re.search(r"(?ims)^\s*summary\s*:\s*(.+)$", raw)
-        summary = summary_match.group(1).strip() if summary_match else raw
-        summary = re.sub(r"(?im)^\s*state\s*:\s*[a-z-]+\s*$", "", summary).strip()
-        return {"state": state, "rolling_summary": truncate_text(summary, 1200)}
+    def parse_yoagent_session_summary_response(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.parse_yoagent_session_summary_response(*args, **kwargs)
 
-    def yoagent_codex_app_server_target(self, settings: dict[str, Any] | None = None) -> dict[str, Any]:
-        current_settings = settings or self.yoagent_settings()
-        model = str(current_settings.get("codex_model") or "").strip()
-        effort = str(current_settings.get("codex_effort") or "").strip()
-        target: dict[str, Any] = {
-            "session": "__yoagent_codex__",
-            "agent_kind": "codex",
-            "transport": "codex-app-server",
-            "managed": True,
-            "cwd": str(PROJECT_ROOT),
-            "sandbox": "read-only",
-            "approval_policy": "never",
-            "approvals_reviewer": "user",
-            "ephemeral": False,
-            "service_tier": SUMMARY_CODEX_SERVICE_TIER,
-        }
-        if model:
-            target["agent_model"] = model
-        if effort:
-            target["agent_effort"] = effort
-        return target
+    def yoagent_codex_app_server_target(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_codex_app_server_target(*args, **kwargs)
 
-    def yoagent_codex_app_server_target_key(self, target: dict[str, Any]) -> str:
-        return json.dumps(
-            {
-                "cwd": str(target.get("cwd") or ""),
-                "model": str(target.get("agent_model") or target.get("model") or ""),
-                "effort": str(target.get("agent_effort") or target.get("effort") or ""),
-                "service_tier": str(target.get("service_tier") or ""),
-                "sandbox": str(target.get("sandbox") or target.get("sandbox_mode") or ""),
-                "approval_policy": str(target.get("approval_policy") or target.get("approvalPolicy") or ""),
-            },
-            sort_keys=True,
-        )
+    def yoagent_codex_app_server_target_key(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_codex_app_server_target_key(*args, **kwargs)
 
-    def close_yoagent_codex_app_server(self) -> None:
-        with self.yoagent_codex_app_server_lock:
-            if self.yoagent_codex_app_server is not None:
-                self.yoagent_codex_app_server.close()
-            self.yoagent_codex_app_server = None
-            self.yoagent_codex_app_server_key = ""
+    def close_yoagent_codex_app_server(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.close_yoagent_codex_app_server(*args, **kwargs)
 
-    def ensure_yoagent_codex_app_server(self, settings: dict[str, Any] | None = None, session_id: str = "") -> tuple[str, str, dict[str, Any]]:
-        if not shutil.which("codex"):
-            return "", "codex CLI not found", {"transport": "codex-app-server", "persistent": True}
-        target = self.yoagent_codex_app_server_target(settings)
-        if session_id:
-            target["agent_session_id"] = session_id
-        key = self.yoagent_codex_app_server_target_key(target)
-        started = time.monotonic()
-        with self.yoagent_codex_app_server_lock:
-            if self.yoagent_codex_app_server is None or self.yoagent_codex_app_server_key != key:
-                if self.yoagent_codex_app_server is not None:
-                    self.yoagent_codex_app_server.close()
-                self.yoagent_codex_app_server = CodexAppServerSession(target)
-                self.yoagent_codex_app_server_key = key
-            try:
-                thread_id, status = self.yoagent_codex_app_server.ensure_started(target, timeout=YOAGENT_CLI_TIMEOUT_SECONDS)
-            except (OSError, subprocess.SubprocessError) as exc:
-                self.close_yoagent_codex_app_server()
-                return "", str(exc), {"transport": "codex-app-server", "persistent": True}
-        status["elapsed_ms"] = round((time.monotonic() - started) * 1000)
-        return thread_id, "", status
+    def ensure_yoagent_codex_app_server(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.ensure_yoagent_codex_app_server(*args, **kwargs)
 
-    def run_yoagent_codex_app_server(
-        self,
-        prompt: str,
-        session_id: str = "",
-        resume: bool = False,
-        settings: dict[str, Any] | None = None,
-        stream_callback: Any | None = None,
-    ) -> tuple[str, str, str, dict[str, Any]]:
-        if not shutil.which("codex"):
-            return "", "codex CLI not found", "", {"transport": "codex-app-server", "persistent": True}
-        target = self.yoagent_codex_app_server_target(settings)
-        if resume and session_id:
-            target["agent_session_id"] = session_id
-        key = self.yoagent_codex_app_server_target_key(target)
-        started = time.monotonic()
-        with self.yoagent_codex_app_server_lock:
-            if self.yoagent_codex_app_server is None or self.yoagent_codex_app_server_key != key:
-                if self.yoagent_codex_app_server is not None:
-                    self.yoagent_codex_app_server.close()
-                self.yoagent_codex_app_server = CodexAppServerSession(target)
-                self.yoagent_codex_app_server_key = key
-            result, status = self.yoagent_codex_app_server.send(prompt, target, timeout=YOAGENT_CLI_TIMEOUT_SECONDS, on_event=stream_callback)
-            captured_session_id = self.yoagent_codex_app_server.thread_id
-        status["elapsed_ms"] = round((time.monotonic() - started) * 1000)
-        if result.ok and result.text:
-            return result.text, "", captured_session_id, status
-        return "", result.error or "codex app-server completed without a final agent message", captured_session_id, status
+    def run_yoagent_codex_app_server(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.run_yoagent_codex_app_server(*args, **kwargs)
 
-    def run_yoagent_direct_prompt_backend(self, backend: str, prompt: str, settings: dict[str, Any] | None = None) -> tuple[str, str, dict[str, Any]]:
-        if backend not in {"codex", "claude"}:
-            return "", f"unknown backend: {backend}", {}
-        started = time.monotonic()
-        current_settings = settings or self.yoagent_settings()
-        if backend == "codex":
-            answer, error, _session_id = self.run_yoagent_codex_cli(prompt, session_id="", resume=False, settings=current_settings)
-        else:
-            claude_model = str(current_settings.get("claude_model") or YOAGENT_CLAUDE_SUMMARY_MODEL).strip()
-            claude_effort = str(current_settings.get("claude_effort") or "").strip()
-            answer, error = self.run_yoagent_claude_cli(prompt, session_id="", resume=False, model=claude_model, effort=claude_effort)
-        return answer, yoagent_cli_fallback_reason(backend, error), {
-            "backend": backend,
-            "prompt_chars": len(prompt),
-            "elapsed_ms": round((time.monotonic() - started) * 1000),
-            "direct": True,
-        }
+    def run_yoagent_direct_prompt_backend(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.run_yoagent_direct_prompt_backend(*args, **kwargs)
 
-    def update_yoagent_session_summary(
-        self,
-        session: str,
-        info: SessionInfo,
-        settings: dict[str, Any] | None = None,
-        force: bool = False,
-    ) -> dict[str, Any]:
-        agent = next((item for item in info.agents if item.transcript), None)
-        if agent is None or not agent.transcript:
-            return {"session": session, "updated": False, "reason": "no transcript"}
-        transcript_path = Path(agent.transcript)
-        try:
-            text = tail_file_lines(transcript_path, MAX_TRANSCRIPT_TAIL_LINES)
-        except OSError as exc:
-            return {"session": session, "updated": False, "reason": str(exc)}
-        if not force and transcript_activity_is_recent(transcript_path, text, recency_seconds=YOAGENT_SESSION_SUMMARY_QUIET_SECONDS):
-            return {"session": session, "updated": False, "reason": "transcript still active"}
-        with self.yoagent_session_summary_lock:
-            previous = dict(self.yoagent_session_summaries.get(session) or {})
-        last_processed_ts = self.float_value(previous.get("last_processed_ts"), 0.0)
-        since = datetime.fromtimestamp(last_processed_ts + 0.000001, timezone.utc) if last_processed_ts > 0 else datetime.fromtimestamp(0, timezone.utc)
-        items, stats = compact_transcript_items_since(text, since)
-        items = items[-YOAGENT_SESSION_SUMMARY_MAX_ITEMS:]
-        newest = newest_transcript_timestamp(text)
-        if not items or newest is None:
-            return {"session": session, "updated": False, "reason": "no new transcript lines", "stats": stats}
-        transcript_text = "\n\n".join(format_transcript_item(item) for item in items)
-        transcript_text, truncated = trim_prompt_text(transcript_text, SUMMARY_MAX_PROMPT_CHARS)
-        prompt = self.build_yoagent_session_summary_update_prompt(
-            session,
-            str(transcript_path),
-            str(previous.get("rolling_summary") or ""),
-            transcript_text,
-        )
-        current_settings = settings or self.yoagent_settings()
-        requested_backend = str(current_settings.get("backend") or "deterministic").strip().lower()
-        backend = resolve_yoagent_backend(requested_backend)
-        invocation = str(current_settings.get("invocation") or "cli").strip().lower()
-        if backend not in {"codex", "claude"} or invocation != "cli":
-            return {"session": session, "updated": False, "reason": "no CLI backend available", "backend": backend}
-        answer, fallback_reason, cli_status = self.run_yoagent_direct_prompt_backend(backend, prompt, settings=current_settings)
-        if not answer:
-            return {"session": session, "updated": False, "reason": fallback_reason or "empty summary response", "backend": backend, "cli": cli_status}
-        parsed = self.parse_yoagent_session_summary_response(answer, default_state="working" if agent.status == "running" else "idle")
-        if not parsed["rolling_summary"]:
-            return {"session": session, "updated": False, "reason": "empty parsed summary", "backend": backend, "cli": cli_status}
-        now = time.time()
-        record = {
-            "rolling_summary": parsed["rolling_summary"],
-            "last_processed_ts": newest.timestamp(),
-            "updated_ts": now,
-            "state": parsed["state"],
-        }
-        with self.yoagent_session_summary_lock:
-            self.yoagent_session_summaries[session] = record
-            self.persist_yoagent_session_summaries_locked()
-        return {
-            "session": session,
-            "updated": True,
-            "backend": backend,
-            "state": parsed["state"],
-            "items": len(items),
-            "truncated": truncated,
-            "stats": stats,
-            "cli": cli_status,
-        }
+    def update_yoagent_session_summary(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.update_yoagent_session_summary(*args, **kwargs)
 
-    def tick_yoagent_session_summaries(self, settings: dict[str, Any] | None = None) -> dict[str, Any]:
-        current_settings = settings or self.yoagent_settings()
-        interval = self.yoagent_refresh_interval_seconds(current_settings)
-        if interval <= 0:
-            return {"enabled": False, "updated": [], "skipped": []}
-        sessions, errors = discover_sessions(self.sessions)
-        self.prune_yoagent_session_summaries(set(sessions))
-        updated: list[dict[str, Any]] = []
-        skipped: list[dict[str, Any]] = []
-        now = time.time()
-        for session in self.tmux_recency_ordered_sessions(self.sessions):
-            info = sessions.get(session)
-            if info is None:
-                continue
-            if not self.yoagent_session_summary_due(session, interval, now):
-                skipped.append({"session": session, "reason": "interval"})
-                continue
-            result = self.update_yoagent_session_summary(session, info, current_settings)
-            if result.get("updated"):
-                updated.append(result)
-            else:
-                skipped.append(result)
-        return {"enabled": True, "updated": updated, "skipped": skipped, "errors": errors}
+    def tick_yoagent_session_summaries(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.tick_yoagent_session_summaries(*args, **kwargs)
 
-    def maybe_start_yoagent_summary_worker(self) -> None:
-        settings = self.yoagent_settings()
-        if self.yoagent_refresh_interval_seconds(settings) <= 0:
-            return
-        with self.yoagent_summary_worker_lock:
-            if self.yoagent_summary_worker_running:
-                return
-            self.yoagent_summary_worker_running = True
-        threading.Thread(target=self.yoagent_summary_worker_loop, name="yoagent-summary-refresh", daemon=True).start()
+    def maybe_start_yoagent_summary_worker(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.maybe_start_yoagent_summary_worker(*args, **kwargs)
 
-    def yoagent_summary_worker_loop(self) -> None:
-        try:
-            while True:
-                settings = self.yoagent_settings()
-                interval = self.yoagent_refresh_interval_seconds(settings)
-                if interval <= 0:
-                    return
-                self.tick_yoagent_session_summaries(settings)
-                time.sleep(min(interval, 60.0))
-        finally:
-            with self.yoagent_summary_worker_lock:
-                self.yoagent_summary_worker_running = False
+    def yoagent_summary_worker_loop(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_summary_worker_loop(*args, **kwargs)
 
     def yoagent_settings(self) -> dict[str, Any]:
         settings = settings_payload().get("settings", {}).get("yoagent", {})
@@ -3741,1804 +3590,207 @@ class TmuxWebtermApp:
 
         return callback
 
-    def yoagent_job_prompt_text(self, action: dict[str, Any]) -> str:
-        if str(action.get("type") or "") != "send_prompt":
-            return ""
-        return truncate_text(str(action.get("text") or ""), YOAGENT_ACTION_TEXT_LIMIT)
+    def yoagent_job_prompt_text(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_job_prompt_text(*args, **kwargs)
 
-    def yoagent_job_transport_id(self, target: dict[str, Any], action: dict[str, Any], result: dict[str, Any] | None = None) -> str:
-        send_result = result.get("send") if isinstance(result, dict) and isinstance(result.get("send"), dict) else {}
-        action_result = result.get("action") if isinstance(result, dict) and isinstance(result.get("action"), dict) else {}
-        action_target = action_result.get("target") if isinstance(action_result.get("target"), dict) else {}
-        candidates = [
-            send_result.get("transport"),
-            action.get("transport"),
-            target.get("transport"),
-            action_target.get("transport"),
-        ]
-        for candidate in candidates:
-            raw = str(candidate or "").strip()
-            if raw:
-                return normalize_yoagent_transport_id(raw)
-        return ""
+    def yoagent_job_transport_id(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_job_transport_id(*args, **kwargs)
 
-    def yoagent_job_result_marker_from_result(self, result: dict[str, Any]) -> dict[str, Any]:
-        send_result = result.get("send") if isinstance(result.get("send"), dict) else {}
-        marker = result.get("result_marker") if isinstance(result.get("result_marker"), dict) else send_result.get("result_marker")
-        return dict(marker) if isinstance(marker, dict) else {}
+    def yoagent_job_result_marker_from_result(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_job_result_marker_from_result(*args, **kwargs)
 
-    def yoagent_job_result_source_from_result(self, result: dict[str, Any]) -> str:
-        send_result = result.get("send") if isinstance(result.get("send"), dict) else {}
-        return str(result.get("result_source") or send_result.get("result_source") or result.get("source") or "")
+    def yoagent_job_result_source_from_result(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_job_result_source_from_result(*args, **kwargs)
 
-    def sanitize_yoagent_job(self, value: Any) -> dict[str, Any] | None:
-        if not isinstance(value, dict):
-            return None
-        job_id = str(value.get("id") or "").strip()
-        if not job_id:
-            return None
-        status = str(value.get("status") or "queued")
-        if status not in {"queued", "pending_confirmation", "fired", "cancelled", "failed", "timed_out"}:
-            status = "queued"
-        target = value.get("target") if isinstance(value.get("target"), dict) else {}
-        predicate = value.get("predicate") if isinstance(value.get("predicate"), dict) else {}
-        action = value.get("action") if isinstance(value.get("action"), dict) else {}
-        result = value.get("result") if isinstance(value.get("result"), dict) else {}
-        prompt = truncate_text(str(value.get("prompt") or self.yoagent_job_prompt_text(action)), YOAGENT_ACTION_TEXT_LIMIT)
-        result_marker = value.get("result_marker") if isinstance(value.get("result_marker"), dict) else self.yoagent_job_result_marker_from_result(result)
-        job = {
-            "id": job_id,
-            "job_id": str(value.get("job_id") or job_id),
-            "type": str(value.get("type") or "notify_session_idle"),
-            "target": dict(target),
-            "predicate": dict(predicate),
-            "action": dict(action),
-            "transport": str(value.get("transport") or self.yoagent_job_transport_id(target, action, result)),
-            "prompt": prompt,
-            "prompt_preview": redacted_action_preview(prompt),
-            "public_text": redacted_action_text(prompt, 240),
-            "started_at": str(value.get("started_at") or ""),
-            "result_marker": dict(result_marker),
-            "result_source": str(value.get("result_source") or self.yoagent_job_result_source_from_result(result)),
-            "created_at": str(value.get("created_at") or datetime.now(timezone.utc).isoformat()),
-            "created_ts": self.float_value(value.get("created_ts"), time.time()),
-            "created_by": str(value.get("created_by") or "yoagent"),
-            "status": status,
-            "last_observed_state": dict(value.get("last_observed_state") if isinstance(value.get("last_observed_state"), dict) else {}),
-            "timeout_at": str(value.get("timeout_at") or ""),
-            "timeout_ts": self.float_value(value.get("timeout_ts"), 0.0),
-            "confirm_required": bool(value.get("confirm_required")),
-            "confirmed_at": str(value.get("confirmed_at") or ""),
-            "idempotency_key": str(value.get("idempotency_key") or ""),
-            "audit_event_ids": [str(item) for item in value.get("audit_event_ids", []) if item],
-        }
-        for key in ("fired_at", "cancelled_at", "failed_at", "timed_out_at", "result", "error"):
-            if key in value:
-                job[key] = value[key]
-        return job
+    def sanitize_yoagent_job(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.sanitize_yoagent_job(*args, **kwargs)
 
-    def load_yoagent_jobs(self) -> dict[str, dict[str, Any]]:
-        raw = read_yolomux_state().get(YOAGENT_JOBS_STATE_KEY, {})
-        items = raw.values() if isinstance(raw, dict) else raw if isinstance(raw, list) else []
-        jobs: dict[str, dict[str, Any]] = {}
-        for item in items:
-            job = self.sanitize_yoagent_job(item)
-            if job:
-                jobs[str(job["id"])] = job
-        return jobs
+    def load_yoagent_jobs(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.load_yoagent_jobs(*args, **kwargs)
 
-    def persist_yoagent_jobs_locked(self) -> None:
-        jobs = dict(sorted(self.yoagent_jobs.items(), key=lambda item: float(item[1].get("created_ts") or 0), reverse=True)[:YOAGENT_JOB_MAX_ITEMS])
-        self.yoagent_jobs = jobs
-        update_yolomux_state({YOAGENT_JOBS_STATE_KEY: jobs})
+    def persist_yoagent_jobs_locked(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.persist_yoagent_jobs_locked(*args, **kwargs)
 
-    def publish_yoagent_jobs_changed(self, reason: str, job: dict[str, Any] | None = None) -> None:
-        payload: dict[str, Any] = {"reason": reason}
-        if job:
-            payload["job"] = self.public_yoagent_job(job)
-            notification = job.get("notification") if isinstance(job.get("notification"), dict) else {}
-            if notification:
-                payload["notification"] = notification
-        self.publish_client_event("yoagent_jobs_changed", payload, trigger=reason, cache="ready")
+    def publish_yoagent_jobs_changed(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.publish_yoagent_jobs_changed(*args, **kwargs)
 
-    def public_yoagent_job(self, job: dict[str, Any]) -> dict[str, Any]:
-        public = copy.deepcopy(job)
-        prompt = str(public.get("prompt") or "")
-        if prompt:
-            public["prompt_preview"] = redacted_action_preview(prompt)
-            public["prompt"] = redacted_action_text(prompt, 240)
-            public["public_text"] = redacted_action_text(prompt, 240)
-        action = public.get("action") if isinstance(public.get("action"), dict) else {}
-        if "text" in action:
-            action["text_preview"] = redacted_action_preview(str(action.get("text") or ""))
-            action["text"] = redacted_action_text(str(action.get("text") or ""), 240)
-        public["action"] = action
-        return public
+    def public_yoagent_job(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.public_yoagent_job(*args, **kwargs)
 
-    def public_yoagent_action_preview(self, preview: dict[str, Any]) -> dict[str, Any]:
-        public = copy.deepcopy(preview)
-        if "text" in public:
-            public["text_preview"] = redacted_action_preview(str(public.get("text") or ""))
-            public["text"] = redacted_action_text(str(public.get("text") or ""), YOAGENT_ACTION_TEXT_LIMIT)
-        screen = public.get("screen") if isinstance(public.get("screen"), dict) else {}
-        if "detected_text" in screen:
-            detected = str(screen.get("detected_text") or "")
-            screen["detected_text_preview"] = redacted_action_preview(detected)
-            screen["detected_text"] = redacted_action_text(detected, 240)
-            public["screen"] = screen
-        handoff = public.get("handoff") if isinstance(public.get("handoff"), dict) else {}
-        if "instruction" in handoff:
-            handoff["instruction"] = redacted_action_text(str(handoff.get("instruction") or ""), YOAGENT_ACTION_TEXT_LIMIT)
-        if handoff:
-            public["handoff"] = handoff
-        return public
+    def public_yoagent_action_preview(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.public_yoagent_action_preview(*args, **kwargs)
 
-    def yoagent_jobs_payload(self) -> tuple[dict[str, Any], HTTPStatus]:
-        with self.yoagent_job_lock:
-            jobs = [self.public_yoagent_job(job) for job in self.yoagent_jobs.values()]
-        jobs.sort(key=lambda item: float(item.get("created_ts") or 0), reverse=True)
-        return {"ok": True, "jobs": jobs}, HTTPStatus.OK
+    def yoagent_jobs_payload(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_jobs_payload(*args, **kwargs)
 
-    def yoagent_job_idempotency_key(self, job_type: str, target: dict[str, Any], predicate: dict[str, Any], action: dict[str, Any]) -> str:
-        signature = self.client_event_payload_signature({
-            "type": job_type,
-            "target": target,
-            "predicate": predicate,
-            "action": action,
-        })
-        return hashlib.sha256(signature.encode("utf-8", errors="replace")).hexdigest()
+    def yoagent_job_idempotency_key(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_job_idempotency_key(*args, **kwargs)
 
-    def yoagent_job_spec_from_payload(self, payload: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
-        raw_type = str(payload.get("type") or payload.get("kind") or "").strip()
-        job_type = raw_type or "notify_session_idle"
-        target_payload = payload.get("target") if isinstance(payload.get("target"), dict) else {}
-        action_payload = payload.get("action") if isinstance(payload.get("action"), dict) else {}
-        session = str(payload.get("session") or target_payload.get("session") or action_payload.get("session") or "").strip()
-        if job_type in {"notify_when_idle", "notify_session", "notify_session_idle"}:
-            job_type = "notify_session_idle"
-            if not session:
-                return {"error": "missing target session"}, HTTPStatus.BAD_REQUEST
-            unknown = self.require_known_session(session)
-            if unknown:
-                return unknown
-            target = {"session": session}
-            predicate = {"type": "session_idle", "quiet_seconds": self.float_value(payload.get("quiet_seconds"), YOAGENT_JOB_IDLE_QUIET_SECONDS)}
-            action = {"type": "notify_user", "message": str(payload.get("message") or f"tmux session `{session}` is idle")}
-        elif job_type in {"notify_all_idle", "all_idle_summary"}:
-            roster = [str(item) for item in (payload.get("roster") if isinstance(payload.get("roster"), list) else self.sessions) if str(item)]
-            missing = [item for item in roster if item not in self.sessions]
-            if missing:
-                return {"error": "unknown sessions in roster", "sessions": missing}, HTTPStatus.NOT_FOUND
-            target = {"roster": roster}
-            predicate = {"type": "all_idle", "quiet_seconds": self.float_value(payload.get("quiet_seconds"), YOAGENT_JOB_IDLE_QUIET_SECONDS)}
-            action = {"type": "notify_user", "message": str(payload.get("message") or "all watched tmux sessions are idle")}
-        elif job_type in {"wait_then_send", "wait_then_run"}:
-            job_type = "wait_then_send"
-            if not session:
-                return {"error": "missing target session"}, HTTPStatus.BAD_REQUEST
-            unknown = self.require_known_session(session)
-            if unknown:
-                return unknown
-            text = truncate_text(str(payload.get("text") or action_payload.get("text") or "").strip(), YOAGENT_ACTION_TEXT_LIMIT)
-            if not text:
-                return {"session": session, "error": "missing prompt text"}, HTTPStatus.BAD_REQUEST
-            target = {"session": session}
-            predicate = {"type": "session_idle", "quiet_seconds": self.float_value(payload.get("quiet_seconds"), YOAGENT_JOB_IDLE_QUIET_SECONDS)}
-            action = {"type": "send_prompt", "session": session, "text": text, "submit": action_payload.get("submit") is not False, "return_result": bool(action_payload.get("return_result") or payload.get("return_result"))}
-        else:
-            return {"error": f"unsupported YO!agent job type: {job_type}"}, HTTPStatus.BAD_REQUEST
-        return {"type": job_type, "target": target, "predicate": predicate, "action": action}, HTTPStatus.OK
+    def yoagent_job_spec_from_payload(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_job_spec_from_payload(*args, **kwargs)
 
-    def create_yoagent_job(self, payload: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
-        spec, status = self.yoagent_job_spec_from_payload(payload)
-        if status != HTTPStatus.OK:
-            return spec, status
-        job_type = str(spec["type"])
-        target = spec["target"]
-        predicate = spec["predicate"]
-        action = spec["action"]
-        risk_labels = self.yoagent_action_risk_labels(str(action.get("text") or "")) if action.get("type") == "send_prompt" else []
-        if risk_labels:
-            action["risk_labels"] = risk_labels
-        confirm_required = bool(payload.get("confirm_required") or payload.get("requires_confirmation") or risk_labels)
-        idempotency_key = str(payload.get("idempotency_key") or self.yoagent_job_idempotency_key(job_type, target, predicate, action))
-        with self.yoagent_job_lock:
-            for existing in self.yoagent_jobs.values():
-                if existing.get("idempotency_key") == idempotency_key and existing.get("status") in {"queued", "pending_confirmation"}:
-                    return {"ok": False, "duplicate": True, "job": self.public_yoagent_job(existing)}, HTTPStatus.CONFLICT
-            now_ts = time.time()
-            timeout_minutes = max(1.0, min(1440.0, self.float_value(payload.get("timeout_minutes"), YOAGENT_JOB_DEFAULT_TIMEOUT_MINUTES)))
-            timeout_dt = datetime.now(timezone.utc) + timedelta(minutes=timeout_minutes)
-            prompt = self.yoagent_job_prompt_text(action)
-            job_id = f"yj_{uuid.uuid4().hex[:16]}"
-            job = {
-                "id": job_id,
-                "job_id": job_id,
-                "type": job_type,
-                "target": target,
-                "predicate": predicate,
-                "action": action,
-                "transport": self.yoagent_job_transport_id(target, action),
-                "prompt": prompt,
-                "prompt_preview": redacted_action_preview(prompt),
-                "public_text": redacted_action_text(prompt, 240),
-                "started_at": "",
-                "result_marker": {},
-                "result_source": "",
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "created_ts": now_ts,
-                "created_by": "yoagent",
-                "status": "pending_confirmation" if confirm_required else "queued",
-                "last_observed_state": {},
-                "timeout_at": timeout_dt.isoformat(),
-                "timeout_ts": now_ts + timeout_minutes * 60.0,
-                "confirm_required": confirm_required,
-                "confirmed_at": "" if confirm_required else datetime.now(timezone.utc).isoformat(),
-                "idempotency_key": idempotency_key,
-                "audit_event_ids": [],
-            }
-            self.yoagent_jobs[job["id"]] = job
-            self.persist_yoagent_jobs_locked()
-        event = self.log_event(str(target.get("session") or ""), "yoagent_job_created", f"YO!agent job created: {job_type}", {
-            "job_id": job["id"],
-            "type": job_type,
-            "target_session": target.get("session", ""),
-            "roster": target.get("roster", []),
-            "predicate": predicate.get("type", ""),
-            "action": action.get("type", ""),
-            "text_preview": redacted_action_preview(str(action.get("text") or "")),
-            "risk_labels": risk_labels,
-        })
-        with self.yoagent_job_lock:
-            current = self.yoagent_jobs.get(job["id"])
-            if current is not None:
-                current["audit_event_ids"].append(str(event.get("time") or ""))
-                self.persist_yoagent_jobs_locked()
-                job = copy.deepcopy(current)
-        self.publish_yoagent_jobs_changed("yoagent_job_created", job)
-        return {"ok": True, "job": self.public_yoagent_job(job)}, HTTPStatus.OK
+    def create_yoagent_job(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.create_yoagent_job(*args, **kwargs)
 
-    def confirm_yoagent_job(self, job_id: str) -> tuple[dict[str, Any], HTTPStatus]:
-        with self.yoagent_job_lock:
-            job = self.yoagent_jobs.get(str(job_id))
-            if not job:
-                return {"error": "job not found"}, HTTPStatus.NOT_FOUND
-            if job.get("status") != "pending_confirmation":
-                return {"ok": True, "job": self.public_yoagent_job(job)}, HTTPStatus.OK
-            job["status"] = "queued"
-            job["confirmed_at"] = datetime.now(timezone.utc).isoformat()
-            self.persist_yoagent_jobs_locked()
-            public = copy.deepcopy(job)
-        self.log_event(str(public.get("target", {}).get("session") or ""), "yoagent_job_confirmed", f"YO!agent job confirmed: {job_id}", {"job_id": job_id})
-        self.publish_yoagent_jobs_changed("yoagent_job_confirmed", public)
-        self.client_watch_wake_event.set()
-        return {"ok": True, "job": self.public_yoagent_job(public)}, HTTPStatus.OK
+    def confirm_yoagent_job(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.confirm_yoagent_job(*args, **kwargs)
 
-    def cancel_yoagent_job(self, job_id: str) -> tuple[dict[str, Any], HTTPStatus]:
-        with self.yoagent_job_lock:
-            job = self.yoagent_jobs.get(str(job_id))
-            if not job:
-                return {"error": "job not found"}, HTTPStatus.NOT_FOUND
-            if job.get("status") in {"fired", "cancelled", "failed", "timed_out"}:
-                return {"ok": True, "job": self.public_yoagent_job(job)}, HTTPStatus.OK
-            job["status"] = "cancelled"
-            job["cancelled_at"] = datetime.now(timezone.utc).isoformat()
-            self.persist_yoagent_jobs_locked()
-            public = copy.deepcopy(job)
-        self.log_event(str(public.get("target", {}).get("session") or ""), "yoagent_job_cancelled", f"YO!agent job cancelled: {job_id}", {"job_id": job_id})
-        self.publish_yoagent_jobs_changed("yoagent_job_cancelled", public)
-        return {"ok": True, "job": self.public_yoagent_job(public)}, HTTPStatus.OK
+    def cancel_yoagent_job(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.cancel_yoagent_job(*args, **kwargs)
 
-    def yoagent_intent(self, payload: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
-        intent = payload.get("intent") if isinstance(payload.get("intent"), dict) else payload
-        intent_type = str(intent.get("type") or "")
-        if intent_type in {"send_prompt", "wait_then_send", "session_handoff"}:
-            preview, status = self.create_yoagent_action_preview(intent)
-            risk = "mutating-send" if str(preview.get("status") or "") == "ready" else "waiting-target"
-            return {"ok": status == HTTPStatus.OK, "intent": intent, "preview": preview, "risk": risk, "confirmation_required": bool(preview.get("requires_confirmation"))}, status
-        job, status = self.yoagent_job_spec_from_payload(intent)
-        return {"ok": status == HTTPStatus.OK, "intent": intent, "job_preview": job, "risk": "mutating-job" if (job.get("action") or {}).get("type") == "send_prompt" else "notify-only"}, status
+    def yoagent_intent(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_intent(*args, **kwargs)
 
-    def yoagent_job_observed_state(self, job: dict[str, Any]) -> dict[str, Any]:
-        predicate = job.get("predicate") if isinstance(job.get("predicate"), dict) else {}
-        target = job.get("target") if isinstance(job.get("target"), dict) else {}
-        predicate_type = str(predicate.get("type") or "")
-        if predicate_type == "all_idle":
-            roster = [str(item) for item in target.get("roster", []) if str(item)]
-            blockers: list[str] = []
-            states: dict[str, str] = {}
-            for session in roster:
-                current, status = self.yoagent_action_target(session)
-                if status != HTTPStatus.OK:
-                    states[session] = "missing"
-                    blockers.append(session)
-                    continue
-                screen = current.get("screen") if isinstance(current.get("screen"), dict) else {}
-                state_key = str(screen.get("key") or "idle")
-                states[session] = state_key
-                if state_key not in YOAGENT_ACTION_ACCEPTING_SCREEN_KEYS:
-                    blockers.append(session)
-            return {"ready": not blockers and bool(roster), "state": "all_idle" if not blockers else "waiting", "states": states, "blockers": blockers}
-        session = str(target.get("session") or "").strip()
-        current, status = self.yoagent_action_target(session)
-        if status != HTTPStatus.OK:
-            return {"ready": False, "state": "missing", "error": current.get("error") or status.phrase}
-        accepting, acceptance_text = self.yoagent_action_acceptance(current)
-        screen = current.get("screen") if isinstance(current.get("screen"), dict) else {}
-        state_key = str(screen.get("key") or ("idle" if accepting else "waiting"))
-        ready = accepting if predicate_type in {"session_idle", "session_done"} else False
-        return {"ready": ready, "state": state_key, "acceptance_text": acceptance_text, "target": current}
+    def yoagent_job_observed_state(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_job_observed_state(*args, **kwargs)
 
-    def update_yoagent_job_observation(self, job_id: str, observed: dict[str, Any], now: float) -> tuple[dict[str, Any] | None, bool]:
-        with self.yoagent_job_lock:
-            job = self.yoagent_jobs.get(job_id)
-            if not job or job.get("status") != "queued":
-                return None, False
-            predicate = job.get("predicate") if isinstance(job.get("predicate"), dict) else {}
-            quiet_seconds = max(0.0, self.float_value(predicate.get("quiet_seconds"), YOAGENT_JOB_IDLE_QUIET_SECONDS))
-            previous = job.get("last_observed_state") if isinstance(job.get("last_observed_state"), dict) else {}
-            state = str(observed.get("state") or "")
-            ready = bool(observed.get("ready"))
-            if previous.get("state") != state or bool(previous.get("ready")) != ready:
-                since = now
-            else:
-                since = self.float_value(previous.get("since_ts"), now)
-            job["last_observed_state"] = {
-                "state": state,
-                "ready": ready,
-                "since_ts": since,
-                "observed_ts": now,
-                "blockers": observed.get("blockers", []),
-                "states": observed.get("states", {}),
-                "acceptance_text": observed.get("acceptance_text", ""),
-            }
-            self.persist_yoagent_jobs_locked()
-            return copy.deepcopy(job), ready and now - since >= quiet_seconds
+    def update_yoagent_job_observation(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.update_yoagent_job_observation(*args, **kwargs)
 
-    def complete_yoagent_job(self, job_id: str, status: str, result: dict[str, Any]) -> dict[str, Any] | None:
-        with self.yoagent_job_lock:
-            job = self.yoagent_jobs.get(job_id)
-            if not job:
-                return None
-            job["status"] = status
-            timestamp_key = "fired_at" if status == "fired" else "failed_at" if status == "failed" else "timed_out_at"
-            timestamp = datetime.now(timezone.utc).isoformat()
-            job[timestamp_key] = timestamp
-            if status == "fired" and not job.get("started_at"):
-                job["started_at"] = timestamp
-            if result:
-                job["result"] = result
-                transport = self.yoagent_job_transport_id(
-                    job.get("target") if isinstance(job.get("target"), dict) else {},
-                    job.get("action") if isinstance(job.get("action"), dict) else {},
-                    result,
-                )
-                if transport:
-                    job["transport"] = transport
-                marker = self.yoagent_job_result_marker_from_result(result)
-                if marker:
-                    job["result_marker"] = marker
-                result_source = self.yoagent_job_result_source_from_result(result)
-                if result_source:
-                    job["result_source"] = result_source
-            self.persist_yoagent_jobs_locked()
-            return copy.deepcopy(job)
+    def complete_yoagent_job(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.complete_yoagent_job(*args, **kwargs)
 
-    def fire_yoagent_job(self, job: dict[str, Any], observed: dict[str, Any]) -> None:
-        job_id = str(job.get("id") or "")
-        action = job.get("action") if isinstance(job.get("action"), dict) else {}
-        action_type = str(action.get("type") or "notify_user")
-        session = str((job.get("target") if isinstance(job.get("target"), dict) else {}).get("session") or action.get("session") or "")
-        if action_type == "notify_user":
-            message = str(action.get("message") or f"YO!agent job `{job_id}` fired")
-            notification = {"title": "YO!agent", "body": message, "session": session}
-            completed = self.complete_yoagent_job(job_id, "fired", {"message": message})
-            if completed:
-                completed["notification"] = notification
-                self.log_event(session, "yoagent_job_fired", message, {"job_id": job_id, "type": job.get("type"), "state": observed.get("state", "")})
-                self.publish_yoagent_jobs_changed("yoagent_job_fired", completed)
-            return
-        if action_type == "send_prompt":
-            intent = {
-                "type": "send_prompt",
-                "session": str(action.get("session") or session),
-                "text": str(action.get("text") or ""),
-                "submit": action.get("submit") is not False,
-                "return_result": bool(action.get("return_result")),
-            }
-            preview, preview_status = self.create_yoagent_action_preview(intent)
-            if preview_status == HTTPStatus.OK and preview.get("status") == "ready":
-                result, result_status = self.execute_yoagent_send_action({"preview_id": preview.get("id")}, persist_result=True, start_result_watch=bool(intent.get("return_result")))
-                completed = self.complete_yoagent_job(job_id, "fired" if result_status == HTTPStatus.OK else "failed", {"action": preview, "send": result, "status": int(result_status)})
-                if completed:
-                    self.log_event(str(intent.get("session") or ""), "yoagent_job_fired", f"YO!agent job sent prompt to {intent.get('session')}", {"job_id": job_id, "status": int(result_status), "text_preview": redacted_action_preview(str(intent.get("text") or ""))})
-                    self.publish_yoagent_jobs_changed("yoagent_job_fired", completed)
-                return
-            reason = preview.get("acceptance_text") or preview.get("error") or "target is not ready"
-            failed = self.complete_yoagent_job(job_id, "failed", {"error": reason, "action": preview})
-            if failed:
-                self.log_event(str(intent.get("session") or ""), "yoagent_job_failed", f"YO!agent job failed: {reason}", {"job_id": job_id})
-                self.publish_yoagent_jobs_changed("yoagent_job_failed", failed)
+    def fire_yoagent_job(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.fire_yoagent_job(*args, **kwargs)
 
-    def poll_yoagent_jobs_once(self) -> list[str]:
-        now = time.time()
-        fired: list[str] = []
-        with self.yoagent_job_lock:
-            jobs = [copy.deepcopy(job) for job in self.yoagent_jobs.values() if job.get("status") == "queued"]
-        for job in jobs:
-            job_id = str(job.get("id") or "")
-            if self.float_value(job.get("timeout_ts"), 0.0) and now >= self.float_value(job.get("timeout_ts"), 0.0):
-                timed_out = self.complete_yoagent_job(job_id, "timed_out", {"reason": "timeout"})
-                if timed_out:
-                    timed_out["notification"] = {
-                        "title": "YO!agent",
-                        "body": f"YO!agent job `{job_id}` timed out",
-                        "session": str((timed_out.get("target") or {}).get("session") or ""),
-                    }
-                    self.log_event(str((timed_out.get("target") or {}).get("session") or ""), "yoagent_job_timed_out", f"YO!agent job timed out: {job_id}", {"job_id": job_id})
-                    self.publish_yoagent_jobs_changed("yoagent_job_timed_out", timed_out)
-                continue
-            observed = self.yoagent_job_observed_state(job)
-            if str(observed.get("state") or "") == "missing":
-                reason = str(observed.get("error") or "target session is missing")
-                failed = self.complete_yoagent_job(job_id, "failed", {"error": reason, "observed": observed})
-                if failed:
-                    failed["notification"] = {
-                        "title": "YO!agent",
-                        "body": f"YO!agent job `{job_id}` failed: {reason}",
-                        "session": str((failed.get("target") or {}).get("session") or ""),
-                    }
-                    self.log_event(str((failed.get("target") or {}).get("session") or ""), "yoagent_job_failed", f"YO!agent job failed: {reason}", {"job_id": job_id})
-                    self.publish_yoagent_jobs_changed("yoagent_job_failed", failed)
-                continue
-            current, should_fire = self.update_yoagent_job_observation(job_id, observed, now)
-            if current and should_fire:
-                self.fire_yoagent_job(current, observed)
-                fired.append(job_id)
-        return fired
+    def poll_yoagent_jobs_once(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.poll_yoagent_jobs_once(*args, **kwargs)
 
-    def yoagent_wait_regarding_text(self, text: Any, fallback: str) -> str:
-        preview = redacted_action_preview(" ".join(str(text or "").split()), 90).strip(" .")
-        return preview or fallback
+    def yoagent_wait_regarding_text(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_wait_regarding_text(*args, **kwargs)
 
-    def yoagent_action_wait_label(self, preview: dict[str, Any]) -> str:
-        target = preview.get("target") if isinstance(preview.get("target"), dict) else {}
-        session = str(preview.get("session") or target.get("session") or "").strip()
-        handoff = preview.get("handoff") if isinstance(preview.get("handoff"), dict) else {}
-        target_session = str(handoff.get("session") or "").strip()
-        if target_session:
-            source_regarding = self.yoagent_wait_regarding_text(preview.get("text"), "the current request")
-            target_regarding = self.yoagent_wait_regarding_text(handoff.get("instruction"), "the next request")
-            return (
-                f"Waiting for tmux session `{session}` to respond (regarding {source_regarding}), before handing off "
-                f"the next request to tmux session `{target_session}` (regarding {target_regarding})"
-            )
-        return f"Waiting for tmux session `{session}` to reply"
+    def yoagent_action_wait_label(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_action_wait_label(*args, **kwargs)
 
-    def register_yoagent_action_wait(self, watch_id: str, preview: dict[str, Any], marker: dict[str, Any]) -> dict[str, Any]:
-        target = preview.get("target") if isinstance(preview.get("target"), dict) else {}
-        session = str(preview.get("session") or target.get("session") or "").strip()
-        handoff = preview.get("handoff") if isinstance(preview.get("handoff"), dict) else {}
-        pending = {
-            "id": watch_id,
-            "session": session,
-            "label": self.yoagent_action_wait_label(preview),
-            "started_ts": time.time(),
-            "wait_seconds": YOAGENT_ACTION_RESULT_WAIT_SECONDS,
-            "transcript": str(marker.get("transcript") or ""),
-        }
-        if handoff:
-            pending["handoff"] = {
-                "source_session": str(handoff.get("source_session") or session),
-                "session": str(handoff.get("session") or ""),
-                "source_regarding": self.yoagent_wait_regarding_text(preview.get("text"), "the current request"),
-                "target_regarding": self.yoagent_wait_regarding_text(handoff.get("instruction"), "the next request"),
-            }
-        with self.yoagent_action_lock:
-            self.yoagent_action_waits[watch_id] = pending
-        self.publish_yoagent_conversation_changed("yoagent_wait_started")
-        return pending
+    def register_yoagent_action_wait(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.register_yoagent_action_wait(*args, **kwargs)
 
-    def finish_yoagent_action_wait(self, watch_id: str | None, reason: str = "done") -> None:
-        if not watch_id:
-            return
-        removed = False
-        with self.yoagent_action_lock:
-            removed = self.yoagent_action_waits.pop(watch_id, None) is not None
-        if removed:
-            self.publish_yoagent_conversation_changed(reason)
+    def finish_yoagent_action_wait(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.finish_yoagent_action_wait(*args, **kwargs)
 
-    def yoagent_prompt_history(self, raw_history: Any, question: str) -> list[dict[str, str]]:
-        source = raw_history if isinstance(raw_history, list) and raw_history else yoagent_conversation.load_messages()
-        sanitized = [message for message in (yoagent_conversation.sanitize_message(item) for item in source) if message is not None]
-        if sanitized and sanitized[-1].get("role") == "user":
-            latest = " ".join(str(sanitized[-1].get("content") or "").split())
-            if latest == question:
-                sanitized = sanitized[:-1]
-        history: list[dict[str, str]] = []
-        for item in sanitized[-8:]:
-            role = "user" if item.get("role") == "user" else "assistant"
-            content = truncate_text(" ".join(str(item.get("content") or "").split()), 1000)
-            if content:
-                history.append({"role": role, "content": content})
-        return history
+    def yoagent_prompt_history(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_prompt_history(*args, **kwargs)
 
-    def yoagent_activity_payload(self) -> dict[str, Any]:
-        payload = dict(self.activity_summary_payload())
-        payload["yoagent_skills"] = self.yoagent_skills_payload()
-        return payload
+    def yoagent_activity_payload(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_activity_payload(*args, **kwargs)
 
-    def prune_yoagent_action_previews(self) -> None:
-        cutoff = time.time() - YOAGENT_ACTION_PREVIEW_TTL_SECONDS
-        with self.yoagent_action_lock:
-            for preview_id, preview in list(self.yoagent_action_previews.items()):
-                if float(preview.get("created_ts") or 0) < cutoff:
-                    self.yoagent_action_previews.pop(preview_id, None)
+    def prune_yoagent_action_previews(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.prune_yoagent_action_previews(*args, **kwargs)
 
-    def yoagent_managed_target_metadata(self, session: str, agent: Any | None) -> dict[str, Any]:
-        candidates = [str(session or "").strip()]
-        if agent is not None:
-            session_id = str(agent.session_id or "").strip()
-            pane_target = str(agent.pane_target or "").strip()
-            if session_id:
-                candidates.append(session_id)
-                candidates.append(f"{session}:{session_id}")
-            if pane_target:
-                candidates.append(pane_target)
-                candidates.append(f"{session}:{pane_target}")
-        for key in candidates:
-            if key and key in self.yoagent_managed_targets:
-                value = self.yoagent_managed_targets[key]
-                return dict(value) if isinstance(value, dict) else {}
-        return {}
+    def yoagent_managed_target_metadata(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_managed_target_metadata(*args, **kwargs)
 
-    def yoagent_target_with_transport(self, target: dict[str, Any]) -> dict[str, Any]:
-        transport_provider = self.yoagent_transports.first_available(target)
-        return {
-            **target,
-            "transport": transport_provider.id,
-            "transport_label": transport_provider.label,
-            "transport_kind": transport_provider.kind,
-            "transport_capabilities": list(transport_provider.capabilities),
-        }
+    def yoagent_target_with_transport(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_target_with_transport(*args, **kwargs)
 
     @requires_known_session(refresh=True)
-    def yoagent_action_target(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
-        discovered, errors = discover_sessions([session])
-        info = discovered.get(session)
-        if info is None:
-            return {"session": session, "error": "session metadata unavailable", "errors": errors}, HTTPStatus.NOT_FOUND
-        selected = info.selected_pane
-        agent = None
-        if selected:
-            agent = next((item for item in info.agents if item.pane_target == selected.target), None)
-        if agent is None:
-            agent = next((item for item in info.agents if item.transcript), info.agents[0] if info.agents else None)
-        target_pane = agent.pane_target if agent and agent.pane_target else (selected.target if selected else tmux_session_target(session))
-        prompt, screen = self.yoagent_action_pane_status(session, target_pane, discovered_sessions=discovered)
-        target = {
-            "session": session,
-            "pane_target": target_pane,
-            "pane_window": selected.window if selected else "",
-            "pane_index": selected.pane if selected else "",
-            "cwd": (agent.cwd if agent and agent.cwd else selected.current_path if selected else "") or "",
-            "agent_kind": agent.kind if agent else "",
-            "agent_session_id": agent.session_id if agent else "",
-            "agent_model": agent.model if agent else "",
-            "agent_transcript": agent.transcript if agent and agent.transcript else "",
-            "prompt": prompt,
-            "screen": screen,
-            "errors": errors,
-        }
-        managed_metadata = self.yoagent_managed_target_metadata(session, agent)
-        if managed_metadata:
-            target.update(managed_metadata)
-            target["managed"] = managed_metadata.get("managed") is not False
-        return self.yoagent_target_with_transport(target), HTTPStatus.OK
+    def yoagent_action_target(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_action_target(*args, **kwargs)
 
-    def yoagent_action_pane_status(self, session: str, target_pane: str, discovered_sessions: dict[str, SessionInfo] | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
-        try:
-            visible_text = tmux_capture_pane(target_pane, visible_only=True)
-            if visible_text is None:
-                prompt = normalized_prompt_state()
-                prompt["error"] = "failed to capture pane"
-                return prompt, {"key": "disconnected", "text": "failed to capture pane"}
-            prompt_state = hybrid_approval_prompt_state(session, visible_text, prompt_source=self.auto_approve_prompt_source())
-            if prompt_state.get("visible") and prompt_state.get("type") == "bash":
-                pane_text = tmux_capture_pane(target_pane)
-                prompt_state = hybrid_approval_prompt_state(session, visible_text, pane_text or visible_text, prompt_source=self.auto_approve_prompt_source())
-            screen_state = agent_screen_state(visible_text)
-            composer_text = self.yoagent_visible_composer_text(visible_text)
-            if screen_state.get("key") == "idle" and composer_text:
-                screen_state = {
-                    "key": "input-draft",
-                    "text": "target input box already contains unsent text",
-                    "detected_text": composer_text,
-                }
-            if screen_state.get("key") == "idle":
-                infos = discovered_sessions
-                if infos is None:
-                    infos, _errors = discover_sessions([session])
-                transcript_state = session_transcript_activity_state(infos.get(session))
-                if transcript_state.get("key") != "idle":
-                    screen_state = transcript_state
-            return normalized_prompt_state(prompt_state), dict(screen_state)
-        except (OSError, subprocess.SubprocessError) as exc:
-            prompt = normalized_prompt_state()
-            prompt["error"] = str(exc)
-            return prompt, {"key": "error", "text": str(exc)}
+    def yoagent_action_pane_status(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_action_pane_status(*args, **kwargs)
 
-    def yoagent_action_acceptance(self, target: dict[str, Any]) -> tuple[bool, str]:
-        agent_kind = str(target.get("agent_kind") or "").strip().lower()
-        if agent_kind not in YOAGENT_ACTION_AGENT_KINDS:
-            return False, "target pane does not have a detected Claude or Codex agent"
-        if not str(target.get("pane_target") or "").strip():
-            return False, "target pane is missing"
-        prompt = target.get("prompt") if isinstance(target.get("prompt"), dict) else {}
-        if prompt.get("visible"):
-            return False, "target agent is at an approval prompt, not a fresh AI prompt"
-        screen = target.get("screen") if isinstance(target.get("screen"), dict) else {}
-        screen_key = str(screen.get("key") or "idle")
-        if screen_key == "input-draft":
-            return True, "target input box has unsent text; YO!agent will clear it before sending"
-        if screen_key in YOAGENT_ACTION_ACCEPTING_SCREEN_KEYS:
-            return True, "target agent is accepting an AI prompt"
-        if screen_key == "working":
-            return False, "target agent is still working"
-        if screen_key in {"approval", "needs-approval", "yolo-approval"}:
-            return False, "target agent is at an approval prompt"
-        if screen_key in {"disconnected", "error"}:
-            return False, str(screen.get("text") or "target pane is not reachable")
-        return False, f"target agent is not accepting an AI prompt ({screen_key})"
+    def yoagent_action_acceptance(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_action_acceptance(*args, **kwargs)
 
-    def yoagent_action_risk_labels(self, text: str) -> list[str]:
-        value = str(text or "")
-        checks = [
-            ("secret-like-text", r"(?i)\b(?:token|secret|password|api[_-]?key)\s*=\s*\S+"),
-            ("credential-path", r"(?i)(~?/\.config/gitlab-token|~?/\.cache/huggingface/token|~?/\.docker/config\.json|~?/\.ngc/config)"),
-            ("recursive-delete", r"(?i)\brm\s+-[^\n]*r[^\n]*f\b"),
-            ("hard-reset", r"(?i)\bgit\s+reset\s+--hard\b"),
-            ("broad-pkill", r"(?i)\bpkill\s+-f\b"),
-            ("recursive-permission-change", r"(?i)\b(?:chmod|chown)\s+-R\b"),
-            ("mfa-ssh", r"(?i)\bssh\s+\S+"),
-        ]
-        return [label for label, pattern in checks if re.search(pattern, value)]
+    def yoagent_action_risk_labels(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_action_risk_labels(*args, **kwargs)
 
-    def create_yoagent_action_preview(self, intent: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
-        session = str(intent.get("session") or "").strip()
-        text = truncate_text(str(intent.get("text") or "").strip(), YOAGENT_ACTION_TEXT_LIMIT)
-        if not session:
-            return {"error": "missing target session"}, HTTPStatus.BAD_REQUEST
-        if not text:
-            return {"session": session, "error": "missing prompt text"}, HTTPStatus.BAD_REQUEST
-        target, status = self.yoagent_action_target(session)
-        if status != HTTPStatus.OK:
-            return target, status
-        accepting, acceptance_text = self.yoagent_action_acceptance(target)
-        preview_id = f"ya_{secrets.token_urlsafe(12)}"
-        risk_labels = self.yoagent_action_risk_labels(text)
-        requires_confirmation = bool(intent.get("requires_confirmation") or risk_labels)
-        preview = {
-            "id": preview_id,
-            "type": str(intent.get("type") or "send_prompt"),
-            "session": session,
-            "text": text,
-            "submit": intent.get("submit") is not False,
-            "requires_confirmation": requires_confirmation,
-            "return_result": bool(intent.get("return_result")),
-            "risk_labels": risk_labels,
-            "status": "ready" if accepting else "waiting",
-            "status_text": "ready to send now" if accepting else acceptance_text,
-            "target": {key: target.get(key) for key in [
-                "session",
-                "pane_target",
-                "pane_window",
-                "pane_index",
-                "cwd",
-                "agent_kind",
-                "agent_session_id",
-                "agent_model",
-                "agent_transcript",
-                "transport",
-                "transport_label",
-                "transport_kind",
-                "transport_capabilities",
-            ]},
-            "screen": target.get("screen") or {},
-            "accepting_prompt": accepting,
-            "acceptance_text": acceptance_text,
-            "created_ts": time.time(),
-            "expires_in_seconds": YOAGENT_ACTION_PREVIEW_TTL_SECONDS,
-        }
-        if isinstance(intent.get("handoff"), dict):
-            handoff = intent["handoff"]
-            preview["handoff"] = {
-                "source_session": str(handoff.get("source_session") or session),
-                "session": str(handoff.get("session") or ""),
-                "instruction": truncate_text(str(handoff.get("instruction") or ""), YOAGENT_ACTION_TEXT_LIMIT),
-            }
-        if accepting:
-            with self.yoagent_action_lock:
-                self.yoagent_action_previews[preview_id] = copy.deepcopy(preview)
-        self.log_event(session, "yoagent_action_preview", f"YO!agent previewed send to {session}", {
-            "preview_id": preview_id,
-            "type": preview["type"],
-            "transport": preview["target"].get("transport"),
-            "status": preview["status"],
-            "risk_labels": risk_labels,
-            "text_preview": redacted_action_preview(text),
-        })
-        return self.public_yoagent_action_preview(preview), HTTPStatus.OK
+    def create_yoagent_action_preview(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.create_yoagent_action_preview(*args, **kwargs)
 
-    def yoagent_action_answer(self, action: dict[str, Any]) -> str:
-        target = action.get("target") if isinstance(action.get("target"), dict) else {}
-        session = str(action.get("session") or target.get("session") or "")
-        transport = normalize_yoagent_transport_id(str(target.get("transport") or ""))
-        transport_label = str(target.get("transport_label") or self.yoagent_transports.get(transport).label)
-        cwd = str(target.get("cwd") or "").strip()
-        action_text = str(action.get("text") or "")
-        if action.get("status") == "ready":
-            where = f" in `{cwd}`" if cwd else ""
-            screen = action.get("screen") if isinstance(action.get("screen"), dict) else {}
-            clear_note = " I will clear the existing target input before sending." if str(screen.get("key") or "") == "input-draft" else ""
-            return "\n".join([
-                f"I resolved tmux session `{session}`{where} and prepared a confirmed send action.{clear_note}",
-                "",
-                f"Transport: `{transport_label}`. Text to send:",
-                "",
-                f"```text\n{action_text}\n```",
-            ])
-        screen = action.get("screen") if isinstance(action.get("screen"), dict) else {}
-        if str(screen.get("key") or "") == "input-draft":
-            detected = str(screen.get("detected_text_preview") or screen.get("detected_text") or "").strip()
-            if detected:
-                return f"I resolved tmux session `{session}`, but I did not send anything because the target input box already contains unsent text: `{detected}`."
-        return f"I resolved tmux session `{session}`, but I did not send anything because {action.get('acceptance_text') or 'the target is not accepting an AI prompt'}."
+    def yoagent_action_answer(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_action_answer(*args, **kwargs)
 
-    def yoagent_action_preview_details(self, action: dict[str, Any]) -> str:
-        lines: list[str] = []
-        session = str(action.get("session") or "")
-        screen = action.get("screen") if isinstance(action.get("screen"), dict) else {}
-        screen_key = str(screen.get("key") or "").strip()
-        if session:
-            lines.append(f"- target session: `{session}`")
-        if screen_key:
-            lines.append(f"- target screen state: `{screen_key}`")
-        if screen_key == "input-draft":
-            detected = str(screen.get("detected_text_preview") or screen.get("detected_text") or "").strip()
-            if detected:
-                lines.append(f"- detected target composer text: `{detected}`")
-        acceptance = str(action.get("acceptance_text") or "").strip()
-        if acceptance:
-            lines.append(f"- send blocker: {acceptance}")
-        return "\n".join(lines)
+    def yoagent_action_preview_details(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_action_preview_details(*args, **kwargs)
 
-    def yoagent_action_sent_answer(self, preview: dict[str, Any], result: dict[str, Any]) -> str:
-        target = preview.get("target") if isinstance(preview.get("target"), dict) else {}
-        session = str(result.get("session") or preview.get("session") or target.get("session") or "")
-        agent = " ".join(str(item) for item in [target.get("agent_kind"), target.get("agent_model")] if item)
-        agent_text = f" ({agent})" if agent else ""
-        transport_label = str(result.get("transport_label") or target.get("transport_label") or self.yoagent_transports.get(str(target.get("transport") or "")).label)
-        prompt_text = redacted_action_text(str(preview.get("text") or ""), YOAGENT_ACTION_TEXT_LIMIT)
-        lines = [f"I verified tmux session `{session}`{agent_text} is accepting an AI prompt."]
-        if result.get("cleared_input"):
-            lines.append("I cleared existing target input first.")
-        lines.extend([
-            f"I am sending this exact prompt through `{transport_label}`:",
-            "",
-            f"```text\n{prompt_text}\n```",
-        ])
-        if preview.get("return_result") or result.get("return_result"):
-            lines.append("I am awaiting the response and I'll show the result here when it replies.")
-        return "\n".join(lines)
+    def yoagent_action_sent_answer(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_action_sent_answer(*args, **kwargs)
 
-    def yoagent_job_answer(self, job: dict[str, Any]) -> str:
-        job_type = str(job.get("type") or "")
-        target = job.get("target") if isinstance(job.get("target"), dict) else {}
-        action = job.get("action") if isinstance(job.get("action"), dict) else {}
-        status = str(job.get("status") or "")
-        if status == "pending_confirmation":
-            return f"I created YO!agent job `{job.get('id')}` and it is waiting for confirmation."
-        if job_type == "notify_all_idle":
-            roster = ", ".join(f"`{item}`" for item in target.get("roster", []))
-            return f"I created YO!agent job `{job.get('id')}` to notify you when all watched tmux sessions are idle: {roster}."
-        if job_type == "wait_then_send":
-            return f"I created YO!agent job `{job.get('id')}` to wait for tmux session `{target.get('session')}` to accept an AI prompt, then send:\n\n```text\n{action.get('text') or ''}\n```"
-        return f"I created YO!agent job `{job.get('id')}` to notify you when tmux session `{target.get('session')}` is idle."
+    def yoagent_job_answer(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_job_answer(*args, **kwargs)
 
-    def yoagent_action_result_marker(self, target: dict[str, Any]) -> dict[str, Any]:
-        transcript = str(target.get("agent_transcript") or "").strip()
-        marker: dict[str, Any] = {
-            "transcript": transcript,
-            "size": 0,
-            "mtime_ns": 0,
-            "started_ts": time.time(),
-        }
-        if not transcript:
-            return marker
-        try:
-            stat = Path(transcript).expanduser().stat()
-        except OSError:
-            return marker
-        marker["size"] = int(stat.st_size)
-        marker["mtime_ns"] = int(stat.st_mtime_ns)
-        return marker
+    def yoagent_action_result_marker(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_action_result_marker(*args, **kwargs)
 
-    def yoagent_transcript_delta_text(self, marker: dict[str, Any]) -> str:
-        transcript = str(marker.get("transcript") or "").strip()
-        if not transcript:
-            return ""
-        try:
-            path = Path(transcript).expanduser()
-            start_size = max(0, int(marker.get("size") or 0))
-            stat = path.stat()
-            with path.open("rb") as handle:
-                if stat.st_size >= start_size:
-                    handle.seek(start_size)
-                data = handle.read(256_000)
-        except (OSError, ValueError):
-            return ""
-        return data.decode("utf-8", errors="replace")
+    def yoagent_transcript_delta_text(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_transcript_delta_text(*args, **kwargs)
 
-    def yoagent_action_result_text_from_transcript_delta(self, text: str) -> str:
-        if not text.strip():
-            return ""
-        delta_fragments: list[str] = []
-        for raw_line in text.splitlines():
-            try:
-                raw = json.loads(raw_line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(raw, dict):
-                continue
-            piece = codex_event_text(raw)
-            if piece:
-                delta_fragments.append(piece)
-            payload = raw.get("payload")
-            if isinstance(payload, dict):
-                piece = codex_event_text(payload)
-                if piece:
-                    delta_fragments.append(piece)
-        items = compact_transcript_items(text, 120)
-        for role in ("assistant", "task_complete"):
-            for item in reversed(items):
-                if item.get("role") != role:
-                    continue
-                value = str(item.get("text") or "").strip()
-                if value:
-                    return truncate_text(value, YOAGENT_ACTION_RESULT_MAX_CHARS)
-        joined = "".join(delta_fragments).strip()
-        return truncate_text(joined, YOAGENT_ACTION_RESULT_MAX_CHARS) if joined else ""
+    def yoagent_action_result_text_from_transcript_delta(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_action_result_text_from_transcript_delta(*args, **kwargs)
 
-    def yoagent_action_visible_result_text(self, target: dict[str, Any]) -> str:
-        pane_target = str(target.get("pane_target") or target.get("session") or "").strip()
-        if not pane_target:
-            return ""
-        try:
-            visible_text = tmux_capture_pane(pane_target, visible_only=True)
-        except (OSError, subprocess.SubprocessError):
-            return ""
-        if self.yoagent_visible_composer_text(str(visible_text or "")):
-            return ""
-        lines = [line.rstrip() for line in str(visible_text or "").splitlines() if line.strip()]
-        return truncate_text("\n".join(lines[-40:]), YOAGENT_ACTION_RESULT_MAX_CHARS)
+    def yoagent_action_visible_result_text(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_action_visible_result_text(*args, **kwargs)
 
-    def record_yoagent_action_result(
-        self,
-        preview: dict[str, Any],
-        text: str,
-        *,
-        timed_out: bool = False,
-        partial: bool = False,
-    ) -> dict[str, Any] | None:
-        target = preview.get("target") if isinstance(preview.get("target"), dict) else {}
-        session = str(preview.get("session") or target.get("session") or "")
-        transport = normalize_yoagent_transport_id(str(target.get("transport") or ""))
-        transport_label = str(target.get("transport_label") or self.yoagent_transports.get(transport).label)
-        source_label = f"tmux session `{session}`" if transport == TMUX_LEGACY_TRANSPORT_ID else f"{transport_label} target `{session}`"
-        if timed_out and not text:
-            content = f"I sent the request to {source_label}, but I did not see a result before the wait timed out."
-        else:
-            heading = "Partial result" if partial else "Result"
-            content = f"{heading} from {source_label}:\n\n{text.strip()}"
-        message = self.record_yoagent_message(
-            "assistant",
-            content,
-            created_at=datetime.now(timezone.utc).isoformat(),
-            kind="agent_result",
-            session=session,
-        )
-        self.publish_yoagent_conversation_changed("yoagent_result")
-        self.log_event(session, "yoagent_action_result", f"YO!agent recorded result from {session}", {
-            "timed_out": timed_out,
-            "partial": partial,
-            "chars": len(text or ""),
-            "text_preview": redacted_action_preview(text or ""),
-        })
-        return message
+    def record_yoagent_action_result(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.record_yoagent_action_result(*args, **kwargs)
 
-    def yoagent_handoff_time_add_prompt(self, instruction: str, text: str) -> str:
-        add_match = re.search(r"\badd\s+(\d{1,4})\s*(minutes?|mins?|hours?|hrs?)\b", instruction, flags=re.IGNORECASE)
-        if not add_match or not re.search(r"\b(?:if|whether)\s+that\s+is\s+(?:the\s+)?(?:correct|right)(?:\s+time)?(?:\s+now)?\b", instruction, flags=re.IGNORECASE):
-            return ""
-        time_match = re.search(
-            r"\b(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}(?:\s+\w{3,9})?\s+)?"
-            r"(?P<hour>\d{1,2}):(?P<minute>\d{2})(?::(?P<second>\d{2}))?\s*(?P<ampm>[ap]\.?\s*m\.?)?\b",
-            text,
-            flags=re.IGNORECASE,
-        )
-        if not time_match:
-            return ""
-        hour = int(time_match.group("hour"))
-        minute = int(time_match.group("minute"))
-        second = int(time_match.group("second") or 0)
-        ampm = re.sub(r"[^apm]", "", str(time_match.group("ampm") or "").lower())
-        if ampm == "pm" and hour < 12:
-            hour += 12
-        elif ampm == "am" and hour == 12:
-            hour = 0
-        if hour > 23 or minute > 59 or second > 59:
-            return ""
-        amount = int(add_match.group(1))
-        unit = add_match.group(2).lower()
-        delta = timedelta(hours=amount) if unit.startswith(("h", "hr")) else timedelta(minutes=amount)
-        adjusted = datetime(2000, 1, 1, hour, minute, second) + delta
-        display_hour = adjusted.hour % 12 or 12
-        suffix = "AM" if adjusted.hour < 12 else "PM"
-        return f"Is {display_hour}:{adjusted.minute:02d} {suffix} the correct time now?"
+    def yoagent_handoff_time_add_prompt(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_handoff_time_add_prompt(*args, **kwargs)
 
-    def yoagent_derived_handoff_prompt(self, instruction: str, text: str) -> str:
-        return self.yoagent_handoff_time_add_prompt(instruction, text)
+    def yoagent_derived_handoff_prompt(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_derived_handoff_prompt(*args, **kwargs)
 
-    def yoagent_source_neutral_handoff_instruction(self, instruction: str) -> str:
-        clean = str(instruction or "").strip(" ,.")
-        clean = re.sub(r"\bthat\s+result\b", "the context", clean, flags=re.IGNORECASE)
-        clean = re.sub(r"\bthat\s+(?:response|answer|reply)\b", "the context", clean, flags=re.IGNORECASE)
-        return clean.strip(" ,.") or "answer the user's follow-up using the context"
+    def yoagent_source_neutral_handoff_instruction(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_source_neutral_handoff_instruction(*args, **kwargs)
 
-    def yoagent_handoff_prompt(self, preview: dict[str, Any], text: str) -> str:
-        handoff = preview.get("handoff") if isinstance(preview.get("handoff"), dict) else {}
-        target_session = str(handoff.get("session") or "").strip()
-        instruction = str(handoff.get("instruction") or "").strip()
-        if target_session:
-            target = re.escape(target_session)
-            instruction = re.sub(rf"\band\s+ask\s+(?:tmux\s+)?session\s+[`'\"]?{target}[`'\"]?\s+if\b", "and say if", instruction, flags=re.IGNORECASE)
-            instruction = re.sub(rf"\bask\s+(?:tmux\s+)?session\s+[`'\"]?{target}[`'\"]?\s+", "", instruction, flags=re.IGNORECASE)
-        instruction = instruction.strip(" ,.")
-        if not instruction:
-            instruction = "answer the user's follow-up using that reply"
-        derived = self.yoagent_derived_handoff_prompt(instruction, text)
-        if derived:
-            return truncate_text(derived, YOAGENT_ACTION_TEXT_LIMIT)
-        instruction = self.yoagent_source_neutral_handoff_instruction(instruction)
-        context = " ".join(text.strip().split())
-        return truncate_text(
-            f"Use this context: {context} Task: {instruction}.",
-            YOAGENT_ACTION_TEXT_LIMIT,
-        )
+    def yoagent_handoff_prompt(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_handoff_prompt(*args, **kwargs)
 
-    def continue_yoagent_handoff(self, preview: dict[str, Any], text: str) -> dict[str, Any] | None:
-        handoff = preview.get("handoff") if isinstance(preview.get("handoff"), dict) else {}
-        next_session = str(handoff.get("session") or "").strip()
-        if not next_session or not text.strip():
-            return None
-        intent = {
-            "type": "send_prompt",
-            "session": next_session,
-            "text": self.yoagent_handoff_prompt(preview, text),
-            "submit": True,
-            "return_result": True,
-        }
-        action, action_status = self.create_yoagent_action_preview(intent)
-        if action_status == HTTPStatus.OK and action.get("status") == "ready":
-            result, result_status = self.execute_yoagent_send_action({"preview_id": action.get("id")}, persist_result=True, start_result_watch=True)
-            self.publish_yoagent_conversation_changed("yoagent_handoff")
-            return {"ok": result_status == HTTPStatus.OK, "action": action, "result": result, "status": int(result_status)}
-        reason = action.get("acceptance_text") or action.get("error") or "the next target is not accepting an AI prompt"
-        self.record_yoagent_message(
-            "assistant",
-            f"I got the result from tmux session `{preview.get('session')}`, but I did not send the handoff to tmux session `{next_session}` because {reason}.",
-            created_at=datetime.now(timezone.utc).isoformat(),
-        )
-        self.publish_yoagent_conversation_changed("yoagent_handoff_blocked")
-        return {"ok": False, "action": action, "status": int(action_status), "error": reason}
+    def continue_yoagent_handoff(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.continue_yoagent_handoff(*args, **kwargs)
 
-    def finish_yoagent_action_result(self, preview: dict[str, Any], text: str) -> None:
-        self.record_yoagent_action_result(preview, text)
-        self.continue_yoagent_handoff(preview, text)
+    def finish_yoagent_action_result(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.finish_yoagent_action_result(*args, **kwargs)
 
-    def run_yoagent_action_result_watcher(
-        self,
-        preview: dict[str, Any],
-        marker: dict[str, Any],
-        *,
-        watch_id: str | None = None,
-        wait_seconds: float = YOAGENT_ACTION_RESULT_WAIT_SECONDS,
-        poll_seconds: float = YOAGENT_ACTION_RESULT_POLL_SECONDS,
-    ) -> dict[str, Any]:
-        try:
-            target = preview.get("target") if isinstance(preview.get("target"), dict) else {}
-            session = str(preview.get("session") or target.get("session") or "")
-            pane_target = str(target.get("pane_target") or session)
-            started = time.monotonic()
-            deadline = started + max(1.0, float(wait_seconds))
-            poll = max(0.1, float(poll_seconds))
-            saw_work = False
-            last_text = ""
-            last_change = started
-            pause = threading.Event()
-            while time.monotonic() < deadline:
-                now = time.monotonic()
-                delta_text = self.yoagent_transcript_delta_text(marker)
-                delta_state = transcript_delta_result_state(delta_text)
-                text = self.yoagent_action_result_text_from_transcript_delta(delta_text)
-                if text != last_text:
-                    last_text = text
-                    last_change = now
-                _prompt, screen = self.yoagent_action_pane_status(session, pane_target)
-                screen_key = str(screen.get("key") or "idle")
-                if screen_key == "working":
-                    saw_work = True
-                if last_text and delta_state.get("complete") is True:
-                    self.finish_yoagent_action_result(preview, last_text)
-                    return {"ok": True, "session": session, "source": "transcript", "timed_out": False}
-                if (
-                    last_text
-                    and delta_state.get("has_lifecycle") is not True
-                    and delta_state.get("working") is not True
-                    and screen_key in YOAGENT_ACTION_ACCEPTING_SCREEN_KEYS
-                ):
-                    self.finish_yoagent_action_result(preview, last_text)
-                    return {"ok": True, "session": session, "source": "transcript", "timed_out": False}
-                if (
-                    last_text
-                    and saw_work
-                    and now - last_change >= 2.0
-                    and delta_state.get("has_lifecycle") is not True
-                    and delta_state.get("working") is not True
-                ):
-                    self.finish_yoagent_action_result(preview, last_text)
-                    return {"ok": True, "session": session, "source": "transcript", "timed_out": False}
-                pause.wait(min(poll, max(0.0, deadline - time.monotonic())))
-            if last_text:
-                self.record_yoagent_action_result(preview, last_text, timed_out=True, partial=True)
-                return {"ok": True, "session": session, "source": "transcript", "timed_out": True, "partial": True}
-            visible_text = self.yoagent_action_visible_result_text(target)
-            self.record_yoagent_action_result(preview, visible_text, timed_out=True, partial=bool(visible_text))
-            return {"ok": bool(visible_text), "session": session, "source": "screen" if visible_text else "", "timed_out": True}
-        finally:
-            self.finish_yoagent_action_wait(watch_id, "yoagent_wait_finished")
+    def run_yoagent_action_result_watcher(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.run_yoagent_action_result_watcher(*args, **kwargs)
 
-    def start_yoagent_action_result_watcher(self, preview: dict[str, Any], marker: dict[str, Any]) -> dict[str, Any]:
-        watch_id = f"yar_{secrets.token_urlsafe(10)}"
-        self.register_yoagent_action_wait(watch_id, preview, marker)
-        worker = threading.Thread(
-            target=self.run_yoagent_action_result_watcher,
-            kwargs={"preview": copy.deepcopy(preview), "marker": copy.deepcopy(marker), "watch_id": watch_id},
-            name=f"yoagent-result-{watch_id}",
-            daemon=True,
-        )
-        worker.start()
-        return {"id": watch_id, "started": True, "wait_seconds": YOAGENT_ACTION_RESULT_WAIT_SECONDS}
+    def start_yoagent_action_result_watcher(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.start_yoagent_action_result_watcher(*args, **kwargs)
 
-    def yoagent_visible_composer_text(self, visible_text: str) -> str:
-        lines = [line.replace("\xa0", " ") for line in str(visible_text or "").splitlines()[-80:]]
-        footer_index = -1
-        for index in range(len(lines) - 1, -1, -1):
-            stripped = lines[index].strip()
-            if stripped.startswith(("▶▶", "⏵⏵", "gpt-", "claude ")):
-                footer_index = index
-                break
-        if footer_index < 0:
-            return ""
-        end_index = footer_index
-        for index in range(footer_index - 1, -1, -1):
-            if re.match(r"^[─━╌╍]{3,}$", lines[index].strip()):
-                end_index = index
-                break
-        start_index = max(0, end_index - 8)
-        for index in range(end_index - 1, -1, -1):
-            if re.match(r"^[─━╌╍]{3,}$", lines[index].strip()):
-                start_index = index + 1
-                break
-        lines = lines[start_index:end_index]
-        prompt_index = -1
-        first_line = ""
-        for index in range(len(lines) - 1, -1, -1):
-            line = lines[index]
-            match = re.match(r"^\s*[❯›>]\s+(?P<text>\S.*)$", line)
-            if not match:
-                continue
-            if re.match(r"^\s*[❯›>]\s*\d+[.:]\s+\S", line):
-                continue
-            prompt_index = index
-            first_line = match.group("text").strip()
-            break
-        if prompt_index < 0 or not first_line:
-            return ""
-        block = [first_line]
-        for line in lines[prompt_index + 1:]:
-            stripped = line.strip()
-            if re.match(r"^[─━╌╍]{3,}$", stripped):
-                break
-            if stripped.startswith(("▶▶", "⏵⏵", "new task?", "gpt-", "claude ")):
-                break
-            if stripped.startswith(("●", "✻", "⎿", "⤷")) or re.match(r"^(Ran|Bash|Write|Read|Edit|Update|Search)\b", stripped):
-                return ""
-            block.append(stripped)
-        return " ".join(part for part in block if part).strip()
+    def yoagent_composer_text_is_idle_placeholder(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_composer_text_is_idle_placeholder(*args, **kwargs)
 
-    def yoagent_text_still_in_composer(self, target: dict[str, Any], text: str, wait_seconds: float = 0.8, poll_seconds: float = 0.1) -> bool:
-        pane_target = str(target.get("pane_target") or target.get("session") or "").strip()
-        needle = " ".join(str(text or "").split())
-        if not pane_target or not needle:
-            return False
-        deadline = time.monotonic() + max(0.0, wait_seconds)
-        pause = threading.Event()
-        while True:
-            try:
-                visible_text = tmux_capture_pane(pane_target, visible_only=True) or ""
-            except (OSError, subprocess.SubprocessError):
-                return False
-            pending = " ".join(self.yoagent_visible_composer_text(visible_text).split())
-            if not pending:
-                return False
-            prefix_len = min(120, len(needle))
-            if needle in pending or pending in needle or needle[:prefix_len] in pending:
-                if time.monotonic() >= deadline:
-                    return True
-                pause.wait(min(max(0.01, poll_seconds), max(0.0, deadline - time.monotonic())))
-                continue
-            return False
+    def yoagent_visible_composer_text(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_visible_composer_text(*args, **kwargs)
 
-    def yoagent_clear_target_composer(
-        self,
-        target: dict[str, Any],
-        *,
-        wait_seconds: float = 0.8,
-        poll_seconds: float = 0.1,
-    ) -> dict[str, Any]:
-        pane_target = str(target.get("pane_target") or target.get("session") or "").strip()
-        if not pane_target:
-            return {"ok": False, "cleared": False, "error": "target pane is missing"}
-        try:
-            visible_text = tmux_capture_pane(pane_target, visible_only=True) or ""
-        except (OSError, subprocess.SubprocessError) as exc:
-            return {"ok": False, "cleared": False, "error": str(exc)}
-        detected = self.yoagent_visible_composer_text(visible_text)
-        if not detected:
-            return {"ok": True, "cleared": False, "detected_text": ""}
-        result = tmux_clear_input(pane_target)
-        if result.returncode != 0:
-            return {
-                "ok": False,
-                "cleared": False,
-                "detected_text": detected,
-                "error": cmd_error(result, "tmux send-keys C-u failed"),
-            }
-        deadline = time.monotonic() + max(0.0, wait_seconds)
-        pause = threading.Event()
-        while True:
-            try:
-                visible_text = tmux_capture_pane(pane_target, visible_only=True) or ""
-            except (OSError, subprocess.SubprocessError) as exc:
-                return {"ok": False, "cleared": False, "detected_text": detected, "error": str(exc)}
-            remaining = self.yoagent_visible_composer_text(visible_text)
-            if not remaining:
-                return {"ok": True, "cleared": True, "detected_text": detected}
-            if time.monotonic() >= deadline:
-                return {
-                    "ok": False,
-                    "cleared": False,
-                    "detected_text": detected,
-                    "remaining_text": remaining,
-                    "error": "target input box did not clear",
-                }
-            pause.wait(min(max(0.01, poll_seconds), max(0.0, deadline - time.monotonic())))
+    def yoagent_text_still_in_composer(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_text_still_in_composer(*args, **kwargs)
 
-    def preview_yoagent_send_action(self, payload: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
-        intent = {
-            "type": str(payload.get("type") or "send_prompt"),
-            "session": str(payload.get("session") or payload.get("target") or ""),
-            "text": str(payload.get("text") or payload.get("prompt") or ""),
-            "submit": payload.get("submit") is not False,
-            "requires_confirmation": payload.get("requires_confirmation") is not False,
-            "return_result": bool(payload.get("return_result")),
-        }
-        return self.create_yoagent_action_preview(intent)
+    def yoagent_clear_target_composer(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_clear_target_composer(*args, **kwargs)
 
-    def execute_yoagent_send_action(
-        self,
-        payload: dict[str, Any],
-        persist_result: bool = True,
-        start_result_watch: bool = True,
-    ) -> tuple[dict[str, Any], HTTPStatus]:
-        self.prune_yoagent_action_previews()
-        preview_id = str(payload.get("preview_id") or payload.get("id") or "").strip()
-        if not preview_id:
-            return {"error": "missing preview_id"}, HTTPStatus.BAD_REQUEST
-        with self.yoagent_action_lock:
-            preview = copy.deepcopy(self.yoagent_action_previews.get(preview_id) or {})
-        if not preview:
-            return {"preview_id": preview_id, "error": "action preview expired or unknown"}, HTTPStatus.NOT_FOUND
-        if preview.get("status") != "ready":
-            return {"preview_id": preview_id, "error": "action is not ready to send"}, HTTPStatus.CONFLICT
-        current, status = self.yoagent_action_target(str(preview.get("session") or ""))
-        if status != HTTPStatus.OK:
-            return current, status
-        accepting, acceptance_text = self.yoagent_action_acceptance(current)
-        if not accepting:
-            return {"preview_id": preview_id, "session": preview.get("session"), "error": acceptance_text}, HTTPStatus.CONFLICT
-        target = preview.get("target") if isinstance(preview.get("target"), dict) else {}
-        stale_keys = ["pane_target", "agent_kind", "agent_session_id"]
-        if any(str(current.get(key) or "") != str(target.get(key) or "") for key in stale_keys):
-            return {"preview_id": preview_id, "session": preview.get("session"), "error": "action target changed; create a fresh preview"}, HTTPStatus.CONFLICT
-        if normalize_yoagent_transport_id(str(current.get("transport") or "")) != normalize_yoagent_transport_id(str(target.get("transport") or "")):
-            return {"preview_id": preview_id, "session": preview.get("session"), "error": "action target changed; create a fresh preview"}, HTTPStatus.CONFLICT
-        target = {
-            **target,
-            "agent_transcript": current.get("agent_transcript") or target.get("agent_transcript") or "",
-            "screen": current.get("screen") if isinstance(current.get("screen"), dict) else target.get("screen") or {},
-        }
-        target["transport"] = normalize_yoagent_transport_id(str(target.get("transport") or current.get("transport") or ""))
-        target["transport_label"] = current.get("transport_label") or target.get("transport_label") or self.yoagent_transports.get(str(target.get("transport") or "")).label
-        target["transport_kind"] = current.get("transport_kind") or target.get("transport_kind") or self.yoagent_transports.get(str(target.get("transport") or "")).kind
-        preview["target"] = target
-        text = str(preview.get("text") or "")
-        transport = normalize_yoagent_transport_id(str(target.get("transport") or ""))
-        transport_provider = self.yoagent_transports.get(transport)
-        return_result = bool(preview.get("return_result") or payload.get("return_result"))
-        clear_result: dict[str, Any] = {}
-        screen = current.get("screen") if isinstance(current.get("screen"), dict) else {}
-        if transport == TMUX_LEGACY_TRANSPORT_ID and str(screen.get("key") or "") == "input-draft":
-            clear_result = self.yoagent_clear_target_composer(target)
-            cleared_text_preview = redacted_action_preview(str(clear_result.get("detected_text") or ""))
-            if not clear_result.get("ok"):
-                self.log_event(str(preview.get("session") or ""), "yoagent_action_clear_failed", f"YO!agent could not clear input before send to {preview.get('session')}", {
-                    "preview_id": preview_id,
-                    "transport": transport,
-                    "cleared_text_preview": cleared_text_preview,
-                    "remaining_text_preview": redacted_action_preview(str(clear_result.get("remaining_text") or "")),
-                })
-                return {
-                    "preview_id": preview_id,
-                    "session": preview.get("session"),
-                    "transport": transport,
-                    "transport_label": transport_provider.label,
-                    "sent": False,
-                    "cleared_input": False,
-                    "cleared_text_preview": cleared_text_preview,
-                    "error": clear_result.get("error") or "target input box did not clear",
-                }, HTTPStatus.CONFLICT
-        result_marker = self.yoagent_action_result_marker(target) if return_result else {}
-        send_result = transport_provider.send(
-            target,
-            text,
-            submit=preview.get("submit") is not False,
-            tmux_paste_text=tmux_paste_text,
-        ).as_dict()
-        if not send_result.get("ok"):
-            return {
-                "preview_id": preview_id,
-                "session": preview.get("session"),
-                "transport": transport,
-                "transport_label": send_result.get("transport_label") or transport_provider.label,
-                "error": send_result.get("error") or "transport send failed",
-            }, HTTPStatus.INTERNAL_SERVER_ERROR
-        if transport == TMUX_LEGACY_TRANSPORT_ID and preview.get("submit") is not False and self.yoagent_text_still_in_composer(target, text):
-            with self.yoagent_action_lock:
-                self.yoagent_action_previews.pop(preview_id, None)
-            error = "pasted text is still in the target input box after Return; target did not submit it"
-            self.log_event(str(preview.get("session") or ""), "yoagent_action_unsubmitted", f"YO!agent send to {preview.get('session')} did not submit", {
-                "preview_id": preview_id,
-                "transport": transport,
-                "text_preview": redacted_action_preview(text),
-            })
-            return {
-                "preview_id": preview_id,
-                "session": preview.get("session"),
-                "transport": transport,
-                "transport_label": transport_provider.label,
-                "sent": False,
-                "pasted": True,
-                "error": error,
-            }, HTTPStatus.CONFLICT
-        with self.yoagent_action_lock:
-            self.yoagent_action_previews.pop(preview_id, None)
-        self.log_event(str(preview.get("session") or ""), "yoagent_action_executed", f"YO!agent sent action to {preview.get('session')}", {
-            "preview_id": preview_id,
-            "transport": transport,
-            "text_preview": redacted_action_preview(text),
-            "cleared_input": bool(clear_result.get("cleared")),
-            "cleared_text_preview": redacted_action_preview(str(clear_result.get("detected_text") or "")),
-        })
-        response = {
-            "ok": True,
-            "preview_id": preview_id,
-            "session": preview.get("session"),
-            "transport": transport,
-            "transport_label": send_result.get("transport_label") or transport_provider.label,
-            "result_source": send_result.get("result_source") or "",
-            "answer": "",
-            "sent": True,
-            "return_result": return_result,
-            "result_marker": result_marker,
-        }
-        if clear_result.get("cleared"):
-            response["cleared_input"] = True
-            response["cleared_text_preview"] = redacted_action_preview(str(clear_result.get("detected_text") or ""))
-        response["answer"] = self.yoagent_action_sent_answer(preview, response)
-        if persist_result:
-            self.record_yoagent_message(
-                "assistant",
-                response["answer"],
-                created_at=datetime.now(timezone.utc).isoformat(),
-            )
-            response["conversation"] = self.yoagent_conversation_payload()
-        if return_result and send_result.get("text"):
-            self.record_yoagent_action_result(preview, str(send_result.get("text") or ""))
-            response["result_recorded"] = True
-        elif return_result and start_result_watch:
-            response["result_watch"] = self.start_yoagent_action_result_watcher(preview, result_marker)
-        return response, HTTPStatus.OK
+    def preview_yoagent_send_action(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.preview_yoagent_send_action(*args, **kwargs)
 
-    def reset_yoagent_chat(self) -> dict[str, Any]:
-        with self.yoagent_cli_lock:
-            self.yoagent_cli_sessions.clear()
-            yoagent_conversation.clear_cli_sessions()
-        self.close_yoagent_codex_app_server()
-        with self.yoagent_action_lock:
-            self.yoagent_action_waits.clear()
-        yoagent_conversation.clear_messages()
-        with self.yoagent_prewarm_lock:
-            self.yoagent_prewarm_status = {}
-            self.yoagent_startup_response_running = False
-        return {"ok": True, "conversation": self.yoagent_conversation_payload()}
+    def execute_yoagent_send_action(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.execute_yoagent_send_action(*args, **kwargs)
 
-    def start_yoagent_backend_prewarm(self, payload: dict[str, Any] | None = None, *, reason: str = "prewarm") -> tuple[dict[str, Any], HTTPStatus]:
-        settings = self.yoagent_settings()
-        requested_backend = str(settings.get("backend") or "deterministic").strip().lower()
-        backend = resolve_yoagent_backend(requested_backend)
-        invocation = str(settings.get("invocation") or "cli").strip().lower()
-        if backend != "codex" or invocation != "cli":
-            return {"ok": True, "started": False, "backend": requested_backend, "backend_used": backend, "reason": "no persistent Codex backend available"}, HTTPStatus.OK
-        with self.yoagent_prewarm_lock:
-            if self.yoagent_prewarm_running:
-                return {"ok": True, "started": False, "backend": requested_backend, "backend_used": backend, "reason": "already running"}, HTTPStatus.ACCEPTED
-            self.yoagent_prewarm_running = True
-            self.yoagent_prewarm_status = {"backend": backend, "reason": reason, "started_at": time.time()}
+    def reset_yoagent_chat(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.reset_yoagent_chat(*args, **kwargs)
 
-        def worker() -> None:
-            status: dict[str, Any] = {"backend": backend, "reason": reason}
-            try:
-                thread_id, fallback_reason, cli_status = self.ensure_yoagent_codex_app_server(settings)
-                status = {"backend": backend, "reason": reason, "warmed": bool(thread_id and not fallback_reason), "fallback_reason": fallback_reason, "cli": cli_status}
-            except Exception as exc:
-                status = {"backend": backend, "reason": reason, "warmed": False, "error": str(exc)}
-            finally:
-                with self.yoagent_prewarm_lock:
-                    self.yoagent_prewarm_status = status
-                    self.yoagent_prewarm_running = False
+    def start_yoagent_backend_prewarm(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.start_yoagent_backend_prewarm(*args, **kwargs)
 
-        threading.Thread(target=worker, name="yoagent-prewarm", daemon=True).start()
-        return {"ok": True, "started": True, "backend": requested_backend, "backend_used": backend}, HTTPStatus.ACCEPTED
+    def yoagent_startup_response(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_startup_response(*args, **kwargs)
 
-    def yoagent_startup_response(self, payload: dict[str, Any] | None = None) -> tuple[dict[str, Any], HTTPStatus]:
-        if yoagent_conversation.load_messages(limit=1):
-            warm_payload, _warm_status = self.start_yoagent_backend_prewarm(payload, reason="startup_existing_conversation")
-            return {
-                "ok": True,
-                "started": False,
-                "visible": False,
-                "reason": "conversation already has messages",
-                "prewarm": warm_payload,
-                "conversation": self.yoagent_conversation_payload(),
-            }, HTTPStatus.OK
-        settings = self.yoagent_settings()
-        requested_backend = str(settings.get("backend") or "deterministic").strip().lower()
-        backend = resolve_yoagent_backend(requested_backend)
-        invocation = str(settings.get("invocation") or "cli").strip().lower()
-        locale = str((payload or {}).get("locale") or "en").strip() or "en"
-        if backend not in {"codex", "claude"} or invocation != "cli":
-            return {
-                "ok": True,
-                "started": False,
-                "visible": False,
-                "backend": requested_backend,
-                "backend_used": backend,
-                "reason": "no CLI backend available",
-                "conversation": self.yoagent_conversation_payload(),
-            }, HTTPStatus.OK
-        with self.yoagent_prewarm_lock:
-            if self.yoagent_startup_response_running:
-                return {
-                    "ok": True,
-                    "started": False,
-                    "visible": True,
-                    "backend": requested_backend,
-                    "backend_used": backend,
-                    "reason": "startup response already running",
-                    "conversation": self.yoagent_conversation_payload(),
-                }, HTTPStatus.ACCEPTED
-            self.yoagent_startup_response_running = True
-        stream_id = f"startup-{uuid.uuid4().hex}"
-        started = time.monotonic()
-        self.publish_yoagent_stream_delta(stream_id, "", backend=backend, phase="started")
-        try:
-            activity_payload = self.yoagent_activity_payload()
-            answer, fallback_reason, cli_status = self.run_yoagent_cli_backend(
-                backend,
-                YOAGENT_STARTUP_QUESTION,
-                activity_payload,
-                settings,
-                [],
-                locale,
-                stream_id=stream_id,
-            )
-            model_answered = bool(answer)
-            backend_used = backend if model_answered else "deterministic"
-            if not answer:
-                answer = deterministic_yoagent_reply(YOAGENT_STARTUP_QUESTION, activity_payload, settings, locale)
-            response: dict[str, Any] = {
-                "ok": True,
-                "started": True,
-                "visible": True,
-                "answer": answer,
-                "backend": requested_backend,
-                "backend_used": backend_used,
-                "fallback": bool(fallback_reason),
-                "fallback_reason": fallback_reason,
-                "cli": cli_status,
-                "timing": {"ttfr_ms": round((time.monotonic() - started) * 1000, 3)},
-                "stream_id": stream_id,
-                "generated_at": activity_payload.get("generated_at"),
-                "session_order": activity_payload.get("session_order", []),
-            }
-            answer_text, hidden_thinking_removed = strip_yoagent_hidden_thinking(str(response.get("answer") or ""))
-            response["answer"] = answer_text
-            if hidden_thinking_removed:
-                response["hidden_thinking_removed"] = True
-            response["details"] = yoagent_response_details(response)
-            if answer_text:
-                self.record_yoagent_message("assistant", answer_text, details=str(response.get("details") or ""))
-                self.publish_yoagent_conversation_changed("yoagent_startup")
-            response["conversation"] = self.yoagent_conversation_payload()
-            if not model_answered:
-                self.publish_yoagent_stream_delta(
-                    stream_id,
-                    answer_text,
-                    backend=backend_used,
-                    phase="done",
-                    done=True,
-                    hidden_thinking_removed=bool(response.get("hidden_thinking_removed")),
-                )
-            return response, HTTPStatus.OK
-        except Exception as exc:
-            self.publish_yoagent_stream_delta(stream_id, "", backend=backend, phase="error", done=True)
-            return {"ok": False, "error": str(exc), "stream_id": stream_id, "conversation": self.yoagent_conversation_payload()}, HTTPStatus.INTERNAL_SERVER_ERROR
-        finally:
-            with self.yoagent_prewarm_lock:
-                self.yoagent_startup_response_running = False
+    def yoagent_prewarm(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_prewarm(*args, **kwargs)
 
-    def yoagent_prewarm(self, payload: dict[str, Any] | None = None) -> tuple[dict[str, Any], HTTPStatus]:
-        if (payload or {}).get("visible"):
-            return self.yoagent_startup_response(payload)
-        return self.start_yoagent_backend_prewarm(payload, reason="client_prewarm")
+    def yoagent_chat(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.yoagent_chat(*args, **kwargs)
 
-    def yoagent_chat(self, payload: dict[str, Any], access_role: str = "admin") -> tuple[dict[str, Any], HTTPStatus]:
-        chat_started = time.monotonic()
-        question = truncate_text(" ".join(str(payload.get("message") or payload.get("question") or "").split()), 4000)
-        if not question:
-            return {"error": "missing YO!agent message"}, HTTPStatus.BAD_REQUEST
-        history = self.yoagent_prompt_history(payload.get("history", []), question)
-        self.record_yoagent_message("user", question)
-        settings = self.yoagent_settings()
-        locale = str(payload.get("locale") or "en").strip()
-        activity_payload_cache: dict[str, Any] | None = None
-        context_lines_cache: list[str] | None = None
+    def run_yoagent_cli_backend(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.run_yoagent_cli_backend(*args, **kwargs)
 
-        def get_activity_payload() -> dict[str, Any]:
-            nonlocal activity_payload_cache
-            if activity_payload_cache is None:
-                activity_payload_cache = self.yoagent_activity_payload()
-            return activity_payload_cache
+    def run_yoagent_codex_cli(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.run_yoagent_codex_cli(*args, **kwargs)
 
-        def get_context_lines() -> list[str]:
-            nonlocal context_lines_cache
-            if context_lines_cache is None:
-                context_lines_cache = yoagent_context_lines(get_activity_payload())
-            return context_lines_cache
-
-        def finish(response: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
-            response.setdefault("answered_at", datetime.now(timezone.utc).isoformat())
-            timing = response.get("timing") if isinstance(response.get("timing"), dict) else {}
-            timing.setdefault("ttfr_ms", round((time.monotonic() - chat_started) * 1000, 3))
-            response["timing"] = timing
-            answer_text = str(response.get("answer") or "")
-            answer_text, hidden_thinking_removed = strip_yoagent_hidden_thinking(answer_text)
-            response["answer"] = answer_text
-            if hidden_thinking_removed:
-                response["hidden_thinking_removed"] = True
-            details = str(response.get("details") or "").strip()
-            generated_details = yoagent_response_details(response)
-            response["details"] = "\n".join(part for part in [details, generated_details] if part).strip()
-            actions = response.get("actions") if isinstance(response.get("actions"), list) else []
-            if answer_text:
-                self.record_yoagent_message("assistant", answer_text, actions=actions, details=str(response.get("details") or ""))
-            response["conversation"] = self.yoagent_conversation_payload()
-            return response, HTTPStatus.OK
-
-        def base_response(
-            answer: str,
-            *,
-            actions: list[dict[str, Any]] | None = None,
-            backend: str = "yolomux",
-            backend_used: str = "yolomux",
-            fallback_reason: str = "",
-            details: str = "",
-            cli: dict[str, Any] | None = None,
-            include_activity: bool = False,
-        ) -> dict[str, Any]:
-            response_activity = get_activity_payload() if include_activity else {}
-            return {
-                "answer": answer,
-                "actions": actions or [],
-                "backend": backend,
-                "backend_used": backend_used,
-                "fallback": bool(fallback_reason),
-                "fallback_reason": fallback_reason,
-                "details": details,
-                "cli": cli or {},
-                "context_lines": get_context_lines() if include_activity else [],
-                "generated_at": response_activity.get("generated_at"),
-                "session_order": response_activity.get("session_order", []),
-            }
-
-        skill_file_intent = parse_yoagent_skill_file_intent(question)
-        if skill_file_intent:
-            if access_role != "admin":
-                return finish(base_response("YO!skill and context file management requires an admin login. I did not change anything."))
-            return finish(base_response(self.yoagent_skill_file_answer(skill_file_intent)))
-
-        job_intent = parse_yoagent_job_intent(question, self.sessions)
-        if job_intent:
-            if access_role != "admin":
-                return finish(base_response("YO!agent watch and notify jobs require an admin login. I did not create a job."))
-            job_payload, job_status = self.create_yoagent_job(job_intent)
-            if job_status not in {HTTPStatus.OK, HTTPStatus.CONFLICT}:
-                return {"error": job_payload.get("error") or "failed to create YO!agent job", **job_payload}, job_status
-            job = job_payload.get("job") if isinstance(job_payload.get("job"), dict) else {}
-            duplicate = " I reused the existing matching job." if job_payload.get("duplicate") else ""
-            return finish(base_response(self.yoagent_job_answer(job) + duplicate))
-
-        action_intent = parse_yoagent_action_intent(question, history, self.sessions)
-        if action_intent:
-            if access_role != "admin":
-                return finish(base_response("Sending prompts to tmux sessions through YO!agent requires an admin login. I did not send anything."))
-            action, action_status = self.create_yoagent_action_preview(action_intent)
-            if action_status != HTTPStatus.OK:
-                return {"error": action.get("error") or "failed to create YO!agent action", **action}, action_status
-            confirmation_required = bool(action_intent.get("requires_confirmation") or action.get("requires_confirmation"))
-            if action.get("status") == "ready" and not confirmation_required:
-                result, result_status = self.execute_yoagent_send_action({"preview_id": action.get("id")}, persist_result=False, start_result_watch=False)
-                if result_status == HTTPStatus.OK:
-                    finished = finish(base_response(self.yoagent_action_sent_answer(action, result)))
-                    if action.get("return_result"):
-                        self.start_yoagent_action_result_watcher(action, result.get("result_marker") if isinstance(result.get("result_marker"), dict) else {})
-                    return finished
-                return finish(base_response(f"I did not send anything because {result.get('error') or 'the target is not accepting an AI prompt'}."))
-            if action_intent.get("type") == "wait_then_send" and not confirmation_required:
-                job_payload, job_status = self.create_yoagent_job({
-                    "type": "wait_then_send",
-                    "session": action_intent.get("session"),
-                    "text": action_intent.get("text"),
-                    "return_result": bool(action_intent.get("return_result")),
-                })
-                if job_status in {HTTPStatus.OK, HTTPStatus.CONFLICT}:
-                    job = job_payload.get("job") if isinstance(job_payload.get("job"), dict) else {}
-                    duplicate = " I reused the existing matching job." if job_payload.get("duplicate") else ""
-                    return finish(base_response(self.yoagent_job_answer(job) + duplicate))
-            if not confirmation_required:
-                return finish(base_response(self.yoagent_action_answer(action), details=self.yoagent_action_preview_details(action)))
-            return finish(base_response(self.yoagent_action_answer(action), actions=[action], details=self.yoagent_action_preview_details(action)))
-        settings_payload_data = self.settings_payload()
-        activity_for_operator = get_activity_payload() if product_state_needs_activity(question) else {}
-        if parse_settings_write(question, settings_payload_data) or parse_settings_read(question, settings_payload_data):
-            activity_for_operator = {}
-        operator_response = yoagent_operator_response(
-            question,
-            settings_payload_data,
-            activity_for_operator,
-            access_role,
-            self.save_settings,
-        )
-        if operator_response:
-            operator_response.setdefault("context_lines", yoagent_context_lines(activity_for_operator) if activity_for_operator else [])
-            operator_response.setdefault("generated_at", activity_for_operator.get("generated_at") if activity_for_operator else None)
-            operator_response.setdefault("session_order", activity_for_operator.get("session_order", []) if activity_for_operator else [])
-            return finish(operator_response)
-        requested_backend = str(settings.get("backend") or "deterministic").strip().lower()
-        backend = resolve_yoagent_backend(requested_backend)
-        invocation = str(settings.get("invocation") or "cli").strip().lower()
-        answer = ""
-        backend_used = "deterministic"
-        fallback_reason = ""
-        cli_status: dict[str, Any] = {}
-        activity_payload = get_activity_payload()
-        stream_id = f"chat-{uuid.uuid4().hex}"
-        if backend in {"codex", "claude"} and invocation == "cli":
-            answer, fallback_reason, cli_status = self.run_yoagent_cli_backend(backend, question, activity_payload, settings, history, locale, stream_id=stream_id)
-            if answer:
-                backend_used = backend
-        elif backend in {"codex", "claude"} and invocation != "cli":
-            fallback_reason = f"{backend} {invocation} invocation is not available yet"
-        if not answer:
-            answer = deterministic_yoagent_reply(question, activity_payload, settings, locale)
-        response = base_response(answer, backend=requested_backend, backend_used=backend_used, fallback_reason=fallback_reason, cli=cli_status, include_activity=True)
-        if cli_status:
-            response["stream_id"] = stream_id
-        return finish(response)
-
-    def run_yoagent_cli_backend(
-        self,
-        backend: str,
-        question: str,
-        activity_payload: dict[str, Any],
-        settings: dict[str, Any],
-        history: list[dict[str, str]],
-        locale: str = "en",
-        stream_id: str = "",
-    ) -> tuple[str, str, dict[str, Any]]:
-        if backend not in {"codex", "claude"}:
-            return "", f"unknown backend: {backend}", {}
-
-        with self.yoagent_cli_lock:
-            state = self.yoagent_cli_sessions.get(backend, {})
-            session_id = str(state.get("session_id") or "")
-            context_signature = yoagent_activity_payload_signature(activity_payload)
-            context_changed = context_signature != state.get("activity_signature")
-            seed = not session_id
-            next_session_id = session_id or (str(uuid.uuid4()) if backend == "claude" else "")
-            prompt = build_yoagent_chat_prompt(question, activity_payload, settings, history, locale) if seed else build_yoagent_resume_prompt(question, activity_payload, settings, context_changed, locale)
-            prompt += yoagent_language_directive(locale)
-
-        started = time.monotonic()
-        if stream_id:
-            self.publish_yoagent_stream_delta(stream_id, "", backend=backend, phase="started")
-        if backend == "codex":
-            stream_callback = self.yoagent_stream_callback(stream_id, backend) if stream_id else None
-            if stream_callback:
-                answer, error, captured_session_id, backend_status = self.run_yoagent_codex_app_server(
-                    prompt,
-                    session_id=session_id,
-                    resume=not seed,
-                    settings=settings,
-                    stream_callback=stream_callback,
-                )
-            else:
-                answer, error, captured_session_id, backend_status = self.run_yoagent_codex_app_server(prompt, session_id=session_id, resume=not seed, settings=settings)
-            next_session_id = captured_session_id or session_id
-            if error and not answer:
-                fallback_answer, fallback_error, fallback_session_id = self.run_yoagent_codex_cli(prompt, session_id=session_id, resume=not seed, settings=settings)
-                backend_status["fast_backend_error"] = error
-                backend_status["fallback_transport"] = "codex-exec"
-                if fallback_answer:
-                    answer = fallback_answer
-                    error = ""
-                    next_session_id = fallback_session_id or next_session_id
-                    backend_status["transport"] = "codex-exec"
-                    backend_status["persistent"] = False
-                else:
-                    error = fallback_error or error
-        else:
-            claude_model = str(settings.get("claude_model") or YOAGENT_CLAUDE_SUMMARY_MODEL).strip()
-            claude_effort = str(settings.get("claude_effort") or "").strip()
-            answer, error = self.run_yoagent_claude_cli(prompt, session_id=next_session_id, resume=not seed, model=claude_model, effort=claude_effort)
-            backend_status = {"transport": "claude-cli", "persistent": False, "model": claude_model, "effort": claude_effort or None}
-        elapsed_ms = round((time.monotonic() - started) * 1000)
-        fallback_reason = yoagent_cli_fallback_reason(backend, error)
-        status = {
-            **backend_status,
-            "backend": backend,
-            "resumed": not seed,
-            "seeded": seed,
-            "context_changed": context_changed,
-            "prompt_chars": len(prompt),
-            "elapsed_ms": elapsed_ms,
-            "session_id": next_session_id or None,
-            "per_server": True,
-        }
-        with self.yoagent_cli_lock:
-            if answer and next_session_id:
-                self.yoagent_cli_sessions[backend] = {
-                    "session_id": next_session_id,
-                    "activity_signature": context_signature,
-                    "updated_ts": time.time(),
-                    "updated_monotonic": time.monotonic(),
-                }
-                yoagent_conversation.save_cli_sessions(self.yoagent_cli_sessions)
-            elif fallback_reason:
-                self.yoagent_cli_sessions.pop(backend, None)
-                yoagent_conversation.save_cli_sessions(self.yoagent_cli_sessions)
-        if stream_id:
-            visible_answer, hidden_thinking_removed = strip_yoagent_hidden_thinking(answer)
-            self.publish_yoagent_stream_delta(
-                stream_id,
-                visible_answer,
-                backend=backend,
-                phase="done",
-                done=True,
-                hidden_thinking_removed=hidden_thinking_removed,
-            )
-        return answer, fallback_reason, status
-
-    def run_yoagent_codex_cli(self, prompt: str, session_id: str = "", resume: bool = False, settings: dict[str, Any] | None = None) -> tuple[str, str, str]:
-        if not shutil.which("codex"):
-            return "", "codex CLI not found", ""
-        current_settings = settings or self.yoagent_settings()
-        args = codex_exec_argv(
-            resume_session_id=session_id if resume and session_id else None,
-            model=str(current_settings.get("codex_model") or "").strip() or None,
-            effort=str(current_settings.get("codex_effort") or "").strip() or None,
-            service_tier=SUMMARY_CODEX_SERVICE_TIER,
-        )
-        try:
-                completed = subprocess.run(
-                    args,
-                    input=prompt,
-                    cwd=str(PROJECT_ROOT),
-                    env=codex_runtime_env(),
-                    text=True,
-                    capture_output=True,
-                    timeout=YOAGENT_CLI_TIMEOUT_SECONDS,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return "", str(exc), ""
-        text_parts = []
-        captured_session_id = ""
-        for line in completed.stdout.splitlines():
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            captured_session_id = captured_session_id or codex_event_session_id(event)
-            text = codex_event_text(event)
-            if text:
-                text_parts.append(text)
-        if text_parts:
-            return "\n".join(text_parts).strip(), "", captured_session_id
-        error = completed.stderr.strip() or f"codex exited {completed.returncode}"
-        return "", error, captured_session_id
-
-    def run_yoagent_claude_cli(self, prompt: str, session_id: str = "", resume: bool = False, model: str = "", effort: str = "") -> tuple[str, str]:
-        if not shutil.which("claude"):
-            return "", "claude CLI not found"
-        args = ["claude", "-p"]
-        if model:
-            args.extend(["--model", model])
-        if effort:
-            args.extend(["--effort", effort])
-        if resume and session_id:
-            args.extend(["--resume", session_id])
-        elif session_id:
-            args.extend(["--session-id", session_id])
-        args.append(prompt)
-        try:
-            completed = subprocess.run(
-                args,
-                cwd=str(PROJECT_ROOT),
-                env={**os.environ, "TERM": "xterm-256color", "NO_COLOR": "1"},
-                text=True,
-                capture_output=True,
-                timeout=YOAGENT_CLI_TIMEOUT_SECONDS,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return "", str(exc)
-        if completed.returncode == 0 and completed.stdout.strip():
-            return completed.stdout.strip(), ""
-        return "", completed.stderr.strip() or f"claude exited {completed.returncode}"
+    def run_yoagent_claude_cli(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.run_yoagent_claude_cli(*args, **kwargs)
 
     def save_settings(self, patch: dict[str, Any]) -> dict[str, Any]:
         payload = save_settings(patch)
@@ -5598,6 +3850,95 @@ class TmuxWebtermApp:
             "limit": bounded_limit,
         }, HTTPStatus.OK
 
+    def search_result_for_summary(
+        self,
+        *,
+        query: str,
+        session: str,
+        text: str,
+        kind: str,
+        source: str,
+        timestamp: str = "",
+        title: str = "",
+    ) -> SearchResult | None:
+        if not str(query or "").strip() or str(query).strip().lower() not in str(text or "").lower():
+            return None
+        target_type = "activity-summary" if kind == "global_summary" else "summary"
+        return {
+            "session": session,
+            "timestamp": timestamp,
+            "kind": kind,
+            "source": source,
+            "title": title or (f"{session} summary" if session else "Global summary"),
+            "snippet": search_snippet(text, query),
+            "target": {
+                "type": target_type,
+                "session": session,
+                "timestamp": timestamp,
+                "tab": "summary" if session else "yoagent",
+            },
+        }
+
+    def search_summary_results(self, query: str, session: str | None, limit: int) -> tuple[list[SearchResult], list[dict[str, Any]]]:
+        text = str(query or "").strip()
+        if not text:
+            return [], []
+        search_sessions = [session] if session else self.sessions
+        results: list[SearchResult] = []
+        legacy_summaries: list[dict[str, Any]] = []
+        with getattr(self, "yoagent_session_summary_lock", threading.RLock()):
+            rolling_summaries = copy.deepcopy(getattr(self, "yoagent_session_summaries", {}))
+        for name in search_sessions:
+            if len(results) >= limit:
+                break
+            summary, status = self.summary(name)
+            summary_text = summary.get("text") if status == HTTPStatus.OK else ""
+            if isinstance(summary_text, str):
+                result = self.search_result_for_summary(
+                    query=text,
+                    session=name or "",
+                    text=summary_text,
+                    kind="summary",
+                    source="session_summary",
+                    title=f"{name} summary",
+                )
+                if result:
+                    results.append(result)
+                    legacy_summaries.append({"session": name, "type": "summary", "text": truncate_text(summary_text, 2000)})
+            rolling = rolling_summaries.get(name) if isinstance(rolling_summaries, dict) else None
+            rolling_text = rolling.get("rolling_summary") if isinstance(rolling, dict) else ""
+            if isinstance(rolling_text, str):
+                result = self.search_result_for_summary(
+                    query=text,
+                    session=name or "",
+                    text=rolling_text,
+                    kind="summary",
+                    source="rolling_summary",
+                    timestamp=utc_iso_from_ts(rolling.get("updated_ts") if isinstance(rolling, dict) else 0),
+                    title=f"{name} rolling summary",
+                )
+                if result and len(results) < limit:
+                    results.append(result)
+                    legacy_summaries.append({"session": name, "type": "rolling_summary", "text": truncate_text(rolling_text, 2000)})
+        if not session and len(results) < limit and hasattr(self, "activity_summary_lock"):
+            activity_payload = self.activity_summary_payload()
+            global_payload = activity_payload.get("global") if isinstance(activity_payload, dict) else None
+            lines = global_payload.get("lines") if isinstance(global_payload, dict) else None
+            global_text = "\n".join(str(line) for line in lines if isinstance(line, str)) if isinstance(lines, list) else ""
+            result = self.search_result_for_summary(
+                query=text,
+                session="",
+                text=global_text,
+                kind="global_summary",
+                source="global_summary",
+                timestamp=str(activity_payload.get("generated_at") or ""),
+                title="Global activity summary",
+            )
+            if result:
+                results.append(result)
+                legacy_summaries.append({"session": "", "type": "global_summary", "text": truncate_text(global_text, 2000)})
+        return results[:limit], legacy_summaries[:limit]
+
     def search_payload(self, query: str, session: str | None = None, limit: int = 100) -> tuple[dict[str, Any], HTTPStatus]:
         self.refresh_sessions()
         if session and session not in self.sessions:
@@ -5605,25 +3946,20 @@ class TmuxWebtermApp:
         text = str(query or "").strip()
         bounded_limit = max(1, min(limit, MAX_EVENT_TAIL_LINES))
         event_matches = self.event_log.search(text, session=session, limit=bounded_limit)
-        summary_matches: list[dict[str, Any]] = []
-        if text:
-            search_sessions = [session] if session else self.sessions
-            needle = text.lower()
-            for name in search_sessions:
-                summary, status = self.summary(name)
-                summary_text = summary.get("text") if status == HTTPStatus.OK else ""
-                if isinstance(summary_text, str) and needle in summary_text.lower():
-                    summary_matches.append({
-                        "session": name,
-                        "type": "summary",
-                        "text": truncate_text(summary_text, 2000),
-                    })
-                    if len(summary_matches) >= bounded_limit:
-                        break
+        event_results = self.event_log.search_results(text, session=session, limit=bounded_limit)
+        summary_results, summary_matches = self.search_summary_results(text, session, max(0, bounded_limit - len(event_results)))
+        results = [*event_results, *summary_results]
         return {
             "query": text,
             "session": session or "",
             "limit": bounded_limit,
+            "strategy": "scan-on-query",
+            "sources": {
+                "events": str(self.event_log.path),
+                "summaries": ["session summaries", "rolling per-session summaries", "global activity summary"],
+            },
+            "result_shape": ["session", "timestamp", "kind", "snippet", "target"],
+            "results": results,
             "events": event_matches,
             "summaries": summary_matches,
         }, HTTPStatus.OK
@@ -5648,15 +3984,20 @@ class TmuxWebtermApp:
             return
         self.activity_ledger.heartbeat(session, self.active_window_for(session), byte_count=byte_count, source=source)
 
-    def build_activity_payload(self) -> dict[str, Any]:
-        sessions, errors = discover_sessions(self.sessions)
-        ordered_sessions = self.tmux_recency_ordered_sessions(self.sessions)
+    def build_activity_payload(self, session_scope: Any = "configured", hours: Any = 24.0) -> dict[str, Any]:
+        session_names, scope_errors, scope = self.activity_session_names(session_scope)
+        bounded_hours = session_files.bounded_session_files_hours(self.float_value(hours, 24.0))
+        sessions, errors = discover_sessions(session_names)
+        errors = [*scope_errors, *errors]
+        ordered_sessions = self.tmux_recency_ordered_sessions(session_names)
         agent_infos = {session: sessions[session] for session in ordered_sessions if session in sessions and sessions[session].agents}
-        session_files_by_session = self.cached_session_files_payloads_for_infos(agent_infos, hours=24.0)
+        session_files_by_session = self.cached_session_files_payloads_for_infos(agent_infos, hours=bounded_hours)
         return {
             "activity": self.activity_ledger.snapshot(),
             "agents": build_recent_agents_payload(sessions, ordered_sessions, session_files_by_session=session_files_by_session),
             "errors": errors,
+            "session_scope": scope,
+            "session_file_hours": bounded_hours,
         }
 
     def set_tabber_activity_cache(self, payload: dict[str, Any]) -> None:
@@ -5749,35 +4090,119 @@ class TmuxWebtermApp:
         }
         return payload, HTTPStatus.OK
 
+    def run_history_store_for_app(self) -> RunHistoryStore:
+        store = getattr(self, "run_history_store", None)
+        if isinstance(store, RunHistoryStore):
+            return store
+        store = RunHistoryStore(RUN_HISTORY_PATH)
+        self.run_history_store = store
+        return store
+
+    def yoagent_session_summary_record(self, session: str) -> dict[str, Any]:
+        lock = getattr(self, "yoagent_session_summary_lock", threading.RLock())
+        with lock:
+            summaries = getattr(self, "yoagent_session_summaries", {})
+            value = summaries.get(session) if isinstance(summaries, dict) else None
+            return copy.deepcopy(value) if isinstance(value, dict) else {}
+
+    def latest_summary_for_run_history(self, session: str) -> tuple[str, float]:
+        rolling = self.yoagent_session_summary_record(session)
+        rolling_text = str(rolling.get("rolling_summary") or "").strip()
+        if rolling_text:
+            return redacted_action_text(rolling_text, 1200), self.float_value(rolling.get("updated_ts"), 0.0)
+        if hasattr(self, "transcript_tail_cache_lock"):
+            try:
+                payload, status = self.summary(session)
+            except (AttributeError, OSError, RuntimeError, ValueError):
+                payload, status = {}, HTTPStatus.INTERNAL_SERVER_ERROR
+            summary_text = payload.get("text") if status == HTTPStatus.OK and isinstance(payload, dict) else ""
+            if isinstance(summary_text, str) and summary_text.strip():
+                return redacted_action_text(summary_text, 1200), 0.0
+        return "", 0.0
+
+    def compact_agent_for_run_history(self, agent: Any) -> dict[str, Any] | None:
+        if agent is None:
+            return None
+        return {
+            "kind": agent.kind,
+            "model": agent.model or "",
+            "session_id": agent.session_id or "",
+            "pid": agent.pid,
+            "status": agent.status or "",
+            "transcript": agent.transcript or "",
+            "pane_target": agent.pane_target,
+        }
+
+    def run_history_id(self, session: str, agent: Any, selected: Any) -> str:
+        if agent is not None:
+            if agent.session_id:
+                return f"{agent.kind}:{agent.session_id}"
+            if agent.transcript:
+                return f"{agent.kind}:{agent.transcript}"
+            return f"{agent.kind}:{session}:{agent.pid}"
+        target = selected.target if selected is not None else ""
+        return f"tmux:{session}:{target}"
+
+    def run_history_entry_for_session(self, session: str, info: SessionInfo) -> RunHistoryEntry:
+        selected = info.selected_pane
+        agent = next((item for item in info.agents if item.transcript), info.agents[0] if info.agents else None)
+        project = session_project_metadata(info, self.metadata_cache, allow_network=False)
+        transcript = agent.transcript if agent and agent.transcript else ""
+        transcript_mtime = session_files.file_mtime(Path(transcript)) if transcript else 0.0
+        transcript_meta = transcript_run_metadata(transcript, agent.kind if agent else "")
+        if not transcript_meta.get("ended_ts") and transcript_mtime:
+            transcript_meta["ended_ts"] = transcript_mtime
+            transcript_meta["ended_at"] = utc_iso_from_ts(transcript_mtime)
+        if not transcript_meta.get("started_ts") and transcript_mtime:
+            transcript_meta["started_ts"] = transcript_mtime
+            transcript_meta["started_at"] = utc_iso_from_ts(transcript_mtime)
+        latest_summary, latest_summary_updated_ts = self.latest_summary_for_run_history(session)
+        rolling = self.yoagent_session_summary_record(session)
+        rolling_state = str(rolling.get("state") or "").strip().lower()
+        final_state = rolling_state if rolling_state in YOAGENT_SESSION_SUMMARY_STATES else str(transcript_meta.get("final_state") or "idle")
+        if agent and agent.status == "running":
+            final_state = "working"
+        pull_request = compact_pull_request_for_history(project.get("pull_request") if isinstance(project, dict) else None)
+        return {
+            "id": self.run_history_id(session, agent, selected),
+            "session": session,
+            "agent": self.compact_agent_for_run_history(agent),
+            "prompt": redacted_action_text(str(transcript_meta.get("prompt") or ""), 1200),
+            "cwd": agent.cwd if agent and agent.cwd else selected.current_path if selected else "",
+            "tmux_target": selected.target if selected else "",
+            "tmux_command": selected.process_label or selected.command if selected else "",
+            "started_at": str(transcript_meta.get("started_at") or ""),
+            "started_ts": self.float_value(transcript_meta.get("started_ts"), 0.0),
+            "ended_at": str(transcript_meta.get("ended_at") or ""),
+            "ended_ts": self.float_value(transcript_meta.get("ended_ts"), 0.0),
+            "final_state": final_state,
+            "pr": pull_request,
+            "latest_summary": latest_summary,
+            "latest_summary_updated_ts": latest_summary_updated_ts,
+            "transcript": transcript,
+            "transcript_mtime": transcript_mtime,
+            "project": project,
+            "recent_events": self.event_log.tail(session=session, limit=5),
+        }
+
     def run_history_payload(self, session: str | None = None) -> tuple[RunHistoryPayload, HTTPStatus]:
         refresh_errors = self.refresh_sessions()
-        if session and session not in self.sessions:
+        store = self.run_history_store_for_app()
+        stored_before = store.load_rows(session=session)
+        if session and session not in self.sessions and not stored_before:
             return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
-        scope = [session] if session else self.sessions
+        scope = [session] if session and session in self.sessions else ([] if session else self.sessions)
         infos, errors = discover_sessions(scope)
         runs: list[RunHistoryEntry] = []
         for name in scope:
             info = infos.get(name)
             if info is None:
                 continue
-            selected = info.selected_pane
-            agent = next((item for item in info.agents if item.transcript), info.agents[0] if info.agents else None)
-            project = session_project_metadata(info, self.metadata_cache, allow_network=False)
-            transcript_mtime = 0.0
-            if agent and agent.transcript:
-                transcript_mtime = session_files.file_mtime(Path(agent.transcript))
-            runs.append({
-                "session": name,
-                "agent": asdict(agent) if agent else None,
-                "cwd": agent.cwd if agent and agent.cwd else selected.current_path if selected else "",
-                "tmux_target": selected.target if selected else "",
-                "tmux_command": selected.process_label or selected.command if selected else "",
-                "transcript_mtime": transcript_mtime,
-                "project": project,
-                "recent_events": self.event_log.tail(session=name, limit=5),
-            })
-        runs.sort(key=lambda item: (-float(item.get("transcript_mtime") or 0), item["session"]))
-        return {"session": session or "", "runs": runs, "errors": [*refresh_errors, *errors]}, HTTPStatus.OK
+            runs.append(self.run_history_entry_for_session(name, info))
+        if runs:
+            store.upsert_rows(runs)
+        rows = store.load_rows(session=session)
+        return {"session": session or "", "runs": rows, "errors": [*refresh_errors, *errors]}, HTTPStatus.OK
 
     def session_files_payload(
         self,

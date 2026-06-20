@@ -691,6 +691,7 @@ function appMenuTree() {
             targetItem: fileExplorerItemId,
           }),
           fileMenuVirtualCommand(infoItemId, t('menu.file.info.detail')),
+          fileMenuVirtualCommand(searchHistoryItemId, t('searchHistory.detail')),
           // #40: YO!agent is now a sub-tab of the merged YO!info pane — this entry opens that pane on it.
           menuCommand(yoagentTabLabel(), () => openInfoSubTab('yoagent'), {
             checked: itemInLayout(infoItemId) && infoPanelSubTab === 'yoagent',

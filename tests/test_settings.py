@@ -65,7 +65,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
             "updates": {"notify_level": "bogus"},
             "performance": {"latency_refresh_ms": 100, "event_log_refresh_ms": 100000},
             "terminal_editor": {"word_wrap": "yes", "line_numbers": "no"},
-            "editor": {"autosave": "yes", "autosave_delay_seconds": 100},
+            "editor": {"autosave": "yes", "autosave_delay_seconds": 100, "trim_trailing_whitespace_on_save": "yes", "ensure_final_newline_on_save": "no"},
             "uploads": {"max_bytes": 999999999},
             "share": {"ttl_seconds": 1_000_000, "max_viewers": 999, "scheme": "ftp", "read_only": "no"},
             "yoagent": {"backend": "wat", "invocation": "bad", "system_prompt": "Use facts", "intro": "Be terse", "format": "One line"},
@@ -99,6 +99,8 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["file_explorer"]["image_preview_max_px"] == 1200
     assert settings["editor"]["autosave"] is True
     assert settings["editor"]["autosave_delay_seconds"] == 60
+    assert settings["editor"]["trim_trailing_whitespace_on_save"] is True
+    assert settings["editor"]["ensure_final_newline_on_save"] is False
     assert settings["uploads"]["filename_template"] == DEFAULT_UPLOAD_FILENAME_TEMPLATE
     assert settings["uploads"]["max_bytes"] == 512 * 1024 * 1024
     assert settings["share"]["ttl_seconds"] == 28800
@@ -259,7 +261,7 @@ def test_stale_yoagent_model_settings_revert_to_valid_defaults():
 
 
 def test_preferences_source_paths_are_in_backend_catalog():
-    source = (REPO_ROOT / "static_src/js/yolomux/80_panes_preferences.js").read_text(encoding="utf-8")
+    source = (REPO_ROOT / "static_src/js/yolomux/82_preferences_panel.js").read_text(encoding="utf-8")
     paths = set()
     for line in source.splitlines():
         if "{path:" not in line:
@@ -547,11 +549,15 @@ def test_watched_prs_setting_round_trips_in_template(tmp_path):
     assert loaded["github"]["watched_prs"] == ["ai-dynamo/frontend-crates#18", "owner/repo#7"]
 
 
-def test_blame_all_lines_default_and_coercion():
-    # follow-up: the all-lines blame toggle defaults off and coerces to bool.
+def test_editor_boolean_defaults_and_coercion():
+    # Editor save/blame toggles default off and coerce through the shared bool path.
     assert default_settings()["editor"]["blame_all_lines"] is False
     assert sanitize_settings({"editor": {"blame_all_lines": "yes"}})["editor"]["blame_all_lines"] is True
     assert sanitize_settings({"editor": {"blame_all_lines": "no"}})["editor"]["blame_all_lines"] is False
+    assert default_settings()["editor"]["trim_trailing_whitespace_on_save"] is False
+    assert default_settings()["editor"]["ensure_final_newline_on_save"] is False
+    assert sanitize_settings({"editor": {"trim_trailing_whitespace_on_save": "yes"}})["editor"]["trim_trailing_whitespace_on_save"] is True
+    assert sanitize_settings({"editor": {"ensure_final_newline_on_save": "yes"}})["editor"]["ensure_final_newline_on_save"] is True
 
 
 def test_uploads_subdir_defaults_to_dot_uploads():

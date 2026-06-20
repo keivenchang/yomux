@@ -1,0 +1,21 @@
+{
+  "agent": "claude",
+  "captured_at": "2026-06-19T20:47:19.547266+00:00",
+  "claude_version": "2.1.183 (Claude Code)",
+  "codex_version": "",
+  "expected_screen_key": "approval",
+  "height": null,
+  "id": "claude_real_plan_approval_2_1_183",
+  "include_scrollback": false,
+  "launch_agent": "",
+  "launch_command": "",
+  "launched_session": "",
+  "mode": "plan",
+  "ready_text": [],
+  "send_lines": [],
+  "source": "real capture",
+  "target": "yreal-claude-plan-503389:",
+  "tmux_socket": "/tmp/yoreal-4zEpgj/s",
+  "wait_text": [],
+  "width": 120
+}

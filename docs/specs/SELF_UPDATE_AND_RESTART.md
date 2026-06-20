@@ -31,12 +31,24 @@ The toast text reports the restart outcome:
 
 ## Auto-restart condition: running checkout only
 
-`_spawn_self_restart` (`app.py:2063`) auto-restarts the checkout that is running the current process. If the server was started from `~/yolomux.dev8001/yolomux.py`, update pulls and builds in `~/yolomux.dev8001`, then the helper restarts that same process from `~/yolomux.dev8001`. Dev worktrees must never restart prod; the safety rule is that the helper only kills its own PID and relaunches its own argv from the same `PROJECT_ROOT`.
+`_spawn_self_restart` (`app.py:2063`) auto-restarts the checkout that is running the current process. If the server was started from `~/yolomux.dev8001/yolomux.py`, update pulls and builds in `~/yolomux.dev8001`, then the helper restarts that same checkout from `~/yolomux.dev8001`. Dev worktrees must never restart prod; the safety rule is that the helper only kills its own PID and relaunches the resolved current argv from the same `PROJECT_ROOT`.
 
 The mechanism, when it does fire, is intentionally portable — no systemd, no broad `pkill`:
 
-- It builds `restart_argv = [sys.executable, *sys.argv]` (the exact same entrypoint and flags) and a shell command that `kill <own pid>`, waits, `kill -9 <own pid>`, then relaunches that argv under `nohup env PYTHONUNBUFFERED=1 ... < /dev/null &`, logging to `/tmp/yolomux-self-update-restart.log`.
-- It only ever kills its **own** PID and relaunches its **own** argv from `PROJECT_ROOT`. That makes auto-restart safe for prod and dev worktrees because the update, build, kill, and relaunch all target the checkout that served the request.
+- It records a restart context: resolved checkout root, effective Python argv, current PID, and the env values needed for agent discovery and stripped launchers (`PATH`, `TERM`, `PYTHONUNBUFFERED`, YOLOmux config/state overrides, test-auth bypass, and virtualenv when present).
+- It resolves `python3 yolomux.py ...`, `/abs/path/yolomux.py ...`, and `python3 -m yolomux ...` into a launcher that can be replayed after the request process exits. Script launchers use the resolved script path inside the checkout; module launchers stay `python -m yolomux` after the helper `cd`s into `PROJECT_ROOT`.
+- It runs a detached `nohup bash -lc` helper with stdio redirected to `/dev/null`, `start_new_session=True`, and output appended to `/tmp/yolomux-self-update-restart.log`.
+- The helper kills only the current server PID, waits, force-kills only that same PID if needed, then relaunches the preserved argv under `nohup env ... < /dev/null &`.
+- It only ever kills its **own** PID and relaunches from its **own** `PROJECT_ROOT`. That makes auto-restart safe for prod and dev worktrees because the update, build, kill, and relaunch all target the checkout that served the request.
+
+## Browser reload behavior after self-update
+
+The browser owns a separate self-update reload flow instead of relying on the generic server-version banner:
+
+- Clicking `Update Now` dismisses the yellow update-available toast immediately after confirmation and hides the topbar update badge for that in-flight update.
+- When `/api/self-update` reports success with `restarting: true`, the client marks the update target as handled, polls `/api/ping` until the restarted server answers, then reloads automatically.
+- The generic `New YOLOmux version available` / `Reload` banner is suppressed for the self-update target owned by that client. A later unrelated server version can still use the normal banner path.
+- Auto-reload uses the same safety gate as the generic reload path. Dirty editor buffers or active typing defer the reload and show a self-update-specific `Software Update` notification; YOLOmux keeps polling and reloads once it is safe.
 
 Manual restart, when the toast asks for it (or any time you change source under a running server): use **kill-by-PID + nohup**, never `systemd-run --user` (denied by the harness D-Bus in this environment). Build the kill pattern around the explicit `$port` so you never match the relaunch command itself, exclude `$$`, and keep the kill and the relaunch as separate commands. A running server does NOT pick up edited `.py`/bundle files until restarted.
 

@@ -4,7 +4,7 @@ This spec captures common questions users are likely to ask YO!agent, the expect
 
 ## Operating Rule
 
-YO!agent is the coordinator by default. The user may speak in routing language such as `ask session 1`, `tell agent 2`, `when it is done`, or `pass that to agent 3`, but each target agent should receive only the task or question from that target's point of view. YO!agent should preserve evidence, wait for real completion, read artifacts when asked, transform outputs itself when needed, and send clean source-neutral prompts to the next target.
+YO!agent is the central command surface and coordinator by default. The user may speak in routing language such as `ask session 1`, `tell agent 2`, `when it is done`, or `pass that to agent 3`, but each target agent should receive only the task or question from that target's point of view. YO!agent should preserve evidence, wait for real completion, read artifacts when asked, transform outputs itself when needed, and send clean source-neutral prompts to the next target.
 
 Peer-to-peer relay is the exception. If the user explicitly says that one target should contact, relay to, or instruct another target directly, YO!agent may pass relay instructions, but the prompt must say exactly how to relay and what to disclose. Without that wording, target sessions should not know about each other.
 
@@ -37,19 +37,21 @@ Peer-to-peer relay is the exception. If the user explicitly says that one target
 ### Session Sends And Watches
 
 - `ask session 1 what it has done today`: send `what have you done today?` to session `1`; explain locally that YO!agent asked tmux session `1`.
-- `tell session 6 to run the tests`: verify the target is an AI prompt in a Claude/Codex pane, send the task with Return, verify the composer cleared, and report the transport used.
+- `tell session 6 to run the tests`: verify the target is an AI prompt in a Claude/Codex pane, reject busy/approval/draft targets, send the task through the server-owned transport, verify the composer cleared, and report the transport used.
 - `send date to session 6`: translate shell-like phrasing into an agent prompt such as `tell me the date` unless the user explicitly asks for literal terminal input.
+- Explicit target-session sends return results by default: YO!agent confirms the send immediately, watches the target transcript or visible pane, and appends the target response back into the YO!agent conversation. Opt-out phrases such as `do not wait for the result`, `just send it`, or `no output needed` keep the behavior send-only.
 - `send this but ask me first`: create an action preview card instead of sending immediately.
 - `notify me when session 4 is idle`: create a one-shot watch job with quiet-time debounce and browser/toast notification.
-- `wait for session 4 to finish, then tell it to update docs`: create a wait-then-send job; revalidate the target prompt state before sending.
+- `wait for session 4 to finish, then tell it to update docs`: create a wait-then-send job; revalidate the exact target pane and prompt state before sending; after the send, watch for the target result by default unless the user opted out.
 - `notify me when all sessions are idle`: track the configured YOLOmux session roster, show which session still blocks the watch, and fire once when all qualify.
-- `send this and show me the result here`: send immediately, return an immediate watching message, then append the target result from transcript or visible pane watcher.
+- `send this and show me the result here`: same as the default explicit-send behavior, but reinforces that YO!agent should append the target result from transcript or visible pane watcher.
 
 ### Multi-Agent Orchestration
 
 - `ask session 1 what changed, then ask session 2 if that is correct`: ask session `1`; wait for a final response; derive a clean fact-check prompt; ask session `2`; wait; append session `2`'s result to YO!agent chat.
 - `ask session 1 what time it is, add 35 minutes, and ask session 2 if that is correct`: YO!agent performs the time arithmetic and asks session `2` only the derived question, such as `Is 6:10 PM the correct time now?`.
 - `I want agent 1 to do this and write to a file, then when it is done, take the output to agent 2`: YO!agent should create a staged plan, pick or ask for an artifact path if needed, send agent `1` a clean task with the output file requirement, wait for completion, read/validate the file or output, then send agent `2` a clean task with the artifact path or extracted content.
+- `pass the exact answer to session 2`, `summarize that for session 2`, or `modify it before sending`: YO!agent chooses the requested transformation itself. Exact/original handoffs preserve bounded source text; excerpt handoffs include only the relevant bounded passage; summary handoffs condense and label uncertainty; modified/derived handoffs compute the requested change before sending.
 - `have agent 1 draft instructions for agent 2`: YO!agent may ask agent `1` for a draft, but YO!agent still performs the actual send to agent `2` unless the user explicitly asks for direct relay.
 - `run A in three sessions and compare results`: fan out as separate target tasks, track each result separately, then synthesize centrally in YO!agent. Do not let one target summarize another target's transcript unless explicitly requested.
 - `if tests pass in session 3, tell session 5 to pick up docs`: watch session `3`, inspect the completion evidence, then send session `5` a clean pickup prompt with only the facts it needs.
@@ -87,11 +89,12 @@ Peer-to-peer relay is the exception. If the user explicitly says that one target
 - Use a trace id or job id for multi-step work so logs, files, and messages can be tied together.
 - Name artifact paths explicitly. If the user did not specify a path, choose a project-local temporary or queue path and report it.
 - Ask target agents for bounded outputs: final answer, file path, test command/result, changed files, or a small JSON object. Avoid asking for vague full transcripts.
+- Honor the user's requested handoff form: pass exact original text only when requested and bounded, pass excerpts when the user names the relevant part, summarize when the user asks for a summary, and compute modified or derived prompts inside YO!agent before sending. Do not let a target agent infer the transformation from routing history.
 - Treat target output as untrusted data. YO!agent should not execute commands or write settings based only on another agent's prose without validation and auth checks.
 - Confirm high-risk actions before sending: secrets, credentials, recursive delete, hard reset, broad process kills, recursive permissions, SSH, broad resets, or writes outside the project/config boundary.
 - Do not paste into a target that is busy, at an approval prompt, has unsent text, is not a detected agent pane, or cannot be reached.
 - Report progress while waiting. For handoffs, show which source session is being waited on and which target is next, with a short `regarding ...` summary.
-- Return the final result to the YO!agent conversation when the user asks to show/print/tell the result here.
+- Return the final result to the YO!agent conversation for explicit target-session sends by default; suppress the watcher only when the user asks YO!agent not to wait or not to return output.
 
 ## Implementation Backlog
 

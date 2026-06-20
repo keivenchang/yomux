@@ -158,7 +158,6 @@ let shareGeometryDigestTimer = null;
 let shareDebugSequence = 0;
 let shareDebugReports = [];
 const shareDebugReportLimit = 20;
-const shareDebugProfileUploadMinIntervalMs = 5000;
 let shareDebugProfileLastUploadAtByKind = new Map();
 let shareLastGeometryDigest = null;
 let shareLastGeometryDigestResult = null;
@@ -254,6 +253,7 @@ const fileExplorerIndexedDirsMigratedKey = 'yolomux.fileExplorer.indexedDirs.mig
 const fileExplorerModeStorageKey = 'yolomux.fileExplorerMode.v1';
 const fileExplorerOpenIntentStorageKey = 'yolomux.fileExplorerOpen.v1';
 const fileExplorerTabberCollapsedStorageKey = 'yolomux.fileExplorer.tabberCollapsed.v1';
+const fileExplorerTabberLookbackHoursStorageKey = 'yolomux.fileExplorer.tabberLookbackHours.v1';
 const legacyFileExplorerChangesHiddenStorageKey = 'yolomux.fileExplorerChangesHidden';
 const changesFolderCollapsedStorageKey = 'yolomux.modifiedFiles.folderCollapsed.v1';
 const changesRepoCollapsedStorageKey = 'yolomux.modifiedFiles.repoCollapsed.v1';
@@ -678,6 +678,7 @@ const resizeObservers = new Map();
 const transcriptStreams = new Map();
 const summaryStreams = new Map();
 const autoApproveStates = new Map();
+const promptAttentionClears = new Map();
 const documentTitleIdleThresholdMs = 120000;
 const tmuxSignalActivityWindowMs = documentTitleIdleThresholdMs;
 let documentTitleIdleSinceMs = null;
@@ -694,6 +695,7 @@ const startupHelperIndexStorageKey = 'yolomux.startupHelper.index.v1';
 // YO!info and YO!agent are merged into one pane with an in-pane sub-tab toggle; the chosen
 // sub-tab is remembered across reloads.
 const infoSubTabStorageKey = 'yolomux.infoPanel.activeSubTab.v1';
+const infoLookbackHoursStorageKey = 'yolomux.infoPanel.lookbackHours.v1';
 const transcriptPreviewMessages = 200;
 let remoteResizeDelayMs = initialSetting('performance.remote_resize_delay_ms');
 // The latest watched-PR payload + last-seen status per PR ref (for notify-on-transition diffing) live here.
@@ -769,6 +771,8 @@ function yoagentTabLabel() { return t('brand.tab.agent'); }
 // the active sub-tab within the merged YO!info pane ('info' | 'yoagent'), remembered.
 let infoPanelSubTab = readStoredInfoSubTab();
 const fileExplorerItemId = '__files__';
+const searchHistoryItemId = '__search_history__';
+function searchHistoryTabLabel() { return t('tab.searchHistory'); }
 const prefsItemId = '__prefs__';
 const debugPaneItemId = '__debug__';
 const emptyPaneParam = '__empty_pane__';
@@ -916,6 +920,25 @@ const TAB_TYPES = [
     className: () => 'file-explorer',
     icon: 'finder',
     minWidth: () => rootCssLengthPx('--file-pane-min-inline-size') || minSplitPaneWidthPx(),
+    prunePriority: () => 0,
+  },
+  {
+    key: 'search-history',
+    id: searchHistoryItemId,
+    aliases: ['search', 'history', 'run-history', 'search-history', searchHistoryItemId],
+    match: item => item === searchHistoryItemId,
+    label: () => searchHistoryTabLabel(),
+    shortLabel: () => t('tab.searchHistory.short'),
+    terminalTitle: () => t('tab.unavailableFor', {name: searchHistoryTabLabel()}),
+    sortRank: 0.6,
+    param: () => 'search-history',
+    detail: () => t('searchHistory.detail'),
+    rowHtml: (item, options) => searchHistoryPaneTabHtml(item, options),
+    createPanel: () => createSearchHistoryPanel(),
+    renderAttached: () => loadSearchHistoryPanelData({silent: true}),
+    className: () => 'search-history-item',
+    icon: 'document',
+    minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 0,
   },
   {
@@ -1094,8 +1117,8 @@ function applyFileExplorerStaticLabels() {
 const syntaxLanguageByExtension = new Map(Object.entries(HIGHLIGHTABLE_EXTENSIONS));
 function virtualTabItems() {
   return debugModeEnabled
-    ? [infoItemId, fileExplorerItemId, prefsItemId, debugPaneItemId]
-    : [infoItemId, fileExplorerItemId, prefsItemId];
+    ? [infoItemId, fileExplorerItemId, searchHistoryItemId, prefsItemId, debugPaneItemId]
+    : [infoItemId, fileExplorerItemId, searchHistoryItemId, prefsItemId];
 }
 let visibleSessions = sessions.slice(0, maxSessionTabs);
 let layoutItems = [...virtualTabItems(), ...visibleSessions];
@@ -1110,7 +1133,6 @@ let clientEventsSource = null;
 let clientEventsConnected = false;
 let reconnectResyncTimer = null;
 const reconnectResyncDebounceMs = 751;
-const autoApproveDisconnectedPollMs = 5003;
 let serverVersionReloadHandled = '';
 let activitySummaryPayload = {sessions: {}, global: {lines: []}, session_order: []};
 let activitySummaryRefreshing = false;
@@ -1118,6 +1140,8 @@ let activitySummaryLastRefreshTs = 0;
 const activitySummaryGuard = makeGenerationGuard();
 let yoagentMessages = [];
 let yoagentPendingWaits = [];
+let yoagentJobs = [];
+let yoagentJobsLoading = false;
 let yoagentConversationLoaded = false;
 let yoagentConversationLoading = false;
 let yoagentConversationPath = '';
@@ -1135,6 +1159,13 @@ let yoagentNotice = null;
 let yoagentScrollbackLocked = false;
 let yoagentStartupInfoShown = false;
 let yoagentStartupInfoVisible = false;
+let searchHistoryQuery = '';
+let searchHistoryPayload = {query: '', results: []};
+let searchHistoryLoading = false;
+let searchHistoryError = '';
+let runHistoryPayload = {runs: []};
+let runHistoryLoading = false;
+let runHistoryError = '';
 let notificationsEnabled = false;
 let fileExplorerChangesSelectedSession = shareBootstrapFinderSession();
 const sessionStateKeys = new Map();
@@ -1227,6 +1258,45 @@ let openAppMenuOpenedAt = 0;
 let fileExplorerSyncPathInFlight = '';
 let fileExplorerLastAppliedSyncPlanKey = '';
 let fileExplorerSyncGeneration = 0;
+// Hardcoded frontend timing values live here. Settings-backed intervals stay in settings.py and are read through initialSetting/numberSetting.
+const uiDelayMs = Object.freeze({
+  shareViewerStatusBackupRefresh: 30000,
+  shareHostStatusBackupRefresh: 3000,
+  shareRemoteResizeAfterSocketOpen: 50,
+});
+
+const yolomuxTiming = Object.freeze({
+  shareDebugProfileUploadMinIntervalMs: 5000,
+  // Non-settings fallback polls use odd cadences by preference; see docs/DEVELOPMENT.md.
+  autoApproveDisconnectedPollMs: 5003,
+  shareViewerStatusBackupRefreshMs: uiDelayMs.shareViewerStatusBackupRefresh,
+  shareHostStatusBackupRefreshMs: uiDelayMs.shareHostStatusBackupRefresh,
+  shareRemoteResizeAfterSocketOpenMs: uiDelayMs.shareRemoteResizeAfterSocketOpen,
+  yolomuxFontReadyTimeoutMs: 2500,
+  shareReplayKeyframeRequestInitialBackoffMs: 5000,
+  shareReplayKeyframeRequestMinIntervalMs: 5000,
+  shareReplayKeyframeRequestMaxBackoffMs: 5000,
+  shareGeometryResyncMinIntervalMs: 10000,
+  shareReplayPostTopologyKeyframeQuietExtraMs: 1000,
+  shareTopologyKeyframePointerQuietMs: 500,
+});
+
+const {
+  shareDebugProfileUploadMinIntervalMs,
+  autoApproveDisconnectedPollMs,
+  shareViewerStatusBackupRefreshMs,
+  shareHostStatusBackupRefreshMs,
+  shareRemoteResizeAfterSocketOpenMs,
+  yolomuxFontReadyTimeoutMs,
+  shareReplayKeyframeRequestInitialBackoffMs,
+  shareReplayKeyframeRequestMinIntervalMs,
+  shareReplayKeyframeRequestMaxBackoffMs,
+  shareGeometryResyncMinIntervalMs,
+  shareTopologyKeyframePointerQuietMs,
+} = yolomuxTiming;
+const shareReplayHostKeyframeMinIntervalMs = shareReplayKeyframeRequestMinIntervalMs;
+const shareReplayPostTopologyKeyframeQuietMs = shareReplayHostKeyframeMinIntervalMs + yolomuxTiming.shareReplayPostTopologyKeyframeQuietExtraMs;
+const shareTopologyKeyframeMaxDeferralMs = shareReplayHostKeyframeMinIntervalMs;
 // i18n runtime: a tiny key-based string catalog with a t() helper. Catalogs are fetched from
 // /static/locales/<locale>.json (all-static-fetch delivery); `en` is the source-of-truth fallback.
 // This partial loads right after the bootstrap (00) and before everything else (10+), so all code
@@ -1805,6 +1875,30 @@ function agentLabel(kind) {
   return String(kind || '');
 }
 
+const sessionFileLookbackDefaultHours = 24;
+const sessionFileLookbackHourValues = Object.freeze([
+  0.5, 1, 2, 4, 8, 12, 24, 48, 72, 96, 120, 144, 168, 192, 216, 240, 264, 288, 312, 336,
+]);
+
+function normalizeSessionFileLookbackHours(value, fallback = sessionFileLookbackDefaultHours) {
+  const parsed = Number(value);
+  const candidate = Number.isFinite(parsed) ? parsed : Number(fallback);
+  if (sessionFileLookbackHourValues.includes(candidate)) return candidate;
+  if (sessionFileLookbackHourValues.includes(Number(fallback))) return Number(fallback);
+  return sessionFileLookbackDefaultHours;
+}
+
+function sessionFileLookbackLabel(hours) {
+  const value = Number(hours);
+  if (value < 1) return t('share.duration.minute', {count: Math.round(value * 60)});
+  if (value < 24) return tPlural('duration.hour', value);
+  return tPlural('duration.day', value / 24);
+}
+
+function sessionFileLookbackOptions() {
+  return sessionFileLookbackHourValues.map(hours => ({hours, label: sessionFileLookbackLabel(hours)}));
+}
+
 // localStorage can throw (privacy mode, blocked, quota) — these swallow failures so a blocked store
 // never breaks the page. storageGet returns the raw string (or `fallback` when absent/blocked);
 // storageSet coerces to string and no-ops on failure. Every readStored*/writeStored* builds on these.
@@ -1822,6 +1916,30 @@ function storageSet(key, value) {
     window.localStorage?.setItem(key, String(value));
   } catch (_) {}
 }
+
+function readStoredInfoLookbackHours() {
+  return normalizeSessionFileLookbackHours(storageGet(infoLookbackHoursStorageKey));
+}
+
+function writeStoredInfoLookbackHours(hours) {
+  const normalized = normalizeSessionFileLookbackHours(hours);
+  storageSet(infoLookbackHoursStorageKey, normalized);
+  return normalized;
+}
+
+let infoSessionFileLookbackHours = readStoredInfoLookbackHours();
+
+function readStoredTabberLookbackHours() {
+  return normalizeSessionFileLookbackHours(storageGet(fileExplorerTabberLookbackHoursStorageKey));
+}
+
+function writeStoredTabberLookbackHours(hours) {
+  const normalized = normalizeSessionFileLookbackHours(hours);
+  storageSet(fileExplorerTabberLookbackHoursStorageKey, normalized);
+  return normalized;
+}
+
+let tabberSessionFileLookbackHours = readStoredTabberLookbackHours();
 
 function sessionStorageGet(key, fallback = null) {
   try {
@@ -4176,7 +4294,8 @@ function showTabContextMenu(item, x, y, options = {}) {
     for (const command of tmuxSessionActionCommands(item, {renameAction, includeKill: false})) {
       appendContextMenuButton(menu, command.label, command.action, closeSessionContextMenu, {disabled: command.disabled, checked: command.checked});
     }
-    const viewItems = tmuxSessionViewCommands(item).filter(command => command.label !== 'Pane details');
+    const paneInfoBarLabel = t('menu.tmux.paneDetails');
+    const viewItems = tmuxSessionViewCommands(item).filter(command => command.label !== paneInfoBarLabel);
     for (const command of viewItems) {
       appendContextMenuButton(menu, command.label, command.action, closeSessionContextMenu, {
         disabled: command.disabled,
@@ -5149,6 +5268,7 @@ const paneScrollContainerSelector = [
   '.summary-preview',
   '.event-list',
   '.info-list',
+  '.search-history-scroll',
   '.yoagent-chat-history',
   '.file-explorer-tree-panel',
   '.file-explorer-changes-panel',
@@ -5334,9 +5454,9 @@ function itemParam(item) {
 }
 
 const stateDefs = {
-  'needs-approval': {label: 'Needs approval', short: 'EXEC?', priority: 0, attention: true},
+  'needs-approval': {label: 'Needs approval', short: 'ASK?', priority: 0, attention: true},
   'yolo-approval': {label: 'YOLO pending approval', short: 'YOLO?', priority: 0, attention: false},
-  'needs-input': {label: 'Needs input', short: 'QUES?', priority: 1, attention: true},
+  'needs-input': {label: 'Needs input', short: 'ASK?', priority: 1, attention: true},
   blocked: {label: 'Blocked', short: 'BLK', priority: 2, attention: true},
   disconnected: {label: 'Disconnected', short: 'OFF', priority: 3, attention: true},
   'tests-running': {label: 'Tests running', short: 'TEST', priority: 4, attention: false},
@@ -5355,6 +5475,48 @@ function stateDef(key) {
   // re-localizes it (stateDefs is frozen at load). Compact badge text is localized too.
   const resolvedKey = stateDefs[key] ? key : 'idle';
   return {...stateDefs[resolvedKey], label: t(`state.${resolvedKey}`), short: t(`state.short.${resolvedKey}`)};
+}
+
+function promptAttentionClearKey(session, signature) {
+  return JSON.stringify([String(session || ''), String(signature || '')]);
+}
+
+function promptAttentionPayloadSignature(payload = {}) {
+  const prompt = payload?.prompt || {};
+  const screen = payload?.screen || {};
+  if (prompt.visible === true) {
+    return String(prompt.signature || prompt.hash || prompt.question_text || prompt.text || prompt.command || '');
+  }
+  if (['approval', 'needs-approval', 'needs-input'].includes(String(screen.key || ''))) {
+    return String(screen.signature || screen.hash || screen.question_text || screen.text || screen.key || '');
+  }
+  return '';
+}
+
+function promptAttentionIsCleared(session, signature) {
+  return Boolean(signature) && promptAttentionClears.has(promptAttentionClearKey(session, signature));
+}
+
+function promptAttentionExtra(session, payload = {}) {
+  const signature = promptAttentionPayloadSignature(payload);
+  const cleared = promptAttentionIsCleared(session, signature);
+  return {
+    session,
+    promptSignature: signature,
+    promptAttentionCleared: cleared,
+    attention: !cleared,
+    showBadge: !cleared,
+  };
+}
+
+function clearPromptAttentionForSession(session) {
+  const signature = promptAttentionPayloadSignature(autoApproveStates.get(session) || {});
+  if (!signature) return false;
+  setLimitedMapEntry(promptAttentionClears, promptAttentionClearKey(session, signature), Date.now(), 512);
+  refreshSessionChrome(session);
+  updateTopbarActivityStatus();
+  trackSessionStateChanges();
+  return true;
 }
 
 function terminalDisconnected(session) {
@@ -5402,20 +5564,17 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
   if (/blocked|denied|rejected/.test(lastAction)) {
     return stateValue('blocked', stateReason('yoloBlockedApproval'));
   }
-  if (approvalPromptVisible && approvalYesSelected && autoEnabled) {
-    return stateValue('yolo-approval', stateReason('yoloWillPressEnter'));
-  }
   if (approvalPromptVisible && approvalYesSelected) {
-    return stateValue('needs-approval', approvalPromptText || stateReason('approvalPromptVisible'));
+    return stateValue('needs-approval', approvalPromptText || stateReason('approvalPromptVisible'), promptAttentionExtra(session, auto));
   }
   if (approvalPromptVisible) {
-    return stateValue('needs-input', stateReason('approvalYesNotSelected'));
+    return stateValue('needs-input', stateReason('approvalYesNotSelected'), promptAttentionExtra(session, auto));
   }
   if (!autoEnabled && /permission|approval|approve|confirm/.test(agentText)) {
     return stateValue('needs-approval', approvalPromptText || stateReason('approvalPromptVisible'));
   }
   if (screenKey === 'approval') {
-    return stateValue('needs-approval', screenText || approvalPromptText || stateReason('approvalPromptVisible'));
+    return stateValue('needs-approval', screenText || approvalPromptText || stateReason('approvalPromptVisible'), promptAttentionExtra(session, auto));
   }
   const tmuxSignalStateForSession = tmuxSignalAgentStateForSession(session);
   if (tmuxSignalStateForSession) {
@@ -5425,7 +5584,7 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
     return stateValue('working', screenText || stateReason('agentWorking'));
   }
   if (screenKey === 'needs-input') {
-    return stateValue('needs-input', screenText || stateReason('agentWaitingInput'));
+    return stateValue('needs-input', screenText || stateReason('agentWaitingInput'), promptAttentionExtra(session, auto));
   }
   if (screenKey === 'error') {
     return stateValue('blocked', screenText || stateReason('agentScreenFailed'));
@@ -5655,8 +5814,22 @@ function tmuxSignalDeadText(pane) {
   return 'agent exited';
 }
 
+function tmuxSignalPaneTitle(pane) {
+  return String(pane?.title || pane?.pane_title || '').trim();
+}
+
+function tmuxSignalPaneActionRequired(pane) {
+  return /\[\s*[!.]\s*\]\s*action required/i.test(tmuxSignalPaneTitle(pane));
+}
+
 function tmuxSignalAgentStateForSession(session) {
-  const panes = tmuxSignalAgentPanesForSession(session);
+  const sessionText = String(session || '').trim();
+  const sessionPanes = tmuxSignalPanes().filter(pane => tmuxSignalPaneSession(pane) === sessionText);
+  const actionRequiredPane = sessionPanes.find(pane => pane?.dead !== true && tmuxSignalPaneActionRequired(pane));
+  if (actionRequiredPane) {
+    return stateValue('needs-input', 'tmux agent action required', {tmuxSignal: 'action-required'});
+  }
+  const panes = sessionPanes.filter(tmuxSignalPaneIsAgent);
   if (!panes.length) return null;
   const livePanes = panes.filter(pane => pane?.dead !== true);
   const deadPanes = panes.filter(pane => pane?.dead === true);
@@ -5783,22 +5956,40 @@ function globalActivityCounts() {
   const signalSessions = new Set(signalWindows.map(tmuxSignalWindowSession).filter(Boolean));
   const runningSignalSessions = new Set();
   const bellSignalWindows = new Set();
+  const actionRequiredSignalWindows = new Set();
+  const signalAttentionSessions = new Set();
   for (const windowRecord of signalWindows) {
-    if (windowRecord?.bell_flag === true) {
+    const signalSession = tmuxSignalWindowSession(windowRecord);
+    const signalPayload = signalSession ? (autoApproveStates.get(signalSession) || {}) : {};
+    const signalPromptSignature = signalSession ? promptAttentionPayloadSignature(signalPayload) : '';
+    const signalPromptCleared = signalSession ? promptAttentionIsCleared(signalSession, signalPromptSignature) : false;
+    if (windowRecord?.bell_flag === true && !signalPromptCleared) {
       bellSignalWindows.add(String(windowRecord?.key || `${tmuxSignalWindowSession(windowRecord)}:${windowRecord?.window_index || ''}`));
+      if (signalSession) signalAttentionSessions.add(signalSession);
+    }
+    const panes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
+    if (panes.some(tmuxSignalPaneActionRequired) && !signalPromptCleared) {
+      actionRequiredSignalWindows.add(String(windowRecord?.key || `${tmuxSignalWindowSession(windowRecord)}:${windowRecord?.window_index || ''}`));
+      if (signalSession) signalAttentionSessions.add(signalSession);
     }
     if (!tmuxSignalWindowIsRecentlyActive(windowRecord)) continue;
     running += 1;
-    const session = tmuxSignalWindowSession(windowRecord);
-    if (session) runningSignalSessions.add(session);
+    if (signalSession) runningSignalSessions.add(signalSession);
   }
-  questions += bellSignalWindows.size;
+  questions += new Set([...bellSignalWindows, ...actionRequiredSignalWindows]).size;
   const countedSessions = new Set([...sessions, ...autoApproveStates.keys()].map(value => String(value || '')).filter(Boolean));
   for (const session of countedSessions) {
     if (!isTmuxSession(session)) continue;
-    const key = String(autoApproveStates.get(session)?.screen?.key || '');
+    const payload = autoApproveStates.get(session) || {};
+    const key = String(payload?.screen?.key || '');
+    const promptVisible = payload?.prompt?.visible === true;
+    const promptAttentionKey = promptVisible
+      ? (payload?.prompt?.yes_selected === true ? 'needs-approval' : 'needs-input')
+      : key;
+    const promptSignature = promptAttentionPayloadSignature(payload);
+    const promptCleared = promptAttentionIsCleared(session, promptSignature);
     if (key === 'working' && !runningSignalSessions.has(session)) running += 1;
-    else if (key === 'needs-input') questions += 1;
+    else if (['approval', 'needs-approval', 'needs-input'].includes(promptAttentionKey) && !promptCleared && !signalAttentionSessions.has(session)) questions += 1;
     else if (key === 'blocked') blocked += 1;
   }
   const fallbackTotal = [...countedSessions].filter(isTmuxSession).length;
@@ -5814,7 +6005,7 @@ function globalActivityStatusLineHtml() {
   if (!counts.total) return '';
   const parts = [];
   parts.push(`<span class="topbar-activity-run${counts.running ? ' active' : ''}">${counts.running} RUN</span>`);
-  parts.push(`<span class="topbar-activity-ques${counts.questions ? ' topbar-activity-attn' : ''}">${counts.questions} QUES?</span>`);
+  parts.push(`<span class="topbar-activity-ques${counts.questions ? ' topbar-activity-attn' : ''}">${counts.questions} ASK?</span>`);
   parts.push(`<span class="topbar-activity-blk${counts.blocked ? ' topbar-activity-attn' : ''}">${counts.blocked} BLK</span>`);
   parts.push(`<span class="topbar-activity-idle">${counts.idle} idle</span>`);
   return parts.join('<span class="topbar-activity-sep" aria-hidden="true">·</span>');
@@ -5866,19 +6057,28 @@ function syncAttentionAnimation(node, active) {
   }
 }
 
-function stateBadgeHtml(key, short, title) {
+function stateBadgeHtml(key, short, title, options = {}) {
   const classes = ['session-state-badge', 'tab-symbol', `session-state-${key}`];
   const attention = stateDef(key).attention;
   if (attention) classes.push('session-state-reminder');
   const style = attention ? ` style="${attentionAnimationStyle()}"` : '';
-  return `<span class="${esc(classes.join(' '))}"${style} title="${esc(title)}">${esc(short)}</span>`;
+  const clearable = options.clearable === true && options.session && options.promptSignature;
+  const attrs = clearable
+    ? ` role="button" tabindex="0" data-prompt-attention-clear="1" data-session="${esc(options.session)}" data-prompt-signature="${esc(options.promptSignature)}" aria-label="${esc(t('state.clearAsk'))}"`
+    : '';
+  return `<span class="${esc(classes.join(' '))}"${style} title="${esc(title)}"${attrs}>${esc(short)}</span>`;
 }
 
 function sessionStateHtml(state) {
   // 'ready-review' is dropped — the dedicated #NNNN / CI / Approved PR chips already convey
   // "PR ready", so the standalone "PR" state pill is redundant on the tab.
+  if (state?.promptAttentionCleared) return '';
   if (!state || (!state.showBadge && ['working', 'tests-running', 'done', 'disconnected', 'yolo-approval', 'ready-review'].includes(state.key))) return '';
-  return stateBadgeHtml(state.key, state.short || stateDef(state.key).short, `${state.label}: ${state.reason}`);
+  return stateBadgeHtml(state.key, state.short || stateDef(state.key).short, `${state.label}: ${state.reason}`, {
+    clearable: ['needs-approval', 'needs-input'].includes(state.key) && Boolean(state.promptSignature),
+    session: state.session,
+    promptSignature: state.promptSignature,
+  });
 }
 
 function inactiveTabItems() {
@@ -8562,6 +8762,7 @@ function appMenuTree() {
             targetItem: fileExplorerItemId,
           }),
           fileMenuVirtualCommand(infoItemId, t('menu.file.info.detail')),
+          fileMenuVirtualCommand(searchHistoryItemId, t('searchHistory.detail')),
           // #40: YO!agent is now a sub-tab of the merged YO!info pane — this entry opens that pane on it.
           menuCommand(yoagentTabLabel(), () => openInfoSubTab('yoagent'), {
             checked: itemInLayout(infoItemId) && infoPanelSubTab === 'yoagent',
@@ -11187,6 +11388,131 @@ function fileTreeMtimeText(entry) {
   return sessionFileDisplayTimeTextForEntry(entry);
 }
 
+const FILE_TREE_RECENCY_PULSE_MAX_AGE_SECONDS = 60;
+const FILE_TREE_RECENCY_PULSE_DURATION_MS = 10000;
+const FILE_TREE_RECENCY_THRESHOLDS = Object.freeze([
+  {key: 'hot', maxAgeSeconds: FILE_TREE_RECENCY_PULSE_MAX_AGE_SECONDS, colorVar: 'var(--file-tree-recency-hot)'},
+  {key: 'fresh', maxAgeSeconds: 5 * 60, colorVar: 'var(--file-tree-recency-fresh)'},
+  {key: 'recent', maxAgeSeconds: 60 * 60, colorVar: 'var(--file-tree-recency-recent)'},
+  {key: 'warm', maxAgeSeconds: 24 * 60 * 60, colorVar: 'var(--file-tree-recency-warm)'},
+]);
+const FILE_TREE_RECENCY_OLD_STATE = Object.freeze({
+  key: 'old',
+  className: 'file-tree-recency-old',
+  colorVar: 'var(--file-tree-recency-old)',
+  pulseEligible: false,
+});
+const FILE_TREE_RECENCY_CLASSES = Object.freeze([
+  ...FILE_TREE_RECENCY_THRESHOLDS.map(item => `file-tree-recency-${item.key}`),
+  FILE_TREE_RECENCY_OLD_STATE.className,
+]);
+
+function fileTreeRecencyNowMs() {
+  const value = Number(globalThis.__yolomuxFileTreeRecencyNowMs);
+  return Number.isFinite(value) ? value : Date.now();
+}
+
+function fileTreeRecencyStateForMtime(mtime, nowMs = fileTreeRecencyNowMs()) {
+  const value = Number(mtime || 0);
+  const now = Number(nowMs);
+  if (!value || !Number.isFinite(value) || !Number.isFinite(now)) return null;
+  const ageSeconds = Math.max(0, (now / 1000) - value);
+  const threshold = FILE_TREE_RECENCY_THRESHOLDS.find(item => ageSeconds <= item.maxAgeSeconds);
+  const key = threshold?.key || FILE_TREE_RECENCY_OLD_STATE.key;
+  return {
+    key,
+    className: `file-tree-recency-${key}`,
+    colorVar: threshold?.colorVar || FILE_TREE_RECENCY_OLD_STATE.colorVar,
+    mtimeKey: String(value),
+    ageSeconds,
+    pulseEligible: key === 'hot',
+  };
+}
+
+function clearFileTreeRecencyPulseTimer(row) {
+  if (row?.__fileTreeRecencyPulseTimer) clearTimeout(row.__fileTreeRecencyPulseTimer);
+  if (row) {
+    row.__fileTreeRecencyPulseTimer = null;
+    row.__fileTreeRecencyPulseTimerUntilMs = 0;
+  }
+}
+
+function setFileTreeRecencyPulseClass(row, enabled, restart = false) {
+  if (!row?.classList) return;
+  if (!enabled) {
+    row.classList.remove('file-tree-recency-pulse');
+    return;
+  }
+  if (restart && row.classList.contains('file-tree-recency-pulse')) {
+    row.classList.remove('file-tree-recency-pulse');
+    const date = row.querySelector?.(':scope > .file-tree-date');
+    if (date?.offsetWidth !== undefined) void date.offsetWidth;
+  }
+  row.classList.add('file-tree-recency-pulse');
+}
+
+function scheduleFileTreeRecencyPulseStop(row, untilMs) {
+  if (!row) return;
+  const until = Number(untilMs) || 0;
+  const delay = until - fileTreeRecencyNowMs();
+  if (delay <= 0) {
+    setFileTreeRecencyPulseClass(row, false);
+    clearFileTreeRecencyPulseTimer(row);
+    return;
+  }
+  if (row.__fileTreeRecencyPulseTimerUntilMs === until) return;
+  clearFileTreeRecencyPulseTimer(row);
+  row.__fileTreeRecencyPulseTimerUntilMs = until;
+  row.__fileTreeRecencyPulseTimer = setTimeout(() => {
+    if ((Number(row.__fileTreeRecencyPulseUntilMs) || 0) <= fileTreeRecencyNowMs()) {
+      setFileTreeRecencyPulseClass(row, false);
+      clearFileTreeRecencyPulseTimer(row);
+    }
+  }, delay);
+}
+
+function clearFileTreeRowRecency(row) {
+  if (!row) return;
+  for (const className of FILE_TREE_RECENCY_CLASSES) row.classList.remove(className);
+  row.classList.remove('file-tree-recency-pulse');
+  setRowDataset(row, 'recency', '');
+  row.style?.removeProperty('--file-tree-recency-date-color');
+}
+
+function applyFileTreeRowRecency(row, entry, options = {}) {
+  if (!row || options.differMode === true || fileExplorerTreeDateMode !== 'relative') {
+    clearFileTreeRowRecency(row);
+    return;
+  }
+  const nowMs = fileTreeRecencyNowMs();
+  const state = fileTreeRecencyStateForMtime(entry?.mtime, nowMs);
+  if (!state) {
+    clearFileTreeRowRecency(row);
+    clearFileTreeRecencyPulseTimer(row);
+    row.__fileTreeRecencyPulseMtimeKey = '';
+    row.__fileTreeRecencyPulseUntilMs = 0;
+    return;
+  }
+  for (const className of FILE_TREE_RECENCY_CLASSES) row.classList.toggle(className, className === state.className);
+  setRowDataset(row, 'recency', state.key);
+  row.style?.setProperty('--file-tree-recency-date-color', state.colorVar);
+  if (!state.pulseEligible) {
+    setFileTreeRecencyPulseClass(row, false);
+    clearFileTreeRecencyPulseTimer(row);
+    return;
+  }
+  const mtimeChanged = row.__fileTreeRecencyPulseMtimeKey !== state.mtimeKey;
+  if (mtimeChanged) {
+    row.__fileTreeRecencyPulseMtimeKey = state.mtimeKey;
+    row.__fileTreeRecencyPulseUntilMs = nowMs + FILE_TREE_RECENCY_PULSE_DURATION_MS;
+  }
+  const pulseUntilMs = Number(row.__fileTreeRecencyPulseUntilMs) || 0;
+  const pulseActive = pulseUntilMs > nowMs && row.__fileTreeRecencyPulseMtimeKey === state.mtimeKey;
+  setFileTreeRecencyPulseClass(row, pulseActive, mtimeChanged);
+  if (pulseActive) scheduleFileTreeRecencyPulseStop(row, pulseUntilMs);
+  else clearFileTreeRecencyPulseTimer(row);
+}
+
 function sortedFileTreeEntries(entries, sortMode = fileExplorerTreeSortMode, options = {}) {
   const includeHidden = options.includeHidden === true;
   const visible = entries.filter(entry => includeHidden || fileExplorerShowHidden || !entry.name.startsWith('.'));
@@ -11529,6 +11855,7 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
     dateText: fileTreeMtimeText(entry),
   });
   applyFileTreeRowDerivedState(row, derivedState);
+  applyFileTreeRowRecency(row, entry, {differMode});
   const {changedFile, changedFileStatus} = derivedState;
   if (!differMode && entry.kind === 'dir' && entry.is_repo === true) {
     row.removeAttribute('title');
@@ -11762,12 +12089,13 @@ function bindFileImagePreview(anchor, path, entry) {
 
 function selectableFileTreeRows(container = document) {
   return Array.from(container.querySelectorAll('.file-tree-row[data-path]'))
-    .filter(row => row.dataset.kind === 'file' || row.dataset.kind === 'dir');
+    .filter(row => !row.dataset.tabberType && (row.dataset.kind === 'file' || row.dataset.kind === 'dir'));
 }
 
 function updateFileExplorerCurrentFileHighlight() {
   const currentDirectory = activeFinderDirectoryPath();
   document.querySelectorAll('.file-tree-row').forEach(row => {
+    if (row.dataset.tabberType) return;
     const selected = fileExplorerSelectedPaths.has(row.dataset.path);
     const currentFile = row.dataset.kind === 'file' && row.dataset.path === activeFile;
     const currentDirectoryRow = !currentFile && row.dataset.kind === 'dir' && row.dataset.path === currentDirectory;
@@ -11896,6 +12224,301 @@ function updateFileTreeSelectionFromClick(row, fullPath, event) {
   fileExplorerManualSelectionActive = false;
   selectFileTreePath(fullPath);
   return false;
+}
+
+function sharedTreeRowId(row) {
+  return String(row?.dataset?.path || '');
+}
+
+function sharedTreeRows(panel, options = {}) {
+  const selector = options.rowSelector || '.file-tree-row[data-path]';
+  const rows = Array.from(panel?.querySelectorAll?.(selector) || []);
+  return rows.filter(row => {
+    const id = sharedTreeRowId(row);
+    if (!id) return false;
+    return typeof options.isRowSelectable === 'function' ? options.isRowSelectable(row) : true;
+  });
+}
+
+function sharedTreeEventAllowed(event, options = {}) {
+  if (typeof options.shouldIgnoreEvent === 'function' && options.shouldIgnoreEvent(event)) return false;
+  if (typeof globalShortcutTargetAllowsAppAction === 'function' && !globalShortcutTargetAllowsAppAction(event?.target)) return false;
+  return true;
+}
+
+const sharedTreeInteractionControllers = new Map();
+
+function registerSharedTreeInteractionController(controller) {
+  const name = String(controller?.name || '');
+  if (name) sharedTreeInteractionControllers.set(name, controller);
+  return controller;
+}
+
+function sharedTreeInteractionControllerNames() {
+  return Array.from(sharedTreeInteractionControllers.keys()).sort();
+}
+
+function sharedTreeKeyIntent(event, options = {}) {
+  if (!event || event.altKey) return null;
+  const mod = event.metaKey === true || event.ctrlKey === true;
+  const shift = event.shiftKey === true;
+  if (mod && options.allowSelectAll === true && String(event.key || '').toLowerCase() === 'a') return 'select-all';
+  if (mod) return null;
+  switch (event.key) {
+    case 'ArrowDown': return shift && options.allowRange === true ? 'extend-down' : 'move-down';
+    case 'ArrowUp': return shift && options.allowRange === true ? 'extend-up' : 'move-up';
+    case 'Home': return shift && options.allowRange === true ? 'extend-home' : 'move-home';
+    case 'End': return shift && options.allowRange === true ? 'extend-end' : 'move-end';
+    case 'ArrowRight': return shift ? null : 'expand';
+    case 'ArrowLeft': return shift ? null : 'collapse';
+    case 'Enter': return shift ? null : 'activate';
+    default: return null;
+  }
+}
+
+function consumeSharedTreeEvent(event) {
+  event?.preventDefault?.();
+  event?.stopPropagation?.();
+  event?.stopImmediatePropagation?.();
+  if (event) event.__sharedTreeInteractionHandled = true;
+}
+
+function sharedTreeScrollRowIntoView(panel, row, options = {}) {
+  const container = typeof options.scrollContainer === 'function'
+    ? options.scrollContainer(panel, row)
+    : (row?.closest?.(options.scrollContainerSelector || '[role="tree"]') || panel);
+  if (!scrollFileTreeRowIntoView(container, row)) row?.scrollIntoView?.({block: 'nearest'});
+}
+
+function sharedTreeParentRow(rows, row) {
+  const id = sharedTreeRowId(row);
+  const parent = id ? dirnameOf(id) : '';
+  if (!parent || parent === id || parent === '/') return null;
+  return rows.find(item => sharedTreeRowId(item) === parent) || null;
+}
+
+function sharedTreeChildRow(rows, row) {
+  const id = sharedTreeRowId(row);
+  const index = rows.indexOf(row);
+  if (!id || index < 0) return null;
+  const child = rows[index + 1] || null;
+  const childId = sharedTreeRowId(child);
+  return childId && childId !== id && pathIsInsideDirectory(childId, id) ? child : null;
+}
+
+function createSharedTreeInteractionController(options = {}) {
+  const state = {
+    selectedIds: new Set(),
+    leadId: '',
+  };
+  const controller = {
+    name: options.name || 'tree',
+    rows(panel) {
+      return sharedTreeRows(panel, options);
+    },
+    selectedIds() {
+      if (typeof options.selectedIds === 'function') {
+        const selected = options.selectedIds();
+        if (selected instanceof Set) return selected;
+        if (Array.isArray(selected)) return new Set(selected.map(String));
+      }
+      return state.selectedIds;
+    },
+    leadId() {
+      return typeof options.getLeadId === 'function' ? String(options.getLeadId() || '') : state.leadId;
+    },
+    setLeadId(id) {
+      const value = String(id || '');
+      state.leadId = value;
+      if (typeof options.setLeadId === 'function') options.setLeadId(value);
+    },
+    currentId() {
+      return typeof options.currentRowId === 'function' ? String(options.currentRowId() || '') : '';
+    },
+    rowIsCurrent(row) {
+      const id = sharedTreeRowId(row);
+      return Boolean(id && id === controller.currentId());
+    },
+    applyState(panel, stateOptions = {}) {
+      let currentRow = null;
+      const selectedIds = controller.selectedIds();
+      for (const row of controller.rows(panel)) {
+        const id = sharedTreeRowId(row);
+        const selected = selectedIds.has(id);
+        const current = controller.rowIsCurrent(row);
+        row.classList.toggle('selected', selected);
+        row.setAttribute('aria-selected', selected ? 'true' : 'false');
+        if (options.applyCurrentClasses !== false) {
+          row.classList.toggle('current-file', current && row.dataset.kind !== 'dir');
+          row.classList.toggle('current-directory', current && row.dataset.kind === 'dir');
+          if (current) row.setAttribute('aria-current', 'true');
+          else if (options.preserveExistingAriaCurrent !== true) row.removeAttribute('aria-current');
+        }
+        if (current) currentRow = row;
+      }
+      if (stateOptions.scrollCurrent === true && currentRow) sharedTreeScrollRowIntoView(panel, currentRow, options);
+    },
+    selectRow(panel, row, event = null, selectOptions = {}) {
+      const id = sharedTreeRowId(row);
+      if (!id) return false;
+      controller.setLeadId(id);
+      if (typeof options.selectRow === 'function') {
+        options.selectRow(row, id, event, selectOptions);
+      } else {
+        const selectedIds = controller.selectedIds();
+        selectedIds.clear();
+        selectedIds.add(id);
+      }
+      controller.applyState(panel);
+      sharedTreeScrollRowIntoView(panel, row, options);
+      return true;
+    },
+    selectRange(panel, row, event = null) {
+      const id = sharedTreeRowId(row);
+      if (!id) return false;
+      controller.setLeadId(id);
+      if (typeof options.selectRange === 'function') {
+        options.selectRange(row, id, event);
+      } else {
+        const rows = controller.rows(panel);
+        const selectedIds = controller.selectedIds();
+        const anchorId = selectedIds.values().next().value || controller.leadId() || id;
+        const anchorIndex = rows.findIndex(item => sharedTreeRowId(item) === anchorId);
+        const targetIndex = rows.indexOf(row);
+        selectedIds.clear();
+        if (anchorIndex >= 0 && targetIndex >= 0) {
+          const start = Math.min(anchorIndex, targetIndex);
+          const end = Math.max(anchorIndex, targetIndex);
+          for (const item of rows.slice(start, end + 1)) selectedIds.add(sharedTreeRowId(item));
+        } else {
+          selectedIds.add(id);
+        }
+      }
+      controller.applyState(panel);
+      sharedTreeScrollRowIntoView(panel, row, options);
+      return true;
+    },
+    selectFromClick(panel, row, event) {
+      const id = sharedTreeRowId(row);
+      if (!id) return false;
+      controller.setLeadId(id);
+      const selectionOnly = typeof options.selectFromClick === 'function'
+        ? options.selectFromClick(row, id, event)
+        : (controller.selectRow(panel, row, event), false);
+      controller.applyState(panel);
+      return selectionOnly === true;
+    },
+    isExpanded(row) {
+      if (typeof options.isExpanded === 'function') return options.isExpanded(row) === true;
+      return row?.getAttribute?.('aria-expanded') === 'true';
+    },
+    setExpanded(panel, row, expanded) {
+      if (typeof options.setExpanded === 'function') {
+        options.setExpanded(row, expanded === true);
+        return true;
+      }
+      return false;
+    },
+    activateRow(panel, row, event = null) {
+      if (typeof options.activateRow === 'function') {
+        options.activateRow(row, event);
+        controller.applyState(panel);
+        return true;
+      }
+      return false;
+    },
+    leadRow(panel) {
+      const rows = controller.rows(panel);
+      const leadId = controller.leadId();
+      return rows.find(row => sharedTreeRowId(row) === leadId)
+        || rows.find(row => controller.selectedIds().has(sharedTreeRowId(row)))
+        || rows.find(row => controller.rowIsCurrent(row))
+        || rows[0]
+        || null;
+    },
+    handleClick(event, panel, clickOptions = {}) {
+      const row = clickOptions.row || event?.target?.closest?.(options.rowSelector || '.file-tree-row[data-path]');
+      if (!row || !panel?.contains?.(row) || !controller.rows(panel).includes(row)) return false;
+      if (typeof options.shouldIgnoreEvent === 'function' && options.shouldIgnoreEvent(event)) return false;
+      if (typeof globalShortcutTargetAllowsAppAction === 'function' && !globalShortcutTargetAllowsAppAction(event?.target) && !clickOptions.row) return false;
+      const onDisclosure = Boolean(event?.target?.closest?.('.file-tree-icon'));
+      consumeSharedTreeEvent(event);
+      const selectionOnly = controller.selectFromClick(panel, row, event);
+      if (row.dataset.kind === 'dir' && onDisclosure) {
+        controller.setExpanded(panel, row, !controller.isExpanded(row));
+        return true;
+      }
+      if (!selectionOnly && options.activateOnClick !== false) controller.activateRow(panel, row, event);
+      return true;
+    },
+    handleKeydown(event, panel) {
+      if (typeof options.shouldIgnoreEvent === 'function' && options.shouldIgnoreEvent(event)) return false;
+      const intent = sharedTreeKeyIntent(event, options);
+      if (!intent) return false;
+      const rows = controller.rows(panel);
+      if (!rows.length) return false;
+      const eventTargetsOwnedPanel = panel?.contains?.(event?.target) || event?.target === panel;
+      if (typeof globalShortcutTargetAllowsAppAction === 'function' && !globalShortcutTargetAllowsAppAction(event?.target) && !eventTargetsOwnedPanel) return false;
+      const lead = controller.leadRow(panel);
+      let leadIndex = lead ? rows.indexOf(lead) : -1;
+      if (intent === 'select-all' && options.allowSelectAll === true) {
+        consumeSharedTreeEvent(event);
+        const selectedIds = controller.selectedIds();
+        selectedIds.clear();
+        for (const row of rows) selectedIds.add(sharedTreeRowId(row));
+        controller.setLeadId(sharedTreeRowId(rows[rows.length - 1]));
+        if (typeof options.afterSelectAll === 'function') options.afterSelectAll(rows, event);
+        controller.applyState(panel);
+        return true;
+      }
+      if (intent === 'activate') {
+        if (!lead) return false;
+        consumeSharedTreeEvent(event);
+        controller.selectRow(panel, lead, event);
+        controller.activateRow(panel, lead, event);
+        return true;
+      }
+      if (intent === 'expand' || intent === 'collapse') {
+        if (!lead) return false;
+        consumeSharedTreeEvent(event);
+        const expanded = controller.isExpanded(lead);
+        if (intent === 'expand') {
+          if (lead.dataset.kind === 'dir' && !expanded) controller.setExpanded(panel, lead, true);
+          else {
+            const child = sharedTreeChildRow(rows, lead);
+            if (child) controller.selectRow(panel, child, event);
+          }
+          return true;
+        }
+        if (lead.dataset.kind === 'dir' && expanded) controller.setExpanded(panel, lead, false);
+        else {
+          const parent = sharedTreeParentRow(rows, lead);
+          if (parent) controller.selectRow(panel, parent, event);
+        }
+        return true;
+      }
+      if (leadIndex < 0) leadIndex = 0;
+      const lastIndex = rows.length - 1;
+      let nextIndex = leadIndex;
+      if (intent === 'move-home' || intent === 'extend-home') nextIndex = 0;
+      else if (intent === 'move-end' || intent === 'extend-end') nextIndex = lastIndex;
+      else if (intent === 'move-down' || intent === 'extend-down') nextIndex = Math.min(lastIndex, leadIndex + 1);
+      else if (intent === 'move-up' || intent === 'extend-up') nextIndex = Math.max(0, leadIndex - 1);
+      consumeSharedTreeEvent(event);
+      const nextRow = rows[nextIndex];
+      if (intent.startsWith('extend')) controller.selectRange(panel, nextRow, event);
+      else controller.selectRow(panel, nextRow, event);
+      return true;
+    },
+    syncCurrent(panel, syncOptions = {}) {
+      const currentId = controller.currentId();
+      if (currentId && typeof options.syncCurrentSelection === 'function') options.syncCurrentSelection(currentId);
+      controller.setLeadId(currentId || controller.leadId());
+      controller.applyState(panel, {scrollCurrent: syncOptions.scrollIntoView === true});
+      return Boolean(currentId);
+    },
+  };
+  return registerSharedTreeInteractionController(controller);
 }
 
 function fileTreeActionPaths(fullPath) {
@@ -12236,14 +12859,42 @@ function warmTabberDataOnLaunch() {
   return true;
 }
 
-// Touched-path cache, keyed by session (lazily fetched; never disturbs the Differ target).
-const tabberSessionFilesStates = new Map();
+function tabberLookbackControlHtml() {
+  const options = sessionFileLookbackOptions()
+    .map(option => `<option value="${esc(option.hours)}"${option.hours === tabberSessionFileLookbackHours ? ' selected' : ''}>${esc(option.label)}</option>`)
+    .join('');
+  return `<label class="info-lookback-control tabber-lookback-control">${esc(t('info.lookback'))}<select data-tabber-lookback>${options}</select></label>`;
+}
 
-function tabberSessionFilesState(session) {
-  const key = String(session || '');
+function setTabberSessionFileLookbackHours(hours, options = {}) {
+  const previous = tabberSessionFileLookbackHours;
+  tabberSessionFileLookbackHours = writeStoredTabberLookbackHours(hours);
+  if (tabberSessionFileLookbackHours !== previous) {
+    clearTabberSessionFilesStates();
+    if (options.refresh !== false) {
+      ensureTabberSessionFilesFetches();
+      if (fileExplorerMode === 'tabber') refreshTabberPanels();
+    }
+  }
+  return tabberSessionFileLookbackHours;
+}
+
+function tabberSessionFilesStateKey(session, hours = tabberSessionFileLookbackHours) {
+  const boundedHours = normalizeSessionFileLookbackHours(hours);
+  return `${String(session || '')}\u0000${boundedHours}`;
+}
+
+// Touched-path cache, keyed by session plus lookback (lazily fetched; never disturbs the Differ target).
+const tabberSessionFilesStates = new Map();
+const tabberTreeSelectedPaths = new Set();
+let tabberTreeSelectionLead = '';
+
+function tabberSessionFilesState(session, hours = tabberSessionFileLookbackHours) {
+  const boundedHours = normalizeSessionFileLookbackHours(hours);
+  const key = tabberSessionFilesStateKey(session, boundedHours);
   let state = tabberSessionFilesStates.get(key);
   if (!state) {
-    state = {files: [], loaded: false, loading: false};
+    state = {session: String(session || ''), hours: boundedHours, files: [], loaded: false, loading: false};
     tabberSessionFilesStates.set(key, state);
   }
   return state;
@@ -12255,12 +12906,13 @@ function clearTabberSessionFilesStates() {
 
 async function fetchTabberSessionFiles(session, options = {}) {
   if (!session) return;
-  const state = tabberSessionFilesState(session);
+  const hours = normalizeSessionFileLookbackHours(options.hours ?? tabberSessionFileLookbackHours);
+  const state = tabberSessionFilesState(session, hours);
   if (!options.force && (state.loaded || state.loading)) return;
   state.loading = true;
   if (fileExplorerMode === 'tabber') refreshTabberPanels();
   try {
-    const payload = await apiFetchJson(`/api/session-files?session=${encodeURIComponent(session)}&hours=24`, {cache: 'no-store'});
+    const payload = await apiFetchJson(`/api/session-files?session=${encodeURIComponent(session)}&hours=${encodeURIComponent(String(hours))}`, {cache: 'no-store'});
     state.files = Array.isArray(payload?.files) ? payload.files : [];
     state.loaded = true;
   } catch (_) {
@@ -12273,42 +12925,43 @@ async function fetchTabberSessionFiles(session, options = {}) {
 }
 
 async function fetchTabberSessionFilesBatch(sessions, options = {}) {
+  const hours = normalizeSessionFileLookbackHours(options.hours ?? tabberSessionFileLookbackHours);
   const targets = [];
   const seen = new Set();
   for (const rawSession of sessions || []) {
     const session = String(rawSession || '').trim();
     if (!session || seen.has(session)) continue;
     seen.add(session);
-    const state = tabberSessionFilesState(session);
+    const state = tabberSessionFilesState(session, hours);
     if (!options.force && (state.loaded || state.loading)) continue;
     targets.push(session);
   }
   if (!targets.length) return;
   for (const session of targets) {
-    const state = tabberSessionFilesState(session);
+    const state = tabberSessionFilesState(session, hours);
     state.loading = true;
   }
   if (fileExplorerMode === 'tabber') refreshTabberPanels();
   try {
     const params = new URLSearchParams();
     for (const session of targets) params.append('session', session);
-    params.set('hours', '24');
+    params.set('hours', String(hours));
     const payload = await apiFetchJson(`/api/session-files-batch?${params.toString()}`, {cache: 'no-store'});
     const payloads = payload?.sessions && typeof payload.sessions === 'object' ? payload.sessions : {};
     for (const session of targets) {
-      const state = tabberSessionFilesState(session);
+      const state = tabberSessionFilesState(session, hours);
       const sessionPayload = payloads[session] || {};
       state.files = Array.isArray(sessionPayload.files) ? sessionPayload.files : [];
       state.loaded = true;
     }
   } catch (_) {
     for (const session of targets) {
-      const state = tabberSessionFilesState(session);
+      const state = tabberSessionFilesState(session, hours);
       state.files = [];
       state.loaded = true;
     }
   } finally {
-    for (const session of targets) tabberSessionFilesState(session).loading = false;
+    for (const session of targets) tabberSessionFilesState(session, hours).loading = false;
   }
   if (fileExplorerMode === 'tabber') refreshTabberPanels();
 }
@@ -12389,7 +13042,7 @@ function tabberFileMatchesWindow(file, windowIndex, agentKey = '') {
 // Absolute touched-path entries for the paths a session's agent touched, attached under an agent window.
 // These are intentionally leaves: the Tabber shows where work happened, not every changed file.
 function tabberRepoEntriesForWindow(session, windowIndex, agentKey, gitBranch, gitRoot) {
-  const cached = tabberSessionFilesStates.get(session);
+  const cached = tabberSessionFilesState(session);
   if (!cached?.loaded) {
     if (!cached?.loading) return [];
     return [{
@@ -12432,6 +13085,7 @@ function tabberRepoEntriesForWindow(session, windowIndex, agentKey, gitBranch, g
 function buildTabberTree() {
   const entriesByDir = new Map();
   const topEntries = [];
+  const activeSession = currentSessionActionTarget();
   tabberOrderedSessions().forEach(session => {
     const info = transcriptMeta.sessions?.[session] || {};
     const sessionName = `s_${tabberPathToken(session)}`;
@@ -12445,7 +13099,7 @@ function buildTabberTree() {
     const sessionDisplay = sessionWork ? `${sessionNameLabel}  ${sessionWork}` : sessionNameLabel;
     const sessionEntry = {
       name: sessionName, kind: 'dir', mtime: 0, sortName: sessionDisplay,
-      tabber: {type: 'session', session, label: sessionNameLabel, description: sessionWork, icon: '■', branchText: branch},
+      tabber: {type: 'session', session, label: sessionNameLabel, description: sessionWork, icon: '■', branchText: branch, active: session === activeSession},
     };
     topEntries.push(sessionEntry);
     const windowEntries = tmuxWindowRecords(info.panes).map(record => {
@@ -12466,12 +13120,13 @@ function buildTabberTree() {
       return {
         name: windowName, kind: repoEntries.length ? 'dir' : 'file', mtime: windowMtime,
         sortName: record.indexedNameLabel || record.nameLabel,
-        tabber: {type: 'window', session, windowIndex: record.index, label: record.indexedNameLabel || `${record.indexText}:${record.nameLabel}`, icon: '▢', active: record.active === true, agentKey, dateText: tabberAgentDateText(agentActivity)},
+        tabber: {type: 'window', session, windowIndex: record.index, label: record.indexedNameLabel || `${record.indexText}:${record.nameLabel}`, icon: '▢', active: record.active === true, current: session === activeSession && record.active === true, agentKey, dateText: tabberAgentDateText(agentActivity)},
       };
     });
     entriesByDir.set(normalizeDirectoryPath(sessionPath), windowEntries);
     const maxChild = windowEntries.reduce((max, entry) => Math.max(max, Number(entry.mtime || 0)), 0);
     sessionEntry.mtime = Math.max(maxChild, windowEntries.length ? 0 : fallbackSessionRecency);
+    sessionEntry.tabber.current = session === activeSession && !windowEntries.some(entry => entry.tabber?.current === true);
   });
   // The other open (non-tmux) tabs — Preferences, YO!info/YO!agent, file editors — as leaf rows after the
   // sessions. They are kind:'file', so the shared dirs-before-files sort always keeps them below sessions.
@@ -12514,6 +13169,7 @@ function renderTabberTree(groupsEl) {
     treeSortMode: tabberSortMode(),
     includeHidden: true,
   });
+  syncTabberTreeActiveSelection(container);
 }
 
 function refreshTabberPanels() {
@@ -12530,6 +13186,13 @@ function tabberWindowLabelHtml(label, iconHtml, options = {}) {
   const pidText = pidMatch ? pidMatch[2] : '';
   const activeMarker = options.active === true ? ' ●' : '';
   return `<span class="tabber-window-label"><span class="tabber-window-text">${esc(nameText)}</span>${iconHtml}${pidText ? `<span class="tabber-window-pid">${esc(pidText)}</span>` : ''}${activeMarker ? `<span class="tabber-window-active">${esc(activeMarker)}</span>` : ''}</span>`;
+}
+
+function tabberSessionLabelHtml(data, entry) {
+  const classes = ['tabber-session-tab', data.active === true ? 'active' : ''].filter(Boolean).join(' ');
+  const label = data.label || entry.name;
+  const description = data.description ? `<span class="tabber-session-description">${esc(data.description)}</span>` : '';
+  return `<span class="${classes}"><span class="tabber-session-name">${esc(label)}</span>${description}</span>`;
 }
 
 // Shared-pipeline row updater for Tabber nodes (same .file-tree-row DOM + updateFileTreeRowContents).
@@ -12558,13 +13221,20 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   setRowDataset(row, 'changeSize', '');
   const paddingLeft = fileTreeRowPadding(depth);
   if (row.style.paddingLeft !== paddingLeft) row.style.paddingLeft = paddingLeft;
-  setTreeItemAria(row, {selected: fileExplorerSelectedPaths.has(fullPath), expandable, expanded});
+  const selected = tabberTreeSelectedPaths.has(fullPath);
+  const current = data.current === true;
+  setTreeItemAria(row, {selected, expandable, expanded});
   row.draggable = false;
-  row.classList.toggle('selected', fileExplorerSelectedPaths.has(fullPath));
+  row.classList.toggle('selected', selected);
   row.classList.toggle('expanded', expanded);
   row.classList.toggle('collapsed', expandable && !expanded);
   row.classList.add('tabber-row');
   row.classList.toggle('tabber-active-window', data.type === 'window' && data.active === true);
+  row.classList.toggle('tabber-active-session', data.type === 'session' && data.active === true);
+  row.classList.toggle('current-file', current && row.dataset.kind !== 'dir');
+  row.classList.toggle('current-directory', current && row.dataset.kind === 'dir');
+  if (current || (data.type === 'session' && data.active === true)) row.setAttribute('aria-current', 'true');
+  else row.removeAttribute('aria-current');
   const icon = expandable ? (expanded ? '▾' : '▸') : (data.icon || '·');
   const label = data.label || entry.name;
   const titleParts = [
@@ -12579,7 +13249,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
     ? agentIcon(data.agentKey, {label: agentLabel(data.agentKey)})
     : '';
   const nameHtml = data.type === 'session'
-    ? `<span class="tabber-session-name">${esc(data.label || entry.name)}</span>${data.description ? `<span class="tabber-session-description">${esc(data.description)}</span>` : ''}`
+    ? tabberSessionLabelHtml(data, entry)
     : data.type === 'window' && windowAgentIconHtml
       ? tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true})
     : data.type === 'loading'
@@ -12636,6 +13306,20 @@ function tabberSessionPath(session) {
   return value ? `/s_${tabberPathToken(value)}` : '';
 }
 
+function tabberWindowPath(session, windowIndex) {
+  const sessionPath = tabberSessionPath(session);
+  const index = tmuxWindowNumber(windowIndex);
+  return sessionPath && index !== null ? `${sessionPath}/w_${tabberPathToken(index)}` : '';
+}
+
+function activeTabberRowPath() {
+  const session = currentSessionActionTarget();
+  if (!session) return '';
+  const info = transcriptMeta.sessions?.[session] || {};
+  const activeWindow = tmuxWindowRecords(info.panes).find(record => record.active === true);
+  return activeWindow ? tabberWindowPath(session, activeWindow.index) : tabberSessionPath(session);
+}
+
 function tabberSessionForNumericKey(key) {
   const value = String(key || '').trim();
   if (!/^[1-9]$/.test(value)) return '';
@@ -12690,6 +13374,39 @@ function handleTabberRowActivate(row, event) {
   }
 }
 
+const tabberTreeInteractionController = createSharedTreeInteractionController({
+  name: 'tabber',
+  rowSelector: '.file-tree-row[data-tabber-type]',
+  preserveExistingAriaCurrent: true,
+  isRowSelectable: row => Boolean(row?.dataset?.tabberType && row.dataset.tabberType !== 'loading'),
+  selectedIds: () => tabberTreeSelectedPaths,
+  getLeadId: () => tabberTreeSelectionLead,
+  setLeadId: id => { tabberTreeSelectionLead = id; },
+  currentRowId: activeTabberRowPath,
+  syncCurrentSelection(currentId) {
+    tabberTreeSelectedPaths.clear();
+    if (currentId) tabberTreeSelectedPaths.add(currentId);
+  },
+  isExpanded: row => row?.getAttribute?.('aria-expanded') === 'true',
+  setExpanded(row, expanded) {
+    const fullPath = row?.dataset?.path || '';
+    if (!fullPath || row?.dataset?.kind !== 'dir') return;
+    if (expanded) fileExplorerTabberCollapsed.delete(fullPath);
+    else fileExplorerTabberCollapsed.add(fullPath);
+    persistTabberCollapsed();
+    refreshTabberPanels();
+    scheduleShareUiStatePublish();
+  },
+  activateRow(row, event) {
+    handleTabberRowActivate(row, event);
+    syncTabberTreeActiveSelection(document, {scrollIntoView: true});
+  },
+});
+
+function syncTabberTreeActiveSelection(panel = document, options = {}) {
+  return tabberTreeInteractionController.syncCurrent(panel, options);
+}
+
 function bindTabberPanel(panel) {
   if (!panel || panel.dataset.tabberBound === 'true') return;
   panel.dataset.tabberBound = 'true';
@@ -12697,12 +13414,11 @@ function bindTabberPanel(panel) {
     if (fileExplorerMode !== 'tabber') return;
     const row = event.target.closest?.('.file-tree-row[data-tabber-type]');
     if (!row || !panel.contains(row)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    handleTabberRowActivate(row, event);
+    tabberTreeInteractionController.handleClick(event, panel, {row});
   });
   panel.addEventListener('keydown', event => {
     if (fileExplorerMode !== 'tabber') return;
+    if (tabberTreeInteractionController.handleKeydown(event, panel)) return;
     if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
     const session = tabberSessionForNumericKey(event.key);
     if (!session) return;
@@ -12710,6 +13426,12 @@ function bindTabberPanel(panel) {
     event.preventDefault();
     event.stopPropagation();
     openTabberSession(session);
+  });
+  panel.addEventListener('change', event => {
+    if (fileExplorerMode !== 'tabber') return;
+    const lookback = event.target.closest?.('[data-tabber-lookback]');
+    if (!lookback || !panel.contains(lookback)) return;
+    setTabberSessionFileLookbackHours(lookback.value);
   });
   panel.addEventListener('contextmenu', event => {
     if (fileExplorerMode !== 'tabber') return;
@@ -13212,6 +13934,67 @@ function setFileTreeDirectoryExpanded(row, fullPath, expand) {
   else collapseDirectoryRow(row, fullPath, {manual: true});
 }
 
+const finderTreeInteractionController = createSharedTreeInteractionController({
+  name: 'finder',
+  rowSelector: '.file-tree-row[data-path]',
+  allowRange: true,
+  allowSelectAll: true,
+  applyCurrentClasses: false,
+  isRowSelectable: row => Boolean(
+    row
+    && !row.dataset.tabberType
+    && !row.closest?.('.file-explorer-changes-panel')
+    && (row.dataset.kind === 'file' || row.dataset.kind === 'dir'),
+  ),
+  selectedIds: () => fileExplorerSelectedPaths,
+  getLeadId: () => fileExplorerSelectionLead,
+  setLeadId: id => { fileExplorerSelectionLead = id; },
+  selectRow(row, id) {
+    fileExplorerManualSelectionActive = true;
+    selectFileTreePath(id || row?.dataset?.path || '');
+  },
+  selectRange(row, id) {
+    fileExplorerManualSelectionActive = true;
+    selectFileTreeRange(row, id || row?.dataset?.path || '', {clear: true});
+  },
+  afterSelectAll(rows) {
+    fileExplorerManualSelectionActive = true;
+    fileExplorerSelectionAnchor = rows[0]?.dataset?.path || null;
+  },
+  isExpanded: row => row?.dataset?.kind === 'dir' && fileTreeDirectoryExpanded(row, row.dataset.path || ''),
+  setExpanded(row, expanded) {
+    const path = row?.dataset?.path || '';
+    if (!path || row?.dataset?.kind !== 'dir') return;
+    setFileTreeDirectoryExpanded(row, path, expanded === true);
+  },
+});
+
+function finderTreeContainerForEvent(event) {
+  const treeSel = '.file-explorer-tree-panel';
+  return event?.target?.closest?.(treeSel)
+    || (fileExplorerSelectionLead && document.querySelector(`.file-tree-row[data-path="${cssEscape(fileExplorerSelectionLead)}"]`)?.closest?.(treeSel))
+    || document.querySelector(`.panel.file-explorer-panel ${treeSel}`)
+    || document.querySelector(treeSel)
+    || document;
+}
+
+function finderTreeLeadRow(container) {
+  const rows = finderTreeInteractionController.rows(container);
+  const leadIndex = rows.findIndex(item => item.dataset.path === fileExplorerSelectionLead);
+  return {
+    rows,
+    leadIndex: leadIndex >= 0 ? leadIndex : rows.findIndex(item => fileExplorerSelectedPaths.has(item.dataset.path)),
+  };
+}
+
+function finderTreeRowEntry(row, path) {
+  return {
+    kind: row?.dataset?.kind,
+    name: row?.dataset?.name || basenameOf(path),
+    is_repo: row?.dataset?.isRepo === 'true',
+  };
+}
+
 // File Explorer / Finder-style keyboard nav over the SHARED selection (Finder AND Differ render
 // .file-tree-row). Dispatches the PURE fileExplorerKeyIntent map onto the live tree. Same surface gating
 // as the delete shortcut. Returns true if it handled the key.
@@ -13229,45 +14012,18 @@ function handleFileExplorerArrowNav(event) {
     if (parent && parent !== root) openFileExplorerManualRoot(parent);
     return true;
   }
-  // Scope to ONE tree: the event's tree, else the tree holding the lead, else the active tree. Matches BOTH
-  // the Finder (.file-explorer-tree-panel) and the Differ (.file-explorer-changes-panel) so the exact same
-  // handler drives both surfaces.
-  const treeSel = '.file-explorer-tree-panel, .file-explorer-changes-panel';
-  const container = event.target?.closest?.(treeSel)
-    || (fileExplorerSelectionLead && document.querySelector(`.file-tree-row[data-path="${cssEscape(fileExplorerSelectionLead)}"]`)?.closest?.(treeSel))
-    || document.querySelector(`.panel.file-explorer-panel ${treeSel.split(', ').join(', .panel.file-explorer-panel ')}`)
-    || document.querySelector(treeSel)
-    || document;
-  const rows = selectableFileTreeRows(container);
+  const container = finderTreeContainerForEvent(event);
+  const {rows, leadIndex} = finderTreeLeadRow(container);
   if (!rows.length) return false;
-  const selectLead = (row, extend = false) => {
-    fileExplorerManualSelectionActive = true;
-    if (extend) selectFileTreeRange(row, row.dataset.path, {clear: true});
-    else selectFileTreePath(row.dataset.path);
-    fileExplorerSelectionLead = row.dataset.path;
-    row.scrollIntoView({block: 'nearest'});
-  };
-  if (intent === 'select-all') {
-    consume();
-    fileExplorerManualSelectionActive = true;
-    fileExplorerSelectedPaths.clear();
-    for (const item of rows) fileExplorerSelectedPaths.add(item.dataset.path);
-    fileExplorerSelectionAnchor = rows[0].dataset.path;
-    fileExplorerSelectionLead = rows[rows.length - 1].dataset.path;
-    updateFileExplorerCurrentFileHighlight();
-    return true;
-  }
-  let leadIndex = rows.findIndex(item => item.dataset.path === fileExplorerSelectionLead);
-  if (leadIndex < 0) leadIndex = rows.findIndex(item => fileExplorerSelectedPaths.has(item.dataset.path));
+  const selectLead = row => finderTreeInteractionController.selectRow(container, row, event);
   if (intent === 'typeahead') { consume(); fileExplorerTypeaheadSelect(rows, leadIndex, event.key, selectLead); return true; }
   // Intents that act on the current lead row.
-  if (intent === 'rename' || intent === 'open' || intent === 'preview' || intent === 'expand' || intent === 'collapse') {
+  if (intent === 'rename' || intent === 'open' || intent === 'preview') {
     if (leadIndex < 0) return false;
     const leadRow = rows[leadIndex];
     const leadPath = leadRow.dataset.path;
     const isDir = leadRow.dataset.kind === 'dir';
-    const inDiffer = Boolean(leadRow.closest('.file-explorer-changes-panel'));
-    const entry = {kind: leadRow.dataset.kind, name: leadRow.dataset.name || basenameOf(leadPath), is_repo: leadRow.dataset.isRepo === 'true'};
+    const entry = finderTreeRowEntry(leadRow, leadPath);
     if (intent === 'rename') {                     // Finder Return = rename; tracked files move via git mv (backend)
       consume();
       beginFileTreeRename(leadRow, leadPath, entry);
@@ -13275,9 +14031,7 @@ function handleFileExplorerArrowNav(event) {
     }
     if (intent === 'open') {                       // Cmd-O / Cmd-Down: open
       consume();
-      if (!isDir && inDiffer && leadRow.dataset.openChangeFile) openChangedFileInDiff(leadRow.dataset.openChangeFile, leadRow.dataset.openChangeSession || '', leadRow.dataset.openChangeStatus || '', leadRow.dataset.openChangeRepo || '');
-      else if (!isDir) openFileInEditor(leadPath, entry);
-      else if (inDiffer) setFileTreeDirectoryExpanded(leadRow, leadPath, !fileTreeDirectoryExpanded(leadRow, leadPath));
+      if (!isDir) openFileInEditor(leadPath, entry);
       else openFileExplorerManualRoot(leadPath);   // Finder: open a folder = descend into it
       return true;
     }
@@ -13287,31 +14041,8 @@ function handleFileExplorerArrowNav(event) {
       else if (!isDir) openFileImagePreview(leadRow, leadPath, entry);
       return true;
     }
-    const expanded = fileTreeDirectoryExpanded(leadRow, leadPath);
-    if (intent === 'expand') {
-      consume();
-      if (isDir && !expanded) setFileTreeDirectoryExpanded(leadRow, leadPath, true);
-      else if (isDir && expanded) { const child = rows[leadIndex + 1]; if (child && pathIsInsideDirectory(child.dataset.path, leadPath)) selectLead(child); }
-      return true;
-    }
-    // collapse: collapse an expanded folder, else step to the parent row
-    consume();
-    if (isDir && expanded) setFileTreeDirectoryExpanded(leadRow, leadPath, false);
-    else { const parentRow = rows.find(item => item.dataset.path === dirnameOf(leadPath)); if (parentRow) selectLead(parentRow); }
-    return true;
   }
-  // Movement intents (move/extend up/down/home/end).
-  const lastIndex = rows.length - 1;
-  let nextIndex;
-  if (intent === 'move-home' || intent === 'extend-home') nextIndex = 0;
-  else if (intent === 'move-end' || intent === 'extend-end') nextIndex = lastIndex;
-  else {
-    const delta = (intent === 'move-down' || intent === 'extend-down') ? 1 : -1;
-    nextIndex = leadIndex < 0 ? (delta > 0 ? 0 : lastIndex) : Math.max(0, Math.min(lastIndex, leadIndex + delta));
-  }
-  consume();
-  selectLead(rows[nextIndex], intent.startsWith('extend'));
-  return true;
+  return finderTreeInteractionController.handleKeydown(event, container);
 }
 
 function handleFileExplorerDeleteShortcut(event) {
@@ -14809,6 +15540,8 @@ function clientServerWatchState() {
     state.activity_summary = {
       visible: activitySummaryIsVisible(),
       locale: typeof i18nActiveLocaleId === 'function' ? i18nActiveLocaleId() : 'en',
+      scope: 'all',
+      hours: typeof infoSessionFileLookbackHours === 'number' ? infoSessionFileLookbackHours : 24,
     };
   }
   if (document.querySelector('.file-explorer-changes-panel') && typeof clientSessionFilesWatchRequests === 'function') {
@@ -15763,7 +16496,12 @@ function openCodeMirrorFindForView(api, view) {
 function updateCodeMirrorCursorStatus(panel) {
   const view = panel?._cmView;
   const status = panel?.querySelector?.('.file-editor-cursor-status');
-  if (!view || !status) return;
+  updateFileEditorCountStatus(panel);
+  if (!status) return;
+  if (!view) {
+    status.textContent = '';
+    return;
+  }
   const main = view.state.selection.main;
   const line = view.state.doc.lineAt(main.head);
   const column = main.head - line.from + 1;
@@ -15771,6 +16509,37 @@ function updateCodeMirrorCursorStatus(panel) {
   const selections = view.state.selection.ranges.length;
   const selectionText = selectedChars ? ` · ${selections} sel · ${selectedChars} chars` : '';
   status.textContent = `${line.number}:${column}${selectionText}`;
+}
+
+function fileEditorTextMetrics(text) {
+  const value = String(text ?? '');
+  const words = (value.trim().match(/\S+/g) || []).length;
+  return {
+    lines: value ? value.split('\n').length : 1,
+    words,
+    characters: value.length,
+  };
+}
+
+function fileEditorCountStatusText(text) {
+  return t('editor.status.counts', fileEditorTextMetrics(text));
+}
+
+function fileEditorStatusSourceText(panel) {
+  const viewText = panel?._cmView?.state?.doc?.toString?.();
+  if (viewText !== undefined && viewText !== null) return viewText;
+  const path = panel?.dataset?.filePath || '';
+  const state = openFiles.get(path);
+  return state?.kind === 'text' ? state.content || '' : '';
+}
+
+function updateFileEditorCountStatus(panel) {
+  const status = panel?.querySelector?.('.file-editor-count-status');
+  if (!status) return;
+  const path = panel?.dataset?.filePath || '';
+  const state = path ? openFiles.get(path) : null;
+  const text = fileEditorStatusSourceText(panel);
+  status.textContent = state?.kind === 'text' || panel?._cmView ? fileEditorCountStatusText(text) : '';
 }
 
 function codeMirrorExtensions(api, panel, path, options = {}) {
@@ -15953,6 +16722,540 @@ function renameOpenFilePath(oldPath, newPath) {
     renderPaneTabStrips();
     updateFileExplorerCurrentFileHighlight();
   }
+}
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Drop-action registry and terminal drop suggestions.
+// DOIT.57: one data-driven file-drop action registry. Agent panes keep the shipped "path first, then
+// append a deictic clause" behavior; shell and server actions compose full commands/results from the
+// selected action so they do not run a stray bare path before the useful command.
+const DROP_SUGGESTION_CATEGORY_EXTS = {
+  image: ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.heic', '.heif', '.avif'],
+  log: ['.log', '.out', '.err'],
+  diff: ['.diff', '.patch'],
+  data: ['.csv', '.tsv', '.json', '.ndjson', '.yaml', '.yml', '.parquet'],
+  doc: ['.md', '.markdown', '.rst', '.pdf', '.txt', '.docx', '.html'],
+  config: ['.toml', '.ini', '.env', '.cfg', '.conf'],
+  code: ['.py', '.js', '.ts', '.tsx', '.jsx', '.mjs', '.rs', '.go', '.java', '.c', '.h', '.cpp', '.cc', '.rb', '.php', '.lua', '.sql', '.css', '.sh', '.bash', '.zsh'],
+  archive: ['.zip', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.whl'],
+};
+
+function fileDropCategory(pathOrName, kind = 'file') {
+  if (kind === 'dir') return 'dir';
+  const name = String(pathOrName || '').toLowerCase();
+  const base = name.slice(Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\')) + 1);
+  const dot = base.lastIndexOf('.');
+  const ext = dot > 0 ? base.slice(dot) : '';
+  for (const category of Object.keys(DROP_SUGGESTION_CATEGORY_EXTS)) {
+    if (DROP_SUGGESTION_CATEGORY_EXTS[category].includes(ext)) return category;
+  }
+  return 'any';
+}
+
+const DROP_ACTION_CATEGORIES = Object.freeze(['any', 'image', 'log', 'code', 'diff', 'data', 'doc', 'config', 'archive', 'dir']);
+const DEFAULT_IMAGE_DROP_ACTION_ORDER = Object.freeze([
+  'Extract the text (OCR): ; do OCR on this image and extract all of the text.',
+  'Diagnose the error: ; diagnose the error/problem shown in this screenshot & suggest a fix.',
+  'Describe the image: ; describe what is shown in this image.',
+  'info',
+]);
+const DROP_ACTIONS = [
+  {id: 'insert-path', cats: DROP_ACTION_CATEGORIES, kind: 'insert', label: 'Insert path', labelKey: 'drop.action.insertPath', readOnly: true},
+  {id: 'img-error', cats: ['image'], kind: 'prompt', agent: true, label: 'Diagnose the error', labelKey: 'drop.action.imgError', prompt: () => 'diagnose the error/problem shown in this screenshot & suggest a fix.', aliases: ['Diagnose the error in this screenshot', 'diagnose the error or problem shown in this screenshot and suggest a fix.', 'Diagnose the error in this screenshot: ; diagnose the error or problem shown in this screenshot and suggest a fix.']},
+  {id: 'img-describe', cats: ['image'], kind: 'prompt', agent: true, label: 'Describe the image', labelKey: 'drop.action.imgDescribe', prompt: () => 'describe what is shown in this image.'},
+  {id: 'img-ocr', cats: ['image'], kind: 'prompt', agent: true, label: 'Extract the text (OCR)', labelKey: 'drop.action.imgOcr', prompt: () => 'do OCR on this image and extract all of the text.'},
+  {id: 'log-errors', cats: ['log'], kind: 'prompt', agent: true, label: 'Find the errors', labelKey: 'drop.action.logErrors', prompt: () => 'read this log and list the errors and warnings, most important first.'},
+  {id: 'log-cause', cats: ['log'], kind: 'prompt', agent: true, label: 'Find the root cause', labelKey: 'drop.action.logCause', prompt: () => 'read this log, find the root cause of the failure, and suggest a fix.'},
+  {id: 'code-review', cats: ['code'], kind: 'prompt', agent: true, label: 'Review for bugs', labelKey: 'drop.action.codeReview', prompt: () => 'review this file for bugs and correctness issues.'},
+  {id: 'code-explain', cats: ['code', 'config'], kind: 'prompt', agent: true, label: 'Explain what it does', labelKey: 'drop.action.codeExplain', prompt: () => 'explain what this file does.'},
+  {id: 'code-security', cats: ['code', 'config'], kind: 'prompt', agent: true, label: 'Find security issues', labelKey: 'drop.action.codeSecurity', prompt: () => 'review this file for security problems.'},
+  {id: 'code-tests', cats: ['code'], kind: 'prompt', agent: true, label: 'Write tests', labelKey: 'drop.action.codeTests', prompt: () => 'write tests for this file.'},
+  {id: 'diff-review', cats: ['diff'], kind: 'prompt', agent: true, label: 'Review the diff', labelKey: 'drop.action.diffReview', prompt: () => 'review this diff for risks and regressions.'},
+  {id: 'diff-commit', cats: ['diff'], kind: 'prompt', agent: true, label: 'Write a commit message', labelKey: 'drop.action.diffCommit', prompt: () => 'write a commit message for the change in this diff.'},
+  {id: 'data-summary', cats: ['data'], kind: 'prompt', agent: true, label: 'Summarize the data', labelKey: 'drop.action.dataSummary', prompt: () => 'summarize the structure and contents of this data file (columns/schema, row count, anything notable).'},
+  {id: 'data-anomaly', cats: ['data'], kind: 'prompt', agent: true, label: 'Find anomalies', labelKey: 'drop.action.dataAnomaly', prompt: () => 'look at this data file and point out anomalies or outliers.'},
+  {id: 'doc-summary', cats: ['doc'], kind: 'prompt', agent: true, label: 'Summarize', labelKey: 'drop.action.docSummary', prompt: () => 'summarize this document.'},
+  {id: 'doc-todos', cats: ['doc'], kind: 'prompt', agent: true, label: 'Extract the action items', labelKey: 'drop.action.docTodos', prompt: () => 'extract the action items and TODOs from this document.'},
+  {id: 'dir-tree', cats: ['dir'], kind: 'prompt', agent: true, label: 'Summarize this folder', labelKey: 'drop.action.dirTree', prompt: () => 'summarize the contents of this folder.'},
+  {id: 'dir-large', cats: ['dir'], kind: 'prompt', agent: true, label: 'Find the largest files', labelKey: 'drop.action.dirLarge', prompt: () => 'find the largest files in this folder.'},
+  {id: 'multi-diff', cats: DROP_ACTION_CATEGORIES, kind: 'prompt', agent: true, label: 'Compare these files', labelKey: 'drop.action.multiDiff', minFiles: 2, prompt: ctx => `compare these ${ctx.paths.length} files and summarize the important differences.`},
+  {id: 'multi-summary', cats: DROP_ACTION_CATEGORIES, kind: 'prompt', agent: true, label: 'Summarize all files', labelKey: 'drop.action.multiSummary', minFiles: 2, prompt: ctx => `summarize these ${ctx.paths.length} files together and call out common themes.`},
+  {id: 'analyze', cats: ['any'], kind: 'prompt', agent: true, label: 'Take a look at it', labelKey: 'drop.action.analyze', prompt: () => 'take a look at this file and tell me what it is and anything notable.'},
+  {id: 'shell-file', cats: DROP_ACTION_CATEGORIES.filter(cat => cat !== 'dir'), kind: 'shell', shell: true, readOnly: true, label: 'Show file type', labelKey: 'drop.action.shellFile', command: ctx => `file ${dropActionQuotedPaths(ctx).join(' ')}`},
+  {id: 'shell-wc', cats: ['log', 'code', 'diff', 'data', 'doc', 'config', 'any'], kind: 'shell', shell: true, readOnly: true, label: 'Count lines and bytes', labelKey: 'drop.action.shellWc', command: ctx => `wc -l -c ${dropActionQuotedPaths(ctx).join(' ')}`},
+  {id: 'shell-tail', cats: ['log', 'any'], kind: 'shell', shell: true, readOnly: true, label: 'Tail and watch', labelKey: 'drop.action.shellTail', command: ctx => `tail -F ${dropActionQuotedPaths(ctx).join(' ')}`},
+  {id: 'shell-jq', cats: ['data'], kind: 'shell', shell: true, readOnly: true, label: 'Pretty-print JSON with jq', labelKey: 'drop.action.shellJq', command: ctx => `jq . ${dropActionQuotedPaths(ctx).join(' ')}`},
+  {id: 'shell-column', cats: ['data'], kind: 'shell', shell: true, readOnly: true, label: 'Show as table', labelKey: 'drop.action.shellColumn', command: ctx => `column -t -s, ${dropActionQuotedPaths(ctx).join(' ')} | less -S`},
+  {id: 'shell-du', cats: ['dir'], kind: 'shell', shell: true, readOnly: true, label: 'Largest files here', labelKey: 'drop.action.shellDu', command: ctx => `du -ah ${dropActionQuotedPaths(ctx).join(' ')} | sort -h | tail -40`},
+  {id: 'server-info', cats: DROP_ACTION_CATEGORIES, kind: 'server', readOnly: true, label: 'Server: file info', labelKey: 'drop.action.serverInfo'},
+  {id: 'server-head', cats: ['log', 'code', 'diff', 'data', 'doc', 'config', 'any'], kind: 'server', readOnly: true, label: 'Server: preview head', labelKey: 'drop.action.serverHead'},
+  {id: 'server-log-errors', cats: ['log', 'any'], kind: 'server', readOnly: true, label: 'Server: scan errors', labelKey: 'drop.action.serverLogErrors'},
+  {id: 'server-data-stats', cats: ['data'], kind: 'server', readOnly: true, label: 'Server: data stats + chart', labelKey: 'drop.action.serverDataStats'},
+  {id: 'server-ocr', cats: ['image'], kind: 'server', readOnly: true, label: 'Server: OCR image', labelKey: 'drop.action.serverOcr'},
+];
+
+function customDropActions() {
+  const lines = nestedSetting(clientSettings, 'uploads.custom_actions', []);
+  if (!Array.isArray(lines)) return [];
+  return lines.map((line, index) => customDropActionFromLine(line, index)).filter(Boolean);
+}
+
+function customDropActionFromLine(line, index = 0) {
+  const parts = String(line || '').split('|').map(part => part.trim());
+  if (parts.length < 2 || !parts[0] || !parts[1]) return null;
+  const rawCats = (parts[2] || 'any').split(',').map(cat => cat.trim().toLowerCase()).filter(Boolean);
+  const cats = rawCats.filter(cat => DROP_ACTION_CATEGORIES.includes(cat));
+  const body = parts[1];
+  const shell = body.toLowerCase().startsWith('shell:');
+  return {
+    id: `custom-${index}-${fuzzyCanonicalPrefixText(parts[0]).slice(0, 24) || 'action'}`,
+    custom: true,
+    cats: cats.length ? cats : ['any'],
+    kind: shell ? 'shell' : 'prompt',
+    shell,
+    agent: !shell,
+    readOnly: shell,
+    label: parts[0],
+    template: shell ? body.slice(6).trim() : body,
+  };
+}
+
+function dropActionMatchesCategory(action, category) {
+  const cats = Array.isArray(action?.cats) ? action.cats : ['any'];
+  if (category === 'dir') return cats.includes('dir');
+  return cats.includes('any') || cats.includes(category);
+}
+
+function dropActionLastKey(category) {
+  return `yolomux.dropAction.last.${category || 'any'}`;
+}
+
+function rememberDropAction(category, actionId) {
+  if (!actionId) return;
+  storageSet(dropActionLastKey(category), actionId);
+}
+
+function normalizedDropActionOrderText(value) {
+  return String(value || '')
+    .trim()
+    .replace(/^;\s*/, '')
+    .replace(/[.:]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+}
+
+function dropActionPromptText(action) {
+  if (action?.kind !== 'prompt') return '';
+  return String(action.template ? action.template : action.prompt?.({paths: [''], category: 'image'}) || '').trim();
+}
+
+function dropActionLabelAliases(action) {
+  const label = String(action?.label || '').trim();
+  const aliases = [label, label.replace(/\s*\([^)]*\)\s*/g, ' ').replace(/\s+/g, ' ').trim()];
+  return aliases.map(normalizedDropActionOrderText).filter(Boolean);
+}
+
+function dropActionDisplayLabel(action) {
+  if (!action) return '';
+  if (action.menuLabel) return String(action.menuLabel);
+  if (action.labelKey) return t(action.labelKey);
+  return String(action.label || action.id || '');
+}
+
+function dropActionOrderAliases(action) {
+  const aliases = [action?.id, ...dropActionLabelAliases(action)];
+  if (Array.isArray(action?.aliases)) aliases.push(...action.aliases);
+  if (action?.kind === 'prompt') {
+    const clause = dropActionPromptText(action);
+    if (clause) {
+      aliases.push(clause, `; ${clause}`);
+      dropActionLabelAliases(action).forEach(label => {
+        aliases.push(`${label}: ${clause}`, `${label}: ; ${clause}`);
+      });
+    }
+  }
+  if (action?.id === 'server-info') aliases.push('info', 'file info', 'server info');
+  if (action?.id === 'server-ocr') aliases.push('server ocr', 'ocr result');
+  if (action?.id === 'shell-file') aliases.push('file', 'file type');
+  if (action?.id === 'insert-path') aliases.push('insert path', 'path');
+  return aliases.map(normalizedDropActionOrderText).filter(Boolean);
+}
+
+function imageDropActionPreferenceId(value) {
+  const raw = String(value || '').trim();
+  const normalized = normalizedDropActionOrderText(value);
+  if (!normalized) return '';
+  if (['insert-path', 'insert path', 'path', 'server-ocr', 'server ocr', 'server ocr image', 'ocr result', 'shell-file', 'show file type', 'file', 'file type'].includes(normalized)) return '';
+  const exact = DROP_ACTIONS.find(candidate => dropActionOrderAliases(candidate).includes(normalized));
+  if (exact) return exact.id;
+  const colonIndex = raw.indexOf(':');
+  if (colonIndex < 0) return '';
+  const labelText = normalizedDropActionOrderText(raw.slice(0, colonIndex));
+  const promptText = normalizedDropActionOrderText(raw.slice(colonIndex + 1));
+  if (!promptText) return '';
+  const promptMatches = DROP_ACTIONS.filter(candidate => dropActionOrderAliases(candidate).includes(promptText));
+  if (!promptMatches.length) return '';
+  const labelMatch = promptMatches.find(candidate => dropActionLabelAliases(candidate).includes(labelText));
+  return (labelMatch || promptMatches[0]).id || '';
+}
+
+function canonicalDropActionPreferenceLabel(action) {
+  if (!action) return '';
+  if (action.id === 'server-info') return action.label || 'Server: file info';
+  const prompt = dropActionPromptText(action);
+  if (action.kind === 'prompt' && prompt) return `${action.label}: ; ${prompt}`;
+  return action.label || action.id || '';
+}
+
+function imageDropActionPreferenceLabel(value, actionId) {
+  const action = DROP_ACTIONS.find(candidate => candidate.id === actionId);
+  const raw = String(value || '').trim();
+  if (!raw) return canonicalDropActionPreferenceLabel(action);
+  if (actionId === 'server-info') return action?.label || 'Server: file info';
+  if (normalizedDropActionOrderText(raw) === normalizedDropActionOrderText(actionId)) return canonicalDropActionPreferenceLabel(action);
+  return raw;
+}
+
+function preferredDropActionEntries(category) {
+  if (category !== 'image') return [];
+  const configured = nestedSetting(clientSettings, 'uploads.image_action_order', DEFAULT_IMAGE_DROP_ACTION_ORDER);
+  const rawOrder = Array.isArray(configured) && configured.length ? configured : DEFAULT_IMAGE_DROP_ACTION_ORDER;
+  const seen = new Set();
+  const ordered = [];
+  const addValue = value => {
+    const actionId = imageDropActionPreferenceId(value);
+    if (!actionId || seen.has(actionId)) return;
+    seen.add(actionId);
+    ordered.push({id: actionId, label: imageDropActionPreferenceLabel(value, actionId)});
+  };
+  rawOrder.forEach(addValue);
+  if (!ordered.length && rawOrder !== DEFAULT_IMAGE_DROP_ACTION_ORDER) DEFAULT_IMAGE_DROP_ACTION_ORDER.forEach(addValue);
+  return ordered;
+}
+
+function preferredDropActionOrder(category) {
+  return preferredDropActionEntries(category).map(entry => entry.id);
+}
+
+function sortDropActionsByPreference(actions, category, options = {}) {
+  const preferred = preferredDropActionEntries(category);
+  if (!preferred.length) return actions;
+  const byId = new Map(actions.map(action => [action.id, action]));
+  const ordered = [];
+  preferred.forEach(entry => {
+    const action = byId.get(entry.id);
+    if (!action) return;
+    ordered.push({...action, menuLabel: action.custom ? (entry.label || action.label) : ''});
+  });
+  return ordered;
+}
+
+function sortDropActionsForCategory(actions, category, options = {}) {
+  const hasPreferredOrder = preferredDropActionOrder(category).length > 0;
+  actions = sortDropActionsByPreference(actions, category, options);
+  if (hasPreferredOrder) return actions;
+  const lastId = storageGet(dropActionLastKey(category), '');
+  if (!lastId) return actions;
+  const insert = actions.find(action => action.id === 'insert-path');
+  const rest = actions.filter(action => action.id !== 'insert-path');
+  const last = rest.find(action => action.id === lastId);
+  if (!last) return actions;
+  const ordered = [last, ...rest.filter(action => action !== last)];
+  return insert && options.pathInserted !== true ? [insert, ...ordered] : ordered;
+}
+
+function dropActionsFor(category, agentKind, count = 1, options = {}) {
+  const isAgent = agentKind === 'claude' || agentKind === 'codex';
+  const preferredImageIds = category === 'image' ? new Set(preferredDropActionOrder(category)) : new Set();
+  const all = [DROP_ACTIONS[0], ...customDropActions(), ...DROP_ACTIONS.slice(1)];
+  const filtered = all.filter(action => {
+    const configuredImageAction = preferredImageIds.has(action.id);
+    if (action.id === 'insert-path' && options.pathInserted === true) return false;
+    if (action.agent && !isAgent) return false;
+    if (action.shell && isAgent && options.includeShellForAgents !== true && !configuredImageAction) return false;
+    if (action.kind === 'server' && options.includeServer === false) return false;
+    const minFiles = Number(action.minFiles || 1);
+    const maxFiles = Number(action.maxFiles || 0);
+    if (count < minFiles) return false;
+    if (maxFiles > 0 && count > maxFiles) return false;
+    return dropActionMatchesCategory(action, category);
+  });
+  return sortDropActionsForCategory(filtered, category, options).slice(0, 9);
+}
+
+function dropSuggestionsFor(category, agentKind, count = 1, options = {}) {
+  return dropActionsFor(category, agentKind, count, options);
+}
+
+function dropActionContext(action, paths, category, agentKind, options = {}) {
+  return {action, paths, category, agentKind, session: options.session || '', kind: options.kind || 'file', pathInserted: options.pathInserted === true};
+}
+
+function dropActionQuotedPaths(context) {
+  return (context.paths || []).map(shellQuote);
+}
+
+function formatDropActionTemplate(template, context) {
+  const paths = context.paths || [];
+  const first = paths[0] || '';
+  const values = {
+    path: first,
+    qpath: shellQuote(first),
+    paths: paths.join(' '),
+    qpaths: paths.map(shellQuote).join(' '),
+    name: basenameOf(first),
+    count: String(paths.length),
+    category: context.category || 'any',
+  };
+  return String(template || '').replace(/\{(path|qpath|paths|qpaths|name|count|category)\}/g, (_m, key) => values[key] || '');
+}
+
+function composeDropSuggestion(action, context = {}) {
+  if (!action) return '';
+  const paths = Array.isArray(context.paths) && context.paths.length ? context.paths : ['/var/log/app.log'];
+  const category = context.category || fileDropCategory(paths[0], context.kind || 'file');
+  const fullContext = dropActionContext(action, paths, category, context.agentKind || '', context);
+  if (action.kind === 'insert') return `${paths.map(shellQuote).join(' ')} `;
+  if (action.kind === 'shell') {
+    const command = action.template ? formatDropActionTemplate(action.template, fullContext) : action.command?.(fullContext);
+    return String(command || '').trim();
+  }
+  if (action.kind === 'server') return '';
+  const clause = action.template ? formatDropActionTemplate(action.template, fullContext) : action.prompt?.(fullContext);
+  return String(clause || '').trim();
+}
+
+function insertedDropActionText(action, context = {}) {
+  const text = composeDropSuggestion(action, context);
+  if (!text) return '';
+  const pathInserted = context.pathInserted === true;
+  if (action.kind === 'prompt' && pathInserted) return `; ${text}`;
+  if (action.kind === 'shell' && pathInserted) {
+    const isAgent = context.agentKind === 'claude' || context.agentKind === 'codex';
+    if (isAgent) {
+      if (action.id === 'shell-file') return '; show the file type';
+      return `; ${String(action.label || text).toLowerCase()}`;
+    }
+    return `\u0015${text}`;
+  }
+  return text;
+}
+
+function terminalDropShouldInsertPathFirst(session, payload) {
+  const paths = Array.isArray(payload?.paths) ? payload.paths.filter(Boolean) : [payload?.path].filter(Boolean);
+  if (!paths.length) return false;
+  const agentKind = sessionAgentKind(session);
+  if (agentKind !== 'claude' && agentKind !== 'codex') return false;
+  const category = fileDropCategory(paths[0], payload?.kind);
+  return dropActionsFor(category, agentKind, paths.length, {pathInserted: true, includeServer: false}).some(action => action.kind === 'prompt');
+}
+
+async function runDropAction(action, context) {
+  const paths = context.paths || [];
+  const category = context.category || fileDropCategory(paths[0], context.kind || 'file');
+  rememberDropAction(category, action.id);
+  if (action.kind === 'server') {
+    await runServerDropAction(action, paths);
+    return;
+  }
+  const text = composeDropSuggestion(action, context);
+  if (!text) return;
+  const suffix = insertedDropActionText(action, context);
+  const shellActionActsAsAgentPrompt = action.kind === 'shell' && context.pathInserted && (context.agentKind === 'claude' || context.agentKind === 'codex');
+  const autoEnter = action.kind === 'shell' && action.readOnly === true && !shellActionActsAsAgentPrompt && boolSetting('uploads.suggestion_autorun', false);
+  const inserted = insertIntoTerminal(context.session, `${suffix}${autoEnter ? '\r' : ''}`);
+  statusEl.innerHTML = inserted
+    ? `<span class="ok">${localizedHtml(autoEnter ? 'status.ranDropAction' : 'status.insertedDropAction', {name: action.label || action.id})}</span>`
+    : `<span class="err">${terminalNotConnectedHtml(context.session)}</span>`;
+}
+
+async function runServerDropAction(action, paths) {
+  try {
+    const payload = await apiFetchJson('/api/drop-action/run', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action: action.id, paths}),
+    });
+    showDropActionResult(payload);
+  } catch (error) {
+    statusErr(localizedHtml('status.copyFailed', {error: error?.payload?.error || error}));
+  }
+}
+
+function showDropActionResult(payload) {
+  showFileEditorDecisionDialog({
+    title: payload?.title || t('upload.dropActionResultTitle'),
+    bodyHtml: `<div class="drop-action-result"><pre>${esc(payload?.body || payload?.error || '')}</pre></div>`,
+    actions: [{id: 'close', label: t('common.close')}],
+    className: 'drop-action-result-dialog',
+  });
+}
+
+let terminalDropSuggestionState = null;
+
+function dismissTerminalDropSuggestions() {
+  const state = terminalDropSuggestionState;
+  if (!state) return;
+  terminalDropSuggestionState = null;
+  clearTimeout(state.timer);
+  document.removeEventListener('keydown', state.onKeyDown, true);
+  document.removeEventListener('pointerdown', state.onPointerDown, true);
+  state.node.remove();
+}
+
+function dropSuggestionIndexFromKeyEvent(event) {
+  if (event?.ctrlKey || event?.metaKey) return -1;
+  const code = String(event?.code || '');
+  if (/^Digit[1-9]$/.test(code)) return Number(code.slice(5)) - 1;
+  if (/^Numpad[1-9]$/.test(code)) return Number(code.slice(6)) - 1;
+  const key = String(event?.key || '');
+  if (/^[1-9]$/.test(key)) return Number(key) - 1;
+  return -1;
+}
+
+function showTerminalDropSuggestions(session, payload, x, y, options = {}) {
+  dismissTerminalDropSuggestions();
+  const paths = Array.isArray(payload?.paths) ? payload.paths.filter(Boolean) : [payload?.path].filter(Boolean);
+  if (!paths.length) return false;
+  const category = fileDropCategory(paths[0], payload?.kind);
+  const agentKind = sessionAgentKind(session);
+  const pathInserted = options.pathInserted === true;
+  const suggestions = dropActionsFor(category, agentKind, paths.length, {pathInserted});
+  if (!suggestions.length) return false;
+  const rows = suggestions.map(action => ({
+    label: dropActionDisplayLabel(action),
+    run: () => runDropAction(action, dropActionContext(action, paths, category, agentKind, {pathInserted, session, kind: payload?.kind})),
+  }));
+
+  const node = document.createElement('div');
+  node.className = 'terminal-drop-suggestions';
+  node.setAttribute('role', 'listbox');
+  const head = document.createElement('div');
+  head.className = 'terminal-drop-suggestions-head';
+  const prefix = pathInserted ? t('drop.pathInserted') : (paths.length > 1 ? tPlural('drop.files', paths.length) : basenameOf(paths[0]));
+  head.textContent = t('drop.suggestionHint', {prefix, max: Math.min(rows.length, 9)});
+  node.appendChild(head);
+  rows.forEach((row, index) => {
+    const item = document.createElement('div');
+    item.className = 'terminal-drop-suggestion';
+    item.setAttribute('role', 'option');
+    item.tabIndex = -1;
+    const combo = document.createElement('span');
+    combo.className = 'terminal-drop-suggestion-combo';
+    combo.textContent = String(index + 1);
+    const label = document.createElement('span');
+    label.className = 'terminal-drop-suggestion-label';
+    label.textContent = row.label;
+    item.append(combo, label);
+    item.addEventListener('click', () => { row.run(); dismissTerminalDropSuggestions(); });
+    node.appendChild(item);
+  });
+  document.body.appendChild(node);
+  // Anchor at the drop point when there is one; for paste (no drop point) anchor near the session's
+  // terminal, falling back to the viewport so the overlay is always on-screen.
+  let anchorX = x;
+  let anchorY = y;
+  if (!Number.isFinite(anchorX) || !Number.isFinite(anchorY)) {
+    const host = document.getElementById(terminalDomId(session)) || document.getElementById(panelDomId(session));
+    const hostRect = host?.getBoundingClientRect?.();
+    const fallbackViewport = appViewport();
+    anchorX = hostRect ? hostRect.left + 16 : fallbackViewport.width / 2;
+    anchorY = hostRect ? hostRect.top + 16 : fallbackViewport.height / 3;
+  }
+  const rect = node.getBoundingClientRect();
+  const viewport = appViewport();
+  node.style.left = `${Math.round(Math.max(8, Math.min(anchorX, viewport.width - rect.width - 8)))}px`;
+  node.style.top = `${Math.round(Math.max(8, Math.min(anchorY, viewport.height - rect.height - 8)))}px`;
+
+  const onKeyDown = event => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      dismissTerminalDropSuggestions();
+      return;
+    }
+    // Press 1..9 to pick a row. Accept top-row digits, numpad digits, and browsers that only provide
+    // event.key. Exclude platform browser tab-switch shortcuts.
+    const index = dropSuggestionIndexFromKeyEvent(event);
+    if (index >= 0) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (index < rows.length) {
+        rows[index].run();
+        dismissTerminalDropSuggestions();
+      }
+      return;
+    }
+    // Any other key: the overlay is advisory — dismiss it but let the keystroke reach the terminal.
+    dismissTerminalDropSuggestions();
+  };
+  const onPointerDown = event => { if (!node.contains(event.target)) dismissTerminalDropSuggestions(); };
+  const timeoutMs = Number.isFinite(Number(options.timeoutMs)) ? Math.max(1, Number(options.timeoutMs)) : 6000;
+  const timer = setTimeout(dismissTerminalDropSuggestions, timeoutMs);
+  terminalDropSuggestionState = {node, timer, onKeyDown, onPointerDown};
+  document.addEventListener('keydown', onKeyDown, true);
+  document.addEventListener('pointerdown', onPointerDown, true);
+  return true;
+}
+
+// Decide what a drop onto a terminal does. 'ignore' = let it bubble to the layout (files keep opening
+// in the editor when suggestions are off); 'editor' = open a split (edge drops); 'suggest' = the
+// transient overlay (center drops when uploads.show_suggestions is on); 'insert' = legacy dir path-insert.
+function terminalDropMode(payload, intent) {
+  if (!payload?.path) return 'ignore';
+  const center = !intent?.targetSlot || intent.zone === 'middle';
+  if (!center) return payload.kind === 'dir' ? 'editor' : 'ignore';
+  if (boolSetting('uploads.show_suggestions', true)) return 'suggest';
+  return payload.kind === 'dir' ? 'insert' : 'ignore';
+}
+
+function installFilePathDropTarget(session, target) {
+  if (readOnlyMode) return;
+  target.addEventListener('dragover', event => {
+    const payload = fileDragPayload(event);
+    const intent = dropIntentForEvent(event);
+    const mode = terminalDropMode(payload, intent);
+    if (mode === 'ignore') return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = 'copy';
+    if (mode === 'editor' && intent?.targetSlot && pathDropIntentAllowsPayload(payload, intent)) showDropPreview(intent);
+    else clearDropPreview();
+    target.classList.add(CLS.pathDragOver);
+  });
+  target.addEventListener('dragleave', event => {
+    if (target.contains(event.relatedTarget)) return;
+    target.classList.remove(CLS.pathDragOver);
+    clearDropPreview();
+  });
+  target.addEventListener('drop', event => {
+    const payload = fileDragPayload(event);
+    const intent = dropIntentForEvent(event);
+    const mode = terminalDropMode(payload, intent);
+    if (mode === 'ignore') return;
+    event.preventDefault();
+    event.stopPropagation();
+    target.classList.remove(CLS.pathDragOver);
+    clearDropPreview();
+    if (mode === 'editor') {
+      if (intent?.targetSlot && pathDropIntentAllowsPayload(payload, intent)) {
+        openDraggedFilesInEditor(payload, {targetSlot: intent.targetSlot, targetZone: intent.zone});
+      }
+      return;
+    }
+    if (mode === 'suggest') {
+      const pathInserted = terminalDropShouldInsertPathFirst(session, payload);
+      if (pathInserted) insertFileDragPayloadIntoTerminal(session, payload);
+      const shown = showTerminalDropSuggestions(session, payload, event.clientX, event.clientY, {pathInserted});
+      if (!shown && !pathInserted) insertFileDragPayloadIntoTerminal(session, payload);
+      return;
+    }
+    insertFileDragPayloadIntoTerminal(session, payload);
+  });
+}
+
+function installTerminalFileDrop(session, container) {
+  installFilePathDropTarget(session, container);
 }
 function editorViewModeKey(path, item = null) {
   return item && isFileEditorItem(item) ? item : path;
@@ -17304,7 +18607,7 @@ function yoloMarkerHtml(session, auto, options = {}) {
   if (options.yoloWorking) classes.push('working');
   if (readOnlyMode) classes.push('readonly');
   const yoloAttr = ` data-yolo-session="${esc(session)}"`;
-  const toggleAttr = options.toggle && !readOnlyMode ? ` data-auto-session="${esc(session)}"` : '';
+  const toggleAttr = options.toggle && !readOnlyMode ? ` data-auto-session="${esc(session)}" data-action="pane-tab-auto-approve"` : '';
   const rotationStyle = options.yoloWorking ? ` style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}"` : '';
   const stateText = auto ? t('yolo.state.onHere') : (locked ? t('yolo.state.onElsewhere') : t('yolo.state.off'));
   const title = options.toggle && readOnlyMode
@@ -17323,8 +18626,8 @@ function pullRequestCompactBadgesHtml(session, pr) {
 
 function applySessionStateClasses(node, state) {
   node.classList.toggle('needs-attention', state?.attention === true);
-  node.classList.toggle('needs-input', state?.key === 'needs-input');
-  node.classList.toggle('needs-exec', state?.key === 'needs-approval');
+  node.classList.toggle('needs-input', state?.key === 'needs-input' && state?.attention === true);
+  node.classList.toggle('needs-exec', state?.key === 'needs-approval' && state?.attention === true);
   node.classList.toggle('needs-blocked', state?.key === 'blocked');
   syncAttentionAnimation(node, state?.attention === true);
 }
@@ -22394,6 +23697,163 @@ function hideDockviewInnerPaneTabs(panel) {
   strip.replaceChildren();
   return true;
 }
+function domBuilderDataAttributeName(key) {
+  return `data-${String(key).replace(/[A-Z]/g, match => `-${match.toLowerCase()}`)}`;
+}
+
+function setDomBuilderOptions(element, options = {}) {
+  if (!element) return element;
+  if (options.id) element.id = options.id;
+  if (options.className) element.className = options.className;
+  if (options.role) element.setAttribute('role', options.role);
+  if (options.title) element.title = options.title;
+  if (options.ariaLabel) element.setAttribute('aria-label', options.ariaLabel);
+  if (options.ariaHidden !== undefined) element.setAttribute('aria-hidden', options.ariaHidden ? 'true' : 'false');
+  if (options.hidden !== undefined) element.hidden = options.hidden === true;
+  if (options.dataset) {
+    for (const [key, value] of Object.entries(options.dataset)) {
+      if (value !== undefined && value !== null && value !== false) element.dataset[key] = value === true ? '' : String(value);
+    }
+  }
+  if (options.attributes) {
+    for (const [name, value] of Object.entries(options.attributes)) {
+      if (!name || value === undefined || value === null || value === false) continue;
+      element.setAttribute(name, value === true ? '' : String(value));
+    }
+  }
+  if (options.html !== undefined) element.innerHTML = options.html;
+  else if (options.label !== undefined) element.textContent = options.label;
+  return element;
+}
+
+function domBuilderSerializedAttributes(element) {
+  const attrs = [];
+  const seen = new Set();
+  const add = (name, value) => {
+    if (!name || value === undefined || value === null || value === false || seen.has(name)) return;
+    seen.add(name);
+    if (value === true) attrs.push(` ${name}`);
+    else attrs.push(` ${name}="${esc(value)}"`);
+  };
+  const attrMap = element?.attributes || {};
+  if (element?.id) add('id', element.id);
+  if (String(element?.localName || '').toLowerCase() === 'button') add('type', element.type || attrMap.type || 'button');
+  const className = typeof element?.className === 'string' ? element.className : '';
+  if (className) add('class', className);
+  if (element?.title) add('title', element.title);
+  if (typeof attrMap.length === 'number') {
+    for (const attr of Array.from(attrMap)) add(attr.name, attr.value);
+  } else {
+    for (const [name, value] of Object.entries(attrMap)) add(name, value);
+  }
+  if (element?.dataset && typeof element.dataset === 'object') {
+    for (const [key, value] of Object.entries(element.dataset)) add(domBuilderDataAttributeName(key), value);
+  }
+  if (element?.hidden === true) add('hidden', true);
+  if (element?.disabled === true) add('disabled', true);
+  return attrs.join('');
+}
+
+function domBuilderElementHtml(element) {
+  if (!element) return '';
+  const tagName = String(element.localName || element.tagName || element.nodeName || 'div').toLowerCase();
+  const childHtml = Array.from(element.children || []).map(child => domBuilderElementHtml(child)).join('');
+  const body = childHtml || element.innerHTML || esc(element.textContent || '');
+  return `<${tagName}${domBuilderSerializedAttributes(element)}>${body}</${tagName}>`;
+}
+
+function createToolbarButton(options = {}) {
+  const dataset = {...(options.dataset || {})};
+  if (options.action) dataset.action = options.action;
+  const button = makeButton({
+    type: options.type || 'button',
+    id: options.id,
+    className: options.className,
+    role: options.role,
+    html: options.html,
+    label: options.label,
+    disabled: options.disabled,
+    title: options.title,
+    ariaLabel: options.ariaLabel,
+    pressed: options.pressed,
+    checked: options.checked,
+    dataset,
+  });
+  return setDomBuilderOptions(button, options);
+}
+
+function createActionRowItem(item = {}) {
+  if (item.node) return item.node;
+  if (item.kind === 'separator') {
+    const separator = document.createElement(item.tagName || 'span');
+    return setDomBuilderOptions(separator, {
+      className: item.className,
+      hidden: item.hidden,
+      dataset: item.dataset,
+      attributes: item.attributes,
+      ariaHidden: item.ariaHidden !== false,
+    });
+  }
+  if (item.kind === 'custom') {
+    const node = document.createElement(item.tagName || 'span');
+    return setDomBuilderOptions(node, item);
+  }
+  return createToolbarButton(item);
+}
+
+function createActionRow(options = {}) {
+  const row = document.createElement(options.tagName || 'div');
+  setDomBuilderOptions(row, options);
+  for (const item of options.items || options.actions || []) {
+    row.appendChild(createActionRowItem(item));
+  }
+  return row;
+}
+
+function createSegmentedControl(options = {}) {
+  return createActionRow({
+    tagName: options.tagName || 'span',
+    className: options.className,
+    role: options.role || 'group',
+    ariaLabel: options.ariaLabel,
+    hidden: options.hidden,
+    dataset: options.dataset,
+    attributes: options.attributes,
+    actions: (options.items || []).map(item => ({
+      ...item,
+      className: item.className || options.buttonClassName || '',
+      action: item.action || options.action,
+    })),
+  });
+}
+
+function toolbarButtonHtml(options = {}) {
+  return domBuilderElementHtml(createToolbarButton(options));
+}
+
+function actionRowHtml(options = {}) {
+  return domBuilderElementHtml(createActionRow(options));
+}
+
+function segmentedControlHtml(options = {}) {
+  return domBuilderElementHtml(createSegmentedControl(options));
+}
+
+function bindActionDispatcher(parent, handlers = {}, options = {}) {
+  return delegate(parent, options.type || 'click', options.selector || '[data-action]', async (event, target) => {
+    const action = target?.dataset?.action || '';
+    const handler = handlers[action];
+    if (!handler || options.ignore?.(event, target) === true) return;
+    if (options.preventDefault !== false) event.preventDefault();
+    if (options.stopPropagation !== false) event.stopPropagation();
+    if (options.skipDisabled !== false && (target.disabled || target.hidden)) return;
+    await handler(event, target, action);
+  }, options.listenerOptions || {});
+}
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Shared panel layout, pane-tab shell, tmux window controls, and search/history panel helpers split from 80_panes_preferences.js.
+
 function renderPanels(previousActive = [], options = {}) {
   if (renderPanelsDockview(previousActive, options)) return;
   // a full panel re-render pools every panel and clears the grid, which detaches
@@ -22927,7 +24387,13 @@ function paneTabInnerHtml(item, rowOptions = {}) {
     const closeTitle = isEditor ? `Close ${itemLabel(item)}` : `hide ${itemLabel(item)} from layout`;
     const closeLabel = isEditor ? `Close ${itemLabel(item)}` : `Hide ${itemLabel(item)} from layout`;
     const controlKind = isEditor ? 'close' : 'minimize';
-    html += `<button type="button" class="pane-tab-close ${platformWindowControlClass(controlKind)}" data-pane-tab-close title="${esc(closeTitle)}" aria-label="${esc(closeLabel)}"></button>`;
+    html += toolbarButtonHtml({
+      className: `pane-tab-close ${platformWindowControlClass(controlKind)}`,
+      action: 'pane-tab-close',
+      dataset: {paneTabClose: ''},
+      title: closeTitle,
+      ariaLabel: closeLabel,
+    });
   }
   if (isEditor) html += filePopoverHtml(item);
   else if (!isVirtual) html += sessionPopoverHtml(item, info, agentKind, auto, state);
@@ -22974,23 +24440,16 @@ function createPaneTab(side, item, displayContext = {}) {
     event.stopPropagation();
     if (item === activeItemForSide(side)) setFocusedPanelItem(item);
   });
-  tab.addEventListener('click', async event => {
-    if (event.target.closest('[data-pane-tab-close]')) {
-      event.preventDefault();
-      event.stopPropagation();
+  bindActionDispatcher(tab, {
+    'pane-tab-close': () => {
       if (isEditor) closeFileTab(fileItemPath(item), {item});
       else removeSessionFromLayout(item);
-      return;
-    }
-    const autoTarget = event.target.closest('[data-auto-session]');
-    if (autoTarget) {
-      event.preventDefault();
-      event.stopPropagation();
+    },
+    'pane-tab-auto-approve': async (_event, autoTarget) => {
       const shouldRefocus = item === activeItemForSide(side);
       await toggleAutoApprove(autoTarget.dataset.autoSession);
       if (shouldRefocus) focusPanel(item);
-      return;
-    }
+    },
   });
   tab.addEventListener('keydown', event => {
     if (!['Enter', ' '].includes(event.key)) return;
@@ -23207,6 +24666,10 @@ function preferencesPaneTabHtml(item = prefsItemId, options = {}) {
 
 function debugPaneTabHtml(item = debugPaneItemId, options = {}) {
   return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir">${esc(t('tab.debug'))}</span></span>`;
+}
+
+function searchHistoryPaneTabHtml(item = searchHistoryItemId, options = {}) {
+  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir">${esc(searchHistoryTabLabel())}</span></span>`;
 }
 
 function fileEditorPaneTabHtml(item, options = {}) {
@@ -23904,10 +25367,278 @@ function updatePanelControlLabels(session, info) {
   }
 }
 
+function searchHistoryResults() {
+  return Array.isArray(searchHistoryPayload?.results) ? searchHistoryPayload.results : [];
+}
+
+function runHistoryRows() {
+  return Array.isArray(runHistoryPayload?.runs) ? runHistoryPayload.runs : [];
+}
+
+function searchHistoryTimestampSeconds(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value > 1e11 ? value / 1000 : value;
+  const parsed = Date.parse(String(value || ''));
+  return Number.isFinite(parsed) ? parsed / 1000 : 0;
+}
+
+function searchHistoryTimeLabel(value, fallbackSeconds = 0) {
+  const seconds = searchHistoryTimestampSeconds(value) || Number(fallbackSeconds || 0);
+  return seconds ? localizedDateTimeFormat(seconds, {month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'}) : '';
+}
+
+function runHistoryAgentLabel(row) {
+  const agent = row?.agent && typeof row.agent === 'object' ? row.agent : null;
+  return [agent?.kind, agent?.model].filter(Boolean).join(' ');
+}
+
+function runHistoryPrLabel(row) {
+  const pr = row?.pr && typeof row.pr === 'object' ? row.pr : null;
+  if (!pr?.number) return '';
+  return `${t('searchHistory.pr')} #${pr.number}${pr.state ? ` ${pr.state}` : ''}`;
+}
+
+function runHistoryMetaParts(row) {
+  const started = searchHistoryTimeLabel(row?.started_at, row?.started_ts);
+  const ended = searchHistoryTimeLabel(row?.ended_at, row?.ended_ts);
+  return [
+    row?.cwd ? compactHomePath(row.cwd) : '',
+    runHistoryAgentLabel(row),
+    started ? `${t('searchHistory.started')}: ${started}` : '',
+    ended ? `${t('searchHistory.ended')}: ${ended}` : '',
+    row?.final_state ? `${t('searchHistory.finalState')}: ${row.final_state}` : '',
+    runHistoryPrLabel(row),
+  ].filter(Boolean);
+}
+
+function searchHistoryResultHtml(result, index) {
+  const target = result?.target && typeof result.target === 'object' ? result.target : {};
+  const session = target.session || result?.session || '';
+  const time = searchHistoryTimeLabel(result?.timestamp);
+  const meta = [session, result?.kind || result?.source || '', time].filter(Boolean).join(' · ');
+  return `<button type="button" class="search-history-result" data-search-result-index="${index}">
+    <span class="search-history-row-meta">${esc(meta)}</span>
+    <span class="search-history-row-title">${esc(result?.title || result?.kind || t('searchHistory.result'))}</span>
+    <span class="search-history-row-snippet">${esc(result?.snippet || '')}</span>
+  </button>`;
+}
+
+function searchHistoryResultsHtml() {
+  const results = searchHistoryResults();
+  if (searchHistoryLoading) return `<div class="search-history-empty">${esc(t('common.loading'))}</div>`;
+  if (!searchHistoryQuery.trim()) return `<div class="search-history-empty">${esc(t('searchHistory.emptyQuery'))}</div>`;
+  if (!results.length) return `<div class="search-history-empty">${esc(t('searchHistory.emptyResults'))}</div>`;
+  return `<div class="search-history-list">${results.map(searchHistoryResultHtml).join('')}</div>`;
+}
+
+function runHistoryRowHtml(row) {
+  const session = String(row?.session || '');
+  const meta = runHistoryMetaParts(row);
+  const disabled = sessions.includes(session) ? '' : ' disabled';
+  const prompt = row?.prompt ? `<div class="search-history-row-field"><span>${esc(t('searchHistory.prompt'))}</span>${esc(row.prompt)}</div>` : '';
+  const summary = row?.latest_summary ? `<div class="search-history-row-field"><span>${esc(t('searchHistory.summary'))}</span>${esc(row.latest_summary)}</div>` : '';
+  return `<button type="button" class="search-history-run" data-run-history-session="${esc(session)}"${disabled}>
+    <span class="search-history-row-title">${esc(session || t('common.unknown'))}</span>
+    <span class="search-history-row-meta">${esc(meta.join(' · '))}</span>
+    ${prompt}
+    ${summary}
+  </button>`;
+}
+
+function runHistoryRowsHtml() {
+  const rows = runHistoryRows();
+  if (runHistoryLoading && !rows.length) return `<div class="search-history-empty">${esc(t('common.loading'))}</div>`;
+  if (!rows.length) return `<div class="search-history-empty">${esc(t('searchHistory.emptyRuns'))}</div>`;
+  return `<div class="search-history-list">${rows.map(runHistoryRowHtml).join('')}</div>`;
+}
+
+function searchHistoryPanelStatusText() {
+  if (searchHistoryLoading || runHistoryLoading) return t('common.loading');
+  if (searchHistoryError || runHistoryError) return searchHistoryError || runHistoryError;
+  return t('searchHistory.detail');
+}
+
+function searchHistoryPanelHtml() {
+  const errors = [searchHistoryError, runHistoryError].filter(Boolean);
+  const errorHtml = errors.length ? `<div class="search-history-error">${esc(errors.join(' · '))}</div>` : '';
+  return `
+    <form class="search-history-search" data-search-history-form>
+      <input class="search-history-input" data-search-history-query value="${esc(searchHistoryQuery)}" placeholder="${esc(t('searchHistory.query.placeholder'))}" aria-label="${esc(t('searchHistory.query.placeholder'))}">
+      <button type="submit" class="preferences-search-button">${esc(t('searchHistory.search'))}</button>
+      <button type="button" class="preferences-reset-all" data-run-history-refresh>${esc(t('searchHistory.refresh'))}</button>
+    </form>
+    ${errorHtml}
+    <section class="search-history-section" aria-label="${esc(t('searchHistory.results'))}">
+      <div class="search-history-section-head">${esc(t('searchHistory.results'))}</div>
+      ${searchHistoryResultsHtml()}
+    </section>
+    <section class="search-history-section" aria-label="${esc(t('searchHistory.runHistory'))}">
+      <div class="search-history-section-head">${esc(t('searchHistory.runHistory'))}</div>
+      ${runHistoryRowsHtml()}
+    </section>`;
+}
+
+function renderSearchHistoryPanel(panel = document.getElementById(panelDomId(searchHistoryItemId))) {
+  if (!panel) return;
+  const meta = panel.querySelector(`#meta-${cssEscape(searchHistoryItemId)}`);
+  if (meta) meta.textContent = searchHistoryPanelStatusText();
+  const scroll = panel.querySelector('[data-search-history-scroll]');
+  if (scroll) scroll.innerHTML = searchHistoryPanelHtml();
+}
+
+function renderSearchHistoryPanels() {
+  document.querySelectorAll('.search-history-panel').forEach(panel => renderSearchHistoryPanel(panel));
+}
+
+async function refreshRunHistoryData() {
+  runHistoryLoading = true;
+  runHistoryError = '';
+  renderSearchHistoryPanels();
+  try {
+    runHistoryPayload = await apiFetchJson('/api/run-history', {cache: 'no-store'});
+  } catch (error) {
+    runHistoryError = String(error?.payload?.error || error?.message || error);
+  } finally {
+    runHistoryLoading = false;
+    renderSearchHistoryPanels();
+  }
+  return runHistoryPayload;
+}
+
+async function runSearchHistoryQuery(query = searchHistoryQuery) {
+  searchHistoryQuery = String(query || '').trim();
+  searchHistoryError = '';
+  if (!searchHistoryQuery) {
+    searchHistoryPayload = {query: '', results: []};
+    renderSearchHistoryPanels();
+    return searchHistoryPayload;
+  }
+  searchHistoryLoading = true;
+  renderSearchHistoryPanels();
+  try {
+    searchHistoryPayload = await apiFetchJson(`/api/search?q=${encodeURIComponent(searchHistoryQuery)}`, {cache: 'no-store'});
+  } catch (error) {
+    searchHistoryError = String(error?.payload?.error || error?.message || error);
+  } finally {
+    searchHistoryLoading = false;
+    renderSearchHistoryPanels();
+  }
+  return searchHistoryPayload;
+}
+
+async function loadSearchHistoryPanelData(options = {}) {
+  renderSearchHistoryPanels();
+  await refreshRunHistoryData();
+  const query = options.query == null ? searchHistoryQuery : String(options.query || '');
+  if (query.trim()) await runSearchHistoryQuery(query);
+  else renderSearchHistoryPanels();
+}
+
+async function openSearchHistoryResult(index) {
+  const result = searchHistoryResults()[Number(index)];
+  const target = result?.target && typeof result.target === 'object' ? result.target : {};
+  if (target.type === 'activity-summary' || target.tab === 'yoagent') {
+    await openInfoSubTab('yoagent');
+    return;
+  }
+  const session = String(target.session || result?.session || '');
+  if (!session || !sessions.includes(session)) {
+    statusErr(localizedHtml('searchHistory.sessionUnavailable', {session: session || t('common.unknown')}));
+    return;
+  }
+  await selectSession(session, {userInitiated: true});
+  const tab = String(target.tab || '');
+  if (['terminal', 'transcript', 'summary', 'events'].includes(tab)) activateTab(session, tab, {userInitiated: true});
+}
+
+async function openRunHistorySession(session) {
+  const name = String(session || '');
+  if (!name || !sessions.includes(name)) {
+    statusErr(localizedHtml('searchHistory.sessionUnavailable', {session: name || t('common.unknown')}));
+    return;
+  }
+  await selectSession(name, {userInitiated: true});
+}
+
+function bindSearchHistoryPanel(panel) {
+  if (!panel || panel.dataset.searchHistoryBound === 'true') return;
+  panel.dataset.searchHistoryBound = 'true';
+  panel.addEventListener('submit', event => {
+    const form = event.target.closest('[data-search-history-form]');
+    if (!form || !panel.contains(form)) return;
+    event.preventDefault();
+    runSearchHistoryQuery(form.querySelector('[data-search-history-query]')?.value || '');
+  });
+  panel.addEventListener('click', event => {
+    const refresh = event.target.closest('[data-run-history-refresh]');
+    if (refresh && panel.contains(refresh)) {
+      event.preventDefault();
+      loadSearchHistoryPanelData({query: searchHistoryQuery});
+      return;
+    }
+    const result = event.target.closest('[data-search-result-index]');
+    if (result && panel.contains(result)) {
+      event.preventDefault();
+      openSearchHistoryResult(result.dataset.searchResultIndex);
+      return;
+    }
+    const run = event.target.closest('[data-run-history-session]');
+    if (run && panel.contains(run)) {
+      event.preventDefault();
+      openRunHistorySession(run.dataset.runHistorySession);
+    }
+  });
+}
+
+function createSearchHistoryPanel() {
+  const panel = document.createElement('article');
+  panel.className = 'panel search-history-panel';
+  panel.id = panelDomId(searchHistoryItemId);
+  panel.innerHTML = `
+      <div class="panel-head search-history-panel-head">
+        ${virtualPanelControlsHtml(searchHistoryItemId)}
+        <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
+      </div>
+      <div class="panel-detail-row">
+        <div class="panel-copy">
+          <div id="panel-tab-${searchHistoryItemId}" class="panel-session-label"><span class="session-button-dir">${esc(searchHistoryTabLabel())}</span></div>
+          <div id="meta-${searchHistoryItemId}" class="meta">${esc(searchHistoryPanelStatusText())}</div>
+        </div>
+        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(searchHistoryItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
+      </div>
+      <div class="search-history-body info-pane panel-overlay-root">
+        <div id="panel-toasts-${searchHistoryItemId}" class="panel-toast-stack"></div>
+        <div class="search-history-scroll info-list" data-search-history-scroll>${searchHistoryPanelHtml()}</div>
+      </div>`;
+  bindPanelShell(panel, searchHistoryItemId);
+  bindSearchHistoryPanel(panel);
+  return panel;
+}
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Merged YO!info panel shell and sub-tab routing split from 80_panes_preferences.js.
+
 // ONE merged panel hosting both YO!info (repo metadata) and YO!agent (chat + activity
 // context), switched by a segmented sub-tab row under the pane tabs. Both sub-views render into their
 // own containers (#info-content / #yoagent-content) and the active one is shown via CSS; the chosen
 // sub-tab is remembered across reloads (infoPanelSubTab).
+function infoLookbackControlHtml() {
+  const options = sessionFileLookbackOptions()
+    .map(option => `<option value="${esc(option.hours)}"${option.hours === infoSessionFileLookbackHours ? ' selected' : ''}>${esc(option.label)}</option>`)
+    .join('');
+  return `<label class="info-lookback-control">${esc(t('info.lookback'))}<select data-info-lookback>${options}</select></label>`;
+}
+
+function setInfoSessionFileLookbackHours(hours, options = {}) {
+  const previous = infoSessionFileLookbackHours;
+  infoSessionFileLookbackHours = writeStoredInfoLookbackHours(hours);
+  if (infoSessionFileLookbackHours !== previous) {
+    activitySummaryPayload = {...activitySummaryPayload, session_file_hours: infoSessionFileLookbackHours};
+    if (options.refresh !== false) refreshActivitySummary({force: true, silent: options.silent === true});
+    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+  }
+  return infoSessionFileLookbackHours;
+}
+
 function createInfoPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel info-panel';
@@ -23924,6 +25655,7 @@ function createInfoPanel() {
           <button type="button" class="info-subtab" role="tab" data-info-subtab="yoagent"><span class="session-button-dir">${esc(yoagentTabLabel())}</span></button>
         </div>
         <div class="info-subtab-actions">
+          ${infoLookbackControlHtml()}
           <button type="button" class="info-refresh" data-info-subtab-action="info" data-info-refresh title="${esc(t('info.refreshRepo'))}">${esc(t('info.refreshRepo'))}</button>
           <button type="button" class="info-refresh" data-info-subtab-action="yoagent" data-yoagent-refresh title="${esc(t('yoagent.refreshTitle'))}">${esc(t('yoagent.refresh'))}</button>
         </div>
@@ -23942,9 +25674,12 @@ function createInfoPanel() {
   panel.querySelector('[data-info-refresh]')?.addEventListener('click', event => {
     event.preventDefault();
     refreshTranscripts({force: true});
+    refreshActivitySummary({force: true});
   });
   panel.querySelector('[data-yoagent-refresh]')?.addEventListener('click', event => {
     event.preventDefault();
+    loadYoagentConversation({force: true, silent: true, scrollBottom: false});
+    loadYoagentJobs({silent: true, scrollBottom: false});
     refreshActivitySummary({force: true});
   });
   panel.querySelectorAll('[data-info-subtab]').forEach(button => {
@@ -23989,6 +25724,18 @@ function createInfoPanel() {
     if (actionSend && panel.contains(actionSend)) {
       event.preventDefault();
       executeYoagentActionSend(actionSend.dataset.yoagentActionSend || '');
+      return;
+    }
+    const jobConfirm = event.target.closest('[data-yoagent-job-confirm]');
+    if (jobConfirm && panel.contains(jobConfirm)) {
+      event.preventDefault();
+      confirmYoagentJob(jobConfirm.dataset.yoagentJobConfirm || '');
+      return;
+    }
+    const jobCancel = event.target.closest('[data-yoagent-job-cancel]');
+    if (jobCancel && panel.contains(jobCancel)) {
+      event.preventDefault();
+      cancelYoagentJob(jobCancel.dataset.yoagentJobCancel || '');
     }
   });
   panel.addEventListener('input', event => {
@@ -24003,6 +25750,11 @@ function createInfoPanel() {
     if (input && panel.contains(input)) handleYoagentChatHistoryKeydown(event, input);
   });
   panel.addEventListener('change', event => {
+    const lookback = event.target.closest('[data-info-lookback]');
+    if (lookback && panel.contains(lookback)) {
+      setInfoSessionFileLookbackHours(lookback.value);
+      return;
+    }
     // The composer's backend pill writes the real yoagent.backend setting and re-renders (which also
     // flips chat enablement when switching to/from No agent).
     const backend = event.target.closest('[data-yoagent-backend]');
@@ -24017,6 +25769,7 @@ function createInfoPanel() {
   renderYoagentPanel();
   if (infoPanelSubTab === 'yoagent') {
     loadYoagentConversation({silent: true});
+    loadYoagentJobs({silent: true});
     prewarmYoagent();
   }
   return panel;
@@ -24069,6 +25822,8 @@ function relocalizeInfoPanelChrome(panel = document.getElementById(panelDomId(in
     agentRefresh.title = t('yoagent.refreshTitle');
     agentRefresh.setAttribute('aria-label', t('yoagent.refreshTitle'));
   }
+  const lookback = panel.querySelector('.info-lookback-control');
+  if (lookback) lookback.outerHTML = infoLookbackControlHtml();
   applyInfoSubTab(panel);
 }
 
@@ -24100,6 +25855,7 @@ function setInfoSubTab(tab, options = {}) {
     showYoagentStartupInfoOnce();
     renderYoagentPanel({preserveDraft: true, focusInput: options.focusChat === true});
     loadYoagentConversation({silent: true});
+    loadYoagentJobs({silent: true});
     refreshActivitySummary({silent: true});
     prewarmYoagent();
   }
@@ -24117,6 +25873,7 @@ async function openInfoSubTab(tab) {
     showYoagentStartupInfoOnce();
     renderYoagentPanel({preserveDraft: true, focusInput: true});
     loadYoagentConversation({silent: true});
+    loadYoagentJobs({silent: true});
     refreshActivitySummary({silent: true});
     prewarmYoagent();
   }
@@ -24191,6 +25948,9 @@ function openYoagentRightPane() {
   setInfoSubTab('yoagent', {focusChat: true});
   focusYoagentChatSoon();
 }
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// YO!agent panel rendering, conversation controls, and activity summary refresh split from 80_panes_preferences.js.
 
 function sessionActivitySummary(session) {
   return activitySummaryPayload?.sessions?.[session] || null;
@@ -24476,6 +26236,76 @@ function yoagentPendingWaitsHtml() {
   </div>`;
 }
 
+function applyYoagentJobsPayload(payload = {}) {
+  if (!payload || typeof payload !== 'object') return false;
+  yoagentJobs = Array.isArray(payload.jobs) ? payload.jobs : [];
+  return true;
+}
+
+function yoagentJobTargetText(job) {
+  const target = job?.target && typeof job.target === 'object' ? job.target : {};
+  if (Array.isArray(target.roster) && target.roster.length) return target.roster.map(item => String(item || '')).filter(Boolean).join(', ');
+  return String(target.session || job?.session || '');
+}
+
+function yoagentJobActionText(job) {
+  const action = job?.action && typeof job.action === 'object' ? job.action : {};
+  return String(job?.public_text || job?.prompt_preview || action.text_preview || action.text || action.message || '').trim();
+}
+
+function yoagentJobStatusText(job) {
+  const status = String(job?.status || '');
+  if (status === 'pending_confirmation') return t('yoagent.jobs.status.pendingConfirmation');
+  if (status === 'timed_out') return t('yoagent.jobs.status.timedOut');
+  if (status) return status.replace(/_/g, ' ');
+  return t('yoagent.jobs.status.unknown');
+}
+
+function yoagentJobRowsHtml() {
+  const jobs = Array.isArray(yoagentJobs) ? yoagentJobs : [];
+  if (!jobs.length) return '';
+  return jobs.map(job => {
+    const id = String(job?.id || job?.job_id || '');
+    const status = String(job?.status || '');
+    const type = String(job?.type || '');
+    const target = yoagentJobTargetText(job);
+    const actionText = yoagentJobActionText(job);
+    const canConfirm = status === 'pending_confirmation' && id && !readOnlyMode;
+    const canCancel = ['queued', 'pending_confirmation'].includes(status) && id && !readOnlyMode;
+    const blocker = job?.last_observed_state?.blockers && Array.isArray(job.last_observed_state.blockers)
+      ? job.last_observed_state.blockers.join(', ')
+      : '';
+    const error = String(job?.error || job?.result?.error || '');
+    const meta = [
+      type,
+      target ? t('yoagent.jobs.target', {target}) : '',
+      blocker ? t('yoagent.jobs.blockedBy', {blocker}) : '',
+      error,
+    ].filter(Boolean).join(' · ');
+    const controls = [
+      canConfirm ? `<button type="button" class="yoagent-job-confirm" data-yoagent-job-confirm="${esc(id)}">${esc(t('yoagent.jobs.confirm'))}</button>` : '',
+      canCancel ? `<button type="button" class="yoagent-job-cancel" data-yoagent-job-cancel="${esc(id)}">${esc(t('yoagent.jobs.cancel'))}</button>` : '',
+    ].filter(Boolean).join('');
+    return `<li class="yoagent-job-item yoagent-job-${esc(status || 'unknown')}" data-yoagent-job-row="${esc(id)}">
+      <div class="yoagent-job-main">
+        <span class="yoagent-job-status">${esc(yoagentJobStatusText(job))}</span>
+        <span class="yoagent-job-meta">${esc(meta)}</span>
+      </div>
+      ${actionText ? `<div class="yoagent-job-text">${esc(actionText)}</div>` : ''}
+      ${controls ? `<div class="yoagent-job-controls">${controls}</div>` : ''}
+    </li>`;
+  }).join('');
+}
+
+function yoagentJobsHtml() {
+  const rows = yoagentJobRowsHtml();
+  if (!rows) return '';
+  return `<div class="yoagent-jobs-list" aria-live="polite" aria-label="${esc(t('yoagent.jobs.title'))}">
+    <div class="yoagent-jobs-title">${esc(t('yoagent.jobs.title'))}</div>
+    <ul class="yoagent-jobs-items">${rows}</ul>
+  </div>`;
+}
+
 function applyYoagentConversationPayload(payload = {}) {
   if (!payload || typeof payload !== 'object') return false;
   const messages = Array.isArray(payload.messages) ? payload.messages : [];
@@ -24747,6 +26577,22 @@ async function loadYoagentConversation(options = {}) {
   }
 }
 
+async function loadYoagentJobs(options = {}) {
+  if (yoagentJobsLoading) return false;
+  yoagentJobsLoading = true;
+  try {
+    const payload = await apiFetchJson('/api/yoagent/jobs', {cache: 'no-store'});
+    applyYoagentJobsPayload(payload);
+    if (options.render !== false && infoPanelSubTab === 'yoagent') renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom || false});
+    return true;
+  } catch (error) {
+    if (!options.silent) console.warn('YO!agent jobs refresh failed', error);
+    return false;
+  } finally {
+    yoagentJobsLoading = false;
+  }
+}
+
 function yoagentBackendLabel(value) {
   const key = String(value || '').toLowerCase();
   if (key === 'auto') return t('yoagent.backend.auto');
@@ -24797,7 +26643,7 @@ function yoagentChatHtml() {
   const placeholder = t('yoagent.chatPlaceholder');
   const isThinking = yoagentBusy || yoagentPrewarming;
   const startupInfo = yoagentStartupInfoVisible ? yoagentStartupInfoHtml() : '';
-  const hasConversation = Boolean(yoagentMessages.length || yoagentPendingWaits.length || yoagentNotice || isThinking || yoagentError || startupInfo);
+  const hasConversation = Boolean(yoagentMessages.length || yoagentPendingWaits.length || yoagentJobs.length || yoagentNotice || isThinking || yoagentError || startupInfo);
   const thinkingHtml = textWithMovingEllipsisHtml(t('yoagent.thinking'), 'yoagent-thinking-dots');
   const busy = isThinking
     ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span><span class="yoagent-thinking">${thinkingHtml}</span></div>`
@@ -24822,7 +26668,7 @@ function yoagentChatHtml() {
     : '';
   return `<section class="yoagent-chat ${hasConversation ? 'has-history' : 'empty'}" aria-label="${esc(t('yoagent.chatAria', {name: yoagentTabLabel()}))}">
     ${yoagentTranscriptPathHtml()}
-    <div class="yoagent-chat-history">${yoagentAutoRefreshStatusHtml()}${yoagentNoticeHtml()}${yoagentChatMessagesHtml()}${yoagentPendingWaitsHtml()}${busy}${error}</div>
+    <div class="yoagent-chat-history">${yoagentAutoRefreshStatusHtml()}${yoagentNoticeHtml()}${yoagentChatMessagesHtml()}${yoagentPendingWaitsHtml()}${yoagentJobsHtml()}${busy}${error}</div>
     ${form}
   </section>`;
 }
@@ -24892,6 +26738,36 @@ async function clearYoagentConversation() {
   } catch (error) {
     statusErr(`${esc(t('yoagent.statusClearFailed', {error}))}`);
   }
+}
+
+async function updateYoagentJob(jobId, action) {
+  const id = String(jobId || '');
+  if (!id || readOnlyMode) return;
+  try {
+    const payload = await apiFetchJson(`/api/yoagent/jobs/${encodeURIComponent(id)}/${action}`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({id}),
+    });
+    if (payload?.job) {
+      const next = yoagentJobs.map(job => String(job?.id || job?.job_id || '') === id ? payload.job : job);
+      if (!next.some(job => String(job?.id || job?.job_id || '') === id)) next.unshift(payload.job);
+      yoagentJobs = next;
+    }
+    await loadYoagentJobs({silent: true, render: false});
+    renderYoagentPanel({preserveDraft: true, scrollBottom: false});
+  } catch (error) {
+    yoagentError = yoagentChatErrorMessage(error);
+    renderYoagentPanel({preserveDraft: true, scrollBottom: false});
+  }
+}
+
+function confirmYoagentJob(jobId) {
+  return updateYoagentJob(jobId, 'confirm');
+}
+
+function cancelYoagentJob(jobId) {
+  return updateYoagentJob(jobId, 'cancel');
 }
 
 async function sendYoagentChatMessage(rawText) {
@@ -25028,6 +26904,8 @@ async function refreshActivitySummary(options = {}) {
     const params = new URLSearchParams();
     if (options.force) params.set('force', '1');
     params.set('locale', i18nActiveLocaleId());
+    params.set('scope', 'all');
+    params.set('hours', String(infoSessionFileLookbackHours));
     const payload = await apiFetchJson(`/api/activity-summary?${params.toString()}`, {cache: 'no-store'});
     if (!requestIsCurrent()) return;
     applyActivitySummaryPayloadFromPush(payload);
@@ -25051,14 +26929,21 @@ async function refreshActivitySummary(options = {}) {
 
 function applyActivitySummaryPayloadFromPush(payload = {}) {
   if (!payload || typeof payload !== 'object') return false;
+  if (payload.session_file_hours != null) {
+    infoSessionFileLookbackHours = writeStoredInfoLookbackHours(payload.session_file_hours);
+  }
   activitySummaryPayload = payload;
   activitySummaryLastRefreshTs = Date.now();
   activitySummaryRefreshing = false;
+  clearInfoSessionDrawerCache();
   renderInfoPanel();
   renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
   if (infoPanelSubTab === 'yoagent') prewarmYoagent();
   return true;
 }
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Preferences panel choices, rendering, and binding split from 80_panes_preferences.js.
 
 function editorSchemePreferenceChoices(options = {}) {
   const preferredOrder = [
@@ -25224,6 +27109,8 @@ function preferenceSections() {
       {path: 'editor.autosave', label: t('pref.editor.autosave.label'), type: 'boolean', help: t('pref.editor.autosave.help')},
       {path: 'editor.autosave_delay_seconds', label: t('pref.editor.autosave_delay_seconds.label'), type: 'number', min: 0.5, max: 60, step: 0.5, suffix: 's', help: t('pref.editor.autosave_delay_seconds.help')},
       {path: 'editor.blame_all_lines', label: t('pref.editor.blame_all_lines.label'), type: 'boolean', help: t('pref.editor.blame_all_lines.help')},
+      {path: 'editor.trim_trailing_whitespace_on_save', label: t('pref.editor.trim_trailing_whitespace_on_save.label'), type: 'boolean', help: t('pref.editor.trim_trailing_whitespace_on_save.help')},
+      {path: 'editor.ensure_final_newline_on_save', label: t('pref.editor.ensure_final_newline_on_save.label'), type: 'boolean', help: t('pref.editor.ensure_final_newline_on_save.help')},
     ]},
     {title: t('pref.section.notifications'), items: [
       {path: 'general.reload_on_update', label: t('pref.general.reload_on_update.label'), type: 'boolean', help: t('pref.general.reload_on_update.help')},
@@ -25658,6 +27545,290 @@ function preferencesPanelHtml() {
     <div class="preferences-sections">${sections}</div>
     ${resetBlock}`;
 }
+function createPreferencesPanel() {
+  const panel = document.createElement('article');
+  panel.className = 'panel preferences-panel';
+  panel.id = panelDomId(prefsItemId);
+  panel.innerHTML = `
+      <div class="panel-head preferences-panel-head">
+        ${virtualPanelControlsHtml(prefsItemId)}
+        <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
+      </div>
+      <div class="panel-detail-row">
+        <div class="panel-copy">
+          <div id="panel-tab-${prefsItemId}" class="panel-session-label"><span class="session-button-dir">${esc(t('tab.preferences'))}</span></div>
+          <div id="meta-${prefsItemId}" class="meta">${esc(preferenceStatusText())}</div>
+        </div>
+        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(prefsItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
+      </div>
+      <div class="preferences-body panel-overlay-root">
+        <div id="panel-toasts-${prefsItemId}" class="panel-toast-stack"></div>
+        <div class="preferences-scroll">${preferencesPanelHtml()}</div>
+      </div>`;
+  bindPanelShell(panel, prefsItemId);
+  bindPreferencesPanel(panel);
+  return panel;
+}
+
+function focusPreferencesSearch(panel = null) {
+  // never steal focus into the search box while a tab is being dragged — focus() during a
+  // drag (and the re-render it triggers) aborts the native drag.
+  if (dragSession != null) return false;
+  const root = panel && panel.isConnected !== false
+    ? panel
+    : (Array.from(document.querySelectorAll('.preferences-panel')).find(candidate => candidate.offsetParent !== null) || document.querySelector('.preferences-panel'));
+  const search = root?.querySelector?.('[data-preferences-search]');
+  if (!search) return false;
+  search.focus?.({preventScroll: true});
+  const position = String(search.value || '').length;
+  search.setSelectionRange?.(position, position);
+  return true;
+}
+
+function preferencesScrollIsActive(now = Date.now()) {
+  return Number(now) < preferencesScrollActiveUntil;
+}
+
+function schedulePreferencesScrollFlush() {
+  if (preferencesScrollFlushTimer) clearTimeout(preferencesScrollFlushTimer);
+  preferencesScrollFlushTimer = setTimeout(() => {
+    preferencesScrollFlushTimer = null;
+    if (!pendingPreferencesRender) return;
+    if (preferencesScrollIsActive()) {
+      schedulePreferencesScrollFlush();
+      return;
+    }
+    pendingPreferencesRender = false;
+    renderPreferencesPanels();
+  }, preferencesScrollRenderDeferMs);
+}
+
+function notePreferencesScrollActivity(now = Date.now()) {
+  preferencesScrollActiveUntil = Math.max(preferencesScrollActiveUntil, Number(now) + preferencesScrollRenderDeferMs);
+  schedulePreferencesScrollFlush();
+}
+
+function renderPreferencesPanels(options = {}) {
+  // defer Preferences re-render while a tab drag is in flight; rebuilding the dragged tab
+  // node aborts the native HTML5 drag.
+  if (dragSession != null) { pendingPreferencesRender = true; return; }
+  if (options.force !== true && preferencesScrollIsActive()) {
+    pendingPreferencesRender = true;
+    schedulePreferencesScrollFlush();
+    return;
+  }
+  for (const panel of document.querySelectorAll('.preferences-panel')) {
+    const body = panel.querySelector('.preferences-body');
+    const meta = panel.querySelector(`#meta-${cssEscape(prefsItemId)}`);
+    if (meta) meta.textContent = preferenceStatusText();
+    if (body) {
+      const activeControl = activePreferenceControl(panel);
+      const shouldKeepDom = activeControl && options.force !== true;
+      // the scroller is the inner .preferences-scroll, not the overlay-root body.
+      const scroller = () => body.querySelector('.preferences-scroll') || body;
+      const prevScroll = scroller();
+      const scrollTop = prevScroll.scrollTop;
+      const scrollLeft = prevScroll.scrollLeft;
+      if (shouldKeepDom) {
+        const pathRows = body.querySelector('.preferences-path-rows');
+        if (pathRows) pathRows.innerHTML = `${preferencesPathRowsHtml()}${readOnlyMode && !shareViewMode ? `<span class="preferences-readonly">${esc(t('pref.readonly'))}</span>` : ''}`;
+      } else {
+        body.innerHTML = `<div id="panel-toasts-${prefsItemId}" class="panel-toast-stack"></div><div class="preferences-scroll">${preferencesPanelHtml()}</div>`;
+      }
+      if (options.focusSearch !== true) {
+        const restore = () => { const s = scroller(); s.scrollTop = scrollTop; s.scrollLeft = scrollLeft; };
+        restore();
+        requestAnimationFrame(restore);
+      }
+    }
+    bindPreferencesPanel(panel);
+    autosizePreferenceTextareas(panel);
+    if (options.focusSearch) focusPreferencesSearch(panel);
+  }
+  if (shareViewMode && typeof scheduleShareScrollRestoreByKey === 'function') {
+    scheduleShareScrollRestoreByKey('preferences');
+  }
+}
+
+function autosizePreferenceTextarea(textarea) {
+  if (!textarea || textarea.dataset.settingAutosize !== 'true') return;
+  const maxRows = Number(textarea.dataset.settingMaxItems || textarea.getAttribute('rows') || 0);
+  textarea.style.height = 'auto';
+  let height = textarea.scrollHeight;
+  if (Number.isFinite(maxRows) && maxRows > 0) {
+    const style = window.getComputedStyle?.(textarea);
+    const lineHeight = Number.parseFloat(style?.lineHeight || '');
+    const paddingTop = Number.parseFloat(style?.paddingTop || '0') || 0;
+    const paddingBottom = Number.parseFloat(style?.paddingBottom || '0') || 0;
+    const borderTop = Number.parseFloat(style?.borderTopWidth || '0') || 0;
+    const borderBottom = Number.parseFloat(style?.borderBottomWidth || '0') || 0;
+    if (Number.isFinite(lineHeight) && lineHeight > 0) {
+      const maxHeight = Math.ceil((lineHeight * maxRows) + paddingTop + paddingBottom + borderTop + borderBottom);
+      height = Math.min(height, maxHeight);
+      textarea.style.overflowY = textarea.scrollHeight > maxHeight ? 'auto' : '';
+    }
+  }
+  textarea.style.height = `${height}px`;
+}
+
+function clampPreferenceListControl(control) {
+  const maxItems = Number(control?.dataset?.settingMaxItems || 0);
+  if (!Number.isFinite(maxItems) || maxItems <= 0) return;
+  const lines = String(control.value || '').split('\n');
+  const kept = [];
+  let used = 0;
+  for (const line of lines) {
+    if (line.trim()) {
+      if (used >= maxItems) continue;
+      used += 1;
+    }
+    kept.push(line);
+  }
+  const next = kept.join('\n');
+  if (next !== control.value) control.value = next;
+}
+
+function autosizePreferenceTextareas(root) {
+  root.querySelectorAll?.('textarea[data-setting-autosize="true"]').forEach(autosizePreferenceTextarea);
+}
+
+function bindPreferencesPanel(panel) {
+  if (!panel || panel.dataset.preferencesBound === 'true') return;
+  panel.dataset.preferencesBound = 'true';
+  panel.addEventListener('input', event => {
+    const search = event.target.closest('[data-preferences-search]');
+    if (search && panel.contains(search)) {
+      preferencesSearchText = search.value || '';
+      preferencesResetConfirmVisible = false;
+      renderPreferencesPanels({force: true, focusSearch: true});
+      scheduleShareUiStatePublish();
+      return;
+    }
+    const control = event.target.closest('[data-setting-path]');
+    if (!control || !panel.contains(control)) return;
+    if (control.dataset.settingAutosize === 'true') {
+      if (control.dataset.settingType === 'list') clampPreferenceListControl(control);
+      autosizePreferenceTextarea(control);
+    }
+    if (control.dataset.settingType === 'number') {
+      validatePreferenceNumberControl(control);
+      return;
+    }
+    if (control.dataset.settingType === 'range') {
+      const value = valueFromPreferenceControl(control);
+      const output = control.parentElement?.querySelector('.preferences-range-value');
+      if (output) output.textContent = String(control.value);
+      if (control.dataset.settingPath === 'appearance.inactive_pane_opacity') applyInactivePaneOpacity(value);
+      if (control.dataset.settingPath === 'appearance.pane_ring_opacity') applyPaneRingOpacity(value);
+    }
+  });
+  panel.addEventListener('change', event => {
+    const control = event.target.closest('[data-setting-path]');
+    if (!control || !panel.contains(control)) return;
+    savePreferenceControl(control);
+  });
+  panel.addEventListener('wheel', event => {
+    if (event.target.closest?.('.preferences-scroll')) notePreferencesScrollActivity();
+  }, {passive: true});
+  panel.addEventListener('touchmove', event => {
+    if (event.target.closest?.('.preferences-scroll')) notePreferencesScrollActivity();
+  }, {passive: true});
+  panel.addEventListener('scroll', event => {
+    if (event.target?.classList?.contains('preferences-scroll')) notePreferencesScrollActivity();
+  }, true);
+  panel.addEventListener('focusout', () => {
+    setTimeout(() => {
+      if (!activePreferenceControl(panel)) renderPreferencesPanels();
+    }, 0);
+  });
+  panel.addEventListener('click', async event => {
+    const searchAction = event.target.closest('[data-preferences-search-action]');
+    if (searchAction && panel.contains(searchAction)) {
+      event.preventDefault();
+      preferencesResetConfirmVisible = false;
+      renderPreferencesPanels({force: true});
+      focusPreferencesSearch(panel);
+      return;
+    }
+    const resetAll = event.target.closest('[data-preferences-reset-all]');
+    if (resetAll && panel.contains(resetAll)) {
+      event.preventDefault();
+      preferencesResetConfirmVisible = true;
+      renderPreferencesPanels({force: true});
+      setTimeout(() => {
+        const confirm = document.querySelector('[data-preferences-reset-confirm]');
+        confirm?.scrollIntoView?.({block: 'nearest', inline: 'nearest'});
+        confirm?.focus?.();
+      }, 0);
+      return;
+    }
+    const resetConfirm = event.target.closest('[data-preferences-reset-confirm]');
+    if (resetConfirm && panel.contains(resetConfirm)) {
+      event.preventDefault();
+      preferencesResetConfirmVisible = false;
+      resetAllPreferences();
+      return;
+    }
+    const resetCancel = event.target.closest('[data-preferences-reset-cancel]');
+    if (resetCancel && panel.contains(resetCancel)) {
+      event.preventDefault();
+      preferencesResetConfirmVisible = false;
+      renderPreferencesPanels({force: true});
+      return;
+    }
+    const copy = event.target.closest('[data-copy-path]');
+    if (copy && panel.contains(copy)) {
+      event.preventDefault();
+      copyTextToClipboard(copy.dataset.copyPath || '')
+        .then(() => { statusEl.textContent = 'copied path'; })
+        .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
+      return;
+    }
+    const copyText = event.target.closest('[data-copy-text]');
+    if (copyText && panel.contains(copyText)) {
+      event.preventDefault();
+      copyTextToClipboard(copyText.dataset.copyText || '')
+        .then(() => { statusEl.textContent = 'copied text'; })
+        .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
+      return;
+    }
+    const yoloRuleOpen = event.target.closest('[data-yolo-rule-open]');
+    if (yoloRuleOpen && panel.contains(yoloRuleOpen)) {
+      event.preventDefault();
+      preferencesResetConfirmVisible = false;
+      openYoloRuleFile();
+      return;
+    }
+    const sectionToggle = event.target.closest('[data-preference-section-toggle]');
+    if (sectionToggle && panel.contains(sectionToggle)) {
+      event.preventDefault();
+      preferencesResetConfirmVisible = false;
+      const title = sectionToggle.dataset.preferenceSectionToggle || '';
+      if (collapsedPreferenceSections.has(title)) collapsedPreferenceSections.delete(title);
+      else collapsedPreferenceSections.add(title);
+      writeStoredCollapsedPreferenceSections();
+      const section = sectionToggle.closest('[data-preference-section]');
+      const collapsed = collapsedPreferenceSections.has(title);
+      if (section) {
+        section.classList.toggle('collapsed', collapsed);
+        sectionToggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+        const settings = section.querySelector('.preferences-settings');
+        if (settings) settings.hidden = collapsed;
+      } else {
+        renderPreferencesPanels({force: true});
+      }
+      scheduleShareUiStatePublish();
+      return;
+    }
+    const reset = event.target.closest('[data-setting-reset]');
+    if (!reset || !panel.contains(reset)) return;
+    event.preventDefault();
+    resetPreference(reset.dataset.settingReset || '');
+  });
+}
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// JavaScript debug panel rendering and controls split from 80_panes_preferences.js.
 
 function debugEventCounts() {
   const apiCalls = jsDebugEvents.filter(event => event.type === 'api').length;
@@ -25976,288 +28147,6 @@ function bindDebugPanel(panel) {
       clearJsDebugEvents();
       statusEl.textContent = t('debug.cleared');
     }
-  });
-}
-
-function createPreferencesPanel() {
-  const panel = document.createElement('article');
-  panel.className = 'panel preferences-panel';
-  panel.id = panelDomId(prefsItemId);
-  panel.innerHTML = `
-      <div class="panel-head preferences-panel-head">
-        ${virtualPanelControlsHtml(prefsItemId)}
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
-      </div>
-      <div class="panel-detail-row">
-        <div class="panel-copy">
-          <div id="panel-tab-${prefsItemId}" class="panel-session-label"><span class="session-button-dir">${esc(t('tab.preferences'))}</span></div>
-          <div id="meta-${prefsItemId}" class="meta">${esc(preferenceStatusText())}</div>
-        </div>
-        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(prefsItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
-      </div>
-      <div class="preferences-body panel-overlay-root">
-        <div id="panel-toasts-${prefsItemId}" class="panel-toast-stack"></div>
-        <div class="preferences-scroll">${preferencesPanelHtml()}</div>
-      </div>`;
-  bindPanelShell(panel, prefsItemId);
-  bindPreferencesPanel(panel);
-  return panel;
-}
-
-function focusPreferencesSearch(panel = null) {
-  // never steal focus into the search box while a tab is being dragged — focus() during a
-  // drag (and the re-render it triggers) aborts the native drag.
-  if (dragSession != null) return false;
-  const root = panel && panel.isConnected !== false
-    ? panel
-    : (Array.from(document.querySelectorAll('.preferences-panel')).find(candidate => candidate.offsetParent !== null) || document.querySelector('.preferences-panel'));
-  const search = root?.querySelector?.('[data-preferences-search]');
-  if (!search) return false;
-  search.focus?.({preventScroll: true});
-  const position = String(search.value || '').length;
-  search.setSelectionRange?.(position, position);
-  return true;
-}
-
-function preferencesScrollIsActive(now = Date.now()) {
-  return Number(now) < preferencesScrollActiveUntil;
-}
-
-function schedulePreferencesScrollFlush() {
-  if (preferencesScrollFlushTimer) clearTimeout(preferencesScrollFlushTimer);
-  preferencesScrollFlushTimer = setTimeout(() => {
-    preferencesScrollFlushTimer = null;
-    if (!pendingPreferencesRender) return;
-    if (preferencesScrollIsActive()) {
-      schedulePreferencesScrollFlush();
-      return;
-    }
-    pendingPreferencesRender = false;
-    renderPreferencesPanels();
-  }, preferencesScrollRenderDeferMs);
-}
-
-function notePreferencesScrollActivity(now = Date.now()) {
-  preferencesScrollActiveUntil = Math.max(preferencesScrollActiveUntil, Number(now) + preferencesScrollRenderDeferMs);
-  schedulePreferencesScrollFlush();
-}
-
-function renderPreferencesPanels(options = {}) {
-  // defer Preferences re-render while a tab drag is in flight; rebuilding the dragged tab
-  // node aborts the native HTML5 drag.
-  if (dragSession != null) { pendingPreferencesRender = true; return; }
-  if (options.force !== true && preferencesScrollIsActive()) {
-    pendingPreferencesRender = true;
-    schedulePreferencesScrollFlush();
-    return;
-  }
-  for (const panel of document.querySelectorAll('.preferences-panel')) {
-    const body = panel.querySelector('.preferences-body');
-    const meta = panel.querySelector(`#meta-${cssEscape(prefsItemId)}`);
-    if (meta) meta.textContent = preferenceStatusText();
-    if (body) {
-      const activeControl = activePreferenceControl(panel);
-      const shouldKeepDom = activeControl && options.force !== true;
-      // the scroller is the inner .preferences-scroll, not the overlay-root body.
-      const scroller = () => body.querySelector('.preferences-scroll') || body;
-      const prevScroll = scroller();
-      const scrollTop = prevScroll.scrollTop;
-      const scrollLeft = prevScroll.scrollLeft;
-      if (shouldKeepDom) {
-        const pathRows = body.querySelector('.preferences-path-rows');
-        if (pathRows) pathRows.innerHTML = `${preferencesPathRowsHtml()}${readOnlyMode && !shareViewMode ? `<span class="preferences-readonly">${esc(t('pref.readonly'))}</span>` : ''}`;
-      } else {
-        body.innerHTML = `<div id="panel-toasts-${prefsItemId}" class="panel-toast-stack"></div><div class="preferences-scroll">${preferencesPanelHtml()}</div>`;
-      }
-      if (options.focusSearch !== true) {
-        const restore = () => { const s = scroller(); s.scrollTop = scrollTop; s.scrollLeft = scrollLeft; };
-        restore();
-        requestAnimationFrame(restore);
-      }
-    }
-    bindPreferencesPanel(panel);
-    autosizePreferenceTextareas(panel);
-    if (options.focusSearch) focusPreferencesSearch(panel);
-  }
-  if (shareViewMode && typeof scheduleShareScrollRestoreByKey === 'function') {
-    scheduleShareScrollRestoreByKey('preferences');
-  }
-}
-
-function autosizePreferenceTextarea(textarea) {
-  if (!textarea || textarea.dataset.settingAutosize !== 'true') return;
-  const maxRows = Number(textarea.dataset.settingMaxItems || textarea.getAttribute('rows') || 0);
-  textarea.style.height = 'auto';
-  let height = textarea.scrollHeight;
-  if (Number.isFinite(maxRows) && maxRows > 0) {
-    const style = window.getComputedStyle?.(textarea);
-    const lineHeight = Number.parseFloat(style?.lineHeight || '');
-    const paddingTop = Number.parseFloat(style?.paddingTop || '0') || 0;
-    const paddingBottom = Number.parseFloat(style?.paddingBottom || '0') || 0;
-    const borderTop = Number.parseFloat(style?.borderTopWidth || '0') || 0;
-    const borderBottom = Number.parseFloat(style?.borderBottomWidth || '0') || 0;
-    if (Number.isFinite(lineHeight) && lineHeight > 0) {
-      const maxHeight = Math.ceil((lineHeight * maxRows) + paddingTop + paddingBottom + borderTop + borderBottom);
-      height = Math.min(height, maxHeight);
-      textarea.style.overflowY = textarea.scrollHeight > maxHeight ? 'auto' : '';
-    }
-  }
-  textarea.style.height = `${height}px`;
-}
-
-function clampPreferenceListControl(control) {
-  const maxItems = Number(control?.dataset?.settingMaxItems || 0);
-  if (!Number.isFinite(maxItems) || maxItems <= 0) return;
-  const lines = String(control.value || '').split('\n');
-  const kept = [];
-  let used = 0;
-  for (const line of lines) {
-    if (line.trim()) {
-      if (used >= maxItems) continue;
-      used += 1;
-    }
-    kept.push(line);
-  }
-  const next = kept.join('\n');
-  if (next !== control.value) control.value = next;
-}
-
-function autosizePreferenceTextareas(root) {
-  root.querySelectorAll?.('textarea[data-setting-autosize="true"]').forEach(autosizePreferenceTextarea);
-}
-
-function bindPreferencesPanel(panel) {
-  if (!panel || panel.dataset.preferencesBound === 'true') return;
-  panel.dataset.preferencesBound = 'true';
-  panel.addEventListener('input', event => {
-    const search = event.target.closest('[data-preferences-search]');
-    if (search && panel.contains(search)) {
-      preferencesSearchText = search.value || '';
-      preferencesResetConfirmVisible = false;
-      renderPreferencesPanels({force: true, focusSearch: true});
-      scheduleShareUiStatePublish();
-      return;
-    }
-    const control = event.target.closest('[data-setting-path]');
-    if (!control || !panel.contains(control)) return;
-    if (control.dataset.settingAutosize === 'true') {
-      if (control.dataset.settingType === 'list') clampPreferenceListControl(control);
-      autosizePreferenceTextarea(control);
-    }
-    if (control.dataset.settingType === 'number') {
-      validatePreferenceNumberControl(control);
-      return;
-    }
-    if (control.dataset.settingType === 'range') {
-      const value = valueFromPreferenceControl(control);
-      const output = control.parentElement?.querySelector('.preferences-range-value');
-      if (output) output.textContent = String(control.value);
-      if (control.dataset.settingPath === 'appearance.inactive_pane_opacity') applyInactivePaneOpacity(value);
-      if (control.dataset.settingPath === 'appearance.pane_ring_opacity') applyPaneRingOpacity(value);
-    }
-  });
-  panel.addEventListener('change', event => {
-    const control = event.target.closest('[data-setting-path]');
-    if (!control || !panel.contains(control)) return;
-    savePreferenceControl(control);
-  });
-  panel.addEventListener('wheel', event => {
-    if (event.target.closest?.('.preferences-scroll')) notePreferencesScrollActivity();
-  }, {passive: true});
-  panel.addEventListener('touchmove', event => {
-    if (event.target.closest?.('.preferences-scroll')) notePreferencesScrollActivity();
-  }, {passive: true});
-  panel.addEventListener('scroll', event => {
-    if (event.target?.classList?.contains('preferences-scroll')) notePreferencesScrollActivity();
-  }, true);
-  panel.addEventListener('focusout', () => {
-    setTimeout(() => {
-      if (!activePreferenceControl(panel)) renderPreferencesPanels();
-    }, 0);
-  });
-  panel.addEventListener('click', async event => {
-    const searchAction = event.target.closest('[data-preferences-search-action]');
-    if (searchAction && panel.contains(searchAction)) {
-      event.preventDefault();
-      preferencesResetConfirmVisible = false;
-      renderPreferencesPanels({force: true});
-      focusPreferencesSearch(panel);
-      return;
-    }
-    const resetAll = event.target.closest('[data-preferences-reset-all]');
-    if (resetAll && panel.contains(resetAll)) {
-      event.preventDefault();
-      preferencesResetConfirmVisible = true;
-      renderPreferencesPanels({force: true});
-      setTimeout(() => {
-        const confirm = document.querySelector('[data-preferences-reset-confirm]');
-        confirm?.scrollIntoView?.({block: 'nearest', inline: 'nearest'});
-        confirm?.focus?.();
-      }, 0);
-      return;
-    }
-    const resetConfirm = event.target.closest('[data-preferences-reset-confirm]');
-    if (resetConfirm && panel.contains(resetConfirm)) {
-      event.preventDefault();
-      preferencesResetConfirmVisible = false;
-      resetAllPreferences();
-      return;
-    }
-    const resetCancel = event.target.closest('[data-preferences-reset-cancel]');
-    if (resetCancel && panel.contains(resetCancel)) {
-      event.preventDefault();
-      preferencesResetConfirmVisible = false;
-      renderPreferencesPanels({force: true});
-      return;
-    }
-    const copy = event.target.closest('[data-copy-path]');
-    if (copy && panel.contains(copy)) {
-      event.preventDefault();
-      copyTextToClipboard(copy.dataset.copyPath || '')
-        .then(() => { statusEl.textContent = 'copied path'; })
-        .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
-      return;
-    }
-    const copyText = event.target.closest('[data-copy-text]');
-    if (copyText && panel.contains(copyText)) {
-      event.preventDefault();
-      copyTextToClipboard(copyText.dataset.copyText || '')
-        .then(() => { statusEl.textContent = 'copied text'; })
-        .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
-      return;
-    }
-    const yoloRuleOpen = event.target.closest('[data-yolo-rule-open]');
-    if (yoloRuleOpen && panel.contains(yoloRuleOpen)) {
-      event.preventDefault();
-      preferencesResetConfirmVisible = false;
-      openYoloRuleFile();
-      return;
-    }
-    const sectionToggle = event.target.closest('[data-preference-section-toggle]');
-    if (sectionToggle && panel.contains(sectionToggle)) {
-      event.preventDefault();
-      preferencesResetConfirmVisible = false;
-      const title = sectionToggle.dataset.preferenceSectionToggle || '';
-      if (collapsedPreferenceSections.has(title)) collapsedPreferenceSections.delete(title);
-      else collapsedPreferenceSections.add(title);
-      writeStoredCollapsedPreferenceSections();
-      const section = sectionToggle.closest('[data-preference-section]');
-      const collapsed = collapsedPreferenceSections.has(title);
-      if (section) {
-        section.classList.toggle('collapsed', collapsed);
-        sectionToggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-        const settings = section.querySelector('.preferences-settings');
-        if (settings) settings.hidden = collapsed;
-      } else {
-        renderPreferencesPanels({force: true});
-      }
-      scheduleShareUiStatePublish();
-      return;
-    }
-    const reset = event.target.closest('[data-setting-reset]');
-    if (!reset || !panel.contains(reset)) return;
-    event.preventDefault();
-    resetPreference(reset.dataset.settingReset || '');
   });
 }
 function sessionForFileRepo(path) {
@@ -27712,7 +29601,13 @@ function syncFileExplorerDiffSessionControls() {
 // Returns the static toolbar/header HTML for the embedded Finder Differ panel.
 function fileExplorerChangesPanelStaticHtml(options = {}) {
   if (fileExplorerMode === 'tabber') {
-    return '<div class="changes-groups"></div>';
+    return `
+      <div class="changes-toolbar tabber-toolbar">
+        ${tabberLookbackControlHtml()}
+        ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
+        ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
+      </div>
+      <div class="changes-groups"></div>`;
   }
   const payload = fileExplorerSessionFilesPayload;
   const loading = fileExplorerSessionFilesLoading;
@@ -28051,20 +29946,23 @@ function bindChangesPanel(panel) {
   });
   panel.addEventListener('keydown', event => {
     const diffRefInput = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
-    if (!diffRefInput || !panel.contains(diffRefInput)) return;
-    if (handleDiffRefPopoverKeydown(event, diffRefInput)) return;
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      hideDiffRefPopover();
-      commitDiffRefControls(diffRefInput.closest('[data-diff-ref-controls]') || panel);
-      diffRefInput.blur?.();
-    } else if (event.key === 'Escape') {
-      event.preventDefault();
-      hideDiffRefPopover();
-      // C6: revert to THIS repo's current ref, not the global default.
-      const controls = diffRefInput.closest('[data-diff-ref-controls]');
-      revertDiffRefInputToRepo(diffRefInput, controls?.dataset?.diffRefRepo || '', controls?.dataset?.diffRefPath || '');
+    if (diffRefInput && panel.contains(diffRefInput)) {
+      if (handleDiffRefPopoverKeydown(event, diffRefInput)) return;
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        hideDiffRefPopover();
+        commitDiffRefControls(diffRefInput.closest('[data-diff-ref-controls]') || panel);
+        diffRefInput.blur?.();
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        hideDiffRefPopover();
+        // C6: revert to THIS repo's current ref, not the global default.
+        const controls = diffRefInput.closest('[data-diff-ref-controls]');
+        revertDiffRefInputToRepo(diffRefInput, controls?.dataset?.diffRefRepo || '', controls?.dataset?.diffRefPath || '');
+      }
+      return;
     }
+    differTreeInteractionController.handleKeydown(event, panel);
   });
   panel.addEventListener('click', async event => {
     const treeExpandCollapseAll = event.target.closest('[data-file-tree-expand-collapse-all]');
@@ -28140,17 +30038,13 @@ function bindChangesPanel(panel) {
     stopCustomDragPreview();
     clearDropPreview();
   });
-  // Single-click opens the row in the active editor pane. Modifier clicks keep the shared Finder-style
-  // multi-select behavior without opening a diff.
-  panel.addEventListener('click', async event => {
-    const fileRow = event.target.closest('[data-open-change-file]');
-    if (!fileRow || !panel.contains(fileRow)) return;
-    const selectionOnly = updateFileTreeSelectionFromClick(fileRow, fileRow.dataset.path || fileRow.dataset.openChangeFile || '', event);
-    if (selectionOnly) return;
-    const path = fileRow.dataset.openChangeFile;
-    if (!path) return;
-    event.preventDefault();
-    await openChangedFileInDiff(path, fileRow.dataset.openChangeSession || '', fileRow.dataset.openChangeStatus || '', fileRow.dataset.openChangeRepo || '', {userInitiated: true});
+  // Single-clicks route through the shared tree controller. Modifier clicks keep Finder-style
+  // multi-select without opening a diff; disclosure clicks toggle folders without opening files.
+  panel.addEventListener('click', event => {
+    if (event.__sharedTreeInteractionHandled) return;
+    const row = event.target.closest('.file-tree-row[data-path]');
+    if (!row || !panel.contains(row)) return;
+    differTreeInteractionController.handleClick(event, panel, {row});
   });
   panel.addEventListener('contextmenu', event => {
     const fileRow = event.target.closest('[data-open-change-file]');
@@ -28206,6 +30100,85 @@ function changedFileRowEntry(row) {
     path,
   };
 }
+
+function differTreeEventTargetsControl(event) {
+  return Boolean(event?.target?.closest?.('[data-diff-ref-controls], [data-session-files-session], [data-session-files-sort], [data-session-files-refresh], [data-file-explorer-tree-dates], [data-file-tree-expand-collapse-all], [data-changes-repo-toggle], input, select, textarea, button'));
+}
+
+function differTreeRowPath(row) {
+  return row?.dataset?.path || row?.dataset?.openChangeFile || row?.dataset?.openChangeDirectory || '';
+}
+
+const differTreeInteractionController = createSharedTreeInteractionController({
+  name: 'differ',
+  rowSelector: '.file-tree-row[data-path]',
+  allowRange: true,
+  allowSelectAll: true,
+  applyCurrentClasses: false,
+  shouldIgnoreEvent: differTreeEventTargetsControl,
+  isRowSelectable: row => Boolean(
+    row?.closest?.('.file-explorer-changes-panel')
+    && !row.dataset.tabberType
+    && (row.dataset.openChangeFile || row.dataset.openChangeDirectory || row.dataset.changesFolderToggle),
+  ),
+  selectedIds: () => fileExplorerSelectedPaths,
+  getLeadId: () => fileExplorerSelectionLead,
+  setLeadId: id => { fileExplorerSelectionLead = id; },
+  selectRow(row, id) {
+    fileExplorerManualSelectionActive = true;
+    selectFileTreePath(id || differTreeRowPath(row));
+  },
+  selectRange(row, id) {
+    fileExplorerManualSelectionActive = true;
+    selectFileTreeRange(row, id || differTreeRowPath(row), {clear: true});
+  },
+  selectFromClick(row, id, event) {
+    return updateFileTreeSelectionFromClick(row, id || differTreeRowPath(row), event);
+  },
+  isExpanded: row => row?.dataset?.kind === 'dir' && row.getAttribute?.('aria-expanded') === 'true',
+  setExpanded(row, expanded) {
+    const key = row?.dataset?.changesFolderToggle || row?.dataset?.openChangeDirectory || row?.dataset?.path || '';
+    if (!key || row?.dataset?.kind !== 'dir') return;
+    if (expanded) changesFolderCollapsed.delete(key);
+    else changesFolderCollapsed.add(key);
+    writeStoredChangesFolderCollapsed();
+    renderFileExplorerChangesPanels({force: true});
+    scheduleShareUiStatePublish();
+  },
+  activateRow(row, event) {
+    if (row?.dataset?.openChangeFile) {
+      void openChangedFileInDiff(
+        row.dataset.openChangeFile,
+        row.dataset.openChangeSession || '',
+        row.dataset.openChangeStatus || '',
+        row.dataset.openChangeRepo || '',
+        {userInitiated: true},
+      );
+      return;
+    }
+    if (row?.dataset?.kind === 'dir') {
+      differTreeInteractionController.setExpanded(row.closest?.('.file-explorer-changes-panel') || document, row, !differTreeInteractionController.isExpanded(row));
+    }
+  },
+});
+
+const originalFileExplorerArrowNavForSharedTree = handleFileExplorerArrowNav;
+handleFileExplorerArrowNav = event => {
+  const panel = event?.target?.closest?.('.file-explorer-panel')
+    || event?.target?.closest?.('.file-explorer-changes-panel')
+    || document.querySelector('.file-explorer-panel')
+    || document;
+  if (fileExplorerMode === 'tabber' && tabberTreeInteractionController.handleKeydown(event, panel)) return true;
+  if (fileExplorerMode === 'diff' && differTreeInteractionController.handleKeydown(event, panel)) return true;
+  return originalFileExplorerArrowNavForSharedTree(event);
+};
+
+const originalSelectSessionForTabberTree = selectSession;
+selectSession = async (session, options = {}) => {
+  const result = await originalSelectSessionForTabberTree(session, options);
+  if (fileExplorerMode === 'tabber') syncTabberTreeActiveSelection(document, {scrollIntoView: true});
+  return result;
+};
 
 function showChangedDirectoryContextMenu(row, x, y) {
   closeFileContextMenu();
@@ -28776,6 +30749,191 @@ async function enterFileEditorDiffMode(path, panel, item) {
   renderFileEditorPanel(panel, item);
 }
 
+function fileEditorToolbarHtml(item) {
+  return `
+      <div class="file-editor-toolbar" role="toolbar" aria-label="${esc(t('editor.toolbar.aria'))}" hidden>
+        ${actionRowHtml({
+          className: 'file-editor-toolbar-zone file-editor-toolbar-left',
+          actions: [
+            {
+              className: 'file-editor-gutter-panel',
+              action: 'editor-toggle-gutter',
+              label: '#',
+              title: t('editor.toggleLineNumbers'),
+              ariaLabel: t('editor.toggleLineNumbers'),
+              hidden: true,
+            },
+            {
+              className: 'file-editor-wrap-panel',
+              action: 'editor-toggle-wrap',
+              html: '<span class="file-editor-icon file-editor-icon-wrap" aria-hidden="true"></span>',
+              title: t('editor.toggleWordWrap'),
+              ariaLabel: t('editor.toggleWordWrap'),
+              hidden: true,
+            },
+            {
+              className: 'file-editor-diff-panel',
+              action: 'editor-diff',
+              label: 'Differ',
+              title: t('editor.diff'),
+              ariaLabel: t('editor.diff'),
+              hidden: true,
+            },
+            {
+              className: 'file-editor-diff-expand-panel',
+              action: 'editor-diff-expand',
+              label: '↕',
+              title: t('editor.diffExpand'),
+              ariaLabel: t('editor.diffExpand'),
+              pressed: fileEditorDiffExpandUnchangedForItem(item),
+              hidden: true,
+            },
+            {
+              kind: 'custom',
+              tagName: 'span',
+              className: 'file-editor-diff-ref-panel',
+              hidden: true,
+              html: diffRefControlsHtml({compact: true}),
+            },
+          ],
+        })}
+        <div class="file-editor-toolbar-zone file-editor-toolbar-center">
+          ${segmentedControlHtml({
+            className: 'file-editor-preview-font-panel',
+            role: 'group',
+            ariaLabel: t('editor.previewFont.aria'),
+            hidden: true,
+            items: [
+              {
+                action: 'editor-preview-font-step',
+                dataset: {editorPreviewFontStep: '-1'},
+                label: 'A-',
+                title: t('editor.previewFont.decrease'),
+                ariaLabel: t('editor.previewFont.decrease'),
+              },
+              {
+                kind: 'custom',
+                tagName: 'span',
+                className: 'file-editor-preview-font-value',
+                attributes: {'aria-live': 'polite'},
+                label: String(editorPreviewFontSize),
+              },
+              {
+                action: 'editor-preview-font-step',
+                dataset: {editorPreviewFontStep: '1'},
+                label: 'A+',
+                title: t('editor.previewFont.increase'),
+                ariaLabel: t('editor.previewFont.increase'),
+              },
+            ],
+          })}
+        </div>
+        ${actionRowHtml({
+          className: 'file-editor-toolbar-zone file-editor-toolbar-right',
+          actions: [
+            {
+              className: 'file-editor-theme-panel',
+              action: 'editor-theme',
+              html: '<span class="file-editor-icon file-editor-icon-theme" aria-hidden="true"></span>',
+              title: t('editor.theme'),
+              ariaLabel: t('editor.theme'),
+            },
+            {
+              kind: 'custom',
+              tagName: 'span',
+              className: 'file-editor-mode-control file-editor-mode-control-panel',
+              role: 'group',
+              ariaLabel: t('editor.mode.aria'),
+              hidden: true,
+              html: [
+                toolbarButtonHtml({
+                  action: 'editor-mode',
+                  dataset: {editorMode: 'edit'},
+                  html: '<span class="file-editor-icon file-editor-icon-edit" aria-hidden="true"></span>',
+                  title: t('editor.mode.edit'),
+                  ariaLabel: t('editor.mode.edit'),
+                }),
+                toolbarButtonHtml({
+                  action: 'editor-mode',
+                  dataset: {editorMode: 'preview'},
+                  html: '<span class="file-editor-icon file-editor-icon-eye" aria-hidden="true"></span>',
+                  title: t('editor.mode.preview'),
+                  ariaLabel: t('editor.mode.preview'),
+                }),
+                toolbarButtonHtml({
+                  action: 'editor-mode',
+                  dataset: {editorMode: 'split'},
+                  html: '<span class="file-editor-icon file-editor-icon-split" aria-hidden="true"></span>',
+                  title: t('editor.mode.split'),
+                  ariaLabel: t('editor.mode.split'),
+                }),
+                toolbarButtonHtml({
+                  className: 'file-editor-popout-preview-panel',
+                  action: 'editor-popout-preview',
+                  html: '<span class="file-editor-icon file-editor-icon-popout-preview" aria-hidden="true"></span>',
+                  title: t('editor.popoutPreview'),
+                  ariaLabel: t('editor.popoutPreview'),
+                  hidden: true,
+                }),
+              ].join(''),
+            },
+            {
+              kind: 'separator',
+              className: 'file-editor-toolbar-separator',
+              dataset: {editorToolbarSeparator: 'mode'},
+              hidden: true,
+            },
+            {
+              className: 'file-editor-find-panel',
+              action: 'editor-find',
+              html: '<span class="file-editor-icon file-editor-icon-find" aria-hidden="true"></span>',
+              title: t('editor.findInFile', {shortcut: appShortcutText('F')}),
+              ariaLabel: t('editor.findInFileAria'),
+              pressed: false,
+              hidden: true,
+            },
+            {
+              className: 'file-editor-blame-panel',
+              action: 'editor-blame',
+              html: '<span class="file-editor-icon file-editor-icon-blame" aria-hidden="true"></span>',
+              title: t('editor.blame.toggle'),
+              ariaLabel: t('editor.blame.toggle'),
+              pressed: fileEditorBlameEnabled,
+              hidden: true,
+            },
+            {
+              kind: 'separator',
+              className: 'file-editor-toolbar-separator',
+              dataset: {editorToolbarSeparator: 'tools'},
+              hidden: true,
+            },
+            {
+              className: 'file-editor-reload-panel',
+              action: 'editor-reload',
+              label: t('editor.reload'),
+              title: t('editor.reloadFromDisk'),
+              ariaLabel: t('editor.reloadFromDisk'),
+              hidden: true,
+            },
+            {
+              kind: 'separator',
+              className: 'file-editor-toolbar-separator',
+              dataset: {editorToolbarSeparator: 'theme'},
+              hidden: true,
+            },
+            {
+              className: 'file-editor-save-panel',
+              action: 'editor-save',
+              html: '<span class="file-editor-icon file-editor-icon-save" aria-hidden="true"></span>',
+              title: t('editor.save'),
+              ariaLabel: t('editor.saveFile'),
+              hidden: readOnlyMode,
+            },
+          ],
+        })}
+      </div>`;
+}
+
 function createFileEditorPanel(item) {
   const path = fileItemPath(item);
   const panel = document.createElement('article');
@@ -28798,38 +30956,7 @@ function createFileEditorPanel(item) {
         </div>
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
-      <div class="file-editor-toolbar" role="toolbar" aria-label="${esc(t('editor.toolbar.aria'))}" hidden>
-        <div class="file-editor-toolbar-zone file-editor-toolbar-left">
-          <button type="button" class="file-editor-gutter-panel" title="${esc(t('editor.toggleLineNumbers'))}" aria-label="${esc(t('editor.toggleLineNumbers'))}" hidden>#</button>
-          <button type="button" class="file-editor-wrap-panel" title="${esc(t('editor.toggleWordWrap'))}" aria-label="${esc(t('editor.toggleWordWrap'))}" hidden><span class="file-editor-icon file-editor-icon-wrap" aria-hidden="true"></span></button>
-          <button type="button" class="file-editor-diff-panel" title="${esc(t('editor.diff'))}" aria-label="${esc(t('editor.diff'))}" hidden>Differ</button>
-          <button type="button" class="file-editor-diff-expand-panel" title="${esc(t('editor.diffExpand'))}" aria-label="${esc(t('editor.diffExpand'))}" aria-pressed="${fileEditorDiffExpandUnchangedForItem(item) ? 'true' : 'false'}" hidden>↕</button>
-          <span class="file-editor-diff-ref-panel" hidden>${diffRefControlsHtml({compact: true})}</span>
-        </div>
-        <div class="file-editor-toolbar-zone file-editor-toolbar-center">
-          <span class="file-editor-preview-font-panel" role="group" aria-label="${esc(t('editor.previewFont.aria'))}" hidden>
-            <button type="button" data-editor-preview-font-step="-1" title="${esc(t('editor.previewFont.decrease'))}" aria-label="${esc(t('editor.previewFont.decrease'))}">A-</button>
-            <span class="file-editor-preview-font-value" aria-live="polite">${esc(String(editorPreviewFontSize))}</span>
-            <button type="button" data-editor-preview-font-step="1" title="${esc(t('editor.previewFont.increase'))}" aria-label="${esc(t('editor.previewFont.increase'))}">A+</button>
-          </span>
-        </div>
-        <div class="file-editor-toolbar-zone file-editor-toolbar-right">
-          <button type="button" class="file-editor-theme-panel" title="${esc(t('editor.theme'))}" aria-label="${esc(t('editor.theme'))}"><span class="file-editor-icon file-editor-icon-theme" aria-hidden="true"></span></button>
-          <div class="file-editor-mode-control file-editor-mode-control-panel" role="group" aria-label="${esc(t('editor.mode.aria'))}" hidden>
-            <button type="button" data-editor-mode="edit" title="${esc(t('editor.mode.edit'))}" aria-label="${esc(t('editor.mode.edit'))}"><span class="file-editor-icon file-editor-icon-edit" aria-hidden="true"></span></button>
-            <button type="button" data-editor-mode="preview" title="${esc(t('editor.mode.preview'))}" aria-label="${esc(t('editor.mode.preview'))}"><span class="file-editor-icon file-editor-icon-eye" aria-hidden="true"></span></button>
-            <button type="button" data-editor-mode="split" title="${esc(t('editor.mode.split'))}" aria-label="${esc(t('editor.mode.split'))}"><span class="file-editor-icon file-editor-icon-split" aria-hidden="true"></span></button>
-            <button type="button" class="file-editor-popout-preview-panel" title="${esc(t('editor.popoutPreview'))}" aria-label="${esc(t('editor.popoutPreview'))}" hidden><span class="file-editor-icon file-editor-icon-popout-preview" aria-hidden="true"></span></button>
-          </div>
-          <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="mode" aria-hidden="true" hidden></span>
-          <button type="button" class="file-editor-find-panel" title="${esc(t('editor.findInFile', {shortcut: appShortcutText('F')}))}" aria-label="${esc(t('editor.findInFileAria'))}" aria-pressed="false" hidden><span class="file-editor-icon file-editor-icon-find" aria-hidden="true"></span></button>
-          <button type="button" class="file-editor-blame-panel" title="${esc(t('editor.blame.toggle'))}" aria-label="${esc(t('editor.blame.toggle'))}" aria-pressed="${fileEditorBlameEnabled ? 'true' : 'false'}" hidden><span class="file-editor-icon file-editor-icon-blame" aria-hidden="true"></span></button>
-          <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="tools" aria-hidden="true" hidden></span>
-          <button type="button" class="file-editor-reload-panel" title="${esc(t('editor.reloadFromDisk'))}" aria-label="${esc(t('editor.reloadFromDisk'))}" hidden>${esc(t('editor.reload'))}</button>
-          <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="theme" aria-hidden="true" hidden></span>
-          <button type="button" class="file-editor-save-panel" title="${esc(t('editor.save'))}" aria-label="${esc(t('editor.saveFile'))}" ${readOnlyMode ? 'hidden' : ''}><span class="file-editor-icon file-editor-icon-save" aria-hidden="true"></span></button>
-        </div>
-      </div>
+      ${fileEditorToolbarHtml(item)}
       <div class="file-editor-panel-body panel-overlay-root">
         <div id="panel-toasts-${item}" class="panel-toast-stack"></div>
         <div class="file-editor-content">
@@ -28838,7 +30965,7 @@ function createFileEditorPanel(item) {
           <div class="file-editor-preview-pane-panel markdown-body" hidden></div>
           <div class="file-editor-image-panel" hidden></div>
         </div>
-        <div class="file-editor-status-panel"><span class="file-editor-status-message"></span><span class="file-editor-cursor-status"></span></div>
+        <div class="file-editor-status-panel"><span class="file-editor-status-message"></span><span class="file-editor-count-status"></span><span class="file-editor-cursor-status"></span></div>
       </div>`;
   bindPanelShell(panel, item);
   panel.addEventListener('click', event => {
@@ -28847,73 +30974,52 @@ function createFileEditorPanel(item) {
     scheduleFileExplorerActiveFileReveal(path);
   });
   delegate(panel, 'pointerdown', 'button', event => event.stopPropagation());
-  panel.querySelector('.file-editor-save-panel')?.addEventListener('click', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    saveFileEditor(path, panel);
-  });
-  panel.querySelector('.file-editor-reload-panel')?.addEventListener('click', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    reloadOpenFileFromDisk(path);
-  });
-  panel.querySelector('.file-editor-mode-control-panel')?.addEventListener('click', event => {
-    const mode = event.target?.closest?.('[data-editor-mode]')?.dataset?.editorMode;
-    if (!editorViewModes.has(mode)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    if (mode === 'diff' && editorViewModeFor(path, item) !== 'diff') {
-      enterFileEditorDiffMode(path, panel, item);
-      return;
-    }
-    setFileEditorViewMode(path, mode, item);
-    renderFileEditorPanel(panel, item);
-  });
-  panel.querySelector('.file-editor-gutter-panel')?.addEventListener('click', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    toggleEditorLineNumbers();
-  });
-  panel.querySelector('.file-editor-preview-font-panel')?.addEventListener('click', event => {
-    const button = event.target?.closest?.('[data-editor-preview-font-step]');
-    if (!button) return;
-    event.preventDefault();
-    event.stopPropagation();
-    setEditorPreviewFontSize(editorPreviewFontSize + Number(button.dataset.editorPreviewFontStep || 0));
-  });
-  panel.querySelector('.file-editor-wrap-panel')?.addEventListener('click', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    toggleEditorWrap();
-  });
-  panel.querySelector('.file-editor-find-panel')?.addEventListener('click', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    toggleEditorFind(panel);
-  });
-  panel.querySelector('.file-editor-blame-panel')?.addEventListener('click', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    if (event.currentTarget?.disabled) return;
-    toggleFileEditorBlame();  // inline git blame on/off (persisted, fetches + re-renders editors)
-  });
-  panel.querySelector('.file-editor-diff-panel')?.addEventListener('click', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    if (event.currentTarget?.disabled || event.currentTarget?.hidden) return;
-    const nextMode = editorViewModeFor(path, item) === 'diff' ? 'edit' : 'diff';
-    if (nextMode === 'diff') {
-      enterFileEditorDiffMode(path, panel, item);
-      return;
-    }
-    setFileEditorViewMode(path, nextMode, item);
-    renderFileEditorPanel(panel, item);
-  });
-  panel.querySelector('.file-editor-diff-expand-panel')?.addEventListener('click', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    toggleFileEditorDiffExpandUnchangedForItem(path, item);  // show all context vs collapse unchanged runs for this editor
-  });
+  bindActionDispatcher(panel, {
+    'editor-save': () => saveFileEditor(path, panel),
+    'editor-reload': () => reloadOpenFileFromDisk(path),
+    'editor-mode': (_event, target) => {
+      const mode = target?.dataset?.editorMode;
+      if (!editorViewModes.has(mode)) return;
+      if (mode === 'diff' && editorViewModeFor(path, item) !== 'diff') {
+        enterFileEditorDiffMode(path, panel, item);
+        return;
+      }
+      setFileEditorViewMode(path, mode, item);
+      renderFileEditorPanel(panel, item);
+    },
+    'editor-toggle-gutter': () => toggleEditorLineNumbers(),
+    'editor-preview-font-step': (_event, target) => {
+      setEditorPreviewFontSize(editorPreviewFontSize + Number(target?.dataset?.editorPreviewFontStep || 0));
+    },
+    'editor-toggle-wrap': () => toggleEditorWrap(),
+    'editor-find': () => {
+      toggleEditorFind(panel);
+    },
+    'editor-blame': (_event, target) => {
+      if (target?.disabled) return;
+      toggleFileEditorBlame();  // inline git blame on/off (persisted, fetches + re-renders editors)
+    },
+    'editor-diff': (_event, target) => {
+      if (target?.disabled || target?.hidden) return;
+      const nextMode = editorViewModeFor(path, item) === 'diff' ? 'edit' : 'diff';
+      if (nextMode === 'diff') {
+        enterFileEditorDiffMode(path, panel, item);
+        return;
+      }
+      setFileEditorViewMode(path, nextMode, item);
+      renderFileEditorPanel(panel, item);
+    },
+    'editor-diff-expand': () => {
+      toggleFileEditorDiffExpandUnchangedForItem(path, item);  // show all context vs collapse unchanged runs for this editor
+    },
+    'editor-popout-preview': () => {
+      if (openFilePreviewPopout(path, panel)) {
+        setFileEditorViewMode(path, 'edit', item);
+        renderFileEditorPanel(panel, item);
+      }
+    },
+    'editor-theme': () => cycleEditorThemeMode({includeVanilla: true}),
+  }, {skipDisabled: false});
   const diffRefPanel = panel.querySelector('.file-editor-diff-ref-panel');
   diffRefPanel?.addEventListener('change', event => {
     const input = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
@@ -28964,19 +31070,6 @@ function createFileEditorPanel(item) {
     const repo = controls?.dataset?.diffRefRepo || '';
     const path = controls?.dataset?.diffRefPath || '';
     setRepoDiffRefs(repo, 'HEAD', 'current', {path});
-  });
-  panel.querySelector('.file-editor-popout-preview-panel')?.addEventListener('click', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    if (openFilePreviewPopout(path, panel)) {
-      setFileEditorViewMode(path, 'edit', item);
-      renderFileEditorPanel(panel, item);
-    }
-  });
-  panel.querySelector('.file-editor-theme-panel')?.addEventListener('click', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    cycleEditorThemeMode({includeVanilla: true});
   });
   panel.querySelector('.file-editor-preview-pane-panel')?.addEventListener('scroll', () => scheduleFileEditorSplitScrollSync(panel, 'preview'));
   renderFileEditorPanel(panel, item);
@@ -29157,6 +31250,2901 @@ function restoreFileEditorPanelViewState(item, panel) {
   measuredRestore();
   requestAnimationFrame(() => measuredRestore(true));
   requestAnimationFrame(() => requestAnimationFrame(() => measuredRestore(true)));
+}
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Editor navigation history helpers split from 95_codemirror_editor.js.
+
+// — back/forward navigation history. The stack holds the layout ITEM ids of visited tabs (any
+// kind: file editors/previews, terminals, Finder, Prefs, …), so Back returns to the previous tab worked
+// on — not just files. recordEditorNav pushes a user-initiated activation; back/forward re-activate the
+// item (re-opening a since-closed file from its path-encoded id). Bounded so the history can't grow
+// without limit — the oldest entries drop past the cap.
+const NAV_STACK_LIMIT = 50;
+function recordEditorNav(item) {
+  if (editorNav.navigating || !item) return;
+  if (editorNav.stack[editorNav.index] === item) return;   // dedupe consecutive same-tab activations
+  editorNav.stack = editorNav.stack.slice(0, editorNav.index + 1);   // a new activation after Back drops the forward tail
+  editorNav.stack.push(item);
+  collapseEditorNavPingPong();
+  if (editorNav.stack.length > NAV_STACK_LIMIT) {
+    editorNav.stack = editorNav.stack.slice(editorNav.stack.length - NAV_STACK_LIMIT);
+  }
+  editorNav.index = editorNav.stack.length - 1;
+  updateEditorNavButtons();
+}
+
+function collapseEditorNavPingPong() {
+  while (editorNav.stack.length >= 4) {
+    const end = editorNav.stack.length;
+    const first = editorNav.stack[end - 4];
+    const second = editorNav.stack[end - 3];
+    if (first !== editorNav.stack[end - 2] || second !== editorNav.stack[end - 1]) return;
+    editorNav.stack.splice(end - 2, 2);
+  }
+}
+
+// Re-activate a history item: focus its tab if still open; if it's a closed file editor/preview, re-open
+// it from the path encoded in its id. Returns false when the item is gone and can't be restored (a
+// closed terminal/Finder/etc.) so the caller can skip it.
+async function activateNavItem(item) {
+  const side = slotForItem(item);
+  if (side) {
+    activatePaneTab(side, item);   // userInitiated defaults falsey → does not re-record
+    return true;
+  }
+  if (isFileEditorItem(item)) {
+    const path = fileItemPath(item);
+    if (path) {
+      await openFileInEditor(path, basenameOf(path), {item});
+      return true;
+    }
+  }
+  return false;
+}
+
+async function editorNavGo(delta) {
+  // Walk in `delta` direction, skipping entries that can't be re-activated (closed non-file tabs), so a
+  // stale entry never dead-ends the history. The first activatable entry becomes the new position.
+  let idx = editorNav.index + delta;
+  while (idx >= 0 && idx < editorNav.stack.length) {
+    const item = editorNav.stack[idx];
+    editorNav.navigating = true;   // re-activation must NOT record a new entry
+    let activated = false;
+    try {
+      activated = await activateNavItem(item);
+    } finally {
+      editorNav.navigating = false;
+    }
+    if (activated) {
+      editorNav.index = idx;
+      updateEditorNavButtons();
+      return;
+    }
+    idx += delta;
+  }
+  updateEditorNavButtons();
+}
+
+function editorNavBack() { return editorNavGo(-1); }
+function editorNavForward() { return editorNavGo(1); }
+
+// The back/forward control lives in the GLOBAL TOPBAR (left of the search bar), not per editor pane —
+// it's one global file-history control, like a browser's. Always visible; disabled at the ends.
+function updateEditorNavButtons() {
+  const back = document.getElementById('topbarNavBack');
+  const forward = document.getElementById('topbarNavForward');
+  if (back) back.disabled = editorNav.index <= 0;
+  if (forward) forward.disabled = editorNav.index >= editorNav.stack.length - 1;
+}
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Markdown preview parsing, sanitizing, source anchors, and Mermaid/SVG helpers split from 95_codemirror_editor.js.
+
+function markdownTextWithSourceAnchors(text) {
+  return String(text || '');
+}
+
+function applyMarkdownSourceLines(container, source) {
+  const lines = String(source || '').split('\n');
+  let searchFrom = 0;
+  const blocks = Array.from(container.querySelectorAll('h1,h2,h3,h4,h5,h6,p,blockquote,pre,ul,ol,table,hr'));
+  for (const block of blocks) {
+    const text = String(block.textContent || '').trim();
+    let lineIndex = -1;
+    for (let index = searchFrom; index < lines.length; index += 1) {
+      const trimmed = lines[index].trim();
+      if (!trimmed) continue;
+      if (block.tagName === 'HR' && /^-{3,}$/.test(trimmed)) {
+        lineIndex = index;
+        break;
+      }
+      if (block.tagName === 'TABLE' && trimmed.startsWith('|')) {
+        lineIndex = index;
+        break;
+      }
+      if (text && trimmed.includes(text.slice(0, Math.min(text.length, 40)))) {
+        lineIndex = index;
+        break;
+      }
+    }
+    if (lineIndex >= 0) {
+      block.dataset.sourceLine = String(lineIndex + 1);
+      const anchor = document.createElement('span');
+      anchor.className = 'markdown-source-anchor';
+      anchor.dataset.sourceLine = String(lineIndex + 1);
+      block.appendChild(anchor);
+      searchFrom = lineIndex + 1;
+    }
+  }
+}
+
+const MARKDOWN_PREVIEW_BLOCKED_TAGS = new Set([
+  'applet',
+  'audio',
+  'base',
+  'button',
+  'canvas',
+  'embed',
+  'form',
+  'iframe',
+  'link',
+  'math',
+  'meta',
+  'object',
+  'option',
+  'script',
+  'select',
+  'source',
+  'style',
+  'svg',
+  'textarea',
+  'track',
+  'video',
+]);
+const MARKDOWN_PREVIEW_URL_ATTRS = new Set(['href', 'src', 'poster', 'xlink:href']);
+const MARKDOWN_PREVIEW_SAFE_PROTOCOLS = new Set(['http:', 'https:', 'mailto:', 'tel:']);
+const MARKDOWN_PREVIEW_SAFE_IMAGE_DATA = /^data:image\/(?:png|gif|jpe?g|webp);/i;
+const MARKDOWN_PREVIEW_INPUT_ATTRS = new Set(['type', 'checked', 'disabled', 'aria-label', 'class']);
+
+function markdownPreviewUrlAllowed(value, tagName) {
+  const raw = String(value || '').trim();
+  if (!raw) return true;
+  if (raw.startsWith('#') || raw.startsWith('/') || raw.startsWith('./') || raw.startsWith('../')) return true;
+  try {
+    const base = globalThis.location?.href || 'http://localhost/';
+    const url = new URL(raw, base);
+    if (MARKDOWN_PREVIEW_SAFE_PROTOCOLS.has(url.protocol.toLowerCase())) return true;
+    return tagName === 'img' && url.protocol.toLowerCase() === 'data:' && MARKDOWN_PREVIEW_SAFE_IMAGE_DATA.test(raw);
+  } catch (_) {
+    return false;
+  }
+}
+
+function sanitizeMarkdownPreviewAttribute(element, attr) {
+  const name = String(attr?.name || '').toLowerCase();
+  if (!name) return;
+  const tagName = String(element.tagName || '').toLowerCase();
+  if (tagName === 'input' && !MARKDOWN_PREVIEW_INPUT_ATTRS.has(name)) {
+    element.removeAttribute(attr.name);
+    return;
+  }
+  if (name.startsWith('on') || name === 'style' || name === 'srcdoc' || name === 'srcset' || name === 'formaction') {
+    element.removeAttribute(attr.name);
+    return;
+  }
+  if (name.includes(':') && name !== 'xlink:href') {
+    element.removeAttribute(attr.name);
+    return;
+  }
+  if (MARKDOWN_PREVIEW_URL_ATTRS.has(name) && !markdownPreviewUrlAllowed(attr.value, tagName)) {
+    element.removeAttribute(attr.name);
+    return;
+  }
+  if (name === 'target' && element.getAttribute('target') === '_blank') {
+    element.setAttribute('rel', 'noopener noreferrer');
+  }
+}
+
+function markdownPreviewInputAllowed(element) {
+  return String(element?.getAttribute?.('type') || '').toLowerCase() === 'checkbox';
+}
+
+function sanitizeMarkdownPreviewNode(root) {
+  const elementNode = globalThis.Node?.ELEMENT_NODE || 1;
+  const commentNode = globalThis.Node?.COMMENT_NODE || 8;
+  for (const child of Array.from(root?.childNodes || [])) {
+    if (child.nodeType === commentNode) {
+      child.remove();
+      continue;
+    }
+    if (child.nodeType !== elementNode) continue;
+    const tagName = String(child.tagName || '').toLowerCase();
+    if (tagName === 'input') {
+      if (!markdownPreviewInputAllowed(child)) {
+        child.remove();
+        continue;
+      }
+      child.setAttribute('type', 'checkbox');
+      child.setAttribute('disabled', '');
+    }
+    if (MARKDOWN_PREVIEW_BLOCKED_TAGS.has(tagName)) {
+      child.remove();
+      continue;
+    }
+    if (tagName === 'input' && String(child.getAttribute('type') || '').toLowerCase() !== 'checkbox') {
+      child.remove();
+      continue;
+    }
+    for (const attr of Array.from(child.attributes || [])) {
+      if (tagName === 'input' && !MARKDOWN_PREVIEW_INPUT_ATTRS.has(String(attr?.name || '').toLowerCase())) {
+        child.removeAttribute(attr.name);
+        continue;
+      }
+      sanitizeMarkdownPreviewAttribute(child, attr);
+    }
+    sanitizeMarkdownPreviewNode(child);
+  }
+}
+
+function sanitizeMarkdownPreviewHtml(html) {
+  const template = document.createElement('template');
+  if (!template.content) {
+    const fallback = document.createElement('div');
+    fallback.textContent = String(html ?? '');
+    return fallback;
+  }
+  template.innerHTML = String(html ?? '');
+  sanitizeMarkdownPreviewNode(template.content);
+  return template.content;
+}
+
+// turn bare http(s) URLs in rendered markdown into real <a> links — version-proof against
+// marked's GFM autolink missing them (e.g. when per-line source anchors are interleaved). Skips text
+// already inside <a>/<code>/<pre> so existing links and code samples are untouched. Reuses
+// markdownPreviewUrlAllowed so only safe schemes link; mirrors the app's safe-link attributes.
+function linkifyBareUrls(root) {
+  if (!root || typeof document.createTreeWalker !== 'function') return;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      for (let el = node.parentElement; el; el = el.parentElement) {
+        const tag = el.tagName ? el.tagName.toLowerCase() : '';
+        if (tag === 'a' || tag === 'code' || tag === 'pre') return NodeFilter.FILTER_REJECT;
+      }
+      return /\bhttps?:\/\/\S/.test(node.nodeValue || '') ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+    },
+  });
+  const targets = [];
+  while (walker.nextNode()) targets.push(walker.currentNode);
+  const urlRe = /\bhttps?:\/\/[^\s<>"')\]}]+/g;
+  for (const textNode of targets) {
+    const text = textNode.nodeValue;
+    let last = 0;
+    let match;
+    const frag = document.createDocumentFragment();
+    urlRe.lastIndex = 0;
+    while ((match = urlRe.exec(text))) {
+      const url = match[0].replace(/[.,;:!?]+$/, '');   // drop trailing sentence punctuation
+      const start = match.index;
+      const end = start + url.length;
+      if (start > last) frag.appendChild(document.createTextNode(text.slice(last, start)));
+      if (markdownPreviewUrlAllowed(url, 'a')) {
+        const a = document.createElement('a');
+        a.href = url;
+        a.textContent = url;
+        a.target = '_blank';
+        a.rel = 'noreferrer noopener';
+        frag.appendChild(a);
+      } else {
+        frag.appendChild(document.createTextNode(url));
+      }
+      last = end;
+    }
+    if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+    textNode.replaceWith(frag);
+  }
+}
+
+function mermaidApiIsUsable(api) {
+  return Boolean(api?.initialize && api?.render);
+}
+
+function mermaidBundleUrl(options = {}) {
+  const base = '/static/vendor/mermaid.min.js';
+  return options.force ? `${base}?retry=${Date.now()}` : base;
+}
+
+function loadMermaidBundleScript(options = {}) {
+  if (!options.force && mermaidApiIsUsable(window.mermaid)) return Promise.resolve(window.mermaid);
+  if (options.force) mermaidBundlePromise = null;
+  if (!mermaidBundlePromise) {
+    mermaidBundlePromise = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = mermaidBundleUrl(options);
+      script.async = true;
+      script.onload = () => resolve(window.mermaid || null);
+      script.onerror = () => reject(new Error(`Mermaid bundle failed to load: ${script.src}`));
+      document.head.appendChild(script);
+    });
+  }
+  return mermaidBundlePromise;
+}
+
+// The two readable label/line "ink" colors for the Mermaid preview: MERMAID_LIGHT_INK on dark
+// surfaces/fills, MERMAID_DARK_INK on light ones. One owner so the dark/light contrast pair, the
+// dark-surface foreground fallback, and the label style default cannot drift apart.
+const MERMAID_LIGHT_INK = '#e4e8ee';
+const MERMAID_DARK_INK = '#0f172a';
+
+function mermaidSurfacePalette() {
+  // The diagram renders on the PREVIEW surface, whose Bright/Dark/Vanilla display mode is independent
+  // of the app theme. Derive the palette from that mode, NOT from document `--text` (which follows the
+  // app theme): a Bright preview on a dark app must still get dark lines/text on its white surface,
+  // otherwise the light app `--text` paints light-gray lines that are illegible on white.
+  const light = typeof editorPreviewThemeState === 'function' && editorPreviewThemeState() !== 'dark';
+  if (light) {
+    return {dark: false, fg: '#17202c', surfaceBg: '#ffffff', nodeBg: '#f4f6fa', border: '#c2c9d6', cluster: '#eef2f7'};
+  }
+  return {
+    dark: true,
+    fg: svgPreviewColor('--text', MERMAID_LIGHT_INK),
+    surfaceBg: svgPreviewColor('--panel', '#151922'),
+    nodeBg: svgPreviewColor('--panel', '#151922'),
+    border: svgPreviewColor('--line', '#2a3140'),
+    cluster: svgPreviewColor('--panel2', '#1e2430'),
+  };
+}
+
+function mermaidPreviewConfig() {
+  const p = mermaidSurfacePalette();
+  return {
+    startOnLoad: false,
+    securityLevel: 'strict',
+    deterministicIds: true,
+    deterministicIDSeed: 'yolomux-preview',
+    theme: 'base',
+    htmlLabels: true,
+    flowchart: {
+      htmlLabels: true,
+      useMaxWidth: true,
+      nodeSpacing: 72,
+      rankSpacing: 72,
+    },
+    themeVariables: {
+      background: p.surfaceBg,
+      mainBkg: p.nodeBg,
+      primaryColor: p.nodeBg,
+      primaryTextColor: p.fg,
+      primaryBorderColor: p.border,
+      lineColor: p.fg,
+      textColor: p.fg,
+      fontFamily: svgPreviewFontFamily(),
+      fontSize: '16px',
+      nodeBorder: p.border,
+      clusterBkg: p.cluster,
+      clusterBorder: p.border,
+    },
+  };
+}
+
+function configureMermaidApi(api) {
+  api.initialize(mermaidPreviewConfig());
+  return api;
+}
+
+async function loadMermaidApi() {
+  if (mermaidApiIsUsable(window.mermaid)) return configureMermaidApi(window.mermaid);
+  if (!mermaidApiPromise) {
+    mermaidApiPromise = (async () => {
+      let bundleError = null;
+      try {
+        let api = await loadMermaidBundleScript();
+        if (mermaidApiIsUsable(api)) return configureMermaidApi(api);
+        api = await loadMermaidBundleScript({force: true});
+        if (mermaidApiIsUsable(api)) return configureMermaidApi(api);
+        bundleError = new Error('Mermaid bundle missing critical exports');
+      } catch (error) {
+        bundleError = error;
+      }
+      throw bundleError || new Error('Mermaid unavailable');
+    })();
+  }
+  try {
+    return await mermaidApiPromise;
+  } catch (error) {
+    mermaidApiPromise = null;
+    throw error;
+  }
+}
+
+function splitMarkdownResourceUrl(value) {
+  const raw = String(value || '').trim();
+  const match = raw.match(/^([^?#]*)([?#].*)?$/);
+  return {
+    path: match ? match[1] : raw,
+    suffix: match ? (match[2] || '') : '',
+  };
+}
+
+function safeDecodeMarkdownUrlPath(value) {
+  try {
+    return decodeURIComponent(String(value || ''));
+  } catch (_) {
+    return String(value || '');
+  }
+}
+
+function markdownPreviewImageTarget(src, markdownPath) {
+  const raw = String(src || '').trim();
+  if (!raw || !markdownPath) return null;
+  if (raw.startsWith('#') || raw.startsWith('//')) return null;
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(raw)) {
+    if (/^https?:/i.test(raw)) return {src: raw, path: '', external: true};
+    if (/^data:/i.test(raw) && MARKDOWN_PREVIEW_SAFE_IMAGE_DATA.test(raw)) return {src: raw, path: '', external: true};
+    return null;
+  }
+  const {path: rawPath} = splitMarkdownResourceUrl(raw);
+  if (!rawPath) return null;
+  const resolved = joinAndNormalize(dirnameOf(markdownPath), safeDecodeMarkdownUrlPath(rawPath));
+  return {src: rawFileUrl(resolved), path: resolved, external: false};
+}
+
+function markdownImageFallbackNode(path, label = '') {
+  const node = document.createElement('span');
+  node.className = 'markdown-image-error';
+  const text = document.createElement('span');
+  text.textContent = label || `Image unavailable: ${path}`;
+  node.appendChild(text);
+  if (path) {
+    const open = document.createElement('a');
+    open.href = rawFileUrl(path);
+    open.target = '_blank';
+    open.rel = 'noopener noreferrer';
+    open.textContent = 'Open';
+    const download = document.createElement('a');
+    download.href = rawFileDownloadUrl(path);
+    download.textContent = 'Download';
+    node.append(document.createTextNode(' '), open, document.createTextNode(' · '), download);
+  }
+  return node;
+}
+
+function rewriteMarkdownPreviewImages(root, markdownPath) {
+  if (!root || !markdownPath) return;
+  for (const img of Array.from(root.querySelectorAll?.('img[src]') || [])) {
+    const original = img.getAttribute('src') || '';
+    const target = markdownPreviewImageTarget(original, markdownPath);
+    if (!target) continue;
+    img.classList.add('markdown-preview-image');
+    img.dataset.originalSrc = original;
+    if (target.path) img.dataset.resolvedPath = target.path;
+    img.setAttribute('src', target.src);
+    if (!img.getAttribute('alt') && target.path) img.setAttribute('alt', basenameOf(target.path));
+    img.addEventListener('error', () => {
+      img.replaceWith(markdownImageFallbackNode(target.path, `Image unavailable: ${target.path || original}`));
+    }, {once: true});
+  }
+}
+
+const MARKDOWN_TASK_LINE_RE = /^(\s*(?:[-+*]|\d+[.)])\s+\[)([ xX])(\]\s*)/;
+
+function markdownTaskLineEntries(text) {
+  return String(text || '').split('\n')
+    .map((line, index) => {
+      const match = line.match(MARKDOWN_TASK_LINE_RE);
+      return match ? {line: index + 1, checked: match[2].toLowerCase() === 'x'} : null;
+    })
+    .filter(Boolean);
+}
+
+function markdownTextWithTaskLineToggled(text, sourceLine, checked) {
+  const lines = String(text || '').split('\n');
+  const index = Math.max(0, Math.floor(Number(sourceLine) || 1) - 1);
+  if (index >= lines.length || !MARKDOWN_TASK_LINE_RE.test(lines[index])) return null;
+  lines[index] = lines[index].replace(MARKDOWN_TASK_LINE_RE, (_, prefix, _marker, suffix) => `${prefix}${checked ? 'x' : ' '}${suffix}`);
+  return lines.join('\n');
+}
+
+function updateMarkdownTaskFromPreview(container, input) {
+  const path = container?.dataset?.mdPath || '';
+  const sourceLine = Number(input?.dataset?.sourceLine || 0);
+  const state = openFiles.get(path);
+  if (readOnlyMode || !path || !sourceLine || !state || state.kind !== 'text') return false;
+  const next = markdownTextWithTaskLineToggled(state.content, sourceLine, input.checked === true);
+  if (next === null || next === state.content) return false;
+  const sourcePanel = container.closest?.('.file-editor-panel') || fileEditorPanelsForPath(path)[0] || null;
+  handleFileEditorContentChanged(sourcePanel, path, next, {syntax: false});
+  for (const panel of fileEditorPanelsForPath(path)) {
+    if (panel?._cmView) syncCodeMirrorDocument(panel._cmView, next, {path});
+  }
+  return true;
+}
+
+function bindMarkdownTaskCheckboxes(container, text, markdownPath) {
+  const tasks = markdownTaskLineEntries(text);
+  const checkboxes = Array.from(container.querySelectorAll('input[type="checkbox"]'));
+  checkboxes.forEach((input, index) => {
+    const task = tasks[index];
+    if (!task) return;
+    input.dataset.sourceLine = String(task.line);
+    input.classList.add('markdown-task-checkbox');
+    input.checked = task.checked;
+    if (markdownPath && !readOnlyMode) {
+      input.disabled = false;
+      input.removeAttribute('disabled');
+      input.setAttribute('aria-label', t('editor.toggleTaskLine', {line: task.line}));
+    }
+  });
+  if (markdownPath && !container.dataset.mdTaskBound) {
+    container.dataset.mdTaskBound = '1';
+    container.addEventListener('change', event => {
+      const input = event.target?.closest?.('input[type="checkbox"].markdown-task-checkbox[data-source-line]');
+      if (!input || !container.contains(input)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const updated = updateMarkdownTaskFromPreview(container, input);
+      if (!updated) input.checked = !input.checked;
+    });
+  }
+}
+
+function markdownFallbackDestinationAndTitle(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return {dest: '', title: ''};
+  if (raw.startsWith('<')) {
+    const end = raw.indexOf('>');
+    if (end >= 0) return {dest: raw.slice(1, end), title: raw.slice(end + 1).trim().replace(/^["']|["']$/g, '')};
+  }
+  const titleMatch = raw.match(/^(.+?)\s+["']([^"']*)["']\s*$/);
+  if (titleMatch) return {dest: titleMatch[1].trim(), title: titleMatch[2]};
+  let dest = '';
+  let escaped = false;
+  let index = 0;
+  for (; index < raw.length; index += 1) {
+    const ch = raw[index];
+    if (escaped) {
+      dest += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (/\s/.test(ch)) break;
+    dest += ch;
+  }
+  return {dest, title: raw.slice(index).trim().replace(/^["']|["']$/g, '')};
+}
+
+function findMarkdownInlineCloseBracket(text, start) {
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const ch = text[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (ch === ']') return index;
+  }
+  return -1;
+}
+
+function findMarkdownInlineCloseParen(text, start) {
+  let escaped = false;
+  let quote = '';
+  let depth = 0;
+  for (let index = start; index < text.length; index += 1) {
+    const ch = text[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = '';
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === '(') {
+      depth += 1;
+      continue;
+    }
+    if (ch === ')') {
+      if (depth === 0) return index;
+      depth -= 1;
+    }
+  }
+  return -1;
+}
+
+function markdownInlineResourceHtml(text, hold) {
+  const source = String(text || '');
+  let out = '';
+  let index = 0;
+  while (index < source.length) {
+    const image = source.startsWith('![', index);
+    const link = !image && source[index] === '[';
+    if (!image && !link) {
+      out += source[index];
+      index += 1;
+      continue;
+    }
+    const labelStart = index + (image ? 2 : 1);
+    const labelEnd = findMarkdownInlineCloseBracket(source, labelStart);
+    if (labelEnd < 0 || source[labelEnd + 1] !== '(') {
+      out += source[index];
+      index += 1;
+      continue;
+    }
+    const destStart = labelEnd + 2;
+    const destEnd = findMarkdownInlineCloseParen(source, destStart);
+    if (destEnd < 0) {
+      out += source[index];
+      index += 1;
+      continue;
+    }
+    const label = source.slice(labelStart, labelEnd);
+    const rawDest = source.slice(destStart, destEnd);
+    const {dest, title} = markdownFallbackDestinationAndTitle(rawDest);
+    if (!dest) {
+      out += source.slice(index, destEnd + 1);
+      index = destEnd + 1;
+      continue;
+    }
+    const titleAttr = title ? ` title="${esc(title)}"` : '';
+    out += image
+      ? hold(`<img alt="${esc(label)}" src="${esc(dest)}"${titleAttr}>`)
+      : hold(`<a href="${esc(dest)}"${titleAttr}>${esc(label)}</a>`);
+    index = destEnd + 1;
+  }
+  return out;
+}
+
+function markdownInlineHtml(text) {
+  const placeholders = [];
+  const hold = html => {
+    const token = `@@YOLOMUX_MD_${placeholders.length}@@`;
+    placeholders.push([token, html]);
+    return token;
+  };
+  const source = markdownInlineResourceHtml(text, hold);
+  let html = esc(source)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  for (const [token, value] of placeholders) html = html.replaceAll(token, value);
+  return html;
+}
+
+function markdownFallbackTableHtml(lines, start) {
+  if (start + 1 >= lines.length || !/^\s*\|?[\s:-]+\|[\s|:-]*$/.test(lines[start + 1])) return null;
+  const rows = [];
+  let index = start;
+  while (index < lines.length && /^\s*\|/.test(lines[index])) {
+    if (index !== start + 1) rows.push(lines[index]);
+    index += 1;
+  }
+  const cells = line => line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(cell => markdownInlineHtml(cell.trim()));
+  const header = cells(rows[0] || '');
+  const bodyRows = rows.slice(1);
+  const head = `<thead><tr>${header.map(cell => `<th>${cell}</th>`).join('')}</tr></thead>`;
+  const body = `<tbody>${bodyRows.map(row => `<tr>${cells(row).map(cell => `<td>${cell}</td>`).join('')}</tr>`).join('')}</tbody>`;
+  return {html: `<table>${head}${body}</table>`, next: index};
+}
+
+function fallbackMarkdownToHtml(text) {
+  const lines = String(text || '').split('\n');
+  const out = [];
+  let paragraph = [];
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    out.push(`<p>${paragraph.map(line => markdownInlineHtml(line.trim())).join('<br>')}</p>`);
+    paragraph = [];
+  };
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const trimmed = line.trim();
+    if (!trimmed) {
+      flushParagraph();
+      continue;
+    }
+    const fence = trimmed.match(/^```([A-Za-z0-9_-]+)?\s*$/);
+    if (fence) {
+      flushParagraph();
+      const language = String(fence[1] || 'text').toLowerCase();
+      const code = [];
+      index += 1;
+      while (index < lines.length && !lines[index].trim().startsWith('```')) {
+        code.push(lines[index]);
+        index += 1;
+      }
+      out.push(`<pre><code class="language-${esc(language)}">${esc(code.join('\n'))}</code></pre>`);
+      continue;
+    }
+    const table = markdownFallbackTableHtml(lines, index);
+    if (table) {
+      flushParagraph();
+      out.push(table.html);
+      index = table.next - 1;
+      continue;
+    }
+    const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
+    if (heading) {
+      flushParagraph();
+      const level = heading[1].length;
+      out.push(`<h${level}>${markdownInlineHtml(heading[2])}</h${level}>`);
+      continue;
+    }
+    if (/^[-*_]{3,}$/.test(trimmed)) {
+      flushParagraph();
+      out.push('<hr>');
+      continue;
+    }
+    const quote = trimmed.match(/^>\s?(.*)$/);
+    if (quote) {
+      flushParagraph();
+      out.push(`<blockquote><p>${markdownInlineHtml(quote[1])}</p></blockquote>`);
+      continue;
+    }
+    const task = trimmed.match(/^[-+*]\s+\[([ xX])\]\s+(.+)$/);
+    if (task) {
+      flushParagraph();
+      const items = [];
+      while (index < lines.length) {
+        const item = lines[index].trim().match(/^[-+*]\s+\[([ xX])\]\s+(.+)$/);
+        if (!item) break;
+        const checked = item[1].toLowerCase() === 'x' ? ' checked' : '';
+        items.push(`<li class="task-list-item"><input type="checkbox"${checked} disabled> ${markdownInlineHtml(item[2])}</li>`);
+        index += 1;
+      }
+      out.push(`<ul>${items.join('')}</ul>`);
+      index -= 1;
+      continue;
+    }
+    const bullet = trimmed.match(/^[-+*]\s+(.+)$/);
+    if (bullet) {
+      flushParagraph();
+      const items = [];
+      while (index < lines.length) {
+        const item = lines[index].trim().match(/^[-+*]\s+(.+)$/);
+        if (!item || /^[-+*]\s+\[[ xX]\]\s+/.test(lines[index].trim())) break;
+        items.push(`<li>${markdownInlineHtml(item[1])}</li>`);
+        index += 1;
+      }
+      out.push(`<ul>${items.join('')}</ul>`);
+      index -= 1;
+      continue;
+    }
+    paragraph.push(line);
+  }
+  flushParagraph();
+  return out.join('');
+}
+
+function markdownPreviewHtml(text) {
+  if (typeof window.marked !== 'undefined' && typeof window.marked.parse === 'function') {
+    return window.marked.parse(markdownTextWithSourceAnchors(text), {gfm: true, breaks: true});
+  }
+  return fallbackMarkdownToHtml(markdownTextWithSourceAnchors(text));
+}
+
+function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) {
+  container._previewAsync = null;
+  const html = markdownPreviewHtml(text);
+  const frag = sanitizeMarkdownPreviewHtml(html);
+  linkifyBareUrls(frag);
+  rewriteMarkdownPreviewImages(frag, markdownPath);
+  container.replaceChildren(frag);
+  applyMarkdownSourceLines(container, text);
+  container._previewAsync = renderMarkdownMermaidBlocks(container, markdownPath, {context: options.context || ''});
+  bindMarkdownTaskCheckboxes(container, text, markdownPath);
+  installLinkContextMenu(container);   // right-click Copy URL / Open URL on rendered links
+  // when this preview belongs to an on-disk file (file-editor preview, NOT a yoagent body),
+  // remember the owning file's dir so relative links resolve, and bind the in-pane link handler once.
+  if (markdownPath) {
+    container.dataset.mdPath = markdownPath;
+    container.dataset.basePath = dirnameOf(markdownPath);
+    if (!container.dataset.mdLinkBound) {
+      container.dataset.mdLinkBound = '1';
+      container.addEventListener('click', handleMarkdownPreviewLinkClick);
+    }
+  }
+  if (fileEditorPreviewDisplayMode !== 'vanilla') {
+    container.querySelectorAll('pre code').forEach(block => {
+      if (typeof window.hljs !== 'undefined') {
+        try { window.hljs.highlightElement(block); } catch (_) {}
+      }
+      applyMarkdownFenceFallbackHighlight(block);
+    });
+  }
+}
+
+function markdownFenceLanguage(block) {
+  const classes = Array.from(block?.classList || []);
+  for (const className of classes) {
+    const match = String(className || '').match(/^(?:language|lang)-(.+)$/);
+    if (match) return match[1].toLowerCase();
+  }
+  return '';
+}
+
+function isMermaidFenceLanguage(language) {
+  return ['mermaid', 'mmd', 'diagram-mermaid'].includes(String(language || '').toLowerCase());
+}
+
+function sanitizeSvgStyleText(text) {
+  return String(text || '')
+    .replace(/@import[^;]+;?/gi, '')
+    .replace(/url\([^)]*\)/gi, '');
+}
+
+function svgUrlValueUnsafe(value) {
+  const raw = String(value || '').trim();
+  if (!raw || raw.startsWith('#')) return false;
+  return true;
+}
+
+function svgNumberAttribute(element, name, fallback = 0) {
+  const value = Number.parseFloat(String(element?.getAttribute?.(name) || ''));
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function svgPreviewFontFamily() {
+  const root = typeof getComputedStyle === 'function' ? getComputedStyle(document.documentElement) : null;
+  return root?.getPropertyValue?.('--ui-font')?.trim() || 'Inter, "Segoe UI", "Noto Sans", Arial, sans-serif';
+}
+
+function svgPreviewColor(name, fallback) {
+  const root = typeof getComputedStyle === 'function' ? getComputedStyle(document.documentElement) : null;
+  return root?.getPropertyValue?.(name)?.trim() || fallback;
+}
+
+function svgParseColor(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text || text === 'none' || text === 'transparent' || text === 'currentcolor' || text.startsWith('url(')) return null;
+  const hex = text.match(/^#([0-9a-f]{3,8})$/i);
+  if (hex) {
+    let raw = hex[1];
+    if (raw.length === 3 || raw.length === 4) raw = raw.split('').map(ch => ch + ch).join('');
+    if (raw.length < 6) return null;
+    return {
+      r: Number.parseInt(raw.slice(0, 2), 16),
+      g: Number.parseInt(raw.slice(2, 4), 16),
+      b: Number.parseInt(raw.slice(4, 6), 16),
+    };
+  }
+  const rgb = text.match(/^rgba?\(\s*([0-9.]+)[,\s]+([0-9.]+)[,\s]+([0-9.]+)/);
+  if (rgb) {
+    return {
+      r: Number.parseFloat(rgb[1]),
+      g: Number.parseFloat(rgb[2]),
+      b: Number.parseFloat(rgb[3]),
+    };
+  }
+  return null;
+}
+
+function svgColorLuminance(color) {
+  const channel = value => {
+    const normalized = Math.max(0, Math.min(255, value)) / 255;
+    return normalized <= 0.03928 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+  };
+  return (0.2126 * channel(color.r)) + (0.7152 * channel(color.g)) + (0.0722 * channel(color.b));
+}
+
+function svgColorContrastRatio(foreground, background) {
+  const fg = svgParseColor(foreground);
+  const bg = svgParseColor(background);
+  if (!fg || !bg) return 0;
+  const a = svgColorLuminance(fg);
+  const b = svgColorLuminance(bg);
+  const lighter = Math.max(a, b);
+  const darker = Math.min(a, b);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+function svgColorIsDark(value) {
+  const color = svgParseColor(value);
+  return color ? svgColorLuminance(color) < 0.36 : true;
+}
+
+function svgStyleValue(element, property) {
+  const style = String(element?.getAttribute?.('style') || '');
+  const match = style.match(new RegExp(`${property}\\s*:\\s*([^;]+)`, 'i'));
+  // Strip a trailing `!important` (Mermaid stamps it on every classDef fill, e.g.
+  // `fill:#fef3c7 !important`); otherwise svgParseColor's anchored `^#...$` rejects the value and
+  // the node reads as having no background, which flips its label to the wrong contrast color.
+  return match ? match[1].replace(/\s*!important\s*$/i, '').trim() : '';
+}
+
+function svgStyleDeclarations(text) {
+  const declarations = {};
+  String(text || '').split(';').forEach(part => {
+    const index = part.indexOf(':');
+    if (index <= 0) return;
+    const property = part.slice(0, index).trim().toLowerCase();
+    const value = part.slice(index + 1).trim().replace(/\s*!important\s*$/i, '');
+    if (property && value) declarations[property] = value;
+  });
+  return declarations;
+}
+
+function svgStyleRules(svg) {
+  if (!svg) return [];
+  if (Array.isArray(svg._yolomuxSvgStyleRules)) return svg._yolomuxSvgStyleRules;
+  const rules = [];
+  svg.querySelectorAll?.('style').forEach(style => {
+    const text = String(style.textContent || '').replace(/\/\*[\s\S]*?\*\//g, '');
+    for (const match of text.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      const declarations = svgStyleDeclarations(match[2]);
+      match[1].split(',').map(selector => selector.trim()).filter(Boolean).forEach(selector => {
+        rules.push({selector, declarations});
+      });
+    }
+  });
+  svg._yolomuxSvgStyleRules = rules;
+  return rules;
+}
+
+function svgSimpleSelectorMatches(element, selector) {
+  const raw = String(selector || '').trim();
+  if (!raw || raw.includes(':') || raw.includes('>') || raw.includes('+') || raw.includes('~')) return false;
+  const tag = raw.match(/^[a-z][a-z0-9_-]*/i)?.[0] || '';
+  if (tag && tag !== '*' && String(element?.tagName || '').toLowerCase() !== tag.toLowerCase()) return false;
+  for (const id of raw.matchAll(/#([a-z0-9_-]+)/gi)) {
+    if (element?.id !== id[1]) return false;
+  }
+  for (const className of raw.matchAll(/\.([a-z0-9_-]+)/gi)) {
+    if (!element?.classList?.contains(className[1])) return false;
+  }
+  return true;
+}
+
+function svgSelectorMatches(element, selector) {
+  const parts = String(selector || '').trim().split(/\s+/).filter(Boolean);
+  if (!parts.length || !element) return false;
+  let node = element;
+  for (let index = parts.length - 1; index >= 0; index -= 1) {
+    let match = null;
+    for (let cursor = node; cursor; cursor = cursor.parentElement) {
+      if (svgSimpleSelectorMatches(cursor, parts[index])) {
+        match = cursor;
+        break;
+      }
+    }
+    if (!match) return false;
+    node = match.parentElement;
+  }
+  return true;
+}
+
+function svgCssStyleValue(element, property) {
+  const svg = element?.closest?.('svg');
+  if (!svg) return '';
+  const key = String(property || '').toLowerCase();
+  let value = '';
+  for (const rule of svgStyleRules(svg)) {
+    if (rule.declarations[key] && svgSelectorMatches(element, rule.selector)) value = rule.declarations[key];
+  }
+  return value;
+}
+
+function svgPaintColor(element, property = 'fill') {
+  return svgStyleValue(element, property) || svgCssStyleValue(element, property) || element?.getAttribute?.(property) || '';
+}
+
+function svgSetStyleProperty(element, property, value) {
+  if (!element?.setAttribute) return;
+  const existing = String(element.getAttribute('style') || '')
+    .split(';')
+    .map(part => part.trim())
+    .filter(part => part && !part.toLowerCase().startsWith(`${property.toLowerCase()}:`));
+  existing.push(`${property}:${value}`);
+  element.setAttribute('style', `${existing.join(';')};`);
+}
+
+function svgNodeBackgroundFill(node) {
+  // The background behind a node label is the node's own background SHAPE fill. Scan the node's
+  // shapes (skipping label-internal shapes) and return the first with a parseable fill; the first
+  // shape in document order can be a fill-less <path> or a label-internal shape, so picking it
+  // blindly is wrong. A node with no parseable shape fill is transparent over the preview surface.
+  const shapes = node?.querySelectorAll?.('rect, polygon, path, circle, ellipse') || [];
+  for (const shape of Array.from(shapes)) {
+    if (shape.closest?.('.label')) continue;
+    const fill = svgPaintColor(shape, 'fill');
+    if (svgParseColor(fill)) return fill;
+  }
+  return '';
+}
+
+function svgReadableLabelColor(element) {
+  // Labels that sit on the preview surface (subgraph/edge labels, or a node with no/transparent fill)
+  // use the surface foreground, which follows the preview's Bright/Dark/Vanilla mode (dark text on a
+  // white Bright surface, light text on a dark surface).
+  const surfaceFg = mermaidSurfacePalette().fg;
+  const node = element?.closest?.('.node');
+  if (!node) return surfaceFg;
+  // A node with a fill: pick the text color that contrasts with the node's actual background SHAPE
+  // fill (not the nearest ancestor fill, which for a label is the text color and gives dark-on-dark).
+  const bg = svgNodeBackgroundFill(node);
+  if (!bg || !svgParseColor(bg)) return surfaceFg;
+  return svgColorContrastRatio(MERMAID_DARK_INK, bg) >= svgColorContrastRatio(MERMAID_LIGHT_INK, bg) ? MERMAID_DARK_INK : MERMAID_LIGHT_INK;
+}
+
+function svgReadableEdgeColor() {
+  return mermaidSurfacePalette().fg;
+}
+
+function svgReadableLabelStyle(color = svgPreviewColor('--text', MERMAID_LIGHT_INK), size = 15, weight = 400) {
+  return `font-family:${svgPreviewFontFamily()};font-size:${size}px;font-weight:${weight};fill:${color};stroke:none;stroke-width:0;`;
+}
+
+function svgApplyReadableLabelStyle(node, color) {
+  if (!node?.setAttribute) return;
+  svgSetStyleProperty(node, 'font-family', svgPreviewFontFamily());
+  svgSetStyleProperty(node, 'font-weight', '400');
+  svgSetStyleProperty(node, 'fill', color);
+  svgSetStyleProperty(node, 'stroke', 'none');
+  svgSetStyleProperty(node, 'stroke-width', '0');
+}
+
+function svgForeignObjectTextNode(element) {
+  const clone = element.cloneNode(true);
+  clone.querySelectorAll?.('script,style,iframe,object,embed,link,meta').forEach(node => node.remove());
+  const text = String(clone.textContent || '').replace(/\s+/g, ' ').trim();
+  if (!text) return null;
+  const doc = element.ownerDocument || document;
+  const node = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
+  const x = svgNumberAttribute(element, 'x');
+  const y = svgNumberAttribute(element, 'y');
+  const width = svgNumberAttribute(element, 'width');
+  const height = svgNumberAttribute(element, 'height');
+  node.textContent = text;
+  node.setAttribute('x', String(x + (width / 2)));
+  node.setAttribute('y', String(y + (height / 2)));
+  node.setAttribute('text-anchor', 'middle');
+  node.setAttribute('dominant-baseline', 'middle');
+  node.setAttribute('class', 'mermaid-node-label');
+  node.setAttribute('style', svgReadableLabelStyle(svgReadableLabelColor(element)));
+  return node;
+}
+
+function styleStandaloneSvgText(svg) {
+  const fontFamily = svgPreviewFontFamily();
+  const edgeColor = svgReadableEdgeColor();
+  svg.querySelectorAll?.('.edgePaths path, .edgePath path, .flowchart-link, path.flowchart-link, path.messageLine0, path.messageLine1, line.messageLine0, line.messageLine1, marker path, marker polygon').forEach(edge => {
+    svgSetStyleProperty(edge, 'stroke', edgeColor);
+    svgSetStyleProperty(edge, 'stroke-opacity', '0.95');
+    const strokeWidth = Number.parseFloat(svgStyleValue(edge, 'stroke-width') || svgCssStyleValue(edge, 'stroke-width') || edge.getAttribute?.('stroke-width') || '');
+    if (!Number.isFinite(strokeWidth) || strokeWidth < 2) svgSetStyleProperty(edge, 'stroke-width', '2px');
+    if (String(edge.tagName || '').toLowerCase() !== 'path' || edge.closest?.('marker')) svgSetStyleProperty(edge, 'fill', edgeColor);
+  });
+  svg.querySelectorAll?.('.node rect, .node polygon, .node path').forEach(shape => {
+    const fill = svgPaintColor(shape, 'fill');
+    const stroke = svgPaintColor(shape, 'stroke');
+    if (svgColorIsDark(fill) && (!stroke || svgColorIsDark(stroke))) svgSetStyleProperty(shape, 'stroke', edgeColor);
+  });
+  svg.querySelectorAll?.('text').forEach(text => {
+    if (!text.getAttribute('font-family')) text.setAttribute('font-family', fontFamily);
+    const labelColor = svgReadableLabelColor(text);
+    svgApplyReadableLabelStyle(text, labelColor);
+    text.querySelectorAll?.('tspan').forEach(tspan => svgApplyReadableLabelStyle(tspan, labelColor));
+  });
+}
+
+function sanitizeStandaloneSvgNode(root) {
+  const elementNode = globalThis.Node?.ELEMENT_NODE || 1;
+  const blocked = new Set(['script', 'foreignobject', 'iframe', 'object', 'embed', 'audio', 'video', 'canvas', 'link', 'meta']);
+  for (const child of Array.from(root?.childNodes || [])) {
+    if (child.nodeType !== elementNode) {
+      if (child.nodeType === (globalThis.Node?.COMMENT_NODE || 8)) child.remove();
+      continue;
+    }
+    const tagName = String(child.tagName || '').toLowerCase();
+    if (tagName === 'foreignobject') {
+      const textNode = svgForeignObjectTextNode(child);
+      if (textNode) child.replaceWith(textNode);
+      else child.remove();
+      continue;
+    }
+    if (blocked.has(tagName)) {
+      child.remove();
+      continue;
+    }
+    if (tagName === 'style') {
+      child.textContent = sanitizeSvgStyleText(child.textContent);
+    }
+    for (const attr of Array.from(child.attributes || [])) {
+      const name = String(attr?.name || '').toLowerCase();
+      if (!name || name.startsWith('on')) {
+        child.removeAttribute(attr.name);
+        continue;
+      }
+      if (name === 'style') {
+        const sanitized = sanitizeSvgStyleText(attr.value);
+        if (sanitized) child.setAttribute(attr.name, sanitized);
+        else child.removeAttribute(attr.name);
+        continue;
+      }
+      if ((name === 'href' || name === 'xlink:href' || name === 'src') && svgUrlValueUnsafe(attr.value)) {
+        child.removeAttribute(attr.name);
+      }
+    }
+    sanitizeStandaloneSvgNode(child);
+  }
+}
+
+function sanitizeStandaloneSvgString(svgText) {
+  return String(svgText || '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<\s*(?:script|foreignObject|iframe|object|embed|audio|video|canvas|link|meta)\b[\s\S]*?<\s*\/\s*(?:script|foreignObject|iframe|object|embed|audio|video|canvas|link|meta)\s*>/gi, '')
+    .replace(/<\s*(?:script|foreignObject|iframe|object|embed|audio|video|canvas|link|meta)\b[^>]*\/?\s*>/gi, '')
+    .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/\s+(?:href|xlink:href|src)\s*=\s*(?:"(?!#)[^"]*"|'(?!#)[^']*'|(?![#'"])[^\s>]+)/gi, '')
+    .replace(/@import[^;]+;?/gi, '')
+    .replace(/url\([^)]*\)/gi, '')
+    .replace(/https?:\/\/[^"')\s<>]+/gi, '');
+}
+
+function sanitizeStandaloneSvg(svgText) {
+  const template = document.createElement('template');
+  if (!template.content) return sanitizeStandaloneSvgString(svgText);
+  template.innerHTML = String(svgText || '');
+  sanitizeStandaloneSvgNode(template.content);
+  const svg = template.content?.querySelector?.('svg');
+  if (svg) styleStandaloneSvgText(svg);
+  return svg ? svg.outerHTML : '';
+}
+
+function svgImageUrl(svgText) {
+  const svg = String(svgText || '');
+  if (typeof Blob === 'function' && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+    return URL.createObjectURL(new Blob([svg], {type: 'image/svg+xml'}));
+  }
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// File preview renderers and zoom controls split from 95_codemirror_editor.js.
+
+const previewZoomPolicy = Object.freeze({
+  minScale: 0.2,
+  maxScale: 32,
+  step: 1.25,
+  disabledEpsilon: 0.001,
+  actualPressedEpsilon: 0.01,
+  fitPaddingPx: 24,
+  fitScaleCaps: Object.freeze({
+    image: 1,
+    mermaidInline: 3,
+    mermaidFull: Number.POSITIVE_INFINITY,
+  }),
+  panThresholdPx: 2,
+});
+
+const previewZoomShellClasses = Object.freeze([
+  'file-editor-preview-zoom-shell',
+  'file-editor-preview-zoom-full',
+  'file-editor-preview-zoom-inline',
+]);
+
+const previewZoomRendererDefaults = Object.freeze({
+  imagePane: Object.freeze({zoomKey: 'image-pane', fitMaxScale: previewZoomPolicy.fitScaleCaps.image, full: true, wheelZoom: true, panDrag: true}),
+  imagePreview: Object.freeze({zoomKey: 'image-preview', fitMaxScale: previewZoomPolicy.fitScaleCaps.image, full: true, wheelZoom: true, panDrag: true}),
+  mermaidFull: Object.freeze({zoomKey: 'mermaid', fitMaxScale: previewZoomPolicy.fitScaleCaps.mermaidFull, full: true, wheelZoom: true, panDrag: true}),
+  mermaidInline: Object.freeze({zoomKey: 'mermaid', fitMaxScale: previewZoomPolicy.fitScaleCaps.mermaidInline, full: false, wheelZoom: true, panDrag: true}),
+  default: Object.freeze({zoomKey: 'default', fitMaxScale: Number.POSITIVE_INFINITY, full: true}),
+});
+
+const previewZoomActions = Object.freeze([
+  Object.freeze({
+    id: 'out',
+    label: '-',
+    title: 'Zoom out',
+    zoomState: current => ({mode: 'manual', scale: current / previewZoomPolicy.step}),
+    disabled: scale => scale <= previewZoomPolicy.minScale + previewZoomPolicy.disabledEpsilon,
+  }),
+  Object.freeze({
+    id: 'fit',
+    label: 'Fit',
+    title: 'Fit to view',
+    zoomState: current => ({mode: 'fit', scale: current}),
+    pressed: state => state.mode === 'fit',
+  }),
+  Object.freeze({
+    id: 'actual',
+    label: '1:1',
+    title: 'Actual size',
+    zoomState: () => ({mode: 'actual', scale: 1}),
+    pressed: (state, scale) => state.mode !== 'fit' && Math.abs(scale - 1) < previewZoomPolicy.actualPressedEpsilon,
+  }),
+  Object.freeze({
+    id: 'in',
+    label: '+',
+    title: 'Zoom in',
+    zoomState: current => ({mode: 'manual', scale: current * previewZoomPolicy.step}),
+    disabled: scale => scale >= previewZoomPolicy.maxScale - previewZoomPolicy.disabledEpsilon,
+  }),
+]);
+
+const previewZoomActionById = new Map(previewZoomActions.map(action => [action.id, action]));
+
+function previewContextId(value) {
+  return String(value || '').trim();
+}
+
+function previewZoomScopedKey(key, context) {
+  const normalized = normalizedPreviewZoomKey(key);
+  const scope = previewContextId(context);
+  return scope ? `${scope}:${normalized}` : normalized;
+}
+
+function previewZoomOptionsForKind(kind, options = {}) {
+  const defaults = previewZoomRendererDefaults[kind] || previewZoomRendererDefaults.default;
+  const baseZoomKey = Object.prototype.hasOwnProperty.call(options, 'zoomKey') ? options.zoomKey : defaults.zoomKey;
+  const context = previewContextId(options.context || defaults.context || '');
+  const result = {...defaults, ...options};
+  result.context = context;
+  result.zoomKeyBase = normalizedPreviewZoomKey(baseZoomKey);
+  result.zoomKey = previewZoomScopedKey(baseZoomKey, context);
+  if (!Object.prototype.hasOwnProperty.call(options, 'fitMaxScale')) result.fitMaxScale = defaults.fitMaxScale;
+  if (!Object.prototype.hasOwnProperty.call(options, 'full')) result.full = defaults.full;
+  if (!Object.prototype.hasOwnProperty.call(options, 'wheelZoom')) result.wheelZoom = defaults.wheelZoom === true;
+  if (!Object.prototype.hasOwnProperty.call(options, 'panDrag')) result.panDrag = defaults.panDrag === true;
+  return result;
+}
+
+function previewZoomStateForAction(actionId, currentScale) {
+  return previewZoomActionById.get(actionId)?.zoomState?.(currentScale) || null;
+}
+
+function clampPreviewZoomScale(scale) {
+  const value = Number.parseFloat(String(scale || ''));
+  if (!Number.isFinite(value)) return 1;
+  return Math.max(previewZoomPolicy.minScale, Math.min(previewZoomPolicy.maxScale, value));
+}
+
+function clampPreviewFitScale(scale) {
+  const value = Number.parseFloat(String(scale || ''));
+  if (!Number.isFinite(value)) return 1;
+  return Math.max(previewZoomPolicy.minScale, value);
+}
+
+function resetPreviewZoomSurfaceClasses(shell) {
+  if (!shell?.classList) return;
+  shell.classList.remove(...previewZoomShellClasses);
+  if (shell.dataset) {
+    delete shell.dataset.previewZoomScale;
+    delete shell.dataset.previewZoomMode;
+  }
+}
+
+function disconnectPreviewZoomSurface(shell, options = {}) {
+  if (typeof shell?._previewZoomControlsCleanup === 'function') {
+    shell._previewZoomControlsCleanup();
+    shell._previewZoomControlsCleanup = null;
+  }
+  if (shell?._previewZoomResizeObserver) {
+    shell._previewZoomResizeObserver.disconnect();
+    shell._previewZoomResizeObserver = null;
+  }
+  if (shell?._previewZoomResizeFrame) {
+    previewZoomOwnerWindow(shell)?.cancelAnimationFrame?.(shell._previewZoomResizeFrame);
+    shell._previewZoomResizeFrame = 0;
+  }
+  if (shell?._previewZoomRevealTimer) {
+    previewZoomOwnerWindow(shell)?.clearTimeout?.(shell._previewZoomRevealTimer);
+    shell._previewZoomRevealTimer = 0;
+  }
+  shell?.classList?.remove?.('file-editor-preview-zoom-measuring');
+  if (options.resetClasses === true) resetPreviewZoomSurfaceClasses(shell);
+}
+
+function previewZoomOwnerWindow(shell) {
+  return shell?.ownerDocument?.defaultView || window;
+}
+
+function schedulePreviewZoomFrame(shell, callback) {
+  const ownerWindow = previewZoomOwnerWindow(shell);
+  if (typeof ownerWindow?.requestAnimationFrame === 'function') return ownerWindow.requestAnimationFrame(callback);
+  if (typeof requestAnimationFrame === 'function') return requestAnimationFrame(callback);
+  return setTimeout(callback, 0);
+}
+
+function writePreviewZoomSurfaceDataset(shell, options = {}) {
+  if (!shell?.dataset) return;
+  shell.dataset.previewZoomPath = options.path || '';
+  shell.dataset.previewZoomKey = options.zoomKey || 'default';
+  shell.dataset.previewZoomFull = options.full === false ? '0' : '1';
+  shell.dataset.previewZoomWheel = options.wheelZoom === true ? '1' : '0';
+  shell.dataset.previewZoomPan = options.panDrag === true ? '1' : '0';
+  if (Number.isFinite(options.fitMaxScale)) shell.dataset.previewZoomFitMaxScale = String(options.fitMaxScale);
+  else delete shell.dataset.previewZoomFitMaxScale;
+}
+
+function previewZoomOptionsFromSurface(shell) {
+  const fitMaxScale = Number.parseFloat(shell?.dataset?.previewZoomFitMaxScale || '');
+  return {
+    path: shell?.dataset?.previewZoomPath || '',
+    zoomKey: shell?.dataset?.previewZoomKey || 'default',
+    full: shell?.dataset?.previewZoomFull !== '0',
+    wheelZoom: shell?.dataset?.previewZoomWheel === '1',
+    panDrag: shell?.dataset?.previewZoomPan === '1',
+    fitMaxScale: Number.isFinite(fitMaxScale) ? fitMaxScale : Number.POSITIVE_INFINITY,
+  };
+}
+
+function previewZoomSurfaceContent(shell) {
+  return shell?.querySelector?.(':scope > .file-editor-preview-zoom-viewport > .file-editor-preview-zoom-stage > .file-editor-preview-zoom-content')
+    || shell?.querySelector?.(':scope > .file-editor-preview-zoom-viewport > .file-editor-preview-zoom-stage > *')
+    || null;
+}
+
+function previewZoomContentSize(content) {
+  const naturalWidth = Number(content?.naturalWidth || 0);
+  const naturalHeight = Number(content?.naturalHeight || 0);
+  if (naturalWidth > 0 && naturalHeight > 0) return {width: naturalWidth, height: naturalHeight};
+  const rect = content?.getBoundingClientRect?.();
+  return {
+    width: Math.max(1, Math.round(rect?.width || 1)),
+    height: Math.max(1, Math.round(rect?.height || 1)),
+  };
+}
+
+function previewZoomStagePadding(stage) {
+  const ownerWindow = previewZoomOwnerWindow(stage);
+  const style = ownerWindow?.getComputedStyle?.(stage) || (typeof getComputedStyle === 'function' ? getComputedStyle(stage) : null);
+  const px = name => Number.parseFloat(style?.getPropertyValue?.(name) || '') || 0;
+  return {
+    x: px('padding-left') + px('padding-right'),
+    y: px('padding-top') + px('padding-bottom'),
+  };
+}
+
+function previewZoomFitScale(viewport, content, options = {}) {
+  const size = previewZoomContentSize(content);
+  const availableWidth = Math.max(1, (viewport?.clientWidth || 1) - previewZoomPolicy.fitPaddingPx);
+  const availableHeight = Math.max(1, (viewport?.clientHeight || 1) - previewZoomPolicy.fitPaddingPx);
+  const fitScale = Math.min(availableWidth / size.width, availableHeight / size.height);
+  const maxFitScale = Number.isFinite(options.fitMaxScale) ? options.fitMaxScale : Number.POSITIVE_INFINITY;
+  return clampPreviewFitScale(Math.min(maxFitScale, fitScale));
+}
+
+function previewZoomButton(action) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.dataset.previewZoomAction = action.id;
+  button.textContent = action.label;
+  button.title = action.title;
+  button.setAttribute('aria-label', action.title);
+  return button;
+}
+
+function previewZoomReadState(options = {}) {
+  if (options.path) return fileEditorPreviewZoomStateForPath(options.path, options.zoomKey || 'default');
+  return normalizePreviewZoomState(options.shell?._previewZoomState);
+}
+
+function previewZoomWriteState(shell, options = {}, zoomState) {
+  const normalized = normalizePreviewZoomState(zoomState);
+  if (options.path) setFileEditorPreviewZoomStateForPath(options.path, options.zoomKey || 'default', normalized);
+  shell._previewZoomState = normalized;
+  return normalized;
+}
+
+function applyPreviewZoomSurface(shell, content, options = {}, applyOptions = {}) {
+  const viewport = shell.querySelector(':scope > .file-editor-preview-zoom-viewport');
+  const value = shell.querySelector(':scope > .file-editor-preview-zoom-toolbar .file-editor-preview-zoom-value');
+  if (!viewport || !content) return;
+  const previousScale = Number.parseFloat(shell.dataset.previewZoomScale || '1') || 1;
+  const viewportRect = viewport.getBoundingClientRect?.();
+  const focusOffsetX = Number.isFinite(applyOptions.focusClientX) && viewportRect
+    ? Math.max(0, Math.min(viewport.clientWidth, applyOptions.focusClientX - viewportRect.left))
+    : (viewport.clientWidth / 2);
+  const focusOffsetY = Number.isFinite(applyOptions.focusClientY) && viewportRect
+    ? Math.max(0, Math.min(viewport.clientHeight, applyOptions.focusClientY - viewportRect.top))
+    : (viewport.clientHeight / 2);
+  const hasFocusPoint = Number.isFinite(applyOptions.focusClientX) || Number.isFinite(applyOptions.focusClientY);
+  const focusX = (viewport.scrollLeft + focusOffsetX) / previousScale;
+  const focusY = (viewport.scrollTop + focusOffsetY) / previousScale;
+  const state = previewZoomReadState({...options, shell});
+  const scale = state.mode === 'fit' ? previewZoomFitScale(viewport, content, options) : clampPreviewZoomScale(state.scale);
+  const size = previewZoomContentSize(content);
+  const scaledWidth = Math.max(1, Math.round(size.width * scale));
+  const scaledHeight = Math.max(1, Math.round(size.height * scale));
+  content.style.width = `${scaledWidth}px`;
+  content.style.height = `${scaledHeight}px`;
+  content.classList.add('file-editor-preview-zoom-content');
+  const stage = content.closest?.('.file-editor-preview-zoom-stage') || null;
+  if (stage) {
+    const padding = previewZoomStagePadding(stage);
+    stage.style.width = `${Math.max(viewport.clientWidth, scaledWidth + padding.x)}px`;
+    stage.style.height = `${Math.max(viewport.clientHeight, scaledHeight + padding.y)}px`;
+  }
+  shell.dataset.previewZoomScale = String(scale);
+  shell.dataset.previewZoomMode = state.mode;
+  if (value) value.textContent = `${Math.round(scale * 100)}%`;
+  shell.querySelectorAll('[data-preview-zoom-action]').forEach(button => {
+    const action = previewZoomActionById.get(button.dataset.previewZoomAction);
+    button.disabled = Boolean(action?.disabled?.(scale));
+    if (action?.pressed) button.setAttribute('aria-pressed', action.pressed(state, scale) ? 'true' : 'false');
+    else button.removeAttribute('aria-pressed');
+  });
+  schedulePreviewZoomFrame(shell, () => {
+    if (state.mode === 'fit') {
+      viewport.scrollLeft = 0;
+      viewport.scrollTop = 0;
+      return;
+    }
+    if (applyOptions.centerIfUnfocused === true && !hasFocusPoint) {
+      viewport.scrollLeft = Math.max(0, (viewport.scrollWidth - viewport.clientWidth) / 2);
+      viewport.scrollTop = Math.max(0, (viewport.scrollHeight - viewport.clientHeight) / 2);
+      return;
+    }
+    viewport.scrollLeft = Math.max(0, (focusX * scale) - focusOffsetX);
+    viewport.scrollTop = Math.max(0, (focusY * scale) - focusOffsetY);
+  });
+}
+
+function setPreviewZoomSurfaceState(shell, content, options = {}, zoomState = {}, applyOptions = {}) {
+  previewZoomWriteState(shell, options, zoomState);
+  applyPreviewZoomSurface(shell, content, options, applyOptions);
+}
+
+function bindPreviewZoomDragPan(shell, viewport, bind) {
+  let drag = null;
+  const finish = event => {
+    if (!drag || (event.pointerId !== undefined && event.pointerId !== drag.pointerId)) return;
+    try { viewport.releasePointerCapture?.(drag.pointerId); } catch (_) {}
+    shell.classList.remove('file-editor-preview-zoom-panning');
+    drag = null;
+  };
+  bind(viewport, 'pointerdown', event => {
+    if (event.button !== 0 || event.defaultPrevented) return;
+    event.preventDefault();
+    drag = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      scrollLeft: viewport.scrollLeft,
+      scrollTop: viewport.scrollTop,
+    };
+    shell.classList.add('file-editor-preview-zoom-panning');
+    try { viewport.setPointerCapture?.(event.pointerId); } catch (_) {}
+  }, {passive: false});
+  bind(viewport, 'pointermove', event => {
+    if (!drag || (event.pointerId !== undefined && event.pointerId !== drag.pointerId)) return;
+    const dx = event.clientX - drag.x;
+    const dy = event.clientY - drag.y;
+    if (Math.abs(dx) > previewZoomPolicy.panThresholdPx || Math.abs(dy) > previewZoomPolicy.panThresholdPx) event.preventDefault();
+    viewport.scrollLeft = Math.max(0, drag.scrollLeft - dx);
+    viewport.scrollTop = Math.max(0, drag.scrollTop - dy);
+  }, {passive: false});
+  bind(viewport, 'pointerup', finish);
+  bind(viewport, 'pointercancel', finish);
+}
+
+function hydratePreviewZoomSurface(shell, content = null, options = null) {
+  if (!shell) return false;
+  const resolvedContent = content || previewZoomSurfaceContent(shell);
+  if (!resolvedContent) return false;
+  const resolvedOptions = options || previewZoomOptionsFromSurface(shell);
+  disconnectPreviewZoomSurface(shell);
+  writePreviewZoomSurfaceDataset(shell, resolvedOptions);
+  const toolbar = shell.querySelector(':scope > .file-editor-preview-zoom-toolbar');
+  const viewport = shell.querySelector(':scope > .file-editor-preview-zoom-viewport');
+  if (!toolbar || !viewport) return false;
+  const cleanup = [];
+  const bind = (target, type, handler, listenerOptions = false) => {
+    if (!target?.addEventListener) return;
+    target.addEventListener(type, handler, listenerOptions);
+    cleanup.push(() => target.removeEventListener?.(type, handler, listenerOptions));
+  };
+  shell._previewZoomControlsCleanup = () => {
+    while (cleanup.length) cleanup.pop()();
+  };
+  bind(toolbar, 'click', event => {
+    const button = event.target?.closest?.('[data-preview-zoom-action]');
+    if (!button || !toolbar.contains(button) || button.disabled) return;
+    const current = Number.parseFloat(shell.dataset.previewZoomScale || '1') || 1;
+    const zoomState = previewZoomStateForAction(button.dataset.previewZoomAction, current);
+    if (zoomState) setPreviewZoomSurfaceState(shell, resolvedContent, resolvedOptions, zoomState, {centerIfUnfocused: true});
+  });
+  bind(viewport, 'wheel', event => {
+    if (resolvedOptions.wheelZoom !== true && !event.ctrlKey && !event.metaKey) return;
+    event.preventDefault();
+    const current = Number.parseFloat(shell.dataset.previewZoomScale || '1') || 1;
+    const zoomState = previewZoomStateForAction(event.deltaY < 0 ? 'in' : 'out', current);
+    if (zoomState) setPreviewZoomSurfaceState(shell, resolvedContent, resolvedOptions, zoomState, {
+      focusClientX: event.clientX,
+      focusClientY: event.clientY,
+    });
+  }, {passive: false});
+  if (resolvedOptions.panDrag === true) bindPreviewZoomDragPan(shell, viewport, bind);
+  const ownerWindow = previewZoomOwnerWindow(shell);
+  // Hide the diagram until its viewport size has settled, then reveal. A file editor pane opens at a
+  // transient height and Dockview re-lays-it-out ~150ms later (and a hover that triggers a relayout
+  // does the same), so fitting against the transient size and then re-fitting makes the diagram
+  // visibly jump/resize. `visibility:hidden` keeps the viewport measurable while hidden, and a
+  // debounce after the last apply reveals it once at the settled size.
+  shell.classList.add('file-editor-preview-zoom-measuring');
+  const scheduleReveal = () => {
+    if (!shell.classList.contains('file-editor-preview-zoom-measuring')) return;
+    if (shell._previewZoomRevealTimer) ownerWindow?.clearTimeout?.(shell._previewZoomRevealTimer);
+    shell._previewZoomRevealTimer = ownerWindow?.setTimeout?.(() => {
+      shell._previewZoomRevealTimer = 0;
+      shell.classList.remove('file-editor-preview-zoom-measuring');
+    }, 150);
+  };
+  const applyAndScheduleReveal = applyOptions => {
+    applyPreviewZoomSurface(shell, resolvedContent, resolvedOptions, applyOptions);
+    scheduleReveal();
+  };
+  const ResizeObserverCtor = ownerWindow?.ResizeObserver || (typeof ResizeObserver === 'function' ? ResizeObserver : null);
+  if (ResizeObserverCtor) {
+    const resizeObserver = new ResizeObserverCtor(() => {
+      // Coalesce to one apply per frame. applyPreviewZoomSurface resizes the content inside the
+      // observed viewport (and can toggle a scrollbar, which changes the viewport content-box),
+      // so applying synchronously here would re-trigger this observer and emit the noisy
+      // "ResizeObserver loop completed with undelivered notifications" warning.
+      const ownerWin = previewZoomOwnerWindow(shell);
+      if (shell._previewZoomResizeFrame) ownerWin?.cancelAnimationFrame?.(shell._previewZoomResizeFrame);
+      shell._previewZoomResizeFrame = schedulePreviewZoomFrame(shell, () => {
+        shell._previewZoomResizeFrame = 0;
+        applyAndScheduleReveal();
+      });
+    });
+    shell._previewZoomResizeObserver = resizeObserver;
+    resizeObserver.observe(viewport);
+  }
+  bind(resolvedContent, 'load', () => applyAndScheduleReveal({centerIfUnfocused: true}), {once: true});
+  schedulePreviewZoomFrame(shell, () => applyAndScheduleReveal({centerIfUnfocused: true}));
+  return true;
+}
+
+function hydratePreviewZoomSurfaces(root) {
+  const surfaces = Array.from(root?.querySelectorAll?.('.file-editor-preview-zoom-shell') || []);
+  if (root?.classList?.contains('file-editor-preview-zoom-shell')) surfaces.unshift(root);
+  for (const shell of surfaces) hydratePreviewZoomSurface(shell);
+  return surfaces.length;
+}
+
+function installPreviewZoomSurface(shell, content, options = {}) {
+  disconnectPreviewZoomSurface(shell, {resetClasses: true});
+  shell.classList.add('file-editor-preview-zoom-shell');
+  shell.classList.toggle('file-editor-preview-zoom-full', options.full !== false);
+  shell.classList.toggle('file-editor-preview-zoom-inline', options.full === false);
+  writePreviewZoomSurfaceDataset(shell, options);
+  const toolbar = document.createElement('div');
+  toolbar.className = 'file-editor-preview-zoom-toolbar';
+  toolbar.append(...previewZoomActions.map(previewZoomButton));
+  const value = document.createElement('span');
+  value.className = 'file-editor-preview-zoom-value';
+  value.setAttribute('aria-live', 'polite');
+  value.textContent = '100%';
+  toolbar.appendChild(value);
+  const viewport = document.createElement('div');
+  viewport.className = 'file-editor-preview-zoom-viewport';
+  const stage = document.createElement('div');
+  stage.className = 'file-editor-preview-zoom-stage';
+  stage.appendChild(content);
+  viewport.appendChild(stage);
+  shell.replaceChildren(toolbar, viewport);
+  hydratePreviewZoomSurface(shell, content, options);
+  return shell;
+}
+
+function previewZoomSurfaceNode(content, options = {}) {
+  return installPreviewZoomSurface(document.createElement('div'), content, options);
+}
+
+let mermaidPreviewRenderSeq = 0;
+
+function mermaidErrorNode(source, error) {
+  const node = document.createElement('div');
+  node.className = 'mermaid-preview-error';
+  const title = document.createElement('div');
+  title.className = 'file-editor-empty-title';
+  title.textContent = 'Mermaid diagram could not be rendered';
+  const detail = document.createElement('div');
+  detail.className = 'file-editor-empty-detail';
+  detail.textContent = String(error || 'invalid Mermaid source');
+  const pre = document.createElement('pre');
+  const code = document.createElement('code');
+  code.className = 'language-mermaid';
+  code.textContent = source;
+  pre.appendChild(code);
+  node.append(title, detail, pre);
+  return node;
+}
+
+function mermaidLoadingNode() {
+  // While a NEW diagram loads/renders, show the shared blinking "..." (moving-ellipsis) used by the
+  // other loading states, not a static "Rendering...". Reuses the empty-state shell so it matches
+  // the Mermaid empty/error states.
+  const node = document.createElement('div');
+  node.className = 'file-editor-empty-state mermaid-preview-loading';
+  node.setAttribute('aria-live', 'polite');
+  node.setAttribute('aria-busy', 'true');
+  const title = document.createElement('div');
+  title.className = 'file-editor-empty-title';
+  title.innerHTML = textWithMovingEllipsisHtml('Rendering Mermaid diagram', 'mermaid-preview-loading-dots');
+  node.appendChild(title);
+  return node;
+}
+
+async function renderMermaidSourceInto(container, source, options = {}) {
+  const text = String(source || '').trim();
+  disconnectPreviewZoomSurface(container, {resetClasses: true});
+  if (!text) {
+    container.replaceChildren(fileEditorEmptyState('Mermaid diagram is empty'));
+    return false;
+  }
+  const seq = ++mermaidPreviewRenderSeq;
+  container.dataset.mermaidRenderSeq = String(seq);
+  container.classList.add('mermaid-preview');
+  container.replaceChildren(mermaidLoadingNode());
+  try {
+    const api = await loadMermaidApi();
+    if (container.dataset.mermaidRenderSeq !== String(seq)) return false;
+    const id = `yolomux-mermaid-${Date.now()}-${seq}`;
+    const result = await api.render(id, text);
+    if (container.dataset.mermaidRenderSeq !== String(seq)) return false;
+    const rawSvg = typeof result === 'string' ? result : result?.svg;
+    const svg = sanitizeStandaloneSvg(rawSvg);
+    if (!svg) throw new Error('Mermaid produced no SVG');
+    const img = document.createElement('img');
+    img.className = 'mermaid-preview-image';
+    img.alt = 'Mermaid diagram';
+    img.src = svgImageUrl(svg);
+    const fullPreview = Object.prototype.hasOwnProperty.call(options, 'full')
+      ? options.full !== false
+      : container.classList.contains('file-editor-preview-pane-panel');
+    installPreviewZoomSurface(container, img, previewZoomOptionsForKind(fullPreview ? 'mermaidFull' : 'mermaidInline', {
+      ...options,
+      path: options.path || '',
+      full: fullPreview,
+    }));
+    return true;
+  } catch (error) {
+    disconnectPreviewZoomSurface(container, {resetClasses: true});
+    if (container.dataset.mermaidRenderSeq === String(seq)) container.replaceChildren(mermaidErrorNode(text, error));
+    return false;
+  }
+}
+
+function renderMarkdownMermaidBlocks(container, markdownPath = '', options = {}) {
+  const blocks = Array.from(container.querySelectorAll?.('pre > code') || [])
+    .filter(block => isMermaidFenceLanguage(markdownFenceLanguage(block)));
+  const renders = [];
+  blocks.forEach((block, index) => {
+    const source = block.textContent || '';
+    const pre = block.closest?.('pre');
+    if (!pre) return;
+    const host = document.createElement('div');
+    host.className = 'mermaid-preview-host';
+    pre.replaceWith(host);
+    renders.push(renderMermaidSourceInto(host, source, {
+      full: false,
+      path: markdownPath,
+      zoomKey: `mermaid:${index}`,
+      context: options.context || '',
+    }));
+  });
+  return renders.length ? Promise.allSettled(renders) : null;
+}
+
+function applyMarkdownFenceFallbackHighlight(block) {
+  const language = markdownFenceLanguage(block);
+  if (!language) return;
+  const html = simpleCodeSyntaxHtml(language, block.textContent || '');
+  if (html === null) return;
+  block.innerHTML = html;
+  block.classList.add('editor-highlight-code');
+}
+
+function safeDecodePathComponent(value) {
+  try {
+    return decodeURIComponent(String(value || ''));
+  } catch (_) {
+    return String(value || '');
+  }
+}
+
+function localPathFromFileHref(href) {
+  const raw = String(href || '').trim();
+  if (!/^file:/i.test(raw)) return '';
+  try {
+    const base = globalThis.location?.href || 'http://localhost/';
+    const url = new URL(raw, base);
+    if (url.protocol !== 'file:') return '';
+    return safeDecodePathComponent(url.pathname || '');
+  } catch (_) {
+    const match = raw.match(/^file:\/\/(?:localhost)?(\/[^?#]*)/i);
+    return match ? safeDecodePathComponent(match[1]) : '';
+  }
+}
+
+function openMarkdownPreviewPathLink(container, resolved) {
+  const owner = openFileOwnerSessionsForPath(container?.dataset?.mdPath || '')[0] || undefined;
+  return Promise.resolve(openFileInEditor(resolved, basenameOf(resolved), {
+    viewMode: editorPreviewModeAvailable(resolved) ? 'preview' : 'edit',
+    ownerSession: owner,
+  })).catch(() => showToast(t('preview.openFailed', {path: resolved}), '', {level: 'error'}));
+}
+
+// in the file-editor markdown preview, route link clicks: in-page #anchors keep default;
+// file:// server paths and relative file links open through the YOLOmux editor, while external links
+// open in a new browser tab. The server's read endpoint still rejects paths outside allowed roots.
+function handleMarkdownPreviewLinkClick(event) {
+  const a = event.target.closest?.('a');
+  if (!a) return;
+  const container = event.currentTarget;
+  const href = a.getAttribute('href') || '';
+  if (!href || href.startsWith('#')) return;
+  if (/^file:/i.test(href)) {
+    event.preventDefault();
+    const resolved = localPathFromFileHref(href);
+    if (resolved) openMarkdownPreviewPathLink(container, resolved);
+    return;
+  }
+  if (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith('//')) {
+    event.preventDefault();
+    window.open(a.href, '_blank', 'noopener,noreferrer');
+    return;
+  }
+  event.preventDefault();
+  const clean = href.split('#')[0].split('?')[0];
+  if (!clean) return;
+  const basePath = container?.dataset?.basePath || '/';
+  const resolved = joinAndNormalize(clean.startsWith('/') ? '/' : basePath, clean);
+  openMarkdownPreviewPathLink(container, resolved);
+}
+
+function isMarkdownPath(path) {
+  const lower = String(path || '').toLowerCase();
+  return lower.endsWith('.md') || lower.endsWith('.markdown');
+}
+
+function isHtmlPath(path) {
+  const lower = String(path || '').toLowerCase();
+  return lower.endsWith('.html') || lower.endsWith('.htm');
+}
+
+function editorPreviewModeAvailable(path, state = null) {
+  return previewKindForPath(path, state || openFiles.get(path)) !== 'unsupported';
+}
+
+function editorVisualLineFragments(line, columnCount, wrapEnabled = fileEditorWrapEnabled) {
+  const text = String(line ?? '');
+  const width = Math.floor(Number(columnCount) || 0);
+  if (!wrapEnabled || width <= 0 || text.length <= width) return [text];
+  const fragments = [];
+  for (let index = 0; index < text.length; index += width) {
+    fragments.push(text.slice(index, index + width));
+  }
+  return fragments.length ? fragments : [''];
+}
+
+function simpleLineSyntaxHtml(language, line) {
+  const highlighted = simpleCodeSyntaxHtml(language, line);
+  return highlighted === null ? esc(line) : highlighted;
+}
+
+function editorVisualHighlightHtml(language, text, options = {}) {
+  const source = String(text ?? '');
+  const wrapEnabled = options.wrap === true;
+  const lineNumbers = options.lineNumbers === true;
+  const columnCount = options.columnCount || 88;
+  const measuredRows = Array.isArray(options.visualRows) ? options.visualRows : null;
+  const rows = source.split('\n');
+  return rows.map((line, lineIndex) => {
+    const fragments = measuredRows?.[lineIndex] || editorVisualLineFragments(line, columnCount, wrapEnabled);
+    return fragments.map((fragment, fragmentIndex) => {
+      const sourceLine = lineIndex + 1;
+      const continuation = fragmentIndex > 0;
+      const rowClass = continuation ? 'editor-visual-line continuation' : 'editor-visual-line';
+      const lineNumber = lineNumbers && !continuation ? String(sourceLine) : '';
+      const marker = wrapEnabled && continuation ? '↪' : '';
+      const code = simpleLineSyntaxHtml(language, fragment);
+      return `<span class="${rowClass}" data-source-line="${sourceLine}"><span class="editor-line-number">${esc(lineNumber)}</span><span class="editor-soft-wrap-marker">${esc(marker)}</span><span class="editor-line-code">${code}</span></span>`;
+    }).join('');
+  }).join('') || '<span class="editor-visual-line" data-source-line="1"><span class="editor-line-number">1</span><span class="editor-soft-wrap-marker"></span><span class="editor-line-code"></span></span>';
+}
+
+function renderEditorCodePreviewInto(container, path, text) {
+  const language = syntaxLanguageForPath(path);
+  const pre = document.createElement('pre');
+  pre.className = ['file-editor-code-preview', 'editor-wrap', fileEditorLineNumbersEnabled ? 'editor-line-numbers' : ''].filter(Boolean).join(' ');
+  const code = document.createElement('code');
+  code.className = `language-${language || 'text'} editor-highlight-code`;
+  code.innerHTML = editorVisualHighlightHtml(language, text, {
+    wrap: true,
+    lineNumbers: fileEditorLineNumbersEnabled,
+    columnCount: 96,
+  });
+  pre.appendChild(code);
+  container.replaceChildren(pre);
+}
+
+function boundedPreviewText(text, maxChars = 20000) {
+  const source = String(text ?? '');
+  if (source.length <= maxChars) return {text: source, truncated: false};
+  return {text: source.slice(0, maxChars), truncated: true};
+}
+
+function previewRendererLanguageForPath(path) {
+  const renderer = previewRendererForPath(path);
+  const ext = fileExtensionOf(path);
+  return renderer?.languageByExtension?.[ext] || renderer?.language || syntaxLanguageForPath(path) || 'text';
+}
+
+function jsonStructuredPreview(label, source, errorLabel = `${label} parse error`) {
+  try {
+    return {label, text: JSON.stringify(JSON.parse(source), null, 2), language: 'json', error: ''};
+  } catch (error) {
+    return {label: errorLabel, text: source, language: 'json', error: String(error?.message || error)};
+  }
+}
+
+function jsonLinesStructuredPreview(path, source) {
+  const ext = fileExtensionOf(path);
+  const lines = String(source ?? '').split(/\r?\n/);
+  const records = [];
+  const errors = [];
+  lines.forEach((line, index) => {
+    if (!line.trim()) return;
+    try {
+      records.push(JSON.parse(line));
+    } catch (error) {
+      errors.push(`line ${index + 1}: ${String(error?.message || error)}`);
+    }
+  });
+  if (errors.length) {
+    return {
+      label: `${ext === '.ndjson' ? 'NDJSON' : 'JSONL'} parse error`,
+      text: source,
+      language: 'json',
+      error: errors.slice(0, 5).join('\n'),
+    };
+  }
+  return {
+    label: `${ext === '.ndjson' ? 'NDJSON' : 'JSONL'} preview · ${records.length} records`,
+    text: records.map(record => JSON.stringify(record)).join('\n'),
+    language: 'json',
+    error: '',
+  };
+}
+
+function notebookStructuredPreview(source) {
+  let notebook;
+  try {
+    notebook = JSON.parse(String(source ?? ''));
+  } catch (error) {
+    return {label: 'Notebook parse error', text: source, language: 'json', error: String(error?.message || error)};
+  }
+  const cells = Array.isArray(notebook?.cells) ? notebook.cells : [];
+  const out = [`Notebook preview · ${cells.length} cells · outputs not rendered`];
+  cells.slice(0, 80).forEach((cell, index) => {
+    const type = String(cell?.cell_type || 'cell');
+    const sourceText = Array.isArray(cell?.source) ? cell.source.join('') : String(cell?.source || '');
+    const outputCount = Array.isArray(cell?.outputs) ? cell.outputs.length : 0;
+    out.push('', `## ${index + 1}. ${type}${outputCount ? ` · ${outputCount} outputs hidden` : ''}`, sourceText.trimEnd());
+  });
+  if (cells.length > 80) out.push('', `... ${cells.length - 80} more cells truncated ...`);
+  return {label: 'Notebook preview', text: out.join('\n'), language: 'markdown', error: ''};
+}
+
+function structuredPreviewValue(path, text) {
+  const ext = fileExtensionOf(path);
+  const source = String(text ?? '');
+  if (ext === '.json') return jsonStructuredPreview('JSON preview', source, 'JSON parse error');
+  if (ext === '.geojson') return jsonStructuredPreview('GeoJSON preview', source, 'GeoJSON parse error');
+  if (ext === '.excalidraw') return jsonStructuredPreview('Excalidraw JSON preview', source, 'Excalidraw parse error');
+  if (ext === '.jsonl' || ext === '.ndjson') return jsonLinesStructuredPreview(path, source);
+  if (ext === '.ipynb') return notebookStructuredPreview(source);
+  if (ext === '.toml') return {label: 'TOML preview', text: source, language: 'ini', error: ''};
+  if (['.xml', '.drawio', '.dio'].includes(ext)) return {label: ext === '.xml' ? 'XML preview' : 'Draw.io XML preview', text: source, language: 'xml', error: ''};
+  if (['.ini', '.cfg', '.conf', '.env', '.properties', '.props'].includes(ext)) return {label: 'Config preview', text: source, language: 'ini', error: ''};
+  return {label: 'YAML preview', text: source, language: 'yaml', error: ''};
+}
+
+function renderStructuredPreviewInto(container, path, text) {
+  const value = structuredPreviewValue(path, text);
+  const bounded = boundedPreviewText(value.text);
+  const wrapper = document.createElement('div');
+  wrapper.className = 'file-editor-data-preview';
+  const header = document.createElement('div');
+  header.className = 'file-editor-data-preview-header';
+  header.textContent = `${value.label}${bounded.truncated ? ' · truncated' : ''}`;
+  wrapper.appendChild(header);
+  if (value.error) {
+    const error = document.createElement('div');
+    error.className = 'file-editor-preview-error';
+    error.textContent = value.error;
+    wrapper.appendChild(error);
+  }
+  const pre = document.createElement('pre');
+  pre.className = 'file-editor-code-preview editor-wrap';
+  const code = document.createElement('code');
+  code.className = `language-${value.language} editor-highlight-code`;
+  code.innerHTML = editorVisualHighlightHtml(value.language, bounded.text, {
+    wrap: true,
+    lineNumbers: fileEditorLineNumbersEnabled,
+    columnCount: 96,
+  });
+  pre.appendChild(code);
+  wrapper.appendChild(pre);
+  container.replaceChildren(wrapper);
+}
+
+function splitDelimitedPreviewLine(line, delimiter) {
+  const cells = [];
+  let value = '';
+  let quoted = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const ch = line[index];
+    if (ch === '"') {
+      if (quoted && line[index + 1] === '"') {
+        value += '"';
+        index += 1;
+      } else {
+        quoted = !quoted;
+      }
+      continue;
+    }
+    if (ch === delimiter && !quoted) {
+      cells.push(value);
+      value = '';
+      continue;
+    }
+    value += ch;
+  }
+  cells.push(value);
+  return cells;
+}
+
+function renderTablePreviewInto(container, path, text) {
+  const delimiter = fileExtensionOf(path) === '.tsv' ? '\t' : ',';
+  const maxRows = 200;
+  const maxCols = 50;
+  const lines = String(text ?? '').split(/\r?\n/).filter(line => line.length > 0);
+  let truncatedColumns = false;
+  const rows = lines.slice(0, maxRows).map(line => {
+    const cells = splitDelimitedPreviewLine(line, delimiter);
+    if (cells.length > maxCols) truncatedColumns = true;
+    return cells.slice(0, maxCols);
+  });
+  const wrapper = document.createElement('div');
+  wrapper.className = 'file-editor-table-preview';
+  const header = document.createElement('div');
+  header.className = 'file-editor-data-preview-header';
+  header.textContent = `${delimiter === '\t' ? 'TSV' : 'CSV'} preview · ${Math.min(lines.length, maxRows)} of ${lines.length} rows${lines.length > maxRows || truncatedColumns ? ' · truncated' : ''}`;
+  wrapper.appendChild(header);
+  const table = document.createElement('table');
+  const body = document.createElement('tbody');
+  rows.forEach((row, rowIndex) => {
+    const tr = document.createElement('tr');
+    row.forEach(cell => {
+      const node = document.createElement(rowIndex === 0 ? 'th' : 'td');
+      node.textContent = cell;
+      tr.appendChild(node);
+    });
+    body.appendChild(tr);
+  });
+  table.appendChild(body);
+  wrapper.appendChild(table);
+  container.replaceChildren(wrapper);
+}
+
+function htmlPreviewHasDisabledJavaScript(text) {
+  const source = String(text ?? '');
+  return /<script\b/i.test(source) || /\son[a-z]+\s*=/i.test(source);
+}
+
+function htmlPreviewUrl(path) {
+  return `/api/fs/html-preview?path=${encodeURIComponent(path)}`;
+}
+
+function renderRawImagePreviewInto(container, path, state = null, options = {}) {
+  const version = String(state?.mtime || state?.size || 0);
+  const img = document.createElement('img');
+  img.className = 'file-editor-preview-image';
+  img.src = rawFileUrl(path, version ? {v: version} : {});
+  img.alt = basenameOf(path);
+  img.loading = 'eager';
+  img.decoding = 'async';
+  img.addEventListener('error', () => {
+    container.replaceChildren(previewActionFallbackNode('Image could not be loaded', `${previewMimeForPath(path) || 'image'}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
+  }, {once: true});
+  container.replaceChildren(previewZoomSurfaceNode(img, previewZoomOptionsForKind('imagePreview', {
+    path,
+    context: options.context || '',
+  })));
+}
+
+function renderPdfPreviewInto(container, path) {
+  const frame = document.createElement('iframe');
+  frame.className = 'file-editor-pdf-preview';
+  frame.setAttribute('sandbox', '');
+  frame.setAttribute('title', `${basenameOf(path)} PDF preview`);
+  frame.src = rawFileUrl(path);
+  const fallback = document.createElement('div');
+  fallback.className = 'file-editor-preview-fallback';
+  const title = document.createElement('div');
+  title.className = 'file-editor-empty-title';
+  title.textContent = 'PDF preview';
+  const detail = document.createElement('div');
+  detail.className = 'file-editor-empty-detail';
+  const open = document.createElement('a');
+  open.href = rawFileUrl(path);
+  open.target = '_blank';
+  open.rel = 'noopener noreferrer';
+  open.textContent = 'Open';
+  const download = document.createElement('a');
+  download.href = rawFileDownloadUrl(path);
+  download.textContent = 'Download';
+  detail.append(open, document.createTextNode(' · '), download);
+  fallback.append(title, detail);
+  container.replaceChildren(frame, fallback);
+}
+
+function previewActionFallbackNode(titleText, detailText, path) {
+  const fallback = document.createElement('div');
+  fallback.className = 'file-editor-preview-fallback';
+  const title = document.createElement('div');
+  title.className = 'file-editor-empty-title';
+  title.textContent = titleText;
+  const detail = document.createElement('div');
+  detail.className = 'file-editor-empty-detail';
+  detail.append(document.createTextNode(detailText || ''));
+  if (path) {
+    const open = document.createElement('a');
+    open.href = rawFileUrl(path);
+    open.target = '_blank';
+    open.rel = 'noopener noreferrer';
+    open.textContent = 'Open';
+    const download = document.createElement('a');
+    download.href = rawFileDownloadUrl(path);
+    download.textContent = 'Download';
+    detail.append(document.createTextNode(detailText ? ' · ' : ''), open, document.createTextNode(' · '), download);
+  }
+  fallback.append(title, detail);
+  return fallback;
+}
+
+function renderNativeMediaPreviewInto(container, path, state = null, kind = 'audio') {
+  const media = document.createElement(kind === 'video' ? 'video' : 'audio');
+  media.className = `file-editor-native-media file-editor-native-${kind}`;
+  media.controls = true;
+  media.preload = 'metadata';
+  media.src = rawFileUrl(path, state?.mtime ? {v: state.mtime} : {});
+  media.addEventListener('error', () => {
+    container.replaceChildren(previewActionFallbackNode(`${kind === 'video' ? 'Video' : 'Audio'} could not be loaded`, `${previewMimeForPath(path) || kind}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
+  }, {once: true});
+  container.replaceChildren(media, previewActionFallbackNode(`${kind === 'video' ? 'Video' : 'Audio'} preview`, `${previewMimeForPath(path) || kind}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
+}
+
+function renderUnsupportedPreviewInto(container, path, state = null) {
+  const renderer = previewRendererForPath(path, state);
+  const title = renderer?.fallbackTitle || 'Preview is not available';
+  const label = state?.mime || previewMimeForPath(path) || state?.kind || 'unsupported file';
+  container.replaceChildren(previewActionFallbackNode(title, `${label}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
+}
+
+async function openHtmlPreviewWithAuth(path) {
+  const previewWindow = window.open('about:blank', '_blank');
+  if (previewWindow) previewWindow.opener = null;
+  try {
+    const response = await apiFetch(htmlPreviewUrl(path));
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const source = await response.text();
+    const blobUrl = URL.createObjectURL(new Blob([source], {type: 'text/html'}));
+    if (previewWindow) {
+      previewWindow.location.href = blobUrl;
+    } else {
+      window.open(blobUrl, '_blank', 'noopener,noreferrer');
+    }
+    window.setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+  } catch (error) {
+    if (previewWindow) previewWindow.close();
+    statusErr(localizedHtml('status.htmlPreviewFailed', {error}));
+  }
+}
+
+function renderHtmlPreviewInto(container, path, text) {
+  const children = [];
+  if (htmlPreviewHasDisabledJavaScript(text)) {
+    const notice = document.createElement('div');
+    notice.className = 'file-editor-html-js-notice';
+    const message = document.createElement('span');
+    message.textContent = t('preview.jsDisabled');
+    const link = document.createElement('a');
+    link.href = htmlPreviewUrl(path);
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.dataset.htmlPreviewAuth = '1';
+    link.addEventListener('click', event => {
+      event.preventDefault();
+      openHtmlPreviewWithAuth(path);
+    });
+    link.textContent = t('preview.openWithJs');
+    notice.append(message, link);
+    children.push(notice);
+  }
+  const frame = document.createElement('iframe');
+  frame.className = 'file-editor-html-preview';
+  frame.setAttribute('sandbox', '');
+  frame.setAttribute('title', t('preview.htmlTitle'));
+  frame.srcdoc = String(text ?? '');
+  children.push(frame);
+  container.replaceChildren(...children);
+}
+
+function renderEditorPreviewPane(container, path, text, options = {}) {
+  if (!container) return;
+  container._previewAsync = null;
+  const scrollTop = container.scrollTop || 0;
+  const scrollLeft = container.scrollLeft || 0;
+  const state = openFiles.get(path) || null;
+  const previewKind = previewKindForPath(path, state);
+  const previewContext = previewContextId(options.context || 'preview');
+  container.classList.toggle('markdown-body', previewKind === 'markdown');
+  container.classList.toggle('html-preview-body', previewKind === 'html');
+  container.classList.toggle('image-preview-body', previewKind === 'image');
+  container.classList.toggle('pdf-preview-body', previewKind === 'pdf');
+  container.classList.toggle('data-preview-body', previewKind === 'structured' || previewKind === 'table');
+  container.classList.toggle('media-preview-body', previewKind === 'audio' || previewKind === 'video');
+  container.classList.toggle('code-preview-body', previewKind === 'text' || previewKind === 'mermaid');
+  container.classList.toggle('vanilla-preview-body', fileEditorPreviewDisplayMode === 'vanilla');
+  if (previewKind === 'markdown') {
+    container._mermaidSig = null;
+    // fix 6: skip the expensive markdown render (marked.parse + recursive sanitize + per-block
+    // hljs) when the path + content are unchanged from the last render — mirrors CodeMirror's
+    // _cmSignature short-circuit. Prevents a multi-second stall re-rendering a large .md when an
+    // unrelated panel render fires (off the reorder hot path once S2 lands, but a latent cost).
+    if (container._previewPath !== path || container._previewText !== text || container._previewDisplayMode !== fileEditorPreviewDisplayMode || container._previewContext !== previewContext) {
+      container._previewPath = path;
+      container._previewText = text;
+      container._previewDisplayMode = fileEditorPreviewDisplayMode;
+      container._previewContext = previewContext;
+      renderMarkdownPreviewInto(container, text, path, {context: previewContext});
+    }
+  } else if (previewKind === 'mermaid') {
+    // Idempotent: a periodic pane refresh re-runs this with identical source; re-rendering rebuilds
+    // the SVG and (with the reveal gate) FLASHES the diagram on every refresh tick. Skip when the
+    // source, preview theme, and context are unchanged AND a rendered diagram (or error) is already
+    // present. editorPreviewThemeState() is in the signature so a Bright/Dark/Vanilla toggle still
+    // re-renders with the new palette.
+    container._previewPath = null;
+    container._previewText = null;
+    container._previewDisplayMode = null;
+    container._previewContext = null;
+    const mermaidSig = `${path} ${text} ${typeof editorPreviewThemeState === 'function' ? editorPreviewThemeState() : ''} ${previewContext}`;
+    if (container._mermaidSig !== mermaidSig || !container.querySelector('img.mermaid-preview-image, .mermaid-preview-error')) {
+      container._mermaidSig = mermaidSig;
+      container._previewAsync = renderMermaidSourceInto(container, text, {path, zoomKey: 'mermaid', context: previewContext});
+    }
+  } else {
+    container._previewPath = null;
+    container._previewText = null;
+    container._previewDisplayMode = null;
+    container._previewContext = null;
+    container._mermaidSig = null;
+    if (previewKind === 'html') renderHtmlPreviewInto(container, path, text);
+    else if (previewKind === 'image') renderRawImagePreviewInto(container, path, state, {context: previewContext});
+    else if (previewKind === 'pdf') renderPdfPreviewInto(container, path);
+    else if (previewKind === 'structured') renderStructuredPreviewInto(container, path, text);
+    else if (previewKind === 'table') renderTablePreviewInto(container, path, text);
+    else if (previewKind === 'audio' || previewKind === 'video') renderNativeMediaPreviewInto(container, path, state, previewKind);
+    else if (previewKind === 'unsupported') renderUnsupportedPreviewInto(container, path, state);
+    else renderEditorCodePreviewInto(container, path, text);
+  }
+  restoreElementScrollPosition(container, scrollTop, scrollLeft);
+}
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// File preview popout window helpers split from 95_codemirror_editor.js.
+
+const filePreviewPopouts = new Map();
+
+function filePreviewPopoutsForPath(path) {
+  const record = filePreviewPopouts.get(path);
+  return record ? [record] : [];
+}
+
+function closeFilePreviewPopout(path) {
+  const record = filePreviewPopouts.get(path);
+  filePreviewPopouts.delete(path);
+  const previewWindow = record?.window;
+  if (!previewWindow || previewWindow.closed) return false;
+  try { previewWindow.close?.(); } catch (_) {}
+  return true;
+}
+
+function bumpFilePreviewPopoutGeneration(path) {
+  const record = filePreviewPopouts.get(path);
+  if (!record) return 0;
+  record.previewGeneration = Number(record.previewGeneration || 0) + 1;
+  return record.previewGeneration;
+}
+
+function filePreviewPopoutGenerationMatches(path, previewWindow, generation) {
+  const record = filePreviewPopouts.get(path);
+  return Boolean(record && record.window === previewWindow && record.previewGeneration === generation);
+}
+
+function filePreviewPopoutDocument(previewWindow) {
+  try { return previewWindow?.document || null; } catch (_) { return null; }
+}
+
+function filePreviewPopoutScrollElement(previewWindow) {
+  const doc = filePreviewPopoutDocument(previewWindow);
+  return doc?.scrollingElement || doc?.documentElement || doc?.body || null;
+}
+
+function filePreviewPopoutPreviewRoot(previewWindow) {
+  return filePreviewPopoutDocument(previewWindow)?.querySelector?.('[data-preview-root]') || null;
+}
+
+function filePreviewPopoutCanDrive(previewWindow) {
+  const scroller = filePreviewPopoutScrollElement(previewWindow);
+  return elementCanScroll(scroller);
+}
+
+function scrollSyncTargetPosition(from, to, axis = 'top') {
+  const scrollKey = axis === 'left' ? 'scrollLeft' : 'scrollTop';
+  const sizeKey = axis === 'left' ? 'scrollWidth' : 'scrollHeight';
+  const clientKey = axis === 'left' ? 'clientWidth' : 'clientHeight';
+  const sourceSize = Math.max(0, Number(from?.[sizeKey] || 0));
+  const targetSize = Math.max(0, Number(to?.[sizeKey] || 0));
+  const sourceClient = Math.max(0, Number(from?.[clientKey] || 0));
+  const targetClient = Math.max(0, Number(to?.[clientKey] || 0));
+  const maxFrom = Math.max(0, sourceSize - sourceClient);
+  const maxTo = Math.max(0, targetSize - targetClient);
+  const current = Math.max(0, Number(from?.[scrollKey] || 0));
+  const edgeSnap = Math.max(2, Math.ceil(sourceClient * 0.01));
+  if (maxTo <= 0 || current <= edgeSnap) return 0;
+  if (maxFrom <= edgeSnap || current >= maxFrom - edgeSnap) return maxTo;
+  const sourceCenter = Math.min(maxFrom, current) + (sourceClient / 2);
+  const centerRatio = sourceSize > 0 ? sourceCenter / sourceSize : 0;
+  const target = (centerRatio * targetSize) - (targetClient / 2);
+  return Math.min(maxTo, Math.max(0, target));
+}
+
+function syncScrollPositionByRatio(from, to) {
+  if (!from || !to) return false;
+  to.scrollTop = scrollSyncTargetPosition(from, to, 'top');
+  to.scrollLeft = scrollSyncTargetPosition(from, to, 'left');
+  return true;
+}
+
+function scrollElementAtVerticalEdge(element) {
+  const maxTop = Math.max(0, Number(element?.scrollHeight || 0) - Number(element?.clientHeight || 0));
+  const current = Math.max(0, Number(element?.scrollTop || 0));
+  const edgeSnap = Math.max(2, Math.ceil(Number(element?.clientHeight || 0) * 0.01));
+  return current <= edgeSnap || current >= maxTop - edgeSnap;
+}
+
+function syncFilePreviewPopoutFromPanel(path, record, panel, source) {
+  if (!record) return false;
+  const previewWindow = record.window;
+  const scroller = filePreviewPopoutScrollElement(previewWindow);
+  const root = filePreviewPopoutPreviewRoot(previewWindow);
+  const from = fileEditorSourceElement(panel, source);
+  if (!scroller || !root || !from || !elementCanScroll(scroller)) return false;
+  setFileEditorScrollSyncGuard(record);
+  return syncScrollPositionByRatio(from, scroller);
+}
+
+function syncFilePreviewPopoutsFromPanel(panel, source) {
+  const path = fileEditorPanelPath(panel);
+  if (!path || !fileEditorSourceCanDrive(panel, source)) return false;
+  let synced = false;
+  for (const record of filePreviewPopoutsForPath(path)) {
+    synced = syncFilePreviewPopoutFromPanel(path, record, panel, source) || synced;
+  }
+  return synced;
+}
+
+function syncFilePreviewPopoutScroll(path, previewWindow, options = {}) {
+  const record = filePreviewPopouts.get(path);
+  if (!record || !filePreviewPopoutCanDrive(previewWindow)) return false;
+  const scroller = filePreviewPopoutScrollElement(previewWindow);
+  const forceEdge = options.forceEdges === true && scrollElementAtVerticalEdge(scroller);
+  if (!forceEdge && fileEditorScrollSyncBlocked(record)) return false;
+  let synced = false;
+  for (const panel of fileEditorPanelsForPath(path)) {
+    setFileEditorScrollSyncGuard(panel);
+    const mode = fileEditorPanelMode(panel);
+    const previewPane = fileEditorPanelPreviewPane(panel);
+    const editorScroller = fileEditorPanelScroller(panel);
+    if (mode !== 'diff' && editorScroller && elementCanScroll(editorScroller)) synced = syncScrollPositionByRatio(scroller, editorScroller) || synced;
+    if ((mode === 'preview' || mode === 'split') && previewPane && elementCanScroll(previewPane)) synced = syncScrollPositionByRatio(scroller, previewPane) || synced;
+  }
+  return synced;
+}
+
+function scheduleFilePreviewPopoutScrollSync(path, previewWindow, options = {}) {
+  const record = filePreviewPopouts.get(path);
+  if (!record) return false;
+  if (record.scrollSyncFrame) return true;
+  const run = () => {
+    record.scrollSyncFrame = 0;
+    syncFilePreviewPopoutScroll(path, previewWindow, options);
+  };
+  if (typeof previewWindow?.requestAnimationFrame === 'function') record.scrollSyncFrame = previewWindow.requestAnimationFrame(run);
+  else if (typeof requestAnimationFrame === 'function') record.scrollSyncFrame = requestAnimationFrame(run);
+  else record.scrollSyncFrame = setTimeout(run, 0);
+  return true;
+}
+
+function currentStylesheetHref(match) {
+  const link = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
+    .find(item => String(item.getAttribute('href') || '').includes(match));
+  return link ? link.href : '';
+}
+
+function previewPopoutBodyClassName() {
+  const keep = ['theme-light', 'theme-dark', 'editor-theme-light', 'editor-theme-dark', 'editor-preview-vanilla'];
+  const classes = keep.filter(name => document.body?.classList?.contains(name));
+  classes.push('file-preview-popout-window');
+  return classes.join(' ');
+}
+
+function previewPopoutVariableStyle() {
+  const root = getComputedStyle(document.documentElement);
+  const names = [
+    '--active-accent', '--active-accent-rgb', '--active-accent-bright', '--active-accent-text',
+    '--active-control-bg', '--active-control-border', '--active-control-text',
+    '--editor-preview-font-size', '--editor-line-height',
+    '--lt-editor-bg', '--lt-editor-preview-bg', '--lt-text', '--lt-muted', '--lt-line',
+    '--lt-panel', '--lt-panel2', '--lt-markdown-heading', '--lt-markdown-heading-bg',
+    '--lt-markdown-link', '--lt-markdown-strong', '--lt-markdown-emphasis',
+    '--lt-code-inline', '--lt-code-inline-bg', '--lt-code-inline-border',
+    '--markdown-heading', '--markdown-heading-bg', '--markdown-link', '--markdown-strong',
+    '--markdown-emphasis', '--code-inline', '--code-inline-bg', '--code-inline-border',
+    '--code-keyword', '--code-control', '--code-atom', '--code-string', '--code-number', '--code-variable',
+    '--code-function', '--code-type', '--code-property', '--code-tag', '--code-comment',
+    '--code-invalid',
+  ];
+  const aliases = [
+    ['--editor-scheme-bg', '--popout-editor-scheme-bg'],
+    ['--editor-scheme-fg', '--popout-editor-scheme-fg'],
+    ['--editor-scheme-muted', '--popout-editor-scheme-muted'],
+    ['--editor-scheme-line', '--popout-editor-scheme-line'],
+    ['--editor-scheme-panel', '--popout-editor-scheme-panel'],
+    ['--editor-scheme-panel2', '--popout-editor-scheme-panel2'],
+    ['--editor-scheme-preview-bg', '--popout-editor-scheme-preview-bg'],
+  ];
+  const copied = names
+    .map(name => {
+      const value = root.getPropertyValue(name).trim();
+      return value ? `${name}: ${value}` : '';
+    });
+  const aliased = aliases.map(([source, target]) => {
+    const value = root.getPropertyValue(source).trim();
+    return value ? `${target}: ${value}` : '';
+  });
+  return [...copied, ...aliased].filter(Boolean)
+    .join('; ');
+}
+
+function previewPopoutToolbarHtml() {
+  return `
+      <span class="file-editor-preview-font-panel" role="group" aria-label="${esc(t('editor.previewFont.aria'))}">
+        <button type="button" data-editor-preview-font-step="-1" title="${esc(t('editor.previewFont.decrease'))}" aria-label="${esc(t('editor.previewFont.decrease'))}">A-</button>
+        <span class="file-editor-preview-font-value" aria-live="polite">${esc(String(editorPreviewFontSize))}</span>
+        <button type="button" data-editor-preview-font-step="1" title="${esc(t('editor.previewFont.increase'))}" aria-label="${esc(t('editor.previewFont.increase'))}">A+</button>
+      </span>
+      <button type="button" class="file-editor-theme-panel" data-preview-popout-theme title="${esc(editorThemeLabel())}" aria-label="${esc(editorThemeLabel())}"><span class="file-editor-icon file-editor-icon-theme" aria-hidden="true"></span></button>`;
+}
+
+function snapshotRenderedPreviewContainer(scratch) {
+  return {
+    className: scratch.className,
+    html: scratch.innerHTML,
+    dataAttributes: previewSnapshotDataAttributes(scratch),
+  };
+}
+
+function previewSnapshotDataAttributes(scratch) {
+  const attributes = {};
+  for (const name of scratch?.getAttributeNames?.() || []) {
+    if (name.startsWith('data-')) attributes[name] = scratch.getAttribute(name) || '';
+  }
+  return attributes;
+}
+
+function previewSnapshotDataAttributesHtml(snapshot) {
+  return Object.entries(snapshot?.dataAttributes || {})
+    .map(([name, value]) => ` ${name}="${esc(value)}"`)
+    .join('');
+}
+
+function applyPreviewSnapshotRoot(root, snapshot) {
+  if (!root || !snapshot) return false;
+  root.className = snapshot.className;
+  for (const name of Array.from(root.getAttributeNames?.() || [])) {
+    if (name.startsWith('data-') && name !== 'data-preview-root') root.removeAttribute(name);
+  }
+  for (const [name, value] of Object.entries(snapshot.dataAttributes || {})) {
+    root.setAttribute(name, value);
+  }
+  root.innerHTML = snapshot.html;
+  return true;
+}
+
+function previewSnapshotScratch(path, text, options = {}) {
+  const scratch = document.createElement('div');
+  scratch.className = 'file-editor-preview-pane-panel';
+  renderEditorPreviewPane(scratch, path, text, {context: options.context || 'popout'});
+  scratch.hidden = false;
+  return scratch;
+}
+
+function renderedPreviewSnapshot(path, text) {
+  return snapshotRenderedPreviewContainer(previewSnapshotScratch(path, text, {context: 'popout'}));
+}
+
+async function renderedPreviewSnapshotAsync(path, text) {
+  const scratch = previewSnapshotScratch(path, text, {context: 'popout'});
+  if (scratch._previewAsync && typeof scratch._previewAsync.then === 'function') {
+    await scratch._previewAsync;
+  }
+  return snapshotRenderedPreviewContainer(scratch);
+}
+
+function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
+  const doc = previewWindow?.document;
+  if (!doc) return false;
+  const title = `${basenameOf(path)} preview`;
+  const cssHref = currentStylesheetHref('yolomux.css') || '/static/yolomux.css';
+  doc.open();
+  doc.write(`<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${esc(title)}</title>
+  <link rel="stylesheet" href="${esc(cssHref)}">
+  <style>
+    html {
+      min-height: 100%;
+      margin: 0;
+      overflow: auto;
+    }
+    body.file-preview-popout-window {
+      min-height: 100%;
+      height: auto;
+      margin: 0;
+      display: block !important;
+      grid-template-rows: none !important;
+      overflow: auto;
+    }
+    body.file-preview-popout-window {
+      background: var(--editor-preview-bg, var(--bg, #ffffff));
+      color: var(--text, #111827);
+    }
+    .file-preview-popout-shell {
+      box-sizing: border-box;
+      width: 100%;
+      margin: 0 auto;
+      padding: 64px 24px 36px;
+    }
+    .file-preview-popout-title {
+      position: fixed;
+      top: 0;
+      left: 50%;
+      z-index: 1000;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+      align-items: center;
+      gap: 12px;
+      box-sizing: border-box;
+      width: calc(100% - 48px);
+      min-height: 32px;
+      padding: 8px 0 12px;
+      margin-bottom: 12px;
+      transform: translateX(-50%);
+      border-bottom: 1px solid var(--border, #d1d5db);
+      background: var(--editor-preview-bg, var(--bg, #ffffff));
+      color: var(--text, #111827);
+      font: 600 13px/1.3 var(--font, system-ui, sans-serif);
+      box-shadow: 0 1px 0 var(--editor-preview-bg, var(--bg, #ffffff));
+    }
+    .file-preview-popout-title-path {
+      grid-column: 1;
+      min-width: 0;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      justify-self: start;
+    }
+    .file-preview-popout-title .file-editor-preview-font-panel {
+      grid-column: 2;
+      display: inline-flex;
+      align-items: center;
+      justify-self: center;
+    }
+    .file-preview-popout-title .file-editor-theme-panel {
+      grid-column: 3;
+      justify-self: end;
+      min-width: 66px;
+      width: auto;
+      height: 20px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: flex-start;
+      padding: 0 7px 0 4px;
+    }
+    .file-preview-popout-window .file-editor-preview-pane-panel {
+      position: static !important;
+      inset: auto !important;
+      left: auto !important;
+      right: auto !important;
+      top: auto !important;
+      bottom: auto !important;
+      display: block !important;
+      box-sizing: border-box;
+      width: 100% !important;
+      max-width: 100%;
+      min-height: auto;
+      max-height: none;
+      height: auto;
+      overflow: visible;
+      padding: 0;
+      border: 0;
+      background: transparent;
+    }
+	    .file-preview-popout-window .file-editor-preview-pane-panel.file-editor-preview-zoom-shell {
+	      display: grid !important;
+	      grid-template-rows: auto minmax(0, 1fr);
+	      height: clamp(360px, calc(100vh - 132px), 900px);
+	      min-height: 360px;
+	      overflow: hidden;
+	      padding: 8px;
+	    }
+	    .file-preview-popout-window .file-editor-preview-zoom-viewport {
+	      box-sizing: border-box;
+	      width: 100%;
+	      height: 100%;
+	      max-width: 100%;
+	      max-height: 100%;
+	      min-width: 0;
+	      min-height: 0;
+	      overflow: auto;
+	      overscroll-behavior: contain;
+	    }
+    .file-preview-popout-window {
+      --editor-scheme-bg: var(--popout-editor-scheme-bg);
+      --editor-scheme-fg: var(--popout-editor-scheme-fg);
+      --editor-scheme-muted: var(--popout-editor-scheme-muted);
+      --editor-scheme-line: var(--popout-editor-scheme-line);
+      --editor-scheme-panel: var(--popout-editor-scheme-panel);
+      --editor-scheme-panel2: var(--popout-editor-scheme-panel2);
+      --editor-scheme-preview-bg: var(--popout-editor-scheme-preview-bg);
+      --bg: var(--editor-scheme-bg, #0f131a);
+      --panel: var(--editor-scheme-panel, #151b24);
+      --panel2: var(--editor-scheme-panel2, #1b2432);
+      --text: var(--editor-scheme-fg, #e4e8ee);
+      --muted: var(--editor-scheme-muted, #8b95a5);
+      --line: var(--editor-scheme-line, #2a3444);
+      --editor-preview-bg: var(--editor-scheme-preview-bg, var(--bg));
+    }
+    .file-preview-popout-window .markdown-body {
+      color: var(--text, #111827);
+      background: transparent;
+    }
+    .file-preview-popout-window .markdown-body pre code.hljs {
+      color: var(--editor-scheme-fg, inherit) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .hljs-comment,
+    .file-preview-popout-window .markdown-body pre code .hljs-quote {
+      color: var(--code-comment) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .hljs-keyword,
+    .file-preview-popout-window .markdown-body pre code .hljs-selector-tag,
+    .file-preview-popout-window .markdown-body pre code .hljs-literal,
+    .file-preview-popout-window .markdown-body pre code .hljs-section,
+    .file-preview-popout-window .markdown-body pre code .hljs-doctag {
+      color: var(--code-keyword) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .hljs-string,
+    .file-preview-popout-window .markdown-body pre code .hljs-regexp,
+    .file-preview-popout-window .markdown-body pre code .hljs-addition,
+    .file-preview-popout-window .markdown-body pre code .hljs-template-variable {
+      color: var(--code-string) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .hljs-number,
+    .file-preview-popout-window .markdown-body pre code .hljs-symbol,
+    .file-preview-popout-window .markdown-body pre code .hljs-bullet,
+    .file-preview-popout-window .markdown-body pre code .hljs-attr {
+      color: var(--code-number) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .hljs-title,
+    .file-preview-popout-window .markdown-body pre code .hljs-title.function_,
+    .file-preview-popout-window .markdown-body pre code .hljs-function .hljs-title {
+      color: var(--code-function) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .hljs-built_in,
+    .file-preview-popout-window .markdown-body pre code .hljs-type,
+    .file-preview-popout-window .markdown-body pre code .hljs-class .hljs-title {
+      color: var(--code-type) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .hljs-variable,
+    .file-preview-popout-window .markdown-body pre code .hljs-params,
+    .file-preview-popout-window .markdown-body pre code .hljs-name {
+      color: var(--code-variable) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .hljs-property,
+    .file-preview-popout-window .markdown-body pre code .hljs-attribute {
+      color: var(--code-property) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .hljs-tag {
+      color: var(--code-tag) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .hljs-deletion {
+      color: var(--code-invalid) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .hljs-meta {
+      color: var(--code-atom) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .code-keyword {
+      color: var(--code-keyword) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .code-control {
+      color: var(--code-control) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .code-string {
+      color: var(--code-string) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .code-comment {
+      color: var(--code-comment) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .code-number {
+      color: var(--code-number) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .code-constant {
+      color: var(--code-atom) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .code-builtin,
+    .file-preview-popout-window .markdown-body pre code .code-function {
+      color: var(--code-function) !important;
+      font-weight: 700;
+    }
+    .file-preview-popout-window .markdown-body pre code .code-type,
+    .file-preview-popout-window .markdown-body pre code .code-attr {
+      color: var(--code-type) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .code-variable {
+      color: var(--code-variable) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .code-property {
+      color: var(--code-property) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .code-tag {
+      color: var(--code-tag) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .code-invalid {
+      color: var(--code-invalid) !important;
+    }
+    .file-preview-popout-window.editor-theme-light {
+      --editor-scheme-bg: var(--lt-editor-bg);
+      --editor-scheme-fg: var(--lt-text);
+      --editor-scheme-muted: var(--lt-muted);
+      --editor-scheme-line: var(--lt-line);
+      --editor-scheme-panel: var(--lt-panel);
+      --editor-scheme-panel2: var(--lt-panel2);
+      --editor-scheme-preview-bg: var(--lt-editor-preview-bg);
+    }
+    .file-preview-popout-window.editor-theme-light .markdown-body {
+      --markdown-heading: var(--lt-markdown-heading);
+      --markdown-heading-bg: var(--lt-markdown-heading-bg);
+      --markdown-link: var(--lt-markdown-link);
+      --markdown-strong: var(--lt-markdown-strong);
+      --markdown-emphasis: var(--lt-markdown-emphasis);
+      --code-inline: var(--lt-code-inline);
+      --code-inline-bg: var(--lt-code-inline-bg);
+      --code-inline-border: var(--lt-code-inline-border);
+    }
+    .file-preview-popout-window.editor-theme-light .markdown-body pre {
+      color: var(--lt-text);
+      background: var(--lt-panel);
+      border-color: var(--lt-line);
+    }
+    .file-preview-popout-window.editor-theme-light .markdown-body pre code {
+      color: inherit;
+      background: transparent;
+      border: 0;
+    }
+    @media (max-width: 640px) {
+      .file-preview-popout-shell { padding: 64px 14px 28px; }
+      .file-preview-popout-title { width: calc(100% - 28px); }
+    }
+  </style>
+</head>
+<body class="${esc(previewPopoutBodyClassName())}" style="${esc(previewPopoutVariableStyle())}">
+  <main class="file-preview-popout-shell">
+    <header class="file-preview-popout-title" role="toolbar" aria-label="${esc(t('editor.toolbar.aria'))}">
+      <span class="file-preview-popout-title-path">${esc(compactHomePath(path))}</span>
+      ${previewPopoutToolbarHtml()}
+    </header>
+    <article data-preview-root${previewSnapshotDataAttributesHtml(snapshot)} class="${esc(snapshot.className)}">${snapshot.html}</article>
+  </main>
+</body>
+</html>`);
+  doc.close();
+  doc._yolomuxPreviewControlsBound = false;
+  bindFilePreviewPopoutControls(path, previewWindow);
+  return true;
+}
+
+function updateFilePreviewPopoutControls(path, previewWindow) {
+  const doc = previewWindow?.document;
+  if (!doc) return;
+  doc.body?.setAttribute('style', previewPopoutVariableStyle());
+  const themeButton = doc.querySelector('[data-preview-popout-theme]');
+  if (themeButton) updateEditorThemeButton(themeButton, {includeVanilla: true});
+  updateEditorPreviewFontControls(doc);
+  hydratePreviewZoomSurfaces(doc.querySelector('[data-preview-root]') || doc);
+}
+
+function bindFilePreviewPopoutControls(path, previewWindow) {
+  const doc = previewWindow?.document;
+  if (!doc || doc._yolomuxPreviewControlsBound) return;
+  doc._yolomuxPreviewControlsBound = true;
+  if (typeof previewWindow._yolomuxPreviewControlsCleanup === 'function') {
+    previewWindow._yolomuxPreviewControlsCleanup();
+  }
+  const cleanup = [];
+  const bind = (target, type, handler) => {
+    if (!target?.addEventListener) return;
+    target.addEventListener(type, handler, {passive: true});
+    cleanup.push(() => target.removeEventListener?.(type, handler));
+  };
+  previewWindow._yolomuxPreviewControlsCleanup = () => {
+    while (cleanup.length) {
+      try { cleanup.pop()(); } catch (_) {}
+    }
+  };
+  doc.querySelector('[data-preview-popout-theme]')?.addEventListener('click', event => {
+    event.preventDefault();
+    cycleEditorThemeMode({includeVanilla: true});
+  });
+  doc.querySelector('.file-editor-preview-font-panel')?.addEventListener('click', event => {
+    const button = event.target?.closest?.('[data-editor-preview-font-step]');
+    if (!button) return;
+    event.preventDefault();
+    setEditorPreviewFontSize(editorPreviewFontSize + Number(button.dataset.editorPreviewFontStep || 0));
+  });
+  const syncScroll = () => {
+    syncFilePreviewPopoutScroll(path, previewWindow, {forceEdges: true});
+    scheduleFilePreviewPopoutScrollSync(path, previewWindow, {forceEdges: true});
+  };
+  const scheduleScrollSync = () => scheduleFilePreviewPopoutScrollSync(path, previewWindow, {forceEdges: true});
+  const scroller = filePreviewPopoutScrollElement(previewWindow);
+  bind(previewWindow, 'scroll', syncScroll);
+  bind(previewWindow, 'wheel', scheduleScrollSync);
+  bind(doc, 'scroll', syncScroll);
+  bind(doc, 'wheel', scheduleScrollSync);
+  bind(scroller, 'scroll', syncScroll);
+  bind(scroller, 'wheel', scheduleScrollSync);
+  updateFilePreviewPopoutControls(path, previewWindow);
+}
+
+function updateFilePreviewPopout(path, text) {
+  const record = filePreviewPopouts.get(path);
+  if (!record) return false;
+  const previewWindow = record.window;
+  const generation = bumpFilePreviewPopoutGeneration(path);
+  if (!previewWindow || previewWindow.closed) {
+    filePreviewPopouts.delete(path);
+    return false;
+  }
+  const snapshot = renderedPreviewSnapshot(path, text);
+  try {
+    const doc = previewWindow.document;
+    const scroller = filePreviewPopoutScrollElement(previewWindow);
+    const scrollTop = scroller?.scrollTop || 0;
+    const scrollLeft = scroller?.scrollLeft || 0;
+    const root = doc?.querySelector?.('[data-preview-root]');
+    if (!root) return writeFilePreviewPopoutDocument(path, previewWindow, snapshot);
+    applyPreviewSnapshotRoot(root, snapshot);
+    doc.body.className = previewPopoutBodyClassName();
+    updateFilePreviewPopoutControls(path, previewWindow);
+    doc.title = `${basenameOf(path)} preview`;
+    restoreElementScrollPosition(scroller, scrollTop, scrollLeft);
+    renderedPreviewSnapshotAsync(path, text).then(asyncSnapshot => {
+      if (!filePreviewPopoutGenerationMatches(path, previewWindow, generation) || previewWindow.closed) return;
+      const currentRoot = previewWindow.document?.querySelector?.('[data-preview-root]');
+      if (!currentRoot) return;
+      applyPreviewSnapshotRoot(currentRoot, asyncSnapshot);
+      updateFilePreviewPopoutControls(path, previewWindow);
+    }).catch(() => {});
+    return true;
+  } catch (_) {
+    filePreviewPopouts.delete(path);
+    return false;
+  }
+}
+
+function refreshFilePreviewPopouts() {
+  for (const path of Array.from(filePreviewPopouts.keys())) {
+    const state = openFiles.get(path);
+    if (state?.kind && editorPreviewModeAvailable(path, state)) updateFilePreviewPopout(path, state.content || '');
+    else filePreviewPopouts.delete(path);
+  }
+}
+
+function writeFilePreviewPopoutAfterNavigation(path, previewWindow, snapshot) {
+  let written = false;
+  const write = () => {
+    if (written || !previewWindow || previewWindow.closed) return;
+    written = true;
+    writeFilePreviewPopoutDocument(path, previewWindow, snapshot);
+    previewWindow.focus?.();
+  };
+  try {
+    if (previewWindow.location?.pathname === '/preview-popout' && previewWindow.document?.readyState === 'complete') {
+      write();
+      return;
+    }
+    previewWindow.addEventListener?.('load', write, {once: true});
+    window.setTimeout(write, 1000);
+  } catch (_) {
+    write();
+  }
+}
+
+function writeFilePreviewPopoutWhenReady(path, previewWindow, text) {
+  const generation = bumpFilePreviewPopoutGeneration(path);
+  writeFilePreviewPopoutAfterNavigation(path, previewWindow, renderedPreviewSnapshot(path, text));
+  renderedPreviewSnapshotAsync(path, text).then(snapshot => {
+    if (!filePreviewPopoutGenerationMatches(path, previewWindow, generation) || previewWindow.closed) return;
+    writeFilePreviewPopoutAfterNavigation(path, previewWindow, snapshot);
+  }).catch(() => {});
+}
+
+function openFilePreviewPopout(path, panel = null) {
+  if (!path || !editorPreviewModeAvailable(path)) return false;
+  const initialState = openFiles.get(path);
+  if (initialState?.kind === 'text') syncOpenFileContentFromPanels(path, panel);
+  const state = openFiles.get(path);
+  if (!state || !editorPreviewModeAvailable(path, state)) return false;
+  const existing = filePreviewPopouts.get(path)?.window;
+  if (existing && !existing.closed) {
+    updateFilePreviewPopout(path, state.content || '');
+    existing.focus?.();
+    return true;
+  }
+  const previewWindow = window.open(`/preview-popout?path=${encodeURIComponent(path)}`, `yolomux-preview-${encodeURIComponent(path)}`, 'popup,width=980,height=900');
+  if (!previewWindow) {
+    statusErr(localizedHtml('status.previewPopoutBlocked'));
+    return false;
+  }
+  try {
+    filePreviewPopouts.set(path, {window: previewWindow});
+    writeFilePreviewPopoutWhenReady(path, previewWindow, state.content || '');
+    return true;
+  } catch (error) {
+    filePreviewPopouts.delete(path);
+    try { previewWindow.close(); } catch (_) {}
+    statusErr(localizedHtml('status.previewPopoutFailed', {error}));
+    return false;
+  }
 }
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
@@ -30523,7 +35511,7 @@ function updateFileEditorPanelChrome(panel, path) {
   }
   const reloadButton = panel.querySelector('.file-editor-reload-panel');
   if (reloadButton) {
-    reloadButton.hidden = previewOnly || !(state?.externalChanged || state?.externalMissing || state?.externalError);
+    reloadButton.hidden = previewOnly || state?.kind !== 'text';
   }
   updateFileEditorToolbarSeparators(panel);
 }
@@ -30538,88 +35526,6 @@ function setFileEditorToolbarSeparator(panel, key, visible) {
   if (separator) separator.hidden = !visible;
 }
 
-// — back/forward navigation history. The stack holds the layout ITEM ids of visited tabs (any
-// kind: file editors/previews, terminals, Finder, Prefs, …), so Back returns to the previous tab worked
-// on — not just files. recordEditorNav pushes a user-initiated activation; back/forward re-activate the
-// item (re-opening a since-closed file from its path-encoded id). Bounded so the history can't grow
-// without limit — the oldest entries drop past the cap.
-const NAV_STACK_LIMIT = 50;
-function recordEditorNav(item) {
-  if (editorNav.navigating || !item) return;
-  if (editorNav.stack[editorNav.index] === item) return;   // dedupe consecutive same-tab activations
-  editorNav.stack = editorNav.stack.slice(0, editorNav.index + 1);   // a new activation after Back drops the forward tail
-  editorNav.stack.push(item);
-  collapseEditorNavPingPong();
-  if (editorNav.stack.length > NAV_STACK_LIMIT) {
-    editorNav.stack = editorNav.stack.slice(editorNav.stack.length - NAV_STACK_LIMIT);
-  }
-  editorNav.index = editorNav.stack.length - 1;
-  updateEditorNavButtons();
-}
-
-function collapseEditorNavPingPong() {
-  while (editorNav.stack.length >= 4) {
-    const end = editorNav.stack.length;
-    const first = editorNav.stack[end - 4];
-    const second = editorNav.stack[end - 3];
-    if (first !== editorNav.stack[end - 2] || second !== editorNav.stack[end - 1]) return;
-    editorNav.stack.splice(end - 2, 2);
-  }
-}
-
-// Re-activate a history item: focus its tab if still open; if it's a closed file editor/preview, re-open
-// it from the path encoded in its id. Returns false when the item is gone and can't be restored (a
-// closed terminal/Finder/etc.) so the caller can skip it.
-async function activateNavItem(item) {
-  const side = slotForItem(item);
-  if (side) {
-    activatePaneTab(side, item);   // userInitiated defaults falsey → does not re-record
-    return true;
-  }
-  if (isFileEditorItem(item)) {
-    const path = fileItemPath(item);
-    if (path) {
-      await openFileInEditor(path, basenameOf(path), {item});
-      return true;
-    }
-  }
-  return false;
-}
-
-async function editorNavGo(delta) {
-  // Walk in `delta` direction, skipping entries that can't be re-activated (closed non-file tabs), so a
-  // stale entry never dead-ends the history. The first activatable entry becomes the new position.
-  let idx = editorNav.index + delta;
-  while (idx >= 0 && idx < editorNav.stack.length) {
-    const item = editorNav.stack[idx];
-    editorNav.navigating = true;   // re-activation must NOT record a new entry
-    let activated = false;
-    try {
-      activated = await activateNavItem(item);
-    } finally {
-      editorNav.navigating = false;
-    }
-    if (activated) {
-      editorNav.index = idx;
-      updateEditorNavButtons();
-      return;
-    }
-    idx += delta;
-  }
-  updateEditorNavButtons();
-}
-
-function editorNavBack() { return editorNavGo(-1); }
-function editorNavForward() { return editorNavGo(1); }
-
-// The back/forward control lives in the GLOBAL TOPBAR (left of the search bar), not per editor pane —
-// it's one global file-history control, like a browser's. Always visible; disabled at the ends.
-function updateEditorNavButtons() {
-  const back = document.getElementById('topbarNavBack');
-  const forward = document.getElementById('topbarNavForward');
-  if (back) back.disabled = editorNav.index <= 0;
-  if (forward) forward.disabled = editorNav.index >= editorNav.stack.length - 1;
-}
 
 function updateFileEditorToolbarSeparators(panel) {
   const mode = fileEditorToolbarControlVisible(panel, '.file-editor-mode-control-panel');
@@ -30649,2817 +35555,33 @@ function setFileEditorPanelStatus(panel, message, level) {
   const status = panel?.querySelector?.('.file-editor-status-panel');
   if (!status) return;
   let messageNode = status.querySelector('.file-editor-status-message');
+  let countNode = status.querySelector('.file-editor-count-status');
+  let cursorNode = status.querySelector('.file-editor-cursor-status');
   if (!messageNode) {
     status.textContent = '';
     messageNode = document.createElement('span');
     messageNode.className = 'file-editor-status-message';
-    const cursorNode = document.createElement('span');
+    countNode = document.createElement('span');
+    countNode.className = 'file-editor-count-status';
+    cursorNode = document.createElement('span');
     cursorNode.className = 'file-editor-cursor-status';
-    status.append(messageNode, cursorNode);
+    status.append(messageNode, countNode, cursorNode);
+  } else {
+    if (!countNode) {
+      countNode = document.createElement('span');
+      countNode.className = 'file-editor-count-status';
+      if (cursorNode) status.insertBefore(countNode, cursorNode);
+      else status.appendChild(countNode);
+    }
+    if (!cursorNode) {
+      cursorNode = document.createElement('span');
+      cursorNode.className = 'file-editor-cursor-status';
+      status.appendChild(cursorNode);
+    }
   }
   messageNode.textContent = message || '';
   status.dataset.level = level || '';
   updateCodeMirrorCursorStatus(panel);
-}
-
-function markdownTextWithSourceAnchors(text) {
-  return String(text || '');
-}
-
-function applyMarkdownSourceLines(container, source) {
-  const lines = String(source || '').split('\n');
-  let searchFrom = 0;
-  const blocks = Array.from(container.querySelectorAll('h1,h2,h3,h4,h5,h6,p,blockquote,pre,ul,ol,table,hr'));
-  for (const block of blocks) {
-    const text = String(block.textContent || '').trim();
-    let lineIndex = -1;
-    for (let index = searchFrom; index < lines.length; index += 1) {
-      const trimmed = lines[index].trim();
-      if (!trimmed) continue;
-      if (block.tagName === 'HR' && /^-{3,}$/.test(trimmed)) {
-        lineIndex = index;
-        break;
-      }
-      if (block.tagName === 'TABLE' && trimmed.startsWith('|')) {
-        lineIndex = index;
-        break;
-      }
-      if (text && trimmed.includes(text.slice(0, Math.min(text.length, 40)))) {
-        lineIndex = index;
-        break;
-      }
-    }
-    if (lineIndex >= 0) {
-      block.dataset.sourceLine = String(lineIndex + 1);
-      const anchor = document.createElement('span');
-      anchor.className = 'markdown-source-anchor';
-      anchor.dataset.sourceLine = String(lineIndex + 1);
-      block.appendChild(anchor);
-      searchFrom = lineIndex + 1;
-    }
-  }
-}
-
-const MARKDOWN_PREVIEW_BLOCKED_TAGS = new Set([
-  'applet',
-  'audio',
-  'base',
-  'button',
-  'canvas',
-  'embed',
-  'form',
-  'iframe',
-  'link',
-  'math',
-  'meta',
-  'object',
-  'option',
-  'script',
-  'select',
-  'source',
-  'style',
-  'svg',
-  'textarea',
-  'track',
-  'video',
-]);
-const MARKDOWN_PREVIEW_URL_ATTRS = new Set(['href', 'src', 'poster', 'xlink:href']);
-const MARKDOWN_PREVIEW_SAFE_PROTOCOLS = new Set(['http:', 'https:', 'mailto:', 'tel:']);
-const MARKDOWN_PREVIEW_SAFE_IMAGE_DATA = /^data:image\/(?:png|gif|jpe?g|webp);/i;
-const MARKDOWN_PREVIEW_INPUT_ATTRS = new Set(['type', 'checked', 'disabled', 'aria-label', 'class']);
-
-function markdownPreviewUrlAllowed(value, tagName) {
-  const raw = String(value || '').trim();
-  if (!raw) return true;
-  if (raw.startsWith('#') || raw.startsWith('/') || raw.startsWith('./') || raw.startsWith('../')) return true;
-  try {
-    const base = globalThis.location?.href || 'http://localhost/';
-    const url = new URL(raw, base);
-    if (MARKDOWN_PREVIEW_SAFE_PROTOCOLS.has(url.protocol.toLowerCase())) return true;
-    return tagName === 'img' && url.protocol.toLowerCase() === 'data:' && MARKDOWN_PREVIEW_SAFE_IMAGE_DATA.test(raw);
-  } catch (_) {
-    return false;
-  }
-}
-
-function sanitizeMarkdownPreviewAttribute(element, attr) {
-  const name = String(attr?.name || '').toLowerCase();
-  if (!name) return;
-  const tagName = String(element.tagName || '').toLowerCase();
-  if (tagName === 'input' && !MARKDOWN_PREVIEW_INPUT_ATTRS.has(name)) {
-    element.removeAttribute(attr.name);
-    return;
-  }
-  if (name.startsWith('on') || name === 'style' || name === 'srcdoc' || name === 'srcset' || name === 'formaction') {
-    element.removeAttribute(attr.name);
-    return;
-  }
-  if (name.includes(':') && name !== 'xlink:href') {
-    element.removeAttribute(attr.name);
-    return;
-  }
-  if (MARKDOWN_PREVIEW_URL_ATTRS.has(name) && !markdownPreviewUrlAllowed(attr.value, tagName)) {
-    element.removeAttribute(attr.name);
-    return;
-  }
-  if (name === 'target' && element.getAttribute('target') === '_blank') {
-    element.setAttribute('rel', 'noopener noreferrer');
-  }
-}
-
-function markdownPreviewInputAllowed(element) {
-  return String(element?.getAttribute?.('type') || '').toLowerCase() === 'checkbox';
-}
-
-function sanitizeMarkdownPreviewNode(root) {
-  const elementNode = globalThis.Node?.ELEMENT_NODE || 1;
-  const commentNode = globalThis.Node?.COMMENT_NODE || 8;
-  for (const child of Array.from(root?.childNodes || [])) {
-    if (child.nodeType === commentNode) {
-      child.remove();
-      continue;
-    }
-    if (child.nodeType !== elementNode) continue;
-    const tagName = String(child.tagName || '').toLowerCase();
-    if (tagName === 'input') {
-      if (!markdownPreviewInputAllowed(child)) {
-        child.remove();
-        continue;
-      }
-      child.setAttribute('type', 'checkbox');
-      child.setAttribute('disabled', '');
-    }
-    if (MARKDOWN_PREVIEW_BLOCKED_TAGS.has(tagName)) {
-      child.remove();
-      continue;
-    }
-    if (tagName === 'input' && String(child.getAttribute('type') || '').toLowerCase() !== 'checkbox') {
-      child.remove();
-      continue;
-    }
-    for (const attr of Array.from(child.attributes || [])) {
-      if (tagName === 'input' && !MARKDOWN_PREVIEW_INPUT_ATTRS.has(String(attr?.name || '').toLowerCase())) {
-        child.removeAttribute(attr.name);
-        continue;
-      }
-      sanitizeMarkdownPreviewAttribute(child, attr);
-    }
-    sanitizeMarkdownPreviewNode(child);
-  }
-}
-
-function sanitizeMarkdownPreviewHtml(html) {
-  const template = document.createElement('template');
-  if (!template.content) {
-    const fallback = document.createElement('div');
-    fallback.textContent = String(html ?? '');
-    return fallback;
-  }
-  template.innerHTML = String(html ?? '');
-  sanitizeMarkdownPreviewNode(template.content);
-  return template.content;
-}
-
-// turn bare http(s) URLs in rendered markdown into real <a> links — version-proof against
-// marked's GFM autolink missing them (e.g. when per-line source anchors are interleaved). Skips text
-// already inside <a>/<code>/<pre> so existing links and code samples are untouched. Reuses
-// markdownPreviewUrlAllowed so only safe schemes link; mirrors the app's safe-link attributes.
-function linkifyBareUrls(root) {
-  if (!root || typeof document.createTreeWalker !== 'function') return;
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-    acceptNode(node) {
-      for (let el = node.parentElement; el; el = el.parentElement) {
-        const tag = el.tagName ? el.tagName.toLowerCase() : '';
-        if (tag === 'a' || tag === 'code' || tag === 'pre') return NodeFilter.FILTER_REJECT;
-      }
-      return /\bhttps?:\/\/\S/.test(node.nodeValue || '') ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
-    },
-  });
-  const targets = [];
-  while (walker.nextNode()) targets.push(walker.currentNode);
-  const urlRe = /\bhttps?:\/\/[^\s<>"')\]}]+/g;
-  for (const textNode of targets) {
-    const text = textNode.nodeValue;
-    let last = 0;
-    let match;
-    const frag = document.createDocumentFragment();
-    urlRe.lastIndex = 0;
-    while ((match = urlRe.exec(text))) {
-      const url = match[0].replace(/[.,;:!?]+$/, '');   // drop trailing sentence punctuation
-      const start = match.index;
-      const end = start + url.length;
-      if (start > last) frag.appendChild(document.createTextNode(text.slice(last, start)));
-      if (markdownPreviewUrlAllowed(url, 'a')) {
-        const a = document.createElement('a');
-        a.href = url;
-        a.textContent = url;
-        a.target = '_blank';
-        a.rel = 'noreferrer noopener';
-        frag.appendChild(a);
-      } else {
-        frag.appendChild(document.createTextNode(url));
-      }
-      last = end;
-    }
-    if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
-    textNode.replaceWith(frag);
-  }
-}
-
-function mermaidApiIsUsable(api) {
-  return Boolean(api?.initialize && api?.render);
-}
-
-function mermaidBundleUrl(options = {}) {
-  const base = '/static/vendor/mermaid.min.js';
-  return options.force ? `${base}?retry=${Date.now()}` : base;
-}
-
-function loadMermaidBundleScript(options = {}) {
-  if (!options.force && mermaidApiIsUsable(window.mermaid)) return Promise.resolve(window.mermaid);
-  if (options.force) mermaidBundlePromise = null;
-  if (!mermaidBundlePromise) {
-    mermaidBundlePromise = new Promise((resolve, reject) => {
-      const script = document.createElement('script');
-      script.src = mermaidBundleUrl(options);
-      script.async = true;
-      script.onload = () => resolve(window.mermaid || null);
-      script.onerror = () => reject(new Error(`Mermaid bundle failed to load: ${script.src}`));
-      document.head.appendChild(script);
-    });
-  }
-  return mermaidBundlePromise;
-}
-
-// The two readable label/line "ink" colors for the Mermaid preview: MERMAID_LIGHT_INK on dark
-// surfaces/fills, MERMAID_DARK_INK on light ones. One owner so the dark/light contrast pair, the
-// dark-surface foreground fallback, and the label style default cannot drift apart.
-const MERMAID_LIGHT_INK = '#e4e8ee';
-const MERMAID_DARK_INK = '#0f172a';
-
-function mermaidSurfacePalette() {
-  // The diagram renders on the PREVIEW surface, whose Bright/Dark/Vanilla display mode is independent
-  // of the app theme. Derive the palette from that mode, NOT from document `--text` (which follows the
-  // app theme): a Bright preview on a dark app must still get dark lines/text on its white surface,
-  // otherwise the light app `--text` paints light-gray lines that are illegible on white.
-  const light = typeof editorPreviewThemeState === 'function' && editorPreviewThemeState() !== 'dark';
-  if (light) {
-    return {dark: false, fg: '#17202c', surfaceBg: '#ffffff', nodeBg: '#f4f6fa', border: '#c2c9d6', cluster: '#eef2f7'};
-  }
-  return {
-    dark: true,
-    fg: svgPreviewColor('--text', MERMAID_LIGHT_INK),
-    surfaceBg: svgPreviewColor('--panel', '#151922'),
-    nodeBg: svgPreviewColor('--panel', '#151922'),
-    border: svgPreviewColor('--line', '#2a3140'),
-    cluster: svgPreviewColor('--panel2', '#1e2430'),
-  };
-}
-
-function mermaidPreviewConfig() {
-  const p = mermaidSurfacePalette();
-  return {
-    startOnLoad: false,
-    securityLevel: 'strict',
-    deterministicIds: true,
-    deterministicIDSeed: 'yolomux-preview',
-    theme: 'base',
-    htmlLabels: true,
-    flowchart: {
-      htmlLabels: true,
-      useMaxWidth: true,
-      nodeSpacing: 72,
-      rankSpacing: 72,
-    },
-    themeVariables: {
-      background: p.surfaceBg,
-      mainBkg: p.nodeBg,
-      primaryColor: p.nodeBg,
-      primaryTextColor: p.fg,
-      primaryBorderColor: p.border,
-      lineColor: p.fg,
-      textColor: p.fg,
-      fontFamily: svgPreviewFontFamily(),
-      fontSize: '16px',
-      nodeBorder: p.border,
-      clusterBkg: p.cluster,
-      clusterBorder: p.border,
-    },
-  };
-}
-
-function configureMermaidApi(api) {
-  api.initialize(mermaidPreviewConfig());
-  return api;
-}
-
-async function loadMermaidApi() {
-  if (mermaidApiIsUsable(window.mermaid)) return configureMermaidApi(window.mermaid);
-  if (!mermaidApiPromise) {
-    mermaidApiPromise = (async () => {
-      let bundleError = null;
-      try {
-        let api = await loadMermaidBundleScript();
-        if (mermaidApiIsUsable(api)) return configureMermaidApi(api);
-        api = await loadMermaidBundleScript({force: true});
-        if (mermaidApiIsUsable(api)) return configureMermaidApi(api);
-        bundleError = new Error('Mermaid bundle missing critical exports');
-      } catch (error) {
-        bundleError = error;
-      }
-      throw bundleError || new Error('Mermaid unavailable');
-    })();
-  }
-  try {
-    return await mermaidApiPromise;
-  } catch (error) {
-    mermaidApiPromise = null;
-    throw error;
-  }
-}
-
-function splitMarkdownResourceUrl(value) {
-  const raw = String(value || '').trim();
-  const match = raw.match(/^([^?#]*)([?#].*)?$/);
-  return {
-    path: match ? match[1] : raw,
-    suffix: match ? (match[2] || '') : '',
-  };
-}
-
-function safeDecodeMarkdownUrlPath(value) {
-  try {
-    return decodeURIComponent(String(value || ''));
-  } catch (_) {
-    return String(value || '');
-  }
-}
-
-function markdownPreviewImageTarget(src, markdownPath) {
-  const raw = String(src || '').trim();
-  if (!raw || !markdownPath) return null;
-  if (raw.startsWith('#') || raw.startsWith('//')) return null;
-  if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(raw)) {
-    if (/^https?:/i.test(raw)) return {src: raw, path: '', external: true};
-    if (/^data:/i.test(raw) && MARKDOWN_PREVIEW_SAFE_IMAGE_DATA.test(raw)) return {src: raw, path: '', external: true};
-    return null;
-  }
-  const {path: rawPath} = splitMarkdownResourceUrl(raw);
-  if (!rawPath) return null;
-  const resolved = joinAndNormalize(dirnameOf(markdownPath), safeDecodeMarkdownUrlPath(rawPath));
-  return {src: rawFileUrl(resolved), path: resolved, external: false};
-}
-
-function markdownImageFallbackNode(path, label = '') {
-  const node = document.createElement('span');
-  node.className = 'markdown-image-error';
-  const text = document.createElement('span');
-  text.textContent = label || `Image unavailable: ${path}`;
-  node.appendChild(text);
-  if (path) {
-    const open = document.createElement('a');
-    open.href = rawFileUrl(path);
-    open.target = '_blank';
-    open.rel = 'noopener noreferrer';
-    open.textContent = 'Open';
-    const download = document.createElement('a');
-    download.href = rawFileDownloadUrl(path);
-    download.textContent = 'Download';
-    node.append(document.createTextNode(' '), open, document.createTextNode(' · '), download);
-  }
-  return node;
-}
-
-function rewriteMarkdownPreviewImages(root, markdownPath) {
-  if (!root || !markdownPath) return;
-  for (const img of Array.from(root.querySelectorAll?.('img[src]') || [])) {
-    const original = img.getAttribute('src') || '';
-    const target = markdownPreviewImageTarget(original, markdownPath);
-    if (!target) continue;
-    img.classList.add('markdown-preview-image');
-    img.dataset.originalSrc = original;
-    if (target.path) img.dataset.resolvedPath = target.path;
-    img.setAttribute('src', target.src);
-    if (!img.getAttribute('alt') && target.path) img.setAttribute('alt', basenameOf(target.path));
-    img.addEventListener('error', () => {
-      img.replaceWith(markdownImageFallbackNode(target.path, `Image unavailable: ${target.path || original}`));
-    }, {once: true});
-  }
-}
-
-const MARKDOWN_TASK_LINE_RE = /^(\s*(?:[-+*]|\d+[.)])\s+\[)([ xX])(\]\s*)/;
-
-function markdownTaskLineEntries(text) {
-  return String(text || '').split('\n')
-    .map((line, index) => {
-      const match = line.match(MARKDOWN_TASK_LINE_RE);
-      return match ? {line: index + 1, checked: match[2].toLowerCase() === 'x'} : null;
-    })
-    .filter(Boolean);
-}
-
-function markdownTextWithTaskLineToggled(text, sourceLine, checked) {
-  const lines = String(text || '').split('\n');
-  const index = Math.max(0, Math.floor(Number(sourceLine) || 1) - 1);
-  if (index >= lines.length || !MARKDOWN_TASK_LINE_RE.test(lines[index])) return null;
-  lines[index] = lines[index].replace(MARKDOWN_TASK_LINE_RE, (_, prefix, _marker, suffix) => `${prefix}${checked ? 'x' : ' '}${suffix}`);
-  return lines.join('\n');
-}
-
-function updateMarkdownTaskFromPreview(container, input) {
-  const path = container?.dataset?.mdPath || '';
-  const sourceLine = Number(input?.dataset?.sourceLine || 0);
-  const state = openFiles.get(path);
-  if (readOnlyMode || !path || !sourceLine || !state || state.kind !== 'text') return false;
-  const next = markdownTextWithTaskLineToggled(state.content, sourceLine, input.checked === true);
-  if (next === null || next === state.content) return false;
-  const sourcePanel = container.closest?.('.file-editor-panel') || fileEditorPanelsForPath(path)[0] || null;
-  handleFileEditorContentChanged(sourcePanel, path, next, {syntax: false});
-  for (const panel of fileEditorPanelsForPath(path)) {
-    if (panel?._cmView) syncCodeMirrorDocument(panel._cmView, next, {path});
-  }
-  return true;
-}
-
-function bindMarkdownTaskCheckboxes(container, text, markdownPath) {
-  const tasks = markdownTaskLineEntries(text);
-  const checkboxes = Array.from(container.querySelectorAll('input[type="checkbox"]'));
-  checkboxes.forEach((input, index) => {
-    const task = tasks[index];
-    if (!task) return;
-    input.dataset.sourceLine = String(task.line);
-    input.classList.add('markdown-task-checkbox');
-    input.checked = task.checked;
-    if (markdownPath && !readOnlyMode) {
-      input.disabled = false;
-      input.removeAttribute('disabled');
-      input.setAttribute('aria-label', t('editor.toggleTaskLine', {line: task.line}));
-    }
-  });
-  if (markdownPath && !container.dataset.mdTaskBound) {
-    container.dataset.mdTaskBound = '1';
-    container.addEventListener('change', event => {
-      const input = event.target?.closest?.('input[type="checkbox"].markdown-task-checkbox[data-source-line]');
-      if (!input || !container.contains(input)) return;
-      event.preventDefault();
-      event.stopPropagation();
-      const updated = updateMarkdownTaskFromPreview(container, input);
-      if (!updated) input.checked = !input.checked;
-    });
-  }
-}
-
-function markdownFallbackDestinationAndTitle(value) {
-  const raw = String(value || '').trim();
-  if (!raw) return {dest: '', title: ''};
-  if (raw.startsWith('<')) {
-    const end = raw.indexOf('>');
-    if (end >= 0) return {dest: raw.slice(1, end), title: raw.slice(end + 1).trim().replace(/^["']|["']$/g, '')};
-  }
-  const titleMatch = raw.match(/^(.+?)\s+["']([^"']*)["']\s*$/);
-  if (titleMatch) return {dest: titleMatch[1].trim(), title: titleMatch[2]};
-  let dest = '';
-  let escaped = false;
-  let index = 0;
-  for (; index < raw.length; index += 1) {
-    const ch = raw[index];
-    if (escaped) {
-      dest += ch;
-      escaped = false;
-      continue;
-    }
-    if (ch === '\\') {
-      escaped = true;
-      continue;
-    }
-    if (/\s/.test(ch)) break;
-    dest += ch;
-  }
-  return {dest, title: raw.slice(index).trim().replace(/^["']|["']$/g, '')};
-}
-
-function findMarkdownInlineCloseBracket(text, start) {
-  let escaped = false;
-  for (let index = start; index < text.length; index += 1) {
-    const ch = text[index];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (ch === '\\') {
-      escaped = true;
-      continue;
-    }
-    if (ch === ']') return index;
-  }
-  return -1;
-}
-
-function findMarkdownInlineCloseParen(text, start) {
-  let escaped = false;
-  let quote = '';
-  let depth = 0;
-  for (let index = start; index < text.length; index += 1) {
-    const ch = text[index];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (ch === '\\') {
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      if (ch === quote) quote = '';
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      continue;
-    }
-    if (ch === '(') {
-      depth += 1;
-      continue;
-    }
-    if (ch === ')') {
-      if (depth === 0) return index;
-      depth -= 1;
-    }
-  }
-  return -1;
-}
-
-function markdownInlineResourceHtml(text, hold) {
-  const source = String(text || '');
-  let out = '';
-  let index = 0;
-  while (index < source.length) {
-    const image = source.startsWith('![', index);
-    const link = !image && source[index] === '[';
-    if (!image && !link) {
-      out += source[index];
-      index += 1;
-      continue;
-    }
-    const labelStart = index + (image ? 2 : 1);
-    const labelEnd = findMarkdownInlineCloseBracket(source, labelStart);
-    if (labelEnd < 0 || source[labelEnd + 1] !== '(') {
-      out += source[index];
-      index += 1;
-      continue;
-    }
-    const destStart = labelEnd + 2;
-    const destEnd = findMarkdownInlineCloseParen(source, destStart);
-    if (destEnd < 0) {
-      out += source[index];
-      index += 1;
-      continue;
-    }
-    const label = source.slice(labelStart, labelEnd);
-    const rawDest = source.slice(destStart, destEnd);
-    const {dest, title} = markdownFallbackDestinationAndTitle(rawDest);
-    if (!dest) {
-      out += source.slice(index, destEnd + 1);
-      index = destEnd + 1;
-      continue;
-    }
-    const titleAttr = title ? ` title="${esc(title)}"` : '';
-    out += image
-      ? hold(`<img alt="${esc(label)}" src="${esc(dest)}"${titleAttr}>`)
-      : hold(`<a href="${esc(dest)}"${titleAttr}>${esc(label)}</a>`);
-    index = destEnd + 1;
-  }
-  return out;
-}
-
-function markdownInlineHtml(text) {
-  const placeholders = [];
-  const hold = html => {
-    const token = `@@YOLOMUX_MD_${placeholders.length}@@`;
-    placeholders.push([token, html]);
-    return token;
-  };
-  const source = markdownInlineResourceHtml(text, hold);
-  let html = esc(source)
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*([^*]+)\*/g, '<em>$1</em>');
-  for (const [token, value] of placeholders) html = html.replaceAll(token, value);
-  return html;
-}
-
-function markdownFallbackTableHtml(lines, start) {
-  if (start + 1 >= lines.length || !/^\s*\|?[\s:-]+\|[\s|:-]*$/.test(lines[start + 1])) return null;
-  const rows = [];
-  let index = start;
-  while (index < lines.length && /^\s*\|/.test(lines[index])) {
-    if (index !== start + 1) rows.push(lines[index]);
-    index += 1;
-  }
-  const cells = line => line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(cell => markdownInlineHtml(cell.trim()));
-  const header = cells(rows[0] || '');
-  const bodyRows = rows.slice(1);
-  const head = `<thead><tr>${header.map(cell => `<th>${cell}</th>`).join('')}</tr></thead>`;
-  const body = `<tbody>${bodyRows.map(row => `<tr>${cells(row).map(cell => `<td>${cell}</td>`).join('')}</tr>`).join('')}</tbody>`;
-  return {html: `<table>${head}${body}</table>`, next: index};
-}
-
-function fallbackMarkdownToHtml(text) {
-  const lines = String(text || '').split('\n');
-  const out = [];
-  let paragraph = [];
-  const flushParagraph = () => {
-    if (!paragraph.length) return;
-    out.push(`<p>${paragraph.map(line => markdownInlineHtml(line.trim())).join('<br>')}</p>`);
-    paragraph = [];
-  };
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    const trimmed = line.trim();
-    if (!trimmed) {
-      flushParagraph();
-      continue;
-    }
-    const fence = trimmed.match(/^```([A-Za-z0-9_-]+)?\s*$/);
-    if (fence) {
-      flushParagraph();
-      const language = String(fence[1] || 'text').toLowerCase();
-      const code = [];
-      index += 1;
-      while (index < lines.length && !lines[index].trim().startsWith('```')) {
-        code.push(lines[index]);
-        index += 1;
-      }
-      out.push(`<pre><code class="language-${esc(language)}">${esc(code.join('\n'))}</code></pre>`);
-      continue;
-    }
-    const table = markdownFallbackTableHtml(lines, index);
-    if (table) {
-      flushParagraph();
-      out.push(table.html);
-      index = table.next - 1;
-      continue;
-    }
-    const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
-    if (heading) {
-      flushParagraph();
-      const level = heading[1].length;
-      out.push(`<h${level}>${markdownInlineHtml(heading[2])}</h${level}>`);
-      continue;
-    }
-    if (/^[-*_]{3,}$/.test(trimmed)) {
-      flushParagraph();
-      out.push('<hr>');
-      continue;
-    }
-    const quote = trimmed.match(/^>\s?(.*)$/);
-    if (quote) {
-      flushParagraph();
-      out.push(`<blockquote><p>${markdownInlineHtml(quote[1])}</p></blockquote>`);
-      continue;
-    }
-    const task = trimmed.match(/^[-+*]\s+\[([ xX])\]\s+(.+)$/);
-    if (task) {
-      flushParagraph();
-      const items = [];
-      while (index < lines.length) {
-        const item = lines[index].trim().match(/^[-+*]\s+\[([ xX])\]\s+(.+)$/);
-        if (!item) break;
-        const checked = item[1].toLowerCase() === 'x' ? ' checked' : '';
-        items.push(`<li class="task-list-item"><input type="checkbox"${checked} disabled> ${markdownInlineHtml(item[2])}</li>`);
-        index += 1;
-      }
-      out.push(`<ul>${items.join('')}</ul>`);
-      index -= 1;
-      continue;
-    }
-    const bullet = trimmed.match(/^[-+*]\s+(.+)$/);
-    if (bullet) {
-      flushParagraph();
-      const items = [];
-      while (index < lines.length) {
-        const item = lines[index].trim().match(/^[-+*]\s+(.+)$/);
-        if (!item || /^[-+*]\s+\[[ xX]\]\s+/.test(lines[index].trim())) break;
-        items.push(`<li>${markdownInlineHtml(item[1])}</li>`);
-        index += 1;
-      }
-      out.push(`<ul>${items.join('')}</ul>`);
-      index -= 1;
-      continue;
-    }
-    paragraph.push(line);
-  }
-  flushParagraph();
-  return out.join('');
-}
-
-function markdownPreviewHtml(text) {
-  if (typeof window.marked !== 'undefined' && typeof window.marked.parse === 'function') {
-    return window.marked.parse(markdownTextWithSourceAnchors(text), {gfm: true, breaks: true});
-  }
-  return fallbackMarkdownToHtml(markdownTextWithSourceAnchors(text));
-}
-
-function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) {
-  container._previewAsync = null;
-  const html = markdownPreviewHtml(text);
-  const frag = sanitizeMarkdownPreviewHtml(html);
-  linkifyBareUrls(frag);
-  rewriteMarkdownPreviewImages(frag, markdownPath);
-  container.replaceChildren(frag);
-  applyMarkdownSourceLines(container, text);
-  container._previewAsync = renderMarkdownMermaidBlocks(container, markdownPath, {context: options.context || ''});
-  bindMarkdownTaskCheckboxes(container, text, markdownPath);
-  installLinkContextMenu(container);   // right-click Copy URL / Open URL on rendered links
-  // when this preview belongs to an on-disk file (file-editor preview, NOT a yoagent body),
-  // remember the owning file's dir so relative links resolve, and bind the in-pane link handler once.
-  if (markdownPath) {
-    container.dataset.mdPath = markdownPath;
-    container.dataset.basePath = dirnameOf(markdownPath);
-    if (!container.dataset.mdLinkBound) {
-      container.dataset.mdLinkBound = '1';
-      container.addEventListener('click', handleMarkdownPreviewLinkClick);
-    }
-  }
-  if (fileEditorPreviewDisplayMode !== 'vanilla') {
-    container.querySelectorAll('pre code').forEach(block => {
-      if (typeof window.hljs !== 'undefined') {
-        try { window.hljs.highlightElement(block); } catch (_) {}
-      }
-      applyMarkdownFenceFallbackHighlight(block);
-    });
-  }
-}
-
-function markdownFenceLanguage(block) {
-  const classes = Array.from(block?.classList || []);
-  for (const className of classes) {
-    const match = String(className || '').match(/^(?:language|lang)-(.+)$/);
-    if (match) return match[1].toLowerCase();
-  }
-  return '';
-}
-
-function isMermaidFenceLanguage(language) {
-  return ['mermaid', 'mmd', 'diagram-mermaid'].includes(String(language || '').toLowerCase());
-}
-
-function sanitizeSvgStyleText(text) {
-  return String(text || '')
-    .replace(/@import[^;]+;?/gi, '')
-    .replace(/url\([^)]*\)/gi, '');
-}
-
-function svgUrlValueUnsafe(value) {
-  const raw = String(value || '').trim();
-  if (!raw || raw.startsWith('#')) return false;
-  return true;
-}
-
-function svgNumberAttribute(element, name, fallback = 0) {
-  const value = Number.parseFloat(String(element?.getAttribute?.(name) || ''));
-  return Number.isFinite(value) ? value : fallback;
-}
-
-function svgPreviewFontFamily() {
-  const root = typeof getComputedStyle === 'function' ? getComputedStyle(document.documentElement) : null;
-  return root?.getPropertyValue?.('--ui-font')?.trim() || 'Inter, "Segoe UI", "Noto Sans", Arial, sans-serif';
-}
-
-function svgPreviewColor(name, fallback) {
-  const root = typeof getComputedStyle === 'function' ? getComputedStyle(document.documentElement) : null;
-  return root?.getPropertyValue?.(name)?.trim() || fallback;
-}
-
-function svgParseColor(value) {
-  const text = String(value || '').trim().toLowerCase();
-  if (!text || text === 'none' || text === 'transparent' || text === 'currentcolor' || text.startsWith('url(')) return null;
-  const hex = text.match(/^#([0-9a-f]{3,8})$/i);
-  if (hex) {
-    let raw = hex[1];
-    if (raw.length === 3 || raw.length === 4) raw = raw.split('').map(ch => ch + ch).join('');
-    if (raw.length < 6) return null;
-    return {
-      r: Number.parseInt(raw.slice(0, 2), 16),
-      g: Number.parseInt(raw.slice(2, 4), 16),
-      b: Number.parseInt(raw.slice(4, 6), 16),
-    };
-  }
-  const rgb = text.match(/^rgba?\(\s*([0-9.]+)[,\s]+([0-9.]+)[,\s]+([0-9.]+)/);
-  if (rgb) {
-    return {
-      r: Number.parseFloat(rgb[1]),
-      g: Number.parseFloat(rgb[2]),
-      b: Number.parseFloat(rgb[3]),
-    };
-  }
-  return null;
-}
-
-function svgColorLuminance(color) {
-  const channel = value => {
-    const normalized = Math.max(0, Math.min(255, value)) / 255;
-    return normalized <= 0.03928 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
-  };
-  return (0.2126 * channel(color.r)) + (0.7152 * channel(color.g)) + (0.0722 * channel(color.b));
-}
-
-function svgColorContrastRatio(foreground, background) {
-  const fg = svgParseColor(foreground);
-  const bg = svgParseColor(background);
-  if (!fg || !bg) return 0;
-  const a = svgColorLuminance(fg);
-  const b = svgColorLuminance(bg);
-  const lighter = Math.max(a, b);
-  const darker = Math.min(a, b);
-  return (lighter + 0.05) / (darker + 0.05);
-}
-
-function svgColorIsDark(value) {
-  const color = svgParseColor(value);
-  return color ? svgColorLuminance(color) < 0.36 : true;
-}
-
-function svgStyleValue(element, property) {
-  const style = String(element?.getAttribute?.('style') || '');
-  const match = style.match(new RegExp(`${property}\\s*:\\s*([^;]+)`, 'i'));
-  // Strip a trailing `!important` (Mermaid stamps it on every classDef fill, e.g.
-  // `fill:#fef3c7 !important`); otherwise svgParseColor's anchored `^#...$` rejects the value and
-  // the node reads as having no background, which flips its label to the wrong contrast color.
-  return match ? match[1].replace(/\s*!important\s*$/i, '').trim() : '';
-}
-
-function svgStyleDeclarations(text) {
-  const declarations = {};
-  String(text || '').split(';').forEach(part => {
-    const index = part.indexOf(':');
-    if (index <= 0) return;
-    const property = part.slice(0, index).trim().toLowerCase();
-    const value = part.slice(index + 1).trim().replace(/\s*!important\s*$/i, '');
-    if (property && value) declarations[property] = value;
-  });
-  return declarations;
-}
-
-function svgStyleRules(svg) {
-  if (!svg) return [];
-  if (Array.isArray(svg._yolomuxSvgStyleRules)) return svg._yolomuxSvgStyleRules;
-  const rules = [];
-  svg.querySelectorAll?.('style').forEach(style => {
-    const text = String(style.textContent || '').replace(/\/\*[\s\S]*?\*\//g, '');
-    for (const match of text.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
-      const declarations = svgStyleDeclarations(match[2]);
-      match[1].split(',').map(selector => selector.trim()).filter(Boolean).forEach(selector => {
-        rules.push({selector, declarations});
-      });
-    }
-  });
-  svg._yolomuxSvgStyleRules = rules;
-  return rules;
-}
-
-function svgSimpleSelectorMatches(element, selector) {
-  const raw = String(selector || '').trim();
-  if (!raw || raw.includes(':') || raw.includes('>') || raw.includes('+') || raw.includes('~')) return false;
-  const tag = raw.match(/^[a-z][a-z0-9_-]*/i)?.[0] || '';
-  if (tag && tag !== '*' && String(element?.tagName || '').toLowerCase() !== tag.toLowerCase()) return false;
-  for (const id of raw.matchAll(/#([a-z0-9_-]+)/gi)) {
-    if (element?.id !== id[1]) return false;
-  }
-  for (const className of raw.matchAll(/\.([a-z0-9_-]+)/gi)) {
-    if (!element?.classList?.contains(className[1])) return false;
-  }
-  return true;
-}
-
-function svgSelectorMatches(element, selector) {
-  const parts = String(selector || '').trim().split(/\s+/).filter(Boolean);
-  if (!parts.length || !element) return false;
-  let node = element;
-  for (let index = parts.length - 1; index >= 0; index -= 1) {
-    let match = null;
-    for (let cursor = node; cursor; cursor = cursor.parentElement) {
-      if (svgSimpleSelectorMatches(cursor, parts[index])) {
-        match = cursor;
-        break;
-      }
-    }
-    if (!match) return false;
-    node = match.parentElement;
-  }
-  return true;
-}
-
-function svgCssStyleValue(element, property) {
-  const svg = element?.closest?.('svg');
-  if (!svg) return '';
-  const key = String(property || '').toLowerCase();
-  let value = '';
-  for (const rule of svgStyleRules(svg)) {
-    if (rule.declarations[key] && svgSelectorMatches(element, rule.selector)) value = rule.declarations[key];
-  }
-  return value;
-}
-
-function svgPaintColor(element, property = 'fill') {
-  return svgStyleValue(element, property) || svgCssStyleValue(element, property) || element?.getAttribute?.(property) || '';
-}
-
-function svgSetStyleProperty(element, property, value) {
-  if (!element?.setAttribute) return;
-  const existing = String(element.getAttribute('style') || '')
-    .split(';')
-    .map(part => part.trim())
-    .filter(part => part && !part.toLowerCase().startsWith(`${property.toLowerCase()}:`));
-  existing.push(`${property}:${value}`);
-  element.setAttribute('style', `${existing.join(';')};`);
-}
-
-function svgNodeBackgroundFill(node) {
-  // The background behind a node label is the node's own background SHAPE fill. Scan the node's
-  // shapes (skipping label-internal shapes) and return the first with a parseable fill; the first
-  // shape in document order can be a fill-less <path> or a label-internal shape, so picking it
-  // blindly is wrong. A node with no parseable shape fill is transparent over the preview surface.
-  const shapes = node?.querySelectorAll?.('rect, polygon, path, circle, ellipse') || [];
-  for (const shape of Array.from(shapes)) {
-    if (shape.closest?.('.label')) continue;
-    const fill = svgPaintColor(shape, 'fill');
-    if (svgParseColor(fill)) return fill;
-  }
-  return '';
-}
-
-function svgReadableLabelColor(element) {
-  // Labels that sit on the preview surface (subgraph/edge labels, or a node with no/transparent fill)
-  // use the surface foreground, which follows the preview's Bright/Dark/Vanilla mode (dark text on a
-  // white Bright surface, light text on a dark surface).
-  const surfaceFg = mermaidSurfacePalette().fg;
-  const node = element?.closest?.('.node');
-  if (!node) return surfaceFg;
-  // A node with a fill: pick the text color that contrasts with the node's actual background SHAPE
-  // fill (not the nearest ancestor fill, which for a label is the text color and gives dark-on-dark).
-  const bg = svgNodeBackgroundFill(node);
-  if (!bg || !svgParseColor(bg)) return surfaceFg;
-  return svgColorContrastRatio(MERMAID_DARK_INK, bg) >= svgColorContrastRatio(MERMAID_LIGHT_INK, bg) ? MERMAID_DARK_INK : MERMAID_LIGHT_INK;
-}
-
-function svgReadableEdgeColor() {
-  return mermaidSurfacePalette().fg;
-}
-
-function svgReadableLabelStyle(color = svgPreviewColor('--text', MERMAID_LIGHT_INK), size = 15, weight = 400) {
-  return `font-family:${svgPreviewFontFamily()};font-size:${size}px;font-weight:${weight};fill:${color};stroke:none;stroke-width:0;`;
-}
-
-function svgApplyReadableLabelStyle(node, color) {
-  if (!node?.setAttribute) return;
-  svgSetStyleProperty(node, 'font-family', svgPreviewFontFamily());
-  svgSetStyleProperty(node, 'font-weight', '400');
-  svgSetStyleProperty(node, 'fill', color);
-  svgSetStyleProperty(node, 'stroke', 'none');
-  svgSetStyleProperty(node, 'stroke-width', '0');
-}
-
-function svgForeignObjectTextNode(element) {
-  const clone = element.cloneNode(true);
-  clone.querySelectorAll?.('script,style,iframe,object,embed,link,meta').forEach(node => node.remove());
-  const text = String(clone.textContent || '').replace(/\s+/g, ' ').trim();
-  if (!text) return null;
-  const doc = element.ownerDocument || document;
-  const node = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
-  const x = svgNumberAttribute(element, 'x');
-  const y = svgNumberAttribute(element, 'y');
-  const width = svgNumberAttribute(element, 'width');
-  const height = svgNumberAttribute(element, 'height');
-  node.textContent = text;
-  node.setAttribute('x', String(x + (width / 2)));
-  node.setAttribute('y', String(y + (height / 2)));
-  node.setAttribute('text-anchor', 'middle');
-  node.setAttribute('dominant-baseline', 'middle');
-  node.setAttribute('class', 'mermaid-node-label');
-  node.setAttribute('style', svgReadableLabelStyle(svgReadableLabelColor(element)));
-  return node;
-}
-
-function styleStandaloneSvgText(svg) {
-  const fontFamily = svgPreviewFontFamily();
-  const edgeColor = svgReadableEdgeColor();
-  svg.querySelectorAll?.('.edgePaths path, .edgePath path, .flowchart-link, path.flowchart-link, path.messageLine0, path.messageLine1, line.messageLine0, line.messageLine1, marker path, marker polygon').forEach(edge => {
-    svgSetStyleProperty(edge, 'stroke', edgeColor);
-    svgSetStyleProperty(edge, 'stroke-opacity', '0.95');
-    const strokeWidth = Number.parseFloat(svgStyleValue(edge, 'stroke-width') || svgCssStyleValue(edge, 'stroke-width') || edge.getAttribute?.('stroke-width') || '');
-    if (!Number.isFinite(strokeWidth) || strokeWidth < 2) svgSetStyleProperty(edge, 'stroke-width', '2px');
-    if (String(edge.tagName || '').toLowerCase() !== 'path' || edge.closest?.('marker')) svgSetStyleProperty(edge, 'fill', edgeColor);
-  });
-  svg.querySelectorAll?.('.node rect, .node polygon, .node path').forEach(shape => {
-    const fill = svgPaintColor(shape, 'fill');
-    const stroke = svgPaintColor(shape, 'stroke');
-    if (svgColorIsDark(fill) && (!stroke || svgColorIsDark(stroke))) svgSetStyleProperty(shape, 'stroke', edgeColor);
-  });
-  svg.querySelectorAll?.('text').forEach(text => {
-    if (!text.getAttribute('font-family')) text.setAttribute('font-family', fontFamily);
-    const labelColor = svgReadableLabelColor(text);
-    svgApplyReadableLabelStyle(text, labelColor);
-    text.querySelectorAll?.('tspan').forEach(tspan => svgApplyReadableLabelStyle(tspan, labelColor));
-  });
-}
-
-function sanitizeStandaloneSvgNode(root) {
-  const elementNode = globalThis.Node?.ELEMENT_NODE || 1;
-  const blocked = new Set(['script', 'foreignobject', 'iframe', 'object', 'embed', 'audio', 'video', 'canvas', 'link', 'meta']);
-  for (const child of Array.from(root?.childNodes || [])) {
-    if (child.nodeType !== elementNode) {
-      if (child.nodeType === (globalThis.Node?.COMMENT_NODE || 8)) child.remove();
-      continue;
-    }
-    const tagName = String(child.tagName || '').toLowerCase();
-    if (tagName === 'foreignobject') {
-      const textNode = svgForeignObjectTextNode(child);
-      if (textNode) child.replaceWith(textNode);
-      else child.remove();
-      continue;
-    }
-    if (blocked.has(tagName)) {
-      child.remove();
-      continue;
-    }
-    if (tagName === 'style') {
-      child.textContent = sanitizeSvgStyleText(child.textContent);
-    }
-    for (const attr of Array.from(child.attributes || [])) {
-      const name = String(attr?.name || '').toLowerCase();
-      if (!name || name.startsWith('on')) {
-        child.removeAttribute(attr.name);
-        continue;
-      }
-      if (name === 'style') {
-        const sanitized = sanitizeSvgStyleText(attr.value);
-        if (sanitized) child.setAttribute(attr.name, sanitized);
-        else child.removeAttribute(attr.name);
-        continue;
-      }
-      if ((name === 'href' || name === 'xlink:href' || name === 'src') && svgUrlValueUnsafe(attr.value)) {
-        child.removeAttribute(attr.name);
-      }
-    }
-    sanitizeStandaloneSvgNode(child);
-  }
-}
-
-function sanitizeStandaloneSvgString(svgText) {
-  return String(svgText || '')
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/<\s*(?:script|foreignObject|iframe|object|embed|audio|video|canvas|link|meta)\b[\s\S]*?<\s*\/\s*(?:script|foreignObject|iframe|object|embed|audio|video|canvas|link|meta)\s*>/gi, '')
-    .replace(/<\s*(?:script|foreignObject|iframe|object|embed|audio|video|canvas|link|meta)\b[^>]*\/?\s*>/gi, '')
-    .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
-    .replace(/\s+(?:href|xlink:href|src)\s*=\s*(?:"(?!#)[^"]*"|'(?!#)[^']*'|(?![#'"])[^\s>]+)/gi, '')
-    .replace(/@import[^;]+;?/gi, '')
-    .replace(/url\([^)]*\)/gi, '')
-    .replace(/https?:\/\/[^"')\s<>]+/gi, '');
-}
-
-function sanitizeStandaloneSvg(svgText) {
-  const template = document.createElement('template');
-  if (!template.content) return sanitizeStandaloneSvgString(svgText);
-  template.innerHTML = String(svgText || '');
-  sanitizeStandaloneSvgNode(template.content);
-  const svg = template.content?.querySelector?.('svg');
-  if (svg) styleStandaloneSvgText(svg);
-  return svg ? svg.outerHTML : '';
-}
-
-function svgImageUrl(svgText) {
-  const svg = String(svgText || '');
-  if (typeof Blob === 'function' && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
-    return URL.createObjectURL(new Blob([svg], {type: 'image/svg+xml'}));
-  }
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
-}
-
-const previewZoomPolicy = Object.freeze({
-  minScale: 0.2,
-  maxScale: 32,
-  step: 1.25,
-  disabledEpsilon: 0.001,
-  actualPressedEpsilon: 0.01,
-  fitPaddingPx: 24,
-  fitScaleCaps: Object.freeze({
-    image: 1,
-    mermaidInline: 3,
-    mermaidFull: Number.POSITIVE_INFINITY,
-  }),
-  panThresholdPx: 2,
-});
-
-const previewZoomShellClasses = Object.freeze([
-  'file-editor-preview-zoom-shell',
-  'file-editor-preview-zoom-full',
-  'file-editor-preview-zoom-inline',
-]);
-
-const previewZoomRendererDefaults = Object.freeze({
-  imagePane: Object.freeze({zoomKey: 'image-pane', fitMaxScale: previewZoomPolicy.fitScaleCaps.image, full: true, wheelZoom: true, panDrag: true}),
-  imagePreview: Object.freeze({zoomKey: 'image-preview', fitMaxScale: previewZoomPolicy.fitScaleCaps.image, full: true, wheelZoom: true, panDrag: true}),
-  mermaidFull: Object.freeze({zoomKey: 'mermaid', fitMaxScale: previewZoomPolicy.fitScaleCaps.mermaidFull, full: true, wheelZoom: true, panDrag: true}),
-  mermaidInline: Object.freeze({zoomKey: 'mermaid', fitMaxScale: previewZoomPolicy.fitScaleCaps.mermaidInline, full: false, wheelZoom: true, panDrag: true}),
-  default: Object.freeze({zoomKey: 'default', fitMaxScale: Number.POSITIVE_INFINITY, full: true}),
-});
-
-const previewZoomActions = Object.freeze([
-  Object.freeze({
-    id: 'out',
-    label: '-',
-    title: 'Zoom out',
-    zoomState: current => ({mode: 'manual', scale: current / previewZoomPolicy.step}),
-    disabled: scale => scale <= previewZoomPolicy.minScale + previewZoomPolicy.disabledEpsilon,
-  }),
-  Object.freeze({
-    id: 'fit',
-    label: 'Fit',
-    title: 'Fit to view',
-    zoomState: current => ({mode: 'fit', scale: current}),
-    pressed: state => state.mode === 'fit',
-  }),
-  Object.freeze({
-    id: 'actual',
-    label: '1:1',
-    title: 'Actual size',
-    zoomState: () => ({mode: 'actual', scale: 1}),
-    pressed: (state, scale) => state.mode !== 'fit' && Math.abs(scale - 1) < previewZoomPolicy.actualPressedEpsilon,
-  }),
-  Object.freeze({
-    id: 'in',
-    label: '+',
-    title: 'Zoom in',
-    zoomState: current => ({mode: 'manual', scale: current * previewZoomPolicy.step}),
-    disabled: scale => scale >= previewZoomPolicy.maxScale - previewZoomPolicy.disabledEpsilon,
-  }),
-]);
-
-const previewZoomActionById = new Map(previewZoomActions.map(action => [action.id, action]));
-
-function previewContextId(value) {
-  return String(value || '').trim();
-}
-
-function previewZoomScopedKey(key, context) {
-  const normalized = normalizedPreviewZoomKey(key);
-  const scope = previewContextId(context);
-  return scope ? `${scope}:${normalized}` : normalized;
-}
-
-function previewZoomOptionsForKind(kind, options = {}) {
-  const defaults = previewZoomRendererDefaults[kind] || previewZoomRendererDefaults.default;
-  const baseZoomKey = Object.prototype.hasOwnProperty.call(options, 'zoomKey') ? options.zoomKey : defaults.zoomKey;
-  const context = previewContextId(options.context || defaults.context || '');
-  const result = {...defaults, ...options};
-  result.context = context;
-  result.zoomKeyBase = normalizedPreviewZoomKey(baseZoomKey);
-  result.zoomKey = previewZoomScopedKey(baseZoomKey, context);
-  if (!Object.prototype.hasOwnProperty.call(options, 'fitMaxScale')) result.fitMaxScale = defaults.fitMaxScale;
-  if (!Object.prototype.hasOwnProperty.call(options, 'full')) result.full = defaults.full;
-  if (!Object.prototype.hasOwnProperty.call(options, 'wheelZoom')) result.wheelZoom = defaults.wheelZoom === true;
-  if (!Object.prototype.hasOwnProperty.call(options, 'panDrag')) result.panDrag = defaults.panDrag === true;
-  return result;
-}
-
-function previewZoomStateForAction(actionId, currentScale) {
-  return previewZoomActionById.get(actionId)?.zoomState?.(currentScale) || null;
-}
-
-function clampPreviewZoomScale(scale) {
-  const value = Number.parseFloat(String(scale || ''));
-  if (!Number.isFinite(value)) return 1;
-  return Math.max(previewZoomPolicy.minScale, Math.min(previewZoomPolicy.maxScale, value));
-}
-
-function clampPreviewFitScale(scale) {
-  const value = Number.parseFloat(String(scale || ''));
-  if (!Number.isFinite(value)) return 1;
-  return Math.max(previewZoomPolicy.minScale, value);
-}
-
-function resetPreviewZoomSurfaceClasses(shell) {
-  if (!shell?.classList) return;
-  shell.classList.remove(...previewZoomShellClasses);
-  if (shell.dataset) {
-    delete shell.dataset.previewZoomScale;
-    delete shell.dataset.previewZoomMode;
-  }
-}
-
-function disconnectPreviewZoomSurface(shell, options = {}) {
-  if (typeof shell?._previewZoomControlsCleanup === 'function') {
-    shell._previewZoomControlsCleanup();
-    shell._previewZoomControlsCleanup = null;
-  }
-  if (shell?._previewZoomResizeObserver) {
-    shell._previewZoomResizeObserver.disconnect();
-    shell._previewZoomResizeObserver = null;
-  }
-  if (shell?._previewZoomResizeFrame) {
-    previewZoomOwnerWindow(shell)?.cancelAnimationFrame?.(shell._previewZoomResizeFrame);
-    shell._previewZoomResizeFrame = 0;
-  }
-  if (shell?._previewZoomRevealTimer) {
-    previewZoomOwnerWindow(shell)?.clearTimeout?.(shell._previewZoomRevealTimer);
-    shell._previewZoomRevealTimer = 0;
-  }
-  shell?.classList?.remove?.('file-editor-preview-zoom-measuring');
-  if (options.resetClasses === true) resetPreviewZoomSurfaceClasses(shell);
-}
-
-function previewZoomOwnerWindow(shell) {
-  return shell?.ownerDocument?.defaultView || window;
-}
-
-function schedulePreviewZoomFrame(shell, callback) {
-  const ownerWindow = previewZoomOwnerWindow(shell);
-  if (typeof ownerWindow?.requestAnimationFrame === 'function') return ownerWindow.requestAnimationFrame(callback);
-  if (typeof requestAnimationFrame === 'function') return requestAnimationFrame(callback);
-  return setTimeout(callback, 0);
-}
-
-function writePreviewZoomSurfaceDataset(shell, options = {}) {
-  if (!shell?.dataset) return;
-  shell.dataset.previewZoomPath = options.path || '';
-  shell.dataset.previewZoomKey = options.zoomKey || 'default';
-  shell.dataset.previewZoomFull = options.full === false ? '0' : '1';
-  shell.dataset.previewZoomWheel = options.wheelZoom === true ? '1' : '0';
-  shell.dataset.previewZoomPan = options.panDrag === true ? '1' : '0';
-  if (Number.isFinite(options.fitMaxScale)) shell.dataset.previewZoomFitMaxScale = String(options.fitMaxScale);
-  else delete shell.dataset.previewZoomFitMaxScale;
-}
-
-function previewZoomOptionsFromSurface(shell) {
-  const fitMaxScale = Number.parseFloat(shell?.dataset?.previewZoomFitMaxScale || '');
-  return {
-    path: shell?.dataset?.previewZoomPath || '',
-    zoomKey: shell?.dataset?.previewZoomKey || 'default',
-    full: shell?.dataset?.previewZoomFull !== '0',
-    wheelZoom: shell?.dataset?.previewZoomWheel === '1',
-    panDrag: shell?.dataset?.previewZoomPan === '1',
-    fitMaxScale: Number.isFinite(fitMaxScale) ? fitMaxScale : Number.POSITIVE_INFINITY,
-  };
-}
-
-function previewZoomSurfaceContent(shell) {
-  return shell?.querySelector?.(':scope > .file-editor-preview-zoom-viewport > .file-editor-preview-zoom-stage > .file-editor-preview-zoom-content')
-    || shell?.querySelector?.(':scope > .file-editor-preview-zoom-viewport > .file-editor-preview-zoom-stage > *')
-    || null;
-}
-
-function previewZoomContentSize(content) {
-  const naturalWidth = Number(content?.naturalWidth || 0);
-  const naturalHeight = Number(content?.naturalHeight || 0);
-  if (naturalWidth > 0 && naturalHeight > 0) return {width: naturalWidth, height: naturalHeight};
-  const rect = content?.getBoundingClientRect?.();
-  return {
-    width: Math.max(1, Math.round(rect?.width || 1)),
-    height: Math.max(1, Math.round(rect?.height || 1)),
-  };
-}
-
-function previewZoomStagePadding(stage) {
-  const ownerWindow = previewZoomOwnerWindow(stage);
-  const style = ownerWindow?.getComputedStyle?.(stage) || (typeof getComputedStyle === 'function' ? getComputedStyle(stage) : null);
-  const px = name => Number.parseFloat(style?.getPropertyValue?.(name) || '') || 0;
-  return {
-    x: px('padding-left') + px('padding-right'),
-    y: px('padding-top') + px('padding-bottom'),
-  };
-}
-
-function previewZoomFitScale(viewport, content, options = {}) {
-  const size = previewZoomContentSize(content);
-  const availableWidth = Math.max(1, (viewport?.clientWidth || 1) - previewZoomPolicy.fitPaddingPx);
-  const availableHeight = Math.max(1, (viewport?.clientHeight || 1) - previewZoomPolicy.fitPaddingPx);
-  const fitScale = Math.min(availableWidth / size.width, availableHeight / size.height);
-  const maxFitScale = Number.isFinite(options.fitMaxScale) ? options.fitMaxScale : Number.POSITIVE_INFINITY;
-  return clampPreviewFitScale(Math.min(maxFitScale, fitScale));
-}
-
-function previewZoomButton(action) {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.dataset.previewZoomAction = action.id;
-  button.textContent = action.label;
-  button.title = action.title;
-  button.setAttribute('aria-label', action.title);
-  return button;
-}
-
-function previewZoomReadState(options = {}) {
-  if (options.path) return fileEditorPreviewZoomStateForPath(options.path, options.zoomKey || 'default');
-  return normalizePreviewZoomState(options.shell?._previewZoomState);
-}
-
-function previewZoomWriteState(shell, options = {}, zoomState) {
-  const normalized = normalizePreviewZoomState(zoomState);
-  if (options.path) setFileEditorPreviewZoomStateForPath(options.path, options.zoomKey || 'default', normalized);
-  shell._previewZoomState = normalized;
-  return normalized;
-}
-
-function applyPreviewZoomSurface(shell, content, options = {}, applyOptions = {}) {
-  const viewport = shell.querySelector(':scope > .file-editor-preview-zoom-viewport');
-  const value = shell.querySelector(':scope > .file-editor-preview-zoom-toolbar .file-editor-preview-zoom-value');
-  if (!viewport || !content) return;
-  const previousScale = Number.parseFloat(shell.dataset.previewZoomScale || '1') || 1;
-  const viewportRect = viewport.getBoundingClientRect?.();
-  const focusOffsetX = Number.isFinite(applyOptions.focusClientX) && viewportRect
-    ? Math.max(0, Math.min(viewport.clientWidth, applyOptions.focusClientX - viewportRect.left))
-    : (viewport.clientWidth / 2);
-  const focusOffsetY = Number.isFinite(applyOptions.focusClientY) && viewportRect
-    ? Math.max(0, Math.min(viewport.clientHeight, applyOptions.focusClientY - viewportRect.top))
-    : (viewport.clientHeight / 2);
-  const hasFocusPoint = Number.isFinite(applyOptions.focusClientX) || Number.isFinite(applyOptions.focusClientY);
-  const focusX = (viewport.scrollLeft + focusOffsetX) / previousScale;
-  const focusY = (viewport.scrollTop + focusOffsetY) / previousScale;
-  const state = previewZoomReadState({...options, shell});
-  const scale = state.mode === 'fit' ? previewZoomFitScale(viewport, content, options) : clampPreviewZoomScale(state.scale);
-  const size = previewZoomContentSize(content);
-  const scaledWidth = Math.max(1, Math.round(size.width * scale));
-  const scaledHeight = Math.max(1, Math.round(size.height * scale));
-  content.style.width = `${scaledWidth}px`;
-  content.style.height = `${scaledHeight}px`;
-  content.classList.add('file-editor-preview-zoom-content');
-  const stage = content.closest?.('.file-editor-preview-zoom-stage') || null;
-  if (stage) {
-    const padding = previewZoomStagePadding(stage);
-    stage.style.width = `${Math.max(viewport.clientWidth, scaledWidth + padding.x)}px`;
-    stage.style.height = `${Math.max(viewport.clientHeight, scaledHeight + padding.y)}px`;
-  }
-  shell.dataset.previewZoomScale = String(scale);
-  shell.dataset.previewZoomMode = state.mode;
-  if (value) value.textContent = `${Math.round(scale * 100)}%`;
-  shell.querySelectorAll('[data-preview-zoom-action]').forEach(button => {
-    const action = previewZoomActionById.get(button.dataset.previewZoomAction);
-    button.disabled = Boolean(action?.disabled?.(scale));
-    if (action?.pressed) button.setAttribute('aria-pressed', action.pressed(state, scale) ? 'true' : 'false');
-    else button.removeAttribute('aria-pressed');
-  });
-  schedulePreviewZoomFrame(shell, () => {
-    if (state.mode === 'fit') {
-      viewport.scrollLeft = 0;
-      viewport.scrollTop = 0;
-      return;
-    }
-    if (applyOptions.centerIfUnfocused === true && !hasFocusPoint) {
-      viewport.scrollLeft = Math.max(0, (viewport.scrollWidth - viewport.clientWidth) / 2);
-      viewport.scrollTop = Math.max(0, (viewport.scrollHeight - viewport.clientHeight) / 2);
-      return;
-    }
-    viewport.scrollLeft = Math.max(0, (focusX * scale) - focusOffsetX);
-    viewport.scrollTop = Math.max(0, (focusY * scale) - focusOffsetY);
-  });
-}
-
-function setPreviewZoomSurfaceState(shell, content, options = {}, zoomState = {}, applyOptions = {}) {
-  previewZoomWriteState(shell, options, zoomState);
-  applyPreviewZoomSurface(shell, content, options, applyOptions);
-}
-
-function bindPreviewZoomDragPan(shell, viewport, bind) {
-  let drag = null;
-  const finish = event => {
-    if (!drag || (event.pointerId !== undefined && event.pointerId !== drag.pointerId)) return;
-    try { viewport.releasePointerCapture?.(drag.pointerId); } catch (_) {}
-    shell.classList.remove('file-editor-preview-zoom-panning');
-    drag = null;
-  };
-  bind(viewport, 'pointerdown', event => {
-    if (event.button !== 0 || event.defaultPrevented) return;
-    event.preventDefault();
-    drag = {
-      pointerId: event.pointerId,
-      x: event.clientX,
-      y: event.clientY,
-      scrollLeft: viewport.scrollLeft,
-      scrollTop: viewport.scrollTop,
-    };
-    shell.classList.add('file-editor-preview-zoom-panning');
-    try { viewport.setPointerCapture?.(event.pointerId); } catch (_) {}
-  }, {passive: false});
-  bind(viewport, 'pointermove', event => {
-    if (!drag || (event.pointerId !== undefined && event.pointerId !== drag.pointerId)) return;
-    const dx = event.clientX - drag.x;
-    const dy = event.clientY - drag.y;
-    if (Math.abs(dx) > previewZoomPolicy.panThresholdPx || Math.abs(dy) > previewZoomPolicy.panThresholdPx) event.preventDefault();
-    viewport.scrollLeft = Math.max(0, drag.scrollLeft - dx);
-    viewport.scrollTop = Math.max(0, drag.scrollTop - dy);
-  }, {passive: false});
-  bind(viewport, 'pointerup', finish);
-  bind(viewport, 'pointercancel', finish);
-}
-
-function hydratePreviewZoomSurface(shell, content = null, options = null) {
-  if (!shell) return false;
-  const resolvedContent = content || previewZoomSurfaceContent(shell);
-  if (!resolvedContent) return false;
-  const resolvedOptions = options || previewZoomOptionsFromSurface(shell);
-  disconnectPreviewZoomSurface(shell);
-  writePreviewZoomSurfaceDataset(shell, resolvedOptions);
-  const toolbar = shell.querySelector(':scope > .file-editor-preview-zoom-toolbar');
-  const viewport = shell.querySelector(':scope > .file-editor-preview-zoom-viewport');
-  if (!toolbar || !viewport) return false;
-  const cleanup = [];
-  const bind = (target, type, handler, listenerOptions = false) => {
-    if (!target?.addEventListener) return;
-    target.addEventListener(type, handler, listenerOptions);
-    cleanup.push(() => target.removeEventListener?.(type, handler, listenerOptions));
-  };
-  shell._previewZoomControlsCleanup = () => {
-    while (cleanup.length) cleanup.pop()();
-  };
-  bind(toolbar, 'click', event => {
-    const button = event.target?.closest?.('[data-preview-zoom-action]');
-    if (!button || !toolbar.contains(button) || button.disabled) return;
-    const current = Number.parseFloat(shell.dataset.previewZoomScale || '1') || 1;
-    const zoomState = previewZoomStateForAction(button.dataset.previewZoomAction, current);
-    if (zoomState) setPreviewZoomSurfaceState(shell, resolvedContent, resolvedOptions, zoomState, {centerIfUnfocused: true});
-  });
-  bind(viewport, 'wheel', event => {
-    if (resolvedOptions.wheelZoom !== true && !event.ctrlKey && !event.metaKey) return;
-    event.preventDefault();
-    const current = Number.parseFloat(shell.dataset.previewZoomScale || '1') || 1;
-    const zoomState = previewZoomStateForAction(event.deltaY < 0 ? 'in' : 'out', current);
-    if (zoomState) setPreviewZoomSurfaceState(shell, resolvedContent, resolvedOptions, zoomState, {
-      focusClientX: event.clientX,
-      focusClientY: event.clientY,
-    });
-  }, {passive: false});
-  if (resolvedOptions.panDrag === true) bindPreviewZoomDragPan(shell, viewport, bind);
-  const ownerWindow = previewZoomOwnerWindow(shell);
-  // Hide the diagram until its viewport size has settled, then reveal. A file editor pane opens at a
-  // transient height and Dockview re-lays-it-out ~150ms later (and a hover that triggers a relayout
-  // does the same), so fitting against the transient size and then re-fitting makes the diagram
-  // visibly jump/resize. `visibility:hidden` keeps the viewport measurable while hidden, and a
-  // debounce after the last apply reveals it once at the settled size.
-  shell.classList.add('file-editor-preview-zoom-measuring');
-  const scheduleReveal = () => {
-    if (!shell.classList.contains('file-editor-preview-zoom-measuring')) return;
-    if (shell._previewZoomRevealTimer) ownerWindow?.clearTimeout?.(shell._previewZoomRevealTimer);
-    shell._previewZoomRevealTimer = ownerWindow?.setTimeout?.(() => {
-      shell._previewZoomRevealTimer = 0;
-      shell.classList.remove('file-editor-preview-zoom-measuring');
-    }, 150);
-  };
-  const applyAndScheduleReveal = applyOptions => {
-    applyPreviewZoomSurface(shell, resolvedContent, resolvedOptions, applyOptions);
-    scheduleReveal();
-  };
-  const ResizeObserverCtor = ownerWindow?.ResizeObserver || (typeof ResizeObserver === 'function' ? ResizeObserver : null);
-  if (ResizeObserverCtor) {
-    const resizeObserver = new ResizeObserverCtor(() => {
-      // Coalesce to one apply per frame. applyPreviewZoomSurface resizes the content inside the
-      // observed viewport (and can toggle a scrollbar, which changes the viewport content-box),
-      // so applying synchronously here would re-trigger this observer and emit the noisy
-      // "ResizeObserver loop completed with undelivered notifications" warning.
-      const ownerWin = previewZoomOwnerWindow(shell);
-      if (shell._previewZoomResizeFrame) ownerWin?.cancelAnimationFrame?.(shell._previewZoomResizeFrame);
-      shell._previewZoomResizeFrame = schedulePreviewZoomFrame(shell, () => {
-        shell._previewZoomResizeFrame = 0;
-        applyAndScheduleReveal();
-      });
-    });
-    shell._previewZoomResizeObserver = resizeObserver;
-    resizeObserver.observe(viewport);
-  }
-  bind(resolvedContent, 'load', () => applyAndScheduleReveal({centerIfUnfocused: true}), {once: true});
-  schedulePreviewZoomFrame(shell, () => applyAndScheduleReveal({centerIfUnfocused: true}));
-  return true;
-}
-
-function hydratePreviewZoomSurfaces(root) {
-  const surfaces = Array.from(root?.querySelectorAll?.('.file-editor-preview-zoom-shell') || []);
-  if (root?.classList?.contains('file-editor-preview-zoom-shell')) surfaces.unshift(root);
-  for (const shell of surfaces) hydratePreviewZoomSurface(shell);
-  return surfaces.length;
-}
-
-function installPreviewZoomSurface(shell, content, options = {}) {
-  disconnectPreviewZoomSurface(shell, {resetClasses: true});
-  shell.classList.add('file-editor-preview-zoom-shell');
-  shell.classList.toggle('file-editor-preview-zoom-full', options.full !== false);
-  shell.classList.toggle('file-editor-preview-zoom-inline', options.full === false);
-  writePreviewZoomSurfaceDataset(shell, options);
-  const toolbar = document.createElement('div');
-  toolbar.className = 'file-editor-preview-zoom-toolbar';
-  toolbar.append(...previewZoomActions.map(previewZoomButton));
-  const value = document.createElement('span');
-  value.className = 'file-editor-preview-zoom-value';
-  value.setAttribute('aria-live', 'polite');
-  value.textContent = '100%';
-  toolbar.appendChild(value);
-  const viewport = document.createElement('div');
-  viewport.className = 'file-editor-preview-zoom-viewport';
-  const stage = document.createElement('div');
-  stage.className = 'file-editor-preview-zoom-stage';
-  stage.appendChild(content);
-  viewport.appendChild(stage);
-  shell.replaceChildren(toolbar, viewport);
-  hydratePreviewZoomSurface(shell, content, options);
-  return shell;
-}
-
-function previewZoomSurfaceNode(content, options = {}) {
-  return installPreviewZoomSurface(document.createElement('div'), content, options);
-}
-
-let mermaidPreviewRenderSeq = 0;
-
-function mermaidErrorNode(source, error) {
-  const node = document.createElement('div');
-  node.className = 'mermaid-preview-error';
-  const title = document.createElement('div');
-  title.className = 'file-editor-empty-title';
-  title.textContent = 'Mermaid diagram could not be rendered';
-  const detail = document.createElement('div');
-  detail.className = 'file-editor-empty-detail';
-  detail.textContent = String(error || 'invalid Mermaid source');
-  const pre = document.createElement('pre');
-  const code = document.createElement('code');
-  code.className = 'language-mermaid';
-  code.textContent = source;
-  pre.appendChild(code);
-  node.append(title, detail, pre);
-  return node;
-}
-
-function mermaidLoadingNode() {
-  // While a NEW diagram loads/renders, show the shared blinking "..." (moving-ellipsis) used by the
-  // other loading states, not a static "Rendering...". Reuses the empty-state shell so it matches
-  // the Mermaid empty/error states.
-  const node = document.createElement('div');
-  node.className = 'file-editor-empty-state mermaid-preview-loading';
-  node.setAttribute('aria-live', 'polite');
-  node.setAttribute('aria-busy', 'true');
-  const title = document.createElement('div');
-  title.className = 'file-editor-empty-title';
-  title.innerHTML = textWithMovingEllipsisHtml('Rendering Mermaid diagram', 'mermaid-preview-loading-dots');
-  node.appendChild(title);
-  return node;
-}
-
-async function renderMermaidSourceInto(container, source, options = {}) {
-  const text = String(source || '').trim();
-  disconnectPreviewZoomSurface(container, {resetClasses: true});
-  if (!text) {
-    container.replaceChildren(fileEditorEmptyState('Mermaid diagram is empty'));
-    return false;
-  }
-  const seq = ++mermaidPreviewRenderSeq;
-  container.dataset.mermaidRenderSeq = String(seq);
-  container.classList.add('mermaid-preview');
-  container.replaceChildren(mermaidLoadingNode());
-  try {
-    const api = await loadMermaidApi();
-    if (container.dataset.mermaidRenderSeq !== String(seq)) return false;
-    const id = `yolomux-mermaid-${Date.now()}-${seq}`;
-    const result = await api.render(id, text);
-    if (container.dataset.mermaidRenderSeq !== String(seq)) return false;
-    const rawSvg = typeof result === 'string' ? result : result?.svg;
-    const svg = sanitizeStandaloneSvg(rawSvg);
-    if (!svg) throw new Error('Mermaid produced no SVG');
-    const img = document.createElement('img');
-    img.className = 'mermaid-preview-image';
-    img.alt = 'Mermaid diagram';
-    img.src = svgImageUrl(svg);
-    const fullPreview = Object.prototype.hasOwnProperty.call(options, 'full')
-      ? options.full !== false
-      : container.classList.contains('file-editor-preview-pane-panel');
-    installPreviewZoomSurface(container, img, previewZoomOptionsForKind(fullPreview ? 'mermaidFull' : 'mermaidInline', {
-      ...options,
-      path: options.path || '',
-      full: fullPreview,
-    }));
-    return true;
-  } catch (error) {
-    disconnectPreviewZoomSurface(container, {resetClasses: true});
-    if (container.dataset.mermaidRenderSeq === String(seq)) container.replaceChildren(mermaidErrorNode(text, error));
-    return false;
-  }
-}
-
-function renderMarkdownMermaidBlocks(container, markdownPath = '', options = {}) {
-  const blocks = Array.from(container.querySelectorAll?.('pre > code') || [])
-    .filter(block => isMermaidFenceLanguage(markdownFenceLanguage(block)));
-  const renders = [];
-  blocks.forEach((block, index) => {
-    const source = block.textContent || '';
-    const pre = block.closest?.('pre');
-    if (!pre) return;
-    const host = document.createElement('div');
-    host.className = 'mermaid-preview-host';
-    pre.replaceWith(host);
-    renders.push(renderMermaidSourceInto(host, source, {
-      full: false,
-      path: markdownPath,
-      zoomKey: `mermaid:${index}`,
-      context: options.context || '',
-    }));
-  });
-  return renders.length ? Promise.allSettled(renders) : null;
-}
-
-function applyMarkdownFenceFallbackHighlight(block) {
-  const language = markdownFenceLanguage(block);
-  if (!language) return;
-  const html = simpleCodeSyntaxHtml(language, block.textContent || '');
-  if (html === null) return;
-  block.innerHTML = html;
-  block.classList.add('editor-highlight-code');
-}
-
-function safeDecodePathComponent(value) {
-  try {
-    return decodeURIComponent(String(value || ''));
-  } catch (_) {
-    return String(value || '');
-  }
-}
-
-function localPathFromFileHref(href) {
-  const raw = String(href || '').trim();
-  if (!/^file:/i.test(raw)) return '';
-  try {
-    const base = globalThis.location?.href || 'http://localhost/';
-    const url = new URL(raw, base);
-    if (url.protocol !== 'file:') return '';
-    return safeDecodePathComponent(url.pathname || '');
-  } catch (_) {
-    const match = raw.match(/^file:\/\/(?:localhost)?(\/[^?#]*)/i);
-    return match ? safeDecodePathComponent(match[1]) : '';
-  }
-}
-
-function openMarkdownPreviewPathLink(container, resolved) {
-  const owner = openFileOwnerSessionsForPath(container?.dataset?.mdPath || '')[0] || undefined;
-  return Promise.resolve(openFileInEditor(resolved, basenameOf(resolved), {
-    viewMode: editorPreviewModeAvailable(resolved) ? 'preview' : 'edit',
-    ownerSession: owner,
-  })).catch(() => showToast(t('preview.openFailed', {path: resolved}), '', {level: 'error'}));
-}
-
-// in the file-editor markdown preview, route link clicks: in-page #anchors keep default;
-// file:// server paths and relative file links open through the YOLOmux editor, while external links
-// open in a new browser tab. The server's read endpoint still rejects paths outside allowed roots.
-function handleMarkdownPreviewLinkClick(event) {
-  const a = event.target.closest?.('a');
-  if (!a) return;
-  const container = event.currentTarget;
-  const href = a.getAttribute('href') || '';
-  if (!href || href.startsWith('#')) return;
-  if (/^file:/i.test(href)) {
-    event.preventDefault();
-    const resolved = localPathFromFileHref(href);
-    if (resolved) openMarkdownPreviewPathLink(container, resolved);
-    return;
-  }
-  if (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith('//')) {
-    event.preventDefault();
-    window.open(a.href, '_blank', 'noopener,noreferrer');
-    return;
-  }
-  event.preventDefault();
-  const clean = href.split('#')[0].split('?')[0];
-  if (!clean) return;
-  const basePath = container?.dataset?.basePath || '/';
-  const resolved = joinAndNormalize(clean.startsWith('/') ? '/' : basePath, clean);
-  openMarkdownPreviewPathLink(container, resolved);
-}
-
-function isMarkdownPath(path) {
-  const lower = String(path || '').toLowerCase();
-  return lower.endsWith('.md') || lower.endsWith('.markdown');
-}
-
-function isHtmlPath(path) {
-  const lower = String(path || '').toLowerCase();
-  return lower.endsWith('.html') || lower.endsWith('.htm');
-}
-
-function editorPreviewModeAvailable(path, state = null) {
-  return previewKindForPath(path, state || openFiles.get(path)) !== 'unsupported';
-}
-
-function editorVisualLineFragments(line, columnCount, wrapEnabled = fileEditorWrapEnabled) {
-  const text = String(line ?? '');
-  const width = Math.floor(Number(columnCount) || 0);
-  if (!wrapEnabled || width <= 0 || text.length <= width) return [text];
-  const fragments = [];
-  for (let index = 0; index < text.length; index += width) {
-    fragments.push(text.slice(index, index + width));
-  }
-  return fragments.length ? fragments : [''];
-}
-
-function simpleLineSyntaxHtml(language, line) {
-  const highlighted = simpleCodeSyntaxHtml(language, line);
-  return highlighted === null ? esc(line) : highlighted;
-}
-
-function editorVisualHighlightHtml(language, text, options = {}) {
-  const source = String(text ?? '');
-  const wrapEnabled = options.wrap === true;
-  const lineNumbers = options.lineNumbers === true;
-  const columnCount = options.columnCount || 88;
-  const measuredRows = Array.isArray(options.visualRows) ? options.visualRows : null;
-  const rows = source.split('\n');
-  return rows.map((line, lineIndex) => {
-    const fragments = measuredRows?.[lineIndex] || editorVisualLineFragments(line, columnCount, wrapEnabled);
-    return fragments.map((fragment, fragmentIndex) => {
-      const sourceLine = lineIndex + 1;
-      const continuation = fragmentIndex > 0;
-      const rowClass = continuation ? 'editor-visual-line continuation' : 'editor-visual-line';
-      const lineNumber = lineNumbers && !continuation ? String(sourceLine) : '';
-      const marker = wrapEnabled && continuation ? '↪' : '';
-      const code = simpleLineSyntaxHtml(language, fragment);
-      return `<span class="${rowClass}" data-source-line="${sourceLine}"><span class="editor-line-number">${esc(lineNumber)}</span><span class="editor-soft-wrap-marker">${esc(marker)}</span><span class="editor-line-code">${code}</span></span>`;
-    }).join('');
-  }).join('') || '<span class="editor-visual-line" data-source-line="1"><span class="editor-line-number">1</span><span class="editor-soft-wrap-marker"></span><span class="editor-line-code"></span></span>';
-}
-
-function renderEditorCodePreviewInto(container, path, text) {
-  const language = syntaxLanguageForPath(path);
-  const pre = document.createElement('pre');
-  pre.className = ['file-editor-code-preview', 'editor-wrap', fileEditorLineNumbersEnabled ? 'editor-line-numbers' : ''].filter(Boolean).join(' ');
-  const code = document.createElement('code');
-  code.className = `language-${language || 'text'} editor-highlight-code`;
-  code.innerHTML = editorVisualHighlightHtml(language, text, {
-    wrap: true,
-    lineNumbers: fileEditorLineNumbersEnabled,
-    columnCount: 96,
-  });
-  pre.appendChild(code);
-  container.replaceChildren(pre);
-}
-
-function boundedPreviewText(text, maxChars = 20000) {
-  const source = String(text ?? '');
-  if (source.length <= maxChars) return {text: source, truncated: false};
-  return {text: source.slice(0, maxChars), truncated: true};
-}
-
-function previewRendererLanguageForPath(path) {
-  const renderer = previewRendererForPath(path);
-  const ext = fileExtensionOf(path);
-  return renderer?.languageByExtension?.[ext] || renderer?.language || syntaxLanguageForPath(path) || 'text';
-}
-
-function jsonStructuredPreview(label, source, errorLabel = `${label} parse error`) {
-  try {
-    return {label, text: JSON.stringify(JSON.parse(source), null, 2), language: 'json', error: ''};
-  } catch (error) {
-    return {label: errorLabel, text: source, language: 'json', error: String(error?.message || error)};
-  }
-}
-
-function jsonLinesStructuredPreview(path, source) {
-  const ext = fileExtensionOf(path);
-  const lines = String(source ?? '').split(/\r?\n/);
-  const records = [];
-  const errors = [];
-  lines.forEach((line, index) => {
-    if (!line.trim()) return;
-    try {
-      records.push(JSON.parse(line));
-    } catch (error) {
-      errors.push(`line ${index + 1}: ${String(error?.message || error)}`);
-    }
-  });
-  if (errors.length) {
-    return {
-      label: `${ext === '.ndjson' ? 'NDJSON' : 'JSONL'} parse error`,
-      text: source,
-      language: 'json',
-      error: errors.slice(0, 5).join('\n'),
-    };
-  }
-  return {
-    label: `${ext === '.ndjson' ? 'NDJSON' : 'JSONL'} preview · ${records.length} records`,
-    text: records.map(record => JSON.stringify(record)).join('\n'),
-    language: 'json',
-    error: '',
-  };
-}
-
-function notebookStructuredPreview(source) {
-  let notebook;
-  try {
-    notebook = JSON.parse(String(source ?? ''));
-  } catch (error) {
-    return {label: 'Notebook parse error', text: source, language: 'json', error: String(error?.message || error)};
-  }
-  const cells = Array.isArray(notebook?.cells) ? notebook.cells : [];
-  const out = [`Notebook preview · ${cells.length} cells · outputs not rendered`];
-  cells.slice(0, 80).forEach((cell, index) => {
-    const type = String(cell?.cell_type || 'cell');
-    const sourceText = Array.isArray(cell?.source) ? cell.source.join('') : String(cell?.source || '');
-    const outputCount = Array.isArray(cell?.outputs) ? cell.outputs.length : 0;
-    out.push('', `## ${index + 1}. ${type}${outputCount ? ` · ${outputCount} outputs hidden` : ''}`, sourceText.trimEnd());
-  });
-  if (cells.length > 80) out.push('', `... ${cells.length - 80} more cells truncated ...`);
-  return {label: 'Notebook preview', text: out.join('\n'), language: 'markdown', error: ''};
-}
-
-function structuredPreviewValue(path, text) {
-  const ext = fileExtensionOf(path);
-  const source = String(text ?? '');
-  if (ext === '.json') return jsonStructuredPreview('JSON preview', source, 'JSON parse error');
-  if (ext === '.geojson') return jsonStructuredPreview('GeoJSON preview', source, 'GeoJSON parse error');
-  if (ext === '.excalidraw') return jsonStructuredPreview('Excalidraw JSON preview', source, 'Excalidraw parse error');
-  if (ext === '.jsonl' || ext === '.ndjson') return jsonLinesStructuredPreview(path, source);
-  if (ext === '.ipynb') return notebookStructuredPreview(source);
-  if (ext === '.toml') return {label: 'TOML preview', text: source, language: 'ini', error: ''};
-  if (['.xml', '.drawio', '.dio'].includes(ext)) return {label: ext === '.xml' ? 'XML preview' : 'Draw.io XML preview', text: source, language: 'xml', error: ''};
-  if (['.ini', '.cfg', '.conf', '.env', '.properties', '.props'].includes(ext)) return {label: 'Config preview', text: source, language: 'ini', error: ''};
-  return {label: 'YAML preview', text: source, language: 'yaml', error: ''};
-}
-
-function renderStructuredPreviewInto(container, path, text) {
-  const value = structuredPreviewValue(path, text);
-  const bounded = boundedPreviewText(value.text);
-  const wrapper = document.createElement('div');
-  wrapper.className = 'file-editor-data-preview';
-  const header = document.createElement('div');
-  header.className = 'file-editor-data-preview-header';
-  header.textContent = `${value.label}${bounded.truncated ? ' · truncated' : ''}`;
-  wrapper.appendChild(header);
-  if (value.error) {
-    const error = document.createElement('div');
-    error.className = 'file-editor-preview-error';
-    error.textContent = value.error;
-    wrapper.appendChild(error);
-  }
-  const pre = document.createElement('pre');
-  pre.className = 'file-editor-code-preview editor-wrap';
-  const code = document.createElement('code');
-  code.className = `language-${value.language} editor-highlight-code`;
-  code.innerHTML = editorVisualHighlightHtml(value.language, bounded.text, {
-    wrap: true,
-    lineNumbers: fileEditorLineNumbersEnabled,
-    columnCount: 96,
-  });
-  pre.appendChild(code);
-  wrapper.appendChild(pre);
-  container.replaceChildren(wrapper);
-}
-
-function splitDelimitedPreviewLine(line, delimiter) {
-  const cells = [];
-  let value = '';
-  let quoted = false;
-  for (let index = 0; index < line.length; index += 1) {
-    const ch = line[index];
-    if (ch === '"') {
-      if (quoted && line[index + 1] === '"') {
-        value += '"';
-        index += 1;
-      } else {
-        quoted = !quoted;
-      }
-      continue;
-    }
-    if (ch === delimiter && !quoted) {
-      cells.push(value);
-      value = '';
-      continue;
-    }
-    value += ch;
-  }
-  cells.push(value);
-  return cells;
-}
-
-function renderTablePreviewInto(container, path, text) {
-  const delimiter = fileExtensionOf(path) === '.tsv' ? '\t' : ',';
-  const maxRows = 200;
-  const maxCols = 50;
-  const lines = String(text ?? '').split(/\r?\n/).filter(line => line.length > 0);
-  let truncatedColumns = false;
-  const rows = lines.slice(0, maxRows).map(line => {
-    const cells = splitDelimitedPreviewLine(line, delimiter);
-    if (cells.length > maxCols) truncatedColumns = true;
-    return cells.slice(0, maxCols);
-  });
-  const wrapper = document.createElement('div');
-  wrapper.className = 'file-editor-table-preview';
-  const header = document.createElement('div');
-  header.className = 'file-editor-data-preview-header';
-  header.textContent = `${delimiter === '\t' ? 'TSV' : 'CSV'} preview · ${Math.min(lines.length, maxRows)} of ${lines.length} rows${lines.length > maxRows || truncatedColumns ? ' · truncated' : ''}`;
-  wrapper.appendChild(header);
-  const table = document.createElement('table');
-  const body = document.createElement('tbody');
-  rows.forEach((row, rowIndex) => {
-    const tr = document.createElement('tr');
-    row.forEach(cell => {
-      const node = document.createElement(rowIndex === 0 ? 'th' : 'td');
-      node.textContent = cell;
-      tr.appendChild(node);
-    });
-    body.appendChild(tr);
-  });
-  table.appendChild(body);
-  wrapper.appendChild(table);
-  container.replaceChildren(wrapper);
-}
-
-function htmlPreviewHasDisabledJavaScript(text) {
-  const source = String(text ?? '');
-  return /<script\b/i.test(source) || /\son[a-z]+\s*=/i.test(source);
-}
-
-function htmlPreviewUrl(path) {
-  return `/api/fs/html-preview?path=${encodeURIComponent(path)}`;
-}
-
-function renderRawImagePreviewInto(container, path, state = null, options = {}) {
-  const version = String(state?.mtime || state?.size || 0);
-  const img = document.createElement('img');
-  img.className = 'file-editor-preview-image';
-  img.src = rawFileUrl(path, version ? {v: version} : {});
-  img.alt = basenameOf(path);
-  img.loading = 'eager';
-  img.decoding = 'async';
-  img.addEventListener('error', () => {
-    container.replaceChildren(previewActionFallbackNode('Image could not be loaded', `${previewMimeForPath(path) || 'image'}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
-  }, {once: true});
-  container.replaceChildren(previewZoomSurfaceNode(img, previewZoomOptionsForKind('imagePreview', {
-    path,
-    context: options.context || '',
-  })));
-}
-
-function renderPdfPreviewInto(container, path) {
-  const frame = document.createElement('iframe');
-  frame.className = 'file-editor-pdf-preview';
-  frame.setAttribute('sandbox', '');
-  frame.setAttribute('title', `${basenameOf(path)} PDF preview`);
-  frame.src = rawFileUrl(path);
-  const fallback = document.createElement('div');
-  fallback.className = 'file-editor-preview-fallback';
-  const title = document.createElement('div');
-  title.className = 'file-editor-empty-title';
-  title.textContent = 'PDF preview';
-  const detail = document.createElement('div');
-  detail.className = 'file-editor-empty-detail';
-  const open = document.createElement('a');
-  open.href = rawFileUrl(path);
-  open.target = '_blank';
-  open.rel = 'noopener noreferrer';
-  open.textContent = 'Open';
-  const download = document.createElement('a');
-  download.href = rawFileDownloadUrl(path);
-  download.textContent = 'Download';
-  detail.append(open, document.createTextNode(' · '), download);
-  fallback.append(title, detail);
-  container.replaceChildren(frame, fallback);
-}
-
-function previewActionFallbackNode(titleText, detailText, path) {
-  const fallback = document.createElement('div');
-  fallback.className = 'file-editor-preview-fallback';
-  const title = document.createElement('div');
-  title.className = 'file-editor-empty-title';
-  title.textContent = titleText;
-  const detail = document.createElement('div');
-  detail.className = 'file-editor-empty-detail';
-  detail.append(document.createTextNode(detailText || ''));
-  if (path) {
-    const open = document.createElement('a');
-    open.href = rawFileUrl(path);
-    open.target = '_blank';
-    open.rel = 'noopener noreferrer';
-    open.textContent = 'Open';
-    const download = document.createElement('a');
-    download.href = rawFileDownloadUrl(path);
-    download.textContent = 'Download';
-    detail.append(document.createTextNode(detailText ? ' · ' : ''), open, document.createTextNode(' · '), download);
-  }
-  fallback.append(title, detail);
-  return fallback;
-}
-
-function renderNativeMediaPreviewInto(container, path, state = null, kind = 'audio') {
-  const media = document.createElement(kind === 'video' ? 'video' : 'audio');
-  media.className = `file-editor-native-media file-editor-native-${kind}`;
-  media.controls = true;
-  media.preload = 'metadata';
-  media.src = rawFileUrl(path, state?.mtime ? {v: state.mtime} : {});
-  media.addEventListener('error', () => {
-    container.replaceChildren(previewActionFallbackNode(`${kind === 'video' ? 'Video' : 'Audio'} could not be loaded`, `${previewMimeForPath(path) || kind}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
-  }, {once: true});
-  container.replaceChildren(media, previewActionFallbackNode(`${kind === 'video' ? 'Video' : 'Audio'} preview`, `${previewMimeForPath(path) || kind}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
-}
-
-function renderUnsupportedPreviewInto(container, path, state = null) {
-  const renderer = previewRendererForPath(path, state);
-  const title = renderer?.fallbackTitle || 'Preview is not available';
-  const label = state?.mime || previewMimeForPath(path) || state?.kind || 'unsupported file';
-  container.replaceChildren(previewActionFallbackNode(title, `${label}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
-}
-
-async function openHtmlPreviewWithAuth(path) {
-  const previewWindow = window.open('about:blank', '_blank');
-  if (previewWindow) previewWindow.opener = null;
-  try {
-    const response = await apiFetch(htmlPreviewUrl(path));
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const source = await response.text();
-    const blobUrl = URL.createObjectURL(new Blob([source], {type: 'text/html'}));
-    if (previewWindow) {
-      previewWindow.location.href = blobUrl;
-    } else {
-      window.open(blobUrl, '_blank', 'noopener,noreferrer');
-    }
-    window.setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
-  } catch (error) {
-    if (previewWindow) previewWindow.close();
-    statusErr(localizedHtml('status.htmlPreviewFailed', {error}));
-  }
-}
-
-function renderHtmlPreviewInto(container, path, text) {
-  const children = [];
-  if (htmlPreviewHasDisabledJavaScript(text)) {
-    const notice = document.createElement('div');
-    notice.className = 'file-editor-html-js-notice';
-    const message = document.createElement('span');
-    message.textContent = t('preview.jsDisabled');
-    const link = document.createElement('a');
-    link.href = htmlPreviewUrl(path);
-    link.target = '_blank';
-    link.rel = 'noopener noreferrer';
-    link.dataset.htmlPreviewAuth = '1';
-    link.addEventListener('click', event => {
-      event.preventDefault();
-      openHtmlPreviewWithAuth(path);
-    });
-    link.textContent = t('preview.openWithJs');
-    notice.append(message, link);
-    children.push(notice);
-  }
-  const frame = document.createElement('iframe');
-  frame.className = 'file-editor-html-preview';
-  frame.setAttribute('sandbox', '');
-  frame.setAttribute('title', t('preview.htmlTitle'));
-  frame.srcdoc = String(text ?? '');
-  children.push(frame);
-  container.replaceChildren(...children);
-}
-
-function renderEditorPreviewPane(container, path, text, options = {}) {
-  if (!container) return;
-  container._previewAsync = null;
-  const scrollTop = container.scrollTop || 0;
-  const scrollLeft = container.scrollLeft || 0;
-  const state = openFiles.get(path) || null;
-  const previewKind = previewKindForPath(path, state);
-  const previewContext = previewContextId(options.context || 'preview');
-  container.classList.toggle('markdown-body', previewKind === 'markdown');
-  container.classList.toggle('html-preview-body', previewKind === 'html');
-  container.classList.toggle('image-preview-body', previewKind === 'image');
-  container.classList.toggle('pdf-preview-body', previewKind === 'pdf');
-  container.classList.toggle('data-preview-body', previewKind === 'structured' || previewKind === 'table');
-  container.classList.toggle('media-preview-body', previewKind === 'audio' || previewKind === 'video');
-  container.classList.toggle('code-preview-body', previewKind === 'text' || previewKind === 'mermaid');
-  container.classList.toggle('vanilla-preview-body', fileEditorPreviewDisplayMode === 'vanilla');
-  if (previewKind === 'markdown') {
-    container._mermaidSig = null;
-    // fix 6: skip the expensive markdown render (marked.parse + recursive sanitize + per-block
-    // hljs) when the path + content are unchanged from the last render — mirrors CodeMirror's
-    // _cmSignature short-circuit. Prevents a multi-second stall re-rendering a large .md when an
-    // unrelated panel render fires (off the reorder hot path once S2 lands, but a latent cost).
-    if (container._previewPath !== path || container._previewText !== text || container._previewDisplayMode !== fileEditorPreviewDisplayMode || container._previewContext !== previewContext) {
-      container._previewPath = path;
-      container._previewText = text;
-      container._previewDisplayMode = fileEditorPreviewDisplayMode;
-      container._previewContext = previewContext;
-      renderMarkdownPreviewInto(container, text, path, {context: previewContext});
-    }
-  } else if (previewKind === 'mermaid') {
-    // Idempotent: a periodic pane refresh re-runs this with identical source; re-rendering rebuilds
-    // the SVG and (with the reveal gate) FLASHES the diagram on every refresh tick. Skip when the
-    // source, preview theme, and context are unchanged AND a rendered diagram (or error) is already
-    // present. editorPreviewThemeState() is in the signature so a Bright/Dark/Vanilla toggle still
-    // re-renders with the new palette.
-    container._previewPath = null;
-    container._previewText = null;
-    container._previewDisplayMode = null;
-    container._previewContext = null;
-    const mermaidSig = `${path} ${text} ${typeof editorPreviewThemeState === 'function' ? editorPreviewThemeState() : ''} ${previewContext}`;
-    if (container._mermaidSig !== mermaidSig || !container.querySelector('img.mermaid-preview-image, .mermaid-preview-error')) {
-      container._mermaidSig = mermaidSig;
-      container._previewAsync = renderMermaidSourceInto(container, text, {path, zoomKey: 'mermaid', context: previewContext});
-    }
-  } else {
-    container._previewPath = null;
-    container._previewText = null;
-    container._previewDisplayMode = null;
-    container._previewContext = null;
-    container._mermaidSig = null;
-    if (previewKind === 'html') renderHtmlPreviewInto(container, path, text);
-    else if (previewKind === 'image') renderRawImagePreviewInto(container, path, state, {context: previewContext});
-    else if (previewKind === 'pdf') renderPdfPreviewInto(container, path);
-    else if (previewKind === 'structured') renderStructuredPreviewInto(container, path, text);
-    else if (previewKind === 'table') renderTablePreviewInto(container, path, text);
-    else if (previewKind === 'audio' || previewKind === 'video') renderNativeMediaPreviewInto(container, path, state, previewKind);
-    else if (previewKind === 'unsupported') renderUnsupportedPreviewInto(container, path, state);
-    else renderEditorCodePreviewInto(container, path, text);
-  }
-  restoreElementScrollPosition(container, scrollTop, scrollLeft);
-}
-
-const filePreviewPopouts = new Map();
-
-function filePreviewPopoutsForPath(path) {
-  const record = filePreviewPopouts.get(path);
-  return record ? [record] : [];
-}
-
-function closeFilePreviewPopout(path) {
-  const record = filePreviewPopouts.get(path);
-  filePreviewPopouts.delete(path);
-  const previewWindow = record?.window;
-  if (!previewWindow || previewWindow.closed) return false;
-  try { previewWindow.close?.(); } catch (_) {}
-  return true;
-}
-
-function bumpFilePreviewPopoutGeneration(path) {
-  const record = filePreviewPopouts.get(path);
-  if (!record) return 0;
-  record.previewGeneration = Number(record.previewGeneration || 0) + 1;
-  return record.previewGeneration;
-}
-
-function filePreviewPopoutGenerationMatches(path, previewWindow, generation) {
-  const record = filePreviewPopouts.get(path);
-  return Boolean(record && record.window === previewWindow && record.previewGeneration === generation);
-}
-
-function filePreviewPopoutDocument(previewWindow) {
-  try { return previewWindow?.document || null; } catch (_) { return null; }
-}
-
-function filePreviewPopoutScrollElement(previewWindow) {
-  const doc = filePreviewPopoutDocument(previewWindow);
-  return doc?.scrollingElement || doc?.documentElement || doc?.body || null;
-}
-
-function filePreviewPopoutPreviewRoot(previewWindow) {
-  return filePreviewPopoutDocument(previewWindow)?.querySelector?.('[data-preview-root]') || null;
-}
-
-function filePreviewPopoutCanDrive(previewWindow) {
-  const scroller = filePreviewPopoutScrollElement(previewWindow);
-  return elementCanScroll(scroller);
-}
-
-function scrollSyncTargetPosition(from, to, axis = 'top') {
-  const scrollKey = axis === 'left' ? 'scrollLeft' : 'scrollTop';
-  const sizeKey = axis === 'left' ? 'scrollWidth' : 'scrollHeight';
-  const clientKey = axis === 'left' ? 'clientWidth' : 'clientHeight';
-  const sourceSize = Math.max(0, Number(from?.[sizeKey] || 0));
-  const targetSize = Math.max(0, Number(to?.[sizeKey] || 0));
-  const sourceClient = Math.max(0, Number(from?.[clientKey] || 0));
-  const targetClient = Math.max(0, Number(to?.[clientKey] || 0));
-  const maxFrom = Math.max(0, sourceSize - sourceClient);
-  const maxTo = Math.max(0, targetSize - targetClient);
-  const current = Math.max(0, Number(from?.[scrollKey] || 0));
-  const edgeSnap = Math.max(2, Math.ceil(sourceClient * 0.01));
-  if (maxTo <= 0 || current <= edgeSnap) return 0;
-  if (maxFrom <= edgeSnap || current >= maxFrom - edgeSnap) return maxTo;
-  const sourceCenter = Math.min(maxFrom, current) + (sourceClient / 2);
-  const centerRatio = sourceSize > 0 ? sourceCenter / sourceSize : 0;
-  const target = (centerRatio * targetSize) - (targetClient / 2);
-  return Math.min(maxTo, Math.max(0, target));
-}
-
-function syncScrollPositionByRatio(from, to) {
-  if (!from || !to) return false;
-  to.scrollTop = scrollSyncTargetPosition(from, to, 'top');
-  to.scrollLeft = scrollSyncTargetPosition(from, to, 'left');
-  return true;
-}
-
-function scrollElementAtVerticalEdge(element) {
-  const maxTop = Math.max(0, Number(element?.scrollHeight || 0) - Number(element?.clientHeight || 0));
-  const current = Math.max(0, Number(element?.scrollTop || 0));
-  const edgeSnap = Math.max(2, Math.ceil(Number(element?.clientHeight || 0) * 0.01));
-  return current <= edgeSnap || current >= maxTop - edgeSnap;
-}
-
-function syncFilePreviewPopoutFromPanel(path, record, panel, source) {
-  if (!record) return false;
-  const previewWindow = record.window;
-  const scroller = filePreviewPopoutScrollElement(previewWindow);
-  const root = filePreviewPopoutPreviewRoot(previewWindow);
-  const from = fileEditorSourceElement(panel, source);
-  if (!scroller || !root || !from || !elementCanScroll(scroller)) return false;
-  setFileEditorScrollSyncGuard(record);
-  return syncScrollPositionByRatio(from, scroller);
-}
-
-function syncFilePreviewPopoutsFromPanel(panel, source) {
-  const path = fileEditorPanelPath(panel);
-  if (!path || !fileEditorSourceCanDrive(panel, source)) return false;
-  let synced = false;
-  for (const record of filePreviewPopoutsForPath(path)) {
-    synced = syncFilePreviewPopoutFromPanel(path, record, panel, source) || synced;
-  }
-  return synced;
-}
-
-function syncFilePreviewPopoutScroll(path, previewWindow, options = {}) {
-  const record = filePreviewPopouts.get(path);
-  if (!record || !filePreviewPopoutCanDrive(previewWindow)) return false;
-  const scroller = filePreviewPopoutScrollElement(previewWindow);
-  const forceEdge = options.forceEdges === true && scrollElementAtVerticalEdge(scroller);
-  if (!forceEdge && fileEditorScrollSyncBlocked(record)) return false;
-  let synced = false;
-  for (const panel of fileEditorPanelsForPath(path)) {
-    setFileEditorScrollSyncGuard(panel);
-    const mode = fileEditorPanelMode(panel);
-    const previewPane = fileEditorPanelPreviewPane(panel);
-    const editorScroller = fileEditorPanelScroller(panel);
-    if (mode !== 'diff' && editorScroller && elementCanScroll(editorScroller)) synced = syncScrollPositionByRatio(scroller, editorScroller) || synced;
-    if ((mode === 'preview' || mode === 'split') && previewPane && elementCanScroll(previewPane)) synced = syncScrollPositionByRatio(scroller, previewPane) || synced;
-  }
-  return synced;
-}
-
-function scheduleFilePreviewPopoutScrollSync(path, previewWindow, options = {}) {
-  const record = filePreviewPopouts.get(path);
-  if (!record) return false;
-  if (record.scrollSyncFrame) return true;
-  const run = () => {
-    record.scrollSyncFrame = 0;
-    syncFilePreviewPopoutScroll(path, previewWindow, options);
-  };
-  if (typeof previewWindow?.requestAnimationFrame === 'function') record.scrollSyncFrame = previewWindow.requestAnimationFrame(run);
-  else if (typeof requestAnimationFrame === 'function') record.scrollSyncFrame = requestAnimationFrame(run);
-  else record.scrollSyncFrame = setTimeout(run, 0);
-  return true;
-}
-
-function currentStylesheetHref(match) {
-  const link = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
-    .find(item => String(item.getAttribute('href') || '').includes(match));
-  return link ? link.href : '';
-}
-
-function previewPopoutBodyClassName() {
-  const keep = ['theme-light', 'theme-dark', 'editor-theme-light', 'editor-theme-dark', 'editor-preview-vanilla'];
-  const classes = keep.filter(name => document.body?.classList?.contains(name));
-  classes.push('file-preview-popout-window');
-  return classes.join(' ');
-}
-
-function previewPopoutVariableStyle() {
-  const root = getComputedStyle(document.documentElement);
-  const names = [
-    '--active-accent', '--active-accent-rgb', '--active-accent-bright', '--active-accent-text',
-    '--active-control-bg', '--active-control-border', '--active-control-text',
-    '--editor-preview-font-size', '--editor-line-height',
-    '--lt-editor-bg', '--lt-editor-preview-bg', '--lt-text', '--lt-muted', '--lt-line',
-    '--lt-panel', '--lt-panel2', '--lt-markdown-heading', '--lt-markdown-heading-bg',
-    '--lt-markdown-link', '--lt-markdown-strong', '--lt-markdown-emphasis',
-    '--lt-code-inline', '--lt-code-inline-bg', '--lt-code-inline-border',
-    '--markdown-heading', '--markdown-heading-bg', '--markdown-link', '--markdown-strong',
-    '--markdown-emphasis', '--code-inline', '--code-inline-bg', '--code-inline-border',
-    '--code-keyword', '--code-control', '--code-atom', '--code-string', '--code-number', '--code-variable',
-    '--code-function', '--code-type', '--code-property', '--code-tag', '--code-comment',
-    '--code-invalid',
-  ];
-  const aliases = [
-    ['--editor-scheme-bg', '--popout-editor-scheme-bg'],
-    ['--editor-scheme-fg', '--popout-editor-scheme-fg'],
-    ['--editor-scheme-muted', '--popout-editor-scheme-muted'],
-    ['--editor-scheme-line', '--popout-editor-scheme-line'],
-    ['--editor-scheme-panel', '--popout-editor-scheme-panel'],
-    ['--editor-scheme-panel2', '--popout-editor-scheme-panel2'],
-    ['--editor-scheme-preview-bg', '--popout-editor-scheme-preview-bg'],
-  ];
-  const copied = names
-    .map(name => {
-      const value = root.getPropertyValue(name).trim();
-      return value ? `${name}: ${value}` : '';
-    });
-  const aliased = aliases.map(([source, target]) => {
-    const value = root.getPropertyValue(source).trim();
-    return value ? `${target}: ${value}` : '';
-  });
-  return [...copied, ...aliased].filter(Boolean)
-    .join('; ');
-}
-
-function previewPopoutToolbarHtml() {
-  return `
-      <span class="file-editor-preview-font-panel" role="group" aria-label="${esc(t('editor.previewFont.aria'))}">
-        <button type="button" data-editor-preview-font-step="-1" title="${esc(t('editor.previewFont.decrease'))}" aria-label="${esc(t('editor.previewFont.decrease'))}">A-</button>
-        <span class="file-editor-preview-font-value" aria-live="polite">${esc(String(editorPreviewFontSize))}</span>
-        <button type="button" data-editor-preview-font-step="1" title="${esc(t('editor.previewFont.increase'))}" aria-label="${esc(t('editor.previewFont.increase'))}">A+</button>
-      </span>
-      <button type="button" class="file-editor-theme-panel" data-preview-popout-theme title="${esc(editorThemeLabel())}" aria-label="${esc(editorThemeLabel())}"><span class="file-editor-icon file-editor-icon-theme" aria-hidden="true"></span></button>`;
-}
-
-function snapshotRenderedPreviewContainer(scratch) {
-  return {
-    className: scratch.className,
-    html: scratch.innerHTML,
-    dataAttributes: previewSnapshotDataAttributes(scratch),
-  };
-}
-
-function previewSnapshotDataAttributes(scratch) {
-  const attributes = {};
-  for (const name of scratch?.getAttributeNames?.() || []) {
-    if (name.startsWith('data-')) attributes[name] = scratch.getAttribute(name) || '';
-  }
-  return attributes;
-}
-
-function previewSnapshotDataAttributesHtml(snapshot) {
-  return Object.entries(snapshot?.dataAttributes || {})
-    .map(([name, value]) => ` ${name}="${esc(value)}"`)
-    .join('');
-}
-
-function applyPreviewSnapshotRoot(root, snapshot) {
-  if (!root || !snapshot) return false;
-  root.className = snapshot.className;
-  for (const name of Array.from(root.getAttributeNames?.() || [])) {
-    if (name.startsWith('data-') && name !== 'data-preview-root') root.removeAttribute(name);
-  }
-  for (const [name, value] of Object.entries(snapshot.dataAttributes || {})) {
-    root.setAttribute(name, value);
-  }
-  root.innerHTML = snapshot.html;
-  return true;
-}
-
-function previewSnapshotScratch(path, text, options = {}) {
-  const scratch = document.createElement('div');
-  scratch.className = 'file-editor-preview-pane-panel';
-  renderEditorPreviewPane(scratch, path, text, {context: options.context || 'popout'});
-  scratch.hidden = false;
-  return scratch;
-}
-
-function renderedPreviewSnapshot(path, text) {
-  return snapshotRenderedPreviewContainer(previewSnapshotScratch(path, text, {context: 'popout'}));
-}
-
-async function renderedPreviewSnapshotAsync(path, text) {
-  const scratch = previewSnapshotScratch(path, text, {context: 'popout'});
-  if (scratch._previewAsync && typeof scratch._previewAsync.then === 'function') {
-    await scratch._previewAsync;
-  }
-  return snapshotRenderedPreviewContainer(scratch);
-}
-
-function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
-  const doc = previewWindow?.document;
-  if (!doc) return false;
-  const title = `${basenameOf(path)} preview`;
-  const cssHref = currentStylesheetHref('yolomux.css') || '/static/yolomux.css';
-  doc.open();
-  doc.write(`<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${esc(title)}</title>
-  <link rel="stylesheet" href="${esc(cssHref)}">
-  <style>
-    html {
-      min-height: 100%;
-      margin: 0;
-      overflow: auto;
-    }
-    body.file-preview-popout-window {
-      min-height: 100%;
-      height: auto;
-      margin: 0;
-      display: block !important;
-      grid-template-rows: none !important;
-      overflow: auto;
-    }
-    body.file-preview-popout-window {
-      background: var(--editor-preview-bg, var(--bg, #ffffff));
-      color: var(--text, #111827);
-    }
-    .file-preview-popout-shell {
-      box-sizing: border-box;
-      width: 100%;
-      margin: 0 auto;
-      padding: 64px 24px 36px;
-    }
-    .file-preview-popout-title {
-      position: fixed;
-      top: 0;
-      left: 50%;
-      z-index: 1000;
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-      align-items: center;
-      gap: 12px;
-      box-sizing: border-box;
-      width: calc(100% - 48px);
-      min-height: 32px;
-      padding: 8px 0 12px;
-      margin-bottom: 12px;
-      transform: translateX(-50%);
-      border-bottom: 1px solid var(--border, #d1d5db);
-      background: var(--editor-preview-bg, var(--bg, #ffffff));
-      color: var(--text, #111827);
-      font: 600 13px/1.3 var(--font, system-ui, sans-serif);
-      box-shadow: 0 1px 0 var(--editor-preview-bg, var(--bg, #ffffff));
-    }
-    .file-preview-popout-title-path {
-      grid-column: 1;
-      min-width: 0;
-      max-width: 100%;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      justify-self: start;
-    }
-    .file-preview-popout-title .file-editor-preview-font-panel {
-      grid-column: 2;
-      display: inline-flex;
-      align-items: center;
-      justify-self: center;
-    }
-    .file-preview-popout-title .file-editor-theme-panel {
-      grid-column: 3;
-      justify-self: end;
-      min-width: 66px;
-      width: auto;
-      height: 20px;
-      display: inline-flex;
-      align-items: center;
-      justify-content: flex-start;
-      padding: 0 7px 0 4px;
-    }
-    .file-preview-popout-window .file-editor-preview-pane-panel {
-      position: static !important;
-      inset: auto !important;
-      left: auto !important;
-      right: auto !important;
-      top: auto !important;
-      bottom: auto !important;
-      display: block !important;
-      box-sizing: border-box;
-      width: 100% !important;
-      max-width: 100%;
-      min-height: auto;
-      max-height: none;
-      height: auto;
-      overflow: visible;
-      padding: 0;
-      border: 0;
-      background: transparent;
-    }
-	    .file-preview-popout-window .file-editor-preview-pane-panel.file-editor-preview-zoom-shell {
-	      display: grid !important;
-	      grid-template-rows: auto minmax(0, 1fr);
-	      height: clamp(360px, calc(100vh - 132px), 900px);
-	      min-height: 360px;
-	      overflow: hidden;
-	      padding: 8px;
-	    }
-	    .file-preview-popout-window .file-editor-preview-zoom-viewport {
-	      box-sizing: border-box;
-	      width: 100%;
-	      height: 100%;
-	      max-width: 100%;
-	      max-height: 100%;
-	      min-width: 0;
-	      min-height: 0;
-	      overflow: auto;
-	      overscroll-behavior: contain;
-	    }
-    .file-preview-popout-window {
-      --editor-scheme-bg: var(--popout-editor-scheme-bg);
-      --editor-scheme-fg: var(--popout-editor-scheme-fg);
-      --editor-scheme-muted: var(--popout-editor-scheme-muted);
-      --editor-scheme-line: var(--popout-editor-scheme-line);
-      --editor-scheme-panel: var(--popout-editor-scheme-panel);
-      --editor-scheme-panel2: var(--popout-editor-scheme-panel2);
-      --editor-scheme-preview-bg: var(--popout-editor-scheme-preview-bg);
-      --bg: var(--editor-scheme-bg, #0f131a);
-      --panel: var(--editor-scheme-panel, #151b24);
-      --panel2: var(--editor-scheme-panel2, #1b2432);
-      --text: var(--editor-scheme-fg, #e4e8ee);
-      --muted: var(--editor-scheme-muted, #8b95a5);
-      --line: var(--editor-scheme-line, #2a3444);
-      --editor-preview-bg: var(--editor-scheme-preview-bg, var(--bg));
-    }
-    .file-preview-popout-window .markdown-body {
-      color: var(--text, #111827);
-      background: transparent;
-    }
-    .file-preview-popout-window .markdown-body pre code.hljs {
-      color: var(--editor-scheme-fg, inherit) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .hljs-comment,
-    .file-preview-popout-window .markdown-body pre code .hljs-quote {
-      color: var(--code-comment) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .hljs-keyword,
-    .file-preview-popout-window .markdown-body pre code .hljs-selector-tag,
-    .file-preview-popout-window .markdown-body pre code .hljs-literal,
-    .file-preview-popout-window .markdown-body pre code .hljs-section,
-    .file-preview-popout-window .markdown-body pre code .hljs-doctag {
-      color: var(--code-keyword) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .hljs-string,
-    .file-preview-popout-window .markdown-body pre code .hljs-regexp,
-    .file-preview-popout-window .markdown-body pre code .hljs-addition,
-    .file-preview-popout-window .markdown-body pre code .hljs-template-variable {
-      color: var(--code-string) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .hljs-number,
-    .file-preview-popout-window .markdown-body pre code .hljs-symbol,
-    .file-preview-popout-window .markdown-body pre code .hljs-bullet,
-    .file-preview-popout-window .markdown-body pre code .hljs-attr {
-      color: var(--code-number) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .hljs-title,
-    .file-preview-popout-window .markdown-body pre code .hljs-title.function_,
-    .file-preview-popout-window .markdown-body pre code .hljs-function .hljs-title {
-      color: var(--code-function) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .hljs-built_in,
-    .file-preview-popout-window .markdown-body pre code .hljs-type,
-    .file-preview-popout-window .markdown-body pre code .hljs-class .hljs-title {
-      color: var(--code-type) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .hljs-variable,
-    .file-preview-popout-window .markdown-body pre code .hljs-params,
-    .file-preview-popout-window .markdown-body pre code .hljs-name {
-      color: var(--code-variable) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .hljs-property,
-    .file-preview-popout-window .markdown-body pre code .hljs-attribute {
-      color: var(--code-property) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .hljs-tag {
-      color: var(--code-tag) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .hljs-deletion {
-      color: var(--code-invalid) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .hljs-meta {
-      color: var(--code-atom) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .code-keyword {
-      color: var(--code-keyword) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .code-control {
-      color: var(--code-control) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .code-string {
-      color: var(--code-string) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .code-comment {
-      color: var(--code-comment) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .code-number {
-      color: var(--code-number) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .code-constant {
-      color: var(--code-atom) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .code-builtin,
-    .file-preview-popout-window .markdown-body pre code .code-function {
-      color: var(--code-function) !important;
-      font-weight: 700;
-    }
-    .file-preview-popout-window .markdown-body pre code .code-type,
-    .file-preview-popout-window .markdown-body pre code .code-attr {
-      color: var(--code-type) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .code-variable {
-      color: var(--code-variable) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .code-property {
-      color: var(--code-property) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .code-tag {
-      color: var(--code-tag) !important;
-    }
-    .file-preview-popout-window .markdown-body pre code .code-invalid {
-      color: var(--code-invalid) !important;
-    }
-    .file-preview-popout-window.editor-theme-light {
-      --editor-scheme-bg: var(--lt-editor-bg);
-      --editor-scheme-fg: var(--lt-text);
-      --editor-scheme-muted: var(--lt-muted);
-      --editor-scheme-line: var(--lt-line);
-      --editor-scheme-panel: var(--lt-panel);
-      --editor-scheme-panel2: var(--lt-panel2);
-      --editor-scheme-preview-bg: var(--lt-editor-preview-bg);
-    }
-    .file-preview-popout-window.editor-theme-light .markdown-body {
-      --markdown-heading: var(--lt-markdown-heading);
-      --markdown-heading-bg: var(--lt-markdown-heading-bg);
-      --markdown-link: var(--lt-markdown-link);
-      --markdown-strong: var(--lt-markdown-strong);
-      --markdown-emphasis: var(--lt-markdown-emphasis);
-      --code-inline: var(--lt-code-inline);
-      --code-inline-bg: var(--lt-code-inline-bg);
-      --code-inline-border: var(--lt-code-inline-border);
-    }
-    .file-preview-popout-window.editor-theme-light .markdown-body pre {
-      color: var(--lt-text);
-      background: var(--lt-panel);
-      border-color: var(--lt-line);
-    }
-    .file-preview-popout-window.editor-theme-light .markdown-body pre code {
-      color: inherit;
-      background: transparent;
-      border: 0;
-    }
-    @media (max-width: 640px) {
-      .file-preview-popout-shell { padding: 64px 14px 28px; }
-      .file-preview-popout-title { width: calc(100% - 28px); }
-    }
-  </style>
-</head>
-<body class="${esc(previewPopoutBodyClassName())}" style="${esc(previewPopoutVariableStyle())}">
-  <main class="file-preview-popout-shell">
-    <header class="file-preview-popout-title" role="toolbar" aria-label="${esc(t('editor.toolbar.aria'))}">
-      <span class="file-preview-popout-title-path">${esc(compactHomePath(path))}</span>
-      ${previewPopoutToolbarHtml()}
-    </header>
-    <article data-preview-root${previewSnapshotDataAttributesHtml(snapshot)} class="${esc(snapshot.className)}">${snapshot.html}</article>
-  </main>
-</body>
-</html>`);
-  doc.close();
-  doc._yolomuxPreviewControlsBound = false;
-  bindFilePreviewPopoutControls(path, previewWindow);
-  return true;
-}
-
-function updateFilePreviewPopoutControls(path, previewWindow) {
-  const doc = previewWindow?.document;
-  if (!doc) return;
-  doc.body?.setAttribute('style', previewPopoutVariableStyle());
-  const themeButton = doc.querySelector('[data-preview-popout-theme]');
-  if (themeButton) updateEditorThemeButton(themeButton, {includeVanilla: true});
-  updateEditorPreviewFontControls(doc);
-  hydratePreviewZoomSurfaces(doc.querySelector('[data-preview-root]') || doc);
-}
-
-function bindFilePreviewPopoutControls(path, previewWindow) {
-  const doc = previewWindow?.document;
-  if (!doc || doc._yolomuxPreviewControlsBound) return;
-  doc._yolomuxPreviewControlsBound = true;
-  if (typeof previewWindow._yolomuxPreviewControlsCleanup === 'function') {
-    previewWindow._yolomuxPreviewControlsCleanup();
-  }
-  const cleanup = [];
-  const bind = (target, type, handler) => {
-    if (!target?.addEventListener) return;
-    target.addEventListener(type, handler, {passive: true});
-    cleanup.push(() => target.removeEventListener?.(type, handler));
-  };
-  previewWindow._yolomuxPreviewControlsCleanup = () => {
-    while (cleanup.length) {
-      try { cleanup.pop()(); } catch (_) {}
-    }
-  };
-  doc.querySelector('[data-preview-popout-theme]')?.addEventListener('click', event => {
-    event.preventDefault();
-    cycleEditorThemeMode({includeVanilla: true});
-  });
-  doc.querySelector('.file-editor-preview-font-panel')?.addEventListener('click', event => {
-    const button = event.target?.closest?.('[data-editor-preview-font-step]');
-    if (!button) return;
-    event.preventDefault();
-    setEditorPreviewFontSize(editorPreviewFontSize + Number(button.dataset.editorPreviewFontStep || 0));
-  });
-  const syncScroll = () => {
-    syncFilePreviewPopoutScroll(path, previewWindow, {forceEdges: true});
-    scheduleFilePreviewPopoutScrollSync(path, previewWindow, {forceEdges: true});
-  };
-  const scheduleScrollSync = () => scheduleFilePreviewPopoutScrollSync(path, previewWindow, {forceEdges: true});
-  const scroller = filePreviewPopoutScrollElement(previewWindow);
-  bind(previewWindow, 'scroll', syncScroll);
-  bind(previewWindow, 'wheel', scheduleScrollSync);
-  bind(doc, 'scroll', syncScroll);
-  bind(doc, 'wheel', scheduleScrollSync);
-  bind(scroller, 'scroll', syncScroll);
-  bind(scroller, 'wheel', scheduleScrollSync);
-  updateFilePreviewPopoutControls(path, previewWindow);
-}
-
-function updateFilePreviewPopout(path, text) {
-  const record = filePreviewPopouts.get(path);
-  if (!record) return false;
-  const previewWindow = record.window;
-  const generation = bumpFilePreviewPopoutGeneration(path);
-  if (!previewWindow || previewWindow.closed) {
-    filePreviewPopouts.delete(path);
-    return false;
-  }
-  const snapshot = renderedPreviewSnapshot(path, text);
-  try {
-    const doc = previewWindow.document;
-    const scroller = filePreviewPopoutScrollElement(previewWindow);
-    const scrollTop = scroller?.scrollTop || 0;
-    const scrollLeft = scroller?.scrollLeft || 0;
-    const root = doc?.querySelector?.('[data-preview-root]');
-    if (!root) return writeFilePreviewPopoutDocument(path, previewWindow, snapshot);
-    applyPreviewSnapshotRoot(root, snapshot);
-    doc.body.className = previewPopoutBodyClassName();
-    updateFilePreviewPopoutControls(path, previewWindow);
-    doc.title = `${basenameOf(path)} preview`;
-    restoreElementScrollPosition(scroller, scrollTop, scrollLeft);
-    renderedPreviewSnapshotAsync(path, text).then(asyncSnapshot => {
-      if (!filePreviewPopoutGenerationMatches(path, previewWindow, generation) || previewWindow.closed) return;
-      const currentRoot = previewWindow.document?.querySelector?.('[data-preview-root]');
-      if (!currentRoot) return;
-      applyPreviewSnapshotRoot(currentRoot, asyncSnapshot);
-      updateFilePreviewPopoutControls(path, previewWindow);
-    }).catch(() => {});
-    return true;
-  } catch (_) {
-    filePreviewPopouts.delete(path);
-    return false;
-  }
-}
-
-function refreshFilePreviewPopouts() {
-  for (const path of Array.from(filePreviewPopouts.keys())) {
-    const state = openFiles.get(path);
-    if (state?.kind && editorPreviewModeAvailable(path, state)) updateFilePreviewPopout(path, state.content || '');
-    else filePreviewPopouts.delete(path);
-  }
-}
-
-function writeFilePreviewPopoutAfterNavigation(path, previewWindow, snapshot) {
-  let written = false;
-  const write = () => {
-    if (written || !previewWindow || previewWindow.closed) return;
-    written = true;
-    writeFilePreviewPopoutDocument(path, previewWindow, snapshot);
-    previewWindow.focus?.();
-  };
-  try {
-    if (previewWindow.location?.pathname === '/preview-popout' && previewWindow.document?.readyState === 'complete') {
-      write();
-      return;
-    }
-    previewWindow.addEventListener?.('load', write, {once: true});
-    window.setTimeout(write, 1000);
-  } catch (_) {
-    write();
-  }
-}
-
-function writeFilePreviewPopoutWhenReady(path, previewWindow, text) {
-  const generation = bumpFilePreviewPopoutGeneration(path);
-  writeFilePreviewPopoutAfterNavigation(path, previewWindow, renderedPreviewSnapshot(path, text));
-  renderedPreviewSnapshotAsync(path, text).then(snapshot => {
-    if (!filePreviewPopoutGenerationMatches(path, previewWindow, generation) || previewWindow.closed) return;
-    writeFilePreviewPopoutAfterNavigation(path, previewWindow, snapshot);
-  }).catch(() => {});
-}
-
-function openFilePreviewPopout(path, panel = null) {
-  if (!path || !editorPreviewModeAvailable(path)) return false;
-  const initialState = openFiles.get(path);
-  if (initialState?.kind === 'text') syncOpenFileContentFromPanels(path, panel);
-  const state = openFiles.get(path);
-  if (!state || !editorPreviewModeAvailable(path, state)) return false;
-  const existing = filePreviewPopouts.get(path)?.window;
-  if (existing && !existing.closed) {
-    updateFilePreviewPopout(path, state.content || '');
-    existing.focus?.();
-    return true;
-  }
-  const previewWindow = window.open(`/preview-popout?path=${encodeURIComponent(path)}`, `yolomux-preview-${encodeURIComponent(path)}`, 'popup,width=980,height=900');
-  if (!previewWindow) {
-    statusErr(localizedHtml('status.previewPopoutBlocked'));
-    return false;
-  }
-  try {
-    filePreviewPopouts.set(path, {window: previewWindow});
-    writeFilePreviewPopoutWhenReady(path, previewWindow, state.content || '');
-    return true;
-  } catch (error) {
-    filePreviewPopouts.delete(path);
-    try { previewWindow.close(); } catch (_) {}
-    statusErr(localizedHtml('status.previewPopoutFailed', {error}));
-    return false;
-  }
 }
 
 function markdownInlineHighlightHtml(escaped) {
@@ -33895,6 +36017,47 @@ function refreshEditorPreviews() {
 
 window.addEventListener('load', refreshEditorPreviews);
 
+function fileEditorSaveHygieneOptions() {
+  return {
+    trimTrailingWhitespace: boolSetting('editor.trim_trailing_whitespace_on_save'),
+    ensureFinalNewline: boolSetting('editor.ensure_final_newline_on_save'),
+  };
+}
+
+function normalizeFileEditorSaveContent(content, options = fileEditorSaveHygieneOptions()) {
+  let text = String(content ?? '');
+  if (options.trimTrailingWhitespace === true) text = text.replace(/[ \t]+(?=\r?\n|$)/g, '');
+  if (options.ensureFinalNewline === true && text && !text.endsWith('\n')) text += '\n';
+  return text;
+}
+
+function syncFileEditorNormalizedContentToPanels(path, content) {
+  for (const openPanel of fileEditorPanelsForPath(path)) {
+    if (openPanel?._cmView) syncCodeMirrorDocument(openPanel._cmView, content, {path});
+    const rawCode = openPanel?.querySelector?.('.file-editor-raw-panel code');
+    if (rawCode) rawCode.textContent = content;
+    const mode = fileEditorPanelMode(openPanel);
+    if (mode === 'preview' || mode === 'split') {
+      renderEditorPreviewPane(openPanel.querySelector('.file-editor-preview-pane-panel'), path, content, {context: mode});
+    }
+    const status = openFileStatus(openFiles.get(path));
+    setFileEditorPanelStatus(openPanel, status.message, status.level);
+  }
+  renderLinkedFilePreviewPanels(null, path, content);
+  updateFilePreviewPopout(path, content);
+}
+
+function applyFileEditorSaveHygiene(path) {
+  const state = openFiles.get(path);
+  if (!state || state.kind !== 'text') return false;
+  const nextContent = normalizeFileEditorSaveContent(state.content);
+  if (nextContent === state.content) return false;
+  state.content = nextContent;
+  updateOpenFileDirtyFlag(path);
+  syncFileEditorNormalizedContentToPanels(path, state.content);
+  return true;
+}
+
 async function saveFileEditor(path, panel, options = {}) {
   if (readOnlyMode) return false;
   const state = openFiles.get(path);
@@ -33905,6 +36068,7 @@ async function saveFileEditor(path, panel, options = {}) {
     clearFileAutosaveTimer(path);
     return showFileSaveConflictDialog(path, panel);
   }
+  applyFileEditorSaveHygiene(path);
   if (!state.dirty && options.force !== true) return true;
   setFileEditorPanelStatus(panel, options.autosave ? 'auto-saving...' : 'saving...', '');
   try {
@@ -33954,3490 +36118,9 @@ async function saveFileEditor(path, panel, options = {}) {
     return false;
   }
 }
-
-function paneFrameControlsHtml(session, options = {}) {
-  const disabled = options.disabled === true;
-  const unavailableLabel = options.unavailableLabel || itemLabel(session);
-  const disabledAttrs = label => ` type="button" disabled title="${esc(t('tab.unavailableFor', {name: unavailableLabel}))}" aria-label="${esc(label)}"`;
-  const controls = [];
-  const includeActions = options.actions ?? isTmuxSession(session);
-  const includeDetails = options.details === true;
-  const includeMinimize = options.minimize !== false;
-  const includeExpand = options.expand !== false;
-  if (includeActions) {
-    controls.push(disabled
-      ? `<button class="tab pane-actions" ${disabledAttrs(t('pane.actions'))}><span class="pane-actions-dots" aria-hidden="true">...</span></button>`
-      : `<button type="button" class="tab pane-actions" data-pane-actions="${esc(session)}" title="${esc(t('pane.actions'))}" aria-label="${esc(t('pane.actions'))}"><span class="pane-actions-dots" aria-hidden="true">...</span></button>`);
-  }
-  if (includeDetails) {
-    const detailsLabel = t('pane.details.hide');
-    controls.push(disabled
-      ? `<button class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')}" ${disabledAttrs(detailsLabel)}></button>`
-      : `<button type="button" class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')} active" data-detail-toggle="${esc(session)}" title="${esc(detailsLabel)}" aria-label="${esc(detailsLabel)}" aria-pressed="true"></button>`);
-  }
-  if (includeMinimize) {
-    controls.push(disabled
-      ? `<button class="tab pane-minimize ${platformWindowControlClass('minimize')}" ${disabledAttrs(t('pane.minimize'))}></button>`
-      : `<button type="button" class="tab pane-minimize ${platformWindowControlClass('minimize')}" data-pane-minimize="${esc(session)}" title="${esc(t('pane.minimize'))}" aria-label="${esc(t('pane.minimize'))}"></button>`);
-  }
-  if (includeExpand) {
-    const expandAttrs = `${canPaneExpand(session) ? '' : ' hidden'} type="button" data-pane-expand="${esc(session)}" title="${esc(t('pane.expand'))}" aria-label="${esc(t('pane.expand'))}"`;
-    controls.push(disabled
-      ? `<button class="tab pane-expand ${platformWindowControlClass('zoom')}" ${disabledAttrs(t('pane.expand'))}></button>`
-      : `<button class="tab pane-expand ${platformWindowControlClass('zoom')}" ${expandAttrs}></button>`);
-  }
-  if (options.close) {
-    const closeLabel = options.closeLabel || t('pane.closeTab');
-    const closeTitle = options.closeTitle || closeLabel;
-    const closeClass = options.closeClass ? ` ${options.closeClass}` : '';
-    const closeData = `data-pane-close="${esc(session)}"`;
-    controls.push(disabled
-      ? `<button class="tab pane-close ${platformWindowControlClass('close')}${closeClass}" ${disabledAttrs(closeLabel)}></button>`
-      : `<button type="button" class="tab pane-close ${platformWindowControlClass('close')}${closeClass}" ${closeData} title="${esc(closeTitle)}" aria-label="${esc(closeLabel)}"></button>`);
-  }
-  return controls.join('');
-}
-
-function paneFrameControlsGroupHtml(session, options = {}) {
-  const groupClass = options.groupClass ? ` ${options.groupClass}` : '';
-  return `<div class="tabs pane-frame-controls${groupClass}" role="tablist">${paneFrameControlsHtml(session, options)}</div>`;
-}
-
-function panelControlsHtml(session, options = {}) {
-  const disabled = options.disabled === true;
-  const unavailableLabel = options.unavailableLabel || itemLabel(session);
-  const disabledAttrs = label => disabled ? ` type="button" disabled title="${esc(t('tab.unavailableFor', {name: unavailableLabel}))}" aria-label="${esc(label)}"` : '';
-  const readonlyAttrs = label => ` type="button" disabled title="${esc(t('tab.adminRequiredFor', {name: label}))}" aria-label="${esc(label)}"`;
-  const tabAttrs = (name, label = '') => {
-    if (disabled) return disabledAttrs(label || name);
-    if (readOnlyMode && name === 'summary') return readonlyAttrs('YO!summary');
-    const labelAttrs = label ? ` title="${esc(label)}" aria-label="${esc(label)}"` : '';
-    return ` type="button" data-tab="${esc(session)}" data-tab-name="${name}"${labelAttrs}`;
-  };
-  const info = transcriptMeta.sessions?.[session];
-  const terminalTitle = terminalTabTitle(session, info);
-  const terminalAttrs = disabled ? disabledAttrs(terminalTitle) : `${tabAttrs('terminal')} title="${esc(terminalTitle)}" aria-label="${esc(terminalTitle)}"`;
-  const terminalLabel = disabled ? t('tab.terminal.short') : terminalTabLabel(session, info);
-  const isFiles = isFileExplorerItem(session);
-  // Term is pressed ONLY when the terminal view is the active one — computed from the live view, not
-  // hardcoded, so a panel re-render (Dockview header refresh) doesn't re-press it after the user
-  // switched to transcript / YO!summary / events. activateTab also toggles it on click.
-  const terminalActive = panelActiveTabName(session) === 'terminal';
-  const terminalButtonHtml = `<button class="tab${terminalActive ? ' active' : ''} terminal-tab" ${terminalAttrs}>${esc(terminalLabel)}</button>`;
-  const frameHtml = isFiles
-    ? paneFrameControlsHtml(session, {
-      disabled,
-      actions: false,
-      minimize: false,
-      expand: false,
-      close: true,
-      closeTitle: t('finder.close', {name: fileExplorerLabel()}),
-      closeLabel: t('finder.close', {name: fileExplorerLabel()}),
-    })
-    : paneFrameControlsHtml(session, {disabled, actions: isTmuxSession(session), details: true, close: false});
-  return `<div class="tabs ${disabled ? 'disabled-panel-controls' : ''}" role="tablist">
-          ${terminalButtonHtml}
-          ${frameHtml}
-        </div>`;
-}
-
-function virtualPanelControlsHtml(session) {
-  return `<div class="tabs virtual-panel-controls" role="tablist">
-          ${paneFrameControlsHtml(session, {actions: false, close: false})}
-        </div>`;
-}
-
-function panelActiveTabName(session) {
-  const activePane = document.getElementById(panelDomId(session))?.querySelector('.tab-pane.active');
-  const id = activePane?.id || '';
-  if (id === `transcript-pane-${session}`) return 'transcript';
-  if (id === `summary-pane-${session}`) return 'summary';
-  if (id === `events-pane-${session}`) return 'events';
-  return 'terminal';
-}
-
-function createPanel(session) {
-  const panel = document.createElement('article');
-  panel.className = 'panel';
-  panel.id = panelDomId(session);
-  panel.innerHTML = `
-      <div class="panel-head">
-        ${panelControlsHtml(session)}
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
-      </div>
-      <div class="panel-detail-row">
-        <div class="panel-popover-zone">
-          <div id="panel-tab-${session}" class="panel-session-label">${panelHeaderStateHtml(sessionState(session, transcriptMeta.sessions?.[session]))}</div>
-          <div id="meta-${session}" class="meta">${esc(t('pane.findingBranch'))}</div>
-          ${sessionPopoverHtml(session, transcriptMeta.sessions?.[session], sessionAgentKind(session), autoApproveStates.get(session)?.enabled === true, sessionState(session, transcriptMeta.sessions?.[session]))}
-        </div>
-        ${isTmuxSession(session) ? tmuxWindowBarHtml(session, transcriptMeta.sessions?.[session]) : ''}
-        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(session)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
-      </div>
-      <div id="terminal-pane-${session}" class="tab-pane active panel-overlay-root">
-        <div id="term-${session}" class="terminal"></div>
-        <div id="panel-toasts-${session}" class="panel-toast-stack">
-          <div id="upload-${session}" class="upload-result toast" hidden></div>
-        </div>
-      </div>
-      <div id="transcript-pane-${session}" class="tab-pane">
-        <div class="transcript">
-          <div class="transcript-head">${esc(t('tab.transcript'))}</div>
-          <div id="transcript-path-${session}" class="transcript-path-row">${esc(t('pane.findingTranscript'))}</div>
-          <div id="transcript-${session}" class="transcript-preview">${esc(t('pane.findingTranscript'))}</div>
-        </div>
-      </div>
-      <div id="summary-pane-${session}" class="tab-pane">
-        <div class="summary">
-          <div class="transcript-head">${esc(t('menu.tmux.aiTranscript', {session: sessionLabel(session)}))}</div>
-          <div id="summary-context-${session}" class="summary-context">${esc(t('summary.loadingContext'))}</div>
-          <div id="summary-${session}" class="summary-preview markdown-body">${esc(t('summary.emptyPrompt'))}</div>
-        </div>
-      </div>
-      <div id="events-pane-${session}" class="tab-pane">
-        <div class="summary">
-          <div class="transcript-head">${esc(t('events.title'))}</div>
-          <div id="events-${session}" class="event-list">${esc(t('events.loading'))}</div>
-        </div>
-      </div>`;
-  bindPanelShell(panel, session);
-  bindPanelControls(panel, session);
-  return panel;
-}
-
-function setMetadataRefreshButtonLoading(button, loading, idleLabel, idleTitle) {
-  if (!button) return;
-  button.classList.toggle('loading', loading);
-  button.disabled = loading;
-  button.setAttribute('aria-busy', loading ? 'true' : 'false');
-  button.textContent = loading ? t('info.loadingShort') : idleLabel;
-  button.title = loading ? t('info.loadingRepo') : idleTitle;
-  button.setAttribute('aria-label', loading ? t('info.loadingRepo') : idleTitle);
-}
-
-function syncTranscriptMetaLoadingUi() {
-  document.querySelectorAll('[data-info-refresh]').forEach(button => {
-    setMetadataRefreshButtonLoading(button, transcriptMetaLoading, t('info.refreshRepo'), t('info.refreshRepo'));
-  });
-  const metaRefreshButton = refreshMeta;
-  if (metaRefreshButton) {
-    metaRefreshButton.classList.toggle('loading', transcriptMetaLoading);
-    metaRefreshButton.disabled = transcriptMetaLoading;
-    metaRefreshButton.setAttribute('aria-busy', transcriptMetaLoading ? 'true' : 'false');
-    if (transcriptMetaLoading) {
-      metaRefreshButton.title = t('info.loadingRepo');
-      metaRefreshButton.setAttribute('aria-label', t('info.loadingRepo'));
-    } else {
-      refreshMetaButtonTitle();
-      metaRefreshButton.setAttribute('aria-label', t('meta.refreshAria'));
-    }
-  }
-  document.getElementById(panelDomId(infoItemId))?.classList.toggle('metadata-loading', transcriptMetaLoading);
-}
-
-function infoMetadataLoadingHtml() {
-  return `<div class="info-empty info-loading" role="status" aria-live="polite">
-    <span class="info-loading-spinner" aria-hidden="true"></span>
-    <span>${esc(t('info.loadingRepo'))}</span>
-  </div>`;
-}
-
-function renderInfoPanel() {
-  const node = document.getElementById('info-content');
-  if (!node) return;
-  syncTranscriptMetaLoadingUi();
-  applyInfoBranchColumnWidth();
-  bindInfoPrContextMenu(node);   // idempotent — "Watch this PR" on the PR column
-  renderWatchedPrs();   // the Watched PRs section repaints alongside the branch table
-  const rows = infoBranchRows();
-  const hasShareRows = shareViewMode && Array.isArray(shareInfoBranchRowsOverride);
-  if (!rows.length) {
-    if (hasShareRows) {
-      node.innerHTML = `<div class="info-empty">${esc(t('info.empty'))}</div>`;
-      return;
-    }
-    if (transcriptMetaLoading) {
-      node.innerHTML = infoMetadataLoadingHtml();
-      return;
-    }
-    if (transcriptMetaLoadError) {
-      node.innerHTML = `<div class="info-empty info-error">${esc(t('info.loadFailed'))} ${esc(transcriptMetaLoadError)}</div>`;
-      return;
-    }
-    if (!transcriptMetaLoaded) {
-      node.innerHTML = infoMetadataLoadingHtml();
-      return;
-    }
-    node.innerHTML = `<div class="info-empty">${esc(t('info.empty'))}</div>`;
-    return;
-  }
-  const headerCell = (key, label) => {
-    const active = infoBranchSort.key === key;
-    const dirLabel = active ? (infoBranchSort.dir === 'asc' ? t('sort.ascending') : t('sort.descending')) : t('sort.unsorted');
-    const marker = active ? (infoBranchSort.dir === 'asc' ? 'A-Z' : 'Z-A') : '';
-    return `<button type="button" class="info-sort-button${active ? ' active' : ''}" data-info-sort="${esc(key)}" aria-label="${esc(t('sort.aria', {label, dir: dirLabel}))}"><span>${esc(label)}</span>${marker ? `<span class="info-sort-marker">${marker}</span>` : ''}</button>`;
-  };
-  const resizeHandle = (column, label) => `<button type="button" class="info-column-resizer" data-info-column-resize="${esc(column)}" title="${esc(label)}" aria-label="${esc(label)}"></button>`;
-  const header = `<div class="info-row header">
-    <div class="info-cell">${headerCell('session', t('info.header.session'))}</div>
-    <div class="info-cell">${headerCell('path', t('info.header.path'))}</div>
-    <div class="info-cell info-resizable-header-cell info-branch-header-cell">${headerCell('branch', t('info.header.branch'))}${resizeHandle('branch', t('info.resizeBranchColumn'))}</div>
-    <div class="info-cell">${headerCell('pr', 'PR')}</div>
-    <div class="info-cell">${headerCell('linear', 'Linear')}</div>
-    <div class="info-cell info-resizable-header-cell info-desc-header-cell">${headerCell('desc', t('info.header.desc'))}${resizeHandle('desc', t('info.resizeDescColumn'))}</div>
-    <div class="info-cell">${headerCell('updated', t('info.header.updated'))}</div>
-  </div>`;
-  const body = rows.map(row => `<div class="info-row${row.current ? ' current' : ''}">
-    <div class="info-cell" title="${esc(row.session)}">${esc(row.session)}</div>
-    <div class="info-cell" title="${esc(row.pathTitle || row.path)}">${esc(row.pathLabel || compactHomePath(row.path) || row.session || '')}</div>
-    <div class="info-cell" title="${esc(row.branch)}">${row.current ? '<span class="info-branch-current">*</span> ' : ''}${infoBranchCellHtml(row)}</div>
-    <div class="info-cell" title="${esc(row.prTitle)}">${infoPrCellHtml(row)}</div>
-    <div class="info-cell" title="${esc(row.linearTitle)}">${infoLinearCellHtml(row)}</div>
-    <div class="info-cell" title="${esc(row.desc)}">${esc(row.desc)}</div>
-    <div class="info-cell" title="${esc(row.updatedTitle || row.updated)}">${esc(row.updatedText || row.updated)}</div>
-  </div>`).join('');
-  node.innerHTML = header + body;
-  node.querySelectorAll('[data-info-sort]').forEach(button => {
-    button.addEventListener('click', () => {
-      setInfoBranchSort(button.dataset.infoSort);
-      renderInfoPanel();
-    });
-  });
-  bindInfoColumnResizers(node);
-}
-
-function infoColumnResizeConfig(column) {
-  if (column === 'branch') {
-    return {
-      cssVar: '--info-branch-column-width',
-      defaultWidthPx: infoBranchColumnDefaultWidthPx,
-      maxWidthPx: infoBranchColumnMaxWidthPx,
-      minWidthPx: infoBranchColumnMinWidthPx,
-      storageKey: infoBranchColumnWidthStorageKey,
-    };
-  }
-  if (column === 'desc') {
-    return {
-      cssVar: '--info-desc-column-width',
-      defaultWidthPx: infoDescColumnDefaultWidthPx,
-      maxWidthPx: infoDescColumnMaxWidthPx,
-      minWidthPx: infoDescColumnMinWidthPx,
-      storageKey: infoDescColumnWidthStorageKey,
-    };
-  }
-  return null;
-}
-
-function infoColumnWidth(column) {
-  return column === 'desc' ? infoDescColumnWidthPx : infoBranchColumnWidthPx;
-}
-
-function setInfoColumnWidthState(column, value) {
-  if (column === 'desc') infoDescColumnWidthPx = value;
-  else infoBranchColumnWidthPx = value;
-}
-
-function clampInfoColumnWidth(column, value) {
-  const config = infoColumnResizeConfig(column);
-  if (!config) return infoBranchColumnDefaultWidthPx;
-  const number = Number(value);
-  if (!Number.isFinite(number)) return config.defaultWidthPx;
-  return Math.max(config.minWidthPx, Math.min(config.maxWidthPx, Math.round(number)));
-}
-
-function readStoredInfoColumnWidth(column) {
-  const config = infoColumnResizeConfig(column);
-  if (!config) return infoBranchColumnDefaultWidthPx;
-  return clampInfoColumnWidth(column, storageGet(config.storageKey, config.defaultWidthPx));
-}
-
-function setInfoColumnWidth(column, value, options = {}) {
-  const config = infoColumnResizeConfig(column);
-  if (!config) return infoColumnWidth('branch');
-  const width = clampInfoColumnWidth(column, value);
-  const previous = infoColumnWidth(column);
-  setInfoColumnWidthState(column, width);
-  applyInfoColumnWidth(column);
-  if (options.persist !== false) storageSet(config.storageKey, width);
-  if (options.publish !== false && width !== previous) scheduleShareUiStatePublish();
-  return width;
-}
-
-function resetInfoColumnWidth(column) {
-  const config = infoColumnResizeConfig(column);
-  return setInfoColumnWidth(column, config?.defaultWidthPx);
-}
-
-function applyInfoColumnWidth(column, root = document.documentElement) {
-  const config = infoColumnResizeConfig(column);
-  if (!config) return;
-  root?.style?.setProperty(config.cssVar, `${clampInfoColumnWidth(column, infoColumnWidth(column))}px`);
-}
-
-function applyInfoColumnWidths(root = document.documentElement) {
-  applyInfoColumnWidth('branch', root);
-  applyInfoColumnWidth('desc', root);
-}
-
-function setInfoBranchColumnWidth(value, options = {}) {
-  return setInfoColumnWidth('branch', value, options);
-}
-
-function setInfoDescColumnWidth(value, options = {}) {
-  return setInfoColumnWidth('desc', value, options);
-}
-
-function resetInfoBranchColumnWidth() {
-  return resetInfoColumnWidth('branch');
-}
-
-function resetInfoDescColumnWidth() {
-  return resetInfoColumnWidth('desc');
-}
-
-function applyInfoBranchColumnWidth(root = document.documentElement) {
-  applyInfoColumnWidths(root);
-}
-
-function bindInfoColumnResizers(node) {
-  node.querySelectorAll('[data-info-column-resize]').forEach(handle => {
-    if (handle.dataset.bound === 'true') return;
-    const column = handle.dataset.infoColumnResize;
-    const config = infoColumnResizeConfig(column);
-    if (!config) return;
-    handle.dataset.bound = 'true';
-    handle.addEventListener('click', event => {
-      event.preventDefault();
-      event.stopPropagation();
-    });
-    handle.addEventListener('dblclick', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      resetInfoColumnWidth(column);
-    });
-    handle.addEventListener('pointerdown', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      const pointerId = event.pointerId;
-      const startX = event.clientX;
-      const startWidth = infoColumnWidth(column);
-      const direction = getComputedStyle(node).direction === 'rtl' ? -1 : 1;
-      handle.setPointerCapture?.(pointerId);
-      document.body?.classList.add('info-column-resizing');
-      const move = moveEvent => {
-        const delta = (moveEvent.clientX - startX) * direction;
-        setInfoColumnWidth(column, startWidth + delta, {persist: false});
-      };
-      const done = () => {
-        storageSet(config.storageKey, infoColumnWidth(column));
-        document.body?.classList.remove('info-column-resizing');
-        try { handle.releasePointerCapture?.(pointerId); } catch (_) {}
-        window.removeEventListener('pointermove', move);
-        window.removeEventListener('pointerup', done);
-        window.removeEventListener('pointercancel', done);
-      };
-      window.addEventListener('pointermove', move);
-      window.addEventListener('pointerup', done);
-      window.addEventListener('pointercancel', done);
-    });
-  });
-}
-
-// client-side mirror of the backend parse_pull_request_ref — normalize a watched-PR entry
-// ("owner/repo#N", "owner/repo/N", or a github.com PR URL) to the canonical "owner/repo#N", else ''.
-// Used to dedupe and to match a stored entry (which may be a URL) against a PR's canonical ref.
-function normalizeWatchedPrRef(entry) {
-  const text = String(entry || '').trim();
-  if (!text) return '';
-  const seg = '[A-Za-z0-9._-]+';
-  if (/github\.com/i.test(text) && /:\/\//.test(text)) {
-    const match = text.match(new RegExp(`github\\.com/(${seg})/(${seg})/(?:pull|pulls)/(\\d+)`, 'i'));
-    if (match) return `${match[1]}/${match[2]}#${Number(match[3])}`;
-    return '';
-  }
-  const short = text.match(new RegExp(`^(${seg})/(${seg})(?:#|/(?:pull/)?)(\\d+)$`));
-  if (short && Number(short[3]) > 0) return `${short[1]}/${short[2]}#${Number(short[3])}`;
-  return '';
-}
-
-function watchedPrStatusText(pr) {
-  return pullRequestStatusDisplay(pr) || (pr?.state ? String(pr.state).toUpperCase() : t('common.unknown'));
-}
-
-// The Watched PRs section of YO!info — PRs tracked independent of any open session's branch. Reuses
-// the pr-status-* badge classes; renders into its own #info-watched container so it can repaint on the
-// (longer) watched-PR poll cadence without re-rendering the branch table.
-function renderWatchedPrs() {
-  const node = document.getElementById('info-watched');
-  if (!node) return;
-  const prs = Array.isArray(watchedPrsData.watched_prs) ? watchedPrsData.watched_prs : [];
-  const heading = `<div class="info-watched-head">${esc(t('info.watched.heading'))}</div>`;
-  if (!prs.length) {
-    node.innerHTML = `${heading}<div class="info-empty info-watched-empty">${esc(t('info.watched.empty'))}</div>`;
-    return;
-  }
-  const rows = prs.map(pr => {
-    const ref = String(pr.ref || `#${pr.number}`);
-    const statusCls = pullRequestStatusClass(pr);
-    const statusText = watchedPrStatusText(pr);
-    const link = linkHtml(pr.url, ref, pr.title || pr.description || '', 'info-watched-ref');
-    return `<div class="info-row info-watched-row" data-watched-ref="${esc(ref)}">
-      <div class="info-cell info-watched-ref-cell">${link}</div>
-      <div class="info-cell info-watched-title" title="${esc(pr.title || '')}">${esc(pr.title || '')}</div>
-      <div class="info-cell info-watched-status"><span class="meta-pr-status ${esc(statusCls)}">${esc(statusText)}</span></div>
-      <div class="info-cell info-watched-actions"><button type="button" class="info-watched-remove" data-watched-remove="${esc(ref)}" title="${esc(t('info.watched.remove'))}" aria-label="${esc(t('info.watched.remove'))}">×</button></div>
-    </div>`;
-  }).join('');
-  const truncated = watchedPrsData.truncated > 0
-    ? `<div class="info-watched-note">${esc(t('info.watched.truncated', {count: String(watchedPrsData.truncated)}))}</div>`
-    : '';
-  node.innerHTML = heading + rows + truncated;
-  node.querySelectorAll('[data-watched-remove]').forEach(button => {
-    button.addEventListener('click', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      removeWatchedPr(button.dataset.watchedRemove);
-    });
-  });
-}
-
-async function refreshWatchedPrs() {
-  try {
-    const data = await apiFetchJson('/api/watched-prs');
-    applyWatchedPrsPayload(data);
-  } catch (_error) {}
-}
-
-function applyWatchedPrsPayload(data) {
-  if (!data || typeof data !== 'object') return false;
-  watchedPrsData = {
-    watched_prs: Array.isArray(data.watched_prs) ? data.watched_prs : [],
-    truncated: Number(data.truncated) || 0,
-    invalid: Array.isArray(data.invalid) ? data.invalid : [],
-  };
-  notifyWatchedPrTransitions(watchedPrsData.watched_prs);
-  renderWatchedPrs();
-  return true;
-}
-
-// Append a PR ref to github.watched_prs (dedup by canonical ref); accepts owner/repo#N or a PR URL.
-function addWatchedPr(entry) {
-  const ref = normalizeWatchedPrRef(entry);
-  if (!ref) {
-    statusErr(t('info.watched.invalid', {entry: String(entry || '')}));
-    return;
-  }
-  const current = initialSetting('github.watched_prs', []);
-  const list = Array.isArray(current) ? current.slice() : [];
-  if (list.some(item => normalizeWatchedPrRef(item) === ref)) {
-    statusOk(t('info.watched.already', {ref}));
-    return;
-  }
-  list.push(ref);
-  saveSettingsPatch(settingPatch('github.watched_prs', list))
-    .then(() => { statusOk(t('info.watched.added', {ref})); refreshWatchedPrs(); })
-    .catch(error => statusErr(localizedHtml('status.settingsSaveFailed', {error})));
-}
-
-function removeWatchedPr(ref) {
-  const target = normalizeWatchedPrRef(ref) || String(ref || '');
-  const current = initialSetting('github.watched_prs', []);
-  const list = (Array.isArray(current) ? current : []).filter(item => normalizeWatchedPrRef(item) !== target && String(item).trim() !== target);
-  saveSettingsPatch(settingPatch('github.watched_prs', list))
-    .then(() => { statusOk(t('info.watched.removed', {ref: target})); refreshWatchedPrs(); })
-    .catch(error => statusErr(localizedHtml('status.settingsSaveFailed', {error})));
-}
-
-// right-clicking a PR link in YO!info offers "Watch this PR" (adds it to github.watched_prs).
-// Delegated on #info-content so it covers both the branch-table PR column and any future PR cells.
-function bindInfoPrContextMenu(node) {
-  if (!node || node.dataset.watchedPrMenuBound === '1') return;
-  node.dataset.watchedPrMenuBound = '1';
-  node.addEventListener('contextmenu', event => {
-    const cell = event.target.closest('.info-cell');
-    const link = cell?.querySelector?.('a[href*="github.com/"][href*="/pull/"]');
-    if (!link) return;
-    const ref = normalizeWatchedPrRef(link.getAttribute('href') || '');
-    if (!ref) return;
-    event.preventDefault();
-    event.stopPropagation();
-    showWatchPrContextMenu(ref, event.clientX, event.clientY);
-  });
-}
-
-function showWatchPrContextMenu(ref, x, y) {
-  const already = (Array.isArray(initialSetting('github.watched_prs', [])) ? initialSetting('github.watched_prs', []) : [])
-    .some(item => normalizeWatchedPrRef(item) === ref);
-  const menu = document.createElement('div');
-  menu.className = 'terminal-context-menu watched-pr-context-menu';
-  menu.setAttribute('role', 'menu');
-  appendContextMenuButton(
-    menu,
-    already ? t('info.watched.unwatchThis', {ref}) : t('info.watched.watchThis', {ref}),
-    () => (already ? removeWatchedPr(ref) : addWatchedPr(ref)),
-    () => watchedPrContextMenu.close(),
-  );
-  watchedPrContextMenu.open(menu, x, y);
-}
-
-function scrollYoagentChatToBottom(node = document.getElementById('yoagent-content')) {
-  const history = node?.querySelector?.('.yoagent-chat-history');
-  if (history) history.scrollTop = history.scrollHeight;
-  if (node) node.scrollTop = node.scrollHeight;
-  const panelBody = node?.closest?.('.info-pane, .panel-overlay-root, .panel');
-  if (panelBody && panelBody !== node) panelBody.scrollTop = panelBody.scrollHeight;
-  yoagentScrollbackLocked = false;
-}
-
-function yoagentChatHistoryIsNearBottom(history, threshold = 48) {
-  if (!history) return true;
-  return history.scrollHeight - history.clientHeight - history.scrollTop <= threshold;
-}
-
-function yoagentChatScrollState(node = document.getElementById('yoagent-content')) {
-  const history = node?.querySelector?.('.yoagent-chat-history');
-  const panelBody = node?.closest?.('.info-pane, .panel-overlay-root, .panel');
-  return {
-    nearBottom: yoagentChatHistoryIsNearBottom(history),
-    historyTop: history ? history.scrollTop : 0,
-    nodeTop: node ? node.scrollTop : 0,
-    panelTop: panelBody && panelBody !== node ? panelBody.scrollTop : 0,
-  };
-}
-
-function restoreYoagentChatScrollState(node, state) {
-  if (!node || !state) return;
-  const history = node.querySelector?.('.yoagent-chat-history');
-  if (history) history.scrollTop = state.historyTop || 0;
-  node.scrollTop = state.nodeTop || 0;
-  const panelBody = node.closest?.('.info-pane, .panel-overlay-root, .panel');
-  if (panelBody && panelBody !== node) panelBody.scrollTop = state.panelTop || 0;
-  yoagentScrollbackLocked = state.nearBottom === false;
-}
-
-function installYoagentChatScrollTracker(node = document.getElementById('yoagent-content')) {
-  const history = node?.querySelector?.('.yoagent-chat-history');
-  if (!history || history.dataset.yoagentScrollTracker === 'true') return;
-  history.dataset.yoagentScrollTracker = 'true';
-  history.addEventListener('scroll', () => {
-    yoagentScrollbackLocked = !yoagentChatHistoryIsNearBottom(history);
-  }, {passive: true});
-}
-
-function yoagentOpenMessageDetailsState(node = document.getElementById('yoagent-content')) {
-  const openKeys = new Set();
-  (node?.querySelectorAll?.('.yoagent-message-details[open][data-yoagent-message-details-key]') || []).forEach(details => {
-    const key = details.dataset?.yoagentMessageDetailsKey || '';
-    if (key) openKeys.add(key);
-  });
-  return openKeys;
-}
-
-function restoreYoagentOpenMessageDetailsState(node, openKeys) {
-  if (!node || !openKeys?.size) return;
-  (node.querySelectorAll?.('.yoagent-message-details[data-yoagent-message-details-key]') || []).forEach(details => {
-    const key = details.dataset?.yoagentMessageDetailsKey || '';
-    if (key && openKeys.has(key)) details.open = true;
-  });
-}
-
-function yoagentShouldScrollBottom(options, scrollState) {
-  if (options.scrollBottom === true) return true;
-  if (options.scrollBottom === false) return false;
-  if (yoagentScrollbackLocked) return false;
-  return scrollState?.nearBottom !== false;
-}
-
-function focusYoagentChatInput(node = document.getElementById('yoagent-content')) {
-  const input = node?.querySelector?.('[data-yoagent-chat-input]');
-  if (!input || input.disabled) return;
-  input.focus({preventScroll: true});
-  const end = input.value.length;
-  try { input.setSelectionRange(end, end); } catch (_) {}
-}
-
-function yoagentChatInputIsFocused(node = document.getElementById('yoagent-content')) {
-  const input = node?.querySelector?.('[data-yoagent-chat-input]');
-  return Boolean(input && document.activeElement === input);
-}
-
-function restoreYoagentChatInputFocus(node, inputFocused, selectionStart, selectionEnd) {
-  if (!inputFocused) return false;
-  const nextInput = node?.querySelector?.('[data-yoagent-chat-input]');
-  if (!nextInput || nextInput.disabled) return false;
-  nextInput.focus({preventScroll: true});
-  if (selectionStart !== null && selectionEnd !== null) {
-    try { nextInput.setSelectionRange(selectionStart, selectionEnd); } catch (_) {}
-  }
-  return true;
-}
-
-function refreshYoagentSummaryRegions(node = document.getElementById('yoagent-content')) {
-  if (!node) return false;
-  const chat = node.querySelector('.yoagent-chat');
-  if (!chat) return false;
-  const openDetails = yoagentOpenMessageDetailsState(node);
-  chat.outerHTML = yoagentChatHtml();
-  renderYoagentMessageMarkdown(node);
-  restoreYoagentOpenMessageDetailsState(node, openDetails);
-  installYoagentChatScrollTracker(node);
-  return true;
-}
-
-function yoagentBusyUiIsMounted(node = document.getElementById('yoagent-content')) {
-  return Boolean(yoagentBusy && node?.querySelector?.('.yoagent-chat-status'));
-}
-
-// Downgrade block-level headings (#/##/### …) to inline bold so an embedded agent heading renders as
-// emphasis inside a compact card instead of a giant h1/h2 that balloons its height. Inline emphasis,
-// code, lists, and links are left intact for marked.js to render.
-// the LLM backends emit "loose" markdown (blank lines between list items, double blank
-// lines between sections) which marked.js renders with big gaps. Tighten ONLY the yoagent inputs
-// (not the shared file-editor preview): collapse 2+ blank lines to one, and drop blank lines between
-// adjacent list items so a loose list renders as tightly as a tight one.
-function yoagentTightMarkdown(text) {
-  return String(text || '')
-    .replace(/\n{3,}/g, '\n\n')
-    .replace(/^([ \t]*(?:[-*+]|\d+\.)[ \t].*)\n(?:[ \t]*\n)+(?=[ \t]*(?:[-*+]|\d+\.)[ \t])/gm, '$1\n');
-}
-
-function yoagentInlineMarkdown(text) {
-  const downgraded = String(text || '').replace(/^[ \t]*#{1,6}[ \t]+(.*?)[ \t]*#*$/gm, (match, title) => (title ? `**${title}**` : ''));
-  return yoagentTightMarkdown(downgraded);
-}
-
-function yoagentSessionFromHref(href) {
-  try {
-    const url = new URL(String(href || ''), window.location.href);
-    return url.searchParams.get('yoagent-session') || '';
-  } catch (_) {
-    return '';
-  }
-}
-
-function handleYoagentSessionLinkClick(event) {
-  const anchor = event.target?.closest?.('a[href]');
-  if (!anchor) return;
-  const session = yoagentSessionFromHref(anchor.getAttribute('href') || '');
-  if (!session) return;
-  event.preventDefault();
-  selectSession(session, {userInitiated: true});
-}
-
-function linkYoagentSessionCodeReferences(container) {
-  if (!container) return;
-  (container.querySelectorAll?.('code') || []).forEach(code => {
-    if (code.closest('a')) return;
-    const session = (code.textContent || '').trim();
-    if (!session || !sessions.includes(session)) return;
-    const previousText = code.previousSibling?.nodeType === Node.TEXT_NODE ? code.previousSibling.textContent || '' : '';
-    if (!/(^|\b)(tmux\s+)?session\s*$/i.test(previousText)) return;
-    const link = document.createElement('a');
-    link.href = `?yoagent-session=${encodeURIComponent(session)}`;
-    link.className = 'yoagent-session-link';
-    link.title = `Open tmux session ${session}`;
-    code.replaceWith(link);
-    link.appendChild(code);
-  });
-}
-
-function installYoagentSessionLinks(container) {
-  if (!container) return;
-  linkYoagentSessionCodeReferences(container);
-  if (container.dataset.yoagentSessionLinksBound !== 'true') {
-    container.dataset.yoagentSessionLinksBound = 'true';
-    container.addEventListener('click', handleYoagentSessionLinkClick);
-  }
-}
-
-function renderYoagentMessageMarkdown(node = document.getElementById('yoagent-content')) {
-  // Render assistant chat replies through the Markdown pipeline so bold titles, code, lists, and links
-  // display formatted. Without marked.js the escaped-text fallback stays.
-  if (!node || typeof window.marked === 'undefined') return;
-  (node.querySelectorAll?.('.yoagent-global [data-yoagent-global-markdown]') || []).forEach(body => {
-    renderMarkdownPreviewInto(body, yoagentTightMarkdown(body.textContent || ''));
-    installYoagentSessionLinks(body);
-    body.removeAttribute('data-yoagent-global-markdown');
-  });
-  (node.querySelectorAll?.('.yoagent-message.assistant [data-yoagent-markdown]') || []).forEach(body => {
-    renderMarkdownPreviewInto(body, yoagentTightMarkdown(body.textContent || ''));
-    installYoagentSessionLinks(body);
-    body.removeAttribute('data-yoagent-markdown');
-  });
-}
-
-function renderYoagentPanel(options = {}) {
-  const node = document.getElementById('yoagent-content');
-  if (!node) return;
-  const scrollState = yoagentChatScrollState(node);
-  const openDetails = yoagentOpenMessageDetailsState(node);
-  const shouldScrollBottom = yoagentShouldScrollBottom(options, scrollState);
-  const input = node.querySelector('[data-yoagent-chat-input]');
-  const inputFocused = input && document.activeElement === input;
-  const selectionStart = inputFocused ? input.selectionStart : null;
-  const selectionEnd = inputFocused ? input.selectionEnd : null;
-  if (input && options.preserveDraft !== false) yoagentDraft = input.value || '';
-  if (yoagentBusyUiIsMounted(node) && options.allowBusyRebuild !== true) {
-    if (refreshYoagentSummaryRegions(node)) {
-      if (shouldScrollBottom) scrollYoagentChatToBottom(node);
-      else restoreYoagentChatScrollState(node, scrollState);
-      restoreYoagentChatInputFocus(node, inputFocused, selectionStart, selectionEnd);
-    }
-    return;
-  }
-  if (options.summaryOnly && refreshYoagentSummaryRegions(node)) {
-    if (shouldScrollBottom) scrollYoagentChatToBottom(node);
-    else restoreYoagentChatScrollState(node, scrollState);
-    restoreYoagentChatInputFocus(node, inputFocused, selectionStart, selectionEnd);
-    return;
-  }
-  node.innerHTML = yoagentChatHtml();
-  renderYoagentMessageMarkdown(node);
-  restoreYoagentOpenMessageDetailsState(node, openDetails);
-  installYoagentChatScrollTracker(node);
-  if (shouldScrollBottom) {
-    requestAnimationFrame(() => scrollYoagentChatToBottom(node));
-    setTimeout(() => scrollYoagentChatToBottom(node), 0);
-  } else {
-    restoreYoagentChatScrollState(node, scrollState);
-  }
-  if (options.focusInput) {
-    requestAnimationFrame(() => focusYoagentChatInput(node));
-    return;
-  }
-  if (!inputFocused) return;
-  restoreYoagentChatInputFocus(node, inputFocused, selectionStart, selectionEnd);
-}
-
-function infoBranchRows() {
-  if (shareViewMode && Array.isArray(shareInfoBranchRowsOverride)) {
-    return sortedInfoBranchRows(shareInfoBranchRowsOverride, infoBranchSort);
-  }
-  return sortedInfoBranchRows(rawInfoBranchRows(), infoBranchSort);
-}
-
-function infoBranchCellHtml(row) {
-  return row?.branchHtml || esc(row?.branch || '');
-}
-
-function infoPrCellHtml(row) {
-  if (row?.prLabel) return linkHtml(row.prUrl || '', row.prLabel, row.prTitle || '', row.prClass || '');
-  return row?.prHtml || '';
-}
-
-function infoLinearCellHtml(row) {
-  if (Array.isArray(row?.linearItems)) {
-    return row.linearItems.map(item => {
-      if (item?.url) return linearIssueHtml(item);
-      return linearIssueLinkHtml(item?.identifier || '');
-    }).filter(Boolean).join(' ');
-  }
-  return row?.linearHtml || '';
-}
-
-function infoPathLabel(git) {
-  const path = git?.root || git?.cwd || '';
-  const label = compactHomePath(path);
-  const parent = git?.worktree?.parent_root || '';
-  if (!parent) return label;
-  return `${label} (worktree of ${compactHomePath(parent)})`;
-}
-
-function infoPathTitle(git) {
-  const path = git?.root || git?.cwd || '';
-  const parent = git?.worktree?.parent_root || '';
-  if (!parent) return path;
-  return `${path} (worktree of ${parent})`;
-}
-
-function infoGitRoot(git) {
-  return String(git?.root || git?.cwd || '');
-}
-
-function infoBranchSourcesForSession(session, info) {
-  const project = info?.project || {};
-  const primaryGit = project.git;
-  const primaryRoot = infoGitRoot(primaryGit);
-  const sources = [];
-  const seenRoots = new Set();
-  const addSource = (git, primary) => {
-    const root = infoGitRoot(git);
-    const branches = git?.other_branches?.branches;
-    if (!root || !Array.isArray(branches) || !branches.length || seenRoots.has(root)) return;
-    seenRoots.add(root);
-    sources.push({session, info, project, git, primary: primary === true});
-  };
-  addSource(primaryGit, true);
-  for (const repo of Array.isArray(project.repos) ? project.repos : []) {
-    addSource(repo, Boolean(primaryRoot && infoGitRoot(repo) === primaryRoot));
-  }
-  return sources;
-}
-
-function infoBranchOwnedBySource(git, branch) {
-  const branchName = String(branch?.name || '');
-  const currentBranch = String(git?.branch || '');
-  return branch?.current === true && Boolean(branchName) && (!currentBranch || currentBranch === branchName);
-}
-
-function infoBranchRowForSource(source, branch, ownsSession) {
-  const {session, info, project, git, primary} = source;
-  const useCurrentProjectMetadata = ownsSession && primary;
-  const currentPr = useCurrentProjectMetadata ? displayPullRequest(info) : null;
-  const currentLinear = useCurrentProjectMetadata ? project.linear || [] : [];
-  const linearIds = currentLinear.length
-    ? currentLinear.map(issue => issue.identifier).filter(Boolean)
-    : branch.linear_ids || [];
-  const linearHtml = currentLinear.length
-    ? currentLinear.map(issue => linearIssueHtml(issue)).join(' ')
-    : linearIds.map(linearIssueLinkHtml).filter(Boolean).join(' ');
-  const prHtml = currentPr?.number ? pullRequestColumnLinkHtml(currentPr) : pullRequestLinkForBranch(git, branch);
-  const prValue = currentPr?.number ? currentPr : branch.pull_request;
-  const prTitle = pullRequestTextForBranch(prValue, branch.subject || '');
-  const repoUrl = git?.github_repo?.url || '';
-  const prUrl = prValue?.url || (prValue?.number && repoUrl ? `${repoUrl}/pull/${prValue.number}` : '');
-  const prLabel = prValue?.number ? pullRequestLinkLabel(prValue) : '';
-  const prClass = prValue?.number ? pullRequestStatusClass(prValue) : '';
-  const linearTitle = currentLinear.length
-    ? currentLinear.map(issue => [issue.identifier, issue.state, issue.title].filter(Boolean).join(' ')).filter(Boolean).join(' · ')
-    : linearIds.join(' ');
-  const linearItems = currentLinear.length
-    ? currentLinear.map(issue => ({
-      identifier: String(issue?.identifier || ''),
-      state: String(issue?.state || ''),
-      title: String(issue?.title || ''),
-      url: String(issue?.url || ''),
-    })).filter(issue => issue.identifier || issue.url)
-    : linearIds.map(identifier => ({identifier: String(identifier || '')})).filter(issue => issue.identifier);
-  const desc = shortText(
-    currentPr?.title
-      || currentPr?.description
-      || currentLinear.find(issue => issue.title)?.title
-      || branch.subject
-      || '',
-    180,
-  );
-  return {
-    session: ownsSession ? session : '',
-    path: infoGitRoot(git),
-    pathLabel: infoPathLabel(git),
-    pathTitle: infoPathTitle(git),
-    branch: branch.name || '',
-    branchHtml: branchLinkHtml(git, branch.name),
-    desc,
-    updated: branch.updated || '',
-    updatedText: branchUpdatedText(branch),
-    updatedTitle: branch.updated || branchUpdatedText(branch),
-    updatedTs: Number.isFinite(branch.updated_ts) ? branch.updated_ts : 0,
-    prHtml: prHtml || '',
-    prTitle,
-    prUrl,
-    prLabel,
-    prClass,
-    prSort: prTitle || (prValue?.number ? String(prValue.number) : ''),
-    linearHtml,
-    linearItems,
-    linearTitle,
-    current: ownsSession,
-    sourcePrimary: primary,
-  };
-}
-
-function preferInfoBranchRow(existing, next) {
-  if (!existing) return next;
-  if (next.session && !existing.session) return next;
-  if (next.session && next.sourcePrimary && !existing.sourcePrimary) return next;
-  return existing;
-}
-
-function rawInfoBranchRows() {
-  const rowsByKey = new Map();
-  for (const session of sessions) {
-    const info = transcriptMeta.sessions?.[session];
-    for (const source of infoBranchSourcesForSession(session, info)) {
-      for (const branch of source.git?.other_branches?.branches || []) {
-        const key = `${infoGitRoot(source.git)}\n${branch.name || ''}`;
-        const row = infoBranchRowForSource(source, branch, infoBranchOwnedBySource(source.git, branch));
-        rowsByKey.set(key, preferInfoBranchRow(rowsByKey.get(key), row));
-      }
-    }
-  }
-  return [...rowsByKey.values()];
-}
-
-function setInfoBranchSort(key) {
-  if (!infoBranchSortColumns.has(key)) return;
-  const previous = `${infoBranchSort.key}:${infoBranchSort.dir}`;
-  if (infoBranchSort.key === key) {
-    infoBranchSort = {key, dir: infoBranchSort.dir === 'asc' ? 'desc' : 'asc'};
-  } else {
-    infoBranchSort = {key, dir: 'asc'};
-  }
-  if (`${infoBranchSort.key}:${infoBranchSort.dir}` !== previous) scheduleShareUiStatePublish();
-}
-
-const infoBranchSortColumns = new Set(['session', 'path', 'branch', 'pr', 'linear', 'desc', 'updated']);
-
-function normalizeShareInfoSort(value = {}) {
-  const key = infoBranchSortColumns.has(value?.key) ? value.key : 'updated';
-  const dir = value?.dir === 'asc' ? 'asc' : 'desc';
-  return {key, dir};
-}
-
-function shareInfoString(value, limit = 500) {
-  return String(value || '').slice(0, limit);
-}
-
-function shareInfoRowSnapshot(row = {}) {
-  return {
-    session: shareInfoString(row.session, 80),
-    path: shareInfoString(row.path, 1000),
-    pathLabel: shareInfoString(row.pathLabel, 1000),
-    pathTitle: shareInfoString(row.pathTitle, 1000),
-    branch: shareInfoString(row.branch, 500),
-    desc: shareInfoString(row.desc, 1000),
-    updated: shareInfoString(row.updated, 200),
-    updatedText: shareInfoString(row.updatedText, 200),
-    updatedTitle: shareInfoString(row.updatedTitle, 500),
-    updatedTs: Number.isFinite(row.updatedTs) ? row.updatedTs : 0,
-    prTitle: shareInfoString(row.prTitle, 1000),
-    prUrl: shareInfoString(row.prUrl, 1000),
-    prLabel: shareInfoString(row.prLabel, 100),
-    prClass: shareInfoString(row.prClass, 100),
-    prSort: shareInfoString(row.prSort, 1000),
-    linearTitle: shareInfoString(row.linearTitle, 1000),
-    linearItems: Array.isArray(row.linearItems)
-      ? row.linearItems.slice(0, 20).map(item => ({
-        identifier: shareInfoString(item?.identifier, 120),
-        state: shareInfoString(item?.state, 120),
-        title: shareInfoString(item?.title, 500),
-        url: shareInfoString(item?.url, 1000),
-      })).filter(item => item.identifier || item.url)
-      : [],
-    current: row.current === true,
-  };
-}
-
-function cleanShareInfoRows(value) {
-  if (!Array.isArray(value)) return [];
-  return value.slice(0, 1000).map(shareInfoRowSnapshot);
-}
-
-function shareInfoStateSnapshot(options = {}) {
-  const snapshot = {
-    branchSort: normalizeShareInfoSort(infoBranchSort),
-    columnWidths: {
-      branch: clampInfoColumnWidth('branch', infoBranchColumnWidthPx),
-      desc: clampInfoColumnWidth('desc', infoDescColumnWidthPx),
-    },
-  };
-  if (options.includeRows !== false) snapshot.branchRows = infoBranchRows().map(shareInfoRowSnapshot);
-  return snapshot;
-}
-
-function applyShareInfoState(info = {}) {
-  if (!info || typeof info !== 'object') return;
-  if ('branchSort' in info) infoBranchSort = normalizeShareInfoSort(info.branchSort);
-  if ('branchRows' in info) shareInfoBranchRowsOverride = cleanShareInfoRows(info.branchRows);
-  const widths = info.columnWidths && typeof info.columnWidths === 'object' ? info.columnWidths : {};
-  if ('branch' in widths) setInfoColumnWidth('branch', widths.branch, {persist: false, publish: false});
-  if ('desc' in widths) setInfoColumnWidth('desc', widths.desc, {persist: false, publish: false});
-  renderInfoPanel();
-  restoreShareScrollTargetByKey('info');
-}
-
-function infoBranchSortValue(row, key) {
-  if (key === 'updated') return Number.isFinite(row.updatedTs) ? row.updatedTs : 0;
-  if (key === 'pr') return row.prSort || row.prTitle || '';
-  if (key === 'linear') return row.linearTitle || '';
-  return row[key] || '';
-}
-
-function compareInfoBranchRows(left, right, sortState) {
-  const key = infoBranchSortColumns.has(sortState?.key) ? sortState.key : 'updated';
-  const direction = sortState?.dir === 'asc' ? 1 : -1;
-  const leftValue = infoBranchSortValue(left, key);
-  const rightValue = infoBranchSortValue(right, key);
-  let result = 0;
-  if (typeof leftValue === 'number' && typeof rightValue === 'number') {
-    result = leftValue - rightValue;
-  } else {
-    result = String(leftValue).localeCompare(String(rightValue), undefined, {numeric: true, sensitivity: 'base'});
-  }
-  if (result !== 0) return result * direction;
-  return (right.updatedTs - left.updatedTs)
-    || String(left.session).localeCompare(String(right.session), undefined, {numeric: true, sensitivity: 'base'})
-    || String(left.path).localeCompare(String(right.path), undefined, {numeric: true, sensitivity: 'base'})
-    || String(left.branch).localeCompare(String(right.branch), undefined, {numeric: true, sensitivity: 'base'});
-}
-
-function sortedInfoBranchRows(rows, sortState = infoBranchSort) {
-  return rows.slice().sort((left, right) => compareInfoBranchRows(left, right, sortState));
-}
-
-function bindPanelControls(panel, session) {
-  delegate(panel, 'click', '[data-tab]', (_event, button) => {
-    const currentName = button.dataset.tabName;
-    const nextName = currentName !== 'terminal' && button.classList.contains(CLS.active) ? 'terminal' : currentName;
-    activateTab(button.dataset.tab, nextName, {userInitiated: true});
-  });
-  delegate(panel, 'click', '[data-window-dir], [data-window-index]', event => {
-    handleWindowStepButtonClick(event);
-  });
-  delegate(panel, 'click', '[data-pane-close]', (event, button) => {
-    event.preventDefault();
-    event.stopPropagation();
-    removePaneFromLayout(button.dataset.paneClose);
-  });
-  delegate(panel, 'click', '[data-pane-minimize]', (event, button) => {
-    event.preventDefault();
-    event.stopPropagation();
-    minimizePaneFromLayout(button.dataset.paneMinimize);
-  });
-  delegate(panel, 'click', '[data-pane-expand]', (event, button) => {
-    event.preventDefault();
-    event.stopPropagation();
-    expandPaneFromLayout(button.dataset.paneExpand);
-  });
-  delegate(panel, 'click', '[data-pane-actions]', (event, button) => {
-    event.preventDefault();
-    event.stopPropagation();
-    const rect = button.getBoundingClientRect();
-    showSessionContextMenu(button.dataset.paneActions || session, rect.left, rect.bottom + 4);
-  });
-  if (isTmuxSession(session)) {
-    panel.querySelector('.panel-head')?.addEventListener('contextmenu', event => {
-      if (event.target.closest('button, input')) return;
-      event.preventDefault();
-      event.stopPropagation();
-      showSessionContextMenu(session, event.clientX, event.clientY);
-    });
-  }
-  delegate(panel, 'click', '[data-context]', () => showContext(session));
-  panel.addEventListener('click', event => {
-    const target = event.target.closest('[data-auto-session]');
-    if (!target || !panel.contains(target)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    toggleAutoApprove(target.dataset.autoSession || session);
-  });
-  panel.addEventListener('click', event => {
-    const target = event.target.closest('[data-copy-transcript-path]');
-    if (!target || !panel.contains(target)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const path = target.dataset.copyTranscriptPath || '';
-    if (!path) return;
-    copyTextToClipboard(path)
-      .then(() => { statusOk(localizedHtml('status.copiedTranscriptPath')); })
-      .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
-  });
-  panel.querySelector('.meta')?.addEventListener('click', event => {
-    event.stopPropagation();
-    const cycle = event.target.closest('[data-repo-cycle]');
-    if (cycle) {
-      event.preventDefault();
-      const targetSession = cycle.dataset.repoCycle || session;
-      cycleSessionRepoDisplay(targetSession, transcriptMeta.sessions?.[targetSession], cycle.dataset.repoCycleDir || 1);
-      updatePanelHeader(targetSession, transcriptMeta.sessions?.[targetSession]);
-      renderSessionButtons();
-      renderPaneTabStrips();
-      return;
-    }
-    // The repo count opens the per-session multi-repo popover (delegated, since .meta re-renders).
-    const chip = event.target.closest('[data-repo-chip]');
-    if (chip) {
-      event.preventDefault();
-      showRepoChipMenu(chip.dataset.repoChip || session, event.clientX, event.clientY);
-    }
-  });
-  panel.querySelector('.meta')?.addEventListener('dragstart', event => event.stopPropagation());
-  bindFileUpload(panel, session);
-}
-
-function hasFileDrag(event) {
-  const types = Array.from(event.dataTransfer?.types || []);
-  return types.includes('Files') || Boolean(event.dataTransfer?.files?.length);
-}
-
-function hasUploadableDrag(event) {
-  // External file drops (any type) OR an image exposed as rich data with no File entry — both must be
-  // claimed so a dragged image never leaks to the terminal-backed agent as a rich [Image #N] attachment.
-  return hasFileDrag(event) || dataTransferHasImagePayload(event?.dataTransfer);
-}
-
-function bindFileUpload(panel, session) {
-  if (readOnlyMode) return;
-  panel.addEventListener('dragenter', event => {
-    if (!hasUploadableDrag(event)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    panel.classList.add(CLS.fileDragOver);
-  });
-  panel.addEventListener('dragover', event => {
-    if (!hasUploadableDrag(event)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    event.dataTransfer.dropEffect = 'copy';
-    panel.classList.add(CLS.fileDragOver);
-  });
-  panel.addEventListener('dragleave', event => {
-    if (!hasUploadableDrag(event)) return;
-    if (panel.contains(event.relatedTarget)) return;
-    panel.classList.remove(CLS.fileDragOver);
-  });
-  panel.addEventListener('drop', event => {
-    if (!hasUploadableDrag(event)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    panel.classList.remove(CLS.fileDragOver);
-    // DOIT.57: remember the drop point so the post-upload suggestion overlay can anchor there.
-    // Prefer the plain File list; fall back to images extracted from rich data (text/html <img>,
-    // image MIME) so a dragged image exposed without a File still uploads instead of leaking.
-    const dropped = event.dataTransfer?.files?.length ? event.dataTransfer.files : dataTransferImageFiles(event.dataTransfer);
-    uploadFiles(session, dropped, {suggestAt: {x: event.clientX, y: event.clientY}});
-  });
-}
-
-function insertFileDragPayloadIntoTerminal(session, payload) {
-  const references = terminalFileReferences(session, payload);
-  if (!references.length) return;
-  const inserted = insertIntoTerminal(session, `${references.map(shellQuote).join(' ')} `);
-  const label = references.length === 1 ? references[0] : tPlural('files.pathCount', references.length);
-  statusEl.innerHTML = inserted
-    ? `<span class="ok">${localizedHtml('status.insertedInto', {name: label, session: sessionLabel(session)})}</span>`
-    : `<span class="err">${terminalNotConnectedHtml(session)}</span>`;
-}
-
-// DOIT.57: one data-driven file-drop action registry. Agent panes keep the shipped "path first, then
-// append a deictic clause" behavior; shell and server actions compose full commands/results from the
-// selected action so they do not run a stray bare path before the useful command.
-const DROP_SUGGESTION_CATEGORY_EXTS = {
-  image: ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.heic', '.heif', '.avif'],
-  log: ['.log', '.out', '.err'],
-  diff: ['.diff', '.patch'],
-  data: ['.csv', '.tsv', '.json', '.ndjson', '.yaml', '.yml', '.parquet'],
-  doc: ['.md', '.markdown', '.rst', '.pdf', '.txt', '.docx', '.html'],
-  config: ['.toml', '.ini', '.env', '.cfg', '.conf'],
-  code: ['.py', '.js', '.ts', '.tsx', '.jsx', '.mjs', '.rs', '.go', '.java', '.c', '.h', '.cpp', '.cc', '.rb', '.php', '.lua', '.sql', '.css', '.sh', '.bash', '.zsh'],
-  archive: ['.zip', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.whl'],
-};
-
-function fileDropCategory(pathOrName, kind = 'file') {
-  if (kind === 'dir') return 'dir';
-  const name = String(pathOrName || '').toLowerCase();
-  const base = name.slice(Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\')) + 1);
-  const dot = base.lastIndexOf('.');
-  const ext = dot > 0 ? base.slice(dot) : '';
-  for (const category of Object.keys(DROP_SUGGESTION_CATEGORY_EXTS)) {
-    if (DROP_SUGGESTION_CATEGORY_EXTS[category].includes(ext)) return category;
-  }
-  return 'any';
-}
-
-const DROP_ACTION_CATEGORIES = Object.freeze(['any', 'image', 'log', 'code', 'diff', 'data', 'doc', 'config', 'archive', 'dir']);
-const DEFAULT_IMAGE_DROP_ACTION_ORDER = Object.freeze([
-  'Extract the text (OCR): ; do OCR on this image and extract all of the text.',
-  'Diagnose the error: ; diagnose the error/problem shown in this screenshot & suggest a fix.',
-  'Describe the image: ; describe what is shown in this image.',
-  'info',
-]);
-const DROP_ACTIONS = [
-  {id: 'insert-path', cats: DROP_ACTION_CATEGORIES, kind: 'insert', label: 'Insert path', labelKey: 'drop.action.insertPath', readOnly: true},
-  {id: 'img-error', cats: ['image'], kind: 'prompt', agent: true, label: 'Diagnose the error', labelKey: 'drop.action.imgError', prompt: () => 'diagnose the error/problem shown in this screenshot & suggest a fix.', aliases: ['Diagnose the error in this screenshot', 'diagnose the error or problem shown in this screenshot and suggest a fix.', 'Diagnose the error in this screenshot: ; diagnose the error or problem shown in this screenshot and suggest a fix.']},
-  {id: 'img-describe', cats: ['image'], kind: 'prompt', agent: true, label: 'Describe the image', labelKey: 'drop.action.imgDescribe', prompt: () => 'describe what is shown in this image.'},
-  {id: 'img-ocr', cats: ['image'], kind: 'prompt', agent: true, label: 'Extract the text (OCR)', labelKey: 'drop.action.imgOcr', prompt: () => 'do OCR on this image and extract all of the text.'},
-  {id: 'log-errors', cats: ['log'], kind: 'prompt', agent: true, label: 'Find the errors', labelKey: 'drop.action.logErrors', prompt: () => 'read this log and list the errors and warnings, most important first.'},
-  {id: 'log-cause', cats: ['log'], kind: 'prompt', agent: true, label: 'Find the root cause', labelKey: 'drop.action.logCause', prompt: () => 'read this log, find the root cause of the failure, and suggest a fix.'},
-  {id: 'code-review', cats: ['code'], kind: 'prompt', agent: true, label: 'Review for bugs', labelKey: 'drop.action.codeReview', prompt: () => 'review this file for bugs and correctness issues.'},
-  {id: 'code-explain', cats: ['code', 'config'], kind: 'prompt', agent: true, label: 'Explain what it does', labelKey: 'drop.action.codeExplain', prompt: () => 'explain what this file does.'},
-  {id: 'code-security', cats: ['code', 'config'], kind: 'prompt', agent: true, label: 'Find security issues', labelKey: 'drop.action.codeSecurity', prompt: () => 'review this file for security problems.'},
-  {id: 'code-tests', cats: ['code'], kind: 'prompt', agent: true, label: 'Write tests', labelKey: 'drop.action.codeTests', prompt: () => 'write tests for this file.'},
-  {id: 'diff-review', cats: ['diff'], kind: 'prompt', agent: true, label: 'Review the diff', labelKey: 'drop.action.diffReview', prompt: () => 'review this diff for risks and regressions.'},
-  {id: 'diff-commit', cats: ['diff'], kind: 'prompt', agent: true, label: 'Write a commit message', labelKey: 'drop.action.diffCommit', prompt: () => 'write a commit message for the change in this diff.'},
-  {id: 'data-summary', cats: ['data'], kind: 'prompt', agent: true, label: 'Summarize the data', labelKey: 'drop.action.dataSummary', prompt: () => 'summarize the structure and contents of this data file (columns/schema, row count, anything notable).'},
-  {id: 'data-anomaly', cats: ['data'], kind: 'prompt', agent: true, label: 'Find anomalies', labelKey: 'drop.action.dataAnomaly', prompt: () => 'look at this data file and point out anomalies or outliers.'},
-  {id: 'doc-summary', cats: ['doc'], kind: 'prompt', agent: true, label: 'Summarize', labelKey: 'drop.action.docSummary', prompt: () => 'summarize this document.'},
-  {id: 'doc-todos', cats: ['doc'], kind: 'prompt', agent: true, label: 'Extract the action items', labelKey: 'drop.action.docTodos', prompt: () => 'extract the action items and TODOs from this document.'},
-  {id: 'dir-tree', cats: ['dir'], kind: 'prompt', agent: true, label: 'Summarize this folder', labelKey: 'drop.action.dirTree', prompt: () => 'summarize the contents of this folder.'},
-  {id: 'dir-large', cats: ['dir'], kind: 'prompt', agent: true, label: 'Find the largest files', labelKey: 'drop.action.dirLarge', prompt: () => 'find the largest files in this folder.'},
-  {id: 'multi-diff', cats: DROP_ACTION_CATEGORIES, kind: 'prompt', agent: true, label: 'Compare these files', labelKey: 'drop.action.multiDiff', minFiles: 2, prompt: ctx => `compare these ${ctx.paths.length} files and summarize the important differences.`},
-  {id: 'multi-summary', cats: DROP_ACTION_CATEGORIES, kind: 'prompt', agent: true, label: 'Summarize all files', labelKey: 'drop.action.multiSummary', minFiles: 2, prompt: ctx => `summarize these ${ctx.paths.length} files together and call out common themes.`},
-  {id: 'analyze', cats: ['any'], kind: 'prompt', agent: true, label: 'Take a look at it', labelKey: 'drop.action.analyze', prompt: () => 'take a look at this file and tell me what it is and anything notable.'},
-  {id: 'shell-file', cats: DROP_ACTION_CATEGORIES.filter(cat => cat !== 'dir'), kind: 'shell', shell: true, readOnly: true, label: 'Show file type', labelKey: 'drop.action.shellFile', command: ctx => `file ${dropActionQuotedPaths(ctx).join(' ')}`},
-  {id: 'shell-wc', cats: ['log', 'code', 'diff', 'data', 'doc', 'config', 'any'], kind: 'shell', shell: true, readOnly: true, label: 'Count lines and bytes', labelKey: 'drop.action.shellWc', command: ctx => `wc -l -c ${dropActionQuotedPaths(ctx).join(' ')}`},
-  {id: 'shell-tail', cats: ['log', 'any'], kind: 'shell', shell: true, readOnly: true, label: 'Tail and watch', labelKey: 'drop.action.shellTail', command: ctx => `tail -F ${dropActionQuotedPaths(ctx).join(' ')}`},
-  {id: 'shell-jq', cats: ['data'], kind: 'shell', shell: true, readOnly: true, label: 'Pretty-print JSON with jq', labelKey: 'drop.action.shellJq', command: ctx => `jq . ${dropActionQuotedPaths(ctx).join(' ')}`},
-  {id: 'shell-column', cats: ['data'], kind: 'shell', shell: true, readOnly: true, label: 'Show as table', labelKey: 'drop.action.shellColumn', command: ctx => `column -t -s, ${dropActionQuotedPaths(ctx).join(' ')} | less -S`},
-  {id: 'shell-du', cats: ['dir'], kind: 'shell', shell: true, readOnly: true, label: 'Largest files here', labelKey: 'drop.action.shellDu', command: ctx => `du -ah ${dropActionQuotedPaths(ctx).join(' ')} | sort -h | tail -40`},
-  {id: 'server-info', cats: DROP_ACTION_CATEGORIES, kind: 'server', readOnly: true, label: 'Server: file info', labelKey: 'drop.action.serverInfo'},
-  {id: 'server-head', cats: ['log', 'code', 'diff', 'data', 'doc', 'config', 'any'], kind: 'server', readOnly: true, label: 'Server: preview head', labelKey: 'drop.action.serverHead'},
-  {id: 'server-log-errors', cats: ['log', 'any'], kind: 'server', readOnly: true, label: 'Server: scan errors', labelKey: 'drop.action.serverLogErrors'},
-  {id: 'server-data-stats', cats: ['data'], kind: 'server', readOnly: true, label: 'Server: data stats + chart', labelKey: 'drop.action.serverDataStats'},
-  {id: 'server-ocr', cats: ['image'], kind: 'server', readOnly: true, label: 'Server: OCR image', labelKey: 'drop.action.serverOcr'},
-];
-
-function customDropActions() {
-  const lines = nestedSetting(clientSettings, 'uploads.custom_actions', []);
-  if (!Array.isArray(lines)) return [];
-  return lines.map((line, index) => customDropActionFromLine(line, index)).filter(Boolean);
-}
-
-function customDropActionFromLine(line, index = 0) {
-  const parts = String(line || '').split('|').map(part => part.trim());
-  if (parts.length < 2 || !parts[0] || !parts[1]) return null;
-  const rawCats = (parts[2] || 'any').split(',').map(cat => cat.trim().toLowerCase()).filter(Boolean);
-  const cats = rawCats.filter(cat => DROP_ACTION_CATEGORIES.includes(cat));
-  const body = parts[1];
-  const shell = body.toLowerCase().startsWith('shell:');
-  return {
-    id: `custom-${index}-${fuzzyCanonicalPrefixText(parts[0]).slice(0, 24) || 'action'}`,
-    custom: true,
-    cats: cats.length ? cats : ['any'],
-    kind: shell ? 'shell' : 'prompt',
-    shell,
-    agent: !shell,
-    readOnly: shell,
-    label: parts[0],
-    template: shell ? body.slice(6).trim() : body,
-  };
-}
-
-function dropActionMatchesCategory(action, category) {
-  const cats = Array.isArray(action?.cats) ? action.cats : ['any'];
-  if (category === 'dir') return cats.includes('dir');
-  return cats.includes('any') || cats.includes(category);
-}
-
-function dropActionLastKey(category) {
-  return `yolomux.dropAction.last.${category || 'any'}`;
-}
-
-function rememberDropAction(category, actionId) {
-  if (!actionId) return;
-  storageSet(dropActionLastKey(category), actionId);
-}
-
-function normalizedDropActionOrderText(value) {
-  return String(value || '')
-    .trim()
-    .replace(/^;\s*/, '')
-    .replace(/[.:]+$/g, '')
-    .replace(/\s+/g, ' ')
-    .toLowerCase();
-}
-
-function dropActionPromptText(action) {
-  if (action?.kind !== 'prompt') return '';
-  return String(action.template ? action.template : action.prompt?.({paths: [''], category: 'image'}) || '').trim();
-}
-
-function dropActionLabelAliases(action) {
-  const label = String(action?.label || '').trim();
-  const aliases = [label, label.replace(/\s*\([^)]*\)\s*/g, ' ').replace(/\s+/g, ' ').trim()];
-  return aliases.map(normalizedDropActionOrderText).filter(Boolean);
-}
-
-function dropActionDisplayLabel(action) {
-  if (!action) return '';
-  if (action.menuLabel) return String(action.menuLabel);
-  if (action.labelKey) return t(action.labelKey);
-  return String(action.label || action.id || '');
-}
-
-function dropActionOrderAliases(action) {
-  const aliases = [action?.id, ...dropActionLabelAliases(action)];
-  if (Array.isArray(action?.aliases)) aliases.push(...action.aliases);
-  if (action?.kind === 'prompt') {
-    const clause = dropActionPromptText(action);
-    if (clause) {
-      aliases.push(clause, `; ${clause}`);
-      dropActionLabelAliases(action).forEach(label => {
-        aliases.push(`${label}: ${clause}`, `${label}: ; ${clause}`);
-      });
-    }
-  }
-  if (action?.id === 'server-info') aliases.push('info', 'file info', 'server info');
-  if (action?.id === 'server-ocr') aliases.push('server ocr', 'ocr result');
-  if (action?.id === 'shell-file') aliases.push('file', 'file type');
-  if (action?.id === 'insert-path') aliases.push('insert path', 'path');
-  return aliases.map(normalizedDropActionOrderText).filter(Boolean);
-}
-
-function imageDropActionPreferenceId(value) {
-  const raw = String(value || '').trim();
-  const normalized = normalizedDropActionOrderText(value);
-  if (!normalized) return '';
-  if (['insert-path', 'insert path', 'path', 'server-ocr', 'server ocr', 'server ocr image', 'ocr result', 'shell-file', 'show file type', 'file', 'file type'].includes(normalized)) return '';
-  const exact = DROP_ACTIONS.find(candidate => dropActionOrderAliases(candidate).includes(normalized));
-  if (exact) return exact.id;
-  const colonIndex = raw.indexOf(':');
-  if (colonIndex < 0) return '';
-  const labelText = normalizedDropActionOrderText(raw.slice(0, colonIndex));
-  const promptText = normalizedDropActionOrderText(raw.slice(colonIndex + 1));
-  if (!promptText) return '';
-  const promptMatches = DROP_ACTIONS.filter(candidate => dropActionOrderAliases(candidate).includes(promptText));
-  if (!promptMatches.length) return '';
-  const labelMatch = promptMatches.find(candidate => dropActionLabelAliases(candidate).includes(labelText));
-  return (labelMatch || promptMatches[0]).id || '';
-}
-
-function canonicalDropActionPreferenceLabel(action) {
-  if (!action) return '';
-  if (action.id === 'server-info') return action.label || 'Server: file info';
-  const prompt = dropActionPromptText(action);
-  if (action.kind === 'prompt' && prompt) return `${action.label}: ; ${prompt}`;
-  return action.label || action.id || '';
-}
-
-function imageDropActionPreferenceLabel(value, actionId) {
-  const action = DROP_ACTIONS.find(candidate => candidate.id === actionId);
-  const raw = String(value || '').trim();
-  if (!raw) return canonicalDropActionPreferenceLabel(action);
-  if (actionId === 'server-info') return action?.label || 'Server: file info';
-  if (normalizedDropActionOrderText(raw) === normalizedDropActionOrderText(actionId)) return canonicalDropActionPreferenceLabel(action);
-  return raw;
-}
-
-function preferredDropActionEntries(category) {
-  if (category !== 'image') return [];
-  const configured = nestedSetting(clientSettings, 'uploads.image_action_order', DEFAULT_IMAGE_DROP_ACTION_ORDER);
-  const rawOrder = Array.isArray(configured) && configured.length ? configured : DEFAULT_IMAGE_DROP_ACTION_ORDER;
-  const seen = new Set();
-  const ordered = [];
-  const addValue = value => {
-    const actionId = imageDropActionPreferenceId(value);
-    if (!actionId || seen.has(actionId)) return;
-    seen.add(actionId);
-    ordered.push({id: actionId, label: imageDropActionPreferenceLabel(value, actionId)});
-  };
-  rawOrder.forEach(addValue);
-  if (!ordered.length && rawOrder !== DEFAULT_IMAGE_DROP_ACTION_ORDER) DEFAULT_IMAGE_DROP_ACTION_ORDER.forEach(addValue);
-  return ordered;
-}
-
-function preferredDropActionOrder(category) {
-  return preferredDropActionEntries(category).map(entry => entry.id);
-}
-
-function sortDropActionsByPreference(actions, category, options = {}) {
-  const preferred = preferredDropActionEntries(category);
-  if (!preferred.length) return actions;
-  const byId = new Map(actions.map(action => [action.id, action]));
-  const ordered = [];
-  preferred.forEach(entry => {
-    const action = byId.get(entry.id);
-    if (!action) return;
-    ordered.push({...action, menuLabel: action.custom ? (entry.label || action.label) : ''});
-  });
-  return ordered;
-}
-
-function sortDropActionsForCategory(actions, category, options = {}) {
-  const hasPreferredOrder = preferredDropActionOrder(category).length > 0;
-  actions = sortDropActionsByPreference(actions, category, options);
-  if (hasPreferredOrder) return actions;
-  const lastId = storageGet(dropActionLastKey(category), '');
-  if (!lastId) return actions;
-  const insert = actions.find(action => action.id === 'insert-path');
-  const rest = actions.filter(action => action.id !== 'insert-path');
-  const last = rest.find(action => action.id === lastId);
-  if (!last) return actions;
-  const ordered = [last, ...rest.filter(action => action !== last)];
-  return insert && options.pathInserted !== true ? [insert, ...ordered] : ordered;
-}
-
-function dropActionsFor(category, agentKind, count = 1, options = {}) {
-  const isAgent = agentKind === 'claude' || agentKind === 'codex';
-  const preferredImageIds = category === 'image' ? new Set(preferredDropActionOrder(category)) : new Set();
-  const all = [DROP_ACTIONS[0], ...customDropActions(), ...DROP_ACTIONS.slice(1)];
-  const filtered = all.filter(action => {
-    const configuredImageAction = preferredImageIds.has(action.id);
-    if (action.id === 'insert-path' && options.pathInserted === true) return false;
-    if (action.agent && !isAgent) return false;
-    if (action.shell && isAgent && options.includeShellForAgents !== true && !configuredImageAction) return false;
-    if (action.kind === 'server' && options.includeServer === false) return false;
-    const minFiles = Number(action.minFiles || 1);
-    const maxFiles = Number(action.maxFiles || 0);
-    if (count < minFiles) return false;
-    if (maxFiles > 0 && count > maxFiles) return false;
-    return dropActionMatchesCategory(action, category);
-  });
-  return sortDropActionsForCategory(filtered, category, options).slice(0, 9);
-}
-
-function dropSuggestionsFor(category, agentKind, count = 1, options = {}) {
-  return dropActionsFor(category, agentKind, count, options);
-}
-
-function dropActionContext(action, paths, category, agentKind, options = {}) {
-  return {action, paths, category, agentKind, session: options.session || '', kind: options.kind || 'file', pathInserted: options.pathInserted === true};
-}
-
-function dropActionQuotedPaths(context) {
-  return (context.paths || []).map(shellQuote);
-}
-
-function formatDropActionTemplate(template, context) {
-  const paths = context.paths || [];
-  const first = paths[0] || '';
-  const values = {
-    path: first,
-    qpath: shellQuote(first),
-    paths: paths.join(' '),
-    qpaths: paths.map(shellQuote).join(' '),
-    name: basenameOf(first),
-    count: String(paths.length),
-    category: context.category || 'any',
-  };
-  return String(template || '').replace(/\{(path|qpath|paths|qpaths|name|count|category)\}/g, (_m, key) => values[key] || '');
-}
-
-function composeDropSuggestion(action, context = {}) {
-  if (!action) return '';
-  const paths = Array.isArray(context.paths) && context.paths.length ? context.paths : ['/var/log/app.log'];
-  const category = context.category || fileDropCategory(paths[0], context.kind || 'file');
-  const fullContext = dropActionContext(action, paths, category, context.agentKind || '', context);
-  if (action.kind === 'insert') return `${paths.map(shellQuote).join(' ')} `;
-  if (action.kind === 'shell') {
-    const command = action.template ? formatDropActionTemplate(action.template, fullContext) : action.command?.(fullContext);
-    return String(command || '').trim();
-  }
-  if (action.kind === 'server') return '';
-  const clause = action.template ? formatDropActionTemplate(action.template, fullContext) : action.prompt?.(fullContext);
-  return String(clause || '').trim();
-}
-
-function insertedDropActionText(action, context = {}) {
-  const text = composeDropSuggestion(action, context);
-  if (!text) return '';
-  const pathInserted = context.pathInserted === true;
-  if (action.kind === 'prompt' && pathInserted) return `; ${text}`;
-  if (action.kind === 'shell' && pathInserted) {
-    const isAgent = context.agentKind === 'claude' || context.agentKind === 'codex';
-    if (isAgent) {
-      if (action.id === 'shell-file') return '; show the file type';
-      return `; ${String(action.label || text).toLowerCase()}`;
-    }
-    return `\u0015${text}`;
-  }
-  return text;
-}
-
-function terminalDropShouldInsertPathFirst(session, payload) {
-  const paths = Array.isArray(payload?.paths) ? payload.paths.filter(Boolean) : [payload?.path].filter(Boolean);
-  if (!paths.length) return false;
-  const agentKind = sessionAgentKind(session);
-  if (agentKind !== 'claude' && agentKind !== 'codex') return false;
-  const category = fileDropCategory(paths[0], payload?.kind);
-  return dropActionsFor(category, agentKind, paths.length, {pathInserted: true, includeServer: false}).some(action => action.kind === 'prompt');
-}
-
-async function runDropAction(action, context) {
-  const paths = context.paths || [];
-  const category = context.category || fileDropCategory(paths[0], context.kind || 'file');
-  rememberDropAction(category, action.id);
-  if (action.kind === 'server') {
-    await runServerDropAction(action, paths);
-    return;
-  }
-  const text = composeDropSuggestion(action, context);
-  if (!text) return;
-  const suffix = insertedDropActionText(action, context);
-  const shellActionActsAsAgentPrompt = action.kind === 'shell' && context.pathInserted && (context.agentKind === 'claude' || context.agentKind === 'codex');
-  const autoEnter = action.kind === 'shell' && action.readOnly === true && !shellActionActsAsAgentPrompt && boolSetting('uploads.suggestion_autorun', false);
-  const inserted = insertIntoTerminal(context.session, `${suffix}${autoEnter ? '\r' : ''}`);
-  statusEl.innerHTML = inserted
-    ? `<span class="ok">${localizedHtml(autoEnter ? 'status.ranDropAction' : 'status.insertedDropAction', {name: action.label || action.id})}</span>`
-    : `<span class="err">${terminalNotConnectedHtml(context.session)}</span>`;
-}
-
-async function runServerDropAction(action, paths) {
-  try {
-    const payload = await apiFetchJson('/api/drop-action/run', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({action: action.id, paths}),
-    });
-    showDropActionResult(payload);
-  } catch (error) {
-    statusErr(localizedHtml('status.copyFailed', {error: error?.payload?.error || error}));
-  }
-}
-
-function showDropActionResult(payload) {
-  showFileEditorDecisionDialog({
-    title: payload?.title || t('upload.dropActionResultTitle'),
-    bodyHtml: `<div class="drop-action-result"><pre>${esc(payload?.body || payload?.error || '')}</pre></div>`,
-    actions: [{id: 'close', label: t('common.close')}],
-    className: 'drop-action-result-dialog',
-  });
-}
-
-let terminalDropSuggestionState = null;
-
-function dismissTerminalDropSuggestions() {
-  const state = terminalDropSuggestionState;
-  if (!state) return;
-  terminalDropSuggestionState = null;
-  clearTimeout(state.timer);
-  document.removeEventListener('keydown', state.onKeyDown, true);
-  document.removeEventListener('pointerdown', state.onPointerDown, true);
-  state.node.remove();
-}
-
-function dropSuggestionIndexFromKeyEvent(event) {
-  if (event?.ctrlKey || event?.metaKey) return -1;
-  const code = String(event?.code || '');
-  if (/^Digit[1-9]$/.test(code)) return Number(code.slice(5)) - 1;
-  if (/^Numpad[1-9]$/.test(code)) return Number(code.slice(6)) - 1;
-  const key = String(event?.key || '');
-  if (/^[1-9]$/.test(key)) return Number(key) - 1;
-  return -1;
-}
-
-function showTerminalDropSuggestions(session, payload, x, y, options = {}) {
-  dismissTerminalDropSuggestions();
-  const paths = Array.isArray(payload?.paths) ? payload.paths.filter(Boolean) : [payload?.path].filter(Boolean);
-  if (!paths.length) return false;
-  const category = fileDropCategory(paths[0], payload?.kind);
-  const agentKind = sessionAgentKind(session);
-  const pathInserted = options.pathInserted === true;
-  const suggestions = dropActionsFor(category, agentKind, paths.length, {pathInserted});
-  if (!suggestions.length) return false;
-  const rows = suggestions.map(action => ({
-    label: dropActionDisplayLabel(action),
-    run: () => runDropAction(action, dropActionContext(action, paths, category, agentKind, {pathInserted, session, kind: payload?.kind})),
-  }));
-
-  const node = document.createElement('div');
-  node.className = 'terminal-drop-suggestions';
-  node.setAttribute('role', 'listbox');
-  const head = document.createElement('div');
-  head.className = 'terminal-drop-suggestions-head';
-  const prefix = pathInserted ? t('drop.pathInserted') : (paths.length > 1 ? tPlural('drop.files', paths.length) : basenameOf(paths[0]));
-  head.textContent = t('drop.suggestionHint', {prefix, max: Math.min(rows.length, 9)});
-  node.appendChild(head);
-  rows.forEach((row, index) => {
-    const item = document.createElement('div');
-    item.className = 'terminal-drop-suggestion';
-    item.setAttribute('role', 'option');
-    item.tabIndex = -1;
-    const combo = document.createElement('span');
-    combo.className = 'terminal-drop-suggestion-combo';
-    combo.textContent = String(index + 1);
-    const label = document.createElement('span');
-    label.className = 'terminal-drop-suggestion-label';
-    label.textContent = row.label;
-    item.append(combo, label);
-    item.addEventListener('click', () => { row.run(); dismissTerminalDropSuggestions(); });
-    node.appendChild(item);
-  });
-  document.body.appendChild(node);
-  // Anchor at the drop point when there is one; for paste (no drop point) anchor near the session's
-  // terminal, falling back to the viewport so the overlay is always on-screen.
-  let anchorX = x;
-  let anchorY = y;
-  if (!Number.isFinite(anchorX) || !Number.isFinite(anchorY)) {
-    const host = document.getElementById(terminalDomId(session)) || document.getElementById(panelDomId(session));
-    const hostRect = host?.getBoundingClientRect?.();
-    const fallbackViewport = appViewport();
-    anchorX = hostRect ? hostRect.left + 16 : fallbackViewport.width / 2;
-    anchorY = hostRect ? hostRect.top + 16 : fallbackViewport.height / 3;
-  }
-  const rect = node.getBoundingClientRect();
-  const viewport = appViewport();
-  node.style.left = `${Math.round(Math.max(8, Math.min(anchorX, viewport.width - rect.width - 8)))}px`;
-  node.style.top = `${Math.round(Math.max(8, Math.min(anchorY, viewport.height - rect.height - 8)))}px`;
-
-  const onKeyDown = event => {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      event.stopPropagation();
-      dismissTerminalDropSuggestions();
-      return;
-    }
-    // Press 1..9 to pick a row. Accept top-row digits, numpad digits, and browsers that only provide
-    // event.key. Exclude platform browser tab-switch shortcuts.
-    const index = dropSuggestionIndexFromKeyEvent(event);
-    if (index >= 0) {
-      event.preventDefault();
-      event.stopPropagation();
-      if (index < rows.length) {
-        rows[index].run();
-        dismissTerminalDropSuggestions();
-      }
-      return;
-    }
-    // Any other key: the overlay is advisory — dismiss it but let the keystroke reach the terminal.
-    dismissTerminalDropSuggestions();
-  };
-  const onPointerDown = event => { if (!node.contains(event.target)) dismissTerminalDropSuggestions(); };
-  const timeoutMs = Number.isFinite(Number(options.timeoutMs)) ? Math.max(1, Number(options.timeoutMs)) : 6000;
-  const timer = setTimeout(dismissTerminalDropSuggestions, timeoutMs);
-  terminalDropSuggestionState = {node, timer, onKeyDown, onPointerDown};
-  document.addEventListener('keydown', onKeyDown, true);
-  document.addEventListener('pointerdown', onPointerDown, true);
-  return true;
-}
-
-// Decide what a drop onto a terminal does. 'ignore' = let it bubble to the layout (files keep opening
-// in the editor when suggestions are off); 'editor' = open a split (edge drops); 'suggest' = the
-// transient overlay (center drops when uploads.show_suggestions is on); 'insert' = legacy dir path-insert.
-function terminalDropMode(payload, intent) {
-  if (!payload?.path) return 'ignore';
-  const center = !intent?.targetSlot || intent.zone === 'middle';
-  if (!center) return payload.kind === 'dir' ? 'editor' : 'ignore';
-  if (boolSetting('uploads.show_suggestions', true)) return 'suggest';
-  return payload.kind === 'dir' ? 'insert' : 'ignore';
-}
-
-function installFilePathDropTarget(session, target) {
-  if (readOnlyMode) return;
-  target.addEventListener('dragover', event => {
-    const payload = fileDragPayload(event);
-    const intent = dropIntentForEvent(event);
-    const mode = terminalDropMode(payload, intent);
-    if (mode === 'ignore') return;
-    event.preventDefault();
-    event.stopPropagation();
-    event.dataTransfer.dropEffect = 'copy';
-    if (mode === 'editor' && intent?.targetSlot && pathDropIntentAllowsPayload(payload, intent)) showDropPreview(intent);
-    else clearDropPreview();
-    target.classList.add(CLS.pathDragOver);
-  });
-  target.addEventListener('dragleave', event => {
-    if (target.contains(event.relatedTarget)) return;
-    target.classList.remove(CLS.pathDragOver);
-    clearDropPreview();
-  });
-  target.addEventListener('drop', event => {
-    const payload = fileDragPayload(event);
-    const intent = dropIntentForEvent(event);
-    const mode = terminalDropMode(payload, intent);
-    if (mode === 'ignore') return;
-    event.preventDefault();
-    event.stopPropagation();
-    target.classList.remove(CLS.pathDragOver);
-    clearDropPreview();
-    if (mode === 'editor') {
-      if (intent?.targetSlot && pathDropIntentAllowsPayload(payload, intent)) {
-        openDraggedFilesInEditor(payload, {targetSlot: intent.targetSlot, targetZone: intent.zone});
-      }
-      return;
-    }
-    if (mode === 'suggest') {
-      const pathInserted = terminalDropShouldInsertPathFirst(session, payload);
-      if (pathInserted) insertFileDragPayloadIntoTerminal(session, payload);
-      const shown = showTerminalDropSuggestions(session, payload, event.clientX, event.clientY, {pathInserted});
-      if (!shown && !pathInserted) insertFileDragPayloadIntoTerminal(session, payload);
-      return;
-    }
-    insertFileDragPayloadIntoTerminal(session, payload);
-  });
-}
-
-function installTerminalFileDrop(session, container) {
-  installFilePathDropTarget(session, container);
-}
-
-function bindClipboardPaste() {
-  if (readOnlyMode) return;
-  if (clipboardPasteBound) return;
-  clipboardPasteBound = true;
-  document.addEventListener('paste', event => {
-    if (!dataTransferHasImagePayload(event.clipboardData)) return;
-    // Image-bearing paste: ALWAYS claim it (preventDefault + stopPropagation) so the raw image can never
-    // reach the terminal-backed agent as a rich [Image #N] attachment (the mixed text+attachment bug).
-    // Then upload ALL pasted images and insert only their textual uploaded-path references.
-    event.preventDefault();
-    event.stopPropagation();
-    const session = pasteTargetSession(event);
-    if (!session) {
-      statusErr(localizedHtml('status.selectPaneForImagePaste'));
-      return;
-    }
-    const files = dataTransferImageFiles(event.clipboardData);
-    if (!files.length) {
-      // Claimed (so nothing leaks to the agent) but the image was exposed only as un-extractable rich
-      // data (e.g. a remote <img> URL with no File and no data: URL).
-      statusErr(localizedHtml('status.selectPaneForImagePaste'));
-      return;
-    }
-    if (!beginPasteUpload(session)) return;
-    uploadFiles(session, files, {source: 'paste'}).finally(() => {
-      pasteUploadInFlight = false;
-    });
-  }, {capture: true});
-}
-
-// ONE shared image-payload contract for BOTH paste (clipboardData) and drop (dataTransfer). A browser may
-// expose an image as a File, OR as rich data (a text/html <img>, an image MIME type) with NO File. ALL of
-// these must be detectable so the handlers can CLAIM the event and never let a raw image reach the
-// terminal-backed agent as a rich [Image #N] attachment. See AGENTS.md (rich-data drag/paste note).
-function dataTransferHasImagePayload(dt) {
-  if (!dt) return false;
-  if (Array.from(dt.items || []).some(item => item.kind === 'file' && String(item.type || '').startsWith('image/'))) return true;
-  if (dt.files && Array.from(dt.files).some(file => String(file.type || '').startsWith('image/'))) return true;
-  const types = Array.from(dt.types || []);
-  if (types.some(type => String(type).startsWith('image/'))) return true;
-  if (types.includes('text/html') && /<img\b/i.test(typeof dt.getData === 'function' ? (dt.getData('text/html') || '') : '')) return true;
-  return false;
-}
-
-// Extract EVERY image in the payload as a renamed upload File, so multi-image prompts are deterministic
-// (N images -> N uploaded path references, never one text ref + one attachment). Handles File items, a
-// plain File list, and data: URL <img> sources embedded in text/html (browser image copies).
-function dataTransferImageFiles(dt) {
-  if (!dt) return [];
-  const files = [];
-  for (const item of Array.from(dt.items || [])) {
-    if (item.kind !== 'file' || !String(item.type || '').startsWith('image/')) continue;
-    const file = item.getAsFile?.();
-    if (!file) continue;
-    const type = file.type || item.type || 'image/png';
-    files.push(new File([file], pastedImageFilename(file.name, type), {type}));
-  }
-  if (!files.length && dt.files) {
-    for (const file of Array.from(dt.files)) {
-      if (!String(file.type || '').startsWith('image/')) continue;
-      const type = file.type || 'image/png';
-      files.push(new File([file], pastedImageFilename(file.name, type), {type}));
-    }
-  }
-  if (!files.length && typeof dt.getData === 'function') {
-    const html = dt.getData('text/html') || '';
-    const re = /<img\b[^>]*\bsrc\s*=\s*["']?(data:image\/[^"'\s>]+)/gi;
-    let match;
-    while ((match = re.exec(html))) {
-      const file = dataUrlToImageFile(match[1]);
-      if (file) files.push(file);
-    }
-  }
-  return files;
-}
-
-function dataUrlToImageFile(dataUrl) {
-  const match = /^data:(image\/[a-z0-9.+-]+);base64,(.*)$/i.exec(String(dataUrl || ''));
-  if (!match) return null;
-  const type = match[1];
-  try {
-    const binary = atob(match[2]);
-    const bytes = new Uint8Array(binary.length);
-    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-    return new File([bytes], pastedImageFilename('', type), {type});
-  } catch (_) {
-    return null;
-  }
-}
-
-function beginPasteUpload(session) {
-  const now = Date.now();
-  if (pasteUploadInFlight) return false;
-  const existing = readStoredJson(pasteLockStorageKey, null);
-  if (existing?.expiresAt && existing.expiresAt > now) return false;
-  storageSet(pasteLockStorageKey, JSON.stringify({session, expiresAt: now + 1500}));
-  pasteUploadInFlight = true;
-  return true;
-}
-
-function pasteTargetSession(event) {
-  const panel = event.target?.closest?.('.panel');
-  const panelSession = panel?.id?.startsWith('panel-') ? panel.id.slice('panel-'.length) : '';
-  if (sessions.includes(panelSession) && activeSessions.includes(panelSession)) return panelSession;
-  if (focusedTerminal && activeSessions.includes(focusedTerminal)) return focusedTerminal;
-  if (focusedPanelItem && sessions.includes(focusedPanelItem) && activeSessions.includes(focusedPanelItem)) return focusedPanelItem;
-  if (lastFocusedTmuxSession && activeSessions.includes(lastFocusedTmuxSession)) return lastFocusedTmuxSession;
-  const activeTmuxSessions = activeSessions.filter(isTmuxSession);
-  return activeTmuxSessions.length === 1 ? activeTmuxSessions[0] : null;
-}
-
-function nextPasteFilename(mimeType) {
-  const stamp = pacificDateStamp();
-  const suffix = imageSuffix(mimeType);
-  const key = `${stamp}:${suffix}`;
-  const next = nextPasteCounter(key);
-  return `${stamp}-${String(next).padStart(3, '0')}${suffix}`;
-}
-
-function pastedImageFilename(originalName, mimeType) {
-  const suffix = imageSuffixFromFilename(originalName) || imageSuffix(mimeType);
-  const imageNumber = imageNumberFromFilename(originalName);
-  if (Number.isFinite(imageNumber)) {
-    return `${pacificDateStamp()}-${String(imageNumber).padStart(3, '0')}${suffix}`;
-  }
-  return nextPasteFilename(mimeType);
-}
-
-function nextPasteCounter(key) {
-  const localValue = pasteCounters.get(key) || 0;
-  const counters = readPasteCounters();
-  const next = Math.max(localValue, pasteCounterValue(counters, key)) + 1;
-  counters[key] = next;
-  writePasteCounters(counters);
-  pasteCounters.set(key, next);
-  return next;
-}
-
-function readPasteCounters() {
-  const counters = readStoredJson(pasteCountersStorageKey, {});
-  return counters && typeof counters === 'object' ? counters : {};
-}
-
-function writePasteCounters(counters) {
-  storageSet(pasteCountersStorageKey, JSON.stringify(counters));
-}
-
-function pasteCounterValue(counters, key) {
-  return Number(counters?.[key]) || 0;
-}
-
-function imageNumberFromFilename(filename) {
-  const name = pathBasename(filename || '').replace(/\.[A-Za-z0-9]{1,8}$/, '');
-  const match = name.match(/(?:^|[^A-Za-z])image[^0-9]*(\d+)(?:[^0-9]|$)/i);
-  if (!match) return null;
-  const value = Number(match[1]);
-  return Number.isInteger(value) && value > 0 ? value : null;
-}
-
-function pasteUploadIndexFromPath(path) {
-  const match = pathBasename(path || '').match(/^\d{8}-(\d{3})(?:\.[A-Za-z0-9]{1,8})$/);
-  if (!match) return null;
-  const value = Number(match[1]);
-  return Number.isInteger(value) && value > 0 ? value : null;
-}
-
-function imageSuffixFromFilename(filename) {
-  const match = String(filename || '').match(/(\.[A-Za-z0-9]{1,8})$/);
-  if (!match) return '';
-  const suffix = match[1].toLowerCase();
-  return ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'].includes(suffix) ? (suffix === '.jpeg' ? '.jpg' : suffix) : '';
-}
-
-function pacificDateStamp() {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/Los_Angeles',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).formatToParts(new Date());
-  const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
-  return `${values.year}${values.month}${values.day}`;
-}
-
-function imageSuffix(mimeType) {
-  const value = String(mimeType || '').toLowerCase();
-  if (value.includes('jpeg') || value.includes('jpg')) return '.jpg';
-  if (value.includes('gif')) return '.gif';
-  if (value.includes('webp')) return '.webp';
-  if (value.includes('bmp')) return '.bmp';
-  return '.png';
-}
-
-async function uploadFiles(session, fileList, options = {}) {
-  if (readOnlyMode) {
-    statusErr(localizedHtml('status.readOnlyUploadFiles'));
-    return;
-  }
-  const files = Array.from(fileList || []);
-  if (!files.length) return;
-  const totalBytes = files.reduce((total, file) => total + (Number(file?.size) || 0), 0);
-  if (uploadMaxBytes > 0 && totalBytes > uploadMaxBytes) {
-    statusErr(localizedHtml('status.uploadTooLarge', {selected: formatFileSize(totalBytes), limit: formatFileSize(uploadMaxBytes)}));
-    showUploadRsyncRecommendation({session, sizeBytes: totalBytes});
-    return;
-  }
-  const formData = new FormData();
-  for (const file of files) {
-    formData.append('files', file, file.name || 'upload.bin');
-  }
-  try {
-    const payload = await apiFetchJson(`/api/upload?session=${encodeURIComponent(session)}`, {
-      method: 'POST',
-      credentials: 'same-origin',
-      body: formData,
-    });
-    const paths = (payload.files || []).map(file => file.path).filter(Boolean);
-    if (options.source === 'paste') syncPasteCountersFromPayload(payload);
-    activateTab(session, 'terminal');
-    const dropPayload = {path: paths[0], paths, kind: 'file'};
-    const pathInserted = options.source === 'paste' || terminalDropShouldInsertPathFirst(session, dropPayload);
-    const inserted = pathInserted
-      ? (options.source === 'paste'
-          ? insertPasteUploadReferences(session, payload.files || [], {silent: true})
-          : insertUploadPaths(session, paths, {silent: true}))
-      : false;
-    const uploadResult = showUploadResult(session, payload, inserted);
-    if (paths.length && boolSetting('uploads.show_suggestions', true)) {
-      const timeoutMs = uploadResult?.expiresAt ? uploadResult.expiresAt - Date.now() : toastDurationMs;
-      const shown = showTerminalDropSuggestions(session, dropPayload, options.suggestAt?.x, options.suggestAt?.y, {pathInserted, timeoutMs});
-      if (!shown && !pathInserted) insertUploadPaths(session, paths, {silent: true});
-    } else if (!pathInserted) {
-      insertUploadPaths(session, paths, {silent: true});
-    }
-    refreshTerminalAfterUpload(session);
-    refreshOpenEventLogs();
-    refreshTranscripts({force: true});
-  } catch (error) {
-    statusErr(localizedHtml('status.uploadFailed', {error: error?.payload?.error || error}));
-  }
-}
-
-function refreshTerminalAfterUpload(session) {
-  if (!isTmuxSession(session)) return;
-  scheduleFit(session);
-  refreshTerminal(session);
-  requestAnimationFrame(() => {
-    scheduleFit(session);
-    refreshTerminal(session);
-    requestAnimationFrame(() => refreshTerminal(session));
-  });
-}
-
-function insertUploadPaths(session, paths, options = {}) {
-  if (!paths.length) return false;
-  const inserted = insertIntoTerminal(session, `${paths.map(shellQuote).join(' ')} `);
-  if (!options.silent) {
-    statusEl.innerHTML = inserted
-      ? `<span class="ok">${localizedHtml('status.insertedUploadPath', {session: sessionLabel(session)})}</span>`
-      : `<span class="err">${terminalNotConnectedHtml(session)}</span>`;
-  }
-  return inserted;
-}
-
-function insertPasteUploadReferences(session, files, options = {}) {
-  const references = pasteUploadReferences(files);
-  if (!references.length) return insertUploadPaths(session, files.map(file => file.path).filter(Boolean), options);
-  const inserted = insertIntoTerminal(session, `${references.join(' ')} `);
-  if (!options.silent) {
-    statusEl.innerHTML = inserted
-      ? `<span class="ok">${localizedHtml('status.insertedPastedImage', {session: sessionLabel(session)})}</span>`
-      : `<span class="err">${terminalNotConnectedHtml(session)}</span>`;
-  }
-  return inserted;
-}
-
-function pasteUploadReferences(files) {
-  return (files || []).map((file, index) => {
-    const path = file.path || '';
-    if (!path) return '';
-    const number = pasteUploadIndexFromPath(path) || index + 1;
-    return `[Image #${number}] ${shellQuote(path)}`;
-  }).filter(Boolean);
-}
-
-function syncPasteCountersFromPayload(payload) {
-  const files = payload?.files || [];
-  for (const file of files) syncPasteCounterFromPath(file.path || file.saved_name || '');
-}
-
-function syncPasteCounterFromPath(path) {
-  const index = pasteUploadIndexFromPath(path);
-  if (!Number.isFinite(index)) return;
-  const suffix = imageSuffixFromFilename(path) || imageSuffix('');
-  const stampMatch = pathBasename(path).match(/^(\d{8})-/);
-  const stamp = stampMatch?.[1] || pacificDateStamp();
-  const key = `${stamp}:${suffix}`;
-  const localValue = pasteCounters.get(key) || 0;
-  const counters = readPasteCounters();
-  const next = Math.max(localValue, pasteCounterValue(counters, key), index);
-  if (next <= localValue) return;
-  counters[key] = next;
-  writePasteCounters(counters);
-  pasteCounters.set(key, next);
-}
-
-function insertIntoTerminal(session, text) {
-  if (readOnlyMode && !shareWriteMode) {
-    statusErr(localizedHtml('status.readOnlyTypeTerminals'));
-    return false;
-  }
-  const item = terminals.get(session);
-  if (!item) return false;
-  const filtered = stripTerminalQueryResponses(text);
-  if (!filtered) return false;
-  noteFileExplorerChangesSessionInteraction(session);
-  setFocusedTerminal(session, {userInitiated: true});
-  if (shareReplayShellActive && shareWriteMode) {
-    const sent = shareSendTerminalInputIntent(session, filtered);
-    if (sent && autoFocusEnabled) item.term?.focus?.();
-    return sent;
-  }
-  if (item.socket?.readyState !== WebSocket.OPEN) return false;
-  item.socket.send(JSON.stringify({type: 'input', data: filtered}));
-  if (autoFocusEnabled) item.term?.focus?.();
-  return true;
-}
-
-function noteTerminalExplicitInput(session) {
-  noteFileExplorerChangesSessionInteraction(session);
-  setFocusedTerminal(session, {userInitiated: true});
-}
-
-function handleTerminalData(session, data) {
-  if (readOnlyMode && !shareWriteMode) return false;
-  const filtered = stripTerminalQueryResponses(data);
-  if (!filtered) return false;
-  if (shareReplayShellActive && shareWriteMode) {
-    shareSendTerminalInputIntent(session, filtered);
-    return true;
-  }
-  const current = terminals.get(session);
-  const socket = current?.socket;
-  if (socket?.readyState !== WebSocket.OPEN) return false;
-  socket.send(JSON.stringify({type: 'input', data: filtered}));
-  return true;
-}
-
-function shellQuote(value) {
-  return "'" + String(value).replace(/'/g, "'\\''") + "'";
-}
-
-function showUploadResult(session, payload, inserted) {
-  const node = document.getElementById(`upload-${session}`);
-  if (!node) return null;
-  const files = payload.files || [];
-  const paths = files.map(file => file.path).filter(Boolean);
-  const label = files.length === 1 ? (files[0].saved_name || files[0].name || t('popover.kind.file')) : t('files.count', {count: files.length});
-  const target = payload.target_dir || '';
-  const uploadResultKey = inserted ? 'upload.resultInserted' : 'upload.resultTerminalDisconnected';
-  const expiresAt = Date.now() + toastDurationMs;
-  const newEntries = files.length
-    ? files.map(file => {
-      const name = file.saved_name || file.name || t('popover.kind.file');
-      const destination = pathBasename(file.path || target) || target;
-      return {
-        id: ++uploadResultSequence,
-        text: t(uploadResultKey, {name, destination}),
-        path: file.path || '',
-        expiresAt,
-      };
-    })
-    : [{
-      id: ++uploadResultSequence,
-      text: t(uploadResultKey, {name: label, destination: pathBasename(target) || target}),
-      path: target,
-      expiresAt,
-    }];
-  const existing = uploadResultsBySession.get(session) || [];
-  const active = [...existing.filter(entry => entry.expiresAt > Date.now()), ...newEntries].slice(-8);
-  uploadResultsBySession.set(session, active);
-  renderUploadResult(session);
-  return {expiresAt};
-}
-
-function ensureUploadResultShell(session, node) {
-  return ensureToastShell(node, {
-    title: t('upload.resultTitle', {host: serverHostname, session: sessionLabel(session)}),
-    closeLabel: t('upload.hideStatus'),
-    keepLabel: t('upload.keepStatus'),
-    onKeep: () => keepUploadResult(session),
-    onClose: () => hideUploadResult(session),
-  });
-}
-
-function keepUploadResult(session) {
-  const entries = uploadResultsBySession.get(session) || [];
-  for (const entry of entries) entry.expiresAt = Number.POSITIVE_INFINITY;
-  uploadResultsBySession.set(session, entries);
-  if (uploadCleanupTimers.has(session)) {
-    clearTimeout(uploadCleanupTimers.get(session));
-    uploadCleanupTimers.delete(session);
-  }
-}
-
-function scheduleUploadResultCleanup(session, active, now) {
-  if (uploadCleanupTimers.has(session)) clearTimeout(uploadCleanupTimers.get(session));
-  const delay = Math.max(1, Math.min(...active.map(entry => entry.expiresAt - now)));
-  uploadCleanupTimers.set(session, window.setTimeout(() => {
-    uploadCleanupTimers.delete(session);
-    renderUploadResult(session);
-  }, delay));
-}
-
-function renderUploadResult(session) {
-  const node = document.getElementById(`upload-${session}`);
-  if (!node) return;
-  const now = Date.now();
-  const active = (uploadResultsBySession.get(session) || []).filter(entry => entry.expiresAt > now).slice(-8);
-  uploadResultsBySession.set(session, active);
-  if (!active.length) {
-    node.hidden = true;
-    const titleNode = node.querySelector('.toast-title');
-    if (titleNode) titleNode.textContent = '';
-    const textNode = node.querySelector('.toast-body');
-    if (textNode) textNode.replaceChildren();
-    if (uploadCleanupTimers.has(session)) {
-      clearTimeout(uploadCleanupTimers.get(session));
-      uploadCleanupTimers.delete(session);
-    }
-    return;
-  }
-  const textNode = ensureUploadResultShell(session, node);
-  if (!textNode) return;
-  const paths = active.map(entry => entry.path).filter(Boolean);
-  node.hidden = false;
-  textNode.title = paths.join('\n');
-  renderToastLines(textNode, active.map(entry => ({
-    text: entry.text,
-    countdownMs: entry.expiresAt - now,
-  })));
-  scheduleUploadResultCleanup(session, active, now);
-}
-
-function hideUploadResult(session) {
-  uploadResultsBySession.delete(session);
-  if (uploadCleanupTimers.has(session)) {
-    clearTimeout(uploadCleanupTimers.get(session));
-    uploadCleanupTimers.delete(session);
-  }
-  const node = document.getElementById(`upload-${session}`);
-  if (node) {
-    const titleNode = node.querySelector('.toast-title');
-    if (titleNode) titleNode.textContent = '';
-    const textNode = node.querySelector('.toast-body');
-    if (textNode) textNode.replaceChildren();
-    node.hidden = true;
-  }
-}
-
-function updatePanelSlot(panel, session, slot) {
-  panel.dataset.slot = slot;
-  panel.dataset.layoutItem = session;
-  const head = panel.querySelector('.panel-head');
-  if (head) head.dataset.dragSlot = slot;
-  if (isFileEditorItem(session)) renderFileEditorPanel(panel, session, {updateActiveFile: !dockviewLayoutActive(), captureViewState: false});
-  updatePaneExpandButton(panel, session);
-  if (!hideDockviewInnerPaneTabs(panel)) updatePaneTabStrip(panel, slot);
-  updatePanelInactiveOverlays();
-}
-
-function updatePaneExpandButton(panel, session) {
-  const button = panel.querySelector('[data-pane-expand]');
-  if (button) button.hidden = !canPaneExpand(session);
-}
-
-function syncPanelVisibility(previousActive = []) {
-  const visible = new Set(activeSessions);
-  for (const session of sessions) {
-    if (!visible.has(session)) {
-      stopTranscriptStream(session);
-      stopSummaryStream(session);
-      if (focusedTerminal === session) focusedTerminal = null;
-    }
-    updateTypingIndicator(session);
-  }
-  for (const session of activeSessions.filter(isTmuxSession)) {
-    const pane = document.getElementById(`terminal-pane-${session}`);
-    if (pane?.classList.contains('active')) scheduleFit(session);
-  }
-}
-
-function activateTab(session, name, options = {}) {
-  setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
-  if (name !== 'transcript') stopTranscriptStream(session);
-  if (name !== 'summary') stopSummaryStream(session);
-  document.querySelectorAll(`[data-tab="${session}"]`).forEach(button => {
-    button.classList.toggle('active', button.dataset.tabName === name);
-  });
-  document.querySelectorAll(`[data-panel-tab-overflow="${session}"]`).forEach(button => {
-    button.classList.toggle('active', ['transcript', 'summary', 'events'].includes(name));
-  });
-  for (const tabName of ['terminal', 'transcript', 'summary', 'events']) {
-    const pane = document.getElementById(`${tabName}-pane-${session}`);
-    if (pane) pane.classList.toggle('active', tabName === name);
-  }
-  updateTypingIndicator(session);
-  if (name === 'terminal') {
-    scheduleFit(session);
-    setTimeout(() => refreshTerminal(session), 120);
-    scheduleTerminalBlankScreenRefresh(session);
-    if (options.userInitiated) focusTerminalFromUserAction(session);
-    else focusTerminalWhenAutoFocus(session, 25);
-  } else {
-    clearFocusedTerminal(session);
-  }
-  if (name === 'transcript') {
-    startTranscriptStream(session, {scrollBottom: true});
-  }
-  if (name === 'summary') startSummaryStream(session);
-  if (name === 'events') refreshEventLog(session);
-}
-
-function tmuxWindow(session, key, label) {
-  if (readOnlyMode) {
-    statusErr(localizedHtml('terminal.connection.readonlyTmuxWindow'));
-    return;
-  }
-  const directIndex = tmuxWindowNumber(key?.windowIndex);
-  if (directIndex !== null) {
-    previewTmuxWindowLabel(session, {windowIndex: directIndex});
-    statusOk(`${esc(label)}: ${esc(sessionLabel(session))}`);
-    scheduleFit(session);
-    focusTerminalFromUserAction(session, 75);
-    apiFetchJson(`/api/tmux-window?session=${encodeURIComponent(session)}&window=${encodeURIComponent(String(directIndex))}`, {method: 'POST'})
-      .then(() => setTimeout(() => refreshTranscripts({force: true}), 250))
-      .catch(error => statusErr(localizedHtml('terminal.window.failed', {error: error.message || error})));
-    return;
-  }
-  const item = terminals.get(session);
-  if (!item || item.socket?.readyState !== WebSocket.OPEN) {
-    statusErr(terminalNotConnectedHtml(session));
-    return;
-  }
-  fitTerminal(session);
-  item.socket.send(JSON.stringify({type: 'input', data: String.fromCharCode(2) + key}));
-  previewTmuxWindowLabel(session, key);
-  statusOk(`${esc(label)}: ${esc(sessionLabel(session))}`);
-  scheduleFit(session);
-  focusTerminalFromUserAction(session, 75);
-  setTimeout(() => refreshTranscripts({force: true}), 250);
-}
-
-async function ensureTerminalRunning(session) {
-  const item = terminals.get(session);
-  const readyState = item?.socket?.readyState;
-  const container = document.getElementById(terminalDomId(session));
-  const boundToCurrentContainer = Boolean(item?.term && container?.isConnected && item.container === container);
-  if (item && boundToCurrentContainer && readyState !== undefined && readyState !== WebSocket.CLOSING && readyState !== WebSocket.CLOSED) return;
-  if (readOnlyMode) {
-    startTerminal(session);
-    return;
-  }
-  const ensured = await ensureSession(session);
-  if (!ensured) {
-    const container = document.getElementById(terminalDomId(session));
-    if (container) container.innerHTML = `<pre class="terminal-error">${localizedHtml('terminal.connection.sessionUnavailableRetry', {session: sessionLabel(session)})}</pre>`;
-    return;
-  }
-  startTerminal(session);
-}
-
-function connectTerminalSocket(session, item) {
-  if (!item?.term || !item?.container) return;
-  if (item.socket && item.socket.readyState !== WebSocket.CLOSED && item.socket.readyState !== WebSocket.CLOSING) return;
-  const socket = new WebSocket(wsUrl(session));
-  socket.binaryType = 'arraybuffer';
-  item.socket = socket;
-  item.manualClose = false;
-  socket.onopen = () => {
-    item.reconnectAttempt = 0;
-    dismissTerminalConnectionToasts(session);
-    if (terminalIsVisible(session, item.container)) {
-      scheduleFit(session);
-      scheduleTerminalBlankScreenRefresh(session);
-      if (!shareViewMode) scheduleRemoteResize(session, 50);
-    }
-    updateTypingIndicator(session);
-    updateStatus();
-    refreshTrackedSessionChrome(session);
-  };
-  socket.onmessage = event => {
-    if (terminals.get(session) !== item || !item.term) return;
-    try {
-      if (shareViewMode) {
-        handleShareViewSocketMessage(session, item, event.data);
-      } else if (event.data instanceof ArrayBuffer) {
-        item.term.write(new Uint8Array(event.data));
-      } else {
-        item.term.write(String(event.data));
-      }
-      scheduleTerminalBlankScreenRefresh(session);
-    } catch (_) {
-      if (terminals.get(session) === item) closeTerminalItem(session, item);
-    }
-  };
-  socket.onclose = () => {
-    if (item.manualClose || terminals.get(session) !== item) return;
-    postEvent(session, 'terminal_disconnected', `terminal disconnected from ${session}`, {});
-    clearFocusedTerminal(session);
-    updateStatus();
-    refreshTrackedSessionChrome(session);
-    // Roster-confirm before reconnecting: a killed session is pruned immediately, a transient
-    // disconnect reconnects as before.
-    confirmSessionGoneOrReconnect(session, item);
-  };
-  socket.onerror = () => {
-    updateTypingIndicator(session);
-    updateStatus();
-    refreshTrackedSessionChrome(session);
-  };
-}
-
-function shareSocketMessage(data) {
-  if (typeof data !== 'string') return null;
-  try {
-    return JSON.parse(data);
-  } catch (_) {
-    return null;
-  }
-}
-
-function shareTerminalBytesFromMessage(session, message) {
-  if (!message || message.ch !== 'term' || message.pane !== session || typeof message.data !== 'string') {
-    return null;
-  }
-  const raw = atob(message.data);
-  const bytes = new Uint8Array(raw.length);
-  for (let index = 0; index < raw.length; index += 1) {
-    bytes[index] = raw.charCodeAt(index);
-  }
-  return bytes;
-}
-
-function handleShareViewSocketMessage(session, item, data) {
-  const message = shareSocketMessage(data);
-  if (!message) return;
-  if (message.ch === 'ui') {
-    applyShareUiMessage(message);
-    return;
-  }
-  if (message.ch === 'ptr') {
-    renderSharePointerGhost(message.payload && typeof message.payload === 'object' ? message.payload : message);
-    return;
-  }
-  const bytes = shareTerminalBytesFromMessage(session, message);
-  if (bytes) {
-    item.shareTerminalBytesReceived = true;
-    item.shareTerminalLastByteAt = Date.now();
-    item.shareTerminalByteCount = Math.max(0, Math.round(Number(item.shareTerminalByteCount) || 0)) + bytes.length;
-    item.term.write(bytes);
-  }
-}
-
-function bindTerminalContainerForSession(session, term, container) {
-  if (!session || !term || !container) return;
-  if (container.dataset?.terminalHandlersBound === session) return;
-  if (container.dataset) container.dataset.terminalHandlersBound = session;
-  installTerminalContextMenu(session, term, container);
-  installTerminalCopyShortcut(session, term, container);
-  installTerminalFileDrop(session, container);
-  enableTerminalScroll(session, term, container);
-  observeTerminalResize(session, container);
-  container.addEventListener('focusin', () => {
-    setFocusedTerminal(session);
-  });
-  container.addEventListener('focusout', () => {
-    clearFocusedTerminal(session);
-  });
-  container.addEventListener('copy', event => {
-    copyTerminalSelectionToClipboardEvent(session, term, event, container);
-  }, {capture: true});
-  container.addEventListener('keydown', () => noteTerminalExplicitInput(session), {capture: true});
-  container.addEventListener('paste', () => noteTerminalExplicitInput(session), {capture: true});
-  container.addEventListener('beforeinput', () => noteTerminalExplicitInput(session), {capture: true});
-}
-
-function startTerminal(session) {
-  const existing = terminals.get(session);
-  const reconnectAttempt = existing?.reconnectAttempt || 0;
-  const container = document.getElementById(terminalDomId(session));
-  if (!container) return;
-  if (existing?.term && existing.container === container) {
-    connectTerminalSocket(session, existing);
-    return;
-  }
-  if (existing) {
-    closeTerminalItem(session, existing);
-    terminals.delete(session);
-  }
-  const TerminalCtor = window.Terminal?.Terminal || window.Terminal;
-  if (!TerminalCtor) {
-    container.innerHTML = '<pre class="terminal-error">xterm.js failed to load from /static/xterm.js. Terminal cannot attach.</pre>';
-    statusErr(localizedHtml('status.xtermUnavailable'));
-    return;
-  }
-  container.innerHTML = '';
-  const size = shareHostTerminalSize(session) || estimateTerminalSize(container);
-  const term = new TerminalCtor({
-    cols: size.cols,
-    rows: size.rows,
-    cursorBlink: true,
-    convertEol: false,
-    fontFamily: terminalFontFamily,
-    fontSize: terminalFontSize,
-    letterSpacing: 0,
-    lineHeight: 1.0,
-    scrollback: terminalScrollback,
-    disableStdin: readOnlyMode && !shareWriteMode,
-    theme: terminalThemeForSession(session),
-    minimumContrastRatio: terminalMinimumContrastRatio(),
-    // Alt-screen TUIs (claude, vim, less) enable mouse reporting, which makes xterm send drags to the app
-    // instead of selecting text — so Ctrl-C/Cmd-C has nothing to copy. Option-click (Mac) forces a text
-    // selection anyway; on Linux/Windows hold Shift while dragging (xterm's built-in bypass).
-    macOptionClickForcesSelection: true,
-  });
-  term.open(container);
-  // match the container bg to the terminal theme so every pane shares one white.
-  if (container?.style) container.style.background = terminalThemeForGlobalTheme().background;
-  installTerminalLinkProvider(term);
-  installTerminalOsc52Bridge(session, term);   // Claude/tmux OSC 52 clipboard escapes -> browser clipboard
-  const openedSize = shareHostTerminalSize(session) || estimateTerminalSize(container, term);
-  if (term.cols !== openedSize.cols || term.rows !== openedSize.rows) {
-    term.resize(openedSize.cols, openedSize.rows);
-  }
-  const item = {
-    term,
-    socket: null,
-    container,
-    manualClose: false,
-    reconnectAttempt,
-    reconnectTimer: null,
-    resizeTimer: null,
-    scrollTimer: null,
-    pendingScrollLines: 0,
-    shareTerminalBytesReceived: false,
-    shareTerminalLastByteAt: 0,
-    shareTerminalByteCount: 0,
-    shareTerminalLastResetAt: 0,
-    shareTerminalSkippedResetCount: 0,
-    blankScreenRefreshTimer: 0,
-    blankScreenRefreshAttempts: 0,
-  };
-  terminals.set(session, item);
-  bindTerminalContainerForSession(session, term, container);
-  term.onFocus?.(() => {
-    setFocusedTerminal(session);
-  });
-  term.onBlur?.(() => {
-    clearFocusedTerminal(session);
-  });
-  // xterm can emit focus and mouse-tracking bytes from hover. Keep Differ commits on DOM
-  // keydown/paste/beforeinput and pane pointerdown, not on the terminal transport stream.
-  term.onData(data => handleTerminalData(session, data));
-  connectTerminalSocket(session, item);
-}
-
-function updateTypingIndicator(session) {
-  const item = terminals.get(session);
-  const container = item?.container || document.getElementById(terminalDomId(session));
-  const pane = document.getElementById(`terminal-pane-${session}`);
-  const panel = document.getElementById(panelDomId(session));
-  const ready = Boolean(
-    item?.socket?.readyState === WebSocket.OPEN
-    && focusedTerminal === session
-    && pane?.classList.contains('active')
-  );
-  container?.classList.toggle('typing-ready', ready);
-  panel?.classList.toggle('typing-ready-pane', ready);
-  panel?.classList.toggle('yolo-ready-pane', ready && autoApproveStates.get(session)?.enabled === true);
-}
-
-function updateStatus() {
-  if (activeSessions.length === 0) {
-    statusEl.textContent = t('terminal.status.noSessionSelected');
-    statusEl.removeAttribute('title');
-    return;
-  }
-  const activeTmuxSessions = activeSessions.filter(isTmuxSession);
-  if (!activeTmuxSessions.length) {
-    statusEl.textContent = t('terminal.status.viewShown', {view: infoTabLabel()});
-    statusEl.removeAttribute('title');
-    return;
-  }
-  let open = 0;
-  for (const session of activeTmuxSessions) {
-    const item = terminals.get(session);
-    if (item?.socket?.readyState === WebSocket.OPEN) open += 1;
-  }
-  const total = activeTmuxSessions.length;
-  statusEl.textContent = open === total ? '' : t('terminal.connection.connShort', {open, total});
-  statusEl.title = open === total ? '' : t('terminal.connection.socketsTitle', {open, total});
-}
-
-async function toggleAutoApprove(session) {
-  if (readOnlyMode) {
-    statusErr(localizedHtml('status.yoloReadOnlyChange'));
-    return;
-  }
-  const state = autoApproveStates.get(session) || {};
-  const current = state.enabled === true;
-  await setAutoApprove(session, !current);
-}
-
-async function setAutoApprove(session, enabled) {
-  if (readOnlyMode) {
-    statusErr(localizedHtml('status.yoloReadOnlyChange'));
-    return;
-  }
-  try {
-    const payload = await apiFetchJson(`/api/auto-approve?session=${encodeURIComponent(session)}&enabled=${enabled ? '1' : '0'}`, {method: 'POST'});
-    autoApproveStates.set(session, payload);
-    updateDocumentTitle();
-    updateSessionButtonStates();
-    renderAutoApproveButton(session, payload);
-    scheduleShareUiStatePublish();
-    statusEl.innerHTML = payload.enabled
-      ? `<span class="ok">${localizedHtml('status.yoloEnabledFor', {session: sessionLabel(session)})}</span>`
-      : `<span class="ok">${localizedHtml('status.yoloDisabledFor', {session: sessionLabel(session)})}</span>`;
-  } catch (error) {
-    const payload = error?.payload || {};
-    if (error?.status) {
-      if (payload?.target || payload?.session) {
-        autoApproveStates.set(session, payload);
-        updateDocumentTitle();
-        updateSessionButtonStates();
-        renderAutoApproveButton(session, payload);
-        scheduleShareUiStatePublish();
-      }
-      statusErr(localizedHtml('status.yoloApprovalFailed', {error: payload.error || t('status.yoloApprovalFailedDefault')}));
-      return;
-    }
-    statusErr(localizedHtml('status.yoloRequestFailed', {error}));
-  }
-}
-
-async function refreshAutoStatuses() {
-  await loadAutoStatuses();
-  bindClipboardPaste();
-  renderAutoApproveButtons();
-  updateSessionButtonStates();
-  refreshActivePanelHeaders();
-  trackSessionStateChanges();
-  refreshOpenEventLogs();
-}
-
-async function loadAutoStatuses() {
-  try {
-    const payload = await apiFetchJson('/api/auto-approve');
-    applyAutoApprovePayload(payload);
-  } catch (_) {
-    for (const session of activeSessions.filter(isTmuxSession)) {
-      try {
-        const payload = await apiFetchJson(`/api/auto-approve?session=${encodeURIComponent(session)}`);
-        autoApproveStates.set(session, payload);
-      } catch (_) {}
-    }
-  }
-  updateDocumentTitle();
-  // Re-toggle the YO markers' working class from the fresh states on the SAME poll the title updates,
-  // so a finished/idle pane's marker stops spinning instead of lingering (the transcript poll path
-  // updated the title but never re-synced the markers).
-  renderAutoApproveButtons();
-}
-
-function applyAutoApprovePayload(payload) {
-  if (!payload || typeof payload !== 'object') return false;
-  const previousActive = activeSessions.slice();
-  const sessionsChanged = Array.isArray(payload.session_order) ? updateSessionList(payload.session_order) : false;
-  if (payload.rules) {
-    yoloRulesPayload = payload.rules;
-    renderPreferencesPanels();
-  }
-  for (const session of sessions) {
-    const state = payload.sessions?.[session] || {target: session, enabled: false, last_action: 'off'};
-    autoApproveStates.set(session, state);
-  }
-  if (sessionsChanged) renderPanels(previousActive);
-  updateDocumentTitle();
-  renderAutoApproveButtons();
-  updateSessionButtonStates();
-  refreshActivePanelHeaders();
-  trackSessionStateChanges();
-  scheduleShareUiStatePublish();
-  return true;
-}
-
-function autoApproveOwnerLabel(payload) {
-  const owner = payload?.lock_owner || {};
-  const pid = owner.pid ? `pid ${owner.pid}` : '';
-  const root = owner.project_root || '';
-  return [pid, root].filter(Boolean).join(' ') || payload?.last_action || t('yolo.ownerFallback');
-}
-
-function renderAutoApproveButtons() {
-  for (const session of sessions) {
-    const state = autoApproveStates.get(session) || {target: session, enabled: false, last_action: 'off'};
-    renderAutoApproveButton(session, state);
-  }
-}
-
-function renderAutoApproveButton(session, payload) {
-  const buttons = document.querySelectorAll(`[data-yolo-session="${cssEscape(session)}"]`);
-  const enabled = payload?.enabled === true;
-  const locked = payload?.locked === true && !enabled;
-  const working = sessionYoloIsWorking(session, payload);
-  for (const button of buttons) {
-    const wasWorking = button.classList.contains('working');
-    syncPressedButton(button, enabled);
-    button.classList.toggle('inactive', !enabled && !locked);
-    button.classList.toggle('locked', locked);
-    button.classList.toggle('working', working);
-    if (working) {
-      if (!wasWorking || !button.style.getPropertyValue('--yolo-rotate-delay')) {
-        button.style.setProperty('--yolo-rotate-delay', yoloRotationDelay());
-      }
-    } else {
-      button.style.removeProperty('--yolo-rotate-delay');
-    }
-    button.closest('.pane-tab')?.classList.remove('is-working');
-    button.textContent = t('brand.marker');
-    const action = payload?.last_action ? t('yolo.actionSuffix', {action: payload.last_action}) : '';
-    const readonly = readOnlyMode ? t('yolo.readonlySuffix') : '';
-    button.title = enabled
-      ? t('yolo.buttonOnForSession', {session: sessionLabel(session), action, readonly})
-      : locked
-        ? t('yolo.buttonOwnedBy', {owner: autoApproveOwnerLabel(payload)})
-      : t('yolo.buttonOffForSession', {session: sessionLabel(session), readonly});
-  }
-  updatePanelHeader(session, transcriptMeta.sessions?.[session]);
-  updateTypingIndicator(session);
-}
-
-function startSummaryStream(session) {
-  stopSummaryStream(session);
-  const node = document.getElementById(summaryDomId(session));
-  if (!node) return;
-  if (readOnlyMode) {
-    node.textContent = t('transcript.adminRequired');
-    statusErr(`${esc(t('transcript.adminStatus'))}`);
-    return;
-  }
-  // Accumulate the raw streamed text and render it through the markdown pipeline
-  // (coalesced to one render per frame) so the panel shows formatted markdown,
-  // not raw `##`/`**`/backticks. The leading `[codex]` status lines render as
-  // plain paragraphs, then the model's markdown summary renders properly.
-  let raw = 'Starting structured Codex summary for the last hour…\n\n';
-  let renderScheduled = false;
-  const renderSummary = () => {
-    renderScheduled = false;
-    renderMarkdownPreviewInto(node, raw);
-    node.scrollTop = node.scrollHeight;
-  };
-  const appendSummary = text => {
-    raw += text;
-    if (!renderScheduled) {
-      renderScheduled = true;
-      requestAnimationFrame(renderSummary);
-    }
-  };
-  renderSummary();
-  const source = new EventSource(`/api/summary-stream?session=${encodeURIComponent(session)}&lookback=${60 * 60}`);
-  summaryStreams.set(session, source);
-  source.addEventListener('meta', event => {
-    const payload = safeJsonParse(event.data, null);
-    if (!payload) return;
-    const fallback = payload.fallback ? 'recent transcript tail' : 'last hour';
-    const projectCount = Array.isArray(payload.projects) ? payload.projects.length : 0;
-    appendSummary(`[codex] summarizing ${fallback} for ${payload.focus_root || session}\n`);
-    if (payload.summary_model) appendSummary(`[codex] model: ${payload.summary_model}; effort: ${payload.summary_effort || 'default'}\n`);
-    appendSummary(`[codex] project inventory: ${projectCount} sessions\n\n`);
-  });
-  source.addEventListener('log', event => {
-    const payload = safeJsonParse(event.data, null);
-    if (payload?.text) appendSummary(`[codex] ${payload.text}\n`);
-  });
-  source.addEventListener('delta', event => {
-    const payload = safeJsonParse(event.data, null);
-    if (payload?.text) appendSummary(payload.text);
-  });
-  source.addEventListener('summary_error', event => {
-    // A bad frame must still tear the stream down (this is the error path); guard the read but always stop
-    // — an unguarded JSON.parse throw here would leak the EventSource.
-    const payload = safeJsonParse(event.data, null);
-    appendSummary(`\n[error] ${payload?.error || 'summary failed'}\n`);
-    stopSummaryStream(session);
-  });
-  source.addEventListener('done', event => {
-    const payload = safeJsonParse(event.data, null);
-    if (payload?.return_code && payload.return_code !== 0) {
-      appendSummary(`\n[codex exited ${payload.return_code}]\n`);
-    }
-    stopSummaryStream(session);
-  });
-  source.onerror = () => {
-    if (summaryStreams.get(session) !== source) return;
-    appendSummary(`\n${t('terminal.summary.streamDisconnected')}\n`);
-    stopSummaryStream(session);
-  };
-}
-
-function stopSummaryStream(session) {
-  const source = summaryStreams.get(session);
-  if (!source) return;
-  source.close();
-  summaryStreams.delete(session);
-}
-
-function reloadIsSafe() {
-  // Don't yank the page out from under unsaved work or active typing.
-  for (const file of openFiles.values()) {
-    if (file?.dirty) return false;
-  }
-  const active = document.activeElement;
-  if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return false;
-  return true;
-}
-
-function showServerUpdateBanner(version) {
-  let banner = document.getElementById('serverUpdateBanner');
-  if (banner) {
-    banner.dataset.version = version;
-    return;
-  }
-  banner = document.createElement('div');
-  banner.id = 'serverUpdateBanner';
-  banner.className = 'server-update-banner';
-  banner.dataset.version = version;
-  const msg = document.createElement('span');
-  msg.className = 'server-update-banner-msg';
-  msg.textContent = t('update.available');
-  const reload = document.createElement('button');
-  reload.type = 'button';
-  reload.className = 'server-update-banner-reload';
-  reload.textContent = t('update.reload');
-  reload.addEventListener('click', () => location.reload());
-  const dismiss = document.createElement('button');
-  dismiss.type = 'button';
-  dismiss.className = 'server-update-banner-dismiss';
-  dismiss.setAttribute('aria-label', t('update.dismiss'));
-  dismiss.textContent = '×';
-  dismiss.addEventListener('click', () => banner.remove());
-  banner.append(msg, reload, dismiss);
-  document.body.appendChild(banner);
-}
-
-function maybeHandleServerVersionChange(serverVersion) {
-  // The boot version (bootstrap.version) only updates on page load; this lets a
-  // long-lived open client learn that a newer server shipped, via the metadata poll.
-  if (!serverVersion || serverVersion === bootstrap.version) return;
-  if (!updateNotificationAllowsVersion(bootstrap.version, serverVersion)) return;
-  if (serverVersionReloadHandled === serverVersion) return;
-  serverVersionReloadHandled = serverVersion;
-  if (boolSetting('general.reload_on_update_auto', false) && reloadIsSafe()) {
-    location.reload();
-    return;
-  }
-  showServerUpdateBanner(serverVersion);
-}
-
-async function applyTranscriptsPayload(payload, options = {}) {
-  if (!payload || typeof payload !== 'object') return false;
-  transcriptMeta = payload;
-  transcriptMetaLoaded = true;
-  transcriptMetaLoadError = '';
-  if (typeof warmTabberDataOnLaunch === 'function') warmTabberDataOnLaunch();
-  maybeHandleServerVersionChange(transcriptMeta.server_version);
-  if (transcriptMeta.agentAuth) agentAuth = transcriptMeta.agentAuth;
-  updateMetadataBadgePulses(transcriptMeta);
-  const previousActive = activeSessions.slice();
-  const sessionsChanged = updateSessionList(transcriptMeta.session_order || []);
-  if (options.refreshAuto !== false) {
-    await loadAutoStatuses();
-  }
-  if (sessionsChanged) renderPanels(previousActive);
-  renderSessionButtons();
-  renderInfoPanel();
-  renderYoagentPanel();
-  if (options.refreshActivity !== false) refreshActivitySummary({silent: true});
-  for (const session of activeSessions.filter(isTmuxSession)) {
-    const preview = document.getElementById(transcriptDomId(session));
-    const info = transcriptMeta.sessions?.[session];
-    const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
-    updatePanelHeader(session, info);
-    renderSummaryContext(session, info, agent);
-    if (!preview) continue;
-    if (agent?.transcript) {
-      updateTranscriptPathRow(session, agent.transcript);
-      if (options.refreshContext === false) continue;
-      preview.textContent = `session_id: ${agent.session_id || ''}\nstatus: ${agent.status || ''}\n\n${t('transcript.loadingRecentContext')}`;
-      refreshTranscriptPreview(session, preview, {preserveScroll: false});
-    } else if (agent?.error) {
-      updateTranscriptPathRow(session, '', agent.error);
-      preview.textContent = agent.error;
-    } else {
-      updateTranscriptPathRow(session, '', t('transcript.noAgentFound'));
-      preview.textContent = t('transcript.noAgentFound');
-    }
-  }
-  renderPaneTabStrips();
-  scheduleFileExplorerActiveTabSync();
-  if (!shareViewMode && typeof syncServerWatchRoots === 'function') syncServerWatchRoots({renew: true});
-  if (!shareViewMode) scheduleShareUiStatePublish();
-  trackSessionStateChanges();
-  refreshOpenEventLogs();
-  return true;
-}
-
-async function refreshTranscripts(options = {}) {
-  if (transcriptMetaRefreshPromise) return transcriptMetaRefreshPromise;
-  transcriptMetaLoading = true;
-  transcriptMetaLoadError = '';
-  syncTranscriptMetaLoadingUi();
-  renderInfoPanel();
-  transcriptMetaRefreshPromise = (async () => {
-    try {
-      const params = new URLSearchParams();
-      if (options.force === true) params.set('force', '1');
-      const suffix = params.toString();
-      const payload = await apiFetchJson(`/api/transcripts${suffix ? `?${suffix}` : ''}`);
-      await applyTranscriptsPayload(payload, {
-        refreshAuto: options.refreshAuto !== false,
-        refreshContext: true,
-        refreshActivity: options.refreshActivity !== false,
-      });
-    } catch (error) {
-      transcriptMetaLoadError = String(error);
-      for (const session of activeSessions.filter(isTmuxSession)) {
-        const meta = document.getElementById(`meta-${session}`);
-        const preview = document.getElementById(transcriptDomId(session));
-        if (meta) meta.innerHTML = `<span class="err">transcript lookup failed</span>`;
-        updateTranscriptPathRow(session, '', 'transcript lookup failed');
-        if (preview) preview.textContent = `transcript lookup failed: ${error}`;
-      }
-    } finally {
-      transcriptMetaLoading = false;
-      transcriptMetaRefreshPromise = null;
-      syncTranscriptMetaLoadingUi();
-      renderInfoPanel();
-    }
-  })();
-  return transcriptMetaRefreshPromise;
-}
-
-function updatePanelMeta(session, info) {
-  const meta = document.getElementById(`meta-${session}`);
-  if (!meta) return;
-  meta.innerHTML = stripTitleAttrs(projectMetaHtml(session, info));
-  meta.removeAttribute('title');
-}
-
-function updatePanelHeader(session, info) {
-  const tab = document.getElementById(paneTabDomId(session));
-  const panel = document.getElementById(panelDomId(session));
-  const auto = autoApproveStates.get(session)?.enabled === true;
-  const state = sessionState(session, info);
-  updatePanelControlLabels(session, info);
-  syncAttentionAnimation(panel, state.attention === true);
-  if (tab) {
-    tab.className = `panel-session-label ${auto ? 'auto' : ''} ${state.attention ? 'needs-attention' : ''}`;
-    syncAttentionAnimation(tab, state.attention === true);
-    tab.innerHTML = panelHeaderStateHtml(state);
-    tab.removeAttribute('title');
-  }
-  updatePanelMeta(session, info);
-  const popover = panel?.querySelector(':scope .panel-popover-zone > .session-popover');
-  if (popover) {
-    const agentKind = sessionAgentKind(session);
-    const wrapper = document.createElement('div');
-    wrapper.innerHTML = sessionPopoverHtml(session, info, agentKind, auto, state);
-    popover.replaceWith(wrapper.firstElementChild);
-  }
-  panel?.classList.toggle('needs-input-pane', state.key === 'needs-input');
-  panel?.classList.toggle('needs-exec-pane', state.key === 'needs-approval');
-  panel?.classList.toggle('needs-blocked-pane', state.key === 'blocked');
-}
-
-function refreshSessionChrome(session) {
-  updateSessionButtonStates();
-  updatePanelHeader(session, transcriptMeta.sessions?.[session]);
-}
-
-function refreshTrackedSessionChrome(session) {
-  refreshSessionChrome(session);
-  trackSessionStateChanges();
-}
-
-function refreshActivePanelHeaders() {
-  for (const session of activeSessions.filter(isTmuxSession)) {
-    updatePanelHeader(session, transcriptMeta.sessions?.[session]);
-  }
-}
-
-function renderSummaryContext(session, info, agent) {
-  const node = document.getElementById(`summary-context-${session}`);
-  if (!node) return;
-  node.innerHTML = summaryContextHtml(session, info, agent);
-}
-
-function transcriptPathRowHtml(path, fallback = 'no transcript path') {
-  if (!path) return `<span class="transcript-path-missing">${esc(fallback)}</span>`;
-  return `<span class="transcript-path-label">path</span><span class="transcript-path-value">${esc(path)}</span>${pathCopyButtonHtml(path, {className: 'transcript-path-copy', dataAttr: 'data-copy-transcript-path', title: 'Copy transcript path'})}`;
-}
-
-function updateTranscriptPathRow(session, path, fallback = 'no transcript path') {
-  const row = document.getElementById(`transcript-path-${session}`);
-  if (!row) return;
-  row.innerHTML = transcriptPathRowHtml(path, fallback);
-}
-
-async function refreshTranscriptPreview(session, preview, options = {}) {
-  try {
-    const payload = await apiFetchJson(`/api/context-items?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
-    if (!applyContextItemsPayloadFromPush(payload, options)) {
-      preview.textContent = JSON.stringify(payload, null, 2);
-    }
-  } catch (error) {
-    preview.textContent += `\n\ncontext load failed: ${error}`;
-  }
-}
-
-function applyContextItemsPayloadFromPush(payload = {}, options = {}) {
-  if (!payload || !payload.items) return false;
-  const session = payload.session || options.session || '';
-  const preview = options.preview || (session ? document.getElementById(transcriptDomId(session)) : null);
-  if (!preview) return false;
-  updateTranscriptPathRow(session, payload.path);
-  renderTranscriptItems(preview, payload.path, payload.items, options);
-  return true;
-}
-
-function startTranscriptStream(session, options = {}) {
-  stopTranscriptStream(session);
-  const preview = document.getElementById(transcriptDomId(session));
-  if (!preview) return;
-  const url = `/api/context-stream?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`;
-  const source = new EventSource(url);
-  transcriptStreams.set(session, source);
-  source.addEventListener('reset', event => {
-    const payload = safeJsonParse(event.data, null);
-    if (!payload) return;
-    updateTranscriptPathRow(session, payload.path);
-    renderTranscriptItems(preview, payload.path, payload.items || [], {scrollBottom: options.scrollBottom === true});
-  });
-  source.addEventListener('items', event => {
-    const payload = safeJsonParse(event.data, null);
-    if (!payload) return;
-    appendTranscriptItems(preview, payload.items || []);
-  });
-  source.addEventListener('ping', () => {});
-  source.onerror = () => {
-    stopTranscriptStream(session);
-    const pane = document.getElementById(`transcript-pane-${session}`);
-    if (pane?.classList.contains('active')) {
-      statusErr(localizedHtml('terminal.transcript.streamDisconnected', {session: sessionLabel(session)}));
-      setTimeout(() => {
-        if (document.getElementById(`transcript-pane-${session}`)?.classList.contains('active')) {
-          startTranscriptStream(session, {scrollBottom: false});
-        }
-      }, 1500);
-    }
-  };
-}
-
-function stopTranscriptStream(session) {
-  const source = transcriptStreams.get(session);
-  if (source) {
-    source.close();
-    transcriptStreams.delete(session);
-  }
-}
-
-function renderTranscriptItems(container, path, items, options = {}) {
-  const shouldScrollBottom = options.scrollBottom === true;
-  const wasNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 32;
-  const oldTop = container.scrollTop;
-  const oldHeight = container.scrollHeight;
-  const blocks = items.map(item => transcriptItemHtml(item));
-  container.innerHTML = blocks.join('');
-  if (shouldScrollBottom) {
-    requestAnimationFrame(() => {
-      container.scrollTop = container.scrollHeight;
-    });
-  } else if (options.preserveScroll) {
-    if (wasNearBottom) {
-      container.scrollTop = container.scrollHeight;
-    } else {
-      container.scrollTop = Math.max(0, oldTop + container.scrollHeight - oldHeight);
-    }
-  } else {
-    container.scrollTop = container.scrollHeight;
-  }
-}
-
-function appendTranscriptItems(container, items) {
-  if (!items.length) return;
-  const wasNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 32;
-  container.insertAdjacentHTML('beforeend', items.map(item => transcriptItemHtml(item)).join(''));
-  const rendered = Array.from(container.querySelectorAll('.transcript-item:not(.system)'));
-  const extra = rendered.length - transcriptPreviewMessages;
-  for (const item of rendered.slice(0, Math.max(0, extra))) item.remove();
-  if (wasNearBottom) {
-    requestAnimationFrame(() => {
-      container.scrollTop = container.scrollHeight;
-    });
-  }
-}
-
-function transcriptItemHtml(item) {
-  const role = normalizeRole(item.role);
-  return `<div class="transcript-item ${role}">
-    <div class="transcript-role">${esc(item.header || role)}</div>
-    <div class="transcript-text">${esc(item.text || '')}</div>
-  </div>`;
-}
-
-function eventItemHtml(event) {
-  const details = event.details && typeof event.details === 'object' ? event.details : {};
-  const detailText = Object.entries(details)
-    .filter(([, value]) => value != null && value !== '')
-    .map(([key, value]) => `${key}=${Array.isArray(value) ? value.join(',') : value}`)
-    .join(' · ');
-  const title = detailText ? `${event.message || ''}\n${detailText}` : event.message || '';
-  return `<div class="event-item" title="${esc(title)}">
-    <span class="event-time">${esc(formatEventTime(event.time))}</span>
-    <span class="event-type">${esc(event.type || 'event')}</span>
-    <span class="event-message">${esc(event.message || '')}${detailText ? ` · ${esc(detailText)}` : ''}</span>
-  </div>`;
-}
-
-function formatEventTime(value) {
-  const date = new Date(value || 0);
-  if (Number.isNaN(date.getTime())) return '';
-  return date.toLocaleString([], {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  });
-}
-
-async function refreshEventLog(session) {
-  const node = document.getElementById(`events-${session}`);
-  if (!node) return;
-  try {
-    const payload = await apiFetchJson(`/api/events?session=${encodeURIComponent(session)}&limit=120`);
-    const events = Array.isArray(payload.events) ? payload.events : [];
-    node.innerHTML = events.length
-      ? events.slice().reverse().map(eventItemHtml).join('')
-      : '<div class="event-empty">no events yet</div>';
-  } catch (error) {
-    if (error?.status) {
-      node.innerHTML = `<div class="event-empty">${esc(error.payload?.error || 'failed to load events')}</div>`;
-      return;
-    }
-    node.innerHTML = `<div class="event-empty">failed to load events: ${esc(error)}</div>`;
-  }
-}
-
-function refreshOpenEventLogs() {
-  for (const session of activeSessions.filter(isTmuxSession)) {
-    const pane = document.getElementById(`events-pane-${session}`);
-    if (pane?.classList.contains('active')) refreshEventLog(session);
-  }
-}
-
-function postEvent(session, type, message, details = {}) {
-  apiFetch('/api/event', {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({session, type, message, details}),
-  }).then(() => {
-    refreshOpenEventLogs();
-  }).catch(() => {});
-}
-
-function normalizeRole(role) {
-  const value = String(role || 'message').toLowerCase();
-  if (value.includes('tool_use')) return 'tool_use';
-  if (value.includes('tool_result')) return 'tool_result';
-  if (value.includes('assistant')) return 'assistant';
-  if (value.includes('user')) return 'user';
-  if (value.includes('summary')) return 'summary';
-  if (value.includes('system')) return 'system';
-  return 'system';
-}
-
-function renderLatency(latestMs) {
-  const samples = latencySamples.slice(-latencySamplesMax);
-  if (samples.length === 0) {
-    latencyLine.setAttribute('points', '');
-  } else {
-    const maxMs = Math.max(100, ...samples);
-    const width = 44;
-    const height = 18;
-    const points = samples.map((value, index) => {
-      const x = samples.length === 1 ? width : (index / (samples.length - 1)) * width;
-      const y = height - 1 - (Math.min(value, maxMs) / maxMs) * (height - 2);
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    });
-    latencyLine.setAttribute('points', points.join(' '));
-  }
-
-  latencyMeter.classList.remove('good', 'warn', 'bad');
-  if (latestMs == null) {
-    latencyMeter.classList.add('bad');
-    latencyNumber.textContent = '-- ms';
-    return;
-  }
-  latencyNumber.textContent = `${latestMs} ms`;
-  if (latestMs <= 80) {
-    latencyMeter.classList.add('good');
-  } else if (latestMs <= 200) {
-    latencyMeter.classList.add('warn');
-  } else {
-    latencyMeter.classList.add('bad');
-  }
-}
-
-async function updateLatency() {
-  const startedAt = performance.now();
-  try {
-    await apiFetchJson(`/api/ping?t=${Date.now()}`, {cache: 'no-store'});
-    const elapsedMs = Math.max(1, Math.round(performance.now() - startedAt));
-    latencySamples = [...latencySamples, elapsedMs].slice(-latencySamplesMax);
-    renderLatency(elapsedMs);
-  } catch (_) {
-    renderLatency(null);
-  }
-}
-
-function refreshAll() {
-  refreshTranscripts({force: true});
-  refreshAutoStatuses();
-  refreshWatchedFilesystem();
-}
-
-function scheduleReconnectResync(reason = '') {
-  if (reconnectResyncTimer) clearTimeout(reconnectResyncTimer);
-  reconnectResyncTimer = setTimeout(() => {
-    reconnectResyncTimer = null;
-    refreshAll();
-  }, reconnectResyncDebounceMs);
-}
-
-function resyncVisibleTerminalRemoteSizes(reason = '') {
-  void reason;
-  for (const session of activeSessions.filter(isTmuxSession)) {
-    scheduleFit(session);
-    forceRemoteResize(session);
-  }
-}
-
-function installReconnectResyncHandlers() {
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') {
-      scheduleReconnectResync('visible');
-      resyncVisibleTerminalRemoteSizes('visible');
-    }
-  });
-  window.addEventListener('online', () => {
-    scheduleReconnectResync('online');
-    resyncVisibleTerminalRemoteSizes('online');
-  });
-}
-
-async function boot() {
-  applySettingsPayload(clientSettingsPayload, {initial: true, force: true});
-  installReconnectResyncHandlers();
-  if (shareViewMode) {
-    applyShareViewBodyClasses();
-    const bootstrapUiState = shareBootstrap?.uiState && typeof shareBootstrap.uiState === 'object' ? shareBootstrap.uiState : {};
-    applyShareViewportState(bootstrapUiState.viewport || shareBootstrap?.viewport || {});
-    applyShareAppearanceState(bootstrapUiState.appearance || shareBootstrap?.appearance || {});
-    applyShareMirrorTransform();
-  }
-  await waitForYolomuxFontsReady({timeoutMs: 0});
-  syncAppViewportBreakpointClasses();
-  if (!shareViewMode) installClientEventStream();
-  // i18n: AWAIT the active locale catalog (all-static-fetch) before the first render so menus,
-  // tabs, and the wordmark paint in the right language from the start — no flash of raw t() keys (the
-  // menu bar renders synchronously at boot, before any later re-render could fix it). A 'system' pref is
-  // resolved client-side against navigator.language (the server can't see the browser locale).
-  await applyLocale(resolveLocalePref(initialSetting('general.language', 'system')));
-  installGlobalThemeMediaListener();
-  if (installShareReplayShell()) {
-    installDevAutoReload();
-    return;
-  }
-  applyFileExplorerStaticLabels();
-  renderTransportWarning();
-  renderTabMetaToggle();
-  bindTopbarMetrics();
-  syncInitialLayoutUrl();
-  statusEl.textContent = t('status.yoloLoading');
-  if (!shareViewMode) {
-    await loadNotifyStatus();
-    await loadAutoStatuses();
-  }
-  bindClipboardPaste();
-  if (!shareViewMode) {
-    await refreshTranscripts({refreshAuto: false});
-  } else {
-    transcriptMeta = {session_order: sessions.slice(), sessions: Object.fromEntries(sessions.map(session => [session, {target: session}]))};
-    transcriptMetaLoaded = true;
-    await refreshTranscripts({refreshAuto: false, refreshActivity: false});
-  }
-  renderSessionButtons();
-  renderPanels([], {prune: false});
-  installYolomuxFontMetricRefresh();
-  seedVisualActivePaneItem(activeSessions);
-  updatePanelInactiveOverlays();
-  if (shareViewMode) {
-    const bootstrapUiState = shareBootstrap?.uiState && typeof shareBootstrap.uiState === 'object' ? shareBootstrap.uiState : {};
-    await applyShareUiState({
-      ...bootstrapUiState,
-      finder: bootstrapUiState.finder || shareBootstrap?.finder || {},
-    });
-  }
-  if (!shareViewMode && clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
-  await Promise.all(activeSessions.filter(isTmuxSession).map(session => ensureTerminalRunning(session)));
-  if (!shareViewMode) refreshWatchedPrs();
-  renderAutoApproveButtons();
-  updateLatency();
-  installRuntimeIntervals();
-  scheduleStartupHelperTip();
-  installShareViewerBanner();
-  installSharePointerPublisher();
-  installShareScrollPublisher();
-  installShareGeometryDigestLoop();
-  installSharePopupLayerPublisher();
-  installShareReplayMutationPublisher();
-  startShareStatusRefresh();
-  installDevAutoReload();
-  document.querySelector('[data-update-badge]')?.addEventListener('click', triggerSelfUpdate);
-  checkForUpdateOnce();
-}
-
-function clientEventEnvelope(event) {
-  try {
-    const parsed = JSON.parse(event?.data || '{}');
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch (_error) {
-    return {};
-  }
-}
-
-function clientEventPayloadFromEnvelope(envelope) {
-  return envelope && typeof envelope === 'object' && envelope.payload && typeof envelope.payload === 'object'
-    ? envelope.payload
-    : envelope;
-}
-
-function recordSseDebugEvent(eventType, envelope = {}, rawEvent = null) {
-  if (!debugModeEnabled) return;
-  const payload = clientEventPayloadFromEnvelope(envelope);
-  const rawData = rawEvent?.data || '';
-  const dataBytes = jsDebugByteLength(rawData);
-  const dataLines = String(rawData || '').split(/\r?\n/);
-  const frameBytes = jsDebugByteLength(`event: ${eventType}\n`)
-    + dataLines.reduce((total, line) => total + jsDebugByteLength(`data: ${line}\n`), 0)
-    + 1;
-  const serverTimeMs = Number(envelope?.time) * 1000;
-  const receiveLatencyMs = Number.isFinite(serverTimeMs)
-    ? Number((Date.now() - serverTimeMs).toFixed(1))
-    : undefined;
-  recordJsDebugEvent('sse', {
-    eventType,
-    serverEventId: Number(envelope?.id || 0) || undefined,
-    trigger: payload?.trigger || '',
-    cache: payload?.cache || '',
-    computeMs: Number.isFinite(Number(payload?.compute_ms)) ? Number(payload.compute_ms) : undefined,
-    receiveLatencyMs,
-    bytes: dataBytes,
-    frameBytes,
-    changeSummary: payload?.change_summary && typeof payload.change_summary === 'object' ? payload.change_summary : null,
-    listingSummary: payload?.listing_summary && typeof payload.listing_summary === 'object' ? payload.listing_summary : null,
-    key: payload?.session || payload?.locale || payload?.request?.session || '',
-  });
-}
-
-function updateDryRunEnabled() {
-  return typeof urlFlagEnabled === 'function' && urlFlagEnabled('updateDryRun');
-}
-
-function updateActionButton(label, onClick) {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = 'toast-action';
-  button.textContent = label;
-  button.addEventListener('click', onClick);
-  return button;
-}
-
-async function triggerSelfUpdate() {
-  const dry = updateDryRunEnabled();
-  const confirmed = window.confirm(dry
-    ? 'Dry run: simulate installing a YOLOmux update? Nothing is pulled and the server is not restarted.'
-    : 'Install the latest YOLOmux update and restart now?');
-  if (!confirmed) return;
-  try {
-    const res = await fetch(`/api/self-update${dry ? '?dryrun=1' : ''}`, {method: 'POST'});
-    const data = await res.json().catch(() => ({}));
-    const title = data.ok ? (data.restarting ? 'Installing update...' : 'Software Update') : 'Update failed';
-    showToast(title, [data.message || (data.ok ? 'done' : 'see server logs')]);
-  } catch (error) {
-    showToast('Update failed', [String(error)]);
-  }
-}
-
-// Non-intrusive "a newer version exists" cue: unhide the topbar badge and show one dismissible toast
-// with an "Update Now" action (admin-only; the endpoint rejects readonly).
-function applyUpdateAvailable(status) {
-  if (!status || !status.available) return;
-  if (status.notify === false) return;
-  const badge = document.querySelector('[data-update-badge]');
-  if (badge) {
-    badge.hidden = false;
-    badge.title = `YOLOmux update available${status.target ? ` (${status.target})` : ''} - click to update now`;
-  }
-  showToast('YOLOmux update available', [
-    `A new YOLOmux update is available${status.target ? ` (${status.target})` : ''}.`,
-  ], {
-    actions: [updateActionButton('Update Now', triggerSelfUpdate)],
-    countdownMs: 4 * 60 * 60 * 1000,  // keep the update cue up for 4 hours, not the default ~10s
-    className: 'attention-alert toast toast-update',  // solid (opaque) background, not the translucent default
-  });
-}
-
-async function checkForUpdateOnce() {
-  try {
-    const res = await fetch(`/api/update-status${updateDryRunEnabled() ? '?dryrun=1' : ''}`);
-    if (!res.ok) return;  // readonly (403) or unavailable
-    const status = await res.json();
-    if (status && status.available) applyUpdateAvailable(status);
-  } catch (_error) { /* offline / transient — the hourly push will retry */ }
-}
-
-function maybeNotifyYoagentJob(notification = {}) {
-  const title = String(notification.title || 'YO!agent');
-  const body = String(notification.body || '').trim();
-  if (!body || !notificationsEnabled) return;
-  const session = String(notification.session || '').trim();
-  const tag = `yoagent-job:${session || 'global'}:${body}`;
-  showToast(title, [body], {session});
-  if (!('Notification' in window) || Notification.permission !== 'granted') return;
-  try {
-    sendBrowserNotification(hostNotificationTitle(title), {
-      body,
-      tag,
-      renotify: true,
-      session,
-    });
-  } catch (error) {
-    postEvent(session || null, 'yoagent_job_notification_error', `notification failed: ${error}`, {});
-  }
-}
-
-function applyTmuxSignalsPayload(payload = {}) {
-  const data = payload?.data && typeof payload.data === 'object' ? payload.data : payload;
-  if (!data || typeof data !== 'object') return;
-  tmuxSignalState = data;
-}
-
-function handleClientPushEvent(type, payload = {}) {
-  if (type === 'update_available') {
-    applyUpdateAvailable(payload && payload.available !== undefined ? payload : (payload.data || {}));
-    return;
-  }
-  if (type === 'settings_changed') {
-    if (payload.data && typeof payload.data === 'object') {
-      applySettingsPayload(payload.data, {force: true});
-    }
-    return;
-  }
-  if (type === 'auto_approve_changed') {
-    if (payload.data) applyAutoApprovePayload(payload.data);
-    return;
-  }
-  if (type === 'tmux_signals_changed') {
-    applyTmuxSignalsPayload(payload);
-    return;
-  }
-  if (type === 'watched_prs_changed') {
-    if (payload.data) applyWatchedPrsPayload(payload.data);
-    return;
-  }
-  if (type === 'transcripts_changed') {
-    if (payload.data) {
-      applyTranscriptsPayload(payload.data, {refreshAuto: false, refreshContext: false, refreshActivity: false});
-    }
-    return;
-  }
-  if (type === 'context_items_ready') {
-    if (payload.data) applyContextItemsPayloadFromPush(payload.data, {session: payload.session, preserveScroll: true});
-    return;
-  }
-  if (type === 'activity_summary_ready') {
-    if (payload.data) applyActivitySummaryPayloadFromPush(payload.data);
-    return;
-  }
-  if (type === 'yoagent_conversation_changed') {
-    loadYoagentConversation({force: true, render: infoPanelSubTab === 'yoagent', scrollBottom: 'auto'}).catch(error => console.warn('YO!agent conversation refresh failed', error));
-    return;
-  }
-  if (type === 'yoagent_stream_delta') {
-    if (typeof applyYoagentStreamPayload === 'function' && applyYoagentStreamPayload(payload)) {
-      renderYoagentPanel({preserveDraft: true, scrollBottom: 'auto'});
-    }
-    return;
-  }
-  if (type === 'yoagent_jobs_changed') {
-    maybeNotifyYoagentJob(payload.notification || {});
-    return;
-  }
-  if (type === 'yoagent_skills_changed') {
-    refreshActivitySummary({force: true, render: infoPanelSubTab === 'yoagent'}).catch(error => console.warn('YO!agent skills refresh failed', error));
-    return;
-  }
-  if (type === 'session_files_ready') {
-    if (payload.data && typeof applySessionFilesPayloadFromPush === 'function') {
-      applySessionFilesPayloadFromPush(payload.data, payload.request || {});
-    }
-    return;
-  }
-  if (type === 'files_changed') {
-    if (typeof refreshOpenFilesFromPush === 'function') {
-      refreshOpenFilesFromPush(payload).catch(error => console.warn('client file push refresh failed', error));
-    }
-    return;
-  }
-  if (type === 'fs_changed') {
-    if (typeof refreshFileExplorerFromPush === 'function') {
-      refreshFileExplorerFromPush(payload).catch(error => console.warn('client fs push refresh failed', error));
-    }
-  }
-}
-
-function installClientEventStream() {
-  if (typeof EventSource === 'undefined' || clientEventsSource) return;
-  let source;
-  try {
-    source = new EventSource('/api/client-events');
-  } catch (_error) {
-    return;
-  }
-  clientEventsSource = source;
-  source.addEventListener('ready', event => {
-    clientEventsConnected = true;
-    recordSseDebugEvent('ready', clientEventEnvelope(event), event);
-    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
-    refreshAutoStatuses().catch(error => console.warn('client-events ready auto-status refresh failed', error));
-  });
-  source.addEventListener('ping', event => {
-    clientEventsConnected = true;
-    recordSseDebugEvent('ping', clientEventEnvelope(event), event);
-  });
-  source.onerror = () => { clientEventsConnected = false; };
-  for (const type of ['settings_changed', 'auto_approve_changed', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta']) {
-    source.addEventListener(type, event => {
-      clientEventsConnected = true;
-      const envelope = clientEventEnvelope(event);
-      recordSseDebugEvent(type, envelope, event);
-      handleClientPushEvent(type, clientEventPayloadFromEnvelope(envelope));
-    });
-  }
-}
-
-// Dev-velocity #1b: in --dev mode, reload the page when the static bundle changes (ends the recurring
-// "is the bundle stale?" misdiagnoses). Listens to the server's /api/dev-reload SSE 'reload' event;
-// no-op outside dev mode. The EventSource auto-reconnects across the backend re-exec (#1c).
-function installDevAutoReload() {
-  if (!devMode || typeof EventSource === 'undefined') return;
-  let source;
-  try {
-    source = new EventSource('/api/dev-reload');
-  } catch (_error) {
-    return;
-  }
-  source.addEventListener('reload', () => {
-    statusOk('dev: bundle changed — reloading');
-    location.reload();
-  });
-}
-
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Share status, creation payloads, mirror sockets, and shared state snapshots.
 let shareDefaultTtlSeconds = initialSetting('share.ttl_seconds', 600);
 let shareDefaultMaxViewers = initialSetting('share.max_viewers', 2);
 let shareDefaultReadOnly = initialSetting('share.read_only', true) !== false;
@@ -37460,18 +36143,7 @@ let shareReplayLastFrameReceivedAt = 0;
 let shareReplayLastRedactionPolicyVersion = 1;
 let shareStatusLastRefreshAt = 0;
 let shareStatusRefreshInFlight = false;
-const shareViewerStatusBackupRefreshMs = 30000;
-const shareHostStatusBackupRefreshMs = 3000;
-const yolomuxFontReadyTimeoutMs = 2500;
-const shareReplayKeyframeRequestInitialBackoffMs = 5000;
-const shareReplayKeyframeRequestMinIntervalMs = 5000;
-const shareReplayKeyframeRequestMaxBackoffMs = 5000;
-const shareGeometryResyncMinIntervalMs = 10000;
-const shareReplayHostKeyframeMinIntervalMs = shareReplayKeyframeRequestMinIntervalMs;
-const shareReplayPostTopologyKeyframeQuietMs = shareReplayHostKeyframeMinIntervalMs + 1000;
 const shareReplayHostDeltaMaxBytes = 48 * 1024;
-const shareTopologyKeyframePointerQuietMs = 500;
-const shareTopologyKeyframeMaxDeferralMs = shareReplayHostKeyframeMinIntervalMs;
 let yolomuxFontsReadyPromise = null;
 
 function normalizeSharePayload(payload) {
@@ -38152,7 +36824,9 @@ function beginShareRemoteUiApply() {
     applyingShareRemoteUiState = Math.max(0, (Number(applyingShareRemoteUiState) || 0) - 1);
   };
 }
-
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Share mirror protocol, DOM replay, pointer mirroring, scroll sync, and geometry diagnostics.
 // Share mirror protocol owner. Replay code must add names here first, then reference these constants.
 const shareMirrorFrameTypes = Object.freeze({
   uiState: 'ui-state',
@@ -41756,7 +40430,9 @@ function applyShareUiMessage(message) {
     finishRemoteApply();
   }
 }
-
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Share admin UI, viewer banner, status refresh, and read-only interaction blocking.
 function ensureShareStatusPill() {
   if (shareStatusPill) return shareStatusPill;
   shareStatusPill = document.createElement('button');
@@ -42285,49 +40961,6 @@ function startShareStatusRefresh() {
   }, 1000);
 }
 
-async function showContext(session) {
-  const modal = document.getElementById('modal');
-  const title = document.getElementById('modalTitle');
-  const body = document.getElementById('modalBody');
-  modal.classList.remove('about-open', 'share-open');
-  title.textContent = t('transcript.tailTitle', {session: sessionLabel(session)});
-  body.innerHTML = '';
-  body.textContent = t('common.loading');
-  modal.classList.add('open');
-  const payload = await apiFetchJson(`/api/context?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
-  if (payload.text) {
-    body.textContent = `${payload.path}\n\n${payload.text}`;
-  } else {
-    body.textContent = JSON.stringify(payload, null, 2);
-  }
-  scheduleSharePopupLayerPublish();
-}
-
-function globalShortcutTargetAllowsAppAction(target) {
-  const node = typeof Element !== 'undefined' && target instanceof Element ? target : document.activeElement;
-  if (!node) return true;
-  const blocked = ['.xterm', '.terminal-pane', '.cm-editor', 'input', 'textarea', 'select', '[contenteditable="true"]'];
-  return !blocked.some(selector => node.closest?.(selector));
-}
-
-function globalShortcutTargetAllowsPlatformAction(target) {
-  return isMacPlatform() || globalShortcutTargetAllowsAppAction(target);
-}
-
-function globalShortcutTargetIsTerminalSurface(target) {
-  const node = typeof Element !== 'undefined' && target instanceof Element ? target : document.activeElement;
-  return Boolean(node?.closest?.('.xterm') || node?.closest?.('.terminal-pane'));
-}
-
-function globalShortcutTargetAllowsFinderShortcut(target) {
-  if (globalShortcutTargetAllowsAppAction(target)) return true;
-  return isMacPlatform() && globalShortcutTargetIsTerminalSurface(target);
-}
-
-function globalShortcutShouldToggleFinder(event, key = String(event?.key || '').toLowerCase(), mod = appModifier(event)) {
-  return Boolean(mod && key === 'b' && globalShortcutTargetAllowsFinderShortcut(event?.target));
-}
-
 const shareReadonlyPreventDefaultEvents = new Set(['beforeinput', 'change', 'drop', 'dragstart', 'input', 'paste', 'submit']);
 const shareReadonlyActivationEvents = new Set(['auxclick', 'click', 'dblclick']);
 const shareReadonlyNavigationKeys = new Set([
@@ -42507,6 +41140,3301 @@ function installShareReadonlyInteractionBlocker() {
   }
 }
 
+function paneFrameControlsHtml(session, options = {}) {
+  const disabled = options.disabled === true;
+  const unavailableLabel = options.unavailableLabel || itemLabel(session);
+  const disabledAttrs = label => ` type="button" disabled title="${esc(t('tab.unavailableFor', {name: unavailableLabel}))}" aria-label="${esc(label)}"`;
+  const controls = [];
+  const includeActions = options.actions ?? isTmuxSession(session);
+  const includeDetails = options.details === true;
+  const includeMinimize = options.minimize !== false;
+  const includeExpand = options.expand !== false;
+  if (includeActions) {
+    controls.push(disabled
+      ? `<button class="tab pane-actions" ${disabledAttrs(t('pane.actions'))}><span class="pane-actions-dots" aria-hidden="true">...</span></button>`
+      : `<button type="button" class="tab pane-actions" data-pane-actions="${esc(session)}" title="${esc(t('pane.actions'))}" aria-label="${esc(t('pane.actions'))}"><span class="pane-actions-dots" aria-hidden="true">...</span></button>`);
+  }
+  if (includeDetails) {
+    const detailsLabel = t('pane.details.hide');
+    controls.push(disabled
+      ? `<button class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')}" ${disabledAttrs(detailsLabel)}></button>`
+      : `<button type="button" class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')} active" data-detail-toggle="${esc(session)}" title="${esc(detailsLabel)}" aria-label="${esc(detailsLabel)}" aria-pressed="true"></button>`);
+  }
+  if (includeMinimize) {
+    controls.push(disabled
+      ? `<button class="tab pane-minimize ${platformWindowControlClass('minimize')}" ${disabledAttrs(t('pane.minimize'))}></button>`
+      : `<button type="button" class="tab pane-minimize ${platformWindowControlClass('minimize')}" data-pane-minimize="${esc(session)}" title="${esc(t('pane.minimize'))}" aria-label="${esc(t('pane.minimize'))}"></button>`);
+  }
+  if (includeExpand) {
+    const expandAttrs = `${canPaneExpand(session) ? '' : ' hidden'} type="button" data-pane-expand="${esc(session)}" title="${esc(t('pane.expand'))}" aria-label="${esc(t('pane.expand'))}"`;
+    controls.push(disabled
+      ? `<button class="tab pane-expand ${platformWindowControlClass('zoom')}" ${disabledAttrs(t('pane.expand'))}></button>`
+      : `<button class="tab pane-expand ${platformWindowControlClass('zoom')}" ${expandAttrs}></button>`);
+  }
+  if (options.close) {
+    const closeLabel = options.closeLabel || t('pane.closeTab');
+    const closeTitle = options.closeTitle || closeLabel;
+    const closeClass = options.closeClass ? ` ${options.closeClass}` : '';
+    const closeData = `data-pane-close="${esc(session)}"`;
+    controls.push(disabled
+      ? `<button class="tab pane-close ${platformWindowControlClass('close')}${closeClass}" ${disabledAttrs(closeLabel)}></button>`
+      : `<button type="button" class="tab pane-close ${platformWindowControlClass('close')}${closeClass}" ${closeData} title="${esc(closeTitle)}" aria-label="${esc(closeLabel)}"></button>`);
+  }
+  return controls.join('');
+}
+
+function paneFrameControlsGroupHtml(session, options = {}) {
+  const groupClass = options.groupClass ? ` ${options.groupClass}` : '';
+  return `<div class="tabs pane-frame-controls${groupClass}" role="tablist">${paneFrameControlsHtml(session, options)}</div>`;
+}
+
+function panelControlsHtml(session, options = {}) {
+  const disabled = options.disabled === true;
+  const unavailableLabel = options.unavailableLabel || itemLabel(session);
+  const disabledAttrs = label => disabled ? ` type="button" disabled title="${esc(t('tab.unavailableFor', {name: unavailableLabel}))}" aria-label="${esc(label)}"` : '';
+  const readonlyAttrs = label => ` type="button" disabled title="${esc(t('tab.adminRequiredFor', {name: label}))}" aria-label="${esc(label)}"`;
+  const tabAttrs = (name, label = '') => {
+    if (disabled) return disabledAttrs(label || name);
+    if (readOnlyMode && name === 'summary') return readonlyAttrs('YO!summary');
+    const labelAttrs = label ? ` title="${esc(label)}" aria-label="${esc(label)}"` : '';
+    return ` type="button" data-tab="${esc(session)}" data-tab-name="${name}"${labelAttrs}`;
+  };
+  const info = transcriptMeta.sessions?.[session];
+  const terminalTitle = terminalTabTitle(session, info);
+  const terminalAttrs = disabled ? disabledAttrs(terminalTitle) : `${tabAttrs('terminal')} title="${esc(terminalTitle)}" aria-label="${esc(terminalTitle)}"`;
+  const terminalLabel = disabled ? t('tab.terminal.short') : terminalTabLabel(session, info);
+  const isFiles = isFileExplorerItem(session);
+  // Term is pressed ONLY when the terminal view is the active one — computed from the live view, not
+  // hardcoded, so a panel re-render (Dockview header refresh) doesn't re-press it after the user
+  // switched to transcript / YO!summary / events. activateTab also toggles it on click.
+  const terminalActive = panelActiveTabName(session) === 'terminal';
+  const terminalButtonHtml = `<button class="tab${terminalActive ? ' active' : ''} terminal-tab" ${terminalAttrs}>${esc(terminalLabel)}</button>`;
+  const frameHtml = isFiles
+    ? paneFrameControlsHtml(session, {
+      disabled,
+      actions: false,
+      minimize: false,
+      expand: false,
+      close: true,
+      closeTitle: t('finder.close', {name: fileExplorerLabel()}),
+      closeLabel: t('finder.close', {name: fileExplorerLabel()}),
+    })
+    : paneFrameControlsHtml(session, {disabled, actions: isTmuxSession(session), details: true, close: false});
+  return `<div class="tabs ${disabled ? 'disabled-panel-controls' : ''}" role="tablist">
+          ${terminalButtonHtml}
+          ${frameHtml}
+        </div>`;
+}
+
+function virtualPanelControlsHtml(session) {
+  return `<div class="tabs virtual-panel-controls" role="tablist">
+          ${paneFrameControlsHtml(session, {actions: false, close: false})}
+        </div>`;
+}
+
+function panelActiveTabName(session) {
+  const activePane = document.getElementById(panelDomId(session))?.querySelector('.tab-pane.active');
+  const id = activePane?.id || '';
+  if (id === `transcript-pane-${session}`) return 'transcript';
+  if (id === `summary-pane-${session}`) return 'summary';
+  if (id === `events-pane-${session}`) return 'events';
+  return 'terminal';
+}
+
+function createPanel(session) {
+  const panel = document.createElement('article');
+  panel.className = 'panel';
+  panel.id = panelDomId(session);
+  panel.innerHTML = `
+      <div class="panel-head">
+        ${panelControlsHtml(session)}
+        <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
+      </div>
+      <div class="panel-detail-row">
+        <div class="panel-popover-zone">
+          <div id="panel-tab-${session}" class="panel-session-label">${panelHeaderStateHtml(sessionState(session, transcriptMeta.sessions?.[session]))}</div>
+          <div id="meta-${session}" class="meta">${esc(t('pane.findingBranch'))}</div>
+          ${sessionPopoverHtml(session, transcriptMeta.sessions?.[session], sessionAgentKind(session), autoApproveStates.get(session)?.enabled === true, sessionState(session, transcriptMeta.sessions?.[session]))}
+        </div>
+        ${isTmuxSession(session) ? tmuxWindowBarHtml(session, transcriptMeta.sessions?.[session]) : ''}
+        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(session)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
+      </div>
+      <div id="terminal-pane-${session}" class="tab-pane active panel-overlay-root">
+        <div id="term-${session}" class="terminal"></div>
+        <div id="panel-toasts-${session}" class="panel-toast-stack">
+          <div id="upload-${session}" class="upload-result toast" hidden></div>
+        </div>
+      </div>
+      <div id="transcript-pane-${session}" class="tab-pane">
+        <div class="transcript">
+          <div class="transcript-head">${esc(t('tab.transcript'))}</div>
+          <div id="transcript-path-${session}" class="transcript-path-row">${esc(t('pane.findingTranscript'))}</div>
+          <div id="transcript-${session}" class="transcript-preview">${esc(t('pane.findingTranscript'))}</div>
+        </div>
+      </div>
+      <div id="summary-pane-${session}" class="tab-pane">
+        <div class="summary">
+          <div class="transcript-head">${esc(t('menu.tmux.aiTranscript', {session: sessionLabel(session)}))}</div>
+          <div id="summary-context-${session}" class="summary-context">${esc(t('summary.loadingContext'))}</div>
+          <div id="summary-${session}" class="summary-preview markdown-body">${esc(t('summary.emptyPrompt'))}</div>
+        </div>
+      </div>
+      <div id="events-pane-${session}" class="tab-pane">
+        <div class="summary">
+          <div class="transcript-head">${esc(t('events.title'))}</div>
+          <div id="events-${session}" class="event-list">${esc(t('events.loading'))}</div>
+        </div>
+      </div>`;
+  bindPanelShell(panel, session);
+  bindPanelControls(panel, session);
+  return panel;
+}
+
+function setMetadataRefreshButtonLoading(button, loading, idleLabel, idleTitle) {
+  if (!button) return;
+  button.classList.toggle('loading', loading);
+  button.disabled = loading;
+  button.setAttribute('aria-busy', loading ? 'true' : 'false');
+  button.textContent = loading ? t('info.loadingShort') : idleLabel;
+  button.title = loading ? t('info.loadingRepo') : idleTitle;
+  button.setAttribute('aria-label', loading ? t('info.loadingRepo') : idleTitle);
+}
+
+function syncTranscriptMetaLoadingUi() {
+  document.querySelectorAll('[data-info-refresh]').forEach(button => {
+    setMetadataRefreshButtonLoading(button, transcriptMetaLoading, t('info.refreshRepo'), t('info.refreshRepo'));
+  });
+  const metaRefreshButton = refreshMeta;
+  if (metaRefreshButton) {
+    metaRefreshButton.classList.toggle('loading', transcriptMetaLoading);
+    metaRefreshButton.disabled = transcriptMetaLoading;
+    metaRefreshButton.setAttribute('aria-busy', transcriptMetaLoading ? 'true' : 'false');
+    if (transcriptMetaLoading) {
+      metaRefreshButton.title = t('info.loadingRepo');
+      metaRefreshButton.setAttribute('aria-label', t('info.loadingRepo'));
+    } else {
+      refreshMetaButtonTitle();
+      metaRefreshButton.setAttribute('aria-label', t('meta.refreshAria'));
+    }
+  }
+  document.getElementById(panelDomId(infoItemId))?.classList.toggle('metadata-loading', transcriptMetaLoading);
+}
+
+function infoMetadataLoadingHtml() {
+  return `<div class="info-empty info-loading" role="status" aria-live="polite">
+    <span class="info-loading-spinner" aria-hidden="true"></span>
+    <span>${esc(t('info.loadingRepo'))}</span>
+  </div>`;
+}
+
+function renderInfoPanel() {
+  const node = document.getElementById('info-content');
+  if (!node) return;
+  syncTranscriptMetaLoadingUi();
+  applyInfoBranchColumnWidth();
+  bindInfoPrContextMenu(node);   // idempotent — "Watch this PR" on the PR column
+  renderWatchedPrs();   // the Watched PRs section repaints alongside the branch table
+  const rows = infoBranchRows();
+  const hasShareRows = shareViewMode && Array.isArray(shareInfoBranchRowsOverride);
+  if (!rows.length) {
+    if (hasShareRows) {
+      node.innerHTML = `<div class="info-empty">${esc(t('info.empty'))}</div>`;
+      return;
+    }
+    if (transcriptMetaLoading) {
+      node.innerHTML = infoMetadataLoadingHtml();
+      return;
+    }
+    if (transcriptMetaLoadError) {
+      node.innerHTML = `<div class="info-empty info-error">${esc(t('info.loadFailed'))} ${esc(transcriptMetaLoadError)}</div>`;
+      return;
+    }
+    if (!transcriptMetaLoaded) {
+      node.innerHTML = infoMetadataLoadingHtml();
+      return;
+    }
+    node.innerHTML = `<div class="info-empty">${esc(t('info.empty'))}</div>`;
+    return;
+  }
+  const headerCell = (key, label) => {
+    const active = infoBranchSort.key === key;
+    const dirLabel = active ? (infoBranchSort.dir === 'asc' ? t('sort.ascending') : t('sort.descending')) : t('sort.unsorted');
+    const marker = active ? (infoBranchSort.dir === 'asc' ? 'A-Z' : 'Z-A') : '';
+    return `<button type="button" class="info-sort-button${active ? ' active' : ''}" data-info-sort="${esc(key)}" aria-label="${esc(t('sort.aria', {label, dir: dirLabel}))}"><span>${esc(label)}</span>${marker ? `<span class="info-sort-marker">${marker}</span>` : ''}</button>`;
+  };
+  const resizeHandle = (column, label) => `<button type="button" class="info-column-resizer" data-info-column-resize="${esc(column)}" title="${esc(label)}" aria-label="${esc(label)}"></button>`;
+  const header = `<div class="info-row header">
+    <div class="info-cell">${headerCell('session', t('info.header.session'))}</div>
+    <div class="info-cell">${headerCell('path', t('info.header.path'))}</div>
+    <div class="info-cell info-resizable-header-cell info-branch-header-cell">${headerCell('branch', t('info.header.branch'))}${resizeHandle('branch', t('info.resizeBranchColumn'))}</div>
+    <div class="info-cell">${headerCell('pr', 'PR')}</div>
+    <div class="info-cell">${headerCell('linear', 'Linear')}</div>
+    <div class="info-cell info-resizable-header-cell info-desc-header-cell">${headerCell('desc', t('info.header.desc'))}${resizeHandle('desc', t('info.resizeDescColumn'))}</div>
+    <div class="info-cell">${headerCell('updated', t('info.header.updated'))}</div>
+  </div>`;
+  const body = rows.map(row => {
+    const sessionToggle = infoSessionDrawerToggleHtml(row);
+    const rowHtml = `<div class="info-row${row.current ? ' current' : ''}">
+    <div class="info-cell info-session-cell" title="${esc(row.session)}">${sessionToggle}${esc(row.session)}</div>
+    <div class="info-cell" title="${esc(row.pathTitle || row.path)}">${esc(row.pathLabel || compactHomePath(row.path) || row.session || '')}</div>
+    <div class="info-cell" title="${esc(row.branch)}">${row.current ? '<span class="info-branch-current">*</span> ' : ''}${infoBranchCellHtml(row)}</div>
+    <div class="info-cell" title="${esc(row.prTitle)}">${infoPrCellHtml(row)}</div>
+    <div class="info-cell" title="${esc(row.linearTitle)}">${infoLinearCellHtml(row)}</div>
+    <div class="info-cell" title="${esc(row.desc)}">${esc(row.desc)}</div>
+    <div class="info-cell" title="${esc(row.updatedTitle || row.updated)}">${esc(row.updatedText || row.updated)}</div>
+  </div>`;
+    return rowHtml + (row.session && infoSessionDrawerOpen.has(row.session) ? cachedInfoSessionDrawerHtml(row.session) : '');
+  }).join('');
+  node.innerHTML = header + body;
+  node.querySelectorAll('[data-info-sort]').forEach(button => {
+    button.addEventListener('click', () => {
+      setInfoBranchSort(button.dataset.infoSort);
+      renderInfoPanel();
+    });
+  });
+  node.querySelectorAll('[data-info-session-drawer]').forEach(button => {
+    button.addEventListener('click', () => toggleInfoSessionDrawer(button.dataset.infoSessionDrawer || ''));
+  });
+  bindInfoColumnResizers(node);
+}
+
+function infoColumnResizeConfig(column) {
+  if (column === 'branch') {
+    return {
+      cssVar: '--info-branch-column-width',
+      defaultWidthPx: infoBranchColumnDefaultWidthPx,
+      maxWidthPx: infoBranchColumnMaxWidthPx,
+      minWidthPx: infoBranchColumnMinWidthPx,
+      storageKey: infoBranchColumnWidthStorageKey,
+    };
+  }
+  if (column === 'desc') {
+    return {
+      cssVar: '--info-desc-column-width',
+      defaultWidthPx: infoDescColumnDefaultWidthPx,
+      maxWidthPx: infoDescColumnMaxWidthPx,
+      minWidthPx: infoDescColumnMinWidthPx,
+      storageKey: infoDescColumnWidthStorageKey,
+    };
+  }
+  return null;
+}
+
+function infoColumnWidth(column) {
+  return column === 'desc' ? infoDescColumnWidthPx : infoBranchColumnWidthPx;
+}
+
+function setInfoColumnWidthState(column, value) {
+  if (column === 'desc') infoDescColumnWidthPx = value;
+  else infoBranchColumnWidthPx = value;
+}
+
+function clampInfoColumnWidth(column, value) {
+  const config = infoColumnResizeConfig(column);
+  if (!config) return infoBranchColumnDefaultWidthPx;
+  const number = Number(value);
+  if (!Number.isFinite(number)) return config.defaultWidthPx;
+  return Math.max(config.minWidthPx, Math.min(config.maxWidthPx, Math.round(number)));
+}
+
+function readStoredInfoColumnWidth(column) {
+  const config = infoColumnResizeConfig(column);
+  if (!config) return infoBranchColumnDefaultWidthPx;
+  return clampInfoColumnWidth(column, storageGet(config.storageKey, config.defaultWidthPx));
+}
+
+function setInfoColumnWidth(column, value, options = {}) {
+  const config = infoColumnResizeConfig(column);
+  if (!config) return infoColumnWidth('branch');
+  const width = clampInfoColumnWidth(column, value);
+  const previous = infoColumnWidth(column);
+  setInfoColumnWidthState(column, width);
+  applyInfoColumnWidth(column);
+  if (options.persist !== false) storageSet(config.storageKey, width);
+  if (options.publish !== false && width !== previous) scheduleShareUiStatePublish();
+  return width;
+}
+
+function resetInfoColumnWidth(column) {
+  const config = infoColumnResizeConfig(column);
+  return setInfoColumnWidth(column, config?.defaultWidthPx);
+}
+
+function applyInfoColumnWidth(column, root = document.documentElement) {
+  const config = infoColumnResizeConfig(column);
+  if (!config) return;
+  root?.style?.setProperty(config.cssVar, `${clampInfoColumnWidth(column, infoColumnWidth(column))}px`);
+}
+
+function applyInfoColumnWidths(root = document.documentElement) {
+  applyInfoColumnWidth('branch', root);
+  applyInfoColumnWidth('desc', root);
+}
+
+function setInfoBranchColumnWidth(value, options = {}) {
+  return setInfoColumnWidth('branch', value, options);
+}
+
+function setInfoDescColumnWidth(value, options = {}) {
+  return setInfoColumnWidth('desc', value, options);
+}
+
+function resetInfoBranchColumnWidth() {
+  return resetInfoColumnWidth('branch');
+}
+
+function resetInfoDescColumnWidth() {
+  return resetInfoColumnWidth('desc');
+}
+
+function applyInfoBranchColumnWidth(root = document.documentElement) {
+  applyInfoColumnWidths(root);
+}
+
+function bindInfoColumnResizers(node) {
+  node.querySelectorAll('[data-info-column-resize]').forEach(handle => {
+    if (handle.dataset.bound === 'true') return;
+    const column = handle.dataset.infoColumnResize;
+    const config = infoColumnResizeConfig(column);
+    if (!config) return;
+    handle.dataset.bound = 'true';
+    handle.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    handle.addEventListener('dblclick', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      resetInfoColumnWidth(column);
+    });
+    handle.addEventListener('pointerdown', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      const pointerId = event.pointerId;
+      const startX = event.clientX;
+      const startWidth = infoColumnWidth(column);
+      const direction = getComputedStyle(node).direction === 'rtl' ? -1 : 1;
+      handle.setPointerCapture?.(pointerId);
+      document.body?.classList.add('info-column-resizing');
+      const move = moveEvent => {
+        const delta = (moveEvent.clientX - startX) * direction;
+        setInfoColumnWidth(column, startWidth + delta, {persist: false});
+      };
+      const done = () => {
+        storageSet(config.storageKey, infoColumnWidth(column));
+        document.body?.classList.remove('info-column-resizing');
+        try { handle.releasePointerCapture?.(pointerId); } catch (_) {}
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', done);
+        window.removeEventListener('pointercancel', done);
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', done);
+      window.addEventListener('pointercancel', done);
+    });
+  });
+}
+
+// client-side mirror of the backend parse_pull_request_ref — normalize a watched-PR entry
+// ("owner/repo#N", "owner/repo/N", or a github.com PR URL) to the canonical "owner/repo#N", else ''.
+// Used to dedupe and to match a stored entry (which may be a URL) against a PR's canonical ref.
+function normalizeWatchedPrRef(entry) {
+  const text = String(entry || '').trim();
+  if (!text) return '';
+  const seg = '[A-Za-z0-9._-]+';
+  if (/github\.com/i.test(text) && /:\/\//.test(text)) {
+    const match = text.match(new RegExp(`github\\.com/(${seg})/(${seg})/(?:pull|pulls)/(\\d+)`, 'i'));
+    if (match) return `${match[1]}/${match[2]}#${Number(match[3])}`;
+    return '';
+  }
+  const short = text.match(new RegExp(`^(${seg})/(${seg})(?:#|/(?:pull/)?)(\\d+)$`));
+  if (short && Number(short[3]) > 0) return `${short[1]}/${short[2]}#${Number(short[3])}`;
+  return '';
+}
+
+function watchedPrStatusText(pr) {
+  return pullRequestStatusDisplay(pr) || (pr?.state ? String(pr.state).toUpperCase() : t('common.unknown'));
+}
+
+// The Watched PRs section of YO!info — PRs tracked independent of any open session's branch. Reuses
+// the pr-status-* badge classes; renders into its own #info-watched container so it can repaint on the
+// (longer) watched-PR poll cadence without re-rendering the branch table.
+function renderWatchedPrs() {
+  const node = document.getElementById('info-watched');
+  if (!node) return;
+  const prs = Array.isArray(watchedPrsData.watched_prs) ? watchedPrsData.watched_prs : [];
+  const heading = `<div class="info-watched-head">${esc(t('info.watched.heading'))}</div>`;
+  if (!prs.length) {
+    node.innerHTML = `${heading}<div class="info-empty info-watched-empty">${esc(t('info.watched.empty'))}</div>`;
+    return;
+  }
+  const rows = prs.map(pr => {
+    const ref = String(pr.ref || `#${pr.number}`);
+    const statusCls = pullRequestStatusClass(pr);
+    const statusText = watchedPrStatusText(pr);
+    const link = linkHtml(pr.url, ref, pr.title || pr.description || '', 'info-watched-ref');
+    return `<div class="info-row info-watched-row" data-watched-ref="${esc(ref)}">
+      <div class="info-cell info-watched-ref-cell">${link}</div>
+      <div class="info-cell info-watched-title" title="${esc(pr.title || '')}">${esc(pr.title || '')}</div>
+      <div class="info-cell info-watched-status"><span class="meta-pr-status ${esc(statusCls)}">${esc(statusText)}</span></div>
+      <div class="info-cell info-watched-actions"><button type="button" class="info-watched-remove" data-watched-remove="${esc(ref)}" title="${esc(t('info.watched.remove'))}" aria-label="${esc(t('info.watched.remove'))}">×</button></div>
+    </div>`;
+  }).join('');
+  const truncated = watchedPrsData.truncated > 0
+    ? `<div class="info-watched-note">${esc(t('info.watched.truncated', {count: String(watchedPrsData.truncated)}))}</div>`
+    : '';
+  node.innerHTML = heading + rows + truncated;
+  node.querySelectorAll('[data-watched-remove]').forEach(button => {
+    button.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      removeWatchedPr(button.dataset.watchedRemove);
+    });
+  });
+}
+
+async function refreshWatchedPrs() {
+  try {
+    const data = await apiFetchJson('/api/watched-prs');
+    applyWatchedPrsPayload(data);
+  } catch (_error) {}
+}
+
+function applyWatchedPrsPayload(data) {
+  if (!data || typeof data !== 'object') return false;
+  watchedPrsData = {
+    watched_prs: Array.isArray(data.watched_prs) ? data.watched_prs : [],
+    truncated: Number(data.truncated) || 0,
+    invalid: Array.isArray(data.invalid) ? data.invalid : [],
+  };
+  notifyWatchedPrTransitions(watchedPrsData.watched_prs);
+  renderWatchedPrs();
+  return true;
+}
+
+// Append a PR ref to github.watched_prs (dedup by canonical ref); accepts owner/repo#N or a PR URL.
+function addWatchedPr(entry) {
+  const ref = normalizeWatchedPrRef(entry);
+  if (!ref) {
+    statusErr(t('info.watched.invalid', {entry: String(entry || '')}));
+    return;
+  }
+  const current = initialSetting('github.watched_prs', []);
+  const list = Array.isArray(current) ? current.slice() : [];
+  if (list.some(item => normalizeWatchedPrRef(item) === ref)) {
+    statusOk(t('info.watched.already', {ref}));
+    return;
+  }
+  list.push(ref);
+  saveSettingsPatch(settingPatch('github.watched_prs', list))
+    .then(() => { statusOk(t('info.watched.added', {ref})); refreshWatchedPrs(); })
+    .catch(error => statusErr(localizedHtml('status.settingsSaveFailed', {error})));
+}
+
+function removeWatchedPr(ref) {
+  const target = normalizeWatchedPrRef(ref) || String(ref || '');
+  const current = initialSetting('github.watched_prs', []);
+  const list = (Array.isArray(current) ? current : []).filter(item => normalizeWatchedPrRef(item) !== target && String(item).trim() !== target);
+  saveSettingsPatch(settingPatch('github.watched_prs', list))
+    .then(() => { statusOk(t('info.watched.removed', {ref: target})); refreshWatchedPrs(); })
+    .catch(error => statusErr(localizedHtml('status.settingsSaveFailed', {error})));
+}
+
+// right-clicking a PR link in YO!info offers "Watch this PR" (adds it to github.watched_prs).
+// Delegated on #info-content so it covers both the branch-table PR column and any future PR cells.
+function bindInfoPrContextMenu(node) {
+  if (!node || node.dataset.watchedPrMenuBound === '1') return;
+  node.dataset.watchedPrMenuBound = '1';
+  node.addEventListener('contextmenu', event => {
+    const cell = event.target.closest('.info-cell');
+    const link = cell?.querySelector?.('a[href*="github.com/"][href*="/pull/"]');
+    if (!link) return;
+    const ref = normalizeWatchedPrRef(link.getAttribute('href') || '');
+    if (!ref) return;
+    event.preventDefault();
+    event.stopPropagation();
+    showWatchPrContextMenu(ref, event.clientX, event.clientY);
+  });
+}
+
+function showWatchPrContextMenu(ref, x, y) {
+  const already = (Array.isArray(initialSetting('github.watched_prs', [])) ? initialSetting('github.watched_prs', []) : [])
+    .some(item => normalizeWatchedPrRef(item) === ref);
+  const menu = document.createElement('div');
+  menu.className = 'terminal-context-menu watched-pr-context-menu';
+  menu.setAttribute('role', 'menu');
+  appendContextMenuButton(
+    menu,
+    already ? t('info.watched.unwatchThis', {ref}) : t('info.watched.watchThis', {ref}),
+    () => (already ? removeWatchedPr(ref) : addWatchedPr(ref)),
+    () => watchedPrContextMenu.close(),
+  );
+  watchedPrContextMenu.open(menu, x, y);
+}
+
+function yoagentChatScrollOwner(node = document.getElementById('yoagent-content')) {
+  return node?.querySelector?.('.yoagent-chat-history') || node || null;
+}
+
+function scrollYoagentChatToBottom(node = document.getElementById('yoagent-content')) {
+  const owner = yoagentChatScrollOwner(node);
+  if (owner) owner.scrollTop = owner.scrollHeight;
+  yoagentScrollbackLocked = false;
+}
+
+function yoagentChatHistoryIsNearBottom(owner, threshold = 48) {
+  if (!owner) return true;
+  return owner.scrollHeight - owner.clientHeight - owner.scrollTop <= threshold;
+}
+
+function yoagentChatScrollState(node = document.getElementById('yoagent-content')) {
+  const owner = yoagentChatScrollOwner(node);
+  return {
+    nearBottom: yoagentChatHistoryIsNearBottom(owner),
+    ownerTop: owner ? owner.scrollTop : 0,
+  };
+}
+
+function restoreYoagentChatScrollState(node, state) {
+  if (!node || !state) return;
+  const owner = yoagentChatScrollOwner(node);
+  if (owner) owner.scrollTop = state.ownerTop || 0;
+  yoagentScrollbackLocked = state.nearBottom === false;
+}
+
+function installYoagentChatScrollTracker(node = document.getElementById('yoagent-content')) {
+  const history = yoagentChatScrollOwner(node);
+  if (!history || history.dataset.yoagentScrollTracker === 'true') return;
+  history.dataset.yoagentScrollTracker = 'true';
+  history.addEventListener('scroll', () => {
+    yoagentScrollbackLocked = !yoagentChatHistoryIsNearBottom(history);
+  }, {passive: true});
+}
+
+function yoagentOpenMessageDetailsState(node = document.getElementById('yoagent-content')) {
+  const openKeys = new Set();
+  (node?.querySelectorAll?.('.yoagent-message-details[open][data-yoagent-message-details-key]') || []).forEach(details => {
+    const key = details.dataset?.yoagentMessageDetailsKey || '';
+    if (key) openKeys.add(key);
+  });
+  return openKeys;
+}
+
+function restoreYoagentOpenMessageDetailsState(node, openKeys) {
+  if (!node || !openKeys?.size) return;
+  (node.querySelectorAll?.('.yoagent-message-details[data-yoagent-message-details-key]') || []).forEach(details => {
+    const key = details.dataset?.yoagentMessageDetailsKey || '';
+    if (key && openKeys.has(key)) details.open = true;
+  });
+}
+
+function yoagentShouldScrollBottom(options, scrollState) {
+  if (options.scrollBottom === true) return true;
+  if (options.scrollBottom === false) return false;
+  if (yoagentScrollbackLocked) return false;
+  return scrollState?.nearBottom !== false;
+}
+
+function focusYoagentChatInput(node = document.getElementById('yoagent-content')) {
+  const input = node?.querySelector?.('[data-yoagent-chat-input]');
+  if (!input || input.disabled) return;
+  input.focus({preventScroll: true});
+  const end = input.value.length;
+  try { input.setSelectionRange(end, end); } catch (_) {}
+}
+
+function yoagentChatInputIsFocused(node = document.getElementById('yoagent-content')) {
+  const input = node?.querySelector?.('[data-yoagent-chat-input]');
+  return Boolean(input && document.activeElement === input);
+}
+
+function restoreYoagentChatInputFocus(node, inputFocused, selectionStart, selectionEnd) {
+  if (!inputFocused) return false;
+  const nextInput = node?.querySelector?.('[data-yoagent-chat-input]');
+  if (!nextInput || nextInput.disabled) return false;
+  nextInput.focus({preventScroll: true});
+  if (selectionStart !== null && selectionEnd !== null) {
+    try { nextInput.setSelectionRange(selectionStart, selectionEnd); } catch (_) {}
+  }
+  return true;
+}
+
+function refreshYoagentSummaryRegions(node = document.getElementById('yoagent-content')) {
+  if (!node) return false;
+  const chat = node.querySelector('.yoagent-chat');
+  if (!chat) return false;
+  const openDetails = yoagentOpenMessageDetailsState(node);
+  chat.outerHTML = yoagentChatHtml();
+  renderYoagentMessageMarkdown(node);
+  restoreYoagentOpenMessageDetailsState(node, openDetails);
+  installYoagentChatScrollTracker(node);
+  return true;
+}
+
+function yoagentBusyUiIsMounted(node = document.getElementById('yoagent-content')) {
+  return Boolean(yoagentBusy && node?.querySelector?.('.yoagent-chat-status'));
+}
+
+// Downgrade block-level headings (#/##/### …) to inline bold so an embedded agent heading renders as
+// emphasis inside a compact card instead of a giant h1/h2 that balloons its height. Inline emphasis,
+// code, lists, and links are left intact for marked.js to render.
+// the LLM backends emit "loose" markdown (blank lines between list items, double blank
+// lines between sections) which marked.js renders with big gaps. Tighten ONLY the yoagent inputs
+// (not the shared file-editor preview): collapse 2+ blank lines to one, and drop blank lines between
+// adjacent list items so a loose list renders as tightly as a tight one.
+function yoagentTightMarkdown(text) {
+  return String(text || '')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/^([ \t]*(?:[-*+]|\d+\.)[ \t].*)\n(?:[ \t]*\n)+(?=[ \t]*(?:[-*+]|\d+\.)[ \t])/gm, '$1\n');
+}
+
+function yoagentInlineMarkdown(text) {
+  const downgraded = String(text || '').replace(/^[ \t]*#{1,6}[ \t]+(.*?)[ \t]*#*$/gm, (match, title) => (title ? `**${title}**` : ''));
+  return yoagentTightMarkdown(downgraded);
+}
+
+function yoagentSessionFromHref(href) {
+  try {
+    const url = new URL(String(href || ''), window.location.href);
+    return url.searchParams.get('yoagent-session') || '';
+  } catch (_) {
+    return '';
+  }
+}
+
+function handleYoagentSessionLinkClick(event) {
+  const anchor = event.target?.closest?.('a[href]');
+  if (!anchor) return;
+  const session = yoagentSessionFromHref(anchor.getAttribute('href') || '');
+  if (!session) return;
+  event.preventDefault();
+  selectSession(session, {userInitiated: true});
+}
+
+function linkYoagentSessionCodeReferences(container) {
+  if (!container) return;
+  (container.querySelectorAll?.('code') || []).forEach(code => {
+    if (code.closest('a')) return;
+    const session = (code.textContent || '').trim();
+    if (!session || !sessions.includes(session)) return;
+    const previousText = code.previousSibling?.nodeType === Node.TEXT_NODE ? code.previousSibling.textContent || '' : '';
+    if (!/(^|\b)(tmux\s+)?session\s*$/i.test(previousText)) return;
+    const link = document.createElement('a');
+    link.href = `?yoagent-session=${encodeURIComponent(session)}`;
+    link.className = 'yoagent-session-link';
+    link.title = `Open tmux session ${session}`;
+    code.replaceWith(link);
+    link.appendChild(code);
+  });
+}
+
+function installYoagentSessionLinks(container) {
+  if (!container) return;
+  linkYoagentSessionCodeReferences(container);
+  if (container.dataset.yoagentSessionLinksBound !== 'true') {
+    container.dataset.yoagentSessionLinksBound = 'true';
+    container.addEventListener('click', handleYoagentSessionLinkClick);
+  }
+}
+
+function renderYoagentMessageMarkdown(node = document.getElementById('yoagent-content')) {
+  // Render assistant chat replies through the Markdown pipeline so bold titles, code, lists, and links
+  // display formatted. Without marked.js the escaped-text fallback stays.
+  if (!node || typeof window.marked === 'undefined') return;
+  (node.querySelectorAll?.('.yoagent-global [data-yoagent-global-markdown]') || []).forEach(body => {
+    renderMarkdownPreviewInto(body, yoagentTightMarkdown(body.textContent || ''));
+    installYoagentSessionLinks(body);
+    body.removeAttribute('data-yoagent-global-markdown');
+  });
+  (node.querySelectorAll?.('.yoagent-message.assistant [data-yoagent-markdown]') || []).forEach(body => {
+    renderMarkdownPreviewInto(body, yoagentTightMarkdown(body.textContent || ''));
+    installYoagentSessionLinks(body);
+    body.removeAttribute('data-yoagent-markdown');
+  });
+}
+
+function renderYoagentPanel(options = {}) {
+  const node = document.getElementById('yoagent-content');
+  if (!node) return;
+  const scrollState = yoagentChatScrollState(node);
+  const openDetails = yoagentOpenMessageDetailsState(node);
+  const shouldScrollBottom = yoagentShouldScrollBottom(options, scrollState);
+  const input = node.querySelector('[data-yoagent-chat-input]');
+  const inputFocused = input && document.activeElement === input;
+  const selectionStart = inputFocused ? input.selectionStart : null;
+  const selectionEnd = inputFocused ? input.selectionEnd : null;
+  if (input && options.preserveDraft !== false) yoagentDraft = input.value || '';
+  if (yoagentBusyUiIsMounted(node) && options.allowBusyRebuild !== true) {
+    if (refreshYoagentSummaryRegions(node)) {
+      if (shouldScrollBottom) scrollYoagentChatToBottom(node);
+      else restoreYoagentChatScrollState(node, scrollState);
+      restoreYoagentChatInputFocus(node, inputFocused, selectionStart, selectionEnd);
+    }
+    return;
+  }
+  if (options.summaryOnly && refreshYoagentSummaryRegions(node)) {
+    if (shouldScrollBottom) scrollYoagentChatToBottom(node);
+    else restoreYoagentChatScrollState(node, scrollState);
+    restoreYoagentChatInputFocus(node, inputFocused, selectionStart, selectionEnd);
+    return;
+  }
+  node.innerHTML = yoagentChatHtml();
+  renderYoagentMessageMarkdown(node);
+  restoreYoagentOpenMessageDetailsState(node, openDetails);
+  installYoagentChatScrollTracker(node);
+  if (shouldScrollBottom) {
+    requestAnimationFrame(() => scrollYoagentChatToBottom(node));
+    setTimeout(() => scrollYoagentChatToBottom(node), 0);
+  } else {
+    restoreYoagentChatScrollState(node, scrollState);
+  }
+  if (options.focusInput) {
+    requestAnimationFrame(() => focusYoagentChatInput(node));
+    return;
+  }
+  if (!inputFocused) return;
+  restoreYoagentChatInputFocus(node, inputFocused, selectionStart, selectionEnd);
+}
+
+function infoBranchRows() {
+  if (shareViewMode && Array.isArray(shareInfoBranchRowsOverride)) {
+    return sortedInfoBranchRows(shareInfoBranchRowsOverride, infoBranchSort);
+  }
+  return sortedInfoBranchRows(rawInfoBranchRows(), infoBranchSort);
+}
+
+function infoBranchCellHtml(row) {
+  return row?.branchHtml || esc(row?.branch || '');
+}
+
+function infoPrCellHtml(row) {
+  if (row?.prLabel) return linkHtml(row.prUrl || '', row.prLabel, row.prTitle || '', row.prClass || '');
+  return row?.prHtml || '';
+}
+
+function infoLinearCellHtml(row) {
+  if (Array.isArray(row?.linearItems)) {
+    return row.linearItems.map(item => {
+      if (item?.url) return linearIssueHtml(item);
+      return linearIssueLinkHtml(item?.identifier || '');
+    }).filter(Boolean).join(' ');
+  }
+  return row?.linearHtml || '';
+}
+
+const infoSessionDrawerOpen = new Set();
+const infoSessionDrawerHtmlCache = new Map();
+
+function clearInfoSessionDrawerCache() {
+  infoSessionDrawerHtmlCache.clear();
+}
+
+function infoSessionDrawerToggleHtml(row) {
+  const session = String(row?.session || '');
+  if (!session) return '';
+  const expanded = infoSessionDrawerOpen.has(session);
+  const label = expanded ? 'hide session info' : 'show session info';
+  return `<button type="button" class="info-session-drawer-toggle" data-info-session-drawer="${esc(session)}" aria-expanded="${expanded ? 'true' : 'false'}" aria-label="${esc(label)}" title="${esc(label)}"></button>`;
+}
+
+function infoSessionDrawerCacheKey(session) {
+  return [
+    session,
+    activitySummaryPayload?.generated_at || '',
+    transcriptMeta?.server_version || '',
+    infoSessionFileLookbackHours,
+  ].map(value => String(value ?? '')).join('|');
+}
+
+function cachedInfoSessionDrawerHtml(session) {
+  const key = infoSessionDrawerCacheKey(session);
+  const cached = infoSessionDrawerHtmlCache.get(key);
+  if (cached) return cached;
+  const html = infoSessionDrawerHtml(session);
+  infoSessionDrawerHtmlCache.set(key, html);
+  return html;
+}
+
+function toggleInfoSessionDrawer(session) {
+  const key = String(session || '');
+  if (!key) return false;
+  if (infoSessionDrawerOpen.has(key)) {
+    infoSessionDrawerOpen.delete(key);
+  } else {
+    infoSessionDrawerOpen.add(key);
+    if (!activitySummaryPayload?.session_info?.[key] && !activitySummaryRefreshing && typeof refreshActivitySummary === 'function') {
+      refreshActivitySummary({force: true});
+    }
+  }
+  renderInfoPanel();
+  scheduleShareUiStatePublish();
+  return infoSessionDrawerOpen.has(key);
+}
+
+function infoSessionDrawerData(session) {
+  const fromActivity = activitySummaryPayload?.session_info?.[session];
+  if (fromActivity && typeof fromActivity === 'object') return fromActivity;
+  const info = transcriptMeta?.sessions?.[session] || {};
+  const project = info.project || {};
+  return {session, project, git: project.git || null, pull_request: project.pull_request || null, linear: project.linear || [], latest_summary: '', recent_events: []};
+}
+
+function infoSessionCountText(label, value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return '';
+  return `${label} ${Math.max(0, Math.trunc(number))}`;
+}
+
+function infoSessionDrawerPairsHtml(items) {
+  const rows = items.map(item => {
+    const value = String(item?.value ?? '').trim();
+    const html = String(item?.html || '').trim();
+    return item && (value || html) ? {...item, value, html} : null;
+  }).filter(Boolean).map(item => `
+    <div class="info-session-drawer-field">
+      <span class="info-session-drawer-label">${esc(item.label)}</span>
+      <span class="info-session-drawer-value">${item.html || esc(item.value)}</span>
+    </div>`);
+  return rows.join('');
+}
+
+function infoSessionDrawerEventsHtml(events) {
+  const rows = Array.isArray(events) ? events.slice(0, 5) : [];
+  if (!rows.length) return '<div class="info-session-drawer-empty">No recent events</div>';
+  return `<ul class="info-session-drawer-events">${rows.map(event => {
+    const text = [event?.time || '', event?.type || '', event?.message || ''].filter(Boolean).join(' · ');
+    return `<li>${esc(text)}</li>`;
+  }).join('')}</ul>`;
+}
+
+function infoSessionDrawerLinearHtml(linear) {
+  const items = Array.isArray(linear) ? linear : [];
+  if (!items.length) return '';
+  return items.map(issue => linearIssueHtml(issue)).filter(Boolean).join(' ');
+}
+
+function infoSessionDrawerPrHtml(pr) {
+  if (!pr || typeof pr !== 'object') return '';
+  if (pr.number) return pullRequestColumnLinkHtml(pr);
+  return pr.title || pr.description || '';
+}
+
+function infoSessionDrawerHtml(session) {
+  const data = infoSessionDrawerData(session);
+  const git = data.git && typeof data.git === 'object' ? data.git : {};
+  const pr = data.pull_request && typeof data.pull_request === 'object' ? data.pull_request : null;
+  const ci = data.ci && typeof data.ci === 'object' ? data.ci : (pr?.checks && typeof pr.checks === 'object' ? pr.checks : null);
+  const linearHtml = infoSessionDrawerLinearHtml(data.linear);
+  const prHtml = infoSessionDrawerPrHtml(pr);
+  const counts = [
+    infoSessionCountText('dirty', git.dirty_count),
+    infoSessionCountText('ahead', git.ahead),
+    infoSessionCountText('behind', git.behind),
+  ].filter(Boolean).join(' · ');
+  const fields = infoSessionDrawerPairsHtml([
+    {label: 'Full path', value: data.path || git.root || git.cwd || data.cwd || ''},
+    {label: 'Branch', value: git.branch || ''},
+    {label: 'Git', value: counts},
+    {label: 'PR', value: prHtml ? 'pr' : '', html: prHtml},
+    {label: 'CI', value: ci?.status_label || ci?.state || ci?.conclusion || ''},
+    {label: 'Issues', value: linearHtml ? 'issues' : '', html: linearHtml},
+  ]);
+  const summary = String(data.latest_summary || '').trim();
+  const content = activitySummaryPayload?.session_info?.[session]
+    ? `
+      <div class="info-session-drawer-grid">${fields || '<div class="info-session-drawer-empty">No project metadata</div>'}</div>
+      ${summary ? `<div class="info-session-drawer-summary"><span>Latest summary</span><p>${esc(summary)}</p></div>` : ''}
+      <div class="info-session-drawer-section"><span>Recent events</span>${infoSessionDrawerEventsHtml(data.recent_events)}</div>`
+    : `<div class="info-session-drawer-empty">${esc(activitySummaryRefreshing ? 'Loading session info...' : 'Open drawer data by refreshing YO!info')}</div>`;
+  return `<div class="info-row info-session-drawer-row" data-info-session-drawer-row="${esc(session)}">
+    <div class="info-session-drawer">${content}</div>
+  </div>`;
+}
+
+function infoPathLabel(git) {
+  const path = git?.root || git?.cwd || '';
+  const label = compactHomePath(path);
+  const parent = git?.worktree?.parent_root || '';
+  if (!parent) return label;
+  return `${label} (worktree of ${compactHomePath(parent)})`;
+}
+
+function infoPathTitle(git) {
+  const path = git?.root || git?.cwd || '';
+  const parent = git?.worktree?.parent_root || '';
+  if (!parent) return path;
+  return `${path} (worktree of ${parent})`;
+}
+
+function infoGitRoot(git) {
+  return String(git?.root || git?.cwd || '');
+}
+
+function infoBranchSourcesForSession(session, info) {
+  const project = info?.project || {};
+  const primaryGit = project.git;
+  const primaryRoot = infoGitRoot(primaryGit);
+  const sources = [];
+  const seenRoots = new Set();
+  const addSource = (git, primary) => {
+    const root = infoGitRoot(git);
+    const branches = git?.other_branches?.branches;
+    if (!root || !Array.isArray(branches) || !branches.length || seenRoots.has(root)) return;
+    seenRoots.add(root);
+    sources.push({session, info, project, git, primary: primary === true});
+  };
+  addSource(primaryGit, true);
+  for (const repo of Array.isArray(project.repos) ? project.repos : []) {
+    addSource(repo, Boolean(primaryRoot && infoGitRoot(repo) === primaryRoot));
+  }
+  return sources;
+}
+
+function infoBranchOwnedBySource(git, branch) {
+  const branchName = String(branch?.name || '');
+  const currentBranch = String(git?.branch || '');
+  return branch?.current === true && Boolean(branchName) && (!currentBranch || currentBranch === branchName);
+}
+
+function infoBranchRowForSource(source, branch, ownsSession) {
+  const {session, info, project, git, primary} = source;
+  const useCurrentProjectMetadata = ownsSession && primary;
+  const currentPr = useCurrentProjectMetadata ? displayPullRequest(info) : null;
+  const currentLinear = useCurrentProjectMetadata ? project.linear || [] : [];
+  const linearIds = currentLinear.length
+    ? currentLinear.map(issue => issue.identifier).filter(Boolean)
+    : branch.linear_ids || [];
+  const linearHtml = currentLinear.length
+    ? currentLinear.map(issue => linearIssueHtml(issue)).join(' ')
+    : linearIds.map(linearIssueLinkHtml).filter(Boolean).join(' ');
+  const prHtml = currentPr?.number ? pullRequestColumnLinkHtml(currentPr) : pullRequestLinkForBranch(git, branch);
+  const prValue = currentPr?.number ? currentPr : branch.pull_request;
+  const prTitle = pullRequestTextForBranch(prValue, branch.subject || '');
+  const repoUrl = git?.github_repo?.url || '';
+  const prUrl = prValue?.url || (prValue?.number && repoUrl ? `${repoUrl}/pull/${prValue.number}` : '');
+  const prLabel = prValue?.number ? pullRequestLinkLabel(prValue) : '';
+  const prClass = prValue?.number ? pullRequestStatusClass(prValue) : '';
+  const linearTitle = currentLinear.length
+    ? currentLinear.map(issue => [issue.identifier, issue.state, issue.title].filter(Boolean).join(' ')).filter(Boolean).join(' · ')
+    : linearIds.join(' ');
+  const linearItems = currentLinear.length
+    ? currentLinear.map(issue => ({
+      identifier: String(issue?.identifier || ''),
+      state: String(issue?.state || ''),
+      title: String(issue?.title || ''),
+      url: String(issue?.url || ''),
+    })).filter(issue => issue.identifier || issue.url)
+    : linearIds.map(identifier => ({identifier: String(identifier || '')})).filter(issue => issue.identifier);
+  const desc = shortText(
+    currentPr?.title
+      || currentPr?.description
+      || currentLinear.find(issue => issue.title)?.title
+      || branch.subject
+      || '',
+    180,
+  );
+  return {
+    session: ownsSession ? session : '',
+    path: infoGitRoot(git),
+    pathLabel: infoPathLabel(git),
+    pathTitle: infoPathTitle(git),
+    branch: branch.name || '',
+    branchHtml: branchLinkHtml(git, branch.name),
+    desc,
+    updated: branch.updated || '',
+    updatedText: branchUpdatedText(branch),
+    updatedTitle: branch.updated || branchUpdatedText(branch),
+    updatedTs: Number.isFinite(branch.updated_ts) ? branch.updated_ts : 0,
+    prHtml: prHtml || '',
+    prTitle,
+    prUrl,
+    prLabel,
+    prClass,
+    prSort: prTitle || (prValue?.number ? String(prValue.number) : ''),
+    linearHtml,
+    linearItems,
+    linearTitle,
+    current: ownsSession,
+    sourcePrimary: primary,
+  };
+}
+
+function preferInfoBranchRow(existing, next) {
+  if (!existing) return next;
+  if (next.session && !existing.session) return next;
+  if (next.session && next.sourcePrimary && !existing.sourcePrimary) return next;
+  return existing;
+}
+
+function rawInfoBranchRows() {
+  const rowsByKey = new Map();
+  const infoSessions = Array.isArray(transcriptMeta?.session_order) ? transcriptMeta.session_order : sessions;
+  for (const session of infoSessions) {
+    const info = transcriptMeta.sessions?.[session];
+    for (const source of infoBranchSourcesForSession(session, info)) {
+      for (const branch of source.git?.other_branches?.branches || []) {
+        const key = `${infoGitRoot(source.git)}\n${branch.name || ''}`;
+        const row = infoBranchRowForSource(source, branch, infoBranchOwnedBySource(source.git, branch));
+        rowsByKey.set(key, preferInfoBranchRow(rowsByKey.get(key), row));
+      }
+    }
+  }
+  return [...rowsByKey.values()];
+}
+
+function setInfoBranchSort(key) {
+  if (!infoBranchSortColumns.has(key)) return;
+  const previous = `${infoBranchSort.key}:${infoBranchSort.dir}`;
+  if (infoBranchSort.key === key) {
+    infoBranchSort = {key, dir: infoBranchSort.dir === 'asc' ? 'desc' : 'asc'};
+  } else {
+    infoBranchSort = {key, dir: 'asc'};
+  }
+  if (`${infoBranchSort.key}:${infoBranchSort.dir}` !== previous) scheduleShareUiStatePublish();
+}
+
+const infoBranchSortColumns = new Set(['session', 'path', 'branch', 'pr', 'linear', 'desc', 'updated']);
+
+function normalizeShareInfoSort(value = {}) {
+  const key = infoBranchSortColumns.has(value?.key) ? value.key : 'updated';
+  const dir = value?.dir === 'asc' ? 'asc' : 'desc';
+  return {key, dir};
+}
+
+function shareInfoString(value, limit = 500) {
+  return String(value || '').slice(0, limit);
+}
+
+function shareInfoRowSnapshot(row = {}) {
+  return {
+    session: shareInfoString(row.session, 80),
+    path: shareInfoString(row.path, 1000),
+    pathLabel: shareInfoString(row.pathLabel, 1000),
+    pathTitle: shareInfoString(row.pathTitle, 1000),
+    branch: shareInfoString(row.branch, 500),
+    desc: shareInfoString(row.desc, 1000),
+    updated: shareInfoString(row.updated, 200),
+    updatedText: shareInfoString(row.updatedText, 200),
+    updatedTitle: shareInfoString(row.updatedTitle, 500),
+    updatedTs: Number.isFinite(row.updatedTs) ? row.updatedTs : 0,
+    prTitle: shareInfoString(row.prTitle, 1000),
+    prUrl: shareInfoString(row.prUrl, 1000),
+    prLabel: shareInfoString(row.prLabel, 100),
+    prClass: shareInfoString(row.prClass, 100),
+    prSort: shareInfoString(row.prSort, 1000),
+    linearTitle: shareInfoString(row.linearTitle, 1000),
+    linearItems: Array.isArray(row.linearItems)
+      ? row.linearItems.slice(0, 20).map(item => ({
+        identifier: shareInfoString(item?.identifier, 120),
+        state: shareInfoString(item?.state, 120),
+        title: shareInfoString(item?.title, 500),
+        url: shareInfoString(item?.url, 1000),
+      })).filter(item => item.identifier || item.url)
+      : [],
+    current: row.current === true,
+  };
+}
+
+function cleanShareInfoRows(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 1000).map(shareInfoRowSnapshot);
+}
+
+function shareInfoStateSnapshot(options = {}) {
+  const snapshot = {
+    branchSort: normalizeShareInfoSort(infoBranchSort),
+    columnWidths: {
+      branch: clampInfoColumnWidth('branch', infoBranchColumnWidthPx),
+      desc: clampInfoColumnWidth('desc', infoDescColumnWidthPx),
+    },
+  };
+  if (options.includeRows !== false) snapshot.branchRows = infoBranchRows().map(shareInfoRowSnapshot);
+  return snapshot;
+}
+
+function applyShareInfoState(info = {}) {
+  if (!info || typeof info !== 'object') return;
+  if ('branchSort' in info) infoBranchSort = normalizeShareInfoSort(info.branchSort);
+  if ('branchRows' in info) shareInfoBranchRowsOverride = cleanShareInfoRows(info.branchRows);
+  const widths = info.columnWidths && typeof info.columnWidths === 'object' ? info.columnWidths : {};
+  if ('branch' in widths) setInfoColumnWidth('branch', widths.branch, {persist: false, publish: false});
+  if ('desc' in widths) setInfoColumnWidth('desc', widths.desc, {persist: false, publish: false});
+  renderInfoPanel();
+  restoreShareScrollTargetByKey('info');
+}
+
+function infoBranchSortValue(row, key) {
+  if (key === 'updated') return Number.isFinite(row.updatedTs) ? row.updatedTs : 0;
+  if (key === 'pr') return row.prSort || row.prTitle || '';
+  if (key === 'linear') return row.linearTitle || '';
+  return row[key] || '';
+}
+
+function compareInfoBranchRows(left, right, sortState) {
+  const key = infoBranchSortColumns.has(sortState?.key) ? sortState.key : 'updated';
+  const direction = sortState?.dir === 'asc' ? 1 : -1;
+  const leftValue = infoBranchSortValue(left, key);
+  const rightValue = infoBranchSortValue(right, key);
+  let result = 0;
+  if (typeof leftValue === 'number' && typeof rightValue === 'number') {
+    result = leftValue - rightValue;
+  } else {
+    result = String(leftValue).localeCompare(String(rightValue), undefined, {numeric: true, sensitivity: 'base'});
+  }
+  if (result !== 0) return result * direction;
+  return (right.updatedTs - left.updatedTs)
+    || String(left.session).localeCompare(String(right.session), undefined, {numeric: true, sensitivity: 'base'})
+    || String(left.path).localeCompare(String(right.path), undefined, {numeric: true, sensitivity: 'base'})
+    || String(left.branch).localeCompare(String(right.branch), undefined, {numeric: true, sensitivity: 'base'});
+}
+
+function sortedInfoBranchRows(rows, sortState = infoBranchSort) {
+  return rows.slice().sort((left, right) => compareInfoBranchRows(left, right, sortState));
+}
+
+function bindPanelControls(panel, session) {
+  delegate(panel, 'click', '[data-tab]', (_event, button) => {
+    const currentName = button.dataset.tabName;
+    const nextName = currentName !== 'terminal' && button.classList.contains(CLS.active) ? 'terminal' : currentName;
+    activateTab(button.dataset.tab, nextName, {userInitiated: true});
+  });
+  delegate(panel, 'click', '[data-window-dir], [data-window-index]', event => {
+    handleWindowStepButtonClick(event);
+  });
+  delegate(panel, 'click', '[data-pane-close]', (event, button) => {
+    event.preventDefault();
+    event.stopPropagation();
+    removePaneFromLayout(button.dataset.paneClose);
+  });
+  delegate(panel, 'click', '[data-pane-minimize]', (event, button) => {
+    event.preventDefault();
+    event.stopPropagation();
+    minimizePaneFromLayout(button.dataset.paneMinimize);
+  });
+  delegate(panel, 'click', '[data-pane-expand]', (event, button) => {
+    event.preventDefault();
+    event.stopPropagation();
+    expandPaneFromLayout(button.dataset.paneExpand);
+  });
+  delegate(panel, 'click', '[data-pane-actions]', (event, button) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = button.getBoundingClientRect();
+    showSessionContextMenu(button.dataset.paneActions || session, rect.left, rect.bottom + 4);
+  });
+  if (isTmuxSession(session)) {
+    panel.querySelector('.panel-head')?.addEventListener('contextmenu', event => {
+      if (event.target.closest('button, input')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      showSessionContextMenu(session, event.clientX, event.clientY);
+    });
+  }
+  delegate(panel, 'click', '[data-context]', () => showContext(session));
+  panel.addEventListener('click', event => {
+    const target = event.target.closest('[data-auto-session]');
+    if (!target || !panel.contains(target)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    toggleAutoApprove(target.dataset.autoSession || session);
+  });
+  panel.addEventListener('click', event => {
+    const target = event.target.closest('[data-copy-transcript-path]');
+    if (!target || !panel.contains(target)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const path = target.dataset.copyTranscriptPath || '';
+    if (!path) return;
+    copyTextToClipboard(path)
+      .then(() => { statusOk(localizedHtml('status.copiedTranscriptPath')); })
+      .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
+  });
+  panel.querySelector('.meta')?.addEventListener('click', event => {
+    event.stopPropagation();
+    const cycle = event.target.closest('[data-repo-cycle]');
+    if (cycle) {
+      event.preventDefault();
+      const targetSession = cycle.dataset.repoCycle || session;
+      cycleSessionRepoDisplay(targetSession, transcriptMeta.sessions?.[targetSession], cycle.dataset.repoCycleDir || 1);
+      updatePanelHeader(targetSession, transcriptMeta.sessions?.[targetSession]);
+      renderSessionButtons();
+      renderPaneTabStrips();
+      return;
+    }
+    // The repo count opens the per-session multi-repo popover (delegated, since .meta re-renders).
+    const chip = event.target.closest('[data-repo-chip]');
+    if (chip) {
+      event.preventDefault();
+      showRepoChipMenu(chip.dataset.repoChip || session, event.clientX, event.clientY);
+    }
+  });
+  panel.querySelector('.meta')?.addEventListener('dragstart', event => event.stopPropagation());
+  bindFileUpload(panel, session);
+}
+
+function hasFileDrag(event) {
+  const types = Array.from(event.dataTransfer?.types || []);
+  return types.includes('Files') || Boolean(event.dataTransfer?.files?.length);
+}
+
+function hasUploadableDrag(event) {
+  // External file drops (any type) OR an image exposed as rich data with no File entry — both must be
+  // claimed so a dragged image never leaks to the terminal-backed agent as a rich [Image #N] attachment.
+  return hasFileDrag(event) || dataTransferHasImagePayload(event?.dataTransfer);
+}
+
+function bindFileUpload(panel, session) {
+  if (readOnlyMode) return;
+  panel.addEventListener('dragenter', event => {
+    if (!hasUploadableDrag(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    panel.classList.add(CLS.fileDragOver);
+  });
+  panel.addEventListener('dragover', event => {
+    if (!hasUploadableDrag(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = 'copy';
+    panel.classList.add(CLS.fileDragOver);
+  });
+  panel.addEventListener('dragleave', event => {
+    if (!hasUploadableDrag(event)) return;
+    if (panel.contains(event.relatedTarget)) return;
+    panel.classList.remove(CLS.fileDragOver);
+  });
+  panel.addEventListener('drop', event => {
+    if (!hasUploadableDrag(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    panel.classList.remove(CLS.fileDragOver);
+    // DOIT.57: remember the drop point so the post-upload suggestion overlay can anchor there.
+    // Prefer the plain File list; fall back to images extracted from rich data (text/html <img>,
+    // image MIME) so a dragged image exposed without a File still uploads instead of leaking.
+    const dropped = event.dataTransfer?.files?.length ? event.dataTransfer.files : dataTransferImageFiles(event.dataTransfer);
+    uploadFiles(session, dropped, {suggestAt: {x: event.clientX, y: event.clientY}});
+  });
+}
+
+function insertFileDragPayloadIntoTerminal(session, payload) {
+  const references = terminalFileReferences(session, payload);
+  if (!references.length) return;
+  const inserted = insertIntoTerminal(session, `${references.map(shellQuote).join(' ')} `);
+  const label = references.length === 1 ? references[0] : tPlural('files.pathCount', references.length);
+  statusEl.innerHTML = inserted
+    ? `<span class="ok">${localizedHtml('status.insertedInto', {name: label, session: sessionLabel(session)})}</span>`
+    : `<span class="err">${terminalNotConnectedHtml(session)}</span>`;
+}
+
+function bindClipboardPaste() {
+  if (readOnlyMode) return;
+  if (clipboardPasteBound) return;
+  clipboardPasteBound = true;
+  document.addEventListener('paste', event => {
+    if (!dataTransferHasImagePayload(event.clipboardData)) return;
+    // Image-bearing paste: ALWAYS claim it (preventDefault + stopPropagation) so the raw image can never
+    // reach the terminal-backed agent as a rich [Image #N] attachment (the mixed text+attachment bug).
+    // Then upload ALL pasted images and insert only their textual uploaded-path references.
+    event.preventDefault();
+    event.stopPropagation();
+    const session = pasteTargetSession(event);
+    if (!session) {
+      statusErr(localizedHtml('status.selectPaneForImagePaste'));
+      return;
+    }
+    const files = dataTransferImageFiles(event.clipboardData);
+    if (!files.length) {
+      // Claimed (so nothing leaks to the agent) but the image was exposed only as un-extractable rich
+      // data (e.g. a remote <img> URL with no File and no data: URL).
+      statusErr(localizedHtml('status.selectPaneForImagePaste'));
+      return;
+    }
+    if (!beginPasteUpload(session)) return;
+    uploadFiles(session, files, {source: 'paste'}).finally(() => {
+      pasteUploadInFlight = false;
+    });
+  }, {capture: true});
+}
+
+// ONE shared image-payload contract for BOTH paste (clipboardData) and drop (dataTransfer). A browser may
+// expose an image as a File, OR as rich data (a text/html <img>, an image MIME type) with NO File. ALL of
+// these must be detectable so the handlers can CLAIM the event and never let a raw image reach the
+// terminal-backed agent as a rich [Image #N] attachment. See AGENTS.md (rich-data drag/paste note).
+function dataTransferHasImagePayload(dt) {
+  if (!dt) return false;
+  if (Array.from(dt.items || []).some(item => item.kind === 'file' && String(item.type || '').startsWith('image/'))) return true;
+  if (dt.files && Array.from(dt.files).some(file => String(file.type || '').startsWith('image/'))) return true;
+  const types = Array.from(dt.types || []);
+  if (types.some(type => String(type).startsWith('image/'))) return true;
+  if (types.includes('text/html') && /<img\b/i.test(typeof dt.getData === 'function' ? (dt.getData('text/html') || '') : '')) return true;
+  return false;
+}
+
+// Extract EVERY image in the payload as a renamed upload File, so multi-image prompts are deterministic
+// (N images -> N uploaded path references, never one text ref + one attachment). Handles File items, a
+// plain File list, and data: URL <img> sources embedded in text/html (browser image copies).
+function dataTransferImageFiles(dt) {
+  if (!dt) return [];
+  const files = [];
+  for (const item of Array.from(dt.items || [])) {
+    if (item.kind !== 'file' || !String(item.type || '').startsWith('image/')) continue;
+    const file = item.getAsFile?.();
+    if (!file) continue;
+    const type = file.type || item.type || 'image/png';
+    files.push(new File([file], pastedImageFilename(file.name, type), {type}));
+  }
+  if (!files.length && dt.files) {
+    for (const file of Array.from(dt.files)) {
+      if (!String(file.type || '').startsWith('image/')) continue;
+      const type = file.type || 'image/png';
+      files.push(new File([file], pastedImageFilename(file.name, type), {type}));
+    }
+  }
+  if (!files.length && typeof dt.getData === 'function') {
+    const html = dt.getData('text/html') || '';
+    const re = /<img\b[^>]*\bsrc\s*=\s*["']?(data:image\/[^"'\s>]+)/gi;
+    let match;
+    while ((match = re.exec(html))) {
+      const file = dataUrlToImageFile(match[1]);
+      if (file) files.push(file);
+    }
+  }
+  return files;
+}
+
+function dataUrlToImageFile(dataUrl) {
+  const match = /^data:(image\/[a-z0-9.+-]+);base64,(.*)$/i.exec(String(dataUrl || ''));
+  if (!match) return null;
+  const type = match[1];
+  try {
+    const binary = atob(match[2]);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return new File([bytes], pastedImageFilename('', type), {type});
+  } catch (_) {
+    return null;
+  }
+}
+
+function beginPasteUpload(session) {
+  const now = Date.now();
+  if (pasteUploadInFlight) return false;
+  const existing = readStoredJson(pasteLockStorageKey, null);
+  if (existing?.expiresAt && existing.expiresAt > now) return false;
+  storageSet(pasteLockStorageKey, JSON.stringify({session, expiresAt: now + 1500}));
+  pasteUploadInFlight = true;
+  return true;
+}
+
+function pasteTargetSession(event) {
+  const panel = event.target?.closest?.('.panel');
+  const panelSession = panel?.id?.startsWith('panel-') ? panel.id.slice('panel-'.length) : '';
+  if (sessions.includes(panelSession) && activeSessions.includes(panelSession)) return panelSession;
+  if (focusedTerminal && activeSessions.includes(focusedTerminal)) return focusedTerminal;
+  if (focusedPanelItem && sessions.includes(focusedPanelItem) && activeSessions.includes(focusedPanelItem)) return focusedPanelItem;
+  if (lastFocusedTmuxSession && activeSessions.includes(lastFocusedTmuxSession)) return lastFocusedTmuxSession;
+  const activeTmuxSessions = activeSessions.filter(isTmuxSession);
+  return activeTmuxSessions.length === 1 ? activeTmuxSessions[0] : null;
+}
+
+function nextPasteFilename(mimeType) {
+  const stamp = pacificDateStamp();
+  const suffix = imageSuffix(mimeType);
+  const key = `${stamp}:${suffix}`;
+  const next = nextPasteCounter(key);
+  return `${stamp}-${String(next).padStart(3, '0')}${suffix}`;
+}
+
+function pastedImageFilename(originalName, mimeType) {
+  const suffix = imageSuffixFromFilename(originalName) || imageSuffix(mimeType);
+  const imageNumber = imageNumberFromFilename(originalName);
+  if (Number.isFinite(imageNumber)) {
+    return `${pacificDateStamp()}-${String(imageNumber).padStart(3, '0')}${suffix}`;
+  }
+  return nextPasteFilename(mimeType);
+}
+
+function nextPasteCounter(key) {
+  const localValue = pasteCounters.get(key) || 0;
+  const counters = readPasteCounters();
+  const next = Math.max(localValue, pasteCounterValue(counters, key)) + 1;
+  counters[key] = next;
+  writePasteCounters(counters);
+  pasteCounters.set(key, next);
+  return next;
+}
+
+function readPasteCounters() {
+  const counters = readStoredJson(pasteCountersStorageKey, {});
+  return counters && typeof counters === 'object' ? counters : {};
+}
+
+function writePasteCounters(counters) {
+  storageSet(pasteCountersStorageKey, JSON.stringify(counters));
+}
+
+function pasteCounterValue(counters, key) {
+  return Number(counters?.[key]) || 0;
+}
+
+function imageNumberFromFilename(filename) {
+  const name = pathBasename(filename || '').replace(/\.[A-Za-z0-9]{1,8}$/, '');
+  const match = name.match(/(?:^|[^A-Za-z])image[^0-9]*(\d+)(?:[^0-9]|$)/i);
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+
+function pasteUploadIndexFromPath(path) {
+  const match = pathBasename(path || '').match(/^\d{8}-(\d{3})(?:\.[A-Za-z0-9]{1,8})$/);
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+
+function imageSuffixFromFilename(filename) {
+  const match = String(filename || '').match(/(\.[A-Za-z0-9]{1,8})$/);
+  if (!match) return '';
+  const suffix = match[1].toLowerCase();
+  return ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'].includes(suffix) ? (suffix === '.jpeg' ? '.jpg' : suffix) : '';
+}
+
+function pacificDateStamp() {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Los_Angeles',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return `${values.year}${values.month}${values.day}`;
+}
+
+function imageSuffix(mimeType) {
+  const value = String(mimeType || '').toLowerCase();
+  if (value.includes('jpeg') || value.includes('jpg')) return '.jpg';
+  if (value.includes('gif')) return '.gif';
+  if (value.includes('webp')) return '.webp';
+  if (value.includes('bmp')) return '.bmp';
+  return '.png';
+}
+
+async function uploadFiles(session, fileList, options = {}) {
+  if (readOnlyMode) {
+    statusErr(localizedHtml('status.readOnlyUploadFiles'));
+    return;
+  }
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  const totalBytes = files.reduce((total, file) => total + (Number(file?.size) || 0), 0);
+  if (uploadMaxBytes > 0 && totalBytes > uploadMaxBytes) {
+    statusErr(localizedHtml('status.uploadTooLarge', {selected: formatFileSize(totalBytes), limit: formatFileSize(uploadMaxBytes)}));
+    showUploadRsyncRecommendation({session, sizeBytes: totalBytes});
+    return;
+  }
+  const formData = new FormData();
+  for (const file of files) {
+    formData.append('files', file, file.name || 'upload.bin');
+  }
+  try {
+    const payload = await apiFetchJson(`/api/upload?session=${encodeURIComponent(session)}`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      body: formData,
+    });
+    const paths = (payload.files || []).map(file => file.path).filter(Boolean);
+    if (options.source === 'paste') syncPasteCountersFromPayload(payload);
+    activateTab(session, 'terminal');
+    const dropPayload = {path: paths[0], paths, kind: 'file'};
+    const pathInserted = options.source === 'paste' || terminalDropShouldInsertPathFirst(session, dropPayload);
+    const inserted = pathInserted
+      ? (options.source === 'paste'
+          ? insertPasteUploadReferences(session, payload.files || [], {silent: true})
+          : insertUploadPaths(session, paths, {silent: true}))
+      : false;
+    const uploadResult = showUploadResult(session, payload, inserted);
+    if (paths.length && boolSetting('uploads.show_suggestions', true)) {
+      const timeoutMs = uploadResult?.expiresAt ? uploadResult.expiresAt - Date.now() : toastDurationMs;
+      const shown = showTerminalDropSuggestions(session, dropPayload, options.suggestAt?.x, options.suggestAt?.y, {pathInserted, timeoutMs});
+      if (!shown && !pathInserted) insertUploadPaths(session, paths, {silent: true});
+    } else if (!pathInserted) {
+      insertUploadPaths(session, paths, {silent: true});
+    }
+    refreshTerminalAfterUpload(session);
+    refreshOpenEventLogs();
+    refreshTranscripts({force: true});
+  } catch (error) {
+    statusErr(localizedHtml('status.uploadFailed', {error: error?.payload?.error || error}));
+  }
+}
+
+function refreshTerminalAfterUpload(session) {
+  if (!isTmuxSession(session)) return;
+  scheduleFit(session);
+  refreshTerminal(session);
+  requestAnimationFrame(() => {
+    scheduleFit(session);
+    refreshTerminal(session);
+    requestAnimationFrame(() => refreshTerminal(session));
+  });
+}
+
+function insertUploadPaths(session, paths, options = {}) {
+  if (!paths.length) return false;
+  const inserted = insertIntoTerminal(session, `${paths.map(shellQuote).join(' ')} `);
+  if (!options.silent) {
+    statusEl.innerHTML = inserted
+      ? `<span class="ok">${localizedHtml('status.insertedUploadPath', {session: sessionLabel(session)})}</span>`
+      : `<span class="err">${terminalNotConnectedHtml(session)}</span>`;
+  }
+  return inserted;
+}
+
+function insertPasteUploadReferences(session, files, options = {}) {
+  const references = pasteUploadReferences(files);
+  if (!references.length) return insertUploadPaths(session, files.map(file => file.path).filter(Boolean), options);
+  const inserted = insertIntoTerminal(session, `${references.join(' ')} `);
+  if (!options.silent) {
+    statusEl.innerHTML = inserted
+      ? `<span class="ok">${localizedHtml('status.insertedPastedImage', {session: sessionLabel(session)})}</span>`
+      : `<span class="err">${terminalNotConnectedHtml(session)}</span>`;
+  }
+  return inserted;
+}
+
+function pasteUploadReferences(files) {
+  return (files || []).map((file, index) => {
+    const path = file.path || '';
+    if (!path) return '';
+    const number = pasteUploadIndexFromPath(path) || index + 1;
+    return `[Image #${number}] ${shellQuote(path)}`;
+  }).filter(Boolean);
+}
+
+function syncPasteCountersFromPayload(payload) {
+  const files = payload?.files || [];
+  for (const file of files) syncPasteCounterFromPath(file.path || file.saved_name || '');
+}
+
+function syncPasteCounterFromPath(path) {
+  const index = pasteUploadIndexFromPath(path);
+  if (!Number.isFinite(index)) return;
+  const suffix = imageSuffixFromFilename(path) || imageSuffix('');
+  const stampMatch = pathBasename(path).match(/^(\d{8})-/);
+  const stamp = stampMatch?.[1] || pacificDateStamp();
+  const key = `${stamp}:${suffix}`;
+  const localValue = pasteCounters.get(key) || 0;
+  const counters = readPasteCounters();
+  const next = Math.max(localValue, pasteCounterValue(counters, key), index);
+  if (next <= localValue) return;
+  counters[key] = next;
+  writePasteCounters(counters);
+  pasteCounters.set(key, next);
+}
+
+function insertIntoTerminal(session, text) {
+  if (readOnlyMode && !shareWriteMode) {
+    statusErr(localizedHtml('status.readOnlyTypeTerminals'));
+    return false;
+  }
+  const item = terminals.get(session);
+  if (!item) return false;
+  const filtered = stripTerminalQueryResponses(text);
+  if (!filtered) return false;
+  noteFileExplorerChangesSessionInteraction(session);
+  setFocusedTerminal(session, {userInitiated: true});
+  if (shareReplayShellActive && shareWriteMode) {
+    const sent = shareSendTerminalInputIntent(session, filtered);
+    if (sent && autoFocusEnabled) item.term?.focus?.();
+    return sent;
+  }
+  if (item.socket?.readyState !== WebSocket.OPEN) return false;
+  item.socket.send(JSON.stringify({type: 'input', data: filtered}));
+  if (autoFocusEnabled) item.term?.focus?.();
+  return true;
+}
+
+function noteTerminalExplicitInput(session) {
+  noteFileExplorerChangesSessionInteraction(session);
+  setFocusedTerminal(session, {userInitiated: true});
+}
+
+const terminalTmuxPrefixPendingBySession = new Map();
+
+function terminalTmuxPrefixWindowShortcut(key) {
+  const value = String(key || '');
+  if (value === 'n') return {previewKey: 'n', label: 'next tmux window'};
+  if (value === 'p') return {previewKey: 'p', label: 'previous tmux window'};
+  if (/^[0-9]$/.test(value)) return {previewKey: {windowIndex: value}, label: `tmux window ${value}`};
+  return null;
+}
+
+function mirrorTerminalTmuxWindowSwitch(session, shortcut) {
+  if (!shortcut) return false;
+  previewTmuxWindowLabel(session, shortcut.previewKey);
+  statusOk(`${esc(shortcut.label)}: ${esc(sessionLabel(session))}`);
+  scheduleFit(session);
+  focusTerminalFromUserAction(session, 75);
+  setTimeout(() => refreshTranscripts({force: true}), 250);
+  return true;
+}
+
+function observeTerminalTmuxPrefixWindowSwitches(session, data) {
+  const text = String(data || '');
+  if (!text) return false;
+  let pending = terminalTmuxPrefixPendingBySession.get(session) === true;
+  let mirrored = false;
+  for (const char of text) {
+    if (pending) {
+      mirrored = mirrorTerminalTmuxWindowSwitch(session, terminalTmuxPrefixWindowShortcut(char)) || mirrored;
+      pending = false;
+      continue;
+    }
+    if (char === '\x02') pending = true;
+  }
+  if (pending) terminalTmuxPrefixPendingBySession.set(session, true);
+  else terminalTmuxPrefixPendingBySession.delete(session);
+  return mirrored;
+}
+
+function handleTerminalData(session, data) {
+  if (readOnlyMode && !shareWriteMode) return false;
+  const filtered = stripTerminalQueryResponses(data);
+  if (!filtered) return false;
+  if (shareReplayShellActive && shareWriteMode) {
+    shareSendTerminalInputIntent(session, filtered);
+    return true;
+  }
+  const current = terminals.get(session);
+  const socket = current?.socket;
+  if (socket?.readyState !== WebSocket.OPEN) return false;
+  observeTerminalTmuxPrefixWindowSwitches(session, filtered);
+  socket.send(JSON.stringify({type: 'input', data: filtered}));
+  return true;
+}
+
+function shellQuote(value) {
+  return "'" + String(value).replace(/'/g, "'\\''") + "'";
+}
+
+function showUploadResult(session, payload, inserted) {
+  const node = document.getElementById(`upload-${session}`);
+  if (!node) return null;
+  const files = payload.files || [];
+  const paths = files.map(file => file.path).filter(Boolean);
+  const label = files.length === 1 ? (files[0].saved_name || files[0].name || t('popover.kind.file')) : t('files.count', {count: files.length});
+  const target = payload.target_dir || '';
+  const uploadResultKey = inserted ? 'upload.resultInserted' : 'upload.resultTerminalDisconnected';
+  const expiresAt = Date.now() + toastDurationMs;
+  const newEntries = files.length
+    ? files.map(file => {
+      const name = file.saved_name || file.name || t('popover.kind.file');
+      const destination = pathBasename(file.path || target) || target;
+      return {
+        id: ++uploadResultSequence,
+        text: t(uploadResultKey, {name, destination}),
+        path: file.path || '',
+        expiresAt,
+      };
+    })
+    : [{
+      id: ++uploadResultSequence,
+      text: t(uploadResultKey, {name: label, destination: pathBasename(target) || target}),
+      path: target,
+      expiresAt,
+    }];
+  const existing = uploadResultsBySession.get(session) || [];
+  const active = [...existing.filter(entry => entry.expiresAt > Date.now()), ...newEntries].slice(-8);
+  uploadResultsBySession.set(session, active);
+  renderUploadResult(session);
+  return {expiresAt};
+}
+
+function ensureUploadResultShell(session, node) {
+  return ensureToastShell(node, {
+    title: t('upload.resultTitle', {host: serverHostname, session: sessionLabel(session)}),
+    closeLabel: t('upload.hideStatus'),
+    keepLabel: t('upload.keepStatus'),
+    onKeep: () => keepUploadResult(session),
+    onClose: () => hideUploadResult(session),
+  });
+}
+
+function keepUploadResult(session) {
+  const entries = uploadResultsBySession.get(session) || [];
+  for (const entry of entries) entry.expiresAt = Number.POSITIVE_INFINITY;
+  uploadResultsBySession.set(session, entries);
+  if (uploadCleanupTimers.has(session)) {
+    clearTimeout(uploadCleanupTimers.get(session));
+    uploadCleanupTimers.delete(session);
+  }
+}
+
+function scheduleUploadResultCleanup(session, active, now) {
+  if (uploadCleanupTimers.has(session)) clearTimeout(uploadCleanupTimers.get(session));
+  const delay = Math.max(1, Math.min(...active.map(entry => entry.expiresAt - now)));
+  uploadCleanupTimers.set(session, window.setTimeout(() => {
+    uploadCleanupTimers.delete(session);
+    renderUploadResult(session);
+  }, delay));
+}
+
+function renderUploadResult(session) {
+  const node = document.getElementById(`upload-${session}`);
+  if (!node) return;
+  const now = Date.now();
+  const active = (uploadResultsBySession.get(session) || []).filter(entry => entry.expiresAt > now).slice(-8);
+  uploadResultsBySession.set(session, active);
+  if (!active.length) {
+    node.hidden = true;
+    const titleNode = node.querySelector('.toast-title');
+    if (titleNode) titleNode.textContent = '';
+    const textNode = node.querySelector('.toast-body');
+    if (textNode) textNode.replaceChildren();
+    if (uploadCleanupTimers.has(session)) {
+      clearTimeout(uploadCleanupTimers.get(session));
+      uploadCleanupTimers.delete(session);
+    }
+    return;
+  }
+  const textNode = ensureUploadResultShell(session, node);
+  if (!textNode) return;
+  const paths = active.map(entry => entry.path).filter(Boolean);
+  node.hidden = false;
+  textNode.title = paths.join('\n');
+  renderToastLines(textNode, active.map(entry => ({
+    text: entry.text,
+    countdownMs: entry.expiresAt - now,
+  })));
+  scheduleUploadResultCleanup(session, active, now);
+}
+
+function hideUploadResult(session) {
+  uploadResultsBySession.delete(session);
+  if (uploadCleanupTimers.has(session)) {
+    clearTimeout(uploadCleanupTimers.get(session));
+    uploadCleanupTimers.delete(session);
+  }
+  const node = document.getElementById(`upload-${session}`);
+  if (node) {
+    const titleNode = node.querySelector('.toast-title');
+    if (titleNode) titleNode.textContent = '';
+    const textNode = node.querySelector('.toast-body');
+    if (textNode) textNode.replaceChildren();
+    node.hidden = true;
+  }
+}
+
+function updatePanelSlot(panel, session, slot) {
+  panel.dataset.slot = slot;
+  panel.dataset.layoutItem = session;
+  const head = panel.querySelector('.panel-head');
+  if (head) head.dataset.dragSlot = slot;
+  if (isFileEditorItem(session)) renderFileEditorPanel(panel, session, {updateActiveFile: !dockviewLayoutActive(), captureViewState: false});
+  updatePaneExpandButton(panel, session);
+  if (!hideDockviewInnerPaneTabs(panel)) updatePaneTabStrip(panel, slot);
+  updatePanelInactiveOverlays();
+}
+
+function updatePaneExpandButton(panel, session) {
+  const button = panel.querySelector('[data-pane-expand]');
+  if (button) button.hidden = !canPaneExpand(session);
+}
+
+function syncPanelVisibility(previousActive = []) {
+  const visible = new Set(activeSessions);
+  for (const session of sessions) {
+    if (!visible.has(session)) {
+      stopTranscriptStream(session);
+      stopSummaryStream(session);
+      if (focusedTerminal === session) focusedTerminal = null;
+    }
+    updateTypingIndicator(session);
+  }
+  for (const session of activeSessions.filter(isTmuxSession)) {
+    const pane = document.getElementById(`terminal-pane-${session}`);
+    if (pane?.classList.contains('active')) scheduleFit(session);
+  }
+}
+
+function activateTab(session, name, options = {}) {
+  setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
+  if (name !== 'transcript') stopTranscriptStream(session);
+  if (name !== 'summary') stopSummaryStream(session);
+  document.querySelectorAll(`[data-tab="${session}"]`).forEach(button => {
+    button.classList.toggle('active', button.dataset.tabName === name);
+  });
+  document.querySelectorAll(`[data-panel-tab-overflow="${session}"]`).forEach(button => {
+    button.classList.toggle('active', ['transcript', 'summary', 'events'].includes(name));
+  });
+  for (const tabName of ['terminal', 'transcript', 'summary', 'events']) {
+    const pane = document.getElementById(`${tabName}-pane-${session}`);
+    if (pane) pane.classList.toggle('active', tabName === name);
+  }
+  updateTypingIndicator(session);
+  if (name === 'terminal') {
+    scheduleFit(session);
+    setTimeout(() => refreshTerminal(session), 120);
+    scheduleTerminalBlankScreenRefresh(session);
+    if (options.userInitiated) focusTerminalFromUserAction(session);
+    else focusTerminalWhenAutoFocus(session, 25);
+  } else {
+    clearFocusedTerminal(session);
+  }
+  if (name === 'transcript') {
+    startTranscriptStream(session, {scrollBottom: true});
+  }
+  if (name === 'summary') startSummaryStream(session);
+  if (name === 'events') refreshEventLog(session);
+}
+
+function tmuxWindow(session, key, label) {
+  if (readOnlyMode) {
+    statusErr(localizedHtml('terminal.connection.readonlyTmuxWindow'));
+    return;
+  }
+  const directIndex = tmuxWindowNumber(key?.windowIndex);
+  if (directIndex !== null) {
+    previewTmuxWindowLabel(session, {windowIndex: directIndex});
+    statusOk(`${esc(label)}: ${esc(sessionLabel(session))}`);
+    scheduleFit(session);
+    focusTerminalFromUserAction(session, 75);
+    apiFetchJson(`/api/tmux-window?session=${encodeURIComponent(session)}&window=${encodeURIComponent(String(directIndex))}`, {method: 'POST'})
+      .then(() => setTimeout(() => refreshTranscripts({force: true}), 250))
+      .catch(error => statusErr(localizedHtml('terminal.window.failed', {error: error.message || error})));
+    return;
+  }
+  const item = terminals.get(session);
+  if (!item || item.socket?.readyState !== WebSocket.OPEN) {
+    statusErr(terminalNotConnectedHtml(session));
+    return;
+  }
+  fitTerminal(session);
+  item.socket.send(JSON.stringify({type: 'input', data: String.fromCharCode(2) + key}));
+  previewTmuxWindowLabel(session, key);
+  statusOk(`${esc(label)}: ${esc(sessionLabel(session))}`);
+  scheduleFit(session);
+  focusTerminalFromUserAction(session, 75);
+  setTimeout(() => refreshTranscripts({force: true}), 250);
+}
+
+async function ensureTerminalRunning(session) {
+  const item = terminals.get(session);
+  const readyState = item?.socket?.readyState;
+  const container = document.getElementById(terminalDomId(session));
+  const boundToCurrentContainer = Boolean(item?.term && container?.isConnected && item.container === container);
+  if (item && boundToCurrentContainer && readyState !== undefined && readyState !== WebSocket.CLOSING && readyState !== WebSocket.CLOSED) return;
+  if (readOnlyMode) {
+    startTerminal(session);
+    return;
+  }
+  const ensured = await ensureSession(session);
+  if (!ensured) {
+    const container = document.getElementById(terminalDomId(session));
+    if (container) container.innerHTML = `<pre class="terminal-error">${localizedHtml('terminal.connection.sessionUnavailableRetry', {session: sessionLabel(session)})}</pre>`;
+    return;
+  }
+  startTerminal(session);
+}
+
+function connectTerminalSocket(session, item) {
+  if (!item?.term || !item?.container) return;
+  if (item.socket && item.socket.readyState !== WebSocket.CLOSED && item.socket.readyState !== WebSocket.CLOSING) return;
+  const socket = new WebSocket(wsUrl(session));
+  socket.binaryType = 'arraybuffer';
+  item.socket = socket;
+  item.manualClose = false;
+  socket.onopen = () => {
+    item.reconnectAttempt = 0;
+    dismissTerminalConnectionToasts(session);
+    if (terminalIsVisible(session, item.container)) {
+      scheduleFit(session);
+      scheduleTerminalBlankScreenRefresh(session);
+      if (!shareViewMode) scheduleRemoteResize(session, shareRemoteResizeAfterSocketOpenMs);
+    }
+    updateTypingIndicator(session);
+    updateStatus();
+    refreshTrackedSessionChrome(session);
+  };
+  socket.onmessage = event => {
+    if (terminals.get(session) !== item || !item.term) return;
+    try {
+      if (shareViewMode) {
+        handleShareViewSocketMessage(session, item, event.data);
+      } else if (event.data instanceof ArrayBuffer) {
+        item.term.write(new Uint8Array(event.data));
+      } else {
+        item.term.write(String(event.data));
+      }
+      scheduleTerminalBlankScreenRefresh(session);
+    } catch (_) {
+      if (terminals.get(session) === item) closeTerminalItem(session, item);
+    }
+  };
+  socket.onclose = () => {
+    if (item.manualClose || terminals.get(session) !== item) return;
+    postEvent(session, 'terminal_disconnected', `terminal disconnected from ${session}`, {});
+    clearFocusedTerminal(session);
+    updateStatus();
+    refreshTrackedSessionChrome(session);
+    // Roster-confirm before reconnecting: a killed session is pruned immediately, a transient
+    // disconnect reconnects as before.
+    confirmSessionGoneOrReconnect(session, item);
+  };
+  socket.onerror = () => {
+    updateTypingIndicator(session);
+    updateStatus();
+    refreshTrackedSessionChrome(session);
+  };
+}
+
+function shareSocketMessage(data) {
+  if (typeof data !== 'string') return null;
+  try {
+    return JSON.parse(data);
+  } catch (_) {
+    return null;
+  }
+}
+
+function shareTerminalBytesFromMessage(session, message) {
+  if (!message || message.ch !== 'term' || message.pane !== session || typeof message.data !== 'string') {
+    return null;
+  }
+  const raw = atob(message.data);
+  const bytes = new Uint8Array(raw.length);
+  for (let index = 0; index < raw.length; index += 1) {
+    bytes[index] = raw.charCodeAt(index);
+  }
+  return bytes;
+}
+
+function handleShareViewSocketMessage(session, item, data) {
+  const message = shareSocketMessage(data);
+  if (!message) return;
+  if (message.ch === 'ui') {
+    applyShareUiMessage(message);
+    return;
+  }
+  if (message.ch === 'ptr') {
+    renderSharePointerGhost(message.payload && typeof message.payload === 'object' ? message.payload : message);
+    return;
+  }
+  const bytes = shareTerminalBytesFromMessage(session, message);
+  if (bytes) {
+    item.shareTerminalBytesReceived = true;
+    item.shareTerminalLastByteAt = Date.now();
+    item.shareTerminalByteCount = Math.max(0, Math.round(Number(item.shareTerminalByteCount) || 0)) + bytes.length;
+    item.term.write(bytes);
+  }
+}
+
+function bindTerminalContainerForSession(session, term, container) {
+  if (!session || !term || !container) return;
+  if (container.dataset?.terminalHandlersBound === session) return;
+  if (container.dataset) container.dataset.terminalHandlersBound = session;
+  installTerminalContextMenu(session, term, container);
+  installTerminalCopyShortcut(session, term, container);
+  installTerminalFileDrop(session, container);
+  enableTerminalScroll(session, term, container);
+  observeTerminalResize(session, container);
+  container.addEventListener('focusin', () => {
+    setFocusedTerminal(session);
+  });
+  container.addEventListener('focusout', () => {
+    clearFocusedTerminal(session);
+  });
+  container.addEventListener('copy', event => {
+    copyTerminalSelectionToClipboardEvent(session, term, event, container);
+  }, {capture: true});
+  container.addEventListener('keydown', () => noteTerminalExplicitInput(session), {capture: true});
+  container.addEventListener('paste', () => noteTerminalExplicitInput(session), {capture: true});
+  container.addEventListener('beforeinput', () => noteTerminalExplicitInput(session), {capture: true});
+}
+
+function startTerminal(session) {
+  const existing = terminals.get(session);
+  const reconnectAttempt = existing?.reconnectAttempt || 0;
+  const container = document.getElementById(terminalDomId(session));
+  if (!container) return;
+  if (existing?.term && existing.container === container) {
+    connectTerminalSocket(session, existing);
+    return;
+  }
+  if (existing) {
+    closeTerminalItem(session, existing);
+    terminals.delete(session);
+  }
+  const TerminalCtor = window.Terminal?.Terminal || window.Terminal;
+  if (!TerminalCtor) {
+    container.innerHTML = '<pre class="terminal-error">xterm.js failed to load from /static/xterm.js. Terminal cannot attach.</pre>';
+    statusErr(localizedHtml('status.xtermUnavailable'));
+    return;
+  }
+  container.innerHTML = '';
+  const size = shareHostTerminalSize(session) || estimateTerminalSize(container);
+  const term = new TerminalCtor({
+    cols: size.cols,
+    rows: size.rows,
+    cursorBlink: true,
+    convertEol: false,
+    fontFamily: terminalFontFamily,
+    fontSize: terminalFontSize,
+    letterSpacing: 0,
+    lineHeight: 1.0,
+    scrollback: terminalScrollback,
+    disableStdin: readOnlyMode && !shareWriteMode,
+    theme: terminalThemeForSession(session),
+    minimumContrastRatio: terminalMinimumContrastRatio(),
+    // Alt-screen TUIs (claude, vim, less) enable mouse reporting, which makes xterm send drags to the app
+    // instead of selecting text — so Ctrl-C/Cmd-C has nothing to copy. Option-click (Mac) forces a text
+    // selection anyway; on Linux/Windows hold Shift while dragging (xterm's built-in bypass).
+    macOptionClickForcesSelection: true,
+  });
+  term.open(container);
+  // match the container bg to the terminal theme so every pane shares one white.
+  if (container?.style) container.style.background = terminalThemeForGlobalTheme().background;
+  installTerminalLinkProvider(term);
+  installTerminalOsc52Bridge(session, term);   // Claude/tmux OSC 52 clipboard escapes -> browser clipboard
+  const openedSize = shareHostTerminalSize(session) || estimateTerminalSize(container, term);
+  if (term.cols !== openedSize.cols || term.rows !== openedSize.rows) {
+    term.resize(openedSize.cols, openedSize.rows);
+  }
+  const item = {
+    term,
+    socket: null,
+    container,
+    manualClose: false,
+    reconnectAttempt,
+    reconnectTimer: null,
+    resizeTimer: null,
+    scrollTimer: null,
+    pendingScrollLines: 0,
+    shareTerminalBytesReceived: false,
+    shareTerminalLastByteAt: 0,
+    shareTerminalByteCount: 0,
+    shareTerminalLastResetAt: 0,
+    shareTerminalSkippedResetCount: 0,
+    blankScreenRefreshTimer: 0,
+    blankScreenRefreshAttempts: 0,
+  };
+  terminals.set(session, item);
+  bindTerminalContainerForSession(session, term, container);
+  term.onFocus?.(() => {
+    setFocusedTerminal(session);
+  });
+  term.onBlur?.(() => {
+    clearFocusedTerminal(session);
+  });
+  // xterm can emit focus and mouse-tracking bytes from hover. Keep Differ commits on DOM
+  // keydown/paste/beforeinput and pane pointerdown, not on the terminal transport stream.
+  term.onData(data => handleTerminalData(session, data));
+  connectTerminalSocket(session, item);
+}
+
+function updateTypingIndicator(session) {
+  const item = terminals.get(session);
+  const container = item?.container || document.getElementById(terminalDomId(session));
+  const pane = document.getElementById(`terminal-pane-${session}`);
+  const panel = document.getElementById(panelDomId(session));
+  const ready = Boolean(
+    item?.socket?.readyState === WebSocket.OPEN
+    && focusedTerminal === session
+    && pane?.classList.contains('active')
+  );
+  container?.classList.toggle('typing-ready', ready);
+  panel?.classList.toggle('typing-ready-pane', ready);
+  panel?.classList.toggle('yolo-ready-pane', ready && autoApproveStates.get(session)?.enabled === true);
+}
+
+function updateStatus() {
+  if (activeSessions.length === 0) {
+    statusEl.textContent = t('terminal.status.noSessionSelected');
+    statusEl.removeAttribute('title');
+    return;
+  }
+  const activeTmuxSessions = activeSessions.filter(isTmuxSession);
+  if (!activeTmuxSessions.length) {
+    statusEl.textContent = t('terminal.status.viewShown', {view: infoTabLabel()});
+    statusEl.removeAttribute('title');
+    return;
+  }
+  let open = 0;
+  for (const session of activeTmuxSessions) {
+    const item = terminals.get(session);
+    if (item?.socket?.readyState === WebSocket.OPEN) open += 1;
+  }
+  const total = activeTmuxSessions.length;
+  statusEl.textContent = open === total ? '' : t('terminal.connection.connShort', {open, total});
+  statusEl.title = open === total ? '' : t('terminal.connection.socketsTitle', {open, total});
+}
+
+async function toggleAutoApprove(session) {
+  if (readOnlyMode) {
+    statusErr(localizedHtml('status.yoloReadOnlyChange'));
+    return;
+  }
+  const state = autoApproveStates.get(session) || {};
+  const current = state.enabled === true;
+  await setAutoApprove(session, !current);
+}
+
+async function setAutoApprove(session, enabled) {
+  if (readOnlyMode) {
+    statusErr(localizedHtml('status.yoloReadOnlyChange'));
+    return;
+  }
+  try {
+    const payload = await apiFetchJson(`/api/auto-approve?session=${encodeURIComponent(session)}&enabled=${enabled ? '1' : '0'}`, {method: 'POST'});
+    autoApproveStates.set(session, payload);
+    updateDocumentTitle();
+    updateSessionButtonStates();
+    renderAutoApproveButton(session, payload);
+    scheduleShareUiStatePublish();
+    statusEl.innerHTML = payload.enabled
+      ? `<span class="ok">${localizedHtml('status.yoloEnabledFor', {session: sessionLabel(session)})}</span>`
+      : `<span class="ok">${localizedHtml('status.yoloDisabledFor', {session: sessionLabel(session)})}</span>`;
+  } catch (error) {
+    const payload = error?.payload || {};
+    if (error?.status) {
+      if (payload?.target || payload?.session) {
+        autoApproveStates.set(session, payload);
+        updateDocumentTitle();
+        updateSessionButtonStates();
+        renderAutoApproveButton(session, payload);
+        scheduleShareUiStatePublish();
+      }
+      statusErr(localizedHtml('status.yoloApprovalFailed', {error: payload.error || t('status.yoloApprovalFailedDefault')}));
+      return;
+    }
+    statusErr(localizedHtml('status.yoloRequestFailed', {error}));
+  }
+}
+
+async function refreshAutoStatuses() {
+  await loadAutoStatuses();
+  bindClipboardPaste();
+  renderAutoApproveButtons();
+  updateSessionButtonStates();
+  refreshActivePanelHeaders();
+  trackSessionStateChanges();
+  refreshOpenEventLogs();
+}
+
+async function loadAutoStatuses() {
+  try {
+    const payload = await apiFetchJson('/api/auto-approve');
+    applyAutoApprovePayload(payload);
+  } catch (_) {
+    for (const session of activeSessions.filter(isTmuxSession)) {
+      try {
+        const payload = await apiFetchJson(`/api/auto-approve?session=${encodeURIComponent(session)}`);
+        autoApproveStates.set(session, payload);
+      } catch (_) {}
+    }
+  }
+  updateDocumentTitle();
+  // Re-toggle the YO markers' working class from the fresh states on the SAME poll the title updates,
+  // so a finished/idle pane's marker stops spinning instead of lingering (the transcript poll path
+  // updated the title but never re-synced the markers).
+  renderAutoApproveButtons();
+}
+
+function applyAutoApprovePayload(payload) {
+  if (!payload || typeof payload !== 'object') return false;
+  const previousActive = activeSessions.slice();
+  const sessionsChanged = Array.isArray(payload.session_order) ? updateSessionList(payload.session_order) : false;
+  if (payload.rules) {
+    yoloRulesPayload = payload.rules;
+    renderPreferencesPanels();
+  }
+  for (const session of sessions) {
+    const state = payload.sessions?.[session] || {target: session, enabled: false, last_action: 'off'};
+    autoApproveStates.set(session, state);
+  }
+  if (sessionsChanged) renderPanels(previousActive);
+  updateDocumentTitle();
+  renderAutoApproveButtons();
+  updateSessionButtonStates();
+  refreshActivePanelHeaders();
+  trackSessionStateChanges();
+  scheduleShareUiStatePublish();
+  return true;
+}
+
+function autoApproveOwnerLabel(payload) {
+  const owner = payload?.lock_owner || {};
+  const pid = owner.pid ? `pid ${owner.pid}` : '';
+  const root = owner.project_root || '';
+  return [pid, root].filter(Boolean).join(' ') || payload?.last_action || t('yolo.ownerFallback');
+}
+
+function renderAutoApproveButtons() {
+  for (const session of sessions) {
+    const state = autoApproveStates.get(session) || {target: session, enabled: false, last_action: 'off'};
+    renderAutoApproveButton(session, state);
+  }
+}
+
+function renderAutoApproveButton(session, payload) {
+  const buttons = document.querySelectorAll(`[data-yolo-session="${cssEscape(session)}"]`);
+  const enabled = payload?.enabled === true;
+  const locked = payload?.locked === true && !enabled;
+  const working = sessionYoloIsWorking(session, payload);
+  for (const button of buttons) {
+    const wasWorking = button.classList.contains('working');
+    syncPressedButton(button, enabled);
+    button.classList.toggle('inactive', !enabled && !locked);
+    button.classList.toggle('locked', locked);
+    button.classList.toggle('working', working);
+    if (working) {
+      if (!wasWorking || !button.style.getPropertyValue('--yolo-rotate-delay')) {
+        button.style.setProperty('--yolo-rotate-delay', yoloRotationDelay());
+      }
+    } else {
+      button.style.removeProperty('--yolo-rotate-delay');
+    }
+    button.closest('.pane-tab')?.classList.remove('is-working');
+    button.textContent = t('brand.marker');
+    const action = payload?.last_action ? t('yolo.actionSuffix', {action: payload.last_action}) : '';
+    const readonly = readOnlyMode ? t('yolo.readonlySuffix') : '';
+    button.title = enabled
+      ? t('yolo.buttonOnForSession', {session: sessionLabel(session), action, readonly})
+      : locked
+        ? t('yolo.buttonOwnedBy', {owner: autoApproveOwnerLabel(payload)})
+      : t('yolo.buttonOffForSession', {session: sessionLabel(session), readonly});
+  }
+  updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+  updateTypingIndicator(session);
+}
+
+function startSummaryStream(session) {
+  stopSummaryStream(session);
+  const node = document.getElementById(summaryDomId(session));
+  if (!node) return;
+  if (readOnlyMode) {
+    node.textContent = t('transcript.adminRequired');
+    statusErr(`${esc(t('transcript.adminStatus'))}`);
+    return;
+  }
+  // Accumulate the raw streamed text and render it through the markdown pipeline
+  // (coalesced to one render per frame) so the panel shows formatted markdown,
+  // not raw `##`/`**`/backticks. The leading `[codex]` status lines render as
+  // plain paragraphs, then the model's markdown summary renders properly.
+  let raw = 'Starting structured Codex summary for the last hour…\n\n';
+  let renderScheduled = false;
+  const renderSummary = () => {
+    renderScheduled = false;
+    renderMarkdownPreviewInto(node, raw);
+    node.scrollTop = node.scrollHeight;
+  };
+  const appendSummary = text => {
+    raw += text;
+    if (!renderScheduled) {
+      renderScheduled = true;
+      requestAnimationFrame(renderSummary);
+    }
+  };
+  renderSummary();
+  const source = new EventSource(`/api/summary-stream?session=${encodeURIComponent(session)}&lookback=${60 * 60}`);
+  summaryStreams.set(session, source);
+  source.addEventListener('meta', event => {
+    const payload = safeJsonParse(event.data, null);
+    if (!payload) return;
+    const fallback = payload.fallback ? 'recent transcript tail' : 'last hour';
+    const projectCount = Array.isArray(payload.projects) ? payload.projects.length : 0;
+    appendSummary(`[codex] summarizing ${fallback} for ${payload.focus_root || session}\n`);
+    if (payload.summary_model) appendSummary(`[codex] model: ${payload.summary_model}; effort: ${payload.summary_effort || 'default'}\n`);
+    appendSummary(`[codex] project inventory: ${projectCount} sessions\n\n`);
+  });
+  source.addEventListener('log', event => {
+    const payload = safeJsonParse(event.data, null);
+    if (payload?.text) appendSummary(`[codex] ${payload.text}\n`);
+  });
+  source.addEventListener('delta', event => {
+    const payload = safeJsonParse(event.data, null);
+    if (payload?.text) appendSummary(payload.text);
+  });
+  source.addEventListener('summary_error', event => {
+    // A bad frame must still tear the stream down (this is the error path); guard the read but always stop
+    // — an unguarded JSON.parse throw here would leak the EventSource.
+    const payload = safeJsonParse(event.data, null);
+    appendSummary(`\n[error] ${payload?.error || 'summary failed'}\n`);
+    stopSummaryStream(session);
+  });
+  source.addEventListener('done', event => {
+    const payload = safeJsonParse(event.data, null);
+    if (payload?.return_code && payload.return_code !== 0) {
+      appendSummary(`\n[codex exited ${payload.return_code}]\n`);
+    }
+    stopSummaryStream(session);
+  });
+  source.onerror = () => {
+    if (summaryStreams.get(session) !== source) return;
+    appendSummary(`\n${t('terminal.summary.streamDisconnected')}\n`);
+    stopSummaryStream(session);
+  };
+}
+
+function stopSummaryStream(session) {
+  const source = summaryStreams.get(session);
+  if (!source) return;
+  source.close();
+  summaryStreams.delete(session);
+}
+
+function reloadIsSafe() {
+  // Don't yank the page out from under unsaved work or active typing.
+  for (const file of openFiles.values()) {
+    if (file?.dirty) return false;
+  }
+  const active = document.activeElement;
+  if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return false;
+  return true;
+}
+
+let selfUpdateAvailableTarget = '';
+let selfUpdateReloadPending = false;
+let selfUpdateReloadTarget = '';
+let selfUpdateReloadAttempts = 0;
+let selfUpdateReloadTimer = null;
+let selfUpdateReloadDeferredToastShown = false;
+const selfUpdateReloadPollMs = 1500;
+const selfUpdateReloadMaxAttempts = 120;
+
+function dismissToastNode(node) {
+  if (!node) return;
+  const alertId = Number(node.dataset?.alertId || 0);
+  if (alertId) removeAttentionAlert(alertId);
+  else node.remove?.();
+}
+
+function dismissUpdateAvailableToasts(ownerToast = null) {
+  const toasts = new Set();
+  if (ownerToast) toasts.add(ownerToast);
+  for (const node of document.querySelectorAll?.('.toast-update') || []) {
+    toasts.add(node);
+  }
+  for (const node of toasts) dismissToastNode(node);
+}
+
+function hideUpdateBadge() {
+  const badge = document.querySelector('[data-update-badge]');
+  if (!badge) return;
+  badge.hidden = true;
+  delete badge.dataset.updateTarget;
+}
+
+function markSelfUpdateReloadPending(target = '') {
+  selfUpdateReloadPending = true;
+  selfUpdateReloadTarget = String(target || selfUpdateReloadTarget || '').trim();
+  selfUpdateReloadAttempts = 0;
+  selfUpdateReloadDeferredToastShown = false;
+  if (selfUpdateReloadTarget) serverVersionReloadHandled = selfUpdateReloadTarget;
+  document.getElementById('serverUpdateBanner')?.remove();
+}
+
+function selfUpdateOwnsServerVersion(serverVersion) {
+  if (!selfUpdateReloadPending) return false;
+  if (!selfUpdateReloadTarget || serverVersion === selfUpdateReloadTarget) {
+    if (serverVersion) serverVersionReloadHandled = serverVersion;
+    return true;
+  }
+  return false;
+}
+
+function selfUpdateReloadDeferredReason() {
+  for (const file of openFiles.values()) {
+    if (file?.dirty) return 'unsaved edits';
+  }
+  const active = document.activeElement;
+  if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) {
+    return 'active typing';
+  }
+  return 'current activity';
+}
+
+function showSelfUpdateReloadDeferredToast() {
+  if (selfUpdateReloadDeferredToastShown) return;
+  selfUpdateReloadDeferredToastShown = true;
+  showToast('Software Update', [
+    `Reload deferred because of ${selfUpdateReloadDeferredReason()}. YOLOmux will reload when it is safe.`,
+  ], {className: 'attention-alert toast toast-update'});
+}
+
+function maybeReloadAfterSelfUpdate() {
+  if (!selfUpdateReloadPending) return false;
+  if (reloadIsSafe()) {
+    location.reload();
+    return true;
+  }
+  showSelfUpdateReloadDeferredToast();
+  scheduleSelfUpdateReloadPoll();
+  return false;
+}
+
+function scheduleSelfUpdateReloadPoll(delayMs = selfUpdateReloadPollMs) {
+  if (!selfUpdateReloadPending) return;
+  if (selfUpdateReloadTimer) clearTimeout(selfUpdateReloadTimer);
+  selfUpdateReloadTimer = window.setTimeout(() => {
+    selfUpdateReloadTimer = null;
+    pollSelfUpdateReload();
+  }, delayMs);
+}
+
+async function pollSelfUpdateReload() {
+  if (!selfUpdateReloadPending) return false;
+  selfUpdateReloadAttempts += 1;
+  try {
+    const res = await fetch(`/api/ping?selfUpdate=${Date.now()}`, {cache: 'no-store'});
+    if (res && res.ok !== false) return maybeReloadAfterSelfUpdate();
+  } catch (_error) {
+    // The old process may already be gone. Keep polling until the replacement server answers.
+  }
+  if (selfUpdateReloadAttempts >= selfUpdateReloadMaxAttempts) {
+    selfUpdateReloadPending = false;
+    showToast('Software Update', ['Update installed, but YOLOmux did not answer after restart. Reload when it is reachable.']);
+    return false;
+  }
+  scheduleSelfUpdateReloadPoll();
+  return false;
+}
+
+function startSelfUpdateReloadPolling(target = '') {
+  markSelfUpdateReloadPending(target);
+  scheduleSelfUpdateReloadPoll(0);
+}
+
+function showServerUpdateBanner(version) {
+  let banner = document.getElementById('serverUpdateBanner');
+  if (banner) {
+    banner.dataset.version = version;
+    return;
+  }
+  banner = document.createElement('div');
+  banner.id = 'serverUpdateBanner';
+  banner.className = 'server-update-banner';
+  banner.dataset.version = version;
+  const msg = document.createElement('span');
+  msg.className = 'server-update-banner-msg';
+  msg.textContent = t('update.available');
+  const reload = document.createElement('button');
+  reload.type = 'button';
+  reload.className = 'server-update-banner-reload';
+  reload.textContent = t('update.reload');
+  reload.addEventListener('click', () => location.reload());
+  const dismiss = document.createElement('button');
+  dismiss.type = 'button';
+  dismiss.className = 'server-update-banner-dismiss';
+  dismiss.setAttribute('aria-label', t('update.dismiss'));
+  dismiss.textContent = '×';
+  dismiss.addEventListener('click', () => banner.remove());
+  banner.append(msg, reload, dismiss);
+  document.body.appendChild(banner);
+}
+
+function maybeHandleServerVersionChange(serverVersion) {
+  // The boot version (bootstrap.version) only updates on page load; this lets a
+  // long-lived open client learn that a newer server shipped, via the metadata poll.
+  if (!serverVersion || serverVersion === bootstrap.version) return;
+  if (!updateNotificationAllowsVersion(bootstrap.version, serverVersion)) return;
+  if (selfUpdateOwnsServerVersion(serverVersion)) return;
+  if (serverVersionReloadHandled === serverVersion) return;
+  serverVersionReloadHandled = serverVersion;
+  if (boolSetting('general.reload_on_update_auto', false) && reloadIsSafe()) {
+    location.reload();
+    return;
+  }
+  showServerUpdateBanner(serverVersion);
+}
+
+async function applyTranscriptsPayload(payload, options = {}) {
+  if (!payload || typeof payload !== 'object') return false;
+  transcriptMeta = payload;
+  transcriptMetaLoaded = true;
+  transcriptMetaLoadError = '';
+  clearInfoSessionDrawerCache();
+  if (typeof warmTabberDataOnLaunch === 'function') warmTabberDataOnLaunch();
+  maybeHandleServerVersionChange(transcriptMeta.server_version);
+  if (transcriptMeta.agentAuth) agentAuth = transcriptMeta.agentAuth;
+  updateMetadataBadgePulses(transcriptMeta);
+  const previousActive = activeSessions.slice();
+  const sessionsChanged = updateSessionList(transcriptMeta.session_order || []);
+  if (options.refreshAuto !== false) {
+    await loadAutoStatuses();
+  }
+  if (sessionsChanged) renderPanels(previousActive);
+  renderSessionButtons();
+  renderInfoPanel();
+  renderYoagentPanel();
+  if (options.refreshActivity !== false) refreshActivitySummary({silent: true});
+  for (const session of activeSessions.filter(isTmuxSession)) {
+    const preview = document.getElementById(transcriptDomId(session));
+    const info = transcriptMeta.sessions?.[session];
+    const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
+    updatePanelHeader(session, info);
+    renderSummaryContext(session, info, agent);
+    if (!preview) continue;
+    if (agent?.transcript) {
+      updateTranscriptPathRow(session, agent.transcript);
+      if (options.refreshContext === false) continue;
+      preview.textContent = `session_id: ${agent.session_id || ''}\nstatus: ${agent.status || ''}\n\n${t('transcript.loadingRecentContext')}`;
+      refreshTranscriptPreview(session, preview, {preserveScroll: false});
+    } else if (agent?.error) {
+      updateTranscriptPathRow(session, '', agent.error);
+      preview.textContent = agent.error;
+    } else {
+      updateTranscriptPathRow(session, '', t('transcript.noAgentFound'));
+      preview.textContent = t('transcript.noAgentFound');
+    }
+  }
+  renderPaneTabStrips();
+  scheduleFileExplorerActiveTabSync();
+  if (!shareViewMode && typeof syncServerWatchRoots === 'function') syncServerWatchRoots({renew: true});
+  if (!shareViewMode) scheduleShareUiStatePublish();
+  trackSessionStateChanges();
+  refreshOpenEventLogs();
+  return true;
+}
+
+async function refreshTranscripts(options = {}) {
+  if (transcriptMetaRefreshPromise) return transcriptMetaRefreshPromise;
+  transcriptMetaLoading = true;
+  transcriptMetaLoadError = '';
+  syncTranscriptMetaLoadingUi();
+  renderInfoPanel();
+  transcriptMetaRefreshPromise = (async () => {
+    try {
+      const params = new URLSearchParams();
+      if (options.force === true) params.set('force', '1');
+      const suffix = params.toString();
+      const payload = await apiFetchJson(`/api/transcripts${suffix ? `?${suffix}` : ''}`);
+      await applyTranscriptsPayload(payload, {
+        refreshAuto: options.refreshAuto !== false,
+        refreshContext: true,
+        refreshActivity: options.refreshActivity !== false,
+      });
+    } catch (error) {
+      transcriptMetaLoadError = String(error);
+      for (const session of activeSessions.filter(isTmuxSession)) {
+        const meta = document.getElementById(`meta-${session}`);
+        const preview = document.getElementById(transcriptDomId(session));
+        if (meta) meta.innerHTML = `<span class="err">transcript lookup failed</span>`;
+        updateTranscriptPathRow(session, '', 'transcript lookup failed');
+        if (preview) preview.textContent = `transcript lookup failed: ${error}`;
+      }
+    } finally {
+      transcriptMetaLoading = false;
+      transcriptMetaRefreshPromise = null;
+      syncTranscriptMetaLoadingUi();
+      renderInfoPanel();
+    }
+  })();
+  return transcriptMetaRefreshPromise;
+}
+
+function updatePanelMeta(session, info) {
+  const meta = document.getElementById(`meta-${session}`);
+  if (!meta) return;
+  meta.innerHTML = stripTitleAttrs(projectMetaHtml(session, info));
+  meta.removeAttribute('title');
+}
+
+function updatePanelHeader(session, info) {
+  const tab = document.getElementById(paneTabDomId(session));
+  const panel = document.getElementById(panelDomId(session));
+  const auto = autoApproveStates.get(session)?.enabled === true;
+  const state = sessionState(session, info);
+  updatePanelControlLabels(session, info);
+  syncAttentionAnimation(panel, state.attention === true);
+  if (tab) {
+    tab.className = `panel-session-label ${auto ? 'auto' : ''} ${state.attention ? 'needs-attention' : ''}`;
+    syncAttentionAnimation(tab, state.attention === true);
+    tab.innerHTML = panelHeaderStateHtml(state);
+    tab.removeAttribute('title');
+  }
+  updatePanelMeta(session, info);
+  const popover = panel?.querySelector(':scope .panel-popover-zone > .session-popover');
+  if (popover) {
+    const agentKind = sessionAgentKind(session);
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = sessionPopoverHtml(session, info, agentKind, auto, state);
+    popover.replaceWith(wrapper.firstElementChild);
+  }
+  panel?.classList.toggle('needs-input-pane', state.key === 'needs-input' && state.attention === true);
+  panel?.classList.toggle('needs-exec-pane', state.key === 'needs-approval' && state.attention === true);
+  panel?.classList.toggle('needs-blocked-pane', state.key === 'blocked');
+}
+
+function refreshSessionChrome(session) {
+  updateSessionButtonStates();
+  updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+}
+
+function refreshTrackedSessionChrome(session) {
+  refreshSessionChrome(session);
+  trackSessionStateChanges();
+}
+
+function refreshActivePanelHeaders() {
+  for (const session of activeSessions.filter(isTmuxSession)) {
+    updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+  }
+}
+
+function renderSummaryContext(session, info, agent) {
+  const node = document.getElementById(`summary-context-${session}`);
+  if (!node) return;
+  node.innerHTML = summaryContextHtml(session, info, agent);
+}
+
+function transcriptPathRowHtml(path, fallback = 'no transcript path') {
+  if (!path) return `<span class="transcript-path-missing">${esc(fallback)}</span>`;
+  return `<span class="transcript-path-label">path</span><span class="transcript-path-value">${esc(path)}</span>${pathCopyButtonHtml(path, {className: 'transcript-path-copy', dataAttr: 'data-copy-transcript-path', title: 'Copy transcript path'})}`;
+}
+
+function updateTranscriptPathRow(session, path, fallback = 'no transcript path') {
+  const row = document.getElementById(`transcript-path-${session}`);
+  if (!row) return;
+  row.innerHTML = transcriptPathRowHtml(path, fallback);
+}
+
+async function refreshTranscriptPreview(session, preview, options = {}) {
+  try {
+    const payload = await apiFetchJson(`/api/context-items?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
+    if (!applyContextItemsPayloadFromPush(payload, options)) {
+      preview.textContent = JSON.stringify(payload, null, 2);
+    }
+  } catch (error) {
+    preview.textContent += `\n\ncontext load failed: ${error}`;
+  }
+}
+
+function applyContextItemsPayloadFromPush(payload = {}, options = {}) {
+  if (!payload || !payload.items) return false;
+  const session = payload.session || options.session || '';
+  const preview = options.preview || (session ? document.getElementById(transcriptDomId(session)) : null);
+  if (!preview) return false;
+  updateTranscriptPathRow(session, payload.path);
+  renderTranscriptItems(preview, payload.path, payload.items, options);
+  return true;
+}
+
+function startTranscriptStream(session, options = {}) {
+  stopTranscriptStream(session);
+  const preview = document.getElementById(transcriptDomId(session));
+  if (!preview) return;
+  const url = `/api/context-stream?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`;
+  const source = new EventSource(url);
+  transcriptStreams.set(session, source);
+  source.addEventListener('reset', event => {
+    const payload = safeJsonParse(event.data, null);
+    if (!payload) return;
+    updateTranscriptPathRow(session, payload.path);
+    renderTranscriptItems(preview, payload.path, payload.items || [], {scrollBottom: options.scrollBottom === true});
+  });
+  source.addEventListener('items', event => {
+    const payload = safeJsonParse(event.data, null);
+    if (!payload) return;
+    appendTranscriptItems(preview, payload.items || []);
+  });
+  source.addEventListener('ping', () => {});
+  source.onerror = () => {
+    stopTranscriptStream(session);
+    const pane = document.getElementById(`transcript-pane-${session}`);
+    if (pane?.classList.contains('active')) {
+      statusErr(localizedHtml('terminal.transcript.streamDisconnected', {session: sessionLabel(session)}));
+      setTimeout(() => {
+        if (document.getElementById(`transcript-pane-${session}`)?.classList.contains('active')) {
+          startTranscriptStream(session, {scrollBottom: false});
+        }
+      }, 1500);
+    }
+  };
+}
+
+function stopTranscriptStream(session) {
+  const source = transcriptStreams.get(session);
+  if (source) {
+    source.close();
+    transcriptStreams.delete(session);
+  }
+}
+
+function renderTranscriptItems(container, path, items, options = {}) {
+  const shouldScrollBottom = options.scrollBottom === true;
+  const wasNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 32;
+  const oldTop = container.scrollTop;
+  const oldHeight = container.scrollHeight;
+  const blocks = items.map(item => transcriptItemHtml(item));
+  container.innerHTML = blocks.join('');
+  if (shouldScrollBottom) {
+    requestAnimationFrame(() => {
+      container.scrollTop = container.scrollHeight;
+    });
+  } else if (options.preserveScroll) {
+    if (wasNearBottom) {
+      container.scrollTop = container.scrollHeight;
+    } else {
+      container.scrollTop = Math.max(0, oldTop + container.scrollHeight - oldHeight);
+    }
+  } else {
+    container.scrollTop = container.scrollHeight;
+  }
+}
+
+function appendTranscriptItems(container, items) {
+  if (!items.length) return;
+  const wasNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 32;
+  container.insertAdjacentHTML('beforeend', items.map(item => transcriptItemHtml(item)).join(''));
+  const rendered = Array.from(container.querySelectorAll('.transcript-item:not(.system)'));
+  const extra = rendered.length - transcriptPreviewMessages;
+  for (const item of rendered.slice(0, Math.max(0, extra))) item.remove();
+  if (wasNearBottom) {
+    requestAnimationFrame(() => {
+      container.scrollTop = container.scrollHeight;
+    });
+  }
+}
+
+function transcriptItemHtml(item) {
+  const role = normalizeRole(item.role);
+  return `<div class="transcript-item ${role}">
+    <div class="transcript-role">${esc(item.header || role)}</div>
+    <div class="transcript-text">${esc(item.text || '')}</div>
+  </div>`;
+}
+
+function eventItemHtml(event) {
+  const details = event.details && typeof event.details === 'object' ? event.details : {};
+  const detailText = Object.entries(details)
+    .filter(([, value]) => value != null && value !== '')
+    .map(([key, value]) => `${key}=${Array.isArray(value) ? value.join(',') : value}`)
+    .join(' · ');
+  const title = detailText ? `${event.message || ''}\n${detailText}` : event.message || '';
+  return `<div class="event-item" title="${esc(title)}">
+    <span class="event-time">${esc(formatEventTime(event.time))}</span>
+    <span class="event-type">${esc(event.type || 'event')}</span>
+    <span class="event-message">${esc(event.message || '')}${detailText ? ` · ${esc(detailText)}` : ''}</span>
+  </div>`;
+}
+
+function formatEventTime(value) {
+  const date = new Date(value || 0);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleString([], {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
+async function refreshEventLog(session) {
+  const node = document.getElementById(`events-${session}`);
+  if (!node) return;
+  try {
+    const payload = await apiFetchJson(`/api/events?session=${encodeURIComponent(session)}&limit=120`);
+    const events = Array.isArray(payload.events) ? payload.events : [];
+    node.innerHTML = events.length
+      ? events.slice().reverse().map(eventItemHtml).join('')
+      : '<div class="event-empty">no events yet</div>';
+  } catch (error) {
+    if (error?.status) {
+      node.innerHTML = `<div class="event-empty">${esc(error.payload?.error || 'failed to load events')}</div>`;
+      return;
+    }
+    node.innerHTML = `<div class="event-empty">failed to load events: ${esc(error)}</div>`;
+  }
+}
+
+function refreshOpenEventLogs() {
+  for (const session of activeSessions.filter(isTmuxSession)) {
+    const pane = document.getElementById(`events-pane-${session}`);
+    if (pane?.classList.contains('active')) refreshEventLog(session);
+  }
+}
+
+function postEvent(session, type, message, details = {}) {
+  apiFetch('/api/event', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({session, type, message, details}),
+  }).then(() => {
+    refreshOpenEventLogs();
+  }).catch(() => {});
+}
+
+function normalizeRole(role) {
+  const value = String(role || 'message').toLowerCase();
+  if (value.includes('tool_use')) return 'tool_use';
+  if (value.includes('tool_result')) return 'tool_result';
+  if (value.includes('assistant')) return 'assistant';
+  if (value.includes('user')) return 'user';
+  if (value.includes('summary')) return 'summary';
+  if (value.includes('system')) return 'system';
+  return 'system';
+}
+
+function renderLatency(latestMs) {
+  const samples = latencySamples.slice(-latencySamplesMax);
+  if (samples.length === 0) {
+    latencyLine.setAttribute('points', '');
+  } else {
+    const maxMs = Math.max(100, ...samples);
+    const width = 44;
+    const height = 18;
+    const points = samples.map((value, index) => {
+      const x = samples.length === 1 ? width : (index / (samples.length - 1)) * width;
+      const y = height - 1 - (Math.min(value, maxMs) / maxMs) * (height - 2);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    });
+    latencyLine.setAttribute('points', points.join(' '));
+  }
+
+  latencyMeter.classList.remove('good', 'warn', 'bad');
+  if (latestMs == null) {
+    latencyMeter.classList.add('bad');
+    latencyNumber.textContent = '-- ms';
+    return;
+  }
+  latencyNumber.textContent = `${latestMs} ms`;
+  if (latestMs <= 80) {
+    latencyMeter.classList.add('good');
+  } else if (latestMs <= 200) {
+    latencyMeter.classList.add('warn');
+  } else {
+    latencyMeter.classList.add('bad');
+  }
+}
+
+async function updateLatency() {
+  const startedAt = performance.now();
+  try {
+    await apiFetchJson(`/api/ping?t=${Date.now()}`, {cache: 'no-store'});
+    const elapsedMs = Math.max(1, Math.round(performance.now() - startedAt));
+    latencySamples = [...latencySamples, elapsedMs].slice(-latencySamplesMax);
+    renderLatency(elapsedMs);
+  } catch (_) {
+    renderLatency(null);
+  }
+}
+
+function refreshAll() {
+  refreshTranscripts({force: true});
+  refreshAutoStatuses();
+  refreshWatchedFilesystem();
+}
+
+function scheduleReconnectResync(reason = '') {
+  if (reconnectResyncTimer) clearTimeout(reconnectResyncTimer);
+  reconnectResyncTimer = setTimeout(() => {
+    reconnectResyncTimer = null;
+    refreshAll();
+  }, reconnectResyncDebounceMs);
+}
+
+function resyncVisibleTerminalRemoteSizes(reason = '') {
+  void reason;
+  for (const session of activeSessions.filter(isTmuxSession)) {
+    scheduleFit(session);
+    forceRemoteResize(session);
+  }
+}
+
+function installReconnectResyncHandlers() {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      scheduleReconnectResync('visible');
+      resyncVisibleTerminalRemoteSizes('visible');
+    }
+  });
+  window.addEventListener('online', () => {
+    scheduleReconnectResync('online');
+    resyncVisibleTerminalRemoteSizes('online');
+  });
+}
+
+async function boot() {
+  applySettingsPayload(clientSettingsPayload, {initial: true, force: true});
+  installReconnectResyncHandlers();
+  if (shareViewMode) {
+    applyShareViewBodyClasses();
+    const bootstrapUiState = shareBootstrap?.uiState && typeof shareBootstrap.uiState === 'object' ? shareBootstrap.uiState : {};
+    applyShareViewportState(bootstrapUiState.viewport || shareBootstrap?.viewport || {});
+    applyShareAppearanceState(bootstrapUiState.appearance || shareBootstrap?.appearance || {});
+    applyShareMirrorTransform();
+  }
+  await waitForYolomuxFontsReady({timeoutMs: 0});
+  syncAppViewportBreakpointClasses();
+  if (!shareViewMode) installClientEventStream();
+  // i18n: AWAIT the active locale catalog (all-static-fetch) before the first render so menus,
+  // tabs, and the wordmark paint in the right language from the start — no flash of raw t() keys (the
+  // menu bar renders synchronously at boot, before any later re-render could fix it). A 'system' pref is
+  // resolved client-side against navigator.language (the server can't see the browser locale).
+  await applyLocale(resolveLocalePref(initialSetting('general.language', 'system')));
+  installGlobalThemeMediaListener();
+  if (installShareReplayShell()) {
+    installDevAutoReload();
+    return;
+  }
+  applyFileExplorerStaticLabels();
+  renderTransportWarning();
+  renderTabMetaToggle();
+  bindTopbarMetrics();
+  syncInitialLayoutUrl();
+  statusEl.textContent = t('status.yoloLoading');
+  if (!shareViewMode) {
+    await loadNotifyStatus();
+    await loadAutoStatuses();
+  }
+  bindClipboardPaste();
+  if (!shareViewMode) {
+    await refreshTranscripts({refreshAuto: false});
+  } else {
+    transcriptMeta = {session_order: sessions.slice(), sessions: Object.fromEntries(sessions.map(session => [session, {target: session}]))};
+    transcriptMetaLoaded = true;
+    await refreshTranscripts({refreshAuto: false, refreshActivity: false});
+  }
+  renderSessionButtons();
+  renderPanels([], {prune: false});
+  installYolomuxFontMetricRefresh();
+  seedVisualActivePaneItem(activeSessions);
+  updatePanelInactiveOverlays();
+  if (shareViewMode) {
+    const bootstrapUiState = shareBootstrap?.uiState && typeof shareBootstrap.uiState === 'object' ? shareBootstrap.uiState : {};
+    await applyShareUiState({
+      ...bootstrapUiState,
+      finder: bootstrapUiState.finder || shareBootstrap?.finder || {},
+    });
+  }
+  if (!shareViewMode && clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+  await Promise.all(activeSessions.filter(isTmuxSession).map(session => ensureTerminalRunning(session)));
+  if (!shareViewMode) refreshWatchedPrs();
+  renderAutoApproveButtons();
+  updateLatency();
+  installRuntimeIntervals();
+  scheduleStartupHelperTip();
+  installShareViewerBanner();
+  installSharePointerPublisher();
+  installShareScrollPublisher();
+  installShareGeometryDigestLoop();
+  installSharePopupLayerPublisher();
+  installShareReplayMutationPublisher();
+  startShareStatusRefresh();
+  installDevAutoReload();
+  document.querySelector('[data-update-badge]')?.addEventListener('click', triggerSelfUpdate);
+  checkForUpdateOnce();
+}
+
+function clientEventEnvelope(event) {
+  try {
+    const parsed = JSON.parse(event?.data || '{}');
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (_error) {
+    return {};
+  }
+}
+
+function clientEventPayloadFromEnvelope(envelope) {
+  return envelope && typeof envelope === 'object' && envelope.payload && typeof envelope.payload === 'object'
+    ? envelope.payload
+    : envelope;
+}
+
+function recordSseDebugEvent(eventType, envelope = {}, rawEvent = null) {
+  if (!debugModeEnabled) return;
+  const payload = clientEventPayloadFromEnvelope(envelope);
+  const rawData = rawEvent?.data || '';
+  const dataBytes = jsDebugByteLength(rawData);
+  const dataLines = String(rawData || '').split(/\r?\n/);
+  const frameBytes = jsDebugByteLength(`event: ${eventType}\n`)
+    + dataLines.reduce((total, line) => total + jsDebugByteLength(`data: ${line}\n`), 0)
+    + 1;
+  const serverTimeMs = Number(envelope?.time) * 1000;
+  const receiveLatencyMs = Number.isFinite(serverTimeMs)
+    ? Number((Date.now() - serverTimeMs).toFixed(1))
+    : undefined;
+  recordJsDebugEvent('sse', {
+    eventType,
+    serverEventId: Number(envelope?.id || 0) || undefined,
+    trigger: payload?.trigger || '',
+    cache: payload?.cache || '',
+    computeMs: Number.isFinite(Number(payload?.compute_ms)) ? Number(payload.compute_ms) : undefined,
+    receiveLatencyMs,
+    bytes: dataBytes,
+    frameBytes,
+    changeSummary: payload?.change_summary && typeof payload.change_summary === 'object' ? payload.change_summary : null,
+    listingSummary: payload?.listing_summary && typeof payload.listing_summary === 'object' ? payload.listing_summary : null,
+    key: payload?.session || payload?.locale || payload?.request?.session || '',
+  });
+}
+
+function updateDryRunEnabled() {
+  return typeof urlFlagEnabled === 'function' && urlFlagEnabled('updateDryRun');
+}
+
+function updateActionButton(label, onClick) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'toast-action';
+  button.textContent = label;
+  button.addEventListener('click', event => {
+    event.stopPropagation();
+    onClick(event, button.closest('.toast'));
+  });
+  return button;
+}
+
+async function triggerSelfUpdate(_event = null, ownerToast = null) {
+  const dry = updateDryRunEnabled();
+  const confirmed = window.confirm(dry
+    ? 'Dry run: simulate installing a YOLOmux update? Nothing is pulled and the server is not restarted.'
+    : 'Install the latest YOLOmux update and restart now?');
+  if (!confirmed) return;
+  const target = String(ownerToast?.dataset?.updateTarget || selfUpdateAvailableTarget || '').trim();
+  dismissUpdateAvailableToasts(ownerToast);
+  hideUpdateBadge();
+  try {
+    const res = await fetch(`/api/self-update${dry ? '?dryrun=1' : ''}`, {method: 'POST'});
+    const data = await res.json().catch(() => ({}));
+    const title = data.ok ? (data.restarting ? 'Installing update...' : 'Software Update') : 'Update failed';
+    showToast(title, [data.message || (data.ok ? 'done' : 'see server logs')]);
+    if (data.ok && data.restarting) {
+      startSelfUpdateReloadPolling(data.target || data.version || target);
+    }
+  } catch (error) {
+    showToast('Update failed', [String(error)]);
+  }
+}
+
+// Non-intrusive "a newer version exists" cue: unhide the topbar badge and show one dismissible toast
+// with an "Update Now" action (admin-only; the endpoint rejects readonly).
+function applyUpdateAvailable(status) {
+  if (!status || !status.available) return;
+  if (status.notify === false) return;
+  const target = String(status.target || '').trim();
+  selfUpdateAvailableTarget = target;
+  const badge = document.querySelector('[data-update-badge]');
+  if (badge) {
+    badge.hidden = false;
+    badge.title = `YOLOmux update available${status.target ? ` (${status.target})` : ''} - click to update now`;
+    if (target) badge.dataset.updateTarget = target;
+  }
+  const node = showToast('YOLOmux update available', [
+    `A new YOLOmux update is available${status.target ? ` (${status.target})` : ''}.`,
+  ], {
+    actions: [updateActionButton('Update Now', triggerSelfUpdate)],
+    countdownMs: 4 * 60 * 60 * 1000,  // keep the update cue up for 4 hours, not the default ~10s
+    className: 'attention-alert toast toast-update',  // solid (opaque) background, not the translucent default
+  });
+  if (node && target) node.dataset.updateTarget = target;
+}
+
+async function checkForUpdateOnce() {
+  try {
+    const res = await fetch(`/api/update-status${updateDryRunEnabled() ? '?dryrun=1' : ''}`);
+    if (!res.ok) return;  // readonly (403) or unavailable
+    const status = await res.json();
+    if (status && status.available) applyUpdateAvailable(status);
+  } catch (_error) { /* offline / transient — the hourly push will retry */ }
+}
+
+function maybeNotifyYoagentJob(notification = {}) {
+  const title = String(notification.title || 'YO!agent');
+  const body = String(notification.body || '').trim();
+  if (!body || !notificationsEnabled) return;
+  const session = String(notification.session || '').trim();
+  const tag = `yoagent-job:${session || 'global'}:${body}`;
+  showToast(title, [body], {session});
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  try {
+    sendBrowserNotification(hostNotificationTitle(title), {
+      body,
+      tag,
+      renotify: true,
+      session,
+    });
+  } catch (error) {
+    postEvent(session || null, 'yoagent_job_notification_error', `notification failed: ${error}`, {});
+  }
+}
+
+function applyTmuxSignalsPayload(payload = {}) {
+  const data = payload?.data && typeof payload.data === 'object' ? payload.data : payload;
+  if (!data || typeof data !== 'object') return;
+  tmuxSignalState = data;
+}
+
+function handleClientPushEvent(type, payload = {}) {
+  if (type === 'update_available') {
+    applyUpdateAvailable(payload && payload.available !== undefined ? payload : (payload.data || {}));
+    return;
+  }
+  if (type === 'settings_changed') {
+    if (payload.data && typeof payload.data === 'object') {
+      applySettingsPayload(payload.data, {force: true});
+    }
+    return;
+  }
+  if (type === 'auto_approve_changed') {
+    if (payload.data) applyAutoApprovePayload(payload.data);
+    return;
+  }
+  if (type === 'tmux_signals_changed') {
+    applyTmuxSignalsPayload(payload);
+    return;
+  }
+  if (type === 'watched_prs_changed') {
+    if (payload.data) applyWatchedPrsPayload(payload.data);
+    return;
+  }
+  if (type === 'transcripts_changed') {
+    if (payload.data) {
+      applyTranscriptsPayload(payload.data, {refreshAuto: false, refreshContext: false, refreshActivity: false});
+    }
+    return;
+  }
+  if (type === 'context_items_ready') {
+    if (payload.data) applyContextItemsPayloadFromPush(payload.data, {session: payload.session, preserveScroll: true});
+    return;
+  }
+  if (type === 'activity_summary_ready') {
+    if (payload.data) applyActivitySummaryPayloadFromPush(payload.data);
+    return;
+  }
+  if (type === 'yoagent_conversation_changed') {
+    loadYoagentConversation({force: true, render: infoPanelSubTab === 'yoagent', scrollBottom: 'auto'}).catch(error => console.warn('YO!agent conversation refresh failed', error));
+    return;
+  }
+  if (type === 'yoagent_stream_delta') {
+    if (typeof applyYoagentStreamPayload === 'function' && applyYoagentStreamPayload(payload)) {
+      renderYoagentPanel({preserveDraft: true, scrollBottom: 'auto'});
+    }
+    return;
+  }
+  if (type === 'yoagent_jobs_changed') {
+    if (typeof loadYoagentJobs === 'function') {
+      loadYoagentJobs({force: true, silent: true, render: infoPanelSubTab === 'yoagent', scrollBottom: false}).catch(error => console.warn('YO!agent jobs refresh failed', error));
+    }
+    maybeNotifyYoagentJob(payload.notification || {});
+    return;
+  }
+  if (type === 'yoagent_skills_changed') {
+    refreshActivitySummary({force: true, render: infoPanelSubTab === 'yoagent'}).catch(error => console.warn('YO!agent skills refresh failed', error));
+    return;
+  }
+  if (type === 'session_files_ready') {
+    if (payload.data && typeof applySessionFilesPayloadFromPush === 'function') {
+      applySessionFilesPayloadFromPush(payload.data, payload.request || {});
+    }
+    return;
+  }
+  if (type === 'files_changed') {
+    if (typeof refreshOpenFilesFromPush === 'function') {
+      refreshOpenFilesFromPush(payload).catch(error => console.warn('client file push refresh failed', error));
+    }
+    return;
+  }
+  if (type === 'fs_changed') {
+    if (typeof refreshFileExplorerFromPush === 'function') {
+      refreshFileExplorerFromPush(payload).catch(error => console.warn('client fs push refresh failed', error));
+    }
+  }
+}
+
+function installClientEventStream() {
+  if (typeof EventSource === 'undefined' || clientEventsSource) return;
+  let source;
+  try {
+    source = new EventSource('/api/client-events');
+  } catch (_error) {
+    return;
+  }
+  clientEventsSource = source;
+  source.addEventListener('ready', event => {
+    clientEventsConnected = true;
+    recordSseDebugEvent('ready', clientEventEnvelope(event), event);
+    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+    refreshAutoStatuses().catch(error => console.warn('client-events ready auto-status refresh failed', error));
+  });
+  source.addEventListener('ping', event => {
+    clientEventsConnected = true;
+    recordSseDebugEvent('ping', clientEventEnvelope(event), event);
+  });
+  source.onerror = () => { clientEventsConnected = false; };
+  for (const type of ['settings_changed', 'auto_approve_changed', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta']) {
+    source.addEventListener(type, event => {
+      clientEventsConnected = true;
+      const envelope = clientEventEnvelope(event);
+      recordSseDebugEvent(type, envelope, event);
+      handleClientPushEvent(type, clientEventPayloadFromEnvelope(envelope));
+    });
+  }
+}
+
+// Dev-velocity #1b: in --dev mode, reload the page when the static bundle changes (ends the recurring
+// "is the bundle stale?" misdiagnoses). Listens to the server's /api/dev-reload SSE 'reload' event;
+// no-op outside dev mode. The EventSource auto-reconnects across the backend re-exec (#1c).
+function installDevAutoReload() {
+  if (!devMode || typeof EventSource === 'undefined') return;
+  let source;
+  try {
+    source = new EventSource('/api/dev-reload');
+  } catch (_error) {
+    return;
+  }
+  source.addEventListener('reload', () => {
+    statusOk('dev: bundle changed — reloading');
+    location.reload();
+  });
+}
+
+async function showContext(session) {
+  const modal = document.getElementById('modal');
+  const title = document.getElementById('modalTitle');
+  const body = document.getElementById('modalBody');
+  modal.classList.remove('about-open', 'share-open');
+  title.textContent = t('transcript.tailTitle', {session: sessionLabel(session)});
+  body.innerHTML = '';
+  body.textContent = t('common.loading');
+  modal.classList.add('open');
+  const payload = await apiFetchJson(`/api/context?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
+  if (payload.text) {
+    body.textContent = `${payload.path}\n\n${payload.text}`;
+  } else {
+    body.textContent = JSON.stringify(payload, null, 2);
+  }
+  scheduleSharePopupLayerPublish();
+}
+
+function globalShortcutTargetAllowsAppAction(target) {
+  const node = typeof Element !== 'undefined' && target instanceof Element ? target : document.activeElement;
+  if (!node) return true;
+  const blocked = ['.xterm', '.terminal-pane', '.cm-editor', 'input', 'textarea', 'select', '[contenteditable="true"]'];
+  return !blocked.some(selector => node.closest?.(selector));
+}
+
+function globalShortcutTargetAllowsPlatformAction(target) {
+  return isMacPlatform() || globalShortcutTargetAllowsAppAction(target);
+}
+
+function globalShortcutTargetIsTerminalSurface(target) {
+  const node = typeof Element !== 'undefined' && target instanceof Element ? target : document.activeElement;
+  return Boolean(node?.closest?.('.xterm') || node?.closest?.('.terminal-pane'));
+}
+
+function globalShortcutTargetAllowsFinderShortcut(target) {
+  if (globalShortcutTargetAllowsAppAction(target)) return true;
+  return isMacPlatform() && globalShortcutTargetIsTerminalSurface(target);
+}
+
+function globalShortcutShouldToggleFinder(event, key = String(event?.key || '').toLowerCase(), mod = appModifier(event)) {
+  return Boolean(mod && key === 'b' && globalShortcutTargetAllowsFinderShortcut(event?.target));
+}
+
 function clearPendingGlobalShortcutChord() {
   pendingGlobalShortcutChord = null;
   if (pendingGlobalShortcutChordTimer) {
@@ -42597,6 +44525,24 @@ document.getElementById('closeModal').onclick = () => {
   modal.classList.remove('open', 'about-open', 'share-open');
   scheduleSharePopupLayerPublish({immediate: true});
 };
+function promptAttentionClearElement(target) {
+  return target?.closest?.('[data-prompt-attention-clear]');
+}
+
+function handlePromptAttentionClearEvent(event) {
+  const node = promptAttentionClearElement(event.target);
+  if (!node) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  clearPromptAttentionForSession(node.dataset.session || '');
+  return true;
+}
+
+document.addEventListener('click', handlePromptAttentionClearEvent);
+document.addEventListener('keydown', event => {
+  if (!['Enter', ' '].includes(event.key)) return;
+  handlePromptAttentionClearEvent(event);
+});
 document.addEventListener('click', event => {
   if (event.target?.closest?.('.app-menu')) return;
   closeAppMenus();

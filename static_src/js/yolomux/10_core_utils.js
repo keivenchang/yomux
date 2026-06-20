@@ -338,6 +338,30 @@ function agentLabel(kind) {
   return String(kind || '');
 }
 
+const sessionFileLookbackDefaultHours = 24;
+const sessionFileLookbackHourValues = Object.freeze([
+  0.5, 1, 2, 4, 8, 12, 24, 48, 72, 96, 120, 144, 168, 192, 216, 240, 264, 288, 312, 336,
+]);
+
+function normalizeSessionFileLookbackHours(value, fallback = sessionFileLookbackDefaultHours) {
+  const parsed = Number(value);
+  const candidate = Number.isFinite(parsed) ? parsed : Number(fallback);
+  if (sessionFileLookbackHourValues.includes(candidate)) return candidate;
+  if (sessionFileLookbackHourValues.includes(Number(fallback))) return Number(fallback);
+  return sessionFileLookbackDefaultHours;
+}
+
+function sessionFileLookbackLabel(hours) {
+  const value = Number(hours);
+  if (value < 1) return t('share.duration.minute', {count: Math.round(value * 60)});
+  if (value < 24) return tPlural('duration.hour', value);
+  return tPlural('duration.day', value / 24);
+}
+
+function sessionFileLookbackOptions() {
+  return sessionFileLookbackHourValues.map(hours => ({hours, label: sessionFileLookbackLabel(hours)}));
+}
+
 // localStorage can throw (privacy mode, blocked, quota) — these swallow failures so a blocked store
 // never breaks the page. storageGet returns the raw string (or `fallback` when absent/blocked);
 // storageSet coerces to string and no-ops on failure. Every readStored*/writeStored* builds on these.
@@ -355,6 +379,30 @@ function storageSet(key, value) {
     window.localStorage?.setItem(key, String(value));
   } catch (_) {}
 }
+
+function readStoredInfoLookbackHours() {
+  return normalizeSessionFileLookbackHours(storageGet(infoLookbackHoursStorageKey));
+}
+
+function writeStoredInfoLookbackHours(hours) {
+  const normalized = normalizeSessionFileLookbackHours(hours);
+  storageSet(infoLookbackHoursStorageKey, normalized);
+  return normalized;
+}
+
+let infoSessionFileLookbackHours = readStoredInfoLookbackHours();
+
+function readStoredTabberLookbackHours() {
+  return normalizeSessionFileLookbackHours(storageGet(fileExplorerTabberLookbackHoursStorageKey));
+}
+
+function writeStoredTabberLookbackHours(hours) {
+  const normalized = normalizeSessionFileLookbackHours(hours);
+  storageSet(fileExplorerTabberLookbackHoursStorageKey, normalized);
+  return normalized;
+}
+
+let tabberSessionFileLookbackHours = readStoredTabberLookbackHours();
 
 function sessionStorageGet(key, fallback = null) {
   try {
@@ -2709,7 +2757,8 @@ function showTabContextMenu(item, x, y, options = {}) {
     for (const command of tmuxSessionActionCommands(item, {renameAction, includeKill: false})) {
       appendContextMenuButton(menu, command.label, command.action, closeSessionContextMenu, {disabled: command.disabled, checked: command.checked});
     }
-    const viewItems = tmuxSessionViewCommands(item).filter(command => command.label !== 'Pane details');
+    const paneInfoBarLabel = t('menu.tmux.paneDetails');
+    const viewItems = tmuxSessionViewCommands(item).filter(command => command.label !== paneInfoBarLabel);
     for (const command of viewItems) {
       appendContextMenuButton(menu, command.label, command.action, closeSessionContextMenu, {
         disabled: command.disabled,

@@ -1,0 +1,5 @@
+user@host$ ./deploy.sh
+Deploy to staging?
+[y/N]
+
+user@host$

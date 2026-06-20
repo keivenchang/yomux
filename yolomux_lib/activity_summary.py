@@ -1066,8 +1066,169 @@ def yoagent_question_named_sessions(question: str) -> set[str]:
     return set(re.findall(r"\bsession\s+([A-Za-z0-9_.-]{1,64})\b", text))
 
 
+def yoagent_question_requests_work_next(question: str) -> bool:
+    text = str(question or "").lower()
+    return any(
+        phrase in text
+        for phrase in (
+            "what should i work on",
+            "what should i do next",
+            "what is next",
+            "what's next",
+            "prioritize my sessions",
+            "prioritise my sessions",
+        )
+    )
+
+
+def yoagent_question_requests_full_work_inventory(question: str) -> bool:
+    text = str(question or "").lower()
+    return yoagent_question_requests_work_next(question) and any(
+        phrase in text
+        for phrase in (
+            "full inventory",
+            "full list",
+            "show all",
+            "list all",
+            "all sessions",
+            "every session",
+            "everything",
+        )
+    )
+
+
+def yoagent_summary_project(summary: dict[str, Any]) -> dict[str, Any]:
+    project = summary.get("project")
+    if isinstance(project, dict):
+        return project
+    return {}
+
+
+def yoagent_summary_git(summary: dict[str, Any]) -> dict[str, Any]:
+    git = summary.get("git")
+    if isinstance(git, dict):
+        return git
+    project = yoagent_summary_project(summary)
+    git = project.get("git")
+    return git if isinstance(git, dict) else {}
+
+
+def yoagent_summary_pull_request(summary: dict[str, Any]) -> dict[str, Any]:
+    pr = summary.get("pull_request")
+    if isinstance(pr, dict):
+        return pr
+    project = yoagent_summary_project(summary)
+    pr = project.get("pull_request")
+    return pr if isinstance(pr, dict) else {}
+
+
+def yoagent_summary_ci(summary: dict[str, Any]) -> dict[str, Any]:
+    ci = summary.get("ci")
+    if isinstance(ci, dict):
+        return ci
+    pr = yoagent_summary_pull_request(summary)
+    checks = pr.get("checks")
+    return checks if isinstance(checks, dict) else {}
+
+
+def yoagent_text_contains_failure(text: str) -> bool:
+    value = text.lower()
+    return any(term in value for term in ("failing", "failed", "failure", "red", "broken"))
+
+
+def yoagent_work_recommendation(summary: dict[str, Any]) -> dict[str, Any]:
+    state = summary.get("state") if isinstance(summary.get("state"), dict) else {}
+    state_key = str(state.get("key") or summary.get("activity_label") or "").strip().lower()
+    state_text = str(state.get("text") or "").strip()
+    status = str(summary.get("status_text") or "").strip()
+    ci_text = str(summary.get("ci") or "").strip()
+    blockers = [str(item) for item in summary.get("blockers") or [] if item]
+    errors = [str(item) for item in summary.get("errors") or [] if item]
+    combined_text = " ".join(
+        str(item or "")
+        for item in (
+            state_key,
+            state_text,
+            status,
+            ci_text,
+            summary.get("local"),
+            summary.get("work"),
+            summary.get("goal"),
+            " ".join(blockers),
+            " ".join(errors),
+        )
+    )
+    files = summary.get("files") if isinstance(summary.get("files"), dict) else {}
+    git = yoagent_summary_git(summary)
+    pr = yoagent_summary_pull_request(summary)
+    ci = yoagent_summary_ci(summary)
+    dirty_count = git.get("dirty_count")
+    files_count = files.get("count")
+    ci_state = str(ci.get("state") or "").strip().lower()
+    review_decision = str(pr.get("review_decision") or "").strip().upper()
+    reasons: list[str] = []
+    next_action = "Open the session and ask for the current status."
+    score = 100
+    if state_key in {"needs-input", "needs_input", "needs input"}:
+        score = 1000
+        reasons.append(f"needs input: {truncate_text(state_text, 100)}" if state_text else "needs input")
+        next_action = "Answer the prompt or send the next instruction."
+    elif state_key in {"blocked", "needs-approval", "approval"} or blockers or errors or "blocked" in combined_text.lower():
+        score = 900
+        blocker_text = state_text or (blockers[0] if blockers else errors[0] if errors else "")
+        reasons.append(f"blocked: {truncate_text(blocker_text, 100)}" if blocker_text else "blocked")
+        next_action = "Clear the blocker before picking up lower-priority work."
+    elif "test" in combined_text.lower() and yoagent_text_contains_failure(combined_text):
+        score = 850
+        reasons.append("tests are failing")
+        next_action = "Inspect the failing test output and fix the first concrete failure."
+    elif ci_state == "failing" or ("ci" in combined_text.lower() and yoagent_text_contains_failure(combined_text)):
+        score = 820
+        reasons.append(str(ci.get("summary") or ci_text or "CI is failing"))
+        next_action = "Open the PR checks and fix the failing lane."
+    elif review_decision in {"CHANGES_REQUESTED", "REVIEW_REQUIRED"} or any(phrase in combined_text.lower() for phrase in ("review required", "changes requested", "review comment")):
+        score = 780
+        reasons.append("review feedback is waiting")
+        next_action = "Read the review comments and address the actionable ones."
+    elif isinstance(dirty_count, int) and dirty_count > 0:
+        score = 650
+        reasons.append(f"{plural(dirty_count, 'dirty file')}")
+        next_action = "Review the dirty worktree and decide whether to test, split, or finish it."
+    elif isinstance(files_count, int) and files_count > 0:
+        score = 620
+        reasons.append(files_sentence(files))
+        next_action = "Review the changed files and run the relevant checks."
+    elif summary.get("active"):
+        score = 500
+        reasons.append("recently active")
+        next_action = "Keep it moving until it reaches a clean stopping point."
+    else:
+        reasons.append("idle")
+        next_action = "Resume only after higher-priority sessions are clear."
+    if not reasons and ci_text:
+        reasons.append(ci_text)
+    return {
+        "score": score,
+        "reasons": reasons,
+        "next_action": next_action,
+        "last_activity_ts": summary_last_activity_ts(summary),
+        "session": str(summary.get("session") or ""),
+    }
+
+
 def yoagent_rank_summaries(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(summaries, key=lambda summary: (0 if summary.get("active") else 1, -summary_last_activity_ts(summary)))
+
+
+def yoagent_rank_work_summaries(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        summaries,
+        key=lambda summary: (
+            -int(yoagent_work_recommendation(summary)["score"]),
+            -summary_last_activity_ts(summary),
+            str(summary.get("session") or ""),
+        ),
+    )
 
 
 def yoagent_default_summaries(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1076,6 +1237,10 @@ def yoagent_default_summaries(summaries: list[dict[str, Any]]) -> list[dict[str,
     if active:
         return active[:3]
     return ranked[:1]
+
+
+def yoagent_default_work_summaries(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return yoagent_rank_work_summaries(summaries)[:3]
 
 
 def yoagent_work_advice_line(summary: dict[str, Any]) -> str:
@@ -1093,10 +1258,17 @@ def yoagent_work_advice_line(summary: dict[str, Any]) -> str:
     return f"- **{title}:** {'; '.join(part for part in details if part)}."
 
 
+def yoagent_ranked_work_advice_line(summary: dict[str, Any]) -> str:
+    recommendation = yoagent_work_recommendation(summary)
+    title = yoagent_topic_title(summary)
+    reasons = "; ".join(str(item) for item in recommendation["reasons"] if item)
+    return f"- **{title}:** {reasons}. Next: {recommendation['next_action']}"
+
+
 def yoagent_default_pending_lines(summaries: list[dict[str, Any]]) -> list[str]:
     if not summaries:
         return []
-    ranked = yoagent_rank_summaries(summaries)
+    ranked = yoagent_rank_work_summaries(summaries)
     target = ranked[0] if ranked else None
     pending: list[str] = []
     if target:
@@ -1134,15 +1306,24 @@ def deterministic_yoagent_reply(question: str, activity_payload: dict[str, Any],
             if not isinstance(summary, dict):
                 continue
             # Real payloads carry "session"; fall back to the dict key so the section title is labeled.
-            all_summaries.append(summary if summary.get("session") else {**summary, "session": key})
+            item = summary if summary.get("session") else {**summary, "session": key}
+            session_info = activity_payload.get("session_info") if isinstance(activity_payload, dict) else {}
+            details = session_info.get(str(item.get("session") or key)) if isinstance(session_info, dict) else None
+            if isinstance(details, dict) and "project" not in item:
+                item = {**item, "project": details.get("project") if isinstance(details.get("project"), dict) else {}}
+            all_summaries.append(item)
     # Session detail is opt-in: only expose session ids when the user explicitly asks for sessions or
     # names a concrete "session N". Default answers stay task/advice-shaped.
     named_sessions = yoagent_question_named_sessions(question)
     selected = [summary for summary in all_summaries if summary.get("session") and str(summary.get("session")).lower() in named_sessions]
     if selected:
         chosen = yoagent_rank_summaries(selected)
+    elif yoagent_question_requests_full_work_inventory(question):
+        chosen = yoagent_rank_work_summaries(all_summaries)
     elif yoagent_question_requests_session_list(question):
         chosen = yoagent_rank_summaries(all_summaries)
+    elif yoagent_question_requests_work_next(question):
+        chosen = yoagent_default_work_summaries(all_summaries)
     else:
         chosen = yoagent_default_summaries(all_summaries)
     prefix = server_string(locale, "det.noBackend")
@@ -1165,7 +1346,10 @@ def deterministic_yoagent_reply(question: str, activity_payload: dict[str, Any],
     else:
         out.append("**Priority:**")
         for summary in chosen:
-            out.append(yoagent_work_advice_line(summary))
+            if yoagent_question_requests_work_next(question):
+                out.append(yoagent_ranked_work_advice_line(summary))
+            else:
+                out.append(yoagent_work_advice_line(summary))
         pending = yoagent_default_pending_lines(all_summaries)
     if pending:
         out.append(f'**{server_string(locale, "det.openPending")}**')

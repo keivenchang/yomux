@@ -4,6 +4,58 @@ Archive of completed YOLOmux work, newest first. Concise by design — the full 
 
 Unless an entry says otherwise, every item shipped with the standard check gate green (`tools/check.py`: py_compile, `static_build.py --check`, both `node --check`, `node tests/layout_url.test.js`, full pytest, `git diff --check`). Entries call out only verification that goes BEYOND that gate (live user confirmation, focused browser repros, notable test counts).
 
+## 2026-06-19
+
+### Refactor split large files and structural guards
+- Completed and removed `DOIT.refactor_split_large_files.md`. HTTP routes now use a grouped route registry; YO!agent flow moved into controller/backend/session-summary owners; share/replay/drop, editor/preview/popout, Info/YO!agent/preferences/debug, DOM action, and timing code have separate source owners; filesystem moved into a package; browser tests and JS layout tests were split; repeated CSS colors and z-index values moved to shared tokens. Verification: recursive py-compile guard now includes nested split packages, static assets were rebuilt, and final `python3 tools/check.py` passed all 7 lanes (`CHECK PASSED in 44.88s`).
+
+### YO!agent central command
+- Completed and removed `DOIT.yoagent_central_command.md`. Claude `Try ...` placeholders no longer block sends; explicit target sends default to result capture with opt-outs; server-owned sends revalidate target pane, prompt state, drafts, and submission; pending waits, multiple sends, wait-then-send, handoffs, visible jobs, and work-next ranking all use the shared YO!agent/all-session path. Verification: parser/app/layout/job tests, mock Claude/Codex real-tmux E2E, real `7777` smoke, rebuilt static assets, and final `python3 tools/check.py` passed all 7 lanes (`CHECK PASSED in 44.88s`).
+
+### Agent prompt ASK? attention
+- Completed and removed `DOIT.agent_prompt_attention_ask.md`. Claude/Codex approvals and questions now raise a clearable red `ASK?` cue in session tabs, pane chrome, and global activity; prompt detection is backed by a fixture inventory, positive/negative corpus, capture harness, mock-agent E2E, and real-agent smoke. Verification: detector corpus tests, browser ASK? tests, mock Claude/Codex tmux tests, real Claude/Codex smoke, rebuilt static assets, and final `python3 tools/check.py` passed all 7 lanes (`CHECK PASSED in 44.88s`). The inventory still records bell-only live-signal coverage as an explicit uncaptured gap, not a captured fixture claim.
+
+### DOIT index cleanup
+- Removed `DOIT.00_index.md` after all descriptive DOIT queue files were archived; it was only the stale queue map and had no standalone product change.
+
+### Shared Finder/Differ/Tabber tree controller
+- Completed and removed `DOIT.shared_tree_finder_differ_tabber.md`. Finder, Differ, and Tabber now register through one shared tree interaction controller for row discovery, lead/selection state, range/select-all, disclosure/expand-collapse, activation, current-row sync, aria, and scroll reveal. Finder keeps Finder-only commands for Return rename, Cmd-open, Space preview, typeahead, and enclosing-folder navigation while cursor movement and expansion use the shared parent; Tabber has Finder-style keyboard navigation plus active session/window sync; Differ has the same keyboard and mouse selection path while diff-ref inputs keep priority. Source guards now prevent bespoke Tabber row builders and Differ selected/current style forks. Verification: `node tests/layout_url.test.js` passed `162 passed, 0 failed`; final `python3 tools/check.py` passed all 7 lanes (`CHECK PASSED in 45.73s`).
+
+### Tmux window keys, Info Bar rename, and per-session info drawer
+- Completed and removed `DOIT.tmux_window_keys_and_infobar.md`. Terminal `Ctrl-b n`/`p`/numeric tmux window switches now mirror YOLOmux active-window/Header/Info Bar state without swallowing input, user-visible pane metadata copy says `Info Bar`, and each Info row has a lazy per-session drawer sourced from the existing YO!info/activity-summary metadata path with full path, git state, PR/CI/Linear metadata, latest summary, and recent events. Verification: backend activity-summary shape tests, frontend drawer/cache/source-shape tests, focused previously failing tests (`3 passed in 1.67s`), rebuilt `static/yolomux.js`/`static/yolomux.css`, and final `python3 tools/check.py` passed all 7 lanes (`CHECK PASSED in 45.42s`).
+
+### Search and run history foundation
+- Completed and removed `DOIT.search_and_run_history.md`. YOLOmux now has scan-on-query full-text search across captured events and summaries, `/api/search`, compact persisted run history rows with prompt/cwd/agent/timestamps/final state/PR/latest summary, `/api/run-history`, and a Search & Runs UI tab/menu entry that renders search results plus compact run rows without scraping terminal text. Verification: observability pytest covers search/result shape/run rows, node layout tests cover frontend fetch/rendering, static assets are rebuilt, and final `python3 tools/check.py` passed all 7 lanes (`CHECK PASSED in 43.83s`).
+
+### Shared Tabber and YO!info lookback controls
+- Completed and removed `DOIT.lookback_slider_tabber_and_info.md`. Tabber and YO!info now share the 30-minute-through-14-day lookback options, backend normalization accepts the full range, YO!info can request all visible tmux sessions with the selected touched-path lookback, and Tabber has its own persisted lookback control that invalidates/reloads touched-path state and sends the selected `hours` through both batch and single-session session-files requests. Verification: backend all-session/lookback pytest coverage, node URL/control/cache-invalidation coverage, rebuilt `static/yolomux.js`, and final `python3 tools/check.py` passed all 7 lanes (`CHECK PASSED in 43.83s`).
+
+### Tabber session rows styled like pane tabs
+- Completed and removed `DOIT.tabber_session_tab_styling.md`. First-level Tabber tmux session rows now render their label/description inside an inner `.tabber-session-tab` using the shared pane-tab tokens for height, width, border, radius, inactive/hover/active colors, font, and focus ring; window/repo/loading/non-tmux rows keep the normal tree-row rendering. The row itself remains the treeitem, disclosure, click target, and ARIA owner, so expand/collapse, selected/current state, indentation, keyboard behavior, and row delegation stay on the shared tree path. Long descriptions truncate inside the tab label while the numeric session name and date/ago column stay visible; current sessions read as active tabs via `.tabber-active-session`/`aria-current` without changing active-window styling.
+- Verification: `python3 -m pytest tests/test_browser_layout.py -k 'tabber_session_rows_use_pane_tab_shape_and_keep_columns' -q` passed dark/narrow and light/wide geometry plus screenshot checks; `node --check static/yolomux.js`, a generated-source Tabber guard, `python3 tools/static_build.py --check`, and `python3 tools/check.py` were run. The final gate passed all lanes except `node-layout`, which is blocked by unrelated search-history expectations (`Search & Runs` in the File menu and `__search_history__` in virtual tabs).
+
+### YO!agent chat scrollbar ownership
+- Completed and removed `DOIT.yoagent_chat_scrollbars.md`. YO!agent thinking/activity now has one normal vertical scroll owner: `.yoagent-chat-history`; the outer YO!agent list keeps vertical overflow hidden, the chat history owns stable vertical scrolling, active-pane hover keeps the rail neutral, and direct scrollbar hover/drag still gets the active thumb. Streaming/busy refreshes respect manual scrollback and keep the composer separated from the history.
+- Verification: `tests/test_browser_layout.py::test_yoagent_busy_chat_uses_one_vertical_scroll_owner` builds a busy + streaming YO!agent state at desktop and narrow widths, captures screenshots, asserts only history overflows vertically, and verifies scrollback is not yanked to bottom; `node tests/layout_url.test.js` passed 154/154; final `python3 tools/check.py` passed all 7 lanes (`CHECK PASSED in 42.84s`).
+
+### Archived verified done queues
+- Completed and removed `DOIT.done_differ_codex_transcript.md`: multi-Codex missing-transcript data is warning-only when valid repo/file data exists; the original live state no longer reproduces, and the conditional transcript-discovery follow-up is not needed unless a future warning blocks valid data again.
+- Completed and removed `DOIT.done_yoagent_no_backend.md`: YO!agent backend diagnostics are precondition-specific and CLI-backed chat already exists; exposing managed SDK transports to non-managed visible targets remains a product decision, not active queue work.
+- Completed and removed `DOIT.done_autoapprove_mock_agents.md`: mock Claude/Codex yes/no approval handling is verified through detector and real-tmux mock E2E coverage; the file had no active unchecked boxes, only non-blocking cursor-placement polish noted as `[~]`.
+- Verification: the latest `python3 tools/check.py` passed all 7 lanes (`CHECK PASSED in 42.84s`); the archived files' audits name the existing focused tests for warning demotion, backend diagnostics, and mock-agent approval.
+
+### Finder Ago recency brightness and pulse
+- Completed and removed `DOIT.finder_ago_recency_brightness.md`. Finder rows in Ago mode now color only the date cell by one shared mtime-to-recency helper, use dark/light recency tokens, keep old rows muted, and gently pulse files modified within about a minute for 10 seconds without restarting on same-mtime refreshes. Date/None modes and Differ rows keep their previous styling.
+- Verification: node regression `Finder Ago recency brightness and pulse are scoped to relative Finder rows` covers bucket mapping, Date/None clearing, pulse start/expiry/restart, and Differ scoping; full `python3 tools/check.py` passed all 7 lanes (`CHECK PASSED in 40.25s`).
+
+### Editor save hygiene, reload, and status counts
+- Completed and removed `DOIT.editor_polish.md`. The editor now has opt-in save hygiene settings for trailing-whitespace trim and final newline, a reload-from-disk action that preserves the dirty-buffer confirmation path, and a status count segment showing live line/word/character counts alongside cursor/selection status.
+- Verification: node tests cover helper/default behavior, save-path behavior, dirty reload cancel/confirm, and live count updates; settings tests cover defaults/sanitization; full `python3 tools/check.py` passed all 7 lanes (`CHECK PASSED in 40.25s`).
+
+### Self-update restart and browser reload UX
+- Completed and removed `DOIT.self_update_restart_and_ux.md`. Self-update now records a restart context for the running checkout, resolves script/module launchers, preserves argv/env needed for the active server, relaunches from `PROJECT_ROOT` with a detached helper that kills only its own PID, and documents the launcher-agnostic contract. The browser side dismisses the update toast immediately, hides the badge, starts self-update-specific ping polling after `restarting: true`, reloads when safe, suppresses the generic reload banner for the owned target, and defers with a clear Software Update toast when dirty editors or active typing would be interrupted.
+- Verification: pytest covers relative script, absolute script, module launcher, stripped-env/nohup-style env, current-PID-only kill, helper detachment/stdio/log behavior, and no systemd/pkill; node tests cover immediate toast removal, reload polling, banner suppression, dirty-editor deferral, and active-typing deferral; full `python3 tools/check.py` passed all 7 lanes (`CHECK PASSED in 40.25s`).
+
 ## 2026-06-18
 
 ### DOIT.83 editor toolbar, Tabber recency, and selected-window repo metadata

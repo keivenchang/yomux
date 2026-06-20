@@ -1,0 +1,988 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
+from __future__ import annotations
+
+import json
+import math
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from http import HTTPStatus
+from typing import Any
+from urllib.parse import parse_qs
+from urllib.parse import unquote
+from urllib.parse import urlparse
+
+from .common import MAX_COMPACT_TRANSCRIPT_ITEMS
+from .common import MAX_EVENT_TAIL_LINES
+from .common import MAX_TRANSCRIPT_TAIL_LINES
+from .common import SUMMARY_LOOKBACK_SECONDS
+from .common import auth_setup_required
+from .common import error_payload
+from .common import parse_bool
+from .web import html_page
+from .web import static_content_type
+
+
+RouteRole = str | Callable[[Any, Any], str]
+RouteHandler = Callable[[Any, Any, "Route"], bool | None]
+PUBLIC = "public"
+
+
+@dataclass(frozen=True)
+class Route:
+    method: str
+    path: str
+    role: RouteRole
+    handler: RouteHandler
+    body_limit: int | None = None
+    group: str = "core"
+
+
+def query_one(qs: dict[str, list[str]], name: str, default: str | None = "") -> str | None:
+    values = qs.get(name)
+    return values[0] if values else default
+
+
+def query_list(qs: dict[str, list[str]], name: str) -> list[str]:
+    values: list[str] = []
+    for raw_value in qs.get(name, []):
+        for item in str(raw_value or "").split(","):
+            value = item.strip()
+            if value:
+                values.append(value)
+    return values
+
+
+def query_bool(qs: dict[str, list[str]], name: str, default: bool = False) -> bool:
+    raw_default = "1" if default else "0"
+    return parse_bool(str(query_one(qs, name, raw_default) or ""))
+
+
+def parse_query_int(
+    qs: dict[str, list[str]],
+    name: str,
+    default: int,
+    *,
+    min_value: int = 1,
+    max_value: int | None = None,
+) -> tuple[int | None, str]:
+    raw = qs.get(name, [str(default)])[0]
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None, f"{name} must be an integer"
+    if value < min_value:
+        return None, f"{name} must be at least {min_value}"
+    if max_value is not None:
+        value = min(value, max_value)
+    return value, ""
+
+
+def parse_query_float(
+    qs: dict[str, list[str]],
+    name: str,
+    default: float,
+    *,
+    min_value: float = 0.0,
+    max_value: float | None = None,
+) -> tuple[float | None, str]:
+    raw = qs.get(name, [str(default)])[0]
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None, f"{name} must be a number"
+    if not math.isfinite(value):
+        return None, f"{name} must be finite"
+    if value < min_value:
+        return None, f"{name} must be at least {min_value:g}"
+    if max_value is not None:
+        value = min(value, max_value)
+    return value, ""
+
+
+def parse_repo_refs_param(raw: str | None) -> dict[str, dict[str, str]] | None:
+    # C6: decode the optional per-repo FROM/TO JSON map sent as URL-encoded JSON
+    # ({repo_path: {"from": <ref>, "to": <ref>}}). Returns None for absent/malformed input so the caller
+    # falls back to the scalar from/to; only well-formed string ref pairs survive.
+    if not raw:
+        return None
+    try:
+        decoded = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(decoded, dict):
+        return None
+    result: dict[str, dict[str, str]] = {}
+    for repo, refs in decoded.items():
+        if not isinstance(repo, str) or not isinstance(refs, dict):
+            continue
+        entry: dict[str, str] = {}
+        for key in ("from", "to"):
+            value = refs.get(key)
+            if isinstance(value, str) and value.strip():
+                entry[key] = value.strip()
+        if entry:
+            result[repo] = entry
+    return result or None
+
+
+def get_share_status_role(request: Any, parsed: Any) -> str:
+    del parsed
+    return "readonly" if request.share_token_text() else "admin"
+
+
+def share_readonly_post_role(request: Any, parsed: Any) -> str:
+    del parsed
+    return "readonly" if request.share_token_text() else "admin"
+
+
+def yoagent_chat_post_role(request: Any, parsed: Any) -> str:
+    del parsed
+    return "admin" if request.share_token_text() else "readonly"
+
+
+def route_required_role(route: Route, request: Any, parsed: Any) -> str | None:
+    role = route.role(request, parsed) if callable(route.role) else route.role
+    return None if role == PUBLIC else role
+
+
+def route_matches(route: Route, path: str) -> bool:
+    if "*" not in route.path:
+        return path == route.path
+    prefix, suffix = route.path.split("*", 1)
+    return path.startswith(prefix) and path.endswith(suffix) and len(path) > len(prefix) + len(suffix)
+
+
+def routes_for_method(method: str) -> tuple[Route, ...]:
+    return ROUTES_BY_METHOD.get(method.upper(), ())
+
+
+def dispatch_http_route(request: Any, method: str) -> None:
+    parsed = urlparse(request.path)
+    if request.redirect_plaintext_to_https_if_needed(parsed):
+        return
+
+    route = _find_route(method, parsed.path)
+    if route is None:
+        _write_not_found_after_default_auth(request, method)
+        return
+
+    if route.role == PUBLIC:
+        handled = route.handler(request, parsed, route)
+        if handled is False:
+            _write_not_found_after_default_auth(request, method)
+        return
+
+    required_role = route_required_role(route, request, parsed)
+    if required_role is not None and not request.require_auth(required_role):
+        return
+    if route.group == "filesystem" and request.auth_readonly() and not request.share_readonly_api_allowed(parsed):
+        request.reject_forbidden(request.auth_identity(), "admin")
+        return
+    route.handler(request, parsed, route)
+
+
+def _find_route(method: str, path: str) -> Route | None:
+    for route in routes_for_method(method):
+        if route_matches(route, path):
+            return route
+    return None
+
+
+def _write_not_found_after_default_auth(request: Any, method: str) -> None:
+    if method.upper() == "GET":
+        if not request.require_auth("readonly"):
+            return
+        request.write_text("not found\n", status=HTTPStatus.NOT_FOUND)
+        return
+    if not request.require_auth("admin"):
+        return
+    request.write_json(error_payload("not found", status=HTTPStatus.NOT_FOUND), status=HTTPStatus.NOT_FOUND)
+
+
+def _json_body(request: Any, route: Route) -> dict[str, Any] | None:
+    if route.body_limit is None:
+        raise RuntimeError(f"route {route.method} {route.path} has no body_limit")
+    return request.read_json_body(route.body_limit)
+
+
+def get_static_asset(request: Any, parsed: Any, route: Route) -> bool:
+    del route
+    asset = parsed.path.removeprefix("/static/")
+    content_type = static_content_type(asset)
+    if not content_type:
+        return False
+    request.write_static_asset(asset, content_type)
+    return True
+
+
+def get_auth_setup(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    request.write_json({"setup_required": auth_setup_required()})
+
+
+def get_login(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.handle_login_page(parsed)
+
+
+def get_logout(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    request.write_redirect("/login", clear_auth=True)
+
+
+def get_share_shell(request: Any, parsed: Any, route: Route) -> bool:
+    del route
+    return request.handle_share_shell(parsed)
+
+
+def get_ping(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    request.write_json({"ok": True, "time": time.time()})
+
+
+def get_update_status(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    if request.auth_readonly():
+        request.reject_forbidden(request.auth_identity(), "admin")
+        return
+    request.write_json(request.server.app.update_status_payload(dryrun=query_bool(parse_qs(parsed.query), "dryrun")))
+
+
+def get_dev_reload(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    if not getattr(request.server, "dev", False):
+        request.write_json(error_payload("not found", status=HTTPStatus.NOT_FOUND), status=HTTPStatus.NOT_FOUND)
+        return
+    request.stream_dev_reload()
+
+
+def get_client_events(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    request.stream_client_events()
+
+
+def get_home(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    sessions = request.share_sessions() if request.share_sessions() else request.server.app.sessions
+    request.write_html(html_page(
+        sessions,
+        request.auth_identity().role,
+        dev=getattr(request.server, "dev", False),
+        dangerously_yolo=request.server.app.dangerously_yolo,
+        share=request.share_bootstrap_payload(request.share_record()) if request.share_record() else None,
+    ))
+
+
+def get_preview_popout(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.handle_preview_popout_placeholder(parsed)
+
+
+def get_transcripts(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = parse_qs(parsed.query)
+    request.write_json(request.share_scoped_transcripts_payload(request.server.app.transcripts_payload(force=query_bool(qs, "force"))))
+
+
+def get_activity_summary(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = parse_qs(parsed.query)
+    request.write_json(request.server.app.activity_summary_payload(
+        force=query_bool(qs, "force"),
+        locale=str(query_one(qs, "locale", "en") or "en"),
+        session_scope=query_one(qs, "scope", "configured"),
+        hours=query_one(qs, "hours", "24"),
+    ))
+
+
+def get_yoagent_skills(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    request.write_json(request.server.app.yoagent_skills_payload())
+
+
+def get_yoagent_skill_files(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = parse_qs(parsed.query)
+    payload, status = request.server.app.yoagent_skill_files_payload(
+        str(query_one(qs, "kind", "") or ""),
+        str(query_one(qs, "name", "") or ""),
+    )
+    request.write_json(payload, status=status)
+
+
+def get_yoagent_conversation(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    request.write_json(request.server.app.yoagent_conversation_payload())
+
+
+def get_yoagent_jobs(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    response, status = request.server.app.yoagent_jobs_payload()
+    request.write_json(response, status=status)
+
+
+def get_tmux(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.write_int_query_app_result(
+        parsed,
+        "lines",
+        90,
+        MAX_TRANSCRIPT_TAIL_LINES,
+        lambda qs, lines: request.server.app.tmux_snapshot(str(query_one(qs, "session", "") or ""), lines),
+    )
+
+
+def get_tmux_signals(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.write_app_result(request.server.app.tmux_signals_payload(force=query_bool(parse_qs(parsed.query), "force")))
+
+
+def get_transcript(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.write_int_query_app_result(
+        parsed,
+        "lines",
+        120,
+        MAX_TRANSCRIPT_TAIL_LINES,
+        lambda qs, lines: request.server.app.transcript_tail(str(query_one(qs, "session", "") or ""), lines),
+    )
+
+
+def get_context(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.write_int_query_app_result(
+        parsed,
+        "messages",
+        40,
+        MAX_COMPACT_TRANSCRIPT_ITEMS,
+        lambda qs, messages: request.server.app.context_tail(str(query_one(qs, "session", "") or ""), messages),
+    )
+
+
+def get_context_items(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.write_int_query_app_result(
+        parsed,
+        "messages",
+        40,
+        MAX_COMPACT_TRANSCRIPT_ITEMS,
+        lambda qs, messages: request.server.app.context_items(str(query_one(qs, "session", "") or ""), messages),
+    )
+
+
+def get_context_stream(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.stream_context_items(parsed)
+
+
+def get_summary_stream(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.stream_codex_summary(parsed)
+
+
+def get_auto_approve(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = parse_qs(parsed.query)
+    session = query_one(qs, "session", None)
+    request.write_app_result(request.server.app.auto_approve_status(session))
+
+
+def get_notify(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    request.write_json(request.server.app.notify_status())
+
+
+def get_settings(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    request.write_json(request.server.app.settings_payload())
+
+
+def get_share_status(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    if request.share_token():
+        request.write_app_result(request.server.app.share_status_payload(request.share_token(), base_url=request.request_base_url()))
+    else:
+        request.write_app_result(request.server.app.active_share_payload(base_url=request.request_base_url()))
+
+
+def get_watched_prs(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    request.write_json(request.server.app.watched_prs_payload())
+
+
+def get_yolo_rules(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    request.write_json(request.server.app.yolo_rules_payload())
+
+
+def get_events(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.write_int_query_app_result(
+        parsed,
+        "limit",
+        100,
+        MAX_EVENT_TAIL_LINES,
+        lambda qs, limit: request.server.app.events_payload(query_one(qs, "session", None), limit),
+    )
+
+
+def get_search(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.write_int_query_app_result(
+        parsed,
+        "limit",
+        100,
+        MAX_EVENT_TAIL_LINES,
+        lambda qs, limit: request.server.app.search_payload(str(query_one(qs, "q", "") or ""), query_one(qs, "session", None), limit),
+    )
+
+
+def get_run_history(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = parse_qs(parsed.query)
+    session = query_one(qs, "session", None)
+    request.write_app_result(request.server.app.run_history_payload(session))
+
+
+def get_activity(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    request.write_app_result(request.share_scoped_activity_result(request.server.app.activity_payload()))
+
+
+def get_session_files_batch(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = parse_qs(parsed.query)
+    requested_sessions = query_list(qs, "session") or query_list(qs, "sessions")
+    hours, error = parse_query_float(qs, "hours", 24.0, max_value=24.0 * 365.0)
+    if error:
+        request.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+        return
+    from_ref = query_one(qs, "from", None)
+    to_ref = query_one(qs, "to", None)
+    force = query_bool(qs, "force")
+    share_sessions = request.share_sessions()
+    if share_sessions:
+        if not requested_sessions:
+            requested_sessions = share_sessions
+        blocked = [session for session in requested_sessions if session not in share_sessions]
+        if blocked:
+            request.write_json(error_payload("share token is scoped to a different session", status=HTTPStatus.FORBIDDEN), status=HTTPStatus.FORBIDDEN)
+            return
+    repo_refs = parse_repo_refs_param(query_one(qs, "refs", None))
+    request.write_app_result(request.server.app.session_files_batch_payload(requested_sessions or None, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, force=force))
+
+
+def get_session_files(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = parse_qs(parsed.query)
+    session = query_one(qs, "session", None)
+    hours, error = parse_query_float(qs, "hours", 24.0, max_value=24.0 * 365.0)
+    if error:
+        request.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+        return
+    from_ref = query_one(qs, "from", None)
+    to_ref = query_one(qs, "to", None)
+    force = query_bool(qs, "force")
+    if request.share_sessions() and session not in request.share_sessions():
+        request.write_json(error_payload("share token is scoped to a different session", status=HTTPStatus.FORBIDDEN), status=HTTPStatus.FORBIDDEN)
+        return
+    repo_refs = parse_repo_refs_param(query_one(qs, "refs", None))
+    request.write_app_result(request.server.app.session_files_payload(session, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, force=force))
+
+
+def get_summary(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = parse_qs(parsed.query)
+    session = str(query_one(qs, "session", "") or "")
+    request.write_app_result(request.server.app.summary(session))
+
+
+def get_fs_list(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.handle_fs_list(parsed)
+
+
+def get_fs_search(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.handle_fs_search(parsed)
+
+
+def get_fs_index_status(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.handle_fs_index_status(parsed)
+
+
+def get_fs_read(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.handle_fs_read(parsed)
+
+
+def get_fs_info(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.handle_fs_info(parsed)
+
+
+def get_fs_diff(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.handle_fs_diff(parsed)
+
+
+def get_blame(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.handle_blame(parsed)
+
+
+def get_fs_raw(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.handle_fs_raw(parsed)
+
+
+def get_fs_html_preview(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.handle_fs_html_preview(parsed)
+
+
+def get_share_host_websocket(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.websocket_share_host(parsed)
+
+
+def get_share_ui_websocket(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.websocket_share_ui(parsed)
+
+
+def get_share_view_websocket(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.websocket_share_view(parsed)
+
+
+def get_websocket(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.websocket(parsed)
+
+
+def post_login(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.handle_login_submit(parsed)
+
+
+def post_self_update(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    if request.auth_readonly():
+        request.reject_forbidden(request.auth_identity(), "admin")
+        return
+    request.write_json(request.server.app.perform_self_update(dryrun=query_bool(parse_qs(parsed.query), "dryrun")))
+
+
+def post_ensure_session(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = parse_qs(parsed.query)
+    session = str(query_one(qs, "session", "") or "")
+    request.write_app_result(request.server.app.ensure_session(session))
+
+
+def post_create_session(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = parse_qs(parsed.query)
+    agent = str(query_one(qs, "agent", "claude") or "claude")
+    request.write_app_result(request.server.app.create_next_session(agent))
+
+
+def post_rename_session(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = parse_qs(parsed.query)
+    session = str(query_one(qs, "session", "") or "")
+    new_name = str(query_one(qs, "new_name", "") or "")
+    request.write_app_result(request.server.app.rename_session(session, new_name))
+
+
+def post_kill_session(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = parse_qs(parsed.query)
+    session = str(query_one(qs, "session", "") or "")
+    request.write_app_result(request.server.app.kill_session(session))
+
+
+def post_upload(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = parse_qs(parsed.query)
+    session = str(query_one(qs, "session", "") or "")
+    request.write_app_result(request.handle_upload(session))
+
+
+def post_auto_approve(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = parse_qs(parsed.query)
+    session = str(query_one(qs, "session", "") or "")
+    enabled = query_bool(qs, "enabled")
+    request.write_app_result(request.server.app.set_auto_approve(session, enabled))
+
+
+def post_notify(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = parse_qs(parsed.query)
+    enabled = query_bool(qs, "enabled")
+    request.write_json(request.server.app.set_notify(enabled))
+
+
+def post_settings(request: Any, parsed: Any, route: Route) -> None:
+    del parsed
+    payload = _json_body(request, route)
+    if payload is None:
+        return
+    request.write_json(request.server.app.save_settings(payload.get("settings", payload)))
+
+
+def post_share_create(request: Any, parsed: Any, route: Route) -> None:
+    del parsed
+    payload = _json_body(request, route)
+    if payload is None:
+        return
+    request.write_app_result(request.handle_share_create(payload))
+
+
+def post_share_stop(request: Any, parsed: Any, route: Route) -> None:
+    qs = parse_qs(parsed.query)
+    token_or_short_id = str(query_one(qs, "token", "") or query_one(qs, "id", "") or "")
+    content_length = int(request.headers.get("Content-Length", "0") or 0)
+    if not token_or_short_id and content_length > 0:
+        payload = _json_body(request, route)
+        if payload is None:
+            return
+        token_or_short_id = str(payload.get("token") or payload.get("short_id") or payload.get("id") or "")
+    result = request.server.app.stop_active_share(token_or_short_id)
+    request.server.close_inactive_share_upstreams()
+    request.write_app_result(result)
+
+
+def post_share_extend(request: Any, parsed: Any, route: Route) -> None:
+    del parsed
+    payload = _json_body(request, route)
+    if payload is None:
+        return
+    token_or_short_id = str(payload.get("token") or payload.get("short_id") or payload.get("id") or "")
+    add_seconds = payload.get("add_seconds", 600)
+    result = request.server.app.extend_share_token(token_or_short_id, add_seconds, base_url=request.request_base_url())
+    if result[1] == HTTPStatus.OK:
+        token = str(result[0].get("token") or token_or_short_id)
+        request.server.broadcast_share_status(token)
+    request.write_app_result(result)
+
+
+def post_share_debug_profile(request: Any, parsed: Any, route: Route) -> None:
+    del parsed
+    payload = _json_body(request, route)
+    if payload is None:
+        return
+    token = request.share_token()
+    if not token:
+        request.write_json(error_payload("share token required", status=HTTPStatus.UNAUTHORIZED), status=HTTPStatus.UNAUTHORIZED)
+        return
+    client_ip = request.client_address[0] if isinstance(request.client_address, tuple) and request.client_address else ""
+    request.write_app_result(request.server.app.record_share_debug_profile(
+        token,
+        payload,
+        ip=client_ip,
+        user_agent=request.headers.get("User-Agent", ""),
+    ))
+
+
+def post_watch_roots(request: Any, parsed: Any, route: Route) -> None:
+    del parsed
+    payload = _json_body(request, route)
+    if payload is None:
+        return
+    request.write_json(request.server.app.update_client_watch_roots(payload))
+
+
+def post_drop_action(request: Any, parsed: Any, route: Route) -> None:
+    del parsed
+    payload = _json_body(request, route)
+    if payload is None:
+        return
+    request.write_app_result(request.server.app.run_file_drop_action(payload))
+
+
+def post_yoagent_chat(request: Any, parsed: Any, route: Route) -> None:
+    del parsed
+    payload = _json_body(request, route)
+    if payload is None:
+        return
+    response, status = request.server.app.yoagent_chat(payload, access_role=request.auth_identity().role)
+    request.write_json(response, status=status)
+
+
+def post_yoagent_preview_send(request: Any, parsed: Any, route: Route) -> None:
+    del parsed
+    payload = _json_body(request, route)
+    if payload is None:
+        return
+    response, status = request.server.app.preview_yoagent_send_action(payload)
+    request.write_json(response, status=status)
+
+
+def post_yoagent_execute_send(request: Any, parsed: Any, route: Route) -> None:
+    del parsed
+    payload = _json_body(request, route)
+    if payload is None:
+        return
+    response, status = request.server.app.execute_yoagent_send_action(payload)
+    request.write_json(response, status=status)
+
+
+def post_yoagent_intent(request: Any, parsed: Any, route: Route) -> None:
+    del parsed
+    payload = _json_body(request, route)
+    if payload is None:
+        return
+    response, status = request.server.app.yoagent_intent(payload)
+    request.write_json(response, status=status)
+
+
+def post_yoagent_jobs(request: Any, parsed: Any, route: Route) -> None:
+    del parsed
+    payload = _json_body(request, route)
+    if payload is None:
+        return
+    response, status = request.server.app.create_yoagent_job(payload)
+    request.write_json(response, status=status)
+
+
+def post_yoagent_job_confirm(request: Any, parsed: Any, route: Route) -> None:
+    payload = _json_body(request, route)
+    if payload is None:
+        return
+    job_id = unquote(parsed.path[len("/api/yoagent/jobs/"):-len("/confirm")]).strip("/")
+    response, status = request.server.app.confirm_yoagent_job(str(payload.get("id") or job_id))
+    request.write_json(response, status=status)
+
+
+def post_yoagent_job_cancel(request: Any, parsed: Any, route: Route) -> None:
+    payload = _json_body(request, route)
+    if payload is None:
+        return
+    job_id = unquote(parsed.path[len("/api/yoagent/jobs/"):-len("/cancel")]).strip("/")
+    response, status = request.server.app.cancel_yoagent_job(str(payload.get("id") or job_id))
+    request.write_json(response, status=status)
+
+
+def post_yoagent_skill_file_upsert(request: Any, parsed: Any, route: Route) -> None:
+    del parsed
+    payload = _json_body(request, route)
+    if payload is None:
+        return
+    response, status = request.server.app.upsert_yoagent_skill_file(payload)
+    request.write_json(response, status=status)
+
+
+def post_yoagent_skill_file_delete(request: Any, parsed: Any, route: Route) -> None:
+    del parsed
+    payload = _json_body(request, route)
+    if payload is None:
+        return
+    response, status = request.server.app.delete_yoagent_skill_file(payload)
+    request.write_json(response, status=status)
+
+
+def post_yoagent_prewarm(request: Any, parsed: Any, route: Route) -> None:
+    del parsed
+    payload = _json_body(request, route)
+    if payload is None:
+        return
+    response, status = request.server.app.yoagent_prewarm(payload)
+    request.write_json(response, status=status)
+
+
+def post_yoagent_reset(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    request.write_json(request.server.app.reset_yoagent_chat())
+
+
+def post_yolo_rules_reload(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    request.write_json(request.server.app.reload_yolo_rules())
+
+
+def post_yolo_rules_open(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    request.write_json(request.server.app.ensure_yolo_rules_file())
+
+
+def post_tmux_next(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = parse_qs(parsed.query)
+    session = qs.get("session", [""])[0]
+    request.write_app_result(request.server.app.tmux_next_window(session))
+
+
+def post_tmux_window(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = parse_qs(parsed.query)
+    session = qs.get("session", [""])[0]
+    window = qs.get("window", [""])[0]
+    payload, status = request.server.app.tmux_select_window(session, window)
+    request.write_json(payload, status=status)
+
+
+def post_tmux_copy_selection(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = parse_qs(parsed.query)
+    session = str(query_one(qs, "session", "") or "")
+    request.write_app_result(request.server.app.tmux_copy_selection(session))
+
+
+def post_event(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    request.write_app_result(request.handle_client_event())
+
+
+def post_fs_batch(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.handle_fs_batch(parsed)
+
+
+def post_fs_write(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.handle_fs_write(parsed)
+
+
+def post_fs_delete(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.handle_fs_delete(parsed)
+
+
+def post_fs_unindex(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.handle_fs_unindex(parsed)
+
+
+def post_fs_rename(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.handle_fs_rename(parsed)
+
+
+def post_fs_mkdir(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.handle_fs_mkdir(parsed)
+
+
+CORE_ROUTES = (
+    Route("GET", "/static/*", PUBLIC, get_static_asset, group="core"),
+    Route("GET", "/api/auth-setup", PUBLIC, get_auth_setup, group="core"),
+    Route("GET", "/login", PUBLIC, get_login, group="core"),
+    Route("GET", "/logout", PUBLIC, get_logout, group="core"),
+    Route("GET", "/api/ping", "readonly", get_ping, group="core"),
+    Route("GET", "/api/update-status", "admin", get_update_status, group="core"),
+    Route("GET", "/api/dev-reload", "readonly", get_dev_reload, group="core"),
+    Route("GET", "/api/client-events", "readonly", get_client_events, group="core"),
+    Route("GET", "/", "readonly", get_home, group="core"),
+    Route("GET", "/preview-popout", "readonly", get_preview_popout, group="core"),
+    Route("GET", "/api/transcripts", "readonly", get_transcripts, group="core"),
+    Route("GET", "/api/activity-summary", "readonly", get_activity_summary, group="core"),
+    Route("GET", "/api/auto-approve", "readonly", get_auto_approve, group="core"),
+    Route("GET", "/api/notify", "readonly", get_notify, group="core"),
+    Route("GET", "/api/settings", "readonly", get_settings, group="core"),
+    Route("GET", "/api/watched-prs", "readonly", get_watched_prs, group="core"),
+    Route("GET", "/api/yolo-rules", "readonly", get_yolo_rules, group="core"),
+    Route("GET", "/api/events", "readonly", get_events, group="core"),
+    Route("GET", "/api/search", "readonly", get_search, group="core"),
+    Route("GET", "/api/run-history", "readonly", get_run_history, group="core"),
+    Route("GET", "/api/activity", "readonly", get_activity, group="core"),
+    Route("GET", "/api/session-files-batch", "readonly", get_session_files_batch, group="core"),
+    Route("GET", "/api/session-files", "readonly", get_session_files, group="core"),
+    Route("GET", "/api/summary", "readonly", get_summary, group="core"),
+    Route("POST", "/login", PUBLIC, post_login, group="core"),
+    Route("POST", "/api/self-update", "admin", post_self_update, group="core"),
+    Route("POST", "/api/ensure-session", "admin", post_ensure_session, group="core"),
+    Route("POST", "/api/create-session", "admin", post_create_session, group="core"),
+    Route("POST", "/api/rename-session", "admin", post_rename_session, group="core"),
+    Route("POST", "/api/kill-session", "admin", post_kill_session, group="core"),
+    Route("POST", "/api/upload", "admin", post_upload, group="core"),
+    Route("POST", "/api/auto-approve", "admin", post_auto_approve, group="core"),
+    Route("POST", "/api/notify", "admin", post_notify, group="core"),
+    Route("POST", "/api/settings", "admin", post_settings, body_limit=64 * 1024, group="core"),
+    Route("POST", "/api/watch/roots", "admin", post_watch_roots, body_limit=64 * 1024, group="core"),
+    Route("POST", "/api/drop-action/run", "admin", post_drop_action, body_limit=64 * 1024, group="core"),
+    Route("POST", "/api/yolo-rules/reload", "admin", post_yolo_rules_reload, group="core"),
+    Route("POST", "/api/yolo-rules/open", "admin", post_yolo_rules_open, group="core"),
+    Route("POST", "/api/event", "readonly", post_event, group="core"),
+)
+
+SHARE_ROUTES = (
+    Route("GET", "/share/*", PUBLIC, get_share_shell, group="share"),
+    Route("GET", "/api/share", get_share_status_role, get_share_status, group="share"),
+    Route("GET", "/ws/share-host", "admin", get_share_host_websocket, group="share"),
+    Route("GET", "/ws/share-ui", "readonly", get_share_ui_websocket, group="share"),
+    Route("GET", "/ws/share-view", "readonly", get_share_view_websocket, group="share"),
+    Route("POST", "/api/share", "admin", post_share_create, body_limit=16 * 1024, group="share"),
+    Route("POST", "/api/share/stop", "admin", post_share_stop, body_limit=4096, group="share"),
+    Route("POST", "/api/share/extend", "admin", post_share_extend, body_limit=4096, group="share"),
+    Route("POST", "/api/share/debug-profile", share_readonly_post_role, post_share_debug_profile, body_limit=64 * 1024, group="share"),
+)
+
+YOAGENT_ROUTES = (
+    Route("GET", "/api/yoagent/skills", "admin", get_yoagent_skills, group="yoagent"),
+    Route("GET", "/api/yoagent/skill-files", "admin", get_yoagent_skill_files, group="yoagent"),
+    Route("GET", "/api/yoagent/conversation", "admin", get_yoagent_conversation, group="yoagent"),
+    Route("GET", "/api/yoagent/jobs", "admin", get_yoagent_jobs, group="yoagent"),
+    Route("POST", "/api/yoagent/chat", yoagent_chat_post_role, post_yoagent_chat, body_limit=64 * 1024, group="yoagent"),
+    Route("POST", "/api/yoagent/actions/preview-send", "admin", post_yoagent_preview_send, body_limit=64 * 1024, group="yoagent"),
+    Route("POST", "/api/yoagent/actions/execute-send", "admin", post_yoagent_execute_send, body_limit=16 * 1024, group="yoagent"),
+    Route("POST", "/api/yoagent/intent", "admin", post_yoagent_intent, body_limit=64 * 1024, group="yoagent"),
+    Route("POST", "/api/yoagent/jobs", "admin", post_yoagent_jobs, body_limit=64 * 1024, group="yoagent"),
+    Route("POST", "/api/yoagent/jobs/*/confirm", "admin", post_yoagent_job_confirm, body_limit=16 * 1024, group="yoagent"),
+    Route("POST", "/api/yoagent/jobs/*/cancel", "admin", post_yoagent_job_cancel, body_limit=16 * 1024, group="yoagent"),
+    Route("POST", "/api/yoagent/skill-files/upsert", "admin", post_yoagent_skill_file_upsert, body_limit=64 * 1024, group="yoagent"),
+    Route("POST", "/api/yoagent/skill-files/delete", "admin", post_yoagent_skill_file_delete, body_limit=16 * 1024, group="yoagent"),
+    Route("POST", "/api/yoagent/prewarm", "admin", post_yoagent_prewarm, body_limit=64 * 1024, group="yoagent"),
+    Route("POST", "/api/yoagent/reset", "admin", post_yoagent_reset, group="yoagent"),
+)
+
+FILESYSTEM_ROUTES = (
+    Route("GET", "/api/fs/list", "readonly", get_fs_list, group="filesystem"),
+    Route("GET", "/api/fs/search", "readonly", get_fs_search, group="filesystem"),
+    Route("GET", "/api/fs/index-status", "readonly", get_fs_index_status, group="filesystem"),
+    Route("GET", "/api/fs/read", "readonly", get_fs_read, group="filesystem"),
+    Route("GET", "/api/fs/info", "readonly", get_fs_info, group="filesystem"),
+    Route("GET", "/api/fs/diff", "readonly", get_fs_diff, group="filesystem"),
+    Route("GET", "/api/blame", "readonly", get_blame, group="filesystem"),
+    Route("GET", "/api/fs/raw", "readonly", get_fs_raw, group="filesystem"),
+    Route("GET", "/api/fs/html-preview", "readonly", get_fs_html_preview, group="filesystem"),
+    Route("POST", "/api/fs/batch", share_readonly_post_role, post_fs_batch, body_limit=64 * 1024, group="filesystem"),
+    Route("POST", "/api/fs/write", "admin", post_fs_write, group="filesystem"),
+    Route("POST", "/api/fs/delete", "admin", post_fs_delete, body_limit=4096, group="filesystem"),
+    Route("POST", "/api/fs/unindex", "admin", post_fs_unindex, body_limit=4096, group="filesystem"),
+    Route("POST", "/api/fs/rename", "admin", post_fs_rename, body_limit=4096, group="filesystem"),
+    Route("POST", "/api/fs/mkdir", "admin", post_fs_mkdir, body_limit=4096, group="filesystem"),
+)
+
+TMUX_ROUTES = (
+    Route("GET", "/api/tmux", "readonly", get_tmux, group="tmux"),
+    Route("GET", "/api/tmux-signals", "readonly", get_tmux_signals, group="tmux"),
+    Route("GET", "/api/transcript", "readonly", get_transcript, group="tmux"),
+    Route("GET", "/api/context", "readonly", get_context, group="tmux"),
+    Route("GET", "/api/context-items", "readonly", get_context_items, group="tmux"),
+    Route("GET", "/api/context-stream", "readonly", get_context_stream, group="tmux"),
+    Route("GET", "/api/summary-stream", "admin", get_summary_stream, group="tmux"),
+    Route("GET", "/ws", "readonly", get_websocket, group="tmux"),
+    Route("POST", "/api/tmux-next", "admin", post_tmux_next, group="tmux"),
+    Route("POST", "/api/tmux-window", "admin", post_tmux_window, group="tmux"),
+    Route("POST", "/api/tmux-copy-selection", "admin", post_tmux_copy_selection, group="tmux"),
+)
+
+ROUTE_GROUPS = {
+    "core": CORE_ROUTES,
+    "share": SHARE_ROUTES,
+    "yoagent": YOAGENT_ROUTES,
+    "filesystem": FILESYSTEM_ROUTES,
+    "tmux": TMUX_ROUTES,
+}
+ALL_ROUTES = tuple(route for routes in ROUTE_GROUPS.values() for route in routes)
+ROUTES_BY_METHOD = {
+    "GET": tuple(route for route in ALL_ROUTES if route.method == "GET"),
+    "POST": tuple(route for route in ALL_ROUTES if route.method == "POST"),
+}

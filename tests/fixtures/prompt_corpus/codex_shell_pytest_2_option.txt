@@ -1,0 +1,12 @@
+ Codex wants to run a shell command
+
+ Would you like to run the following command?
+
+   Reason: Run the focused backend detector tests.
+
+   $ python3 -m pytest tests/test_auto_approve_detector.py -q
+
+ › 1. Yes, proceed (y)
+   2. No, and tell Codex what to do differently (esc)
+
+ Press enter to confirm or esc to cancel

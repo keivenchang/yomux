@@ -14,6 +14,16 @@ import shlex
 
 from . import yolo_rules
 
+_ANSI_ESCAPE_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def normalize_capture_text(text: str) -> str:
+    """Strip terminal control bytes before classifying captured pane text."""
+    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    normalized = _ANSI_ESCAPE_RE.sub("", normalized)
+    return _CONTROL_CHAR_RE.sub("", normalized)
+
 
 def is_dangerous(cmd_line: str) -> bool:
     """Return True when the shared YOLO rule engine would not auto-approve this command.
@@ -65,6 +75,13 @@ _STEP_MARKER_RE = re.compile(r"^\[\d+\s*/\s*\d+\]")
 # the canonical Claude bullet `● Bash(<cmd>)` / `• Bash(<cmd>)` — the parenthesized arg is
 # the exact command, so anchoring to it avoids folding the adjacent description prose.
 _BASH_CALL_RE = re.compile(r"[●•]\s*Bash\((.+)\)\s*$")
+_CODEX_COMMAND_PROMPT_PREFIX = "would you like to run the following comm"
+
+
+def _is_codex_command_prompt_line(line: str) -> bool:
+    # Real Codex captures can crop the final "d?" at narrow widths, leaving
+    # "Would you like to run the following comman"; match the stable prefix.
+    return _CODEX_COMMAND_PROMPT_PREFIX in str(line or "").lower()
 
 
 def _shell_text_complete(cmd_line: str) -> bool:
@@ -108,11 +125,12 @@ def extract_command(pane_text: str) -> str | None:
     For Codex we look for the "$ " line *between* the question and the
     selector (it's below, not above).
     """
+    pane_text = normalize_capture_text(pane_text)
     lines = pane_text.splitlines()
 
     # Codex: command is on a "$ ..." line below the question.
     for i, line in enumerate(lines):
-        if "Would you like to run the following command" in line:
+        if _is_codex_command_prompt_line(line):
             for j in range(i + 1, min(i + 12, len(lines))):
                 stripped = lines[j].lstrip()
                 # Codex prefixes the command with "$ " after leading box whitespace.
@@ -150,7 +168,7 @@ def extract_command(pane_text: str) -> str | None:
     # Claude: walk backward from the trigger line to a separator/bullet.
     trigger_idx = None
     for i, line in enumerate(lines):
-        if "Permission rule" in line or "Do you want to proceed" in line or "Do you want to make this edit" in line:
+        if "Permission rule" in line or _CLAUDE_PROCEED_PROMPT_RE.search(line) or "Do you want to make this edit" in line:
             trigger_idx = i
             break
 
@@ -252,6 +270,38 @@ _FILE_PROMPT_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
+_CLAUDE_PROCEED_PROMPT_RE = re.compile(r"^\s*(?:[●•]\s*)?Do you want to proceed\?\s*$", re.IGNORECASE)
+_PLAN_PROMPT_RE = re.compile(
+    r"(?:"
+    r"Do you want to (?:proceed with|approve|accept|use) (?:this )?plan\?"
+    r"|Would you like (?:me|Claude) to (?:start|proceed|make changes)(?: with this plan)?\?"
+    r"|Claude has written up a plan\b.*Would you like to proceed\?"
+    r"|Ready to (?:start|make changes)\?"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _is_plan_prompt_at(lines: list[str], index: int) -> bool:
+    return bool(_plan_prompt_text_at(lines, index))
+
+
+def _plan_prompt_text_at(lines: list[str], index: int) -> str:
+    line = lines[index] if 0 <= index < len(lines) else ""
+    if _PLAN_PROMPT_RE.search(line):
+        return line.strip()
+    if "Claude has written up a plan" not in line:
+        return ""
+    parts: list[str] = []
+    for part in lines[index:index + 4]:
+        stripped = part.strip()
+        if not stripped:
+            continue
+        parts.append(stripped)
+        if "Would you like to proceed?" in stripped:
+            break
+    window = " ".join(parts)
+    return window if "Would you like to proceed?" in window else ""
 
 
 def detect_prompt(pane_text: str) -> str | None:
@@ -269,16 +319,20 @@ def detect_prompt(pane_text: str) -> str | None:
     that, once we see the Codex header we suppress tool-prompt detection
     inside the next ~20 lines (the Codex prompt body).
     """
+    pane_text = normalize_capture_text(pane_text)
     last_type = None
     codex_body_until = -1
-    for i, line in enumerate(pane_text.splitlines()):
-        if "Do you want to proceed" in line:
+    lines = pane_text.splitlines()
+    for i, line in enumerate(lines):
+        if _CLAUDE_PROCEED_PROMPT_RE.search(line):
             last_type = "bash"
-        elif "Would you like to run the following command" in line:
+        elif _is_codex_command_prompt_line(line):
             last_type = "bash"
             codex_body_until = i + 20
         elif _FILE_PROMPT_RE.search(line):
             last_type = "file"
+        elif _is_plan_prompt_at(lines, i):
+            last_type = "plan"
         elif "Do you want to allow" in line and i > codex_body_until:
             last_type = "tool"
     return last_type
@@ -319,12 +373,12 @@ def yes_is_selected(pane_text: str) -> bool:
     frame with nothing highlighted that wrongly reports the first option as selected, which can confirm
     the wrong option. A send requires a visible selector glyph.
     """
-    return bool(_YES_SELECTOR_RE.search(pane_text))
+    return bool(_YES_SELECTOR_RE.search(normalize_capture_text(pane_text)))
 
 
 def selected_prompt_option(pane_text: str) -> int:
     # #67: only a visible selector glyph counts as a selection — no positional default-to-yes.
-    matches = list(_SELECTED_CHOICE_NUMBER_RE.finditer(pane_text))
+    matches = list(_SELECTED_CHOICE_NUMBER_RE.finditer(normalize_capture_text(pane_text)))
     if matches:
         return int(matches[-1].group(1))
     return 0
@@ -373,22 +427,27 @@ def prompt_text(pane_text: str, prompt_type: str | None = None) -> str:
     This is the display companion to ``detect_prompt``. Keep the matching
     rules aligned so UI code and auto-approval code describe the same prompt.
     """
+    pane_text = normalize_capture_text(pane_text)
     text = ""
     codex_body_until = -1
     lines = pane_text.splitlines()
     for i, line in enumerate(lines):
         stripped = line.strip()
-        if "Do you want to proceed" in stripped:
+        if _CLAUDE_PROCEED_PROMPT_RE.search(stripped):
             text = "Do you want to proceed?"
-        elif "Would you like to run the following command" in stripped:
+        elif _is_codex_command_prompt_line(stripped):
             text = "Would you like to run the following command?"
             codex_body_until = i + 20
         else:
             file_match = _FILE_PROMPT_RE.search(stripped)
             if file_match:
                 text = stripped
-            elif "Do you want to allow" in stripped and i > codex_body_until:
-                text = stripped
+            else:
+                plan_text = _plan_prompt_text_at(lines, i)
+                if plan_text:
+                    text = plan_text
+                elif "Do you want to allow" in stripped and i > codex_body_until:
+                    text = stripped
     if text:
         return text
     if prompt_type == "bash":
@@ -397,6 +456,8 @@ def prompt_text(pane_text: str, prompt_type: str | None = None) -> str:
         return "file approval prompt is visible"
     if prompt_type == "tool":
         return "tool approval prompt is visible"
+    if prompt_type == "plan":
+        return "plan approval prompt is visible"
     return ""
 
 
@@ -433,6 +494,7 @@ _CODEX_MODEL_STATUS_LINE_RE = re.compile(
     r"^\s*(?:gpt|o\d|codex)[A-Za-z0-9_.-]*\s+\S+(?:\s+\S+)?\s+(?:~|/)[^\s]*(?:\s+\d+%\s+context\s+(?:used|left|remaining))?\s*$",
     re.IGNORECASE,
 )
+_SHELL_PROMPT_RE = re.compile(r"[@:][^@\s]+[$#](?:\s+\S.*)?$")
 # Header of the Ctrl-T todo overlay, e.g. "11 tasks (0 done, 1 in progress, 10 open)" — also matches
 # singular "1 task (...)". The whole overlay is a bounded block: everything below this header is
 # persistent chrome rendered under a LIVE prompt, not newer agent output.
@@ -474,6 +536,124 @@ _ASK_QUESTION_FOOTER_RE = re.compile(
 _ASK_QUESTION_HINT_RE = re.compile(
     r"to\s+navigate|add\s+notes|switch\s+questions", re.IGNORECASE
 )
+_OPTION_LINE_RE = re.compile(r"^\s*([❯›>]?)\s*(\d+)[.:]\s+(.+?)\s*$")
+_INLINE_CONFIRMATION_RE = re.compile(r"\?.*(?:\((?:y/n|yes/no)\)|\[(?:y/N|Y/n|yes/no)\])\s*$", re.IGNORECASE)
+
+
+def _prompt_options(visible_text: str) -> list[dict[str, object]]:
+    options: list[dict[str, object]] = []
+    for line in normalize_capture_text(visible_text).splitlines():
+        match = _OPTION_LINE_RE.match(line)
+        if not match:
+            continue
+        marker, number, label = match.groups()
+        options.append({
+            "index": int(number),
+            "label": re.sub(r"\s+", " ", label).strip(),
+            "selected": bool(marker),
+        })
+    return options
+
+
+def _infer_agent(visible_text: str, prompt_type: str | None = None) -> str:
+    text = normalize_capture_text(visible_text)
+    lowered = text.lower()
+    if (
+        "codex wants to run a shell command" in lowered
+        or "codex wants to use an mcp tool" in lowered
+        or _is_codex_command_prompt_line(lowered)
+        or re.search(r"^\s*(?:gpt|o\d|codex)[A-Za-z0-9_.-]*\b", text, re.MULTILINE)
+    ):
+        return "codex"
+    if (
+        "permission rule bash requires confirmation" in lowered
+        or "bash command" in lowered
+        or "claude" in lowered
+        or "do you want to allow" in lowered
+        or prompt_type in {"file", "tool", "plan"}
+        or _is_ask_user_question_footer(text)
+    ):
+        return "claude"
+    return "unknown"
+
+
+def _prompt_kind(prompt_type: str | None) -> str:
+    if prompt_type == "bash":
+        return "shell-command"
+    if prompt_type == "file":
+        return "file-edit"
+    if prompt_type == "tool":
+        return "tool-approval"
+    if prompt_type == "plan":
+        return "plan-approval"
+    return ""
+
+
+def _question_prompt_kind(visible_text: str, question: str) -> str:
+    lowered = f"{visible_text}\n{question}".lower()
+    if "mcp" in lowered and ("would you like to allow" in lowered or "wants to use an mcp tool" in lowered):
+        return "tool-approval"
+    return "question"
+
+
+def _matching_evidence_lines(visible_text: str, prompt_type: str | None, question: str = "") -> list[str]:
+    evidence: list[str] = []
+    codex_body_until = -1
+    lines = normalize_capture_text(visible_text).splitlines()
+    for index, line in enumerate(lines):
+        stripped = _clean_prompt_block_line(line)
+        if not stripped:
+            continue
+        matched = False
+        if prompt_type == "bash" and (
+            _CLAUDE_PROCEED_PROMPT_RE.search(stripped)
+            or _is_codex_command_prompt_line(stripped)
+            or stripped.startswith("$ ")
+            or stripped.startswith("Bash command")
+            or stripped.startswith("Codex wants to run a shell command")
+        ):
+            matched = True
+            if _is_codex_command_prompt_line(stripped):
+                codex_body_until = index + 20
+        elif prompt_type == "file" and _FILE_PROMPT_RE.search(stripped):
+            matched = True
+        elif prompt_type == "plan" and _is_plan_prompt_at(lines, index):
+            matched = True
+        elif prompt_type == "tool" and "Do you want to allow" in stripped and index > codex_body_until:
+            matched = True
+        elif question and stripped in question.splitlines():
+            matched = True
+        elif _OPTION_LINE_RE.match(line):
+            matched = True
+
+        if matched:
+            evidence.append(stripped)
+        if len(evidence) >= 8:
+            break
+    return evidence
+
+
+def _negative_reason(visible_text: str) -> str:
+    visible_text = normalize_capture_text(visible_text)
+    if not visible_text.strip():
+        return "empty"
+    if stale_approval_behind_working(visible_text) or approval_prompt_has_later_activity(visible_text):
+        return "stale prompt text has later activity"
+    if visible_agent_working(visible_text):
+        return "agent is working"
+    if any(re.match(r"^\s*[❯›>]\s*(?:\S.*)?$", line) for line in visible_text.splitlines()[-8:]):
+        return "idle composer"
+    return "no current agent prompt"
+
+
+def _hash_prompt_parts(*parts: object) -> str:
+    normalized: list[str] = []
+    for part in parts:
+        if isinstance(part, list):
+            normalized.extend(str(item) for item in part)
+        elif part not in (None, ""):
+            normalized.append(str(part))
+    return hashlib.md5("\n".join(normalized).encode()).hexdigest()
 
 
 def _is_working_line(line: str) -> bool:
@@ -485,6 +665,7 @@ def visible_agent_working(visible_text: str) -> bool:
 
     Spec: docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md#detector-principles
     """
+    visible_text = normalize_capture_text(visible_text)
     lines = visible_text.splitlines()[-25:]
     working_index = _last_working_index(lines)
     return working_index >= 0 and not _working_line_has_later_prompt(lines, working_index)
@@ -501,7 +682,7 @@ def _working_line_has_later_prompt(lines: list[str], working_index: int) -> bool
             continue
         if re.match(r"^[❯›>]\s+\S", stripped):
             continue
-        if re.search(r"[@:][^@\s]+[$#]\s*$", stripped):
+        if _SHELL_PROMPT_RE.search(stripped):
             return True
         return True
     return False
@@ -511,9 +692,9 @@ def _last_approval_prompt_index(lines: list[str]) -> int:
     last_index = -1
     codex_body_until = -1
     for index, line in enumerate(lines):
-        if "Do you want to proceed" in line or "Would you like to run the following command" in line:
+        if _CLAUDE_PROCEED_PROMPT_RE.search(line) or _is_codex_command_prompt_line(line):
             last_index = index
-            if "Would you like to run the following command" in line:
+            if _is_codex_command_prompt_line(line):
                 codex_body_until = index + 20
         elif _FILE_PROMPT_RE.search(line):
             last_index = index
@@ -532,6 +713,7 @@ def _last_working_index(lines: list[str]) -> int:
 
 def stale_approval_behind_working(visible_text: str) -> bool:
     """Return True when old prompt text remains visible above a live working row."""
+    visible_text = normalize_capture_text(visible_text)
     lines = visible_text.splitlines()
     prompt_index = _last_approval_prompt_index(lines)
     return (
@@ -543,6 +725,7 @@ def stale_approval_behind_working(visible_text: str) -> bool:
 
 def approval_prompt_has_later_activity(visible_text: str) -> bool:
     """Return True when a dismissed prompt remains visible above newer output."""
+    visible_text = normalize_capture_text(visible_text)
     lines = visible_text.splitlines()
     prompt_index = _last_approval_prompt_index(lines)
     if prompt_index < 0:
@@ -580,7 +763,7 @@ def approval_prompt_has_later_activity(visible_text: str) -> bool:
             return True
         if stripped.startswith(("●", "•", "✻", "✢", "❯", "›")):
             return True
-        if re.search(r"[@:][^@\s]+[$#]\s*$", stripped):
+        if _SHELL_PROMPT_RE.search(stripped):
             return True
     return False
 
@@ -622,6 +805,8 @@ def _is_prompt_trailing_ui_line(line: str) -> bool:
     if _BOX_DRAWING_ONLY_LINE_RE.fullmatch(stripped):
         return True
     if _BOXED_EMPTY_INPUT_LINE_RE.match(stripped):
+        return True
+    if stripped.startswith("Press enter to confirm") or stripped.startswith("Press y to"):
         return True
     if _EFFORT_STATUS_LINE_RE.match(stripped):
         return True
@@ -683,11 +868,15 @@ def ask_user_question_prompt_text(visible_text: str) -> str:
     numbered options and a ``?``-question line — even with a preview box / "Notes:" / "Chat about this"
     block sitting between the options and the footer.
     """
+    visible_text = normalize_capture_text(visible_text)
     lines = visible_text.splitlines()[-80:]
     footer_indices = [i for i, line in enumerate(lines) if _is_ask_user_question_footer(line)]
     if not footer_indices:
         return ""
-    head = lines[: footer_indices[-1]]
+    footer_index = footer_indices[-1]
+    if _choice_prompt_has_later_activity(lines, footer_index):
+        return ""
+    head = lines[:footer_index]
     option_indices = [i for i, line in enumerate(head) if _CHOICE_LINE_RE.search(line)]
     if len(option_indices) < 2:
         return ""
@@ -706,6 +895,7 @@ def visible_choice_prompt_text(visible_text: str) -> str:
     This intentionally ignores scrollback. If a spinner/working line is visible,
     working wins over older questions still present above the prompt.
     """
+    visible_text = normalize_capture_text(visible_text)
     if not visible_text.strip():
         return ""
     if detect_prompt(visible_text) is not None or visible_agent_working(visible_text):
@@ -735,6 +925,8 @@ def visible_choice_prompt_text(visible_text: str) -> str:
             end += 1
         block = lines[start:end]
         if sum(1 for line in block if _CHOICE_LINE_RE.search(line)) >= 2:
+            if _choice_prompt_has_later_activity(lines, end):
+                return ""
             return _clip_prompt_lines(block)
 
     prompt_line_visible = any(re.match(r"^\s*[❯›>]\s*$", line) for line in lines[-8:])
@@ -744,11 +936,25 @@ def visible_choice_prompt_text(visible_text: str) -> str:
         stripped = _clean_prompt_block_line(line)
         if not stripped or _is_footer_hint_line(stripped) or stripped.startswith(("keivenc@", "$ ")):
             continue
+        if line.strip().startswith(("●", "•")) and not (_QUESTION_RE.match(stripped) or _INLINE_CONFIRMATION_RE.search(stripped)):
+            break
         if re.match(r"^\s*[❯›>]\s+\S", line):
             break
-        if _QUESTION_RE.match(stripped):
+        if _QUESTION_RE.match(stripped) or _INLINE_CONFIRMATION_RE.search(stripped):
             return stripped
     return ""
+
+
+def _choice_prompt_has_later_activity(lines: list[str], end_index: int) -> bool:
+    """Return True when a choice prompt is followed by newer output in the same capture."""
+    for line in lines[end_index + 1:]:
+        stripped = line.strip()
+        if not stripped or _is_separator_or_footer(line) or _is_prompt_trailing_ui_line(line):
+            continue
+        if re.match(r"^[❯›>][\s█▉▊▋▌▍▎▏]*$", stripped):
+            continue
+        return True
+    return False
 
 
 def agent_screen_state(visible_text: str) -> dict[str, object]:
@@ -758,20 +964,45 @@ def agent_screen_state(visible_text: str) -> dict[str, object]:
     UI state, so the browser does not need its own stale scrollback parser.
     Spec: docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md#state-model
     """
+    visible_text = normalize_capture_text(visible_text)
     prompt_state = approval_prompt_state(visible_text)
     prompt_type = prompt_state.get("type") or None
     if prompt_type is not None:
         return {
             "key": "approval",
-            "text": str(prompt_state.get("text") or prompt_text(visible_text, prompt_type)),
+            "text": str(prompt_state.get("question_text") or prompt_state.get("text") or prompt_text(visible_text, prompt_type)),
             "prompt_type": prompt_type,
+            "agent": prompt_state.get("agent") or "unknown",
+            "prompt_kind": prompt_state.get("prompt_kind") or "",
+            "question_text": prompt_state.get("question_text") or "",
+            "command": prompt_state.get("command"),
+            "options": prompt_state.get("options") or [],
+            "selected_option": prompt_state.get("selected_option") or 0,
+            "confidence": prompt_state.get("confidence") or 0.0,
+            "evidence_lines": prompt_state.get("evidence_lines") or [],
+            "prompt_hash": prompt_state.get("hash") or "",
         }
     if visible_agent_working(visible_text):
-        return {"key": "working", "text": "agent is working"}
+        return {"key": "working", "text": "agent is working", "negative_reason": "agent is working"}
     question = visible_choice_prompt_text(visible_text)
     if question:
-        return {"key": "needs-input", "text": question}
-    return {"key": "idle", "text": ""}
+        options = _prompt_options(visible_text)
+        option_labels = [str(option["label"]) for option in options]
+        prompt_kind = _question_prompt_kind(visible_text, question)
+        return {
+            "key": "needs-input",
+            "text": question,
+            "agent": _infer_agent(visible_text),
+            "prompt_kind": prompt_kind,
+            "question_text": question,
+            "command": None,
+            "options": options,
+            "selected_option": selected_prompt_option(visible_text),
+            "confidence": 0.9 if options else 0.75,
+            "evidence_lines": _matching_evidence_lines(visible_text, None, question),
+            "prompt_hash": _hash_prompt_parts(question, option_labels),
+        }
+    return {"key": "idle", "text": "", "negative_reason": _negative_reason(visible_text)}
 
 
 def prompt_hash(pane_text: str) -> str:
@@ -781,8 +1012,9 @@ def prompt_hash(pane_text: str) -> str:
     block above the selector so two different commands do not look like the
     same already-approved prompt.
     """
+    pane_text = normalize_capture_text(pane_text)
     all_lines = pane_text.splitlines()
-    selector_re = re.compile(r"[❯›]\s*\d+\.\s*\S")
+    selector_re = re.compile(r"[❯›>]\s*\d+\.\s*\S")
     selector_index = -1
     for i, line in enumerate(all_lines):
         if selector_re.search(line):
@@ -827,6 +1059,8 @@ def approval_prompt_state(visible_text: str, pane_text: str | None = None) -> di
     Spec: docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md#claude-approval-patterns
     and docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md#codex-approval-patterns.
     """
+    visible_text = normalize_capture_text(visible_text)
+    pane_text = normalize_capture_text(pane_text) if pane_text is not None else None
     prompt_type = detect_prompt(visible_text)
     selected = yes_is_selected(visible_text)
     if prompt_type is not None and (
@@ -834,16 +1068,26 @@ def approval_prompt_state(visible_text: str, pane_text: str | None = None) -> di
     ):
         prompt_type = None
 
+    question = prompt_text(visible_text, prompt_type) if prompt_type is not None else ""
+    options = _prompt_options(visible_text) if prompt_type is not None else []
     state: dict[str, object] = {
         "visible": prompt_type is not None,
         "type": prompt_type or "",
-        "text": prompt_text(visible_text, prompt_type) if prompt_type is not None else "",
+        "text": question,
         "yes_selected": selected if prompt_type is not None else False,
         "selected_option": selected_prompt_option(visible_text) if prompt_type is not None else 0,
         "action": None,
         "command": None,
         "dangerous": False,
         "hash": prompt_hash(visible_text) if prompt_type is not None else "",
+        "signature": prompt_hash(visible_text) if prompt_type is not None else "",
+        "agent": _infer_agent(visible_text, prompt_type) if prompt_type is not None else "unknown",
+        "prompt_kind": _prompt_kind(prompt_type),
+        "question_text": question,
+        "options": options,
+        "confidence": 0.95 if prompt_type is not None and options else 0.0,
+        "evidence_lines": _matching_evidence_lines(visible_text, prompt_type, question) if prompt_type is not None else [],
+        "negative_reason": "" if prompt_type is not None else _negative_reason(visible_text),
     }
     if prompt_type is None:
         return state
@@ -865,6 +1109,7 @@ __all__ = [
     "detect_prompt",
     "extract_command",
     "is_dangerous",
+    "normalize_capture_text",
     "prompt_hash",
     "prompt_text",
     "selected_prompt_option",

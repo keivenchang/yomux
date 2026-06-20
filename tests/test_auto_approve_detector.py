@@ -1,5 +1,9 @@
+import argparse
+import importlib.util
 import json
 import os
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -9,6 +13,35 @@ from yolomux_lib import approvals
 from yolomux_lib import prompt_detector
 from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import SessionInfo
+
+
+PROMPT_CORPUS_DIR = Path(__file__).resolve().parent / "fixtures" / "prompt_corpus"
+
+
+def load_prompt_corpus():
+    inventory = json.loads((PROMPT_CORPUS_DIR / "inventory.json").read_text(encoding="utf-8"))
+    cases = []
+    for fixture in inventory["fixtures"]:
+        case = dict(fixture)
+        case["text"] = (PROMPT_CORPUS_DIR / fixture["file"]).read_text(encoding="utf-8")
+        cases.append(case)
+    return inventory, cases
+
+
+PROMPT_CORPUS_INVENTORY, PROMPT_CORPUS_CASES = load_prompt_corpus()
+
+
+def load_capture_harness_module():
+    path = PROMPT_CORPUS_DIR / "capture_prompt_fixture.py"
+    spec = importlib.util.spec_from_file_location("capture_prompt_fixture_for_test", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def option_labels(options):
+    return [str(option["label"]) for option in options]
 
 
 def claude_bash_prompt_with_footer(*footer_lines):
@@ -49,6 +82,67 @@ def test_approval_detection_pipeline_has_one_shared_owner():
     assert auto_approve_tmux.PROMPT_RETRY_SECONDS == approvals.PROMPT_RETRY_SECONDS
     assert app_module.hybrid_approval_prompt_state is approvals.hybrid_approval_prompt_state
     assert app_module.blank_prompt_state is approvals.blank_prompt_state
+
+
+def test_capture_prompt_fixture_harness_contract(monkeypatch, tmp_path):
+    harness = load_capture_harness_module()
+
+    assert harness.parse_size("120x40") == (120, 40)
+    with pytest.raises(argparse.ArgumentTypeError):
+        harness.parse_size("30x9")
+    paths = harness.fixture_paths(tmp_path, "codex_sleep", [(80, 24), (120, 40)])
+    assert [text.name for _size, text, _meta in paths] == ["codex_sleep.80x24.txt", "codex_sleep.120x40.txt"]
+    sanitized = harness.sanitize_text(f"{Path.home()}/repo sk-abcdefghijklmnop user@example.com\n")
+    assert "~/repo" in sanitized
+    assert "<redacted-token>" in sanitized
+    assert "<redacted-email>" in sanitized
+
+    tmux_calls = []
+
+    def fake_run_tmux(socket, args, timeout=10):
+        tmux_calls.append((socket, args, timeout))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(harness, "run_tmux", fake_run_tmux)
+    target, launched_session = harness.launched_target(
+        argparse.Namespace(
+            launch_command="",
+            launch_agent="codex",
+            target=None,
+            session="capture-codex",
+            socket="/tmp/yolomux-capture.sock",
+        ),
+        "codex_sleep",
+        (100, 30),
+    )
+    assert target == "capture-codex:"
+    assert launched_session == "capture-codex"
+    assert tmux_calls == [("/tmp/yolomux-capture.sock", ["new-session", "-d", "-s", "capture-codex", "-x", "100", "-y", "30", "codex"], 10)]
+
+    waits = []
+    tmux_calls.clear()
+
+    def fake_wait_for_text(target, needles, timeout, include_scrollback, socket=""):
+        waits.append((target, tuple(needles), timeout, include_scrollback, socket))
+        return "ready"
+
+    monkeypatch.setattr(harness, "wait_for_text", fake_wait_for_text)
+    harness.drive_prompt(
+        argparse.Namespace(
+            ready_text=["›"],
+            send_line=["sleep 10"],
+            wait_text=["Would you like to run the following command?"],
+            timeout=12,
+            include_scrollback=False,
+            socket="/tmp/yolomux-capture.sock",
+        ),
+        "capture-codex:",
+    )
+    assert waits == [
+        ("capture-codex:", ("›",), 12, False, "/tmp/yolomux-capture.sock"),
+        ("capture-codex:", ("Would you like to run the following command?",), 12, False, "/tmp/yolomux-capture.sock"),
+    ]
+    assert tmux_calls == [("/tmp/yolomux-capture.sock", ["send-keys", "-t", "capture-codex:", "sleep 10", "Enter"], 10)]
 
 
 def test_standalone_bash_decision_fails_closed_without_extracted_command(monkeypatch):
@@ -307,6 +401,56 @@ MOCK_CODEX_YESNO_PROMPT = "\n".join([
     "",
     " Esc to cancel · Tab to amend",
 ])
+
+
+def test_prompt_corpus_inventory_declares_required_families():
+    fixture_families = {case["family"] for case in PROMPT_CORPUS_CASES}
+    gap_families = {gap["family"] for gap in PROMPT_CORPUS_INVENTORY["gaps"]}
+
+    assert set(PROMPT_CORPUS_INVENTORY["required_families"]) <= fixture_families | gap_families
+    assert {source["url"] for source in PROMPT_CORPUS_INVENTORY["sources"]}
+    assert (PROMPT_CORPUS_DIR / PROMPT_CORPUS_INVENTORY["capture_harness"]).exists()
+
+
+@pytest.mark.parametrize("case", PROMPT_CORPUS_CASES, ids=lambda case: case["id"])
+def test_prompt_corpus_cases_classify_with_structured_evidence(case):
+    text = case["text"]
+    expected = case["expected"]
+
+    prompt = prompt_detector.approval_prompt_state(text, text)
+    screen = prompt_detector.agent_screen_state(text)
+
+    assert prompt["visible"] is expected["approval_visible"]
+    assert screen["key"] == expected["screen_key"]
+
+    if expected["ask"]:
+        payload = prompt if expected["approval_visible"] else screen
+        assert payload["agent"] == expected["agent"]
+        assert payload["prompt_kind"] == expected["prompt_kind"]
+        assert payload["question_text"] == expected["question_text"]
+        assert payload["command"] == expected["command"]
+        assert payload["selected_option"] == expected["selected_option"]
+        assert option_labels(payload["options"]) == expected["option_labels"]
+        assert float(payload["confidence"]) >= expected["confidence_min"]
+        assert payload["evidence_lines"], case["id"]
+        assert payload.get("hash") or payload.get("prompt_hash")
+
+        if expected["approval_visible"]:
+            assert prompt["type"] == expected["prompt_type"]
+            assert prompt["yes_selected"] is expected["yes_selected"]
+            assert prompt["action"] == expected["action"]
+            assert prompt["negative_reason"] == ""
+        else:
+            assert prompt["type"] == ""
+            assert prompt["action"] is None
+        return
+
+    assert prompt["visible"] is False
+    assert prompt["action"] is None
+    assert prompt["command"] is None
+    assert prompt["options"] == []
+    negative_reason = str(prompt.get("negative_reason") or screen.get("negative_reason") or "")
+    assert expected["negative_reason_contains"] in negative_reason
 
 
 def test_mock_claude_yesno_extract_command_drops_step_marker():
@@ -750,6 +894,68 @@ def test_detect_prompt_real_prompt_shapes_and_bottom_most_prompt_wins():
         "   3. No",
     ])
     assert prompt_detector.detect_prompt(stale_then_current) == "file"
+
+
+def test_detect_prompt_handles_real_codex_wrapped_command_header():
+    codex_pane = "\n".join([
+        "› Run sleep 10",
+        "",
+        "• Running sleep 10",
+        "",
+        "",
+        "  Would you like to run the following comman",
+        "",
+        "  $ sleep 10",
+        "",
+        "› 1. Yes, proceed (y)",
+        "  2. Yes, and don't ask again for commands",
+        "     that start with `sleep 10` (p)",
+        "  3. No, and tell Codex what to do",
+        "     differently (esc)",
+        "",
+        "  Press enter to confirm or esc to cancel",
+    ])
+
+    prompt_state = prompt_detector.approval_prompt_state(codex_pane, codex_pane)
+    screen_state = prompt_detector.agent_screen_state(codex_pane)
+
+    assert prompt_state["visible"] is True
+    assert prompt_state["type"] == "bash"
+    assert prompt_state["agent"] == "codex"
+    assert prompt_state["prompt_kind"] == "shell-command"
+    assert prompt_state["question_text"] == "Would you like to run the following command?"
+    assert prompt_state["command"] == "sleep 10"
+    assert prompt_state["selected_option"] == 1
+    assert screen_state["key"] == "approval"
+
+
+def test_detect_prompt_handles_real_claude_wrapped_plan_prompt():
+    claude_pane = "\n".join([
+        "  ──────────────────────────────────────────────",
+        "   Ready to code?",
+        "",
+        "   Here is Claude's plan:",
+        "   Add a temporary line to README.md after approval.",
+        "",
+        "  ──────────────────────────────────────────────",
+        "   Claude has written up a plan and is ready to",
+        "   execute. Would you like to proceed?",
+        "",
+        "   ❯ 1. Yes, and use auto mode",
+        "     2. Yes, manually approve edits",
+        "     3. Tell Claude what to change",
+    ])
+
+    prompt_state = prompt_detector.approval_prompt_state(claude_pane, claude_pane)
+    screen_state = prompt_detector.agent_screen_state(claude_pane)
+
+    assert prompt_state["visible"] is True
+    assert prompt_state["type"] == "plan"
+    assert prompt_state["agent"] == "claude"
+    assert prompt_state["prompt_kind"] == "plan-approval"
+    assert prompt_state["question_text"] == "Claude has written up a plan and is ready to execute. Would you like to proceed?"
+    assert prompt_state["selected_option"] == 1
+    assert screen_state["key"] == "approval"
 
 
 def test_action_for_prompt_preserves_codex_bash_option_policy():

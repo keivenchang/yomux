@@ -225,6 +225,77 @@ def transcript_delta_result_state(text: str) -> dict[str, Any]:
         state["complete"] = False
     return state
 
+
+def transcript_user_prompt_text(raw_item: dict[str, Any]) -> str:
+    message = raw_item.get("message")
+    if isinstance(message, dict) and str(message.get("role") or "") == "user":
+        for block in extract_content_blocks(message.get("content"), "user"):
+            if block.get("role") == "user" and block.get("text"):
+                return str(block["text"])
+    payload = raw_item.get("payload")
+    if not isinstance(payload, dict):
+        return ""
+    payload_type = str(payload.get("type") or raw_item.get("type") or "")
+    if payload_type in {"user_message", "input_message", "message"}:
+        for key in ("message", "text", "content", "input", "prompt"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+    return ""
+
+
+def transcript_run_metadata(path: Path | str | None, kind: str = "") -> dict[str, Any]:
+    if not path:
+        return {"prompt": "", "started_at": "", "started_ts": 0.0, "ended_at": "", "ended_ts": 0.0, "final_state": "idle"}
+    transcript_path = Path(path)
+    first_prompt = ""
+    started: datetime | None = None
+    ended: datetime | None = None
+    tail_lines: list[str] = []
+    try:
+        with transcript_path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                raw = line.strip()
+                if not raw:
+                    continue
+                tail_lines.append(raw)
+                if len(tail_lines) > 600:
+                    tail_lines.pop(0)
+                try:
+                    raw_item = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(raw_item, dict):
+                    continue
+                timestamp = parse_transcript_timestamp(raw_item.get("timestamp"))
+                if timestamp is not None:
+                    if started is None or timestamp < started:
+                        started = timestamp
+                    if ended is None or timestamp > ended:
+                        ended = timestamp
+                if not first_prompt:
+                    first_prompt = transcript_user_prompt_text(raw_item)
+    except OSError:
+        return {"prompt": "", "started_at": "", "started_ts": 0.0, "ended_at": "", "ended_ts": 0.0, "final_state": "idle"}
+    state = transcript_delta_result_state("\n".join(tail_lines))
+    final_state = "working" if state.get("working") else ("done" if state.get("complete") else "idle")
+    if ended is None:
+        try:
+            ended = datetime.fromtimestamp(transcript_path.stat().st_mtime, timezone.utc)
+        except OSError:
+            ended = None
+    if started is None:
+        started = ended
+    return {
+        "prompt": truncate_text(" ".join(first_prompt.split()), 1200),
+        "started_at": started.isoformat() if started else "",
+        "started_ts": started.timestamp() if started else 0.0,
+        "ended_at": ended.isoformat() if ended else "",
+        "ended_ts": ended.timestamp() if ended else 0.0,
+        "final_state": final_state,
+    }
+
+
 def newest_transcript_timestamp(text: str) -> datetime | None:
     newest = None
     for raw_line in text.splitlines():

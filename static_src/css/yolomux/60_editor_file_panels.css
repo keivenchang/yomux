@@ -246,7 +246,7 @@ body.editor-theme-light .file-editor-image-panel {
   font: 700 var(--ui-font-size-sm)/1.25 var(--ui-font);
 }
 .file-editor-html-js-notice a {
-  color: #064e3b;
+  color: var(--success-text-strong);
   text-decoration: underline;
   white-space: nowrap;
 }
@@ -625,8 +625,8 @@ body.app-vw-lte-760 .file-editor-conflict-compare {
 .file-editor-gutter.active,
 .file-editor-find:hover,
 .file-editor-theme:hover {
-  color: #9fd8ff;
-  border-color: #9fd8ff;
+  color: var(--accent-sky-strong);
+  border-color: var(--accent-sky-strong);
 }
 .file-editor-theme.theme-dark,
 .file-editor-theme-panel.theme-dark {
@@ -658,7 +658,7 @@ body.app-vw-lte-760 .file-editor-conflict-compare {
 .file-editor-codemirror {
   position: absolute;
   inset: 0;
-  z-index: 3;
+  z-index: var(--z-file-editor-layer);
   width: 100%;
   height: 100%;
 }
@@ -761,7 +761,7 @@ body.editor-theme-light .file-editor-image {
 .file-editor-preview-pane {
   position: absolute;
   inset: 0;
-  z-index: 4;
+  z-index: var(--z-file-editor-preview-layer);
   overflow: auto;
   padding: 12px 16px;
   background: var(--editor-preview-bg);
@@ -1309,7 +1309,7 @@ body.resizing-file-explorer-changes {
    centered ::before. Light/dark flip automatically via the tokens (no hardcoded hex). */
 .file-explorer-changes-resizer {
   position: relative;
-  z-index: 2;
+  z-index: var(--z-panel-resizer-inline);
   flex: 0 0 var(--file-explorer-changes-resizer-size);
   min-height: var(--file-explorer-changes-resizer-size);
   cursor: row-resize;
@@ -1362,7 +1362,7 @@ body.theme-light .file-explorer-changes-panel {
 .file-explorer-changes-head {
   position: sticky;
   top: 0;
-  z-index: 6;
+  z-index: var(--z-sticky-pane-head);
   display: grid;
   /* C6 moved the diff-ref controls into each repo header; C8 added a compact sort. Children are now
      title (flex), sort, date mode, refresh, close. */
@@ -1846,7 +1846,7 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
 }
 .file-editor-diff-codemirror .cm-searchMatch {
   position: relative;
-  z-index: 1;
+  z-index: var(--z-inline-control);
   color: var(--diff-search-match-fg) !important;
   background: var(--diff-search-match-bg) !important;
   box-shadow: inset 0 0 0 1px var(--diff-search-match-ring), 0 0 0 1px rgb(var(--shadow-rgb) / 0.54) !important;
@@ -1875,7 +1875,7 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
   position: absolute !important;
   inset-block-start: 2px;
   inset-inline-end: 8px !important;
-  z-index: 2;
+  z-index: var(--z-panel-resizer-inline);
   display: inline-flex;
   gap: 2px;
   align-items: center;
@@ -1895,14 +1895,14 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
   position: absolute;
   inset-block: 0;
   inset-inline-end: 14px;
-  z-index: 4;
+  z-index: var(--z-file-editor-preview-layer);
   width: 4px;
   pointer-events: none;
 }
 .file-editor-diff-codemirror .cm-diff-overview-viewport {
   position: absolute;
   inset-inline: -2px;
-  z-index: 1;
+  z-index: var(--z-inline-control);
   box-sizing: border-box;
   min-height: 6px;
   border: 1px solid rgba(226, 238, 248, 0.18);
@@ -1938,9 +1938,9 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-deletedChunk .cm-delete
   text-decoration-color: var(--danger-light-text);
 }
 body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText {
-  color: #064e3b;
+  color: var(--success-text-strong);
   background: #b9e7c2;
-  text-decoration-color: #064e3b;
+  text-decoration-color: var(--success-text-strong);
 }
 /* Inline (non-mergeview) editor diff decorations read --code-diff-* from the content
    scope; the light values were scoped ONLY to .file-editor-diff-codemirror, so the
@@ -2526,7 +2526,7 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
 }
 .file-editor-codemirror,
 .file-editor-codemirror-panel {
-  z-index: 3;
+  z-index: var(--z-file-editor-layer);
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -2573,7 +2573,7 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
 .cm-wrap-marker-layer {
   position: absolute;
   inset: 0 auto auto 0;
-  z-index: 8;
+  z-index: var(--z-editor-wrap-marker);
   pointer-events: none;
 }
 .cm-wrap-marker {
@@ -2582,7 +2582,7 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #9fd8ff;
+  color: var(--accent-sky-strong);
   font-weight: 900;
   opacity: 0.86;
   text-indent: 0;
@@ -2680,12 +2680,12 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   grid-column: 1;
   grid-row: 2;
   margin-inline-start: 0;
-  border-color: #6f7b8c;
+  border-color: var(--neutral-border-strong);
   box-shadow: none;
 }
 .file-editor-codemirror .cm-search .cm-textfield:focus,
 .file-editor-codemirror-panel .cm-search .cm-textfield:focus {
-  border-color: #9fd8ff;
+  border-color: var(--accent-sky-strong);
   outline: none;
   box-shadow: 0 0 0 2px rgba(159, 216, 255, 0.22);
 }
@@ -2702,7 +2702,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   color: var(--text);
   background: rgba(255, 255, 255, 0.055);
   background-image: none;
-  border: 1px solid #6f7b8c;
+  border: 1px solid var(--neutral-border-strong);
   border-radius: var(--radius-control);
   font: 700 0/1 var(--ui-font);
   white-space: nowrap;
@@ -2781,7 +2781,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
 .file-editor-codemirror .cm-search .cm-button:hover,
 .file-editor-codemirror-panel .cm-search .cm-button:hover {
   color: #ffffff;
-  border-color: #9fd8ff;
+  border-color: var(--accent-sky-strong);
   background: rgba(159, 216, 255, 0.12);
 }
 .file-editor-codemirror .cm-search label,
@@ -2797,7 +2797,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   margin: 0;
   color: var(--muted);
   background: rgba(255, 255, 255, 0.045);
-  border: 1px solid #6f7b8c;
+  border: 1px solid var(--neutral-border-strong);
   border-radius: var(--radius-control);
   font: 700 0/1 var(--ui-font);
   white-space: nowrap;
@@ -2929,7 +2929,7 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
   color: var(--lt-markdown-heading);
 }
 .file-editor-raw-panel {
-  z-index: 3;
+  z-index: var(--z-file-editor-layer);
   margin: 0;
   overflow: auto;
   padding: 8px 10px;
@@ -3123,7 +3123,7 @@ body.editor-theme-light .cm-content .md-code {
   color: var(--code-tag);
 }
 .file-editor-preview-pane-panel {
-  z-index: 4;
+  z-index: var(--z-file-editor-preview-layer);
   min-height: 0;
   overflow: auto;
   padding: 12px 16px;
@@ -3205,7 +3205,7 @@ body.editor-theme-light .file-editor-native-video {
   background: #000;
 }
 .file-editor-image-panel {
-  z-index: 4;
+  z-index: var(--z-file-editor-preview-layer);
   min-height: 0;
   display: grid;
   place-items: center;
@@ -3227,7 +3227,7 @@ body.editor-theme-light .file-editor-native-video {
 }
 .file-editor-empty-state {
   position: relative;
-  z-index: 1;
+  z-index: var(--z-inline-control);
   max-width: min(60ch, 100%);
   padding: 16px;
   color: var(--pane-tab-text);
@@ -3354,8 +3354,8 @@ body.editor-theme-light .file-editor-native-video {
   white-space: nowrap;
 }
 
-/* Tabber (Finder pane 3rd mode) rows reuse the .file-tree-row DOM; only the detail column (pane cwd /
-   session work description, carried in the agent slot) and the active-window emphasis are tabber-specific. */
+/* Tabber (Finder pane 3rd mode) rows reuse the .file-tree-row DOM; only the level-0 session label shape,
+   the window/process detail, and the active-window emphasis are tabber-specific. */
 .file-tree-row.tabber-row {
   --tabber-level0-color: var(--markdown-heading);
   --tabber-level1-color: var(--code-function);
@@ -3372,9 +3372,53 @@ body.theme-light .file-tree-row.tabber-row {
   background: var(--file-hover-bg);
   box-shadow: inset 4px 0 0 var(--file-hover-border), inset 0 0 0 1px var(--file-hover-outline);
 }
-.file-tree-row.tabber-row .tabber-session-name,
-.file-tree-row.tabber-row .tabber-session-description {
+.file-tree-row.tabber-row[data-tabber-type="session"] > .file-tree-name {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-inline-size: 100%;
+}
+.file-tree-row.tabber-row .tabber-session-tab {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  max-inline-size: min(var(--pane-tab-width), 100%);
+  height: var(--pane-tab-height);
+  padding: 1px 5px 0;
+  color: var(--pane-tab-text);
+  background: var(--pane-bar-bg, var(--panel2));
+  border: 1px solid var(--pane-inactive-tab-border);
+  border-bottom-color: var(--pane-inactive-tab-border);
+  border-radius: 6px 6px 0 0;
+  font-family: var(--tab-font);
+  font-size: var(--tab-label-size);
+  font-stretch: condensed;
+  font-weight: 500;
+  line-height: var(--tab-line-height);
+  text-align: start;
+  white-space: nowrap;
+  overflow: hidden;
   cursor: pointer;
+}
+.file-tree-row.tabber-row[data-tabber-type="session"]:not(.tabber-active-session):not(.selected):hover .tabber-session-tab {
+  color: var(--pane-tab-text);
+  background: var(--pane-inactive-tab-bg-hover);
+  border-color: rgba(255, 255, 255, 0.92);
+}
+body.theme-light .file-tree-row.tabber-row[data-tabber-type="session"]:not(.tabber-active-session):not(.selected):hover .tabber-session-tab {
+  border-color: rgb(var(--overlay-slate-rgb) / 0.5);
+}
+.file-tree-row.tabber-row.tabber-active-session .tabber-session-tab,
+.file-tree-row.tabber-row .tabber-session-tab.active {
+  color: var(--pane-tab-active-text);
+  background: var(--pane-tab-active-bg);
+  border-color: var(--pane-tab-active-border);
+  border-bottom-color: var(--pane-tab-active-bg);
+}
+.file-tree-row.tabber-row.selected .tabber-session-tab {
+  box-shadow: 0 0 0 1px var(--active-control-focus-ring);
 }
 .file-tree-row.tabber-row .tabber-window-label {
   min-width: 0;
@@ -3401,14 +3445,21 @@ body.theme-light .file-tree-row.tabber-row {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.file-tree-row.tabber-row .tabber-session-description {
-  color: var(--tabber-level0-color);
-  margin-inline-start: 8px;
-  font-weight: 500;
-}
-.file-tree-row.tabber-row[data-tabber-type="session"]:not(.selected) .tabber-session-name {
-  color: var(--tabber-level0-color);
+.file-tree-row.tabber-row .tabber-session-name {
+  flex: 0 0 auto;
+  min-width: 0;
+  max-inline-size: clamp(4ch, 28%, 10ch);
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-weight: 800;
+}
+.file-tree-row.tabber-row .tabber-session-description {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: currentColor;
+  font-weight: 500;
 }
 .file-tree-row.tabber-row[data-tabber-type="session"]:not(.selected) > .file-tree-icon {
   color: var(--tabber-level0-color);

@@ -23,6 +23,22 @@ RESULT_REQUEST_RE = re.compile(
     r"|\btell\s+me\s+what\s+it\s+says\b",
     re.IGNORECASE,
 )
+RESULT_OPT_OUT_RE = re.compile(
+    r"\b(?:do\s+not|don't|dont)\s+(?:wait\s+for|return|show|print|paste|fetch|get|tell\s+me)\s+(?:the\s+)?"
+    r"(?:result|output|answer|response|reply)\b"
+    r"|\b(?:just|only)\s+send\s+it\b"
+    r"|\bsend\s+it\s+(?:only|without\s+waiting)\b"
+    r"|\bno\s+(?:result|output|answer|response|reply)\s+(?:needed|required)\b",
+    re.IGNORECASE,
+)
+RESULT_OPT_OUT_TRAILING_RE = re.compile(
+    r",?\s+(?:and\s+)?(?:do\s+not|don't|dont)\s+(?:wait\s+for|return|show|print|paste|fetch|get|tell\s+me)\s+(?:the\s+)?"
+    r"(?:result|output|answer|response|reply)\.?$"
+    r"|,?\s+(?:and\s+)?(?:just|only)\s+send\s+it\.?$"
+    r"|,?\s+(?:and\s+)?send\s+it\s+(?:only|without\s+waiting)\.?$"
+    r"|,?\s+(?:and\s+)?no\s+(?:result|output|answer|response|reply)\s+(?:needed|required)\.?$",
+    re.IGNORECASE,
+)
 RESULT_TRAILING_RE = re.compile(
     r",?\s+(?:and\s+)?(?:show|print|paste|return|get|fetch|tell|give)\s+(?:me\s+)?(?:the\s+)?"
     r"(?:result|output|answer|response|reply|what\s+it\s+says|what\s+it\s+returns)(?:\s+here)?\.?$"
@@ -72,6 +88,7 @@ def clean_action_text(value: str) -> str:
             text = next_text
             break
     text = RESULT_TRAILING_RE.sub("", text).strip()
+    text = RESULT_OPT_OUT_TRAILING_RE.sub("", text).strip()
     return text.strip(" `'\".")
 
 
@@ -184,6 +201,10 @@ def action_result_requested(text: str) -> bool:
     return bool(RESULT_REQUEST_RE.search(str(text or "")))
 
 
+def action_result_opted_out(text: str) -> bool:
+    return bool(RESULT_OPT_OUT_RE.search(str(text or "")))
+
+
 def parse_yoagent_action_intent(question: str, history: list[dict[str, str]], known_sessions: list[str] | tuple[str, ...]) -> dict[str, Any] | None:
     text = " ".join(str(question or "").split())
     if not text:
@@ -243,7 +264,10 @@ def parse_yoagent_action_intent(question: str, history: list[dict[str, str]], kn
     }
     if action_confirmation_requested(text):
         intent["requires_confirmation"] = True
-    if action_result_requested(text):
+    result_opted_out = action_result_opted_out(text)
+    if not result_opted_out:
+        intent["return_result"] = True
+    if action_result_requested(text) and not result_opted_out:
         intent["return_result"] = True
     return intent
 

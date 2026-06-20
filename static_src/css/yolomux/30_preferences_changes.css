@@ -834,7 +834,7 @@
   grid-template-rows: auto auto minmax(0, 1fr);
   overflow: hidden;
   color: var(--text);
-  background: #111820;
+  background: var(--overlay-surface);
   border: var(--app-modal-border-width) solid var(--app-modal-border-color);
   border-radius: 8px;
   box-shadow:
@@ -995,7 +995,7 @@ body.theme-light .command-palette-view-chip {
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
   color: var(--text);
-  background: #111820;
+  background: var(--overlay-surface);
   border: var(--app-modal-border-width) solid var(--app-modal-border-color);
   border-radius: 8px;
   box-shadow: 0 24px 70px rgb(var(--shadow-rgb) / 0.62);
@@ -1306,7 +1306,7 @@ body.theme-light .preferences-inline-action {
 }
 .branch-subject {
   grid-column: 1 / -1;
-  color: #9ea8b7;
+  color: var(--text-muted-cool);
   overflow-wrap: anywhere;
   display: -webkit-box;
   -webkit-box-orient: vertical;

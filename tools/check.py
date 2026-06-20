@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
-import glob
 import shlex
 import subprocess
 import sys
@@ -58,7 +57,7 @@ def py_compile_files() -> list[str]:
         "yolomux.py",
         "tmux_wall.py",
         "auto_approve_tmux.py",
-        *sorted(glob.glob("yolomux_lib/*.py", root_dir=REPO_ROOT)),
+        *sorted(str(path.relative_to(REPO_ROOT)) for path in (REPO_ROOT / "yolomux_lib").rglob("*.py")),
     ]
 
 

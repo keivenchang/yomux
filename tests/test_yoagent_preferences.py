@@ -464,7 +464,7 @@ def test_app_yoagent_settings_question_skips_cli_backend(monkeypatch, tmp_path):
     payload = settings_payload_for_path(path)
     webapp = app_module.TmuxWebtermApp([])
     monkeypatch.setattr(app_module, "settings_payload", lambda: payload)
-    monkeypatch.setattr(webapp, "activity_summary_payload", lambda: (_ for _ in ()).throw(AssertionError("settings questions must not build the activity summary")))
+    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("settings questions must not build the activity summary")))
     monkeypatch.setattr(webapp, "run_yoagent_cli_backend", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("model backend should not run")))
     try:
         response, status = webapp.yoagent_chat({"message": "what is my theme?"}, access_role="readonly")
@@ -482,7 +482,7 @@ def test_app_yoagent_static_capability_question_skips_activity_summary(monkeypat
     payload = settings_payload_for_path(path)
     webapp = app_module.TmuxWebtermApp([])
     monkeypatch.setattr(app_module, "settings_payload", lambda: payload)
-    monkeypatch.setattr(webapp, "activity_summary_payload", lambda: (_ for _ in ()).throw(AssertionError("static capability questions must not build the activity summary")))
+    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("static capability questions must not build the activity summary")))
     monkeypatch.setattr(webapp, "run_yoagent_cli_backend", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("model backend should not run")))
     try:
         response, status = webapp.yoagent_chat({"message": "what can I do from here?"}, access_role="readonly")
@@ -500,7 +500,7 @@ def test_app_yoagent_product_state_question_skips_cli_backend(monkeypatch, tmp_p
     payload = settings_payload_for_path(path)
     webapp = app_module.TmuxWebtermApp([])
     monkeypatch.setattr(app_module, "settings_payload", lambda: payload)
-    monkeypatch.setattr(webapp, "activity_summary_payload", lambda: {
+    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {
         "generated_at": "now",
         "sessions": {"6": {"session": "6", "last_activity_ts": 1, "repos": ["/repo"], "work": "tests", "file_lines": ["M app.py"]}},
         "global": {"headline": "No work."},
@@ -523,7 +523,7 @@ def test_app_yoagent_model_answer_includes_timing(monkeypatch, tmp_path):
     webapp = app_module.TmuxWebtermApp([])
     monkeypatch.setattr(app_module, "settings_payload", lambda: payload)
     monkeypatch.setattr(app_module, "resolve_yoagent_backend", lambda backend: "claude")
-    monkeypatch.setattr(webapp, "activity_summary_payload", lambda: {"generated_at": "now", "sessions": {}, "global": {"headline": "No work."}})
+    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {"generated_at": "now", "sessions": {}, "global": {"headline": "No work."}})
     monkeypatch.setattr(webapp, "run_yoagent_cli_backend", lambda *_args, **_kwargs: ("model answer", "", {"session_id": "abc"}))
     try:
         response, status = webapp.yoagent_chat({"message": "summarize this project"}, access_role="admin")
@@ -545,7 +545,7 @@ def test_app_yoagent_hides_raw_think_blocks_and_exposes_safe_details(monkeypatch
     webapp = app_module.TmuxWebtermApp([])
     monkeypatch.setattr(app_module, "settings_payload", lambda: payload)
     monkeypatch.setattr(app_module, "resolve_yoagent_backend", lambda backend: "claude")
-    monkeypatch.setattr(webapp, "activity_summary_payload", lambda: {"generated_at": "now", "sessions": {}, "global": {"headline": "No work."}})
+    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {"generated_at": "now", "sessions": {}, "global": {"headline": "No work."}})
     monkeypatch.setattr(webapp, "run_yoagent_cli_backend", lambda *_args, **_kwargs: ("<think>hidden chain</think>\nfinal answer", "", {"elapsed_ms": 1234}))
     try:
         response, status = webapp.yoagent_chat({"message": "use the model"}, access_role="admin")
@@ -563,7 +563,7 @@ def test_app_yoagent_hides_raw_think_blocks_and_exposes_safe_details(monkeypatch
 
 def test_app_yoagent_readonly_cannot_send_to_session(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["6"])
-    monkeypatch.setattr(webapp, "activity_summary_payload", lambda: {"generated_at": "now", "sessions": {}, "global": {"headline": "No work."}})
+    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {"generated_at": "now", "sessions": {}, "global": {"headline": "No work."}})
     try:
         response, status = webapp.yoagent_chat({"message": "tell session 6 to run date"}, access_role="readonly")
     finally:

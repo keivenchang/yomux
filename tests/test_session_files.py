@@ -81,6 +81,31 @@ def test_session_touched_dirs_collects_edited_dirs(tmp_path):
     assert dirs == {str(tmp_path / "repo" / "a"), str(tmp_path / "repo" / "b")}
 
 
+def test_session_files_hours_controls_transcript_cutoff(tmp_path):
+    touched = tmp_path / "older.py"
+    touched.write_text("print('old edit')\n", encoding="utf-8")
+    transcript = tmp_path / "claude.jsonl"
+    transcript.write_text(
+        json.dumps({
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "tool_use", "name": "Edit", "input": {"file_path": str(touched)}},
+            ]},
+        }) + "\n",
+        encoding="utf-8",
+    )
+    transcript_mtime = 10_000
+    now = transcript_mtime + 2 * 3600
+    os.utime(transcript, (transcript_mtime, transcript_mtime))
+    info = SessionInfo(session="s1", panes=[], selected_pane=None, agents=[agent("claude", transcript, tmp_path)])
+
+    one_hour = session_files.session_files_payload_for_info(info, hours=1, now=now)
+    four_hours = session_files.session_files_payload_for_info(info, hours=4, now=now)
+
+    assert [item["path"] for item in one_hour["files"]] == []
+    assert [item["path"] for item in four_hours["files"]] == [str(touched)]
+
+
 def test_session_files_payload_carries_agent_window_attribution(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()

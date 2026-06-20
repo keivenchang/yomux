@@ -587,8 +587,10 @@ body.theme-light .drop-slot.drag-over {
   --pane-scrollbar-current-thumb: var(--pane-scrollbar-thumb-active);
   --pane-scrollbar-current-track: var(--pane-scrollbar-track-active);
 }
-/* Pane scrollbars must always inherit a shared pane scrollbar contract from this block. Never customize
-   thumb/track colors in pane-specific CSS; add new pane scroll containers to this shared list instead. */
+/* Pane scrollbars must always inherit a shared pane scrollbar contract from this block. Add new pane scroll
+   containers to this shared list instead of forking full scrollbar rules.
+   YO!agent's normal vertical owner is .yoagent-chat-history; its outer .yoagent-list only keeps horizontal
+   overflow so thinking/activity refreshes do not show nested vertical rails. */
 :where(
   .preferences-scroll,
   .terminal .xterm-viewport,
@@ -596,6 +598,7 @@ body.theme-light .drop-slot.drag-over {
   .summary-preview,
   .event-list,
   .info-list,
+  .search-history-scroll,
   .yoagent-chat-history,
   .yoagent-chat .markdown-body pre,
   .yoagent-global .markdown-body pre,
@@ -625,6 +628,7 @@ body.theme-light .drop-slot.drag-over {
   .summary-preview,
   .event-list,
   .info-list,
+  .search-history-scroll,
   .yoagent-chat-history,
   .yoagent-chat .markdown-body pre,
   .yoagent-global .markdown-body pre,
@@ -654,6 +658,7 @@ body.theme-light .drop-slot.drag-over {
   .summary-preview,
   .event-list,
   .info-list,
+  .search-history-scroll,
   .yoagent-chat-history,
   .yoagent-chat .markdown-body pre,
   .yoagent-global .markdown-body pre,
@@ -682,6 +687,7 @@ body.theme-light .drop-slot.drag-over {
   .summary-preview,
   .event-list,
   .info-list,
+  .search-history-scroll,
   .yoagent-chat-history,
   .yoagent-chat .markdown-body pre,
   .yoagent-global .markdown-body pre,
@@ -710,6 +716,7 @@ body.theme-light .drop-slot.drag-over {
   .summary-preview,
   .event-list,
   .info-list,
+  .search-history-scroll,
   .yoagent-chat-history,
   .yoagent-chat .markdown-body pre,
   .yoagent-global .markdown-body pre,
@@ -1178,7 +1185,7 @@ body.theme-light .drop-slot.drag-over {
   height: var(--pane-tab-height);
   display: inline-flex;
   position: relative;
-  z-index: 1;
+  z-index: var(--z-pane-tab);
   vertical-align: top;
   align-items: center;
   gap: 3px;
@@ -1281,7 +1288,7 @@ body.theme-light .pane-tab:not(.active) .session-button-detail {
 .pane-tab.file-missing {
   color: #ffdbe1;
   background: #55313a;
-  border-color: #d56b7a;
+  border-color: var(--danger-border-soft);
 }
 .pane-tab.file-missing:hover {
   background: #653843;
@@ -1316,7 +1323,7 @@ body.theme-light .pane-tab.file-missing {
 }
 body.theme-light .pane-tab.file-missing:hover {
   background: #fbe0e4;
-  border-color: #d56b7a;
+  border-color: var(--danger-border-soft);
 }
 body.theme-light .pane-tab.file-missing.active {
   color: #7a1f2c;
@@ -1329,7 +1336,7 @@ body.theme-light .pane-tab.file-missing.active .file-tab-missing-badge {
   color: #b3263a;
 }
 body.theme-light .pane-tab.active .session-yolo-marker.inactive {
-  color: #52617a;
+  color: var(--neutral-text-strong);
   background: #e2e6ec;
   border-color: #c2cad6;
 }
@@ -1541,7 +1548,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
 }
 .tabs {
   position: relative;
-  z-index: 4;
+  z-index: var(--z-tabs-row);
   float: right;
   display: flex;
   align-items: center;

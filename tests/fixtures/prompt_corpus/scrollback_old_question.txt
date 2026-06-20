@@ -1,0 +1,11 @@
+Which backend should I use for this verification?
+❯ 1. vLLM
+  2. SGLang
+  3. TensorRT-LLM
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+● User answered: vLLM
+● Running tests now.
+  ⎿ ok
+
+❯

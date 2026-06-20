@@ -473,6 +473,87 @@ def test_deterministic_yoagent_reply_prioritizes_active_work_without_listing_eve
     assert "[`9`](?yoagent-session=9)" in summary_reply
 
 
+def test_work_next_ranking_uses_prompt_and_metadata_signals():
+    now = time.time()
+    activity = {
+        "global": {"headline": "Four sessions have cached activity.", "lines": []},
+        "sessions": {
+            "1": {
+                "session": "1",
+                "agent": "claude",
+                "agent_label": "Claude opus",
+                "active": False,
+                "state": {"key": "idle", "text": ""},
+                "activity_label": "idle",
+                "repos": ["/repo/docs"],
+                "files": {"count": 0, "added": 0, "removed": 0},
+                "work": "docs cleanup",
+                "last_activity_text": "1 minute ago",
+                "last_activity_ts": now - 60,
+            },
+            "2": {
+                "session": "2",
+                "agent": "codex",
+                "agent_label": "Codex gpt-5",
+                "active": False,
+                "state": {"key": "needs-input", "text": "Approve running the focused pytest?"},
+                "activity_label": "needs-input",
+                "repos": ["/repo/yolomux"],
+                "files": {"count": 0, "added": 0, "removed": 0},
+                "work": "approval prompt",
+                "last_activity_text": "10 minutes ago",
+                "last_activity_ts": now - 600,
+            },
+            "3": {
+                "session": "3",
+                "agent": "codex",
+                "agent_label": "Codex gpt-5",
+                "active": False,
+                "state": {"key": "idle", "text": ""},
+                "activity_label": "idle",
+                "repos": ["/repo/dynamo"],
+                "files": {"count": 2, "added": 10, "removed": 1},
+                "work": "parser fix",
+                "last_activity_text": "5 minutes ago",
+                "last_activity_ts": now - 300,
+            },
+            "4": {
+                "session": "4",
+                "agent": "claude",
+                "agent_label": "Claude sonnet",
+                "active": False,
+                "state": {"key": "idle", "text": ""},
+                "activity_label": "idle",
+                "repos": ["/repo/frontend"],
+                "files": {"count": 0, "added": 0, "removed": 0},
+                "work": "frontend PR",
+                "last_activity_text": "2 minutes ago",
+                "last_activity_ts": now - 120,
+            },
+        },
+        "session_info": {
+            "3": {"project": {"git": {"dirty_count": 2}}},
+            "4": {"project": {"pull_request": {"checks": {"state": "failing", "summary": "CI failing: unit"}}}},
+        },
+        "errors": [],
+    }
+
+    reply = deterministic_yoagent_reply("what should I work on?", activity, {})
+
+    priority = reply.split("**Priority:**", 1)[1].split("**Open / pending:**", 1)[0]
+    assert priority.count("- **") == 3
+    assert priority.index("approval prompt") < priority.index("frontend PR") < priority.index("parser fix")
+    assert "needs input: Approve running the focused pytest?" in priority
+    assert "CI failing: unit" in priority
+    assert "2 dirty files" in priority
+    assert "docs cleanup" not in priority
+
+    full_reply = deterministic_yoagent_reply("what should I work on? full inventory", activity, {})
+    full_priority = full_reply.split("**Priority:**", 1)[1].split("**Open / pending:**", 1)[0]
+    assert full_priority.count("- **") == 4
+    assert "docs cleanup" in full_priority
+
+
 def test_changed_file_totals_coerces_numeric_strings_and_ignores_bools():
     from yolomux_lib.activity_summary import changed_file_totals
     # numeric strings count ("5" -> 5); a bool does NOT (added=True must not be +1).
