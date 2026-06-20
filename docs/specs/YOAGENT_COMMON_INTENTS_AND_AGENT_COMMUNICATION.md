@@ -4,7 +4,11 @@ This spec captures common questions users are likely to ask YO!agent, the expect
 
 ## Operating Rule
 
-YO!agent is the central command surface and coordinator by default. The user may speak in routing language such as `ask session 1`, `tell agent 2`, `when it is done`, or `pass that to agent 3`, but each target agent should receive only the task or question from that target's point of view. YO!agent should preserve evidence, wait for real completion, read artifacts when asked, transform outputs itself when needed, and send clean source-neutral prompts to the next target.
+YO!agent is the central command surface for YOLOmux. It should understand the state of all tmux sessions visible to the current user, not only the currently focused pane or the configured tab subset, and it should answer with session-aware context unless the user asks for a narrow target. It owns routing, send verification, result capture, waiting, fanout, and handoff orchestration.
+
+YO!agent is the coordinator by default. The user may speak in routing language such as `ask session 1`, `tell agent 2`, `when it is done`, or `pass that to agent 3`, but each target agent should receive only the task or question from that target's point of view. YO!agent should preserve evidence, wait for real completion, read artifacts when asked, transform outputs itself when needed, and send clean source-neutral prompts to the next target.
+
+YO!agent sends are not fire-and-forget unless the user explicitly asks for that. When the user says `send`, `ask`, or `tell` for a target session, YO!agent should send through a robust server-owned transport, track the request, capture the target's output from transcript or visible pane evidence, and append the result back into the YO!agent conversation. It should keep the user able to issue additional commands while previous target results are pending.
 
 Peer-to-peer relay is the exception. If the user explicitly says that one target should contact, relay to, or instruct another target directly, YO!agent may pass relay instructions, but the prompt must say exactly how to relay and what to disclose. Without that wording, target sessions should not know about each other.
 
@@ -31,25 +35,31 @@ Peer-to-peer relay is the exception. If the user explicitly says that one target
 - `what PR was that?`: use branch metadata, watched PRs, transcript metadata, and GitHub metadata when available; say when no PR evidence exists.
 - `where is my <file>?`: search cached recent paths first, then route to Finder/Quick Search if a broader filesystem search is needed.
 - `which sessions are idle/running/blocked?`: answer from server-owned activity and prompt-state cache; avoid a full session inventory unless the user asks for all sessions.
+- `what are all agents doing?`, `show all sessions`, `which sessions need me?`: enumerate all visible tmux sessions, group by running, waiting for input/approval, blocked, done, and idle, and include enough path/repo context for the user to act.
 - `why is session 2 stuck?`: summarize detected prompt state, transcript state, blockers, approval state, and last activity; name the uncertainty if the pane is stale or unreachable.
 - `what can YO!agent do?`: list the user-facing capabilities with examples: Preferences, tabs/panes, Finder/Differ/Tabber, recent work, PRs, YO!skills, notifications, waits, sends, and handoffs.
 
 ### Session Sends And Watches
 
 - `ask session 1 what it has done today`: send `what have you done today?` to session `1`; explain locally that YO!agent asked tmux session `1`.
-- `tell session 6 to run the tests`: verify the target is an AI prompt in a Claude/Codex pane, reject busy/approval/draft targets, send the task through the server-owned transport, verify the composer cleared, and report the transport used.
-- `send date to session 6`: translate shell-like phrasing into an agent prompt such as `tell me the date` unless the user explicitly asks for literal terminal input.
+- `tell session 6 to run the tests`: verify the target is an AI prompt in a Claude/Codex pane, reject busy/approval/draft targets, send the task through the server-owned transport, verify the composer cleared, show a pending result wait, append the target's result or timeout back into YO!agent, and report the transport used.
+- `send date to session 6`: translate shell-like phrasing into an agent prompt such as `tell me the date` unless the user explicitly asks for literal terminal input; the target's answer must come back to YO!agent by default.
+- `ask session 7777 for the current date`: send the target prompt, immediately report that the request was sent, keep the composer available for another request, then append the target response when captured.
 - Explicit target-session sends return results by default: YO!agent confirms the send immediately, watches the target transcript or visible pane, and appends the target response back into the YO!agent conversation. Opt-out phrases such as `do not wait for the result`, `just send it`, or `no output needed` keep the behavior send-only.
 - `send this but ask me first`: create an action preview card instead of sending immediately.
 - `notify me when session 4 is idle`: create a one-shot watch job with quiet-time debounce and browser/toast notification.
 - `wait for session 4 to finish, then tell it to update docs`: create a wait-then-send job; revalidate the exact target pane and prompt state before sending; after the send, watch for the target result by default unless the user opted out.
-- `notify me when all sessions are idle`: track the configured YOLOmux session roster, show which session still blocks the watch, and fire once when all qualify.
-- `send this and show me the result here`: same as the default explicit-send behavior, but reinforces that YO!agent should append the target result from transcript or visible pane watcher.
+- `wait for session 4, send it date, and tell me what it says`: wait until session `4` accepts a prompt, send the derived prompt, watch for transcript/pane output, and append the result to YO!agent.
+- `notify me when all sessions are idle`: track all tmux sessions visible to the current user, show which session still blocks the watch, and fire once when all qualify.
+- `send this and show me the result here`: same as the default target-send behavior; the explicit phrase only makes the result expectation clearer.
+- `send this but do not wait`: send immediately and do not start a result watcher; use only when the user explicitly opts out of result capture.
 
 ### Multi-Agent Orchestration
 
 - `ask session 1 what changed, then ask session 2 if that is correct`: ask session `1`; wait for a final response; derive a clean fact-check prompt; ask session `2`; wait; append session `2`'s result to YO!agent chat.
 - `ask session 1 what time it is, add 35 minutes, and ask session 2 if that is correct`: YO!agent performs the time arithmetic and asks session `2` only the derived question, such as `Is 6:10 PM the correct time now?`.
+- `ask session 1 for the failing test output, summarize it, and pass that to session 2`: ask session `1`, capture the answer, summarize it centrally, and send only the summary plus the requested next task to session `2`.
+- `take the exact output from session 1 and pass it to session 2`: preserve the source output exactly up to configured size limits, label it as untrusted context, and send it to session `2` with a clean task. If the output is too large, create or reference an artifact path.
 - `I want agent 1 to do this and write to a file, then when it is done, take the output to agent 2`: YO!agent should create a staged plan, pick or ask for an artifact path if needed, send agent `1` a clean task with the output file requirement, wait for completion, read/validate the file or output, then send agent `2` a clean task with the artifact path or extracted content.
 - `pass the exact answer to session 2`, `summarize that for session 2`, or `modify it before sending`: YO!agent chooses the requested transformation itself. Exact/original handoffs preserve bounded source text; excerpt handoffs include only the relevant bounded passage; summary handoffs condense and label uncertainty; modified/derived handoffs compute the requested change before sending.
 - `have agent 1 draft instructions for agent 2`: YO!agent may ask agent `1` for a draft, but YO!agent still performs the actual send to agent `2` unless the user explicitly asks for direct relay.
@@ -72,14 +82,15 @@ Peer-to-peer relay is the exception. If the user explicitly says that one target
 4. YOLOmux-managed work queue plus artifact files: reliable across different brands because every agent can read/write files. Use a DOIT/TODO queue, a named artifact path, a schema, and a DONE note. This is often the best cross-brand bridge when native APIs do not interoperate.
 5. Shared external system: Git commits, PR comments, issue comments, Slack/Teams, email, or a ticket system can hand off durable context between humans and agents. Use when the handoff should survive YOLOmux restarts or leave an auditable project trail. It is slower and should avoid secrets.
 6. Transcript/event observation: good for monitoring and result extraction when the target agent already writes structured transcript files. It is read-only and should not be treated as a send channel.
-7. Terminal/PTY automation through tmux paste plus Return: necessary for already-open visible TUI panes without a native control channel. It must resolve the exact pane, verify the target is an AI prompt, avoid approval prompts and busy/draft states, paste text, press Return, and verify the composer cleared. It is a fallback, not a native agent API.
+7. Terminal/PTY automation through tmux paste plus Return: necessary for already-open visible TUI panes without a native control channel. It must be scripted and testable, not ad hoc manual typing: resolve the exact pane, verify the target is an AI prompt, avoid approval prompts and busy/draft states, paste text, press Return, verify the composer cleared, record a result marker, and capture output from transcript or visible pane evidence. It is a fallback, not a native agent API.
 8. Blind `tmux send-keys` or unverified keystrokes: last resort only. It is easy to target the wrong pane, type into a shell instead of an agent, miss Return, or paste over unsent text.
 
 ### Cross-Agent Handoff Patterns
 
 - Central orchestrator: YO!agent asks, waits, reads, transforms, sends, and reports. This is the default because it keeps routing local, avoids leaking session identities, and lets YO!agent enforce auth/risk checks.
+- Wait-send-capture: YO!agent waits for a target state, sends a prompt, records a request marker, waits for a final or timed-out result, and appends the result to YO!agent chat. This is the normal shape for `ask session ...` and `send ... to session ...`.
 - Artifact handoff: agent `1` writes a file with a known path and format; YO!agent validates it and passes the path or extracted content to agent `2`. Prefer this for long output, code patches, test reports, or data tables.
-- Structured result handoff: agent `1` returns JSON, a checklist, or a short answer in the chat; YO!agent parses or bounds it before asking agent `2`. Prefer this for small facts and decisions.
+- Structured result handoff: agent `1` returns JSON, a checklist, or a short answer in the chat; YO!agent parses, summarizes, rewrites, or bounds it before asking agent `2`. Prefer this for small facts and decisions.
 - Queue handoff: YO!agent writes a checked Markdown queue item or updates an existing DOIT/TODO file; another agent processes that queue using project rules. Prefer this when work can be resumed later or distributed.
 - Broadcast/fanout: YO!agent sends the same clean task to multiple agents and gathers independent answers. Results must be labeled by source and compared centrally.
 - Direct relay: one target agent is instructed to contact or instruct another target. Use only when the user explicitly requests relay/chaining and the receiving channel is known. Include concrete routing instructions and disclosure boundaries.
@@ -94,7 +105,8 @@ Peer-to-peer relay is the exception. If the user explicitly says that one target
 - Confirm high-risk actions before sending: secrets, credentials, recursive delete, hard reset, broad process kills, recursive permissions, SSH, broad resets, or writes outside the project/config boundary.
 - Do not paste into a target that is busy, at an approval prompt, has unsent text, is not a detected agent pane, or cannot be reached.
 - Report progress while waiting. For handoffs, show which source session is being waited on and which target is next, with a short `regarding ...` summary.
-- Return the final result to the YO!agent conversation for explicit target-session sends by default; suppress the watcher only when the user asks YO!agent not to wait or not to return output.
+- Return the final result to the YO!agent conversation for target sends by default. Only skip result capture when the user explicitly asks not to wait or the transport cannot provide enough evidence, in which case say that clearly.
+- Allow multiple pending sends and waits. Each request needs its own id, target, result marker, pending row, timeout, and final message; one finished wait must not clear another.
 
 ## Implementation Backlog
 
@@ -103,3 +115,6 @@ Peer-to-peer relay is the exception. If the user explicitly says that one target
 - Add a UI affordance in Details that separates deterministic timing from model timing and explicitly labels when the model path was skipped.
 - Add a visible job list for multi-step handoffs with per-stage state: waiting source, reading artifact, sending target, waiting target, complete, failed, timed out.
 - Add artifact-handoff helpers that create a safe project-local path, ask a target to write there, validate existence/size/type, and pass the path or content to the next target.
+- Make explicit target-session sends default to result capture, with an opt-out phrase for fire-and-forget sends.
+- Add a robust scripted send/capture harness that can drive mock Claude, mock Codex, and one real Claude/Codex pane through tmux send/capture for regression tests.
+- Extend all-session activity context so YO!agent can reason over every visible tmux session when answering, routing, waiting, and handoff planning.
