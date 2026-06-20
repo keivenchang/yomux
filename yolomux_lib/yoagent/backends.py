@@ -26,6 +26,7 @@ from ..web import server_string
 from ..workdir import AGENT_LOGIN_COMMANDS
 from ..workdir import agent_auth_status
 from . import conversation as yoagent_conversation
+from .transports import ClaudeStreamJsonTransport
 from .transports import CodexAppServerSession
 
 
@@ -319,8 +320,9 @@ class YoagentBackendsMixin:
         else:
             claude_model = str(settings.get("claude_model") or YOAGENT_CLAUDE_SUMMARY_MODEL).strip()
             claude_effort = str(settings.get("claude_effort") or "").strip()
-            answer, error = self.deps.run_yoagent_claude_cli(prompt, session_id=next_session_id, resume=not seed, model=claude_model, effort=claude_effort)
-            backend_status = {"transport": "claude-cli", "persistent": False, "model": claude_model, "effort": claude_effort or None}
+            stream_callback = self.yoagent_stream_callback(stream_id, backend) if stream_id else None
+            answer, error = self.deps.run_yoagent_claude_cli(prompt, session_id=next_session_id, resume=not seed, model=claude_model, effort=claude_effort, stream_callback=stream_callback)
+            backend_status = {"transport": "claude-stream-json", "persistent": False, "model": claude_model, "effort": claude_effort or None}
         elapsed_ms = round((time.monotonic() - started) * 1000)
         fallback_reason = self.deps.yoagent_cli_fallback_reason(backend, error)
         status = {
@@ -399,31 +401,36 @@ class YoagentBackendsMixin:
         return "", error, captured_session_id
 
 
-    def run_yoagent_claude_cli(self, prompt: str, session_id: str = "", resume: bool = False, model: str = "", effort: str = "") -> tuple[str, str]:
+    def run_yoagent_claude_cli(
+        self,
+        prompt: str,
+        session_id: str = "",
+        resume: bool = False,
+        model: str = "",
+        effort: str = "",
+        stream_callback: Any | None = None,
+    ) -> tuple[str, str]:
         if not shutil.which("claude"):
             return "", "claude CLI not found"
-        args = ["claude", "-p"]
+        target = {
+            "session": session_id or "yoagent-claude",
+            "agent_kind": "claude",
+            "transport": "claude-stream-json",
+            "managed": True,
+            "cwd": str(PROJECT_ROOT),
+            "agent_session_id": session_id,
+            "resume": bool(resume),
+        }
         if model:
-            args.extend(["--model", model])
+            target["agent_model"] = model
         if effort:
-            args.extend(["--effort", effort])
-        if resume and session_id:
-            args.extend(["--resume", session_id])
-        elif session_id:
-            args.extend(["--session-id", session_id])
-        args.append(prompt)
-        try:
-            completed = subprocess.run(
-                args,
-                cwd=str(PROJECT_ROOT),
-                env={**os.environ, "TERM": "xterm-256color", "NO_COLOR": "1"},
-                text=True,
-                capture_output=True,
-                timeout=YOAGENT_CLI_TIMEOUT_SECONDS,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return "", str(exc)
-        if completed.returncode == 0 and completed.stdout.strip():
-            return completed.stdout.strip(), ""
-        return "", completed.stderr.strip() or f"claude exited {completed.returncode}"
+            target["agent_effort"] = effort
+        result = ClaudeStreamJsonTransport().send(
+            target,
+            prompt,
+            timeout=YOAGENT_CLI_TIMEOUT_SECONDS,
+            on_event=stream_callback,
+        )
+        if result.ok and result.text:
+            return result.text, ""
+        return "", result.error or "claude stream-json completed without a final response"

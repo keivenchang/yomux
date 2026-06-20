@@ -33,6 +33,8 @@ from text_client_common import (
     CLIENT_PERMISSION_DEFAULTS,
     TextClientBase,
     TOOL_OUTPUT_PREFIX,
+    client_slash_commands,
+    client_slash_help_rows,
     collect_token_usage,
     command_text,
     config_value_text,
@@ -42,6 +44,7 @@ from text_client_common import (
     parse_config_bool,
     parse_config_value,
     prefixed_output_labels,
+    slash_command_compat_note,
 )
 
 
@@ -63,35 +66,6 @@ KNOWN_CONFIG_KEYS = {
     CLAUDE_CONFIG_KEYS.tool_output,
     CLAUDE_CONFIG_KEYS.timeout,
 }
-REPL_COMMANDS = [
-    "agents",
-    "clear",
-    "compact",
-    "config",
-    "context",
-    "effort",
-    "exit",
-    "goal",
-    "help",
-    "heapdump",
-    "init",
-    "insights",
-    "metrics",
-    "model",
-    "permission",
-    "permission-mode",
-    "permissions",
-    "quit",
-    "raw",
-    "reload-skills",
-    "resume",
-    "review",
-    "security-review",
-    "status",
-    "team-onboarding",
-    "thinking",
-    "usage",
-]
 UNIMPLEMENTED_CLAUDE_COMMANDS = {
     "agents": "background agent management is not implemented in this stdout prototype",
     "compact": "manual compaction is not implemented in this subprocess prototype",
@@ -104,6 +78,7 @@ UNIMPLEMENTED_CLAUDE_COMMANDS = {
     "security-review": "security review mode is not implemented here; run real Claude for /security-review",
     "team-onboarding": "team onboarding is not implemented in this stdout prototype",
 }
+REPL_COMMANDS = client_slash_commands("claude", UNIMPLEMENTED_CLAUDE_COMMANDS)
 
 
 def split_csv_values(items: list[str]) -> list[str]:
@@ -529,6 +504,9 @@ class ClaudeTextClient(TextClientBase):
             self.print_status()
             return "handled"
         if command == "clear":
+            self.clear_conversation()
+            return "handled"
+        if command == "cls":
             print("\033c", end="")
             return "handled"
         if command == "context":
@@ -549,8 +527,8 @@ class ClaudeTextClient(TextClientBase):
         if command in {"permission", "permission-mode", "permissions"}:
             self.handle_permission_mode_command(rest)
             return "handled"
-        if command == "thinking":
-            self.handle_thinking_command(rest)
+        if command in {"thinking", "reasoning"}:
+            self.handle_thinking_command(rest, command)
             return "handled"
         if command == "resume":
             self.handle_resume_command(rest)
@@ -570,20 +548,8 @@ class ClaudeTextClient(TextClientBase):
 
     def print_repl_help(self) -> None:
         print("Slash commands:")
-        print("  /status                         show current session configuration")
-        print("  /context                        show session context known to this client")
-        print("  /usage                          show last-turn cost and token usage")
-        print("  /metrics [on|off|last]          show TTFT, ISL/OSL, token rate, and tool timing")
-        print("  /model [model]                  show or change model")
-        print("  /effort [level]                 show or change effort: low, medium, high, xhigh, max")
-        print("  /permission-mode [mode]         show or change Claude permission mode")
-        print("  /permissions [mode]             alias for /permission-mode")
-        print("  /config [key=value ...]         show or change client settings")
-        print("  /resume <session-id>            continue a specific Claude session")
-        print(f"  /thinking [on|off]              toggle gray {CLAUDE_OUTPUT_TERMS.lower_label} output")
-        print("  /raw [on|off]                   toggle raw stream-json diagnostics")
-        print("  /clear                          clear the terminal")
-        print("  /quit                           exit")
+        for row in client_slash_help_rows("claude"):
+            print(row)
         print("Recognized but not implemented in this text prototype:")
         print("  " + " ".join(f"/{name}" for name in sorted(UNIMPLEMENTED_CLAUDE_COMMANDS)))
         print("Common settings:")
@@ -631,6 +597,19 @@ class ClaudeTextClient(TextClientBase):
         if self.init_slash_commands:
             builtins = [command for command in self.init_slash_commands if command in REPL_COMMANDS or command in UNIMPLEMENTED_CLAUDE_COMMANDS]
             print(f"  Claude commands:    {', '.join(builtins) if builtins else '<reported after first turn>'}")
+
+    def clear_conversation(self) -> None:
+        self.session_id = ""
+        self.args.resume = ""
+        self.args.continue_last = False
+        self.args.session_id = ""
+        self.last_result = ""
+        self.last_error = ""
+        self.last_cost_usd = None
+        self.last_usage = {}
+        self.last_model_usage = {}
+        self.last_metrics = None
+        print("Conversation cleared; next turn starts a new Claude session.")
 
     def print_usage(self) -> None:
         print("Claude Usage")
@@ -711,8 +690,10 @@ class ClaudeTextClient(TextClientBase):
         self.args.permission_mode = mode
         print(f"permission mode changed: {mode}")
 
-    def handle_thinking_command(self, rest: str) -> None:
-        self.print_compat_note("thinking", "Claude", f"Implemented by claude.py to toggle clone-specific {CLAUDE_OUTPUT_TERMS.lower_label} display.")
+    def handle_thinking_command(self, rest: str, command: str = "thinking") -> None:
+        note = slash_command_compat_note("claude", command)
+        if note:
+            self.print_compat_note(command, "Claude", note)
         value = rest.strip().lower()
         try:
             self.args.show_thinking = not self.args.show_thinking if not value else parse_bool(value)

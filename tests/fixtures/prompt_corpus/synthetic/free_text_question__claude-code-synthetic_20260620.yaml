@@ -1,0 +1,47 @@
+agent: unknown
+capture_date: '2026-06-20'
+capture_date_position: end
+capture_mode: converted_text_fixture
+captured_at: '2026-06-20T00:00:00-07:00'
+case_name: free_text_question
+claude_version: ''
+client_name: Claude Code
+client_version: synthetic Claude Code fixture
+client_version_slug: claude-code-synthetic
+codex_version: ''
+cursor: {}
+expected:
+  action: null
+  agent: unknown
+  approval_visible: false
+  ask: true
+  command: null
+  confidence_min: 0.7
+  option_labels: []
+  prompt_kind: question
+  prompt_type: ''
+  question_text: Which branch should I use for the follow-up?
+  screen_key: needs-input
+  selected_option: 0
+  yes_selected: false
+expected_screen_key: needs-input
+failures: []
+filename_convention: case_name__client-token_date
+fixture_id: free_text_question__claude-code-synthetic_20260620
+id: free_text_question__claude-code-synthetic_20260620
+operations: []
+raw_capture: |
+  ● Which branch should I use for the follow-up?
+
+  ❯
+source: synthetic current Claude question layout
+source_fixture_id: claude-free-text-question
+source_text_file: claude_free_text_question.txt
+styled_capture: |
+  ● Which branch should I use for the follow-up?
+
+  ❯
+visible_text: |
+  ● Which branch should I use for the follow-up?
+
+  ❯

@@ -1,0 +1,72 @@
+agent: codex
+capture_date: '2026-06-20'
+capture_date_position: end
+capture_mode: converted_text_fixture
+captured_at: '2026-06-20T00:00:00-07:00'
+case_name: mcp_tool_approval
+claude_version: ''
+client_name: Codex CLI
+client_version: synthetic Codex CLI fixture
+client_version_slug: codex-cli-synthetic
+codex_version: ''
+cursor: {}
+expected:
+  action: null
+  agent: codex
+  approval_visible: false
+  ask: true
+  command: null
+  confidence_min: 0.9
+  option_labels:
+  - Yes, allow once
+  - Yes, and always allow this MCP tool for this server
+  - 'No'
+  prompt_kind: tool-approval
+  prompt_type: ''
+  question_text: |-
+    Would you like to allow mcp__github__get_pull_request to access ai-dynamo/dynamo#123?
+    1. Yes, allow once
+    2. Yes, and always allow this MCP tool for this server
+    3. No
+  screen_key: needs-input
+  selected_option: 1
+  yes_selected: false
+expected_screen_key: needs-input
+failures: []
+filename_convention: case_name__client-token_date
+fixture_id: mcp_tool_approval__codex-cli-synthetic_20260620
+id: mcp_tool_approval__codex-cli-synthetic_20260620
+operations: []
+raw_capture: |2
+   Codex wants to use an MCP tool
+
+   Would you like to allow mcp__github__get_pull_request to access ai-dynamo/dynamo#123?
+
+   › 1. Yes, allow once
+     2. Yes, and always allow this MCP tool for this server
+     3. No
+
+   Press enter to confirm or esc to cancel
+source: synthetic MCP approval layout from official Codex MCP/tool approval family
+source_fixture_id: codex-mcp-tool-approval
+source_text_file: codex_mcp_tool_approval.txt
+styled_capture: |2
+   Codex wants to use an MCP tool
+
+   Would you like to allow mcp__github__get_pull_request to access ai-dynamo/dynamo#123?
+
+   › 1. Yes, allow once
+     2. Yes, and always allow this MCP tool for this server
+     3. No
+
+   Press enter to confirm or esc to cancel
+visible_text: |2
+   Codex wants to use an MCP tool
+
+   Would you like to allow mcp__github__get_pull_request to access ai-dynamo/dynamo#123?
+
+   › 1. Yes, allow once
+     2. Yes, and always allow this MCP tool for this server
+     3. No
+
+   Press enter to confirm or esc to cancel

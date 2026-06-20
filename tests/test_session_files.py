@@ -106,6 +106,43 @@ def test_session_files_hours_controls_transcript_cutoff(tmp_path):
     assert [item["path"] for item in four_hours["files"]] == [str(touched)]
 
 
+def test_session_files_payload_keeps_boundary_touched_repo_stable_for_grace(tmp_path):
+    primary = tmp_path / "yolomux.dev8001"
+    secondary = tmp_path / "ai-config"
+    for repo in (primary, secondary):
+        repo.mkdir()
+        git(repo, "init")
+        git(repo, "config", "user.email", "test@example.com")
+        git(repo, "config", "user.name", "Test User")
+        tracked = repo / "tracked.txt"
+        tracked.write_text("base\n", encoding="utf-8")
+        git(repo, "add", "tracked.txt")
+        git(repo, "commit", "-m", "base")
+    transcript = tmp_path / "claude.jsonl"
+    touched = secondary / "tracked.txt"
+    transcript.write_text(
+        json.dumps({
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "tool_use", "name": "Edit", "input": {"file_path": str(touched)}},
+            ]},
+        }) + "\n",
+        encoding="utf-8",
+    )
+    transcript_mtime = 10_000.0
+    os.utime(transcript, (transcript_mtime, transcript_mtime))
+    info = SessionInfo(session="s1", panes=[], selected_pane=None, agents=[agent("claude", transcript, primary)])
+
+    before_boundary = session_files.session_files_payload_for_info(info, hours=1, now=transcript_mtime + 3600 - 0.5)
+    after_boundary = session_files.session_files_payload_for_info(info, hours=1, now=transcript_mtime + 3600 + 0.5)
+
+    before_repos = {item["repo"] for item in before_boundary["repos"]}
+    after_repos = {item["repo"] for item in after_boundary["repos"]}
+    assert before_repos == after_repos
+    assert str(primary) in after_repos
+    assert str(secondary) in after_repos
+
+
 def test_session_files_payload_carries_agent_window_attribution(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()

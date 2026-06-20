@@ -1,8 +1,0 @@
-● I need to check the current vendor documentation.
-
-Do you want to allow WebFetch to access https://code.claude.com/docs/en/permission-modes?
-❯ 1. Yes
-  2. Yes, and always allow WebFetch for code.claude.com
-  3. No
-
-Esc to cancel · Enter to select

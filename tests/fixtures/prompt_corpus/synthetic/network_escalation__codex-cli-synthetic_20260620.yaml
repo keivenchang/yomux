@@ -1,0 +1,76 @@
+agent: codex
+capture_date: '2026-06-20'
+capture_date_position: end
+capture_mode: converted_text_fixture
+captured_at: '2026-06-20T00:00:00-07:00'
+case_name: network_escalation
+claude_version: ''
+client_name: Codex CLI
+client_version: synthetic Codex CLI fixture
+client_version_slug: codex-cli-synthetic
+codex_version: ''
+cursor: {}
+expected:
+  action: option1
+  agent: codex
+  approval_visible: true
+  ask: true
+  command: python3 -m pip index versions pytest
+  confidence_min: 0.9
+  option_labels:
+  - Yes, proceed (y)
+  - No, and tell Codex what to do differently (esc)
+  prompt_kind: shell-command
+  prompt_type: bash
+  question_text: Would you like to run the following command?
+  screen_key: approval
+  selected_option: 1
+  yes_selected: true
+expected_screen_key: approval
+failures: []
+filename_convention: case_name__client-token_date
+fixture_id: network_escalation__codex-cli-synthetic_20260620
+id: network_escalation__codex-cli-synthetic_20260620
+operations: []
+raw_capture: |2
+   Codex wants to run a shell command
+
+   Would you like to run the following command?
+
+     Reason: Fetch package metadata over the network while sandboxed.
+
+     $ python3 -m pip index versions pytest
+
+   › 1. Yes, proceed (y)
+     2. No, and tell Codex what to do differently (esc)
+
+   Press enter to confirm or esc to cancel
+source: synthetic current Codex command approval layout from official network/escalation family
+source_fixture_id: codex-network-escalation
+source_text_file: codex_network_escalation.txt
+styled_capture: |2
+   Codex wants to run a shell command
+
+   Would you like to run the following command?
+
+     Reason: Fetch package metadata over the network while sandboxed.
+
+     $ python3 -m pip index versions pytest
+
+   › 1. Yes, proceed (y)
+     2. No, and tell Codex what to do differently (esc)
+
+   Press enter to confirm or esc to cancel
+visible_text: |2
+   Codex wants to run a shell command
+
+   Would you like to run the following command?
+
+     Reason: Fetch package metadata over the network while sandboxed.
+
+     $ python3 -m pip index versions pytest
+
+   › 1. Yes, proceed (y)
+     2. No, and tell Codex what to do differently (esc)
+
+   Press enter to confirm or esc to cancel

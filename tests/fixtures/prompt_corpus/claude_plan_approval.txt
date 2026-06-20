@@ -1,7 +1,0 @@
-● I found the relevant files and prepared a plan.
-
-Do you want to proceed with this plan?
-❯ 1. Yes
-  2. No, keep planning
-
-Enter to select · Esc to cancel

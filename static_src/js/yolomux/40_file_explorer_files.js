@@ -1928,7 +1928,7 @@ function clearFileTreeRowRecency(row) {
 }
 
 function applyFileTreeRowRecency(row, entry, options = {}) {
-  if (!row || options.differMode === true || fileExplorerTreeDateMode !== 'relative') {
+  if (!row || fileExplorerTreeDateMode === 'none') {
     clearFileTreeRowRecency(row);
     return;
   }
@@ -3547,7 +3547,7 @@ function buildTabberTree() {
     const sessionDisplay = sessionWork ? `${sessionNameLabel}  ${sessionWork}` : sessionNameLabel;
     const sessionEntry = {
       name: sessionName, kind: 'dir', mtime: 0, sortName: sessionDisplay,
-      tabber: {type: 'session', session, label: sessionNameLabel, description: sessionWork, icon: '■', branchText: branch, active: session === activeSession},
+      tabber: {type: 'session', session, label: sessionNameLabel, description: sessionWork, icon: '●', branchText: branch, active: session === activeSession},
     };
     topEntries.push(sessionEntry);
     const windowEntries = tmuxWindowRecords(info.panes).map(record => {
@@ -3568,7 +3568,7 @@ function buildTabberTree() {
       return {
         name: windowName, kind: repoEntries.length ? 'dir' : 'file', mtime: windowMtime,
         sortName: record.indexedNameLabel || record.nameLabel,
-        tabber: {type: 'window', session, windowIndex: record.index, label: record.indexedNameLabel || `${record.indexText}:${record.nameLabel}`, icon: '▢', active: record.active === true, current: session === activeSession && record.active === true, agentKey, dateText: tabberAgentDateText(agentActivity)},
+        tabber: {type: 'window', session, windowIndex: record.index, label: record.indexedNameLabel || `${record.indexText}:${record.nameLabel}`, icon: '⌁', active: record.active === true, current: session === activeSession && record.active === true, agentKey, dateText: tabberAgentDateText(agentActivity)},
       };
     });
     entriesByDir.set(normalizeDirectoryPath(sessionPath), windowEntries);
@@ -3684,12 +3684,17 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   if (current || (data.type === 'session' && data.active === true)) row.setAttribute('aria-current', 'true');
   else row.removeAttribute('aria-current');
   const icon = expandable ? (expanded ? '▾' : '▸') : (data.icon || '·');
-  const label = data.label || entry.name;
+  const rawLabel = data.label || entry.name;
+  const label = compactHomePath(rawLabel);
+  const description = data.description ? compactHomePath(data.description) : '';
+  const renderData = (label !== rawLabel || description !== (data.description || ''))
+    ? {...data, label, description}
+    : data;
   const titleParts = [
     label,
-    data.description && data.description !== label ? data.description : '',
+    description && description !== label ? description : '',
     data.branchText ? `branch: ${data.branchText}` : '',
-    data.repoRoot && data.repoRoot !== label ? data.repoRoot : '',
+    data.repoRoot && data.repoRoot !== rawLabel ? compactHomePath(data.repoRoot) : '',
   ].filter(Boolean);
   if (titleParts.length) row.setAttribute('title', titleParts.join('\n'));
   else row.removeAttribute('title');
@@ -3697,7 +3702,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
     ? agentIcon(data.agentKey, {label: agentLabel(data.agentKey)})
     : '';
   const nameHtml = data.type === 'session'
-    ? tabberSessionLabelHtml(data, entry)
+    ? tabberSessionLabelHtml(renderData, entry)
     : data.type === 'window' && windowAgentIconHtml
       ? tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true})
     : data.type === 'loading'
@@ -3708,6 +3713,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
     nameHtml,
     dateText: data.dateText || (entry.mtime ? fileTreeMtimeText(entry) : ''),
   });
+  applyFileTreeRowRecency(row, entry, options);
   // Tabber rows use delegation (bindTabberPanel) like the Differ; clear any stale Finder per-row handlers.
   clearFileTreeRowHandlers(row);
   return fullPath;

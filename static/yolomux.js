@@ -11481,7 +11481,7 @@ function clearFileTreeRowRecency(row) {
 }
 
 function applyFileTreeRowRecency(row, entry, options = {}) {
-  if (!row || options.differMode === true || fileExplorerTreeDateMode !== 'relative') {
+  if (!row || fileExplorerTreeDateMode === 'none') {
     clearFileTreeRowRecency(row);
     return;
   }
@@ -13100,7 +13100,7 @@ function buildTabberTree() {
     const sessionDisplay = sessionWork ? `${sessionNameLabel}  ${sessionWork}` : sessionNameLabel;
     const sessionEntry = {
       name: sessionName, kind: 'dir', mtime: 0, sortName: sessionDisplay,
-      tabber: {type: 'session', session, label: sessionNameLabel, description: sessionWork, icon: '■', branchText: branch, active: session === activeSession},
+      tabber: {type: 'session', session, label: sessionNameLabel, description: sessionWork, icon: '●', branchText: branch, active: session === activeSession},
     };
     topEntries.push(sessionEntry);
     const windowEntries = tmuxWindowRecords(info.panes).map(record => {
@@ -13121,7 +13121,7 @@ function buildTabberTree() {
       return {
         name: windowName, kind: repoEntries.length ? 'dir' : 'file', mtime: windowMtime,
         sortName: record.indexedNameLabel || record.nameLabel,
-        tabber: {type: 'window', session, windowIndex: record.index, label: record.indexedNameLabel || `${record.indexText}:${record.nameLabel}`, icon: '▢', active: record.active === true, current: session === activeSession && record.active === true, agentKey, dateText: tabberAgentDateText(agentActivity)},
+        tabber: {type: 'window', session, windowIndex: record.index, label: record.indexedNameLabel || `${record.indexText}:${record.nameLabel}`, icon: '⌁', active: record.active === true, current: session === activeSession && record.active === true, agentKey, dateText: tabberAgentDateText(agentActivity)},
       };
     });
     entriesByDir.set(normalizeDirectoryPath(sessionPath), windowEntries);
@@ -13237,12 +13237,17 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   if (current || (data.type === 'session' && data.active === true)) row.setAttribute('aria-current', 'true');
   else row.removeAttribute('aria-current');
   const icon = expandable ? (expanded ? '▾' : '▸') : (data.icon || '·');
-  const label = data.label || entry.name;
+  const rawLabel = data.label || entry.name;
+  const label = compactHomePath(rawLabel);
+  const description = data.description ? compactHomePath(data.description) : '';
+  const renderData = (label !== rawLabel || description !== (data.description || ''))
+    ? {...data, label, description}
+    : data;
   const titleParts = [
     label,
-    data.description && data.description !== label ? data.description : '',
+    description && description !== label ? description : '',
     data.branchText ? `branch: ${data.branchText}` : '',
-    data.repoRoot && data.repoRoot !== label ? data.repoRoot : '',
+    data.repoRoot && data.repoRoot !== rawLabel ? compactHomePath(data.repoRoot) : '',
   ].filter(Boolean);
   if (titleParts.length) row.setAttribute('title', titleParts.join('\n'));
   else row.removeAttribute('title');
@@ -13250,7 +13255,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
     ? agentIcon(data.agentKey, {label: agentLabel(data.agentKey)})
     : '';
   const nameHtml = data.type === 'session'
-    ? tabberSessionLabelHtml(data, entry)
+    ? tabberSessionLabelHtml(renderData, entry)
     : data.type === 'window' && windowAgentIconHtml
       ? tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true})
     : data.type === 'loading'
@@ -13261,6 +13266,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
     nameHtml,
     dateText: data.dateText || (entry.mtime ? fileTreeMtimeText(entry) : ''),
   });
+  applyFileTreeRowRecency(row, entry, options);
   // Tabber rows use delegation (bindTabberPanel) like the Differ; clear any stale Finder per-row handlers.
   clearFileTreeRowHandlers(row);
   return fullPath;
@@ -26008,10 +26014,26 @@ function yoagentMessageDetailsKey(message, index) {
 
 function yoagentMessageDetailsHtml(message, key = '') {
   const text = String(message?.details || '').trim();
-  if (!text) return '';
-  return `<details class="yoagent-message-details" data-yoagent-message-details-key="${esc(key)}">
-    <summary>${esc(t('popover.details'))}</summary>
-    <pre>${esc(text)}</pre>
+  const auxiliaryText = String(message?.auxiliaryText || '').trim();
+  const auxiliaryPreview = String(message?.auxiliaryPreview || '').trim();
+  const hasAuxiliary = Boolean(auxiliaryText || auxiliaryPreview);
+  const truncated = Boolean(message?.auxiliaryTruncated);
+  if (!text && !hasAuxiliary) return '';
+  const preview = auxiliaryPreview
+    ? `<span class="yoagent-details-preview">${esc(auxiliaryPreview)}</span>`
+    : '';
+  const auxiliaryBlock = auxiliaryText
+    ? `<pre class="yoagent-auxiliary-stream">${esc(auxiliaryText)}</pre>`
+    : '';
+  const truncationNote = truncated
+    ? `<div class="yoagent-details-note">auxiliary stream truncated to latest entries</div>`
+    : '';
+  const detailsBlock = text
+    ? `<pre class="yoagent-safe-details">${esc(text)}</pre>`
+    : '';
+  return `<details class="yoagent-message-details${hasAuxiliary ? ' has-auxiliary' : ''}" data-yoagent-message-details-key="${esc(key)}">
+    <summary><span>${esc(t('popover.details'))}</span>${preview}</summary>
+    ${auxiliaryBlock}${truncationNote}${detailsBlock}
   </details>`;
 }
 
@@ -26057,7 +26079,7 @@ function globalActivitySummaryHtml() {
 function yoagentStreamingMessagesList() {
   if (!(yoagentStreamingMessages instanceof Map)) return [];
   return [...yoagentStreamingMessages.values()]
-    .filter(message => message && (message.content || message.streaming || message.details))
+    .filter(message => message && (message.content || message.streaming || message.details || message.auxiliaryText || message.auxiliaryPreview))
     .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
 }
 
@@ -26340,16 +26362,29 @@ function applyYoagentStreamPayload(payload = {}) {
   const content = String(payload.content || '');
   const phase = String(payload.phase || '');
   const hiddenThinking = Boolean(payload.hidden_thinking_removed);
+  const previous = yoagentStreamingMessages.get(streamId) || {};
+  const auxiliaryLines = Array.isArray(payload.auxiliary_lines)
+    ? payload.auxiliary_lines.map(line => String(line || '')).filter(Boolean)
+    : (Array.isArray(previous.auxiliaryLines) ? previous.auxiliaryLines : []);
+  const auxiliaryActive = Boolean(payload.hidden_work_active || payload.tool_active);
+  const auxiliaryPreview = String(payload.auxiliary_preview || '').trim()
+    || (auxiliaryLines.length ? auxiliaryLines.slice(-(auxiliaryActive ? 2 : 1)).join('\n') : String(previous.auxiliaryPreview || ''));
   const detailLines = [];
   if (payload.backend) detailLines.push(`- backend: \`${payload.backend}\``);
   if (phase) detailLines.push(`- stream phase: \`${phase}\``);
   if (hiddenThinking) detailLines.push('- raw model thinking was hidden; YOLOmux shows safe diagnostics instead of chain-of-thought');
-  const previous = yoagentStreamingMessages.get(streamId) || {};
+  if (payload.auxiliary_truncated) detailLines.push('- auxiliary stream truncated to latest entries');
   yoagentStreamingMessages.set(streamId, {
     role: 'assistant',
     content: content || previous.content || '',
     createdAt: previous.createdAt || createdAt,
     details: detailLines.join('\n') || previous.details || '',
+    auxiliaryLines,
+    auxiliaryText: auxiliaryLines.join('\n') || previous.auxiliaryText || '',
+    auxiliaryPreview,
+    auxiliaryActive,
+    auxiliaryDone: Boolean(payload.auxiliary_done) || previous.auxiliaryDone || false,
+    auxiliaryTruncated: Boolean(payload.auxiliary_truncated) || previous.auxiliaryTruncated || false,
     streaming: payload.done !== true,
   });
   hideYoagentStartupInfo();
@@ -44136,6 +44171,7 @@ async function updateLatency() {
 }
 
 function refreshAll() {
+  resyncVisibleTerminalRemoteSizes('refresh');
   refreshTranscripts({force: true});
   refreshAutoStatuses();
   refreshWatchedFilesystem();

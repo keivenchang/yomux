@@ -1,0 +1,167 @@
+actual:
+  agent_kind: codex
+  approval:
+    approval_action: ''
+    approval_type: ''
+    approval_visible: false
+    command: ''
+    dangerous: false
+    prompt_hash: ''
+    risk: ''
+    rule_input_text: ''
+    selected_option: 0
+    source: ''
+  attention_kind: ''
+  attention_label: ''
+  composer:
+    accepting: true
+    detected_text: ''
+    key: empty
+    prompt_suggestion: false
+    text: ''
+  cursor:
+    character: ' '
+    current_command: node
+    pane_in_mode: false
+    x: 0
+    y: 0
+  display:
+    attention_kind: ''
+    attention_label: ''
+    evidence_lines: []
+    options: []
+    prompt_hash: ''
+    prompt_kind: ''
+    question_text: ''
+    screen_key: idle
+    selected_option: 0
+  reason_code: idle
+  screen:
+    key: idle
+    negative_reason: empty
+    text: ''
+agent: codex
+capture_date: '2026-06-20'
+capture_date_position: end
+capture_mode: visible
+captured_at: '2026-06-20T10:44:06.677132+00:00'
+case_name: idle_empty_prompt
+claude_version: ''
+client_name: Codex CLI
+client_version: codex-cli 0.141.0
+client_version_slug: codex-cli-0.141.0
+codex_version: codex-cli 0.141.0
+cursor:
+  character: ' '
+  current_command: node
+  pane_in_mode: false
+  x: 0
+  y: 0
+evidence_fields:
+  display_evidence_lines: []
+  prompt_hash: ''
+  screen_evidence_lines: null
+expected:
+  agent_kind: codex
+  approval_visible: 'false'
+  attention_kind: ''
+  clear_cleared: ''
+  clear_ok: ''
+  composer_key: empty
+  reason_code: idle
+  screen_key: idle
+  send_ok: ''
+  send_reason_code: ''
+expected_promoted:
+  agent_kind: codex
+  approval_type: ''
+  approval_visible: false
+  attention_kind: ''
+  attention_label: ''
+  composer_key: empty
+  reason_code: idle
+  screen_key: idle
+failures: []
+filename_convention: case_name__client-token_date
+fixture_description: Codex idle empty prompt
+fixture_id: idle_empty_prompt__codex-cli-0.141.0_20260620
+fixture_scenario: idle_empty_prompt
+id: idle_empty_prompt__codex-cli-0.141.0_20260620
+operations:
+- state:
+    agent_kind: codex
+    approval:
+      approval_action: ''
+      approval_type: ''
+      approval_visible: false
+      command: ''
+      dangerous: false
+      prompt_hash: ''
+      risk: ''
+      rule_input_text: ''
+      selected_option: 0
+      source: ''
+    attention_kind: ''
+    attention_label: ''
+    composer:
+      accepting: true
+      detected_text: ''
+      key: empty
+      prompt_suggestion: false
+      text: ''
+    cursor:
+      character: ' '
+      current_command: node
+      pane_in_mode: false
+      x: 0
+      y: 0
+    display:
+      attention_kind: ''
+      attention_label: ''
+      evidence_lines: []
+      options: []
+      prompt_hash: ''
+      prompt_kind: ''
+      question_text: ''
+      screen_key: idle
+      selected_option: 0
+    prompt:
+      action: null
+      agent: unknown
+      command: null
+      confidence: 0.0
+      dangerous: false
+      evidence_lines: []
+      hash: ''
+      negative_reason: empty
+      options: []
+      prompt_kind: ''
+      question_text: ''
+      selected_option: 0
+      signature: ''
+      source: pane
+      text: ''
+      type: ''
+      visible: false
+      yes_selected: false
+    reason_code: idle
+    screen:
+      key: idle
+      negative_reason: empty
+      text: ''
+    target: 'agent-tui-live-codex-idle:'
+  type: wait_until_accepting
+raw_capture: |2+
+
+source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T104406Z.yaml
+styled_capture: |2+
+
+tmux_socket: ''
+tmux_target: 'agent-tui-live-codex-idle:'
+verifier_capabilities:
+- raw-capture
+- styled-capture
+- cursor-facts
+- central-clear-composer
+- central-send-prompt
+- visible-status-counter

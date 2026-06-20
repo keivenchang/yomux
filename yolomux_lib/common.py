@@ -49,7 +49,7 @@ SUMMARY_CODEX_SERVICE_TIER = os.environ.get("YOLOMUX_SUMMARY_SERVICE_TIER", "fas
 YOAGENT_CLAUDE_SUMMARY_MODEL = os.environ.get("YOLOMUX_YOAGENT_CLAUDE_SUMMARY_MODEL", "claude-haiku-4-5")
 CONFIG_DIR = Path(os.environ.get("YOLOMUX_CONFIG_DIR", str(Path.home() / ".config" / "yolomux")))
 STATE_DIR = Path(os.environ.get("YOLOMUX_STATE_DIR", str(Path.home() / ".local" / "state" / "yolomux")))
-YOAGENT_CODEX_HOME = Path(os.environ.get("YOLOMUX_CODEX_HOME", str(STATE_DIR / "codex-home")))
+YOAGENT_CODEX_HOME = Path(os.environ.get("YOLOMUX_CODEX_HOME") or os.environ.get("CODEX_HOME") or str(Path.home() / ".codex"))
 STATE_PATH = CONFIG_DIR / "state.json"
 EVENT_LOG_PATH = STATE_DIR / "events.jsonl"
 RUN_HISTORY_PATH = STATE_DIR / "run-history.json"
@@ -122,11 +122,19 @@ def heal_server_path() -> str:
     return os.environ.get("PATH", "")
 
 
+def codex_home_from_env(env: dict[str, str] | None = None) -> Path:
+    values = env or os.environ
+    configured = str(values.get("YOLOMUX_CODEX_HOME") or values.get("CODEX_HOME") or "").strip()
+    return Path(configured).expanduser() if configured else Path.home() / ".codex"
+
+
 def codex_runtime_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
-    """Build a Codex subprocess environment with a writable state home."""
-    env = dict(base_env or os.environ)
+    """Build the Codex subprocess environment used by YO!agent."""
+    env = dict(os.environ)
+    if base_env is not None:
+        env.update(base_env)
     heal_server_path()
-    codex_home = Path(env.get("YOLOMUX_CODEX_HOME", str(YOAGENT_CODEX_HOME))).expanduser()
+    codex_home = codex_home_from_env(env)
     codex_home.mkdir(parents=True, exist_ok=True)
     env["PATH"] = os.environ.get("PATH", env.get("PATH", ""))
     env["CODEX_HOME"] = str(codex_home)

@@ -1,5 +1,0 @@
-• Working (1m 21s • esc to interrupt)
-
-› Implement the detector corpus
-
-  gpt-5.5 xhigh · ~/yolomux.dev8001

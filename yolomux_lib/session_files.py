@@ -29,6 +29,7 @@ CODEX_SHELL_TOOL_NAMES = {"exec_command", "shell_command", "shell"}
 SHELL_COMMAND_BREAK_TOKENS = {"&&", "||", ";", "|"}
 SHELL_RUNNERS = {"bash", "sh", "zsh"}
 SESSION_FILES_MAX_HOURS = 24 * 14
+SESSION_FILES_CUTOFF_GRACE_SECONDS = 60.0
 _CODEX_TRANSCRIPT_SCAN_CACHE_MAX = 64
 _CODEX_TRANSCRIPT_SCAN_CACHE: dict[tuple[str, str, bool, float, int], dict[str, set[str]]] = {}
 _CLAUDE_TRANSCRIPT_SCAN_CACHE_MAX = 64
@@ -379,6 +380,13 @@ def bounded_session_files_hours(value: Any) -> float:
     except (TypeError, ValueError):
         return 24.0
     return max(0.25, min(parsed, float(SESSION_FILES_MAX_HOURS)))
+
+
+def session_files_cutoff(hours: float, now: float | None = None) -> float:
+    # Poll ticks near the lookback boundary should not make a repo appear on one refresh and vanish on the
+    # next just because transcript mtime crossed the exact second cutoff.
+    current = now if now is not None else time.time()
+    return current - bounded_session_files_hours(hours) * 3600 - SESSION_FILES_CUTOFF_GRACE_SECONDS
 
 
 def git_default_branch_ref(repo: Path) -> str | None:
@@ -840,7 +848,7 @@ def session_files_payload_for_info(
     # C6: `repo_refs` carries per-repo FROM/TO overrides ({repo_path: {"from","to"}}); a SHA chosen for
     # one repo no longer leaks into another. The scalar from_ref/to_ref stay as the global default applied
     # to any repo without an override (and drive the top-level payload refs for legacy single-repo callers).
-    cutoff = (now if now is not None else time.time()) - bounded_session_files_hours(hours) * 3600
+    cutoff = session_files_cutoff(hours, now)
     refs_active = refs_requested(from_ref, to_ref)
     selected_from, selected_to = diff_refs(from_ref, to_ref) if refs_active else ("", "")
     errors: list[str] = []
@@ -1012,7 +1020,7 @@ def session_files_payload(
     include_cross_session_attribution: bool = True,
 ) -> tuple[dict[str, Any], HTTPStatus]:
     now = time.time()
-    cutoff = now - bounded_session_files_hours(hours) * 3600
+    cutoff = session_files_cutoff(hours, now)
     attribution = agent_attribution_by_path(infos, cutoff) if include_cross_session_attribution else {}
     if session:
         info = infos.get(session)

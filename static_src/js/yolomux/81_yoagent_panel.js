@@ -51,10 +51,26 @@ function yoagentMessageDetailsKey(message, index) {
 
 function yoagentMessageDetailsHtml(message, key = '') {
   const text = String(message?.details || '').trim();
-  if (!text) return '';
-  return `<details class="yoagent-message-details" data-yoagent-message-details-key="${esc(key)}">
-    <summary>${esc(t('popover.details'))}</summary>
-    <pre>${esc(text)}</pre>
+  const auxiliaryText = String(message?.auxiliaryText || '').trim();
+  const auxiliaryPreview = String(message?.auxiliaryPreview || '').trim();
+  const hasAuxiliary = Boolean(auxiliaryText || auxiliaryPreview);
+  const truncated = Boolean(message?.auxiliaryTruncated);
+  if (!text && !hasAuxiliary) return '';
+  const preview = auxiliaryPreview
+    ? `<span class="yoagent-details-preview">${esc(auxiliaryPreview)}</span>`
+    : '';
+  const auxiliaryBlock = auxiliaryText
+    ? `<pre class="yoagent-auxiliary-stream">${esc(auxiliaryText)}</pre>`
+    : '';
+  const truncationNote = truncated
+    ? `<div class="yoagent-details-note">auxiliary stream truncated to latest entries</div>`
+    : '';
+  const detailsBlock = text
+    ? `<pre class="yoagent-safe-details">${esc(text)}</pre>`
+    : '';
+  return `<details class="yoagent-message-details${hasAuxiliary ? ' has-auxiliary' : ''}" data-yoagent-message-details-key="${esc(key)}">
+    <summary><span>${esc(t('popover.details'))}</span>${preview}</summary>
+    ${auxiliaryBlock}${truncationNote}${detailsBlock}
   </details>`;
 }
 
@@ -100,7 +116,7 @@ function globalActivitySummaryHtml() {
 function yoagentStreamingMessagesList() {
   if (!(yoagentStreamingMessages instanceof Map)) return [];
   return [...yoagentStreamingMessages.values()]
-    .filter(message => message && (message.content || message.streaming || message.details))
+    .filter(message => message && (message.content || message.streaming || message.details || message.auxiliaryText || message.auxiliaryPreview))
     .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
 }
 
@@ -383,16 +399,29 @@ function applyYoagentStreamPayload(payload = {}) {
   const content = String(payload.content || '');
   const phase = String(payload.phase || '');
   const hiddenThinking = Boolean(payload.hidden_thinking_removed);
+  const previous = yoagentStreamingMessages.get(streamId) || {};
+  const auxiliaryLines = Array.isArray(payload.auxiliary_lines)
+    ? payload.auxiliary_lines.map(line => String(line || '')).filter(Boolean)
+    : (Array.isArray(previous.auxiliaryLines) ? previous.auxiliaryLines : []);
+  const auxiliaryActive = Boolean(payload.hidden_work_active || payload.tool_active);
+  const auxiliaryPreview = String(payload.auxiliary_preview || '').trim()
+    || (auxiliaryLines.length ? auxiliaryLines.slice(-(auxiliaryActive ? 2 : 1)).join('\n') : String(previous.auxiliaryPreview || ''));
   const detailLines = [];
   if (payload.backend) detailLines.push(`- backend: \`${payload.backend}\``);
   if (phase) detailLines.push(`- stream phase: \`${phase}\``);
   if (hiddenThinking) detailLines.push('- raw model thinking was hidden; YOLOmux shows safe diagnostics instead of chain-of-thought');
-  const previous = yoagentStreamingMessages.get(streamId) || {};
+  if (payload.auxiliary_truncated) detailLines.push('- auxiliary stream truncated to latest entries');
   yoagentStreamingMessages.set(streamId, {
     role: 'assistant',
     content: content || previous.content || '',
     createdAt: previous.createdAt || createdAt,
     details: detailLines.join('\n') || previous.details || '',
+    auxiliaryLines,
+    auxiliaryText: auxiliaryLines.join('\n') || previous.auxiliaryText || '',
+    auxiliaryPreview,
+    auxiliaryActive,
+    auxiliaryDone: Boolean(payload.auxiliary_done) || previous.auxiliaryDone || false,
+    auxiliaryTruncated: Boolean(payload.auxiliary_truncated) || previous.auxiliaryTruncated || false,
     streaming: payload.done !== true,
   });
   hideYoagentStartupInfo();

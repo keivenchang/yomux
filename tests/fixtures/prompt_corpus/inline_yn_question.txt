@@ -1,3 +1,0 @@
-● Do you want to proceed with deploying to staging? (y/n)
-
-❯

@@ -1,0 +1,82 @@
+agent: claude
+capture_date: '2026-06-20'
+capture_date_position: end
+capture_mode: converted_text_fixture
+captured_at: '2026-06-20T00:00:00-07:00'
+case_name: bash_step_marker
+claude_version: ''
+client_name: Claude Code
+client_version: synthetic Claude Code fixture
+client_version_slug: claude-code-synthetic
+codex_version: ''
+cursor: {}
+expected:
+  action: option1
+  agent: claude
+  approval_visible: true
+  ask: true
+  command: mkdir -p build/output
+  confidence_min: 0.9
+  option_labels:
+  - 'Yes'
+  - 'No'
+  prompt_kind: shell-command
+  prompt_type: bash
+  question_text: Do you want to proceed?
+  screen_key: approval
+  selected_option: 1
+  yes_selected: true
+expected_screen_key: approval
+failures: []
+filename_convention: case_name__client-token_date
+fixture_id: bash_step_marker__claude-code-synthetic_20260620
+id: bash_step_marker__claude-code-synthetic_20260620
+operations: []
+raw_capture: |
+  ● Mock build script - 10 steps, each needs Yes/No.
+  ────────────────────────────
+   Bash command (unsandboxed)
+
+     mkdir -p build/output
+     [1/10] Create the build output directory
+
+   Permission rule Bash requires confirmation for this command.
+
+   Do you want to proceed?
+   ❯ 1. Yes
+     2. No
+
+   Esc to cancel
+source: mock capture
+source_fixture_id: claude-bash-step-marker
+source_text_file: claude_bash_step_marker.txt
+styled_capture: |
+  ● Mock build script - 10 steps, each needs Yes/No.
+  ────────────────────────────
+   Bash command (unsandboxed)
+
+     mkdir -p build/output
+     [1/10] Create the build output directory
+
+   Permission rule Bash requires confirmation for this command.
+
+   Do you want to proceed?
+   ❯ 1. Yes
+     2. No
+
+   Esc to cancel
+visible_text: |
+  ● Mock build script - 10 steps, each needs Yes/No.
+  ────────────────────────────
+   Bash command (unsandboxed)
+
+     mkdir -p build/output
+     [1/10] Create the build output directory
+
+   Permission rule Bash requires confirmation for this command.
+
+   Do you want to proceed?
+   ❯ 1. Yes
+     2. No
+
+   Esc to cancel

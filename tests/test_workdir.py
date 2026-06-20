@@ -49,6 +49,48 @@ def test_agent_auth_status_parses_claude_json_and_codex_text(monkeypatch):
     assert status["codex"] == {"installed": True, "logged_in": True}
 
 
+def test_codex_runtime_env_defaults_to_user_codex_home(monkeypatch, tmp_path):
+    monkeypatch.delenv("YOLOMUX_CODEX_HOME", raising=False)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setattr(common.Path, "home", lambda: tmp_path)
+
+    env = common.codex_runtime_env({"PATH": "/usr/bin"})
+
+    assert env["CODEX_HOME"] == str(tmp_path / ".codex")
+    assert env["TERM"] == "xterm-256color"
+    assert env["NO_COLOR"] == "1"
+
+
+def test_codex_runtime_env_respects_yolomux_codex_home_override(monkeypatch, tmp_path):
+    codex_home = tmp_path / "codex-home"
+    monkeypatch.setenv("YOLOMUX_CODEX_HOME", str(codex_home))
+
+    env = common.codex_runtime_env({"PATH": "/usr/bin"})
+
+    assert env["CODEX_HOME"] == str(codex_home)
+    assert codex_home.is_dir()
+
+
+def test_agent_auth_status_probes_codex_with_runtime_env(monkeypatch, tmp_path):
+    codex_home = tmp_path / "codex-home"
+    seen: dict[str, dict[str, str] | None] = {}
+    monkeypatch.setenv("YOLOMUX_CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(workdir.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    def run(cmd, *args, **kwargs):
+        seen[cmd[0]] = kwargs.get("env")
+        if cmd[0] == "claude":
+            return _completed(cmd, 0, stdout='{"loggedIn": true}')
+        return _completed(cmd, 0, stdout="Logged in using ChatGPT")
+
+    monkeypatch.setattr(workdir.subprocess, "run", run)
+    status = agent_auth_status(force=True)
+
+    assert status["codex"]["logged_in"] is True
+    assert seen["claude"] is None
+    assert seen["codex"]["CODEX_HOME"] == str(codex_home)
+
+
 def test_agent_auth_status_treats_logged_out_and_missing_as_not_logged_in(monkeypatch):
     # claude installed but JSON says loggedIn=false; codex installed but prints a logged-out marker;
     # a missing binary is installed=False, logged_in=False.

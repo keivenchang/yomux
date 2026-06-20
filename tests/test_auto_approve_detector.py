@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 
 import auto_approve_tmux
@@ -18,12 +19,26 @@ from yolomux_lib.common import SessionInfo
 PROMPT_CORPUS_DIR = Path(__file__).resolve().parent / "fixtures" / "prompt_corpus"
 
 
+def load_structured_fixture(path: Path):
+    text = path.read_text(encoding="utf-8")
+    if path.suffix == ".json":
+        return json.loads(text)
+    return yaml.safe_load(text)
+
+
+def fixture_visible_text(path: Path) -> str:
+    if path.suffix in {".json", ".yaml", ".yml"}:
+        data = load_structured_fixture(path)
+        return str(data.get("raw_capture") or data.get("visible_text") or "")
+    return path.read_text(encoding="utf-8")
+
+
 def load_prompt_corpus():
-    inventory = json.loads((PROMPT_CORPUS_DIR / "inventory.json").read_text(encoding="utf-8"))
+    inventory = load_structured_fixture(PROMPT_CORPUS_DIR / "inventory.yaml")
     cases = []
     for fixture in inventory["fixtures"]:
         case = dict(fixture)
-        case["text"] = (PROMPT_CORPUS_DIR / fixture["file"]).read_text(encoding="utf-8")
+        case["text"] = fixture_visible_text(PROMPT_CORPUS_DIR / fixture["file"])
         cases.append(case)
     return inventory, cases
 
@@ -84,14 +99,65 @@ def test_approval_detection_pipeline_has_one_shared_owner():
     assert app_module.blank_prompt_state is approvals.blank_prompt_state
 
 
+def test_auto_approve_cli_state_keeps_normal_questions_out_of_approval_path():
+    visible_text = "Which backend should I use?\n❯ 1. vLLM\n  2. SGLang"
+
+    state, pane_text = auto_approve_tmux.classify_auto_approve_state("6", visible_text, prompt_source="pane")
+
+    assert pane_text is None
+    assert state.reason_code == "needs-input"
+    assert state.attention_kind == "question"
+    assert state.display["attention_label"] == "ASK?"
+    assert state.approval["approval_visible"] is False
+
+
+def test_auto_approve_cli_once_sends_from_central_approval_state(monkeypatch):
+    sent = []
+    state = SimpleNamespace(
+        prompt={
+            "visible": True,
+            "type": "bash",
+            "yes_selected": True,
+            "selected_option": 1,
+            "hash": "hash-cli",
+            "source": "pane",
+            "command": "make test",
+        },
+        approval={
+            "approval_visible": True,
+            "approval_type": "bash",
+            "approval_action": "option1",
+            "selected_option": 1,
+            "command": "make test",
+            "prompt_hash": "hash-cli",
+            "source": "pane",
+        },
+        screen={"key": "approval", "text": "Do you want to proceed?"},
+        reason_code="approval",
+    )
+
+    monkeypatch.setattr(auto_approve_tmux.sys, "argv", ["auto_approve_tmux.py", "--once", "6"])
+    monkeypatch.setattr(auto_approve_tmux, "resolve_targets", lambda _targets: ["6"])
+    monkeypatch.setattr(auto_approve_tmux, "tmux_has_session", lambda _session: True)
+    monkeypatch.setattr(auto_approve_tmux, "tmux_capture_pane", lambda _target, visible_only=False: "visible approval")
+    monkeypatch.setattr(auto_approve_tmux, "classify_auto_approve_state", lambda _target, _visible, prompt_source="hybrid": (state, "make test"))
+    monkeypatch.setattr(auto_approve_tmux, "standalone_bash_decision", lambda *_args, **_kwargs: {"action": "approve"})
+    monkeypatch.setattr(auto_approve_tmux, "tmux_send_option", lambda target, option, selected_option=None: sent.append((target, option, selected_option)))
+    monkeypatch.setattr(auto_approve_tmux.time, "sleep", lambda *_args: None)
+
+    auto_approve_tmux.main()
+
+    assert sent == [("6", 1, 1)]
+
+
 def test_capture_prompt_fixture_harness_contract(monkeypatch, tmp_path):
     harness = load_capture_harness_module()
 
     assert harness.parse_size("120x40") == (120, 40)
     with pytest.raises(argparse.ArgumentTypeError):
         harness.parse_size("30x9")
-    paths = harness.fixture_paths(tmp_path, "codex_sleep", [(80, 24), (120, 40)])
-    assert [text.name for _size, text, _meta in paths] == ["codex_sleep.80x24.txt", "codex_sleep.120x40.txt"]
+    paths = harness.fixture_paths(tmp_path, "codex_sleep", [(80, 24), (120, 40)], version_slug="codex-cli-0.141.0", capture_date="20260620")
+    assert [capture.name for _size, capture in paths] == ["codex_sleep_80x24__codex-cli-0.141.0_20260620.yaml", "codex_sleep_120x40__codex-cli-0.141.0_20260620.yaml"]
     sanitized = harness.sanitize_text(f"{Path.home()}/repo sk-abcdefghijklmnop user@example.com\n")
     assert "~/repo" in sanitized
     assert "<redacted-token>" in sanitized
@@ -817,6 +883,57 @@ VISIBLE_AGENT_WORKING_CASES = [
         "working",
         id="codex-bare-working-row-above-composer",
     ),
+    pytest.param(
+        "\n".join([
+            "✽ Tomfoolering… (7m 12s · ↓ 30.1k tokens · almost done thinking with xhigh effort)",
+            "Tip: Connect Claude to your IDE · /ide",
+            "──────────────────────────────────────────────",
+            "╭────────────────────────────────────────────╮",
+            "│ >                                          │",
+            "╰────────────────────────────────────────────╯",
+            "⏺ xhigh /effort",
+        ]),
+        True,
+        "working",
+        id="claude-counter-tip-and-idle-composer",
+    ),
+    pytest.param(
+        "\n".join([
+            ". Tomfoolering… (10m 35s · ↓ 55.4K tokens)",
+            "Tip: /ultrareview runs a deep, multi-agent review of your changes",
+            "──────────────────────────────────────────────",
+            "╭────────────────────────────────────────────╮",
+            "│ >                                          │",
+            "╰────────────────────────────────────────────╯",
+            "▶▶ auto mode on · ctrl+b ctrl+b (twice) to run in background",
+            "○general-purpose Audit yoagent streaming DOIT 2m 30s · ↓ 59.7K tokens",
+        ]),
+        True,
+        "working",
+        id="claude-dot-counter-footer-and-background-agent",
+    ),
+    pytest.param(
+        "\n".join([
+            "· Tomfoolering… (12m 49s · ↑ 64.3k tokens)",
+            "Tip: /ultrareview runs a deep, multi-agent review of your changes — available in Claude for Enterprise · Learn more",
+            "╭────────────────────────────────────────────╮",
+            "│ >                                          │",
+            "╰────────────────────────────────────────────╯",
+        ]),
+        True,
+        "working",
+        id="claude-middle-dot-up-token-tip",
+    ),
+    pytest.param(
+        "\n".join([
+            "✱ Tomfoolering... (6m 34s · ↓ 30.1k tokens · still thinking with xhigh effort)",
+            "✳ Wobbleflorping… (2m 01s · ↓ 8.4K tokens)",
+            "☉ Any status words here... (24s · ↑ 13 tokens · high effort)",
+        ]),
+        True,
+        "working",
+        id="claude-arbitrary-status-counter-text",
+    ),
 ]
 
 
@@ -825,6 +942,86 @@ def test_visible_agent_working_cases(visible_text, expected_working, expected_ke
     assert prompt_detector.visible_agent_working(visible_text) is expected_working
     if expected_key is not None:
         assert prompt_detector.agent_screen_state(visible_text)["key"] == expected_key
+
+
+@pytest.mark.parametrize(
+    "line, elapsed, tokens",
+    [
+        ("✽ Tomfoolering… (7m 12s · ↓ 30.1k tokens · almost done thinking with xhigh effort)", 432, 30100),
+        ("☉ Any status words here... (24s · ↑ 13 tokens · high effort)", 24, 13),
+        ("☉ Decimal seconds... (2.3s · ↑ 13 tokens · high effort)", 2.3, 13),
+        ("✳ Wobbleflorping… (1h 02m 03s · ↓ 8.4K tokens)", 3723, 8400),
+        ("✱ No tokens... (6m 34s · still thinking with xhigh effort)", 394, None),
+        ("✱ Big tokens... (6m 34s · ↓ 1.2M tokens)", 394, 1200000),
+    ],
+)
+def test_parse_agent_status_counter_durations_and_tokens(line, elapsed, tokens):
+    counter = prompt_detector.parse_agent_status_counter(line)
+
+    assert counter is not None
+    assert counter["status_elapsed_seconds"] == elapsed
+    assert counter["status_tokens"] == tokens
+    assert counter["status_line"] == line
+
+
+def test_parse_claude_background_agent_status_counter():
+    line = "○general-purpose Audit ui_tree followups DOIT 2m 15s · ↓ 69.1K tokens"
+
+    counter = prompt_detector.parse_agent_status_counter(line)
+
+    assert counter is not None
+    assert counter["status_elapsed_seconds"] == 135
+    assert counter["status_tokens"] == 69100
+    assert counter["status_marker"] == "○"
+
+
+def test_agent_screen_state_reports_visible_counter_evidence_and_advancement():
+    first = "✽ Tomfoolering… (7m 12s · ↓ 30.1k tokens · almost done thinking with xhigh effort)"
+    second = first.replace("7m 12s", "7m 13s")
+
+    first_state = prompt_detector.agent_screen_state(first, pane_target="%counter-advances", now=1000.0)
+    second_state = prompt_detector.agent_screen_state(second, pane_target="%counter-advances", now=1001.0)
+
+    assert first_state["key"] == "working"
+    assert first_state["activity_source"] == "visible-counter"
+    assert first_state["status_counter_advanced"] is False
+    assert second_state["key"] == "working"
+    assert second_state["status_counter_advanced"] is True
+    assert second_state["status_elapsed_seconds"] == 433
+
+
+def test_agent_screen_state_reports_token_counter_advancement():
+    first = "✽ Tomfoolering… (7m 12s · ↓ 30.1k tokens · almost done thinking with xhigh effort)"
+    second = first.replace("30.1k", "30.2k")
+
+    prompt_detector.agent_screen_state(first, pane_target="%counter-token-advances", now=1000.0)
+    state = prompt_detector.agent_screen_state(second, pane_target="%counter-token-advances", now=1001.0)
+
+    assert state["key"] == "working"
+    assert state["status_counter_advanced"] is True
+    assert state["status_tokens"] == 30200
+
+
+def test_agent_screen_state_stales_repeated_unchanged_visible_counter():
+    visible_text = "✽ Tomfoolering… (7m 12s · ↓ 30.1k tokens · almost done thinking with xhigh effort)"
+
+    prompt_detector.agent_screen_state(visible_text, pane_target="%counter-stale", now=1000.0)
+    state = prompt_detector.agent_screen_state(visible_text, pane_target="%counter-stale", now=1080.0)
+
+    assert state["key"] == "idle"
+    assert state["activity_source"] == "visible-counter"
+    assert state["negative_reason"] == "stale visible status counter"
+
+
+def test_visible_counter_is_stale_when_real_output_follows_it():
+    visible_text = "\n".join([
+        "✽ Tomfoolering… (7m 12s · ↓ 30.1k tokens · almost done thinking with xhigh effort)",
+        "build finished",
+        "keivenc@host$ ",
+    ])
+
+    assert prompt_detector.visible_agent_status_counter(visible_text) is None
+    assert prompt_detector.agent_screen_state(visible_text)["key"] == "idle"
 
 
 def test_claude_multi_agent_header_does_not_hide_live_approval_prompt():
@@ -961,6 +1158,7 @@ def test_detect_prompt_handles_real_claude_wrapped_plan_prompt():
 def test_action_for_prompt_preserves_codex_bash_option_policy():
     assert prompt_detector.action_for_prompt("bash") == "option1"
     assert prompt_detector.action_for_prompt("file") == "option2"
+    assert prompt_detector.action_for_prompt("plan") == "option1"
     assert prompt_detector.action_for_prompt("tool") == "option2"
     assert prompt_detector.action_for_prompt(None) is None
     assert prompt_detector.action_for_prompt("unknown") is None
@@ -1054,6 +1252,23 @@ def test_visible_choice_prompt_text_ignores_stale_user_question_above_idle_promp
         "✻ Baked for 1m 33s · 1 shell still running",
         "",
         "❯ ",
+    ])
+
+    assert prompt_detector.visible_choice_prompt_text(visible_text) == ""
+    assert prompt_detector.agent_screen_state(visible_text)["key"] == "idle"
+
+
+def test_visible_choice_prompt_text_ignores_claude_tip_question_chrome():
+    visible_text = "\n".join([
+        "❯ Plan this harmless YOLOmux E2E task: run `sleep 5` and then report done. Stop for approval before executing.",
+        "",
+        "✻ Composing…",
+        "  ⎿  Tip: Did you know you can drag and drop image files into your terminal?",
+        "",
+        "────────────────────────────────────────────────────────────────",
+        "❯ ",
+        "────────────────────────────────────────────────────────────────",
+        "  ⏸ plan mode on (shift+tab to cycle) · esc to interrupt",
     ])
 
     assert prompt_detector.visible_choice_prompt_text(visible_text) == ""

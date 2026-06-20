@@ -26,6 +26,9 @@ YOAGENT_CONVERSATION_MAX_MESSAGES = 500
 YOAGENT_MESSAGE_CONTENT_LIMIT = 20_000
 YOAGENT_MESSAGE_DETAILS_LIMIT = 4_000
 YOAGENT_ACTIONS_LIMIT = 8
+YOAGENT_AUXILIARY_LINES_LIMIT = 200
+YOAGENT_AUXILIARY_LINE_LIMIT = 1_000
+YOAGENT_AUXILIARY_PREVIEW_LIMIT = 2_000
 YOAGENT_BACKENDS = {"claude", "codex"}
 YOAGENT_MESSAGE_KINDS = {"agent_result"}
 
@@ -63,6 +66,13 @@ def sanitized_actions(value: Any) -> list[dict[str, Any]]:
     return clean
 
 
+def sanitized_auxiliary_lines(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    lines = [truncate_text(str(item or "").strip(), YOAGENT_AUXILIARY_LINE_LIMIT) for item in value if str(item or "").strip()]
+    return lines[-YOAGENT_AUXILIARY_LINES_LIMIT:]
+
+
 def sanitize_message(value: Any, *, role: str | None = None, content: str | None = None, created_at: str | None = None) -> dict[str, Any] | None:
     raw = value if isinstance(value, dict) else {}
     message_role = str(role or raw.get("role") or "").strip().lower()
@@ -85,6 +95,17 @@ def sanitize_message(value: Any, *, role: str | None = None, content: str | None
     details = truncate_text(str(raw.get("details") or "").strip(), YOAGENT_MESSAGE_DETAILS_LIMIT)
     if details and message_role == "assistant":
         message["details"] = details
+    auxiliary_lines = sanitized_auxiliary_lines(raw.get("auxiliaryLines"))
+    if auxiliary_lines and message_role == "assistant":
+        message["auxiliaryLines"] = auxiliary_lines
+        message["auxiliaryText"] = "\n".join(auxiliary_lines)
+        preview = truncate_text(str(raw.get("auxiliaryPreview") or "\n".join(auxiliary_lines[-1:])).strip(), YOAGENT_AUXILIARY_PREVIEW_LIMIT)
+        if preview:
+            message["auxiliaryPreview"] = preview
+        if bool(raw.get("auxiliaryDone")):
+            message["auxiliaryDone"] = True
+        if bool(raw.get("auxiliaryTruncated")):
+            message["auxiliaryTruncated"] = True
     return message
 
 

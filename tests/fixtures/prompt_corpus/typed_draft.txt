@@ -1,3 +1,0 @@
-› run the focused detector tests
-
-  gpt-5.5 xhigh · ~/yolomux.dev8001

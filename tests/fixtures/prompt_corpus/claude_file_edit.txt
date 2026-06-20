@@ -1,8 +1,0 @@
-● I can make the requested change.
-
-Do you want to make this edit to yolomux_lib/prompt_detector.py?
-❯ 1. Yes
-  2. Yes, and allow Claude to edit files in this project
-  3. No
-
-Esc to cancel · Enter to select

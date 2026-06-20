@@ -73,12 +73,14 @@ async function runEditorPreviewSuite() {
     assert.ok(html.includes('beta rollout finished'), 'run history summaries render');
   });
 
-  test('Finder Ago recency brightness and pulse are scoped to relative Finder rows', () => {
+  test('Finder/Differ/Tabber recency brightness and pulse apply in Ago and Date modes', () => {
     const api = loadYolomux('', ['1']);
     const nowMs = 2_000_000;
     const nowSeconds = nowMs / 1000;
     const entries = [
-      {name: 'hour.md', kind: 'file', mtime: nowSeconds - 20 * 60},
+      {name: 'fresh.md', kind: 'file', mtime: nowSeconds - 4 * 60},
+      {name: 'ten.md', kind: 'file', mtime: nowSeconds - 9 * 60},
+      {name: 'hour.md', kind: 'file', mtime: nowSeconds - 50 * 60},
       {name: 'just.md', kind: 'file', mtime: nowSeconds - 30},
       {name: 'old.md', kind: 'file', mtime: nowSeconds - 3 * 24 * 60 * 60},
     ];
@@ -86,7 +88,9 @@ async function runEditorPreviewSuite() {
 
     api.setFileTreeRecencyNowForTest(nowMs);
     assert.equal(api.fileTreeRecencyStateForMtimeForTest(nowSeconds - 30, nowMs).key, 'hot', 'sub-minute mtime maps to the brightest recency bucket');
-    assert.equal(api.fileTreeRecencyStateForMtimeForTest(nowSeconds - 20 * 60, nowMs).key, 'recent', 'hour-window mtime maps to a middle recency bucket');
+    assert.equal(api.fileTreeRecencyStateForMtimeForTest(nowSeconds - 4 * 60, nowMs).key, 'fresh', 'five-minute-window mtime maps to the fresh recency bucket');
+    assert.equal(api.fileTreeRecencyStateForMtimeForTest(nowSeconds - 9 * 60, nowMs).key, 'recent', 'sub-ten-minute mtime still gets a recent recency bucket');
+    assert.equal(api.fileTreeRecencyStateForMtimeForTest(nowSeconds - 50 * 60, nowMs).key, 'recent', 'hour-window mtime maps to a middle recency bucket');
     assert.equal(api.fileTreeRecencyStateForMtimeForTest(nowSeconds - 3 * 24 * 60 * 60, nowMs).key, 'old', 'old mtime maps to the gray bucket');
 
     api.setFileExplorerTreeDateModeForTest('relative');
@@ -99,8 +103,11 @@ async function runEditorPreviewSuite() {
     assert.equal(rows['/repo/just.md'].classList.contains('file-tree-recency-hot'), true, 'Ago mode applies the hot row class');
     assert.equal(rows['/repo/just.md'].classList.contains('file-tree-recency-pulse'), true, 'sub-minute Finder rows pulse at first render');
     assert.equal(rows['/repo/just.md'].style.getPropertyValue('--file-tree-recency-date-color'), 'var(--file-tree-recency-hot)', 'hot rows expose the token-backed date color');
-    assert.equal(rows['/repo/hour.md'].dataset.recency, 'recent', 'Ago mode marks recent Finder rows without pulsing');
-    assert.equal(rows['/repo/hour.md'].classList.contains('file-tree-recency-pulse'), false, 'middle recency rows do not pulse');
+    assert.equal(rows['/repo/fresh.md'].dataset.recency, 'fresh', 'Ago mode marks fresh Finder rows without pulsing');
+    assert.equal(rows['/repo/fresh.md'].classList.contains('file-tree-recency-pulse'), false, 'fresh recency rows do not pulse');
+    assert.equal(rows['/repo/ten.md'].dataset.recency, 'recent', 'Ago mode marks sub-ten-minute Finder rows recent without pulsing');
+    assert.equal(rows['/repo/hour.md'].dataset.recency, 'recent', 'Ago mode marks hour-window Finder rows without pulsing');
+    assert.equal(rows['/repo/hour.md'].classList.contains('file-tree-recency-pulse'), false, 'hour-window recency rows do not pulse');
     assert.equal(rows['/repo/old.md'].dataset.recency, 'old', 'Ago mode keeps old Finder rows in the gray bucket');
     assert.equal(rows['/repo/old.md'].classList.contains('file-tree-recency-pulse'), false, 'old Finder rows never pulse');
 
@@ -120,9 +127,9 @@ async function runEditorPreviewSuite() {
 
     api.setFileExplorerTreeDateModeForTest('date');
     api.renderTreeChildrenForTest(tree, '/repo', updatedEntries);
-    assert.equal(rows['/repo/just.md'].dataset.recency, undefined, 'Date mode clears Finder recency data');
-    assert.equal(rows['/repo/just.md'].classList.contains('file-tree-recency-hot'), false, 'Date mode clears Finder recency classes');
-    assert.equal(rows['/repo/just.md'].classList.contains('file-tree-recency-pulse'), false, 'Date mode clears Finder recency pulse');
+    assert.equal(rows['/repo/just.md'].dataset.recency, 'hot', 'Date mode preserves Finder recency data');
+    assert.equal(rows['/repo/just.md'].classList.contains('file-tree-recency-hot'), true, 'Date mode preserves Finder recency classes');
+    assert.equal(rows['/repo/ten.md'].dataset.recency, 'recent', 'Date mode preserves sub-ten-minute Finder recency');
 
     api.setFileExplorerTreeDateModeForTest('none');
     api.renderTreeChildrenForTest(tree, '/repo', updatedEntries);
@@ -134,8 +141,12 @@ async function runEditorPreviewSuite() {
     differTree.classList.add('file-explorer-tree-panel');
     api.renderTreeChildrenForTest(differTree, '/repo', updatedEntries, 0, [], {differMode: true});
     const differRows = rowMap(differTree);
-    assert.equal(differRows['/repo/just.md'].dataset.recency, undefined, 'Differ rows keep their existing Ago styling');
-    assert.equal(differRows['/repo/just.md'].classList.contains('file-tree-recency-pulse'), false, 'Differ rows do not pulse from Finder recency rules');
+    assert.equal(differRows['/repo/just.md'].dataset.recency, 'hot', 'Differ Ago rows use the shared recency state');
+    assert.equal(differRows['/repo/just.md'].classList.contains('file-tree-recency-pulse'), true, 'Differ sub-minute rows pulse from shared recency rules');
+    assert.equal(differRows['/repo/ten.md'].dataset.recency, 'recent', 'Differ Ago rows keep graduated recent styling');
+    api.setFileExplorerTreeDateModeForTest('date');
+    api.renderTreeChildrenForTest(differTree, '/repo', updatedEntries, 0, [], {differMode: true});
+    assert.equal(differRows['/repo/just.md'].dataset.recency, 'hot', 'Differ Date rows preserve the recency signal');
     api.setFileTreeRecencyNowForTest(null);
   });
 
@@ -1884,6 +1895,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/function scheduleRemoteResize\(session[\s\S]*?!terminalCanPublishRemoteSize\(\)[\s\S]*item\.remoteResizePending = true/.test(source), 'hidden-tab resize skips are marked pending instead of silently disappearing');
     assert.ok(/function forceRemoteResize\(session\)[\s\S]*sendRemoteResize\(session\)/.test(source), 'forced remote resize bypasses unchanged-fit dedupe by sending current terminal dims');
     assert.ok(/function resyncVisibleTerminalRemoteSizes\(reason = ''\)[\s\S]*scheduleFit\(session\)[\s\S]*forceRemoteResize\(session\)/.test(source), 'page-visible and online recovery force-publish current terminal geometry');
+    assert.ok(/function refreshAll\(\)[\s\S]*resyncVisibleTerminalRemoteSizes\('refresh'\)[\s\S]*refreshTranscripts\(\{force: true\}\)/.test(source), 'manual refresh resizes visible tmux panes before continuing existing refresh work');
     assert.ok(/document\.addEventListener\('visibilitychange'[\s\S]*resyncVisibleTerminalRemoteSizes\('visible'\)/.test(source), 'visibility return resends terminal geometry');
     assert.ok(/window\.addEventListener\('online'[\s\S]*resyncVisibleTerminalRemoteSizes\('online'\)/.test(source), 'network return resends terminal geometry');
     assert.ok(/function closeTerminalItem\(session, item\)[\s\S]*cancelAnimationFrame\(item\.fitFrame\)[\s\S]*clearTimeout\(item\.fitTimer\)[\s\S]*item\.fitFrame = 0[\s\S]*item\.fitTimer = 0/.test(source), 'terminal teardown cancels pending fit callbacks');
@@ -2002,6 +2014,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/let yoagentStreamingMessages = new Map\(\)/.test(src), 'YO!agent keeps transient streaming assistant messages in chat state');
     assert.ok(/function yoagentStreamingMessagesList\(\)[\s\S]*yoagentStreamingMessages\.values/.test(src), 'YO!agent exposes streamed assistant deltas as renderable messages');
     assert.ok(/function applyYoagentStreamPayload\(payload = \{\}\)[\s\S]*hidden_thinking_removed[\s\S]*raw model thinking was hidden/.test(src), 'YO!agent stream events expose safe thinking diagnostics without raw chain-of-thought');
+    assert.ok(/function applyYoagentStreamPayload\(payload = \{\}\)[\s\S]*auxiliary_lines[\s\S]*auxiliaryPreview[\s\S]*auxiliaryText[\s\S]*auxiliaryTruncated/.test(src), 'YO!agent stream payloads keep auxiliary thinking/tool lines separate from assistant content');
     assert.ok(src.includes("'yoagent_stream_delta'"), 'YO!agent subscribes to streaming SSE events');
     assert.ok(/function yoagentChatMessagesHtml\(\)[\s\S]*const startupInfo = yoagentStartupInfoVisible \? yoagentStartupInfoHtml\(\) : '';[\s\S]*return `\$\{messageHtml\}\$\{startupInfo\}`;/.test(src), 'YO!agent startup info is state-gated instead of always appended after messages');
     assert.ok(/function showYoagentStartupInfoOnce\(\)[\s\S]*yoagentStartupInfoShown[\s\S]*yoagentStartupInfoVisible = true/.test(src), 'YO!agent startup info can be shown only once per page session');
@@ -2038,9 +2051,12 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.yoagent-message\.user\s*\{[\s\S]*align-self:\s*flex-end[\s\S]*margin-inline-start:\s*28px[\s\S]*border-color:\s*var\(--link-soft\)/.test(css), 'YO!agent user bubbles are right-indented with the secondary/link border color');
     assert.ok(/function yoagentTimestampText[\s\S]*second:\s*'2-digit'/.test(src), 'YO!agent chat timestamps include seconds');
     assert.ok(/function yoagentMessageDetailsHtml[\s\S]*data-yoagent-message-details-key/.test(src), 'YO!agent assistant diagnostics render as an expandable details block with a stable message key');
+    assert.ok(/function yoagentMessageDetailsHtml[\s\S]*yoagent-details-preview[\s\S]*yoagent-auxiliary-stream[\s\S]*yoagent-details-note/.test(src), 'YO!agent assistant diagnostics render a collapsed auxiliary preview, expanded stream, and truncation note');
     assert.ok(/function refreshYoagentSummaryRegions[\s\S]*const openDetails = yoagentOpenMessageDetailsState\(node\)[\s\S]*restoreYoagentOpenMessageDetailsState\(node, openDetails\)/.test(src), 'YO!agent summary refresh preserves expanded Details blocks');
     assert.ok(/function renderYoagentPanel[\s\S]*const openDetails = yoagentOpenMessageDetailsState\(node\)[\s\S]*node\.innerHTML = yoagentChatHtml\(\);[\s\S]*restoreYoagentOpenMessageDetailsState\(node, openDetails\)/.test(src), 'YO!agent full chat rerenders preserve expanded Details blocks');
     assert.ok(/\.yoagent-message-details pre\s*\{[\s\S]*max-height:\s*180px/.test(css), 'YO!agent diagnostics details stay bounded inside the message');
+    assert.ok(/\.yoagent-details-preview\s*\{[\s\S]*max-height:\s*calc\(2 \* max/.test(css), 'YO!agent collapsed auxiliary preview reserves at most two lines while running');
+    assert.ok(/\.yoagent-message-details pre\.yoagent-auxiliary-stream\s*\{[\s\S]*color:\s*color-mix/.test(css), 'YO!agent auxiliary stream is visually quieter than normal chat text');
     assert.ok(/\.yoagent-chat-history\s*\{[\s\S]*overflow-x:\s*hidden[\s\S]*overflow-y:\s*auto[\s\S]*scrollbar-gutter:\s*stable/.test(css), 'YO!agent chat history is the single normal vertical scrollbar with a stable gutter');
     assert.ok(/\.yoagent-chat-history\s*\{[\s\S]*--pane-scrollbar-current-thumb:\s*var\(--pane-scrollbar-thumb\)[\s\S]*--pane-scrollbar-current-track:\s*var\(--pane-scrollbar-track\)/.test(css), 'YO!agent history keeps the normal rail neutral during active-pane hover');
     assert.ok(/\.yoagent-chat-history::\-webkit-scrollbar-thumb:hover,[\s\S]*\.yoagent-chat-history::\-webkit-scrollbar-thumb:active\s*\{[\s\S]*background:\s*var\(--pane-scrollbar-thumb-active\)/.test(css), 'YO!agent history uses the bright thumb only for direct scrollbar hover or drag');

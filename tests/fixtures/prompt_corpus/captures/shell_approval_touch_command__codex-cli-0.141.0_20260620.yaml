@@ -1,0 +1,216 @@
+actual:
+  agent_kind: codex
+  approval:
+    approval_action: option1
+    approval_type: bash
+    approval_visible: true
+    command: touch /tmp/yolomux-codex-e2e-approval-20260620-1106
+    dangerous: false
+    prompt_hash: 31efef4a08e20257202b64db7f361135
+    risk: ''
+    rule_input_text: touch /tmp/yolomux-codex-e2e-approval-20260620-1106
+    selected_option: 1
+    source: pane
+  attention_kind: approval
+  attention_label: YOLO?
+  composer:
+    accepting: true
+    detected_text: ''
+    key: empty
+    prompt_suggestion: false
+    text: ''
+  cursor:
+    character: ' '
+    current_command: node
+    pane_in_mode: false
+    x: 1
+    y: 38
+  display:
+    attention_kind: approval
+    attention_label: YOLO?
+    evidence_lines:
+    - 1. Pane capture 2. Transcript capture
+    - 1. Pane capture
+    - 2. Transcript capture
+    - Would you like to run the following command?
+    - $ touch /tmp/yolomux-codex-e2e-approval-20260620-1106
+    - 1. Yes, proceed (y)
+    - 2. Yes, and don't ask again for commands that start with `touch /tmp/yolomux-codex-e2e-approval-20260620-1106` (p)
+    - 3. No, and tell Codex what to do differently (esc)
+    options:
+    - index: 1
+      label: Yes, proceed (y)
+      selected: true
+    - index: 2
+      label: Yes, and don't ask again for commands that start with `touch /tmp/yolomux-codex-e2e-approval-20260620-1106` (p)
+      selected: false
+    - index: 3
+      label: No, and tell Codex what to do differently (esc)
+      selected: false
+    prompt_hash: 31efef4a08e20257202b64db7f361135
+    prompt_kind: shell-command
+    question_text: Would you like to run the following command?
+    screen_key: approval
+    selected_option: 1
+  reason_code: approval
+  screen:
+    agent: codex
+    command: null
+    confidence: 0.95
+    evidence_lines:
+    - 1. Pane capture 2. Transcript capture
+    - 1. Pane capture
+    - 2. Transcript capture
+    - Would you like to run the following command?
+    - $ touch /tmp/yolomux-codex-e2e-approval-20260620-1106
+    - 1. Yes, proceed (y)
+    - 2. Yes, and don't ask again for commands that start with `touch /tmp/yolomux-codex-e2e-approval-20260620-1106` (p)
+    - 3. No, and tell Codex what to do differently (esc)
+    key: approval
+    options:
+    - index: 1
+      label: Yes, proceed (y)
+      selected: true
+    - index: 2
+      label: Yes, and don't ask again for commands that start with `touch /tmp/yolomux-codex-e2e-approval-20260620-1106` (p)
+      selected: false
+    - index: 3
+      label: No, and tell Codex what to do differently (esc)
+      selected: false
+    prompt_hash: 31efef4a08e20257202b64db7f361135
+    prompt_kind: shell-command
+    prompt_type: bash
+    question_text: Would you like to run the following command?
+    selected_option: 1
+    text: Would you like to run the following command?
+agent: codex
+capture_date: '2026-06-20'
+capture_date_position: end
+capture_mode: visible
+captured_at: '2026-06-20T11:07:06.613507+00:00'
+case_name: shell_approval_touch_command
+claude_version: ''
+client_name: Codex CLI
+client_version: codex-cli 0.141.0
+client_version_slug: codex-cli-0.141.0
+codex_version: codex-cli 0.141.0
+cursor:
+  character: ' '
+  current_command: node
+  pane_in_mode: false
+  x: 1
+  y: 38
+evidence_fields:
+  display_evidence_lines:
+  - 1. Pane capture 2. Transcript capture
+  - 1. Pane capture
+  - 2. Transcript capture
+  - Would you like to run the following command?
+  - $ touch /tmp/yolomux-codex-e2e-approval-20260620-1106
+  - 1. Yes, proceed (y)
+  - 2. Yes, and don't ask again for commands that start with `touch /tmp/yolomux-codex-e2e-approval-20260620-1106` (p)
+  - 3. No, and tell Codex what to do differently (esc)
+  prompt_hash: 31efef4a08e20257202b64db7f361135
+  screen_evidence_lines:
+  - 1. Pane capture 2. Transcript capture
+  - 1. Pane capture
+  - 2. Transcript capture
+  - Would you like to run the following command?
+  - $ touch /tmp/yolomux-codex-e2e-approval-20260620-1106
+  - 1. Yes, proceed (y)
+  - 2. Yes, and don't ask again for commands that start with `touch /tmp/yolomux-codex-e2e-approval-20260620-1106` (p)
+  - 3. No, and tell Codex what to do differently (esc)
+expected:
+  agent_kind: codex
+  approval_visible: 'true'
+  attention_kind: approval
+  clear_cleared: ''
+  clear_ok: ''
+  composer_key: ''
+  reason_code: ''
+  screen_key: approval
+  send_ok: ''
+  send_reason_code: ''
+expected_promoted:
+  agent_kind: codex
+  approval_type: bash
+  approval_visible: true
+  attention_kind: approval
+  attention_label: YOLO?
+  composer_key: empty
+  reason_code: approval
+  screen_key: approval
+failures: []
+filename_convention: case_name__client-token_date
+fixture_description: Codex shell command approval
+fixture_id: shell_approval_touch_command__codex-cli-0.141.0_20260620
+fixture_scenario: shell_approval_touch_command
+id: shell_approval_touch_command__codex-cli-0.141.0_20260620
+operations:
+- needles: []
+  ok: true
+  type: ready_text
+- needles: []
+  ok: true
+  type: wait_text
+raw_capture: |2
+    └ (no output)
+
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  • Done.
+
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+  › Ask me this question and wait for my answer instead of choosing yourself: Which YOLOmux verifier mode should we use?
+    1. Pane capture 2. Transcript capture
+
+
+  • Which YOLOmux verifier mode should we use?
+
+    1. Pane capture
+    2. Transcript capture
+
+
+  › Pane capture
+
+
+  • Pane capture.
+
+
+  › Run this harmless command exactly: touch /tmp/yolomux-codex-e2e-approval-20260620-1106
+
+
+  • Running touch /tmp/yolomux-codex-e2e-approval-20260620-1106
+
+
+    Would you like to run the following command?
+
+    $ touch /tmp/yolomux-codex-e2e-approval-20260620-1106
+
+  › 1. Yes, proceed (y)
+    2. Yes, and don't ask again for commands that start with `touch /tmp/yolomux-codex-e2e-approval-20260620-1106` (p)
+    3. No, and tell Codex what to do differently (esc)
+
+    Press enter to confirm or esc to cancel
+source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T110706Z.yaml
+styled_capture: "\e[2m  └ (no output)\n\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  \n• \e[0mDone.\n\n\e[2m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  \n\n\e[1m› \e[0mAsk me this question and wait for my answer instead of choosing yourself: Which YOLOmux verifier mode should\
+  \ we use?\n  1. Pane capture 2. Transcript capture\n\n\n\e[2m• \e[0mWhich YOLOmux verifier mode should we use?\n\n  1. Pane\
+  \ capture\n  2. Transcript capture\n\n\n\e[1;2m› \e[0mPane capture\n\n\n\e[2m• \e[0mPane capture.\n\n\n\e[1;2m› \e[0mRun\
+  \ this harmless command exactly: touch /tmp/yolomux-codex-e2e-approval-20260620-1106\n\n\n• \e[1mRunning\e[0m touch /tmp/yolomux-codex-e2e-approval-20260620-1106\n\
+  \n\n  Would you like to run the following command?\n\n  $ touch /tmp/yolomux-codex-e2e-approval-20260620-1106\n\n› 1. Yes,\
+  \ proceed (y)\n  2. Yes, and don't ask again for commands that start with `touch /tmp/yolomux-codex-e2e-approval-20260620-1106`\
+  \ (\e[2mp\e[0m)\n  3. No, and tell Codex what to do differently (\e[2mesc\e[0m)\n\n  \e[2mPress enter to confirm or esc\
+  \ to cancel\n"
+tmux_socket: /tmp/yoask-real-ui-2552908-0ead450e/s
+tmux_target: yr-codex-2552908-7ec5c7:0.0
+verifier_capabilities:
+- raw-capture
+- styled-capture
+- cursor-facts
+- central-clear-composer
+- central-send-prompt
+- visible-status-counter

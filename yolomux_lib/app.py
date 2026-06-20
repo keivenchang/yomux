@@ -91,6 +91,7 @@ from .events import RunHistoryStore
 from .events import search_snippet
 from .events import read_yolomux_state
 from .events import update_yolomux_state
+from .agent_tui import classify_agent_pane
 from .metadata import MetadataCache
 from .metadata import candidate_session_cwds
 from .metadata import focus_root_for_session
@@ -172,6 +173,16 @@ from .yoagent.backends import codex_event_session_id
 from .yoagent.backends import resolve_yoagent_backend
 from .yoagent.backends import strip_yoagent_hidden_thinking
 from .yoagent.backends import strip_yoagent_stream_hidden_thinking
+from .yoagent.stream_events import ASSISTANT_DELTA
+from .yoagent.stream_events import ERROR
+from .yoagent.stream_events import HIDDEN_WORK_DELTA
+from .yoagent.stream_events import HIDDEN_WORK_DONE
+from .yoagent.stream_events import TOOL_CALL_DELTA
+from .yoagent.stream_events import TOOL_CALL_FINISHED
+from .yoagent.stream_events import TOOL_CALL_STARTED
+from .yoagent.stream_events import TURN_DONE
+from .yoagent.stream_events import normalize_yoagent_stream_event
+from .yoagent.stream_events import yoagent_stream_event_auxiliary_line
 from .yoagent.backends import yoagent_activity_payload_signature
 from .yoagent.backends import yoagent_cli_auth_failure
 from .yoagent.backends import yoagent_cli_fallback_reason
@@ -782,6 +793,8 @@ class TmuxWebtermApp:
         self.yoagent_transports = default_yoagent_transport_registry()
         self.yoagent_controller = YoagentController(YoagentAppDeps(self))
         self.yoagent_managed_targets: dict[str, dict[str, Any]] = {}
+        self.yoagent_stream_lock = threading.RLock()
+        self.yoagent_stream_states: dict[str, dict[str, Any]] = {}
         self.yoagent_action_lock = threading.RLock()
         self.yoagent_action_previews: dict[str, dict[str, Any]] = {}
         self.yoagent_action_waits: dict[str, dict[str, Any]] = {}
@@ -3516,6 +3529,10 @@ class TmuxWebtermApp:
         kind: str = "",
         session: str = "",
         details: str = "",
+        auxiliary_lines: list[str] | None = None,
+        auxiliary_preview: str = "",
+        auxiliary_done: bool = False,
+        auxiliary_truncated: bool = False,
     ) -> dict[str, Any] | None:
         clean_content = redacted_action_text(str(content or ""), 100_000)
         message: dict[str, Any] = {"role": role, "content": clean_content, "createdAt": created_at or datetime.now(timezone.utc).isoformat()}
@@ -3527,6 +3544,15 @@ class TmuxWebtermApp:
             message["session"] = session
         if details:
             message["details"] = redacted_action_text(str(details), 10_000)
+        clean_auxiliary_lines = [redacted_action_text(str(line or ""), 1000) for line in (auxiliary_lines or []) if str(line or "").strip()]
+        if clean_auxiliary_lines:
+            message["auxiliaryLines"] = clean_auxiliary_lines[-200:]
+            message["auxiliaryText"] = "\n".join(message["auxiliaryLines"])
+            message["auxiliaryPreview"] = redacted_action_text(str(auxiliary_preview or "\n".join(message["auxiliaryLines"][-1:])), 2000)
+            if auxiliary_done:
+                message["auxiliaryDone"] = True
+            if auxiliary_truncated:
+                message["auxiliaryTruncated"] = True
         return yoagent_conversation.append_message(message)
 
     def publish_yoagent_conversation_changed(self, trigger: str = "yoagent") -> None:
@@ -3541,6 +3567,16 @@ class TmuxWebtermApp:
         phase: str = "",
         done: bool = False,
         hidden_thinking_removed: bool = False,
+        events: list[dict[str, Any]] | None = None,
+        auxiliary_lines: list[str] | None = None,
+        auxiliary_preview: str = "",
+        hidden_work_active: bool = False,
+        tool_active: bool = False,
+        auxiliary_done: bool = False,
+        auxiliary_truncated: bool = False,
+        turn_done: bool = False,
+        error: bool = False,
+        aborted: bool = False,
         created_at: str = "",
     ) -> None:
         safe_stream_id = str(stream_id or "").strip()
@@ -3550,6 +3586,10 @@ class TmuxWebtermApp:
             "stream_id": safe_stream_id,
             "content": truncate_text(str(content or ""), 20_000),
             "done": bool(done),
+            "running": not bool(done),
+            "turn_done": bool(turn_done or done),
+            "error": bool(error),
+            "aborted": bool(aborted),
             "created_at": created_at or datetime.now(timezone.utc).isoformat(),
         }
         if backend:
@@ -3558,36 +3598,147 @@ class TmuxWebtermApp:
             payload["phase"] = phase
         if hidden_thinking_removed:
             payload["hidden_thinking_removed"] = True
+        if events:
+            payload["events"] = events
+        if auxiliary_lines:
+            payload["auxiliary_lines"] = [truncate_text(str(line or ""), 1000) for line in auxiliary_lines[-200:]]
+        if auxiliary_preview:
+            payload["auxiliary_preview"] = truncate_text(auxiliary_preview, 2000)
+        if hidden_work_active:
+            payload["hidden_work_active"] = True
+        if tool_active:
+            payload["tool_active"] = True
+        if auxiliary_done:
+            payload["auxiliary_done"] = True
+        if auxiliary_truncated:
+            payload["auxiliary_truncated"] = True
         self.publish_client_event("yoagent_stream_delta", payload, trigger="yoagent_stream", cache="delta")
 
-    def yoagent_stream_callback(self, stream_id: str, backend: str) -> Any:
-        state: dict[str, Any] = {"last_content": None, "hidden_thinking_removed": False}
+    def yoagent_stream_auxiliary_message_fields(self, stream_id: str) -> dict[str, Any]:
+        safe_stream_id = str(stream_id or "").strip()
+        if not safe_stream_id:
+            return {}
+        with self.yoagent_stream_lock:
+            state = copy.deepcopy(self.yoagent_stream_states.get(safe_stream_id) or {})
+        lines = [str(line or "") for line in state.get("auxiliaryLines", []) if str(line or "").strip()]
+        if not lines:
+            return {}
+        return {
+            "auxiliary_lines": lines,
+            "auxiliary_preview": str(state.get("auxiliaryPreview") or "\n".join(lines[-1:])),
+            "auxiliary_done": bool(state.get("auxiliaryDone")),
+            "auxiliary_truncated": bool(state.get("auxiliaryTruncated")),
+        }
 
-        def callback(event: dict[str, Any]) -> None:
-            event_type = str(event.get("event") or "")
-            if event_type == "thinking":
-                state["hidden_thinking_removed"] = True
-                self.publish_yoagent_stream_delta(
-                    stream_id,
-                    str(state.get("last_content") or ""),
-                    backend=backend,
-                    phase="thinking",
-                    hidden_thinking_removed=True,
-                )
-                return
-            visible_text, hidden_thinking_removed = strip_yoagent_stream_hidden_thinking(str(event.get("text") or ""))
-            hidden_changed = bool(hidden_thinking_removed and not state.get("hidden_thinking_removed"))
-            state["hidden_thinking_removed"] = bool(state.get("hidden_thinking_removed") or hidden_thinking_removed)
-            if visible_text == state.get("last_content") and not hidden_changed:
-                return
-            state["last_content"] = visible_text
+    def yoagent_stream_callback(self, stream_id: str, backend: str) -> Any:
+        state: dict[str, Any] = {
+            "raw_content": "",
+            "last_content": None,
+            "hidden_thinking_removed": False,
+            "auxiliary_lines": [],
+            "hidden_work_active": False,
+            "tool_active": False,
+            "auxiliary_done": False,
+            "auxiliary_truncated": False,
+        }
+
+        def publish(events: list[dict[str, Any]], phase: str = "") -> None:
+            lines = list(state.get("auxiliary_lines") or [])
+            active = bool(state.get("hidden_work_active") or state.get("tool_active"))
+            preview_count = 2 if active else 1
+            preview = "\n".join(lines[-preview_count:]) if lines else ""
+            safe_stream_id = str(stream_id or "").strip()
+            if safe_stream_id:
+                with self.yoagent_stream_lock:
+                    self.yoagent_stream_states[safe_stream_id] = {
+                        "auxiliaryLines": lines,
+                        "auxiliaryText": "\n".join(lines),
+                        "auxiliaryPreview": preview,
+                        "auxiliaryDone": bool(state.get("auxiliary_done")),
+                        "auxiliaryTruncated": bool(state.get("auxiliary_truncated")),
+                        "updatedTs": time.time(),
+                    }
+                    if len(self.yoagent_stream_states) > 50:
+                        oldest = sorted(self.yoagent_stream_states.items(), key=lambda item: float(item[1].get("updatedTs") or 0))[:10]
+                        for key, _value in oldest:
+                            self.yoagent_stream_states.pop(key, None)
             self.publish_yoagent_stream_delta(
                 stream_id,
-                visible_text,
+                str(state.get("last_content") or ""),
                 backend=backend,
-                phase="answer" if visible_text else "thinking",
+                phase=phase,
                 hidden_thinking_removed=bool(state.get("hidden_thinking_removed")),
+                events=events,
+                auxiliary_lines=lines,
+                auxiliary_preview=preview,
+                hidden_work_active=bool(state.get("hidden_work_active")),
+                tool_active=bool(state.get("tool_active")),
+                auxiliary_done=bool(state.get("auxiliary_done")),
+                auxiliary_truncated=bool(state.get("auxiliary_truncated")),
+                turn_done=phase == "done",
+                error=phase == "error",
             )
+
+        def append_auxiliary_line(event: dict[str, Any]) -> None:
+            line = yoagent_stream_event_auxiliary_line(event)
+            if not line:
+                return
+            lines = list(state.get("auxiliary_lines") or [])
+            for part in str(line).splitlines() or [line]:
+                value = part.strip()
+                if value:
+                    lines.append(value)
+            if len(lines) > 500:
+                state["auxiliary_truncated"] = True
+            state["auxiliary_lines"] = lines[-500:]
+
+        def callback(event: dict[str, Any]) -> None:
+            normalized = normalize_yoagent_stream_event(event, backend=backend)
+            event_type = str(normalized.get("kind") or normalized.get("event") or "")
+            if event_type == ASSISTANT_DELTA:
+                incoming_text = str(normalized.get("text") or "")
+                if normalized.get("snapshot"):
+                    state["raw_content"] = incoming_text
+                else:
+                    state["raw_content"] = str(state.get("raw_content") or "") + incoming_text
+                visible_text, hidden_thinking_removed = strip_yoagent_stream_hidden_thinking(str(state.get("raw_content") or ""))
+                hidden_changed = bool(hidden_thinking_removed and not state.get("hidden_thinking_removed"))
+                state["hidden_thinking_removed"] = bool(state.get("hidden_thinking_removed") or hidden_thinking_removed)
+                if visible_text == state.get("last_content") and not hidden_changed:
+                    return
+                state["last_content"] = visible_text
+                publish([normalized], phase="answer" if visible_text else "thinking")
+                return
+            if event_type == HIDDEN_WORK_DELTA:
+                state["hidden_thinking_removed"] = True
+                state["hidden_work_active"] = True
+                state["auxiliary_done"] = False
+                append_auxiliary_line(normalized)
+                publish([normalized], phase="thinking")
+                return
+            if event_type in {TOOL_CALL_STARTED, TOOL_CALL_DELTA}:
+                state["tool_active"] = True
+                state["auxiliary_done"] = False
+                append_auxiliary_line(normalized)
+                publish([normalized], phase="tool")
+                return
+            if event_type in {TOOL_CALL_FINISHED, HIDDEN_WORK_DONE}:
+                if event_type == TOOL_CALL_FINISHED:
+                    state["tool_active"] = False
+                if event_type == HIDDEN_WORK_DONE:
+                    state["hidden_work_active"] = False
+                append_auxiliary_line(normalized)
+                publish([normalized], phase="tool" if event_type == TOOL_CALL_FINISHED else "thinking")
+                return
+            if event_type in {TURN_DONE, ERROR}:
+                state["hidden_work_active"] = False
+                state["tool_active"] = False
+                state["auxiliary_done"] = True
+                append_auxiliary_line(normalized)
+                publish([normalized], phase="done" if event_type == TURN_DONE else "error")
+                return
+            append_auxiliary_line(normalized)
+            publish([normalized], phase=str(normalized.get("native_type") or "event"))
 
         return callback
 
@@ -5485,44 +5636,52 @@ class TmuxWebtermApp:
         capture_idle_bare_session = capture_bare_session_when_roster and not capture_pane and target == session
         if not capture_roster_target and not capture_idle_bare_session and not self.auto_approve_session_has_pending_prompt(session) and not self.auto_approve_capture_allowed_for_target(target):
             return hidden_prompt, {"key": "idle", "text": "tmux activity quiet"}
+
+        def prompt_classifier(prompt_target: str, visible_text: str, pane_text: str | None, prompt_source: str) -> dict[str, Any]:
+            return hybrid_approval_prompt_state(prompt_target, visible_text, pane_text, prompt_source=prompt_source)
+
+        def roster_prompt_classifier(_prompt_target: str, visible_text: str, pane_text: str | None, _prompt_source: str) -> dict[str, Any]:
+            if pane_text is None:
+                return approval_prompt_state(visible_text)
+            return approval_prompt_state(visible_text, pane_text)
+
+        def screen_classifier(visible_text: str, pane_target: str | None) -> dict[str, Any]:
+            return dict(agent_screen_state(visible_text, pane_target=pane_target))
+
         if not capture_pane:
             # Roster path: derive working/idle from the LIVE pane via a cheap visible-only capture
             # plus cheap prompt presence from the already-captured text. This avoids the expensive
             # hybrid transcript / bash double-capture fan-out while still lighting roster approval badges.
-            try:
-                visible_text = tmux_capture_pane(target, visible_only=True)
-            except (OSError, subprocess.SubprocessError):
-                visible_text = None
-            if visible_text is None:
+            state = classify_agent_pane(
+                target,
+                session=session,
+                discovered_sessions=discovered_sessions,
+                prompt_source="pane",
+                include_composer=False,
+                include_transcript_activity=False,
+                capture_full_for_bash=False,
+                capture_func=tmux_capture_pane,
+                capture_styled_func=tmux_capture_pane_styled,
+                prompt_classifier=roster_prompt_classifier,
+                screen_classifier=screen_classifier,
+            )
+            if state.reason_code in {"disconnected", "error"}:
                 return hidden_prompt, {"key": "idle", "text": ""}
-            return normalized_prompt_state(approval_prompt_state(visible_text)), dict(agent_screen_state(visible_text))
-        try:
-            visible_text = tmux_capture_pane(target, visible_only=True)
-            if visible_text is None:
-                prompt = normalized_prompt_state()
-                prompt["error"] = "failed to capture pane"
-                screen = {"key": "disconnected", "text": "failed to capture pane"}
-                return prompt, screen
-            prompt_state = hybrid_approval_prompt_state(session, visible_text, prompt_source=self.auto_approve_prompt_source())
-            if prompt_state.get("visible") and prompt_state.get("type") == "bash":
-                pane_text = tmux_capture_pane(target)
-                prompt_state = hybrid_approval_prompt_state(session, visible_text, pane_text or visible_text, prompt_source=self.auto_approve_prompt_source())
-            screen_state = agent_screen_state(visible_text)
-            if screen_state.get("key") == "idle":
-                # Visible pane state is primary. Transcript activity only upgrades idle -> working
-                # when recent, matching docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md#transcript-signals.
-                infos = discovered_sessions
-                if infos is None:
-                    infos, _errors = discover_sessions([session])
-                transcript_state = session_transcript_activity_state(infos.get(session))
-                if transcript_state.get("key") != "idle":
-                    screen_state = transcript_state
-            return normalized_prompt_state(prompt_state), dict(screen_state)
-        except (OSError, subprocess.SubprocessError) as exc:
-            prompt = normalized_prompt_state()
-            prompt["error"] = str(exc)
-            screen = {"key": "error", "text": str(exc)}
-            return prompt, screen
+            return normalized_prompt_state(state.prompt), dict(state.screen)
+        state = classify_agent_pane(
+            target,
+            session=session,
+            discovered_sessions=discovered_sessions,
+            prompt_source=self.auto_approve_prompt_source(),
+            include_composer=False,
+            include_transcript_activity=True,
+            capture_func=tmux_capture_pane,
+            capture_styled_func=tmux_capture_pane_styled,
+            prompt_classifier=prompt_classifier,
+            screen_classifier=screen_classifier,
+            discover_sessions_func=discover_sessions,
+        )
+        return normalized_prompt_state(state.prompt), dict(state.screen)
 
     def auto_approve_session_status(
         self,

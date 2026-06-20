@@ -17,6 +17,8 @@ from typing import Callable
 
 import auto_approve_tmux
 
+from .agent_tui import AgentPaneState
+from .agent_tui import classify_agent_pane
 from . import yolo_rules
 from .common import AUTO_APPROVE_LOCK_DIR
 from .common import PROJECT_ROOT
@@ -273,40 +275,37 @@ class AutoApproveWorker:
         self.missing_capture_count = 0
         self.capture_gate_observed = True
 
-        if hasattr(module, "hybrid_approval_prompt_state"):
-            prompt_state = module.hybrid_approval_prompt_state(self.target, visible_text, prompt_source=self.prompt_source)
-        else:
-            prompt_state = module.approval_prompt_state(visible_text)
-        prompt_type = prompt_state.get("type") or None
-        if prompt_type is None:
+        state, pane_text = self.classify_pane_state(module, visible_text)
+        prompt_state = state.prompt
+        approval_state = state.approval or {}
+        if state.reason_code == "needs-input":
             self.last_hash = ""
             self.last_hash_at = 0.0
             self.last_blocked_hash = ""
             self.pending_prompt = False
-            reason = str(prompt_state.get("reason") or "")
+            self.update(last_action="question visible; waiting for manual answer")
+            return False
+        prompt_type = str(approval_state.get("approval_type") or prompt_state.get("type") or "")
+        if not prompt_type or not approval_state.get("approval_visible"):
+            self.last_hash = ""
+            self.last_hash_at = 0.0
+            self.last_blocked_hash = ""
+            self.pending_prompt = False
+            reason = str(prompt_state.get("reason") or prompt_state.get("negative_reason") or state.screen.get("text") or "")
             self.update(last_action=f"idle; {reason}" if reason else "idle")
             return False
         self.pending_prompt = True
 
-        action_value = prompt_state.get("action")
+        action_value = approval_state.get("approval_action") or prompt_state.get("action")
         action = action_value if isinstance(action_value, str) and action_value else None
-        selected_value = prompt_state.get("selected_option")
+        selected_value = approval_state.get("selected_option") or prompt_state.get("selected_option")
         selected_option = selected_value if isinstance(selected_value, int) else 0
-        prompt_source = str(prompt_state.get("source") or "pane")
+        prompt_source = str(approval_state.get("source") or prompt_state.get("source") or "pane")
         if not prompt_state.get("yes_selected") and selected_option <= 0:
             self.update(last_action="prompt found, no selectable approval option is highlighted")
             return False
 
-        pane_text = module.tmux_capture_pane(self.target)
-        if pane_text is None:
-            pane_text = visible_text
-        if prompt_source == "pane" and hasattr(module, "hybrid_approval_prompt_state"):
-            prompt_state = module.hybrid_approval_prompt_state(self.target, visible_text, pane_text, prompt_source=self.prompt_source)
-            action_value = prompt_state.get("action")
-            if isinstance(action_value, str) and action_value:
-                action = action_value
-
-        current_hash = str(prompt_state.get("hash") or "")
+        current_hash = str(approval_state.get("prompt_hash") or prompt_state.get("hash") or "")
         now = time.monotonic()
         if current_hash == self.last_blocked_hash:
             self.update(last_action="blocked prompt still visible; waiting for manual action")
@@ -318,13 +317,51 @@ class AutoApproveWorker:
             self.update(last_action=f"approved prompt still visible after {module.PROMPT_RETRY_SECONDS:g}s; retrying")
 
         if prompt_type == "bash":
-            command_value = prompt_state.get("command")
+            command_value = approval_state.get("command") or prompt_state.get("command")
             command = command_value if isinstance(command_value, str) and command_value.strip() else None
             return self.handle_bash_prompt(module, pane_text, current_hash, action, selected_option, command=command, prompt_source=prompt_source)
-        if prompt_type in {"file", "tool"}:
-            return self.handle_non_bash_prompt(module, str(prompt_state.get("text") or ""), current_hash, action, prompt_type, selected_option, prompt_source=prompt_source)
+        if prompt_type in {"file", "plan", "tool"}:
+            rule_input = str(approval_state.get("rule_input_text") or prompt_state.get("text") or "")
+            return self.handle_non_bash_prompt(module, rule_input, current_hash, action, prompt_type, selected_option, prompt_source=prompt_source)
         self.update(last_action=f"unknown prompt type: {prompt_type}")
         return False
+
+    def classify_pane_state(self, module: Any, visible_text: str) -> tuple[AgentPaneState, str]:
+        pane_capture: dict[str, str | None] = {"text": None}
+
+        def capture_func(_target: str, visible_only: bool = False) -> str | None:
+            if visible_only:
+                return visible_text
+            if pane_capture["text"] is None:
+                pane_capture["text"] = module.tmux_capture_pane(self.target)
+            return pane_capture["text"] or visible_text
+
+        def capture_styled_func(_target: str, visible_only: bool = False) -> str:
+            return ""
+
+        def prompt_classifier(prompt_target: str, current_visible_text: str, pane_text: str | None, prompt_source: str) -> dict[str, Any]:
+            if hasattr(module, "hybrid_approval_prompt_state"):
+                state = module.hybrid_approval_prompt_state(prompt_target, current_visible_text, pane_text, prompt_source=prompt_source)
+            else:
+                state = module.approval_prompt_state(current_visible_text)
+            if state.get("type") and "visible" not in state:
+                state = dict(state)
+                state["visible"] = True
+            return state
+
+        state = classify_agent_pane(
+            self.target,
+            session=self.target.split(":", 1)[0],
+            prompt_source=self.prompt_source,
+            include_composer=False,
+            include_cursor=False,
+            include_transcript_activity=False,
+            capture_full_for_bash=True,
+            capture_func=capture_func,
+            capture_styled_func=capture_styled_func,
+            prompt_classifier=prompt_classifier,
+        )
+        return state, pane_capture["text"] or visible_text
 
     def send_action(self, module: Any, action: str | None, selected_option: int = 1) -> bool:
         option = 2 if action == "option2" else 1

@@ -1,0 +1,244 @@
+actual:
+  agent_kind: claude
+  approval:
+    approval_action: ''
+    approval_type: ''
+    approval_visible: false
+    command: ''
+    dangerous: false
+    prompt_hash: ''
+    risk: ''
+    rule_input_text: ''
+    selected_option: 0
+    source: ''
+  attention_kind: question
+  attention_label: ASK?
+  composer:
+    accepting: true
+    detected_text: ''
+    key: empty
+    prompt_suggestion: false
+    text: ''
+  cursor:
+    character: ❯
+    current_command: claude
+    pane_in_mode: false
+    x: 0
+    y: 31
+  display:
+    attention_kind: question
+    attention_label: ASK?
+    evidence_lines:
+    - Which YOLOmux verifier mode should we use?
+    - 1. Pane capture
+    - 2. Transcript capture
+    - 3. Type something.
+    - 4. Chat about this
+    options:
+    - index: 1
+      label: Pane capture
+      selected: true
+    - index: 2
+      label: Transcript capture
+      selected: false
+    - index: 3
+      label: Type something.
+      selected: false
+    - index: 4
+      label: Chat about this
+      selected: false
+    prompt_hash: 932bb7e95030dfa57a2ea11fb7d2544b
+    prompt_kind: question
+    question_text: Which YOLOmux verifier mode should we use?
+    screen_key: needs-input
+    selected_option: 1
+  reason_code: needs-input
+  screen:
+    agent: claude
+    command: null
+    confidence: 0.9
+    evidence_lines:
+    - Which YOLOmux verifier mode should we use?
+    - 1. Pane capture
+    - 2. Transcript capture
+    - 3. Type something.
+    - 4. Chat about this
+    key: needs-input
+    options:
+    - index: 1
+      label: Pane capture
+      selected: true
+    - index: 2
+      label: Transcript capture
+      selected: false
+    - index: 3
+      label: Type something.
+      selected: false
+    - index: 4
+      label: Chat about this
+      selected: false
+    prompt_hash: 932bb7e95030dfa57a2ea11fb7d2544b
+    prompt_kind: question
+    question_text: Which YOLOmux verifier mode should we use?
+    selected_option: 1
+    text: Which YOLOmux verifier mode should we use?
+agent: claude
+capture_date: '2026-06-20'
+capture_date_position: end
+capture_mode: visible
+captured_at: '2026-06-20T10:55:55.626813+00:00'
+case_name: ask_user_question
+claude_version: 2.1.183 (Claude Code)
+client_name: Claude Code
+client_version: 2.1.183 (Claude Code)
+client_version_slug: claude-code-2.1.183
+codex_version: ''
+cursor:
+  character: ❯
+  current_command: claude
+  pane_in_mode: false
+  x: 0
+  y: 31
+evidence_fields:
+  display_evidence_lines:
+  - Which YOLOmux verifier mode should we use?
+  - 1. Pane capture
+  - 2. Transcript capture
+  - 3. Type something.
+  - 4. Chat about this
+  prompt_hash: 932bb7e95030dfa57a2ea11fb7d2544b
+  screen_evidence_lines:
+  - Which YOLOmux verifier mode should we use?
+  - 1. Pane capture
+  - 2. Transcript capture
+  - 3. Type something.
+  - 4. Chat about this
+expected:
+  agent_kind: claude
+  approval_visible: ''
+  attention_kind: ''
+  clear_cleared: ''
+  clear_ok: ''
+  composer_key: ''
+  reason_code: ''
+  screen_key: ''
+  send_ok: ''
+  send_reason_code: ''
+expected_promoted:
+  agent_kind: claude
+  approval_type: ''
+  approval_visible: false
+  attention_kind: question
+  attention_label: ASK?
+  composer_key: empty
+  reason_code: needs-input
+  screen_key: needs-input
+failures: []
+filename_convention: case_name__client-token_date
+fixture_description: Claude AskUserQuestion needs-input prompt
+fixture_id: ask_user_question__claude-code-2.1.183_20260620
+fixture_scenario: ask_user_question
+id: ask_user_question__claude-code-2.1.183_20260620
+operations:
+- needles: []
+  ok: true
+  type: ready_text
+- needles: []
+  ok: true
+  type: wait_text
+- result:
+    clear:
+      cleared: false
+      detected_text: ''
+      ok: true
+    cleared: false
+    ok: true
+    pasted: true
+    reason_code: submitted
+    returncode: 0
+    sent: true
+  text_length: 202
+  type: send_prompt
+raw_capture: "     │                                                                                                     \
+  \            │\n     │ Context                                                                                         \
+  \                │\n     │                                                                                             \
+  \                    │\n     │ This is a simple verification task to confirm the execution flow works end-to-end. No code\
+  \ changes are involved │\n     │ — it's a no-op timing check. The goal is to run a short blocking command, wait for it to\
+  \ finish, then report    │\n     │ completion.                                                                         \
+  \                            │\n     │                                                                                 \
+  \                                │\n     │ Approach                                                                    \
+  \                                    │\n     │                                                                         \
+  \                                        │\n     │ 1. Run sleep 10 (a benign command that blocks for 10 seconds and exits 0).\
+  \                                      │\n     │ 2. After it returns, report \"done\" to the user.                     \
+  \                                            │\n     │                                                                 \
+  \                                                │\n     │ Files                                                       \
+  \                                                    │\n     │                                                         \
+  \                                                        │\n     │ None modified. This is a shell command only.        \
+  \                                                            │\n     │                                                 \
+  \                                                                │\n     │ Verification                                \
+  \                                                                    │\n     │                                         \
+  \                                                                        │\n     │ - The sleep 10 command exits with status\
+  \ 0 after ~10 seconds.                                                   │\n     │ - Confirm the completion message is reported\
+  \ back.                                                              │\n     ╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\n\
+  \                                                                                                                      \
+  \  \n❯ Use Claude Code interactive question UI, not prose, and ask me this multiple-choice question: Which YOLOmux verifier\
+  \  \n  mode should we use? Options: Pane capture, Transcript capture. Wait for my selection.                           \
+  \      \n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  Planning: ~/.claude/plans/plan-this-harmless-verification-fuzzy-graham.md                                   \n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  \ ☐ Verifier mode                                                                                                      \
+  \  \n                                                                                                                  \
+  \      \nWhich YOLOmux verifier mode should we use?                                                                    \
+  \          \n\n❯ 1. Pane capture                                                                                       \
+  \                \n     Capture the verification output directly from the terminal pane.                               \
+  \                    \n  2. Transcript capture                                                                         \
+  \                        \n     Capture the verification output from the session transcript.                           \
+  \                            \n  3. Type something.\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  \  4. Chat about this                                                                                            \n\nEnter\
+  \ to select · ↑/↓ to navigate · Esc to cancel\n"
+source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T105555Z.yaml
+styled_capture: "     │                                                                                                  \
+  \               │\n     │ Context                                                                                      \
+  \                   │\n     │                                                                                          \
+  \                       │\n     │ This is a simple verification task to confirm the execution flow works end-to-end. No\
+  \ code changes are involved │\n     │ — it's a no-op timing check. The goal is to run a short blocking command, wait for\
+  \ it to finish, then report    │\n     │ completion.                                                                   \
+  \                                  │\n     │                                                                           \
+  \                                      │\n     │ Approach                                                              \
+  \                                          │\n     │                                                                   \
+  \                                              │\n     │ 1. Run sleep 10 (a benign command that blocks for 10 seconds and\
+  \ exits 0).                                      │\n     │ 2. After it returns, report \"done\" to the user.           \
+  \                                                      │\n     │                                                       \
+  \                                                          │\n     │ Files                                             \
+  \                                                              │\n     │                                               \
+  \                                                                  │\n     │ None modified. This is a shell command only.\
+  \                                                                    │\n     │                                         \
+  \                                                                        │\n     │ Verification                        \
+  \                                                                            │\n     │                                 \
+  \                                                                                │\n     │ - The sleep 10 command exits\
+  \ with status 0 after ~10 seconds.                                                   │\n     │ - Confirm the completion\
+  \ message is reported back.                                                              │\n     ╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\n\
+  \                                                                                                                      \
+  \  \n❯ Use Claude Code interactive question UI, not prose, and ask me this multiple-choice question: Which YOLOmux verifier\
+  \  \n  mode should we use? Options: Pane capture, Transcript capture. Wait for my selection.                           \
+  \      \n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  Planning: \e]8;id=ftgk84;file://~/.claude/plans/plan-this-harmless-verification-fuzzy-graham.md\e\\~/.claude/plans/plan-this-harmless-verification-fuzzy-graham.md\e\
+  ]8;;\e\\                                   \n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  \ ☐ Verifier mode                                                                                                      \
+  \  \n                                                                                                                  \
+  \      \nWhich YOLOmux verifier mode should we use?                                                                    \
+  \          \n\n❯ 1. Pane capture                                                                                       \
+  \                \n     Capture the verification output directly from the terminal pane.                               \
+  \                    \n  2. Transcript capture                                                                         \
+  \                        \n     Capture the verification output from the session transcript.                           \
+  \                            \n  3. Type something.\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  \  4. Chat about this                                                                                            \n\nEnter\
+  \ to select · ↑/↓ to navigate · Esc to cancel\n"
+tmux_socket: /tmp/yoask-real-ui-2552908-0ead450e/s
+tmux_target: yr-claude-2552908-c8fd27:0.0
+verifier_capabilities:
+- raw-capture
+- styled-capture
+- cursor-facts
+- central-clear-composer
+- central-send-prompt
+- visible-status-counter

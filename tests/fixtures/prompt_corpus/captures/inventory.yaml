@@ -1,0 +1,365 @@
+filename_convention: case_name__client-token_date
+fixtures:
+- agent: claude
+  capture_date: '2026-06-20'
+  case_name: ask_user_question
+  client_name: Claude Code
+  client_version: 2.1.183 (Claude Code)
+  client_version_slug: claude-code-2.1.183
+  description: Claude AskUserQuestion needs-input prompt
+  expected:
+    agent_kind: claude
+    approval_type: ''
+    approval_visible: false
+    attention_kind: question
+    attention_label: ASK?
+    composer_key: empty
+    reason_code: needs-input
+    screen_key: needs-input
+  file: ask_user_question__claude-code-2.1.183_20260620.yaml
+  id: ask_user_question__claude-code-2.1.183_20260620
+  scenario: ask_user_question
+  source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T105555Z.yaml
+- agent: claude
+  capture_date: '2026-06-20'
+  case_name: composing_tip_not_question
+  client_name: Claude Code
+  client_version: 2.1.183 (Claude Code)
+  client_version_slug: claude-code-2.1.183
+  description: 'Negative: Claude composing Tip chrome is not a user question'
+  expected:
+    agent_kind: claude
+    approval_type: ''
+    approval_visible: false
+    attention_kind: ''
+    attention_label: ''
+    composer_key: empty
+    reason_code: idle
+    screen_key: idle
+  file: composing_tip_not_question__claude-code-2.1.183_20260620.yaml
+  id: composing_tip_not_question__claude-code-2.1.183_20260620
+  scenario: composing_tip_not_question
+  source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T111001Z.yaml
+- agent: claude
+  capture_date: '2026-06-20'
+  case_name: idle_empty_prompt
+  client_name: Claude Code
+  client_version: 2.1.183 (Claude Code)
+  client_version_slug: claude-code-2.1.183
+  description: Claude idle empty prompt
+  expected:
+    agent_kind: claude
+    approval_type: ''
+    approval_visible: false
+    attention_kind: ''
+    attention_label: ''
+    composer_key: empty
+    reason_code: idle
+    screen_key: idle
+  file: idle_empty_prompt__claude-code-2.1.183_20260620.yaml
+  id: idle_empty_prompt__claude-code-2.1.183_20260620
+  scenario: idle_empty_prompt
+  source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T110814Z.yaml
+- agent: claude
+  capture_date: '2026-06-20'
+  case_name: idle_ghost_suggestion
+  client_name: Claude Code
+  client_version: 2.1.183 (Claude Code)
+  client_version_slug: claude-code-2.1.183
+  description: Claude idle prompt with ghost suggestion
+  expected:
+    agent_kind: claude
+    approval_type: ''
+    approval_visible: false
+    attention_kind: ''
+    attention_label: ''
+    composer_key: ghost
+    reason_code: idle
+    screen_key: idle
+  file: idle_ghost_suggestion__claude-code-2.1.183_20260620.yaml
+  id: idle_ghost_suggestion__claude-code-2.1.183_20260620
+  scenario: idle_ghost_suggestion
+  source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T111523Z.yaml
+- agent: claude
+  capture_date: '2026-06-19'
+  case_name: plan_approval_real
+  client_name: Claude Code
+  client_version: 2.1.183 (Claude Code)
+  client_version_slug: claude-code-2.1.183
+  description: Claude plan approval with selected option
+  expected:
+    agent_kind: claude
+    approval_type: plan
+    approval_visible: true
+    attention_kind: approval
+    attention_label: YOLO?
+    composer_key: empty
+    reason_code: approval
+    screen_key: approval
+  file: plan_approval_real__claude-code-2.1.183_20260619.yaml
+  id: plan_approval_real__claude-code-2.1.183_20260619
+  scenario: plan_approval_real
+  source: real capture
+- agent: claude
+  capture_date: '2026-06-20'
+  case_name: plan_approval_selected_option
+  client_name: Claude Code
+  client_version: 2.1.183 (Claude Code)
+  client_version_slug: claude-code-2.1.183
+  description: Claude plan approval with selected option
+  expected:
+    agent_kind: claude
+    approval_type: plan
+    approval_visible: true
+    attention_kind: approval
+    attention_label: YOLO?
+    composer_key: empty
+    reason_code: approval
+    screen_key: approval
+  file: plan_approval_selected_option__claude-code-2.1.183_20260620.yaml
+  id: plan_approval_selected_option__claude-code-2.1.183_20260620
+  scenario: plan_approval_selected_option
+  source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T111057Z.yaml
+- agent: claude
+  capture_date: '2026-06-20'
+  case_name: typed_nbsp_draft
+  client_name: Claude Code
+  client_version: 2.1.183 (Claude Code)
+  client_version_slug: claude-code-2.1.183
+  description: 'Negative: Claude NBSP composer text with advanced cursor is a clearable draft, not a ghost prompt'
+  expected:
+    agent_kind: claude
+    approval_type: ''
+    approval_visible: false
+    attention_kind: ''
+    attention_label: ''
+    composer_key: draft
+    reason_code: draft-clearable
+    screen_key: input-draft
+  file: typed_nbsp_draft__claude-code-2.1.183_20260620.yaml
+  id: typed_nbsp_draft__claude-code-2.1.183_20260620
+  scenario: typed_nbsp_draft
+  source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T104236Z.yaml
+- agent: claude
+  capture_date: '2026-06-20'
+  case_name: working_visible_counter
+  client_name: Claude Code
+  client_version: 2.1.183 (Claude Code)
+  client_version_slug: claude-code-2.1.183
+  description: Claude working visible status counter
+  expected:
+    agent_kind: claude
+    approval_type: ''
+    approval_visible: false
+    attention_kind: working
+    attention_label: RUN
+    composer_key: empty
+    reason_code: busy
+    screen_key: working
+  file: working_visible_counter__claude-code-2.1.183_20260620.yaml
+  id: working_visible_counter__claude-code-2.1.183_20260620
+  scenario: working_visible_counter
+  source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T105442Z.yaml
+- agent: codex
+  capture_date: '2026-06-20'
+  case_name: choice_question
+  client_name: Codex CLI
+  client_version: codex-cli 0.141.0
+  client_version_slug: codex-cli-0.141.0
+  description: Codex non-permission choice question
+  expected:
+    agent_kind: codex
+    approval_type: ''
+    approval_visible: false
+    attention_kind: question
+    attention_label: ASK?
+    composer_key: ghost
+    reason_code: needs-input
+    screen_key: needs-input
+  file: choice_question__codex-cli-0.141.0_20260620.yaml
+  id: choice_question__codex-cli-0.141.0_20260620
+  scenario: choice_question
+  source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T110043Z.yaml
+- agent: codex
+  capture_date: '2026-06-20'
+  case_name: choice_question_real
+  client_name: Codex CLI
+  client_version: codex-cli 0.141.0
+  client_version_slug: codex-cli-0.141.0
+  description: Codex user question with an answer draft in the composer
+  expected:
+    agent_kind: codex
+    approval_type: ''
+    approval_visible: false
+    attention_kind: question
+    attention_label: ASK?
+    composer_key: draft
+    reason_code: needs-input
+    screen_key: needs-input
+  file: choice_question_real__codex-cli-0.141.0_20260620.yaml
+  id: choice_question_real__codex-cli-0.141.0_20260620
+  scenario: choice_question_real
+  source: real Codex CLI 0.141.0 question followed by ghost-suggestion composer
+- agent: codex
+  capture_date: '2026-06-20'
+  case_name: idle_dim_ghost_prompt
+  client_name: Codex CLI
+  client_version: codex-cli 0.141.0
+  client_version_slug: codex-cli-0.141.0
+  description: Codex idle dim ghost prompt
+  expected:
+    agent_kind: codex
+    approval_type: ''
+    approval_visible: false
+    attention_kind: ''
+    attention_label: ''
+    composer_key: ghost
+    reason_code: idle
+    screen_key: idle
+  file: idle_dim_ghost_prompt__codex-cli-0.141.0_20260620.yaml
+  id: idle_dim_ghost_prompt__codex-cli-0.141.0_20260620
+  scenario: idle_dim_ghost_prompt
+  source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T110608Z.yaml
+- agent: codex
+  capture_date: '2026-06-20'
+  case_name: idle_empty_prompt
+  client_name: Codex CLI
+  client_version: codex-cli 0.141.0
+  client_version_slug: codex-cli-0.141.0
+  description: Codex idle empty prompt
+  expected:
+    agent_kind: codex
+    approval_type: ''
+    approval_visible: false
+    attention_kind: ''
+    attention_label: ''
+    composer_key: empty
+    reason_code: idle
+    screen_key: idle
+  file: idle_empty_prompt__codex-cli-0.141.0_20260620.yaml
+  id: idle_empty_prompt__codex-cli-0.141.0_20260620
+  scenario: idle_empty_prompt
+  source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T104406Z.yaml
+- agent: codex
+  capture_date: '2026-06-20'
+  case_name: question_with_answer_draft
+  client_name: Codex CLI
+  client_version: codex-cli 0.141.0
+  client_version_slug: codex-cli-0.141.0
+  description: 'Positive: Codex question remains ASK? even when an answer draft is in the composer'
+  expected:
+    agent_kind: codex
+    approval_type: ''
+    approval_visible: false
+    attention_kind: question
+    attention_label: ASK?
+    composer_key: draft
+    reason_code: needs-input
+    screen_key: needs-input
+  file: question_with_answer_draft__codex-cli-0.141.0_20260620.yaml
+  id: question_with_answer_draft__codex-cli-0.141.0_20260620
+  scenario: question_with_answer_draft
+  source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T110100Z.yaml
+- agent: codex
+  capture_date: '2026-06-20'
+  case_name: shell_approval_touch_command
+  client_name: Codex CLI
+  client_version: codex-cli 0.141.0
+  client_version_slug: codex-cli-0.141.0
+  description: Codex shell command approval
+  expected:
+    agent_kind: codex
+    approval_type: bash
+    approval_visible: true
+    attention_kind: approval
+    attention_label: YOLO?
+    composer_key: empty
+    reason_code: approval
+    screen_key: approval
+  file: shell_approval_touch_command__codex-cli-0.141.0_20260620.yaml
+  id: shell_approval_touch_command__codex-cli-0.141.0_20260620
+  scenario: shell_approval_touch_command
+  source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T110706Z.yaml
+- agent: codex
+  capture_date: '2026-06-20'
+  case_name: shell_no_selected_option
+  client_name: Codex CLI
+  client_version: codex-cli 0.141.0
+  client_version_slug: codex-cli-0.141.0
+  description: Codex shell approval with the reject option selected
+  expected:
+    agent_kind: codex
+    approval_type: bash
+    approval_visible: true
+    attention_kind: approval
+    attention_label: YOLO?
+    composer_key: empty
+    reason_code: approval
+    screen_key: approval
+  file: shell_no_selected_option__codex-cli-0.141.0_20260620.yaml
+  id: shell_no_selected_option__codex-cli-0.141.0_20260620
+  scenario: shell_no_selected_option
+  source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T160826Z.yaml
+- agent: codex
+  capture_date: '2026-06-20'
+  case_name: shell_sleep_10_3_option
+  client_name: Codex CLI
+  client_version: codex-cli 0.141.0
+  client_version_slug: codex-cli-0.141.0
+  description: Codex shell approval with the first option selected
+  expected:
+    agent_kind: codex
+    approval_type: bash
+    approval_visible: true
+    attention_kind: approval
+    attention_label: YOLO?
+    composer_key: empty
+    reason_code: approval
+    screen_key: approval
+  file: shell_sleep_10_3_option__codex-cli-0.141.0_20260620.yaml
+  id: shell_sleep_10_3_option__codex-cli-0.141.0_20260620
+  scenario: shell_sleep_10_3_option
+  source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T160805Z.yaml
+- agent: codex
+  capture_date: '2026-06-20'
+  case_name: typed_draft
+  client_name: Codex CLI
+  client_version: codex-cli 0.141.0
+  client_version_slug: codex-cli-0.141.0
+  description: Codex composer with unsent user draft text
+  expected:
+    agent_kind: codex
+    approval_type: ''
+    approval_visible: false
+    attention_kind: ''
+    attention_label: ''
+    composer_key: draft
+    reason_code: draft-clearable
+    screen_key: input-draft
+  file: typed_draft__codex-cli-0.141.0_20260620.yaml
+  id: typed_draft__codex-cli-0.141.0_20260620
+  scenario: typed_draft
+  source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T160638Z.yaml
+- agent: codex
+  capture_date: '2026-06-20'
+  case_name: working_command_counter
+  client_name: Codex CLI
+  client_version: codex-cli 0.141.0
+  client_version_slug: codex-cli-0.141.0
+  description: Codex working after command send
+  expected:
+    agent_kind: codex
+    approval_type: ''
+    approval_visible: false
+    attention_kind: working
+    attention_label: RUN
+    composer_key: ghost
+    reason_code: busy
+    screen_key: working
+  file: working_command_counter__codex-cli-0.141.0_20260620.yaml
+  id: working_command_counter__codex-cli-0.141.0_20260620
+  scenario: working_command_counter
+  source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T110659Z.yaml
+purpose: Promoted real Claude/Codex agent_tui captures. Filenames use case_name__client-token_date; source_staging_file records
+  staging provenance when available.
+schema: 1

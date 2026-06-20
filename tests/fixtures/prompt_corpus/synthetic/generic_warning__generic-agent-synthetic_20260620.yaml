@@ -1,0 +1,41 @@
+agent: generic
+capture_date: '2026-06-20'
+capture_date_position: end
+capture_mode: converted_text_fixture
+captured_at: '2026-06-20T00:00:00-07:00'
+case_name: generic_warning
+claude_version: ''
+client_name: Generic agent TUI
+client_version: synthetic generic agent fixture
+client_version_slug: generic-agent-synthetic
+codex_version: ''
+cursor: {}
+expected:
+  approval_visible: false
+  ask: false
+  negative_reason_contains: idle
+  screen_key: idle
+expected_screen_key: idle
+failures: []
+filename_convention: case_name__client-token_date
+fixture_id: generic_warning__generic-agent-synthetic_20260620
+id: generic_warning__generic-agent-synthetic_20260620
+operations: []
+raw_capture: |
+  Warning: Do you want to proceed? appears in this log file.
+  The command already finished and no agent prompt is active.
+
+  ❯
+source: synthetic warning negative
+source_fixture_id: generic-warning
+source_text_file: generic_warning.txt
+styled_capture: |
+  Warning: Do you want to proceed? appears in this log file.
+  The command already finished and no agent prompt is active.
+
+  ❯
+visible_text: |
+  Warning: Do you want to proceed? appears in this log file.
+  The command already finished and no agent prompt is active.
+
+  ❯

@@ -1,0 +1,62 @@
+agent: generic
+capture_date: '2026-06-20'
+capture_date_position: end
+capture_mode: converted_text_fixture
+captured_at: '2026-06-20T00:00:00-07:00'
+case_name: scrollback_old_question
+claude_version: ''
+client_name: Generic agent TUI
+client_version: synthetic generic agent fixture
+client_version_slug: generic-agent-synthetic
+codex_version: ''
+cursor: {}
+expected:
+  approval_visible: false
+  ask: false
+  negative_reason_contains: idle
+  screen_key: idle
+expected_screen_key: idle
+failures: []
+filename_convention: case_name__client-token_date
+fixture_id: scrollback_old_question__generic-agent-synthetic_20260620
+id: scrollback_old_question__generic-agent-synthetic_20260620
+operations: []
+raw_capture: |
+  Which backend should I use for this verification?
+  ❯ 1. vLLM
+    2. SGLang
+    3. TensorRT-LLM
+
+  Enter to select · ↑/↓ to navigate · Esc to cancel
+  ● User answered: vLLM
+  ● Running tests now.
+    ⎿ ok
+
+  ❯
+source: synthetic answered choice question followed by later output and idle composer
+source_fixture_id: scrollback-old-question
+source_text_file: scrollback_old_question.txt
+styled_capture: |
+  Which backend should I use for this verification?
+  ❯ 1. vLLM
+    2. SGLang
+    3. TensorRT-LLM
+
+  Enter to select · ↑/↓ to navigate · Esc to cancel
+  ● User answered: vLLM
+  ● Running tests now.
+    ⎿ ok
+
+  ❯
+visible_text: |
+  Which backend should I use for this verification?
+  ❯ 1. vLLM
+    2. SGLang
+    3. TensorRT-LLM
+
+  Enter to select · ↑/↓ to navigate · Esc to cancel
+  ● User answered: vLLM
+  ● Running tests now.
+    ⎿ ok
+
+  ❯

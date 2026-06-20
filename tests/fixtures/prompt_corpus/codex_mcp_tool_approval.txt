@@ -1,9 +1,0 @@
- Codex wants to use an MCP tool
-
- Would you like to allow mcp__github__get_pull_request to access ai-dynamo/dynamo#123?
-
- › 1. Yes, allow once
-   2. Yes, and always allow this MCP tool for this server
-   3. No
-
- Press enter to confirm or esc to cancel

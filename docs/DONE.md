@@ -4,7 +4,38 @@ Archive of completed YOLOmux work, newest first. Concise by design — the full 
 
 Unless an entry says otherwise, every item shipped with the standard check gate green (`tools/check.py`: py_compile, `static_build.py --check`, both `node --check`, `node tests/layout_url.test.js`, full pytest, `git diff --check`). Entries call out only verification that goes BEYOND that gate (live user confirmation, focused browser repros, notable test counts).
 
+## 2026-06-20
+
+### Central Claude/Codex TUI API and YO!agent auxiliary streams
+- Completed and removed `DOIT.cli_api_claude_codex.md` and `DOIT.yoagent_stream_thinking_toolcalls.md`. Visible Claude/Codex pane control is centralized in `agent_tui.py`, with cursor/composer capture, shape-based prompt/approval/question/activity classification, send/clear verification, auto-approve action fields, shared tmux-wall status, and real CLI fixture harvesting that treats Claude as a frequently changing TUI rather than a stable string API.
+- YO!agent chat now uses shared Claude/Codex event normalization for assistant deltas, reasoning/thinking, tool starts/output/done, approval requests, usage, errors, and turn completion; the UI renders auxiliary thinking/tool-call lines in a subdued collapsible details panel while keeping normal assistant text separate.
+- Verification: focused detector/agent_tui/auto-approve tests passed (`176 passed`), focused YO!agent stream/send tests passed (`37 passed, 162 deselected`), isolated real-agent browser smoke passed, live 8001 YO!agent browser verifier passed for Claude and Codex with screenshots under `/tmp`, and full `python3 tools/check.py` passed.
+
+### Activity detection from live status counters
+- Completed and removed `DOIT.activity_elapsed_counter_detection.md`. Visible Claude/Codex status-counter rows now count as live activity when their elapsed/token counters advance, even with arbitrary status words and trailing tip/composer chrome, so pane tabs, YO rings/markers, Tabber, activity APIs, YO!agent status, wait-then-send, and auto-approve refusal all share the same `visible-counter` evidence.
+- Verification: focused detector/app tests passed (`44 passed`), full `python3 tools/check.py` passed, and live 8001 verification against Claude `2.1.183 (Claude Code)` on pane `%20` saw advancing rows such as `✽ Hashing… (3s · ↓ 26 tokens)` through `/api/auto-approve` and `agent_screen_state(..., pane_target='%20')` as `working` with `activity_source='visible-counter'`.
+
+### Claude/Codex text-client slash-command parity
+- Completed and removed `DOIT.cli_add.md`. `tools/claude.py` and `tools/codex.py` now derive slash-command names, aliases, help rows, completion, and compatibility notes from the shared `tools/text_client_common.py` registry; Codex gained Claude-style permission aliases, reasoning/thinking controls, `/context`, real `/usage`, and conversation-clearing `/clear`; Claude gained `/reasoning`, and both clients use `/cls` for terminal clearing.
+- Verification: `python3 -m pytest tests/test_text_client_common_metadata.py` passed (`13 passed`) and covers registry/export/help parity, compatibility notes, thinking/reasoning aliases, `/clear` vs `/cls`, and Codex `/usage`.
+
+### Tabber compact home paths
+- Completed and removed `DOIT.tabber_home_path_tilde.md`. Tabber row rendering now runs human-visible labels, descriptions, and titles through the shared `compactHomePath()` helper, so repo paths under the configured home display as `~/...` and the bare home displays as `~`, while non-home paths, already-tilde paths, absolute repo metadata, and synthetic `/s_.../w_...` ids are unchanged.
+- Verification: `node tests/tabber.test.js` passed (`35 passed`, with existing disabled-fetch fixture warnings only) and full `python3 tools/check.py` passed (`CHECK PASSED in 47.48s`).
+
+### UI tree and CLI follow-ups
+- Completed and removed `DOIT.ui_tree_cli_followups.md`. Refresh now resizes visible tmux tabs, Finder/Differ/Tabber timestamp recency styling covers Ago and Date modes, Tabber shell/process rows use neutral process affordances instead of checkbox-looking squares, and Claude/Codex text-client startup flags plus slash-command help are pinned to docs and versioned real-client fixture lists.
+- Verification: focused frontend/browser tests passed for refresh, Tabber row shape, recency styling, and process-row affordances; `python3 -m pytest tests/test_text_client_common_metadata.py` passed (`15 passed`) for CLI docs/fixture parity; full `python3 tools/check.py` passed (`CHECK PASSED in 45.44s`).
+
+### Differ repo-set cutoff stability
+- Completed and removed `DOIT.differ_repo_flicker_ai_config.md`. Session-files repo selection now applies a short shared cutoff grace around the lookback boundary, so a secondary repo touched exactly near the 24h cutoff does not appear on one poll and disappear on the next; the fix is generic and does not special-case `ai-config` or add a frontend debounce.
+- Verification: current live 8001 no longer reproduced the original `~/ai-config` blink, five authenticated forced `/api/session-files?session=1&hours=24&force=1` samples all returned only `~/yolomux.dev8001`, the boundary regression passed, full `python3 tools/check.py` passed (`CHECK PASSED in 43.15s`), and 8001 restarted from `/home/keivenc/yolomux.dev8001`.
+
 ## 2026-06-19
+
+### YO!agent suggestion prompts, waits, and editor image paste
+- Completed and removed `DOIT.refix.md`. YO!agent now treats Claude NBSP and Codex ANSI-dim bottom-composer suggestions as idle placeholder UI, detects real typed drafts separately, clears real drafts through the verified target-send path when sending, sends to suggestion-only Claude/Codex panes without clearing prompt text, records transcript/edited-file evidence before visible-pane fallback, always clears pending wait rows on success/partial/no-output timeout, and exposes a Clear control backed by the existing action wait store. Markdown editor image paste now uploads beside the edited Markdown file and inserts relative `.uploads/...` links while preserving terminal paste behavior and preview resolution.
+- Verification: raw live Claude/Codex suggestion captures were added as tests; focused YO!agent/upload route tests passed (`38 passed` in `tests/test_app.py`, `3 passed` in `tests/test_server_query.py`), `node tests/layout_async.test.js`, `node tests/editor_preview.test.js`, and final `python3 tools/check.py` passed (`CHECK PASSED in 49.16s`). Live smoke sent marker/date prompts to session `1:0` Claude and `1:1` Codex, both returned marker-bearing YO!agent result messages with `pending_waits: []`; user completed the 8001 manual visual gate after restart on version `0.4.19`.
 
 ### Refactor split large files and structural guards
 - Completed and removed `DOIT.refactor_split_large_files.md`. HTTP routes now use a grouped route registry; YO!agent flow moved into controller/backend/session-summary owners; share/replay/drop, editor/preview/popout, Info/YO!agent/preferences/debug, DOM action, and timing code have separate source owners; filesystem moved into a package; browser tests and JS layout tests were split; repeated CSS colors and z-index values moved to shared tokens. Verification: recursive py-compile guard now includes nested split packages, static assets were rebuilt, and final `python3 tools/check.py` passed all 7 lanes (`CHECK PASSED in 44.88s`).

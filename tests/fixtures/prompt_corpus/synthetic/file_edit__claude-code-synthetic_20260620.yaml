@@ -1,0 +1,65 @@
+agent: claude
+capture_date: '2026-06-20'
+capture_date_position: end
+capture_mode: converted_text_fixture
+captured_at: '2026-06-20T00:00:00-07:00'
+case_name: file_edit
+claude_version: ''
+client_name: Claude Code
+client_version: synthetic Claude Code fixture
+client_version_slug: claude-code-synthetic
+codex_version: ''
+cursor: {}
+expected:
+  action: option2
+  agent: claude
+  approval_visible: true
+  ask: true
+  command: null
+  confidence_min: 0.9
+  option_labels:
+  - 'Yes'
+  - Yes, and allow Claude to edit files in this project
+  - 'No'
+  prompt_kind: file-edit
+  prompt_type: file
+  question_text: Do you want to make this edit to yolomux_lib/prompt_detector.py?
+  screen_key: approval
+  selected_option: 1
+  yes_selected: true
+expected_screen_key: approval
+failures: []
+filename_convention: case_name__client-token_date
+fixture_id: file_edit__claude-code-synthetic_20260620
+id: file_edit__claude-code-synthetic_20260620
+operations: []
+raw_capture: |
+  ● I can make the requested change.
+
+  Do you want to make this edit to yolomux_lib/prompt_detector.py?
+  ❯ 1. Yes
+    2. Yes, and allow Claude to edit files in this project
+    3. No
+
+  Esc to cancel · Enter to select
+source: synthetic current Claude layout
+source_fixture_id: claude-file-edit
+source_text_file: claude_file_edit.txt
+styled_capture: |
+  ● I can make the requested change.
+
+  Do you want to make this edit to yolomux_lib/prompt_detector.py?
+  ❯ 1. Yes
+    2. Yes, and allow Claude to edit files in this project
+    3. No
+
+  Esc to cancel · Enter to select
+visible_text: |
+  ● I can make the requested change.
+
+  Do you want to make this edit to yolomux_lib/prompt_detector.py?
+  ❯ 1. Yes
+    2. Yes, and allow Claude to edit files in this project
+    3. No
+
+  Esc to cancel · Enter to select

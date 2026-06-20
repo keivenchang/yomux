@@ -21,21 +21,23 @@ from pathlib import Path
 from typing import Any
 
 from ..approvals import blank_prompt_state
-from ..approvals import hybrid_approval_prompt_state
+from ..agent_tui import classify_agent_pane
+from ..agent_tui import clear_composer
+from ..agent_tui import composer_text_is_idle_placeholder
+from ..agent_tui import text_still_in_composer
+from ..agent_tui import visible_composer_source
+from ..agent_tui import visible_composer_text
 from ..activity_summary import deterministic_yoagent_reply
 from ..activity_summary import yoagent_context_lines
 from ..activity_summary import yoagent_question_requests_work_next
 from ..common import SessionInfo
 from ..common import truncate_text
-from ..prompt_detector import agent_screen_state
 from ..session_files import classify_change
 from ..session_files import scan_claude_transcript
 from ..session_files import scan_codex_transcript
-from ..tmux_utils import cmd_error
 from ..tmux_utils import tmux_session_target
 from ..transcripts import codex_event_text
 from ..transcripts import compact_transcript_items
-from ..transcripts import session_transcript_activity_state
 from ..transcripts import transcript_delta_result_state
 from . import conversation as yoagent_conversation
 from .actions import parse_yoagent_action_intent
@@ -62,28 +64,12 @@ YOAGENT_ACTION_RESULT_WAIT_SECONDS = 180.0
 YOAGENT_ACTION_RESULT_POLL_SECONDS = 1.0
 YOAGENT_ACTION_RESULT_MAX_CHARS = 6000
 YOAGENT_ACTION_AGENT_KINDS = {"claude", "codex"}
-YOAGENT_ACTION_ACCEPTING_SCREEN_KEYS = {"idle", "done", "needs-input", "input-draft"}
+YOAGENT_ACTION_ACCEPTING_SCREEN_KEYS = {"idle", "done", "input-draft"}
 YOAGENT_JOBS_STATE_KEY = "yoagent_jobs"
 YOAGENT_JOB_MAX_ITEMS = 200
 YOAGENT_JOB_POLL_SECONDS = 1.0
 YOAGENT_JOB_DEFAULT_TIMEOUT_MINUTES = 120
 YOAGENT_JOB_IDLE_QUIET_SECONDS = 3.0
-YOAGENT_IDLE_SUGGESTION_TEXTS = {
-    "commit the DYN_PARSER_DEBUG change",
-    "Summarize recent commits",
-}
-ANSI_SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
-
-
-def strip_ansi_sgr(text: str) -> str:
-    return ANSI_SGR_RE.sub("", text)
-
-
-def ansi_sgr_has_param(text: str, param: str) -> bool:
-    for match in ANSI_SGR_RE.finditer(text):
-        if param in {part for part in match.group(1).split(";") if part}:
-            return True
-    return False
 
 
 def normalized_prompt_state(prompt: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -755,36 +741,29 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
 
 
     def yoagent_action_pane_status(self, session: str, target_pane: str, discovered_sessions: dict[str, SessionInfo] | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
-        try:
-            visible_text = self.deps.tmux_capture_pane(target_pane, visible_only=True)
-            if visible_text is None:
-                prompt = self.deps.normalized_prompt_state()
-                prompt["error"] = "failed to capture pane"
-                return prompt, {"key": "disconnected", "text": "failed to capture pane"}
-            prompt_state = hybrid_approval_prompt_state(session, visible_text, prompt_source=self.auto_approve_prompt_source())
-            if prompt_state.get("visible") and prompt_state.get("type") == "bash":
-                pane_text = self.deps.tmux_capture_pane(target_pane)
-                prompt_state = hybrid_approval_prompt_state(session, visible_text, pane_text or visible_text, prompt_source=self.auto_approve_prompt_source())
-            screen_state = agent_screen_state(visible_text)
-            composer_text = self.deps.yoagent_visible_composer_text(self.yoagent_visible_composer_source(target_pane, visible_text))
-            if screen_state.get("key") == "idle" and composer_text:
-                screen_state = {
-                    "key": "input-draft",
-                    "text": "target input box already contains unsent text",
-                    "detected_text": composer_text,
-                }
-            if screen_state.get("key") == "idle":
-                infos = discovered_sessions
-                if infos is None:
-                    infos, _errors = self.deps.discover_sessions([session])
-                transcript_state = session_transcript_activity_state(infos.get(session))
-                if transcript_state.get("key") != "idle":
-                    screen_state = transcript_state
-            return self.deps.normalized_prompt_state(prompt_state), dict(screen_state)
-        except (OSError, subprocess.SubprocessError) as exc:
-            prompt = self.deps.normalized_prompt_state()
-            prompt["error"] = str(exc)
-            return prompt, {"key": "error", "text": str(exc)}
+        infos = discovered_sessions
+        if infos is None:
+            infos, _errors = self.deps.discover_sessions([session])
+
+        def prompt_classifier(prompt_target: str, visible_text: str, pane_text: str | None, prompt_source: str) -> dict[str, Any]:
+            return self.deps.hybrid_approval_prompt_state(prompt_target, visible_text, pane_text, prompt_source=prompt_source)
+
+        def screen_classifier(visible_text: str, pane_target: str | None) -> dict[str, Any]:
+            return dict(self.deps.agent_screen_state(visible_text, pane_target=pane_target))
+
+        state = classify_agent_pane(
+            target_pane,
+            session=session,
+            discovered_sessions=infos,
+            prompt_source=self.auto_approve_prompt_source(),
+            include_composer=True,
+            include_transcript_activity=True,
+            capture_func=self.deps.tmux_capture_pane,
+            capture_styled_func=self.deps.tmux_capture_pane_styled,
+            prompt_classifier=prompt_classifier,
+            screen_classifier=screen_classifier,
+        )
+        return self.deps.normalized_prompt_state(state.prompt), dict(state.screen)
 
 
     def yoagent_action_acceptance(self, target: dict[str, Any]) -> tuple[bool, str]:
@@ -802,6 +781,8 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             return True, "target input box has unsent text; YO!agent will clear it before sending"
         if screen_key in YOAGENT_ACTION_ACCEPTING_SCREEN_KEYS:
             return True, "target agent is accepting an AI prompt"
+        if screen_key == "needs-input":
+            return False, "target agent is asking a question; answer the question before sending a new prompt"
         if screen_key == "working":
             return False, "target agent is still working"
         if screen_key in {"approval", "needs-approval", "yolo-approval"}:
@@ -1302,99 +1283,26 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
 
 
     def yoagent_composer_text_is_idle_placeholder(self, text: str, *, prompt_suggestion: bool = False) -> bool:
-        candidate = " ".join(str(text or "").split()).strip()
-        if not candidate:
-            return False
-        if re.fullmatch(r'Try\s+(?:"[^"\n]{1,200}"|“[^“”\n]{1,200}”)', candidate):
-            return True
-        if re.fullmatch(r"Implement\s+\{[^{}\n]{1,80}\}", candidate):
-            return True
-        return prompt_suggestion and candidate in YOAGENT_IDLE_SUGGESTION_TEXTS
+        return composer_text_is_idle_placeholder(text, prompt_suggestion=prompt_suggestion)
 
 
     def yoagent_visible_composer_source(self, pane_target: str, visible_text: str = "") -> str:
-        try:
-            styled_text = self.deps.tmux_capture_pane_styled(pane_target, visible_only=True) or ""
-        except (OSError, subprocess.SubprocessError):
-            styled_text = ""
-        if styled_text and visible_text:
-            styled_plain = " ".join(strip_ansi_sgr(styled_text).split())
-            visible_plain = " ".join(str(visible_text or "").split())
-            if styled_plain != visible_plain:
-                styled_text = ""
-        return styled_text or str(visible_text or "")
+        return visible_composer_source(pane_target, visible_text, capture_styled_func=self.deps.tmux_capture_pane_styled)
 
 
     def yoagent_visible_composer_text(self, visible_text: str) -> str:
-        raw_lines = str(visible_text or "").splitlines()[-80:]
-        plain_raw_lines = [strip_ansi_sgr(line) for line in raw_lines]
-        lines = [line.replace("\xa0", " ") for line in plain_raw_lines]
-        footer_index = -1
-        for index in range(len(lines) - 1, -1, -1):
-            stripped = lines[index].strip()
-            if stripped.startswith(("▶▶", "⏵⏵", "gpt-", "claude ")):
-                footer_index = index
-                break
-        if footer_index < 0:
-            return ""
-        prompt_index = -1
-        first_line = ""
-        prompt_suggestion = False
-        start_index = max(0, footer_index - 12)
-        for index in range(footer_index - 1, start_index - 1, -1):
-            raw_line = raw_lines[index]
-            plain_raw_line = plain_raw_lines[index]
-            line = lines[index]
-            match = re.match(r"^\s*[❯›>](?P<gap>[ \xa0]+)(?P<text>\S.*)$", plain_raw_line)
-            if not match:
-                continue
-            if re.match(r"^\s*[❯›>]\s*\d+[.:]\s+\S", line):
-                continue
-            prompt_index = index
-            first_line = match.group("text").replace("\xa0", " ").strip()
-            prompt_suggestion = "\xa0" in match.group("gap") or ansi_sgr_has_param(raw_line, "2")
-            break
-        if prompt_index < 0 or not first_line:
-            return ""
-        block = [first_line]
-        for line in lines[prompt_index + 1:footer_index]:
-            stripped = line.strip()
-            if re.match(r"^[─━╌╍]{3,}$", stripped):
-                break
-            if stripped.startswith(("▶▶", "⏵⏵", "new task?", "gpt-", "claude ")):
-                break
-            if stripped.startswith(("●", "✻", "⎿", "⤷")) or re.match(r"^(Ran|Bash|Write|Read|Edit|Update|Search)\b", stripped):
-                return ""
-            block.append(stripped)
-        parts = [part for part in block if part]
-        composer_text = " ".join(parts).strip()
-        if len(parts) == 1 and self.deps.yoagent_composer_text_is_idle_placeholder(composer_text, prompt_suggestion=prompt_suggestion):
-            return ""
-        return composer_text
+        return visible_composer_text(visible_text)
 
 
     def yoagent_text_still_in_composer(self, target: dict[str, Any], text: str, wait_seconds: float = 0.8, poll_seconds: float = 0.1) -> bool:
-        pane_target = str(target.get("pane_target") or target.get("session") or "").strip()
-        needle = " ".join(str(text or "").split())
-        if not pane_target or not needle:
-            return False
-        deadline = time.monotonic() + max(0.0, wait_seconds)
-        pause = threading.Event()
-        while True:
-            try:
-                visible_text = self.yoagent_visible_composer_source(pane_target, self.deps.tmux_capture_pane(pane_target, visible_only=True) or "")
-            except (OSError, subprocess.SubprocessError):
-                return False
-            pending = " ".join(self.deps.yoagent_visible_composer_text(visible_text).split())
-            if not pending:
-                return False
-            prefix_len = min(120, len(needle))
-            if needle in pending or pending in needle or needle[:prefix_len] in pending:
-                if time.monotonic() >= deadline:
-                    return True
-                pause.wait(min(max(0.01, poll_seconds), max(0.0, deadline - time.monotonic())))
-                continue
-            return False
+        return text_still_in_composer(
+            target,
+            text,
+            wait_seconds=wait_seconds,
+            poll_seconds=poll_seconds,
+            capture_func=self.deps.tmux_capture_pane,
+            capture_styled_func=self.deps.tmux_capture_pane_styled,
+        )
 
 
     def yoagent_clear_target_composer(
@@ -1404,47 +1312,14 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         wait_seconds: float = 0.8,
         poll_seconds: float = 0.1,
     ) -> dict[str, Any]:
-        pane_target = str(target.get("pane_target") or target.get("session") or "").strip()
-        if not pane_target:
-            return {"ok": False, "cleared": False, "error": "target pane is missing"}
-        try:
-            visible_text = self.yoagent_visible_composer_source(pane_target, self.deps.tmux_capture_pane(pane_target, visible_only=True) or "")
-        except (OSError, subprocess.SubprocessError) as exc:
-            return {"ok": False, "cleared": False, "error": str(exc)}
-        detected = self.deps.yoagent_visible_composer_text(visible_text)
-        if self.deps.yoagent_composer_text_is_idle_placeholder(detected):
-            return {"ok": True, "cleared": False, "detected_text": ""}
-        if not detected:
-            return {"ok": True, "cleared": False, "detected_text": ""}
-        result = self.deps.tmux_clear_input(pane_target)
-        if result.returncode != 0:
-            return {
-                "ok": False,
-                "cleared": False,
-                "detected_text": detected,
-                "error": cmd_error(result, "tmux send-keys C-u failed"),
-            }
-        deadline = time.monotonic() + max(0.0, wait_seconds)
-        pause = threading.Event()
-        while True:
-            try:
-                visible_text = self.yoagent_visible_composer_source(pane_target, self.deps.tmux_capture_pane(pane_target, visible_only=True) or "")
-            except (OSError, subprocess.SubprocessError) as exc:
-                return {"ok": False, "cleared": False, "detected_text": detected, "error": str(exc)}
-            remaining = self.deps.yoagent_visible_composer_text(visible_text)
-            if self.deps.yoagent_composer_text_is_idle_placeholder(remaining):
-                return {"ok": True, "cleared": True, "detected_text": detected, "remaining_text": remaining, "remaining_placeholder": True}
-            if not remaining:
-                return {"ok": True, "cleared": True, "detected_text": detected}
-            if time.monotonic() >= deadline:
-                return {
-                    "ok": False,
-                    "cleared": False,
-                    "detected_text": detected,
-                    "remaining_text": remaining,
-                    "error": "target input box did not clear",
-                }
-            pause.wait(min(max(0.01, poll_seconds), max(0.0, deadline - time.monotonic())))
+        return clear_composer(
+            target,
+            wait_seconds=wait_seconds,
+            poll_seconds=poll_seconds,
+            capture_func=self.deps.tmux_capture_pane,
+            capture_styled_func=self.deps.tmux_capture_pane_styled,
+            clear_func=self.deps.tmux_clear_input,
+        ).as_dict()
 
 
     def preview_yoagent_send_action(self, payload: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
@@ -1484,9 +1359,9 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         target = preview.get("target") if isinstance(preview.get("target"), dict) else {}
         stale_keys = ["pane_target", "agent_kind", "agent_session_id"]
         if any(str(current.get(key) or "") != str(target.get(key) or "") for key in stale_keys):
-            return {"preview_id": preview_id, "session": preview.get("session"), "error": "action target changed; create a fresh preview"}, HTTPStatus.CONFLICT
+            return {"preview_id": preview_id, "session": preview.get("session"), "reason_code": "stale-target", "error": "action target changed; create a fresh preview"}, HTTPStatus.CONFLICT
         if normalize_yoagent_transport_id(str(current.get("transport") or "")) != normalize_yoagent_transport_id(str(target.get("transport") or "")):
-            return {"preview_id": preview_id, "session": preview.get("session"), "error": "action target changed; create a fresh preview"}, HTTPStatus.CONFLICT
+            return {"preview_id": preview_id, "session": preview.get("session"), "reason_code": "stale-target", "error": "action target changed; create a fresh preview"}, HTTPStatus.CONFLICT
         target = {
             **target,
             "agent_transcript": current.get("agent_transcript") or target.get("agent_transcript") or "",
@@ -1500,68 +1375,65 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         transport = normalize_yoagent_transport_id(str(target.get("transport") or ""))
         transport_provider = self.yoagent_transports.get(transport)
         return_result = bool(preview.get("return_result") or payload.get("return_result"))
-        clear_result: dict[str, Any] = {}
         screen = current.get("screen") if isinstance(current.get("screen"), dict) else {}
-        if transport == TMUX_LEGACY_TRANSPORT_ID and str(screen.get("key") or "") == "input-draft":
-            clear_result = self.deps.yoagent_clear_target_composer(target)
-            cleared_text_preview = redacted_action_preview(str(clear_result.get("detected_text") or ""))
-            if not clear_result.get("ok"):
-                self.log_event(str(preview.get("session") or ""), "yoagent_action_clear_failed", f"YO!agent could not clear input before send to {preview.get('session')}", {
-                    "preview_id": preview_id,
-                    "transport": transport,
-                    "cleared_text_preview": cleared_text_preview,
-                    "remaining_text_preview": redacted_action_preview(str(clear_result.get("remaining_text") or "")),
-                })
-                return {
-                    "preview_id": preview_id,
-                    "session": preview.get("session"),
-                    "transport": transport,
-                    "transport_label": transport_provider.label,
-                    "sent": False,
-                    "cleared_input": False,
-                    "cleared_text_preview": cleared_text_preview,
-                    "error": clear_result.get("error") or "target input box did not clear",
-                }, HTTPStatus.CONFLICT
         result_marker = self.deps.yoagent_action_result_marker(target) if return_result else {}
+        clear_existing = transport == TMUX_LEGACY_TRANSPORT_ID and str(screen.get("key") or "") == "input-draft"
+        verify_submit = transport == TMUX_LEGACY_TRANSPORT_ID and preview.get("submit") is not False
         send_result = transport_provider.send(
             target,
             text,
             submit=preview.get("submit") is not False,
             tmux_paste_text=self.deps.tmux_paste_text,
+            tmux_capture_pane=self.deps.tmux_capture_pane,
+            tmux_capture_pane_styled=self.deps.tmux_capture_pane_styled,
+            tmux_clear_input=self.deps.tmux_clear_input,
+            clear_existing=clear_existing,
+            verify_submit=verify_submit,
         ).as_dict()
         if not send_result.get("ok"):
-            return {
+            clear_result = send_result.get("clear") if isinstance(send_result.get("clear"), dict) else {}
+            reason_code = str(send_result.get("reason_code") or "")
+            if reason_code == "draft-unclearable":
+                self.log_event(str(preview.get("session") or ""), "yoagent_action_clear_failed", f"YO!agent could not clear input before send to {preview.get('session')}", {
+                    "preview_id": preview_id,
+                    "transport": transport,
+                    "cleared_text_preview": redacted_action_preview(str(clear_result.get("detected_text") or "")),
+                    "remaining_text_preview": redacted_action_preview(str(clear_result.get("remaining_text") or "")),
+                })
+            elif reason_code == "unsubmitted":
+                with self.yoagent_action_lock:
+                    self.yoagent_action_previews.pop(preview_id, None)
+                self.log_event(str(preview.get("session") or ""), "yoagent_action_unsubmitted", f"YO!agent send to {preview.get('session')} did not submit", {
+                    "preview_id": preview_id,
+                    "transport": transport,
+                    "text_preview": redacted_action_preview(text),
+                })
+            conflict_reasons = {"approval", "busy", "disconnected", "draft-clearable", "draft-unclearable", "error", "needs-input", "not-agent", "unsubmitted"}
+            status_code = HTTPStatus.CONFLICT if reason_code in conflict_reasons else HTTPStatus.INTERNAL_SERVER_ERROR
+            response = {
                 "preview_id": preview_id,
                 "session": preview.get("session"),
                 "transport": transport,
                 "transport_label": send_result.get("transport_label") or transport_provider.label,
-                "error": send_result.get("error") or "transport send failed",
-            }, HTTPStatus.INTERNAL_SERVER_ERROR
-        if transport == TMUX_LEGACY_TRANSPORT_ID and preview.get("submit") is not False and self.deps.yoagent_text_still_in_composer(target, text):
-            with self.yoagent_action_lock:
-                self.yoagent_action_previews.pop(preview_id, None)
-            error = "pasted text is still in the target input box after Return; target did not submit it"
-            self.log_event(str(preview.get("session") or ""), "yoagent_action_unsubmitted", f"YO!agent send to {preview.get('session')} did not submit", {
-                "preview_id": preview_id,
-                "transport": transport,
-                "text_preview": redacted_action_preview(text),
-            })
-            return {
-                "preview_id": preview_id,
-                "session": preview.get("session"),
-                "transport": transport,
-                "transport_label": transport_provider.label,
                 "sent": False,
-                "pasted": True,
-                "error": error,
-            }, HTTPStatus.CONFLICT
+                "error": send_result.get("error") or "transport send failed",
+            }
+            if send_result.get("pasted"):
+                response["pasted"] = True
+            if reason_code:
+                response["reason_code"] = reason_code
+            if clear_result:
+                response["cleared_input"] = bool(clear_result.get("cleared"))
+                response["cleared_text_preview"] = redacted_action_preview(str(clear_result.get("detected_text") or ""))
+            return response, status_code
+        clear_result = send_result.get("clear") if isinstance(send_result.get("clear"), dict) else {}
         with self.yoagent_action_lock:
             self.yoagent_action_previews.pop(preview_id, None)
         self.log_event(str(preview.get("session") or ""), "yoagent_action_executed", f"YO!agent sent action to {preview.get('session')}", {
             "preview_id": preview_id,
             "transport": transport,
             "text_preview": redacted_action_preview(text),
-            "cleared_input": bool(clear_result.get("cleared")),
+            "cleared_input": bool(send_result.get("cleared")),
             "cleared_text_preview": redacted_action_preview(str(clear_result.get("detected_text") or "")),
         })
         response = {
@@ -1576,7 +1448,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             "return_result": return_result,
             "result_marker": result_marker,
         }
-        if clear_result.get("cleared"):
+        if send_result.get("cleared"):
             response["cleared_input"] = True
             response["cleared_text_preview"] = redacted_action_preview(str(clear_result.get("detected_text") or ""))
         response["answer"] = self.deps.yoagent_action_sent_answer(preview, response)
@@ -1715,7 +1587,8 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                 response["hidden_thinking_removed"] = True
             response["details"] = yoagent_response_details(response)
             if answer_text:
-                self.record_yoagent_message("assistant", answer_text, details=str(response.get("details") or ""))
+                stream_fields = self.deps.yoagent_stream_auxiliary_message_fields(stream_id)
+                self.record_yoagent_message("assistant", answer_text, details=str(response.get("details") or ""), **stream_fields)
                 self.publish_yoagent_conversation_changed("yoagent_startup")
             response["conversation"] = self.yoagent_conversation_payload()
             if not model_answered:
@@ -1781,7 +1654,8 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             response["details"] = "\n".join(part for part in [details, generated_details] if part).strip()
             actions = response.get("actions") if isinstance(response.get("actions"), list) else []
             if answer_text:
-                self.record_yoagent_message("assistant", answer_text, actions=actions, details=str(response.get("details") or ""))
+                stream_fields = self.deps.yoagent_stream_auxiliary_message_fields(str(response.get("stream_id") or ""))
+                self.record_yoagent_message("assistant", answer_text, actions=actions, details=str(response.get("details") or ""), **stream_fields)
             response["conversation"] = self.yoagent_conversation_payload()
             return response, HTTPStatus.OK
 

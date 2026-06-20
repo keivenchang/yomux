@@ -715,7 +715,13 @@ def test_auto_approve_roster_uses_live_pane_working_signal(monkeypatch):
         return pane_text.get(session, "")
 
     monkeypatch.setattr(app_module, "tmux_capture_pane", fake_capture)
-    monkeypatch.setattr(app_module, "agent_screen_state", lambda text: {"key": "approval" if text == "approval pane" else "working" if text == "working pane" else "idle", "text": text})
+    screen_calls = []
+
+    def fake_screen_state(text, **kwargs):
+        screen_calls.append((text, kwargs.get("pane_target")))
+        return {"key": "approval" if text == "approval pane" else "working" if text == "working pane" else "idle", "text": text}
+
+    monkeypatch.setattr(app_module, "agent_screen_state", fake_screen_state)
     monkeypatch.setattr(
         app_module,
         "approval_prompt_state",
@@ -734,6 +740,7 @@ def test_auto_approve_roster_uses_live_pane_working_signal(monkeypatch):
     assert status == HTTPStatus.OK
     assert discover_calls == [("5", "6")]  # discovered once for the whole roster, not per session
     assert {session for session, _visible in capture_calls} == {"5", "6:1.0"}
+    assert screen_calls == [("working pane", "5"), ("approval pane", "6:1.0")]
     assert all(visible_only is True for _session, visible_only in capture_calls)  # cheap visible-only capture only
     assert payload["sessions"]["5"]["screen"]["key"] == "working"  # live working pane spins
     assert payload["sessions"]["6"]["screen"]["key"] == "approval"  # pending approval lights the roster
@@ -1316,7 +1323,7 @@ def test_prompt_and_screen_status_captures_discovered_agent_pane(monkeypatch):
 
     monkeypatch.setattr(app_module, "tmux_capture_pane", fake_capture)
     monkeypatch.setattr(app_module, "hybrid_approval_prompt_state", fake_hybrid)
-    monkeypatch.setattr(app_module, "agent_screen_state", lambda _text: {"key": "approval", "text": "Do you want to proceed?"})
+    monkeypatch.setattr(app_module, "agent_screen_state", lambda _text, **_kwargs: {"key": "approval", "text": "Do you want to proceed?"})
     webapp = app_module.TmuxWebtermApp(["6"])
     try:
         prompt, screen = webapp.prompt_and_screen_status("6", discovered_sessions={"6": info})
@@ -2378,7 +2385,7 @@ def test_yoagent_chat_sends_to_accepting_agent_pane_without_extra_confirmation(m
     assert pastes == [("%6", "tell me the date", True)]
 
 
-def test_yoagent_chat_sends_to_agent_waiting_for_input(monkeypatch):
+def test_yoagent_chat_does_not_send_to_agent_waiting_for_question_input(monkeypatch):
     pane = PaneInfo(
         session="1",
         window="1",
@@ -2441,12 +2448,12 @@ def test_yoagent_chat_sends_to_agent_waiting_for_input(monkeypatch):
 
     assert status == HTTPStatus.OK
     assert payload["backend_used"] == "yolomux"
-    assert "accepting an AI prompt" in payload["answer"]
-    assert "I am sending this exact prompt" in payload["answer"]
-    assert "```text\nwhat have you done today?\n```" in payload["answer"]
+    assert "did not send anything" in payload["answer"]
+    assert "asking a question" in payload["answer"]
+    assert "I am sending this exact prompt" not in payload["answer"]
     assert "ask session 1 what it has done today" not in payload["answer"]
     assert payload["actions"] == []
-    assert pastes == [("%1", "what have you done today?", True)]
+    assert pastes == []
 
 
 def test_yoagent_chat_sends_and_starts_background_result_watch(monkeypatch):
@@ -3532,7 +3539,15 @@ def test_yoagent_send_does_not_claim_success_when_text_remains_in_composer(monke
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"1": info}, []))
     monkeypatch.setattr(webapp, "yoagent_action_pane_status", lambda session, target, **_kwargs: ({}, {"key": "idle", "text": ""}))
     monkeypatch.setattr(app_module, "tmux_paste_text", lambda target, text, submit=False: SimpleNamespace(returncode=0, stdout="", stderr=""))
-    monkeypatch.setattr(webapp, "yoagent_text_still_in_composer", lambda target, text: True)
+    still_in_composer = "\n".join([
+        "new task? /clear to save 193.6k tokens",
+        "────────────────────────────────────────────────────────────────",
+        "❯ Use this context: hello Task: answer.",
+        "────────────────────────────────────────────────────────────────",
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+    ])
+    monkeypatch.setattr(app_module, "tmux_capture_pane", lambda target, visible_only=False: still_in_composer)
+    monkeypatch.setattr(app_module, "tmux_capture_pane_styled", lambda target, visible_only=False: "")
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
 
     try:
@@ -3546,8 +3561,57 @@ def test_yoagent_send_does_not_claim_success_when_text_remains_in_composer(monke
     assert result_status == HTTPStatus.CONFLICT
     assert result["sent"] is False
     assert result["pasted"] is True
+    assert result["reason_code"] == "unsubmitted"
     assert "still in the target input box" in result["error"]
     assert conversation["messages"] == []
+
+
+@pytest.mark.parametrize(
+    ("changed_key", "changed_value"),
+    [
+        ("pane_target", "%2"),
+        ("agent_kind", "codex"),
+        ("agent_session_id", "agent-session-2"),
+        ("transport", "codex-sdk"),
+    ],
+)
+def test_yoagent_send_revalidates_target_identity_before_paste(monkeypatch, changed_key, changed_value):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    base_target = {
+        "session": "1",
+        "pane_target": "%1",
+        "agent_kind": "claude",
+        "agent_session_id": "agent-session-1",
+        "agent_transcript": "/tmp/claude-session-1.jsonl",
+        "transport": "tmux-legacy",
+        "transport_label": "legacy tmux pane paste + Return",
+        "transport_kind": "terminal",
+        "prompt": {},
+        "screen": {"key": "idle", "text": ""},
+    }
+    preview_id = f"preview-stale-{changed_key}"
+    webapp.yoagent_action_previews[preview_id] = {
+        "id": preview_id,
+        "status": "ready",
+        "session": "1",
+        "text": "what time is it?",
+        "submit": True,
+        "created_ts": app_module.time.time(),
+        "target": dict(base_target),
+    }
+    current_target = {**base_target, changed_key: changed_value, "screen": {"key": "idle", "text": ""}}
+    monkeypatch.setattr(webapp, "yoagent_action_target", lambda _session: (current_target, HTTPStatus.OK))
+    monkeypatch.setattr(webapp, "yoagent_action_acceptance", lambda _target: (True, "target agent is accepting an AI prompt"))
+    monkeypatch.setattr(app_module, "tmux_paste_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("stale target must not receive paste")))
+
+    try:
+        result, status = webapp.execute_yoagent_send_action({"preview_id": preview_id})
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.CONFLICT
+    assert result["reason_code"] == "stale-target"
+    assert result["error"] == "action target changed; create a fresh preview"
 
 
 def test_yoagent_action_preview_allows_existing_target_composer_text_with_clear(monkeypatch):
@@ -3722,13 +3786,16 @@ def test_yoagent_send_refuses_when_existing_draft_does_not_clear(monkeypatch):
         "screen": {"key": "input-draft", "text": "target input box already contains unsent text", "detected_text": "old draft"},
     }
     monkeypatch.setattr(webapp, "yoagent_action_target", lambda session: (target, HTTPStatus.OK))
-    monkeypatch.setattr(webapp, "yoagent_clear_target_composer", lambda *_args, **_kwargs: {
-        "ok": False,
-        "cleared": False,
-        "detected_text": "old draft",
-        "remaining_text": "old draft",
-        "error": "target input box did not clear",
-    })
+    draft_text = "\n".join([
+        "new task? /clear to save 193.6k tokens",
+        "────────────────────────────────────────────────────────────────",
+        "❯ old draft",
+        "────────────────────────────────────────────────────────────────",
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+    ])
+    monkeypatch.setattr(app_module, "tmux_capture_pane", lambda target, visible_only=False: draft_text)
+    monkeypatch.setattr(app_module, "tmux_capture_pane_styled", lambda target, visible_only=False: "")
+    monkeypatch.setattr(app_module, "tmux_clear_input", lambda target: SimpleNamespace(returncode=1, stdout="", stderr="target input box did not clear"))
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
     monkeypatch.setattr(app_module, "tmux_paste_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("uncleared draft must not receive paste")))
 
@@ -3743,6 +3810,7 @@ def test_yoagent_send_refuses_when_existing_draft_does_not_clear(monkeypatch):
     assert status == HTTPStatus.CONFLICT
     assert result["sent"] is False
     assert result["cleared_input"] is False
+    assert result["reason_code"] == "draft-unclearable"
     assert result["cleared_text_preview"] == "old draft"
     assert "did not clear" in result["error"]
 
@@ -4279,7 +4347,7 @@ def test_yoagent_composer_text_ignores_numbered_choice_and_approval_rows(monkeyp
     webapp = app_module.TmuxWebtermApp(["1"])
     monkeypatch.setattr(app_module, "tmux_capture_pane", lambda target, visible_only=False: approval_text)
     monkeypatch.setattr(app_module, "hybrid_approval_prompt_state", lambda *_args, **_kwargs: {"visible": True, "type": "bash", "text": "Would you like to run the following command?", "action": "python3 tools/check.py"})
-    monkeypatch.setattr(app_module, "agent_screen_state", lambda _text: {"key": "approval", "text": "Would you like to run the following command?"})
+    monkeypatch.setattr(app_module, "agent_screen_state", lambda _text, **_kwargs: {"key": "approval", "text": "Would you like to run the following command?"})
     info = SessionInfo(session="1", panes=[], selected_pane=None, agents=[])
     try:
         assert webapp.yoagent_visible_composer_text(numbered_choice) == ""
@@ -4642,6 +4710,103 @@ def test_yoagent_wait_then_send_job_fires_when_target_accepts(monkeypatch):
     assert jobs["jobs"][0]["result_marker"] == {"transcript": "/tmp/codex-session-6.jsonl", "size": 10}
     assert jobs["jobs"][0]["result"]["send"]["ok"] is True
     assert any(item[0] == "yoagent_jobs_changed" and item[1].get("reason") == "yoagent_job_fired" for item in events)
+
+
+def fake_agent_tui_send_result():
+    return SimpleNamespace(
+        ok=True,
+        sent=True,
+        pasted=True,
+        cleared=False,
+        reason_code="submitted",
+        returncode=0,
+        error="",
+        clear_result=SimpleNamespace(as_dict=lambda: {}),
+    )
+
+
+def test_yoagent_direct_send_uses_tmux_legacy_agent_tui_send(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["6"])
+    target = {
+        "session": "6",
+        "pane_target": "%6",
+        "agent_kind": "codex",
+        "agent_model": "gpt-5",
+        "agent_session_id": "codex-session-6",
+        "agent_transcript": "/tmp/codex-session-6.jsonl",
+        "transport": "pane-paste",
+        "prompt": {},
+        "screen": {"key": "idle", "text": ""},
+    }
+    send_calls = []
+    monkeypatch.setattr(webapp, "yoagent_action_target", lambda _session: (dict(target), HTTPStatus.OK))
+    monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        transport_module,
+        "send_prompt",
+        lambda send_target, text, **kwargs: send_calls.append((send_target, text, kwargs)) or fake_agent_tui_send_result(),
+    )
+    monkeypatch.setattr(app_module, "tmux_paste_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("direct send must go through agent_tui send_prompt")))
+
+    try:
+        preview, preview_status = webapp.create_yoagent_action_preview({"type": "send_prompt", "session": "6", "text": "date"})
+        result, status = webapp.execute_yoagent_send_action({"preview_id": preview["id"]})
+    finally:
+        webapp.control_server.stop()
+
+    assert preview_status == HTTPStatus.OK
+    assert status == HTTPStatus.OK
+    assert result["sent"] is True
+    assert len(send_calls) == 1
+    send_target, text, kwargs = send_calls[0]
+    assert send_target["pane_target"] == "%6"
+    assert text == "date"
+    assert kwargs["clear_existing"] is False
+    assert kwargs["verify_submit"] is True
+
+
+def test_yoagent_wait_then_send_job_uses_tmux_legacy_agent_tui_send(monkeypatch):
+    install_fake_yolomux_state(monkeypatch)
+    events = []
+    webapp = app_module.TmuxWebtermApp(["6"])
+    target = {
+        "session": "6",
+        "pane_target": "%6",
+        "agent_kind": "codex",
+        "agent_model": "gpt-5",
+        "agent_session_id": "codex-session-6",
+        "agent_transcript": "/tmp/codex-session-6.jsonl",
+        "transport": "pane-paste",
+        "prompt": {},
+        "screen": {"key": "idle", "text": ""},
+    }
+    send_calls = []
+    monkeypatch.setattr(webapp, "yoagent_action_target", lambda _session: (dict(target), HTTPStatus.OK))
+    monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {"time": f"event-{len(events)}"})
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})) or {"type": event_type})
+    monkeypatch.setattr(
+        transport_module,
+        "send_prompt",
+        lambda send_target, text, **kwargs: send_calls.append((send_target, text, kwargs)) or fake_agent_tui_send_result(),
+    )
+    monkeypatch.setattr(app_module, "tmux_paste_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("wait-then-send must go through agent_tui send_prompt")))
+
+    try:
+        payload, status = webapp.create_yoagent_job({"type": "wait_then_send", "session": "6", "text": "date", "quiet_seconds": 0})
+        fired = webapp.poll_yoagent_jobs_once()
+        jobs, _jobs_status = webapp.yoagent_jobs_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert fired == [payload["job"]["id"]]
+    assert jobs["jobs"][0]["status"] == "fired"
+    assert jobs["jobs"][0]["transport"] == "tmux-legacy"
+    assert len(send_calls) == 1
+    send_target, text, kwargs = send_calls[0]
+    assert send_target["pane_target"] == "%6"
+    assert text == "date"
+    assert kwargs["verify_submit"] is True
 
 
 def test_yoagent_risky_chat_send_requires_preview_confirmation_and_redacts_secret(monkeypatch):
@@ -5020,7 +5185,7 @@ def test_yoagent_chat_auto_runs_logged_in_agent(monkeypatch):
     assert payload["answer"] == "codex answer"
 
 
-def test_yoagent_codex_backend_reuses_persistent_app_server(monkeypatch):
+def test_yoagent_codex_backend_reuses_persistent_app_server(monkeypatch, tmp_path):
     messages = [
         {"jsonrpc": "2.0", "id": "initialize-1", "result": {}},
         {"jsonrpc": "2.0", "id": "thread-1", "result": {"thread": {"id": "thread-1"}}},
@@ -5044,6 +5209,8 @@ def test_yoagent_codex_backend_reuses_persistent_app_server(monkeypatch):
         "errors": [],
     }
     webapp = app_module.TmuxWebtermApp(["5"])
+    codex_home = tmp_path / "codex-home"
+    monkeypatch.setenv("YOLOMUX_CODEX_HOME", str(codex_home))
     monkeypatch.setattr(app_module.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
     monkeypatch.setattr(transport_module.subprocess, "Popen", fake_popen)
     try:
@@ -5058,13 +5225,15 @@ def test_yoagent_codex_backend_reuses_persistent_app_server(monkeypatch):
     assert second == "second answer"
     assert first_reason == ""
     assert second_reason == ""
-    assert len(calls) == 1
-    assert calls[0][0][:4] == ["codex", "app-server", "--listen", "stdio://"]
-    assert 'model_reasoning_effort="low"' in calls[0][0]
-    assert 'service_tier="fast"' in calls[0][0]
-    assert calls[0][1]["env"]["CODEX_HOME"].endswith("codex-home")
-    assert calls[0][1]["env"]["TERM"] == "xterm-256color"
-    assert calls[0][1]["env"]["NO_COLOR"] == "1"
+    codex_app_server_calls = [call for call in calls if call[0][:4] == ["codex", "app-server", "--listen", "stdio://"]]
+    assert len(codex_app_server_calls) == 1
+    launch_args, launch_kwargs = codex_app_server_calls[0]
+    assert launch_args[:4] == ["codex", "app-server", "--listen", "stdio://"]
+    assert 'model_reasoning_effort="low"' in launch_args
+    assert 'service_tier="fast"' in launch_args
+    assert launch_kwargs["env"]["CODEX_HOME"] == str(codex_home)
+    assert launch_kwargs["env"]["TERM"] == "xterm-256color"
+    assert launch_kwargs["env"]["NO_COLOR"] == "1"
     assert first_status["transport"] == "codex-app-server"
     assert first_status["persistent"] is True
     assert first_status["process_started"] is True
@@ -5215,6 +5384,84 @@ def test_yoagent_stream_hidden_thinking_is_not_exposed():
     assert hidden is True
 
 
+def test_yoagent_stream_callback_separates_answer_from_auxiliary_events(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["5"])
+    events = []
+    stored_messages = []
+    webapp.publish_client_event = lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {}))
+    monkeypatch.setattr(app_module.yoagent_conversation, "append_message", lambda message: stored_messages.append(message) or message)
+    try:
+        callback = webapp.yoagent_stream_callback("stream-1", "codex")
+        callback({"kind": "hidden_work_delta", "text": "Checking repo state"})
+        callback({"kind": "tool_call_started", "tool_name": "command", "command": "python3 tools/check.py"})
+        callback({"kind": "assistant_delta", "text": "Visible "})
+        callback({"kind": "assistant_delta", "text": "answer"})
+        callback({"kind": "tool_call_finished", "tool_name": "command", "text": "passed"})
+        callback({"kind": "turn_done"})
+        webapp.record_yoagent_message("assistant", "Visible answer", **webapp.yoagent_stream_auxiliary_message_fields("stream-1"))
+    finally:
+        webapp.control_server.stop()
+
+    payloads = [payload for event_type, payload in events if event_type == "yoagent_stream_delta"]
+    assert payloads[-1]["content"] == "Visible answer"
+    assert payloads[-1]["auxiliary_done"] is True
+    assert payloads[-1]["auxiliary_preview"] == "tool done: command: passed"
+    assert payloads[-1]["auxiliary_lines"] == [
+        "thinking: Checking repo state",
+        "tool start: command: python3 tools/check.py",
+        "tool done: command: passed",
+    ]
+    assert stored_messages[-1]["auxiliaryPreview"] == "tool done: command: passed"
+    assert "thinking: Checking repo state" in stored_messages[-1]["auxiliaryText"]
+    assert stored_messages[-1]["auxiliaryDone"] is True
+
+
+def test_yoagent_conversation_persists_auxiliary_stream_fields(tmp_path):
+    path = tmp_path / "conversation.jsonl"
+
+    written = app_module.yoagent_conversation.append_message(
+        {
+            "role": "assistant",
+            "content": "Visible answer",
+            "auxiliaryLines": ["thinking: Checking repo state", "tool done: command: passed"],
+            "auxiliaryPreview": "tool done: command: passed",
+            "auxiliaryDone": True,
+            "auxiliaryTruncated": True,
+        },
+        path=path,
+    )
+    loaded = app_module.yoagent_conversation.load_messages(path=path)
+
+    assert written is not None
+    assert written["auxiliaryLines"] == ["thinking: Checking repo state", "tool done: command: passed"]
+    assert written["auxiliaryText"] == "thinking: Checking repo state\ntool done: command: passed"
+    assert written["auxiliaryPreview"] == "tool done: command: passed"
+    assert written["auxiliaryDone"] is True
+    assert written["auxiliaryTruncated"] is True
+    assert loaded == [written]
+
+
+def test_yoagent_stream_callback_bounds_auxiliary_history():
+    webapp = app_module.TmuxWebtermApp(["5"])
+    events = []
+    webapp.publish_client_event = lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {}))
+    try:
+        callback = webapp.yoagent_stream_callback("stream-long", "codex")
+        for index in range(505):
+            callback({"kind": "tool_call_delta", "tool_name": "command", "text": f"line {index}"})
+        callback({"kind": "turn_done"})
+        fields = webapp.yoagent_stream_auxiliary_message_fields("stream-long")
+    finally:
+        webapp.control_server.stop()
+
+    payloads = [payload for event_type, payload in events if event_type == "yoagent_stream_delta"]
+    assert payloads[-1]["auxiliary_truncated"] is True
+    assert len(payloads[-1]["auxiliary_lines"]) == 200
+    assert fields["auxiliary_truncated"] is True
+    assert len(fields["auxiliary_lines"]) == 500
+    assert fields["auxiliary_lines"][0] == "tool output: command: line 5"
+
+
 def test_yoagent_cli_sessions_persist_across_restart(monkeypatch):
     activity = {
         "generated_at": "2026-05-31T00:00:00+00:00",
@@ -5333,8 +5580,9 @@ def test_codex_event_session_id_extracts_common_shapes():
     assert app_module.codex_event_session_id({"thread": {"id": "nested"}}) == "nested"
 
 
-def test_yoagent_codex_cli_persists_then_resumes(monkeypatch):
+def test_yoagent_codex_cli_persists_then_resumes(monkeypatch, tmp_path):
     webapp = app_module.TmuxWebtermApp(["5"])
+    codex_home = tmp_path / "codex-home"
     calls = []
     envs = []
 
@@ -5348,6 +5596,7 @@ def test_yoagent_codex_cli_persists_then_resumes(monkeypatch):
         return SimpleNamespace(stdout=stdout, stderr="", returncode=0)
 
     monkeypatch.setattr(app_module.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setenv("YOLOMUX_CODEX_HOME", str(codex_home))
     monkeypatch.setattr(app_module.subprocess, "run", fake_run)
     try:
         settings = {"codex_model": "gpt-5.4-mini", "codex_effort": "low"}
@@ -5375,7 +5624,7 @@ def test_yoagent_codex_cli_persists_then_resumes(monkeypatch):
     # the resume call must NOT pass them — passing them raised "unexpected argument '--sandbox'".
     assert "--sandbox" not in calls[1]
     assert "--cd" not in calls[1]
-    assert envs[0]["CODEX_HOME"].endswith("codex-home")
+    assert envs[0]["CODEX_HOME"] == str(codex_home)
     assert envs[0]["TERM"] == "xterm-256color"
     assert envs[0]["NO_COLOR"] == "1"
 

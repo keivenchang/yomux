@@ -133,6 +133,41 @@ async function runTabberSuite() {
     assert.equal(api.currentSessionActionTarget(), '2', 'Tabber Enter opens the selected tmux session');
   });
 
+  test('Tabber displays home-relative paths with the shared compact home formatter', () => {
+    const api = loadYolomux('', ['7', '8', '9', '10']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.leafNode('main');
+    slots.main = api.paneStateWithTabs(['7', '8', '9', '10'], '7');
+    api.setLayoutSlotsForTest(slots);
+    api.setFocusedPanelItem('7');
+
+    const agentPane = path => [{window: '0', pane: '0', window_active: true, active: true, process_label: 'claude', command: 'claude', current_path: path}];
+    api.setTranscriptInfoForTest('7', {project: {git: {root: '/home/test/project'}}, panes: agentPane('/home/test/project')});
+    api.setTranscriptInfoForTest('8', {project: {git: {root: '/home/test'}}, panes: agentPane('/home/test')});
+    api.setTranscriptInfoForTest('9', {project: {git: {root: '/etc/yolo'}}, panes: agentPane('/etc/yolo')});
+    api.setTranscriptInfoForTest('10', {project: {git: {root: '~/already'}}, panes: agentPane('~/already')});
+    api.setTabberSessionFilesForTest('7', [{path: 'app.py', abs_path: '/home/test/project/app.py', repo: '/home/test/project', status: 'M', mtime: 7000}]);
+    api.setTabberSessionFilesForTest('8', [{path: 'notes.md', abs_path: '/home/test/notes.md', repo: '/home/test', status: 'M', mtime: 6000}]);
+    api.setTabberSessionFilesForTest('9', [{path: 'config', abs_path: '/etc/yolo/config', repo: '/etc/yolo', status: 'M', mtime: 5000}]);
+    api.setTabberSessionFilesForTest('10', [{path: 'file.txt', abs_path: '~/already/file.txt', repo: '~/already', status: 'M', mtime: 4000}]);
+
+    const tree = api.buildTabberTree();
+    const sessionSeven = tree.entries.find(entry => entry.tabber?.session === '7');
+    const sessionSevenWindow = tree.entriesByDir.get('/' + sessionSeven.name)[0];
+    const sessionSevenRepo = tree.entriesByDir.get('/' + sessionSeven.name + '/' + sessionSevenWindow.name)[0];
+    assert.equal(sessionSevenRepo.tabber.label, '/home/test/project', 'Tabber keeps backend repo labels absolute before render');
+
+    const rows = api.tabberRenderedRowsForTest();
+    const byRepo = new Map(rows.filter(row => row.type === 'repo').map(row => [row.repoRoot, row]));
+    assert.equal(byRepo.get('/home/test/project')?.name, '~/project', 'Tabber renders a repo under home as ~/name');
+    assert.equal(byRepo.get('/home/test/project')?.title.split('\n')[0], '~/project', 'Tabber title uses the same compact home path');
+    assert.equal(byRepo.get('/home/test')?.name, '~', 'Tabber renders the bare home directory as ~');
+    assert.equal(byRepo.get('/etc/yolo')?.name, '/etc/yolo', 'Tabber leaves non-home paths unchanged');
+    assert.equal(byRepo.get('~/already')?.name, '~/already', 'Tabber does not double-abbreviate an already-tilde path');
+    assert.ok(/^\/s_7\/w_0\/r_/.test(byRepo.get('/home/test/project')?.path || ''), 'Tabber synthetic tree path stays id-based, not display-path based');
+    assert.equal((byRepo.get('/home/test/project')?.path || '').includes('~'), false, 'Tabber synthetic tree path never receives home abbreviation');
+  });
+
   test('Differ shared tree controller handles keys without taking diff-ref input keys', () => {
     const api = loadYolomux('', ['1']);
     api.setFileExplorerModeForTest('diff');
@@ -986,6 +1021,8 @@ async function runTabberSuite() {
     assert.ok(/transcriptMetaLoaded = true;[\s\S]*?warmTabberDataOnLaunch\(\)/.test(source), 'Tabber launch warmup runs as soon as transcript metadata is available');
     assert.ok(/function tabberAgentForWindow\(session, windowIndex, agentKey = ''\)/.test(source), 'Tabber can look up agent transcript activity by session/window');
     assert.ok(/const windowMtime = isAgent\s*\?\s*tabberAgentRecency\(agentActivity\)\s*:\s*Math\.max\(ledgerMtime, childMtime, fallbackSessionRecency\)/.test(source), 'Tabber agent windows sort only from agent transcript recency, never user-input or touched-path mtimes');
+    assert.ok(/function updateTabberRow\([\s\S]*updateFileTreeRowContents\(row, icon, label,[\s\S]*applyFileTreeRowRecency\(row, entry, options\)/.test(source), 'Tabber timestamp rows route through the shared Finder/Differ recency styling');
+    assert.equal(/icon:\s*'▢'|icon:\s*'■'/.test(source), false, 'Tabber shell/session rows avoid checkbox-looking square glyphs');
     assert.ok(/let tabberActivityRefreshMs;[\s\S]*tabberActivityRefreshMs = initialSetting\('performance\.tabber_activity_refresh_ms'\);/.test(source), 'Tabber activity refresh initializes from server-provided settings defaults');
     assert.equal(source.includes("initialSetting('performance.tabber_activity_refresh_ms', 15000)"), false, 'Tabber activity refresh does not keep a duplicated bootstrap fallback');
     assert.equal(source.includes("numberSetting('performance.tabber_activity_refresh_ms', 15000)"), false, 'Tabber activity refresh does not keep a duplicated reload fallback');
@@ -1104,6 +1141,29 @@ async function runTabberSuite() {
     assert.ok(activeSessionRow.classes.includes('tabber-active-session'), 'A5: the current tmux session row gets the active-session class');
     const activeWindowRow = rows.find(r => r.type === 'window' && /0:claude \(pid=12345\)/.test(r.name));
     assert.equal(activeWindowRow?.ariaCurrent, 'true', 'N10: the active tmux window row exposes aria-current');
+    const shellWindowRow = rows.find(r => r.type === 'window' && /1:bash/.test(r.name));
+    assert.equal(shellWindowRow?.icon, '⌁', 'shell/process window leaf rows use a neutral process glyph instead of a checkbox-looking square');
+    assert.equal(rows.some(r => r.type === 'window' && ['▢', '■'].includes(r.icon)), false, 'tmux window rows never render checkbox-looking square glyphs');
+    assert.equal(activeSessionRow.icon, '▾', 'expanded session rows still use the shared disclosure affordance');
+    api.setFileTreeRecencyNowForTest(2_000_000);
+    api.setFileExplorerTreeDateModeForTest('relative');
+    api.setTabberActivityForTest({
+      activity: {'1:1': {last_user_input_ts: 2000 - 30}},
+      agents: [{session: '1', window: '0', agent_kind: 'claude', last_used_ts: 2000 - 9 * 60, sort_ts: 2000 - 9 * 60, running: true, label: "session '1' 0:claude"}],
+    });
+    const recentTabberAgoRows = api.tabberRenderedRowsForTest();
+    assert.equal(recentTabberAgoRows.find(r => r.type === 'window' && /1:bash/.test(r.name))?.recency, 'hot', 'Tabber Ago timestamp rows mark sub-minute process activity hot');
+    assert.equal(recentTabberAgoRows.find(r => r.type === 'window' && /1:bash/.test(r.name))?.classes.includes('file-tree-recency-pulse'), true, 'Tabber Ago sub-minute rows pulse');
+    assert.equal(recentTabberAgoRows.find(r => r.type === 'window' && /0:claude/.test(r.name))?.recency, 'recent', 'Tabber Ago timestamp rows keep sub-ten-minute graduated styling');
+    api.setFileExplorerTreeDateModeForTest('date');
+    const recentTabberDateRows = api.tabberRenderedRowsForTest();
+    assert.equal(recentTabberDateRows.find(r => r.type === 'window' && /1:bash/.test(r.name))?.recency, 'hot', 'Tabber Date timestamp rows preserve sub-minute recency');
+    assert.equal(recentTabberDateRows.find(r => r.type === 'window' && /0:claude/.test(r.name))?.recency, 'recent', 'Tabber Date timestamp rows preserve graduated recency');
+    api.setFileExplorerTreeDateModeForTest('none');
+    const noDateTabberRows = api.tabberRenderedRowsForTest();
+    assert.equal(noDateTabberRows.find(r => r.type === 'window' && /1:bash/.test(r.name))?.recency, '', 'Tabber None mode hides timestamp recency styling');
+    api.setFileTreeRecencyNowForTest(null);
+    api.setFileExplorerTreeDateModeForTest('relative');
     assert.ok(activeSessionRow.nameHtml.includes('class="tabber-session-tab active"'), 'A5: the current tmux session label reads as an active tab');
     assert.equal(inactiveSessionRow.classes.includes('tabber-active-session'), false, 'A5: inactive tmux sessions do not get the active-session class');
     assert.equal(inactiveSessionRow.ariaCurrent, '', 'A5: inactive tmux sessions do not expose aria-current');

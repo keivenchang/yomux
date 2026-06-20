@@ -1,0 +1,38 @@
+agent: codex
+capture_date: '2026-06-20'
+capture_date_position: end
+capture_mode: converted_text_fixture
+captured_at: '2026-06-20T00:00:00-07:00'
+case_name: idle_empty_prompt
+claude_version: ''
+client_name: Codex CLI
+client_version: synthetic Codex CLI fixture
+client_version_slug: codex-cli-synthetic
+codex_version: ''
+cursor: {}
+expected:
+  approval_visible: false
+  ask: false
+  negative_reason_contains: idle
+  screen_key: idle
+expected_screen_key: idle
+failures: []
+filename_convention: case_name__client-token_date
+fixture_id: idle_empty_prompt__codex-cli-synthetic_20260620
+id: idle_empty_prompt__codex-cli-synthetic_20260620
+operations: []
+raw_capture: |
+  › Implement {feature}
+
+    gpt-5.5 xhigh · ~/yolomux.dev8001
+source: synthetic current Codex idle layout
+source_fixture_id: codex-idle-empty-prompt
+source_text_file: codex_idle_empty_prompt.txt
+styled_capture: |
+  › Implement {feature}
+
+    gpt-5.5 xhigh · ~/yolomux.dev8001
+visible_text: |
+  › Implement {feature}
+
+    gpt-5.5 xhigh · ~/yolomux.dev8001

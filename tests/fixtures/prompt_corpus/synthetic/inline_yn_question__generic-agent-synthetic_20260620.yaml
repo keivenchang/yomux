@@ -1,0 +1,47 @@
+agent: unknown
+capture_date: '2026-06-20'
+capture_date_position: end
+capture_mode: converted_text_fixture
+captured_at: '2026-06-20T00:00:00-07:00'
+case_name: inline_yn_question
+claude_version: ''
+client_name: Generic agent TUI
+client_version: synthetic generic agent fixture
+client_version_slug: generic-agent-synthetic
+codex_version: ''
+cursor: {}
+expected:
+  action: null
+  agent: unknown
+  approval_visible: false
+  ask: true
+  command: null
+  confidence_min: 0.7
+  option_labels: []
+  prompt_kind: question
+  prompt_type: ''
+  question_text: Do you want to proceed with deploying to staging? (y/n)
+  screen_key: needs-input
+  selected_option: 0
+  yes_selected: false
+expected_screen_key: needs-input
+failures: []
+filename_convention: case_name__client-token_date
+fixture_id: inline_yn_question__generic-agent-synthetic_20260620
+id: inline_yn_question__generic-agent-synthetic_20260620
+operations: []
+raw_capture: |
+  ● Do you want to proceed with deploying to staging? (y/n)
+
+  ❯
+source: synthetic current agent question layout
+source_fixture_id: inline-yn-question
+source_text_file: inline_yn_question.txt
+styled_capture: |
+  ● Do you want to proceed with deploying to staging? (y/n)
+
+  ❯
+visible_text: |
+  ● Do you want to proceed with deploying to staging? (y/n)
+
+  ❯

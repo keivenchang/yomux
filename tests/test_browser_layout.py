@@ -577,6 +577,9 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
               const streaming = document.querySelector('.yoagent-message.streaming');
               const pre = document.querySelector('.yoagent-chat .markdown-body pre');
               const details = document.querySelector('.yoagent-message-details');
+              const auxPreview = document.querySelector('.yoagent-details-preview');
+              const auxStream = document.querySelector('.yoagent-auxiliary-stream');
+              const streamingBody = streaming?.querySelector?.('.yoagent-message-body');
               const actionText = document.querySelector('.yoagent-action-text');
               const boxes = {
                 infoPane: boxFor(infoPane),
@@ -597,6 +600,9 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
                 noHistoryFormOverlap: Boolean(history && form && history.getBoundingClientRect().bottom <= form.getBoundingClientRect().top + 1),
                 statusInsideHistory: Boolean(status && history && history.contains(status)),
                 streamingInsideHistory: Boolean(streaming && history && history.contains(streaming)),
+                auxPreviewText: auxPreview?.textContent || '',
+                auxStreamText: auxStream?.textContent || '',
+                streamingBodyText: streamingBody?.textContent || '',
                 errors: window.__bootErrors || [],
                 rejections: window.__bootRejections || [],
               };
@@ -633,6 +639,9 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
                 backend: 'claude',
                 phase: 'delta',
                 content: Array.from({length: 24}, (_, index) => `streamed line ${index + 1}: working through the activity context`).join('\\n'),
+                auxiliary_lines: ['thinking: reading activity context', 'tool output: command: collected files'],
+                auxiliary_preview: 'thinking: reading activity context\\ntool output: command: collected files',
+                hidden_work_active: true,
               });
               renderYoagentPanel({preserveDraft: true, scrollBottom: 'auto', allowBusyRebuild: true});
               await raf();
@@ -663,6 +672,10 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
         assert metrics["hasStreaming"] is True, (label, metrics)
         assert metrics["statusInsideHistory"] is True, (label, metrics)
         assert metrics["streamingInsideHistory"] is True, (label, metrics)
+        assert metrics["auxPreviewText"] == "thinking: reading activity context\ntool output: command: collected files", (label, metrics)
+        assert "thinking: reading activity context" in metrics["auxStreamText"], (label, metrics)
+        assert "tool output: command: collected files" in metrics["auxStreamText"], (label, metrics)
+        assert "thinking: reading activity context" not in metrics["streamingBodyText"], (label, metrics)
         assert metrics["outer"]["overflowY"] == "hidden", (label, metrics)
         assert metrics["outer"]["scrollHeight"] <= metrics["outer"]["clientHeight"] + 1, (label, metrics)
         assert metrics["history"]["overflowY"] == "auto", (label, metrics)
@@ -676,6 +689,47 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
         screenshot = browser_screenshot_rgb(browser)
         assert screenshot.size[0] >= window_width - 20, (label, screenshot.size)
         assert screenshot.getbbox() is not None, label
+
+
+def test_yoagent_auxiliary_details_are_subdued_in_dark_and_light(browser, tmp_path):
+    for theme_class in ("theme-dark", "theme-light"):
+        page = tmp_path / f"yoagent-auxiliary-{theme_class}.html"
+        page.write_text(
+            page_html(
+                f"""
+                <script>document.body.className = {json.dumps(theme_class)};</script>
+                <section class="yoagent-chat">
+                  <div class="yoagent-message assistant">
+                    <div class="yoagent-message-role"><span>YO!agent</span></div>
+                    <div class="yoagent-message-body markdown-body">Normal assistant answer</div>
+                    <details class="yoagent-message-details has-auxiliary" open>
+                      <summary><span>Details</span><span class="yoagent-details-preview">thinking: preview</span></summary>
+                      <pre class="yoagent-auxiliary-stream">thinking: preview\ntool output: done</pre>
+                    </details>
+                  </div>
+                </section>
+                """,
+                extra_css="body { margin: 0; padding: 20px; background: var(--bg); color: var(--text); } .yoagent-chat { width: 420px; }",
+            ),
+            encoding="utf-8",
+        )
+        browser.get(page.as_uri())
+        metrics = browser.execute_script(
+            """
+            const body = document.querySelector('.yoagent-message-body');
+            const aux = document.querySelector('.yoagent-auxiliary-stream');
+            const preview = document.querySelector('.yoagent-details-preview');
+            return {
+              bodyColor: getComputedStyle(body).color,
+              auxColor: getComputedStyle(aux).color,
+              previewColor: getComputedStyle(preview).color,
+              auxText: aux.textContent,
+            };
+            """
+        )
+        assert metrics["auxText"] == "thinking: preview\ntool output: done", (theme_class, metrics)
+        assert metrics["auxColor"] != metrics["bodyColor"], (theme_class, metrics)
+        assert metrics["previewColor"] != metrics["bodyColor"], (theme_class, metrics)
 
 
 def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_path):
@@ -701,7 +755,7 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
                       <span class="file-tree-date">2m ago</span>
                     </div>
                     <div class="file-tree-row tabber-row kind-file" data-tabber-type="window" data-tabber-session="1" role="treeitem" aria-selected="false" style="padding-left: 27px;">
-                      <span class="file-tree-icon tabber-icon">▢</span>
+                      <span class="file-tree-icon tabber-icon">⌁</span>
                       <span class="file-tree-name"><span class="tabber-window-label"><span class="tabber-window-text">0:bash</span></span></span>
                       <span class="file-tree-agent" hidden></span>
                       <span class="file-tree-diff" hidden></span>
@@ -719,7 +773,7 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
                       <span class="file-tree-date">15m ago</span>
                     </div>
                     <div class="file-tree-row tabber-row kind-file" data-tabber-type="window" data-tabber-session="2" role="treeitem" aria-selected="false" style="padding-left: 27px;">
-                      <span class="file-tree-icon tabber-icon">▢</span>
+                      <span class="file-tree-icon tabber-icon">⌁</span>
                       <span class="file-tree-name"><span class="tabber-window-label"><span class="tabber-window-text">0:bash</span></span></span>
                       <span class="file-tree-agent" hidden></span>
                       <span class="file-tree-diff" hidden></span>
@@ -800,11 +854,13 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
             const activeRow = sessionRows.find(row => row.dataset.tabberSession === '1');
             const inactiveRow = sessionRows.find(row => row.dataset.tabberSession === '2');
             const activeWindowRow = windowRows.find(row => row.dataset.tabberSession === '1');
+            const windowIcons = windowRows.map(row => (row.querySelector('.file-tree-icon')?.textContent || '').trim());
             const nonSessionWithSessionTab = Array.from(document.querySelectorAll('.file-tree-row:not([data-tabber-type="session"]) .tabber-session-tab')).length;
             return {
               active: rowMetrics(activeRow),
               inactive: rowMetrics(inactiveRow),
               activeWindow: rectFor(activeWindowRow),
+              windowIcons,
               nonSessionWithSessionTab,
               sessionCount: sessionRows.length,
               windowCount: windowRows.length,
@@ -814,6 +870,7 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
         )
         assert metrics["sessionCount"] >= 2, (label, metrics)
         assert metrics["windowCount"] >= 2, (label, metrics)
+        assert metrics["windowIcons"] == ["⌁", "⌁"], (label, metrics)
         assert metrics["nonSessionWithSessionTab"] == 0, (label, metrics)
         assert "tabber-active-session" in metrics["active"]["rowClass"], (label, metrics)
         assert "active" in metrics["active"]["tabClass"], (label, metrics)

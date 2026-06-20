@@ -232,6 +232,34 @@ def test_process_once_uses_live_prompt_command_not_stale_pane_command(monkeypatc
     assert worker.last_action == "blocked bash: cp -r src/ dist/"
 
 
+def test_process_once_routes_plan_prompt_through_non_bash_rules(monkeypatch):
+    module = DummyProcessModule({
+        "visible": True,
+        "type": "plan",
+        "hash": "hash-plan",
+        "action": "option1",
+        "selected_option": 1,
+        "yes_selected": True,
+        "question_text": "Claude has written up a plan and is ready to execute. Would you like to proceed?",
+        "text": "Claude has written up a plan and is ready to execute. Would you like to proceed?",
+    })
+    worker = auto_approve_worker.AutoApproveWorker("6", interval=0.01)
+    evaluated: list[tuple[str, str]] = []
+
+    def evaluate(rule_input: str, prompt_type: str = "bash", *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        evaluated.append((rule_input, prompt_type))
+        return rule_decision("approve", rule_name="approve plan")
+
+    monkeypatch.setattr(auto_approve_worker.yolo_rules, "evaluate", evaluate)
+
+    acted = worker.process_once(module)
+
+    assert acted is True
+    assert evaluated == [("Claude has written up a plan and is ready to execute. Would you like to proceed?", "plan")]
+    assert module.sent == [("option", "6", 1, 1)]
+    assert worker.last_action == "approved plan: approve plan"
+
+
 def test_process_once_skips_capture_after_initial_tmux_activity_observation():
     module = DummyProcessModule({
         "visible": False,
@@ -474,4 +502,25 @@ def test_process_once_can_force_pane_only_prompt_source(monkeypatch):
 
     assert acted is False
     assert module.sent == []
-    assert worker.last_action == "idle"
+    assert worker.last_action == "question visible; waiting for manual answer"
+
+
+def test_process_once_does_not_accept_normal_agent_question(monkeypatch):
+    module = DummyHybridProcessModule("Which backend should I use?\n❯ 1. vLLM\n  2. SGLang", {
+        "visible": False,
+        "type": "",
+        "hash": "",
+        "source": "pane",
+        "yes_selected": False,
+        "selected_option": 0,
+    })
+    worker = auto_approve_worker.AutoApproveWorker("6", interval=0.01, prompt_source="hybrid")
+    monkeypatch.setattr(auto_approve_worker.yolo_rules, "evaluate", approving_decision)
+
+    acted = worker.process_once(module)
+
+    assert acted is False
+    assert module.sent == []
+    assert worker.approved == 0
+    assert worker.blocked == 0
+    assert worker.last_action == "question visible; waiting for manual answer"

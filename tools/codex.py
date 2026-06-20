@@ -34,6 +34,8 @@ from text_client_common import (
     CLIENT_PERMISSION_DEFAULTS,
     TextClientBase,
     TOOL_OUTPUT_PREFIX,
+    client_slash_commands,
+    client_slash_help_rows,
     collect_token_usage,
     command_text,
     config_value_text,
@@ -43,6 +45,7 @@ from text_client_common import (
     parse_config_bool,
     parse_config_value,
     prefixed_output_labels,
+    slash_command_compat_note,
 )
 
 
@@ -62,53 +65,10 @@ APPROVAL_METHODS = {
     "applyPatchApproval",
     "execCommandApproval",
 }
-REPL_COMMANDS = [
-    "app",
-    "apps",
-    "archive",
-    "clear",
-    "compact",
-    "config",
-    "copy",
-    "delete",
-    "diff",
-    "effort",
-    "experimental",
-    "fast",
-    "feedback",
-    "fork",
-    "goal",
-    "help",
-    "ide",
-    "import",
-    "init",
-    "keymap",
-    "mcp",
-    "memories",
-    "metrics",
-    "model",
-    "personality",
-    "plugins",
-    "ps",
-    "permissions",
-    "quit",
-    "raw",
-    "rename",
-    "resume",
-    "review",
-    "sandbox-add-read-dir",
-    "side",
-    "skills",
-    "status",
-    "statusline",
-    "stop",
-    "usage",
-]
 UNIMPLEMENTED_CODEX_COMMANDS = {
     "app": "app selection is not implemented in this stdout prototype",
     "apps": "app selection is not implemented in this stdout prototype",
     "archive": "session archiving is not implemented in this stdout prototype",
-    "clear": "terminal UI clearing is not meaningful in this stdout prototype",
     "compact": "conversation compaction is not implemented in this stdout prototype",
     "copy": "clipboard integration is not implemented in this stdout prototype",
     "delete": "session deletion is not implemented in this stdout prototype",
@@ -134,6 +94,7 @@ UNIMPLEMENTED_CODEX_COMMANDS = {
     "statusline": "status line configuration is not implemented in this stdout prototype",
     "stop": "background terminal stop is not implemented in this stdout prototype",
 }
+REPL_COMMANDS = client_slash_commands("codex", UNIMPLEMENTED_CODEX_COMMANDS)
 APPROVAL_POLICIES = {"untrusted", "on-failure", "on-request", "never"}
 SANDBOX_MODES = {"read-only", "workspace-write", "danger-full-access"}
 REASONING_EFFORT_ORDER = ["minimal", "low", "medium", "high", "xhigh"]
@@ -689,14 +650,26 @@ class CodexTextClient(TextClientBase):
         if command == "status":
             self.print_status()
             return "handled"
+        if command == "context":
+            self.print_context()
+            return "handled"
+        if command == "clear":
+            self.clear_conversation()
+            return "handled"
+        if command == "cls":
+            print("\033c", end="")
+            return "handled"
         if command == "model":
             self.handle_model_command(rest)
             return "handled"
         if command == "effort":
             self.handle_effort_command(rest)
             return "handled"
-        if command == "permissions":
-            self.handle_permissions_command(rest)
+        if command in {"permission", "permission-mode", "permissions"}:
+            self.handle_permissions_command(rest, command)
+            return "handled"
+        if command in {"reasoning", "thinking"}:
+            self.handle_reasoning_command(rest, command)
             return "handled"
         if command == "fast":
             self.handle_fast_command(rest)
@@ -708,7 +681,7 @@ class CodexTextClient(TextClientBase):
             self.handle_metrics_command(rest)
             return "handled"
         if command == "usage":
-            self.print_metrics()
+            self.print_usage()
             return "handled"
         if command == "raw":
             self.handle_raw_command(rest)
@@ -725,17 +698,8 @@ class CodexTextClient(TextClientBase):
 
     def print_repl_help(self) -> None:
         print("Slash commands:")
-        print("  /status                       show current session configuration")
-        print(f"  /model [model] [effort]       choose model and {CODEX_OUTPUT_TERMS.lower_label} effort")
-        print(f"  /effort [level]               choose {CODEX_OUTPUT_TERMS.lower_label} effort")
-        print("  /permissions [mode]           choose what Codex is allowed to do")
-        print("  /fast [on|off]                toggle Fast mode for later turns")
-        print("  /config [key=value ...]       show or change -c style settings")
-        print("  /metrics [on|off|last]        print TTFT, ISL/OSL, token rate, and tool timing")
-        print("  /usage                        show last-turn token/timing metrics")
-        print("  /raw [on|off]                 toggle raw-output mode marker")
-        print("  /resume <thread-id>           continue a specific thread")
-        print("  /quit                          exit")
+        for row in client_slash_help_rows("codex"):
+            print(row)
         print("Recognized but not implemented in this text prototype:")
         print("  " + " ".join(f"/{name}" for name in sorted(UNIMPLEMENTED_CODEX_COMMANDS)))
         try:
@@ -766,6 +730,50 @@ class CodexTextClient(TextClientBase):
         print(f"  Metrics:              {'on' if self.args.show_metrics else 'off'}")
         print(f"  Terminal bg:          {self.terminal_background_text()}")
         print("  Limits:               run real Codex /status for account usage limits")
+
+    def print_context(self) -> None:
+        print("Codex Context")
+        print(f"  Directory:            {self.display_cwd()}")
+        print(f"  Thread:               {self.thread_id or '<not started>'}")
+        print(f"  Session file:         {self.session_file_path()}")
+        print(f"  Model:                {display_value(self.args.model)}")
+        print(f"  {CODEX_OUTPUT_TERMS.title_label} effort: {display_value(self.args.effort)}")
+        print(f"  Summary mode:         {self.args.reasoning_summary}")
+        print(f"  Permissions:          {self.permissions_text()}")
+        print(f"  Sandbox:              {self.args.sandbox}")
+        print(f"  Approval policy:      {self.args.approval_policy}")
+        print(f"  Add dirs:             {', '.join(self.args.add_dir) if self.args.add_dir else '<none>'}")
+        print(f"  Output toggles:       summary={'on' if self.args.show_reasoning_summary else 'off'}, raw={'on' if self.args.show_raw_reasoning else 'off'}, tool={'on' if self.args.show_tool_output else 'off'}, metrics={'on' if self.args.show_metrics else 'off'}")
+        if self.last_metrics is not None:
+            print("  Last metrics:")
+            for line in self.metrics_lines(self.last_metrics):
+                print(f"    {line}")
+
+    def clear_conversation(self) -> None:
+        self.thread_id = ""
+        self.args.thread_id = ""
+        self.active_turn_id = ""
+        self.answer_buffer = []
+        self.reasoning_summary_buffer = []
+        self.raw_reasoning_buffer = []
+        self.final_item_text = ""
+        self.last_metrics = None
+        print("Conversation cleared; next turn starts a new Codex thread.")
+
+    def print_usage(self) -> None:
+        print("Codex Usage")
+        metrics = self.last_metrics
+        if metrics is None:
+            print("  No completed turn yet.")
+            return
+        if metrics.usage:
+            for key in sorted(metrics.usage):
+                print(f"  {key}: {metrics.usage[key]:g}")
+        else:
+            print("  Backend did not emit token usage for the last turn.")
+        print("  Metrics:")
+        for line in self.metrics_lines(metrics):
+            print(f"    {line}")
 
     def handle_model_command(self, rest: str) -> None:
         self.print_compat_note("model", "Codex", "Implemented here to match the Claude-style runtime model switch.")
@@ -798,11 +806,13 @@ class CodexTextClient(TextClientBase):
         self.update_thread_settings(effort=effort)
         print(f"{CODEX_OUTPUT_TERMS.lower_label} effort changed: {effort}")
 
-    def handle_permissions_command(self, rest: str) -> None:
+    def handle_permissions_command(self, rest: str, command: str = "permissions") -> None:
+        if command in {"permission", "permission-mode"}:
+            self.print_compat_note(command, "Codex", slash_command_compat_note("codex", command))
         parts = shlex.split(rest)
         if not parts:
             print(f"Permissions: {self.permissions_text()}")
-            print(f"Usage: /permissions [read-only|workspace-write|{DEFAULT_SANDBOX}|untrusted|on-failure|on-request|never|{CODEX_YOLO_ALIAS}]")
+            print(f"Usage: /{command} [read-only|workspace-write|{DEFAULT_SANDBOX}|untrusted|on-failure|on-request|never|{CODEX_YOLO_ALIAS}]")
             return
         for value in parts:
             normalized = value.strip().lower()
@@ -823,6 +833,40 @@ class CodexTextClient(TextClientBase):
             sandboxPolicy=self.sandbox_policy_param(),
         )
         print(f"Permissions: {self.permissions_text()}")
+
+    def handle_reasoning_command(self, rest: str, command: str = "reasoning") -> None:
+        if command == "thinking":
+            self.print_compat_note(command, "Codex", slash_command_compat_note("codex", command))
+        value = rest.strip().lower()
+        if not value:
+            print(f"{CODEX_OUTPUT_TERMS.title_label}: summary={self.args.reasoning_summary}, show_summary={'on' if self.args.show_reasoning_summary else 'off'}, raw={'on' if self.args.show_raw_reasoning else 'off'}")
+            print("Usage: /reasoning [on|off|summary|raw|none|auto|concise|detailed]")
+            return
+        if value == "on":
+            self.args.show_reasoning_summary = True
+        elif value == "off":
+            self.args.show_reasoning_summary = False
+            self.args.show_raw_reasoning = False
+        elif value == "summary":
+            self.args.show_reasoning_summary = True
+            self.args.show_raw_reasoning = False
+            if self.args.reasoning_summary == "none":
+                self.args.reasoning_summary = "concise"
+        elif value == "raw":
+            self.args.show_raw_reasoning = True
+        elif value in REASONING_SUMMARIES | set(REASONING_SUMMARY_ALIASES):
+            self.args.reasoning_summary = normalize_reasoning_summary(value)
+            self.args.show_reasoning_summary = self.args.reasoning_summary != "none"
+            if self.args.reasoning_summary == "none":
+                self.args.show_raw_reasoning = False
+        else:
+            print(f"reasoning mode must be one of: on, off, summary, raw, {', '.join(sorted(REASONING_SUMMARIES))}")
+            return
+        self.args.config_values["model_reasoning_summary"] = self.args.reasoning_summary
+        self.args.config_values[CODEX_CONFIG_KEYS.hidden_work_summary] = self.args.show_reasoning_summary
+        self.args.config_values[CODEX_CONFIG_KEYS.hidden_work_raw] = self.args.show_raw_reasoning
+        self.update_thread_settings(summary=self.args.reasoning_summary or None)
+        print(f"{CODEX_OUTPUT_TERMS.title_label}: summary={self.args.reasoning_summary}, show_summary={'on' if self.args.show_reasoning_summary else 'off'}, raw={'on' if self.args.show_raw_reasoning else 'off'}")
 
     def handle_fast_command(self, rest: str) -> None:
         value = rest.strip().lower()

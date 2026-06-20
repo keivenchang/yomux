@@ -1,0 +1,74 @@
+agent: codex
+capture_date: '2026-06-20'
+capture_date_position: end
+capture_mode: converted_text_fixture
+captured_at: '2026-06-20T00:00:00-07:00'
+case_name: prefix_rule_gh_api
+claude_version: ''
+client_name: Codex CLI
+client_version: synthetic Codex CLI fixture
+client_version_slug: codex-cli-synthetic
+codex_version: ''
+cursor: {}
+expected:
+  action: option2
+  agent: codex
+  approval_visible: true
+  ask: true
+  command: gh api repos/example/project/pulls/123/comments
+  confidence_min: 0.9
+  option_labels:
+  - Yes, proceed (y)
+  - Yes, and don't ask again for commands that start with `gh api` (p)
+  - No, and tell Codex what to do differently (esc)
+  prompt_kind: shell-command
+  prompt_type: bash
+  question_text: Would you like to run the following command?
+  screen_key: approval
+  selected_option: 1
+  yes_selected: true
+expected_screen_key: approval
+failures: []
+filename_convention: case_name__client-token_date
+fixture_id: prefix_rule_gh_api__codex-cli-synthetic_20260620
+id: prefix_rule_gh_api__codex-cli-synthetic_20260620
+operations: []
+raw_capture: |
+  ◦ Running gh api repos/example/project/pulls/123/comments
+
+    Would you like to run the following command?
+
+    Reason: Fetch pull request comments through GitHub.
+
+    $ gh api repos/example/project/pulls/123/comments
+
+  › 1. Yes, proceed (y)
+    2. Yes, and don't ask again for commands that start with `gh api` (p)
+    3. No, and tell Codex what to do differently (esc)
+source: mock capture from existing detector tests
+source_fixture_id: codex-prefix-rule-gh-api
+source_text_file: codex_prefix_rule_gh_api.txt
+styled_capture: |
+  ◦ Running gh api repos/example/project/pulls/123/comments
+
+    Would you like to run the following command?
+
+    Reason: Fetch pull request comments through GitHub.
+
+    $ gh api repos/example/project/pulls/123/comments
+
+  › 1. Yes, proceed (y)
+    2. Yes, and don't ask again for commands that start with `gh api` (p)
+    3. No, and tell Codex what to do differently (esc)
+visible_text: |
+  ◦ Running gh api repos/example/project/pulls/123/comments
+
+    Would you like to run the following command?
+
+    Reason: Fetch pull request comments through GitHub.
+
+    $ gh api repos/example/project/pulls/123/comments
+
+  › 1. Yes, proceed (y)
+    2. Yes, and don't ask again for commands that start with `gh api` (p)
+    3. No, and tell Codex what to do differently (esc)

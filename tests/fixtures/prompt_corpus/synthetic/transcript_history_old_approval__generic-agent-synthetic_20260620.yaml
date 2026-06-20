@@ -1,0 +1,56 @@
+agent: generic
+capture_date: '2026-06-20'
+capture_date_position: end
+capture_mode: converted_text_fixture
+captured_at: '2026-06-20T00:00:00-07:00'
+case_name: transcript_history_old_approval
+claude_version: ''
+client_name: Generic agent TUI
+client_version: synthetic generic agent fixture
+client_version_slug: generic-agent-synthetic
+codex_version: ''
+cursor: {}
+expected:
+  approval_visible: false
+  ask: false
+  negative_reason_contains: stale
+  screen_key: idle
+expected_screen_key: idle
+failures: []
+filename_convention: case_name__client-token_date
+fixture_id: transcript_history_old_approval__generic-agent-synthetic_20260620
+id: transcript_history_old_approval__generic-agent-synthetic_20260620
+operations: []
+raw_capture: |2
+   Do you want to proceed?
+   ❯ 1. Yes
+     2. No
+   Esc to cancel
+  ● User approved Claude's request
+  ● Bash(echo one)
+    ⎿  one
+
+  ❯
+source: synthetic old scrollback negative
+source_fixture_id: transcript-history-old-approval
+source_text_file: transcript_history_old_approval.txt
+styled_capture: |2
+   Do you want to proceed?
+   ❯ 1. Yes
+     2. No
+   Esc to cancel
+  ● User approved Claude's request
+  ● Bash(echo one)
+    ⎿  one
+
+  ❯
+visible_text: |2
+   Do you want to proceed?
+   ❯ 1. Yes
+     2. No
+   Esc to cancel
+  ● User approved Claude's request
+  ● Bash(echo one)
+    ⎿  one
+
+  ❯

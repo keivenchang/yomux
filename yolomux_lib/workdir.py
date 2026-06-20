@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .cache import TtlCache
 from .common import PROJECT_ROOT
+from .common import codex_runtime_env
 from .common import heal_server_path
 
 
@@ -116,8 +117,11 @@ def _probe_agent_logged_in(agent: str) -> bool:
     probe = AGENT_AUTH_PROBES.get(agent)
     if not probe:
         return False
+    kwargs: dict[str, object] = {"capture_output": True, "text": True, "timeout": _AGENT_AUTH_PROBE_TIMEOUT}
+    if agent == "codex":
+        kwargs["env"] = codex_runtime_env()
     try:
-        result = subprocess.run(list(probe), capture_output=True, text=True, timeout=_AGENT_AUTH_PROBE_TIMEOUT)
+        result = subprocess.run(list(probe), **kwargs)
     except (subprocess.TimeoutExpired, OSError, ValueError):
         return False
     parsed = _logged_in_flag_from_json(result.stdout or "")

@@ -1342,10 +1342,28 @@
   color: var(--muted);
 }
 .yoagent-message-details summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  max-width: 100%;
   cursor: pointer;
   user-select: none;
-  width: fit-content;
   color: var(--muted);
+}
+.yoagent-message-details summary > span:first-child {
+  flex: 0 0 auto;
+}
+.yoagent-details-preview {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-height: calc(2 * max(9px, calc(var(--terminal-font-size) - 2px)) * 1.35);
+  overflow: hidden;
+  color: color-mix(in srgb, var(--muted) 78%, var(--text));
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.yoagent-message-details[open] .yoagent-details-preview {
+  display: none;
 }
 .yoagent-message-details pre {
   margin: 5px 0 0;
@@ -1358,6 +1376,14 @@
   background: color-mix(in srgb, var(--panel2) 72%, var(--bg));
   border: 1px solid var(--line);
   border-radius: 6px;
+}
+.yoagent-message-details pre.yoagent-auxiliary-stream {
+  color: color-mix(in srgb, var(--muted) 72%, var(--text));
+  background: color-mix(in srgb, var(--panel2) 78%, var(--bg));
+}
+.yoagent-details-note {
+  margin-top: 5px;
+  color: color-mix(in srgb, var(--muted) 82%, var(--text));
 }
 .yoagent-action-card {
   display: grid;
@@ -1576,10 +1602,21 @@ body.theme-light .yoagent-global .markdown-body {
 body.theme-light .yoagent-message-details summary {
   color: var(--lt-muted-strong);
 }
+body.theme-light .yoagent-details-preview {
+  color: #667085;
+}
 body.theme-light .yoagent-message-details pre {
   color: var(--lt-text);
   background: var(--lt-code-block-bg);
   border-color: var(--lt-code-block-border);
+}
+body.theme-light .yoagent-message-details pre.yoagent-auxiliary-stream {
+  color: #667085;
+  background: #f7f8fa;
+  border-color: var(--lt-code-block-border);
+}
+body.theme-light .yoagent-details-note {
+  color: #667085;
 }
 body.theme-light .yoagent-action-card {
   color: var(--lt-text);

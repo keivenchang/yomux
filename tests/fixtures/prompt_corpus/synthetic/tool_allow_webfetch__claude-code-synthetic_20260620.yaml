@@ -1,0 +1,65 @@
+agent: claude
+capture_date: '2026-06-20'
+capture_date_position: end
+capture_mode: converted_text_fixture
+captured_at: '2026-06-20T00:00:00-07:00'
+case_name: tool_allow_webfetch
+claude_version: ''
+client_name: Claude Code
+client_version: synthetic Claude Code fixture
+client_version_slug: claude-code-synthetic
+codex_version: ''
+cursor: {}
+expected:
+  action: option2
+  agent: claude
+  approval_visible: true
+  ask: true
+  command: null
+  confidence_min: 0.9
+  option_labels:
+  - 'Yes'
+  - Yes, and always allow WebFetch for code.claude.com
+  - 'No'
+  prompt_kind: tool-approval
+  prompt_type: tool
+  question_text: Do you want to allow WebFetch to access https://code.claude.com/docs/en/permission-modes?
+  screen_key: approval
+  selected_option: 1
+  yes_selected: true
+expected_screen_key: approval
+failures: []
+filename_convention: case_name__client-token_date
+fixture_id: tool_allow_webfetch__claude-code-synthetic_20260620
+id: tool_allow_webfetch__claude-code-synthetic_20260620
+operations: []
+raw_capture: |
+  ● I need to check the current vendor documentation.
+
+  Do you want to allow WebFetch to access https://code.claude.com/docs/en/permission-modes?
+  ❯ 1. Yes
+    2. Yes, and always allow WebFetch for code.claude.com
+    3. No
+
+  Esc to cancel · Enter to select
+source: synthetic current Claude layout
+source_fixture_id: claude-tool-allow-webfetch
+source_text_file: claude_tool_allow_webfetch.txt
+styled_capture: |
+  ● I need to check the current vendor documentation.
+
+  Do you want to allow WebFetch to access https://code.claude.com/docs/en/permission-modes?
+  ❯ 1. Yes
+    2. Yes, and always allow WebFetch for code.claude.com
+    3. No
+
+  Esc to cancel · Enter to select
+visible_text: |
+  ● I need to check the current vendor documentation.
+
+  Do you want to allow WebFetch to access https://code.claude.com/docs/en/permission-modes?
+  ❯ 1. Yes
+    2. Yes, and always allow WebFetch for code.claude.com
+    3. No
+
+  Esc to cancel · Enter to select

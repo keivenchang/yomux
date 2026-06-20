@@ -1,0 +1,179 @@
+actual:
+  agent_kind: codex
+  approval:
+    approval_action: ''
+    approval_type: ''
+    approval_visible: false
+    command: ''
+    dangerous: false
+    prompt_hash: ''
+    risk: ''
+    rule_input_text: ''
+    selected_option: 0
+    source: ''
+  attention_kind: working
+  attention_label: RUN
+  composer:
+    accepting: true
+    detected_text: ''
+    evidence: suggestion-style
+    key: ghost
+    prompt_suggestion: true
+    text: Improve documentation in @filename
+  cursor:
+    character: I
+    current_command: node
+    pane_in_mode: false
+    x: 2
+    y: 37
+  display:
+    attention_kind: working
+    attention_label: RUN
+    evidence_lines: []
+    options: []
+    prompt_hash: ''
+    prompt_kind: ''
+    question_text: agent is working
+    screen_key: working
+    selected_option: 0
+  reason_code: busy
+  screen:
+    activity_source: visible-counter
+    key: working
+    last_counter_seen_at: 144469.870885827
+    negative_reason: agent is working
+    status_counter_advanced: false
+    status_elapsed_seconds: 0.0
+    status_identity: ◦ working (<elapsed> • esc to interrupt)
+    status_line: ◦ Working (0s • esc to interrupt)
+    status_marker: ◦
+    status_tokens: null
+    status_tool_uses: null
+    text: agent is working
+agent: codex
+capture_date: '2026-06-20'
+capture_date_position: end
+capture_mode: visible
+captured_at: '2026-06-20T11:06:59.338554+00:00'
+case_name: working_command_counter
+claude_version: ''
+client_name: Codex CLI
+client_version: codex-cli 0.141.0
+client_version_slug: codex-cli-0.141.0
+codex_version: codex-cli 0.141.0
+cursor:
+  character: I
+  current_command: node
+  pane_in_mode: false
+  x: 2
+  y: 37
+evidence_fields:
+  display_evidence_lines: []
+  prompt_hash: ''
+  screen_evidence_lines: null
+expected:
+  agent_kind: codex
+  approval_visible: ''
+  attention_kind: ''
+  clear_cleared: ''
+  clear_ok: ''
+  composer_key: ''
+  reason_code: ''
+  screen_key: ''
+  send_ok: 'true'
+  send_reason_code: ''
+expected_promoted:
+  agent_kind: codex
+  approval_type: ''
+  approval_visible: false
+  attention_kind: working
+  attention_label: RUN
+  composer_key: ghost
+  reason_code: busy
+  screen_key: working
+failures: []
+filename_convention: case_name__client-token_date
+fixture_description: Codex working after command send
+fixture_id: working_command_counter__codex-cli-0.141.0_20260620
+fixture_scenario: working_command_counter
+id: working_command_counter__codex-cli-0.141.0_20260620
+operations:
+- needles: []
+  ok: true
+  type: ready_text
+- needles: []
+  ok: true
+  type: wait_text
+- result:
+    clear:
+      cleared: false
+      detected_text: ''
+      ok: true
+    cleared: false
+    ok: true
+    pasted: true
+    reason_code: submitted
+    returncode: 0
+    sent: true
+  text_length: 86
+  type: send_prompt
+raw_capture: |
+  › Please run the shell command `touch /tmp/yolomux-e2e-approval`.
+
+
+  ✔ You approved codex to run touch /tmp/yolomux-e2e-approval this time
+
+  • Ran touch /tmp/yolomux-e2e-approval
+    └ (no output)
+
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  • Done.
+
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+  › Ask me this question and wait for my answer instead of choosing yourself: Which YOLOmux verifier mode should we use?
+    1. Pane capture 2. Transcript capture
+
+
+  • Which YOLOmux verifier mode should we use?
+
+    1. Pane capture
+    2. Transcript capture
+
+
+  › Pane capture
+
+
+  • Pane capture.
+
+
+  › Run this harmless command exactly: touch /tmp/yolomux-codex-e2e-approval-20260620-1106
+
+
+  ◦ Working (0s • esc to interrupt)
+
+
+  › Improve documentation in @filename
+
+    gpt-5.5 xhigh · ~/yolomux.dev8001
+source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T110659Z.yaml
+styled_capture: "\e[1;2m› \e[0mPlease run the shell command `touch /tmp/yolomux-e2e-approval`.\n\n\n✔ You \e[1mapproved\e\
+  [0m codex to run \e[2mtouch /tmp/yolomux-e2e-approval\e[0;1m this time\n\n\e[0m• \e[1mRan\e[0m touch /tmp/yolomux-e2e-approval\n\
+  \e[2m  └ (no output)\n\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  \n• \e[0mDone.\n\n\e[2m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  \n\n\e[1m› \e[0mAsk me this question and wait for my answer instead of choosing yourself: Which YOLOmux verifier mode should\
+  \ we use?\n  1. Pane capture 2. Transcript capture\n\n\n\e[2m• \e[0mWhich YOLOmux verifier mode should we use?\n\n  1. Pane\
+  \ capture\n  2. Transcript capture\n\n\n\e[1;2m› \e[0mPane capture\n\n\n\e[2m• \e[0mPane capture.\n\n\n\e[1;2m› \e[0mRun\
+  \ this harmless command exactly: touch /tmp/yolomux-codex-e2e-approval-20260620-1106\n\n\n\e[2m◦\e[0m \e[2mWorking\e[0m\
+  \ \e[2m(0s • esc to interrupt)\n\n\n\e[0;1m›\e[0m \e[2mImprove documentation in @filename\n\n\e[0m  gpt-5.5 xhigh · ~/yolomux.dev8001\n"
+tmux_socket: /tmp/yoask-real-ui-2552908-0ead450e/s
+tmux_target: yr-codex-2552908-7ec5c7:0.0
+verifier_capabilities:
+- raw-capture
+- styled-capture
+- cursor-facts
+- central-clear-composer
+- central-send-prompt
+- visible-status-counter

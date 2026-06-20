@@ -1,0 +1,35 @@
+agent: codex
+capture_date: '2026-06-20'
+capture_date_position: end
+capture_mode: converted_text_fixture
+captured_at: '2026-06-20T00:00:00-07:00'
+case_name: completed_prompt
+claude_version: ''
+client_name: Codex CLI
+client_version: synthetic Codex CLI fixture
+client_version_slug: codex-cli-synthetic
+codex_version: ''
+cursor: {}
+expected:
+  approval_visible: false
+  ask: false
+  negative_reason_contains: stale
+  screen_key: idle
+expected_screen_key: idle
+failures: []
+filename_convention: case_name__client-token_date
+fixture_id: completed_prompt__codex-cli-synthetic_20260620
+id: completed_prompt__codex-cli-synthetic_20260620
+operations: []
+raw_capture: " Codex wants to run a shell command\n\n Would you like to run the following command?\n\n   Reason: Print a marker.\n\
+  \n   $ echo done\n\n › 1. Yes, proceed (y)\n   2. No, and tell Codex what to do differently (esc)\n\n Press enter to confirm\
+  \ or esc to cancel\n● Ran echo done\n  ⎿ done\n\n› \n"
+source: synthetic answered Codex approval followed by command output
+source_fixture_id: completed-prompt
+source_text_file: completed_prompt.txt
+styled_capture: " Codex wants to run a shell command\n\n Would you like to run the following command?\n\n   Reason: Print\
+  \ a marker.\n\n   $ echo done\n\n › 1. Yes, proceed (y)\n   2. No, and tell Codex what to do differently (esc)\n\n Press\
+  \ enter to confirm or esc to cancel\n● Ran echo done\n  ⎿ done\n\n› \n"
+visible_text: " Codex wants to run a shell command\n\n Would you like to run the following command?\n\n   Reason: Print a\
+  \ marker.\n\n   $ echo done\n\n › 1. Yes, proceed (y)\n   2. No, and tell Codex what to do differently (esc)\n\n Press enter\
+  \ to confirm or esc to cancel\n● Ran echo done\n  ⎿ done\n\n› \n"

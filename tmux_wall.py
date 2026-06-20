@@ -27,11 +27,14 @@ from typing import Any
 from urllib.parse import parse_qs
 from urllib.parse import urlparse
 
+from yolomux_lib.agent_tui import capture_agent_pane
+from yolomux_lib.agent_tui import classify_agent_pane
 from yolomux_lib.common import split_csv
 from yolomux_lib.tmux_utils import cmd_error
 from yolomux_lib.tmux_utils import run_cmd
 from yolomux_lib.tmux_utils import tmux
 from yolomux_lib.tmux_utils import tmux_capture_pane
+from yolomux_lib.tmux_utils import tmux_capture_pane_styled
 
 
 DEFAULT_SESSIONS = ("project1", "project2", "project3", "project4")
@@ -228,14 +231,40 @@ def default_targets(panes: list[PaneInfo], slots: int) -> list[str]:
     return selected[:slots]
 
 
+def capture_pane_state(target: str, lines: int) -> tuple[str, str | None, dict[str, Any]]:
+    def capture_func(pane_target: str, visible_only: bool = False) -> str | None:
+        return tmux_capture_pane(pane_target, lines=lines, visible_only=visible_only, timeout=3.0)
+
+    def capture_styled_func(pane_target: str, visible_only: bool = False) -> str | None:
+        return tmux_capture_pane_styled(pane_target, lines=lines, visible_only=visible_only, timeout=3.0)
+
+    capture = capture_agent_pane(
+        target,
+        visible_only=False,
+        styled=False,
+        include_cursor=False,
+        capture_func=capture_func,
+        capture_styled_func=capture_styled_func,
+    )
+    state = classify_agent_pane(
+        target,
+        session=target.split(":", 1)[0],
+        prompt_source="pane",
+        include_composer=False,
+        include_cursor=False,
+        include_transcript_activity=False,
+        capture_func=capture_func,
+        capture_styled_func=capture_styled_func,
+    )
+    state_payload = state.as_dict()
+    text = capture.visible_text.rstrip("\n") if capture.ok else ""
+    error = capture.error or None
+    return text, error, state_payload
+
+
 def capture_pane(target: str, lines: int) -> tuple[str, str | None]:
-    # route through the shared tmux_utils.tmux_capture_pane so the wall gets the same -J
-    # wrapped-line rejoin + exact-target resolution as the main app. The wall previously
-    # forked this with a bare capture-pane that dropped -J, so a wrapped command rendered differently here.
-    output = tmux_capture_pane(target, lines=lines, timeout=3.0)
-    if output is None:
-        return "", "tmux capture-pane failed"
-    return output.rstrip("\n"), None
+    text, error, _state = capture_pane_state(target, lines)
+    return text, error
 
 
 def parse_container_table(text: str) -> list[dict[str, str]]:
@@ -302,7 +331,7 @@ class TmuxWallApp:
             if index < len(discovered["targets"]):
                 target = discovered["targets"][index]
                 pane = discovered["pane_by_target"].get(target)
-                text, error = capture_pane(target, capture_lines)
+                text, error, state = capture_pane_state(target, capture_lines)
                 slots.append(
                     {
                         "index": index,
@@ -310,6 +339,14 @@ class TmuxWallApp:
                         "pane": asdict(pane) if pane else None,
                         "text": text,
                         "error": error,
+                        "state": state,
+                        "screen": state.get("screen") or {},
+                        "display": state.get("display") or {},
+                        "approval": state.get("approval") or {},
+                        "attention_kind": state.get("attention_kind") or "",
+                        "attention_label": state.get("attention_label") or "",
+                        "agent_kind": state.get("agent_kind") or "",
+                        "reason_code": state.get("reason_code") or "",
                     }
                 )
             else:
@@ -334,13 +371,21 @@ class TmuxWallApp:
     def transcript(self, target: str, lines: int) -> dict[str, Any]:
         panes, tmux_error = list_panes()
         pane_by_target = {pane.target: pane for pane in panes}
-        text, error = capture_pane(target, lines)
+        text, error, state = capture_pane_state(target, lines)
         return {
             "target": target,
             "pane": asdict(pane_by_target[target]) if target in pane_by_target else None,
             "lines": lines,
             "text": text,
             "error": error or tmux_error,
+            "state": state,
+            "screen": state.get("screen") or {},
+            "display": state.get("display") or {},
+            "approval": state.get("approval") or {},
+            "attention_kind": state.get("attention_kind") or "",
+            "attention_label": state.get("attention_label") or "",
+            "agent_kind": state.get("agent_kind") or "",
+            "reason_code": state.get("reason_code") or "",
         }
 
 

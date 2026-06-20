@@ -1,0 +1,89 @@
+agent: codex
+capture_date: '2026-06-20'
+capture_date_position: end
+capture_mode: converted_real_text_capture
+captured_at: '2026-06-20T00:00:00-07:00'
+case_name: choice_question_real
+claude_version: ''
+client_name: Codex CLI
+client_version: codex-cli 0.141.0
+client_version_slug: codex-cli-0.141.0
+codex_version: codex-cli 0.141.0
+cursor: {}
+expected:
+  action: null
+  agent: codex
+  approval_visible: false
+  ask: true
+  command: null
+  confidence_min: 0.9
+  option_labels:
+  - Pane capture
+  - Transcript capture
+  prompt_kind: question
+  prompt_type: ''
+  question_text: Which YOLOmux verifier mode should we use?
+  screen_key: needs-input
+  selected_option: 0
+  yes_selected: false
+expected_promoted:
+  agent_kind: codex
+  approval_type: ''
+  approval_visible: false
+  attention_kind: question
+  attention_label: ASK?
+  composer_key: draft
+  reason_code: needs-input
+  screen_key: needs-input
+expected_screen_key: needs-input
+failures: []
+filename_convention: case_name__client-token_date
+fixture_id: choice_question_real__codex-cli-0.141.0_20260620
+fixture_scenario: choice_question_real
+id: choice_question_real__codex-cli-0.141.0_20260620
+operations: []
+raw_capture: |
+  › Ask me this question and wait for my answer instead of choosing yourself: Which YOLOmux verifier mode should we use?
+    1. Pane capture 2. Transcript capture
+
+
+  • Which YOLOmux verifier mode should we use?
+
+    1. Pane capture
+    2. Transcript capture
+
+
+  › Improve documentation in @filename
+
+    gpt-5.5 xhigh · ~/yolomux.dev8001
+source: real Codex CLI 0.141.0 question followed by ghost-suggestion composer
+source_fixture_id: codex-real-question-0-141-0
+source_text_file: codex_real_question_0_141_0.txt
+styled_capture: |
+  › Ask me this question and wait for my answer instead of choosing yourself: Which YOLOmux verifier mode should we use?
+    1. Pane capture 2. Transcript capture
+
+
+  • Which YOLOmux verifier mode should we use?
+
+    1. Pane capture
+    2. Transcript capture
+
+
+  › Improve documentation in @filename
+
+    gpt-5.5 xhigh · ~/yolomux.dev8001
+visible_text: |
+  › Ask me this question and wait for my answer instead of choosing yourself: Which YOLOmux verifier mode should we use?
+    1. Pane capture 2. Transcript capture
+
+
+  • Which YOLOmux verifier mode should we use?
+
+    1. Pane capture
+    2. Transcript capture
+
+
+  › Improve documentation in @filename
+
+    gpt-5.5 xhigh · ~/yolomux.dev8001

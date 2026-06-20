@@ -249,6 +249,30 @@ class ClientIntentRow:
     notes: str
 
 
+@dataclass(frozen=True)
+class SlashCommandSpec:
+    name: str
+    owner: str
+    codex_help: str = ""
+    claude_help: str = ""
+    codex_compat: str = ""
+    claude_compat: str = ""
+
+    def help_for(self, client: str) -> str:
+        if client == "codex":
+            return self.codex_help
+        if client == "claude":
+            return self.claude_help
+        raise ValueError(f"unknown text client: {client}")
+
+    def compat_for(self, client: str) -> str:
+        if client == "codex":
+            return self.codex_compat
+        if client == "claude":
+            return self.claude_compat
+        raise ValueError(f"unknown text client: {client}")
+
+
 def markdown_code_cell(text: str) -> str:
     escaped = text.replace("&", "&amp;").replace("|", "&#124;").replace("<", "&lt;").replace(">", "&gt;")
     return f"<code>{escaped}</code>"
@@ -329,6 +353,46 @@ CLIENT_INTENT_ROWS = (
     ClientIntentRow("Diagnostics", "`text_client.debug_json`, `text_client.raw_output`, `/raw`", "`text_client.raw_json`, `/raw`", "Similar", "Both are prototype diagnostics, not the main answer stream."),
     ClientIntentRow("Metrics", f"`{CLIENT_SHARED_CONFIG_KEYS.metrics}`, `/metrics`", f"`{CLIENT_SHARED_CONFIG_KEYS.metrics}`, `/metrics`", "Yes", "Shared metric names and formatting come from `TextClientBase`."),
 )
+
+
+SLASH_COMMAND_SPECS = (
+    SlashCommandSpec("status", "shared", codex_help="/status                       show current session configuration", claude_help="/status                         show current session configuration"),
+    SlashCommandSpec("context", "shared", codex_help="/context                      show session context known to this client", claude_help="/context                        show session context known to this client"),
+    SlashCommandSpec("usage", "shared", codex_help="/usage                        show last-turn token usage when available", claude_help="/usage                          show last-turn cost and token usage"),
+    SlashCommandSpec("metrics", "shared", codex_help="/metrics [on|off|last]        show TTFT, ISL/OSL, token rate, and tool timing", claude_help="/metrics [on|off|last]          show TTFT, ISL/OSL, token rate, and tool timing"),
+    SlashCommandSpec("model", "shared", codex_help=f"/model [model] [effort]       choose model and {CODEX_OUTPUT_TERMS.lower_label} effort", claude_help="/model [model]                  show or change model", codex_compat="Implemented here to match the Claude-style runtime model switch.", claude_compat="Implemented here to match Codex-style runtime model switching."),
+    SlashCommandSpec("effort", "shared", codex_help=f"/effort [level]               choose {CODEX_OUTPUT_TERMS.lower_label} effort", claude_help="/effort [level]                 show or change effort: low, medium, high, xhigh, max", codex_compat=f"Claude has a native /effort command; codex.py maps it to Codex {CODEX_OUTPUT_TERMS.lower_label} effort."),
+    SlashCommandSpec("permission", "compat", codex_help="/permission [mode]            alias for /permissions", claude_help="/permission [mode]              alias for /permission-mode", codex_compat="Implemented by codex.py for Claude permission-command muscle memory."),
+    SlashCommandSpec("permission-mode", "compat", codex_help="/permission-mode [mode]       alias for /permissions", claude_help="/permission-mode [mode]         show or change Claude permission mode", codex_compat="Implemented by codex.py for Claude permission-command muscle memory.", claude_compat="Implemented here as a runtime wrapper around Claude's --permission-mode flag."),
+    SlashCommandSpec("permissions", "shared", codex_help="/permissions [mode]           choose what Codex is allowed to do", claude_help="/permissions [mode]             alias for /permission-mode"),
+    SlashCommandSpec("thinking", "shared", codex_help=f"/thinking [mode]              compatibility alias for Codex {CODEX_OUTPUT_TERMS.lower_label} output", claude_help=f"/thinking [on|off]              toggle gray {CLAUDE_OUTPUT_TERMS.lower_label} output", codex_compat=f"Implemented by codex.py as a Claude-style alias for Codex {CODEX_OUTPUT_TERMS.lower_label} output.", claude_compat=f"Implemented by claude.py to toggle clone-specific {CLAUDE_OUTPUT_TERMS.lower_label} display."),
+    SlashCommandSpec("reasoning", "shared", codex_help=f"/reasoning [mode]             configure Codex {CODEX_OUTPUT_TERMS.lower_label} output", claude_help=f"/reasoning [on|off]             compatibility alias for /thinking", claude_compat=f"Implemented by claude.py as a Codex-style alias for Claude {CLAUDE_OUTPUT_TERMS.lower_label} output."),
+    SlashCommandSpec("fast", "codex", codex_help="/fast [on|off]                toggle Fast mode for later turns"),
+    SlashCommandSpec("config", "shared", codex_help="/config [key=value ...]       show or change -c style settings", claude_help="/config [key=value ...]         show or change client settings"),
+    SlashCommandSpec("resume", "shared", codex_help="/resume <thread-id>           continue a specific thread", claude_help="/resume <session-id>            continue a specific Claude session"),
+    SlashCommandSpec("raw", "shared", codex_help="/raw [on|off]                 toggle raw-output mode marker", claude_help="/raw [on|off]                   toggle raw stream-json diagnostics", codex_compat="Implemented by this text client to toggle clone-specific raw output state.", claude_compat="Implemented by this text client to toggle clone-specific stream-json diagnostics."),
+    SlashCommandSpec("clear", "shared", codex_help="/clear                        clear conversation context; next turn starts a new thread", claude_help="/clear                          clear conversation context; next turn starts a new session"),
+    SlashCommandSpec("cls", "shared", codex_help="/cls                          clear the terminal screen only", claude_help="/cls                            clear the terminal screen only"),
+    SlashCommandSpec("quit", "shared", codex_help="/quit                         exit", claude_help="/quit                           exit"),
+    SlashCommandSpec("exit", "shared", codex_help="/exit                         alias for /quit", claude_help="/exit                           alias for /quit"),
+    SlashCommandSpec("help", "shared", codex_help="/help                         show this help", claude_help="/help                           show this help"),
+)
+SLASH_COMMAND_SPEC_BY_NAME = {spec.name: spec for spec in SLASH_COMMAND_SPECS}
+
+
+def client_slash_commands(client: str, extra_commands: Iterable[str] = ()) -> list[str]:
+    commands = [spec.name for spec in SLASH_COMMAND_SPECS if spec.help_for(client)]
+    commands.extend(extra_commands)
+    return sorted(set(commands))
+
+
+def client_slash_help_rows(client: str) -> list[str]:
+    return [f"  {spec.help_for(client)}" for spec in SLASH_COMMAND_SPECS if spec.help_for(client)]
+
+
+def slash_command_compat_note(client: str, command: str) -> str:
+    spec = SLASH_COMMAND_SPEC_BY_NAME.get(command)
+    return spec.compat_for(client) if spec is not None else ""
 
 
 def client_intent_markdown_rows() -> list[str]:

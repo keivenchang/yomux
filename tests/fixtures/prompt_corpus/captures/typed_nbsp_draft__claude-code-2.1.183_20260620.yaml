@@ -1,0 +1,179 @@
+actual:
+  agent_kind: claude
+  approval:
+    approval_action: ''
+    approval_type: ''
+    approval_visible: false
+    command: ''
+    dangerous: false
+    prompt_hash: ''
+    risk: ''
+    rule_input_text: ''
+    selected_option: 0
+    source: ''
+  attention_kind: ''
+  attention_label: ''
+  composer:
+    accepting: false
+    detected_text: old-draft-for-yolomux-verifier
+    evidence: cursor-after-suggestion-text
+    key: draft
+    prompt_suggestion: false
+    text: old-draft-for-yolomux-verifier
+  cursor:
+    character: ' '
+    current_command: claude
+    pane_in_mode: false
+    x: 32
+    y: 31
+  display:
+    attention_kind: ''
+    attention_label: ''
+    evidence_lines: []
+    options: []
+    prompt_hash: ''
+    prompt_kind: ''
+    question_text: target input box already contains unsent text
+    screen_key: input-draft
+    selected_option: 0
+  prompt:
+    action: null
+    agent: unknown
+    command: null
+    confidence: 0.0
+    dangerous: false
+    evidence_lines: []
+    hash: ''
+    negative_reason: idle composer
+    options: []
+    prompt_kind: ''
+    question_text: ''
+    selected_option: 0
+    signature: ''
+    source: pane
+    text: ''
+    type: ''
+    visible: false
+    yes_selected: false
+  reason_code: draft-clearable
+  screen:
+    detected_text: old-draft-for-yolomux-verifier
+    key: input-draft
+    text: target input box already contains unsent text
+  target: '%promoted-fixture'
+agent: claude
+capture_date: '2026-06-20'
+capture_date_position: end
+capture_mode: visible
+captured_at: '2026-06-20T10:42:35.984433+00:00'
+case_name: typed_nbsp_draft
+claude_version: 2.1.183 (Claude Code)
+client_name: Claude Code
+client_version: 2.1.183 (Claude Code)
+client_version_slug: claude-code-2.1.183
+codex_version: ''
+cursor:
+  character: ' '
+  current_command: claude
+  pane_in_mode: false
+  x: 32
+  y: 31
+description: 'Negative: Claude NBSP composer text with advanced cursor is a clearable draft, not a ghost prompt'
+evidence_fields:
+  display_evidence_lines: []
+  prompt_hash: ''
+  screen_evidence_lines: null
+expected:
+  agent_kind: claude
+  approval_visible: 'false'
+  attention_kind: ''
+  clear_cleared: 'true'
+  clear_ok: 'true'
+  composer_key: ghost
+  reason_code: idle
+  screen_key: idle
+  send_ok: ''
+  send_reason_code: ''
+expected_promoted:
+  agent_kind: claude
+  approval_type: ''
+  approval_visible: false
+  attention_kind: ''
+  attention_label: ''
+  composer_key: draft
+  reason_code: draft-clearable
+  screen_key: input-draft
+failures: []
+filename_convention: case_name__client-token_date
+fixture_id: typed_nbsp_draft__claude-code-2.1.183_20260620
+fixture_scenario: typed_nbsp_draft
+id: typed_nbsp_draft__claude-code-2.1.183_20260620
+operations:
+- result:
+    cleared: false
+    detected_text: ''
+    ok: true
+  type: clear_composer
+raw_capture: "        ompactHomePath` is a hoisted `function`, so Tabber code in                              \n     … +47\
+  \ lines                                                                                  \n\n● Created two new debug/feature\
+  \ queues, both grounded in the actual code:                       \n                                                   \
+  \                                              \n  DOIT.differ_repo_flicker_ai_config.md — the Differ flicker on 8001. Traced\
+  \ the repo list to its\n  real source: /api/session-files → session_files.py repos[] ←                                 \
+  \     \n  metadata.py::candidate_session_cwd_entries (where the transcript-derived session_touched_dirs tier\n  is the prime\
+  \ suspect for ~/ai-config entering), polled by fetchSessionFiles and rendered by    \n  renderChangesGroups. The queue's\
+  \ leading hypothesis is a cutoff-boundary flicker (a file under \n  ~/ai-config touched near the 24h window edge crosses\
+  \ in/out each refresh), with alternates        \n  (clean-repo drop, mtime-cache expiry) to confirm with evidence. Fix is\
+  \ in the shared              \n  candidate/repo pipeline (hysteresis / stable cutoff bucket) — explicitly not name-matching\
+  \        \n  ai-config — keeping ~/yolomux.dev8001 always shown, plus a test_session_files.py regression   \n  pinning repo-set\
+  \ stability across the boundary.                                                   \n                                  \
+  \                                                               \n  DOIT.tabber_home_path_tilde.md — show ~/... instead\
+  \ of /home/<user>/... in Tabber. The key        \n  finding: a shared compactHomePath() parent already exists (70_layout_actions.js:1123),\
+  \ so the     \n  queue routes the Tabber session label/description path through it rather than adding a parallel   \n  /home/\
+  \ replace (avoiding the divergent-copy drift this repo keeps hitting). It scopes the change  \n  to the human-visible path\
+  \ only — leaving the synthetic /s_<token> tree ids (tabberSessionPath)    \n  untouched — and notes the bundle is one scope\
+  \ so calling the hoisted compactHomePath from      \n  40_file_explorer_files.js is safe. Test goes in tabber.test.js. \
+  \                                \n                                                                                    \
+  \                \n  Both follow the existing queue style (findings → tasks → done criteria, real file:symbol pointers,\n\
+  \  ending on tools/static_build.py + tools/check.py). Note: the concurrent session is still active   \n  in this worktree,\
+  \ so it may pick these up (or churn other DOIT files) on its own.                 \n\n✻ Churned for 2m 31s             \
+  \                                                                   \n                                                 \
+  \            new task? /clear to save 453.4k tokens\n────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  ❯ old-draft-for-yolomux-verifier           \n────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  \  ⏵⏵ auto mode on (shift+tab to cycle)\n"
+source_capture_status: promoted; staging discarded after promotion
+source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T104236Z.yaml
+styled_capture: "        ompactHomePath` is a hoisted `function`, so Tabber code in                              \n     …\
+  \ +47 lines                                                                                  \n\n● Created two new debug/feature\
+  \ queues, both grounded in the actual code:                       \n                                                   \
+  \                                              \n  DOIT.differ_repo_flicker_ai_config.md — the Differ flicker on 8001. Traced\
+  \ the repo list to its\n  real source: /api/session-files → session_files.py repos[] ←                                 \
+  \     \n  metadata.py::candidate_session_cwd_entries (where the transcript-derived session_touched_dirs tier\n  is the prime\
+  \ suspect for ~/ai-config entering), polled by fetchSessionFiles and rendered by    \n  renderChangesGroups. The queue's\
+  \ leading hypothesis is a cutoff-boundary flicker (a file under \n  ~/ai-config touched near the 24h window edge crosses\
+  \ in/out each refresh), with alternates        \n  (clean-repo drop, mtime-cache expiry) to confirm with evidence. Fix is\
+  \ in the shared              \n  candidate/repo pipeline (hysteresis / stable cutoff bucket) — explicitly not name-matching\
+  \        \n  ai-config — keeping ~/yolomux.dev8001 always shown, plus a test_session_files.py regression   \n  pinning repo-set\
+  \ stability across the boundary.                                                   \n                                  \
+  \                                                               \n  DOIT.tabber_home_path_tilde.md — show ~/... instead\
+  \ of /home/<user>/... in Tabber. The key        \n  finding: a shared compactHomePath() parent already exists (70_layout_actions.js:1123),\
+  \ so the     \n  queue routes the Tabber session label/description path through it rather than adding a parallel   \n  /home/\
+  \ replace (avoiding the divergent-copy drift this repo keeps hitting). It scopes the change  \n  to the human-visible path\
+  \ only — leaving the synthetic /s_<token> tree ids (tabberSessionPath)    \n  untouched — and notes the bundle is one scope\
+  \ so calling the hoisted compactHomePath from      \n  40_file_explorer_files.js is safe. Test goes in tabber.test.js. \
+  \                                \n                                                                                    \
+  \                \n  Both follow the existing queue style (findings → tasks → done criteria, real file:symbol pointers,\n\
+  \  ending on tools/static_build.py + tools/check.py). Note: the concurrent session is still active   \n  in this worktree,\
+  \ so it may pick these up (or churn other DOIT files) on its own.                 \n\n✻ Churned for 2m 31s             \
+  \                                                                   \n                                                 \
+  \            new task? /clear to save 453.4k tokens\n────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  ❯ old-draft-for-yolomux-verifier           \n────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  \  ⏵⏵ auto mode on (shift+tab to cycle)\n"
+tmux_socket: ''
+tmux_target: '8001:1.0'
+verifier_capabilities:
+- raw-capture
+- styled-capture
+- cursor-facts
+- central-clear-composer
+- central-send-prompt
+- visible-status-counter

@@ -14,6 +14,13 @@ import subprocess
 import sys
 import time
 
+import yaml
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO_ROOT))
+
+from yolomux_lib.agent_tui import agent_client_version_slug
+
 
 TOKEN_RE = re.compile(
     r"\b(?:"
@@ -25,6 +32,22 @@ TOKEN_RE = re.compile(
     r"|hf_[A-Za-z0-9_]{10,}"
     r")\b"
 )
+
+
+class LiteralStringDumper(yaml.SafeDumper):
+    pass
+
+
+def _represent_string(dumper: yaml.SafeDumper, value: str) -> yaml.nodes.ScalarNode:
+    style = "|" if "\n" in value else None
+    return dumper.represent_scalar("tag:yaml.org,2002:str", value, style=style)
+
+
+LiteralStringDumper.add_representer(str, _represent_string)
+
+
+def dump_fixture_yaml(data: dict) -> str:
+    return yaml.dump(data, Dumper=LiteralStringDumper, allow_unicode=True, sort_keys=True, width=120)
 
 
 def parse_size(value: str) -> tuple[int, int]:
@@ -99,12 +122,18 @@ def fixture_id(value: str) -> str:
     return normalized.strip("._-")
 
 
-def fixture_paths(output_dir: Path, base: str, sizes: list[tuple[int, int]]) -> list[tuple[tuple[int, int], Path, Path]]:
+def client_version_slug(agent: str, claude_version: str = "", codex_version: str = "") -> str:
+    version = claude_version if agent == "claude" else codex_version if agent == "codex" else (claude_version or codex_version)
+    return agent_client_version_slug(agent, version)
+
+
+def fixture_paths(output_dir: Path, base: str, sizes: list[tuple[int, int]], *, version_slug: str = "generic-agent", capture_date: str = "00000000") -> list[tuple[tuple[int, int], Path]]:
+    version_slug = agent_client_version_slug("", version_slug)
     multi = len(sizes) > 1
     paths = []
     for cols, rows in sizes:
-        suffix = f".{cols}x{rows}" if multi else ""
-        paths.append(((cols, rows), output_dir / f"{base}{suffix}.txt", output_dir / f"{base}{suffix}.capture.json"))
+        size_part = f"_{cols}x{rows}" if multi else ""
+        paths.append(((cols, rows), output_dir / f"{base}{size_part}__{version_slug}_{capture_date}.yaml"))
     return paths
 
 
@@ -176,22 +205,31 @@ def main() -> int:
     target, launched_session = launched_target(args, base, initial_size)
     try:
         drive_prompt(args, target)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        captured_at = now.isoformat()
+        capture_date = now.strftime("%Y%m%d")
+        claude_version = command_version("claude") if args.agent in {"claude", "unknown"} else ""
+        codex_version = command_version("codex") if args.agent in {"codex", "unknown"} else ""
+        version_slug = client_version_slug(args.agent, claude_version, codex_version)
         outputs = []
-        for (cols, rows), text_path, meta_path in fixture_paths(args.output_dir, base, sizes):
+        for (cols, rows), capture_path in fixture_paths(args.output_dir, base, sizes, version_slug=version_slug, capture_date=capture_date):
             if cols and rows:
                 result = run_tmux(args.socket, ["resize-window", "-t", target, "-x", str(cols), "-y", str(rows)])
                 if result.returncode != 0:
                     raise SystemExit(result.stderr.strip() or result.stdout.strip() or "tmux resize-window failed")
             captured = sanitize_text(capture_tmux(target, args.include_scrollback, args.socket))
             metadata = {
-                "id": base,
+                "id": capture_path.stem,
+                "fixture_id": capture_path.stem,
                 "agent": args.agent,
+                "capture_date": now.date().isoformat(),
                 "expected_screen_key": args.expected_screen_key,
                 "source": args.source,
                 "mode": args.mode,
                 "width": cols or None,
                 "height": rows or None,
-                "captured_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "captured_at": captured_at,
+                "capture_mode": "visible",
                 "target": target,
                 "tmux_socket": args.socket,
                 "launched_session": launched_session,
@@ -201,21 +239,27 @@ def main() -> int:
                 "ready_text": list(args.ready_text),
                 "wait_text": list(args.wait_text),
                 "include_scrollback": bool(args.include_scrollback),
-                "claude_version": command_version("claude") if args.agent in {"claude", "unknown"} else "",
-                "codex_version": command_version("codex") if args.agent in {"codex", "unknown"} else "",
+                "client_name": "Claude Code" if args.agent == "claude" else "Codex CLI" if args.agent == "codex" else "unknown",
+                "client_version": claude_version if args.agent == "claude" else codex_version if args.agent == "codex" else (claude_version or codex_version or "unknown"),
+                "client_version_slug": version_slug,
+                "claude_version": claude_version,
+                "codex_version": codex_version,
+                "raw_capture": captured,
+                "styled_capture": captured,
+                "cursor": {},
+                "operations": [],
+                "failures": [],
             }
-            outputs.append((captured, metadata, text_path, meta_path))
+            outputs.append((captured, metadata, capture_path))
         if args.dry_run:
-            for captured, metadata, _text_path, _meta_path in outputs:
+            for captured, metadata, _capture_path in outputs:
                 print(captured, end="")
-                print(json.dumps(metadata, indent=2, sort_keys=True), file=sys.stderr)
+                print(dump_fixture_yaml(metadata), file=sys.stderr)
             return 0
         args.output_dir.mkdir(parents=True, exist_ok=True)
-        for captured, metadata, text_path, meta_path in outputs:
-            text_path.write_text(captured, encoding="utf-8")
-            meta_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            print(f"wrote {text_path}")
-            print(f"wrote {meta_path}")
+        for _captured, metadata, capture_path in outputs:
+            capture_path.write_text(dump_fixture_yaml(metadata), encoding="utf-8")
+            print(f"wrote {capture_path}")
         return 0
     finally:
         if launched_session and args.kill_launched:

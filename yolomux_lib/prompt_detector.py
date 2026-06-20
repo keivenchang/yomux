@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import re
 import shlex
+import time
 
 from . import yolo_rules
 
@@ -387,6 +388,7 @@ def selected_prompt_option(pane_text: str) -> int:
 PROMPT_ACTION = {
     "bash": "option1",
     "file": "option2",
+    "plan": "option1",
     "tool": "option2",
 }
 
@@ -482,6 +484,15 @@ _CLAUDE_AGENT_TOKEN_SUBLINE_RE = re.compile(
     r"^\s*(?:[│├└]\s*)?\S.*\s·\s+(?:\d+\s+tool uses?\s+·\s+)?\d+(?:\.\d+)?[kKmM]?\s+tokens\b",
     re.IGNORECASE,
 )
+_STATUS_COUNTER_STALE_SECONDS = 75.0
+_STATUS_COUNTER_LEADING_MARKERS = "✢✣✤✥✦✧✩✱✲✳✴✵✶✷✸✹✺✻✽✾✿*+·•◦∙⋅.☉○◯●"
+_STATUS_COUNTER_MARKER_RE = re.compile(rf"^\s*(?P<marker>[{re.escape(_STATUS_COUNTER_LEADING_MARKERS)}])\s*(?P<body>\S.*)$")
+_STATUS_COUNTER_ELAPSED_RE = re.compile(r"\b(?:(?P<hours>\d+)h\s*)?(?:(?P<minutes>\d+)m\s*)?(?P<seconds>\d+(?:\.\d+)?)s\b", re.IGNORECASE)
+_STATUS_COUNTER_TOKEN_RE = re.compile(r"(?:[↑↓]\s*)?(?P<count>\d+(?:\.\d+)?)\s*(?P<suffix>[kKmM])?\s+tokens?\b", re.IGNORECASE)
+_STATUS_COUNTER_TOOL_USE_RE = re.compile(r"\b(?P<count>\d+)\s+tool uses?\b", re.IGNORECASE)
+_STATUS_COUNTER_PAYLOAD_RE = re.compile(r"\b(?:thinking|effort|tokens?|tool uses?|esc\s+to\s+interrupt)\b|[↑↓]", re.IGNORECASE)
+_STATUS_COUNTER_BACKGROUND_RE = re.compile(r"^\s*[○◯]\s*\S.*\b\d+(?:\.\d+)?s\s*·\s*(?:[↑↓]\s*)?\d", re.IGNORECASE)
+_VISIBLE_STATUS_COUNTER_CACHE: dict[str, dict[str, object]] = {}
 _BOX_DRAWING_ONLY_LINE_RE = re.compile(r"^[\s│┃╭╮╰╯┌┐└┘├┤┬┴┼─━═╔╗╚╝╠╣╦╩╬]+$")
 _BOXED_EMPTY_INPUT_LINE_RE = re.compile(r"^\s*[│┃]\s*[❯›>]?\s*[█▉▊▋▌▍▎▏_ ]*[│┃]\s*$")
 _EFFORT_STATUS_LINE_RE = re.compile(r"^\s*(?:[^\w\s]\s*)?\S+\s+/effort\b", re.IGNORECASE)
@@ -541,18 +552,24 @@ _INLINE_CONFIRMATION_RE = re.compile(r"\?.*(?:\((?:y/n|yes/no)\)|\[(?:y/N|Y/n|ye
 
 
 def _prompt_options(visible_text: str) -> list[dict[str, object]]:
-    options: list[dict[str, object]] = []
+    option_groups: list[list[dict[str, object]]] = []
+    current_group: list[dict[str, object]] = []
     for line in normalize_capture_text(visible_text).splitlines():
         match = _OPTION_LINE_RE.match(line)
         if not match:
+            if current_group:
+                option_groups.append(current_group)
+                current_group = []
             continue
         marker, number, label = match.groups()
-        options.append({
+        current_group.append({
             "index": int(number),
             "label": re.sub(r"\s+", " ", label).strip(),
             "selected": bool(marker),
         })
-    return options
+    if current_group:
+        option_groups.append(current_group)
+    return option_groups[-1] if option_groups else []
 
 
 def _infer_agent(visible_text: str, prompt_type: str | None = None) -> str:
@@ -656,8 +673,137 @@ def _hash_prompt_parts(*parts: object) -> str:
     return hashlib.md5("\n".join(normalized).encode()).hexdigest()
 
 
+def _parse_status_duration_seconds(line: str) -> float | None:
+    match = _STATUS_COUNTER_ELAPSED_RE.search(line)
+    if not match:
+        return None
+    hours = int(match.group("hours") or 0)
+    minutes = int(match.group("minutes") or 0)
+    seconds = float(match.group("seconds") or 0)
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def _parse_status_token_count(line: str) -> int | None:
+    matches = list(_STATUS_COUNTER_TOKEN_RE.finditer(line))
+    if not matches:
+        return None
+    match = matches[-1]
+    count = float(match.group("count"))
+    suffix = (match.group("suffix") or "").lower()
+    if suffix == "k":
+        count *= 1000
+    elif suffix == "m":
+        count *= 1000000
+    return int(count)
+
+
+def _parse_status_tool_uses(line: str) -> int | None:
+    matches = list(_STATUS_COUNTER_TOOL_USE_RE.finditer(line))
+    if not matches:
+        return None
+    return int(matches[-1].group("count"))
+
+
+def _status_counter_identity(line: str) -> str:
+    identity = _STATUS_COUNTER_ELAPSED_RE.sub("<elapsed>", line.strip())
+    identity = _STATUS_COUNTER_TOKEN_RE.sub("<tokens>", identity)
+    identity = _STATUS_COUNTER_TOOL_USE_RE.sub("<tool-uses>", identity)
+    return re.sub(r"\s+", " ", identity).lower()
+
+
+def parse_agent_status_counter(line: str) -> dict[str, object] | None:
+    """Parse a visible Claude/Codex activity counter line when the line shape is current UI chrome."""
+    stripped = normalize_capture_text(line).strip()
+    if not stripped:
+        return None
+
+    elapsed_seconds = _parse_status_duration_seconds(stripped)
+    tokens = _parse_status_token_count(stripped)
+    tool_uses = _parse_status_tool_uses(stripped)
+    if elapsed_seconds is None and tokens is None and tool_uses is None:
+        return None
+
+    marker_match = _STATUS_COUNTER_MARKER_RE.match(stripped)
+    marker = marker_match.group("marker") if marker_match else ""
+    has_marker = marker_match is not None
+    has_payload = bool(_STATUS_COUNTER_PAYLOAD_RE.search(stripped))
+    has_status_text = "…" in stripped or "..." in stripped or "Working" in stripped or "Reviewing" in stripped
+    is_parenthesized_status = has_marker and elapsed_seconds is not None and "(" in stripped and ")" in stripped and (has_payload or has_status_text)
+    is_codex_status = bool(elapsed_seconds is not None and _WORKING_LINE_RE.search(stripped))
+    is_background_row = bool(elapsed_seconds is not None and tokens is not None and _STATUS_COUNTER_BACKGROUND_RE.search(stripped))
+    is_multi_agent_subline = bool((tokens is not None or tool_uses is not None) and _CLAUDE_AGENT_TOKEN_SUBLINE_RE.search(stripped))
+    if not (is_parenthesized_status or is_codex_status or is_background_row or is_multi_agent_subline):
+        return None
+
+    return {
+        "status_line": stripped,
+        "status_identity": _status_counter_identity(stripped),
+        "status_marker": marker,
+        "status_elapsed_seconds": elapsed_seconds,
+        "status_tokens": tokens,
+        "status_tool_uses": tool_uses,
+    }
+
+
+def _last_status_counter(lines: list[str]) -> tuple[int, dict[str, object] | None]:
+    last_index = -1
+    last_counter = None
+    for index, line in enumerate(lines):
+        counter = parse_agent_status_counter(line)
+        if counter is not None:
+            last_index = index
+            last_counter = counter
+    return last_index, last_counter
+
+
+def _status_counter_advanced(previous: dict[str, object] | None, current: dict[str, object]) -> bool:
+    if not previous:
+        return False
+    if previous.get("status_identity") != current.get("status_identity"):
+        return False
+    for key in ("status_elapsed_seconds", "status_tokens", "status_tool_uses"):
+        old = previous.get(key)
+        new = current.get(key)
+        if isinstance(old, (int, float)) and isinstance(new, (int, float)) and new > old:
+            return True
+    return False
+
+
+def _status_counter_screen_state(counter: dict[str, object], pane_target: str | None = None, now: float | None = None) -> dict[str, object]:
+    now = time.monotonic() if now is None else now
+    advanced = False
+    stale = False
+    last_counter_seen_at = now
+    if pane_target:
+        previous = _VISIBLE_STATUS_COUNTER_CACHE.get(pane_target)
+        previous_counter = previous.get("counter") if previous else None
+        advanced = _status_counter_advanced(previous_counter if isinstance(previous_counter, dict) else None, counter)
+        if previous and previous_counter == counter and not advanced:
+            last_advanced_at = float(previous.get("last_advanced_at") or previous.get("first_seen_at") or now)
+            stale = now - last_advanced_at > _STATUS_COUNTER_STALE_SECONDS
+            last_counter_seen_at = float(previous.get("last_counter_seen_at") or now)
+        if not stale:
+            _VISIBLE_STATUS_COUNTER_CACHE[pane_target] = {
+                "counter": dict(counter),
+                "first_seen_at": previous.get("first_seen_at") if previous else now,
+                "last_advanced_at": now if advanced or not previous else previous.get("last_advanced_at", now),
+                "last_counter_seen_at": now,
+            }
+
+    state = {
+        "key": "idle" if stale else "working",
+        "text": "" if stale else "agent is working",
+        "negative_reason": "stale visible status counter" if stale else "agent is working",
+        "activity_source": "visible-counter",
+        "status_counter_advanced": advanced,
+        "last_counter_seen_at": last_counter_seen_at,
+    }
+    state.update(counter)
+    return state
+
+
 def _is_working_line(line: str) -> bool:
-    return bool(_WORKING_LINE_RE.search(line) or _CLAUDE_MULTI_AGENT_HEADER_RE.search(line))
+    return bool(parse_agent_status_counter(line) is not None or _WORKING_LINE_RE.search(line) or _CLAUDE_MULTI_AGENT_HEADER_RE.search(line))
 
 
 def visible_agent_working(visible_text: str) -> bool:
@@ -669,6 +815,16 @@ def visible_agent_working(visible_text: str) -> bool:
     lines = visible_text.splitlines()[-25:]
     working_index = _last_working_index(lines)
     return working_index >= 0 and not _working_line_has_later_prompt(lines, working_index)
+
+
+def visible_agent_status_counter(visible_text: str) -> dict[str, object] | None:
+    """Return the newest current visible status counter, ignoring stale rows above real output."""
+    visible_text = normalize_capture_text(visible_text)
+    lines = visible_text.splitlines()[-25:]
+    counter_index, counter = _last_status_counter(lines)
+    if counter_index < 0 or counter is None or _working_line_has_later_prompt(lines, counter_index):
+        return None
+    return counter
 
 
 def _working_line_has_later_prompt(lines: list[str], working_index: int) -> bool:
@@ -816,7 +972,7 @@ def _is_prompt_trailing_ui_line(line: str) -> bool:
         return True
     if _CLAUDE_AGENT_TOKEN_SUBLINE_RE.search(stripped):
         return True
-    if re.match(r"^[⎿└]\s+Tip:", stripped, re.IGNORECASE):
+    if re.match(r"^(?:[⎿└]\s*)?Tip:", stripped, re.IGNORECASE):
         return True
     if re.match(r"^(?:gpt|claude|opus|sonnet)[A-Za-z0-9_.-]*\s+.+\s·\s", stripped, re.IGNORECASE):
         return True
@@ -929,12 +1085,12 @@ def visible_choice_prompt_text(visible_text: str) -> str:
                 return ""
             return _clip_prompt_lines(block)
 
-    prompt_line_visible = any(re.match(r"^\s*[❯›>]\s*$", line) for line in lines[-8:])
-    if not prompt_line_visible:
+    prompt_index = _current_input_prompt_index(lines)
+    if prompt_index < 0:
         return ""
-    for line in reversed(lines[:-1]):
+    for line in reversed(lines[:prompt_index]):
         stripped = _clean_prompt_block_line(line)
-        if not stripped or _is_footer_hint_line(stripped) or stripped.startswith(("keivenc@", "$ ")):
+        if not stripped or _is_footer_hint_line(stripped) or _is_prompt_trailing_ui_line(line) or stripped.startswith(("keivenc@", "$ ")):
             continue
         if line.strip().startswith(("●", "•")) and not (_QUESTION_RE.match(stripped) or _INLINE_CONFIRMATION_RE.search(stripped)):
             break
@@ -943,6 +1099,19 @@ def visible_choice_prompt_text(visible_text: str) -> str:
         if _QUESTION_RE.match(stripped) or _INLINE_CONFIRMATION_RE.search(stripped):
             return stripped
     return ""
+
+
+def _current_input_prompt_index(lines: list[str]) -> int:
+    """Return the bottom composer prompt row when only trailing UI follows it."""
+    start = max(0, len(lines) - 12)
+    for index in range(len(lines) - 1, start - 1, -1):
+        stripped = lines[index].strip()
+        if not re.match(r"^[❯›>](?:\s+\S.*)?$", stripped):
+            continue
+        later_lines = lines[index + 1:]
+        if all(not line.strip() or _is_separator_or_footer(line) or _is_prompt_trailing_ui_line(line) for line in later_lines):
+            return index
+    return -1
 
 
 def _choice_prompt_has_later_activity(lines: list[str], end_index: int) -> bool:
@@ -957,7 +1126,7 @@ def _choice_prompt_has_later_activity(lines: list[str], end_index: int) -> bool:
     return False
 
 
-def agent_screen_state(visible_text: str) -> dict[str, object]:
+def agent_screen_state(visible_text: str, pane_target: str | None = None, now: float | None = None) -> dict[str, object]:
     """Classify the visible terminal screen for YOLOmux UI badges.
 
     Approval detection and auto-approval use the same visible pane text as this
@@ -982,6 +1151,9 @@ def agent_screen_state(visible_text: str) -> dict[str, object]:
             "evidence_lines": prompt_state.get("evidence_lines") or [],
             "prompt_hash": prompt_state.get("hash") or "",
         }
+    counter = visible_agent_status_counter(visible_text)
+    if counter is not None:
+        return _status_counter_screen_state(counter, pane_target=pane_target, now=now)
     if visible_agent_working(visible_text):
         return {"key": "working", "text": "agent is working", "negative_reason": "agent is working"}
     question = visible_choice_prompt_text(visible_text)
@@ -1110,11 +1282,13 @@ __all__ = [
     "extract_command",
     "is_dangerous",
     "normalize_capture_text",
+    "parse_agent_status_counter",
     "prompt_hash",
     "prompt_text",
     "selected_prompt_option",
     "stale_approval_behind_working",
     "visible_agent_working",
+    "visible_agent_status_counter",
     "visible_choice_prompt_text",
     "yes_is_selected",
 ]

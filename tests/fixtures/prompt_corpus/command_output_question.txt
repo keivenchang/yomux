@@ -1,7 +1,0 @@
-● Bash(cat fixture.txt)
-  ⎿  output:
-     Do you want to proceed?
-     1. Yes
-     2. No
-
-user@host$ echo done

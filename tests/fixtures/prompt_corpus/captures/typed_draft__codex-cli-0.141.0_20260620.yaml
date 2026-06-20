@@ -1,0 +1,116 @@
+actual:
+  agent_kind: codex
+  approval:
+    approval_action: ''
+    approval_type: ''
+    approval_visible: false
+    command: ''
+    dangerous: false
+    prompt_hash: ''
+    risk: ''
+    rule_input_text: ''
+    selected_option: 0
+    source: ''
+  attention_kind: ''
+  attention_label: ''
+  composer:
+    accepting: false
+    detected_text: run the focused detector tests
+    key: draft
+    prompt_suggestion: false
+    text: run the focused detector tests
+  cursor:
+    character: ' '
+    current_command: node
+    pane_in_mode: false
+    x: 32
+    y: 10
+  display:
+    attention_kind: ''
+    attention_label: ''
+    evidence_lines: []
+    options: []
+    prompt_hash: ''
+    prompt_kind: ''
+    question_text: target input box already contains unsent text
+    screen_key: input-draft
+    selected_option: 0
+  reason_code: draft-clearable
+  screen:
+    detected_text: run the focused detector tests
+    key: input-draft
+    text: target input box already contains unsent text
+agent: codex
+capture_date: '2026-06-20'
+capture_mode: visible
+captured_at: '2026-06-20T16:06:38.515447+00:00'
+case_name: typed_draft
+claude_version: ''
+client_name: Codex CLI
+client_version: codex-cli 0.141.0
+client_version_slug: codex-cli-0.141.0
+codex_version: codex-cli 0.141.0
+cursor:
+  character: ' '
+  current_command: node
+  pane_in_mode: false
+  x: 32
+  y: 10
+evidence_fields:
+  display_evidence_lines: []
+  prompt_hash: ''
+  screen_evidence_lines: null
+expected:
+  approval_visible: false
+  ask: false
+  negative_reason_contains: idle composer
+  screen_key: idle
+expected_promoted:
+  agent_kind: codex
+  approval_type: ''
+  approval_visible: false
+  attention_kind: ''
+  attention_label: ''
+  composer_key: draft
+  reason_code: draft-clearable
+  screen_key: input-draft
+expected_screen_key: idle
+failures: []
+filename_convention: case_name__client-token_date
+fixture_id: typed_draft__codex-cli-0.141.0_20260620
+fixture_scenario: typed_draft
+id: typed_draft__codex-cli-0.141.0_20260620
+operations:
+- needles: []
+  ok: true
+  type: ready_text
+- needles: []
+  ok: true
+  type: wait_text
+- error: ''
+  returncode: 0
+  text_length: 30
+  type: type_text
+provenance: real Codex CLI capture
+raw_capture: "╭─────────────────────────────────────────────╮\n│ >_ OpenAI Codex (v0.141.0)                  │\n│        \
+  \                                     │\n│ model:     gpt-5.5 xhigh   /model to change │\n│ directory: ~/yolomux.dev8001\
+  \                │\n╰─────────────────────────────────────────────╯\n\n  Tip: Switch models or reasoning effort quickly\
+  \ with /model.\n\n\n› run the focused detector tests \n\n  gpt-5.5 xhigh · ~/yolomux.dev8001\n"
+source: real Codex CLI capture
+source_capture_status: promoted from live real Codex CLI capture; staging can be discarded
+source_fixture_id: typed-draft
+source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T160638Z.yaml
+styled_capture: "\e[2m╭─────────────────────────────────────────────╮\n│ >_ \e[0;1mOpenAI Codex\e[0;2m (v0.141.0)        \
+  \          │\n│                                             │\n│ model:     \e[0mgpt-5.5 xhigh\e[2m   \e[0m/model to change\
+  \ │\n\e[2m│ directory: \e[0m~/yolomux.dev8001\e[2m                │\n╰─────────────────────────────────────────────╯\n\n\
+  \e[0m  \e[1mTip:\e[0m Switch models or reasoning effort quickly with /model.\n\n\n\e[1m›\e[0m run the focused detector tests\
+  \ \n\n  gpt-5.5 xhigh · ~/yolomux.dev8001\n"
+tmux_socket: ''
+tmux_target: 'yoreal-codex-inspect:'
+verifier_capabilities:
+- raw-capture
+- styled-capture
+- cursor-facts
+- central-clear-composer
+- central-send-prompt
+- visible-status-counter

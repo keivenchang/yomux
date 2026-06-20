@@ -1,0 +1,209 @@
+actual:
+  agent_kind: codex
+  approval:
+    approval_action: option1
+    approval_type: bash
+    approval_visible: true
+    command: sleep 10
+    dangerous: false
+    prompt_hash: 39d2fe1c62d60e7c80988a2b66bd21e8
+    risk: ''
+    rule_input_text: sleep 10
+    selected_option: 1
+    source: pane
+  attention_kind: approval
+  attention_label: YOLO?
+  composer:
+    accepting: true
+    detected_text: ''
+    key: empty
+    prompt_suggestion: false
+    text: ''
+  cursor:
+    character: ' '
+    current_command: node
+    pane_in_mode: false
+    x: 1
+    y: 23
+  display:
+    attention_kind: approval
+    attention_label: YOLO?
+    evidence_lines:
+    - Would you like to run the following command?
+    - $ sleep 10
+    - 1. Yes, proceed (y)
+    - 2. Yes, and don't ask again for commands that start with `sleep 10` (p)
+    - 3. No, and tell Codex what to do differently (esc)
+    options:
+    - index: 1
+      label: Yes, proceed (y)
+      selected: true
+    - index: 2
+      label: Yes, and don't ask again for commands that start with `sleep 10` (p)
+      selected: false
+    - index: 3
+      label: No, and tell Codex what to do differently (esc)
+      selected: false
+    prompt_hash: 39d2fe1c62d60e7c80988a2b66bd21e8
+    prompt_kind: shell-command
+    question_text: Would you like to run the following command?
+    screen_key: approval
+    selected_option: 1
+  reason_code: approval
+  screen:
+    agent: codex
+    command: null
+    confidence: 0.95
+    evidence_lines:
+    - Would you like to run the following command?
+    - $ sleep 10
+    - 1. Yes, proceed (y)
+    - 2. Yes, and don't ask again for commands that start with `sleep 10` (p)
+    - 3. No, and tell Codex what to do differently (esc)
+    key: approval
+    options:
+    - index: 1
+      label: Yes, proceed (y)
+      selected: true
+    - index: 2
+      label: Yes, and don't ask again for commands that start with `sleep 10` (p)
+      selected: false
+    - index: 3
+      label: No, and tell Codex what to do differently (esc)
+      selected: false
+    prompt_hash: 39d2fe1c62d60e7c80988a2b66bd21e8
+    prompt_kind: shell-command
+    prompt_type: bash
+    question_text: Would you like to run the following command?
+    selected_option: 1
+    text: Would you like to run the following command?
+agent: codex
+capture_date: '2026-06-20'
+capture_mode: visible
+captured_at: '2026-06-20T16:08:05.813588+00:00'
+case_name: shell_sleep_10_3_option
+claude_version: ''
+client_name: Codex CLI
+client_version: codex-cli 0.141.0
+client_version_slug: codex-cli-0.141.0
+codex_version: codex-cli 0.141.0
+cursor:
+  character: ' '
+  current_command: node
+  pane_in_mode: false
+  x: 1
+  y: 23
+evidence_fields:
+  display_evidence_lines:
+  - Would you like to run the following command?
+  - $ sleep 10
+  - 1. Yes, proceed (y)
+  - 2. Yes, and don't ask again for commands that start with `sleep 10` (p)
+  - 3. No, and tell Codex what to do differently (esc)
+  prompt_hash: 39d2fe1c62d60e7c80988a2b66bd21e8
+  screen_evidence_lines:
+  - Would you like to run the following command?
+  - $ sleep 10
+  - 1. Yes, proceed (y)
+  - 2. Yes, and don't ask again for commands that start with `sleep 10` (p)
+  - 3. No, and tell Codex what to do differently (esc)
+expected:
+  action: option1
+  agent: codex
+  approval_visible: true
+  ask: true
+  command: sleep 10
+  confidence_min: 0.9
+  option_labels:
+  - Yes, proceed (y)
+  - Yes, and don't ask again for commands that start with `sleep 10` (p)
+  - No, and tell Codex what to do differently (esc)
+  prompt_kind: shell-command
+  prompt_type: bash
+  question_text: Would you like to run the following command?
+  screen_key: approval
+  selected_option: 1
+  yes_selected: true
+expected_promoted:
+  agent_kind: codex
+  approval_type: bash
+  approval_visible: true
+  attention_kind: approval
+  attention_label: YOLO?
+  composer_key: empty
+  reason_code: approval
+  screen_key: approval
+expected_screen_key: approval
+failures: []
+filename_convention: case_name__client-token_date
+fixture_id: shell_sleep_10_3_option__codex-cli-0.141.0_20260620
+fixture_scenario: shell_sleep_10_3_option
+id: shell_sleep_10_3_option__codex-cli-0.141.0_20260620
+operations:
+- needles: []
+  ok: true
+  type: ready_text
+- needles: []
+  ok: true
+  type: wait_text
+- result:
+    clear:
+      cleared: false
+      detected_text: ''
+      ok: true
+    cleared: false
+    ok: true
+    pasted: true
+    reason_code: submitted
+    returncode: 0
+    sent: true
+  text_length: 40
+  type: send_prompt
+provenance: real Codex CLI capture
+raw_capture: |
+  ╭─────────────────────────────────────────────╮
+  │ >_ OpenAI Codex (v0.141.0)                  │
+  │                                             │
+  │ model:     gpt-5.5 xhigh   /model to change │
+  │ directory: ~/yolomux.dev8001                │
+  ╰─────────────────────────────────────────────╯
+
+    Tip: New Use /fast to enable our fastest inference with increased plan usage.
+
+
+  › Please run the shell command `sleep 10`.
+
+
+  ◦ Running sleep 10
+
+
+    Would you like to run the following command?
+
+    $ sleep 10
+
+  › 1. Yes, proceed (y)
+    2. Yes, and don't ask again for commands that start with `sleep 10` (p)
+    3. No, and tell Codex what to do differently (esc)
+
+    Press enter to confirm or esc to cancel
+source: real Codex CLI capture
+source_capture_status: promoted from live real Codex CLI capture; staging can be discarded
+source_fixture_id: codex-shell-sleep-10-3-option
+source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T160805Z.yaml
+styled_capture: "\e[2m╭─────────────────────────────────────────────╮\n│ >_ \e[0;1mOpenAI Codex\e[0;2m (v0.141.0)        \
+  \          │\n│                                             │\n│ model:     \e[0mgpt-5.5 xhigh\e[2m   \e[0m/model to change\
+  \ │\n\e[2m│ directory: \e[0m~/yolomux.dev8001\e[2m                │\n╰─────────────────────────────────────────────╯\n\n\
+  \e[0m  \e[1mTip:\e[0m \e[3mNew\e[0m Use \e[1m/fast\e[0m to enable our fastest inference with increased plan usage.\n\n\n\
+  \e[1;2m› \e[0mPlease run the shell command `sleep 10`.\n\n\n\e[2m◦\e[0m \e[1mRunning\e[0m sleep 10\n\n\n  Would you like\
+  \ to run the following command?\n\n  $ sleep 10\n\n› 1. Yes, proceed (y)\n  2. Yes, and don't ask again for commands that\
+  \ start with `sleep 10` (\e[2mp\e[0m)\n  3. No, and tell Codex what to do differently (\e[2mesc\e[0m)\n\n  \e[2mPress enter\
+  \ to confirm or esc to cancel\n"
+tmux_socket: ''
+tmux_target: 'yoreal-codex-approval:'
+verifier_capabilities:
+- raw-capture
+- styled-capture
+- cursor-facts
+- central-clear-composer
+- central-send-prompt
+- visible-status-counter

@@ -1,0 +1,133 @@
+actual:
+  agent_kind: claude
+  approval:
+    approval_action: ''
+    approval_type: ''
+    approval_visible: false
+    command: ''
+    dangerous: false
+    prompt_hash: ''
+    risk: ''
+    rule_input_text: ''
+    selected_option: 0
+    source: ''
+  attention_kind: working
+  attention_label: RUN
+  composer:
+    accepting: true
+    detected_text: ''
+    key: empty
+    prompt_suggestion: false
+    text: ''
+  cursor:
+    character: ' '
+    current_command: claude
+    pane_in_mode: false
+    x: 2
+    y: 37
+  display:
+    attention_kind: working
+    attention_label: RUN
+    evidence_lines: []
+    options: []
+    prompt_hash: ''
+    prompt_kind: ''
+    question_text: agent is working
+    screen_key: working
+    selected_option: 0
+  reason_code: busy
+  screen:
+    activity_source: visible-counter
+    key: working
+    last_counter_seen_at: 143732.847913627
+    negative_reason: agent is working
+    status_counter_advanced: false
+    status_elapsed_seconds: 11.0
+    status_identity: · clauding… (<elapsed> · <tokens>)
+    status_line: · Clauding… (11s · ↓ 471 tokens)
+    status_marker: ·
+    status_tokens: 471
+    status_tool_uses: null
+    text: agent is working
+agent: claude
+capture_date: '2026-06-20'
+capture_date_position: end
+capture_mode: visible
+captured_at: '2026-06-20T10:54:42.315536+00:00'
+case_name: working_visible_counter
+claude_version: 2.1.183 (Claude Code)
+client_name: Claude Code
+client_version: 2.1.183 (Claude Code)
+client_version_slug: claude-code-2.1.183
+codex_version: ''
+cursor:
+  character: ' '
+  current_command: claude
+  pane_in_mode: false
+  x: 2
+  y: 37
+evidence_fields:
+  display_evidence_lines: []
+  prompt_hash: ''
+  screen_evidence_lines: null
+expected:
+  agent_kind: claude
+  approval_visible: ''
+  attention_kind: ''
+  clear_cleared: ''
+  clear_ok: ''
+  composer_key: ''
+  reason_code: ''
+  screen_key: ''
+  send_ok: ''
+  send_reason_code: ''
+expected_promoted:
+  agent_kind: claude
+  approval_type: ''
+  approval_visible: false
+  attention_kind: working
+  attention_label: RUN
+  composer_key: empty
+  reason_code: busy
+  screen_key: working
+failures: []
+filename_convention: case_name__client-token_date
+fixture_description: Claude working visible status counter
+fixture_id: working_visible_counter__claude-code-2.1.183_20260620
+fixture_scenario: working_visible_counter
+id: working_visible_counter__claude-code-2.1.183_20260620
+operations:
+- needles: []
+  ok: true
+  type: ready_text
+- needles: []
+  ok: true
+  type: wait_text
+raw_capture: "\n ▐▛███▜▌   Claude Code v2.1.183\n▝▜█████▛▘  Opus 4.8 (1M context) with xhigh effort · API Usage Billing\n\
+  \  ▘▘ ▝▝    ~/yolomux.dev8001\n\n ⚠ Safe mode: all customizations are disabled (CLAUDE.md, skills, plugins, hooks, MCP,\
+  \ agents, and more)\n   Restart without --safe-mode to re-enable\n\n❯ Plan this harmless verification task: run `sleep 10`\
+  \ and then report done. Stop for approval before executing.\n\n● This is a trivial task — no codebase exploration needed.\
+  \ Let me write a minimal plan and prepare to exit plan mode.\n\n● Updated plan\n  ⎿  /plan to preview\n\n\n\n\n\n\n\n\n\n\
+  \n\n\n\n\n\n\n\n\n\n\n· Clauding… (11s · ↓ 471 tokens)                \n                                               \
+  \                                                                        \n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  ❯                                                                                                               \n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  \  ⏸ plan mode on (shift+tab to cycle) · esc to interrupt\n"
+source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T105442Z.yaml
+styled_capture: "\n ▐▛███▜▌   Claude Code v2.1.183\n▝▜█████▛▘  Opus 4.8 (1M context) with xhigh effort · API Usage Billing\n\
+  \  ▘▘ ▝▝    ~/yolomux.dev8001\n\n ⚠ Safe mode: all customizations are disabled (CLAUDE.md, skills, plugins, hooks, MCP,\
+  \ agents, and more)\n   Restart without --safe-mode to re-enable\n\n❯ Plan this harmless verification task: run `sleep 10`\
+  \ and then report done. Stop for approval before executing.\n\n● This is a trivial task — no codebase exploration needed.\
+  \ Let me write a minimal plan and prepare to exit plan mode.\n\n● Updated plan\n  ⎿  /plan to preview\n\n\n\n\n\n\n\n\n\n\
+  \n\n\n\n\n\n\n\n\n\n\n· Clauding… (11s · ↓ 471 tokens)                \n                                               \
+  \                                                                        \n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  ❯                                                                                                               \n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  \  ⏸ plan mode on (shift+tab to cycle) · esc to interrupt\n"
+tmux_socket: /tmp/yoask-real-ui-2552908-0ead450e/s
+tmux_target: yr-claude-2552908-c8fd27:0.0
+verifier_capabilities:
+- raw-capture
+- styled-capture
+- cursor-facts
+- central-clear-composer
+- central-send-prompt
+- visible-status-counter

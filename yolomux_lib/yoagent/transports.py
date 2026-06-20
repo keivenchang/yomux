@@ -21,16 +21,24 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
+from dataclasses import field
 from pathlib import Path
 from typing import Any
 
+from ..agent_tui import send_prompt
 from ..common import PROJECT_ROOT
 from ..common import YOLOMUX_VERSION
 from ..common import codex_exec_argv
 from ..common import codex_runtime_env
 from ..tmux_utils import cmd_error
+from ..tmux_utils import tmux_capture_pane
+from ..tmux_utils import tmux_capture_pane_styled
+from ..tmux_utils import tmux_clear_input
 from ..tmux_utils import tmux_paste_text
 from ..transcripts import codex_event_text
+from .stream_events import ClaudeStreamJsonNormalizer
+from .stream_events import ERROR
+from .stream_events import normalize_codex_app_server_message
 
 
 TMUX_LEGACY_TRANSPORT_ID = "tmux-legacy"
@@ -132,6 +140,9 @@ class TransportSendResult:
     text: str = ""
     error: str = ""
     pasted: bool = False
+    cleared: bool = False
+    clear: dict[str, Any] = field(default_factory=dict)
+    reason_code: str = ""
     returncode: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
@@ -148,6 +159,12 @@ class TransportSendResult:
             payload["error"] = self.error
         if self.pasted:
             payload["pasted"] = True
+        if self.cleared:
+            payload["cleared"] = True
+        if self.clear:
+            payload["clear"] = dict(self.clear)
+        if self.reason_code:
+            payload["reason_code"] = self.reason_code
         if self.returncode is not None:
             payload["returncode"] = self.returncode
         return payload
@@ -399,15 +416,32 @@ class TmuxLegacyTransport(AgentTransport):
 
     def send(self, target: dict[str, Any], text: str, *, submit: bool = True, **kwargs: Any) -> TransportSendResult:
         paste_text = kwargs.get("tmux_paste_text") or tmux_paste_text
-        result = paste_text(str(target.get("pane_target") or target.get("session") or ""), text, submit=submit)
-        if result.returncode != 0:
+        result = send_prompt(
+            target,
+            text,
+            submit=submit,
+            clear_existing=bool(kwargs.get("clear_existing")),
+            verify_submit=bool(kwargs.get("verify_submit")),
+            preflight=bool(kwargs.get("preflight", False)),
+            paste_func=paste_text,
+            capture_func=kwargs.get("tmux_capture_pane") or tmux_capture_pane,
+            capture_styled_func=kwargs.get("tmux_capture_pane_styled") or tmux_capture_pane_styled,
+            clear_func=kwargs.get("tmux_clear_input") or tmux_clear_input,
+        )
+        clear_payload = result.clear_result.as_dict()
+        include_clear = result.cleared or bool(clear_payload.get("detected_text") or clear_payload.get("remaining_text") or clear_payload.get("error"))
+        if not result.ok:
             return TransportSendResult(
                 ok=False,
                 sent=False,
                 transport=self.id,
                 transport_label=self.label,
                 result_source="",
-                error=cmd_error(result, "tmux paste-buffer failed"),
+                error=result.error or "tmux paste-buffer failed",
+                pasted=result.pasted,
+                cleared=result.cleared,
+                clear=clear_payload if include_clear else {},
+                reason_code=result.reason_code,
                 returncode=result.returncode,
             )
         return TransportSendResult(
@@ -417,6 +451,9 @@ class TmuxLegacyTransport(AgentTransport):
             transport_label=self.label,
             result_source="transcript-or-screen",
             pasted=True,
+            cleared=result.cleared,
+            clear=clear_payload if include_clear else {},
+            reason_code=result.reason_code,
             returncode=result.returncode,
         )
 
@@ -753,37 +790,29 @@ class CodexAppServerTransport(AgentTransport):
             method = str(message.get("method") or "")
             params = message.get("params") if isinstance(message.get("params"), dict) else {}
             if message.get("id") is not None and method:
+                if callable(on_event):
+                    for event in normalize_codex_app_server_message(message):
+                        on_event(event)
                 return "", f"codex app-server requested client handling for `{method}`; approval relay is not implemented yet"
+            if callable(on_event):
+                for event in normalize_codex_app_server_message(message):
+                    on_event(event)
             if method == "item/agentMessage/delta":
                 delta = params.get("delta")
                 if isinstance(delta, str):
                     deltas.append(delta)
-                    if callable(on_event):
-                        on_event(
-                            {
-                                "event": "delta",
-                                "thread_id": str(params.get("threadId") or ""),
-                                "turn_id": str(params.get("turnId") or ""),
-                                "item_id": str(params.get("itemId") or ""),
-                                "delta": delta,
-                                "text": "".join(deltas),
-                            }
-                        )
             elif method in {"item/reasoning/delta", "item/thinking/delta", "item/thought/delta"}:
-                if callable(on_event):
-                    on_event(
-                        {
-                            "event": "thinking",
-                            "thread_id": str(params.get("threadId") or ""),
-                            "turn_id": str(params.get("turnId") or ""),
-                            "item_id": str(params.get("itemId") or ""),
-                        }
-                    )
+                pass
             elif method == "turn/completed":
                 if str(params.get("threadId") or "") != thread_id:
                     continue
                 final_text = codex_app_server_turn_text(params.get("turn"))
                 return final_text or "".join(deltas).strip(), ""
+            elif method == "thread/status/changed":
+                status = params.get("status") if isinstance(params.get("status"), dict) else {}
+                message_thread_id = str(params.get("threadId") or "")
+                if status.get("type") == "idle" and (not message_thread_id or message_thread_id == thread_id):
+                    return "".join(deltas).strip(), ""
 
     def send(self, target: dict[str, Any], text: str, *, submit: bool = True, **kwargs: Any) -> TransportSendResult:
         can_send, reason = self.can_send(target)
@@ -878,14 +907,16 @@ class CodexAppServerSession:
             requested_thread = str(self.target.get("thread_id") or self.target.get("agent_session_id") or "").strip()
             if requested_thread and self.thread_id and requested_thread != self.thread_id:
                 self.close()
-                self.thread_id = requested_thread
+                self.thread_id = ""
             if not self.alive():
                 status.update(self._start_process(self.target, deadline, notifications))
             else:
                 status["process_reused"] = True
-            if self.thread_id:
+            if self.thread_id and not status["process_started"]:
                 status["thread_id"] = self.thread_id
                 return self.thread_id, status
+            if self.thread_id and not requested_thread:
+                requested_thread = self.thread_id
             thread_response: dict[str, Any]
             if requested_thread:
                 thread_id = self._request_id("thread")
@@ -974,7 +1005,10 @@ def claude_stream_json_argv(target: dict[str, Any]) -> list[str]:
     ]
     session_id = str(target.get("thread_id") or target.get("agent_session_id") or "").strip()
     if session_id:
-        args.extend(["--resume", session_id])
+        if target.get("resume") is False:
+            args.extend(["--session-id", session_id])
+        else:
+            args.extend(["--resume", session_id])
     model = str(target.get("model") or target.get("agent_model") or "").strip()
     if model:
         args.extend(["--model", model])
@@ -1010,6 +1044,75 @@ def claude_stream_json_result(stdout: str) -> tuple[str, str]:
             result = str(item.get("result") or "").strip()
             return result or "".join(assistant_parts).strip(), ""
     return "".join(assistant_parts).strip(), ""
+
+
+def claude_stream_json_run(
+    args: list[str],
+    text: str,
+    *,
+    cwd: str,
+    env: dict[str, str],
+    timeout: float,
+    on_event: Any | None = None,
+    popen: Any | None = None,
+) -> tuple[int, str, str]:
+    launch = popen or subprocess.Popen
+    process: subprocess.Popen[str] | None = None
+    stdout_parts: list[str] = []
+    stderr_text = ""
+    normalizer = ClaudeStreamJsonNormalizer()
+    try:
+        process = launch(
+            args,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        if process.stdin is None or process.stdout is None:
+            raise OSError("claude stream-json pipes are unavailable")
+        process.stdin.write(text)
+        process.stdin.close()
+        deadline = time.monotonic() + max(1.0, timeout)
+        selector = selectors.DefaultSelector()
+        try:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(args, timeout)
+                ready = selector.select(timeout=min(0.25, remaining))
+                for key, _mask in ready:
+                    line = key.fileobj.readline()
+                    if line:
+                        stdout_parts.append(line)
+                        if callable(on_event):
+                            for event in normalizer.normalize_line(line):
+                                on_event(event)
+                if process.poll() is not None:
+                    for line in process.stdout.readlines():
+                        stdout_parts.append(line)
+                        if callable(on_event):
+                            for event in normalizer.normalize_line(line):
+                                on_event(event)
+                    break
+        finally:
+            selector.close()
+        if process.stderr is not None:
+            stderr_text = process.stderr.read()
+        return process.wait(timeout=max(0.1, deadline - time.monotonic())), "".join(stdout_parts), stderr_text
+    except BaseException:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=1)
+        raise
 
 
 class CodexMcpServerTransport(CodexAppServerTransport):
@@ -1118,24 +1221,47 @@ class ClaudeStreamJsonTransport(AgentTransport):
         cwd = str(target.get("cwd") or PROJECT_ROOT)
         run = kwargs.get("run") or subprocess.run
         args = claude_stream_json_argv(target)
+        on_event = kwargs.get("on_event")
         try:
-            completed = run(
-                args,
-                input=text,
-                cwd=cwd,
-                env={**os.environ, "TERM": "xterm-256color", "NO_COLOR": "1"},
-                text=True,
-                capture_output=True,
-                timeout=timeout,
-                check=False,
-            )
+            env = {**os.environ, "TERM": "xterm-256color", "NO_COLOR": "1"}
+            if kwargs.get("run") is not None:
+                completed = run(
+                    args,
+                    input=text,
+                    cwd=cwd,
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    timeout=timeout,
+                    check=False,
+                )
+                normalizer = ClaudeStreamJsonNormalizer()
+                if callable(on_event):
+                    for line in str(completed.stdout or "").splitlines():
+                        for event in normalizer.normalize_line(line):
+                            on_event(event)
+                returncode = completed.returncode
+                stdout_text = str(completed.stdout or "")
+                stderr_text = str(completed.stderr or "")
+            else:
+                returncode, stdout_text, stderr_text = claude_stream_json_run(
+                    args,
+                    text,
+                    cwd=cwd,
+                    env=env,
+                    timeout=timeout,
+                    on_event=on_event,
+                    popen=kwargs.get("popen"),
+                )
         except (OSError, subprocess.TimeoutExpired) as exc:
+            if callable(on_event):
+                on_event({"kind": ERROR, "event": ERROR, "backend": "claude", "native_type": "subprocess", "text": str(exc)})
             return TransportSendResult(ok=False, sent=False, transport=self.id, transport_label=self.label, result_source="claude-stream-json", error=str(exc))
-        output_text, output_error = claude_stream_json_result(str(completed.stdout or ""))
-        if completed.returncode == 0 and output_text:
-            return TransportSendResult(ok=True, sent=True, transport=self.id, transport_label=self.label, result_source="claude-stream-json", text=output_text, returncode=completed.returncode)
-        error = output_error or str(completed.stderr or "").strip() or f"claude exited {completed.returncode}"
-        return TransportSendResult(ok=False, sent=False, transport=self.id, transport_label=self.label, result_source="claude-stream-json", error=error, returncode=completed.returncode)
+        output_text, output_error = claude_stream_json_result(stdout_text)
+        if returncode == 0 and output_text:
+            return TransportSendResult(ok=True, sent=True, transport=self.id, transport_label=self.label, result_source="claude-stream-json", text=output_text, returncode=returncode)
+        error = output_error or stderr_text.strip() or f"claude exited {returncode}"
+        return TransportSendResult(ok=False, sent=False, transport=self.id, transport_label=self.label, result_source="claude-stream-json", error=error, returncode=returncode)
 
 
 class AgentTransportRegistry:

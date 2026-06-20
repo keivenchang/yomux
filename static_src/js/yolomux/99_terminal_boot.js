@@ -2965,6 +2965,7 @@ async function updateLatency() {
 }
 
 function refreshAll() {
+  resyncVisibleTerminalRemoteSizes('refresh');
   refreshTranscripts({force: true});
   refreshAutoStatuses();
   refreshWatchedFilesystem();

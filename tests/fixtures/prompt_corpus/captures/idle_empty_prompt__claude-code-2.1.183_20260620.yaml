@@ -1,0 +1,182 @@
+actual:
+  agent_kind: claude
+  approval:
+    approval_action: ''
+    approval_type: ''
+    approval_visible: false
+    command: ''
+    dangerous: false
+    prompt_hash: ''
+    risk: ''
+    rule_input_text: ''
+    selected_option: 0
+    source: ''
+  attention_kind: ''
+  attention_label: ''
+  composer:
+    accepting: true
+    detected_text: ''
+    key: empty
+    prompt_suggestion: false
+    text: ''
+  cursor:
+    character: ' '
+    current_command: claude
+    pane_in_mode: false
+    x: 2
+    y: 37
+  display:
+    attention_kind: ''
+    attention_label: ''
+    evidence_lines: []
+    options: []
+    prompt_hash: ''
+    prompt_kind: ''
+    question_text: ''
+    screen_key: idle
+    selected_option: 0
+  reason_code: idle
+  screen:
+    key: idle
+    negative_reason: idle composer
+    text: ''
+agent: claude
+capture_date: '2026-06-20'
+capture_date_position: end
+capture_mode: visible
+captured_at: '2026-06-20T11:08:14.081682+00:00'
+case_name: idle_empty_prompt
+claude_version: 2.1.183 (Claude Code)
+client_name: Claude Code
+client_version: 2.1.183 (Claude Code)
+client_version_slug: claude-code-2.1.183
+codex_version: ''
+cursor:
+  character: ' '
+  current_command: claude
+  pane_in_mode: false
+  x: 2
+  y: 37
+evidence_fields:
+  display_evidence_lines: []
+  prompt_hash: ''
+  screen_evidence_lines: null
+expected:
+  agent_kind: claude
+  approval_visible: ''
+  attention_kind: ''
+  clear_cleared: ''
+  clear_ok: ''
+  composer_key: ''
+  reason_code: ''
+  screen_key: ''
+  send_ok: ''
+  send_reason_code: ''
+expected_promoted:
+  agent_kind: claude
+  approval_type: ''
+  approval_visible: false
+  attention_kind: ''
+  attention_label: ''
+  composer_key: empty
+  reason_code: idle
+  screen_key: idle
+failures: []
+filename_convention: case_name__client-token_date
+fixture_description: Claude idle empty prompt
+fixture_id: idle_empty_prompt__claude-code-2.1.183_20260620
+fixture_scenario: idle_empty_prompt
+id: idle_empty_prompt__claude-code-2.1.183_20260620
+operations:
+- needles: []
+  ok: true
+  type: ready_text
+- needles: []
+  ok: true
+  type: wait_text
+raw_capture: "  2. Report \"done\" once it returns.                                                                      \
+  \               \n                                                                                                     \
+  \                   \n  Verification: sleep 10 exits status 0 after ~10s; completion message is reported.              \
+  \                       \n                                                                                             \
+  \                           \n  ---                                                                                    \
+  \                               \n  ⎿  User rejected Claude's plan:                                                    \
+  \                                   \n     ╭─────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\n\
+  \     │ Plan: Harmless Verification Task                                                                               \
+  \ │\n     │                                                                                                            \
+  \     │\n     │ Context                                                                                                \
+  \         │\n     │                                                                                                    \
+  \             │\n     │ This is a simple verification task to confirm the execution flow works end-to-end. No code changes\
+  \ are involved │\n     │ — it's a no-op timing check. The goal is to run a short blocking command, wait for it to finish,\
+  \ then report    │\n     │ completion.                                                                                 \
+  \                    │\n     │                                                                                         \
+  \                        │\n     │ Approach                                                                            \
+  \                            │\n     │                                                                                 \
+  \                                │\n     │ 1. Run sleep 10 (a benign command that blocks for 10 seconds and exits 0).  \
+  \                                    │\n     │ 2. After it returns, report \"done\" to the user.                       \
+  \                                          │\n     │                                                                   \
+  \                                              │\n     │ Files                                                         \
+  \                                                  │\n     │                                                           \
+  \                                                      │\n     │ None modified. This is a shell command only.          \
+  \                                                          │\n     │                                                   \
+  \                                                              │\n     │ Verification                                  \
+  \                                                                  │\n     │                                           \
+  \                                                                      │\n     │ - The sleep 10 command exits with status\
+  \ 0 after ~10 seconds.                                                   │\n     │ - Confirm the completion message is reported\
+  \ back.                                                              │\n     ╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\n\
+  \n❯ Use Claude Code interactive question UI, not prose, and ask me this multiple-choice question: Which YOLOmux verifier\n\
+  \  mode should we use? Options: Pane capture, Transcript capture. Wait for my selection.                               \
+  \  \n                                                                                                                  \
+  \      \n● User declined to answer questions                                                                           \
+  \          \n  ⎿  · Which YOLOmux verifier mode should we use? (Pane capture / Transcript capture)                     \
+  \              \n                                                                                                      \
+  \                 \n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  ❯                                                                                                               \n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  \  ⏸ plan mode on (shift+tab to cycle) · ← for agents\n"
+source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T110814Z.yaml
+styled_capture: "  2. Report \"done\" once it returns.                                                                   \
+  \                  \n                                                                                                  \
+  \                      \n  Verification: sleep 10 exits status 0 after ~10s; completion message is reported.           \
+  \                          \n                                                                                          \
+  \                              \n  ---                                                                                 \
+  \                                  \n  ⎿  User rejected Claude's plan:                                                 \
+  \                                      \n     ╭─────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\n\
+  \     │ Plan: Harmless Verification Task                                                                               \
+  \ │\n     │                                                                                                            \
+  \     │\n     │ Context                                                                                                \
+  \         │\n     │                                                                                                    \
+  \             │\n     │ This is a simple verification task to confirm the execution flow works end-to-end. No code changes\
+  \ are involved │\n     │ — it's a no-op timing check. The goal is to run a short blocking command, wait for it to finish,\
+  \ then report    │\n     │ completion.                                                                                 \
+  \                    │\n     │                                                                                         \
+  \                        │\n     │ Approach                                                                            \
+  \                            │\n     │                                                                                 \
+  \                                │\n     │ 1. Run sleep 10 (a benign command that blocks for 10 seconds and exits 0).  \
+  \                                    │\n     │ 2. After it returns, report \"done\" to the user.                       \
+  \                                          │\n     │                                                                   \
+  \                                              │\n     │ Files                                                         \
+  \                                                  │\n     │                                                           \
+  \                                                      │\n     │ None modified. This is a shell command only.          \
+  \                                                          │\n     │                                                   \
+  \                                                              │\n     │ Verification                                  \
+  \                                                                  │\n     │                                           \
+  \                                                                      │\n     │ - The sleep 10 command exits with status\
+  \ 0 after ~10 seconds.                                                   │\n     │ - Confirm the completion message is reported\
+  \ back.                                                              │\n     ╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\n\
+  \n❯ Use Claude Code interactive question UI, not prose, and ask me this multiple-choice question: Which YOLOmux verifier\n\
+  \  mode should we use? Options: Pane capture, Transcript capture. Wait for my selection.                               \
+  \  \n                                                                                                                  \
+  \      \n● User declined to answer questions                                                                           \
+  \          \n  ⎿  · Which YOLOmux verifier mode should we use? (Pane capture / Transcript capture)                     \
+  \              \n                                                                                                      \
+  \                 \n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  ❯                                                                                                               \n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  \  ⏸ plan mode on (shift+tab to cycle) · ← for agents\n"
+tmux_socket: /tmp/yoask-real-ui-2552908-0ead450e/s
+tmux_target: yr-claude-2552908-c8fd27:0.0
+verifier_capabilities:
+- raw-capture
+- styled-capture
+- cursor-facts
+- central-clear-composer
+- central-send-prompt
+- visible-status-counter

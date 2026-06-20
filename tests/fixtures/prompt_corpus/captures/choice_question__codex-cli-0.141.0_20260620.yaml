@@ -1,0 +1,193 @@
+actual:
+  agent_kind: codex
+  approval:
+    approval_action: ''
+    approval_type: ''
+    approval_visible: false
+    command: ''
+    dangerous: false
+    prompt_hash: ''
+    risk: ''
+    rule_input_text: ''
+    selected_option: 0
+    source: ''
+  attention_kind: question
+  attention_label: ASK?
+  composer:
+    accepting: true
+    detected_text: ''
+    evidence: suggestion-style
+    key: ghost
+    prompt_suggestion: true
+    text: Improve documentation in @filename
+  cursor:
+    character: I
+    current_command: node
+    pane_in_mode: false
+    x: 2
+    y: 37
+  display:
+    attention_kind: question
+    attention_label: ASK?
+    evidence_lines:
+    - 1. Pane capture 2. Transcript capture
+    - Which YOLOmux verifier mode should we use?
+    - 1. Pane capture
+    - 2. Transcript capture
+    options:
+    - index: 1
+      label: Pane capture
+      selected: false
+    - index: 2
+      label: Transcript capture
+      selected: false
+    prompt_hash: c86e6d7328a72b156c03491a3b4ddf13
+    prompt_kind: question
+    question_text: Which YOLOmux verifier mode should we use?
+    screen_key: needs-input
+    selected_option: 0
+  reason_code: needs-input
+  screen:
+    agent: codex
+    command: null
+    confidence: 0.9
+    evidence_lines:
+    - 1. Pane capture 2. Transcript capture
+    - Which YOLOmux verifier mode should we use?
+    - 1. Pane capture
+    - 2. Transcript capture
+    key: needs-input
+    options:
+    - index: 1
+      label: Pane capture
+      selected: false
+    - index: 2
+      label: Transcript capture
+      selected: false
+    prompt_hash: c86e6d7328a72b156c03491a3b4ddf13
+    prompt_kind: question
+    question_text: Which YOLOmux verifier mode should we use?
+    selected_option: 0
+    text: Which YOLOmux verifier mode should we use?
+agent: codex
+capture_date: '2026-06-20'
+capture_date_position: end
+capture_mode: visible
+captured_at: '2026-06-20T11:00:43.266804+00:00'
+case_name: choice_question
+claude_version: ''
+client_name: Codex CLI
+client_version: codex-cli 0.141.0
+client_version_slug: codex-cli-0.141.0
+codex_version: codex-cli 0.141.0
+cursor:
+  character: I
+  current_command: node
+  pane_in_mode: false
+  x: 2
+  y: 37
+evidence_fields:
+  display_evidence_lines:
+  - 1. Pane capture 2. Transcript capture
+  - Which YOLOmux verifier mode should we use?
+  - 1. Pane capture
+  - 2. Transcript capture
+  prompt_hash: c86e6d7328a72b156c03491a3b4ddf13
+  screen_evidence_lines:
+  - 1. Pane capture 2. Transcript capture
+  - Which YOLOmux verifier mode should we use?
+  - 1. Pane capture
+  - 2. Transcript capture
+expected:
+  agent_kind: codex
+  approval_visible: 'false'
+  attention_kind: question
+  clear_cleared: ''
+  clear_ok: ''
+  composer_key: ''
+  reason_code: needs-input
+  screen_key: needs-input
+  send_ok: ''
+  send_reason_code: ''
+expected_promoted:
+  agent_kind: codex
+  approval_type: ''
+  approval_visible: false
+  attention_kind: question
+  attention_label: ASK?
+  composer_key: ghost
+  reason_code: needs-input
+  screen_key: needs-input
+failures: []
+filename_convention: case_name__client-token_date
+fixture_description: Codex non-permission choice question
+fixture_id: choice_question__codex-cli-0.141.0_20260620
+fixture_scenario: choice_question
+id: choice_question__codex-cli-0.141.0_20260620
+operations:
+- needles: []
+  ok: true
+  type: ready_text
+- needles: []
+  ok: true
+  type: wait_text
+raw_capture: |2
+
+
+  • Ran echo yolomux-e2e-approval
+    └ yolomux-e2e-approval
+
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  • yolomux-e2e-approval
+
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+  › Please run the shell command `touch /tmp/yolomux-e2e-approval`.
+
+
+  ✔ You approved codex to run touch /tmp/yolomux-e2e-approval this time
+
+  • Ran touch /tmp/yolomux-e2e-approval
+    └ (no output)
+
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  • Done.
+
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+  › Ask me this question and wait for my answer instead of choosing yourself: Which YOLOmux verifier mode should we use?
+    1. Pane capture 2. Transcript capture
+
+
+  • Which YOLOmux verifier mode should we use?
+
+    1. Pane capture
+    2. Transcript capture
+
+
+  › Improve documentation in @filename
+
+    gpt-5.5 xhigh · ~/yolomux.dev8001
+source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T110043Z.yaml
+styled_capture: "\n\n• \e[1mRan\e[0m echo yolomux-e2e-approval\n\e[2m  └ yolomux-e2e-approval\n\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  \n• \e[0myolomux-e2e-approval\n\n\e[2m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  \n\n\e[1m› \e[0mPlease run the shell command `touch /tmp/yolomux-e2e-approval`.\n\n\n✔ You \e[1mapproved\e[0m codex to run\
+  \ \e[2mtouch /tmp/yolomux-e2e-approval\e[0;1m this time\n\n\e[0m• \e[1mRan\e[0m touch /tmp/yolomux-e2e-approval\n\e[2m \
+  \ └ (no output)\n\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  \n• \e[0mDone.\n\n\e[2m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  \n\n\e[1m› \e[0mAsk me this question and wait for my answer instead of choosing yourself: Which YOLOmux verifier mode should\
+  \ we use?\n  1. Pane capture 2. Transcript capture\n\n\n\e[2m• \e[0mWhich YOLOmux verifier mode should we use?\n\n  1. Pane\
+  \ capture\n  2. Transcript capture\n\n\n\e[1m›\e[0m \e[2mImprove documentation in @filename\n\n\e[0m  gpt-5.5 xhigh · ~/yolomux.dev8001\n"
+tmux_socket: /tmp/yoask-real-ui-2552908-0ead450e/s
+tmux_target: yr-codex-2552908-7ec5c7:0.0
+verifier_capabilities:
+- raw-capture
+- styled-capture
+- cursor-facts
+- central-clear-composer
+- central-send-prompt
+- visible-status-counter
