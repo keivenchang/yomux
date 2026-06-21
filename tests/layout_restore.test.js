@@ -1454,6 +1454,8 @@ async function runLayoutRestoreSuite() {
     assert.ok(/1 RUN/.test(html) && /topbar-activity-run active/.test(html), 'status line shows running count');
     assert.ok(/1 ASK\?/.test(html) && /topbar-activity-ques topbar-activity-attn/.test(html), 'status line shows ASK? count');
     assert.ok(/1 BLK/.test(html) && /topbar-activity-blk topbar-activity-attn/.test(html), 'status line shows BLK count');
+    assert.ok(/status-indicator[^"]*topbar-activity-ques[^"]*attention-pulse/.test(html), 'topbar ASK? inherits the shared status indicator pulse parent');
+    assert.ok(/status-indicator[^"]*topbar-activity-blk[^"]*attention-pulse/.test(html), 'topbar BLK inherits the shared status indicator pulse parent');
     assert.ok(/1 idle/.test(html), 'status line shows the idle count');
     assert.ok(/\.topbar-activity\s*\{/.test(css), 'the top-bar activity line is styled');
     assert.ok(/\.topbar-activity-run\.active/.test(css), 'RUN only turns green when nonzero');
@@ -1582,7 +1584,9 @@ async function runLayoutRestoreSuite() {
     assert.ok(/body\.theme-light \.ci-indicator\.pr-number-chip/.test(css) && /body\.theme-light \.ci-indicator\.pr-review-approved/.test(css), '#6: light-theme overrides cover number + review chips');
     // #2: the ready-review "PR" state pill is dropped (PR chips convey it now); other states still render.
     assert.equal(api.sessionStateHtml({key: 'ready-review', short: 'PR', label: 'Ready for review', reason: 'checks pass'}), '', '#7: the redundant ready-review PR pill is suppressed');
-    assert.ok(api.sessionStateHtml({key: 'needs-input', short: '?', label: 'Needs input', reason: 'waiting'}).includes('session-state-needs-input'), '#7: actionable states still render a badge');
+    const needsInputBadge = api.sessionStateHtml({key: 'needs-input', short: '?', label: 'Needs input', reason: 'waiting'});
+    assert.ok(needsInputBadge.includes('session-state-needs-input'), '#7: actionable states still render a badge');
+    assert.ok(/status-indicator[^"]*status-indicator--text[^"]*session-state-needs-input[^"]*status-indicator--attention[^"]*attention-pulse/.test(needsInputBadge), '#7: ASK? badges inherit shared status indicator text and pulse behavior');
     // #3: tab badge chips carry no native title (the custom popover is the single source).
     assert.ok(!api.pullRequestNumberIndicatorHtml('5', {number: 123}).includes('title='), '#8: the PR number chip has no native title tooltip');
     assert.ok(!api.pullRequestApprovalIndicatorHtml('5', {number: 123, state: 'open', review_decision: 'APPROVED'}).includes('title='), '#8: the approval chip has no native title tooltip');
@@ -1733,7 +1737,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/focusInput:\s*shouldRestoreFocus && focusSerial === yoagentFocusSerial && yoagentDocumentHasFocus\(\)/.test(source), 'YO!agent responses only refocus when the user did not move away');
     assert.ok(/if \(options\.summaryOnly && refreshYoagentSummaryRegions\(node\)\) \{[\s\S]*?restoreYoagentChatInputFocus/.test(source), 'YO!agent summary refresh restores an already-focused composer input');
     assert.ok(source.includes('function refreshYoagentSummaryRegions'), 'YO!agent metadata refresh can update summaries without rebuilding the chat input');
-    assert.ok(source.includes('function yoagentAutoRefreshStatusHtml'), 'YO!agent renders cached background-summary status when auto-refresh is enabled');
+    assert.equal(source.includes('function yoagentAutoRefreshStatusHtml'), false, 'YO!agent no longer renders a continuous background-summary status notice');
     assert.ok(source.includes('summaryOnly: true'), 'YO!agent metadata refresh requests summary-only panel updates');
     assert.ok(source.includes("params.set('locale', i18nActiveLocaleId())"), 'YO!agent activity-summary requests carry the active UI locale');
     assert.ok(source.includes("params.set('scope', 'all')"), 'YO!agent activity-summary requests all visible tmux sessions');

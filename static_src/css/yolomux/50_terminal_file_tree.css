@@ -480,11 +480,11 @@
   padding: 7px 9px;
   border-radius: 5px;
 }
-.transcript-item.user { border-color: #60a5fa; background: color-mix(in srgb, #60a5fa 12%, var(--panel)); }
-.transcript-item.assistant { border-color: #4ade80; background: color-mix(in srgb, #4ade80 12%, var(--panel)); }
+.transcript-item.user { border-color: var(--transcript-user-accent); background: color-mix(in srgb, var(--transcript-user-accent) 12%, var(--panel)); }
+.transcript-item.assistant { border-color: var(--transcript-assistant-accent); background: color-mix(in srgb, var(--transcript-assistant-accent) 12%, var(--panel)); }
 .transcript-item.tool_use { border-color: var(--status-tool); background: color-mix(in srgb, var(--status-tool) 12%, var(--panel)); }
 .transcript-item.tool_result { border-color: var(--pr-status-merged); background: color-mix(in srgb, var(--pr-status-merged) 12%, var(--panel)); }
-.transcript-item.summary { border-color: #f472b6; background: color-mix(in srgb, #f472b6 12%, var(--panel)); }
+.transcript-item.summary { border-color: var(--transcript-summary-accent); background: color-mix(in srgb, var(--transcript-summary-accent) 12%, var(--panel)); }
 .transcript-item.system { border-color: var(--git-transcript-badge); background: color-mix(in srgb, var(--git-transcript-badge) 12%, var(--panel)); }
 .transcript-role {
   color: var(--text);
@@ -1331,6 +1331,7 @@
   width: calc(100% - 28px);
   max-width: calc(100% - 28px);
   padding: 7px 8px;
+  color: var(--text);
   border: 1px solid var(--line);
   border-radius: 5px;
   background: var(--panel2);
@@ -1401,11 +1402,18 @@
   font-weight: 600;
   text-transform: none;
 }
+.yoagent-message-latency {
+  color: var(--muted);
+  font-weight: 600;
+  text-transform: none;
+  white-space: nowrap;
+}
 .yoagent-message-body {
   min-width: 0;
   overflow-x: visible;
   overflow-y: visible;
   overscroll-behavior: auto;
+  color: var(--text);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font: var(--terminal-font-size)/1.35 var(--ui-font);
@@ -1432,6 +1440,29 @@
   cursor: pointer;
   user-select: none;
   color: var(--muted);
+}
+.yoagent-message-details summary::-webkit-details-marker {
+  display: none;
+}
+.yoagent-message-details summary::marker {
+  content: '';
+}
+.yoagent-message-details summary::before {
+  content: '';
+  flex: 0 0 auto;
+  width: 0;
+  height: 0;
+  margin-top: 0.45em;
+  border-block-start: 4px solid transparent;
+  border-block-end: 4px solid transparent;
+  border-inline-start: 6px solid currentColor;
+  opacity: 0.75;
+  transform-origin: 45% 50%;
+  transition: transform 120ms ease, opacity 120ms ease;
+}
+.yoagent-message-details[open] summary::before {
+  transform: rotate(90deg);
+  opacity: 0.95;
 }
 .yoagent-message-details summary > span:first-child {
   flex: 0 0 auto;
@@ -1471,6 +1502,10 @@
 .yoagent-message-details pre.yoagent-toolcall-stream {
   color: color-mix(in srgb, var(--accent-gold) 58%, var(--text));
   border-color: color-mix(in srgb, var(--accent-gold) 35%, var(--line));
+}
+.yoagent-tc-command {
+  color: var(--code-function);
+  font-weight: 650;
 }
 .yoagent-details-note {
   margin-top: 5px;
@@ -1554,12 +1589,13 @@
   flex-direction: column;
   gap: 6px;
   padding: 8px 10px;
-  background: var(--bg);
-  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--link-soft) 8%, var(--bg));
+  border: 1px solid var(--link-soft);
   border-radius: 14px;
 }
 .yoagent-chat-form:focus-within {
-  border-color: var(--active-control-border);
+  border-color: var(--link-soft);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--link-soft) 45%, transparent);
 }
 .yoagent-chat-input {
   min-width: 0;
@@ -1599,11 +1635,28 @@
   max-width: 13ch;
 }
 .yoagent-backend-pill-dot {
-  width: 9px;
-  height: 9px;
+  width: 10px;
+  height: 10px;
   flex: 0 0 auto;
   border-radius: 50%;
-  border: 2px solid var(--active-control-bg);
+  background: var(--agent-inactive-marker-bg);
+  border: 2px solid var(--yoagent-inactive-backend-dot-border);
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.45);
+}
+.yoagent-composer-pill-backend:not(:has(select:disabled)) .yoagent-backend-pill-dot {
+  background: var(--pr-status-passing);
+  border-color: color-mix(in srgb, var(--pr-status-passing) 30%, #ffffff);
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.48), 0 0 0 3px color-mix(in srgb, var(--pr-status-passing) 22%, transparent);
+}
+body.theme-light .yoagent-backend-pill-dot {
+  background: var(--agent-inactive-marker-bg);
+  border-color: var(--agent-inactive-marker-border);
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.42), 0 0 0 2px rgb(255 255 255 / 0.45);
+}
+body.theme-light .yoagent-composer-pill-backend:not(:has(select:disabled)) .yoagent-backend-pill-dot {
+  background: var(--pr-status-passing);
+  border-color: color-mix(in srgb, var(--pr-status-passing) 34%, #ffffff);
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.38), 0 0 0 3px color-mix(in srgb, var(--pr-status-passing) 24%, transparent);
 }
 .yoagent-composer-pill select,
 .yoagent-backend-pill select {
@@ -1722,6 +1775,12 @@ body.theme-light .yoagent-message.assistant.yoagent-agent-result {
 body.theme-light .yoagent-message.user {
   border-color: var(--link-soft);
 }
+body.theme-light .yoagent-message,
+body.theme-light .yoagent-message-body,
+body.theme-light .yoagent-message-body.markdown-body,
+body.theme-light .yoagent-message-body.markdown-body * {
+  color: var(--lt-text);
+}
 body.theme-light .yoagent-global-head,
 body.theme-light .yoagent-headline,
 body.theme-light .yoagent-line {
@@ -1729,10 +1788,11 @@ body.theme-light .yoagent-line {
 }
 body.theme-light .yoagent-generated,
 body.theme-light .yoagent-empty,
-body.theme-light .yoagent-message-role {
+body.theme-light .yoagent-message-role,
+body.theme-light .yoagent-message-time,
+body.theme-light .yoagent-message-latency {
   color: var(--lt-muted-strong);
 }
-body.theme-light .yoagent-message-body.markdown-body,
 body.theme-light .yoagent-global .markdown-body {
   color: var(--lt-text);
 }
@@ -1740,7 +1800,7 @@ body.theme-light .yoagent-message-details summary {
   color: var(--lt-muted-strong);
 }
 body.theme-light .yoagent-details-preview {
-  color: #667085;
+  color: var(--text-muted-soft);
 }
 body.theme-light .yoagent-message-details pre {
   color: var(--lt-text);
@@ -1748,12 +1808,12 @@ body.theme-light .yoagent-message-details pre {
   border-color: var(--lt-code-block-border);
 }
 body.theme-light .yoagent-message-details pre.yoagent-auxiliary-stream {
-  color: #667085;
+  color: var(--text-muted-soft);
   background: #f7f8fa;
   border-color: var(--lt-code-block-border);
 }
 body.theme-light .yoagent-details-note {
-  color: #667085;
+  color: var(--text-muted-soft);
 }
 body.theme-light .yoagent-chat-queue {
   color: var(--lt-text);
@@ -1769,10 +1829,23 @@ body.theme-light .yoagent-message-details pre.yoagent-toolcall-stream {
   background: #fff9e8;
   border-color: #e3bf57;
 }
+body.theme-light .yoagent-tc-command {
+  color: #005fb8;
+}
 body.theme-light .yoagent-action-card {
   color: var(--lt-text);
   background: var(--lt-code-block-bg);
   border-color: var(--link-soft);
+}
+body.theme-light .yoagent-chat-form {
+  background: color-mix(in srgb, var(--link-soft) 8%, #ffffff);
+  border-color: var(--link-soft);
+}
+body.theme-light .yoagent-chat-input {
+  color: var(--lt-text);
+}
+body.theme-light .yoagent-chat-input::placeholder {
+  color: var(--lt-muted-strong);
 }
 body.theme-light .yoagent-action-head {
   color: #0f4c81;
@@ -2669,6 +2742,10 @@ body.app-vw-lte-760 .share-result-meta {
   font-size: var(--ui-font-size-sm);
   font-weight: 800;
 }
+.about-license {
+  justify-self: start;
+  font-size: var(--ui-font-size-xs);
+}
 .about-author {
   justify-self: start;
   color: var(--markdown-link);
@@ -3338,6 +3415,8 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
   inline-size: var(--file-tree-date-column-width);
   min-height: var(--file-tree-row-control-size);
   padding-inline-start: 4px;
+  border: 1px solid transparent;
+  border-radius: 5px;
   color: var(--muted);
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-3xs);

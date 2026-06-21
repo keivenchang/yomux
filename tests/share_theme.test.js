@@ -1905,7 +1905,9 @@ async function runShareThemeSuite() {
     assert.ok(/preferences-path-label">settings<\/span>[\s\S]*settings\.yaml[\s\S]*loaded/.test(globalPathRowsHtml), 'Preferences settings path row shows the loaded age inline');
     assert.equal(globalPathRowsHtml.includes('YOLO rules'), false, 'global Preferences path rows no longer show the YOLO rules path');
     assert.equal(preferencesHtml.includes('preferences-status'), false, 'Preferences does not render a separate loaded/status line');
-    const yoloSectionHtml = preferencesHtml.slice(preferencesHtml.indexOf('data-preference-section="YOLO"'), preferencesHtml.indexOf('data-preference-section="YO!agent"'));
+    const yoloSectionStart = preferencesHtml.indexOf('data-preference-section="YOLO"');
+    const yoloSectionEnd = preferencesHtml.indexOf('data-preference-section="', yoloSectionStart + 1);
+    const yoloSectionHtml = preferencesHtml.slice(yoloSectionStart, yoloSectionEnd >= 0 ? yoloSectionEnd : undefined);
     assert.ok(yoloSectionHtml.includes('preferences-path-row preferences-path-row--section'), 'YOLO section contains the YOLO rules path row');
     assert.ok(yoloSectionHtml.includes('YOLO rules'), 'YOLO rules label is inside the YOLO section');
     assert.ok(/YOLO rules[\s\S]*data-copy-path=/.test(yoloSectionHtml), 'YOLO rules copy button is inside the YOLO section');
@@ -2013,8 +2015,8 @@ async function runShareThemeSuite() {
     assert.equal(/yoagent\.claude_model[\s\S]{0,220}wide:\s*true/.test(diffBundle), false, 'YO!agent Claude model does not stretch across a full-width row');
     assert.equal(/yoagent\.codex_model[\s\S]{0,260}wide:\s*true/.test(diffBundle), false, 'YO!agent Codex model does not stretch across a full-width row');
     assert.ok(/select\[data-setting-path="yoagent\.claude_model"\][\s\S]*select\[data-setting-path="yoagent\.codex_model"\]\s*\{[\s\S]*width:\s*min\(calc\(100% - var\(--preferences-control-left-indent\)\),\s*42ch\)/.test(preferencesCss), 'YO!agent model selects are just wide enough for model labels, not full row width');
-    assert.equal(preferencesHtml.includes('data-setting-path="yoagent.auto_refresh"'), false, 'YO!agent background transcript summaries use the interval row instead of a separate checkbox');
-    assert.ok(/data-setting-path="yoagent\.refresh_interval_seconds"[\s\S]*min="0"[\s\S]*max="3600"/.test(preferencesHtml), 'YO!agent background summary interval is bounded in Preferences and allows 0s off');
+    assert.equal(preferencesHtml.includes('data-setting-path="yoagent.auto_refresh"'), false, 'YO!agent background transcript summaries no longer expose an auto-refresh checkbox');
+    assert.equal(preferencesHtml.includes('data-setting-path="yoagent.refresh_interval_seconds"'), false, 'YO!agent background transcript summaries no longer expose an interval row');
     assert.ok(preferencesHtml.includes('data-setting-path="yoagent.system_prompt"'), 'preferences expose YO!agent prompt');
     assert.ok(/preferences-setting-row preferences-setting-row--wide[\s\S]*data-setting-path="yoagent\.system_prompt"[\s\S]*data-setting-autosize="true"/.test(preferencesHtml), 'YO!agent system prompt renders as an autosizing full-width row');
     assert.ok(/preferences-setting-row preferences-setting-row--wide[\s\S]*data-setting-path="yoagent\.intro"[\s\S]*data-setting-autosize="true"/.test(preferencesHtml), 'YO!agent intro renders as an autosizing full-width row');
@@ -2080,6 +2082,8 @@ async function runShareThemeSuite() {
     assert.equal(/data-setting-path="yoagent\.backend"[\s\S]*?value="deterministic"/.test(preferencesHtml), false, 'Preferences no longer offer No agent (deterministic) as a backend option');
     assert.equal(preferencesHtml.includes('Deterministic'), false, 'Preferences do not expose the internal deterministic backend label');
     assert.equal(/data-setting-path="yoagent\.invocation"[\s\S]*?value="api-key"/.test(preferencesHtml), false, 'Preferences do not expose the reserved API-key invocation mode');
+    assert.ok(/data-setting-path="yoagent\.invocation"[\s\S]*?>\s*<span>Local process<\/span>/.test(preferencesHtml), 'Preferences labels YO!agent invocation as a local process transport, not a generic CLI toggle');
+    assert.ok(preferencesHtml.includes('persistent local app-server') && preferencesHtml.includes('stream-json CLI subprocess'), 'Preferences help explains Codex app-server and Claude stream-json transport');
     // #41: the YO!agent backend defaults to auto (codex -> claude -> No agent) and Preferences offers it.
     assert.ok(/value="auto"[^>]*data-setting-path="yoagent\.backend"[\s\S]*?>\s*<span>Auto \(Codex → Claude\)<\/span>/.test(preferencesHtml), '#41: the YO!agent backend radios offer the Auto option');
     assert.equal(preferencesHtml.includes('data-setting-path="appearance.editor_color_scheme"'), false, 'preferences do not show the legacy single mixed editor scheme setting');
@@ -2528,7 +2532,9 @@ async function runShareThemeSuite() {
     assert.ok(api.modalBodyHtmlForTest().includes('about-github'), 'DOIT.60: the GitHub link carries the about-github class');
     assert.ok(api.modalBodyHtmlForTest().includes(`>${api.t('menu.help.about.github')}</a>`), 'DOIT.60: the GitHub link uses the localized label');
     assert.ok(api.modalBodyHtmlForTest().includes('<span> - </span><a class="about-author about-github"'), 'About author and GitHub links render on one line');
-    assert.ok(api.modalBodyHtmlForTest().includes('<span> (to YOLOmux)</span>'), 'About GitHub link names the YOLOmux target inline');
+    assert.equal(api.modalBodyHtmlForTest().includes('(to YOLOmux)'), false, 'About GitHub link no longer carries the old inline target suffix');
+    assert.ok(api.modalBodyHtmlForTest().includes('https://polyformproject.org/licenses/noncommercial/1.0.0'), 'About modal links to the PolyForm Noncommercial license');
+    assert.ok(api.modalBodyHtmlForTest().includes(`>${api.t('menu.help.about.license')}</a>`), 'About modal renders the localized license label');
     assert.ok(preferencesCss.includes('.modal.about-open .modal-dialog'), 'About modal has compact modal chrome through the shared dialog shell');
     assert.ok(/\.modal\s*\{[\s\S]*?z-index:\s*var\(--z-file-conflict-dialog\)/.test(preferencesCss), 'shared app modal sits above pane resizers, menus, and other pane-local overlays');
     assert.ok(/\.app-modal-overlay\s*\{[\s\S]*?position:\s*fixed[\s\S]*?inset:\s*0[\s\S]*?background:\s*var\(--app-modal-backdrop-bg\)/.test(preferencesCss), 'modal overlays share one dimmed full-viewport parent behavior');
@@ -4787,11 +4793,28 @@ async function runShareThemeSuite() {
     assert.equal(hideDetailsLabel, 'hide Info Bar');
     assert.equal(showDetailsLabel, 'show Info Bar');
     const paneInfoLocaleFiles = fs.readdirSync('static_src/locales').filter(name => name.endsWith('.json')).sort();
+    const localizedPaneInfoLabels = {
+      'zh-Hans.json': {
+        'menu.tmux.paneDetails': '信息栏',
+        'pane.details.hide': '隐藏信息栏',
+        'pane.details.show': '显示信息栏',
+      },
+      'zh-Hant.json': {
+        'menu.tmux.paneDetails': '資訊列',
+        'pane.details.hide': '隱藏資訊列',
+        'pane.details.show': '顯示資訊列',
+      },
+    };
     for (const localeFile of paneInfoLocaleFiles) {
       const catalog = JSON.parse(fs.readFileSync(`static_src/locales/${localeFile}`, 'utf8'));
       for (const key of ['menu.tmux.paneDetails', 'pane.details.hide', 'pane.details.show']) {
         const value = String(catalog[key] || '');
-        assert.ok(value.includes('Info Bar'), `W5: ${localeFile} ${key} names the pane metadata bar Info Bar`);
+        if (localizedPaneInfoLabels[localeFile]) {
+          assert.equal(value, localizedPaneInfoLabels[localeFile][key], `W5: ${localeFile} ${key} localizes the pane metadata bar label`);
+          assert.equal(value.includes('Info Bar'), false, `W5: ${localeFile} ${key} does not leak English Info Bar`);
+        } else {
+          assert.ok(value.includes('Info Bar'), `W5: ${localeFile} ${key} names the pane metadata bar Info Bar`);
+        }
         assert.equal(/details/i.test(value), false, `W5: ${localeFile} ${key} no longer uses Details for the pane metadata bar`);
       }
     }

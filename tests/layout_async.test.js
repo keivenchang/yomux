@@ -35,6 +35,37 @@ const {
 
 async function runLayoutAsyncSuite() {
     {
+      const api = loadYolomux('', ['1'], 'https:');
+      const transcriptPath = '/home/test/.local/state/yolomux/yoagent/conversation.jsonl';
+      api.applyYoagentConversationPayloadForTest({
+        transcript_path: transcriptPath,
+        transcript_display_path: '~/.local/state/yolomux/yoagent/conversation.jsonl',
+        messages: [{role: 'user', content: 'persisted question', createdAt: '2026-06-13T17:39:00Z'}],
+      });
+      const transcriptHtml = api.yoagentChatHtml();
+      assert.ok(transcriptHtml.includes('yoagent-transcript-copy'), 'YO!agent transcript row renders a copy button');
+      assert.ok(transcriptHtml.includes(`data-copy-path="${transcriptPath}"`), 'YO!agent transcript copy button carries the transcript path');
+
+      const button = new TestElement('yoagent-transcript-copy', 'button');
+      button.className = 'path-copy-button yoagent-transcript-copy';
+      button.dataset.copyPath = transcriptPath;
+      const clickEvent = {
+        target: button,
+        defaultPrevented: false,
+        propagationStopped: false,
+        preventDefault() { this.defaultPrevented = true; },
+        stopPropagation() { this.propagationStopped = true; },
+      };
+      for (const listener of api.documentListenersForTest('click')) listener(clickEvent);
+      await flushAsyncWork();
+      await flushAsyncWork();
+
+      assert.equal(clickEvent.defaultPrevented, true, 'shared path-copy handler claims the YO!agent copy click');
+      assert.equal(api.clipboardTextForTest(), transcriptPath, 'YO!agent transcript copy writes the transcript path');
+      assert.ok(api.statusHtmlForTest().includes('copied transcript path'), 'YO!agent transcript copy reports success');
+    }
+
+    {
       const api = loadYolomux('', ['1']);
       const calls = [];
       api.setFetchForTest(url => {
@@ -1448,6 +1479,34 @@ async function runLayoutAsyncSuite() {
     {
       const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
       const calls = [];
+      api.applyYoagentConversationPayloadForTest({
+        messages: [{role: 'assistant', content: 'sent to target'}],
+        pending_waits: [{id: 'wait-target', session: '1', started_ts: Math.round(Date.now() / 1000)}],
+      });
+      api.setFetchForTest((url, options = {}) => {
+        calls.push({url: String(url), method: options.method || 'GET', body: options.body || ''});
+        if (String(url) === '/api/yoagent/chat') {
+          return Promise.resolve(jsonResponse({
+            answer: 'queued after wait',
+            backend: 'codex',
+            backend_used: 'codex',
+            conversation: {messages: [{role: 'user', content: 'after'}, {role: 'assistant', content: 'queued after wait'}]},
+          }));
+        }
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      });
+      await api.sendYoagentChatMessageForTest('after');
+      assert.equal(api.yoagentChatQueueForTest().length, 1, 'pending target-agent waits make new asks join the queue');
+      assert.deepStrictEqual(calls, [], 'queued asks are not sent while a target-agent reply is still pending');
+      api.applyYoagentConversationPayloadForTest({messages: [{role: 'assistant', content: 'target finished'}], pending_waits: []});
+      await new Promise(resolve => setTimeout(resolve, 0));
+      assert.equal(api.yoagentChatQueueForTest().length, 0, 'clearing the pending wait drains the next queued ask');
+      assert.deepStrictEqual(calls.filter(call => call.url === '/api/yoagent/chat').map(call => JSON.parse(call.body).message), ['after'], 'pending-wait queue drains FIFO after the target AI finishes');
+    }
+
+    {
+      const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
+      const calls = [];
       api.setYoagentBusyForTest(true);
       await api.sendYoagentChatMessageForTest('queued only');
       const queued = api.yoagentChatQueueForTest()[0];
@@ -1488,29 +1547,88 @@ async function runLayoutAsyncSuite() {
     {
       const api = loadYolomux('', ['1']);
       const detailsPreviews = html => [...String(html || '').matchAll(/<span class="yoagent-details-preview">([\s\S]*?)<\/span>/g)].map(match => match[1]);
-      const thinkingLines = ['thinking: scanning files', 'thinking: reading activity context', 'thinking: final synthesis'];
+      const thinkingLine = 'thinking: scanning files reading activity context final synthesis';
       api.applyYoagentStreamPayloadForTest({
         stream_id: 'stream-thinking',
         phase: 'delta',
         content: 'partial answer',
-        auxiliary_lines: [...thinkingLines, 'tool output: command: collected files'],
-        auxiliary_preview: 'thinking: reading activity context\nthinking: final synthesis\ntool output: command: collected files',
+        auxiliary_lines: [thinkingLine, 'tool output: command: collected files'],
+        auxiliary_preview: `${thinkingLine}\ntool output: command: collected files`,
         hidden_work_active: true,
         tool_active: true,
       });
       const runningPreviews = detailsPreviews(api.yoagentChatHtml());
-      assert.equal(runningPreviews[0], 'thinking: reading activity context\nthinking: final synthesis', 'running thinking preview shows the last two thinking lines only');
+      assert.equal(runningPreviews[0], thinkingLine, 'running thinking preview shows one continuously growing thinking line');
       assert.equal(runningPreviews[1], 'tool output: command: collected files', 'tool calls use their own one-line TC preview');
       api.applyYoagentStreamPayloadForTest({
         stream_id: 'stream-thinking',
         phase: 'hidden_work_done',
         done: true,
         auxiliary_done: true,
-        auxiliary_lines: [...thinkingLines, 'tool output: command: collected files'],
+        auxiliary_lines: [thinkingLine, 'tool output: command: collected files'],
       });
       const donePreviews = detailsPreviews(api.yoagentChatHtml());
-      assert.equal(donePreviews[0], 'thinking: final synthesis', 'completed thinking preview collapses to the final thinking line');
+      assert.equal(donePreviews[0], thinkingLine, 'completed thinking preview keeps the final continuous thinking line');
       assert.equal(donePreviews[1], 'tool output: command: collected files', 'completed tool-call preview remains separate from thinking');
+
+      const longThinking = ['thinking:', ...Array.from({length: 72}, (_value, index) => `word${index}`)].join(' ');
+      api.applyYoagentConversationPayloadForTest({
+        messages: [{
+          role: 'assistant',
+          content: 'answer',
+          createdAt: '2026-06-20T00:00:00Z',
+          auxiliaryLines: [longThinking],
+          auxiliaryText: longThinking,
+        }],
+      });
+      const longHtml = api.yoagentChatHtml();
+      const longPreviews = detailsPreviews(longHtml);
+      const expectedTail = `… ${Array.from({length: 50}, (_value, index) => `word${index + 22}`).join(' ')}`;
+      assert.equal(longPreviews[0], expectedTail, 'long thinking preview shows the last 50 words with an ellipsis');
+      assert.ok(longHtml.includes(longThinking), 'expanded thinking details keep the complete thinking text');
+    }
+
+    {
+      const api = loadYolomux('', ['1']);
+      api.applyYoagentStreamPayloadForTest({
+        stream_id: 'stream-multiline-tool',
+        phase: 'tool',
+        content: 'partial answer',
+        auxiliary_lines: ['tool output: command: line 1\nline 2'],
+        auxiliary_preview: 'tool output: command: line 1\nline 2',
+        tool_active: true,
+      });
+      const html = api.yoagentChatHtml();
+      assert.equal(html.includes('Details…'), false, 'multiline tool output continuation lines do not leak into the thinking details preview');
+      assert.ok(html.includes('Tool call'), 'multiline tool output still renders in the Tool call block');
+      assert.ok(html.includes('tool output: command: line 1\nline 2'), 'tool-call pre preserves real multiline output');
+    }
+
+    {
+      const api = loadYolomux('', ['1']);
+      api.applyYoagentStreamPayloadForTest({
+        stream_id: 'stream-interleaved',
+        phase: 'delta',
+        content: 'first answer second answer',
+        stream_items: [
+          {kind: 'thinking', text: 'thinking: reading context'},
+          {kind: 'assistant', text: 'first answer'},
+          {kind: 'tool', text: 'tool output: command: line 1\nline 2'},
+          {kind: 'assistant', text: 'second answer'},
+        ],
+        auxiliary_lines: ['thinking: reading context', 'tool output: command: line 1\nline 2'],
+      });
+      const html = api.yoagentChatHtml();
+      const ordered = [
+        html.indexOf('thinking: reading context'),
+        html.indexOf('first answer'),
+        html.indexOf('tool output: command: line 1\nline 2'),
+        html.indexOf('second answer'),
+      ];
+      assert.ok(ordered.every(index => index >= 0), 'interleaved YO!agent stream rows all render');
+      assert.deepStrictEqual(ordered, [...ordered].sort((left, right) => left - right), 'thinking/tool rows and assistant text render in stream order');
+      assert.ok(html.includes('yoagent-message-stream'), 'interleaved stream uses the ordered message stream renderer');
+      assert.equal((html.match(/<details class="[^"]*yoagent-message-details/g) || []).length, 2, 'thinking and tool-call stream rows remain independently collapsible');
     }
 
     {

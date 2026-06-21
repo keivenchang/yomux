@@ -75,18 +75,64 @@
 .session-button-detail.pr-status-closed {
   color: var(--pr-status-closed);
 }
-.session-state-badge {
-  min-width: 26px;
+.status-indicator {
+  flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  transform-origin: center;
+}
+.status-indicator--inline {
+  min-width: 0;
+  padding: 0 2px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  line-height: 1.15;
+}
+.status-indicator--text {
+  min-width: 26px;
   padding: 1px 3px;
   border: 1px solid var(--divider);
   border-radius: 5px;
-  color: var(--pr-status-closed);
-  background: #161d29;
   font: var(--ui-font-size-3xs)/1.15 var(--mono-font);
   text-transform: uppercase;
+}
+.status-indicator--dot {
+  width: 1em;
+  min-width: 1em;
+  color: var(--muted);
+  font-size: 0.9em;
+  line-height: 1;
+  text-align: center;
+}
+.status-indicator--positive,
+.status-indicator--working {
+  color: var(--pr-status-passing);
+}
+.heartbeat-pulse {
+  transform-origin: center;
+  animation-duration: var(--pulse-duration);
+  animation-timing-function: var(--pulse-easing);
+}
+.status-indicator--dot.status-indicator--working.heartbeat-pulse {
+  animation-name: command-palette-thinking;
+  animation-duration: var(--pulse-duration);
+  animation-timing-function: var(--pulse-easing);
+  animation-iteration-count: infinite;
+  animation-direction: alternate;
+}
+.status-indicator--settled {
+  color: var(--agent-inactive-marker-bg);
+}
+.status-indicator--attention {
+  color: var(--danger-text);
+}
+.topbar-activity .topbar-activity-attn.status-indicator--attention {
+  color: var(--accent-gold);
+}
+.session-state-badge {
+  color: var(--pr-status-closed);
+  background: #161d29;
 }
 .session-state-needs-approval,
 .session-state-needs-input {
@@ -137,21 +183,19 @@
 }
 .attention-pulse {
   --attention-ring-border: 1px;
-  transform-origin: center;
   animation-name: attention-ring-fade;
-  animation-duration: var(--red-reminder-duration);
+  animation-duration: var(--pulse-duration);
   animation-delay: var(--attention-animation-delay, 0s);
-  animation-timing-function: var(--red-reminder-easing);
+  animation-timing-function: var(--pulse-easing);
   animation-iteration-count: infinite;
 }
-.session-state-badge.attention-pulse,
+.status-indicator--text.status-indicator--attention.attention-pulse,
 .ci-indicator.pr-status-failing {
   --attention-ring-border: 1px;
-  transform-origin: center;
   animation-name: attention-ring-fade, red-pill-fill-fade;
-  animation-duration: var(--red-reminder-duration), var(--red-reminder-duration);
+  animation-duration: var(--pulse-duration), var(--pulse-duration);
   animation-delay: var(--attention-animation-delay, 0s), var(--attention-animation-delay, 0s);
-  animation-timing-function: var(--red-reminder-easing), var(--red-reminder-easing);
+  animation-timing-function: var(--pulse-easing), var(--pulse-easing);
   animation-iteration-count: infinite, infinite;
 }
 @keyframes red-pill-fill-fade {
@@ -169,6 +213,7 @@
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .heartbeat-pulse,
   .attention-pulse,
   .session-state-needs-approval,
   .session-state-needs-input,
@@ -194,9 +239,9 @@
   padding: 1px 0;
   color: var(--pane-tab-yolo-text);
   background: var(--pane-tab-yolo-bg);
-  border: 1px solid var(--pane-tab-yolo-border);
-  border-radius: 2px;
-  box-shadow: none;
+  border: 2px solid var(--pane-tab-yolo-border);
+  border-radius: var(--radius-pill);
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.42), 0 0 0 2px rgb(255 255 255 / 0.24);
   font: 800 var(--ui-font-size-2xs)/1.1 var(--mono-font);
   overflow: visible;
 }
@@ -207,13 +252,13 @@
   min-width: max(17px, calc(var(--ui-font-size) + 5px));
   height: max(16px, calc(var(--ui-font-size) + 5px));
   padding: 0;
-  border-radius: 2px;
+  border-radius: var(--radius-pill);
   font-size: max(10px, var(--ui-font-size));
 }
 .session-yolo-marker.inactive {
-  color: var(--pane-meta-branch);
-  background: var(--divider);
-  border-color: #5d6878;
+  color: var(--agent-inactive-marker-text);
+  background: var(--agent-inactive-marker-bg);
+  border-color: var(--agent-inactive-marker-border);
 }
 .session-yolo-marker.locked {
   color: #ffd75d;
@@ -234,9 +279,9 @@ body.theme-light .session-state-done {
   border-color: #b8c2d2;
 }
 body.theme-light .session-yolo-marker.inactive {
-  color: var(--neutral-text-strong);
-  background: #e2e6ec;
-  border-color: #c2cad6;
+  color: var(--agent-inactive-marker-text);
+  background: var(--agent-inactive-marker-bg);
+  border-color: var(--agent-inactive-marker-border);
 }
 /* the YO ball spins ONLY when the agent is working, and SLOWLY — at the
    "Active YO rotation period" setting (appearance.yolo_rotate_ms, default 20s), not a fast hardcoded
@@ -386,7 +431,7 @@ body.theme-light .ci-indicator.branch-indicator {
 }
 .ci-indicator.metadata-pulse:not(.pr-status-failing) {
   transform-origin: center;
-  animation: metadata-badge-pulse 1.4s var(--red-reminder-easing) 14;
+  animation: metadata-badge-pulse var(--pulse-duration) var(--pulse-easing) 14;
 }
 @keyframes metadata-badge-pulse {
   0%, 100% {
@@ -520,6 +565,56 @@ body.theme-light .branch-link {
 }
 .popover-subtitle-text {
   min-width: 0;
+}
+.session-agent-list {
+  display: grid;
+  gap: 2px;
+  margin: 1px 0 6px;
+  padding: 4px 0 5px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.session-agent-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text);
+  font: var(--ui-font-size-xs)/1.25 var(--ui-font);
+  white-space: nowrap;
+}
+.session-agent-row.attention {
+  color: var(--danger-text);
+}
+.session-agent-kind {
+  min-width: 0;
+  font-weight: 600;
+}
+.session-agent-sep,
+.session-agent-status,
+.session-agent-empty {
+  color: var(--muted);
+}
+.session-agent-row.attention .session-agent-status {
+  color: var(--danger-text);
+}
+.session-agent-empty {
+  font: var(--ui-font-size-xs)/1.25 var(--ui-font);
+}
+.session-window-metadata-list {
+  display: grid;
+  gap: 4px;
+  margin: 0 0 6px;
+}
+.session-window-metadata,
+.session-window-metadata-list.shared {
+  padding: 4px 0 2px;
+  border-top: 1px solid var(--line);
+}
+.session-window-metadata-title {
+  color: var(--text);
+  font: 600 var(--ui-font-size-xs)/1.25 var(--ui-font);
+  padding: 2px 0;
 }
 .popover-row {
   display: grid;

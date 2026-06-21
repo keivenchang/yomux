@@ -1432,7 +1432,7 @@ button {
 }
 button:hover { border-color: #657084; }
 button:disabled {
-  color: #667085;
+  color: var(--text-muted-soft);
   cursor: not-allowed;
   opacity: 0.55;
 }

@@ -1131,6 +1131,22 @@ def yoagent_summary_ci(summary: dict[str, Any]) -> dict[str, Any]:
     return checks if isinstance(checks, dict) else {}
 
 
+def yoagent_summary_priority_hints(summary: dict[str, Any]) -> list[str]:
+    hints: list[str] = []
+    for key in ("work_priority_reasons", "priority_reasons", "user_priority_reasons"):
+        values = summary.get(key)
+        if isinstance(values, list):
+            for item in values:
+                text = truncate_text(str(item or "").strip(), 120)
+                if text and text not in hints:
+                    hints.append(text)
+    for key in ("work_priority", "user_priority", "priority"):
+        text = truncate_text(str(summary.get(key) or "").strip(), 120)
+        if text and text not in hints:
+            hints.append(text)
+    return hints
+
+
 def yoagent_text_contains_failure(text: str) -> bool:
     value = text.lower()
     return any(term in value for term in ("failing", "failed", "failure", "red", "broken"))
@@ -1166,6 +1182,7 @@ def yoagent_work_recommendation(summary: dict[str, Any]) -> dict[str, Any]:
     files_count = files.get("count")
     ci_state = str(ci.get("state") or "").strip().lower()
     review_decision = str(pr.get("review_decision") or "").strip().upper()
+    priority_hints = yoagent_summary_priority_hints(summary)
     reasons: list[str] = []
     next_action = "Open the session and ask for the current status."
     score = 100
@@ -1205,6 +1222,15 @@ def yoagent_work_recommendation(summary: dict[str, Any]) -> dict[str, Any]:
     else:
         reasons.append("idle")
         next_action = "Resume only after higher-priority sessions are clear."
+    if priority_hints:
+        reason = f"local priority: {priority_hints[0]}"
+        if reason not in reasons:
+            reasons.append(reason)
+        if score < 740:
+            score = 740
+            next_action = "Use the local priority note to choose the next concrete step."
+        else:
+            score += 25
     if not reasons and ci_text:
         reasons.append(ci_text)
     return {
@@ -1241,6 +1267,46 @@ def yoagent_default_summaries(summaries: list[dict[str, Any]]) -> list[dict[str,
 
 def yoagent_default_work_summaries(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return yoagent_rank_work_summaries(summaries)[:3]
+
+
+def yoagent_work_priority_hints(activity_payload: dict[str, Any]) -> dict[str, list[str]]:
+    if not isinstance(activity_payload, dict):
+        return {}
+    by_session: dict[str, list[str]] = {}
+
+    def add(session: Any, reason: Any) -> None:
+        key = str(session or "").strip()
+        text = truncate_text(str(reason or "").strip(), 120)
+        if not key or not text:
+            return
+        by_session.setdefault(key, [])
+        if text not in by_session[key]:
+            by_session[key].append(text)
+
+    def add_from_value(value: Any) -> None:
+        if isinstance(value, dict):
+            if "session" in value:
+                add(value.get("session"), value.get("reason") or value.get("text") or value.get("label") or value.get("priority"))
+                return
+            for session, reason in value.items():
+                add(session, reason)
+        elif isinstance(value, list):
+            for item in value:
+                add_from_value(item)
+
+    for key in ("work_priorities", "user_priorities", "priorities"):
+        add_from_value(activity_payload.get(key))
+
+    skills = activity_payload.get("yoagent_skills")
+    context_lines = skills.get("context_lines") if isinstance(skills, dict) else []
+    for raw_line in context_lines or []:
+        line = str(raw_line or "").strip()
+        if not re.search(r"\b(?:work[- ]?next\s+priority|work\s+priority|priority\s+session|prioriti[sz]e\s+session)\b", line, re.IGNORECASE):
+            continue
+        match = re.search(r"\bsession\s+([A-Za-z0-9_.-]{1,64})\b\s*(?::|-|\u2014)?\s*(.*)$", line, re.IGNORECASE)
+        if match:
+            add(match.group(1), match.group(2) or line)
+    return by_session
 
 
 def yoagent_work_advice_line(summary: dict[str, Any]) -> str:
@@ -1301,16 +1367,20 @@ def deterministic_yoagent_reply(question: str, activity_payload: dict[str, Any],
     headline = str(global_summary.get("headline") or no_activity) if isinstance(global_summary, dict) else no_activity
     question_text = str(question or "").lower()
     all_summaries: list[dict[str, Any]] = []
+    work_priority_hints = yoagent_work_priority_hints(activity_payload)
     if isinstance(sessions, dict):
         for key, summary in sessions.items():
             if not isinstance(summary, dict):
                 continue
             # Real payloads carry "session"; fall back to the dict key so the section title is labeled.
             item = summary if summary.get("session") else {**summary, "session": key}
+            session_key = str(item.get("session") or key)
             session_info = activity_payload.get("session_info") if isinstance(activity_payload, dict) else {}
-            details = session_info.get(str(item.get("session") or key)) if isinstance(session_info, dict) else None
+            details = session_info.get(session_key) if isinstance(session_info, dict) else None
             if isinstance(details, dict) and "project" not in item:
                 item = {**item, "project": details.get("project") if isinstance(details.get("project"), dict) else {}}
+            if work_priority_hints.get(session_key):
+                item = {**item, "work_priority_reasons": [*yoagent_summary_priority_hints(item), *work_priority_hints[session_key]]}
             all_summaries.append(item)
     # Session detail is opt-in: only expose session ids when the user explicitly asks for sessions or
     # names a concrete "session N". Default answers stay task/advice-shaped.

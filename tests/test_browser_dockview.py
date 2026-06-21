@@ -114,6 +114,7 @@ def test_dockview_tab_hover_shows_session_detail_popover(browser, tmp_path):
     )
     assert "/home/test/yolomux.dev1" in metrics["text"], metrics
     assert "yolo-tab-dock-rewrite" in metrics["text"], metrics
+    assert "tmux session 1" in metrics["text"], metrics
     assert metrics["parentTag"] == "BODY", metrics
     assert metrics["top"] >= metrics["tabBottom"], metrics
     assert metrics["pointerEvents"] == "auto", metrics
@@ -821,6 +822,15 @@ def test_dockview_window_bar_buttons_select_tmux_windows(browser, tmp_path):
         """
     )
     browser.find_element("css selector", '.panel-detail-row [data-window-index="2"]').click()
+    after_click_buttons = browser.execute_script(
+        """
+        return Array.from(document.querySelectorAll('.panel-detail-row [data-window-index]')).map(button => ({
+          index: button.dataset.windowIndex || '',
+          pressed: button.getAttribute('aria-pressed') || '',
+          active: button.classList.contains('active'),
+        }));
+        """
+    )
     fetches = browser.execute_script(
         """
         return window.__bootFetches
@@ -839,8 +849,86 @@ def test_dockview_window_bar_buttons_select_tmux_windows(browser, tmp_path):
         {"text": "1:codex", "index": "1", "pressed": "true", "active": True},
         {"text": "2:pytest", "index": "2", "pressed": "false", "active": False},
     ]
+    assert after_click_buttons == [
+        {"index": "0", "pressed": "false", "active": False},
+        {"index": "1", "pressed": "false", "active": False},
+        {"index": "2", "pressed": "true", "active": True},
+    ]
     assert fetches == ["POST /api/tmux-window"]
     assert query == "session=1&window=2"
+
+
+def test_dockview_window_bar_working_status_dot_uses_shared_pulse(browser, tmp_path):
+    transcript_sessions = {
+        "1": {
+            "panes": [
+                {"target": "%1", "window": 0, "window_name": "bash", "window_active": False, "active": True, "process_label": "bash"},
+                {"target": "%2", "window": 1, "window_name": "codex", "window_active": True, "active": True, "process_label": "codex"},
+                {"target": "%3", "window": 2, "window_name": "claude", "window_active": False, "active": True, "process_label": "claude"},
+            ],
+        },
+    }
+    auto_approve_payload = {
+        "session_order": ["1"],
+        "sessions": {
+            "1": {
+                "target": "1",
+                "enabled": True,
+                "agent_windows": [
+                    {"kind": "codex", "state": "working", "window_index": 1, "window_label": "1:codex"},
+                    {"kind": "claude", "state": "idle", "window_index": 2, "window_label": "2:claude", "idle_since": 1},
+                ],
+            },
+        },
+        "rules": {"path": "/home/test/.config/yolomux/yolo-rules.yaml", "source": "default", "rules": [], "errors": []},
+    }
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=left&tabs=left:1",
+        sessions=["1"],
+        transcript_sessions=transcript_sessions,
+        auto_approve_payload=auto_approve_payload,
+    )
+    wait_for_dockview(browser, min_tabs=1)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return document.querySelector('.agent-window-activity-icon--working')
+              && document.querySelector('.agent-window-activity-icon--idle');
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const working = document.querySelector('.agent-window-activity-icon--working');
+        const idle = document.querySelector('.agent-window-activity-icon--idle');
+        const workingStyle = getComputedStyle(working);
+        const idleStyle = getComputedStyle(idle);
+        return {
+          workingText: working?.textContent || '',
+          idleText: idle?.textContent || '',
+          workingHasParent: working?.classList.contains('status-indicator') || false,
+          workingHasDot: working?.classList.contains('status-indicator--dot') || false,
+          workingHasState: working?.classList.contains('status-indicator--working') || false,
+          idleHasParent: idle?.classList.contains('status-indicator') || false,
+          idleHasDot: idle?.classList.contains('status-indicator--dot') || false,
+          idleHasState: idle?.classList.contains('status-indicator--idle') || false,
+          workingAnimationName: workingStyle.animationName,
+          idleAnimationName: idleStyle.animationName,
+        };
+        """
+    )
+    assert metrics["workingText"] == "●", metrics
+    assert metrics["idleText"] == "○", metrics
+    assert metrics["workingHasParent"] is True, metrics
+    assert metrics["workingHasDot"] is True, metrics
+    assert metrics["workingHasState"] is True, metrics
+    assert metrics["idleHasParent"] is True, metrics
+    assert metrics["idleHasDot"] is True, metrics
+    assert metrics["idleHasState"] is True, metrics
+    assert metrics["workingAnimationName"] == "command-palette-thinking", metrics
+    assert metrics["idleAnimationName"] == "none", metrics
 
 
 def test_dockview_terminal_info_bar_alignment_and_detail_toggle_refits_xterm(browser, tmp_path):
@@ -3220,4 +3308,3 @@ def test_dockview_directory_drag_over_finder_is_reserved_but_terminal_path_targe
     assert result["sharedFileGateFinder"] is False, result
     assert result["sharedPathGateFinderMiddle"] is False, result
     assert result["sharedPathGateTerminalEdge"] is True, result
-

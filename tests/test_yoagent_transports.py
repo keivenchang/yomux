@@ -6,6 +6,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import yolomux_lib.yoagent.transports as transport_module
+from yolomux_lib.agent_comms.claude_stream_json import claude_stream_json_argv
+from yolomux_lib.agent_comms.claude_stream_json import claude_stream_json_result
+from yolomux_lib.common import codex_exec_argv
 from yolomux_lib.yoagent.transports import ClaudeChannelsTransport
 from yolomux_lib.yoagent.transports import ClaudeSdkTransport
 from yolomux_lib.yoagent.transports import ClaudeStreamJsonTransport
@@ -37,6 +40,36 @@ def test_transport_registry_order_and_aliases():
     assert normalize_yoagent_transport_id("pane-paste") == TMUX_LEGACY_TRANSPORT_ID
     assert registry.get("pane-paste").id == TMUX_LEGACY_TRANSPORT_ID
     assert registry.get("tmux-legacy").label == "legacy tmux pane paste + Return"
+
+
+def test_codex_exec_search_is_top_level_and_not_used_for_resume():
+    fresh = codex_exec_argv(model="gpt-5.5", effort="xhigh", search=True)
+    resumed = codex_exec_argv(resume_session_id="thread-1", model="gpt-5.5", effort="xhigh", search=True)
+
+    assert fresh[:3] == ["codex", "--search", "exec"]
+    assert "--search" not in resumed
+    assert resumed[:3] == ["codex", "exec", "resume"]
+
+
+def test_claude_stream_json_argv_includes_partials_and_optional_tools():
+    args = claude_stream_json_argv({"agent_model": "claude-haiku-4-5", "agent_effort": "high", "tools": "default"})
+
+    assert "--include-partial-messages" in args
+    assert "--show-thinking" in args
+    assert args[args.index("--tools") + 1] == "default"
+
+
+def test_claude_stream_json_result_falls_back_to_wrapped_text_deltas():
+    stdout = "\n".join([
+        json.dumps({"type": "stream_event", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "wrapped "}}}),
+        json.dumps({"type": "stream_event", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "answer"}}}),
+        json.dumps({"type": "result", "is_error": False, "result": ""}),
+    ])
+
+    answer, error = claude_stream_json_result(stdout)
+
+    assert answer == "wrapped answer"
+    assert error == ""
 
 
 def test_transport_registry_prefers_structured_provider_only_for_managed_targets(monkeypatch):
@@ -539,7 +572,7 @@ def test_codex_app_server_transport_runs_stdio_json_rpc_until_turn_completed(mon
     assert result.transport == "codex-app-server"
     assert result.result_source == "codex-app-server-json-rpc"
     assert result.text == "Final app-server answer."
-    assert calls[0][0] == ["codex", "app-server", "--listen", "stdio://"]
+    assert calls[0][0] == ["codex", "app-server", "--listen", "stdio://", "-c", 'model_reasoning_summary="auto"']
     assert calls[0][1]["cwd"] == "/repo/app"
     assert calls[0][1]["env"]["CODEX_HOME"] == str(codex_home)
     assert calls[0][1]["env"]["TERM"] == "xterm-256color"
@@ -556,6 +589,36 @@ def test_codex_app_server_transport_runs_stdio_json_rpc_until_turn_completed(mon
     assert stream_events[0]["item_id"] == "item-1"
     assert stream_events[0]["native_type"] == "item/agentMessage/delta"
     assert stream_events[1]["native_type"] == "turn/completed"
+
+
+def test_codex_app_server_low_effort_keeps_reasoning_summary_enabled(tmp_path):
+    messages = [
+        {"jsonrpc": "2.0", "id": "initialize-1", "result": {}},
+        {"jsonrpc": "2.0", "id": "thread-1", "result": {"threadId": "thread-1"}},
+        {"jsonrpc": "2.0", "id": "turn-1", "result": {"turn": {"id": "turn-1", "items": [], "status": "inProgress"}}},
+        {"jsonrpc": "2.0", "method": "item/reasoning/summaryTextDelta", "params": {"threadId": "thread-1", "turnId": "turn-1", "itemId": "reason-1", "delta": "Checking context"}},
+        {"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {"threadId": "thread-1", "turnId": "turn-1", "itemId": "answer-1", "delta": "Final app-server answer."}},
+        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"threadId": "thread-1", "turn": {"items": []}}},
+    ]
+    fake_process = FakeCodexAppServerProcess(messages)
+    calls = []
+    stream_events = []
+
+    def fake_popen(args, **kwargs):
+        calls.append((args, kwargs))
+        return fake_process
+
+    result = CodexAppServerTransport().send(
+        {"session": "job-1", "agent_kind": "codex", "transport": "codex-app-server", "managed": True, "cwd": str(tmp_path), "agent_effort": "low"},
+        "summarize the diff",
+        popen=fake_popen,
+        timeout=3,
+        on_event=stream_events.append,
+    )
+
+    assert result.ok is True
+    assert calls[0][0] == ["codex", "app-server", "--listen", "stdio://", "-c", 'model_reasoning_effort="low"', "-c", 'model_reasoning_summary="auto"']
+    assert any(event["kind"] == "hidden_work_delta" and event["text"] == "Checking context" for event in stream_events)
 
 
 def test_codex_app_server_transport_resumes_existing_thread(monkeypatch):

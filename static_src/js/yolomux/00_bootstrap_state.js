@@ -1139,6 +1139,7 @@ let activitySummaryPayload = {sessions: {}, global: {lines: []}, session_order: 
 let activitySummaryRefreshing = false;
 let activitySummaryLastRefreshTs = 0;
 const activitySummaryGuard = makeGenerationGuard();
+let yoagentStartupActivitySummaryPayload = null;
 let yoagentMessages = [];
 let yoagentPendingWaits = [];
 let yoagentJobs = [];

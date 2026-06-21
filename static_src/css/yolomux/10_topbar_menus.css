@@ -1104,7 +1104,7 @@ body.theme-light .app-menu-popover {
 }
 body.theme-light .app-submenu-popover {
   color: var(--text);
-  background: #f8fafc;
+  background: var(--app-submenu-light-bg);
   border-color: var(--line);
   box-shadow:
     0 -2px 10px rgb(var(--overlay-slate-rgb) / 0.10),

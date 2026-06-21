@@ -16,6 +16,7 @@ from typing import Any
 
 from ..activity_summary import build_yoagent_chat_prompt
 from ..activity_summary import build_yoagent_resume_prompt
+from ..activity_summary import yoagent_question_requests_session_list
 from ..common import PROJECT_ROOT
 from ..common import SUMMARY_CODEX_SERVICE_TIER
 from ..common import YOAGENT_CLAUDE_SUMMARY_MODEL
@@ -57,6 +58,8 @@ def strip_yoagent_hidden_thinking(text: str) -> tuple[str, bool]:
 def strip_yoagent_stream_hidden_thinking(text: str) -> tuple[str, bool]:
     value = str(text or "")
     cleaned, count = YOAGENT_THINK_BLOCK_RE.subn("", value)
+    if not count and not re.search(r"</?think\b", cleaned, re.IGNORECASE):
+        return cleaned, False
     open_think = re.search(r"<think\b[^>]*>", cleaned, re.IGNORECASE)
     if open_think:
         return cleaned[: open_think.start()].strip(), True
@@ -71,9 +74,9 @@ def yoagent_response_details(response: dict[str, Any]) -> str:
     backend_used = str(response.get("backend_used") or response.get("backend") or "").strip()
     if backend_used:
         lines.append(f"- backend: `{backend_used}`")
-    ttfr_ms = timing.get("ttfr_ms")
-    if isinstance(ttfr_ms, (int, float)):
-        lines.append(f"- response time: `{float(ttfr_ms) / 1000:.3f}s` (`{float(ttfr_ms):.1f}ms`)")
+    response_ms = yoagent_response_ms(response)
+    if response_ms is not None:
+        lines.append(f"- response time: `{response_ms / 1000:.3f}s` (`{response_ms:.1f}ms`)")
     elapsed_ms = cli.get("elapsed_ms")
     if isinstance(elapsed_ms, (int, float)):
         lines.append(f"- model CLI time: `{float(elapsed_ms) / 1000:.3f}s`")
@@ -108,6 +111,14 @@ def yoagent_response_details(response: dict[str, Any]) -> str:
     if response.get("hidden_thinking_removed"):
         lines.append("- raw model thinking was hidden; YOLOmux shows safe diagnostics instead of chain-of-thought")
     return "\n".join(lines)
+
+
+def yoagent_response_ms(response: dict[str, Any]) -> float | None:
+    timing = response.get("timing") if isinstance(response.get("timing"), dict) else {}
+    value = timing.get("ttfr_ms")
+    if isinstance(value, (int, float)) and float(value) > 0:
+        return float(value)
+    return None
 
 
 def yoagent_cli_fallback_reason(backend: str, error: str) -> str:
@@ -299,6 +310,8 @@ class YoagentBackendsMixin:
         locale: str = "en",
         stream_id: str = "",
         request_id: str = "",
+        include_activity_context: bool = True,
+        require_external_tools: bool = False,
     ) -> tuple[str, str, dict[str, Any]]:
         if backend not in {"codex", "claude"}:
             return "", f"unknown backend: {backend}", {}
@@ -306,11 +319,21 @@ class YoagentBackendsMixin:
         with self.yoagent_cli_lock:
             state = self.yoagent_cli_sessions.get(backend, {})
             session_id = str(state.get("session_id") or "")
-            context_signature = self.deps.yoagent_activity_payload_signature(activity_payload)
-            context_changed = context_signature != state.get("activity_signature")
-            seed = not session_id
+            context_signature = self.deps.yoagent_activity_payload_signature(activity_payload) if include_activity_context else ""
+            context_seen_signature = str(state.get("context_injected_signature") or "")
+            context_seen_this_process = bool(context_signature and context_seen_signature == context_signature)
+            context_forced = include_activity_context and (
+                backend == "claude"
+                or yoagent_question_requests_session_list(question)
+                or (bool(session_id) and not context_seen_this_process)
+            )
+            context_changed = include_activity_context and (context_signature != state.get("activity_signature") or context_forced)
+            force_seed = backend == "codex" and require_external_tools
+            seed = force_seed or not session_id
             next_session_id = session_id or (str(uuid.uuid4()) if backend == "claude" else "")
-            prompt = build_yoagent_chat_prompt(question, activity_payload, settings, history, locale) if seed else build_yoagent_resume_prompt(question, activity_payload, settings, context_changed, locale)
+            prompt_activity = activity_payload if include_activity_context else {}
+            prompt_context_included = include_activity_context and (seed or context_changed)
+            prompt = build_yoagent_chat_prompt(question, prompt_activity, settings, history, locale) if seed else build_yoagent_resume_prompt(question, prompt_activity, settings, prompt_context_included, locale)
             prompt += self.deps.yoagent_language_directive(locale)
 
         started = time.monotonic()
@@ -318,7 +341,10 @@ class YoagentBackendsMixin:
             self.publish_yoagent_stream_delta(stream_id, "", backend=backend, phase="started")
         if backend == "codex":
             stream_callback = self.yoagent_stream_callback(stream_id, backend) if stream_id else None
-            if stream_callback:
+            if require_external_tools:
+                answer, error, captured_session_id = self.deps.run_yoagent_codex_cli(prompt, session_id="", resume=False, settings=settings, enable_search=True)
+                backend_status = {"transport": "codex-exec", "persistent": False, "external_tools_enabled": True, "web_search_enabled": True}
+            elif stream_callback:
                 answer, error, captured_session_id, backend_status = self.deps.run_yoagent_codex_app_server(
                     prompt,
                     session_id=session_id,
@@ -333,7 +359,7 @@ class YoagentBackendsMixin:
             if request_id and self.deps.yoagent_chat_request_cancelled(request_id):
                 backend_status["cancelled"] = True
                 error = "interrupted"
-            elif error and not answer:
+            elif error and not answer and not require_external_tools:
                 fallback_answer, fallback_error, fallback_session_id = self.deps.run_yoagent_codex_cli(prompt, session_id=session_id, resume=not seed, settings=settings)
                 backend_status["fast_backend_error"] = error
                 backend_status["fallback_transport"] = "codex-exec"
@@ -350,8 +376,9 @@ class YoagentBackendsMixin:
             claude_effort = str(settings.get("claude_effort") or "").strip()
             stream_callback = self.yoagent_stream_callback(stream_id, backend) if stream_id else None
             cancel_event = self.deps.yoagent_chat_request_cancel_event(request_id) if request_id else None
-            answer, error = self.deps.run_yoagent_claude_cli(prompt, session_id=next_session_id, resume=not seed, model=claude_model, effort=claude_effort, stream_callback=stream_callback, request_id=request_id, cancel_event=cancel_event)
-            backend_status = {"transport": "claude-stream-json", "persistent": False, "model": claude_model, "effort": claude_effort or None}
+            tools = "default" if require_external_tools else ""
+            answer, error = self.deps.run_yoagent_claude_cli(prompt, session_id=next_session_id, resume=not seed, model=claude_model, effort=claude_effort, stream_callback=stream_callback, request_id=request_id, cancel_event=cancel_event, tools=tools)
+            backend_status = {"transport": "claude-stream-json", "persistent": False, "model": claude_model, "effort": claude_effort or None, "external_tools_enabled": bool(tools), "tools": tools or None}
         elapsed_ms = round((time.monotonic() - started) * 1000)
         fallback_reason = self.deps.yoagent_cli_fallback_reason(backend, error)
         status = {
@@ -360,16 +387,21 @@ class YoagentBackendsMixin:
             "resumed": not seed,
             "seeded": seed,
             "context_changed": context_changed,
+            "activity_context_included": include_activity_context,
+            "activity_context_sent": prompt_context_included,
+            "activity_context_forced": context_forced,
+            "external_tools_required": bool(require_external_tools),
             "prompt_chars": len(prompt),
             "elapsed_ms": elapsed_ms,
             "session_id": next_session_id or None,
             "per_server": True,
         }
         with self.yoagent_cli_lock:
-            if answer and next_session_id:
+            if answer and next_session_id and not (backend == "codex" and require_external_tools):
                 self.yoagent_cli_sessions[backend] = {
                     "session_id": next_session_id,
                     "activity_signature": context_signature,
+                    "context_injected_signature": context_signature if prompt_context_included and context_signature else str(state.get("context_injected_signature") or ""),
                     "updated_ts": time.time(),
                     "updated_monotonic": time.monotonic(),
                 }
@@ -390,7 +422,7 @@ class YoagentBackendsMixin:
         return answer, fallback_reason, status
 
 
-    def run_yoagent_codex_cli(self, prompt: str, session_id: str = "", resume: bool = False, settings: dict[str, Any] | None = None) -> tuple[str, str, str]:
+    def run_yoagent_codex_cli(self, prompt: str, session_id: str = "", resume: bool = False, settings: dict[str, Any] | None = None, enable_search: bool = False) -> tuple[str, str, str]:
         if not shutil.which("codex"):
             return "", "codex CLI not found", ""
         current_settings = settings or self.yoagent_settings()
@@ -399,6 +431,7 @@ class YoagentBackendsMixin:
             model=str(current_settings.get("codex_model") or "").strip() or None,
             effort=str(current_settings.get("codex_effort") or "").strip() or None,
             service_tier=SUMMARY_CODEX_SERVICE_TIER,
+            search=enable_search and not (resume and session_id),
         )
         try:
                 completed = subprocess.run(
@@ -440,6 +473,7 @@ class YoagentBackendsMixin:
         stream_callback: Any | None = None,
         request_id: str = "",
         cancel_event: threading.Event | None = None,
+        tools: str = "",
     ) -> tuple[str, str]:
         if not shutil.which("claude"):
             return "", "claude CLI not found"
@@ -456,6 +490,8 @@ class YoagentBackendsMixin:
             target["agent_model"] = model
         if effort:
             target["agent_effort"] = effort
+        if tools:
+            target["tools"] = tools
         result = ClaudeStreamJsonTransport().send(
             target,
             prompt,

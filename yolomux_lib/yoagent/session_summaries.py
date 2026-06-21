@@ -89,21 +89,6 @@ class YoagentSessionSummariesMixin:
             return max((float(item.get("updated_ts") or 0) for item in self.yoagent_session_summaries.values()), default=0.0)
 
 
-    def yoagent_refresh_interval_seconds(self, settings: dict[str, Any] | None = None) -> float:
-        value = (settings or self.yoagent_settings()).get("refresh_interval_seconds", 0)
-        interval = self.float_value(value, 0.0)
-        if interval <= 0:
-            return 0.0
-        return max(30.0, min(3600.0, interval))
-
-
-    def yoagent_session_summary_due(self, session: str, interval: float, now: float | None = None) -> bool:
-        current = time.time() if now is None else now
-        with self.yoagent_session_summary_lock:
-            updated = self.float_value((self.yoagent_session_summaries.get(session) or {}).get("updated_ts"), 0.0)
-        return updated <= 0 or current - updated >= interval
-
-
     def build_yoagent_session_summary_update_prompt(
         self,
         session: str,
@@ -202,51 +187,36 @@ class YoagentSessionSummariesMixin:
         }
 
 
-    def tick_yoagent_session_summaries(self, settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    def tick_yoagent_session_summaries(self, settings: dict[str, Any] | None = None, *, force: bool = False) -> dict[str, Any]:
         current_settings = settings or self.yoagent_settings()
-        interval = self.deps.yoagent_refresh_interval_seconds(current_settings)
-        if interval <= 0:
-            return {"enabled": False, "updated": [], "skipped": []}
         sessions, errors = self.deps.discover_sessions(self.sessions)
         self.deps.prune_yoagent_session_summaries(set(sessions))
         updated: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
-        now = time.time()
         for session in self.tmux_recency_ordered_sessions(self.sessions):
             info = sessions.get(session)
             if info is None:
                 continue
-            if not self.deps.yoagent_session_summary_due(session, interval, now):
-                skipped.append({"session": session, "reason": "interval"})
-                continue
-            result = self.deps.update_yoagent_session_summary(session, info, current_settings)
+            result = self.deps.update_yoagent_session_summary(session, info, current_settings, force=force)
             if result.get("updated"):
                 updated.append(result)
             else:
                 skipped.append(result)
-        return {"enabled": True, "updated": updated, "skipped": skipped, "errors": errors}
+        return {"enabled": True, "mode": "first_launch", "updated": updated, "skipped": skipped, "errors": errors}
 
 
     def maybe_start_yoagent_summary_worker(self) -> None:
-        settings = self.yoagent_settings()
-        if self.deps.yoagent_refresh_interval_seconds(settings) <= 0:
-            return
         with self.yoagent_summary_worker_lock:
-            if self.yoagent_summary_worker_running:
+            if self.yoagent_summary_worker_running or self.yoagent_summary_first_launch_started:
                 return
+            self.yoagent_summary_first_launch_started = True
             self.yoagent_summary_worker_running = True
-        threading.Thread(target=self.yoagent_summary_worker_loop, name="yoagent-summary-refresh", daemon=True).start()
+        threading.Thread(target=self.yoagent_summary_worker_loop, name="yoagent-summary-first-launch", daemon=True).start()
 
 
     def yoagent_summary_worker_loop(self) -> None:
         try:
-            while True:
-                settings = self.yoagent_settings()
-                interval = self.deps.yoagent_refresh_interval_seconds(settings)
-                if interval <= 0:
-                    return
-                self.deps.tick_yoagent_session_summaries(settings)
-                time.sleep(min(interval, 60.0))
+            self.deps.tick_yoagent_session_summaries(self.yoagent_settings(), force=True)
         finally:
             with self.yoagent_summary_worker_lock:
                 self.yoagent_summary_worker_running = False

@@ -201,7 +201,7 @@ def run_lane(lane: Lane) -> LaneResult:
 def print_result(result: LaneResult) -> None:
     state = "PASS" if result.ok else "FAIL"
     print(f"{state}: {result.label} ({result.seconds:.2f}s)", flush=True)
-    if not result.ok:
+    if not result.ok or "WARNING:" in result.output:
         print(result.output, end="" if result.output.endswith("\n") else "\n", flush=True)
 
 

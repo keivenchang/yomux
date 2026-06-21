@@ -41,7 +41,7 @@ Keep the `<textarea>` + overlay and hand-build Find + the editor-options list on
 - CSS (`static/yolomux.css`): the ~121 lines for `.file-editor-textarea`, `.file-editor-highlight`, `.syntax-highlighted`, `.editor-wrap`, the `--editor-line-number*` / `--editor-wrap-marker*` vars, and the visual-overlay grid. (CM owns gutter/wrap/highlight.)
 - `web.py`: the `#fileEditorHighlight` `<pre><code>` + `#fileEditorTextarea` markup (`web.py:138-139`); the `#`/wrap toolbar buttons if CM commands replace them.
 - KEEP: marked.js + `#fileEditorPreviewPane` (markdown Preview), the Edit/Preview/Split mode control, `editor_font_size`/`word_wrap`/`line_numbers` settings (now drive CM config). DECIDE on highlight.js: keep it only for the code-file Preview read view, or let a read-only CM render that too and drop highlight.js entirely.
-- This change also CLOSES DOIT.5 #6 (gutter/continuation real-wrap mapping) and most of the TODO "More editor options" list.
+- This change also retired the gutter/continuation real-wrap mapping bug (#6) and most of the TODO "More editor options" list.
 
 ## Adapter surface (what CM must hook into — keep the rest of the app unchanged)
 - `openFiles` per-file state `{content, original, dirty, kind}`; the input -> `state.content` / dirty -> `setEditorStatus` path (~4966).

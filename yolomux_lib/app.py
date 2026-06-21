@@ -70,16 +70,12 @@ from .common import PROJECT_ROOT
 from .common import RUN_HISTORY_PATH
 from .common import SERVER_HOSTNAME
 from .common import SERVER_STARTED_AT
-from .common import SUMMARY_CODEX_SERVICE_TIER
 from .common import SUMMARY_MAX_PROMPT_CHARS
 from .common import WATCH_INDEX_PATH
 from .common import YOLOMUX_VERSION
-from .common import YOAGENT_CLAUDE_SUMMARY_MODEL
 from .common import UPLOAD_MAX_FILES
 from .common import UPLOAD_MAX_BYTES
 from .common import as_dict
-from .common import codex_exec_argv
-from .common import codex_runtime_env
 from .common import next_numbered_session_name
 from .common import tail_file_lines
 from .common import truncate_text
@@ -104,9 +100,11 @@ from .metadata import session_to_json
 from .metadata import watched_pr_metadata
 from .sessions import active_window_for_panes
 from .sessions import discover_sessions
+from .settings import default_settings
 from .settings import save_settings
 from .settings import SETTINGS_PATH
 from .settings import settings_payload
+from .settings import summary_settings as normalized_summary_settings
 from .transcripts import codex_summary_prompt
 from .transcripts import codex_event_text
 from .transcripts import compact_summary_lines
@@ -208,6 +206,7 @@ from .yoagent.session_summaries import YOAGENT_SESSION_SUMMARY_STATES
 
 
 logger = logging.getLogger(__name__)
+ACTIVITY_SUMMARY_READY_PUSH_TRIGGERS = {"manual", "refresh", "force"}
 METADATA_BADGE_PULSE_SECONDS = 20.0
 METADATA_BADGES = ("main", "pr", "status", "ci")
 METADATA_BADGE_SIGNATURES_STATE_KEY = "metadata_badge_signatures"
@@ -234,7 +233,6 @@ SERVER_TMUX_SIGNAL_EVENT_POLL_SECONDS = 1.009
 TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS = 1.009
 TMUX_SIGNAL_ACTIVITY_WINDOW_SECONDS = 120.0
 SERVER_WATCHED_PR_EVENT_POLL_SECONDS = 60.0
-DEFAULT_TABBER_ACTIVITY_REFRESH_SECONDS = 15.0
 SERVER_ACTIVITY_HEARTBEAT_ROTATE_SECONDS = 3600.0
 CLIENT_WATCH_ROOT_TTL_SECONDS = 300
 CLIENT_WATCH_ROOT_LIMIT = 128
@@ -242,6 +240,8 @@ CLIENT_WATCH_FILE_LIMIT = 128
 DIRECTORY_WATCH_ENTRY_LIMIT = 512
 # Keep in sync with tmuxSessionNameError() in static/yolomux.js.
 TMUX_SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9_. -]{1,64}$")
+DEFAULT_APP_SETTINGS = default_settings()
+DEFAULT_PERFORMANCE_SETTINGS = DEFAULT_APP_SETTINGS["performance"]
 SELF_RESTART_LOG_PATH = "/tmp/yolomux-self-update-restart.log"
 SELF_RESTART_ENV_KEYS = (
     "PATH",
@@ -813,13 +813,13 @@ class TmuxWebtermApp:
         self.yoagent_session_summaries: dict[str, dict[str, Any]] = {}
         self.yoagent_summary_worker_lock = threading.Lock()
         self.yoagent_summary_worker_running = False
+        self.yoagent_summary_first_launch_started = False
         self.load_metadata_badge_state()
         self.load_yoagent_session_summaries()
         self.event_log = EventLog(EVENT_LOG_PATH)
         self.run_history_store = RunHistoryStore(RUN_HISTORY_PATH)
         self.control_server = YolomuxControlServer(self.handle_control_request)
         self.control_server.start()
-        self.maybe_start_yoagent_summary_worker()
 
     def require_known_session(self, session: str) -> tuple[dict[str, Any], HTTPStatus] | None:
         # The standard "unknown session -> 404" guard. Decorated handlers use requires_known_session();
@@ -1810,6 +1810,9 @@ class TmuxWebtermApp:
     def settings_payload(self) -> dict[str, Any]:
         return settings_payload()
 
+    def summary_settings(self) -> dict[str, Any]:
+        return normalized_summary_settings(self.settings_payload().get("settings"))
+
     def publish_client_event(
         self,
         event_type: str,
@@ -1833,23 +1836,28 @@ class TmuxWebtermApp:
         except (TypeError, ValueError):
             return str(payload)
 
-    def server_event_poll_seconds(self) -> float:
+    def performance_setting_ms_as_seconds(self, key: str, minimum: float, maximum: float) -> float:
+        default = float(DEFAULT_PERFORMANCE_SETTINGS[key])
         settings = settings_payload().get("settings", {})
         performance = settings.get("performance", {}) if isinstance(settings, dict) else {}
-        value = performance.get("server_event_poll_ms", 850) if isinstance(performance, dict) else 850
-        return max(0.25, min(60.0, self.float_value(value, 850.0) / 1000.0))
+        value = performance.get(key, default) if isinstance(performance, dict) else default
+        return max(minimum, min(maximum, self.float_value(value, default) / 1000.0))
+
+    def performance_setting_seconds(self, key: str, minimum: float, maximum: float) -> float:
+        default = float(DEFAULT_PERFORMANCE_SETTINGS[key])
+        settings = settings_payload().get("settings", {})
+        performance = settings.get("performance", {}) if isinstance(settings, dict) else {}
+        value = performance.get(key, default) if isinstance(performance, dict) else default
+        return max(minimum, min(maximum, self.float_value(value, default)))
+
+    def server_event_poll_seconds(self) -> float:
+        return self.performance_setting_ms_as_seconds("server_event_poll_ms", 0.25, 60.0)
 
     def server_directory_event_poll_seconds(self) -> float:
-        settings = settings_payload().get("settings", {})
-        performance = settings.get("performance", {}) if isinstance(settings, dict) else {}
-        value = performance.get("server_directory_event_poll_ms", 3000) if isinstance(performance, dict) else 3000
-        return max(0.25, min(60.0, self.float_value(value, 3000.0) / 1000.0))
+        return self.performance_setting_ms_as_seconds("server_directory_event_poll_ms", 0.25, 60.0)
 
     def server_background_file_event_poll_seconds(self) -> float:
-        settings = settings_payload().get("settings", {})
-        performance = settings.get("performance", {}) if isinstance(settings, dict) else {}
-        value = performance.get("server_background_file_event_poll_ms", 5000) if isinstance(performance, dict) else 5000
-        return max(0.25, min(60.0, self.float_value(value, 5000.0) / 1000.0))
+        return self.performance_setting_ms_as_seconds("server_background_file_event_poll_ms", 0.25, 60.0)
 
     def server_auto_approve_event_poll_seconds(self) -> float:
         return SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS
@@ -1860,7 +1868,10 @@ class TmuxWebtermApp:
     def server_watched_pr_event_poll_seconds(self) -> float:
         return SERVER_WATCHED_PR_EVENT_POLL_SECONDS
 
-    def tmux_signal_snapshot(self, force: bool = False) -> dict[str, Any]:
+    def tmux_signal_snapshot(self, force: bool = False, session: str = "") -> dict[str, Any]:
+        target = str(session or "").strip()
+        if target:
+            return fetch_tmux_signal_snapshot(session=target)
         if not force:
             cached = self.tmux_signal_cache.get_or_miss("snapshot")
             if cached is not CACHE_MISS:
@@ -1869,8 +1880,8 @@ class TmuxWebtermApp:
         self.tmux_signal_cache.set("snapshot", copy.deepcopy(payload))
         return payload
 
-    def tmux_signals_payload(self, force: bool = False) -> tuple[dict[str, Any], HTTPStatus]:
-        payload = self.tmux_signal_snapshot(force=force)
+    def tmux_signals_payload(self, force: bool = False, session: str = "") -> tuple[dict[str, Any], HTTPStatus]:
+        payload = self.tmux_signal_snapshot(force=force, session=session)
         return payload, HTTPStatus.OK if payload.get("ok") else HTTPStatus.SERVICE_UNAVAILABLE
 
     def tmux_signal_signature_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2195,10 +2206,7 @@ class TmuxWebtermApp:
         return True
 
     def tabber_activity_refresh_seconds(self) -> float:
-        settings = settings_payload().get("settings", {})
-        performance = settings.get("performance", {}) if isinstance(settings, dict) else {}
-        value = performance.get("tabber_activity_refresh_ms", DEFAULT_TABBER_ACTIVITY_REFRESH_SECONDS * 1000) if isinstance(performance, dict) else DEFAULT_TABBER_ACTIVITY_REFRESH_SECONDS * 1000
-        return max(1.0, min(60.0, self.float_value(value, DEFAULT_TABBER_ACTIVITY_REFRESH_SECONDS * 1000) / 1000.0))
+        return self.performance_setting_ms_as_seconds("tabber_activity_refresh_ms", 1.0, 60.0)
 
     def client_event_watch_sleep_seconds(self, now: float) -> float:
         next_due = min(
@@ -2652,6 +2660,8 @@ class TmuxWebtermApp:
         return events
 
     def publish_activity_summary_ready_events(self, trigger: str = "watch") -> list[str]:
+        if str(trigger or "") not in ACTIVITY_SUMMARY_READY_PUSH_TRIGGERS:
+            return []
         _context_items, _session_files, activity_summary = self.client_watch_state_snapshot()
         if activity_summary.get("visible") is not True:
             return []
@@ -3301,7 +3311,6 @@ class TmuxWebtermApp:
                     self.activity_summary_cache.pop(session, None)
         generated = datetime.now(timezone.utc)
         rolling_updated = self.latest_yoagent_session_summary_updated_ts()
-        settings = self.yoagent_settings()
         return {
             "generated_at": generated.isoformat(),
             "generated_ts": generated.timestamp(),
@@ -3316,8 +3325,9 @@ class TmuxWebtermApp:
             "session_scope": scope,
             "session_file_hours": bounded_hours,
             "yoagent_summaries": {
-                "auto_refresh": self.yoagent_refresh_interval_seconds(settings) > 0,
-                "refresh_interval_seconds": self.yoagent_refresh_interval_seconds(settings),
+                "mode": "first_launch",
+                "first_launch_started": bool(self.yoagent_summary_first_launch_started),
+                "running": bool(self.yoagent_summary_worker_running),
                 "updated_ts": rolling_updated,
                 "updated_at": datetime.fromtimestamp(rolling_updated, timezone.utc).isoformat() if rolling_updated else "",
             },
@@ -3346,12 +3356,6 @@ class TmuxWebtermApp:
             return float(value)
         except (TypeError, ValueError):
             return default
-
-    def yoagent_refresh_interval_seconds(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_refresh_interval_seconds(*args, **kwargs)
-
-    def yoagent_session_summary_due(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_session_summary_due(*args, **kwargs)
 
     def build_yoagent_session_summary_update_prompt(self, *args: Any, **kwargs: Any) -> Any:
         return self.yoagent_controller.build_yoagent_session_summary_update_prompt(*args, **kwargs)
@@ -3531,8 +3535,10 @@ class TmuxWebtermApp:
         kind: str = "",
         session: str = "",
         details: str = "",
+        response_ms: float | None = None,
         auxiliary_lines: list[str] | None = None,
         auxiliary_preview: str = "",
+        stream_items: list[dict[str, str]] | None = None,
         auxiliary_done: bool = False,
         auxiliary_truncated: bool = False,
     ) -> dict[str, Any] | None:
@@ -3546,15 +3552,20 @@ class TmuxWebtermApp:
             message["session"] = session
         if details:
             message["details"] = redacted_action_text(str(details), 10_000)
-        clean_auxiliary_lines = [redacted_action_text(str(line or ""), 1000) for line in (auxiliary_lines or []) if str(line or "").strip()]
+        if isinstance(response_ms, (int, float)) and float(response_ms) > 0:
+            message["responseMs"] = round(float(response_ms), 3)
+        clean_auxiliary_lines = [redacted_action_text(str(line or ""), None) for line in (auxiliary_lines or []) if str(line or "").strip()]
+        clean_stream_items = self.sanitized_yoagent_stream_items(stream_items)
         if clean_auxiliary_lines:
-            message["auxiliaryLines"] = clean_auxiliary_lines[-200:]
+            message["auxiliaryLines"] = clean_auxiliary_lines
             message["auxiliaryText"] = "\n".join(message["auxiliaryLines"])
-            message["auxiliaryPreview"] = redacted_action_text(str(auxiliary_preview or "\n".join(message["auxiliaryLines"][-1:])), 2000)
-            if auxiliary_done:
-                message["auxiliaryDone"] = True
-            if auxiliary_truncated:
-                message["auxiliaryTruncated"] = True
+            message["auxiliaryPreview"] = redacted_action_text(str(auxiliary_preview or "\n".join(message["auxiliaryLines"][-1:])), None)
+        if clean_stream_items:
+            message["streamItems"] = clean_stream_items
+        if (clean_auxiliary_lines or clean_stream_items) and auxiliary_done:
+            message["auxiliaryDone"] = True
+        if (clean_auxiliary_lines or clean_stream_items) and auxiliary_truncated:
+            message["auxiliaryTruncated"] = True
         return yoagent_conversation.append_message(message)
 
     def publish_yoagent_conversation_changed(self, trigger: str = "yoagent") -> None:
@@ -3572,6 +3583,7 @@ class TmuxWebtermApp:
         events: list[dict[str, Any]] | None = None,
         auxiliary_lines: list[str] | None = None,
         auxiliary_preview: str = "",
+        stream_items: list[dict[str, str]] | None = None,
         hidden_work_active: bool = False,
         tool_active: bool = False,
         auxiliary_done: bool = False,
@@ -3603,9 +3615,12 @@ class TmuxWebtermApp:
         if events:
             payload["events"] = events
         if auxiliary_lines:
-            payload["auxiliary_lines"] = [truncate_text(str(line or ""), 1000) for line in auxiliary_lines[-200:]]
+            payload["auxiliary_lines"] = [str(line or "") for line in auxiliary_lines if str(line or "").strip()]
         if auxiliary_preview:
-            payload["auxiliary_preview"] = truncate_text(auxiliary_preview, 2000)
+            payload["auxiliary_preview"] = str(auxiliary_preview)
+        clean_stream_items = self.sanitized_yoagent_stream_items(stream_items)
+        if clean_stream_items:
+            payload["stream_items"] = clean_stream_items
         if hidden_work_active:
             payload["hidden_work_active"] = True
         if tool_active:
@@ -3623,14 +3638,33 @@ class TmuxWebtermApp:
         with self.yoagent_stream_lock:
             state = copy.deepcopy(self.yoagent_stream_states.get(safe_stream_id) or {})
         lines = [str(line or "") for line in state.get("auxiliaryLines", []) if str(line or "").strip()]
-        if not lines:
+        stream_items = self.sanitized_yoagent_stream_items(state.get("streamItems"))
+        if not lines and not stream_items:
             return {}
-        return {
-            "auxiliary_lines": lines,
-            "auxiliary_preview": str(state.get("auxiliaryPreview") or "\n".join(lines[-1:])),
-            "auxiliary_done": bool(state.get("auxiliaryDone")),
-            "auxiliary_truncated": bool(state.get("auxiliaryTruncated")),
-        }
+        fields: dict[str, Any] = {"stream_items": stream_items}
+        if lines:
+            fields["auxiliary_lines"] = lines
+            fields["auxiliary_preview"] = str(state.get("auxiliaryPreview") or "\n".join(lines[-1:]))
+        if bool(state.get("auxiliaryDone")):
+            fields["auxiliary_done"] = True
+        if bool(state.get("auxiliaryTruncated")):
+            fields["auxiliary_truncated"] = True
+        return fields
+
+    def sanitized_yoagent_stream_items(self, value: Any) -> list[dict[str, str]]:
+        if not isinstance(value, list):
+            return []
+        result: list[dict[str, str]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind") or "").strip().lower()
+            if kind not in {"assistant", "thinking", "tool"}:
+                continue
+            text = redacted_action_text(str(item.get("text") or ""), None)
+            if text.strip():
+                result.append({"kind": kind, "text": text})
+        return result
 
     def yoagent_stream_callback(self, stream_id: str, backend: str) -> Any:
         state: dict[str, Any] = {
@@ -3638,14 +3672,18 @@ class TmuxWebtermApp:
             "last_content": None,
             "hidden_thinking_removed": False,
             "auxiliary_lines": [],
+            "hidden_work_prefix": "",
+            "hidden_work_text": "",
             "hidden_work_active": False,
             "tool_active": False,
             "auxiliary_done": False,
             "auxiliary_truncated": False,
+            "stream_items": [],
         }
 
         def publish(events: list[dict[str, Any]], phase: str = "") -> None:
             lines = list(state.get("auxiliary_lines") or [])
+            stream_items = self.sanitized_yoagent_stream_items(state.get("stream_items"))
             active = bool(state.get("hidden_work_active") or state.get("tool_active"))
             preview_count = 2 if active else 1
             preview = "\n".join(lines[-preview_count:]) if lines else ""
@@ -3656,6 +3694,7 @@ class TmuxWebtermApp:
                         "auxiliaryLines": lines,
                         "auxiliaryText": "\n".join(lines),
                         "auxiliaryPreview": preview,
+                        "streamItems": stream_items,
                         "auxiliaryDone": bool(state.get("auxiliary_done")),
                         "auxiliaryTruncated": bool(state.get("auxiliary_truncated")),
                         "updatedTs": time.time(),
@@ -3673,6 +3712,7 @@ class TmuxWebtermApp:
                 events=events,
                 auxiliary_lines=lines,
                 auxiliary_preview=preview,
+                stream_items=stream_items,
                 hidden_work_active=bool(state.get("hidden_work_active")),
                 tool_active=bool(state.get("tool_active")),
                 auxiliary_done=bool(state.get("auxiliary_done")),
@@ -3681,18 +3721,94 @@ class TmuxWebtermApp:
                 error=phase == "error",
             )
 
+        def hidden_work_prefix(event: dict[str, Any]) -> str:
+            if event.get("summary"):
+                return "thinking summary"
+            if event.get("redacted"):
+                return "redacted thinking"
+            return "thinking"
+
+        def compact_auxiliary_text(value: str) -> str:
+            return " ".join(str(value or "").split())
+
+        def append_stream_item(kind: str, text: str, *, merge: bool = True) -> None:
+            safe_kind = str(kind or "").strip().lower()
+            value = redacted_action_text(str(text or ""), None)
+            if safe_kind not in {"assistant", "thinking", "tool"} or not value:
+                return
+            items = self.sanitized_yoagent_stream_items(state.get("stream_items"))
+            if merge and items and items[-1].get("kind") == safe_kind:
+                joiner = "" if safe_kind == "assistant" else "\n"
+                items[-1]["text"] = str(items[-1].get("text") or "") + joiner + value
+            else:
+                items.append({"kind": safe_kind, "text": value})
+            state["stream_items"] = items
+
+        def replace_or_append_stream_item(kind: str, text: str) -> None:
+            safe_kind = str(kind or "").strip().lower()
+            value = redacted_action_text(str(text or ""), None)
+            if safe_kind not in {"assistant", "thinking", "tool"} or not value:
+                return
+            items = self.sanitized_yoagent_stream_items(state.get("stream_items"))
+            if items and items[-1].get("kind") == safe_kind:
+                items[-1]["text"] = value
+            else:
+                items.append({"kind": safe_kind, "text": value})
+            state["stream_items"] = items
+
+        def hidden_work_stream_item_text(event: dict[str, Any]) -> str:
+            prefix = str(state.get("hidden_work_prefix") or hidden_work_prefix(event) or "thinking")
+            raw_text = str(state.get("hidden_work_text") or event.get("text") or "")
+            compact_text = compact_auxiliary_text(raw_text)
+            if raw_text:
+                return f"{prefix}: {raw_text}"
+            if compact_text:
+                return f"{prefix}: {compact_text}"
+            return yoagent_stream_event_auxiliary_line(event)
+
         def append_auxiliary_line(event: dict[str, Any]) -> None:
             line = yoagent_stream_event_auxiliary_line(event)
             if not line:
                 return
+            event_type = str(event.get("kind") or event.get("event") or "")
             lines = list(state.get("auxiliary_lines") or [])
-            for part in str(line).splitlines() or [line]:
-                value = part.strip()
+            if event_type == HIDDEN_WORK_DELTA:
+                prefix = hidden_work_prefix(event)
+                raw_text = str(event.get("text") or "")
+                compact_text = compact_auxiliary_text(raw_text)
+                if not compact_text:
+                    compact_text = compact_auxiliary_text(line.removeprefix(f"{prefix}:").strip()) or prefix
+                previous_prefix = str(state.get("hidden_work_prefix") or "")
+                if lines and previous_prefix == prefix:
+                    previous_text = str(state.get("hidden_work_text") or "")
+                    if compact_text.startswith("thinking..."):
+                        next_text = compact_text
+                    elif event.get("snapshot"):
+                        next_text = raw_text
+                    elif compact_auxiliary_text(previous_text).startswith("thinking..."):
+                        next_text = raw_text
+                    else:
+                        next_text = previous_text + raw_text
+                    state["hidden_work_text"] = next_text
+                    lines[-1] = f"{prefix}: {compact_auxiliary_text(next_text)}" if compact_auxiliary_text(next_text) else prefix
+                else:
+                    state["hidden_work_prefix"] = prefix
+                    state["hidden_work_text"] = raw_text if not compact_text.startswith("thinking...") else compact_text
+                    lines.append(f"{prefix}: {compact_text}" if compact_text else prefix)
+            elif event_type in {TOOL_CALL_STARTED, TOOL_CALL_DELTA, TOOL_CALL_FINISHED}:
+                state["hidden_work_prefix"] = ""
+                state["hidden_work_text"] = ""
+                value = str(line).strip()
                 if value:
                     lines.append(value)
-            if len(lines) > 500:
-                state["auxiliary_truncated"] = True
-            state["auxiliary_lines"] = lines[-500:]
+            else:
+                state["hidden_work_prefix"] = ""
+                state["hidden_work_text"] = ""
+                for part in str(line).splitlines() or [line]:
+                    value = part.strip()
+                    if value:
+                        lines.append(value)
+            state["auxiliary_lines"] = lines
 
         def callback(event: dict[str, Any]) -> None:
             normalized = normalize_yoagent_stream_event(event, backend=backend)
@@ -3708,7 +3824,14 @@ class TmuxWebtermApp:
                 state["hidden_thinking_removed"] = bool(state.get("hidden_thinking_removed") or hidden_thinking_removed)
                 if visible_text == state.get("last_content") and not hidden_changed:
                     return
+                previous_visible = str(state.get("last_content") or "")
                 state["last_content"] = visible_text
+                visible_delta = visible_text
+                if normalized.get("snapshot"):
+                    visible_delta = visible_text
+                elif previous_visible and visible_text.startswith(previous_visible):
+                    visible_delta = visible_text[len(previous_visible):]
+                append_stream_item("assistant", visible_delta)
                 publish([normalized], phase="answer" if visible_text else "thinking")
                 return
             if event_type == HIDDEN_WORK_DELTA:
@@ -3716,12 +3839,14 @@ class TmuxWebtermApp:
                 state["hidden_work_active"] = True
                 state["auxiliary_done"] = False
                 append_auxiliary_line(normalized)
+                replace_or_append_stream_item("thinking", hidden_work_stream_item_text(normalized))
                 publish([normalized], phase="thinking")
                 return
             if event_type in {TOOL_CALL_STARTED, TOOL_CALL_DELTA}:
                 state["tool_active"] = True
                 state["auxiliary_done"] = False
                 append_auxiliary_line(normalized)
+                append_stream_item("tool", yoagent_stream_event_auxiliary_line(normalized), merge=False)
                 publish([normalized], phase="tool")
                 return
             if event_type in {TOOL_CALL_FINISHED, HIDDEN_WORK_DONE}:
@@ -3730,6 +3855,8 @@ class TmuxWebtermApp:
                 if event_type == HIDDEN_WORK_DONE:
                     state["hidden_work_active"] = False
                 append_auxiliary_line(normalized)
+                if event_type == TOOL_CALL_FINISHED:
+                    append_stream_item("tool", yoagent_stream_event_auxiliary_line(normalized), merge=False)
                 publish([normalized], phase="tool" if event_type == TOOL_CALL_FINISHED else "thinking")
                 return
             if event_type in {TURN_DONE, ERROR}:
@@ -3791,6 +3918,9 @@ class TmuxWebtermApp:
 
     def cancel_yoagent_job(self, *args: Any, **kwargs: Any) -> Any:
         return self.yoagent_controller.cancel_yoagent_job(*args, **kwargs)
+
+    def cancel_yoagent_jobs_for_session(self, *args: Any, **kwargs: Any) -> Any:
+        return self.yoagent_controller.cancel_yoagent_jobs_for_session(*args, **kwargs)
 
     def yoagent_intent(self, *args: Any, **kwargs: Any) -> Any:
         return self.yoagent_controller.yoagent_intent(*args, **kwargs)
@@ -3971,8 +4101,6 @@ class TmuxWebtermApp:
         payload = save_settings(patch)
         self.publish_client_event("settings_changed", {"mtime_ns": payload.get("mtime_ns", 0), "data": payload}, trigger="manual", cache="ready")
         self.client_watch_wake_event.set()
-        if self.yoagent_refresh_interval_seconds(payload.get("settings", {}).get("yoagent", {})) > 0:
-            self.maybe_start_yoagent_summary_worker()
         return payload
 
     def yolo_rules_payload(self) -> dict[str, Any]:
@@ -3986,11 +4114,7 @@ class TmuxWebtermApp:
         return yolo_rules.reload_rules()
 
     def auto_approve_interval_seconds(self) -> float:
-        value = settings_payload().get("settings", {}).get("performance", {}).get("auto_approve_interval_seconds", 0.5)
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return 0.5
+        return self.performance_setting_seconds("auto_approve_interval_seconds", 0.1, 10.0)
 
     def auto_approve_prompt_source(self) -> str:
         value = settings_payload().get("settings", {}).get("yolo", {}).get("prompt_source", "hybrid")
@@ -4167,8 +4291,9 @@ class TmuxWebtermApp:
         ordered_sessions = self.tmux_recency_ordered_sessions(session_names)
         agent_infos = {session: sessions[session] for session in ordered_sessions if session in sessions and sessions[session].agents}
         session_files_by_session = self.cached_session_files_payloads_for_infos(agent_infos, hours=bounded_hours)
+        activity_snapshot = self.activity_snapshot_with_recency()
         return {
-            "activity": self.activity_ledger.snapshot(),
+            "activity": activity_snapshot,
             "agents": build_recent_agents_payload(sessions, ordered_sessions, session_files_by_session=session_files_by_session),
             "errors": errors,
             "session_scope": scope,
@@ -4229,7 +4354,6 @@ class TmuxWebtermApp:
                 started = time.monotonic()
                 try:
                     self.refresh_tabber_activity_cache()
-                    self.publish_activity_summary_ready_events(trigger="tabber_activity")
                 except (OSError, RuntimeError, ValueError) as exc:
                     self.log_event(None, "client_event_watch_error", f"Tabber activity cache refresh failed: {exc}", {})
                 interval = self.tabber_activity_refresh_seconds()
@@ -5703,12 +5827,122 @@ class TmuxWebtermApp:
         )
         return normalized_prompt_state(state.prompt), dict(state.screen)
 
+    def agent_window_screen_state(
+        self,
+        agent: AgentInfo,
+        preclassified_by_target: dict[str, dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        target = str(agent.pane_target or "")
+        if target and preclassified_by_target and target in preclassified_by_target:
+            return dict(preclassified_by_target[target])
+        if not target:
+            return {"key": "idle", "text": ""}
+        visible_text = tmux_capture_pane(target, visible_only=True)
+        if visible_text is None:
+            return {"key": "idle", "text": "failed to capture pane"}
+        return dict(agent_screen_state(visible_text, pane_target=target))
+
+    @staticmethod
+    def agent_window_state_from_screen(screen: dict[str, Any]) -> str:
+        key = str(screen.get("key") or "").strip()
+        if key == "working":
+            return "working"
+        if key in {"approval", "needs-approval"}:
+            return "approval"
+        if key == "needs-input":
+            return "needs-input"
+        return "idle"
+
+    def activity_record_recency_ts(self, record: dict[str, Any] | None) -> float:
+        if not isinstance(record, dict):
+            return 0.0
+        active_recency = self.float_value(record.get("active_recency_ts"), 0.0)
+        if active_recency > 0:
+            return active_recency
+        return max(
+            self.float_value(record.get("last_user_input_ts"), 0.0),
+            self.float_value(record.get("last_agent_active_ts"), 0.0),
+            self.float_value(record.get("last_output_ts"), 0.0),
+        )
+
+    def activity_snapshot_with_recency(self, snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+        source = snapshot if isinstance(snapshot, dict) else self.activity_ledger.snapshot()
+        result: dict[str, Any] = {}
+        for key, value in source.items():
+            record = dict(value) if isinstance(value, dict) else {}
+            record["active_recency_ts"] = self.activity_record_recency_ts(record)
+            result[key] = record
+        return result
+
+    def agent_window_last_active_ts(self, activity_snapshot: dict[str, Any], session: str, window: str) -> float:
+        key = f"{session}:{window}" if window else session
+        record = activity_snapshot.get(key) if isinstance(activity_snapshot, dict) else None
+        return self.activity_record_recency_ts(record if isinstance(record, dict) else None)
+
+    def agent_window_status_payloads(
+        self,
+        session: str,
+        *,
+        info: SessionInfo | None = None,
+        discovered_sessions: dict[str, SessionInfo] | None = None,
+        activity_snapshot: dict[str, Any] | None = None,
+        preclassified_by_target: dict[str, dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        if info is None:
+            info = discovered_sessions.get(session) if discovered_sessions is not None else None
+        if info is None:
+            infos, _errors = discover_sessions([session])
+            info = infos.get(session)
+        if info is None:
+            return []
+        activity = self.activity_snapshot_with_recency(activity_snapshot)
+        rows: list[dict[str, Any]] = []
+        window_names = {str(pane.window or ""): str(pane.window_name or "") for pane in info.panes}
+        for agent_index, agent in enumerate(info.agents):
+            kind = str(agent.kind or "").lower()
+            if kind not in {"claude", "codex"}:
+                continue
+            window, pane = session_files.agent_window_for_info(info, agent)
+            screen = self.agent_window_screen_state(agent, preclassified_by_target=preclassified_by_target)
+            state = self.agent_window_state_from_screen(screen)
+            elapsed = self.float_value(screen.get("display_elapsed_seconds"), self.float_value(screen.get("status_elapsed_seconds"), -1.0))
+            last_active_ts = self.agent_window_last_active_ts(activity, session, window)
+            window_index: int | None
+            try:
+                window_index = int(window)
+            except ValueError:
+                window_index = None
+            window_name = window_names.get(window) or kind
+            window_label = f"{window}:{kind}" if window else kind
+            rows.append({
+                "kind": kind,
+                "state": state,
+                "window": window,
+                "window_index": window_index,
+                "window_name": window_name,
+                "window_label": window_label,
+                "pane": pane,
+                "pane_target": str(agent.pane_target or ""),
+                "working_elapsed_seconds": elapsed if state == "working" and elapsed >= 0 else None,
+                "idle_since": last_active_ts if state == "idle" and last_active_ts > 0 else None,
+                "last_active_ts": last_active_ts,
+                "screen_text": str(screen.get("text") or ""),
+                "status_tokens": screen.get("status_tokens") if isinstance(screen.get("status_tokens"), (int, float)) else None,
+                "_agent_order": agent_index,
+            })
+        state_rank = {"working": 0, "approval": 1, "needs-input": 2, "idle": 3}
+        rows.sort(key=lambda item: (state_rank.get(str(item.get("state") or ""), 9), item.get("window_index") if isinstance(item.get("window_index"), int) else 9999, int(item.get("_agent_order") or 0)))
+        for item in rows:
+            item.pop("_agent_order", None)
+        return rows
+
     def auto_approve_session_status(
         self,
         session: str,
         discovered_sessions: dict[str, SessionInfo] | None = None,
         include_live_prompt: bool = True,
         capture_bare_session_when_roster: bool = False,
+        activity_snapshot: dict[str, Any] | None = None,
     ) -> AutoApproveState:
         with self.auto_workers_lock:
             worker_sessions = self.auto_worker_session_map()
@@ -5748,6 +5982,7 @@ class TmuxWebtermApp:
                     "last_action": auto_approve_lock_message(owner),
                     "error": auto_approve_lock_message(owner),
                 })
+        capture_target = self.auto_approve_capture_target(session, discovered_sessions=discovered_sessions)
         prompt, screen = self.prompt_and_screen_status(
             session,
             discovered_sessions=discovered_sessions,
@@ -5756,6 +5991,14 @@ class TmuxWebtermApp:
         )
         payload["prompt"] = prompt
         payload["screen"] = screen
+        info = discovered_sessions.get(session) if discovered_sessions is not None else None
+        payload["agent_windows"] = self.agent_window_status_payloads(
+            session,
+            info=info,
+            discovered_sessions=discovered_sessions,
+            activity_snapshot=activity_snapshot,
+            preclassified_by_target={capture_target: screen} if capture_target else None,
+        )
         return payload
 
     def auto_approve_status(self, session: str | None = None) -> tuple[AutoApproveState | AutoApproveStatusPayload, HTTPStatus]:
@@ -5775,8 +6018,9 @@ class TmuxWebtermApp:
             self.sync_auto_approve_agent_workers(takeover=False)
         if removed:
             self.persist_auto_sessions()
+        activity_snapshot = self.activity_snapshot_with_recency()
         if session is not None:
-            return self.auto_approve_session_status(session), HTTPStatus.OK
+            return self.auto_approve_session_status(session, activity_snapshot=activity_snapshot), HTTPStatus.OK
         discovered_sessions, discovery_errors = discover_sessions(self.sessions)
         return {
             "session_order": self.sessions,
@@ -5786,6 +6030,7 @@ class TmuxWebtermApp:
                     discovered_sessions=discovered_sessions,
                     include_live_prompt=False,
                     capture_bare_session_when_roster=True,
+                    activity_snapshot=activity_snapshot,
                 )
                 for name in self.sessions
             },

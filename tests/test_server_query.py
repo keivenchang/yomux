@@ -389,6 +389,7 @@ def test_http_route_registry_groups_dispatch_and_keeps_verbs_thin():
     assert route_by_path("GET", "/api/activity-summary").group == "core"
     assert route_by_path("GET", "/ws/share-ui").handler is http_routes.get_share_ui_websocket
     assert route_by_path("POST", "/api/share/extend").body_limit == 4096
+    assert route_by_path("POST", "/api/yoagent/jobs/cancel-session").handler is http_routes.post_yoagent_jobs_cancel_session
     assert route_by_path("POST", "/api/yoagent/jobs/*/confirm").handler is http_routes.post_yoagent_job_confirm
     assert route_by_path("POST", "/api/yoagent/waits/*/clear").handler is http_routes.post_yoagent_wait_clear
     assert route_by_path("POST", "/api/fs/batch").role is http_routes.share_readonly_post_role
@@ -410,11 +411,11 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
     assert calls == [("require_auth", "readonly")]
     assert writes == [("json", HTTPStatus.OK, {"force": True, "locale": "ja"})]
 
-    app = SimpleNamespace(tmux_signals_payload=lambda force=False: ({"force": force}, HTTPStatus.OK))
-    handler, calls, writes = route_handler("/api/tmux-signals?force=1", app)
+    app = SimpleNamespace(tmux_signals_payload=lambda force=False, session="": ({"force": force, "session": session}, HTTPStatus.OK))
+    handler, calls, writes = route_handler("/api/tmux-signals?force=1&session=5", app)
     Handler.do_GET(handler)
     assert calls == [("require_auth", "readonly")]
-    assert writes == [("json", HTTPStatus.OK, {"force": True})]
+    assert writes == [("json", HTTPStatus.OK, {"force": True, "session": "5"})]
 
     app = SimpleNamespace(yoagent_skills_payload=lambda: {"skills": []})
     handler, calls, writes = route_handler("/api/yoagent/skills", app)
@@ -716,6 +717,15 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
     assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "id": "yj_1"})]
 
+    app = SimpleNamespace(cancel_yoagent_jobs_for_session=lambda session: ({"ok": True, "session": session, "count": 2}, HTTPStatus.OK))
+    handler, calls, writes = route_handler("/api/yoagent/jobs/cancel-session", app)
+    handler.read_json_body = lambda limit: {"session": "6"}
+
+    Handler.do_POST(handler)
+
+    assert calls == [("require_auth", "admin")]
+    assert writes == [("json", HTTPStatus.OK, {"ok": True, "session": "6", "count": 2})]
+
     app = SimpleNamespace(cancel_yoagent_job=lambda job_id: ({"ok": True, "id": job_id}, HTTPStatus.OK))
     handler, calls, writes = route_handler("/api/yoagent/jobs/yj_1/cancel", app)
     handler.read_json_body = lambda limit: {}
@@ -907,7 +917,7 @@ def test_handle_ws_payload_refreshes_tmux_session_even_when_readonly(monkeypatch
 
 def test_handle_ws_payload_resize_sets_pty_and_signals_for_admin_only(monkeypatch):
     calls = []
-    process = SimpleNamespace(pid=123)
+    process = SimpleNamespace(pid=123, poll=lambda: None)
     handler = SimpleNamespace(server=SimpleNamespace(app=SimpleNamespace(tmux_scroll=lambda *_args: None)))
     monkeypatch.setattr(server_module, "set_pty_size", lambda fd, rows, cols: calls.append(("size", fd, rows, cols)))
     monkeypatch.setattr(server_module.os, "killpg", lambda pid, sig: calls.append(("signal", pid, sig)))
@@ -920,6 +930,12 @@ def test_handle_ws_payload_resize_sets_pty_and_signals_for_admin_only(monkeypatc
     Handler.handle_ws_payload(handler, "6", 10, 11, process, json.dumps({"type": "resize", "rows": 12, "cols": 40, "foreground": False}).encode(), readonly=False)
 
     assert calls == []
+
+    dead_process = SimpleNamespace(pid=456, poll=lambda: 0)
+    Handler.handle_ws_payload(handler, "6", 10, 11, dead_process, json.dumps({"type": "resize", "rows": 31, "cols": 101}).encode(), readonly=False)
+
+    assert calls == [("size", 11, 31, 101)]
+    calls.clear()
 
     Handler.handle_ws_payload(handler, "6", 10, 11, process, json.dumps({"type": "resize", "rows": 30, "cols": 100}).encode(), readonly=True)
 
@@ -945,6 +961,144 @@ def test_write_sse_json_formats_event_stream():
     Handler.write_sse_json(handler, "delta", {"text": "hello"})
 
     assert handler.wfile.getvalue() == b'event: delta\ndata: {"text": "hello"}\n\n'
+
+
+def test_stream_codex_summary_uses_settings_and_raw_auth_status(monkeypatch):
+    writes = []
+    responses = []
+    headers = []
+    logs = []
+    calls = []
+    summary_settings = {
+        "backend": "codex",
+        "codex_model": "gpt-5.4-mini",
+        "codex_effort": "high",
+        "codex_service_tier": "fast",
+        "lookback_seconds": 7200,
+        "timeout_seconds": 42,
+    }
+
+    app = SimpleNamespace(
+        summary_settings=lambda: dict(summary_settings),
+        codex_summary_prompt=lambda session, lookback: calls.append(("prompt", session, lookback)) or ({"session": session, "path": "/tmp/codex.jsonl", "prompt": "summarize", "items": 2}, HTTPStatus.OK),
+        log_event=lambda *args: logs.append(args),
+    )
+    handler = object.__new__(Handler)
+    handler.server = SimpleNamespace(app=app)
+    handler.wfile = io.BytesIO()
+    handler.send_response = lambda status: responses.append(status)
+    handler.send_header = lambda name, value: headers.append((name, value))
+    handler.send_auth_cookie_if_needed = lambda: None
+    handler.end_headers = lambda: None
+    handler.write_json = lambda value, status=HTTPStatus.OK: writes.append(("json", status, value))
+    handler.run_codex_summary = lambda prompt, settings: calls.append(("run", prompt, dict(settings)))
+    monkeypatch.setattr(server_module, "agent_auth_status", lambda: {"codex": {"installed": True, "logged_in": True}})
+
+    Handler.stream_codex_summary(handler, SimpleNamespace(query="session=5"))
+
+    assert writes == []
+    assert responses == [HTTPStatus.OK]
+    assert ("Content-Type", "text/event-stream; charset=utf-8") in headers
+    assert calls == [
+        ("prompt", "5", 7200),
+        ("run", "summarize", summary_settings),
+    ]
+    stream = handler.wfile.getvalue().decode("utf-8")
+    assert '"summary_model": "gpt-5.4-mini"' in stream
+    assert '"summary_effort": "high"' in stream
+    assert '"summary_service_tier": "fast"' in stream
+    assert logs[0][1] == "summary_started"
+    assert logs[0][3] == {"lookback_seconds": 7200, "model": "gpt-5.4-mini"}
+    assert logs[1][1] == "summary_finished"
+
+
+def test_stream_codex_summary_rejects_logged_out_codex_before_prompt(monkeypatch):
+    writes = []
+    app = SimpleNamespace(
+        summary_settings=lambda: {
+            "backend": "codex",
+            "codex_model": "gpt-5.4-mini",
+            "codex_effort": "low",
+            "codex_service_tier": "fast",
+            "lookback_seconds": 3600,
+            "timeout_seconds": 600,
+        },
+        codex_summary_prompt=lambda *_args: (_ for _ in ()).throw(AssertionError("summary prompt should not be built when Codex is unavailable")),
+    )
+    handler = object.__new__(Handler)
+    handler.server = SimpleNamespace(app=app)
+    handler.write_json = lambda value, status=HTTPStatus.OK: writes.append(("json", status, value))
+    monkeypatch.setattr(server_module, "agent_auth_status", lambda: {"codex": {"installed": True, "logged_in": False}})
+
+    Handler.stream_codex_summary(handler, SimpleNamespace(query="session=5"))
+
+    assert writes == [(
+        "json",
+        HTTPStatus.SERVICE_UNAVAILABLE,
+        {
+            "error": "Codex summary provider is unavailable because the codex CLI is not logged in. Run `codex login`.",
+            "provider": "codex",
+            "login_command": "codex login",
+        },
+    )]
+
+
+def test_run_codex_summary_uses_configured_model_effort_service_tier_and_timeout(monkeypatch):
+    calls = []
+    stream_calls = []
+
+    class FakeStdin:
+        def __init__(self):
+            self.data = b""
+            self.closed = False
+
+        def write(self, data):
+            self.data += data
+
+        def close(self):
+            self.closed = True
+
+    class FakeProcess:
+        def __init__(self):
+            self.stdin = FakeStdin()
+            self.stdout = io.BytesIO()
+            self.pid = 123
+
+        def poll(self):
+            return 0
+
+    fake_process = FakeProcess()
+
+    def fake_popen(args, **kwargs):
+        calls.append((args, kwargs))
+        return fake_process
+
+    handler = object.__new__(Handler)
+    handler.write_sse_json = lambda event, value: stream_calls.append((event, value))
+    handler.stream_codex_process = lambda process, timeout_seconds=None: stream_calls.append(("stream", process, timeout_seconds))
+    monkeypatch.setattr(server_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(server_module, "terminate_process_group", lambda process: stream_calls.append(("terminated", process)))
+
+    Handler.run_codex_summary(handler, "summarize", {
+        "codex_model": "gpt-5.4-mini",
+        "codex_effort": "xhigh",
+        "codex_service_tier": "fast",
+        "timeout_seconds": 42,
+    })
+
+    assert fake_process.stdin.data == b"summarize"
+    assert fake_process.stdin.closed is True
+    args, kwargs = calls[0]
+    assert args[:3] == ["codex", "exec", "--json"]
+    assert args[args.index("-m") + 1] == "gpt-5.4-mini"
+    assert 'model_reasoning_effort="xhigh"' in args
+    assert 'service_tier="fast"' in args
+    assert "--ephemeral" in args
+    assert kwargs["cwd"] == str(server_module.PROJECT_ROOT)
+    assert kwargs["env"]["TERM"] == "xterm-256color"
+    assert kwargs["env"]["NO_COLOR"] == "1"
+    assert ("stream", fake_process, 42) in stream_calls
+    assert stream_calls[-1] == ("terminated", fake_process)
 
 
 def test_stream_codex_process_decodes_utf8_across_chunks(monkeypatch):
@@ -992,7 +1146,7 @@ def test_server_source_wires_routing_ws_readonly_and_pty_setup():
     assert "resize_client_id = clean_resize_authority_client_id" in ws_body
     assert "self.bridge_tmux(session, readonly=self.auth_readonly(), resize_client_id=resize_client_id)" in ws_body
     assert "tmux_attach_command(readonly=readonly)" in bridge_body
-    assert 'tmux_command(["has-session", "-t", target])' in bridge_body
+    assert 'tmux(["has-session", "-t", target])' in bridge_body
     assert "set_pty_size(slave_fd, initial_rows, initial_cols)" in bridge_body
     assert "saw_initial_resize" in bridge_body
     assert "host_pty_dimensions_for_session(session)" in bridge_body
@@ -1717,6 +1871,26 @@ def test_share_viewers_receive_host_terminal_dimensions():
         ("broadcast", "share-token", "terminal-host-resize", {"session": "6", "rows": 33, "cols": 111}),
         ("refresh",),
     ]
+
+
+def test_share_terminal_upstream_resize_uses_shared_live_process_signal_guard(monkeypatch):
+    calls = []
+    upstream = server_module.ShareTerminalUpstream(SimpleNamespace(), "share-token", "6")
+    upstream.slave_fd = 11
+    upstream.process = SimpleNamespace(pid=123, poll=lambda: None)
+    upstream.request_refresh_client = lambda: calls.append(("refresh",))
+    monkeypatch.setattr(server_module, "set_pty_size", lambda fd, rows, cols: calls.append(("size", fd, rows, cols)))
+    monkeypatch.setattr(server_module.os, "killpg", lambda pid, sig: calls.append(("signal", pid, sig)))
+
+    upstream.update_dimensions(24, 80)
+
+    assert calls == [("size", 11, 24, 80), ("signal", 123, server_module.signal.SIGWINCH), ("refresh",)]
+    calls.clear()
+    upstream.process = SimpleNamespace(pid=456, poll=lambda: 0)
+
+    upstream.update_dimensions(31, 101, refresh=False)
+
+    assert calls == [("size", 11, 31, 101)]
 
 
 def test_share_terminal_upstream_refreshes_existing_viewer_attach():

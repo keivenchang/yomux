@@ -12,6 +12,8 @@ YO!agent sends are not fire-and-forget unless the user explicitly asks for that.
 
 YO!agent's own Claude/Codex chat stream separates assistant answer text from backend-visible auxiliary activity. `assistant_delta` is the only event kind that updates the normal assistant bubble; reasoning/thinking, tool-call progress, approval requests, usage, errors, and turn completion stay in the auxiliary event stream and render in the response Details disclosure.
 
+YO!agent's own Ask queue is FIFO and waits for the active model turn to finish before starting the next queued ask. This is enforced in the browser state and at the server backend-call boundary, so duplicate or overlapping `/api/yoagent/chat` requests cannot run two Claude/Codex model turns at the same time.
+
 Peer-to-peer relay is the exception. If the user explicitly says that one target should contact, relay to, or instruct another target directly, YO!agent may pass relay instructions, but the prompt must say exactly how to relay and what to disclose. Without that wording, target sessions should not know about each other.
 
 ## Common User Questions And Expected Behavior
@@ -50,6 +52,10 @@ Peer-to-peer relay is the exception. If the user explicitly says that one target
 - Explicit target-session sends return results by default: YO!agent confirms the send immediately, watches the target transcript or visible pane, and appends the target response back into the YO!agent conversation. Opt-out phrases such as `do not wait for the result`, `just send it`, or `no output needed` keep the behavior send-only.
 - `send this but ask me first`: create an action preview card instead of sending immediately.
 - `notify me when session 4 is idle`: create a one-shot watch job with quiet-time debounce and browser/toast notification.
+- `notify me when session 4 asks a question`: create a one-shot watch job that fires only when the target screen classifier reports `needs-input` or question attention.
+- `notify me when session 4 is blocked`: create a one-shot watch job that fires when the target is blocked by approval, disconnect, or error state.
+- `notify me when session 4 is done after it was working`: create a one-shot watch job that records whether this job observed `working` and fires only after a later accepting/done/idle state.
+- `cancel pending jobs for session 4`: cancel only queued and pending-confirmation YO!agent jobs targeted at session `4`; do not touch fired, failed, timed-out, or other-session jobs.
 - `wait for session 4 to finish, then tell it to update docs`: create a wait-then-send job; revalidate the exact target pane and prompt state before sending; after the send, watch for the target result by default unless the user opted out.
 - `wait for session 4, send it date, and tell me what it says`: wait until session `4` accepts a prompt, send the derived prompt, watch for transcript/pane output, and append the result to YO!agent.
 - `notify me when all sessions are idle`: track all tmux sessions visible to the current user, show which session still blocks the watch, and fire once when all qualify.
@@ -115,8 +121,8 @@ Peer-to-peer relay is the exception. If the user explicitly says that one target
 - Expand deterministic intent coverage for common natural-language Preferences aliases: white/black background, bigger/smaller UI, quiet/no notifications, bigger tabs, light/dark terminal, and language endonyms.
 - Add a central intent example fixture for YO!agent so common phrases are tested against the expected action, write, watch, or clarification behavior.
 - Add a UI affordance in Details that separates deterministic timing from model timing and explicitly labels when the model path was skipped.
+- Add remaining persisted-job watch predicates and automations: tests-finished, all-agents-status fanout, review sweep, close-out finished work, and pause noisy watches.
 - Add a visible job list for multi-step handoffs with per-stage state: waiting source, reading artifact, sending target, waiting target, complete, failed, timed out.
 - Add artifact-handoff helpers that create a safe project-local path, ask a target to write there, validate existence/size/type, and pass the path or content to the next target.
-- Make explicit target-session sends default to result capture, with an opt-out phrase for fire-and-forget sends.
 - Add a robust scripted send/capture harness that can drive mock Claude, mock Codex, and one real Claude/Codex pane through tmux send/capture for regression tests.
 - Extend all-session activity context so YO!agent can reason over every visible tmux session when answering, routing, waiting, and handoff planning.

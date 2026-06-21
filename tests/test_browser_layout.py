@@ -96,9 +96,16 @@ def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser
             const badge = tab?.querySelector('[data-prompt-attention-clear]');
             const before = {
               badgeText: badge?.textContent || '',
+              badgeHasSharedParent: badge?.classList.contains('status-indicator') || false,
+              badgeHasTextModifier: badge?.classList.contains('status-indicator--text') || false,
+              badgeHasAttentionModifier: badge?.classList.contains('status-indicator--attention') || false,
+              badgeHasPulse: badge?.classList.contains('attention-pulse') || false,
               tabAttention: tab?.classList.contains('needs-attention') || false,
               panelNeedsApproval: panel?.classList.contains('needs-exec-pane') || false,
               topbarText: topbar?.textContent || '',
+              topbarAskHasSharedParent: topbar?.querySelector('.topbar-activity-ques')?.classList.contains('status-indicator') || false,
+              topbarAskHasAttentionModifier: topbar?.querySelector('.topbar-activity-ques')?.classList.contains('status-indicator--attention') || false,
+              topbarAskHasPulse: topbar?.querySelector('.topbar-activity-ques')?.classList.contains('attention-pulse') || false,
             };
             badge?.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
             const afterSocketFrames = (window.__bootSocketInstances || []).flatMap(socket => socket.sent || []);
@@ -114,9 +121,16 @@ def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser
             session,
         )
         assert metrics["before"]["badgeText"] == "ASK?"
+        assert metrics["before"]["badgeHasSharedParent"] is True
+        assert metrics["before"]["badgeHasTextModifier"] is True
+        assert metrics["before"]["badgeHasAttentionModifier"] is True
+        assert metrics["before"]["badgeHasPulse"] is True
         assert metrics["before"]["tabAttention"] is True
         assert metrics["before"]["panelNeedsApproval"] is True
         assert "1 ASK?" in metrics["before"]["topbarText"]
+        assert metrics["before"]["topbarAskHasSharedParent"] is True
+        assert metrics["before"]["topbarAskHasAttentionModifier"] is True
+        assert metrics["before"]["topbarAskHasPulse"] is True
         assert metrics["after"]["badgeText"] == ""
         assert metrics["after"]["tabAttention"] is False
         assert metrics["after"]["panelNeedsApproval"] is False
@@ -667,7 +681,7 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
                     : `message ${index + 1} ` + Array.from({length: 10}, (_line, lineIndex) => `detail-${lineIndex + 1}-for-message-${index + 1}`).join(' '),
                   createdAt: `2026-06-19T08:${String(index).padStart(2, '0')}:00Z`,
                 })),
-                pending_waits: [{id: 'wait-1', session: '1', started_ts: Math.round(Date.now() / 1000) - 45, transcript: '/tmp/yolomux-transcript.jsonl'}],
+                pending_waits: [],
               });
               renderYoagentPanel({scrollBottom: true});
               await raf();
@@ -787,7 +801,7 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
         assert metrics["inputDisabled"] is False, (label, metrics)
         assert metrics["thinkingDetailsOpen"] is False, (label, metrics)
         assert metrics["toolDetailsOpen"] is False, (label, metrics)
-        assert metrics["auxPreviewText"] == "thinking: reading activity context\nthinking: final synthesis", (label, metrics)
+        assert metrics["auxPreviewText"] == "thinking: reading activity context thinking: final synthesis", (label, metrics)
         assert metrics["toolPreviewText"] == "tool output: command: collected files", (label, metrics)
         assert "thinking: reading activity context" in metrics["auxStreamText"], (label, metrics)
         assert "tool output: command: collected files" not in metrics["auxStreamText"], (label, metrics)

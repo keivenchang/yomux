@@ -27,6 +27,7 @@
   --status-tool: #f59e0b;
   --danger-border-soft: #d56b7a;
   --text-muted-cool: #9ea8b7;
+  --text-muted-soft: #667085;
   --neutral-border-strong: #6f7b8c;
   --neutral-text-strong: #52617a;
   --overlay-surface: #111820;
@@ -103,6 +104,9 @@
   --git-staged-badge: var(--brand-green);
   --git-transcript: var(--muted);
   --git-transcript-badge: #94a3b8;
+  --transcript-user-accent: #60a5fa;
+  --transcript-assistant-accent: #4ade80;
+  --transcript-summary-accent: #f472b6;
   --info-session-column-width: 120px;
   --info-path-column-width: 320px;
   --info-branch-column-width: 320px;
@@ -144,6 +148,10 @@
   --active-control-focus-ring: rgb(var(--active-accent-rgb) / 0.14);
   --active-terminal-cursor-rgb: var(--active-accent-rgb);
   --active-control-scrollbar-thumb: rgb(var(--active-terminal-cursor-rgb) / 0.88);
+  --agent-inactive-marker-text: #f8fafc;
+  --agent-inactive-marker-bg: #050608;
+  --agent-inactive-marker-border: #cfd8e3;
+  --yoagent-inactive-backend-dot-border: #d9e2ee;
   --pane-scrollbar-thumb: rgba(190, 205, 218, 0.56);
   --pane-scrollbar-thumb-hover: var(--active-control-scrollbar-thumb);
   --pane-scrollbar-track: rgba(255, 255, 255, 0.035);
@@ -223,6 +231,7 @@
   --app-menu-max-inline-size: var(--popover-max-inline-size);
   --app-menu-max-block-size: 74vh;
   --app-menu-tab-max-block-size: 82vh;
+  --app-submenu-light-bg: #f8fafc;
   --file-explorer-tree-inline-size: clamp(280px, 22vw, 340px);
   --file-explorer-editor-inline-size: clamp(420px, 42vw, 640px);
   --file-explorer-open-inline-size: calc(var(--file-explorer-tree-inline-size) + var(--file-explorer-editor-inline-size));
@@ -415,8 +424,10 @@
   --icon-changes: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 4h10'/%3E%3Cpath d='M7 20h10'/%3E%3Cpath d='M12 6v12'/%3E%3Cpath d='M5 10h5'/%3E%3Cpath d='M14 14h5'/%3E%3C/svg%3E");
   --editor-preview-bg: #342f22;
   --topbar-height: 38px;
-  --red-reminder-duration: 1.55s;
-  --red-reminder-easing: ease-in-out;
+  --pulse-duration: 1.55s;
+  --pulse-easing: ease-in-out;
+  --red-reminder-duration: var(--pulse-duration);
+  --red-reminder-easing: var(--pulse-easing);
   --yolo-reminder-duration: 2.8s;
   --yolo-rotation-duration: 20s;
 }
@@ -1793,7 +1804,7 @@ body.theme-light .app-menu-popover {
 }
 body.theme-light .app-submenu-popover {
   color: var(--text);
-  background: #f8fafc;
+  background: var(--app-submenu-light-bg);
   border-color: var(--line);
   box-shadow:
     0 -2px 10px rgb(var(--overlay-slate-rgb) / 0.10),
@@ -1961,18 +1972,64 @@ body.theme-light .latency-meter {
 .session-button-detail.pr-status-closed {
   color: var(--pr-status-closed);
 }
-.session-state-badge {
-  min-width: 26px;
+.status-indicator {
+  flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  transform-origin: center;
+}
+.status-indicator--inline {
+  min-width: 0;
+  padding: 0 2px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  line-height: 1.15;
+}
+.status-indicator--text {
+  min-width: 26px;
   padding: 1px 3px;
   border: 1px solid var(--divider);
   border-radius: 5px;
-  color: var(--pr-status-closed);
-  background: #161d29;
   font: var(--ui-font-size-3xs)/1.15 var(--mono-font);
   text-transform: uppercase;
+}
+.status-indicator--dot {
+  width: 1em;
+  min-width: 1em;
+  color: var(--muted);
+  font-size: 0.9em;
+  line-height: 1;
+  text-align: center;
+}
+.status-indicator--positive,
+.status-indicator--working {
+  color: var(--pr-status-passing);
+}
+.heartbeat-pulse {
+  transform-origin: center;
+  animation-duration: var(--pulse-duration);
+  animation-timing-function: var(--pulse-easing);
+}
+.status-indicator--dot.status-indicator--working.heartbeat-pulse {
+  animation-name: command-palette-thinking;
+  animation-duration: var(--pulse-duration);
+  animation-timing-function: var(--pulse-easing);
+  animation-iteration-count: infinite;
+  animation-direction: alternate;
+}
+.status-indicator--settled {
+  color: var(--agent-inactive-marker-bg);
+}
+.status-indicator--attention {
+  color: var(--danger-text);
+}
+.topbar-activity .topbar-activity-attn.status-indicator--attention {
+  color: var(--accent-gold);
+}
+.session-state-badge {
+  color: var(--pr-status-closed);
+  background: #161d29;
 }
 .session-state-needs-approval,
 .session-state-needs-input {
@@ -2023,21 +2080,19 @@ body.theme-light .latency-meter {
 }
 .attention-pulse {
   --attention-ring-border: 1px;
-  transform-origin: center;
   animation-name: attention-ring-fade;
-  animation-duration: var(--red-reminder-duration);
+  animation-duration: var(--pulse-duration);
   animation-delay: var(--attention-animation-delay, 0s);
-  animation-timing-function: var(--red-reminder-easing);
+  animation-timing-function: var(--pulse-easing);
   animation-iteration-count: infinite;
 }
-.session-state-badge.attention-pulse,
+.status-indicator--text.status-indicator--attention.attention-pulse,
 .ci-indicator.pr-status-failing {
   --attention-ring-border: 1px;
-  transform-origin: center;
   animation-name: attention-ring-fade, red-pill-fill-fade;
-  animation-duration: var(--red-reminder-duration), var(--red-reminder-duration);
+  animation-duration: var(--pulse-duration), var(--pulse-duration);
   animation-delay: var(--attention-animation-delay, 0s), var(--attention-animation-delay, 0s);
-  animation-timing-function: var(--red-reminder-easing), var(--red-reminder-easing);
+  animation-timing-function: var(--pulse-easing), var(--pulse-easing);
   animation-iteration-count: infinite, infinite;
 }
 @keyframes red-pill-fill-fade {
@@ -2055,6 +2110,7 @@ body.theme-light .latency-meter {
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .heartbeat-pulse,
   .attention-pulse,
   .session-state-needs-approval,
   .session-state-needs-input,
@@ -2080,9 +2136,9 @@ body.theme-light .latency-meter {
   padding: 1px 0;
   color: var(--pane-tab-yolo-text);
   background: var(--pane-tab-yolo-bg);
-  border: 1px solid var(--pane-tab-yolo-border);
-  border-radius: 2px;
-  box-shadow: none;
+  border: 2px solid var(--pane-tab-yolo-border);
+  border-radius: var(--radius-pill);
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.42), 0 0 0 2px rgb(255 255 255 / 0.24);
   font: 800 var(--ui-font-size-2xs)/1.1 var(--mono-font);
   overflow: visible;
 }
@@ -2093,13 +2149,13 @@ body.theme-light .latency-meter {
   min-width: max(17px, calc(var(--ui-font-size) + 5px));
   height: max(16px, calc(var(--ui-font-size) + 5px));
   padding: 0;
-  border-radius: 2px;
+  border-radius: var(--radius-pill);
   font-size: max(10px, var(--ui-font-size));
 }
 .session-yolo-marker.inactive {
-  color: var(--pane-meta-branch);
-  background: var(--divider);
-  border-color: #5d6878;
+  color: var(--agent-inactive-marker-text);
+  background: var(--agent-inactive-marker-bg);
+  border-color: var(--agent-inactive-marker-border);
 }
 .session-yolo-marker.locked {
   color: #ffd75d;
@@ -2120,9 +2176,9 @@ body.theme-light .session-state-done {
   border-color: #b8c2d2;
 }
 body.theme-light .session-yolo-marker.inactive {
-  color: var(--neutral-text-strong);
-  background: #e2e6ec;
-  border-color: #c2cad6;
+  color: var(--agent-inactive-marker-text);
+  background: var(--agent-inactive-marker-bg);
+  border-color: var(--agent-inactive-marker-border);
 }
 /* the YO ball spins ONLY when the agent is working, and SLOWLY — at the
    "Active YO rotation period" setting (appearance.yolo_rotate_ms, default 20s), not a fast hardcoded
@@ -2272,7 +2328,7 @@ body.theme-light .ci-indicator.branch-indicator {
 }
 .ci-indicator.metadata-pulse:not(.pr-status-failing) {
   transform-origin: center;
-  animation: metadata-badge-pulse 1.4s var(--red-reminder-easing) 14;
+  animation: metadata-badge-pulse var(--pulse-duration) var(--pulse-easing) 14;
 }
 @keyframes metadata-badge-pulse {
   0%, 100% {
@@ -2406,6 +2462,56 @@ body.theme-light .branch-link {
 }
 .popover-subtitle-text {
   min-width: 0;
+}
+.session-agent-list {
+  display: grid;
+  gap: 2px;
+  margin: 1px 0 6px;
+  padding: 4px 0 5px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.session-agent-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text);
+  font: var(--ui-font-size-xs)/1.25 var(--ui-font);
+  white-space: nowrap;
+}
+.session-agent-row.attention {
+  color: var(--danger-text);
+}
+.session-agent-kind {
+  min-width: 0;
+  font-weight: 600;
+}
+.session-agent-sep,
+.session-agent-status,
+.session-agent-empty {
+  color: var(--muted);
+}
+.session-agent-row.attention .session-agent-status {
+  color: var(--danger-text);
+}
+.session-agent-empty {
+  font: var(--ui-font-size-xs)/1.25 var(--ui-font);
+}
+.session-window-metadata-list {
+  display: grid;
+  gap: 4px;
+  margin: 0 0 6px;
+}
+.session-window-metadata,
+.session-window-metadata-list.shared {
+  padding: 4px 0 2px;
+  border-top: 1px solid var(--line);
+}
+.session-window-metadata-title {
+  color: var(--text);
+  font: 600 var(--ui-font-size-xs)/1.25 var(--ui-font);
+  padding: 2px 0;
 }
 .popover-row {
   display: grid;
@@ -4052,7 +4158,7 @@ button {
 }
 button:hover { border-color: #657084; }
 button:disabled {
-  color: #667085;
+  color: var(--text-muted-soft);
   cursor: not-allowed;
   opacity: 0.55;
 }
@@ -5339,9 +5445,9 @@ body.theme-light .pane-tab:not(.active) .session-button-detail {
   color: var(--pane-tab-active-text);
 }
 .pane-tab.active .session-yolo-marker.inactive {
-  color: var(--pane-meta-branch);
-  background: var(--divider);
-  border-color: #5d6878;
+  color: var(--agent-inactive-marker-text);
+  background: var(--agent-inactive-marker-bg);
+  border-color: var(--agent-inactive-marker-border);
 }
 .pane-tab.file-missing {
   color: #ffdbe1;
@@ -5394,9 +5500,9 @@ body.theme-light .pane-tab.file-missing.active .file-tab-missing-badge {
   color: #b3263a;
 }
 body.theme-light .pane-tab.active .session-yolo-marker.inactive {
-  color: var(--neutral-text-strong);
-  background: #e2e6ec;
-  border-color: #c2cad6;
+  color: var(--agent-inactive-marker-text);
+  background: var(--agent-inactive-marker-bg);
+  border-color: var(--agent-inactive-marker-border);
 }
 .pane-tab-close {
   position: relative;
@@ -5679,12 +5785,28 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   font-stretch: normal;
   font-weight: 500;
 }
-.tmux-window-button .tmux-window-name-label,
 .tmux-window-button .tmux-window-number-label {
   display: block;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.tmux-window-button .tmux-window-name-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+.tmux-window-button .tmux-window-name-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.agent-window-activity-icon {
+  margin-inline-start: 1px;
 }
 .tmux-window-bar[data-tmux-window-label-mode="names"] .tmux-window-number-label,
 .tmux-window-bar[data-tmux-window-label-mode="numbers"] .tmux-window-name-label {
@@ -5706,25 +5828,6 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   background: var(--active-control-bg);
   border-color: var(--active-control-border);
   font-weight: 600;
-}
-/* Per-agent tint for the window-switcher buttons. data-window-agent (set in tmuxWindowBarHtml from the
-   window's program: claude/codex/shell/editor/repl/git/other) picks a mid-tone hue. The hue shows as a
-   solid 3px left swatch on EVERY button (so the active green-toggle button still reveals its agent), and
-   inactive buttons also get a faint agent-tinted background mixed into the theme's --panel2 (so the tint
-   flips with the theme). Mid-tone hues + border/--var carriers keep the light-mode literal lint quiet.
-   These rules follow .active in source order so the left swatch wins over the active border on the left. */
-.tmux-window-button[data-window-agent="claude"] { --window-agent-color: #e0883c; }
-.tmux-window-button[data-window-agent="codex"]  { --window-agent-color: #9b87f5; }
-.tmux-window-button[data-window-agent="shell"]  { --window-agent-color: #6fd08c; }
-.tmux-window-button[data-window-agent="editor"] { --window-agent-color: #56d4c6; }
-.tmux-window-button[data-window-agent="repl"]   { --window-agent-color: #7cb3f0; }
-.tmux-window-button[data-window-agent="git"]    { --window-agent-color: #ff9a76; }
-.tmux-window-button[data-window-agent="other"]  { --window-agent-color: var(--muted); }
-.tmux-window-button[data-window-agent] {
-  border-inline-start: 3px solid var(--window-agent-color, transparent);
-}
-.tmux-window-button[data-window-agent]:not(.active) {
-  background: color-mix(in srgb, var(--window-agent-color, transparent) 18%, var(--panel2));
 }
 .terminal-tab {
   flex: 0 1 auto;
@@ -6437,11 +6540,11 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   padding: 7px 9px;
   border-radius: 5px;
 }
-.transcript-item.user { border-color: #60a5fa; background: color-mix(in srgb, #60a5fa 12%, var(--panel)); }
-.transcript-item.assistant { border-color: #4ade80; background: color-mix(in srgb, #4ade80 12%, var(--panel)); }
+.transcript-item.user { border-color: var(--transcript-user-accent); background: color-mix(in srgb, var(--transcript-user-accent) 12%, var(--panel)); }
+.transcript-item.assistant { border-color: var(--transcript-assistant-accent); background: color-mix(in srgb, var(--transcript-assistant-accent) 12%, var(--panel)); }
 .transcript-item.tool_use { border-color: var(--status-tool); background: color-mix(in srgb, var(--status-tool) 12%, var(--panel)); }
 .transcript-item.tool_result { border-color: var(--pr-status-merged); background: color-mix(in srgb, var(--pr-status-merged) 12%, var(--panel)); }
-.transcript-item.summary { border-color: #f472b6; background: color-mix(in srgb, #f472b6 12%, var(--panel)); }
+.transcript-item.summary { border-color: var(--transcript-summary-accent); background: color-mix(in srgb, var(--transcript-summary-accent) 12%, var(--panel)); }
 .transcript-item.system { border-color: var(--git-transcript-badge); background: color-mix(in srgb, var(--git-transcript-badge) 12%, var(--panel)); }
 .transcript-role {
   color: var(--text);
@@ -7288,6 +7391,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   width: calc(100% - 28px);
   max-width: calc(100% - 28px);
   padding: 7px 8px;
+  color: var(--text);
   border: 1px solid var(--line);
   border-radius: 5px;
   background: var(--panel2);
@@ -7358,11 +7462,18 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   font-weight: 600;
   text-transform: none;
 }
+.yoagent-message-latency {
+  color: var(--muted);
+  font-weight: 600;
+  text-transform: none;
+  white-space: nowrap;
+}
 .yoagent-message-body {
   min-width: 0;
   overflow-x: visible;
   overflow-y: visible;
   overscroll-behavior: auto;
+  color: var(--text);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font: var(--terminal-font-size)/1.35 var(--ui-font);
@@ -7389,6 +7500,29 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   cursor: pointer;
   user-select: none;
   color: var(--muted);
+}
+.yoagent-message-details summary::-webkit-details-marker {
+  display: none;
+}
+.yoagent-message-details summary::marker {
+  content: '';
+}
+.yoagent-message-details summary::before {
+  content: '';
+  flex: 0 0 auto;
+  width: 0;
+  height: 0;
+  margin-top: 0.45em;
+  border-block-start: 4px solid transparent;
+  border-block-end: 4px solid transparent;
+  border-inline-start: 6px solid currentColor;
+  opacity: 0.75;
+  transform-origin: 45% 50%;
+  transition: transform 120ms ease, opacity 120ms ease;
+}
+.yoagent-message-details[open] summary::before {
+  transform: rotate(90deg);
+  opacity: 0.95;
 }
 .yoagent-message-details summary > span:first-child {
   flex: 0 0 auto;
@@ -7428,6 +7562,10 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 .yoagent-message-details pre.yoagent-toolcall-stream {
   color: color-mix(in srgb, var(--accent-gold) 58%, var(--text));
   border-color: color-mix(in srgb, var(--accent-gold) 35%, var(--line));
+}
+.yoagent-tc-command {
+  color: var(--code-function);
+  font-weight: 650;
 }
 .yoagent-details-note {
   margin-top: 5px;
@@ -7511,12 +7649,13 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   flex-direction: column;
   gap: 6px;
   padding: 8px 10px;
-  background: var(--bg);
-  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--link-soft) 8%, var(--bg));
+  border: 1px solid var(--link-soft);
   border-radius: 14px;
 }
 .yoagent-chat-form:focus-within {
-  border-color: var(--active-control-border);
+  border-color: var(--link-soft);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--link-soft) 45%, transparent);
 }
 .yoagent-chat-input {
   min-width: 0;
@@ -7556,11 +7695,28 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   max-width: 13ch;
 }
 .yoagent-backend-pill-dot {
-  width: 9px;
-  height: 9px;
+  width: 10px;
+  height: 10px;
   flex: 0 0 auto;
   border-radius: 50%;
-  border: 2px solid var(--active-control-bg);
+  background: var(--agent-inactive-marker-bg);
+  border: 2px solid var(--yoagent-inactive-backend-dot-border);
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.45);
+}
+.yoagent-composer-pill-backend:not(:has(select:disabled)) .yoagent-backend-pill-dot {
+  background: var(--pr-status-passing);
+  border-color: color-mix(in srgb, var(--pr-status-passing) 30%, #ffffff);
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.48), 0 0 0 3px color-mix(in srgb, var(--pr-status-passing) 22%, transparent);
+}
+body.theme-light .yoagent-backend-pill-dot {
+  background: var(--agent-inactive-marker-bg);
+  border-color: var(--agent-inactive-marker-border);
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.42), 0 0 0 2px rgb(255 255 255 / 0.45);
+}
+body.theme-light .yoagent-composer-pill-backend:not(:has(select:disabled)) .yoagent-backend-pill-dot {
+  background: var(--pr-status-passing);
+  border-color: color-mix(in srgb, var(--pr-status-passing) 34%, #ffffff);
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.38), 0 0 0 3px color-mix(in srgb, var(--pr-status-passing) 24%, transparent);
 }
 .yoagent-composer-pill select,
 .yoagent-backend-pill select {
@@ -7679,6 +7835,12 @@ body.theme-light .yoagent-message.assistant.yoagent-agent-result {
 body.theme-light .yoagent-message.user {
   border-color: var(--link-soft);
 }
+body.theme-light .yoagent-message,
+body.theme-light .yoagent-message-body,
+body.theme-light .yoagent-message-body.markdown-body,
+body.theme-light .yoagent-message-body.markdown-body * {
+  color: var(--lt-text);
+}
 body.theme-light .yoagent-global-head,
 body.theme-light .yoagent-headline,
 body.theme-light .yoagent-line {
@@ -7686,10 +7848,11 @@ body.theme-light .yoagent-line {
 }
 body.theme-light .yoagent-generated,
 body.theme-light .yoagent-empty,
-body.theme-light .yoagent-message-role {
+body.theme-light .yoagent-message-role,
+body.theme-light .yoagent-message-time,
+body.theme-light .yoagent-message-latency {
   color: var(--lt-muted-strong);
 }
-body.theme-light .yoagent-message-body.markdown-body,
 body.theme-light .yoagent-global .markdown-body {
   color: var(--lt-text);
 }
@@ -7697,7 +7860,7 @@ body.theme-light .yoagent-message-details summary {
   color: var(--lt-muted-strong);
 }
 body.theme-light .yoagent-details-preview {
-  color: #667085;
+  color: var(--text-muted-soft);
 }
 body.theme-light .yoagent-message-details pre {
   color: var(--lt-text);
@@ -7705,12 +7868,12 @@ body.theme-light .yoagent-message-details pre {
   border-color: var(--lt-code-block-border);
 }
 body.theme-light .yoagent-message-details pre.yoagent-auxiliary-stream {
-  color: #667085;
+  color: var(--text-muted-soft);
   background: #f7f8fa;
   border-color: var(--lt-code-block-border);
 }
 body.theme-light .yoagent-details-note {
-  color: #667085;
+  color: var(--text-muted-soft);
 }
 body.theme-light .yoagent-chat-queue {
   color: var(--lt-text);
@@ -7726,10 +7889,23 @@ body.theme-light .yoagent-message-details pre.yoagent-toolcall-stream {
   background: #fff9e8;
   border-color: #e3bf57;
 }
+body.theme-light .yoagent-tc-command {
+  color: #005fb8;
+}
 body.theme-light .yoagent-action-card {
   color: var(--lt-text);
   background: var(--lt-code-block-bg);
   border-color: var(--link-soft);
+}
+body.theme-light .yoagent-chat-form {
+  background: color-mix(in srgb, var(--link-soft) 8%, #ffffff);
+  border-color: var(--link-soft);
+}
+body.theme-light .yoagent-chat-input {
+  color: var(--lt-text);
+}
+body.theme-light .yoagent-chat-input::placeholder {
+  color: var(--lt-muted-strong);
 }
 body.theme-light .yoagent-action-head {
   color: #0f4c81;
@@ -8626,6 +8802,10 @@ body.app-vw-lte-760 .share-result-meta {
   font-size: var(--ui-font-size-sm);
   font-weight: 800;
 }
+.about-license {
+  justify-self: start;
+  font-size: var(--ui-font-size-xs);
+}
 .about-author {
   justify-self: start;
   color: var(--markdown-link);
@@ -9295,6 +9475,8 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
   inline-size: var(--file-tree-date-column-width);
   min-height: var(--file-tree-row-control-size);
   padding-inline-start: 4px;
+  border: 1px solid transparent;
+  border-radius: 5px;
   color: var(--muted);
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-3xs);

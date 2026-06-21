@@ -950,6 +950,8 @@ def test_visible_agent_working_cases(visible_text, expected_working, expected_ke
         ("☉ Any status words here... (24s · ↑ 13 tokens · high effort)", 24, 13),
         ("☉ Decimal seconds... (2.3s · ↑ 13 tokens · high effort)", 2.3, 13),
         ("✳ Wobbleflorping… (1h 02m 03s · ↓ 8.4K tokens)", 3723, 8400),
+        ("✳ Wobbleflorping… (3h 45m · ↓ 8.4K tokens)", 13500, 8400),
+        ("✳ Wobbleflorping… (3h · ↓ 8.4K tokens)", 10800, 8400),
         ("✱ No tokens... (6m 34s · still thinking with xhigh effort)", 394, None),
         ("✱ Big tokens... (6m 34s · ↓ 1.2M tokens)", 394, 1200000),
     ],
@@ -999,6 +1001,38 @@ def test_agent_screen_state_reports_token_counter_advancement():
     assert state["key"] == "working"
     assert state["status_counter_advanced"] is True
     assert state["status_tokens"] == 30200
+
+
+def test_agent_screen_state_prefers_codex_pursuing_goal_elapsed_for_display():
+    visible_text = "\n".join([
+        "◦ Working (1m 46s • esc to interrupt)",
+        "› Implement feature",
+        "  gpt-5.5 xhigh · ~ · Main [default]                         Pursuing goal (3h 45m)",
+    ])
+
+    state = prompt_detector.agent_screen_state(visible_text, pane_target="%codex-goal-display", now=1000.0)
+
+    assert state["key"] == "working"
+    assert state["status_elapsed_seconds"] == 106
+    assert state["goal_elapsed_seconds"] == 13500
+    assert state["display_elapsed_seconds"] == 13500
+
+
+def test_codex_pursuing_goal_elapsed_does_not_advance_stale_counter():
+    first = "\n".join([
+        "◦ Working (1m 46s • esc to interrupt)",
+        "› Implement feature",
+        "  gpt-5.5 xhigh · ~ · Main [default]                         Pursuing goal (3h 45m)",
+    ])
+    second = first.replace("3h 45m", "3h 46m")
+
+    prompt_detector.agent_screen_state(first, pane_target="%codex-goal-stale", now=1000.0)
+    state = prompt_detector.agent_screen_state(second, pane_target="%codex-goal-stale", now=1080.0)
+
+    assert state["key"] == "idle"
+    assert state["status_counter_advanced"] is False
+    assert state["negative_reason"] == "stale visible status counter"
+    assert state["display_elapsed_seconds"] == 13560
 
 
 def test_agent_screen_state_stales_repeated_unchanged_visible_counter():

@@ -38,7 +38,7 @@ DEFAULT_ROWS = 36
 MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
-YOLOMUX_VERSION = "0.4.19"
+YOLOMUX_VERSION = "0.4.20"
 UPDATE_NOTIFY_LEVELS: tuple[str, ...] = ("major", "minor", "patch", "none")
 SUMMARY_LOOKBACK_SECONDS = 3600
 SUMMARY_MAX_PROMPT_CHARS = 100_000
@@ -169,6 +169,7 @@ def codex_exec_argv(
     model: str | None = None,
     effort: str | None = None,
     service_tier: str | None = None,
+    search: bool = False,
 ) -> list[str]:
     selected_model = str(model or SUMMARY_CODEX_MODEL).strip() or SUMMARY_CODEX_MODEL
     selected_effort = str(effort or SUMMARY_CODEX_EFFORT).strip() or SUMMARY_CODEX_EFFORT
@@ -186,7 +187,11 @@ def codex_exec_argv(
     if resume_session_id:
         # `codex exec resume` restores the original cwd/sandbox and rejects --sandbox/--cd.
         return ["codex", "exec", "resume", *common, resume_session_id, "-"]
-    args = ["codex", "exec", *common, "--sandbox", "read-only"]
+    args = ["codex"]
+    if search:
+        # `--search` is a top-level Codex flag in 0.141.0; `codex exec --search` is rejected.
+        args.append("--search")
+    args.extend(["exec", *common, "--sandbox", "read-only"])
     if ephemeral:
         args.append("--ephemeral")
     return [*args, "--cd", str(PROJECT_ROOT), "-"]

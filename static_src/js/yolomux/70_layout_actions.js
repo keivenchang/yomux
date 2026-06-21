@@ -1058,9 +1058,9 @@ function pullRequestChecksHtml(pr) {
   return metaJoin(parts);
 }
 
-function activeWindowPaneForProjectMeta(info) {
+function activeWindowPaneForProjectMeta(session, info) {
   const panes = Array.isArray(info?.panes) ? info.panes : [];
-  return panes.length ? terminalDisplayPane(info) : null;
+  return panes.length ? terminalDisplayPane(info, session) : null;
 }
 
 function repoSummaryAsGit(repo) {
@@ -1082,7 +1082,7 @@ function projectMetaSelection(session, info) {
   const project = info?.project || {};
   const repos = sessionRepoSummaries(info);
   const explicitRoot = repoRootKey(sessionRepoDisplayRoot.get(session));
-  const activePane = activeWindowPaneForProjectMeta(info);
+  const activePane = activeWindowPaneForProjectMeta(session, info);
   const activePath = normalizeDirectoryPath(activePane?.current_path || '');
   const activeAgent = activePane ? agentForPane(info, activePane) : null;
   const activeAgentKind = String(activeAgent?.kind || activePane?.process_label || activePane?.command || '').toLowerCase();
@@ -1109,7 +1109,7 @@ function projectMetaSelection(session, info) {
 function panelFullPath(session, info) {
   const project = info?.project || {};
   const git = project.git;
-  const activePane = activeWindowPaneForProjectMeta(info);
+  const activePane = activeWindowPaneForProjectMeta(session, info);
   if (activePane?.current_path) return activePane.current_path;
   const panes = Array.isArray(info?.panes) ? info.panes : [];
   const nonHomePane = panes.find(pane => pane?.current_path && pane.current_path !== homePath && !['claude', 'codex'].includes(String(pane.command || '').toLowerCase()));

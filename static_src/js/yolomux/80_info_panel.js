@@ -161,7 +161,7 @@ function createInfoPanel() {
     const yoagentSetting = event.target.closest('[data-yoagent-setting-path]');
     if (!yoagentSetting || !panel.contains(yoagentSetting) || readOnlyMode) return;
     const path = yoagentSetting.dataset.yoagentSettingPath || '';
-    saveSettingsPatch(settingPatch(path, yoagentSetting.value))
+    saveSettingsPatch(settingPatchForPath(path, yoagentSetting.value))
       .then(() => { statusEl.textContent = t('yoagent.statusBackend', {backend: yoagentBackendLabel(yoagentComposerBackendKey())}); renderYoagentPanel(); })
       .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
   });

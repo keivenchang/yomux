@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from datetime import datetime
 from datetime import timezone
@@ -26,9 +27,6 @@ YOAGENT_CONVERSATION_MAX_MESSAGES = 500
 YOAGENT_MESSAGE_CONTENT_LIMIT = 20_000
 YOAGENT_MESSAGE_DETAILS_LIMIT = 4_000
 YOAGENT_ACTIONS_LIMIT = 8
-YOAGENT_AUXILIARY_LINES_LIMIT = 200
-YOAGENT_AUXILIARY_LINE_LIMIT = 1_000
-YOAGENT_AUXILIARY_PREVIEW_LIMIT = 2_000
 YOAGENT_BACKENDS = {"claude", "codex"}
 YOAGENT_MESSAGE_KINDS = {"agent_result"}
 
@@ -69,8 +67,27 @@ def sanitized_actions(value: Any) -> list[dict[str, Any]]:
 def sanitized_auxiliary_lines(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
-    lines = [truncate_text(str(item or "").strip(), YOAGENT_AUXILIARY_LINE_LIMIT) for item in value if str(item or "").strip()]
-    return lines[-YOAGENT_AUXILIARY_LINES_LIMIT:]
+    return [redacted_auxiliary_text(str(item or "").strip()) for item in value if str(item or "").strip()]
+
+
+def redacted_auxiliary_text(text: str) -> str:
+    return re.sub(r"(?i)\b(token|secret|password|api[_-]?key)\s*=\s*\S+", r"\1=<redacted>", str(text or ""))
+
+
+def sanitized_stream_items(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "").strip().lower()
+        if kind not in {"assistant", "thinking", "tool"}:
+            continue
+        text = redacted_auxiliary_text(str(item.get("text") or ""))
+        if text.strip():
+            result.append({"kind": kind, "text": text})
+    return result
 
 
 def sanitize_message(value: Any, *, role: str | None = None, content: str | None = None, created_at: str | None = None) -> dict[str, Any] | None:
@@ -95,17 +112,24 @@ def sanitize_message(value: Any, *, role: str | None = None, content: str | None
     details = truncate_text(str(raw.get("details") or "").strip(), YOAGENT_MESSAGE_DETAILS_LIMIT)
     if details and message_role == "assistant":
         message["details"] = details
+    raw_response_ms = raw.get("responseMs", raw.get("response_ms"))
+    response_ms = float_value(raw_response_ms, 0.0)
+    if message_role == "assistant" and response_ms > 0:
+        message["responseMs"] = round(response_ms, 3)
     auxiliary_lines = sanitized_auxiliary_lines(raw.get("auxiliaryLines"))
     if auxiliary_lines and message_role == "assistant":
         message["auxiliaryLines"] = auxiliary_lines
         message["auxiliaryText"] = "\n".join(auxiliary_lines)
-        preview = truncate_text(str(raw.get("auxiliaryPreview") or "\n".join(auxiliary_lines[-1:])).strip(), YOAGENT_AUXILIARY_PREVIEW_LIMIT)
+        preview = redacted_auxiliary_text(str(raw.get("auxiliaryPreview") or "\n".join(auxiliary_lines[-1:])).strip())
         if preview:
             message["auxiliaryPreview"] = preview
         if bool(raw.get("auxiliaryDone")):
             message["auxiliaryDone"] = True
         if bool(raw.get("auxiliaryTruncated")):
             message["auxiliaryTruncated"] = True
+    stream_items = sanitized_stream_items(raw.get("streamItems"))
+    if stream_items and message_role == "assistant":
+        message["streamItems"] = stream_items
     return message
 
 

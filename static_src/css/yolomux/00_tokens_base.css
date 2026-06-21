@@ -26,6 +26,7 @@
   --status-tool: #f59e0b;
   --danger-border-soft: #d56b7a;
   --text-muted-cool: #9ea8b7;
+  --text-muted-soft: #667085;
   --neutral-border-strong: #6f7b8c;
   --neutral-text-strong: #52617a;
   --overlay-surface: #111820;
@@ -102,6 +103,9 @@
   --git-staged-badge: var(--brand-green);
   --git-transcript: var(--muted);
   --git-transcript-badge: #94a3b8;
+  --transcript-user-accent: #60a5fa;
+  --transcript-assistant-accent: #4ade80;
+  --transcript-summary-accent: #f472b6;
   --info-session-column-width: 120px;
   --info-path-column-width: 320px;
   --info-branch-column-width: 320px;
@@ -143,6 +147,10 @@
   --active-control-focus-ring: rgb(var(--active-accent-rgb) / 0.14);
   --active-terminal-cursor-rgb: var(--active-accent-rgb);
   --active-control-scrollbar-thumb: rgb(var(--active-terminal-cursor-rgb) / 0.88);
+  --agent-inactive-marker-text: #f8fafc;
+  --agent-inactive-marker-bg: #050608;
+  --agent-inactive-marker-border: #cfd8e3;
+  --yoagent-inactive-backend-dot-border: #d9e2ee;
   --pane-scrollbar-thumb: rgba(190, 205, 218, 0.56);
   --pane-scrollbar-thumb-hover: var(--active-control-scrollbar-thumb);
   --pane-scrollbar-track: rgba(255, 255, 255, 0.035);
@@ -222,6 +230,7 @@
   --app-menu-max-inline-size: var(--popover-max-inline-size);
   --app-menu-max-block-size: 74vh;
   --app-menu-tab-max-block-size: 82vh;
+  --app-submenu-light-bg: #f8fafc;
   --file-explorer-tree-inline-size: clamp(280px, 22vw, 340px);
   --file-explorer-editor-inline-size: clamp(420px, 42vw, 640px);
   --file-explorer-open-inline-size: calc(var(--file-explorer-tree-inline-size) + var(--file-explorer-editor-inline-size));
@@ -414,8 +423,10 @@
   --icon-changes: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 4h10'/%3E%3Cpath d='M7 20h10'/%3E%3Cpath d='M12 6v12'/%3E%3Cpath d='M5 10h5'/%3E%3Cpath d='M14 14h5'/%3E%3C/svg%3E");
   --editor-preview-bg: #342f22;
   --topbar-height: 38px;
-  --red-reminder-duration: 1.55s;
-  --red-reminder-easing: ease-in-out;
+  --pulse-duration: 1.55s;
+  --pulse-easing: ease-in-out;
+  --red-reminder-duration: var(--pulse-duration);
+  --red-reminder-easing: var(--pulse-easing);
   --yolo-reminder-duration: 2.8s;
   --yolo-rotation-duration: 20s;
 }

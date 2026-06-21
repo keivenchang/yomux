@@ -1140,6 +1140,7 @@ let activitySummaryPayload = {sessions: {}, global: {lines: []}, session_order: 
 let activitySummaryRefreshing = false;
 let activitySummaryLastRefreshTs = 0;
 const activitySummaryGuard = makeGenerationGuard();
+let yoagentStartupActivitySummaryPayload = null;
 let yoagentMessages = [];
 let yoagentPendingWaits = [];
 let yoagentJobs = [];
@@ -3600,12 +3601,24 @@ function delegate(parent, type, selector, handler, options = {}) {
   if (!parent || typeof handler !== 'function') return null;
   const listener = event => {
     const target = event.target?.closest?.(selector);
-    if (!target || !parent.contains(target)) return;
+    if (!target || (typeof parent.contains === 'function' && !parent.contains(target))) return;
     handler(event, target);
   };
   parent.addEventListener(type, listener, options);
   return listener;
 }
+
+function handleCopyPathClick(event, button) {
+  event.preventDefault();
+  event.stopPropagation();
+  const path = button.dataset.copyPath || '';
+  if (!path) return;
+  copyTextToClipboard(path)
+    .then(() => { statusOk(localizedHtml('status.copiedTranscriptPath')); })
+    .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
+}
+
+delegate(document, 'click', '[data-copy-path]', handleCopyPathClick);
 
 // One owner for the per-session/-item DOM id scheme. Both the element that sets the id and every
 // getElementById/querySelector that looks it up route through these, so the prefix lives in one place
@@ -5760,7 +5773,9 @@ function tmuxSignalSessionActivityTs(session) {
 
 function tmuxSignalActivePaneForSession(session) {
   const windows = tmuxSignalWindowsForSession(session);
-  const windowRecord = windows.find(item => item?.active === true) || windows[0] || null;
+  const override = typeof tmuxWindowActiveIndexOverride === 'function' ? tmuxWindowActiveIndexOverride(session) : undefined;
+  const overrideWindow = override !== undefined && override !== '__pending__' ? tmuxSignalWindowForSessionIndex(session, override) : null;
+  const windowRecord = overrideWindow || windows.find(item => item?.active === true) || windows[0] || null;
   const panes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
   return panes.find(pane => pane?.active === true) || panes[0] || null;
 }
@@ -6010,10 +6025,13 @@ function globalActivityStatusLineHtml() {
   const counts = globalActivityCounts();
   if (!counts.total) return '';
   const parts = [];
-  parts.push(`<span class="topbar-activity-run${counts.running ? ' active' : ''}">${counts.running} RUN</span>`);
-  parts.push(`<span class="topbar-activity-ques${counts.questions ? ' topbar-activity-attn' : ''}">${counts.questions} ASK?</span>`);
-  parts.push(`<span class="topbar-activity-blk${counts.blocked ? ' topbar-activity-attn' : ''}">${counts.blocked} BLK</span>`);
-  parts.push(`<span class="topbar-activity-idle">${counts.idle} idle</span>`);
+  const runTone = counts.running ? 'positive' : '';
+  const questionTone = counts.questions ? 'attention' : '';
+  const blockedTone = counts.blocked ? 'attention' : '';
+  parts.push(`<span class="${esc(statusIndicatorInlineClasses(runTone, 'topbar-activity-run', counts.running ? 'active' : ''))}">${counts.running} RUN</span>`);
+  parts.push(`<span class="${esc(statusIndicatorInlineClasses(questionTone, 'topbar-activity-ques', counts.questions ? 'topbar-activity-attn' : ''))}"${statusIndicatorToneStyle(questionTone)}>${counts.questions} ASK?</span>`);
+  parts.push(`<span class="${esc(statusIndicatorInlineClasses(blockedTone, 'topbar-activity-blk', counts.blocked ? 'topbar-activity-attn' : ''))}"${statusIndicatorToneStyle(blockedTone)}>${counts.blocked} BLK</span>`);
+  parts.push(`<span class="${esc(statusIndicatorInlineClasses('', 'topbar-activity-idle'))}">${counts.idle} idle</span>`);
   return parts.join('<span class="topbar-activity-sep" aria-hidden="true">·</span>');
 }
 
@@ -6055,6 +6073,7 @@ function attentionAnimationStyle() {
 function syncAttentionAnimation(node, active) {
   if (!node?.style) return;
   node.classList?.toggle?.('attention-pulse', active === true);
+  node.classList?.toggle?.('heartbeat-pulse', active === true);
   if (active) {
     if (!node.style.getPropertyValue('--attention-animation-delay')) {
       node.style.setProperty('--attention-animation-delay', attentionAnimationDelay());
@@ -6064,16 +6083,63 @@ function syncAttentionAnimation(node, active) {
   }
 }
 
+function statusIndicatorClassItems(...classes) {
+  const items = [];
+  classes.forEach(item => {
+    if (Array.isArray(item)) items.push(...statusIndicatorClassItems(...item));
+    else if (item) items.push(item);
+  });
+  return items;
+}
+
+function statusIndicatorClasses(...classes) {
+  return ['status-indicator', ...statusIndicatorClassItems(...classes)].join(' ');
+}
+
+function statusIndicatorToneClasses(tone) {
+  if (tone === 'positive') return ['status-indicator--positive'];
+  if (tone === 'working') return ['status-indicator--working', 'heartbeat-pulse'];
+  if (tone === 'attention') return ['status-indicator--attention', 'heartbeat-pulse', 'attention-pulse'];
+  if (tone === 'settled') return ['status-indicator--settled'];
+  if (tone === 'idle') return ['status-indicator--idle'];
+  return [];
+}
+
+function statusIndicatorToneStyle(tone) {
+  return tone === 'attention' ? ` style="${attentionAnimationStyle()}"` : '';
+}
+
+function statusIndicatorModifiedClasses(modifier, tone, classes, options = {}) {
+  const items = statusIndicatorClassItems(classes);
+  const toneClasses = statusIndicatorToneClasses(tone);
+  if (options.modifierPosition === 'after-all') return statusIndicatorClasses(items, toneClasses, modifier);
+  if (!items.length) return statusIndicatorClasses(modifier, toneClasses);
+  return statusIndicatorClasses(items[0], modifier, items.slice(1), toneClasses);
+}
+
+function statusIndicatorTextClasses(tone, ...classes) {
+  return statusIndicatorModifiedClasses('status-indicator--text', tone, classes);
+}
+
+function statusIndicatorDotClasses(tone, ...classes) {
+  return statusIndicatorModifiedClasses('status-indicator--dot', tone, classes);
+}
+
+function statusIndicatorInlineClasses(tone, ...classes) {
+  return statusIndicatorModifiedClasses('status-indicator--inline', tone, classes, {modifierPosition: 'after-all'});
+}
+
 function stateBadgeHtml(key, short, title, options = {}) {
   const classes = ['session-state-badge', 'tab-symbol', `session-state-${key}`];
   const attention = stateDef(key).attention;
-  if (attention) classes.push('session-state-reminder', 'attention-pulse');
-  const style = attention ? ` style="${attentionAnimationStyle()}"` : '';
+  const tone = attention ? 'attention' : '';
+  if (attention) classes.push('session-state-reminder');
+  const style = statusIndicatorToneStyle(tone);
   const clearable = options.clearable === true && options.session && options.promptSignature;
   const attrs = clearable
     ? ` role="button" tabindex="0" data-prompt-attention-clear="1" data-session="${esc(options.session)}" data-prompt-signature="${esc(options.promptSignature)}" aria-label="${esc(t('state.clearAsk'))}"`
     : '';
-  return `<span class="${esc(classes.join(' '))}"${style} title="${esc(title)}"${attrs}>${esc(short)}</span>`;
+  return `<span class="${esc(statusIndicatorTextClasses(tone, classes))}"${style} title="${esc(title)}"${attrs}>${esc(short)}</span>`;
 }
 
 function sessionStateHtml(state) {
@@ -8119,6 +8185,7 @@ function layoutMenuCommand(mode) {
 
 const aboutLinkedInUrl = 'https://www.linkedin.com/in/keiven/';
 const aboutProjectUrl = 'https://github.com/keivenchang/yolomux';
+const aboutLicenseUrl = 'https://polyformproject.org/licenses/noncommercial/1.0.0';
 
 function aboutDateTimeText() {
   if (bootstrap.versionCommitTime) return bootstrap.versionCommitTime;
@@ -8215,7 +8282,8 @@ function showAboutModal() {
       <div><dt>SHA</dt><dd>${esc(sha || t('common.unknown'))}</dd></div>
       <div><dt>${esc(t('menu.help.about.version'))}</dt><dd>${esc(version || t('common.unknown'))}</dd></div>
     </dl>
-    <div class="about-links"><a class="about-author" href="${esc(aboutLinkedInUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.author'))}</a><span> - </span><a class="about-author about-github" href="${esc(aboutProjectUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.github'))}</a><span> (to YOLOmux)</span></div>
+    <div class="about-links"><a class="about-author" href="${esc(aboutLinkedInUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.author'))}</a><span> - </span><a class="about-author about-github" href="${esc(aboutProjectUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.github'))}</a></div>
+    <div class="about-license"><a class="about-author about-license-link" href="${esc(aboutLicenseUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.license'))}</a></div>
   </div>`;
   modal.classList.add('open');
   scheduleSharePopupLayerPublish();
@@ -11453,10 +11521,12 @@ function setFileTreeRecencyAttentionClass(row, enabled, nowMs = fileTreeRecencyN
   if (!row?.classList || !date?.classList) return;
   if (!enabled) {
     date.classList.remove('attention-pulse');
+    date.classList.remove('heartbeat-pulse');
     date.style?.removeProperty('--attention-animation-delay');
     return;
   }
   date.classList.add('attention-pulse');
+  date.classList.add('heartbeat-pulse');
   date.style?.setProperty('--attention-animation-delay', attentionAnimationDelay(nowMs));
 }
 
@@ -11485,6 +11555,7 @@ function clearFileTreeRowRecency(row) {
   for (const className of FILE_TREE_RECENCY_CLASSES) row.classList.remove(className);
   const date = fileTreeRecencyDateCell(row);
   date?.classList?.remove?.('attention-pulse');
+  date?.classList?.remove?.('heartbeat-pulse');
   date?.style?.removeProperty?.('--attention-animation-delay');
   setRowDataset(row, 'recency', '');
   row.style?.removeProperty('--file-tree-recency-date-color');
@@ -12810,11 +12881,12 @@ function persistTabberCollapsed() {
   storageSet(fileExplorerTabberCollapsedStorageKey, JSON.stringify(Array.from(fileExplorerTabberCollapsed).sort()));
 }
 
-// Recency for a ledger key (session "6" or session:window "6:1") = the latest of last typed / agent-active
-// / output. 0 when the key has no ledger entry yet.
+// Recency for a ledger key (session "6" or session:window "6:1") is derived by the backend once as active_recency_ts.
 function tabberRecency(key) {
   const rec = tabberActivityPayload?.activity?.[key];
   if (!rec) return 0;
+  const derived = Number(rec.active_recency_ts || 0);
+  if (Number.isFinite(derived) && derived > 0) return derived;
   return Math.max(Number(rec.last_user_input_ts || 0), Number(rec.last_agent_active_ts || 0), Number(rec.last_output_ts || 0));
 }
 
@@ -13092,6 +13164,158 @@ function tabberRepoEntriesForWindow(session, windowIndex, agentKey, gitBranch, g
 // Build the Tabber tree + an entriesByDir map keyed by STABLE id-based synthetic node paths
 // (s_<session>/w_<index>/r_<n>). Each entry carries mtime (ledger recency; parents inherit the max
 // child) for the date column + recency sort, and sortName (the human label) for A-Z/Z-A sort.
+function agentWindowKind(value) {
+  const key = String(value || '').trim().toLowerCase();
+  return key === 'claude' || key === 'codex' ? key : '';
+}
+
+function agentWindowCanonicalLabel(windowIndex, agentKey, fallback = '') {
+  const kind = agentWindowKind(agentKey);
+  if (!kind) return String(fallback || '').trim();
+  const index = tmuxWindowIndexKey(windowIndex);
+  return index !== null ? `${index}:${kind}` : kind;
+}
+
+function sessionAgentWindowStatusPayloads(session, info = null, autoPayload = null) {
+  const statePayload = autoPayload || autoApproveStates.get(session) || {};
+  const source = Array.isArray(statePayload.agent_windows) && statePayload.agent_windows.length
+    ? statePayload.agent_windows
+    : Array.isArray(info?.agent_windows) && info.agent_windows.length
+      ? info.agent_windows
+      : [];
+  const fallback = source.length ? source : (Array.isArray(info?.agents) ? info.agents : [])
+    .map(agent => ({kind: agent?.kind || '', state: 'idle', pane_target: agent?.pane_target || '', window_label: agent?.window_label || '', last_active_ts: 0, idle_since: null}));
+  return fallback
+    .map(agent => {
+      const kind = agentWindowKind(agent?.kind);
+      const windowIndex = tmuxWindowNumber(agent?.window_index ?? agent?.window);
+      const windowText = windowIndex !== null ? String(windowIndex) : String(agent?.window || '').trim();
+      const canonical = agentWindowCanonicalLabel(windowText || agent?.window_index, kind, agent?.window_label || kind);
+      return {...agent, kind, window: windowText, window_index: windowIndex, window_label: canonical};
+    })
+    .filter(agent => agent.kind);
+}
+
+function agentWindowStatusForRecord(session, record, info = null) {
+  const indexKey = tmuxWindowIndexKey(record?.index ?? record?.indexText);
+  if (indexKey === null) return null;
+  const rows = sessionAgentWindowStatusPayloads(session, info);
+  return rows.find(agent => tmuxWindowIndexKey(agent.window_index ?? agent.window) === indexKey) || null;
+}
+
+function agentWindowIdleSeconds(agent, nowSeconds = Date.now() / 1000) {
+  const lastActive = Number(agent?.idle_since || agent?.last_active_ts || 0);
+  return Number.isFinite(lastActive) && lastActive > 0 ? Math.max(0, nowSeconds - lastActive) : null;
+}
+
+const agentWindowActivityStates = new Map();
+const agentWindowStoppedTimers = new Map();
+
+function agentWindowActivityTransitionKey(agentKey, options = {}) {
+  const explicit = String(options.transitionKey || '').trim();
+  if (explicit) return explicit;
+  const kind = agentWindowKind(agentKey);
+  if (!kind) return '';
+  const session = String(options.session || '').trim();
+  const windowIndex = tmuxWindowIndexKey(options.window_index ?? options.window);
+  const pane = String(options.pane_target || options.pane || '').trim();
+  return [session, windowIndex ?? '', pane, kind].join(':');
+}
+
+function scheduleAgentWindowStoppedRefresh(key, untilMs) {
+  if (!key || !Number.isFinite(untilMs) || untilMs <= 0) return;
+  const previous = agentWindowStoppedTimers.get(key);
+  if (previous?.untilMs === untilMs) return;
+  if (previous?.timer) clearTimeout(previous.timer);
+  const delay = Math.max(0, untilMs - Date.now());
+  const timer = setTimeout(() => {
+    const current = agentWindowStoppedTimers.get(key);
+    if (!current || current.untilMs !== untilMs) return;
+    agentWindowStoppedTimers.delete(key);
+    if (typeof renderPanels === 'function' && typeof activePaneItems === 'function') {
+      renderPanels(activePaneItems());
+    }
+  }, delay);
+  agentWindowStoppedTimers.set(key, {timer, untilMs});
+}
+
+function clearAgentWindowStoppedRefresh(key) {
+  const previous = agentWindowStoppedTimers.get(key);
+  if (previous?.timer) clearTimeout(previous.timer);
+  agentWindowStoppedTimers.delete(key);
+}
+
+function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
+  const kind = agentWindowKind(agentKey);
+  if (!kind) return null;
+  const nowSeconds = Number.isFinite(Number(options.nowSeconds)) ? Number(options.nowSeconds) : Date.now() / 1000;
+  const transitionKey = agentWindowActivityTransitionKey(kind, options);
+  const previous = transitionKey ? (agentWindowActivityStates.get(transitionKey) || {}) : {};
+  if (String(state || '') === 'working') {
+    if (transitionKey) {
+      clearAgentWindowStoppedRefresh(transitionKey);
+      agentWindowActivityStates.set(transitionKey, {state: 'working', seenWorking: true, stoppedAt: 0});
+    }
+    return {state: 'working', icon: '●', label: `${agentLabel(kind)} ${t('state.working')}`};
+  }
+  const workingStoppedTs = Number(options.working_stopped_ts || options.workingStoppedTs || 0);
+  let stoppedAt = Number.isFinite(workingStoppedTs) && workingStoppedTs > 0 ? workingStoppedTs : 0;
+  const seenWorking = previous.seenWorking === true || stoppedAt > 0;
+  if (!stoppedAt && previous.state === 'working') stoppedAt = nowSeconds;
+  if (!stoppedAt && Number(previous.stoppedAt) > 0) stoppedAt = Number(previous.stoppedAt);
+  if (transitionKey) agentWindowActivityStates.set(transitionKey, {state: String(state || 'idle'), seenWorking, stoppedAt});
+  if (seenWorking && stoppedAt > 0) {
+    const stoppedAgeSeconds = Math.max(0, nowSeconds - stoppedAt);
+    if (stoppedAgeSeconds < FILE_TREE_RECENCY_JUST_UPDATED_MAX_AGE_SECONDS) {
+      if (options.scheduleRefresh !== false) scheduleAgentWindowStoppedRefresh(transitionKey, (stoppedAt + FILE_TREE_RECENCY_JUST_UPDATED_MAX_AGE_SECONDS) * 1000);
+      return {state: 'stopped', icon: '●', label: `${agentLabel(kind)} stopped`};
+    }
+    return {state: 'settled', icon: '●', label: `${agentLabel(kind)} ${t('state.idle')}`};
+  }
+  const idle = Number(idleSeconds);
+  if (Number.isFinite(idle) && idle >= 60) {
+    return {state: 'idle', icon: '○', label: `${agentLabel(kind)} ${t('state.idle')}`};
+  }
+  return null;
+}
+
+function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {}) {
+  const item = agentWindowActivityIcon(agentKey, state, idleSeconds, options);
+  if (!item) return '';
+  const tone = item.state === 'working' ? 'working' : item.state === 'stopped' ? 'attention' : item.state === 'settled' ? 'settled' : 'idle';
+  const classes = statusIndicatorDotClasses(
+    tone,
+    'agent-window-activity-icon',
+    `agent-window-activity-icon--${item.state}`,
+  );
+  const style = statusIndicatorToneStyle(tone);
+  return `<span class="${esc(classes)}" title="${esc(item.label)}" aria-label="${esc(item.label)}" role="img"${style}>${esc(item.icon)}</span>`;
+}
+
+function agentWindowActivityIconHtmlForStatus(agent, agentKey = agent?.kind, session = '') {
+  return agentWindowActivityIconHtml(agentKey, agent?.state, agentWindowIdleSeconds(agent), {
+    session,
+    window: agent?.window,
+    window_index: agent?.window_index,
+    pane: agent?.pane,
+    pane_target: agent?.pane_target,
+    working_stopped_ts: agent?.working_stopped_ts,
+  });
+}
+
+function tmuxWindowAgentStatus(session, record, info = null) {
+  const status = agentWindowStatusForRecord(session, record, info);
+  const statusKind = agentWindowKind(status?.kind);
+  const recordKind = agentWindowKind(tmuxWindowAgentKey(record?.name));
+  const agentKey = statusKind || recordKind;
+  return {status, agentKey};
+}
+
+function tmuxWindowCanonicalLabel(session, record, fallback = '', info = null) {
+  const {agentKey} = tmuxWindowAgentStatus(session, record, info);
+  return agentWindowCanonicalLabel(record?.indexText ?? record?.index, agentKey, fallback);
+}
+
 function buildTabberTree() {
   const entriesByDir = new Map();
   const topEntries = [];
@@ -13107,16 +13331,19 @@ function buildTabberTree() {
     const sessionWork = sessionWorkDescription(session, info, 200);
     const sessionNameLabel = sessionLabel(session) || session;
     const sessionDisplay = sessionWork ? `${sessionNameLabel}  ${sessionWork}` : sessionNameLabel;
+    const nowSeconds = Date.now() / 1000;
     const sessionEntry = {
       name: sessionName, kind: 'dir', mtime: 0, sortName: sessionDisplay,
       tabber: {type: 'session', session, label: sessionNameLabel, description: sessionWork, icon: '●', branchText: branch, active: session === activeSession},
     };
     topEntries.push(sessionEntry);
+    const activeIndexOverride = tmuxWindowDisplayActiveIndex(session);
+    const activeIndexOverlay = activeIndexOverride === tmuxWindowPendingActiveIndex ? null : activeIndexOverride;
     const windowEntries = tmuxWindowRecords(info.panes).map(record => {
       const windowName = `w_${tabberPathToken(record.index)}`;
       const windowPath = `${sessionPath}/${windowName}`;
-      const isAgent = tabberWindowIsAgent(record.name);
-      const agentKey = tmuxWindowAgentKey(record.name);
+      const {status: agentStatus, agentKey} = tmuxWindowAgentStatus(session, record, info);
+      const isAgent = Boolean(agentKey) || tabberWindowIsAgent(record.name);
       const agentActivity = isAgent ? tabberAgentForWindow(session, record.index, agentKey) : null;
       const repoEntries = isAgent ? tabberRepoEntriesForWindow(session, record.index, agentKey, branch, gitRoot) : [];
       const childMtime = repoEntries.reduce((max, entry) => Math.max(max, Number(entry.mtime || 0)), 0);
@@ -13126,11 +13353,15 @@ function buildTabberTree() {
       const windowMtime = isAgent
         ? tabberAgentRecency(agentActivity)
         : Math.max(ledgerMtime, childMtime, fallbackSessionRecency);
+      const active = activeIndexOverride === undefined ? record.active === true : (activeIndexOverlay !== null && String(record.index) === activeIndexOverlay);
+      const label = tmuxWindowCanonicalLabel(session, record, record.indexedNameLabel || `${record.indexText}:${record.nameLabel}`, info);
+      const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatus, agentKey, session);
+      const dateText = agentStatus ? sessionPopoverAgentStateText(agentStatus, nowSeconds) : tabberAgentDateText(agentActivity);
       if (repoEntries.length) entriesByDir.set(normalizeDirectoryPath(windowPath), repoEntries);
       return {
         name: windowName, kind: repoEntries.length ? 'dir' : 'file', mtime: windowMtime,
-        sortName: record.indexedNameLabel || record.nameLabel,
-        tabber: {type: 'window', session, windowIndex: record.index, label: record.indexedNameLabel || `${record.indexText}:${record.nameLabel}`, icon: '⌁', active: record.active === true, current: session === activeSession && record.active === true, agentKey, dateText: tabberAgentDateText(agentActivity)},
+        sortName: label,
+        tabber: {type: 'window', session, windowIndex: record.index, label, icon: '⌁', active, current: session === activeSession && active, agentKey, activityIconHtml, dateText},
       };
     });
     entriesByDir.set(normalizeDirectoryPath(sessionPath), windowEntries);
@@ -13194,8 +13425,8 @@ function tabberWindowLabelHtml(label, iconHtml, options = {}) {
   const pidMatch = text.match(/^(.*?)(\s+\(pid=\d+\))$/);
   const nameText = pidMatch ? pidMatch[1] : text;
   const pidText = pidMatch ? pidMatch[2] : '';
-  const activeMarker = options.active === true ? ' ●' : '';
-  return `<span class="tabber-window-label"><span class="tabber-window-text">${esc(nameText)}</span>${iconHtml}${pidText ? `<span class="tabber-window-pid">${esc(pidText)}</span>` : ''}${activeMarker ? `<span class="tabber-window-active">${esc(activeMarker)}</span>` : ''}</span>`;
+  const activityIconHtml = String(options.activityIconHtml || '');
+  return `<span class="tabber-window-label"><span class="tabber-window-text">${esc(nameText)}</span>${activityIconHtml}${iconHtml}${pidText ? `<span class="tabber-window-pid">${esc(pidText)}</span>` : ''}</span>`;
 }
 
 function tabberSessionLabelHtml(data, entry) {
@@ -13266,7 +13497,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   const nameHtml = data.type === 'session'
     ? tabberSessionLabelHtml(renderData, entry)
     : data.type === 'window' && windowAgentIconHtml
-      ? tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true})
+      ? tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true, activityIconHtml: data.activityIconHtml})
     : data.type === 'loading'
       ? `<span class="tabber-loading-label">${esc(data.label || 'Fetching')}</span>${movingEllipsisHtml('tabber-loading-dots')}`
     : '';
@@ -13332,6 +13563,10 @@ function activeTabberRowPath() {
   const session = currentSessionActionTarget();
   if (!session) return '';
   const info = transcriptMeta.sessions?.[session] || {};
+  const override = tmuxWindowDisplayActiveIndex(session);
+  if (override !== undefined) {
+    return override === tmuxWindowPendingActiveIndex ? tabberSessionPath(session) : tabberWindowPath(session, override);
+  }
   const activeWindow = tmuxWindowRecords(info.panes).find(record => record.active === true);
   return activeWindow ? tabberWindowPath(session, activeWindow.index) : tabberSessionPath(session);
 }
@@ -13370,20 +13605,26 @@ function handleTabberRowActivate(row, event) {
     refreshTabberPanels();
     return;
   }
-  const switchWindow = () => { if (session && windowIndex !== null) tmuxWindow(session, {windowIndex}, row.querySelector('.file-tree-name')?.textContent || session); };
+  const switchWindow = () => {
+    if (session && windowIndex !== null) {
+      tmuxWindow(session, {windowIndex}, row.querySelector('.file-tree-name')?.textContent || session);
+      return true;
+    }
+    return false;
+  };
   if (type === 'tab' && row.dataset.tabberItem) {
     if (row.dataset.tabberItem === infoItemId) openInfoSubTab('info');
     else selectSession(row.dataset.tabberItem, {userInitiated: true});
   } else if (type === 'session' && session) {
     openTabberSession(session);
   } else if (type === 'window' && session) {
-    selectSession(session, {userInitiated: true});
     switchWindow();
+    selectSession(session, {userInitiated: true});
   } else if (type === 'repo' && row.dataset.tabberRepoRoot) {
+    switchWindow();
     setFileExplorerMode('files');
     openFileExplorerManualRoot(row.dataset.tabberRepoRoot);
     if (session) selectSession(session, {userInitiated: true});
-    switchWindow();
   } else if (row.dataset.kind === 'dir' && fullPath) {
     toggleTabberCollapsed(fullPath);
     refreshTabberPanels();
@@ -18906,6 +19147,156 @@ function gitHeadValueHtml(git) {
   return esc(shortText(subjectWithoutPullRequestNumber(gitHeadSubject(git)), 120));
 }
 
+function sessionPopoverAgentStateRank(state) {
+  return {working: 0, approval: 1, 'needs-input': 2, idle: 3}[String(state || '')] ?? 9;
+}
+
+function sessionPopoverAgentStateText(agent, nowSeconds = Date.now() / 1000) {
+  const state = String(agent?.state || 'idle');
+  if (state === 'working') {
+    const elapsed = Number(agent?.working_elapsed_seconds);
+    return Number.isFinite(elapsed) && elapsed >= 0 ? `working for ${compactElapsedDurationText(elapsed)}` : 'working';
+  }
+  if (state === 'approval') return 'ASK? approval';
+  if (state === 'needs-input') return 'ASK? needs input';
+  const lastActive = Number(agent?.idle_since || agent?.last_active_ts || 0);
+  const ageSeconds = Number.isFinite(lastActive) && lastActive > 0 ? Math.max(0, nowSeconds - lastActive) : null;
+  if (ageSeconds !== null && ageSeconds < 60) return '<1 min active';
+  const duration = ageSeconds !== null ? compactElapsedDurationText(ageSeconds) : '';
+  return duration ? `idle ${duration}` : 'idle';
+}
+
+function tmuxSessionDescriptorLabel(label) {
+  const text = String(label || '').trim();
+  if (/^tmux\s+session\b/i.test(text)) return text;
+  return t('popover.tmuxSession', {label: text});
+}
+
+function tmuxWindowDescriptorLabel(label) {
+  const text = String(label || '').trim();
+  if (/^tmux\s+window\b/i.test(text)) return text;
+  return t('popover.tmuxWindow', {label: text});
+}
+
+function sessionPopoverSortedAgentWindows(session, info, autoPayload) {
+  return sessionAgentWindowStatusPayloads(session, info, autoPayload)
+    .map((agent, index) => ({...agent, _index: index, kind: String(agent?.kind || '').toLowerCase(), state: String(agent?.state || 'idle')}))
+    .filter(agent => ['claude', 'codex'].includes(agent.kind))
+    .sort((left, right) => sessionPopoverAgentStateRank(left.state) - sessionPopoverAgentStateRank(right.state)
+      || Number(left.window_index ?? 9999) - Number(right.window_index ?? 9999)
+      || left._index - right._index);
+}
+
+function sessionPopoverAgentWindowHtml(session, info, autoPayload, agentRows = null) {
+  const agents = Array.isArray(agentRows) ? agentRows : sessionPopoverSortedAgentWindows(session, info, autoPayload);
+  if (!agents.length) {
+    return `<div class="session-agent-list empty"><div class="session-agent-empty">no AI agents in this tab</div></div>`;
+  }
+  const nowSeconds = Date.now() / 1000;
+  const rows = agents.map(agent => {
+    const working = agent.state === 'working';
+    const attention = agent.state === 'approval' || agent.state === 'needs-input';
+    const dot = working ? '●' : '○';
+    const label = tmuxWindowDescriptorLabel(agentWindowCanonicalLabel(agent.window_index ?? agent.window, agent.kind, agent.window_label || agent.kind));
+    const classes = ['session-agent-row', `state-${agent.state}`];
+    if (working) classes.push('working');
+    if (attention) classes.push('attention');
+    const dotTone = working ? 'working' : attention ? 'attention' : 'idle';
+    const dotClasses = statusIndicatorDotClasses(
+      dotTone,
+      'session-agent-dot',
+    );
+    const dotStyle = statusIndicatorToneStyle(dotTone);
+    return `<div class="${esc(classes.join(' '))}">
+      <span class="${esc(dotClasses)}" aria-hidden="true"${dotStyle}>${esc(dot)}</span>
+      <span class="session-agent-kind">${esc(label)}</span>
+      <span class="session-agent-sep">—</span>
+      <span class="session-agent-status">${esc(sessionPopoverAgentStateText(agent, nowSeconds))}</span>
+    </div>`;
+  }).join('');
+  return `<div class="session-agent-list">${rows}</div>`;
+}
+
+function sessionWindowMetadataRows(info) {
+  const payloadRows = Array.isArray(info?.window_metadata) ? info.window_metadata : [];
+  if (payloadRows.length) {
+    return payloadRows.map(row => ({
+      window: String(row?.window ?? ''),
+      window_index: Number.isFinite(Number(row?.window_index)) ? Number(row.window_index) : null,
+      window_name: String(row?.window_name || ''),
+      path: String(row?.path || ''),
+      git: row?.git && typeof row.git === 'object' ? row.git : null,
+    }));
+  }
+  const rows = [];
+  const seen = new Set();
+  for (const pane of info?.panes || []) {
+    const window = String(pane?.window ?? '');
+    if (!window || seen.has(window)) continue;
+    seen.add(window);
+    rows.push({
+      window,
+      window_index: Number.isFinite(Number(window)) ? Number(window) : null,
+      window_name: String(pane?.window_name || ''),
+      path: String(pane?.current_path || ''),
+      git: null,
+    });
+  }
+  return rows;
+}
+
+function sessionWindowMetadataForAgent(agent, windowRows) {
+  const agentIndex = tmuxWindowIndexKey(agent?.window_index ?? agent?.window);
+  return windowRows.find(row => tmuxWindowIndexKey(row.window_index ?? row.window) === agentIndex) || null;
+}
+
+function sessionWindowMetadataSignature(row) {
+  const git = row?.git || {};
+  return [row?.path || '', git.root || '', git.branch || '', git.worktree?.path || ''].join('\u0000');
+}
+
+function windowMetadataBranchHtml(git) {
+  if (!git?.branch) return '';
+  return `${branchLinkHtml(git, git.branch)}${git.upstream ? `<span class="meta-muted"> -> ${esc(git.upstream)}</span>` : ''}`;
+}
+
+function windowMetadataRowsHtml(row) {
+  if (!row) return '';
+  const git = row.git || {};
+  const rows = [];
+  if (row.path) rows.push(popoverRow(t('popover.path'), filePopoverPathHtml(row.path)));
+  if (git.branch) rows.push(popoverRow(t('popover.branch'), windowMetadataBranchHtml(git)));
+  if (git.root && git.root !== row.path) rows.push(popoverRow(t('popover.repo'), git.root));
+  if (git.worktree) rows.push(popoverRow(t('popover.worktree'), `${esc(git.worktree.name || git.worktree.path)} — worktree of ${esc(git.worktree.parent_root)}`));
+  if (git.head) rows.push(popoverRow('HEAD', gitHeadValueHtml(git)));
+  if (gitStatusHasFacts(git)) rows.push(popoverRow(t('popover.git'), gitStatusText(git)));
+  return rows.join('');
+}
+
+function sessionPopoverWindowMetadataHtml(session, info, agentRows) {
+  const agents = Array.isArray(agentRows) ? agentRows : [];
+  if (!agents.length) return '';
+  const windowRows = sessionWindowMetadataRows(info);
+  const mapped = agents.map(agent => ({agent, meta: sessionWindowMetadataForAgent(agent, windowRows)})).filter(item => item.meta);
+  if (!mapped.length) return '';
+  const signatures = new Set(mapped.map(item => sessionWindowMetadataSignature(item.meta)));
+  if (signatures.size === 1) {
+    const labels = mapped.map(item => agentWindowCanonicalLabel(item.agent.window_index ?? item.agent.window, item.agent.kind, item.agent.window_label || item.agent.kind)).join(', ');
+    return `<div class="session-window-metadata-list shared">
+      <div class="session-window-metadata-title">${esc(`AI windows ${labels} share this path`)}</div>
+      ${windowMetadataRowsHtml(mapped[0].meta)}
+    </div>`;
+  }
+  const blocks = mapped.map(({agent, meta}) => {
+    const label = tmuxWindowDescriptorLabel(agentWindowCanonicalLabel(agent.window_index ?? agent.window, agent.kind, agent.window_label || agent.kind));
+    return `<div class="session-window-metadata">
+      <div class="session-window-metadata-title">${esc(label)}</div>
+      ${windowMetadataRowsHtml(meta)}
+    </div>`;
+  }).join('');
+  return blocks ? `<div class="session-window-metadata-list">${blocks}</div>` : '';
+}
+
 function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessionState(session, info)) {
   const project = info?.project || {};
   const git = project.git;
@@ -18913,7 +19304,7 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const linear = project.linear || [];
   const pane = info?.selected_pane;
   const description = sessionWorkDescription(session, info, 220);
-  const title = `${sessionLabel(session)} · ${projectDirName(session, info)}`;
+  const title = `${tmuxSessionDescriptorLabel(sessionLabel(session))} · ${projectDirName(session, info)}`;
   const subtitle = description || git?.branch || pane?.current_path || t('git.noCheckout');
   const subtitleHtml = sessionPopoverSubtitleHtml(session, info, subtitle);
   const rows = [];
@@ -18923,11 +19314,17 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const autoText = autoEnabled ? t('yolo.on') : (autoElsewhere ? t('yolo.elsewhere') : '');
   const agentValue = agentKind ? `${agentName(agentKind)}${autoText ? ` · ${autoText}` : ''}` : (autoText || t('agent.notDetected'));
   const displayPath = panelFullPath(session, info) || pane?.current_path || t('common.notAvailable');
-  rows.push(popoverPairRow(t('popover.state'), stateValue, t('popover.agent'), agentValue));
+  const agentRows = sessionPopoverSortedAgentWindows(session, info, autoPayload);
+  const agentWindowsHtml = sessionPopoverAgentWindowHtml(session, info, autoPayload, agentRows);
+  const windowMetadataHtml = sessionPopoverWindowMetadataHtml(session, info, agentRows);
+  const perWindowMetadata = Boolean(windowMetadataHtml);
+  if (!perWindowMetadata) rows.push(popoverPairRow(t('popover.state'), stateValue, t('popover.agent'), agentValue));
   const activityText = popoverActivityText(session, git);
   if (activityText) rows.push(popoverRow(yoagentTabLabel(), esc(activityText)));
-  rows.push(popoverRow(t('popover.path'), displayPath));
-  if (git?.branch) rows.push(popoverRow(t('popover.branch'), sessionBranchValueHtml(session, info)));
+  if (!perWindowMetadata) {
+    rows.push(popoverRow(t('popover.path'), displayPath));
+    if (git?.branch) rows.push(popoverRow(t('popover.branch'), sessionBranchValueHtml(session, info)));
+  }
   let linearValue = '';
   let linearDesc = '';
   if (linear.length) {
@@ -18941,11 +19338,11 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   }
   const subject = currentBranchSubject(git);
   if (subject && !pr?.number) rows.push(popoverRow(t('popover.desc'), `<div class="popover-desc">${esc(subject)}</div>`));
-  if (git?.root && git.root !== displayPath) rows.push(popoverRow(t('popover.repo'), git.root));
+  if (!perWindowMetadata && git?.root && git.root !== displayPath) rows.push(popoverRow(t('popover.repo'), git.root));
   // S7: name a linked worktree vs its parent repo so the focused path isn't mistaken for the main checkout.
-  if (git?.worktree) rows.push(popoverRow(t('popover.worktree'), `${esc(git.worktree.name || git.worktree.path)} — worktree of ${esc(git.worktree.parent_root)}`));
-  if (git?.head) rows.push(popoverRow('HEAD', gitHeadValueHtml(git)));
-  if (gitStatusHasFacts(git)) rows.push(popoverRow(t('popover.git'), gitStatusText(git)));
+  if (!perWindowMetadata && git?.worktree) rows.push(popoverRow(t('popover.worktree'), `${esc(git.worktree.name || git.worktree.path)} — worktree of ${esc(git.worktree.parent_root)}`));
+  if (!perWindowMetadata && git?.head) rows.push(popoverRow('HEAD', gitHeadValueHtml(git)));
+  if (!perWindowMetadata && gitStatusHasFacts(git)) rows.push(popoverRow(t('popover.git'), gitStatusText(git)));
   return `<div class="session-popover" role="tooltip">
     <div class="popover-head">
       <div>
@@ -18953,6 +19350,8 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
         ${subtitleHtml}
       </div>
     </div>
+    ${agentWindowsHtml}
+    ${windowMetadataHtml}
     ${rows.join('')}
     ${otherBranchesHtml(session, info)}
   </div>`;
@@ -19214,7 +19613,7 @@ function terminalCurrentPath(session) {
   const signalPath = tmuxSignalPanePathForSession(session);
   if (signalPath) return signalPath;
   const info = transcriptMeta.sessions?.[session];
-  return terminalDisplayPane(info)?.current_path || info?.selected_pane?.current_path || '';
+  return terminalDisplayPane(info, session)?.current_path || info?.selected_pane?.current_path || '';
 }
 
 function pathRelativeToDirectory(path, directory) {
@@ -20580,9 +20979,9 @@ function pullRequestChecksHtml(pr) {
   return metaJoin(parts);
 }
 
-function activeWindowPaneForProjectMeta(info) {
+function activeWindowPaneForProjectMeta(session, info) {
   const panes = Array.isArray(info?.panes) ? info.panes : [];
-  return panes.length ? terminalDisplayPane(info) : null;
+  return panes.length ? terminalDisplayPane(info, session) : null;
 }
 
 function repoSummaryAsGit(repo) {
@@ -20604,7 +21003,7 @@ function projectMetaSelection(session, info) {
   const project = info?.project || {};
   const repos = sessionRepoSummaries(info);
   const explicitRoot = repoRootKey(sessionRepoDisplayRoot.get(session));
-  const activePane = activeWindowPaneForProjectMeta(info);
+  const activePane = activeWindowPaneForProjectMeta(session, info);
   const activePath = normalizeDirectoryPath(activePane?.current_path || '');
   const activeAgent = activePane ? agentForPane(info, activePane) : null;
   const activeAgentKind = String(activeAgent?.kind || activePane?.process_label || activePane?.command || '').toLowerCase();
@@ -20631,7 +21030,7 @@ function projectMetaSelection(session, info) {
 function panelFullPath(session, info) {
   const project = info?.project || {};
   const git = project.git;
-  const activePane = activeWindowPaneForProjectMeta(info);
+  const activePane = activeWindowPaneForProjectMeta(session, info);
   if (activePane?.current_path) return activePane.current_path;
   const panes = Array.isArray(info?.panes) ? info.panes : [];
   const nonHomePane = panes.find(pane => pane?.current_path && pane.current_path !== homePath && !['claude', 'codex'].includes(String(pane.command || '').toLowerCase()));
@@ -25135,7 +25534,7 @@ function terminalTabDisplayLabel(session, info) {
 }
 
 function terminalTabDetailLabel(session, info) {
-  const label = terminalProcessLabel(info);
+  const label = terminalProcessLabel(session, info);
   return label || 'Term';
 }
 
@@ -25151,8 +25550,8 @@ function terminalTabTitle(session, info) {
   return `terminal: ${terminalTabDetailLabel(session, info)}`;
 }
 
-function terminalProcessLabel(info) {
-  const pane = terminalDisplayPane(info);
+function terminalProcessLabel(session, info) {
+  const pane = terminalDisplayPane(info, session);
   if (pane?.process_label) return pane.process_label;
   const agent = agentForPane(info, pane) || info?.agents?.[0];
   if (agent?.command) return processLabelFromCommand(agent.command);
@@ -25161,8 +25560,22 @@ function terminalProcessLabel(info) {
   return 'Term';
 }
 
-function terminalDisplayPane(info) {
+function terminalDisplayPaneForWindowIndex(info, windowIndex) {
   const panes = Array.isArray(info?.panes) ? info.panes : [];
+  const indexKey = tmuxWindowIndexKey(windowIndex);
+  if (!panes.length || indexKey === null) return null;
+  return panes.find(pane => tmuxWindowIndexKey(pane.window ?? pane.window_index) === indexKey && pane.active)
+    || panes.find(pane => tmuxWindowIndexKey(pane.window ?? pane.window_index) === indexKey)
+    || null;
+}
+
+function terminalDisplayPane(info, session = '') {
+  const panes = Array.isArray(info?.panes) ? info.panes : [];
+  const override = session ? tmuxWindowDisplayActiveIndex(session) : undefined;
+  if (override !== undefined && override !== tmuxWindowPendingActiveIndex) {
+    const overridePane = terminalDisplayPaneForWindowIndex(info, override);
+    if (overridePane) return overridePane;
+  }
   return panes.find(pane => pane.window_active && pane.active)
     || panes.find(pane => pane.window_active)
     || info?.selected_pane
@@ -25173,6 +25586,279 @@ function terminalDisplayPane(info) {
 function tmuxWindowNumber(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
+}
+
+const tmuxWindowActiveIndexOverrides = new Map();
+const tmuxWindowSwitchSequences = new Map();
+const tmuxWindowDirectTargetGuards = new Map();
+const tmuxWindowPendingActiveIndex = '__pending__';
+const tmuxWindowConfirmedOverrideHoldMs = 4000;
+const tmuxWindowDirectTargetGuardMs = 17000;
+
+function tmuxWindowIndexKey(value) {
+  const index = tmuxWindowNumber(value);
+  return index === null ? null : String(index);
+}
+
+function tmuxWindowActiveIndexOverride(session) {
+  return tmuxWindowActiveIndexOverrides.get(String(session || ''));
+}
+
+function tmuxWindowDisplayActiveIndex(session) {
+  const override = tmuxWindowActiveIndexOverride(session);
+  if (override !== undefined) return override;
+  return tmuxWindowDirectTargetGuard(session)?.index;
+}
+
+function tmuxWindowDirectTargetGuard(session) {
+  const key = String(session || '');
+  const guard = tmuxWindowDirectTargetGuards.get(key);
+  if (!guard) return null;
+  if (Number(guard.guardUntilMs || 0) > Date.now()) return guard;
+  tmuxWindowDirectTargetGuards.delete(key);
+  return null;
+}
+
+function tmuxWindowDirectTargetGuardEntries() {
+  const entries = [];
+  for (const [session, guard] of tmuxWindowDirectTargetGuards.entries()) {
+    const active = tmuxWindowDirectTargetGuard(session);
+    if (active) entries.push([session, active]);
+    else if (guard) tmuxWindowDirectTargetGuards.delete(session);
+  }
+  return entries;
+}
+
+function setTmuxWindowDirectTargetGuard(session, windowIndex, sequence) {
+  const key = String(session || '');
+  const indexKey = tmuxWindowIndexKey(windowIndex);
+  if (!key || indexKey === null) return false;
+  const now = Date.now();
+  tmuxWindowDirectTargetGuards.set(key, {
+    index: indexKey,
+    sequence: Number(sequence) || 0,
+    startedAtMs: now,
+    confirmedAtMs: 0,
+    guardUntilMs: now + tmuxWindowDirectTargetGuardMs,
+  });
+  return true;
+}
+
+function confirmTmuxWindowDirectTargetGuard(session, windowIndex, options = {}) {
+  const key = String(session || '');
+  const indexKey = tmuxWindowIndexKey(windowIndex);
+  if (!key || indexKey === null) return false;
+  const guard = tmuxWindowDirectTargetGuard(key);
+  if (!guard || guard.index !== indexKey) return false;
+  const sequence = tmuxWindowSwitchOptionSequence(options);
+  if (sequence > 0 && Number(guard.sequence || 0) > 0 && Number(guard.sequence) !== sequence) return false;
+  const now = Date.now();
+  tmuxWindowDirectTargetGuards.set(key, {
+    ...guard,
+    confirmedAtMs: now,
+    guardUntilMs: now + tmuxWindowDirectTargetGuardMs,
+  });
+  return true;
+}
+
+function clearTmuxWindowDirectTargetGuard(session, options = {}) {
+  const key = String(session || '');
+  if (!key) return false;
+  const sequence = tmuxWindowSwitchOptionSequence(options);
+  const guard = tmuxWindowDirectTargetGuard(key);
+  if (sequence > 0 && guard && Number(guard.sequence || 0) > 0 && Number(guard.sequence) !== sequence) return false;
+  return tmuxWindowDirectTargetGuards.delete(key);
+}
+
+function tmuxWindowSwitchSequence(session) {
+  return Number(tmuxWindowSwitchSequences.get(String(session || '')) || 0);
+}
+
+function tmuxWindowSwitchOptionSequence(options = {}) {
+  const sequence = Number(options.sequence);
+  return Number.isFinite(sequence) && sequence > 0 ? sequence : 0;
+}
+
+function tmuxWindowSwitchSequenceMatches(session, sequence) {
+  const value = Number(sequence);
+  return !Number.isFinite(value) || value <= 0 || tmuxWindowSwitchSequence(session) === value;
+}
+
+function nextTmuxWindowSwitchSequence(session) {
+  const key = String(session || '');
+  if (!key) return 0;
+  const next = tmuxWindowSwitchSequence(key) + 1;
+  tmuxWindowSwitchSequences.set(key, next);
+  return next;
+}
+
+function tmuxWindowOverrideSequence(session, options = {}) {
+  const key = String(session || '');
+  if (!key) return 0;
+  const explicit = tmuxWindowSwitchOptionSequence(options);
+  if (explicit > 0) {
+    tmuxWindowSwitchSequences.set(key, explicit);
+    return explicit;
+  }
+  if (options.bumpSequence === false) return tmuxWindowSwitchSequence(key);
+  return nextTmuxWindowSwitchSequence(key);
+}
+
+function updateTmuxWindowBarActiveButtons(session, windowIndex) {
+  const indexKey = windowIndex === null ? null : tmuxWindowIndexKey(windowIndex);
+  if (indexKey === null && windowIndex !== null) return false;
+  let matched = false;
+  document.body?.querySelectorAll?.(`[data-tmux-window-bar="${cssEscape(session)}"]`)?.forEach(bar => {
+    bar.querySelectorAll?.('[data-window-index]')?.forEach(button => {
+      const active = indexKey !== null && tmuxWindowIndexKey(button.dataset.windowIndex) === indexKey;
+      matched = matched || active;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+  });
+  return matched;
+}
+
+function refreshTabberPanelsForTmuxWindowChange() {
+  if (fileExplorerMode === 'tabber' && typeof refreshTabberPanels === 'function') refreshTabberPanels();
+}
+
+function tmuxWindowInfoWithActiveIndex(info, windowIndex) {
+  const activeIndex = tmuxWindowIndexKey(windowIndex);
+  const panes = Array.isArray(info?.panes) ? info.panes : [];
+  if (!info || activeIndex === null || !panes.length) return null;
+  let selectedPane = null;
+  let matched = false;
+  const nextPanes = panes.map(pane => {
+    const active = tmuxWindowIndexKey(pane.window ?? pane.window_index) === activeIndex;
+    if (active) {
+      matched = true;
+      if (!selectedPane || pane.active === true) selectedPane = {...pane, window_active: true};
+    }
+    return {...pane, window_active: active};
+  });
+  if (!matched) return null;
+  return {...info, selected_pane: selectedPane || info.selected_pane || nextPanes.find(pane => pane.window_active) || null, panes: nextPanes};
+}
+
+function applyTmuxWindowActiveIndexToTranscriptInfo(session, windowIndex, options = {}) {
+  const info = transcriptMeta.sessions?.[session];
+  const nextInfo = tmuxWindowInfoWithActiveIndex(info, windowIndex);
+  if (!nextInfo) return false;
+  transcriptMeta = {
+    ...transcriptMeta,
+    sessions: {...(transcriptMeta.sessions || {}), [session]: nextInfo},
+  };
+  if (options.render === true) {
+    updatePanelHeader(session, nextInfo);
+    renderInfoPanel();
+  }
+  return true;
+}
+
+function transcriptPayloadWithTmuxWindowOverrides(payload) {
+  if (!payload || typeof payload !== 'object' || !(payload.sessions && typeof payload.sessions === 'object')) return payload;
+  let nextSessions = null;
+  for (const session of Object.keys(payload.sessions)) {
+    const override = tmuxWindowDisplayActiveIndex(session);
+    const activeIndex = override === tmuxWindowPendingActiveIndex
+      ? null
+      : override !== undefined
+        ? override
+        : tmuxWindowActiveIndexFromSignals(session);
+    if (activeIndex === null) continue;
+    const nextInfo = tmuxWindowInfoWithActiveIndex(payload.sessions[session], activeIndex);
+    if (!nextInfo) continue;
+    if (!nextSessions) nextSessions = {...payload.sessions};
+    nextSessions[session] = nextInfo;
+  }
+  return nextSessions ? {...payload, sessions: nextSessions} : payload;
+}
+
+function tmuxWindowActiveIndexFromSignals(session) {
+  if (typeof tmuxSignalWindowsForSession !== 'function') return null;
+  const activeWindow = tmuxSignalWindowsForSession(session).find(windowRecord => windowRecord?.active === true);
+  return tmuxWindowIndexKey(activeWindow?.window_index);
+}
+
+function setTmuxWindowActiveIndexOverride(session, windowIndex, options = {}) {
+  const indexKey = tmuxWindowIndexKey(windowIndex);
+  if (!session || indexKey === null) return false;
+  const sequence = tmuxWindowOverrideSequence(session, options);
+  tmuxWindowActiveIndexOverrides.set(String(session), indexKey);
+  setTmuxWindowDirectTargetGuard(session, indexKey, sequence);
+  applyTmuxWindowActiveIndexToTranscriptInfo(String(session), indexKey, {render: true});
+  updateTmuxWindowBarActiveButtons(session, indexKey);
+  refreshTabberPanelsForTmuxWindowChange();
+  return sequence || true;
+}
+
+function setTmuxWindowActiveIndexPending(session, options = {}) {
+  if (!session) return false;
+  const sequence = tmuxWindowOverrideSequence(session, options);
+  tmuxWindowActiveIndexOverrides.set(String(session), tmuxWindowPendingActiveIndex);
+  clearTmuxWindowDirectTargetGuard(session);
+  updateTmuxWindowBarActiveButtons(session, null);
+  refreshTabberPanelsForTmuxWindowChange();
+  return sequence || true;
+}
+
+function clearTmuxWindowActiveIndexOverride(session, options = {}) {
+  if (!session) return false;
+  const sequence = tmuxWindowSwitchOptionSequence(options);
+  if (sequence > 0 && !tmuxWindowSwitchSequenceMatches(session, sequence)) return false;
+  const deleted = tmuxWindowActiveIndexOverrides.delete(String(session));
+  if (options.clearDirectTarget === true) clearTmuxWindowDirectTargetGuard(session, {sequence});
+  if (deleted) refreshTabberPanelsForTmuxWindowChange();
+  return deleted;
+}
+
+function confirmTmuxWindowActiveIndexOverride(session, windowIndex, options = {}) {
+  const indexKey = tmuxWindowIndexKey(windowIndex);
+  if (!session || indexKey === null) return false;
+  const sequence = tmuxWindowSwitchOptionSequence(options);
+  if (sequence > 0 && !tmuxWindowSwitchSequenceMatches(session, sequence)) return false;
+  tmuxWindowActiveIndexOverrides.set(String(session), indexKey);
+  confirmTmuxWindowDirectTargetGuard(session, indexKey, {sequence});
+  updateTmuxWindowBarActiveButtons(session, indexKey);
+  refreshTabberPanelsForTmuxWindowChange();
+  setTimeout(() => {
+    if (sequence > 0 && !tmuxWindowSwitchSequenceMatches(session, sequence)) return;
+    if (tmuxWindowActiveIndexOverride(session) !== indexKey) return;
+    if (tmuxWindowInfoActiveIndex(transcriptMeta.sessions?.[session]) === indexKey) {
+      clearTmuxWindowActiveIndexOverride(session, {sequence});
+    }
+  }, tmuxWindowConfirmedOverrideHoldMs);
+  return true;
+}
+
+function tmuxWindowInfoActiveIndex(info) {
+  const active = tmuxWindowRecords(Array.isArray(info) ? info : info?.panes).find(record => record.active === true);
+  return active ? String(active.index) : null;
+}
+
+function reconcileTmuxWindowActiveIndexOverride(session, info, options = {}) {
+  const sequence = tmuxWindowSwitchOptionSequence(options);
+  if (sequence > 0 && !tmuxWindowSwitchSequenceMatches(session, sequence)) return false;
+  const override = tmuxWindowActiveIndexOverride(session);
+  if (override === undefined) return false;
+  const activeIndex = tmuxWindowInfoActiveIndex(info);
+  if (override === tmuxWindowPendingActiveIndex) {
+    if (activeIndex !== null) {
+      confirmTmuxWindowActiveIndexOverride(session, activeIndex, {sequence});
+      return true;
+    }
+    updateTmuxWindowBarActiveButtons(session, null);
+    return false;
+  }
+  const expected = tmuxWindowIndexKey(options.expectedIndex);
+  const target = expected === null ? override : expected;
+  if (activeIndex === target) {
+    confirmTmuxWindowActiveIndexOverride(session, activeIndex, {sequence});
+    return true;
+  }
+  updateTmuxWindowBarActiveButtons(session, override);
+  return false;
 }
 
 function tmuxWindowIndices(panes) {
@@ -25251,8 +25937,6 @@ function tmuxWindowBarLabelMode(records, options = {}) {
   return items.length > fallbackCount || namedChars > charLimit ? 'numbers' : 'names';
 }
 
-// Classify a tmux window by the program it runs so the window-switcher buttons can be tinted per agent
-// (claude/codex/shell/editor/repl/git/other). Drives the per-agent color via [data-window-agent] in CSS.
 function tmuxWindowAgentKey(name) {
   const base = String(name || '').trim().toLowerCase().replace(/\(\d+\)$/, '').split(/[\s:/]/)[0];
   if (base === 'claude' || base === 'codex') return base;
@@ -25268,17 +25952,23 @@ function tmuxWindowBarHtml(session, info, options = {}) {
   const records = tmuxWindowRecords(panes);
   if (!records.length) return '';
   const disabled = options.disabled === true || readOnlyMode;
+  const activeIndexOverride = tmuxWindowDisplayActiveIndex(session);
   const labelMode = tmuxWindowBarLabelMode(records, options);
   const disabledTitle = readOnlyMode ? t('terminal.window.adminRequired') : t('tab.unavailableFor', {name: itemLabel(session)});
   const buttons = records.map(record => {
-    const pressed = record.active ? 'true' : 'false';
-    const activeClass = record.active ? ' active' : '';
-    const visibleName = record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.nameLabel}`;
+    const active = activeIndexOverride === undefined ? record.active : String(record.index) === activeIndexOverride;
+    const pressed = active ? 'true' : 'false';
+    const activeClass = active ? ' active' : '';
+    const infoPayload = Array.isArray(info) ? {panes: info} : info;
+    const fallbackName = record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.nameLabel}`;
+    const visibleName = tmuxWindowCanonicalLabel(session, record, fallbackName, infoPayload);
+    const {status: agentStatus, agentKey} = tmuxWindowAgentStatus(session, record, infoPayload);
+    const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatus, agentKey, session);
     const title = t('terminal.window.title', {name: visibleName});
     const attrs = disabled
       ? `disabled title="${esc(disabledTitle)}" aria-label="${esc(title)}"`
       : `data-window-index="${esc(record.indexText)}" data-window-session="${esc(session)}" data-window-label="${esc(visibleName)}" title="${esc(title)}" aria-label="${esc(title)}" aria-pressed="${pressed}"`;
-    return `<button type="button" class="tab tmux-window-button${activeClass}" data-window-agent="${esc(tmuxWindowAgentKey(record.name))}" ${attrs}><span class="tmux-window-name-label">${esc(visibleName)}</span><span class="tmux-window-number-label">${esc(record.numberLabel)}</span></button>`;
+    return `<button type="button" class="tab tmux-window-button${activeClass}" ${attrs}><span class="tmux-window-name-label"><span class="tmux-window-name-text">${esc(visibleName)}</span>${activityIconHtml}</span><span class="tmux-window-number-label">${esc(record.numberLabel)}</span></button>`;
   }).join('');
   return `<div class="tmux-window-bar" data-tmux-window-bar="${esc(session)}" data-tmux-window-label-mode="${esc(labelMode)}" role="group" aria-label="${esc(t('terminal.window.groupAria'))}">${buttons}</div>`;
 }
@@ -25761,7 +26451,7 @@ function createInfoPanel() {
     const yoagentSetting = event.target.closest('[data-yoagent-setting-path]');
     if (!yoagentSetting || !panel.contains(yoagentSetting) || readOnlyMode) return;
     const path = yoagentSetting.dataset.yoagentSettingPath || '';
-    saveSettingsPatch(settingPatch(path, yoagentSetting.value))
+    saveSettingsPatch(settingPatchForPath(path, yoagentSetting.value))
       .then(() => { statusEl.textContent = t('yoagent.statusBackend', {backend: yoagentBackendLabel(yoagentComposerBackendKey())}); renderYoagentPanel(); })
       .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
   });
@@ -25986,9 +26676,22 @@ function yoagentTimestampText(value) {
   }
 }
 
-function yoagentMessageTimestampHtml(value) {
+function yoagentMessageResponseMs(message) {
+  const value = Number(message?.responseMs ?? message?.response_ms ?? 0);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function yoagentMessageLatencyHtml(message) {
+  const responseMs = yoagentMessageResponseMs(message);
+  if (!responseMs) return '';
+  const seconds = responseMs / 1000;
+  return `<span class="yoagent-message-latency">${esc(t('yoagent.responseLatency', {seconds: seconds.toFixed(1)}))}</span>`;
+}
+
+function yoagentMessageTimestampHtml(value, message = null) {
   const text = yoagentTimestampText(value);
-  return text ? `<span class="yoagent-message-time">${esc(text)}</span>` : '';
+  const latency = message ? yoagentMessageLatencyHtml(message) : '';
+  return text ? `<span class="yoagent-message-time">${esc(text)}</span>${latency}` : latency;
 }
 
 function yoagentMessageDetailsKey(message, index) {
@@ -26012,23 +26715,127 @@ function yoagentAuxiliaryLineIsTool(line) {
   return /^(tool start|tool output|tool done|approval requested):?/i.test(String(line || '').trim());
 }
 
+function yoagentAuxiliaryLineIsDiagnostic(line) {
+  return /^(?:thinking done|usage:|[-*]\s*(?:backend|response time|model CLI time|Codex transport|Codex timing|prompt size|model session|fallback reason|stream phase|raw model thinking|activity context changed|auxiliary stream truncated)\b)/i.test(String(line || '').trim());
+}
+
+function yoagentAuxiliaryLineIsThinking(line) {
+  return /^(?:thinking|thinking summary|redacted thinking):?/i.test(String(line || '').trim());
+}
+
+const YOAGENT_THINKING_PREVIEW_WORDS = 50;
+
+function yoagentAuxiliaryPreviewThinkingLines(text) {
+  const result = [];
+  let currentKind = '';
+  for (const rawLine of String(text || '').split(/\r?\n/)) {
+    const line = String(rawLine || '').trim();
+    if (!line) continue;
+    if (yoagentAuxiliaryLineIsTool(line)) {
+      currentKind = 'tool';
+      continue;
+    }
+    if (yoagentAuxiliaryLineIsDiagnostic(line)) {
+      currentKind = 'diagnostic';
+      continue;
+    }
+    if (yoagentAuxiliaryLineIsThinking(line)) {
+      currentKind = 'thinking';
+      result.push(line);
+      continue;
+    }
+    if (currentKind === 'tool' || currentKind === 'diagnostic') continue;
+    result.push(line);
+  }
+  return result;
+}
+
 function yoagentLastLines(lines, count = 1) {
   return (Array.isArray(lines) ? lines : []).slice(-Math.max(1, count)).join('\n');
+}
+
+function yoagentThinkingPreviewText(text) {
+  const normalized = String(text || '').replace(/\\n/g, '\n').replace(/\s+/g, ' ').trim();
+  if (!normalized) return '';
+  const words = normalized.split(/\s+/).filter(Boolean);
+  if (words.length <= YOAGENT_THINKING_PREVIEW_WORDS) return normalized;
+  return `… ${words.slice(-YOAGENT_THINKING_PREVIEW_WORDS).join(' ')}`;
+}
+
+function yoagentToolLineHtml(line) {
+  const text = String(line || '').replace(/\\n/g, '\n');
+  const commandMatch = text.match(/^((?:tool start:\s*(?:command|bash|shell)|approval requested):\s*)(.*)$/i);
+  if (commandMatch) {
+    return `${esc(commandMatch[1])}<span class="yoagent-tc-command">${esc(commandMatch[2])}</span>`;
+  }
+  const shellMatch = text.match(/^(\$\s+)(.*)$/);
+  if (shellMatch) {
+    return `${esc(shellMatch[1])}<span class="yoagent-tc-command">${esc(shellMatch[2])}</span>`;
+  }
+  return esc(text);
+}
+
+function yoagentToolLinesHtml(lines) {
+  return (Array.isArray(lines) ? lines : []).map(yoagentToolLineHtml).join('\n');
+}
+
+function yoagentStreamItems(message) {
+  return (Array.isArray(message?.streamItems) ? message.streamItems : [])
+    .map(item => {
+      const text = String(item?.text || '');
+      return {
+        kind: String(item?.kind || '').trim(),
+        text,
+      };
+    })
+    .filter(item => ['assistant', 'thinking', 'tool'].includes(item.kind) && item.text.trim());
+}
+
+function yoagentPreviewLine(text) {
+  return String(text || '').replace(/\\n/g, '\n').split(/\r?\n/).map(line => line.trim()).filter(Boolean)[0] || '';
+}
+
+function yoagentStreamAuxiliaryItemHtml(item, key, index) {
+  const kind = String(item?.kind || '');
+  const text = String(item?.text || '');
+  if (!text || (kind !== 'thinking' && kind !== 'tool')) return '';
+  const tool = kind === 'tool';
+  const label = tool ? t('yoagent.toolCall.label') : 'thinking';
+  const preview = tool ? yoagentPreviewLine(text) : yoagentThinkingPreviewText(text);
+  const classes = tool
+    ? 'yoagent-message-details yoagent-toolcall-details has-auxiliary yoagent-stream-detail'
+    : 'yoagent-message-details has-auxiliary yoagent-stream-detail';
+  const streamClasses = tool
+    ? 'yoagent-auxiliary-stream yoagent-toolcall-stream'
+    : 'yoagent-auxiliary-stream';
+  const body = tool ? yoagentToolLinesHtml([text]) : esc(text);
+  return `<details class="${classes}" data-yoagent-message-details-key="${esc(`${key}|stream|${index}`)}">
+    <summary><span>${esc(`${label}…`)}</span>${preview ? `<span class="yoagent-details-preview">${esc(preview)}</span>` : ''}</summary>
+    <pre class="${streamClasses}">${body}</pre>
+  </details>`;
+}
+
+function yoagentMessageStreamItemsHtml(message, key = '') {
+  const items = yoagentStreamItems(message);
+  if (!items.length) return '';
+  return `<div class="yoagent-message-stream">${items.map((item, index) => {
+    if (item.kind === 'assistant') {
+      return `<div class="yoagent-message-body markdown-body yoagent-stream-assistant" data-yoagent-markdown>${esc(item.text)}</div>`;
+    }
+    return yoagentStreamAuxiliaryItemHtml(item, key, index);
+  }).join('')}</div>`;
 }
 
 function yoagentMessageDetailsHtml(message, key = '') {
   const text = String(message?.details || '').trim();
   const auxiliaryLines = yoagentAuxiliaryLines(message);
   const toolLines = auxiliaryLines.filter(yoagentAuxiliaryLineIsTool);
-  const thinkingLines = auxiliaryLines.filter(line => !yoagentAuxiliaryLineIsTool(line));
+  const thinkingLines = auxiliaryLines.filter(line => !yoagentAuxiliaryLineIsTool(line) && !yoagentAuxiliaryLineIsDiagnostic(line));
   const auxiliaryText = thinkingLines.join('\n');
   const toolText = toolLines.join('\n');
-  const auxiliaryPreviewLines = String(message?.auxiliaryPreview || '')
-    .split(/\r?\n/)
-    .map(line => String(line || '').trim())
-    .filter(line => line && !yoagentAuxiliaryLineIsTool(line));
-  const auxiliaryPreview = auxiliaryPreviewLines.join('\n') || yoagentLastLines(thinkingLines, message?.streaming ? 2 : 1);
-  const toolPreview = yoagentLastLines(toolLines, 1);
+  const auxiliaryPreviewLines = yoagentAuxiliaryPreviewThinkingLines(message?.auxiliaryPreview || '');
+  const auxiliaryPreview = yoagentThinkingPreviewText(auxiliaryPreviewLines.join('\n') || thinkingLines.join('\n'));
+  const toolPreview = yoagentPreviewLine(yoagentLastLines(toolLines, 1));
   const hasAuxiliary = Boolean(auxiliaryText || auxiliaryPreview);
   const hasTool = Boolean(toolText || toolPreview);
   const truncated = Boolean(message?.auxiliaryTruncated);
@@ -26047,14 +26854,14 @@ function yoagentMessageDetailsHtml(message, key = '') {
     : '';
   const thinkingDetails = (text || hasAuxiliary)
     ? `<details class="yoagent-message-details${hasAuxiliary ? ' has-auxiliary' : ''}" data-yoagent-message-details-key="${esc(key)}">
-    <summary><span>${esc(t('popover.details'))}</span>${preview}</summary>
+    <summary><span>${esc(`${t('popover.details')}…`)}</span>${preview}</summary>
     ${auxiliaryBlock}${truncationNote}${detailsBlock}
   </details>`
     : '';
   const toolDetails = hasTool
     ? `<details class="yoagent-message-details yoagent-toolcall-details has-auxiliary" data-yoagent-message-details-key="${esc(`${key}|tc`)}">
-    <summary><span>TC</span>${toolPreview ? `<span class="yoagent-details-preview">${esc(toolPreview)}</span>` : ''}</summary>
-    <pre class="yoagent-auxiliary-stream yoagent-toolcall-stream">${esc(toolText || toolPreview)}</pre>
+    <summary><span>${esc(t('yoagent.toolCall.label'))}</span>${toolPreview ? `<span class="yoagent-details-preview">${esc(toolPreview)}</span>` : ''}</summary>
+    <pre class="yoagent-auxiliary-stream yoagent-toolcall-stream">${yoagentToolLinesHtml(toolLines.length ? toolLines : [toolPreview])}</pre>
   </details>`
     : '';
   return `${thinkingDetails}${toolDetails}`;
@@ -26147,14 +26954,15 @@ function yoagentChatMessagesHtml() {
     const streaming = roleClass === 'assistant' && message?.streaming;
     const messageClass = `yoagent-message ${roleClass}${agentResult ? ' yoagent-agent-result' : ''}${streaming ? ' streaming' : ''}${message?.aborted ? ' stopped' : ''}`;
     const detailsKey = yoagentMessageDetailsKey(message, index);
+    const streamItemsHtml = roleClass === 'assistant' ? yoagentMessageStreamItemsHtml(message, detailsKey) : '';
     const stoppedState = roleClass === 'assistant' && message?.aborted && String(message?.content || '').trim()
       ? `<div class="yoagent-message-state">${esc(t('yoagent.stopped'))}</div>`
       : '';
     return `<div class="${messageClass}">
-      <div class="yoagent-message-role"><span>${esc(role)}</span>${yoagentMessageTimestampHtml(message.createdAt)}</div>
-      ${yoagentMessageBodyHtml(message, roleClass, agentResult, streaming)}
+      <div class="yoagent-message-role"><span>${esc(role)}</span>${yoagentMessageTimestampHtml(message.createdAt, roleClass === 'assistant' ? message : null)}</div>
+      ${streamItemsHtml || yoagentMessageBodyHtml(message, roleClass, agentResult, streaming)}
       ${stoppedState}
-      ${roleClass === 'assistant' ? yoagentMessageDetailsHtml(message, detailsKey) : ''}
+      ${roleClass === 'assistant' && !streamItemsHtml ? yoagentMessageDetailsHtml(message, detailsKey) : ''}
       ${roleClass === 'assistant' ? yoagentActionCardsHtml(message.actions) : ''}
     </div>`;
   }).join('');
@@ -26205,8 +27013,28 @@ function yoagentActionStatusText(action) {
   return action?.status_text || status;
 }
 
-function yoagentIntroMessageText() {
-  const summary = activitySummaryPayload?.global || {};
+function yoagentStartupActivityPayload() {
+  return yoagentStartupActivitySummaryPayload || activitySummaryPayload;
+}
+
+function cloneYoagentActivitySummaryPayload(payload) {
+  return JSON.parse(JSON.stringify(payload || {sessions: {}, global: {lines: []}, session_order: []}));
+}
+
+function captureYoagentStartupActivitySummarySnapshot(options = {}) {
+  if (options.replace !== true && yoagentStartupActivitySummaryPayload) return yoagentStartupActivitySummaryPayload;
+  yoagentStartupActivitySummaryPayload = activitySummaryPayload && typeof activitySummaryPayload === 'object'
+    ? cloneYoagentActivitySummaryPayload(activitySummaryPayload)
+    : {sessions: {}, global: {lines: []}, session_order: []};
+  return yoagentStartupActivitySummaryPayload;
+}
+
+function resetYoagentStartupActivitySummarySnapshot() {
+  yoagentStartupActivitySummaryPayload = null;
+}
+
+function yoagentIntroMessageText(payload = yoagentStartupActivityPayload()) {
+  const summary = payload?.global || {};
   const lines = Array.isArray(summary.lines) ? summary.lines : [];
   const headline = String(summary.headline || lines[0] || '').trim();
   if (!headline) return '';
@@ -26218,10 +27046,11 @@ function yoagentIntroMessageText() {
 }
 
 function yoagentIntroMessageHtml() {
-  const text = yoagentIntroMessageText();
+  const payload = yoagentStartupActivityPayload();
+  const text = yoagentIntroMessageText(payload);
   if (!text || !yoagentChatEnabled()) return '';
   return `<div class="yoagent-message assistant yoagent-intro-message">
-    <div class="yoagent-message-role"><span>${esc(yoagentTabLabel())}</span>${yoagentMessageTimestampHtml(activitySummaryPayload?.generated_at)}</div>
+    <div class="yoagent-message-role"><span>${esc(yoagentTabLabel())}</span>${yoagentMessageTimestampHtml(payload?.generated_at)}</div>
     <div class="yoagent-message-body markdown-body" data-yoagent-markdown>${esc(text)}</div>
   </div>`;
 }
@@ -26232,12 +27061,14 @@ function yoagentStartupInfoHtml() {
 
 function showYoagentStartupInfoOnce() {
   if (yoagentStartupInfoShown) return false;
+  captureYoagentStartupActivitySummarySnapshot();
   yoagentStartupInfoShown = true;
   yoagentStartupInfoVisible = true;
   return true;
 }
 
 function showYoagentStartupInfoForLatestActivity() {
+  resetYoagentStartupActivitySummarySnapshot();
   yoagentStartupInfoShown = false;
   return showYoagentStartupInfoOnce();
 }
@@ -26250,15 +27081,6 @@ function yoagentNoticeHtml() {
   if (!yoagentNotice?.reason) return '';
   const backend = yoagentNotice.backend ? `<span class="yoagent-chat-notice-backend">${esc(yoagentNotice.backend)}</span> ` : '';
   return `<div class="yoagent-chat-notice">${backend}${esc(yoagentNotice.reason)}</div>`;
-}
-
-function yoagentAutoRefreshStatusHtml() {
-  const summary = activitySummaryPayload?.yoagent_summaries || {};
-  if (!summary.auto_refresh) return '';
-  const generated = summary.updated_ts
-    ? relativeActivityGeneratedText({generated_ts: summary.updated_ts, generated_at: summary.updated_at})
-    : {text: t('yoagent.notLoaded'), title: ''};
-  return `<div class="yoagent-chat-notice yoagent-auto-refresh-status" title="${esc(generated.title)}">${esc(t('yoagent.autoRefreshStatus', {updated: generated.text}))}</div>`;
 }
 
 function yoagentPendingWaitsHtml() {
@@ -26388,14 +27210,19 @@ function yoagentChatQueueHtml() {
 
 function applyYoagentConversationPayload(payload = {}) {
   if (!payload || typeof payload !== 'object') return false;
+  if (!Object.prototype.hasOwnProperty.call(payload, 'messages')) return false;
   const messages = Array.isArray(payload.messages) ? payload.messages : [];
+  const hadPendingWaits = Array.isArray(yoagentPendingWaits) && yoagentPendingWaits.length > 0;
   yoagentPendingWaits = Array.isArray(payload.pending_waits) ? payload.pending_waits : [];
-  if (messages.length) hideYoagentStartupInfo();
   if (messages.length && yoagentStreamingMessages instanceof Map) yoagentStreamingMessages.clear();
   yoagentMessages = messages;
   yoagentConversationPath = String(payload.transcript_path || '');
   yoagentConversationDisplayPath = String(payload.transcript_display_path || yoagentConversationPath);
   yoagentConversationLoaded = true;
+  if (hadPendingWaits && !yoagentPendingWaits.length && yoagentChatQueue.length) {
+    if (typeof queueMicrotask === 'function') queueMicrotask(() => drainYoagentChatQueue());
+    else Promise.resolve().then(() => drainYoagentChatQueue());
+  }
   return true;
 }
 
@@ -26412,14 +27239,16 @@ function applyYoagentStreamPayload(payload = {}) {
   const auxiliaryLines = Array.isArray(payload.auxiliary_lines)
     ? payload.auxiliary_lines.map(line => String(line || '')).filter(Boolean)
     : (Array.isArray(previous.auxiliaryLines) ? previous.auxiliaryLines : []);
+  const streamItems = Array.isArray(payload.stream_items)
+    ? yoagentStreamItems({streamItems: payload.stream_items})
+    : yoagentStreamItems(previous);
   const auxiliaryActive = Boolean(payload.hidden_work_active || payload.tool_active);
-  const thinkingLines = auxiliaryLines.filter(line => !yoagentAuxiliaryLineIsTool(line));
-  const auxiliaryPreviewLines = String(payload.auxiliary_preview || '')
-    .split(/\r?\n/)
-    .map(line => String(line || '').trim())
-    .filter(line => line && !yoagentAuxiliaryLineIsTool(line));
-  const auxiliaryPreview = auxiliaryPreviewLines.join('\n')
-    || (thinkingLines.length ? yoagentLastLines(thinkingLines, auxiliaryActive ? 2 : 1) : String(previous.auxiliaryPreview || ''));
+  const thinkingLines = auxiliaryLines.filter(line => !yoagentAuxiliaryLineIsTool(line) && !yoagentAuxiliaryLineIsDiagnostic(line));
+  const auxiliaryPreviewLines = yoagentAuxiliaryPreviewThinkingLines(payload.auxiliary_preview || '');
+  const auxiliaryPreview = yoagentThinkingPreviewText(
+    auxiliaryPreviewLines.join('\n')
+    || (thinkingLines.length ? thinkingLines.join('\n') : String(previous.auxiliaryPreview || '')),
+  );
   const detailLines = [];
   if (payload.backend) detailLines.push(`- backend: \`${payload.backend}\``);
   if (phase) detailLines.push(`- stream phase: \`${phase}\``);
@@ -26433,13 +27262,13 @@ function applyYoagentStreamPayload(payload = {}) {
     auxiliaryLines,
     auxiliaryText: auxiliaryLines.join('\n') || previous.auxiliaryText || '',
     auxiliaryPreview,
+    streamItems,
     auxiliaryActive,
     auxiliaryDone: Boolean(payload.auxiliary_done) || previous.auxiliaryDone || false,
     auxiliaryTruncated: Boolean(payload.auxiliary_truncated) || previous.auxiliaryTruncated || false,
     aborted: Boolean(payload.aborted) || previous.aborted || false,
     streaming: payload.done !== true,
   });
-  hideYoagentStartupInfo();
   yoagentPrewarming = payload.done === true ? false : yoagentPrewarming;
   return true;
 }
@@ -26600,8 +27429,8 @@ function yoagentRecentAgentPathText(agent, signal = yoagentRecentAgentSignal(age
   return agent?.cwd ? compactHomePath(agent.cwd) : '';
 }
 
-function yoagentRecentAgentsHtml() {
-  const agents = Array.isArray(activitySummaryPayload?.agents) ? activitySummaryPayload.agents : [];
+function yoagentRecentAgentsHtml(payload = yoagentStartupActivityPayload()) {
+  const agents = Array.isArray(payload?.agents) ? payload.agents : [];
   const items = agents
     .filter(agent => agent && typeof agent === 'object' && agent.label)
     .map(agent => {
@@ -26652,10 +27481,11 @@ function yoagentRecentAgentsHtml() {
 }
 
 function yoagentRecentAgentsMessageHtml() {
-  const html = yoagentRecentAgentsHtml();
+  const payload = yoagentStartupActivityPayload();
+  const html = yoagentRecentAgentsHtml(payload);
   if (!html || !yoagentChatEnabled()) return '';
   return `<div class="yoagent-message assistant yoagent-recent-agents-message">
-    <div class="yoagent-message-role"><span>${esc(yoagentTabLabel())}</span>${yoagentMessageTimestampHtml(activitySummaryPayload?.generated_at)}</div>
+    <div class="yoagent-message-role"><span>${esc(yoagentTabLabel())}</span>${yoagentMessageTimestampHtml(payload?.generated_at)}</div>
     ${html}
   </div>`;
 }
@@ -26830,7 +27660,7 @@ function yoagentChatHtml() {
     </form>`;
   return `<section class="yoagent-chat ${hasConversation ? 'has-history' : 'empty'}" aria-label="${esc(t('yoagent.chatAria', {name: yoagentTabLabel()}))}">
     ${yoagentTranscriptPathHtml()}
-    <div class="yoagent-chat-history">${yoagentAutoRefreshStatusHtml()}${yoagentNoticeHtml()}${yoagentChatMessagesHtml()}${yoagentChatQueueHtml()}${yoagentPendingWaitsHtml()}${yoagentJobsHtml()}${busy}${error}${chatDisabled}</div>
+    <div class="yoagent-chat-history">${yoagentNoticeHtml()}${yoagentChatMessagesHtml()}${yoagentChatQueueHtml()}${yoagentPendingWaitsHtml()}${yoagentJobsHtml()}${busy}${error}${chatDisabled}</div>
     ${form}
   </section>`;
 }
@@ -26931,7 +27761,7 @@ function finishYoagentActiveRequest(requestId, options = {}) {
 }
 
 function drainYoagentChatQueue() {
-  if (yoagentBusy || yoagentActiveChatRequest || !yoagentChatEnabled() || !yoagentChatQueue.length) return false;
+  if (yoagentBusy || yoagentActiveChatRequest || yoagentPendingWaits.length || !yoagentChatEnabled() || !yoagentChatQueue.length) return false;
   const next = yoagentChatQueue.shift();
   if (!next) return false;
   startYoagentChatRequest(next.text, {fromQueue: true});
@@ -27043,7 +27873,6 @@ async function startYoagentChatRequest(rawText, options = {}) {
   const text = String(rawText || '').trim();
   if (!text || yoagentBusy || yoagentActiveChatRequest || !yoagentChatEnabled()) return;
   resetYoagentComposerHistory();
-  hideYoagentStartupInfo();
   installYoagentFocusTracker();
   const requestId = yoagentNewChatRequestId();
   const streamId = requestId;
@@ -27101,7 +27930,7 @@ async function startYoagentChatRequest(rawText, options = {}) {
 async function sendYoagentChatMessage(rawText) {
   const text = String(rawText || '').trim();
   if (!text || !yoagentChatEnabled()) return;
-  if (yoagentBusy || yoagentActiveChatRequest) {
+  if (yoagentBusy || yoagentActiveChatRequest || yoagentPendingWaits.length) {
     enqueueYoagentChatMessage(text);
     return;
   }
@@ -27198,7 +28027,7 @@ async function refreshActivitySummary(options = {}) {
     params.set('hours', String(infoSessionFileLookbackHours));
     const payload = await apiFetchJson(`/api/activity-summary?${params.toString()}`, {cache: 'no-store'});
     if (!requestIsCurrent()) return;
-    applyActivitySummaryPayloadFromPush(payload);
+    applyActivitySummaryPayloadFromPush(payload, {refreshStartupSnapshot: true, render: true});
   } catch (error) {
     if (!requestIsCurrent()) return;
     activitySummaryPayload = {
@@ -27217,7 +28046,7 @@ async function refreshActivitySummary(options = {}) {
   }
 }
 
-function applyActivitySummaryPayloadFromPush(payload = {}) {
+function applyActivitySummaryPayloadFromPush(payload = {}, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
   if (payload.session_file_hours != null) {
     infoSessionFileLookbackHours = writeStoredInfoLookbackHours(payload.session_file_hours);
@@ -27226,9 +28055,12 @@ function applyActivitySummaryPayloadFromPush(payload = {}) {
   activitySummaryLastRefreshTs = Date.now();
   activitySummaryRefreshing = false;
   clearInfoSessionDrawerCache();
-  renderInfoPanel();
-  renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
-  if (infoPanelSubTab === 'yoagent') prewarmYoagent();
+  if (options.refreshStartupSnapshot === true) captureYoagentStartupActivitySummarySnapshot({replace: true});
+  if (options.render === true || options.refreshStartupSnapshot === true) {
+    renderInfoPanel();
+    renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
+    if (infoPanelSubTab === 'yoagent') prewarmYoagent();
+  }
   return true;
 }
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
@@ -27324,22 +28156,40 @@ function updateNotifyLevelPreferenceChoices() {
 }
 
 const YOAGENT_CLAUDE_MODEL_LABEL_KEYS = {
+  'claude-fable-5': 'pref.yoagent.claude_model.fable',
   'claude-opus-4-8': 'pref.yoagent.claude_model.opus',
   'claude-sonnet-4-6': 'pref.yoagent.claude_model.sonnet',
   'claude-haiku-4-5': 'pref.yoagent.claude_model.haiku',
 };
 
 const YOAGENT_CODEX_MODEL_LABEL_KEYS = {
+  'gpt-5.3-codex-spark': 'pref.yoagent.codex_model.gpt53spark',
   'gpt-5.4-mini': 'pref.yoagent.codex_model.gpt54mini',
   'gpt-5.4': 'pref.yoagent.codex_model.gpt54',
   'gpt-5.5': 'pref.yoagent.codex_model.gpt55',
 };
 
+function settingCatalogEntry(path) {
+  const catalog = clientSettingsPayload?.catalog || {};
+  return catalog && typeof catalog[path] === 'object' ? catalog[path] : {};
+}
+
+function settingChoiceLabels(path) {
+  const labels = settingCatalogEntry(path).choice_labels || {};
+  return labels && typeof labels === 'object' ? labels : {};
+}
+
+function settingChoiceMetadata(path) {
+  const metadata = settingCatalogEntry(path).choice_metadata || {};
+  return metadata && typeof metadata === 'object' ? metadata : {};
+}
+
 function modelPreferenceChoices(path, fallbackValues, labelKeys) {
   const choices = Array.isArray(clientSettingsPayload?.choices?.[path])
     ? clientSettingsPayload.choices[path]
     : fallbackValues;
-  return choices.map(value => ({value, label: labelKeys[value] ? t(labelKeys[value]) : preferenceChoiceLabel(value)}));
+  const catalogLabels = settingChoiceLabels(path);
+  return choices.map(value => ({value, label: catalogLabels[value] || (labelKeys[value] ? t(labelKeys[value]) : preferenceChoiceLabel(value))}));
 }
 
 function yoagentClaudeModelPreferenceChoices() {
@@ -27362,7 +28212,12 @@ function yoagentClaudeEffortPreferenceChoices() {
 }
 
 function yoagentCodexEffortPreferenceChoices() {
-  return effortPreferenceChoices('yoagent.codex_effort', ['low', 'medium', 'high'], 'pref.yoagent.codex_effort');
+  const selectedModel = String(preferenceValue('yoagent.codex_model') || '').trim();
+  const modelMetadata = settingChoiceMetadata('yoagent.codex_model')[selectedModel] || {};
+  const options = Array.isArray(modelMetadata.effort_options) && modelMetadata.effort_options.length
+    ? modelMetadata.effort_options
+    : ['low', 'medium', 'high', 'xhigh'];
+  return options.map(value => ({value, label: t(`pref.yoagent.codex_effort.${value}`)}));
 }
 
 function yoagentModelPreferenceChoicesForBackend(backend) {
@@ -27455,12 +28310,6 @@ function preferenceSections() {
       {path: 'uploads.custom_actions', label: t('pref.uploads.custom_actions.label'), type: 'list', wide: true, help: t('pref.uploads.custom_actions.help')},
       {path: 'uploads.max_bytes', label: t('pref.uploads.max_bytes.label'), type: 'number', min: 1, max: 512, step: 1, suffix: 'MB', scale: 1048576, help: t('pref.uploads.max_bytes.help')},
     ]},
-    {title: t('pref.section.share'), items: [
-      {path: 'share.ttl_seconds', label: t('pref.share.ttl_seconds.label'), type: 'number', min: 1, max: 480, step: 1, suffix: t('unit.minute.short'), scale: 60, help: t('pref.share.ttl_seconds.help')},
-      {path: 'share.max_viewers', label: t('pref.share.max_viewers.label'), type: 'number', min: 1, max: 300, step: 1, help: t('pref.share.max_viewers.help')},
-      {path: 'share.read_only', label: t('pref.share.read_only.label'), type: 'boolean', help: t('pref.share.read_only.help')},
-      {path: 'share.scheme', label: t('pref.share.scheme.label'), type: 'radio', choices: ['http', 'https'], help: t('pref.share.scheme.help')},
-    ]},
     {title: t('pref.section.performance'), items: [
       {path: 'performance.server_event_poll_ms', label: t('pref.performance.server_event_poll_ms.label'), type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.server_event_poll_ms.help')},
       {path: 'performance.server_background_file_event_poll_ms', label: t('pref.performance.server_background_file_event_poll_ms.label'), type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.server_background_file_event_poll_ms.help')},
@@ -27478,15 +28327,6 @@ function preferenceSections() {
     {title: t('pref.section.github'), items: [
       {path: 'github.watched_prs', label: t('pref.github.watched_prs.label'), type: 'list', wide: true, help: t('pref.github.watched_prs.help')},
     ]},
-    {id: 'yolo', title: t('pref.section.yolo'), items: [
-      {path: 'performance.auto_approve_interval_seconds', label: t('pref.performance.auto_approve_interval_seconds.label'), type: 'number', min: 0.1, max: 10, step: 0.1, suffix: 's', help: t('pref.performance.auto_approve_interval_seconds.help')},
-      {path: 'yolo.rule_file_path', label: t('pref.yolo.rule_file_path.label'), type: 'text', action: 'open-yolo-rule', wide: true, help: t('pref.yolo.rule_file_path.help')},
-      {path: 'yolo.dry_run', label: t('pref.yolo.dry_run.label'), type: 'boolean', help: t('pref.yolo.dry_run.help')},
-      {path: 'yolo.prompt_source', label: t('pref.yolo.prompt_source.label'), type: 'radio', choices: [
-        {value: 'hybrid', label: t('pref.yolo.prompt_source.hybrid')},
-        {value: 'pane', label: t('pref.yolo.prompt_source.pane')},
-      ], help: t('pref.yolo.prompt_source.help')},
-    ]},
     {title: t('pref.section.yoagent'), items: [
       {path: 'yoagent.backend', label: t('pref.yoagent.backend.label'), type: 'radio', choices: [
         {value: 'auto', label: t('pref.yoagent.backend.auto')},
@@ -27500,10 +28340,24 @@ function preferenceSections() {
       {path: 'yoagent.claude_effort', label: t('pref.yoagent.claude_effort.label'), type: 'radio', choices: yoagentClaudeEffortPreferenceChoices(), help: t('pref.yoagent.claude_effort.help')},
       {path: 'yoagent.codex_model', label: t('pref.yoagent.codex_model.label'), type: 'select', choices: yoagentCodexModelPreferenceChoices(), help: t('pref.yoagent.codex_model.help')},
       {path: 'yoagent.codex_effort', label: t('pref.yoagent.codex_effort.label'), type: 'radio', choices: yoagentCodexEffortPreferenceChoices(), help: t('pref.yoagent.codex_effort.help')},
-      {path: 'yoagent.refresh_interval_seconds', label: t('pref.yoagent.refresh_interval_seconds.label'), type: 'number', min: 0, max: 3600, step: 30, suffix: 's', help: t('pref.yoagent.refresh_interval_seconds.help')},
       {path: 'yoagent.system_prompt', label: t('pref.yoagent.system_prompt.label'), type: 'textarea', help: t('pref.yoagent.system_prompt.help'), alwaysEnableReset: true},
       {path: 'yoagent.intro', label: t('pref.yoagent.intro.label'), type: 'textarea', help: t('pref.yoagent.intro.help'), alwaysEnableReset: true},
       {path: 'yoagent.format', label: t('pref.yoagent.format.label'), type: 'textarea', help: t('pref.yoagent.format.help'), alwaysEnableReset: true},
+    ]},
+    {title: t('pref.section.share'), items: [
+      {path: 'share.ttl_seconds', label: t('pref.share.ttl_seconds.label'), type: 'number', min: 1, max: 480, step: 1, suffix: t('unit.minute.short'), scale: 60, help: t('pref.share.ttl_seconds.help')},
+      {path: 'share.max_viewers', label: t('pref.share.max_viewers.label'), type: 'number', min: 1, max: 300, step: 1, help: t('pref.share.max_viewers.help')},
+      {path: 'share.read_only', label: t('pref.share.read_only.label'), type: 'boolean', help: t('pref.share.read_only.help')},
+      {path: 'share.scheme', label: t('pref.share.scheme.label'), type: 'radio', choices: ['http', 'https'], help: t('pref.share.scheme.help')},
+    ]},
+    {id: 'yolo', title: t('pref.section.yolo'), items: [
+      {path: 'performance.auto_approve_interval_seconds', label: t('pref.performance.auto_approve_interval_seconds.label'), type: 'number', min: 0.1, max: 10, step: 0.1, suffix: 's', help: t('pref.performance.auto_approve_interval_seconds.help')},
+      {path: 'yolo.rule_file_path', label: t('pref.yolo.rule_file_path.label'), type: 'text', action: 'open-yolo-rule', wide: true, help: t('pref.yolo.rule_file_path.help')},
+      {path: 'yolo.dry_run', label: t('pref.yolo.dry_run.label'), type: 'boolean', help: t('pref.yolo.dry_run.help')},
+      {path: 'yolo.prompt_source', label: t('pref.yolo.prompt_source.label'), type: 'radio', choices: [
+        {value: 'hybrid', label: t('pref.yolo.prompt_source.hybrid')},
+        {value: 'pane', label: t('pref.yolo.prompt_source.pane')},
+      ], help: t('pref.yolo.prompt_source.help')},
     ]},
   ];
 }
@@ -28079,14 +28933,6 @@ function bindPreferencesPanel(panel) {
       event.preventDefault();
       preferencesResetConfirmVisible = false;
       renderPreferencesPanels({force: true});
-      return;
-    }
-    const copy = event.target.closest('[data-copy-path]');
-    if (copy && panel.contains(copy)) {
-      event.preventDefault();
-      copyTextToClipboard(copy.dataset.copyPath || '')
-        .then(() => { statusEl.textContent = 'copied path'; })
-        .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
       return;
     }
     const copyText = event.target.closest('[data-copy-text]');
@@ -29328,6 +30174,19 @@ function compactAgeNumber(value) {
   const rounded = Math.round(Number(value || 0) * 10) / 10;
   if (!Number.isFinite(rounded)) return '0';
   return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+}
+
+function compactElapsedDurationText(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  if (total < 60) return `${total}s`;
+  if (total < 3600) {
+    const minutes = Math.floor(total / 60);
+    const remainder = total % 60;
+    return remainder ? `${minutes}m ${remainder}s` : `${minutes}m`;
+  }
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  return `${hours}h ${String(minutes).padStart(2, '0')}m`;
 }
 
 function compactRelativeFileTimeText(unit, countText) {
@@ -30599,6 +31458,22 @@ function settingPatch(path, value) {
   return root;
 }
 
+function codexModelDefaultEffort(model) {
+  const metadata = typeof settingChoiceMetadata === 'function' ? settingChoiceMetadata('yoagent.codex_model') : {};
+  const entry = metadata[String(model || '')] || {};
+  const effort = String(entry.default_effort || '').trim();
+  return effort || '';
+}
+
+function settingPatchForPath(path, value) {
+  const patch = settingPatch(path, value);
+  if (path === 'yoagent.codex_model') {
+    const defaultEffort = codexModelDefaultEffort(value);
+    if (defaultEffort) patch.yoagent = {...(patch.yoagent || {}), codex_effort: defaultEffort};
+  }
+  return patch;
+}
+
 function valueFromPreferenceControl(control) {
   const type = control.dataset.settingType || 'text';
   if (type === 'boolean') return control.checked === true;
@@ -30688,7 +31563,7 @@ function savePreferenceControl(control) {
   if (path === 'appearance.active_color') {
     applyActiveColor(value);
   }
-  saveSettingsPatch(settingPatch(path, value), {
+  saveSettingsPatch(settingPatchForPath(path, value), {
     applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',
   })
     .then(() => {
@@ -42642,17 +43517,6 @@ function bindPanelControls(panel, session) {
     event.stopPropagation();
     toggleAutoApprove(target.dataset.autoSession || session);
   });
-  panel.addEventListener('click', event => {
-    const target = event.target.closest('[data-copy-transcript-path]');
-    if (!target || !panel.contains(target)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const path = target.dataset.copyTranscriptPath || '';
-    if (!path) return;
-    copyTextToClipboard(path)
-      .then(() => { statusOk(localizedHtml('status.copiedTranscriptPath')); })
-      .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
-  });
   panel.querySelector('.meta')?.addEventListener('click', event => {
     event.stopPropagation();
     const cycle = event.target.closest('[data-repo-cycle]');
@@ -43148,29 +44012,234 @@ function noteTerminalExplicitInput(session) {
 
 const terminalTmuxPrefixPendingBySession = new Map();
 const tmuxWindowReadbackDelayMs = 120;
+const tmuxWindowReadbackRetryDelayMs = 80;
+const tmuxWindowReadbackMaxAttempts = 6;
+const terminalTmuxWindowRepeatMs = 900;
+const terminalTmuxWindowRepeatBySession = new Map();
 
 function terminalTmuxPrefixWindowShortcut(key) {
   const value = String(key || '');
-  if (value === 'n') return {label: 'next tmux window'};
-  if (value === 'p') return {label: 'previous tmux window'};
-  if (/^[0-9]$/.test(value)) return {label: `tmux window ${value}`};
+  if (value === 'n') return {label: 'next tmux window', repeatable: true};
+  if (value === 'p') return {label: 'previous tmux window', repeatable: true};
+  if (value === 'l') return {label: 'last tmux window', requireChanged: true};
+  if (value === 'w') return {label: 'tmux window chooser', requireChanged: true};
+  if (value === "'") return {label: 'tmux window prompt', requireChanged: true};
+  if (value === 'f') return {label: 'tmux find window', requireChanged: true};
+  if (/^[0-9]$/.test(value)) return {label: `tmux window ${value}`, windowIndex: value};
   return null;
+}
+
+function terminalTmuxAltWindowShortcut(key) {
+  const value = String(key || '');
+  if (value === 'n') return {label: 'next tmux window', repeatable: true};
+  if (value === 'p') return {label: 'previous tmux window', repeatable: true};
+  return null;
+}
+
+function tmuxWindowSignalReadbackUrl(session) {
+  const params = new URLSearchParams();
+  params.set('force', '1');
+  const target = String(session || '').trim();
+  if (target) params.set('session', target);
+  return `/api/tmux-signals?${params.toString()}`;
+}
+
+function tmuxSignalPayloadData(payload) {
+  return payload?.data && typeof payload.data === 'object' ? payload.data : payload;
+}
+
+function activeTmuxSignalWindowForSession(session, payload = tmuxSignalState) {
+  const sessionText = String(session || '').trim();
+  if (!sessionText) return null;
+  const windows = Array.isArray(payload?.windows) ? payload.windows : [];
+  return windows.find(windowRecord => tmuxSignalWindowSession(windowRecord) === sessionText && windowRecord?.active === true) || null;
+}
+
+function confirmTmuxWindowActiveOverridesFromRawSignals(payload = {}) {
+  const windows = Array.isArray(payload?.windows) ? payload.windows : [];
+  for (const windowRecord of windows) {
+    if (windowRecord?.active !== true) continue;
+    const session = tmuxSignalWindowSession(windowRecord);
+    const activeIndex = tmuxWindowIndexKey(windowRecord?.window_index);
+    const override = tmuxWindowActiveIndexOverride(session);
+    if (!session || activeIndex === null || override === undefined || override === tmuxWindowPendingActiveIndex) continue;
+    if (activeIndex === tmuxWindowIndexKey(override)) confirmTmuxWindowActiveIndexOverride(session, activeIndex);
+  }
+}
+
+function reconcileTmuxWindowDirectTargetGuardsFromRawSignals(payload = {}) {
+  if (typeof tmuxWindowDirectTargetGuard !== 'function') return;
+  const windows = Array.isArray(payload?.windows) ? payload.windows : [];
+  for (const windowRecord of windows) {
+    if (windowRecord?.active !== true) continue;
+    const session = tmuxSignalWindowSession(windowRecord);
+    const activeIndex = tmuxWindowIndexKey(windowRecord?.window_index);
+    const guard = tmuxWindowDirectTargetGuard(session);
+    if (!session || activeIndex === null || !guard) continue;
+    if (activeIndex === tmuxWindowIndexKey(guard.index)) {
+      confirmTmuxWindowDirectTargetGuard(session, activeIndex, {sequence: guard.sequence});
+      continue;
+    }
+  }
+}
+
+function transcriptPaneMatchesSignalPane(pane, signalPane) {
+  if (!pane || !signalPane) return false;
+  const paneTarget = String(pane.target || pane.pane_id || '').trim();
+  const signalTarget = String(signalPane.target || signalPane.pane_id || '').trim();
+  if (paneTarget && signalTarget && paneTarget === signalTarget) return true;
+  const paneWindow = tmuxWindowIndexKey(pane.window ?? pane.window_index);
+  const signalWindow = tmuxWindowIndexKey(signalPane.window_index);
+  const paneIndex = String(pane.pane ?? pane.pane_index ?? '').trim();
+  const signalIndex = String(signalPane.pane_index ?? '').trim();
+  return paneWindow !== null && paneWindow === signalWindow && paneIndex && signalIndex && paneIndex === signalIndex;
+}
+
+function mergeTranscriptPaneWithSignalPane(pane, signalPane, activeIndex) {
+  const windowIndex = tmuxWindowIndexKey(pane?.window ?? pane?.window_index);
+  const next = {...pane, window_active: windowIndex !== null && windowIndex === activeIndex};
+  if (!signalPane) return next;
+  if (signalPane.current_path) next.current_path = normalizeDirectoryPath(signalPane.current_path);
+  if (signalPane.current_command) next.command = signalPane.current_command;
+  if (signalPane.pane_id) next.pane_id = signalPane.pane_id;
+  if (signalPane.target) next.target = signalPane.target;
+  if (signalPane.pane_index !== undefined) next.pane = String(signalPane.pane_index);
+  next.active = signalPane.active === true;
+  return next;
+}
+
+function applyTmuxSignalActiveWindowToTranscriptInfo(session, windowRecord, options = {}) {
+  const activeIndex = tmuxWindowIndexKey(windowRecord?.window_index);
+  const info = transcriptMeta.sessions?.[session];
+  if (activeIndex === null || !info || !Array.isArray(info.panes)) return false;
+  const signalPanes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
+  let selectedPane = info.selected_pane || null;
+  const panes = info.panes.map(pane => {
+    const signalPane = signalPanes.find(item => transcriptPaneMatchesSignalPane(pane, item)) || null;
+    const next = mergeTranscriptPaneWithSignalPane(pane, signalPane, activeIndex);
+    if (next.window_active && (next.active || !selectedPane || tmuxWindowIndexKey(selectedPane.window ?? selectedPane.window_index) !== activeIndex)) {
+      selectedPane = next;
+    }
+    return next;
+  });
+  if (!panes.some(pane => pane.window_active) && signalPanes.length) {
+    const signalPane = signalPanes.find(item => item.active === true) || signalPanes[0];
+    const synthesized = mergeTranscriptPaneWithSignalPane({
+      window: windowRecord.window_index,
+      window_name: windowRecord.window_name || '',
+      pane: signalPane.pane_index ?? '',
+      pane_id: signalPane.pane_id || signalPane.target || '',
+      target: signalPane.target || signalPane.pane_id || '',
+      current_path: signalPane.current_path || '',
+      command: signalPane.current_command || '',
+      active: signalPane.active === true,
+    }, signalPane, activeIndex);
+    panes.push(synthesized);
+    selectedPane = synthesized;
+  }
+  const nextInfo = {...info, selected_pane: selectedPane, panes};
+  transcriptMeta = {
+    ...transcriptMeta,
+    sessions: {...(transcriptMeta.sessions || {}), [session]: nextInfo},
+  };
+  if (options.render !== false) {
+    updatePanelHeader(session, nextInfo);
+    renderInfoPanel();
+    if (fileExplorerMode === 'tabber' && typeof refreshTabberPanels === 'function') refreshTabberPanels();
+  }
+  return true;
+}
+
+function applyTmuxSignalActiveWindowsToTranscriptInfo(payload = {}) {
+  const windows = Array.isArray(payload?.windows) ? payload.windows : [];
+  let changed = false;
+  const seen = new Set();
+  for (const windowRecord of windows) {
+    if (windowRecord?.active !== true) continue;
+    const session = tmuxSignalWindowSession(windowRecord);
+    if (!session || seen.has(session)) continue;
+    seen.add(session);
+    changed = applyTmuxSignalActiveWindowToTranscriptInfo(session, windowRecord, {render: false}) || changed;
+  }
+  if (changed) {
+    for (const session of seen) updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+    renderInfoPanel();
+    if (fileExplorerMode === 'tabber' && typeof refreshTabberPanels === 'function') refreshTabberPanels();
+  }
+  return changed;
+}
+
+async function refreshTmuxWindowActiveFromSignals(session, options = {}) {
+  const payload = await apiFetchJson(tmuxWindowSignalReadbackUrl(session), {cache: 'no-store'});
+  const rawData = tmuxSignalPayloadData(payload);
+  if (!tmuxWindowSwitchSequenceMatches(session, options.sequence)) return true;
+  const expected = tmuxWindowIndexKey(options.expectedIndex);
+  const rawWindowRecord = expected !== null ? activeTmuxSignalWindowForSession(session, rawData) : null;
+  const data = applyTmuxSignalsPayload(payload) || payload;
+  const windowRecord = expected !== null ? rawWindowRecord : activeTmuxSignalWindowForSession(session, data);
+  const activeIndex = tmuxWindowIndexKey(windowRecord?.window_index);
+  if (activeIndex === null) return false;
+  if (expected !== null && activeIndex !== expected) {
+    const override = tmuxWindowActiveIndexOverride(session);
+    updateTmuxWindowBarActiveButtons(session, override === tmuxWindowPendingActiveIndex ? null : override);
+    return false;
+  }
+  const previous = tmuxWindowIndexKey(options.previousIndex);
+  const retryingChangedWindow = options.requireChanged === true && previous !== null && activeIndex === previous && options.acceptUnchanged !== true;
+  if (retryingChangedWindow) {
+    updateTmuxWindowBarActiveButtons(session, null);
+    return false;
+  }
+  applyTmuxSignalActiveWindowToTranscriptInfo(session, windowRecord);
+  confirmTmuxWindowActiveIndexOverride(session, activeIndex, {sequence: options.sequence});
+  return true;
 }
 
 function scheduleTmuxWindowReadback(session, options = {}) {
   const delayMs = Number.isFinite(options.delayMs) ? Math.max(0, options.delayMs) : tmuxWindowReadbackDelayMs;
-  const run = () => refreshTranscripts({force: true});
+  const attempt = Number.isFinite(options.attempt) ? Number(options.attempt) : 0;
+  const run = () => {
+    if (!tmuxWindowSwitchSequenceMatches(session, options.sequence)) return Promise.resolve(true);
+    const acceptUnchanged = options.requireChanged === true && attempt + 1 >= tmuxWindowReadbackMaxAttempts;
+    const readback = refreshTmuxWindowActiveFromSignals(session, {...options, acceptUnchanged});
+    return Promise.resolve(readback).then(confirmed => {
+      if (!tmuxWindowSwitchSequenceMatches(session, options.sequence)) return;
+      if (!confirmed && attempt + 1 < tmuxWindowReadbackMaxAttempts) {
+        scheduleTmuxWindowReadback(session, {...options, delayMs: tmuxWindowReadbackRetryDelayMs, attempt: attempt + 1});
+      }
+    }).catch(error => {
+      console.warn('tmux window signal readback failed', error);
+      if (!tmuxWindowSwitchSequenceMatches(session, options.sequence)) return;
+      if (attempt + 1 < tmuxWindowReadbackMaxAttempts) {
+        scheduleTmuxWindowReadback(session, {...options, delayMs: tmuxWindowReadbackRetryDelayMs, attempt: attempt + 1});
+      } else {
+        const info = transcriptMeta.sessions?.[session];
+        reconcileTmuxWindowActiveIndexOverride(session, info, {expectedIndex: options.expectedIndex, sequence: options.sequence});
+      }
+    });
+  };
   if (delayMs <= 0) return run();
-  setTimeout(run, delayMs);
-  return null;
+  return new Promise(resolve => {
+    setTimeout(() => resolve(run()), delayMs);
+  });
 }
 
 function noteTerminalTmuxWindowSwitch(session, shortcut) {
   if (!shortcut) return false;
+  const directIndex = tmuxWindowNumber(shortcut.windowIndex);
+  const previousIndex = tmuxWindowInfoActiveIndex(transcriptMeta.sessions?.[session]);
+  const sequence = directIndex !== null
+    ? setTmuxWindowActiveIndexOverride(session, directIndex)
+    : setTmuxWindowActiveIndexPending(session);
+  if (shortcut.repeatable) terminalTmuxWindowRepeatBySession.set(session, Date.now() + terminalTmuxWindowRepeatMs);
+  else terminalTmuxWindowRepeatBySession.delete(session);
   statusOk(`${esc(shortcut.label)}: ${esc(sessionLabel(session))}`);
   scheduleFit(session);
   focusTerminalFromUserAction(session, 75);
-  scheduleTmuxWindowReadback(session);
+  const requireChanged = shortcut.requireChanged === true || directIndex === null;
+  scheduleTmuxWindowReadback(session, directIndex !== null
+    ? {clearActiveIndexOverride: true, expectedIndex: directIndex, sequence}
+    : {requireChanged: requireChanged && previousIndex !== null, previousIndex, sequence});
   return true;
 }
 
@@ -43179,7 +44248,23 @@ function observeTerminalTmuxPrefixWindowSwitches(session, data) {
   if (!text) return false;
   let pending = terminalTmuxPrefixPendingBySession.get(session) === true;
   let mirrored = false;
-  for (const char of text) {
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === '\x1b' && index + 1 < text.length) {
+      const altShortcut = terminalTmuxAltWindowShortcut(text[index + 1]);
+      if (altShortcut) {
+        mirrored = noteTerminalTmuxWindowSwitch(session, altShortcut) || mirrored;
+        index += 1;
+        continue;
+      }
+    }
+    const repeatUntil = Number(terminalTmuxWindowRepeatBySession.get(session) || 0);
+    const repeatActive = repeatUntil > Date.now();
+    const repeatShortcut = repeatActive ? terminalTmuxPrefixWindowShortcut(char) : null;
+    if (!pending && repeatShortcut && repeatShortcut.repeatable) {
+      mirrored = noteTerminalTmuxWindowSwitch(session, repeatShortcut) || mirrored;
+      continue;
+    }
     if (pending) {
       mirrored = noteTerminalTmuxWindowSwitch(session, terminalTmuxPrefixWindowShortcut(char)) || mirrored;
       pending = false;
@@ -43189,6 +44274,9 @@ function observeTerminalTmuxPrefixWindowSwitches(session, data) {
   }
   if (pending) terminalTmuxPrefixPendingBySession.set(session, true);
   else terminalTmuxPrefixPendingBySession.delete(session);
+  for (const [key, expires] of terminalTmuxWindowRepeatBySession.entries()) {
+    if (Number(expires || 0) <= Date.now()) terminalTmuxWindowRepeatBySession.delete(key);
+  }
   return mirrored;
 }
 
@@ -43390,12 +44478,30 @@ function tmuxWindow(session, key, label) {
   }
   const directIndex = tmuxWindowNumber(key?.windowIndex);
   if (directIndex !== null) {
+    const previousInfo = transcriptMeta.sessions?.[session] || null;
+    const sequence = setTmuxWindowActiveIndexOverride(session, directIndex);
     statusOk(`${esc(label)}: ${esc(sessionLabel(session))}`);
     scheduleFit(session);
     focusTerminalFromUserAction(session, 75);
     apiFetchJson(`/api/tmux-window?session=${encodeURIComponent(session)}&window=${encodeURIComponent(String(directIndex))}`, {method: 'POST'})
-      .then(() => scheduleTmuxWindowReadback(session, {delayMs: 0}))
-      .catch(error => statusErr(localizedHtml('terminal.window.failed', {error: error.message || error})));
+      .then(() => {
+        if (!tmuxWindowSwitchSequenceMatches(session, sequence)) return;
+        scheduleTmuxWindowReadback(session, {delayMs: 0, clearActiveIndexOverride: true, expectedIndex: directIndex, sequence});
+      })
+      .catch(error => {
+        if (!clearTmuxWindowActiveIndexOverride(session, {sequence, clearDirectTarget: true})) return;
+        if (previousInfo) {
+          transcriptMeta = {
+            ...transcriptMeta,
+            sessions: {...(transcriptMeta.sessions || {}), [session]: previousInfo},
+          };
+          updatePanelHeader(session, previousInfo);
+          renderInfoPanel();
+        } else {
+          reconcileTmuxWindowActiveIndexOverride(session, transcriptMeta.sessions?.[session], {sequence});
+        }
+        statusErr(localizedHtml('terminal.window.failed', {error: error.message || error}));
+      });
     return;
   }
   const item = terminals.get(session);
@@ -43403,12 +44509,14 @@ function tmuxWindow(session, key, label) {
     statusErr(terminalNotConnectedHtml(session));
     return;
   }
+  const previousIndex = tmuxWindowInfoActiveIndex(transcriptMeta.sessions?.[session]);
+  const sequence = setTmuxWindowActiveIndexPending(session);
   fitTerminal(session);
   item.socket.send(JSON.stringify({type: 'input', data: String.fromCharCode(2) + key}));
   statusOk(`${esc(label)}: ${esc(sessionLabel(session))}`);
   scheduleFit(session);
   focusTerminalFromUserAction(session, 75);
-  scheduleTmuxWindowReadback(session);
+  scheduleTmuxWindowReadback(session, {requireChanged: previousIndex !== null, previousIndex, sequence});
 }
 
 async function ensureTerminalRunning(session) {
@@ -44043,7 +45151,7 @@ function maybeHandleServerVersionChange(serverVersion) {
 
 async function applyTranscriptsPayload(payload, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
-  transcriptMeta = payload;
+  transcriptMeta = transcriptPayloadWithTmuxWindowOverrides(payload);
   transcriptMetaLoaded = true;
   transcriptMetaLoadError = '';
   clearInfoSessionDrawerCache();
@@ -44183,7 +45291,7 @@ function renderSummaryContext(session, info, agent) {
 
 function transcriptPathRowHtml(path, fallback = 'no transcript path') {
   if (!path) return `<span class="transcript-path-missing">${esc(fallback)}</span>`;
-  return `<span class="transcript-path-label">path</span><span class="transcript-path-value">${esc(path)}</span>${pathCopyButtonHtml(path, {className: 'transcript-path-copy', dataAttr: 'data-copy-transcript-path', title: 'Copy transcript path'})}`;
+  return `<span class="transcript-path-label">path</span><span class="transcript-path-value">${esc(path)}</span>${pathCopyButtonHtml(path, {className: 'transcript-path-copy', title: 'Copy transcript path'})}`;
 }
 
 function updateTranscriptPathRow(session, path, fallback = 'no transcript path') {
@@ -44656,10 +45764,44 @@ function maybeNotifyYoagentJob(notification = {}) {
   }
 }
 
+function tmuxSignalsPayloadWithWindowOverrides(data) {
+  if (!data || typeof data !== 'object' || !Array.isArray(data.windows)) return data;
+  const overrides = new Map();
+  for (const [session, override] of tmuxWindowActiveIndexOverrides.entries()) {
+    if (override === tmuxWindowPendingActiveIndex) continue;
+    const indexKey = tmuxWindowIndexKey(override);
+    if (indexKey !== null) overrides.set(String(session), indexKey);
+  }
+  if (typeof tmuxWindowDirectTargetGuardEntries === 'function') {
+    for (const [session, guard] of tmuxWindowDirectTargetGuardEntries()) {
+      if (overrides.has(session)) continue;
+      const guardIndex = tmuxWindowIndexKey(guard?.index);
+      if (guardIndex !== null) overrides.set(String(session), guardIndex);
+    }
+  }
+  if (!overrides.size) return data;
+  let changed = false;
+  const windows = data.windows.map(windowRecord => {
+    const session = tmuxSignalWindowSession(windowRecord);
+    const override = overrides.get(session);
+    if (override === undefined) return windowRecord;
+    const active = override === tmuxWindowIndexKey(windowRecord?.window_index);
+    if (windowRecord?.active === active) return windowRecord;
+    changed = true;
+    return {...windowRecord, active};
+  });
+  return changed ? {...data, windows} : data;
+}
+
 function applyTmuxSignalsPayload(payload = {}) {
-  const data = payload?.data && typeof payload.data === 'object' ? payload.data : payload;
-  if (!data || typeof data !== 'object') return;
+  const rawData = tmuxSignalPayloadData(payload);
+  const data = tmuxSignalsPayloadWithWindowOverrides(rawData);
+  if (!data || typeof data !== 'object') return null;
   tmuxSignalState = data;
+  applyTmuxSignalActiveWindowsToTranscriptInfo(data);
+  confirmTmuxWindowActiveOverridesFromRawSignals(rawData);
+  reconcileTmuxWindowDirectTargetGuardsFromRawSignals(rawData);
+  return data;
 }
 
 function handleClientPushEvent(type, payload = {}) {

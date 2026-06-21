@@ -18,9 +18,10 @@ This file records the working knowledge YOLOmux uses to detect Claude and Codex 
 - Transcript activity state: `yolomux_lib/transcripts.py::transcript_activity_state_from_text`.
 - Hybrid approval source order: `yolomux_lib/approvals.py::hybrid_approval_prompt_state`.
 - App status fan-out from pane text, approval state, and transcript state: `yolomux_lib/app.py::TmuxWebtermApp.prompt_and_screen_status`, routed through `agent_tui.classify_agent_pane`.
+- Claude/Codex structured stream normalization for YO!agent and text clients: `yolomux_lib/agent_comms/stream_events.py`. Current Claude CLI stream-json can emit Anthropic-style partials either directly or wrapped as `{"type":"stream_event","event":{...}}`; normalizers must unwrap those events, preserve outer `session_id` metadata, separate assistant-visible text from thinking/tool-call auxiliary rows, and dedupe snapshot tool-use echoes without dropping the later tool output.
 - Regression fixtures: `tests/test_auto_approve_detector.py` and `tests/test_transcripts.py`.
 
-When one tmux session contains multiple detected agent panes, session-level YO status captures the selected/preferred agent pane first. If the selected/preferred pane is not an agent pane, it falls back to a deterministic detected-agent pane. This keeps YO activity tied to the pane the user is actually looking at instead of the first agent discovered by tmux enumeration.
+When one tmux session contains multiple detected Claude/Codex panes, each tmux window keeps its own agent kind, pane target, cwd/path, prompt state, and working/idle evidence. Session-level YO remains a stored user toggle, but status collection fans out to the live agent pane targets; UI surfaces such as the tmux window bar, Tabber, popovers, and Recent Agents must render the per-window rows instead of collapsing them into one session agent. A legacy scalar session status may still choose the selected/preferred agent pane first and then a deterministic fallback, but that scalar is only a summary and must not overwrite per-window state/path/branch rows.
 
 ## State Model
 

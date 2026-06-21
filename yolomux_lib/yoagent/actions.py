@@ -54,6 +54,21 @@ NOTIFY_SESSION_IDLE_RE = re.compile(
     r"\b(?:notify|tell)\s+me\s+when\s+(?:(?:tmux\s+)?session|agent)\s+[`'\"]?(?P<session>[^`'\",\s]+)[`'\"]?\s+(?:is\s+|has\s+)?(?:idle|idling|done|finished|complete|completed)\b",
     re.IGNORECASE,
 )
+NOTIFY_SESSION_DONE_AFTER_WORKING_RE = re.compile(
+    r"\b(?:notify|tell)\s+me\s+when\s+(?:(?:tmux\s+)?session|agent)\s+[`'\"]?(?P<session>[^`'\",\s]+)[`'\"]?\s+"
+    r"(?:(?:is\s+|has\s+)?(?:done|finished|complete|completed)\s+after\s+(?:it\s+)?(?:has\s+)?(?:worked|been\s+working|was\s+working|working)|finishes\s+(?:its\s+)?(?:current\s+)?work)\b",
+    re.IGNORECASE,
+)
+NOTIFY_SESSION_NEEDS_INPUT_RE = re.compile(
+    r"\b(?:notify|tell)\s+me\s+when\s+(?:(?:tmux\s+)?session|agent)\s+[`'\"]?(?P<session>[^`'\",\s]+)[`'\"]?\s+"
+    r"(?:(?:needs|wants|requires)\s+(?:input|attention|an?\s+answer|me)|(?:asks|has|is\s+asking)\s+(?:me\s+)?(?:an?\s+)?question|is\s+waiting\s+for\s+(?:input|an?\s+answer|me))\b",
+    re.IGNORECASE,
+)
+NOTIFY_SESSION_BLOCKED_RE = re.compile(
+    r"\b(?:notify|tell)\s+me\s+when\s+(?:(?:tmux\s+)?session|agent)\s+[`'\"]?(?P<session>[^`'\",\s]+)[`'\"]?\s+"
+    r"(?:(?:is|gets|becomes)\s+(?:blocked|stuck|disconnected)|(?:hits|has)\s+an?\s+error|errors?|needs\s+approval|is\s+at\s+an?\s+approval\s+prompt)\b",
+    re.IGNORECASE,
+)
 EXPLICIT_SHELL_COMMAND_RE = re.compile(r"(?:`[^`]+`|\b(?:run|execute|shell\s+command|terminal\s+command)\b)", re.IGNORECASE)
 FENCED_TEXT_RE = re.compile(r"```(?:yaml|yml|markdown|md|text)?\s*\n(?P<text>[\s\S]*?)```", re.IGNORECASE)
 SKILL_NAME_RE = re.compile(r"\b(?:yo!?skill|skill|context)\s+(?:named\s+|called\s+)?[`'\"]?([a-z][a-z0-9-]{1,63})[`'\"]?", re.IGNORECASE)
@@ -75,6 +90,7 @@ def clean_action_text(value: str) -> str:
         r"^ask\s+(?:it\s+)?for\s+",
         r"^ask\s+(?:it\s+)?(?:to\s+)?(?:run\s+)?",
         r"^tell\s+(?:it\s+)?(?:to\s+)?(?:run\s+)?",
+        r"^send\s+it\s+",
         r"^send\s+",
         r"^run\s+",
         r"^it\s+(?:to\s+)?(?:run\s+)?",
@@ -89,7 +105,7 @@ def clean_action_text(value: str) -> str:
             break
     text = RESULT_TRAILING_RE.sub("", text).strip()
     text = RESULT_OPT_OUT_TRAILING_RE.sub("", text).strip()
-    return text.strip(" `'\".")
+    return text.strip(" `'\".,")
 
 
 def normalize_agent_prompt_text(action_text: str, source_text: str) -> str:
@@ -143,6 +159,12 @@ def extract_action_text_for_session(text: str, session: str) -> str:
         if match:
             return clean_action_text(match.group("action"))
     return ""
+
+
+def extract_wait_followup_action(text: str, session: str) -> str:
+    target = session_target_pattern(session)
+    match = re.search(rf"\bwait\s+for\s+{target}[^,;]*(?:[,;]|\bthen\b)?\s*(?P<action>.+)$", str(text or ""), flags=re.IGNORECASE | re.DOTALL)
+    return clean_action_text(match.group("action")) if match else ""
 
 
 def session_mentions_in_order(text: str, known_sessions: list[str] | tuple[str, ...]) -> list[tuple[str, int]]:
@@ -223,6 +245,10 @@ def parse_yoagent_action_intent(question: str, history: list[dict[str, str]], kn
         first_part = text[: then.start()]
         raw_action = extract_action_text_for_session(first_part, session)
         if raw_action:
+            then_text = then.group(1).strip()
+            target_prefix = rf"^(?:ask|tell|send|sending)\s+(?:to\s+|into\s+)?{session_target_pattern(distinct_mentions[1])}\b"
+            handoff_text = extract_action_text_for_session(then_text, distinct_mentions[1]) if re.search(target_prefix, then_text, flags=re.IGNORECASE) else ""
+            handoff_text = handoff_text or clean_action_text(then_text)
             intent = {
                 "type": "session_handoff",
                 "session": session,
@@ -232,7 +258,7 @@ def parse_yoagent_action_intent(question: str, history: list[dict[str, str]], kn
                 "handoff": {
                     "source_session": session,
                     "session": distinct_mentions[1],
-                    "instruction": clean_action_text(then.group(1)),
+                    "instruction": handoff_text,
                 },
             }
             if action_confirmation_requested(text):
@@ -243,6 +269,9 @@ def parse_yoagent_action_intent(question: str, history: list[dict[str, str]], kn
         action_type = "wait_then_send"
     elif "wait" in lower and then:
         raw_action = then.group(1)
+        action_type = "wait_then_send"
+    elif "wait" in lower and not action_result_opted_out(text) and session and re.search(r"\b(?:ask|tell|send|sending|run)\b", lower):
+        raw_action = extract_wait_followup_action(text, session)
         action_type = "wait_then_send"
     elif re.search(r"\b(?:ask|tell|send|sending|run)\b", lower) and session:
         raw_action = extract_action_text_for_session(text, session)
@@ -276,19 +305,31 @@ def parse_yoagent_job_intent(question: str, known_sessions: list[str] | tuple[st
     text = " ".join(str(question or "").split())
     if not text:
         return None
+    if re.search(r"\b(?:cancel|clear|stop)\b", text, re.IGNORECASE) and re.search(r"\b(?:jobs?|watches|watch\s+jobs?|waits)\b", text, re.IGNORECASE):
+        session = extract_session_name(text, known_sessions)
+        if session:
+            return {"type": "cancel_session_jobs", "session": session}
     if NOTIFY_ALL_IDLE_RE.search(text):
         return {"type": "notify_all_idle"}
-    match = NOTIFY_SESSION_IDLE_RE.search(text)
-    if not match:
-        return None
-    session = match.group("session").strip()
-    if known_sessions and session not in {str(item) for item in known_sessions}:
-        return None
-    return {"type": "notify_session_idle", "session": session}
+    for pattern, intent_type in [
+        (NOTIFY_SESSION_NEEDS_INPUT_RE, "notify_session_needs_input"),
+        (NOTIFY_SESSION_BLOCKED_RE, "notify_session_blocked"),
+        (NOTIFY_SESSION_DONE_AFTER_WORKING_RE, "notify_session_done_after_working"),
+        (NOTIFY_SESSION_IDLE_RE, "notify_session_idle"),
+    ]:
+        match = pattern.search(text)
+        if match:
+            session = match.group("session").strip()
+            if known_sessions and session not in {str(item) for item in known_sessions}:
+                return None
+            return {"type": intent_type, "session": session}
+    return None
 
 
-def redacted_action_text(text: str, limit: int = 4000) -> str:
+def redacted_action_text(text: str, limit: int | None = 4000) -> str:
     value = re.sub(r"(?i)\b(token|secret|password|api[_-]?key)\s*=\s*\S+", r"\1=<redacted>", str(text or ""))
+    if limit is None:
+        return value
     return value[:limit] + ("..." if len(value) > limit else "")
 
 

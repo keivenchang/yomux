@@ -91,22 +91,40 @@ function updateNotifyLevelPreferenceChoices() {
 }
 
 const YOAGENT_CLAUDE_MODEL_LABEL_KEYS = {
+  'claude-fable-5': 'pref.yoagent.claude_model.fable',
   'claude-opus-4-8': 'pref.yoagent.claude_model.opus',
   'claude-sonnet-4-6': 'pref.yoagent.claude_model.sonnet',
   'claude-haiku-4-5': 'pref.yoagent.claude_model.haiku',
 };
 
 const YOAGENT_CODEX_MODEL_LABEL_KEYS = {
+  'gpt-5.3-codex-spark': 'pref.yoagent.codex_model.gpt53spark',
   'gpt-5.4-mini': 'pref.yoagent.codex_model.gpt54mini',
   'gpt-5.4': 'pref.yoagent.codex_model.gpt54',
   'gpt-5.5': 'pref.yoagent.codex_model.gpt55',
 };
 
+function settingCatalogEntry(path) {
+  const catalog = clientSettingsPayload?.catalog || {};
+  return catalog && typeof catalog[path] === 'object' ? catalog[path] : {};
+}
+
+function settingChoiceLabels(path) {
+  const labels = settingCatalogEntry(path).choice_labels || {};
+  return labels && typeof labels === 'object' ? labels : {};
+}
+
+function settingChoiceMetadata(path) {
+  const metadata = settingCatalogEntry(path).choice_metadata || {};
+  return metadata && typeof metadata === 'object' ? metadata : {};
+}
+
 function modelPreferenceChoices(path, fallbackValues, labelKeys) {
   const choices = Array.isArray(clientSettingsPayload?.choices?.[path])
     ? clientSettingsPayload.choices[path]
     : fallbackValues;
-  return choices.map(value => ({value, label: labelKeys[value] ? t(labelKeys[value]) : preferenceChoiceLabel(value)}));
+  const catalogLabels = settingChoiceLabels(path);
+  return choices.map(value => ({value, label: catalogLabels[value] || (labelKeys[value] ? t(labelKeys[value]) : preferenceChoiceLabel(value))}));
 }
 
 function yoagentClaudeModelPreferenceChoices() {
@@ -129,7 +147,12 @@ function yoagentClaudeEffortPreferenceChoices() {
 }
 
 function yoagentCodexEffortPreferenceChoices() {
-  return effortPreferenceChoices('yoagent.codex_effort', ['low', 'medium', 'high'], 'pref.yoagent.codex_effort');
+  const selectedModel = String(preferenceValue('yoagent.codex_model') || '').trim();
+  const modelMetadata = settingChoiceMetadata('yoagent.codex_model')[selectedModel] || {};
+  const options = Array.isArray(modelMetadata.effort_options) && modelMetadata.effort_options.length
+    ? modelMetadata.effort_options
+    : ['low', 'medium', 'high', 'xhigh'];
+  return options.map(value => ({value, label: t(`pref.yoagent.codex_effort.${value}`)}));
 }
 
 function yoagentModelPreferenceChoicesForBackend(backend) {
@@ -222,12 +245,6 @@ function preferenceSections() {
       {path: 'uploads.custom_actions', label: t('pref.uploads.custom_actions.label'), type: 'list', wide: true, help: t('pref.uploads.custom_actions.help')},
       {path: 'uploads.max_bytes', label: t('pref.uploads.max_bytes.label'), type: 'number', min: 1, max: 512, step: 1, suffix: 'MB', scale: 1048576, help: t('pref.uploads.max_bytes.help')},
     ]},
-    {title: t('pref.section.share'), items: [
-      {path: 'share.ttl_seconds', label: t('pref.share.ttl_seconds.label'), type: 'number', min: 1, max: 480, step: 1, suffix: t('unit.minute.short'), scale: 60, help: t('pref.share.ttl_seconds.help')},
-      {path: 'share.max_viewers', label: t('pref.share.max_viewers.label'), type: 'number', min: 1, max: 300, step: 1, help: t('pref.share.max_viewers.help')},
-      {path: 'share.read_only', label: t('pref.share.read_only.label'), type: 'boolean', help: t('pref.share.read_only.help')},
-      {path: 'share.scheme', label: t('pref.share.scheme.label'), type: 'radio', choices: ['http', 'https'], help: t('pref.share.scheme.help')},
-    ]},
     {title: t('pref.section.performance'), items: [
       {path: 'performance.server_event_poll_ms', label: t('pref.performance.server_event_poll_ms.label'), type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.server_event_poll_ms.help')},
       {path: 'performance.server_background_file_event_poll_ms', label: t('pref.performance.server_background_file_event_poll_ms.label'), type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.server_background_file_event_poll_ms.help')},
@@ -245,15 +262,6 @@ function preferenceSections() {
     {title: t('pref.section.github'), items: [
       {path: 'github.watched_prs', label: t('pref.github.watched_prs.label'), type: 'list', wide: true, help: t('pref.github.watched_prs.help')},
     ]},
-    {id: 'yolo', title: t('pref.section.yolo'), items: [
-      {path: 'performance.auto_approve_interval_seconds', label: t('pref.performance.auto_approve_interval_seconds.label'), type: 'number', min: 0.1, max: 10, step: 0.1, suffix: 's', help: t('pref.performance.auto_approve_interval_seconds.help')},
-      {path: 'yolo.rule_file_path', label: t('pref.yolo.rule_file_path.label'), type: 'text', action: 'open-yolo-rule', wide: true, help: t('pref.yolo.rule_file_path.help')},
-      {path: 'yolo.dry_run', label: t('pref.yolo.dry_run.label'), type: 'boolean', help: t('pref.yolo.dry_run.help')},
-      {path: 'yolo.prompt_source', label: t('pref.yolo.prompt_source.label'), type: 'radio', choices: [
-        {value: 'hybrid', label: t('pref.yolo.prompt_source.hybrid')},
-        {value: 'pane', label: t('pref.yolo.prompt_source.pane')},
-      ], help: t('pref.yolo.prompt_source.help')},
-    ]},
     {title: t('pref.section.yoagent'), items: [
       {path: 'yoagent.backend', label: t('pref.yoagent.backend.label'), type: 'radio', choices: [
         {value: 'auto', label: t('pref.yoagent.backend.auto')},
@@ -267,10 +275,24 @@ function preferenceSections() {
       {path: 'yoagent.claude_effort', label: t('pref.yoagent.claude_effort.label'), type: 'radio', choices: yoagentClaudeEffortPreferenceChoices(), help: t('pref.yoagent.claude_effort.help')},
       {path: 'yoagent.codex_model', label: t('pref.yoagent.codex_model.label'), type: 'select', choices: yoagentCodexModelPreferenceChoices(), help: t('pref.yoagent.codex_model.help')},
       {path: 'yoagent.codex_effort', label: t('pref.yoagent.codex_effort.label'), type: 'radio', choices: yoagentCodexEffortPreferenceChoices(), help: t('pref.yoagent.codex_effort.help')},
-      {path: 'yoagent.refresh_interval_seconds', label: t('pref.yoagent.refresh_interval_seconds.label'), type: 'number', min: 0, max: 3600, step: 30, suffix: 's', help: t('pref.yoagent.refresh_interval_seconds.help')},
       {path: 'yoagent.system_prompt', label: t('pref.yoagent.system_prompt.label'), type: 'textarea', help: t('pref.yoagent.system_prompt.help'), alwaysEnableReset: true},
       {path: 'yoagent.intro', label: t('pref.yoagent.intro.label'), type: 'textarea', help: t('pref.yoagent.intro.help'), alwaysEnableReset: true},
       {path: 'yoagent.format', label: t('pref.yoagent.format.label'), type: 'textarea', help: t('pref.yoagent.format.help'), alwaysEnableReset: true},
+    ]},
+    {title: t('pref.section.share'), items: [
+      {path: 'share.ttl_seconds', label: t('pref.share.ttl_seconds.label'), type: 'number', min: 1, max: 480, step: 1, suffix: t('unit.minute.short'), scale: 60, help: t('pref.share.ttl_seconds.help')},
+      {path: 'share.max_viewers', label: t('pref.share.max_viewers.label'), type: 'number', min: 1, max: 300, step: 1, help: t('pref.share.max_viewers.help')},
+      {path: 'share.read_only', label: t('pref.share.read_only.label'), type: 'boolean', help: t('pref.share.read_only.help')},
+      {path: 'share.scheme', label: t('pref.share.scheme.label'), type: 'radio', choices: ['http', 'https'], help: t('pref.share.scheme.help')},
+    ]},
+    {id: 'yolo', title: t('pref.section.yolo'), items: [
+      {path: 'performance.auto_approve_interval_seconds', label: t('pref.performance.auto_approve_interval_seconds.label'), type: 'number', min: 0.1, max: 10, step: 0.1, suffix: 's', help: t('pref.performance.auto_approve_interval_seconds.help')},
+      {path: 'yolo.rule_file_path', label: t('pref.yolo.rule_file_path.label'), type: 'text', action: 'open-yolo-rule', wide: true, help: t('pref.yolo.rule_file_path.help')},
+      {path: 'yolo.dry_run', label: t('pref.yolo.dry_run.label'), type: 'boolean', help: t('pref.yolo.dry_run.help')},
+      {path: 'yolo.prompt_source', label: t('pref.yolo.prompt_source.label'), type: 'radio', choices: [
+        {value: 'hybrid', label: t('pref.yolo.prompt_source.hybrid')},
+        {value: 'pane', label: t('pref.yolo.prompt_source.pane')},
+      ], help: t('pref.yolo.prompt_source.help')},
     ]},
   ];
 }
@@ -846,14 +868,6 @@ function bindPreferencesPanel(panel) {
       event.preventDefault();
       preferencesResetConfirmVisible = false;
       renderPreferencesPanels({force: true});
-      return;
-    }
-    const copy = event.target.closest('[data-copy-path]');
-    if (copy && panel.contains(copy)) {
-      event.preventDefault();
-      copyTextToClipboard(copy.dataset.copyPath || '')
-        .then(() => { statusEl.textContent = 'copied path'; })
-        .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
       return;
     }
     const copyText = event.target.closest('[data-copy-text]');

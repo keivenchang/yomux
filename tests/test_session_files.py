@@ -131,6 +131,7 @@ def test_session_files_payload_keeps_boundary_touched_repo_stable_for_grace(tmp_
     )
     transcript_mtime = 10_000.0
     os.utime(transcript, (transcript_mtime, transcript_mtime))
+    touched.write_text("changed\n", encoding="utf-8")
     info = SessionInfo(session="s1", panes=[], selected_pane=None, agents=[agent("claude", transcript, primary)])
 
     before_boundary = session_files.session_files_payload_for_info(info, hours=1, now=transcript_mtime + 3600 - 0.5)
@@ -138,9 +139,52 @@ def test_session_files_payload_keeps_boundary_touched_repo_stable_for_grace(tmp_
 
     before_repos = {item["repo"] for item in before_boundary["repos"]}
     after_repos = {item["repo"] for item in after_boundary["repos"]}
-    assert before_repos == after_repos
-    assert str(primary) in after_repos
-    assert str(secondary) in after_repos
+    assert before_repos == after_repos == {str(secondary)}
+    assert str(primary) not in after_repos
+
+
+def test_session_files_payload_excludes_zero_change_candidate_repos_from_rendered_repo_set(tmp_path):
+    primary = tmp_path / "yolomux.dev8001"
+    sibling = tmp_path / "yolomux.dev8002"
+    changed = tmp_path / "ai-config"
+    for repo in (primary, sibling, changed):
+        repo.mkdir()
+        git(repo, "init")
+        git(repo, "config", "user.email", "test@example.com")
+        git(repo, "config", "user.name", "Test User")
+        tracked = repo / "tracked.txt"
+        tracked.write_text("base\n", encoding="utf-8")
+        git(repo, "add", "tracked.txt")
+        git(repo, "commit", "-m", "base")
+    (changed / "tracked.txt").write_text("changed\n", encoding="utf-8")
+    transcript = tmp_path / "claude.jsonl"
+    transcript.write_text(
+        json.dumps({
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "tool_use", "name": "Edit", "input": {"file_path": str(primary / "tracked.txt")}},
+                {"type": "tool_use", "name": "Edit", "input": {"file_path": str(changed / "tracked.txt")}},
+            ]},
+        }) + "\n",
+        encoding="utf-8",
+    )
+    os.utime(transcript, (1500, 1500))
+    panes = [
+        PaneInfo(session="s1", window="0", pane="0", pane_id="%1", target="s1:0.0", current_path=str(primary), command="zsh", active=True, window_active=True, title="", pid=11),
+        PaneInfo(session="s1", window="0", pane="1", pane_id="%2", target="s1:0.1", current_path=str(sibling), command="zsh", active=False, window_active=True, title="", pid=12),
+    ]
+    info = SessionInfo(session="s1", panes=panes, selected_pane=panes[0], agents=[agent("claude", transcript, primary)])
+
+    samples = [session_files.session_files_payload_for_info(info, hours=24, now=1600 + index) for index in range(3)]
+
+    assert [[repo["repo"] for repo in sample["repos"]] for sample in samples] == [[str(changed)], [str(changed)], [str(changed)]]
+    for payload in samples:
+        rendered_repos = {item["repo"] for item in payload["files"] if item["status"] != "T" and item["repo"]}
+        counted_repos = {item["repo"] for item in payload["repos"]}
+        assert rendered_repos == counted_repos == {str(changed)}
+        assert payload["repos"][0]["count"] == sum(1 for item in payload["files"] if item["status"] != "T" and item["repo"] == str(changed))
+        assert any(item["repo"] == str(primary) and item["status"] == "T" for item in payload["files"])
+        assert str(sibling) not in counted_repos
 
 
 def test_session_files_payload_carries_agent_window_attribution(tmp_path):
@@ -272,16 +316,7 @@ def test_session_files_payload_keeps_transcript_paths_when_branch_is_clean(tmp_p
     assert item["removed"] is None
     assert item["uploaded"] is False
 
-    assert len(payload["repos"]) == 1
-    repo_summary = payload["repos"][0]
-    assert repo_summary["repo"] == str(repo)
-    assert repo_summary["count"] == 1
-    assert repo_summary["touched_count"] == 1
-    assert repo_summary["added"] == 0
-    assert repo_summary["removed"] == 0
-    assert repo_summary["from_ref"] == "default"
-    assert repo_summary["to_ref"] == "base"
-    assert repo_summary["error"] == ""
+    assert payload["repos"] == []
 
 
 def test_scan_codex_transcript_uses_exec_command_workdir_for_git_add(tmp_path):
@@ -379,9 +414,7 @@ def test_session_files_payload_uses_historical_codex_transcript_for_clean_pane_r
     assert item["repo"] == str(repo)
     assert item["path"] == "tracked.txt"
     assert item["agents"] == ["codex"]
-    assert payload["repos"][0]["repo"] == str(repo)
-    assert payload["repos"][0]["count"] == 1
-    assert payload["repos"][0]["touched_count"] == 1
+    assert payload["repos"] == []
 
 
 def test_historical_codex_transcript_prefers_recent_transcript_with_repo_changes(tmp_path, monkeypatch):

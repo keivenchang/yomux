@@ -1439,7 +1439,9 @@ function tmuxSignalSessionActivityTs(session) {
 
 function tmuxSignalActivePaneForSession(session) {
   const windows = tmuxSignalWindowsForSession(session);
-  const windowRecord = windows.find(item => item?.active === true) || windows[0] || null;
+  const override = typeof tmuxWindowActiveIndexOverride === 'function' ? tmuxWindowActiveIndexOverride(session) : undefined;
+  const overrideWindow = override !== undefined && override !== '__pending__' ? tmuxSignalWindowForSessionIndex(session, override) : null;
+  const windowRecord = overrideWindow || windows.find(item => item?.active === true) || windows[0] || null;
   const panes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
   return panes.find(pane => pane?.active === true) || panes[0] || null;
 }
@@ -1689,10 +1691,13 @@ function globalActivityStatusLineHtml() {
   const counts = globalActivityCounts();
   if (!counts.total) return '';
   const parts = [];
-  parts.push(`<span class="topbar-activity-run${counts.running ? ' active' : ''}">${counts.running} RUN</span>`);
-  parts.push(`<span class="topbar-activity-ques${counts.questions ? ' topbar-activity-attn' : ''}">${counts.questions} ASK?</span>`);
-  parts.push(`<span class="topbar-activity-blk${counts.blocked ? ' topbar-activity-attn' : ''}">${counts.blocked} BLK</span>`);
-  parts.push(`<span class="topbar-activity-idle">${counts.idle} idle</span>`);
+  const runTone = counts.running ? 'positive' : '';
+  const questionTone = counts.questions ? 'attention' : '';
+  const blockedTone = counts.blocked ? 'attention' : '';
+  parts.push(`<span class="${esc(statusIndicatorInlineClasses(runTone, 'topbar-activity-run', counts.running ? 'active' : ''))}">${counts.running} RUN</span>`);
+  parts.push(`<span class="${esc(statusIndicatorInlineClasses(questionTone, 'topbar-activity-ques', counts.questions ? 'topbar-activity-attn' : ''))}"${statusIndicatorToneStyle(questionTone)}>${counts.questions} ASK?</span>`);
+  parts.push(`<span class="${esc(statusIndicatorInlineClasses(blockedTone, 'topbar-activity-blk', counts.blocked ? 'topbar-activity-attn' : ''))}"${statusIndicatorToneStyle(blockedTone)}>${counts.blocked} BLK</span>`);
+  parts.push(`<span class="${esc(statusIndicatorInlineClasses('', 'topbar-activity-idle'))}">${counts.idle} idle</span>`);
   return parts.join('<span class="topbar-activity-sep" aria-hidden="true">·</span>');
 }
 
@@ -1734,6 +1739,7 @@ function attentionAnimationStyle() {
 function syncAttentionAnimation(node, active) {
   if (!node?.style) return;
   node.classList?.toggle?.('attention-pulse', active === true);
+  node.classList?.toggle?.('heartbeat-pulse', active === true);
   if (active) {
     if (!node.style.getPropertyValue('--attention-animation-delay')) {
       node.style.setProperty('--attention-animation-delay', attentionAnimationDelay());
@@ -1743,16 +1749,63 @@ function syncAttentionAnimation(node, active) {
   }
 }
 
+function statusIndicatorClassItems(...classes) {
+  const items = [];
+  classes.forEach(item => {
+    if (Array.isArray(item)) items.push(...statusIndicatorClassItems(...item));
+    else if (item) items.push(item);
+  });
+  return items;
+}
+
+function statusIndicatorClasses(...classes) {
+  return ['status-indicator', ...statusIndicatorClassItems(...classes)].join(' ');
+}
+
+function statusIndicatorToneClasses(tone) {
+  if (tone === 'positive') return ['status-indicator--positive'];
+  if (tone === 'working') return ['status-indicator--working', 'heartbeat-pulse'];
+  if (tone === 'attention') return ['status-indicator--attention', 'heartbeat-pulse', 'attention-pulse'];
+  if (tone === 'settled') return ['status-indicator--settled'];
+  if (tone === 'idle') return ['status-indicator--idle'];
+  return [];
+}
+
+function statusIndicatorToneStyle(tone) {
+  return tone === 'attention' ? ` style="${attentionAnimationStyle()}"` : '';
+}
+
+function statusIndicatorModifiedClasses(modifier, tone, classes, options = {}) {
+  const items = statusIndicatorClassItems(classes);
+  const toneClasses = statusIndicatorToneClasses(tone);
+  if (options.modifierPosition === 'after-all') return statusIndicatorClasses(items, toneClasses, modifier);
+  if (!items.length) return statusIndicatorClasses(modifier, toneClasses);
+  return statusIndicatorClasses(items[0], modifier, items.slice(1), toneClasses);
+}
+
+function statusIndicatorTextClasses(tone, ...classes) {
+  return statusIndicatorModifiedClasses('status-indicator--text', tone, classes);
+}
+
+function statusIndicatorDotClasses(tone, ...classes) {
+  return statusIndicatorModifiedClasses('status-indicator--dot', tone, classes);
+}
+
+function statusIndicatorInlineClasses(tone, ...classes) {
+  return statusIndicatorModifiedClasses('status-indicator--inline', tone, classes, {modifierPosition: 'after-all'});
+}
+
 function stateBadgeHtml(key, short, title, options = {}) {
   const classes = ['session-state-badge', 'tab-symbol', `session-state-${key}`];
   const attention = stateDef(key).attention;
-  if (attention) classes.push('session-state-reminder', 'attention-pulse');
-  const style = attention ? ` style="${attentionAnimationStyle()}"` : '';
+  const tone = attention ? 'attention' : '';
+  if (attention) classes.push('session-state-reminder');
+  const style = statusIndicatorToneStyle(tone);
   const clearable = options.clearable === true && options.session && options.promptSignature;
   const attrs = clearable
     ? ` role="button" tabindex="0" data-prompt-attention-clear="1" data-session="${esc(options.session)}" data-prompt-signature="${esc(options.promptSignature)}" aria-label="${esc(t('state.clearAsk'))}"`
     : '';
-  return `<span class="${esc(classes.join(' '))}"${style} title="${esc(title)}"${attrs}>${esc(short)}</span>`;
+  return `<span class="${esc(statusIndicatorTextClasses(tone, classes))}"${style} title="${esc(title)}"${attrs}>${esc(short)}</span>`;
 }
 
 function sessionStateHtml(state) {

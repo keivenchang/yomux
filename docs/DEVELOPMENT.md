@@ -19,16 +19,11 @@ On externally managed system Python installs, create a virtual environment first
 
 ## Project Conventions
 
-### Version bump per commit
+### Version bump policy
 
-`YOLOMUX_VERSION` in `yolomux_lib/common.py` must be bumped on every commit. The patch segment increments monotonically:
+`YOLOMUX_VERSION` in `yolomux_lib/common.py` is bumped only when publishing to `origin/main`. LOCAL `cps` / `yolo-cps` lands work on local `main` with no version bump and no push; ORIGIN / REMOTE `cps` rebases onto `origin/main`, increments the patch segment, folds the bump into the work commit, and includes `Version: 0.4.N` in the commit message body. The self-updater compares `YOLOMUX_VERSION` on `origin/main`, so SHA-only published commits do not cue update notifications, but local integration commits must not create fake versions.
 
-- `0.1` -> `0.1.1` -> `0.1.2` -> `0.1.3` -> ...
-- If the current value has no patch segment (just `0.1`), the next commit appends one (`0.1.1`).
-- Include the version-bump line in the same commit as the actual code change. Do not make a standalone version-bump commit.
-- Surface the new version in the commit message body, for example `Version: 0.1.N`.
-
-To find the latest committed version: `git show HEAD:yolomux_lib/common.py | grep YOLOMUX_VERSION` and add 1 to the patch segment.
+To find the latest committed version before ORIGIN publish: `git show origin/main:yolomux_lib/common.py | grep YOLOMUX_VERSION` and add 1 to the patch segment.
 
 ### Timing constants
 
@@ -201,6 +196,8 @@ YOLOmux serves xterm.js from a local install when available. It checks `YOLOMUX_
 
 The UI ships in 19 user-facing languages. Locale files are in `static_src/` and generated `static/` locale outputs. When adding a new user-facing string, add the key to all locale files: English, Traditional and Simplified Chinese, Japanese, Korean, Spanish, German, French, Italian, Brazilian Portuguese, Polish, Dutch, Hebrew, Arabic, Russian, Hindi, Vietnamese, Thai, and Turkish, plus `en-XA` pseudo-locale for QA.
 
+Do not seed new locale keys with the English value and leave them there. Preserve interpolation tokens such as `{path}`, `{qpath}`, `{paths}`, `{qpaths}`, `{name}`, `{count}`, `{category}`, `{session}`, and `{command}` exactly, but translate the surrounding prose. `python3 tools/static_build.py --check` prints a warning report for non-allowlisted locale values that still equal `en.json` and fails only if a locale regresses above its recorded baseline; `python3 tools/static_build.py --i18n-untranslated-report` prints the full key list for backfill work.
+
 ## How The Webterm Works
 
 The server is a dependency-light Python `ThreadingHTTPServer`. It serves one HTML page, local xterm.js assets, JSON APIs, Server-Sent Events streams, and a WebSocket endpoint.
@@ -215,9 +212,9 @@ The browser creates panel DOM nodes for visible sessions at boot, checks that th
 
 The full layout is encoded in the page URL through readable `sessions`, `layout`, and `tabs` query parameters; split positions are stored as percentages in `layout`. This makes a layout reload-safe and shareable/bookmarkable without browser storage.
 
-Transcript metadata comes from tmux pane discovery plus local process-tree inspection. YOLOmux looks for Claude or Codex processes in the selected tmux pane, finds their transcript/session metadata, and exposes it in the pane header, transcript tab, and API responses.
+Transcript metadata comes from tmux pane discovery plus local process-tree inspection. YOLOmux looks for Claude or Codex processes across the session's tmux windows, finds their transcript/session metadata, and exposes both per-session summaries and per-window rows in the pane header, transcript tab, popovers, Tabber, and API responses. `project.git` is the primary session summary; `window_metadata[]` carries each tmux window's cwd plus local git branch/repo/worktree/HEAD for UI that must stay pegged to a selected or matching window.
 
-The transcript tab uses Server-Sent Events from `/api/context-stream`. The AI summary tab uses `/api/summary-stream`, which builds a scoped prompt from the selected session's recent transcript and streams a Codex-generated summary back to the browser. Summary model settings can be overridden with `YOLOMUX_SUMMARY_MODEL`, `YOLOMUX_SUMMARY_EFFORT`, and `YOLOMUX_SUMMARY_SERVICE_TIER`.
+The transcript tab uses Server-Sent Events from `/api/context-stream`. The AI summary tab uses `/api/summary-stream`, which builds a scoped prompt from the selected session's recent transcript and streams a Codex-generated summary back to the browser. Summary provider defaults live in `settings.yaml` under `summary.*` and in the backend settings catalog; `YOLOMUX_SUMMARY_MODEL`, `YOLOMUX_SUMMARY_EFFORT`, and `YOLOMUX_SUMMARY_SERVICE_TIER` only seed defaults when they name valid catalog values.
 
 YOLO uses `auto_approve_tmux.py` workers behind `/api/auto-approve`. The browser polls YOLO status every `paneStateRefreshMs` and reflects the active state in each pane tab.
 
@@ -235,7 +232,7 @@ Write access requires HTTPS. A write viewer does not publish `layout`, `ui-state
 
 All API routes require auth unless the process was intentionally started with the local-only `YOLOMUX_TEST_AUTH_BYPASS=1` test bypass. Read endpoints accept `readonly` or `admin`, except `/api/summary-stream` because it launches Codex and requires `admin`. Mutating POST routes require `admin` except `/api/event`, which accepts readonly client telemetry. `/ws` accepts readonly users but attaches tmux with `-r` and ignores keyboard input, tmux-scroll, and resize messages. Share-token guests are narrower than `auth.yaml` readonly users: tokens are scoped to one share and whitelisted only for share-scoped page, static, replay, terminal, status, and readonly file/data routes. The test bypass never escalates a share-token request; share-token scoping still wins.
 
-- `GET /api/transcripts` returns pane, process, and transcript-path metadata.
+- `GET /api/transcripts` returns pane, process, transcript-path, `project`, and `window_metadata[]` metadata. Use `window_metadata[]` for per-window path/branch/git UI; use `project.git` only for the session-level summary.
 - `GET /api/tmux?session=project1&lines=90` returns a tmux capture-pane snapshot.
 - `GET /api/transcript?session=project1&lines=120` returns the transcript tail for one session.
 - `GET /api/context?session=project1&messages=40` returns a compact, message-oriented transcript tail.
@@ -255,9 +252,9 @@ All API routes require auth unless the process was intentionally started with th
 - `GET /api/yoagent/skill-files?kind=skill&name=local-checks`, `POST /api/yoagent/skill-files/upsert`, and `POST /api/yoagent/skill-files/delete` are admin-only narrow file-management routes for user-local YO!skills/context. They validate names, YAML, allowed tools, and canonical paths before writing or deleting; built-in files are not writable through these routes.
 - `docs/YOAGENT_SKILLS.md` is the user/developer guide for YO!skill schema, file locations, examples, and YO!agent skill-file management commands.
 - `docs/specs/YOAGENT_COMMON_INTENTS_AND_AGENT_COMMUNICATION.md` is the product spec for common YO!agent questions, expected Preference/product-state behavior, multi-agent handoff examples, artifact handoff rules, and the cross-agent communication reliability ladder.
-- `POST /api/yoagent/intent` returns a server-side YO!agent preview for a proposed action or job. `POST /api/yoagent/actions/preview-send` resolves a target session into an exact pane/agent/transport preview, and `POST /api/yoagent/actions/execute-send` executes only a live, ready, not-stale preview id. `GET /api/yoagent/jobs`, `POST /api/yoagent/jobs`, `POST /api/yoagent/jobs/<id>/confirm`, and `POST /api/yoagent/jobs/<id>/cancel` manage YO!agent jobs. These routes are admin-only; share-token and readonly users cannot create jobs or send prompts indirectly through YO!agent chat.
+- `POST /api/yoagent/intent` returns a server-side YO!agent preview for a proposed action or job. `POST /api/yoagent/actions/preview-send` resolves a target session into an exact pane/agent/transport preview, and `POST /api/yoagent/actions/execute-send` executes only a live, ready, not-stale preview id. `GET /api/yoagent/jobs`, `POST /api/yoagent/jobs`, `POST /api/yoagent/jobs/<id>/confirm`, `POST /api/yoagent/jobs/<id>/cancel`, and `POST /api/yoagent/jobs/cancel-session` manage YO!agent jobs. These routes are admin-only; share-token and readonly users cannot create jobs or send prompts indirectly through YO!agent chat.
 - YO!agent jobs persist under `yoagent_jobs` in `~/.config/yolomux/state.json`. Each job records `id`, `type`, `target`, `predicate`, `action`, timestamps, status, confirmation state, timeout, idempotency hash, last observed state, and audit event ids. Jobs are one-shot in the first implementation; duplicate queued/pending jobs are rejected by idempotency hash. The server polls queued jobs from the existing client-event watch loop, debounces idle/done predicates with `quiet_seconds`, times out expired jobs once, and emits `yoagent_jobs_changed` events for created, confirmed, cancelled, fired, failed, and timed-out jobs.
-- Notify jobs cover one session becoming idle/done and all visible tmux sessions becoming idle when all-session discovery is enabled. Wait-then-send jobs wait for the resolved target to accept a Claude/Codex prompt, then create a fresh send preview, revalidate the target, paste text plus Return, and start the same result watcher used by direct sends unless the user explicitly opted out. If the session disappears, the job fails and notifies rather than retargeting by name.
+- Notify jobs cover one session becoming idle/done, one session entering `needs-input`, one session becoming blocked by approval/error/disconnect state, one session finishing after this job observed it working, and all visible tmux sessions becoming idle when all-session discovery is enabled. `POST /api/yoagent/jobs/cancel-session` cancels queued and pending-confirmation jobs for one session without touching fired/failed/timed-out jobs or other sessions. Wait-then-send jobs wait for the resolved target to accept a Claude/Codex prompt, then create a fresh send preview, revalidate the target, paste text plus Return, and start the same result watcher used by direct sends unless the user explicitly opted out. If the session disappears, the job fails and notifies rather than retargeting by name.
 - YO!agent risk policy is intentionally narrow and boring. Normal explicit sends do not ask for extra confirmation unless the user asks for preview/confirmation, but high-risk prompt text forces confirmation: secret-like assignments, credential paths, `rm -rf`, `git reset --hard`, broad `pkill -f`, recursive `chmod`/`chown`, and SSH commands. Job idempotency keys are hashes, and stored/displayed YO!agent conversation text plus public job/action payloads redact known `token=`, `secret=`, `password=`, and `api_key=` style values.
 - `GET /api/session-files?session=project1&hours=24` returns repo-aware AI file changes for one session. `GET /api/session-files-batch?session=project1&session=project2&hours=24` returns the same payload shape keyed by session after discovering tmux metadata once, then fills missing per-session payloads with bounded concurrency. These are the endpoints behind Tabber's Level 2 `Fetching paths...` rows and are intentionally separate from the 15-second `/api/activity` cache. They use a short in-memory cache, a shared disk cache under `~/.local/state/yolomux/session-files-cache/` (or `YOLOMUX_STATE_DIR/session-files-cache/`), and a per-key cross-process lock so parallel YOLOmux servers can reuse one touched-path payload instead of rebuilding it in every process. Startup Tabber activity warmup writes the same `payload` cache keys that these endpoints read. `force=1` bypasses existing cache data and stores the replacement result.
 - `GET /api/auto-approve` returns YOLO status for all sessions.

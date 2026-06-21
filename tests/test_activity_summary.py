@@ -554,6 +554,120 @@ def test_work_next_ranking_uses_prompt_and_metadata_signals():
     assert "docs cleanup" in full_priority
 
 
+def test_work_next_ranking_covers_blockers_tests_reviews_local_priorities_and_stale_work():
+    now = time.time()
+    activity = {
+        "global": {"headline": "Six sessions have cached activity.", "lines": []},
+        "sessions": {
+            "1": {
+                "session": "1",
+                "agent": "codex",
+                "agent_label": "Codex gpt-5",
+                "active": False,
+                "state": {"key": "idle", "text": ""},
+                "activity_label": "idle",
+                "repos": ["/repo/release"],
+                "files": {"count": 0, "added": 0, "removed": 0},
+                "work": "blocked release",
+                "blockers": ["waiting for deploy access"],
+                "last_activity_text": "30 minutes ago",
+                "last_activity_ts": now - 1800,
+            },
+            "2": {
+                "session": "2",
+                "agent": "claude",
+                "agent_label": "Claude sonnet",
+                "active": False,
+                "activity_label": "idle",
+                "repos": ["/repo/tests"],
+                "files": {"count": 1, "added": 2, "removed": 0},
+                "work": "test failure",
+                "status_text": "unit test failed in test_agent_prompt",
+                "last_activity_text": "20 minutes ago",
+                "last_activity_ts": now - 1200,
+            },
+            "3": {
+                "session": "3",
+                "agent": "codex",
+                "agent_label": "Codex gpt-5",
+                "active": False,
+                "activity_label": "idle",
+                "repos": ["/repo/review"],
+                "files": {"count": 0, "added": 0, "removed": 0},
+                "work": "review comments",
+                "last_activity_text": "10 minutes ago",
+                "last_activity_ts": now - 600,
+            },
+            "4": {
+                "session": "4",
+                "agent": "claude",
+                "agent_label": "Claude opus",
+                "active": False,
+                "activity_label": "idle",
+                "repos": ["/repo/local"],
+                "files": {"count": 0, "added": 0, "removed": 0},
+                "work": "local roadmap item",
+                "last_activity_text": "1 day ago",
+                "last_activity_ts": now - 86400,
+            },
+            "5": {
+                "session": "5",
+                "agent": "codex",
+                "agent_label": "Codex gpt-5",
+                "active": False,
+                "activity_label": "idle",
+                "repos": ["/repo/dirty"],
+                "files": {"count": 0, "added": 0, "removed": 0},
+                "work": "dirty worktree",
+                "last_activity_text": "5 minutes ago",
+                "last_activity_ts": now - 300,
+            },
+            "6": {
+                "session": "6",
+                "agent": "claude",
+                "agent_label": "Claude haiku",
+                "active": True,
+                "activity_label": "recently active",
+                "repos": ["/repo/active"],
+                "files": {"count": 0, "added": 0, "removed": 0},
+                "work": "active but lower priority",
+                "last_activity_text": "1 minute ago",
+                "last_activity_ts": now - 60,
+            },
+        },
+        "session_info": {
+            "3": {"project": {"pull_request": {"review_decision": "CHANGES_REQUESTED"}}},
+            "5": {"project": {"git": {"dirty_count": 4}}},
+        },
+        "yoagent_skills": {
+            "context_lines": [
+                "YO!agent context `local-priorities`: work-next priority: session 4 - release note is due today.",
+            ],
+        },
+        "errors": [],
+    }
+
+    full_reply = deterministic_yoagent_reply("what should I work on? full inventory", activity, {})
+    priority = full_reply.split("**Priority:**", 1)[1].split("**Open / pending:**", 1)[0]
+
+    assert priority.count("- **") == 6
+    assert priority.index("blocked release") < priority.index("test failure") < priority.index("review comments") < priority.index("local roadmap item") < priority.index("dirty worktree") < priority.index("active but lower priority")
+    assert "blocked: waiting for deploy access" in priority
+    assert "tests are failing" in priority
+    assert "review feedback is waiting" in priority
+    assert "local priority: release note is due today." in priority
+    assert "4 dirty files" in priority
+    assert "recently active" in priority
+
+    default_reply = deterministic_yoagent_reply("what should I work on?", activity, {})
+    default_priority = default_reply.split("**Priority:**", 1)[1].split("**Open / pending:**", 1)[0]
+    assert default_priority.count("- **") == 3
+    assert "blocked release" in default_priority
+    assert "test failure" in default_priority
+    assert "review comments" in default_priority
+    assert "local roadmap item" not in default_priority
+
+
 def test_changed_file_totals_coerces_numeric_strings_and_ignores_bools():
     from yolomux_lib.activity_summary import changed_file_totals
     # numeric strings count ("5" -> 5); a bool does NOT (added=True must not be +1).

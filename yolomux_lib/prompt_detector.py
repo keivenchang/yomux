@@ -487,7 +487,8 @@ _CLAUDE_AGENT_TOKEN_SUBLINE_RE = re.compile(
 _STATUS_COUNTER_STALE_SECONDS = 75.0
 _STATUS_COUNTER_LEADING_MARKERS = "✢✣✤✥✦✧✩✱✲✳✴✵✶✷✸✹✺✻✽✾✿*+·•◦∙⋅.☉○◯●"
 _STATUS_COUNTER_MARKER_RE = re.compile(rf"^\s*(?P<marker>[{re.escape(_STATUS_COUNTER_LEADING_MARKERS)}])\s*(?P<body>\S.*)$")
-_STATUS_COUNTER_ELAPSED_RE = re.compile(r"\b(?:(?P<hours>\d+)h\s*)?(?:(?P<minutes>\d+)m\s*)?(?P<seconds>\d+(?:\.\d+)?)s\b", re.IGNORECASE)
+_STATUS_COUNTER_ELAPSED_RE = re.compile(r"\b(?:\d+(?:\.\d+)?[hms]\s*)+\b", re.IGNORECASE)
+_STATUS_COUNTER_DURATION_TOKEN_RE = re.compile(r"(?P<value>\d+(?:\.\d+)?)(?P<unit>[hms])\b", re.IGNORECASE)
 _STATUS_COUNTER_TOKEN_RE = re.compile(r"(?:[↑↓]\s*)?(?P<count>\d+(?:\.\d+)?)\s*(?P<suffix>[kKmM])?\s+tokens?\b", re.IGNORECASE)
 _STATUS_COUNTER_TOOL_USE_RE = re.compile(r"\b(?P<count>\d+)\s+tool uses?\b", re.IGNORECASE)
 _STATUS_COUNTER_PAYLOAD_RE = re.compile(r"\b(?:thinking|effort|tokens?|tool uses?|esc\s+to\s+interrupt)\b|[↑↓]", re.IGNORECASE)
@@ -505,6 +506,7 @@ _CODEX_MODEL_STATUS_LINE_RE = re.compile(
     r"^\s*(?:gpt|o\d|codex)[A-Za-z0-9_.-]*\s+\S+(?:\s+\S+)?\s+(?:~|/)[^\s]*(?:\s+\d+%\s+context\s+(?:used|left|remaining))?\s*$",
     re.IGNORECASE,
 )
+_CODEX_PURSUING_GOAL_RE = re.compile(r"\bPursuing\s+goal\s*\((?P<duration>[^)]*\d[^)]*)\)", re.IGNORECASE)
 _SHELL_PROMPT_RE = re.compile(r"[@:][^@\s]+[$#](?:\s+\S.*)?$")
 # Header of the Ctrl-T todo overlay, e.g. "11 tasks (0 done, 1 in progress, 10 open)" — also matches
 # singular "1 task (...)". The whole overlay is a bounded block: everything below this header is
@@ -673,14 +675,34 @@ def _hash_prompt_parts(*parts: object) -> str:
     return hashlib.md5("\n".join(normalized).encode()).hexdigest()
 
 
+def _parse_duration_seconds(text: str) -> float | None:
+    total = 0.0
+    seen = False
+    for match in _STATUS_COUNTER_DURATION_TOKEN_RE.finditer(text):
+        seen = True
+        value = float(match.group("value"))
+        unit = match.group("unit").lower()
+        if unit == "h":
+            total += value * 3600
+        elif unit == "m":
+            total += value * 60
+        else:
+            total += value
+    return total if seen else None
+
+
 def _parse_status_duration_seconds(line: str) -> float | None:
     match = _STATUS_COUNTER_ELAPSED_RE.search(line)
     if not match:
         return None
-    hours = int(match.group("hours") or 0)
-    minutes = int(match.group("minutes") or 0)
-    seconds = float(match.group("seconds") or 0)
-    return hours * 3600 + minutes * 60 + seconds
+    return _parse_duration_seconds(match.group(0))
+
+
+def _parse_codex_goal_elapsed_seconds(line: str) -> float | None:
+    match = _CODEX_PURSUING_GOAL_RE.search(line)
+    if not match:
+        return None
+    return _parse_duration_seconds(match.group("duration"))
 
 
 def _parse_status_token_count(line: str) -> int | None:
@@ -709,6 +731,17 @@ def _status_counter_identity(line: str) -> str:
     identity = _STATUS_COUNTER_TOKEN_RE.sub("<tokens>", identity)
     identity = _STATUS_COUNTER_TOOL_USE_RE.sub("<tool-uses>", identity)
     return re.sub(r"\s+", " ", identity).lower()
+
+
+def _status_counter_liveness_snapshot(counter: dict[str, object] | None) -> dict[str, object]:
+    if not isinstance(counter, dict):
+        return {}
+    return {
+        "status_identity": counter.get("status_identity"),
+        "status_elapsed_seconds": counter.get("status_elapsed_seconds"),
+        "status_tokens": counter.get("status_tokens"),
+        "status_tool_uses": counter.get("status_tool_uses"),
+    }
 
 
 def parse_agent_status_counter(line: str) -> dict[str, object] | None:
@@ -756,6 +789,14 @@ def _last_status_counter(lines: list[str]) -> tuple[int, dict[str, object] | Non
     return last_index, last_counter
 
 
+def _last_codex_goal_elapsed_seconds(lines: list[str]) -> float | None:
+    for line in reversed(lines):
+        elapsed = _parse_codex_goal_elapsed_seconds(normalize_capture_text(line).strip())
+        if elapsed is not None:
+            return elapsed
+    return None
+
+
 def _status_counter_advanced(previous: dict[str, object] | None, current: dict[str, object]) -> bool:
     if not previous:
         return False
@@ -778,7 +819,9 @@ def _status_counter_screen_state(counter: dict[str, object], pane_target: str | 
         previous = _VISIBLE_STATUS_COUNTER_CACHE.get(pane_target)
         previous_counter = previous.get("counter") if previous else None
         advanced = _status_counter_advanced(previous_counter if isinstance(previous_counter, dict) else None, counter)
-        if previous and previous_counter == counter and not advanced:
+        previous_liveness = _status_counter_liveness_snapshot(previous_counter if isinstance(previous_counter, dict) else None)
+        current_liveness = _status_counter_liveness_snapshot(counter)
+        if previous and previous_liveness == current_liveness and not advanced:
             last_advanced_at = float(previous.get("last_advanced_at") or previous.get("first_seen_at") or now)
             stale = now - last_advanced_at > _STATUS_COUNTER_STALE_SECONDS
             last_counter_seen_at = float(previous.get("last_counter_seen_at") or now)
@@ -803,7 +846,7 @@ def _status_counter_screen_state(counter: dict[str, object], pane_target: str | 
 
 
 def _is_working_line(line: str) -> bool:
-    return bool(parse_agent_status_counter(line) is not None or _WORKING_LINE_RE.search(line) or _CLAUDE_MULTI_AGENT_HEADER_RE.search(line))
+    return bool(parse_agent_status_counter(line) is not None or _WORKING_LINE_RE.search(line) or _CLAUDE_MULTI_AGENT_HEADER_RE.search(line) or _CODEX_PURSUING_GOAL_RE.search(line))
 
 
 def visible_agent_working(visible_text: str) -> bool:
@@ -824,6 +867,14 @@ def visible_agent_status_counter(visible_text: str) -> dict[str, object] | None:
     counter_index, counter = _last_status_counter(lines)
     if counter_index < 0 or counter is None or _working_line_has_later_prompt(lines, counter_index):
         return None
+    goal_elapsed_seconds = _last_codex_goal_elapsed_seconds(lines)
+    if goal_elapsed_seconds is not None:
+        counter = dict(counter)
+        counter["goal_elapsed_seconds"] = goal_elapsed_seconds
+        counter["display_elapsed_seconds"] = goal_elapsed_seconds
+    else:
+        counter = dict(counter)
+        counter["display_elapsed_seconds"] = counter.get("status_elapsed_seconds")
     return counter
 
 
@@ -968,7 +1019,7 @@ def _is_prompt_trailing_ui_line(line: str) -> bool:
         return True
     if _WORK_QUEUE_HINT_RE.search(stripped) or _WORK_QUEUE_ROW_RE.match(stripped):
         return True
-    if _CODEX_INPUT_HINT_RE.match(stripped) or _CODEX_MODEL_STATUS_LINE_RE.match(stripped):
+    if _CODEX_INPUT_HINT_RE.match(stripped) or _CODEX_MODEL_STATUS_LINE_RE.match(stripped) or _CODEX_PURSUING_GOAL_RE.search(stripped):
         return True
     if _CLAUDE_AGENT_TOKEN_SUBLINE_RE.search(stripped):
         return True

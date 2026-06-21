@@ -337,7 +337,8 @@ def get_tmux(request: Any, parsed: Any, route: Route) -> None:
 
 def get_tmux_signals(request: Any, parsed: Any, route: Route) -> None:
     del route
-    request.write_app_result(request.server.app.tmux_signals_payload(force=query_bool(parse_qs(parsed.query), "force")))
+    qs = parse_qs(parsed.query)
+    request.write_app_result(request.server.app.tmux_signals_payload(force=query_bool(qs, "force"), session=str(query_one(qs, "session", "") or "")))
 
 
 def get_transcript(request: Any, parsed: Any, route: Route) -> None:
@@ -781,6 +782,15 @@ def post_yoagent_job_cancel(request: Any, parsed: Any, route: Route) -> None:
     request.write_json(response, status=status)
 
 
+def post_yoagent_jobs_cancel_session(request: Any, parsed: Any, route: Route) -> None:
+    del parsed
+    payload = _json_body(request, route)
+    if payload is None:
+        return
+    response, status = request.server.app.cancel_yoagent_jobs_for_session(str(payload.get("session") or ""))
+    request.write_json(response, status=status)
+
+
 def post_yoagent_wait_clear(request: Any, parsed: Any, route: Route) -> None:
     payload = _json_body(request, route)
     if payload is None:
@@ -955,6 +965,7 @@ YOAGENT_ROUTES = (
     Route("POST", "/api/yoagent/actions/execute-send", "admin", post_yoagent_execute_send, body_limit=16 * 1024, group="yoagent"),
     Route("POST", "/api/yoagent/intent", "admin", post_yoagent_intent, body_limit=64 * 1024, group="yoagent"),
     Route("POST", "/api/yoagent/jobs", "admin", post_yoagent_jobs, body_limit=64 * 1024, group="yoagent"),
+    Route("POST", "/api/yoagent/jobs/cancel-session", "admin", post_yoagent_jobs_cancel_session, body_limit=16 * 1024, group="yoagent"),
     Route("POST", "/api/yoagent/jobs/*/confirm", "admin", post_yoagent_job_confirm, body_limit=16 * 1024, group="yoagent"),
     Route("POST", "/api/yoagent/jobs/*/cancel", "admin", post_yoagent_job_cancel, body_limit=16 * 1024, group="yoagent"),
     Route("POST", "/api/yoagent/waits/*/clear", "admin", post_yoagent_wait_clear, body_limit=16 * 1024, group="yoagent"),

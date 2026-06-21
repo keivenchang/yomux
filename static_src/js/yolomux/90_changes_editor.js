@@ -874,6 +874,19 @@ function compactAgeNumber(value) {
   return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
 }
 
+function compactElapsedDurationText(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  if (total < 60) return `${total}s`;
+  if (total < 3600) {
+    const minutes = Math.floor(total / 60);
+    const remainder = total % 60;
+    return remainder ? `${minutes}m ${remainder}s` : `${minutes}m`;
+  }
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  return `${hours}h ${String(minutes).padStart(2, '0')}m`;
+}
+
 function compactRelativeFileTimeText(unit, countText) {
   const category = countText === '1' ? 'one' : 'other';
   return t(`relative.compact.${unit}.${category}`, {count: countText});
@@ -2143,6 +2156,22 @@ function settingPatch(path, value) {
   return root;
 }
 
+function codexModelDefaultEffort(model) {
+  const metadata = typeof settingChoiceMetadata === 'function' ? settingChoiceMetadata('yoagent.codex_model') : {};
+  const entry = metadata[String(model || '')] || {};
+  const effort = String(entry.default_effort || '').trim();
+  return effort || '';
+}
+
+function settingPatchForPath(path, value) {
+  const patch = settingPatch(path, value);
+  if (path === 'yoagent.codex_model') {
+    const defaultEffort = codexModelDefaultEffort(value);
+    if (defaultEffort) patch.yoagent = {...(patch.yoagent || {}), codex_effort: defaultEffort};
+  }
+  return patch;
+}
+
 function valueFromPreferenceControl(control) {
   const type = control.dataset.settingType || 'text';
   if (type === 'boolean') return control.checked === true;
@@ -2232,7 +2261,7 @@ function savePreferenceControl(control) {
   if (path === 'appearance.active_color') {
     applyActiveColor(value);
   }
-  saveSettingsPatch(settingPatch(path, value), {
+  saveSettingsPatch(settingPatchForPath(path, value), {
     applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',
   })
     .then(() => {

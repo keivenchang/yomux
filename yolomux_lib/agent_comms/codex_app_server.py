@@ -231,6 +231,7 @@ class CodexAppServerSession:
         effort = str(target.get("agent_effort") or target.get("effort") or "").strip()
         if effort:
             args.extend(["-c", f'model_reasoning_effort="{effort}"'])
+        args.extend(["-c", 'model_reasoning_summary="auto"'])
         service_tier = str(target.get("service_tier") or "").strip()
         if service_tier:
             args.extend(["-c", f'service_tier="{service_tier}"'])
@@ -295,7 +296,7 @@ class CodexAppServerSession:
                 thread_response = self.protocol.read_response(self.process, thread_id, deadline, notifications)
                 status["thread_started"] = True
             thread = thread_response.get("thread") if isinstance(thread_response.get("thread"), dict) else {}
-            self.thread_id = str(thread.get("id") or requested_thread or "").strip()
+            self.thread_id = str(thread.get("id") or thread_response.get("threadId") or thread_response.get("id") or requested_thread or "").strip()
             if not self.thread_id:
                 raise OSError("codex app-server did not return a thread id")
             status["thread_id"] = self.thread_id

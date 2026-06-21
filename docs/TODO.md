@@ -28,11 +28,8 @@ Borrow from other tools only when the feature improves the local control loop: k
 
 ## YO!agent
 
-- [ ] [M] Add a visible YO!agent job list showing queued, pending-confirmation, fired, failed, cancelled, and timed-out jobs. Include per-job confirm/cancel controls, sessions, blockers, and timeout state.
-- [ ] [M] Expand `what should I work on?` beyond prompt context. Rank sessions needing input, blockers/errors, failing tests, failing CI, review comments, dirty repos, recently active sessions with clear next actions, and user-local context priorities. Default to the top 1-3 recommendations unless the user asks for a full inventory.
-- [ ] [M] Add more watch predicates on top of persisted YO!agent jobs: needs-input, done-after-working, tests-finished, all-agents-status fanout, blocked-session status asks, review sweep, close-out finished work, pause noisy watches, and cancel pending jobs by session.
+- [ ] [M] Add remaining watch predicates on top of persisted YO!agent jobs: tests-finished, all-agents-status fanout, review sweep, close-out finished work, and pause noisy watches. Needs-input watches, blocked-session watches, done-after-working watches, and cancel pending jobs by session are shipped in DONE 2026-06-20.
 - [ ] [M] Add artifact-handoff helpers: choose a safe project-local path, ask a target to write there, validate existence/size/type, and pass the path or bounded content to the next target.
-- [ ] [M] Add deterministic intent fixtures for common Preferences aliases and routing language: white/black background, bigger/smaller UI, quiet/no notifications, bigger tabs, light/dark terminal, language endonyms, wait-then-send, send-and-show-result, and multi-agent comparison.
 - [ ] [L] Add golden-frame fixtures for remaining scrape-and-type paths. Record real Claude/Codex `capture-pane` frames per agent version and pin spinner/footer/approval/ready detection so upstream TUI changes fail tests instead of silently changing behavior.
 - [ ] [L] Expose YOLOmux as a local MCP/ACP-style control plane so agents can query session/activity state and request server-verified sends through structured APIs instead of requiring YO!agent to paste into panes.
 
@@ -47,51 +44,35 @@ Borrow from other tools only when the feature improves the local control loop: k
 ## Layout, Finder, Differ, And Tabber
 
 - [ ] [M] Finish remaining app menu gaps: panel-tab visibility controls, inactive-tab tray/show-all control, remaining YOLO controls under `tmux`, and per-pane peek/reply actions.
-- [ ] [M] Add a per-session info drawer with full path, branch, dirty/ahead/behind counts, PR, CI, issue metadata, latest summary, and recent events.
 - [ ] [M] Add git-aware Finder metadata. Repo rows and rooted paths should show repo name, branch, dirty/ahead/behind, and remote/GitHub URL through cached server metadata, not one git spawn per hover.
-- [ ] [M] Keep Finder/Differ/Tabber row rendering under the shared tree pipeline. New row metadata, icon columns, date/sort controls, and context menus should apply through shared helpers, not per-mode copies.
-- [ ] [M] Keep Tabber click behavior pinned: clicking any non-arrow part of a green `N <description>` session row opens that tmux tab and records normal tab navigation; clicking only the disclosure arrow toggles collapse.
 
 ## Editor And Preview
 
 - [ ] [M] Add remaining editor power keys through CodeMirror where possible: multi-cursor, select all occurrences, add cursor above/below, line move/copy/delete, smart-select, matching bracket, fold/unfold, symbol jump, and command mode. Avoid app-side Ctrl-letter bindings on Mac.
-- [ ] [S] Add optional on-save hygiene settings: trim trailing whitespace and ensure a final newline.
-- [ ] [S] Add a reload-from-disk button for files changed externally while preserving the existing dirty-buffer warning.
-- [ ] [S] Add word, character, and line count to the editor status bar.
-- [ ] [M] Keep preview rendering capability-based through the shared preview registry. Do not add new extension checks in toolbar, popout, open-file, reload, Finder/Differ, or split-view code.
 
 ## YO!share
 
 - [ ] [M] Exchange the first valid token hit for a short-lived HttpOnly guest cookie, then redirect to a clean URL so bearer tokens leave browser history and Referer paths.
 - [ ] [L] Continue moving presenter state through host-owned replay rather than semantic client inference. Layout, active pane, scroll, menus, popovers, YO!info, Finder/Differ/Tabber, editor state, and terminal placeholders should converge from host frames.
 - [ ] [L] Add presenter-follow polish: host active pane, per-pane scroll, and host pointer/ghost-cursor frames. Apply them on viewers without echoing client-authored state back.
-- [ ] [M] Keep HTTP read-only share parity covered by real browser tests against `http://.../share/<id>#t=...`, including Finder rows, pane metadata, file editor contents, Differ/Tabber data, plaintext redirect exemptions, and token propagation.
-- [ ] [M] Keep share health diagnostics redacted and actionable: epoch, sequence, base sequence, dropped/stale frames, keyframe requests, terminal placeholder health, fit mode, viewport, DPR, browser, root/stage rects, and mirror transform.
 
-## Launch, Worktrees, Search, And Vitals
+## Launch, Worktrees, And Vitals
 
 - [ ] [L] Add a launch dialog behind `+ Claude`, `+ Codex`, and `+ Term` with cwd, agent, model/profile, permission mode, initial prompt, optional session name, and optional worktree-backed launch.
 - [ ] [M] Add a resume picker for recent Claude/Codex conversations scoped to the selected cwd.
 - [ ] [M] Add a peek/reply action for a session when it needs only a short response and the user does not need to attach to the full terminal.
 - [ ] [M] Add worktree cleanup guardrails: never delete a worktree with uncommitted changes; show the path and stop.
-- [ ] [M] Add full-text search across captured session events and summaries.
 - [ ] [M] Add per-session token/cost/context metrics only if they can be read reliably from Claude/Codex metadata without scraping fragile terminal text.
-- [ ] [M] Add a compact run history: prompt, cwd, agent, started/ended time, final state, PR, and latest summary.
 - [ ] [M] Add lightweight CPU/memory/load probes and per-session process trees. Add optional `nv-smi` GPU status when available, but do not make GPU support required.
 
 ## Global Summaries
 
-- [ ] [XL] Add a background session summarizer that maintains rolling per-session summaries and a global overview: which sessions need attention, what each is doing, who is blocked, and what finished. Use incremental summaries (`prior_summary + transcript delta`) instead of re-sending full transcripts each tick.
+- [ ] [XL] Add durable session-summary context without reintroducing a recurring background loop. The current product contract is first-launch-only transcript summaries per server run; future summary work should update on first visible YO!agent launch, explicit user refresh, or bounded event-driven jobs, and must keep incremental summaries (`prior_summary + transcript delta`) so it never re-sends full transcripts each tick.
 - [ ] [M] Extend the transcript/file-activity working-directory inference to Finder sync, per-tab jump-to-working-path, and summary context. Session repo metadata already uses it: `candidate_session_cwds` feeds each agent's edited dirs into `session_git_inventory` and the YO!info repo list, so a session launched from `$HOME` still surfaces the real repo/branch (see DONE 2026-06-17). Remaining: Finder sync, per-tab jump, and summary context.
-- [ ] [M] Gate summary providers behind settings and availability checks. Defaults should come from the backend settings catalog, not copied literals in docs.
 
-## Refactor Audit Backlog
+## Internationalization
 
-- [ ] [M] Collapse the two backend "resize PTY + SIGWINCH" copies into one helper. `ShareTerminalUpstream.update_dimensions` and the WebSocket resize branch should share the same liveness guard and signal behavior.
-- [ ] [M] Add one tmux attach-command builder and reuse it for readonly/admin attach paths. Any future attach flag should reach both live terminal and share upstream paths.
-- [ ] [S] Route fire-and-forget tmux calls through the existing `tmux()` helper so they inherit the shared timeout and spawn shape.
-- [ ] [M] Reconcile backend-poll defaults to one canonical source. Python defaults, stale-default migrations, settings descriptions, and JS fallbacks must not disagree.
-- [ ] [L] Audit repeated raw CSS hex colors and route semantic repeats through shared theme tokens. Start with accent and slate values before touching deliberate base-white literals.
+- [ ] [M] Backfill low-coverage locale catalogs one locale at a time using `python3 tools/static_build.py --i18n-untranslated-report` as the source list, starting with `nl`, `it`, `pl`, `tr`, `th`, and `vi`; keep `{tokens}` unchanged, lower each locale's untranslated baseline after each pass, and run `python3 tools/check.py` after each locale batch.
 
 ## Product Guardrails
 

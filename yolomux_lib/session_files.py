@@ -675,6 +675,10 @@ def line_total(entries: list[dict[str, Any]], key: str) -> int:
     return total
 
 
+def differ_visible_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [entry for entry in entries if str(entry.get("status") or "M").upper() != "T"]
+
+
 def merge_agent_lists(*agent_lists: list[str]) -> list[str]:
     merged: list[str] = []
     for agent_list in agent_lists:
@@ -874,7 +878,6 @@ def session_files_payload_for_info(
     refs_by_repo: dict[str, list[dict[str, str]]] = {}
     for repo_text in sorted(repos):
         repo = Path(repo_text)
-        refs_by_repo[str(repo)] = git_recent_refs(repo)
         # C6: resolve this repo's effective FROM/TO — its own override if present, else the global scalar.
         repo_override = (repo_refs or {}).get(repo_text) or (repo_refs or {}).get(str(repo)) or {}
         repo_from = str(repo_override.get("from") or "").strip() or from_ref
@@ -947,12 +950,16 @@ def session_files_payload_for_info(
             ))
         repo_entries.sort(key=lambda item: (-float(item.get("mtime") or 0), item["path"]))
         files.extend(repo_entries)
+        rendered_entries = differ_visible_entries(repo_entries)
+        if not rendered_entries:
+            continue
+        refs_by_repo[str(repo)] = git_recent_refs(repo)
         repo_payload = {
             "repo": str(repo),
-            "count": len(repo_entries),
+            "count": len(rendered_entries),
             "touched_count": len(repos[repo_text]),
-            "added": line_total(repo_entries, "added"),
-            "removed": line_total(repo_entries, "removed"),
+            "added": line_total(rendered_entries, "added"),
+            "removed": line_total(rendered_entries, "removed"),
             # C6: report the refs THIS repo actually compared, plus any per-repo fallback, so each repo
             # header can render its own comparison title independently of the others.
             "from_ref": sel_from or "default",

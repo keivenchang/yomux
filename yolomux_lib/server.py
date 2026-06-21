@@ -37,14 +37,10 @@ from .common import DEFAULT_ROWS
 from .common import MAX_COMPACT_TRANSCRIPT_ITEMS
 from .common import MAX_TRANSCRIPT_TAIL_LINES
 from .common import PROJECT_ROOT
-from .common import SUMMARY_CODEX_EFFORT
-from .common import SUMMARY_CODEX_MODEL
-from .common import SUMMARY_CODEX_SERVICE_TIER
-from .common import SUMMARY_CODEX_TIMEOUT_SECONDS
-from .common import SUMMARY_LOOKBACK_SECONDS
 from .common import WEBSOCKET_GUID
 from .common import codex_event_kind
 from .common import codex_exec_argv
+from .common import codex_runtime_env
 from .common import error_payload
 from .common import terminate_process_group
 from .filesystem import FilesystemError
@@ -64,12 +60,16 @@ from .transcripts import strip_terminal_query_responses
 from .transcripts import transcript_items_from_raw_line
 from .uploads import parse_multipart_upload
 from .server_auth import AuthMixin
+from .settings import SUMMARY_DEFAULT_CODEX_TIMEOUT_SECONDS
+from .settings import SUMMARY_DEFAULT_LOOKBACK_SECONDS
 from .web import html_page
 from .web import static_asset_path
 from .web import static_content_type
 from .websocket import make_ws_frame
 from .websocket import read_ws_frame
 from .websocket import set_pty_size
+from .workdir import AGENT_LOGIN_COMMANDS
+from .workdir import agent_auth_status
 
 
 PTY_DIMENSION_MIN = 1
@@ -238,6 +238,15 @@ def tmux_attach_command(readonly: bool = False) -> list[str]:
     return args
 
 
+def resize_pty_and_signal_process(fd: int, process: subprocess.Popen[Any] | None, rows: int, cols: int) -> None:
+    set_pty_size(fd, rows, cols)
+    if process is not None and process.poll() is None:
+        try:
+            os.killpg(process.pid, signal.SIGWINCH)
+        except OSError:
+            pass
+
+
 def tmux_client_name_for_fd(fd: int) -> str:
     try:
         return os.ttyname(fd)
@@ -255,13 +264,7 @@ def tmux_session_client_rows(session: str) -> list[dict[str, Any]]:
     line makes window rows differ from client rows, which would only muddy the comparison.
     """
     fmt = "\t".join(("#{client_name}", "#{client_session}", "#{client_width}", "#{client_flags}"))
-    result = subprocess.run(
-        tmux_command(["list-clients", "-F", fmt]),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        check=False,
-    )
+    result = tmux(["list-clients", "-F", fmt])
     if result.returncode != 0:
         return []
     rows: list[dict[str, Any]] = []
@@ -285,12 +288,7 @@ def tmux_client_has_flag(row: dict[str, Any], flag: str) -> bool:
 def refresh_tmux_client_ignore_size(client_name: str, ignore_size: bool) -> bool:
     if not client_name:
         return False
-    result = subprocess.run(
-        tmux_command(["refresh-client", "-t", client_name, "-f", "ignore-size" if ignore_size else "!ignore-size"]),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
+    result = tmux(["refresh-client", "-t", client_name, "-f", "ignore-size" if ignore_size else "!ignore-size"])
     return result.returncode == 0
 
 
@@ -298,12 +296,7 @@ def refresh_tmux_session_clients(session: str) -> bool:
     clean_session = str(session or "").strip()
     if not clean_session:
         return False
-    result = subprocess.run(
-        tmux_command(["refresh-client", "-t", tmux_session_target(clean_session)]),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
+    result = tmux(["refresh-client", "-t", tmux_session_target(clean_session)])
     return result.returncode == 0
 
 
@@ -772,13 +765,8 @@ class ShareTerminalUpstream:
             process = self.process
             if slave_fd is None:
                 return
-            set_pty_size(slave_fd, rows, cols)
+            resize_pty_and_signal_process(slave_fd, process, rows, cols)
             refresh_needed = True
-            if process is not None and process.poll() is None:
-                try:
-                    os.killpg(process.pid, signal.SIGWINCH)
-                except OSError:
-                    pass
         if refresh_needed and refresh:
             self.request_refresh_client()
 
@@ -834,12 +822,7 @@ class ShareTerminalUpstream:
         if now - self.last_refresh_at < SHARE_REFRESH_CLIENT_MIN_SECONDS:
             return
         self.last_refresh_at = now
-        subprocess.run(
-            tmux_command(["refresh-client", "-t", tmux_session_target(self.session)]),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
+        tmux(["refresh-client", "-t", tmux_session_target(self.session)])
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -1534,9 +1517,15 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
     def stream_codex_summary(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         session = str(query_one(qs, "session", "") or "")
-        lookback_seconds, error = parse_query_int(qs, "lookback", SUMMARY_LOOKBACK_SECONDS, max_value=SUMMARY_LOOKBACK_SECONDS * 24)
+        summary_settings = self.server.app.summary_settings()
+        default_lookback = int(summary_settings.get("lookback_seconds") or SUMMARY_DEFAULT_LOOKBACK_SECONDS)
+        lookback_seconds, error = parse_query_int(qs, "lookback", default_lookback, max_value=24 * 3600)
         if error:
             self.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+            return
+        availability_error = self.codex_summary_availability_error(summary_settings)
+        if availability_error:
+            self.write_json(availability_error, status=HTTPStatus.SERVICE_UNAVAILABLE)
             return
 
         payload, status = self.server.app.codex_summary_prompt(session, lookback_seconds)
@@ -1557,29 +1546,56 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.end_headers()
 
         meta = {key: value for key, value in payload.items() if key != "prompt"}
-        meta["summary_model"] = SUMMARY_CODEX_MODEL
-        meta["summary_effort"] = SUMMARY_CODEX_EFFORT
-        meta["summary_service_tier"] = SUMMARY_CODEX_SERVICE_TIER
+        meta["summary_model"] = summary_settings["codex_model"]
+        meta["summary_effort"] = summary_settings["codex_effort"]
+        meta["summary_service_tier"] = summary_settings["codex_service_tier"]
         self.server.app.log_event(
             session,
             "summary_started",
             "AI summary started",
-            {"lookback_seconds": lookback_seconds, "model": SUMMARY_CODEX_MODEL},
+            {"lookback_seconds": lookback_seconds, "model": summary_settings["codex_model"]},
         )
         try:
             self.write_sse_json("meta", meta)
-            self.run_codex_summary(prompt)
-            self.server.app.log_event(session, "summary_finished", "AI summary finished", {"model": SUMMARY_CODEX_MODEL})
+            self.run_codex_summary(prompt, summary_settings)
+            self.server.app.log_event(session, "summary_finished", "AI summary finished", {"model": summary_settings["codex_model"]})
         except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
             self.server.app.log_event(session, "summary_disconnected", "AI summary stream disconnected", {})
             return
 
-    def run_codex_summary(self, prompt: str) -> None:
+    def codex_summary_availability_error(self, summary_settings: dict[str, Any]) -> dict[str, Any] | None:
+        provider = str(summary_settings.get("backend") or "").strip().lower()
+        if provider != "codex":
+            return {
+                "error": "AI summary provider is disabled",
+                "provider": provider or "disabled",
+            }
+        status = agent_auth_status()
+        codex_status = status.get("codex") if isinstance(status, dict) else {}
+        codex_status = codex_status if isinstance(codex_status, dict) else {}
+        if not codex_status.get("installed"):
+            return {
+                "error": "Codex summary provider is unavailable because the codex CLI is not on PATH",
+                "provider": "codex",
+                "login_command": AGENT_LOGIN_COMMANDS["codex"],
+            }
+        if not codex_status.get("logged_in"):
+            return {
+                "error": f"Codex summary provider is unavailable because the codex CLI is not logged in. Run `{AGENT_LOGIN_COMMANDS['codex']}`.",
+                "provider": "codex",
+                "login_command": AGENT_LOGIN_COMMANDS["codex"],
+            }
+        return None
+
+    def run_codex_summary(self, prompt: str, summary_settings: dict[str, Any]) -> None:
         repo_root = PROJECT_ROOT
-        args = codex_exec_argv(ephemeral=True)
-        env = os.environ.copy()
-        env["TERM"] = "xterm-256color"
-        env["NO_COLOR"] = "1"
+        args = codex_exec_argv(
+            ephemeral=True,
+            model=str(summary_settings.get("codex_model") or "").strip() or None,
+            effort=str(summary_settings.get("codex_effort") or "").strip() or None,
+            service_tier=str(summary_settings.get("codex_service_tier") or "").strip() or None,
+        )
+        env = codex_runtime_env()
         process: subprocess.Popen[bytes] | None = None
         try:
             process = subprocess.Popen(
@@ -1596,14 +1612,14 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 return
             process.stdin.write(prompt.encode("utf-8"))
             process.stdin.close()
-            self.stream_codex_process(process)
+            self.stream_codex_process(process, timeout_seconds=summary_settings.get("timeout_seconds"))
         except OSError as exc:
             self.write_sse_json("summary_error", {"error": str(exc)})
         finally:
             if process is not None:
                 terminate_process_group(process)
 
-    def stream_codex_process(self, process: subprocess.Popen[bytes]) -> None:
+    def stream_codex_process(self, process: subprocess.Popen[bytes], timeout_seconds: Any = SUMMARY_DEFAULT_CODEX_TIMEOUT_SECONDS) -> None:
         if process.stdout is None:
             self.write_sse_json("summary_error", {"error": "missing Codex stdout"})
             return
@@ -1611,7 +1627,11 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         buffer = ""
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         last_ping = time.monotonic()
-        deadline = time.monotonic() + SUMMARY_CODEX_TIMEOUT_SECONDS
+        try:
+            timeout = float(timeout_seconds)
+        except (TypeError, ValueError):
+            timeout = float(SUMMARY_DEFAULT_CODEX_TIMEOUT_SECONDS)
+        deadline = time.monotonic() + max(1.0, timeout)
         while True:
             now = time.monotonic()
             if now > deadline:
@@ -1873,12 +1893,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         process: subprocess.Popen[Any] | None = None
 
         def session_exists() -> bool:
-            return subprocess.run(
-                tmux_command(["has-session", "-t", target]),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            ).returncode == 0
+            return tmux(["has-session", "-t", target]).returncode == 0
 
         def attach_tmux() -> subprocess.Popen:
             if slave_fd is None:
@@ -2233,18 +2248,13 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 ) if isinstance(resize_state, dict) else (None, None)
                 size_changed = previous != (rows, cols)
                 if size_changed:
-                    set_pty_size(resize_fd, rows, cols)
+                    resize_pty_and_signal_process(resize_fd, process, rows, cols)
                     if isinstance(resize_state, dict):
                         resize_state["rows"] = rows
                         resize_state["cols"] = cols
                 recorder = getattr(self.server, "record_host_pty_dimensions", None)
                 if callable(recorder) and (size_changed or authority_changed):
                     recorder(session, rows, cols)
-                if size_changed:
-                    try:
-                        os.killpg(process.pid, signal.SIGWINCH)
-                    except OSError:
-                        pass
         elif msg_type == "tmux-scroll":
             if readonly:
                 return

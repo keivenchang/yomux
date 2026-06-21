@@ -1279,9 +1279,9 @@ body.theme-light .pane-tab:not(.active) .session-button-detail {
   color: var(--pane-tab-active-text);
 }
 .pane-tab.active .session-yolo-marker.inactive {
-  color: var(--pane-meta-branch);
-  background: var(--divider);
-  border-color: #5d6878;
+  color: var(--agent-inactive-marker-text);
+  background: var(--agent-inactive-marker-bg);
+  border-color: var(--agent-inactive-marker-border);
 }
 .pane-tab.file-missing {
   color: #ffdbe1;
@@ -1334,9 +1334,9 @@ body.theme-light .pane-tab.file-missing.active .file-tab-missing-badge {
   color: #b3263a;
 }
 body.theme-light .pane-tab.active .session-yolo-marker.inactive {
-  color: var(--neutral-text-strong);
-  background: #e2e6ec;
-  border-color: #c2cad6;
+  color: var(--agent-inactive-marker-text);
+  background: var(--agent-inactive-marker-bg);
+  border-color: var(--agent-inactive-marker-border);
 }
 .pane-tab-close {
   position: relative;
@@ -1619,12 +1619,28 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   font-stretch: normal;
   font-weight: 500;
 }
-.tmux-window-button .tmux-window-name-label,
 .tmux-window-button .tmux-window-number-label {
   display: block;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.tmux-window-button .tmux-window-name-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+.tmux-window-button .tmux-window-name-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.agent-window-activity-icon {
+  margin-inline-start: 1px;
 }
 .tmux-window-bar[data-tmux-window-label-mode="names"] .tmux-window-number-label,
 .tmux-window-bar[data-tmux-window-label-mode="numbers"] .tmux-window-name-label {
@@ -1646,25 +1662,6 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   background: var(--active-control-bg);
   border-color: var(--active-control-border);
   font-weight: 600;
-}
-/* Per-agent tint for the window-switcher buttons. data-window-agent (set in tmuxWindowBarHtml from the
-   window's program: claude/codex/shell/editor/repl/git/other) picks a mid-tone hue. The hue shows as a
-   solid 3px left swatch on EVERY button (so the active green-toggle button still reveals its agent), and
-   inactive buttons also get a faint agent-tinted background mixed into the theme's --panel2 (so the tint
-   flips with the theme). Mid-tone hues + border/--var carriers keep the light-mode literal lint quiet.
-   These rules follow .active in source order so the left swatch wins over the active border on the left. */
-.tmux-window-button[data-window-agent="claude"] { --window-agent-color: #e0883c; }
-.tmux-window-button[data-window-agent="codex"]  { --window-agent-color: #9b87f5; }
-.tmux-window-button[data-window-agent="shell"]  { --window-agent-color: #6fd08c; }
-.tmux-window-button[data-window-agent="editor"] { --window-agent-color: #56d4c6; }
-.tmux-window-button[data-window-agent="repl"]   { --window-agent-color: #7cb3f0; }
-.tmux-window-button[data-window-agent="git"]    { --window-agent-color: #ff9a76; }
-.tmux-window-button[data-window-agent="other"]  { --window-agent-color: var(--muted); }
-.tmux-window-button[data-window-agent] {
-  border-inline-start: 3px solid var(--window-agent-color, transparent);
-}
-.tmux-window-button[data-window-agent]:not(.active) {
-  background: color-mix(in srgb, var(--window-agent-color, transparent) 18%, var(--panel2));
 }
 .terminal-tab {
   flex: 0 1 auto;

@@ -572,22 +572,27 @@ def parse_tmux_signal_snapshot(
     }
 
 
-def fetch_tmux_signal_snapshot(timeout: float = 3.0) -> dict[str, Any]:
+def fetch_tmux_signal_snapshot(timeout: float = 3.0, session: str = "") -> dict[str, Any]:
     started = time.perf_counter()
     errors: list[str] = []
-    windows_result = tmux(["list-windows", "-a", "-F", tmux_signal_format(TMUX_WINDOW_SIGNAL_FIELDS)], timeout=timeout)
+    target = str(session or "").strip()
+    target_args = ["-t", tmux_session_target(target)] if target else []
+    windows_args = ["list-windows", *target_args, *([] if target else ["-a"]), "-F", tmux_signal_format(TMUX_WINDOW_SIGNAL_FIELDS)]
+    panes_args = ["list-panes", *target_args, *([] if target else ["-a"]), "-F", tmux_signal_format(TMUX_PANE_SIGNAL_FIELDS)]
+    clients_args = ["list-clients", *target_args, "-F", tmux_signal_format(TMUX_CLIENT_SIGNAL_FIELDS)]
+    windows_result = tmux(windows_args, timeout=timeout)
     if windows_result.returncode != 0:
         errors.append(cmd_error(windows_result, "tmux list-windows failed"))
         windows_stdout = ""
     else:
         windows_stdout = windows_result.stdout
-    panes_result = tmux(["list-panes", "-a", "-F", tmux_signal_format(TMUX_PANE_SIGNAL_FIELDS)], timeout=timeout)
+    panes_result = tmux(panes_args, timeout=timeout)
     if panes_result.returncode != 0:
         errors.append(cmd_error(panes_result, "tmux list-panes failed"))
         panes_stdout = ""
     else:
         panes_stdout = panes_result.stdout
-    clients_result = tmux(["list-clients", "-F", tmux_signal_format(TMUX_CLIENT_SIGNAL_FIELDS)], timeout=timeout)
+    clients_result = tmux(clients_args, timeout=timeout)
     if clients_result.returncode != 0:
         errors.append(cmd_error(clients_result, "tmux list-clients failed"))
         clients_stdout = ""

@@ -623,6 +623,36 @@ def session_repo_summaries(info: SessionInfo, primary_root: str | None) -> list[
         )
     ]
 
+def window_metadata(info: SessionInfo) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    panes_by_window: dict[str, list[Any]] = {}
+    for pane in info.panes:
+        panes_by_window.setdefault(str(pane.window or ""), []).append(pane)
+    for window, panes in sorted(panes_by_window.items(), key=lambda item: (int(item[0]) if str(item[0]).isdigit() else 9999, str(item[0]))):
+        chosen = next((pane for pane in panes if pane.active and pane.current_path), None)
+        if chosen is None:
+            chosen = next((pane for pane in panes if pane.current_path), panes[0] if panes else None)
+        if chosen is None:
+            continue
+        cwd = str(chosen.current_path or "")
+        git_data = git_inventory(cwd) if cwd else None
+        if git_data is not None:
+            git_data["cwd"] = cwd
+        try:
+            window_index: int | None = int(window)
+        except ValueError:
+            window_index = None
+        rows.append({
+            "window": window,
+            "window_index": window_index,
+            "window_name": str(chosen.window_name or ""),
+            "path": cwd,
+            "pane": str(chosen.pane or ""),
+            "pane_target": str(chosen.target or ""),
+            "git": git_data,
+        })
+    return rows
+
 def candidate_session_cwds(info: SessionInfo) -> list[str]:
     return [path for path, _priority in candidate_session_cwd_entries(info)]
 
@@ -768,6 +798,7 @@ def session_to_json(info: SessionInfo, metadata_cache: MetadataCache, allow_netw
         "panes": [asdict(pane) for pane in info.panes],
         "selected_pane": asdict(info.selected_pane) if info.selected_pane else None,
         "agents": [asdict(agent) for agent in info.agents],
+        "window_metadata": window_metadata(info),
         "transcript_mtime": transcript_mtime,
         "project": session_project_metadata(info, metadata_cache, allow_network=allow_network),
     }

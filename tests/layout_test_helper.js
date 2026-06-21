@@ -89,6 +89,39 @@ function testDatasetKeyForAttribute(name) {
   return String(name || '').replace(/-([a-z])/g, (_match, char) => char.toUpperCase());
 }
 
+function testHtmlAttributeValue(attrs, name) {
+  const match = String(attrs || '').match(new RegExp(`\\b${name}="([^"]*)"`));
+  return match ? match[1] : '';
+}
+
+function populateTestDatasetFromHtmlAttrs(node, attrs) {
+  String(attrs || '').replace(/\bdata-([A-Za-z0-9_-]+)="([^"]*)"/g, (_match, name, value) => {
+    node.dataset[testDatasetKeyForAttribute(name)] = value;
+    return '';
+  });
+}
+
+function testElementFromTmuxWindowBarHtml(html) {
+  const source = String(html || '');
+  const barMatch = source.match(/^<div\b([^>]*)>([\s\S]*)<\/div>$/);
+  if (!barMatch || !/\btmux-window-bar\b/.test(barMatch[1])) return null;
+  const [, barAttrs, body] = barMatch;
+  const bar = new TestElement('', 'div');
+  bar.className = testHtmlAttributeValue(barAttrs, 'class') || 'tmux-window-bar';
+  populateTestDatasetFromHtmlAttrs(bar, barAttrs);
+  bar._innerHTML = body;
+  for (const buttonMatch of body.matchAll(/<button\b([^>]*)>/g)) {
+    const attrs = buttonMatch[1] || '';
+    const button = new TestElement('', 'button');
+    button.className = testHtmlAttributeValue(attrs, 'class');
+    populateTestDatasetFromHtmlAttrs(button, attrs);
+    const pressed = testHtmlAttributeValue(attrs, 'aria-pressed');
+    if (pressed) button.setAttribute('aria-pressed', pressed);
+    bar.appendChild(button);
+  }
+  return bar;
+}
+
 class TestElement {
   constructor(id = '', tagName = 'div') {
     this.id = id;
@@ -122,6 +155,8 @@ class TestElement {
       node.parentElement = null;
     });
     this.children = [];
+    const tmuxWindowBar = testElementFromTmuxWindowBarHtml(this._innerHTML);
+    if (tmuxWindowBar) this.appendChild(tmuxWindowBar);
   }
 
   addEventListener(type, listener) {
@@ -172,6 +207,9 @@ class TestElement {
   }
   get lastElementChild() {
     return this.children[this.children.length - 1] || null;
+  }
+  get firstElementChild() {
+    return this.children[0] || null;
   }
   get nextElementSibling() {
     const siblings = this.parentElement?.children || [];
@@ -284,6 +322,20 @@ class TestElement {
     this.children = [];
     nodes.forEach(node => this.appendChild(node));
   }
+  replaceWith(node) {
+    if (!this.parentElement) return;
+    const siblings = this.parentElement.children;
+    const index = siblings.indexOf(this);
+    if (index < 0) return;
+    if (node.parentElement) {
+      const previousSiblings = node.parentElement.children;
+      const previousIndex = previousSiblings.indexOf(node);
+      if (previousIndex >= 0) previousSiblings.splice(previousIndex, 1);
+    }
+    node.parentElement = this.parentElement;
+    siblings.splice(index, 1, node);
+    this.parentElement = null;
+  }
   setAttribute(name, value) { this.attributes[name] = String(value); }
 }
 
@@ -321,7 +373,8 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   const bootStart = source.indexOf("if (refreshMeta) {");
   assert.ok(bootStart > 0, 'could not find browser boot section');
-  const bootstrapOverrides = options.bootstrapOverrides || Object.fromEntries(Object.entries(options).filter(([key]) => !['sessionStorage', 'localStorage'].includes(key)));
+  const bootstrapOverrides = options.bootstrapOverrides || Object.fromEntries(Object.entries(options).filter(([key]) => !['sessionStorage', 'localStorage', 'fireAllTimeouts'].includes(key)));
+  const fireAllTimeouts = options.fireAllTimeouts === true;
 
   const bootstrapPayload = {
     sessions,
@@ -364,7 +417,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     reload() { context.__reloadCount = (context.__reloadCount || 0) + 1; },
   };
   const testSetTimeout = (callback, ms) => {
-    if (ms === 8 && typeof callback === 'function') return setImmediate(callback);
+    if ((fireAllTimeouts || ms === 8) && typeof callback === 'function') return setImmediate(callback);
     return 0;
   };
   const element = id => {
@@ -423,7 +476,16 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
       },
     },
     location,
-    navigator: {platform: navigatorPlatform, userAgent: navigatorPlatform},
+    navigator: {
+      platform: navigatorPlatform,
+      userAgent: navigatorPlatform,
+      clipboard: {
+        writeText(text) {
+          context.__clipboardText = String(text ?? '');
+          return Promise.resolve();
+        },
+      },
+    },
     Notification: {permission: 'denied'},
     performance: {now: () => 0},
     requestAnimationFrame(callback) { return callback(); },
@@ -601,10 +663,12 @@ globalThis.__layoutTestApi = {
   sendYoagentChatMessageForTest: sendYoagentChatMessage,
   setYoagentErrorForTest(value) { yoagentError = String(value || ''); },
   setYoagentNoticeForTest(value) { yoagentNotice = value; },
-  setYoagentMessagesForTest(value) { yoagentMessages = Array.isArray(value) ? value : []; if (yoagentMessages.length) hideYoagentStartupInfo(); resetYoagentComposerHistory(); },
+  setYoagentMessagesForTest(value) { yoagentMessages = Array.isArray(value) ? value : []; resetYoagentComposerHistory(); },
   applyYoagentStreamPayloadForTest: applyYoagentStreamPayload,
   showYoagentStartupInfoOnceForTest: showYoagentStartupInfoOnce,
+  showYoagentStartupInfoForLatestActivityForTest: showYoagentStartupInfoForLatestActivity,
   hideYoagentStartupInfoForTest: hideYoagentStartupInfo,
+  applyActivitySummaryPayloadFromPushForTest: applyActivitySummaryPayloadFromPush,
   yoagentOpenMessageDetailsStateForTest: yoagentOpenMessageDetailsState,
   restoreYoagentOpenMessageDetailsStateForTest: restoreYoagentOpenMessageDetailsState,
   yoagentUserMessageHistoryForTest: yoagentUserMessageHistory,
@@ -829,6 +893,14 @@ globalThis.__layoutTestApi = {
   registerTerminalForTest(session, term, socket = {readyState: WebSocket.OPEN}) {
     terminals.set(session, {term, socket, container: document.getElementById('terminal-pane-' + session)});
   },
+  transcriptInfoForTest(session) { return transcriptMeta.sessions?.[session]; },
+  applyTranscriptsPayloadForTest: applyTranscriptsPayload,
+  applyTmuxSignalsPayloadForTest: applyTmuxSignalsPayload,
+  scheduleTmuxWindowReadbackForTest: scheduleTmuxWindowReadback,
+  setTmuxWindowActiveIndexOverrideForTest: setTmuxWindowActiveIndexOverride,
+  setTmuxWindowActiveIndexPendingForTest: setTmuxWindowActiveIndexPending,
+  tmuxWindowActiveIndexOverrideForTest: tmuxWindowActiveIndexOverride,
+  activeTmuxSignalWindowForSessionForTest: activeTmuxSignalWindowForSession,
   seedSessionTeardownStateForTest(session) {
     const closed = {transcript: 0, summary: 0};
     transcriptStreams.set(session, {close() { closed.transcript += 1; }});
@@ -1241,7 +1313,12 @@ globalThis.__layoutTestApi = {
   tmuxWindowRecords,
   tmuxWindowBarLabelMode,
   tmuxWindowBarHtml,
-  tmuxWindowAgentKeyForTest: tmuxWindowAgentKey,
+  updatePanelWindowStepButtonsForTest: updatePanelWindowStepButtons,
+  agentWindowActivityIconForTest: agentWindowActivityIcon,
+  agentWindowActivityIconHtmlForStatusForTest: agentWindowActivityIconHtmlForStatus,
+  sessionAgentWindowStatusPayloadsForTest: sessionAgentWindowStatusPayloads,
+  tmuxWindowCanonicalLabelForTest: tmuxWindowCanonicalLabel,
+  buildTabberTreeForTest: buildTabberTree,
   tabMenuItems,
   sortTabItemsForMenu,
   setTabsMenuSortMode,
@@ -1310,6 +1387,7 @@ globalThis.__layoutTestApi = {
   },
   setActivitySummaryPayloadForTest(payload) {
     activitySummaryPayload = payload;
+    yoagentStartupActivitySummaryPayload = null;
   },
   yoagentRecentAgentsHtmlForTest: yoagentRecentAgentsHtml,
   applyServerMetadataPulsesForTest(session, pulses) {
@@ -1588,6 +1666,7 @@ globalThis.__layoutTestApi = {
   modalTitleForTest() { return document.getElementById('modalTitle').textContent; },
   modalBodyHtmlForTest() { return document.getElementById('modalBody').innerHTML; },
   statusTextForTest() { return statusEl.textContent; },
+  statusHtmlForTest() { return statusEl.innerHTML; },
   serialize(slots) {
     return {
       tree: slots[layoutTreeKey],
@@ -1871,6 +1950,17 @@ function test(label, fn) {
   }
 }
 
+async function testAsync(label, fn) {
+  try {
+    await fn();
+    __testPass++;
+  } catch (error) {
+    __testFail++;
+    process.exitCode = 1;
+    console.error(`\u2717 ${label}: ${(error && error.message) || error}`);
+  }
+}
+
 // Gate-integrity watchdog: a single hung `await` in the trailing suite block (e.g. an un-flushed batched
 // fs listing) used to leave this IIFE unsettled, so its .finally never ran, the event loop drained, and
 // node exited 0 with NO summary — silently masking every later test and passing the cps gate. This timer
@@ -1938,6 +2028,7 @@ module.exports = {
   canonical,
   makeFileTree,
   test,
+  testAsync,
   runSuites,
   finishSuite,
 };

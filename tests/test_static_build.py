@@ -5,6 +5,8 @@ from tools.static_build import BuildError
 from tools.static_build import build_asset
 from tools.static_build import build_pseudo_catalog
 from tools.static_build import check_css_braces
+from tools.static_build import i18n_untranslated_entries
+from tools.static_build import i18n_untranslated_report
 from tools.static_build import locale_key_errors
 from tools.static_build import lint_duplicate_functions
 from tools.static_build import lint_raw_window_viewport_reads
@@ -53,6 +55,59 @@ def test_build_pseudo_catalog_covers_every_source_key():
     pseudo = build_pseudo_catalog(source)
     assert set(pseudo) == set(source)
     assert "{n}" in pseudo["y"]
+
+
+def test_i18n_untranslated_report_lists_real_matches_and_allows_brand_strings(monkeypatch):
+    import tools.static_build as sb
+    monkeypatch.setattr(sb, "I18N_UNTRANSLATED_BASELINE", {})
+    catalogs = {
+        "en": {
+            "about.github": "YOLOmux GitHub",
+            "common.ok": "OK",
+            "pref.uploads.custom_actions.label": "Custom file-drop actions",
+        },
+        "zh-Hant": {
+            "about.github": "YOLOmux GitHub",
+            "common.ok": "OK",
+            "pref.uploads.custom_actions.label": "Custom file-drop actions",
+        },
+    }
+    entries = i18n_untranslated_entries(catalogs)
+    assert entries["zh-Hant"] == ["pref.uploads.custom_actions.label"]
+    warnings, errors = sb.i18n_untranslated_report(catalogs, sample_limit=None)
+    assert warnings == ["WARNING: i18n untranslated values in zh-Hant.json: 1; keys: pref.uploads.custom_actions.label"]
+    assert errors == []
+
+
+def test_i18n_untranslated_report_uses_baseline_for_regression(monkeypatch):
+    import tools.static_build as sb
+    catalogs = {"en": {"a": "Alpha", "b": "Beta"}, "fr": {"a": "Alpha", "b": "Beta"}}
+    monkeypatch.setattr(sb, "I18N_UNTRANSLATED_BASELINE", {"fr": 1})
+    warnings, errors = sb.i18n_untranslated_report(catalogs, sample_limit=1)
+    assert warnings == ["WARNING: i18n untranslated values in fr.json: 2; keys: a (+1 more)"]
+    assert errors == ["fr.json untranslated-value count regressed: 2 > baseline 1"]
+
+
+def test_i18n_untranslated_report_cited_zh_key_before_and_after_backfill():
+    before = {
+        "en": {
+            "pref.uploads.custom_actions.label": "Custom file-drop actions",
+            "pref.uploads.custom_actions.help": "Custom actions, one per line: Label | prompt text or shell:command | optional categories. Template fields: {path}, {qpath}, {paths}, {qpaths}, {name}, {count}, {category}.",
+        },
+        "zh-Hant": {
+            "pref.uploads.custom_actions.label": "Custom file-drop actions",
+            "pref.uploads.custom_actions.help": "Custom actions, one per line: Label | prompt text or shell:command | optional categories. Template fields: {path}, {qpath}, {paths}, {qpaths}, {name}, {count}, {category}.",
+        },
+    }
+    assert i18n_untranslated_entries(before)["zh-Hant"] == [
+        "pref.uploads.custom_actions.help",
+        "pref.uploads.custom_actions.label",
+    ]
+    import tools.static_build as sb
+    current = sb.source_catalogs()
+    current_zh = i18n_untranslated_entries(current)["zh-Hant"]
+    assert "pref.uploads.custom_actions.help" not in current_zh
+    assert "pref.uploads.custom_actions.label" not in current_zh
 
 
 def test_css_braces_are_balanced_in_every_partial():

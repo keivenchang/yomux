@@ -1894,10 +1894,12 @@ function setFileTreeRecencyAttentionClass(row, enabled, nowMs = fileTreeRecencyN
   if (!row?.classList || !date?.classList) return;
   if (!enabled) {
     date.classList.remove('attention-pulse');
+    date.classList.remove('heartbeat-pulse');
     date.style?.removeProperty('--attention-animation-delay');
     return;
   }
   date.classList.add('attention-pulse');
+  date.classList.add('heartbeat-pulse');
   date.style?.setProperty('--attention-animation-delay', attentionAnimationDelay(nowMs));
 }
 
@@ -1926,6 +1928,7 @@ function clearFileTreeRowRecency(row) {
   for (const className of FILE_TREE_RECENCY_CLASSES) row.classList.remove(className);
   const date = fileTreeRecencyDateCell(row);
   date?.classList?.remove?.('attention-pulse');
+  date?.classList?.remove?.('heartbeat-pulse');
   date?.style?.removeProperty?.('--attention-animation-delay');
   setRowDataset(row, 'recency', '');
   row.style?.removeProperty('--file-tree-recency-date-color');
@@ -3251,11 +3254,12 @@ function persistTabberCollapsed() {
   storageSet(fileExplorerTabberCollapsedStorageKey, JSON.stringify(Array.from(fileExplorerTabberCollapsed).sort()));
 }
 
-// Recency for a ledger key (session "6" or session:window "6:1") = the latest of last typed / agent-active
-// / output. 0 when the key has no ledger entry yet.
+// Recency for a ledger key (session "6" or session:window "6:1") is derived by the backend once as active_recency_ts.
 function tabberRecency(key) {
   const rec = tabberActivityPayload?.activity?.[key];
   if (!rec) return 0;
+  const derived = Number(rec.active_recency_ts || 0);
+  if (Number.isFinite(derived) && derived > 0) return derived;
   return Math.max(Number(rec.last_user_input_ts || 0), Number(rec.last_agent_active_ts || 0), Number(rec.last_output_ts || 0));
 }
 
@@ -3533,6 +3537,158 @@ function tabberRepoEntriesForWindow(session, windowIndex, agentKey, gitBranch, g
 // Build the Tabber tree + an entriesByDir map keyed by STABLE id-based synthetic node paths
 // (s_<session>/w_<index>/r_<n>). Each entry carries mtime (ledger recency; parents inherit the max
 // child) for the date column + recency sort, and sortName (the human label) for A-Z/Z-A sort.
+function agentWindowKind(value) {
+  const key = String(value || '').trim().toLowerCase();
+  return key === 'claude' || key === 'codex' ? key : '';
+}
+
+function agentWindowCanonicalLabel(windowIndex, agentKey, fallback = '') {
+  const kind = agentWindowKind(agentKey);
+  if (!kind) return String(fallback || '').trim();
+  const index = tmuxWindowIndexKey(windowIndex);
+  return index !== null ? `${index}:${kind}` : kind;
+}
+
+function sessionAgentWindowStatusPayloads(session, info = null, autoPayload = null) {
+  const statePayload = autoPayload || autoApproveStates.get(session) || {};
+  const source = Array.isArray(statePayload.agent_windows) && statePayload.agent_windows.length
+    ? statePayload.agent_windows
+    : Array.isArray(info?.agent_windows) && info.agent_windows.length
+      ? info.agent_windows
+      : [];
+  const fallback = source.length ? source : (Array.isArray(info?.agents) ? info.agents : [])
+    .map(agent => ({kind: agent?.kind || '', state: 'idle', pane_target: agent?.pane_target || '', window_label: agent?.window_label || '', last_active_ts: 0, idle_since: null}));
+  return fallback
+    .map(agent => {
+      const kind = agentWindowKind(agent?.kind);
+      const windowIndex = tmuxWindowNumber(agent?.window_index ?? agent?.window);
+      const windowText = windowIndex !== null ? String(windowIndex) : String(agent?.window || '').trim();
+      const canonical = agentWindowCanonicalLabel(windowText || agent?.window_index, kind, agent?.window_label || kind);
+      return {...agent, kind, window: windowText, window_index: windowIndex, window_label: canonical};
+    })
+    .filter(agent => agent.kind);
+}
+
+function agentWindowStatusForRecord(session, record, info = null) {
+  const indexKey = tmuxWindowIndexKey(record?.index ?? record?.indexText);
+  if (indexKey === null) return null;
+  const rows = sessionAgentWindowStatusPayloads(session, info);
+  return rows.find(agent => tmuxWindowIndexKey(agent.window_index ?? agent.window) === indexKey) || null;
+}
+
+function agentWindowIdleSeconds(agent, nowSeconds = Date.now() / 1000) {
+  const lastActive = Number(agent?.idle_since || agent?.last_active_ts || 0);
+  return Number.isFinite(lastActive) && lastActive > 0 ? Math.max(0, nowSeconds - lastActive) : null;
+}
+
+const agentWindowActivityStates = new Map();
+const agentWindowStoppedTimers = new Map();
+
+function agentWindowActivityTransitionKey(agentKey, options = {}) {
+  const explicit = String(options.transitionKey || '').trim();
+  if (explicit) return explicit;
+  const kind = agentWindowKind(agentKey);
+  if (!kind) return '';
+  const session = String(options.session || '').trim();
+  const windowIndex = tmuxWindowIndexKey(options.window_index ?? options.window);
+  const pane = String(options.pane_target || options.pane || '').trim();
+  return [session, windowIndex ?? '', pane, kind].join(':');
+}
+
+function scheduleAgentWindowStoppedRefresh(key, untilMs) {
+  if (!key || !Number.isFinite(untilMs) || untilMs <= 0) return;
+  const previous = agentWindowStoppedTimers.get(key);
+  if (previous?.untilMs === untilMs) return;
+  if (previous?.timer) clearTimeout(previous.timer);
+  const delay = Math.max(0, untilMs - Date.now());
+  const timer = setTimeout(() => {
+    const current = agentWindowStoppedTimers.get(key);
+    if (!current || current.untilMs !== untilMs) return;
+    agentWindowStoppedTimers.delete(key);
+    if (typeof renderPanels === 'function' && typeof activePaneItems === 'function') {
+      renderPanels(activePaneItems());
+    }
+  }, delay);
+  agentWindowStoppedTimers.set(key, {timer, untilMs});
+}
+
+function clearAgentWindowStoppedRefresh(key) {
+  const previous = agentWindowStoppedTimers.get(key);
+  if (previous?.timer) clearTimeout(previous.timer);
+  agentWindowStoppedTimers.delete(key);
+}
+
+function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
+  const kind = agentWindowKind(agentKey);
+  if (!kind) return null;
+  const nowSeconds = Number.isFinite(Number(options.nowSeconds)) ? Number(options.nowSeconds) : Date.now() / 1000;
+  const transitionKey = agentWindowActivityTransitionKey(kind, options);
+  const previous = transitionKey ? (agentWindowActivityStates.get(transitionKey) || {}) : {};
+  if (String(state || '') === 'working') {
+    if (transitionKey) {
+      clearAgentWindowStoppedRefresh(transitionKey);
+      agentWindowActivityStates.set(transitionKey, {state: 'working', seenWorking: true, stoppedAt: 0});
+    }
+    return {state: 'working', icon: '●', label: `${agentLabel(kind)} ${t('state.working')}`};
+  }
+  const workingStoppedTs = Number(options.working_stopped_ts || options.workingStoppedTs || 0);
+  let stoppedAt = Number.isFinite(workingStoppedTs) && workingStoppedTs > 0 ? workingStoppedTs : 0;
+  const seenWorking = previous.seenWorking === true || stoppedAt > 0;
+  if (!stoppedAt && previous.state === 'working') stoppedAt = nowSeconds;
+  if (!stoppedAt && Number(previous.stoppedAt) > 0) stoppedAt = Number(previous.stoppedAt);
+  if (transitionKey) agentWindowActivityStates.set(transitionKey, {state: String(state || 'idle'), seenWorking, stoppedAt});
+  if (seenWorking && stoppedAt > 0) {
+    const stoppedAgeSeconds = Math.max(0, nowSeconds - stoppedAt);
+    if (stoppedAgeSeconds < FILE_TREE_RECENCY_JUST_UPDATED_MAX_AGE_SECONDS) {
+      if (options.scheduleRefresh !== false) scheduleAgentWindowStoppedRefresh(transitionKey, (stoppedAt + FILE_TREE_RECENCY_JUST_UPDATED_MAX_AGE_SECONDS) * 1000);
+      return {state: 'stopped', icon: '●', label: `${agentLabel(kind)} stopped`};
+    }
+    return {state: 'settled', icon: '●', label: `${agentLabel(kind)} ${t('state.idle')}`};
+  }
+  const idle = Number(idleSeconds);
+  if (Number.isFinite(idle) && idle >= 60) {
+    return {state: 'idle', icon: '○', label: `${agentLabel(kind)} ${t('state.idle')}`};
+  }
+  return null;
+}
+
+function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {}) {
+  const item = agentWindowActivityIcon(agentKey, state, idleSeconds, options);
+  if (!item) return '';
+  const tone = item.state === 'working' ? 'working' : item.state === 'stopped' ? 'attention' : item.state === 'settled' ? 'settled' : 'idle';
+  const classes = statusIndicatorDotClasses(
+    tone,
+    'agent-window-activity-icon',
+    `agent-window-activity-icon--${item.state}`,
+  );
+  const style = statusIndicatorToneStyle(tone);
+  return `<span class="${esc(classes)}" title="${esc(item.label)}" aria-label="${esc(item.label)}" role="img"${style}>${esc(item.icon)}</span>`;
+}
+
+function agentWindowActivityIconHtmlForStatus(agent, agentKey = agent?.kind, session = '') {
+  return agentWindowActivityIconHtml(agentKey, agent?.state, agentWindowIdleSeconds(agent), {
+    session,
+    window: agent?.window,
+    window_index: agent?.window_index,
+    pane: agent?.pane,
+    pane_target: agent?.pane_target,
+    working_stopped_ts: agent?.working_stopped_ts,
+  });
+}
+
+function tmuxWindowAgentStatus(session, record, info = null) {
+  const status = agentWindowStatusForRecord(session, record, info);
+  const statusKind = agentWindowKind(status?.kind);
+  const recordKind = agentWindowKind(tmuxWindowAgentKey(record?.name));
+  const agentKey = statusKind || recordKind;
+  return {status, agentKey};
+}
+
+function tmuxWindowCanonicalLabel(session, record, fallback = '', info = null) {
+  const {agentKey} = tmuxWindowAgentStatus(session, record, info);
+  return agentWindowCanonicalLabel(record?.indexText ?? record?.index, agentKey, fallback);
+}
+
 function buildTabberTree() {
   const entriesByDir = new Map();
   const topEntries = [];
@@ -3548,16 +3704,19 @@ function buildTabberTree() {
     const sessionWork = sessionWorkDescription(session, info, 200);
     const sessionNameLabel = sessionLabel(session) || session;
     const sessionDisplay = sessionWork ? `${sessionNameLabel}  ${sessionWork}` : sessionNameLabel;
+    const nowSeconds = Date.now() / 1000;
     const sessionEntry = {
       name: sessionName, kind: 'dir', mtime: 0, sortName: sessionDisplay,
       tabber: {type: 'session', session, label: sessionNameLabel, description: sessionWork, icon: '●', branchText: branch, active: session === activeSession},
     };
     topEntries.push(sessionEntry);
+    const activeIndexOverride = tmuxWindowDisplayActiveIndex(session);
+    const activeIndexOverlay = activeIndexOverride === tmuxWindowPendingActiveIndex ? null : activeIndexOverride;
     const windowEntries = tmuxWindowRecords(info.panes).map(record => {
       const windowName = `w_${tabberPathToken(record.index)}`;
       const windowPath = `${sessionPath}/${windowName}`;
-      const isAgent = tabberWindowIsAgent(record.name);
-      const agentKey = tmuxWindowAgentKey(record.name);
+      const {status: agentStatus, agentKey} = tmuxWindowAgentStatus(session, record, info);
+      const isAgent = Boolean(agentKey) || tabberWindowIsAgent(record.name);
       const agentActivity = isAgent ? tabberAgentForWindow(session, record.index, agentKey) : null;
       const repoEntries = isAgent ? tabberRepoEntriesForWindow(session, record.index, agentKey, branch, gitRoot) : [];
       const childMtime = repoEntries.reduce((max, entry) => Math.max(max, Number(entry.mtime || 0)), 0);
@@ -3567,11 +3726,15 @@ function buildTabberTree() {
       const windowMtime = isAgent
         ? tabberAgentRecency(agentActivity)
         : Math.max(ledgerMtime, childMtime, fallbackSessionRecency);
+      const active = activeIndexOverride === undefined ? record.active === true : (activeIndexOverlay !== null && String(record.index) === activeIndexOverlay);
+      const label = tmuxWindowCanonicalLabel(session, record, record.indexedNameLabel || `${record.indexText}:${record.nameLabel}`, info);
+      const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatus, agentKey, session);
+      const dateText = agentStatus ? sessionPopoverAgentStateText(agentStatus, nowSeconds) : tabberAgentDateText(agentActivity);
       if (repoEntries.length) entriesByDir.set(normalizeDirectoryPath(windowPath), repoEntries);
       return {
         name: windowName, kind: repoEntries.length ? 'dir' : 'file', mtime: windowMtime,
-        sortName: record.indexedNameLabel || record.nameLabel,
-        tabber: {type: 'window', session, windowIndex: record.index, label: record.indexedNameLabel || `${record.indexText}:${record.nameLabel}`, icon: '⌁', active: record.active === true, current: session === activeSession && record.active === true, agentKey, dateText: tabberAgentDateText(agentActivity)},
+        sortName: label,
+        tabber: {type: 'window', session, windowIndex: record.index, label, icon: '⌁', active, current: session === activeSession && active, agentKey, activityIconHtml, dateText},
       };
     });
     entriesByDir.set(normalizeDirectoryPath(sessionPath), windowEntries);
@@ -3635,8 +3798,8 @@ function tabberWindowLabelHtml(label, iconHtml, options = {}) {
   const pidMatch = text.match(/^(.*?)(\s+\(pid=\d+\))$/);
   const nameText = pidMatch ? pidMatch[1] : text;
   const pidText = pidMatch ? pidMatch[2] : '';
-  const activeMarker = options.active === true ? ' ●' : '';
-  return `<span class="tabber-window-label"><span class="tabber-window-text">${esc(nameText)}</span>${iconHtml}${pidText ? `<span class="tabber-window-pid">${esc(pidText)}</span>` : ''}${activeMarker ? `<span class="tabber-window-active">${esc(activeMarker)}</span>` : ''}</span>`;
+  const activityIconHtml = String(options.activityIconHtml || '');
+  return `<span class="tabber-window-label"><span class="tabber-window-text">${esc(nameText)}</span>${activityIconHtml}${iconHtml}${pidText ? `<span class="tabber-window-pid">${esc(pidText)}</span>` : ''}</span>`;
 }
 
 function tabberSessionLabelHtml(data, entry) {
@@ -3707,7 +3870,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   const nameHtml = data.type === 'session'
     ? tabberSessionLabelHtml(renderData, entry)
     : data.type === 'window' && windowAgentIconHtml
-      ? tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true})
+      ? tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true, activityIconHtml: data.activityIconHtml})
     : data.type === 'loading'
       ? `<span class="tabber-loading-label">${esc(data.label || 'Fetching')}</span>${movingEllipsisHtml('tabber-loading-dots')}`
     : '';
@@ -3773,6 +3936,10 @@ function activeTabberRowPath() {
   const session = currentSessionActionTarget();
   if (!session) return '';
   const info = transcriptMeta.sessions?.[session] || {};
+  const override = tmuxWindowDisplayActiveIndex(session);
+  if (override !== undefined) {
+    return override === tmuxWindowPendingActiveIndex ? tabberSessionPath(session) : tabberWindowPath(session, override);
+  }
   const activeWindow = tmuxWindowRecords(info.panes).find(record => record.active === true);
   return activeWindow ? tabberWindowPath(session, activeWindow.index) : tabberSessionPath(session);
 }
@@ -3811,20 +3978,26 @@ function handleTabberRowActivate(row, event) {
     refreshTabberPanels();
     return;
   }
-  const switchWindow = () => { if (session && windowIndex !== null) tmuxWindow(session, {windowIndex}, row.querySelector('.file-tree-name')?.textContent || session); };
+  const switchWindow = () => {
+    if (session && windowIndex !== null) {
+      tmuxWindow(session, {windowIndex}, row.querySelector('.file-tree-name')?.textContent || session);
+      return true;
+    }
+    return false;
+  };
   if (type === 'tab' && row.dataset.tabberItem) {
     if (row.dataset.tabberItem === infoItemId) openInfoSubTab('info');
     else selectSession(row.dataset.tabberItem, {userInitiated: true});
   } else if (type === 'session' && session) {
     openTabberSession(session);
   } else if (type === 'window' && session) {
-    selectSession(session, {userInitiated: true});
     switchWindow();
+    selectSession(session, {userInitiated: true});
   } else if (type === 'repo' && row.dataset.tabberRepoRoot) {
+    switchWindow();
     setFileExplorerMode('files');
     openFileExplorerManualRoot(row.dataset.tabberRepoRoot);
     if (session) selectSession(session, {userInitiated: true});
-    switchWindow();
   } else if (row.dataset.kind === 'dir' && fullPath) {
     toggleTabberCollapsed(fullPath);
     refreshTabberPanels();

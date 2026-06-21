@@ -96,6 +96,28 @@ def test_session_repo_summaries_single_repo_has_no_extra(tmp_path):
     assert roots == {root}
 
 
+def test_session_to_json_includes_window_metadata(tmp_path):
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    _init_repo(repo_a)
+    _init_repo(repo_b)
+    _git(repo_b, "checkout", "-b", "feature/repo-b")
+    panes = [
+        PaneInfo(session="s2", window="0", pane="0", pane_id="%20", target="s2:0.0", current_path=str(repo_a), command="codex", active=True, window_active=False, title="", pid=20, window_name="codex"),
+        PaneInfo(session="s2", window="1", pane="0", pane_id="%21", target="s2:1.0", current_path=str(repo_b), command="claude", active=True, window_active=True, title="", pid=21, window_name="claude"),
+    ]
+    info = SessionInfo(session="s2", panes=panes, selected_pane=panes[1], agents=[])
+
+    payload = metadata.session_to_json(info, MetadataCache(), allow_network=False)
+    rows = {row["window"]: row for row in payload["window_metadata"]}
+
+    assert rows["0"]["path"] == str(repo_a)
+    assert rows["0"]["git"]["root"] == str(repo_a.resolve())
+    assert rows["1"]["path"] == str(repo_b)
+    assert rows["1"]["git"]["root"] == str(repo_b.resolve())
+    assert rows["1"]["git"]["branch"] == "feature/repo-b"
+
+
 def test_session_git_inventory_prefers_recent_dirty_repo(tmp_path):
     repos = []
     for name in ("old", "recent"):

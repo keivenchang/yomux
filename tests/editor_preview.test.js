@@ -29,9 +29,42 @@ const {
   canonical,
   makeFileTree,
   test,
+  testAsync,
   runSuites,
   finishSuite,
 } = require('./layout_test_helper');
+
+function tmuxWindowButtonElement(session, index, active = false) {
+  const button = new TestElement(`tmux-window-${session}-${index}`, 'button');
+  button.className = `tab tmux-window-button${active ? ' active' : ''}`;
+  button.dataset.windowIndex = String(index);
+  button.dataset.windowSession = session;
+  button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  return button;
+}
+
+function tmuxWindowBarElement(session, buttons) {
+  const bar = new TestElement(`tmux-window-bar-${session}`);
+  bar.dataset.tmuxWindowBar = session;
+  buttons.forEach(button => bar.appendChild(button));
+  return bar;
+}
+
+function activeTmuxWindowIndexesFromHtml(html) {
+  return [...String(html || '').matchAll(/<button\b([^>]*)>/g)]
+    .filter(([, attrs]) => /\btmux-window-button\b/.test(attrs) && /\bactive\b/.test(attrs))
+    .map(([, attrs]) => attrs.match(/\bdata-window-index="([^"]+)"/)?.[1] || '');
+}
+
+function activeTmuxWindowIndexesFromElement(root) {
+  return Array.from(root.querySelectorAll('.tmux-window-button[data-window-index]'))
+    .filter(button => button.classList.contains('active'))
+    .map(button => button.dataset.windowIndex || '');
+}
+
+function tmuxWindowButtonFromElement(root, index) {
+  return root.querySelector(`.tmux-window-button[data-window-index="${String(index)}"]`);
+}
 
 async function runEditorPreviewSuite() {
   test('search history pane renders search results and compact runs', () => {
@@ -89,10 +122,27 @@ async function runEditorPreviewSuite() {
     const dateCell = row => row.querySelector(':scope > .file-tree-date');
     const sessionsCss = fs.readFileSync('static_src/css/yolomux/20_sessions_popovers.css', 'utf8');
     const treeCss = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
+    const layoutSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
     const fileTreeSource = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
+    const popoverSource = fs.readFileSync('static_src/js/yolomux/60_popovers_tabs.js', 'utf8');
+    assert.ok(/function statusIndicatorToneClasses\(tone\)[\s\S]*tone === 'working'[\s\S]*status-indicator--working', 'heartbeat-pulse'[\s\S]*tone === 'attention'[\s\S]*status-indicator--attention', 'heartbeat-pulse', 'attention-pulse'[\s\S]*tone === 'settled'[\s\S]*status-indicator--settled[\s\S]*tone === 'idle'[\s\S]*status-indicator--idle/.test(layoutSource), 'ASK?/QUES?/activity-dot status tones are centralized in one shared parent helper');
+    assert.ok(/statusIndicatorInlineClasses\(questionTone,\s*'topbar-activity-ques'/.test(layoutSource), 'topbar ASK? badges inherit shared inline status behavior');
+    assert.ok(/statusIndicatorTextClasses\(tone,\s*classes\)/.test(layoutSource), 'tab ASK? badges inherit shared text status behavior');
+    assert.ok(/const tone = item\.state === 'working'[\s\S]*statusIndicatorDotClasses\(\s*tone,\s*'agent-window-activity-icon'/.test(fileTreeSource), 'tmux window activity circles inherit shared dot status behavior');
+    assert.ok(/statusIndicatorDotClasses\(\s*dotTone,\s*'session-agent-dot'/.test(popoverSource), 'session popover activity circles inherit shared dot status behavior');
+    assert.ok(/\.status-indicator\s*\{[^}]*display:\s*inline-flex/.test(sessionsCss), 'ASK?/QUES?/activity-dot markers share the status-indicator parent');
+    assert.ok(/\.status-indicator--text\s*\{[^}]*border:\s*1px solid var\(--divider\)/.test(sessionsCss), 'text status badges inherit pill framing from the shared parent modifier');
+    assert.ok(/\.status-indicator--dot\s*\{[^}]*color:\s*var\(--muted\)/.test(sessionsCss), 'circle status markers inherit dot color/shape from the shared parent modifier');
+    assert.ok(/\.heartbeat-pulse\s*\{[^}]*animation-duration:\s*var\(--pulse-duration\)[^}]*animation-timing-function:\s*var\(--pulse-easing\)/.test(sessionsCss), 'heartbeat indicators share one pulse timing parent');
+    assert.ok(/\.status-indicator--dot\.status-indicator--working\.heartbeat-pulse\s*\{[^}]*animation-name:\s*command-palette-thinking[\s\S]*animation-duration:\s*var\(--pulse-duration\)[\s\S]*animation-timing-function:\s*var\(--pulse-easing\)/.test(sessionsCss), 'working circle markers inherit the shared continuous working pulse');
+    assert.equal(/status-indicator--idle[\s\S]{0,160}animation/.test(sessionsCss), false, 'idle circle markers stay static');
+    assert.ok(/@media \(prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*\.heartbeat-pulse[\s\S]*animation:\s*none/.test(sessionsCss), 'working/attention pulses are disabled under reduced motion by the shared parent');
     assert.ok(/\.attention-pulse\s*\{[^}]*animation-name:\s*attention-ring-fade/.test(sessionsCss), 'recency and attention share the attention-ring-fade animation parent');
-    assert.ok(/\.attention-pulse\s*\{[^}]*animation-duration:\s*var\(--red-reminder-duration\)/.test(sessionsCss), 'shared attention pulse uses the red-reminder duration token');
-    assert.ok(/\.attention-pulse\s*\{[^}]*animation-timing-function:\s*var\(--red-reminder-easing\)/.test(sessionsCss), 'shared attention pulse uses the red-reminder easing token');
+    assert.ok(/\.attention-pulse\s*\{[^}]*animation-duration:\s*var\(--pulse-duration\)/.test(sessionsCss), 'shared attention pulse uses the shared pulse duration token');
+    assert.ok(/\.attention-pulse\s*\{[^}]*animation-timing-function:\s*var\(--pulse-easing\)/.test(sessionsCss), 'shared attention pulse uses the shared pulse easing token');
+    assert.ok(/\.ci-indicator\.metadata-pulse:not\(\.pr-status-failing\)\s*\{[^}]*animation:\s*metadata-badge-pulse var\(--pulse-duration\) var\(--pulse-easing\) 14/.test(sessionsCss), 'metadata pulse no longer has a hardcoded duration');
+    assert.equal(/900ms ease-in-out infinite alternate|metadata-badge-pulse 1\.4s/.test(sessionsCss), false, 'old hardcoded pulse durations are gone from session/popover CSS');
+    assert.ok(/\.file-tree-date\s*\{[\s\S]*border:\s*1px solid transparent[\s\S]*border-radius:\s*5px/.test(treeCss), 'recency date cells have a visible border target for the shared attention-ring animation');
     assert.equal(/file-tree-recency-pulse/.test(treeCss + fileTreeSource), false, 'the old standalone file-tree recency pulse is gone');
     assert.equal(/10s ease-out/.test(treeCss), false, 'recency no longer uses the old one-shot ten-second pulse');
 
@@ -113,6 +163,7 @@ async function runEditorPreviewSuite() {
     assert.equal(rows['/repo/just.md'].dataset.recency, 'just-updated', 'Ago mode marks very recent Finder rows just-updated');
     assert.equal(rows['/repo/just.md'].classList.contains('file-tree-recency-just-updated'), true, 'Ago mode applies the just-updated row class');
     assert.equal(dateCell(rows['/repo/just.md']).classList.contains('attention-pulse'), true, 'very recent Finder rows pulse their date cell with the shared attention class');
+    assert.equal(dateCell(rows['/repo/just.md']).classList.contains('heartbeat-pulse'), true, 'very recent Finder rows inherit the shared heartbeat timing parent');
     assert.notEqual(dateCell(rows['/repo/just.md']).style.getPropertyValue('--attention-animation-delay'), '', 'date-cell pulse is phase-aligned with attentionAnimationDelay');
     assert.equal(rows['/repo/just.md'].style.getPropertyValue('--file-tree-recency-date-color'), 'var(--file-tree-recency-hot)', 'just-updated rows expose the token-backed date color');
     assert.equal(rows['/repo/hot.md'].dataset.recency, 'hot', 'Ago mode marks sub-minute Finder rows hot after the pulse window');
@@ -268,8 +319,28 @@ async function runEditorPreviewSuite() {
     const api = loadYolomux('', ['1']);
     const html = api.transcriptPathRowHtml('/tmp/yolomux/session.jsonl');
     assert.ok(html.includes('/tmp/yolomux/session.jsonl'));
-    assert.ok(html.includes('data-copy-transcript-path'));
+    assert.ok(html.includes('data-copy-path'));
     assert.equal(api.transcriptPathRowHtml('').includes('no transcript path'), true);
+  });
+
+  test('path copy buttons route through one delegated handler', () => {
+    const jsFiles = fs.readdirSync('static_src/js/yolomux')
+      .filter(file => file.endsWith('.js'))
+      .sort()
+      .map(file => `static_src/js/yolomux/${file}`);
+    const handlerSites = [];
+    let source = '';
+    for (const file of jsFiles) {
+      const text = fs.readFileSync(file, 'utf8');
+      source += text;
+      for (const match of text.matchAll(/delegate\([^;\n]*'\[data-copy-path\]'[^;\n]*\)|closest\('\[data-copy-path\]'\)/g)) {
+        handlerSites.push(`${file}:${match[0]}`);
+      }
+    }
+    assert.deepStrictEqual(handlerSites, [
+      "static_src/js/yolomux/10_core_utils.js:delegate(document, 'click', '[data-copy-path]', handleCopyPathClick)",
+    ], 'all data-copy-path clicks are handled by the shared delegated owner');
+    assert.equal(source.includes('data-copy-transcript-path'), false, 'terminal transcript path no longer uses a parallel copy attribute');
   });
 
   test('t@6304', () => {
@@ -561,15 +632,29 @@ async function runEditorPreviewSuite() {
     assert.ok(windowBarHtml.includes('data-window-index="1"'), 'P5: window bar button targets window 1');
     assert.ok(windowBarHtml.includes('data-window-index="2"'), 'P5: window bar button targets window 2');
     assert.ok(/class="tab tmux-window-button active"[^>]*data-window-index="3"[^>]*aria-pressed="true"/.test(windowBarHtml), 'P5: active tmux window button is highlighted and pressed');
-    assert.ok(windowBarHtml.includes('<span class="tmux-window-name-label">1:bash</span>'), 'tmux window buttons show index:name without pid');
-    assert.ok(windowBarHtml.includes('<span class="tmux-window-name-label">2:codex(2)</span>'), 'duplicate tmux window button names keep the disambiguating suffix after the index prefix');
+    assert.ok(windowBarHtml.includes('<span class="tmux-window-name-label"><span class="tmux-window-name-text">1:bash</span></span>'), 'tmux window buttons show index:name without pid');
+    assert.ok(windowBarHtml.includes('<span class="tmux-window-name-label"><span class="tmux-window-name-text">2:codex</span></span>'), 'AI tmux window button labels use the canonical index:agent kind');
     assert.equal(windowBarHtml.includes('(pid='), false, 'tmux window button labels do not show process pids');
     assert.equal(windowBarHtml.includes('3:node'), false, 'DOIT.53 P2: process-aware agent labels beat raw tmux window names like node');
-    assert.ok(/data-window-agent="shell"[^>]*data-window-index="1"/.test(windowBarHtml), 'per-agent color: the bash window is tagged as the shell agent');
-    assert.ok(/tmux-window-button active"[^>]*data-window-agent="codex"/.test(windowBarHtml), 'per-agent color: the active codex window keeps its agent tag so the swatch shows on the green toggle');
-    assert.equal(api.tmuxWindowAgentKeyForTest('claude'), 'claude', 'per-agent color: claude windows map to the claude agent key');
-    assert.equal(api.tmuxWindowAgentKeyForTest('vim README.md'), 'editor', 'per-agent color: editor commands collapse to the editor agent key');
-    assert.equal(api.tmuxWindowAgentKeyForTest('htop'), 'other', 'per-agent color: unknown programs fall back to the other agent key');
+    assert.equal(windowBarHtml.includes('data-window-agent'), false, 'tmux window buttons no longer carry per-agent color tags');
+    const nowSeconds = Date.now() / 1000;
+    api.setAutoApproveStateForTest('1', {agent_windows: [
+      {kind: 'codex', state: 'working', window_index: 3, last_active_ts: nowSeconds, window_label: '3:codex'},
+      {kind: 'codex', state: 'idle', window_index: 2, last_active_ts: nowSeconds - 120, idle_since: nowSeconds - 120, window_label: '2:codex'},
+    ]});
+    assert.equal(api.agentWindowActivityIconForTest('codex', 'working', 0).icon, '●', 'working AI windows use the shared working icon');
+    assert.equal(api.agentWindowActivityIconForTest('claude', 'idle', 60).icon, '○', 'idle AI windows use the shared idle icon after one minute');
+    assert.equal(api.agentWindowActivityIconForTest('claude', 'idle', 10), null, 'recent idle AI windows do not show an idle icon yet');
+    assert.equal(api.agentWindowActivityIconForTest('shell', 'working', 300), null, 'non-AI windows do not show working or idle icons');
+    const transitionKey = '1:3:codex';
+    assert.equal(api.agentWindowActivityIconForTest('codex', 'working', 0, {transitionKey, nowSeconds: 1000, scheduleRefresh: false}).state, 'working', 'working transition state is recorded');
+    assert.equal(api.agentWindowActivityIconForTest('codex', 'idle', 0, {transitionKey, nowSeconds: 1005, scheduleRefresh: false}).state, 'stopped', 'a window that just stopped working pulses red for the shared 15-second window');
+    assert.equal(api.agentWindowActivityIconForTest('codex', 'idle', 20, {transitionKey, nowSeconds: 1020, scheduleRefresh: false}).state, 'settled', 'after the shared 15-second window the stopped marker becomes settled');
+    assert.equal(api.agentWindowActivityIconForTest('codex', 'idle', 120, {transitionKey: 'cold-idle', nowSeconds: 2000, scheduleRefresh: false}).state, 'idle', 'an AI window never observed working stays hollow idle instead of flashing red');
+    const windowBarWithStatusHtml = api.tmuxWindowBarHtml('1', {panes: windowPanes});
+    assert.ok(windowBarWithStatusHtml.includes('status-indicator') && windowBarWithStatusHtml.includes('agent-window-activity-icon--working'), 'window bar renders the shared working icon after AI labels');
+    assert.ok(windowBarWithStatusHtml.includes('status-indicator--dot') && windowBarWithStatusHtml.includes('agent-window-activity-icon--idle'), 'window bar renders the shared idle icon after one-minute idle AI labels');
+    assert.ok(!/<span class="tmux-window-name-text">1:bash<\/span><span class="agent-window-activity-icon/.test(windowBarWithStatusHtml), 'bash window labels do not get AI activity icons');
     const manyWindows = Array.from({length: 9}, (_unused, index) => ({
       window: String(index + 1),
       window_name: `w${index + 1}`,
@@ -595,20 +680,29 @@ async function runEditorPreviewSuite() {
     assert.equal(source.includes('panel-agent-slot'), false, 'DOIT.57 T1: no agent-badge slot is rendered in the detail row');
     assert.ok(/\.tmux-window-button\.active\s*\{[\s\S]*background:\s*var\(--active-control-bg\)/.test(yoloCss), 'DOIT.57 T2: the active window button is a pressed toggle via the shared active-control tokens');
     assert.equal(/\.tmux-window-button\.active\s*\{[^}]*#[0-9a-fA-F]{3,6}/.test(yoloCss), false, 'DOIT.57 T2: the active window button uses theme-aware tokens, not hardcoded hex');
+    assert.equal(yoloCss.includes('window-agent-color') || yoloCss.includes('data-window-agent'), false, 'tmux window buttons have no per-agent tint CSS');
     assert.ok(/\.panel-detail-row \.tmux-window-bar\s*\{[\s\S]*margin-inline-start:\s*auto[\s\S]*justify-content:\s*flex-end/.test(yoloCss), '2026-06-11 Info Bar regression: tmux window bar right-aligns next to the detail close button');
     assert.ok(/\.yolomux-dockview \.dockview-panel-content > \.panel\.dockview-inner-head-collapsed\.details-collapsed\s*\{\s*grid-template-rows:\s*minmax\(0, 1fr\)/.test(yoloCss), '2026-06-11 Info Bar regression: Dockview terminals get one full-height grid row when both inner header and details are hidden');
     assert.ok(/function setPanelDetailsCollapsed\(panel, collapsed\)\s*\{[\s\S]*schedulePanelDetailsFit\(panel\)/.test(source), '2026-06-11 Info Bar regression: details toggle refits visible tmux terminals after row height changes');
     assert.equal(source.includes('function windowStepButtonHtml'), false, 'DOIT.56 N3: dead header tmux stepper renderer stays removed');
     assert.equal(/button\.textContent = terminalTabLabel/.test(source), false, 'DOIT.56 N3: metadata refresh no longer rewrites the static terminal tab label');
     const calls = [];
+    const button1 = tmuxWindowButtonElement('1', '1', false);
+    const button3 = tmuxWindowButtonElement('1', '3', true);
+    api.testElementForId('body').appendChild(tmuxWindowBarElement('1', [button1, button3]));
     api.setFetchForTest((url, options = {}) => {
       calls.push({url: String(url), method: options.method || 'GET'});
-      return Promise.resolve(jsonResponse({ok: true}));
+      return new Promise(() => {});
     });
-    api.tmuxWindowForTest('1', {windowIndex: '3'}, 'tmux window 3:codex(3)');
-    assert.deepStrictEqual(calls, [{url: '/api/tmux-window?session=1&window=3', method: 'POST'}], 'P5: clicking a window button posts direct select-window for that index');
+    api.tmuxWindowForTest('1', {windowIndex: '1'}, 'tmux window 1:bash');
+    assert.deepStrictEqual(activeTmuxWindowIndexesFromElement(api.testElementForId('body')), ['1'], 'direct window clicks mark the clicked button active synchronously before POST resolution');
+    assert.equal(tmuxWindowButtonFromElement(api.testElementForId('body'), '1')?.getAttribute('aria-pressed'), 'true', 'direct window clicks sync aria-pressed before POST resolution');
+    assert.equal(tmuxWindowButtonFromElement(api.testElementForId('body'), '3')?.classList.contains('active'), false, 'direct window clicks clear the previous active button synchronously');
+    assert.equal(tmuxWindowButtonFromElement(api.testElementForId('body'), '3')?.getAttribute('aria-pressed'), 'false', 'direct window clicks clear the previous pressed state synchronously');
+    assert.deepStrictEqual(calls, [{url: '/api/tmux-window?session=1&window=1', method: 'POST'}], 'P5: clicking a window button posts direct select-window for that index');
+    assert.deepStrictEqual(activeTmuxWindowIndexesFromHtml(api.tmuxWindowBarHtml('1', {panes: windowPanes})), ['1'], 'stale interim renders keep the explicit target highlighted until read-back confirms');
     calls.length = 0;
-    api.setTranscriptInfoForTest('meta-preview', {
+    const directMetaInfo = {
       agents: [{kind: 'codex', pane_target: 'meta-preview:0.0'}],
       selected_pane: {target: 'meta-preview:0.0', window: '0', pane: '0', current_path: '/home/u'},
       panes: [
@@ -619,13 +713,17 @@ async function runEditorPreviewSuite() {
         git: {root: '/repo/agent', cwd: '/repo/agent/src', branch: 'agent-work', dirty_count: 8}, pull_request: null, linear: [],
         repos: [{root: '/repo/agent', cwd: '/repo/agent/src', branch: 'agent-work', dirty_count: 8, primary: true}],
       },
-    });
+    };
+    api.setTranscriptInfoForTest('meta-preview', directMetaInfo);
     const metaNode = api.testElementForId('meta-meta-preview');
     metaNode.innerHTML = 'stale';
     api.tmuxWindowForTest('meta-preview', {windowIndex: '1'}, 'tmux window 1:bash');
-    assert.equal(metaNode.innerHTML, 'stale', 'clicking a tmux window does not repaint from a predicted local window index');
+    assert.notEqual(metaNode.innerHTML, 'stale', 'clicking a known tmux window updates path/repo metadata without waiting for the next transcript poll');
+    assert.ok(metaNode.innerHTML.includes('/tmp/shell'), 'known target-window pane path is reflected immediately in the Info Bar');
+    assert.equal(api.terminalTabTitle('meta-preview', api.transcriptInfoForTest('meta-preview')), 'terminal: bash', 'terminal detail label follows the optimistic target window, not stale backend-active metadata');
     assert.deepStrictEqual(calls, [{url: '/api/tmux-window?session=meta-preview&window=1', method: 'POST'}], 'tmux window click still posts the authoritative select-window request');
-    api.setTranscriptInfoForTest('meta-preview', {
+    const relativeApi = loadYolomux('', ['meta-preview']);
+    relativeApi.setTranscriptInfoForTest('meta-preview', {
       selected_pane: {target: 'meta-preview:0.0', window: '0', pane: '0', current_path: '/repo/agent/src'},
       panes: [
         {target: 'meta-preview:0.0', window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', command: 'codex', current_path: '/repo/agent/src'},
@@ -633,23 +731,415 @@ async function runEditorPreviewSuite() {
       ],
     });
     const terminalFrames = [];
-    api.registerTerminalForTest('meta-preview', {focus() {}}, {readyState: WebSocket.OPEN, send(message) { terminalFrames.push(JSON.parse(message)); }});
-    metaNode.innerHTML = 'stale';
-    assert.equal(api.handleTerminalDataForTest('meta-preview', '\x02n'), true, 'Ctrl-b n terminal bytes are still accepted by the transport path');
+    relativeApi.registerTerminalForTest('meta-preview', {focus() {}}, {readyState: WebSocket.OPEN, send(message) { terminalFrames.push(JSON.parse(message)); }});
+    relativeApi.setFetchForTest((url, options = {}) => {
+      if (String(url).startsWith('/api/fs/batch')) {
+        const requests = JSON.parse(options.body || '{}').requests || [];
+        return Promise.resolve(jsonResponse({responses: requests.map(request => ({id: request.id, ok: true, status: 200, payload: {path: request.path, entries: []}}))}));
+      }
+      return Promise.resolve(jsonResponse({entries: [], path: '/repo/agent/src'}));
+    });
+    const relativeMetaNode = relativeApi.testElementForId('meta-meta-preview');
+    const numericButton0 = tmuxWindowButtonElement('meta-preview', '0', true);
+    const numericButton1 = tmuxWindowButtonElement('meta-preview', '1', false);
+    relativeApi.testElementForId('body').appendChild(tmuxWindowBarElement('meta-preview', [numericButton0, numericButton1]));
+    relativeMetaNode.innerHTML = 'stale';
+    assert.equal(relativeApi.handleTerminalDataForTest('meta-preview', '\x02n'), true, 'Ctrl-b n terminal bytes are still accepted by the transport path');
     assert.equal(terminalFrames.at(-1).data, '\x02n', 'Ctrl-b n is still sent verbatim to tmux');
-    assert.equal(metaNode.innerHTML, 'stale', 'Ctrl-b n does not locally predict which tmux window became active');
-    metaNode.innerHTML = 'stale again';
-    assert.equal(api.handleTerminalDataForTest('meta-preview', '\x02'), true, 'a split Ctrl-b prefix is still sent verbatim');
-    assert.equal(api.handleTerminalDataForTest('meta-preview', '0'), true, 'a split tmux numeric selection key is still sent verbatim');
-    assert.deepStrictEqual(terminalFrames.slice(-2).map(frame => frame.data), ['\x02', '0'], 'split tmux prefix and digit are not swallowed or merged');
-    assert.equal(metaNode.innerHTML, 'stale again', 'Ctrl-b then 0 waits for backend/tmux read-back instead of local prediction');
+    assert.deepStrictEqual(activeTmuxWindowIndexesFromElement(relativeApi.testElementForId('body')), [], 'Ctrl-b n clears the current active button synchronously until tmux confirms the real window');
+    assert.equal(tmuxWindowButtonFromElement(relativeApi.testElementForId('body'), '0')?.getAttribute('aria-pressed'), 'false', 'Ctrl-b n clears aria-pressed synchronously');
+    assert.equal(tmuxWindowButtonFromElement(relativeApi.testElementForId('body'), '1')?.classList.contains('active'), false, 'Ctrl-b n does not guess the next active button locally');
+    assert.equal(relativeMetaNode.innerHTML, 'stale', 'Ctrl-b n does not locally predict path/repo metadata');
+    relativeMetaNode.innerHTML = 'stale again';
+    assert.equal(relativeApi.handleTerminalDataForTest('meta-preview', '\x02'), true, 'a split Ctrl-b prefix is still sent verbatim');
+    assert.equal(relativeApi.handleTerminalDataForTest('meta-preview', '1'), true, 'a split tmux numeric selection key is still sent verbatim');
+    assert.deepStrictEqual(terminalFrames.slice(-2).map(frame => frame.data), ['\x02', '1'], 'split tmux prefix and digit are not swallowed or merged');
+    assert.deepStrictEqual(activeTmuxWindowIndexesFromElement(relativeApi.testElementForId('body')), ['1'], 'Ctrl-b then a number marks that explicit target active synchronously');
+    assert.equal(tmuxWindowButtonFromElement(relativeApi.testElementForId('body'), '1')?.getAttribute('aria-pressed'), 'true', 'Ctrl-b numeric selection syncs aria-pressed synchronously');
+    assert.equal(tmuxWindowButtonFromElement(relativeApi.testElementForId('body'), '0')?.classList.contains('active'), false, 'Ctrl-b numeric selection clears the previous active button synchronously');
+    assert.notEqual(relativeMetaNode.innerHTML, 'stale again', 'Ctrl-b then a number updates known target-window path/repo metadata immediately');
+    assert.ok(relativeMetaNode.innerHTML.includes('/tmp/shell'), 'Ctrl-b numeric target uses the known target-window pane path immediately');
     const tmuxPrefixObserver = source.slice(source.indexOf('function observeTerminalTmuxPrefixWindowSwitches(session, data)'), source.indexOf('function handleTerminalData(session, data)'));
     assert.ok(tmuxPrefixObserver.includes("char === '\\x02'") && tmuxPrefixObserver.includes('terminalTmuxPrefixWindowShortcut(char)'), 'terminal transport observes tmux prefix window shortcuts without owning the bytes');
     assert.equal(source.includes('function previewTmuxWindowInfo'), false, 'tmux window switching has no relative-index predictor');
     assert.equal(source.includes('function previewTmuxWindowLabel'), false, 'tmux window switching has no optimistic local label repaint');
-    assert.ok(/function noteTerminalTmuxWindowSwitch\(session, shortcut\)[\s\S]*scheduleTmuxWindowReadback\(session\)/.test(source), 'terminal prefix observer schedules backend read-back instead of predicting active window');
+    assert.ok(/function noteTerminalTmuxWindowSwitch\(session, shortcut\)[\s\S]*const sequence = directIndex !== null[\s\S]*setTmuxWindowActiveIndexOverride\(session, directIndex\)[\s\S]*setTmuxWindowActiveIndexPending\(session\)[\s\S]*expectedIndex: directIndex, sequence[\s\S]*previousIndex, sequence/.test(source), 'terminal prefix observer highlights explicit targets and carries a sequence through readback');
     assert.ok(/function handleTerminalData\(session, data\)[\s\S]*observeTerminalTmuxPrefixWindowSwitches\(session, filtered\);[\s\S]*socket\.send\(JSON\.stringify\(\{type: 'input', data: filtered\}\)\)/.test(source), 'tmux prefix observation happens before sending the unchanged terminal bytes');
-    assert.ok(/apiFetchJson\(`\/api\/tmux-window\?session=\$\{encodeURIComponent\(session\)\}&window=\$\{encodeURIComponent\(String\(directIndex\)\)\}`[\s\S]*\.then\(\(\) => scheduleTmuxWindowReadback\(session, \{delayMs: 0\}\)\)/.test(source), 'direct window buttons read back after the authoritative tmux select-window request');
+    assert.ok(/const sequence = setTmuxWindowActiveIndexOverride\(session, directIndex\)[\s\S]*apiFetchJson\(`\/api\/tmux-window\?session=\$\{encodeURIComponent\(session\)\}&window=\$\{encodeURIComponent\(String\(directIndex\)\)\}`[\s\S]*tmuxWindowSwitchSequenceMatches\(session, sequence\)[\s\S]*scheduleTmuxWindowReadback\(session, \{delayMs: 0, clearActiveIndexOverride: true, expectedIndex: directIndex, sequence\}\)/.test(source), 'direct window buttons highlight before POST and keep the optimistic target until authoritative confirmation');
+    assert.ok(/function setTmuxWindowActiveIndexOverride\(session, windowIndex, options = \{\}\)[\s\S]*applyTmuxWindowActiveIndexToTranscriptInfo\(String\(session\), indexKey, \{render: true\}\)/.test(source), 'known direct tmux targets overlay transcript metadata immediately so stale polls do not flash the old window');
+    assert.ok(/async function applyTranscriptsPayload\(payload, options = \{\}\)[\s\S]*transcriptMeta = transcriptPayloadWithTmuxWindowOverrides\(payload\)/.test(source), 'incoming transcript payloads preserve pending direct-window overrides');
+    assert.ok(/async function refreshTmuxWindowActiveFromSignals\(session, options = \{\}\)[\s\S]*apiFetchJson\(tmuxWindowSignalReadbackUrl\(session\)/.test(source), 'tmux window readback uses the session-scoped lightweight tmux-signals endpoint');
+    assert.ok(/function setTmuxWindowActiveIndexOverride\(session, windowIndex, options = \{\}\)[\s\S]*refreshTabberPanelsForTmuxWindowChange\(\)/.test(source), 'Tabber repaints immediately when a known tmux window target is selected');
+    assert.ok(/function setTmuxWindowActiveIndexPending\(session, options = \{\}\)[\s\S]*refreshTabberPanelsForTmuxWindowChange\(\)/.test(source), 'Tabber repaints immediately when an unknown tmux window target is pending');
+    assert.ok(/function applyTmuxSignalActiveWindowsToTranscriptInfo\(payload = \{\}\)[\s\S]*updatePanelHeader\(session, transcriptMeta\.sessions\?\.\[session\]\)[\s\S]*renderInfoPanel\(\);[\s\S]*refreshTabberPanels\(\)/.test(source), 'probe-confirmed tmux window readback repaints the Tabber without waiting for the activity poll');
+  });
+
+  await testAsync('tmux window direct failure rolls back optimistic metadata', async () => {
+    const api = loadYolomux('', ['meta-preview']);
+    const info = {
+      agents: [{kind: 'codex', pane_target: 'meta-preview:0.0'}, {kind: 'claude', pane_target: 'meta-preview:1.0'}],
+      selected_pane: {target: 'meta-preview:0.0', window: '0', pane: '0', current_path: '/repo/codex'},
+      panes: [
+        {target: 'meta-preview:0.0', window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', command: 'codex', current_path: '/repo/codex'},
+        {target: 'meta-preview:1.0', window: '1', pane: '0', window_active: false, active: true, process_label: 'claude', command: 'claude', current_path: '/repo/claude'},
+      ],
+    };
+    api.setTranscriptInfoForTest('meta-preview', info);
+    api.setFetchForTest((url, options = {}) => {
+      if (String(url).startsWith('/api/tmux-window')) return Promise.reject(new Error('tmux select failed'));
+      if (String(url).startsWith('/api/fs/batch')) {
+        const requests = JSON.parse(options.body || '{}').requests || [];
+        return Promise.resolve(jsonResponse({responses: requests.map(request => ({id: request.id, ok: true, status: 200, payload: {path: request.path, entries: []}}))}));
+      }
+      return Promise.resolve(jsonResponse({entries: [], path: '/repo/claude'}));
+    });
+
+    api.tmuxWindowForTest('meta-preview', {windowIndex: '1'}, 'tmux window 1:claude');
+    assert.equal(api.terminalTabTitle('meta-preview', api.transcriptInfoForTest('meta-preview')), 'terminal: claude', 'direct click applies the known target-window metadata synchronously');
+
+    await flushAsyncWork();
+    await flushAsyncWork();
+
+    assert.equal(api.tmuxWindowActiveIndexOverrideForTest('meta-preview'), undefined, 'failed direct select clears the optimistic target');
+    assert.equal(api.terminalTabTitle('meta-preview', api.transcriptInfoForTest('meta-preview')), 'terminal: codex', 'failed direct select restores the previous active-window metadata');
+  });
+
+  await testAsync('tmux window explicit readback ignores stale active window', async () => {
+    const api = loadYolomux('', ['meta-preview']);
+    const button0 = tmuxWindowButtonElement('meta-preview', '0', true);
+    const button1 = tmuxWindowButtonElement('meta-preview', '1', false);
+    api.testElementForId('body').appendChild(tmuxWindowBarElement('meta-preview', [button0, button1]));
+    api.setTranscriptInfoForTest('meta-preview', {
+      panes: [
+        {target: 'meta-preview:0.0', window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', command: 'codex', current_path: '/repo/agent/src'},
+        {target: 'meta-preview:1.0', window: '1', pane: '0', window_active: false, active: true, process_label: 'bash', command: 'bash', current_path: '/tmp/shell'},
+      ],
+    });
+    api.registerTerminalForTest('meta-preview', {focus() {}}, {readyState: WebSocket.OPEN, send() {}});
+    assert.equal(api.handleTerminalDataForTest('meta-preview', '\x021'), true, 'Ctrl-b 1 sets an explicit optimistic target');
+    assert.deepStrictEqual(activeTmuxWindowIndexesFromElement(api.testElementForId('body')), ['1'], 'explicit target is active immediately');
+    api.setFetchForTest(() => Promise.resolve(jsonResponse({ok: true, windows: [{
+      session: 'meta-preview',
+      window_index: '0',
+      active: true,
+      panes: [{target: 'meta-preview:0.0', pane_id: 'meta-preview:0.0', pane_index: '0', window_index: '0', active: true, current_path: '/repo/agent/src', current_command: 'codex'}],
+    }, {
+      session: 'meta-preview',
+      window_index: '1',
+      active: false,
+      panes: [{target: 'meta-preview:1.0', pane_id: 'meta-preview:1.0', pane_index: '0', window_index: '1', active: true, current_path: '/tmp/shell', current_command: 'bash'}],
+    }]})));
+    await api.scheduleTmuxWindowReadbackForTest('meta-preview', {delayMs: 0, clearActiveIndexOverride: true, expectedIndex: '1', attempt: 5});
+    assert.deepStrictEqual(activeTmuxWindowIndexesFromElement(api.testElementForId('body')), ['1'], 'stale readback does not replace the explicit target');
+    assert.equal(tmuxWindowButtonFromElement(api.testElementForId('body'), '0')?.classList.contains('active'), false, 'stale previous active window does not flash active');
+    assert.equal(api.activeTmuxSignalWindowForSessionForTest('meta-preview')?.window_index, '1', 'cached tmux signals keep the explicit target active during stale direct-window readback');
+  });
+
+  await testAsync('tmux signals keep stale transcript metadata from repainting old active window', async () => {
+    const api = loadYolomux('', ['meta-preview']);
+    const staleInfo = {
+      agents: [{kind: 'codex', pane_target: 'meta-preview:0.0'}, {kind: 'claude', pane_target: 'meta-preview:1.0'}],
+      selected_pane: {target: 'meta-preview:0.0', window: '0', pane: '0', current_path: '/repo/codex'},
+      panes: [
+        {target: 'meta-preview:0.0', window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', command: 'codex', current_path: '/repo/codex'},
+        {target: 'meta-preview:1.0', window: '1', pane: '0', window_active: false, active: true, process_label: 'claude', command: 'claude', current_path: '/repo/claude'},
+      ],
+    };
+    api.setTranscriptInfoForTest('meta-preview', staleInfo);
+    api.setFetchForTest((url, options = {}) => {
+      if (String(url).startsWith('/api/fs/batch')) {
+        const requests = JSON.parse(options.body || '{}').requests || [];
+        return Promise.resolve(jsonResponse({responses: requests.map(request => ({id: request.id, ok: true, status: 200, payload: {path: request.path, entries: []}}))}));
+      }
+      if (String(url).startsWith('/api/activity')) return Promise.resolve(jsonResponse({activity: {}}));
+      if (String(url).startsWith('/api/session-files')) return Promise.resolve(jsonResponse({session: 'meta-preview', files: [], repos: [], errors: [], loaded: true}));
+      return Promise.resolve(jsonResponse({}));
+    });
+    api.applyTmuxSignalsPayloadForTest({windows: [{
+      session: 'meta-preview',
+      window_index: '0',
+      active: false,
+      panes: [{target: 'meta-preview:0.0', pane_id: 'meta-preview:0.0', pane_index: '0', window_index: '0', active: true, current_path: '/repo/codex', current_command: 'codex'}],
+    }, {
+      session: 'meta-preview',
+      window_index: '1',
+      active: true,
+      panes: [{target: 'meta-preview:1.0', pane_id: 'meta-preview:1.0', pane_index: '0', window_index: '1', active: true, current_path: '/repo/claude', current_command: 'claude'}],
+    }]});
+
+    await api.applyTranscriptsPayloadForTest({session_order: ['meta-preview'], sessions: {'meta-preview': staleInfo}}, {refreshAuto: false, refreshContext: false, refreshActivity: false});
+
+    assert.deepStrictEqual(activeTmuxWindowIndexesFromHtml(api.tmuxWindowBarHtml('meta-preview', api.transcriptInfoForTest('meta-preview'))), ['1'], 'stale transcript payloads are normalized through tmux-signals before repainting the window bar');
+    assert.equal(api.terminalTabTitle('meta-preview', api.transcriptInfoForTest('meta-preview')), 'terminal: claude', 'stale transcript payloads do not revert the terminal title to the old active window');
+  });
+
+  await testAsync('direct tmux window clicks do not bounce through stale transcript or partial signal pushes', async () => {
+    const api = loadYolomux('', ['meta-preview']);
+    const button0 = tmuxWindowButtonElement('meta-preview', '0', true);
+    const button1 = tmuxWindowButtonElement('meta-preview', '1', false);
+    api.testElementForId('body').appendChild(tmuxWindowBarElement('meta-preview', [button0, button1]));
+    const staleInfo = {
+      agents: [{kind: 'codex', pane_target: 'meta-preview:0.0'}, {kind: 'claude', pane_target: 'meta-preview:1.0'}],
+      selected_pane: {target: 'meta-preview:0.0', window: '0', pane: '0', current_path: '/repo/codex'},
+      panes: [
+        {target: 'meta-preview:0.0', window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', command: 'codex', current_path: '/repo/codex'},
+        {target: 'meta-preview:1.0', window: '1', pane: '0', window_active: false, active: true, process_label: 'claude', command: 'claude', current_path: '/repo/claude'},
+      ],
+    };
+    api.setTranscriptInfoForTest('meta-preview', staleInfo);
+    api.setFetchForTest((url, options = {}) => {
+      if (String(url).startsWith('/api/tmux-window')) return new Promise(() => {});
+      if (String(url).startsWith('/api/fs/batch')) {
+        const requests = JSON.parse(options.body || '{}').requests || [];
+        return Promise.resolve(jsonResponse({responses: requests.map(request => ({id: request.id, ok: true, status: 200, payload: {path: request.path, entries: []}}))}));
+      }
+      if (String(url).startsWith('/api/activity')) return Promise.resolve(jsonResponse({activity: {}}));
+      if (String(url).startsWith('/api/session-files')) return Promise.resolve(jsonResponse({session: 'meta-preview', files: [], repos: [], errors: [], loaded: true}));
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    api.tmuxWindowForTest('meta-preview', {windowIndex: '1'}, 'tmux window 1:claude');
+    assert.deepStrictEqual(activeTmuxWindowIndexesFromElement(api.testElementForId('body')), ['1'], 'the direct target is active immediately after click');
+    await api.applyTranscriptsPayloadForTest({session_order: ['meta-preview'], sessions: {'meta-preview': staleInfo}}, {refreshAuto: false, refreshContext: false, refreshActivity: false});
+    assert.deepStrictEqual(activeTmuxWindowIndexesFromHtml(api.tmuxWindowBarHtml('meta-preview', api.transcriptInfoForTest('meta-preview'))), ['1'], 'a stale transcript push cannot repaint the old active tmux window while a direct target is pending');
+    assert.equal(api.terminalTabTitle('meta-preview', api.transcriptInfoForTest('meta-preview')), 'terminal: claude', 'the terminal label stays on the direct target while stale transcript data is pending');
+
+    api.applyTmuxSignalsPayloadForTest({windows: [{
+      session: 'meta-preview',
+      window_index: '0',
+      active: true,
+      panes: [{target: 'meta-preview:0.0', pane_id: 'meta-preview:0.0', pane_index: '0', window_index: '0', active: true, current_path: '/repo/codex', current_command: 'codex'}],
+    }]});
+
+    assert.equal(api.activeTmuxSignalWindowForSessionForTest('meta-preview'), null, 'a partial stale signal payload is treated as unconfirmed while the target window is missing');
+    assert.deepStrictEqual(activeTmuxWindowIndexesFromElement(api.testElementForId('body')), ['1'], 'partial stale signal pushes keep the direct target button active');
+    assert.equal(tmuxWindowButtonFromElement(api.testElementForId('body'), '0')?.classList.contains('active'), false, 'partial stale signal pushes do not flash the old button active');
+    assert.deepStrictEqual(activeTmuxWindowIndexesFromHtml(api.tmuxWindowBarHtml('meta-preview', api.transcriptInfoForTest('meta-preview'))), ['1'], 'partial stale signal pushes do not repaint generated window bars back to the old active window');
+  });
+
+  await testAsync('direct tmux window target survives stale in-place button bar refresh', async () => {
+    const api = loadYolomux('', ['meta-preview']);
+    const button0 = tmuxWindowButtonElement('meta-preview', '0', true);
+    const button1 = tmuxWindowButtonElement('meta-preview', '1', false);
+    api.testElementForId('body').appendChild(tmuxWindowBarElement('meta-preview', [button0, button1]));
+    const staleInfo = {
+      agents: [{kind: 'codex', pane_target: 'meta-preview:0.0'}, {kind: 'claude', pane_target: 'meta-preview:1.0'}],
+      selected_pane: {target: 'meta-preview:0.0', window: '0', pane: '0', current_path: '/repo/codex'},
+      panes: [
+        {target: 'meta-preview:0.0', window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', command: 'codex', current_path: '/repo/codex'},
+        {target: 'meta-preview:1.0', window: '1', pane: '0', window_active: false, active: true, process_label: 'claude', command: 'claude', current_path: '/repo/claude'},
+      ],
+    };
+    api.setTranscriptInfoForTest('meta-preview', staleInfo);
+    api.setFetchForTest(url => {
+      if (String(url).startsWith('/api/tmux-window')) return new Promise(() => {});
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    api.tmuxWindowForTest('meta-preview', {windowIndex: '1'}, 'tmux window 1:claude');
+    assert.deepStrictEqual(activeTmuxWindowIndexesFromElement(api.testElementForId('body')), ['1'], 'direct click marks 1:claude active before the POST settles');
+
+    api.updatePanelWindowStepButtonsForTest('meta-preview', staleInfo);
+
+    assert.deepStrictEqual(activeTmuxWindowIndexesFromElement(api.testElementForId('body')), ['1'], 'stale header refresh cannot replace the button bar with 0:codex active');
+  });
+
+  await testAsync('direct tmux window readback only confirms from raw tmux active state', async () => {
+    const api = loadYolomux('', ['meta-preview'], 'http:', 'Linux x86_64', 'admin', {fireAllTimeouts: true});
+    const staleInfo = {
+      agents: [{kind: 'codex', pane_target: 'meta-preview:0.0'}, {kind: 'claude', pane_target: 'meta-preview:1.0'}],
+      selected_pane: {target: 'meta-preview:0.0', window: '0', pane: '0', current_path: '/repo/codex'},
+      panes: [
+        {target: 'meta-preview:0.0', window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', command: 'codex', current_path: '/repo/codex'},
+        {target: 'meta-preview:1.0', window: '1', pane: '0', window_active: false, active: true, process_label: 'claude', command: 'claude', current_path: '/repo/claude'},
+      ],
+    };
+    const staleSignals = {ok: true, windows: [{
+      session: 'meta-preview',
+      window_index: '0',
+      active: true,
+      panes: [{target: 'meta-preview:0.0', pane_id: 'meta-preview:0.0', pane_index: '0', window_index: '0', active: true, current_path: '/repo/codex', current_command: 'codex'}],
+    }, {
+      session: 'meta-preview',
+      window_index: '1',
+      active: false,
+      panes: [{target: 'meta-preview:1.0', pane_id: 'meta-preview:1.0', pane_index: '0', window_index: '1', active: true, current_path: '/repo/claude', current_command: 'claude'}],
+    }]};
+    const requests = [];
+    api.setTranscriptInfoForTest('meta-preview', staleInfo);
+    api.setFetchForTest((url, options = {}) => {
+      requests.push(String(url));
+      if (String(url).startsWith('/api/tmux-window')) return Promise.resolve(jsonResponse({ok: true}));
+      if (String(url).startsWith('/api/tmux-signals')) return Promise.resolve(jsonResponse(staleSignals));
+      if (String(url).startsWith('/api/fs/batch')) {
+        const batchRequests = JSON.parse(options.body || '{}').requests || [];
+        return Promise.resolve(jsonResponse({responses: batchRequests.map(request => ({id: request.id, ok: true, status: 200, payload: {path: request.path, entries: []}}))}));
+      }
+      if (String(url).startsWith('/api/activity')) return Promise.resolve(jsonResponse({activity: {}}));
+      if (String(url).startsWith('/api/session-files')) return Promise.resolve(jsonResponse({session: 'meta-preview', files: [], repos: [], errors: [], loaded: true}));
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    api.tmuxWindowForTest('meta-preview', {windowIndex: '1'}, 'tmux window 1:claude');
+    assert.equal(api.terminalTabTitle('meta-preview', api.transcriptInfoForTest('meta-preview')), 'terminal: claude', 'the direct click still applies the optimistic target immediately');
+    for (let i = 0; i < 20; i += 1) await flushAsyncWork();
+
+    assert.ok(requests.filter(url => url.startsWith('/api/tmux-signals')).length > 1, 'stale raw tmux signals keep readback retrying instead of falsely confirming');
+    assert.equal(api.tmuxWindowActiveIndexOverrideForTest('meta-preview'), '1', 'stale raw tmux signals do not clear the optimistic direct-window target');
+    await api.applyTranscriptsPayloadForTest({session_order: ['meta-preview'], sessions: {'meta-preview': staleInfo}}, {refreshAuto: false, refreshContext: false, refreshActivity: false});
+    assert.deepStrictEqual(activeTmuxWindowIndexesFromHtml(api.tmuxWindowBarHtml('meta-preview', api.transcriptInfoForTest('meta-preview'))), ['1'], 'the held optimistic target keeps stale metadata from repainting the old window after delayed readback');
+    assert.equal(api.terminalTabTitle('meta-preview', api.transcriptInfoForTest('meta-preview')), 'terminal: claude', 'the terminal tab label does not bounce back to the old process after stale delayed readback');
+  });
+
+  await testAsync('confirmed direct tmux window target ignores delayed stale signal snapshots', async () => {
+    const api = loadYolomux('', ['meta-preview'], 'http:', 'Linux x86_64', 'admin', {fireAllTimeouts: true});
+    const staleInfo = {
+      agents: [{kind: 'codex', pane_target: 'meta-preview:0.0'}, {kind: 'claude', pane_target: 'meta-preview:1.0'}],
+      selected_pane: {target: 'meta-preview:0.0', window: '0', pane: '0', current_path: '/repo/codex'},
+      panes: [
+        {target: 'meta-preview:0.0', window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', command: 'codex', current_path: '/repo/codex'},
+        {target: 'meta-preview:1.0', window: '1', pane: '0', window_active: false, active: true, process_label: 'claude', command: 'claude', current_path: '/repo/claude'},
+      ],
+    };
+    const confirmedSignals = {ok: true, generated_at: Date.now() / 1000, windows: [{
+      session: 'meta-preview',
+      window_index: '0',
+      active: false,
+      panes: [{target: 'meta-preview:0.0', pane_id: 'meta-preview:0.0', pane_index: '0', window_index: '0', active: true, current_path: '/repo/codex', current_command: 'codex'}],
+    }, {
+      session: 'meta-preview',
+      window_index: '1',
+      active: true,
+      panes: [{target: 'meta-preview:1.0', pane_id: 'meta-preview:1.0', pane_index: '0', window_index: '1', active: true, current_path: '/repo/claude', current_command: 'claude'}],
+    }]};
+    const oldStaleSignals = {ok: true, generated_at: 1, windows: [{
+      session: 'meta-preview',
+      window_index: '0',
+      active: true,
+      panes: [{target: 'meta-preview:0.0', pane_id: 'meta-preview:0.0', pane_index: '0', window_index: '0', active: true, current_path: '/repo/codex', current_command: 'codex'}],
+    }, {
+      session: 'meta-preview',
+      window_index: '1',
+      active: false,
+      panes: [{target: 'meta-preview:1.0', pane_id: 'meta-preview:1.0', pane_index: '0', window_index: '1', active: true, current_path: '/repo/claude', current_command: 'claude'}],
+    }]};
+    const untimestampedStaleSignals = {...oldStaleSignals};
+    delete untimestampedStaleSignals.generated_at;
+    const requests = [];
+    api.setTranscriptInfoForTest('meta-preview', staleInfo);
+    api.setFetchForTest((url, options = {}) => {
+      requests.push(String(url));
+      if (String(url).startsWith('/api/tmux-window')) return Promise.resolve(jsonResponse({ok: true}));
+      if (String(url).startsWith('/api/tmux-signals')) return Promise.resolve(jsonResponse(confirmedSignals));
+      if (String(url).startsWith('/api/fs/batch')) {
+        const batchRequests = JSON.parse(options.body || '{}').requests || [];
+        return Promise.resolve(jsonResponse({responses: batchRequests.map(request => ({id: request.id, ok: true, status: 200, payload: {path: request.path, entries: []}}))}));
+      }
+      if (String(url).startsWith('/api/activity')) return Promise.resolve(jsonResponse({activity: {}}));
+      if (String(url).startsWith('/api/session-files')) return Promise.resolve(jsonResponse({session: 'meta-preview', files: [], repos: [], errors: [], loaded: true}));
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    api.tmuxWindowForTest('meta-preview', {windowIndex: '1'}, 'tmux window 1:claude');
+    for (let i = 0; i < 12; i += 1) await flushAsyncWork();
+
+    assert.equal(api.tmuxWindowActiveIndexOverrideForTest('meta-preview'), undefined, 'confirmed direct target can release the short pressed-button override');
+    api.applyTmuxSignalsPayloadForTest(untimestampedStaleSignals);
+    assert.deepStrictEqual(activeTmuxWindowIndexesFromHtml(api.tmuxWindowBarHtml('meta-preview', api.transcriptInfoForTest('meta-preview'))), ['1'], 'an untimestamped delayed tmux signal cannot repaint the previous active window after the override clears');
+    assert.equal(api.terminalTabTitle('meta-preview', api.transcriptInfoForTest('meta-preview')), 'terminal: claude', 'an untimestamped delayed tmux signal does not bounce the terminal label back to Codex');
+    api.applyTmuxSignalsPayloadForTest(oldStaleSignals);
+    await api.applyTranscriptsPayloadForTest({session_order: ['meta-preview'], sessions: {'meta-preview': staleInfo}}, {refreshAuto: false, refreshContext: false, refreshActivity: false});
+
+    assert.deepStrictEqual(activeTmuxWindowIndexesFromHtml(api.tmuxWindowBarHtml('meta-preview', api.transcriptInfoForTest('meta-preview'))), ['1'], 'an older delayed tmux signal cannot repaint the previous active window after the override clears');
+    assert.equal(api.terminalTabTitle('meta-preview', api.transcriptInfoForTest('meta-preview')), 'terminal: claude', 'an older delayed tmux signal does not bounce the terminal label back to Codex');
+    assert.ok(requests.some(url => url.startsWith('/api/tmux-signals')), 'the test exercised the direct-window signal readback path');
+  });
+
+  await testAsync('newer direct tmux window clicks ignore older delayed readbacks', async () => {
+    const api = loadYolomux('', ['meta-preview']);
+    const staleInfo = {
+      agents: [{kind: 'codex', pane_target: 'meta-preview:0.0'}, {kind: 'claude', pane_target: 'meta-preview:1.0'}],
+      selected_pane: {target: 'meta-preview:0.0', window: '0', pane: '0', current_path: '/repo/codex'},
+      panes: [
+        {target: 'meta-preview:0.0', window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', command: 'codex', current_path: '/repo/codex'},
+        {target: 'meta-preview:1.0', window: '1', pane: '0', window_active: false, active: true, process_label: 'claude', command: 'claude', current_path: '/repo/claude'},
+      ],
+    };
+    const postResolves = [];
+    const requests = [];
+    api.setTranscriptInfoForTest('meta-preview', staleInfo);
+    api.setFetchForTest((url, options = {}) => {
+      requests.push(String(url));
+      if (String(url).startsWith('/api/tmux-window')) {
+        return new Promise(resolve => postResolves.push(() => resolve(jsonResponse({ok: true}))));
+      }
+      if (String(url).startsWith('/api/tmux-signals')) {
+        return Promise.resolve(jsonResponse({ok: true, windows: [{
+          session: 'meta-preview',
+          window_index: '0',
+          active: true,
+          panes: [{target: 'meta-preview:0.0', pane_id: 'meta-preview:0.0', pane_index: '0', window_index: '0', active: true, current_path: '/repo/codex', current_command: 'codex'}],
+        }, {
+          session: 'meta-preview',
+          window_index: '1',
+          active: false,
+          panes: [{target: 'meta-preview:1.0', pane_id: 'meta-preview:1.0', pane_index: '0', window_index: '1', active: true, current_path: '/repo/claude', current_command: 'claude'}],
+        }]}));
+      }
+      if (String(url).startsWith('/api/fs/batch')) {
+        const batchRequests = JSON.parse(options.body || '{}').requests || [];
+        return Promise.resolve(jsonResponse({responses: batchRequests.map(request => ({id: request.id, ok: true, status: 200, payload: {path: request.path, entries: []}}))}));
+      }
+      if (String(url).startsWith('/api/activity')) return Promise.resolve(jsonResponse({activity: {}}));
+      if (String(url).startsWith('/api/session-files')) return Promise.resolve(jsonResponse({session: 'meta-preview', files: [], repos: [], errors: [], loaded: true}));
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    api.tmuxWindowForTest('meta-preview', {windowIndex: '0'}, 'tmux window 0:codex');
+    api.tmuxWindowForTest('meta-preview', {windowIndex: '1'}, 'tmux window 1:claude');
+    assert.equal(api.tmuxWindowActiveIndexOverrideForTest('meta-preview'), '1', 'latest direct click owns the optimistic target');
+    assert.equal(api.terminalTabTitle('meta-preview', api.transcriptInfoForTest('meta-preview')), 'terminal: claude', 'latest direct click shows Claude before readback');
+
+    postResolves[0]();
+    for (let i = 0; i < 8; i += 1) await flushAsyncWork();
+
+    assert.equal(api.tmuxWindowActiveIndexOverrideForTest('meta-preview'), '1', 'older POST completion cannot confirm the previous window over the latest click');
+    assert.equal(api.terminalTabTitle('meta-preview', api.transcriptInfoForTest('meta-preview')), 'terminal: claude', 'older delayed readback does not bounce the button label back to Codex');
+    assert.equal(requests.filter(url => url.startsWith('/api/tmux-signals')).length, 0, 'stale POST completion is ignored before it can start a readback');
+  });
+
+  await testAsync('tmux window relative readback lands on backend active window', async () => {
+    const api = loadYolomux('', ['meta-preview']);
+    api.setTranscriptInfoForTest('meta-preview', {
+      selected_pane: {target: 'meta-preview:0.0', window: '0', pane: '0', current_path: '/repo/agent/src'},
+      panes: [
+        {target: 'meta-preview:0.0', window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', command: 'codex', current_path: '/repo/agent/src'},
+        {target: 'meta-preview:1.0', window: '1', pane: '0', window_active: false, active: true, process_label: 'bash', command: 'bash', current_path: '/tmp/shell'},
+      ],
+    });
+    const requests = [];
+    api.setFetchForTest((url, options = {}) => {
+      requests.push({url: String(url), method: options.method || 'GET'});
+      return Promise.resolve(jsonResponse({ok: true, windows: [{
+        session: 'meta-preview',
+        window_index: '0',
+        active: false,
+        panes: [{target: 'meta-preview:0.0', pane_id: 'meta-preview:0.0', pane_index: '0', window_index: '0', active: true, current_path: '/repo/agent/src', current_command: 'codex'}],
+      }, {
+        session: 'meta-preview',
+        window_index: '1',
+        window_name: 'bash',
+        active: true,
+        panes: [{target: 'meta-preview:1.0', pane_id: 'meta-preview:1.0', pane_index: '0', window_index: '1', active: true, current_path: '/tmp/shell', current_command: 'bash'}],
+      }]}));
+    });
+
+    await api.scheduleTmuxWindowReadbackForTest('meta-preview', {delayMs: 0});
+
+    assert.deepStrictEqual(requests.filter(request => request.url.startsWith('/api/tmux-signals')), [{url: '/api/tmux-signals?force=1&session=meta-preview', method: 'GET'}], 'relative window navigation readback uses the session-scoped lightweight tmux signal endpoint once');
+    assert.deepStrictEqual(requests.filter(request => request.url.startsWith('/api/transcripts')), [], 'relative window navigation readback does not wait on transcript metadata');
+    assert.deepStrictEqual(activeTmuxWindowIndexesFromHtml(api.tmuxWindowBarHtml('meta-preview', api.transcriptInfoForTest('meta-preview'))), ['1'], 'relative window navigation lands on the backend window_active value');
+    assert.equal(api.transcriptInfoForTest('meta-preview').selected_pane.current_path, '/tmp/shell', 'relative window navigation updates the selected pane path from tmux signals');
   });
 
   test('t@6424', () => {
@@ -836,6 +1326,7 @@ async function runEditorPreviewSuite() {
       },
     });
     const popover = api.sessionPopoverHtml('4', info, 'claude', true);
+    assert.ok(/popover-title">tmux session 4 ·/.test(popover), 'session popover title labels the header as a tmux session');
     assert.ok(/popover-subtitle[\s\S]*branch-indicator[^>]*>MAIN<[\s\S]*pr-number-chip pr-status-merged[^>]*>#9961<[\s\S]*ci: Update the dep/.test(popover), 'merged PR popover header mirrors the tab convention: MAIN chip, purple #number chip, then title');
     assert.equal(popover.includes('#9961:'), false, 'merged PR popover header omits the old #number text prefix');
     assert.ok(/popover-label">branch<\/div><div class="popover-value"><span class="ci-indicator tab-symbol branch-indicator[^"]*">MAIN<\/span>/.test(popover), 'merged PR popover branch row uses the same MAIN chip as the tab');
@@ -918,6 +1409,22 @@ async function runEditorPreviewSuite() {
       if (pulse) assert.ok(ciHtml.includes('metadata-pulse'), `${label} CI badge is marked after CI change`);
       if (state !== 'unknown') assertSingleCiBadge(ciHtml, label);
     });
+    api.setAutoApproveStateForTest('4', {agent_windows: [
+      {kind: 'claude', state: 'working', window_index: 0, window_label: '0:claude'},
+      {kind: 'codex', state: 'needs-input', window_index: 1, window_label: '1:codex'},
+    ]});
+    const agentPopover = api.sessionPopoverHtml('4', {panes: []}, 'claude', false);
+    assert.ok(/class="[^"]*status-indicator[^"]*session-agent-dot[^"]*status-indicator--dot[^"]*status-indicator--working/.test(agentPopover), 'working popover dot inherits the shared dot/working status indicator classes');
+    assert.ok(/class="[^"]*status-indicator[^"]*session-agent-dot[^"]*status-indicator--dot[^"]*status-indicator--attention[^"]*attention-pulse/.test(agentPopover), 'ASK? popover dot inherits the shared attention pulse classes');
+    assert.ok(agentPopover.includes('tmux window 0:claude'), 'working agent row labels the tmux window explicitly');
+    assert.ok(agentPopover.includes('tmux window 1:codex'), 'ASK? agent row labels the tmux window explicitly');
+    assert.equal(agentPopover.includes('tmux window tmux window'), false, 'agent row does not double-label tmux window');
+    const localeFiles = fs.readdirSync('static_src/locales').filter(name => name.endsWith('.json'));
+    for (const file of localeFiles) {
+      const catalog = JSON.parse(fs.readFileSync(`static_src/locales/${file}`, 'utf8'));
+      assert.ok(catalog['popover.tmuxSession']?.includes('{label}'), `${file} localizes popover.tmuxSession and preserves {label}`);
+      assert.ok(catalog['popover.tmuxWindow']?.includes('{label}'), `${file} localizes popover.tmuxWindow and preserves {label}`);
+    }
   });
 
   test('t@6675', () => {
@@ -998,6 +1505,75 @@ async function runEditorPreviewSuite() {
       slot1: {tabs: ['5', injectedApi.infoItemId, injectedApi.debugPaneItemId], active: injectedApi.debugPaneItemId},
       slot2: {tabs: [injectedApi.fileExplorerItemId], active: injectedApi.fileExplorerItemId},
     }, 'debug=1 injects and activates Debug in an existing URL layout');
+  });
+
+  test('session popover lists agent windows with working and idle durations', () => {
+    const api = loadYolomux('', ['4', '5', '6']);
+    const baseInfo = {selected_pane: {current_path: '/repo'}, project: {git: {root: '/repo'}}};
+    const noAgentHtml = api.sessionPopoverHtml('4', {...baseInfo, agents: []}, '', false);
+    assert.ok(noAgentHtml.includes('no AI agents in this tab'), '0-agent tabs render a clear empty line');
+
+    const now = Date.now() / 1000;
+    const multiInfo = {
+      ...baseInfo,
+      agents: [{kind: 'claude', pane_target: '%10'}, {kind: 'codex', pane_target: '%11'}],
+    };
+    api.setAutoApproveStateForTest('5', {
+      agent_windows: [
+        {kind: 'codex', state: 'idle', idle_since: now - 300, last_active_ts: now - 300, window_index: 1, window_name: 'codex', window_label: '1:codex'},
+        {kind: 'claude', state: 'working', working_elapsed_seconds: 158, window_index: 0, window_name: 'claude', window_label: '0:claude'},
+      ],
+    });
+    const multiText = api.sessionPopoverHtml('5', multiInfo, 'claude', false).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+    const workingIndex = multiText.indexOf('0:claude — working for 2m 38s');
+    const idleIndex = multiText.indexOf('1:codex — idle 5m');
+    assert.ok(workingIndex >= 0, 'working row uses the live status-counter elapsed');
+    assert.ok(idleIndex > workingIndex, 'working agents render before idle agents');
+
+    api.setAutoApproveStateForTest('4', {
+      agent_windows: [{kind: 'codex', state: 'idle', last_active_ts: now - 15, window_index: 0, window_name: 'codex', window_label: '0:codex'}],
+    });
+    const recentIdleText = api.sessionPopoverHtml('4', {...baseInfo, agents: [{kind: 'codex'}]}, 'codex', false).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+    assert.ok(recentIdleText.includes('0:codex — &lt;1 min active') || recentIdleText.includes('0:codex — <1 min active'), 'sub-minute idle agents read as recently active instead of seconds-idle');
+
+    api.setAutoApproveStateForTest('6', {
+      agent_windows: [{kind: 'codex', state: 'working', working_elapsed_seconds: 3720, window_index: 0, window_name: 'codex', window_label: '0:codex'}],
+    });
+    const singleText = api.sessionPopoverHtml('6', {...baseInfo, agents: [{kind: 'codex'}]}, 'codex', false).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+    assert.ok(singleText.includes('0:codex — working for 1h 02m'), '1-agent tabs use the shared compact elapsed formatter with the window label');
+
+    const perWindowInfo = {
+      selected_pane: {current_path: '/repo/selected-session-path'},
+      project: {git: {root: '/repo/session-root', branch: 'session-branch'}},
+      agents: [{kind: 'claude'}, {kind: 'codex'}],
+      window_metadata: [
+        {window: '0', window_index: 0, path: '/repo/claude', git: {root: '/repo/claude', branch: 'claude-branch', dirty_count: 2, head: 'abc1234 claude head'}},
+        {window: '1', window_index: 1, path: '/repo/codex', git: {root: '/repo/codex', branch: 'codex-branch', dirty_count: 0, head: 'def5678 codex head'}},
+      ],
+    };
+    api.setAutoApproveStateForTest('5', {
+      agent_windows: [
+        {kind: 'claude', state: 'working', working_elapsed_seconds: 10, window_index: 0, window_label: '0:claude'},
+        {kind: 'codex', state: 'idle', idle_since: now - 120, last_active_ts: now - 120, window_index: 1, window_label: '1:codex'},
+      ],
+    });
+    const perWindowHtml = api.sessionPopoverHtml('5', perWindowInfo, 'claude', false);
+    const perWindowText = perWindowHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+    assert.ok(perWindowText.includes('tmux window 0:claude') && perWindowText.includes('/repo/claude') && perWindowText.includes('claude-branch'), 'popover attributes path and branch to the Claude window');
+    assert.ok(perWindowText.includes('tmux window 1:codex') && perWindowText.includes('/repo/codex') && perWindowText.includes('codex-branch'), 'popover attributes path and branch to the Codex window');
+    assert.equal(perWindowText.includes('/repo/selected-session-path'), false, 'multi-agent popover does not render the old selected-pane path as a flat session path');
+
+    const sharedWindowInfo = {
+      ...perWindowInfo,
+      window_metadata: [
+        {window: '0', window_index: 0, path: '/repo/shared', git: {root: '/repo/shared', branch: 'shared-branch'}},
+        {window: '1', window_index: 1, path: '/repo/shared', git: {root: '/repo/shared', branch: 'shared-branch'}},
+      ],
+    };
+    const sharedHtml = api.sessionPopoverHtml('5', sharedWindowInfo, 'claude', false);
+    const sharedText = sharedHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+    assert.ok(sharedText.includes('AI windows 0:claude, 1:codex share this path'), 'shared metadata collapses to one block');
+    assert.equal((sharedHtml.match(/session-window-metadata-title/g) || []).length, 1, 'shared metadata renders one title instead of one block per AI window');
   });
 
   test('t@6754', () => {
@@ -1319,8 +1895,35 @@ async function runEditorPreviewSuite() {
     assert.ok(enabledChatHtml.includes('yoagent-recent-agent-activity">running'), 'YO!agent recent agents show running agents as running');
     assert.ok(enabledChatHtml.includes('yoagent-recent-agent-activity">3 min ago'), 'YO!agent recent agents show compact last-used time for idle agents');
     assert.ok(enabledChatHtml.indexOf('yoagent-recent-agent-session">session 5') < enabledChatHtml.indexOf('yoagent-recent-agent-session">session 6'), 'YO!agent recent agents preserve backend recency order');
-    api.setActivitySummaryPayloadForTest({yoagent_summaries: {auto_refresh: true, updated_ts: 1760000000, updated_at: '2025-10-09T08:53:20+00:00'}, global: {headline: 'Cached rolling context'}, sessions: {}, session_order: []});
-    assert.ok(api.yoagentChatHtml().includes('Background transcript summaries on'), 'YO!agent chat shows when background transcript summaries are enabled');
+    api.applyActivitySummaryPayloadFromPushForTest({
+      generated_at: '2026-05-31T12:05:00+00:00',
+      global: {headline: 'Pushed summary should stay out of the printed startup block'},
+      sessions: {},
+      agents: [{session: '7', window_label: '0:claude', agent_kind: 'claude', label: "session '7' 0:claude", running: true}],
+    });
+    const pushUpdatedChatHtml = api.yoagentChatHtml();
+    assert.ok(pushUpdatedChatHtml.includes('Your most recent work is about editor fixes'), 'activity-summary pushes do not repaint the one-shot startup summary');
+    assert.equal(pushUpdatedChatHtml.includes('Pushed summary should stay out of the printed startup block'), false, 'activity-summary pushes are cache-only for the printed startup block');
+    assert.equal(pushUpdatedChatHtml.includes('yoagent-recent-agent-session">session 7'), false, 'activity-summary pushes do not repaint printed Recent Agents');
+    api.applyActivitySummaryPayloadFromPushForTest({
+      generated_at: '2026-05-31T12:10:00+00:00',
+      global: {headline: 'Manual refresh replaces the printed startup block'},
+      sessions: {},
+      agents: [{session: '8', window_label: '0:codex', agent_kind: 'codex', label: "session '8' 0:codex", running: true}],
+    }, {refreshStartupSnapshot: true});
+    const manuallyRefreshedChatHtml = api.yoagentChatHtml();
+    assert.ok(manuallyRefreshedChatHtml.includes('Manual refresh replaces the printed startup block'), 'explicit activity-summary refresh replaces the startup summary snapshot');
+    assert.ok(manuallyRefreshedChatHtml.includes('yoagent-recent-agent-session">session 8'), 'explicit activity-summary refresh replaces the Recent Agents snapshot');
+    assert.equal(manuallyRefreshedChatHtml.includes('Your most recent work is about editor fixes'), false, 'explicit refresh removes the stale startup summary snapshot');
+    api.setActivitySummaryPayloadForTest(baseActivitySummaryPayload);
+    api.showYoagentStartupInfoForLatestActivityForTest();
+    api.setYoagentMessagesForTest([{role: 'user', content: 'what changed?'}, {role: 'assistant', content: 'Checking the activity context.'}]);
+    const chatWithHistoryHtml = api.yoagentChatHtml();
+    assert.ok(chatWithHistoryHtml.includes('Checking the activity context.'), 'YO!agent chat keeps persisted messages');
+    assert.ok(chatWithHistoryHtml.includes('yoagent-message assistant yoagent-recent-agents-message'), 'YO!agent chat keeps Recent Agents visible after a question');
+    assert.ok(chatWithHistoryHtml.includes('Your most recent work is about editor fixes'), 'YO!agent chat keeps the current-work summary visible after a question');
+    api.setActivitySummaryPayloadForTest({yoagent_summaries: {mode: 'first_launch', running: true, updated_ts: 1760000000, updated_at: '2025-10-09T08:53:20+00:00'}, global: {headline: 'Cached rolling context'}, sessions: {}, session_order: []});
+    assert.equal(api.yoagentChatHtml().includes('Background transcript summaries on'), false, 'YO!agent chat no longer renders a continuous background-summary status notice');
     api.setActivitySummaryPayloadForTest(baseActivitySummaryPayload);
     assert.equal(enabledChatHtml.includes('yoagent-chat empty'), false, 'YO!agent intro is a regular message, not a special empty layout');
     assert.equal(enabledChatHtml.includes('yoagent-chat-toolbar'), false, 'YO!agent chat does not put Clear in a detached toolbar');
@@ -1331,6 +1934,9 @@ async function runEditorPreviewSuite() {
     assert.ok(enabledChatHtml.indexOf('data-yoagent-backend') < enabledChatHtml.indexOf('data-yoagent-model'), 'YO!agent composer renders backend before model');
     assert.ok(enabledChatHtml.indexOf('data-yoagent-model') < enabledChatHtml.indexOf('data-yoagent-effort'), 'YO!agent composer renders model before effort');
     assert.ok(/data-yoagent-backend[\s\S]*?<option value="claude" selected/.test(enabledChatHtml), 'YO!agent composer selects the saved backend');
+    const modelCatalogSource = fs.readFileSync('static/yolomux.js', 'utf8');
+    assert.ok(/'claude-fable-5': 'pref\.yoagent\.claude_model\.fable'/.test(modelCatalogSource), 'YO!agent frontend fallback includes the current generally available Claude Fable model');
+    assert.ok(/'gpt-5\.3-codex-spark': 'pref\.yoagent\.codex_model\.gpt53spark'/.test(modelCatalogSource), 'YO!agent frontend fallback includes Codex Spark when the backend catalog is not loaded');
     assert.ok(/data-yoagent-model[\s\S]*data-yoagent-setting-path="yoagent\.claude_model"[\s\S]*?<option value="claude-opus-4-8"/.test(enabledChatHtml), 'YO!agent composer model options follow the selected backend');
     assert.ok(/data-yoagent-effort[\s\S]*data-yoagent-setting-path="yoagent\.claude_effort"[\s\S]*?<option value="low"/.test(enabledChatHtml), 'YO!agent composer effort options follow the selected backend');
     assert.equal(/data-yoagent-backend[\s\S]*?<option value="auto"/.test(enabledChatHtml), false, 'YO!agent composer backend selector does not offer Auto');
@@ -1367,7 +1973,7 @@ async function runEditorPreviewSuite() {
     assert.ok(transcriptHtml.includes('yoagent-transcript-path'), 'YO!agent chat shows the persisted transcript location at the top');
     assert.ok(transcriptHtml.includes('~/.local/state/yolomux/yoagent/conversation.jsonl'), 'YO!agent transcript row uses the compact display path');
     assert.ok(transcriptHtml.includes('data-copy-path="/home/test/.local/state/yolomux/yoagent/conversation.jsonl"'), 'YO!agent transcript path can be copied');
-    assert.equal(transcriptHtml.includes('yoagent-message assistant yoagent-recent-agents-message'), false, 'persisted YO!agent messages hide the one-shot Recent agents block so responses stay visible');
+    assert.equal(transcriptHtml.includes('yoagent-message assistant yoagent-recent-agents-message'), true, 'persisted YO!agent messages keep the one-shot Recent agents block visible');
     api.applyYoagentConversationPayloadForTest({
       messages: [{role: 'user', content: 'ask 6 and 7 for status', createdAt: '2026-06-13T17:39:00Z'}],
       pending_waits: [
@@ -1419,6 +2025,7 @@ async function runEditorPreviewSuite() {
         content: 'I resolved tmux session `6` and prepared a confirmed send action.',
         createdAt: '2026-06-13T17:40:01Z',
         details: '- backend: `claude`\n- response time: `1.234s` (`1234.0ms`)',
+        responseMs: 5300,
         actions: [{
           id: 'ya_test',
           status: 'ready',
@@ -1438,6 +2045,8 @@ async function runEditorPreviewSuite() {
     const actionHtml = api.yoagentChatHtml();
     assert.ok(actionHtml.includes('yoagent-message user'), 'YO!agent user turns keep a role-specific bubble');
     assert.ok(actionHtml.includes('yoagent-message assistant'), 'YO!agent assistant turns keep a role-specific bubble');
+    assert.ok(actionHtml.includes('5.3 seconds to respond'), 'YO!agent assistant headers show response latency from the persisted message field');
+    assert.equal((actionHtml.match(/seconds to respond/g) || []).length, 1, 'YO!agent user turns do not show response latency');
     assert.ok(actionHtml.includes('yoagent-message assistant yoagent-agent-result'), 'YO!agent target-agent result turns get a distinct result bubble class');
     assert.ok(actionHtml.includes('yoagent-agent-result-heading') && actionHtml.includes('yoagent-agent-result-output'), 'YO!agent target-agent result splits the heading from the quoted output block');
     assert.ok(actionHtml.includes('class="yoagent-message-details"') && actionHtml.includes('response time:'), 'YO!agent assistant turns can expose expandable safe diagnostics');
@@ -1466,6 +2075,32 @@ async function runEditorPreviewSuite() {
     assert.ok(api.yoagentChatHtml().includes('thinking'), 'YO!agent busy state keeps the concise thinking label');
     assert.ok(api.yoagentChatHtml().includes('yoagent-thinking-dots'), 'YO!agent thinking dots are CSS animated, not hardcoded static text');
     assert.ok(api.yoagentChatHtml().includes('session-yolo-marker active working'), 'YO!agent busy spinner reuses the YO tab working marker');
+    api.setYoagentMessagesForTest([
+      {
+        role: 'assistant',
+        content: 'Done',
+        createdAt: '2026-06-13T17:42:00Z',
+        details: 'usage: {"cache_creation":{"input_tokens":123}}',
+        auxiliaryPreview: 'usage: {"cache_creation":{"input_tokens":123}}',
+      },
+    ]);
+    const usageOnlyHtml = api.yoagentChatHtml();
+    const usageOnlySummary = usageOnlyHtml.match(/<summary>[\s\S]*?<\/summary>/)?.[0] || '';
+    assert.ok(/<summary><span>details…<\/span><\/summary>/.test(usageOnlyHtml), 'YO!agent diagnostic-only details collapse to just details…');
+    assert.ok(/<pre class="yoagent-safe-details">usage:/.test(usageOnlyHtml), 'YO!agent usage diagnostics remain visible inside the expanded details body');
+    assert.equal(usageOnlySummary.includes('usage:'), false, 'YO!agent usage diagnostics do not leak into the collapsed summary preview');
+    api.setYoagentMessagesForTest([
+      {
+        role: 'assistant',
+        content: 'Done',
+        createdAt: '2026-06-13T17:42:01Z',
+        details: '- response time: `1.000s` (`1000.0ms`)',
+        auxiliaryLines: ['thinking: reading activity context'],
+        auxiliaryPreview: 'thinking: reading activity context',
+      },
+    ]);
+    const thinkingPreviewHtml = api.yoagentChatHtml();
+    assert.ok(thinkingPreviewHtml.includes('<span class="yoagent-details-preview">thinking: reading activity context</span>'), 'YO!agent collapsed details still preview real thinking/tool gist lines');
     api.setYoagentBusyForTest(false);
     api.setYoagentDraftForTest('half typed question');
     assert.ok(api.yoagentChatHtml().includes('value="half typed question"'), 'YO!agent chat draft survives summary refresh re-renders');
@@ -1608,6 +2243,53 @@ async function runEditorPreviewSuite() {
     assert.ok(/function setInfoColumnWidth\(column, value, options = \{\}\)[\s\S]*const previous = infoColumnWidth\(column\)[\s\S]*scheduleShareUiStatePublish\(\)/.test(source), 'YO!info column width changes schedule a host share UI-state snapshot');
     assert.ok(/function shareInfoStateSnapshot\(options = \{\}\)[\s\S]*columnWidths:[\s\S]*branch:[\s\S]*infoBranchColumnWidthPx[\s\S]*desc:[\s\S]*infoDescColumnWidthPx[\s\S]*options\.includeRows !== false[\s\S]*branchRows = infoBranchRows\(\)\.map\(shareInfoRowSnapshot\)/.test(source), 'YO!share info snapshots include host YO!info rows and column widths when full state is requested');
     assert.ok(/function applyShareInfoState\(info = \{\}\)[\s\S]*shareInfoBranchRowsOverride = cleanShareInfoRows\(info\.branchRows\)[\s\S]*setInfoColumnWidth\('branch', widths\.branch, \{persist: false, publish: false\}\)[\s\S]*setInfoColumnWidth\('desc', widths\.desc, \{persist: false, publish: false\}\)/.test(source), 'share clients apply host YO!info rows and column widths without persisting or echo-publishing');
+  });
+
+  await testAsync('YO!agent chat queue waits for pending target-agent waits before sending', async () => {
+    const api = loadYolomux('', ['alpha'], 'http:', 'Linux x86_64', 'admin', {
+      bootstrapOverrides: {
+        availableAgents: ['claude'],
+        agentAuth: {claude: {installed: true, logged_in: true}},
+      },
+    });
+    api.setClientSettingsPatchForTest({yoagent: {backend: 'claude'}});
+    const chatPosts = [];
+    api.setFetchForTest((url, options = {}) => {
+      const path = String(url);
+      if (path === '/api/yoagent/chat') {
+        const body = JSON.parse(options.body || '{}');
+        chatPosts.push(body.message);
+        return Promise.resolve(jsonResponse({
+          backend: 'claude',
+          backend_used: 'claude',
+          answer: `${body.message} answer`,
+          conversation: {
+            messages: [
+              {role: 'user', content: body.message, createdAt: '2026-06-13T17:39:00Z'},
+              {role: 'assistant', content: `${body.message} answer`, createdAt: '2026-06-13T17:39:01Z'},
+            ],
+            pending_waits: [],
+          },
+        }));
+      }
+      return Promise.resolve(jsonResponse({messages: [], pending_waits: []}));
+    });
+
+    api.applyYoagentConversationPayloadForTest({
+      messages: [{role: 'user', content: 'ask alpha for status', createdAt: '2026-06-13T17:38:00Z'}],
+      pending_waits: [{id: 'wait-alpha', session: 'alpha', started_ts: Date.now() / 1000, transcript: '/tmp/alpha.jsonl'}],
+    });
+    await api.sendYoagentChatMessageForTest('second ask');
+    assert.deepStrictEqual(chatPosts, [], 'pending target-agent waits keep later asks in the local queue');
+    assert.deepStrictEqual(canonical(api.yoagentChatQueueForTest().map(item => item.text)), ['second ask'], 'later ask is visible as queued text');
+
+    api.applyYoagentConversationPayloadForTest({
+      messages: [{role: 'assistant', kind: 'agent_result', session: 'alpha', content: 'alpha result', createdAt: '2026-06-13T17:39:00Z'}],
+      pending_waits: [],
+    });
+    for (let i = 0; i < 4; i += 1) await flushAsyncWork();
+    assert.deepStrictEqual(chatPosts, ['second ask'], 'queued ask is sent only after the pending wait clears');
+    assert.deepStrictEqual(canonical(api.yoagentChatQueueForTest()), [], 'sent ask is removed from the queue');
   });
 
   test('t@6976', () => {
@@ -2054,26 +2736,32 @@ async function runEditorPreviewSuite() {
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
     assert.ok(/class="yoagent-chat-controls"/.test(src), 'YO!agent composer has a control row');
     assert.ok(/function yoagentComposerControlsHtml/.test(src) && /kind: 'backend'/.test(src) && /kind: 'model'/.test(src) && /kind: 'effort'/.test(src), 'composer renders backend/model/effort selectors');
-    assert.ok(/data-yoagent-setting-path/.test(src) && /saveSettingsPatch\(settingPatch\(path, yoagentSetting\.value\)/.test(src), 'changing a composer selector writes the real YO!agent setting path');
+    assert.ok(/data-yoagent-setting-path/.test(src) && /saveSettingsPatch\(settingPatchForPath\(path, yoagentSetting\.value\)/.test(src), 'changing a composer selector writes the real YO!agent setting path through the shared patch helper');
     assert.ok(/class="yoagent-chat-send-icon"[\s\S]*?<path/.test(src), 'send button is a circular arrow icon (not a text "Ask" button)');
     assert.ok(/\.yoagent-chat-form\s*\{[^}]*border-radius:\s*14px/.test(css), 'composer is one rounded container');
+    assert.ok(/\.yoagent-chat-form\s*\{[\s\S]*border:\s*1px solid var\(--link-soft\)/.test(css), 'YO!agent composer border reuses the YOU bubble color token');
     assert.ok(/\.yoagent-chat-send\s*\{[^}]*border-radius:\s*50%/.test(css), 'send button is circular');
     assert.ok(/\.yoagent-composer-pill,\s*\n\.yoagent-backend-pill\s*\{/.test(css), 'composer selectors are styled as compact pills');
+    assert.ok(/\.yoagent-backend-pill-dot\s*\{[\s\S]*background:\s*var\(--agent-inactive-marker-bg\)[\s\S]*border:\s*2px solid var\(--yoagent-inactive-backend-dot-border\)[\s\S]*box-shadow:/.test(css), 'YO!agent inactive backend dot is a clear black circle with a token-owned visible border');
+    assert.ok(/\.yoagent-composer-pill-backend:not\(:has\(select:disabled\)\) \.yoagent-backend-pill-dot\s*\{[\s\S]*background:\s*var\(--pr-status-passing\)[\s\S]*box-shadow:/.test(css), 'YO!agent usable backend dot switches to the green active status without reusing the current-window marker');
+    assert.ok(/body\.theme-light \.yoagent-backend-pill-dot\s*\{[\s\S]*background:\s*var\(--agent-inactive-marker-bg\)[\s\S]*border-color:\s*var\(--agent-inactive-marker-border\)/.test(css), 'YO!agent inactive backend dot keeps its black fill with an explicit light-mode border pair');
     assert.ok(/\.yoagent-recent-agents-list\s*\{[^}]*display:\s*grid/.test(css), 'YO!agent recent agents render as a compact bullet list inside the chat history');
     assert.ok(/function yoagentRecentAgentPathText\(agent, signal = yoagentRecentAgentSignal\(agent\)\)[\s\S]*agent\?\.recent_paths[\s\S]*compactHomePath/.test(src), 'YO!agent recent agents display backend recent_paths with compact home paths');
-    assert.ok(/function yoagentRecentAgentsHtml\(\)[\s\S]*activitySummaryPayload\?\.agents[\s\S]*<ul class="yoagent-recent-agents-list">/.test(src), 'YO!agent recent agents render from backend activity-summary agents as a list');
-    assert.ok(/function yoagentRecentAgentsMessageHtml\(\)[\s\S]*yoagentRecentAgentsHtml\(\)[\s\S]*yoagent-message assistant yoagent-recent-agents-message/.test(src), 'YO!agent recent agents are wrapped as an assistant response for the startup one-shot');
+    assert.ok(/function yoagentRecentAgentsHtml\(payload = yoagentStartupActivityPayload\(\)\)[\s\S]*payload\?\.agents[\s\S]*<ul class="yoagent-recent-agents-list">/.test(src), 'YO!agent recent agents render from the startup activity-summary snapshot as a list');
+    assert.ok(/function yoagentRecentAgentsMessageHtml\(\)[\s\S]*yoagentRecentAgentsHtml\(payload\)[\s\S]*yoagent-message assistant yoagent-recent-agents-message/.test(src), 'YO!agent recent agents are wrapped as an assistant response for the startup one-shot');
     assert.ok(/let yoagentStreamingMessages = new Map\(\)/.test(src), 'YO!agent keeps transient streaming assistant messages in chat state');
     assert.ok(/function yoagentStreamingMessagesList\(\)[\s\S]*yoagentStreamingMessages\.values/.test(src), 'YO!agent exposes streamed assistant deltas as renderable messages');
     assert.ok(/function applyYoagentStreamPayload\(payload = \{\}\)[\s\S]*hidden_thinking_removed[\s\S]*raw model thinking was hidden/.test(src), 'YO!agent stream events expose safe thinking diagnostics without raw chain-of-thought');
     assert.ok(/function applyYoagentStreamPayload\(payload = \{\}\)[\s\S]*auxiliary_lines[\s\S]*auxiliaryPreview[\s\S]*auxiliaryText[\s\S]*auxiliaryTruncated/.test(src), 'YO!agent stream payloads keep auxiliary thinking/tool lines separate from assistant content');
     assert.ok(src.includes("'yoagent_stream_delta'"), 'YO!agent subscribes to streaming SSE events');
     assert.ok(/function yoagentChatMessagesHtml\(\)[\s\S]*const startupInfo = yoagentStartupInfoVisible \? yoagentStartupInfoHtml\(\) : '';[\s\S]*return `\$\{messageHtml\}\$\{startupInfo\}`;/.test(src), 'YO!agent startup info is state-gated instead of always appended after messages');
-    assert.ok(/function showYoagentStartupInfoOnce\(\)[\s\S]*yoagentStartupInfoShown[\s\S]*yoagentStartupInfoVisible = true/.test(src), 'YO!agent startup info can be shown only once per page session');
-    assert.ok(/function showYoagentStartupInfoForLatestActivity\(\)[\s\S]*yoagentStartupInfoShown = false[\s\S]*showYoagentStartupInfoOnce\(\)/.test(src), 'YO!agent can intentionally re-show the latest activity snapshot after clearing conversation');
+    assert.ok(/function showYoagentStartupInfoOnce\(\)[\s\S]*captureYoagentStartupActivitySummarySnapshot\(\)[\s\S]*yoagentStartupInfoVisible = true/.test(src), 'YO!agent startup info freezes the activity snapshot when it is printed');
+    assert.ok(/function showYoagentStartupInfoForLatestActivity\(\)[\s\S]*resetYoagentStartupActivitySummarySnapshot\(\)[\s\S]*yoagentStartupInfoShown = false[\s\S]*showYoagentStartupInfoOnce\(\)/.test(src), 'YO!agent can intentionally re-show the latest activity snapshot after clearing conversation');
+    assert.ok(/function applyActivitySummaryPayloadFromPush\(payload = \{\}, options = \{\}\)[\s\S]*options\.refreshStartupSnapshot === true[\s\S]*captureYoagentStartupActivitySummarySnapshot\(\{replace: true\}\)/.test(src), 'activity-summary pushes are cache-only unless an explicit refresh requests a new startup snapshot');
     assert.ok(/async function prewarmYoagent\(options = \{\}\)[\s\S]*visible: shouldRequestStartupAnswer[\s\S]*applyYoagentConversationPayload\(payload\.conversation/.test(src), 'YO!agent prewarm asks for one visible startup LLM answer and applies the saved conversation');
     assert.ok(/async function clearYoagentConversation\(\)[\s\S]*yoagentPrewarmStarted = false[\s\S]*showYoagentStartupInfoForLatestActivity\(\)[\s\S]*refreshActivitySummary\(\{force: true, silent: true\}\)[\s\S]*showYoagentStartupInfoForLatestActivity\(\)/.test(src), 'Clear conversation resets prewarm and re-renders the refreshed latest activity snapshot');
-    assert.ok(/function applyYoagentConversationPayload\(payload = \{\}\)[\s\S]*if \(messages\.length\) hideYoagentStartupInfo\(\)/.test(src), 'YO!agent real conversation payloads hide the startup Recent agents block');
+    assert.equal(/function applyYoagentConversationPayload\(payload = \{\}\)[\s\S]*if \(messages\.length\) hideYoagentStartupInfo\(\)/.test(src), false, 'YO!agent real conversation payloads keep the startup Recent agents block');
+    assert.ok(/function applyYoagentConversationPayload\(payload = \{\}\)[\s\S]*hasOwnProperty\.call\(payload, 'messages'\)[\s\S]*return false/.test(src), 'YO!agent ignores partial/missing conversation payloads instead of clearing visible history');
     assert.ok(/let yoagentPendingWaits = \[\]/.test(src), 'YO!agent keeps server-reported pending waits in chat state');
     assert.ok(/function applyYoagentConversationPayload\(payload = \{\}\)[\s\S]*yoagentPendingWaits = Array\.isArray\(payload\.pending_waits\)/.test(src), 'YO!agent conversation payload carries pending background waits');
     assert.ok(/function yoagentPendingWaitsHtml\(\)[\s\S]*tPlural\('yoagent\.waiting\.count'[\s\S]*yoagent-waiting-queue/.test(src), 'YO!agent renders a waiting queue for one or more background result waits');
@@ -2104,15 +2792,24 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.yoagent-message\s*\{[\s\S]*overflow:\s*visible[\s\S]*overscroll-behavior:\s*auto/.test(css), 'YO!agent message bubbles are not vertical scroll containers that swallow wheel input');
     assert.ok(/\.yoagent-message-body\s*\{[\s\S]*overflow-x:\s*visible[\s\S]*overflow-y:\s*visible[\s\S]*overscroll-behavior:\s*auto/.test(css), 'YO!agent message bodies leave vertical wheel scrolling to the chat history owner');
     assert.ok(/function yoagentTimestampText[\s\S]*second:\s*'2-digit'/.test(src), 'YO!agent chat timestamps include seconds');
+    assert.ok(/function yoagentMessageLatencyHtml[\s\S]*yoagent-message-latency[\s\S]*yoagent\.responseLatency/.test(src), 'YO!agent assistant timestamps include a localized response-latency suffix');
     assert.ok(/function yoagentMessageDetailsHtml[\s\S]*data-yoagent-message-details-key/.test(src), 'YO!agent assistant diagnostics render as an expandable details block with a stable message key');
+    assert.ok(/function yoagentAuxiliaryLineIsDiagnostic[\s\S]*usage:[\s\S]*response time/.test(src), 'YO!agent collapsed details filter diagnostics out of auxiliary previews');
     assert.ok(/function yoagentMessageDetailsHtml[\s\S]*yoagent-details-preview[\s\S]*yoagent-auxiliary-stream[\s\S]*yoagent-details-note/.test(src), 'YO!agent assistant diagnostics render a collapsed auxiliary preview, expanded stream, and truncation note');
+    assert.ok(/function yoagentToolLineHtml[\s\S]*yoagent-tc-command/.test(src), 'YO!agent tool-call lines wrap executed commands in a dedicated command span');
+    assert.ok(/t\('yoagent\.toolCall\.label'\)/.test(src), 'YO!agent tool-call details use the localized "tool call" label instead of TC');
+    assert.ok(/\.yoagent-tc-command\s*\{[\s\S]*color:\s*var\(--code-function\)/.test(css), 'YO!agent tool-call command span has a distinct themed color');
     assert.ok(/function refreshYoagentSummaryRegions[\s\S]*const openDetails = yoagentOpenMessageDetailsState\(node\)[\s\S]*restoreYoagentOpenMessageDetailsState\(node, openDetails\)/.test(src), 'YO!agent summary refresh preserves expanded Details blocks');
     assert.ok(/function renderYoagentPanel[\s\S]*const openDetails = yoagentOpenMessageDetailsState\(node\)[\s\S]*node\.innerHTML = yoagentChatHtml\(\);[\s\S]*restoreYoagentOpenMessageDetailsState\(node, openDetails\)/.test(src), 'YO!agent full chat rerenders preserve expanded Details blocks');
     assert.ok(/\.yoagent-message-details pre\s*\{[\s\S]*max-height:\s*180px/.test(css), 'YO!agent diagnostics details stay bounded inside the message');
     assert.ok(/\.yoagent-message-details pre\s*\{[\s\S]*overscroll-behavior:\s*auto/.test(css), 'YO!agent diagnostics details allow vertical wheel chaining at scroll edges');
+    assert.ok(/\.yoagent-message-details summary::before\s*\{[\s\S]*border-inline-start:\s*6px solid currentColor/.test(css), 'YO!agent diagnostics summary renders an explicit disclosure triangle');
+    assert.ok(/\.yoagent-message-details\[open\] summary::before\s*\{[\s\S]*transform:\s*rotate\(90deg\)/.test(css), 'YO!agent disclosure triangle rotates when details are open');
     assert.ok(/\.yoagent-details-preview\s*\{[\s\S]*max-height:\s*calc\(2 \* max/.test(css), 'YO!agent collapsed auxiliary preview reserves at most two lines while running');
     assert.ok(/\.yoagent-details-preview\s*\{[\s\S]*overflow:\s*clip/.test(css), 'YO!agent collapsed auxiliary preview clips without becoming a hidden scroll container');
     assert.ok(/\.yoagent-message-details pre\.yoagent-auxiliary-stream\s*\{[\s\S]*color:\s*color-mix/.test(css), 'YO!agent auxiliary stream is visually quieter than normal chat text');
+    assert.ok(/body\.theme-light \.yoagent-message,[\s\S]*body\.theme-light \.yoagent-message-body,[\s\S]*color:\s*var\(--lt-text\)/.test(css), 'YO!agent light-mode message bodies use readable light-mode text');
+    assert.ok(/body\.theme-light \.yoagent-chat-input\s*\{[\s\S]*color:\s*var\(--lt-text\)/.test(css), 'YO!agent light-mode composer input uses readable light-mode text');
     assert.ok(/\.yoagent-chat-history\s*\{[\s\S]*overflow-x:\s*hidden[\s\S]*overflow-y:\s*auto[\s\S]*scrollbar-gutter:\s*stable/.test(css), 'YO!agent chat history is the single normal vertical scrollbar with a stable gutter');
     assert.ok(/\.yoagent-chat-history\s*\{[\s\S]*--pane-scrollbar-current-thumb:\s*var\(--pane-scrollbar-thumb\)[\s\S]*--pane-scrollbar-current-track:\s*var\(--pane-scrollbar-track\)/.test(css), 'YO!agent history keeps the normal rail neutral during active-pane hover');
     assert.ok(/\.yoagent-chat-history::\-webkit-scrollbar-thumb:hover,[\s\S]*\.yoagent-chat-history::\-webkit-scrollbar-thumb:active\s*\{[\s\S]*background:\s*var\(--pane-scrollbar-thumb-active\)/.test(css), 'YO!agent history uses the bright thumb only for direct scrollbar hover or drag');
@@ -2822,9 +3519,9 @@ async function runEditorPreviewSuite() {
         assert.ok(catalog[k].startsWith(glyph), `${locale} ${k} leads with the localized brand glyph`);
       }
       const yoloSectionStart = zhHtml.indexOf(`data-preference-section="${catalog['pref.section.yolo']}"`);
-      const yoagentSectionStart = zhHtml.indexOf(`data-preference-section="${catalog['pref.section.yoagent']}"`);
-      const yoloSectionHtml = zhHtml.slice(yoloSectionStart, yoagentSectionStart);
-      assert.ok(yoloSectionStart >= 0 && yoagentSectionStart > yoloSectionStart, `${locale} can isolate the localized YOLO Preferences section`);
+      const yoloSectionEnd = zhHtml.indexOf('data-preference-section="', yoloSectionStart + 1);
+      const yoloSectionHtml = zhHtml.slice(yoloSectionStart, yoloSectionEnd >= 0 ? yoloSectionEnd : undefined);
+      assert.ok(yoloSectionStart >= 0, `${locale} can isolate the localized YOLO Preferences section`);
       assert.equal(yoloSectionHtml.includes('YOLO'), false, `${locale} YOLO Preferences section does not leak Latin YOLO`);
       api.setClientSettingsPayloadPatchForTest({mtime_ns: 1000000000});
       assert.equal(api.settingsLoadedAgeText(1123), catalog['pref.status.loadedSeconds'].replace('{count}', '0'), `${locale} Preferences loaded age is localized`);
@@ -3095,13 +3792,17 @@ async function runEditorPreviewSuite() {
       api.t('pref.section.notifications'),
       api.fileExplorerLabel(),
       api.t('pref.section.uploads'),
-      api.t('pref.section.share'),
       api.t('pref.section.performance'),
       api.t('pref.section.github'),
-      api.t('pref.section.yolo'),
       api.t('pref.section.yoagent'),
+      api.t('pref.section.share'),
+      api.t('pref.section.yolo'),
     ];
     assert.deepStrictEqual(sectionOrder, expectedOrder, 'Preferences sections render in the grouped order');
+    const yoagentIndex = sectionOrder.indexOf(api.t('pref.section.yoagent'));
+    const shareIndex = sectionOrder.indexOf(api.t('pref.section.share'));
+    const yoloIndex = sectionOrder.indexOf(api.t('pref.section.yolo'));
+    assert.deepStrictEqual([yoagentIndex, shareIndex, yoloIndex], [sectionOrder.length - 3, sectionOrder.length - 2, sectionOrder.length - 1], 'YO!agent, YO!share, and YOLO sections stay adjacent at the end; YO!info has no standalone Preferences settings');
     const sectionHtml = title => {
       const start = html.indexOf(`data-preference-section="${title}"`);
       assert.ok(start >= 0, `${title} section renders`);
@@ -3119,6 +3820,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/type="radio"[^>]*value="http"[^>]*data-setting-path="share\.scheme"[\s\S]*type="radio"[^>]*value="https"[^>]*data-setting-path="share\.scheme"/.test(shareHtml), 'YO!share Preferences exposes http/https protocol defaults');
     assert.equal(sectionHtml(api.t('pref.section.performance')).includes('data-setting-path="general.reload_on_update_auto"'), false, 'server-version auto-reload no longer lives in Performance');
     assert.equal(sectionHtml(api.t('pref.section.performance')).includes('data-setting-path="updates.check_enabled"'), false, 'origin/main update check no longer lives in Performance');
+    assert.equal(sectionHtml(api.t('pref.section.yoagent')).includes('data-setting-path="yoagent.refresh_interval_seconds"'), false, 'YO!agent Preferences no longer exposes the background transcript-summary interval');
     const appearanceHtml = sectionHtml(api.t('pref.section.appearance'));
     assert.ok(appearanceHtml.includes('data-setting-path="general.default_layout"'), 'Default layout is in Appearance');
     assert.ok(/type="radio"[^>]*value="split"[^>]*data-setting-path="general\.default_layout"/.test(appearanceHtml), 'Default layout offers Split');

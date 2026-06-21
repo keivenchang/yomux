@@ -53,6 +53,7 @@ class AutoApproveState(TypedDict, total=False):
     prompt_source: str
     prompt: dict[str, Any]
     screen: dict[str, Any]
+    agent_windows: list[dict[str, Any]]
 
 
 class AutoApproveStatusPayload(TypedDict, total=False):

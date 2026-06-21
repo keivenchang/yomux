@@ -2058,12 +2058,24 @@ function delegate(parent, type, selector, handler, options = {}) {
   if (!parent || typeof handler !== 'function') return null;
   const listener = event => {
     const target = event.target?.closest?.(selector);
-    if (!target || !parent.contains(target)) return;
+    if (!target || (typeof parent.contains === 'function' && !parent.contains(target))) return;
     handler(event, target);
   };
   parent.addEventListener(type, listener, options);
   return listener;
 }
+
+function handleCopyPathClick(event, button) {
+  event.preventDefault();
+  event.stopPropagation();
+  const path = button.dataset.copyPath || '';
+  if (!path) return;
+  copyTextToClipboard(path)
+    .then(() => { statusOk(localizedHtml('status.copiedTranscriptPath')); })
+    .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
+}
+
+delegate(document, 'click', '[data-copy-path]', handleCopyPathClick);
 
 // One owner for the per-session/-item DOM id scheme. Both the element that sets the id and every
 // getElementById/querySelector that looks it up route through these, so the prefix lives in one place

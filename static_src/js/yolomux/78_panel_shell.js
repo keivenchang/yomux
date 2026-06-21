@@ -1259,7 +1259,7 @@ function terminalTabDisplayLabel(session, info) {
 }
 
 function terminalTabDetailLabel(session, info) {
-  const label = terminalProcessLabel(info);
+  const label = terminalProcessLabel(session, info);
   return label || 'Term';
 }
 
@@ -1275,8 +1275,8 @@ function terminalTabTitle(session, info) {
   return `terminal: ${terminalTabDetailLabel(session, info)}`;
 }
 
-function terminalProcessLabel(info) {
-  const pane = terminalDisplayPane(info);
+function terminalProcessLabel(session, info) {
+  const pane = terminalDisplayPane(info, session);
   if (pane?.process_label) return pane.process_label;
   const agent = agentForPane(info, pane) || info?.agents?.[0];
   if (agent?.command) return processLabelFromCommand(agent.command);
@@ -1285,8 +1285,22 @@ function terminalProcessLabel(info) {
   return 'Term';
 }
 
-function terminalDisplayPane(info) {
+function terminalDisplayPaneForWindowIndex(info, windowIndex) {
   const panes = Array.isArray(info?.panes) ? info.panes : [];
+  const indexKey = tmuxWindowIndexKey(windowIndex);
+  if (!panes.length || indexKey === null) return null;
+  return panes.find(pane => tmuxWindowIndexKey(pane.window ?? pane.window_index) === indexKey && pane.active)
+    || panes.find(pane => tmuxWindowIndexKey(pane.window ?? pane.window_index) === indexKey)
+    || null;
+}
+
+function terminalDisplayPane(info, session = '') {
+  const panes = Array.isArray(info?.panes) ? info.panes : [];
+  const override = session ? tmuxWindowDisplayActiveIndex(session) : undefined;
+  if (override !== undefined && override !== tmuxWindowPendingActiveIndex) {
+    const overridePane = terminalDisplayPaneForWindowIndex(info, override);
+    if (overridePane) return overridePane;
+  }
   return panes.find(pane => pane.window_active && pane.active)
     || panes.find(pane => pane.window_active)
     || info?.selected_pane
@@ -1297,6 +1311,279 @@ function terminalDisplayPane(info) {
 function tmuxWindowNumber(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
+}
+
+const tmuxWindowActiveIndexOverrides = new Map();
+const tmuxWindowSwitchSequences = new Map();
+const tmuxWindowDirectTargetGuards = new Map();
+const tmuxWindowPendingActiveIndex = '__pending__';
+const tmuxWindowConfirmedOverrideHoldMs = 4000;
+const tmuxWindowDirectTargetGuardMs = 17000;
+
+function tmuxWindowIndexKey(value) {
+  const index = tmuxWindowNumber(value);
+  return index === null ? null : String(index);
+}
+
+function tmuxWindowActiveIndexOverride(session) {
+  return tmuxWindowActiveIndexOverrides.get(String(session || ''));
+}
+
+function tmuxWindowDisplayActiveIndex(session) {
+  const override = tmuxWindowActiveIndexOverride(session);
+  if (override !== undefined) return override;
+  return tmuxWindowDirectTargetGuard(session)?.index;
+}
+
+function tmuxWindowDirectTargetGuard(session) {
+  const key = String(session || '');
+  const guard = tmuxWindowDirectTargetGuards.get(key);
+  if (!guard) return null;
+  if (Number(guard.guardUntilMs || 0) > Date.now()) return guard;
+  tmuxWindowDirectTargetGuards.delete(key);
+  return null;
+}
+
+function tmuxWindowDirectTargetGuardEntries() {
+  const entries = [];
+  for (const [session, guard] of tmuxWindowDirectTargetGuards.entries()) {
+    const active = tmuxWindowDirectTargetGuard(session);
+    if (active) entries.push([session, active]);
+    else if (guard) tmuxWindowDirectTargetGuards.delete(session);
+  }
+  return entries;
+}
+
+function setTmuxWindowDirectTargetGuard(session, windowIndex, sequence) {
+  const key = String(session || '');
+  const indexKey = tmuxWindowIndexKey(windowIndex);
+  if (!key || indexKey === null) return false;
+  const now = Date.now();
+  tmuxWindowDirectTargetGuards.set(key, {
+    index: indexKey,
+    sequence: Number(sequence) || 0,
+    startedAtMs: now,
+    confirmedAtMs: 0,
+    guardUntilMs: now + tmuxWindowDirectTargetGuardMs,
+  });
+  return true;
+}
+
+function confirmTmuxWindowDirectTargetGuard(session, windowIndex, options = {}) {
+  const key = String(session || '');
+  const indexKey = tmuxWindowIndexKey(windowIndex);
+  if (!key || indexKey === null) return false;
+  const guard = tmuxWindowDirectTargetGuard(key);
+  if (!guard || guard.index !== indexKey) return false;
+  const sequence = tmuxWindowSwitchOptionSequence(options);
+  if (sequence > 0 && Number(guard.sequence || 0) > 0 && Number(guard.sequence) !== sequence) return false;
+  const now = Date.now();
+  tmuxWindowDirectTargetGuards.set(key, {
+    ...guard,
+    confirmedAtMs: now,
+    guardUntilMs: now + tmuxWindowDirectTargetGuardMs,
+  });
+  return true;
+}
+
+function clearTmuxWindowDirectTargetGuard(session, options = {}) {
+  const key = String(session || '');
+  if (!key) return false;
+  const sequence = tmuxWindowSwitchOptionSequence(options);
+  const guard = tmuxWindowDirectTargetGuard(key);
+  if (sequence > 0 && guard && Number(guard.sequence || 0) > 0 && Number(guard.sequence) !== sequence) return false;
+  return tmuxWindowDirectTargetGuards.delete(key);
+}
+
+function tmuxWindowSwitchSequence(session) {
+  return Number(tmuxWindowSwitchSequences.get(String(session || '')) || 0);
+}
+
+function tmuxWindowSwitchOptionSequence(options = {}) {
+  const sequence = Number(options.sequence);
+  return Number.isFinite(sequence) && sequence > 0 ? sequence : 0;
+}
+
+function tmuxWindowSwitchSequenceMatches(session, sequence) {
+  const value = Number(sequence);
+  return !Number.isFinite(value) || value <= 0 || tmuxWindowSwitchSequence(session) === value;
+}
+
+function nextTmuxWindowSwitchSequence(session) {
+  const key = String(session || '');
+  if (!key) return 0;
+  const next = tmuxWindowSwitchSequence(key) + 1;
+  tmuxWindowSwitchSequences.set(key, next);
+  return next;
+}
+
+function tmuxWindowOverrideSequence(session, options = {}) {
+  const key = String(session || '');
+  if (!key) return 0;
+  const explicit = tmuxWindowSwitchOptionSequence(options);
+  if (explicit > 0) {
+    tmuxWindowSwitchSequences.set(key, explicit);
+    return explicit;
+  }
+  if (options.bumpSequence === false) return tmuxWindowSwitchSequence(key);
+  return nextTmuxWindowSwitchSequence(key);
+}
+
+function updateTmuxWindowBarActiveButtons(session, windowIndex) {
+  const indexKey = windowIndex === null ? null : tmuxWindowIndexKey(windowIndex);
+  if (indexKey === null && windowIndex !== null) return false;
+  let matched = false;
+  document.body?.querySelectorAll?.(`[data-tmux-window-bar="${cssEscape(session)}"]`)?.forEach(bar => {
+    bar.querySelectorAll?.('[data-window-index]')?.forEach(button => {
+      const active = indexKey !== null && tmuxWindowIndexKey(button.dataset.windowIndex) === indexKey;
+      matched = matched || active;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+  });
+  return matched;
+}
+
+function refreshTabberPanelsForTmuxWindowChange() {
+  if (fileExplorerMode === 'tabber' && typeof refreshTabberPanels === 'function') refreshTabberPanels();
+}
+
+function tmuxWindowInfoWithActiveIndex(info, windowIndex) {
+  const activeIndex = tmuxWindowIndexKey(windowIndex);
+  const panes = Array.isArray(info?.panes) ? info.panes : [];
+  if (!info || activeIndex === null || !panes.length) return null;
+  let selectedPane = null;
+  let matched = false;
+  const nextPanes = panes.map(pane => {
+    const active = tmuxWindowIndexKey(pane.window ?? pane.window_index) === activeIndex;
+    if (active) {
+      matched = true;
+      if (!selectedPane || pane.active === true) selectedPane = {...pane, window_active: true};
+    }
+    return {...pane, window_active: active};
+  });
+  if (!matched) return null;
+  return {...info, selected_pane: selectedPane || info.selected_pane || nextPanes.find(pane => pane.window_active) || null, panes: nextPanes};
+}
+
+function applyTmuxWindowActiveIndexToTranscriptInfo(session, windowIndex, options = {}) {
+  const info = transcriptMeta.sessions?.[session];
+  const nextInfo = tmuxWindowInfoWithActiveIndex(info, windowIndex);
+  if (!nextInfo) return false;
+  transcriptMeta = {
+    ...transcriptMeta,
+    sessions: {...(transcriptMeta.sessions || {}), [session]: nextInfo},
+  };
+  if (options.render === true) {
+    updatePanelHeader(session, nextInfo);
+    renderInfoPanel();
+  }
+  return true;
+}
+
+function transcriptPayloadWithTmuxWindowOverrides(payload) {
+  if (!payload || typeof payload !== 'object' || !(payload.sessions && typeof payload.sessions === 'object')) return payload;
+  let nextSessions = null;
+  for (const session of Object.keys(payload.sessions)) {
+    const override = tmuxWindowDisplayActiveIndex(session);
+    const activeIndex = override === tmuxWindowPendingActiveIndex
+      ? null
+      : override !== undefined
+        ? override
+        : tmuxWindowActiveIndexFromSignals(session);
+    if (activeIndex === null) continue;
+    const nextInfo = tmuxWindowInfoWithActiveIndex(payload.sessions[session], activeIndex);
+    if (!nextInfo) continue;
+    if (!nextSessions) nextSessions = {...payload.sessions};
+    nextSessions[session] = nextInfo;
+  }
+  return nextSessions ? {...payload, sessions: nextSessions} : payload;
+}
+
+function tmuxWindowActiveIndexFromSignals(session) {
+  if (typeof tmuxSignalWindowsForSession !== 'function') return null;
+  const activeWindow = tmuxSignalWindowsForSession(session).find(windowRecord => windowRecord?.active === true);
+  return tmuxWindowIndexKey(activeWindow?.window_index);
+}
+
+function setTmuxWindowActiveIndexOverride(session, windowIndex, options = {}) {
+  const indexKey = tmuxWindowIndexKey(windowIndex);
+  if (!session || indexKey === null) return false;
+  const sequence = tmuxWindowOverrideSequence(session, options);
+  tmuxWindowActiveIndexOverrides.set(String(session), indexKey);
+  setTmuxWindowDirectTargetGuard(session, indexKey, sequence);
+  applyTmuxWindowActiveIndexToTranscriptInfo(String(session), indexKey, {render: true});
+  updateTmuxWindowBarActiveButtons(session, indexKey);
+  refreshTabberPanelsForTmuxWindowChange();
+  return sequence || true;
+}
+
+function setTmuxWindowActiveIndexPending(session, options = {}) {
+  if (!session) return false;
+  const sequence = tmuxWindowOverrideSequence(session, options);
+  tmuxWindowActiveIndexOverrides.set(String(session), tmuxWindowPendingActiveIndex);
+  clearTmuxWindowDirectTargetGuard(session);
+  updateTmuxWindowBarActiveButtons(session, null);
+  refreshTabberPanelsForTmuxWindowChange();
+  return sequence || true;
+}
+
+function clearTmuxWindowActiveIndexOverride(session, options = {}) {
+  if (!session) return false;
+  const sequence = tmuxWindowSwitchOptionSequence(options);
+  if (sequence > 0 && !tmuxWindowSwitchSequenceMatches(session, sequence)) return false;
+  const deleted = tmuxWindowActiveIndexOverrides.delete(String(session));
+  if (options.clearDirectTarget === true) clearTmuxWindowDirectTargetGuard(session, {sequence});
+  if (deleted) refreshTabberPanelsForTmuxWindowChange();
+  return deleted;
+}
+
+function confirmTmuxWindowActiveIndexOverride(session, windowIndex, options = {}) {
+  const indexKey = tmuxWindowIndexKey(windowIndex);
+  if (!session || indexKey === null) return false;
+  const sequence = tmuxWindowSwitchOptionSequence(options);
+  if (sequence > 0 && !tmuxWindowSwitchSequenceMatches(session, sequence)) return false;
+  tmuxWindowActiveIndexOverrides.set(String(session), indexKey);
+  confirmTmuxWindowDirectTargetGuard(session, indexKey, {sequence});
+  updateTmuxWindowBarActiveButtons(session, indexKey);
+  refreshTabberPanelsForTmuxWindowChange();
+  setTimeout(() => {
+    if (sequence > 0 && !tmuxWindowSwitchSequenceMatches(session, sequence)) return;
+    if (tmuxWindowActiveIndexOverride(session) !== indexKey) return;
+    if (tmuxWindowInfoActiveIndex(transcriptMeta.sessions?.[session]) === indexKey) {
+      clearTmuxWindowActiveIndexOverride(session, {sequence});
+    }
+  }, tmuxWindowConfirmedOverrideHoldMs);
+  return true;
+}
+
+function tmuxWindowInfoActiveIndex(info) {
+  const active = tmuxWindowRecords(Array.isArray(info) ? info : info?.panes).find(record => record.active === true);
+  return active ? String(active.index) : null;
+}
+
+function reconcileTmuxWindowActiveIndexOverride(session, info, options = {}) {
+  const sequence = tmuxWindowSwitchOptionSequence(options);
+  if (sequence > 0 && !tmuxWindowSwitchSequenceMatches(session, sequence)) return false;
+  const override = tmuxWindowActiveIndexOverride(session);
+  if (override === undefined) return false;
+  const activeIndex = tmuxWindowInfoActiveIndex(info);
+  if (override === tmuxWindowPendingActiveIndex) {
+    if (activeIndex !== null) {
+      confirmTmuxWindowActiveIndexOverride(session, activeIndex, {sequence});
+      return true;
+    }
+    updateTmuxWindowBarActiveButtons(session, null);
+    return false;
+  }
+  const expected = tmuxWindowIndexKey(options.expectedIndex);
+  const target = expected === null ? override : expected;
+  if (activeIndex === target) {
+    confirmTmuxWindowActiveIndexOverride(session, activeIndex, {sequence});
+    return true;
+  }
+  updateTmuxWindowBarActiveButtons(session, override);
+  return false;
 }
 
 function tmuxWindowIndices(panes) {
@@ -1375,8 +1662,6 @@ function tmuxWindowBarLabelMode(records, options = {}) {
   return items.length > fallbackCount || namedChars > charLimit ? 'numbers' : 'names';
 }
 
-// Classify a tmux window by the program it runs so the window-switcher buttons can be tinted per agent
-// (claude/codex/shell/editor/repl/git/other). Drives the per-agent color via [data-window-agent] in CSS.
 function tmuxWindowAgentKey(name) {
   const base = String(name || '').trim().toLowerCase().replace(/\(\d+\)$/, '').split(/[\s:/]/)[0];
   if (base === 'claude' || base === 'codex') return base;
@@ -1392,17 +1677,23 @@ function tmuxWindowBarHtml(session, info, options = {}) {
   const records = tmuxWindowRecords(panes);
   if (!records.length) return '';
   const disabled = options.disabled === true || readOnlyMode;
+  const activeIndexOverride = tmuxWindowDisplayActiveIndex(session);
   const labelMode = tmuxWindowBarLabelMode(records, options);
   const disabledTitle = readOnlyMode ? t('terminal.window.adminRequired') : t('tab.unavailableFor', {name: itemLabel(session)});
   const buttons = records.map(record => {
-    const pressed = record.active ? 'true' : 'false';
-    const activeClass = record.active ? ' active' : '';
-    const visibleName = record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.nameLabel}`;
+    const active = activeIndexOverride === undefined ? record.active : String(record.index) === activeIndexOverride;
+    const pressed = active ? 'true' : 'false';
+    const activeClass = active ? ' active' : '';
+    const infoPayload = Array.isArray(info) ? {panes: info} : info;
+    const fallbackName = record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.nameLabel}`;
+    const visibleName = tmuxWindowCanonicalLabel(session, record, fallbackName, infoPayload);
+    const {status: agentStatus, agentKey} = tmuxWindowAgentStatus(session, record, infoPayload);
+    const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatus, agentKey, session);
     const title = t('terminal.window.title', {name: visibleName});
     const attrs = disabled
       ? `disabled title="${esc(disabledTitle)}" aria-label="${esc(title)}"`
       : `data-window-index="${esc(record.indexText)}" data-window-session="${esc(session)}" data-window-label="${esc(visibleName)}" title="${esc(title)}" aria-label="${esc(title)}" aria-pressed="${pressed}"`;
-    return `<button type="button" class="tab tmux-window-button${activeClass}" data-window-agent="${esc(tmuxWindowAgentKey(record.name))}" ${attrs}><span class="tmux-window-name-label">${esc(visibleName)}</span><span class="tmux-window-number-label">${esc(record.numberLabel)}</span></button>`;
+    return `<button type="button" class="tab tmux-window-button${activeClass}" ${attrs}><span class="tmux-window-name-label"><span class="tmux-window-name-text">${esc(visibleName)}</span>${activityIconHtml}</span><span class="tmux-window-number-label">${esc(record.numberLabel)}</span></button>`;
   }).join('');
   return `<div class="tmux-window-bar" data-tmux-window-bar="${esc(session)}" data-tmux-window-label-mode="${esc(labelMode)}" role="group" aria-label="${esc(t('terminal.window.groupAria'))}">${buttons}</div>`;
 }

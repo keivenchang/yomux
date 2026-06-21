@@ -29,6 +29,8 @@ def claude_stream_json_argv(target: dict[str, Any]) -> list[str]:
         "text",
         "--output-format",
         "stream-json",
+        "--include-partial-messages",
+        "--show-thinking",
     ]
     session_id = str(target.get("thread_id") or target.get("agent_session_id") or "").strip()
     if session_id:
@@ -42,6 +44,9 @@ def claude_stream_json_argv(target: dict[str, Any]) -> list[str]:
     effort = str(target.get("agent_effort") or target.get("effort") or "").strip()
     if effort:
         args.extend(["--effort", effort])
+    tools = str(target.get("tools") or "").strip()
+    if tools:
+        args.extend(["--tools", tools])
     permission_mode = str(target.get("permission_mode") or target.get("permissionMode") or "").strip()
     if permission_mode:
         args.extend(["--permission-mode", permission_mode])
@@ -50,6 +55,7 @@ def claude_stream_json_argv(target: dict[str, Any]) -> list[str]:
 
 def claude_stream_json_result(stdout: str) -> tuple[str, str]:
     assistant_parts: list[str] = []
+    stream_delta_parts: list[str] = []
     for line in str(stdout or "").splitlines():
         try:
             item = json.loads(line)
@@ -65,12 +71,17 @@ def claude_stream_json_result(stdout: str) -> tuple[str, str]:
                 for block in content:
                     if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
                         assistant_parts.append(block["text"])
+        elif item_type == "stream_event":
+            event = item.get("event") if isinstance(item.get("event"), dict) else {}
+            delta = event.get("delta") if isinstance(event.get("delta"), dict) else {}
+            if delta.get("type") == "text_delta" and isinstance(delta.get("text"), str):
+                stream_delta_parts.append(delta["text"])
         elif item_type == "result":
             if item.get("is_error"):
                 return "", str(item.get("result") or item.get("api_error_status") or "Claude stream-json result error")
             result = str(item.get("result") or "").strip()
-            return result or "".join(assistant_parts).strip(), ""
-    return "".join(assistant_parts).strip(), ""
+            return result or "".join(assistant_parts).strip() or "".join(stream_delta_parts).strip(), ""
+    return "".join(assistant_parts).strip() or "".join(stream_delta_parts).strip(), ""
 
 
 def claude_stream_json_run(
@@ -146,4 +157,3 @@ def claude_stream_json_run(
                 process.kill()
                 process.wait(timeout=1)
         raise
-

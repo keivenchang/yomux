@@ -45,6 +45,22 @@ def test_parse_notify_job_intents():
     assert parse_yoagent_job_intent("tell me when all sessions are idle", ["1", "2"]) == {
         "type": "notify_all_idle",
     }
+    assert parse_yoagent_job_intent("notify me when session 1 asks a question", ["1"]) == {
+        "type": "notify_session_needs_input",
+        "session": "1",
+    }
+    assert parse_yoagent_job_intent("tell me when agent 1 is blocked", ["1"]) == {
+        "type": "notify_session_blocked",
+        "session": "1",
+    }
+    assert parse_yoagent_job_intent("notify me when session 1 is done after it was working", ["1"]) == {
+        "type": "notify_session_done_after_working",
+        "session": "1",
+    }
+    assert parse_yoagent_job_intent("cancel pending jobs for session 1", ["1"]) == {
+        "type": "cancel_session_jobs",
+        "session": "1",
+    }
     assert parse_yoagent_job_intent("notify me when agent 9 is idling", ["1"]) is None
 
 

@@ -28,7 +28,7 @@ SETTING_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "appearance.separator_color": ("separator color", "split color", "divider color", "drop preview color"),
     "appearance.editor_cursor_color": ("cursor color", "caret color", "editor cursor color", "terminal cursor color"),
     "appearance.editor_cursor_style": ("cursor style", "caret style", "block cursor", "line cursor"),
-    "appearance.ui_font_size": ("ui font size", "interface font size", "app font size", "terminal size", "yo!agent font size", "yoagent font size"),
+    "appearance.ui_font_size": ("ui font size", "interface font size", "app font size", "yo!agent font size", "yoagent font size"),
     "appearance.terminal_font_size": ("terminal font size", "tmux font size", "shell font size"),
     "appearance.editor_font_size": ("editor font size", "code font size", "codemirror font size"),
     "appearance.preview_font_size": ("preview font size", "markdown preview font size"),
@@ -100,7 +100,6 @@ SETTING_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "editor.blame_all_lines": ("blame all lines", "inline blame all lines"),
     "yoagent.backend": ("yoagent backend", "yo!agent backend", "agent backend"),
     "yoagent.invocation": ("yoagent invocation", "yo!agent invocation"),
-    "yoagent.refresh_interval_seconds": ("yoagent refresh interval", "yo!agent refresh interval", "transcript summary refresh", "background summaries", "background transcript summaries"),
     "yoagent.system_prompt": ("yoagent system prompt", "yo!agent system prompt", "agent system prompt"),
     "yoagent.intro": ("yoagent intro", "yo!agent intro"),
     "yoagent.format": ("yoagent format", "yo!agent format", "answer format"),
@@ -142,6 +141,35 @@ GENERIC_SETTING_KEY_ALIASES = {
 
 def normalize_text(value: Any) -> str:
     return " ".join(re.sub(r"[^a-z0-9_./#:-]+", " ", str(value or "").lower()).split())
+
+
+def implicit_settings_write_question(question: str) -> bool:
+    text = normalize_text(question)
+    if re.search(r"\b(?:tab|tabs)\b", text) and (re.search(r"\b(?:wider|narrower|bigger|smaller|larger|width)\b", text) or re.search(r"\d", text)):
+        return True
+    if re.search(r"\b(?:ui|interface|app)\b", text) and re.search(r"\b(?:bigger|smaller|larger|font|size)\b", text):
+        return True
+    if "terminal" in text and re.search(r"\b(?:bigger|smaller|larger|font|size|light|dark|black|white)\b", text):
+        return True
+    if re.search(r"\b(?:no|quiet|silent|silence|disable|off)\b", text) and re.search(r"\b(?:notify|notification|notifications|alerts)\b", text):
+        return True
+    return False
+
+
+def direct_setting_path_for_question(question: str, catalog: dict[str, dict[str, Any]]) -> str:
+    text = normalize_text(question)
+    path = ""
+    if re.search(r"\b(?:tab|tabs)\b", text) and (re.search(r"\b(?:wider|narrower|bigger|smaller|larger|width)\b", text) or re.search(r"\d", text)):
+        path = "appearance.tab_width"
+    elif re.search(r"\b(?:ui|interface|app)\b", text) and re.search(r"\b(?:bigger|smaller|larger|font|size)\b", text):
+        path = "appearance.ui_font_size"
+    elif "terminal" in text and re.search(r"\b(?:font|size|bigger|smaller|larger)\b", text):
+        path = "appearance.terminal_font_size"
+    elif "terminal" in text and re.search(r"\b(?:light|dark|black|white)\b", text):
+        path = "appearance.terminal_theme"
+    elif re.search(r"\b(?:no|quiet|silent|silence|disable|off)\b", text) and re.search(r"\b(?:notify|notification|notifications|alerts)\b", text):
+        path = "notifications.notify_transitions"
+    return path if path in catalog else ""
 
 
 def hidden_setting_message(question: str) -> str:
@@ -371,10 +399,15 @@ def clamp_numeric_setting_value(number: float, item: dict[str, Any]) -> tuple[in
 
 def choice_value_from_text(value_text: str, item: dict[str, Any]) -> str:
     text = normalize_text(value_text)
+    raw_text = str(value_text or "").casefold()
     choices = [str(choice) for choice in item.get("choices") or []]
     aliases = item.get("aliases") if isinstance(item.get("aliases"), dict) else {}
     for alias, canonical in aliases.items():
-        if normalize_text(alias) in text:
+        normalized_alias = normalize_text(alias)
+        raw_alias = str(alias or "").casefold()
+        if normalized_alias and normalized_alias in text:
+            return str(canonical)
+        if not normalized_alias and raw_alias and raw_alias in raw_text:
             return str(canonical)
     choice_aliases = {
         "on": "true",
@@ -396,7 +429,7 @@ def choice_value_from_text(value_text: str, item: dict[str, Any]) -> str:
         for alias, canonical in choice_aliases.items():
             if canonical == choice:
                 variants.add(alias)
-        if any(normalize_text(variant) in text for variant in variants):
+        if any(normalize_text(variant) and normalize_text(variant) in text for variant in variants):
             return choice
     return ""
 
@@ -538,6 +571,10 @@ def setting_value_from_question(question: str, item: dict[str, Any], operation: 
         value = choice_value_from_question(question, item)
         return (value, "") if value else (None, f"I need one of: {', '.join(f'`{choice}`' for choice in item.get('choices') or [])}.")
     if setting_type == "list":
+        if path == "notifications.notify_transitions" and operation == "set":
+            text = normalize_text(question)
+            if re.search(r"\b(?:no|quiet|silent|silence|disable|off)\b", text) and re.search(r"\b(?:notify|notification|notifications|alerts)\b", text):
+                return [], ""
         if operation not in {"add", "remove"}:
             return None, f"Tell me whether to add or remove an item from `{path}`."
         return list_value_from_question(question, path, current if isinstance(current, list) else [], operation)
@@ -575,7 +612,9 @@ def changed_setting_answer(path: str, item: dict[str, Any], before: Any, after: 
 
 
 def parse_settings_write(question: str, payload: dict[str, Any]) -> dict[str, Any] | None:
-    if not WRITE_RE.search(question):
+    if READ_RE.search(question) and not WRITE_RE.search(question):
+        return None
+    if not WRITE_RE.search(question) and not implicit_settings_write_question(question):
         return None
     text = normalize_text(question)
     hidden_message = hidden_setting_message(question)
@@ -584,7 +623,8 @@ def parse_settings_write(question: str, payload: dict[str, Any]) -> dict[str, An
     if "reset" in text and any(term in text for term in ["all", "everything", "preferences", "settings"]):
         return {"type": "settings_clarify", "answer": "Resetting all Preferences is broad and can disrupt the running UI. Tell me the specific setting to reset, or use Preferences -> Reset all defaults."}
     catalog = catalog_from_payload(payload)
-    candidates = setting_candidates(question, catalog)
+    direct_path = direct_setting_path_for_question(question, catalog)
+    candidates = [(1000, direct_path)] if direct_path else setting_candidates(question, catalog)
     if not candidates:
         return None
     top_score = candidates[0][0]
@@ -715,7 +755,7 @@ def product_capability_registry() -> list[dict[str, Any]]:
             "write_action": "server-verified prompt preview/send/watch",
             "auth": "admin",
             "backing": "yoagent action/job helpers and transport registry",
-            "setting_keys": ["yoagent.backend", "yoagent.invocation", "yoagent.refresh_interval_seconds"],
+            "setting_keys": ["yoagent.backend", "yoagent.invocation"],
             "examples": ["ask session 1 what changed, then ask session 2 if it is correct", "notify me when all sessions are idle"],
         },
         {

@@ -24,6 +24,38 @@ SOURCE_LOCALE = "en"
 PSEUDO_LOCALE = "en-XA"
 WINDOW_VIEWPORT_ALLOW_MARKER = "static-build-allow-window-viewport"
 RAW_TOKEN_LITERAL_IGNORED_VALUES = {"#ffffff"}
+I18N_UNTRANSLATED_REPORT_SAMPLE_LIMIT = 10
+I18N_ALLOWED_IDENTICAL_TERMS = {
+    "apache", "api", "ci", "claude", "cli", "codex", "css", "git", "github", "gitlab", "head", "html", "http",
+    "id", "ip", "javascript", "json", "linkedin", "markdown", "mit", "GPU", "ok", "openai",
+    "polyform", "pr", "readme", "ssh", "tmux", "url", "websocket", "worktree", "yaml", "yo!agent",
+    "yo!info", "yo!share", "yolo", "yolomux",
+}
+I18N_IDENTICAL_KEY_PATTERNS = (
+    re.compile(r"^brand\."),
+    re.compile(r"^pref\.yoagent\.(?:claude|codex)_model\."),
+    re.compile(r"^state\.short\."),
+)
+I18N_UNTRANSLATED_BASELINE: dict[str, int] = {
+    "ar": 393,
+    "de": 342,
+    "es": 327,
+    "fr": 347,
+    "he": 393,
+    "hi": 461,
+    "it": 851,
+    "ja": 309,
+    "ko": 393,
+    "nl": 862,
+    "pl": 851,
+    "pt-BR": 409,
+    "ru": 393,
+    "th": 840,
+    "tr": 844,
+    "vi": 763,
+    "zh-Hans": 0,
+    "zh-Hant": 0,
+}
 _PSEUDO_ACCENTS = str.maketrans({
     "a": "á", "b": "ƀ", "c": "ç", "d": "đ", "e": "é", "f": "ƒ", "g": "ǧ", "h": "ĥ", "i": "í",
     "j": "ĵ", "k": "ķ", "l": "ł", "m": "ɱ", "n": "ñ", "o": "ó", "p": "ƥ", "q": "ɋ", "r": "ř",
@@ -384,6 +416,71 @@ def locale_key_errors(catalogs: dict[str, dict]) -> list[str]:
     return errors
 
 
+def i18n_value_intentionally_identical(key: str, value: str) -> bool:
+    """Return true for strings that should stay identical across locales."""
+    text = str(value or "").strip()
+    if not text:
+        return True
+    # Placeholders, shortcuts, punctuation, counts, and glyph-only labels do not need translation.
+    without_tokens = re.sub(r"\{\w+\}", "", text)
+    if not re.search(r"[A-Za-z]", without_tokens):
+        return True
+    normalized = re.sub(r"[^A-Za-z0-9!+.#_-]+", " ", without_tokens).strip().lower()
+    if not normalized:
+        return True
+    parts = [part.strip(".…:;!?") for part in normalized.split() if part.strip(".…:;!?")]
+    if parts and all(part in I18N_ALLOWED_IDENTICAL_TERMS for part in parts):
+        return True
+    if normalized in {"a-z", "z-a"}:
+        return True
+    if normalized == "keiven chang":
+        return True
+    if any(pattern.search(key) for pattern in I18N_IDENTICAL_KEY_PATTERNS):
+        return True
+    # Brand/legal strings are intentionally stable but may contain version numbers or spaces.
+    if re.fullmatch(r"(?:polyform noncommercial license|apache license|mit license)(?: [0-9.]+)?", normalized):
+        return True
+    if key.endswith(".shortcut") or key.endswith(".key"):
+        return True
+    return False
+
+
+def i18n_untranslated_entries(catalogs: dict[str, dict]) -> dict[str, list[str]]:
+    """Keys whose localized value is still byte-identical to the English source."""
+    source = catalogs.get(SOURCE_LOCALE) or {}
+    result: dict[str, list[str]] = {}
+    for locale, catalog in sorted(catalogs.items()):
+        if locale == SOURCE_LOCALE:
+            continue
+        entries: list[str] = []
+        for key, english_value in sorted(source.items()):
+            value = catalog.get(key)
+            if value != english_value:
+                continue
+            if i18n_value_intentionally_identical(key, str(english_value)):
+                continue
+            entries.append(key)
+        result[locale] = entries
+    return result
+
+
+def i18n_untranslated_report(catalogs: dict[str, dict] | None = None, sample_limit: int | None = I18N_UNTRANSLATED_REPORT_SAMPLE_LIMIT) -> tuple[list[str], list[str]]:
+    """Return warning lines plus baseline-regression errors for untranslated values."""
+    entries = i18n_untranslated_entries(catalogs or source_catalogs())
+    warnings: list[str] = []
+    errors: list[str] = []
+    for locale, keys in entries.items():
+        count = len(keys)
+        baseline = I18N_UNTRANSLATED_BASELINE.get(locale)
+        if count:
+            shown = keys if sample_limit is None else keys[:max(0, sample_limit)]
+            suffix = "" if sample_limit is None or len(keys) <= sample_limit else f" (+{len(keys) - sample_limit} more)"
+            warnings.append(f"WARNING: i18n untranslated values in {locale}.json: {count}; keys: {', '.join(shown)}{suffix}")
+        if baseline is not None and count > baseline:
+            errors.append(f"{locale}.json untranslated-value count regressed: {count} > baseline {baseline}")
+    return warnings, errors
+
+
 def pseudo_value(value: str) -> str:
     """Accent the letters (keep {tokens} intact) and pad ~40% to surface overflow / missed strings."""
     segments = re.split(r"(\{\w+\})", str(value))
@@ -608,6 +705,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check", action="store_true", help="fail if generated static files are stale")
     parser.add_argument("--watch", action="store_true", help="rebuild on source change (mtime poll) until interrupted")
     parser.add_argument("--lint-light", action="store_true", help="report dark/extreme literal colors lacking a body.theme-light override")
+    parser.add_argument("--i18n-untranslated-report", action="store_true", help="print every non-allowlisted locale value that still equals en.json")
     args = parser.parse_args(argv)
 
     assets = args.assets or sorted(ASSETS)
@@ -617,6 +715,13 @@ def main(argv: list[str] | None = None) -> int:
             print(line, file=sys.stderr)
         print(f"{len(violations)} light-mode pairing issue(s)", file=sys.stderr)
         return 1 if violations else 0
+    if args.i18n_untranslated_report:
+        warnings, errors = i18n_untranslated_report(sample_limit=None)
+        for line in warnings:
+            print(line)
+        for line in errors:
+            print(line, file=sys.stderr)
+        return 1 if errors else 0
     if args.watch:
         return watch_loop(assets)
     try:
@@ -634,6 +739,10 @@ def main(argv: list[str] | None = None) -> int:
                 + lint_raw_window_viewport_reads()
                 + lint_light_mode_pairs()
             )
+            i18n_warnings, i18n_errors = i18n_untranslated_report()
+            for warning in i18n_warnings:
+                print(warning, file=sys.stderr)
+            lint_errors += i18n_errors
             for err in lint_errors:
                 print(err, file=sys.stderr)
             if stale or lint_errors:

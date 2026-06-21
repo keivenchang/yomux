@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import threading
+import time
 from types import SimpleNamespace
 from urllib.parse import parse_qs
 from urllib.parse import urlparse
@@ -16,6 +17,7 @@ from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import PaneInfo
 from yolomux_lib.common import SessionInfo
 from yolomux_lib.common import UploadedFile
+from yolomux_lib.yoagent import session_summaries as session_summaries_module
 from yolomux_lib.yoagent import transports as transport_module
 
 
@@ -643,6 +645,21 @@ def test_server_directory_event_poll_seconds_uses_own_interval(monkeypatch):
         webapp.control_server.stop()
 
 
+def test_backend_poll_interval_fallbacks_use_settings_defaults(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    defaults = app_module.DEFAULT_PERFORMANCE_SETTINGS
+    try:
+        monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"performance": {}}})
+
+        assert webapp.server_event_poll_seconds() == pytest.approx(defaults["server_event_poll_ms"] / 1000.0)
+        assert webapp.server_background_file_event_poll_seconds() == pytest.approx(defaults["server_background_file_event_poll_ms"] / 1000.0)
+        assert webapp.server_directory_event_poll_seconds() == pytest.approx(defaults["server_directory_event_poll_ms"] / 1000.0)
+        assert webapp.tabber_activity_refresh_seconds() == pytest.approx(defaults["tabber_activity_refresh_ms"] / 1000.0)
+        assert webapp.auto_approve_interval_seconds() == pytest.approx(defaults["auto_approve_interval_seconds"])
+    finally:
+        webapp.control_server.stop()
+
+
 def test_client_event_watch_sleep_uses_next_due_preference(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     try:
@@ -746,6 +763,113 @@ def test_auto_approve_roster_uses_live_pane_working_signal(monkeypatch):
     assert payload["sessions"]["6"]["screen"]["key"] == "approval"  # pending approval lights the roster
     assert payload["sessions"]["5"]["prompt"]["visible"] is False  # no live prompt fan-out in the roster
     assert payload["sessions"]["6"]["prompt"]["visible"] is True
+
+
+def test_auto_approve_payload_includes_agent_window_statuses(monkeypatch, tmp_path):
+    pane0 = PaneInfo(
+        session="5",
+        window="0",
+        window_name="claude",
+        pane="0",
+        pane_id="%10",
+        target="%10",
+        current_path="/repo/claude",
+        command="claude",
+        active=True,
+        window_active=True,
+        title="claude",
+        pid=10,
+        process_label="claude",
+        process_label_pid=10,
+    )
+    pane1 = PaneInfo(
+        session="5",
+        window="1",
+        window_name="codex",
+        pane="0",
+        pane_id="%11",
+        target="%11",
+        current_path="/repo/codex",
+        command="codex",
+        active=True,
+        window_active=False,
+        title="codex",
+        pid=11,
+        process_label="codex",
+        process_label_pid=11,
+    )
+    info = SessionInfo(
+        session="5",
+        panes=[pane0, pane1],
+        selected_pane=pane0,
+        agents=[
+            AgentInfo("5", "claude", 10, "%10", "claude", "/repo/claude", "running", "claude-id", None, None),
+            AgentInfo("5", "codex", 11, "%11", "codex", "/repo/codex", "running", "codex-id", None, None),
+        ],
+    )
+    monkeypatch.setattr(app_module, "ACTIVITY_PATH", tmp_path / "activity.json")
+    monkeypatch.setattr(app_module, "ACTIVITY_HEARTBEATS_PATH", tmp_path / "activity-heartbeats.jsonl")
+    monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["5"], None))
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
+    capture_calls = []
+
+    def fake_capture(target, *_args, **kwargs):
+        capture_calls.append((target, kwargs.get("visible_only")))
+        return "working screen" if target == "%10" else "idle screen"
+
+    monkeypatch.setattr(app_module, "tmux_capture_pane", fake_capture)
+
+    def fake_screen_state(text, **kwargs):
+        if kwargs.get("pane_target") == "%10":
+            return {"key": "working", "text": "agent is working", "status_elapsed_seconds": 158.0, "display_elapsed_seconds": 3720.0}
+        return {"key": "idle", "text": text}
+
+    monkeypatch.setattr(app_module, "agent_screen_state", fake_screen_state)
+    monkeypatch.setattr(app_module, "auto_approve_lock_owner", lambda _session: None)
+    webapp = app_module.TmuxWebtermApp(["5"])
+    webapp.activity_ledger.heartbeat("5", "1", ts=1000.0, byte_count=1)
+    webapp.activity_ledger.note_agent_active("5", "1", ts=1010.0)
+    monkeypatch.setattr(webapp, "auto_approve_capture_allowed_for_target", lambda _target: True)
+    try:
+        payload, status = webapp.auto_approve_status()
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    agent_windows = payload["sessions"]["5"]["agent_windows"]
+    assert agent_windows == [
+        {
+            "kind": "claude",
+            "state": "working",
+            "window": "0",
+            "window_index": 0,
+            "window_name": "claude",
+            "window_label": "0:claude",
+            "pane": "0",
+            "pane_target": "%10",
+            "working_elapsed_seconds": 3720.0,
+            "idle_since": None,
+            "last_active_ts": 0.0,
+            "screen_text": "agent is working",
+            "status_tokens": None,
+        },
+        {
+            "kind": "codex",
+            "state": "idle",
+            "window": "1",
+            "window_index": 1,
+            "window_name": "codex",
+            "window_label": "1:codex",
+            "pane": "0",
+            "pane_target": "%11",
+            "working_elapsed_seconds": None,
+            "idle_since": 1010.0,
+            "last_active_ts": 1010.0,
+            "screen_text": "idle screen",
+            "status_tokens": None,
+        },
+    ]
+    assert capture_calls == [("%10", True), ("%11", True)]
 
 
 def test_auto_approve_fans_out_to_server_wide_agent_panes(monkeypatch):
@@ -1001,14 +1125,13 @@ def test_activity_payload_and_summary_tick_prioritize_tmux_recent_sessions(monke
     try:
         activity = webapp.build_activity_payload()
         updated = []
-        webapp.yoagent_session_summary_due = lambda session, interval, now=None: True
 
         def fake_update_summary(session, info, settings=None, force=False):
             updated.append(session)
             return {"session": session, "updated": False, "reason": "test"}
 
         webapp.update_yoagent_session_summary = fake_update_summary
-        tick = webapp.tick_yoagent_session_summaries({"refresh_interval_seconds": 60})
+        tick = webapp.tick_yoagent_session_summaries({"backend": "codex", "invocation": "cli"})
     finally:
         webapp.control_server.stop()
 
@@ -1586,8 +1709,24 @@ def test_tabber_activity_cache_warmer_refreshes_snapshot(monkeypatch):
         webapp.control_server.stop()
 
     assert refreshes == ["refresh"]
-    assert events == ["tabber_activity"]
+    assert events == []
     assert webapp.tabber_activity_cache_warmer_running is False
+
+
+def test_activity_summary_ready_auto_triggers_do_not_regenerate(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["5"])
+    calls = []
+    try:
+        monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: calls.append((args, kwargs)) or {"generated_at": "now", "global": {"headline": "changed"}, "sessions": {}})
+        webapp.client_watch_activity_summary = {"visible": True, "locale": "en", "scope": "all", "hours": 24}
+
+        assert webapp.publish_activity_summary_ready_events(trigger="watch_state") == []
+        assert webapp.publish_activity_summary_ready_events(trigger="transcripts_changed") == []
+        assert webapp.publish_activity_summary_ready_events(trigger="tabber_activity") == []
+    finally:
+        webapp.control_server.stop()
+
+    assert calls == []
 
 
 def test_activity_summary_agents_come_from_tabber_activity_cache(monkeypatch):
@@ -2245,7 +2384,7 @@ def test_yoagent_session_summary_updates_from_transcript_delta(monkeypatch, tmp_
     webapp = app_module.TmuxWebtermApp(["5"])
     webapp.warm_metadata_cache_async = lambda sessions: None
     monkeypatch.setattr(webapp, "run_yoagent_direct_prompt_backend", fake_direct_backend)
-    settings = {"backend": "codex", "invocation": "cli", "refresh_interval_seconds": 120}
+    settings = {"backend": "codex", "invocation": "cli"}
     try:
         first = webapp.update_yoagent_session_summary("5", info, settings)
         unchanged = webapp.update_yoagent_session_summary("5", info, settings)
@@ -2269,15 +2408,51 @@ def test_yoagent_session_summary_updates_from_transcript_delta(monkeypatch, tmp_
     assert state["5"]["rolling_summary"] == "Verified the rolling summary update path."
 
 
-def test_yoagent_session_summary_refresh_interval_zero_is_disabled(monkeypatch):
+def test_yoagent_session_summary_worker_runs_once_per_server_launch(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["5"])
-    monkeypatch.setattr(webapp, "update_yoagent_session_summary", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("disabled summaries must not call the model")))
+    started_threads = []
+    ticks = []
+
+    class FakeThread:
+        def __init__(self, target, name=None, daemon=False):
+            self.target = target
+            self.name = name
+            self.daemon = daemon
+
+        def start(self):
+            started_threads.append((self.name, self.daemon))
+            self.target()
+
+    monkeypatch.setattr(session_summaries_module.threading, "Thread", FakeThread)
+    monkeypatch.setattr(webapp, "tick_yoagent_session_summaries", lambda settings=None, **kwargs: ticks.append((settings, kwargs)) or {"enabled": True})
     try:
-        result = webapp.tick_yoagent_session_summaries({"refresh_interval_seconds": 0})
+        webapp.maybe_start_yoagent_summary_worker()
+        webapp.maybe_start_yoagent_summary_worker()
     finally:
         webapp.control_server.stop()
 
-    assert result == {"enabled": False, "updated": [], "skipped": []}
+    assert started_threads == [("yoagent-summary-first-launch", True)]
+    assert ticks == [(webapp.yoagent_settings(), {"force": True})]
+    assert webapp.yoagent_summary_first_launch_started is True
+    assert webapp.yoagent_summary_worker_running is False
+
+
+def test_visible_yoagent_launch_starts_first_launch_summary_worker(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["5"])
+    starts = []
+    monkeypatch.setattr(webapp, "maybe_start_yoagent_summary_worker", lambda: starts.append("summary"))
+    monkeypatch.setattr(app_module, "resolve_yoagent_backend", lambda _requested: "deterministic")
+    try:
+        background_payload, background_status = webapp.yoagent_prewarm({"visible": False})
+        visible_payload, visible_status = webapp.yoagent_prewarm({"visible": True})
+    finally:
+        webapp.control_server.stop()
+
+    assert background_status == HTTPStatus.OK
+    assert background_payload["started"] is False
+    assert starts == ["summary"]
+    assert visible_status == HTTPStatus.OK
+    assert visible_payload["reason"] == "no CLI backend available"
 
 
 def test_cancel_yoagent_chat_marks_request_and_interrupts_active_backend(monkeypatch):
@@ -4926,6 +5101,125 @@ def test_yoagent_notify_all_idle_job_tracks_blockers_then_fires(monkeypatch):
     assert any(item[0] == "yoagent_jobs_changed" and item[1].get("notification", {}).get("body") == "all watched tmux sessions are idle" for item in events)
 
 
+def test_yoagent_notify_needs_input_and_blocked_jobs_fire_on_prompt_states(monkeypatch):
+    install_fake_yolomux_state(monkeypatch)
+    events = []
+    webapp = app_module.TmuxWebtermApp(["6"])
+    state = {"screen": "idle", "prompt_visible": False, "question": ""}
+
+    def target(_session):
+        return {
+            "session": "6",
+            "pane_target": "%6",
+            "agent_kind": "claude",
+            "transport": "pane-paste",
+            "prompt": {"visible": state["prompt_visible"], "question_text": state["question"]},
+            "screen": {"key": state["screen"], "text": state["question"], "question_text": state["question"]},
+        }, HTTPStatus.OK
+
+    monkeypatch.setattr(webapp, "yoagent_action_target", target)
+    monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {"time": f"event-{len(events)}"})
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})) or {"type": event_type})
+
+    try:
+        needs_input, needs_status = webapp.create_yoagent_job({"type": "notify_session_needs_input", "session": "6", "quiet_seconds": 0})
+        blocked, blocked_status = webapp.create_yoagent_job({"type": "notify_session_blocked", "session": "6", "quiet_seconds": 0})
+        first = webapp.poll_yoagent_jobs_once()
+        state.update({"screen": "needs-input", "question": "Which branch should I use?"})
+        needs_fired = webapp.poll_yoagent_jobs_once()
+        waiting, _waiting_status = webapp.yoagent_jobs_payload()
+        state.update({"screen": "idle", "prompt_visible": True, "question": "Do you want to proceed?"})
+        blocked_fired = webapp.poll_yoagent_jobs_once()
+        jobs, _jobs_status = webapp.yoagent_jobs_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert needs_status == HTTPStatus.OK
+    assert blocked_status == HTTPStatus.OK
+    assert first == []
+    assert needs_fired == [needs_input["job"]["id"]]
+    waiting_by_id = {job["id"]: job for job in waiting["jobs"]}
+    assert waiting_by_id[needs_input["job"]["id"]]["last_observed_state"]["question_text"] == "Which branch should I use?"
+    assert blocked_fired == [blocked["job"]["id"]]
+    by_id = {job["id"]: job for job in jobs["jobs"]}
+    assert by_id[needs_input["job"]["id"]]["status"] == "fired"
+    assert by_id[blocked["job"]["id"]]["status"] == "fired"
+    assert any(item[0] == "yoagent_jobs_changed" and item[1].get("notification", {}).get("body") == "tmux session `6` needs input" for item in events)
+    assert any(item[0] == "yoagent_jobs_changed" and item[1].get("notification", {}).get("body") == "tmux session `6` is blocked" for item in events)
+
+
+def test_yoagent_done_after_working_job_requires_working_transition(monkeypatch):
+    install_fake_yolomux_state(monkeypatch)
+    events = []
+    webapp = app_module.TmuxWebtermApp(["6"])
+    state = {"screen": "idle"}
+
+    def target(_session):
+        return {
+            "session": "6",
+            "pane_target": "%6",
+            "agent_kind": "codex",
+            "transport": "pane-paste",
+            "prompt": {},
+            "screen": {"key": state["screen"], "text": state["screen"]},
+        }, HTTPStatus.OK
+
+    monkeypatch.setattr(webapp, "yoagent_action_target", target)
+    monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {"time": f"event-{len(events)}"})
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})) or {"type": event_type})
+
+    try:
+        payload, status = webapp.create_yoagent_job({"type": "notify_session_done_after_working", "session": "6", "quiet_seconds": 0})
+        already_idle = webapp.poll_yoagent_jobs_once()
+        idle_jobs, _idle_status = webapp.yoagent_jobs_payload()
+        state["screen"] = "working"
+        working = webapp.poll_yoagent_jobs_once()
+        state["screen"] = "idle"
+        finished = webapp.poll_yoagent_jobs_once()
+        jobs, _jobs_status = webapp.yoagent_jobs_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert payload["job"]["predicate"]["type"] == "session_done_after_working"
+    assert already_idle == []
+    assert idle_jobs["jobs"][0]["last_observed_state"]["seen_working"] is False
+    assert working == []
+    assert finished == [payload["job"]["id"]]
+    assert jobs["jobs"][0]["status"] == "fired"
+    assert jobs["jobs"][0]["last_observed_state"]["seen_working"] is True
+    assert any(item[0] == "yoagent_jobs_changed" and item[1].get("notification", {}).get("body") == "tmux session `6` finished after working" for item in events)
+
+
+def test_yoagent_cancel_pending_jobs_by_session(monkeypatch):
+    state = install_fake_yolomux_state(monkeypatch)
+    events = []
+    webapp = app_module.TmuxWebtermApp(["6", "7"])
+    monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {"time": f"event-{len(events)}"})
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})) or {"type": event_type})
+
+    try:
+        idle, idle_status = webapp.create_yoagent_job({"type": "notify_session_idle", "session": "6"})
+        blocked, blocked_status = webapp.create_yoagent_job({"type": "notify_session_blocked", "session": "6"})
+        other, other_status = webapp.create_yoagent_job({"type": "notify_session_idle", "session": "7"})
+        cancelled, cancel_status = webapp.cancel_yoagent_jobs_for_session("6")
+        jobs, _jobs_status = webapp.yoagent_jobs_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert idle_status == HTTPStatus.OK
+    assert blocked_status == HTTPStatus.OK
+    assert other_status == HTTPStatus.OK
+    assert cancel_status == HTTPStatus.OK
+    assert cancelled["count"] == 2
+    by_id = {job["id"]: job for job in jobs["jobs"]}
+    assert by_id[idle["job"]["id"]]["status"] == "cancelled"
+    assert by_id[blocked["job"]["id"]]["status"] == "cancelled"
+    assert by_id[other["job"]["id"]]["status"] == "queued"
+    assert state[app_module.YOAGENT_JOBS_STATE_KEY][idle["job"]["id"]]["status"] == "cancelled"
+    assert any(item[0] == "yoagent_jobs_changed" and item[1].get("reason") == "yoagent_jobs_cancelled_for_session" and item[1].get("count") == 2 for item in events)
+
+
 def test_yoagent_jobs_reload_from_persisted_state(monkeypatch):
     install_fake_yolomux_state(monkeypatch)
     first_app = app_module.TmuxWebtermApp(["6"])
@@ -5025,6 +5319,27 @@ def test_yoagent_chat_wait_then_send_queues_job_when_target_is_working(monkeypat
     assert len(jobs["jobs"]) == 1
     assert jobs["jobs"][0]["type"] == "wait_then_send"
     assert jobs["jobs"][0]["action"]["text"] == "date"
+
+
+def test_yoagent_chat_cancels_pending_jobs_for_session(monkeypatch):
+    install_fake_yolomux_state(monkeypatch)
+    webapp = app_module.TmuxWebtermApp(["6"])
+    monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "deterministic", "invocation": "cli"})
+    monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {"time": "event"})
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: {"type": "yoagent_jobs_changed"})
+
+    try:
+        created, created_status = webapp.create_yoagent_job({"type": "notify_session_idle", "session": "6"})
+        payload, status = webapp.yoagent_chat({"message": "cancel pending jobs for session 6"})
+        jobs, _jobs_status = webapp.yoagent_jobs_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert created_status == HTTPStatus.OK
+    assert status == HTTPStatus.OK
+    assert "cancelled 1 pending yo!agent job" in payload["answer"].lower()
+    assert jobs["jobs"][0]["id"] == created["job"]["id"]
+    assert jobs["jobs"][0]["status"] == "cancelled"
 
 
 def test_yoagent_capability_question_is_grounded_and_readonly(monkeypatch):
@@ -5204,6 +5519,53 @@ def test_yoagent_chat_auto_runs_logged_in_agent(monkeypatch):
     assert payload["answer"] == "codex answer"
 
 
+def test_yoagent_chat_serializes_cli_backend_turns(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["5"])
+    monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "claude", "invocation": "cli"})
+    monkeypatch.setattr(app_module, "resolve_yoagent_backend", lambda backend: "claude")
+    entered_first = threading.Event()
+    release_first = threading.Event()
+    active_lock = threading.Lock()
+    active_count = 0
+    max_active = 0
+    started_questions: list[str] = []
+
+    def fake_backend(backend, question, activity_payload, settings, history, locale="en", **kwargs):
+        nonlocal active_count, max_active
+        with active_lock:
+            active_count += 1
+            max_active = max(max_active, active_count)
+            started_questions.append(question)
+        if question == "first":
+            entered_first.set()
+            assert release_first.wait(2)
+        with active_lock:
+            active_count -= 1
+        return f"{question} answer", "", {"session_id": f"{question}-session"}
+
+    monkeypatch.setattr(webapp, "run_yoagent_cli_backend", fake_backend)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(webapp.yoagent_chat, {"message": "first"})
+            assert entered_first.wait(1)
+            second = executor.submit(webapp.yoagent_chat, {"message": "second"})
+            time.sleep(0.05)
+            assert started_questions == ["first"]
+            release_first.set()
+            first_payload, first_status = first.result(timeout=2)
+            second_payload, second_status = second.result(timeout=2)
+    finally:
+        release_first.set()
+        webapp.control_server.stop()
+
+    assert first_status == HTTPStatus.OK
+    assert second_status == HTTPStatus.OK
+    assert first_payload["answer"] == "first answer"
+    assert second_payload["answer"] == "second answer"
+    assert started_questions == ["first", "second"]
+    assert max_active == 1
+
+
 def test_yoagent_codex_backend_reuses_persistent_app_server(monkeypatch, tmp_path):
     messages = [
         {"jsonrpc": "2.0", "id": "initialize-1", "result": {}},
@@ -5277,6 +5639,63 @@ def test_yoagent_codex_backend_reuses_persistent_app_server(monkeypatch, tmp_pat
     assert "second?" in fake_process.stdin.messages[4]["params"]["input"][0]["text"]
     assert terminated_before_shutdown is False
     assert fake_process.terminated is True
+
+
+def test_yoagent_codex_first_ask_reuses_server_start_prewarm(monkeypatch, tmp_path):
+    messages = [
+        {"jsonrpc": "2.0", "id": "initialize-1", "result": {}},
+        {"jsonrpc": "2.0", "id": "thread-1", "result": {"thread": {"id": "thread-1"}}},
+        {"jsonrpc": "2.0", "id": "turn-1", "result": {"turn": {"id": "turn-1", "items": [], "status": "inProgress"}}},
+        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"threadId": "thread-1", "turn": {"id": "turn-1", "items": [{"type": "agentMessage", "id": "item-1", "text": "warm answer"}], "status": "completed"}}},
+    ]
+    fake_process = FakeCodexAppServerProcess(messages)
+    calls = []
+
+    def fake_popen(args, **kwargs):
+        calls.append((args, kwargs))
+        return fake_process
+
+    activity = {
+        "generated_at": "2026-05-31T00:00:00+00:00",
+        "session_order": ["5"],
+        "global": {"headline": "Session 5 is editing YO!agent."},
+        "sessions": {},
+        "errors": [],
+    }
+    webapp = app_module.TmuxWebtermApp(["5"])
+    codex_home = tmp_path / "codex-home"
+    monkeypatch.setenv("YOLOMUX_CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(app_module.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
+    monkeypatch.setattr(transport_module.subprocess, "Popen", fake_popen)
+    settings = {"backend": "codex", "invocation": "cli", "codex_model": "gpt-5.4-mini", "codex_effort": "low"}
+    monkeypatch.setattr(webapp, "yoagent_settings", lambda: dict(settings))
+    monkeypatch.setattr(app_module, "resolve_yoagent_backend", lambda backend: "codex")
+    try:
+        prewarm, prewarm_status = webapp.start_yoagent_backend_prewarm(reason="server_start")
+        for _attempt in range(100):
+            with webapp.yoagent_prewarm_lock:
+                if not webapp.yoagent_prewarm_running:
+                    prewarm_state = dict(webapp.yoagent_prewarm_status)
+                    break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("prewarm did not finish")
+        answer, reason, status = webapp.run_yoagent_cli_backend("codex", "first after idle?", activity, settings, [], include_activity_context=False)
+    finally:
+        webapp.stop_auto_approve_all()
+
+    assert prewarm_status == HTTPStatus.ACCEPTED
+    assert prewarm["started"] is True
+    assert prewarm_state["warmed"] is True
+    assert prewarm_state["cli"]["process_started"] is True
+    assert answer == "warm answer"
+    assert reason == ""
+    assert status["process_reused"] is True
+    assert status["thread_started"] is False
+    assert status["session_id"] == "thread-1"
+    assert len([call for call in calls if call[0][:4] == ["codex", "app-server", "--listen", "stdio://"]]) == 1
+    methods = [message["method"] for message in fake_process.stdin.messages]
+    assert methods == ["initialize", "initialized", "thread/start", "turn/start"]
 
 
 def test_yoagent_codex_backend_falls_back_to_exec_when_app_server_fails(monkeypatch):
@@ -5361,6 +5780,162 @@ def test_yoagent_chat_persists_conversation_until_reset(monkeypatch):
     assert reset["conversation"]["messages"] == []
 
 
+def test_yoagent_prompt_history_prefers_persisted_transcript_over_frontend_history():
+    webapp = app_module.TmuxWebtermApp(["5"])
+    try:
+        webapp.record_yoagent_message("user", "persisted question")
+        webapp.record_yoagent_message("assistant", "persisted answer")
+        history = webapp.yoagent_prompt_history(
+            [
+                {"role": "user", "content": "stale frontend question"},
+                {"role": "assistant", "content": "stale frontend answer"},
+            ],
+            "next question",
+        )
+    finally:
+        webapp.control_server.stop()
+
+    assert history == [
+        {"role": "user", "content": "persisted question"},
+        {"role": "assistant", "content": "persisted answer"},
+    ]
+
+
+def test_yoagent_model_chat_appends_history_and_skips_activity_for_simple_followup(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["5"])
+    calls = []
+    answers = iter(["first answer", "second answer"])
+
+    def fake_backend(backend, question, activity_payload, settings, history, locale="en", **kwargs):
+        calls.append({
+            "backend": backend,
+            "question": question,
+            "activity_payload": activity_payload,
+            "history": history,
+            "include_activity_context": kwargs.get("include_activity_context"),
+        })
+        return next(answers), "", {"session_id": "model-session", "prompt_chars": 120}
+
+    monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "claude", "invocation": "cli"})
+    monkeypatch.setattr(app_module, "resolve_yoagent_backend", lambda backend: "claude")
+    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("simple follow-up should not build activity context")))
+    monkeypatch.setattr(webapp, "run_yoagent_cli_backend", fake_backend)
+    try:
+        first, first_status = webapp.yoagent_chat({"message": "hello"})
+        second, second_status = webapp.yoagent_chat({"message": "what model are you?", "history": [{"role": "user", "content": "stale frontend"}]})
+        conversation = webapp.yoagent_conversation_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert first_status == HTTPStatus.OK
+    assert second_status == HTTPStatus.OK
+    assert first["answer"] == "first answer"
+    assert second["answer"] == "second answer"
+    assert [message["role"] for message in conversation["messages"]] == ["user", "assistant", "user", "assistant"]
+    assert [message["content"] for message in conversation["messages"]] == ["hello", "first answer", "what model are you?", "second answer"]
+    assert calls[0]["activity_payload"] == {}
+    assert calls[0]["include_activity_context"] is False
+    assert calls[0]["history"] == []
+    assert calls[1]["activity_payload"] == {}
+    assert calls[1]["include_activity_context"] is False
+    assert calls[1]["history"] == [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "first answer"},
+    ]
+
+
+def test_yoagent_live_external_data_question_uses_backend_tools(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["5"])
+    monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "claude", "invocation": "cli"})
+    monkeypatch.setattr(app_module, "resolve_yoagent_backend", lambda backend: "claude")
+    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("weather question should not build YOLOmux activity context")))
+    calls = []
+
+    def fake_backend(backend, question, activity_payload, settings, history, locale="en", **kwargs):
+        calls.append({
+            "backend": backend,
+            "question": question,
+            "activity_payload": activity_payload,
+            "include_activity_context": kwargs.get("include_activity_context"),
+            "require_external_tools": kwargs.get("require_external_tools"),
+        })
+        return "It is 72F and clear.", "", {"transport": "claude-stream-json"}
+
+    monkeypatch.setattr(webapp, "run_yoagent_cli_backend", fake_backend)
+    try:
+        payload, status = webapp.yoagent_chat({"message": "what is the weather in Cupertino now?"})
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert payload["backend_used"] == "claude"
+    assert payload["answer"] == "It is 72F and clear."
+    assert calls == [{
+        "backend": "claude",
+        "question": "what is the weather in Cupertino now?",
+        "activity_payload": {},
+        "include_activity_context": False,
+        "require_external_tools": True,
+    }]
+    assert payload["cli"]["tool_capabilities"]["enabled"] is True
+
+
+def test_yoagent_codex_live_external_data_uses_search_exec(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["5"])
+    calls = []
+
+    def fake_codex_cli(prompt, session_id="", resume=False, settings=None, enable_search=False):
+        calls.append({
+            "session_id": session_id,
+            "resume": resume,
+            "settings": dict(settings or {}),
+            "enable_search": enable_search,
+            "prompt": prompt,
+        })
+        return "It is 72F and clear.", "", "search-thread"
+
+    monkeypatch.setattr(webapp, "run_yoagent_codex_cli", fake_codex_cli)
+    monkeypatch.setattr(webapp, "run_yoagent_codex_app_server", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("live external data must use search-capable codex exec")))
+    try:
+        answer, reason, status = webapp.run_yoagent_cli_backend(
+            "codex",
+            "what is the weather in Cupertino now?",
+            {},
+            {"codex_model": "gpt-5.4-mini", "codex_effort": "low"},
+            [],
+            stream_id="stream-weather",
+            include_activity_context=False,
+            require_external_tools=True,
+        )
+    finally:
+        webapp.control_server.stop()
+
+    assert answer == "It is 72F and clear."
+    assert reason == ""
+    assert calls and calls[0]["enable_search"] is True
+    assert calls[0]["session_id"] == ""
+    assert calls[0]["resume"] is False
+    assert status["transport"] == "codex-exec"
+    assert status["external_tools_enabled"] is True
+    assert status["web_search_enabled"] is True
+    assert status["external_tools_required"] is True
+
+
+def test_yoagent_live_external_data_question_reports_missing_tools(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["5"])
+    monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "deterministic", "invocation": "cli"})
+    monkeypatch.setattr(app_module, "resolve_yoagent_backend", lambda backend: "deterministic")
+    monkeypatch.setattr(webapp, "run_yoagent_cli_backend", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("missing tools should not call a model backend")))
+    try:
+        payload, status = webapp.yoagent_chat({"message": "what is the weather in Cupertino now?"})
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert payload["backend_used"] == "yolomux"
+    assert "no Claude/Codex chat backend is available" in payload["answer"]
+
+
 def test_yoagent_visible_prewarm_persists_startup_response(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["5"])
     webapp.warm_metadata_cache_async = lambda sessions: None
@@ -5397,6 +5972,7 @@ def test_yoagent_visible_prewarm_persists_startup_response(monkeypatch):
     assert [message["role"] for message in conversation["messages"]] == ["assistant"]
     assert conversation["messages"][0]["content"] == "Start with the YO!agent streaming fix."
     assert "model CLI time" in conversation["messages"][0]["details"]
+    assert conversation["messages"][0]["responseMs"] > 0
     assert any(event_type == "yoagent_stream_delta" for event_type, _payload in events)
     assert any(event_type == "yoagent_conversation_changed" for event_type, _payload in events)
 
@@ -5420,7 +5996,9 @@ def test_yoagent_stream_callback_separates_answer_from_auxiliary_events(monkeypa
     try:
         callback = webapp.yoagent_stream_callback("stream-1", "codex")
         callback({"kind": "hidden_work_delta", "text": "Checking repo state"})
+        callback({"kind": "hidden_work_delta", "text": " and reading files"})
         callback({"kind": "tool_call_started", "tool_name": "command", "command": "python3 tools/check.py"})
+        callback({"kind": "tool_call_delta", "tool_name": "command", "text": "line 1\nline 2"})
         callback({"kind": "assistant_delta", "text": "Visible "})
         callback({"kind": "assistant_delta", "text": "answer"})
         callback({"kind": "tool_call_finished", "tool_name": "command", "text": "passed"})
@@ -5434,13 +6012,83 @@ def test_yoagent_stream_callback_separates_answer_from_auxiliary_events(monkeypa
     assert payloads[-1]["auxiliary_done"] is True
     assert payloads[-1]["auxiliary_preview"] == "tool done: command: passed"
     assert payloads[-1]["auxiliary_lines"] == [
-        "thinking: Checking repo state",
+        "thinking: Checking repo state and reading files",
         "tool start: command: python3 tools/check.py",
+        "tool output: command: line 1\nline 2",
         "tool done: command: passed",
     ]
     assert stored_messages[-1]["auxiliaryPreview"] == "tool done: command: passed"
-    assert "thinking: Checking repo state" in stored_messages[-1]["auxiliaryText"]
+    assert "thinking: Checking repo state and reading files" in stored_messages[-1]["auxiliaryText"]
+    assert "tool output: command: line 1\nline 2" in stored_messages[-1]["auxiliaryText"]
     assert stored_messages[-1]["auxiliaryDone"] is True
+    assert stored_messages[-1]["streamItems"] == [
+        {"kind": "thinking", "text": "thinking: Checking repo state and reading files"},
+        {"kind": "tool", "text": "tool start: command: python3 tools/check.py"},
+        {"kind": "tool", "text": "tool output: command: line 1\nline 2"},
+        {"kind": "assistant", "text": "Visible answer"},
+        {"kind": "tool", "text": "tool done: command: passed"},
+    ]
+
+
+def test_yoagent_stream_callback_preserves_interleaved_order():
+    webapp = app_module.TmuxWebtermApp(["5"])
+    last_payload = {}
+    webapp.publish_client_event = lambda event_type, payload=None, **_kwargs: last_payload.update(payload or {}) if event_type == "yoagent_stream_delta" else None
+    try:
+        callback = webapp.yoagent_stream_callback("stream-order", "claude")
+        callback({"kind": "hidden_work_delta", "text": "Reading context"})
+        callback({"kind": "assistant_delta", "text": "First visible sentence. "})
+        callback({"kind": "tool_call_started", "tool_name": "command", "command": "python3 tools/check.py"})
+        callback({"kind": "tool_call_finished", "tool_name": "command", "text": "passed"})
+        callback({"kind": "hidden_work_delta", "text": "Preparing final answer"})
+        callback({"kind": "assistant_delta", "text": "Second visible sentence."})
+        fields = webapp.yoagent_stream_auxiliary_message_fields("stream-order")
+    finally:
+        webapp.control_server.stop()
+
+    assert last_payload["stream_items"] == [
+        {"kind": "thinking", "text": "thinking: Reading context"},
+        {"kind": "assistant", "text": "First visible sentence. "},
+        {"kind": "tool", "text": "tool start: command: python3 tools/check.py"},
+        {"kind": "tool", "text": "tool done: command: passed"},
+        {"kind": "thinking", "text": "thinking: Preparing final answer"},
+        {"kind": "assistant", "text": "Second visible sentence."},
+    ]
+    assert fields["stream_items"] == last_payload["stream_items"]
+
+
+def test_yoagent_stream_callback_preserves_raw_thinking_detail_text():
+    webapp = app_module.TmuxWebtermApp(["5"])
+    last_payload = {}
+    webapp.publish_client_event = lambda event_type, payload=None, **_kwargs: last_payload.update(payload or {}) if event_type == "yoagent_stream_delta" else None
+    try:
+        callback = webapp.yoagent_stream_callback("stream-raw-thinking", "claude")
+        callback({"kind": "hidden_work_delta", "text": "First line\n"})
+        callback({"kind": "hidden_work_delta", "text": "  second line"})
+        fields = webapp.yoagent_stream_auxiliary_message_fields("stream-raw-thinking")
+    finally:
+        webapp.control_server.stop()
+
+    assert last_payload["auxiliary_lines"] == ["thinking: First line second line"]
+    assert last_payload["stream_items"] == [{"kind": "thinking", "text": "thinking: First line\n  second line"}]
+    assert fields["stream_items"] == last_payload["stream_items"]
+
+
+def test_yoagent_stream_callback_replaces_claude_thinking_heartbeat():
+    webapp = app_module.TmuxWebtermApp(["5"])
+    events = []
+    webapp.publish_client_event = lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {}))
+    try:
+        callback = webapp.yoagent_stream_callback("stream-claude", "claude")
+        callback({"kind": "hidden_work_delta", "text": "thinking... (~50 tokens)"})
+        callback({"kind": "hidden_work_delta", "text": "Reading context"})
+        callback({"kind": "hidden_work_delta", "text": " and checking files"})
+    finally:
+        webapp.control_server.stop()
+
+    payloads = [payload for event_type, payload in events if event_type == "yoagent_stream_delta"]
+    assert payloads[-1]["auxiliary_preview"] == "thinking: Reading context and checking files"
+    assert payloads[-1]["auxiliary_lines"] == ["thinking: Reading context and checking files"]
 
 
 def test_yoagent_conversation_persists_auxiliary_stream_fields(tmp_path):
@@ -5454,6 +6102,11 @@ def test_yoagent_conversation_persists_auxiliary_stream_fields(tmp_path):
             "auxiliaryPreview": "tool done: command: passed",
             "auxiliaryDone": True,
             "auxiliaryTruncated": True,
+            "streamItems": [
+                {"kind": "thinking", "text": "thinking: Checking repo state"},
+                {"kind": "assistant", "text": "Visible answer"},
+                {"kind": "tool", "text": "tool done: command: passed"},
+            ],
         },
         path=path,
     )
@@ -5465,28 +6118,84 @@ def test_yoagent_conversation_persists_auxiliary_stream_fields(tmp_path):
     assert written["auxiliaryPreview"] == "tool done: command: passed"
     assert written["auxiliaryDone"] is True
     assert written["auxiliaryTruncated"] is True
+    assert written["streamItems"] == [
+        {"kind": "thinking", "text": "thinking: Checking repo state"},
+        {"kind": "assistant", "text": "Visible answer"},
+        {"kind": "tool", "text": "tool done: command: passed"},
+    ]
     assert loaded == [written]
 
 
-def test_yoagent_stream_callback_bounds_auxiliary_history():
+def test_yoagent_conversation_persists_stream_items_without_auxiliary_lines(tmp_path):
+    path = tmp_path / "conversation.jsonl"
+
+    written = app_module.yoagent_conversation.append_message(
+        {
+            "role": "assistant",
+            "content": "Visible answer",
+            "streamItems": [
+                {"kind": "assistant", "text": "Visible answer "},
+                {"kind": "thinking", "text": "thinking: raw\n  detail"},
+            ],
+        },
+        path=path,
+    )
+    loaded = app_module.yoagent_conversation.load_messages(path=path)
+
+    assert written is not None
+    assert "auxiliaryLines" not in written
+    assert written["streamItems"] == [
+        {"kind": "assistant", "text": "Visible answer "},
+        {"kind": "thinking", "text": "thinking: raw\n  detail"},
+    ]
+    assert loaded == [written]
+
+
+def test_yoagent_conversation_persists_response_ms(tmp_path):
+    path = tmp_path / "conversation.jsonl"
+
+    written = app_module.yoagent_conversation.append_message(
+        {
+            "role": "assistant",
+            "content": "Visible answer",
+            "details": "- response time: `5.300s` (`5300.0ms`)",
+            "responseMs": 5300,
+        },
+        path=path,
+    )
+    loaded = app_module.yoagent_conversation.load_messages(path=path)
+
+    assert written is not None
+    assert written["responseMs"] == 5300
+    assert loaded == [written]
+
+
+def test_yoagent_stream_callback_preserves_full_auxiliary_history():
     webapp = app_module.TmuxWebtermApp(["5"])
-    events = []
-    webapp.publish_client_event = lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {}))
+    last_payload = {}
+
+    def publish(event_type, payload=None, **_kwargs):
+        if event_type == "yoagent_stream_delta":
+            last_payload.clear()
+            last_payload.update(payload or {})
+
+    webapp.publish_client_event = publish
     try:
         callback = webapp.yoagent_stream_callback("stream-long", "codex")
-        for index in range(505):
-            callback({"kind": "tool_call_delta", "tool_name": "command", "text": f"line {index}"})
+        long_line = "x" * 1200
+        for index in range(5005):
+            callback({"kind": "tool_call_delta", "tool_name": "command", "text": f"line {index} {long_line if index == 0 else ''}".rstrip()})
         callback({"kind": "turn_done"})
         fields = webapp.yoagent_stream_auxiliary_message_fields("stream-long")
     finally:
         webapp.control_server.stop()
 
-    payloads = [payload for event_type, payload in events if event_type == "yoagent_stream_delta"]
-    assert payloads[-1]["auxiliary_truncated"] is True
-    assert len(payloads[-1]["auxiliary_lines"]) == 200
-    assert fields["auxiliary_truncated"] is True
-    assert len(fields["auxiliary_lines"]) == 500
-    assert fields["auxiliary_lines"][0] == "tool output: command: line 5"
+    assert "auxiliary_truncated" not in last_payload
+    assert len(last_payload["auxiliary_lines"]) == 5005
+    assert len(fields["auxiliary_lines"]) == 5005
+    assert fields["auxiliary_lines"][0] == f"tool output: command: line 0 {long_line}"
+    assert "[truncated]" not in "\n".join(fields["auxiliary_lines"])
+    assert fields["stream_items"][0]["text"] == f"tool output: command: line 0 {long_line}"
 
 
 def test_yoagent_cli_sessions_persist_across_restart(monkeypatch):
@@ -5562,9 +6271,60 @@ def test_yoagent_cli_backend_resumes_and_trims_context(monkeypatch):
     assert calls[1]["effort"] == "low"
     assert first_status["seeded"] is True
     assert second_status["resumed"] is True
-    assert second_status["prompt_chars"] < first_status["prompt_chars"]
-    assert "Activity summary is unchanged" in calls[1]["prompt"]
-    assert "M static/yolomux.js" not in calls[1]["prompt"]
+    assert second_status["activity_context_forced"] is True
+    assert second_status["activity_context_sent"] is True
+    assert second_status["context_changed"] is True
+    assert "Activity summary changed" in calls[1]["prompt"]
+    assert "M static/yolomux.js" in calls[1]["prompt"]
+
+
+def test_yoagent_codex_resumed_cold_session_receives_context(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["5"])
+    calls = []
+    activity = {
+        "generated_at": "2026-05-31T00:00:00+00:00",
+        "session_order": ["5"],
+        "global": {"headline": "Session 5 is editing YO!agent."},
+        "sessions": {
+            "5": {
+                "agent": "codex",
+                "agent_label": "Codex",
+                "active": True,
+                "repos": ["/repo/yolomux"],
+                "files": {"count": 1, "added": 2, "removed": 0},
+                "work": "editor fixes",
+                "file_lines": ["M static/yolomux.js (+2/-0)"],
+            }
+        },
+        "errors": [],
+    }
+    signature = app_module.yoagent_activity_payload_signature(activity)
+    webapp.yoagent_cli_sessions["codex"] = {
+        "session_id": "thread-1",
+        "activity_signature": signature,
+        "updated_ts": time.time(),
+        "updated_monotonic": time.monotonic(),
+    }
+
+    def fake_codex(prompt, session_id="", resume=False, **kwargs):
+        calls.append({"prompt": prompt, "session_id": session_id, "resume": resume, **kwargs})
+        return "answer", "", "thread-1", {"transport": "codex-app-server", "persistent": True}
+
+    monkeypatch.setattr(webapp, "run_yoagent_codex_app_server", fake_codex)
+    try:
+        answer, reason, status = webapp.run_yoagent_cli_backend("codex", "summarize this project", activity, {}, [])
+    finally:
+        webapp.control_server.stop()
+
+    assert answer == "answer"
+    assert reason == ""
+    assert calls[0]["resume"] is True
+    assert calls[0]["session_id"] == "thread-1"
+    assert "M static/yolomux.js" in calls[0]["prompt"]
+    assert status["activity_context_forced"] is True
+    assert status["activity_context_sent"] is True
+    assert status["context_changed"] is True
+    assert webapp.yoagent_cli_sessions["codex"]["context_injected_signature"] == signature
 
 
 def test_yoagent_cli_backend_does_not_hold_state_lock_during_cli(monkeypatch):

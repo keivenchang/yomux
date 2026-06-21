@@ -642,6 +642,156 @@ function gitHeadValueHtml(git) {
   return esc(shortText(subjectWithoutPullRequestNumber(gitHeadSubject(git)), 120));
 }
 
+function sessionPopoverAgentStateRank(state) {
+  return {working: 0, approval: 1, 'needs-input': 2, idle: 3}[String(state || '')] ?? 9;
+}
+
+function sessionPopoverAgentStateText(agent, nowSeconds = Date.now() / 1000) {
+  const state = String(agent?.state || 'idle');
+  if (state === 'working') {
+    const elapsed = Number(agent?.working_elapsed_seconds);
+    return Number.isFinite(elapsed) && elapsed >= 0 ? `working for ${compactElapsedDurationText(elapsed)}` : 'working';
+  }
+  if (state === 'approval') return 'ASK? approval';
+  if (state === 'needs-input') return 'ASK? needs input';
+  const lastActive = Number(agent?.idle_since || agent?.last_active_ts || 0);
+  const ageSeconds = Number.isFinite(lastActive) && lastActive > 0 ? Math.max(0, nowSeconds - lastActive) : null;
+  if (ageSeconds !== null && ageSeconds < 60) return '<1 min active';
+  const duration = ageSeconds !== null ? compactElapsedDurationText(ageSeconds) : '';
+  return duration ? `idle ${duration}` : 'idle';
+}
+
+function tmuxSessionDescriptorLabel(label) {
+  const text = String(label || '').trim();
+  if (/^tmux\s+session\b/i.test(text)) return text;
+  return t('popover.tmuxSession', {label: text});
+}
+
+function tmuxWindowDescriptorLabel(label) {
+  const text = String(label || '').trim();
+  if (/^tmux\s+window\b/i.test(text)) return text;
+  return t('popover.tmuxWindow', {label: text});
+}
+
+function sessionPopoverSortedAgentWindows(session, info, autoPayload) {
+  return sessionAgentWindowStatusPayloads(session, info, autoPayload)
+    .map((agent, index) => ({...agent, _index: index, kind: String(agent?.kind || '').toLowerCase(), state: String(agent?.state || 'idle')}))
+    .filter(agent => ['claude', 'codex'].includes(agent.kind))
+    .sort((left, right) => sessionPopoverAgentStateRank(left.state) - sessionPopoverAgentStateRank(right.state)
+      || Number(left.window_index ?? 9999) - Number(right.window_index ?? 9999)
+      || left._index - right._index);
+}
+
+function sessionPopoverAgentWindowHtml(session, info, autoPayload, agentRows = null) {
+  const agents = Array.isArray(agentRows) ? agentRows : sessionPopoverSortedAgentWindows(session, info, autoPayload);
+  if (!agents.length) {
+    return `<div class="session-agent-list empty"><div class="session-agent-empty">no AI agents in this tab</div></div>`;
+  }
+  const nowSeconds = Date.now() / 1000;
+  const rows = agents.map(agent => {
+    const working = agent.state === 'working';
+    const attention = agent.state === 'approval' || agent.state === 'needs-input';
+    const dot = working ? '●' : '○';
+    const label = tmuxWindowDescriptorLabel(agentWindowCanonicalLabel(agent.window_index ?? agent.window, agent.kind, agent.window_label || agent.kind));
+    const classes = ['session-agent-row', `state-${agent.state}`];
+    if (working) classes.push('working');
+    if (attention) classes.push('attention');
+    const dotTone = working ? 'working' : attention ? 'attention' : 'idle';
+    const dotClasses = statusIndicatorDotClasses(
+      dotTone,
+      'session-agent-dot',
+    );
+    const dotStyle = statusIndicatorToneStyle(dotTone);
+    return `<div class="${esc(classes.join(' '))}">
+      <span class="${esc(dotClasses)}" aria-hidden="true"${dotStyle}>${esc(dot)}</span>
+      <span class="session-agent-kind">${esc(label)}</span>
+      <span class="session-agent-sep">—</span>
+      <span class="session-agent-status">${esc(sessionPopoverAgentStateText(agent, nowSeconds))}</span>
+    </div>`;
+  }).join('');
+  return `<div class="session-agent-list">${rows}</div>`;
+}
+
+function sessionWindowMetadataRows(info) {
+  const payloadRows = Array.isArray(info?.window_metadata) ? info.window_metadata : [];
+  if (payloadRows.length) {
+    return payloadRows.map(row => ({
+      window: String(row?.window ?? ''),
+      window_index: Number.isFinite(Number(row?.window_index)) ? Number(row.window_index) : null,
+      window_name: String(row?.window_name || ''),
+      path: String(row?.path || ''),
+      git: row?.git && typeof row.git === 'object' ? row.git : null,
+    }));
+  }
+  const rows = [];
+  const seen = new Set();
+  for (const pane of info?.panes || []) {
+    const window = String(pane?.window ?? '');
+    if (!window || seen.has(window)) continue;
+    seen.add(window);
+    rows.push({
+      window,
+      window_index: Number.isFinite(Number(window)) ? Number(window) : null,
+      window_name: String(pane?.window_name || ''),
+      path: String(pane?.current_path || ''),
+      git: null,
+    });
+  }
+  return rows;
+}
+
+function sessionWindowMetadataForAgent(agent, windowRows) {
+  const agentIndex = tmuxWindowIndexKey(agent?.window_index ?? agent?.window);
+  return windowRows.find(row => tmuxWindowIndexKey(row.window_index ?? row.window) === agentIndex) || null;
+}
+
+function sessionWindowMetadataSignature(row) {
+  const git = row?.git || {};
+  return [row?.path || '', git.root || '', git.branch || '', git.worktree?.path || ''].join('\u0000');
+}
+
+function windowMetadataBranchHtml(git) {
+  if (!git?.branch) return '';
+  return `${branchLinkHtml(git, git.branch)}${git.upstream ? `<span class="meta-muted"> -> ${esc(git.upstream)}</span>` : ''}`;
+}
+
+function windowMetadataRowsHtml(row) {
+  if (!row) return '';
+  const git = row.git || {};
+  const rows = [];
+  if (row.path) rows.push(popoverRow(t('popover.path'), filePopoverPathHtml(row.path)));
+  if (git.branch) rows.push(popoverRow(t('popover.branch'), windowMetadataBranchHtml(git)));
+  if (git.root && git.root !== row.path) rows.push(popoverRow(t('popover.repo'), git.root));
+  if (git.worktree) rows.push(popoverRow(t('popover.worktree'), `${esc(git.worktree.name || git.worktree.path)} — worktree of ${esc(git.worktree.parent_root)}`));
+  if (git.head) rows.push(popoverRow('HEAD', gitHeadValueHtml(git)));
+  if (gitStatusHasFacts(git)) rows.push(popoverRow(t('popover.git'), gitStatusText(git)));
+  return rows.join('');
+}
+
+function sessionPopoverWindowMetadataHtml(session, info, agentRows) {
+  const agents = Array.isArray(agentRows) ? agentRows : [];
+  if (!agents.length) return '';
+  const windowRows = sessionWindowMetadataRows(info);
+  const mapped = agents.map(agent => ({agent, meta: sessionWindowMetadataForAgent(agent, windowRows)})).filter(item => item.meta);
+  if (!mapped.length) return '';
+  const signatures = new Set(mapped.map(item => sessionWindowMetadataSignature(item.meta)));
+  if (signatures.size === 1) {
+    const labels = mapped.map(item => agentWindowCanonicalLabel(item.agent.window_index ?? item.agent.window, item.agent.kind, item.agent.window_label || item.agent.kind)).join(', ');
+    return `<div class="session-window-metadata-list shared">
+      <div class="session-window-metadata-title">${esc(`AI windows ${labels} share this path`)}</div>
+      ${windowMetadataRowsHtml(mapped[0].meta)}
+    </div>`;
+  }
+  const blocks = mapped.map(({agent, meta}) => {
+    const label = tmuxWindowDescriptorLabel(agentWindowCanonicalLabel(agent.window_index ?? agent.window, agent.kind, agent.window_label || agent.kind));
+    return `<div class="session-window-metadata">
+      <div class="session-window-metadata-title">${esc(label)}</div>
+      ${windowMetadataRowsHtml(meta)}
+    </div>`;
+  }).join('');
+  return blocks ? `<div class="session-window-metadata-list">${blocks}</div>` : '';
+}
+
 function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessionState(session, info)) {
   const project = info?.project || {};
   const git = project.git;
@@ -649,7 +799,7 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const linear = project.linear || [];
   const pane = info?.selected_pane;
   const description = sessionWorkDescription(session, info, 220);
-  const title = `${sessionLabel(session)} · ${projectDirName(session, info)}`;
+  const title = `${tmuxSessionDescriptorLabel(sessionLabel(session))} · ${projectDirName(session, info)}`;
   const subtitle = description || git?.branch || pane?.current_path || t('git.noCheckout');
   const subtitleHtml = sessionPopoverSubtitleHtml(session, info, subtitle);
   const rows = [];
@@ -659,11 +809,17 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const autoText = autoEnabled ? t('yolo.on') : (autoElsewhere ? t('yolo.elsewhere') : '');
   const agentValue = agentKind ? `${agentName(agentKind)}${autoText ? ` · ${autoText}` : ''}` : (autoText || t('agent.notDetected'));
   const displayPath = panelFullPath(session, info) || pane?.current_path || t('common.notAvailable');
-  rows.push(popoverPairRow(t('popover.state'), stateValue, t('popover.agent'), agentValue));
+  const agentRows = sessionPopoverSortedAgentWindows(session, info, autoPayload);
+  const agentWindowsHtml = sessionPopoverAgentWindowHtml(session, info, autoPayload, agentRows);
+  const windowMetadataHtml = sessionPopoverWindowMetadataHtml(session, info, agentRows);
+  const perWindowMetadata = Boolean(windowMetadataHtml);
+  if (!perWindowMetadata) rows.push(popoverPairRow(t('popover.state'), stateValue, t('popover.agent'), agentValue));
   const activityText = popoverActivityText(session, git);
   if (activityText) rows.push(popoverRow(yoagentTabLabel(), esc(activityText)));
-  rows.push(popoverRow(t('popover.path'), displayPath));
-  if (git?.branch) rows.push(popoverRow(t('popover.branch'), sessionBranchValueHtml(session, info)));
+  if (!perWindowMetadata) {
+    rows.push(popoverRow(t('popover.path'), displayPath));
+    if (git?.branch) rows.push(popoverRow(t('popover.branch'), sessionBranchValueHtml(session, info)));
+  }
   let linearValue = '';
   let linearDesc = '';
   if (linear.length) {
@@ -677,11 +833,11 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   }
   const subject = currentBranchSubject(git);
   if (subject && !pr?.number) rows.push(popoverRow(t('popover.desc'), `<div class="popover-desc">${esc(subject)}</div>`));
-  if (git?.root && git.root !== displayPath) rows.push(popoverRow(t('popover.repo'), git.root));
+  if (!perWindowMetadata && git?.root && git.root !== displayPath) rows.push(popoverRow(t('popover.repo'), git.root));
   // S7: name a linked worktree vs its parent repo so the focused path isn't mistaken for the main checkout.
-  if (git?.worktree) rows.push(popoverRow(t('popover.worktree'), `${esc(git.worktree.name || git.worktree.path)} — worktree of ${esc(git.worktree.parent_root)}`));
-  if (git?.head) rows.push(popoverRow('HEAD', gitHeadValueHtml(git)));
-  if (gitStatusHasFacts(git)) rows.push(popoverRow(t('popover.git'), gitStatusText(git)));
+  if (!perWindowMetadata && git?.worktree) rows.push(popoverRow(t('popover.worktree'), `${esc(git.worktree.name || git.worktree.path)} — worktree of ${esc(git.worktree.parent_root)}`));
+  if (!perWindowMetadata && git?.head) rows.push(popoverRow('HEAD', gitHeadValueHtml(git)));
+  if (!perWindowMetadata && gitStatusHasFacts(git)) rows.push(popoverRow(t('popover.git'), gitStatusText(git)));
   return `<div class="session-popover" role="tooltip">
     <div class="popover-head">
       <div>
@@ -689,6 +845,8 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
         ${subtitleHtml}
       </div>
     </div>
+    ${agentWindowsHtml}
+    ${windowMetadataHtml}
     ${rows.join('')}
     ${otherBranchesHtml(session, info)}
   </div>`;
@@ -950,7 +1108,7 @@ function terminalCurrentPath(session) {
   const signalPath = tmuxSignalPanePathForSession(session);
   if (signalPath) return signalPath;
   const info = transcriptMeta.sessions?.[session];
-  return terminalDisplayPane(info)?.current_path || info?.selected_pane?.current_path || '';
+  return terminalDisplayPane(info, session)?.current_path || info?.selected_pane?.current_path || '';
 }
 
 function pathRelativeToDirectory(path, directory) {

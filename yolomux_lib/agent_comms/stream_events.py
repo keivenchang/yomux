@@ -10,9 +10,6 @@ from datetime import datetime
 from datetime import timezone
 from typing import Any
 
-from ..common import truncate_text
-
-
 ASSISTANT_DELTA = "assistant_delta"
 HIDDEN_WORK_DELTA = "hidden_work_delta"
 HIDDEN_WORK_DONE = "hidden_work_done"
@@ -63,7 +60,7 @@ class YoagentStreamEvent:
         payload: dict[str, Any] = {
             "kind": self.kind,
             "event": self.kind,
-            "text": truncate_text(self.text, 10_000),
+            "text": self.text,
             "timestamp": self.timestamp or datetime.now(timezone.utc).isoformat(),
         }
         for key, value in (
@@ -142,13 +139,22 @@ def normalize_yoagent_stream_event(event: dict[str, Any], *, backend: str = "") 
     if not payload.get("timestamp"):
         payload["timestamp"] = datetime.now(timezone.utc).isoformat()
     if "text" in payload:
-        payload["text"] = truncate_text(str(payload.get("text") or ""), 10_000)
+        payload["text"] = str(payload.get("text") or "")
     return payload
+
+
+def _stream_auxiliary_compact_text(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _stream_auxiliary_multiline_text(value: Any) -> str:
+    return str(value or "").replace("\\n", "\n").strip()
 
 
 def yoagent_stream_event_auxiliary_line(event: dict[str, Any]) -> str:
     kind = str(event.get("kind") or event.get("event") or "")
-    text = " ".join(str(event.get("text") or "").split())
+    text = _stream_auxiliary_compact_text(event.get("text"))
+    multiline_text = _stream_auxiliary_multiline_text(event.get("text"))
     tool_name = str(event.get("tool_name") or "").strip()
     native_type = str(event.get("native_type") or "").strip()
     command = str(event.get("command") or "").strip()
@@ -163,14 +169,14 @@ def yoagent_stream_event_auxiliary_line(event: dict[str, Any]) -> str:
     if kind == HIDDEN_WORK_DONE:
         return "thinking done"
     if kind == TOOL_CALL_STARTED:
-        detail = command or path or text
+        detail = command or path or multiline_text
         label = f"tool start: {tool_name or native_type or 'tool'}"
         return f"{label}: {detail}" if detail else label
     if kind == TOOL_CALL_DELTA:
         label = f"tool output: {tool_name or native_type or 'tool'}"
-        return f"{label}: {text}" if text else label
+        return f"{label}: {multiline_text}" if multiline_text else label
     if kind == TOOL_CALL_FINISHED:
-        detail = command or path or text
+        detail = command or path or multiline_text
         label = f"tool done: {tool_name or native_type or 'tool'}"
         return f"{label}: {detail}" if detail else label
     if kind == APPROVAL_REQUESTED:
@@ -252,13 +258,13 @@ def normalize_codex_app_server_message(message: dict[str, Any], *, backend: str 
         return []
     if method == "item/reasoning/summaryTextDelta":
         delta = str(params.get("delta") or "")
-        return [stream_event(HIDDEN_WORK_DELTA, text=delta or "reasoning summary", summary=True, **common)]
+        return [stream_event(HIDDEN_WORK_DELTA, text=delta or "reasoning summary...", summary=True, **common)]
     if method == "item/reasoning/textDelta":
         delta = str(params.get("delta") or "")
-        return [stream_event(HIDDEN_WORK_DELTA, text=delta or "reasoning", raw_thinking=True, **common)]
+        return [stream_event(HIDDEN_WORK_DELTA, text=delta or "reasoning...", raw_thinking=True, **common)]
     if method in {"item/reasoning/delta", "item/thinking/delta", "item/thought/delta"}:
         delta = str(params.get("delta") or params.get("text") or "")
-        return [stream_event(HIDDEN_WORK_DELTA, text=delta or "thinking", **common)]
+        return [stream_event(HIDDEN_WORK_DELTA, text=delta or "reasoning...", **common)]
     if method in {"item/commandExecution/outputDelta", "item/fileChange/outputDelta"}:
         delta = str(params.get("delta") or "")
         tool_name = "command" if "commandExecution" in method else "file change"
@@ -296,6 +302,7 @@ class ClaudeStreamJsonNormalizer:
     def __init__(self, *, backend: str = "claude"):
         self.backend = backend
         self.blocks: dict[int, dict[str, Any]] = {}
+        self.tool_inputs_started: set[str] = set()
         self.tool_inputs_reported: set[str] = set()
 
     def normalize_line(self, line: str) -> list[dict[str, Any]]:
@@ -309,6 +316,15 @@ class ClaudeStreamJsonNormalizer:
 
     def normalize_item(self, item: dict[str, Any]) -> list[dict[str, Any]]:
         item_type = str(item.get("type") or "")
+        if item_type == "stream_event":
+            nested = item.get("event") if isinstance(item.get("event"), dict) else {}
+            if not nested:
+                return []
+            nested_item = dict(nested)
+            for key in ("session_id", "uuid", "parent_tool_use_id"):
+                if key not in nested_item and item.get(key) is not None:
+                    nested_item[key] = item.get(key)
+            return self.normalize_item(nested_item)
         if item_type == "content_block_start":
             return self._content_block_start(item)
         if item_type == "content_block_delta":
@@ -338,6 +354,10 @@ class ClaudeStreamJsonNormalizer:
             return []
         tool_id = str(block.get("id") or "")
         name = str(block.get("name") or "tool")
+        if tool_id:
+            if tool_id in self.tool_inputs_started:
+                return []
+            self.tool_inputs_started.add(tool_id)
         text = _tool_input_summary(name, block.get("input"))
         return [stream_event(TOOL_CALL_STARTED, text=text, tool_name=name, item_id=tool_id, **self._common(item))]
 
@@ -355,7 +375,11 @@ class ClaudeStreamJsonNormalizer:
             return [stream_event(TOOL_CALL_DELTA, text=partial, tool_name=str(block.get("name") or "tool"), item_id=str(block.get("id") or ""), **self._common(item))] if partial else []
         if delta_type in {"thinking_delta", "redacted_thinking_delta"}:
             text = str(delta.get("thinking") or delta.get("text") or "")
-            return [stream_event(HIDDEN_WORK_DELTA, text=text or "thinking", raw_thinking=True, redacted=delta_type == "redacted_thinking_delta", **self._common(item))]
+            estimated_tokens = delta.get("estimated_tokens")
+            token_count = estimated_tokens if isinstance(estimated_tokens, (int, float)) else None
+            heartbeat = f"thinking... (~{int(token_count)} tokens)" if token_count is not None else "thinking..."
+            metadata = {"estimated_tokens": token_count} if token_count is not None else None
+            return [stream_event(HIDDEN_WORK_DELTA, text=text or heartbeat, raw_thinking=True, redacted=delta_type == "redacted_thinking_delta", metadata=metadata, **self._common(item))]
         return []
 
     def _content_block_stop(self, item: dict[str, Any]) -> list[dict[str, Any]]:
@@ -377,13 +401,21 @@ class ClaudeStreamJsonNormalizer:
         content = payload.get("content") if isinstance(payload.get("content"), list) else []
         events: list[dict[str, Any]] = []
         for block in content:
-            if not isinstance(block, dict) or block.get("type") != "tool_use":
+            if not isinstance(block, dict):
+                continue
+            block_type = str(block.get("type") or "")
+            if block_type in {"thinking", "redacted_thinking"}:
+                text = str(block.get("thinking") or block.get("text") or "").strip()
+                metadata = block.get("metadata") if isinstance(block.get("metadata"), dict) else None
+                events.append(stream_event(HIDDEN_WORK_DELTA, text=text or "thinking...", raw_thinking=True, redacted=block_type == "redacted_thinking", snapshot=True, metadata=metadata, **self._common(item)))
+                continue
+            if block_type != "tool_use":
                 continue
             tool_id = str(block.get("id") or "")
-            if tool_id and tool_id in self.tool_inputs_reported:
+            if tool_id and (tool_id in self.tool_inputs_started or tool_id in self.tool_inputs_reported):
                 continue
             if tool_id:
-                self.tool_inputs_reported.add(tool_id)
+                self.tool_inputs_started.add(tool_id)
             name = str(block.get("name") or "tool")
             events.append(stream_event(TOOL_CALL_STARTED, text=_tool_input_summary(name, block.get("input")), tool_name=name, item_id=tool_id, **self._common(item)))
         return events

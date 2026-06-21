@@ -41,6 +41,7 @@ function layoutMenuCommand(mode) {
 
 const aboutLinkedInUrl = 'https://www.linkedin.com/in/keiven/';
 const aboutProjectUrl = 'https://github.com/keivenchang/yolomux';
+const aboutLicenseUrl = 'https://polyformproject.org/licenses/noncommercial/1.0.0';
 
 function aboutDateTimeText() {
   if (bootstrap.versionCommitTime) return bootstrap.versionCommitTime;
@@ -137,7 +138,8 @@ function showAboutModal() {
       <div><dt>SHA</dt><dd>${esc(sha || t('common.unknown'))}</dd></div>
       <div><dt>${esc(t('menu.help.about.version'))}</dt><dd>${esc(version || t('common.unknown'))}</dd></div>
     </dl>
-    <div class="about-links"><a class="about-author" href="${esc(aboutLinkedInUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.author'))}</a><span> - </span><a class="about-author about-github" href="${esc(aboutProjectUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.github'))}</a><span> (to YOLOmux)</span></div>
+    <div class="about-links"><a class="about-author" href="${esc(aboutLinkedInUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.author'))}</a><span> - </span><a class="about-author about-github" href="${esc(aboutProjectUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.github'))}</a></div>
+    <div class="about-license"><a class="about-author about-license-link" href="${esc(aboutLicenseUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.license'))}</a></div>
   </div>`;
   modal.classList.add('open');
   scheduleSharePopupLayerPublish();

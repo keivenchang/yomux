@@ -521,10 +521,21 @@ def test_app_yoagent_model_answer_includes_timing(monkeypatch, tmp_path):
     save_settings({"yoagent": {"backend": "claude"}}, path)
     payload = settings_payload(path)
     webapp = app_module.TmuxWebtermApp([])
+    activity_force_calls = []
+    backend_calls = []
+
+    def fake_activity_payload(*_args, **kwargs):
+        activity_force_calls.append(kwargs.get("force"))
+        return {"generated_at": "now", "sessions": {}, "global": {"headline": "No work."}}
+
+    def fake_cli_backend(*args, **kwargs):
+        backend_calls.append({"args": args, "kwargs": kwargs})
+        return "model answer", "", {"session_id": "abc"}
+
     monkeypatch.setattr(app_module, "settings_payload", lambda: payload)
     monkeypatch.setattr(app_module, "resolve_yoagent_backend", lambda backend: "claude")
-    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {"generated_at": "now", "sessions": {}, "global": {"headline": "No work."}})
-    monkeypatch.setattr(webapp, "run_yoagent_cli_backend", lambda *_args, **_kwargs: ("model answer", "", {"session_id": "abc"}))
+    monkeypatch.setattr(webapp.yoagent_controller, "activity_summary_payload", fake_activity_payload)
+    monkeypatch.setattr(webapp, "run_yoagent_cli_backend", fake_cli_backend)
     try:
         response, status = webapp.yoagent_chat({"message": "summarize this project"}, access_role="admin")
     finally:
@@ -536,6 +547,8 @@ def test_app_yoagent_model_answer_includes_timing(monkeypatch, tmp_path):
     assert "ttfr_ms" in response["timing"]
     assert "response time:" in response["details"]
     assert "backend: `claude`" in response["details"]
+    assert activity_force_calls == [True]
+    assert backend_calls[0]["kwargs"]["include_activity_context"] is True
 
 
 def test_app_yoagent_hides_raw_think_blocks_and_exposes_safe_details(monkeypatch, tmp_path):
