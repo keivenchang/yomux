@@ -114,6 +114,7 @@ REASONING_SUMMARIES = {"none", "auto", "concise", "detailed"}
 REASONING_SUMMARY_ALIASES = {"summary": "concise"}
 DEFAULT_CODEX_MODEL = "gpt-5.4-mini"
 DEFAULT_CODEX_EFFORT = "medium"
+CODEX_MODELS_WITHOUT_REASONING_SUMMARY = {"gpt-5.3-codex-spark"}
 KNOWN_CONFIG_KEYS = {
     "approval_policy",
     "bypass_hook_trust",
@@ -238,6 +239,30 @@ def model_catalog_row_matches(row: dict[str, Any], model: str) -> bool:
         if value and (value == target or value.casefold() == folded):
             return True
     return False
+
+
+def normalized_model_id(model: str) -> str:
+    return model.strip().casefold()
+
+
+def codex_model_supports_reasoning_summary(model: str, extra_unsupported_models: set[str] | None = None) -> bool:
+    model_id = normalized_model_id(model)
+    if not model_id:
+        return True
+    unsupported = {normalized_model_id(item) for item in CODEX_MODELS_WITHOUT_REASONING_SUMMARY}
+    if extra_unsupported_models:
+        unsupported.update(normalized_model_id(item) for item in extra_unsupported_models)
+    return model_id not in unsupported
+
+
+def reasoning_summary_unsupported_error(value: Any) -> bool:
+    message = human_error_message(value).casefold()
+    return "unsupported parameter" in message and "reasoning.summary" in message
+
+
+def thread_not_found_error(value: Any) -> bool:
+    message = human_error_message(value).casefold()
+    return "thread not found" in message
 
 
 def default_model_catalog_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -484,6 +509,7 @@ class CodexTextClient(TextClientBase):
         self.app_server_protocol = CodexAppServerProtocol()
         self.turn_error_message = ""
         self.turn_error_printed = False
+        self.reasoning_summary_unsupported_models = {normalized_model_id(item) for item in CODEX_MODELS_WITHOUT_REASONING_SUMMARY}
 
     def next_id(self, prefix: str) -> str:
         self.request_counter += 1
@@ -751,6 +777,19 @@ class CodexTextClient(TextClientBase):
         if CODEX_CONFIG_KEYS.model in self.args.config_values:
             self.args.config_values[CODEX_CONFIG_KEYS.model] = self.args.model
 
+    def current_model_supports_reasoning_summary(self) -> bool:
+        return codex_model_supports_reasoning_summary(self.args.model, self.reasoning_summary_unsupported_models)
+
+    def register_reasoning_summary_unsupported(self, model: str) -> None:
+        model_id = normalized_model_id(model)
+        if model_id:
+            self.reasoning_summary_unsupported_models.add(model_id)
+
+    def reasoning_summary_for_current_model(self) -> str:
+        if not self.current_model_supports_reasoning_summary():
+            return ""
+        return str(self.args.reasoning_summary or "").strip()
+
     def list_models(self, include_hidden: bool | None = None) -> None:
         rows = self.model_catalog_rows(bool(self.args.include_hidden_models) if include_hidden is None else include_hidden)
         if not rows:
@@ -988,7 +1027,11 @@ class CodexTextClient(TextClientBase):
         self.args.config_values["model_reasoning_summary"] = self.args.reasoning_summary
         self.args.config_values[CODEX_CONFIG_KEYS.hidden_work_summary] = self.args.show_reasoning_summary
         self.args.config_values[CODEX_CONFIG_KEYS.hidden_work_raw] = self.args.show_raw_reasoning
-        self.update_thread_settings(summary=self.args.reasoning_summary or None)
+        runtime_settings = self.thread_settings_for_config_key("model_reasoning_summary")
+        if runtime_settings:
+            self.update_thread_settings(**runtime_settings)
+        elif self.thread_id:
+            self.print_aux_stderr(f"{self.args.model} does not support Codex {CODEX_OUTPUT_TERMS.lower_label} summaries; stored locally and omitted from app-server settings")
         print(f"{CODEX_OUTPUT_TERMS.title_label}: summary={self.args.reasoning_summary}, show_summary={'on' if self.args.show_reasoning_summary else 'off'}, raw={'on' if self.args.show_raw_reasoning else 'off'}")
 
     def handle_fast_command(self, rest: str) -> None:
@@ -1093,12 +1136,19 @@ class CodexTextClient(TextClientBase):
         self.args.thread_id = thread_id
         print(f"Session: {self.thread_id}")
 
-    def update_thread_settings(self, **settings: Any) -> None:
+    def update_thread_settings(self, **settings: Any) -> bool:
         if not self.thread_id:
-            return
+            return False
         params = {"threadId": self.thread_id}
         params.update(settings)
-        self.request("thread/settings/update", params)
+        try:
+            self.request("thread/settings/update", params)
+        except RuntimeError as exc:
+            if thread_not_found_error(str(exc)):
+                self.print_aux_stderr(f"thread {self.thread_id} is not loaded in this Codex app-server; stored settings locally and will apply on the next turn")
+                return False
+            raise
+        return True
 
     def thread_settings_for_config_key(self, key: str) -> dict[str, Any]:
         if key == CODEX_CONFIG_KEYS.model:
@@ -1106,7 +1156,8 @@ class CodexTextClient(TextClientBase):
         if key == CODEX_CONFIG_KEYS.effort:
             return {"effort": self.args.effort or None}
         if key == "model_reasoning_summary":
-            return {"summary": self.args.reasoning_summary or None}
+            summary = self.reasoning_summary_for_current_model()
+            return {"summary": summary or None} if summary else {}
         if key == "approval_policy":
             return {"approvalPolicy": self.args.approval_policy}
         if key in {"sandbox", "sandbox_mode", "web_search"}:
@@ -1247,7 +1298,6 @@ class CodexTextClient(TextClientBase):
         return params
 
     def turn_params(self, text: str) -> dict[str, Any]:
-        summary = self.args.reasoning_summary
         params: dict[str, Any] = {
             "threadId": self.thread_id,
             "approvalPolicy": self.args.approval_policy,
@@ -1255,8 +1305,10 @@ class CodexTextClient(TextClientBase):
             "cwd": str(Path(self.args.cwd).expanduser().resolve()),
             "runtimeWorkspaceRoots": [str(Path(path).expanduser().resolve()) for path in [self.args.cwd, *self.args.add_dir]],
             "sandboxPolicy": self.sandbox_policy_param(),
-            "summary": summary,
         }
+        summary = self.reasoning_summary_for_current_model()
+        if summary:
+            params["summary"] = summary
         if self.args.effort:
             params["effort"] = self.args.effort
         if self.args.model:
@@ -1284,7 +1336,16 @@ class CodexTextClient(TextClientBase):
             self.tool_output_item_ids = set()
             if self.current_metrics is not None:
                 self.current_metrics.turn_start_request_at = time.monotonic()
-            turn_response = self.request("turn/start", self.turn_params(text))
+            turn_params = self.turn_params(text)
+            try:
+                turn_response = self.request("turn/start", turn_params)
+            except RuntimeError as exc:
+                if "summary" in turn_params and reasoning_summary_unsupported_error(str(exc)):
+                    self.register_reasoning_summary_unsupported(self.args.model)
+                    self.print_aux_stderr(f"{self.args.model} does not support Codex {CODEX_OUTPUT_TERMS.lower_label} summaries; retrying without summary")
+                    turn_response = self.request("turn/start", self.turn_params(text))
+                else:
+                    raise
             if self.current_metrics is not None:
                 self.current_metrics.turn_start_response_at = time.monotonic()
                 collect_token_usage(turn_response, self.current_metrics)
@@ -1361,6 +1422,9 @@ class CodexTextClient(TextClientBase):
             return False
         if method == "error":
             error = human_error_message(params.get("error") or params.get("message") or params)
+            if error.casefold().startswith("reconnecting"):
+                self.print_aux_stderr(f"codex app-server warning: {error}")
+                return False
             self.turn_error_message = error or "codex app-server error"
             self.turn_error_printed = True
             self.finish_prefixed_output()

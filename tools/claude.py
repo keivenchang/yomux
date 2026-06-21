@@ -62,6 +62,7 @@ CLAUDE_SKIP_PERMISSIONS_FLAG = CLIENT_PERMISSION_DEFAULTS.claude_skip_permission
 EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 DEFAULT_CLAUDE_MODEL = "haiku"
 DEFAULT_CLAUDE_EFFORT = "medium"
+CLAUDE_MODEL_CHOICES = ("haiku", "sonnet", "opus", "fable", "claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-8")
 PERMISSION_MODES = {"acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"}
 KNOWN_CONFIG_KEYS = {
     CLAUDE_CONFIG_KEYS.effort,
@@ -180,9 +181,12 @@ class ClaudeTextClient(TextClientBase):
         return command_text(command)
 
     def prompt_text(self) -> str:
-        model = self.init_model or self.args.model or DEFAULT_CLAUDE_MODEL
+        model = self.effective_model()
         effort = self.args.effort or DEFAULT_CLAUDE_EFFORT
         return self.prompt_text_for(model, effort)
+
+    def effective_model(self) -> str:
+        return self.init_model or self.args.model or DEFAULT_CLAUDE_MODEL
 
     def command_for_turn(self, text: str) -> list[str]:
         claude_path = shutil.which("claude")
@@ -598,7 +602,7 @@ class ClaudeTextClient(TextClientBase):
 
     def print_status(self) -> None:
         print("Claude Code")
-        print(f"  Model:              {display_value(self.args.model)}" + (f" ({self.init_model})" if self.init_model else ""))
+        print(f"  Model:              {self.effective_model()}" + (f" (configured {self.args.model})" if self.init_model and self.args.model and self.init_model != self.args.model else ""))
         print(f"  Effort:             {display_value(self.args.effort)}")
         print(f"  Directory:          {self.display_cwd()}")
         print(f"  Permission mode:    {self.args.permission_mode}" + (f" ({self.init_permission_mode})" if self.init_permission_mode else ""))
@@ -617,7 +621,7 @@ class ClaudeTextClient(TextClientBase):
         print("Claude Context")
         print(f"  Directory:          {self.display_cwd()}")
         print(f"  Session:            {self.session_id or '<not started>'}")
-        print(f"  Model:              {display_value(self.args.model)}" + (f" ({self.init_model})" if self.init_model else ""))
+        print(f"  Model:              {self.effective_model()}" + (f" (configured {self.args.model})" if self.init_model and self.args.model and self.init_model != self.args.model else ""))
         print(f"  Effort:             {display_value(self.args.effort)}")
         print(f"  Permission mode:    {self.args.permission_mode}" + (f" ({self.init_permission_mode})" if self.init_permission_mode else ""))
         print(f"  Add dirs:           {', '.join(self.args.add_dir) if self.args.add_dir else '<none>'}")
@@ -689,12 +693,15 @@ class ClaudeTextClient(TextClientBase):
     def handle_model_command(self, rest: str) -> None:
         parts = shlex.split(rest)
         if not parts:
-            print(f"Model: {self.args.model}")
-            print("Available: haiku, sonnet, opus, fable")
+            print(f"Model: {self.effective_model()}")
+            if self.init_model and self.args.model and self.init_model != self.args.model:
+                print(f"Configured: {self.args.model}")
+            print(f"Available: {', '.join(CLAUDE_MODEL_CHOICES)}")
             print("Usage: /model <name>")
             return
         self.print_compat_note("model", "Claude", "Implemented here to match Codex-style runtime model switching.")
         self.args.model = parts[0]
+        self.init_model = ""
         print(f"model changed: {self.args.model}")
 
     def handle_effort_command(self, rest: str) -> None:
@@ -842,7 +849,7 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("prompt", nargs="*", help="Optional user prompt to start the session.")
-    parser.add_argument("-m", "--model", default=DEFAULT_CLAUDE_MODEL, metavar="MODEL", help="Model or alias, e.g. sonnet, opus, fable.")
+    parser.add_argument("-m", "--model", default=DEFAULT_CLAUDE_MODEL, metavar="MODEL", help=f"Model or alias. Available in this client: {', '.join(CLAUDE_MODEL_CHOICES)}.")
     parser.add_argument("--effort", choices=sorted(EFFORTS), default=DEFAULT_CLAUDE_EFFORT, metavar="LEVEL", help="Effort for the current session.")
     parser.add_argument("-C", "--cd", dest="cwd", default=os.getcwd(), metavar="DIR", help="Client convenience: run Claude with this working directory.")
     parser.add_argument("--add-dir", action="append", default=[], metavar="DIR", help="Additional directories to allow tool access to.")

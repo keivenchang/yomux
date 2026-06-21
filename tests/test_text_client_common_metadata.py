@@ -34,6 +34,7 @@ from text_client_common import (  # noqa: E402
 )
 import claude  # noqa: E402
 import codex  # noqa: E402
+from yolomux_lib.agent_comms.json_rpc import json_rpc_request  # noqa: E402
 from yolomux_lib.agent_comms.stream_events import ClaudeStreamJsonNormalizer  # noqa: E402
 from yolomux_lib.agent_comms.stream_events import normalize_codex_app_server_message  # noqa: E402
 from yolomux_lib.yoagent.backends import yoagent_response_details  # noqa: E402
@@ -153,6 +154,60 @@ def test_codex_resolves_prompt_defaults_from_model_catalog():
 def test_codex_human_error_message_extracts_json_detail():
     assert codex.human_error_message('{"detail":"bad model"}') == "bad model"
     assert codex.human_error_message({"message": '{"detail":"bad model"}'}) == "bad model"
+
+
+def test_codex_turn_start_json_matches_model_summary_support():
+    model_rows = [
+        {"model": "gpt-5.5", "defaultReasoningEffort": "xhigh", "hidden": False},
+        {"model": "gpt-5.4", "defaultReasoningEffort": "medium", "hidden": False},
+        {"model": "gpt-5.4-mini", "defaultReasoningEffort": "medium", "hidden": False},
+        {"model": "gpt-5.3-codex-spark", "defaultReasoningEffort": "high", "hidden": False},
+        {"model": "gpt-oss-120b", "defaultReasoningEffort": "medium", "hidden": True},
+        {"model": "gpt-oss-20b", "defaultReasoningEffort": "medium", "hidden": True},
+        {"model": "codex-auto-review", "defaultReasoningEffort": "medium", "hidden": True},
+    ]
+    for row in model_rows:
+        model = row["model"]
+        client = CodexTextClient(codex_args(model=model, effort=row["defaultReasoningEffort"], reasoning_summary="concise"))
+        client.thread_id = "thread-1"
+        payload = json_rpc_request("turn-start-1", "turn/start", client.turn_params("hello"))
+        decoded = json.loads(json.dumps(payload, sort_keys=True))
+        params = decoded["params"]
+        assert params["model"] == model
+        assert params["effort"] == row["defaultReasoningEffort"]
+        assert params["input"] == [{"type": "text", "text": "hello", "text_elements": []}]
+        if model == "gpt-5.3-codex-spark":
+            assert "summary" not in params
+            assert client.thread_settings_for_config_key("model_reasoning_summary") == {}
+        else:
+            assert params["summary"] == "concise"
+            assert client.thread_settings_for_config_key("model_reasoning_summary") == {"summary": "concise"}
+
+
+def test_codex_learns_future_summary_unsupported_models():
+    client = CodexTextClient(codex_args(model="future-codex-model", reasoning_summary="detailed"))
+    client.thread_id = "thread-1"
+    assert client.turn_params("hello")["summary"] == "detailed"
+    assert codex.reasoning_summary_unsupported_error({"message": "Unsupported parameter: 'reasoning.summary' is not supported with the 'future-codex-model' model."})
+    client.register_reasoning_summary_unsupported("future-codex-model")
+    assert "summary" not in client.turn_params("hello")
+
+
+def test_codex_reconnect_error_event_is_nonterminal(capsys):
+    client = CodexTextClient(codex_args())
+    assert client.handle_async_message({"jsonrpc": "2.0", "method": "error", "params": {"message": "Reconnecting... 1/5"}}, 999999999.0) is False
+    assert client.turn_error_message == ""
+    assert "Reconnecting... 1/5" in capsys.readouterr().err
+
+
+def test_claude_command_json_is_valid_for_all_client_models():
+    for model in claude.CLAUDE_MODEL_CHOICES:
+        client = ClaudeTextClient(claude_args(model=model, effort="medium"))
+        command = client.command_for_turn("hello")
+        decoded = json.loads(json.dumps({"argv": command}, sort_keys=True))
+        assert decoded["argv"][decoded["argv"].index("--model") + 1] == model
+        assert decoded["argv"][decoded["argv"].index("--effort") + 1] == "medium"
+        assert decoded["argv"][-2:] == ["--", "hello"]
 
 
 def test_prompt_editor_renders_paste_as_placeholder():
@@ -378,6 +433,25 @@ def test_codex_permission_aliases_share_permissions_handler(capsys):
     assert client.args.approval_policy == "on-request"
 
 
+def test_codex_model_command_does_not_exit_when_resume_thread_is_not_loaded(capsys):
+    client = CodexTextClient(codex_args(thread_id="thread-missing"))
+    client.thread_id = "thread-missing"
+
+    def missing_thread_request(method, params=None):
+        assert method == "thread/settings/update"
+        assert params == {"threadId": "thread-missing", "model": "gpt-5.3-codex-spark", "effort": "medium"}
+        raise RuntimeError("thread/settings/update failed: thread not found: thread-missing")
+
+    client.request = missing_thread_request
+    assert client.handle_repl_command("/model gpt-5.3-codex-spark medium") == "handled"
+    output = capsys.readouterr()
+    assert "stored settings locally" in output.err
+    assert "model changed: gpt-5.3-codex-spark (medium)" in output.out
+    assert client.thread_id == "thread-missing"
+    assert client.args.model == "gpt-5.3-codex-spark"
+    assert client.args.effort == "medium"
+
+
 def test_codex_reasoning_and_thinking_aliases_update_config(capsys):
     client = CodexTextClient(codex_args(show_reasoning_summary=False, show_raw_reasoning=False))
     assert client.handle_repl_command("/thinking raw") == "handled"
@@ -398,6 +472,21 @@ def test_claude_reasoning_alias_toggles_thinking(capsys):
     output = capsys.readouterr()
     assert "compatibility command" in output.err
     assert client.args.show_thinking is True
+
+
+def test_claude_model_command_reports_effective_runtime_model(capsys):
+    client = ClaudeTextClient(claude_args(model="haiku", effort="medium"))
+    client.init_model = "claude-haiku-4-5-20251001"
+    assert client.prompt_text().startswith("claude-haiku-4-5-20251001[medium] ")
+    assert client.handle_repl_command("/model") == "handled"
+    output = capsys.readouterr()
+    assert "Model: claude-haiku-4-5-20251001" in output.out
+    assert "Configured: haiku" in output.out
+    assert "claude-haiku-4-5" in output.out
+
+    assert client.handle_repl_command("/model sonnet") == "handled"
+    assert client.init_model == ""
+    assert client.prompt_text().startswith("sonnet[medium] ")
 
 
 def test_clear_resets_conversation_and_cls_is_terminal_only(capsys):
