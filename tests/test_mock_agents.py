@@ -3,6 +3,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import time
 import uuid
 
@@ -14,6 +15,12 @@ from yolomux_lib.tmux_utils import YOLOMUX_TMUX_SOCKET_ENV
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+TOOLS_DIR = REPO_ROOT / "tools"
+if str(TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLS_DIR))
+
+import mock_agent_common  # noqa: E402
+
 PROMPT_CORPUS_DIR = REPO_ROOT / "tests" / "fixtures" / "prompt_corpus"
 
 
@@ -186,6 +193,218 @@ def cleanup_mockcase(tmp_path):
         session_file.unlink()
     if socket_file.exists():
         socket_file.unlink()
+
+
+def test_mock_fixture_list_reports_cursor_status(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "MOCK_FIXTURE_CASES", [
+        {
+            "agent": "codex",
+            "case_name": "choice_question",
+            "path": PROMPT_CORPUS_DIR / "captures" / "choice_question.yaml",
+            "cursor": {"x": 2, "y": 37},
+        },
+        {
+            "agent": "claude",
+            "case_name": "synthetic_plan",
+            "path": PROMPT_CORPUS_DIR / "synthetic" / "synthetic_plan.yaml",
+            "cursor": {},
+        },
+    ])
+    monkeypatch.setattr(mock_agent_common, "AGENT_NAME", "codex")
+
+    mock_agent_common.print_mock_fixture_list()
+
+    output = capsys.readouterr().out
+    assert "codex: choice_question" in output
+    assert "cursor=2,37" in output
+    assert "claude: synthetic_plan" not in output
+
+
+def test_mocklist_alias_prints_fixture_list(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "MOCK_FIXTURE_CASES", [
+        {
+            "agent": "codex",
+            "case_name": "choice_question",
+            "path": PROMPT_CORPUS_DIR / "captures" / "choice_question.yaml",
+            "cursor": {"x": 2, "y": 37},
+        },
+    ])
+    monkeypatch.setattr(mock_agent_common, "AGENT_NAME", "codex")
+
+    mock_agent_common.handle_command("mocklist", {})
+
+    output = capsys.readouterr().out
+    assert "Mock fixture cases" in output
+    assert "choice_question" in output
+
+
+def test_mock_list_filters_to_current_agent_and_shared_cases(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "MOCK_FIXTURE_CASES", [
+        {
+            "agent": "codex",
+            "case_name": "codex_case",
+            "path": PROMPT_CORPUS_DIR / "captures" / "codex_case.yaml",
+            "cursor": {"x": 2, "y": 37},
+        },
+        {
+            "agent": "claude",
+            "case_name": "claude_case",
+            "path": PROMPT_CORPUS_DIR / "captures" / "claude_case.yaml",
+            "cursor": {"x": 3, "y": 34},
+        },
+        {
+            "agent": "unknown",
+            "case_name": "unknown_case",
+            "path": PROMPT_CORPUS_DIR / "synthetic" / "unknown_case.yaml",
+            "cursor": {},
+        },
+        {
+            "agent": "generic",
+            "case_name": "generic_case",
+            "path": PROMPT_CORPUS_DIR / "synthetic" / "generic_case.yaml",
+            "cursor": {},
+        },
+    ])
+
+    monkeypatch.setattr(mock_agent_common, "AGENT_NAME", "codex")
+    mock_agent_common.handle_command("mock list", {})
+    codex_output = capsys.readouterr().out
+    assert "codex: codex_case" in codex_output
+    assert "unknown: unknown_case" in codex_output
+    assert "generic: generic_case" in codex_output
+    assert "claude: claude_case" not in codex_output
+
+    monkeypatch.setattr(mock_agent_common, "AGENT_NAME", "claude")
+    mock_agent_common.handle_command("mock list", {})
+    claude_output = capsys.readouterr().out
+    assert "claude: claude_case" in claude_output
+    assert "unknown: unknown_case" in claude_output
+    assert "generic: generic_case" in claude_output
+    assert "codex: codex_case" not in claude_output
+
+
+def test_mock_fixture_cursor_infers_prompt_above_status_line():
+    lines = [
+        "› Implement {feature}",
+        "",
+        "  gpt-5.5 xhigh · ~/yolomux.dev8002",
+    ]
+
+    assert mock_agent_common.mock_fixture_render_cursor(lines, {}, 10, 7) == (2, 7)
+
+
+def test_mock_fixture_cursor_uses_selected_option_for_choice_prompt():
+    lines = [
+        "Question?",
+        "› 1. Yes",
+        "  2. No",
+        "",
+        "  gpt-5.5 xhigh · ~/yolomux.dev8002",
+    ]
+    group = {"idxs": [1, 2], "selected": 0, "glyph": "›"}
+
+    assert mock_agent_common.mock_fixture_render_cursor(lines, {}, 10, 5, group) == (0, 6)
+
+
+def test_fixture_choice_group_handles_claude_multiline_options():
+    lines = [
+        "Which YOLOmux verifier mode should we use?",
+        "",
+        "❯ 1. Pane capture",
+        "     Capture the verification output directly from the terminal pane.",
+        "  2. Transcript capture",
+        "     Capture the verification output from the session transcript.",
+        "  3. Type something.",
+        "────────────────────────────────────────────────────────────────",
+        "  4. Chat about this",
+        "",
+        "Enter to select · ↑/↓ to navigate · Esc to cancel",
+    ]
+
+    group = mock_agent_common.fixture_choice_group(lines)
+
+    assert group is not None
+    assert group["idxs"] == [2, 4, 6, 8]
+    assert group["bodies"] == [
+        "1. Pane capture",
+        "2. Transcript capture",
+        "3. Type something.",
+        "4. Chat about this",
+    ]
+    assert group["indents"] == ["", "", "", ""]
+    assert group["selected"] == 0
+    assert group["glyph"] == "❯"
+
+
+def test_mock_fixture_without_selector_returns_to_composer(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "MOCK_FIXTURE_CASES", [
+        {
+            "agent": "codex",
+            "case_name": "plain_question",
+            "keys": {"plain_question"},
+            "path": PROMPT_CORPUS_DIR / "captures" / "plain_question.yaml",
+            "styled_capture": "• Which YOLOmux verifier mode should we use?\n\n  1. Pane capture\n  2. Transcript capture\n",
+            "cursor": {},
+        },
+    ])
+    monkeypatch.setattr(mock_agent_common, "AGENT_NAME", "codex")
+    state = {}
+
+    mock_agent_common.cmd_mock_fixture(state, "plain_question")
+
+    assert state.get("pending", "") == ""
+    assert state.get("fixture_interactive", "") == ""
+    output = capsys.readouterr().out
+    assert "Which YOLOmux verifier mode" in output
+
+
+def test_mockcase_fixture_without_selector_stays_frozen(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "MOCK_FIXTURE_CASES", [
+        {
+            "agent": "codex",
+            "case_name": "plain_question",
+            "keys": {"plain_question"},
+            "path": PROMPT_CORPUS_DIR / "captures" / "plain_question.yaml",
+            "styled_capture": "• Which YOLOmux verifier mode should we use?\n\n  1. Pane capture\n  2. Transcript capture\n",
+            "cursor": {},
+        },
+    ])
+    monkeypatch.setattr(mock_agent_common, "AGENT_NAME", "codex")
+    state = {}
+
+    mock_agent_common.cmd_mock_fixture(state, "plain_question", freeze_static=True)
+
+    assert state.get("pending", "") == "fixture"
+    assert state.get("fixture_interactive", "") == ""
+    capsys.readouterr()
+
+
+def test_codex_startup_hook_warning_is_conditional(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "CODEX_BYPASS_HOOK_TRUST", False)
+    mock_agent_common.print_codex_startup()
+    output = capsys.readouterr().out
+    assert "--dangerously-bypass-hook-trust" not in output
+
+    monkeypatch.setattr(mock_agent_common, "CODEX_BYPASS_HOOK_TRUST", True)
+    mock_agent_common.print_codex_startup()
+    output = capsys.readouterr().out
+    assert "--dangerously-bypass-hook-trust" in output
+
+
+def test_live_composer_uses_row_above_bottom_status(monkeypatch):
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 12)
+
+    assert mock_agent_common.live_composer_rows() == (10, 12)
+
+
+def test_ctrl_c_requires_second_press_to_exit():
+    state = {}
+
+    assert mock_agent_common.ctrl_c_requests_exit(state, now=10.0) is False
+    assert mock_agent_common.ctrl_c_requests_exit(state, now=11.0) is True
+    mock_agent_common.clear_ctrl_c_exit_window(state)
+    assert mock_agent_common.ctrl_c_requests_exit(state, now=20.0) is False
+    assert mock_agent_common.ctrl_c_requests_exit(state, now=23.0) is True
 
 
 @pytest.mark.e2e

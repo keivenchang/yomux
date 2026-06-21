@@ -521,7 +521,7 @@ class CodexTextClient(TextClientBase):
             raise RuntimeError("codex CLI not found on PATH")
         command = [codex_path, "app-server", "--listen", "stdio://"]
         if self.args.dangerously_bypass_hook_trust:
-            command.extend(["-c", f"bypass_hook_trust={str(DEFAULT_BYPASS_HOOK_TRUST).lower()}"])
+            command.extend(["-c", f"bypass_hook_trust={str(self.args.dangerously_bypass_hook_trust).lower()}"])
         if self.args.effort:
             command.extend(["-c", f'{CODEX_CONFIG_KEYS.effort}="{self.args.effort}"'])
         if self.args.service_tier:
@@ -1650,7 +1650,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("-p", "--profile", default="", metavar="CONFIG_PROFILE_V2", help="Accepted for Codex CLI compatibility.")
     parser.add_argument("-s", "--sandbox", choices=sorted(SANDBOX_MODES), default=DEFAULT_SANDBOX, help=f"Select the sandbox policy to use. Default: {DEFAULT_SANDBOX}.")
     parser.add_argument(CODEX_BYPASS_APPROVALS_FLAG, action="store_true", help="Skip approval prompts and run without sandboxing.")
-    parser.add_argument(CODEX_BYPASS_HOOK_TRUST_FLAG, action="store_true", default=DEFAULT_BYPASS_HOOK_TRUST, help="Run enabled hooks without persisted hook trust. Default: on for this client.")
+    parser.add_argument(CODEX_BYPASS_HOOK_TRUST_FLAG, action="store_true", default=DEFAULT_BYPASS_HOOK_TRUST, help="Run enabled hooks without persisted hook trust.")
     parser.add_argument("-C", "--cd", dest="cwd", default=os.getcwd(), metavar="DIR", help="Tell the agent to use the specified directory as its working root.")
     parser.add_argument("--add-dir", action="append", default=[], metavar="DIR", help="Additional writable directories; accepted for Codex CLI compatibility.")
     parser.add_argument("-a", "--ask-for-approval", dest="approval_policy", choices=sorted(APPROVAL_POLICIES), default=DEFAULT_APPROVAL_POLICY, metavar="APPROVAL_POLICY", help=f"Configure when Codex requires human approval. Default: {DEFAULT_APPROVAL_POLICY}.")

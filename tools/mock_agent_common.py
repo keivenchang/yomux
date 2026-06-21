@@ -40,6 +40,7 @@ PROMPT_GLYPH = "❯"
 SELECTOR_GLYPH = "❯"
 PERMISSION_STYLE = "claude"
 STARTUP_STYLE = "default"
+CODEX_BYPASS_HOOK_TRUST = False
 PROMPT_CORPUS_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "prompt_corpus"
 MOCK_FIXTURE_CASES: list[dict[str, object]] | None = None
 
@@ -143,10 +144,11 @@ def configure(
     selector_glyph: str,
     permission_style: str,
     startup_style: str = "default",
+    codex_bypass_hook_trust: bool = False,
 ) -> None:
     global AGENT_NAME, AGENT_DISPLAY_NAME, AGENT_PRODUCT_NAME, HISTORY_FILE
     global VERSION, MODEL, EFFORT, MODEL_LINE, PROMPT_GLYPH, SELECTOR_GLYPH, PERMISSION_STYLE
-    global STARTUP_STYLE
+    global STARTUP_STYLE, CODEX_BYPASS_HOOK_TRUST
 
     AGENT_NAME = agent_name
     AGENT_DISPLAY_NAME = agent_display_name
@@ -160,6 +162,7 @@ def configure(
     SELECTOR_GLYPH = selector_glyph
     PERMISSION_STYLE = permission_style
     STARTUP_STYLE = startup_style
+    CODEX_BYPASS_HOOK_TRUST = codex_bypass_hook_trust
 
 
 def looks_like_shell_command(value: str) -> bool:
@@ -189,6 +192,17 @@ def terminal_height() -> int:
         return max(1, os.get_terminal_size(sys.stdout.fileno()).lines)
     except OSError:
         return shutil.get_terminal_size((DEFAULT_WIDTH, 40)).lines
+
+
+def ctrl_c_requests_exit(state: dict[str, str], now: float | None = None) -> bool:
+    now = time.monotonic() if now is None else now
+    previous = float(state.get("last_ctrl_c_at", "0") or 0)
+    state["last_ctrl_c_at"] = str(now)
+    return previous > 0
+
+
+def clear_ctrl_c_exit_window(state: dict[str, str]) -> None:
+    state.pop("last_ctrl_c_at", None)
 
 
 def clipped(text: str, width: int) -> str:
@@ -246,9 +260,10 @@ def print_startup() -> None:
         print_minimal_header()
     else:
         print_welcome_box()
-    print()
-    print_prompt_box(f'{PROMPT_GLYPH} Try "fix typecheck errors"', width)
-    print()
+    if not sys.stdout.isatty():
+        print()
+        print_prompt_box(f'{PROMPT_GLYPH} Try "fix typecheck errors"', width)
+        print()
 
 
 def print_minimal_header() -> None:
@@ -380,15 +395,17 @@ def print_codex_startup() -> None:
     print(box_line(" permissions: danger-full-access"))
     print("╰" + ("─" * inner) + "╯")
     print()
-    print("  ⚠ `--dangerously-bypass-hook-trust` enabled")
-    print()
+    if CODEX_BYPASS_HOOK_TRUST:
+        print("  ⚠ `--dangerously-bypass-hook-trust` enabled")
+        print()
     print("  Tip: NEW: Codex can now generate and use memories. Try it now with /memories")
     print()
-    print()
-    print(f"{PROMPT_GLYPH} Implement {{feature}}")
-    print()
-    print(f"  {MODEL} {EFFORT} · {display_cwd()}")
-    print()
+    if not sys.stdout.isatty():
+        print()
+        print(f"{PROMPT_GLYPH} Implement {{feature}}")
+        print()
+        print(f"{MODEL} {EFFORT} · {display_cwd()}")
+        print()
 
 
 def print_thinking(seconds: float = 0.5, tokens: int = 39) -> None:
@@ -615,7 +632,7 @@ def handle_pending_question_tty(state: dict[str, str]) -> None:
             elif key == "\x1b":
                 break
             elif key == "\x03":
-                raise KeyboardInterrupt
+                break
     finally:
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_settings)
     state.pop("question", None)
@@ -938,6 +955,144 @@ def read_key() -> str:
     return char + second
 
 
+def live_composer_status_line() -> str:
+    return f"{MODEL} {EFFORT} · {display_cwd()}"
+
+
+def live_composer_suggestion() -> str:
+    if PERMISSION_STYLE == "codex":
+        return "Implement {feature}"
+    return 'Try "fix typecheck errors"'
+
+
+def live_composer_rows() -> tuple[int, int]:
+    height = terminal_height()
+    if height <= 1:
+        return 1, 1
+    if height == 2:
+        return 1, 2
+    return height - 2, height
+
+
+def render_live_composer(text: str, cursor: int) -> None:
+    width = terminal_width()
+    prompt_row, status_row = live_composer_rows()
+    prefix = f"{PROMPT_GLYPH} "
+    text_width = max(1, width - len(prefix) - 1)
+    cursor = max(0, min(len(text), cursor))
+    start = max(0, cursor - text_width)
+    if cursor < start:
+        start = cursor
+    visible = text[start:start + text_width]
+    if text:
+        prompt_display = prefix + visible
+    else:
+        prompt_display = prefix + ANSI_DIM + live_composer_suggestion()[:text_width] + ANSI_RESET
+    cursor_col = min(width, len(prefix) + (cursor - start) + 1)
+    status_display = clipped(live_composer_status_line(), width)
+    sys.stdout.write(f"\x1b[{prompt_row};1H\x1b[2K{prompt_display}")
+    if status_row - prompt_row > 1:
+        sys.stdout.write(f"\x1b[{status_row - 1};1H\x1b[2K")
+    sys.stdout.write(f"\x1b[{status_row};1H\x1b[2K{status_display}")
+    sys.stdout.write(f"\x1b[{prompt_row};{cursor_col}H")
+    sys.stdout.flush()
+
+
+def clear_live_composer() -> None:
+    prompt_row, status_row = live_composer_rows()
+    sys.stdout.write(f"\x1b[{prompt_row};1H\x1b[2K")
+    if status_row - prompt_row > 1:
+        sys.stdout.write(f"\x1b[{status_row - 1};1H\x1b[2K")
+    sys.stdout.write(f"\x1b[{status_row};1H\x1b[2K")
+    sys.stdout.write(f"\x1b[{prompt_row};1H")
+    sys.stdout.flush()
+
+
+def history_item(index: int) -> str:
+    return readline.get_history_item(index) or ""
+
+
+def read_live_composer(state: dict[str, str] | None = None) -> str:
+    text = ""
+    cursor = 0
+    history_count = readline.get_current_history_length()
+    history_index = history_count + 1
+    draft = ""
+    old_settings = termios.tcgetattr(sys.stdin.fileno())
+    try:
+        tty.setraw(sys.stdin.fileno())
+        while True:
+            render_live_composer(text, cursor)
+            key = read_key()
+            if state is not None and key != "\x03":
+                clear_ctrl_c_exit_window(state)
+            if key in {"\r", "\n"}:
+                clear_live_composer()
+                if text.strip():
+                    readline.add_history(text)
+                return text
+            if key == "\x03":
+                clear_live_composer()
+                raise KeyboardInterrupt
+            if key == "\x04":
+                if text:
+                    text = text[:cursor] + text[cursor + 1:]
+                    continue
+                clear_live_composer()
+                raise EOFError
+            if key in {"\x7f", "\b"}:
+                if cursor > 0:
+                    text = text[:cursor - 1] + text[cursor:]
+                    cursor -= 1
+                continue
+            if key in {"\x1b[D", "\x1bOD", "\x02"}:
+                cursor = max(0, cursor - 1)
+                continue
+            if key in {"\x1b[C", "\x1bOC", "\x06"}:
+                cursor = min(len(text), cursor + 1)
+                continue
+            if key == "\x01":
+                cursor = 0
+                continue
+            if key == "\x05":
+                cursor = len(text)
+                continue
+            if key == "\x0b":
+                text = text[:cursor]
+                continue
+            if key == "\x15":
+                text = text[cursor:]
+                cursor = 0
+                continue
+            if key == "\x17":
+                start = cursor
+                while start > 0 and text[start - 1].isspace():
+                    start -= 1
+                while start > 0 and not text[start - 1].isspace():
+                    start -= 1
+                text = text[:start] + text[cursor:]
+                cursor = start
+                continue
+            if key in {"\x1b[A", "\x1bOA", "\x10"} and history_count:
+                if history_index == history_count + 1:
+                    draft = text
+                history_index = max(1, history_index - 1)
+                text = history_item(history_index)
+                cursor = len(text)
+                continue
+            if key in {"\x1b[B", "\x1bOB", "\x0e"} and history_count:
+                if history_index <= history_count:
+                    history_index += 1
+                text = draft if history_index == history_count + 1 else history_item(history_index)
+                cursor = len(text)
+                continue
+            if len(key) == 1 and key >= " ":
+                text = text[:cursor] + key + text[cursor:]
+                cursor += len(key)
+    finally:
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_settings)
+
+
 def handle_pending_permission_tty(state: dict[str, str]) -> None:
     selected = int(state.get("selected", "0"))
     choice_count = 3 if PERMISSION_STYLE == "codex" else 2
@@ -971,7 +1126,8 @@ def handle_pending_permission_tty(state: dict[str, str]) -> None:
                 action = "cancel"
                 break
             elif key == "\x03":
-                raise KeyboardInterrupt
+                action = "cancel"
+                break
     finally:
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_settings)
     if action:
@@ -1113,15 +1269,69 @@ def find_mock_fixture_case(name: str) -> dict[str, object] | None:
     return matches[0] if matches else None
 
 
+def mock_fixture_cursor_label(cursor: dict[str, object]) -> str:
+    if "x" in cursor and "y" in cursor:
+        return f"cursor={int(cursor.get('x') or 0)},{int(cursor.get('y') or 0)}"
+    if cursor.get("error"):
+        return f"cursor=error:{cursor.get('error')}"
+    return "cursor=missing"
+
+
+def mock_fixture_prompt_cursor(lines: list[str], group: dict[str, object] | None = None) -> tuple[int, int] | None:
+    if group:
+        idxs = group.get("idxs")
+        selected = int(group.get("selected") or 0)
+        if isinstance(idxs, list) and 0 <= selected < len(idxs):
+            row_index = int(idxs[selected])
+            line = lines[row_index] if 0 <= row_index < len(lines) else ""
+            for glyph in (str(group.get("glyph") or ""), SELECTOR_GLYPH, "❯", "›", ">"):
+                if glyph and glyph in line:
+                    return line.index(glyph), row_index
+
+    status_index = next((index for index in range(len(lines) - 1, -1, -1) if lines[index].strip()), len(lines))
+    for row_index in range(status_index - 1, -1, -1):
+        line = lines[row_index]
+        stripped = line.lstrip()
+        for glyph in (PROMPT_GLYPH, "❯", "›", ">"):
+            if stripped.startswith(glyph):
+                leading = len(line) - len(stripped)
+                after_glyph = stripped[len(glyph):]
+                x = leading + len(glyph) + (1 if after_glyph.startswith(" ") else 0)
+                return x, row_index
+    return None
+
+
+def mock_fixture_render_cursor(lines: list[str], cursor: dict[str, object], height: int, top_padding: int, group: dict[str, object] | None = None) -> tuple[int, int] | None:
+    if "x" in cursor and "y" in cursor:
+        x = int(cursor.get("x") or 0)
+        y = min(height - 1, int(cursor.get("y") or 0) + top_padding)
+        return x, y
+    inferred = mock_fixture_prompt_cursor(lines, group)
+    if inferred is None:
+        return None
+    x, row_index = inferred
+    return x, min(height - 1, row_index + top_padding)
+
+
+def mock_fixture_list_relevant(case: dict[str, object]) -> bool:
+    agent = str(case.get("agent") or "").strip().lower()
+    if not agent or agent in {"unknown", "generic"}:
+        return True
+    return agent == AGENT_NAME
+
+
 def print_mock_fixture_list() -> None:
     print("● Mock fixture cases")
     for case in load_mock_fixture_cases():
+        if not mock_fixture_list_relevant(case):
+            continue
         agent = str(case.get("agent") or "generic")
-        print(f"  ⎿  {agent}: {case['case_name']} ({Path(case['path']).name})")
+        cursor = case.get("cursor") if isinstance(case.get("cursor"), dict) else {}
+        print(f"  ⎿  {agent}: {case['case_name']} ({Path(case['path']).name}) {mock_fixture_cursor_label(cursor)}")
     print()
 
 
-def cmd_mock_fixture(state: dict[str, str], name: str) -> None:
+def cmd_mock_fixture(state: dict[str, str], name: str, freeze_static: bool = False) -> None:
     case = find_mock_fixture_case(name)
     if case is None:
         print(f"● Unknown mock fixture case: {name}")
@@ -1130,21 +1340,174 @@ def cmd_mock_fixture(state: dict[str, str], name: str) -> None:
         return
     capture = str(case.get("styled_capture") or "")
     cursor = case.get("cursor") if isinstance(case.get("cursor"), dict) else {}
+    lines = capture.splitlines()
     sys.stdout.write("\x1b[H\x1b[J")
     height = terminal_height()
-    line_count = len(capture.splitlines()) if capture else 0
+    line_count = len(lines)
     top_padding = max(0, height - line_count) if line_count and line_count < height else 0
     if top_padding:
         sys.stdout.write("\n" * top_padding)
-    sys.stdout.write(capture)
-    if "x" in cursor and "y" in cursor:
-        x = int(cursor.get("x") or 0)
-        y = min(height - 1, int(cursor.get("y") or 0) + top_padding)
+    # Render WITHOUT a trailing newline: a trailing "\n" on the bottom-most row
+    # scrolls the whole frame up one line, which would throw off the absolute row
+    # math the interactive handler uses to move the selector.
+    sys.stdout.write("\n".join(lines))
+    state["fixture_case"] = str(case.get("case_name") or name)
+    # If this capture is a live numbered-choice prompt, let the user actually drive
+    # it (arrow keys / digits / Enter / Esc) instead of just freezing the pane. We
+    # only do so when the choice block round-trips byte-for-byte under our selector
+    # rewrite, so the initial frame stays identical to the capture.
+    group = fixture_choice_group(lines) if sys.stdin.isatty() else None
+    render_cursor = mock_fixture_render_cursor(lines, cursor, height, top_padding, group)
+    if group:
+        rows = [top_padding + idx + 1 for idx in group["idxs"]]
+        indents = [str(indent) for indent in group["indents"]]
+        state["fixture_interactive"] = "1"
+        state["pending"] = "fixture"
+        state["fixture_option_rows"] = ",".join(str(r) for r in rows)
+        state["fixture_option_indents"] = "\x1f".join(indents)
+        state["fixture_option_bodies"] = "\x1f".join(group["bodies"])
+        state["fixture_selected"] = str(group["selected"])
+        state["fixture_glyph"] = str(group["glyph"])
+        state["fixture_bottom_row"] = str(top_padding + line_count)
+        if render_cursor:
+            state["fixture_park_col"] = str(render_cursor[0] + 1)
+            state["fixture_park_row"] = str(render_cursor[1] + 1)
+    elif freeze_static:
+        state["pending"] = "fixture"
+    if render_cursor:
+        x, y = render_cursor
         if x >= 0 and y >= 0:
             sys.stdout.write(f"\x1b[{y + 1};{x + 1}H")
     sys.stdout.flush()
-    state["pending"] = "fixture"
-    state["fixture_case"] = str(case.get("case_name") or name)
+
+
+def fixture_choice_group(lines: list[str]) -> dict[str, object] | None:
+    """Identify a LIVE numbered-choice prompt in a rendered fixture capture.
+
+    Claude's real AskUserQuestion layout can place descriptions, blanks, and a
+    separator between option rows. The live rows are still numbered 1..N and
+    exactly one row carries the selector glyph (❯ / › / >)."""
+    selected_re = re.compile(r"^(?P<indent>\s*)(?P<glyph>[❯›>]) (?P<body>(?P<num>\d+)\. .*)$")
+    unselected_re = re.compile(r"^(?P<indent>\s*)  (?P<body>(?P<num>\d+)\. .*)$")
+    candidates: list[dict[str, object]] = []
+    for idx, line in enumerate(lines):
+        match = selected_re.match(line)
+        selected = True
+        glyph = SELECTOR_GLYPH
+        if match:
+            glyph = match.group("glyph")
+        else:
+            match = unselected_re.match(line)
+            selected = False
+        if not match:
+            continue
+        candidates.append({
+            "idx": idx,
+            "indent": match.group("indent"),
+            "body": match.group("body"),
+            "num": int(match.group("num")),
+            "selected": selected,
+            "glyph": glyph,
+        })
+
+    group: list[dict[str, object]] = []
+    best: list[dict[str, object]] = []
+    for candidate in candidates:
+        if int(candidate["num"]) == 1:
+            group = [candidate]
+        elif group and int(candidate["num"]) == int(group[-1]["num"]) + 1:
+            group.append(candidate)
+        else:
+            group = []
+        if len(group) >= 2 and sum(1 for item in group if item["selected"]) == 1:
+            best = list(group)
+
+    if not best:
+        return None
+    selected_indexes = [index for index, item in enumerate(best) if item["selected"]]
+    if len(selected_indexes) != 1:
+        return None
+    glyphs = [str(item["glyph"]) for item in best if item["selected"]]
+    return {
+        "idxs": [int(item["idx"]) for item in best],
+        "indents": [str(item["indent"]) for item in best],
+        "bodies": [str(item["body"]) for item in best],
+        "selected": selected_indexes[0],
+        "glyph": glyphs[0] if glyphs else SELECTOR_GLYPH,
+    }
+
+
+def redraw_fixture_options(rows: list[int], indents: list[str], bodies: list[str], selected: int, glyph: str, park_row: int, park_col: int) -> None:
+    """Rewrite each option row in place so only `selected` carries the glyph, then
+    park the cursor back where a real agent leaves it."""
+    parts = []
+    for i, (row, indent, body) in enumerate(zip(rows, indents, bodies)):
+        marker = f"{indent}{glyph} " if i == selected else f"{indent}  "
+        parts.append(f"\x1b[{row};1H\x1b[2K{marker}{body}")
+    parts.append(f"\x1b[{park_row};{park_col}H")
+    sys.stdout.write("".join(parts))
+    sys.stdout.flush()
+
+
+def handle_pending_fixture_tty(state: dict[str, str]) -> None:
+    """Drive an interactive prompt-corpus fixture. Up/Down (also j/k, Ctrl-P/Ctrl-N)
+    move the selector; a digit jumps to and picks that option; Enter picks the
+    highlighted one; Esc — or the FIRST Ctrl-C — leaves the prompt WITHOUT exiting
+    the mock program. A fixture is only a captured screen, so nothing is actually
+    wired behind a choice: on resolve we say so rather than fake a follow-through."""
+    rows = [int(r) for r in state.get("fixture_option_rows", "").split(",") if r]
+    indents = state.get("fixture_option_indents", "").split("\x1f")
+    bodies = state.get("fixture_option_bodies", "").split("\x1f")
+    glyph = state.get("fixture_glyph") or SELECTOR_GLYPH
+    count = min(len(rows), len(indents), len(bodies))
+    if count == 0:
+        time.sleep(0.25)
+        return
+    selected = max(0, min(count - 1, int(state.get("fixture_selected", "0"))))
+    bottom_row = int(state.get("fixture_bottom_row", str(terminal_height())))
+    park_row = int(state.get("fixture_park_row", str(bottom_row)))
+    park_col = int(state.get("fixture_park_col", "1"))
+    old_settings = termios.tcgetattr(sys.stdin.fileno())
+    action = "cancel"
+    try:
+        tty.setraw(sys.stdin.fileno())
+        while True:
+            key = read_key()
+            if key in {"\x1b[A", "\x1bOA", "\x10", "k"}:
+                selected = max(0, selected - 1)
+                redraw_fixture_options(rows, indents, bodies, selected, glyph, park_row, park_col)
+            elif key in {"\x1b[B", "\x1bOB", "\x0e", "j"}:
+                selected = min(count - 1, selected + 1)
+                redraw_fixture_options(rows, indents, bodies, selected, glyph, park_row, park_col)
+            elif key in {"\r", "\n"}:
+                action = "select"
+                break
+            elif key.isdigit() and 1 <= int(key) <= count:
+                selected = int(key) - 1
+                redraw_fixture_options(rows, indents, bodies, selected, glyph, park_row, park_col)
+                action = "select"
+                break
+            elif key in {"\x1b", "\x03"}:
+                # Esc cancels. The FIRST Ctrl-C is treated exactly like Esc: it leaves
+                # the fixture but does NOT raise KeyboardInterrupt, so the mock program
+                # keeps running (back to its prompt) instead of dying.
+                action = "cancel"
+                break
+    finally:
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_settings)
+        state["fixture_selected"] = str(selected)
+    # Speak just beneath the frozen capture so the note scrolls in under it.
+    sys.stdout.write(f"\x1b[{bottom_row};1H")
+    sys.stdout.flush()
+    print()
+    if action == "select":
+        print(f"● You picked: {bodies[selected].strip()}")
+        print("● This is a mock fixture — I don't actually know the follow-through actions for that choice.")
+    else:
+        print("● Esc — left the prompt without picking an option.")
+        print("● This is a mock fixture — I don't actually know the follow-through actions.")
+    print()
+    clear_pending(state)
 
 
 def cmd_help() -> None:
@@ -1156,7 +1519,7 @@ def cmd_help() -> None:
     print("     Esc               Interrupt current task")
     print("     Esc Esc           Edit previous message")
     print("     Ctrl+L            Clear screen")
-    print("     Ctrl+C            Cancel input / interrupt")
+    print("     Ctrl+C            Cancel prompt; press twice at composer to exit")
     print("     Ctrl+D            Exit")
     print("     Tab               Completion (slash, @file)")
     print("     ?                 Show this help")
@@ -1173,8 +1536,9 @@ def cmd_help() -> None:
     print('     !<cmd>            Bash mode — REAL shell exec, NO permission prompt')
     print('     sleep N           Real sleep behind a permission prompt (working state)')
     print('     yesno [N]         Mock build script — N Yes/No prompts in a row (default 3)')
-    print('     mockcase <case>   Render a prompt-corpus fixture and freeze the pane')
-    print('     mockcase list     List prompt-corpus fixture cases')
+    print('     mock <case>       Render a fixture; drive options (↑/↓, 1-9, Enter, Esc/Ctrl-C)')
+    print('     mock list         List prompt-corpus fixture cases (also: mock, mocklist)')
+    print('     mockcase, case    Aliases for mock')
     print('     ask, question     AskUserQuestion demo (arrow-key choice)')
     print('     todos             Ctrl-T style task-list overlay')
     print()
@@ -1238,8 +1602,8 @@ def print_capabilities() -> None:
     print("  Built-in actions:")
     print("    sleep N            ← real time.sleep behind a permission prompt")
     print("    yesno [N]          ← N Yes/No permission prompts in a row (default 3)")
-    print("    mockcase <case>    ← render a prompt-corpus fixture and freeze")
-    print("    mockcase list      ← list available fixture cases")
+    print("    mock <case>        ← render a fixture and drive it (↑/↓, 1-9, Enter, Esc/Ctrl-C)")
+    print("    mock list          ← list available fixture cases (mockcase/case also work)")
     print("    ask                ← AskUserQuestion demo with arrow-key nav")
     print("    todos              ← Ctrl-T style task-list overlay")
     print()
@@ -1286,13 +1650,18 @@ def handle_command(user_input: str, state: dict[str, str]) -> None:
         cmd_status(state)
         return
 
-    m = re.match(r"^(?:mockcase|fixture|case)\s+(.+)$", value, re.IGNORECASE)
+    if mock_fixture_key(value) in {"mock", "mocklist", "mockcases", "fixturelist", "fixtures"}:
+        print_mock_fixture_list()
+        return
+
+    m = re.match(r"^(mock|mockcase|fixture|case)\s+(.+)$", value, re.IGNORECASE)
     if m:
-        name = m.group(1).strip()
+        alias = m.group(1).lower()
+        name = m.group(2).strip()
         if mock_fixture_key(name) in {"list", "ls"}:
             print_mock_fixture_list()
         else:
-            cmd_mock_fixture(state, name)
+            cmd_mock_fixture(state, name, freeze_static=alias != "mock")
         return
 
     # !<cmd> — bash mode, runs for real with NO permission prompt.
@@ -1381,20 +1750,26 @@ def main() -> None:
                 handle_pending_question_tty(state)
                 continue
             if state.get("pending") == "fixture":
-                time.sleep(0.25)
+                if state.get("fixture_interactive") == "1" and sys.stdin.isatty():
+                    handle_pending_fixture_tty(state)
+                else:
+                    time.sleep(0.25)
                 continue
             pending = state.get("pending") == "permission"
             prompt = "" if pending else f"{PROMPT_GLYPH} "
-            user_input = input(prompt)
-            if sys.stdin.isatty():
-                sys.stdout.write("\x1b[1A\x1b[2K\r")
-                sys.stdout.flush()
+            if sys.stdin.isatty() and not pending:
+                user_input = read_live_composer(state)
                 if not pending and user_input.strip():
                     print_user_header(user_input)
             else:
+                user_input = input(prompt)
                 print()
+            clear_ctrl_c_exit_window(state)
             handle_command(user_input, state)
         except KeyboardInterrupt:
+            if sys.stdin.isatty() and not ctrl_c_requests_exit(state):
+                print("● Press Ctrl-C again to exit.")
+                continue
             print()
             print("● Interrupted.")
             sys.exit(0)

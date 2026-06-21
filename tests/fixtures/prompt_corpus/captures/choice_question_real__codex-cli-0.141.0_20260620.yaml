@@ -9,7 +9,12 @@ client_name: Codex CLI
 client_version: codex-cli 0.141.0
 client_version_slug: codex-cli-0.141.0
 codex_version: codex-cli 0.141.0
-cursor: {}
+cursor:
+  character: ' '
+  current_command: node
+  pane_in_mode: false
+  x: 36
+  y: 10
 expected:
   action: null
   agent: codex

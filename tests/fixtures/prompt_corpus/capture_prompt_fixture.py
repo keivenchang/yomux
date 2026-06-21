@@ -103,6 +103,32 @@ def capture_tmux(target: str, include_scrollback: bool, socket: str = "") -> str
     return result.stdout
 
 
+def capture_cursor_state(target: str, socket: str = "") -> dict[str, object]:
+    result = run_tmux(socket, ["display-message", "-p", "-t", target, "#{cursor_x}\t#{cursor_y}\t#{cursor_character}\t#{pane_in_mode}\t#{pane_current_command}"])
+    if result.returncode != 0:
+        return {"error": sanitize_text(result.stderr or result.stdout or "tmux display-message failed").strip()}
+    parts = result.stdout.rstrip("\n").split("\t")
+    while len(parts) < 5:
+        parts.append("")
+    try:
+        x = int(parts[0])
+        y = int(parts[1])
+    except ValueError:
+        return {
+            "character": parts[2],
+            "pane_in_mode": parts[3] == "1",
+            "current_command": parts[4],
+            "error": "tmux cursor output was not numeric",
+        }
+    return {
+        "x": x,
+        "y": y,
+        "character": parts[2],
+        "pane_in_mode": parts[3] == "1",
+        "current_command": parts[4],
+    }
+
+
 def wait_for_text(target: str, needles: list[str], timeout: float, include_scrollback: bool, socket: str = "") -> str:
     if not needles:
         return capture_tmux(target, include_scrollback, socket)
@@ -218,6 +244,7 @@ def main() -> int:
                 if result.returncode != 0:
                     raise SystemExit(result.stderr.strip() or result.stdout.strip() or "tmux resize-window failed")
             captured = sanitize_text(capture_tmux(target, args.include_scrollback, args.socket))
+            cursor = capture_cursor_state(target, args.socket)
             metadata = {
                 "id": capture_path.stem,
                 "fixture_id": capture_path.stem,
@@ -246,7 +273,7 @@ def main() -> int:
                 "codex_version": codex_version,
                 "raw_capture": captured,
                 "styled_capture": captured,
-                "cursor": {},
+                "cursor": cursor,
                 "operations": [],
                 "failures": [],
             }

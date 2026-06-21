@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Codex style mock terminal for YOLOmux UI testing."""
 
+import sys
+
 from mock_agent_common import configure, main
 
 
@@ -17,6 +19,7 @@ configure(
     selector_glyph="›",
     permission_style="codex",
     startup_style="codex",
+    codex_bypass_hook_trust="--dangerously-bypass-hook-trust" in sys.argv[1:],
 )
 
 

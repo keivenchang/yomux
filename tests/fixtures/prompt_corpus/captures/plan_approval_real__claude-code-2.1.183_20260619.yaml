@@ -9,7 +9,12 @@ client_name: Claude Code
 client_version: 2.1.183 (Claude Code)
 client_version_slug: claude-code-2.1.183
 codex_version: ''
-cursor: {}
+cursor:
+  character: ❯
+  current_command: claude
+  pane_in_mode: false
+  x: 3
+  y: 34
 expected:
   action: option1
   agent: claude

@@ -109,12 +109,23 @@ def test_permissive_defaults_are_single_source():
     assert CLIENT_PERMISSION_DEFAULTS.claude_permission_mode == "bypassPermissions"
     assert CLIENT_PERMISSION_DEFAULTS.codex_sandbox == "danger-full-access"
     assert CLIENT_PERMISSION_DEFAULTS.codex_approval_policy == "never"
-    assert CLIENT_PERMISSION_DEFAULTS.codex_bypass_hook_trust is True
+    assert CLIENT_PERMISSION_DEFAULTS.codex_bypass_hook_trust is False
     assert CLIENT_PERMISSION_DEFAULTS.codex_text_client_approval_mode == "accept"
     assert CLIENT_PERMISSION_DEFAULTS.claude_skip_permissions_flag == "--dangerously-skip-permissions"
     assert CLIENT_PERMISSION_DEFAULTS.codex_bypass_approvals_flag == "--dangerously-bypass-approvals-and-sandbox"
     assert CLIENT_PERMISSION_DEFAULTS.codex_bypass_hook_trust_flag == "--dangerously-bypass-hook-trust"
     assert CLIENT_PERMISSION_DEFAULTS.codex_is_permissive("danger-full-access", "never")
+
+
+def test_codex_bypass_hook_trust_requires_explicit_flag(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["codex.py"])
+    assert codex.parse_args().dangerously_bypass_hook_trust is False
+
+    monkeypatch.setattr(sys, "argv", ["codex.py", "--dangerously-bypass-hook-trust"])
+    assert codex.parse_args().dangerously_bypass_hook_trust is True
+
+    monkeypatch.setattr(sys, "argv", ["codex.py", "-c", "bypass_hook_trust=true"])
+    assert codex.parse_args().dangerously_bypass_hook_trust is True
 
 
 def test_shared_config_keys_map_same_intent_names():
@@ -360,7 +371,7 @@ def codex_args(**overrides):
         "debug_json": False,
         "include_hidden_models": False,
         "timeout": APP_SERVER_TIMEOUT_SECONDS,
-        "dangerously_bypass_hook_trust": True,
+        "dangerously_bypass_hook_trust": False,
         "ephemeral": False,
         "base_instructions": "",
     }

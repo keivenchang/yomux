@@ -60,7 +60,7 @@ TEXT_CLIENT_BACKGROUND=dark python3 tools/claude.py -C .
 | Tool output | <code>tool&#124; ...</code>, `text_client.show_tool_output` | <code>tool&#124; ...</code>, `text_client.show_tool_output` | Yes | Both clients print tool events in gray through the shared base class. |
 | Model selector | `-m`, `/model`, `/config model=...` | `-m`, `/model`, `/config model=...` | Yes | Values are passed to different upstream model systems. |
 | Resume id | Codex thread id, `resume <thread-id>`, `text_client.thread_id` | Claude session id, `--resume <session-id>`, `text_client.session_id` | Same purpose | The id formats and transcript locations differ. |
-| Permissive mode | `--dangerously-bypass-approvals-and-sandbox`, `--dangerously-bypass-hook-trust`, `sandbox=danger-full-access`, `approval_policy=never`, `bypass_hook_trust=true` | `--dangerously-skip-permissions`, `permission_mode=bypassPermissions` | Same intent | Both prototypes default to this permissive mode. Codex separates approval/sandbox bypass from hook-trust bypass; Claude has one broad permission bypass. |
+| Permissive mode | `--dangerously-bypass-approvals-and-sandbox`, `sandbox=danger-full-access`, `approval_policy=never`; optional `--dangerously-bypass-hook-trust` / `bypass_hook_trust=true` | `--dangerously-skip-permissions`, `permission_mode=bypassPermissions` | Same intent | Codex keeps hook-trust bypass explicit because upstream Codex only warns when that flag/config is set; Claude has one broad permission bypass. |
 | Approval handling | `approval_policy`, `text_client.approval_mode` | `permission_mode` | Similar | codex.py can also auto-answer app-server approval requests with `text_client.approval_mode=accept`. claude.py delegates permission handling to Claude CLI. |
 | Web access | `--search`, `web_search=live` for Codex web search | `WebFetch` / web tools through Claude tool permissions | Similar | Different upstream tool names and permission controls. |
 | Diagnostics | `text_client.debug_json`, `text_client.raw_output`, `/raw` | `text_client.raw_json`, `/raw` | Similar | Both are prototype diagnostics, not the main answer stream. |
@@ -132,7 +132,7 @@ Recommended implementation order if more parity is needed: first add Ctrl-C guar
 - `-p, --profile CONFIG_PROFILE_V2`
 - `-s, --sandbox read-only|workspace-write|danger-full-access` (default: `danger-full-access`)
 - `--dangerously-bypass-approvals-and-sandbox`
-- `--dangerously-bypass-hook-trust` (default: enabled in this client through `bypass_hook_trust=true`)
+- `--dangerously-bypass-hook-trust`
 - `-C, --cd DIR`
 - `--add-dir DIR`
 - `-a, --ask-for-approval untrusted|on-failure|on-request|never` (default: `never`)
@@ -146,7 +146,7 @@ Useful Codex `-c` keys:
 - `service_tier=fast`
 - `approval_policy=untrusted|on-failure|on-request|never` (default: `never`)
 - `sandbox=read-only|workspace-write|danger-full-access` (default: `danger-full-access`)
-- `bypass_hook_trust=true|false` (default: `true`)
+- `bypass_hook_trust=true|false` (default: `false`)
 - `web_search=live`
 - `text_client.show_reasoning_summary=true|false` for codex.py reasoning (aka thinking) summaries.
 - `text_client.show_raw_reasoning=true|false` for raw codex.py reasoning (aka thinking).
