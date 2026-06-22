@@ -1211,7 +1211,7 @@ def test_share_write_mode_stays_terminal_input_only():
     assert 'str((record or {}).get("mode") or "ro") != "rw"' in upstream_start
     assert "tmux_attach_command(readonly=readonly)" in upstream_start
     assert 'message.get("type") != "input"' in upstream_write
-    assert 'record_user_input(self.session, len(filtered), source="share")' in upstream_write
+    assert 'record_user_input(self.session, len(filtered), source="share", data=filtered)' in upstream_write
     assert 'self.request_is_https() and str(current_record.get("mode") or "ro") == "rw"' in bridge_body
     assert "upstream.write_input(payload)" in bridge_body
     assert "request.server.close_inactive_share_upstreams()" in share_stop_body

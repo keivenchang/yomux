@@ -1,7 +1,7 @@
 {
   "agent.notDetected": "⟦ñóť đéťéçťéđ·····⟧",
   "branch.all": "⟦Áłł ƀřáñçĥéš·····⟧",
-  "branch.current": "⟦çúřřéñť···⟧",
+  "branch.current": "⟦áçťíṽé··⟧",
   "branch.more": "⟦+ {count} ɱóřé···⟧",
   "branch.none": "⟦ñóñé ƒóúñđ íñ ťĥíš çĥéçķóúť···········⟧",
   "brand.marker": "⟦ÝÓ·⟧",
@@ -427,6 +427,7 @@
   "popover.kind.text": "⟦ƒíłé éđíťóř····⟧",
   "popover.path": "⟦ƥáťĥ··⟧",
   "popover.repo": "⟦řéƥó··⟧",
+  "popover.sessionId": "⟦Šéššíóñ ÍĐ····⟧",
   "popover.size": "⟦šížé··⟧",
   "popover.state": "⟦šťáťé··⟧",
   "popover.status": "⟦šťáťúš··⟧",

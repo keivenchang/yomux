@@ -755,7 +755,7 @@ class ShareTerminalUpstream:
             if master_fd is None:
                 return False
             os.write(master_fd, filtered.encode("utf-8"))
-        self.server.app.record_user_input(self.session, len(filtered), source="share")
+        self.server.app.record_user_input(self.session, len(filtered), source="share", data=filtered)
         return True
 
     def update_dimensions(self, rows: int, cols: int, *, refresh: bool = True) -> None:
@@ -2233,7 +2233,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 if filtered:
                     os.write(master_fd, filtered.encode("utf-8"))
                     # DOIT.58 Phase 1: one user-input heartbeat (readonly already returned above).
-                    self.server.app.record_user_input(session, len(filtered))
+                    self.server.app.record_user_input(session, len(filtered), data=filtered)
         elif msg_type == "resize":
             if readonly:
                 return

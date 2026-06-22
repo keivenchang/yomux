@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -20,8 +21,22 @@ from .common import truncate_text
 from .yolo_rules import hard_floor_decision
 
 
+TERMINAL_ACTIVITY_REPORT_RE = re.compile(
+    r"(?:\x1b\[[0-9;]*R|\x1b\[(?:I|O)|\x1b\[[0-9;]*t|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\))"
+)
+
+
 def strip_terminal_query_responses(data: str) -> str:
     return TERMINAL_QUERY_RESPONSE_RE.sub("", data)
+
+
+def terminal_input_counts_as_user_activity(data: str) -> bool:
+    if not data:
+        return False
+    remaining = strip_terminal_query_responses(data)
+    remaining = TERMINAL_ACTIVITY_REPORT_RE.sub("", remaining)
+    return bool(remaining)
+
 
 def compact_transcript_lines(text: str, messages: int) -> list[str]:
     return [format_transcript_item(item) for item in compact_transcript_items(text, messages)]

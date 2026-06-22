@@ -138,6 +138,36 @@ def test_yoagent_stream_callback_replaces_claude_thinking_heartbeat():
     assert payloads[-1]["auxiliary_lines"] == ["thinking: Reading context and checking files"]
 
 
+def test_yoagent_stream_callback_replaces_plain_claude_thinking_heartbeat_at_done(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["5"])
+    events = []
+    stored_messages = []
+    webapp.publish_client_event = lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {}))
+    monkeypatch.setattr(app_module.yoagent_conversation, "append_message", lambda message: stored_messages.append(message) or message)
+    try:
+        callback = webapp.yoagent_stream_callback("stream-plain-heartbeat", "claude")
+        callback({"kind": "thinking"})
+        callback({"kind": "hidden_work_delta", "text": "Reading context across files"})
+        callback({"kind": "hidden_work_delta", "text": " and preparing answer"})
+        callback({"kind": "assistant_delta", "text": "Final answer"})
+        callback({"kind": "turn_done"})
+        fields = webapp.yoagent_stream_auxiliary_message_fields("stream-plain-heartbeat")
+        webapp.record_yoagent_message("assistant", "Final answer", **fields)
+    finally:
+        webapp.control_server.stop()
+
+    payloads = [payload for event_type, payload in events if event_type == "yoagent_stream_delta"]
+    assert payloads[-1]["auxiliary_done"] is True
+    assert payloads[-1]["auxiliary_lines"] == ["thinking: Reading context across files and preparing answer"]
+    assert payloads[-1]["stream_items"] == [
+        {"kind": "thinking", "text": "thinking: Reading context across files and preparing answer"},
+        {"kind": "assistant", "text": "Final answer"},
+    ]
+    assert stored_messages[-1]["auxiliaryText"] == "thinking: Reading context across files and preparing answer"
+    assert stored_messages[-1]["streamItems"][0]["text"] == "thinking: Reading context across files and preparing answer"
+    assert "thinking: thinking" not in stored_messages[-1]["auxiliaryText"]
+
+
 def test_yoagent_conversation_persists_auxiliary_stream_fields(tmp_path):
     path = tmp_path / "conversation.jsonl"
 

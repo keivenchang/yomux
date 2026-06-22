@@ -1,7 +1,7 @@
 {
   "agent.notDetected": "未偵測到",
   "branch.all": "所有分支",
-  "branch.current": "目前",
+  "branch.current": "作用中",
   "branch.more": "+ 還有 {count} 個",
   "branch.none": "此檢出中找不到分支",
   "brand.marker": "優",
@@ -427,6 +427,7 @@
   "popover.kind.text": "檔案編輯器",
   "popover.path": "路徑",
   "popover.repo": "儲存庫",
+  "popover.sessionId": "工作階段 ID",
   "popover.size": "大小",
   "popover.state": "狀態",
   "popover.status": "狀態",

@@ -131,15 +131,16 @@
 }
 .status-indicator--cooldown {
   color: var(--accent-gold);
-  --attention-ring-rgb: 245 197 66;
+}
+.status-indicator--active {
+  color: var(--file-tree-recency-max-contrast, var(--text));
 }
 .heartbeat-pulse {
   transform-origin: center;
   animation-duration: var(--pulse-duration);
   animation-timing-function: var(--pulse-easing);
 }
-.status-indicator--dot.status-indicator--working.heartbeat-pulse,
-.status-indicator--dot.status-indicator--cooldown.heartbeat-pulse {
+.status-indicator--dot.status-indicator--working.heartbeat-pulse {
   animation-name: attention-ring-fade;
   animation-duration: var(--pulse-duration);
   animation-delay: var(--attention-animation-delay, 0s);

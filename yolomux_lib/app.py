@@ -117,6 +117,7 @@ from .transcripts import transcript_activity_is_recent
 from .transcripts import transcript_delta_result_state
 from .transcripts import transcript_run_metadata
 from .transcripts import session_transcript_activity_state
+from .transcripts import terminal_input_counts_as_user_activity
 from .transcripts import trim_prompt_text
 from .prompt_detector import agent_screen_state
 from .prompt_detector import approval_prompt_state
@@ -4024,10 +4025,12 @@ class TmuxWebtermApp:
             return None
         return active_window_for_panes(panes)
 
-    def record_user_input(self, session: str, byte_count: int, source: str = "host") -> None:
+    def record_user_input(self, session: str, byte_count: int, source: str = "host", data: str = "") -> None:
         """One user-input heartbeat from the WS bridge. Read-only viewers are dropped upstream;
         write-share input passes source="share" so the heartbeat log can distinguish it."""
         if not session:
+            return
+        if data and not terminal_input_counts_as_user_activity(data):
             return
         self.activity_ledger.heartbeat(session, self.active_window_for(session), byte_count=byte_count, source=source)
 

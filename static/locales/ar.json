@@ -1,7 +1,7 @@
 {
   "agent.notDetected": "not detected",
   "branch.all": "جميع الفروع",
-  "branch.current": "الحالي",
+  "branch.current": "نشط",
   "branch.more": "+ {count} أكثر",
   "branch.none": "لم يُعثر على أي فرع في هذا الاستنساخ",
   "brand.marker": "YO",
@@ -427,6 +427,7 @@
   "popover.kind.text": "محرر الملفات",
   "popover.path": "المسار",
   "popover.repo": "المستودع",
+  "popover.sessionId": "معرّف الجلسة",
   "popover.size": "الحجم",
   "popover.state": "الحالة",
   "popover.status": "الحالة",

@@ -1435,6 +1435,17 @@ function sessionFilesSortSelectHtml(extraClass = '') {
       </select>`;
 }
 
+function fileExplorerTreeSortSelectHtml(extraClass = '') {
+  const classes = ['file-explorer-sort-select', extraClass].filter(Boolean).join(' ');
+  const mode = ['az', 'za', 'newest', 'oldest'].includes(fileExplorerTreeSortMode) ? fileExplorerTreeSortMode : 'az';
+  return `<select class="${esc(classes)}" data-file-explorer-tree-sort title="${esc(t('finder.toolbar.sort'))}" aria-label="${esc(t('finder.toolbar.sort'))}">
+              <option value="az"${mode === 'az' ? ' selected' : ''}>${esc(t('finder.sort.az'))}</option>
+              <option value="za"${mode === 'za' ? ' selected' : ''}>${esc(t('finder.sort.za'))}</option>
+              <option value="newest"${mode === 'newest' ? ' selected' : ''}>${esc(t('finder.sort.newest'))}</option>
+              <option value="oldest"${mode === 'oldest' ? ' selected' : ''}>${esc(t('finder.sort.oldest'))}</option>
+            </select>`;
+}
+
 function sessionFilesSessionSelectHtml(target, options = {}) {
   const classes = options.className ? ` class="${esc(options.className)}"` : '';
   const selectOptions = sessions.map(session => {
@@ -1467,6 +1478,7 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
     return `
       <div class="changes-toolbar tabber-toolbar">
         ${tabberLookbackControlHtml()}
+        ${fileExplorerTreeSortSelectHtml('changes-sort-select-compact')}
         ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
         ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
       </div>
@@ -2376,12 +2388,7 @@ function createFileExplorerPanel() {
             <button type="button" class="file-explorer-header-action file-explorer-folder-action file-explorer-mode-files-only" data-file-explorer-new-folder title="${esc(t('finder.toolbar.newFolder'))}" aria-label="${esc(t('finder.toolbar.newFolder'))}"><span class="file-explorer-folder-icon" aria-hidden="true"></span></button>
             <span class="file-explorer-toolbar-spacer"></span>
             <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel file-explorer-mode-files-only" title="${esc(t('finder.toolbar.hidden'))}" aria-pressed="${fileExplorerShowHidden ? 'true' : 'false'}">.*</button>
-            <select class="file-explorer-sort-select file-explorer-mode-files-only" data-file-explorer-tree-sort title="${esc(t('finder.toolbar.sort'))}" aria-label="${esc(t('finder.toolbar.sort'))}">
-              <option value="az"${fileExplorerTreeSortMode === 'az' ? ' selected' : ''}>${esc(t('finder.sort.az'))}</option>
-              <option value="za"${fileExplorerTreeSortMode === 'za' ? ' selected' : ''}>${esc(t('finder.sort.za'))}</option>
-              <option value="newest"${fileExplorerTreeSortMode === 'newest' ? ' selected' : ''}>${esc(t('finder.sort.newest'))}</option>
-              <option value="oldest"${fileExplorerTreeSortMode === 'oldest' ? ' selected' : ''}>${esc(t('finder.sort.oldest'))}</option>
-            </select>
+            ${fileExplorerTreeSortSelectHtml('file-explorer-mode-files-only')}
             <span class="file-explorer-date-reload-cluster file-explorer-mode-files-only">
               ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
               ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}

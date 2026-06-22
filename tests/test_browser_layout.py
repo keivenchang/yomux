@@ -901,7 +901,7 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
                       <span class="file-tree-date">2m ago</span>
                     </div>
                     <div class="file-tree-row tabber-row kind-file" data-tabber-type="window" data-tabber-session="1" role="treeitem" aria-selected="false" style="padding-left: 27px;">
-                      <span class="file-tree-icon tabber-icon">⌁</span>
+                      <span class="file-tree-icon tabber-icon"></span>
                       <span class="file-tree-name"><span class="tabber-window-label"><span class="tabber-window-text">0:bash</span></span></span>
                       <span class="file-tree-agent" hidden></span>
                       <span class="file-tree-diff" hidden></span>
@@ -919,7 +919,7 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
                       <span class="file-tree-date">15m ago</span>
                     </div>
                     <div class="file-tree-row tabber-row kind-file" data-tabber-type="window" data-tabber-session="2" role="treeitem" aria-selected="false" style="padding-left: 27px;">
-                      <span class="file-tree-icon tabber-icon">⌁</span>
+                      <span class="file-tree-icon tabber-icon"></span>
                       <span class="file-tree-name"><span class="tabber-window-label"><span class="tabber-window-text">0:bash</span></span></span>
                       <span class="file-tree-agent" hidden></span>
                       <span class="file-tree-diff" hidden></span>
@@ -1016,7 +1016,7 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
         )
         assert metrics["sessionCount"] >= 2, (label, metrics)
         assert metrics["windowCount"] >= 2, (label, metrics)
-        assert metrics["windowIcons"] == ["⌁", "⌁"], (label, metrics)
+        assert metrics["windowIcons"] == ["", ""], (label, metrics)
         assert metrics["nonSessionWithSessionTab"] == 0, (label, metrics)
         assert "tabber-active-session" in metrics["active"]["rowClass"], (label, metrics)
         assert "active" in metrics["active"]["tabClass"], (label, metrics)
@@ -1035,6 +1035,7 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
         assert metrics["active"]["dateDisplay"] != "none", (label, metrics)
         assert metrics["active"]["dateWidth"] > 0, (label, metrics)
         assert metrics["active"]["dateText"], (label, metrics)
+        assert abs(metrics["active"]["tab"]["width"] - metrics["inactive"]["tab"]["width"]) <= 1, (label, metrics)
         assert metrics["active"]["icon"]["right"] <= metrics["active"]["tab"]["left"] + 1, (label, metrics)
         assert metrics["active"]["tab"]["right"] <= metrics["active"]["date"]["left"] + 1, (label, metrics)
         assert metrics["active"]["name"]["left"] >= metrics["active"]["tab"]["left"] - 1, (label, metrics)

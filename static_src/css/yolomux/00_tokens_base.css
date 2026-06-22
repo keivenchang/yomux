@@ -365,7 +365,8 @@
   --file-selection-bg: rgb(var(--active-accent-rgb) / 0.46);
   --file-selection-border: var(--active-accent-bright);
   --file-selection-text: #f7fff0;
-  --file-tree-recency-hot: var(--bad);
+  --file-tree-recency-max-contrast: var(--text);
+  --file-tree-recency-hot: var(--file-tree-recency-max-contrast);
   --file-tree-recency-fresh: #dcffa6;
   --file-tree-recency-recent: #bfe87e;
   --file-tree-recency-warm: #aab8c4;
@@ -639,7 +640,8 @@ body.theme-light {
   --file-selection-bg: rgb(var(--active-accent-rgb) / 0.34);
   --file-selection-border: var(--active-accent-bright);
   --file-selection-text: #10230b;
-  --file-tree-recency-hot: var(--bad);
+  --file-tree-recency-max-contrast: var(--text);
+  --file-tree-recency-hot: var(--file-tree-recency-max-contrast);
   --file-tree-recency-fresh: #356f12;
   --file-tree-recency-recent: #4d7f21;
   --file-tree-recency-warm: #566271;

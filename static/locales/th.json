@@ -1,7 +1,7 @@
 {
   "agent.notDetected": "ตรวจไม่พบ",
   "branch.all": "ทุก branch",
-  "branch.current": "ปัจจุบัน",
+  "branch.current": "ใช้งานอยู่",
   "branch.more": "+ อีก {count}",
   "branch.none": "ไม่พบใน checkout นี้",
   "brand.marker": "YO",
@@ -427,6 +427,7 @@
   "popover.kind.text": "file editor",
   "popover.path": "path",
   "popover.repo": "repo",
+  "popover.sessionId": "ID เซสชัน",
   "popover.size": "size",
   "popover.state": "state",
   "popover.status": "status",

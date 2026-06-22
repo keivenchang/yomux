@@ -1670,6 +1670,48 @@ def test_activity_payload_returns_indefinite_stale_cache_and_refreshes(monkeypat
         webapp.control_server.stop()
 
 
+def test_activity_recency_ignores_terminal_report_heartbeats(monkeypatch):
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+    webapp = app_module.TmuxWebtermApp(["6"])
+    try:
+        webapp.active_window_for = lambda session: "1"
+        webapp.activity_ledger.heartbeat("6", "1", ts=1000.0, byte_count=1)
+        monkeypatch.setattr(webapp.activity_ledger, "_clock", lambda: 1065.0)
+
+        webapp.record_user_input("6", len("\x1b[12;40R"), data="\x1b[12;40R")
+        activity = webapp.activity_snapshot_with_recency()
+
+        assert 1065.0 - activity["6"]["active_recency_ts"] >= 60.0
+        assert 1065.0 - activity["6:1"]["active_recency_ts"] >= 60.0
+        assert activity["6"]["last_user_input_ts"] == 1000.0
+        assert activity["6:1"]["last_user_input_ts"] == 1000.0
+        assert activity["6"]["input_events"] == 1
+        assert activity["6:1"]["input_events"] == 1
+    finally:
+        webapp.control_server.stop()
+
+
+def test_activity_recency_records_genuine_just_active_input(monkeypatch):
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+    webapp = app_module.TmuxWebtermApp(["6"])
+    try:
+        webapp.active_window_for = lambda session: "1"
+        webapp.activity_ledger.heartbeat("6", "1", ts=1000.0, byte_count=1)
+        monkeypatch.setattr(webapp.activity_ledger, "_clock", lambda: 1012.0)
+
+        webapp.record_user_input("6", 1, data="x")
+        activity = webapp.activity_snapshot_with_recency()
+
+        assert 1012.0 - activity["6"]["active_recency_ts"] < 15.0
+        assert 1012.0 - activity["6:1"]["active_recency_ts"] < 15.0
+        assert activity["6"]["last_user_input_ts"] == 1012.0
+        assert activity["6:1"]["last_user_input_ts"] == 1012.0
+        assert activity["6"]["input_events"] == 2
+        assert activity["6:1"]["input_events"] == 2
+    finally:
+        webapp.control_server.stop()
+
+
 def test_tabber_activity_refresh_seconds_uses_performance_setting(monkeypatch):
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
     monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"performance": {"tabber_activity_refresh_ms": 2500}}})

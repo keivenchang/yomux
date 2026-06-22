@@ -1,7 +1,7 @@
 {
   "agent.notDetected": "algılanmadı",
   "branch.all": "Tüm dallar",
-  "branch.current": "geçerli",
+  "branch.current": "aktif",
   "branch.more": "+ {count} daha",
   "branch.none": "bu checkout içinde bulunamadı",
   "brand.marker": "YO",
@@ -427,6 +427,7 @@
   "popover.kind.text": "file editor",
   "popover.path": "path",
   "popover.repo": "repo",
+  "popover.sessionId": "Oturum ID'si",
   "popover.size": "size",
   "popover.state": "state",
   "popover.status": "status",

@@ -1785,15 +1785,16 @@ function statusIndicatorClasses(...classes) {
 function statusIndicatorToneClasses(tone) {
   if (tone === 'positive') return ['status-indicator--positive'];
   if (tone === 'working') return ['status-indicator--working', 'heartbeat-pulse'];
-  if (tone === 'cooldown') return ['status-indicator--cooldown', 'heartbeat-pulse'];
+  if (tone === 'cooldown') return ['status-indicator--cooldown'];
   if (tone === 'attention') return ['status-indicator--attention', 'heartbeat-pulse', 'attention-pulse'];
+  if (tone === 'active') return ['status-indicator--active'];
   if (tone === 'settled') return ['status-indicator--settled'];
   if (tone === 'idle') return ['status-indicator--idle'];
   return [];
 }
 
 function statusIndicatorToneStyle(tone) {
-  return ['working', 'cooldown', 'attention'].includes(String(tone || '')) ? ` style="${attentionAnimationStyle()}"` : '';
+  return ['working', 'attention'].includes(String(tone || '')) ? ` style="${attentionAnimationStyle()}"` : '';
 }
 
 function statusIndicatorModifiedClasses(modifier, tone, classes, options = {}) {

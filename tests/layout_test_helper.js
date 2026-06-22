@@ -1595,6 +1595,8 @@ globalThis.__layoutTestApi = {
   tabberSessionForNumericKey,
   openTabberSessionForTest: openTabberSession,
   bindTabberPanelForTest: bindTabberPanel,
+  fileExplorerChangesPanelStaticHtmlForTest: fileExplorerChangesPanelStaticHtml,
+  fileExplorerTreeSortSelectHtmlForTest: fileExplorerTreeSortSelectHtml,
   fileExplorerModeSwitcherHtml,
   normalizeFileExplorerMode,
   setTabberActivityForTest(payload) { tabberActivityPayload = payload; },

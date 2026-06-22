@@ -248,6 +248,27 @@ class YoagentStreamPublisher:
         def compact_auxiliary_text(value: str) -> str:
             return " ".join(str(value or "").split())
 
+        def hidden_work_text_is_heartbeat(prefix: str, value: str) -> bool:
+            compact = compact_auxiliary_text(value).lower()
+            if not compact:
+                return False
+            safe_prefix = compact_auxiliary_text(prefix).lower() or "thinking"
+            roots = {safe_prefix, "thinking", "reasoning"}
+            if safe_prefix.endswith("summary"):
+                roots.update({"thinking summary", "reasoning summary"})
+            for root in roots:
+                if compact == root or compact == f"{root}..." or compact.startswith(f"{root}... "):
+                    return True
+            return False
+
+        def hidden_work_auxiliary_line(prefix: str, text: str) -> str:
+            compact = compact_auxiliary_text(text)
+            if not compact:
+                return prefix
+            if compact.lower() == (compact_auxiliary_text(prefix).lower() or "thinking"):
+                return prefix
+            return f"{prefix}: {compact}"
+
         def append_stream_item(kind: str, text: str, *, merge: bool = True) -> None:
             safe_kind = str(kind or "").strip().lower()
             value = redacted_action_text(str(text or ""), None)
@@ -278,6 +299,8 @@ class YoagentStreamPublisher:
             raw_text = str(state.get("hidden_work_text") or event.get("text") or "")
             compact_text = compact_auxiliary_text(raw_text)
             if raw_text:
+                if hidden_work_text_is_heartbeat(prefix, raw_text) and compact_text.lower() == prefix.lower():
+                    return prefix
                 return f"{prefix}: {raw_text}"
             if compact_text:
                 return f"{prefix}: {compact_text}"
@@ -298,20 +321,20 @@ class YoagentStreamPublisher:
                 previous_prefix = str(state.get("hidden_work_prefix") or "")
                 if lines and previous_prefix == prefix:
                     previous_text = str(state.get("hidden_work_text") or "")
-                    if compact_text.startswith("thinking..."):
+                    if hidden_work_text_is_heartbeat(prefix, compact_text):
                         next_text = compact_text
                     elif event.get("snapshot"):
                         next_text = raw_text
-                    elif compact_auxiliary_text(previous_text).startswith("thinking..."):
+                    elif hidden_work_text_is_heartbeat(prefix, previous_text):
                         next_text = raw_text
                     else:
                         next_text = previous_text + raw_text
                     state["hidden_work_text"] = next_text
-                    lines[-1] = f"{prefix}: {compact_auxiliary_text(next_text)}" if compact_auxiliary_text(next_text) else prefix
+                    lines[-1] = hidden_work_auxiliary_line(prefix, next_text)
                 else:
                     state["hidden_work_prefix"] = prefix
-                    state["hidden_work_text"] = raw_text if not compact_text.startswith("thinking...") else compact_text
-                    lines.append(f"{prefix}: {compact_text}" if compact_text else prefix)
+                    state["hidden_work_text"] = compact_text if hidden_work_text_is_heartbeat(prefix, compact_text) else raw_text
+                    lines.append(hidden_work_auxiliary_line(prefix, compact_text))
             elif event_type in {TOOL_CALL_STARTED, TOOL_CALL_DELTA, TOOL_CALL_FINISHED}:
                 state["hidden_work_prefix"] = ""
                 state["hidden_work_text"] = ""

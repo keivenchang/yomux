@@ -1,7 +1,7 @@
 {
   "agent.notDetected": "not detected",
   "branch.all": "すべてのブランチ",
-  "branch.current": "現在",
+  "branch.current": "アクティブ",
   "branch.more": "+ さらに {count} 件",
   "branch.none": "このチェックアウトに見つかりませんでした",
   "brand.marker": "YO",
@@ -427,6 +427,7 @@
   "popover.kind.text": "ファイルエディター",
   "popover.path": "パス",
   "popover.repo": "リポジトリ",
+  "popover.sessionId": "セッションID",
   "popover.size": "サイズ",
   "popover.state": "状態",
   "popover.status": "状態",

@@ -1496,6 +1496,10 @@
   color: color-mix(in srgb, var(--muted) 72%, var(--text));
   background: color-mix(in srgb, var(--panel2) 78%, var(--bg));
 }
+.yoagent-message-details[open] pre.yoagent-auxiliary-stream {
+  max-height: none;
+  overflow: visible;
+}
 .yoagent-toolcall-details summary > span:first-child {
   color: var(--accent-gold);
 }

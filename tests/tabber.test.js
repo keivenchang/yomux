@@ -1191,6 +1191,8 @@ async function runTabberSuite() {
     assert.ok(source.includes('function normalizeGitStatus(status)') && source.includes('return normalizeGitStatus(fileTreeChangedFile(path)?.status)'), 'DOIT.61 B6: git status normalization is shared');
     assert.equal(source.includes("endsWith(' ●')"), false, 'DOIT.61 B7: active window state is not parsed out of the label string');
     assert.ok(source.includes("tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true, activityIconHtml: data.activityIconHtml, pid: data.pid})"), 'DOIT.61 B7/PD: active window state, activity icons, and pid are passed as data');
+    assert.ok(/function sessionPopoverWindowPidByIndex\(info\)[\s\S]*tmuxWindowRecords\(info\?\.panes \|\| \[\]\)/.test(source), 'PP1: popover PID comes from the same tmux window record source as Tabber');
+    assert.ok(source.includes('tmuxWindowDisplayLabel(descriptor, agent.pid)'), 'PP1: popover PID label reuses the shared tmux window pid formatter');
     assert.ok(/type === 'window' && session\) \{[\s\S]*switchWindow\(\);[\s\S]*selectSession\(session, \{userInitiated: true\}\)/.test(source), 'Tabber window clicks install the tmux-window override before focus/layout can sync against stale active metadata');
     assert.ok(/type === 'repo' && row\.dataset\.tabberRepoRoot\) \{[\s\S]*switchWindow\(\);[\s\S]*setFileExplorerMode\('files'\)/.test(source), 'Tabber repo clicks also install the tmux-window override before leaving Tabber mode');
     assert.equal(source.includes("if (entry.tabber?.type !== 'session') fileExplorerTabberCollapsed.add(path)"), false, 'Tabber collapse-all and disclosure toggles include session rows');
@@ -1206,6 +1208,9 @@ async function runTabberSuite() {
     assert.ok(source.includes('function tabberSessionChromeHtml(data)') && /function tabberSessionChromeHtml\(data\)[\s\S]*tmuxPaneTabHtml\(session, info, state, auto\)[\s\S]*sessionPopoverHtml\(session, info, agentKind, auto, state\)/.test(source), 'A1/A2/TR1: session rows render the shared tmux pane tab chrome and popover');
     assert.equal(source.includes('tabber-session-name') || source.includes('tabber-session-description'), false, 'TR5: Tabber does not keep bespoke session name/description chrome');
     assert.ok(/function bindTabberSessionChrome\(row, session\)[\s\S]*applySessionStateClasses\(tab, state\)[\s\S]*bindPaneTabPopover\(tab, session\)[\s\S]*toggleAutoApprove/.test(source), 'TR2: Tabber session rows reuse the shared state classes, popover binding, and YO toggle action');
+    assert.ok(/function fileExplorerTreeSortSelectHtml\(extraClass = ''\)[\s\S]*data-file-explorer-tree-sort[\s\S]*finder\.sort\.az[\s\S]*finder\.sort\.oldest/.test(source), 'TS1/TS4: Finder and Tabber share one tree sort select component and locale keys');
+    assert.ok(/fileExplorerMode === 'tabber'[\s\S]*tabberLookbackControlHtml\(\)[\s\S]*fileExplorerTreeSortSelectHtml\('changes-sort-select-compact'\)/.test(source), 'TS1: Tabber toolbar renders the shared A-Z/Z-A/recent/oldest sort control');
+    assert.ok(/file-explorer-actions-row[\s\S]*fileExplorerTreeSortSelectHtml\('file-explorer-mode-files-only'\)/.test(source), 'TS3: Finder toolbar also renders the shared tree sort select');
     assert.ok(/row\.classList\.toggle\('tabber-active-session', data\.type === 'session' && data\.active === true\)/.test(source), 'A5: active-session styling is data-driven only for session rows');
     assert.ok(/current \|\| \(data\.type === 'session' && data\.active === true\)\) row\.setAttribute\('aria-current', 'true'\)/.test(source), 'A3/A5: the current tmux session/window exposes aria-current on the tree row');
     assert.ok(/row\.dataset\.tabberItem === infoItemId\) openInfoSubTab\('info'\)/.test(source), 'YO!info Tabber row opens the YO!info sub-tab, not the remembered YO!agent sub-tab');
@@ -1213,6 +1218,12 @@ async function runTabberSuite() {
     api.setInfoPanelSubTabForTest('yoagent');
     api.commandPaletteCommandItems().find(item => item.targetItem === api.infoItemId).run();
     assert.equal(api.infoPanelSubTabForTest(), 'info', 'YO!info-labeled palette rows open YO!info, not the remembered YO!agent sub-tab');
+    api.setFileExplorerModeForTest('tabber');
+    api.setFileExplorerTreeSortModeForTest('za');
+    const tabberToolbarHtml = api.fileExplorerChangesPanelStaticHtmlForTest();
+    assert.ok(tabberToolbarHtml.includes('data-file-explorer-tree-sort'), 'TS1: Tabber toolbar exposes the shared tree sort select');
+    assert.ok(tabberToolbarHtml.includes('value="az"') && tabberToolbarHtml.includes('value="za"') && tabberToolbarHtml.includes('value="newest"') && tabberToolbarHtml.includes('value="oldest"'), 'TS1: Tabber sort select offers A-Z, Z-A, recent, and oldest');
+    assert.ok(/value="za" selected/.test(tabberToolbarHtml), 'TS3: Tabber sort select reflects the shared persisted tree sort mode');
     const tabberActiveSlots = api.emptyLayoutSlots();
     tabberActiveSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 50);
     tabberActiveSlots.left = api.paneStateWithTabs(['1'], '1');
@@ -1285,6 +1296,32 @@ async function runTabberSuite() {
     assert.deepEqual(scopedRepos0, ['/home/u/codex-a'], 'Tabber repo rows under window 0 use only files attributed to tmux window 0');
     assert.deepEqual(scopedRepos1, ['/home/u/codex-b'], 'Tabber repo rows under window 1 use only files attributed to tmux window 1');
 
+    const sortedApi = loadYolomux('', ['1', '2', '3']);
+    sortedApi.setTranscriptInfoForTest('1', {panes: [{window: '0', pane: '0', window_active: true, active: true, process_label: 'bash', command: 'bash'}]});
+    sortedApi.setTranscriptInfoForTest('2', {panes: [{window: '0', pane: '0', window_active: true, active: true, process_label: 'bash', command: 'bash'}]});
+    sortedApi.setTranscriptInfoForTest('3', {panes: [{window: '0', pane: '0', window_active: true, active: true, process_label: 'bash', command: 'bash'}]});
+    sortedApi.setTabberActivityForTest({activity: {
+      '1': {active_recency_ts: 100},
+      '2': {active_recency_ts: 300},
+      '3': {active_recency_ts: 200},
+    }});
+    const sortedSessionLabels = mode => {
+      sortedApi.setFileExplorerTreeSortModeForTest(mode);
+      return sortedApi.tabberRenderedRowsForTest().filter(row => row.type === 'session').map(row => row.title.split('\n')[0]);
+    };
+    assert.deepEqual(sortedSessionLabels('az'), ['1', '2', '3'], 'TS2: Tabber A-Z sorts top-level sessions by the human label');
+    assert.deepEqual(sortedSessionLabels('za'), ['3', '2', '1'], 'TS2: Tabber Z-A sorts top-level sessions by the human label');
+    assert.deepEqual(sortedSessionLabels('newest'), ['2', '3', '1'], 'TS2: Tabber recent sort uses recency timestamps');
+    assert.deepEqual(sortedSessionLabels('oldest'), ['1', '3', '2'], 'TS2: Tabber oldest sort uses recency timestamps');
+    sortedApi.setTranscriptInfoForTest('1', {panes: [
+      {window: '2', pane: '0', window_active: false, active: true, process_label: 'bash', command: 'bash'},
+      {window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', command: 'codex'},
+      {window: '1', pane: '0', window_active: false, active: true, process_label: 'claude', command: 'claude'},
+    ]});
+    sortedApi.setFileExplorerTreeSortModeForTest('za');
+    const windowLabels = sortedApi.buildTabberTree().entriesByDir.get('/s_1').map(row => row.tabber.label);
+    assert.deepEqual(windowLabels, ['0:codex', '1:claude', '2:bash'], 'TS2: tmux window rows stay in tmux index order regardless of Tabber sort mode');
+
     // Render guard: real labels (never synthetic node names); active window marked; absolute path rows present.
     const rows = api.tabberRenderedRowsForTest();
     assert.equal(rows.some(r => /^[swrf]_\d/.test(r.name)), false, 'rows show human labels, not synthetic node names (got ' + JSON.stringify(rows.map(r => r.name).slice(0, 8)) + ')');
@@ -1315,9 +1352,9 @@ async function runTabberSuite() {
     ]});
     const shellWindowRow = rows.find(r => r.type === 'window' && /1:bash/.test(r.name));
     assert.ok(shellWindowRow?.nameHtml.includes('tabber-window-pid') && shellWindowRow.nameHtml.includes('(pid=54321)'), 'PD5: bash Tabber rows still render their pid from record data');
-    assert.equal(shellWindowRow?.icon, '⌁', 'shell/process window leaf rows use a neutral process glyph instead of a checkbox-looking square');
+    assert.equal(shellWindowRow?.icon, '', 'shell/process window leaf rows do not render the old neutral process glyph');
     assert.notEqual(shellWindowRow?.date, 'working for 3h 45m', 'TD4: non-AI tmux windows do not inherit working duration text');
-    assert.equal(rows.some(r => r.type === 'window' && ['▢', '■'].includes(r.icon)), false, 'tmux window rows never render checkbox-looking square glyphs');
+    assert.equal(rows.some(r => r.type === 'window' && ['▢', '■', '⌁'].includes(r.icon)), false, 'tmux window rows never render checkbox-looking or decorative process glyphs');
     assert.equal(activeSessionRow.icon, '▾', 'expanded session rows still use the shared disclosure affordance');
     api.setTranscriptInfoForTest('1', {
       ...session1ShellTranscript,
@@ -1330,7 +1367,7 @@ async function runTabberSuite() {
       {kind: 'codex', state: 'idle', last_active_ts: Date.now() / 1000 - 5, window_index: 1, window_name: 'codex', window_label: '1:codex'},
     ]});
     const idleAgentRows = api.tabberRenderedRowsForTest();
-    const idleAgentWindowRow = idleAgentRows.find(r => r.type === 'window' && /1:codex/.test(r.name));
+    const idleAgentWindowRow = idleAgentRows.find(r => r.type === 'window' && r.path === '/s_1/w_1' && /1:codex/.test(r.name));
     assert.equal(idleAgentWindowRow?.date, '<15 sec ago', 'idle AI Tabber rows use the shared sub-15-second Ago label');
     assert.equal(String(idleAgentWindowRow?.date || '').includes('idle'), false, 'idle AI Tabber rows no longer prefix the recency with idle');
     api.setTranscriptInfoForTest('1', session1ShellTranscript);
@@ -1471,8 +1508,31 @@ async function runTabberSuite() {
     const runningClaude = api.tabberRenderedRowsForTest().find(r => r.type === 'window' && /0:claude/.test(r.name));
     assert.equal(runningClaude?.date, 'running', 'B4: active agent windows show running instead of a stale heartbeat age');
 
-    // B5 context-menu source guard.
+    // B5 context-menu source guard + event path.
+    assert.ok(/data-tabber-type="session"[\s\S]*data-tabber-type="window"[\s\S]*showTabContextMenu\(tabItem, event\.clientX, event\.clientY/.test(source), 'B5: right-click on a Tabber session/window row reuses the shared tab context menu');
     assert.ok(/data-tabber-type="repo"[\s\S]*?showFileTreeContextMenu\(row, abs,/.test(source), 'B5: right-click on an absolute path row reuses the shared file context menu');
+    const contextPanel = new TestElement('tabber-context-panel');
+    const contextSessionRow = new TestElement('tabber-context-session-row');
+    contextSessionRow.classList.add('file-tree-row');
+    contextSessionRow.dataset.tabberType = 'session';
+    contextSessionRow.dataset.tabberSession = '1';
+    const contextSessionTab = new TestElement('tabber-context-session-tab');
+    contextSessionTab.classList.add('tabber-session-tab');
+    contextSessionRow.appendChild(contextSessionTab);
+    contextPanel.appendChild(contextSessionRow);
+    api.bindTabberPanelForTest(contextPanel);
+    const contextMenuEvent = {
+      target: contextSessionRow,
+      clientX: 10,
+      clientY: 12,
+      preventDefault() { this.defaultPrevented = true; },
+      stopPropagation() { this.propagationStopped = true; },
+    };
+    contextPanel.listeners.get('contextmenu')[0](contextMenuEvent);
+    const contextMenu = api.testElementForId('appOverlayRoot').children.find(child => child.classList?.contains('session-context-menu'));
+    assert.equal(contextMenuEvent.defaultPrevented, true, 'right-clicking a Tabber session row opens the shared tab context menu');
+    assert.ok(contextMenu?.children[0]?.innerHTML.includes('Pin Tab'), 'Tabber session context menu includes the shared Pin Tab action');
+    assert.ok(Array.from(contextMenu?.children || []).some(child => String(child.textContent || '').includes("Rename tmux session '1'")), 'Tabber session context menu includes the shared rename action');
   });
 
   {

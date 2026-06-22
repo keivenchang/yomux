@@ -1,7 +1,7 @@
 {
   "agent.notDetected": "未检测到",
   "branch.all": "所有分支",
-  "branch.current": "当前",
+  "branch.current": "活动",
   "branch.more": "+ 还有 {count} 个",
   "branch.none": "此检出中找不到分支",
   "brand.marker": "优",
@@ -427,6 +427,7 @@
   "popover.kind.text": "文件编辑器",
   "popover.path": "路径",
   "popover.repo": "仓库",
+  "popover.sessionId": "会话 ID",
   "popover.size": "大小",
   "popover.state": "状态",
   "popover.status": "状态",

@@ -1,7 +1,7 @@
 {
   "agent.notDetected": "not detected",
   "branch.all": "כל הענפים",
-  "branch.current": "נוכחי",
+  "branch.current": "פעיל",
   "branch.more": "+ {count} נוספים",
   "branch.none": "לא נמצא אף ענף ב-checkout זה",
   "brand.marker": "YO",
@@ -427,6 +427,7 @@
   "popover.kind.text": "עורך קבצים",
   "popover.path": "נתיב",
   "popover.repo": "מאגר",
+  "popover.sessionId": "מזהה סשן",
   "popover.size": "גודל",
   "popover.state": "מצב",
   "popover.status": "סטטוס",

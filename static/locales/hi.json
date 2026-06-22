@@ -1,7 +1,7 @@
 {
   "agent.notDetected": "not detected",
   "branch.all": "सभी branches",
-  "branch.current": "वर्तमान",
+  "branch.current": "सक्रिय",
   "branch.more": "+ {count} और",
   "branch.none": "इस checkout में कोई नहीं मिला",
   "brand.marker": "YO",
@@ -427,6 +427,7 @@
   "popover.kind.text": "file editor",
   "popover.path": "path",
   "popover.repo": "repo",
+  "popover.sessionId": "सत्र ID",
   "popover.size": "साइज़",
   "popover.state": "state",
   "popover.status": "स्थिति",

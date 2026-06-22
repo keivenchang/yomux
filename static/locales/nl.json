@@ -1,7 +1,7 @@
 {
   "agent.notDetected": "niet gedetecteerd",
   "branch.all": "Alle branches",
-  "branch.current": "huidig",
+  "branch.current": "actief",
   "branch.more": "+ {count} meer",
   "branch.none": "geen gevonden in deze checkout",
   "brand.marker": "YO",
@@ -427,6 +427,7 @@
   "popover.kind.text": "file editor",
   "popover.path": "path",
   "popover.repo": "repo",
+  "popover.sessionId": "Sessie-ID",
   "popover.size": "size",
   "popover.state": "state",
   "popover.status": "status",

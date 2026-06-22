@@ -1,7 +1,7 @@
 {
   "agent.notDetected": "not detected",
   "branch.all": "Все ветки",
-  "branch.current": "текущая",
+  "branch.current": "активно",
   "branch.more": "+ ещё {count}",
   "branch.none": "не найдено в этом checkout",
   "brand.marker": "YO",
@@ -427,6 +427,7 @@
   "popover.kind.text": "редактор файлов",
   "popover.path": "путь",
   "popover.repo": "репозиторий",
+  "popover.sessionId": "ID сеанса",
   "popover.size": "размер",
   "popover.state": "состояние",
   "popover.status": "статус",

@@ -1,7 +1,7 @@
 {
   "agent.notDetected": "không phát hiện",
   "branch.all": "Tất cả nhánh",
-  "branch.current": "hiện tại",
+  "branch.current": "đang hoạt động",
   "branch.more": "+ {count} nữa",
   "branch.none": "không tìm thấy trong checkout này",
   "brand.marker": "YO",
@@ -427,6 +427,7 @@
   "popover.kind.text": "file editor",
   "popover.path": "path",
   "popover.repo": "repo",
+  "popover.sessionId": "ID phiên",
   "popover.size": "size",
   "popover.state": "state",
   "popover.status": "status",

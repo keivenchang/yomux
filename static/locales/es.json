@@ -1,7 +1,7 @@
 {
   "agent.notDetected": "not detected",
   "branch.all": "Todas las ramas",
-  "branch.current": "actual",
+  "branch.current": "activo",
   "branch.more": "+ {count} más",
   "branch.none": "no se encontró ninguna en este checkout",
   "brand.marker": "YO",
@@ -427,6 +427,7 @@
   "popover.kind.text": "editor de archivos",
   "popover.path": "ruta",
   "popover.repo": "repo",
+  "popover.sessionId": "ID de sesión",
   "popover.size": "tamaño",
   "popover.state": "estado",
   "popover.status": "estado",

@@ -366,7 +366,8 @@
   --file-selection-bg: rgb(var(--active-accent-rgb) / 0.46);
   --file-selection-border: var(--active-accent-bright);
   --file-selection-text: #f7fff0;
-  --file-tree-recency-hot: var(--bad);
+  --file-tree-recency-max-contrast: var(--text);
+  --file-tree-recency-hot: var(--file-tree-recency-max-contrast);
   --file-tree-recency-fresh: #dcffa6;
   --file-tree-recency-recent: #bfe87e;
   --file-tree-recency-warm: #aab8c4;
@@ -640,7 +641,8 @@ body.theme-light {
   --file-selection-bg: rgb(var(--active-accent-rgb) / 0.34);
   --file-selection-border: var(--active-accent-bright);
   --file-selection-text: #10230b;
-  --file-tree-recency-hot: var(--bad);
+  --file-tree-recency-max-contrast: var(--text);
+  --file-tree-recency-hot: var(--file-tree-recency-max-contrast);
   --file-tree-recency-fresh: #356f12;
   --file-tree-recency-recent: #4d7f21;
   --file-tree-recency-warm: #566271;
@@ -2053,15 +2055,16 @@ body.theme-light .latency-meter {
 }
 .status-indicator--cooldown {
   color: var(--accent-gold);
-  --attention-ring-rgb: 245 197 66;
+}
+.status-indicator--active {
+  color: var(--file-tree-recency-max-contrast, var(--text));
 }
 .heartbeat-pulse {
   transform-origin: center;
   animation-duration: var(--pulse-duration);
   animation-timing-function: var(--pulse-easing);
 }
-.status-indicator--dot.status-indicator--working.heartbeat-pulse,
-.status-indicator--dot.status-indicator--cooldown.heartbeat-pulse {
+.status-indicator--dot.status-indicator--working.heartbeat-pulse {
   animation-name: attention-ring-fade;
   animation-duration: var(--pulse-duration);
   animation-delay: var(--attention-animation-delay, 0s);
@@ -7631,6 +7634,10 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 .yoagent-message-details pre.yoagent-auxiliary-stream {
   color: color-mix(in srgb, var(--muted) 72%, var(--text));
   background: color-mix(in srgb, var(--panel2) 78%, var(--bg));
+}
+.yoagent-message-details[open] pre.yoagent-auxiliary-stream {
+  max-height: none;
+  overflow: visible;
 }
 .yoagent-toolcall-details summary > span:first-child {
   color: var(--accent-gold);

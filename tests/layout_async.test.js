@@ -62,7 +62,7 @@ async function runLayoutAsyncSuite() {
 
       assert.equal(clickEvent.defaultPrevented, true, 'shared path-copy handler claims the YO!agent copy click');
       assert.equal(api.clipboardTextForTest(), transcriptPath, 'YO!agent transcript copy writes the transcript path');
-      assert.ok(api.statusHtmlForTest().includes('copied transcript path'), 'YO!agent transcript copy reports success');
+      assert.ok(api.statusHtmlForTest().includes('copied'), 'YO!agent transcript copy reports success');
     }
 
     {

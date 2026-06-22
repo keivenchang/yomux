@@ -3485,7 +3485,7 @@ function dedentSelectionText(value) {
 async function copyTextToClipboard(text) {
   const clipboard = globalThis.navigator?.clipboard;
   const value = String(text ?? '');
-  if (clipboard?.writeText) {
+  if (globalThis.isSecureContext !== false && clipboard?.writeText) {
     try {
       await clipboard.writeText(value);
       return;
@@ -3494,6 +3494,7 @@ async function copyTextToClipboard(text) {
       // but reject writes on self-signed or permission-limited pages.
     }
   }
+  if (copyTextToClipboardViaCopyEvent(value)) return;
   const textarea = document.createElement('textarea');
   textarea.value = value;
   textarea.setAttribute('readonly', '');
@@ -3642,17 +3643,42 @@ function delegate(parent, type, selector, handler, options = {}) {
   return listener;
 }
 
-function handleCopyPathClick(event, button) {
+function copyPathButtonValue(button) {
+  return String(button?.dataset?.copyPath || '');
+}
+
+function copyPathButtonStopEvent(event) {
   event.preventDefault();
   event.stopPropagation();
-  const path = button.dataset.copyPath || '';
+  event.stopImmediatePropagation?.();
+}
+
+function activateCopyPathButton(event, button) {
+  copyPathButtonStopEvent(event);
+  const path = copyPathButtonValue(button);
   if (!path) return;
   copyTextToClipboard(path)
-    .then(() => { statusOk(localizedHtml('status.copiedTranscriptPath')); })
+    .then(() => { statusOk(localizedHtml('status.copied')); })
     .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
 }
 
-delegate(document, 'click', '[data-copy-path]', handleCopyPathClick);
+function handleCopyPathPointerUp(event, button) {
+  button.__yolomuxCopyPointerHandled = true;
+  activateCopyPathButton(event, button);
+}
+
+function handleCopyPathClick(event, button) {
+  const pointerHandled = button.__yolomuxCopyPointerHandled === true;
+  button.__yolomuxCopyPointerHandled = false;
+  if (pointerHandled && event.detail !== 0) {
+    copyPathButtonStopEvent(event);
+    return;
+  }
+  activateCopyPathButton(event, button);
+}
+
+delegate(document, 'pointerup', '[data-copy-path]', handleCopyPathPointerUp, {capture: true});
+delegate(document, 'click', '[data-copy-path]', handleCopyPathClick, {capture: true});
 
 // One owner for the per-session/-item DOM id scheme. Both the element that sets the id and every
 // getElementById/querySelector that looks it up route through these, so the prefix lives in one place
@@ -6153,15 +6179,16 @@ function statusIndicatorClasses(...classes) {
 function statusIndicatorToneClasses(tone) {
   if (tone === 'positive') return ['status-indicator--positive'];
   if (tone === 'working') return ['status-indicator--working', 'heartbeat-pulse'];
-  if (tone === 'cooldown') return ['status-indicator--cooldown', 'heartbeat-pulse'];
+  if (tone === 'cooldown') return ['status-indicator--cooldown'];
   if (tone === 'attention') return ['status-indicator--attention', 'heartbeat-pulse', 'attention-pulse'];
+  if (tone === 'active') return ['status-indicator--active'];
   if (tone === 'settled') return ['status-indicator--settled'];
   if (tone === 'idle') return ['status-indicator--idle'];
   return [];
 }
 
 function statusIndicatorToneStyle(tone) {
-  return ['working', 'cooldown', 'attention'].includes(String(tone || '')) ? ` style="${attentionAnimationStyle()}"` : '';
+  return ['working', 'attention'].includes(String(tone || '')) ? ` style="${attentionAnimationStyle()}"` : '';
 }
 
 function statusIndicatorModifiedClasses(modifier, tone, classes, options = {}) {
@@ -13252,16 +13279,10 @@ function tabberFileMatchesWindow(file, windowIndex, agentKey = '') {
 
 // Absolute touched-path entries for the paths a session's agent touched, attached under an agent window.
 // These are intentionally leaves: the Tabber shows where work happened, not every changed file.
-function tabberRepoEntriesForWindow(session, windowIndex, agentKey, gitBranch, gitRoot) {
+function tabberTouchedRepoPathsForWindow(session, windowIndex, agentKey, gitRoot) {
   const cached = tabberSessionFilesState(session);
-  if (!cached?.loaded) {
-    if (!cached?.loading) return [];
-    return [{
-      name: 'loading', kind: 'file', mtime: 0, sortName: 'loading',
-      tabber: {type: 'loading', session, windowIndex, label: 'Fetching paths', icon: '·'},
-    }];
-  }
-  if (!cached.loaded || !cached.files.length) return [];
+  if (!cached?.loaded) return {loaded: false, loading: Boolean(cached?.loading), paths: []};
+  if (!cached.loaded || !cached.files.length) return {loaded: true, loading: false, paths: []};
   const knownRoots = tabberKnownRepoRoots(cached.files, gitRoot);
   const byPath = new Map();
   for (const file of cached.files) {
@@ -13279,8 +13300,25 @@ function tabberRepoEntriesForWindow(session, windowIndex, agentKey, gitBranch, g
     prev.mtime = Math.max(prev.mtime, Number(file.mtime || 0));
     byPath.set(path, prev);
   }
-  return Array.from(byPath.values())
-    .sort((left, right) => Number(right.mtime || 0) - Number(left.mtime || 0) || String(left.path).localeCompare(String(right.path)))
+  const paths = Array.from(byPath.values())
+    .sort((left, right) => Number(right.mtime || 0) - Number(left.mtime || 0) || String(left.path).localeCompare(String(right.path)));
+  return {loaded: true, loading: false, paths};
+}
+
+function tabberRepoPathsForWindow(session, windowIndex, agentKey, gitRoot) {
+  return tabberTouchedRepoPathsForWindow(session, windowIndex, agentKey, gitRoot).paths.map(item => item.path);
+}
+
+function tabberRepoEntriesForWindow(session, windowIndex, agentKey, gitBranch, gitRoot) {
+  const touched = tabberTouchedRepoPathsForWindow(session, windowIndex, agentKey, gitRoot);
+  if (!touched.loaded) {
+    if (!touched.loading) return [];
+    return [{
+      name: 'loading', kind: 'file', mtime: 0, sortName: 'loading',
+      tabber: {type: 'loading', session, windowIndex, label: 'Fetching paths', icon: '·'},
+    }];
+  }
+  return touched.paths
     .map((item, pathPos) => {
       const isSessionRepo = gitRoot && normalizeDirectoryPath(item.path) === normalizeDirectoryPath(gitRoot);
       return {
@@ -13506,14 +13544,14 @@ function buildTabberTree() {
       const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatus, agentKey, session);
       const agentStatusForDisplay = agentStatus ? {...agentStatus, current: active} : null;
       const dateText = agentStatusForDisplay ? sessionPopoverAgentStateText(agentStatusForDisplay, nowSeconds) : tabberAgentDateText(agentActivity);
-      const dateHtml = agentStatusForDisplay && agentStatusIsAttentionState(agentStatusForDisplay.state)
+      const dateHtml = agentStatusForDisplay && (agentStatusIsAttentionState(agentStatusForDisplay.state) || agentStatusForDisplay.current === true)
         ? sessionPopoverAgentStatusHtml(agentStatusForDisplay, nowSeconds, 'tabber-agent-status')
         : '';
       if (repoEntries.length) entriesByDir.set(normalizeDirectoryPath(windowPath), repoEntries);
       return {
         name: windowName, kind: repoEntries.length ? 'dir' : 'file', mtime: windowMtime,
         sortName: label,
-        tabber: {type: 'window', session, windowIndex: record.index, label, pid: record.pid, icon: '⌁', active, current: session === activeSession && active, agentKey, activityIconHtml, dateText, dateHtml},
+        tabber: {type: 'window', session, windowIndex: record.index, label, pid: record.pid, icon: '', active, current: session === activeSession && active, agentKey, activityIconHtml, dateText, dateHtml},
       };
     });
     entriesByDir.set(normalizeDirectoryPath(sessionPath), windowEntries);
@@ -13655,7 +13693,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   row.classList.toggle('current-directory', current && row.dataset.kind === 'dir');
   if (current || (data.type === 'session' && data.active === true)) row.setAttribute('aria-current', 'true');
   else row.removeAttribute('aria-current');
-  const icon = expandable ? (expanded ? '▾' : '▸') : (data.icon || '·');
+  const icon = expandable ? (expanded ? '▾' : '▸') : (data.icon || '');
   const rawLabel = data.label || entry.name;
   const label = compactHomePath(rawLabel);
   const description = data.description ? compactHomePath(data.description) : '';
@@ -13873,6 +13911,14 @@ function bindTabberPanel(panel) {
   });
   panel.addEventListener('contextmenu', event => {
     if (fileExplorerMode !== 'tabber') return;
+    const tabRow = event.target.closest?.('.file-tree-row[data-tabber-type="session"], .file-tree-row[data-tabber-type="window"], .file-tree-row[data-tabber-type="tab"]');
+    const tabItem = tabRow?.dataset.tabberType === 'tab' ? tabRow.dataset.tabberItem : tabRow?.dataset.tabberSession;
+    if (tabRow && panel.contains(tabRow) && tabItem && (isPinnableTab(tabItem) || isTmuxSession(tabItem))) {
+      event.preventDefault();
+      event.stopPropagation();
+      showTabContextMenu(tabItem, event.clientX, event.clientY, {tab: tabRow.querySelector?.('.tabber-session-tab') || tabRow});
+      return;
+    }
     const row = event.target.closest?.('.file-tree-row[data-tabber-type="repo"]');
     const abs = row?.dataset.tabberRepoRoot;
     if (!row || !panel.contains(row) || !abs) return;
@@ -19350,7 +19396,7 @@ function sessionPopoverAgentStateText(agent, nowSeconds = Date.now() / 1000) {
     return Number.isFinite(elapsed) && elapsed >= 0 ? `working for ${compactElapsedDurationText(elapsed)}` : 'working';
   }
   if (agentStatusIsAttentionState(state)) return `ASK? ${sessionPopoverAgentRecencyText(agent, nowSeconds, {forceAgo: true})}`;
-  if (agent?.current === true) return 'current';
+  if (agent?.current === true) return t('branch.current');
   const lastActive = Number(agent?.idle_since || agent?.last_active_ts || 0);
   return Number.isFinite(lastActive) && lastActive > 0 ? sessionPopoverAgentRecencyText(agent, nowSeconds) : 'idle';
 }
@@ -19358,6 +19404,7 @@ function sessionPopoverAgentStateText(agent, nowSeconds = Date.now() / 1000) {
 function sessionPopoverAgentStatusHtml(agent, nowSeconds = Date.now() / 1000, className = 'session-agent-status') {
   const text = sessionPopoverAgentStateText(agent, nowSeconds);
   if (agentStatusIsAttentionState(agent?.state)) return statusIndicatorLabelHtml(text, 'attention', className, 'agent-status-attention');
+  if (agent?.current === true) return statusIndicatorLabelHtml(text, 'active', className, 'agent-status-active');
   return `<span class="${esc(className)}">${esc(text)}</span>`;
 }
 
@@ -19373,6 +19420,21 @@ function tmuxWindowDescriptorLabel(label) {
   return t('popover.tmuxWindow', {label: text});
 }
 
+function sessionPopoverWindowPidByIndex(info) {
+  if (typeof tmuxWindowRecords !== 'function') return new Map();
+  return new Map(tmuxWindowRecords(info?.panes || [])
+    .map(record => [tmuxWindowIndexKey(record.index ?? record.indexText), record.pid])
+    .filter(([index, pid]) => index !== null && Number.isFinite(Number(pid)) && Number(pid) > 0));
+}
+
+function sessionPopoverAgentWindowPid(agent, pidByIndex) {
+  const index = tmuxWindowIndexKey(agent?.window_index ?? agent?.window);
+  const sharedPid = index !== null ? Number(pidByIndex.get(index)) : null;
+  if (Number.isFinite(sharedPid) && sharedPid > 0) return Math.floor(sharedPid);
+  const directPid = Number(agent?.process_label_pid || agent?.pid || 0);
+  return Number.isFinite(directPid) && directPid > 0 ? Math.floor(directPid) : null;
+}
+
 function sessionPopoverActiveWindowIndex(session, info) {
   const pane = terminalDisplayPane(info, session) || info?.selected_pane || null;
   return tmuxWindowIndexKey(pane?.window ?? pane?.window_index);
@@ -19380,6 +19442,7 @@ function sessionPopoverActiveWindowIndex(session, info) {
 
 function sessionPopoverSortedAgentWindows(session, info, autoPayload) {
   const activeWindowIndex = sessionPopoverActiveWindowIndex(session, info);
+  const pidByIndex = sessionPopoverWindowPidByIndex(info);
   return sessionAgentWindowStatusPayloads(session, info, autoPayload)
     .map((agent, index) => ({
       ...agent,
@@ -19387,6 +19450,7 @@ function sessionPopoverSortedAgentWindows(session, info, autoPayload) {
       kind: String(agent?.kind || '').toLowerCase(),
       state: String(agent?.state || 'idle'),
       current: activeWindowIndex !== null && tmuxWindowIndexKey(agent.window_index ?? agent.window) === activeWindowIndex,
+      pid: sessionPopoverAgentWindowPid(agent, pidByIndex),
     }))
     .filter(agent => ['claude', 'codex'].includes(agent.kind))
     .sort((left, right) => sessionPopoverAgentStateRank(left.state) - sessionPopoverAgentStateRank(right.state)
@@ -19396,9 +19460,10 @@ function sessionPopoverSortedAgentWindows(session, info, autoPayload) {
 
 function sessionPopoverAgentWindowRowHtml(agent, nowSeconds = Date.now() / 1000) {
   const working = agent.state === 'working';
-  const attention = agent.state === 'approval' || agent.state === 'needs-input';
-  const dot = working ? '●' : '○';
-  const label = tmuxWindowDescriptorLabel(agentWindowCanonicalLabel(agent.window_index ?? agent.window, agent.kind, agent.window_label || agent.kind));
+  const attention = agentStatusIsAttentionState(agent.state);
+  const dot = working || attention ? '●' : '○';
+  const descriptor = tmuxWindowDescriptorLabel(agentWindowCanonicalLabel(agent.window_index ?? agent.window, agent.kind, agent.window_label || agent.kind));
+  const label = typeof tmuxWindowDisplayLabel === 'function' ? tmuxWindowDisplayLabel(descriptor, agent.pid) : descriptor;
   const classes = ['session-agent-row', `state-${agent.state}`];
   if (working) classes.push('working');
   if (attention) classes.push('attention');
@@ -19417,14 +19482,37 @@ function sessionPopoverAgentWindowRowHtml(agent, nowSeconds = Date.now() / 1000)
   </div>`;
 }
 
-function sessionPopoverWindowMetadataItems(info, agentRows) {
+function sessionPopoverTouchedRepoPaths(session, agent, info, row) {
+  if (typeof tabberRepoPathsForWindow !== 'function') return [];
+  const windowIndex = tmuxWindowIndexKey(agent?.window_index ?? agent?.window);
+  if (windowIndex === null) return [];
+  const gitRoot = String(row?.git?.root || info?.project?.git?.root || '').trim();
+  const paths = tabberRepoPathsForWindow(session, windowIndex, agentWindowKind(agent?.kind), gitRoot);
+  const seen = new Set();
+  return paths.filter(path => {
+    const text = String(path || '').trim();
+    if (!text || seen.has(text)) return false;
+    seen.add(text);
+    return true;
+  });
+}
+
+function sessionPopoverWindowMetadataItems(session, info, agentRows) {
   const agents = Array.isArray(agentRows) ? agentRows : [];
   if (!agents.length) return [];
   const windowRows = sessionWindowMetadataRows(info);
   return agents.map(agent => {
-    const meta = sessionWindowMetadataForAgent(agent, windowRows);
-    const html = windowMetadataRowsHtml(meta);
-    return html ? {agent, meta, html} : null;
+    const meta = sessionWindowMetadataForAgent(agent, windowRows) || {
+      window: String(agent?.window ?? ''),
+      window_index: tmuxWindowIndexKey(agent?.window_index ?? agent?.window),
+      window_name: String(agent?.window_name || ''),
+      path: '',
+      git: null,
+    };
+    const touchedPaths = sessionPopoverTouchedRepoPaths(session, agent, info, meta);
+    const enrichedMeta = touchedPaths.length ? {...meta, paths: touchedPaths} : meta;
+    const html = windowMetadataRowsHtml(enrichedMeta);
+    return html ? {agent, meta: enrichedMeta, html} : null;
   }).filter(Boolean);
 }
 
@@ -19434,7 +19522,7 @@ function sessionPopoverAgentWindowHtml(session, info, autoPayload, agentRows = n
     return `<div class="session-agent-list empty"><div class="session-agent-empty">no AI agents in this tab</div></div>`;
   }
   const nowSeconds = Date.now() / 1000;
-  const items = Array.isArray(metadataItems) ? metadataItems : sessionPopoverWindowMetadataItems(info, agents);
+  const items = Array.isArray(metadataItems) ? metadataItems : sessionPopoverWindowMetadataItems(session, info, agents);
   const metadataByWindow = new Map(items.map(item => [tmuxWindowIndexKey(item.agent.window_index ?? item.agent.window), item]));
   const sharedMetadata = items.length > 1 && items.length === agents.length && new Set(items.map(item => sessionWindowMetadataSignature(item.meta))).size === 1;
   const rows = agents.map(agent => {
@@ -19485,7 +19573,8 @@ function sessionWindowMetadataForAgent(agent, windowRows) {
 
 function sessionWindowMetadataSignature(row) {
   const git = row?.git || {};
-  return [row?.path || '', git.root || '', git.branch || '', git.worktree?.path || ''].join('\u0000');
+  const paths = Array.isArray(row?.paths) ? row.paths.join('\u0001') : (row?.path || '');
+  return [paths, git.root || '', git.branch || '', git.worktree?.path || ''].join('\u0000');
 }
 
 function windowMetadataBranchHtml(git) {
@@ -19497,9 +19586,11 @@ function windowMetadataRowsHtml(row) {
   if (!row) return '';
   const git = row.git || {};
   const rows = [];
-  if (row.path) rows.push(popoverRow(t('popover.path'), filePopoverPathHtml(row.path)));
+  const paths = Array.isArray(row.paths) ? row.paths.map(path => String(path || '').trim()).filter(Boolean) : [];
+  const displayPaths = paths.length ? paths : (row.path ? [String(row.path)] : []);
+  for (const path of displayPaths) rows.push(popoverRow(t('popover.path'), filePopoverPathHtml(path)));
   if (git.branch) rows.push(popoverRow(t('popover.branch'), windowMetadataBranchHtml(git)));
-  if (git.root && git.root !== row.path) rows.push(popoverRow(t('popover.repo'), git.root));
+  if (git.root && !displayPaths.includes(git.root)) rows.push(popoverRow(t('popover.repo'), git.root));
   if (git.worktree) rows.push(popoverRow(t('popover.worktree'), `${esc(git.worktree.name || git.worktree.path)} — worktree of ${esc(git.worktree.parent_root)}`));
   if (git.head) rows.push(popoverRow('HEAD', gitHeadValueHtml(git)));
   if (gitStatusHasFacts(git)) rows.push(popoverRow(t('popover.git'), gitStatusText(git)));
@@ -19519,8 +19610,8 @@ function agentTranscriptRowsHtml(agent) {
   if (!transcript) return '';
   const transcriptId = agentTranscriptId(agent);
   const rows = [];
-  if (transcriptId) rows.push(popoverRow('Transcript ID', popoverCopyValueHtml(transcriptId, {title: 'Copy transcript ID'})));
-  rows.push(popoverRow('Transcript', popoverCopyValueHtml(transcript, {title: 'Copy transcript path'})));
+  if (transcriptId) rows.push(popoverRow(t('popover.sessionId'), popoverCopyValueHtml(transcriptId, {title: 'Copy session ID'})));
+  rows.push(popoverRow(t('tab.transcript'), popoverCopyValueHtml(transcript, {title: 'Copy transcript path'})));
   return rows.join('');
 }
 
@@ -19542,7 +19633,7 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const agentValue = agentKind ? `${agentName(agentKind)}${autoText ? ` · ${autoText}` : ''}` : (autoText || t('agent.notDetected'));
   const displayPath = panelFullPath(session, info) || pane?.current_path || t('common.notAvailable');
   const agentRows = sessionPopoverSortedAgentWindows(session, info, autoPayload);
-  const windowMetadataItems = sessionPopoverWindowMetadataItems(info, agentRows);
+  const windowMetadataItems = sessionPopoverWindowMetadataItems(session, info, agentRows);
   const agentWindowsHtml = sessionPopoverAgentWindowHtml(session, info, autoPayload, agentRows, windowMetadataItems);
   const perWindowMetadata = Boolean(windowMetadataItems.length);
   if (!perWindowMetadata) rows.push(popoverPairRow(t('popover.state'), stateValue, t('popover.agent'), agentValue));
@@ -31024,6 +31115,17 @@ function sessionFilesSortSelectHtml(extraClass = '') {
       </select>`;
 }
 
+function fileExplorerTreeSortSelectHtml(extraClass = '') {
+  const classes = ['file-explorer-sort-select', extraClass].filter(Boolean).join(' ');
+  const mode = ['az', 'za', 'newest', 'oldest'].includes(fileExplorerTreeSortMode) ? fileExplorerTreeSortMode : 'az';
+  return `<select class="${esc(classes)}" data-file-explorer-tree-sort title="${esc(t('finder.toolbar.sort'))}" aria-label="${esc(t('finder.toolbar.sort'))}">
+              <option value="az"${mode === 'az' ? ' selected' : ''}>${esc(t('finder.sort.az'))}</option>
+              <option value="za"${mode === 'za' ? ' selected' : ''}>${esc(t('finder.sort.za'))}</option>
+              <option value="newest"${mode === 'newest' ? ' selected' : ''}>${esc(t('finder.sort.newest'))}</option>
+              <option value="oldest"${mode === 'oldest' ? ' selected' : ''}>${esc(t('finder.sort.oldest'))}</option>
+            </select>`;
+}
+
 function sessionFilesSessionSelectHtml(target, options = {}) {
   const classes = options.className ? ` class="${esc(options.className)}"` : '';
   const selectOptions = sessions.map(session => {
@@ -31056,6 +31158,7 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
     return `
       <div class="changes-toolbar tabber-toolbar">
         ${tabberLookbackControlHtml()}
+        ${fileExplorerTreeSortSelectHtml('changes-sort-select-compact')}
         ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
         ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
       </div>
@@ -31965,12 +32068,7 @@ function createFileExplorerPanel() {
             <button type="button" class="file-explorer-header-action file-explorer-folder-action file-explorer-mode-files-only" data-file-explorer-new-folder title="${esc(t('finder.toolbar.newFolder'))}" aria-label="${esc(t('finder.toolbar.newFolder'))}"><span class="file-explorer-folder-icon" aria-hidden="true"></span></button>
             <span class="file-explorer-toolbar-spacer"></span>
             <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel file-explorer-mode-files-only" title="${esc(t('finder.toolbar.hidden'))}" aria-pressed="${fileExplorerShowHidden ? 'true' : 'false'}">.*</button>
-            <select class="file-explorer-sort-select file-explorer-mode-files-only" data-file-explorer-tree-sort title="${esc(t('finder.toolbar.sort'))}" aria-label="${esc(t('finder.toolbar.sort'))}">
-              <option value="az"${fileExplorerTreeSortMode === 'az' ? ' selected' : ''}>${esc(t('finder.sort.az'))}</option>
-              <option value="za"${fileExplorerTreeSortMode === 'za' ? ' selected' : ''}>${esc(t('finder.sort.za'))}</option>
-              <option value="newest"${fileExplorerTreeSortMode === 'newest' ? ' selected' : ''}>${esc(t('finder.sort.newest'))}</option>
-              <option value="oldest"${fileExplorerTreeSortMode === 'oldest' ? ' selected' : ''}>${esc(t('finder.sort.oldest'))}</option>
-            </select>
+            ${fileExplorerTreeSortSelectHtml('file-explorer-mode-files-only')}
             <span class="file-explorer-date-reload-cluster file-explorer-mode-files-only">
               ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
               ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}

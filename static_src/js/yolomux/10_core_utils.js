@@ -1908,7 +1908,7 @@ function dedentSelectionText(value) {
 async function copyTextToClipboard(text) {
   const clipboard = globalThis.navigator?.clipboard;
   const value = String(text ?? '');
-  if (clipboard?.writeText) {
+  if (globalThis.isSecureContext !== false && clipboard?.writeText) {
     try {
       await clipboard.writeText(value);
       return;
@@ -1917,6 +1917,7 @@ async function copyTextToClipboard(text) {
       // but reject writes on self-signed or permission-limited pages.
     }
   }
+  if (copyTextToClipboardViaCopyEvent(value)) return;
   const textarea = document.createElement('textarea');
   textarea.value = value;
   textarea.setAttribute('readonly', '');
@@ -2065,17 +2066,42 @@ function delegate(parent, type, selector, handler, options = {}) {
   return listener;
 }
 
-function handleCopyPathClick(event, button) {
+function copyPathButtonValue(button) {
+  return String(button?.dataset?.copyPath || '');
+}
+
+function copyPathButtonStopEvent(event) {
   event.preventDefault();
   event.stopPropagation();
-  const path = button.dataset.copyPath || '';
+  event.stopImmediatePropagation?.();
+}
+
+function activateCopyPathButton(event, button) {
+  copyPathButtonStopEvent(event);
+  const path = copyPathButtonValue(button);
   if (!path) return;
   copyTextToClipboard(path)
-    .then(() => { statusOk(localizedHtml('status.copiedTranscriptPath')); })
+    .then(() => { statusOk(localizedHtml('status.copied')); })
     .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
 }
 
-delegate(document, 'click', '[data-copy-path]', handleCopyPathClick);
+function handleCopyPathPointerUp(event, button) {
+  button.__yolomuxCopyPointerHandled = true;
+  activateCopyPathButton(event, button);
+}
+
+function handleCopyPathClick(event, button) {
+  const pointerHandled = button.__yolomuxCopyPointerHandled === true;
+  button.__yolomuxCopyPointerHandled = false;
+  if (pointerHandled && event.detail !== 0) {
+    copyPathButtonStopEvent(event);
+    return;
+  }
+  activateCopyPathButton(event, button);
+}
+
+delegate(document, 'pointerup', '[data-copy-path]', handleCopyPathPointerUp, {capture: true});
+delegate(document, 'click', '[data-copy-path]', handleCopyPathClick, {capture: true});
 
 // One owner for the per-session/-item DOM id scheme. Both the element that sets the id and every
 // getElementById/querySelector that looks it up route through these, so the prefix lives in one place
