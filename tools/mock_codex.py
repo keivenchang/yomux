@@ -20,6 +20,7 @@ configure(
     permission_style="codex",
     startup_style="codex",
     codex_bypass_hook_trust="--dangerously-bypass-hook-trust" in sys.argv[1:],
+    codex_danger_full_access="--dangerously-bypass-approvals-and-sandbox" in sys.argv[1:],
 )
 
 
