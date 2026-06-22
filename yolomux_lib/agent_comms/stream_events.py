@@ -165,6 +165,8 @@ def yoagent_stream_event_auxiliary_line(event: dict[str, Any]) -> str:
             prefix = "thinking summary"
         if event.get("redacted"):
             prefix = "redacted thinking"
+        if text.lower() == prefix or text.lower().startswith(f"{prefix}..."):
+            return text
         return f"{prefix}: {text}" if text else prefix
     if kind == HIDDEN_WORK_DONE:
         return "thinking done"
@@ -304,6 +306,7 @@ class ClaudeStreamJsonNormalizer:
         self.blocks: dict[int, dict[str, Any]] = {}
         self.tool_inputs_started: set[str] = set()
         self.tool_inputs_reported: set[str] = set()
+        self.thinking_token_estimate: int | None = None
 
     def normalize_line(self, line: str) -> list[dict[str, Any]]:
         try:
@@ -335,6 +338,8 @@ class ClaudeStreamJsonNormalizer:
             return self._assistant_message(item)
         if item_type == "user":
             return self._user_message(item)
+        if item_type == "system":
+            return self._system_message(item)
         if item_type == "result":
             return self._result_message(item)
         return []
@@ -377,9 +382,16 @@ class ClaudeStreamJsonNormalizer:
             text = str(delta.get("thinking") or delta.get("text") or "")
             estimated_tokens = delta.get("estimated_tokens")
             token_count = estimated_tokens if isinstance(estimated_tokens, (int, float)) else None
+            if text:
+                return [stream_event(HIDDEN_WORK_DELTA, text=text, raw_thinking=True, redacted=delta_type == "redacted_thinking_delta", **self._common(item))]
+            if token_count is not None and self.thinking_token_estimate is not None and int(token_count) <= self.thinking_token_estimate:
+                return []
+            if token_count is None:
+                return []
+            self.thinking_token_estimate = int(token_count)
             heartbeat = f"thinking... (~{int(token_count)} tokens)" if token_count is not None else "thinking..."
             metadata = {"estimated_tokens": token_count} if token_count is not None else None
-            return [stream_event(HIDDEN_WORK_DELTA, text=text or heartbeat, raw_thinking=True, redacted=delta_type == "redacted_thinking_delta", metadata=metadata, **self._common(item))]
+            return [stream_event(HIDDEN_WORK_DELTA, text=heartbeat, raw_thinking=True, redacted=delta_type == "redacted_thinking_delta", metadata=metadata, **self._common(item))]
         return []
 
     def _content_block_stop(self, item: dict[str, Any]) -> list[dict[str, Any]]:
@@ -406,8 +418,10 @@ class ClaudeStreamJsonNormalizer:
             block_type = str(block.get("type") or "")
             if block_type in {"thinking", "redacted_thinking"}:
                 text = str(block.get("thinking") or block.get("text") or "").strip()
+                if not text:
+                    continue
                 metadata = block.get("metadata") if isinstance(block.get("metadata"), dict) else None
-                events.append(stream_event(HIDDEN_WORK_DELTA, text=text or "thinking...", raw_thinking=True, redacted=block_type == "redacted_thinking", snapshot=True, metadata=metadata, **self._common(item)))
+                events.append(stream_event(HIDDEN_WORK_DELTA, text=text, raw_thinking=True, redacted=block_type == "redacted_thinking", snapshot=True, metadata=metadata, **self._common(item)))
                 continue
             if block_type != "tool_use":
                 continue
@@ -430,6 +444,30 @@ class ClaudeStreamJsonNormalizer:
         if not text:
             text = "interrupted" if result.get("interrupted") else "result"
         return [stream_event(TOOL_CALL_FINISHED, text=text, tool_name="tool", **self._common(item))]
+
+    def _system_message(self, item: dict[str, Any]) -> list[dict[str, Any]]:
+        if str(item.get("subtype") or "") != "thinking_tokens":
+            return []
+        estimated_tokens = item.get("estimated_tokens")
+        if not isinstance(estimated_tokens, (int, float)):
+            return []
+        token_count = int(estimated_tokens)
+        if self.thinking_token_estimate is not None and token_count <= self.thinking_token_estimate:
+            return []
+        self.thinking_token_estimate = token_count
+        metadata: dict[str, Any] = {"estimated_tokens": token_count}
+        estimated_tokens_delta = item.get("estimated_tokens_delta")
+        if isinstance(estimated_tokens_delta, (int, float)):
+            metadata["estimated_tokens_delta"] = int(estimated_tokens_delta)
+        return [
+            stream_event(
+                HIDDEN_WORK_DELTA,
+                text=f"thinking... (~{token_count} tokens)",
+                raw_thinking=True,
+                metadata=metadata,
+                **self._common(item),
+            )
+        ]
 
     def _result_message(self, item: dict[str, Any]) -> list[dict[str, Any]]:
         if item.get("is_error"):

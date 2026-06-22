@@ -1476,6 +1476,9 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.yoagent-details-preview.yoagent-thinking-live-preview {
+  max-height: calc(5 * max(9px, calc(var(--terminal-font-size) - 2px)) * 1.35);
+}
 .yoagent-message-details[open] .yoagent-details-preview {
   display: none;
 }

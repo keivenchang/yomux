@@ -1653,6 +1653,62 @@ async function runEditorPreviewSuite() {
     assert.ok(/session-agent-row[^"]*state-idle[^"]*current/.test(currentIdleHtml), 'focused/current agent window row carries the current class for header styling');
     assert.ok(/agent-status-active[^"]*status-indicator--active/.test(currentIdleHtml), 'focused/current agent window label uses the shared active/max-contrast status class');
 
+    const parityInfo = {
+      selected_pane: {target: '5:0.0', window: '0', pane: '0', current_path: '/repo/codex-root/src'},
+      project: {
+        git: {root: '/repo/session-root', branch: 'session-branch'},
+        repos: [
+          {root: '/repo/codex-root', cwd: '/repo/codex-root/src', branch: 'codex-branch', dirty_count: 4, ahead: 1, primary: true},
+          {root: '/repo/claude-root', cwd: '/repo/claude-root/src/deep', branch: 'claude-branch', dirty_count: 0, ahead: 3},
+        ],
+      },
+      agents: [{kind: 'codex', pane_target: '5:0.0'}, {kind: 'claude', pane_target: '5:1.0'}],
+      panes: [
+        {target: '5:0.0', window: '0', pane: '0', window_active: false, active: true, process_label: 'codex', process_label_pid: 111, command: 'codex', current_path: '/repo/codex-root/src'},
+        {target: '5:1.0', window: '1', pane: '0', window_active: true, active: true, process_label: 'claude', process_label_pid: 222, command: 'claude', current_path: '/repo/claude-root/src/deep'},
+      ],
+      window_metadata: [
+        {window: '0', window_index: 0, path: '/repo/codex-root/src', git: {root: '/repo/codex-root', branch: 'codex-branch', dirty_count: 4, ahead: 1}},
+        {window: '1', window_index: 1, path: '/repo/claude-root/src/deep', git: {root: '/repo/claude-root', branch: 'claude-branch', dirty_count: 0, ahead: 3}},
+      ],
+    };
+    api.setTranscriptInfoForTest('5', parityInfo);
+    api.setFocusedPanelItem('5');
+    api.setFileExplorerModeForTest('tabber');
+    api.setTabberSessionFilesForTest('5', [
+      {path: 'codex.py', abs_path: '/repo/codex-root/src/codex.py', repo: '/repo/codex-root', status: 'M', mtime: 200, agents: ['codex'], agent_windows: [{kind: 'codex', window: '0', window_index: 0, pane: '0', pane_target: '5:0.0'}]},
+      {path: 'claude.py', abs_path: '/repo/claude-root/src/deep/claude.py', repo: '/repo/claude-root', status: 'M', mtime: 300, agents: ['claude'], agent_windows: [{kind: 'claude', window: '1', window_index: 1, pane: '0', pane_target: '5:1.0'}]},
+    ]);
+    api.setAutoApproveStateForTest('5', {
+      agent_windows: [
+        {kind: 'codex', state: 'working', working_elapsed_seconds: 65, window_index: 0, window_label: '0:codex'},
+        {kind: 'claude', state: 'idle', idle_since: now - 3600, last_active_ts: now - 3600, window_index: 1, window_label: '1:claude'},
+      ],
+    });
+    const parityPopoverHtml = api.sessionPopoverHtml('5', parityInfo, 'claude', false);
+    const parityPopoverText = parityPopoverHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+    assert.ok(parityPopoverText.includes('1:claude (pid=222) — active'), 'popover marks tmux window_active=1 as active even when selected_pane still points at window 0');
+    assert.ok(parityPopoverText.includes('0:codex (pid=111) — working for 1m 5s'), 'non-focused window keeps its own working state');
+    assert.equal((parityPopoverHtml.match(/session-agent-row[^"]*current/g) || []).length, 1, 'popover marks exactly one agent window current');
+    assert.deepStrictEqual(activeTmuxWindowIndexesFromHtml(api.tmuxWindowBarHtml('5', parityInfo)), ['1'], 'window bar marks the tmux window_active window');
+    const parityRows = api.tabberRenderedRowsForTest();
+    const parityClaudeRow = parityRows.find(row => row.type === 'window' && /^1:claude/.test(row.name));
+    const parityCodexRow = parityRows.find(row => row.type === 'window' && /^0:codex/.test(row.name));
+    assert.equal(parityClaudeRow?.classes.includes('tabber-active-window'), true, 'Tabber marks the same active tmux window as the popover and window bar');
+    assert.equal(parityClaudeRow?.date, 'active', 'Tabber active window displays active instead of stale transcript recency');
+    assert.ok((parityCodexRow?.nameHtml || '').includes('agent-window-activity-icon--working'), 'Tabber working dot uses the same working state as the popover');
+    const parityTree = api.buildTabberTree();
+    const paritySession = parityTree.entries.find(entry => entry.tabber?.session === '5');
+    const parityWindows = parityTree.entriesByDir.get('/' + paritySession.name);
+    const parityClaudeWindow = parityWindows.find(row => row.tabber.windowIndex === 1);
+    const parityClaudeRepos = parityTree.entriesByDir.get('/' + paritySession.name + '/' + parityClaudeWindow.name).map(row => row.tabber.label);
+    assert.deepEqual(parityClaudeRepos, ['/repo/claude-root'], 'Tabber and popover share the touched repo root for the active Claude window');
+    const parityMetaHtml = api.projectMetaHtml('5', parityInfo);
+    assert.ok(parityMetaHtml.includes('/repo/claude-root'), 'Info Line uses the active AI window touched repo root, not the raw pane cwd subdir');
+    assert.ok(parityMetaHtml.includes('claude-branch') && parityMetaHtml.includes('0 dirty') && parityMetaHtml.includes('3 ahead'), 'Info Line git summary matches the active window metadata');
+    assert.equal(parityMetaHtml.includes('/repo/claude-root/src/deep'), false, 'Info Line does not show the active AI window raw cwd subdir when touched repo metadata exists');
+    assert.equal(parityMetaHtml.includes('codex-branch') || parityMetaHtml.includes('4 dirty'), false, 'Info Line does not leak selected-pane git state for the inactive Codex window');
+
     api.setAutoApproveStateForTest('6', {
       agent_windows: [{kind: 'codex', state: 'working', working_elapsed_seconds: 3720, window_index: 0, window_name: 'codex', window_label: '0:codex'}],
     });
@@ -2249,7 +2305,9 @@ async function runEditorPreviewSuite() {
       },
     ]);
     const thinkingPreviewHtml = api.yoagentChatHtml();
-    assert.ok(thinkingPreviewHtml.includes('<span class="yoagent-details-preview">thinking: reading activity context</span>'), 'YO!agent collapsed details still preview real thinking/tool gist lines');
+    assert.ok(thinkingPreviewHtml.includes('<summary><span>thinking (4 words)…</span></summary>'), 'completed YO!agent thinking details collapse to a count-only summary');
+    assert.equal(thinkingPreviewHtml.includes('yoagent-details-preview'), false, 'completed YO!agent thinking details do not keep preview words in the collapsed summary');
+    assert.ok(thinkingPreviewHtml.includes('<pre class="yoagent-auxiliary-stream">thinking: reading activity context</pre>'), 'expanded completed YO!agent thinking details keep the real thinking text');
     api.setYoagentBusyForTest(false);
     api.setYoagentDraftForTest('half typed question');
     assert.ok(api.yoagentChatHtml().includes('value="half typed question"'), 'YO!agent chat draft survives summary refresh re-renders');
@@ -2968,7 +3026,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/function yoagentMessageLatencyHtml[\s\S]*yoagent-message-latency[\s\S]*yoagent\.responseLatency/.test(src), 'YO!agent assistant timestamps include a localized response-latency suffix');
     assert.ok(/function yoagentMessageDetailsHtml[\s\S]*data-yoagent-message-details-key/.test(src), 'YO!agent assistant diagnostics render as an expandable details block with a stable message key');
     assert.ok(/function yoagentAuxiliaryLineIsDiagnostic[\s\S]*usage:[\s\S]*response time/.test(src), 'YO!agent collapsed details filter diagnostics out of auxiliary previews');
-    assert.ok(/function yoagentMessageDetailsHtml[\s\S]*yoagent-details-preview[\s\S]*yoagent-auxiliary-stream[\s\S]*yoagent-details-note/.test(src), 'YO!agent assistant diagnostics render a collapsed auxiliary preview, expanded stream, and truncation note');
+    assert.ok(/function yoagentMessageDetailsHtml[\s\S]*yoagentThinkingDetailsPreview[\s\S]*yoagentDetailsPreviewHtml[\s\S]*yoagent-auxiliary-stream[\s\S]*yoagent-details-note/.test(src), 'YO!agent assistant diagnostics render active thinking preview, expanded stream, and truncation note');
     assert.ok(/function yoagentToolLineHtml[\s\S]*yoagent-tc-command/.test(src), 'YO!agent tool-call lines wrap executed commands in a dedicated command span');
     assert.ok(/t\('yoagent\.toolCall\.label'\)/.test(src), 'YO!agent tool-call details use the localized "tool call" label instead of TC');
     assert.ok(/\.yoagent-tc-command\s*\{[\s\S]*color:\s*var\(--code-function\)/.test(css), 'YO!agent tool-call command span has a distinct themed color');
@@ -2978,7 +3036,8 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.yoagent-message-details pre\s*\{[\s\S]*overscroll-behavior:\s*auto/.test(css), 'YO!agent diagnostics details allow vertical wheel chaining at scroll edges');
     assert.ok(/\.yoagent-message-details summary::before\s*\{[\s\S]*border-inline-start:\s*6px solid currentColor/.test(css), 'YO!agent diagnostics summary renders an explicit disclosure triangle');
     assert.ok(/\.yoagent-message-details\[open\] summary::before\s*\{[\s\S]*transform:\s*rotate\(90deg\)/.test(css), 'YO!agent disclosure triangle rotates when details are open');
-    assert.ok(/\.yoagent-details-preview\s*\{[\s\S]*max-height:\s*calc\(2 \* max/.test(css), 'YO!agent collapsed auxiliary preview reserves at most two lines while running');
+    assert.ok(/\.yoagent-details-preview\s*\{[\s\S]*max-height:\s*calc\(2 \* max/.test(css), 'YO!agent default collapsed auxiliary preview reserves at most two lines');
+    assert.ok(/\.yoagent-details-preview\.yoagent-thinking-live-preview\s*\{[\s\S]*max-height:\s*calc\(5 \* max/.test(css), 'YO!agent live thinking collapsed preview reserves five visual lines while running');
     assert.ok(/\.yoagent-details-preview\s*\{[\s\S]*overflow:\s*clip/.test(css), 'YO!agent collapsed auxiliary preview clips without becoming a hidden scroll container');
     assert.ok(/\.yoagent-message-details pre\.yoagent-auxiliary-stream\s*\{[\s\S]*color:\s*color-mix/.test(css), 'YO!agent auxiliary stream is visually quieter than normal chat text');
     assert.ok(/body\.theme-light \.yoagent-message,[\s\S]*body\.theme-light \.yoagent-message-body,[\s\S]*color:\s*var\(--lt-text\)/.test(css), 'YO!agent light-mode message bodies use readable light-mode text');

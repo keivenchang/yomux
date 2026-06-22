@@ -1601,7 +1601,7 @@ async function runLayoutAsyncSuite() {
 
     {
       const api = loadYolomux('', ['1']);
-      const detailsPreviews = html => [...String(html || '').matchAll(/<span class="yoagent-details-preview">([\s\S]*?)<\/span>/g)].map(match => match[1]);
+      const detailsPreviews = html => [...String(html || '').matchAll(/<span class="[^"]*\byoagent-details-preview\b[^"]*">([\s\S]*?)<\/span>/g)].map(match => match[1]);
       const thinkingLine = 'thinking: scanning files reading activity context final synthesis';
       api.applyYoagentStreamPayloadForTest({
         stream_id: 'stream-thinking',
@@ -1612,9 +1612,11 @@ async function runLayoutAsyncSuite() {
         hidden_work_active: true,
         tool_active: true,
       });
-      const runningPreviews = detailsPreviews(api.yoagentChatHtml());
+      const runningHtml = api.yoagentChatHtml();
+      const runningPreviews = detailsPreviews(runningHtml);
       assert.equal(runningPreviews[0], thinkingLine, 'running thinking preview shows one continuously growing thinking line');
       assert.equal(runningPreviews[1], 'tool output: command: collected files', 'tool calls use their own one-line TC preview');
+      assert.ok(runningHtml.includes('yoagent-thinking-live-preview'), 'running thinking preview uses the five-line live preview clamp');
       api.applyYoagentStreamPayloadForTest({
         stream_id: 'stream-thinking',
         phase: 'hidden_work_done',
@@ -1623,8 +1625,8 @@ async function runLayoutAsyncSuite() {
         auxiliary_lines: [thinkingLine, 'tool output: command: collected files'],
       });
       const donePreviews = detailsPreviews(api.yoagentChatHtml());
-      assert.equal(donePreviews[0], thinkingLine, 'completed thinking preview keeps the final continuous thinking line');
-      assert.equal(donePreviews[1], 'tool output: command: collected files', 'completed tool-call preview remains separate from thinking');
+      assert.equal(donePreviews.length, 1, 'completed thinking summary collapses to count-only with no preview words');
+      assert.equal(donePreviews[0], 'tool output: command: collected files', 'completed tool-call preview remains separate from thinking');
 
       const longThinking = ['thinking:', ...Array.from({length: 72}, (_value, index) => `word${index}`)].join(' ');
       api.applyYoagentConversationPayloadForTest({
@@ -1638,10 +1640,26 @@ async function runLayoutAsyncSuite() {
       });
       const longHtml = api.yoagentChatHtml();
       const longPreviews = detailsPreviews(longHtml);
-      const expectedTail = `… ${Array.from({length: 50}, (_value, index) => `word${index + 22}`).join(' ')}`;
-      assert.equal(longPreviews[0], expectedTail, 'long thinking preview shows the last 50 words with an ellipsis');
+      assert.deepStrictEqual(longPreviews, [], 'completed thinking details do not show preview words in the collapsed summary');
       assert.ok(longHtml.includes('thinking (73 words)…'), 'completed thinking details label counts the full thinking text');
       assert.ok(longHtml.includes(longThinking), 'expanded thinking details keep the complete thinking text');
+      assert.equal(longHtml.includes('did not expose readable thinking text'), false, 'word-bearing thinking does not show the token-only note');
+
+      api.applyYoagentConversationPayloadForTest({
+        messages: [{
+          role: 'assistant',
+          content: 'answer',
+          createdAt: '2026-06-20T00:00:00Z',
+          auxiliaryLines: ['thinking... (~200 tokens)'],
+          auxiliaryText: 'thinking... (~200 tokens)',
+        }],
+      });
+      const tokenProgressHtml = api.yoagentChatHtml();
+      assert.ok(tokenProgressHtml.includes('thinking (~200 tokens)…'), 'Claude token-only thinking progress is labeled as tokens, not fake words');
+      assert.equal(tokenProgressHtml.includes('thinking (2 words)…'), false, 'Claude token-only thinking progress does not use the text word counter');
+      assert.equal(tokenProgressHtml.includes('thinking: thinking'), false, 'Claude token-only thinking progress does not duplicate the thinking prefix');
+      assert.ok(tokenProgressHtml.includes('did not expose readable thinking text'), 'Claude token-only thinking progress explains why no words are shown');
+      assert.equal(tokenProgressHtml.includes('<pre class="yoagent-auxiliary-stream">thinking... (~200 tokens)</pre>'), false, 'Claude token-only progress is metadata, not fake thinking body text');
     }
 
     {
@@ -1685,6 +1703,24 @@ async function runLayoutAsyncSuite() {
       assert.deepStrictEqual(ordered, [...ordered].sort((left, right) => left - right), 'thinking/tool rows and assistant text render in stream order');
       assert.ok(html.includes('yoagent-message-stream'), 'interleaved stream uses the ordered message stream renderer');
       assert.equal((html.match(/<details class="[^"]*yoagent-message-details/g) || []).length, 2, 'thinking and tool-call stream rows remain independently collapsible');
+    }
+
+    {
+      const api = loadYolomux('', ['1']);
+      api.applyYoagentStreamPayloadForTest({
+        stream_id: 'stream-real-claude-thinking',
+        phase: 'thinking',
+        content: '',
+        stream_items: [
+          {kind: 'thinking', text: 'thinking: Reading context\n  and checking files'},
+        ],
+        auxiliary_lines: ['thinking: Reading context and checking files'],
+        hidden_work_active: true,
+      });
+      const html = api.yoagentChatHtml();
+      assert.ok(html.includes('thinking: Reading context\n  and checking files'), 'real Claude thinking text stream renders in the expanded GUI body');
+      assert.ok(html.includes('thinking (6 words)…'), 'real Claude thinking text uses the normal thinking label');
+      assert.equal(html.includes('did not expose readable thinking text'), false, 'real Claude thinking text never shows the token-only note');
     }
 
     {

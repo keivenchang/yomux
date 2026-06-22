@@ -13616,7 +13616,7 @@ function tabberWindowLabelHtml(label, iconHtml, options = {}) {
   const nameText = text;
   const pidText = Number.isFinite(pid) && pid > 0 ? ` (pid=${Math.floor(pid)})` : '';
   const activityIconHtml = String(options.activityIconHtml || '');
-  return `<span class="tabber-window-label"><span class="tabber-window-text">${esc(nameText)}</span>${activityIconHtml}${iconHtml}${pidText ? `<span class="tabber-window-pid">${esc(pidText)}</span>` : ''}</span>`;
+  return `<span class="tabber-window-label">${iconHtml}<span class="tabber-window-text">${esc(nameText)}</span>${activityIconHtml}${pidText ? `<span class="tabber-window-pid">${esc(pidText)}</span>` : ''}</span>`;
 }
 
 function tabberSessionChromeHtml(data) {
@@ -19436,7 +19436,10 @@ function sessionPopoverAgentWindowPid(agent, pidByIndex) {
 }
 
 function sessionPopoverActiveWindowIndex(session, info) {
-  const pane = terminalDisplayPane(info, session) || info?.selected_pane || null;
+  if (typeof tmuxWindowCurrentActiveIndex === 'function') return tmuxWindowCurrentActiveIndex(session, info);
+  const active = typeof tmuxWindowInfoActiveIndex === 'function' ? tmuxWindowInfoActiveIndex(info) : null;
+  if (active !== null) return active;
+  const pane = info?.selected_pane || null;
   return tmuxWindowIndexKey(pane?.window ?? pane?.window_index);
 }
 
@@ -21316,6 +21319,25 @@ function repoSummaryAsGit(repo) {
   };
 }
 
+function activeAgentWindowMetadataItemForProjectMeta(session, info, activePane, activeAgentKind) {
+  const kind = typeof agentWindowKind === 'function' ? agentWindowKind(activeAgentKind) : String(activeAgentKind || '').trim().toLowerCase();
+  if (!activePane || !['claude', 'codex'].includes(kind)) return null;
+  if (typeof tmuxWindowCurrentActiveIndex !== 'function' || typeof sessionPopoverSortedAgentWindows !== 'function' || typeof sessionPopoverWindowMetadataItems !== 'function') return null;
+  const activeWindowIndex = tmuxWindowCurrentActiveIndex(session, info);
+  if (activeWindowIndex === null) return null;
+  const agentRows = sessionPopoverSortedAgentWindows(session, info, autoApproveStates.get(session));
+  const metadataItems = sessionPopoverWindowMetadataItems(session, info, agentRows);
+  return metadataItems.find(item => tmuxWindowIndexKey(item?.agent?.window_index ?? item?.agent?.window) === activeWindowIndex) || null;
+}
+
+function projectMetaPathFromWindowMetadata(meta) {
+  const paths = Array.isArray(meta?.paths) ? meta.paths.map(path => String(path || '').trim()).filter(Boolean) : [];
+  if (paths.length) return paths[0];
+  const path = String(meta?.path || '').trim();
+  if (path) return path;
+  return String(meta?.git?.root || '').trim();
+}
+
 function projectMetaSelection(session, info) {
   const project = info?.project || {};
   const repos = sessionRepoSummaries(info);
@@ -21324,7 +21346,11 @@ function projectMetaSelection(session, info) {
   const activePath = normalizeDirectoryPath(activePane?.current_path || '');
   const activeAgent = activePane ? agentForPane(info, activePane) : null;
   const activeAgentKind = String(activeAgent?.kind || activePane?.process_label || activePane?.command || '').toLowerCase();
-  const activeWindowUsesTranscript = activeAgent && ['claude', 'codex'].includes(activeAgentKind);
+  const activeWindowUsesTranscript = ['claude', 'codex'].includes(typeof agentWindowKind === 'function' ? agentWindowKind(activeAgentKind) : activeAgentKind);
+  const activeWindowMetadataItem = !explicitRoot ? activeAgentWindowMetadataItemForProjectMeta(session, info, activePane, activeAgentKind) : null;
+  const activeWindowMeta = activeWindowMetadataItem?.meta || null;
+  const activeWindowMetaHasSharedData = Boolean(activeWindowMeta?.git) || (Array.isArray(activeWindowMeta?.paths) && activeWindowMeta.paths.length > 0);
+  const activeWindowMetaPath = projectMetaPathFromWindowMetadata(activeWindowMeta);
   let repoIndex = selectedSessionRepoIndex(session, info);
   if (!explicitRoot && activePath && repos.length) {
     const activeRepoIndex = repos.findIndex(repo => repo?.root && pathIsInsideDirectory(activePath, repo.root));
@@ -21334,6 +21360,21 @@ function projectMetaSelection(session, info) {
   let git = selectedRepo ? repoSummaryAsGit(selectedRepo) : displayedSessionGit(session, info);
   let repoSwitchRepos = repos;
   let fullPath = selectedRepo?.cwd || selectedRepo?.root || panelFullPath(session, info);
+  if (!explicitRoot && activeWindowMetaHasSharedData) {
+    const activeMetaRoot = repoRootKey(activeWindowMeta.git?.root || '');
+    const activeMetaRepoIndex = activeMetaRoot
+      ? repos.findIndex(repo => repoRootKey(repo.root) === activeMetaRoot)
+      : activeWindowMetaPath
+        ? repos.findIndex(repo => repo?.root && pathIsInsideDirectory(activeWindowMetaPath, repo.root))
+        : -1;
+    if (activeMetaRepoIndex >= 0) {
+      repoIndex = activeMetaRepoIndex;
+      selectedRepo = repos[repoIndex];
+    }
+    if (activeWindowMeta.git) git = activeWindowMeta.git;
+    else if (selectedRepo) git = repoSummaryAsGit(selectedRepo);
+    if (activeWindowMetaPath) fullPath = activeWindowMetaPath;
+  }
   if (!explicitRoot && activePane && git?.root && activePath && !pathIsInsideDirectory(activePath, git.root) && !activeWindowUsesTranscript) {
     git = null;
     selectedRepo = null;
@@ -21393,7 +21434,7 @@ function projectMetaHtml(session, info) {
   if (fullPath) parts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
   if (Number.isFinite(git.behind) && git.behind > 0) parts.push(`<span class="meta-muted">${esc(t('git.behind', {count: git.behind}))}</span>`);
   if (Number.isFinite(git.ahead) && git.ahead > 0) parts.push(`<span class="meta-muted">${esc(t('git.ahead', {count: git.ahead}))}</span>`);
-  if (Number.isFinite(git.dirty_count) && git.dirty_count > 0) parts.push(`<span class="meta-muted">${esc(t('git.dirty', {count: git.dirty_count}))}</span>`);
+  if (Number.isFinite(git.dirty_count)) parts.push(`<span class="meta-muted">${esc(t('git.dirty', {count: git.dirty_count}))}</span>`);
   if (showingPrimaryGit && pr?.number) {
     if (!pullRequestIsMerged(pr) && pr.checks?.state && pr.checks.state !== 'unknown') {
       parts.push(`<span class="meta-pr-status ${pullRequestCiStatusClass(pr)}">${esc(pr.checks.summary || pullRequestStatusLabel(pr))}</span>`);
@@ -26154,6 +26195,17 @@ function tmuxWindowInfoActiveIndex(info) {
   return active ? String(active.index) : null;
 }
 
+function tmuxWindowCurrentActiveIndex(session, info) {
+  const override = session ? tmuxWindowDisplayActiveIndex(session) : undefined;
+  if (override !== undefined) {
+    return override === tmuxWindowPendingActiveIndex ? null : tmuxWindowIndexKey(override);
+  }
+  const active = tmuxWindowInfoActiveIndex(info);
+  if (active !== null) return active;
+  const pane = info?.selected_pane || null;
+  return tmuxWindowIndexKey(pane?.window ?? pane?.window_index);
+}
+
 function reconcileTmuxWindowActiveIndexOverride(session, info, options = {}) {
   const sequence = tmuxWindowSwitchOptionSequence(options);
   if (sequence > 0 && !tmuxWindowSwitchSequenceMatches(session, sequence)) return false;
@@ -27041,6 +27093,7 @@ function yoagentAuxiliaryLineIsThinking(line) {
 }
 
 const YOAGENT_THINKING_PREVIEW_WORDS = 50;
+const YOAGENT_THINKING_LIVE_PREVIEW_WORDS = 160;
 
 function yoagentAuxiliaryPreviewThinkingLines(text) {
   const result = [];
@@ -27071,12 +27124,13 @@ function yoagentLastLines(lines, count = 1) {
   return (Array.isArray(lines) ? lines : []).slice(-Math.max(1, count)).join('\n');
 }
 
-function yoagentThinkingPreviewText(text) {
+function yoagentThinkingPreviewText(text, wordLimit = YOAGENT_THINKING_PREVIEW_WORDS) {
   const normalized = String(text || '').replace(/\\n/g, '\n').replace(/\s+/g, ' ').trim();
   if (!normalized) return '';
   const words = yoagentThinkingWords(normalized);
-  if (words.length <= YOAGENT_THINKING_PREVIEW_WORDS) return normalized;
-  return `… ${words.slice(-YOAGENT_THINKING_PREVIEW_WORDS).join(' ')}`;
+  const limit = Math.max(1, Number(wordLimit) || YOAGENT_THINKING_PREVIEW_WORDS);
+  if (words.length <= limit) return normalized;
+  return `… ${words.slice(-limit).join(' ')}`;
 }
 
 function yoagentThinkingWords(text) {
@@ -27086,6 +27140,68 @@ function yoagentThinkingWords(text) {
 
 function yoagentThinkingWordCount(text) {
   return yoagentThinkingWords(text).length;
+}
+
+function yoagentThinkingTokenCount(text) {
+  let latest = 0;
+  const tokenPattern = /~\s*([0-9][\d,.]*)([kKmM]?)\s*tokens?\b/g;
+  for (const match of String(text || '').matchAll(tokenPattern)) {
+    const value = Number(String(match[1] || '').replace(/,/g, ''));
+    if (!Number.isFinite(value) || value <= 0) continue;
+    const suffix = String(match[2] || '').toLowerCase();
+    const multiplier = suffix === 'm' ? 1000000 : (suffix === 'k' ? 1000 : 1);
+    latest = Math.max(latest, Math.round(value * multiplier));
+  }
+  return latest;
+}
+
+function yoagentThinkingLabel(text) {
+  const tokenCount = yoagentThinkingTokenCount(text);
+  if (tokenCount > 0) return tPlural('yoagent.thinking.tokens', tokenCount);
+  return tPlural('yoagent.thinking.words', yoagentThinkingWordCount(text));
+}
+
+function yoagentThinkingReadableText(text) {
+  return String(text || '')
+    .replace(/\\n/g, '\n')
+    .replace(/\(~\s*[0-9][\d,.]*[kKmM]?\s*tokens?\)/g, ' ')
+    .replace(/~\s*[0-9][\d,.]*[kKmM]?\s*tokens?\b/g, ' ')
+    .split(/\r?\n/)
+    .map(line => line.replace(/^\s*(?:thinking summary|redacted thinking|thinking)\s*(?::|[.…-]+)?\s*/i, ''))
+    .join(' ')
+    .replace(/[()[\]{}~*.,:;!?\s-]+/g, ' ')
+    .trim();
+}
+
+function yoagentThinkingIsTokenOnly(text) {
+  return yoagentThinkingTokenCount(text) > 0 && !yoagentThinkingReadableText(text);
+}
+
+function yoagentThinkingTokenOnlyNoteHtml(text) {
+  return yoagentThinkingIsTokenOnly(text)
+    ? `<div class="yoagent-details-note">${esc(t('yoagent.thinking.tokensOnlyNote'))}</div>`
+    : '';
+}
+
+function yoagentThinkingDetailsPreview(text, options = {}) {
+  if (!options.active || yoagentThinkingIsTokenOnly(text)) return '';
+  return yoagentThinkingPreviewText(text, YOAGENT_THINKING_LIVE_PREVIEW_WORDS);
+}
+
+function yoagentThinkingPreviewActive(message) {
+  if (message && Object.prototype.hasOwnProperty.call(message, 'thinkingActive')) {
+    return Boolean(message.thinkingActive);
+  }
+  if (message && Object.prototype.hasOwnProperty.call(message, 'auxiliaryActive')) {
+    return Boolean(message.auxiliaryActive);
+  }
+  return Boolean(message?.streaming);
+}
+
+function yoagentDetailsPreviewHtml(preview, className = '') {
+  if (!preview) return '';
+  const classes = ['yoagent-details-preview', className].filter(Boolean).join(' ');
+  return `<span class="${esc(classes)}">${esc(preview)}</span>`;
 }
 
 function yoagentToolLineHtml(line) {
@@ -27134,13 +27250,14 @@ function yoagentPreviewLine(text) {
   return String(text || '').replace(/\\n/g, '\n').split(/\r?\n/).map(line => line.trim()).filter(Boolean)[0] || '';
 }
 
-function yoagentStreamAuxiliaryItemHtml(item, key, index) {
+function yoagentStreamAuxiliaryItemHtml(item, key, index, options = {}) {
   const kind = String(item?.kind || '');
   const text = String(item?.text || '');
   if (!text || (kind !== 'thinking' && kind !== 'tool')) return '';
   const tool = kind === 'tool';
-  const label = tool ? t('yoagent.toolCall.label') : tPlural('yoagent.thinking.words', yoagentThinkingWordCount(text));
-  const preview = tool ? yoagentPreviewLine(text) : yoagentThinkingPreviewText(text);
+  const label = tool ? t('yoagent.toolCall.label') : yoagentThinkingLabel(text);
+  const preview = tool ? yoagentPreviewLine(text) : yoagentThinkingDetailsPreview(text, options);
+  const previewHtml = yoagentDetailsPreviewHtml(preview, tool ? '' : 'yoagent-thinking-live-preview');
   const classes = tool
     ? 'yoagent-message-details yoagent-toolcall-details has-auxiliary yoagent-stream-detail'
     : 'yoagent-message-details has-auxiliary yoagent-stream-detail';
@@ -27148,21 +27265,26 @@ function yoagentStreamAuxiliaryItemHtml(item, key, index) {
     ? 'yoagent-auxiliary-stream yoagent-toolcall-stream'
     : 'yoagent-auxiliary-stream';
   const body = tool ? yoagentToolLinesHtml(String(text).replace(/\\n/g, '\n').split(/\r?\n/)) : esc(text);
+  const note = tool ? '' : yoagentThinkingTokenOnlyNoteHtml(text);
+  const streamBody = tool || !yoagentThinkingIsTokenOnly(text)
+    ? `<pre class="${streamClasses}">${body}</pre>`
+    : '';
   const streamIndex = Number.isFinite(Number(item?.sourceIndex)) ? Number(item.sourceIndex) : index;
   return `<details class="${classes}" data-yoagent-message-details-key="${esc(`${key}|stream|${streamIndex}`)}">
-    <summary><span>${esc(`${label}…`)}</span>${preview ? `<span class="yoagent-details-preview">${esc(preview)}</span>` : ''}</summary>
-    <pre class="${streamClasses}">${body}</pre>
+    <summary><span>${esc(`${label}…`)}</span>${previewHtml}</summary>
+    ${note}${streamBody}
   </details>`;
 }
 
 function yoagentMessageStreamItemsHtml(message, key = '') {
   const items = yoagentStreamItems(message);
   if (!items.length) return '';
+  const thinkingActive = yoagentThinkingPreviewActive(message);
   return `<div class="yoagent-message-stream">${items.map((item, index) => {
     if (item.kind === 'assistant') {
       return `<div class="yoagent-message-body markdown-body yoagent-stream-assistant" data-yoagent-markdown>${esc(item.text)}</div>`;
     }
-    return yoagentStreamAuxiliaryItemHtml(item, key, index);
+    return yoagentStreamAuxiliaryItemHtml(item, key, index, {active: thinkingActive});
   }).join('')}</div>`;
 }
 
@@ -27174,18 +27296,20 @@ function yoagentMessageDetailsHtml(message, key = '') {
   const auxiliaryText = thinkingLines.join('\n');
   const toolText = toolLines.join('\n');
   const auxiliaryPreviewLines = yoagentAuxiliaryPreviewThinkingLines(message?.auxiliaryPreview || '');
-  const auxiliaryPreview = yoagentThinkingPreviewText(auxiliaryPreviewLines.join('\n') || thinkingLines.join('\n'));
+  const auxiliarySourceText = auxiliaryPreviewLines.join('\n') || thinkingLines.join('\n');
+  const auxiliaryBodyText = auxiliaryText || auxiliarySourceText;
+  const thinkingActive = yoagentThinkingPreviewActive(message);
+  const auxiliaryPreview = yoagentThinkingDetailsPreview(auxiliarySourceText, {active: thinkingActive});
   const toolPreview = yoagentPreviewLine(yoagentLastLines(toolLines, 1));
-  const hasAuxiliary = Boolean(auxiliaryText || auxiliaryPreview);
+  const hasAuxiliary = Boolean(auxiliaryBodyText || auxiliaryPreview);
   const hasTool = Boolean(toolText || toolPreview);
   const truncated = Boolean(message?.auxiliaryTruncated);
   if (!text && !hasAuxiliary && !hasTool) return '';
-  const preview = auxiliaryPreview
-    ? `<span class="yoagent-details-preview">${esc(auxiliaryPreview)}</span>`
+  const preview = yoagentDetailsPreviewHtml(auxiliaryPreview, 'yoagent-thinking-live-preview');
+  const auxiliaryBlock = auxiliaryBodyText && !yoagentThinkingIsTokenOnly(auxiliaryBodyText)
+    ? `<pre class="yoagent-auxiliary-stream">${esc(auxiliaryBodyText)}</pre>`
     : '';
-  const auxiliaryBlock = auxiliaryText
-    ? `<pre class="yoagent-auxiliary-stream">${esc(auxiliaryText)}</pre>`
-    : '';
+  const tokenOnlyNote = auxiliaryBodyText ? yoagentThinkingTokenOnlyNoteHtml(auxiliaryBodyText) : '';
   const truncationNote = truncated
     ? `<div class="yoagent-details-note">auxiliary stream truncated to latest entries</div>`
     : '';
@@ -27193,17 +27317,17 @@ function yoagentMessageDetailsHtml(message, key = '') {
     ? `<pre class="yoagent-safe-details">${esc(text)}</pre>`
     : '';
   const detailsLabel = hasAuxiliary
-    ? tPlural('yoagent.thinking.words', yoagentThinkingWordCount(auxiliaryText || auxiliaryPreview))
+    ? yoagentThinkingLabel(auxiliaryBodyText || auxiliaryPreview)
     : t('popover.details');
   const thinkingDetails = (text || hasAuxiliary)
     ? `<details class="yoagent-message-details${hasAuxiliary ? ' has-auxiliary' : ''}" data-yoagent-message-details-key="${esc(key)}">
     <summary><span>${esc(`${detailsLabel}…`)}</span>${preview}</summary>
-    ${auxiliaryBlock}${truncationNote}${detailsBlock}
+    ${tokenOnlyNote}${auxiliaryBlock}${truncationNote}${detailsBlock}
   </details>`
     : '';
   const toolDetails = hasTool
     ? `<details class="yoagent-message-details yoagent-toolcall-details has-auxiliary" data-yoagent-message-details-key="${esc(`${key}|tc`)}">
-    <summary><span>${esc(t('yoagent.toolCall.label'))}</span>${toolPreview ? `<span class="yoagent-details-preview">${esc(toolPreview)}</span>` : ''}</summary>
+    <summary><span>${esc(t('yoagent.toolCall.label'))}</span>${yoagentDetailsPreviewHtml(toolPreview)}</summary>
     <pre class="yoagent-auxiliary-stream yoagent-toolcall-stream">${yoagentToolLinesHtml(toolLines.length ? toolLines : [toolPreview])}</pre>
   </details>`
     : '';
@@ -27585,7 +27709,9 @@ function applyYoagentStreamPayload(payload = {}) {
   const streamItems = Array.isArray(payload.stream_items)
     ? yoagentStreamItems({streamItems: payload.stream_items})
     : yoagentStreamItems(previous);
-  const auxiliaryActive = Boolean(payload.hidden_work_active || payload.tool_active);
+  const thinkingActive = Boolean(payload.hidden_work_active);
+  const toolActive = Boolean(payload.tool_active);
+  const auxiliaryActive = Boolean(thinkingActive || toolActive);
   const thinkingLines = auxiliaryLines.filter(line => !yoagentAuxiliaryLineIsTool(line) && !yoagentAuxiliaryLineIsDiagnostic(line));
   const auxiliaryPreviewLines = yoagentAuxiliaryPreviewThinkingLines(payload.auxiliary_preview || '');
   const auxiliaryPreview = yoagentThinkingPreviewText(
@@ -27606,6 +27732,8 @@ function applyYoagentStreamPayload(payload = {}) {
     auxiliaryText: auxiliaryLines.join('\n') || previous.auxiliaryText || '',
     auxiliaryPreview,
     streamItems,
+    thinkingActive,
+    toolActive,
     auxiliaryActive,
     auxiliaryDone: Boolean(payload.auxiliary_done) || previous.auxiliaryDone || false,
     auxiliaryTruncated: Boolean(payload.auxiliary_truncated) || previous.auxiliaryTruncated || false,

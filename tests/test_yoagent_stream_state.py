@@ -1,6 +1,7 @@
 import pytest
 
 from yolomux_lib import app as app_module
+from yolomux_lib.agent_comms.stream_events import ClaudeStreamJsonNormalizer
 
 
 pytestmark = pytest.mark.usefixtures("no_control_socket", "isolated_yoagent_conversation_state")
@@ -138,6 +139,25 @@ def test_yoagent_stream_callback_replaces_claude_thinking_heartbeat():
     assert payloads[-1]["auxiliary_lines"] == ["thinking: Reading context and checking files"]
 
 
+def test_yoagent_stream_callback_ignores_later_claude_heartbeats_after_words():
+    webapp = app_module.TmuxWebtermApp(["5"])
+    events = []
+    webapp.publish_client_event = lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {}))
+    try:
+        callback = webapp.yoagent_stream_callback("stream-claude-live-words", "claude")
+        callback({"kind": "hidden_work_delta", "text": "thinking... (~3 tokens)"})
+        callback({"kind": "hidden_work_delta", "text": "Reading context"})
+        callback({"kind": "hidden_work_delta", "text": "thinking... (~23 tokens)"})
+        callback({"kind": "hidden_work_delta", "text": " and checking files"})
+    finally:
+        webapp.control_server.stop()
+
+    payloads = [payload for event_type, payload in events if event_type == "yoagent_stream_delta"]
+    assert payloads[2]["auxiliary_lines"] == ["thinking: Reading context"]
+    assert payloads[-1]["auxiliary_lines"] == ["thinking: Reading context and checking files"]
+    assert payloads[-1]["stream_items"] == [{"kind": "thinking", "text": "thinking: Reading context and checking files"}]
+
+
 def test_yoagent_stream_callback_replaces_plain_claude_thinking_heartbeat_at_done(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["5"])
     events = []
@@ -166,6 +186,79 @@ def test_yoagent_stream_callback_replaces_plain_claude_thinking_heartbeat_at_don
     assert stored_messages[-1]["auxiliaryText"] == "thinking: Reading context across files and preparing answer"
     assert stored_messages[-1]["streamItems"][0]["text"] == "thinking: Reading context across files and preparing answer"
     assert "thinking: thinking" not in stored_messages[-1]["auxiliaryText"]
+
+
+def test_yoagent_stream_callback_keeps_claude_token_progress_after_empty_thinking_snapshot(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["5"])
+    events = []
+    stored_messages = []
+    normalizer = ClaudeStreamJsonNormalizer()
+    webapp.publish_client_event = lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {}))
+    monkeypatch.setattr(app_module.yoagent_conversation, "append_message", lambda message: stored_messages.append(message) or message)
+    try:
+        callback = webapp.yoagent_stream_callback("stream-claude-token-progress", "claude")
+        for line in [
+            {"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 50, "estimated_tokens_delta": 50, "session_id": "claude-session"},
+            {"type": "stream_event", "session_id": "claude-session", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "", "estimated_tokens": 50}}},
+            {"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 200, "estimated_tokens_delta": 150, "session_id": "claude-session"},
+            {"type": "stream_event", "session_id": "claude-session", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "", "estimated_tokens": 150}}},
+            {"type": "assistant", "session_id": "claude-session", "message": {"content": [{"type": "thinking", "thinking": "", "signature": "signed-redacted-thinking"}]}},
+        ]:
+            for event in normalizer.normalize_item(line):
+                callback(event)
+        callback({"kind": "assistant_delta", "text": "Final answer"})
+        callback({"kind": "turn_done"})
+        fields = webapp.yoagent_stream_auxiliary_message_fields("stream-claude-token-progress")
+        webapp.record_yoagent_message("assistant", "Final answer", **fields)
+    finally:
+        webapp.control_server.stop()
+
+    payloads = [payload for event_type, payload in events if event_type == "yoagent_stream_delta"]
+    assert payloads[-1]["auxiliary_lines"] == ["thinking... (~200 tokens)"]
+    assert payloads[-1]["stream_items"] == [
+        {"kind": "thinking", "text": "thinking... (~200 tokens)"},
+        {"kind": "assistant", "text": "Final answer"},
+    ]
+    assert stored_messages[-1]["auxiliaryText"] == "thinking... (~200 tokens)"
+    assert "thinking: thinking" not in stored_messages[-1]["auxiliaryText"]
+
+
+def test_yoagent_stream_callback_keeps_claude_usage_from_hiding_thinking(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["5"])
+    events = []
+    stored_messages = []
+    normalizer = ClaudeStreamJsonNormalizer()
+    webapp.publish_client_event = lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {}))
+    monkeypatch.setattr(app_module.yoagent_conversation, "append_message", lambda message: stored_messages.append(message) or message)
+    try:
+        callback = webapp.yoagent_stream_callback("stream-claude-real-shape", "claude")
+        for line in [
+            {"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 50, "estimated_tokens_delta": 50, "session_id": "claude-session"},
+            {"type": "stream_event", "session_id": "claude-session", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "", "estimated_tokens": 50}}},
+            {"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 86, "estimated_tokens_delta": 36, "session_id": "claude-session"},
+            {"type": "stream_event", "session_id": "claude-session", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "signed-redacted-thinking"}}},
+            {"type": "assistant", "session_id": "claude-session", "message": {"content": [{"type": "thinking", "thinking": "", "signature": "signed-redacted-thinking"}]}},
+            {"type": "stream_event", "session_id": "claude-session", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "Final answer"}}},
+            {"type": "result", "is_error": False, "usage": {"input_tokens": 1, "output_tokens": 2}},
+        ]:
+            for event in normalizer.normalize_item(line):
+                callback(event)
+        callback({"kind": "turn_done"})
+        fields = webapp.yoagent_stream_auxiliary_message_fields("stream-claude-real-shape")
+        webapp.record_yoagent_message("assistant", "Final answer", **fields)
+    finally:
+        webapp.control_server.stop()
+
+    payloads = [payload for event_type, payload in events if event_type == "yoagent_stream_delta"]
+    assert payloads[-1]["auxiliary_preview"] == "thinking... (~86 tokens)"
+    assert payloads[-1]["auxiliary_lines"] == ["thinking... (~86 tokens)"]
+    assert payloads[-1]["stream_items"] == [
+        {"kind": "thinking", "text": "thinking... (~86 tokens)"},
+        {"kind": "assistant", "text": "Final answer"},
+    ]
+    assert stored_messages[-1]["auxiliaryPreview"] == "thinking... (~86 tokens)"
+    assert stored_messages[-1]["auxiliaryText"] == "thinking... (~86 tokens)"
+    assert "usage:" not in stored_messages[-1]["auxiliaryText"]
 
 
 def test_yoagent_conversation_persists_auxiliary_stream_fields(tmp_path):

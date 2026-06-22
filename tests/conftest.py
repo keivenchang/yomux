@@ -14,8 +14,6 @@ import tempfile
 
 import pytest
 
-from yolomux_lib import app as app_module
-
 # Each process needs its OWN config/state dir. Under pytest-xdist, worker subprocesses INHERIT the
 # parent's environment, so a plain setdefault makes every parallel worker share ONE YOLOMUX_CONFIG_DIR
 # -> one state.json. Concurrent TmuxWebtermApp construction in different workers then prunes each
@@ -28,6 +26,9 @@ for _env_var, _prefix in (("YOLOMUX_CONFIG_DIR", "yolomux-test-config-"), ("YOLO
         os.environ[_env_var] = tempfile.mkdtemp(prefix=f"{_prefix}{_xdist_worker}-")
     else:
         os.environ.setdefault(_env_var, tempfile.mkdtemp(prefix=_prefix))
+
+
+from yolomux_lib import app as app_module
 
 
 SLOWEST_FIRST_TESTS = (

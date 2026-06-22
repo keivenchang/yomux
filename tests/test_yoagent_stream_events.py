@@ -50,6 +50,7 @@ def test_textless_reasoning_delta_uses_truthful_minimal_state():
     assert claude_events[0]["text"] == "thinking... (~50 tokens)"
     assert claude_events[0]["metadata"] == {"estimated_tokens": 50}
     assert yoagent_stream_event_auxiliary_line(codex_events[0]) == "thinking: reasoning..."
+    assert yoagent_stream_event_auxiliary_line(claude_events[0]) == "thinking... (~50 tokens)"
 
 
 def test_stream_events_preserve_long_text_without_truncation_marker():
@@ -123,6 +124,23 @@ def test_claude_stream_event_wrapper_feeds_current_cli_partials():
     assert events[1]["text"] == "Reading files"
     assert events[2]["tool_name"] == "Bash"
     assert events[4]["text"] == "printf ok"
+
+
+def test_claude_thinking_token_events_keep_cumulative_progress_without_empty_snapshot():
+    normalizer = ClaudeStreamJsonNormalizer()
+    lines = [
+        {"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 50, "estimated_tokens_delta": 50, "session_id": "claude-session"},
+        {"type": "stream_event", "session_id": "claude-session", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "", "estimated_tokens": 50}}},
+        {"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 200, "estimated_tokens_delta": 150, "session_id": "claude-session"},
+        {"type": "stream_event", "session_id": "claude-session", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "", "estimated_tokens": 150}}},
+        {"type": "assistant", "session_id": "claude-session", "message": {"content": [{"type": "thinking", "thinking": "", "signature": "signed-redacted-thinking"}]}},
+    ]
+
+    events = [event for line in lines for event in normalizer.normalize_line(json.dumps(line))]
+
+    assert [event["kind"] for event in events] == [HIDDEN_WORK_DELTA, HIDDEN_WORK_DELTA]
+    assert [event["text"] for event in events] == ["thinking... (~50 tokens)", "thinking... (~200 tokens)"]
+    assert events[-1]["metadata"] == {"estimated_tokens": 200, "estimated_tokens_delta": 150}
 
 
 def test_tool_auxiliary_lines_preserve_multiline_output():

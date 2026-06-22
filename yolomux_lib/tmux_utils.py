@@ -9,6 +9,7 @@ import re
 import secrets
 import subprocess
 import time
+from typing import Any
 
 from .cache import TtlCache
 
@@ -52,6 +53,33 @@ def tmux_run(*args: str, check: bool = True, timeout: float = 5.0) -> subprocess
 
 def tmux_session_target(session: str) -> str:
     return f"{session}:"
+
+
+def tmux_session_client_rows(session: str) -> list[dict[str, Any]]:
+    """Every client attached to `session`, with its column width and flags.
+
+    Deliberately NOT limited to yolomux-spawned clients: under `window-size largest` ANY wider
+    client pins the shared window wider than the focused browser surface, so the active surface
+    must be able to see -- and silence -- a hand-attached terminal too, not just sibling browsers.
+    Only columns are collected; rows never overflow the browser the same way, and tmux's status
+    line makes window rows differ from client rows, which would only muddy the comparison.
+    """
+    fmt = "\t".join(("#{client_name}", "#{client_session}", "#{client_width}", "#{client_flags}"))
+    result = tmux(["list-clients", "-F", fmt])
+    if result.returncode != 0:
+        return []
+    rows: list[dict[str, Any]] = []
+    clean_session = str(session or "")
+    for line in result.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 4 or parts[1] != clean_session:
+            continue
+        try:
+            width = int(parts[2])
+        except ValueError:
+            continue
+        rows.append({"name": parts[0], "session": parts[1], "width": width, "flags": parts[3]})
+    return rows
 
 
 def session_sort_key(session: str) -> tuple[int, str, int]:

@@ -108,6 +108,11 @@ def test_kill_session_calls_tmux_and_removes_session(monkeypatch):
 def test_tmux_select_window_calls_direct_target(monkeypatch):
     app = make_app(["1"])
     calls = []
+    monkeypatch.setattr(app_module, "tmux_session_client_rows", lambda session: [
+        {"name": "/dev/pts/1", "session": session, "width": 100, "flags": "attached,UTF-8"},
+        {"name": "client-browser", "session": session, "width": 80, "flags": "attached,ignore-size,UTF-8"},
+        {"name": "", "session": session, "width": 120, "flags": "attached,UTF-8"},
+    ])
 
     def fake_tmux(args, timeout=5.0):
         calls.append(args)
@@ -122,7 +127,36 @@ def test_tmux_select_window_calls_direct_target(monkeypatch):
     assert payload == {"session": "1", "window": "3", "ok": True}
     assert invalid_status == HTTPStatus.BAD_REQUEST
     assert "window" in invalid_payload["error"]
-    assert calls == [["select-window", "-t", "1:3"]]
+    assert calls == [
+        ["select-window", "-t", "1:3"],
+        ["switch-client", "-c", "/dev/pts/1", "-t", "1:3"],
+        ["switch-client", "-c", "client-browser", "-t", "1:3"],
+    ]
+
+
+def test_tmux_select_window_keeps_click_success_when_client_switch_fails(monkeypatch):
+    app = make_app(["1"])
+    calls = []
+    monkeypatch.setattr(app_module, "tmux_session_client_rows", lambda session: [
+        {"name": "/dev/pts/1", "session": session, "width": 100, "flags": "attached,UTF-8"},
+    ])
+
+    def fake_tmux(args, timeout=5.0):
+        calls.append(args)
+        if args[0] == "switch-client":
+            return FakeTmuxResult(returncode=1, stderr="client vanished")
+        return FakeTmuxResult()
+
+    monkeypatch.setattr(app_module, "tmux", fake_tmux)
+
+    payload, status = app.tmux_select_window("1", "2")
+
+    assert status == HTTPStatus.OK
+    assert payload == {"session": "1", "window": "2", "ok": True}
+    assert calls == [
+        ["select-window", "-t", "1:2"],
+        ["switch-client", "-c", "/dev/pts/1", "-t", "1:2"],
+    ]
 
 
 def test_list_tmux_panes_captures_window_name(monkeypatch):

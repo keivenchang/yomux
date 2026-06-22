@@ -148,6 +148,15 @@
   animation-iteration-count: infinite;
   animation-direction: normal;
 }
+.status-indicator--dot.status-indicator--attention.heartbeat-pulse {
+  border: 1px solid transparent;
+  animation-name: attention-ring-fade;
+  animation-duration: var(--pulse-duration);
+  animation-delay: var(--attention-animation-delay, 0s);
+  animation-timing-function: var(--pulse-easing);
+  animation-iteration-count: infinite;
+  animation-direction: normal;
+}
 .status-indicator--settled {
   color: var(--agent-inactive-marker-bg);
 }

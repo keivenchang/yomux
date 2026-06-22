@@ -1,6 +1,54 @@
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 
+
+def test_attention_agent_dots_share_ask_badge_pulse_computed_style(browser, tmp_path):
+    page = tmp_path / "attention-dot-pulse.html"
+    page.write_text(page_html("""
+      <span id="window-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
+      <span id="popover-dot" class="status-indicator session-agent-dot status-indicator--dot status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
+      <span id="tabber-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
+      <span id="ask-badge" class="status-indicator tabber-agent-status status-indicator--label agent-status-attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">ASK?</span>
+    """, extra_css="""
+      :root { --pulse-duration: 1.8s; --pulse-easing: ease-in-out; --bad: #ff3347; --danger-text: #ff3347; --text: #dbe2ef; --muted: #8590a6; }
+      body { background: #111; color: #ddd; font: 16px sans-serif; padding: 24px; }
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const ids = ['window-dot', 'popover-dot', 'tabber-dot', 'ask-badge'];
+        const read = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {
+            animationName: style.animationName,
+            animationPlayState: style.animationPlayState,
+            animationIterationCount: style.animationIterationCount,
+            animationDuration: style.animationDuration,
+            animationDelay: style.animationDelay,
+            borderTopStyle: style.borderTopStyle,
+            borderTopWidth: style.borderTopWidth,
+            delayVar: style.getPropertyValue('--attention-animation-delay').trim(),
+            reduced: matchMedia('(prefers-reduced-motion: reduce)').matches,
+          };
+        };
+        return Object.fromEntries(ids.map(id => [id, read(id)]));
+        """
+    )
+    if metrics["ask-badge"]["reduced"]:
+        pytest.skip("browser prefers reduced motion")
+    badge = metrics["ask-badge"]
+    for dot_id in ("window-dot", "popover-dot", "tabber-dot"):
+        dot = metrics[dot_id]
+        assert dot["animationName"] == "attention-ring-fade", {dot_id: dot}
+        assert dot["animationPlayState"] == "running", {dot_id: dot}
+        assert dot["animationIterationCount"] == "infinite", {dot_id: dot}
+        assert dot["animationDuration"] == badge["animationDuration"], {dot_id: dot, "badge": badge}
+        assert dot["animationDelay"] == badge["animationDelay"], {dot_id: dot, "badge": badge}
+        assert dot["delayVar"] == badge["delayVar"] == "-0.42s", {dot_id: dot, "badge": badge}
+        assert dot["borderTopStyle"] == "solid", {dot_id: dot}
+        assert dot["borderTopWidth"] != "0px", {dot_id: dot}
+
+
 @pytest.mark.parametrize(
     "mock_name,user_input,agent",
     [

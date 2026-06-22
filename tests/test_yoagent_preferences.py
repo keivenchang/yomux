@@ -11,6 +11,9 @@ from yolomux_lib.yoagent.preferences import product_capability_registry
 from yolomux_lib.yoagent.preferences import yoagent_operator_response
 
 
+pytestmark = pytest.mark.usefixtures("isolated_yoagent_conversation_state")
+
+
 @pytest.fixture(autouse=True)
 def no_control_socket(monkeypatch):
     monkeypatch.setattr(app_module.YolomuxControlServer, "start", lambda self: None)

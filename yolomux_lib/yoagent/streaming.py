@@ -23,6 +23,7 @@ from .stream_events import TOOL_CALL_DELTA
 from .stream_events import TOOL_CALL_FINISHED
 from .stream_events import TOOL_CALL_STARTED
 from .stream_events import TURN_DONE
+from .stream_events import USAGE
 from .stream_events import normalize_yoagent_stream_event
 from .stream_events import yoagent_stream_event_auxiliary_line
 
@@ -267,6 +268,8 @@ class YoagentStreamPublisher:
                 return prefix
             if compact.lower() == (compact_auxiliary_text(prefix).lower() or "thinking"):
                 return prefix
+            if hidden_work_text_is_heartbeat(prefix, compact):
+                return compact
             return f"{prefix}: {compact}"
 
         def append_stream_item(kind: str, text: str, *, merge: bool = True) -> None:
@@ -299,8 +302,8 @@ class YoagentStreamPublisher:
             raw_text = str(state.get("hidden_work_text") or event.get("text") or "")
             compact_text = compact_auxiliary_text(raw_text)
             if raw_text:
-                if hidden_work_text_is_heartbeat(prefix, raw_text) and compact_text.lower() == prefix.lower():
-                    return prefix
+                if hidden_work_text_is_heartbeat(prefix, raw_text):
+                    return compact_text or prefix
                 return f"{prefix}: {raw_text}"
             if compact_text:
                 return f"{prefix}: {compact_text}"
@@ -321,11 +324,15 @@ class YoagentStreamPublisher:
                 previous_prefix = str(state.get("hidden_work_prefix") or "")
                 if lines and previous_prefix == prefix:
                     previous_text = str(state.get("hidden_work_text") or "")
-                    if hidden_work_text_is_heartbeat(prefix, compact_text):
+                    incoming_is_heartbeat = hidden_work_text_is_heartbeat(prefix, compact_text)
+                    previous_is_heartbeat = hidden_work_text_is_heartbeat(prefix, previous_text)
+                    if incoming_is_heartbeat and previous_text and not previous_is_heartbeat:
+                        next_text = previous_text
+                    elif incoming_is_heartbeat:
                         next_text = compact_text
                     elif event.get("snapshot"):
                         next_text = raw_text
-                    elif hidden_work_text_is_heartbeat(prefix, previous_text):
+                    elif previous_is_heartbeat:
                         next_text = raw_text
                     else:
                         next_text = previous_text + raw_text
@@ -398,6 +405,9 @@ class YoagentStreamPublisher:
                 if event_type == TOOL_CALL_FINISHED:
                     append_stream_item("tool", yoagent_stream_event_auxiliary_line(normalized), merge=False)
                 publish([normalized], phase="tool" if event_type == TOOL_CALL_FINISHED else "thinking")
+                return
+            if event_type == USAGE:
+                publish([normalized], phase="usage")
                 return
             if event_type in {TURN_DONE, ERROR}:
                 state["hidden_work_active"] = False

@@ -704,7 +704,10 @@ function sessionPopoverAgentWindowPid(agent, pidByIndex) {
 }
 
 function sessionPopoverActiveWindowIndex(session, info) {
-  const pane = terminalDisplayPane(info, session) || info?.selected_pane || null;
+  if (typeof tmuxWindowCurrentActiveIndex === 'function') return tmuxWindowCurrentActiveIndex(session, info);
+  const active = typeof tmuxWindowInfoActiveIndex === 'function' ? tmuxWindowInfoActiveIndex(info) : null;
+  if (active !== null) return active;
+  const pane = info?.selected_pane || null;
   return tmuxWindowIndexKey(pane?.window ?? pane?.window_index);
 }
 

@@ -129,6 +129,7 @@ from .tmux_utils import tmux_capture_pane
 from .tmux_utils import tmux_capture_pane_styled
 from .tmux_utils import tmux_has_exact_session
 from .tmux_utils import tmux_paste_text
+from .tmux_utils import tmux_session_client_rows
 from .tmux_utils import tmux_session_target
 from .tmux_signals import fetch_tmux_signal_snapshot
 from .tmux_signals import TmuxSignalEventWatcher
@@ -4914,7 +4915,21 @@ class TmuxWebtermApp:
         if result.returncode != 0:
             error = (result.stderr or result.stdout or "tmux select-window failed").strip()
             return {"session": session, "window": window_text, "error": error}, HTTPStatus.INTERNAL_SERVER_ERROR
+        self.switch_attached_tmux_clients(session, target)
         return {"session": session, "window": window_text, "ok": True}, HTTPStatus.OK
+
+    def switch_attached_tmux_clients(self, session: str, target: str) -> int:
+        switched = 0
+        for row in tmux_session_client_rows(session):
+            client_name = str(row.get("name") or "").strip()
+            if not client_name:
+                continue
+            result = tmux(["switch-client", "-c", client_name, "-t", target], timeout=1.0)
+            if result.returncode == 0:
+                switched += 1
+                continue
+            logger.debug("tmux switch-client failed for %s -> %s: %s", client_name, target, cmd_error(result, "tmux switch-client failed"))
+        return switched
 
     def stop_auto_approve_worker(self, session: str) -> None:
         with self.auto_workers_lock:

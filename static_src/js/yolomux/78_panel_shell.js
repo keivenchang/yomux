@@ -1562,6 +1562,17 @@ function tmuxWindowInfoActiveIndex(info) {
   return active ? String(active.index) : null;
 }
 
+function tmuxWindowCurrentActiveIndex(session, info) {
+  const override = session ? tmuxWindowDisplayActiveIndex(session) : undefined;
+  if (override !== undefined) {
+    return override === tmuxWindowPendingActiveIndex ? null : tmuxWindowIndexKey(override);
+  }
+  const active = tmuxWindowInfoActiveIndex(info);
+  if (active !== null) return active;
+  const pane = info?.selected_pane || null;
+  return tmuxWindowIndexKey(pane?.window ?? pane?.window_index);
+}
+
 function reconcileTmuxWindowActiveIndexOverride(session, info, options = {}) {
   const sequence = tmuxWindowSwitchOptionSequence(options);
   if (sequence > 0 && !tmuxWindowSwitchSequenceMatches(session, sequence)) return false;

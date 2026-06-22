@@ -1078,6 +1078,25 @@ function repoSummaryAsGit(repo) {
   };
 }
 
+function activeAgentWindowMetadataItemForProjectMeta(session, info, activePane, activeAgentKind) {
+  const kind = typeof agentWindowKind === 'function' ? agentWindowKind(activeAgentKind) : String(activeAgentKind || '').trim().toLowerCase();
+  if (!activePane || !['claude', 'codex'].includes(kind)) return null;
+  if (typeof tmuxWindowCurrentActiveIndex !== 'function' || typeof sessionPopoverSortedAgentWindows !== 'function' || typeof sessionPopoverWindowMetadataItems !== 'function') return null;
+  const activeWindowIndex = tmuxWindowCurrentActiveIndex(session, info);
+  if (activeWindowIndex === null) return null;
+  const agentRows = sessionPopoverSortedAgentWindows(session, info, autoApproveStates.get(session));
+  const metadataItems = sessionPopoverWindowMetadataItems(session, info, agentRows);
+  return metadataItems.find(item => tmuxWindowIndexKey(item?.agent?.window_index ?? item?.agent?.window) === activeWindowIndex) || null;
+}
+
+function projectMetaPathFromWindowMetadata(meta) {
+  const paths = Array.isArray(meta?.paths) ? meta.paths.map(path => String(path || '').trim()).filter(Boolean) : [];
+  if (paths.length) return paths[0];
+  const path = String(meta?.path || '').trim();
+  if (path) return path;
+  return String(meta?.git?.root || '').trim();
+}
+
 function projectMetaSelection(session, info) {
   const project = info?.project || {};
   const repos = sessionRepoSummaries(info);
@@ -1086,7 +1105,11 @@ function projectMetaSelection(session, info) {
   const activePath = normalizeDirectoryPath(activePane?.current_path || '');
   const activeAgent = activePane ? agentForPane(info, activePane) : null;
   const activeAgentKind = String(activeAgent?.kind || activePane?.process_label || activePane?.command || '').toLowerCase();
-  const activeWindowUsesTranscript = activeAgent && ['claude', 'codex'].includes(activeAgentKind);
+  const activeWindowUsesTranscript = ['claude', 'codex'].includes(typeof agentWindowKind === 'function' ? agentWindowKind(activeAgentKind) : activeAgentKind);
+  const activeWindowMetadataItem = !explicitRoot ? activeAgentWindowMetadataItemForProjectMeta(session, info, activePane, activeAgentKind) : null;
+  const activeWindowMeta = activeWindowMetadataItem?.meta || null;
+  const activeWindowMetaHasSharedData = Boolean(activeWindowMeta?.git) || (Array.isArray(activeWindowMeta?.paths) && activeWindowMeta.paths.length > 0);
+  const activeWindowMetaPath = projectMetaPathFromWindowMetadata(activeWindowMeta);
   let repoIndex = selectedSessionRepoIndex(session, info);
   if (!explicitRoot && activePath && repos.length) {
     const activeRepoIndex = repos.findIndex(repo => repo?.root && pathIsInsideDirectory(activePath, repo.root));
@@ -1096,6 +1119,21 @@ function projectMetaSelection(session, info) {
   let git = selectedRepo ? repoSummaryAsGit(selectedRepo) : displayedSessionGit(session, info);
   let repoSwitchRepos = repos;
   let fullPath = selectedRepo?.cwd || selectedRepo?.root || panelFullPath(session, info);
+  if (!explicitRoot && activeWindowMetaHasSharedData) {
+    const activeMetaRoot = repoRootKey(activeWindowMeta.git?.root || '');
+    const activeMetaRepoIndex = activeMetaRoot
+      ? repos.findIndex(repo => repoRootKey(repo.root) === activeMetaRoot)
+      : activeWindowMetaPath
+        ? repos.findIndex(repo => repo?.root && pathIsInsideDirectory(activeWindowMetaPath, repo.root))
+        : -1;
+    if (activeMetaRepoIndex >= 0) {
+      repoIndex = activeMetaRepoIndex;
+      selectedRepo = repos[repoIndex];
+    }
+    if (activeWindowMeta.git) git = activeWindowMeta.git;
+    else if (selectedRepo) git = repoSummaryAsGit(selectedRepo);
+    if (activeWindowMetaPath) fullPath = activeWindowMetaPath;
+  }
   if (!explicitRoot && activePane && git?.root && activePath && !pathIsInsideDirectory(activePath, git.root) && !activeWindowUsesTranscript) {
     git = null;
     selectedRepo = null;
@@ -1155,7 +1193,7 @@ function projectMetaHtml(session, info) {
   if (fullPath) parts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
   if (Number.isFinite(git.behind) && git.behind > 0) parts.push(`<span class="meta-muted">${esc(t('git.behind', {count: git.behind}))}</span>`);
   if (Number.isFinite(git.ahead) && git.ahead > 0) parts.push(`<span class="meta-muted">${esc(t('git.ahead', {count: git.ahead}))}</span>`);
-  if (Number.isFinite(git.dirty_count) && git.dirty_count > 0) parts.push(`<span class="meta-muted">${esc(t('git.dirty', {count: git.dirty_count}))}</span>`);
+  if (Number.isFinite(git.dirty_count)) parts.push(`<span class="meta-muted">${esc(t('git.dirty', {count: git.dirty_count}))}</span>`);
   if (showingPrimaryGit && pr?.number) {
     if (!pullRequestIsMerged(pr) && pr.checks?.state && pr.checks.state !== 'unknown') {
       parts.push(`<span class="meta-pr-status ${pullRequestCiStatusClass(pr)}">${esc(pr.checks.summary || pullRequestStatusLabel(pr))}</span>`);

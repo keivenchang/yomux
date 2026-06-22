@@ -1408,7 +1408,10 @@ async function runTabberSuite() {
     assert.ok(rows.some(r => r.type === 'window' && r.nameHtml.includes('tabber-window-label') && r.nameHtml.includes('agent-icon claude')), 'Claude Tabber window rows show the shared Claude icon');
     assert.ok(rows.some(r => r.type === 'window' && r.nameHtml.includes('tabber-window-label') && r.nameHtml.includes('agent-icon codex')), 'Codex Tabber window rows show the shared Codex icon');
     const claudeWindowRow = activeWindowRow;
-    assert.ok(/tabber-window-text[^>]*>0:claude<[\s\S]*agent-icon claude/.test(claudeWindowRow?.nameHtml || ''), 'Claude icon renders after the canonical window name');
+    assert.ok(/tabber-window-label[^>]*>[\s\S]*agent-icon claude[\s\S]*tabber-window-text[^>]*>0:claude</.test(claudeWindowRow?.nameHtml || ''), 'Claude icon renders before the canonical window name');
+    assert.equal(/tabber-window-text[^>]*>0:claude<[\s\S]*agent-icon claude/.test(claudeWindowRow?.nameHtml || ''), false, 'Claude icon no longer renders after the canonical window name');
+    assert.equal(/agent-icon[\s\S]*tabber-window-text[^>]*>1:bash</.test(shellWindowRow?.nameHtml || ''), false, 'bash Tabber rows do not gain a leading agent icon');
+    assert.ok(/tabber-window-text[^>]*>0:claude<[\s\S]*status-indicator--dot[\s\S]*tabber-window-pid/.test(claudeWindowRow?.nameHtml || ''), 'activity dot and pid stay after the canonical window name');
     api.setFileExplorerTreeSortModeForTest('newest');
     api.setTabberActivityForTest({activity: {'1:1': {last_user_input_ts: 99999}, '1:0': {last_user_input_ts: 1}}});
     api.setTabberCollapsedForTest(['/s_1']);

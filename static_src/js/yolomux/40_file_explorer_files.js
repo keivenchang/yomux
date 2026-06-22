@@ -3896,7 +3896,7 @@ function tabberWindowLabelHtml(label, iconHtml, options = {}) {
   const nameText = text;
   const pidText = Number.isFinite(pid) && pid > 0 ? ` (pid=${Math.floor(pid)})` : '';
   const activityIconHtml = String(options.activityIconHtml || '');
-  return `<span class="tabber-window-label"><span class="tabber-window-text">${esc(nameText)}</span>${activityIconHtml}${iconHtml}${pidText ? `<span class="tabber-window-pid">${esc(pidText)}</span>` : ''}</span>`;
+  return `<span class="tabber-window-label">${iconHtml}<span class="tabber-window-text">${esc(nameText)}</span>${activityIconHtml}${pidText ? `<span class="tabber-window-pid">${esc(pidText)}</span>` : ''}</span>`;
 }
 
 function tabberSessionChromeHtml(data) {
