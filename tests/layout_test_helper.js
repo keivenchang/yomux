@@ -1296,6 +1296,7 @@ globalThis.__layoutTestApi = {
   terminalWrappedLineLinks,
   terminalWrappedLineReferences,
   terminalReferenceAtPosition,
+  terminalReferenceProviderLinks,
   terminalFileReferenceAbsolutePath,
   terminalFileReferenceTarget,
   terminalPositionFromClientPoint,

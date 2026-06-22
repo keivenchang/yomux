@@ -72,6 +72,7 @@ class ActivityLedger:
         self._clock = clock
         self._records: dict[str, ActivityRecord] = {}
         self._lock = threading.RLock()
+        self._heartbeat_replay_offset = 0
 
     # ---- recording -------------------------------------------------------
 
@@ -113,6 +114,7 @@ class ActivityLedger:
             return
         moment = self._clock() if ts is None else float(ts)
         with self._lock:
+            self._sync_heartbeats_locked()
             self._bump_input(str(session), moment, byte_count)
             if window not in (None, ""):
                 self._bump_input(f"{session}:{window}", moment, byte_count)
@@ -147,45 +149,48 @@ class ActivityLedger:
         """Drop every key whose session is no longer live."""
         live = {str(s) for s in (live_sessions or set())}
         with self._lock:
+            self._sync_heartbeats_locked()
             for key in [k for k in self._records if session_of(k) not in live]:
                 del self._records[key]
 
     def snapshot(self) -> dict[str, dict]:
         with self._lock:
+            self._sync_heartbeats_locked()
             return {key: asdict(rec) for key, rec in self._records.items()}
 
     # ---- persistence -----------------------------------------------------
 
     def load(self) -> None:
-        if not self.path.exists():
-            return
-        try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            logger.warning("resetting unreadable activity ledger %s: %s", self.path, exc)
-            with self._lock:
-                self._records.clear()
-            return
-        if not isinstance(raw, dict):
-            logger.warning("resetting invalid activity ledger %s: expected object", self.path)
-            with self._lock:
-                self._records.clear()
-            return
-        records = raw.get("records", {}) if isinstance(raw, dict) else {}
-        if not isinstance(records, dict):
-            logger.warning("resetting invalid activity ledger %s: records must be an object", self.path)
-            with self._lock:
-                self._records.clear()
-            return
-        valid = {f.name for f in ActivityRecord.__dataclass_fields__.values()}  # type: ignore[attr-defined]
         with self._lock:
+            self._records.clear()
+            if not self.path.exists():
+                self._sync_heartbeats_locked(full=True)
+                return
+            try:
+                raw = json.loads(self.path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                logger.warning("resetting unreadable activity ledger %s: %s", self.path, exc)
+                self._sync_heartbeats_locked(full=True)
+                return
+            if not isinstance(raw, dict):
+                logger.warning("resetting invalid activity ledger %s: expected object", self.path)
+                self._sync_heartbeats_locked(full=True)
+                return
+            records = raw.get("records", {})
+            if not isinstance(records, dict):
+                logger.warning("resetting invalid activity ledger %s: records must be an object", self.path)
+                self._sync_heartbeats_locked(full=True)
+                return
+            valid = {f.name for f in ActivityRecord.__dataclass_fields__.values()}  # type: ignore[attr-defined]
             self._records.clear()
             for key, data in records.items():
                 if isinstance(data, dict):
                     self._records[str(key)] = ActivityRecord(**{k: v for k, v in data.items() if k in valid})
+            self._sync_heartbeats_locked(full=True)
 
     def flush(self) -> None:
         with self._lock:
+            self._sync_heartbeats_locked()
             payload = {"records": {key: asdict(rec) for key, rec in self._records.items()}}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with file_lock(self.path):
@@ -199,6 +204,55 @@ class ActivityLedger:
         with file_lock(self.heartbeat_path):
             with open(self.heartbeat_path, "a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
+
+    def _bump_input_if_newer(self, key: str, ts: float, byte_count: int) -> None:
+        rec = self._records.get(key)
+        if rec is not None and ts <= rec.last_user_input_ts:
+            return
+        self._bump_input(key, ts, byte_count)
+
+    def _apply_heartbeat_line(self, line: str) -> None:
+        if not line.strip():
+            return
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(item, dict):
+            return
+        session = str(item.get("s") or "").strip()
+        if not session:
+            return
+        try:
+            ts = float(item.get("ts") or 0)
+        except (TypeError, ValueError):
+            return
+        if ts <= 0:
+            return
+        try:
+            byte_count = int(item.get("b") or 0)
+        except (TypeError, ValueError):
+            byte_count = 0
+        self._bump_input_if_newer(session, ts, byte_count)
+        window = item.get("w")
+        if window not in (None, ""):
+            self._bump_input_if_newer(f"{session}:{window}", ts, byte_count)
+
+    def _sync_heartbeats_locked(self, full: bool = False) -> None:
+        if not self.heartbeat_path or not self.heartbeat_path.exists():
+            self._heartbeat_replay_offset = 0
+            return
+        try:
+            with file_lock(self.heartbeat_path):
+                size = self.heartbeat_path.stat().st_size
+                offset = 0 if full or self._heartbeat_replay_offset > size else self._heartbeat_replay_offset
+                with open(self.heartbeat_path, "r", encoding="utf-8") as handle:
+                    handle.seek(offset)
+                    for line in handle:
+                        self._apply_heartbeat_line(line)
+                    self._heartbeat_replay_offset = handle.tell()
+        except OSError as exc:
+            logger.warning("could not replay activity heartbeats %s: %s", self.heartbeat_path, exc)
 
     def rotate_heartbeats(self, now: float | None = None) -> int:
         """Drop heartbeat-log lines older than the retention window. Returns kept count."""
@@ -216,4 +270,5 @@ class ActivityLedger:
                 except ValueError:
                     continue
             atomic_write_text(self.heartbeat_path, ("\n".join(kept) + "\n") if kept else "")
+        self._heartbeat_replay_offset = 0
         return len(kept)

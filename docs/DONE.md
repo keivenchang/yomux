@@ -6,6 +6,10 @@ Unless an entry says otherwise, every item shipped with the standard check gate 
 
 ## 2026-06-22
 
+### Wrapped ASK?/QUES? question highlight
+
+- Completed and removed `DOIT.question-highlight-wrap.md`. ASK?/QUES? question highlighting now matches the triggering question sentence across wrapped terminal rows, paints one overlay segment per visual row, stops before unrelated text such as the explanatory parenthetical after `Want me ... chat?`, and uses a slightly stronger red fill/ring without adding a heavy left-edge block. Regression coverage now includes the existing single-line prompt, an explicit wrapped `Want me to draft...?` payload, a generic fallback wrapped prompt, and nearby non-question rows. Verification: `node tests/editor_preview.test.js` (`96 passed`), `python3 tools/static_build.py --check`, and full `python3 tools/check.py` (`CHECK PASSED in 54.94s`).
+
 ### Browser reload on client/server mismatch
 
 - Completed and removed `DOIT.client_server_version_reload_prompt.md`. The existing server-version reload path now treats enabled semantic differences as client/server mismatches in either direction, asks "Do you want to reload the browser?", and shows the existing Reload plus Keep controls while preserving the same metadata poll, safe auto-reload gate, idempotence guard, and self-update suppression. Verification: `node tests/layout_async.test.js`, `node tests/editor_preview.test.js`, `node tests/layout_url.test.js`, and full `python3 tools/check.py` (`CHECK PASSED in 99.34s`).

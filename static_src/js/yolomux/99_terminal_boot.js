@@ -2376,7 +2376,7 @@ function startTerminal(session) {
   term.open(container);
   // match the container bg to the terminal theme so every pane shares one white.
   if (container?.style) container.style.background = terminalThemeForGlobalTheme().background;
-  installTerminalLinkProvider(term);
+  installTerminalLinkProvider(session, term);
   installTerminalOsc52Bridge(session, term);   // Claude/tmux OSC 52 clipboard escapes -> browser clipboard
   const openedSize = shareHostTerminalSize(session) || estimateTerminalSize(container, term);
   if (term.cols !== openedSize.cols || term.rows !== openedSize.rows) {

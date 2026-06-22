@@ -2615,7 +2615,8 @@ async function runEditorPreviewSuite() {
     const providerStart = linkProviderSource.indexOf('function installTerminalLinkProvider');
     const providerEnd = linkProviderSource.indexOf('function terminalCellDimensions', providerStart);
     const providerSource = linkProviderSource.slice(providerStart, providerEnd);
-    assert.ok(/registerLinkProvider\(\{[\s\S]*provideLinks: \(y, callback\) => \{[\s\S]*void y;[\s\S]*callback\(\[\]\)/.test(linkProviderSource), 'xterm left-click links are disabled; terminal references are context-menu only');
+    assert.ok(/activate: \(\) => \{\}/.test(linkProviderSource), 'xterm link decorations have an explicit no-op left-click handler');
+    assert.ok(/decorations: \{underline: true, pointerCursor: false\}/.test(linkProviderSource), 'terminal URL/file references are visibly underlined without showing a left-click pointer affordance');
     assert.equal(providerSource.includes('window.open'), false, 'xterm link provider must not open browser tabs from left-click activation');
     const first = 'https://claude.com/cai/oauth/authorize?client_id=abc123&scope=org%3Acreate_a';
     const continuations = [
@@ -2666,12 +2667,24 @@ async function runEditorPreviewSuite() {
       range: {start: {x: 20, y: 1}, end: {x: 57, y: 1}},
     }, 'terminal output detects relative file:line references as context-menu references');
     assert.equal(api.terminalFileReferenceAbsolutePath('1', fileRef), '/home/test/yolomux.dev3/docs/specs/SHARE_TEST_INVENTORY.md', 'relative terminal file refs resolve against the active pane cwd');
-    assert.equal(api.terminalWrappedLineLinks(term, 1).some(ref => ref.type === 'file'), false, 'file references are not xterm left-click links');
+    assert.equal(api.terminalWrappedLineLinks(term, 1).some(ref => ref.type === 'file'), true, 'file references are visually marked for right-click open/copy actions');
     assert.equal(api.terminalReferenceAtPosition(term, {x: 32, y: 1})?.text, 'docs/specs/SHARE_TEST_INVENTORY.md:123', 'right-click hit-testing finds the file ref under the cursor');
     const urlRef = api.terminalReferenceAtPosition(term, {x: 8, y: 2});
     assert.equal(urlRef.type, 'url', 'right-click hit-testing still finds URLs');
     assert.equal(urlRef.href, 'https://example.com/guide');
     assert.equal(typeof urlRef.activate, 'undefined', 'URL references have no left-click activation handler');
+
+    const qwenLines = [
+      terminalLine('protocols/openai/chat_completions/qwen3_coder_v2.rs'),
+      terminalLine('- Streaming - preprocessor.rs:1972'),
+    ];
+    const qwenTerm = {cols: 100, rows: 10, buffer: {active: {viewportY: 0, getLine: index => qwenLines[index] || null}}};
+    const qwenRef = api.terminalWrappedLineReferences(qwenTerm, 1).find(ref => ref.type === 'file');
+    assert.equal(qwenRef?.path, 'protocols/openai/chat_completions/qwen3_coder_v2.rs', 'terminal output detects qwen-style repo-relative Rust paths');
+    api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/dynamo4/lib/llm/src'}});
+    assert.equal(api.terminalFileReferenceAbsolutePath('1', qwenRef), '/home/test/dynamo4/lib/llm/src/protocols/openai/chat_completions/qwen3_coder_v2.rs', 'qwen-style paths resolve against the live terminal cwd');
+    const basenameRef = api.terminalWrappedLineReferences(qwenTerm, 2).find(ref => ref.type === 'file');
+    assert.deepStrictEqual(canonical({path: basenameRef?.path, line: basenameRef?.line}), {path: 'preprocessor.rs', line: 1972}, 'terminal output detects basename.rs:line references in prose');
 
     const container = api.testElementForId('terminal-pane-1');
     container.rect = {left: 0, top: 0, width: 800, height: 200, right: 800, bottom: 200};
@@ -2735,6 +2748,7 @@ async function runEditorPreviewSuite() {
     assert.equal(visibleRows[1].classList.contains('terminal-attention-question-row'), true, 'the exact visible question row is marked');
     const overlay = container.querySelector('.terminal-attention-question-overlay[data-session="1"]');
     assert.ok(overlay, 'a visible overlay is created for canvas-rendered terminals');
+    assert.equal(container.querySelectorAll('.terminal-attention-question-overlay[data-session="1"]').length, 1, 'single-line prompts create one overlay segment');
     assert.equal(overlay.style.top, '20px', 'overlay is aligned to the question row');
     assert.equal(overlay.style.left, '30px', 'overlay starts at the matched sentence, not the start of the row');
     assert.equal(overlay.style.width, `${questionText.length * 10}px`, 'overlay width tracks the matched sentence, not the whole row');
@@ -2749,6 +2763,98 @@ async function runEditorPreviewSuite() {
     visibleRows[3].textContent = 'Something something sentence something?';
     assert.equal(api.syncTerminalAttentionHighlightForTest('1'), true, 'attention state falls back to a visible question row when payload text is generic');
     assert.equal(visibleRows[3].classList.contains('terminal-attention-question-row'), true, 'fallback chooses the newest visible question-looking row');
+  });
+
+  test('ASK?/QUES? prompt question highlights wrapped sentence spans only', () => {
+    const api = loadYolomux('', ['1']);
+    api.setTranscriptInfoForTest('1', {agents: [{kind: 'claude'}], panes: []});
+    const container = api.testElementForId('terminal-pane-1');
+    container.className = 'terminal';
+    container.rect = {left: 0, top: 0, width: 900, height: 140, right: 900, bottom: 140};
+    const xtermRows = new TestElement('xterm-rows');
+    xtermRows.className = 'xterm-rows';
+    xtermRows.rect = {left: 0, top: 0, width: 900, height: 140, right: 900, bottom: 140};
+    const questionText = 'Want me to draft a pending review on GitHub with the merge-order note, or leave it as-is in chat?';
+    const firstQuestionRow = '>> Want me to draft a pending review on GitHub with the merge-order note, or leave it as-';
+    const secondQuestionRow = "is in chat? (I won't submit anything publicly without you saying so.)";
+    const visibleRows = ['Claude Code', firstQuestionRow, secondQuestionRow, '1. Draft locally', '2. Leave in chat']
+      .map((text, index) => {
+        const row = new TestElement(`wrapped-row-${index}`);
+        row.textContent = text;
+        row.rect = {left: 0, top: index * 20, width: 900, height: 20, right: 900, bottom: (index + 1) * 20};
+        xtermRows.appendChild(row);
+        return row;
+      });
+    container.appendChild(xtermRows);
+    api.registerTerminalForTest('1', {
+      cols: firstQuestionRow.length,
+      rows: 8,
+      _core: {_renderService: {dimensions: {css: {cell: {width: 10, height: 20}}}}},
+      buffer: {active: {length: visibleRows.length, viewportY: 0, getLine: index => terminalLine(visibleRows[index]?.textContent || '')}},
+    });
+    api.setAutoApproveStateForTest('1', {
+      enabled: true,
+      screen: {key: 'needs-input', text: questionText, question_text: questionText},
+      prompt: {visible: false},
+    });
+
+    assert.equal(api.syncTerminalAttentionHighlightForTest('1'), true, 'explicit wrapped question text paints the wrapped sentence');
+    assert.equal(visibleRows[0].classList.contains('terminal-attention-question-row'), false, 'nearby header text is not marked');
+    assert.equal(visibleRows[1].classList.contains('terminal-attention-question-row'), true, 'first wrapped question row is marked');
+    assert.equal(visibleRows[2].classList.contains('terminal-attention-question-row'), true, 'second wrapped question row is marked');
+    assert.equal(visibleRows[3].classList.contains('terminal-attention-question-row'), false, 'nearby option text is not marked');
+    const overlays = container.querySelectorAll('.terminal-attention-question-overlay[data-session="1"]');
+    assert.equal(overlays.length, 2, 'wrapped question creates one overlay segment per visual row');
+    assert.deepStrictEqual(canonical(overlays.map(overlay => ({
+      top: overlay.style.top,
+      left: overlay.style.left,
+      width: overlay.style.width,
+    }))), [
+      {top: '20px', left: '30px', width: `${(firstQuestionRow.length - 3) * 10}px`},
+      {top: '40px', left: '0px', width: `${'is in chat?'.length * 10}px`},
+    ], 'wrapped overlays cover only the question sentence and stop before the parenthetical');
+
+    api.setAutoApproveStateForTest('1', {enabled: true, screen: {key: 'idle', text: ''}});
+    assert.equal(api.syncTerminalAttentionHighlightForTest('1'), false, 'clearing state removes wrapped overlays');
+    assert.equal(container.querySelectorAll('.terminal-attention-question-overlay[data-session="1"]').length, 0, 'all wrapped overlay segments are removed');
+  });
+
+  test('ASK?/QUES? fallback highlights wrapped question without swallowing nearby text', () => {
+    const api = loadYolomux('', ['1']);
+    api.setTranscriptInfoForTest('1', {agents: [{kind: 'claude'}], panes: []});
+    const container = api.testElementForId('terminal-pane-1');
+    container.className = 'terminal';
+    container.rect = {left: 0, top: 0, width: 900, height: 140, right: 900, bottom: 140};
+    const xtermRows = new TestElement('xterm-rows');
+    xtermRows.className = 'xterm-rows';
+    xtermRows.rect = {left: 0, top: 0, width: 900, height: 140, right: 900, bottom: 140};
+    const firstQuestionRow = '>> Want me to draft a pending review on GitHub with the merge-order note, or leave it as-';
+    const secondQuestionRow = "is in chat? (I won't submit anything publicly without you saying so.)";
+    const visibleRows = ['Claude Code', firstQuestionRow, secondQuestionRow, 'Tip: this is not a question']
+      .map((text, index) => {
+        const row = new TestElement(`fallback-wrapped-row-${index}`);
+        row.textContent = text;
+        row.rect = {left: 0, top: index * 20, width: 900, height: 20, right: 900, bottom: (index + 1) * 20};
+        xtermRows.appendChild(row);
+        return row;
+      });
+    container.appendChild(xtermRows);
+    api.registerTerminalForTest('1', {
+      cols: firstQuestionRow.length,
+      rows: 8,
+      _core: {_renderService: {dimensions: {css: {cell: {width: 10, height: 20}}}}},
+      buffer: {active: {length: visibleRows.length, viewportY: 0, getLine: index => terminalLine(visibleRows[index]?.textContent || '')}},
+    });
+    api.setAutoApproveStateForTest('1', {enabled: true, screen: {key: 'needs-input', text: 'waiting for input'}});
+
+    assert.equal(api.syncTerminalAttentionHighlightForTest('1'), true, 'generic attention state falls back to the visible wrapped question');
+    assert.equal(visibleRows[0].classList.contains('terminal-attention-question-row'), false, 'fallback does not merge unrelated header text');
+    assert.equal(visibleRows[1].classList.contains('terminal-attention-question-row'), true, 'fallback includes the first wrapped question row');
+    assert.equal(visibleRows[2].classList.contains('terminal-attention-question-row'), true, 'fallback includes the second wrapped question row');
+    assert.equal(visibleRows[3].classList.contains('terminal-attention-question-row'), false, 'fallback leaves unrelated nearby text unmarked');
+    const overlays = container.querySelectorAll('.terminal-attention-question-overlay[data-session="1"]');
+    assert.equal(overlays.length, 2, 'fallback wrapped question creates multiple overlay segments');
+    assert.equal(overlays[1].style.width, `${'is in chat?'.length * 10}px`, 'fallback highlight stops before explanatory parenthetical text');
   });
 
   // (no false merge): even an unterminated URL-looking row cannot absorb a flush-left continuation when

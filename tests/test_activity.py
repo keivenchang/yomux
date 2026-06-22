@@ -78,6 +78,33 @@ def test_atomic_persistence_round_trip(tmp_path):
     assert reloaded.snapshot()["6:1"]["total_user_input_ms"] == 5000
 
 
+def test_load_replays_fresh_heartbeat_log_over_stale_activity_json(tmp_path):
+    led = _ledger(tmp_path)
+    led.heartbeat("8002", "0", ts=1000.0, byte_count=1)
+    led.flush()
+    with open(tmp_path / "activity-heartbeats.jsonl", "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"ts": 2000.0, "s": "8002", "w": "0", "b": 1, "src": "host"}) + "\n")
+
+    reloaded = _ledger(tmp_path)
+    reloaded.load()
+
+    snap = reloaded.snapshot()
+    assert snap["8002"]["last_user_input_ts"] == 2000.0
+    assert snap["8002:0"]["last_user_input_ts"] == 2000.0
+
+
+def test_snapshot_replays_heartbeat_lines_appended_by_another_process(tmp_path):
+    led = _ledger(tmp_path)
+    led.load()
+    with open(tmp_path / "activity-heartbeats.jsonl", "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"ts": 3000.0, "s": "8002", "w": "0", "b": 1, "src": "host"}) + "\n")
+
+    snap = led.snapshot()
+
+    assert snap["8002"]["last_user_input_ts"] == 3000.0
+    assert snap["8002:0"]["last_user_input_ts"] == 3000.0
+
+
 def test_load_corrupt_activity_json_resets_records_and_logs(tmp_path, caplog):
     led = _ledger(tmp_path)
     led.heartbeat("6", "1", ts=1000.0)
@@ -85,7 +112,7 @@ def test_load_corrupt_activity_json_resets_records_and_logs(tmp_path, caplog):
 
     led.load()
 
-    assert led.snapshot() == {}
+    assert led.snapshot()["6:1"]["last_user_input_ts"] == 1000.0
     assert "resetting unreadable activity ledger" in caplog.text
 
 

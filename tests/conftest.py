@@ -68,6 +68,8 @@ def isolated_yoagent_conversation_state(monkeypatch, tmp_path):
     monkeypatch.setattr(app_module.yoagent_conversation, "YOAGENT_CLI_STATE_PATH", state_dir / "cli-sessions.json")
     monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
     monkeypatch.setattr(app_module, "EVENT_LOG_PATH", tmp_path / "events.jsonl")
+    monkeypatch.setattr(app_module, "ACTIVITY_PATH", tmp_path / "activity.json")
+    monkeypatch.setattr(app_module, "ACTIVITY_HEARTBEATS_PATH", tmp_path / "activity-heartbeats.jsonl")
 
 
 def local_socket_capability() -> tuple[bool, str]:

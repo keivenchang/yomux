@@ -454,7 +454,7 @@ def git_diff_args(repo: Path, base: str | None = None, from_ref: str | None = No
         if error:
             return [], False, error
         if newer == "current":
-            return [older], older == "HEAD", ""
+            return [older], True, ""
         return [older, newer], False, ""
     return [base or git_diff_base(repo)], True, ""
 

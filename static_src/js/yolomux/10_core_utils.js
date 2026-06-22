@@ -1557,7 +1557,7 @@ function stripTerminalQueryResponses(data) {
 }
 
 const terminalLinkPattern = /(?:https?:\/\/|file:\/\/|www\.)[^\s<>"'`]+/gi;
-const terminalFileReferencePattern = /(^|[\s([{<"'`])((?:~\/|\.{1,2}\/|\/)?[A-Za-z0-9._@%+=-]+(?:\/[A-Za-z0-9._@%+=-]+)+)(?::([1-9]\d{0,6}))?/g;
+const terminalFileReferencePattern = /(^|[\s([{<"'`])((?:(?:~\/|\.{1,2}\/|\/)?[A-Za-z0-9._@%+=-]+(?:\/[A-Za-z0-9._@%+=-]+)+)|(?:(?:~\/|\.{1,2}\/|\/)?[A-Za-z0-9._@%+=-]+\.[A-Za-z0-9][A-Za-z0-9+_-]{0,31}))(?::([1-9]\d{0,6}))?/g;
 const terminalWrappedUrlMaxRows = 8;
 const terminalLinkClosePairs = [
   [')', '('],
@@ -1662,7 +1662,7 @@ function terminalTextReferences(lineText, rangeForOffsets, y = null) {
 }
 
 function terminalTextLinks(lineText, rangeForOffsets, y = null) {
-  return terminalTextReferences(lineText, rangeForOffsets, y).filter(ref => ref.type === 'url');
+  return terminalTextReferences(lineText, rangeForOffsets, y);
 }
 
 function terminalLineLinks(lineText, y) {
@@ -1813,18 +1813,36 @@ function terminalWrappedLineReferences(term, y) {
   return terminalTextReferences(group.text, (startIndex, endIndex) => terminalWrappedRange(group, startIndex, endIndex), y);
 }
 
-function installTerminalLinkProvider(term) {
+function terminalReferenceXtermLink(reference) {
+  if (!reference?.range) return null;
+  return {
+    range: reference.range,
+    text: reference.text || reference.href || '',
+    activate: () => {},
+    decorations: {underline: true, pointerCursor: false},
+  };
+}
+
+async function terminalReferenceProviderLinks(session, term, y) {
+  const refs = terminalWrappedLineReferences(term, y);
+  const links = refs.filter(ref => ref.type === 'url').map(terminalReferenceXtermLink).filter(Boolean);
+  const fileRefs = refs.filter(ref => ref.type === 'file');
+  if (!fileRefs.length) return links;
+  const fileTargets = await Promise.all(fileRefs.map(ref => terminalFileReferenceTarget(session, ref, {fresh: false, user: true})));
+  fileRefs.forEach((ref, index) => {
+    if (fileTargets[index]) {
+      const link = terminalReferenceXtermLink(ref);
+      if (link) links.push(link);
+    }
+  });
+  return links.sort((a, b) => a.range.start.y - b.range.start.y || a.range.start.x - b.range.start.x);
+}
+
+function installTerminalLinkProvider(session, term) {
   if (typeof term.registerLinkProvider !== 'function') return;
   term.registerLinkProvider({
     provideLinks: (y, callback) => {
-      try {
-        // Terminal references are context-menu actions only. Returning no xterm links prevents
-        // accidental left-click activation while the context menu still uses terminalWrappedLineReferences.
-        void y;
-        callback([]);
-      } catch (_) {
-        callback([]);
-      }
+      terminalReferenceProviderLinks(session, term, y).then(callback).catch(() => callback([]));
     },
   });
 }
@@ -2436,28 +2454,53 @@ function terminalContextMenuSelection(session, term, container = null, presetSel
   return appSelection ? {text: appSelection, source: 'app-clipboard'} : {text: '', source: 'none'};
 }
 
-function terminalFileReferenceAbsolutePath(session, reference) {
+function terminalFileReferenceCandidatePaths(session, reference) {
   const raw = String(reference?.path || '').trim();
-  if (!raw || raw.includes('\0') || /[\r\n]/.test(raw)) return '';
-  if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) return '';
-  if (raw === '~') return normalizeDirectoryPath(homePath || '/');
-  if (raw.startsWith('~/')) return homePath ? joinAndNormalize(homePath, raw.slice(2)) : '';
-  if (raw.startsWith('/')) return normalizeDirectoryPath(raw);
-  const base = terminalCurrentPath(session) || sessionTranscriptInfo(session).gitRoot || homePath || '/';
-  return joinAndNormalize(base, raw);
+  if (!raw || raw.includes('\0') || /[\r\n]/.test(raw)) return [];
+  if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) return [];
+  if (raw === '~') return homePath ? [normalizeDirectoryPath(homePath)] : [];
+  if (raw.startsWith('~/')) return homePath ? [joinAndNormalize(homePath, raw.slice(2))] : [];
+  if (raw.startsWith('/')) return [normalizeDirectoryPath(raw)];
+  const info = sessionTranscriptInfo(session);
+  const selectedRepo = selectedSessionRepo(session, info.info);
+  const bases = [
+    terminalCurrentPath(session),
+    info.selectedPath,
+    info.gitCwd,
+    selectedRepo?.cwd,
+    selectedRepo?.root,
+    info.gitRoot,
+    homePath,
+  ];
+  const paths = [];
+  for (const base of bases) {
+    const normalizedBase = normalizeDirectoryPath(base || '');
+    const candidate = normalizedBase ? joinAndNormalize(normalizedBase, raw) : '';
+    if (!candidate || paths.includes(candidate)) continue;
+    paths.push(candidate);
+  }
+  return paths;
 }
 
-async function terminalFileReferenceTarget(session, reference) {
+function terminalFileReferenceAbsolutePath(session, reference) {
+  return terminalFileReferenceCandidatePaths(session, reference)[0] || '';
+}
+
+async function terminalFileReferenceTarget(session, reference, options = {}) {
   if (reference?.type !== 'file') return null;
-  const path = terminalFileReferenceAbsolutePath(session, reference);
-  if (!path) return null;
-  try {
-    const info = await fetchFilePathInfo(path, {user: true, fresh: true});
-    if (!info || info.kind !== 'file') return null;
-    return {path, info, line: reference.line || null, text: reference.text || path};
-  } catch (_error) {
-    return null;
+  const fetchOptions = {
+    user: options.user !== false,
+    fresh: options.fresh !== false,
+  };
+  for (const path of terminalFileReferenceCandidatePaths(session, reference)) {
+    try {
+      const info = await fetchFilePathInfo(path, fetchOptions);
+      if (info?.kind === 'file') return {path, info, line: reference.line || null, text: reference.text || path};
+    } catch (_error) {
+      // Try the next context-derived candidate; a missing cwd-relative path can still be repo-relative.
+    }
   }
+  return null;
 }
 
 function requestFileEditorLineTarget(item, line) {

@@ -3134,7 +3134,7 @@ function stripTerminalQueryResponses(data) {
 }
 
 const terminalLinkPattern = /(?:https?:\/\/|file:\/\/|www\.)[^\s<>"'`]+/gi;
-const terminalFileReferencePattern = /(^|[\s([{<"'`])((?:~\/|\.{1,2}\/|\/)?[A-Za-z0-9._@%+=-]+(?:\/[A-Za-z0-9._@%+=-]+)+)(?::([1-9]\d{0,6}))?/g;
+const terminalFileReferencePattern = /(^|[\s([{<"'`])((?:(?:~\/|\.{1,2}\/|\/)?[A-Za-z0-9._@%+=-]+(?:\/[A-Za-z0-9._@%+=-]+)+)|(?:(?:~\/|\.{1,2}\/|\/)?[A-Za-z0-9._@%+=-]+\.[A-Za-z0-9][A-Za-z0-9+_-]{0,31}))(?::([1-9]\d{0,6}))?/g;
 const terminalWrappedUrlMaxRows = 8;
 const terminalLinkClosePairs = [
   [')', '('],
@@ -3239,7 +3239,7 @@ function terminalTextReferences(lineText, rangeForOffsets, y = null) {
 }
 
 function terminalTextLinks(lineText, rangeForOffsets, y = null) {
-  return terminalTextReferences(lineText, rangeForOffsets, y).filter(ref => ref.type === 'url');
+  return terminalTextReferences(lineText, rangeForOffsets, y);
 }
 
 function terminalLineLinks(lineText, y) {
@@ -3390,18 +3390,36 @@ function terminalWrappedLineReferences(term, y) {
   return terminalTextReferences(group.text, (startIndex, endIndex) => terminalWrappedRange(group, startIndex, endIndex), y);
 }
 
-function installTerminalLinkProvider(term) {
+function terminalReferenceXtermLink(reference) {
+  if (!reference?.range) return null;
+  return {
+    range: reference.range,
+    text: reference.text || reference.href || '',
+    activate: () => {},
+    decorations: {underline: true, pointerCursor: false},
+  };
+}
+
+async function terminalReferenceProviderLinks(session, term, y) {
+  const refs = terminalWrappedLineReferences(term, y);
+  const links = refs.filter(ref => ref.type === 'url').map(terminalReferenceXtermLink).filter(Boolean);
+  const fileRefs = refs.filter(ref => ref.type === 'file');
+  if (!fileRefs.length) return links;
+  const fileTargets = await Promise.all(fileRefs.map(ref => terminalFileReferenceTarget(session, ref, {fresh: false, user: true})));
+  fileRefs.forEach((ref, index) => {
+    if (fileTargets[index]) {
+      const link = terminalReferenceXtermLink(ref);
+      if (link) links.push(link);
+    }
+  });
+  return links.sort((a, b) => a.range.start.y - b.range.start.y || a.range.start.x - b.range.start.x);
+}
+
+function installTerminalLinkProvider(session, term) {
   if (typeof term.registerLinkProvider !== 'function') return;
   term.registerLinkProvider({
     provideLinks: (y, callback) => {
-      try {
-        // Terminal references are context-menu actions only. Returning no xterm links prevents
-        // accidental left-click activation while the context menu still uses terminalWrappedLineReferences.
-        void y;
-        callback([]);
-      } catch (_) {
-        callback([]);
-      }
+      terminalReferenceProviderLinks(session, term, y).then(callback).catch(() => callback([]));
     },
   });
 }
@@ -4013,28 +4031,53 @@ function terminalContextMenuSelection(session, term, container = null, presetSel
   return appSelection ? {text: appSelection, source: 'app-clipboard'} : {text: '', source: 'none'};
 }
 
-function terminalFileReferenceAbsolutePath(session, reference) {
+function terminalFileReferenceCandidatePaths(session, reference) {
   const raw = String(reference?.path || '').trim();
-  if (!raw || raw.includes('\0') || /[\r\n]/.test(raw)) return '';
-  if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) return '';
-  if (raw === '~') return normalizeDirectoryPath(homePath || '/');
-  if (raw.startsWith('~/')) return homePath ? joinAndNormalize(homePath, raw.slice(2)) : '';
-  if (raw.startsWith('/')) return normalizeDirectoryPath(raw);
-  const base = terminalCurrentPath(session) || sessionTranscriptInfo(session).gitRoot || homePath || '/';
-  return joinAndNormalize(base, raw);
+  if (!raw || raw.includes('\0') || /[\r\n]/.test(raw)) return [];
+  if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) return [];
+  if (raw === '~') return homePath ? [normalizeDirectoryPath(homePath)] : [];
+  if (raw.startsWith('~/')) return homePath ? [joinAndNormalize(homePath, raw.slice(2))] : [];
+  if (raw.startsWith('/')) return [normalizeDirectoryPath(raw)];
+  const info = sessionTranscriptInfo(session);
+  const selectedRepo = selectedSessionRepo(session, info.info);
+  const bases = [
+    terminalCurrentPath(session),
+    info.selectedPath,
+    info.gitCwd,
+    selectedRepo?.cwd,
+    selectedRepo?.root,
+    info.gitRoot,
+    homePath,
+  ];
+  const paths = [];
+  for (const base of bases) {
+    const normalizedBase = normalizeDirectoryPath(base || '');
+    const candidate = normalizedBase ? joinAndNormalize(normalizedBase, raw) : '';
+    if (!candidate || paths.includes(candidate)) continue;
+    paths.push(candidate);
+  }
+  return paths;
 }
 
-async function terminalFileReferenceTarget(session, reference) {
+function terminalFileReferenceAbsolutePath(session, reference) {
+  return terminalFileReferenceCandidatePaths(session, reference)[0] || '';
+}
+
+async function terminalFileReferenceTarget(session, reference, options = {}) {
   if (reference?.type !== 'file') return null;
-  const path = terminalFileReferenceAbsolutePath(session, reference);
-  if (!path) return null;
-  try {
-    const info = await fetchFilePathInfo(path, {user: true, fresh: true});
-    if (!info || info.kind !== 'file') return null;
-    return {path, info, line: reference.line || null, text: reference.text || path};
-  } catch (_error) {
-    return null;
+  const fetchOptions = {
+    user: options.user !== false,
+    fresh: options.fresh !== false,
+  };
+  for (const path of terminalFileReferenceCandidatePaths(session, reference)) {
+    try {
+      const info = await fetchFilePathInfo(path, fetchOptions);
+      if (info?.kind === 'file') return {path, info, line: reference.line || null, text: reference.text || path};
+    } catch (_error) {
+      // Try the next context-derived candidate; a missing cwd-relative path can still be repo-relative.
+    }
   }
+  return null;
 }
 
 function requestFileEditorLineTarget(item, line) {
@@ -22036,7 +22079,154 @@ function terminalAttentionRowTexts(item) {
   return records;
 }
 
-function terminalAttentionSpan(record, candidate) {
+function terminalAttentionNormalizeMappedText(rawText, rawMap = []) {
+  const raw = terminalAttentionRawText(rawText);
+  let text = '';
+  const map = [];
+  let hasPendingSpace = false;
+  let pendingSpaceSource = null;
+  for (let index = 0; index < raw.length; index += 1) {
+    const char = raw[index];
+    if (/\s/.test(char)) {
+      if (text && !hasPendingSpace) {
+        hasPendingSpace = true;
+        pendingSpaceSource = rawMap[index] || null;
+      }
+      continue;
+    }
+    if (hasPendingSpace && text) {
+      text += ' ';
+      map.push(pendingSpaceSource);
+      hasPendingSpace = false;
+      pendingSpaceSource = null;
+    }
+    text += char;
+    map.push(rawMap[index] || null);
+  }
+  return {text, map};
+}
+
+function terminalAttentionJoinedContext(rows, separator = '') {
+  let rawText = '';
+  const rawMap = [];
+  rows.forEach((record, rowIndex) => {
+    if (rowIndex > 0 && separator) {
+      for (let index = 0; index < separator.length; index += 1) {
+        rawText += separator[index];
+        rawMap.push(null);
+      }
+    }
+    const rowText = terminalAttentionRawText(record?.rawText || record?.text || '');
+    for (let index = 0; index < rowText.length; index += 1) {
+      rawText += rowText[index];
+      rawMap.push({record, column: index});
+    }
+  });
+  return terminalAttentionNormalizeMappedText(rawText, rawMap);
+}
+
+function terminalAttentionRowsLikelyWrapped(previous, item) {
+  const rawText = terminalAttentionRawText(previous?.rawText || previous?.text || '').replace(/\s+$/g, '');
+  if (!rawText) return false;
+  if (/[A-Za-z0-9)]-$/.test(rawText)) return true;
+  const cols = Math.floor(Number(item?.term?.cols || 0));
+  return cols > 0 && rawText.length >= Math.max(1, cols - 2);
+}
+
+function terminalAttentionFallbackContext(rows, item) {
+  let rawText = '';
+  const rawMap = [];
+  rows.forEach((record, rowIndex) => {
+    if (rowIndex > 0) {
+      const previous = rows[rowIndex - 1];
+      const previousText = terminalAttentionRawText(previous?.rawText || previous?.text || '').replace(/\s+$/g, '');
+      const separator = terminalAttentionRowsLikelyWrapped(previous, item)
+        ? (previousText.endsWith('-') ? '' : ' ')
+        : '. ';
+      for (let index = 0; index < separator.length; index += 1) {
+        rawText += separator[index];
+        rawMap.push(null);
+      }
+    }
+    const rowText = terminalAttentionRawText(record?.rawText || record?.text || '');
+    for (let index = 0; index < rowText.length; index += 1) {
+      rawText += rowText[index];
+      rawMap.push({record, column: index});
+    }
+  });
+  return terminalAttentionNormalizeMappedText(rawText, rawMap);
+}
+
+function terminalAttentionSegmentsForRange(context, start, length, highlightText) {
+  const end = start + length;
+  const segments = [];
+  for (let index = start; index < end; index += 1) {
+    const source = context.map[index];
+    if (!source?.record) continue;
+    let segment = segments.find(item => item.record === source.record);
+    if (!segment) {
+      segment = {
+        record: source.record,
+        highlightStart: source.column,
+        highlightEnd: source.column + 1,
+      };
+      segments.push(segment);
+    } else {
+      segment.highlightStart = Math.min(segment.highlightStart, source.column);
+      segment.highlightEnd = Math.max(segment.highlightEnd, source.column + 1);
+    }
+  }
+  return segments
+    .sort((a, b) => Number(a.record.index || 0) - Number(b.record.index || 0))
+    .map(segment => ({
+      ...segment.record,
+      highlightStart: Math.max(0, segment.highlightStart),
+      highlightLength: Math.max(1, segment.highlightEnd - segment.highlightStart),
+      highlightText,
+    }));
+}
+
+function terminalAttentionQuestionSentenceRanges(text) {
+  const source = terminalAttentionTextPart(text);
+  if (!source || !/[?？]/.test(source)) return [];
+  const ranges = [];
+  const pattern = /(?:^|[.!?？|│])\s*(?:[>❯$#]\s*)*([^.!?？|│]*[?？])/g;
+  let match = pattern.exec(source);
+  while (match) {
+    const rawSentence = match[1] || '';
+    const sentence = rawSentence.trim();
+    if (sentence && !/^(>|❯|\$|#)\s*[?？]?$/.test(sentence)) {
+      const rawOffset = match[0].lastIndexOf(rawSentence);
+      const trimOffset = rawSentence.length - rawSentence.trimStart().length;
+      ranges.push({
+        start: match.index + Math.max(0, rawOffset) + trimOffset,
+        length: sentence.length,
+        text: sentence,
+      });
+    }
+    match = pattern.exec(source);
+  }
+  return ranges;
+}
+
+function terminalAttentionQuestionCandidateTexts(questionTexts) {
+  const seen = new Set();
+  const candidates = [];
+  const add = value => {
+    const text = terminalAttentionTextPart(value);
+    if (!text || seen.has(text)) return;
+    seen.add(text);
+    candidates.push(text);
+  };
+  for (const candidate of questionTexts) {
+    const text = terminalAttentionTextPart(candidate);
+    for (const range of terminalAttentionQuestionSentenceRanges(text)) add(range.text);
+    add(text);
+  }
+  return candidates;
+}
+
+function terminalAttentionSingleRowSpan(record, candidate) {
   const needle = terminalAttentionTextPart(candidate);
   if (!needle) return null;
   const rawText = terminalAttentionRawText(record?.rawText || record?.text || '');
@@ -22055,6 +22245,23 @@ function terminalAttentionSpan(record, candidate) {
   return null;
 }
 
+function terminalAttentionSpanSegments(rows, candidate) {
+  const needle = terminalAttentionTextPart(candidate);
+  if (!needle) return [];
+  for (const separator of ['', ' ']) {
+    const context = terminalAttentionJoinedContext(rows, separator);
+    const start = context.text.indexOf(needle);
+    if (start < 0) continue;
+    const segments = terminalAttentionSegmentsForRange(context, start, needle.length, needle);
+    if (segments.length) return segments;
+  }
+  for (const record of rows) {
+    const span = terminalAttentionSingleRowSpan(record, candidate);
+    if (span) return [{...record, ...span}];
+  }
+  return [];
+}
+
 function terminalAttentionQuestionFallbackSpan(record) {
   const rawText = terminalAttentionRawText(record?.rawText || record?.text || '');
   const trimmedEnd = rawText.replace(/\s+$/g, '');
@@ -22066,37 +22273,53 @@ function terminalAttentionQuestionFallbackSpan(record) {
   return {highlightStart: start, highlightLength: Math.max(1, sentence.length), highlightText: sentence};
 }
 
+function terminalAttentionQuestionFallbackSegments(item, rows) {
+  const context = terminalAttentionFallbackContext(rows, item);
+  const ranges = terminalAttentionQuestionSentenceRanges(context.text);
+  for (let index = ranges.length - 1; index >= 0; index -= 1) {
+    const range = ranges[index];
+    const segments = terminalAttentionSegmentsForRange(context, range.start, range.length, range.text);
+    if (segments.length) return segments;
+  }
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    if (terminalAttentionQuestionFallback(rows[index].text)) {
+      const span = terminalAttentionQuestionFallbackSpan(rows[index]);
+      if (span) return [{...rows[index], ...span}];
+    }
+  }
+  return [];
+}
+
 function terminalAttentionQuestionFallback(text) {
   const trimmed = terminalAttentionTextPart(text);
   if (!trimmed || !/[?？]\s*$/.test(trimmed)) return false;
   return !/^(>|❯|\$|#)\s*$/.test(trimmed);
 }
 
-function terminalAttentionQuestionRow(item, questionTexts = []) {
+function terminalAttentionQuestionSegments(item, questionTexts = []) {
   const rows = terminalAttentionRowTexts(item);
-  if (!rows.length) return null;
-  const candidates = questionTexts.map(terminalAttentionTextPart).filter(Boolean);
+  if (!rows.length) return [];
+  const candidates = terminalAttentionQuestionCandidateTexts(questionTexts);
   for (const candidate of candidates) {
-    for (const record of rows) {
-      const span = terminalAttentionSpan(record, candidate);
-      if (span) return {...record, ...span};
-    }
+    const segments = terminalAttentionSpanSegments(rows, candidate);
+    if (segments.length) return segments;
   }
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    if (terminalAttentionQuestionFallback(rows[index].text)) return {...rows[index], ...terminalAttentionQuestionFallbackSpan(rows[index])};
-  }
-  return null;
+  return terminalAttentionQuestionFallbackSegments(item, rows);
 }
 
-function terminalAttentionOverlay(session, item) {
+function terminalAttentionQuestionRow(item, questionTexts = []) {
+  const segments = terminalAttentionQuestionSegments(item, questionTexts);
+  if (!segments.length) return null;
+  return {...segments[0], segments};
+}
+
+function terminalAttentionOverlay(session, item, index = 0) {
   if (!item?.container) return null;
-  let overlay = item.container.querySelector?.(`.${terminalAttentionQuestionOverlayClass}[data-session="${cssEscape(session)}"]`);
-  if (!overlay) {
-    overlay = document.createElement('div');
-    overlay.className = terminalAttentionQuestionOverlayClass;
-    overlay.dataset.session = String(session);
-    item.container.appendChild(overlay);
-  }
+  const overlay = document.createElement('div');
+  overlay.className = terminalAttentionQuestionOverlayClass;
+  overlay.dataset.session = String(session);
+  overlay.dataset.attentionIndex = String(index);
+  item.container.appendChild(overlay);
   return overlay;
 }
 
@@ -22106,11 +22329,13 @@ function clearTerminalAttentionHighlight(session, item = terminals.get(session))
   for (const row of container.querySelectorAll?.(`.${terminalAttentionQuestionRowClass}`) || []) {
     row.classList.remove(terminalAttentionQuestionRowClass);
   }
-  container.querySelector?.(`.${terminalAttentionQuestionOverlayClass}[data-session="${cssEscape(session)}"]`)?.remove();
+  for (const overlay of container.querySelectorAll?.(`.${terminalAttentionQuestionOverlayClass}[data-session="${cssEscape(session)}"]`) || []) {
+    overlay.remove();
+  }
 }
 
-function placeTerminalAttentionOverlay(session, item, record) {
-  const overlay = terminalAttentionOverlay(session, item);
+function placeTerminalAttentionOverlay(session, item, record, index = 0) {
+  const overlay = terminalAttentionOverlay(session, item, index);
   if (!overlay) return;
   const containerRect = item.container.getBoundingClientRect?.() || {};
   const rowRect = record.row?.getBoundingClientRect?.();
@@ -22142,8 +22367,11 @@ function syncTerminalAttentionHighlight(session) {
   if (!texts.length) return false;
   const record = terminalAttentionQuestionRow(item, texts);
   if (!record) return false;
-  record.row?.classList?.add(terminalAttentionQuestionRowClass);
-  placeTerminalAttentionOverlay(session, item, record);
+  const segments = Array.isArray(record.segments) && record.segments.length ? record.segments : [record];
+  segments.forEach((segment, index) => {
+    segment.row?.classList?.add(terminalAttentionQuestionRowClass);
+    placeTerminalAttentionOverlay(session, item, segment, index);
+  });
   return true;
 }
 
@@ -45481,7 +45709,7 @@ function startTerminal(session) {
   term.open(container);
   // match the container bg to the terminal theme so every pane shares one white.
   if (container?.style) container.style.background = terminalThemeForGlobalTheme().background;
-  installTerminalLinkProvider(term);
+  installTerminalLinkProvider(session, term);
   installTerminalOsc52Bridge(session, term);   // Claude/tmux OSC 52 clipboard escapes -> browser clipboard
   const openedSize = shareHostTerminalSize(session) || estimateTerminalSize(container, term);
   if (term.cols !== openedSize.cols || term.rows !== openedSize.rows) {

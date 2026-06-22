@@ -1408,6 +1408,44 @@ async function runLayoutAsyncSuite() {
     }
 
     {
+      const api = loadYolomux('', ['1']);
+      api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/dynamo4/lib/llm/src'}});
+      const lines = [terminalLine('protocols/openai/chat_completions/qwen3_coder_v2.rs')];
+      const term = {cols: 100, rows: 10, buffer: {active: {viewportY: 0, getLine: index => lines[index] || null}}};
+      const calls = [];
+      api.setFetchForTest((url, options = {}) => {
+        const body = JSON.parse(options.body || '{}');
+        calls.push({url: String(url), method: options.method || 'GET', requests: body.requests || []});
+        return Promise.resolve(jsonResponse({
+          responses: body.requests.map(request => ({
+            id: request.id,
+            ok: true,
+            payload: {kind: 'file', name: 'qwen3_coder_v2.rs', path: request.path},
+          })),
+        }));
+      });
+      const providerPromise = api.terminalReferenceProviderLinks('1', term, 1);
+      await api.flushFileExplorerFsBatchForTest();
+      const links = await providerPromise;
+      assert.deepStrictEqual(canonical(calls), [{
+        method: 'POST',
+        requests: [{id: 1, path: '/home/test/dynamo4/lib/llm/src/protocols/openai/chat_completions/qwen3_coder_v2.rs', type: 'info'}],
+        url: '/api/fs/batch',
+      }], 'terminal qwen-style file refs confirm existence against the active pane cwd');
+      assert.equal(links.length, 1, 'confirmed terminal file refs are exposed to xterm as visual decorations');
+      assert.deepStrictEqual(canonical({
+        text: links[0].text,
+        range: links[0].range,
+        decorations: links[0].decorations,
+      }), {
+        text: 'protocols/openai/chat_completions/qwen3_coder_v2.rs',
+        range: {start: {x: 1, y: 1}, end: {x: 51, y: 1}},
+        decorations: {pointerCursor: false, underline: true},
+      }, 'xterm marks terminal file refs with underline but no left-click pointer affordance');
+      assert.equal(links[0].activate(), undefined, 'left-click activation is intentionally a no-op');
+    }
+
+    {
       const source = fs.readFileSync('static/yolomux.js', 'utf8');
       assert.ok(/Promise\.all\(directories\.map\(async directory =>/.test(source), 'periodic Finder refresh starts watched directory checks together so fs/list can batch');
     }

@@ -854,7 +854,7 @@ def test_session_files_payload_accepts_explicit_commit_refs(tmp_path):
     assert payload["repos"][0]["ahead"] == 1
 
 
-def test_session_files_payload_explicit_current_ref_matches_plain_git_diff(tmp_path):
+def test_session_files_payload_explicit_current_ref_includes_untracked_files(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     git(repo, "init")
@@ -866,9 +866,14 @@ def test_session_files_payload_explicit_current_ref_matches_plain_git_diff(tmp_p
     git(repo, "commit", "-m", "one")
     older = git(repo, "rev-parse", "HEAD").stdout.strip()
     tracked.write_text("one\ntwo\n", encoding="utf-8")
-    (repo / "loose.txt").write_text("not in plain git diff\n", encoding="utf-8")
+    untracked = repo / "lib" / "llm" / "src" / "protocols" / "openai" / "chat_completions" / "qwen3_coder_v2.rs"
+    untracked.parent.mkdir(parents=True)
+    untracked.write_text("one\ntwo\n", encoding="utf-8")
     rollout = tmp_path / "rollout.jsonl"
-    rollout.write_text('{"msg":"*** Begin Patch\\n*** Update File: loose.txt\\n"}\n', encoding="utf-8")
+    rollout.write_text(
+        '{"msg":"*** Begin Patch\\n*** Add File: lib/llm/src/protocols/openai/chat_completions/qwen3_coder_v2.rs\\n"}\n',
+        encoding="utf-8",
+    )
     pane = PaneInfo(
         session="s1",
         window="0",
@@ -886,10 +891,17 @@ def test_session_files_payload_explicit_current_ref_matches_plain_git_diff(tmp_p
 
     payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time(), from_ref=older, to_ref="current")
 
-    assert [item["path"] for item in payload["files"]] == ["tracked.txt"]
-    assert payload["files"][0]["added"] == 1
-    assert payload["files"][0]["removed"] == 0
-    assert payload["repos"][0]["count"] == 1
+    by_path = {item["path"]: item for item in payload["files"]}
+    qwen_path = "lib/llm/src/protocols/openai/chat_completions/qwen3_coder_v2.rs"
+    assert set(by_path) == {qwen_path, "tracked.txt"}
+    assert by_path["tracked.txt"]["added"] == 1
+    assert by_path["tracked.txt"]["removed"] == 0
+    assert by_path["tracked.txt"]["diff_tracked"] is True
+    assert by_path[qwen_path]["status"] == "?"
+    assert by_path[qwen_path]["added"] == 2
+    assert by_path[qwen_path]["removed"] == 0
+    assert by_path[qwen_path]["diff_tracked"] is False
+    assert payload["repos"][0]["count"] == 2
     assert payload["repos"][0]["added"] == 1
     assert payload["repos"][0]["removed"] == 0
 
