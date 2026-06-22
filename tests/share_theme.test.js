@@ -1920,8 +1920,8 @@ async function runShareThemeSuite() {
     assert.ok(modifiedPreferencesHtml.includes('Global reset'), 'preferences reset is labeled as global in normal-case text');
     assert.ok(modifiedPreferencesHtml.includes('resets every Preferences value'), 'preferences reset carries a broad warning');
     assert.ok(modifiedPreferencesHtml.includes('data-preferences-reset-all'), 'preferences expose a global reset action after a setting changes');
-    assert.ok(/\.preferences-global-reset \.preferences-reset-all\s*\{[\s\S]*?background:\s*#d92d20[\s\S]*?font:\s*600 var\(--ui-font-size-sm\)\/1\.1 var\(--ui-font\)/.test(preferencesCss), 'preferences global reset button is red and uses normal UI text');
-    assert.ok(/body\.theme-light \.preferences-global-reset \.preferences-reset-all\s*\{[\s\S]*?background:\s*var\(--danger-strong\)/.test(preferencesCss), 'preferences global reset button uses the shared danger token in light mode');
+    assert.ok(/\.preferences-global-reset \.preferences-reset-all\s*\{[\s\S]*?color:\s*var\(--danger-action-text\)[\s\S]*?background:\s*var\(--danger-action-bg\)[\s\S]*?border-color:\s*var\(--danger-action-border\)[\s\S]*?font:\s*600 var\(--ui-font-size-sm\)\/1\.1 var\(--ui-font\)/.test(preferencesCss), 'preferences global reset button uses danger action tokens and normal UI text');
+    assert.ok(/body\.theme-light \.preferences-global-reset \.preferences-reset-all\s*\{[\s\S]*?color:\s*var\(--danger-action-text\)[\s\S]*?background:\s*var\(--danger-strong\)[\s\S]*?border-color:\s*var\(--danger-action-light-border\)/.test(preferencesCss), 'preferences global reset button uses shared danger tokens in light mode');
     assert.equal(preferencesHtml.includes('data-preferences-reset-confirm'), false, 'preferences do not show the destructive confirmation until requested');
     const resetConfirmHtml = api.preferencesResetConfirmHtmlForTest();
     assert.ok(resetConfirmHtml.includes('data-preferences-reset-confirm'), 'reset-all requires a second continue action');
@@ -2120,7 +2120,8 @@ async function runShareThemeSuite() {
       assert.equal(api.sessionFileDisplayTimeText(timestamp), api.sessionFileTimeText(timestamp), 'file-tree date mode Date uses the localized absolute timestamp');
       api.setFileExplorerTreeDateModeForTest('relative');
       assert.equal(api.sessionFileRelativeTimeText(1000, 999), 'now', 'file-tree relative dates localize the now case');
-      assert.equal(api.sessionFileRelativeTimeText(1000, 1059), '<1 min ago', 'file-tree relative dates localize the sub-minute case');
+      assert.equal(api.sessionFileRelativeTimeText(1000, 1014), '<15 sec ago', 'file-tree relative dates localize the pulse-window case');
+      assert.equal(api.sessionFileRelativeTimeText(1000, 1059), '<1 min ago', 'file-tree relative dates localize the sub-minute case after the pulse window');
       assert.equal(api.sessionFileRelativeTimeText(1000, 1060), '1 min ago', 'file-tree relative dates show minute age');
       assert.equal(api.sessionFileRelativeTimeText(1000, 19720), '5.2 hrs ago', 'file-tree relative dates show decimal hour age');
       assert.equal(api.sessionFileRelativeTimeText(1000, 217000), '2.5 days ago', 'file-tree relative dates show decimal day age');
@@ -2553,7 +2554,7 @@ async function runShareThemeSuite() {
     assert.ok(preferencesCss.includes('.about-brand-row'), 'About modal has a large brand row style');
     assert.ok(/\.about-brand-yo\s*\{[\s\S]*animation:\s*yolo-marker-rotate/.test(preferencesCss), 'About YO glyph spins with the shared YOLO marker animation');
     assert.ok(/\.about-brand-yo\s*\{[\s\S]*background:\s*var\(--pane-tab-yolo-bg\)/.test(preferencesCss), 'About YO glyph follows the active theme color');
-    assert.ok(/\.about-brand-lo\s*\{[\s\S]*color:\s*var\(--brand-green,\s*#76b900\)/.test(preferencesCss), 'About LO stays brand green regardless of active color');
+    assert.ok(/\.about-brand-lo\s*\{[\s\S]*color:\s*var\(--brand-green\)/.test(preferencesCss), 'About LO stays brand green regardless of active color');
     const brandCss = fs.readFileSync('static/brand.css', 'utf8');
     assert.ok(/--brand-yolo-bg:\s*var\(--active-control-bg,\s*var\(--brand-primary-green\)\)/.test(brandCss), 'topbar YO follows the active color with green fallback');
     assert.ok(/\.brand-title \.brand-yolo\s*\{[\s\S]*background:\s*var\(--brand-yolo-bg\)/.test(brandCss), 'topbar YO background uses the active-color brand token');
@@ -2838,7 +2839,8 @@ async function runShareThemeSuite() {
       assert.ok(/async function repairShareGeometryDigest\(payload = \{\}, initialDiff = ''\)[\s\S]*repairShareGeometryBucket\(payload, diff\)[\s\S]*shareGeometryDigestCompare/.test(shareSource), 'M9: viewers repair and recheck geometry drift through the bucket-specific repair helper');
       assert.equal(/async function repairShareGeometryDigest\(payload = \{\}, initialDiff = ''\)[\s\S]*else await resyncShareViewerUiState\(\)/.test(shareSource), false, 'DOIT.72 P0.2: geometry drift repair no longer blindly runs the generic semantic resync for every mismatch');
       assert.ok(/function applyShareGeometryDigest\(payload = \{\}\)[\s\S]*shareGeometryDigestCompare\(payload\)[\s\S]*!shareGeometryRepairInFlight[\s\S]*repairShareGeometryDigest\(payload, diff\)/.test(shareSource), 'M9: viewers compare geometry digests and route mismatch through the guarded repair helper');
-      assert.ok(/function installShareGeometryDigestLoop\(\)[\s\S]*setInterval\(publishShareGeometryDigest, 2000\)/.test(shareSource), 'M9: host publishes geometry digest every two seconds');
+      assert.ok(/shareGeometryDigestPublishMs:\s*uiDelayMs\.shareGeometryDigestPublish/.test(timingSource), 'M9: the two-second geometry digest cadence is owned by the shared timing partial');
+      assert.ok(/function installShareGeometryDigestLoop\(\)[\s\S]*setInterval\(publishShareGeometryDigest, shareGeometryDigestPublishMs\)/.test(shareSource), 'M9: host publishes geometry digest through the shared timing owner');
       assert.ok(/function renderSharePointerGhost\(payload = \{\}\)[\s\S]*payload\.sender === shareClientId[\s\S]*ensureSharePointerGhost\(sender\)[\s\S]*renderShareClickRipple/.test(shareSource), 'share participants render remote ghost cursors and ignore their own echoed cursor');
       assert.ok(/function shareHostTerminalSize\(session\)[\s\S]*shareHostDimensions\.get[\s\S]*rawRows <= 0 \|\| rawCols <= 0[\s\S]*return null/.test(shareSource), 'share viewers size xterm only from positive host terminal dimensions');
       assert.ok(/function fitTerminal\(session, options = \{\}\)[\s\S]*if \(shareViewMode\) \{[\s\S]*if \(!hostSize\) return[\s\S]*item\.term\.resize\(hostSize\.cols, hostSize\.rows\)[\s\S]*item\.term\.reset\(\)[\s\S]*return;[\s\S]*estimateTerminalSize/.test(shareSource), 'DOIT.69: share-view fitting uses host dims only, resets on host dim changes, and never reflows from the client pane box');

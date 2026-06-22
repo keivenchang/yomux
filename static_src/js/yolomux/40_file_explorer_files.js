@@ -1836,7 +1836,6 @@ function fileTreeMtimeText(entry) {
   return sessionFileDisplayTimeTextForEntry(entry);
 }
 
-const FILE_TREE_RECENCY_JUST_UPDATED_MAX_AGE_SECONDS = 15;
 const FILE_TREE_RECENCY_THRESHOLDS = Object.freeze([
   {key: 'just-updated', maxAgeSeconds: FILE_TREE_RECENCY_JUST_UPDATED_MAX_AGE_SECONDS, colorVar: 'var(--file-tree-recency-hot)', pulseEligible: true},
   {key: 'hot', maxAgeSeconds: 60, colorVar: 'var(--file-tree-recency-hot)'},
@@ -2187,9 +2186,18 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
   }
   setHiddenIfChanged(status, !statusText);
   if (options.preserveDate !== true) {
-    const dateText = options.dateText || '';
-    if (date.textContent !== dateText) date.textContent = dateText;
-    setHiddenIfChanged(date, !dateText);
+    const dateHtml = options.dateHtml || '';
+    if (dateHtml) {
+      if (date.innerHTML !== dateHtml) date.innerHTML = dateHtml;
+      setHiddenIfChanged(date, false);
+    } else {
+      const dateText = options.dateText || '';
+      if (date.innerHTML || date.textContent !== dateText) {
+        date.innerHTML = '';
+        date.textContent = dateText;
+      }
+      setHiddenIfChanged(date, !dateText);
+    }
   }
 }
 
@@ -2255,12 +2263,7 @@ function applyFileTreeRowDerivedState(row, state) {
   updateFileTreeRowContents(row, state.icon, state.displayName.text, state.contentOptions);
 }
 
-function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
-  const fullPath = parentPath === '/' ? `/${entry.name}` : `${parentPath}/${entry.name}`;
-  // Tabber rows are heterogeneous (session/window/pane/repo/file), so the file-specific git/popover/index
-  // logic below does not apply. Render them via the shared column filler (updateFileTreeRowContents) +
-  // .file-tree-row DOM, with all display values precomputed in the entry as data — B3's mode:'tabber'.
-  if (options.mode === 'tabber') return updateTabberRow(row, fullPath, entry, depth, options);
+function buildFileTreeRowState(fullPath, entry, depth, options = {}) {
   const differMode = options.differMode === true;
   const compact = options.compact === true;
   const currentDirectory = activeFinderDirectoryPath();
@@ -2269,48 +2272,77 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
     : (options.autoExpand === true || fileExplorerExpanded.has(fullPath)));
   const indexedDirectory = !differMode && entry.kind === 'dir' && fileExplorerDirectoryIsIndexed(fullPath);
   const indexedDescendantDirectory = !differMode && entry.kind === 'dir' && !indexedDirectory && Boolean(fileExplorerIndexedAncestor(fullPath));
+  const derivedState = fileTreeRowDerivedState(fullPath, entry, {
+    ...options,
+    expanded,
+    dateText: fileTreeMtimeText(entry),
+  });
+  const changedFile = derivedState.changedFile;
+  const changedFileStatus = derivedState.changedFileStatus;
+  const repoRoot = differMode && entry.kind === 'dir' ? (options.repoForDiffer || '') : '';
+  const relDir = repoRoot && fullPath.startsWith(repoRoot + '/') ? fullPath.slice(repoRoot.length + 1) : '';
+  return {
+    fullPath,
+    entry,
+    depth,
+    options,
+    differMode,
+    compact,
+    expanded,
+    indexedDirectory,
+    indexedDescendantDirectory,
+    paddingLeft: fileTreeRowPadding(depth, compact),
+    selected: fileExplorerSelectedPaths.has(fullPath),
+    sessionHighlightClass: fileExplorerSessionHighlightClassForPath(fullPath, entry.kind, {
+      differMode,
+      sessionHighlightSets: options.sessionHighlightSets,
+    }),
+    derivedState,
+    changedFile,
+    changedFileStatus,
+    newEntry: !differMode && fileExplorerEntryIsNew(fullPath),
+    currentFile: !differMode && entry.kind === 'file' && fullPath === activeFile,
+    currentDirectoryRow: !differMode && entry.kind === 'dir' && fullPath === currentDirectory,
+    relDir,
+    imagePreviewEligible: entry.kind === 'file' && previewMediaKindForPath(entry.name) === 'image' && Number(entry.size || 0) <= MAX_FILE_PREVIEW_BYTES,
+  };
+}
+
+function applyFileTreeRowDataset(row, state) {
+  const {entry, fullPath} = state;
   syncFileTreeRowKindClass(row, entry.kind);
-  row.classList.toggle('compact', compact);
+  row.classList.toggle('compact', state.compact);
   setRowDataset(row, 'path', fullPath);
   setRowDataset(row, 'kind', entry.kind);
   setRowDataset(row, 'name', entry.name);
   setRowDataset(row, 'isRepo', entry.is_repo === true ? 'true' : 'false');
   setRowDataset(row, 'isSymlink', entry.is_symlink === true ? 'true' : 'false');
   setRowDataset(row, 'symlinkTarget', entry.symlink_target || '');
-  setRowDataset(row, 'indexed', indexedDirectory ? 'true' : 'false');
+  setRowDataset(row, 'indexed', state.indexedDirectory ? 'true' : 'false');
   setRowDataset(row, 'tabberType', '');
   setRowDataset(row, 'tabberSession', '');
   setRowDataset(row, 'tabberWindow', '');
   setRowDataset(row, 'tabberRepoRoot', '');
   setRowDataset(row, 'tabberItem', '');
   setRowDataset(row, 'tabberBranch', '');
-  const paddingLeft = fileTreeRowPadding(depth, compact);
-  if (row.style.paddingLeft !== paddingLeft) row.style.paddingLeft = paddingLeft;
-  setTreeItemAria(row, {selected: fileExplorerSelectedPaths.has(fullPath), expandable: entry.kind === 'dir', expanded});
+  if (row.style.paddingLeft !== state.paddingLeft) row.style.paddingLeft = state.paddingLeft;
+  setTreeItemAria(row, {selected: state.selected, expandable: entry.kind === 'dir', expanded: state.expanded});
   row.draggable = entry.kind === 'file' || entry.kind === 'dir';
-  row.classList.toggle('selected', fileExplorerSelectedPaths.has(fullPath));
-  row.classList.toggle('expanded', expanded);
-  row.classList.toggle('collapsed', entry.kind === 'dir' && !expanded);
+  row.classList.toggle('selected', state.selected);
+  row.classList.toggle('expanded', state.expanded);
+  row.classList.toggle('collapsed', entry.kind === 'dir' && !state.expanded);
   row.classList.toggle('is-repo', entry.kind === 'dir' && entry.is_repo === true);
-  row.classList.toggle('indexed-directory', indexedDirectory);
-  row.classList.toggle('indexed-descendant-directory', indexedDescendantDirectory);
-  const sessionHighlightClass = fileExplorerSessionHighlightClassForPath(fullPath, entry.kind, {
-    differMode,
-    sessionHighlightSets: options.sessionHighlightSets,
-  });
-  applySessionHighlightRowClass(row, sessionHighlightClass);
+  row.classList.toggle('indexed-directory', state.indexedDirectory);
+  row.classList.toggle('indexed-descendant-directory', state.indexedDescendantDirectory);
+  applySessionHighlightRowClass(row, state.sessionHighlightClass);
   // flag symlinks so the icon gets an arrow-badge overlay (target-type icon is kept); a broken
   // link gets a red badge + struck-through name. The backend sets is_symlink + kind=symlink-broken.
   row.classList.toggle('is-symlink', entry.is_symlink === true);
   row.classList.toggle('symlink-broken', entry.kind === 'symlink-broken');
-  const derivedState = fileTreeRowDerivedState(fullPath, entry, {
-    ...options,
-    expanded,
-    dateText: fileTreeMtimeText(entry),
-  });
-  applyFileTreeRowDerivedState(row, derivedState);
-  applyFileTreeRowRecency(row, entry, {differMode});
-  const {changedFile, changedFileStatus} = derivedState;
+}
+
+function bindFinderRowHandlers(row, state) {
+  const {entry, fullPath, differMode} = state;
   if (!differMode && entry.kind === 'dir' && entry.is_repo === true) {
     row.removeAttribute('title');
     row.onmouseenter = event => { fileTreeRepoPopoverCursor = {x: event.clientX, y: event.clientY}; scheduleRepoRowHoverPopover(row, fullPath); };
@@ -2330,16 +2362,76 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
     }
   }
   if (!differMode) {
-    const newEntry = fileExplorerEntryIsNew(fullPath);
-    row.classList.toggle('new-entry', newEntry);
-    if (newEntry) scheduleNewEntryClassRemoval(row, fullPath);
-    const currentFile = entry.kind === 'file' && fullPath === activeFile;
-    const currentDirectoryRow = entry.kind === 'dir' && fullPath === currentDirectory;
-    row.classList.toggle('current-file', currentFile);
-    row.classList.toggle('current-directory', currentDirectoryRow);
-    if (currentFile || currentDirectoryRow) row.setAttribute('aria-current', 'true');
+    row.classList.toggle('new-entry', state.newEntry);
+    if (state.newEntry) scheduleNewEntryClassRemoval(row, fullPath);
+    row.classList.toggle('current-file', state.currentFile);
+    row.classList.toggle('current-directory', state.currentDirectoryRow);
+    if (state.currentFile || state.currentDirectoryRow) row.setAttribute('aria-current', 'true');
     else row.removeAttribute('aria-current');
   }
+  if (state.imagePreviewEligible) bindFileImagePreview(row, fullPath, entry);
+  if (differMode) {
+    // In differMode, event handling is via delegation in bindChangesPanel; clear Finder handlers
+    clearFileTreeRowHandlers(row);
+    return;
+  }
+  row.onpointerdown = event => {
+    if (event.button != null && event.button !== 0) return;
+    cancelPendingFileExplorerActiveSync();
+    row.__fileTreePointerDown = {x: event.clientX || 0, y: event.clientY || 0};
+  };
+  row.onpointerup = event => {
+    if (event.button != null && event.button !== 0) return;
+    const start = row.__fileTreePointerDown;
+    row.__fileTreePointerDown = null;
+    if (row.__fileTreeDragging) return;
+    const dx = Math.abs((event.clientX || 0) - (start?.x || 0));
+    const dy = Math.abs((event.clientY || 0) - (start?.y || 0));
+    if (start && Math.max(dx, dy) > 4) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.detail > 1) return;
+    row.__fileTreePointerActivated = true;
+    setTimeout(() => { row.__fileTreePointerActivated = false; }, 0);
+    onFileTreeRowClick(row, fullPath, entry, event);
+  };
+  row.onclick = event => {
+    if (row.__fileTreePointerActivated) {
+      row.__fileTreePointerActivated = false;
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    event.stopPropagation();
+    if (event.detail > 1) return;
+    onFileTreeRowClick(row, fullPath, entry, event);
+  };
+  row.ondblclick = event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (entry.kind === 'dir') openFileExplorerManualRoot(fullPath);
+    else openFileInEditor(fullPath, entry);
+  };
+  row.oncontextmenu = event => {
+    event.preventDefault();
+    event.stopPropagation();
+    closeFileImagePreview();
+    showFileTreeContextMenu(row, fullPath, entry, event.clientX, event.clientY);
+  };
+  row.ondragstart = event => {
+    row.__fileTreeDragging = true;
+    startFileTreeDrag(event, row, fullPath, entry);
+  };
+  row.ondragend = () => {
+    row.__fileTreeDragging = false;
+    dragFilePayloadState = null;
+    stopCustomDragPreview();
+    clearDropPreview();
+  };
+}
+
+function bindDifferRowData(row, state) {
+  const {entry, fullPath, differMode, changedFile, changedFileStatus} = state;
   // Set data attributes so Differ event delegation (click/drag/contextmenu) can find these rows
   setRowDataset(row, 'openChangeFile', changedFile?.abs_path || '');
   setRowDataset(row, 'openChangeSession', changedFile?.abs_path ? (changedFile.session || '') : '');
@@ -2348,76 +2440,27 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   setRowDataset(row, 'openChangeRepo', changedFile?.abs_path ? (changedFile.repo || '') : '');
   setRowDataset(row, 'changeSize', changedFile?.abs_path && changedFile.size !== null && changedFile.size !== undefined ? changedFile.size : '');
   if (differMode && entry.kind === 'dir') {
-    const repoRoot = options.repoForDiffer || '';
-    const relDir = repoRoot && fullPath.startsWith(repoRoot + '/') ? fullPath.slice(repoRoot.length + 1) : '';
     setRowDataset(row, 'changesFolderToggle', fullPath);
     setRowDataset(row, 'openChangeDirectory', fullPath);
-    setRowDataset(row, 'changeRel', relDir);
+    setRowDataset(row, 'changeRel', state.relDir);
   } else if (!differMode) {
     setRowDataset(row, 'changesFolderToggle', '');
     setRowDataset(row, 'openChangeDirectory', '');
   }
-  if (entry.kind === 'file' && previewMediaKindForPath(entry.name) === 'image' && Number(entry.size || 0) <= MAX_FILE_PREVIEW_BYTES) {
-    bindFileImagePreview(row, fullPath, entry);
-  }
-  if (differMode) {
-    // In differMode, event handling is via delegation in bindChangesPanel; clear Finder handlers
-    clearFileTreeRowHandlers(row);
-  } else {
-    row.onpointerdown = event => {
-      if (event.button != null && event.button !== 0) return;
-      cancelPendingFileExplorerActiveSync();
-      row.__fileTreePointerDown = {x: event.clientX || 0, y: event.clientY || 0};
-    };
-    row.onpointerup = event => {
-      if (event.button != null && event.button !== 0) return;
-      const start = row.__fileTreePointerDown;
-      row.__fileTreePointerDown = null;
-      if (row.__fileTreeDragging) return;
-      const dx = Math.abs((event.clientX || 0) - (start?.x || 0));
-      const dy = Math.abs((event.clientY || 0) - (start?.y || 0));
-      if (start && Math.max(dx, dy) > 4) return;
-      event.preventDefault();
-      event.stopPropagation();
-      if (event.detail > 1) return;
-      row.__fileTreePointerActivated = true;
-      setTimeout(() => { row.__fileTreePointerActivated = false; }, 0);
-      onFileTreeRowClick(row, fullPath, entry, event);
-    };
-    row.onclick = event => {
-      if (row.__fileTreePointerActivated) {
-        row.__fileTreePointerActivated = false;
-        event.preventDefault();
-        event.stopPropagation();
-        return;
-      }
-      event.stopPropagation();
-      if (event.detail > 1) return;
-      onFileTreeRowClick(row, fullPath, entry, event);
-    };
-    row.ondblclick = event => {
-      event.preventDefault();
-      event.stopPropagation();
-      if (entry.kind === 'dir') openFileExplorerManualRoot(fullPath);
-      else openFileInEditor(fullPath, entry);
-    };
-    row.oncontextmenu = event => {
-      event.preventDefault();
-      event.stopPropagation();
-      closeFileImagePreview();
-      showFileTreeContextMenu(row, fullPath, entry, event.clientX, event.clientY);
-    };
-    row.ondragstart = event => {
-      row.__fileTreeDragging = true;
-      startFileTreeDrag(event, row, fullPath, entry);
-    };
-    row.ondragend = () => {
-      row.__fileTreeDragging = false;
-      dragFilePayloadState = null;
-      stopCustomDragPreview();
-      clearDropPreview();
-    };
-  }
+}
+
+function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
+  const fullPath = parentPath === '/' ? `/${entry.name}` : `${parentPath}/${entry.name}`;
+  // Tabber rows are heterogeneous (session/window/pane/repo/file), so the file-specific git/popover/index
+  // logic below does not apply. Render them via the shared column filler (updateFileTreeRowContents) +
+  // .file-tree-row DOM, with all display values precomputed in the entry as data — B3's mode:'tabber'.
+  if (options.mode === 'tabber') return updateTabberRow(row, fullPath, entry, depth, options);
+  const rowState = buildFileTreeRowState(fullPath, entry, depth, options);
+  applyFileTreeRowDataset(row, rowState);
+  applyFileTreeRowDerivedState(row, rowState.derivedState);
+  applyFileTreeRowRecency(row, entry, {differMode: rowState.differMode});
+  bindDifferRowData(row, rowState);
+  bindFinderRowHandlers(row, rowState);
   return fullPath;
 }
 
@@ -2760,16 +2803,8 @@ function sharedTreeChildRow(rows, row) {
   return childId && childId !== id && pathIsInsideDirectory(childId, id) ? child : null;
 }
 
-function createSharedTreeInteractionController(options = {}) {
-  const state = {
-    selectedIds: new Set(),
-    leadId: '',
-  };
-  const controller = {
-    name: options.name || 'tree',
-    rows(panel) {
-      return sharedTreeRows(panel, options);
-    },
+function sharedTreeSelectionApi(controller, state, options = {}) {
+  return {
     selectedIds() {
       if (typeof options.selectedIds === 'function') {
         const selected = options.selectedIds();
@@ -2862,6 +2897,27 @@ function createSharedTreeInteractionController(options = {}) {
       controller.applyState(panel);
       return selectionOnly === true;
     },
+    leadRow(panel) {
+      const rows = controller.rows(panel);
+      const leadId = controller.leadId();
+      return rows.find(row => sharedTreeRowId(row) === leadId)
+        || rows.find(row => controller.selectedIds().has(sharedTreeRowId(row)))
+        || rows.find(row => controller.rowIsCurrent(row))
+        || rows[0]
+        || null;
+    },
+    syncCurrent(panel, syncOptions = {}) {
+      const currentId = controller.currentId();
+      if (currentId && typeof options.syncCurrentSelection === 'function') options.syncCurrentSelection(currentId);
+      controller.setLeadId(currentId || controller.leadId());
+      controller.applyState(panel, {scrollCurrent: syncOptions.scrollIntoView === true});
+      return Boolean(currentId);
+    },
+  };
+}
+
+function sharedTreeExpansionApi(controller, options = {}) {
+  return {
     isExpanded(row) {
       if (typeof options.isExpanded === 'function') return options.isExpanded(row) === true;
       return row?.getAttribute?.('aria-expanded') === 'true';
@@ -2873,6 +2929,99 @@ function createSharedTreeInteractionController(options = {}) {
       }
       return false;
     },
+  };
+}
+
+function sharedTreeClickHandler(controller, options = {}) {
+  return function handleSharedTreeClick(event, panel, clickOptions = {}) {
+    const row = clickOptions.row || event?.target?.closest?.(options.rowSelector || '.file-tree-row[data-path]');
+    if (!row || !panel?.contains?.(row) || !controller.rows(panel).includes(row)) return false;
+    if (typeof options.shouldIgnoreEvent === 'function' && options.shouldIgnoreEvent(event)) return false;
+    if (typeof globalShortcutTargetAllowsAppAction === 'function' && !globalShortcutTargetAllowsAppAction(event?.target) && !clickOptions.row) return false;
+    const onDisclosure = Boolean(event?.target?.closest?.('.file-tree-icon'));
+    consumeSharedTreeEvent(event);
+    const selectionOnly = controller.selectFromClick(panel, row, event);
+    if (row.dataset.kind === 'dir' && onDisclosure) {
+      controller.setExpanded(panel, row, !controller.isExpanded(row));
+      return true;
+    }
+    if (!selectionOnly && options.activateOnClick !== false) controller.activateRow(panel, row, event);
+    return true;
+  };
+}
+
+function sharedTreeKeyboardHandler(controller, options = {}) {
+  return function handleSharedTreeKeydown(event, panel) {
+    if (typeof options.shouldIgnoreEvent === 'function' && options.shouldIgnoreEvent(event)) return false;
+    const intent = sharedTreeKeyIntent(event, options);
+    if (!intent) return false;
+    const rows = controller.rows(panel);
+    if (!rows.length) return false;
+    const eventTargetsOwnedPanel = panel?.contains?.(event?.target) || event?.target === panel;
+    if (typeof globalShortcutTargetAllowsAppAction === 'function' && !globalShortcutTargetAllowsAppAction(event?.target) && !eventTargetsOwnedPanel) return false;
+    const lead = controller.leadRow(panel);
+    let leadIndex = lead ? rows.indexOf(lead) : -1;
+    if (intent === 'select-all' && options.allowSelectAll === true) {
+      consumeSharedTreeEvent(event);
+      const selectedIds = controller.selectedIds();
+      selectedIds.clear();
+      for (const row of rows) selectedIds.add(sharedTreeRowId(row));
+      controller.setLeadId(sharedTreeRowId(rows[rows.length - 1]));
+      if (typeof options.afterSelectAll === 'function') options.afterSelectAll(rows, event);
+      controller.applyState(panel);
+      return true;
+    }
+    if (intent === 'activate') {
+      if (!lead) return false;
+      consumeSharedTreeEvent(event);
+      controller.selectRow(panel, lead, event);
+      controller.activateRow(panel, lead, event);
+      return true;
+    }
+    if (intent === 'expand' || intent === 'collapse') {
+      if (!lead) return false;
+      consumeSharedTreeEvent(event);
+      const expanded = controller.isExpanded(lead);
+      if (intent === 'expand') {
+        if (lead.dataset.kind === 'dir' && !expanded) controller.setExpanded(panel, lead, true);
+        else {
+          const child = sharedTreeChildRow(rows, lead);
+          if (child) controller.selectRow(panel, child, event);
+        }
+        return true;
+      }
+      if (lead.dataset.kind === 'dir' && expanded) controller.setExpanded(panel, lead, false);
+      else {
+        const parent = sharedTreeParentRow(rows, lead);
+        if (parent) controller.selectRow(panel, parent, event);
+      }
+      return true;
+    }
+    if (leadIndex < 0) leadIndex = 0;
+    const lastIndex = rows.length - 1;
+    let nextIndex = leadIndex;
+    if (intent === 'move-home' || intent === 'extend-home') nextIndex = 0;
+    else if (intent === 'move-end' || intent === 'extend-end') nextIndex = lastIndex;
+    else if (intent === 'move-down' || intent === 'extend-down') nextIndex = Math.min(lastIndex, leadIndex + 1);
+    else if (intent === 'move-up' || intent === 'extend-up') nextIndex = Math.max(0, leadIndex - 1);
+    consumeSharedTreeEvent(event);
+    const nextRow = rows[nextIndex];
+    if (intent.startsWith('extend')) controller.selectRange(panel, nextRow, event);
+    else controller.selectRow(panel, nextRow, event);
+    return true;
+  };
+}
+
+function createSharedTreeInteractionController(options = {}) {
+  const state = {
+    selectedIds: new Set(),
+    leadId: '',
+  };
+  const controller = {
+    name: options.name || 'tree',
+    rows(panel) {
+      return sharedTreeRows(panel, options);
+    },
     activateRow(panel, row, event = null) {
       if (typeof options.activateRow === 'function') {
         options.activateRow(row, event);
@@ -2881,97 +3030,11 @@ function createSharedTreeInteractionController(options = {}) {
       }
       return false;
     },
-    leadRow(panel) {
-      const rows = controller.rows(panel);
-      const leadId = controller.leadId();
-      return rows.find(row => sharedTreeRowId(row) === leadId)
-        || rows.find(row => controller.selectedIds().has(sharedTreeRowId(row)))
-        || rows.find(row => controller.rowIsCurrent(row))
-        || rows[0]
-        || null;
-    },
-    handleClick(event, panel, clickOptions = {}) {
-      const row = clickOptions.row || event?.target?.closest?.(options.rowSelector || '.file-tree-row[data-path]');
-      if (!row || !panel?.contains?.(row) || !controller.rows(panel).includes(row)) return false;
-      if (typeof options.shouldIgnoreEvent === 'function' && options.shouldIgnoreEvent(event)) return false;
-      if (typeof globalShortcutTargetAllowsAppAction === 'function' && !globalShortcutTargetAllowsAppAction(event?.target) && !clickOptions.row) return false;
-      const onDisclosure = Boolean(event?.target?.closest?.('.file-tree-icon'));
-      consumeSharedTreeEvent(event);
-      const selectionOnly = controller.selectFromClick(panel, row, event);
-      if (row.dataset.kind === 'dir' && onDisclosure) {
-        controller.setExpanded(panel, row, !controller.isExpanded(row));
-        return true;
-      }
-      if (!selectionOnly && options.activateOnClick !== false) controller.activateRow(panel, row, event);
-      return true;
-    },
-    handleKeydown(event, panel) {
-      if (typeof options.shouldIgnoreEvent === 'function' && options.shouldIgnoreEvent(event)) return false;
-      const intent = sharedTreeKeyIntent(event, options);
-      if (!intent) return false;
-      const rows = controller.rows(panel);
-      if (!rows.length) return false;
-      const eventTargetsOwnedPanel = panel?.contains?.(event?.target) || event?.target === panel;
-      if (typeof globalShortcutTargetAllowsAppAction === 'function' && !globalShortcutTargetAllowsAppAction(event?.target) && !eventTargetsOwnedPanel) return false;
-      const lead = controller.leadRow(panel);
-      let leadIndex = lead ? rows.indexOf(lead) : -1;
-      if (intent === 'select-all' && options.allowSelectAll === true) {
-        consumeSharedTreeEvent(event);
-        const selectedIds = controller.selectedIds();
-        selectedIds.clear();
-        for (const row of rows) selectedIds.add(sharedTreeRowId(row));
-        controller.setLeadId(sharedTreeRowId(rows[rows.length - 1]));
-        if (typeof options.afterSelectAll === 'function') options.afterSelectAll(rows, event);
-        controller.applyState(panel);
-        return true;
-      }
-      if (intent === 'activate') {
-        if (!lead) return false;
-        consumeSharedTreeEvent(event);
-        controller.selectRow(panel, lead, event);
-        controller.activateRow(panel, lead, event);
-        return true;
-      }
-      if (intent === 'expand' || intent === 'collapse') {
-        if (!lead) return false;
-        consumeSharedTreeEvent(event);
-        const expanded = controller.isExpanded(lead);
-        if (intent === 'expand') {
-          if (lead.dataset.kind === 'dir' && !expanded) controller.setExpanded(panel, lead, true);
-          else {
-            const child = sharedTreeChildRow(rows, lead);
-            if (child) controller.selectRow(panel, child, event);
-          }
-          return true;
-        }
-        if (lead.dataset.kind === 'dir' && expanded) controller.setExpanded(panel, lead, false);
-        else {
-          const parent = sharedTreeParentRow(rows, lead);
-          if (parent) controller.selectRow(panel, parent, event);
-        }
-        return true;
-      }
-      if (leadIndex < 0) leadIndex = 0;
-      const lastIndex = rows.length - 1;
-      let nextIndex = leadIndex;
-      if (intent === 'move-home' || intent === 'extend-home') nextIndex = 0;
-      else if (intent === 'move-end' || intent === 'extend-end') nextIndex = lastIndex;
-      else if (intent === 'move-down' || intent === 'extend-down') nextIndex = Math.min(lastIndex, leadIndex + 1);
-      else if (intent === 'move-up' || intent === 'extend-up') nextIndex = Math.max(0, leadIndex - 1);
-      consumeSharedTreeEvent(event);
-      const nextRow = rows[nextIndex];
-      if (intent.startsWith('extend')) controller.selectRange(panel, nextRow, event);
-      else controller.selectRow(panel, nextRow, event);
-      return true;
-    },
-    syncCurrent(panel, syncOptions = {}) {
-      const currentId = controller.currentId();
-      if (currentId && typeof options.syncCurrentSelection === 'function') options.syncCurrentSelection(currentId);
-      controller.setLeadId(currentId || controller.leadId());
-      controller.applyState(panel, {scrollCurrent: syncOptions.scrollIntoView === true});
-      return Boolean(currentId);
-    },
   };
+  Object.assign(controller, sharedTreeSelectionApi(controller, state, options));
+  Object.assign(controller, sharedTreeExpansionApi(controller, options));
+  controller.handleClick = sharedTreeClickHandler(controller, options);
+  controller.handleKeydown = sharedTreeKeyboardHandler(controller, options);
   return registerSharedTreeInteractionController(controller);
 }
 
@@ -3557,7 +3620,17 @@ function sessionAgentWindowStatusPayloads(session, info = null, autoPayload = nu
       ? info.agent_windows
       : [];
   const fallback = source.length ? source : (Array.isArray(info?.agents) ? info.agents : [])
-    .map(agent => ({kind: agent?.kind || '', state: 'idle', pane_target: agent?.pane_target || '', window_label: agent?.window_label || '', last_active_ts: 0, idle_since: null}));
+    .map(agent => ({
+      kind: agent?.kind || '',
+      state: 'idle',
+      pane_target: agent?.pane_target || '',
+      window_label: agent?.window_label || '',
+      transcript: agent?.transcript || '',
+      transcript_id: agent?.transcript_id || agent?.session_id || agent?.agent_session_id || '',
+      agent_session_id: agent?.agent_session_id || agent?.session_id || '',
+      last_active_ts: 0,
+      idle_since: null,
+    }));
   return fallback
     .map(agent => {
       const kind = agentWindowKind(agent?.kind);
@@ -3583,6 +3656,7 @@ function agentWindowIdleSeconds(agent, nowSeconds = Date.now() / 1000) {
 
 const agentWindowActivityStates = new Map();
 const agentWindowStoppedTimers = new Map();
+const AGENT_WINDOW_COOLDOWN_SECONDS = 60;
 
 function agentWindowActivityTransitionKey(agentKey, options = {}) {
   const explicit = String(options.transitionKey || '').trim();
@@ -3624,7 +3698,15 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   const nowSeconds = Number.isFinite(Number(options.nowSeconds)) ? Number(options.nowSeconds) : Date.now() / 1000;
   const transitionKey = agentWindowActivityTransitionKey(kind, options);
   const previous = transitionKey ? (agentWindowActivityStates.get(transitionKey) || {}) : {};
-  if (String(state || '') === 'working') {
+  const stateKey = String(state || '').trim();
+  if (['approval', 'needs-approval', 'needs-input', 'interrupted'].includes(stateKey)) {
+    if (transitionKey) {
+      clearAgentWindowStoppedRefresh(transitionKey);
+      agentWindowActivityStates.set(transitionKey, {state: stateKey, seenWorking: previous.seenWorking === true, stoppedAt: Number(previous.stoppedAt) || 0});
+    }
+    return {state: 'attention', icon: '●', label: `${agentLabel(kind)} ${t('state.needs-input')}`};
+  }
+  if (stateKey === 'working') {
     if (transitionKey) {
       clearAgentWindowStoppedRefresh(transitionKey);
       agentWindowActivityStates.set(transitionKey, {state: 'working', seenWorking: true, stoppedAt: 0});
@@ -3639,9 +3721,9 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   if (transitionKey) agentWindowActivityStates.set(transitionKey, {state: String(state || 'idle'), seenWorking, stoppedAt});
   if (seenWorking && stoppedAt > 0) {
     const stoppedAgeSeconds = Math.max(0, nowSeconds - stoppedAt);
-    if (stoppedAgeSeconds < FILE_TREE_RECENCY_JUST_UPDATED_MAX_AGE_SECONDS) {
-      if (options.scheduleRefresh !== false) scheduleAgentWindowStoppedRefresh(transitionKey, (stoppedAt + FILE_TREE_RECENCY_JUST_UPDATED_MAX_AGE_SECONDS) * 1000);
-      return {state: 'stopped', icon: '●', label: `${agentLabel(kind)} stopped`};
+    if (stoppedAgeSeconds < AGENT_WINDOW_COOLDOWN_SECONDS) {
+      if (options.scheduleRefresh !== false) scheduleAgentWindowStoppedRefresh(transitionKey, (stoppedAt + AGENT_WINDOW_COOLDOWN_SECONDS) * 1000);
+      return {state: 'cooldown', icon: '●', label: `${agentLabel(kind)} stopped`};
     }
     return {state: 'settled', icon: '●', label: `${agentLabel(kind)} ${t('state.idle')}`};
   }
@@ -3655,7 +3737,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
 function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {}) {
   const item = agentWindowActivityIcon(agentKey, state, idleSeconds, options);
   if (!item) return '';
-  const tone = item.state === 'working' ? 'working' : item.state === 'stopped' ? 'attention' : item.state === 'settled' ? 'settled' : 'idle';
+  const tone = item.state === 'working' ? 'working' : item.state === 'cooldown' ? 'cooldown' : item.state === 'attention' ? 'attention' : item.state === 'settled' ? 'settled' : 'idle';
   const classes = statusIndicatorDotClasses(
     tone,
     'agent-window-activity-icon',
@@ -3727,14 +3809,18 @@ function buildTabberTree() {
         ? tabberAgentRecency(agentActivity)
         : Math.max(ledgerMtime, childMtime, fallbackSessionRecency);
       const active = activeIndexOverride === undefined ? record.active === true : (activeIndexOverlay !== null && String(record.index) === activeIndexOverlay);
-      const label = tmuxWindowCanonicalLabel(session, record, record.indexedNameLabel || `${record.indexText}:${record.nameLabel}`, info);
+      const label = tmuxWindowCanonicalLabel(session, record, record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.name}`, info);
       const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatus, agentKey, session);
-      const dateText = agentStatus ? sessionPopoverAgentStateText(agentStatus, nowSeconds) : tabberAgentDateText(agentActivity);
+      const agentStatusForDisplay = agentStatus ? {...agentStatus, current: active} : null;
+      const dateText = agentStatusForDisplay ? sessionPopoverAgentStateText(agentStatusForDisplay, nowSeconds) : tabberAgentDateText(agentActivity);
+      const dateHtml = agentStatusForDisplay && agentStatusIsAttentionState(agentStatusForDisplay.state)
+        ? sessionPopoverAgentStatusHtml(agentStatusForDisplay, nowSeconds, 'tabber-agent-status')
+        : '';
       if (repoEntries.length) entriesByDir.set(normalizeDirectoryPath(windowPath), repoEntries);
       return {
         name: windowName, kind: repoEntries.length ? 'dir' : 'file', mtime: windowMtime,
         sortName: label,
-        tabber: {type: 'window', session, windowIndex: record.index, label, icon: '⌁', active, current: session === activeSession && active, agentKey, activityIconHtml, dateText},
+        tabber: {type: 'window', session, windowIndex: record.index, label, pid: record.pid, icon: '⌁', active, current: session === activeSession && active, agentKey, activityIconHtml, dateText, dateHtml},
       };
     });
     entriesByDir.set(normalizeDirectoryPath(sessionPath), windowEntries);
@@ -3795,18 +3881,44 @@ function refreshTabberPanels() {
 
 function tabberWindowLabelHtml(label, iconHtml, options = {}) {
   const text = String(label || '');
-  const pidMatch = text.match(/^(.*?)(\s+\(pid=\d+\))$/);
-  const nameText = pidMatch ? pidMatch[1] : text;
-  const pidText = pidMatch ? pidMatch[2] : '';
+  const pid = Number(options.pid);
+  const nameText = text;
+  const pidText = Number.isFinite(pid) && pid > 0 ? ` (pid=${Math.floor(pid)})` : '';
   const activityIconHtml = String(options.activityIconHtml || '');
   return `<span class="tabber-window-label"><span class="tabber-window-text">${esc(nameText)}</span>${activityIconHtml}${iconHtml}${pidText ? `<span class="tabber-window-pid">${esc(pidText)}</span>` : ''}</span>`;
 }
 
-function tabberSessionLabelHtml(data, entry) {
+function tabberSessionChromeHtml(data) {
   const classes = ['tabber-session-tab', data.active === true ? 'active' : ''].filter(Boolean).join(' ');
-  const label = data.label || entry.name;
-  const description = data.description ? `<span class="tabber-session-description">${esc(data.description)}</span>` : '';
-  return `<span class="${classes}"><span class="tabber-session-name">${esc(label)}</span>${description}</span>`;
+  const session = String(data.session || '').trim();
+  const info = transcriptMeta.sessions?.[session] || {};
+  const state = sessionState(session, info);
+  const auto = autoApproveStates.get(session)?.enabled === true;
+  const agentKind = sessionAgentKind(session);
+  return `<span class="${classes}" data-tabber-session-chrome="shared">${tmuxPaneTabHtml(session, info, state, auto)}${sessionPopoverHtml(session, info, agentKind, auto, state)}</span>`;
+}
+
+function bindTabberSessionChrome(row, session) {
+  const tab = row?.querySelector?.('.tabber-session-tab');
+  if (!tab || tab.dataset.tabberChromeBound === 'true') return;
+  tab.dataset.tabberChromeBound = 'true';
+  const info = transcriptMeta.sessions?.[session] || {};
+  const state = sessionState(session, info);
+  applySessionStateClasses(tab, state);
+  bindPaneTabPopover(tab, session);
+  tab.addEventListener('pointerdown', event => {
+    const autoTarget = event.target.closest?.('[data-auto-session]');
+    if (!autoTarget) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (session === currentSessionActionTarget()) setFocusedPanelItem(session);
+  });
+  bindActionDispatcher(tab, {
+    'pane-tab-auto-approve': async (_event, autoTarget) => {
+      await toggleAutoApprove(autoTarget.dataset.autoSession);
+      if (session === currentSessionActionTarget()) focusPanel(session);
+    },
+  });
 }
 
 // Shared-pipeline row updater for Tabber nodes (same .file-tree-row DOM + updateFileTreeRowContents).
@@ -3845,6 +3957,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   row.classList.add('tabber-row');
   row.classList.toggle('tabber-active-window', data.type === 'window' && data.active === true);
   row.classList.toggle('tabber-active-session', data.type === 'session' && data.active === true);
+  row.classList.toggle('tabber-status-long', data.type === 'window' && /^(working for|ASK\?)/.test(String(data.dateText || '')));
   row.classList.toggle('current-file', current && row.dataset.kind !== 'dir');
   row.classList.toggle('current-directory', current && row.dataset.kind === 'dir');
   if (current || (data.type === 'session' && data.active === true)) row.setAttribute('aria-current', 'true');
@@ -3868,9 +3981,9 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
     ? agentIcon(data.agentKey, {label: agentLabel(data.agentKey)})
     : '';
   const nameHtml = data.type === 'session'
-    ? tabberSessionLabelHtml(renderData, entry)
-    : data.type === 'window' && windowAgentIconHtml
-      ? tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true, activityIconHtml: data.activityIconHtml})
+    ? tabberSessionChromeHtml(renderData)
+    : data.type === 'window'
+      ? tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true, activityIconHtml: data.activityIconHtml, pid: data.pid})
     : data.type === 'loading'
       ? `<span class="tabber-loading-label">${esc(data.label || 'Fetching')}</span>${movingEllipsisHtml('tabber-loading-dots')}`
     : '';
@@ -3878,7 +3991,9 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
     iconClass: 'tabber-icon',
     nameHtml,
     dateText: data.dateText || (entry.mtime ? fileTreeMtimeText(entry) : ''),
+    dateHtml: data.dateHtml || '',
   });
+  if (data.type === 'session' && data.session) bindTabberSessionChrome(row, data.session);
   applyFileTreeRowRecency(row, entry, options);
   // Tabber rows use delegation (bindTabberPanel) like the Differ; clear any stale Finder per-row handlers.
   clearFileTreeRowHandlers(row);

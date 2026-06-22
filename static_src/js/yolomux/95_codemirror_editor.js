@@ -1078,6 +1078,229 @@ function scheduleShareFileEditorScrollRestore(item, path) {
   scheduleShareScrollRestoreByKey(`editor:${key}:preview`);
 }
 
+function editorPanelParts(panel) {
+  const parts = {
+    codeMirrorPane: panel.querySelector('.file-editor-codemirror-panel'),
+    rawPane: panel.querySelector('.file-editor-raw-panel'),
+    previewPane: panel.querySelector('.file-editor-preview-pane-panel'),
+    imagePane: panel.querySelector('.file-editor-image-panel'),
+    modeControl: panel.querySelector('.file-editor-mode-control-panel'),
+    previewFontPanel: panel.querySelector('.file-editor-preview-font-panel'),
+    gutterButton: panel.querySelector('.file-editor-gutter-panel'),
+    wrapButton: panel.querySelector('.file-editor-wrap-panel'),
+    findButton: panel.querySelector('.file-editor-find-panel'),
+    diffButton: panel.querySelector('.file-editor-diff-panel'),
+    diffRefPanel: panel.querySelector('.file-editor-diff-ref-panel'),
+    diffExpandButton: panel.querySelector('.file-editor-diff-expand-panel'),
+    popoutPreviewButton: panel.querySelector('.file-editor-popout-preview-panel'),
+    reloadButton: panel.querySelector('.file-editor-reload-panel'),
+    themeButton: panel.querySelector('.file-editor-theme-panel'),
+    blameButton: panel.querySelector('.file-editor-blame-panel'),
+    saveButton: panel.querySelector('.file-editor-save-panel'),
+    content: panel.querySelector('.file-editor-content'),
+  };
+  parts.textControls = [
+    parts.modeControl,
+    parts.previewFontPanel,
+    parts.gutterButton,
+    parts.wrapButton,
+    parts.findButton,
+    parts.blameButton,
+    parts.diffButton,
+    parts.diffExpandButton,
+    parts.diffRefPanel,
+    parts.popoutPreviewButton,
+    parts.reloadButton,
+  ];
+  return parts;
+}
+
+function hideTextEditorPanes(parts) {
+  hideFileEditorContent(parts.rawPane, parts.previewPane, parts.imagePane, parts.codeMirrorPane);
+}
+
+function destroyEditorAndShowStatus(panel, parts, message, level = '') {
+  setElementsHidden(parts.textControls, true);
+  updateFileEditorToolbarSeparators(panel);
+  panel.classList.remove('syntax-highlighted');
+  destroyCodeMirrorPanel(panel);
+  hideTextEditorPanes(parts);
+  setFileEditorPanelStatus(panel, message, level);
+}
+
+function renderClosedEditor(panel, parts) {
+  destroyEditorAndShowStatus(panel, parts, 'file closed', '');
+}
+
+function renderLoadingEditor(panel, item, path, parts) {
+  destroyEditorAndShowStatus(panel, parts, t('common.loading'), '');
+  loadFileEditorState(path, panel, item);
+}
+
+function renderErrorEditor(panel, path, state, parts) {
+  setElementsHidden(parts.textControls, true);
+  updateFileEditorToolbarSeparators(panel);
+  panel.classList.remove('syntax-highlighted');
+  destroyCodeMirrorPanel(panel);
+  if (parts.rawPane) parts.rawPane.hidden = true;
+  if (parts.codeMirrorPane) parts.codeMirrorPane.hidden = true;
+  if (parts.previewPane) parts.previewPane.hidden = true;
+  if (parts.imagePane) {
+    parts.imagePane.hidden = false;
+    const limit = formatFileSize(state.maxBytes || MAX_FILE_PREVIEW_BYTES);
+    const size = formatFileSize(state.size);
+    const title = state.kind === 'too-large' ? t('editor.fileTooLargeTitle') : t('editor.fileOpenFailedTitle');
+    const detail = state.kind === 'too-large'
+      ? (state.error || t('editor.fileTooLargeDetail', {size: size || '', limit}))
+      : String(state.error || t('editor.fileLoadFailed'));
+    parts.imagePane.replaceChildren(fileEditorEmptyState(title, detail));
+  }
+  const status = state.kind === 'too-large'
+    ? t('editor.fileTooLargeStatus', {limit: formatFileSize(state.maxBytes || MAX_FILE_PREVIEW_BYTES)})
+    : state.error || t('editor.fileLoadFailed');
+  setFileEditorPanelStatus(panel, status, 'error');
+}
+
+function syncEditorDiffRefPanel(path, state, item, parts, mode) {
+  const diffRefPanel = parts.diffRefPanel;
+  if (!diffRefPanel) return;
+  diffRefPanel.hidden = mode !== 'diff' || state.kind !== 'text';
+  // C6: scope the editor's own FROM/TO controls to THIS file's repo, so they match the repo header and
+  // drive the file's diff. Re-render only when the repo actually changed and the picker isn't focused.
+  const diffRepo = fileRepoForPath(path);
+  const historySignature = fileDiffRefHistorySignature(path);
+  if (!diffRefPanel.hidden
+    && (diffRefPanel.dataset.diffRefRepoRendered !== diffRepo
+      || diffRefPanel.dataset.diffRefPathRendered !== path
+      || diffRefPanel.dataset.diffRefHistoryRendered !== historySignature)
+    && !diffRefPanel.contains(document.activeElement)) {
+    diffRefPanel.innerHTML = diffRefControlsHtml({compact: true, repo: diffRepo, path});
+    diffRefPanel.dataset.diffRefRepoRendered = diffRepo;
+    diffRefPanel.dataset.diffRefPathRendered = path;
+    diffRefPanel.dataset.diffRefHistoryRendered = historySignature;
+  }
+  syncDiffRefControlValues(diffRefPanel);
+}
+
+function syncTextEditorControls(panel, path, state, item, parts, mode) {
+  const diffExpandButton = parts.diffExpandButton;
+  const popoutPreviewButton = parts.popoutPreviewButton;
+  const previewable = editorPreviewModeAvailable(path, state);
+  updateEditorThemeButton(parts.themeButton, {includeVanilla: true});
+  updateEditorModeControl(parts.modeControl, path, state, item);
+  if (parts.previewFontPanel) {
+    parts.previewFontPanel.hidden = state.kind !== 'text' || !previewable || (mode !== 'preview' && mode !== 'split');
+    updateEditorPreviewFontControls(parts.previewFontPanel);
+  }
+  if (parts.gutterButton) {
+    parts.gutterButton.hidden = state.kind !== 'text' || mode === 'preview';
+    updateEditorGutterButton(parts.gutterButton);
+  }
+  if (parts.wrapButton) {
+    parts.wrapButton.hidden = state.kind !== 'text' || mode === 'preview';
+    updateEditorWrapButton(parts.wrapButton);
+  }
+  updateEditorFindButton(parts.findButton, state, panel);
+  if (parts.findButton && mode === 'preview') parts.findButton.hidden = true;
+  // Git-backed controls share file-history gating, but Diff also depends on the loaded diff state while
+  // Blame stays available in normal edit mode for clean files with useful history.
+  updateFileEditorBlameButton(parts.blameButton, path, state, item);
+  updateFileEditorDiffButton(parts.diffButton, path, state, item);
+  updateFileEditorDiffExpandButton(diffExpandButton, path, state, item);
+  if (popoutPreviewButton) popoutPreviewButton.hidden = !previewable;
+  syncEditorDiffRefPanel(path, state, item, parts, mode);
+  updateFileEditorToolbarSeparators(panel);
+  return {previewable};
+}
+
+function renderImageEditor(panel, path, state, parts) {
+  updateImageViewerThemeButton(parts.themeButton);
+  setEditorContentMode(parts.content, 'preview');
+  destroyCodeMirrorPanel(panel);
+  if (parts.rawPane) parts.rawPane.hidden = true;
+  if (parts.codeMirrorPane) parts.codeMirrorPane.hidden = true;
+  if (parts.previewPane) parts.previewPane.hidden = true;
+  panel.classList.remove('syntax-highlighted');
+  if (parts.imagePane) {
+    parts.imagePane.hidden = false;
+    renderFileEditorImagePane(parts.imagePane, path, state, (message, level) => setFileEditorPanelStatus(panel, message, level));
+  }
+}
+
+function renderMediaEditor(panel, path, state, parts) {
+  updateImageViewerThemeButton(parts.themeButton);
+  setEditorContentMode(parts.content, 'preview');
+  destroyCodeMirrorPanel(panel);
+  if (parts.rawPane) parts.rawPane.hidden = true;
+  if (parts.codeMirrorPane) parts.codeMirrorPane.hidden = true;
+  if (parts.imagePane) {
+    disconnectFileEditorImageObserver(parts.imagePane);
+    parts.imagePane.hidden = true;
+    parts.imagePane.replaceChildren();
+  }
+  panel.classList.remove('syntax-highlighted');
+  if (parts.previewPane) {
+    parts.previewPane.hidden = false;
+    renderEditorPreviewPane(parts.previewPane, path, '', {context: 'preview'});
+  }
+  const status = openFileStatus(state);
+  setFileEditorPanelStatus(panel, status.message, status.level);
+}
+
+function resetImagePreviewPane(parts) {
+  if (!parts.imagePane) return;
+  disconnectFileEditorImageObserver(parts.imagePane);
+  parts.imagePane.hidden = true;
+  parts.imagePane.replaceChildren();
+}
+
+function renderTextPreviewMode(panel, item, path, state, parts) {
+  destroyCodeMirrorPanel(panel);
+  if (parts.rawPane) parts.rawPane.hidden = true;
+  if (parts.codeMirrorPane) parts.codeMirrorPane.hidden = true;
+  panel.classList.remove('syntax-highlighted');
+  if (parts.previewPane) {
+    parts.previewPane.hidden = false;
+    renderEditorPreviewPane(parts.previewPane, path, state.content, {context: 'preview'});
+  }
+  scheduleShareFileEditorScrollRestore(item, path);
+}
+
+function renderTextCodeMode(panel, item, path, state, parts, mode) {
+  const rawPane = parts.rawPane;
+  const previewPane = parts.previewPane;
+  if (rawPane) rawPane.hidden = true;
+  if (previewPane) {
+    previewPane.hidden = mode !== 'split';
+    if (mode === 'split') renderEditorPreviewPane(previewPane, path, state.content, {context: 'split'});
+  }
+  panel.classList.remove('syntax-highlighted');
+  ensureCodeMirrorPanel(panel, item, path, state).then(loaded => {
+    if (loaded === false) renderFileEditorRawPane(rawPane, path, state.content);
+    else scheduleShareFileEditorScrollRestore(item, path);
+  }).catch(error => {
+    if (panel.dataset.filePath !== path) return;
+    console.warn('CodeMirror editor unavailable; showing read-only raw text', error);
+    destroyCodeMirrorPanel(panel);
+    if (parts.codeMirrorPane) parts.codeMirrorPane.hidden = true;
+    setFileEditorPanelStatus(panel, t('editor.codemirrorUnavailable', {error}), 'error');
+    renderFileEditorRawPane(rawPane, path, state.content);
+  });
+}
+
+function renderTextEditorMode(panel, item, path, state, parts, mode) {
+  resetImagePreviewPane(parts);
+  setEditorContentMode(parts.content, mode);
+  panel.classList.toggle('editor-wrap', fileEditorWrapEnabled);
+  panel.classList.toggle('editor-line-numbers', fileEditorLineNumbersEnabled);
+  if (mode === 'preview') renderTextPreviewMode(panel, item, path, state, parts);
+  else renderTextCodeMode(panel, item, path, state, parts, mode);
+  const status = openFileStatus(state);
+  setFileEditorPanelStatus(panel, status.message, status.level);
+  focusFileEditorPanelIfReady(panel, item);
+  scheduleShareFileEditorScrollRestore(item, path);
+}
+
 function renderFileEditorPanel(panel, item, options = {}) {
   const path = fileItemPath(item);
   if (renderFileEditorPanelShouldCaptureViewState(options)) capturePaneViewState(item, panel);
@@ -1093,66 +1316,18 @@ function renderFileEditorPanel(panel, item, options = {}) {
   }
   const state = openFiles.get(path);
   updateFileEditorPanelChrome(panel, path);
-  const codeMirrorPane = panel.querySelector('.file-editor-codemirror-panel');
-  const rawPane = panel.querySelector('.file-editor-raw-panel');
-  const previewPane = panel.querySelector('.file-editor-preview-pane-panel');
-  const imagePane = panel.querySelector('.file-editor-image-panel');
-  const modeControl = panel.querySelector('.file-editor-mode-control-panel');
-  const previewFontPanel = panel.querySelector('.file-editor-preview-font-panel');
-  const gutterButton = panel.querySelector('.file-editor-gutter-panel');
-  const wrapButton = panel.querySelector('.file-editor-wrap-panel');
-  const findButton = panel.querySelector('.file-editor-find-panel');
-  const diffButton = panel.querySelector('.file-editor-diff-panel');
-  const diffRefPanel = panel.querySelector('.file-editor-diff-ref-panel');
-  const diffExpandButton = panel.querySelector('.file-editor-diff-expand-panel');
-  const popoutPreviewButton = panel.querySelector('.file-editor-popout-preview-panel');
-  const reloadButton = panel.querySelector('.file-editor-reload-panel');
-  const themeButton = panel.querySelector('.file-editor-theme-panel');
-  const blameButton = panel.querySelector('.file-editor-blame-panel');
-  const saveButton = panel.querySelector('.file-editor-save-panel');
-  const content = panel.querySelector('.file-editor-content');
-  const textControls = [modeControl, previewFontPanel, gutterButton, wrapButton, findButton, blameButton, diffButton, diffExpandButton, diffRefPanel, popoutPreviewButton, reloadButton];
-  let mode = editorViewModeFor(path, item);
-  updateEditorThemeButton(themeButton, {includeVanilla: true});
+  const parts = editorPanelParts(panel);
+  updateEditorThemeButton(parts.themeButton, {includeVanilla: true});
   if (!state) {
-    setElementsHidden(textControls, true);
-    updateFileEditorToolbarSeparators(panel);
-    panel.classList.remove('syntax-highlighted');
-    destroyCodeMirrorPanel(panel);
-    hideFileEditorContent(rawPane, previewPane, imagePane, codeMirrorPane);
-    setFileEditorPanelStatus(panel, 'file closed', '');
+    renderClosedEditor(panel, parts);
     return;
   }
   if (state.loading) {
-    setElementsHidden(textControls, true);
-    updateFileEditorToolbarSeparators(panel);
-    panel.classList.remove('syntax-highlighted');
-    destroyCodeMirrorPanel(panel);
-    hideFileEditorContent(rawPane, previewPane, imagePane, codeMirrorPane);
-    setFileEditorPanelStatus(panel, t('common.loading'), '');
-    loadFileEditorState(path, panel, item);
+    renderLoadingEditor(panel, item, path, parts);
     return;
   }
   if (state.kind === 'error' || state.kind === 'too-large') {
-    setElementsHidden(textControls, true);
-    updateFileEditorToolbarSeparators(panel);
-    panel.classList.remove('syntax-highlighted');
-    destroyCodeMirrorPanel(panel);
-    if (rawPane) rawPane.hidden = true;
-    if (codeMirrorPane) codeMirrorPane.hidden = true;
-    if (previewPane) previewPane.hidden = true;
-    if (imagePane) {
-      imagePane.hidden = false;
-      const limit = formatFileSize(state.maxBytes || MAX_FILE_PREVIEW_BYTES);
-      const size = formatFileSize(state.size);
-      const title = state.kind === 'too-large' ? t('editor.fileTooLargeTitle') : t('editor.fileOpenFailedTitle');
-      const detail = state.kind === 'too-large'
-        ? (state.error || t('editor.fileTooLargeDetail', {size: size || '', limit}))
-        : String(state.error || t('editor.fileLoadFailed'));
-      imagePane.replaceChildren(fileEditorEmptyState(title, detail));
-    }
-    const status = state.kind === 'too-large' ? t('editor.fileTooLargeStatus', {limit: formatFileSize(state.maxBytes || MAX_FILE_PREVIEW_BYTES)}) : state.error || t('editor.fileLoadFailed');
-    setFileEditorPanelStatus(panel, status, 'error');
+    renderErrorEditor(panel, path, state, parts);
     return;
   }
   // do NOT auto-load the diff when a file opens/renders. The diff loads only on explicit
@@ -1161,126 +1336,17 @@ function renderFileEditorPanel(panel, item, options = {}) {
   if (diffModeShouldFallBackToEdit(path, state, item)) {
     setFileEditorViewMode(path, 'edit', item);
   }
-  mode = editorViewModeFor(path, item);
-  const previewable = editorPreviewModeAvailable(path, state);
-  updateEditorThemeButton(themeButton, {includeVanilla: true});
-  updateEditorModeControl(modeControl, path, state, item);
-  if (previewFontPanel) {
-    previewFontPanel.hidden = state.kind !== 'text' || !editorPreviewModeAvailable(path, state) || (mode !== 'preview' && mode !== 'split');
-    updateEditorPreviewFontControls(previewFontPanel);
-  }
-  if (gutterButton) {
-    gutterButton.hidden = state.kind !== 'text' || mode === 'preview';
-    updateEditorGutterButton(gutterButton);
-  }
-  if (wrapButton) {
-    wrapButton.hidden = state.kind !== 'text' || mode === 'preview';
-    updateEditorWrapButton(wrapButton);
-  }
-  updateEditorFindButton(findButton, state, panel);
-  if (findButton && mode === 'preview') findButton.hidden = true;
-  // Git-backed controls share file-history gating, but Diff also depends on the loaded diff state while
-  // Blame stays available in normal edit mode for clean files with useful history.
-  updateFileEditorBlameButton(blameButton, path, state, item);
-  updateFileEditorDiffButton(diffButton, path, state, item);
-  updateFileEditorDiffExpandButton(diffExpandButton, path, state, item);
-  if (popoutPreviewButton) {
-    popoutPreviewButton.hidden = !previewable;
-  }
-  if (diffRefPanel) {
-    diffRefPanel.hidden = mode !== 'diff' || state.kind !== 'text';
-    // C6: scope the editor's own FROM/TO controls to THIS file's repo, so they match the repo header and
-    // drive the file's diff. Re-render only when the repo actually changed and the picker isn't focused.
-    const diffRepo = fileRepoForPath(path);
-    const historySignature = fileDiffRefHistorySignature(path);
-    if (!diffRefPanel.hidden
-      && (diffRefPanel.dataset.diffRefRepoRendered !== diffRepo
-        || diffRefPanel.dataset.diffRefPathRendered !== path
-        || diffRefPanel.dataset.diffRefHistoryRendered !== historySignature)
-      && !diffRefPanel.contains(document.activeElement)) {
-      diffRefPanel.innerHTML = diffRefControlsHtml({compact: true, repo: diffRepo, path});
-      diffRefPanel.dataset.diffRefRepoRendered = diffRepo;
-      diffRefPanel.dataset.diffRefPathRendered = path;
-      diffRefPanel.dataset.diffRefHistoryRendered = historySignature;
-    }
-    syncDiffRefControlValues(diffRefPanel);
-  }
-  updateFileEditorToolbarSeparators(panel);
+  const mode = editorViewModeFor(path, item);
+  syncTextEditorControls(panel, path, state, item, parts, mode);
   if (state.kind === 'image') {
-    updateImageViewerThemeButton(themeButton);
-    setEditorContentMode(content, 'preview');
-    destroyCodeMirrorPanel(panel);
-    if (rawPane) rawPane.hidden = true;
-    if (codeMirrorPane) codeMirrorPane.hidden = true;
-    if (previewPane) previewPane.hidden = true;
-    panel.classList.remove('syntax-highlighted');
-    if (imagePane) {
-      imagePane.hidden = false;
-      renderFileEditorImagePane(imagePane, path, state, (message, level) => setFileEditorPanelStatus(panel, message, level));
-    }
+    renderImageEditor(panel, path, state, parts);
     return;
   }
   if (state.kind === 'media') {
-    updateImageViewerThemeButton(themeButton);
-    setEditorContentMode(content, 'preview');
-    destroyCodeMirrorPanel(panel);
-    if (rawPane) rawPane.hidden = true;
-    if (codeMirrorPane) codeMirrorPane.hidden = true;
-    if (imagePane) {
-      disconnectFileEditorImageObserver(imagePane);
-      imagePane.hidden = true;
-      imagePane.replaceChildren();
-    }
-    panel.classList.remove('syntax-highlighted');
-    if (previewPane) {
-      previewPane.hidden = false;
-      renderEditorPreviewPane(previewPane, path, '', {context: 'preview'});
-    }
-    const status = openFileStatus(state);
-    setFileEditorPanelStatus(panel, status.message, status.level);
+    renderMediaEditor(panel, path, state, parts);
     return;
   }
-  if (imagePane) {
-    disconnectFileEditorImageObserver(imagePane);
-    imagePane.hidden = true;
-    imagePane.replaceChildren();
-  }
-  setEditorContentMode(content, mode);
-  panel.classList.toggle('editor-wrap', fileEditorWrapEnabled);
-  panel.classList.toggle('editor-line-numbers', fileEditorLineNumbersEnabled);
-  if (mode === 'preview') {
-    destroyCodeMirrorPanel(panel);
-    if (rawPane) rawPane.hidden = true;
-    if (codeMirrorPane) codeMirrorPane.hidden = true;
-    panel.classList.remove('syntax-highlighted');
-    if (previewPane) {
-      previewPane.hidden = false;
-      renderEditorPreviewPane(previewPane, path, state.content, {context: 'preview'});
-    }
-    scheduleShareFileEditorScrollRestore(item, path);
-  } else {
-    if (rawPane) rawPane.hidden = true;
-    if (previewPane) {
-      previewPane.hidden = mode !== 'split';
-      if (mode === 'split') renderEditorPreviewPane(previewPane, path, state.content, {context: 'split'});
-    }
-    panel.classList.remove('syntax-highlighted');
-    ensureCodeMirrorPanel(panel, item, path, state).then(loaded => {
-      if (loaded === false) renderFileEditorRawPane(rawPane, path, state.content);
-      else scheduleShareFileEditorScrollRestore(item, path);
-    }).catch(error => {
-      if (panel.dataset.filePath !== path) return;
-      console.warn('CodeMirror editor unavailable; showing read-only raw text', error);
-      destroyCodeMirrorPanel(panel);
-      if (codeMirrorPane) codeMirrorPane.hidden = true;
-      setFileEditorPanelStatus(panel, t('editor.codemirrorUnavailable', {error}), 'error');
-      renderFileEditorRawPane(rawPane, path, state.content);
-    });
-  }
-  const status = openFileStatus(state);
-  setFileEditorPanelStatus(panel, status.message, status.level);
-  focusFileEditorPanelIfReady(panel, item);
-  scheduleShareFileEditorScrollRestore(item, path);
+  renderTextEditorMode(panel, item, path, state, parts, mode);
 }
 
 function loadFileEditorState(path, panel, item) {

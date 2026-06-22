@@ -1663,6 +1663,13 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   border-color: var(--active-control-border);
   font-weight: 600;
 }
+.tmux-window-bar .tmux-window-button.active .agent-window-activity-icon {
+  text-shadow: 0 0 0 var(--active-control-text), 0 0 4px var(--active-control-text);
+}
+.tmux-window-bar .tmux-window-button.active .agent-window-activity-icon.status-indicator--attention {
+  color: var(--bad);
+  text-shadow: 0 0 0 var(--bad), 0 0 6px rgb(var(--attention-ring-rgb, 255 51 71) / 0.85);
+}
 .terminal-tab {
   flex: 0 1 auto;
   max-width: 72px;

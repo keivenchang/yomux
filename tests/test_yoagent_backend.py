@@ -101,6 +101,18 @@ def test_logged_in_cli_or_installed_sdk_is_available():
     assert via_sdk.sdk_module == "claude_code_sdk"
 
 
+def test_unknown_cli_auth_does_not_suppress_installed_provider():
+    result = backend_availability(
+        "claude",
+        {"claude": {"installed": True, "logged_in": None, "unavailable_reason": "auth-unknown"}},
+        module_available=_no_module,
+    )
+
+    assert result.available is True
+    assert result.reason == BACKEND_REASON_AVAILABLE
+    assert result.backend == "claude"
+
+
 def test_auto_backend_prefers_available_then_most_actionable_blocker():
     # auto resolves codex then claude; surface the first provider that can answer.
     available = backend_availability(

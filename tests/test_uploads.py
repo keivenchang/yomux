@@ -44,7 +44,7 @@ def test_upload_request_limit_comes_from_live_settings():
 
     assert "self.server.app.upload_max_bytes()" in body
     assert "content_length > UPLOAD_MAX_BYTES" not in body
-    assert 'parse_multipart_upload(self.headers.get("Content-Type", ""), body, max_part_bytes=upload_max_bytes)' in body
+    assert 'parse_multipart_upload(self.headers.get("Content-Type", ""), body or b"", max_part_bytes=upload_max_bytes)' in body
 
 
 def multipart_body(parts, boundary="test-boundary"):

@@ -1477,6 +1477,61 @@ async function runLayoutAsyncSuite() {
     }
 
     {
+      const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+        bootstrapOverrides: {
+          availableAgents: [],
+          agentAuth: {},
+          settingsPayload: {defaults: DEFAULT_TEST_SETTINGS, settings: {yoagent: {backend: 'claude'}}, mtime_ns: 1},
+        },
+      });
+      assert.equal(api.yoagentResolvedBackendForTest(), 'deterministic', 'without installed-agent metadata, explicit Claude cannot be attempted yet');
+      await api.applyTranscriptsPayloadForTest({
+        session_order: ['1'],
+        sessions: {},
+        availableAgents: ['claude'],
+        agentAuth: {claude: {installed: true, logged_in: true}},
+      }, {refreshAuto: false, refreshActivity: false});
+      assert.equal(api.yoagentResolvedBackendForTest(), 'claude', 'metadata refresh updates availableAgents as well as agentAuth');
+    }
+
+    {
+      const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+        bootstrapOverrides: {
+          availableAgents: ['claude'],
+          agentAuth: {claude: {installed: true, logged_in: false}},
+          settingsPayload: {defaults: DEFAULT_TEST_SETTINGS, settings: {yoagent: {backend: 'claude'}}, mtime_ns: 1},
+        },
+      });
+      assert.equal(api.yoagentResolvedBackendForTest(), 'claude', 'explicit Claude selection stays explicit when the CLI exists');
+      assert.deepStrictEqual(canonical(api.yoagentAvailableBackendOptionsForTest()), ['claude'], 'explicit Claude remains visible even if stale auth says logged out');
+      const calls = [];
+      api.setFetchForTest((url, options = {}) => {
+        calls.push({url: String(url), method: options.method || 'GET', body: options.body || ''});
+        if (String(url) === '/api/agent-auth?force=1') {
+          return Promise.resolve(jsonResponse({
+            availableAgents: ['claude'],
+            agentAuth: {claude: {installed: true, logged_in: true}},
+          }));
+        }
+        if (String(url) === '/api/yoagent/chat') {
+          return Promise.resolve(jsonResponse({
+            answer: 'claude answered',
+            backend: 'claude',
+            backend_used: 'claude',
+            conversation: {messages: [{role: 'user', content: 'hello'}, {role: 'assistant', content: 'claude answered'}]},
+          }));
+        }
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      });
+      await api.sendYoagentChatMessageForTest('hello');
+      assert.deepStrictEqual(canonical(calls.map(call => ({method: call.method, url: call.url}))), [
+        {method: 'GET', url: '/api/agent-auth?force=1'},
+        {method: 'POST', url: '/api/yoagent/chat'},
+      ], 'explicit backend sends force-refresh agent auth before posting chat');
+      assert.equal(JSON.parse(calls[1].body).message, 'hello', 'chat request still posts the user request after refresh');
+    }
+
+    {
       const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
       const calls = [];
       api.applyYoagentConversationPayloadForTest({
@@ -1585,6 +1640,7 @@ async function runLayoutAsyncSuite() {
       const longPreviews = detailsPreviews(longHtml);
       const expectedTail = `… ${Array.from({length: 50}, (_value, index) => `word${index + 22}`).join(' ')}`;
       assert.equal(longPreviews[0], expectedTail, 'long thinking preview shows the last 50 words with an ellipsis');
+      assert.ok(longHtml.includes('thinking (73 words)…'), 'completed thinking details label counts the full thinking text');
       assert.ok(longHtml.includes(longThinking), 'expanded thinking details keep the complete thinking text');
     }
 
@@ -1629,6 +1685,43 @@ async function runLayoutAsyncSuite() {
       assert.deepStrictEqual(ordered, [...ordered].sort((left, right) => left - right), 'thinking/tool rows and assistant text render in stream order');
       assert.ok(html.includes('yoagent-message-stream'), 'interleaved stream uses the ordered message stream renderer');
       assert.equal((html.match(/<details class="[^"]*yoagent-message-details/g) || []).length, 2, 'thinking and tool-call stream rows remain independently collapsible');
+    }
+
+    {
+      const api = loadYolomux('', ['1']);
+      api.applyYoagentStreamPayloadForTest({
+        stream_id: 'stream-coalesced',
+        phase: 'delta',
+        content: 'middle answer',
+        stream_items: [
+          {kind: 'tool', text: 'tool start: command: rg files'},
+          {kind: 'tool', text: 'tool output: command: found one'},
+          {kind: 'tool', text: 'tool done: command: exit 0'},
+          {kind: 'assistant', text: 'middle answer'},
+          {kind: 'tool', text: 'tool start: command: git status'},
+        ],
+      });
+      const html = api.yoagentChatHtml();
+      assert.equal((html.match(/yoagent-toolcall-details/g) || []).length, 2, 'adjacent tool calls coalesce but assistant text splits tool runs');
+      assert.ok(html.includes('tool start: command: rg files') && html.includes('tool output: command: found one') && html.includes('tool done: command: exit 0'), 'coalesced tool block keeps every tool line in order');
+      assert.ok(html.includes('|stream|0') && html.includes('|stream|4'), 'coalesced tool runs keep stable source-index detail keys');
+    }
+
+    {
+      const api = loadYolomux('', ['1']);
+      api.applyYoagentStreamPayloadForTest({
+        stream_id: 'stream-thinking-count',
+        phase: 'delta',
+        content: 'answer',
+        stream_items: [
+          {kind: 'thinking', text: 'alpha beta gamma'},
+          {kind: 'thinking', text: 'delta epsilon'},
+          {kind: 'assistant', text: 'answer'},
+        ],
+      });
+      const html = api.yoagentChatHtml();
+      assert.ok(html.includes('thinking (5 words)…'), 'coalesced thinking stream label counts the full merged thinking run');
+      assert.equal((html.match(/<details class="[^"]*yoagent-message-details/g) || []).length, 1, 'adjacent thinking stream rows coalesce into one collapsible');
     }
 
     {

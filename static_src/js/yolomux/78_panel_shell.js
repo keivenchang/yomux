@@ -1648,8 +1648,8 @@ function tmuxWindowRecords(panes) {
     numberLabel: record.indexText,
   })).map(record => ({
     ...record,
-    indexedButtonLabel: `${record.indexText}:${record.buttonNameLabel}`,
-    indexedNameLabel: `${record.indexText}:${record.nameLabel}`,
+    indexedButtonLabel: `${record.indexText}:${record.name}`,
+    indexedNameLabel: `${record.indexText}:${tmuxWindowDisplayLabel(record.name, record.pid)}`,
   }));
 }
 

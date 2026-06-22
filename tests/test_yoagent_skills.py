@@ -15,7 +15,7 @@ def test_builtin_yoagent_skills_load_with_context(tmp_path):
 
     names = {item["name"] for item in payload["skills"]}
     assert payload["ok"] is True
-    assert {"work-next", "notify-when-idle", "wait-then-run", "ask-for-status", "all-idle-summary", "session-handoff", "handoff-after-done", "manage-skills"} <= names
+    assert {"work-next", "notify-when-idle", "wait-then-run", "ask-for-status", "all-idle-summary", "session-handoff", "handoff-after-done", "sequential-dependent-asks", "manage-skills"} <= names
     assert payload["user_dirs"]["skills"] == str(tmp_path / "skills.d")
     assert payload["user_dirs"]["context"] == str(tmp_path / "context.d")
     assert any("YO!agent skill `work-next`" in line for line in payload["context_lines"])
@@ -37,6 +37,12 @@ def test_builtin_yoagent_skills_load_with_context(tmp_path):
         "YO!agent skill `wait-then-run`" in line
         and "ask agent 1 to <do ...>" in line
         and "sends only \"<do ...>\"" in line
+        for line in payload["context_lines"]
+    )
+    assert any(
+        "YO!agent skill `sequential-dependent-asks`" in line
+        and "even when every step targets the same tmux session" in line
+        and "never paste free text into a menu" in line
         for line in payload["context_lines"]
     )
     assert any("YO!agent skill `manage-skills`" in line and "~/.config/yolomux/skills.d/" in line for line in payload["context_lines"])

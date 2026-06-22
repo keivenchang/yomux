@@ -105,6 +105,30 @@ def test_parse_direct_send_text_to_session():
     assert intent == {"type": "send_prompt", "session": "6", "text": "date", "submit": True, "return_result": True}
 
 
+def test_parse_direct_send_disambiguates_numeric_payload_and_bare_numeric_target():
+    assert parse_yoagent_action_intent("send 1 to session 1", [], ["1"]) == {
+        "type": "send_prompt",
+        "session": "1",
+        "text": "1",
+        "submit": True,
+        "return_result": True,
+    }
+    assert parse_yoagent_action_intent("send 1 to 1", [], ["1"]) == {
+        "type": "send_prompt",
+        "session": "1",
+        "text": "1",
+        "submit": True,
+        "return_result": True,
+    }
+    assert parse_yoagent_action_intent("send date to 1", [], ["1"]) == {
+        "type": "send_prompt",
+        "session": "1",
+        "text": "tell me the date",
+        "submit": True,
+        "return_result": True,
+    }
+
+
 def test_parse_natural_date_command_as_agent_prompt():
     intent = parse_yoagent_action_intent("send a date command session 6", [], ["6"])
 
@@ -201,6 +225,27 @@ def test_parse_session_handoff_keeps_next_session_out_of_first_prompt():
             "source_session": "1",
             "session": "2",
             "instruction": "take that result, add 35 minutes, and ask session 2 if that is correct",
+        },
+    }
+
+
+def test_parse_same_session_sequential_dependent_ask_uses_handoff_watcher():
+    intent = parse_yoagent_action_intent(
+        "ask session 1 what time it is, then add 5 minutes, then ask if that is correct.",
+        [],
+        ["1"],
+    )
+
+    assert intent == {
+        "type": "session_handoff",
+        "session": "1",
+        "text": "what time is it?",
+        "submit": True,
+        "return_result": True,
+        "handoff": {
+            "source_session": "1",
+            "session": "1",
+            "instruction": "add 5 minutes, then ask if that is correct",
         },
     }
 

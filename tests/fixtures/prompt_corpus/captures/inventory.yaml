@@ -21,6 +21,26 @@ fixtures:
   scenario: ask_user_question
   source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T105555Z.yaml
 - agent: claude
+  capture_date: '2026-06-21'
+  case_name: ask_user_question_no_selector_accessible
+  client_name: Claude Code
+  client_version: 2.1.185 (Claude Code)
+  client_version_slug: claude-code-2.1.185
+  description: Claude AskUserQuestion no-selector prompt in accessible screen-reader mode
+  expected:
+    agent_kind: claude
+    approval_type: ''
+    approval_visible: false
+    attention_kind: question
+    attention_label: ASK?
+    composer_key: empty
+    reason_code: needs-input
+    screen_key: needs-input
+  file: ask_user_question_no_selector_accessible__claude-code-2.1.185_20260621.yaml
+  id: ask_user_question_no_selector_accessible__claude-code-2.1.185_20260621
+  scenario: ask_user_question_no_selector_accessible
+  source: real Claude Code accessible AskUserQuestion no-selector capture from tmux yoreal-no-selector-ax:0.0
+- agent: claude
   capture_date: '2026-06-20'
   case_name: composing_tip_not_question
   client_name: Claude Code

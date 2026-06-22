@@ -653,6 +653,9 @@ globalThis.__layoutTestApi = {
   },
   globalActivitySummaryHtml,
   yoagentChatHtml,
+  yoagentResolvedBackendForTest: yoagentResolvedBackend,
+  yoagentAvailableBackendOptionsForTest: yoagentAvailableBackendOptions,
+  yoagentChatEnabledForTest: yoagentChatEnabled,
   setYoagentDraftForTest(value) { yoagentDraft = String(value || ''); },
   setYoagentBusyForTest(value) { yoagentBusy = Boolean(value); },
   setYoagentActiveChatRequestForTest(value) { yoagentActiveChatRequest = value; },
@@ -1620,6 +1623,8 @@ globalThis.__layoutTestApi = {
     renderTabberTree(el);
     return Array.from(el.querySelectorAll('.file-tree-row')).map(row => {
       const dateCell = row.querySelector('.file-tree-date') || {};
+      const dateHtml = dateCell.innerHTML || '';
+      const dateText = dateHtml ? dateHtml.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim() : (dateCell.textContent || '');
       return {
         type: row.dataset.tabberType || '',
         name: (row.querySelector('.file-tree-name') || {}).textContent || '',
@@ -1630,7 +1635,8 @@ globalThis.__layoutTestApi = {
         nameHtml: (row.querySelector('.file-tree-name') || {}).innerHTML || '',
         status: (row.querySelector('.file-tree-git-status') || {}).textContent || '',
         statusHidden: row.querySelector('.file-tree-git-status')?.hidden !== false,
-        date: dateCell.textContent || '',
+        date: dateText,
+        dateHtml,
         recency: row.dataset.recency || '',
         title: row.getAttribute('title') || '',
         ariaCurrent: row.getAttribute('aria-current') || '',
@@ -1658,6 +1664,7 @@ globalThis.__layoutTestApi = {
     sessionFilesSortMode = normalizeSessionFilesSortMode(mode);
   },
   sortedSessionFiles,
+  sessionYoloIsWorking,
   runningAgentCount,
   updateDocumentTitle,
   documentTitleForTest() { return document.title; },

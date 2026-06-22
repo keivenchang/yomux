@@ -1691,8 +1691,8 @@ function noteTerminalExplicitInput(session) {
 }
 
 const terminalTmuxPrefixPendingBySession = new Map();
-const tmuxWindowReadbackDelayMs = 120;
-const tmuxWindowReadbackRetryDelayMs = 80;
+const tmuxWindowReadbackDelayMs = tmuxWindowReadbackMs;
+const tmuxWindowReadbackRetryDelayMs = tmuxWindowReadbackRetryMs;
 const tmuxWindowReadbackMaxAttempts = 6;
 const terminalTmuxWindowRepeatMs = 900;
 const terminalTmuxWindowRepeatBySession = new Map();
@@ -2137,7 +2137,7 @@ function activateTab(session, name, options = {}) {
   updateTypingIndicator(session);
   if (name === 'terminal') {
     scheduleFit(session);
-    setTimeout(() => refreshTerminal(session), 120);
+    setTimeout(() => refreshTerminal(session), terminalRefreshAfterTabSelectMs);
     scheduleTerminalBlankScreenRefresh(session);
     if (options.userInitiated) focusTerminalFromUserAction(session);
     else focusTerminalWhenAutoFocus(session, 25);
@@ -2837,7 +2837,7 @@ async function applyTranscriptsPayload(payload, options = {}) {
   clearInfoSessionDrawerCache();
   if (typeof warmTabberDataOnLaunch === 'function') warmTabberDataOnLaunch();
   maybeHandleServerVersionChange(transcriptMeta.server_version);
-  if (transcriptMeta.agentAuth) agentAuth = transcriptMeta.agentAuth;
+  applyAgentAvailabilityPayload(transcriptMeta);
   updateMetadataBadgePulses(transcriptMeta);
   const previousActive = activeSessions.slice();
   const sessionsChanged = updateSessionList(transcriptMeta.session_order || []);

@@ -55,7 +55,7 @@ def test_claude_stream_json_argv_includes_partials_and_optional_tools():
     args = claude_stream_json_argv({"agent_model": "claude-haiku-4-5", "agent_effort": "high", "tools": "default"})
 
     assert "--include-partial-messages" in args
-    assert "--show-thinking" in args
+    assert "--show-thinking" not in args
     assert args[args.index("--tools") + 1] == "default"
 
 

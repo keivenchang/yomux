@@ -1,0 +1,74 @@
+agent: claude
+capture_date: '2026-06-21'
+capture_date_position: end
+capture_mode: converted_text_fixture
+captured_at: '2026-06-21T00:00:00-07:00'
+case_name: ask_user_question_no_selector_descriptions
+claude_version: ''
+client_name: Claude Code
+client_version: synthetic Claude Code fixture
+client_version_slug: claude-code-synthetic
+codex_version: ''
+cursor: {}
+expected:
+  action: null
+  agent: claude
+  approval_visible: false
+  ask: true
+  command: null
+  confidence_min: 0.9
+  option_labels:
+  - Pane capture
+  - Transcript capture
+  prompt_kind: question
+  prompt_type: ''
+  question_text: Which verifier mode should we use?
+  screen_key: needs-input
+  selected_option: 0
+  yes_selected: false
+expected_screen_key: needs-input
+failures: []
+filename_convention: case_name__client-token_date
+fixture_id: ask_user_question_no_selector_descriptions__claude-code-synthetic_20260621
+id: ask_user_question_no_selector_descriptions__claude-code-synthetic_20260621
+operations: []
+raw_capture: |
+  ✻ Sautéed for 16s
+
+  □ Verifier mode
+
+  Which verifier mode should we use?
+
+    1. Pane capture
+       Capture the verification output directly from the terminal pane.
+    2. Transcript capture
+       Capture the verification output from the session transcript.
+
+  Enter to select · ↑/↓ to navigate · Esc to cancel
+source: synthetic Claude AskUserQuestion redraw with no highlighted selector and option descriptions
+styled_capture: |
+  ✻ Sautéed for 16s
+
+  □ Verifier mode
+
+  Which verifier mode should we use?
+
+    1. Pane capture
+       Capture the verification output directly from the terminal pane.
+    2. Transcript capture
+       Capture the verification output from the session transcript.
+
+  Enter to select · ↑/↓ to navigate · Esc to cancel
+visible_text: |
+  ✻ Sautéed for 16s
+
+  □ Verifier mode
+
+  Which verifier mode should we use?
+
+    1. Pane capture
+       Capture the verification output directly from the terminal pane.
+    2. Transcript capture
+       Capture the verification output from the session transcript.
+
+  Enter to select · ↑/↓ to navigate · Esc to cancel

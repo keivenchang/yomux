@@ -1018,6 +1018,38 @@ def test_agent_screen_state_prefers_codex_pursuing_goal_elapsed_for_display():
     assert state["display_elapsed_seconds"] == 13500
 
 
+def test_agent_screen_state_prefers_claude_goal_active_elapsed_for_display():
+    visible_text = "\n".join([
+        "◉ /goal active (1m)",
+        "· Sublimating… (1m 29s · ↓ 2.8k tokens · thinking some more with xhigh effort)",
+        "▶▶ auto mode on (shift+tab to cycle) · esc to interrupt",
+    ])
+
+    state = prompt_detector.agent_screen_state(visible_text, pane_target="%claude-goal-display", now=1000.0)
+
+    assert state["key"] == "working"
+    assert state["status_elapsed_seconds"] == 89
+    assert state["goal_elapsed_seconds"] == 60
+    assert state["display_elapsed_seconds"] == 60
+
+
+@pytest.mark.parametrize("filename,pane_target", [
+    ("goal_active__claude-code-2.1.185_20260621.yaml", "%real-claude-goal-active"),
+    ("goal_active__codex-cli-0.141.0_20260621.yaml", "%real-codex-goal-active"),
+])
+def test_real_goal_active_captures_prefer_goal_elapsed_for_display(filename, pane_target):
+    path = PROMPT_CORPUS_DIR / "captures" / filename
+    data = load_structured_fixture(path)
+
+    state = prompt_detector.agent_screen_state(data["raw_capture"], pane_target=pane_target, now=1000.0)
+
+    assert state["key"] == "working"
+    assert state["goal_elapsed_seconds"] == data["expected_goal_elapsed_seconds"]
+    assert state["display_elapsed_seconds"] == data["expected_goal_elapsed_seconds"]
+    if data["expected_goal_elapsed_seconds"] > state["status_elapsed_seconds"]:
+        assert state["display_elapsed_seconds"] > state["status_elapsed_seconds"]
+
+
 def test_codex_pursuing_goal_elapsed_does_not_advance_stale_counter():
     first = "\n".join([
         "◦ Working (1m 46s • esc to interrupt)",
@@ -1328,6 +1360,135 @@ def test_ask_user_question_ui_is_needs_input_not_auto_approved():
     state = prompt_detector.agent_screen_state(visible_text)
     assert state["key"] == "needs-input"
     assert state["text"] == "How should the YO!info | YO!agent sub-tab toggle look inside the merged panel?"
+
+
+def test_ask_user_question_no_selector_with_descriptions_keeps_all_options():
+    visible_text = "\n".join([
+        "✻ Sautéed for 16s",
+        "",
+        "□ Verifier mode",
+        "",
+        "Which verifier mode should we use?",
+        "",
+        "  1. Pane capture",
+        "     Capture the verification output directly from the terminal pane.",
+        "  2. Transcript capture",
+        "     Capture the verification output from the session transcript.",
+        "",
+        "Enter to select · ↑/↓ to navigate · Esc to cancel",
+    ])
+
+    state = prompt_detector.agent_screen_state(visible_text)
+
+    assert state["key"] == "needs-input"
+    assert state["question_text"] == "Which verifier mode should we use?"
+    assert state["selected_option"] == 0
+    assert option_labels(state["options"]) == ["Pane capture", "Transcript capture"]
+    assert prompt_detector.yes_is_selected(visible_text) is False
+
+
+def test_ask_user_question_selected_with_chat_separator_keeps_all_options():
+    visible_text = "\n".join([
+        "● Current time is 09:40:05 PDT (2026-06-21 Sun). Plus 5 minutes is 09:45:05 PDT.",
+        "─────────────────────────────────────────────────────────────────────────────────────────────────────",
+        "☐ Time +5min",
+        "",
+        "Current time is 09:40:05 PDT. Adding 5 minutes gives 09:45:05 PDT. Is that the right time?",
+        "",
+        "❯ 1. Yes, 09:45 is right",
+        "     Confirm 09:45:05 PDT is the intended time.",
+        "  2. No, that's wrong",
+        "     The computed time is not what you wanted.",
+        "  3. Type something.",
+        "─────────────────────────────────────────────────────────────────────────────────────────────────────",
+        "  4. Chat about this",
+        "",
+        "Enter to select · ↑/↓ to navigate · Esc to cancel",
+    ])
+
+    state = prompt_detector.agent_screen_state(visible_text)
+
+    assert state["key"] == "needs-input"
+    assert state["selected_option"] == 1
+    assert option_labels(state["options"]) == ["Yes, 09:45 is right", "No, that's wrong", "Type something.", "Chat about this"]
+    assert prompt_detector.yes_is_selected(visible_text) is True
+
+
+def test_ask_user_question_accessible_menu_no_selector_is_needs_input():
+    visible_text = fixture_visible_text(PROMPT_CORPUS_DIR / "captures/ask_user_question_no_selector_accessible__claude-code-2.1.185_20260621.yaml")
+
+    state = prompt_detector.agent_screen_state(visible_text)
+
+    assert state["key"] == "needs-input"
+    assert state["question_text"] == "Which verifier mode should we use?"
+    assert state["selected_option"] == 0
+    assert option_labels(state["options"]) == ["Pane capture", "Transcript capture", "Other", "Chat about this"]
+    assert prompt_detector.visible_choice_prompt_text(visible_text) == "Which verifier mode should we use?"
+    assert prompt_detector.detect_prompt(visible_text) is None
+
+
+@pytest.mark.parametrize("fixture_path,expected_question,expected_selected", [
+    (
+        "synthetic/ask_user_question_no_selector_descriptions__claude-code-synthetic_20260621.yaml",
+        "Which verifier mode should we use?",
+        0,
+    ),
+    (
+        "captures/ask_user_question_no_selector_accessible__claude-code-2.1.185_20260621.yaml",
+        "Which verifier mode should we use?",
+        0,
+    ),
+    (
+        "captures/ask_user_question_selected_option__claude-code-2.1.185_20260621.yaml",
+        "Current time is 09:40:05 PDT. Adding 5 minutes gives 09:45:05 PDT. Is that the right time?",
+        1,
+    ),
+    (
+        "captures/interrupted_what_should_claude_do_instead__claude-code-2.1.185_20260621.yaml",
+        "Interrupted · What should Claude do instead?",
+        0,
+    ),
+])
+def test_ask_detection_question_corpus_is_needs_input_not_auto_approval(fixture_path, expected_question, expected_selected):
+    visible_text = fixture_visible_text(PROMPT_CORPUS_DIR / fixture_path)
+
+    state = prompt_detector.agent_screen_state(visible_text)
+    approval = prompt_detector.approval_prompt_state(visible_text)
+
+    assert state["key"] == "needs-input"
+    assert state["question_text"] == expected_question
+    assert state["selected_option"] == expected_selected
+    assert prompt_detector.visible_choice_prompt_text(visible_text) == expected_question
+    assert prompt_detector.detect_prompt(visible_text) is None
+    assert approval["visible"] is False
+    assert approval["action"] is None
+
+
+def test_interrupted_what_should_agent_do_instead_is_needs_input():
+    visible_text = "\n".join([
+        "Interrupted · What should Claude do instead?",
+        "",
+        "❯ ",
+    ])
+
+    state = prompt_detector.agent_screen_state(visible_text)
+
+    assert state["key"] == "needs-input"
+    assert state["agent"] == "claude"
+    assert state["question_text"] == "Interrupted · What should Claude do instead?"
+    assert state["selected_option"] == 0
+
+
+def test_real_interrupted_capture_beats_goal_active_working_chrome():
+    path = PROMPT_CORPUS_DIR / "captures" / "interrupted_what_should_claude_do_instead__claude-code-2.1.185_20260621.yaml"
+    data = load_structured_fixture(path)
+
+    state = prompt_detector.agent_screen_state(data["raw_capture"], pane_target="%real-claude-interrupted-goal-active")
+
+    assert state["key"] == "needs-input"
+    assert state["agent"] == "claude"
+    assert state["question_text"] == "Interrupted · What should Claude do instead?"
+    assert state["selected_option"] == 0
 
 
 def test_ask_user_question_footer_parts_are_recognized():

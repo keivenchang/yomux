@@ -49,6 +49,7 @@
   --active-ring: rgba(255, 255, 255, 0.96);
   --brand-green: #76b900;
   --brand-green-dark: #3f6f00;
+  --about-brand-red: #ef4444;
   --accent-gold: #f5c542;
   --menu-accent: var(--accent);
   --icon-code: #7dd3fc;
@@ -86,6 +87,22 @@
   --danger-strong-hover: #b91c1c;
   --danger-strong-border: #991b1b;
   --danger-light-text: #7f1d1d;
+  --danger-panel-text: #ffd7d7;
+  --danger-panel-title: #ff9b9b;
+  --danger-panel-warning: #ffdede;
+  --danger-panel-bg: rgba(95, 18, 18, 0.26);
+  --danger-panel-border: rgba(255, 120, 120, 0.72);
+  --danger-panel-confirming-bg: rgba(122, 25, 20, 0.42);
+  --danger-panel-confirming-border: #ff8f6a;
+  --danger-panel-confirming-ring: rgba(255, 142, 90, 0.12);
+  --danger-action-text: #ffffff;
+  --danger-action-bg: #d92d20;
+  --danger-action-border: #ff8a80;
+  --danger-action-hover-bg: #b42318;
+  --danger-action-hover-border: #ffb4ad;
+  --danger-confirm-text: #260000;
+  --danger-confirm-bg: #ff7a7a;
+  --danger-confirm-border: #ffb3b3;
   --transport-warning-text: #fff4f5;
   --transport-warning-bg: #b42332;
   --transport-warning-border: #ff8a95;
@@ -267,6 +284,7 @@
   --z-drag-ghost: 45;
   --z-pane-modal: 170;
   --z-session-popover: 80;
+  --z-tab-popover: var(--z-session-popover);
   --z-transport-warning: 160;
   --z-topbar: 180;
   --z-menu-dropdown: 92;
@@ -347,7 +365,7 @@
   --file-selection-bg: rgb(var(--active-accent-rgb) / 0.46);
   --file-selection-border: var(--active-accent-bright);
   --file-selection-text: #f7fff0;
-  --file-tree-recency-hot: #f8ffd8;
+  --file-tree-recency-hot: var(--bad);
   --file-tree-recency-fresh: #dcffa6;
   --file-tree-recency-recent: #bfe87e;
   --file-tree-recency-warm: #aab8c4;
@@ -367,6 +385,9 @@
   --lt-editor-bg: #ffffff;
   --lt-editor-gutter-bg: #f6f8fa;
   --lt-editor-preview-bg: #fff6df;
+  --document-preview-bg: #ffffff;
+  --image-preview-checker-bg: #151a22;
+  --image-preview-checker-bg-light: #e9edf2;
   --lt-markdown-heading: var(--active-accent);
   --lt-markdown-heading-bg: transparent;
   --lt-markdown-link: #075985;
@@ -474,7 +495,7 @@ body.theme-light {
   --active-accent: #5f9800;
   --active-accent-rgb: 95 152 0;
   --active-accent-bright: #4f9e3a;
-  --active-accent-text: #ffffff;
+  --active-accent-text: #071000;
   --active-accent-dim: #e1edda;
   --active-accent-soft: rgb(var(--active-accent-rgb) / 0.12);
   --active-control-bg: var(--active-accent-bright);
@@ -595,6 +616,10 @@ body.theme-light {
   --danger-strong-hover: #b91c1c;
   --danger-strong-border: #991b1b;
   --danger-light-text: #7f1d1d;
+  --danger-panel-light-bg: #fff5f5;
+  --danger-panel-light-confirming-bg: #fff1f0;
+  --danger-panel-light-confirming-border: #d9534f;
+  --danger-action-light-border: #ef4444;
   --inactive-gray: rgba(91, 101, 115, 0.42);
   --inactive-gray-hover: rgba(91, 101, 115, 0.54);
   /* #254/#259 follow-up: keep the neutral gray dim, but back off the light-mode alpha so inactive panes
@@ -614,7 +639,7 @@ body.theme-light {
   --file-selection-bg: rgb(var(--active-accent-rgb) / 0.34);
   --file-selection-border: var(--active-accent-bright);
   --file-selection-text: #10230b;
-  --file-tree-recency-hot: #24520f;
+  --file-tree-recency-hot: var(--bad);
   --file-tree-recency-fresh: #356f12;
   --file-tree-recency-recent: #4d7f21;
   --file-tree-recency-warm: #566271;

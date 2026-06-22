@@ -41,6 +41,10 @@ async function runTabberSuite() {
     const api = loadYolomux('', ['1']);
     assert.deepStrictEqual(canonical(api.sharedTreeControllerNamesForTest()), ['differ', 'finder', 'tabber'], 'Finder, Tabber, and Differ register through the shared tree interaction controller');
     assert.ok(source.includes('function createSharedTreeInteractionController('), 'shared tree controller exists');
+    assert.ok(source.includes('function sharedTreeSelectionApi('), 'shared tree selection behavior has a named owner');
+    assert.ok(source.includes('function sharedTreeExpansionApi('), 'shared tree expansion behavior has a named owner');
+    assert.ok(source.includes('function sharedTreeClickHandler('), 'shared tree click routing has a named owner');
+    assert.ok(source.includes('function sharedTreeKeyboardHandler('), 'shared tree keyboard routing has a named owner');
     assert.ok(/const finderTreeInteractionController = createSharedTreeInteractionController\(\{[\s\S]*name: 'finder'/.test(source), 'Finder uses the shared tree interaction controller');
     assert.ok(/const tabberTreeInteractionController = createSharedTreeInteractionController\(\{[\s\S]*name: 'tabber'/.test(source), 'Tabber uses the shared tree interaction controller');
     assert.ok(/const differTreeInteractionController = createSharedTreeInteractionController\(\{[\s\S]*name: 'differ'/.test(source), 'Differ uses the shared tree interaction controller');
@@ -389,7 +393,7 @@ async function runTabberSuite() {
     assert.ok(source.includes("initialSetting('appearance.date_time_hour_cycle', '24')"), 'date/time clock defaults to 24-hour in the client');
     assert.ok(source.includes("label: t('pref.appearance.date_time_hour_cycle.label')"), 'date/time clock Preferences field is i18n-keyed');
     const enThemeCatalog = JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'));
-    assert.equal(enThemeCatalog['pref.appearance.theme.label'], 'Global color theme', '#12: the Preferences field reads "Global color theme"');
+    assert.equal(enThemeCatalog['pref.appearance.theme.label'], 'Global appearance', '#12: the Preferences field reads "Global appearance"');
     assert.equal(enThemeCatalog['pref.appearance.theme.label'] === 'Global app theme', false, '#12: no stale "Global app theme" label remains');
     // #13: Help -> README opens rendered markdown preview.
     assert.ok(source.includes("openFileInEditor(path, 'README.md', {viewMode: 'preview'})"), '#13: README opens in preview mode');
@@ -1147,13 +1151,18 @@ async function runTabberSuite() {
     assert.ok(/\.file-tree-row\.tabber-row\[data-tabber-type="session"\]:not\(\.tabber-active-session\):not\(\.selected\):hover \.tabber-session-tab\s*\{[\s\S]*background:\s*var\(--pane-inactive-tab-bg-hover\)/.test(css), 'A2: inactive Tabber session hover uses the shared inactive-tab hover token');
     assert.ok(/\.file-tree-row\.tabber-row\.tabber-active-session \.tabber-session-tab,[\s\S]*\.tabber-session-tab\.active\s*\{[\s\S]*background:\s*var\(--pane-tab-active-bg\)[\s\S]*border-bottom-color:\s*var\(--pane-tab-active-bg\)/.test(css), 'A5: active Tabber session labels use active pane-tab tokens');
     assert.ok(/\.file-tree-row\.tabber-row\.selected \.tabber-session-tab\s*\{[\s\S]*box-shadow:\s*0 0 0 1px var\(--active-control-focus-ring\)/.test(css), 'A2/A3: selected tree rows keep a visible focus ring on the tab-shaped label');
-    assert.ok(/\.file-tree-row\.tabber-row \.tabber-session-name\s*\{[\s\S]*flex:\s*0 0 auto[\s\S]*max-inline-size:\s*clamp\(4ch, 28%, 10ch\)[\s\S]*text-overflow:\s*ellipsis/.test(css), 'A4: the session number stays visible and ellipsizes before it can push columns');
-    assert.ok(/\.file-tree-row\.tabber-row \.tabber-session-description\s*\{[\s\S]*flex:\s*1 1 auto[\s\S]*min-width:\s*0[\s\S]*text-overflow:\s*ellipsis/.test(css), 'A4: the session description truncates inside the tab-shaped label');
+    assert.ok(/\.file-tree-row\.tabber-row \.tabber-session-tab > \.pane-tab-core\s*\{[\s\S]*flex:\s*1 1 auto[\s\S]*inline-size:\s*100%/.test(css), 'TR3: shared tab chrome stretches inside the Tabber row wrapper');
+    assert.ok(/\.file-tree-row\.tabber-row \.tabber-session-tab \.session-button-prefix\s*\{[\s\S]*flex:\s*0 0 auto/.test(css), 'A4/TR1: the shared session number prefix stays visible before detail truncation');
+    assert.ok(/\.file-tree-row\.tabber-row \.tabber-session-tab \.tab-inline-detail\s*\{[\s\S]*flex:\s*1 1 auto[\s\S]*min-width:\s*0[\s\S]*text-overflow:\s*ellipsis/.test(css), 'A4/TR1: the shared tab detail truncates inside the stretched Tabber label');
+    assert.ok(/\.file-tree-row\.tabber-row \.tabber-session-tab > \.session-popover\s*\{[\s\S]*position:\s*fixed[\s\S]*z-index:\s*var\(--z-tab-popover\)/.test(css), 'TR2: Tabber session popovers use the same fixed-position popover layer as real tabs');
     assert.ok(source.includes("movingEllipsisHtml('tabber-loading-dots')"), 'Tabber shows shared moving dots while touched paths are loading');
     assert.ok(source.includes('function tabberLookbackControlHtml()') && source.includes('data-tabber-lookback'), 'Tabber renders a dedicated touched-path lookback control');
     assert.ok(/function setTabberSessionFileLookbackHours\(hours, options = \{\}\)[\s\S]*clearTabberSessionFilesStates\(\)[\s\S]*ensureTabberSessionFilesFetches\(\)/.test(source), 'changing Tabber lookback invalidates and reloads touched-path state');
     assert.ok(/\.file-tree-row\.tabber-row \.tabber-window-label \.agent-icon\s*\{[\s\S]*width:\s*calc\(var\(--file-explorer-font-size\) \+ 2px\)[\s\S]*height:\s*calc\(var\(--file-explorer-font-size\) \+ 2px\)/.test(css), 'Tabber process icons scale with the file explorer row font');
     assert.ok(/\.file-tree-row\.tabber-row \.file-tree-date\s*\{[\s\S]*flex:\s*0 0 var\(--file-tree-date-column-width\)[\s\S]*inline-size:\s*var\(--file-tree-date-column-width\)/.test(css), 'Tabber keeps the recency column reserved at narrow widths');
+    assert.ok(/\.file-tree-date\s*\{[\s\S]*font-size:\s*max\(var\(--ui-font-size-2xs\), calc\(var\(--file-explorer-font-size\) - 1px\)\)[\s\S]*text-overflow:\s*ellipsis/.test(css), 'SC7: recency/status text uses a larger row-scale font and end ellipsis');
+    assert.ok(/row\.classList\.toggle\('tabber-status-long', data\.type === 'window' && \/\^\(working for\|ASK\\\?\)\//.test(source), 'SC1: Tabber marks long working/ASK status rows without affecting plain ago rows');
+    assert.ok(/\.file-tree-row\.tabber-row\.tabber-status-long \.file-tree-date\s*\{[\s\S]*display:\s*block[\s\S]*flex:\s*0 1 auto[\s\S]*text-align:\s*start[\s\S]*text-overflow:\s*ellipsis/.test(css), 'SC1/SC2: long Tabber statuses fit content and truncate at the end, not from the leading edge');
     assert.equal(/@container[\s\S]*tabber-row \.file-tree-date[\s\S]*display:\s*none/.test(css), false, 'Tabber never hides the <time> ago recency column for narrow panes');
     assert.ok(/function warmTabberDataOnLaunch\(\)[\s\S]*?tabberLaunchWarmupStarted = true;[\s\S]*?fetchTabberActivity\(\);[\s\S]*?fetchTabberSessionFilesBatch\(tabberAgentSessions\(\)\);/.test(source), 'Tabber launch warmup primes activity and batch-hydrates touched paths');
     assert.ok(/transcriptMetaLoaded = true;[\s\S]*?warmTabberDataOnLaunch\(\)/.test(source), 'Tabber launch warmup runs as soon as transcript metadata is available');
@@ -1181,7 +1190,7 @@ async function runTabberSuite() {
     assert.ok(source.includes('function setTreeItemAria(row') && (source.match(/setTreeItemAria\(row/g) || []).length >= 2, 'DOIT.61 B5: treeitem aria is shared');
     assert.ok(source.includes('function normalizeGitStatus(status)') && source.includes('return normalizeGitStatus(fileTreeChangedFile(path)?.status)'), 'DOIT.61 B6: git status normalization is shared');
     assert.equal(source.includes("endsWith(' ●')"), false, 'DOIT.61 B7: active window state is not parsed out of the label string');
-    assert.ok(source.includes("tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true, activityIconHtml: data.activityIconHtml})"), 'DOIT.61 B7: active window state and activity icons are passed as data');
+    assert.ok(source.includes("tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true, activityIconHtml: data.activityIconHtml, pid: data.pid})"), 'DOIT.61 B7/PD: active window state, activity icons, and pid are passed as data');
     assert.ok(/type === 'window' && session\) \{[\s\S]*switchWindow\(\);[\s\S]*selectSession\(session, \{userInitiated: true\}\)/.test(source), 'Tabber window clicks install the tmux-window override before focus/layout can sync against stale active metadata');
     assert.ok(/type === 'repo' && row\.dataset\.tabberRepoRoot\) \{[\s\S]*switchWindow\(\);[\s\S]*setFileExplorerMode\('files'\)/.test(source), 'Tabber repo clicks also install the tmux-window override before leaving Tabber mode');
     assert.equal(source.includes("if (entry.tabber?.type !== 'session') fileExplorerTabberCollapsed.add(path)"), false, 'Tabber collapse-all and disclosure toggles include session rows');
@@ -1194,7 +1203,9 @@ async function runTabberSuite() {
     assert.equal(api.readStoredFileExplorerModeForTest('tabber'), 'files', 'Tabber is an explicit mode choice, not the default restored left Finder pane');
     assert.ok(/data-file-explorer-mode-set="files"[\s\S]*data-file-explorer-mode-set="diff"[\s\S]*data-file-explorer-mode-set="tabber"/.test(api.fileExplorerModeSwitcherHtml()), 'B1: Finder / Differ / Tabber order');
     assert.equal(source.includes('data-tabber-expand'), false, 'Tabber session descriptions are not separate expand-only targets');
-    assert.ok(source.includes('function tabberSessionLabelHtml(data, entry)') && source.includes('tabber-session-tab') && source.includes('tabber-session-name') && source.includes('tabber-session-description'), 'A1/A2: session rows render a tab-shaped label with the session number and description inside the one clickable row body');
+    assert.ok(source.includes('function tabberSessionChromeHtml(data)') && /function tabberSessionChromeHtml\(data\)[\s\S]*tmuxPaneTabHtml\(session, info, state, auto\)[\s\S]*sessionPopoverHtml\(session, info, agentKind, auto, state\)/.test(source), 'A1/A2/TR1: session rows render the shared tmux pane tab chrome and popover');
+    assert.equal(source.includes('tabber-session-name') || source.includes('tabber-session-description'), false, 'TR5: Tabber does not keep bespoke session name/description chrome');
+    assert.ok(/function bindTabberSessionChrome\(row, session\)[\s\S]*applySessionStateClasses\(tab, state\)[\s\S]*bindPaneTabPopover\(tab, session\)[\s\S]*toggleAutoApprove/.test(source), 'TR2: Tabber session rows reuse the shared state classes, popover binding, and YO toggle action');
     assert.ok(/row\.classList\.toggle\('tabber-active-session', data\.type === 'session' && data\.active === true\)/.test(source), 'A5: active-session styling is data-driven only for session rows');
     assert.ok(/current \|\| \(data\.type === 'session' && data\.active === true\)\) row\.setAttribute\('aria-current', 'true'\)/.test(source), 'A3/A5: the current tmux session/window exposes aria-current on the tree row');
     assert.ok(/row\.dataset\.tabberItem === infoItemId\) openInfoSubTab\('info'\)/.test(source), 'YO!info Tabber row opens the YO!info sub-tab, not the remembered YO!agent sub-tab');
@@ -1209,13 +1220,14 @@ async function runTabberSuite() {
     api.setLayoutSlotsForTest(tabberActiveSlots);
     api.setFocusedPanelItem('1');
 
-    api.setTranscriptInfoForTest('1', {
+    const session1ShellTranscript = {
       project: {git: {branch: 'devbranch', root: '/home/u/proj'}},
       panes: [
         {window: '0', pane: '0', window_active: true, active: true, process_label: 'claude', process_label_pid: 12345, command: 'claude', current_path: '/home/u/proj'},
         {window: '1', pane: '0', window_active: false, active: true, process_label: 'bash', pid: 54321, command: 'bash', current_path: '/home/u'},
       ],
-    });
+    };
+    api.setTranscriptInfoForTest('1', session1ShellTranscript);
     api.setTranscriptInfoForTest('2', {
       panes: [{window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', process_label_pid: 24680, command: 'codex', current_path: '/home/u/two'}],
     });
@@ -1241,6 +1253,7 @@ async function runTabberSuite() {
     const claudeWin = windows.find(w => /0:claude/.test(w.tabber.label));
     assert.ok(claudeWin, 'B2: window label is index:process (0:claude)');
     assert.equal(claudeWin.tabber.label, '0:claude', 'PL/WI: AI window labels use the canonical index:agent label without raw pid text');
+    assert.equal(claudeWin.tabber.pid, 12345, 'PD3: Tabber window entries carry the pid as data');
     assert.equal(claudeWin.tabber.active, true, '#2: the active window is flagged');
     assert.equal(claudeWin.kind, 'dir', 'L3: the agent window expands to touched absolute paths');
     const repos = entriesByDir.get('/' + s1.name + '/' + claudeWin.name);
@@ -1275,7 +1288,8 @@ async function runTabberSuite() {
     // Render guard: real labels (never synthetic node names); active window marked; absolute path rows present.
     const rows = api.tabberRenderedRowsForTest();
     assert.equal(rows.some(r => /^[swrf]_\d/.test(r.name)), false, 'rows show human labels, not synthetic node names (got ' + JSON.stringify(rows.map(r => r.name).slice(0, 8)) + ')');
-    assert.ok(rows.some(r => r.type === 'session' && r.nameHtml.includes('tabber-session-tab') && r.nameHtml.includes('tabber-session-name') && r.nameHtml.includes('tabber-session-description')), 'A1/A2: session rows render the number and description inside the tab-shaped clickable row body');
+    assert.ok(rows.some(r => r.type === 'session' && r.nameHtml.includes('tabber-session-tab') && r.nameHtml.includes('pane-tab-core') && r.nameHtml.includes('session-yolo-marker') && r.nameHtml.includes('session-button-prefix') && r.nameHtml.includes('tab-inline-detail')), 'A1/A2/TR1: session rows render the real tab chrome inside the stretched Tabber row');
+    assert.ok(rows.some(r => r.type === 'session' && r.nameHtml.includes('data-action="pane-tab-auto-approve"')), 'TR2: Tabber session rows expose the same YO auto-approve action as real tabs');
     assert.equal(rows.some(r => r.type !== 'session' && r.nameHtml.includes('tabber-session-tab')), false, 'A1: window/repo/loading/non-tmux Tabber rows do not get the session tab treatment');
     const activeSessionRow = rows.find(r => r.type === 'session' && r.title.split('\n')[0] === '1');
     const inactiveSessionRow = rows.find(r => r.type === 'session' && r.title.split('\n')[0] === '2');
@@ -1283,13 +1297,46 @@ async function runTabberSuite() {
     assert.ok(inactiveSessionRow, 'A5: rendered rows include an inactive session');
     assert.ok(activeSessionRow.classes.includes('tabber-active-session'), 'A5: the current tmux session row gets the active-session class');
     const activeWindowRow = rows.find(r => r.type === 'window' && /^0:claude/.test(r.name));
+    assert.ok(activeWindowRow?.nameHtml.includes('tabber-window-pid') && activeWindowRow.nameHtml.includes('(pid=12345)'), 'PD4: agent Tabber rows render canonical index:agent plus pid');
     assert.equal(activeWindowRow?.ariaCurrent, 'true', 'N10: the active tmux window row exposes aria-current');
     assert.equal(activeWindowRow?.date, 'working for 3h 45m', 'TD1: working agent Tabber rows use the shared state text with working duration');
+    assert.equal(activeWindowRow?.dateHtml.includes('attention-pulse'), false, 'working Tabber status text does not inherit the ASK? attention pulse');
+    api.setAutoApproveStateForTest('1', {agent_windows: [
+      {kind: 'claude', state: 'needs-input', last_active_ts: Date.now() / 1000 - 5, window_index: 0, window_name: 'claude', window_label: '0:claude'},
+    ]});
+    const askRows = api.tabberRenderedRowsForTest();
+    const askWindowRow = askRows.find(r => r.type === 'window' && /^0:claude/.test(r.name));
+    assert.ok((askWindowRow?.dateHtml || '').includes('ASK? &lt;15 sec ago'), 'ASK? Tabber window rows show shared recency text instead of subtype words');
+    assert.equal((askWindowRow?.dateHtml || '').includes('ASK? needs input'), false, 'ASK? Tabber window rows no longer say needs input');
+    assert.equal((askWindowRow?.dateHtml || '').includes('ASK? approval'), false, 'ASK? Tabber window rows no longer say approval');
+    assert.ok(/tabber-agent-status[^"]*status-indicator--label[^"]*agent-status-attention[^"]*status-indicator--attention[^"]*attention-pulse[^"]*" style="--attention-animation-delay:/.test(askWindowRow?.dateHtml || ''), 'ASK? Tabber status text is red and shares the attention pulse phase');
+    api.setAutoApproveStateForTest('1', {agent_windows: [
+      {kind: 'claude', state: 'working', working_elapsed_seconds: 13500, window_index: 0, window_name: 'claude', window_label: '0:claude'},
+    ]});
     const shellWindowRow = rows.find(r => r.type === 'window' && /1:bash/.test(r.name));
+    assert.ok(shellWindowRow?.nameHtml.includes('tabber-window-pid') && shellWindowRow.nameHtml.includes('(pid=54321)'), 'PD5: bash Tabber rows still render their pid from record data');
     assert.equal(shellWindowRow?.icon, '⌁', 'shell/process window leaf rows use a neutral process glyph instead of a checkbox-looking square');
     assert.notEqual(shellWindowRow?.date, 'working for 3h 45m', 'TD4: non-AI tmux windows do not inherit working duration text');
     assert.equal(rows.some(r => r.type === 'window' && ['▢', '■'].includes(r.icon)), false, 'tmux window rows never render checkbox-looking square glyphs');
     assert.equal(activeSessionRow.icon, '▾', 'expanded session rows still use the shared disclosure affordance');
+    api.setTranscriptInfoForTest('1', {
+      ...session1ShellTranscript,
+      panes: [
+        session1ShellTranscript.panes[0],
+        {window: '1', pane: '0', window_active: false, active: true, process_label: 'codex', process_label_pid: 54321, command: 'codex', current_path: '/home/u'},
+      ],
+    });
+    api.setAutoApproveStateForTest('1', {agent_windows: [
+      {kind: 'codex', state: 'idle', last_active_ts: Date.now() / 1000 - 5, window_index: 1, window_name: 'codex', window_label: '1:codex'},
+    ]});
+    const idleAgentRows = api.tabberRenderedRowsForTest();
+    const idleAgentWindowRow = idleAgentRows.find(r => r.type === 'window' && /1:codex/.test(r.name));
+    assert.equal(idleAgentWindowRow?.date, '<15 sec ago', 'idle AI Tabber rows use the shared sub-15-second Ago label');
+    assert.equal(String(idleAgentWindowRow?.date || '').includes('idle'), false, 'idle AI Tabber rows no longer prefix the recency with idle');
+    api.setTranscriptInfoForTest('1', session1ShellTranscript);
+    api.setAutoApproveStateForTest('1', {agent_windows: [
+      {kind: 'claude', state: 'working', working_elapsed_seconds: 13500, window_index: 0, window_name: 'claude', window_label: '0:claude'},
+    ]});
     api.setFileTreeRecencyNowForTest(2_000_000);
     api.setFileExplorerTreeDateModeForTest('relative');
     api.setTabberActivityForTest({
@@ -1312,6 +1359,7 @@ async function runTabberSuite() {
     api.setFileTreeRecencyNowForTest(null);
     api.setFileExplorerTreeDateModeForTest('relative');
     assert.ok(activeSessionRow.nameHtml.includes('class="tabber-session-tab active"'), 'A5: the current tmux session label reads as an active tab');
+    assert.ok(activeSessionRow.nameHtml.includes('data-tabber-session-chrome="shared"'), 'TR5: the session row marks the shared chrome path');
     assert.equal(inactiveSessionRow.classes.includes('tabber-active-session'), false, 'A5: inactive tmux sessions do not get the active-session class');
     assert.equal(inactiveSessionRow.ariaCurrent, '', 'A5: inactive tmux sessions do not expose aria-current');
     assert.equal(inactiveSessionRow.nameHtml.includes('tabber-session-tab active'), false, 'A5: inactive tmux session labels keep the inactive tab shape');

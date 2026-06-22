@@ -33,6 +33,18 @@ def server_ws_json(frame: bytes) -> dict:
     return json.loads(frame[offset:offset + payload_length].decode("utf-8"))
 
 
+def test_get_agent_auth_honors_force_query():
+    writes = []
+    calls = []
+    app = SimpleNamespace(agent_auth_payload=lambda force=False: calls.append(force) or {"ok": True, "force": force})
+    request = SimpleNamespace(server=SimpleNamespace(app=app), write_json=lambda payload, status=HTTPStatus.OK: writes.append((status, payload)))
+
+    http_routes.get_agent_auth(request, SimpleNamespace(query="force=1"), None)
+
+    assert calls == [True]
+    assert writes == [(HTTPStatus.OK, {"ok": True, "force": True})]
+
+
 class FakeShareConnection:
     def __init__(self) -> None:
         self.sent: list[bytes] = []
@@ -346,6 +358,37 @@ def test_handle_upload_enforces_live_app_size_limit():
     assert status == HTTPStatus.REQUEST_ENTITY_TOO_LARGE
     assert payload == {"session": "6", "error": "upload is too large; limit is 5 bytes"}
     assert handler.close_connection is True
+
+
+def test_request_body_reader_owns_content_length_validation():
+    # RA6: every POST body reader should route Content-Length parsing through one helper so missing,
+    # invalid, non-positive, and oversized bodies cannot drift by route.
+    assert "Content-Length" in inspect.getsource(Handler.read_request_body)
+    for method in [Handler.read_json_body, Handler.read_urlencoded_form, Handler.handle_client_event, Handler.handle_upload]:
+        body = inspect.getsource(method)
+        assert "read_request_body" in body
+        assert "self.headers.get(\"Content-Length" not in body
+    assert "read_json_body" in inspect.getsource(http_routes._json_body)
+    assert "Content-Length" not in inspect.getsource(http_routes.post_share_stop)
+
+
+def test_do_post_share_stop_rejects_invalid_content_length_without_value_error():
+    app_calls = []
+    app = SimpleNamespace(stop_active_share=lambda target="": app_calls.append(target) or ({"ok": True}, HTTPStatus.OK))
+    handler, calls, writes = route_handler("/api/share/stop", app)
+    handler.headers = {"Content-Length": "bad"}
+    handler.rfile = io.BytesIO(b"")
+    handler.server.close_inactive_share_upstreams = lambda: app_calls.append("closed-upstreams")
+
+    Handler.do_POST(handler)
+
+    assert calls == [("require_auth", "admin")]
+    assert writes == [(
+        "json",
+        HTTPStatus.LENGTH_REQUIRED,
+        {"error": "missing or invalid Content-Length", "status": 411},
+    )]
+    assert app_calls == []
 
 
 def route_handler(path, app=None, readonly=False):

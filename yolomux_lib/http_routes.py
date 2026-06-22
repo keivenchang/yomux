@@ -202,10 +202,12 @@ def _write_not_found_after_default_auth(request: Any, method: str) -> None:
     request.write_json(error_payload("not found", status=HTTPStatus.NOT_FOUND), status=HTTPStatus.NOT_FOUND)
 
 
-def _json_body(request: Any, route: Route) -> dict[str, Any] | None:
+def _json_body(request: Any, route: Route, *, allow_empty: bool = False, allow_missing: bool = False) -> dict[str, Any] | None:
     if route.body_limit is None:
         raise RuntimeError(f"route {route.method} {route.path} has no body_limit")
-    return request.read_json_body(route.body_limit)
+    if not allow_empty and not allow_missing:
+        return request.read_json_body(route.body_limit)
+    return request.read_json_body(route.body_limit, allow_empty=allow_empty, allow_missing=allow_missing)
 
 
 def get_static_asset(request: Any, parsed: Any, route: Route) -> bool:
@@ -285,6 +287,12 @@ def get_transcripts(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = parse_qs(parsed.query)
     request.write_json(request.share_scoped_transcripts_payload(request.server.app.transcripts_payload(force=query_bool(qs, "force"))))
+
+
+def get_agent_auth(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = parse_qs(parsed.query)
+    request.write_json(request.server.app.agent_auth_payload(force=query_bool(qs, "force")))
 
 
 def get_activity_summary(request: Any, parsed: Any, route: Route) -> None:
@@ -651,9 +659,8 @@ def post_share_create(request: Any, parsed: Any, route: Route) -> None:
 def post_share_stop(request: Any, parsed: Any, route: Route) -> None:
     qs = parse_qs(parsed.query)
     token_or_short_id = str(query_one(qs, "token", "") or query_one(qs, "id", "") or "")
-    content_length = int(request.headers.get("Content-Length", "0") or 0)
-    if not token_or_short_id and content_length > 0:
-        payload = _json_body(request, route)
+    if not token_or_short_id:
+        payload = _json_body(request, route, allow_empty=True, allow_missing=True)
         if payload is None:
             return
         token_or_short_id = str(payload.get("token") or payload.get("short_id") or payload.get("id") or "")
@@ -912,6 +919,7 @@ CORE_ROUTES = (
     Route("GET", "/", "readonly", get_home, group="core"),
     Route("GET", "/preview-popout", "readonly", get_preview_popout, group="core"),
     Route("GET", "/api/transcripts", "readonly", get_transcripts, group="core"),
+    Route("GET", "/api/agent-auth", "readonly", get_agent_auth, group="core"),
     Route("GET", "/api/activity-summary", "readonly", get_activity_summary, group="core"),
     Route("GET", "/api/auto-approve", "readonly", get_auto_approve, group="core"),
     Route("GET", "/api/notify", "readonly", get_notify, group="core"),

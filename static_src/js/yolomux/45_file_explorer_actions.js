@@ -454,7 +454,7 @@ let fileExplorerTypeaheadTimer = null;
 // forward from the lead (wrapping).
 function fileExplorerTypeaheadSelect(rows, leadIndex, char, selectLead) {
   if (fileExplorerTypeaheadTimer) clearTimeout(fileExplorerTypeaheadTimer);
-  fileExplorerTypeaheadTimer = setTimeout(() => { fileExplorerTypeaheadBuffer = ''; }, 700);
+  fileExplorerTypeaheadTimer = setTimeout(() => { fileExplorerTypeaheadBuffer = ''; }, fileExplorerTypeaheadClearMs);
   const lower = char.toLowerCase();
   const cycling = fileExplorerTypeaheadBuffer === lower;
   fileExplorerTypeaheadBuffer = cycling ? lower : (fileExplorerTypeaheadBuffer + lower);

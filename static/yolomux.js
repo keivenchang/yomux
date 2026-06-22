@@ -11,7 +11,7 @@ const agentLoginCommands = {claude: 'claude auth login', codex: 'codex login'};
 function agentLoggedIn(agent) {
   const entry = agentAuth[agent];
   // Unknown (term, or no status yet) counts as logged-in so we never block a usable agent.
-  return !entry || !entry.installed || entry.logged_in === true;
+  return !entry || !entry.installed || entry.logged_in !== false;
 }
 function agentLoginCommand(agent) {
   return agentLoginCommands[agent] || '';
@@ -19,6 +19,18 @@ function agentLoginCommand(agent) {
 function agentUnavailableReason(agent) {
   const entry = agentAuth[agent];
   return entry?.unavailable_reason || '';
+}
+function applyAgentAvailabilityPayload(payload = {}) {
+  if (!payload || typeof payload !== 'object') return false;
+  if (payload.agentAuth && typeof payload.agentAuth === 'object') agentAuth = payload.agentAuth;
+  if (Array.isArray(payload.availableAgents)) {
+    availableAgents.clear();
+    payload.availableAgents.forEach(agent => {
+      const name = String(agent || '').trim();
+      if (name) availableAgents.add(name);
+    });
+  }
+  return true;
 }
 const accessRole = bootstrap.accessRole || 'admin';
 const readOnlyMode = accessRole !== 'admin';
@@ -1265,10 +1277,18 @@ let fileExplorerSyncPathInFlight = '';
 let fileExplorerLastAppliedSyncPlanKey = '';
 let fileExplorerSyncGeneration = 0;
 // Hardcoded frontend timing values live here. Settings-backed intervals stay in settings.py and are read through initialSetting/numberSetting.
+const FILE_TREE_RECENCY_JUST_UPDATED_MAX_AGE_SECONDS = 15;
 const uiDelayMs = Object.freeze({
   shareViewerStatusBackupRefresh: 30000,
   shareHostStatusBackupRefresh: 3000,
   shareRemoteResizeAfterSocketOpen: 50,
+  serverWatchRenew: 60000,
+  tmuxWindowReadback: 120,
+  tmuxWindowReadbackRetry: 80,
+  terminalRefreshAfterTabSelect: 120,
+  fileQuickOpenDebounce: 160,
+  fileExplorerTypeaheadClear: 700,
+  shareGeometryDigestPublish: 2000,
 });
 
 const yolomuxTiming = Object.freeze({
@@ -1278,6 +1298,13 @@ const yolomuxTiming = Object.freeze({
   shareViewerStatusBackupRefreshMs: uiDelayMs.shareViewerStatusBackupRefresh,
   shareHostStatusBackupRefreshMs: uiDelayMs.shareHostStatusBackupRefresh,
   shareRemoteResizeAfterSocketOpenMs: uiDelayMs.shareRemoteResizeAfterSocketOpen,
+  serverWatchRenewMs: uiDelayMs.serverWatchRenew,
+  tmuxWindowReadbackMs: uiDelayMs.tmuxWindowReadback,
+  tmuxWindowReadbackRetryMs: uiDelayMs.tmuxWindowReadbackRetry,
+  terminalRefreshAfterTabSelectMs: uiDelayMs.terminalRefreshAfterTabSelect,
+  fileQuickOpenDebounceMs: uiDelayMs.fileQuickOpenDebounce,
+  fileExplorerTypeaheadClearMs: uiDelayMs.fileExplorerTypeaheadClear,
+  shareGeometryDigestPublishMs: uiDelayMs.shareGeometryDigestPublish,
   yolomuxFontReadyTimeoutMs: 2500,
   shareReplayKeyframeRequestInitialBackoffMs: 5000,
   shareReplayKeyframeRequestMinIntervalMs: 5000,
@@ -1293,6 +1320,13 @@ const {
   shareViewerStatusBackupRefreshMs,
   shareHostStatusBackupRefreshMs,
   shareRemoteResizeAfterSocketOpenMs,
+  serverWatchRenewMs,
+  tmuxWindowReadbackMs,
+  tmuxWindowReadbackRetryMs,
+  terminalRefreshAfterTabSelectMs,
+  fileQuickOpenDebounceMs,
+  fileExplorerTypeaheadClearMs,
+  shareGeometryDigestPublishMs,
   yolomuxFontReadyTimeoutMs,
   shareReplayKeyframeRequestInitialBackoffMs,
   shareReplayKeyframeRequestMinIntervalMs,
@@ -5595,6 +5629,8 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
   if (screenKey === 'approval') {
     return stateValue('needs-approval', screenText || approvalPromptText || stateReason('approvalPromptVisible'), promptAttentionExtra(session, auto));
   }
+  const agentWindowAttention = agentWindowAttentionState(session, info, auto);
+  if (agentWindowAttention) return agentWindowAttention;
   const tmuxSignalStateForSession = tmuxSignalAgentStateForSession(session);
   if (tmuxSignalStateForSession) {
     return tmuxSignalStateForSession;
@@ -5629,6 +5665,18 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
   return stateValue('idle', stateReason('noActiveAgent'));
 }
 
+function agentWindowAttentionState(session, info = null, auto = autoApproveStates.get(session) || {}) {
+  if (typeof sessionAgentWindowStatusPayloads !== 'function') return null;
+  const windows = sessionAgentWindowStatusPayloads(session, info, auto);
+  const agent = windows.find(item => ['approval', 'needs-approval', 'needs-input', 'interrupted'].includes(String(item?.state || '')));
+  if (!agent) return null;
+  const stateKey = ['approval', 'needs-approval'].includes(String(agent.state || '')) ? 'needs-approval' : 'needs-input';
+  const windowLabel = String(agent.window_label || agent.window || agent.kind || '').trim();
+  const reasonText = String(agent.screen_text || '').trim() || (stateKey === 'needs-approval' ? stateReason('approvalPromptVisible') : stateReason('agentWaitingInput'));
+  const reason = windowLabel ? `${windowLabel}: ${reasonText}` : reasonText;
+  return stateValue(stateKey, reason, promptAttentionExtra(session, auto));
+}
+
 function agentErrorIsBlocking(error) {
   const text = String(error || '').toLowerCase();
   if (!text) return false;
@@ -5652,17 +5700,23 @@ function autoApproveEnabledForSession(payload) {
   return autoApproveEnabledHere(payload) || autoApproveEnabledElsewhere(payload);
 }
 
-function yoloWorkingSessions() {
-  return sessions.filter(session => autoApproveScreenIsWorking(autoApproveStates.get(session)));
-}
-
 function autoApproveScreenIsWorking(payload) {
   return String(payload?.screen?.key || '') === 'working';
 }
 
+function sessionHasWorkingAgentWindow(session, payload = autoApproveStates.get(session), info = transcriptMeta.sessions?.[session]) {
+  if (typeof sessionAgentWindowStatusPayloads !== 'function') return false;
+  return sessionAgentWindowStatusPayloads(session, info, payload)
+    .some(agent => String(agent?.state || '').toLowerCase() === 'working');
+}
+
 function sessionYoloIsWorking(session, payload = autoApproveStates.get(session)) {
-  // Spin the YO ball whenever the agent is working, regardless of auto-approve state.
-  return autoApproveScreenIsWorking(payload);
+  // Spin the YO ball whenever any Claude/Codex window is working, even when that window is hidden.
+  return sessionHasWorkingAgentWindow(session, payload) || autoApproveScreenIsWorking(payload);
+}
+
+function yoloWorkingSessions() {
+  return sessions.filter(session => sessionYoloIsWorking(session));
 }
 
 function runningAgentCount() {
@@ -5670,7 +5724,7 @@ function runningAgentCount() {
 }
 
 function sessionCountsAsRunning(session, stateKey = '') {
-  if (autoApproveScreenIsWorking(autoApproveStates.get(session))) return true;
+  if (sessionYoloIsWorking(session)) return true;
   return ['tests-running', 'yolo-approval'].includes(String(stateKey || ''));
 }
 
@@ -6099,6 +6153,7 @@ function statusIndicatorClasses(...classes) {
 function statusIndicatorToneClasses(tone) {
   if (tone === 'positive') return ['status-indicator--positive'];
   if (tone === 'working') return ['status-indicator--working', 'heartbeat-pulse'];
+  if (tone === 'cooldown') return ['status-indicator--cooldown', 'heartbeat-pulse'];
   if (tone === 'attention') return ['status-indicator--attention', 'heartbeat-pulse', 'attention-pulse'];
   if (tone === 'settled') return ['status-indicator--settled'];
   if (tone === 'idle') return ['status-indicator--idle'];
@@ -6106,7 +6161,7 @@ function statusIndicatorToneClasses(tone) {
 }
 
 function statusIndicatorToneStyle(tone) {
-  return tone === 'attention' ? ` style="${attentionAnimationStyle()}"` : '';
+  return ['working', 'cooldown', 'attention'].includes(String(tone || '')) ? ` style="${attentionAnimationStyle()}"` : '';
 }
 
 function statusIndicatorModifiedClasses(modifier, tone, classes, options = {}) {
@@ -6121,12 +6176,23 @@ function statusIndicatorTextClasses(tone, ...classes) {
   return statusIndicatorModifiedClasses('status-indicator--text', tone, classes);
 }
 
+function statusIndicatorLabelClasses(tone, ...classes) {
+  return statusIndicatorModifiedClasses('status-indicator--label', tone, classes);
+}
+
 function statusIndicatorDotClasses(tone, ...classes) {
   return statusIndicatorModifiedClasses('status-indicator--dot', tone, classes);
 }
 
 function statusIndicatorInlineClasses(tone, ...classes) {
   return statusIndicatorModifiedClasses('status-indicator--inline', tone, classes, {modifierPosition: 'after-all'});
+}
+
+function statusIndicatorLabelHtml(text, tone, ...classes) {
+  const value = String(text || '').trim();
+  if (!value) return '';
+  const style = statusIndicatorToneStyle(tone);
+  return `<span class="${esc(statusIndicatorLabelClasses(tone, classes))}"${style}>${esc(value)}</span>`;
 }
 
 function stateBadgeHtml(key, short, title, options = {}) {
@@ -7337,7 +7403,7 @@ function scheduleFileQuickOpenSearch(options = {}) {
     if (!q.startsWith('>') && !q.startsWith('@')) refreshFileQuickOpenCandidates(commandPaletteQuery);
   };
   if (options.immediate) run();
-  else fileQuickOpenDebounce = setTimeout(run, 160);
+  else fileQuickOpenDebounce = setTimeout(run, fileQuickOpenDebounceMs);
 }
 
 function abortFileQuickOpenSearch() {
@@ -11463,7 +11529,6 @@ function fileTreeMtimeText(entry) {
   return sessionFileDisplayTimeTextForEntry(entry);
 }
 
-const FILE_TREE_RECENCY_JUST_UPDATED_MAX_AGE_SECONDS = 15;
 const FILE_TREE_RECENCY_THRESHOLDS = Object.freeze([
   {key: 'just-updated', maxAgeSeconds: FILE_TREE_RECENCY_JUST_UPDATED_MAX_AGE_SECONDS, colorVar: 'var(--file-tree-recency-hot)', pulseEligible: true},
   {key: 'hot', maxAgeSeconds: 60, colorVar: 'var(--file-tree-recency-hot)'},
@@ -11814,9 +11879,18 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
   }
   setHiddenIfChanged(status, !statusText);
   if (options.preserveDate !== true) {
-    const dateText = options.dateText || '';
-    if (date.textContent !== dateText) date.textContent = dateText;
-    setHiddenIfChanged(date, !dateText);
+    const dateHtml = options.dateHtml || '';
+    if (dateHtml) {
+      if (date.innerHTML !== dateHtml) date.innerHTML = dateHtml;
+      setHiddenIfChanged(date, false);
+    } else {
+      const dateText = options.dateText || '';
+      if (date.innerHTML || date.textContent !== dateText) {
+        date.innerHTML = '';
+        date.textContent = dateText;
+      }
+      setHiddenIfChanged(date, !dateText);
+    }
   }
 }
 
@@ -11882,12 +11956,7 @@ function applyFileTreeRowDerivedState(row, state) {
   updateFileTreeRowContents(row, state.icon, state.displayName.text, state.contentOptions);
 }
 
-function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
-  const fullPath = parentPath === '/' ? `/${entry.name}` : `${parentPath}/${entry.name}`;
-  // Tabber rows are heterogeneous (session/window/pane/repo/file), so the file-specific git/popover/index
-  // logic below does not apply. Render them via the shared column filler (updateFileTreeRowContents) +
-  // .file-tree-row DOM, with all display values precomputed in the entry as data — B3's mode:'tabber'.
-  if (options.mode === 'tabber') return updateTabberRow(row, fullPath, entry, depth, options);
+function buildFileTreeRowState(fullPath, entry, depth, options = {}) {
   const differMode = options.differMode === true;
   const compact = options.compact === true;
   const currentDirectory = activeFinderDirectoryPath();
@@ -11896,48 +11965,77 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
     : (options.autoExpand === true || fileExplorerExpanded.has(fullPath)));
   const indexedDirectory = !differMode && entry.kind === 'dir' && fileExplorerDirectoryIsIndexed(fullPath);
   const indexedDescendantDirectory = !differMode && entry.kind === 'dir' && !indexedDirectory && Boolean(fileExplorerIndexedAncestor(fullPath));
+  const derivedState = fileTreeRowDerivedState(fullPath, entry, {
+    ...options,
+    expanded,
+    dateText: fileTreeMtimeText(entry),
+  });
+  const changedFile = derivedState.changedFile;
+  const changedFileStatus = derivedState.changedFileStatus;
+  const repoRoot = differMode && entry.kind === 'dir' ? (options.repoForDiffer || '') : '';
+  const relDir = repoRoot && fullPath.startsWith(repoRoot + '/') ? fullPath.slice(repoRoot.length + 1) : '';
+  return {
+    fullPath,
+    entry,
+    depth,
+    options,
+    differMode,
+    compact,
+    expanded,
+    indexedDirectory,
+    indexedDescendantDirectory,
+    paddingLeft: fileTreeRowPadding(depth, compact),
+    selected: fileExplorerSelectedPaths.has(fullPath),
+    sessionHighlightClass: fileExplorerSessionHighlightClassForPath(fullPath, entry.kind, {
+      differMode,
+      sessionHighlightSets: options.sessionHighlightSets,
+    }),
+    derivedState,
+    changedFile,
+    changedFileStatus,
+    newEntry: !differMode && fileExplorerEntryIsNew(fullPath),
+    currentFile: !differMode && entry.kind === 'file' && fullPath === activeFile,
+    currentDirectoryRow: !differMode && entry.kind === 'dir' && fullPath === currentDirectory,
+    relDir,
+    imagePreviewEligible: entry.kind === 'file' && previewMediaKindForPath(entry.name) === 'image' && Number(entry.size || 0) <= MAX_FILE_PREVIEW_BYTES,
+  };
+}
+
+function applyFileTreeRowDataset(row, state) {
+  const {entry, fullPath} = state;
   syncFileTreeRowKindClass(row, entry.kind);
-  row.classList.toggle('compact', compact);
+  row.classList.toggle('compact', state.compact);
   setRowDataset(row, 'path', fullPath);
   setRowDataset(row, 'kind', entry.kind);
   setRowDataset(row, 'name', entry.name);
   setRowDataset(row, 'isRepo', entry.is_repo === true ? 'true' : 'false');
   setRowDataset(row, 'isSymlink', entry.is_symlink === true ? 'true' : 'false');
   setRowDataset(row, 'symlinkTarget', entry.symlink_target || '');
-  setRowDataset(row, 'indexed', indexedDirectory ? 'true' : 'false');
+  setRowDataset(row, 'indexed', state.indexedDirectory ? 'true' : 'false');
   setRowDataset(row, 'tabberType', '');
   setRowDataset(row, 'tabberSession', '');
   setRowDataset(row, 'tabberWindow', '');
   setRowDataset(row, 'tabberRepoRoot', '');
   setRowDataset(row, 'tabberItem', '');
   setRowDataset(row, 'tabberBranch', '');
-  const paddingLeft = fileTreeRowPadding(depth, compact);
-  if (row.style.paddingLeft !== paddingLeft) row.style.paddingLeft = paddingLeft;
-  setTreeItemAria(row, {selected: fileExplorerSelectedPaths.has(fullPath), expandable: entry.kind === 'dir', expanded});
+  if (row.style.paddingLeft !== state.paddingLeft) row.style.paddingLeft = state.paddingLeft;
+  setTreeItemAria(row, {selected: state.selected, expandable: entry.kind === 'dir', expanded: state.expanded});
   row.draggable = entry.kind === 'file' || entry.kind === 'dir';
-  row.classList.toggle('selected', fileExplorerSelectedPaths.has(fullPath));
-  row.classList.toggle('expanded', expanded);
-  row.classList.toggle('collapsed', entry.kind === 'dir' && !expanded);
+  row.classList.toggle('selected', state.selected);
+  row.classList.toggle('expanded', state.expanded);
+  row.classList.toggle('collapsed', entry.kind === 'dir' && !state.expanded);
   row.classList.toggle('is-repo', entry.kind === 'dir' && entry.is_repo === true);
-  row.classList.toggle('indexed-directory', indexedDirectory);
-  row.classList.toggle('indexed-descendant-directory', indexedDescendantDirectory);
-  const sessionHighlightClass = fileExplorerSessionHighlightClassForPath(fullPath, entry.kind, {
-    differMode,
-    sessionHighlightSets: options.sessionHighlightSets,
-  });
-  applySessionHighlightRowClass(row, sessionHighlightClass);
+  row.classList.toggle('indexed-directory', state.indexedDirectory);
+  row.classList.toggle('indexed-descendant-directory', state.indexedDescendantDirectory);
+  applySessionHighlightRowClass(row, state.sessionHighlightClass);
   // flag symlinks so the icon gets an arrow-badge overlay (target-type icon is kept); a broken
   // link gets a red badge + struck-through name. The backend sets is_symlink + kind=symlink-broken.
   row.classList.toggle('is-symlink', entry.is_symlink === true);
   row.classList.toggle('symlink-broken', entry.kind === 'symlink-broken');
-  const derivedState = fileTreeRowDerivedState(fullPath, entry, {
-    ...options,
-    expanded,
-    dateText: fileTreeMtimeText(entry),
-  });
-  applyFileTreeRowDerivedState(row, derivedState);
-  applyFileTreeRowRecency(row, entry, {differMode});
-  const {changedFile, changedFileStatus} = derivedState;
+}
+
+function bindFinderRowHandlers(row, state) {
+  const {entry, fullPath, differMode} = state;
   if (!differMode && entry.kind === 'dir' && entry.is_repo === true) {
     row.removeAttribute('title');
     row.onmouseenter = event => { fileTreeRepoPopoverCursor = {x: event.clientX, y: event.clientY}; scheduleRepoRowHoverPopover(row, fullPath); };
@@ -11957,16 +12055,76 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
     }
   }
   if (!differMode) {
-    const newEntry = fileExplorerEntryIsNew(fullPath);
-    row.classList.toggle('new-entry', newEntry);
-    if (newEntry) scheduleNewEntryClassRemoval(row, fullPath);
-    const currentFile = entry.kind === 'file' && fullPath === activeFile;
-    const currentDirectoryRow = entry.kind === 'dir' && fullPath === currentDirectory;
-    row.classList.toggle('current-file', currentFile);
-    row.classList.toggle('current-directory', currentDirectoryRow);
-    if (currentFile || currentDirectoryRow) row.setAttribute('aria-current', 'true');
+    row.classList.toggle('new-entry', state.newEntry);
+    if (state.newEntry) scheduleNewEntryClassRemoval(row, fullPath);
+    row.classList.toggle('current-file', state.currentFile);
+    row.classList.toggle('current-directory', state.currentDirectoryRow);
+    if (state.currentFile || state.currentDirectoryRow) row.setAttribute('aria-current', 'true');
     else row.removeAttribute('aria-current');
   }
+  if (state.imagePreviewEligible) bindFileImagePreview(row, fullPath, entry);
+  if (differMode) {
+    // In differMode, event handling is via delegation in bindChangesPanel; clear Finder handlers
+    clearFileTreeRowHandlers(row);
+    return;
+  }
+  row.onpointerdown = event => {
+    if (event.button != null && event.button !== 0) return;
+    cancelPendingFileExplorerActiveSync();
+    row.__fileTreePointerDown = {x: event.clientX || 0, y: event.clientY || 0};
+  };
+  row.onpointerup = event => {
+    if (event.button != null && event.button !== 0) return;
+    const start = row.__fileTreePointerDown;
+    row.__fileTreePointerDown = null;
+    if (row.__fileTreeDragging) return;
+    const dx = Math.abs((event.clientX || 0) - (start?.x || 0));
+    const dy = Math.abs((event.clientY || 0) - (start?.y || 0));
+    if (start && Math.max(dx, dy) > 4) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.detail > 1) return;
+    row.__fileTreePointerActivated = true;
+    setTimeout(() => { row.__fileTreePointerActivated = false; }, 0);
+    onFileTreeRowClick(row, fullPath, entry, event);
+  };
+  row.onclick = event => {
+    if (row.__fileTreePointerActivated) {
+      row.__fileTreePointerActivated = false;
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    event.stopPropagation();
+    if (event.detail > 1) return;
+    onFileTreeRowClick(row, fullPath, entry, event);
+  };
+  row.ondblclick = event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (entry.kind === 'dir') openFileExplorerManualRoot(fullPath);
+    else openFileInEditor(fullPath, entry);
+  };
+  row.oncontextmenu = event => {
+    event.preventDefault();
+    event.stopPropagation();
+    closeFileImagePreview();
+    showFileTreeContextMenu(row, fullPath, entry, event.clientX, event.clientY);
+  };
+  row.ondragstart = event => {
+    row.__fileTreeDragging = true;
+    startFileTreeDrag(event, row, fullPath, entry);
+  };
+  row.ondragend = () => {
+    row.__fileTreeDragging = false;
+    dragFilePayloadState = null;
+    stopCustomDragPreview();
+    clearDropPreview();
+  };
+}
+
+function bindDifferRowData(row, state) {
+  const {entry, fullPath, differMode, changedFile, changedFileStatus} = state;
   // Set data attributes so Differ event delegation (click/drag/contextmenu) can find these rows
   setRowDataset(row, 'openChangeFile', changedFile?.abs_path || '');
   setRowDataset(row, 'openChangeSession', changedFile?.abs_path ? (changedFile.session || '') : '');
@@ -11975,76 +12133,27 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   setRowDataset(row, 'openChangeRepo', changedFile?.abs_path ? (changedFile.repo || '') : '');
   setRowDataset(row, 'changeSize', changedFile?.abs_path && changedFile.size !== null && changedFile.size !== undefined ? changedFile.size : '');
   if (differMode && entry.kind === 'dir') {
-    const repoRoot = options.repoForDiffer || '';
-    const relDir = repoRoot && fullPath.startsWith(repoRoot + '/') ? fullPath.slice(repoRoot.length + 1) : '';
     setRowDataset(row, 'changesFolderToggle', fullPath);
     setRowDataset(row, 'openChangeDirectory', fullPath);
-    setRowDataset(row, 'changeRel', relDir);
+    setRowDataset(row, 'changeRel', state.relDir);
   } else if (!differMode) {
     setRowDataset(row, 'changesFolderToggle', '');
     setRowDataset(row, 'openChangeDirectory', '');
   }
-  if (entry.kind === 'file' && previewMediaKindForPath(entry.name) === 'image' && Number(entry.size || 0) <= MAX_FILE_PREVIEW_BYTES) {
-    bindFileImagePreview(row, fullPath, entry);
-  }
-  if (differMode) {
-    // In differMode, event handling is via delegation in bindChangesPanel; clear Finder handlers
-    clearFileTreeRowHandlers(row);
-  } else {
-    row.onpointerdown = event => {
-      if (event.button != null && event.button !== 0) return;
-      cancelPendingFileExplorerActiveSync();
-      row.__fileTreePointerDown = {x: event.clientX || 0, y: event.clientY || 0};
-    };
-    row.onpointerup = event => {
-      if (event.button != null && event.button !== 0) return;
-      const start = row.__fileTreePointerDown;
-      row.__fileTreePointerDown = null;
-      if (row.__fileTreeDragging) return;
-      const dx = Math.abs((event.clientX || 0) - (start?.x || 0));
-      const dy = Math.abs((event.clientY || 0) - (start?.y || 0));
-      if (start && Math.max(dx, dy) > 4) return;
-      event.preventDefault();
-      event.stopPropagation();
-      if (event.detail > 1) return;
-      row.__fileTreePointerActivated = true;
-      setTimeout(() => { row.__fileTreePointerActivated = false; }, 0);
-      onFileTreeRowClick(row, fullPath, entry, event);
-    };
-    row.onclick = event => {
-      if (row.__fileTreePointerActivated) {
-        row.__fileTreePointerActivated = false;
-        event.preventDefault();
-        event.stopPropagation();
-        return;
-      }
-      event.stopPropagation();
-      if (event.detail > 1) return;
-      onFileTreeRowClick(row, fullPath, entry, event);
-    };
-    row.ondblclick = event => {
-      event.preventDefault();
-      event.stopPropagation();
-      if (entry.kind === 'dir') openFileExplorerManualRoot(fullPath);
-      else openFileInEditor(fullPath, entry);
-    };
-    row.oncontextmenu = event => {
-      event.preventDefault();
-      event.stopPropagation();
-      closeFileImagePreview();
-      showFileTreeContextMenu(row, fullPath, entry, event.clientX, event.clientY);
-    };
-    row.ondragstart = event => {
-      row.__fileTreeDragging = true;
-      startFileTreeDrag(event, row, fullPath, entry);
-    };
-    row.ondragend = () => {
-      row.__fileTreeDragging = false;
-      dragFilePayloadState = null;
-      stopCustomDragPreview();
-      clearDropPreview();
-    };
-  }
+}
+
+function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
+  const fullPath = parentPath === '/' ? `/${entry.name}` : `${parentPath}/${entry.name}`;
+  // Tabber rows are heterogeneous (session/window/pane/repo/file), so the file-specific git/popover/index
+  // logic below does not apply. Render them via the shared column filler (updateFileTreeRowContents) +
+  // .file-tree-row DOM, with all display values precomputed in the entry as data — B3's mode:'tabber'.
+  if (options.mode === 'tabber') return updateTabberRow(row, fullPath, entry, depth, options);
+  const rowState = buildFileTreeRowState(fullPath, entry, depth, options);
+  applyFileTreeRowDataset(row, rowState);
+  applyFileTreeRowDerivedState(row, rowState.derivedState);
+  applyFileTreeRowRecency(row, entry, {differMode: rowState.differMode});
+  bindDifferRowData(row, rowState);
+  bindFinderRowHandlers(row, rowState);
   return fullPath;
 }
 
@@ -12387,16 +12496,8 @@ function sharedTreeChildRow(rows, row) {
   return childId && childId !== id && pathIsInsideDirectory(childId, id) ? child : null;
 }
 
-function createSharedTreeInteractionController(options = {}) {
-  const state = {
-    selectedIds: new Set(),
-    leadId: '',
-  };
-  const controller = {
-    name: options.name || 'tree',
-    rows(panel) {
-      return sharedTreeRows(panel, options);
-    },
+function sharedTreeSelectionApi(controller, state, options = {}) {
+  return {
     selectedIds() {
       if (typeof options.selectedIds === 'function') {
         const selected = options.selectedIds();
@@ -12489,6 +12590,27 @@ function createSharedTreeInteractionController(options = {}) {
       controller.applyState(panel);
       return selectionOnly === true;
     },
+    leadRow(panel) {
+      const rows = controller.rows(panel);
+      const leadId = controller.leadId();
+      return rows.find(row => sharedTreeRowId(row) === leadId)
+        || rows.find(row => controller.selectedIds().has(sharedTreeRowId(row)))
+        || rows.find(row => controller.rowIsCurrent(row))
+        || rows[0]
+        || null;
+    },
+    syncCurrent(panel, syncOptions = {}) {
+      const currentId = controller.currentId();
+      if (currentId && typeof options.syncCurrentSelection === 'function') options.syncCurrentSelection(currentId);
+      controller.setLeadId(currentId || controller.leadId());
+      controller.applyState(panel, {scrollCurrent: syncOptions.scrollIntoView === true});
+      return Boolean(currentId);
+    },
+  };
+}
+
+function sharedTreeExpansionApi(controller, options = {}) {
+  return {
     isExpanded(row) {
       if (typeof options.isExpanded === 'function') return options.isExpanded(row) === true;
       return row?.getAttribute?.('aria-expanded') === 'true';
@@ -12500,6 +12622,99 @@ function createSharedTreeInteractionController(options = {}) {
       }
       return false;
     },
+  };
+}
+
+function sharedTreeClickHandler(controller, options = {}) {
+  return function handleSharedTreeClick(event, panel, clickOptions = {}) {
+    const row = clickOptions.row || event?.target?.closest?.(options.rowSelector || '.file-tree-row[data-path]');
+    if (!row || !panel?.contains?.(row) || !controller.rows(panel).includes(row)) return false;
+    if (typeof options.shouldIgnoreEvent === 'function' && options.shouldIgnoreEvent(event)) return false;
+    if (typeof globalShortcutTargetAllowsAppAction === 'function' && !globalShortcutTargetAllowsAppAction(event?.target) && !clickOptions.row) return false;
+    const onDisclosure = Boolean(event?.target?.closest?.('.file-tree-icon'));
+    consumeSharedTreeEvent(event);
+    const selectionOnly = controller.selectFromClick(panel, row, event);
+    if (row.dataset.kind === 'dir' && onDisclosure) {
+      controller.setExpanded(panel, row, !controller.isExpanded(row));
+      return true;
+    }
+    if (!selectionOnly && options.activateOnClick !== false) controller.activateRow(panel, row, event);
+    return true;
+  };
+}
+
+function sharedTreeKeyboardHandler(controller, options = {}) {
+  return function handleSharedTreeKeydown(event, panel) {
+    if (typeof options.shouldIgnoreEvent === 'function' && options.shouldIgnoreEvent(event)) return false;
+    const intent = sharedTreeKeyIntent(event, options);
+    if (!intent) return false;
+    const rows = controller.rows(panel);
+    if (!rows.length) return false;
+    const eventTargetsOwnedPanel = panel?.contains?.(event?.target) || event?.target === panel;
+    if (typeof globalShortcutTargetAllowsAppAction === 'function' && !globalShortcutTargetAllowsAppAction(event?.target) && !eventTargetsOwnedPanel) return false;
+    const lead = controller.leadRow(panel);
+    let leadIndex = lead ? rows.indexOf(lead) : -1;
+    if (intent === 'select-all' && options.allowSelectAll === true) {
+      consumeSharedTreeEvent(event);
+      const selectedIds = controller.selectedIds();
+      selectedIds.clear();
+      for (const row of rows) selectedIds.add(sharedTreeRowId(row));
+      controller.setLeadId(sharedTreeRowId(rows[rows.length - 1]));
+      if (typeof options.afterSelectAll === 'function') options.afterSelectAll(rows, event);
+      controller.applyState(panel);
+      return true;
+    }
+    if (intent === 'activate') {
+      if (!lead) return false;
+      consumeSharedTreeEvent(event);
+      controller.selectRow(panel, lead, event);
+      controller.activateRow(panel, lead, event);
+      return true;
+    }
+    if (intent === 'expand' || intent === 'collapse') {
+      if (!lead) return false;
+      consumeSharedTreeEvent(event);
+      const expanded = controller.isExpanded(lead);
+      if (intent === 'expand') {
+        if (lead.dataset.kind === 'dir' && !expanded) controller.setExpanded(panel, lead, true);
+        else {
+          const child = sharedTreeChildRow(rows, lead);
+          if (child) controller.selectRow(panel, child, event);
+        }
+        return true;
+      }
+      if (lead.dataset.kind === 'dir' && expanded) controller.setExpanded(panel, lead, false);
+      else {
+        const parent = sharedTreeParentRow(rows, lead);
+        if (parent) controller.selectRow(panel, parent, event);
+      }
+      return true;
+    }
+    if (leadIndex < 0) leadIndex = 0;
+    const lastIndex = rows.length - 1;
+    let nextIndex = leadIndex;
+    if (intent === 'move-home' || intent === 'extend-home') nextIndex = 0;
+    else if (intent === 'move-end' || intent === 'extend-end') nextIndex = lastIndex;
+    else if (intent === 'move-down' || intent === 'extend-down') nextIndex = Math.min(lastIndex, leadIndex + 1);
+    else if (intent === 'move-up' || intent === 'extend-up') nextIndex = Math.max(0, leadIndex - 1);
+    consumeSharedTreeEvent(event);
+    const nextRow = rows[nextIndex];
+    if (intent.startsWith('extend')) controller.selectRange(panel, nextRow, event);
+    else controller.selectRow(panel, nextRow, event);
+    return true;
+  };
+}
+
+function createSharedTreeInteractionController(options = {}) {
+  const state = {
+    selectedIds: new Set(),
+    leadId: '',
+  };
+  const controller = {
+    name: options.name || 'tree',
+    rows(panel) {
+      return sharedTreeRows(panel, options);
+    },
     activateRow(panel, row, event = null) {
       if (typeof options.activateRow === 'function') {
         options.activateRow(row, event);
@@ -12508,97 +12723,11 @@ function createSharedTreeInteractionController(options = {}) {
       }
       return false;
     },
-    leadRow(panel) {
-      const rows = controller.rows(panel);
-      const leadId = controller.leadId();
-      return rows.find(row => sharedTreeRowId(row) === leadId)
-        || rows.find(row => controller.selectedIds().has(sharedTreeRowId(row)))
-        || rows.find(row => controller.rowIsCurrent(row))
-        || rows[0]
-        || null;
-    },
-    handleClick(event, panel, clickOptions = {}) {
-      const row = clickOptions.row || event?.target?.closest?.(options.rowSelector || '.file-tree-row[data-path]');
-      if (!row || !panel?.contains?.(row) || !controller.rows(panel).includes(row)) return false;
-      if (typeof options.shouldIgnoreEvent === 'function' && options.shouldIgnoreEvent(event)) return false;
-      if (typeof globalShortcutTargetAllowsAppAction === 'function' && !globalShortcutTargetAllowsAppAction(event?.target) && !clickOptions.row) return false;
-      const onDisclosure = Boolean(event?.target?.closest?.('.file-tree-icon'));
-      consumeSharedTreeEvent(event);
-      const selectionOnly = controller.selectFromClick(panel, row, event);
-      if (row.dataset.kind === 'dir' && onDisclosure) {
-        controller.setExpanded(panel, row, !controller.isExpanded(row));
-        return true;
-      }
-      if (!selectionOnly && options.activateOnClick !== false) controller.activateRow(panel, row, event);
-      return true;
-    },
-    handleKeydown(event, panel) {
-      if (typeof options.shouldIgnoreEvent === 'function' && options.shouldIgnoreEvent(event)) return false;
-      const intent = sharedTreeKeyIntent(event, options);
-      if (!intent) return false;
-      const rows = controller.rows(panel);
-      if (!rows.length) return false;
-      const eventTargetsOwnedPanel = panel?.contains?.(event?.target) || event?.target === panel;
-      if (typeof globalShortcutTargetAllowsAppAction === 'function' && !globalShortcutTargetAllowsAppAction(event?.target) && !eventTargetsOwnedPanel) return false;
-      const lead = controller.leadRow(panel);
-      let leadIndex = lead ? rows.indexOf(lead) : -1;
-      if (intent === 'select-all' && options.allowSelectAll === true) {
-        consumeSharedTreeEvent(event);
-        const selectedIds = controller.selectedIds();
-        selectedIds.clear();
-        for (const row of rows) selectedIds.add(sharedTreeRowId(row));
-        controller.setLeadId(sharedTreeRowId(rows[rows.length - 1]));
-        if (typeof options.afterSelectAll === 'function') options.afterSelectAll(rows, event);
-        controller.applyState(panel);
-        return true;
-      }
-      if (intent === 'activate') {
-        if (!lead) return false;
-        consumeSharedTreeEvent(event);
-        controller.selectRow(panel, lead, event);
-        controller.activateRow(panel, lead, event);
-        return true;
-      }
-      if (intent === 'expand' || intent === 'collapse') {
-        if (!lead) return false;
-        consumeSharedTreeEvent(event);
-        const expanded = controller.isExpanded(lead);
-        if (intent === 'expand') {
-          if (lead.dataset.kind === 'dir' && !expanded) controller.setExpanded(panel, lead, true);
-          else {
-            const child = sharedTreeChildRow(rows, lead);
-            if (child) controller.selectRow(panel, child, event);
-          }
-          return true;
-        }
-        if (lead.dataset.kind === 'dir' && expanded) controller.setExpanded(panel, lead, false);
-        else {
-          const parent = sharedTreeParentRow(rows, lead);
-          if (parent) controller.selectRow(panel, parent, event);
-        }
-        return true;
-      }
-      if (leadIndex < 0) leadIndex = 0;
-      const lastIndex = rows.length - 1;
-      let nextIndex = leadIndex;
-      if (intent === 'move-home' || intent === 'extend-home') nextIndex = 0;
-      else if (intent === 'move-end' || intent === 'extend-end') nextIndex = lastIndex;
-      else if (intent === 'move-down' || intent === 'extend-down') nextIndex = Math.min(lastIndex, leadIndex + 1);
-      else if (intent === 'move-up' || intent === 'extend-up') nextIndex = Math.max(0, leadIndex - 1);
-      consumeSharedTreeEvent(event);
-      const nextRow = rows[nextIndex];
-      if (intent.startsWith('extend')) controller.selectRange(panel, nextRow, event);
-      else controller.selectRow(panel, nextRow, event);
-      return true;
-    },
-    syncCurrent(panel, syncOptions = {}) {
-      const currentId = controller.currentId();
-      if (currentId && typeof options.syncCurrentSelection === 'function') options.syncCurrentSelection(currentId);
-      controller.setLeadId(currentId || controller.leadId());
-      controller.applyState(panel, {scrollCurrent: syncOptions.scrollIntoView === true});
-      return Boolean(currentId);
-    },
   };
+  Object.assign(controller, sharedTreeSelectionApi(controller, state, options));
+  Object.assign(controller, sharedTreeExpansionApi(controller, options));
+  controller.handleClick = sharedTreeClickHandler(controller, options);
+  controller.handleKeydown = sharedTreeKeyboardHandler(controller, options);
   return registerSharedTreeInteractionController(controller);
 }
 
@@ -13184,7 +13313,17 @@ function sessionAgentWindowStatusPayloads(session, info = null, autoPayload = nu
       ? info.agent_windows
       : [];
   const fallback = source.length ? source : (Array.isArray(info?.agents) ? info.agents : [])
-    .map(agent => ({kind: agent?.kind || '', state: 'idle', pane_target: agent?.pane_target || '', window_label: agent?.window_label || '', last_active_ts: 0, idle_since: null}));
+    .map(agent => ({
+      kind: agent?.kind || '',
+      state: 'idle',
+      pane_target: agent?.pane_target || '',
+      window_label: agent?.window_label || '',
+      transcript: agent?.transcript || '',
+      transcript_id: agent?.transcript_id || agent?.session_id || agent?.agent_session_id || '',
+      agent_session_id: agent?.agent_session_id || agent?.session_id || '',
+      last_active_ts: 0,
+      idle_since: null,
+    }));
   return fallback
     .map(agent => {
       const kind = agentWindowKind(agent?.kind);
@@ -13210,6 +13349,7 @@ function agentWindowIdleSeconds(agent, nowSeconds = Date.now() / 1000) {
 
 const agentWindowActivityStates = new Map();
 const agentWindowStoppedTimers = new Map();
+const AGENT_WINDOW_COOLDOWN_SECONDS = 60;
 
 function agentWindowActivityTransitionKey(agentKey, options = {}) {
   const explicit = String(options.transitionKey || '').trim();
@@ -13251,7 +13391,15 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   const nowSeconds = Number.isFinite(Number(options.nowSeconds)) ? Number(options.nowSeconds) : Date.now() / 1000;
   const transitionKey = agentWindowActivityTransitionKey(kind, options);
   const previous = transitionKey ? (agentWindowActivityStates.get(transitionKey) || {}) : {};
-  if (String(state || '') === 'working') {
+  const stateKey = String(state || '').trim();
+  if (['approval', 'needs-approval', 'needs-input', 'interrupted'].includes(stateKey)) {
+    if (transitionKey) {
+      clearAgentWindowStoppedRefresh(transitionKey);
+      agentWindowActivityStates.set(transitionKey, {state: stateKey, seenWorking: previous.seenWorking === true, stoppedAt: Number(previous.stoppedAt) || 0});
+    }
+    return {state: 'attention', icon: '●', label: `${agentLabel(kind)} ${t('state.needs-input')}`};
+  }
+  if (stateKey === 'working') {
     if (transitionKey) {
       clearAgentWindowStoppedRefresh(transitionKey);
       agentWindowActivityStates.set(transitionKey, {state: 'working', seenWorking: true, stoppedAt: 0});
@@ -13266,9 +13414,9 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   if (transitionKey) agentWindowActivityStates.set(transitionKey, {state: String(state || 'idle'), seenWorking, stoppedAt});
   if (seenWorking && stoppedAt > 0) {
     const stoppedAgeSeconds = Math.max(0, nowSeconds - stoppedAt);
-    if (stoppedAgeSeconds < FILE_TREE_RECENCY_JUST_UPDATED_MAX_AGE_SECONDS) {
-      if (options.scheduleRefresh !== false) scheduleAgentWindowStoppedRefresh(transitionKey, (stoppedAt + FILE_TREE_RECENCY_JUST_UPDATED_MAX_AGE_SECONDS) * 1000);
-      return {state: 'stopped', icon: '●', label: `${agentLabel(kind)} stopped`};
+    if (stoppedAgeSeconds < AGENT_WINDOW_COOLDOWN_SECONDS) {
+      if (options.scheduleRefresh !== false) scheduleAgentWindowStoppedRefresh(transitionKey, (stoppedAt + AGENT_WINDOW_COOLDOWN_SECONDS) * 1000);
+      return {state: 'cooldown', icon: '●', label: `${agentLabel(kind)} stopped`};
     }
     return {state: 'settled', icon: '●', label: `${agentLabel(kind)} ${t('state.idle')}`};
   }
@@ -13282,7 +13430,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
 function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {}) {
   const item = agentWindowActivityIcon(agentKey, state, idleSeconds, options);
   if (!item) return '';
-  const tone = item.state === 'working' ? 'working' : item.state === 'stopped' ? 'attention' : item.state === 'settled' ? 'settled' : 'idle';
+  const tone = item.state === 'working' ? 'working' : item.state === 'cooldown' ? 'cooldown' : item.state === 'attention' ? 'attention' : item.state === 'settled' ? 'settled' : 'idle';
   const classes = statusIndicatorDotClasses(
     tone,
     'agent-window-activity-icon',
@@ -13354,14 +13502,18 @@ function buildTabberTree() {
         ? tabberAgentRecency(agentActivity)
         : Math.max(ledgerMtime, childMtime, fallbackSessionRecency);
       const active = activeIndexOverride === undefined ? record.active === true : (activeIndexOverlay !== null && String(record.index) === activeIndexOverlay);
-      const label = tmuxWindowCanonicalLabel(session, record, record.indexedNameLabel || `${record.indexText}:${record.nameLabel}`, info);
+      const label = tmuxWindowCanonicalLabel(session, record, record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.name}`, info);
       const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatus, agentKey, session);
-      const dateText = agentStatus ? sessionPopoverAgentStateText(agentStatus, nowSeconds) : tabberAgentDateText(agentActivity);
+      const agentStatusForDisplay = agentStatus ? {...agentStatus, current: active} : null;
+      const dateText = agentStatusForDisplay ? sessionPopoverAgentStateText(agentStatusForDisplay, nowSeconds) : tabberAgentDateText(agentActivity);
+      const dateHtml = agentStatusForDisplay && agentStatusIsAttentionState(agentStatusForDisplay.state)
+        ? sessionPopoverAgentStatusHtml(agentStatusForDisplay, nowSeconds, 'tabber-agent-status')
+        : '';
       if (repoEntries.length) entriesByDir.set(normalizeDirectoryPath(windowPath), repoEntries);
       return {
         name: windowName, kind: repoEntries.length ? 'dir' : 'file', mtime: windowMtime,
         sortName: label,
-        tabber: {type: 'window', session, windowIndex: record.index, label, icon: '⌁', active, current: session === activeSession && active, agentKey, activityIconHtml, dateText},
+        tabber: {type: 'window', session, windowIndex: record.index, label, pid: record.pid, icon: '⌁', active, current: session === activeSession && active, agentKey, activityIconHtml, dateText, dateHtml},
       };
     });
     entriesByDir.set(normalizeDirectoryPath(sessionPath), windowEntries);
@@ -13422,18 +13574,44 @@ function refreshTabberPanels() {
 
 function tabberWindowLabelHtml(label, iconHtml, options = {}) {
   const text = String(label || '');
-  const pidMatch = text.match(/^(.*?)(\s+\(pid=\d+\))$/);
-  const nameText = pidMatch ? pidMatch[1] : text;
-  const pidText = pidMatch ? pidMatch[2] : '';
+  const pid = Number(options.pid);
+  const nameText = text;
+  const pidText = Number.isFinite(pid) && pid > 0 ? ` (pid=${Math.floor(pid)})` : '';
   const activityIconHtml = String(options.activityIconHtml || '');
   return `<span class="tabber-window-label"><span class="tabber-window-text">${esc(nameText)}</span>${activityIconHtml}${iconHtml}${pidText ? `<span class="tabber-window-pid">${esc(pidText)}</span>` : ''}</span>`;
 }
 
-function tabberSessionLabelHtml(data, entry) {
+function tabberSessionChromeHtml(data) {
   const classes = ['tabber-session-tab', data.active === true ? 'active' : ''].filter(Boolean).join(' ');
-  const label = data.label || entry.name;
-  const description = data.description ? `<span class="tabber-session-description">${esc(data.description)}</span>` : '';
-  return `<span class="${classes}"><span class="tabber-session-name">${esc(label)}</span>${description}</span>`;
+  const session = String(data.session || '').trim();
+  const info = transcriptMeta.sessions?.[session] || {};
+  const state = sessionState(session, info);
+  const auto = autoApproveStates.get(session)?.enabled === true;
+  const agentKind = sessionAgentKind(session);
+  return `<span class="${classes}" data-tabber-session-chrome="shared">${tmuxPaneTabHtml(session, info, state, auto)}${sessionPopoverHtml(session, info, agentKind, auto, state)}</span>`;
+}
+
+function bindTabberSessionChrome(row, session) {
+  const tab = row?.querySelector?.('.tabber-session-tab');
+  if (!tab || tab.dataset.tabberChromeBound === 'true') return;
+  tab.dataset.tabberChromeBound = 'true';
+  const info = transcriptMeta.sessions?.[session] || {};
+  const state = sessionState(session, info);
+  applySessionStateClasses(tab, state);
+  bindPaneTabPopover(tab, session);
+  tab.addEventListener('pointerdown', event => {
+    const autoTarget = event.target.closest?.('[data-auto-session]');
+    if (!autoTarget) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (session === currentSessionActionTarget()) setFocusedPanelItem(session);
+  });
+  bindActionDispatcher(tab, {
+    'pane-tab-auto-approve': async (_event, autoTarget) => {
+      await toggleAutoApprove(autoTarget.dataset.autoSession);
+      if (session === currentSessionActionTarget()) focusPanel(session);
+    },
+  });
 }
 
 // Shared-pipeline row updater for Tabber nodes (same .file-tree-row DOM + updateFileTreeRowContents).
@@ -13472,6 +13650,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   row.classList.add('tabber-row');
   row.classList.toggle('tabber-active-window', data.type === 'window' && data.active === true);
   row.classList.toggle('tabber-active-session', data.type === 'session' && data.active === true);
+  row.classList.toggle('tabber-status-long', data.type === 'window' && /^(working for|ASK\?)/.test(String(data.dateText || '')));
   row.classList.toggle('current-file', current && row.dataset.kind !== 'dir');
   row.classList.toggle('current-directory', current && row.dataset.kind === 'dir');
   if (current || (data.type === 'session' && data.active === true)) row.setAttribute('aria-current', 'true');
@@ -13495,9 +13674,9 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
     ? agentIcon(data.agentKey, {label: agentLabel(data.agentKey)})
     : '';
   const nameHtml = data.type === 'session'
-    ? tabberSessionLabelHtml(renderData, entry)
-    : data.type === 'window' && windowAgentIconHtml
-      ? tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true, activityIconHtml: data.activityIconHtml})
+    ? tabberSessionChromeHtml(renderData)
+    : data.type === 'window'
+      ? tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true, activityIconHtml: data.activityIconHtml, pid: data.pid})
     : data.type === 'loading'
       ? `<span class="tabber-loading-label">${esc(data.label || 'Fetching')}</span>${movingEllipsisHtml('tabber-loading-dots')}`
     : '';
@@ -13505,7 +13684,9 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
     iconClass: 'tabber-icon',
     nameHtml,
     dateText: data.dateText || (entry.mtime ? fileTreeMtimeText(entry) : ''),
+    dateHtml: data.dateHtml || '',
   });
+  if (data.type === 'session' && data.session) bindTabberSessionChrome(row, data.session);
   applyFileTreeRowRecency(row, entry, options);
   // Tabber rows use delegation (bindTabberPanel) like the Differ; clear any stale Finder per-row handlers.
   clearFileTreeRowHandlers(row);
@@ -14156,7 +14337,7 @@ let fileExplorerTypeaheadTimer = null;
 // forward from the lead (wrapping).
 function fileExplorerTypeaheadSelect(rows, leadIndex, char, selectLead) {
   if (fileExplorerTypeaheadTimer) clearTimeout(fileExplorerTypeaheadTimer);
-  fileExplorerTypeaheadTimer = setTimeout(() => { fileExplorerTypeaheadBuffer = ''; }, 700);
+  fileExplorerTypeaheadTimer = setTimeout(() => { fileExplorerTypeaheadBuffer = ''; }, fileExplorerTypeaheadClearMs);
   const lower = char.toLowerCase();
   const cycling = fileExplorerTypeaheadBuffer === lower;
   fileExplorerTypeaheadBuffer = cycling ? lower : (fileExplorerTypeaheadBuffer + lower);
@@ -18159,7 +18340,7 @@ function hexToRgbTriple(hex) {
 function uiColorVisualPreset(value, light = false) {
   if (value === 'green') {
     return light
-      ? {accent: '#5f9800', bright: '#4f9e3a', text: '#ffffff'}
+      ? {accent: '#5f9800', bright: '#4f9e3a', text: '#071000'}
       : {accent: '#76b900', bright: '#86d600', text: '#071000'};
   }
   const preset = ACTIVE_COLOR_PRESETS[value];
@@ -18493,7 +18674,7 @@ function installRuntimeIntervals() {
     if (clientEventsConnected === true) return null;
     return refreshAutoStatuses();
   }, autoApproveDisconnectedPollMs);
-  resetRuntimeInterval('server-watch-renew', renewServerWatchRootsFromRuntime, 60000);
+  resetRuntimeInterval('server-watch-renew', renewServerWatchRootsFromRuntime, serverWatchRenewMs);
   if (fileExplorerMode === 'tabber') {
     resetRuntimeInterval('tabber-activity', () => { if (fileExplorerMode === 'tabber') fetchTabberActivity(); }, tabberActivityRefreshMs);
   }
@@ -18578,14 +18759,8 @@ function updateSessionButtonStates() {
   updateTopbarActivityStatus();
 }
 
-function bindFilePopoverActions(container) {
-  container.querySelectorAll('[data-copy-popover-path]').forEach(button => {
-    button.addEventListener('click', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      copyFilePath(button.dataset.copyPopoverPath || '', 'path');
-    });
-  });
+function bindFilePopoverActions(_container) {
+  // Popover copy buttons route through the document-level data-copy-path delegate.
 }
 
 function clearTimer(timer) {
@@ -19092,8 +19267,14 @@ function pathCopyButtonHtml(path, options = {}) {
   return `<button type="button" class="${esc(className)}" ${dataAttr}="${esc(path)}" title="${esc(title)}" aria-label="${esc(options.ariaLabel || title)}"></button>`;
 }
 
+function popoverCopyValueHtml(value, options = {}) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  return `<span class="popover-copy-value">${esc(text)}</span>${pathCopyButtonHtml(text, {className: options.className || 'popover-copy-button', title: options.title || 'Copy', ariaLabel: options.ariaLabel || options.title || 'Copy'})}`;
+}
+
 function filePopoverPathHtml(path) {
-  return `<span class="popover-copy-value">${esc(path)}</span>${pathCopyButtonHtml(path, {className: 'popover-copy-button', dataAttr: 'data-copy-popover-path'})}`;
+  return `<span class="popover-copy-value">${esc(path)}</span>${pathCopyButtonHtml(path, {className: 'popover-copy-button'})}`;
 }
 
 function sessionPopoverSubtitleHtml(session, info, fallback = '') {
@@ -19151,19 +19332,33 @@ function sessionPopoverAgentStateRank(state) {
   return {working: 0, approval: 1, 'needs-input': 2, idle: 3}[String(state || '')] ?? 9;
 }
 
+function agentStatusIsAttentionState(state) {
+  return ['approval', 'needs-approval', 'needs-input', 'interrupted'].includes(String(state || '').trim());
+}
+
+function sessionPopoverAgentRecencyText(agent, nowSeconds = Date.now() / 1000, options = {}) {
+  const lastActive = Number(agent?.idle_since || agent?.last_active_ts || 0);
+  let timestamp = Number.isFinite(lastActive) && lastActive > 0 ? lastActive : nowSeconds;
+  if (options.forceAgo === true && timestamp >= nowSeconds) timestamp = nowSeconds - 1;
+  return sessionFileRelativeTimeText(timestamp, nowSeconds);
+}
+
 function sessionPopoverAgentStateText(agent, nowSeconds = Date.now() / 1000) {
   const state = String(agent?.state || 'idle');
   if (state === 'working') {
     const elapsed = Number(agent?.working_elapsed_seconds);
     return Number.isFinite(elapsed) && elapsed >= 0 ? `working for ${compactElapsedDurationText(elapsed)}` : 'working';
   }
-  if (state === 'approval') return 'ASK? approval';
-  if (state === 'needs-input') return 'ASK? needs input';
+  if (agentStatusIsAttentionState(state)) return `ASK? ${sessionPopoverAgentRecencyText(agent, nowSeconds, {forceAgo: true})}`;
+  if (agent?.current === true) return 'current';
   const lastActive = Number(agent?.idle_since || agent?.last_active_ts || 0);
-  const ageSeconds = Number.isFinite(lastActive) && lastActive > 0 ? Math.max(0, nowSeconds - lastActive) : null;
-  if (ageSeconds !== null && ageSeconds < 60) return '<1 min active';
-  const duration = ageSeconds !== null ? compactElapsedDurationText(ageSeconds) : '';
-  return duration ? `idle ${duration}` : 'idle';
+  return Number.isFinite(lastActive) && lastActive > 0 ? sessionPopoverAgentRecencyText(agent, nowSeconds) : 'idle';
+}
+
+function sessionPopoverAgentStatusHtml(agent, nowSeconds = Date.now() / 1000, className = 'session-agent-status') {
+  const text = sessionPopoverAgentStateText(agent, nowSeconds);
+  if (agentStatusIsAttentionState(agent?.state)) return statusIndicatorLabelHtml(text, 'attention', className, 'agent-status-attention');
+  return `<span class="${esc(className)}">${esc(text)}</span>`;
 }
 
 function tmuxSessionDescriptorLabel(label) {
@@ -19178,43 +19373,81 @@ function tmuxWindowDescriptorLabel(label) {
   return t('popover.tmuxWindow', {label: text});
 }
 
+function sessionPopoverActiveWindowIndex(session, info) {
+  const pane = terminalDisplayPane(info, session) || info?.selected_pane || null;
+  return tmuxWindowIndexKey(pane?.window ?? pane?.window_index);
+}
+
 function sessionPopoverSortedAgentWindows(session, info, autoPayload) {
+  const activeWindowIndex = sessionPopoverActiveWindowIndex(session, info);
   return sessionAgentWindowStatusPayloads(session, info, autoPayload)
-    .map((agent, index) => ({...agent, _index: index, kind: String(agent?.kind || '').toLowerCase(), state: String(agent?.state || 'idle')}))
+    .map((agent, index) => ({
+      ...agent,
+      _index: index,
+      kind: String(agent?.kind || '').toLowerCase(),
+      state: String(agent?.state || 'idle'),
+      current: activeWindowIndex !== null && tmuxWindowIndexKey(agent.window_index ?? agent.window) === activeWindowIndex,
+    }))
     .filter(agent => ['claude', 'codex'].includes(agent.kind))
     .sort((left, right) => sessionPopoverAgentStateRank(left.state) - sessionPopoverAgentStateRank(right.state)
       || Number(left.window_index ?? 9999) - Number(right.window_index ?? 9999)
       || left._index - right._index);
 }
 
-function sessionPopoverAgentWindowHtml(session, info, autoPayload, agentRows = null) {
+function sessionPopoverAgentWindowRowHtml(agent, nowSeconds = Date.now() / 1000) {
+  const working = agent.state === 'working';
+  const attention = agent.state === 'approval' || agent.state === 'needs-input';
+  const dot = working ? '●' : '○';
+  const label = tmuxWindowDescriptorLabel(agentWindowCanonicalLabel(agent.window_index ?? agent.window, agent.kind, agent.window_label || agent.kind));
+  const classes = ['session-agent-row', `state-${agent.state}`];
+  if (working) classes.push('working');
+  if (attention) classes.push('attention');
+  if (agent.current === true) classes.push('current');
+  const dotTone = working ? 'working' : attention ? 'attention' : 'idle';
+  const dotClasses = statusIndicatorDotClasses(
+    dotTone,
+    'session-agent-dot',
+  );
+  const dotStyle = statusIndicatorToneStyle(dotTone);
+  return `<div class="${esc(classes.join(' '))}">
+    <span class="${esc(dotClasses)}" aria-hidden="true"${dotStyle}>${esc(dot)}</span>
+    <span class="session-agent-kind">${esc(label)}</span>
+    <span class="session-agent-sep">—</span>
+    ${sessionPopoverAgentStatusHtml(agent, nowSeconds)}
+  </div>`;
+}
+
+function sessionPopoverWindowMetadataItems(info, agentRows) {
+  const agents = Array.isArray(agentRows) ? agentRows : [];
+  if (!agents.length) return [];
+  const windowRows = sessionWindowMetadataRows(info);
+  return agents.map(agent => {
+    const meta = sessionWindowMetadataForAgent(agent, windowRows);
+    const html = windowMetadataRowsHtml(meta);
+    return html ? {agent, meta, html} : null;
+  }).filter(Boolean);
+}
+
+function sessionPopoverAgentWindowHtml(session, info, autoPayload, agentRows = null, metadataItems = null) {
   const agents = Array.isArray(agentRows) ? agentRows : sessionPopoverSortedAgentWindows(session, info, autoPayload);
   if (!agents.length) {
     return `<div class="session-agent-list empty"><div class="session-agent-empty">no AI agents in this tab</div></div>`;
   }
   const nowSeconds = Date.now() / 1000;
+  const items = Array.isArray(metadataItems) ? metadataItems : sessionPopoverWindowMetadataItems(info, agents);
+  const metadataByWindow = new Map(items.map(item => [tmuxWindowIndexKey(item.agent.window_index ?? item.agent.window), item]));
+  const sharedMetadata = items.length > 1 && items.length === agents.length && new Set(items.map(item => sessionWindowMetadataSignature(item.meta))).size === 1;
   const rows = agents.map(agent => {
-    const working = agent.state === 'working';
-    const attention = agent.state === 'approval' || agent.state === 'needs-input';
-    const dot = working ? '●' : '○';
-    const label = tmuxWindowDescriptorLabel(agentWindowCanonicalLabel(agent.window_index ?? agent.window, agent.kind, agent.window_label || agent.kind));
-    const classes = ['session-agent-row', `state-${agent.state}`];
-    if (working) classes.push('working');
-    if (attention) classes.push('attention');
-    const dotTone = working ? 'working' : attention ? 'attention' : 'idle';
-    const dotClasses = statusIndicatorDotClasses(
-      dotTone,
-      'session-agent-dot',
-    );
-    const dotStyle = statusIndicatorToneStyle(dotTone);
-    return `<div class="${esc(classes.join(' '))}">
-      <span class="${esc(dotClasses)}" aria-hidden="true"${dotStyle}>${esc(dot)}</span>
-      <span class="session-agent-kind">${esc(label)}</span>
-      <span class="session-agent-sep">—</span>
-      <span class="session-agent-status">${esc(sessionPopoverAgentStateText(agent, nowSeconds))}</span>
-    </div>`;
+    const row = sessionPopoverAgentWindowRowHtml(agent, nowSeconds);
+    const item = metadataByWindow.get(tmuxWindowIndexKey(agent.window_index ?? agent.window));
+    const transcriptHtml = agentTranscriptRowsHtml(agent);
+    if ((!item || sharedMetadata) && !transcriptHtml) return row;
+    const metadataHtml = item && !sharedMetadata ? item.html : '';
+    return `<div class="session-agent-window-block">${row}<div class="session-window-metadata">${metadataHtml}${transcriptHtml}</div></div>`;
   }).join('');
-  return `<div class="session-agent-list">${rows}</div>`;
+  const sharedRows = sharedMetadata ? `<div class="session-window-metadata-list shared">${items[0].html}</div>` : '';
+  const metadataClass = items.length ? ' has-window-metadata' : '';
+  return `<div class="session-agent-list${metadataClass}">${rows}${sharedRows}</div>`;
 }
 
 function sessionWindowMetadataRows(info) {
@@ -19273,28 +19506,22 @@ function windowMetadataRowsHtml(row) {
   return rows.join('');
 }
 
-function sessionPopoverWindowMetadataHtml(session, info, agentRows) {
-  const agents = Array.isArray(agentRows) ? agentRows : [];
-  if (!agents.length) return '';
-  const windowRows = sessionWindowMetadataRows(info);
-  const mapped = agents.map(agent => ({agent, meta: sessionWindowMetadataForAgent(agent, windowRows)})).filter(item => item.meta);
-  if (!mapped.length) return '';
-  const signatures = new Set(mapped.map(item => sessionWindowMetadataSignature(item.meta)));
-  if (signatures.size === 1) {
-    const labels = mapped.map(item => agentWindowCanonicalLabel(item.agent.window_index ?? item.agent.window, item.agent.kind, item.agent.window_label || item.agent.kind)).join(', ');
-    return `<div class="session-window-metadata-list shared">
-      <div class="session-window-metadata-title">${esc(`AI windows ${labels} share this path`)}</div>
-      ${windowMetadataRowsHtml(mapped[0].meta)}
-    </div>`;
-  }
-  const blocks = mapped.map(({agent, meta}) => {
-    const label = tmuxWindowDescriptorLabel(agentWindowCanonicalLabel(agent.window_index ?? agent.window, agent.kind, agent.window_label || agent.kind));
-    return `<div class="session-window-metadata">
-      <div class="session-window-metadata-title">${esc(label)}</div>
-      ${windowMetadataRowsHtml(meta)}
-    </div>`;
-  }).join('');
-  return blocks ? `<div class="session-window-metadata-list">${blocks}</div>` : '';
+function agentTranscriptId(agent) {
+  const direct = String(agent?.transcript_id || agent?.agent_session_id || agent?.session_id || '').trim();
+  if (direct) return direct;
+  const transcript = String(agent?.transcript || '').trim();
+  if (!transcript) return '';
+  return basenameOf(transcript).replace(/\.[^.]+$/, '');
+}
+
+function agentTranscriptRowsHtml(agent) {
+  const transcript = String(agent?.transcript || '').trim();
+  if (!transcript) return '';
+  const transcriptId = agentTranscriptId(agent);
+  const rows = [];
+  if (transcriptId) rows.push(popoverRow('Transcript ID', popoverCopyValueHtml(transcriptId, {title: 'Copy transcript ID'})));
+  rows.push(popoverRow('Transcript', popoverCopyValueHtml(transcript, {title: 'Copy transcript path'})));
+  return rows.join('');
 }
 
 function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessionState(session, info)) {
@@ -19315,9 +19542,9 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const agentValue = agentKind ? `${agentName(agentKind)}${autoText ? ` · ${autoText}` : ''}` : (autoText || t('agent.notDetected'));
   const displayPath = panelFullPath(session, info) || pane?.current_path || t('common.notAvailable');
   const agentRows = sessionPopoverSortedAgentWindows(session, info, autoPayload);
-  const agentWindowsHtml = sessionPopoverAgentWindowHtml(session, info, autoPayload, agentRows);
-  const windowMetadataHtml = sessionPopoverWindowMetadataHtml(session, info, agentRows);
-  const perWindowMetadata = Boolean(windowMetadataHtml);
+  const windowMetadataItems = sessionPopoverWindowMetadataItems(info, agentRows);
+  const agentWindowsHtml = sessionPopoverAgentWindowHtml(session, info, autoPayload, agentRows, windowMetadataItems);
+  const perWindowMetadata = Boolean(windowMetadataItems.length);
   if (!perWindowMetadata) rows.push(popoverPairRow(t('popover.state'), stateValue, t('popover.agent'), agentValue));
   const activityText = popoverActivityText(session, git);
   if (activityText) rows.push(popoverRow(yoagentTabLabel(), esc(activityText)));
@@ -19351,7 +19578,6 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
       </div>
     </div>
     ${agentWindowsHtml}
-    ${windowMetadataHtml}
     ${rows.join('')}
     ${otherBranchesHtml(session, info)}
   </div>`;
@@ -25923,8 +26149,8 @@ function tmuxWindowRecords(panes) {
     numberLabel: record.indexText,
   })).map(record => ({
     ...record,
-    indexedButtonLabel: `${record.indexText}:${record.buttonNameLabel}`,
-    indexedNameLabel: `${record.indexText}:${record.nameLabel}`,
+    indexedButtonLabel: `${record.indexText}:${record.name}`,
+    indexedNameLabel: `${record.indexText}:${tmuxWindowDisplayLabel(record.name, record.pid)}`,
   }));
 }
 
@@ -26757,9 +26983,18 @@ function yoagentLastLines(lines, count = 1) {
 function yoagentThinkingPreviewText(text) {
   const normalized = String(text || '').replace(/\\n/g, '\n').replace(/\s+/g, ' ').trim();
   if (!normalized) return '';
-  const words = normalized.split(/\s+/).filter(Boolean);
+  const words = yoagentThinkingWords(normalized);
   if (words.length <= YOAGENT_THINKING_PREVIEW_WORDS) return normalized;
   return `… ${words.slice(-YOAGENT_THINKING_PREVIEW_WORDS).join(' ')}`;
+}
+
+function yoagentThinkingWords(text) {
+  const normalized = String(text || '').replace(/\\n/g, '\n').replace(/\s+/g, ' ').trim();
+  return normalized ? normalized.split(/\s+/).filter(Boolean) : [];
+}
+
+function yoagentThinkingWordCount(text) {
+  return yoagentThinkingWords(text).length;
 }
 
 function yoagentToolLineHtml(line) {
@@ -26780,15 +27015,28 @@ function yoagentToolLinesHtml(lines) {
 }
 
 function yoagentStreamItems(message) {
-  return (Array.isArray(message?.streamItems) ? message.streamItems : [])
+  const items = (Array.isArray(message?.streamItems) ? message.streamItems : [])
     .map(item => {
       const text = String(item?.text || '');
+      const sourceIndex = Number(item?.sourceIndex);
       return {
         kind: String(item?.kind || '').trim(),
         text,
+        sourceIndex: Number.isFinite(sourceIndex) ? sourceIndex : null,
       };
     })
-    .filter(item => ['assistant', 'thinking', 'tool'].includes(item.kind) && item.text.trim());
+    .filter(item => ['assistant', 'thinking', 'tool'].includes(item.kind) && item.text.trim())
+    .map((item, index) => ({...item, sourceIndex: item.sourceIndex == null ? index : item.sourceIndex}));
+  const coalesced = [];
+  for (const item of items) {
+    const previous = coalesced[coalesced.length - 1];
+    if (previous && previous.kind === item.kind && (item.kind === 'thinking' || item.kind === 'tool')) {
+      previous.text = `${previous.text.replace(/\s+$/, '')}\n${item.text.replace(/^\s+/, '')}`;
+      continue;
+    }
+    coalesced.push({...item});
+  }
+  return coalesced;
 }
 
 function yoagentPreviewLine(text) {
@@ -26800,7 +27048,7 @@ function yoagentStreamAuxiliaryItemHtml(item, key, index) {
   const text = String(item?.text || '');
   if (!text || (kind !== 'thinking' && kind !== 'tool')) return '';
   const tool = kind === 'tool';
-  const label = tool ? t('yoagent.toolCall.label') : 'thinking';
+  const label = tool ? t('yoagent.toolCall.label') : tPlural('yoagent.thinking.words', yoagentThinkingWordCount(text));
   const preview = tool ? yoagentPreviewLine(text) : yoagentThinkingPreviewText(text);
   const classes = tool
     ? 'yoagent-message-details yoagent-toolcall-details has-auxiliary yoagent-stream-detail'
@@ -26808,8 +27056,9 @@ function yoagentStreamAuxiliaryItemHtml(item, key, index) {
   const streamClasses = tool
     ? 'yoagent-auxiliary-stream yoagent-toolcall-stream'
     : 'yoagent-auxiliary-stream';
-  const body = tool ? yoagentToolLinesHtml([text]) : esc(text);
-  return `<details class="${classes}" data-yoagent-message-details-key="${esc(`${key}|stream|${index}`)}">
+  const body = tool ? yoagentToolLinesHtml(String(text).replace(/\\n/g, '\n').split(/\r?\n/)) : esc(text);
+  const streamIndex = Number.isFinite(Number(item?.sourceIndex)) ? Number(item.sourceIndex) : index;
+  return `<details class="${classes}" data-yoagent-message-details-key="${esc(`${key}|stream|${streamIndex}`)}">
     <summary><span>${esc(`${label}…`)}</span>${preview ? `<span class="yoagent-details-preview">${esc(preview)}</span>` : ''}</summary>
     <pre class="${streamClasses}">${body}</pre>
   </details>`;
@@ -26852,9 +27101,12 @@ function yoagentMessageDetailsHtml(message, key = '') {
   const detailsBlock = text
     ? `<pre class="yoagent-safe-details">${esc(text)}</pre>`
     : '';
+  const detailsLabel = hasAuxiliary
+    ? tPlural('yoagent.thinking.words', yoagentThinkingWordCount(auxiliaryText || auxiliaryPreview))
+    : t('popover.details');
   const thinkingDetails = (text || hasAuxiliary)
     ? `<details class="yoagent-message-details${hasAuxiliary ? ' has-auxiliary' : ''}" data-yoagent-message-details-key="${esc(key)}">
-    <summary><span>${esc(`${t('popover.details')}…`)}</span>${preview}</summary>
+    <summary><span>${esc(`${detailsLabel}…`)}</span>${preview}</summary>
     ${auxiliaryBlock}${truncationNote}${detailsBlock}
   </details>`
     : '';
@@ -27522,6 +27774,29 @@ async function loadYoagentJobs(options = {}) {
   }
 }
 
+let yoagentAgentAvailabilityRefreshPromise = null;
+
+async function refreshYoagentAgentAvailability(options = {}) {
+  if (yoagentAgentAvailabilityRefreshPromise) return yoagentAgentAvailabilityRefreshPromise;
+  yoagentAgentAvailabilityRefreshPromise = (async () => {
+    try {
+      const params = new URLSearchParams();
+      if (options.force === true) params.set('force', '1');
+      const suffix = params.toString();
+      const payload = await apiFetchJson(`/api/agent-auth${suffix ? `?${suffix}` : ''}`, {cache: 'no-store'});
+      applyAgentAvailabilityPayload(payload);
+      if (options.render !== false) renderYoagentPanel({preserveDraft: true, scrollBottom: false});
+      return true;
+    } catch (error) {
+      if (!options.silent) console.warn('YO!agent backend availability refresh failed', error);
+      return false;
+    } finally {
+      yoagentAgentAvailabilityRefreshPromise = null;
+    }
+  })();
+  return yoagentAgentAvailabilityRefreshPromise;
+}
+
 function yoagentBackendLabel(value) {
   const key = String(value || '').toLowerCase();
   if (key === 'auto') return t('yoagent.backend.auto');
@@ -27537,19 +27812,24 @@ function yoagentBackendKey() {
 
 const YOAGENT_CHAT_BACKENDS = ['codex', 'claude'];
 
+function yoagentBackendInstalled(agent) {
+  return YOAGENT_CHAT_BACKENDS.includes(agent) && availableAgents.has(agent);
+}
+
 function yoagentBackendUsable(agent) {
-  return YOAGENT_CHAT_BACKENDS.includes(agent) && availableAgents.has(agent) && agentLoggedIn(agent);
+  return yoagentBackendInstalled(agent) && agentLoggedIn(agent);
 }
 
 function yoagentAvailableBackendOptions() {
-  return YOAGENT_CHAT_BACKENDS.filter(yoagentBackendUsable);
+  const current = yoagentBackendKey();
+  return YOAGENT_CHAT_BACKENDS.filter(agent => yoagentBackendInstalled(agent) && (agentLoggedIn(agent) || agent === current));
 }
 
 // #41: mirror the server's auto-resolution (codex -> claude -> deterministic) using the cached agent
 // login status, so the chat input enables/disables to match what the backend will actually run.
 function yoagentResolvedBackend() {
   const key = yoagentBackendKey();
-  if (YOAGENT_CHAT_BACKENDS.includes(key)) return yoagentBackendUsable(key) ? key : 'deterministic';
+  if (YOAGENT_CHAT_BACKENDS.includes(key)) return yoagentBackendInstalled(key) ? key : 'deterministic';
   for (const agent of YOAGENT_CHAT_BACKENDS) {
     if (yoagentBackendUsable(agent)) return agent;
   }
@@ -27871,7 +28151,14 @@ async function clearYoagentPendingWait(waitId) {
 
 async function startYoagentChatRequest(rawText, options = {}) {
   const text = String(rawText || '').trim();
-  if (!text || yoagentBusy || yoagentActiveChatRequest || !yoagentChatEnabled()) return;
+  if (!text || yoagentBusy || yoagentActiveChatRequest) return;
+  if (YOAGENT_CHAT_BACKENDS.includes(yoagentBackendKey())) {
+    await refreshYoagentAgentAvailability({force: true, silent: true, render: false});
+  }
+  if (!yoagentChatEnabled()) {
+    renderYoagentPanel({preserveDraft: true, scrollBottom: false});
+    return;
+  }
   resetYoagentComposerHistory();
   installYoagentFocusTracker();
   const requestId = yoagentNewChatRequestId();
@@ -27929,7 +28216,7 @@ async function startYoagentChatRequest(rawText, options = {}) {
 
 async function sendYoagentChatMessage(rawText) {
   const text = String(rawText || '').trim();
-  if (!text || !yoagentChatEnabled()) return;
+  if (!text) return;
   if (yoagentBusy || yoagentActiveChatRequest || yoagentPendingWaits.length) {
     enqueueYoagentChatMessage(text);
     return;
@@ -30194,13 +30481,14 @@ function compactRelativeFileTimeText(unit, countText) {
   return t(`relative.compact.${unit}.${category}`, {count: countText});
 }
 
-function sessionFileRelativeTimeText(mtime, nowSeconds = Date.now() / 1000) {
+function sessionFileRelativeTimeText(mtime, nowSeconds = fileTreeRecencyNowMs() / 1000) {
   const value = Number(mtime || 0);
   if (!value) return '';
   const now = Number(nowSeconds);
   if (!Number.isFinite(now)) return '';
   const age = now - value;
   if (age <= 0) return t('relative.compact.now');
+  if (age < FILE_TREE_RECENCY_JUST_UPDATED_MAX_AGE_SECONDS) return t('relative.compact.lessThan15Sec');
   if (age < 60) return t('relative.compact.lessThanMinute');
   if (age < 3600) {
     return compactRelativeFileTimeText('minute', String(Math.max(1, Math.round(age / 60))));
@@ -36406,6 +36694,229 @@ function scheduleShareFileEditorScrollRestore(item, path) {
   scheduleShareScrollRestoreByKey(`editor:${key}:preview`);
 }
 
+function editorPanelParts(panel) {
+  const parts = {
+    codeMirrorPane: panel.querySelector('.file-editor-codemirror-panel'),
+    rawPane: panel.querySelector('.file-editor-raw-panel'),
+    previewPane: panel.querySelector('.file-editor-preview-pane-panel'),
+    imagePane: panel.querySelector('.file-editor-image-panel'),
+    modeControl: panel.querySelector('.file-editor-mode-control-panel'),
+    previewFontPanel: panel.querySelector('.file-editor-preview-font-panel'),
+    gutterButton: panel.querySelector('.file-editor-gutter-panel'),
+    wrapButton: panel.querySelector('.file-editor-wrap-panel'),
+    findButton: panel.querySelector('.file-editor-find-panel'),
+    diffButton: panel.querySelector('.file-editor-diff-panel'),
+    diffRefPanel: panel.querySelector('.file-editor-diff-ref-panel'),
+    diffExpandButton: panel.querySelector('.file-editor-diff-expand-panel'),
+    popoutPreviewButton: panel.querySelector('.file-editor-popout-preview-panel'),
+    reloadButton: panel.querySelector('.file-editor-reload-panel'),
+    themeButton: panel.querySelector('.file-editor-theme-panel'),
+    blameButton: panel.querySelector('.file-editor-blame-panel'),
+    saveButton: panel.querySelector('.file-editor-save-panel'),
+    content: panel.querySelector('.file-editor-content'),
+  };
+  parts.textControls = [
+    parts.modeControl,
+    parts.previewFontPanel,
+    parts.gutterButton,
+    parts.wrapButton,
+    parts.findButton,
+    parts.blameButton,
+    parts.diffButton,
+    parts.diffExpandButton,
+    parts.diffRefPanel,
+    parts.popoutPreviewButton,
+    parts.reloadButton,
+  ];
+  return parts;
+}
+
+function hideTextEditorPanes(parts) {
+  hideFileEditorContent(parts.rawPane, parts.previewPane, parts.imagePane, parts.codeMirrorPane);
+}
+
+function destroyEditorAndShowStatus(panel, parts, message, level = '') {
+  setElementsHidden(parts.textControls, true);
+  updateFileEditorToolbarSeparators(panel);
+  panel.classList.remove('syntax-highlighted');
+  destroyCodeMirrorPanel(panel);
+  hideTextEditorPanes(parts);
+  setFileEditorPanelStatus(panel, message, level);
+}
+
+function renderClosedEditor(panel, parts) {
+  destroyEditorAndShowStatus(panel, parts, 'file closed', '');
+}
+
+function renderLoadingEditor(panel, item, path, parts) {
+  destroyEditorAndShowStatus(panel, parts, t('common.loading'), '');
+  loadFileEditorState(path, panel, item);
+}
+
+function renderErrorEditor(panel, path, state, parts) {
+  setElementsHidden(parts.textControls, true);
+  updateFileEditorToolbarSeparators(panel);
+  panel.classList.remove('syntax-highlighted');
+  destroyCodeMirrorPanel(panel);
+  if (parts.rawPane) parts.rawPane.hidden = true;
+  if (parts.codeMirrorPane) parts.codeMirrorPane.hidden = true;
+  if (parts.previewPane) parts.previewPane.hidden = true;
+  if (parts.imagePane) {
+    parts.imagePane.hidden = false;
+    const limit = formatFileSize(state.maxBytes || MAX_FILE_PREVIEW_BYTES);
+    const size = formatFileSize(state.size);
+    const title = state.kind === 'too-large' ? t('editor.fileTooLargeTitle') : t('editor.fileOpenFailedTitle');
+    const detail = state.kind === 'too-large'
+      ? (state.error || t('editor.fileTooLargeDetail', {size: size || '', limit}))
+      : String(state.error || t('editor.fileLoadFailed'));
+    parts.imagePane.replaceChildren(fileEditorEmptyState(title, detail));
+  }
+  const status = state.kind === 'too-large'
+    ? t('editor.fileTooLargeStatus', {limit: formatFileSize(state.maxBytes || MAX_FILE_PREVIEW_BYTES)})
+    : state.error || t('editor.fileLoadFailed');
+  setFileEditorPanelStatus(panel, status, 'error');
+}
+
+function syncEditorDiffRefPanel(path, state, item, parts, mode) {
+  const diffRefPanel = parts.diffRefPanel;
+  if (!diffRefPanel) return;
+  diffRefPanel.hidden = mode !== 'diff' || state.kind !== 'text';
+  // C6: scope the editor's own FROM/TO controls to THIS file's repo, so they match the repo header and
+  // drive the file's diff. Re-render only when the repo actually changed and the picker isn't focused.
+  const diffRepo = fileRepoForPath(path);
+  const historySignature = fileDiffRefHistorySignature(path);
+  if (!diffRefPanel.hidden
+    && (diffRefPanel.dataset.diffRefRepoRendered !== diffRepo
+      || diffRefPanel.dataset.diffRefPathRendered !== path
+      || diffRefPanel.dataset.diffRefHistoryRendered !== historySignature)
+    && !diffRefPanel.contains(document.activeElement)) {
+    diffRefPanel.innerHTML = diffRefControlsHtml({compact: true, repo: diffRepo, path});
+    diffRefPanel.dataset.diffRefRepoRendered = diffRepo;
+    diffRefPanel.dataset.diffRefPathRendered = path;
+    diffRefPanel.dataset.diffRefHistoryRendered = historySignature;
+  }
+  syncDiffRefControlValues(diffRefPanel);
+}
+
+function syncTextEditorControls(panel, path, state, item, parts, mode) {
+  const diffExpandButton = parts.diffExpandButton;
+  const popoutPreviewButton = parts.popoutPreviewButton;
+  const previewable = editorPreviewModeAvailable(path, state);
+  updateEditorThemeButton(parts.themeButton, {includeVanilla: true});
+  updateEditorModeControl(parts.modeControl, path, state, item);
+  if (parts.previewFontPanel) {
+    parts.previewFontPanel.hidden = state.kind !== 'text' || !previewable || (mode !== 'preview' && mode !== 'split');
+    updateEditorPreviewFontControls(parts.previewFontPanel);
+  }
+  if (parts.gutterButton) {
+    parts.gutterButton.hidden = state.kind !== 'text' || mode === 'preview';
+    updateEditorGutterButton(parts.gutterButton);
+  }
+  if (parts.wrapButton) {
+    parts.wrapButton.hidden = state.kind !== 'text' || mode === 'preview';
+    updateEditorWrapButton(parts.wrapButton);
+  }
+  updateEditorFindButton(parts.findButton, state, panel);
+  if (parts.findButton && mode === 'preview') parts.findButton.hidden = true;
+  // Git-backed controls share file-history gating, but Diff also depends on the loaded diff state while
+  // Blame stays available in normal edit mode for clean files with useful history.
+  updateFileEditorBlameButton(parts.blameButton, path, state, item);
+  updateFileEditorDiffButton(parts.diffButton, path, state, item);
+  updateFileEditorDiffExpandButton(diffExpandButton, path, state, item);
+  if (popoutPreviewButton) popoutPreviewButton.hidden = !previewable;
+  syncEditorDiffRefPanel(path, state, item, parts, mode);
+  updateFileEditorToolbarSeparators(panel);
+  return {previewable};
+}
+
+function renderImageEditor(panel, path, state, parts) {
+  updateImageViewerThemeButton(parts.themeButton);
+  setEditorContentMode(parts.content, 'preview');
+  destroyCodeMirrorPanel(panel);
+  if (parts.rawPane) parts.rawPane.hidden = true;
+  if (parts.codeMirrorPane) parts.codeMirrorPane.hidden = true;
+  if (parts.previewPane) parts.previewPane.hidden = true;
+  panel.classList.remove('syntax-highlighted');
+  if (parts.imagePane) {
+    parts.imagePane.hidden = false;
+    renderFileEditorImagePane(parts.imagePane, path, state, (message, level) => setFileEditorPanelStatus(panel, message, level));
+  }
+}
+
+function renderMediaEditor(panel, path, state, parts) {
+  updateImageViewerThemeButton(parts.themeButton);
+  setEditorContentMode(parts.content, 'preview');
+  destroyCodeMirrorPanel(panel);
+  if (parts.rawPane) parts.rawPane.hidden = true;
+  if (parts.codeMirrorPane) parts.codeMirrorPane.hidden = true;
+  if (parts.imagePane) {
+    disconnectFileEditorImageObserver(parts.imagePane);
+    parts.imagePane.hidden = true;
+    parts.imagePane.replaceChildren();
+  }
+  panel.classList.remove('syntax-highlighted');
+  if (parts.previewPane) {
+    parts.previewPane.hidden = false;
+    renderEditorPreviewPane(parts.previewPane, path, '', {context: 'preview'});
+  }
+  const status = openFileStatus(state);
+  setFileEditorPanelStatus(panel, status.message, status.level);
+}
+
+function resetImagePreviewPane(parts) {
+  if (!parts.imagePane) return;
+  disconnectFileEditorImageObserver(parts.imagePane);
+  parts.imagePane.hidden = true;
+  parts.imagePane.replaceChildren();
+}
+
+function renderTextPreviewMode(panel, item, path, state, parts) {
+  destroyCodeMirrorPanel(panel);
+  if (parts.rawPane) parts.rawPane.hidden = true;
+  if (parts.codeMirrorPane) parts.codeMirrorPane.hidden = true;
+  panel.classList.remove('syntax-highlighted');
+  if (parts.previewPane) {
+    parts.previewPane.hidden = false;
+    renderEditorPreviewPane(parts.previewPane, path, state.content, {context: 'preview'});
+  }
+  scheduleShareFileEditorScrollRestore(item, path);
+}
+
+function renderTextCodeMode(panel, item, path, state, parts, mode) {
+  const rawPane = parts.rawPane;
+  const previewPane = parts.previewPane;
+  if (rawPane) rawPane.hidden = true;
+  if (previewPane) {
+    previewPane.hidden = mode !== 'split';
+    if (mode === 'split') renderEditorPreviewPane(previewPane, path, state.content, {context: 'split'});
+  }
+  panel.classList.remove('syntax-highlighted');
+  ensureCodeMirrorPanel(panel, item, path, state).then(loaded => {
+    if (loaded === false) renderFileEditorRawPane(rawPane, path, state.content);
+    else scheduleShareFileEditorScrollRestore(item, path);
+  }).catch(error => {
+    if (panel.dataset.filePath !== path) return;
+    console.warn('CodeMirror editor unavailable; showing read-only raw text', error);
+    destroyCodeMirrorPanel(panel);
+    if (parts.codeMirrorPane) parts.codeMirrorPane.hidden = true;
+    setFileEditorPanelStatus(panel, t('editor.codemirrorUnavailable', {error}), 'error');
+    renderFileEditorRawPane(rawPane, path, state.content);
+  });
+}
+
+function renderTextEditorMode(panel, item, path, state, parts, mode) {
+  resetImagePreviewPane(parts);
+  setEditorContentMode(parts.content, mode);
+  panel.classList.toggle('editor-wrap', fileEditorWrapEnabled);
+  panel.classList.toggle('editor-line-numbers', fileEditorLineNumbersEnabled);
+  if (mode === 'preview') renderTextPreviewMode(panel, item, path, state, parts);
+  else renderTextCodeMode(panel, item, path, state, parts, mode);
+  const status = openFileStatus(state);
+  setFileEditorPanelStatus(panel, status.message, status.level);
+  focusFileEditorPanelIfReady(panel, item);
+  scheduleShareFileEditorScrollRestore(item, path);
+}
+
 function renderFileEditorPanel(panel, item, options = {}) {
   const path = fileItemPath(item);
   if (renderFileEditorPanelShouldCaptureViewState(options)) capturePaneViewState(item, panel);
@@ -36421,66 +36932,18 @@ function renderFileEditorPanel(panel, item, options = {}) {
   }
   const state = openFiles.get(path);
   updateFileEditorPanelChrome(panel, path);
-  const codeMirrorPane = panel.querySelector('.file-editor-codemirror-panel');
-  const rawPane = panel.querySelector('.file-editor-raw-panel');
-  const previewPane = panel.querySelector('.file-editor-preview-pane-panel');
-  const imagePane = panel.querySelector('.file-editor-image-panel');
-  const modeControl = panel.querySelector('.file-editor-mode-control-panel');
-  const previewFontPanel = panel.querySelector('.file-editor-preview-font-panel');
-  const gutterButton = panel.querySelector('.file-editor-gutter-panel');
-  const wrapButton = panel.querySelector('.file-editor-wrap-panel');
-  const findButton = panel.querySelector('.file-editor-find-panel');
-  const diffButton = panel.querySelector('.file-editor-diff-panel');
-  const diffRefPanel = panel.querySelector('.file-editor-diff-ref-panel');
-  const diffExpandButton = panel.querySelector('.file-editor-diff-expand-panel');
-  const popoutPreviewButton = panel.querySelector('.file-editor-popout-preview-panel');
-  const reloadButton = panel.querySelector('.file-editor-reload-panel');
-  const themeButton = panel.querySelector('.file-editor-theme-panel');
-  const blameButton = panel.querySelector('.file-editor-blame-panel');
-  const saveButton = panel.querySelector('.file-editor-save-panel');
-  const content = panel.querySelector('.file-editor-content');
-  const textControls = [modeControl, previewFontPanel, gutterButton, wrapButton, findButton, blameButton, diffButton, diffExpandButton, diffRefPanel, popoutPreviewButton, reloadButton];
-  let mode = editorViewModeFor(path, item);
-  updateEditorThemeButton(themeButton, {includeVanilla: true});
+  const parts = editorPanelParts(panel);
+  updateEditorThemeButton(parts.themeButton, {includeVanilla: true});
   if (!state) {
-    setElementsHidden(textControls, true);
-    updateFileEditorToolbarSeparators(panel);
-    panel.classList.remove('syntax-highlighted');
-    destroyCodeMirrorPanel(panel);
-    hideFileEditorContent(rawPane, previewPane, imagePane, codeMirrorPane);
-    setFileEditorPanelStatus(panel, 'file closed', '');
+    renderClosedEditor(panel, parts);
     return;
   }
   if (state.loading) {
-    setElementsHidden(textControls, true);
-    updateFileEditorToolbarSeparators(panel);
-    panel.classList.remove('syntax-highlighted');
-    destroyCodeMirrorPanel(panel);
-    hideFileEditorContent(rawPane, previewPane, imagePane, codeMirrorPane);
-    setFileEditorPanelStatus(panel, t('common.loading'), '');
-    loadFileEditorState(path, panel, item);
+    renderLoadingEditor(panel, item, path, parts);
     return;
   }
   if (state.kind === 'error' || state.kind === 'too-large') {
-    setElementsHidden(textControls, true);
-    updateFileEditorToolbarSeparators(panel);
-    panel.classList.remove('syntax-highlighted');
-    destroyCodeMirrorPanel(panel);
-    if (rawPane) rawPane.hidden = true;
-    if (codeMirrorPane) codeMirrorPane.hidden = true;
-    if (previewPane) previewPane.hidden = true;
-    if (imagePane) {
-      imagePane.hidden = false;
-      const limit = formatFileSize(state.maxBytes || MAX_FILE_PREVIEW_BYTES);
-      const size = formatFileSize(state.size);
-      const title = state.kind === 'too-large' ? t('editor.fileTooLargeTitle') : t('editor.fileOpenFailedTitle');
-      const detail = state.kind === 'too-large'
-        ? (state.error || t('editor.fileTooLargeDetail', {size: size || '', limit}))
-        : String(state.error || t('editor.fileLoadFailed'));
-      imagePane.replaceChildren(fileEditorEmptyState(title, detail));
-    }
-    const status = state.kind === 'too-large' ? t('editor.fileTooLargeStatus', {limit: formatFileSize(state.maxBytes || MAX_FILE_PREVIEW_BYTES)}) : state.error || t('editor.fileLoadFailed');
-    setFileEditorPanelStatus(panel, status, 'error');
+    renderErrorEditor(panel, path, state, parts);
     return;
   }
   // do NOT auto-load the diff when a file opens/renders. The diff loads only on explicit
@@ -36489,126 +36952,17 @@ function renderFileEditorPanel(panel, item, options = {}) {
   if (diffModeShouldFallBackToEdit(path, state, item)) {
     setFileEditorViewMode(path, 'edit', item);
   }
-  mode = editorViewModeFor(path, item);
-  const previewable = editorPreviewModeAvailable(path, state);
-  updateEditorThemeButton(themeButton, {includeVanilla: true});
-  updateEditorModeControl(modeControl, path, state, item);
-  if (previewFontPanel) {
-    previewFontPanel.hidden = state.kind !== 'text' || !editorPreviewModeAvailable(path, state) || (mode !== 'preview' && mode !== 'split');
-    updateEditorPreviewFontControls(previewFontPanel);
-  }
-  if (gutterButton) {
-    gutterButton.hidden = state.kind !== 'text' || mode === 'preview';
-    updateEditorGutterButton(gutterButton);
-  }
-  if (wrapButton) {
-    wrapButton.hidden = state.kind !== 'text' || mode === 'preview';
-    updateEditorWrapButton(wrapButton);
-  }
-  updateEditorFindButton(findButton, state, panel);
-  if (findButton && mode === 'preview') findButton.hidden = true;
-  // Git-backed controls share file-history gating, but Diff also depends on the loaded diff state while
-  // Blame stays available in normal edit mode for clean files with useful history.
-  updateFileEditorBlameButton(blameButton, path, state, item);
-  updateFileEditorDiffButton(diffButton, path, state, item);
-  updateFileEditorDiffExpandButton(diffExpandButton, path, state, item);
-  if (popoutPreviewButton) {
-    popoutPreviewButton.hidden = !previewable;
-  }
-  if (diffRefPanel) {
-    diffRefPanel.hidden = mode !== 'diff' || state.kind !== 'text';
-    // C6: scope the editor's own FROM/TO controls to THIS file's repo, so they match the repo header and
-    // drive the file's diff. Re-render only when the repo actually changed and the picker isn't focused.
-    const diffRepo = fileRepoForPath(path);
-    const historySignature = fileDiffRefHistorySignature(path);
-    if (!diffRefPanel.hidden
-      && (diffRefPanel.dataset.diffRefRepoRendered !== diffRepo
-        || diffRefPanel.dataset.diffRefPathRendered !== path
-        || diffRefPanel.dataset.diffRefHistoryRendered !== historySignature)
-      && !diffRefPanel.contains(document.activeElement)) {
-      diffRefPanel.innerHTML = diffRefControlsHtml({compact: true, repo: diffRepo, path});
-      diffRefPanel.dataset.diffRefRepoRendered = diffRepo;
-      diffRefPanel.dataset.diffRefPathRendered = path;
-      diffRefPanel.dataset.diffRefHistoryRendered = historySignature;
-    }
-    syncDiffRefControlValues(diffRefPanel);
-  }
-  updateFileEditorToolbarSeparators(panel);
+  const mode = editorViewModeFor(path, item);
+  syncTextEditorControls(panel, path, state, item, parts, mode);
   if (state.kind === 'image') {
-    updateImageViewerThemeButton(themeButton);
-    setEditorContentMode(content, 'preview');
-    destroyCodeMirrorPanel(panel);
-    if (rawPane) rawPane.hidden = true;
-    if (codeMirrorPane) codeMirrorPane.hidden = true;
-    if (previewPane) previewPane.hidden = true;
-    panel.classList.remove('syntax-highlighted');
-    if (imagePane) {
-      imagePane.hidden = false;
-      renderFileEditorImagePane(imagePane, path, state, (message, level) => setFileEditorPanelStatus(panel, message, level));
-    }
+    renderImageEditor(panel, path, state, parts);
     return;
   }
   if (state.kind === 'media') {
-    updateImageViewerThemeButton(themeButton);
-    setEditorContentMode(content, 'preview');
-    destroyCodeMirrorPanel(panel);
-    if (rawPane) rawPane.hidden = true;
-    if (codeMirrorPane) codeMirrorPane.hidden = true;
-    if (imagePane) {
-      disconnectFileEditorImageObserver(imagePane);
-      imagePane.hidden = true;
-      imagePane.replaceChildren();
-    }
-    panel.classList.remove('syntax-highlighted');
-    if (previewPane) {
-      previewPane.hidden = false;
-      renderEditorPreviewPane(previewPane, path, '', {context: 'preview'});
-    }
-    const status = openFileStatus(state);
-    setFileEditorPanelStatus(panel, status.message, status.level);
+    renderMediaEditor(panel, path, state, parts);
     return;
   }
-  if (imagePane) {
-    disconnectFileEditorImageObserver(imagePane);
-    imagePane.hidden = true;
-    imagePane.replaceChildren();
-  }
-  setEditorContentMode(content, mode);
-  panel.classList.toggle('editor-wrap', fileEditorWrapEnabled);
-  panel.classList.toggle('editor-line-numbers', fileEditorLineNumbersEnabled);
-  if (mode === 'preview') {
-    destroyCodeMirrorPanel(panel);
-    if (rawPane) rawPane.hidden = true;
-    if (codeMirrorPane) codeMirrorPane.hidden = true;
-    panel.classList.remove('syntax-highlighted');
-    if (previewPane) {
-      previewPane.hidden = false;
-      renderEditorPreviewPane(previewPane, path, state.content, {context: 'preview'});
-    }
-    scheduleShareFileEditorScrollRestore(item, path);
-  } else {
-    if (rawPane) rawPane.hidden = true;
-    if (previewPane) {
-      previewPane.hidden = mode !== 'split';
-      if (mode === 'split') renderEditorPreviewPane(previewPane, path, state.content, {context: 'split'});
-    }
-    panel.classList.remove('syntax-highlighted');
-    ensureCodeMirrorPanel(panel, item, path, state).then(loaded => {
-      if (loaded === false) renderFileEditorRawPane(rawPane, path, state.content);
-      else scheduleShareFileEditorScrollRestore(item, path);
-    }).catch(error => {
-      if (panel.dataset.filePath !== path) return;
-      console.warn('CodeMirror editor unavailable; showing read-only raw text', error);
-      destroyCodeMirrorPanel(panel);
-      if (codeMirrorPane) codeMirrorPane.hidden = true;
-      setFileEditorPanelStatus(panel, t('editor.codemirrorUnavailable', {error}), 'error');
-      renderFileEditorRawPane(rawPane, path, state.content);
-    });
-  }
-  const status = openFileStatus(state);
-  setFileEditorPanelStatus(panel, status.message, status.level);
-  focusFileEditorPanelIfReady(panel, item);
-  scheduleShareFileEditorScrollRestore(item, path);
+  renderTextEditorMode(panel, item, path, state, parts, mode);
 }
 
 function loadFileEditorState(path, panel, item) {
@@ -41522,7 +41876,7 @@ function publishShareGeometryDigest() {
 
 function installShareGeometryDigestLoop() {
   if (shareGeometryDigestTimer) clearInterval(shareGeometryDigestTimer);
-  shareGeometryDigestTimer = setInterval(publishShareGeometryDigest, 2000);
+  shareGeometryDigestTimer = setInterval(publishShareGeometryDigest, shareGeometryDigestPublishMs);
 }
 
 function applyShareUiMessage(message) {
@@ -44011,8 +44365,8 @@ function noteTerminalExplicitInput(session) {
 }
 
 const terminalTmuxPrefixPendingBySession = new Map();
-const tmuxWindowReadbackDelayMs = 120;
-const tmuxWindowReadbackRetryDelayMs = 80;
+const tmuxWindowReadbackDelayMs = tmuxWindowReadbackMs;
+const tmuxWindowReadbackRetryDelayMs = tmuxWindowReadbackRetryMs;
 const tmuxWindowReadbackMaxAttempts = 6;
 const terminalTmuxWindowRepeatMs = 900;
 const terminalTmuxWindowRepeatBySession = new Map();
@@ -44457,7 +44811,7 @@ function activateTab(session, name, options = {}) {
   updateTypingIndicator(session);
   if (name === 'terminal') {
     scheduleFit(session);
-    setTimeout(() => refreshTerminal(session), 120);
+    setTimeout(() => refreshTerminal(session), terminalRefreshAfterTabSelectMs);
     scheduleTerminalBlankScreenRefresh(session);
     if (options.userInitiated) focusTerminalFromUserAction(session);
     else focusTerminalWhenAutoFocus(session, 25);
@@ -45157,7 +45511,7 @@ async function applyTranscriptsPayload(payload, options = {}) {
   clearInfoSessionDrawerCache();
   if (typeof warmTabberDataOnLaunch === 'function') warmTabberDataOnLaunch();
   maybeHandleServerVersionChange(transcriptMeta.server_version);
-  if (transcriptMeta.agentAuth) agentAuth = transcriptMeta.agentAuth;
+  applyAgentAvailabilityPayload(transcriptMeta);
   updateMetadataBadgePulses(transcriptMeta);
   const previousActive = activeSessions.slice();
   const sessionsChanged = updateSessionList(transcriptMeta.session_order || []);

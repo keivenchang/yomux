@@ -24,6 +24,47 @@ SOURCE_LOCALE = "en"
 PSEUDO_LOCALE = "en-XA"
 WINDOW_VIEWPORT_ALLOW_MARKER = "static-build-allow-window-viewport"
 RAW_TOKEN_LITERAL_IGNORED_VALUES = {"#ffffff"}
+RAW_COMPONENT_LITERAL_REPEAT_ALLOWLIST: dict[str, str] = {
+    "#ffffff": "shared white paint in fixed light documents, text, and light-theme mixes",
+    "#ffe7a3": "paired YO!agent tool-call warning colors",
+    "#ffe27a": "paired warning/status accent colors",
+    "#ffd8dc": "paired danger text colors",
+    "#ff9f1c": "paired warning/orange component colors",
+    "#f7d2d8": "paired disconnected-share colors",
+    "#f4f7fb": "paired light tree surface colors",
+    "#ef4444": "paired about-brand / error accent colors",
+    "#eef6ff": "paired YO!agent light action-code surfaces",
+    "#eef1f5": "paired muted editor surface colors",
+    "#e8f0fb": "paired info-card surface colors",
+    "#e7ebf1": "paired muted popover/button text colors",
+    "#dfe7f2": "paired topbar popover text colors",
+    "#d81f32": "paired diff/compare removed colors",
+    "#c8941e": "paired warning borders",
+    "#b98c24": "paired file-hover warning borders",
+    "#aab4c4": "paired muted popover border colors",
+    "#9fb0c4": "paired preferences preview muted text colors",
+    "#8ff2a7": "paired green status sample colors",
+    "#8c959f": "paired markdown quote border colors",
+    "#8ab4f8": "paired YO!agent action-code borders",
+    "#7c2d12": "paired conflict prompt warning colors",
+    "#7a2e3d": "paired disconnected-share dark text colors",
+    "#586072": "paired muted tree/popover text colors",
+    "#3b0a0a": "paired conflict compare removed text colors",
+    "#3a2b00": "paired warning dark text colors",
+    "#2b3242": "paired status label dark surface colors",
+    "#2a1e00": "paired warning dark surface colors",
+    "#273140": "paired preferences/topbar dark preview colors",
+    "#263044": "paired tree/popover dark surface colors",
+    "#166534": "paired light success text colors",
+    "#161d29": "paired popover dark surface colors",
+    "#14171d": "paired file-tree warning dark surface colors",
+    "#10151d": "paired topbar dark surface colors",
+    "#0f4c81": "paired YO!agent action heading colors",
+    "#0b1017": "paired preferences dark preview colors",
+    "#0645ad": "paired editor vanilla link colors",
+    "#051408": "paired green status dark surface colors",
+    "#00a152": "paired diff/compare added colors",
+}
 I18N_UNTRANSLATED_REPORT_SAMPLE_LIMIT = 10
 I18N_ALLOWED_IDENTICAL_TERMS = {
     "apache", "api", "ci", "claude", "cli", "codex", "css", "git", "github", "gitlab", "head", "html", "http",
@@ -609,6 +650,35 @@ def lint_raw_literal_equals_token() -> list[str]:
     return errors
 
 
+def lint_repeated_raw_component_literals() -> list[str]:
+    """New repeated component hex colors must become tokens or get a reviewed allowlist reason."""
+    occurrences: dict[str, list[str]] = defaultdict(list)
+    for part in ASSETS.get("yolomux.css", []):
+        if part.endswith("00_tokens_base.css"):
+            continue
+        path = repo_path(part)
+        try:
+            text = read_text(path)
+        except FileNotFoundError:
+            continue
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            if "var(" in line:
+                continue
+            for match in re.finditer(r"#[0-9a-fA-F]{6}\b", line):
+                literal = match.group(0).lower()
+                occurrences[literal].append(f"{part}:{line_no}")
+    errors: list[str] = []
+    for literal, locations in sorted(occurrences.items()):
+        if len(locations) < 2:
+            continue
+        if literal in RAW_COMPONENT_LITERAL_REPEAT_ALLOWLIST:
+            continue
+        shown = ", ".join(locations[:4])
+        suffix = "" if len(locations) <= 4 else f" (+{len(locations) - 4} more)"
+        errors.append(f"raw component color {literal} repeats in {shown}{suffix}; move it to a CSS token or add a reviewed allowlist reason")
+    return errors
+
+
 def lint_raw_window_viewport_reads() -> list[str]:
     """Every JS viewport read must go through appViewport(); the one owner line is marked."""
     errors: list[str] = []
@@ -736,6 +806,7 @@ def main(argv: list[str] | None = None) -> int:
                 lint_duplicate_functions()
                 + lint_undefined_css_vars()
                 + lint_raw_literal_equals_token()
+                + lint_repeated_raw_component_literals()
                 + lint_raw_window_viewport_reads()
                 + lint_light_mode_pairs()
             )

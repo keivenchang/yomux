@@ -893,7 +893,7 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
                   <div class="file-tree" role="tree">
                     <div class="file-tree-row tabber-row kind-dir expanded tabber-active-session" data-tabber-type="session" data-tabber-session="1" role="treeitem" aria-expanded="true" aria-selected="false" aria-current="true" style="padding-left: 8px;">
                       <span class="file-tree-icon tabber-icon">▾</span>
-                      <span class="file-tree-name"><span class="tabber-session-tab active"><span class="tabber-session-name">8801</span><span class="tabber-session-description">tabber session tab styling keeps the date column visible for a deliberately long work description</span></span></span>
+                      <span class="file-tree-name"><span class="tabber-session-tab active" data-tabber-session-chrome="shared"><span class="pane-tab-core"><span class="session-yolo-marker inactive">YO</span><span class="session-button-prefix"><span class="session-button-number">8801</span></span><span class="session-button-text"><span class="session-button-dir tab-inline-detail">tabber session tab styling keeps the date column visible for a deliberately long work description</span></span></span></span></span>
                       <span class="file-tree-agent" hidden></span>
                       <span class="file-tree-diff" hidden></span>
                       <span class="file-tree-dir-count" hidden></span>
@@ -911,7 +911,7 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
                     </div>
                     <div class="file-tree-row tabber-row kind-dir expanded" data-tabber-type="session" data-tabber-session="2" role="treeitem" aria-expanded="true" aria-selected="false" style="padding-left: 8px;">
                       <span class="file-tree-icon tabber-icon">▾</span>
-                      <span class="file-tree-name"><span class="tabber-session-tab"><span class="tabber-session-name">2</span><span class="tabber-session-description">main</span></span></span>
+                      <span class="file-tree-name"><span class="tabber-session-tab" data-tabber-session-chrome="shared"><span class="pane-tab-core"><span class="session-yolo-marker inactive">YO</span><span class="session-button-prefix"><span class="session-button-number">2</span></span><span class="session-button-text"><span class="session-button-dir tab-inline-detail">main</span></span></span></span></span>
                       <span class="file-tree-agent" hidden></span>
                       <span class="file-tree-diff" hidden></span>
                       <span class="file-tree-dir-count" hidden></span>
@@ -964,8 +964,8 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
             };
             const rowMetrics = row => {
               const tab = row?.querySelector('.tabber-session-tab');
-              const name = row?.querySelector('.tabber-session-name');
-              const description = row?.querySelector('.tabber-session-description');
+              const name = row?.querySelector('.session-button-prefix');
+              const description = row?.querySelector('.tab-inline-detail');
               const icon = row?.querySelector(':scope > .file-tree-icon');
               const date = row?.querySelector(':scope > .file-tree-date');
               const style = tab ? getComputedStyle(tab) : null;

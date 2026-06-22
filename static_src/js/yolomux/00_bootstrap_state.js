@@ -10,7 +10,7 @@ const agentLoginCommands = {claude: 'claude auth login', codex: 'codex login'};
 function agentLoggedIn(agent) {
   const entry = agentAuth[agent];
   // Unknown (term, or no status yet) counts as logged-in so we never block a usable agent.
-  return !entry || !entry.installed || entry.logged_in === true;
+  return !entry || !entry.installed || entry.logged_in !== false;
 }
 function agentLoginCommand(agent) {
   return agentLoginCommands[agent] || '';
@@ -18,6 +18,18 @@ function agentLoginCommand(agent) {
 function agentUnavailableReason(agent) {
   const entry = agentAuth[agent];
   return entry?.unavailable_reason || '';
+}
+function applyAgentAvailabilityPayload(payload = {}) {
+  if (!payload || typeof payload !== 'object') return false;
+  if (payload.agentAuth && typeof payload.agentAuth === 'object') agentAuth = payload.agentAuth;
+  if (Array.isArray(payload.availableAgents)) {
+    availableAgents.clear();
+    payload.availableAgents.forEach(agent => {
+      const name = String(agent || '').trim();
+      if (name) availableAgents.add(name);
+    });
+  }
+  return true;
 }
 const accessRole = bootstrap.accessRole || 'admin';
 const readOnlyMode = accessRole !== 'admin';

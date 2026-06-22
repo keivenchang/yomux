@@ -1261,6 +1261,8 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
   if (screenKey === 'approval') {
     return stateValue('needs-approval', screenText || approvalPromptText || stateReason('approvalPromptVisible'), promptAttentionExtra(session, auto));
   }
+  const agentWindowAttention = agentWindowAttentionState(session, info, auto);
+  if (agentWindowAttention) return agentWindowAttention;
   const tmuxSignalStateForSession = tmuxSignalAgentStateForSession(session);
   if (tmuxSignalStateForSession) {
     return tmuxSignalStateForSession;
@@ -1295,6 +1297,18 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
   return stateValue('idle', stateReason('noActiveAgent'));
 }
 
+function agentWindowAttentionState(session, info = null, auto = autoApproveStates.get(session) || {}) {
+  if (typeof sessionAgentWindowStatusPayloads !== 'function') return null;
+  const windows = sessionAgentWindowStatusPayloads(session, info, auto);
+  const agent = windows.find(item => ['approval', 'needs-approval', 'needs-input', 'interrupted'].includes(String(item?.state || '')));
+  if (!agent) return null;
+  const stateKey = ['approval', 'needs-approval'].includes(String(agent.state || '')) ? 'needs-approval' : 'needs-input';
+  const windowLabel = String(agent.window_label || agent.window || agent.kind || '').trim();
+  const reasonText = String(agent.screen_text || '').trim() || (stateKey === 'needs-approval' ? stateReason('approvalPromptVisible') : stateReason('agentWaitingInput'));
+  const reason = windowLabel ? `${windowLabel}: ${reasonText}` : reasonText;
+  return stateValue(stateKey, reason, promptAttentionExtra(session, auto));
+}
+
 function agentErrorIsBlocking(error) {
   const text = String(error || '').toLowerCase();
   if (!text) return false;
@@ -1318,17 +1332,23 @@ function autoApproveEnabledForSession(payload) {
   return autoApproveEnabledHere(payload) || autoApproveEnabledElsewhere(payload);
 }
 
-function yoloWorkingSessions() {
-  return sessions.filter(session => autoApproveScreenIsWorking(autoApproveStates.get(session)));
-}
-
 function autoApproveScreenIsWorking(payload) {
   return String(payload?.screen?.key || '') === 'working';
 }
 
+function sessionHasWorkingAgentWindow(session, payload = autoApproveStates.get(session), info = transcriptMeta.sessions?.[session]) {
+  if (typeof sessionAgentWindowStatusPayloads !== 'function') return false;
+  return sessionAgentWindowStatusPayloads(session, info, payload)
+    .some(agent => String(agent?.state || '').toLowerCase() === 'working');
+}
+
 function sessionYoloIsWorking(session, payload = autoApproveStates.get(session)) {
-  // Spin the YO ball whenever the agent is working, regardless of auto-approve state.
-  return autoApproveScreenIsWorking(payload);
+  // Spin the YO ball whenever any Claude/Codex window is working, even when that window is hidden.
+  return sessionHasWorkingAgentWindow(session, payload) || autoApproveScreenIsWorking(payload);
+}
+
+function yoloWorkingSessions() {
+  return sessions.filter(session => sessionYoloIsWorking(session));
 }
 
 function runningAgentCount() {
@@ -1336,7 +1356,7 @@ function runningAgentCount() {
 }
 
 function sessionCountsAsRunning(session, stateKey = '') {
-  if (autoApproveScreenIsWorking(autoApproveStates.get(session))) return true;
+  if (sessionYoloIsWorking(session)) return true;
   return ['tests-running', 'yolo-approval'].includes(String(stateKey || ''));
 }
 
@@ -1765,6 +1785,7 @@ function statusIndicatorClasses(...classes) {
 function statusIndicatorToneClasses(tone) {
   if (tone === 'positive') return ['status-indicator--positive'];
   if (tone === 'working') return ['status-indicator--working', 'heartbeat-pulse'];
+  if (tone === 'cooldown') return ['status-indicator--cooldown', 'heartbeat-pulse'];
   if (tone === 'attention') return ['status-indicator--attention', 'heartbeat-pulse', 'attention-pulse'];
   if (tone === 'settled') return ['status-indicator--settled'];
   if (tone === 'idle') return ['status-indicator--idle'];
@@ -1772,7 +1793,7 @@ function statusIndicatorToneClasses(tone) {
 }
 
 function statusIndicatorToneStyle(tone) {
-  return tone === 'attention' ? ` style="${attentionAnimationStyle()}"` : '';
+  return ['working', 'cooldown', 'attention'].includes(String(tone || '')) ? ` style="${attentionAnimationStyle()}"` : '';
 }
 
 function statusIndicatorModifiedClasses(modifier, tone, classes, options = {}) {
@@ -1787,12 +1808,23 @@ function statusIndicatorTextClasses(tone, ...classes) {
   return statusIndicatorModifiedClasses('status-indicator--text', tone, classes);
 }
 
+function statusIndicatorLabelClasses(tone, ...classes) {
+  return statusIndicatorModifiedClasses('status-indicator--label', tone, classes);
+}
+
 function statusIndicatorDotClasses(tone, ...classes) {
   return statusIndicatorModifiedClasses('status-indicator--dot', tone, classes);
 }
 
 function statusIndicatorInlineClasses(tone, ...classes) {
   return statusIndicatorModifiedClasses('status-indicator--inline', tone, classes, {modifierPosition: 'after-all'});
+}
+
+function statusIndicatorLabelHtml(text, tone, ...classes) {
+  const value = String(text || '').trim();
+  if (!value) return '';
+  const style = statusIndicatorToneStyle(tone);
+  return `<span class="${esc(statusIndicatorLabelClasses(tone, classes))}"${style}>${esc(value)}</span>`;
 }
 
 function stateBadgeHtml(key, short, title, options = {}) {
@@ -3003,7 +3035,7 @@ function scheduleFileQuickOpenSearch(options = {}) {
     if (!q.startsWith('>') && !q.startsWith('@')) refreshFileQuickOpenCandidates(commandPaletteQuery);
   };
   if (options.immediate) run();
-  else fileQuickOpenDebounce = setTimeout(run, 160);
+  else fileQuickOpenDebounce = setTimeout(run, fileQuickOpenDebounceMs);
 }
 
 function abortFileQuickOpenSearch() {

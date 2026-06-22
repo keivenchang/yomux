@@ -94,8 +94,9 @@ _AGENT_LOGGED_OUT_MARKERS = (
     "no credentials",
     "no api key",
 )
-_AGENT_AUTH_PROBE_TIMEOUT = 4.0
+_AGENT_AUTH_PROBE_TIMEOUT = 8.0
 _AGENT_AUTH_CACHE_TTL = 45.0
+_AGENT_AUTH_UNKNOWN_CACHE_TTL = 5.0
 _agent_auth_cache = TtlCache(_AGENT_AUTH_CACHE_TTL, max_entries=4)
 
 
@@ -113,7 +114,7 @@ def _logged_in_flag_from_json(stdout: str) -> bool | None:
     return None
 
 
-def _probe_agent_logged_in(agent: str) -> bool:
+def _probe_agent_logged_in(agent: str) -> bool | None:
     probe = AGENT_AUTH_PROBES.get(agent)
     if not probe:
         return False
@@ -123,13 +124,13 @@ def _probe_agent_logged_in(agent: str) -> bool:
     try:
         result = subprocess.run(list(probe), **kwargs)
     except (subprocess.TimeoutExpired, OSError, ValueError):
-        return False
+        return None
     parsed = _logged_in_flag_from_json(result.stdout or "")
     if parsed is not None:
         return parsed
-    if result.returncode != 0:
-        return False
     combined = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
+    if result.returncode != 0:
+        return False if any(marker in combined for marker in _AGENT_LOGGED_OUT_MARKERS) else None
     return not any(marker in combined for marker in _AGENT_LOGGED_OUT_MARKERS)
 
 
@@ -141,17 +142,21 @@ def agent_auth_status(force: bool = False) -> dict[str, dict[str, object]]:
     agents = ("claude", "codex")
     installed = {agent: shutil.which(agent) is not None for agent in agents}
     to_probe = [agent for agent in agents if installed[agent]]
-    logged_in = {agent: False for agent in agents}
+    logged_in: dict[str, bool | None] = {agent: False for agent in agents}
     if to_probe:
         # Probe concurrently so a cold cache costs ~one probe, not the sum, on page load.
         with ThreadPoolExecutor(max_workers=len(to_probe)) as pool:
             for agent, result in zip(to_probe, pool.map(_probe_agent_logged_in, to_probe)):
                 logged_in[agent] = result
     status = {}
+    has_unknown = False
     for agent in agents:
         entry = {"installed": installed[agent], "logged_in": logged_in[agent]}
         if not installed[agent]:
             entry["unavailable_reason"] = "not-on-path"
+        elif logged_in[agent] is None:
+            has_unknown = True
+            entry["unavailable_reason"] = "auth-unknown"
         status[agent] = entry
-    _agent_auth_cache.set("status", status)
+    _agent_auth_cache.set("status", status, ttl=_AGENT_AUTH_UNKNOWN_CACHE_TTL if has_unknown else None)
     return status

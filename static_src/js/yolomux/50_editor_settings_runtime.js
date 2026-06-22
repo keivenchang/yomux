@@ -635,7 +635,7 @@ function hexToRgbTriple(hex) {
 function uiColorVisualPreset(value, light = false) {
   if (value === 'green') {
     return light
-      ? {accent: '#5f9800', bright: '#4f9e3a', text: '#ffffff'}
+      ? {accent: '#5f9800', bright: '#4f9e3a', text: '#071000'}
       : {accent: '#76b900', bright: '#86d600', text: '#071000'};
   }
   const preset = ACTIVE_COLOR_PRESETS[value];
@@ -969,7 +969,7 @@ function installRuntimeIntervals() {
     if (clientEventsConnected === true) return null;
     return refreshAutoStatuses();
   }, autoApproveDisconnectedPollMs);
-  resetRuntimeInterval('server-watch-renew', renewServerWatchRootsFromRuntime, 60000);
+  resetRuntimeInterval('server-watch-renew', renewServerWatchRootsFromRuntime, serverWatchRenewMs);
   if (fileExplorerMode === 'tabber') {
     resetRuntimeInterval('tabber-activity', () => { if (fileExplorerMode === 'tabber') fetchTabberActivity(); }, tabberActivityRefreshMs);
   }

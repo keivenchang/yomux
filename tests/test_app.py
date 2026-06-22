@@ -18,25 +18,12 @@ from yolomux_lib.common import PaneInfo
 from yolomux_lib.common import SessionInfo
 from yolomux_lib.common import UploadedFile
 from yolomux_lib.yoagent import session_summaries as session_summaries_module
+from yolomux_lib.yoagent import controller as controller_module
 from yolomux_lib.yoagent import transports as transport_module
 
 
 PROMPT_STATE_KEYS = set(app_module.blank_prompt_state())
-
-
-@pytest.fixture(autouse=True)
-def no_control_socket(monkeypatch):
-    monkeypatch.setattr(app_module.YolomuxControlServer, "start", lambda self: None)
-    monkeypatch.setattr(app_module.YolomuxControlServer, "stop", lambda self: None)
-
-
-@pytest.fixture(autouse=True)
-def isolated_yoagent_conversation_state(monkeypatch, tmp_path):
-    state_dir = tmp_path / "yoagent-state"
-    monkeypatch.setattr(app_module.yoagent_conversation, "YOAGENT_CONVERSATION_PATH", state_dir / "conversation.jsonl")
-    monkeypatch.setattr(app_module.yoagent_conversation, "YOAGENT_CLI_STATE_PATH", state_dir / "cli-sessions.json")
-    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
-    monkeypatch.setattr(app_module, "EVENT_LOG_PATH", tmp_path / "events.jsonl")
+pytestmark = pytest.mark.usefixtures("no_control_socket", "isolated_yoagent_conversation_state")
 
 
 def test_session_http_guards_use_shared_decorator():
@@ -803,8 +790,8 @@ def test_auto_approve_payload_includes_agent_window_statuses(monkeypatch, tmp_pa
         panes=[pane0, pane1],
         selected_pane=pane0,
         agents=[
-            AgentInfo("5", "claude", 10, "%10", "claude", "/repo/claude", "running", "claude-id", None, None),
-            AgentInfo("5", "codex", 11, "%11", "codex", "/repo/codex", "running", "codex-id", None, None),
+            AgentInfo("5", "claude", 10, "%10", "claude", "/repo/claude", "running", "claude-id", str(tmp_path / "claude.jsonl"), None),
+            AgentInfo("5", "codex", 11, "%11", "codex", "/repo/codex", "running", "codex-id", str(tmp_path / "codex.jsonl"), None),
         ],
     )
     monkeypatch.setattr(app_module, "ACTIVITY_PATH", tmp_path / "activity.json")
@@ -847,6 +834,9 @@ def test_auto_approve_payload_includes_agent_window_statuses(monkeypatch, tmp_pa
             "window_label": "0:claude",
             "pane": "0",
             "pane_target": "%10",
+            "transcript": str(tmp_path / "claude.jsonl"),
+            "transcript_id": "claude-id",
+            "agent_session_id": "claude-id",
             "working_elapsed_seconds": 3720.0,
             "idle_since": None,
             "last_active_ts": 0.0,
@@ -862,6 +852,9 @@ def test_auto_approve_payload_includes_agent_window_statuses(monkeypatch, tmp_pa
             "window_label": "1:codex",
             "pane": "0",
             "pane_target": "%11",
+            "transcript": str(tmp_path / "codex.jsonl"),
+            "transcript_id": "codex-id",
+            "agent_session_id": "codex-id",
             "working_elapsed_seconds": None,
             "idle_since": 1010.0,
             "last_active_ts": 1010.0,
@@ -4959,6 +4952,74 @@ def test_yoagent_direct_send_uses_tmux_legacy_agent_tui_send(monkeypatch):
     assert kwargs["verify_submit"] is True
 
 
+def test_yoagent_prompt_answer_uses_verified_selector_path(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    target = {
+        "session": "1",
+        "pane_target": "%1",
+        "agent_kind": "claude",
+        "agent_session_id": "claude-session-1",
+        "agent_transcript": "/tmp/claude-session-1.jsonl",
+        "transport": "pane-paste",
+        "transport_label": "legacy tmux pane paste + Return",
+        "transport_kind": "terminal",
+        "prompt": {"visible": True, "selected_option": 1, "options": [{"text": "Approve"}, {"text": "Reject"}]},
+        "screen": {"key": "approval", "text": "Approve this?", "selected_option": 1, "options": [{"text": "Approve"}, {"text": "Reject"}]},
+    }
+    moved = []
+    entered = []
+    monkeypatch.setattr(webapp, "yoagent_action_target", lambda _session: (dict(target), HTTPStatus.OK))
+    monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
+    monkeypatch.setattr(controller_module, "tmux_move_to_option", lambda pane, option, selected_option=None: moved.append((pane, option, selected_option)))
+    monkeypatch.setattr(controller_module, "tmux_send_enter", lambda pane: entered.append(pane))
+    monkeypatch.setattr(app_module, "tmux_capture_pane", lambda _target, visible_only=False: "  1. Approve\n❯ 2. Reject\nEnter to select · ↑/↓ to navigate · Esc to cancel")
+    monkeypatch.setattr(app_module, "tmux_paste_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("prompt answers must not paste free text")))
+
+    try:
+        preview, preview_status = webapp.create_yoagent_action_preview({"type": "send_prompt", "session": "1", "text": "2"})
+        result, status = webapp.execute_yoagent_send_action({"preview_id": preview["id"]}, persist_result=False)
+    finally:
+        webapp.control_server.stop()
+
+    assert preview_status == HTTPStatus.OK
+    assert preview["status"] == "ready"
+    assert preview["prompt_answer"]["option"] == 2
+    assert status == HTTPStatus.OK
+    assert result["prompt_answer"] is True
+    assert result["option"] == 2
+    assert moved == [("%1", 2, 1)]
+    assert entered == ["%1"]
+
+
+def test_yoagent_prompt_target_rejects_free_text_with_options_status(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    target = {
+        "session": "1",
+        "pane_target": "%1",
+        "agent_kind": "claude",
+        "agent_session_id": "claude-session-1",
+        "agent_transcript": "/tmp/claude-session-1.jsonl",
+        "transport": "pane-paste",
+        "transport_label": "legacy tmux pane paste + Return",
+        "transport_kind": "terminal",
+        "prompt": {"visible": True, "selected_option": 1, "options": [{"text": "Pane capture"}, {"text": "Transcript capture"}]},
+        "screen": {"key": "needs-input", "text": "Which verifier mode?", "selected_option": 1, "options": [{"text": "Pane capture"}, {"text": "Transcript capture"}]},
+    }
+    monkeypatch.setattr(webapp, "yoagent_action_target", lambda _session: (dict(target), HTTPStatus.OK))
+    monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
+    monkeypatch.setattr(app_module, "tmux_paste_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("prompt targets must not receive free text")))
+
+    try:
+        response, status = webapp.yoagent_chat({"message": "tell session 1 to run date"}, access_role="admin")
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert "I resolved tmux session `1`, but I did not send anything" in response["answer"]
+    assert "answer with an option number, Enter, or Esc" in response["answer"]
+    assert "1. Pane capture; 2. Transcript capture" in response["answer"]
+
+
 def test_yoagent_wait_then_send_job_uses_tmux_legacy_agent_tui_send(monkeypatch):
     install_fake_yolomux_state(monkeypatch)
     events = []
@@ -5285,7 +5346,7 @@ def test_yoagent_action_preview_blocks_approval_prompt(monkeypatch):
 
     assert status == HTTPStatus.OK
     assert preview["status"] == "waiting"
-    assert preview["acceptance_text"] == "target agent is at an approval prompt, not a fresh AI prompt"
+    assert preview["acceptance_text"] == "target agent is at an approval prompt; answer with an option number, Enter, or Esc."
 
 
 def test_yoagent_chat_wait_then_send_queues_job_when_target_is_working(monkeypatch):
@@ -5444,8 +5505,8 @@ def test_yoagent_cli_fallback_keeps_non_auth_error():
 
 
 def test_resolve_yoagent_backend_auto_prefers_codex_then_claude(monkeypatch):
-    # #41: auto resolves to codex first, then claude, then deterministic — only for installed AND
-    # logged-in agents. Explicit choices pass through untouched.
+    # #41: auto resolves to codex first, then claude, then deterministic. A transient unknown auth
+    # result still tries the installed provider; only confirmed logged_in=False suppresses it.
     def status(claude_in, codex_in):
         return lambda *a, **k: {
             "claude": {"installed": True, "logged_in": claude_in},
@@ -5461,6 +5522,8 @@ def test_resolve_yoagent_backend_auto_prefers_codex_then_claude(monkeypatch):
     # an installed-but-logged-out codex is skipped in favor of a logged-in claude
     monkeypatch.setattr(app_module, "agent_auth_status", status(True, False))
     assert app_module.resolve_yoagent_backend("auto") == "claude"
+    monkeypatch.setattr(app_module, "agent_auth_status", status(False, None))
+    assert app_module.resolve_yoagent_backend("auto") == "codex"
     # explicit selections are never auto-resolved
     monkeypatch.setattr(app_module, "agent_auth_status", status(False, False))
     assert app_module.resolve_yoagent_backend("claude") == "claude"
@@ -5977,180 +6040,6 @@ def test_yoagent_visible_prewarm_persists_startup_response(monkeypatch):
     assert any(event_type == "yoagent_conversation_changed" for event_type, _payload in events)
 
 
-def test_yoagent_stream_hidden_thinking_is_not_exposed():
-    visible, hidden = app_module.strip_yoagent_stream_hidden_thinking("<think>private reasoning")
-    assert visible == ""
-    assert hidden is True
-
-    visible, hidden = app_module.strip_yoagent_stream_hidden_thinking("<think>private</think>Final answer")
-    assert visible == "Final answer"
-    assert hidden is True
-
-
-def test_yoagent_stream_callback_separates_answer_from_auxiliary_events(monkeypatch):
-    webapp = app_module.TmuxWebtermApp(["5"])
-    events = []
-    stored_messages = []
-    webapp.publish_client_event = lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {}))
-    monkeypatch.setattr(app_module.yoagent_conversation, "append_message", lambda message: stored_messages.append(message) or message)
-    try:
-        callback = webapp.yoagent_stream_callback("stream-1", "codex")
-        callback({"kind": "hidden_work_delta", "text": "Checking repo state"})
-        callback({"kind": "hidden_work_delta", "text": " and reading files"})
-        callback({"kind": "tool_call_started", "tool_name": "command", "command": "python3 tools/check.py"})
-        callback({"kind": "tool_call_delta", "tool_name": "command", "text": "line 1\nline 2"})
-        callback({"kind": "assistant_delta", "text": "Visible "})
-        callback({"kind": "assistant_delta", "text": "answer"})
-        callback({"kind": "tool_call_finished", "tool_name": "command", "text": "passed"})
-        callback({"kind": "turn_done"})
-        webapp.record_yoagent_message("assistant", "Visible answer", **webapp.yoagent_stream_auxiliary_message_fields("stream-1"))
-    finally:
-        webapp.control_server.stop()
-
-    payloads = [payload for event_type, payload in events if event_type == "yoagent_stream_delta"]
-    assert payloads[-1]["content"] == "Visible answer"
-    assert payloads[-1]["auxiliary_done"] is True
-    assert payloads[-1]["auxiliary_preview"] == "tool done: command: passed"
-    assert payloads[-1]["auxiliary_lines"] == [
-        "thinking: Checking repo state and reading files",
-        "tool start: command: python3 tools/check.py",
-        "tool output: command: line 1\nline 2",
-        "tool done: command: passed",
-    ]
-    assert stored_messages[-1]["auxiliaryPreview"] == "tool done: command: passed"
-    assert "thinking: Checking repo state and reading files" in stored_messages[-1]["auxiliaryText"]
-    assert "tool output: command: line 1\nline 2" in stored_messages[-1]["auxiliaryText"]
-    assert stored_messages[-1]["auxiliaryDone"] is True
-    assert stored_messages[-1]["streamItems"] == [
-        {"kind": "thinking", "text": "thinking: Checking repo state and reading files"},
-        {"kind": "tool", "text": "tool start: command: python3 tools/check.py"},
-        {"kind": "tool", "text": "tool output: command: line 1\nline 2"},
-        {"kind": "assistant", "text": "Visible answer"},
-        {"kind": "tool", "text": "tool done: command: passed"},
-    ]
-
-
-def test_yoagent_stream_callback_preserves_interleaved_order():
-    webapp = app_module.TmuxWebtermApp(["5"])
-    last_payload = {}
-    webapp.publish_client_event = lambda event_type, payload=None, **_kwargs: last_payload.update(payload or {}) if event_type == "yoagent_stream_delta" else None
-    try:
-        callback = webapp.yoagent_stream_callback("stream-order", "claude")
-        callback({"kind": "hidden_work_delta", "text": "Reading context"})
-        callback({"kind": "assistant_delta", "text": "First visible sentence. "})
-        callback({"kind": "tool_call_started", "tool_name": "command", "command": "python3 tools/check.py"})
-        callback({"kind": "tool_call_finished", "tool_name": "command", "text": "passed"})
-        callback({"kind": "hidden_work_delta", "text": "Preparing final answer"})
-        callback({"kind": "assistant_delta", "text": "Second visible sentence."})
-        fields = webapp.yoagent_stream_auxiliary_message_fields("stream-order")
-    finally:
-        webapp.control_server.stop()
-
-    assert last_payload["stream_items"] == [
-        {"kind": "thinking", "text": "thinking: Reading context"},
-        {"kind": "assistant", "text": "First visible sentence. "},
-        {"kind": "tool", "text": "tool start: command: python3 tools/check.py"},
-        {"kind": "tool", "text": "tool done: command: passed"},
-        {"kind": "thinking", "text": "thinking: Preparing final answer"},
-        {"kind": "assistant", "text": "Second visible sentence."},
-    ]
-    assert fields["stream_items"] == last_payload["stream_items"]
-
-
-def test_yoagent_stream_callback_preserves_raw_thinking_detail_text():
-    webapp = app_module.TmuxWebtermApp(["5"])
-    last_payload = {}
-    webapp.publish_client_event = lambda event_type, payload=None, **_kwargs: last_payload.update(payload or {}) if event_type == "yoagent_stream_delta" else None
-    try:
-        callback = webapp.yoagent_stream_callback("stream-raw-thinking", "claude")
-        callback({"kind": "hidden_work_delta", "text": "First line\n"})
-        callback({"kind": "hidden_work_delta", "text": "  second line"})
-        fields = webapp.yoagent_stream_auxiliary_message_fields("stream-raw-thinking")
-    finally:
-        webapp.control_server.stop()
-
-    assert last_payload["auxiliary_lines"] == ["thinking: First line second line"]
-    assert last_payload["stream_items"] == [{"kind": "thinking", "text": "thinking: First line\n  second line"}]
-    assert fields["stream_items"] == last_payload["stream_items"]
-
-
-def test_yoagent_stream_callback_replaces_claude_thinking_heartbeat():
-    webapp = app_module.TmuxWebtermApp(["5"])
-    events = []
-    webapp.publish_client_event = lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {}))
-    try:
-        callback = webapp.yoagent_stream_callback("stream-claude", "claude")
-        callback({"kind": "hidden_work_delta", "text": "thinking... (~50 tokens)"})
-        callback({"kind": "hidden_work_delta", "text": "Reading context"})
-        callback({"kind": "hidden_work_delta", "text": " and checking files"})
-    finally:
-        webapp.control_server.stop()
-
-    payloads = [payload for event_type, payload in events if event_type == "yoagent_stream_delta"]
-    assert payloads[-1]["auxiliary_preview"] == "thinking: Reading context and checking files"
-    assert payloads[-1]["auxiliary_lines"] == ["thinking: Reading context and checking files"]
-
-
-def test_yoagent_conversation_persists_auxiliary_stream_fields(tmp_path):
-    path = tmp_path / "conversation.jsonl"
-
-    written = app_module.yoagent_conversation.append_message(
-        {
-            "role": "assistant",
-            "content": "Visible answer",
-            "auxiliaryLines": ["thinking: Checking repo state", "tool done: command: passed"],
-            "auxiliaryPreview": "tool done: command: passed",
-            "auxiliaryDone": True,
-            "auxiliaryTruncated": True,
-            "streamItems": [
-                {"kind": "thinking", "text": "thinking: Checking repo state"},
-                {"kind": "assistant", "text": "Visible answer"},
-                {"kind": "tool", "text": "tool done: command: passed"},
-            ],
-        },
-        path=path,
-    )
-    loaded = app_module.yoagent_conversation.load_messages(path=path)
-
-    assert written is not None
-    assert written["auxiliaryLines"] == ["thinking: Checking repo state", "tool done: command: passed"]
-    assert written["auxiliaryText"] == "thinking: Checking repo state\ntool done: command: passed"
-    assert written["auxiliaryPreview"] == "tool done: command: passed"
-    assert written["auxiliaryDone"] is True
-    assert written["auxiliaryTruncated"] is True
-    assert written["streamItems"] == [
-        {"kind": "thinking", "text": "thinking: Checking repo state"},
-        {"kind": "assistant", "text": "Visible answer"},
-        {"kind": "tool", "text": "tool done: command: passed"},
-    ]
-    assert loaded == [written]
-
-
-def test_yoagent_conversation_persists_stream_items_without_auxiliary_lines(tmp_path):
-    path = tmp_path / "conversation.jsonl"
-
-    written = app_module.yoagent_conversation.append_message(
-        {
-            "role": "assistant",
-            "content": "Visible answer",
-            "streamItems": [
-                {"kind": "assistant", "text": "Visible answer "},
-                {"kind": "thinking", "text": "thinking: raw\n  detail"},
-            ],
-        },
-        path=path,
-    )
-    loaded = app_module.yoagent_conversation.load_messages(path=path)
-
-    assert written is not None
-    assert "auxiliaryLines" not in written
-    assert written["streamItems"] == [
-        {"kind": "assistant", "text": "Visible answer "},
-        {"kind": "thinking", "text": "thinking: raw\n  detail"},
-    ]
-    assert loaded == [written]
-
-
 def test_yoagent_conversation_persists_response_ms(tmp_path):
     path = tmp_path / "conversation.jsonl"
 
@@ -6168,34 +6057,6 @@ def test_yoagent_conversation_persists_response_ms(tmp_path):
     assert written is not None
     assert written["responseMs"] == 5300
     assert loaded == [written]
-
-
-def test_yoagent_stream_callback_preserves_full_auxiliary_history():
-    webapp = app_module.TmuxWebtermApp(["5"])
-    last_payload = {}
-
-    def publish(event_type, payload=None, **_kwargs):
-        if event_type == "yoagent_stream_delta":
-            last_payload.clear()
-            last_payload.update(payload or {})
-
-    webapp.publish_client_event = publish
-    try:
-        callback = webapp.yoagent_stream_callback("stream-long", "codex")
-        long_line = "x" * 1200
-        for index in range(5005):
-            callback({"kind": "tool_call_delta", "tool_name": "command", "text": f"line {index} {long_line if index == 0 else ''}".rstrip()})
-        callback({"kind": "turn_done"})
-        fields = webapp.yoagent_stream_auxiliary_message_fields("stream-long")
-    finally:
-        webapp.control_server.stop()
-
-    assert "auxiliary_truncated" not in last_payload
-    assert len(last_payload["auxiliary_lines"]) == 5005
-    assert len(fields["auxiliary_lines"]) == 5005
-    assert fields["auxiliary_lines"][0] == f"tool output: command: line 0 {long_line}"
-    assert "[truncated]" not in "\n".join(fields["auxiliary_lines"])
-    assert fields["stream_items"][0]["text"] == f"tool output: command: line 0 {long_line}"
 
 
 def test_yoagent_cli_sessions_persist_across_restart(monkeypatch):

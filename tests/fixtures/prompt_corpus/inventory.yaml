@@ -367,6 +367,158 @@ fixtures:
   fixture_id: multiple_choice_question__claude-code-synthetic_20260620
   id: claude-multiple-choice-question
   provenance: synthetic current Claude question layout
+- case_name: ask_user_question_no_selector_descriptions
+  expected:
+    action: null
+    agent: claude
+    approval_visible: false
+    ask: true
+    command: null
+    confidence_min: 0.9
+    option_labels:
+    - Pane capture
+    - Transcript capture
+    prompt_kind: question
+    prompt_type: ''
+    question_text: Which verifier mode should we use?
+    screen_key: needs-input
+    selected_option: 0
+    yes_selected: false
+  family: claude-ask-user-question-no-selector
+  file: synthetic/ask_user_question_no_selector_descriptions__claude-code-synthetic_20260621.yaml
+  fixture_id: ask_user_question_no_selector_descriptions__claude-code-synthetic_20260621
+  id: claude-ask-user-question-no-selector-descriptions
+  provenance: synthetic Claude AskUserQuestion redraw with no highlighted selector and option descriptions
+- case_name: ask_user_question_no_selector_accessible
+  expected:
+    action: null
+    agent: claude
+    approval_visible: false
+    ask: true
+    command: null
+    confidence_min: 0.9
+    option_labels:
+    - Pane capture
+    - Transcript capture
+    - Other
+    - Chat about this
+    prompt_kind: question
+    prompt_type: ''
+    question_text: Which verifier mode should we use?
+    screen_key: needs-input
+    selected_option: 0
+    yes_selected: false
+  family: claude-ask-user-question-no-selector
+  file: captures/ask_user_question_no_selector_accessible__claude-code-2.1.185_20260621.yaml
+  fixture_id: ask_user_question_no_selector_accessible__claude-code-2.1.185_20260621
+  id: claude-ask-user-question-no-selector-accessible-real
+  provenance: real Claude Code 2.1.185 accessible AskUserQuestion no-selector capture
+- case_name: ask_user_question_selected_option
+  expected:
+    action: null
+    agent: claude
+    approval_visible: false
+    ask: true
+    command: null
+    confidence_min: 0.9
+    option_labels:
+    - Yes, 09:45 is right
+    - No, that's wrong
+    - Type something.
+    - Chat about this
+    prompt_kind: question
+    prompt_type: ''
+    question_text: Current time is 09:40:05 PDT. Adding 5 minutes gives 09:45:05 PDT. Is that the right time?
+    screen_key: needs-input
+    selected_option: 1
+    yes_selected: true
+  family: claude-ask-user-question-selected-option
+  file: captures/ask_user_question_selected_option__claude-code-2.1.185_20260621.yaml
+  fixture_id: ask_user_question_selected_option__claude-code-2.1.185_20260621
+  id: claude-ask-user-question-selected-option-real
+  provenance: real Claude Code 2.1.185 AskUserQuestion highlighted selector capture
+- case_name: interrupted_what_should_claude_do_instead
+  expected:
+    action: null
+    agent: claude
+    approval_visible: false
+    ask: true
+    command: null
+    confidence_min: 0.75
+    option_labels: []
+    prompt_kind: question
+    prompt_type: ''
+    question_text: Interrupted · What should Claude do instead?
+    screen_key: needs-input
+    selected_option: 0
+    yes_selected: false
+  family: claude-interrupted-question
+  file: synthetic/interrupted_what_should_claude_do_instead__claude-code-synthetic_20260621.yaml
+  fixture_id: interrupted_what_should_claude_do_instead__claude-code-synthetic_20260621
+  id: claude-interrupted-what-should-do-instead
+  provenance: synthetic Claude interrupted awaiting-user-instruction screen
+- case_name: interrupted_what_should_claude_do_instead
+  expected:
+    action: null
+    agent: claude
+    approval_visible: false
+    ask: true
+    command: null
+    confidence_min: 0.75
+    option_labels: []
+    prompt_kind: question
+    prompt_type: ''
+    question_text: Interrupted · What should Claude do instead?
+    screen_key: needs-input
+    selected_option: 0
+    yes_selected: false
+  family: claude-interrupted-question
+  file: captures/interrupted_what_should_claude_do_instead__claude-code-2.1.185_20260621.yaml
+  fixture_id: interrupted_what_should_claude_do_instead__claude-code-2.1.185_20260621
+  id: claude-interrupted-what-should-do-instead-real
+  provenance: real Claude Code 2.1.185 interrupted awaiting-user-instruction capture
+- case_name: goal_active
+  expected:
+    action: null
+    agent: claude
+    approval_visible: false
+    ask: false
+    command: null
+    confidence_min: 0.9
+    negative_reason_contains: ''
+    option_labels: []
+    prompt_kind: ''
+    prompt_type: ''
+    question_text: ''
+    screen_key: working
+    selected_option: 0
+    yes_selected: false
+  family: claude-goal-active
+  file: captures/goal_active__claude-code-2.1.185_20260621.yaml
+  fixture_id: goal_active__claude-code-2.1.185_20260621
+  id: claude-goal-active-real
+  provenance: real Claude Code 2.1.185 `/goal active` capture from scratch tmux
+- case_name: goal_active
+  expected:
+    action: null
+    agent: codex
+    approval_visible: false
+    ask: false
+    command: null
+    confidence_min: 0.9
+    negative_reason_contains: ''
+    option_labels: []
+    prompt_kind: ''
+    prompt_type: ''
+    question_text: ''
+    screen_key: working
+    selected_option: 0
+    yes_selected: false
+  family: codex-goal-active
+  file: captures/goal_active__codex-cli-0.141.0_20260621.yaml
+  fixture_id: goal_active__codex-cli-0.141.0_20260621
+  id: codex-goal-active-real
+  provenance: real Codex CLI 0.141.0 `Pursuing goal` capture from tmux 8001:0.0
 - case_name: non_permission_question
   expected:
     action: null

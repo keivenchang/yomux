@@ -3517,7 +3517,7 @@ function publishShareGeometryDigest() {
 
 function installShareGeometryDigestLoop() {
   if (shareGeometryDigestTimer) clearInterval(shareGeometryDigestTimer);
-  shareGeometryDigestTimer = setInterval(publishShareGeometryDigest, 2000);
+  shareGeometryDigestTimer = setInterval(publishShareGeometryDigest, shareGeometryDigestPublishMs);
 }
 
 function applyShareUiMessage(message) {

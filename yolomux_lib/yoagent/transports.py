@@ -241,7 +241,7 @@ def _classify_provider_backend(
     entry = auth_status.get(provider) if isinstance(auth_status, dict) else None
     entry = entry if isinstance(entry, dict) else {}
     cli_installed = bool(entry.get("installed"))
-    cli_logged_in = bool(entry.get("logged_in"))
+    cli_logged_in = cli_installed and entry.get("logged_in") is not False
     sdk_module = YOAGENT_PROVIDER_SDK_MODULES.get(provider, "")
     sdk_installed = bool(sdk_module) and bool(module_available(sdk_module))
     if (cli_installed and cli_logged_in) or sdk_installed:

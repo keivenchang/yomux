@@ -150,7 +150,7 @@ def resolve_yoagent_backend(backend: str, auth_status: dict[str, dict[str, Any]]
     status = agent_auth_status() if auth_status is None else auth_status
     for agent in ("codex", "claude"):
         entry = status.get(agent, {})
-        if entry.get("installed") and entry.get("logged_in"):
+        if entry.get("installed") and entry.get("logged_in") is not False:
             return agent
     return "deterministic"
 

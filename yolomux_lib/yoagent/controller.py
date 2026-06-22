@@ -13,6 +13,7 @@ import subprocess
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -36,6 +37,10 @@ from ..common import truncate_text
 from ..session_files import classify_change
 from ..session_files import scan_claude_transcript
 from ..session_files import scan_codex_transcript
+from ..prompt_detector import selected_prompt_option
+from ..tmux_utils import tmux_move_to_option
+from ..tmux_utils import tmux_run
+from ..tmux_utils import tmux_send_enter
 from ..tmux_utils import tmux_session_target
 from ..transcripts import codex_event_text
 from ..transcripts import compact_transcript_items
@@ -137,6 +142,98 @@ def yoagent_live_external_data_reply(capabilities: dict[str, Any]) -> str:
         f"I can't fetch live external data from YO!agent because {reason}. "
         "I can answer from YOLOmux state, read local files, or help you send a command to a tmux session."
     )
+
+
+@dataclass
+class YoagentChatContext:
+    controller: Any
+    payload: dict[str, Any]
+    access_role: str
+    started: float
+    question: str
+    request_id: str
+    stream_id: str
+    history: list[dict[str, Any]]
+    settings: dict[str, Any]
+    locale: str
+    force_activity_context: bool
+    activity_payload_cache: dict[str, Any] | None = None
+    context_lines_cache: list[str] | None = None
+
+    def get_activity_payload(self) -> dict[str, Any]:
+        if self.activity_payload_cache is None:
+            self.activity_payload_cache = self.controller.deps.yoagent_activity_payload(force=self.force_activity_context)
+        return self.activity_payload_cache
+
+    def get_context_lines(self) -> list[str]:
+        if self.context_lines_cache is None:
+            self.context_lines_cache = yoagent_context_lines(self.get_activity_payload())
+        return self.context_lines_cache
+
+    def base_response(
+        self,
+        answer: str,
+        *,
+        actions: list[dict[str, Any]] | None = None,
+        backend: str = "yolomux",
+        backend_used: str = "yolomux",
+        fallback_reason: str = "",
+        details: str = "",
+        cli: dict[str, Any] | None = None,
+        include_activity: bool = False,
+    ) -> dict[str, Any]:
+        response_activity = self.get_activity_payload() if include_activity else {}
+        return {
+            "answer": answer,
+            "actions": actions or [],
+            "backend": backend,
+            "backend_used": backend_used,
+            "fallback": bool(fallback_reason),
+            "fallback_reason": fallback_reason,
+            "details": details,
+            "cli": cli or {},
+            "context_lines": self.get_context_lines() if include_activity else [],
+            "generated_at": response_activity.get("generated_at"),
+            "session_order": response_activity.get("session_order", []),
+        }
+
+    def finish(self, response: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
+        controller = self.controller
+        if controller.deps.yoagent_chat_request_cancelled(self.request_id):
+            return self.finish_cancelled()
+        response.setdefault("answered_at", datetime.now(timezone.utc).isoformat())
+        response.setdefault("request_id", self.request_id)
+        response.setdefault("stream_id", self.stream_id)
+        timing = response.get("timing") if isinstance(response.get("timing"), dict) else {}
+        timing.setdefault("ttfr_ms", round((time.monotonic() - self.started) * 1000, 3))
+        response["timing"] = timing
+        answer_text = str(response.get("answer") or "")
+        answer_text, hidden_thinking_removed = strip_yoagent_hidden_thinking(answer_text)
+        response["answer"] = answer_text
+        if hidden_thinking_removed:
+            response["hidden_thinking_removed"] = True
+        details = str(response.get("details") or "").strip()
+        generated_details = yoagent_response_details(response)
+        response["details"] = "\n".join(part for part in [details, generated_details] if part).strip()
+        actions = response.get("actions") if isinstance(response.get("actions"), list) else []
+        if answer_text:
+            stream_fields = controller.deps.yoagent_stream_auxiliary_message_fields(str(response.get("stream_id") or ""))
+            controller.record_yoagent_message("assistant", answer_text, actions=actions, details=str(response.get("details") or ""), response_ms=yoagent_response_ms(response), **stream_fields)
+        response["conversation"] = controller.yoagent_conversation_payload()
+        controller.deps.complete_yoagent_chat_request(self.request_id)
+        return response, HTTPStatus.OK
+
+    def finish_cancelled(self) -> tuple[dict[str, Any], HTTPStatus]:
+        controller = self.controller
+        controller.publish_yoagent_stream_delta(self.stream_id, "", phase="stopped", done=True, aborted=True, auxiliary_done=True)
+        controller.deps.complete_yoagent_chat_request(self.request_id)
+        return {
+            "ok": True,
+            "cancelled": True,
+            "request_id": self.request_id,
+            "stream_id": self.stream_id,
+            "conversation": controller.yoagent_conversation_payload(),
+        }, HTTPStatus.OK
 
 
 class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
@@ -1035,6 +1132,104 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         return False, f"target agent is not accepting an AI prompt ({screen_key})"
 
 
+    def yoagent_prompt_answer_options_text(self, target: dict[str, Any]) -> str:
+        screen = target.get("screen") if isinstance(target.get("screen"), dict) else {}
+        prompt = target.get("prompt") if isinstance(target.get("prompt"), dict) else {}
+        options = screen.get("options") if isinstance(screen.get("options"), list) else prompt.get("options") if isinstance(prompt.get("options"), list) else []
+        rows = []
+        for index, option in enumerate(options[:8], start=1):
+            text = str(option.get("text") if isinstance(option, dict) else option).strip()
+            if text:
+                rows.append(f"{index}. {text}")
+        return "; ".join(rows)
+
+
+    def yoagent_target_prompt_visible(self, target: dict[str, Any]) -> bool:
+        prompt = target.get("prompt") if isinstance(target.get("prompt"), dict) else {}
+        screen = target.get("screen") if isinstance(target.get("screen"), dict) else {}
+        screen_key = str(screen.get("key") or "").strip()
+        return bool(prompt.get("visible")) or screen_key in {"approval", "needs-approval", "yolo-approval", "needs-input"}
+
+
+    def yoagent_prompt_answer_error_prefix(self, target: dict[str, Any]) -> str:
+        prompt = target.get("prompt") if isinstance(target.get("prompt"), dict) else {}
+        screen = target.get("screen") if isinstance(target.get("screen"), dict) else {}
+        screen_key = str(screen.get("key") or "").strip()
+        if screen_key == "needs-input":
+            return "target agent is asking a question"
+        if bool(prompt.get("visible")) or screen_key in {"approval", "needs-approval", "yolo-approval"}:
+            return "target agent is at an approval prompt"
+        return "target is at a prompt"
+
+
+    def yoagent_prompt_answer_plan(self, text: str, target: dict[str, Any]) -> dict[str, Any]:
+        prompt = target.get("prompt") if isinstance(target.get("prompt"), dict) else {}
+        screen = target.get("screen") if isinstance(target.get("screen"), dict) else {}
+        if not self.yoagent_target_prompt_visible(target):
+            return {"ready": False, "error": "target is not at a visible approval/question prompt"}
+        raw_text = " ".join(str(text or "").strip().split())
+        normalized = raw_text.lower().strip(" .")
+        selected = int(screen.get("selected_option") or prompt.get("selected_option") or 0)
+        options = screen.get("options") if isinstance(screen.get("options"), list) else prompt.get("options") if isinstance(prompt.get("options"), list) else []
+        option = 0
+        key = ""
+        number_match = re.fullmatch(r"(?:option\s*)?(\d{1,2})", normalized)
+        if number_match:
+            option = int(number_match.group(1))
+        elif normalized in {"enter", "return", "press enter", "select", "selected", "current"}:
+            key = "Enter"
+            option = selected
+        elif normalized in {"escape", "esc", "cancel", "press escape"}:
+            key = "Escape"
+        elif normalized in {"yes", "y", "approve", "allow"}:
+            option = 1
+        elif normalized in {"no", "n", "decline", "deny"}:
+            option = 2
+        else:
+            options_text = self.yoagent_prompt_answer_options_text(target)
+            suffix = f" Options: {options_text}." if options_text else ""
+            return {"ready": False, "error": f"{self.yoagent_prompt_answer_error_prefix(target)}; answer with an option number, Enter, or Esc.{suffix}"}
+        if key == "Escape":
+            return {"ready": True, "key": key, "selected_option": selected, "text": raw_text}
+        if option <= 0:
+            return {"ready": False, "error": "target prompt has no visible selected option to confirm"}
+        if options and option > len(options):
+            return {"ready": False, "error": f"target prompt has {len(options)} option(s); option {option} is not available"}
+        if selected <= 0:
+            options_text = self.yoagent_prompt_answer_options_text(target)
+            suffix = f" Options: {options_text}." if options_text else ""
+            return {"ready": False, "error": f"{self.yoagent_prompt_answer_error_prefix(target)} has no visible selected option; I did not paste free text into the menu.{suffix}"}
+        return {"ready": True, "option": option, "selected_option": selected, "text": raw_text}
+
+
+    def execute_yoagent_prompt_answer(self, preview: dict[str, Any], current: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
+        plan = self.yoagent_prompt_answer_plan(str(preview.get("text") or ""), current)
+        preview_id = str(preview.get("id") or "")
+        session = str(preview.get("session") or current.get("session") or "")
+        pane_target = str(current.get("pane_target") or "").strip()
+        if not plan.get("ready"):
+            return {"preview_id": preview_id, "session": session, "sent": False, "reason_code": "prompt-answer-unavailable", "error": plan.get("error") or "prompt answer is not available"}, HTTPStatus.CONFLICT
+        if not pane_target:
+            return {"preview_id": preview_id, "session": session, "sent": False, "reason_code": "disconnected", "error": "target pane is missing"}, HTTPStatus.CONFLICT
+        key = str(plan.get("key") or "")
+        if key == "Escape":
+            result = tmux_run("send-keys", "-t", pane_target, "Escape", check=False, timeout=5.0)
+            if result.returncode != 0:
+                return {"preview_id": preview_id, "session": session, "sent": False, "reason_code": "tmux-send-failed", "error": (result.stderr or result.stdout or "tmux send-keys failed").strip()}, HTTPStatus.INTERNAL_SERVER_ERROR
+            answer = f"I cancelled the prompt in tmux session `{session}` with Esc."
+            return {"ok": True, "preview_id": preview_id, "session": session, "sent": True, "prompt_answer": True, "key": "Escape", "answer": answer}, HTTPStatus.OK
+        option = int(plan.get("option") or 0)
+        selected = int(plan.get("selected_option") or 0)
+        tmux_move_to_option(pane_target, option, selected)
+        visible_text = self.deps.tmux_capture_pane(pane_target, visible_only=True) or ""
+        confirmed = selected_prompt_option(visible_text)
+        if confirmed != option:
+            return {"preview_id": preview_id, "session": session, "sent": False, "reason_code": "prompt-answer-unverified", "error": f"prompt highlight is {confirmed or 'none'}, expected {option}; I did not press Enter"}, HTTPStatus.CONFLICT
+        tmux_send_enter(pane_target)
+        answer = f"I answered the prompt in tmux session `{session}` by selecting option {option}."
+        return {"ok": True, "preview_id": preview_id, "session": session, "sent": True, "prompt_answer": True, "option": option, "answer": answer}, HTTPStatus.OK
+
+
     def yoagent_action_risk_labels(self, text: str) -> list[str]:
         value = str(text or "")
         checks = [
@@ -1060,6 +1255,10 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         if status != HTTPStatus.OK:
             return target, status
         accepting, acceptance_text = self.deps.yoagent_action_acceptance(target)
+        prompt_answer = self.yoagent_prompt_answer_plan(text, target) if not accepting and self.yoagent_target_prompt_visible(target) else {}
+        prompt_answer_ready = bool(prompt_answer.get("ready"))
+        if prompt_answer and not prompt_answer_ready:
+            acceptance_text = str(prompt_answer.get("error") or acceptance_text)
         preview_id = f"ya_{secrets.token_urlsafe(12)}"
         risk_labels = self.deps.yoagent_action_risk_labels(text)
         requires_confirmation = bool(intent.get("requires_confirmation") or risk_labels)
@@ -1072,8 +1271,8 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             "requires_confirmation": requires_confirmation,
             "return_result": bool(intent.get("return_result")),
             "risk_labels": risk_labels,
-            "status": "ready" if accepting else "waiting",
-            "status_text": "ready to send now" if accepting else acceptance_text,
+            "status": "ready" if accepting or prompt_answer_ready else "waiting",
+            "status_text": "ready to send now" if accepting else "ready to answer prompt" if prompt_answer_ready else acceptance_text,
             "target": {key: target.get(key) for key in [
                 "session",
                 "pane_target",
@@ -1095,6 +1294,8 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             "created_ts": time.time(),
             "expires_in_seconds": YOAGENT_ACTION_PREVIEW_TTL_SECONDS,
         }
+        if prompt_answer:
+            preview["prompt_answer"] = {key: prompt_answer.get(key) for key in ["ready", "option", "selected_option", "key", "text", "error"] if key in prompt_answer}
         if isinstance(intent.get("handoff"), dict):
             handoff = intent["handoff"]
             preview["handoff"] = {
@@ -1102,7 +1303,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                 "session": str(handoff.get("session") or ""),
                 "instruction": truncate_text(str(handoff.get("instruction") or ""), YOAGENT_ACTION_TEXT_LIMIT),
             }
-        if accepting:
+        if accepting or prompt_answer_ready:
             with self.yoagent_action_lock:
                 self.yoagent_action_previews[preview_id] = copy.deepcopy(preview)
         self.log_event(session, "yoagent_action_preview", f"YO!agent previewed send to {session}", {
@@ -1602,15 +1803,29 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         current, status = self.deps.yoagent_action_target(str(preview.get("session") or ""))
         if status != HTTPStatus.OK:
             return current, status
-        accepting, acceptance_text = self.deps.yoagent_action_acceptance(current)
-        if not accepting:
-            return {"preview_id": preview_id, "session": preview.get("session"), "error": acceptance_text}, HTTPStatus.CONFLICT
         target = preview.get("target") if isinstance(preview.get("target"), dict) else {}
         stale_keys = ["pane_target", "agent_kind", "agent_session_id"]
         if any(str(current.get(key) or "") != str(target.get(key) or "") for key in stale_keys):
             return {"preview_id": preview_id, "session": preview.get("session"), "reason_code": "stale-target", "error": "action target changed; create a fresh preview"}, HTTPStatus.CONFLICT
         if normalize_yoagent_transport_id(str(current.get("transport") or "")) != normalize_yoagent_transport_id(str(target.get("transport") or "")):
             return {"preview_id": preview_id, "session": preview.get("session"), "reason_code": "stale-target", "error": "action target changed; create a fresh preview"}, HTTPStatus.CONFLICT
+        if isinstance(preview.get("prompt_answer"), dict):
+            result, result_status = self.execute_yoagent_prompt_answer(preview, current)
+            if result_status == HTTPStatus.OK:
+                with self.yoagent_action_lock:
+                    self.yoagent_action_previews.pop(preview_id, None)
+                self.log_event(str(preview.get("session") or ""), "yoagent_prompt_answered", f"YO!agent answered prompt in {preview.get('session')}", {
+                    "preview_id": preview_id,
+                    "option": result.get("option"),
+                    "key": result.get("key"),
+                })
+                if persist_result:
+                    self.record_yoagent_message("assistant", str(result.get("answer") or ""), created_at=datetime.now(timezone.utc).isoformat())
+                    result["conversation"] = self.yoagent_conversation_payload()
+            return result, result_status
+        accepting, acceptance_text = self.deps.yoagent_action_acceptance(current)
+        if not accepting:
+            return {"preview_id": preview_id, "session": preview.get("session"), "error": acceptance_text}, HTTPStatus.CONFLICT
         target = {
             **target,
             "agent_transcript": current.get("agent_transcript") or target.get("agent_transcript") or "",
@@ -1865,11 +2080,11 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         return self.deps.start_yoagent_backend_prewarm(payload, reason="client_prewarm")
 
 
-    def yoagent_chat(self, payload: dict[str, Any], access_role: str = "admin") -> tuple[dict[str, Any], HTTPStatus]:
+    def create_yoagent_chat_context(self, payload: dict[str, Any], access_role: str = "admin") -> tuple[YoagentChatContext | None, tuple[dict[str, Any], HTTPStatus] | None]:
         chat_started = time.monotonic()
         question = truncate_text(" ".join(str(payload.get("message") or payload.get("question") or "").split()), 4000)
         if not question:
-            return {"error": "missing YO!agent message"}, HTTPStatus.BAD_REQUEST
+            return None, ({"error": "missing YO!agent message"}, HTTPStatus.BAD_REQUEST)
         request_id = self.normalize_yoagent_chat_request_id(payload.get("request_id")) or f"chat-{uuid.uuid4().hex}"
         stream_id = self.normalize_yoagent_chat_request_id(payload.get("stream_id")) or request_id
         self.register_yoagent_chat_request(request_id, stream_id)
@@ -1877,127 +2092,71 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         self.record_yoagent_message("user", question)
         settings = self.yoagent_settings()
         locale = str(payload.get("locale") or "en").strip()
-        activity_payload_cache: dict[str, Any] | None = None
-        context_lines_cache: list[str] | None = None
         force_activity_context = yoagent_question_requests_session_list(question)
+        return YoagentChatContext(
+            controller=self,
+            payload=payload,
+            access_role=access_role,
+            started=chat_started,
+            question=question,
+            request_id=request_id,
+            stream_id=stream_id,
+            history=history,
+            settings=settings,
+            locale=locale,
+            force_activity_context=force_activity_context,
+        ), None
 
-        def get_activity_payload() -> dict[str, Any]:
-            nonlocal activity_payload_cache
-            if activity_payload_cache is None:
-                activity_payload_cache = self.deps.yoagent_activity_payload(force=force_activity_context)
-            return activity_payload_cache
-
-        def get_context_lines() -> list[str]:
-            nonlocal context_lines_cache
-            if context_lines_cache is None:
-                context_lines_cache = yoagent_context_lines(get_activity_payload())
-            return context_lines_cache
-
-        def finish(response: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
-            if self.deps.yoagent_chat_request_cancelled(request_id):
-                return finish_cancelled()
-            response.setdefault("answered_at", datetime.now(timezone.utc).isoformat())
-            response.setdefault("request_id", request_id)
-            response.setdefault("stream_id", stream_id)
-            timing = response.get("timing") if isinstance(response.get("timing"), dict) else {}
-            timing.setdefault("ttfr_ms", round((time.monotonic() - chat_started) * 1000, 3))
-            response["timing"] = timing
-            answer_text = str(response.get("answer") or "")
-            answer_text, hidden_thinking_removed = strip_yoagent_hidden_thinking(answer_text)
-            response["answer"] = answer_text
-            if hidden_thinking_removed:
-                response["hidden_thinking_removed"] = True
-            details = str(response.get("details") or "").strip()
-            generated_details = yoagent_response_details(response)
-            response["details"] = "\n".join(part for part in [details, generated_details] if part).strip()
-            actions = response.get("actions") if isinstance(response.get("actions"), list) else []
-            if answer_text:
-                stream_fields = self.deps.yoagent_stream_auxiliary_message_fields(str(response.get("stream_id") or ""))
-                self.record_yoagent_message("assistant", answer_text, actions=actions, details=str(response.get("details") or ""), response_ms=yoagent_response_ms(response), **stream_fields)
-            response["conversation"] = self.yoagent_conversation_payload()
-            self.deps.complete_yoagent_chat_request(request_id)
-            return response, HTTPStatus.OK
-
-        def finish_cancelled() -> tuple[dict[str, Any], HTTPStatus]:
-            self.publish_yoagent_stream_delta(stream_id, "", phase="stopped", done=True, aborted=True, auxiliary_done=True)
-            self.deps.complete_yoagent_chat_request(request_id)
-            return {
-                "ok": True,
-                "cancelled": True,
-                "request_id": request_id,
-                "stream_id": stream_id,
-                "conversation": self.yoagent_conversation_payload(),
-            }, HTTPStatus.OK
-
-        def base_response(
-            answer: str,
-            *,
-            actions: list[dict[str, Any]] | None = None,
-            backend: str = "yolomux",
-            backend_used: str = "yolomux",
-            fallback_reason: str = "",
-            details: str = "",
-            cli: dict[str, Any] | None = None,
-            include_activity: bool = False,
-        ) -> dict[str, Any]:
-            response_activity = get_activity_payload() if include_activity else {}
-            return {
-                "answer": answer,
-                "actions": actions or [],
-                "backend": backend,
-                "backend_used": backend_used,
-                "fallback": bool(fallback_reason),
-                "fallback_reason": fallback_reason,
-                "details": details,
-                "cli": cli or {},
-                "context_lines": get_context_lines() if include_activity else [],
-                "generated_at": response_activity.get("generated_at"),
-                "session_order": response_activity.get("session_order", []),
-            }
-
-        skill_file_intent = parse_yoagent_skill_file_intent(question)
+    def yoagent_chat_skill_file_response(self, ctx: YoagentChatContext) -> tuple[dict[str, Any], HTTPStatus] | None:
+        skill_file_intent = parse_yoagent_skill_file_intent(ctx.question)
         if skill_file_intent:
-            if access_role != "admin":
-                return finish(base_response("YO!skill and context file management requires an admin login. I did not change anything."))
-            return finish(base_response(self.yoagent_skill_file_answer(skill_file_intent)))
+            if ctx.access_role != "admin":
+                return ctx.finish(ctx.base_response("YO!skill and context file management requires an admin login. I did not change anything."))
+            return ctx.finish(ctx.base_response(self.yoagent_skill_file_answer(skill_file_intent)))
+        return None
 
-        job_intent = parse_yoagent_job_intent(question, self.sessions)
+    def yoagent_chat_job_response(self, ctx: YoagentChatContext) -> tuple[dict[str, Any], HTTPStatus] | None:
+        job_intent = parse_yoagent_job_intent(ctx.question, self.sessions)
         if job_intent:
-            if access_role != "admin":
-                return finish(base_response("YO!agent watch, notify, and job-cancel actions require an admin login. I did not change anything."))
+            if ctx.access_role != "admin":
+                return ctx.finish(ctx.base_response("YO!agent watch, notify, and job-cancel actions require an admin login. I did not change anything."))
             if job_intent.get("type") == "cancel_session_jobs":
                 cancel_payload, cancel_status = self.deps.cancel_yoagent_jobs_for_session(str(job_intent.get("session") or ""))
                 if cancel_status != HTTPStatus.OK:
-                    self.deps.complete_yoagent_chat_request(request_id)
+                    self.deps.complete_yoagent_chat_request(ctx.request_id)
                     return {"error": cancel_payload.get("error") or "failed to cancel YO!agent jobs", **cancel_payload}, cancel_status
-                return finish(base_response(f"I cancelled {cancel_payload.get('count', 0)} pending YO!agent job(s) for tmux session `{cancel_payload.get('session')}`."))
+                return ctx.finish(ctx.base_response(f"I cancelled {cancel_payload.get('count', 0)} pending YO!agent job(s) for tmux session `{cancel_payload.get('session')}`."))
             job_payload, job_status = self.deps.create_yoagent_job(job_intent)
             if job_status not in {HTTPStatus.OK, HTTPStatus.CONFLICT}:
-                self.deps.complete_yoagent_chat_request(request_id)
+                self.deps.complete_yoagent_chat_request(ctx.request_id)
                 return {"error": job_payload.get("error") or "failed to create YO!agent job", **job_payload}, job_status
             job = job_payload.get("job") if isinstance(job_payload.get("job"), dict) else {}
             duplicate = " I reused the existing matching job." if job_payload.get("duplicate") else ""
-            return finish(base_response(self.deps.yoagent_job_answer(job) + duplicate))
+            return ctx.finish(ctx.base_response(self.deps.yoagent_job_answer(job) + duplicate))
+        return None
 
-        action_intent = parse_yoagent_action_intent(question, history, self.sessions)
+    def yoagent_chat_action_response(self, ctx: YoagentChatContext) -> tuple[dict[str, Any], HTTPStatus] | None:
+        action_intent = parse_yoagent_action_intent(ctx.question, ctx.history, self.sessions)
         if action_intent:
-            if access_role != "admin":
-                return finish(base_response("Sending prompts to tmux sessions through YO!agent requires an admin login. I did not send anything."))
+            if ctx.access_role != "admin":
+                return ctx.finish(ctx.base_response("Sending prompts to tmux sessions through YO!agent requires an admin login. I did not send anything."))
             action, action_status = self.deps.create_yoagent_action_preview(action_intent)
             if action_status != HTTPStatus.OK:
-                self.deps.complete_yoagent_chat_request(request_id)
+                self.deps.complete_yoagent_chat_request(ctx.request_id)
                 return {"error": action.get("error") or "failed to create YO!agent action", **action}, action_status
             confirmation_required = bool(action_intent.get("requires_confirmation") or action.get("requires_confirmation"))
             if action.get("status") == "ready" and not confirmation_required:
                 result, result_status = self.deps.execute_yoagent_send_action({"preview_id": action.get("id")}, persist_result=False, start_result_watch=False)
                 if result_status == HTTPStatus.OK:
+                    if result.get("prompt_answer"):
+                        return ctx.finish(ctx.base_response(str(result.get("answer") or self.deps.yoagent_action_answer(action))))
                     if action.get("return_result") and not result.get("result_recorded"):
                         result["result_watch"] = self.deps.start_yoagent_action_result_watcher(
                             action,
                             result.get("result_marker") if isinstance(result.get("result_marker"), dict) else {},
                         )
-                    return finish(base_response(self.deps.yoagent_action_sent_answer(action, result)))
-                return finish(base_response(f"I did not send anything because {result.get('error') or 'the target is not accepting an AI prompt'}."))
+                    return ctx.finish(ctx.base_response(self.deps.yoagent_action_sent_answer(action, result)))
+                return ctx.finish(ctx.base_response(f"I did not send anything because {result.get('error') or 'the target is not accepting an AI prompt'}."))
             if action_intent.get("type") == "wait_then_send" and not confirmation_required:
                 job_payload, job_status = self.deps.create_yoagent_job({
                     "type": "wait_then_send",
@@ -2008,60 +2167,107 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                 if job_status in {HTTPStatus.OK, HTTPStatus.CONFLICT}:
                     job = job_payload.get("job") if isinstance(job_payload.get("job"), dict) else {}
                     duplicate = " I reused the existing matching job." if job_payload.get("duplicate") else ""
-                    return finish(base_response(self.deps.yoagent_job_answer(job) + duplicate))
+                    return ctx.finish(ctx.base_response(self.deps.yoagent_job_answer(job) + duplicate))
             if not confirmation_required:
-                return finish(base_response(self.deps.yoagent_action_answer(action), details=self.deps.yoagent_action_preview_details(action)))
-            return finish(base_response(self.deps.yoagent_action_answer(action), actions=[action], details=self.deps.yoagent_action_preview_details(action)))
+                return ctx.finish(ctx.base_response(self.deps.yoagent_action_answer(action), details=self.deps.yoagent_action_preview_details(action)))
+            return ctx.finish(ctx.base_response(self.deps.yoagent_action_answer(action), actions=[action], details=self.deps.yoagent_action_preview_details(action)))
+        return None
+
+    def yoagent_chat_work_next_response(self, ctx: YoagentChatContext) -> tuple[dict[str, Any], HTTPStatus] | None:
+        if yoagent_question_requests_work_next(ctx.question):
+            activity_payload = ctx.get_activity_payload()
+            answer = deterministic_yoagent_reply(ctx.question, activity_payload, ctx.settings, ctx.locale)
+            return ctx.finish(ctx.base_response(answer, include_activity=True))
+        return None
+
+    def yoagent_chat_operator_response(self, ctx: YoagentChatContext) -> tuple[dict[str, Any], HTTPStatus] | None:
         settings_payload_data = self.settings_payload()
-        if yoagent_question_requests_work_next(question):
-            activity_payload = get_activity_payload()
-            answer = deterministic_yoagent_reply(question, activity_payload, settings, locale)
-            return finish(base_response(answer, include_activity=True))
-        activity_for_operator = get_activity_payload() if product_state_needs_activity(question) else {}
-        if parse_settings_write(question, settings_payload_data) or parse_settings_read(question, settings_payload_data):
+        activity_for_operator = ctx.get_activity_payload() if product_state_needs_activity(ctx.question) else {}
+        if parse_settings_write(ctx.question, settings_payload_data) or parse_settings_read(ctx.question, settings_payload_data):
             activity_for_operator = {}
         operator_response = yoagent_operator_response(
-            question,
+            ctx.question,
             settings_payload_data,
             activity_for_operator,
-            access_role,
+            ctx.access_role,
             self.save_settings,
         )
         if operator_response:
             operator_response.setdefault("context_lines", yoagent_context_lines(activity_for_operator) if activity_for_operator else [])
             operator_response.setdefault("generated_at", activity_for_operator.get("generated_at") if activity_for_operator else None)
             operator_response.setdefault("session_order", activity_for_operator.get("session_order", []) if activity_for_operator else [])
-            return finish(operator_response)
-        requested_backend = str(settings.get("backend") or "deterministic").strip().lower()
+            return ctx.finish(operator_response)
+        return None
+
+    def yoagent_chat_backend_info(self, ctx: YoagentChatContext) -> tuple[str, str, str, dict[str, Any]]:
+        requested_backend = str(ctx.settings.get("backend") or "deterministic").strip().lower()
         backend = self.deps.resolve_yoagent_backend(requested_backend)
-        invocation = str(settings.get("invocation") or "cli").strip().lower()
-        external_tool_request = yoagent_question_requests_external_tools(question)
+        invocation = str(ctx.settings.get("invocation") or "cli").strip().lower()
         tool_capabilities = yoagent_chat_tool_capabilities(backend, invocation)
+        return requested_backend, backend, invocation, tool_capabilities
+
+    def yoagent_chat_external_tools_response(self, ctx: YoagentChatContext) -> tuple[dict[str, Any], HTTPStatus] | None:
+        _requested_backend, _backend, _invocation, tool_capabilities = self.yoagent_chat_backend_info(ctx)
+        external_tool_request = yoagent_question_requests_external_tools(ctx.question)
         if external_tool_request and not tool_capabilities.get("enabled"):
             external_reply = yoagent_live_external_data_reply(tool_capabilities)
-            return finish(base_response(external_reply, details=f"YO!agent tool policy: {tool_capabilities.get('reason') or 'live tools unavailable'}."))
+            return ctx.finish(ctx.base_response(external_reply, details=f"YO!agent tool policy: {tool_capabilities.get('reason') or 'live tools unavailable'}."))
+        return None
+
+    def yoagent_chat_cli_or_fallback_response(self, ctx: YoagentChatContext) -> tuple[dict[str, Any], HTTPStatus]:
+        requested_backend, backend, invocation, tool_capabilities = self.yoagent_chat_backend_info(ctx)
+        external_tool_request = yoagent_question_requests_external_tools(ctx.question)
         answer = ""
         backend_used = "deterministic"
         fallback_reason = ""
         cli_status: dict[str, Any] = {}
-        include_model_activity = yoagent_question_needs_activity_context(question)
-        activity_payload = get_activity_payload() if include_model_activity else {}
+        include_model_activity = yoagent_question_needs_activity_context(ctx.question)
+        activity_payload = ctx.get_activity_payload() if include_model_activity else {}
         if backend in {"codex", "claude"} and invocation == "cli":
             with self.yoagent_cli_lock:
-                if self.deps.yoagent_chat_request_cancelled(request_id):
-                    return finish_cancelled()
-                answer, fallback_reason, cli_status = self.deps.run_yoagent_cli_backend(backend, question, activity_payload, settings, history, locale, stream_id=stream_id, request_id=request_id, include_activity_context=include_model_activity, require_external_tools=external_tool_request)
-            if self.deps.yoagent_chat_request_cancelled(request_id):
-                return finish_cancelled()
+                if self.deps.yoagent_chat_request_cancelled(ctx.request_id):
+                    return ctx.finish_cancelled()
+                answer, fallback_reason, cli_status = self.deps.run_yoagent_cli_backend(
+                    backend,
+                    ctx.question,
+                    activity_payload,
+                    ctx.settings,
+                    ctx.history,
+                    ctx.locale,
+                    stream_id=ctx.stream_id,
+                    request_id=ctx.request_id,
+                    include_activity_context=include_model_activity,
+                    require_external_tools=external_tool_request,
+                )
+            if self.deps.yoagent_chat_request_cancelled(ctx.request_id):
+                return ctx.finish_cancelled()
             if answer:
                 backend_used = backend
         elif backend in {"codex", "claude"} and invocation != "cli":
             fallback_reason = f"{backend} {invocation} invocation is not available yet"
         if not answer:
-            answer = deterministic_yoagent_reply(question, activity_payload if include_model_activity else get_activity_payload(), settings, locale)
+            answer = deterministic_yoagent_reply(ctx.question, activity_payload if include_model_activity else ctx.get_activity_payload(), ctx.settings, ctx.locale)
         if tool_capabilities:
             cli_status.setdefault("tool_capabilities", tool_capabilities)
-        response = base_response(answer, backend=requested_backend, backend_used=backend_used, fallback_reason=fallback_reason, cli=cli_status, include_activity=include_model_activity)
+        response = ctx.base_response(answer, backend=requested_backend, backend_used=backend_used, fallback_reason=fallback_reason, cli=cli_status, include_activity=include_model_activity)
         if cli_status:
-            response["stream_id"] = stream_id
-        return finish(response)
+            response["stream_id"] = ctx.stream_id
+        return ctx.finish(response)
+
+    def yoagent_chat(self, payload: dict[str, Any], access_role: str = "admin") -> tuple[dict[str, Any], HTTPStatus]:
+        ctx, error = self.create_yoagent_chat_context(payload, access_role)
+        if error is not None:
+            return error
+        assert ctx is not None
+        for handler in (
+            self.yoagent_chat_skill_file_response,
+            self.yoagent_chat_job_response,
+            self.yoagent_chat_action_response,
+            self.yoagent_chat_work_next_response,
+            self.yoagent_chat_operator_response,
+            self.yoagent_chat_external_tools_response,
+        ):
+            response = handler(ctx)
+            if response is not None:
+                return response
+        return self.yoagent_chat_cli_or_fallback_response(ctx)

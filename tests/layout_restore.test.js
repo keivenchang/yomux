@@ -1048,7 +1048,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes('maybeHandleServerVersionChange(transcriptMeta.server_version)'), 'the metadata poll checks the live server version');
     // #39: the new-session picker greys an installed-but-logged-out agent and names its login command;
     // the metadata poll refreshes agentAuth so it re-enables after the user logs in.
-    assert.ok(/function agentLoggedIn\(agent\)[\s\S]*entry\.logged_in === true/.test(source), '#39: agentLoggedIn reads the per-agent logged_in flag');
+    assert.ok(/function agentLoggedIn\(agent\)[\s\S]*entry\.logged_in !== false/.test(source), '#39: agentLoggedIn treats only confirmed logged-out status as unavailable');
     assert.ok(source.includes('const loggedOut = available && !agentLoggedIn(agent);'), '#39: the new-session picker computes a logged-out state per agent');
     assert.ok(/disabled: readOnlyMode \|\| !available \|\| loggedOut \|\| capped/.test(source), '#39: a logged-out agent is disabled in the picker');
     assert.ok(/loggedOut[\s\S]*?t\('menu\.tmux\.runLogin', \{command: agentLoginCommand\(agent\)\}\)/.test(source), '#39: a logged-out agent shows its login command as the menu detail (via t())');
@@ -1056,7 +1056,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/function agentUnavailableReason\(agent\)[\s\S]*unavailable_reason/.test(source), '#62: unavailable agents carry a server-provided reason');
     assert.ok(/agentUnavailableReason\(agent\) === 'not-on-path'[\s\S]*t\('menu\.tmux\.agentUnavailablePath'\)/.test(source), '#62: missing agent CLIs show the server-PATH detail');
     assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['menu.tmux.agentUnavailablePath'], 'Not on server PATH', '#62: missing-agent detail is localized in English');
-    assert.ok(source.includes('if (transcriptMeta.agentAuth) agentAuth = transcriptMeta.agentAuth;'), '#39: the metadata poll refreshes agent login status');
+    assert.ok(/function applyAgentAvailabilityPayload[\s\S]*payload\.agentAuth[\s\S]*payload\.availableAgents/.test(source) && source.includes('applyAgentAvailabilityPayload(transcriptMeta)'), '#39: the metadata poll refreshes agent login and installed-agent status');
     // #41: the frontend mirrors the server's auto backend resolution (codex -> claude -> deterministic)
     // so the chat input enables to match what the backend will run, and defaults to auto.
     assert.ok(/const YOAGENT_CHAT_BACKENDS = \['codex', 'claude'\]/.test(source) && /function yoagentResolvedBackend\(\)[\s\S]*?for \(const agent of YOAGENT_CHAT_BACKENDS\)[\s\S]*?yoagentBackendUsable\(agent\)/.test(source), '#41: yoagentResolvedBackend prefers codex then claude among logged-in agents');
@@ -1649,7 +1649,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/function renderFileExplorerChangesPanel[\s\S]*renderChangesRoot\(/.test(source), 'Finder diff panel / embedded Differ refreshes through the shared incremental render root');
     assert.ok(source.includes('function updateFileTreeRowContents('), 'Finder row text/icon updates are localized');
     assert.ok(source.includes('function fileTreeRowDerivedState(') && source.includes('function applyFileTreeRowDerivedState('), 'R3: Finder derived row state has one builder and one applier');
-    assert.ok(/function updateFileTreeRow\([\s\S]*fileTreeRowDerivedState\(fullPath, entry,[\s\S]*applyFileTreeRowDerivedState\(row, derivedState\)/.test(source), 'R3: full Finder/Differ render applies the shared derived row state');
+    assert.ok(/function updateFileTreeRow\([\s\S]*buildFileTreeRowState\(fullPath, entry, depth, options\)[\s\S]*applyFileTreeRowDerivedState\(row, rowState\.derivedState\)/.test(source), 'R3/RA4: full Finder/Differ render applies the shared derived row state through the row-state builder');
     assert.ok(/function updateFileTreeGitStatusRows\(\)[\s\S]*applyFileTreeRowDerivedState\(row, fileTreeRowDerivedState\(fullPath, entry,/.test(source), 'R3: lightweight Finder refresh applies the shared derived row state');
     assert.equal(/const gitStatus = row\.dataset\.kind === 'file' \? fileTreeGitStatus/.test(source), false, 'R3: lightweight Finder refresh no longer has its own git-status derivation fork');
     const updateStart = source.indexOf('function updateFileTreeRowContents(');
@@ -1689,7 +1689,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes("event.dataTransfer.setData('application/x-yolomux-file'"), 'Modified-files drag carries the same file payload as Finder drag');
     assert.ok(source.includes("'Allow index'"), 'Finder directory context menu exposes Allow index');
     assert.ok(source.includes("'Disallow index'"), 'Finder directory context menu exposes Disallow index');
-    assert.ok(source.includes("row.classList.toggle('indexed-directory', indexedDirectory)"), 'Finder row render marks indexed directories');
+    assert.ok(source.includes("row.classList.toggle('indexed-directory', state.indexedDirectory)"), 'Finder row render marks indexed directories');
     assert.ok(source.includes("'file-icon-dir-indexed'"), 'Finder indexed directories use a distinct icon class');
   });
 

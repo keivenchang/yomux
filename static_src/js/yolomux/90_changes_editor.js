@@ -892,13 +892,14 @@ function compactRelativeFileTimeText(unit, countText) {
   return t(`relative.compact.${unit}.${category}`, {count: countText});
 }
 
-function sessionFileRelativeTimeText(mtime, nowSeconds = Date.now() / 1000) {
+function sessionFileRelativeTimeText(mtime, nowSeconds = fileTreeRecencyNowMs() / 1000) {
   const value = Number(mtime || 0);
   if (!value) return '';
   const now = Number(nowSeconds);
   if (!Number.isFinite(now)) return '';
   const age = now - value;
   if (age <= 0) return t('relative.compact.now');
+  if (age < FILE_TREE_RECENCY_JUST_UPDATED_MAX_AGE_SECONDS) return t('relative.compact.lessThan15Sec');
   if (age < 60) return t('relative.compact.lessThanMinute');
   if (age < 3600) {
     return compactRelativeFileTimeText('minute', String(Math.max(1, Math.round(age / 60))));

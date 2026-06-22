@@ -196,6 +196,7 @@ def extract_session_name(text: str, known_sessions: list[str] | tuple[str, ...])
         target = bare_session_target_pattern(session)
         patterns = [
             rf"\b(?:ask|tell)\s+{target}(?=$|[\s,;:.])",
+            rf"\b(?:send|sending)\s+.+?\s+(?:to|into)\s+{target}(?=$|[\s,;:.])",
             rf"\b(?:send|sending)\s+(?:to|into)\s+{target}(?=$|[\s,;:.])",
             rf"\bwait\s+for\s+{target}(?=$|[\s,;:.])",
         ]
@@ -259,6 +260,27 @@ def parse_yoagent_action_intent(question: str, history: list[dict[str, str]], kn
                     "source_session": session,
                     "session": distinct_mentions[1],
                     "instruction": handoff_text,
+                },
+            }
+            if action_confirmation_requested(text):
+                intent["requires_confirmation"] = True
+            return intent
+    if then and session:
+        first_part = text[: then.start()]
+        raw_action = extract_action_text_for_session(first_part, session)
+        then_text = then.group(1).strip()
+        sequential_dependent = re.search(r"\b(?:wait|once|after|add|subtract|derive|compute|calculate|ask\s+(?:it\s+)?again|ask\s+(?:if|whether))\b", then_text, re.IGNORECASE)
+        if raw_action and sequential_dependent:
+            intent = {
+                "type": "session_handoff",
+                "session": session,
+                "text": normalize_agent_prompt_text(raw_action, first_part),
+                "submit": True,
+                "return_result": True,
+                "handoff": {
+                    "source_session": session,
+                    "session": session,
+                    "instruction": clean_action_text(then_text),
                 },
             }
             if action_confirmation_requested(text):

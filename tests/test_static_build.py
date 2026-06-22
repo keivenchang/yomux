@@ -9,6 +9,7 @@ from tools.static_build import i18n_untranslated_entries
 from tools.static_build import i18n_untranslated_report
 from tools.static_build import locale_key_errors
 from tools.static_build import lint_duplicate_functions
+from tools.static_build import lint_repeated_raw_component_literals
 from tools.static_build import lint_raw_window_viewport_reads
 from tools.static_build import pseudo_value
 from tools.static_build import repo_path
@@ -152,6 +153,21 @@ def test_undefined_css_var_lint_is_clean():
 
 def test_raw_window_viewport_lint_tree_is_clean():
     assert lint_raw_window_viewport_reads() == []
+
+
+def test_repeated_raw_component_literal_lint_tree_is_clean():
+    assert lint_repeated_raw_component_literals() == []
+
+
+def test_repeated_raw_component_literal_lint_flags_new_repeats(monkeypatch, tmp_path):
+    import tools.static_build as sb
+    bad = tmp_path / "bad.css"
+    bad.write_text(".a { color: #123456; }\n.b { border-color: #123456; }\n.c { color: #abcdef; }\n", encoding="utf-8")
+    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["bad.css"])
+    monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
+    assert sb.lint_repeated_raw_component_literals() == [
+        "raw component color #123456 repeats in bad.css:1, bad.css:2; move it to a CSS token or add a reviewed allowlist reason"
+    ]
 
 
 def test_raw_window_viewport_lint_flags_unowned_reads(monkeypatch, tmp_path):

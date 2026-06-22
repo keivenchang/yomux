@@ -115,9 +115,18 @@ function yoagentLastLines(lines, count = 1) {
 function yoagentThinkingPreviewText(text) {
   const normalized = String(text || '').replace(/\\n/g, '\n').replace(/\s+/g, ' ').trim();
   if (!normalized) return '';
-  const words = normalized.split(/\s+/).filter(Boolean);
+  const words = yoagentThinkingWords(normalized);
   if (words.length <= YOAGENT_THINKING_PREVIEW_WORDS) return normalized;
   return `… ${words.slice(-YOAGENT_THINKING_PREVIEW_WORDS).join(' ')}`;
+}
+
+function yoagentThinkingWords(text) {
+  const normalized = String(text || '').replace(/\\n/g, '\n').replace(/\s+/g, ' ').trim();
+  return normalized ? normalized.split(/\s+/).filter(Boolean) : [];
+}
+
+function yoagentThinkingWordCount(text) {
+  return yoagentThinkingWords(text).length;
 }
 
 function yoagentToolLineHtml(line) {
@@ -138,15 +147,28 @@ function yoagentToolLinesHtml(lines) {
 }
 
 function yoagentStreamItems(message) {
-  return (Array.isArray(message?.streamItems) ? message.streamItems : [])
+  const items = (Array.isArray(message?.streamItems) ? message.streamItems : [])
     .map(item => {
       const text = String(item?.text || '');
+      const sourceIndex = Number(item?.sourceIndex);
       return {
         kind: String(item?.kind || '').trim(),
         text,
+        sourceIndex: Number.isFinite(sourceIndex) ? sourceIndex : null,
       };
     })
-    .filter(item => ['assistant', 'thinking', 'tool'].includes(item.kind) && item.text.trim());
+    .filter(item => ['assistant', 'thinking', 'tool'].includes(item.kind) && item.text.trim())
+    .map((item, index) => ({...item, sourceIndex: item.sourceIndex == null ? index : item.sourceIndex}));
+  const coalesced = [];
+  for (const item of items) {
+    const previous = coalesced[coalesced.length - 1];
+    if (previous && previous.kind === item.kind && (item.kind === 'thinking' || item.kind === 'tool')) {
+      previous.text = `${previous.text.replace(/\s+$/, '')}\n${item.text.replace(/^\s+/, '')}`;
+      continue;
+    }
+    coalesced.push({...item});
+  }
+  return coalesced;
 }
 
 function yoagentPreviewLine(text) {
@@ -158,7 +180,7 @@ function yoagentStreamAuxiliaryItemHtml(item, key, index) {
   const text = String(item?.text || '');
   if (!text || (kind !== 'thinking' && kind !== 'tool')) return '';
   const tool = kind === 'tool';
-  const label = tool ? t('yoagent.toolCall.label') : 'thinking';
+  const label = tool ? t('yoagent.toolCall.label') : tPlural('yoagent.thinking.words', yoagentThinkingWordCount(text));
   const preview = tool ? yoagentPreviewLine(text) : yoagentThinkingPreviewText(text);
   const classes = tool
     ? 'yoagent-message-details yoagent-toolcall-details has-auxiliary yoagent-stream-detail'
@@ -166,8 +188,9 @@ function yoagentStreamAuxiliaryItemHtml(item, key, index) {
   const streamClasses = tool
     ? 'yoagent-auxiliary-stream yoagent-toolcall-stream'
     : 'yoagent-auxiliary-stream';
-  const body = tool ? yoagentToolLinesHtml([text]) : esc(text);
-  return `<details class="${classes}" data-yoagent-message-details-key="${esc(`${key}|stream|${index}`)}">
+  const body = tool ? yoagentToolLinesHtml(String(text).replace(/\\n/g, '\n').split(/\r?\n/)) : esc(text);
+  const streamIndex = Number.isFinite(Number(item?.sourceIndex)) ? Number(item.sourceIndex) : index;
+  return `<details class="${classes}" data-yoagent-message-details-key="${esc(`${key}|stream|${streamIndex}`)}">
     <summary><span>${esc(`${label}…`)}</span>${preview ? `<span class="yoagent-details-preview">${esc(preview)}</span>` : ''}</summary>
     <pre class="${streamClasses}">${body}</pre>
   </details>`;
@@ -210,9 +233,12 @@ function yoagentMessageDetailsHtml(message, key = '') {
   const detailsBlock = text
     ? `<pre class="yoagent-safe-details">${esc(text)}</pre>`
     : '';
+  const detailsLabel = hasAuxiliary
+    ? tPlural('yoagent.thinking.words', yoagentThinkingWordCount(auxiliaryText || auxiliaryPreview))
+    : t('popover.details');
   const thinkingDetails = (text || hasAuxiliary)
     ? `<details class="yoagent-message-details${hasAuxiliary ? ' has-auxiliary' : ''}" data-yoagent-message-details-key="${esc(key)}">
-    <summary><span>${esc(`${t('popover.details')}…`)}</span>${preview}</summary>
+    <summary><span>${esc(`${detailsLabel}…`)}</span>${preview}</summary>
     ${auxiliaryBlock}${truncationNote}${detailsBlock}
   </details>`
     : '';
@@ -880,6 +906,29 @@ async function loadYoagentJobs(options = {}) {
   }
 }
 
+let yoagentAgentAvailabilityRefreshPromise = null;
+
+async function refreshYoagentAgentAvailability(options = {}) {
+  if (yoagentAgentAvailabilityRefreshPromise) return yoagentAgentAvailabilityRefreshPromise;
+  yoagentAgentAvailabilityRefreshPromise = (async () => {
+    try {
+      const params = new URLSearchParams();
+      if (options.force === true) params.set('force', '1');
+      const suffix = params.toString();
+      const payload = await apiFetchJson(`/api/agent-auth${suffix ? `?${suffix}` : ''}`, {cache: 'no-store'});
+      applyAgentAvailabilityPayload(payload);
+      if (options.render !== false) renderYoagentPanel({preserveDraft: true, scrollBottom: false});
+      return true;
+    } catch (error) {
+      if (!options.silent) console.warn('YO!agent backend availability refresh failed', error);
+      return false;
+    } finally {
+      yoagentAgentAvailabilityRefreshPromise = null;
+    }
+  })();
+  return yoagentAgentAvailabilityRefreshPromise;
+}
+
 function yoagentBackendLabel(value) {
   const key = String(value || '').toLowerCase();
   if (key === 'auto') return t('yoagent.backend.auto');
@@ -895,19 +944,24 @@ function yoagentBackendKey() {
 
 const YOAGENT_CHAT_BACKENDS = ['codex', 'claude'];
 
+function yoagentBackendInstalled(agent) {
+  return YOAGENT_CHAT_BACKENDS.includes(agent) && availableAgents.has(agent);
+}
+
 function yoagentBackendUsable(agent) {
-  return YOAGENT_CHAT_BACKENDS.includes(agent) && availableAgents.has(agent) && agentLoggedIn(agent);
+  return yoagentBackendInstalled(agent) && agentLoggedIn(agent);
 }
 
 function yoagentAvailableBackendOptions() {
-  return YOAGENT_CHAT_BACKENDS.filter(yoagentBackendUsable);
+  const current = yoagentBackendKey();
+  return YOAGENT_CHAT_BACKENDS.filter(agent => yoagentBackendInstalled(agent) && (agentLoggedIn(agent) || agent === current));
 }
 
 // #41: mirror the server's auto-resolution (codex -> claude -> deterministic) using the cached agent
 // login status, so the chat input enables/disables to match what the backend will actually run.
 function yoagentResolvedBackend() {
   const key = yoagentBackendKey();
-  if (YOAGENT_CHAT_BACKENDS.includes(key)) return yoagentBackendUsable(key) ? key : 'deterministic';
+  if (YOAGENT_CHAT_BACKENDS.includes(key)) return yoagentBackendInstalled(key) ? key : 'deterministic';
   for (const agent of YOAGENT_CHAT_BACKENDS) {
     if (yoagentBackendUsable(agent)) return agent;
   }
@@ -1229,7 +1283,14 @@ async function clearYoagentPendingWait(waitId) {
 
 async function startYoagentChatRequest(rawText, options = {}) {
   const text = String(rawText || '').trim();
-  if (!text || yoagentBusy || yoagentActiveChatRequest || !yoagentChatEnabled()) return;
+  if (!text || yoagentBusy || yoagentActiveChatRequest) return;
+  if (YOAGENT_CHAT_BACKENDS.includes(yoagentBackendKey())) {
+    await refreshYoagentAgentAvailability({force: true, silent: true, render: false});
+  }
+  if (!yoagentChatEnabled()) {
+    renderYoagentPanel({preserveDraft: true, scrollBottom: false});
+    return;
+  }
   resetYoagentComposerHistory();
   installYoagentFocusTracker();
   const requestId = yoagentNewChatRequestId();
@@ -1287,7 +1348,7 @@ async function startYoagentChatRequest(rawText, options = {}) {
 
 async function sendYoagentChatMessage(rawText) {
   const text = String(rawText || '').trim();
-  if (!text || !yoagentChatEnabled()) return;
+  if (!text) return;
   if (yoagentBusy || yoagentActiveChatRequest || yoagentPendingWaits.length) {
     enqueueYoagentChatMessage(text);
     return;

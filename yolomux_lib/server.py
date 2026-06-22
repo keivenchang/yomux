@@ -1144,23 +1144,63 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
 </html>"""
         self.write_html(body)
 
-    def read_json_body(self, max_length: int) -> dict[str, Any] | None:
+    def read_request_body(
+        self,
+        max_length: int,
+        *,
+        allow_empty: bool = False,
+        allow_missing: bool = False,
+        missing_message: str = "missing Content-Length",
+        invalid_message: str = "invalid Content-Length",
+        empty_message: str = "invalid Content-Length",
+        too_large_message: str = "content too large",
+        missing_status: HTTPStatus = HTTPStatus.LENGTH_REQUIRED,
+        invalid_status: HTTPStatus = HTTPStatus.BAD_REQUEST,
+        empty_status: HTTPStatus = HTTPStatus.BAD_REQUEST,
+        too_large_status: HTTPStatus = HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+        close_on_too_large: bool = True,
+    ) -> tuple[bytes | None, dict[str, Any] | None, HTTPStatus]:
         length_text = self.headers.get("Content-Length", "")
+        if not length_text and allow_missing:
+            return b"", None, HTTPStatus.OK
         try:
             length = int(length_text)
-        except ValueError:
-            self.write_json(error_payload("missing or invalid Content-Length", status=HTTPStatus.LENGTH_REQUIRED), status=HTTPStatus.LENGTH_REQUIRED)
+        except (TypeError, ValueError):
+            return None, error_payload(missing_message if not length_text else invalid_message, status=missing_status if not length_text else invalid_status), missing_status if not length_text else invalid_status
+        if length < 0 or (length == 0 and not allow_empty):
+            return None, error_payload(empty_message, status=empty_status), empty_status
+        if length > max_length:
+            if close_on_too_large:
+                self.close_connection = True
+            return None, error_payload(too_large_message, status=too_large_status), too_large_status
+        return self.rfile.read(length), None, HTTPStatus.OK
+
+    def read_json_body(self, max_length: int, *, allow_empty: bool = False, allow_missing: bool = False) -> dict[str, Any] | None:
+        body, error, status = Handler.read_request_body(
+            self,
+            max_length,
+            allow_empty=allow_empty,
+            allow_missing=allow_missing,
+            missing_message="missing or invalid Content-Length",
+            invalid_message="missing or invalid Content-Length",
+            empty_message="content too large",
+            missing_status=HTTPStatus.LENGTH_REQUIRED,
+            invalid_status=HTTPStatus.LENGTH_REQUIRED,
+            empty_status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            too_large_message="content too large",
+        )
+        if error is not None:
+            self.write_json(error, status=status)
             return None
-        if length <= 0 or length > max_length:
-            self.write_json(error_payload("content too large", status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE), status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
-            return None
+        if body == b"" and (allow_empty or allow_missing):
+            return {}
         try:
-            body = self.rfile.read(length).decode("utf-8")
+            text = (body or b"").decode("utf-8")
         except UnicodeDecodeError:
             self.write_json(error_payload("request body must be utf-8 JSON", status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
             return None
         try:
-            payload = json.loads(body)
+            payload = json.loads(text)
         except json.JSONDecodeError as exc:
             self.write_json(error_payload(f"invalid JSON: {exc}", status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
             return None
@@ -1326,38 +1366,18 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.write_json({"responses": responses})
 
     def read_urlencoded_form(self) -> dict[str, list[str]]:
-        content_length_text = self.headers.get("Content-Length")
-        if not content_length_text:
-            return {}
-        try:
-            content_length = int(content_length_text)
-        except ValueError:
+        body, error, _status = Handler.read_request_body(self, 16 * 1024, allow_empty=True, allow_missing=True)
+        if error is not None:
             self.close_connection = True
             return {}
-        if content_length > 16 * 1024:
-            self.close_connection = True
-            return {}
-        body = self.rfile.read(content_length).decode("utf-8", errors="replace")
-        return parse_qs(body, keep_blank_values=True)
+        return parse_qs((body or b"").decode("utf-8", errors="replace"), keep_blank_values=True)
 
     def handle_client_event(self) -> tuple[dict[str, Any], HTTPStatus]:
-        content_length_text = self.headers.get("Content-Length")
-        if not content_length_text:
-            return error_payload("missing Content-Length", status=HTTPStatus.LENGTH_REQUIRED), HTTPStatus.LENGTH_REQUIRED
+        body, error, status = Handler.read_request_body(self, 64 * 1024, too_large_message="event is too large")
+        if error is not None:
+            return error, status
         try:
-            content_length = int(content_length_text)
-        except ValueError:
-            return error_payload("invalid Content-Length", status=HTTPStatus.BAD_REQUEST), HTTPStatus.BAD_REQUEST
-        # reject a non-positive length — `read(-1)` blocks until disconnect and `read(-5)`
-        # raises (-> 500); only the upper bound was checked.
-        if content_length <= 0:
-            return error_payload("invalid Content-Length", status=HTTPStatus.BAD_REQUEST), HTTPStatus.BAD_REQUEST
-        if content_length > 64 * 1024:
-            self.close_connection = True
-            return error_payload("event is too large", status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE), HTTPStatus.REQUEST_ENTITY_TOO_LARGE
-        body = self.rfile.read(content_length)
-        try:
-            event = json.loads(body.decode("utf-8"))
+            event = json.loads((body or b"").decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             return error_payload(f"invalid JSON: {exc}", status=HTTPStatus.BAD_REQUEST), HTTPStatus.BAD_REQUEST
         if not isinstance(event, dict):
@@ -1365,27 +1385,12 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         return self.server.app.client_event(event)
 
     def handle_upload(self, session: str, *, editor_path: str = "", base_dir: str = "") -> tuple[dict[str, Any], HTTPStatus]:
-        content_length_text = self.headers.get("Content-Length")
-        if not content_length_text:
-            return {"session": session, "error": "missing Content-Length"}, HTTPStatus.LENGTH_REQUIRED
-        try:
-            content_length = int(content_length_text)
-        except ValueError:
-            return {"session": session, "error": "invalid Content-Length"}, HTTPStatus.BAD_REQUEST
-        # reject a non-positive length (read(-1) blocks until disconnect; read(-5) -> 500).
-        if content_length <= 0:
-            return {"session": session, "error": "invalid Content-Length"}, HTTPStatus.BAD_REQUEST
         upload_max_bytes = self.server.app.upload_max_bytes()
-        if content_length > upload_max_bytes:
-            self.close_connection = True
-            return {
-                "session": session,
-                "error": f"upload is too large; limit is {upload_max_bytes} bytes",
-            }, HTTPStatus.REQUEST_ENTITY_TOO_LARGE
-
-        body = self.rfile.read(content_length)
+        body, error, status = Handler.read_request_body(self, upload_max_bytes, too_large_message=f"upload is too large; limit is {upload_max_bytes} bytes")
+        if error is not None:
+            return {"session": session, "error": str(error.get("error") or "")}, status
         try:
-            files = parse_multipart_upload(self.headers.get("Content-Type", ""), body, max_part_bytes=upload_max_bytes)
+            files = parse_multipart_upload(self.headers.get("Content-Type", ""), body or b"", max_part_bytes=upload_max_bytes)
         except ValueError as exc:
             return {"session": session, "error": str(exc)}, HTTPStatus.BAD_REQUEST
         if editor_path or base_dir:

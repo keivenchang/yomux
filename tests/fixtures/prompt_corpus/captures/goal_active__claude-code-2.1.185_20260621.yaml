@@ -1,0 +1,52 @@
+agent: claude
+capture_date: '2026-06-21'
+capture_mode: visible
+captured_at: '2026-06-21T20:16:18.042376+00:00'
+case_name: goal_active
+claude_version: 2.1.185 (Claude Code)
+client_name: Claude Code
+client_version: 2.1.185 (Claude Code)
+client_version_slug: claude-code-2.1.185
+codex_version: ''
+cursor: {}
+expected_screen_key: working
+expected_goal_elapsed_seconds: 7
+failures: []
+fixture_scenario: goal_active
+fixture_id: goal_active__claude-code-2.1.185_20260621
+height: 40
+id: goal_active__claude-code-2.1.185_20260621
+include_scrollback: false
+launch_agent: ''
+launch_command: ''
+launched_session: ''
+mode: ''
+operations: []
+raw_capture: "\n ▐▛███▜▌   Claude Code v2.1.185\n▝▜█████▛▘  Opus 4.8 (1M context) with xhigh effort · API Usage Billing\n\
+  \  ▘▘ ▝▝    ~/yolomux.dev8001\n\n\n❯ /goal gather scratch capture evidence\n  ⎿  Goal set: gather scratch capture evidence\n\
+  \n● I'll start by understanding what \"scratch capture\" means in this project.\n\n● Reading 1 file, running 1 shell command…\n\
+  \  ⎿  $ git rev-parse --show-toplevel && echo \"---DOIT files---\" && ls -la DOIT*.md 2>/dev/null; echo \"---scratch\n \
+  \    refs---\" && grep -ril \"scratch\" --include=\"*.md\" --include=\"*.js\" --include=\"*.py\" . 2>/dev/null | grep -v\
+  \  \n     node_modules | head -40\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n· Flummoxing… (7s · ↑ 352 tokens)             \
+  \    \n                                                                                                    ◎ /goal active\
+  \ (7s)\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  ❯                              \n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  \  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt\n"
+ready_text: []
+send_lines: []
+source: real Claude goal-active capture from scratch tmux yoreal-claude-capture:0.0
+styled_capture: "\n ▐▛███▜▌   Claude Code v2.1.185\n▝▜█████▛▘  Opus 4.8 (1M context) with xhigh effort · API Usage Billing\n\
+  \  ▘▘ ▝▝    ~/yolomux.dev8001\n\n\n❯ /goal gather scratch capture evidence\n  ⎿  Goal set: gather scratch capture evidence\n\
+  \n● I'll start by understanding what \"scratch capture\" means in this project.\n\n● Reading 1 file, running 1 shell command…\n\
+  \  ⎿  $ git rev-parse --show-toplevel && echo \"---DOIT files---\" && ls -la DOIT*.md 2>/dev/null; echo \"---scratch\n \
+  \    refs---\" && grep -ril \"scratch\" --include=\"*.md\" --include=\"*.js\" --include=\"*.py\" . 2>/dev/null | grep -v\
+  \  \n     node_modules | head -40\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n· Flummoxing… (7s · ↑ 352 tokens)             \
+  \    \n                                                                                                    ◎ /goal active\
+  \ (7s)\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  ❯                              \n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  \  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt\n"
+target: yoreal-claude-capture:0.0
+tmux_socket: ''
+wait_text:
+- /goal active
+width: 120

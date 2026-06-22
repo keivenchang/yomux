@@ -915,6 +915,8 @@ def test_dockview_window_bar_working_status_dot_uses_shared_pulse(browser, tmp_p
           idleHasDot: idle?.classList.contains('status-indicator--dot') || false,
           idleHasState: idle?.classList.contains('status-indicator--idle') || false,
           workingAnimationName: workingStyle.animationName,
+          workingOpacity: workingStyle.opacity,
+          workingGlowRgb: workingStyle.getPropertyValue('--attention-ring-rgb').trim(),
           idleAnimationName: idleStyle.animationName,
         };
         """
@@ -927,7 +929,9 @@ def test_dockview_window_bar_working_status_dot_uses_shared_pulse(browser, tmp_p
     assert metrics["idleHasParent"] is True, metrics
     assert metrics["idleHasDot"] is True, metrics
     assert metrics["idleHasState"] is True, metrics
-    assert metrics["workingAnimationName"] == "command-palette-thinking", metrics
+    assert metrics["workingAnimationName"] == "attention-ring-fade", metrics
+    assert metrics["workingOpacity"] == "1", metrics
+    assert metrics["workingGlowRgb"] == "82 210 115", metrics
     assert metrics["idleAnimationName"] == "none", metrics
 
 

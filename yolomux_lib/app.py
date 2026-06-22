@@ -171,16 +171,8 @@ from .yoagent.backends import codex_event_session_id
 from .yoagent.backends import resolve_yoagent_backend
 from .yoagent.backends import strip_yoagent_hidden_thinking
 from .yoagent.backends import strip_yoagent_stream_hidden_thinking
-from .yoagent.stream_events import ASSISTANT_DELTA
-from .yoagent.stream_events import ERROR
-from .yoagent.stream_events import HIDDEN_WORK_DELTA
-from .yoagent.stream_events import HIDDEN_WORK_DONE
-from .yoagent.stream_events import TOOL_CALL_DELTA
-from .yoagent.stream_events import TOOL_CALL_FINISHED
-from .yoagent.stream_events import TOOL_CALL_STARTED
-from .yoagent.stream_events import TURN_DONE
-from .yoagent.stream_events import normalize_yoagent_stream_event
-from .yoagent.stream_events import yoagent_stream_event_auxiliary_line
+from .yoagent.streaming import YoagentStreamPublisher
+from .yoagent.streaming import sanitized_stream_items as sanitized_yoagent_stream_items
 from .yoagent.backends import yoagent_activity_payload_signature
 from .yoagent.backends import yoagent_cli_auth_failure
 from .yoagent.backends import yoagent_cli_fallback_reason
@@ -793,8 +785,12 @@ class TmuxWebtermApp:
         self.yoagent_transports = default_yoagent_transport_registry()
         self.yoagent_controller = YoagentController(YoagentAppDeps(self))
         self.yoagent_managed_targets: dict[str, dict[str, Any]] = {}
-        self.yoagent_stream_lock = threading.RLock()
-        self.yoagent_stream_states: dict[str, dict[str, Any]] = {}
+        self.yoagent_streams = YoagentStreamPublisher(
+            publish_client_event=lambda *args, **kwargs: self.publish_client_event(*args, **kwargs),
+            publish_stream_delta=lambda *args, **kwargs: self.publish_yoagent_stream_delta(*args, **kwargs),
+        )
+        self.yoagent_stream_lock = self.yoagent_streams.store.lock
+        self.yoagent_stream_states = self.yoagent_streams.store.states
         self.yoagent_chat_request_lock = threading.RLock()
         self.yoagent_chat_requests: dict[str, dict[str, Any]] = {}
         self.yoagent_action_lock = threading.RLock()
@@ -3593,283 +3589,35 @@ class TmuxWebtermApp:
         aborted: bool = False,
         created_at: str = "",
     ) -> None:
-        safe_stream_id = str(stream_id or "").strip()
-        if not safe_stream_id:
-            return
-        payload: dict[str, Any] = {
-            "stream_id": safe_stream_id,
-            "content": truncate_text(str(content or ""), 20_000),
-            "done": bool(done),
-            "running": not bool(done),
-            "turn_done": bool(turn_done or done),
-            "error": bool(error),
-            "aborted": bool(aborted),
-            "created_at": created_at or datetime.now(timezone.utc).isoformat(),
-        }
-        if backend:
-            payload["backend"] = backend
-        if phase:
-            payload["phase"] = phase
-        if hidden_thinking_removed:
-            payload["hidden_thinking_removed"] = True
-        if events:
-            payload["events"] = events
-        if auxiliary_lines:
-            payload["auxiliary_lines"] = [str(line or "") for line in auxiliary_lines if str(line or "").strip()]
-        if auxiliary_preview:
-            payload["auxiliary_preview"] = str(auxiliary_preview)
-        clean_stream_items = self.sanitized_yoagent_stream_items(stream_items)
-        if clean_stream_items:
-            payload["stream_items"] = clean_stream_items
-        if hidden_work_active:
-            payload["hidden_work_active"] = True
-        if tool_active:
-            payload["tool_active"] = True
-        if auxiliary_done:
-            payload["auxiliary_done"] = True
-        if auxiliary_truncated:
-            payload["auxiliary_truncated"] = True
-        self.publish_client_event("yoagent_stream_delta", payload, trigger="yoagent_stream", cache="delta")
+        self.yoagent_streams.publish_delta(
+            stream_id,
+            content,
+            backend=backend,
+            phase=phase,
+            done=done,
+            hidden_thinking_removed=hidden_thinking_removed,
+            events=events,
+            auxiliary_lines=auxiliary_lines,
+            auxiliary_preview=auxiliary_preview,
+            stream_items=stream_items,
+            hidden_work_active=hidden_work_active,
+            tool_active=tool_active,
+            auxiliary_done=auxiliary_done,
+            auxiliary_truncated=auxiliary_truncated,
+            turn_done=turn_done,
+            error=error,
+            aborted=aborted,
+            created_at=created_at,
+        )
 
     def yoagent_stream_auxiliary_message_fields(self, stream_id: str) -> dict[str, Any]:
-        safe_stream_id = str(stream_id or "").strip()
-        if not safe_stream_id:
-            return {}
-        with self.yoagent_stream_lock:
-            state = copy.deepcopy(self.yoagent_stream_states.get(safe_stream_id) or {})
-        lines = [str(line or "") for line in state.get("auxiliaryLines", []) if str(line or "").strip()]
-        stream_items = self.sanitized_yoagent_stream_items(state.get("streamItems"))
-        if not lines and not stream_items:
-            return {}
-        fields: dict[str, Any] = {"stream_items": stream_items}
-        if lines:
-            fields["auxiliary_lines"] = lines
-            fields["auxiliary_preview"] = str(state.get("auxiliaryPreview") or "\n".join(lines[-1:]))
-        if bool(state.get("auxiliaryDone")):
-            fields["auxiliary_done"] = True
-        if bool(state.get("auxiliaryTruncated")):
-            fields["auxiliary_truncated"] = True
-        return fields
+        return self.yoagent_streams.auxiliary_message_fields(stream_id)
 
     def sanitized_yoagent_stream_items(self, value: Any) -> list[dict[str, str]]:
-        if not isinstance(value, list):
-            return []
-        result: list[dict[str, str]] = []
-        for item in value:
-            if not isinstance(item, dict):
-                continue
-            kind = str(item.get("kind") or "").strip().lower()
-            if kind not in {"assistant", "thinking", "tool"}:
-                continue
-            text = redacted_action_text(str(item.get("text") or ""), None)
-            if text.strip():
-                result.append({"kind": kind, "text": text})
-        return result
+        return sanitized_yoagent_stream_items(value)
 
     def yoagent_stream_callback(self, stream_id: str, backend: str) -> Any:
-        state: dict[str, Any] = {
-            "raw_content": "",
-            "last_content": None,
-            "hidden_thinking_removed": False,
-            "auxiliary_lines": [],
-            "hidden_work_prefix": "",
-            "hidden_work_text": "",
-            "hidden_work_active": False,
-            "tool_active": False,
-            "auxiliary_done": False,
-            "auxiliary_truncated": False,
-            "stream_items": [],
-        }
-
-        def publish(events: list[dict[str, Any]], phase: str = "") -> None:
-            lines = list(state.get("auxiliary_lines") or [])
-            stream_items = self.sanitized_yoagent_stream_items(state.get("stream_items"))
-            active = bool(state.get("hidden_work_active") or state.get("tool_active"))
-            preview_count = 2 if active else 1
-            preview = "\n".join(lines[-preview_count:]) if lines else ""
-            safe_stream_id = str(stream_id or "").strip()
-            if safe_stream_id:
-                with self.yoagent_stream_lock:
-                    self.yoagent_stream_states[safe_stream_id] = {
-                        "auxiliaryLines": lines,
-                        "auxiliaryText": "\n".join(lines),
-                        "auxiliaryPreview": preview,
-                        "streamItems": stream_items,
-                        "auxiliaryDone": bool(state.get("auxiliary_done")),
-                        "auxiliaryTruncated": bool(state.get("auxiliary_truncated")),
-                        "updatedTs": time.time(),
-                    }
-                    if len(self.yoagent_stream_states) > 50:
-                        oldest = sorted(self.yoagent_stream_states.items(), key=lambda item: float(item[1].get("updatedTs") or 0))[:10]
-                        for key, _value in oldest:
-                            self.yoagent_stream_states.pop(key, None)
-            self.publish_yoagent_stream_delta(
-                stream_id,
-                str(state.get("last_content") or ""),
-                backend=backend,
-                phase=phase,
-                hidden_thinking_removed=bool(state.get("hidden_thinking_removed")),
-                events=events,
-                auxiliary_lines=lines,
-                auxiliary_preview=preview,
-                stream_items=stream_items,
-                hidden_work_active=bool(state.get("hidden_work_active")),
-                tool_active=bool(state.get("tool_active")),
-                auxiliary_done=bool(state.get("auxiliary_done")),
-                auxiliary_truncated=bool(state.get("auxiliary_truncated")),
-                turn_done=phase == "done",
-                error=phase == "error",
-            )
-
-        def hidden_work_prefix(event: dict[str, Any]) -> str:
-            if event.get("summary"):
-                return "thinking summary"
-            if event.get("redacted"):
-                return "redacted thinking"
-            return "thinking"
-
-        def compact_auxiliary_text(value: str) -> str:
-            return " ".join(str(value or "").split())
-
-        def append_stream_item(kind: str, text: str, *, merge: bool = True) -> None:
-            safe_kind = str(kind or "").strip().lower()
-            value = redacted_action_text(str(text or ""), None)
-            if safe_kind not in {"assistant", "thinking", "tool"} or not value:
-                return
-            items = self.sanitized_yoagent_stream_items(state.get("stream_items"))
-            if merge and items and items[-1].get("kind") == safe_kind:
-                joiner = "" if safe_kind == "assistant" else "\n"
-                items[-1]["text"] = str(items[-1].get("text") or "") + joiner + value
-            else:
-                items.append({"kind": safe_kind, "text": value})
-            state["stream_items"] = items
-
-        def replace_or_append_stream_item(kind: str, text: str) -> None:
-            safe_kind = str(kind or "").strip().lower()
-            value = redacted_action_text(str(text or ""), None)
-            if safe_kind not in {"assistant", "thinking", "tool"} or not value:
-                return
-            items = self.sanitized_yoagent_stream_items(state.get("stream_items"))
-            if items and items[-1].get("kind") == safe_kind:
-                items[-1]["text"] = value
-            else:
-                items.append({"kind": safe_kind, "text": value})
-            state["stream_items"] = items
-
-        def hidden_work_stream_item_text(event: dict[str, Any]) -> str:
-            prefix = str(state.get("hidden_work_prefix") or hidden_work_prefix(event) or "thinking")
-            raw_text = str(state.get("hidden_work_text") or event.get("text") or "")
-            compact_text = compact_auxiliary_text(raw_text)
-            if raw_text:
-                return f"{prefix}: {raw_text}"
-            if compact_text:
-                return f"{prefix}: {compact_text}"
-            return yoagent_stream_event_auxiliary_line(event)
-
-        def append_auxiliary_line(event: dict[str, Any]) -> None:
-            line = yoagent_stream_event_auxiliary_line(event)
-            if not line:
-                return
-            event_type = str(event.get("kind") or event.get("event") or "")
-            lines = list(state.get("auxiliary_lines") or [])
-            if event_type == HIDDEN_WORK_DELTA:
-                prefix = hidden_work_prefix(event)
-                raw_text = str(event.get("text") or "")
-                compact_text = compact_auxiliary_text(raw_text)
-                if not compact_text:
-                    compact_text = compact_auxiliary_text(line.removeprefix(f"{prefix}:").strip()) or prefix
-                previous_prefix = str(state.get("hidden_work_prefix") or "")
-                if lines and previous_prefix == prefix:
-                    previous_text = str(state.get("hidden_work_text") or "")
-                    if compact_text.startswith("thinking..."):
-                        next_text = compact_text
-                    elif event.get("snapshot"):
-                        next_text = raw_text
-                    elif compact_auxiliary_text(previous_text).startswith("thinking..."):
-                        next_text = raw_text
-                    else:
-                        next_text = previous_text + raw_text
-                    state["hidden_work_text"] = next_text
-                    lines[-1] = f"{prefix}: {compact_auxiliary_text(next_text)}" if compact_auxiliary_text(next_text) else prefix
-                else:
-                    state["hidden_work_prefix"] = prefix
-                    state["hidden_work_text"] = raw_text if not compact_text.startswith("thinking...") else compact_text
-                    lines.append(f"{prefix}: {compact_text}" if compact_text else prefix)
-            elif event_type in {TOOL_CALL_STARTED, TOOL_CALL_DELTA, TOOL_CALL_FINISHED}:
-                state["hidden_work_prefix"] = ""
-                state["hidden_work_text"] = ""
-                value = str(line).strip()
-                if value:
-                    lines.append(value)
-            else:
-                state["hidden_work_prefix"] = ""
-                state["hidden_work_text"] = ""
-                for part in str(line).splitlines() or [line]:
-                    value = part.strip()
-                    if value:
-                        lines.append(value)
-            state["auxiliary_lines"] = lines
-
-        def callback(event: dict[str, Any]) -> None:
-            normalized = normalize_yoagent_stream_event(event, backend=backend)
-            event_type = str(normalized.get("kind") or normalized.get("event") or "")
-            if event_type == ASSISTANT_DELTA:
-                incoming_text = str(normalized.get("text") or "")
-                if normalized.get("snapshot"):
-                    state["raw_content"] = incoming_text
-                else:
-                    state["raw_content"] = str(state.get("raw_content") or "") + incoming_text
-                visible_text, hidden_thinking_removed = strip_yoagent_stream_hidden_thinking(str(state.get("raw_content") or ""))
-                hidden_changed = bool(hidden_thinking_removed and not state.get("hidden_thinking_removed"))
-                state["hidden_thinking_removed"] = bool(state.get("hidden_thinking_removed") or hidden_thinking_removed)
-                if visible_text == state.get("last_content") and not hidden_changed:
-                    return
-                previous_visible = str(state.get("last_content") or "")
-                state["last_content"] = visible_text
-                visible_delta = visible_text
-                if normalized.get("snapshot"):
-                    visible_delta = visible_text
-                elif previous_visible and visible_text.startswith(previous_visible):
-                    visible_delta = visible_text[len(previous_visible):]
-                append_stream_item("assistant", visible_delta)
-                publish([normalized], phase="answer" if visible_text else "thinking")
-                return
-            if event_type == HIDDEN_WORK_DELTA:
-                state["hidden_thinking_removed"] = True
-                state["hidden_work_active"] = True
-                state["auxiliary_done"] = False
-                append_auxiliary_line(normalized)
-                replace_or_append_stream_item("thinking", hidden_work_stream_item_text(normalized))
-                publish([normalized], phase="thinking")
-                return
-            if event_type in {TOOL_CALL_STARTED, TOOL_CALL_DELTA}:
-                state["tool_active"] = True
-                state["auxiliary_done"] = False
-                append_auxiliary_line(normalized)
-                append_stream_item("tool", yoagent_stream_event_auxiliary_line(normalized), merge=False)
-                publish([normalized], phase="tool")
-                return
-            if event_type in {TOOL_CALL_FINISHED, HIDDEN_WORK_DONE}:
-                if event_type == TOOL_CALL_FINISHED:
-                    state["tool_active"] = False
-                if event_type == HIDDEN_WORK_DONE:
-                    state["hidden_work_active"] = False
-                append_auxiliary_line(normalized)
-                if event_type == TOOL_CALL_FINISHED:
-                    append_stream_item("tool", yoagent_stream_event_auxiliary_line(normalized), merge=False)
-                publish([normalized], phase="tool" if event_type == TOOL_CALL_FINISHED else "thinking")
-                return
-            if event_type in {TURN_DONE, ERROR}:
-                state["hidden_work_active"] = False
-                state["tool_active"] = False
-                state["auxiliary_done"] = True
-                append_auxiliary_line(normalized)
-                publish([normalized], phase="done" if event_type == TURN_DONE else "error")
-                return
-            append_auxiliary_line(normalized)
-            publish([normalized], phase=str(normalized.get("native_type") or "event"))
-
-        return callback
+        return self.yoagent_streams.callback_for(stream_id, backend)
 
     def yoagent_job_prompt_text(self, *args: Any, **kwargs: Any) -> Any:
         return self.yoagent_controller.yoagent_job_prompt_text(*args, **kwargs)
@@ -4659,6 +4407,7 @@ class TmuxWebtermApp:
             name: session_to_json(info, self.metadata_cache, allow_network=False)
             for name, info in sessions.items()
         }
+        agent_payload = self.agent_auth_payload()
         payload = {
             "server_time": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
             "server_version": YOLOMUX_VERSION,
@@ -4668,12 +4417,19 @@ class TmuxWebtermApp:
             "sessions": session_payloads,
             # refresh agent login status on the metadata poll (cached server-side) so the
             # new-session picker re-enables an agent within the cache TTL after the user logs in.
-            "agentAuth": agent_auth_status(),
+            "agentAuth": agent_payload["agentAuth"],
+            "availableAgents": agent_payload["availableAgents"],
             "errors": [*refresh_errors, *errors],
         }
         self.apply_metadata_badge_pulses(session_payloads)
         self.warm_metadata_cache_async(sessions)
         return payload
+
+    def agent_auth_payload(self, force: bool = False) -> dict[str, Any]:
+        return {
+            "agentAuth": agent_auth_status(force=True) if force else agent_auth_status(),
+            "availableAgents": available_agent_commands(),
+        }
 
     def transcripts_payload(self, force: bool = False) -> dict[str, Any]:
         max_age = TRANSCRIPTS_PAYLOAD_CACHE_SECONDS
@@ -5853,6 +5609,14 @@ class TmuxWebtermApp:
             return "needs-input"
         return "idle"
 
+    @staticmethod
+    def agent_transcript_id(agent: AgentInfo) -> str:
+        session_id = str(agent.session_id or "").strip()
+        if session_id:
+            return session_id
+        transcript = str(agent.transcript or "").strip()
+        return Path(transcript).stem if transcript else ""
+
     def activity_record_recency_ts(self, record: dict[str, Any] | None) -> float:
         if not isinstance(record, dict):
             return 0.0
@@ -5923,6 +5687,9 @@ class TmuxWebtermApp:
                 "window_label": window_label,
                 "pane": pane,
                 "pane_target": str(agent.pane_target or ""),
+                "transcript": str(agent.transcript or ""),
+                "transcript_id": self.agent_transcript_id(agent),
+                "agent_session_id": str(agent.session_id or ""),
                 "working_elapsed_seconds": elapsed if state == "working" and elapsed >= 0 else None,
                 "idle_since": last_active_ts if state == "idle" and last_active_ts > 0 else None,
                 "last_active_ts": last_active_ts,

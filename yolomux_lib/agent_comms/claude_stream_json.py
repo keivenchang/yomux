@@ -30,7 +30,6 @@ def claude_stream_json_argv(target: dict[str, Any]) -> list[str]:
         "--output-format",
         "stream-json",
         "--include-partial-messages",
-        "--show-thinking",
     ]
     session_id = str(target.get("thread_id") or target.get("agent_session_id") or "").strip()
     if session_id:

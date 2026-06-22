@@ -161,7 +161,7 @@ def test_missing_agent_path_warning_skips_resolvable_agent(monkeypatch, tmp_path
     assert [record.getMessage() for record in caplog.records] == []
 
 
-def test_agent_auth_status_nonzero_exit_and_timeout_are_not_logged_in(monkeypatch):
+def test_agent_auth_status_nonzero_exit_and_timeout_are_unknown(monkeypatch):
     monkeypatch.setattr(workdir.shutil, "which", lambda name: f"/usr/bin/{name}")
 
     def run(cmd, *args, **kwargs):
@@ -170,8 +170,10 @@ def test_agent_auth_status_nonzero_exit_and_timeout_are_not_logged_in(monkeypatc
         raise subprocess.TimeoutExpired(cmd, 4.0)
     monkeypatch.setattr(workdir.subprocess, "run", run)
     status = agent_auth_status(force=True)
-    assert status["claude"]["logged_in"] is False
-    assert status["codex"]["logged_in"] is False
+    assert status["claude"]["logged_in"] is None
+    assert status["claude"]["unavailable_reason"] == "auth-unknown"
+    assert status["codex"]["logged_in"] is None
+    assert status["codex"]["unavailable_reason"] == "auth-unknown"
 
 
 def test_agent_auth_status_caches_until_forced(monkeypatch):

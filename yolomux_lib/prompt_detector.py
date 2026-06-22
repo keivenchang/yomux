@@ -507,6 +507,10 @@ _CODEX_MODEL_STATUS_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 _CODEX_PURSUING_GOAL_RE = re.compile(r"\bPursuing\s+goal\s*\((?P<duration>[^)]*\d[^)]*)\)", re.IGNORECASE)
+_CLAUDE_GOAL_ACTIVE_RE = re.compile(
+    r"(?:[◉●○◯☉]\s*)?/goal\s+active\s*\((?P<duration>[^)]*\d[^)]*)\)",
+    re.IGNORECASE,
+)
 _SHELL_PROMPT_RE = re.compile(r"[@:][^@\s]+[$#](?:\s+\S.*)?$")
 # Header of the Ctrl-T todo overlay, e.g. "11 tasks (0 done, 1 in progress, 10 open)" — also matches
 # singular "1 task (...)". The whole overlay is a bounded block: everything below this header is
@@ -516,7 +520,7 @@ _WORK_QUEUE_ROW_RE = re.compile(
     r"^\s*[○●◦]\s+\S.*(?:\b\d+(?:\.\d+)?\s*s\b|↑/↓\s+to\s+select|enter\s+to\s+view|↑\s+to\s+manage)",
     re.IGNORECASE,
 )
-_CHOICE_LINE_RE = re.compile(r"^\s*(?:[❯›>]\s*)?\d+[.:]\s+\S")
+_CHOICE_LINE_RE = re.compile(r"^\s*(?:menu:\s*)?(?:[❯›>]\s*)?\d+[.:]\s+\S", re.IGNORECASE)
 _SELECTED_CHOICE_LINE_RE = re.compile(r"^\s*[❯›>]\s*\d+[.:]\s+\S")
 _SELECTED_CHOICE_NUMBER_RE = re.compile(r"^\s*[❯›>]\s*(\d+)[.:]\s+\S", re.MULTILINE)
 _YES_OPTION_LINE_RE = re.compile(r"^\s*(?:[❯›>]\s*)?1[.:]\s+Yes\b", re.IGNORECASE)
@@ -549,21 +553,39 @@ _ASK_QUESTION_FOOTER_RE = re.compile(
 _ASK_QUESTION_HINT_RE = re.compile(
     r"to\s+navigate|add\s+notes|switch\s+questions", re.IGNORECASE
 )
-_OPTION_LINE_RE = re.compile(r"^\s*([❯›>]?)\s*(\d+)[.:]\s+(.+?)\s*$")
+_ASK_QUESTION_ACCESSIBLE_FOOTER_RE = re.compile(
+    r"^Enter selection\s+\[\d+\s*-\s*\d+\],\s+or\s+Escape\s+to\s+cancel:?\s*$",
+    re.IGNORECASE,
+)
+_INTERRUPTED_QUESTION_RE = re.compile(
+    r"(?:^|\b)(?:Interrupted\s*[·:.-]\s*)?(What should\s+(?:Claude|Codex|the agent|[\w.-]+)\s+do\s+instead\?)",
+    re.IGNORECASE,
+)
+_OPTION_LINE_RE = re.compile(r"^\s*(menu:\s*)?([❯›>]?)\s*(\d+)[.:]\s+(.+?)\s*$", re.IGNORECASE)
 _INLINE_CONFIRMATION_RE = re.compile(r"\?.*(?:\((?:y/n|yes/no)\)|\[(?:y/N|Y/n|yes/no)\])\s*$", re.IGNORECASE)
 
 
 def _prompt_options(visible_text: str) -> list[dict[str, object]]:
     option_groups: list[list[dict[str, object]]] = []
     current_group: list[dict[str, object]] = []
-    for line in normalize_capture_text(visible_text).splitlines():
+    lines = normalize_capture_text(visible_text).splitlines()
+    ask_question_mode = any(_is_ask_user_question_footer(line) for line in lines)
+    for line in lines:
         match = _OPTION_LINE_RE.match(line)
         if not match:
+            stripped = line.strip()
+            if current_group and stripped and (not _is_separator_or_footer(line) or (ask_question_mode and not _is_footer_hint_line(stripped))):
+                # Claude's AskUserQuestion UI can put descriptive sub-lines beneath each numbered
+                # choice, and current versions may put a separator before "Chat about this".
+                # Keep collecting the current option group until a blank/footer boundary.
+                continue
             if current_group:
                 option_groups.append(current_group)
                 current_group = []
             continue
-        marker, number, label = match.groups()
+        menu_prefix, marker, number, label = match.groups()
+        if menu_prefix or ask_question_mode:
+            label = re.split(r"\s+[—-]\s+", label, maxsplit=1)[0]
         current_group.append({
             "index": int(number),
             "label": re.sub(r"\s+", " ", label).strip(),
@@ -705,6 +727,18 @@ def _parse_codex_goal_elapsed_seconds(line: str) -> float | None:
     return _parse_duration_seconds(match.group("duration"))
 
 
+def _parse_claude_goal_elapsed_seconds(line: str) -> float | None:
+    match = _CLAUDE_GOAL_ACTIVE_RE.search(line)
+    if not match:
+        return None
+    return _parse_duration_seconds(match.group("duration"))
+
+
+def _parse_agent_goal_elapsed_seconds(line: str) -> float | None:
+    """Return active-goal elapsed time for Claude `/goal active` or Codex `Pursuing goal`."""
+    return _parse_claude_goal_elapsed_seconds(line) or _parse_codex_goal_elapsed_seconds(line)
+
+
 def _parse_status_token_count(line: str) -> int | None:
     matches = list(_STATUS_COUNTER_TOKEN_RE.finditer(line))
     if not matches:
@@ -789,9 +823,9 @@ def _last_status_counter(lines: list[str]) -> tuple[int, dict[str, object] | Non
     return last_index, last_counter
 
 
-def _last_codex_goal_elapsed_seconds(lines: list[str]) -> float | None:
+def _last_agent_goal_elapsed_seconds(lines: list[str]) -> float | None:
     for line in reversed(lines):
-        elapsed = _parse_codex_goal_elapsed_seconds(normalize_capture_text(line).strip())
+        elapsed = _parse_agent_goal_elapsed_seconds(normalize_capture_text(line).strip())
         if elapsed is not None:
             return elapsed
     return None
@@ -846,7 +880,7 @@ def _status_counter_screen_state(counter: dict[str, object], pane_target: str | 
 
 
 def _is_working_line(line: str) -> bool:
-    return bool(parse_agent_status_counter(line) is not None or _WORKING_LINE_RE.search(line) or _CLAUDE_MULTI_AGENT_HEADER_RE.search(line) or _CODEX_PURSUING_GOAL_RE.search(line))
+    return bool(parse_agent_status_counter(line) is not None or _WORKING_LINE_RE.search(line) or _CLAUDE_MULTI_AGENT_HEADER_RE.search(line) or _parse_agent_goal_elapsed_seconds(line) is not None)
 
 
 def visible_agent_working(visible_text: str) -> bool:
@@ -867,7 +901,7 @@ def visible_agent_status_counter(visible_text: str) -> dict[str, object] | None:
     counter_index, counter = _last_status_counter(lines)
     if counter_index < 0 or counter is None or _working_line_has_later_prompt(lines, counter_index):
         return None
-    goal_elapsed_seconds = _last_codex_goal_elapsed_seconds(lines)
+    goal_elapsed_seconds = _last_agent_goal_elapsed_seconds(lines)
     if goal_elapsed_seconds is not None:
         counter = dict(counter)
         counter["goal_elapsed_seconds"] = goal_elapsed_seconds
@@ -993,6 +1027,8 @@ def _is_footer_hint_line(line: str) -> bool:
     stripped = line.strip()
     if not stripped:
         return False
+    if _ASK_QUESTION_ACCESSIBLE_FOOTER_RE.match(stripped):
+        return True
     if _FOOTER_LINE_RE.search(stripped):
         return True
     if stripped.startswith("(") and stripped.endswith(")"):
@@ -1063,7 +1099,10 @@ def _clip_prompt_lines(lines: list[str], max_lines: int = 12, max_chars: int = 1
 
 
 def _is_ask_user_question_footer(line: str) -> bool:
-    return bool(_ASK_QUESTION_FOOTER_RE.search(line) and _ASK_QUESTION_HINT_RE.search(line))
+    return bool(
+        (_ASK_QUESTION_FOOTER_RE.search(line) and _ASK_QUESTION_HINT_RE.search(line))
+        or _ASK_QUESTION_ACCESSIBLE_FOOTER_RE.match(line.strip())
+    )
 
 
 def ask_user_question_prompt_text(visible_text: str) -> str:
@@ -1096,6 +1135,27 @@ def ask_user_question_prompt_text(visible_text: str) -> str:
     return ""
 
 
+def interrupted_user_question_text(visible_text: str) -> str:
+    """Return Claude/Codex's current post-interrupt question, even when goal chrome remains visible."""
+    visible_text = normalize_capture_text(visible_text)
+    lines = visible_text.splitlines()[-80:]
+    for index in range(len(lines) - 1, -1, -1):
+        cleaned = _clean_prompt_block_line(re.sub(r"^\s*[⎿└]\s*", "", lines[index]))
+        match = _INTERRUPTED_QUESTION_RE.search(cleaned)
+        if not match:
+            continue
+        for later in lines[index + 1:]:
+            stripped = later.strip()
+            if not stripped or _is_separator_or_footer(later) or _is_prompt_trailing_ui_line(later):
+                continue
+            if re.fullmatch(r"[❯›>][\s█▉▊▋▌▍▎▏]*", stripped):
+                continue
+            return ""
+        prefix = "Interrupted · " if re.search(r"\bInterrupted\b", cleaned, re.IGNORECASE) else ""
+        return prefix + match.group(1)
+    return ""
+
+
 def visible_choice_prompt_text(visible_text: str) -> str:
     """Return the current user-question prompt from the visible pane only.
 
@@ -1105,6 +1165,9 @@ def visible_choice_prompt_text(visible_text: str) -> str:
     visible_text = normalize_capture_text(visible_text)
     if not visible_text.strip():
         return ""
+    interrupted_question = interrupted_user_question_text(visible_text)
+    if interrupted_question:
+        return interrupted_question
     if detect_prompt(visible_text) is not None or visible_agent_working(visible_text):
         return ""
     if re.search(r"accept edits on\s*\(", visible_text, re.IGNORECASE):
@@ -1201,6 +1264,21 @@ def agent_screen_state(visible_text: str, pane_target: str | None = None, now: f
             "confidence": prompt_state.get("confidence") or 0.0,
             "evidence_lines": prompt_state.get("evidence_lines") or [],
             "prompt_hash": prompt_state.get("hash") or "",
+        }
+    interrupted_question = interrupted_user_question_text(visible_text)
+    if interrupted_question:
+        return {
+            "key": "needs-input",
+            "text": interrupted_question,
+            "agent": _infer_agent(visible_text),
+            "prompt_kind": "question",
+            "question_text": interrupted_question,
+            "command": None,
+            "options": [],
+            "selected_option": 0,
+            "confidence": 0.75,
+            "evidence_lines": _matching_evidence_lines(visible_text, None, interrupted_question) or [interrupted_question],
+            "prompt_hash": _hash_prompt_parts(interrupted_question),
         }
     counter = visible_agent_status_counter(visible_text)
     if counter is not None:

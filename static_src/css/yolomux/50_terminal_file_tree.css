@@ -1747,15 +1747,15 @@ body.theme-light .yoagent-composer-pill-backend:not(:has(select:disabled)) .yoag
   padding: 8px 10px;
 }
 body.theme-light .info-pane {
-  background: #ffffff;
+  background: var(--lt-bg);
 }
 body.theme-light .info-list,
 body.theme-light .info-watched {
-  background: #ffffff;
+  background: var(--lt-bg);
 }
 body.theme-light .yoagent-global {
   color: var(--text);
-  background: #ffffff;
+  background: var(--lt-bg);
   border-color: var(--line);
 }
 body.theme-light .yoagent-chat,
@@ -2699,13 +2699,13 @@ body.app-vw-lte-760 .share-result-meta {
   animation-delay: var(--yolo-rotate-delay, 0s);
 }
 .about-brand-lo {
-  color: var(--brand-green, #76b900);
+  color: var(--brand-green);
 }
 .about-brand-m {
   color: #3b82f6;
 }
 .about-brand-u {
-  color: #ef4444;
+  color: var(--about-brand-red);
 }
 .about-brand-x {
   color: var(--status-tool);
@@ -3419,12 +3419,12 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
   border-radius: 5px;
   color: var(--muted);
   font-family: var(--mono-font);
-  font-size: var(--ui-font-size-3xs);
+  font-size: max(var(--ui-font-size-2xs), calc(var(--file-explorer-font-size) - 1px));
   line-height: 1;
   font-stretch: condensed;
   letter-spacing: 0;
   overflow: hidden;
-  text-overflow: clip;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 .file-tree-row:not(.selected):not(.current-file)[data-recency] > .file-tree-date {

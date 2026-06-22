@@ -14,6 +14,8 @@ import tempfile
 
 import pytest
 
+from yolomux_lib import app as app_module
+
 # Each process needs its OWN config/state dir. Under pytest-xdist, worker subprocesses INHERIT the
 # parent's environment, so a plain setdefault makes every parallel worker share ONE YOLOMUX_CONFIG_DIR
 # -> one state.json. Concurrent TmuxWebtermApp construction in different workers then prunes each
@@ -50,6 +52,21 @@ SLOWEST_FIRST_TESTS = (
 SLOWEST_FIRST_RANK = {nodeid: index for index, nodeid in enumerate(SLOWEST_FIRST_TESTS)}
 
 _SOCKET_AVAILABILITY: tuple[bool, str] | None = None
+
+
+@pytest.fixture
+def no_control_socket(monkeypatch):
+    monkeypatch.setattr(app_module.YolomuxControlServer, "start", lambda self: None)
+    monkeypatch.setattr(app_module.YolomuxControlServer, "stop", lambda self: None)
+
+
+@pytest.fixture
+def isolated_yoagent_conversation_state(monkeypatch, tmp_path):
+    state_dir = tmp_path / "yoagent-state"
+    monkeypatch.setattr(app_module.yoagent_conversation, "YOAGENT_CONVERSATION_PATH", state_dir / "conversation.jsonl")
+    monkeypatch.setattr(app_module.yoagent_conversation, "YOAGENT_CLI_STATE_PATH", state_dir / "cli-sessions.json")
+    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
+    monkeypatch.setattr(app_module, "EVENT_LOG_PATH", tmp_path / "events.jsonl")
 
 
 def local_socket_capability() -> tuple[bool, str]:

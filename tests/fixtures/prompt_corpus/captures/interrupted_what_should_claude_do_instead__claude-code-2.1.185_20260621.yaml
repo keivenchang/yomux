@@ -1,0 +1,47 @@
+agent: claude
+capture_date: '2026-06-21'
+capture_mode: visible
+captured_at: '2026-06-21T20:18:45.024040+00:00'
+case_name: interrupted_what_should_claude_do_instead
+claude_version: 2.1.185 (Claude Code)
+client_name: Claude Code
+client_version: 2.1.185 (Claude Code)
+client_version_slug: claude-code-2.1.185
+codex_version: ''
+cursor: {}
+expected_screen_key: needs-input
+failures: []
+fixture_scenario: interrupted_what_should_claude_do_instead
+fixture_id: interrupted_what_should_claude_do_instead__claude-code-2.1.185_20260621
+height: 40
+id: interrupted_what_should_claude_do_instead__claude-code-2.1.185_20260621
+include_scrollback: false
+launch_agent: ''
+launch_command: ''
+launched_session: ''
+mode: ''
+operations: []
+raw_capture: |
+  Interrupted · What should Claude do instead?
+
+                                                                                                      ◎ /goal active (2m)
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ❯
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+ready_text: []
+send_lines: []
+source: real Claude interrupted awaiting-user-instruction capture from scratch tmux yoreal-claude-capture:0.0, trimmed to the visible prompt area for replay
+styled_capture: |
+  Interrupted · What should Claude do instead?
+
+                                                                                                      ◎ /goal active (2m)
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ❯
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+target: yoreal-claude-capture:0.0
+tmux_socket: ''
+wait_text:
+- What should Claude do instead
+width: 120
