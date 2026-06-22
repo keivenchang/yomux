@@ -2285,11 +2285,19 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
-        (async () => {
-          try {
-            const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-            const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-            const escapeHtml = value => String(value || '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
+            (async () => {
+              try {
+                const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+                const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+                const waitFor = async (predicate, timeoutMs = 1500) => {
+                  const deadline = performance.now() + timeoutMs;
+                  while (performance.now() < deadline) {
+                    if (predicate()) return true;
+                    await frame();
+                  }
+                  return predicate();
+                };
+                const escapeHtml = value => String(value || '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
             window.marked = {
               parse(markdown) {
                 const lines = String(markdown || '').split('\\n');
@@ -2453,8 +2461,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               popupStyle: popupDoc.body.getAttribute('style') || '',
             };
             handleFileEditorContentChanged(panel, path, updated, {syntax: false});
-            await frame();
-            await frame();
+            await waitFor(() => (popupDoc.querySelector('[data-preview-root]')?.textContent || '').includes('Updated pop-out text'));
             const afterEditorContent = popupDoc.querySelector('[data-preview-root]')?.textContent || '';
             setFileEditorThemeMode(configuredEditorSchemeForMode(false));
             await frame();

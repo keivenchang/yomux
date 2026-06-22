@@ -92,7 +92,7 @@ def lanes() -> list[Lane]:
         ),
         Lane(
             "pytest",
-            "pytest full",
+            "pytest non-browser",
             # Exclude node_bridge: test_node_suite.py shells out to `node tests/layout_url.test.js`,
             # the exact command the always-on node-layout lane already runs. Without this, the gate
             # runs that ~20s node suite twice concurrently (it was the single slowest pytest item)
@@ -102,16 +102,25 @@ def lanes() -> list[Lane]:
             # Exclude e2e too: end-to-end tests launch real tmux + mock agents + a TmuxWebtermApp and are
             # an order of magnitude slower; they run as their own parallel `pytest-e2e` lane (below) so a
             # fast unit failure surfaces immediately and the two pools do not thrash each other's cores.
-            (Step("pytest full", ["python3", "-m", "pytest", "tests", "-n", "auto", "-m", "not node_bridge and not e2e", "-q"]),),
+            # Exclude browser too: Selenium tests are a separate `pytest-browser` lane so browser-only
+            # script errors and timing flakes do not hide inside the generic pytest lane.
+            (Step("pytest non-browser", ["python3", "-m", "pytest", "tests", "-n", "auto", "-m", "not node_bridge and not e2e and not browser", "-q"]),),
+            True,
+        ),
+        Lane(
+            "pytest-browser",
+            "pytest browser",
+            (Step("pytest browser", ["python3", "-m", "pytest", "tests", "-n", "auto", "-m", "browser and not e2e", "-q"]),),
             True,
         ),
         Lane(
             "pytest-e2e",
             "pytest e2e",
-            # End-to-end auto-approve etc.: real tmux + mock_*.py + AutoApproveWorker. Runs in PARALLEL
-            # with the unit `pytest` lane (separate Lane = separate process), and the `socket` marker
-            # makes each test self-skip when the sandbox blocks local sockets/tmux.
-            (Step("pytest e2e", ["python3", "-m", "pytest", "tests", "-n", "auto", "-m", "e2e", "-q"]),),
+            # End-to-end auto-approve etc.: real tmux + mock_*.py + AutoApproveWorker. Keep this pool
+            # bounded: `-n auto` can launch dozens of tmux/mock-agent subprocesses while the browser and
+            # unit pools are also running, which slows the whole default gate down and makes flakes harder
+            # to diagnose.
+            (Step("pytest e2e", ["python3", "-m", "pytest", "tests", "-n", "4", "-m", "e2e", "-q"]),),
             True,
         ),
         Lane(
@@ -149,16 +158,6 @@ def lanes() -> list[Lane]:
                         "socket and not browser",
                         "-q",
                     ],
-                ),
-            ),
-        ),
-        Lane(
-            "pytest-browser",
-            "pytest browser",
-            (
-                Step(
-                    "pytest browser",
-                    ["python3", "-m", "pytest", "tests/test_browser_layout.py", "-n", "auto", "-q"],
                 ),
             ),
         ),

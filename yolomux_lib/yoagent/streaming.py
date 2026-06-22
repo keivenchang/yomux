@@ -48,6 +48,22 @@ def sanitized_stream_items(value: Any) -> list[dict[str, str]]:
     return result
 
 
+def copy_stream_items(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "").strip().lower()
+        if kind not in {"assistant", "thinking", "tool"}:
+            continue
+        text = str(item.get("text") or "")
+        if text.strip():
+            result.append({"kind": kind, "text": text})
+    return result
+
+
 class YoagentStreamStateStore:
     def __init__(
         self,
@@ -71,6 +87,7 @@ class YoagentStreamStateStore:
         stream_items: list[dict[str, str]],
         auxiliary_done: bool,
         auxiliary_truncated: bool,
+        stream_items_sanitized: bool = False,
     ) -> None:
         safe_stream_id = str(stream_id or "").strip()
         if not safe_stream_id:
@@ -80,7 +97,7 @@ class YoagentStreamStateStore:
                 "auxiliaryLines": list(auxiliary_lines),
                 "auxiliaryText": "\n".join(auxiliary_lines),
                 "auxiliaryPreview": auxiliary_preview,
-                "streamItems": sanitized_stream_items(stream_items),
+                "streamItems": copy_stream_items(stream_items) if stream_items_sanitized else sanitized_stream_items(stream_items),
                 "auxiliaryDone": bool(auxiliary_done),
                 "auxiliaryTruncated": bool(auxiliary_truncated),
                 "updatedTs": self.clock(),
@@ -150,6 +167,7 @@ class YoagentStreamPublisher:
         error: bool = False,
         aborted: bool = False,
         created_at: str = "",
+        stream_items_sanitized: bool = False,
     ) -> None:
         safe_stream_id = str(stream_id or "").strip()
         if not safe_stream_id:
@@ -176,7 +194,7 @@ class YoagentStreamPublisher:
             payload["auxiliary_lines"] = [str(line or "") for line in auxiliary_lines if str(line or "").strip()]
         if auxiliary_preview:
             payload["auxiliary_preview"] = str(auxiliary_preview)
-        clean_stream_items = sanitized_stream_items(stream_items)
+        clean_stream_items = copy_stream_items(stream_items) if stream_items_sanitized else sanitized_stream_items(stream_items)
         if clean_stream_items:
             payload["stream_items"] = clean_stream_items
         if hidden_work_active:
@@ -209,7 +227,7 @@ class YoagentStreamPublisher:
 
         def publish(events: list[dict[str, Any]], phase: str = "") -> None:
             lines = list(state.get("auxiliary_lines") or [])
-            stream_items = sanitized_stream_items(state.get("stream_items"))
+            stream_items = copy_stream_items(state.get("stream_items"))
             active = bool(state.get("hidden_work_active") or state.get("tool_active"))
             preview_count = 2 if active else 1
             preview = "\n".join(lines[-preview_count:]) if lines else ""
@@ -220,6 +238,7 @@ class YoagentStreamPublisher:
                 stream_items=stream_items,
                 auxiliary_done=bool(state.get("auxiliary_done")),
                 auxiliary_truncated=bool(state.get("auxiliary_truncated")),
+                stream_items_sanitized=True,
             )
             self.publish_stream_delta(
                 stream_id,
@@ -237,6 +256,7 @@ class YoagentStreamPublisher:
                 auxiliary_truncated=bool(state.get("auxiliary_truncated")),
                 turn_done=phase == "done",
                 error=phase == "error",
+                stream_items_sanitized=True,
             )
 
         def hidden_work_prefix(event: dict[str, Any]) -> str:
@@ -275,27 +295,31 @@ class YoagentStreamPublisher:
         def append_stream_item(kind: str, text: str, *, merge: bool = True) -> None:
             safe_kind = str(kind or "").strip().lower()
             value = redacted_action_text(str(text or ""), None)
-            if safe_kind not in {"assistant", "thinking", "tool"} or not value:
+            if safe_kind not in {"assistant", "thinking", "tool"} or not value.strip():
                 return
-            items = sanitized_stream_items(state.get("stream_items"))
+            items = state.get("stream_items")
+            if not isinstance(items, list):
+                items = []
+                state["stream_items"] = items
             if merge and items and items[-1].get("kind") == safe_kind:
                 joiner = "" if safe_kind == "assistant" else "\n"
                 items[-1]["text"] = str(items[-1].get("text") or "") + joiner + value
             else:
                 items.append({"kind": safe_kind, "text": value})
-            state["stream_items"] = items
 
         def replace_or_append_stream_item(kind: str, text: str) -> None:
             safe_kind = str(kind or "").strip().lower()
             value = redacted_action_text(str(text or ""), None)
-            if safe_kind not in {"assistant", "thinking", "tool"} or not value:
+            if safe_kind not in {"assistant", "thinking", "tool"} or not value.strip():
                 return
-            items = sanitized_stream_items(state.get("stream_items"))
+            items = state.get("stream_items")
+            if not isinstance(items, list):
+                items = []
+                state["stream_items"] = items
             if items and items[-1].get("kind") == safe_kind:
                 items[-1]["text"] = value
             else:
                 items.append({"kind": safe_kind, "text": value})
-            state["stream_items"] = items
 
         def hidden_work_stream_item_text(event: dict[str, Any]) -> str:
             prefix = str(state.get("hidden_work_prefix") or hidden_work_prefix(event) or "thinking")
@@ -314,7 +338,10 @@ class YoagentStreamPublisher:
             if not line:
                 return
             event_type = str(event.get("kind") or event.get("event") or "")
-            lines = list(state.get("auxiliary_lines") or [])
+            lines = state.get("auxiliary_lines")
+            if not isinstance(lines, list):
+                lines = []
+                state["auxiliary_lines"] = lines
             if event_type == HIDDEN_WORK_DELTA:
                 prefix = hidden_work_prefix(event)
                 raw_text = str(event.get("text") or "")
@@ -355,7 +382,6 @@ class YoagentStreamPublisher:
                     value = part.strip()
                     if value:
                         lines.append(value)
-            state["auxiliary_lines"] = lines
 
         def callback(event: dict[str, Any]) -> None:
             normalized = normalize_yoagent_stream_event(event, backend=backend)

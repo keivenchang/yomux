@@ -3591,6 +3591,7 @@ class TmuxWebtermApp:
         error: bool = False,
         aborted: bool = False,
         created_at: str = "",
+        stream_items_sanitized: bool = False,
     ) -> None:
         self.yoagent_streams.publish_delta(
             stream_id,
@@ -3611,6 +3612,7 @@ class TmuxWebtermApp:
             error=error,
             aborted=aborted,
             created_at=created_at,
+            stream_items_sanitized=stream_items_sanitized,
         )
 
     def yoagent_stream_auxiliary_message_fields(self, stream_id: str) -> dict[str, Any]:
