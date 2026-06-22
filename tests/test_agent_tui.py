@@ -488,6 +488,32 @@ def test_promoted_agent_tui_captures_reclassify_to_expected_state(case):
     assert state.composer.key == expected["composer_key"]
 
 
+def test_codex_node_shell_approval_fixture_stays_yolo_approval():
+    data = load_structured_fixture(PROMOTED_CAPTURE_DIR / "shell_approval_touch_command__codex-cli-0.141.0_20260620.yaml")
+    cursor = cursor_from_capture(data)
+
+    state = classify_agent_pane(
+        {"pane_target": "%promoted-fixture", "agent_kind": data["agent"]},
+        session="promoted-fixture",
+        prompt_source="pane",
+        include_composer=True,
+        include_transcript_activity=False,
+        capture_full_for_bash=False,
+        capture_func=lambda _target, visible_only=False: data["raw_capture"],
+        capture_styled_func=lambda _target, visible_only=False: data["styled_capture"],
+        cursor_func=lambda _target: cursor,
+    )
+
+    assert data["agent"] == "codex"
+    assert cursor.current_command == "node"
+    assert state.reason_code == "approval"
+    assert state.attention_label == "YOLO?"
+    assert state.approval["approval_visible"] is True
+    assert state.approval["approval_type"] == "bash"
+    assert state.approval["selected_option"] == 1
+    assert "touch /tmp/yolomux-codex-e2e-approval" in data["raw_capture"]
+
+
 def test_send_prompt_clears_draft_before_paste_and_verifies_submit():
     draft = claude_composer("❯ old draft")
     empty = claude_composer("❯ ")

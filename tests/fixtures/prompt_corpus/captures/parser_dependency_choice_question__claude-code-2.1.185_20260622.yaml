@@ -1,0 +1,222 @@
+actual:
+  agent_kind: claude
+  approval:
+    approval_action: ''
+    approval_type: ''
+    approval_visible: false
+    command: ''
+    dangerous: false
+    prompt_hash: ''
+    risk: ''
+    rule_input_text: ''
+    selected_option: 0
+    source: ''
+  attention_kind: question
+  attention_label: ASK?
+  composer:
+    accepting: true
+    detected_text: ''
+    key: empty
+    prompt_suggestion: false
+    text: ''
+  cursor: &id003
+    character: ❯
+    current_command: claude
+    pane_in_mode: false
+    x: 0
+    y: 40
+  display:
+    attention_kind: question
+    attention_label: ASK?
+    evidence_lines: &id001
+    - How should dynamo depend on the frontend-crates parser crates (dynamo-parsers + dynamo-parsers-v2)?
+    - 1. Local path dep (relative)
+    - 2. Git dep, pinned rev
+    - 3. Absolute path (as-is)
+    - 4. Type something.
+    - 5. Chat about this
+    options: &id002
+    - index: 1
+      label: Local path dep (relative)
+      selected: true
+    - index: 2
+      label: Git dep, pinned rev
+      selected: false
+    - index: 3
+      label: Absolute path (as-is)
+      selected: false
+    - index: 4
+      label: Type something.
+      selected: false
+    - index: 5
+      label: Chat about this
+      selected: false
+    prompt_hash: 4c416c7989bd72c19b4e958f74722531
+    prompt_kind: question
+    question_text: How should dynamo depend on the frontend-crates parser crates (dynamo-parsers + dynamo-parsers-v2)?
+    screen_key: needs-input
+    selected_option: 1
+  reason_code: needs-input
+  screen:
+    agent: claude
+    command: null
+    confidence: 0.9
+    evidence_lines: *id001
+    key: needs-input
+    options: *id002
+    prompt_hash: 4c416c7989bd72c19b4e958f74722531
+    prompt_kind: question
+    question_text: How should dynamo depend on the frontend-crates parser crates (dynamo-parsers + dynamo-parsers-v2)?
+    selected_option: 1
+    text: How should dynamo depend on the frontend-crates parser crates (dynamo-parsers + dynamo-parsers-v2)?
+agent: claude
+capture_date: '2026-06-22'
+capture_date_position: end
+capture_mode: visible
+captured_at: '2026-06-22T18:54:45.489459+00:00'
+case_name: parser_dependency_choice_question
+claude_version: 2.1.185 (Claude Code)
+client_name: Claude Code
+client_version: 2.1.185 (Claude Code)
+client_version_slug: claude-code-2.1.185
+codex_version: ''
+cursor: *id003
+evidence_fields:
+  display_evidence_lines: *id001
+  prompt_hash: 4c416c7989bd72c19b4e958f74722531
+  screen_evidence_lines: *id001
+expected:
+  agent_kind: claude
+  approval_visible: false
+  attention_kind: question
+  clear_cleared: ''
+  clear_ok: ''
+  composer_key: empty
+  reason_code: needs-input
+  screen_key: needs-input
+  send_ok: ''
+  send_reason_code: ''
+expected_promoted:
+  agent_kind: claude
+  approval_type: ''
+  approval_visible: false
+  attention_kind: question
+  attention_label: ASK?
+  composer_key: empty
+  reason_code: needs-input
+  screen_key: needs-input
+failures: []
+fixture_id: parser_dependency_choice_question__claude-code-2.1.185_20260622
+fixture_scenario: parser_dependency_choice_question
+id: parser_dependency_choice_question__claude-code-2.1.185_20260622
+operations:
+- needles: []
+  ok: true
+  type: ready_text
+- needles: []
+  ok: true
+  type: wait_text
+raw_capture: "  Before I touch anything, let me map dynamo's qwen3 routing + jailing so I can plan the \"no jailing, use v2\
+  \  \n  for batch+stream\" change precisely.                                                                          \n\
+  \                                                                                                               \n● Explore(Map\
+  \ dynamo qwen3 parser routing + jailing)                                                           \n  ⎿  Done (32 tool\
+  \ uses · 101.3k tokens · 1m 34s)                                                             \n                        \
+  \                                                                                       \n                             \
+  \                                                                                  \n● I now have a complete map. Crucially,\
+  \ the in-progress jail.rs already uses                                  \n  dynamo_parsers_v2::Qwen3CoderToolStreamParser\
+  \ — but only to parse the buffered/jailed content at finalize    \n  time. The user wants the opposite: for qwen3, bypass\
+  \ the jail and stream incrementally through the v2 crate,\n  for both batch and streaming.                             \
+  \                                                   \n                                                                 \
+  \                                              \n  Let me pin down what's committed vs uncommitted in jail.rs, and whether\
+  \ DIS-2238 is already in main — both\n  affect the rebase.                                                             \
+  \                              \n                                                                                      \
+  \                        \n  Ran 1 shell command                                                                       \
+  \                   \n\n● The qwen3-v2 work in jail.rs is entirely uncommitted (53 insertions); committed HEAD has zero\
+  \ v2 references.\n  Let me finish the rebase-landscape checks.                                                         \
+  \         \n\n  Ran 1 shell command                                                                                    \
+  \     \n                                                                                                           \n● I\
+  \ now have the full landscape. Key findings:                                                                \n         \
+  \                                                                                                     \n  - dynamo4: branch\
+  \ DIS-2238 (the truncation fix 27a5e7e, not yet in main), 1 commit ahead / 44 behind        \n  origin/main. The entire\
+  \ qwen3-v2 integration is uncommitted/experimental: Cargo.toml dep swaps using absolute\n  local paths (~/dynamo/frontend-crates4/...,\
+  \ stale versions 2.0.0/0.1.3), +53 lines in jail.rs,   \n  plus fixture/Cargo.lock edits. Committed HEAD and origin/main\
+  \ have zero parsers_v2 references.               \n  - The experiment still jails qwen3 — it buffers the stream, then parses\
+  \ the buffered text with the v2 parser\n  at finalize. That's not \"no jailing.\" You want qwen3 to bypass the jail and\
+  \ stream incrementally through the\n  v2 crate's streaming API, for both batch and streaming.                          \
+  \                           \n  - Collision avoided cleverly: the experiment makes dynamo depend on frontend-crates' dynamo-parsers\
+  \         \n  everywhere (not dynamo's own lib/parsers), so there's only one dynamo-parsers package.                   \
+  \   \n                                                                                                              \n \
+  \ Two decisions define the whole approach, and guessing wrong is costly — let me confirm:                     \n───────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  ←  ☐ Dep mechanism  ☐ No jailing  ✔ Submit  →                                                                 \n       \
+  \                                                                                                        \nHow should dynamo\
+  \ depend on the frontend-crates parser crates (dynamo-parsers + dynamo-parsers-v2)?            \n                      \
+  \                                                                                      \n❯ 1. Local path dep (relative)\
+  \                                                                                \n     Point dynamo's Cargo.toml at ../frontend-crates4\
+  \ via relative path. Builds on this machine, matches your  \n     in-progress edits (but cleaner than absolute paths). Best\
+  \ for 'I'd like to use it' locally; not          \n     CI/PR-portable.                                                \
+  \                                           \n  2. Git dep, pinned rev                                                 \
+  \                                      \n     Depend on ai-dynamo/frontend-crates at a pushed commit. Portable, CI- and\
+  \ PR-ready, but I must push the   \n     frontend-crates DIS-2228 branch first and bump versions.                      \
+  \                           \n  3. Absolute path (as-is)                                                               \
+  \                      \n     Keep the absolute ~/... paths from the in-progress experiment, just refreshed to current \
+  \     \n     versions (2.0.1/0.1.4). Fastest, fully machine-specific.                                                  \n\
+  \  4. Type something.\n───────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  \  5. Chat about this\n\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\n"
+styled_capture: "  Before I touch anything, let me map dynamo's qwen3 routing + jailing so I can plan the \"no jailing, use\
+  \ v2  \n  for batch+stream\" change precisely.                                                                         \
+  \ \n                                                                                                               \n● Explore(Map\
+  \ dynamo qwen3 parser routing + jailing)                                                           \n  ⎿  Done (32 tool\
+  \ uses · 101.3k tokens · 1m 34s)                                                             \n                        \
+  \                                                                                       \n                             \
+  \                                                                                  \n● I now have a complete map. Crucially,\
+  \ the in-progress jail.rs already uses                                  \n  dynamo_parsers_v2::Qwen3CoderToolStreamParser\
+  \ — but only to parse the buffered/jailed content at finalize    \n  time. The user wants the opposite: for qwen3, bypass\
+  \ the jail and stream incrementally through the v2 crate,\n  for both batch and streaming.                             \
+  \                                                   \n                                                                 \
+  \                                              \n  Let me pin down what's committed vs uncommitted in jail.rs, and whether\
+  \ DIS-2238 is already in main — both\n  affect the rebase.                                                             \
+  \                              \n                                                                                      \
+  \                        \n  Ran 1 shell command                                                                       \
+  \                   \n\n● The qwen3-v2 work in jail.rs is entirely uncommitted (53 insertions); committed HEAD has zero\
+  \ v2 references.\n  Let me finish the rebase-landscape checks.                                                         \
+  \         \n\n  Ran 1 shell command                                                                                    \
+  \     \n                                                                                                           \n● I\
+  \ now have the full landscape. Key findings:                                                                \n         \
+  \                                                                                                     \n  - dynamo4: branch\
+  \ DIS-2238 (the truncation fix 27a5e7e, not yet in main), 1 commit ahead / 44 behind        \n  origin/main. The entire\
+  \ qwen3-v2 integration is uncommitted/experimental: Cargo.toml dep swaps using absolute\n  local paths (~/dynamo/frontend-crates4/...,\
+  \ stale versions 2.0.0/0.1.3), +53 lines in jail.rs,   \n  plus fixture/Cargo.lock edits. Committed HEAD and origin/main\
+  \ have zero parsers_v2 references.               \n  - The experiment still jails qwen3 — it buffers the stream, then parses\
+  \ the buffered text with the v2 parser\n  at finalize. That's not \"no jailing.\" You want qwen3 to bypass the jail and\
+  \ stream incrementally through the\n  v2 crate's streaming API, for both batch and streaming.                          \
+  \                           \n  - Collision avoided cleverly: the experiment makes dynamo depend on frontend-crates' dynamo-parsers\
+  \         \n  everywhere (not dynamo's own lib/parsers), so there's only one dynamo-parsers package.                   \
+  \   \n                                                                                                              \n \
+  \ Two decisions define the whole approach, and guessing wrong is costly — let me confirm:                     \n───────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  ←  ☐ Dep mechanism  ☐ No jailing  ✔ Submit  →                                                                 \n       \
+  \                                                                                                        \nHow should dynamo\
+  \ depend on the frontend-crates parser crates (dynamo-parsers + dynamo-parsers-v2)?            \n                      \
+  \                                                                                      \n❯ 1. Local path dep (relative)\
+  \                                                                                \n     Point dynamo's Cargo.toml at ../frontend-crates4\
+  \ via relative path. Builds on this machine, matches your  \n     in-progress edits (but cleaner than absolute paths). Best\
+  \ for 'I'd like to use it' locally; not          \n     CI/PR-portable.                                                \
+  \                                           \n  2. Git dep, pinned rev                                                 \
+  \                                      \n     Depend on ai-dynamo/frontend-crates at a pushed commit. Portable, CI- and\
+  \ PR-ready, but I must push the   \n     frontend-crates DIS-2228 branch first and bump versions.                      \
+  \                           \n  3. Absolute path (as-is)                                                               \
+  \                      \n     Keep the absolute ~/... paths from the in-progress experiment, just refreshed to current \
+  \     \n     versions (2.0.1/0.1.4). Fastest, fully machine-specific.                                                  \n\
+  \  4. Type something.\n───────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  \  5. Chat about this\n\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\n"
+tmux_socket: ''
+tmux_target: '4:0.0'
+source: real Claude Code parser dependency AskUserQuestion selected-option capture from tmux session 4:0.0
+source_capture_status: promoted from live real Claude Code capture; staging discarded after promotion
+source_staging_file: staging/agent_tui__claude-code-2.1.185_20260622T185445Z.yaml
+verifier_capabilities:
+- raw-capture
+- styled-capture
+- cursor-facts
+- central-clear-composer
+- central-send-prompt
+- visible-status-counter

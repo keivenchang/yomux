@@ -287,10 +287,10 @@ async function runTabberSuite() {
     api.setTranscriptInfoForTest('8', {project: {git: {root: '/home/test'}}, panes: agentPane('/home/test')});
     api.setTranscriptInfoForTest('9', {project: {git: {root: '/etc/yolo'}}, panes: agentPane('/etc/yolo')});
     api.setTranscriptInfoForTest('10', {project: {git: {root: '~/already'}}, panes: agentPane('~/already')});
-    api.setTabberSessionFilesForTest('7', [{path: 'app.py', abs_path: '/home/test/project/app.py', repo: '/home/test/project', status: 'M', mtime: 7000}]);
-    api.setTabberSessionFilesForTest('8', [{path: 'notes.md', abs_path: '/home/test/notes.md', repo: '/home/test', status: 'M', mtime: 6000}]);
-    api.setTabberSessionFilesForTest('9', [{path: 'config', abs_path: '/etc/yolo/config', repo: '/etc/yolo', status: 'M', mtime: 5000}]);
-    api.setTabberSessionFilesForTest('10', [{path: 'file.txt', abs_path: '~/already/file.txt', repo: '~/already', status: 'M', mtime: 4000}]);
+    api.setAutoApproveStateForTest('7', {agent_windows: [{kind: 'claude', state: 'idle', window_index: 0, window_label: '0:claude', active: true, path_entries: [{path: '/home/test/project', mtime: 7000}]}]});
+    api.setAutoApproveStateForTest('8', {agent_windows: [{kind: 'claude', state: 'idle', window_index: 0, window_label: '0:claude', active: true, path_entries: [{path: '/home/test', mtime: 6000}]}]});
+    api.setAutoApproveStateForTest('9', {agent_windows: [{kind: 'claude', state: 'idle', window_index: 0, window_label: '0:claude', active: true, path_entries: [{path: '/etc/yolo', mtime: 5000}]}]});
+    api.setAutoApproveStateForTest('10', {agent_windows: [{kind: 'claude', state: 'idle', window_index: 0, window_label: '0:claude', active: true, path_entries: [{path: '~/already', mtime: 4000}]}]});
 
     const tree = api.buildTabberTree();
     const sessionSeven = tree.entries.find(entry => entry.tabber?.session === '7');
@@ -1155,18 +1155,20 @@ async function runTabberSuite() {
     assert.ok(/\.file-tree-row\.tabber-row \.tabber-session-tab \.session-button-prefix\s*\{[\s\S]*flex:\s*0 0 auto/.test(css), 'A4/TR1: the shared session number prefix stays visible before detail truncation');
     assert.ok(/\.file-tree-row\.tabber-row \.tabber-session-tab \.tab-inline-detail\s*\{[\s\S]*flex:\s*1 1 auto[\s\S]*min-width:\s*0[\s\S]*text-overflow:\s*ellipsis/.test(css), 'A4/TR1: the shared tab detail truncates inside the stretched Tabber label');
     assert.ok(/\.file-tree-row\.tabber-row \.tabber-session-tab > \.session-popover\s*\{[\s\S]*position:\s*fixed[\s\S]*z-index:\s*var\(--z-tab-popover\)/.test(css), 'TR2: Tabber session popovers use the same fixed-position popover layer as real tabs');
-    assert.ok(source.includes("movingEllipsisHtml('tabber-loading-dots')"), 'Tabber shows shared moving dots while touched paths are loading');
+    assert.equal(source.includes("tabber: {type: 'loading'"), false, 'Tabber no longer renders a client-side touched-path loading row');
     assert.ok(source.includes('function tabberLookbackControlHtml()') && source.includes('data-tabber-lookback'), 'Tabber renders a dedicated touched-path lookback control');
-    assert.ok(/function setTabberSessionFileLookbackHours\(hours, options = \{\}\)[\s\S]*clearTabberSessionFilesStates\(\)[\s\S]*ensureTabberSessionFilesFetches\(\)/.test(source), 'changing Tabber lookback invalidates and reloads touched-path state');
+    assert.ok(/function setTabberSessionFileLookbackHours\(hours, options = \{\}\)[\s\S]*clearTabberSessionFilesStates\(\)[\s\S]*fetchTabberActivity\(\)/.test(source), 'changing Tabber lookback reloads the cached activity agent-window records');
     assert.ok(/\.file-tree-row\.tabber-row \.tabber-window-label \.agent-icon\s*\{[\s\S]*width:\s*calc\(var\(--file-explorer-font-size\) \+ 2px\)[\s\S]*height:\s*calc\(var\(--file-explorer-font-size\) \+ 2px\)/.test(css), 'Tabber process icons scale with the file explorer row font');
     assert.ok(/\.file-tree-row\.tabber-row \.file-tree-date\s*\{[\s\S]*flex:\s*0 0 var\(--file-tree-date-column-width\)[\s\S]*inline-size:\s*var\(--file-tree-date-column-width\)/.test(css), 'Tabber keeps the recency column reserved at narrow widths');
     assert.ok(/\.file-tree-date\s*\{[\s\S]*font-size:\s*max\(var\(--ui-font-size-2xs\), calc\(var\(--file-explorer-font-size\) - 1px\)\)[\s\S]*text-overflow:\s*ellipsis/.test(css), 'SC7: recency/status text uses a larger row-scale font and end ellipsis');
     assert.ok(/row\.classList\.toggle\('tabber-status-long', data\.type === 'window' && \/\^\(working for\|ASK\\\?\)\//.test(source), 'SC1: Tabber marks long working/ASK status rows without affecting plain ago rows');
     assert.ok(/\.file-tree-row\.tabber-row\.tabber-status-long \.file-tree-date\s*\{[\s\S]*display:\s*block[\s\S]*flex:\s*0 1 auto[\s\S]*text-align:\s*start[\s\S]*text-overflow:\s*ellipsis/.test(css), 'SC1/SC2: long Tabber statuses fit content and truncate at the end, not from the leading edge');
     assert.equal(/@container[\s\S]*tabber-row \.file-tree-date[\s\S]*display:\s*none/.test(css), false, 'Tabber never hides the <time> ago recency column for narrow panes');
-    assert.ok(/function warmTabberDataOnLaunch\(\)[\s\S]*?tabberLaunchWarmupStarted = true;[\s\S]*?fetchTabberActivity\(\);[\s\S]*?fetchTabberSessionFilesBatch\(tabberAgentSessions\(\)\);/.test(source), 'Tabber launch warmup primes activity and batch-hydrates touched paths');
+    assert.ok(/function warmTabberDataOnLaunch\(\)[\s\S]*?tabberLaunchWarmupStarted = true;[\s\S]*?fetchTabberActivity\(\);[\s\S]*?return true;/.test(source), 'Tabber launch warmup primes cached activity agent-window records');
     assert.ok(/transcriptMetaLoaded = true;[\s\S]*?warmTabberDataOnLaunch\(\)/.test(source), 'Tabber launch warmup runs as soon as transcript metadata is available');
     assert.ok(/function tabberAgentForWindow\(session, windowIndex, agentKey = ''\)/.test(source), 'Tabber can look up agent transcript activity by session/window');
+    assert.ok(source.includes('function agentWindowPathEntries(agent)') && source.includes('function windowViewModel(session, windowIndex'), 'Tabber reads paths through the shared backend agent-window view model');
+    assert.equal(/tabberTouchedRepoPathsForWindow|tabberRepoPathsForWindow|tabberFileMatchesWindow/.test(source), false, 'Tabber has no client-side per-window path resolver');
     assert.ok(/const windowMtime = isAgent\s*\?\s*tabberAgentRecency\(agentActivity\)\s*:\s*Math\.max\(ledgerMtime, childMtime, fallbackSessionRecency\)/.test(source), 'Tabber agent windows sort only from agent transcript recency, never user-input or touched-path mtimes');
     assert.ok(/function updateTabberRow\([\s\S]*updateFileTreeRowContents\(row, icon, label,[\s\S]*applyFileTreeRowRecency\(row, entry, options\)/.test(source), 'Tabber timestamp rows route through the shared Finder/Differ recency styling');
     assert.equal(/icon:\s*'▢'|icon:\s*'■'/.test(source), false, 'Tabber shell/session rows avoid checkbox-looking square glyphs');
@@ -1180,10 +1182,12 @@ async function runTabberSuite() {
     assert.ok(source.includes('function setRowDataset(row, key, value)'), 'DOIT.61 B1: row dataset set/delete is centralized');
     assert.ok(source.includes('const tabberSessionFilesStates = new Map()'), 'DOIT.61 B2: Tabber session files use one state map');
     assert.equal(/tabberSessionFilesCache|tabberSessionFilesInFlight/.test(source), false, 'DOIT.61 B2: Tabber no longer has parallel cache + inflight state');
-    assert.ok(source.includes('/api/session-files-batch?') && source.includes('function fetchTabberSessionFilesBatch(sessions'), 'Tabber touched paths hydrate through one batch request');
-    assert.ok(/function ensureTabberSessionFilesFetches\(\)[\s\S]*fetchTabberSessionFilesBatch\(tabberAgentSessions\(\)\)/.test(source), 'Tabber open reuses the batch hydrator for every missing agent session');
+    assert.ok(source.includes('/api/session-files-batch?') && source.includes('function fetchTabberSessionFilesBatch(sessions'), 'the modified-files session-file helpers still have one batch request');
+    assert.ok(/function ensureTabberSessionFilesFetches\(\)[\s\S]*fetchTabberActivity\(\)/.test(source), 'Tabber open reuses cached activity instead of a session-files path fetch');
+    assert.equal(source.includes('fetchTabberSessionFilesBatch(tabberAgentSessions())'), false, 'Tabber agent-window paths do not hydrate through the old client session-files batch');
     assert.ok(/params\.set\('hours', String\(hours\)\)/.test(source), 'Tabber batch touched-path requests carry the selected lookback hours');
     assert.ok(/\/api\/session-files\?session=\$\{encodeURIComponent\(session\)\}&hours=\$\{encodeURIComponent\(String\(hours\)\)\}/.test(source), 'Tabber single-session fallback requests carry the selected lookback hours');
+    assert.ok(/apiFetchJson\(`\/api\/activity\?\$\{params\.toString\(\)\}`/.test(source) && /params\.set\('hours', String\(normalizeSessionFileLookbackHours\(tabberSessionFileLookbackHours\)\)\)/.test(source), 'Tabber activity fetch carries the selected touched-path lookback hours');
     assert.ok(source.includes('function fileTreeRowPadding(depth, compact = false)') && source.includes('function fileTreeRowDepth(row, compact = false)'), 'DOIT.61 B3: tree indentation math is centralized');
     assert.ok(source.includes('const nextDepth = fileTreeRowDepth(row) + 1'), 'DOIT.61 B3: directory expansion uses the shared depth helper');
     assert.ok(source.includes('function clearFileTreeRowHandlers(row)') && (source.match(/clearFileTreeRowHandlers\(row\)/g) || []).length >= 2, 'DOIT.61 B4: stale row handler cleanup is shared');
@@ -1242,15 +1246,9 @@ async function runTabberSuite() {
     api.setTranscriptInfoForTest('2', {
       panes: [{window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', process_label_pid: 24680, command: 'codex', current_path: '/home/u/two'}],
     });
-    // L3 paths for the claude window (set BEFORE building so the agent window gets repo children).
-    api.setTabberSessionFilesForTest('1', [
-      {path: 'src/app.py', abs_path: '/home/u/proj/src/app.py', repo: '/home/u/proj', status: 'M', mtime: 5000},
-      {path: 'README.md', abs_path: '/home/u/proj/README.md', repo: '/home/u/proj', status: 'A', mtime: 4000},
-      {path: '/home/u/proj/src/deep/tool.py', abs_path: '/home/u/proj/src/deep/tool.py', repo: '', status: 'T', mtime: 4500},
-      {path: '/tmp/scratch.txt', abs_path: '/tmp/scratch.txt', repo: '', status: 'T', mtime: 9000},
-    ]);
+    // L3 paths for the claude window come from the backend agent_windows record, not a client session-files parse.
     api.setAutoApproveStateForTest('1', {agent_windows: [
-      {kind: 'claude', state: 'working', working_elapsed_seconds: 13500, window_index: 0, window_name: 'claude', window_label: '0:claude'},
+      {kind: 'claude', state: 'working', working_elapsed_seconds: 13500, window_index: 0, window_name: 'claude', window_label: '0:claude', pid: 12345, active: true, path_entries: [{path: '/home/u/proj', mtime: 5000, git: {root: '/home/u/proj', branch: 'devbranch'}}]},
     ]});
 
     const {entries, entriesByDir} = api.buildTabberTree();
@@ -1282,10 +1280,10 @@ async function runTabberSuite() {
         {window: '1', pane: '0', window_active: false, active: true, process_label: 'codex', process_label_pid: 222, command: 'codex', current_path: '/home/u'},
       ],
     });
-    api.setTabberSessionFilesForTest('3', [
-      {path: 'a.py', abs_path: '/home/u/codex-a/a.py', repo: '/home/u/codex-a', status: 'M', mtime: 7000, agents: ['codex'], agent_windows: [{kind: 'codex', window: '0', window_index: 0, pane: '0', pane_target: '3:0.0'}]},
-      {path: 'b.py', abs_path: '/home/u/codex-b/b.py', repo: '/home/u/codex-b', status: 'M', mtime: 8000, agents: ['codex'], agent_windows: [{kind: 'codex', window: '1', window_index: 1, pane: '0', pane_target: '3:1.0'}]},
-    ]);
+    api.setAutoApproveStateForTest('3', {agent_windows: [
+      {kind: 'codex', state: 'idle', window_index: 0, window_label: '0:codex', active: true, path_entries: [{path: '/home/u/codex-a', mtime: 7000}]},
+      {kind: 'codex', state: 'idle', window_index: 1, window_label: '1:codex', active: false, path_entries: [{path: '/home/u/codex-b', mtime: 8000}]},
+    ]});
     const scopedTree = api.buildTabberTree();
     const scopedSession = scopedTree.entries.find(e => e.tabber?.session === '3');
     const scopedWindows = scopedTree.entriesByDir.get('/' + scopedSession.name);
@@ -1478,7 +1476,7 @@ async function runTabberSuite() {
     assert.equal(rows.flatMap(r => r.datasetKeys).some(key => /^tabberOpen/.test(key)), false, 'DOIT.61 A3: Tabber rows do not retain stale tabberOpen* dataset keys');
     api.setTabberSessionFilesLoadingForTest('1');
     const loadingRows = api.tabberRenderedRowsForTest({preserveCollapsed: true});
-    assert.ok(loadingRows.some(r => r.type === 'loading' && /Fetching paths/.test(r.name)), 'L3: initial touched-path fetch shows a loading row');
+    assert.equal(loadingRows.some(r => r.type === 'loading' && /Fetching paths/.test(r.name)), false, 'L3: Tabber no longer has a frontend touched-path loading row');
     // Non-tmux tabs (Preferences / YO!info / file editors) render as leaf rows AFTER all the sessions.
     const rowTypes = rows.map(r => r.type);
     assert.ok(rowTypes.includes('tab'), 'non-tmux tabs appear in the Tabber');
@@ -1488,9 +1486,9 @@ async function runTabberSuite() {
     // session 1's Claude window and a newer touched-path mtime under it must not make it outrank the newer
     // Codex transcript in session 2.
     api.setFileExplorerTreeSortModeForTest('newest');
-    api.setTabberSessionFilesForTest('1', [
-      {path: 'src/app.py', abs_path: '/home/u/proj/src/app.py', repo: '/home/u/proj', status: 'M', mtime: 999999},
-    ]);
+    api.setAutoApproveStateForTest('1', {agent_windows: [
+      {kind: 'claude', state: 'working', working_elapsed_seconds: 13500, window_index: 0, window_name: 'claude', window_label: '0:claude', pid: 12345, active: true, path_entries: [{path: '/home/u/proj', mtime: 999999, git: {root: '/home/u/proj', branch: 'devbranch'}}]},
+    ]});
     api.setTabberActivityForTest({
       activity: {'1:0': {last_user_input_ts: 999999}, '2:0': {last_user_input_ts: 1}},
       agents: [

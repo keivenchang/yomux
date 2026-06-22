@@ -896,6 +896,10 @@ globalThis.__layoutTestApi = {
   registerTerminalForTest(session, term, socket = {readyState: WebSocket.OPEN}) {
     terminals.set(session, {term, socket, container: document.getElementById('terminal-pane-' + session)});
   },
+  terminalAttentionQuestionTextsForTest: terminalAttentionQuestionTexts,
+  terminalAttentionQuestionRowForTest: terminalAttentionQuestionRow,
+  syncTerminalAttentionHighlightForTest: syncTerminalAttentionHighlight,
+  clearTerminalAttentionHighlightForTest: clearTerminalAttentionHighlight,
   transcriptInfoForTest(session) { return transcriptMeta.sessions?.[session]; },
   applyTranscriptsPayloadForTest: applyTranscriptsPayload,
   applyTmuxSignalsPayloadForTest: applyTmuxSignalsPayload,

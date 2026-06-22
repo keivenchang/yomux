@@ -2248,6 +2248,7 @@ function connectTerminalSocket(session, item) {
         item.term.write(String(event.data));
       }
       scheduleTerminalBlankScreenRefresh(session);
+      scheduleTerminalAttentionHighlight(session);
     } catch (_) {
       if (terminals.get(session) === item) closeTerminalItem(session, item);
     }
@@ -2471,6 +2472,7 @@ async function setAutoApprove(session, enabled) {
     updateDocumentTitle();
     updateSessionButtonStates();
     renderAutoApproveButton(session, payload);
+    scheduleTerminalAttentionHighlight(session);
     scheduleShareUiStatePublish();
     statusEl.innerHTML = payload.enabled
       ? `<span class="ok">${localizedHtml('status.yoloEnabledFor', {session: sessionLabel(session)})}</span>`
@@ -2483,6 +2485,7 @@ async function setAutoApprove(session, enabled) {
         updateDocumentTitle();
         updateSessionButtonStates();
         renderAutoApproveButton(session, payload);
+        scheduleTerminalAttentionHighlight(session);
         scheduleShareUiStatePublish();
       }
       statusErr(localizedHtml('status.yoloApprovalFailed', {error: payload.error || t('status.yoloApprovalFailedDefault')}));
@@ -2539,6 +2542,7 @@ function applyAutoApprovePayload(payload) {
   updateSessionButtonStates();
   refreshActivePanelHeaders();
   trackSessionStateChanges();
+  syncTerminalAttentionHighlights();
   scheduleShareUiStatePublish();
   return true;
 }
@@ -2788,6 +2792,11 @@ function startSelfUpdateReloadPolling(target = '') {
 
 function showServerUpdateBanner(version) {
   let banner = document.getElementById('serverUpdateBanner');
+  if (banner && banner.parentElement) {
+    banner.dataset.version = version;
+    return;
+  }
+  banner = [...(document.body?.children || [])].find(node => node?.id === 'serverUpdateBanner') || null;
   if (banner) {
     banner.dataset.version = version;
     return;
@@ -2808,7 +2817,7 @@ function showServerUpdateBanner(version) {
   dismiss.type = 'button';
   dismiss.className = 'server-update-banner-dismiss';
   dismiss.setAttribute('aria-label', t('update.dismiss'));
-  dismiss.textContent = '×';
+  dismiss.textContent = t('update.dismiss');
   dismiss.addEventListener('click', () => banner.remove());
   banner.append(msg, reload, dismiss);
   document.body.appendChild(banner);
@@ -2816,7 +2825,8 @@ function showServerUpdateBanner(version) {
 
 function maybeHandleServerVersionChange(serverVersion) {
   // The boot version (bootstrap.version) only updates on page load; this lets a
-  // long-lived open client learn that a newer server shipped, via the metadata poll.
+  // long-lived open client learn that the running server no longer matches the
+  // browser bundle that booted this tab.
   if (!serverVersion || serverVersion === bootstrap.version) return;
   if (!updateNotificationAllowsVersion(bootstrap.version, serverVersion)) return;
   if (selfUpdateOwnsServerVersion(serverVersion)) return;
@@ -3205,6 +3215,7 @@ async function updateLatency() {
 
 function refreshAll() {
   resyncVisibleTerminalRemoteSizes('refresh');
+  refreshVisibleTerminalScreens('manual-refresh');
   refreshTranscripts({force: true});
   refreshAutoStatuses();
   refreshWatchedFilesystem();

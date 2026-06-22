@@ -457,8 +457,13 @@ def get_run_history(request: Any, parsed: Any, route: Route) -> None:
 
 
 def get_activity(request: Any, parsed: Any, route: Route) -> None:
-    del parsed, route
-    request.write_app_result(request.share_scoped_activity_result(request.server.app.activity_payload()))
+    del route
+    qs = parse_qs(parsed.query)
+    hours, error = parse_query_float(qs, "hours", 24.0, max_value=24.0 * 365.0)
+    if error:
+        request.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+        return
+    request.write_app_result(request.share_scoped_activity_result(request.server.app.activity_payload(hours=hours)))
 
 
 def get_session_files_batch(request: Any, parsed: Any, route: Route) -> None:

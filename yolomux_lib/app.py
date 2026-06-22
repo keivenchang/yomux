@@ -92,6 +92,7 @@ from .metadata import MetadataCache
 from .metadata import candidate_session_cwds
 from .metadata import focus_root_for_session
 from .metadata import github_checks_unknown
+from .metadata import git_inventory
 from .metadata import project_inventory
 from .metadata import pull_request_number_from_subject
 from .metadata import session_git_inventory
@@ -4047,6 +4048,16 @@ class TmuxWebtermApp:
         return {
             "activity": activity_snapshot,
             "agents": build_recent_agents_payload(sessions, ordered_sessions, session_files_by_session=session_files_by_session),
+            "agent_windows": {
+                session: self.agent_window_status_payloads(
+                    session,
+                    info=info,
+                    discovered_sessions=sessions,
+                    activity_snapshot=activity_snapshot,
+                    files_payload=session_files_by_session.get(session),
+                )
+                for session, info in agent_infos.items()
+            },
             "errors": errors,
             "session_scope": scope,
             "session_file_hours": bounded_hours,
@@ -4069,8 +4080,8 @@ class TmuxWebtermApp:
                 return None
             return copy.deepcopy(payload), fresh, age_seconds
 
-    def refresh_tabber_activity_cache(self) -> dict[str, Any]:
-        payload = self.build_activity_payload()
+    def refresh_tabber_activity_cache(self, hours: Any = 24.0) -> dict[str, Any]:
+        payload = self.build_activity_payload(hours=hours)
         self.set_tabber_activity_cache(payload)
         return payload
 
@@ -4115,11 +4126,25 @@ class TmuxWebtermApp:
             with self.tabber_activity_cache_lock:
                 self.tabber_activity_cache_warmer_running = False
 
-    def activity_payload(self) -> tuple[dict[str, Any], HTTPStatus]:
+    def activity_payload(self, hours: Any = 24.0) -> tuple[dict[str, Any], HTTPStatus]:
         refresh_seconds = self.tabber_activity_refresh_seconds()
+        bounded_hours = session_files.bounded_session_files_hours(self.float_value(hours, 24.0))
         cached = self.get_tabber_activity_cache(refresh_seconds, allow_stale=True)
         if cached:
             payload, fresh, age_seconds = cached
+            cached_hours = session_files.bounded_session_files_hours(self.float_value(payload.get("session_file_hours"), 24.0))
+            if cached_hours != bounded_hours:
+                payload = self.build_activity_payload(hours=bounded_hours)
+                self.set_tabber_activity_cache(payload)
+                payload = copy.deepcopy(payload)
+                payload["cache"] = {
+                    "hit": False,
+                    "stale": False,
+                    "age_seconds": 0,
+                    "refresh_seconds": refresh_seconds,
+                    "refreshing": False,
+                }
+                return payload, HTTPStatus.OK
             payload["cache"] = {
                 "hit": True,
                 "stale": not fresh,
@@ -4129,7 +4154,7 @@ class TmuxWebtermApp:
             if not fresh:
                 payload["cache"]["refreshing"] = self.start_tabber_activity_cache_refresh()
             return payload, HTTPStatus.OK
-        payload = self.build_activity_payload()
+        payload = self.build_activity_payload(hours=bounded_hours)
         self.set_tabber_activity_cache(payload)
         payload = copy.deepcopy(payload)
         payload["cache"] = {
@@ -5354,26 +5379,49 @@ class TmuxWebtermApp:
             if worker_sessions.get(key, key) == session
         ]
 
-    def auto_approve_agent_targets(self, session: str, payload: dict[str, Any] | None = None) -> list[str]:
+    def auto_approve_agent_targets(
+        self,
+        session: str,
+        payload: dict[str, Any] | None = None,
+        discovered_sessions: dict[str, SessionInfo] | None = None,
+    ) -> list[str]:
+        targets: list[str] = []
+        seen: set[str] = set()
+
+        def add_target(value: Any) -> None:
+            target = str(value or "").strip()
+            if not target or target in seen:
+                return
+            seen.add(target)
+            targets.append(target)
+
+        info = discovered_sessions.get(session) if discovered_sessions is not None else None
+        if info is None and discovered_sessions is None:
+            discovered, _errors = discover_sessions([session])
+            info = discovered.get(session)
+        if info is not None:
+            for agent in info.agents:
+                if str(agent.kind or "").lower() not in {"claude", "codex"}:
+                    continue
+                add_target(agent.pane_target)
+
         signal_payload = payload if payload is not None else self.tmux_signal_snapshot()
         agents = signal_payload.get("agents") if isinstance(signal_payload, dict) else None
         if not isinstance(agents, list):
-            return []
-        targets: list[str] = []
-        seen: set[str] = set()
+            return targets
         for agent in agents:
             if not isinstance(agent, dict):
                 continue
             if str(agent.get("session") or "") != session or agent.get("dead") is True:
                 continue
-            target = str(agent.get("target") or agent.get("pane_id") or "").strip()
-            if not target or target in seen:
-                continue
-            seen.add(target)
-            targets.append(target)
+            add_target(agent.get("target") or agent.get("pane_id"))
         return targets
 
-    def auto_approve_session_lock_owner(self, session: str) -> dict[str, Any] | None:
+    def auto_approve_session_lock_owner(
+        self,
+        session: str,
+        discovered_sessions: dict[str, SessionInfo] | None = None,
+    ) -> dict[str, Any] | None:
         """The owner of session's YO lock when another server holds it, else None.
 
         YO workers lock per agent-pane target (auto_approve_agent_targets), NOT the bare session,
@@ -5383,7 +5431,7 @@ class TmuxWebtermApp:
         session, which is what silently dropped the cross-server "YO running elsewhere" (yellow)
         marker on the other servers.
         """
-        targets = self.auto_approve_agent_targets(session) or [session]
+        targets = self.auto_approve_agent_targets(session, discovered_sessions=discovered_sessions) or [session]
         if session not in targets:
             targets = [*targets, session]
         for target in targets:
@@ -5661,6 +5709,111 @@ class TmuxWebtermApp:
         record = activity_snapshot.get(key) if isinstance(activity_snapshot, dict) else None
         return self.activity_record_recency_ts(record if isinstance(record, dict) else None)
 
+    @staticmethod
+    def agent_window_index_key(value: Any) -> str:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            text = str(value or "").strip()
+            return text
+        return str(number)
+
+    @staticmethod
+    def agent_window_path_match(raw: dict[str, Any], window: str, kind: str) -> bool:
+        raw_window = TmuxWebtermApp.agent_window_index_key(raw.get("window_index") if raw.get("window_index") is not None else raw.get("window"))
+        if raw_window != TmuxWebtermApp.agent_window_index_key(window):
+            return False
+        raw_kind = str(raw.get("kind") or "").strip().lower()
+        return not raw_kind or not kind or raw_kind == kind
+
+    @staticmethod
+    def normalized_agent_window_repo_path(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        try:
+            return str(Path(text).expanduser().resolve(strict=False))
+        except OSError:
+            return str(Path(text).expanduser())
+
+    def agent_window_git_inventory(self, path: str, cache: dict[str, dict[str, Any] | None]) -> dict[str, Any] | None:
+        root = self.normalized_agent_window_repo_path(path)
+        if not root:
+            return None
+        if root not in cache:
+            cache[root] = git_inventory(root)
+        git_data = cache[root]
+        if not isinstance(git_data, dict):
+            return None
+        return copy.deepcopy(git_data)
+
+    def agent_window_path_records(
+        self,
+        info: SessionInfo,
+        files_payload: dict[str, Any] | None = None,
+    ) -> dict[tuple[str, str], dict[str, Any]]:
+        payload = files_payload if isinstance(files_payload, dict) else self.cached_session_files_payload_for_info(info)
+        files = payload.get("files") if isinstance(payload, dict) else []
+        git_cache: dict[str, dict[str, Any] | None] = {}
+        records: dict[tuple[str, str], dict[str, Any]] = {}
+        for file_item in files if isinstance(files, list) else []:
+            if not isinstance(file_item, dict) or file_item.get("uploaded") is True:
+                continue
+            repo = self.normalized_agent_window_repo_path(file_item.get("repo"))
+            if not repo or repo == "/":
+                continue
+            windows = file_item.get("agent_windows") if isinstance(file_item.get("agent_windows"), list) else []
+            for raw_window in windows:
+                if not isinstance(raw_window, dict):
+                    continue
+                window = self.agent_window_index_key(raw_window.get("window_index") if raw_window.get("window_index") is not None else raw_window.get("window"))
+                kind = str(raw_window.get("kind") or "").strip().lower()
+                if not window or kind not in {"claude", "codex"}:
+                    continue
+                key = (window, kind)
+                item = records.setdefault(key, {"paths_by_root": {}})
+                paths_by_root = item["paths_by_root"]
+                path_record = paths_by_root.setdefault(repo, {"path": repo, "mtime": 0.0})
+                path_record["mtime"] = max(self.float_value(path_record.get("mtime"), 0.0), self.float_value(file_item.get("mtime"), 0.0))
+        result: dict[tuple[str, str], dict[str, Any]] = {}
+        for key, item in records.items():
+            paths = sorted(item.get("paths_by_root", {}).values(), key=lambda row: (-self.float_value(row.get("mtime"), 0.0), str(row.get("path") or "")))
+            for path_item in paths:
+                git_data = self.agent_window_git_inventory(str(path_item.get("path") or ""), git_cache)
+                if git_data is not None:
+                    path_item["git"] = git_data
+            result[key] = {
+                "path_entries": paths,
+                "paths": [str(path_item.get("path") or "") for path_item in paths if str(path_item.get("path") or "")],
+                "git": copy.deepcopy(paths[0].get("git")) if paths and isinstance(paths[0].get("git"), dict) else None,
+            }
+        return result
+
+    @staticmethod
+    def agent_window_pane_maps(info: SessionInfo) -> tuple[dict[str, bool], dict[str, PaneInfo]]:
+        active_by_window: dict[str, bool] = {}
+        pane_by_window: dict[str, PaneInfo] = {}
+        for pane in info.panes:
+            window = TmuxWebtermApp.agent_window_index_key(pane.window)
+            if not window:
+                continue
+            active_by_window[window] = active_by_window.get(window, False) or pane.window_active is True
+            current = pane_by_window.get(window)
+            if current is None or (pane.active and not current.active) or (pane.window_active and not current.window_active):
+                pane_by_window[window] = pane
+        return active_by_window, pane_by_window
+
+    def agent_window_fallback_path_record(self, pane: PaneInfo | None, git_cache: dict[str, dict[str, Any] | None]) -> dict[str, Any]:
+        path = self.normalized_agent_window_repo_path(pane.current_path if pane else "")
+        if not path:
+            return {"path": "", "paths": [], "path_entries": [], "git": None}
+        git_data = self.agent_window_git_inventory(path, git_cache)
+        if isinstance(git_data, dict) and git_data.get("root"):
+            root = self.normalized_agent_window_repo_path(git_data.get("root"))
+            entry = {"path": root, "mtime": 0.0, "git": git_data}
+            return {"path": root, "paths": [root], "path_entries": [entry], "git": git_data}
+        return {"path": path, "paths": [], "path_entries": [], "git": None}
+
     def agent_window_status_payloads(
         self,
         session: str,
@@ -5669,6 +5822,7 @@ class TmuxWebtermApp:
         discovered_sessions: dict[str, SessionInfo] | None = None,
         activity_snapshot: dict[str, Any] | None = None,
         preclassified_by_target: dict[str, dict[str, Any]] | None = None,
+        files_payload: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         if info is None:
             info = discovered_sessions.get(session) if discovered_sessions is not None else None
@@ -5680,6 +5834,9 @@ class TmuxWebtermApp:
         activity = self.activity_snapshot_with_recency(activity_snapshot)
         rows: list[dict[str, Any]] = []
         window_names = {str(pane.window or ""): str(pane.window_name or "") for pane in info.panes}
+        path_records = self.agent_window_path_records(info, files_payload=files_payload)
+        active_by_window, pane_by_window = self.agent_window_pane_maps(info)
+        fallback_git_cache: dict[str, dict[str, Any] | None] = {}
         for agent_index, agent in enumerate(info.agents):
             kind = str(agent.kind or "").lower()
             if kind not in {"claude", "codex"}:
@@ -5696,15 +5853,30 @@ class TmuxWebtermApp:
                 window_index = None
             window_name = window_names.get(window) or kind
             window_label = f"{window}:{kind}" if window else kind
+            pane_record = pane_by_window.get(self.agent_window_index_key(window))
+            pid = int(pane_record.process_label_pid or pane_record.pid) if pane_record and (pane_record.process_label_pid or pane_record.pid) else int(agent.pid or 0)
+            path_record = path_records.get((self.agent_window_index_key(window), kind))
+            if not path_record:
+                path_record = self.agent_window_fallback_path_record(pane_record, fallback_git_cache)
+            path_entries = copy.deepcopy(path_record.get("path_entries") if isinstance(path_record, dict) else [])
+            paths = [str(item.get("path") or "") for item in path_entries if isinstance(item, dict) and str(item.get("path") or "")]
+            fallback_path = str(path_record.get("path") or "") if isinstance(path_record, dict) else ""
             rows.append({
                 "kind": kind,
                 "state": state,
                 "window": window,
                 "window_index": window_index,
                 "window_name": window_name,
+                "label": window_label,
                 "window_label": window_label,
                 "pane": pane,
                 "pane_target": str(agent.pane_target or ""),
+                "pid": pid if pid > 0 else None,
+                "active": active_by_window.get(self.agent_window_index_key(window), False),
+                "path": paths[0] if paths else fallback_path,
+                "paths": paths,
+                "path_entries": path_entries,
+                "git": copy.deepcopy(path_record.get("git")) if isinstance(path_record, dict) and isinstance(path_record.get("git"), dict) else None,
                 "transcript": str(agent.transcript or ""),
                 "transcript_id": self.agent_transcript_id(agent),
                 "agent_session_id": str(agent.session_id or ""),
@@ -5758,7 +5930,7 @@ class TmuxWebtermApp:
                 "blocked": 0,
                 "last_action": "off",
             }
-            owner = self.auto_approve_session_lock_owner(session)
+            owner = self.auto_approve_session_lock_owner(session, discovered_sessions=discovered_sessions)
             if owner:
                 payload.update({
                     "enabled_elsewhere": True,

@@ -1201,6 +1201,7 @@ function clearPromptAttentionForSession(session) {
   refreshSessionChrome(session);
   updateTopbarActivityStatus();
   trackSessionStateChanges();
+  syncTerminalAttentionHighlight(session);
   return true;
 }
 

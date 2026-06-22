@@ -6159,6 +6159,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   height: 100%;
 }
 .terminal {
+  position: relative;
   height: 100%;
   min-width: 0;
   max-width: 100%;
@@ -6199,6 +6200,17 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 }
 .terminal .xterm {
   height: 100%;
+}
+.terminal .terminal-attention-question-overlay {
+  position: absolute;
+  z-index: var(--z-terminal-overlay-low);
+  pointer-events: none;
+  background: rgb(var(--attention-ring-rgb, 255 51 71) / 0.11);
+  box-shadow: inset 0 0 0 1px rgb(var(--attention-ring-rgb, 255 51 71) / 0.16);
+  border-radius: 3px;
+}
+.terminal .xterm-rows .terminal-attention-question-row {
+  background: transparent;
 }
 /* THE BLACK LINE FIX (image 034): xterm.css ships `.xterm:not(.allow-transparency) .xterm-viewport {
    background-color: #000 }` — a dark-page assumption so the OS-X scrollbar slider reads as opaque.
@@ -8451,12 +8463,18 @@ body.theme-light .info-cell a.pr-status-closed:hover {
 }
 .server-update-banner-dismiss {
   cursor: pointer;
-  border: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
   background: transparent;
   color: var(--pr-status-closed);
-  font-size: 16px;
-  line-height: 1;
-  padding: 0 4px;
+  font: inherit;
+  font-weight: 800;
+  padding: 2px 8px;
+}
+.server-update-banner-dismiss:hover,
+.server-update-banner-dismiss:focus-visible {
+  border-color: color-mix(in srgb, var(--pr-status-closed) 60%, transparent);
+  background: color-mix(in srgb, var(--pr-status-closed) 12%, transparent);
 }
 .modal {
   display: none;

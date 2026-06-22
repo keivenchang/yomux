@@ -538,13 +538,9 @@ function updateNotificationAllowsVersion(currentVersion, targetVersion, level = 
   if (!currentParts || !targetParts) {
     return cleanLevel === 'patch' && String(targetVersion || '') !== String(currentVersion || '');
   }
-  if (targetParts[0] !== currentParts[0]) {
-    return cleanLevel !== 'none' && targetParts[0] > currentParts[0];
-  }
-  if (targetParts[1] !== currentParts[1]) {
-    return (cleanLevel === 'minor' || cleanLevel === 'patch') && targetParts[1] > currentParts[1];
-  }
-  if (targetParts[2] !== currentParts[2]) return cleanLevel === 'patch' && targetParts[2] > currentParts[2];
+  if (targetParts[0] !== currentParts[0]) return cleanLevel !== 'none';
+  if (targetParts[1] !== currentParts[1]) return cleanLevel === 'minor' || cleanLevel === 'patch';
+  if (targetParts[2] !== currentParts[2]) return cleanLevel === 'patch';
   return false;
 }
 

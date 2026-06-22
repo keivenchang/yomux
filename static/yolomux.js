@@ -5595,6 +5595,7 @@ function clearPromptAttentionForSession(session) {
   refreshSessionChrome(session);
   updateTopbarActivityStatus();
   trackSessionStateChanges();
+  syncTerminalAttentionHighlight(session);
   return true;
 }
 
@@ -13079,7 +13080,9 @@ function tabberAgentDateText(agent) {
 
 async function fetchTabberActivity() {
   try {
-    const payload = await apiFetchJson('/api/activity', {cache: 'no-store'});
+    const params = new URLSearchParams();
+    params.set('hours', String(normalizeSessionFileLookbackHours(tabberSessionFileLookbackHours)));
+    const payload = await apiFetchJson(`/api/activity?${params.toString()}`, {cache: 'no-store'});
     if (payload && typeof payload === 'object' && payload.activity && typeof payload.activity === 'object') {
       tabberActivityPayload = payload;
     }
@@ -13093,7 +13096,6 @@ function warmTabberDataOnLaunch() {
   if (tabberLaunchWarmupStarted || !transcriptMetaLoaded) return false;
   tabberLaunchWarmupStarted = true;
   fetchTabberActivity();
-  fetchTabberSessionFilesBatch(tabberAgentSessions());
   return true;
 }
 
@@ -13110,7 +13112,7 @@ function setTabberSessionFileLookbackHours(hours, options = {}) {
   if (tabberSessionFileLookbackHours !== previous) {
     clearTabberSessionFilesStates();
     if (options.refresh !== false) {
-      ensureTabberSessionFilesFetches();
+      fetchTabberActivity();
       if (fileExplorerMode === 'tabber') refreshTabberPanels();
     }
   }
@@ -13236,94 +13238,105 @@ function tabberAgentSessions() {
 }
 
 function ensureTabberSessionFilesFetches() {
-  fetchTabberSessionFilesBatch(tabberAgentSessions());
+  // Agent-window paths now come from the cached /api/activity agent_windows payload.
+  // The session-files fetchers remain for the modified-files UI and focused tests.
+  if (!tabberActivityPayload?.agent_windows) fetchTabberActivity();
 }
 
-function tabberKnownRepoRoots(files, gitRoot = '') {
-  const roots = [];
-  const addRoot = value => {
-    const root = normalizeDirectoryPath(String(value || '').trim());
-    if (!root || root === '/' || roots.includes(root)) return;
-    roots.push(root);
+function agentWindowPathEntries(agent) {
+  const entries = [];
+  const seen = new Set();
+  const addEntry = (value, fallback = {}) => {
+    let path = '';
+    let mtime = Number(fallback.mtime || 0);
+    let git = fallback.git && typeof fallback.git === 'object' ? fallback.git : null;
+    if (value && typeof value === 'object') {
+      path = String(value.path || value.root || '').trim();
+      mtime = Number(value.mtime || mtime || 0);
+      git = value.git && typeof value.git === 'object' ? value.git : git;
+    } else {
+      path = String(value || '').trim();
+    }
+    if (!path || seen.has(path)) return;
+    seen.add(path);
+    entries.push({path, mtime: Number.isFinite(mtime) ? mtime : 0, git});
   };
-  addRoot(gitRoot);
-  for (const file of files || []) addRoot(file?.repo);
-  return roots.sort((left, right) => right.length - left.length || left.localeCompare(right));
+  for (const entry of Array.isArray(agent?.path_entries) ? agent.path_entries : []) addEntry(entry);
+  for (const entry of Array.isArray(agent?.paths) ? agent.paths : []) addEntry(entry, {git: agent?.git});
+  return entries;
 }
 
-function tabberKnownRootForPath(path, roots) {
-  const normalized = normalizeDirectoryPath(String(path || '').trim());
-  if (!normalized) return '';
-  for (const root of roots || []) {
-    if (normalized === root || normalized.startsWith(root + '/')) return root;
+function agentWindowPrimaryGit(agent) {
+  if (agent?.git && typeof agent.git === 'object') return agent.git;
+  const entry = agentWindowPathEntries(agent).find(item => item.git && typeof item.git === 'object');
+  return entry?.git || null;
+}
+
+function agentWindowPrimaryPath(agent) {
+  const entry = agentWindowPathEntries(agent).find(item => item.path);
+  return entry?.path || String(agent?.path || '').trim();
+}
+
+function agentWindowPayloadKey(agent) {
+  const index = tmuxWindowIndexKey(agent?.window_index ?? agent?.window);
+  const kind = agentWindowKind(agent?.kind);
+  return index !== null && kind ? `${index}:${kind}` : '';
+}
+
+function normalizedAgentWindowPayload(agent) {
+  const kind = agentWindowKind(agent?.kind);
+  const windowIndex = tmuxWindowNumber(agent?.window_index ?? agent?.window);
+  const windowText = windowIndex !== null ? String(windowIndex) : String(agent?.window || '').trim();
+  const canonical = agentWindowCanonicalLabel(windowText || agent?.window_index, kind, agent?.window_label || agent?.label || kind);
+  const pathEntries = agentWindowPathEntries(agent);
+  const git = agentWindowPrimaryGit(agent);
+  return {
+    ...agent,
+    kind,
+    window: windowText,
+    window_index: windowIndex,
+    label: String(agent?.label || canonical),
+    window_label: canonical,
+    pid: Number.isFinite(Number(agent?.pid)) && Number(agent.pid) > 0 ? Math.floor(Number(agent.pid)) : agent?.pid,
+    active: typeof agent?.active === 'boolean' ? agent.active : agent?.active,
+    path: pathEntries[0]?.path || String(agent?.path || ''),
+    paths: pathEntries.map(item => item.path),
+    path_entries: pathEntries,
+    git,
+  };
+}
+
+function agentWindowPayloadRows(value) {
+  return Array.isArray(value) ? value.filter(item => item && typeof item === 'object') : [];
+}
+
+function mergeAgentWindowPayload(base, candidates) {
+  const key = agentWindowPayloadKey(base);
+  const enrich = candidates
+    .map(rows => rows.find(row => agentWindowPayloadKey(row) === key))
+    .find(Boolean) || {};
+  const merged = {...enrich, ...base};
+  if (!agentWindowPathEntries(merged).length && agentWindowPathEntries(enrich).length) {
+    merged.path = enrich.path;
+    merged.paths = enrich.paths;
+    merged.path_entries = enrich.path_entries;
+    merged.git = enrich.git;
   }
-  return '';
+  if (!(merged.git && typeof merged.git === 'object') && enrich.git && typeof enrich.git === 'object') merged.git = enrich.git;
+  if (typeof merged.active !== 'boolean' && typeof enrich.active === 'boolean') merged.active = enrich.active;
+  if ((!Number.isFinite(Number(merged.pid)) || Number(merged.pid) <= 0) && Number.isFinite(Number(enrich.pid)) && Number(enrich.pid) > 0) merged.pid = enrich.pid;
+  return normalizedAgentWindowPayload(merged);
 }
 
-function tabberFileMatchesWindow(file, windowIndex, agentKey = '') {
-  const targetWindow = String(windowIndex ?? '');
-  const targetAgent = String(agentKey || '').toLowerCase();
-  const windows = Array.isArray(file?.agent_windows) ? file.agent_windows : [];
-  if (windows.length) {
-    return windows.some(item => {
-      const itemWindow = String(item?.window ?? (item?.window_index ?? ''));
-      const itemAgent = String(item?.kind || '').toLowerCase();
-      if (targetWindow && itemWindow !== targetWindow) return false;
-      return !targetAgent || !itemAgent || itemAgent === targetAgent;
-    });
-  }
-  const agents = Array.isArray(file?.agents) ? file.agents : [file?.agent].filter(Boolean);
-  if (!targetAgent || !agents.length) return true;
-  return agents.map(item => String(item || '').toLowerCase()).includes(targetAgent);
-}
-
-// Absolute touched-path entries for the paths a session's agent touched, attached under an agent window.
-// These are intentionally leaves: the Tabber shows where work happened, not every changed file.
-function tabberTouchedRepoPathsForWindow(session, windowIndex, agentKey, gitRoot) {
-  const cached = tabberSessionFilesState(session);
-  if (!cached?.loaded) return {loaded: false, loading: Boolean(cached?.loading), paths: []};
-  if (!cached.loaded || !cached.files.length) return {loaded: true, loading: false, paths: []};
-  const knownRoots = tabberKnownRepoRoots(cached.files, gitRoot);
-  const byPath = new Map();
-  for (const file of cached.files) {
-    if (file.uploaded === true) continue;
-    if (!tabberFileMatchesWindow(file, windowIndex, agentKey)) continue;
-    const rawRepo = String(file.repo || '').trim();
-    const rawAbsPath = String(file.abs_path || '').trim();
-    const repo = rawRepo ? normalizeDirectoryPath(rawRepo) : '';
-    const absPath = rawAbsPath ? normalizeDirectoryPath(rawAbsPath) : '';
-    const candidatePath = repo && repo !== '/' ? repo : (absPath ? normalizeDirectoryPath(dirnameOf(absPath)) : '');
-    const path = tabberKnownRootForPath(candidatePath, knownRoots) || (repo ? candidatePath : '');
-    if (!path) continue;
-    const prev = byPath.get(path) || {path, files: [], mtime: 0};
-    prev.files.push(file);
-    prev.mtime = Math.max(prev.mtime, Number(file.mtime || 0));
-    byPath.set(path, prev);
-  }
-  const paths = Array.from(byPath.values())
-    .sort((left, right) => Number(right.mtime || 0) - Number(left.mtime || 0) || String(left.path).localeCompare(String(right.path)));
-  return {loaded: true, loading: false, paths};
-}
-
-function tabberRepoPathsForWindow(session, windowIndex, agentKey, gitRoot) {
-  return tabberTouchedRepoPathsForWindow(session, windowIndex, agentKey, gitRoot).paths.map(item => item.path);
-}
-
-function tabberRepoEntriesForWindow(session, windowIndex, agentKey, gitBranch, gitRoot) {
-  const touched = tabberTouchedRepoPathsForWindow(session, windowIndex, agentKey, gitRoot);
-  if (!touched.loaded) {
-    if (!touched.loading) return [];
-    return [{
-      name: 'loading', kind: 'file', mtime: 0, sortName: 'loading',
-      tabber: {type: 'loading', session, windowIndex, label: 'Fetching paths', icon: '·'},
-    }];
-  }
-  return touched.paths
+function tabberRepoEntriesForAgentWindow(agent, session, windowIndex) {
+  const pathEntries = agentWindowPathEntries(agent);
+  return pathEntries
     .map((item, pathPos) => {
-      const isSessionRepo = gitRoot && normalizeDirectoryPath(item.path) === normalizeDirectoryPath(gitRoot);
+      const git = item.git && typeof item.git === 'object' ? item.git : agentWindowPrimaryGit(agent);
+      const branchText = git?.branch ? shortBranch(git.branch) : '';
       return {
         name: `r_${tabberPad(pathPos)}`, kind: 'file', mtime: item.mtime, sortName: item.path,
-        tabber: {type: 'repo', session, windowIndex, repoRoot: item.path, label: item.path, icon: '📁', branchText: isSessionRepo ? gitBranch : ''},
+        tabber: {type: 'repo', session, windowIndex, repoRoot: item.path, label: item.path, icon: '📁', branchText},
       };
     });
 }
@@ -13345,11 +13358,13 @@ function agentWindowCanonicalLabel(windowIndex, agentKey, fallback = '') {
 
 function sessionAgentWindowStatusPayloads(session, info = null, autoPayload = null) {
   const statePayload = autoPayload || autoApproveStates.get(session) || {};
-  const source = Array.isArray(statePayload.agent_windows) && statePayload.agent_windows.length
-    ? statePayload.agent_windows
-    : Array.isArray(info?.agent_windows) && info.agent_windows.length
-      ? info.agent_windows
-      : [];
+  const activityPayload = tabberActivityPayload?.agent_windows && typeof tabberActivityPayload.agent_windows === 'object'
+    ? tabberActivityPayload.agent_windows[String(session || '')]
+    : null;
+  const stateRows = agentWindowPayloadRows(statePayload.agent_windows);
+  const activityRows = agentWindowPayloadRows(activityPayload);
+  const infoRows = agentWindowPayloadRows(info?.agent_windows);
+  const source = stateRows.length ? stateRows : activityRows.length ? activityRows : infoRows;
   const fallback = source.length ? source : (Array.isArray(info?.agents) ? info.agents : [])
     .map(agent => ({
       kind: agent?.kind || '',
@@ -13363,14 +13378,15 @@ function sessionAgentWindowStatusPayloads(session, info = null, autoPayload = nu
       idle_since: null,
     }));
   return fallback
-    .map(agent => {
-      const kind = agentWindowKind(agent?.kind);
-      const windowIndex = tmuxWindowNumber(agent?.window_index ?? agent?.window);
-      const windowText = windowIndex !== null ? String(windowIndex) : String(agent?.window || '').trim();
-      const canonical = agentWindowCanonicalLabel(windowText || agent?.window_index, kind, agent?.window_label || kind);
-      return {...agent, kind, window: windowText, window_index: windowIndex, window_label: canonical};
-    })
+    .map(agent => mergeAgentWindowPayload(agent, [activityRows, infoRows, stateRows]))
     .filter(agent => agent.kind);
+}
+
+function windowViewModel(session, windowIndex, info = null, autoPayload = null) {
+  const indexKey = tmuxWindowIndexKey(windowIndex);
+  if (indexKey === null) return null;
+  return sessionAgentWindowStatusPayloads(session, info, autoPayload)
+    .find(agent => tmuxWindowIndexKey(agent.window_index ?? agent.window) === indexKey) || null;
 }
 
 function agentWindowStatusForRecord(session, record, info = null) {
@@ -13512,7 +13528,6 @@ function buildTabberTree() {
     const sessionPath = `/${sessionName}`;
     const git = info?.project?.git;
     const branch = git?.branch ? shortBranch(git.branch) : '';
-    const gitRoot = git?.root || '';
     const fallbackSessionRecency = tabberRecency(session);
     const sessionWork = sessionWorkDescription(session, info, 200);
     const sessionNameLabel = sessionLabel(session) || session;
@@ -13531,7 +13546,7 @@ function buildTabberTree() {
       const {status: agentStatus, agentKey} = tmuxWindowAgentStatus(session, record, info);
       const isAgent = Boolean(agentKey) || tabberWindowIsAgent(record.name);
       const agentActivity = isAgent ? tabberAgentForWindow(session, record.index, agentKey) : null;
-      const repoEntries = isAgent ? tabberRepoEntriesForWindow(session, record.index, agentKey, branch, gitRoot) : [];
+      const repoEntries = isAgent && agentStatus ? tabberRepoEntriesForAgentWindow(agentStatus, session, record.index) : [];
       const childMtime = repoEntries.reduce((max, entry) => Math.max(max, Number(entry.mtime || 0)), 0);
       const ledgerMtime = isAgent ? 0 : tabberRecency(`${session}:${record.index}`);
       // Agent windows use transcript activity only. Their touched repo rows may have newer file mtimes, but
@@ -13539,7 +13554,8 @@ function buildTabberTree() {
       const windowMtime = isAgent
         ? tabberAgentRecency(agentActivity)
         : Math.max(ledgerMtime, childMtime, fallbackSessionRecency);
-      const active = activeIndexOverride === undefined ? record.active === true : (activeIndexOverlay !== null && String(record.index) === activeIndexOverlay);
+      const recordActive = agentStatus && typeof agentStatus.active === 'boolean' ? agentStatus.active === true : record.active === true;
+      const active = activeIndexOverride === undefined ? recordActive : (activeIndexOverlay !== null && String(record.index) === activeIndexOverlay);
       const label = tmuxWindowCanonicalLabel(session, record, record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.name}`, info);
       const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatus, agentKey, session);
       const agentStatusForDisplay = agentStatus ? {...agentStatus, current: active} : null;
@@ -18289,13 +18305,9 @@ function updateNotificationAllowsVersion(currentVersion, targetVersion, level = 
   if (!currentParts || !targetParts) {
     return cleanLevel === 'patch' && String(targetVersion || '') !== String(currentVersion || '');
   }
-  if (targetParts[0] !== currentParts[0]) {
-    return cleanLevel !== 'none' && targetParts[0] > currentParts[0];
-  }
-  if (targetParts[1] !== currentParts[1]) {
-    return (cleanLevel === 'minor' || cleanLevel === 'patch') && targetParts[1] > currentParts[1];
-  }
-  if (targetParts[2] !== currentParts[2]) return cleanLevel === 'patch' && targetParts[2] > currentParts[2];
+  if (targetParts[0] !== currentParts[0]) return cleanLevel !== 'none';
+  if (targetParts[1] !== currentParts[1]) return cleanLevel === 'minor' || cleanLevel === 'patch';
+  if (targetParts[2] !== currentParts[2]) return cleanLevel === 'patch';
   return false;
 }
 
@@ -19428,11 +19440,12 @@ function sessionPopoverWindowPidByIndex(info) {
 }
 
 function sessionPopoverAgentWindowPid(agent, pidByIndex) {
+  const directPid = Number(agent?.pid || agent?.process_label_pid || 0);
+  if (Number.isFinite(directPid) && directPid > 0) return Math.floor(directPid);
   const index = tmuxWindowIndexKey(agent?.window_index ?? agent?.window);
   const sharedPid = index !== null ? Number(pidByIndex.get(index)) : null;
   if (Number.isFinite(sharedPid) && sharedPid > 0) return Math.floor(sharedPid);
-  const directPid = Number(agent?.process_label_pid || agent?.pid || 0);
-  return Number.isFinite(directPid) && directPid > 0 ? Math.floor(directPid) : null;
+  return null;
 }
 
 function sessionPopoverActiveWindowIndex(session, info) {
@@ -19452,7 +19465,9 @@ function sessionPopoverSortedAgentWindows(session, info, autoPayload) {
       _index: index,
       kind: String(agent?.kind || '').toLowerCase(),
       state: String(agent?.state || 'idle'),
-      current: activeWindowIndex !== null && tmuxWindowIndexKey(agent.window_index ?? agent.window) === activeWindowIndex,
+      current: typeof agent?.active === 'boolean'
+        ? agent.active === true
+        : activeWindowIndex !== null && tmuxWindowIndexKey(agent.window_index ?? agent.window) === activeWindowIndex,
       pid: sessionPopoverAgentWindowPid(agent, pidByIndex),
     }))
     .filter(agent => ['claude', 'codex'].includes(agent.kind))
@@ -19485,37 +19500,25 @@ function sessionPopoverAgentWindowRowHtml(agent, nowSeconds = Date.now() / 1000)
   </div>`;
 }
 
-function sessionPopoverTouchedRepoPaths(session, agent, info, row) {
-  if (typeof tabberRepoPathsForWindow !== 'function') return [];
-  const windowIndex = tmuxWindowIndexKey(agent?.window_index ?? agent?.window);
-  if (windowIndex === null) return [];
-  const gitRoot = String(row?.git?.root || info?.project?.git?.root || '').trim();
-  const paths = tabberRepoPathsForWindow(session, windowIndex, agentWindowKind(agent?.kind), gitRoot);
-  const seen = new Set();
-  return paths.filter(path => {
-    const text = String(path || '').trim();
-    if (!text || seen.has(text)) return false;
-    seen.add(text);
-    return true;
-  });
-}
-
 function sessionPopoverWindowMetadataItems(session, info, agentRows) {
   const agents = Array.isArray(agentRows) ? agentRows : [];
   if (!agents.length) return [];
-  const windowRows = sessionWindowMetadataRows(info);
   return agents.map(agent => {
-    const meta = sessionWindowMetadataForAgent(agent, windowRows) || {
+    const pathEntries = typeof agentWindowPathEntries === 'function' ? agentWindowPathEntries(agent) : [];
+    const paths = pathEntries.map(item => item.path).filter(Boolean);
+    const git = typeof agentWindowPrimaryGit === 'function' ? agentWindowPrimaryGit(agent) : (agent?.git || null);
+    const path = paths[0] || (typeof agentWindowPrimaryPath === 'function' ? agentWindowPrimaryPath(agent) : String(agent?.path || ''));
+    const meta = {
       window: String(agent?.window ?? ''),
       window_index: tmuxWindowIndexKey(agent?.window_index ?? agent?.window),
       window_name: String(agent?.window_name || ''),
-      path: '',
-      git: null,
+      path,
+      paths,
+      path_entries: pathEntries,
+      git,
     };
-    const touchedPaths = sessionPopoverTouchedRepoPaths(session, agent, info, meta);
-    const enrichedMeta = touchedPaths.length ? {...meta, paths: touchedPaths} : meta;
-    const html = windowMetadataRowsHtml(enrichedMeta);
-    return html ? {agent, meta: enrichedMeta, html} : null;
+    const html = windowMetadataRowsHtml(meta);
+    return html ? {agent, meta, html} : null;
   }).filter(Boolean);
 }
 
@@ -19539,39 +19542,6 @@ function sessionPopoverAgentWindowHtml(session, info, autoPayload, agentRows = n
   const sharedRows = sharedMetadata ? `<div class="session-window-metadata-list shared">${items[0].html}</div>` : '';
   const metadataClass = items.length ? ' has-window-metadata' : '';
   return `<div class="session-agent-list${metadataClass}">${rows}${sharedRows}</div>`;
-}
-
-function sessionWindowMetadataRows(info) {
-  const payloadRows = Array.isArray(info?.window_metadata) ? info.window_metadata : [];
-  if (payloadRows.length) {
-    return payloadRows.map(row => ({
-      window: String(row?.window ?? ''),
-      window_index: Number.isFinite(Number(row?.window_index)) ? Number(row.window_index) : null,
-      window_name: String(row?.window_name || ''),
-      path: String(row?.path || ''),
-      git: row?.git && typeof row.git === 'object' ? row.git : null,
-    }));
-  }
-  const rows = [];
-  const seen = new Set();
-  for (const pane of info?.panes || []) {
-    const window = String(pane?.window ?? '');
-    if (!window || seen.has(window)) continue;
-    seen.add(window);
-    rows.push({
-      window,
-      window_index: Number.isFinite(Number(window)) ? Number(window) : null,
-      window_name: String(pane?.window_name || ''),
-      path: String(pane?.current_path || ''),
-      git: null,
-    });
-  }
-  return rows;
-}
-
-function sessionWindowMetadataForAgent(agent, windowRows) {
-  const agentIndex = tmuxWindowIndexKey(agent?.window_index ?? agent?.window);
-  return windowRows.find(row => tmuxWindowIndexKey(row.window_index ?? row.window) === agentIndex) || null;
 }
 
 function sessionWindowMetadataSignature(row) {
@@ -21319,18 +21289,30 @@ function repoSummaryAsGit(repo) {
   };
 }
 
-function activeAgentWindowMetadataItemForProjectMeta(session, info, activePane, activeAgentKind) {
-  const kind = typeof agentWindowKind === 'function' ? agentWindowKind(activeAgentKind) : String(activeAgentKind || '').trim().toLowerCase();
-  if (!activePane || !['claude', 'codex'].includes(kind)) return null;
-  if (typeof tmuxWindowCurrentActiveIndex !== 'function' || typeof sessionPopoverSortedAgentWindows !== 'function' || typeof sessionPopoverWindowMetadataItems !== 'function') return null;
+function activeAgentWindowMetadataItemForProjectMeta(session, info) {
+  if (typeof tmuxWindowCurrentActiveIndex !== 'function' || typeof windowViewModel !== 'function') return null;
   const activeWindowIndex = tmuxWindowCurrentActiveIndex(session, info);
   if (activeWindowIndex === null) return null;
-  const agentRows = sessionPopoverSortedAgentWindows(session, info, autoApproveStates.get(session));
-  const metadataItems = sessionPopoverWindowMetadataItems(session, info, agentRows);
-  return metadataItems.find(item => tmuxWindowIndexKey(item?.agent?.window_index ?? item?.agent?.window) === activeWindowIndex) || null;
+  const agent = windowViewModel(session, activeWindowIndex, info, autoApproveStates.get(session));
+  const kind = typeof agentWindowKind === 'function' ? agentWindowKind(agent?.kind) : String(agent?.kind || '').trim().toLowerCase();
+  if (!['claude', 'codex'].includes(kind)) return null;
+  const pathEntries = typeof agentWindowPathEntries === 'function' ? agentWindowPathEntries(agent) : [];
+  const paths = pathEntries.map(item => item.path).filter(Boolean);
+  const meta = {
+    window: String(agent?.window ?? ''),
+    window_index: tmuxWindowIndexKey(agent?.window_index ?? agent?.window),
+    window_name: String(agent?.window_name || ''),
+    path: paths[0] || (typeof agentWindowPrimaryPath === 'function' ? agentWindowPrimaryPath(agent) : String(agent?.path || '')),
+    paths,
+    path_entries: pathEntries,
+    git: typeof agentWindowPrimaryGit === 'function' ? agentWindowPrimaryGit(agent) : (agent?.git || null),
+  };
+  return {agent, meta};
 }
 
 function projectMetaPathFromWindowMetadata(meta) {
+  const pathEntries = Array.isArray(meta?.path_entries) ? meta.path_entries.map(item => String(item?.path || '').trim()).filter(Boolean) : [];
+  if (pathEntries.length) return pathEntries[0];
   const paths = Array.isArray(meta?.paths) ? meta.paths.map(path => String(path || '').trim()).filter(Boolean) : [];
   if (paths.length) return paths[0];
   const path = String(meta?.path || '').trim();
@@ -21347,9 +21329,9 @@ function projectMetaSelection(session, info) {
   const activeAgent = activePane ? agentForPane(info, activePane) : null;
   const activeAgentKind = String(activeAgent?.kind || activePane?.process_label || activePane?.command || '').toLowerCase();
   const activeWindowUsesTranscript = ['claude', 'codex'].includes(typeof agentWindowKind === 'function' ? agentWindowKind(activeAgentKind) : activeAgentKind);
-  const activeWindowMetadataItem = !explicitRoot ? activeAgentWindowMetadataItemForProjectMeta(session, info, activePane, activeAgentKind) : null;
+  const activeWindowMetadataItem = !explicitRoot ? activeAgentWindowMetadataItemForProjectMeta(session, info) : null;
   const activeWindowMeta = activeWindowMetadataItem?.meta || null;
-  const activeWindowMetaHasSharedData = Boolean(activeWindowMeta?.git) || (Array.isArray(activeWindowMeta?.paths) && activeWindowMeta.paths.length > 0);
+  const activeWindowMetaHasSharedData = Boolean(activeWindowMeta?.git) || Boolean(projectMetaPathFromWindowMetadata(activeWindowMeta));
   const activeWindowMetaPath = projectMetaPathFromWindowMetadata(activeWindowMeta);
   let repoIndex = selectedSessionRepoIndex(session, info);
   if (!explicitRoot && activePath && repos.length) {
@@ -21972,6 +21954,7 @@ function refreshTerminal(session) {
   if (!item?.term) return;
   requestAnimationFrame(() => {
     try { item.term.refresh(0, Math.max(0, item.term.rows - 1)); } catch (_) {}
+    syncTerminalAttentionHighlight(session);
   });
 }
 
@@ -21982,6 +21965,194 @@ function terminalIsVisible(session, container) {
     && container.clientWidth > 40
     && container.clientHeight > 40
   );
+}
+
+const terminalAttentionQuestionRowClass = 'terminal-attention-question-row';
+const terminalAttentionQuestionOverlayClass = 'terminal-attention-question-overlay';
+
+function terminalAttentionTextPart(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function terminalAttentionRawText(value) {
+  return String(value || '').replace(/\u00a0/g, ' ');
+}
+
+function terminalAttentionQuestionTexts(session) {
+  const state = sessionState(session, transcriptMeta.sessions?.[session]);
+  if (!['needs-input', 'needs-approval'].includes(String(state?.key || '')) || state?.attention === false) return [];
+  const payload = autoApproveStates.get(session) || {};
+  const candidates = [
+    payload.display?.question_text,
+    payload.screen?.question_text,
+    payload.prompt?.question_text,
+    payload.screen?.text,
+    payload.prompt?.text,
+    payload.prompt?.rule_input_text,
+    payload.prompt?.command,
+  ];
+  for (const agentWindow of Array.isArray(payload.agent_windows) ? payload.agent_windows : []) {
+    candidates.push(
+      agentWindow?.question_text,
+      agentWindow?.screen_text,
+      agentWindow?.display?.question_text,
+      agentWindow?.screen?.question_text,
+      agentWindow?.screen?.text,
+    );
+  }
+  candidates.push(state.reason);
+  const seen = new Set();
+  const texts = [];
+  for (const candidate of candidates) {
+    const text = terminalAttentionTextPart(candidate);
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    texts.push(text);
+  }
+  return texts;
+}
+
+function terminalAttentionRowTexts(item) {
+  const rows = Array.from(item?.container?.querySelector?.('.xterm-rows')?.children || [])
+    .map((row, index) => {
+      const rawText = terminalAttentionRawText(row?.textContent || '');
+      return {index, row, rawText, text: terminalAttentionTextPart(rawText)};
+    })
+    .filter(record => record.text);
+  if (rows.length) return rows;
+  const buffer = item?.term?.buffer?.active;
+  const bufferLength = Number(buffer?.length);
+  if (!Number.isFinite(bufferLength) || typeof buffer?.getLine !== 'function') return [];
+  const visibleRows = Math.max(1, Number(item.term.rows || 0));
+  const start = Math.max(0, Number(buffer.viewportY || 0));
+  const end = Math.min(bufferLength, start + visibleRows);
+  const records = [];
+  for (let lineIndex = start; lineIndex < end; lineIndex += 1) {
+    const line = buffer.getLine(lineIndex);
+    const rawText = terminalAttentionRawText(typeof line?.translateToString === 'function' ? line.translateToString(true) : '');
+    const text = terminalAttentionTextPart(rawText);
+    if (text) records.push({index: lineIndex - start, row: null, rawText, text});
+  }
+  return records;
+}
+
+function terminalAttentionSpan(record, candidate) {
+  const needle = terminalAttentionTextPart(candidate);
+  if (!needle) return null;
+  const rawText = terminalAttentionRawText(record?.rawText || record?.text || '');
+  const directStart = rawText.indexOf(needle);
+  if (directStart >= 0) return {highlightStart: directStart, highlightLength: needle.length, highlightText: needle};
+  const normalized = terminalAttentionTextPart(rawText);
+  const normalizedStart = normalized.indexOf(needle);
+  if (normalizedStart >= 0) {
+    const leading = rawText.match(/^\s*/)?.[0]?.length || 0;
+    return {highlightStart: leading + normalizedStart, highlightLength: needle.length, highlightText: needle};
+  }
+  if (normalized.length >= 8 && needle.includes(normalized)) {
+    const leading = rawText.match(/^\s*/)?.[0]?.length || 0;
+    return {highlightStart: leading, highlightLength: normalized.length, highlightText: normalized};
+  }
+  return null;
+}
+
+function terminalAttentionQuestionFallbackSpan(record) {
+  const rawText = terminalAttentionRawText(record?.rawText || record?.text || '');
+  const trimmedEnd = rawText.replace(/\s+$/g, '');
+  if (!/[?？]$/.test(trimmedEnd)) return null;
+  const questionEnd = Math.max(trimmedEnd.lastIndexOf('?'), trimmedEnd.lastIndexOf('？')) + 1;
+  const questionPrefix = trimmedEnd.slice(0, questionEnd);
+  const sentence = questionPrefix.match(/([^.!?？|│]+[?？])$/)?.[1]?.trim() || terminalAttentionTextPart(trimmedEnd);
+  const start = Math.max(0, rawText.lastIndexOf(sentence));
+  return {highlightStart: start, highlightLength: Math.max(1, sentence.length), highlightText: sentence};
+}
+
+function terminalAttentionQuestionFallback(text) {
+  const trimmed = terminalAttentionTextPart(text);
+  if (!trimmed || !/[?？]\s*$/.test(trimmed)) return false;
+  return !/^(>|❯|\$|#)\s*$/.test(trimmed);
+}
+
+function terminalAttentionQuestionRow(item, questionTexts = []) {
+  const rows = terminalAttentionRowTexts(item);
+  if (!rows.length) return null;
+  const candidates = questionTexts.map(terminalAttentionTextPart).filter(Boolean);
+  for (const candidate of candidates) {
+    for (const record of rows) {
+      const span = terminalAttentionSpan(record, candidate);
+      if (span) return {...record, ...span};
+    }
+  }
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    if (terminalAttentionQuestionFallback(rows[index].text)) return {...rows[index], ...terminalAttentionQuestionFallbackSpan(rows[index])};
+  }
+  return null;
+}
+
+function terminalAttentionOverlay(session, item) {
+  if (!item?.container) return null;
+  let overlay = item.container.querySelector?.(`.${terminalAttentionQuestionOverlayClass}[data-session="${cssEscape(session)}"]`);
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.className = terminalAttentionQuestionOverlayClass;
+    overlay.dataset.session = String(session);
+    item.container.appendChild(overlay);
+  }
+  return overlay;
+}
+
+function clearTerminalAttentionHighlight(session, item = terminals.get(session)) {
+  const container = item?.container;
+  if (!container) return;
+  for (const row of container.querySelectorAll?.(`.${terminalAttentionQuestionRowClass}`) || []) {
+    row.classList.remove(terminalAttentionQuestionRowClass);
+  }
+  container.querySelector?.(`.${terminalAttentionQuestionOverlayClass}[data-session="${cssEscape(session)}"]`)?.remove();
+}
+
+function placeTerminalAttentionOverlay(session, item, record) {
+  const overlay = terminalAttentionOverlay(session, item);
+  if (!overlay) return;
+  const containerRect = item.container.getBoundingClientRect?.() || {};
+  const rowRect = record.row?.getBoundingClientRect?.();
+  const screenRect = terminalScreenElement(item.container)?.getBoundingClientRect?.() || containerRect;
+  const cell = terminalCellDimensions(item.term, item.container);
+  const cellWidth = Math.max(1, Number(cell.width || 0) || 0);
+  const top = rowRect?.height
+    ? rowRect.top - Number(containerRect.top || 0)
+    : Number(screenRect.top || 0) - Number(containerRect.top || 0) + Math.max(0, Number(record.index || 0)) * Math.max(1, Number(cell.height || 0));
+  const height = rowRect?.height || Math.max(1, Number(cell.height || 0));
+  const leftBase = Number((rowRect || screenRect)?.left || 0) - Number(containerRect.left || 0);
+  const start = Math.max(0, Number(record.highlightStart || 0));
+  const length = Math.max(1, Number(record.highlightLength || terminalAttentionTextPart(record.text).length || 1));
+  const left = Math.max(0, leftBase + start * cellWidth);
+  const maxWidth = Math.max(cellWidth, Number(containerRect.width || 0) - left);
+  const width = Math.max(cellWidth, Math.min(maxWidth, length * cellWidth));
+  overlay.style.top = `${Math.max(0, top)}px`;
+  overlay.style.height = `${height}px`;
+  overlay.style.left = `${left}px`;
+  overlay.style.width = `${width}px`;
+  overlay.title = record.highlightText || record.text;
+}
+
+function syncTerminalAttentionHighlight(session) {
+  const item = terminals.get(session);
+  if (!item?.container || !item?.term) return false;
+  clearTerminalAttentionHighlight(session, item);
+  const texts = terminalAttentionQuestionTexts(session);
+  if (!texts.length) return false;
+  const record = terminalAttentionQuestionRow(item, texts);
+  if (!record) return false;
+  record.row?.classList?.add(terminalAttentionQuestionRowClass);
+  placeTerminalAttentionOverlay(session, item, record);
+  return true;
+}
+
+function scheduleTerminalAttentionHighlight(session) {
+  requestAnimationFrame(() => syncTerminalAttentionHighlight(session));
+}
+
+function syncTerminalAttentionHighlights() {
+  for (const session of sessions.filter(isTmuxSession)) syncTerminalAttentionHighlight(session);
 }
 
 const terminalBlankScreenRefreshDelaysMs = Object.freeze([220, 650, 1400, 2800]);
@@ -22007,13 +22178,23 @@ function terminalRenderedContentPresent(session, item = terminals.get(session)) 
   return false;
 }
 
-function requestTerminalScreenRefresh(session, item = terminals.get(session)) {
+function requestTerminalScreenRefresh(session, item = terminals.get(session), reason = 'terminal-refresh') {
   if (shareViewMode || item?.socket?.readyState !== WebSocket.OPEN) return false;
   try {
-    item.socket.send(JSON.stringify({type: 'refresh', reason: 'blank-screen'}));
+    const refreshReason = String(reason || 'terminal-refresh');
+    item.socket.send(JSON.stringify({type: 'refresh', reason: refreshReason}));
     return true;
   } catch (_) {
     return false;
+  }
+}
+
+function refreshVisibleTerminalScreens(reason = 'manual-refresh') {
+  for (const session of activeSessions.filter(isTmuxSession)) {
+    const item = terminals.get(session);
+    if (!item?.term || !terminalIsVisible(session, item.container)) continue;
+    refreshTerminal(session);
+    requestTerminalScreenRefresh(session, item, reason);
   }
 }
 
@@ -26325,13 +26506,14 @@ function tmuxWindowBarHtml(session, info, options = {}) {
   const labelMode = tmuxWindowBarLabelMode(records, options);
   const disabledTitle = readOnlyMode ? t('terminal.window.adminRequired') : t('tab.unavailableFor', {name: itemLabel(session)});
   const buttons = records.map(record => {
-    const active = activeIndexOverride === undefined ? record.active : String(record.index) === activeIndexOverride;
-    const pressed = active ? 'true' : 'false';
-    const activeClass = active ? ' active' : '';
     const infoPayload = Array.isArray(info) ? {panes: info} : info;
     const fallbackName = record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.nameLabel}`;
     const visibleName = tmuxWindowCanonicalLabel(session, record, fallbackName, infoPayload);
     const {status: agentStatus, agentKey} = tmuxWindowAgentStatus(session, record, infoPayload);
+    const recordActive = agentStatus && typeof agentStatus.active === 'boolean' ? agentStatus.active === true : record.active;
+    const active = activeIndexOverride === undefined ? recordActive : String(record.index) === activeIndexOverride;
+    const pressed = active ? 'true' : 'false';
+    const activeClass = active ? ' active' : '';
     const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatus, agentKey, session);
     const title = t('terminal.window.title', {name: visibleName});
     const attrs = disabled
@@ -26370,17 +26552,40 @@ function syncTmuxWindowBarOverflow(session) {
 }
 
 function updatePanelWindowStepButtons(session, info) {
-  const bars = [...(document.body?.querySelectorAll?.(`[data-tmux-window-bar="${cssEscape(session)}"]`) || [])];
-  if (!bars.length) return;
+  const panel = document.getElementById(panelDomId(session));
+  const barSelector = `[data-tmux-window-bar="${cssEscape(session)}"]`;
+  const bars = [...new Set([
+    ...(document.body?.querySelectorAll?.(barSelector) || []),
+    ...(panel?.querySelectorAll?.(barSelector) || []),
+  ])];
   const html = tmuxWindowBarHtml(session, info);
   if (!html) {
+    bars.forEach(bar => bar.remove());
+    syncTmuxWindowBarOverflow(session);
+    return;
+  }
+  const replacementFromHtml = () => {
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = html;
+    return wrapper.firstElementChild;
+  };
+  const insertBarIntoDetailRow = () => {
+    const row = panel?.querySelector(':scope > .panel-detail-row') || panel?.querySelector('.panel-detail-row');
+    if (!row) return false;
+    const replacement = replacementFromHtml();
+    if (!replacement) return false;
+    const close = row.querySelector(':scope > .panel-detail-close') || row.querySelector('.panel-detail-close');
+    if (close?.parentElement === row) row.insertBefore(replacement, close);
+    else row.appendChild(replacement);
+    return true;
+  };
+  if (!bars.length) {
+    insertBarIntoDetailRow();
     syncTmuxWindowBarOverflow(session);
     return;
   }
   bars.forEach(existing => {
-    const wrapper = document.createElement('div');
-    wrapper.innerHTML = html;
-    const replacement = wrapper.firstElementChild;
+    const replacement = replacementFromHtml();
     if (replacement) existing.replaceWith(replacement);
   });
   syncTmuxWindowBarOverflow(session);
@@ -45148,6 +45353,7 @@ function connectTerminalSocket(session, item) {
         item.term.write(String(event.data));
       }
       scheduleTerminalBlankScreenRefresh(session);
+      scheduleTerminalAttentionHighlight(session);
     } catch (_) {
       if (terminals.get(session) === item) closeTerminalItem(session, item);
     }
@@ -45371,6 +45577,7 @@ async function setAutoApprove(session, enabled) {
     updateDocumentTitle();
     updateSessionButtonStates();
     renderAutoApproveButton(session, payload);
+    scheduleTerminalAttentionHighlight(session);
     scheduleShareUiStatePublish();
     statusEl.innerHTML = payload.enabled
       ? `<span class="ok">${localizedHtml('status.yoloEnabledFor', {session: sessionLabel(session)})}</span>`
@@ -45383,6 +45590,7 @@ async function setAutoApprove(session, enabled) {
         updateDocumentTitle();
         updateSessionButtonStates();
         renderAutoApproveButton(session, payload);
+        scheduleTerminalAttentionHighlight(session);
         scheduleShareUiStatePublish();
       }
       statusErr(localizedHtml('status.yoloApprovalFailed', {error: payload.error || t('status.yoloApprovalFailedDefault')}));
@@ -45439,6 +45647,7 @@ function applyAutoApprovePayload(payload) {
   updateSessionButtonStates();
   refreshActivePanelHeaders();
   trackSessionStateChanges();
+  syncTerminalAttentionHighlights();
   scheduleShareUiStatePublish();
   return true;
 }
@@ -45688,6 +45897,11 @@ function startSelfUpdateReloadPolling(target = '') {
 
 function showServerUpdateBanner(version) {
   let banner = document.getElementById('serverUpdateBanner');
+  if (banner && banner.parentElement) {
+    banner.dataset.version = version;
+    return;
+  }
+  banner = [...(document.body?.children || [])].find(node => node?.id === 'serverUpdateBanner') || null;
   if (banner) {
     banner.dataset.version = version;
     return;
@@ -45708,7 +45922,7 @@ function showServerUpdateBanner(version) {
   dismiss.type = 'button';
   dismiss.className = 'server-update-banner-dismiss';
   dismiss.setAttribute('aria-label', t('update.dismiss'));
-  dismiss.textContent = '×';
+  dismiss.textContent = t('update.dismiss');
   dismiss.addEventListener('click', () => banner.remove());
   banner.append(msg, reload, dismiss);
   document.body.appendChild(banner);
@@ -45716,7 +45930,8 @@ function showServerUpdateBanner(version) {
 
 function maybeHandleServerVersionChange(serverVersion) {
   // The boot version (bootstrap.version) only updates on page load; this lets a
-  // long-lived open client learn that a newer server shipped, via the metadata poll.
+  // long-lived open client learn that the running server no longer matches the
+  // browser bundle that booted this tab.
   if (!serverVersion || serverVersion === bootstrap.version) return;
   if (!updateNotificationAllowsVersion(bootstrap.version, serverVersion)) return;
   if (selfUpdateOwnsServerVersion(serverVersion)) return;
@@ -46105,6 +46320,7 @@ async function updateLatency() {
 
 function refreshAll() {
   resyncVisibleTerminalRemoteSizes('refresh');
+  refreshVisibleTerminalScreens('manual-refresh');
   refreshTranscripts({force: true});
   refreshAutoStatuses();
   refreshWatchedFilesystem();

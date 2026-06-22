@@ -487,7 +487,7 @@ def test_plaintext_on_tls_server_serves_http_share_readonly_apis(monkeypatch, tm
         verify_share_token=lambda token: record if token == "valid-share-token" else None,
         share_record_allows_file_path=lambda share_record, raw_path: share_record == record and raw_path == shared_path,
         share_status_payload=lambda token, **kwargs: calls.append(("share", token, kwargs)) or ({"ok": True, "token": token}, HTTPStatus.OK),
-        activity_payload=lambda: ({"activity": {"6:0": {"session": "6", "window": 0}}}, HTTPStatus.OK),
+        activity_payload=lambda **_kwargs: ({"activity": {"6:0": {"session": "6", "window": 0}}}, HTTPStatus.OK),
         session_files_payload=lambda session, hours, **kwargs: ({"session": session, "loaded": True, "files": [], "repos": [], "errors": []}, HTTPStatus.OK),
     )
     server, thread = start_server(monkeypatch, tmp_path, app=app, tls_context=FakeTlsContext())

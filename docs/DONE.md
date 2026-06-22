@@ -4,6 +4,16 @@ Archive of completed YOLOmux work, newest first. Concise by design — the full 
 
 Unless an entry says otherwise, every item shipped with the standard check gate green (`tools/check.py`: py_compile, `static_build.py --check`, both `node --check`, `node tests/layout_url.test.js`, full pytest, `git diff --check`). Entries call out only verification that goes BEYOND that gate (live user confirmation, focused browser repros, notable test counts).
 
+## 2026-06-22
+
+### Browser reload on client/server mismatch
+
+- Completed and removed `DOIT.client_server_version_reload_prompt.md`. The existing server-version reload path now treats enabled semantic differences as client/server mismatches in either direction, asks "Do you want to reload the browser?", and shows the existing Reload plus Keep controls while preserving the same metadata poll, safe auto-reload gate, idempotence guard, and self-update suppression. Verification: `node tests/layout_async.test.js`, `node tests/editor_preview.test.js`, `node tests/layout_url.test.js`, and full `python3 tools/check.py` (`CHECK PASSED in 99.34s`).
+
+### Backend-owned per-window agent view model
+
+- Completed and removed `DOIT.per_window_viewmodel_backend_source.md`. `agent_window_status_payloads` now owns each Claude/Codex tmux window record (`pid`, `active`, state, touched repo roots, path entries, and git facts), `/api/activity?hours=...` serves those records from the cached activity/session-files path, and the frontend `sessionAgentWindowStatusPayloads` / `windowViewModel` accessors feed popover, Tabber, Info Line, and tmux window-bar rendering. The old frontend per-window path resolvers (`sessionWindowMetadataRows`, `tabberRepoEntriesForWindow` session-files parse, selected-pane path use for agent metadata) were retired. Verification: `node tests/tabber.test.js`, `node tests/editor_preview.test.js`, `node tests/layout_async.test.js`, `node tests/layout_url.test.js`, `node tests/share_theme.test.js`, focused backend/browser-share pytest, and full `python3 tools/check.py` (`CHECK PASSED in 96.19s`).
+
 ## 2026-06-21
 
 ### YO!agent Claude thinking progress

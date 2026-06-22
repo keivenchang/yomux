@@ -696,11 +696,12 @@ function sessionPopoverWindowPidByIndex(info) {
 }
 
 function sessionPopoverAgentWindowPid(agent, pidByIndex) {
+  const directPid = Number(agent?.pid || agent?.process_label_pid || 0);
+  if (Number.isFinite(directPid) && directPid > 0) return Math.floor(directPid);
   const index = tmuxWindowIndexKey(agent?.window_index ?? agent?.window);
   const sharedPid = index !== null ? Number(pidByIndex.get(index)) : null;
   if (Number.isFinite(sharedPid) && sharedPid > 0) return Math.floor(sharedPid);
-  const directPid = Number(agent?.process_label_pid || agent?.pid || 0);
-  return Number.isFinite(directPid) && directPid > 0 ? Math.floor(directPid) : null;
+  return null;
 }
 
 function sessionPopoverActiveWindowIndex(session, info) {
@@ -720,7 +721,9 @@ function sessionPopoverSortedAgentWindows(session, info, autoPayload) {
       _index: index,
       kind: String(agent?.kind || '').toLowerCase(),
       state: String(agent?.state || 'idle'),
-      current: activeWindowIndex !== null && tmuxWindowIndexKey(agent.window_index ?? agent.window) === activeWindowIndex,
+      current: typeof agent?.active === 'boolean'
+        ? agent.active === true
+        : activeWindowIndex !== null && tmuxWindowIndexKey(agent.window_index ?? agent.window) === activeWindowIndex,
       pid: sessionPopoverAgentWindowPid(agent, pidByIndex),
     }))
     .filter(agent => ['claude', 'codex'].includes(agent.kind))
@@ -753,37 +756,25 @@ function sessionPopoverAgentWindowRowHtml(agent, nowSeconds = Date.now() / 1000)
   </div>`;
 }
 
-function sessionPopoverTouchedRepoPaths(session, agent, info, row) {
-  if (typeof tabberRepoPathsForWindow !== 'function') return [];
-  const windowIndex = tmuxWindowIndexKey(agent?.window_index ?? agent?.window);
-  if (windowIndex === null) return [];
-  const gitRoot = String(row?.git?.root || info?.project?.git?.root || '').trim();
-  const paths = tabberRepoPathsForWindow(session, windowIndex, agentWindowKind(agent?.kind), gitRoot);
-  const seen = new Set();
-  return paths.filter(path => {
-    const text = String(path || '').trim();
-    if (!text || seen.has(text)) return false;
-    seen.add(text);
-    return true;
-  });
-}
-
 function sessionPopoverWindowMetadataItems(session, info, agentRows) {
   const agents = Array.isArray(agentRows) ? agentRows : [];
   if (!agents.length) return [];
-  const windowRows = sessionWindowMetadataRows(info);
   return agents.map(agent => {
-    const meta = sessionWindowMetadataForAgent(agent, windowRows) || {
+    const pathEntries = typeof agentWindowPathEntries === 'function' ? agentWindowPathEntries(agent) : [];
+    const paths = pathEntries.map(item => item.path).filter(Boolean);
+    const git = typeof agentWindowPrimaryGit === 'function' ? agentWindowPrimaryGit(agent) : (agent?.git || null);
+    const path = paths[0] || (typeof agentWindowPrimaryPath === 'function' ? agentWindowPrimaryPath(agent) : String(agent?.path || ''));
+    const meta = {
       window: String(agent?.window ?? ''),
       window_index: tmuxWindowIndexKey(agent?.window_index ?? agent?.window),
       window_name: String(agent?.window_name || ''),
-      path: '',
-      git: null,
+      path,
+      paths,
+      path_entries: pathEntries,
+      git,
     };
-    const touchedPaths = sessionPopoverTouchedRepoPaths(session, agent, info, meta);
-    const enrichedMeta = touchedPaths.length ? {...meta, paths: touchedPaths} : meta;
-    const html = windowMetadataRowsHtml(enrichedMeta);
-    return html ? {agent, meta: enrichedMeta, html} : null;
+    const html = windowMetadataRowsHtml(meta);
+    return html ? {agent, meta, html} : null;
   }).filter(Boolean);
 }
 
@@ -807,39 +798,6 @@ function sessionPopoverAgentWindowHtml(session, info, autoPayload, agentRows = n
   const sharedRows = sharedMetadata ? `<div class="session-window-metadata-list shared">${items[0].html}</div>` : '';
   const metadataClass = items.length ? ' has-window-metadata' : '';
   return `<div class="session-agent-list${metadataClass}">${rows}${sharedRows}</div>`;
-}
-
-function sessionWindowMetadataRows(info) {
-  const payloadRows = Array.isArray(info?.window_metadata) ? info.window_metadata : [];
-  if (payloadRows.length) {
-    return payloadRows.map(row => ({
-      window: String(row?.window ?? ''),
-      window_index: Number.isFinite(Number(row?.window_index)) ? Number(row.window_index) : null,
-      window_name: String(row?.window_name || ''),
-      path: String(row?.path || ''),
-      git: row?.git && typeof row.git === 'object' ? row.git : null,
-    }));
-  }
-  const rows = [];
-  const seen = new Set();
-  for (const pane of info?.panes || []) {
-    const window = String(pane?.window ?? '');
-    if (!window || seen.has(window)) continue;
-    seen.add(window);
-    rows.push({
-      window,
-      window_index: Number.isFinite(Number(window)) ? Number(window) : null,
-      window_name: String(pane?.window_name || ''),
-      path: String(pane?.current_path || ''),
-      git: null,
-    });
-  }
-  return rows;
-}
-
-function sessionWindowMetadataForAgent(agent, windowRows) {
-  const agentIndex = tmuxWindowIndexKey(agent?.window_index ?? agent?.window);
-  return windowRows.find(row => tmuxWindowIndexKey(row.window_index ?? row.window) === agentIndex) || null;
 }
 
 function sessionWindowMetadataSignature(row) {

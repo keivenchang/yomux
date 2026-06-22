@@ -77,6 +77,9 @@ async function runLayoutAsyncSuite() {
         if (parsed.pathname === '/api/session-files') {
           return Promise.resolve(jsonResponse({files: [{repo: '/repo/one', abs_path: '/repo/one/b.py', mtime: 2}]}));
         }
+        if (parsed.pathname === '/api/activity') {
+          return Promise.resolve(jsonResponse({activity: {}, agent_windows: {}}));
+        }
         return Promise.reject(new Error(`unexpected fetch ${url}`));
       });
 
@@ -125,8 +128,8 @@ async function runLayoutAsyncSuite() {
       assert.equal(api.tabberSessionFileLookbackHoursForTest(), 48, 'Tabber lookback change handler stores the selected value');
       assert.ok(calls.some(url => {
         const parsed = new URL(url, 'http://localhost');
-        return parsed.pathname === '/api/session-files-batch' && parsed.searchParams.get('hours') === '48';
-      }), 'Tabber lookback change handler reloads touched paths immediately');
+        return parsed.pathname === '/api/activity' && parsed.searchParams.get('hours') === '48';
+      }), 'Tabber lookback change handler reloads cached activity paths immediately');
     }
 
     {
@@ -1788,6 +1791,62 @@ async function runLayoutAsyncSuite() {
       assert.equal(html.includes('yoagent-waiting-queue'), false, 'clearing a stale wait removes the pending row');
       assert.ok(html.includes('Result from tmux session') && html.includes('done'), 'clearing a stale wait preserves recorded result messages');
     }
+
+    test('server/client version mismatch asks whether to reload the browser', async () => {
+      const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+        bootstrapOverrides: {
+          version: '0.4.20',
+          settingsPayload: {
+            defaults: {general: {reload_on_update: true, reload_on_update_auto: false}},
+            settings: {},
+            mtime_ns: 1,
+          },
+        },
+      });
+      api.maybeHandleServerVersionChangeForTest('0.4.19');
+      const banner = api.bodyChildren().find(node => node.id === 'serverUpdateBanner');
+      assert.ok(banner, 'server/client patch rollback mismatch shows the existing reload banner');
+      assert.equal(banner.dataset.version, '0.4.19', 'reload banner stores the mismatched server version');
+      assert.ok(banner.children[0].textContent.includes('Do you want to reload the browser?'), 'reload banner asks the user whether to reload');
+      assert.equal(banner.children[1].textContent, 'Reload', 'reload banner keeps the existing Reload action');
+      assert.equal(banner.children[2].textContent, 'Keep', 'reload banner keeps the existing dismiss action as Keep');
+      api.maybeHandleServerVersionChangeForTest('0.4.19');
+      assert.equal(api.bodyChildren().filter(node => node.id === 'serverUpdateBanner').length, 1, 'same mismatched version does not spawn repeated banners');
+      banner.children[2].listeners.get('click')[0]();
+      assert.equal(api.bodyChildren().some(node => node.id === 'serverUpdateBanner'), false, 'Keep dismisses the mismatch banner');
+      api.maybeHandleServerVersionChangeForTest('0.4.19');
+      assert.equal(api.bodyChildren().some(node => node.id === 'serverUpdateBanner'), false, 'dismissed same mismatch does not immediately reopen');
+
+      const reloadApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+        bootstrapOverrides: {
+          version: '0.4.20',
+          settingsPayload: {
+            defaults: {general: {reload_on_update: true, reload_on_update_auto: false}},
+            settings: {},
+            mtime_ns: 1,
+          },
+        },
+      });
+      reloadApi.maybeHandleServerVersionChangeForTest('0.4.21');
+      const reloadBanner = reloadApi.bodyChildren().find(node => node.id === 'serverUpdateBanner');
+      reloadBanner.children[1].listeners.get('click')[0]();
+      assert.equal(reloadApi.reloadCountForTest(), 1, 'Reload action reloads the browser');
+
+      const autoApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+        bootstrapOverrides: {
+          version: '0.4.20',
+          settingsPayload: {
+            defaults: {general: {reload_on_update: true, reload_on_update_auto: true}},
+            settings: {},
+            mtime_ns: 1,
+          },
+        },
+      });
+      autoApi.setOpenFileStateForTest('/repo/app.py', {kind: 'text', content: 'dirty', original: 'clean', dirty: true});
+      autoApi.maybeHandleServerVersionChangeForTest('0.4.21');
+      assert.equal(autoApi.reloadCountForTest(), 0, 'dirty editors block automatic reload on server/client mismatch');
+      assert.ok(autoApi.bodyChildren().some(node => node.id === 'serverUpdateBanner'), 'dirty auto-reload fallback still shows the existing reload banner');
+    });
 
     test('self-update: Update Now removes toast and reloads after restart ping', async () => {
       const api = loadYolomux('', ['1']);

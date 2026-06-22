@@ -787,6 +787,29 @@ async function runEditorPreviewSuite() {
     assert.ok(/function setPanelDetailsCollapsed\(panel, collapsed\)\s*\{[\s\S]*schedulePanelDetailsFit\(panel\)/.test(source), '2026-06-11 Info Bar regression: details toggle refits visible tmux terminals after row height changes');
     assert.equal(source.includes('function windowStepButtonHtml'), false, 'DOIT.56 N3: dead header tmux stepper renderer stays removed');
     assert.equal(/button\.textContent = terminalTabLabel/.test(source), false, 'DOIT.56 N3: metadata refresh no longer rewrites the static terminal tab label');
+    const lateApi = loadYolomux('', ['late']);
+    const latePanel = lateApi.testElementForId('panel-late');
+    const lateDetailRow = new TestElement('', 'div');
+    lateDetailRow.className = 'panel-detail-row';
+    const lateClose = new TestElement('', 'button');
+    lateClose.className = 'panel-detail-close';
+    lateDetailRow.appendChild(lateClose);
+    latePanel.appendChild(lateDetailRow);
+    assert.equal(lateDetailRow.querySelectorAll('[data-tmux-window-bar="late"]').length, 0, 'late metadata panel starts without a tmux window bar');
+    lateApi.setTranscriptInfoForTest('late', {panes: [
+      {target: 'late:0.0', window: '0', window_name: 'claude', window_active: true, active: true, process_label: 'claude', command: 'claude', current_path: '/repo/agent'},
+      {target: 'late:1.0', window: '1', window_name: 'bash', window_active: false, active: true, process_label: 'bash', command: 'bash', current_path: '/repo/shell'},
+    ]});
+    lateApi.updatePanelWindowStepButtonsForTest('late', lateApi.transcriptInfoForTest('late'));
+    const lateBars = lateDetailRow.querySelectorAll('[data-tmux-window-bar="late"]');
+    assert.equal(lateBars.length, 1, 'late transcript metadata inserts one tmux window bar');
+    assert.deepStrictEqual(
+      Array.from(lateBars[0].querySelectorAll('[data-window-index]')).map(button => button.dataset.windowIndex),
+      ['0', '1'],
+      'late transcript metadata inserts the tmux window bar instead of leaving the Info Bar stuck without window buttons',
+    );
+    lateApi.updatePanelWindowStepButtonsForTest('late', {panes: []});
+    assert.equal(lateDetailRow.querySelectorAll('[data-tmux-window-bar="late"]').length, 0, 'empty window metadata removes the stale tmux window bar');
     const calls = [];
     const button1 = tmuxWindowButtonElement('1', '1', false);
     const button3 = tmuxWindowButtonElement('1', '3', true);
@@ -1644,7 +1667,7 @@ async function runEditorPreviewSuite() {
     assert.ok(recentIdleText.includes('0:codex — &lt;15 sec ago') || recentIdleText.includes('0:codex — <15 sec ago'), 'sub-15-second idle agents use the shared Ago recency label');
 
     api.setAutoApproveStateForTest('4', {
-      agent_windows: [{kind: 'codex', state: 'idle', idle_since: now - 900, last_active_ts: now - 900, window_index: 1, window_name: 'codex', window_label: '1:codex'}],
+      agent_windows: [{kind: 'codex', state: 'idle', idle_since: now - 900, last_active_ts: now - 900, window_index: 1, window_name: 'codex', window_label: '1:codex', active: true}],
     });
     const currentIdleHtml = api.sessionPopoverHtml('4', {selected_pane: {current_path: '/repo', window_index: '1'}, project: {git: {root: '/repo'}}, agents: [{kind: 'codex'}]}, 'codex', false);
     const currentIdleText = currentIdleHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
@@ -1681,8 +1704,8 @@ async function runEditorPreviewSuite() {
     ]);
     api.setAutoApproveStateForTest('5', {
       agent_windows: [
-        {kind: 'codex', state: 'working', working_elapsed_seconds: 65, window_index: 0, window_label: '0:codex'},
-        {kind: 'claude', state: 'idle', idle_since: now - 3600, last_active_ts: now - 3600, window_index: 1, window_label: '1:claude'},
+        {kind: 'codex', state: 'working', working_elapsed_seconds: 65, window_index: 0, window_label: '0:codex', pid: 111, active: false, path_entries: [{path: '/repo/codex-root', mtime: 200, git: {root: '/repo/codex-root', branch: 'codex-branch', dirty_count: 4, ahead: 1}}], git: {root: '/repo/codex-root', branch: 'codex-branch', dirty_count: 4, ahead: 1}},
+        {kind: 'claude', state: 'idle', idle_since: now - 3600, last_active_ts: now - 3600, window_index: 1, window_label: '1:claude', pid: 222, active: true, path_entries: [{path: '/repo/claude-root', mtime: 300, git: {root: '/repo/claude-root', branch: 'claude-branch', dirty_count: 0, ahead: 3}}], git: {root: '/repo/claude-root', branch: 'claude-branch', dirty_count: 0, ahead: 3}},
       ],
     });
     const parityPopoverHtml = api.sessionPopoverHtml('5', parityInfo, 'claude', false);
@@ -1736,8 +1759,8 @@ async function runEditorPreviewSuite() {
     ]);
     api.setAutoApproveStateForTest('5', {
       agent_windows: [
-        {kind: 'claude', state: 'working', working_elapsed_seconds: 10, window_index: 0, window_label: '0:claude', transcript: '/logs/claude-session.jsonl', transcript_id: 'claude-session-id'},
-        {kind: 'codex', state: 'idle', idle_since: now - 120, last_active_ts: now - 120, window_index: 1, window_label: '1:codex', transcript: '/logs/codex-thread.jsonl', transcript_id: 'codex-thread-id'},
+        {kind: 'claude', state: 'working', working_elapsed_seconds: 10, window_index: 0, window_label: '0:claude', pid: 12345, active: true, path_entries: [{path: '/repo/claude', mtime: 100, git: {root: '/repo/claude', branch: 'claude-branch', dirty_count: 2, head: 'abc1234 claude head'}}], git: {root: '/repo/claude', branch: 'claude-branch', dirty_count: 2, head: 'abc1234 claude head'}, transcript: '/logs/claude-session.jsonl', transcript_id: 'claude-session-id'},
+        {kind: 'codex', state: 'idle', idle_since: now - 120, last_active_ts: now - 120, window_index: 1, window_label: '1:codex', pid: 24680, active: false, path_entries: [{path: '/repo/codex-a', mtime: 300, git: {root: '/repo/codex-a', branch: 'codex-branch', dirty_count: 0, head: 'def5678 codex head'}}, {path: '/repo/codex-b', mtime: 200, git: {root: '/repo/codex-b', branch: 'codex-b-branch', dirty_count: 0}}], git: {root: '/repo/codex-a', branch: 'codex-branch', dirty_count: 0, head: 'def5678 codex head'}, transcript: '/logs/codex-thread.jsonl', transcript_id: 'codex-thread-id'},
       ],
     });
     const perWindowHtml = api.sessionPopoverHtml('5', perWindowInfo, 'claude', false);
@@ -1769,6 +1792,12 @@ async function runEditorPreviewSuite() {
         {window: '1', window_index: 1, path: '/repo/shared', git: {root: '/repo/shared', branch: 'shared-branch'}},
       ],
     };
+    api.setAutoApproveStateForTest('5', {
+      agent_windows: [
+        {kind: 'claude', state: 'working', working_elapsed_seconds: 10, window_index: 0, window_label: '0:claude', pid: 12345, active: true, path_entries: [{path: '/repo/shared', mtime: 100, git: {root: '/repo/shared', branch: 'shared-branch'}}], git: {root: '/repo/shared', branch: 'shared-branch'}},
+        {kind: 'codex', state: 'idle', idle_since: now - 120, last_active_ts: now - 120, window_index: 1, window_label: '1:codex', pid: 24680, active: false, path_entries: [{path: '/repo/shared', mtime: 90, git: {root: '/repo/shared', branch: 'shared-branch'}}], git: {root: '/repo/shared', branch: 'shared-branch'}},
+      ],
+    });
     const sharedHtml = api.sessionPopoverHtml('5', sharedWindowInfo, 'claude', false);
     const sharedText = sharedHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
     assert.equal(sharedText.split('tmux window 0:claude').length - 1, 1, 'shared-path Claude window label appears once');
@@ -2670,6 +2699,58 @@ async function runEditorPreviewSuite() {
     assert.equal(row2[0].range.start.y, 2, 'fresh-next-url row 2 starts on row 2');
   });
 
+  test('ASK?/QUES? prompt question highlights the visible terminal row', () => {
+    const api = loadYolomux('', ['1']);
+    api.setTranscriptInfoForTest('1', {agents: [{kind: 'claude'}], panes: []});
+    const container = api.testElementForId('terminal-pane-1');
+    container.className = 'terminal';
+    container.rect = {left: 0, top: 0, width: 800, height: 120, right: 800, bottom: 120};
+    const xtermRows = new TestElement('xterm-rows');
+    xtermRows.className = 'xterm-rows';
+    xtermRows.rect = {left: 0, top: 0, width: 800, height: 120, right: 800, bottom: 120};
+    const questionText = 'What would you like to do?';
+    const visibleRows = ['Claude Code', `>> ${questionText}`, '1. Proceed', '2. Cancel']
+      .map((text, index) => {
+        const row = new TestElement(`row-${index}`);
+        row.textContent = text;
+        row.rect = {left: 0, top: index * 20, width: 800, height: 20, right: 800, bottom: (index + 1) * 20};
+        xtermRows.appendChild(row);
+        return row;
+      });
+    container.appendChild(xtermRows);
+    api.registerTerminalForTest('1', {
+      cols: 80,
+      rows: 6,
+      _core: {_renderService: {dimensions: {css: {cell: {width: 10, height: 20}}}}},
+      buffer: {active: {length: visibleRows.length, viewportY: 0, getLine: index => terminalLine(visibleRows[index]?.textContent || '')}},
+    });
+    api.setAutoApproveStateForTest('1', {
+      enabled: true,
+      screen: {key: 'needs-input', text: questionText, question_text: questionText},
+      prompt: {visible: false},
+    });
+
+    assert.deepStrictEqual(canonical(api.terminalAttentionQuestionTextsForTest('1')), [questionText], 'question text comes from the same payload that drives ASK?/QUES?');
+    assert.equal(api.syncTerminalAttentionHighlightForTest('1'), true, 'attention state paints a question row');
+    assert.equal(visibleRows[1].classList.contains('terminal-attention-question-row'), true, 'the exact visible question row is marked');
+    const overlay = container.querySelector('.terminal-attention-question-overlay[data-session="1"]');
+    assert.ok(overlay, 'a visible overlay is created for canvas-rendered terminals');
+    assert.equal(overlay.style.top, '20px', 'overlay is aligned to the question row');
+    assert.equal(overlay.style.left, '30px', 'overlay starts at the matched sentence, not the start of the row');
+    assert.equal(overlay.style.width, `${questionText.length * 10}px`, 'overlay width tracks the matched sentence, not the whole row');
+
+    api.setAutoApproveStateForTest('1', {enabled: true, screen: {key: 'idle', text: ''}});
+    assert.equal(api.syncTerminalAttentionHighlightForTest('1'), false, 'non-attention state clears the mark');
+    assert.equal(visibleRows[1].classList.contains('terminal-attention-question-row'), false, 'cleared attention removes the row class');
+    assert.equal(container.querySelector('.terminal-attention-question-overlay[data-session="1"]'), null, 'cleared attention removes the overlay');
+
+    api.setAutoApproveStateForTest('1', {enabled: true, screen: {key: 'needs-input', text: 'waiting for input'}});
+    visibleRows[1].textContent = 'Tip: this is not the prompt';
+    visibleRows[3].textContent = 'Something something sentence something?';
+    assert.equal(api.syncTerminalAttentionHighlightForTest('1'), true, 'attention state falls back to a visible question row when payload text is generic');
+    assert.equal(visibleRows[3].classList.contains('terminal-attention-question-row'), true, 'fallback chooses the newest visible question-looking row');
+  });
+
   // (no false merge): even an unterminated URL-looking row cannot absorb a flush-left continuation when
   // it did not reach the terminal edge.
   test('t@7052', () => {
@@ -2855,7 +2936,9 @@ async function runEditorPreviewSuite() {
     assert.ok(/function scheduleRemoteResize\(session[\s\S]*?!terminalCanPublishRemoteSize\(\)[\s\S]*item\.remoteResizePending = true/.test(source), 'hidden-tab resize skips are marked pending instead of silently disappearing');
     assert.ok(/function forceRemoteResize\(session\)[\s\S]*sendRemoteResize\(session\)/.test(source), 'forced remote resize bypasses unchanged-fit dedupe by sending current terminal dims');
     assert.ok(/function resyncVisibleTerminalRemoteSizes\(reason = ''\)[\s\S]*scheduleFit\(session\)[\s\S]*forceRemoteResize\(session\)/.test(source), 'page-visible and online recovery force-publish current terminal geometry');
-    assert.ok(/function refreshAll\(\)[\s\S]*resyncVisibleTerminalRemoteSizes\('refresh'\)[\s\S]*refreshTranscripts\(\{force: true\}\)/.test(source), 'manual refresh resizes visible tmux panes before continuing existing refresh work');
+    assert.ok(/function requestTerminalScreenRefresh\(session, item = terminals\.get\(session\), reason = 'terminal-refresh'\)[\s\S]*JSON\.stringify\(\{type: 'refresh', reason: refreshReason\}\)/.test(source), 'tmux screen refresh requests carry a reason through the shared websocket refresh message');
+    assert.ok(/function refreshVisibleTerminalScreens\(reason = 'manual-refresh'\)[\s\S]*terminalIsVisible\(session, item\.container\)[\s\S]*refreshTerminal\(session\)[\s\S]*requestTerminalScreenRefresh\(session, item, reason\)/.test(source), 'manual refresh repaints visible xterms and asks tmux to redraw those windows');
+    assert.ok(/function refreshAll\(\)[\s\S]*resyncVisibleTerminalRemoteSizes\('refresh'\)[\s\S]*refreshVisibleTerminalScreens\('manual-refresh'\)[\s\S]*refreshTranscripts\(\{force: true\}\)/.test(source), 'manual refresh resizes and repaints visible tmux panes before continuing existing refresh work');
     assert.ok(/document\.addEventListener\('visibilitychange'[\s\S]*resyncVisibleTerminalRemoteSizes\('visible'\)/.test(source), 'visibility return resends terminal geometry');
     assert.ok(/window\.addEventListener\('online'[\s\S]*resyncVisibleTerminalRemoteSizes\('online'\)/.test(source), 'network return resends terminal geometry');
     assert.ok(/function closeTerminalItem\(session, item\)[\s\S]*cancelAnimationFrame\(item\.fitFrame\)[\s\S]*clearTimeout\(item\.fitTimer\)[\s\S]*item\.fitFrame = 0[\s\S]*item\.fitTimer = 0/.test(source), 'terminal teardown cancels pending fit callbacks');
@@ -3463,7 +3546,9 @@ async function runEditorPreviewSuite() {
     assert.equal(en['contextmenu.openInDiffer'], 'Open in a Differ', 'en reusable Differ context label');
     assert.equal(en['contextmenu.openNewDiffEditor'], 'Open in a new Differ', 'en new Differ context label');
     assert.equal(en['contextmenu.openNewEditor'], 'Open in a new Editor', 'en new Editor context label');
-    assert.equal(en['pref.general.reload_on_update.label'], 'Show reload prompt after server update', 'en server-version reload label is specific');
+    assert.equal(en['pref.general.reload_on_update.label'], 'Show reload prompt after server/client mismatch', 'en server/client-version reload label is specific');
+    assert.equal(en['update.available'], 'The YOLOmux server version changed since this browser tab loaded. Do you want to reload the browser?', 'en server/client reload prompt asks whether to reload the browser');
+    assert.equal(en['update.dismiss'], 'Keep', 'en server/client reload prompt has a visible Keep action');
     assert.equal(en['pref.updates.notify_level.label'], 'Notify when change in', 'en update notification threshold label is specific');
     for (const loc of ['es', 'ja', 'de', 'fr', 'pt-BR', 'ru', 'ko', 'hi', 'ar', 'he', 'vi', 'th', 'tr', 'nl', 'pl', 'it', 'zh-Hans', 'zh-Hant']) {
       const cat = JSON.parse(fs.readFileSync(`static/locales/${loc}.json`, 'utf8'));

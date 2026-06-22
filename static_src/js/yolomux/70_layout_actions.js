@@ -1078,18 +1078,30 @@ function repoSummaryAsGit(repo) {
   };
 }
 
-function activeAgentWindowMetadataItemForProjectMeta(session, info, activePane, activeAgentKind) {
-  const kind = typeof agentWindowKind === 'function' ? agentWindowKind(activeAgentKind) : String(activeAgentKind || '').trim().toLowerCase();
-  if (!activePane || !['claude', 'codex'].includes(kind)) return null;
-  if (typeof tmuxWindowCurrentActiveIndex !== 'function' || typeof sessionPopoverSortedAgentWindows !== 'function' || typeof sessionPopoverWindowMetadataItems !== 'function') return null;
+function activeAgentWindowMetadataItemForProjectMeta(session, info) {
+  if (typeof tmuxWindowCurrentActiveIndex !== 'function' || typeof windowViewModel !== 'function') return null;
   const activeWindowIndex = tmuxWindowCurrentActiveIndex(session, info);
   if (activeWindowIndex === null) return null;
-  const agentRows = sessionPopoverSortedAgentWindows(session, info, autoApproveStates.get(session));
-  const metadataItems = sessionPopoverWindowMetadataItems(session, info, agentRows);
-  return metadataItems.find(item => tmuxWindowIndexKey(item?.agent?.window_index ?? item?.agent?.window) === activeWindowIndex) || null;
+  const agent = windowViewModel(session, activeWindowIndex, info, autoApproveStates.get(session));
+  const kind = typeof agentWindowKind === 'function' ? agentWindowKind(agent?.kind) : String(agent?.kind || '').trim().toLowerCase();
+  if (!['claude', 'codex'].includes(kind)) return null;
+  const pathEntries = typeof agentWindowPathEntries === 'function' ? agentWindowPathEntries(agent) : [];
+  const paths = pathEntries.map(item => item.path).filter(Boolean);
+  const meta = {
+    window: String(agent?.window ?? ''),
+    window_index: tmuxWindowIndexKey(agent?.window_index ?? agent?.window),
+    window_name: String(agent?.window_name || ''),
+    path: paths[0] || (typeof agentWindowPrimaryPath === 'function' ? agentWindowPrimaryPath(agent) : String(agent?.path || '')),
+    paths,
+    path_entries: pathEntries,
+    git: typeof agentWindowPrimaryGit === 'function' ? agentWindowPrimaryGit(agent) : (agent?.git || null),
+  };
+  return {agent, meta};
 }
 
 function projectMetaPathFromWindowMetadata(meta) {
+  const pathEntries = Array.isArray(meta?.path_entries) ? meta.path_entries.map(item => String(item?.path || '').trim()).filter(Boolean) : [];
+  if (pathEntries.length) return pathEntries[0];
   const paths = Array.isArray(meta?.paths) ? meta.paths.map(path => String(path || '').trim()).filter(Boolean) : [];
   if (paths.length) return paths[0];
   const path = String(meta?.path || '').trim();
@@ -1106,9 +1118,9 @@ function projectMetaSelection(session, info) {
   const activeAgent = activePane ? agentForPane(info, activePane) : null;
   const activeAgentKind = String(activeAgent?.kind || activePane?.process_label || activePane?.command || '').toLowerCase();
   const activeWindowUsesTranscript = ['claude', 'codex'].includes(typeof agentWindowKind === 'function' ? agentWindowKind(activeAgentKind) : activeAgentKind);
-  const activeWindowMetadataItem = !explicitRoot ? activeAgentWindowMetadataItemForProjectMeta(session, info, activePane, activeAgentKind) : null;
+  const activeWindowMetadataItem = !explicitRoot ? activeAgentWindowMetadataItemForProjectMeta(session, info) : null;
   const activeWindowMeta = activeWindowMetadataItem?.meta || null;
-  const activeWindowMetaHasSharedData = Boolean(activeWindowMeta?.git) || (Array.isArray(activeWindowMeta?.paths) && activeWindowMeta.paths.length > 0);
+  const activeWindowMetaHasSharedData = Boolean(activeWindowMeta?.git) || Boolean(projectMetaPathFromWindowMetadata(activeWindowMeta));
   const activeWindowMetaPath = projectMetaPathFromWindowMetadata(activeWindowMeta);
   let repoIndex = selectedSessionRepoIndex(session, info);
   if (!explicitRoot && activePath && repos.length) {
@@ -1731,6 +1743,7 @@ function refreshTerminal(session) {
   if (!item?.term) return;
   requestAnimationFrame(() => {
     try { item.term.refresh(0, Math.max(0, item.term.rows - 1)); } catch (_) {}
+    syncTerminalAttentionHighlight(session);
   });
 }
 
@@ -1741,6 +1754,194 @@ function terminalIsVisible(session, container) {
     && container.clientWidth > 40
     && container.clientHeight > 40
   );
+}
+
+const terminalAttentionQuestionRowClass = 'terminal-attention-question-row';
+const terminalAttentionQuestionOverlayClass = 'terminal-attention-question-overlay';
+
+function terminalAttentionTextPart(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function terminalAttentionRawText(value) {
+  return String(value || '').replace(/\u00a0/g, ' ');
+}
+
+function terminalAttentionQuestionTexts(session) {
+  const state = sessionState(session, transcriptMeta.sessions?.[session]);
+  if (!['needs-input', 'needs-approval'].includes(String(state?.key || '')) || state?.attention === false) return [];
+  const payload = autoApproveStates.get(session) || {};
+  const candidates = [
+    payload.display?.question_text,
+    payload.screen?.question_text,
+    payload.prompt?.question_text,
+    payload.screen?.text,
+    payload.prompt?.text,
+    payload.prompt?.rule_input_text,
+    payload.prompt?.command,
+  ];
+  for (const agentWindow of Array.isArray(payload.agent_windows) ? payload.agent_windows : []) {
+    candidates.push(
+      agentWindow?.question_text,
+      agentWindow?.screen_text,
+      agentWindow?.display?.question_text,
+      agentWindow?.screen?.question_text,
+      agentWindow?.screen?.text,
+    );
+  }
+  candidates.push(state.reason);
+  const seen = new Set();
+  const texts = [];
+  for (const candidate of candidates) {
+    const text = terminalAttentionTextPart(candidate);
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    texts.push(text);
+  }
+  return texts;
+}
+
+function terminalAttentionRowTexts(item) {
+  const rows = Array.from(item?.container?.querySelector?.('.xterm-rows')?.children || [])
+    .map((row, index) => {
+      const rawText = terminalAttentionRawText(row?.textContent || '');
+      return {index, row, rawText, text: terminalAttentionTextPart(rawText)};
+    })
+    .filter(record => record.text);
+  if (rows.length) return rows;
+  const buffer = item?.term?.buffer?.active;
+  const bufferLength = Number(buffer?.length);
+  if (!Number.isFinite(bufferLength) || typeof buffer?.getLine !== 'function') return [];
+  const visibleRows = Math.max(1, Number(item.term.rows || 0));
+  const start = Math.max(0, Number(buffer.viewportY || 0));
+  const end = Math.min(bufferLength, start + visibleRows);
+  const records = [];
+  for (let lineIndex = start; lineIndex < end; lineIndex += 1) {
+    const line = buffer.getLine(lineIndex);
+    const rawText = terminalAttentionRawText(typeof line?.translateToString === 'function' ? line.translateToString(true) : '');
+    const text = terminalAttentionTextPart(rawText);
+    if (text) records.push({index: lineIndex - start, row: null, rawText, text});
+  }
+  return records;
+}
+
+function terminalAttentionSpan(record, candidate) {
+  const needle = terminalAttentionTextPart(candidate);
+  if (!needle) return null;
+  const rawText = terminalAttentionRawText(record?.rawText || record?.text || '');
+  const directStart = rawText.indexOf(needle);
+  if (directStart >= 0) return {highlightStart: directStart, highlightLength: needle.length, highlightText: needle};
+  const normalized = terminalAttentionTextPart(rawText);
+  const normalizedStart = normalized.indexOf(needle);
+  if (normalizedStart >= 0) {
+    const leading = rawText.match(/^\s*/)?.[0]?.length || 0;
+    return {highlightStart: leading + normalizedStart, highlightLength: needle.length, highlightText: needle};
+  }
+  if (normalized.length >= 8 && needle.includes(normalized)) {
+    const leading = rawText.match(/^\s*/)?.[0]?.length || 0;
+    return {highlightStart: leading, highlightLength: normalized.length, highlightText: normalized};
+  }
+  return null;
+}
+
+function terminalAttentionQuestionFallbackSpan(record) {
+  const rawText = terminalAttentionRawText(record?.rawText || record?.text || '');
+  const trimmedEnd = rawText.replace(/\s+$/g, '');
+  if (!/[?？]$/.test(trimmedEnd)) return null;
+  const questionEnd = Math.max(trimmedEnd.lastIndexOf('?'), trimmedEnd.lastIndexOf('？')) + 1;
+  const questionPrefix = trimmedEnd.slice(0, questionEnd);
+  const sentence = questionPrefix.match(/([^.!?？|│]+[?？])$/)?.[1]?.trim() || terminalAttentionTextPart(trimmedEnd);
+  const start = Math.max(0, rawText.lastIndexOf(sentence));
+  return {highlightStart: start, highlightLength: Math.max(1, sentence.length), highlightText: sentence};
+}
+
+function terminalAttentionQuestionFallback(text) {
+  const trimmed = terminalAttentionTextPart(text);
+  if (!trimmed || !/[?？]\s*$/.test(trimmed)) return false;
+  return !/^(>|❯|\$|#)\s*$/.test(trimmed);
+}
+
+function terminalAttentionQuestionRow(item, questionTexts = []) {
+  const rows = terminalAttentionRowTexts(item);
+  if (!rows.length) return null;
+  const candidates = questionTexts.map(terminalAttentionTextPart).filter(Boolean);
+  for (const candidate of candidates) {
+    for (const record of rows) {
+      const span = terminalAttentionSpan(record, candidate);
+      if (span) return {...record, ...span};
+    }
+  }
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    if (terminalAttentionQuestionFallback(rows[index].text)) return {...rows[index], ...terminalAttentionQuestionFallbackSpan(rows[index])};
+  }
+  return null;
+}
+
+function terminalAttentionOverlay(session, item) {
+  if (!item?.container) return null;
+  let overlay = item.container.querySelector?.(`.${terminalAttentionQuestionOverlayClass}[data-session="${cssEscape(session)}"]`);
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.className = terminalAttentionQuestionOverlayClass;
+    overlay.dataset.session = String(session);
+    item.container.appendChild(overlay);
+  }
+  return overlay;
+}
+
+function clearTerminalAttentionHighlight(session, item = terminals.get(session)) {
+  const container = item?.container;
+  if (!container) return;
+  for (const row of container.querySelectorAll?.(`.${terminalAttentionQuestionRowClass}`) || []) {
+    row.classList.remove(terminalAttentionQuestionRowClass);
+  }
+  container.querySelector?.(`.${terminalAttentionQuestionOverlayClass}[data-session="${cssEscape(session)}"]`)?.remove();
+}
+
+function placeTerminalAttentionOverlay(session, item, record) {
+  const overlay = terminalAttentionOverlay(session, item);
+  if (!overlay) return;
+  const containerRect = item.container.getBoundingClientRect?.() || {};
+  const rowRect = record.row?.getBoundingClientRect?.();
+  const screenRect = terminalScreenElement(item.container)?.getBoundingClientRect?.() || containerRect;
+  const cell = terminalCellDimensions(item.term, item.container);
+  const cellWidth = Math.max(1, Number(cell.width || 0) || 0);
+  const top = rowRect?.height
+    ? rowRect.top - Number(containerRect.top || 0)
+    : Number(screenRect.top || 0) - Number(containerRect.top || 0) + Math.max(0, Number(record.index || 0)) * Math.max(1, Number(cell.height || 0));
+  const height = rowRect?.height || Math.max(1, Number(cell.height || 0));
+  const leftBase = Number((rowRect || screenRect)?.left || 0) - Number(containerRect.left || 0);
+  const start = Math.max(0, Number(record.highlightStart || 0));
+  const length = Math.max(1, Number(record.highlightLength || terminalAttentionTextPart(record.text).length || 1));
+  const left = Math.max(0, leftBase + start * cellWidth);
+  const maxWidth = Math.max(cellWidth, Number(containerRect.width || 0) - left);
+  const width = Math.max(cellWidth, Math.min(maxWidth, length * cellWidth));
+  overlay.style.top = `${Math.max(0, top)}px`;
+  overlay.style.height = `${height}px`;
+  overlay.style.left = `${left}px`;
+  overlay.style.width = `${width}px`;
+  overlay.title = record.highlightText || record.text;
+}
+
+function syncTerminalAttentionHighlight(session) {
+  const item = terminals.get(session);
+  if (!item?.container || !item?.term) return false;
+  clearTerminalAttentionHighlight(session, item);
+  const texts = terminalAttentionQuestionTexts(session);
+  if (!texts.length) return false;
+  const record = terminalAttentionQuestionRow(item, texts);
+  if (!record) return false;
+  record.row?.classList?.add(terminalAttentionQuestionRowClass);
+  placeTerminalAttentionOverlay(session, item, record);
+  return true;
+}
+
+function scheduleTerminalAttentionHighlight(session) {
+  requestAnimationFrame(() => syncTerminalAttentionHighlight(session));
+}
+
+function syncTerminalAttentionHighlights() {
+  for (const session of sessions.filter(isTmuxSession)) syncTerminalAttentionHighlight(session);
 }
 
 const terminalBlankScreenRefreshDelaysMs = Object.freeze([220, 650, 1400, 2800]);
@@ -1766,13 +1967,23 @@ function terminalRenderedContentPresent(session, item = terminals.get(session)) 
   return false;
 }
 
-function requestTerminalScreenRefresh(session, item = terminals.get(session)) {
+function requestTerminalScreenRefresh(session, item = terminals.get(session), reason = 'terminal-refresh') {
   if (shareViewMode || item?.socket?.readyState !== WebSocket.OPEN) return false;
   try {
-    item.socket.send(JSON.stringify({type: 'refresh', reason: 'blank-screen'}));
+    const refreshReason = String(reason || 'terminal-refresh');
+    item.socket.send(JSON.stringify({type: 'refresh', reason: refreshReason}));
     return true;
   } catch (_) {
     return false;
+  }
+}
+
+function refreshVisibleTerminalScreens(reason = 'manual-refresh') {
+  for (const session of activeSessions.filter(isTmuxSession)) {
+    const item = terminals.get(session);
+    if (!item?.term || !terminalIsVisible(session, item.container)) continue;
+    refreshTerminal(session);
+    requestTerminalScreenRefresh(session, item, reason);
   }
 }
 

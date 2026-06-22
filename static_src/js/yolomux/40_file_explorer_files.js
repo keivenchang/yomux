@@ -3359,7 +3359,9 @@ function tabberAgentDateText(agent) {
 
 async function fetchTabberActivity() {
   try {
-    const payload = await apiFetchJson('/api/activity', {cache: 'no-store'});
+    const params = new URLSearchParams();
+    params.set('hours', String(normalizeSessionFileLookbackHours(tabberSessionFileLookbackHours)));
+    const payload = await apiFetchJson(`/api/activity?${params.toString()}`, {cache: 'no-store'});
     if (payload && typeof payload === 'object' && payload.activity && typeof payload.activity === 'object') {
       tabberActivityPayload = payload;
     }
@@ -3373,7 +3375,6 @@ function warmTabberDataOnLaunch() {
   if (tabberLaunchWarmupStarted || !transcriptMetaLoaded) return false;
   tabberLaunchWarmupStarted = true;
   fetchTabberActivity();
-  fetchTabberSessionFilesBatch(tabberAgentSessions());
   return true;
 }
 
@@ -3390,7 +3391,7 @@ function setTabberSessionFileLookbackHours(hours, options = {}) {
   if (tabberSessionFileLookbackHours !== previous) {
     clearTabberSessionFilesStates();
     if (options.refresh !== false) {
-      ensureTabberSessionFilesFetches();
+      fetchTabberActivity();
       if (fileExplorerMode === 'tabber') refreshTabberPanels();
     }
   }
@@ -3516,94 +3517,105 @@ function tabberAgentSessions() {
 }
 
 function ensureTabberSessionFilesFetches() {
-  fetchTabberSessionFilesBatch(tabberAgentSessions());
+  // Agent-window paths now come from the cached /api/activity agent_windows payload.
+  // The session-files fetchers remain for the modified-files UI and focused tests.
+  if (!tabberActivityPayload?.agent_windows) fetchTabberActivity();
 }
 
-function tabberKnownRepoRoots(files, gitRoot = '') {
-  const roots = [];
-  const addRoot = value => {
-    const root = normalizeDirectoryPath(String(value || '').trim());
-    if (!root || root === '/' || roots.includes(root)) return;
-    roots.push(root);
+function agentWindowPathEntries(agent) {
+  const entries = [];
+  const seen = new Set();
+  const addEntry = (value, fallback = {}) => {
+    let path = '';
+    let mtime = Number(fallback.mtime || 0);
+    let git = fallback.git && typeof fallback.git === 'object' ? fallback.git : null;
+    if (value && typeof value === 'object') {
+      path = String(value.path || value.root || '').trim();
+      mtime = Number(value.mtime || mtime || 0);
+      git = value.git && typeof value.git === 'object' ? value.git : git;
+    } else {
+      path = String(value || '').trim();
+    }
+    if (!path || seen.has(path)) return;
+    seen.add(path);
+    entries.push({path, mtime: Number.isFinite(mtime) ? mtime : 0, git});
   };
-  addRoot(gitRoot);
-  for (const file of files || []) addRoot(file?.repo);
-  return roots.sort((left, right) => right.length - left.length || left.localeCompare(right));
+  for (const entry of Array.isArray(agent?.path_entries) ? agent.path_entries : []) addEntry(entry);
+  for (const entry of Array.isArray(agent?.paths) ? agent.paths : []) addEntry(entry, {git: agent?.git});
+  return entries;
 }
 
-function tabberKnownRootForPath(path, roots) {
-  const normalized = normalizeDirectoryPath(String(path || '').trim());
-  if (!normalized) return '';
-  for (const root of roots || []) {
-    if (normalized === root || normalized.startsWith(root + '/')) return root;
+function agentWindowPrimaryGit(agent) {
+  if (agent?.git && typeof agent.git === 'object') return agent.git;
+  const entry = agentWindowPathEntries(agent).find(item => item.git && typeof item.git === 'object');
+  return entry?.git || null;
+}
+
+function agentWindowPrimaryPath(agent) {
+  const entry = agentWindowPathEntries(agent).find(item => item.path);
+  return entry?.path || String(agent?.path || '').trim();
+}
+
+function agentWindowPayloadKey(agent) {
+  const index = tmuxWindowIndexKey(agent?.window_index ?? agent?.window);
+  const kind = agentWindowKind(agent?.kind);
+  return index !== null && kind ? `${index}:${kind}` : '';
+}
+
+function normalizedAgentWindowPayload(agent) {
+  const kind = agentWindowKind(agent?.kind);
+  const windowIndex = tmuxWindowNumber(agent?.window_index ?? agent?.window);
+  const windowText = windowIndex !== null ? String(windowIndex) : String(agent?.window || '').trim();
+  const canonical = agentWindowCanonicalLabel(windowText || agent?.window_index, kind, agent?.window_label || agent?.label || kind);
+  const pathEntries = agentWindowPathEntries(agent);
+  const git = agentWindowPrimaryGit(agent);
+  return {
+    ...agent,
+    kind,
+    window: windowText,
+    window_index: windowIndex,
+    label: String(agent?.label || canonical),
+    window_label: canonical,
+    pid: Number.isFinite(Number(agent?.pid)) && Number(agent.pid) > 0 ? Math.floor(Number(agent.pid)) : agent?.pid,
+    active: typeof agent?.active === 'boolean' ? agent.active : agent?.active,
+    path: pathEntries[0]?.path || String(agent?.path || ''),
+    paths: pathEntries.map(item => item.path),
+    path_entries: pathEntries,
+    git,
+  };
+}
+
+function agentWindowPayloadRows(value) {
+  return Array.isArray(value) ? value.filter(item => item && typeof item === 'object') : [];
+}
+
+function mergeAgentWindowPayload(base, candidates) {
+  const key = agentWindowPayloadKey(base);
+  const enrich = candidates
+    .map(rows => rows.find(row => agentWindowPayloadKey(row) === key))
+    .find(Boolean) || {};
+  const merged = {...enrich, ...base};
+  if (!agentWindowPathEntries(merged).length && agentWindowPathEntries(enrich).length) {
+    merged.path = enrich.path;
+    merged.paths = enrich.paths;
+    merged.path_entries = enrich.path_entries;
+    merged.git = enrich.git;
   }
-  return '';
+  if (!(merged.git && typeof merged.git === 'object') && enrich.git && typeof enrich.git === 'object') merged.git = enrich.git;
+  if (typeof merged.active !== 'boolean' && typeof enrich.active === 'boolean') merged.active = enrich.active;
+  if ((!Number.isFinite(Number(merged.pid)) || Number(merged.pid) <= 0) && Number.isFinite(Number(enrich.pid)) && Number(enrich.pid) > 0) merged.pid = enrich.pid;
+  return normalizedAgentWindowPayload(merged);
 }
 
-function tabberFileMatchesWindow(file, windowIndex, agentKey = '') {
-  const targetWindow = String(windowIndex ?? '');
-  const targetAgent = String(agentKey || '').toLowerCase();
-  const windows = Array.isArray(file?.agent_windows) ? file.agent_windows : [];
-  if (windows.length) {
-    return windows.some(item => {
-      const itemWindow = String(item?.window ?? (item?.window_index ?? ''));
-      const itemAgent = String(item?.kind || '').toLowerCase();
-      if (targetWindow && itemWindow !== targetWindow) return false;
-      return !targetAgent || !itemAgent || itemAgent === targetAgent;
-    });
-  }
-  const agents = Array.isArray(file?.agents) ? file.agents : [file?.agent].filter(Boolean);
-  if (!targetAgent || !agents.length) return true;
-  return agents.map(item => String(item || '').toLowerCase()).includes(targetAgent);
-}
-
-// Absolute touched-path entries for the paths a session's agent touched, attached under an agent window.
-// These are intentionally leaves: the Tabber shows where work happened, not every changed file.
-function tabberTouchedRepoPathsForWindow(session, windowIndex, agentKey, gitRoot) {
-  const cached = tabberSessionFilesState(session);
-  if (!cached?.loaded) return {loaded: false, loading: Boolean(cached?.loading), paths: []};
-  if (!cached.loaded || !cached.files.length) return {loaded: true, loading: false, paths: []};
-  const knownRoots = tabberKnownRepoRoots(cached.files, gitRoot);
-  const byPath = new Map();
-  for (const file of cached.files) {
-    if (file.uploaded === true) continue;
-    if (!tabberFileMatchesWindow(file, windowIndex, agentKey)) continue;
-    const rawRepo = String(file.repo || '').trim();
-    const rawAbsPath = String(file.abs_path || '').trim();
-    const repo = rawRepo ? normalizeDirectoryPath(rawRepo) : '';
-    const absPath = rawAbsPath ? normalizeDirectoryPath(rawAbsPath) : '';
-    const candidatePath = repo && repo !== '/' ? repo : (absPath ? normalizeDirectoryPath(dirnameOf(absPath)) : '');
-    const path = tabberKnownRootForPath(candidatePath, knownRoots) || (repo ? candidatePath : '');
-    if (!path) continue;
-    const prev = byPath.get(path) || {path, files: [], mtime: 0};
-    prev.files.push(file);
-    prev.mtime = Math.max(prev.mtime, Number(file.mtime || 0));
-    byPath.set(path, prev);
-  }
-  const paths = Array.from(byPath.values())
-    .sort((left, right) => Number(right.mtime || 0) - Number(left.mtime || 0) || String(left.path).localeCompare(String(right.path)));
-  return {loaded: true, loading: false, paths};
-}
-
-function tabberRepoPathsForWindow(session, windowIndex, agentKey, gitRoot) {
-  return tabberTouchedRepoPathsForWindow(session, windowIndex, agentKey, gitRoot).paths.map(item => item.path);
-}
-
-function tabberRepoEntriesForWindow(session, windowIndex, agentKey, gitBranch, gitRoot) {
-  const touched = tabberTouchedRepoPathsForWindow(session, windowIndex, agentKey, gitRoot);
-  if (!touched.loaded) {
-    if (!touched.loading) return [];
-    return [{
-      name: 'loading', kind: 'file', mtime: 0, sortName: 'loading',
-      tabber: {type: 'loading', session, windowIndex, label: 'Fetching paths', icon: '·'},
-    }];
-  }
-  return touched.paths
+function tabberRepoEntriesForAgentWindow(agent, session, windowIndex) {
+  const pathEntries = agentWindowPathEntries(agent);
+  return pathEntries
     .map((item, pathPos) => {
-      const isSessionRepo = gitRoot && normalizeDirectoryPath(item.path) === normalizeDirectoryPath(gitRoot);
+      const git = item.git && typeof item.git === 'object' ? item.git : agentWindowPrimaryGit(agent);
+      const branchText = git?.branch ? shortBranch(git.branch) : '';
       return {
         name: `r_${tabberPad(pathPos)}`, kind: 'file', mtime: item.mtime, sortName: item.path,
-        tabber: {type: 'repo', session, windowIndex, repoRoot: item.path, label: item.path, icon: '📁', branchText: isSessionRepo ? gitBranch : ''},
+        tabber: {type: 'repo', session, windowIndex, repoRoot: item.path, label: item.path, icon: '📁', branchText},
       };
     });
 }
@@ -3625,11 +3637,13 @@ function agentWindowCanonicalLabel(windowIndex, agentKey, fallback = '') {
 
 function sessionAgentWindowStatusPayloads(session, info = null, autoPayload = null) {
   const statePayload = autoPayload || autoApproveStates.get(session) || {};
-  const source = Array.isArray(statePayload.agent_windows) && statePayload.agent_windows.length
-    ? statePayload.agent_windows
-    : Array.isArray(info?.agent_windows) && info.agent_windows.length
-      ? info.agent_windows
-      : [];
+  const activityPayload = tabberActivityPayload?.agent_windows && typeof tabberActivityPayload.agent_windows === 'object'
+    ? tabberActivityPayload.agent_windows[String(session || '')]
+    : null;
+  const stateRows = agentWindowPayloadRows(statePayload.agent_windows);
+  const activityRows = agentWindowPayloadRows(activityPayload);
+  const infoRows = agentWindowPayloadRows(info?.agent_windows);
+  const source = stateRows.length ? stateRows : activityRows.length ? activityRows : infoRows;
   const fallback = source.length ? source : (Array.isArray(info?.agents) ? info.agents : [])
     .map(agent => ({
       kind: agent?.kind || '',
@@ -3643,14 +3657,15 @@ function sessionAgentWindowStatusPayloads(session, info = null, autoPayload = nu
       idle_since: null,
     }));
   return fallback
-    .map(agent => {
-      const kind = agentWindowKind(agent?.kind);
-      const windowIndex = tmuxWindowNumber(agent?.window_index ?? agent?.window);
-      const windowText = windowIndex !== null ? String(windowIndex) : String(agent?.window || '').trim();
-      const canonical = agentWindowCanonicalLabel(windowText || agent?.window_index, kind, agent?.window_label || kind);
-      return {...agent, kind, window: windowText, window_index: windowIndex, window_label: canonical};
-    })
+    .map(agent => mergeAgentWindowPayload(agent, [activityRows, infoRows, stateRows]))
     .filter(agent => agent.kind);
+}
+
+function windowViewModel(session, windowIndex, info = null, autoPayload = null) {
+  const indexKey = tmuxWindowIndexKey(windowIndex);
+  if (indexKey === null) return null;
+  return sessionAgentWindowStatusPayloads(session, info, autoPayload)
+    .find(agent => tmuxWindowIndexKey(agent.window_index ?? agent.window) === indexKey) || null;
 }
 
 function agentWindowStatusForRecord(session, record, info = null) {
@@ -3792,7 +3807,6 @@ function buildTabberTree() {
     const sessionPath = `/${sessionName}`;
     const git = info?.project?.git;
     const branch = git?.branch ? shortBranch(git.branch) : '';
-    const gitRoot = git?.root || '';
     const fallbackSessionRecency = tabberRecency(session);
     const sessionWork = sessionWorkDescription(session, info, 200);
     const sessionNameLabel = sessionLabel(session) || session;
@@ -3811,7 +3825,7 @@ function buildTabberTree() {
       const {status: agentStatus, agentKey} = tmuxWindowAgentStatus(session, record, info);
       const isAgent = Boolean(agentKey) || tabberWindowIsAgent(record.name);
       const agentActivity = isAgent ? tabberAgentForWindow(session, record.index, agentKey) : null;
-      const repoEntries = isAgent ? tabberRepoEntriesForWindow(session, record.index, agentKey, branch, gitRoot) : [];
+      const repoEntries = isAgent && agentStatus ? tabberRepoEntriesForAgentWindow(agentStatus, session, record.index) : [];
       const childMtime = repoEntries.reduce((max, entry) => Math.max(max, Number(entry.mtime || 0)), 0);
       const ledgerMtime = isAgent ? 0 : tabberRecency(`${session}:${record.index}`);
       // Agent windows use transcript activity only. Their touched repo rows may have newer file mtimes, but
@@ -3819,7 +3833,8 @@ function buildTabberTree() {
       const windowMtime = isAgent
         ? tabberAgentRecency(agentActivity)
         : Math.max(ledgerMtime, childMtime, fallbackSessionRecency);
-      const active = activeIndexOverride === undefined ? record.active === true : (activeIndexOverlay !== null && String(record.index) === activeIndexOverlay);
+      const recordActive = agentStatus && typeof agentStatus.active === 'boolean' ? agentStatus.active === true : record.active === true;
+      const active = activeIndexOverride === undefined ? recordActive : (activeIndexOverlay !== null && String(record.index) === activeIndexOverlay);
       const label = tmuxWindowCanonicalLabel(session, record, record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.name}`, info);
       const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatus, agentKey, session);
       const agentStatusForDisplay = agentStatus ? {...agentStatus, current: active} : null;

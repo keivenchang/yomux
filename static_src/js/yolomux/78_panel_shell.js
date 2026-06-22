@@ -1692,13 +1692,14 @@ function tmuxWindowBarHtml(session, info, options = {}) {
   const labelMode = tmuxWindowBarLabelMode(records, options);
   const disabledTitle = readOnlyMode ? t('terminal.window.adminRequired') : t('tab.unavailableFor', {name: itemLabel(session)});
   const buttons = records.map(record => {
-    const active = activeIndexOverride === undefined ? record.active : String(record.index) === activeIndexOverride;
-    const pressed = active ? 'true' : 'false';
-    const activeClass = active ? ' active' : '';
     const infoPayload = Array.isArray(info) ? {panes: info} : info;
     const fallbackName = record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.nameLabel}`;
     const visibleName = tmuxWindowCanonicalLabel(session, record, fallbackName, infoPayload);
     const {status: agentStatus, agentKey} = tmuxWindowAgentStatus(session, record, infoPayload);
+    const recordActive = agentStatus && typeof agentStatus.active === 'boolean' ? agentStatus.active === true : record.active;
+    const active = activeIndexOverride === undefined ? recordActive : String(record.index) === activeIndexOverride;
+    const pressed = active ? 'true' : 'false';
+    const activeClass = active ? ' active' : '';
     const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatus, agentKey, session);
     const title = t('terminal.window.title', {name: visibleName});
     const attrs = disabled
@@ -1737,17 +1738,40 @@ function syncTmuxWindowBarOverflow(session) {
 }
 
 function updatePanelWindowStepButtons(session, info) {
-  const bars = [...(document.body?.querySelectorAll?.(`[data-tmux-window-bar="${cssEscape(session)}"]`) || [])];
-  if (!bars.length) return;
+  const panel = document.getElementById(panelDomId(session));
+  const barSelector = `[data-tmux-window-bar="${cssEscape(session)}"]`;
+  const bars = [...new Set([
+    ...(document.body?.querySelectorAll?.(barSelector) || []),
+    ...(panel?.querySelectorAll?.(barSelector) || []),
+  ])];
   const html = tmuxWindowBarHtml(session, info);
   if (!html) {
+    bars.forEach(bar => bar.remove());
+    syncTmuxWindowBarOverflow(session);
+    return;
+  }
+  const replacementFromHtml = () => {
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = html;
+    return wrapper.firstElementChild;
+  };
+  const insertBarIntoDetailRow = () => {
+    const row = panel?.querySelector(':scope > .panel-detail-row') || panel?.querySelector('.panel-detail-row');
+    if (!row) return false;
+    const replacement = replacementFromHtml();
+    if (!replacement) return false;
+    const close = row.querySelector(':scope > .panel-detail-close') || row.querySelector('.panel-detail-close');
+    if (close?.parentElement === row) row.insertBefore(replacement, close);
+    else row.appendChild(replacement);
+    return true;
+  };
+  if (!bars.length) {
+    insertBarIntoDetailRow();
     syncTmuxWindowBarOverflow(session);
     return;
   }
   bars.forEach(existing => {
-    const wrapper = document.createElement('div');
-    wrapper.innerHTML = html;
-    const replacement = wrapper.firstElementChild;
+    const replacement = replacementFromHtml();
     if (replacement) existing.replaceWith(replacement);
   });
   syncTmuxWindowBarOverflow(session);

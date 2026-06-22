@@ -1062,8 +1062,8 @@ async function runLayoutRestoreSuite() {
     assert.ok(/const YOAGENT_CHAT_BACKENDS = \['codex', 'claude'\]/.test(source) && /function yoagentResolvedBackend\(\)[\s\S]*?for \(const agent of YOAGENT_CHAT_BACKENDS\)[\s\S]*?yoagentBackendUsable\(agent\)/.test(source), '#41: yoagentResolvedBackend prefers codex then claude among logged-in agents');
     assert.ok(source.includes("initialSetting('yoagent.backend', 'auto')"), '#41: the YO!agent backend default is auto');
     assert.ok(/function yoagentChatEnabled\(\)[\s\S]*YOAGENT_CHAT_BACKENDS\.includes\(yoagentResolvedBackend\(\)\)/.test(source), '#41/#72: chat-enabled tracks only usable model-backed chat');
-    assert.ok(/maybeHandleServerVersionChange[\s\S]*serverVersion === bootstrap\.version[\s\S]*updateNotificationAllowsVersion\(bootstrap\.version, serverVersion\)/.test(source), 'server-version reload is gated on the boot version and the reload_on_update threshold');
-    assert.ok(/function updateNotificationAllowsVersion\([^)]*\)[\s\S]*cleanLevel === 'none'[\s\S]*targetParts\[1\] !== currentParts\[1\][\s\S]*cleanLevel === 'patch' && targetParts\[2\] > currentParts\[2\]/.test(source), 'update notification threshold follows SemVer major/minor/patch');
+    assert.ok(/maybeHandleServerVersionChange[\s\S]*serverVersion === bootstrap\.version[\s\S]*updateNotificationAllowsVersion\(bootstrap\.version, serverVersion\)/.test(source), 'server/client-version reload is gated on the boot version and the reload_on_update threshold');
+    assert.ok(/function updateNotificationAllowsVersion\([^)]*\)[\s\S]*cleanLevel === 'none'[\s\S]*targetParts\[1\] !== currentParts\[1\][\s\S]*cleanLevel === 'patch'[\s\S]*targetParts\[2\] !== currentParts\[2\][\s\S]*cleanLevel === 'patch'/.test(source), 'update notification threshold follows SemVer major/minor/patch mismatches');
     assert.ok(/maybeHandleServerVersionChange[\s\S]*boolSetting\('general\.reload_on_update_auto'[\s\S]*reloadIsSafe\(\)/.test(source), 'auto-reload only fires when enabled and reloadIsSafe()');
     const updateApi = loadYolomux('', ['1']);
     assert.equal(updateApi.normalizeUpdateNotificationLevelForTest(true), 'patch', 'legacy true maps to patch notifications');
@@ -1074,6 +1074,10 @@ async function runLayoutRestoreSuite() {
     assert.equal(updateApi.updateNotificationAllowsVersionForTest('0.3.25', '0.4.0', 'minor'), true, 'minor threshold notifies for minor updates');
     assert.equal(updateApi.updateNotificationAllowsVersionForTest('0.3.25', '1.0.0', 'minor'), true, 'minor threshold includes major updates');
     assert.equal(updateApi.updateNotificationAllowsVersionForTest('0.3.25', '1.0.0', 'major'), true, 'major threshold notifies for major updates');
+    assert.equal(updateApi.updateNotificationAllowsVersionForTest('0.3.25', '0.3.24', 'patch'), true, 'patch threshold prompts for server/client patch rollback mismatches');
+    assert.equal(updateApi.updateNotificationAllowsVersionForTest('0.3.25', '0.2.0', 'minor'), true, 'minor threshold prompts for server/client minor rollback mismatches');
+    assert.equal(updateApi.updateNotificationAllowsVersionForTest('1.0.0', '0.9.0', 'major'), true, 'major threshold prompts for server/client major rollback mismatches');
+    assert.equal(updateApi.updateNotificationAllowsVersionForTest('0.3.25', '0.3.24', 'minor'), false, 'minor threshold still suppresses patch-only mismatches');
     assert.equal(updateApi.updateNotificationAllowsVersionForTest('0.3.25', '1.0.0', 'none'), false, 'none threshold suppresses update notifications');
     assert.ok(/function applyUpdateAvailable\(status\)[\s\S]*status\.notify === false[\s\S]*return/.test(source), 'origin/main update cue respects the server-side notify threshold');
     assert.ok(/function reloadIsSafe\(\)[\s\S]*file\?\.dirty[\s\S]*isContentEditable/.test(source), 'reloadIsSafe refuses when an editor buffer is dirty or the user is typing');

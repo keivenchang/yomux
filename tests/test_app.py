@@ -11,6 +11,7 @@ from urllib.parse import parse_qs
 from urllib.parse import urlparse
 
 import pytest
+import yaml
 
 from yolomux_lib import app as app_module
 from yolomux_lib.common import AgentInfo
@@ -23,6 +24,7 @@ from yolomux_lib.yoagent import transports as transport_module
 
 
 PROMPT_STATE_KEYS = set(app_module.blank_prompt_state())
+PROMOTED_CAPTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "prompt_corpus" / "captures"
 pytestmark = pytest.mark.usefixtures("no_control_socket", "isolated_yoagent_conversation_state")
 
 
@@ -131,6 +133,72 @@ def test_auto_approve_status_reports_elsewhere_for_agent_pane_lock(monkeypatch):
         assert payload["enabled_elsewhere"] is True
         assert payload["locked"] is True
         assert payload["lock_owner"] == owners["%7"]
+    finally:
+        webapp.control_server.stop()
+
+
+def test_auto_approve_agent_targets_include_codex_process_under_node(monkeypatch):
+    # Real Codex panes often expose `node` as pane_current_command; the process tree is the stronger
+    # signal for auto-approve worker targeting, otherwise YO watches Claude and misses Codex prompts.
+    fixture = yaml.safe_load((PROMOTED_CAPTURE_DIR / "shell_approval_touch_command__codex-cli-0.141.0_20260620.yaml").read_text(encoding="utf-8"))
+    assert fixture["agent"] == "codex"
+    assert fixture["cursor"]["current_command"] == "node"
+    assert fixture["expected_promoted"]["approval_visible"] is True
+    assert fixture["expected_promoted"]["approval_type"] == "bash"
+
+    info = SessionInfo(
+        session="8002",
+        panes=[
+            PaneInfo(
+                session="8002",
+                window="0",
+                window_name="node",
+                pane="0",
+                pane_id="%73",
+                target="%73",
+                current_path="/repo",
+                command=fixture["cursor"]["current_command"],
+                active=True,
+                window_active=True,
+                title="[ ! ] Action Required | repo",
+                pid=3000,
+                process_label="codex",
+                process_label_pid=3001,
+            ),
+            PaneInfo(
+                session="8002",
+                window="1",
+                window_name="claude",
+                pane="0",
+                pane_id="%5",
+                target="%5",
+                current_path="/repo",
+                command="claude",
+                active=True,
+                window_active=False,
+                title="Claude",
+                pid=4000,
+                process_label="claude",
+                process_label_pid=4000,
+            ),
+        ],
+        selected_pane=None,
+        agents=[
+            AgentInfo("8002", "codex", 3001, "%73", "codex resume sid", "/repo", None, "sid", "/tmp/codex.jsonl", None),
+            AgentInfo("8002", "claude", 4000, "%5", "claude", "/repo", "idle", "cid", "/tmp/claude.jsonl", None),
+        ],
+    )
+    signal_payload = {
+        "ok": True,
+        "agents": [
+            {"session": "8002", "target": "%5", "pane_id": "%5", "agent": "claude", "dead": False},
+        ],
+        "windows": [],
+    }
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"8002": info}, []))
+    webapp = app_module.TmuxWebtermApp(["8002"])
+    try:
+        assert webapp.auto_approve_agent_targets("8002", payload=signal_payload) == ["%73", "%5"]
     finally:
         webapp.control_server.stop()
 
@@ -736,6 +804,8 @@ def test_auto_approve_roster_uses_live_pane_working_signal(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["5", "6"])
     monkeypatch.setattr(webapp, "auto_approve_capture_allowed_for_target", lambda _target: True)
     discover_calls.clear()
+    capture_calls.clear()
+    screen_calls.clear()
     try:
         payload, status = webapp.auto_approve_status()
     finally:
@@ -813,10 +883,30 @@ def test_auto_approve_payload_includes_agent_window_statuses(monkeypatch, tmp_pa
 
     monkeypatch.setattr(app_module, "agent_screen_state", fake_screen_state)
     monkeypatch.setattr(app_module, "auto_approve_lock_owner", lambda _session: None)
+
+    def fake_git_inventory(cwd):
+        root = str(cwd)
+        return {
+            "root": root,
+            "branch": f"{Path(root).name}-branch",
+            "head": "abc123 test head",
+            "ahead": 1,
+            "behind": 0,
+            "dirty_count": 2 if "claude" in root else 0,
+        }
+
+    monkeypatch.setattr(app_module, "git_inventory", fake_git_inventory)
     webapp = app_module.TmuxWebtermApp(["5"])
+    webapp.cached_session_files_payload_for_info = lambda _info: {
+        "files": [
+            {"repo": "/repo/claude-touched", "abs_path": "/repo/claude-touched/app.py", "mtime": 20, "status": "M", "agent_windows": [{"kind": "claude", "window": "0", "window_index": 0, "pane": "0", "pane_target": "%10"}]},
+            {"repo": "/repo/codex-touched", "abs_path": "/repo/codex-touched/app.py", "mtime": 10, "status": "M", "agent_windows": [{"kind": "codex", "window": "1", "window_index": 1, "pane": "0", "pane_target": "%11"}]},
+        ]
+    }
     webapp.activity_ledger.heartbeat("5", "1", ts=1000.0, byte_count=1)
     webapp.activity_ledger.note_agent_active("5", "1", ts=1010.0)
     monkeypatch.setattr(webapp, "auto_approve_capture_allowed_for_target", lambda _target: True)
+    capture_calls.clear()
     try:
         payload, status = webapp.auto_approve_status()
     finally:
@@ -824,44 +914,21 @@ def test_auto_approve_payload_includes_agent_window_statuses(monkeypatch, tmp_pa
 
     assert status == HTTPStatus.OK
     agent_windows = payload["sessions"]["5"]["agent_windows"]
-    assert agent_windows == [
-        {
-            "kind": "claude",
-            "state": "working",
-            "window": "0",
-            "window_index": 0,
-            "window_name": "claude",
-            "window_label": "0:claude",
-            "pane": "0",
-            "pane_target": "%10",
-            "transcript": str(tmp_path / "claude.jsonl"),
-            "transcript_id": "claude-id",
-            "agent_session_id": "claude-id",
-            "working_elapsed_seconds": 3720.0,
-            "idle_since": None,
-            "last_active_ts": 0.0,
-            "screen_text": "agent is working",
-            "status_tokens": None,
-        },
-        {
-            "kind": "codex",
-            "state": "idle",
-            "window": "1",
-            "window_index": 1,
-            "window_name": "codex",
-            "window_label": "1:codex",
-            "pane": "0",
-            "pane_target": "%11",
-            "transcript": str(tmp_path / "codex.jsonl"),
-            "transcript_id": "codex-id",
-            "agent_session_id": "codex-id",
-            "working_elapsed_seconds": None,
-            "idle_since": 1010.0,
-            "last_active_ts": 1010.0,
-            "screen_text": "idle screen",
-            "status_tokens": None,
-        },
-    ]
+    by_kind = {row["kind"]: row for row in agent_windows}
+    assert [row["kind"] for row in agent_windows] == ["claude", "codex"]
+    assert by_kind["claude"]["state"] == "working"
+    assert by_kind["claude"]["working_elapsed_seconds"] == 3720.0
+    assert by_kind["claude"]["pid"] == 10
+    assert by_kind["claude"]["active"] is True
+    assert by_kind["claude"]["paths"] == ["/repo/claude-touched"]
+    assert by_kind["claude"]["path_entries"][0]["path"] == "/repo/claude-touched"
+    assert by_kind["claude"]["git"]["branch"] == "claude-touched-branch"
+    assert by_kind["codex"]["state"] == "idle"
+    assert by_kind["codex"]["idle_since"] == 1010.0
+    assert by_kind["codex"]["pid"] == 11
+    assert by_kind["codex"]["active"] is False
+    assert by_kind["codex"]["paths"] == ["/repo/codex-touched"]
+    assert by_kind["codex"]["git"]["branch"] == "codex-touched-branch"
     assert capture_calls == [("%10", True), ("%11", True)]
 
 
@@ -4142,13 +4209,14 @@ def test_yoagent_send_to_claude_try_suggestion_does_not_clear(monkeypatch):
 
 
 def test_yoagent_send_to_claude_nbsp_suggestion_does_not_clear(monkeypatch):
+    pane_target = "yoagent-test-claude-placeholder-pane"
     pane = PaneInfo(
         session="target-agent",
         window="0",
         window_name="claude",
         pane="0",
-        pane_id="%77",
-        target="%77",
+        pane_id=pane_target,
+        target=pane_target,
         current_path="/repo/app",
         command="claude",
         active=True,
@@ -4162,10 +4230,10 @@ def test_yoagent_send_to_claude_nbsp_suggestion_does_not_clear(monkeypatch):
         selected_pane=pane,
         agents=[
             AgentInfo(
-                session="target-agent",
-                kind="claude",
-                pid=123,
-                pane_target="%77",
+                    session="target-agent",
+                    kind="claude",
+                    pid=123,
+                    pane_target=pane_target,
                 command="claude",
                 cwd="/repo/app",
                 status=None,
@@ -4212,17 +4280,18 @@ def test_yoagent_send_to_claude_nbsp_suggestion_does_not_clear(monkeypatch):
     assert len(watchers) == 1
     assert "target input box did not clear" not in json.dumps(result)
     assert "target input box did not clear" not in json.dumps(conversation)
-    assert operations == [("paste", "%77", "tell me the date", True)]
+    assert operations == [("paste", pane_target, "tell me the date", True)]
 
 
 def test_yoagent_send_to_codex_dim_suggestion_does_not_clear(monkeypatch):
+    pane_target = "yoagent-test-codex-placeholder-pane"
     pane = PaneInfo(
         session="target-agent",
         window="0",
         window_name="codex",
         pane="0",
-        pane_id="%77",
-        target="%77",
+        pane_id=pane_target,
+        target=pane_target,
         current_path="/repo/app",
         command="codex",
         active=True,
@@ -4236,10 +4305,10 @@ def test_yoagent_send_to_codex_dim_suggestion_does_not_clear(monkeypatch):
         selected_pane=pane,
         agents=[
             AgentInfo(
-                session="target-agent",
-                kind="codex",
-                pid=123,
-                pane_target="%77",
+                    session="target-agent",
+                    kind="codex",
+                    pid=123,
+                    pane_target=pane_target,
                 command="codex",
                 cwd="/repo/app",
                 status=None,
@@ -4296,7 +4365,7 @@ def test_yoagent_send_to_codex_dim_suggestion_does_not_clear(monkeypatch):
     assert len(watchers) == 1
     assert "target input box did not clear" not in json.dumps(result)
     assert "target input box did not clear" not in json.dumps(conversation)
-    assert operations == [("paste", "%77", "tell me the date", True)]
+    assert operations == [("paste", pane_target, "tell me the date", True)]
 
 
 def test_yoagent_composer_text_ignores_completed_prompt_history():

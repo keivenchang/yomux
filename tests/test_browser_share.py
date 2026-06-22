@@ -1070,12 +1070,26 @@ def test_http_share_browser_keeps_finder_tabs_editor_differ_and_tabber_in_sync(b
             "uiState": share_ui_state,
         }, HTTPStatus.OK),
         transcripts_payload=lambda force=False: transcript_payload,
-        activity_payload=lambda: ({
-            "activity": {
-                "6": {"session": "6", "last_output_ts": 200},
-                "6:1": {"session": "6", "window": 1, "last_output_ts": 200},
-            },
-        }, HTTPStatus.OK),
+            activity_payload=lambda **_kwargs: ({
+                "activity": {
+                    "6": {"session": "6", "last_output_ts": 200},
+                    "6:1": {"session": "6", "window": 1, "last_output_ts": 200},
+                },
+                "agent_windows": {
+                    "6": [{
+                        "kind": "codex",
+                        "state": "idle",
+                        "window": "1",
+                        "window_index": 1,
+                        "window_label": "1:codex",
+                        "pid": 0,
+                        "active": True,
+                        "path_entries": [{"path": root_path, "mtime": 200, "git": transcript_payload["sessions"]["6"]["project"]["git"]}],
+                        "paths": [root_path],
+                        "git": transcript_payload["sessions"]["6"]["project"]["git"],
+                    }],
+                },
+            }, HTTPStatus.OK),
         session_files_batch_payload=lambda sessions, hours, **kwargs: ({
             "sessions": {"6": session_files_payload | {"session": "6"}},
             "errors": {},
@@ -5264,4 +5278,3 @@ def test_share_geometry_digest_ignores_editor_scroll_height_jitter_in_browser(br
     assert metrics["contentDiff"] == "editors", metrics
     assert "scrollHeight" not in metrics["hostEditor"], metrics
     assert metrics["hostEditor"]["contentHash"] != metrics["localEditor"]["contentHash"], metrics
-

@@ -437,6 +437,31 @@ fixtures:
   fixture_id: ask_user_question_selected_option__claude-code-2.1.185_20260621
   id: claude-ask-user-question-selected-option-real
   provenance: real Claude Code 2.1.185 AskUserQuestion highlighted selector capture
+- case_name: parser_dependency_choice_question
+  expected:
+    action: null
+    agent: claude
+    approval_visible: false
+    ask: true
+    command: null
+    confidence_min: 0.9
+    option_labels:
+    - Local path dep (relative)
+    - Git dep, pinned rev
+    - Absolute path (as-is)
+    - Type something.
+    - Chat about this
+    prompt_kind: question
+    prompt_type: ''
+    question_text: How should dynamo depend on the frontend-crates parser crates (dynamo-parsers + dynamo-parsers-v2)?
+    screen_key: needs-input
+    selected_option: 1
+    yes_selected: true
+  family: claude-ask-user-question-selected-option
+  file: captures/parser_dependency_choice_question__claude-code-2.1.185_20260622.yaml
+  fixture_id: parser_dependency_choice_question__claude-code-2.1.185_20260622
+  id: claude-parser-dependency-choice-question-real
+  provenance: real Claude Code 2.1.185 parser dependency AskUserQuestion selected-option capture from tmux session 4:0.0
 - case_name: interrupted_what_should_claude_do_instead
   expected:
     action: null
