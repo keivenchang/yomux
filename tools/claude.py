@@ -246,7 +246,7 @@ class ClaudeTextClient(TextClientBase):
         if not text.strip():
             return
         self.start_metrics(text)
-        self.answer_output_at_line_start = True
+        self.reset_answer_output_state()
         self.prefixed_output_at_line_start = {label: True for label in prefixed_output_labels(CLAUDE_OUTPUT_TERMS)}
         self.blocks = {}
         self.tool_inputs_printed = set()
@@ -412,8 +412,7 @@ class ClaudeTextClient(TextClientBase):
                     if metrics is not None:
                         metrics.record_answer_text(text, now)
                     self.finish_prefixed_output()
-                    print(text, end="", flush=True)
-                    self.answer_output_at_line_start = text.endswith(("\n", "\r"))
+                    self.write_answer_stdout(text)
                 return
             if delta_type == "input_json_delta":
                 partial = str(delta.get("partial_json") or "")
@@ -484,9 +483,7 @@ class ClaudeTextClient(TextClientBase):
         model_usage = message.get("modelUsage")
         self.last_model_usage = model_usage if isinstance(model_usage, dict) else {}
         self.finish_prefixed_output()
-        if not self.answer_output_at_line_start:
-            print("", flush=True)
-            self.answer_output_at_line_start = True
+        self.finish_answer_output()
         if message.get("is_error"):
             error_text = self.last_error or str(message.get("subtype") or "error")
             self.print_aux_stderr(f"claude error: {error_text}")

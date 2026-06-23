@@ -16,6 +16,9 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 from text_client_common import (  # noqa: E402
+    ANSI_BOLD,
+    ANSI_ITALIC,
+    ANSI_RESET,
     CLAUDE_CONFIG_KEYS,
     CLAUDE_OUTPUT_TERMS,
     CLIENT_SHARED_CONFIG_KEYS,
@@ -27,11 +30,13 @@ from text_client_common import (  # noqa: E402
     PromptInputSession,
     PromptLineEditor,
     TOOL_OUTPUT_PREFIX,
+    TextClientBase,
     TurnMetrics,
     client_slash_commands,
     client_intent_markdown_rows,
     client_slash_help_rows,
     prefixed_output_labels,
+    render_terminal_markdown_line,
 )
 import claude  # noqa: E402
 import codex  # noqa: E402
@@ -104,6 +109,35 @@ def test_output_terminology_uses_cross_product_names():
     assert CLAUDE_OUTPUT_TERMS.title_label == "Thinking (aka Reasoning)"
     assert CLAUDE_OUTPUT_TERMS.lower_label == "thinking (aka reasoning)"
     assert CLAUDE_OUTPUT_TERMS.prefix == "thinking"
+
+
+def test_terminal_markdown_line_renders_common_answer_spans():
+    line = "- **Left (east)**: Texas\n- *Right (west)*: `Arizona`\n"
+
+    rendered = render_terminal_markdown_line(line, enabled=True, code_color="\033[35m")
+
+    assert f"{ANSI_BOLD}Left (east){ANSI_RESET}" in rendered
+    assert f"{ANSI_ITALIC}Right (west){ANSI_RESET}" in rendered
+    assert "\033[35mArizona" in rendered
+    assert rendered.endswith(f"{ANSI_RESET}\n")
+    assert render_terminal_markdown_line(line, enabled=False, code_color="\033[35m") == line
+
+
+def test_answer_markdown_renderer_buffers_streaming_lines(capsys):
+    client = TextClientBase(str(ROOT), prefixed_labels=())
+    client.use_answer_markdown = True
+    client.tool_color = "\033[35m"
+
+    client.write_answer_stdout("- **Left")
+    assert capsys.readouterr().out == ""
+
+    client.write_answer_stdout(" (east)**: Texas\nBack: `north`")
+    output = capsys.readouterr().out
+    assert output == f"- {ANSI_BOLD}Left (east){ANSI_RESET}: Texas\n"
+
+    client.finish_answer_output()
+    output = capsys.readouterr().out
+    assert output == f"Back: \033[35mnorth{ANSI_RESET}\n"
 
 
 def test_permissive_defaults_are_single_source():

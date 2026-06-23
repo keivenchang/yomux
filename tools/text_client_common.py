@@ -26,6 +26,8 @@ ANSI_PROMPT_DARK = "\033[1;36m"
 ANSI_PROMPT_LIGHT = "\033[38;5;25m"
 ANSI_TOOL_DARK = "\033[38;5;141m"
 ANSI_TOOL_LIGHT = "\033[38;5;99m"
+ANSI_BOLD = "\033[1m"
+ANSI_ITALIC = "\033[3m"
 ANSI_RESET = "\033[0m"
 OSC11_QUERY_TIMEOUT_SECONDS = 0.12
 READLINE_START_IGNORE = "\001"
@@ -550,6 +552,43 @@ def color_prompt(text: str, enabled: bool, color: str = ANSI_PROMPT_DARK) -> str
     return f"{READLINE_START_IGNORE}{color}{READLINE_END_IGNORE}{text}{READLINE_START_IGNORE}{ANSI_RESET}{READLINE_END_IGNORE}"
 
 
+def render_terminal_markdown_line(text: str, *, enabled: bool, code_color: str = ANSI_TOOL_DARK) -> str:
+    if not enabled or not text:
+        return text
+    rendered: list[str] = []
+    index = 0
+    in_code = False
+    while index < len(text):
+        if text.startswith("`", index):
+            rendered.append(ANSI_RESET if in_code else code_color)
+            in_code = not in_code
+            index += 1
+            continue
+        if not in_code and (text.startswith("**", index) or text.startswith("__", index)):
+            marker = text[index : index + 2]
+            close = text.find(marker, index + 2)
+            if close > index + 2:
+                rendered.append(ANSI_BOLD)
+                rendered.append(text[index + 2 : close])
+                rendered.append(ANSI_RESET)
+                index = close + 2
+                continue
+        if not in_code and text[index] in {"*", "_"}:
+            marker = text[index]
+            close = text.find(marker, index + 1)
+            if close > index + 1:
+                rendered.append(ANSI_ITALIC)
+                rendered.append(text[index + 1 : close])
+                rendered.append(ANSI_RESET)
+                index = close + 1
+                continue
+        rendered.append(text[index])
+        index += 1
+    if in_code:
+        rendered.append(ANSI_RESET)
+    return "".join(rendered)
+
+
 def shorten_cwd(cwd: str) -> str:
     resolved = str(Path(cwd).expanduser().resolve())
     home = str(Path.home())
@@ -764,6 +803,7 @@ CLIENT_INTENT_ROWS = (
     ClientIntentRow("Raw reasoning/thinking", f"`{CODEX_CONFIG_KEYS.hidden_work_raw}=true`", f"`{CLAUDE_CONFIG_KEYS.hidden_work_visibility}=true`", "Similar", "codex.py separates summary and raw reasoning; claude.py has one thinking output toggle."),
     ClientIntentRow("Output prefix", CODEX_OUTPUT_TERMS.prefix_code, CLAUDE_OUTPUT_TERMS.prefix_code, "Yes", "Prefixes intentionally match each upstream product's native term."),
     ClientIntentRow("Tool output", f"{markdown_code_cell(TOOL_OUTPUT_PREFIX + '| ...')}, `{CLIENT_SHARED_CONFIG_KEYS.tool_output}`", f"{markdown_code_cell(TOOL_OUTPUT_PREFIX + '| ...')}, `{CLIENT_SHARED_CONFIG_KEYS.tool_output}`", "Yes", "Both clients print tool events in gray through the shared base class."),
+    ClientIntentRow("Assistant Markdown", "TTY answer text renders common Markdown spans such as `**bold**`, `*italic*`, and inline code; redirected output stays plain", "Same", "Yes", "Rendering applies only to assistant-visible answer text. Thinking/reasoning and tool streams keep their prefixed diagnostic formatting."),
     ClientIntentRow("Model selector", f"`-m`, `/model`, `/config {CLIENT_SHARED_CONFIG_KEYS.model}=...`", f"`-m`, `/model`, `/config {CLIENT_SHARED_CONFIG_KEYS.model}=...`", "Yes", "Values are passed to different upstream model systems."),
     ClientIntentRow("Resume id", f"Codex thread id, `resume <thread-id>`, `{CODEX_CONFIG_KEYS.session}`", f"Claude session id, `--resume <session-id>`, `{CLAUDE_CONFIG_KEYS.session}`", "Same purpose", "The id formats and transcript locations differ."),
     ClientIntentRow("Permissive mode", f"`{CLIENT_PERMISSION_DEFAULTS.codex_bypass_approvals_flag}`, `sandbox={CLIENT_PERMISSION_DEFAULTS.codex_sandbox}`, `approval_policy={CLIENT_PERMISSION_DEFAULTS.codex_approval_policy}`; optional `{CLIENT_PERMISSION_DEFAULTS.codex_bypass_hook_trust_flag}` / `bypass_hook_trust=true`", f"`{CLIENT_PERMISSION_DEFAULTS.claude_skip_permissions_flag}`, `{CLAUDE_CONFIG_KEYS.permission}={CLIENT_PERMISSION_DEFAULTS.claude_permission_mode}`", "Same intent", "Codex keeps hook-trust bypass explicit because upstream Codex only warns when that flag/config is set; Claude has one broad permission bypass."),
@@ -1143,7 +1183,9 @@ class TextClientBase:
         self.use_aux_color = sys.stdout.isatty()
         self.use_aux_stderr_color = sys.stderr.isatty()
         self.use_prompt_color = sys.stdout.isatty()
+        self.use_answer_markdown = sys.stdout.isatty()
         self.answer_output_at_line_start = True
+        self.answer_markdown_buffer = ""
         self.prefixed_output_at_line_start = {label: True for label in prefixed_labels}
         self.current_metrics: TurnMetrics | None = None
         self.last_metrics: TurnMetrics | None = None
@@ -1167,7 +1209,28 @@ class TextClientBase:
     def print_aux_stderr(self, text: str) -> None:
         print(color_text(text, self.use_aux_stderr_color, self.aux_color), file=sys.stderr)
 
+    def reset_answer_output_state(self) -> None:
+        self.answer_output_at_line_start = True
+        self.answer_markdown_buffer = ""
+
+    def write_answer_stdout(self, text: str) -> None:
+        if not text:
+            return
+        if not self.use_answer_markdown:
+            print(text, end="", flush=True)
+            self.answer_output_at_line_start = text.endswith(("\n", "\r"))
+            return
+        self.answer_markdown_buffer += text
+        while "\n" in self.answer_markdown_buffer:
+            line, self.answer_markdown_buffer = self.answer_markdown_buffer.split("\n", 1)
+            print(render_terminal_markdown_line(line + "\n", enabled=True, code_color=self.tool_color), end="", flush=True)
+            self.answer_output_at_line_start = True
+
     def finish_answer_output(self) -> None:
+        if self.answer_markdown_buffer:
+            print(render_terminal_markdown_line(self.answer_markdown_buffer, enabled=self.use_answer_markdown, code_color=self.tool_color), end="", flush=True)
+            self.answer_output_at_line_start = self.answer_markdown_buffer.endswith(("\n", "\r"))
+            self.answer_markdown_buffer = ""
         if not self.answer_output_at_line_start:
             print("", flush=True)
             self.answer_output_at_line_start = True

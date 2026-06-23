@@ -1381,7 +1381,7 @@ class CodexTextClient(TextClientBase):
             self.turn_error_message = ""
             self.turn_error_printed = False
             self.prefixed_output_at_line_start = {label: True for label in prefixed_output_labels(CODEX_OUTPUT_TERMS)}
-            self.answer_output_at_line_start = True
+            self.reset_answer_output_state()
             self.tool_output_item_ids = set()
             if self.current_metrics is not None:
                 self.current_metrics.turn_start_request_at = time.monotonic()
@@ -1494,8 +1494,7 @@ class CodexTextClient(TextClientBase):
                     metrics.record_answer_text(delta, now)
                 self.finish_prefixed_output()
                 self.answer_buffer.append(delta)
-                print(delta, end="", flush=True)
-                self.answer_output_at_line_start = delta.endswith(("\n", "\r"))
+                self.write_answer_stdout(delta)
             return False
         if method == "item/reasoning/summaryTextDelta":
             delta = str(params.get("delta") or "")
@@ -1604,11 +1603,9 @@ class CodexTextClient(TextClientBase):
     def finish_visible_answer(self) -> None:
         self.finish_prefixed_output()
         if self.final_item_text and not self.answer_buffer:
-            print(self.final_item_text, end="", flush=True)
-            self.answer_output_at_line_start = self.final_item_text.endswith(("\n", "\r"))
-        if (self.answer_buffer or self.final_item_text) and not self.answer_output_at_line_start:
-            print("", flush=True)
-            self.answer_output_at_line_start = True
+            self.write_answer_stdout(self.final_item_text)
+        if self.answer_buffer or self.final_item_text:
+            self.finish_answer_output()
         if self.reasoning_summary_buffer and not self.args.show_reasoning_summary:
             self.print_aux_stderr(f"[{CODEX_OUTPUT_TERMS.lower_label} summary received; rerun with -c {CODEX_CONFIG_KEYS.hidden_work_summary}=true to display it]")
         if self.raw_reasoning_buffer and not self.args.show_raw_reasoning:
