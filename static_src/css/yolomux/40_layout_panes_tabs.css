@@ -550,7 +550,7 @@ body.theme-light .drop-slot.drag-over {
   min-height: 0;
   height: 100%;
   /* SHARED PANE-CHROME THEMING (one source of truth — no per-button/per-bar one-offs):
-     • --pane-bar-bg  : every chrome BAR (tab strip, info/detail row, editor toolbar, find panel) reads
+     • --pane-bar-bg  : every chrome BAR (tab strip, Info Bar, editor toolbar, find panel) reads
        this. Default = neutral gray (--panel2) for an UNFOCUSED pane; the focused override below sets it
        to the bright tab-strip green. So all bars track focus together.
      • --pane-ctl-*   : every chrome BUTTON reads these. Rest state = white (light) / near-black (dark);
@@ -823,6 +823,10 @@ body.theme-light .drop-slot.drag-over {
   box-shadow: inset 0 -2px 0 rgba(245, 197, 66, 0.95);
 }
 .panel-detail-row {
+  --pane-info-bar-scroll-distance: 0px;
+  --pane-info-bar-scroll-offset: 0px;
+  --pane-info-bar-scroll-duration: 23s;
+  --pane-info-bar-scroll-timing: linear(0 0%, 0 13.04%, 1 91.30%, 1 100%);
   position: relative;
   min-height: max(18px, calc(var(--ui-font-size) + 5px));
   display: flex;
@@ -875,6 +879,7 @@ body.theme-light .drop-slot.drag-over {
 .panel.details-collapsed {
   grid-template-rows: auto minmax(0, 1fr);
 }
+.panel.details-collapsed .pane-info-bar,
 .panel.details-collapsed .panel-detail-row {
   display: none;
 }
@@ -911,7 +916,7 @@ body.theme-light .drop-slot.drag-over {
    gutter away from the neighbor; moved it back to the seam border, keeping the opacity.) */
 .panel.active-pane,
 .panel.typing-ready-pane {
-  /* focused pane: all chrome bars (tab container + info/detail row) switch from neutral gray to the
+  /* focused pane: all chrome bars (tab container + Info Bar) switch from neutral gray to the
      bright tab-strip green TOGETHER via the one shared --pane-bar-bg → --pane-tab-strip-bg token. No
      separate per-bar override, so they always match; change --pane-tab-strip-bg to recolor both. */
   --pane-bar-bg: var(--pane-tab-strip-bg);
@@ -956,6 +961,12 @@ body.theme-light .drop-slot.drag-over {
   color: var(--pane-tab-text);
   box-shadow: none;
 }
+.panel.active-pane .pane-info-bar .meta,
+.panel.active-pane .pane-info-bar .meta-branch,
+.panel.active-pane .pane-info-bar .meta-path,
+.panel.active-pane .pane-info-bar .meta-desc,
+.panel.active-pane .pane-info-bar .session-button-dir,
+.panel.active-pane .pane-info-bar .session-button-detail,
 .panel.active-pane .panel-detail-row .meta,
 .panel.active-pane .panel-detail-row .meta-branch,
 .panel.active-pane .panel-detail-row .meta-path,
@@ -986,6 +997,7 @@ body.theme-light .drop-slot.drag-over {
   display: none;
 }
 .panel-popover-zone {
+  flex: 1 1 auto;
   min-width: 0;
   position: relative;
   display: flex;
@@ -1025,6 +1037,51 @@ body.theme-light .drop-slot.drag-over {
   margin-top: 0;
   color: var(--muted);
   font: var(--ui-font-size-sm)/1.3 var(--mono-font);
+}
+.pane-info-bar-meta {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.pane-info-bar-controls,
+.pane-info-bar-fixed-sep {
+  flex: 0 0 auto;
+}
+.pane-info-bar-scroll-viewport {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+.pane-info-bar-scroll-text {
+  display: inline-block;
+  min-width: max-content;
+  padding-inline-end: 14px;
+  white-space: nowrap;
+  transform: translateX(0);
+  will-change: transform;
+}
+.pane-info-bar-meta.pane-info-bar-meta-overflow .pane-info-bar-scroll-text {
+  animation-name: pane-info-bar-scroll;
+  animation-duration: var(--pane-info-bar-scroll-duration);
+  animation-delay: 0s;
+  animation-timing-function: var(--pane-info-bar-scroll-timing);
+  animation-iteration-count: infinite;
+  animation-direction: normal;
+}
+@keyframes pane-info-bar-scroll {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(var(--pane-info-bar-scroll-offset));
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pane-info-bar-meta.pane-info-bar-meta-overflow .pane-info-bar-scroll-text {
+    animation: none;
+  }
 }
 .meta a,
 .summary-context a {
@@ -1248,7 +1305,7 @@ body.theme-light .drop-slot.drag-over {
   min-width: 0;
 }
 /* image 003/004: an inactive pane's INACTIVE TABS match the gray bar (--pane-bar-bg, which is --panel2
-   when the pane is unfocused). The bars themselves (strip, detail row, editor toolbar, find) already read
+   when the pane is unfocused). The bars themselves (strip, Info Bar, editor toolbar, find) already read
    --pane-bar-bg, so only the tabs need this; the active tab stays green. */
 .panel:not(.active-pane):not(.typing-ready-pane) .pane-tab:not(.active) {
   background: var(--pane-bar-bg);
@@ -1479,6 +1536,7 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
   max-width: none;
 }
 .pane-tab > .session-popover,
+.file-tree-row.tabber-row .tabber-session-tab > .session-popover,
 .pane-tab-detached-popover {
   position: fixed;
   top: var(--pane-tab-popover-top, 72px);
@@ -1499,10 +1557,12 @@ body.share-replay-shell .share-mirror-stage .app-overlay-root,
 body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   position: absolute;
 }
-.pane-tab.popover-open {
+.pane-tab.popover-open,
+.file-tree-row.tabber-row .tabber-session-tab.popover-open {
   z-index: var(--z-pane-modal);
 }
 .pane-tab.popover-open > .session-popover,
+.file-tree-row.tabber-row .tabber-session-tab.popover-open > .session-popover,
 .pane-tab-detached-popover.popover-open {
   visibility: visible;
   opacity: 1;
@@ -1511,6 +1571,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   transition-delay: 0s;
 }
 .pane-tab > .session-popover::before,
+.file-tree-row.tabber-row .tabber-session-tab > .session-popover::before,
 .pane-tab-detached-popover::before {
   content: "";
   position: absolute;
@@ -1522,16 +1583,19 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   background: transparent;
 }
 .pane-tab > .session-popover.file-popover,
+.file-tree-row.tabber-row .tabber-session-tab > .session-popover.file-popover,
 .pane-tab-detached-popover.file-popover {
   width: min(54ch, var(--popover-max-inline-size));
   max-height: min(42vh, var(--pane-tab-popover-max-block-size));
   pointer-events: none;
 }
 .pane-tab.popover-open > .session-popover.file-popover,
+.file-tree-row.tabber-row .tabber-session-tab.popover-open > .session-popover.file-popover,
 .pane-tab-detached-popover.popover-open.file-popover {
   pointer-events: auto;
 }
 .pane-tab > .session-popover.file-popover .popover-copy-button,
+.file-tree-row.tabber-row .tabber-session-tab > .session-popover.file-popover .popover-copy-button,
 .pane-tab-detached-popover.file-popover .popover-copy-button {
   pointer-events: auto;
 }
@@ -1603,11 +1667,14 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   min-width: 0;
   overflow: hidden;
 }
+.pane-info-bar .tmux-window-bar,
 .panel-detail-row .tmux-window-bar {
-  flex: 0 1 auto;
-  max-width: min(44ch, 46%);
+  flex: 0 0 auto;
+  min-width: max-content;
+  max-width: none;
   margin-inline-start: auto;
   justify-content: flex-end;
+  overflow: visible;
 }
 .tmux-window-button {
   flex: 0 1 auto;
@@ -1618,6 +1685,12 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   font-family: var(--ui-font);
   font-stretch: normal;
   font-weight: 500;
+}
+.pane-info-bar .tmux-window-button,
+.panel-detail-row .tmux-window-button {
+  flex: 0 0 auto;
+  max-width: none;
+  overflow: visible;
 }
 .tmux-window-button .tmux-window-number-label {
   display: block;
@@ -1639,7 +1712,33 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.agent-window-activity-icon {
+.pane-info-bar .tmux-window-button .tmux-window-name-label,
+.panel-detail-row .tmux-window-button .tmux-window-name-label,
+.pane-info-bar .tmux-window-button .tmux-window-name-text,
+.panel-detail-row .tmux-window-button .tmux-window-name-text {
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
+}
+.tmux-window-button .agent-window-activity {
+  --agent-window-activity-inline-size: 14px;
+  --agent-window-activity-block-size: 14px;
+  margin-inline-start: 0;
+  margin-inline-end: 1px;
+}
+.tmux-window-button .agent-window-activity .agent-icon {
+  width: 14px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0;
+  vertical-align: middle;
+}
+.tmux-window-button .agent-window-activity .agent-icon svg {
+  flex-basis: 14px;
+  width: 14px;
+  height: 14px;
+}
+.agent-window-status-dot {
   margin-inline-start: 1px;
 }
 .tmux-window-bar[data-tmux-window-label-mode="names"] .tmux-window-number-label,
@@ -1663,10 +1762,10 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   border-color: var(--active-control-border);
   font-weight: 600;
 }
-.tmux-window-bar .tmux-window-button.active .agent-window-activity-icon {
+.tmux-window-bar .tmux-window-button.active .agent-window-status-dot {
   text-shadow: 0 0 0 var(--active-control-text), 0 0 4px var(--active-control-text);
 }
-.tmux-window-bar .tmux-window-button.active .agent-window-activity-icon.status-indicator--attention {
+.tmux-window-bar .tmux-window-button.active .agent-window-status-dot.status-indicator--attention {
   color: var(--bad);
   text-shadow: 0 0 0 var(--bad), 0 0 6px rgb(var(--attention-ring-rgb, 255 51 71) / 0.85);
 }
@@ -1850,7 +1949,7 @@ body.theme-light .panel-detail-row {
   /* bg comes from the shared --pane-bar-bg (bright when focused, gray when not) — no light override. */
   color: var(--text);
 }
-/* the detail-row header LABEL (.session-button-name, e.g. "YO!info") is the one header
+/* the Info Bar header LABEL (.session-button-name, e.g. "YO!info") is the one header
    element NOT covered by the active-pane color rule (which lists .meta*/.session-button-dir/detail),
    so in light mode force it dark on the light row. (meta/dir/detail already resolve dark via the
    --pane-tab-panel-head-text light override.) */
@@ -1864,7 +1963,7 @@ body.theme-light .panel-detail-close:focus-visible {
   background: rgb(var(--overlay-slate-rgb) / 0.08);
 }
 /* light-mode contrast fixes for genuine light-text-on-neutral / near-white-affordance
-   cases (links on the light detail row, the near-white tab-hover border, white hover-glyph text on
+   cases (links on the light Info Bar, the near-white tab-hover border, white hover-glyph text on
    the light control hover bg). Saturated-chip light text (red/dark-blue badges) is left as-is. */
 body.theme-light .meta a,
 body.theme-light .summary-context a {

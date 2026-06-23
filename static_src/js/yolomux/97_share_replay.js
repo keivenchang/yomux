@@ -607,7 +607,7 @@ function shareReplayApplyTerminalPlaceholders(terminals = []) {
 function bindShareReplayPaneTabPopovers(root = appRootElement()) {
   if (!shareReplayShellActive || shareReadOnlyReplayModeEnabled() || !root?.querySelectorAll || typeof createHoverPopover !== 'function') return 0;
   let bound = 0;
-  const tabs = root.querySelectorAll('.pane-tab, .dockview-pane-tab, .panel-popover-zone');
+  const tabs = root.querySelectorAll('.pane-tab, .dockview-pane-tab, .tabber-session-tab, .panel-popover-zone');
   for (const tab of tabs) {
     if (!tab || tab.dataset?.shareReplayPopoverBound === 'true') continue;
     const popover = tab.querySelector?.(':scope > .session-popover');
@@ -619,7 +619,7 @@ function bindShareReplayPaneTabPopovers(root = appRootElement()) {
     createHoverPopover({
       anchor: tab,
       popover,
-      showDelay: () => (document.querySelector('.pane-tab.popover-open, .dockview-pane-tab.popover-open') ? tabPopoverFollowDelayMs : tabPopoverShowDelayMs),
+      showDelay: () => (document.querySelector('.pane-tab.popover-open, .dockview-pane-tab.popover-open, .tabber-session-tab.popover-open') ? tabPopoverFollowDelayMs : tabPopoverShowDelayMs),
       hideDelay: () => popoverHideDelayMs,
       canOpen: () => true,
       onQueue: position,
@@ -1538,6 +1538,7 @@ function sharePopupLayerElements() {
     '.pane-tab-popover',
     '.pane-tab.popover-open > .session-popover',
     '.dockview-pane-tab.popover-open > .session-popover',
+    '.tabber-session-tab.popover-open > .session-popover',
     '.panel-popover-zone.popover-open > .session-popover',
     '.pane-tab-detached-popover.popover-open',
     '.diff-ref-popover',

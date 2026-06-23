@@ -242,10 +242,10 @@ function createDebugPanel() {
         ${virtualPanelControlsHtml(debugPaneItemId)}
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
-      <div class="panel-detail-row">
-        <div class="panel-copy">
+      <div class="pane-info-bar panel-detail-row">
+        <div class="pane-info-bar-copy panel-copy">
           <div id="panel-tab-${debugPaneItemId}" class="panel-session-label"><span class="session-button-dir">${esc(t('tab.debug'))}</span></div>
-          <div id="meta-${debugPaneItemId}" class="meta">${esc(debugMetaText())}</div>
+          <div id="meta-${debugPaneItemId}" class="pane-info-bar-meta meta">${esc(debugMetaText())}</div>
         </div>
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(debugPaneItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
       </div>

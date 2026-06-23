@@ -612,6 +612,8 @@
   "pref.performance.tab_popover_show_delay_ms.label": "Tab detail hover delay",
   "pref.performance.tabber_activity_refresh_ms.help": "ความถี่ที่เซิร์ฟเวอร์รีเฟรชกิจกรรม Tabber ที่แคชไว้; ไคลเอนต์อ่านสแนปช็อตล่าสุด",
   "pref.performance.tabber_activity_refresh_ms.label": "แคชเซิร์ฟเวอร์: กิจกรรม Tabber",
+  "pref.performance.agent_window_cooldown_seconds.help": "ระยะเวลาที่หน้าต่าง Claude/Codex ที่เพิ่งหยุดทำงานยังคงแสดงจุดสีเหลืองไว้ 0 เพื่อปิดจุดนี้",
+  "pref.performance.agent_window_cooldown_seconds.label": "ระยะเวลาจุดพักของเอเจนต์",
   "pref.readonly": "readonly access",
   "pref.reset.all": "Reset all defaults",
   "pref.reset.aria": "Global reset warning",

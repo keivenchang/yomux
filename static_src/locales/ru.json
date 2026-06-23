@@ -612,6 +612,8 @@
   "pref.performance.tab_popover_show_delay_ms.label": "Задержка отображения деталей вкладки",
   "pref.performance.tabber_activity_refresh_ms.help": "Как часто сервер обновляет кэш активности Tabber; клиенты читают последний снимок.",
   "pref.performance.tabber_activity_refresh_ms.label": "Кэш сервера: активность Tabber",
+  "pref.performance.agent_window_cooldown_seconds.help": "Как долго окно Claude/Codex, которое только что перестало работать, сохраняет желтую точку ожидания. 0 отключает эту точку.",
+  "pref.performance.agent_window_cooldown_seconds.label": "Длительность желтой точки агента",
   "pref.readonly": "доступ только для чтения",
   "pref.reset.all": "Сбросить все значения по умолчанию",
   "pref.reset.aria": "Предупреждение о ГЛОБАЛЬНОМ сбросе",

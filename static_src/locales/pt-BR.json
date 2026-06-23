@@ -612,6 +612,8 @@
   "pref.performance.tab_popover_show_delay_ms.label": "Atraso de hover para detalhes de aba",
   "pref.performance.tabber_activity_refresh_ms.help": "Com que frequência o servidor atualiza a atividade do Tabber em cache; os clientes leem o snapshot mais recente.",
   "pref.performance.tabber_activity_refresh_ms.label": "Cache do servidor: atividade do Tabber",
+  "pref.performance.agent_window_cooldown_seconds.help": "Por quanto tempo uma janela Claude/Codex que acabou de parar de trabalhar mantém o ponto amarelo de resfriamento. 0 desativa o ponto.",
+  "pref.performance.agent_window_cooldown_seconds.label": "Duração do ponto de resfriamento do agente",
   "pref.readonly": "acesso somente leitura",
   "pref.reset.all": "Redefinir todos os padrões",
   "pref.reset.aria": "Aviso de redefinição GLOBAL",

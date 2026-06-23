@@ -612,6 +612,8 @@
   "pref.performance.tab_popover_show_delay_ms.label": "Hover-Verzögerung der Tabdetails",
   "pref.performance.tabber_activity_refresh_ms.help": "Wie oft der Server die zwischengespeicherte Tabber-Aktivität aktualisiert; Clients lesen den neuesten Snapshot.",
   "pref.performance.tabber_activity_refresh_ms.label": "Servercache: Tabber-Aktivität",
+  "pref.performance.agent_window_cooldown_seconds.help": "Wie lange ein Claude/Codex-Fenster, das gerade aufgehört hat zu arbeiten, den gelben Abklingpunkt behält. 0 deaktiviert den Abklingpunkt.",
+  "pref.performance.agent_window_cooldown_seconds.label": "Dauer des Agent-Abklingpunkts",
   "pref.readonly": "Schreibgeschützter Zugriff",
   "pref.reset.all": "Alle Standardwerte zurücksetzen",
   "pref.reset.aria": "Warnung zum GLOBALEN Zurücksetzen",

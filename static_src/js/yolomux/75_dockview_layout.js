@@ -763,7 +763,7 @@ function dockviewSyncHeaderBackgroundDragSources() {
   if (!dockviewLayoutActive()) return;
   document.querySelectorAll('.dv-groupview').forEach(group => {
     const header = group.querySelector('.dv-tabs-and-actions-container');
-    const detail = group.querySelector('.dockview-panel-content > .panel > .panel-detail-row');
+    const infoBar = group.querySelector('.dockview-panel-content > .panel > .pane-info-bar, .dockview-panel-content > .panel > .panel-detail-row');
     const editorToolbar = group.querySelector('.dockview-panel-content > .file-editor-panel > .file-editor-toolbar');
     const slot = dockviewSlotForGroupElement(group);
     const draggable = Boolean(slot && !slotIsFileExplorerPane(slot) && activeItemForSide(slot));
@@ -782,7 +782,7 @@ function dockviewSyncHeaderBackgroundDragSources() {
       element.addEventListener('mousedown', begin);
     };
     syncDragSource(header);
-    syncDragSource(detail);
+    syncDragSource(infoBar);
     syncDragSource(editorToolbar);
   });
 }

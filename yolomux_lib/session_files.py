@@ -637,6 +637,19 @@ def session_candidate_repo_roots(info: SessionInfo) -> list[str]:
     return roots
 
 
+def session_live_pane_repo_roots(info: SessionInfo) -> list[str]:
+    roots: list[str] = []
+    candidates: list[str] = []
+    if info.selected_pane is not None and info.selected_pane.current_path:
+        candidates.append(info.selected_pane.current_path)
+    candidates.extend(pane.current_path for pane in info.panes if pane.current_path)
+    for value in candidates:
+        repo = git_root_for_path(Path(value).expanduser())
+        if repo and repo not in roots:
+            roots.append(repo)
+    return roots
+
+
 def session_file_entry(
     session: str,
     agents: list[str],
@@ -884,8 +897,10 @@ def session_files_payload_for_info(
             repos.setdefault(repo_text, set()).add(path_text)
         else:
             outside_repo_paths.add(path_text)
-    for repo_text in session_candidate_repo_roots(info):
+    candidate_repo_roots = set(session_candidate_repo_roots(info))
+    for repo_text in candidate_repo_roots:
         repos.setdefault(repo_text, set())
+    live_pane_repo_roots = set(session_live_pane_repo_roots(info))
 
     files: list[dict[str, Any]] = []
     repo_payloads: list[dict[str, Any]] = []
@@ -965,7 +980,7 @@ def session_files_payload_for_info(
         repo_entries.sort(key=lambda item: (-float(item.get("mtime") or 0), item["path"]))
         files.extend(repo_entries)
         rendered_entries = differ_visible_entries(repo_entries)
-        if not rendered_entries:
+        if not rendered_entries and repo_text not in live_pane_repo_roots and not repo_refs_active:
             continue
         refs_by_repo[str(repo)] = git_recent_refs(repo)
         repo_payload = {

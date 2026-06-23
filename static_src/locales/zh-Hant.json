@@ -612,6 +612,8 @@
   "pref.performance.tab_popover_show_delay_ms.label": "分頁詳情停留延遲",
   "pref.performance.tabber_activity_refresh_ms.help": "伺服器重新整理快取 Tabber 活動的頻率；用戶端讀取最新快照。",
   "pref.performance.tabber_activity_refresh_ms.label": "伺服器快取：Tabber 活動",
+  "pref.performance.agent_window_cooldown_seconds.help": "Claude/Codex 視窗剛停止工作後保留黃色冷卻點的時間。0 表示停用冷卻點。",
+  "pref.performance.agent_window_cooldown_seconds.label": "代理冷卻點持續時間",
   "pref.readonly": "唯讀存取",
   "pref.reset.all": "重設所有預設值",
   "pref.reset.aria": "全域重設警告",

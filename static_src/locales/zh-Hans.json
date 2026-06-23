@@ -612,6 +612,8 @@
   "pref.performance.tab_popover_show_delay_ms.label": "标签页详情悬停延迟",
   "pref.performance.tabber_activity_refresh_ms.help": "服务器刷新缓存的 Tabber 活动频率；客户端读取最新快照。",
   "pref.performance.tabber_activity_refresh_ms.label": "服务器缓存：Tabber 活动",
+  "pref.performance.agent_window_cooldown_seconds.help": "Claude/Codex 窗口刚停止工作后保留黄色冷却点的时长。0 表示禁用冷却点。",
+  "pref.performance.agent_window_cooldown_seconds.label": "代理冷却点持续时间",
   "pref.readonly": "只读访问",
   "pref.reset.all": "重置所有默认值",
   "pref.reset.aria": "全局重置警告",

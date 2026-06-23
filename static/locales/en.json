@@ -586,6 +586,8 @@
   "pref.path.copySettings": "Copy settings path",
   "pref.path.rules": "YOLO rules",
   "pref.path.settings": "settings",
+  "pref.performance.agent_window_cooldown_seconds.help": "How long a Claude/Codex window that just stopped working keeps the yellow cooldown dot. 0 disables the cooldown dot.",
+  "pref.performance.agent_window_cooldown_seconds.label": "Agent cooldown dot duration",
   "pref.performance.auto_approve_interval_seconds.help": "How often newly enabled YOLO workers inspect visible tmux prompts.",
   "pref.performance.auto_approve_interval_seconds.label": "YOLO worker poll interval",
   "pref.performance.event_log_refresh_ms.help": "How often the browser refreshes open YOLO/event-log panes.",

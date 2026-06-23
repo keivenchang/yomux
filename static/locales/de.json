@@ -586,6 +586,8 @@
   "pref.path.copySettings": "Einstellungspfad kopieren",
   "pref.path.rules": "YOLO-Regeln",
   "pref.path.settings": "Einstellungen",
+  "pref.performance.agent_window_cooldown_seconds.help": "Wie lange ein Claude/Codex-Fenster, das gerade aufgehört hat zu arbeiten, den gelben Abklingpunkt behält. 0 deaktiviert den Abklingpunkt.",
+  "pref.performance.agent_window_cooldown_seconds.label": "Dauer des Agent-Abklingpunkts",
   "pref.performance.auto_approve_interval_seconds.help": "Wie oft neu aktivierte YOLO-Worker sichtbare tmux-Aufforderungen prüfen.",
   "pref.performance.auto_approve_interval_seconds.label": "Polling-Intervall des YOLO-Workers",
   "pref.performance.event_log_refresh_ms.help": "How often the browser refreshes open YOLO/event-log panes.",

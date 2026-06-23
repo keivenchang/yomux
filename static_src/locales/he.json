@@ -612,6 +612,8 @@
   "pref.performance.tab_popover_show_delay_ms.label": "השהיית ריחוף פרטי לשונית",
   "pref.performance.tabber_activity_refresh_ms.help": "באיזו תדירות השרת מרענן את פעילות Tabber שבמטמון; הלקוחות קוראים את תמונת המצב האחרונה.",
   "pref.performance.tabber_activity_refresh_ms.label": "מטמון שרת: פעילות Tabber",
+  "pref.performance.agent_window_cooldown_seconds.help": "כמה זמן חלון Claude/Codex שזה עתה הפסיק לעבוד משאיר את הנקודה הצהובה. 0 משבית את נקודת ההשהיה.",
+  "pref.performance.agent_window_cooldown_seconds.label": "משך נקודת ההשהיה של הסוכן",
   "pref.readonly": "גישת קריאה בלבד",
   "pref.reset.all": "אפס את כל ברירות המחדל",
   "pref.reset.aria": "אזהרת איפוס גלובלי",

@@ -586,6 +586,8 @@
   "pref.path.copySettings": "Copy settings path",
   "pref.path.rules": "YOLO rules",
   "pref.path.settings": "settings",
+  "pref.performance.agent_window_cooldown_seconds.help": "ระยะเวลาที่หน้าต่าง Claude/Codex ที่เพิ่งหยุดทำงานยังคงแสดงจุดสีเหลืองไว้ 0 เพื่อปิดจุดนี้",
+  "pref.performance.agent_window_cooldown_seconds.label": "ระยะเวลาจุดพักของเอเจนต์",
   "pref.performance.auto_approve_interval_seconds.help": "How often newly enabled YOLO workers inspect visible tmux prompts.",
   "pref.performance.auto_approve_interval_seconds.label": "YOLO worker poll interval",
   "pref.performance.event_log_refresh_ms.help": "How often the browser refreshes open YOLO/event-log panes.",

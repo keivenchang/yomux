@@ -71,6 +71,54 @@ function updateSessionButtonStates() {
   // and menu rows, which are rebuilt by their normal render paths.
   // Keep the top-bar cross-session activity line live as states change (poll-driven).
   updateTopbarActivityStatus();
+  refreshPaneTabSessionPopovers();
+}
+
+function sessionPopoverNodeFromHtml(html) {
+  const template = document.createElement('template');
+  if (template?.content !== undefined) {
+    template.innerHTML = String(html || '');
+    return template.content.firstElementChild;
+  }
+  const text = String(html || '');
+  const match = text.match(/^<div class="session-popover" role="tooltip">([\s\S]*)<\/div>\s*$/);
+  return {
+    className: 'session-popover',
+    innerHTML: match ? match[1] : text,
+    getAttribute(name) {
+      return name === 'role' ? 'tooltip' : null;
+    },
+  };
+}
+
+function refreshSessionPopoverContent(popover, html) {
+  if (!popover) return;
+  const fresh = sessionPopoverNodeFromHtml(html);
+  if (!fresh) return;
+  const keepOpen = popover.classList?.contains?.('popover-open') === true;
+  const keepDetached = popover.classList?.contains?.('pane-tab-detached-popover') === true;
+  popover.className = fresh.className || 'session-popover';
+  if (keepOpen) popover.classList?.add?.('popover-open');
+  if (keepDetached) popover.classList?.add?.('pane-tab-detached-popover');
+  const role = fresh.getAttribute?.('role') || 'tooltip';
+  popover.setAttribute?.('role', role);
+  popover.innerHTML = fresh.innerHTML;
+}
+
+function refreshPaneTabSessionPopovers() {
+  document.querySelectorAll('.pane-tab[data-pane-tab], .dockview-pane-tab[data-pane-tab]').forEach(tab => {
+    const session = String(tab?.dataset?.paneTab || '').trim();
+    if (!session || tabTypeForItem(session)) return;
+    const popover = typeof paneTabPopoverForAnchor === 'function'
+      ? paneTabPopoverForAnchor(tab)
+      : tab?.querySelector?.(':scope > .session-popover');
+    if (!popover || popover.classList?.contains?.('file-popover')) return;
+    const info = transcriptMeta.sessions?.[session];
+    const auto = autoApproveStates.get(session)?.enabled === true;
+    const state = sessionState(session, info);
+    const agentKind = sessionAgentKind(session);
+    refreshSessionPopoverContent(popover, sessionPopoverHtml(session, info, agentKind, auto, state));
+  });
 }
 
 function bindFilePopoverActions(_container) {
@@ -118,7 +166,7 @@ function stopPopoverEvent(event) {
 function closeOtherSessionPopovers(current, options = {}) {
   const force = options.force === true;
   let changed = false;
-  for (const other of document.querySelectorAll('.pane-tab.popover-open, .panel-popover-zone.popover-open')) {
+  for (const other of document.querySelectorAll('.pane-tab.popover-open, .tabber-session-tab.popover-open, .panel-popover-zone.popover-open')) {
     if (other !== current) {
       const popover = other.querySelector?.(':scope > .session-popover, :scope > .panel-detail-popover')
         || other.__yolomuxDetachedPopover;
@@ -716,6 +764,7 @@ function sessionPopoverSortedAgentWindows(session, info, autoPayload) {
   return sessionAgentWindowStatusPayloads(session, info, autoPayload)
     .map((agent, index) => ({
       ...agent,
+      _session: session,
       _index: index,
       kind: String(agent?.kind || '').toLowerCase(),
       state: String(agent?.state || 'idle'),
@@ -733,22 +782,15 @@ function sessionPopoverSortedAgentWindows(session, info, autoPayload) {
 function sessionPopoverAgentWindowRowHtml(agent, nowSeconds = Date.now() / 1000) {
   const working = agentWindowIsWorkingState(agent.state);
   const attention = agentWindowIsAttentionState(agent.state);
-  const dot = working || attention ? '●' : '○';
   const descriptor = tmuxWindowDescriptorLabel(agentWindowCanonicalLabel(agent.window_index ?? agent.window, agent.kind, agent.window_label || agent.kind));
   const label = typeof tmuxWindowDisplayLabel === 'function' ? tmuxWindowDisplayLabel(descriptor, agent.pid) : descriptor;
   const classes = ['session-agent-row', `state-${agent.state}`];
   if (working) classes.push('working');
   if (attention) classes.push('attention');
   if (agent.current === true) classes.push('current');
-  const dotTone = agentWindowRawStateTone(agent.state);
-  const dotClasses = statusIndicatorDotClasses(
-    dotTone,
-    'session-agent-dot',
-  );
-  const dotStyle = statusIndicatorToneStyle(dotTone);
+  const activityHtml = agentWindowActivityIconHtmlForStatus(agent, agent.kind, agent._session || '');
   return `<div class="${esc(classes.join(' '))}">
-    <span class="${esc(dotClasses)}" aria-hidden="true"${dotStyle}>${esc(dot)}</span>
-    <span class="session-agent-kind">${esc(label)}</span>
+    <span class="session-agent-kind">${activityHtml}${esc(label)}</span>
     <span class="session-agent-sep">—</span>
     ${sessionPopoverAgentStatusHtml(agent, nowSeconds)}
   </div>`;

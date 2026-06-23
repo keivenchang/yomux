@@ -612,6 +612,8 @@
   "pref.performance.tab_popover_show_delay_ms.label": "탭 상세 호버 지연",
   "pref.performance.tabber_activity_refresh_ms.help": "서버가 캐시된 Tabber 활동을 새로 고치는 빈도입니다. 클라이언트는 최신 스냅샷을 읽습니다.",
   "pref.performance.tabber_activity_refresh_ms.label": "서버 캐시: Tabber 활동",
+  "pref.performance.agent_window_cooldown_seconds.help": "작업을 막 멈춘 Claude/Codex 창이 노란 쿨다운 점을 유지하는 시간입니다. 0이면 쿨다운 점을 끕니다.",
+  "pref.performance.agent_window_cooldown_seconds.label": "에이전트 쿨다운 점 표시 시간",
   "pref.readonly": "읽기 전용 접근",
   "pref.reset.all": "모든 기본값으로 초기화",
   "pref.reset.aria": "전체 초기화 경고",

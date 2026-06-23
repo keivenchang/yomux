@@ -612,6 +612,8 @@
   "pref.performance.tab_popover_show_delay_ms.label": "タブ詳細のホバー遅延",
   "pref.performance.tabber_activity_refresh_ms.help": "サーバーがキャッシュ済みの Tabber アクティビティを更新する頻度です。クライアントは最新のスナップショットを読みます。",
   "pref.performance.tabber_activity_refresh_ms.label": "サーバーキャッシュ: Tabber アクティビティ",
+  "pref.performance.agent_window_cooldown_seconds.help": "作業を停止した直後の Claude/Codex ウィンドウで黄色のクールダウン点を表示し続ける時間。0 で無効にします。",
+  "pref.performance.agent_window_cooldown_seconds.label": "エージェントのクールダウン点の表示時間",
   "pref.readonly": "読み取り専用アクセス",
   "pref.reset.all": "すべての既定値にリセット",
   "pref.reset.aria": "全体リセットの警告",

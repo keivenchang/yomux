@@ -626,7 +626,7 @@ def editor_diff_ref_toolbar_fixture_html():
               <button id="diff-expand-button" type="button" class="file-editor-diff-expand-panel" aria-pressed="true">↕</button>
               <span id="diff-ref-panel" class="file-editor-diff-ref-panel">
                 <span class="diff-ref-controls compact" data-diff-ref-controls data-diff-ref-repo="/repo/app">
-                  <label class="diff-ref-control">FROM <input id="from-ref" class="diff-ref-input" data-diff-ref-from value="abcdef123"></label>
+                  <label class="diff-ref-control">FROM <input id="from-ref" class="diff-ref-input" data-diff-ref-from value="2eb21b3339/HEAD"></label>
                   <label class="diff-ref-control">TO <input id="to-ref" class="diff-ref-input" data-diff-ref-to value="current"></label>
                   <button id="reset-ref" type="button" class="diff-ref-reset" data-diff-ref-reset title="Reset" aria-label="Reset">↺</button>
                 </span>

@@ -1760,7 +1760,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/renderMarkdownPreviewInto\(body, yoagentTightMarkdown\(body\.textContent/.test(source), '#45/#129: assistant message Markdown is rendered (tightened) from the escaped-text fallback');
     assert.ok(source.includes("roleClass === 'assistant' ? 'yoagent-message-body markdown-body'"), '#45: assistant message bodies get the markdown-body class for formatting');
     // #42: editor controls (# / wrap / find / FROM-TO / diff / theme / save) move OFF the tab strip
-    // onto a dedicated toolbar info line below the tabs; the tab strip keeps only tabs + frame controls.
+    // onto a dedicated toolbar line below the tabs; the tab strip keeps only tabs + frame controls.
     const editorToolbarIdx = source.indexOf('function fileEditorToolbarHtml(');
     const editorToolbarEnd = source.indexOf('function createFileEditorPanel(', editorToolbarIdx);
     assert.ok(editorToolbarIdx > -1 && editorToolbarEnd > editorToolbarIdx, 'editor toolbar HTML is built by the shared toolbar helper caller');
@@ -1771,7 +1771,7 @@ async function runLayoutRestoreSuite() {
     const editorFrameActionsIdx = source.indexOf('file-editor-frame-actions');
     const editorTabsIdx = source.indexOf('<div class="pane-tabs"', editorFrameActionsIdx);
     const editorGutterIdx = editorToolbarTemplate.indexOf("className: 'file-editor-gutter-panel'");
-    assert.ok(editorToolbarIdx > -1, '#42: editor controls render on a dedicated .file-editor-toolbar info line');
+    assert.ok(editorToolbarIdx > -1, '#42: editor controls render on a dedicated .file-editor-toolbar line');
     assert.ok(editorGutterIdx > -1, '#42: the # / line-numbers control lives in the toolbar row, not the tab strip');
     assert.ok(editorLeftZoneIdx > -1 && editorLeftZoneIdx < editorCenterZoneIdx && editorCenterZoneIdx < editorRightZoneIdx, 'editor toolbar renders shared left/center/right parent zones');
     assert.ok(source.includes('${fileEditorToolbarHtml(item)}'), 'createFileEditorPanel mounts the helper-built toolbar before the panel body');

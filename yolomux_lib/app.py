@@ -4038,17 +4038,25 @@ class TmuxWebtermApp:
         }, HTTPStatus.OK
 
     def active_window_for(self, session: str) -> str | None:
-        """Cheap active-window lookup from the cached transcripts payload (no tmux spawn).
-        Returns the active window index for ``session`` or None when unknown."""
+        """Active window for routing input heartbeats.
+
+        The cached transcript payload is the fast path, but stale/missing pane metadata must not turn
+        a real window heartbeat into a session-only heartbeat.
+        """
         cached = self.get_transcripts_payload_cache(max_age_seconds=float("inf"), allow_stale=True)
-        if not cached:
+        if cached:
+            payload = cached[0]
+            info = (payload.get("sessions") or {}).get(session) if isinstance(payload, dict) else None
+            panes = info.get("panes") if isinstance(info, dict) else None
+            if isinstance(panes, list):
+                window = active_window_for_panes(panes)
+                if window not in (None, ""):
+                    return window
+        result = tmux(["display-message", "-p", "-t", tmux_session_target(session), "#{window_index}"], timeout=1.0)
+        if result.returncode != 0:
             return None
-        payload = cached[0]
-        info = (payload.get("sessions") or {}).get(session) if isinstance(payload, dict) else None
-        panes = info.get("panes") if isinstance(info, dict) else None
-        if not isinstance(panes, list):
-            return None
-        return active_window_for_panes(panes)
+        window = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
+        return window or None
 
     def record_user_input(self, session: str, byte_count: int, source: str = "host", data: str = "") -> None:
         """One user-input heartbeat from the WS bridge. Read-only viewers are dropped upstream;

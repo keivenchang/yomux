@@ -252,6 +252,7 @@ function preferenceSections() {
       {path: 'performance.latency_refresh_ms', label: t('pref.performance.latency_refresh_ms.label'), type: 'number', min: 1, max: 30, step: 0.1, suffix: 's', scale: 1000, help: t('pref.performance.latency_refresh_ms.help')},
       {path: 'performance.event_log_refresh_ms', label: t('pref.performance.event_log_refresh_ms.label'), type: 'number', min: 1, max: 60, step: 0.1, suffix: 's', scale: 1000, help: t('pref.performance.event_log_refresh_ms.help')},
       {path: 'performance.tabber_activity_refresh_ms', label: t('pref.performance.tabber_activity_refresh_ms.label'), type: 'number', min: 1, max: 60, step: 0.5, suffix: 's', scale: 1000, help: t('pref.performance.tabber_activity_refresh_ms.help')},
+      {path: 'performance.agent_window_cooldown_seconds', label: t('pref.performance.agent_window_cooldown_seconds.label'), type: 'number', min: 0, max: 300, step: 1, suffix: 's', help: t('pref.performance.agent_window_cooldown_seconds.help')},
       {path: 'performance.popover_show_delay_ms', label: t('pref.performance.popover_show_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.popover_show_delay_ms.help')},
       {path: 'performance.popover_hide_delay_ms', label: t('pref.performance.popover_hide_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.popover_hide_delay_ms.help')},
       {path: 'performance.menu_hover_open_delay_ms', label: t('pref.performance.menu_hover_open_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.menu_hover_open_delay_ms.help')},
@@ -648,10 +649,10 @@ function createPreferencesPanel() {
         ${virtualPanelControlsHtml(prefsItemId)}
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
-      <div class="panel-detail-row">
-        <div class="panel-copy">
+      <div class="pane-info-bar panel-detail-row">
+        <div class="pane-info-bar-copy panel-copy">
           <div id="panel-tab-${prefsItemId}" class="panel-session-label"><span class="session-button-dir">${esc(t('tab.preferences'))}</span></div>
-          <div id="meta-${prefsItemId}" class="meta">${esc(preferenceStatusText())}</div>
+          <div id="meta-${prefsItemId}" class="pane-info-bar-meta meta">${esc(preferenceStatusText())}</div>
         </div>
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(prefsItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
       </div>

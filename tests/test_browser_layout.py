@@ -49,6 +49,197 @@ def test_attention_agent_dots_share_ask_badge_pulse_computed_style(browser, tmp_
         assert dot["borderTopWidth"] != "0px", {dot_id: dot}
 
 
+def test_agent_attention_and_cooldown_dot_overlays_ai_icon(browser, tmp_path):
+    page = tmp_path / "agent-status-overlay.html"
+    page.write_text(page_html("""
+      <div id="base" class="agent-window-activity agent-window-activity--attention" style="--attention-animation-delay:-0.42s; --agent-alternate-animation-delay:-0.84s">
+        <span id="base-icon" class="agent-icon claude agent-window-activity-icon agent-window-agent-icon agent-window-activity-icon--attention agent-window-agent-icon--attention heartbeat-pulse">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="5.5" fill="#cf7554"/></svg>
+        </span>
+        <span id="base-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-status-dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse">●</span>
+      </div>
+      <button id="info-button" class="tab tmux-window-button">
+        <span class="tmux-window-name-label">
+          <span id="info" class="agent-window-activity agent-window-activity--attention" style="--attention-animation-delay:-0.37s; --agent-alternate-animation-delay:-0.74s">
+            <span id="info-icon" class="agent-icon claude agent-window-activity-icon agent-window-agent-icon agent-window-activity-icon--attention agent-window-agent-icon--attention heartbeat-pulse">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="5.5" fill="#cf7554"/></svg>
+            </span>
+            <span id="info-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-status-dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse">●</span>
+          </span>
+          <span class="tmux-window-name-text">0:claude</span>
+        </span>
+      </button>
+      <div class="file-tree-row tabber-row" style="--file-explorer-font-size: 14px;">
+        <span class="tabber-window-label">
+          <span id="tabber" class="agent-window-activity agent-window-activity--cooldown" style="--attention-animation-delay:-0.91s; --agent-alternate-animation-delay:-1.82s">
+            <span id="tabber-icon" class="agent-icon codex agent-window-activity-icon agent-window-agent-icon agent-window-activity-icon--cooldown agent-window-agent-icon--cooldown heartbeat-pulse">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#667ef8" d="M3 12a9 9 0 1 0 18 0A9 9 0 0 0 3 12z"/></svg>
+            </span>
+            <span id="tabber-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-status-dot agent-window-activity-icon--cooldown status-indicator--cooldown heartbeat-pulse attention-pulse">●</span>
+          </span>
+          <span class="tabber-window-text">1:codex</span>
+        </span>
+      </div>
+    """, extra_css="""
+      body { background: #111; color: #ddd; font: 16px sans-serif; padding: 24px; display: grid; gap: 16px; }
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const rect = id => {
+          const r = document.getElementById(id).getBoundingClientRect();
+          return {left: r.left, top: r.top, width: r.width, height: r.height, cx: r.left + r.width / 2, cy: r.top + r.height / 2};
+        };
+        const read = (rootId, iconId, dotId) => {
+          const root = document.getElementById(rootId);
+          const rootStyle = getComputedStyle(root);
+          const iconStyle = getComputedStyle(document.getElementById(iconId));
+          const dotStyle = getComputedStyle(document.getElementById(dotId));
+          const rootRect = rect(rootId);
+          const iconRect = rect(iconId);
+          const dotRect = rect(dotId);
+          return {
+            rootDisplay: rootStyle.display,
+            rootWidth: rootRect.width,
+            iconGridArea: iconStyle.gridArea,
+            dotGridArea: dotStyle.gridArea,
+            iconAnimation: iconStyle.animationName,
+            dotAnimation: dotStyle.animationName,
+            iconDelay: iconStyle.animationDelay,
+            dotDelay: dotStyle.animationDelay,
+            iconDuration: iconStyle.animationDuration,
+            dotDuration: dotStyle.animationDuration,
+            pulseDuration: getComputedStyle(document.documentElement).getPropertyValue('--pulse-duration').trim(),
+            rootDelayVar: rootStyle.getPropertyValue('--attention-animation-delay').trim(),
+            iconDelayVar: iconStyle.getPropertyValue('--attention-animation-delay').trim(),
+            dotDelayVar: dotStyle.getPropertyValue('--attention-animation-delay').trim(),
+            rootAlternateDelayVar: rootStyle.getPropertyValue('--agent-alternate-animation-delay').trim(),
+            iconAlternateDelayVar: iconStyle.getPropertyValue('--agent-alternate-animation-delay').trim(),
+            dotAlternateDelayVar: dotStyle.getPropertyValue('--agent-alternate-animation-delay').trim(),
+            centerDx: Math.abs(iconRect.cx - dotRect.cx),
+            centerDy: Math.abs(iconRect.cy - dotRect.cy),
+            dotWithinRoot: dotRect.left >= rootRect.left - 1 && dotRect.left + dotRect.width <= rootRect.left + rootRect.width + 1,
+          };
+        };
+        return {
+          base: read('base', 'base-icon', 'base-dot'),
+          info: read('info', 'info-icon', 'info-dot'),
+          tabber: read('tabber', 'tabber-icon', 'tabber-dot'),
+        };
+        """
+    )
+    for name, item in metrics.items():
+        icon_duration = float(item["iconDuration"].rstrip("s"))
+        pulse_duration = float(item["pulseDuration"].rstrip("s"))
+        assert item["rootDisplay"] in ("grid", "inline-grid"), (name, item)
+        assert item["iconGridArea"] == "agent-status", (name, item)
+        assert item["dotGridArea"] == "agent-status", (name, item)
+        assert item["centerDx"] <= 0.75, (name, item)
+        assert item["centerDy"] <= 0.75, (name, item)
+        assert item["dotWithinRoot"] is True, (name, item)
+        assert item["dotAnimation"] == "agent-status-dot-alternate", (name, item)
+        assert item["iconDelay"] == item["dotDelay"], (name, item)
+        assert item["iconDuration"] == item["dotDuration"], (name, item)
+        assert abs(icon_duration - (pulse_duration * 2)) < 0.01, (name, item)
+        assert item["iconDelayVar"] == item["dotDelayVar"] == item["rootDelayVar"], (name, item)
+        assert item["iconAlternateDelayVar"] == item["dotAlternateDelayVar"] == item["rootAlternateDelayVar"], (name, item)
+        assert item["iconDelay"] == item["rootAlternateDelayVar"], (name, item)
+    assert metrics["base"]["iconAnimation"] == "agent-symbol-status-alternate"
+    assert metrics["info"]["rootWidth"] <= 16
+    assert metrics["tabber"]["rootWidth"] >= 14
+
+
+def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser, tmp_path):
+    page = tmp_path / "pane-info-bar-scroll.html"
+    long_text = "#76 DRAFT · keivenchang/DIS-2239__parity-commit-link-frontend-crates · ~/dynamo/frontend-crates3 · 5 dirty · DIS-2239 In Review · fix(performance): repair v1 PARITY commit + case-doc links after"
+    body = """
+      <article class="panel active-pane" style="width: 520px;">
+        <div id="info-bar" class="pane-info-bar panel-detail-row">
+          <div class="pane-info-bar-popover-zone panel-popover-zone">
+            <div class="panel-session-label"><span class="session-button-dir">8001</span></div>
+            <div id="meta" class="pane-info-bar-meta meta pane-info-bar-meta-overflow" style="--pane-info-bar-scroll-distance: 240px; --pane-info-bar-scroll-offset: -240px; --pane-info-bar-scroll-duration: 23s; --pane-info-bar-scroll-timing: linear(0 0%, 0 13.04%, 1 91.30%, 1 100%);">
+              <span id="controls" class="pane-info-bar-controls"><span class="meta-repo-switch"><button type="button" class="meta-repo-cycle">&lt;</button><button type="button" class="meta-repo-chip">2/3</button><button type="button" class="meta-repo-cycle">&gt;</button></span></span>
+              <span class="meta-sep pane-info-bar-fixed-sep"> · </span>
+              <span id="viewport" class="pane-info-bar-scroll-viewport"><span id="scroll-text" class="pane-info-bar-scroll-text"><span class="meta-branch">__LONG_TEXT__</span></span></span>
+            </div>
+          </div>
+          <div id="window-bar" class="tmux-window-bar" data-tmux-window-bar-context="info-bar" data-tmux-window-label-mode="names">
+            <button type="button" class="tab tmux-window-button"><span class="tmux-window-name-label"><span class="tmux-window-name-text">0:codex</span></span><span class="tmux-window-number-label">0</span></button>
+            <button type="button" class="tab tmux-window-button active"><span class="tmux-window-name-label"><span class="tmux-window-name-text">1:claude</span></span><span class="tmux-window-number-label">1</span></button>
+            <button type="button" class="tab tmux-window-button"><span class="tmux-window-name-label"><span class="tmux-window-name-text">2:bash</span></span><span class="tmux-window-number-label">2</span></button>
+          </div>
+          <button type="button" class="panel-detail-close"></button>
+        </div>
+      </article>
+    """.replace("__LONG_TEXT__", long_text)
+    page.write_text(page_html(body, extra_css="""
+      body { margin: 0; padding: 24px; background: var(--bg); color: var(--text); }
+      .panel { height: auto; }
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const rect = id => {
+          const r = document.getElementById(id).getBoundingClientRect();
+          return {left: r.left, right: r.right, width: r.width};
+        };
+        const textStyle = getComputedStyle(document.getElementById('scroll-text'));
+        const metaStyle = getComputedStyle(document.getElementById('meta'));
+        const movedText = document.getElementById('scroll-text').cloneNode(true);
+        movedText.id = 'scroll-text-moved';
+        movedText.style.animationDelay = '-4s';
+        document.getElementById('viewport').appendChild(movedText);
+        const movedTransform = getComputedStyle(movedText).transform;
+        const movedX = movedTransform && movedTransform !== 'none' ? new DOMMatrixReadOnly(movedTransform).m41 : 0;
+        const firstButton = document.querySelector('.tmux-window-button');
+        const buttonStyle = getComputedStyle(firstButton);
+        return {
+          controls: rect('controls'),
+          viewport: rect('viewport'),
+          bar: rect('window-bar'),
+          metaText: document.getElementById('scroll-text').textContent,
+          controlsInsideViewport: Boolean(document.getElementById('viewport').querySelector('.meta-repo-switch')),
+          scrollAnimation: textStyle.animationName,
+          scrollDelay: textStyle.animationDelay,
+          scrollDirection: textStyle.animationDirection,
+          scrollDuration: textStyle.animationDuration,
+          scrollOffset: metaStyle.getPropertyValue('--pane-info-bar-scroll-offset').trim(),
+          scrollTiming: metaStyle.getPropertyValue('--pane-info-bar-scroll-timing').trim(),
+          movedX,
+          reduced: matchMedia('(prefers-reduced-motion: reduce)').matches,
+          buttonFlexShrink: buttonStyle.flexShrink,
+          buttonMaxWidth: buttonStyle.maxWidth,
+          buttonOverflow: buttonStyle.overflow,
+          buttonWidth: firstButton.getBoundingClientRect().width,
+          labelMode: document.getElementById('window-bar').dataset.tmuxWindowLabelMode,
+          visibleNameDisplays: Array.from(document.querySelectorAll('.tmux-window-name-label')).map(node => getComputedStyle(node).display),
+          visibleNumberDisplays: Array.from(document.querySelectorAll('.tmux-window-number-label')).map(node => getComputedStyle(node).display),
+        };
+        """
+    )
+    assert "keivenchang/DIS-2239__parity-commit-link-frontend-crates" in metrics["metaText"]
+    assert "DIS-2239 In Review" in metrics["metaText"]
+    assert "fix(performance): repair v1 PARITY commit + case-doc links after" in metrics["metaText"]
+    assert metrics["controlsInsideViewport"] is False
+    assert metrics["controls"]["right"] <= metrics["viewport"]["left"] + 2
+    if not metrics["reduced"]:
+        assert metrics["scrollAnimation"] == "pane-info-bar-scroll"
+        assert metrics["scrollDelay"] == "0s"
+        assert metrics["scrollDirection"] == "normal"
+        assert metrics["scrollDuration"] == "23s"
+        assert metrics["scrollOffset"] == "-240px"
+        assert metrics["scrollTiming"] == "linear(0 0%, 0 13.04%, 1 91.30%, 1 100%)"
+        assert metrics["movedX"] < -1
+    assert metrics["buttonFlexShrink"] == "0"
+    assert metrics["buttonMaxWidth"] == "none"
+    assert metrics["buttonOverflow"] == "visible"
+    assert metrics["buttonWidth"] > 40
+    assert metrics["labelMode"] == "names"
+    assert set(metrics["visibleNameDisplays"]).issubset({"flex", "inline-flex"})
+    assert "none" not in set(metrics["visibleNameDisplays"])
+    assert set(metrics["visibleNumberDisplays"]) == {"none"}
+
+
 @pytest.mark.parametrize(
     "agent,user_input",
     [
@@ -1095,6 +1286,86 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
         assert screenshot.getbbox() is not None, label
 
 
+def test_tabber_session_tab_popover_uses_normal_tab_surface(browser, tmp_path):
+    page = tmp_path / "tabber-session-popover-surface.html"
+    page.write_text(
+        page_html(
+            """
+            <script>document.body.className = 'theme-dark';</script>
+            <section class="fixture-tabs">
+              <button id="normal-tab" type="button" class="pane-tab popover-open" style="--pane-tab-popover-left: 24px; --pane-tab-popover-top: 80px;">
+                <span class="pane-tab-core"><span class="session-button-name">8001</span></span>
+                <div id="normal-popover" class="session-popover" role="tooltip"><div class="popover-title">Normal</div></div>
+              </button>
+            </section>
+            <section class="fixture-tabber-panel file-explorer-changes-panel">
+              <div class="file-tree" role="tree">
+                <div class="file-tree-row tabber-row kind-dir expanded" data-tabber-type="session" data-tabber-session="8001" role="treeitem" aria-expanded="true" style="padding-left: 8px;">
+                  <span class="file-tree-icon tabber-icon">▾</span>
+                  <span class="file-tree-name">
+                    <span id="tabber-tab" class="tabber-session-tab popover-open" data-tabber-session-chrome="shared" style="--pane-tab-popover-left: 24px; --pane-tab-popover-top: 180px;">
+                      <span class="pane-tab-core"><span class="session-button-name">8001</span></span>
+                      <div id="tabber-popover" class="session-popover" role="tooltip"><div class="popover-title">Tabber</div></div>
+                    </span>
+                  </span>
+                  <span class="file-tree-date">now</span>
+                </div>
+              </div>
+            </section>
+            """,
+            extra_css="""
+              body { margin: 0; padding: 24px; display: block; min-height: 480px; background: var(--bg); color: var(--text); }
+              .fixture-tabs { margin-bottom: 56px; }
+              .fixture-tabber-panel { width: 420px; }
+            """,
+        ),
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const read = id => {
+          const popover = document.getElementById(id);
+          const style = getComputedStyle(popover);
+          const rect = popover.getBoundingClientRect();
+          return {
+            position: style.position,
+            visibility: style.visibility,
+            opacity: style.opacity,
+            pointerEvents: style.pointerEvents,
+            zIndex: style.zIndex,
+            width: Math.round(rect.width),
+            maxWidth: style.maxWidth,
+            maxHeight: style.maxHeight,
+            boxShadow: style.boxShadow,
+            borderRadius: style.borderTopLeftRadius,
+            transform: style.transform,
+          };
+        };
+        return {
+          normal: read('normal-popover'),
+          tabber: read('tabber-popover'),
+          tabberOpen: document.getElementById('tabber-tab').classList.contains('popover-open'),
+          normalOpen: document.getElementById('normal-tab').classList.contains('popover-open'),
+        };
+        """
+    )
+    assert metrics["normalOpen"] is True
+    assert metrics["tabberOpen"] is True
+    assert metrics["normal"]["position"] == "fixed", metrics
+    assert metrics["tabber"]["position"] == metrics["normal"]["position"], metrics
+    assert metrics["tabber"]["visibility"] == metrics["normal"]["visibility"] == "visible", metrics
+    assert metrics["tabber"]["opacity"] == metrics["normal"]["opacity"] == "1", metrics
+    assert metrics["tabber"]["pointerEvents"] == metrics["normal"]["pointerEvents"] == "auto", metrics
+    assert metrics["tabber"]["zIndex"] == metrics["normal"]["zIndex"], metrics
+    assert metrics["tabber"]["width"] == metrics["normal"]["width"], metrics
+    assert metrics["tabber"]["maxWidth"] == metrics["normal"]["maxWidth"], metrics
+    assert metrics["tabber"]["maxHeight"] == metrics["normal"]["maxHeight"], metrics
+    assert metrics["tabber"]["boxShadow"] == metrics["normal"]["boxShadow"], metrics
+    assert metrics["tabber"]["borderRadius"] == metrics["normal"]["borderRadius"], metrics
+    assert metrics["tabber"]["transform"] == metrics["normal"]["transform"], metrics
+
+
 def test_generated_app_boots_live_runtime_without_browser_errors(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path)
     WebDriverWait(browser, 5).until(
@@ -1793,9 +2064,9 @@ def test_pane_tabs_stay_within_panel(browser, tmp_path, width, expected_rows):
     assert metrics["tabHeadBottomGap"] <= 2
 
 
-def test_pane_tab_wide_layout_shows_compact_detail_row(browser, tmp_path):
+def test_pane_tab_wide_layout_shows_compact_info_bar(browser, tmp_path):
     # At a comfortable width the first tab row shares the toolbar's row (sits left of it), lower rows stay
-    # within the panel, and the detail row is a single compact strip (text shown, symbol hidden, tinted bg).
+    # within the panel, and the Info Bar is a single compact strip (text shown, symbol hidden, tinted bg).
     metrics = load_fixture(browser, tmp_path, 860)
     first_row = metrics["rows"][0]
     assert max(first_row["rights"]) < metrics["toolbar"]["left"]
@@ -1883,7 +2154,7 @@ def test_pane_tab_active_accent_theming(browser, tmp_path):
     # inactiveTabBg is theme-specific now (images 003/004): light gets a very-light-green #e6f1dd while
     # dark keeps #285a2f, so it must NOT be required equal across themes.
     # toolbarActiveBg/Border are the PRESSED control tab's green, which is theme-specific (light #4f9e3a /
-    # dark #86d600); detail-row bg now follows --pane-bar-bg so it is theme-specific too.
+    # dark #86d600); Info Bar bg now follows --pane-bar-bg so it is theme-specific too.
     theme_specific = {"panelHeadBg", "activeTabBg", "activeTabColor", "inactiveActiveTabBg", "inactiveActiveTabColor", "inactiveTabBg", "inactiveTabBorder", "inactiveDirColor", "paneControlBg", "paneControlBorder", "zoomControlBg", "toolbarActiveBg", "toolbarActiveBorder", "activeWindowBg", "activeWindowBorder", "activeWindowColor", "inactiveWindowBg"}
     for key, value in theme_metrics["dark"].items():
         if key not in theme_specific:
@@ -3977,6 +4248,8 @@ def test_editor_diff_ref_reset_is_visible_and_hittable(browser, tmp_path):
         const diffStyle = getComputedStyle(document.getElementById('diff-button'));
         const panel = document.getElementById('diff-ref-panel').getBoundingClientRect();
         const controls = document.querySelector('[data-diff-ref-controls]').getBoundingClientRect();
+        const from = document.getElementById('from-ref').getBoundingClientRect();
+        const fromInput = document.getElementById('from-ref');
         const to = document.getElementById('to-ref').getBoundingClientRect();
         const reset = document.getElementById('reset-ref').getBoundingClientRect();
         const resetStyle = getComputedStyle(document.getElementById('reset-ref'));
@@ -4009,6 +4282,10 @@ def test_editor_diff_ref_reset_is_visible_and_hittable(browser, tmp_path):
           panelRight: panel.right,
           panelLeft: panel.left,
           controlsRight: controls.right,
+          fromValue: fromInput.value,
+          fromClientWidth: fromInput.clientWidth,
+          fromScrollWidth: fromInput.scrollWidth,
+          fromWidth: from.width,
           toRight: to.right,
           resetLeft: reset.left,
           resetRight: reset.right,
@@ -4037,6 +4314,9 @@ def test_editor_diff_ref_reset_is_visible_and_hittable(browser, tmp_path):
     assert 0 <= metrics["panelLeft"] - metrics["expandRight"] <= 6, metrics
     assert metrics["diffBg"] != "rgba(0, 0, 0, 0)", metrics
     assert metrics["diffBorder"] != "rgba(0, 0, 0, 0)", metrics
+    assert metrics["fromValue"] == "2eb21b3339/HEAD", metrics
+    assert metrics["fromScrollWidth"] <= metrics["fromClientWidth"] + 2, metrics
+    assert metrics["fromWidth"] >= 100, metrics
     assert metrics["resetDisplay"] != "none"
     assert metrics["resetWidth"] >= 18
     assert metrics["panelOverflow"] == "visible"
@@ -4187,7 +4467,7 @@ def test_clicking_finder_does_not_change_terminal_pane_toolbar(browser, tmp_path
         };
         """
     )
-    # The detail row is the tinted (active-accent-derived) chrome strip with readable dark meta text —
+    # The Info Bar is the tinted (active-accent-derived) chrome strip with readable dark meta text —
     # assert the readability relationship, not a pinned green, so the active_color picker doesn't break it.
     assert light_metrics["detailBg"] != light_metrics["metaColor"]
     assert light_metrics["metaColor"] == "rgb(31, 41, 55)"

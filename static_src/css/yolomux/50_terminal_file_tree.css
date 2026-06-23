@@ -18,7 +18,7 @@
   min-height: 0;
   /* No padding: the terminal sits flush to the pane edges so its box meets the resizer directly (the
      old 2px left/right padding showed a dark sliver at the seam). The former `padding-top: 2px` gave a
-     small breathing gap below the detail-row border, but it just wasted vertical real estate — removed
+     small breathing gap below the Info Bar border, but it just wasted vertical real estate — removed
      so the terminal uses the full pane (user request, image 034). Restore `padding-top: 2px` here if a
      gap is wanted back. */
   padding: 0;

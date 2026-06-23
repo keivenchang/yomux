@@ -810,6 +810,7 @@ function applySettingsPayload(payload, options = {}) {
   latencyRefreshMs = numberSetting('performance.latency_refresh_ms');
   eventLogRefreshMs = numberSetting('performance.event_log_refresh_ms');
   tabberActivityRefreshMs = numberSetting('performance.tabber_activity_refresh_ms');
+  agentWindowCooldownSeconds = numberSetting('performance.agent_window_cooldown_seconds');
   redReminderMs = numberSetting('appearance.red_reminder_ms');
   yoloRotateMs = numberSetting('appearance.yolo_rotate_ms');
   toastDurationMs = numberSetting('notifications.toast_duration_ms');

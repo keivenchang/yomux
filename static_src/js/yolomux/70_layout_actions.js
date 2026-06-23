@@ -793,11 +793,13 @@ function agentIcon(kind, options = {}) {
   const name = agentLabel(kind);
   const label = options.label || name;
   const labelAttr = label ? ` aria-label="${esc(label)}" title="${esc(label)}"` : '';
+  const extraClass = String(options.className || '').trim();
+  const classes = agentKind => ['agent-icon', agentKind, extraClass].filter(Boolean).join(' ');
   if (kind === 'codex') {
-    return `<span class="agent-icon codex"${labelAttr}>${codexIcon()}</span>`;
+    return `<span class="${esc(classes('codex'))}"${labelAttr}>${codexIcon()}</span>`;
   }
   if (kind === 'claude') {
-    return `<span class="agent-icon claude"${labelAttr}>${claudeIcon()}</span>`;
+    return `<span class="${esc(classes('claude'))}"${labelAttr}>${claudeIcon()}</span>`;
   }
   return '';
 }
@@ -1179,10 +1181,11 @@ function compactHomePath(path) {
   return text;
 }
 
-function projectMetaHtml(session, info) {
+function projectMetaParts(session, info, options = {}) {
   const {project, repos, repoIndex, selectedRepo, git, fullPath} = projectMetaSelection(session, info);
   const showingPrimaryGit = !selectedRepo || repoRootKey(project.git?.root) === repoRootKey(selectedRepo.root);
-  const parts = [];
+  const metadataParts = [];
+  const fullText = options.fullText === true;
   const repoSwitchHtml = repos.length > 1 ? (() => {
     const position = Math.max(0, repoIndex) + 1;
     const switchLabel = `${position}/${repos.length}`;
@@ -1193,33 +1196,51 @@ function projectMetaHtml(session, info) {
     </span>`;
   })() : '';
   if (!git) {
-    if (repoSwitchHtml) parts.push(repoSwitchHtml);
-    if (fullPath) parts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
-    parts.push(`<span class="meta-muted">${esc(t('git.noCheckout'))}</span>`);
-    return metaJoin(parts);
+    if (fullPath) metadataParts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
+    metadataParts.push(`<span class="meta-muted">${esc(t('git.noCheckout'))}</span>`);
+    return {repoSwitchHtml, metadataParts};
   }
   const pr = displayPullRequest(info);
-  if (repoSwitchHtml) parts.push(repoSwitchHtml);
-  if (showingPrimaryGit && pr?.number) parts.push(pullRequestLinkHtml(pr));
-  if (git.branch) parts.push(`<span class="meta-branch">${esc(shortBranch(git.branch))}</span>`);
-  if (fullPath) parts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
-  if (Number.isFinite(git.behind) && git.behind > 0) parts.push(`<span class="meta-muted">${esc(t('git.behind', {count: git.behind}))}</span>`);
-  if (Number.isFinite(git.ahead) && git.ahead > 0) parts.push(`<span class="meta-muted">${esc(t('git.ahead', {count: git.ahead}))}</span>`);
-  if (Number.isFinite(git.dirty_count)) parts.push(`<span class="meta-muted">${esc(t('git.dirty', {count: git.dirty_count}))}</span>`);
+  if (showingPrimaryGit && pr?.number) metadataParts.push(pullRequestLinkHtml(pr));
+  if (git.branch) metadataParts.push(`<span class="meta-branch">${esc(fullText ? git.branch : shortBranch(git.branch))}</span>`);
+  if (fullPath) metadataParts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
+  if (Number.isFinite(git.behind) && git.behind > 0) metadataParts.push(`<span class="meta-muted">${esc(t('git.behind', {count: git.behind}))}</span>`);
+  if (Number.isFinite(git.ahead) && git.ahead > 0) metadataParts.push(`<span class="meta-muted">${esc(t('git.ahead', {count: git.ahead}))}</span>`);
+  if (Number.isFinite(git.dirty_count)) metadataParts.push(`<span class="meta-muted">${esc(t('git.dirty', {count: git.dirty_count}))}</span>`);
   if (showingPrimaryGit && pr?.number) {
     if (!pullRequestIsMerged(pr) && pr.checks?.state && pr.checks.state !== 'unknown') {
-      parts.push(`<span class="meta-pr-status ${pullRequestCiStatusClass(pr)}">${esc(pr.checks.summary || pullRequestStatusLabel(pr))}</span>`);
+      metadataParts.push(`<span class="meta-pr-status ${pullRequestCiStatusClass(pr)}">${esc(pr.checks.summary || pullRequestStatusLabel(pr))}</span>`);
     }
   }
   if (showingPrimaryGit) {
     for (const issue of project.linear || []) {
       const state = issue.state ? ` ${issue.state}` : '';
-      parts.push(linkHtml(issue.url, `${issue.identifier}${state}`, issue.title || ''));
+      metadataParts.push(linkHtml(issue.url, `${issue.identifier}${state}`, issue.title || ''));
     }
     const desc = pr?.title || pr?.description || (project.linear || []).find(issue => issue.title)?.title || '';
-    if (desc) parts.push(`<span class="meta-desc">${esc(shortText(desc, 160))}</span>`);
+    if (desc) {
+      const descText = fullText ? String(desc || '').replace(/\s+/g, ' ').trim() : shortText(desc, 160);
+      if (descText) metadataParts.push(`<span class="meta-desc">${esc(descText)}</span>`);
+    }
   }
-  return parts.length ? metaJoin(parts) : `<span class="meta-muted">${esc(t('git.checkoutDetected'))}</span>`;
+  if (!metadataParts.length) metadataParts.push(`<span class="meta-muted">${esc(t('git.checkoutDetected'))}</span>`);
+  return {repoSwitchHtml, metadataParts};
+}
+
+function projectMetaHtml(session, info, options = {}) {
+  const {repoSwitchHtml, metadataParts} = projectMetaParts(session, info, options);
+  return metaJoin([repoSwitchHtml, ...metadataParts]);
+}
+
+function paneInfoBarMetaHtml(session, info) {
+  const {repoSwitchHtml, metadataParts} = projectMetaParts(session, info, {fullText: true});
+  const scrollHtml = metaJoin(metadataParts);
+  const controlsHtml = repoSwitchHtml ? `<span class="pane-info-bar-controls">${repoSwitchHtml}</span>` : '';
+  const separatorHtml = controlsHtml && scrollHtml ? '<span class="meta-sep pane-info-bar-fixed-sep"> · </span>' : '';
+  const scrollTrackHtml = scrollHtml
+    ? `<span class="pane-info-bar-scroll-viewport"><span class="pane-info-bar-scroll-text">${scrollHtml}</span></span>`
+    : '';
+  return `${controlsHtml}${separatorHtml}${scrollTrackHtml}`;
 }
 
 // C9: popover listing every repo a session touches (focused first), each row: path, branch, dirty,
@@ -1943,25 +1964,67 @@ function terminalAttentionSegmentsForRange(context, start, length, highlightText
     }));
 }
 
+function terminalAttentionCharIsAlphaNumeric(char) {
+  return /[A-Za-z0-9]/.test(String(char || ''));
+}
+
+function terminalAttentionDotIsSentenceBoundary(source, index) {
+  return !(
+    terminalAttentionCharIsAlphaNumeric(source[index - 1])
+    && terminalAttentionCharIsAlphaNumeric(source[index + 1])
+  );
+}
+
+function terminalAttentionCharIsQuestionSentenceBoundary(source, index) {
+  const char = source[index];
+  if (char === '.') return terminalAttentionDotIsSentenceBoundary(source, index);
+  return /[!?？|│—–]/.test(char);
+}
+
+function terminalAttentionSkipPromptPrefix(source, start) {
+  let index = Math.max(0, Number(start) || 0);
+  while (/\s/.test(source[index] || '')) index += 1;
+  while (/[>❯]/.test(source[index] || '')) {
+    index += 1;
+    while (/\s/.test(source[index] || '')) index += 1;
+  }
+  if (/[$#]/.test(source[index] || '') && /\s/.test(source[index + 1] || '')) {
+    index += 1;
+    while (/\s/.test(source[index] || '')) index += 1;
+  }
+  return index;
+}
+
+function terminalAttentionQuestionSentenceStart(source, questionIndex) {
+  let start = 0;
+  for (let index = questionIndex - 1; index >= 0; index -= 1) {
+    if (terminalAttentionCharIsQuestionSentenceBoundary(source, index)) {
+      start = index + 1;
+      break;
+    }
+  }
+  return terminalAttentionSkipPromptPrefix(source, start);
+}
+
 function terminalAttentionQuestionSentenceRanges(text) {
   const source = terminalAttentionTextPart(text);
   if (!source || !/[?？]/.test(source)) return [];
   const ranges = [];
-  const pattern = /(?:^|[.!?？|│—–])\s*(?:[>❯$#]\s*)*([^.!?？|│—–]*[?？])/g;
-  let match = pattern.exec(source);
-  while (match) {
-    const rawSentence = match[1] || '';
+  for (let questionIndex = 0; questionIndex < source.length; questionIndex += 1) {
+    if (!/[?？]/.test(source[questionIndex])) continue;
+    const end = questionIndex + 1;
+    const start = terminalAttentionQuestionSentenceStart(source, questionIndex);
+    const rawSentence = source.slice(start, end);
+    const trimOffset = rawSentence.length - rawSentence.trimStart().length;
     const sentence = rawSentence.trim();
-    if (sentence && !/^(>|❯|\$|#)\s*[?？]?$/.test(sentence)) {
-      const rawOffset = match[0].lastIndexOf(rawSentence);
-      const trimOffset = rawSentence.length - rawSentence.trimStart().length;
+    const content = sentence.replace(/[?？]/g, '').replace(/^[>❯$#\s]+/, '').trim();
+    if (content) {
       ranges.push({
-        start: match.index + Math.max(0, rawOffset) + trimOffset,
+        start: start + trimOffset,
         length: sentence.length,
         text: sentence,
       });
     }
-    match = pattern.exec(source);
   }
   return ranges;
 }
@@ -1980,6 +2043,12 @@ function terminalAttentionShouldExpandQuestionFragment(item, rows, context, star
   const rowIndex = rows.findIndex(record => record === source.record);
   if (rowIndex <= 0) return false;
   return terminalAttentionRowsLikelyWrapped(rows[rowIndex - 1], item);
+}
+
+function terminalAttentionQuestionRangeStartsOnMatchRow(context, range, start) {
+  const rangeSource = context?.map?.[range?.start];
+  const matchSource = context?.map?.[start];
+  return Boolean(rangeSource?.record && rangeSource.record === matchSource?.record);
 }
 
 function terminalAttentionQuestionCandidateTexts(questionTexts) {
@@ -2025,9 +2094,18 @@ function terminalAttentionSpanSegments(item, rows, candidate) {
     const context = terminalAttentionJoinedContext(rows, separator);
     const start = context.text.indexOf(needle);
     if (start < 0) continue;
-    const range = terminalAttentionShouldExpandQuestionFragment(item, rows, context, start)
-      ? terminalAttentionContainingQuestionRange(context, start, needle.length)
-      : null;
+    const containingRange = terminalAttentionContainingQuestionRange(context, start, needle.length);
+    const expandsWrappedFragment = terminalAttentionShouldExpandQuestionFragment(item, rows, context, start);
+    const mayExpandRange = containingRange && (
+      terminalAttentionQuestionRangeStartsOnMatchRow(context, containingRange, start)
+      || expandsWrappedFragment
+    );
+    const expandsRange = containingRange && (
+      containingRange.start < start
+      || containingRange.length > needle.length
+      || expandsWrappedFragment
+    );
+    const range = containingRange && mayExpandRange && expandsRange ? containingRange : null;
     const highlightStart = range?.start ?? start;
     const highlightLength = range?.length ?? needle.length;
     const highlightText = range?.text ?? needle;
@@ -2047,7 +2125,8 @@ function terminalAttentionQuestionFallbackSpan(record) {
   if (!/[?？]$/.test(trimmedEnd)) return null;
   const questionEnd = Math.max(trimmedEnd.lastIndexOf('?'), trimmedEnd.lastIndexOf('？')) + 1;
   const questionPrefix = trimmedEnd.slice(0, questionEnd);
-  const sentence = questionPrefix.match(/([^.!?？|│]+[?？])$/)?.[1]?.trim() || terminalAttentionTextPart(trimmedEnd);
+  const ranges = terminalAttentionQuestionSentenceRanges(questionPrefix);
+  const sentence = ranges.length ? ranges[ranges.length - 1].text : terminalAttentionTextPart(trimmedEnd);
   const start = Math.max(0, rawText.lastIndexOf(sentence));
   return {highlightStart: start, highlightLength: Math.max(1, sentence.length), highlightText: sentence};
 }

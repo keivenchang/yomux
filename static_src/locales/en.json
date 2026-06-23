@@ -612,6 +612,8 @@
   "pref.performance.tab_popover_show_delay_ms.label": "Tab detail hover delay",
   "pref.performance.tabber_activity_refresh_ms.help": "How often the server refreshes cached Tabber activity so Tabber opens with a fresh snapshot. Stored as milliseconds, shown here as seconds.",
   "pref.performance.tabber_activity_refresh_ms.label": "Tabber server poll interval",
+  "pref.performance.agent_window_cooldown_seconds.help": "How long a Claude/Codex window that just stopped working keeps the yellow cooldown dot. 0 disables the cooldown dot.",
+  "pref.performance.agent_window_cooldown_seconds.label": "Agent cooldown dot duration",
   "pref.readonly": "readonly access",
   "pref.reset.all": "Reset all defaults",
   "pref.reset.aria": "Global reset warning",

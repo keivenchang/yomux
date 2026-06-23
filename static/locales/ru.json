@@ -586,6 +586,8 @@
   "pref.path.copySettings": "Скопировать путь к настройкам",
   "pref.path.rules": "правила YOLO",
   "pref.path.settings": "настройки",
+  "pref.performance.agent_window_cooldown_seconds.help": "Как долго окно Claude/Codex, которое только что перестало работать, сохраняет желтую точку ожидания. 0 отключает эту точку.",
+  "pref.performance.agent_window_cooldown_seconds.label": "Длительность желтой точки агента",
   "pref.performance.auto_approve_interval_seconds.help": "Как часто вновь включённые рабочие YOLO проверяют видимые запросы tmux.",
   "pref.performance.auto_approve_interval_seconds.label": "Интервал опроса рабочего YOLO",
   "pref.performance.event_log_refresh_ms.help": "How often the browser refreshes open YOLO/event-log panes.",

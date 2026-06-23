@@ -586,6 +586,8 @@
   "pref.path.copySettings": "複製設定路徑",
   "pref.path.rules": "優樂規則",
   "pref.path.settings": "設定",
+  "pref.performance.agent_window_cooldown_seconds.help": "Claude/Codex 視窗剛停止工作後保留黃色冷卻點的時間。0 表示停用冷卻點。",
+  "pref.performance.agent_window_cooldown_seconds.label": "代理冷卻點持續時間",
   "pref.performance.auto_approve_interval_seconds.help": "新啟用的優樂工作程式檢查可見 tmux 提示的頻率。",
   "pref.performance.auto_approve_interval_seconds.label": "優樂工作程式輪詢間隔",
   "pref.performance.event_log_refresh_ms.help": "瀏覽器重新整理開啟的優樂/事件記錄窗格的頻率。",

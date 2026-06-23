@@ -336,10 +336,16 @@ def print_startup(state: dict[str, str] | None = None) -> None:
         return
     width = terminal_width()
     if sys.stdout.isatty():
+        reset_terminal_scroll_region()
         sys.stdout.write("\x1b[H\x1b[J")
         sys.stdout.flush()
         if terminal_height() < 8:
+            if state is not None:
+                state["claude_startup_header_pending"] = "1"
             return
+        if state is not None:
+            state.pop("claude_startup_header_pending", None)
+            state["claude_startup_header_visible"] = "1"
     print_minimal_header()
     if not sys.stdout.isatty():
         print()
@@ -347,10 +353,17 @@ def print_startup(state: dict[str, str] | None = None) -> None:
         print()
 
 
+def minimal_header_lines() -> list[str]:
+    return [
+        f" {CLAUDE_ORANGE}▐▛███▜▌{ANSI_RESET}   {AGENT_PRODUCT_NAME} v{VERSION}",
+        f"{CLAUDE_ORANGE}▝▜█████▛▘{ANSI_RESET}  {ANSI_DIM}{MODEL_LINE}{ANSI_RESET}",
+        f"  {CLAUDE_ORANGE}▘▘ ▝▝{ANSI_RESET}    {ANSI_DIM}{display_cwd()}{ANSI_RESET}",
+    ]
+
+
 def print_minimal_header() -> None:
-    print(f" {CLAUDE_ORANGE}▐▛███▜▌{ANSI_RESET}   {AGENT_PRODUCT_NAME} v{VERSION}")
-    print(f"{CLAUDE_ORANGE}▝▜█████▛▘{ANSI_RESET}  {ANSI_DIM}{MODEL_LINE}{ANSI_RESET}")
-    print(f"  {CLAUDE_ORANGE}▘▘ ▝▝{ANSI_RESET}    {ANSI_DIM}{display_cwd()}{ANSI_RESET}")
+    for line in minimal_header_lines():
+        print(line)
 
 
 def centered_in(text: str, width: int) -> str:
@@ -1882,6 +1895,22 @@ def reset_terminal_scroll_region(preserve_cursor: bool = False) -> None:
     sys.stdout.flush()
 
 
+def render_pending_claude_startup_header(state: dict[str, str] | None = None) -> None:
+    if PERMISSION_STYLE == "codex" or state is None:
+        return
+    if state.get("claude_startup_header_pending") != "1" or terminal_height() < 8:
+        return
+    reset_terminal_scroll_region()
+    bottom = live_composer_output_bottom("", False, state)
+    for row in range(1, bottom + 1):
+        sys.stdout.write(f"\x1b[{row};1H\x1b[2K")
+    for index, line in enumerate(minimal_header_lines(), start=1):
+        sys.stdout.write(f"\x1b[{index};1H{line}")
+    state.pop("claude_startup_header_pending", None)
+    state["claude_startup_header_visible"] = "1"
+    sys.stdout.flush()
+
+
 def terminal_display_line_count(lines: list[str]) -> int:
     width = max(1, terminal_width())
     count = 0
@@ -2030,11 +2059,16 @@ def read_live_composer(state: dict[str, str] | None = None) -> str:
     try:
         tty.setraw(sys.stdin.fileno())
         while True:
+            render_pending_claude_startup_header(state)
             armed_exit = bool(state and state.get("last_ctrl_c_at"))
             if inline_composer:
                 render_inline_composer(text, cursor, armed_exit, state)
             else:
                 render_live_composer(text, cursor, armed_exit, state)
+            if PERMISSION_STYLE != "codex" and state and state.get("claude_startup_header_pending") == "1":
+                ready, _write, _error = select.select([sys.stdin.fileno()], [], [], 0.12)
+                if not ready:
+                    continue
             key = read_key()
             if state is not None and key != "\x03":
                 clear_ctrl_c_exit_window(state)

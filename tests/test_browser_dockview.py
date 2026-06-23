@@ -858,7 +858,7 @@ def test_dockview_window_bar_buttons_select_tmux_windows(browser, tmp_path):
     assert query == "session=1&window=2"
 
 
-def test_dockview_window_bar_working_status_dot_uses_shared_pulse(browser, tmp_path):
+def test_dockview_window_bar_working_agent_glyph_uses_shared_pulse(browser, tmp_path):
     transcript_sessions = {
         "1": {
             "panes": [
@@ -894,45 +894,111 @@ def test_dockview_window_bar_working_status_dot_uses_shared_pulse(browser, tmp_p
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            return document.querySelector('.agent-window-activity-icon--working')
-              && document.querySelector('.agent-window-activity-icon--idle');
+            return document.querySelector('.agent-window-agent-icon--working')
+              && Array.from(document.querySelectorAll('.tmux-window-button')).some(button =>
+                button.textContent.includes('2:claude') && button.querySelector('.agent-icon.claude'));
             """
         )
     )
     metrics = browser.execute_script(
         """
-        const working = document.querySelector('.agent-window-activity-icon--working');
-        const idle = document.querySelector('.agent-window-activity-icon--idle');
+        const working = document.querySelector('.agent-window-agent-icon--working');
+        const idleButton = Array.from(document.querySelectorAll('.tmux-window-button')).find(button => button.textContent.includes('2:claude'));
+        const idleIcon = idleButton?.querySelector('.agent-icon.claude');
+        const idleDot = idleButton?.querySelector('.agent-window-status-dot');
         const workingStyle = getComputedStyle(working);
-        const idleStyle = getComputedStyle(idle);
         return {
-          workingText: working?.textContent || '',
-          idleText: idle?.textContent || '',
+          workingText: (working?.textContent || '').trim(),
+          idleText: idleDot?.textContent || '',
+          workingHasSvg: !!working?.querySelector('svg'),
+          idleHasSvg: !!idleIcon?.querySelector('svg'),
+          workingHasAgentIcon: working?.classList.contains('agent-icon') || false,
           workingHasParent: working?.classList.contains('status-indicator') || false,
           workingHasDot: working?.classList.contains('status-indicator--dot') || false,
-          workingHasState: working?.classList.contains('status-indicator--working') || false,
-          idleHasParent: idle?.classList.contains('status-indicator') || false,
-          idleHasDot: idle?.classList.contains('status-indicator--dot') || false,
-          idleHasState: idle?.classList.contains('status-indicator--idle') || false,
+          workingHasState: working?.classList.contains('agent-window-agent-icon--working') || false,
+          idleHasParent: idleDot?.classList.contains('status-indicator') || false,
+          idleHasDot: idleDot?.classList.contains('status-indicator--dot') || false,
+          idleHasState: idleDot?.classList.contains('status-indicator--idle') || false,
           workingAnimationName: workingStyle.animationName,
           workingOpacity: workingStyle.opacity,
-          workingGlowRgb: workingStyle.getPropertyValue('--attention-ring-rgb').trim(),
-          idleAnimationName: idleStyle.animationName,
+          workingGlowRgb: workingStyle.getPropertyValue('--agent-working-glow-rgb').trim(),
+          idleDotCount: idleButton?.querySelectorAll('.agent-window-status-dot').length || 0,
         };
         """
     )
-    assert metrics["workingText"] == "●", metrics
-    assert metrics["idleText"] == "○", metrics
-    assert metrics["workingHasParent"] is True, metrics
-    assert metrics["workingHasDot"] is True, metrics
+    assert metrics["workingText"] == "", metrics
+    assert metrics["idleText"] == "", metrics
+    assert metrics["workingHasSvg"] is True, metrics
+    assert metrics["idleHasSvg"] is True, metrics
+    assert metrics["workingHasAgentIcon"] is True, metrics
+    assert metrics["workingHasParent"] is False, metrics
+    assert metrics["workingHasDot"] is False, metrics
     assert metrics["workingHasState"] is True, metrics
-    assert metrics["idleHasParent"] is True, metrics
-    assert metrics["idleHasDot"] is True, metrics
-    assert metrics["idleHasState"] is True, metrics
-    assert metrics["workingAnimationName"] == "attention-ring-fade", metrics
+    assert metrics["idleHasParent"] is False, metrics
+    assert metrics["idleHasDot"] is False, metrics
+    assert metrics["idleHasState"] is False, metrics
+    assert metrics["idleDotCount"] == 0, metrics
+    assert metrics["workingAnimationName"] == "agent-symbol-glow-cadence", metrics
     assert metrics["workingOpacity"] == "1", metrics
-    assert metrics["workingGlowRgb"] == "82 210 115", metrics
-    assert metrics["idleAnimationName"] == "none", metrics
+    assert metrics["workingGlowRgb"] == "102 126 248", metrics
+
+
+def test_dockview_window_bar_active_agent_glyph_pulses_without_dot(browser, tmp_path):
+    transcript_sessions = {
+        "1": {
+            "panes": [
+                {"target": "%1", "window": 0, "window_name": "bash", "window_active": False, "active": True, "process_label": "bash"},
+                {"target": "%2", "window": 1, "window_name": "codex", "window_active": True, "active": True, "process_label": "codex"},
+            ],
+        },
+    }
+    auto_approve_payload = {
+        "session_order": ["1"],
+        "sessions": {
+            "1": {
+                "target": "1",
+                "enabled": False,
+                "agent_windows": [
+                    {"kind": "codex", "state": "idle", "window_index": 1, "window_label": "1:codex", "current": True, "window_active": True},
+                ],
+            },
+        },
+        "rules": {"path": "/home/test/.config/yolomux/yolo-rules.yaml", "source": "default", "rules": [], "errors": []},
+    }
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=left&tabs=left:1",
+        sessions=["1"],
+        transcript_sessions=transcript_sessions,
+        auto_approve_payload=auto_approve_payload,
+    )
+    wait_for_dockview(browser, min_tabs=1)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return !!document.querySelector('.tmux-window-button.active .agent-window-agent-icon--active')")
+    )
+    metrics = browser.execute_script(
+        """
+        const button = Array.from(document.querySelectorAll('.tmux-window-button')).find(item => item.textContent.includes('1:codex'));
+        const icon = button?.querySelector('.agent-window-agent-icon--active');
+        const dot = button?.querySelector('.agent-window-status-dot');
+        const style = getComputedStyle(icon);
+        return {
+          buttonActive: button?.classList.contains('active') || false,
+          iconHasSvg: !!icon?.querySelector('svg'),
+          iconAnimationName: style.animationName,
+          iconGlowRgb: style.getPropertyValue('--agent-working-glow-rgb').trim(),
+          dotCount: button?.querySelectorAll('.agent-window-status-dot').length || 0,
+          dotText: dot?.textContent || '',
+        };
+        """
+    )
+    assert metrics["buttonActive"] is True, metrics
+    assert metrics["iconHasSvg"] is True, metrics
+    assert metrics["iconAnimationName"] == "agent-symbol-glow-cadence", metrics
+    assert metrics["iconGlowRgb"] == "102 126 248", metrics
+    assert metrics["dotCount"] == 0, metrics
+    assert metrics["dotText"] == "", metrics
 
 
 def test_dockview_terminal_info_bar_alignment_and_detail_toggle_refits_xterm(browser, tmp_path):

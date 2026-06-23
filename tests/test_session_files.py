@@ -143,7 +143,7 @@ def test_session_files_payload_keeps_boundary_touched_repo_stable_for_grace(tmp_
     assert str(primary) not in after_repos
 
 
-def test_session_files_payload_excludes_zero_change_candidate_repos_from_rendered_repo_set(tmp_path):
+def test_session_files_payload_includes_zero_change_live_pane_repos_from_rendered_repo_set(tmp_path):
     primary = tmp_path / "yolomux.dev8001"
     sibling = tmp_path / "yolomux.dev8002"
     changed = tmp_path / "ai-config"
@@ -177,14 +177,21 @@ def test_session_files_payload_excludes_zero_change_candidate_repos_from_rendere
 
     samples = [session_files.session_files_payload_for_info(info, hours=24, now=1600 + index) for index in range(3)]
 
-    assert [[repo["repo"] for repo in sample["repos"]] for sample in samples] == [[str(changed)], [str(changed)], [str(changed)]]
+    assert [[repo["repo"] for repo in sample["repos"]] for sample in samples] == [
+        [str(changed), str(primary), str(sibling)],
+        [str(changed), str(primary), str(sibling)],
+        [str(changed), str(primary), str(sibling)],
+    ]
     for payload in samples:
         rendered_repos = {item["repo"] for item in payload["files"] if item["status"] != "T" and item["repo"]}
-        counted_repos = {item["repo"] for item in payload["repos"]}
-        assert rendered_repos == counted_repos == {str(changed)}
-        assert payload["repos"][0]["count"] == sum(1 for item in payload["files"] if item["status"] != "T" and item["repo"] == str(changed))
+        assert rendered_repos == {str(changed)}
+        by_repo = {item["repo"]: item for item in payload["repos"]}
+        assert by_repo[str(changed)]["count"] == sum(1 for item in payload["files"] if item["status"] != "T" and item["repo"] == str(changed))
+        assert by_repo[str(primary)]["count"] == 0
+        assert by_repo[str(primary)]["touched_count"] == 1
+        assert by_repo[str(sibling)]["count"] == 0
+        assert by_repo[str(sibling)]["touched_count"] == 0
         assert any(item["repo"] == str(primary) and item["status"] == "T" for item in payload["files"])
-        assert str(sibling) not in counted_repos
 
 
 def test_session_files_payload_carries_agent_window_attribution(tmp_path):
@@ -414,7 +421,16 @@ def test_session_files_payload_uses_historical_codex_transcript_for_clean_pane_r
     assert item["repo"] == str(repo)
     assert item["path"] == "tracked.txt"
     assert item["agents"] == ["codex"]
-    assert payload["repos"] == []
+    assert payload["repos"] == [{
+        "repo": str(repo),
+        "count": 0,
+        "touched_count": 1,
+        "added": 0,
+        "removed": 0,
+        "from_ref": "default",
+        "to_ref": "base",
+        "error": "",
+    }]
 
 
 def test_historical_codex_transcript_prefers_recent_transcript_with_repo_changes(tmp_path, monkeypatch):

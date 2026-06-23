@@ -349,6 +349,18 @@ async function runShareThemeSuite() {
     assert.ok(/changes-repo-refs[\s\S]*data-diff-ref-from[\s\S]*data-diff-ref-to/.test(emptyExplicitRepoHtml), 'empty explicit repo section still exposes FROM/TO controls');
     assert.ok(emptyExplicitRepoHtml.includes('No Differ results for this session.'), 'empty explicit repo section explains that the selected refs have no visible file rows');
     assert.equal(emptyExplicitRepoHtml.includes('data-open-change-file='), false, 'empty explicit repo section does not invent transcript-only file rows');
+    api.setFileExplorerSessionFilesPayloadForTest({
+      session: '3',
+      loaded: true,
+      errors: [],
+      refs_by_repo: {'/home/test/frontend-crates3': [{ref: 'HEAD', short: 'HEAD', subject: 'base commit'}, {ref: 'current', short: 'current', subject: 'working tree'}]},
+      repos: [{repo: '/home/test/frontend-crates3', count: 0, touched_count: 0, added: 0, removed: 0, from_ref: 'default', to_ref: 'base', behind: 0, ahead: 0}],
+      files: [],
+    });
+    const emptySessionRepoHtml = api.fileExplorerChangesPanelHtml();
+    assert.ok(emptySessionRepoHtml.includes('/home/test/frontend-crates3'), 'Differ keeps the selected tab repo section visible even when the working-tree diff is empty');
+    assert.ok(emptySessionRepoHtml.includes('1 repo, 0 files'), 'empty selected-tab repo still counts as a repo in the Differ summary');
+    assert.ok(emptySessionRepoHtml.includes('No Differ results for this session.'), 'empty selected-tab repo explains that it has no visible file rows');
     assert.equal(changedFilesSource.includes("panel.addEventListener('dblclick', async event => {"), false, 'modified-file rows no longer require double-click to open');
     assert.ok(/panel\.addEventListener\('click', async event => \{[\s\S]*?data-open-change-file[\s\S]*?differTreeInteractionController\.handleClick\(event, panel, \{row\}\)/.test(changedFilesSource), 'single-clicking a Differ file row routes through the shared controller');
     assert.ok(/const differTreeInteractionController = createSharedTreeInteractionController\(\{[\s\S]*selectFromClick\(row, id, event\)[\s\S]*updateFileTreeSelectionFromClick\(row, id \|\| differTreeRowPath\(row\), event\)[\s\S]*activateRow\(row, event\)[\s\S]*openChangedFileInDiff/.test(changedFilesSource), 'the shared Differ controller selects first and opens the reusable diff tab unless it is a modifier-selection click');
@@ -717,7 +729,7 @@ async function runShareThemeSuite() {
     const bashMetaHtml = api.projectMetaHtml('window-scope', bashWindowInfo);
     assert.ok(codexMetaHtml.includes('/repo/agent/src') && codexMetaHtml.includes('8 dirty'), 'active agent window keeps transcript-derived repo metadata');
     assert.equal(bashMetaHtml.includes('/repo/agent'), false, 'non-agent active window outside the repo does not inherit the agent touched repo');
-    assert.ok(bashMetaHtml.includes('/tmp/shell'), 'non-agent active window shows its own cwd in the detail row');
+    assert.ok(bashMetaHtml.includes('/tmp/shell'), 'non-agent active window shows its own cwd in the Info Bar');
     const c9Src = fs.readFileSync('static/yolomux.js', 'utf8');
     const c9Css = fs.readFileSync('static/yolomux.css', 'utf8');
     assert.ok(c9Src.includes('function showRepoChipMenu('), 'C9: the repo count opens a popover');
@@ -1669,11 +1681,11 @@ async function runShareThemeSuite() {
     // adds targeted hover/link contrast overrides (expected), so guard only the base tab + ring.
     assert.equal(/body\.theme-light\s+\.pane-tab\s*\{/.test(preferencesCss), false, 'light theme does not restyle the base pane tab (tokens drive it)');
     assert.equal(/body\.theme-light\s+\.panel\.active-pane\s*\{/.test(preferencesCss), false, 'light theme does not restyle the active-pane ring directly');
-    assert.ok(/body\.theme-light \.meta a/.test(preferencesCss), '#28: light theme adds a contrast override for detail-row links');
+    assert.ok(/body\.theme-light \.meta a/.test(preferencesCss), '#28: light theme adds a contrast override for Info Bar links');
     assert.ok(/body\.theme-light \.pane-tab:hover/.test(preferencesCss), '#28: light theme fixes the near-white pane-tab hover border');
     assert.ok(/body\.theme-light \.tabs \.pane-actions:hover/.test(preferencesCss), '#28: light theme fixes the white tab-overflow hover glyph');
     assert.ok(/body\.theme-light\s*\{[\s\S]*?--active-accent-bright:\s*#4f9e3a/.test(preferencesCss), '#31: the active pane tab has a light-mode green (via the active-accent token) so a theme switch repaints it');
-    assert.ok(/body\.theme-light \.panel\.active-pane \.panel-detail-row \.session-button-name/.test(preferencesCss), '#35: the active-pane detail-row header label is forced dark in light mode (was light-on-light)');
+    assert.ok(/body\.theme-light \.panel\.active-pane \.panel-detail-row \.session-button-name/.test(preferencesCss), '#35: the active-pane Info Bar header label is forced dark in light mode (was light-on-light)');
     assert.ok(fs.readFileSync('static/yolomux.js', 'utf8').includes('session-button-dir pane-tab-info-label'), '#27: the YO!info tab label uses the themed .session-button-dir color treatment');
     assert.ok(preferencesCss.includes('--active-accent-bright: #86d600'), 'focused active pane tab uses a brighter NV green fill (via the active-accent token)');
     assert.ok(preferencesCss.includes('--pane-tab-active-accent: var(--active-accent-bright)'), 'focused active pane tab accent token derives from the shared active-accent (same green as the fill)');
@@ -1693,14 +1705,14 @@ async function runShareThemeSuite() {
     assert.ok(preferencesCss.includes('--pane-active-ring-opacity: 75%'), 'the active pane ring shares the default ring opacity token');
     // Light mode uses a BLUE pane separator (dark mode keeps amber/yellow).
     assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-resizer-bg:\s*rgba\(37, 99, 235/.test(preferencesCss), 'light mode uses a blue pane separator');
-    // Pane chrome bars (strip, detail row, editor toolbar, find) all read the shared --pane-bar-bg, which is
+    // Pane chrome bars (strip, Info Bar, editor toolbar, find) all read the shared --pane-bar-bg, which is
     // the bright tab-strip green when the pane is focused and neutral gray when not. Focus sets it on .panel.
     assert.ok(/\.panel\.active-pane,\s*\.panel\.typing-ready-pane\s*\{[^}]*--pane-bar-bg:\s*var\(--pane-tab-strip-bg\)/.test(preferencesCss), 'focused panes set --pane-bar-bg to the bright tab-strip green');
     assert.equal(/\.panel\.active-pane > \.panel-head,\s*\.panel\.typing-ready-pane > \.panel-head/.test(preferencesCss), false, 'focused pane tab containers use the shared .panel-head background rule, not a separate state override');
     assert.equal(/\.panel\.changes-panel/.test(preferencesCss), false, 'standalone Changes pane chrome CSS is removed');
     assert.ok(/\.panel\.file-explorer-panel > \.file-explorer-head:hover,\s*\.panel\.file-explorer-panel > \.file-explorer-head:focus-within,\s*\.panel\.file-explorer-panel:has\(\.file-explorer-tree-panel:hover\) > \.file-explorer-head,\s*\.panel\.file-explorer-panel:has\(\.file-explorer-tree-panel:focus-within\) > \.file-explorer-head\s*\{[^}]*--pane-bar-bg:\s*var\(--pane-tab-strip-bg\)/.test(preferencesCss), 'Finder hover/focus colors only the Finder header');
     assert.ok(/\.panel-head\s*\{[^}]*background:\s*var\(--pane-bar-bg\)/.test(preferencesCss), 'the tab strip reads the shared --pane-bar-bg');
-    assert.ok(/\.panel-detail-row\s*\{[^}]*background:\s*var\(--pane-bar-bg\)/.test(preferencesCss), 'the info/detail bar reads the shared --pane-bar-bg (gray when unfocused, not green)');
+    assert.ok(/\.panel-detail-row\s*\{[^}]*background:\s*var\(--pane-bar-bg\)/.test(preferencesCss), 'the Info Bar reads the shared --pane-bar-bg (gray when unfocused, not green)');
     assert.ok(/\.file-explorer-head\s*\{[\s\S]*background:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(preferencesCss), 'Finder header reads the shared pane bar background when focused/hovered');
     assert.ok(/\.file-explorer-changes-panel:hover,\s*\.file-explorer-changes-panel:focus-within\s*\{[^}]*--pane-bar-bg:\s*var\(--pane-tab-strip-bg\)/.test(preferencesCss), 'embedded Finder Modified-files section uses the green pane bar on hover/focus');
     assert.ok(/\.file-explorer-changes-panel\s*\{[^}]*--pane-bar-bg:\s*var\(--panel2\)/.test(preferencesCss), 'embedded Finder Modified-files header stays neutral unless its own section is hovered/focused');
@@ -1972,6 +1984,7 @@ async function runShareThemeSuite() {
     assert.ok(/data-setting-path="performance\.server_background_file_event_poll_ms"[\s\S]*?value="5\.000"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'server-side SSE background editor file-change poll defaults to 5 seconds');
     assert.ok(/data-setting-path="performance\.server_directory_event_poll_ms"[\s\S]*?value="3\.000"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'server-side SSE directory-change poll displays seconds');
     assert.ok(/data-setting-path="performance\.tabber_activity_refresh_ms"[\s\S]*?value="15"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'Tabber server poll interval defaults to 15 seconds in Preferences');
+    assert.ok(/data-setting-path="performance\.agent_window_cooldown_seconds"[\s\S]*?value="60"[\s\S]*?min="0"[\s\S]*?max="300"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'agent cooldown dot duration defaults to 60 seconds in Preferences');
     assert.ok(/data-setting-path="performance\.latency_refresh_ms"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'latency refresh displays seconds instead of raw milliseconds');
     assert.ok(/data-setting-path="performance\.event_log_refresh_ms"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'event-log refresh displays seconds instead of raw milliseconds');
     assert.ok(/data-setting-path="performance\.popover_show_delay_ms"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'hover popover timing remains in milliseconds');
@@ -1984,6 +1997,7 @@ async function runShareThemeSuite() {
     assert.ok(performanceHtml.includes('Server SSE: background editor file-change poll'), 'Performance labels the server-side SSE background editor interval');
     assert.ok(performanceHtml.includes('Server SSE: directory-change poll'), 'Performance labels the server-side SSE directory-change interval');
     assert.ok(performanceHtml.includes('Tabber server poll interval'), 'Performance labels the Tabber activity refresh as a server poll interval');
+    assert.ok(performanceHtml.includes('Agent cooldown dot duration'), 'Performance labels the agent cooldown dot duration');
     assert.equal(performanceHtml.includes('Client pull: file-change/Differ fallback'), false, 'Performance no longer exposes the removed client file-change fallback interval');
     for (const removedPath of [
       'file_explorer.refresh_seconds',
@@ -1996,7 +2010,7 @@ async function runShareThemeSuite() {
     ]) {
       assert.equal(preferencesHtml.includes(`data-setting-path="${removedPath}"`), false, `${removedPath} is no longer exposed in Preferences`);
     }
-    assert.ok(/data-setting-path="performance\.server_event_poll_ms"[\s\S]*data-setting-path="performance\.server_background_file_event_poll_ms"[\s\S]*data-setting-path="performance\.server_directory_event_poll_ms"[\s\S]*data-setting-path="performance\.latency_refresh_ms"[\s\S]*data-setting-path="performance\.event_log_refresh_ms"[\s\S]*data-setting-path="performance\.tabber_activity_refresh_ms"/.test(performanceHtml), 'Performance order groups server SSE settings before remaining client timers');
+    assert.ok(/data-setting-path="performance\.server_event_poll_ms"[\s\S]*data-setting-path="performance\.server_background_file_event_poll_ms"[\s\S]*data-setting-path="performance\.server_directory_event_poll_ms"[\s\S]*data-setting-path="performance\.latency_refresh_ms"[\s\S]*data-setting-path="performance\.event_log_refresh_ms"[\s\S]*data-setting-path="performance\.tabber_activity_refresh_ms"[\s\S]*data-setting-path="performance\.agent_window_cooldown_seconds"/.test(performanceHtml), 'Performance order groups server SSE settings before remaining client timers and agent cooldown');
     assert.equal(preferencesHtml.includes('data-setting-path="file_explorer.refresh_ms"'), false, 'Finder refresh interval no longer exposes the legacy millisecond setting');
     assert.equal(diffBundle.includes('fileExplorerRefreshMsFromSettings'), false, 'Finder client-pull refresh setting helper is removed');
     assert.equal(diffBundle.includes('sessionFilesRefreshMsFromSettings'), false, 'Changed-files client-pull refresh setting helper is removed');
@@ -2008,6 +2022,7 @@ async function runShareThemeSuite() {
     assert.ok(diffBundle.includes("path: 'performance.tabber_activity_refresh_ms'") && diffBundle.includes("initialSetting('performance.tabber_activity_refresh_ms')"), 'Tabber activity refresh is backed by the Performance preference through settings defaults');
     assert.equal(diffBundle.includes("initialSetting('performance.tabber_activity_refresh_ms', 15000)"), false, 'Tabber activity refresh does not duplicate the server default in bootstrap JS');
     assert.equal(diffBundle.includes("numberSetting('performance.tabber_activity_refresh_ms', 15000)"), false, 'Tabber activity refresh does not duplicate the server default on settings reload');
+    assert.ok(diffBundle.includes("path: 'performance.agent_window_cooldown_seconds'") && diffBundle.includes("initialSetting('performance.agent_window_cooldown_seconds')"), 'agent cooldown duration is backed by the Performance preference through settings defaults');
     assert.ok(preferencesHtml.includes('data-setting-path="uploads.max_bytes"'), 'preferences expose the upload size cap');
     api.setClientSettingsPatchForTest({uploads: {max_bytes: 64 * 1024 * 1024}});
     const largeUploadPreferencesHtml = api.preferencesPanelHtmlForTest('upload', []);
@@ -2826,7 +2841,7 @@ async function runShareThemeSuite() {
       assert.ok(/function renderSessionButtons\(options = \{\}\)[\s\S]*if \(openAppMenuId\) requestAnimationFrame\(\(\) => scheduleSharePopupLayerPublish\(\{immediate: true\}\)\)/.test(shareSource), 'DOIT.69: restored open topbar menus republish the popup layer after rerender');
       assert.equal(/detail:\s*choice\.value/.test(shareSource), false, 'DOIT.67: topbar language menu does not print raw locale codes as visible detail text');
       assert.ok(/function applyShareUiMessage\(message\)[\s\S]*layoutFromParam\(payload\.layout[\s\S]*applyLayoutSlots\(next/.test(shareSource), 'share-view UI frames apply layout through layoutFromParam');
-      assert.ok(shareSource.includes("'.pane-tab-detached-popover.popover-open'") && shareSource.includes("'.pane-tab.popover-open > .session-popover'") && shareSource.includes("'.dockview-pane-tab.popover-open > .session-popover'"), 'DOIT.68: popup-layer capture includes detached and inline tab hover popovers');
+      assert.ok(shareSource.includes("'.pane-tab-detached-popover.popover-open'") && shareSource.includes("'.pane-tab.popover-open > .session-popover'") && shareSource.includes("'.dockview-pane-tab.popover-open > .session-popover'") && shareSource.includes("'.tabber-session-tab.popover-open > .session-popover'"), 'DOIT.68: popup-layer capture includes detached, inline, and Tabber tab hover popovers');
       assert.ok(shareSource.includes("'.diff-ref-suggestion-popover:not([hidden])'"), 'DOIT.68: popup-layer capture includes custom diff-ref dropdowns');
       assert.ok(/function bindAppMenuCommandMirrorActive[\s\S]*share-mirror-active/.test(shareSource), 'DOIT.68: menu option hover/focus gets a serializable mirror-active class');
       assert.ok(/\.app-menu-command\.share-mirror-active:not\(:disabled\)/.test(fs.readFileSync('static/yolomux.css', 'utf8')), 'DOIT.68: mirrored menu option active class uses the same styling as local hover/focus');
@@ -4960,7 +4975,7 @@ async function runShareThemeSuite() {
       refresh() {},
     });
     api.setPanelDetailsCollapsedForTest(detailsPanel, false);
-    assert.ok(fits.length >= 1, 'hiding or showing the detail row schedules a visible tmux terminal fit');
+    assert.ok(fits.length >= 1, 'hiding or showing the Info Bar schedules a visible tmux terminal fit');
     assert.ok(api.tmuxPaneTabHtml('1', null, {key: 'blocked', short: 'Blocked', label: 'Blocked', reason: 'test'}).includes('tab-symbol'));
     assert.equal(api.tmuxSessionNameError('good_name-1.2'), '');
     assert.equal(api.tmuxSessionNameError('dynamo 2'), '');

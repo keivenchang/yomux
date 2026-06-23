@@ -612,6 +612,8 @@
   "pref.performance.tab_popover_show_delay_ms.label": "Délai de survol des détails d'onglet",
   "pref.performance.tabber_activity_refresh_ms.help": "Fréquence à laquelle le serveur actualise l'activité Tabber en cache ; les clients lisent le dernier instantané.",
   "pref.performance.tabber_activity_refresh_ms.label": "Cache serveur : activité Tabber",
+  "pref.performance.agent_window_cooldown_seconds.help": "Durée pendant laquelle une fenêtre Claude/Codex qui vient de s'arrêter garde le point jaune de pause. 0 désactive ce point.",
+  "pref.performance.agent_window_cooldown_seconds.label": "Durée du point de pause de l'agent",
   "pref.readonly": "accès en lecture seule",
   "pref.reset.all": "Réinitialiser toutes les valeurs par défaut",
   "pref.reset.aria": "Avertissement de réinitialisation GLOBALE",

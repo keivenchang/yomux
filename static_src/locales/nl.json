@@ -612,6 +612,8 @@
   "pref.performance.tab_popover_show_delay_ms.label": "Tab detail hover delay",
   "pref.performance.tabber_activity_refresh_ms.help": "Hoe vaak de server gecachte Tabber-activiteit vernieuwt; clients lezen de nieuwste momentopname.",
   "pref.performance.tabber_activity_refresh_ms.label": "Servercache: Tabber-activiteit",
+  "pref.performance.agent_window_cooldown_seconds.help": "Hoelang een Claude/Codex-venster dat net is gestopt met werken de gele afkoelpunt behoudt. 0 schakelt de afkoelpunt uit.",
+  "pref.performance.agent_window_cooldown_seconds.label": "Duur van agent-afkoelpunt",
   "pref.readonly": "readonly access",
   "pref.reset.all": "Reset all defaults",
   "pref.reset.aria": "Global reset warning",

@@ -612,6 +612,8 @@
   "pref.performance.tab_popover_show_delay_ms.label": "Tab detail hover delay",
   "pref.performance.tabber_activity_refresh_ms.help": "Tần suất máy chủ làm mới hoạt động Tabber đã lưu trong bộ nhớ đệm; máy khách đọc ảnh chụp mới nhất.",
   "pref.performance.tabber_activity_refresh_ms.label": "Bộ nhớ đệm máy chủ: hoạt động Tabber",
+  "pref.performance.agent_window_cooldown_seconds.help": "Thời gian cửa sổ Claude/Codex vừa ngừng chạy vẫn giữ chấm vàng tạm dừng. 0 tắt chấm này.",
+  "pref.performance.agent_window_cooldown_seconds.label": "Thời lượng chấm tạm dừng của agent",
   "pref.readonly": "readonly access",
   "pref.reset.all": "Reset all defaults",
   "pref.reset.aria": "Global reset warning",

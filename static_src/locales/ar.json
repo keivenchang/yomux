@@ -612,6 +612,8 @@
   "pref.performance.tab_popover_show_delay_ms.label": "تأخير تحويم تفاصيل التبويب",
   "pref.performance.tabber_activity_refresh_ms.help": "عدد مرات تحديث الخادم لذاكرة نشاط Tabber المؤقتة؛ يقرأ العملاء أحدث لقطة.",
   "pref.performance.tabber_activity_refresh_ms.label": "ذاكرة الخادم المؤقتة: نشاط Tabber",
+  "pref.performance.agent_window_cooldown_seconds.help": "مدة بقاء النقطة الصفراء بعد توقف نافذة Claude/Codex عن العمل. القيمة 0 تعطل نقطة التهدئة.",
+  "pref.performance.agent_window_cooldown_seconds.label": "مدة نقطة تهدئة الوكيل",
   "pref.readonly": "وصول للقراءة فقط",
   "pref.reset.all": "إعادة تعيين جميع الافتراضيات",
   "pref.reset.aria": "تحذير إعادة التعيين الشاملة",

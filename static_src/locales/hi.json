@@ -612,6 +612,8 @@
   "pref.performance.tab_popover_show_delay_ms.label": "टैब detail hover देरी",
   "pref.performance.tabber_activity_refresh_ms.help": "सर्वर कैश की गई Tabber गतिविधि कितनी बार ताज़ा करता है; क्लाइंट नवीनतम स्नैपशॉट पढ़ते हैं।",
   "pref.performance.tabber_activity_refresh_ms.label": "सर्वर कैश: Tabber गतिविधि",
+  "pref.performance.agent_window_cooldown_seconds.help": "Claude/Codex विंडो के काम बंद करने के बाद पीला कूलडाउन डॉट कितनी देर दिखे। 0 कूलडाउन डॉट बंद करता है।",
+  "pref.performance.agent_window_cooldown_seconds.label": "एजेंट कूलडाउन डॉट अवधि",
   "pref.readonly": "readonly access",
   "pref.reset.all": "सभी डिफ़ॉल्ट रीसेट करें",
   "pref.reset.aria": "GLOBAL रीसेट चेतावनी",

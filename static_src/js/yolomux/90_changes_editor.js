@@ -1243,7 +1243,7 @@ function changesRepoCount(payload, files) {
   if (!repos.size) {
     for (const repoInfo of Array.isArray(payload?.repos) ? payload.repos : []) {
       const path = normalizeDirectoryPath(repoInfo?.repo || '');
-      if (path && repoHasExplicitComparison(repoInfo)) repos.add(path);
+      if (path && repoPayloadHasRenderableSection(repoInfo)) repos.add(path);
     }
   }
   return repos.size;
@@ -1294,8 +1294,13 @@ function repoHasExplicitComparison(repoInfo) {
   return from !== 'default' || to !== 'base';
 }
 
-function payloadHasExplicitRepoSections(payload) {
-  return Array.isArray(payload?.repos) && payload.repos.some(repoHasExplicitComparison);
+function repoPayloadHasRenderableSection(repoInfo) {
+  const repo = normalizeDirectoryPath(repoInfo?.repo || '');
+  return Boolean(repo && repo !== 'Outside repo');
+}
+
+function payloadHasRenderableRepoSections(payload) {
+  return Array.isArray(payload?.repos) && payload.repos.some(repoPayloadHasRenderableSection);
 }
 
 function changesComparisonHeaderHtml(payload, files, options = {}) {
@@ -1418,7 +1423,7 @@ function renderChangesGroups(groupsEl, files, options = {}) {
   if (options.includeEmptyRepoSections === true) {
     for (const repoInfo of Array.isArray(payload?.repos) ? payload.repos : []) {
       const repo = repoInfo?.repo || 'Outside repo';
-      if (repo && repo !== 'Outside repo' && !groups.has(repo) && repoHasExplicitComparison(repoInfo)) {
+      if (repoPayloadHasRenderableSection(repoInfo) && !groups.has(repo)) {
         groups.set(repo, []);
       }
     }
@@ -1566,7 +1571,7 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
   const errorHtml = (payload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
   const warningHtml = (payload.warnings || []).map(warning => `<div class="changes-warning">${esc(warning)}</div>`).join('');
   const full = options.full === true || fileExplorerMode === 'diff';
-  const showEmptyRepoSections = full && !files.length && payloadHasExplicitRepoSections(payload);
+  const showEmptyRepoSections = full && !files.length && payloadHasRenderableRepoSections(payload);
   const empty = !loading && loaded && !files.length && !showEmptyRepoSections ? `<div class="changes-empty">${esc(t('changes.emptyModified'))}</div>` : '';
   if (full) {
     return `

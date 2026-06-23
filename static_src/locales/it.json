@@ -612,6 +612,8 @@
   "pref.performance.tab_popover_show_delay_ms.label": "Tab detail hover delay",
   "pref.performance.tabber_activity_refresh_ms.help": "Frequenza con cui il server aggiorna l'attività Tabber in cache; i client leggono l'istantanea più recente.",
   "pref.performance.tabber_activity_refresh_ms.label": "Cache server: attività Tabber",
+  "pref.performance.agent_window_cooldown_seconds.help": "Per quanto tempo una finestra Claude/Codex che ha appena smesso di lavorare mantiene il punto giallo di raffreddamento. 0 disattiva il punto.",
+  "pref.performance.agent_window_cooldown_seconds.label": "Durata punto di raffreddamento agente",
   "pref.readonly": "readonly access",
   "pref.reset.all": "Reset all defaults",
   "pref.reset.aria": "Global reset warning",

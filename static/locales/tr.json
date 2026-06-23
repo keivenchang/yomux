@@ -586,6 +586,8 @@
   "pref.path.copySettings": "Copy settings path",
   "pref.path.rules": "YOLO rules",
   "pref.path.settings": "settings",
+  "pref.performance.agent_window_cooldown_seconds.help": "Çalışmayı yeni durduran bir Claude/Codex penceresinde sarı bekleme noktasının ne kadar kalacağı. 0 bu noktayı kapatır.",
+  "pref.performance.agent_window_cooldown_seconds.label": "Ajan bekleme noktası süresi",
   "pref.performance.auto_approve_interval_seconds.help": "How often newly enabled YOLO workers inspect visible tmux prompts.",
   "pref.performance.auto_approve_interval_seconds.label": "YOLO worker poll interval",
   "pref.performance.event_log_refresh_ms.help": "How often the browser refreshes open YOLO/event-log panes.",

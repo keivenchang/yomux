@@ -177,7 +177,7 @@
 }
 .diff-ref-input,
 .diff-ref-control input {
-  width: clamp(64px, 10vw, 130px);
+  width: clamp(12ch, 12vw, 24ch);
   padding: 0 5px;
   font-size: var(--ui-font-size-xs);
 }
@@ -186,7 +186,7 @@
 }
 .diff-ref-controls.compact .diff-ref-input,
 .diff-ref-controls.compact .diff-ref-control input {
-  width: clamp(46px, 7vw, 82px);
+  width: clamp(17ch, 9vw, 19ch);
   height: 20px;
 }
 .diff-ref-reset {

@@ -1596,6 +1596,7 @@ def test_claude_startup_clears_tiny_tty_without_overwritten_header(monkeypatch):
             return True
 
     output = TtyBuffer()
+    state = {}
     calls = []
     monkeypatch.setattr(sys, "stdout", output)
     monkeypatch.setattr(mock_agent_common, "STARTUP_STYLE", "default")
@@ -1603,10 +1604,34 @@ def test_claude_startup_clears_tiny_tty_without_overwritten_header(monkeypatch):
     monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 120)
     monkeypatch.setattr(mock_agent_common, "print_minimal_header", lambda: calls.append("min"))
 
-    mock_agent_common.print_startup()
+    mock_agent_common.print_startup(state)
 
-    assert output.getvalue() == "\x1b[H\x1b[J"
+    assert output.getvalue() == "\x1b[r\x1b[H\x1b[J"
     assert calls == []
+    assert state["claude_startup_header_pending"] == "1"
+
+
+def test_claude_startup_redraws_header_after_tiny_tty_grows(monkeypatch):
+    class TtyBuffer(io.StringIO):
+        def isatty(self):
+            return True
+
+    output = TtyBuffer()
+    state = {"claude_startup_header_pending": "1"}
+    monkeypatch.setattr(sys, "stdout", output)
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "default")
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 20)
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 80)
+
+    mock_agent_common.render_pending_claude_startup_header(state)
+
+    assert "\x1b[r" in output.getvalue()
+    assert "Claude Code" in output.getvalue()
+    assert "\x1b[1;1H" in output.getvalue()
+    assert "\x1b[2;1H" in output.getvalue()
+    assert "\x1b[3;1H" in output.getvalue()
+    assert "claude_startup_header_pending" not in state
+    assert state["claude_startup_header_visible"] == "1"
 
 
 @pytest.mark.e2e

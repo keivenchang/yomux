@@ -586,6 +586,8 @@
   "pref.path.copySettings": "Copier le chemin des paramètres",
   "pref.path.rules": "règles YOLO",
   "pref.path.settings": "paramètres",
+  "pref.performance.agent_window_cooldown_seconds.help": "Durée pendant laquelle une fenêtre Claude/Codex qui vient de s'arrêter garde le point jaune de pause. 0 désactive ce point.",
+  "pref.performance.agent_window_cooldown_seconds.label": "Durée du point de pause de l'agent",
   "pref.performance.auto_approve_interval_seconds.help": "Fréquence à laquelle les workers YOLO nouvellement activés inspectent les invites tmux visibles.",
   "pref.performance.auto_approve_interval_seconds.label": "Intervalle de sondage du worker YOLO",
   "pref.performance.event_log_refresh_ms.help": "How often the browser refreshes open YOLO/event-log panes.",

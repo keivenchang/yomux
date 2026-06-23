@@ -612,6 +612,8 @@
   "pref.performance.tab_popover_show_delay_ms.label": "Tab detail hover delay",
   "pref.performance.tabber_activity_refresh_ms.help": "Sunucunun önbellekteki Tabber etkinliğini ne sıklıkla yenilediği; istemciler en son anlık görüntüyü okur.",
   "pref.performance.tabber_activity_refresh_ms.label": "Sunucu önbelleği: Tabber etkinliği",
+  "pref.performance.agent_window_cooldown_seconds.help": "Çalışmayı yeni durduran bir Claude/Codex penceresinde sarı bekleme noktasının ne kadar kalacağı. 0 bu noktayı kapatır.",
+  "pref.performance.agent_window_cooldown_seconds.label": "Ajan bekleme noktası süresi",
   "pref.readonly": "readonly access",
   "pref.reset.all": "Reset all defaults",
   "pref.reset.aria": "Global reset warning",

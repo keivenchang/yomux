@@ -681,7 +681,7 @@ function bindDelayedSessionPopover(anchor, popover, position, options = {}) {
   createHoverPopover({
     anchor,
     popover,
-    showDelay: () => (document.querySelector('.pane-tab.popover-open') ? tabPopoverFollowDelayMs : tabPopoverShowDelayMs),
+    showDelay: () => (document.querySelector('.pane-tab.popover-open, .tabber-session-tab.popover-open') ? tabPopoverFollowDelayMs : tabPopoverShowDelayMs),
     hideDelay: () => popoverHideDelayMs,
     canOpen: () => !appMenuIsOpen() && !topbar?.matches?.(':hover'),
     onQueue: position,
@@ -1689,8 +1689,9 @@ function tmuxWindowBarHtml(session, info, options = {}) {
   if (!records.length) return '';
   const disabled = options.disabled === true || readOnlyMode;
   const activeIndexOverride = tmuxWindowDisplayActiveIndex(session);
-  const labelMode = tmuxWindowBarLabelMode(records, options);
+  const labelMode = tmuxWindowBarLabelMode(records, options.infoBar === true && !options.labelMode ? {...options, labelMode: 'names'} : options);
   const disabledTitle = readOnlyMode ? t('terminal.window.adminRequired') : t('tab.unavailableFor', {name: itemLabel(session)});
+  const contextAttr = options.infoBar === true ? ' data-tmux-window-bar-context="info-bar"' : '';
   const buttons = records.map(record => {
     const infoPayload = Array.isArray(info) ? {panes: info} : info;
     const fallbackName = record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.nameLabel}`;
@@ -1701,14 +1702,19 @@ function tmuxWindowBarHtml(session, info, options = {}) {
     const active = activeIndexOverride === undefined ? recordActive : String(record.index) === activeIndexOverride;
     const pressed = active ? 'true' : 'false';
     const activeClass = active ? ' active' : '';
-    const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatus, agentKey, session);
+    const agentStatusForIcon = agentStatus
+      ? {...agentStatus, current: active, window_active: active}
+      : (active && ['claude', 'codex'].includes(agentKey)
+        ? {kind: agentKey, state: 'idle', window: record.indexText, window_index: record.index, current: true, window_active: true}
+        : agentStatus);
+    const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatusForIcon, agentKey, session);
     const title = t('terminal.window.title', {name: visibleName});
     const attrs = disabled
       ? `disabled title="${esc(disabledTitle)}" aria-label="${esc(title)}"`
       : `data-window-index="${esc(record.indexText)}" data-window-session="${esc(session)}" data-window-label="${esc(visibleName)}" title="${esc(title)}" aria-label="${esc(title)}" aria-pressed="${pressed}"`;
-    return `<button type="button" class="tab tmux-window-button${activeClass}" ${attrs}><span class="tmux-window-name-label"><span class="tmux-window-name-text">${esc(visibleName)}</span>${activityIconHtml}</span><span class="tmux-window-number-label">${esc(record.numberLabel)}</span></button>`;
+    return `<button type="button" class="tab tmux-window-button${activeClass}" ${attrs}><span class="tmux-window-name-label">${activityIconHtml}<span class="tmux-window-name-text">${esc(visibleName)}</span></span><span class="tmux-window-number-label">${esc(record.numberLabel)}</span></button>`;
   }).join('');
-  return `<div class="tmux-window-bar" data-tmux-window-bar="${esc(session)}" data-tmux-window-label-mode="${esc(labelMode)}" role="group" aria-label="${esc(t('terminal.window.groupAria'))}">${buttons}</div>`;
+  return `<div class="tmux-window-bar" data-tmux-window-bar="${esc(session)}"${contextAttr} data-tmux-window-label-mode="${esc(labelMode)}" role="group" aria-label="${esc(t('terminal.window.groupAria'))}">${buttons}</div>`;
 }
 
 function handleWindowStepButtonClick(event) {
@@ -1733,6 +1739,7 @@ function windowStepButtonFromEvent(event) {
 
 function syncTmuxWindowBarOverflow(session) {
   document.body?.querySelectorAll?.(`[data-tmux-window-bar="${cssEscape(session)}"]`)?.forEach(bar => {
+    if (bar?.dataset?.tmuxWindowBarContext === 'info-bar') return;
     if (!bar || bar.dataset.tmuxWindowLabelMode === 'numbers') return;
     if (bar.scrollWidth > bar.clientWidth + 1) bar.dataset.tmuxWindowLabelMode = 'numbers';
   });
@@ -1745,10 +1752,11 @@ function updatePanelWindowStepButtons(session, info) {
     ...(document.body?.querySelectorAll?.(barSelector) || []),
     ...(panel?.querySelectorAll?.(barSelector) || []),
   ])];
-  const html = tmuxWindowBarHtml(session, info);
+  const html = tmuxWindowBarHtml(session, info, {infoBar: true});
   if (!html) {
     bars.forEach(bar => bar.remove());
     syncTmuxWindowBarOverflow(session);
+    schedulePaneInfoBarMetaOverflowSync(panel);
     return;
   }
   const replacementFromHtml = () => {
@@ -1757,7 +1765,7 @@ function updatePanelWindowStepButtons(session, info) {
     return wrapper.firstElementChild;
   };
   const insertBarIntoDetailRow = () => {
-    const row = panel?.querySelector(':scope > .panel-detail-row') || panel?.querySelector('.panel-detail-row');
+    const row = panel?.querySelector(':scope > .pane-info-bar') || panel?.querySelector('.pane-info-bar') || panel?.querySelector(':scope > .panel-detail-row') || panel?.querySelector('.panel-detail-row');
     if (!row) return false;
     const replacement = replacementFromHtml();
     if (!replacement) return false;
@@ -1769,6 +1777,7 @@ function updatePanelWindowStepButtons(session, info) {
   if (!bars.length) {
     insertBarIntoDetailRow();
     syncTmuxWindowBarOverflow(session);
+    schedulePaneInfoBarMetaOverflowSync(panel);
     return;
   }
   bars.forEach(existing => {
@@ -1776,6 +1785,7 @@ function updatePanelWindowStepButtons(session, info) {
     if (replacement) existing.replaceWith(replacement);
   });
   syncTmuxWindowBarOverflow(session);
+  schedulePaneInfoBarMetaOverflowSync(panel);
 }
 
 function agentForPane(info, pane) {
@@ -2034,10 +2044,10 @@ function createSearchHistoryPanel() {
         ${virtualPanelControlsHtml(searchHistoryItemId)}
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
-      <div class="panel-detail-row">
-        <div class="panel-copy">
+      <div class="pane-info-bar panel-detail-row">
+        <div class="pane-info-bar-copy panel-copy">
           <div id="panel-tab-${searchHistoryItemId}" class="panel-session-label"><span class="session-button-dir">${esc(searchHistoryTabLabel())}</span></div>
-          <div id="meta-${searchHistoryItemId}" class="meta">${esc(searchHistoryPanelStatusText())}</div>
+          <div id="meta-${searchHistoryItemId}" class="pane-info-bar-meta meta">${esc(searchHistoryPanelStatusText())}</div>
         </div>
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(searchHistoryItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
       </div>

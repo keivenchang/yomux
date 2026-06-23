@@ -586,6 +586,8 @@
   "pref.path.copySettings": "Copiar caminho das configurações",
   "pref.path.rules": "regras YOLO",
   "pref.path.settings": "configurações",
+  "pref.performance.agent_window_cooldown_seconds.help": "Por quanto tempo uma janela Claude/Codex que acabou de parar de trabalhar mantém o ponto amarelo de resfriamento. 0 desativa o ponto.",
+  "pref.performance.agent_window_cooldown_seconds.label": "Duração do ponto de resfriamento do agente",
   "pref.performance.auto_approve_interval_seconds.help": "Com que frequência os workers YOLO recém-ativados inspecionam prompts visíveis do tmux.",
   "pref.performance.auto_approve_interval_seconds.label": "Intervalo de polling do worker YOLO",
   "pref.performance.event_log_refresh_ms.help": "How often the browser refreshes open YOLO/event-log panes.",

@@ -1749,12 +1749,19 @@ function yoloRotationDelay(now = Date.now()) {
   return `${-((now % duration) / 1000).toFixed(3)}s`;
 }
 
-function attentionAnimationDelay(now = Date.now()) {
-  return `${-((now % redReminderMs) / 1000).toFixed(3)}s`;
+function attentionAnimationDelay(now = Date.now(), durationMs = redReminderMs) {
+  const duration = Math.max(1, Number(durationMs) || Number(redReminderMs) || 1);
+  return `${-((now % duration) / 1000).toFixed(3)}s`;
 }
 
-function attentionAnimationStyle() {
-  return `--attention-animation-delay: ${attentionAnimationDelay()}`;
+function attentionAnimationStyle(now = Date.now(), durationMs = redReminderMs, property = '--attention-animation-delay') {
+  return `${property}: ${attentionAnimationDelay(now, durationMs)}`;
+}
+
+function agentAlternateAnimationStyle() {
+  const now = Date.now();
+  const duration = Math.max(1, Number(redReminderMs) || 1) * 2;
+  return `${attentionAnimationStyle(now)}; ${attentionAnimationStyle(now, duration, '--agent-alternate-animation-delay')}`;
 }
 
 function syncAttentionAnimation(node, active) {
@@ -1786,7 +1793,7 @@ function statusIndicatorClasses(...classes) {
 function statusIndicatorToneClasses(tone) {
   if (tone === 'positive') return ['status-indicator--positive'];
   if (tone === 'working') return ['status-indicator--working', 'heartbeat-pulse'];
-  if (tone === 'cooldown') return ['status-indicator--cooldown'];
+  if (tone === 'cooldown') return ['status-indicator--cooldown', 'heartbeat-pulse', 'attention-pulse'];
   if (tone === 'attention') return ['status-indicator--attention', 'heartbeat-pulse', 'attention-pulse'];
   if (tone === 'active') return ['status-indicator--active'];
   if (tone === 'settled') return ['status-indicator--settled'];
@@ -1795,7 +1802,7 @@ function statusIndicatorToneClasses(tone) {
 }
 
 function statusIndicatorToneStyle(tone) {
-  return ['working', 'attention'].includes(String(tone || '')) ? ` style="${attentionAnimationStyle()}"` : '';
+  return ['working', 'active', 'attention', 'cooldown'].includes(String(tone || '')) ? ` style="${attentionAnimationStyle()}"` : '';
 }
 
 function statusIndicatorModifiedClasses(modifier, tone, classes, options = {}) {

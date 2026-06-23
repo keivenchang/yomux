@@ -189,8 +189,8 @@
   --pane-tab-unfocused-active-text: var(--pane-tab-active-text);
   --pane-tab-unfocused-active-bg: var(--pane-tab-active-bg);
   --pane-tab-unfocused-active-border: var(--pane-tab-active-border);
-  /* Focused chrome-bar green — the ONE token both the tab container (.panel-head) and the info/detail
-     row (.panel-detail-row) read via --pane-bar-bg. Derived from the active accent so it flips with the
+  /* Focused chrome-bar green — the ONE token both the tab container (.panel-head) and the Info Bar
+     (.pane-info-bar, compat .panel-detail-row) read via --pane-bar-bg. Derived from the active accent so it flips with the
      active-color preference and the theme. */
   --pane-tab-strip-bg: var(--active-accent-dim);
   --pane-tab-yolo-text: var(--active-control-text);
@@ -515,7 +515,7 @@ body.theme-light {
   --active-tab-muted-bg: color-mix(in srgb, var(--active-accent-bright) 20%, var(--panel));
   --active-tab-muted-hover-bg: color-mix(in srgb, var(--active-accent-bright) 28%, var(--panel));
   --active-tab-muted-border: color-mix(in srgb, var(--active-accent-bright) 46%, var(--line));
-  /* The pane tab-strip container reads greenish-light (matching the detail row), not the old cool gray. */
+  /* The pane tab-strip container reads greenish-light (matching the Info Bar), not the old cool gray. */
   --pane-tab-strip-bg: var(--active-accent-dim);
   /* image 003/004: light-mode inactive/minimized tabs were white; tint them a very-light green a hair
      lighter than the strip so a tab still reads as a tab (dark mode keeps its own #285a2f). */

@@ -65,7 +65,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
             "file_explorer": {"root_mode": "bad", "image_open_mode": "bad", "image_preview_max_px": 5000, "refresh_seconds": 99},
             "notifications": {"notify_transitions": ["needs-input", "bogus", "done"]},
             "updates": {"notify_level": "bogus"},
-            "performance": {"latency_refresh_ms": 100, "event_log_refresh_ms": 100000},
+            "performance": {"latency_refresh_ms": 100, "event_log_refresh_ms": 100000, "agent_window_cooldown_seconds": 999},
             "terminal_editor": {"word_wrap": "yes", "line_numbers": "no"},
             "editor": {"autosave": "yes", "autosave_delay_seconds": 100, "trim_trailing_whitespace_on_save": "yes", "ensure_final_newline_on_save": "no"},
             "uploads": {"max_bytes": 999999999},
@@ -115,6 +115,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert sanitize_settings({"updates": {"notify_level": "minor"}})["updates"]["notify_level"] == "minor"
     assert settings["performance"]["latency_refresh_ms"] == 1000
     assert settings["performance"]["event_log_refresh_ms"] == 60000
+    assert settings["performance"]["agent_window_cooldown_seconds"] == 300
     assert settings["terminal_editor"]["word_wrap"] is True
     assert settings["terminal_editor"]["line_numbers"] is False
     assert settings["yoagent"]["backend"] == "auto"
@@ -245,6 +246,8 @@ def test_settings_catalog_covers_defaults_and_gui_metadata():
 
     assert catalog["appearance.tab_width"]["limits"] == {"min": 120, "max": 420}
     assert catalog["appearance.tab_width"]["units"] == "pixels"
+    assert catalog["performance.agent_window_cooldown_seconds"]["default"] == 60
+    assert catalog["performance.agent_window_cooldown_seconds"]["limits"] == {"min": 0, "max": 300}
     assert catalog["updates.notify_level"]["choices"] == ["major", "minor", "patch", "none"]
     assert catalog["uploads.subdir"]["empty_allowed"] is True
     assert catalog["uploads.image_action_order"]["list_limit"] == 9

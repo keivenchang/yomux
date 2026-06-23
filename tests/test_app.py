@@ -1876,6 +1876,28 @@ def test_activity_recency_records_genuine_just_active_input(monkeypatch):
         webapp.control_server.stop()
 
 
+def test_record_user_input_uses_live_tmux_window_when_transcript_cache_has_no_active_window(monkeypatch):
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+    webapp = app_module.TmuxWebtermApp(["7777"])
+
+    def fake_tmux(args, timeout=5.0):
+        assert args == ["display-message", "-p", "-t", "7777:", "#{window_index}"]
+        return app_module.subprocess.CompletedProcess(args, 0, "0\n", "")
+
+    try:
+        webapp.get_transcripts_payload_cache = lambda **_kwargs: ({"sessions": {"7777": {"panes": []}}}, True, 0.0)
+        monkeypatch.setattr(app_module, "tmux", fake_tmux)
+        monkeypatch.setattr(webapp.activity_ledger, "_clock", lambda: 2000.0)
+
+        webapp.record_user_input("7777", 1, data="x")
+        activity = webapp.activity_snapshot_with_recency()
+
+        assert activity["7777"]["last_user_input_ts"] == 2000.0
+        assert activity["7777:0"]["last_user_input_ts"] == 2000.0
+    finally:
+        webapp.control_server.stop()
+
+
 def test_tabber_activity_refresh_seconds_uses_performance_setting(monkeypatch):
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
     monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"performance": {"tabber_activity_refresh_ms": 2500}}})

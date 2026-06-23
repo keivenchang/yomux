@@ -1444,7 +1444,8 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
   min-width: 0;
 }
 .file-explorer-changes-panel .changes-repo-refs.compact .diff-ref-inline .diff-ref-input {
-  max-width: 16ch;
+  width: 17ch;
+  max-width: 19ch;
   margin: 0 2px;
   vertical-align: baseline;
   font-size: var(--ui-font-size-xs);
@@ -1553,8 +1554,8 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
   }
   .file-explorer-changes-head .diff-ref-input,
   .file-explorer-changes-head .diff-ref-control input {
-    width: auto;
-    min-width: 0;
+    width: min(17ch, 42vw);
+    min-width: min(15ch, 38vw);
   }
   .file-explorer-changes-head .changes-refresh {
     grid-area: refresh;
@@ -2011,7 +2012,7 @@ body.editor-theme-light .file-editor-content {
   box-shadow: none;
 }
 /* #42: editor controls (# / wrap / find / FROM-TO / diff / theme / save) render on a dedicated
-   info line BELOW the tab strip instead of cramming the tabs. */
+   toolbar line BELOW the tab strip instead of cramming the tabs. */
 .file-editor-toolbar {
   position: relative;
   display: flex;
@@ -2075,7 +2076,7 @@ body.editor-theme-light .file-editor-content {
 }
 .file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-input,
 .file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-control input {
-  width: 38px;
+  width: 17ch;
 }
 .file-editor-diff-ref-panel .diff-ref-controls.compact .diff-ref-reset {
   width: 22px;
@@ -3426,15 +3427,6 @@ body.theme-light .file-tree-row.tabber-row {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.file-tree-row.tabber-row .tabber-session-tab > .session-popover {
-  position: fixed;
-  top: var(--pane-tab-popover-top, 72px);
-  left: var(--pane-tab-popover-left, 0);
-  z-index: var(--z-tab-popover);
-  width: min(420px, calc(100vw - 18px));
-  max-height: min(78vh, 860px);
-  overflow: hidden auto;
-}
 .file-tree-row.tabber-row[data-tabber-type="session"]:not(.tabber-active-session):not(.selected):hover .tabber-session-tab {
   color: var(--pane-tab-text);
   background: var(--pane-inactive-tab-bg-hover);
@@ -3457,8 +3449,14 @@ body.theme-light .file-tree-row.tabber-row[data-tabber-type="session"]:not(.tabb
   min-width: 0;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
   vertical-align: middle;
+}
+.file-tree-row.tabber-row .tabber-window-label .agent-window-activity {
+  --agent-window-activity-inline-size: calc(var(--file-explorer-font-size) + 2px);
+  --agent-window-activity-block-size: calc(var(--file-explorer-font-size) + 2px);
+  margin-inline-start: 0;
+  margin-inline-end: 1px;
 }
 .file-tree-row.tabber-row .tabber-window-label .agent-icon {
   flex: 0 0 auto;

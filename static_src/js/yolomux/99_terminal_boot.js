@@ -109,13 +109,13 @@ function createPanel(session) {
         ${panelControlsHtml(session)}
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
-      <div class="panel-detail-row">
-        <div class="panel-popover-zone">
+      <div class="pane-info-bar panel-detail-row">
+        <div class="pane-info-bar-popover-zone panel-popover-zone">
           <div id="panel-tab-${session}" class="panel-session-label">${panelHeaderStateHtml(sessionState(session, transcriptMeta.sessions?.[session]))}</div>
-          <div id="meta-${session}" class="meta">${esc(t('pane.findingBranch'))}</div>
+          <div id="meta-${session}" class="pane-info-bar-meta meta">${esc(t('pane.findingBranch'))}</div>
           ${sessionPopoverHtml(session, transcriptMeta.sessions?.[session], sessionAgentKind(session), autoApproveStates.get(session)?.enabled === true, sessionState(session, transcriptMeta.sessions?.[session]))}
         </div>
-        ${isTmuxSession(session) ? tmuxWindowBarHtml(session, transcriptMeta.sessions?.[session]) : ''}
+        ${isTmuxSession(session) ? tmuxWindowBarHtml(session, transcriptMeta.sessions?.[session], {infoBar: true}) : ''}
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(session)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
       </div>
       <div id="terminal-pane-${session}" class="tab-pane active panel-overlay-root">
@@ -2957,11 +2957,96 @@ async function refreshTranscripts(options = {}) {
   return transcriptMetaRefreshPromise;
 }
 
-function updatePanelMeta(session, info) {
+let paneInfoBarResizeObserver = null;
+const PANE_INFO_BAR_SCROLL_START_HOLD_SECONDS = 3;
+const PANE_INFO_BAR_SCROLL_END_HOLD_SECONDS = 2;
+
+function paneInfoBarScrollDurationSeconds(distancePx) {
+  const distance = Math.max(0, Number(distancePx) || 0);
+  return Math.min(90, Math.max(12, distance / 22));
+}
+
+function paneInfoBarScrollTiming(distancePx) {
+  const travelSeconds = paneInfoBarScrollDurationSeconds(distancePx);
+  const totalSeconds = PANE_INFO_BAR_SCROLL_START_HOLD_SECONDS + travelSeconds + PANE_INFO_BAR_SCROLL_END_HOLD_SECONDS;
+  const startPercent = (PANE_INFO_BAR_SCROLL_START_HOLD_SECONDS / totalSeconds) * 100;
+  const endPercent = ((PANE_INFO_BAR_SCROLL_START_HOLD_SECONDS + travelSeconds) / totalSeconds) * 100;
+  return {
+    totalSeconds,
+    timing: `linear(0 0%, 0 ${startPercent.toFixed(2)}%, 1 ${endPercent.toFixed(2)}%, 1 100%)`,
+  };
+}
+
+function paneInfoBarMetaNodes(root = document) {
+  if (!root) return [];
+  const nodes = [];
+  if (root.matches?.('.pane-info-bar-meta')) nodes.push(root);
+  if (typeof root.querySelectorAll === 'function') nodes.push(...root.querySelectorAll('.pane-info-bar-meta'));
+  return [...new Set(nodes)];
+}
+
+function ensurePaneInfoBarResizeObserver(meta) {
+  if (!meta || typeof window === 'undefined' || typeof window.ResizeObserver !== 'function') return;
+  if (!paneInfoBarResizeObserver) {
+    paneInfoBarResizeObserver = new ResizeObserver(entries => {
+      for (const entry of entries || []) schedulePaneInfoBarMetaOverflowSync(entry?.target?.closest?.('.pane-info-bar') || entry?.target || document);
+    });
+  }
+  if (meta._paneInfoBarResizeObserved === true) return;
+  meta._paneInfoBarResizeObserved = true;
+  paneInfoBarResizeObserver.observe(meta);
+  const bar = meta.closest?.('.pane-info-bar');
+  if (bar && bar._paneInfoBarResizeObserved !== true) {
+    bar._paneInfoBarResizeObserved = true;
+    paneInfoBarResizeObserver.observe(bar);
+  }
+}
+
+function syncPaneInfoBarMetaOverflow(root = document) {
+  for (const meta of paneInfoBarMetaNodes(root)) {
+    ensurePaneInfoBarResizeObserver(meta);
+    const viewport = meta.querySelector?.('.pane-info-bar-scroll-viewport');
+    const text = viewport?.querySelector?.('.pane-info-bar-scroll-text');
+    if (!viewport || !text) {
+      meta.classList?.remove?.('pane-info-bar-meta-overflow');
+      meta.style?.removeProperty?.('--pane-info-bar-scroll-distance');
+      meta.style?.removeProperty?.('--pane-info-bar-scroll-offset');
+      meta.style?.removeProperty?.('--pane-info-bar-scroll-duration');
+      meta.style?.removeProperty?.('--pane-info-bar-scroll-timing');
+      continue;
+    }
+    const viewportWidth = Number(viewport.clientWidth || viewport.getBoundingClientRect?.().width || 0);
+    const textWidth = Number(text.scrollWidth || text.getBoundingClientRect?.().width || 0);
+    const distance = Math.max(0, Math.ceil(textWidth - viewportWidth));
+    const overflowing = distance > 1;
+    meta.classList?.toggle?.('pane-info-bar-meta-overflow', overflowing);
+    if (overflowing) {
+      const scrollTiming = paneInfoBarScrollTiming(distance);
+      meta.style?.setProperty?.('--pane-info-bar-scroll-distance', `${distance}px`);
+      meta.style?.setProperty?.('--pane-info-bar-scroll-offset', `${-distance}px`);
+      meta.style?.setProperty?.('--pane-info-bar-scroll-duration', `${scrollTiming.totalSeconds.toFixed(2)}s`);
+      meta.style?.setProperty?.('--pane-info-bar-scroll-timing', scrollTiming.timing);
+    } else {
+      meta.style?.removeProperty?.('--pane-info-bar-scroll-distance');
+      meta.style?.removeProperty?.('--pane-info-bar-scroll-offset');
+      meta.style?.removeProperty?.('--pane-info-bar-scroll-duration');
+      meta.style?.removeProperty?.('--pane-info-bar-scroll-timing');
+    }
+  }
+}
+
+function schedulePaneInfoBarMetaOverflowSync(root = document) {
+  const run = () => syncPaneInfoBarMetaOverflow(root);
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+  else setTimeout(run, 0);
+}
+
+function updatePanelInfoBarMeta(session, info) {
   const meta = document.getElementById(`meta-${session}`);
   if (!meta) return;
-  meta.innerHTML = stripTitleAttrs(projectMetaHtml(session, info));
+  meta.innerHTML = stripTitleAttrs(paneInfoBarMetaHtml(session, info));
   meta.removeAttribute('title');
+  schedulePaneInfoBarMetaOverflowSync(meta);
 }
 
 function updatePanelHeader(session, info) {
@@ -2977,7 +3062,7 @@ function updatePanelHeader(session, info) {
     tab.innerHTML = panelHeaderStateHtml(state);
     tab.removeAttribute('title');
   }
-  updatePanelMeta(session, info);
+  updatePanelInfoBarMeta(session, info);
   const popover = panel?.querySelector(':scope .panel-popover-zone > .session-popover');
   if (popover) {
     const agentKind = sessionAgentKind(session);

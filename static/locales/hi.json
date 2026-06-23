@@ -586,6 +586,8 @@
   "pref.path.copySettings": "Settings path कॉपी करें",
   "pref.path.rules": "YOLO नियम",
   "pref.path.settings": "settings",
+  "pref.performance.agent_window_cooldown_seconds.help": "Claude/Codex विंडो के काम बंद करने के बाद पीला कूलडाउन डॉट कितनी देर दिखे। 0 कूलडाउन डॉट बंद करता है।",
+  "pref.performance.agent_window_cooldown_seconds.label": "एजेंट कूलडाउन डॉट अवधि",
   "pref.performance.auto_approve_interval_seconds.help": "नव-सक्षम YOLO workers कितनी बार visible tmux prompts की जांच करते हैं।",
   "pref.performance.auto_approve_interval_seconds.label": "YOLO worker poll अंतराल",
   "pref.performance.event_log_refresh_ms.help": "How often the browser refreshes open YOLO/event-log panes.",

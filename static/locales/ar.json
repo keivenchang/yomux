@@ -586,6 +586,8 @@
   "pref.path.copySettings": "نسخ مسار الإعدادات",
   "pref.path.rules": "قواعد YOLO",
   "pref.path.settings": "الإعدادات",
+  "pref.performance.agent_window_cooldown_seconds.help": "مدة بقاء النقطة الصفراء بعد توقف نافذة Claude/Codex عن العمل. القيمة 0 تعطل نقطة التهدئة.",
+  "pref.performance.agent_window_cooldown_seconds.label": "مدة نقطة تهدئة الوكيل",
   "pref.performance.auto_approve_interval_seconds.help": "عدد مرات فحص عمال YOLO المُفعَّلين حديثاً للطلبات المرئية في tmux.",
   "pref.performance.auto_approve_interval_seconds.label": "فترة استطلاع عامل YOLO",
   "pref.performance.event_log_refresh_ms.help": "How often the browser refreshes open YOLO/event-log panes.",

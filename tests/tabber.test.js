@@ -1154,7 +1154,9 @@ async function runTabberSuite() {
     assert.ok(/\.file-tree-row\.tabber-row \.tabber-session-tab > \.pane-tab-core\s*\{[\s\S]*flex:\s*1 1 auto[\s\S]*inline-size:\s*100%/.test(css), 'TR3: shared tab chrome stretches inside the Tabber row wrapper');
     assert.ok(/\.file-tree-row\.tabber-row \.tabber-session-tab \.session-button-prefix\s*\{[\s\S]*flex:\s*0 0 auto/.test(css), 'A4/TR1: the shared session number prefix stays visible before detail truncation');
     assert.ok(/\.file-tree-row\.tabber-row \.tabber-session-tab \.tab-inline-detail\s*\{[\s\S]*flex:\s*1 1 auto[\s\S]*min-width:\s*0[\s\S]*text-overflow:\s*ellipsis/.test(css), 'A4/TR1: the shared tab detail truncates inside the stretched Tabber label');
-    assert.ok(/\.file-tree-row\.tabber-row \.tabber-session-tab > \.session-popover\s*\{[\s\S]*position:\s*fixed[\s\S]*z-index:\s*var\(--z-tab-popover\)/.test(css), 'TR2: Tabber session popovers use the same fixed-position popover layer as real tabs');
+    assert.ok(/\.pane-tab > \.session-popover,\s*\.file-tree-row\.tabber-row \.tabber-session-tab > \.session-popover,\s*\.pane-tab-detached-popover\s*\{[\s\S]*position:\s*fixed[\s\S]*z-index:\s*var\(--z-pane-modal\)/.test(css), 'TR2: Tabber session popovers use the same fixed-position popover surface as real tabs');
+    assert.ok(/\.pane-tab\.popover-open > \.session-popover,\s*\.file-tree-row\.tabber-row \.tabber-session-tab\.popover-open > \.session-popover,\s*\.pane-tab-detached-popover\.popover-open\s*\{[\s\S]*visibility:\s*visible[\s\S]*opacity:\s*1/.test(css), 'TR2: Tabber session popovers open through the same visibility selector as real tabs');
+    assert.equal(/\.file-tree-row\.tabber-row \.tabber-session-tab > \.session-popover\s*\{[\s\S]*width:\s*min\(420px/.test(css), false, 'TR2: Tabber does not keep a divergent one-off popover width');
     assert.equal(source.includes("tabber: {type: 'loading'"), false, 'Tabber no longer renders a client-side touched-path loading row');
     assert.ok(source.includes('function tabberLookbackControlHtml()') && source.includes('data-tabber-lookback'), 'Tabber renders a dedicated touched-path lookback control');
     assert.ok(/function setTabberSessionFileLookbackHours\(hours, options = \{\}\)[\s\S]*clearTabberSessionFilesStates\(\)[\s\S]*fetchTabberActivity\(\)/.test(source), 'changing Tabber lookback reloads the cached activity agent-window records');
@@ -1194,7 +1196,7 @@ async function runTabberSuite() {
     assert.ok(source.includes('function setTreeItemAria(row') && (source.match(/setTreeItemAria\(row/g) || []).length >= 2, 'DOIT.61 B5: treeitem aria is shared');
     assert.ok(source.includes('function normalizeGitStatus(status)') && source.includes('return normalizeGitStatus(fileTreeChangedFile(path)?.status)'), 'DOIT.61 B6: git status normalization is shared');
     assert.equal(source.includes("endsWith(' ●')"), false, 'DOIT.61 B7: active window state is not parsed out of the label string');
-    assert.ok(source.includes("tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true, activityIconHtml: data.activityIconHtml, pid: data.pid})") && source.includes('function agentWindowPayloadCurrent(agent)'), 'DOIT.61 B7/PD: current window state, activity icons, and pid are passed as separate data');
+    assert.ok(source.includes("tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true, pid: data.pid})") && source.includes('function agentWindowPayloadCurrent(agent)') && source.includes('data.activityIconHtml || agentIcon'), 'DOIT.61 B7/PD: current window state, activity glyphs, and pid are passed as separate data');
     assert.ok(/function sessionPopoverWindowPidByIndex\(info\)[\s\S]*tmuxWindowRecords\(info\?\.panes \|\| \[\]\)/.test(source), 'PP1: popover PID comes from the same tmux window record source as Tabber');
     assert.ok(source.includes('tmuxWindowDisplayLabel(descriptor, agent.pid)'), 'PP1: popover PID label reuses the shared tmux window pid formatter');
     assert.ok(/type === 'window' && session\) \{[\s\S]*switchWindow\(\);[\s\S]*selectSession\(session, \{userInitiated: true\}\)/.test(source), 'Tabber window clicks install the tmux-window override before focus/layout can sync against stale active metadata');
@@ -1293,6 +1295,9 @@ async function runTabberSuite() {
     const scopedRepos1 = scopedTree.entriesByDir.get('/' + scopedSession.name + '/' + scopedWindow1.name).map(row => row.tabber.label);
     assert.deepEqual(scopedRepos0, ['/home/u/codex-a'], 'Tabber repo rows under window 0 use only files attributed to tmux window 0');
     assert.deepEqual(scopedRepos1, ['/home/u/codex-b'], 'Tabber repo rows under window 1 use only files attributed to tmux window 1');
+    assert.ok((scopedWindow0.tabber.activityIconHtml || '').includes('agent-window-agent-icon--active'), 'current idle Codex Tabber window renders the moving active glyph');
+    assert.equal((scopedWindow0.tabber.activityIconHtml || '').includes('agent-window-status-dot'), false, 'current idle Codex Tabber window does not add a competing status dot');
+    assert.equal((scopedWindow1.tabber.activityIconHtml || '').includes('agent-window-agent-icon--active'), false, 'inactive idle Codex Tabber window does not pulse');
 
     const sortedApi = loadYolomux('', ['1', '2', '3']);
     sortedApi.setTranscriptInfoForTest('1', {panes: [{window: '0', pane: '0', window_active: true, active: true, process_label: 'bash', command: 'bash'}]});
@@ -1407,9 +1412,10 @@ async function runTabberSuite() {
     assert.ok(rows.some(r => r.type === 'window' && r.nameHtml.includes('tabber-window-label') && r.nameHtml.includes('agent-icon codex')), 'Codex Tabber window rows show the shared Codex icon');
     const claudeWindowRow = activeWindowRow;
     assert.ok(/tabber-window-label[^>]*>[\s\S]*agent-icon claude[\s\S]*tabber-window-text[^>]*>0:claude</.test(claudeWindowRow?.nameHtml || ''), 'Claude icon renders before the canonical window name');
-    assert.equal(/tabber-window-text[^>]*>0:claude<[\s\S]*agent-icon claude/.test(claudeWindowRow?.nameHtml || ''), false, 'Claude icon no longer renders after the canonical window name');
+    assert.equal(/tabber-window-label[^>]*>[\s\S]*tabber-window-text[^>]*>0:claude<[\s\S]*agent-icon claude/.test(claudeWindowRow?.nameHtml || ''), false, 'Claude icon no longer renders after the canonical window name');
     assert.equal(/agent-icon[\s\S]*tabber-window-text[^>]*>1:bash</.test(shellWindowRow?.nameHtml || ''), false, 'bash Tabber rows do not gain a leading agent icon');
-    assert.ok(/tabber-window-text[^>]*>0:claude<[\s\S]*status-indicator--dot[\s\S]*tabber-window-pid/.test(claudeWindowRow?.nameHtml || ''), 'activity dot and pid stay after the canonical window name');
+    assert.ok(/agent-icon claude[^"]*agent-window-agent-icon--working[\s\S]*tabber-window-text[^>]*>0:claude<[\s\S]*tabber-window-pid/.test(claudeWindowRow?.nameHtml || ''), 'working agent glyph stays before the canonical window name and pid stays after it');
+    assert.equal(/status-indicator--dot[\s\S]*tabber-window-text[^>]*>0:claude<|tabber-window-text[^>]*>0:claude<[\s\S]*status-indicator--dot[\s\S]*tabber-window-pid/.test(claudeWindowRow?.nameHtml || ''), false, 'working Tabber rows do not render a competing status dot around the label');
     api.setFileExplorerTreeSortModeForTest('newest');
     api.setTabberActivityForTest({activity: {'1:1': {last_user_input_ts: 99999}, '1:0': {last_user_input_ts: 1}}});
     api.setTabberCollapsedForTest(['/s_1']);

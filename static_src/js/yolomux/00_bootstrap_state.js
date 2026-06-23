@@ -720,6 +720,7 @@ let latencyRefreshMs = initialSetting('performance.latency_refresh_ms');
 let eventLogRefreshMs = initialSetting('performance.event_log_refresh_ms');
 let tmuxSignalState = null;
 tabberActivityRefreshMs = initialSetting('performance.tabber_activity_refresh_ms');
+let agentWindowCooldownSeconds = initialSetting('performance.agent_window_cooldown_seconds');
 let redReminderMs = initialSetting('appearance.red_reminder_ms');
 let yoloRotateMs = initialSetting('appearance.yolo_rotate_ms');
 const latencySamplesMax = 24;

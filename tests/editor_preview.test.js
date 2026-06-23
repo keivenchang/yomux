@@ -126,24 +126,34 @@ async function runEditorPreviewSuite() {
     const layoutSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
     const fileTreeSource = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
     const popoverSource = fs.readFileSync('static_src/js/yolomux/60_popovers_tabs.js', 'utf8');
-    assert.ok(/function statusIndicatorToneClasses\(tone\)[\s\S]*tone === 'working'[\s\S]*status-indicator--working', 'heartbeat-pulse'[\s\S]*tone === 'cooldown'[\s\S]*status-indicator--cooldown'[\s\S]*tone === 'attention'[\s\S]*status-indicator--attention', 'heartbeat-pulse', 'attention-pulse'[\s\S]*tone === 'active'[\s\S]*status-indicator--active'[\s\S]*tone === 'settled'[\s\S]*status-indicator--settled[\s\S]*tone === 'idle'[\s\S]*status-indicator--idle/.test(layoutSource), 'ASK?/activity-dot status tones are centralized in one shared parent helper');
+    assert.ok(/function statusIndicatorToneClasses\(tone\)[\s\S]*tone === 'working'[\s\S]*status-indicator--working', 'heartbeat-pulse'[\s\S]*tone === 'cooldown'[\s\S]*status-indicator--cooldown', 'heartbeat-pulse', 'attention-pulse'[\s\S]*tone === 'attention'[\s\S]*status-indicator--attention', 'heartbeat-pulse', 'attention-pulse'[\s\S]*tone === 'active'[\s\S]*status-indicator--active'[\s\S]*tone === 'settled'[\s\S]*status-indicator--settled[\s\S]*tone === 'idle'[\s\S]*status-indicator--idle/.test(layoutSource), 'ASK?/activity-dot status tones are centralized in one shared parent helper');
     assert.ok(/statusIndicatorInlineClasses\(askTone,\s*'topbar-activity-ask'/.test(layoutSource), 'topbar ASK? badges inherit shared inline status behavior');
     assert.ok(/statusIndicatorTextClasses\(tone,\s*classes\)/.test(layoutSource), 'tab ASK? badges inherit shared text status behavior');
     assert.ok(/function statusIndicatorLabelClasses\(tone,\s*\.\.\.classes\)[\s\S]*statusIndicatorModifiedClasses\('status-indicator--label'/.test(layoutSource), 'ASK? status labels inherit shared status-indicator tone behavior without badge text-transform');
-    assert.ok(/const tone = agentWindowActivityTone\(item\.state\)[\s\S]*statusIndicatorDotClasses\(\s*tone,\s*'agent-window-activity-icon'/.test(fileTreeSource), 'tmux window activity circles inherit shared dot status behavior through the shared activity-tone helper');
-    assert.ok(/statusIndicatorDotClasses\(\s*dotTone,\s*'session-agent-dot'/.test(popoverSource), 'session popover activity circles inherit shared dot status behavior');
+    assert.ok(/function agentWindowStatusDotHtml\(item\)[\s\S]*const tone = agentWindowActivityTone\(item\.state\)[\s\S]*statusIndicatorDotClasses\(\s*tone,[\s\S]*'agent-window-status-dot'/.test(fileTreeSource), 'tmux window status dots inherit shared dot behavior through the shared activity-tone helper');
+    assert.ok(/sessionPopoverAgentWindowRowHtml\(agent[\s\S]*agentWindowActivityIconHtmlForStatus\(agent, agent\.kind/.test(popoverSource), 'session popover agent rows reuse the shared activity glyph/status renderer');
     assert.ok(/\.status-indicator\s*\{[^}]*display:\s*inline-flex/.test(sessionsCss), 'ASK?/activity-dot markers share the status-indicator parent');
     assert.ok(/\.status-indicator--text\s*\{[^}]*border:\s*1px solid var\(--divider\)/.test(sessionsCss), 'text status badges inherit pill framing from the shared parent modifier');
     assert.ok(/\.status-indicator--dot\s*\{[^}]*color:\s*var\(--muted\)/.test(sessionsCss), 'circle status markers inherit dot color/shape from the shared parent modifier');
     assert.ok(/\.heartbeat-pulse\s*\{[^}]*animation-duration:\s*var\(--pulse-duration\)[^}]*animation-timing-function:\s*var\(--pulse-easing\)/.test(sessionsCss), 'heartbeat indicators share one pulse timing parent');
     assert.ok(/\.status-indicator--dot\s*\{[^}]*border-radius:\s*999px[\s\S]*opacity:\s*1/.test(sessionsCss), 'circle status markers stay fully opaque while their glow pulses');
     assert.ok(/\.status-indicator--dot\.heartbeat-pulse\s*\{[\s\S]*--attention-pulse-brightness-rest:\s*0\.82[\s\S]*--attention-pulse-brightness-peak:\s*1\.34/.test(sessionsCss), 'pulsing dots opt into a brightness channel so the pulse remains visible on active accent backgrounds');
-    assert.ok(/\.status-indicator--dot\.status-indicator--working\.heartbeat-pulse\s*\{[^}]*animation-name:\s*attention-ring-fade[\s\S]*animation-duration:\s*var\(--pulse-duration\)[\s\S]*animation-delay:\s*var\(--attention-animation-delay/.test(sessionsCss), 'working circle markers inherit the shared phased glow pulse');
-    assert.equal(layoutSource.includes("status-indicator--cooldown', 'heartbeat-pulse"), false, 'cooldown tone does not inherit the heartbeat class');
-    assert.equal(/status-indicator--dot\.status-indicator--cooldown\.heartbeat-pulse|\.status-indicator--cooldown\s*\{[^}]*--attention-ring-rgb/.test(sessionsCss), false, 'cooldown circle markers stay static yellow without pulse/glow');
+    assert.ok(/\.agent-window-agent-icon--working,[\s\S]*\.agent-window-agent-icon--active\s*\{[^}]*animation-name:\s*agent-symbol-glow-cadence[\s\S]*animation-duration:\s*var\(--pulse-duration\)[\s\S]*animation-delay:\s*var\(--attention-animation-delay/.test(sessionsCss), 'working and active agent glyphs inherit the same phased cadence as ASK?');
+    assert.ok(/@keyframes agent-symbol-glow-cadence\s*\{[\s\S]*0%, 100%[\s\S]*45%, 55%/.test(sessionsCss), 'working glyph glow uses the same rest/peak timing stops as ASK?');
+    assert.ok(/\.agent-window-activity\s*\{[\s\S]*--agent-alternate-pulse-duration:\s*calc\(var\(--pulse-duration\) \* 2\)/.test(sessionsCss), 'alternating agent glyph/dot cycles are two normal pulse beats long');
+    assert.ok(/\.agent-window-activity--attention \.agent-window-agent-icon,[\s\S]*\.agent-window-activity--cooldown \.agent-window-agent-icon\s*\{[\s\S]*animation-name:\s*agent-symbol-status-alternate[\s\S]*animation-duration:\s*var\(--agent-alternate-pulse-duration\)[\s\S]*animation-delay:\s*var\(--agent-alternate-animation-delay, var\(--attention-animation-delay/.test(sessionsCss), 'ASK?/cooldown agent glyphs alternate with the status dot on the two-beat cadence');
+    assert.ok(/\.agent-window-activity--attention \.agent-window-status-dot\.status-indicator,[\s\S]*\.agent-window-activity--cooldown \.agent-window-status-dot\.status-indicator\s*\{[\s\S]*animation-name:\s*agent-status-dot-alternate[\s\S]*animation-duration:\s*var\(--agent-alternate-pulse-duration\)[\s\S]*animation-delay:\s*var\(--agent-alternate-animation-delay, var\(--attention-animation-delay/.test(sessionsCss), 'ASK?/cooldown status dots alternate with the agent glyph on the two-beat cadence');
+    assert.ok(/@keyframes agent-symbol-status-alternate\s*\{[\s\S]*22\.5%, 27\.5%\s*\{[\s\S]*opacity:\s*1[\s\S]*50%, 72\.5%, 77\.5%\s*\{[\s\S]*opacity:\s*0\.16/.test(sessionsCss), 'alternating AI glyph peaks during the first ASK? bright plateau and dims during the dot beat');
+    assert.ok(/@keyframes agent-status-dot-alternate\s*\{[\s\S]*0%, 22\.5%, 27\.5%, 100%\s*\{[\s\S]*opacity:\s*0\.16[\s\S]*72\.5%, 77\.5%\s*\{[\s\S]*opacity:\s*1/.test(sessionsCss), 'alternating status dot peaks during the second ASK? bright plateau instead of between ASK? pulses');
+    assert.ok(/\.agent-window-activity--attention,\s*\.agent-window-activity--cooldown\s*\{[\s\S]*display:\s*inline-grid[\s\S]*grid-template:\s*"agent-status" 1fr \/ 1fr[\s\S]*place-items:\s*center/.test(sessionsCss), 'ASK?/cooldown agent glyphs and dots occupy one shared overlay slot');
+    assert.ok(/\.agent-window-activity--attention \.agent-window-agent-icon,[\s\S]*\.agent-window-activity--cooldown \.agent-window-status-dot\s*\{[\s\S]*grid-area:\s*agent-status/.test(sessionsCss), 'ASK?/cooldown glyph and dot share the same grid area instead of sitting side by side');
+    assert.ok(layoutSource.includes("status-indicator--cooldown', 'heartbeat-pulse', 'attention-pulse"), 'cooldown tone inherits the shared pulse class for the alternating yellow dot');
+    assert.ok(/\.status-indicator--cooldown\s*\{[^}]*--attention-ring-rgb:\s*245 197 66/.test(sessionsCss), 'cooldown markers use the yellow glow channel');
     assert.equal(/\.status-indicator--dot\.status-indicator--working\.heartbeat-pulse,[\s\S]*?animation-name:\s*command-palette-thinking/.test(sessionsCss), false, 'status dots do not use the old command-palette-thinking pulse');
-    assert.ok(/\.status-indicator--working\s*\{[^}]*--attention-ring-rgb:\s*82 210 115/.test(sessionsCss), 'working dot glow is green');
-    assert.ok(/\.status-indicator--cooldown\s*\{[^}]*color:\s*var\(--accent-gold\)/.test(sessionsCss), 'cooldown dot is static yellow');
+    assert.equal(/\.agent-window-agent-icon--working\s*\{[^}]*--attention-ring-rgb:\s*82 210 115/.test(sessionsCss), false, 'working agent glyph glow is not green');
+    assert.ok(/\.agent-window-agent-icon--working\.agent-icon\.codex,[\s\S]*\.agent-window-agent-icon--active\.agent-icon\.codex\s*\{[^}]*--agent-working-glow-rgb:\s*102 126 248/.test(sessionsCss), 'working and active Codex glyphs glow with the Codex icon color');
+    assert.ok(/\.agent-window-agent-icon--working\.agent-icon\.claude,[\s\S]*\.agent-window-agent-icon--active\.agent-icon\.claude\s*\{[^}]*--agent-working-glow-rgb:\s*207 117 84/.test(sessionsCss), 'working and active Claude glyphs glow with the Claude icon color');
+    assert.ok(/\.status-indicator--cooldown\s*\{[^}]*color:\s*var\(--accent-gold\)/.test(sessionsCss), 'cooldown dot is yellow');
     assert.ok(/\.status-indicator--active\s*\{[^}]*color:\s*var\(--file-tree-recency-max-contrast, var\(--text\)\)/.test(sessionsCss), 'active labels use the same max-contrast token as plain hot recency');
     assert.ok(/\.status-indicator--attention\s*\{[^}]*--attention-ring-rgb:\s*255 51 71/.test(sessionsCss), 'ASK? dot glow is red');
     assert.ok(/\.status-indicator--dot\.status-indicator--attention\s*\{[^}]*color:\s*var\(--bad\)/.test(sessionsCss), 'ASK? dot glyphs use saturated red instead of pale danger text');
@@ -710,7 +720,7 @@ async function runEditorPreviewSuite() {
     assert.ok(windowBarHtml.includes('data-window-index="2"'), 'P5: window bar button targets window 2');
     assert.ok(/class="tab tmux-window-button active"[^>]*data-window-index="3"[^>]*aria-pressed="true"/.test(windowBarHtml), 'P5: active tmux window button is highlighted and pressed');
     assert.ok(windowBarHtml.includes('<span class="tmux-window-name-label"><span class="tmux-window-name-text">1:bash</span></span>'), 'tmux window buttons show index:name without pid');
-    assert.ok(windowBarHtml.includes('<span class="tmux-window-name-label"><span class="tmux-window-name-text">2:codex</span></span>'), 'AI tmux window button labels use the canonical index:agent kind');
+    assert.ok(/<span class="tmux-window-name-label"><span class="agent-window-activity[\s\S]*agent-icon codex[\s\S]*<span class="tmux-window-name-text">2:codex<\/span>/.test(windowBarHtml), 'AI tmux window button labels use the shared glyph before the canonical index:agent kind');
     assert.equal(windowBarHtml.includes('(pid='), false, 'tmux window button labels do not show process pids');
     assert.equal(windowBarHtml.includes('3:node'), false, 'DOIT.53 P2: process-aware agent labels beat raw tmux window names like node');
     assert.equal(windowBarHtml.includes('data-window-agent'), false, 'tmux window buttons no longer carry per-agent color tags');
@@ -720,17 +730,17 @@ async function runEditorPreviewSuite() {
       {kind: 'codex', state: 'idle', window_index: 2, last_active_ts: nowSeconds - 120, idle_since: nowSeconds - 120, window_label: '2:codex'},
     ]});
     assert.equal(api.agentWindowActivityIconForTest('codex', 'working', 0).icon, '●', 'working AI windows use the shared working icon');
-    assert.equal(api.agentWindowActivityIconForTest('claude', 'idle', 60).icon, '○', 'idle AI windows use the shared idle icon after one minute');
+    assert.equal(api.agentWindowActivityIconForTest('claude', 'idle', 60), null, 'idle AI windows show the agent glyph only, not a black/hollow dot');
     assert.equal(api.agentWindowActivityIconForTest('claude', 'idle', 10), null, 'recent idle AI windows do not show an idle icon yet');
     assert.equal(api.agentWindowActivityIconForTest('shell', 'working', 300), null, 'non-AI windows do not show working or idle icons');
     const transitionKey = '1:3:codex';
     assert.equal(api.agentWindowActivityIconForTest('codex', 'working', 0, {transitionKey, nowSeconds: 1000, scheduleRefresh: false}).state, 'working', 'working transition state is recorded');
     assert.equal(api.agentWindowActivityIconForTest('codex', 'idle', 0, {transitionKey, nowSeconds: 1005, scheduleRefresh: false}).state, 'cooldown', 'a window that just stopped working shows static yellow for the dedicated 60-second cooldown');
     assert.equal(api.agentWindowActivityIconForTest('codex', 'idle', 20, {transitionKey, nowSeconds: 1020, scheduleRefresh: false}).state, 'cooldown', 'the stopped marker stays yellow during the dedicated cooldown instead of using file-recency timing');
-    assert.equal(api.agentWindowActivityIconForTest('codex', 'idle', 0, {transitionKey, nowSeconds: 1065, scheduleRefresh: false}).state, 'settled', 'after the dedicated cooldown the stopped marker becomes settled black');
+    assert.equal(api.agentWindowActivityIconForTest('codex', 'idle', 0, {transitionKey, nowSeconds: 1065, scheduleRefresh: false}), null, 'after the dedicated cooldown the stopped marker disappears instead of becoming black');
     assert.equal(api.agentWindowActivityIconForTest('codex', 'needs-input', 0, {transitionKey, nowSeconds: 1061, scheduleRefresh: false}).state, 'attention', 'needs-input outranks cooldown and stays on the persistent red attention state');
     assert.equal(api.agentWindowActivityIconForTest('codex', 'approval', 0, {transitionKey, nowSeconds: 1062, scheduleRefresh: false}).state, 'attention', 'approval prompts use the same persistent red attention state');
-    assert.equal(api.agentWindowActivityIconForTest('codex', 'idle', 120, {transitionKey: 'cold-idle', nowSeconds: 2000, scheduleRefresh: false}).state, 'idle', 'an AI window never observed working stays hollow idle instead of flashing red');
+    assert.equal(api.agentWindowActivityIconForTest('codex', 'idle', 120, {transitionKey: 'cold-idle', nowSeconds: 2000, scheduleRefresh: false}), null, 'an AI window never observed working stays glyph-only instead of showing a black idle dot');
     api.setAutoApproveStateForTest('1', {agent_windows: [
       {kind: 'claude', state: 'needs-input', window_index: 0, window_label: '0:claude'},
     ]});
@@ -743,9 +753,9 @@ async function runEditorPreviewSuite() {
       {kind: 'codex', state: 'idle', window_index: 2, last_active_ts: nowSeconds - 120, idle_since: nowSeconds - 120, window_label: '2:codex'},
     ]});
     const windowBarWithStatusHtml = api.tmuxWindowBarHtml('1', {panes: windowPanes});
-    assert.ok(windowBarWithStatusHtml.includes('status-indicator') && windowBarWithStatusHtml.includes('agent-window-activity-icon--working'), 'window bar renders the shared working icon after AI labels');
-    assert.ok(windowBarWithStatusHtml.includes('status-indicator--dot') && windowBarWithStatusHtml.includes('agent-window-activity-icon--idle'), 'window bar renders the shared idle icon after one-minute idle AI labels');
-    assert.ok(!/<span class="tmux-window-name-text">1:bash<\/span><span class="agent-window-activity-icon/.test(windowBarWithStatusHtml), 'bash window labels do not get AI activity icons');
+    assert.ok(windowBarWithStatusHtml.includes('agent-icon codex') && windowBarWithStatusHtml.includes('agent-window-activity-icon--working') && !/agent-window-activity-icon--working[^"]*status-indicator--dot/.test(windowBarWithStatusHtml), 'window bar renders a pulsing Codex glyph instead of a green working dot after AI labels');
+    assert.equal(/agent-window-status-dot[^"]*agent-window-activity-icon--idle/.test(windowBarWithStatusHtml), false, 'window bar does not render black/hollow idle dots after one-minute idle AI labels');
+    assert.ok(!/<span class="agent-window-activity[\s\S]*<span class="tmux-window-name-text">1:bash<\/span>/.test(windowBarWithStatusHtml), 'bash window labels do not get AI activity icons');
     const manyWindows = Array.from({length: 9}, (_unused, index) => ({
       window: String(index + 1),
       window_name: `w${index + 1}`,
@@ -755,6 +765,28 @@ async function runEditorPreviewSuite() {
     }));
     assert.equal(api.tmuxWindowBarLabelMode(api.tmuxWindowRecords(manyWindows)), 'numbers', 'P5: many windows fall back to numeric labels');
     assert.ok(api.tmuxWindowBarHtml('1', {panes: manyWindows}).includes('data-tmux-window-label-mode="numbers"'), 'P5: numeric fallback is reflected in the rendered bar');
+    assert.ok(api.tmuxWindowBarHtml('1', {panes: manyWindows}, {infoBar: true}).includes('data-tmux-window-label-mode="names"'), 'Info Bar tmux window buttons keep names instead of minimizing to numbers');
+    const longBranch = 'keivenchang/DIS-2239__parity-commit-link-frontend-crates';
+    const longTitle = 'fix(performance): repair v1 PARITY commit + case-doc links after';
+    const longMetaInfo = {
+      selected_pane: {current_path: '/home/test/dynamo/dynamo4'},
+      project: {
+        git: {root: '/home/test/dynamo/dynamo4', cwd: '/home/test/dynamo/dynamo4', branch: longBranch, dirty_count: 1},
+        pull_request: {number: 76, url: 'https://github.example/pr/76', title: longTitle, draft: true, checks: {state: 'unknown'}},
+        linear: [{identifier: 'DIS-2239', state: 'In Review', title: 'Parity commit link frontend crates', url: 'https://linear.test/DIS-2239'}],
+        repos: [
+          {root: '/home/test/dynamo/dynamo4', cwd: '/home/test/dynamo/dynamo4', branch: longBranch, dirty_count: 1, primary: true},
+          {root: '/home/test/dynamo/dynamo-utils.dev', cwd: '/home/test/dynamo/dynamo-utils.dev', branch: 'main', dirty_count: 0},
+        ],
+      },
+    };
+    const paneInfoBarMetaHtml = api.paneInfoBarMetaHtml('1', longMetaInfo);
+    assert.ok(paneInfoBarMetaHtml.includes(longBranch), 'Info Bar metadata keeps the full branch name instead of inserting an ellipsis');
+    assert.ok(paneInfoBarMetaHtml.includes(longTitle), 'Info Bar metadata keeps the full description instead of pre-truncating it');
+    assert.equal(paneInfoBarMetaHtml.includes('...'), false, 'Info Bar metadata does not use shortText/shortBranch ellipses');
+    assert.ok(/class="pane-info-bar-controls"[\s\S]*meta-repo-switch/.test(paneInfoBarMetaHtml), 'Info Bar repo selector is rendered in a fixed controls slot');
+    assert.ok(/pane-info-bar-controls[\s\S]*pane-info-bar-scroll-viewport/.test(paneInfoBarMetaHtml), 'Info Bar scroll viewport starts after the fixed repo selector');
+    assert.ok(/pane-info-bar-scroll-viewport[\s\S]*keivenchang\/DIS-2239__parity-commit-link-frontend-crates[\s\S]*DIS-2239 In Review[\s\S]*fix\(performance\): repair v1 PARITY commit \+ case-doc links after/.test(paneInfoBarMetaHtml), 'Info Bar branch, issue state, and title live inside the scroll viewport');
     api.setTranscriptInfoForTest('1', {panes: windowPanes});
     const controls = api.panelControlsHtml('1');
     assert.equal(controls.includes('data-tmux-window-bar="1"'), false, 'DOIT.53 P1: tmux pane header controls do not render the window bar');
@@ -764,25 +796,38 @@ async function runEditorPreviewSuite() {
     assert.equal(controls.includes('>codex</button>') || controls.includes('>node</button>'), false, 'DOIT.56 N3: terminal header no longer duplicates active window/process names');
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     const yoloCss = fs.readFileSync('static/yolomux.css', 'utf8');
-    assert.ok(/tmuxWindowBarHtml\(session, transcriptMeta\.sessions\?\.\[session\]\)[\s\S]{0,180}class="panel-detail-close"/.test(source), 'DOIT.53 P1: tmux window bar is rendered on the detail row before the close button');
+    assert.ok(/tmuxWindowBarHtml\(session, transcriptMeta\.sessions\?\.\[session\], \{infoBar: true\}\)[\s\S]{0,180}class="panel-detail-close"/.test(source), 'tmux window bar is rendered on the Info Bar before the close button');
     assert.ok(/delegate\(panel, 'click', '\[data-window-dir\], \[data-window-index\]'/.test(source), 'DOIT.53 P3: in-panel window buttons use the shared delegated click path');
-    assert.ok(/\.panel\.details-collapsed \.panel-detail-row\s*\{[\s\S]*display:\s*none/.test(yoloCss), 'DOIT.53 P1: detail-row window bar collapses with the detail row');
+    assert.ok(/\.panel\.details-collapsed \.pane-info-bar,[\s\S]*\.panel\.details-collapsed \.panel-detail-row\s*\{[\s\S]*display:\s*none/.test(yoloCss), 'Info Bar window bar collapses with the Info Bar');
     assert.equal(yoloCss.includes('.panel-agent-badge'), false, 'DOIT.57 T1: the duplicate Info Bar agent-badge CSS is removed');
-    assert.equal(source.includes('panel-agent-slot'), false, 'DOIT.57 T1: no agent-badge slot is rendered in the detail row');
+    assert.equal(source.includes('panel-agent-slot'), false, 'DOIT.57 T1: no agent-badge slot is rendered in the Info Bar');
     assert.ok(/\.tmux-window-button\.active\s*\{[\s\S]*background:\s*var\(--active-control-bg\)/.test(yoloCss), 'DOIT.57 T2: the active window button is a pressed toggle via the shared active-control tokens');
     assert.equal(/\.tmux-window-button\.active\s*\{[^}]*#[0-9a-fA-F]{3,6}/.test(yoloCss), false, 'DOIT.57 T2: the active window button uses theme-aware tokens, not hardcoded hex');
-    assert.ok(/\.tmux-window-button\.active \.agent-window-activity-icon\s*\{[\s\S]*text-shadow:\s*0 0 0 var\(--active-control-text\), 0 0 4px var\(--active-control-text\)/.test(yoloCss), 'active tmux window activity dots reuse active-control text for contrast');
-    assert.ok(/\.tmux-window-button\.active \.agent-window-activity-icon\.status-indicator--attention\s*\{[\s\S]*color:\s*var\(--bad\)[\s\S]*text-shadow:\s*0 0 0 var\(--bad\), 0 0 6px rgb\(var\(--attention-ring-rgb, 255 51 71\) \/ 0\.85\)/.test(yoloCss), 'active ASK? window dots keep the saturated red attention color instead of the active-control white halo');
+    assert.ok(/\.tmux-window-button \.agent-window-activity \.agent-icon\s*\{[\s\S]*width:\s*14px[\s\S]*height:\s*14px/.test(yoloCss), 'tmux window agent glyphs stay compact beside the canonical label');
+    assert.ok(/\.tmux-window-button\.active \.agent-window-status-dot\s*\{[\s\S]*text-shadow:\s*0 0 0 var\(--active-control-text\), 0 0 4px var\(--active-control-text\)/.test(yoloCss), 'active tmux window status dots reuse active-control text for contrast');
+    assert.ok(/\.tmux-window-button\.active \.agent-window-status-dot\.status-indicator--attention\s*\{[\s\S]*color:\s*var\(--bad\)[\s\S]*text-shadow:\s*0 0 0 var\(--bad\), 0 0 6px rgb\(var\(--attention-ring-rgb, 255 51 71\) \/ 0\.85\)/.test(yoloCss), 'active ASK? window dots keep the saturated red attention color instead of the active-control white halo');
     assert.ok(/\.status-indicator--dot\.heartbeat-pulse\s*\{[\s\S]*--attention-pulse-brightness-rest:\s*0\.82[\s\S]*--attention-pulse-brightness-peak:\s*1\.34/.test(yoloCss), 'active tmux window activity dots inherit the shared brightness pulse in the built CSS');
     assert.equal(yoloCss.includes('window-agent-color') || yoloCss.includes('data-window-agent'), false, 'tmux window buttons have no per-agent tint CSS');
-    assert.ok(source.includes('const AGENT_WINDOW_COOLDOWN_SECONDS = 60'), 'agent window cooldown has its own 60-second owner, separate from file-recency timing');
+    assert.ok(source.includes("agentWindowCooldownSeconds = initialSetting('performance.agent_window_cooldown_seconds')"), 'agent window cooldown initializes from the Performance preference');
+    assert.ok(source.includes("agentWindowCooldownSeconds = numberSetting('performance.agent_window_cooldown_seconds')"), 'agent window cooldown live-updates from settings changes');
     assert.ok(source.includes("if (key === 'cooldown') return 'cooldown'"), 'agent window stopped state maps to the shared cooldown tone instead of red attention');
     assert.ok(yoloCss.includes('.status-indicator--cooldown') && yoloCss.includes('var(--accent-gold)'), 'cooldown dot uses the shared theme-aware yellow/gold token');
-    assert.ok(/status-indicator--dot\.status-indicator--working\.heartbeat-pulse[\s\S]*animation-delay:\s*var\(--attention-animation-delay/.test(yoloCss), 'working dots use the shared ASK? animation phase');
-    assert.equal(source.includes("status-indicator--cooldown', 'heartbeat-pulse"), false, 'cooldown tone does not inherit heartbeat in the built source');
-    assert.equal(/status-indicator--dot\.status-indicator--cooldown\.heartbeat-pulse|\.status-indicator--cooldown\s*\{[^}]*--attention-ring-rgb/.test(yoloCss), false, 'cooldown dots are static yellow in the built CSS');
+    assert.ok(/\.agent-window-agent-icon--working,[\s\S]*\.agent-window-agent-icon--active\s*\{[\s\S]*animation-name:\s*agent-symbol-glow-cadence[\s\S]*animation-delay:\s*var\(--attention-animation-delay/.test(yoloCss), 'working and active current agent glyphs use the shared ASK? animation phase');
+    assert.ok(source.includes("tone === 'working' || tone === 'active'"), 'active current agent glyphs receive the shared animation phase style');
+    assert.ok(/@keyframes agent-symbol-status-alternate\s*\{[\s\S]*22\.5%, 27\.5%\s*\{[\s\S]*opacity:\s*1[\s\S]*50%, 72\.5%, 77\.5%\s*\{[\s\S]*opacity:\s*0\.16/.test(yoloCss), 'built CSS keeps alternating AI glyph brightness aligned with the first ASK? pulse peak');
+    assert.ok(/@keyframes agent-status-dot-alternate\s*\{[\s\S]*0%, 22\.5%, 27\.5%, 100%\s*\{[\s\S]*opacity:\s*0\.16[\s\S]*72\.5%, 77\.5%\s*\{[\s\S]*opacity:\s*1/.test(yoloCss), 'built CSS keeps alternating dot brightness aligned with the second ASK? pulse peak');
+    assert.ok(source.includes("status-indicator--cooldown', 'heartbeat-pulse', 'attention-pulse"), 'cooldown tone inherits heartbeat in the built source');
+    assert.ok(/\.status-indicator--cooldown\s*\{[^}]*--attention-ring-rgb:\s*245 197 66/.test(yoloCss), 'cooldown dots use the yellow alternating glow in the built CSS');
     assert.equal(/status-indicator--dot\.status-indicator--working\.heartbeat-pulse[\s\S]{0,240}animation-direction:\s*alternate/.test(yoloCss), false, 'working dots no longer double the pulse period with alternate direction');
-    assert.ok(/\.panel-detail-row \.tmux-window-bar\s*\{[\s\S]*margin-inline-start:\s*auto[\s\S]*justify-content:\s*flex-end/.test(yoloCss), '2026-06-11 Info Bar regression: tmux window bar right-aligns next to the detail close button');
+    assert.ok(/\.pane-info-bar \.tmux-window-bar,[\s\S]*\.panel-detail-row \.tmux-window-bar\s*\{[\s\S]*flex:\s*0 0 auto[\s\S]*max-width:\s*none[\s\S]*margin-inline-start:\s*auto[\s\S]*justify-content:\s*flex-end/.test(yoloCss), 'Info Bar tmux window bar right-aligns without shrinking next to the close button');
+    assert.ok(/\.pane-info-bar-meta\.pane-info-bar-meta-overflow \.pane-info-bar-scroll-text\s*\{[\s\S]*animation-name:\s*pane-info-bar-scroll[\s\S]*animation-delay:\s*0s[\s\S]*animation-timing-function:\s*var\(--pane-info-bar-scroll-timing\)[\s\S]*animation-direction:\s*normal/.test(yoloCss), 'overflowing Info Bar metadata holds at the start, scrolls forward, holds at the end, then repeats');
+    assert.ok(/@keyframes pane-info-bar-scroll\s*\{[\s\S]*transform:\s*translateX\(var\(--pane-info-bar-scroll-offset\)\)/.test(yoloCss), 'Info Bar metadata scroll uses a precomputed negative offset that animates in browsers');
+    assert.equal(yoloCss.includes('translateX(calc(-1 * var(--pane-info-bar-scroll-distance)))'), false, 'Info Bar metadata scroll does not use unsupported calc multiplication in transform');
+    assert.ok(source.includes("'--pane-info-bar-scroll-offset', `${-distance}px`"), 'Info Bar overflow sync stores the negative transform offset');
+    assert.equal(/\.pane-info-bar-meta\.pane-info-bar-meta-overflow \.pane-info-bar-scroll-text\s*\{[\s\S]*animation-direction:\s*alternate/.test(yoloCss), false, 'overflowing Info Bar metadata does not reverse-scroll back to the start');
+    assert.ok(source.includes('const PANE_INFO_BAR_SCROLL_START_HOLD_SECONDS = 3'), 'Info Bar metadata scroll holds the beginning for three seconds');
+    assert.ok(source.includes('const PANE_INFO_BAR_SCROLL_END_HOLD_SECONDS = 2'), 'Info Bar metadata scroll holds the end for two seconds');
+    assert.ok(source.includes('--pane-info-bar-scroll-timing'), 'Info Bar metadata scroll computes a per-distance timing function');
     assert.ok(/\.yolomux-dockview \.dockview-panel-content > \.panel\.dockview-inner-head-collapsed\.details-collapsed\s*\{\s*grid-template-rows:\s*minmax\(0, 1fr\)/.test(yoloCss), '2026-06-11 Info Bar regression: Dockview terminals get one full-height grid row when both inner header and details are hidden');
     assert.ok(/function setPanelDetailsCollapsed\(panel, collapsed\)\s*\{[\s\S]*schedulePanelDetailsFit\(panel\)/.test(source), '2026-06-11 Info Bar regression: details toggle refits visible tmux terminals after row height changes');
     assert.equal(source.includes('function windowStepButtonHtml'), false, 'DOIT.56 N3: dead header tmux stepper renderer stays removed');
@@ -790,7 +835,7 @@ async function runEditorPreviewSuite() {
     const lateApi = loadYolomux('', ['late']);
     const latePanel = lateApi.testElementForId('panel-late');
     const lateDetailRow = new TestElement('', 'div');
-    lateDetailRow.className = 'panel-detail-row';
+    lateDetailRow.className = 'pane-info-bar panel-detail-row';
     const lateClose = new TestElement('', 'button');
     lateClose.className = 'panel-detail-close';
     lateDetailRow.appendChild(lateClose);
@@ -1540,8 +1585,10 @@ async function runEditorPreviewSuite() {
     ]});
     assert.equal(api.sessionState('4', {agents: [{kind: 'claude'}, {kind: 'codex'}], panes: []}).key, 'needs-input', 'a background agent window needing input propagates ASK? to the session tab');
     const agentPopover = api.sessionPopoverHtml('4', {panes: []}, 'claude', false);
-    assert.ok(/class="[^"]*status-indicator[^"]*session-agent-dot[^"]*status-indicator--dot[^"]*status-indicator--working/.test(agentPopover), 'working popover dot inherits the shared dot/working status indicator classes');
-    assert.ok(/class="[^"]*status-indicator[^"]*session-agent-dot[^"]*status-indicator--dot[^"]*status-indicator--attention[^"]*attention-pulse/.test(agentPopover), 'ASK? popover dot inherits the shared attention pulse classes');
+    assert.ok(/session-agent-kind[\s\S]*agent-icon claude[^"]*agent-window-activity-icon--working[\s\S]*0:claude/.test(agentPopover), 'working popover row shows the pulsing Claude glyph before the tmux window label');
+    assert.ok(/session-agent-kind[\s\S]*agent-icon codex[\s\S]*agent-window-status-dot[^"]*status-indicator--attention[^"]*attention-pulse[\s\S]*1:codex/.test(agentPopover), 'ASK? popover row shows the alternating Codex glyph and red attention dot before the label');
+    assert.ok(/agent-window-activity agent-window-activity--attention[^"]*"[^>]*style="--attention-animation-delay:[^"]*;\s*--agent-alternate-animation-delay:[^"]*"[\s\S]*agent-window-status-dot/.test(agentPopover), 'ASK? agent glyph and status dot inherit one shared two-beat animation phase from their wrapper');
+    assert.equal(/agent-window-status-dot[^>]*style="--attention-animation-delay:/.test(agentPopover), false, 'ASK? status dot does not carry its own independent animation phase');
     assert.ok(/class="[^"]*session-agent-status[^"]*status-indicator--label[^"]*agent-status-attention[^"]*status-indicator--attention[^"]*attention-pulse[^"]*" style="--attention-animation-delay:/.test(agentPopover), 'ASK? popover status text inherits the shared red attention pulse and phase');
     assert.ok(agentPopover.includes('ASK? &lt;15 sec ago'), 'ASK? popover status text shows recency instead of approval/needs-input subtype words');
     assert.equal(agentPopover.includes('ASK? needs input') || agentPopover.includes('ASK? approval'), false, 'ASK? popover status text drops subtype words');
@@ -1555,6 +1602,30 @@ async function runEditorPreviewSuite() {
       assert.ok(catalog['popover.tmuxWindow']?.includes('{label}'), `${file} localizes popover.tmuxWindow and preserves {label}`);
       assert.ok(catalog['popover.sessionId'], `${file} localizes popover.sessionId`);
     }
+  });
+
+  test('normal pane tab popover refreshes current agent-window activity', () => {
+    const api = loadYolomux('', ['4']);
+    api.setTranscriptInfoForTest('4', {panes: []});
+    const tab = new TestElement('pane-tab-4');
+    tab.classList.add('pane-tab');
+    tab.dataset.paneTab = '4';
+    const popover = new TestElement('popover-4');
+    popover.classList.add('session-popover', 'popover-open');
+    popover.setAttribute('role', 'tooltip');
+    popover.innerHTML = '<div class="stale">old idle content</div>';
+    tab.appendChild(popover);
+    api.setDocumentQuerySelectorAllForTest(selector => selector === '.pane-tab[data-pane-tab], .dockview-pane-tab[data-pane-tab]' ? [tab] : []);
+
+    api.setAutoApproveStateForTest('4', {agent_windows: [{kind: 'claude', state: 'working', window_index: 0, window_label: '0:claude'}]});
+    api.updateSessionButtonStatesForTest();
+
+    assert.equal(tab.children[0], popover, 'popover element is preserved so existing hover bindings stay valid');
+    assert.equal(popover.classList.contains('popover-open'), true, 'open popover state is preserved during refresh');
+    assert.equal(popover.getAttribute('role'), 'tooltip', 'popover role is preserved during refresh');
+    assert.equal(popover.innerHTML.includes('old idle content'), false, 'normal pane tab popover content is not left stale');
+    assert.ok(popover.innerHTML.includes('agent-icon claude') && popover.innerHTML.includes('agent-window-agent-icon--working'), 'normal pane tab popover shows the same flashing Claude state as Tabber');
+    api.setDocumentQuerySelectorAllForTest(() => []);
   });
 
   test('t@6675', () => {
@@ -1655,8 +1726,10 @@ async function runEditorPreviewSuite() {
       ],
     });
     const multiText = api.sessionPopoverHtml('5', multiInfo, 'claude', false).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-    const workingIndex = multiText.indexOf('0:claude — working for 2m 38s');
-    const idleIndex = multiText.indexOf('1:codex — 5 min ago');
+    const workingMatch = /0:claude\s+—\s+working for 2m 38s/.exec(multiText);
+    const idleMatch = /1:codex(?:\s+○)?\s+—\s+5 min ago/.exec(multiText);
+    const workingIndex = workingMatch?.index ?? -1;
+    const idleIndex = idleMatch?.index ?? -1;
     assert.ok(workingIndex >= 0, 'working row uses the live status-counter elapsed');
     assert.ok(idleIndex > workingIndex, 'working agents render before idle agents and idle agents use recency text');
 
@@ -1671,10 +1744,12 @@ async function runEditorPreviewSuite() {
     });
     const currentIdleHtml = api.sessionPopoverHtml('4', {selected_pane: {current_path: '/repo', window_index: '1'}, project: {git: {root: '/repo'}}, agents: [{kind: 'codex'}]}, 'codex', false);
     const currentIdleText = currentIdleHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-    assert.ok(currentIdleText.includes('1:codex — 15 min ago'), 'focused/current idle agent window displays transcript recency, not tmux selection');
-    assert.equal(currentIdleText.includes('1:codex — active'), false, 'tmux selection is not treated as recent agent activity');
+    assert.ok(/1:codex(?:\s+○)?\s+—\s+15 min ago/.test(currentIdleText), 'focused/current idle agent window displays transcript recency, not tmux selection');
+    assert.equal(/1:codex(?:\s+○)?\s+—\s+active/.test(currentIdleText), false, 'tmux selection is not treated as recent agent activity');
     assert.ok(/session-agent-row[^"]*state-idle[^"]*current/.test(currentIdleHtml), 'focused/current agent window row carries the current class for header styling');
     assert.equal(/agent-status-active[^"]*status-indicator--active/.test(currentIdleHtml), false, 'focused/current idle agent window does not render an active status pill');
+    assert.ok(/agent-icon codex[^"]*agent-window-agent-icon--active/.test(currentIdleHtml), 'focused/current idle agent window renders the moving active Codex glyph');
+    assert.equal(/agent-window-status-dot/.test(currentIdleHtml), false, 'focused/current idle agent window does not render a competing status dot');
 
     const parityInfo = {
       selected_pane: {target: '5:0.0', window: '0', pane: '0', current_path: '/repo/codex-root/src'},
@@ -1710,7 +1785,7 @@ async function runEditorPreviewSuite() {
     });
     const parityPopoverHtml = api.sessionPopoverHtml('5', parityInfo, 'claude', false);
     const parityPopoverText = parityPopoverHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-    assert.ok(parityPopoverText.includes('1:claude (pid=222) — 1 hr ago'), 'popover keeps tmux window_active row current while showing idle transcript recency');
+    assert.ok(/1:claude \(pid=222\)(?:\s+○)?\s+—\s+1 hr ago/.test(parityPopoverText), 'popover keeps tmux window_active row current while showing idle transcript recency');
     assert.ok(parityPopoverText.includes('0:codex (pid=111) — working for 1m 5s'), 'non-focused window keeps its own working state');
     assert.equal((parityPopoverHtml.match(/session-agent-row[^"]*current/g) || []).length, 1, 'popover marks exactly one agent window current');
     assert.deepStrictEqual(activeTmuxWindowIndexesFromHtml(api.tmuxWindowBarHtml('5', parityInfo)), ['1'], 'window bar marks the tmux window_active window');
@@ -1719,7 +1794,7 @@ async function runEditorPreviewSuite() {
     const parityCodexRow = parityRows.find(row => row.type === 'window' && /^0:codex/.test(row.name));
     assert.equal(parityClaudeRow?.classes.includes('tabber-active-window'), true, 'Tabber marks the same active tmux window as the popover and window bar');
     assert.equal(parityClaudeRow?.date, '1 hr ago', 'Tabber current window displays idle transcript recency instead of tmux selection as activity');
-    assert.ok((parityCodexRow?.nameHtml || '').includes('agent-window-activity-icon--working'), 'Tabber working dot uses the same working state as the popover');
+    assert.ok((parityCodexRow?.nameHtml || '').includes('agent-window-agent-icon--working'), 'Tabber working glyph uses the same working state as the popover');
     const parityTree = api.buildTabberTree();
     const paritySession = parityTree.entries.find(entry => entry.tabber?.session === '5');
     const parityWindows = parityTree.entriesByDir.get('/' + paritySession.name);
@@ -1727,10 +1802,10 @@ async function runEditorPreviewSuite() {
     const parityClaudeRepos = parityTree.entriesByDir.get('/' + paritySession.name + '/' + parityClaudeWindow.name).map(row => row.tabber.label);
     assert.deepEqual(parityClaudeRepos, ['/repo/claude-root'], 'Tabber and popover share the touched repo root for the active Claude window');
     const parityMetaHtml = api.projectMetaHtml('5', parityInfo);
-    assert.ok(parityMetaHtml.includes('/repo/claude-root'), 'Info Line uses the active AI window touched repo root, not the raw pane cwd subdir');
-    assert.ok(parityMetaHtml.includes('claude-branch') && parityMetaHtml.includes('0 dirty') && parityMetaHtml.includes('3 ahead'), 'Info Line git summary matches the active window metadata');
-    assert.equal(parityMetaHtml.includes('/repo/claude-root/src/deep'), false, 'Info Line does not show the active AI window raw cwd subdir when touched repo metadata exists');
-    assert.equal(parityMetaHtml.includes('codex-branch') || parityMetaHtml.includes('4 dirty'), false, 'Info Line does not leak selected-pane git state for the inactive Codex window');
+    assert.ok(parityMetaHtml.includes('/repo/claude-root'), 'Info Bar uses the active AI window touched repo root, not the raw pane cwd subdir');
+    assert.ok(parityMetaHtml.includes('claude-branch') && parityMetaHtml.includes('0 dirty') && parityMetaHtml.includes('3 ahead'), 'Info Bar git summary matches the active window metadata');
+    assert.equal(parityMetaHtml.includes('/repo/claude-root/src/deep'), false, 'Info Bar does not show the active AI window raw cwd subdir when touched repo metadata exists');
+    assert.equal(parityMetaHtml.includes('codex-branch') || parityMetaHtml.includes('4 dirty'), false, 'Info Bar does not leak selected-pane git state for the inactive Codex window');
 
     api.setAutoApproveStateForTest('6', {
       agent_windows: [{kind: 'codex', state: 'working', working_elapsed_seconds: 3720, window_index: 0, window_name: 'codex', window_label: '0:codex'}],
@@ -2913,6 +2988,54 @@ async function runEditorPreviewSuite() {
     ], 'overlay expands backward to the full visible question sentence');
   });
 
+  test('ASK?/QUES? prompt suffix after version token expands to the full visible question sentence', () => {
+    const api = loadYolomux('', ['1']);
+    api.setTranscriptInfoForTest('1', {agents: [{kind: 'claude'}], panes: []});
+    const container = api.testElementForId('terminal-pane-1');
+    container.className = 'terminal';
+    container.rect = {left: 0, top: 0, width: 1900, height: 100, right: 1900, bottom: 100};
+    const xtermRows = new TestElement('xterm-version-question-rows');
+    xtermRows.className = 'xterm-rows';
+    xtermRows.rect = {left: 0, top: 0, width: 1900, height: 100, right: 1900, bottom: 100};
+    const firstRow = "Net: dynamo and our vLLM/SGLang fixtures agree at 0.23.0 / 0.5.12.post1. Only gpt-oss/harmony's vLLM";
+    const questionText = 'Want me to take on the harmony token-id recapture to close that last 0.22.x, or leave it?';
+    const secondRow = `stamp lags. ${questionText}`;
+    const visibleRows = [firstRow, secondRow, '1. Yes', '2. No'].map((text, index) => {
+      const row = new TestElement(`version-question-row-${index}`);
+      row.textContent = text;
+      row.rect = {left: 0, top: index * 20, width: 1900, height: 20, right: 1900, bottom: (index + 1) * 20};
+      xtermRows.appendChild(row);
+      return row;
+    });
+    container.appendChild(xtermRows);
+    api.registerTerminalForTest('1', {
+      cols: firstRow.length,
+      rows: 6,
+      _core: {_renderService: {dimensions: {css: {cell: {width: 10, height: 20}}}}},
+      buffer: {active: {length: visibleRows.length, viewportY: 0, getLine: index => terminalLine(visibleRows[index]?.textContent || '')}},
+    });
+    api.setAutoApproveStateForTest('1', {
+      enabled: true,
+      screen: {key: 'needs-input', text: 'x, or leave it?', question_text: 'x, or leave it?'},
+      prompt: {visible: false},
+    });
+
+    assert.equal(api.syncTerminalAttentionHighlightForTest('1'), true, 'suffix-only question payload paints the visible question sentence');
+    assert.equal(visibleRows[0].classList.contains('terminal-attention-question-row'), false, 'prior wrapped row is not marked');
+    assert.equal(visibleRows[1].classList.contains('terminal-attention-question-row'), true, 'question row is marked');
+    assert.equal(visibleRows[2].classList.contains('terminal-attention-question-row'), false, 'option rows are not marked');
+    const overlays = container.querySelectorAll('.terminal-attention-question-overlay[data-session="1"]');
+    const questionStart = secondRow.indexOf('Want me');
+    assert.equal(overlays.length, 1, 'same-row suffix expansion stays a single overlay');
+    assert.deepStrictEqual(canonical(overlays.map(overlay => ({
+      top: overlay.style.top,
+      left: overlay.style.left,
+      width: overlay.style.width,
+    }))), [
+      {top: '20px', left: `${questionStart * 10}px`, width: `${questionText.length * 10}px`},
+    ], 'version-like dots do not split the question sentence');
+  });
+
   // (no false merge): even an unterminated URL-looking row cannot absorb a flush-left continuation when
   // it did not reach the terminal edge.
   test('t@7052', () => {
@@ -3668,6 +3791,8 @@ async function runEditorPreviewSuite() {
       assert.equal(/\.file-editor-(?:gutter|diff|diff-expand)-panel\s*\{[^}]*order:/.test(css), false, 'editor info bar: left buttons do not own placement with child order rules');
       assert.ok(/\.file-editor-diff-ref-panel\s*\{[^}]*min-width:\s*max-content[^}]*overflow:\s*visible/.test(css), 'editor info bar: FROM/TO/reset is intrinsic-width and not clipped');
       assert.equal(css.includes('max-width: min(32vw, 190px)'), false, 'editor info bar: the old too-narrow 190px clipping cap is gone');
+      assert.equal(/\.file-editor-diff-ref-panel \.diff-ref-controls\.compact \.diff-ref-input,[\s\S]*width:\s*38px/.test(css), false, 'editor info bar: compact diff refs are not hard-capped before the /HEAD suffix');
+      assert.ok(/\.file-editor-diff-ref-panel \.diff-ref-controls\.compact \.diff-ref-input,[\s\S]*width:\s*17ch/.test(css), 'editor info bar: compact diff refs can show sha/HEAD labels');
       assert.ok(/\.file-tab-parent\s*\{[^}]*text-overflow:\s*ellipsis/.test(css), 'duplicate file-tab parent suffix is styled as compact muted metadata');
       assert.ok(/\.preferences-setting-control\.setting-type-select,\s*\.preferences-setting-control\.setting-type-text\s*\{[^}]*justify-content:\s*start/.test(css), 'Preferences selects/text inputs are left-aligned from the shared inset');
       assert.ok(/\.preferences-setting-control\.setting-type-number input\[type="number"\]\s*\{[^}]*margin-inline-start:\s*var\(--preferences-control-left-indent\)/.test(css), 'Preferences number inputs are left-aligned from the shared inset');
@@ -3914,7 +4039,7 @@ async function runEditorPreviewSuite() {
       'pref.performance.latency_refresh_ms.label', 'pref.performance.event_log_refresh_ms.label',
       'pref.performance.server_event_poll_ms.label', 'pref.performance.server_background_file_event_poll_ms.label',
       'pref.performance.server_directory_event_poll_ms.label',
-      'pref.performance.tabber_activity_refresh_ms.label',
+      'pref.performance.tabber_activity_refresh_ms.label', 'pref.performance.agent_window_cooldown_seconds.label',
       'pref.editorScheme.group.dark',
       'pref.notifications.throttle_seconds.label',
       'pref.terminal_editor.scrollback.label', 'pref.uploads.max_bytes.label',
@@ -4167,7 +4292,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/function dockviewHandleFileDrop\(event\)[\s\S]*paneDragPayload\(event\)[\s\S]*swapPaneSlots\(intent\.sourceSlot, intent\.targetSlot\)/.test(dockviewSrc), 'Dockview host drops swap whole panes when the pane payload is accepted');
     assert.ok(/function paneDragHandleHtml\(item\)[\s\S]*data-pane-drag=/.test(dockviewSrc), 'Dockview header actions include a dedicated pane-drag payload handle');
     assert.ok(/function dockviewSyncHeaderBackgroundDragSources\(\)[\s\S]*\.dv-tabs-and-actions-container[\s\S]*pane-drag-source[\s\S]*dockviewBeginPanePointerDrag\(event, sourceSlot\)/.test(dockviewSrc), 'Dockview tab-container background starts whole-pane drags without marking the tab container draggable');
-    assert.ok(/function dockviewSyncHeaderBackgroundDragSources\(\)[\s\S]*\.panel-detail-row[\s\S]*syncDragSource\(detail\)/.test(dockviewSrc), 'Dockview pane info/detail rows start the same whole-pane pointer drag as the tab-container background');
+    assert.ok(/function dockviewSyncHeaderBackgroundDragSources\(\)[\s\S]*\.pane-info-bar[\s\S]*\.panel-detail-row[\s\S]*syncDragSource\(infoBar\)/.test(dockviewSrc), 'Dockview pane Info Bars start the same whole-pane pointer drag as the tab-container background');
     assert.ok(/function dockviewSyncHeaderBackgroundDragSources\(\)[\s\S]*\.file-editor-toolbar[\s\S]*syncDragSource\(editorToolbar\)/.test(dockviewSrc), 'Dockview editor toolbars start the same whole-pane pointer drag as other pane info bars');
     assert.ok(/function dockviewClearTabRowBreaks\(tabsContainer\)[\s\S]*dockview-tab-row-break[\s\S]*node\.remove\(\)/.test(dockviewSrc), 'Dockview clears stale first-row break nodes before each header measurement pass');
     assert.ok(/function dockviewSyncHeaderActionReservations\(\)[\s\S]*preferredTabWidth[\s\S]*--pane-tab-width[\s\S]*availableWidth[\s\S]*--dockview-header-actions-reserved-inline-size[\s\S]*--dockview-tab-inline-size[\s\S]*firstRowCapacity[\s\S]*dockview-tab-row-break[\s\S]*insertBefore\(rowBreak, tabs\[firstRowCapacity\]\)/.test(dockviewSrc), 'Dockview measures right-side actions while keeping the configured tab width and breaking only the first row before the action cluster');
@@ -4181,7 +4306,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/api\.onWillDrop\(event => \{[\s\S]*const edgeReorder = dockviewTabEdgeReorderIntent\(event\)[\s\S]*moveSessionToSlot\(edgeReorder\.item, edgeReorder\.targetSlot, edgeReorder\.sourceSlot, edgeReorder\.insertIndex\)/.test(dockviewSrc), 'Dockview manually reorders edge tabs dragged onto their adjacent neighbor');
     assert.ok(/function dockviewInstallTabPointerReorderFallback\(\)[\s\S]*document\.addEventListener\('pointerup', finish, true\)[\s\S]*document\.addEventListener\('mouseup', finish, true\)/.test(dockviewSrc), 'Dockview edge-tab reorder fallback listens to both pointer and mouse release paths');
     assert.ok(/function dockviewFinishTabPointerDrag\(event\)[\s\S]*dockviewTabForPoint[\s\S]*dockviewAdjacentEdgeTabInsertIndex[\s\S]*moveSessionToSlot\(state\.item, targetSlot, targetSlot, currentInsertIndex\)/.test(dockviewSrc), 'Dockview edge-tab pointer fallback reorders against the tab under the release point');
-    assert.ok(/\.pane-tab > \.session-popover,\s*\.pane-tab-detached-popover\s*\{[\s\S]*position:\s*fixed/.test(css), 'Dockview tab hover popovers use the shared fixed-position tab popover surface');
+    assert.ok(/\.pane-tab > \.session-popover,\s*\.file-tree-row\.tabber-row \.tabber-session-tab > \.session-popover,\s*\.pane-tab-detached-popover\s*\{[\s\S]*position:\s*fixed/.test(css), 'Dockview and Tabber tab hover popovers use the shared fixed-position tab popover surface');
     assert.ok(/body\.share-replay-shell \.share-mirror-stage \.app-overlay-root,[\s\S]*body\.share-replay-shell \.share-mirror-stage \.pane-tab-detached-popover\s*\{[\s\S]*position:\s*absolute/.test(css), 'YO!share replay positions detached tab popovers inside the transformed app root instead of the viewer viewport');
     assert.ok(/function bindPaneTabPopover\(tab, session\)[\s\S]*tab\.classList\?\.contains\('dockview-pane-tab'\)[\s\S]*detachPaneTabPopover\(tab, popover\)/.test(fs.readFileSync('static_src/js/yolomux/78_panel_shell.js', 'utf8')), 'Dockview tab hover popovers detach from the clipped Dockview tab scroller');
     assert.ok(/function preserveDockviewDockedFileExplorerSplit\(next, previous = layoutSlots\)[\s\S]*dockviewLayoutContentSignature\(next\) === dockviewLayoutContentSignature\(previous\)[\s\S]*return/.test(dockviewSrc), 'Dockview lets sash-only Finder/Differ resize updates change the root split pct');

@@ -586,6 +586,8 @@
   "pref.path.copySettings": "설정 경로 복사",
   "pref.path.rules": "YOLO 규칙",
   "pref.path.settings": "설정",
+  "pref.performance.agent_window_cooldown_seconds.help": "작업을 막 멈춘 Claude/Codex 창이 노란 쿨다운 점을 유지하는 시간입니다. 0이면 쿨다운 점을 끕니다.",
+  "pref.performance.agent_window_cooldown_seconds.label": "에이전트 쿨다운 점 표시 시간",
   "pref.performance.auto_approve_interval_seconds.help": "새로 활성화된 YOLO 워커가 표시된 tmux 프롬프트를 검사하는 빈도입니다.",
   "pref.performance.auto_approve_interval_seconds.label": "YOLO 워커 폴링 간격",
   "pref.performance.event_log_refresh_ms.help": "How often the browser refreshes open YOLO/event-log panes.",

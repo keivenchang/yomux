@@ -3576,17 +3576,12 @@ function agentWindowIsAttentionState(state) {
   return AGENT_WINDOW_ATTENTION_STATES.has(agentWindowStateKey(state));
 }
 
-function agentWindowRawStateTone(state) {
-  if (agentWindowIsWorkingState(state)) return 'working';
-  if (agentWindowIsAttentionState(state)) return 'attention';
-  return 'idle';
-}
-
 function agentWindowActivityTone(state) {
   const key = agentWindowStateKey(state);
   if (key === 'working') return 'working';
   if (key === 'cooldown') return 'cooldown';
   if (key === 'attention') return 'attention';
+  if (key === 'active') return 'active';
   if (key === 'settled') return 'settled';
   return 'idle';
 }
@@ -3610,8 +3605,8 @@ function normalizedAgentWindowPayload(agent) {
     label: String(agent?.label || canonical),
     window_label: canonical,
     pid: Number.isFinite(Number(agent?.pid)) && Number(agent.pid) > 0 ? Math.floor(Number(agent.pid)) : agent?.pid,
-    current: typeof agent?.current === 'boolean' ? agent.current : typeof agent?.window_active === 'boolean' ? agent.window_active : agent?.current,
-    window_active: typeof agent?.window_active === 'boolean' ? agent.window_active : typeof agent?.current === 'boolean' ? agent.current : agent?.window_active,
+    current: typeof agent?.current === 'boolean' ? agent.current : typeof agent?.window_active === 'boolean' ? agent.window_active : typeof agent?.active === 'boolean' ? agent.active : agent?.current,
+    window_active: typeof agent?.window_active === 'boolean' ? agent.window_active : typeof agent?.current === 'boolean' ? agent.current : typeof agent?.active === 'boolean' ? agent.active : agent?.window_active,
     path: pathEntries[0]?.path || String(agent?.path || ''),
     paths: pathEntries.map(item => item.path),
     path_entries: pathEntries,
@@ -3647,6 +3642,7 @@ function mergeAgentWindowPayload(base, candidates) {
 function agentWindowPayloadCurrent(agent) {
   if (typeof agent?.current === 'boolean') return agent.current;
   if (typeof agent?.window_active === 'boolean') return agent.window_active;
+  if (typeof agent?.active === 'boolean') return agent.active;
   return null;
 }
 
@@ -3725,7 +3721,6 @@ function agentWindowIdleSeconds(agent, nowSeconds = Date.now() / 1000) {
 
 const agentWindowActivityStates = new Map();
 const agentWindowStoppedTimers = new Map();
-const AGENT_WINDOW_COOLDOWN_SECONDS = 60;
 
 function agentWindowActivityTransitionKey(agentKey, options = {}) {
   const explicit = String(options.transitionKey || '').trim();
@@ -3765,9 +3760,11 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   const kind = agentWindowKind(agentKey);
   if (!kind) return null;
   const nowSeconds = Number.isFinite(Number(options.nowSeconds)) ? Number(options.nowSeconds) : Date.now() / 1000;
+  const cooldownSeconds = Math.max(0, Number(agentWindowCooldownSeconds) || 0);
   const transitionKey = agentWindowActivityTransitionKey(kind, options);
   const previous = transitionKey ? (agentWindowActivityStates.get(transitionKey) || {}) : {};
   const stateKey = agentWindowStateKey(state);
+  const current = options.current === true || options.window_active === true;
   if (agentWindowIsAttentionState(stateKey)) {
     if (transitionKey) {
       clearAgentWindowStoppedRefresh(transitionKey);
@@ -3790,30 +3787,50 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   if (transitionKey) agentWindowActivityStates.set(transitionKey, {state: String(state || 'idle'), seenWorking, stoppedAt});
   if (seenWorking && stoppedAt > 0) {
     const stoppedAgeSeconds = Math.max(0, nowSeconds - stoppedAt);
-    if (stoppedAgeSeconds < AGENT_WINDOW_COOLDOWN_SECONDS) {
-      if (options.scheduleRefresh !== false) scheduleAgentWindowStoppedRefresh(transitionKey, (stoppedAt + AGENT_WINDOW_COOLDOWN_SECONDS) * 1000);
+    if (cooldownSeconds > 0 && stoppedAgeSeconds < cooldownSeconds) {
+      if (options.scheduleRefresh !== false) scheduleAgentWindowStoppedRefresh(transitionKey, (stoppedAt + cooldownSeconds) * 1000);
       return {state: 'cooldown', icon: '●', label: `${agentLabel(kind)} stopped`};
     }
-    return {state: 'settled', icon: '●', label: `${agentLabel(kind)} ${t('state.idle')}`};
+    return null;
   }
-  const idle = Number(idleSeconds);
-  if (Number.isFinite(idle) && idle >= 60) {
-    return {state: 'idle', icon: '○', label: `${agentLabel(kind)} ${t('state.idle')}`};
-  }
+  if (current) return {state: 'active', icon: '', label: `${agentLabel(kind)} active`};
   return null;
 }
 
-function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {}) {
-  const item = agentWindowActivityIcon(agentKey, state, idleSeconds, options);
-  if (!item) return '';
+function agentWindowStatusDotHtml(item) {
+  if (!item || item.state === 'working') return '';
+  if (!['attention', 'cooldown'].includes(item.state)) return '';
   const tone = agentWindowActivityTone(item.state);
   const classes = statusIndicatorDotClasses(
     tone,
     'agent-window-activity-icon',
+    'agent-window-status-dot',
     `agent-window-activity-icon--${item.state}`,
   );
-  const style = statusIndicatorToneStyle(tone);
-  return `<span class="${esc(classes)}" title="${esc(item.label)}" aria-label="${esc(item.label)}" role="img"${style}>${esc(item.icon)}</span>`;
+  return `<span class="${esc(classes)}" aria-hidden="true">${esc(item.icon)}</span>`;
+}
+
+function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {}) {
+  const kind = agentWindowKind(agentKey);
+  if (!kind) return '';
+  const item = agentWindowActivityIcon(kind, state, idleSeconds, options);
+  const stateKey = item?.state || 'idle-recent';
+  const label = item?.label || agentLabel(kind);
+  const agentClasses = [
+    'agent-window-activity-icon',
+    'agent-window-agent-icon',
+    `agent-window-activity-icon--${stateKey}`,
+    `agent-window-agent-icon--${stateKey}`,
+    item?.state === 'working' || item?.state === 'active' || item?.state === 'attention' || item?.state === 'cooldown' ? 'heartbeat-pulse' : '',
+  ].filter(Boolean).join(' ');
+  const markerHtml = agentWindowStatusDotHtml(item);
+  const tone = item?.state ? agentWindowActivityTone(item.state) : '';
+  const style = tone === 'working' || tone === 'active'
+    ? statusIndicatorToneStyle(tone)
+    : ['attention', 'cooldown'].includes(tone)
+      ? ` style="${agentAlternateAnimationStyle()}"`
+      : '';
+  return `<span class="agent-window-activity agent-window-activity--${esc(stateKey)}" title="${esc(label)}" aria-label="${esc(label)}"${style}>${agentIcon(kind, {label, className: agentClasses})}${markerHtml}</span>`;
 }
 
 function agentWindowActivityIconHtmlForStatus(agent, agentKey = agent?.kind, session = '') {
@@ -3823,6 +3840,8 @@ function agentWindowActivityIconHtmlForStatus(agent, agentKey = agent?.kind, ses
     window_index: agent?.window_index,
     pane: agent?.pane,
     pane_target: agent?.pane_target,
+    current: agentWindowPayloadCurrent(agent) === true,
+    window_active: agent?.window_active === true,
     working_stopped_ts: agent?.working_stopped_ts,
   });
 }
@@ -3880,8 +3899,11 @@ function buildTabberTree() {
       const recordActive = agentCurrent === null ? record.active === true : agentCurrent === true;
       const active = activeIndexOverride === undefined ? recordActive : (activeIndexOverlay !== null && String(record.index) === activeIndexOverlay);
       const label = tmuxWindowCanonicalLabel(session, record, record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.name}`, info);
-      const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatus, agentKey, session);
-      const agentStatusForDisplay = agentStatus ? {...agentStatus, current: active} : null;
+      const agentStatusForDisplay = agentStatus ? {...agentStatus, current: active, window_active: active} : null;
+      const agentStatusForIcon = agentStatusForDisplay || (active && ['claude', 'codex'].includes(agentKey)
+        ? {kind: agentKey, state: 'idle', window: record.indexText, window_index: record.index, current: true, window_active: true}
+        : agentStatus);
+      const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatusForIcon, agentKey, session);
       const dateText = agentStatusForDisplay ? sessionPopoverAgentStateText(agentStatusForDisplay, nowSeconds) : tabberAgentDateText(agentActivity);
       const dateHtml = agentStatusForDisplay && agentWindowIsAttentionState(agentStatusForDisplay.state)
         ? sessionPopoverAgentStatusHtml(agentStatusForDisplay, nowSeconds, 'tabber-agent-status')
@@ -3954,8 +3976,7 @@ function tabberWindowLabelHtml(label, iconHtml, options = {}) {
   const pid = Number(options.pid);
   const nameText = text;
   const pidText = Number.isFinite(pid) && pid > 0 ? ` (pid=${Math.floor(pid)})` : '';
-  const activityIconHtml = String(options.activityIconHtml || '');
-  return `<span class="tabber-window-label">${iconHtml}<span class="tabber-window-text">${esc(nameText)}</span>${activityIconHtml}${pidText ? `<span class="tabber-window-pid">${esc(pidText)}</span>` : ''}</span>`;
+  return `<span class="tabber-window-label">${iconHtml}<span class="tabber-window-text">${esc(nameText)}</span>${pidText ? `<span class="tabber-window-pid">${esc(pidText)}</span>` : ''}</span>`;
 }
 
 function tabberSessionChromeHtml(data) {
@@ -4048,12 +4069,12 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   if (titleParts.length) row.setAttribute('title', titleParts.join('\n'));
   else row.removeAttribute('title');
   const windowAgentIconHtml = data.type === 'window' && ['claude', 'codex'].includes(data.agentKey)
-    ? agentIcon(data.agentKey, {label: agentLabel(data.agentKey)})
+    ? (data.activityIconHtml || agentIcon(data.agentKey, {label: agentLabel(data.agentKey)}))
     : '';
   const nameHtml = data.type === 'session'
     ? tabberSessionChromeHtml(renderData)
     : data.type === 'window'
-      ? tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true, activityIconHtml: data.activityIconHtml, pid: data.pid})
+      ? tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true, pid: data.pid})
     : data.type === 'loading'
       ? `<span class="tabber-loading-label">${esc(data.label || 'Fetching')}</span>${movingEllipsisHtml('tabber-loading-dots')}`
     : '';

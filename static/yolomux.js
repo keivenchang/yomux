@@ -721,6 +721,7 @@ let latencyRefreshMs = initialSetting('performance.latency_refresh_ms');
 let eventLogRefreshMs = initialSetting('performance.event_log_refresh_ms');
 let tmuxSignalState = null;
 tabberActivityRefreshMs = initialSetting('performance.tabber_activity_refresh_ms');
+let agentWindowCooldownSeconds = initialSetting('performance.agent_window_cooldown_seconds');
 let redReminderMs = initialSetting('appearance.red_reminder_ms');
 let yoloRotateMs = initialSetting('appearance.yolo_rotate_ms');
 const latencySamplesMax = 24;
@@ -6188,12 +6189,19 @@ function yoloRotationDelay(now = Date.now()) {
   return `${-((now % duration) / 1000).toFixed(3)}s`;
 }
 
-function attentionAnimationDelay(now = Date.now()) {
-  return `${-((now % redReminderMs) / 1000).toFixed(3)}s`;
+function attentionAnimationDelay(now = Date.now(), durationMs = redReminderMs) {
+  const duration = Math.max(1, Number(durationMs) || Number(redReminderMs) || 1);
+  return `${-((now % duration) / 1000).toFixed(3)}s`;
 }
 
-function attentionAnimationStyle() {
-  return `--attention-animation-delay: ${attentionAnimationDelay()}`;
+function attentionAnimationStyle(now = Date.now(), durationMs = redReminderMs, property = '--attention-animation-delay') {
+  return `${property}: ${attentionAnimationDelay(now, durationMs)}`;
+}
+
+function agentAlternateAnimationStyle() {
+  const now = Date.now();
+  const duration = Math.max(1, Number(redReminderMs) || 1) * 2;
+  return `${attentionAnimationStyle(now)}; ${attentionAnimationStyle(now, duration, '--agent-alternate-animation-delay')}`;
 }
 
 function syncAttentionAnimation(node, active) {
@@ -6225,7 +6233,7 @@ function statusIndicatorClasses(...classes) {
 function statusIndicatorToneClasses(tone) {
   if (tone === 'positive') return ['status-indicator--positive'];
   if (tone === 'working') return ['status-indicator--working', 'heartbeat-pulse'];
-  if (tone === 'cooldown') return ['status-indicator--cooldown'];
+  if (tone === 'cooldown') return ['status-indicator--cooldown', 'heartbeat-pulse', 'attention-pulse'];
   if (tone === 'attention') return ['status-indicator--attention', 'heartbeat-pulse', 'attention-pulse'];
   if (tone === 'active') return ['status-indicator--active'];
   if (tone === 'settled') return ['status-indicator--settled'];
@@ -6234,7 +6242,7 @@ function statusIndicatorToneClasses(tone) {
 }
 
 function statusIndicatorToneStyle(tone) {
-  return ['working', 'attention'].includes(String(tone || '')) ? ` style="${attentionAnimationStyle()}"` : '';
+  return ['working', 'active', 'attention', 'cooldown'].includes(String(tone || '')) ? ` style="${attentionAnimationStyle()}"` : '';
 }
 
 function statusIndicatorModifiedClasses(modifier, tone, classes, options = {}) {
@@ -13342,17 +13350,12 @@ function agentWindowIsAttentionState(state) {
   return AGENT_WINDOW_ATTENTION_STATES.has(agentWindowStateKey(state));
 }
 
-function agentWindowRawStateTone(state) {
-  if (agentWindowIsWorkingState(state)) return 'working';
-  if (agentWindowIsAttentionState(state)) return 'attention';
-  return 'idle';
-}
-
 function agentWindowActivityTone(state) {
   const key = agentWindowStateKey(state);
   if (key === 'working') return 'working';
   if (key === 'cooldown') return 'cooldown';
   if (key === 'attention') return 'attention';
+  if (key === 'active') return 'active';
   if (key === 'settled') return 'settled';
   return 'idle';
 }
@@ -13376,8 +13379,8 @@ function normalizedAgentWindowPayload(agent) {
     label: String(agent?.label || canonical),
     window_label: canonical,
     pid: Number.isFinite(Number(agent?.pid)) && Number(agent.pid) > 0 ? Math.floor(Number(agent.pid)) : agent?.pid,
-    current: typeof agent?.current === 'boolean' ? agent.current : typeof agent?.window_active === 'boolean' ? agent.window_active : agent?.current,
-    window_active: typeof agent?.window_active === 'boolean' ? agent.window_active : typeof agent?.current === 'boolean' ? agent.current : agent?.window_active,
+    current: typeof agent?.current === 'boolean' ? agent.current : typeof agent?.window_active === 'boolean' ? agent.window_active : typeof agent?.active === 'boolean' ? agent.active : agent?.current,
+    window_active: typeof agent?.window_active === 'boolean' ? agent.window_active : typeof agent?.current === 'boolean' ? agent.current : typeof agent?.active === 'boolean' ? agent.active : agent?.window_active,
     path: pathEntries[0]?.path || String(agent?.path || ''),
     paths: pathEntries.map(item => item.path),
     path_entries: pathEntries,
@@ -13413,6 +13416,7 @@ function mergeAgentWindowPayload(base, candidates) {
 function agentWindowPayloadCurrent(agent) {
   if (typeof agent?.current === 'boolean') return agent.current;
   if (typeof agent?.window_active === 'boolean') return agent.window_active;
+  if (typeof agent?.active === 'boolean') return agent.active;
   return null;
 }
 
@@ -13491,7 +13495,6 @@ function agentWindowIdleSeconds(agent, nowSeconds = Date.now() / 1000) {
 
 const agentWindowActivityStates = new Map();
 const agentWindowStoppedTimers = new Map();
-const AGENT_WINDOW_COOLDOWN_SECONDS = 60;
 
 function agentWindowActivityTransitionKey(agentKey, options = {}) {
   const explicit = String(options.transitionKey || '').trim();
@@ -13531,9 +13534,11 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   const kind = agentWindowKind(agentKey);
   if (!kind) return null;
   const nowSeconds = Number.isFinite(Number(options.nowSeconds)) ? Number(options.nowSeconds) : Date.now() / 1000;
+  const cooldownSeconds = Math.max(0, Number(agentWindowCooldownSeconds) || 0);
   const transitionKey = agentWindowActivityTransitionKey(kind, options);
   const previous = transitionKey ? (agentWindowActivityStates.get(transitionKey) || {}) : {};
   const stateKey = agentWindowStateKey(state);
+  const current = options.current === true || options.window_active === true;
   if (agentWindowIsAttentionState(stateKey)) {
     if (transitionKey) {
       clearAgentWindowStoppedRefresh(transitionKey);
@@ -13556,30 +13561,50 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   if (transitionKey) agentWindowActivityStates.set(transitionKey, {state: String(state || 'idle'), seenWorking, stoppedAt});
   if (seenWorking && stoppedAt > 0) {
     const stoppedAgeSeconds = Math.max(0, nowSeconds - stoppedAt);
-    if (stoppedAgeSeconds < AGENT_WINDOW_COOLDOWN_SECONDS) {
-      if (options.scheduleRefresh !== false) scheduleAgentWindowStoppedRefresh(transitionKey, (stoppedAt + AGENT_WINDOW_COOLDOWN_SECONDS) * 1000);
+    if (cooldownSeconds > 0 && stoppedAgeSeconds < cooldownSeconds) {
+      if (options.scheduleRefresh !== false) scheduleAgentWindowStoppedRefresh(transitionKey, (stoppedAt + cooldownSeconds) * 1000);
       return {state: 'cooldown', icon: '●', label: `${agentLabel(kind)} stopped`};
     }
-    return {state: 'settled', icon: '●', label: `${agentLabel(kind)} ${t('state.idle')}`};
+    return null;
   }
-  const idle = Number(idleSeconds);
-  if (Number.isFinite(idle) && idle >= 60) {
-    return {state: 'idle', icon: '○', label: `${agentLabel(kind)} ${t('state.idle')}`};
-  }
+  if (current) return {state: 'active', icon: '', label: `${agentLabel(kind)} active`};
   return null;
 }
 
-function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {}) {
-  const item = agentWindowActivityIcon(agentKey, state, idleSeconds, options);
-  if (!item) return '';
+function agentWindowStatusDotHtml(item) {
+  if (!item || item.state === 'working') return '';
+  if (!['attention', 'cooldown'].includes(item.state)) return '';
   const tone = agentWindowActivityTone(item.state);
   const classes = statusIndicatorDotClasses(
     tone,
     'agent-window-activity-icon',
+    'agent-window-status-dot',
     `agent-window-activity-icon--${item.state}`,
   );
-  const style = statusIndicatorToneStyle(tone);
-  return `<span class="${esc(classes)}" title="${esc(item.label)}" aria-label="${esc(item.label)}" role="img"${style}>${esc(item.icon)}</span>`;
+  return `<span class="${esc(classes)}" aria-hidden="true">${esc(item.icon)}</span>`;
+}
+
+function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {}) {
+  const kind = agentWindowKind(agentKey);
+  if (!kind) return '';
+  const item = agentWindowActivityIcon(kind, state, idleSeconds, options);
+  const stateKey = item?.state || 'idle-recent';
+  const label = item?.label || agentLabel(kind);
+  const agentClasses = [
+    'agent-window-activity-icon',
+    'agent-window-agent-icon',
+    `agent-window-activity-icon--${stateKey}`,
+    `agent-window-agent-icon--${stateKey}`,
+    item?.state === 'working' || item?.state === 'active' || item?.state === 'attention' || item?.state === 'cooldown' ? 'heartbeat-pulse' : '',
+  ].filter(Boolean).join(' ');
+  const markerHtml = agentWindowStatusDotHtml(item);
+  const tone = item?.state ? agentWindowActivityTone(item.state) : '';
+  const style = tone === 'working' || tone === 'active'
+    ? statusIndicatorToneStyle(tone)
+    : ['attention', 'cooldown'].includes(tone)
+      ? ` style="${agentAlternateAnimationStyle()}"`
+      : '';
+  return `<span class="agent-window-activity agent-window-activity--${esc(stateKey)}" title="${esc(label)}" aria-label="${esc(label)}"${style}>${agentIcon(kind, {label, className: agentClasses})}${markerHtml}</span>`;
 }
 
 function agentWindowActivityIconHtmlForStatus(agent, agentKey = agent?.kind, session = '') {
@@ -13589,6 +13614,8 @@ function agentWindowActivityIconHtmlForStatus(agent, agentKey = agent?.kind, ses
     window_index: agent?.window_index,
     pane: agent?.pane,
     pane_target: agent?.pane_target,
+    current: agentWindowPayloadCurrent(agent) === true,
+    window_active: agent?.window_active === true,
     working_stopped_ts: agent?.working_stopped_ts,
   });
 }
@@ -13646,8 +13673,11 @@ function buildTabberTree() {
       const recordActive = agentCurrent === null ? record.active === true : agentCurrent === true;
       const active = activeIndexOverride === undefined ? recordActive : (activeIndexOverlay !== null && String(record.index) === activeIndexOverlay);
       const label = tmuxWindowCanonicalLabel(session, record, record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.name}`, info);
-      const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatus, agentKey, session);
-      const agentStatusForDisplay = agentStatus ? {...agentStatus, current: active} : null;
+      const agentStatusForDisplay = agentStatus ? {...agentStatus, current: active, window_active: active} : null;
+      const agentStatusForIcon = agentStatusForDisplay || (active && ['claude', 'codex'].includes(agentKey)
+        ? {kind: agentKey, state: 'idle', window: record.indexText, window_index: record.index, current: true, window_active: true}
+        : agentStatus);
+      const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatusForIcon, agentKey, session);
       const dateText = agentStatusForDisplay ? sessionPopoverAgentStateText(agentStatusForDisplay, nowSeconds) : tabberAgentDateText(agentActivity);
       const dateHtml = agentStatusForDisplay && agentWindowIsAttentionState(agentStatusForDisplay.state)
         ? sessionPopoverAgentStatusHtml(agentStatusForDisplay, nowSeconds, 'tabber-agent-status')
@@ -13720,8 +13750,7 @@ function tabberWindowLabelHtml(label, iconHtml, options = {}) {
   const pid = Number(options.pid);
   const nameText = text;
   const pidText = Number.isFinite(pid) && pid > 0 ? ` (pid=${Math.floor(pid)})` : '';
-  const activityIconHtml = String(options.activityIconHtml || '');
-  return `<span class="tabber-window-label">${iconHtml}<span class="tabber-window-text">${esc(nameText)}</span>${activityIconHtml}${pidText ? `<span class="tabber-window-pid">${esc(pidText)}</span>` : ''}</span>`;
+  return `<span class="tabber-window-label">${iconHtml}<span class="tabber-window-text">${esc(nameText)}</span>${pidText ? `<span class="tabber-window-pid">${esc(pidText)}</span>` : ''}</span>`;
 }
 
 function tabberSessionChromeHtml(data) {
@@ -13814,12 +13843,12 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
   if (titleParts.length) row.setAttribute('title', titleParts.join('\n'));
   else row.removeAttribute('title');
   const windowAgentIconHtml = data.type === 'window' && ['claude', 'codex'].includes(data.agentKey)
-    ? agentIcon(data.agentKey, {label: agentLabel(data.agentKey)})
+    ? (data.activityIconHtml || agentIcon(data.agentKey, {label: agentLabel(data.agentKey)}))
     : '';
   const nameHtml = data.type === 'session'
     ? tabberSessionChromeHtml(renderData)
     : data.type === 'window'
-      ? tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true, activityIconHtml: data.activityIconHtml, pid: data.pid})
+      ? tabberWindowLabelHtml(label, windowAgentIconHtml, {active: data.active === true, pid: data.pid})
     : data.type === 'loading'
       ? `<span class="tabber-loading-label">${esc(data.label || 'Fetching')}</span>${movingEllipsisHtml('tabber-loading-dots')}`
     : '';
@@ -18666,6 +18695,7 @@ function applySettingsPayload(payload, options = {}) {
   latencyRefreshMs = numberSetting('performance.latency_refresh_ms');
   eventLogRefreshMs = numberSetting('performance.event_log_refresh_ms');
   tabberActivityRefreshMs = numberSetting('performance.tabber_activity_refresh_ms');
+  agentWindowCooldownSeconds = numberSetting('performance.agent_window_cooldown_seconds');
   redReminderMs = numberSetting('appearance.red_reminder_ms');
   yoloRotateMs = numberSetting('appearance.yolo_rotate_ms');
   toastDurationMs = numberSetting('notifications.toast_duration_ms');
@@ -18904,6 +18934,54 @@ function updateSessionButtonStates() {
   // and menu rows, which are rebuilt by their normal render paths.
   // Keep the top-bar cross-session activity line live as states change (poll-driven).
   updateTopbarActivityStatus();
+  refreshPaneTabSessionPopovers();
+}
+
+function sessionPopoverNodeFromHtml(html) {
+  const template = document.createElement('template');
+  if (template?.content !== undefined) {
+    template.innerHTML = String(html || '');
+    return template.content.firstElementChild;
+  }
+  const text = String(html || '');
+  const match = text.match(/^<div class="session-popover" role="tooltip">([\s\S]*)<\/div>\s*$/);
+  return {
+    className: 'session-popover',
+    innerHTML: match ? match[1] : text,
+    getAttribute(name) {
+      return name === 'role' ? 'tooltip' : null;
+    },
+  };
+}
+
+function refreshSessionPopoverContent(popover, html) {
+  if (!popover) return;
+  const fresh = sessionPopoverNodeFromHtml(html);
+  if (!fresh) return;
+  const keepOpen = popover.classList?.contains?.('popover-open') === true;
+  const keepDetached = popover.classList?.contains?.('pane-tab-detached-popover') === true;
+  popover.className = fresh.className || 'session-popover';
+  if (keepOpen) popover.classList?.add?.('popover-open');
+  if (keepDetached) popover.classList?.add?.('pane-tab-detached-popover');
+  const role = fresh.getAttribute?.('role') || 'tooltip';
+  popover.setAttribute?.('role', role);
+  popover.innerHTML = fresh.innerHTML;
+}
+
+function refreshPaneTabSessionPopovers() {
+  document.querySelectorAll('.pane-tab[data-pane-tab], .dockview-pane-tab[data-pane-tab]').forEach(tab => {
+    const session = String(tab?.dataset?.paneTab || '').trim();
+    if (!session || tabTypeForItem(session)) return;
+    const popover = typeof paneTabPopoverForAnchor === 'function'
+      ? paneTabPopoverForAnchor(tab)
+      : tab?.querySelector?.(':scope > .session-popover');
+    if (!popover || popover.classList?.contains?.('file-popover')) return;
+    const info = transcriptMeta.sessions?.[session];
+    const auto = autoApproveStates.get(session)?.enabled === true;
+    const state = sessionState(session, info);
+    const agentKind = sessionAgentKind(session);
+    refreshSessionPopoverContent(popover, sessionPopoverHtml(session, info, agentKind, auto, state));
+  });
 }
 
 function bindFilePopoverActions(_container) {
@@ -18951,7 +19029,7 @@ function stopPopoverEvent(event) {
 function closeOtherSessionPopovers(current, options = {}) {
   const force = options.force === true;
   let changed = false;
-  for (const other of document.querySelectorAll('.pane-tab.popover-open, .panel-popover-zone.popover-open')) {
+  for (const other of document.querySelectorAll('.pane-tab.popover-open, .tabber-session-tab.popover-open, .panel-popover-zone.popover-open')) {
     if (other !== current) {
       const popover = other.querySelector?.(':scope > .session-popover, :scope > .panel-detail-popover')
         || other.__yolomuxDetachedPopover;
@@ -19549,6 +19627,7 @@ function sessionPopoverSortedAgentWindows(session, info, autoPayload) {
   return sessionAgentWindowStatusPayloads(session, info, autoPayload)
     .map((agent, index) => ({
       ...agent,
+      _session: session,
       _index: index,
       kind: String(agent?.kind || '').toLowerCase(),
       state: String(agent?.state || 'idle'),
@@ -19566,22 +19645,15 @@ function sessionPopoverSortedAgentWindows(session, info, autoPayload) {
 function sessionPopoverAgentWindowRowHtml(agent, nowSeconds = Date.now() / 1000) {
   const working = agentWindowIsWorkingState(agent.state);
   const attention = agentWindowIsAttentionState(agent.state);
-  const dot = working || attention ? '●' : '○';
   const descriptor = tmuxWindowDescriptorLabel(agentWindowCanonicalLabel(agent.window_index ?? agent.window, agent.kind, agent.window_label || agent.kind));
   const label = typeof tmuxWindowDisplayLabel === 'function' ? tmuxWindowDisplayLabel(descriptor, agent.pid) : descriptor;
   const classes = ['session-agent-row', `state-${agent.state}`];
   if (working) classes.push('working');
   if (attention) classes.push('attention');
   if (agent.current === true) classes.push('current');
-  const dotTone = agentWindowRawStateTone(agent.state);
-  const dotClasses = statusIndicatorDotClasses(
-    dotTone,
-    'session-agent-dot',
-  );
-  const dotStyle = statusIndicatorToneStyle(dotTone);
+  const activityHtml = agentWindowActivityIconHtmlForStatus(agent, agent.kind, agent._session || '');
   return `<div class="${esc(classes.join(' '))}">
-    <span class="${esc(dotClasses)}" aria-hidden="true"${dotStyle}>${esc(dot)}</span>
-    <span class="session-agent-kind">${esc(label)}</span>
+    <span class="session-agent-kind">${activityHtml}${esc(label)}</span>
     <span class="session-agent-sep">—</span>
     ${sessionPopoverAgentStatusHtml(agent, nowSeconds)}
   </div>`;
@@ -21091,11 +21163,13 @@ function agentIcon(kind, options = {}) {
   const name = agentLabel(kind);
   const label = options.label || name;
   const labelAttr = label ? ` aria-label="${esc(label)}" title="${esc(label)}"` : '';
+  const extraClass = String(options.className || '').trim();
+  const classes = agentKind => ['agent-icon', agentKind, extraClass].filter(Boolean).join(' ');
   if (kind === 'codex') {
-    return `<span class="agent-icon codex"${labelAttr}>${codexIcon()}</span>`;
+    return `<span class="${esc(classes('codex'))}"${labelAttr}>${codexIcon()}</span>`;
   }
   if (kind === 'claude') {
-    return `<span class="agent-icon claude"${labelAttr}>${claudeIcon()}</span>`;
+    return `<span class="${esc(classes('claude'))}"${labelAttr}>${claudeIcon()}</span>`;
   }
   return '';
 }
@@ -21477,10 +21551,11 @@ function compactHomePath(path) {
   return text;
 }
 
-function projectMetaHtml(session, info) {
+function projectMetaParts(session, info, options = {}) {
   const {project, repos, repoIndex, selectedRepo, git, fullPath} = projectMetaSelection(session, info);
   const showingPrimaryGit = !selectedRepo || repoRootKey(project.git?.root) === repoRootKey(selectedRepo.root);
-  const parts = [];
+  const metadataParts = [];
+  const fullText = options.fullText === true;
   const repoSwitchHtml = repos.length > 1 ? (() => {
     const position = Math.max(0, repoIndex) + 1;
     const switchLabel = `${position}/${repos.length}`;
@@ -21491,33 +21566,51 @@ function projectMetaHtml(session, info) {
     </span>`;
   })() : '';
   if (!git) {
-    if (repoSwitchHtml) parts.push(repoSwitchHtml);
-    if (fullPath) parts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
-    parts.push(`<span class="meta-muted">${esc(t('git.noCheckout'))}</span>`);
-    return metaJoin(parts);
+    if (fullPath) metadataParts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
+    metadataParts.push(`<span class="meta-muted">${esc(t('git.noCheckout'))}</span>`);
+    return {repoSwitchHtml, metadataParts};
   }
   const pr = displayPullRequest(info);
-  if (repoSwitchHtml) parts.push(repoSwitchHtml);
-  if (showingPrimaryGit && pr?.number) parts.push(pullRequestLinkHtml(pr));
-  if (git.branch) parts.push(`<span class="meta-branch">${esc(shortBranch(git.branch))}</span>`);
-  if (fullPath) parts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
-  if (Number.isFinite(git.behind) && git.behind > 0) parts.push(`<span class="meta-muted">${esc(t('git.behind', {count: git.behind}))}</span>`);
-  if (Number.isFinite(git.ahead) && git.ahead > 0) parts.push(`<span class="meta-muted">${esc(t('git.ahead', {count: git.ahead}))}</span>`);
-  if (Number.isFinite(git.dirty_count)) parts.push(`<span class="meta-muted">${esc(t('git.dirty', {count: git.dirty_count}))}</span>`);
+  if (showingPrimaryGit && pr?.number) metadataParts.push(pullRequestLinkHtml(pr));
+  if (git.branch) metadataParts.push(`<span class="meta-branch">${esc(fullText ? git.branch : shortBranch(git.branch))}</span>`);
+  if (fullPath) metadataParts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
+  if (Number.isFinite(git.behind) && git.behind > 0) metadataParts.push(`<span class="meta-muted">${esc(t('git.behind', {count: git.behind}))}</span>`);
+  if (Number.isFinite(git.ahead) && git.ahead > 0) metadataParts.push(`<span class="meta-muted">${esc(t('git.ahead', {count: git.ahead}))}</span>`);
+  if (Number.isFinite(git.dirty_count)) metadataParts.push(`<span class="meta-muted">${esc(t('git.dirty', {count: git.dirty_count}))}</span>`);
   if (showingPrimaryGit && pr?.number) {
     if (!pullRequestIsMerged(pr) && pr.checks?.state && pr.checks.state !== 'unknown') {
-      parts.push(`<span class="meta-pr-status ${pullRequestCiStatusClass(pr)}">${esc(pr.checks.summary || pullRequestStatusLabel(pr))}</span>`);
+      metadataParts.push(`<span class="meta-pr-status ${pullRequestCiStatusClass(pr)}">${esc(pr.checks.summary || pullRequestStatusLabel(pr))}</span>`);
     }
   }
   if (showingPrimaryGit) {
     for (const issue of project.linear || []) {
       const state = issue.state ? ` ${issue.state}` : '';
-      parts.push(linkHtml(issue.url, `${issue.identifier}${state}`, issue.title || ''));
+      metadataParts.push(linkHtml(issue.url, `${issue.identifier}${state}`, issue.title || ''));
     }
     const desc = pr?.title || pr?.description || (project.linear || []).find(issue => issue.title)?.title || '';
-    if (desc) parts.push(`<span class="meta-desc">${esc(shortText(desc, 160))}</span>`);
+    if (desc) {
+      const descText = fullText ? String(desc || '').replace(/\s+/g, ' ').trim() : shortText(desc, 160);
+      if (descText) metadataParts.push(`<span class="meta-desc">${esc(descText)}</span>`);
+    }
   }
-  return parts.length ? metaJoin(parts) : `<span class="meta-muted">${esc(t('git.checkoutDetected'))}</span>`;
+  if (!metadataParts.length) metadataParts.push(`<span class="meta-muted">${esc(t('git.checkoutDetected'))}</span>`);
+  return {repoSwitchHtml, metadataParts};
+}
+
+function projectMetaHtml(session, info, options = {}) {
+  const {repoSwitchHtml, metadataParts} = projectMetaParts(session, info, options);
+  return metaJoin([repoSwitchHtml, ...metadataParts]);
+}
+
+function paneInfoBarMetaHtml(session, info) {
+  const {repoSwitchHtml, metadataParts} = projectMetaParts(session, info, {fullText: true});
+  const scrollHtml = metaJoin(metadataParts);
+  const controlsHtml = repoSwitchHtml ? `<span class="pane-info-bar-controls">${repoSwitchHtml}</span>` : '';
+  const separatorHtml = controlsHtml && scrollHtml ? '<span class="meta-sep pane-info-bar-fixed-sep"> · </span>' : '';
+  const scrollTrackHtml = scrollHtml
+    ? `<span class="pane-info-bar-scroll-viewport"><span class="pane-info-bar-scroll-text">${scrollHtml}</span></span>`
+    : '';
+  return `${controlsHtml}${separatorHtml}${scrollTrackHtml}`;
 }
 
 // C9: popover listing every repo a session touches (focused first), each row: path, branch, dirty,
@@ -22241,25 +22334,67 @@ function terminalAttentionSegmentsForRange(context, start, length, highlightText
     }));
 }
 
+function terminalAttentionCharIsAlphaNumeric(char) {
+  return /[A-Za-z0-9]/.test(String(char || ''));
+}
+
+function terminalAttentionDotIsSentenceBoundary(source, index) {
+  return !(
+    terminalAttentionCharIsAlphaNumeric(source[index - 1])
+    && terminalAttentionCharIsAlphaNumeric(source[index + 1])
+  );
+}
+
+function terminalAttentionCharIsQuestionSentenceBoundary(source, index) {
+  const char = source[index];
+  if (char === '.') return terminalAttentionDotIsSentenceBoundary(source, index);
+  return /[!?？|│—–]/.test(char);
+}
+
+function terminalAttentionSkipPromptPrefix(source, start) {
+  let index = Math.max(0, Number(start) || 0);
+  while (/\s/.test(source[index] || '')) index += 1;
+  while (/[>❯]/.test(source[index] || '')) {
+    index += 1;
+    while (/\s/.test(source[index] || '')) index += 1;
+  }
+  if (/[$#]/.test(source[index] || '') && /\s/.test(source[index + 1] || '')) {
+    index += 1;
+    while (/\s/.test(source[index] || '')) index += 1;
+  }
+  return index;
+}
+
+function terminalAttentionQuestionSentenceStart(source, questionIndex) {
+  let start = 0;
+  for (let index = questionIndex - 1; index >= 0; index -= 1) {
+    if (terminalAttentionCharIsQuestionSentenceBoundary(source, index)) {
+      start = index + 1;
+      break;
+    }
+  }
+  return terminalAttentionSkipPromptPrefix(source, start);
+}
+
 function terminalAttentionQuestionSentenceRanges(text) {
   const source = terminalAttentionTextPart(text);
   if (!source || !/[?？]/.test(source)) return [];
   const ranges = [];
-  const pattern = /(?:^|[.!?？|│—–])\s*(?:[>❯$#]\s*)*([^.!?？|│—–]*[?？])/g;
-  let match = pattern.exec(source);
-  while (match) {
-    const rawSentence = match[1] || '';
+  for (let questionIndex = 0; questionIndex < source.length; questionIndex += 1) {
+    if (!/[?？]/.test(source[questionIndex])) continue;
+    const end = questionIndex + 1;
+    const start = terminalAttentionQuestionSentenceStart(source, questionIndex);
+    const rawSentence = source.slice(start, end);
+    const trimOffset = rawSentence.length - rawSentence.trimStart().length;
     const sentence = rawSentence.trim();
-    if (sentence && !/^(>|❯|\$|#)\s*[?？]?$/.test(sentence)) {
-      const rawOffset = match[0].lastIndexOf(rawSentence);
-      const trimOffset = rawSentence.length - rawSentence.trimStart().length;
+    const content = sentence.replace(/[?？]/g, '').replace(/^[>❯$#\s]+/, '').trim();
+    if (content) {
       ranges.push({
-        start: match.index + Math.max(0, rawOffset) + trimOffset,
+        start: start + trimOffset,
         length: sentence.length,
         text: sentence,
       });
     }
-    match = pattern.exec(source);
   }
   return ranges;
 }
@@ -22278,6 +22413,12 @@ function terminalAttentionShouldExpandQuestionFragment(item, rows, context, star
   const rowIndex = rows.findIndex(record => record === source.record);
   if (rowIndex <= 0) return false;
   return terminalAttentionRowsLikelyWrapped(rows[rowIndex - 1], item);
+}
+
+function terminalAttentionQuestionRangeStartsOnMatchRow(context, range, start) {
+  const rangeSource = context?.map?.[range?.start];
+  const matchSource = context?.map?.[start];
+  return Boolean(rangeSource?.record && rangeSource.record === matchSource?.record);
 }
 
 function terminalAttentionQuestionCandidateTexts(questionTexts) {
@@ -22323,9 +22464,18 @@ function terminalAttentionSpanSegments(item, rows, candidate) {
     const context = terminalAttentionJoinedContext(rows, separator);
     const start = context.text.indexOf(needle);
     if (start < 0) continue;
-    const range = terminalAttentionShouldExpandQuestionFragment(item, rows, context, start)
-      ? terminalAttentionContainingQuestionRange(context, start, needle.length)
-      : null;
+    const containingRange = terminalAttentionContainingQuestionRange(context, start, needle.length);
+    const expandsWrappedFragment = terminalAttentionShouldExpandQuestionFragment(item, rows, context, start);
+    const mayExpandRange = containingRange && (
+      terminalAttentionQuestionRangeStartsOnMatchRow(context, containingRange, start)
+      || expandsWrappedFragment
+    );
+    const expandsRange = containingRange && (
+      containingRange.start < start
+      || containingRange.length > needle.length
+      || expandsWrappedFragment
+    );
+    const range = containingRange && mayExpandRange && expandsRange ? containingRange : null;
     const highlightStart = range?.start ?? start;
     const highlightLength = range?.length ?? needle.length;
     const highlightText = range?.text ?? needle;
@@ -22345,7 +22495,8 @@ function terminalAttentionQuestionFallbackSpan(record) {
   if (!/[?？]$/.test(trimmedEnd)) return null;
   const questionEnd = Math.max(trimmedEnd.lastIndexOf('?'), trimmedEnd.lastIndexOf('？')) + 1;
   const questionPrefix = trimmedEnd.slice(0, questionEnd);
-  const sentence = questionPrefix.match(/([^.!?？|│]+[?？])$/)?.[1]?.trim() || terminalAttentionTextPart(trimmedEnd);
+  const ranges = terminalAttentionQuestionSentenceRanges(questionPrefix);
+  const sentence = ranges.length ? ranges[ranges.length - 1].text : terminalAttentionTextPart(trimmedEnd);
   const start = Math.max(0, rawText.lastIndexOf(sentence));
   return {highlightStart: start, highlightLength: Math.max(1, sentence.length), highlightText: sentence};
 }
@@ -24066,7 +24217,7 @@ function dockviewSyncHeaderBackgroundDragSources() {
   if (!dockviewLayoutActive()) return;
   document.querySelectorAll('.dv-groupview').forEach(group => {
     const header = group.querySelector('.dv-tabs-and-actions-container');
-    const detail = group.querySelector('.dockview-panel-content > .panel > .panel-detail-row');
+    const infoBar = group.querySelector('.dockview-panel-content > .panel > .pane-info-bar, .dockview-panel-content > .panel > .panel-detail-row');
     const editorToolbar = group.querySelector('.dockview-panel-content > .file-editor-panel > .file-editor-toolbar');
     const slot = dockviewSlotForGroupElement(group);
     const draggable = Boolean(slot && !slotIsFileExplorerPane(slot) && activeItemForSide(slot));
@@ -24085,7 +24236,7 @@ function dockviewSyncHeaderBackgroundDragSources() {
       element.addEventListener('mousedown', begin);
     };
     syncDragSource(header);
-    syncDragSource(detail);
+    syncDragSource(infoBar);
     syncDragSource(editorToolbar);
   });
 }
@@ -25800,7 +25951,7 @@ function bindDelayedSessionPopover(anchor, popover, position, options = {}) {
   createHoverPopover({
     anchor,
     popover,
-    showDelay: () => (document.querySelector('.pane-tab.popover-open') ? tabPopoverFollowDelayMs : tabPopoverShowDelayMs),
+    showDelay: () => (document.querySelector('.pane-tab.popover-open, .tabber-session-tab.popover-open') ? tabPopoverFollowDelayMs : tabPopoverShowDelayMs),
     hideDelay: () => popoverHideDelayMs,
     canOpen: () => !appMenuIsOpen() && !topbar?.matches?.(':hover'),
     onQueue: position,
@@ -26808,8 +26959,9 @@ function tmuxWindowBarHtml(session, info, options = {}) {
   if (!records.length) return '';
   const disabled = options.disabled === true || readOnlyMode;
   const activeIndexOverride = tmuxWindowDisplayActiveIndex(session);
-  const labelMode = tmuxWindowBarLabelMode(records, options);
+  const labelMode = tmuxWindowBarLabelMode(records, options.infoBar === true && !options.labelMode ? {...options, labelMode: 'names'} : options);
   const disabledTitle = readOnlyMode ? t('terminal.window.adminRequired') : t('tab.unavailableFor', {name: itemLabel(session)});
+  const contextAttr = options.infoBar === true ? ' data-tmux-window-bar-context="info-bar"' : '';
   const buttons = records.map(record => {
     const infoPayload = Array.isArray(info) ? {panes: info} : info;
     const fallbackName = record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.nameLabel}`;
@@ -26820,14 +26972,19 @@ function tmuxWindowBarHtml(session, info, options = {}) {
     const active = activeIndexOverride === undefined ? recordActive : String(record.index) === activeIndexOverride;
     const pressed = active ? 'true' : 'false';
     const activeClass = active ? ' active' : '';
-    const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatus, agentKey, session);
+    const agentStatusForIcon = agentStatus
+      ? {...agentStatus, current: active, window_active: active}
+      : (active && ['claude', 'codex'].includes(agentKey)
+        ? {kind: agentKey, state: 'idle', window: record.indexText, window_index: record.index, current: true, window_active: true}
+        : agentStatus);
+    const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatusForIcon, agentKey, session);
     const title = t('terminal.window.title', {name: visibleName});
     const attrs = disabled
       ? `disabled title="${esc(disabledTitle)}" aria-label="${esc(title)}"`
       : `data-window-index="${esc(record.indexText)}" data-window-session="${esc(session)}" data-window-label="${esc(visibleName)}" title="${esc(title)}" aria-label="${esc(title)}" aria-pressed="${pressed}"`;
-    return `<button type="button" class="tab tmux-window-button${activeClass}" ${attrs}><span class="tmux-window-name-label"><span class="tmux-window-name-text">${esc(visibleName)}</span>${activityIconHtml}</span><span class="tmux-window-number-label">${esc(record.numberLabel)}</span></button>`;
+    return `<button type="button" class="tab tmux-window-button${activeClass}" ${attrs}><span class="tmux-window-name-label">${activityIconHtml}<span class="tmux-window-name-text">${esc(visibleName)}</span></span><span class="tmux-window-number-label">${esc(record.numberLabel)}</span></button>`;
   }).join('');
-  return `<div class="tmux-window-bar" data-tmux-window-bar="${esc(session)}" data-tmux-window-label-mode="${esc(labelMode)}" role="group" aria-label="${esc(t('terminal.window.groupAria'))}">${buttons}</div>`;
+  return `<div class="tmux-window-bar" data-tmux-window-bar="${esc(session)}"${contextAttr} data-tmux-window-label-mode="${esc(labelMode)}" role="group" aria-label="${esc(t('terminal.window.groupAria'))}">${buttons}</div>`;
 }
 
 function handleWindowStepButtonClick(event) {
@@ -26852,6 +27009,7 @@ function windowStepButtonFromEvent(event) {
 
 function syncTmuxWindowBarOverflow(session) {
   document.body?.querySelectorAll?.(`[data-tmux-window-bar="${cssEscape(session)}"]`)?.forEach(bar => {
+    if (bar?.dataset?.tmuxWindowBarContext === 'info-bar') return;
     if (!bar || bar.dataset.tmuxWindowLabelMode === 'numbers') return;
     if (bar.scrollWidth > bar.clientWidth + 1) bar.dataset.tmuxWindowLabelMode = 'numbers';
   });
@@ -26864,10 +27022,11 @@ function updatePanelWindowStepButtons(session, info) {
     ...(document.body?.querySelectorAll?.(barSelector) || []),
     ...(panel?.querySelectorAll?.(barSelector) || []),
   ])];
-  const html = tmuxWindowBarHtml(session, info);
+  const html = tmuxWindowBarHtml(session, info, {infoBar: true});
   if (!html) {
     bars.forEach(bar => bar.remove());
     syncTmuxWindowBarOverflow(session);
+    schedulePaneInfoBarMetaOverflowSync(panel);
     return;
   }
   const replacementFromHtml = () => {
@@ -26876,7 +27035,7 @@ function updatePanelWindowStepButtons(session, info) {
     return wrapper.firstElementChild;
   };
   const insertBarIntoDetailRow = () => {
-    const row = panel?.querySelector(':scope > .panel-detail-row') || panel?.querySelector('.panel-detail-row');
+    const row = panel?.querySelector(':scope > .pane-info-bar') || panel?.querySelector('.pane-info-bar') || panel?.querySelector(':scope > .panel-detail-row') || panel?.querySelector('.panel-detail-row');
     if (!row) return false;
     const replacement = replacementFromHtml();
     if (!replacement) return false;
@@ -26888,6 +27047,7 @@ function updatePanelWindowStepButtons(session, info) {
   if (!bars.length) {
     insertBarIntoDetailRow();
     syncTmuxWindowBarOverflow(session);
+    schedulePaneInfoBarMetaOverflowSync(panel);
     return;
   }
   bars.forEach(existing => {
@@ -26895,6 +27055,7 @@ function updatePanelWindowStepButtons(session, info) {
     if (replacement) existing.replaceWith(replacement);
   });
   syncTmuxWindowBarOverflow(session);
+  schedulePaneInfoBarMetaOverflowSync(panel);
 }
 
 function agentForPane(info, pane) {
@@ -27153,10 +27314,10 @@ function createSearchHistoryPanel() {
         ${virtualPanelControlsHtml(searchHistoryItemId)}
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
-      <div class="panel-detail-row">
-        <div class="panel-copy">
+      <div class="pane-info-bar panel-detail-row">
+        <div class="pane-info-bar-copy panel-copy">
           <div id="panel-tab-${searchHistoryItemId}" class="panel-session-label"><span class="session-button-dir">${esc(searchHistoryTabLabel())}</span></div>
-          <div id="meta-${searchHistoryItemId}" class="meta">${esc(searchHistoryPanelStatusText())}</div>
+          <div id="meta-${searchHistoryItemId}" class="pane-info-bar-meta meta">${esc(searchHistoryPanelStatusText())}</div>
         </div>
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(searchHistoryItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
       </div>
@@ -29334,6 +29495,7 @@ function preferenceSections() {
       {path: 'performance.latency_refresh_ms', label: t('pref.performance.latency_refresh_ms.label'), type: 'number', min: 1, max: 30, step: 0.1, suffix: 's', scale: 1000, help: t('pref.performance.latency_refresh_ms.help')},
       {path: 'performance.event_log_refresh_ms', label: t('pref.performance.event_log_refresh_ms.label'), type: 'number', min: 1, max: 60, step: 0.1, suffix: 's', scale: 1000, help: t('pref.performance.event_log_refresh_ms.help')},
       {path: 'performance.tabber_activity_refresh_ms', label: t('pref.performance.tabber_activity_refresh_ms.label'), type: 'number', min: 1, max: 60, step: 0.5, suffix: 's', scale: 1000, help: t('pref.performance.tabber_activity_refresh_ms.help')},
+      {path: 'performance.agent_window_cooldown_seconds', label: t('pref.performance.agent_window_cooldown_seconds.label'), type: 'number', min: 0, max: 300, step: 1, suffix: 's', help: t('pref.performance.agent_window_cooldown_seconds.help')},
       {path: 'performance.popover_show_delay_ms', label: t('pref.performance.popover_show_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.popover_show_delay_ms.help')},
       {path: 'performance.popover_hide_delay_ms', label: t('pref.performance.popover_hide_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.popover_hide_delay_ms.help')},
       {path: 'performance.menu_hover_open_delay_ms', label: t('pref.performance.menu_hover_open_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.menu_hover_open_delay_ms.help')},
@@ -29730,10 +29892,10 @@ function createPreferencesPanel() {
         ${virtualPanelControlsHtml(prefsItemId)}
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
-      <div class="panel-detail-row">
-        <div class="panel-copy">
+      <div class="pane-info-bar panel-detail-row">
+        <div class="pane-info-bar-copy panel-copy">
           <div id="panel-tab-${prefsItemId}" class="panel-session-label"><span class="session-button-dir">${esc(t('tab.preferences'))}</span></div>
-          <div id="meta-${prefsItemId}" class="meta">${esc(preferenceStatusText())}</div>
+          <div id="meta-${prefsItemId}" class="pane-info-bar-meta meta">${esc(preferenceStatusText())}</div>
         </div>
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(prefsItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
       </div>
@@ -30238,10 +30400,10 @@ function createDebugPanel() {
         ${virtualPanelControlsHtml(debugPaneItemId)}
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
-      <div class="panel-detail-row">
-        <div class="panel-copy">
+      <div class="pane-info-bar panel-detail-row">
+        <div class="pane-info-bar-copy panel-copy">
           <div id="panel-tab-${debugPaneItemId}" class="panel-session-label"><span class="session-button-dir">${esc(t('tab.debug'))}</span></div>
-          <div id="meta-${debugPaneItemId}" class="meta">${esc(debugMetaText())}</div>
+          <div id="meta-${debugPaneItemId}" class="pane-info-bar-meta meta">${esc(debugMetaText())}</div>
         </div>
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(debugPaneItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
       </div>
@@ -31562,7 +31724,7 @@ function changesRepoCount(payload, files) {
   if (!repos.size) {
     for (const repoInfo of Array.isArray(payload?.repos) ? payload.repos : []) {
       const path = normalizeDirectoryPath(repoInfo?.repo || '');
-      if (path && repoHasExplicitComparison(repoInfo)) repos.add(path);
+      if (path && repoPayloadHasRenderableSection(repoInfo)) repos.add(path);
     }
   }
   return repos.size;
@@ -31613,8 +31775,13 @@ function repoHasExplicitComparison(repoInfo) {
   return from !== 'default' || to !== 'base';
 }
 
-function payloadHasExplicitRepoSections(payload) {
-  return Array.isArray(payload?.repos) && payload.repos.some(repoHasExplicitComparison);
+function repoPayloadHasRenderableSection(repoInfo) {
+  const repo = normalizeDirectoryPath(repoInfo?.repo || '');
+  return Boolean(repo && repo !== 'Outside repo');
+}
+
+function payloadHasRenderableRepoSections(payload) {
+  return Array.isArray(payload?.repos) && payload.repos.some(repoPayloadHasRenderableSection);
 }
 
 function changesComparisonHeaderHtml(payload, files, options = {}) {
@@ -31737,7 +31904,7 @@ function renderChangesGroups(groupsEl, files, options = {}) {
   if (options.includeEmptyRepoSections === true) {
     for (const repoInfo of Array.isArray(payload?.repos) ? payload.repos : []) {
       const repo = repoInfo?.repo || 'Outside repo';
-      if (repo && repo !== 'Outside repo' && !groups.has(repo) && repoHasExplicitComparison(repoInfo)) {
+      if (repoPayloadHasRenderableSection(repoInfo) && !groups.has(repo)) {
         groups.set(repo, []);
       }
     }
@@ -31885,7 +32052,7 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
   const errorHtml = (payload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
   const warningHtml = (payload.warnings || []).map(warning => `<div class="changes-warning">${esc(warning)}</div>`).join('');
   const full = options.full === true || fileExplorerMode === 'diff';
-  const showEmptyRepoSections = full && !files.length && payloadHasExplicitRepoSections(payload);
+  const showEmptyRepoSections = full && !files.length && payloadHasRenderableRepoSections(payload);
   const empty = !loading && loaded && !files.length && !showEmptyRepoSections ? `<div class="changes-empty">${esc(t('changes.emptyModified'))}</div>` : '';
   if (full) {
     return `
@@ -39778,7 +39945,7 @@ function shareReplayApplyTerminalPlaceholders(terminals = []) {
 function bindShareReplayPaneTabPopovers(root = appRootElement()) {
   if (!shareReplayShellActive || shareReadOnlyReplayModeEnabled() || !root?.querySelectorAll || typeof createHoverPopover !== 'function') return 0;
   let bound = 0;
-  const tabs = root.querySelectorAll('.pane-tab, .dockview-pane-tab, .panel-popover-zone');
+  const tabs = root.querySelectorAll('.pane-tab, .dockview-pane-tab, .tabber-session-tab, .panel-popover-zone');
   for (const tab of tabs) {
     if (!tab || tab.dataset?.shareReplayPopoverBound === 'true') continue;
     const popover = tab.querySelector?.(':scope > .session-popover');
@@ -39790,7 +39957,7 @@ function bindShareReplayPaneTabPopovers(root = appRootElement()) {
     createHoverPopover({
       anchor: tab,
       popover,
-      showDelay: () => (document.querySelector('.pane-tab.popover-open, .dockview-pane-tab.popover-open') ? tabPopoverFollowDelayMs : tabPopoverShowDelayMs),
+      showDelay: () => (document.querySelector('.pane-tab.popover-open, .dockview-pane-tab.popover-open, .tabber-session-tab.popover-open') ? tabPopoverFollowDelayMs : tabPopoverShowDelayMs),
       hideDelay: () => popoverHideDelayMs,
       canOpen: () => true,
       onQueue: position,
@@ -40709,6 +40876,7 @@ function sharePopupLayerElements() {
     '.pane-tab-popover',
     '.pane-tab.popover-open > .session-popover',
     '.dockview-pane-tab.popover-open > .session-popover',
+    '.tabber-session-tab.popover-open > .session-popover',
     '.panel-popover-zone.popover-open > .session-popover',
     '.pane-tab-detached-popover.popover-open',
     '.diff-ref-popover',
@@ -43595,13 +43763,13 @@ function createPanel(session) {
         ${panelControlsHtml(session)}
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
-      <div class="panel-detail-row">
-        <div class="panel-popover-zone">
+      <div class="pane-info-bar panel-detail-row">
+        <div class="pane-info-bar-popover-zone panel-popover-zone">
           <div id="panel-tab-${session}" class="panel-session-label">${panelHeaderStateHtml(sessionState(session, transcriptMeta.sessions?.[session]))}</div>
-          <div id="meta-${session}" class="meta">${esc(t('pane.findingBranch'))}</div>
+          <div id="meta-${session}" class="pane-info-bar-meta meta">${esc(t('pane.findingBranch'))}</div>
           ${sessionPopoverHtml(session, transcriptMeta.sessions?.[session], sessionAgentKind(session), autoApproveStates.get(session)?.enabled === true, sessionState(session, transcriptMeta.sessions?.[session]))}
         </div>
-        ${isTmuxSession(session) ? tmuxWindowBarHtml(session, transcriptMeta.sessions?.[session]) : ''}
+        ${isTmuxSession(session) ? tmuxWindowBarHtml(session, transcriptMeta.sessions?.[session], {infoBar: true}) : ''}
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(session)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
       </div>
       <div id="terminal-pane-${session}" class="tab-pane active panel-overlay-root">
@@ -46443,11 +46611,96 @@ async function refreshTranscripts(options = {}) {
   return transcriptMetaRefreshPromise;
 }
 
-function updatePanelMeta(session, info) {
+let paneInfoBarResizeObserver = null;
+const PANE_INFO_BAR_SCROLL_START_HOLD_SECONDS = 3;
+const PANE_INFO_BAR_SCROLL_END_HOLD_SECONDS = 2;
+
+function paneInfoBarScrollDurationSeconds(distancePx) {
+  const distance = Math.max(0, Number(distancePx) || 0);
+  return Math.min(90, Math.max(12, distance / 22));
+}
+
+function paneInfoBarScrollTiming(distancePx) {
+  const travelSeconds = paneInfoBarScrollDurationSeconds(distancePx);
+  const totalSeconds = PANE_INFO_BAR_SCROLL_START_HOLD_SECONDS + travelSeconds + PANE_INFO_BAR_SCROLL_END_HOLD_SECONDS;
+  const startPercent = (PANE_INFO_BAR_SCROLL_START_HOLD_SECONDS / totalSeconds) * 100;
+  const endPercent = ((PANE_INFO_BAR_SCROLL_START_HOLD_SECONDS + travelSeconds) / totalSeconds) * 100;
+  return {
+    totalSeconds,
+    timing: `linear(0 0%, 0 ${startPercent.toFixed(2)}%, 1 ${endPercent.toFixed(2)}%, 1 100%)`,
+  };
+}
+
+function paneInfoBarMetaNodes(root = document) {
+  if (!root) return [];
+  const nodes = [];
+  if (root.matches?.('.pane-info-bar-meta')) nodes.push(root);
+  if (typeof root.querySelectorAll === 'function') nodes.push(...root.querySelectorAll('.pane-info-bar-meta'));
+  return [...new Set(nodes)];
+}
+
+function ensurePaneInfoBarResizeObserver(meta) {
+  if (!meta || typeof window === 'undefined' || typeof window.ResizeObserver !== 'function') return;
+  if (!paneInfoBarResizeObserver) {
+    paneInfoBarResizeObserver = new ResizeObserver(entries => {
+      for (const entry of entries || []) schedulePaneInfoBarMetaOverflowSync(entry?.target?.closest?.('.pane-info-bar') || entry?.target || document);
+    });
+  }
+  if (meta._paneInfoBarResizeObserved === true) return;
+  meta._paneInfoBarResizeObserved = true;
+  paneInfoBarResizeObserver.observe(meta);
+  const bar = meta.closest?.('.pane-info-bar');
+  if (bar && bar._paneInfoBarResizeObserved !== true) {
+    bar._paneInfoBarResizeObserved = true;
+    paneInfoBarResizeObserver.observe(bar);
+  }
+}
+
+function syncPaneInfoBarMetaOverflow(root = document) {
+  for (const meta of paneInfoBarMetaNodes(root)) {
+    ensurePaneInfoBarResizeObserver(meta);
+    const viewport = meta.querySelector?.('.pane-info-bar-scroll-viewport');
+    const text = viewport?.querySelector?.('.pane-info-bar-scroll-text');
+    if (!viewport || !text) {
+      meta.classList?.remove?.('pane-info-bar-meta-overflow');
+      meta.style?.removeProperty?.('--pane-info-bar-scroll-distance');
+      meta.style?.removeProperty?.('--pane-info-bar-scroll-offset');
+      meta.style?.removeProperty?.('--pane-info-bar-scroll-duration');
+      meta.style?.removeProperty?.('--pane-info-bar-scroll-timing');
+      continue;
+    }
+    const viewportWidth = Number(viewport.clientWidth || viewport.getBoundingClientRect?.().width || 0);
+    const textWidth = Number(text.scrollWidth || text.getBoundingClientRect?.().width || 0);
+    const distance = Math.max(0, Math.ceil(textWidth - viewportWidth));
+    const overflowing = distance > 1;
+    meta.classList?.toggle?.('pane-info-bar-meta-overflow', overflowing);
+    if (overflowing) {
+      const scrollTiming = paneInfoBarScrollTiming(distance);
+      meta.style?.setProperty?.('--pane-info-bar-scroll-distance', `${distance}px`);
+      meta.style?.setProperty?.('--pane-info-bar-scroll-offset', `${-distance}px`);
+      meta.style?.setProperty?.('--pane-info-bar-scroll-duration', `${scrollTiming.totalSeconds.toFixed(2)}s`);
+      meta.style?.setProperty?.('--pane-info-bar-scroll-timing', scrollTiming.timing);
+    } else {
+      meta.style?.removeProperty?.('--pane-info-bar-scroll-distance');
+      meta.style?.removeProperty?.('--pane-info-bar-scroll-offset');
+      meta.style?.removeProperty?.('--pane-info-bar-scroll-duration');
+      meta.style?.removeProperty?.('--pane-info-bar-scroll-timing');
+    }
+  }
+}
+
+function schedulePaneInfoBarMetaOverflowSync(root = document) {
+  const run = () => syncPaneInfoBarMetaOverflow(root);
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+  else setTimeout(run, 0);
+}
+
+function updatePanelInfoBarMeta(session, info) {
   const meta = document.getElementById(`meta-${session}`);
   if (!meta) return;
-  meta.innerHTML = stripTitleAttrs(projectMetaHtml(session, info));
+  meta.innerHTML = stripTitleAttrs(paneInfoBarMetaHtml(session, info));
   meta.removeAttribute('title');
+  schedulePaneInfoBarMetaOverflowSync(meta);
 }
 
 function updatePanelHeader(session, info) {
@@ -46463,7 +46716,7 @@ function updatePanelHeader(session, info) {
     tab.innerHTML = panelHeaderStateHtml(state);
     tab.removeAttribute('title');
   }
-  updatePanelMeta(session, info);
+  updatePanelInfoBarMeta(session, info);
   const popover = panel?.querySelector(':scope .panel-popover-zone > .session-popover');
   if (popover) {
     const agentKind = sessionAgentKind(session);
