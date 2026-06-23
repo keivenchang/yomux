@@ -9,6 +9,15 @@ client_version_slug: codex-cli-0.141.0
 codex_version: codex-cli 0.141.0
 cursor: {}
 expected_screen_key: working
+expected_promoted:
+  agent_kind: codex
+  approval_type: ''
+  approval_visible: false
+  attention_kind: working
+  attention_label: RUN
+  composer_key: ghost
+  reason_code: busy
+  screen_key: working
 expected_goal_elapsed_seconds: 5400
 failures: []
 case_name: goal_active

@@ -494,10 +494,15 @@ def test_prompt_corpus_parity_groups_reference_existing_fixtures():
             assert data["agent"] == fixture["agent"]
             assert (data.get("case_name") or data.get("fixture_scenario")) == fixture["case_name"]
             if fixture["file"].startswith("captures/"):
+                assert "expected_promoted" in data
                 grouped_capture_files.add(fixture["file"].removeprefix("captures/"))
 
     capture_inventory = load_structured_fixture(PROMPT_CORPUS_DIR / "captures" / "inventory.yaml")
     promoted_capture_files = {fixture["file"] for fixture in capture_inventory["fixtures"]}
+    actual_capture_files = {path.name for path in (PROMPT_CORPUS_DIR / "captures").glob("*.yaml") if path.name != "inventory.yaml"}
+    root_capture_files = {Path(fixture["file"]).name for fixture in PROMPT_CORPUS_INVENTORY["fixtures"] if str(fixture["file"]).startswith("captures/")}
+    assert promoted_capture_files == actual_capture_files
+    assert root_capture_files <= promoted_capture_files
     assert promoted_capture_files <= grouped_capture_files
 
 

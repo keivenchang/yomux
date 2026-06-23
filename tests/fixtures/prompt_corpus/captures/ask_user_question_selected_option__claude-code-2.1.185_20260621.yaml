@@ -2,6 +2,7 @@ agent: claude
 capture_date: '2026-06-21'
 capture_mode: visible
 captured_at: '2026-06-21T18:57:18.952264+00:00'
+case_name: ask_user_question_selected_option
 claude_version: 2.1.185 (Claude Code)
 client_name: Claude Code
 client_version: 2.1.185 (Claude Code)
@@ -9,7 +10,17 @@ client_version_slug: claude-code-2.1.185
 codex_version: ''
 cursor: {}
 expected_screen_key: needs-input
+expected_promoted:
+  agent_kind: claude
+  approval_type: ''
+  approval_visible: false
+  attention_kind: question
+  attention_label: ASK?
+  composer_key: empty
+  reason_code: needs-input
+  screen_key: needs-input
 failures: []
+fixture_scenario: ask_user_question_selected_option
 fixture_id: ask_user_question_selected_option__claude-code-2.1.185_20260621
 height: null
 id: ask_user_question_selected_option__claude-code-2.1.185_20260621

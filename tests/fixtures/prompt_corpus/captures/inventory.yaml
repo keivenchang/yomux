@@ -41,6 +41,26 @@ fixtures:
   scenario: ask_user_question_no_selector_accessible
   source: real Claude Code accessible AskUserQuestion no-selector capture from tmux yoreal-no-selector-ax:0.0
 - agent: claude
+  capture_date: '2026-06-21'
+  case_name: ask_user_question_selected_option
+  client_name: Claude Code
+  client_version: 2.1.185 (Claude Code)
+  client_version_slug: claude-code-2.1.185
+  description: Claude AskUserQuestion highlighted selected-option prompt
+  expected:
+    agent_kind: claude
+    approval_type: ''
+    approval_visible: false
+    attention_kind: question
+    attention_label: ASK?
+    composer_key: empty
+    reason_code: needs-input
+    screen_key: needs-input
+  file: ask_user_question_selected_option__claude-code-2.1.185_20260621.yaml
+  id: ask_user_question_selected_option__claude-code-2.1.185_20260621
+  scenario: ask_user_question_selected_option
+  source: real Claude AskUserQuestion highlighted selector from tmux 1:2.0
+- agent: claude
   capture_date: '2026-06-22'
   case_name: parser_dependency_choice_question
   client_name: Claude Code
@@ -60,6 +80,26 @@ fixtures:
   id: parser_dependency_choice_question__claude-code-2.1.185_20260622
   scenario: parser_dependency_choice_question
   source_staging_file: staging/agent_tui__claude-code-2.1.185_20260622T185445Z.yaml
+- agent: claude
+  capture_date: '2026-06-21'
+  case_name: interrupted_what_should_claude_do_instead
+  client_name: Claude Code
+  client_version: 2.1.185 (Claude Code)
+  client_version_slug: claude-code-2.1.185
+  description: Claude interrupted awaiting-user-instruction prompt
+  expected:
+    agent_kind: claude
+    approval_type: ''
+    approval_visible: false
+    attention_kind: question
+    attention_label: ASK?
+    composer_key: empty
+    reason_code: needs-input
+    screen_key: needs-input
+  file: interrupted_what_should_claude_do_instead__claude-code-2.1.185_20260621.yaml
+  id: interrupted_what_should_claude_do_instead__claude-code-2.1.185_20260621
+  scenario: interrupted_what_should_claude_do_instead
+  source: real Claude interrupted awaiting-user-instruction capture from scratch tmux yoreal-claude-capture:0.0, trimmed to the visible prompt area for replay
 - agent: claude
   capture_date: '2026-06-20'
   case_name: composing_tip_not_question
@@ -180,6 +220,26 @@ fixtures:
   id: typed_nbsp_draft__claude-code-2.1.183_20260620
   scenario: typed_nbsp_draft
   source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T104236Z.yaml
+- agent: claude
+  capture_date: '2026-06-21'
+  case_name: goal_active
+  client_name: Claude Code
+  client_version: 2.1.185 (Claude Code)
+  client_version_slug: claude-code-2.1.185
+  description: Claude goal-active working status counter
+  expected:
+    agent_kind: claude
+    approval_type: ''
+    approval_visible: false
+    attention_kind: working
+    attention_label: RUN
+    composer_key: empty
+    reason_code: busy
+    screen_key: working
+  file: goal_active__claude-code-2.1.185_20260621.yaml
+  id: goal_active__claude-code-2.1.185_20260621
+  scenario: goal_active
+  source: real Claude goal-active capture from scratch tmux yoreal-claude-capture:0.0
 - agent: claude
   capture_date: '2026-06-20'
   case_name: working_visible_counter
@@ -380,6 +440,26 @@ fixtures:
   id: typed_draft__codex-cli-0.141.0_20260620
   scenario: typed_draft
   source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T160638Z.yaml
+- agent: codex
+  capture_date: '2026-06-21'
+  case_name: goal_active
+  client_name: Codex CLI
+  client_version: codex-cli 0.141.0
+  client_version_slug: codex-cli-0.141.0
+  description: Codex goal-active working status counter
+  expected:
+    agent_kind: codex
+    approval_type: ''
+    approval_visible: false
+    attention_kind: working
+    attention_label: RUN
+    composer_key: ghost
+    reason_code: busy
+    screen_key: working
+  file: goal_active__codex-cli-0.141.0_20260621.yaml
+  id: goal_active__codex-cli-0.141.0_20260621
+  scenario: goal_active
+  source: real Codex CLI goal-active capture from tmux 8001:0.0
 - agent: codex
   capture_date: '2026-06-20'
   case_name: working_command_counter

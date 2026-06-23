@@ -659,13 +659,13 @@ fixtures:
   expected:
     approval_visible: false
     ask: false
-    negative_reason_contains: idle
+    negative_reason_contains: empty
     screen_key: idle
   family: idle-empty-prompt
-  file: synthetic/idle_empty_prompt__codex-cli-synthetic_20260620.yaml
-  fixture_id: idle_empty_prompt__codex-cli-synthetic_20260620
+  file: captures/idle_empty_prompt__codex-cli-0.141.0_20260620.yaml
+  fixture_id: idle_empty_prompt__codex-cli-0.141.0_20260620
   id: codex-idle-empty-prompt
-  provenance: synthetic current Codex idle layout
+  provenance: real Codex CLI 0.141.0 idle capture
 - case_name: try_suggestion_idle
   expected:
     approval_visible: false
@@ -818,7 +818,10 @@ required_families:
 - claude-tool-permission
 - claude-plan-approval
 - claude-normal-question
+- claude-ask-user-question-no-selector
+- claude-ask-user-question-selected-option
 - claude-free-text-question
+- claude-interrupted-question
 - codex-normal-question
 - inline-yn-question
 - partial-choice-capture
@@ -830,6 +833,8 @@ required_families:
 - typed-draft
 - working-spinner
 - visible-working-counter
+- claude-goal-active
+- codex-goal-active
 - command-output-question
 - shell-program-prompt
 - completed-prompt
@@ -849,6 +854,19 @@ parity_groups:
   - agent: codex
     case_name: working_command_counter
     file: captures/working_command_counter__codex-cli-0.141.0_20260620.yaml
+- id: goal-active
+  status: covered-by-both
+  contract: Both clients can show a goal-following busy state that must render as RUN without raising ASK? or YOLO?.
+  why_names_differ: >-
+    Both captures use the same `goal_active` case name, but the visible UI differs: Claude shows `/goal active` beside the
+    `Clauding...` counter, while Codex shows `Pursuing goal` beside the working counter.
+  fixtures:
+  - agent: claude
+    case_name: goal_active
+    file: captures/goal_active__claude-code-2.1.185_20260621.yaml
+  - agent: codex
+    case_name: goal_active
+    file: captures/goal_active__codex-cli-0.141.0_20260621.yaml
 - id: normal-choice-question
   status: covered-by-both
   contract: Both clients can ask non-permission user questions that should show ASK?.
@@ -861,6 +879,9 @@ parity_groups:
     case_name: ask_user_question_no_selector_accessible
     file: captures/ask_user_question_no_selector_accessible__claude-code-2.1.185_20260621.yaml
   - agent: claude
+    case_name: ask_user_question_selected_option
+    file: captures/ask_user_question_selected_option__claude-code-2.1.185_20260621.yaml
+  - agent: claude
     case_name: parser_dependency_choice_question
     file: captures/parser_dependency_choice_question__claude-code-2.1.185_20260622.yaml
   - agent: codex
@@ -872,6 +893,14 @@ parity_groups:
   - agent: codex
     case_name: question_with_answer_draft
     file: captures/question_with_answer_draft__codex-cli-0.141.0_20260620.yaml
+- id: claude-interrupted-question
+  status: intentionally-not-one-to-one
+  contract: Claude's interrupted awaiting-user-instruction prompt should show ASK?; Codex interrupt/stop states in this corpus do not expose the same question prompt.
+  why_names_differ: Claude renders `Interrupted · What should Claude do instead?` as an active needs-input screen. Codex Ctrl-C/stop behavior is captured separately as command/session interruption behavior, not as a matching user-question surface.
+  fixtures:
+  - agent: claude
+    case_name: interrupted_what_should_claude_do_instead
+    file: captures/interrupted_what_should_claude_do_instead__claude-code-2.1.185_20260621.yaml
 - id: typed-draft
   status: covered-by-both
   contract: Both clients can have clearable composer drafts that must not be mistaken for submitted transcript text.
@@ -1011,4 +1040,4 @@ sources:
   - claude-plan-approval
   name: Claude Code hooks
   url: https://code.claude.com/docs/en/hooks
-updated: '2026-06-20'
+updated: '2026-06-22'

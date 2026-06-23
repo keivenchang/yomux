@@ -10,6 +10,15 @@ client_version_slug: claude-code-2.1.185
 codex_version: ''
 cursor: {}
 expected_screen_key: needs-input
+expected_promoted:
+  agent_kind: claude
+  approval_type: ''
+  approval_visible: false
+  attention_kind: question
+  attention_label: ASK?
+  composer_key: empty
+  reason_code: needs-input
+  screen_key: needs-input
 failures: []
 fixture_scenario: interrupted_what_should_claude_do_instead
 fixture_id: interrupted_what_should_claude_do_instead__claude-code-2.1.185_20260621
